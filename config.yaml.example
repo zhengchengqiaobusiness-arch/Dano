@@ -1,0 +1,38 @@
+# 配置文件示例 - 复制此文件为 config.yaml 并填入真实的 API key
+
+embedding:
+  api_base: https://api.siliconflow.cn/v1
+  api_key: your_api_key_here
+  engine: Qwen/Qwen3-Embedding-8B
+
+knowpath:
+  zh_table_know: data/tableDesData.json
+
+llm:
+  api_key: your_api_key_here
+  base_url: https://api.siliconflow.cn/v1
+  model_name: deepseek-ai/DeepSeek-V3.2
+  temperature: 0.0
+  type: qwen_openai
+
+rerank:
+  api_key: your_api_key_here
+  base_url: https://api.siliconflow.cn/v1
+  model_name: Qwen/Qwen3-Reranker-8B
+  temperature: 0.0
+
+# 其他支持的模型提供商配置示例：
+
+# OpenAI:
+# llm:
+#   api_key: sk-your-openai-key
+#   base_url: https://api.openai.com/v1
+#   model_name: gpt-4-turbo
+#   temperature: 0.0
+
+# 其他 OpenAI 兼容 API:
+# llm:
+#   api_key: your_api_key
+#   base_url: your_api_base_url
+#   model_name: your_model_name
+#   temperature: 0.0

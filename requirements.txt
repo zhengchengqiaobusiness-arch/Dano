@@ -1,0 +1,11 @@
+# Core dependencies
+camel-ai>=0.2.84
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# Development dependencies (optional)
+# Uncomment if needed:
+# pytest>=7.0.0
+# black>=23.0.0
+# ruff>=0.1.0
+# mypy>=1.0.0
