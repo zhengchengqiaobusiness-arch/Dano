@@ -3,13 +3,25 @@ Workforce 示例 - 演示如何使用自定义 Workforce 管理多个任务
 """
 
 import os
-from dotenv import load_dotenv
+import sys
+from pathlib import Path
+
+# 添加项目根目录到路径
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
 from camel.tasks import Task
-
 from src.workforce import CustomWorkforce
+from src.utils.config_loader import load_config
 
-# 加载环境变量
-load_dotenv()
+# 加载配置并设置 API
+try:
+    config = load_config()
+    os.environ['OPENAI_API_KEY'] = config['llm']['api_key']
+    os.environ['OPENAI_API_BASE'] = config['llm']['base_url']
+    print(f"✓ 使用配置: {config['llm']['model_name']}")
+except Exception as e:
+    print(f"⚠ 无法加载配置: {e}")
 
 
 def main():

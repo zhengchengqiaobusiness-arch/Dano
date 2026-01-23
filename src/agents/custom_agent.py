@@ -2,10 +2,39 @@
 自定义 ChatAgent - 继承 CAMEL-AI 基类进行扩展
 """
 
+import os
 from typing import Optional, Any, Dict
 from camel.agents import ChatAgent
 from camel.messages import BaseMessage
-from camel.types import ModelType, RoleType
+from camel.types import ModelType, RoleType, ModelPlatformType
+from camel.models import ModelFactory
+
+
+def create_custom_model(
+    model_name: str,
+    api_key: str,
+    base_url: str,
+    temperature: float = 0.0
+):
+    """
+    创建自定义模型（用于 SiliconFlow 等）
+    
+    Args:
+        model_name: 模型名称，如 'deepseek-ai/DeepSeek-V3.2'
+        api_key: API密钥
+        base_url: API基础URL
+        temperature: 温度参数
+    
+    Returns:
+        模型实例
+    """
+    return ModelFactory.create(
+        model_platform=ModelPlatformType.OPENAI,
+        model_type=model_name,
+        api_key=api_key,
+        url=base_url,
+        model_config_dict={'temperature': temperature}
+    )
 
 
 class CustomChatAgent(ChatAgent):
@@ -30,7 +59,7 @@ class CustomChatAgent(ChatAgent):
         
         Args:
             system_message: 系统消息
-            model: 模型（可以是 ModelType, str, 或模型实例）
+            model: 模型实例（使用 create_custom_model() 创建）
             custom_prefix: 自定义提示词前缀
             **kwargs: 其他参数传递给父类
         """

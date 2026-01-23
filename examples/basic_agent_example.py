@@ -3,14 +3,21 @@
 """
 
 import os
-from dotenv import load_dotenv
+import sys
+from pathlib import Path
+
+# 添加项目根目录到路径
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
 from camel.messages import BaseMessage
-from camel.types import ModelType
+from src.agents import CustomChatAgent, create_custom_model
+from src.utils.config_loader import load_config
 
-from src.agents import CustomChatAgent
-
-# 加载环境变量
-load_dotenv()
+# 加载配置
+config = load_config()
+print(f"✓ 使用模型: {config['llm']['model_name']}")
+print(f"✓ API Base: {config['llm']['base_url']}")
 
 
 def main():
@@ -19,9 +26,17 @@ def main():
     print("CAMEL-AI Custom Agent Example")
     print("=" * 60)
     
+    # 创建模型
+    model = create_custom_model(
+        model_name=config['llm']['model_name'],
+        api_key=config['llm']['api_key'],
+        base_url=config['llm']['base_url'],
+        temperature=config['llm']['temperature']
+    )
+    
     # 创建自定义智能体
     agent = CustomChatAgent(
-        model_type=ModelType.GPT_4_TURBO,
+        model=model,
         custom_prefix="[专业助手]"
     )
     

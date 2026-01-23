@@ -10,8 +10,8 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.agents import CustomChatAgent
-from src.utils.config_loader import load_config, create_model_from_config
+from src.agents import CustomChatAgent, create_custom_model
+from src.utils.config_loader import load_config
 from camel.messages import BaseMessage
 
 
@@ -22,24 +22,37 @@ def example_with_config_file():
     print("=" * 60)
     
     try:
-        # 从配置文件加载模型
+        # 加载配置
         config = load_config()
         print(f"\n✓ 加载配置文件成功")
         print(f"  模型: {config['llm']['model_name']}")
         print(f"  API Base: {config['llm']['base_url']}")
         
-        # 方法1: 通过环境变量设置
-        os.environ['OPENAI_API_KEY'] = config['llm']['api_key']
-        os.environ['OPENAI_API_BASE'] = config['llm']['base_url']
+        # 创建模型
+        model = create_custom_model(
+            model_name=config['llm']['model_name'],
+            api_key=config['llm']['api_key'],
+            base_url=config['llm']['base_url'],
+            temperature=config['llm']['temperature']
+        )
         
-        # 创建智能体（使用自定义模型名称）
+        # 创建智能体
         agent = CustomChatAgent(
-            model=config['llm']['model_name'],  # 使用配置中的模型
+            model=model,
             custom_prefix="[SiliconFlow助手]"
         )
         
-        print("\n✓ 创建智能体成功")
-        print(f"  前缀: [SiliconFlow助手]")
+        print("\n✓ 智能体创建成功")
+        
+        # 测试对话
+        message = BaseMessage.make_user_message(
+            role_name="User",
+            content="你好，请用一句话介绍你自己"
+        )
+        
+        print(f"\n问: {message.content}")
+        response = agent.step(message)
+        print(f"答: {response.msgs[0].content}")
         
     except FileNotFoundError:
         print("\n⚠ 配置文件 config.yaml 不存在")
@@ -53,30 +66,34 @@ def example_with_config_file():
 def example_with_direct_config():
     """直接传入配置创建智能体"""
     print("\n" + "=" * 60)
-    print("直接传入配置")
+    print("方法2: 手动创建模型")
     print("=" * 60)
     
     try:
         config = load_config()
         
-        # 设置环境变量
-        os.environ['OPENAI_API_KEY'] = config['llm']['api_key']
-        os.environ['OPENAI_API_BASE'] = config['llm']['base_url']
-        
-        # 创建智能体
-        agent = CustomChatAgent(
-            model=config['llm']['model_name'],
-            custom_prefix="[DeepSeek助手]"
-        )
-        
-        print("\n✓ 智能体创建成功")
-        
-        # 测试消息（不实际调用 API，只展示配置）
+        # 显示配置信息
         print("\n配置信息:")
         print(f"  API Key: {config['llm']['api_key'][:20]}...")
         print(f"  Base URL: {config['llm']['base_url']}")
         print(f"  Model: {config['llm']['model_name']}")
         print(f"  Temperature: {config['llm']['temperature']}")
+        
+        # 创建模型
+        model = create_custom_model(
+            model_name=config['llm']['model_name'],
+            api_key=config['llm']['api_key'],
+            base_url=config['llm']['base_url'],
+            temperature=config['llm']['temperature']
+        )
+        
+        # 创建智能体
+        agent = CustomChatAgent(
+            model=model,
+            custom_prefix="[DeepSeek助手]"
+        )
+        
+        print("\n✓ 智能体创建成功")
         
     except Exception as e:
         print(f"\n❌ 错误: {e}")

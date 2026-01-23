@@ -3,13 +3,20 @@
 """
 
 import os
-from dotenv import load_dotenv
-from camel.types import ModelType
+import sys
+from pathlib import Path
 
-from src.agents import SpecializedAgent
+# 添加项目根目录到路径
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
-# 加载环境变量
-load_dotenv()
+from src.agents import SpecializedAgent, create_custom_model
+from src.utils.config_loader import load_config
+
+# 加载配置
+config = load_config()
+print(f"✓ 使用模型: {config['llm']['model_name']}")
+print(f"✓ API Base: {config['llm']['base_url']}")
 
 
 def main():
@@ -17,6 +24,14 @@ def main():
     print("=" * 60)
     print("CAMEL-AI Specialized Agent Example")
     print("=" * 60)
+    
+    # 创建模型（所有智能体共用）
+    model = create_custom_model(
+        model_name=config['llm']['model_name'],
+        api_key=config['llm']['api_key'],
+        base_url=config['llm']['base_url'],
+        temperature=config['llm']['temperature']
+    )
     
     # 创建不同领域的专业智能体
     domains = [
@@ -34,7 +49,7 @@ def main():
         agent = SpecializedAgent(
             domain=domain,
             expertise_level=expertise,
-            model_type=ModelType.GPT_4_TURBO
+            model=model
         )
         
         # 准备任务描述
@@ -66,17 +81,39 @@ def demo_quick_agents():
     print("Quick Demo: Multiple Specialized Agents")
     print("=" * 60)
     
+    config = load_config()
+    
+    # 创建共享模型
+    model = create_custom_model(
+        model_name=config['llm']['model_name'],
+        api_key=config['llm']['api_key'],
+        base_url=config['llm']['base_url'],
+        temperature=config['llm']['temperature']
+    )
+    
     # 编程助手
-    code_agent = SpecializedAgent(domain="programming", expertise_level="expert")
-    print("\n✓ Created Programming Expert Agent")
+    code_agent = SpecializedAgent(
+        domain="programming", 
+        expertise_level="expert",
+        model=model
+    )
+    print(f"\n✓ Created Programming Expert Agent ({config['llm']['model_name']})")
     
     # 数据科学助手
-    ds_agent = SpecializedAgent(domain="data_science", expertise_level="expert")
-    print("✓ Created Data Science Expert Agent")
+    ds_agent = SpecializedAgent(
+        domain="data_science", 
+        expertise_level="expert",
+        model=model
+    )
+    print(f"✓ Created Data Science Expert Agent ({config['llm']['model_name']})")
     
     # 写作助手
-    writing_agent = SpecializedAgent(domain="writing", expertise_level="intermediate")
-    print("✓ Created Writing Assistant Agent")
+    writing_agent = SpecializedAgent(
+        domain="writing", 
+        expertise_level="intermediate",
+        model=model
+    )
+    print(f"✓ Created Writing Assistant Agent ({config['llm']['model_name']})")
     
     print("\n✓ All agents ready for tasks!")
 
