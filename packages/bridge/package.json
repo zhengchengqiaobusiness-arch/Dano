@@ -1,0 +1,32 @@
+{
+  "name": "@dano/bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "HTTP and SSE bridge server for Dano Web",
+  "type": "module",
+  "exports": {
+    "./*": {
+      "types": "./src/*.ts",
+      "default": "./src/*.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "check": "tsc --noEmit",
+    "dev:standalone": "node --import jiti/register ./src/standalone/main.ts",
+    "start:standalone": "node ../../dist/bridge/standalone/main.js",
+    "test": "vitest run --root ../.. --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.74.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "tsdown": "^0.22.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  }
+}

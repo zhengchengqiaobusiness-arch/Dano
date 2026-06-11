@@ -1,0 +1,9 @@
+node_modules
+dist
+web-dist
+.git
+references/pi-web-main
+specs
+docs
+*.log
+.env

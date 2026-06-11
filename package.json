@@ -1,0 +1,41 @@
+{
+  "name": "dano",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dano P0 web LLM chat",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm run build:server && pnpm run build:web",
+    "build:bridge": "pnpm -C packages/bridge build",
+    "build:server": "pnpm run build:bridge",
+    "build:svelte": "pnpm -C packages/svelte build",
+    "build:web": "pnpm run build:svelte",
+    "check": "pnpm run check:type && pnpm run check:web",
+    "check:type": "tsc -p tsconfig.json --noEmit",
+    "check:web": "pnpm -C packages/svelte check",
+    "dev:bridge:standalone": "node --import jiti/register ./packages/bridge/src/standalone/main.ts",
+    "dev:svelte": "pnpm -C packages/svelte dev",
+    "dev:web": "pnpm run dev:svelte",
+    "start:bridge:standalone": "node ./dist/bridge/standalone/main.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.74.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@tsconfig/svelte": "^5.0.8",
+    "@types/node": "^25.8.0",
+    "jiti": "^2.7.0",
+    "svelte": "^5.55.7",
+    "svelte-check": "^4.4.8",
+    "tsdown": "^0.22.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.13",
+    "vitest": "^4.1.6"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  }
+}
