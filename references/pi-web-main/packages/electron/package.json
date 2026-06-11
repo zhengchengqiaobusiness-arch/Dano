@@ -1,0 +1,66 @@
+{
+  "name": "@pi-web/electron",
+  "version": "0.3.4",
+  "private": true,
+  "description": "Electron desktop shell for Pi Web",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsdown && node -e \"require('node:fs').copyFileSync('src/preload.cjs', 'dist/preload.cjs')\"",
+    "check": "tsc --noEmit",
+    "dev": "pnpm run build && electron .",
+    "dist": "pnpm run build && electron-builder"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.74.0",
+    "ws": "^8.20.1"
+  },
+  "devDependencies": {
+    "@pi-web/bridge": "workspace:*",
+    "@types/node": "^25.8.0",
+    "electron": "^42.0.1",
+    "electron-builder": "^26.8.1",
+    "tsdown": "^0.22.0",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "build": {
+    "appId": "dev.woxqaq.pi-web",
+    "productName": "Pi Web",
+    "directories": {
+      "output": "../../dist-electron"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../../web-dist",
+        "to": "web-dist",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "tar.gz"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    }
+  }
+}
