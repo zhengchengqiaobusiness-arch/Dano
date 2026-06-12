@@ -15,6 +15,7 @@ packages/bridge   HTTP API, SSE event bus, and Pi runtime bridge
 packages/svelte   Browser chat UI
 deploy/nginx      nginx reverse proxy config for container deployment
 .pi/settings.json Default Pi model settings copied into the container
+.pi/SYSTEM.md     Custom Dano system prompt copied into the Pi runtime
 ```
 
 This repo intentionally does not include the old Pi extension target or
@@ -35,12 +36,25 @@ Default Pi settings live in [.pi/settings.json](.pi/settings.json):
 {
   "defaultProvider": "xiaomi-token-plan-cn",
   "defaultModel": "mimo-v2.5",
-  "defaultThinkingLevel": "high"
+  "defaultThinkingLevel": "high",
+  "defaultProjectTrust": "always"
 }
 ```
 
 To switch model, edit that file and restart the server/container. The current
 headless web bridge treats `/model` as normal chat text.
+
+## System Prompt
+
+The default assistant instruction lives in [.pi/SYSTEM.md](.pi/SYSTEM.md). It is
+copied into the runtime settings directory so Dano starts with the project
+system prompt:
+
+- answer in a detailed and friendly tone
+- proactively use tools to help users handle OA-related workflows
+
+Edit `.pi/SYSTEM.md` and restart the server/container to change the system
+prompt.
 
 ## Credentials
 
@@ -194,6 +208,7 @@ conversation.ready
 message.accepted
 assistant.started
 assistant.delta
+assistant.blocks
 assistant.completed
 message.failed
 heartbeat
@@ -203,7 +218,11 @@ heartbeat
 
 - Enter sends the message.
 - Shift+Enter inserts a newline.
+- The composer starts as one line and grows automatically for multiline input.
 - Empty messages are blocked.
+- Assistant and user messages render Markdown, including tables, highlighted
+  fenced code blocks, and Mermaid diagrams.
+- Runtime tool calls and tool results render as inline expandable blocks.
 - LLM failures show a visible error state and retry control.
 - Requests for business actions remain chat-only; no external workflow is
   executed by P0.
