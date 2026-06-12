@@ -30,6 +30,7 @@
   let chat = $state<ChatState>(createInitialChatState());
   let draft = $state("");
   let transcriptElement = $state<HTMLDivElement>();
+  let composerInputElement = $state<HTMLTextAreaElement>();
   let isPinnedToBottom = $state(true);
   let showScrollToBottom = $state(false);
   let isScrollBottomAnimating = $state(false);
@@ -61,6 +62,11 @@
     if (isPinnedToBottom) {
       void scrollTranscriptToBottom("auto");
     }
+  });
+
+  $effect(() => {
+    draft;
+    void tick().then(resizeComposerInput);
   });
 
   async function startConversation() {
@@ -201,6 +207,19 @@
 
     event.preventDefault();
     event.currentTarget.form?.requestSubmit();
+  }
+
+  function resizeComposerInput() {
+    if (!composerInputElement) {
+      return;
+    }
+
+    const maxHeight = 180;
+    composerInputElement.style.height = "auto";
+    const nextHeight = Math.min(composerInputElement.scrollHeight, maxHeight);
+    composerInputElement.style.height = `${nextHeight}px`;
+    composerInputElement.style.overflowY =
+      composerInputElement.scrollHeight > maxHeight ? "auto" : "hidden";
   }
 
   function messageScrollKey(message: ChatMessage) {
@@ -433,19 +452,68 @@
 
     <form
       class="composer"
+      class:invalid={Boolean(chat.inputError)}
       onsubmit={submitComposer}
       aria-label="Send chat message"
     >
+      <label class="sr-only" for="chat-composer-input">Message Dano</label>
       <textarea
+        id="chat-composer-input"
+        class="composer-input"
+        bind:this={composerInputElement}
         bind:value={draft}
         placeholder="Message Dano"
-        rows="3"
+        rows="1"
         aria-invalid={Boolean(chat.inputError)}
         onkeydown={handleComposerKeydown}
+        oninput={resizeComposerInput}
       ></textarea>
-      <button type="submit" disabled={!canSend(draft, chat)}>
-        {chat.sending ? "Sending" : "Send"}
-      </button>
+      <div class="composer-toolbar">
+        <div class="composer-actions-left">
+          <button
+            type="button"
+            class="composer-icon-button"
+            aria-label="Add attachment"
+            title="Attachment upload is not wired yet"
+          >
+            <span class="plus-icon" aria-hidden="true"></span>
+          </button>
+        </div>
+        <div class="composer-actions-right">
+          <button
+            type="button"
+            class="composer-mode-button"
+            aria-label="Thinking level balanced"
+            title="Thinking level selector is not wired yet"
+          >
+            <span>均衡</span>
+            <span class="chevron-icon" aria-hidden="true"></span>
+          </button>
+          <button
+            type="button"
+            class="composer-icon-button"
+            aria-label="Voice input"
+            title="Voice input is not wired yet"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12 14.5a3 3 0 0 0 3-3v-5a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3Z"
+              />
+              <path d="M19 11.5a7 7 0 0 1-14 0" />
+              <path d="M12 18.5V22" />
+              <path d="M8.5 22h7" />
+            </svg>
+          </button>
+          <button
+            type="submit"
+            class="composer-send-button"
+            disabled={!canSend(draft, chat)}
+            aria-label={chat.sending ? "Sending message" : "Send message"}
+          >
+            <span aria-hidden="true">↑</span>
+          </button>
+        </div>
+      </div>
     </form>
     {#if chat.inputError}
       <p class="input-error">{chat.inputError}</p>
@@ -470,6 +538,18 @@
   button,
   textarea {
     font: inherit;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 
   .shell {
@@ -681,8 +761,7 @@
     font-size: 14px;
   }
 
-  .failure-row button,
-  .composer button {
+  .failure-row button {
     border: 0;
     border-radius: 7px;
     background: #1d4ed8;
@@ -707,38 +786,176 @@
 
   .composer {
     display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 12px;
-    padding: 16px 18px 18px;
-    border-top: 1px solid #e4e8ef;
-    background: #fbfcfe;
+    gap: 18px;
+    margin: 16px 18px 18px;
+    padding: 18px 18px 16px;
+    border: 1px solid #d6d9df;
+    border-radius: 30px;
+    background: #ffffff;
+    box-shadow:
+      0 20px 52px rgba(15, 23, 42, 0.12),
+      0 1px 2px rgba(15, 23, 42, 0.08);
+    transition:
+      border-color 140ms ease,
+      box-shadow 140ms ease;
   }
 
-  textarea {
+  .composer:focus-within {
+    border-color: #c9cdd4;
+    box-shadow:
+      0 22px 58px rgba(15, 23, 42, 0.14),
+      0 0 0 3px rgba(148, 163, 184, 0.16);
+  }
+
+  .composer.invalid {
+    border-color: #fda4af;
+    box-shadow:
+      0 20px 52px rgba(15, 23, 42, 0.1),
+      0 0 0 3px rgba(253, 164, 175, 0.22);
+  }
+
+  .composer-input {
     width: 100%;
-    min-height: 72px;
+    min-height: 1.55em;
     max-height: 180px;
-    resize: vertical;
-    border: 1px solid #cfd6e2;
-    border-radius: 7px;
-    padding: 10px 12px;
-    color: #172033;
+    resize: none;
+    border: 0;
+    padding: 0 22px;
+    background: transparent;
+    color: #111827;
+    font-size: 18px;
+    line-height: 1.55;
+    outline: none;
   }
 
-  textarea:focus {
-    outline: 2px solid #93c5fd;
-    outline-offset: 1px;
+  .composer-input::placeholder {
+    color: #8a9099;
   }
 
-  .composer button {
-    width: 96px;
-    min-height: 44px;
-    align-self: end;
+  .composer-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
   }
 
-  .composer button:disabled {
+  .composer-actions-left,
+  .composer-actions-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .composer-icon-button,
+  .composer-mode-button,
+  .composer-send-button {
+    border: 0;
+    cursor: pointer;
+    transition:
+      background 140ms ease,
+      color 140ms ease,
+      opacity 140ms ease,
+      transform 140ms ease;
+  }
+
+  .composer-icon-button {
+    width: 40px;
+    height: 40px;
+    display: grid;
+    place-items: center;
+    border-radius: 999px;
+    background: transparent;
+    color: #111827;
+  }
+
+  .composer-icon-button:hover,
+  .composer-mode-button:hover {
+    background: #f2f3f5;
+  }
+
+  .plus-icon {
+    position: relative;
+    width: 22px;
+    height: 22px;
+    display: inline-block;
+  }
+
+  .plus-icon::before,
+  .plus-icon::after {
+    content: "";
+    position: absolute;
+    inset: 50% auto auto 50%;
+    width: 22px;
+    height: 2px;
+    border-radius: 999px;
+    background: currentColor;
+    transform: translate(-50%, -50%);
+  }
+
+  .plus-icon::after {
+    transform: translate(-50%, -50%) rotate(90deg);
+  }
+
+  .composer-mode-button {
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border-radius: 999px;
+    padding: 0 12px;
+    background: transparent;
+    color: #7a7f87;
+    font-size: 16px;
+  }
+
+  .chevron-icon {
+    width: 9px;
+    height: 9px;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    transform: rotate(45deg) translateY(-2px);
+  }
+
+  .composer-icon-button svg {
+    width: 24px;
+    height: 24px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2.25;
+  }
+
+  .composer-send-button {
+    width: 44px;
+    height: 44px;
+    display: grid;
+    place-items: center;
+    border-radius: 999px;
+    background: #8b5cf6;
+    color: #ffffff;
+  }
+
+  .composer-send-button span {
+    font-size: 30px;
+    line-height: 1;
+    transform: translateY(-2px);
+  }
+
+  .composer-send-button:not(:disabled):hover {
+    background: #7c3aed;
+    transform: translateY(-1px);
+  }
+
+  .composer-send-button:not(:disabled):active {
+    transform: translateY(0) scale(0.96);
+  }
+
+  .composer-send-button:disabled {
     cursor: not-allowed;
-    background: #98a2b3;
+    background: #c7cbd1;
+    color: #ffffff;
+    opacity: 0.75;
   }
 
   .input-error {
@@ -763,11 +980,24 @@
     }
 
     .composer {
-      grid-template-columns: 1fr;
+      margin: 12px;
+      padding: 14px 14px 12px;
+      border-radius: 24px;
     }
 
-    .composer button {
-      width: 100%;
+    .composer-input {
+      min-height: 1.55em;
+      padding: 0 8px;
+      font-size: 16px;
+    }
+
+    .composer-actions-right {
+      gap: 6px;
+    }
+
+    .composer-mode-button {
+      padding: 0 8px;
+      font-size: 14px;
     }
   }
 </style>
