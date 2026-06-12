@@ -2,12 +2,14 @@ FROM node:22-alpine AS build
 
 WORKDIR /app
 RUN corepack enable
+ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
 
 COPY package.json pnpm-workspace.yaml tsconfig.json vitest.config.ts ./
 COPY packages/bridge/package.json packages/bridge/package.json
 COPY packages/svelte/package.json packages/svelte/package.json
 COPY pnpm-lock.yaml* ./
-RUN pnpm install --frozen-lockfile=false
+RUN pnpm config set registry "$NPM_CONFIG_REGISTRY" \
+  && npm_config_fetch_timeout=600000 pnpm install --frozen-lockfile=false
 
 COPY . .
 RUN pnpm run build

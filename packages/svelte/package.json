@@ -22,5 +22,11 @@
   },
   "engines": {
     "node": ">=20.6.0"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.9",
+    "highlight.js": "10.7.3",
+    "marked": "15.0.12",
+    "mermaid": "^11.15.0"
   }
 }

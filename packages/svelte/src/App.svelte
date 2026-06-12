@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import MarkdownMessage from "./components/MarkdownMessage.svelte";
   import {
     applyServerEvent,
     canSend,
@@ -210,7 +211,11 @@
               <span>{message.role === "user" ? "You" : "Dano"}</span>
               <span>{message.status}</span>
             </div>
-            <p>{message.content || (message.status === "streaming" ? "Thinking..." : "")}</p>
+            <MarkdownMessage
+              content={message.content ||
+                (message.status === "streaming" ? "Thinking..." : "")}
+              status={message.status}
+            />
             {#if message.status === "failed"}
               <div class="failure-row">
                 <span>{message.errorMessage}</span>
@@ -384,12 +389,6 @@
     justify-content: space-between;
     gap: 14px;
     margin-bottom: 8px;
-  }
-
-  .message p {
-    white-space: pre-wrap;
-    line-height: 1.55;
-    overflow-wrap: anywhere;
   }
 
   .failure-row {
