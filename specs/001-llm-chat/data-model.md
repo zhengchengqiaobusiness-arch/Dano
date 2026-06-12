@@ -28,6 +28,7 @@ Represents one user input, assistant answer, processing marker, or failure.
 - `conversationId`: Parent Conversation id.
 - `role`: `user`, `assistant`, or `system`.
 - `content`: Text visible to the user.
+- `contentBlocks`: Optional ordered text/tool block list when the runtime emits tool calls and results.
 - `status`: `pending`, `streaming`, `completed`, or `failed`.
 - `createdAt`: Time message was accepted.
 - `completedAt`: Time message completed, when applicable.
@@ -74,6 +75,7 @@ Represents a server-to-browser event sent over EventSource.
 - `message.accepted`: User message accepted by the server.
 - `assistant.started`: Assistant answer started.
 - `assistant.delta`: Assistant answer text delta.
+- `assistant.blocks`: Assistant answer content blocks, including tool-call and tool-result blocks.
 - `assistant.completed`: Assistant answer finished.
 - `message.failed`: User message or assistant answer failed.
 - `heartbeat`: Keepalive event for proxy/browser liveness.

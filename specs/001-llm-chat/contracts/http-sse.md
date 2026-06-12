@@ -70,6 +70,10 @@ event: assistant.delta
 data: {"conversationId":"conv_123","messageId":"msg_2","delta":"Hi"}
 
 id: 5
+event: assistant.blocks
+data: {"conversationId":"conv_123","messageId":"msg_2","blocks":[{"kind":"tool","toolName":"bash","toolCallId":"call_1","toolArgs":{"command":"echo hi"},"argumentsText":"{\"command\":\"echo hi\"}","resultText":"hi","toolStatus":"success"}]}
+
+id: 6
 event: assistant.completed
 data: {"conversationId":"conv_123","messageId":"msg_2","content":"Hi there."}
 

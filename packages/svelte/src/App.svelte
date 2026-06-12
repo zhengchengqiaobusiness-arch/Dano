@@ -3,11 +3,13 @@
   import { cubicOut } from "svelte/easing";
   import { fly } from "svelte/transition";
   import MarkdownMessage from "./components/MarkdownMessage.svelte";
+  import ToolBlock from "./components/ToolBlock.svelte";
   import {
     applyServerEvent,
     canSend,
     createClientMessageId,
     createInitialChatState,
+    type ChatContentBlock,
     type ChatMessage,
     type ChatState,
   } from "./composables/bridgeStore.svelte";
@@ -17,6 +19,7 @@
     "message.accepted",
     "assistant.started",
     "assistant.delta",
+    "assistant.blocks",
     "assistant.completed",
     "message.failed",
     "heartbeat",
@@ -36,7 +39,7 @@
 
   const transcriptScrollKey = $derived(
     chat.messages
-      .map(message => `${message.id}:${message.content.length}:${message.status}`)
+      .map(message => messageScrollKey(message))
       .join("|"),
   );
 
@@ -200,6 +203,46 @@
     event.currentTarget.form?.requestSubmit();
   }
 
+  function messageScrollKey(message: ChatMessage) {
+    const blocksKey = message.contentBlocks
+      ?.map(block =>
+        block.kind === "text"
+          ? `text:${block.text.length}`
+          : [
+              "tool",
+              block.toolCallId ?? "",
+              block.toolName,
+              block.toolStatus,
+              block.resultText?.length ?? 0,
+              block.argumentsText.length,
+            ].join(":"),
+      )
+      .join("|");
+
+    return [
+      message.id,
+      message.content.length,
+      message.status,
+      blocksKey ?? "",
+    ].join(":");
+  }
+
+  function trailingContentForMessage(message: ChatMessage): string {
+    if (!message.contentBlocks?.length || !message.content) {
+      return "";
+    }
+
+    return contentTextFromBlocks(message.contentBlocks) === message.content
+      ? ""
+      : message.content;
+  }
+
+  function contentTextFromBlocks(blocks: ChatContentBlock[]): string {
+    return blocks
+      .flatMap(block => (block.kind === "text" ? [block.text] : []))
+      .join("");
+  }
+
   function handleTranscriptScroll() {
     const isPinned = isTranscriptNearBottom();
     isPinnedToBottom = isPinned;
@@ -327,12 +370,35 @@
                 <span>{message.role === "user" ? "You" : "Dano"}</span>
                 <span>{message.status}</span>
               </div>
-              <MarkdownMessage
-                content={message.content ||
-                  (message.status === "streaming" ? "Thinking..." : "")}
-                status={message.status}
-                onrendered={handleMessageRendered}
-              />
+              {#if message.contentBlocks?.length}
+                {#each message.contentBlocks as block, blockIndex (`${message.id}-${blockIndex}`)}
+                  {#if block.kind === "text"}
+                    {#if block.text}
+                      <MarkdownMessage
+                        content={block.text}
+                        status={message.status}
+                        onrendered={handleMessageRendered}
+                      />
+                    {/if}
+                  {:else}
+                    <ToolBlock block={block} onrendered={handleMessageRendered} />
+                  {/if}
+                {/each}
+                {#if trailingContentForMessage(message)}
+                  <MarkdownMessage
+                    content={trailingContentForMessage(message)}
+                    status={message.status}
+                    onrendered={handleMessageRendered}
+                  />
+                {/if}
+              {:else}
+                <MarkdownMessage
+                  content={message.content ||
+                    (message.status === "streaming" ? "Thinking..." : "")}
+                  status={message.status}
+                  onrendered={handleMessageRendered}
+                />
+              {/if}
               {#if message.status === "failed"}
                 <div class="failure-row">
                   <span>{message.errorMessage}</span>
@@ -590,6 +656,12 @@
   .message.assistant {
     align-self: flex-start;
     background: #f7f8fa;
+  }
+
+  .message :global(.markdown-body + .tool-inline-block),
+  .message :global(.tool-inline-block + .markdown-body),
+  .message :global(.tool-inline-block + .tool-inline-block) {
+    margin-top: 12px;
   }
 
   .message-meta {

@@ -4,11 +4,44 @@ export type ChatRole = "user" | "assistant" | "system";
 
 export type MessageStatus = "pending" | "streaming" | "completed" | "failed";
 
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+export type JsonObject = { [key: string]: JsonValue };
+
+export type ToolArguments = string | JsonObject;
+
+export type ToolBlockStatus = "pending" | "success" | "error";
+
+export interface TextContentBlock {
+  kind: "text";
+  text: string;
+}
+
+export interface ToolContentBlock {
+  kind: "tool";
+  toolName: string;
+  toolCallId?: string;
+  toolArgs?: ToolArguments;
+  argumentsText: string;
+  resultText?: string;
+  resultDetails?: JsonValue;
+  toolStatus: ToolBlockStatus;
+}
+
+export type ChatContentBlock = TextContentBlock | ToolContentBlock;
+
 export interface ChatMessage {
   id: string;
   conversationId: string;
   role: ChatRole;
   content: string;
+  contentBlocks?: ChatContentBlock[];
   status: MessageStatus;
   createdAt: string;
   completedAt?: string;
@@ -64,6 +97,7 @@ export type SseEventName =
   | "message.accepted"
   | "assistant.started"
   | "assistant.delta"
+  | "assistant.blocks"
   | "assistant.completed"
   | "message.failed"
   | "heartbeat";
@@ -82,6 +116,7 @@ export interface RuntimeFailure {
 
 export interface RuntimeCallbacks {
   onDelta(delta: string): void;
+  onContentBlocks(blocks: ChatContentBlock[]): void;
   onComplete(content: string): void;
   onFailure(failure: RuntimeFailure): void;
 }

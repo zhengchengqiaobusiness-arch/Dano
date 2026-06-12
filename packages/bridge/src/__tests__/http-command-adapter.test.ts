@@ -19,6 +19,37 @@ class FakeRuntime implements ServerLlmRuntime {
   }
 }
 
+class ToolRuntime implements ServerLlmRuntime {
+  async sendUserMessage(_text: string, callbacks: RuntimeCallbacks): Promise<void> {
+    callbacks.onContentBlocks([
+      {
+        kind: "tool",
+        toolName: "bash",
+        toolCallId: "tool-1",
+        toolArgs: { command: "echo hello" },
+        argumentsText: '{\n  "command": "echo hello"\n}',
+        toolStatus: "pending",
+      },
+    ]);
+    callbacks.onContentBlocks([
+      {
+        kind: "tool",
+        toolName: "bash",
+        toolCallId: "tool-1",
+        toolArgs: { command: "echo hello" },
+        argumentsText: '{\n  "command": "echo hello"\n}',
+        resultText: "hello",
+        toolStatus: "success",
+      },
+      {
+        kind: "text",
+        text: "Done.",
+      },
+    ]);
+    callbacks.onComplete("Done.");
+  }
+}
+
 function waitForMicrotasks(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
@@ -151,6 +182,47 @@ describe("ConversationController", () => {
         .getHistory(conversation.conversationId)
         .some(event => event.event === "assistant.completed"),
     ).toBe(true);
+  });
+
+  it("emits assistant tool blocks before completion", async () => {
+    const controller = new ConversationController({
+      runtimeFactory: () => new ToolRuntime(),
+    });
+    const conversation = controller.createConversation();
+
+    await controller.sendMessage(conversation.conversationId, {
+      clientMessageId: "tool-1",
+      text: "Run a tool",
+    });
+    await waitForMicrotasks();
+
+    const toolEvents = controller.eventBus
+      .getHistory(conversation.conversationId)
+      .filter(event => event.event === "assistant.blocks");
+    expect(toolEvents).toHaveLength(2);
+    expect(toolEvents[0]?.data).toMatchObject({
+      messageId: "msg_2",
+      blocks: [
+        {
+          kind: "tool",
+          toolName: "bash",
+          toolStatus: "pending",
+        },
+      ],
+    });
+    expect(toolEvents[1]?.data).toMatchObject({
+      blocks: [
+        {
+          kind: "tool",
+          resultText: "hello",
+          toolStatus: "success",
+        },
+        {
+          kind: "text",
+          text: "Done.",
+        },
+      ],
+    });
   });
 
   it("fails loud for unknown conversations", async () => {

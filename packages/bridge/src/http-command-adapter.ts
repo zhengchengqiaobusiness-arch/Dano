@@ -1,6 +1,7 @@
 import { SseEventBus } from "./sse-event-bus.js";
 import type {
   ApiErrorResponse,
+  ChatContentBlock,
   ChatMessage,
   Conversation,
   CreateConversationResponse,
@@ -263,6 +264,18 @@ export class ConversationController {
             delta,
           });
         },
+        onContentBlocks: blocks => {
+          if (settled) {
+            return;
+          }
+          assistantMessage.contentBlocks = blocks;
+          assistantMessage.content = textFromContentBlocks(blocks);
+          this.eventBus.emit(conversation.id, "assistant.blocks", {
+            conversationId: conversation.id,
+            messageId: assistantMessage.id,
+            blocks,
+          });
+        },
         onComplete: content => {
           complete(content);
         },
@@ -334,4 +347,10 @@ export class ConversationController {
   private timestamp(): string {
     return this.now().toISOString();
   }
+}
+
+function textFromContentBlocks(blocks: ChatContentBlock[]): string {
+  return blocks
+    .flatMap(block => (block.kind === "text" ? [block.text] : []))
+    .join("");
 }

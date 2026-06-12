@@ -70,4 +70,93 @@ describe("bridgeStore", () => {
       retryable: true,
     });
   });
+
+  it("applies assistant tool blocks to the active assistant message", () => {
+    let state = createInitialChatState();
+    state = applyServerEvent(state, "assistant.started", {
+      messageId: "msg_2",
+    });
+    state = applyServerEvent(state, "assistant.blocks", {
+      messageId: "msg_2",
+      blocks: [
+        {
+          kind: "tool",
+          toolName: "bash",
+          toolCallId: "tool-1",
+          toolArgs: { command: "echo hello" },
+          argumentsText: '{\n  "command": "echo hello"\n}',
+          resultText: "hello",
+          toolStatus: "success",
+        },
+        {
+          kind: "text",
+          text: "Done.",
+        },
+      ],
+    });
+
+    expect(state.messages[0]).toMatchObject({
+      id: "msg_2",
+      content: "Done.",
+      contentBlocks: [
+        {
+          kind: "tool",
+          toolName: "bash",
+          resultText: "hello",
+          toolStatus: "success",
+        },
+        {
+          kind: "text",
+          text: "Done.",
+        },
+      ],
+      status: "streaming",
+    });
+  });
+
+  it("preserves tool blocks when a later empty block snapshot arrives", () => {
+    let state = createInitialChatState();
+    state = applyServerEvent(state, "assistant.started", {
+      messageId: "msg_2",
+    });
+    state = applyServerEvent(state, "assistant.blocks", {
+      messageId: "msg_2",
+      blocks: [
+        {
+          kind: "tool",
+          toolName: "read",
+          toolCallId: "tool-1",
+          toolArgs: { path: "README.md" },
+          argumentsText: '{\n  "path": "README.md"\n}',
+          resultText: "# Dano\n",
+          toolStatus: "success",
+        },
+      ],
+    });
+    state = applyServerEvent(state, "assistant.blocks", {
+      messageId: "msg_2",
+      blocks: [],
+    });
+    state = applyServerEvent(state, "assistant.delta", {
+      messageId: "msg_2",
+      delta: "Read complete.",
+    });
+    state = applyServerEvent(state, "assistant.completed", {
+      messageId: "msg_2",
+      content: "Read complete.",
+    });
+
+    expect(state.messages[0]).toMatchObject({
+      content: "Read complete.",
+      contentBlocks: [
+        {
+          kind: "tool",
+          toolName: "read",
+          resultText: "# Dano\n",
+          toolStatus: "success",
+        },
+      ],
+      status: "completed",
+    });
+  });
 });
