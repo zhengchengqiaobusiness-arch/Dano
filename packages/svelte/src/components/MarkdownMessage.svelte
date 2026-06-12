@@ -54,7 +54,15 @@
     highlightRegistry.__danoHighlightLanguagesRegistered = true;
   }
 
-  let { content, status }: { content: string; status: MessageStatus } = $props();
+  let {
+    content,
+    status,
+    onrendered,
+  }: {
+    content: string;
+    status: MessageStatus;
+    onrendered?: () => void;
+  } = $props();
   let root = $state<HTMLDivElement>();
   let mermaidConfigured = false;
   let mermaidLoader: Promise<typeof import("mermaid")> | null = null;
@@ -66,11 +74,16 @@
     status;
 
     const currentRoot = root;
-    if (!currentRoot || status === "streaming") {
+    if (!currentRoot) {
       return;
     }
 
-    void tick().then(() => renderMermaid(currentRoot));
+    void tick().then(async () => {
+      if (status !== "streaming") {
+        await renderMermaid(currentRoot);
+      }
+      onrendered?.();
+    });
   });
 
   function renderMarkdown(markdown: string, deferMermaid: boolean): string {

@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
+  import { cubicOut } from "svelte/easing";
+  import { fly } from "svelte/transition";
   import MarkdownMessage from "./components/MarkdownMessage.svelte";
   import {
     applyServerEvent,
@@ -19,16 +21,43 @@
     "message.failed",
     "heartbeat",
   ];
+  const BOTTOM_LOCK_THRESHOLD_PX = 96;
+  const SCROLL_BOTTOM_ANIMATION_MS = 420;
 
   let chat = $state<ChatState>(createInitialChatState());
   let draft = $state("");
+  let transcriptElement = $state<HTMLDivElement>();
+  let isPinnedToBottom = $state(true);
+  let showScrollToBottom = $state(false);
+  let isScrollBottomAnimating = $state(false);
   let eventSource: EventSource | null = null;
+  let scrollFrame: number | null = null;
+  let scrollBottomAnimationTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  const transcriptScrollKey = $derived(
+    chat.messages
+      .map(message => `${message.id}:${message.content.length}:${message.status}`)
+      .join("|"),
+  );
 
   onMount(() => {
     void startConversation();
     return () => {
       eventSource?.close();
+      if (scrollFrame !== null) {
+        cancelAnimationFrame(scrollFrame);
+      }
+      if (scrollBottomAnimationTimeout !== null) {
+        clearTimeout(scrollBottomAnimationTimeout);
+      }
     };
+  });
+
+  $effect(() => {
+    transcriptScrollKey;
+    if (isPinnedToBottom) {
+      void scrollTranscriptToBottom("auto");
+    }
   });
 
   async function startConversation() {
@@ -99,6 +128,7 @@
 
     chat = { ...chat, sending: true, inputError: "", lastError: "" };
     draft = "";
+    void scrollTranscriptToBottom("smooth");
 
     try {
       const response = await fetch(
@@ -131,6 +161,7 @@
     }
 
     chat = { ...chat, sending: true, lastError: "" };
+    void scrollTranscriptToBottom("smooth");
     try {
       const response = await fetch(
         `/api/conversations/${chat.conversationId}/messages/${message.id}/retry`,
@@ -169,6 +200,85 @@
     event.currentTarget.form?.requestSubmit();
   }
 
+  function handleTranscriptScroll() {
+    const isPinned = isTranscriptNearBottom();
+    isPinnedToBottom = isPinned;
+    if (isScrollBottomAnimating && isPinned) {
+      showScrollToBottom = true;
+      return;
+    }
+
+    showScrollToBottom = !isPinned && chat.messages.length > 0;
+  }
+
+  async function handleScrollBottomClick() {
+    isScrollBottomAnimating = true;
+    await scrollTranscriptToBottom("smooth", false);
+    scheduleScrollBottomAnimationEnd();
+  }
+
+  function handleMessageRendered() {
+    if (isPinnedToBottom) {
+      void scrollTranscriptToBottom("auto");
+    }
+  }
+
+  function isTranscriptNearBottom() {
+    if (!transcriptElement) {
+      return true;
+    }
+
+    return getDistanceFromBottom(transcriptElement) <= BOTTOM_LOCK_THRESHOLD_PX;
+  }
+
+  function getDistanceFromBottom(element: HTMLDivElement) {
+    return element.scrollHeight - element.scrollTop - element.clientHeight;
+  }
+
+  async function scrollTranscriptToBottom(
+    behavior: ScrollBehavior,
+    hideButton = true,
+  ) {
+    isPinnedToBottom = true;
+    if (hideButton) {
+      showScrollToBottom = false;
+      isScrollBottomAnimating = false;
+    }
+    await tick();
+
+    if (scrollFrame !== null) {
+      cancelAnimationFrame(scrollFrame);
+    }
+
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = null;
+      transcriptElement?.scrollTo({
+        top: transcriptElement.scrollHeight,
+        behavior,
+      });
+      if (hideButton) {
+        showScrollToBottom = false;
+      }
+    });
+  }
+
+  function scheduleScrollBottomAnimationEnd(startedAt = performance.now()) {
+    if (scrollBottomAnimationTimeout !== null) {
+      clearTimeout(scrollBottomAnimationTimeout);
+    }
+
+    scrollBottomAnimationTimeout = setTimeout(() => {
+      scrollBottomAnimationTimeout = null;
+      if (isTranscriptNearBottom() || performance.now() - startedAt > 1200) {
+        showScrollToBottom = false;
+        isScrollBottomAnimating = false;
+        return;
+      }
+
+      scheduleScrollBottomAnimationEnd(startedAt);
+    }, SCROLL_BOTTOM_ANIMATION_MS);
+  }
+
   async function readErrorMessage(response: Response): Promise<string> {
     try {
       const data = (await response.json()) as { errorMessage?: string };
@@ -198,36 +308,56 @@
       <div class:online={chat.connectionStatus === "connected"} class="status-dot"></div>
     </header>
 
-    <div class="transcript" aria-live="polite">
-      {#if chat.messages.length === 0}
-        <div class="empty-state">
-          <img src="/dano-assistant.svg" alt="" />
-          <p>Start a conversation with the server-side assistant.</p>
-        </div>
-      {:else}
-        {#each chat.messages as message (message.id)}
-          <article class:assistant={message.role === "assistant"} class="message">
-            <div class="message-meta">
-              <span>{message.role === "user" ? "You" : "Dano"}</span>
-              <span>{message.status}</span>
-            </div>
-            <MarkdownMessage
-              content={message.content ||
-                (message.status === "streaming" ? "Thinking..." : "")}
-              status={message.status}
-            />
-            {#if message.status === "failed"}
-              <div class="failure-row">
-                <span>{message.errorMessage}</span>
-                {#if message.retryable}
-                  <button type="button" onclick={() => void retryMessage(message)}>
-                    Retry
-                  </button>
-                {/if}
+    <div class="transcript-shell">
+      <div
+        bind:this={transcriptElement}
+        class="transcript"
+        aria-live="polite"
+        onscroll={handleTranscriptScroll}
+      >
+        {#if chat.messages.length === 0}
+          <div class="empty-state">
+            <img src="/dano-assistant.svg" alt="" />
+            <p>Start a conversation with the server-side assistant.</p>
+          </div>
+        {:else}
+          {#each chat.messages as message (message.id)}
+            <article class:assistant={message.role === "assistant"} class="message">
+              <div class="message-meta">
+                <span>{message.role === "user" ? "You" : "Dano"}</span>
+                <span>{message.status}</span>
               </div>
-            {/if}
-          </article>
-        {/each}
+              <MarkdownMessage
+                content={message.content ||
+                  (message.status === "streaming" ? "Thinking..." : "")}
+                status={message.status}
+                onrendered={handleMessageRendered}
+              />
+              {#if message.status === "failed"}
+                <div class="failure-row">
+                  <span>{message.errorMessage}</span>
+                  {#if message.retryable}
+                    <button type="button" onclick={() => void retryMessage(message)}>
+                      Retry
+                    </button>
+                  {/if}
+                </div>
+              {/if}
+            </article>
+          {/each}
+        {/if}
+      </div>
+      {#if showScrollToBottom}
+        <button
+          type="button"
+          class="scroll-bottom"
+          class:scrolling={isScrollBottomAnimating}
+          aria-label="Scroll to latest message"
+          transition:fly={{ y: 10, duration: 160, easing: cubicOut }}
+          onclick={handleScrollBottomClick}
+        >
+          <span aria-hidden="true"></span>
+        </button>
       {/if}
     </div>
 
@@ -347,12 +477,90 @@
     background: #0d9488;
   }
 
+  .transcript-shell {
+    position: relative;
+    min-height: 0;
+    overflow: hidden;
+  }
+
   .transcript {
+    height: 100%;
     overflow-y: auto;
     padding: 22px;
     display: flex;
     flex-direction: column;
     gap: 14px;
+  }
+
+  .scroll-bottom {
+    position: absolute;
+    right: 22px;
+    bottom: 18px;
+    width: 40px;
+    height: 40px;
+    display: grid;
+    place-items: center;
+    border: 1px solid #d8dee8;
+    border-radius: 999px;
+    background: #ffffff;
+    color: #1d4ed8;
+    box-shadow: 0 10px 24px rgba(23, 32, 51, 0.18);
+    cursor: pointer;
+    transform: translateY(0) scale(1);
+    transition:
+      transform 150ms ease,
+      box-shadow 150ms ease,
+      border-color 150ms ease,
+      background 150ms ease;
+    will-change: transform, opacity;
+  }
+
+  .scroll-bottom:hover {
+    border-color: #b8c4d6;
+    background: #f8fbff;
+    box-shadow: 0 14px 28px rgba(23, 32, 51, 0.2);
+    transform: translateY(-2px) scale(1);
+  }
+
+  .scroll-bottom:active,
+  .scroll-bottom.scrolling {
+    transform: translateY(1px) scale(0.96);
+  }
+
+  .scroll-bottom span {
+    width: 11px;
+    height: 11px;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+    transform: rotate(45deg) translate(-1px, -2px);
+  }
+
+  .scroll-bottom.scrolling span {
+    animation: scroll-bottom-arrow 420ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  @keyframes scroll-bottom-arrow {
+    0% {
+      transform: rotate(45deg) translate(-1px, -2px);
+    }
+
+    42% {
+      transform: rotate(45deg) translate(3px, 2px);
+    }
+
+    100% {
+      transform: rotate(45deg) translate(-1px, -2px);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .scroll-bottom {
+      transition: none;
+    }
+
+    .scroll-bottom.scrolling span {
+      animation: none;
+    }
   }
 
   .empty-state {
