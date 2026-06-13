@@ -31,6 +31,7 @@
   let draft = $state("");
   let transcriptElement = $state<HTMLDivElement>();
   let composerInputElement = $state<HTMLTextAreaElement>();
+  let isComposerMultiline = $state(false);
   let isPinnedToBottom = $state(true);
   let showScrollToBottom = $state(false);
   let isScrollBottomAnimating = $state(false);
@@ -216,7 +217,17 @@
 
     const maxHeight = 180;
     composerInputElement.style.height = "auto";
-    const nextHeight = Math.min(composerInputElement.scrollHeight, maxHeight);
+    const measuredHeight = composerInputElement.scrollHeight;
+    const computedStyle = getComputedStyle(composerInputElement);
+    const lineHeight = Number.parseFloat(computedStyle.lineHeight);
+    const paddingTop = Number.parseFloat(computedStyle.paddingTop) || 0;
+    const paddingBottom = Number.parseFloat(computedStyle.paddingBottom) || 0;
+    const singleLineHeight =
+      (Number.isFinite(lineHeight) ? lineHeight : composerInputElement.clientHeight) +
+      paddingTop +
+      paddingBottom;
+    isComposerMultiline = measuredHeight > Math.ceil(singleLineHeight) + 2;
+    const nextHeight = Math.min(measuredHeight, maxHeight);
     composerInputElement.style.height = `${nextHeight}px`;
     composerInputElement.style.overflowY =
       composerInputElement.scrollHeight > maxHeight ? "auto" : "hidden";
@@ -385,10 +396,11 @@
         {:else}
           {#each chat.messages as message (message.id)}
             <article class:assistant={message.role === "assistant"} class="message">
-              <div class="message-meta">
-                <span>{message.role === "user" ? "You" : "Dano"}</span>
-                <span>{message.status}</span>
-              </div>
+              {#if message.status !== "completed"}
+                <div class="message-meta">
+                  <span>{message.status}</span>
+                </div>
+              {/if}
               {#if message.contentBlocks?.length}
                 {#each message.contentBlocks as block, blockIndex (`${message.id}-${blockIndex}`)}
                   {#if block.kind === "text"}
@@ -452,6 +464,7 @@
 
     <form
       class="composer"
+      class:multiline={isComposerMultiline}
       class:invalid={Boolean(chat.inputError)}
       onsubmit={submitComposer}
       aria-label="Send chat message"
@@ -481,36 +494,12 @@
         </div>
         <div class="composer-actions-right">
           <button
-            type="button"
-            class="composer-mode-button"
-            aria-label="Thinking level balanced"
-            title="Thinking level selector is not wired yet"
-          >
-            <span>均衡</span>
-            <span class="chevron-icon" aria-hidden="true"></span>
-          </button>
-          <button
-            type="button"
-            class="composer-icon-button"
-            aria-label="Voice input"
-            title="Voice input is not wired yet"
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M12 14.5a3 3 0 0 0 3-3v-5a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3Z"
-              />
-              <path d="M19 11.5a7 7 0 0 1-14 0" />
-              <path d="M12 18.5V22" />
-              <path d="M8.5 22h7" />
-            </svg>
-          </button>
-          <button
             type="submit"
             class="composer-send-button"
             disabled={!canSend(draft, chat)}
             aria-label={chat.sending ? "Sending message" : "Send message"}
           >
-            <span aria-hidden="true">↑</span>
+            <span class="send-arrow-icon" aria-hidden="true"></span>
           </button>
         </div>
       </div>
@@ -786,9 +775,12 @@
 
   .composer {
     display: grid;
-    gap: 18px;
+    grid-template-columns: 40px minmax(0, 1fr) 44px;
+    grid-template-areas: "left input right";
+    align-items: center;
+    gap: 10px;
     margin: 16px 18px 18px;
-    padding: 18px 18px 16px;
+    padding: 12px 18px;
     border: 1px solid #d6d9df;
     border-radius: 30px;
     background: #ffffff;
@@ -798,6 +790,16 @@
     transition:
       border-color 140ms ease,
       box-shadow 140ms ease;
+  }
+
+  .composer.multiline {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "input"
+      "toolbar";
+    align-items: stretch;
+    gap: 18px;
+    padding: 18px 18px 16px;
   }
 
   .composer:focus-within {
@@ -815,6 +817,7 @@
   }
 
   .composer-input {
+    grid-area: input;
     width: 100%;
     min-height: 1.55em;
     max-height: 180px;
@@ -828,15 +831,24 @@
     outline: none;
   }
 
+  .composer:not(.multiline) .composer-input {
+    padding: 0 4px;
+  }
+
   .composer-input::placeholder {
     color: #8a9099;
   }
 
   .composer-toolbar {
+    grid-area: toolbar;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 14px;
+  }
+
+  .composer:not(.multiline) .composer-toolbar {
+    display: contents;
   }
 
   .composer-actions-left,
@@ -846,8 +858,16 @@
     gap: 10px;
   }
 
+  .composer-actions-left {
+    grid-area: left;
+  }
+
+  .composer-actions-right {
+    grid-area: right;
+    justify-content: flex-end;
+  }
+
   .composer-icon-button,
-  .composer-mode-button,
   .composer-send-button {
     border: 0;
     cursor: pointer;
@@ -868,8 +888,7 @@
     color: #111827;
   }
 
-  .composer-icon-button:hover,
-  .composer-mode-button:hover {
+  .composer-icon-button:hover {
     background: #f2f3f5;
   }
 
@@ -896,36 +915,6 @@
     transform: translate(-50%, -50%) rotate(90deg);
   }
 
-  .composer-mode-button {
-    min-height: 40px;
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    border-radius: 999px;
-    padding: 0 12px;
-    background: transparent;
-    color: #7a7f87;
-    font-size: 16px;
-  }
-
-  .chevron-icon {
-    width: 9px;
-    height: 9px;
-    border-right: 2px solid currentColor;
-    border-bottom: 2px solid currentColor;
-    transform: rotate(45deg) translateY(-2px);
-  }
-
-  .composer-icon-button svg {
-    width: 24px;
-    height: 24px;
-    fill: none;
-    stroke: currentColor;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    stroke-width: 2.25;
-  }
-
   .composer-send-button {
     width: 44px;
     height: 44px;
@@ -936,10 +925,37 @@
     color: #ffffff;
   }
 
-  .composer-send-button span {
-    font-size: 30px;
-    line-height: 1;
-    transform: translateY(-2px);
+  .send-arrow-icon {
+    position: relative;
+    width: 22px;
+    height: 22px;
+    display: block;
+  }
+
+  .send-arrow-icon::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 4px;
+    width: 3px;
+    height: 15px;
+    border-radius: 999px;
+    background: currentColor;
+    transform: translateX(-50%);
+  }
+
+  .send-arrow-icon::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 4px;
+    width: 11px;
+    height: 11px;
+    border-top: 3px solid currentColor;
+    border-left: 3px solid currentColor;
+    border-radius: 2px 0 0 0;
+    transform: translateX(-50%) rotate(45deg);
+    transform-origin: 50% 50%;
   }
 
   .composer-send-button:not(:disabled):hover {
@@ -981,8 +997,12 @@
 
     .composer {
       margin: 12px;
-      padding: 14px 14px 12px;
+      padding: 10px 14px;
       border-radius: 24px;
+    }
+
+    .composer.multiline {
+      padding: 14px 14px 12px;
     }
 
     .composer-input {
@@ -991,13 +1011,13 @@
       font-size: 16px;
     }
 
+    .composer:not(.multiline) .composer-input {
+      padding: 0 4px;
+    }
+
     .composer-actions-right {
       gap: 6px;
     }
 
-    .composer-mode-button {
-      padding: 0 8px;
-      font-size: 14px;
-    }
   }
 </style>

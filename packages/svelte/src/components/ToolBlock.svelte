@@ -1,288 +1,35 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import type {
-    ChatContentBlock,
-    JsonObject,
-    JsonValue,
-    ToolBlockStatus,
-  } from "../composables/bridgeStore.svelte";
-
-  type ToolContentBlock = Extract<ChatContentBlock, { kind: "tool" }>;
+  import type { ChatContentBlock } from "../composables/bridgeStore.svelte";
+  import {
+    buildToolDetailModel,
+    buildToolInlineModel,
+    detailText,
+    type ToolContentBlock,
+  } from "../utils/toolBlock";
 
   let {
     block,
     onrendered,
   }: {
-    block: ToolContentBlock;
+    block: Extract<ChatContentBlock, { kind: "tool" }>;
     onrendered?: () => void;
   } = $props();
 
   let expanded = $state(false);
 
-  const inline = $derived(buildToolInlineModel(block));
-  const detail = $derived(buildToolDetailModel(block));
+  const inline = $derived(buildToolInlineModel(block as ToolContentBlock));
+  const detail = $derived(buildToolDetailModel(block as ToolContentBlock));
   const trailingKind = $derived(
-    inline.meta ? "meta" : inline.diffStats ? "diff" : "empty",
+    inline.diffStats ? "diff" : inline.meta ? "meta" : "empty",
   );
+  const visibleDetailText = $derived(detailText(detail));
 
   $effect(() => {
     block;
+    expanded;
     void tick().then(() => onrendered?.());
   });
-
-  function buildToolInlineModel(toolBlock: ToolContentBlock) {
-    const args = asRecord(toolBlock.toolArgs);
-
-    return {
-      label: humanizeToolName(toolBlock.toolName),
-      title: formatToolTitle(toolBlock.toolName, args),
-      meta:
-        formatToolMeta(
-          toolBlock.toolName,
-          args,
-          toolBlock.resultText,
-          toolBlock.toolStatus,
-        ) ?? toolStatusMeta(toolBlock.toolStatus),
-      diffStats: buildDiffStats(
-        toolBlock.toolName,
-        args,
-        toolBlock.resultDetails,
-        toolBlock.toolStatus,
-      ),
-    };
-  }
-
-  function buildToolDetailModel(toolBlock: ToolContentBlock) {
-    const args = asRecord(toolBlock.toolArgs);
-    const path = stringValue(args, "path");
-    const command =
-      toolBlock.toolName === "bash"
-        ? formatBashCommand(stringValue(args, "command"))
-        : undefined;
-    const diff = blockResultDiff(toolBlock.resultDetails)?.replace(/\r/g, "").trim();
-
-    if (toolBlock.toolName === "edit") {
-      if (diff) {
-        return { kind: "diff", text: diff, path } as const;
-      }
-    }
-
-    if (toolBlock.toolName === "write") {
-      const content = stringValue(args, "content");
-      if (typeof content === "string") {
-        return content.length > 0
-          ? ({ kind: "code", text: content.replace(/\r/g, ""), path } as const)
-          : ({ kind: "empty", path } as const);
-      }
-    }
-
-    const text = toolBlock.resultText?.replace(/\r/g, "").trim();
-    if (!text) {
-      if (toolBlock.toolName === "bash" && command) {
-        return { kind: "bash", path, command } as const;
-      }
-      return { kind: "empty", path } as const;
-    }
-    if (toolBlock.toolName === "read") {
-      return { kind: "code", text, path } as const;
-    }
-    if (toolBlock.toolName === "bash") {
-      return { kind: "bash", text, path, command } as const;
-    }
-    return { kind: "text", text, path } as const;
-  }
-
-  function formatToolTitle(
-    toolName: string,
-    args: JsonObject | undefined,
-  ): string {
-    switch (toolName) {
-      case "read": {
-        const path = stringValue(args, "path");
-        if (!path) return humanizeToolName(toolName);
-        const offset = numberValue(args, "offset");
-        const limit = numberValue(args, "limit");
-        if (offset === undefined && limit === undefined) return path;
-        const startLine = offset ?? 1;
-        const endLine = limit !== undefined ? startLine + limit - 1 : undefined;
-        return endLine !== undefined
-          ? `${path}:${startLine}-${endLine}`
-          : `${path}:${startLine}`;
-      }
-      case "bash": {
-        const command = stringValue(args, "command");
-        if (!command) return humanizeToolName(toolName);
-        const lines = command.replace(/\r/g, "").split("\n");
-        const suffix =
-          lines.length > 1
-            ? ` (+${lines.length - 1} more line${lines.length - 1 > 1 ? "s" : ""})`
-            : "";
-        return `${lines[0]}${suffix}`;
-      }
-      case "edit":
-      case "write": {
-        return stringValue(args, "path") || humanizeToolName(toolName);
-      }
-      default:
-        return humanizeToolName(toolName);
-    }
-  }
-
-  function formatToolMeta(
-    toolName: string,
-    args: JsonObject | undefined,
-    resultText: string | undefined,
-    status: ToolBlockStatus,
-  ): string | undefined {
-    switch (toolName) {
-      case "bash": {
-        const parts: string[] = [];
-        const exitCode = bashExitCode(resultText, status);
-        if (exitCode !== undefined) parts.push(`exit ${exitCode}`);
-        const timeout = numberValue(args, "timeout");
-        if (timeout !== undefined) parts.push(`timeout ${timeout}s`);
-        return parts.join(" · ") || undefined;
-      }
-      case "write": {
-        const content = stringValue(args, "content");
-        if (!content) return undefined;
-        const lines = content.replace(/\r/g, "").split("\n").length;
-        return `${lines} line${lines === 1 ? "" : "s"}`;
-      }
-      default:
-        return undefined;
-    }
-  }
-
-  function humanizeToolName(toolName: string): string {
-    if (!toolName) return "Tool";
-    return toolName
-      .split(/[_-]+/)
-      .filter(Boolean)
-      .map(part => part[0]!.toUpperCase() + part.slice(1))
-      .join(" ");
-  }
-
-  function asRecord(value: JsonValue | undefined): JsonObject | undefined {
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
-      return undefined;
-    }
-    return value;
-  }
-
-  function stringValue(args: JsonObject | undefined, key: string): string | undefined {
-    const value = args?.[key];
-    return typeof value === "string" ? value : undefined;
-  }
-
-  function numberValue(args: JsonObject | undefined, key: string): number | undefined {
-    const value = args?.[key];
-    return typeof value === "number" ? value : undefined;
-  }
-
-  function bashExitCode(
-    resultText: string | undefined,
-    status: ToolBlockStatus,
-  ): number | undefined {
-    if (!resultText) return status === "success" ? 0 : undefined;
-    const match = resultText.match(/Command exited with code (\d+)/i);
-    if (match) return Number(match[1]);
-    return status === "success" ? 0 : undefined;
-  }
-
-  function formatBashCommand(command: string | undefined): string | undefined {
-    if (!command) return undefined;
-    const normalized = command.replace(/\r/g, "");
-    if (!normalized.trim()) return undefined;
-    return normalized
-      .split("\n")
-      .map(line => `$ ${line}`)
-      .join("\n");
-  }
-
-  function toolStatusMeta(status: ToolBlockStatus): string | undefined {
-    if (status === "pending") return "running";
-    if (status === "error") return "error";
-    return undefined;
-  }
-
-  function blockResultDiff(resultDetails: JsonValue | undefined): string | undefined {
-    return findDiffString(resultDetails, 0);
-  }
-
-  function findDiffString(
-    value: JsonValue | undefined,
-    depth: number,
-  ): string | undefined {
-    if (depth > 3 || value === undefined || value === null) return undefined;
-
-    if (typeof value === "string") {
-      const trimmed = value.trim();
-      if (!trimmed) return undefined;
-      if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-        try {
-          return findDiffString(JSON.parse(trimmed) as JsonValue, depth + 1);
-        } catch {
-          // Fall through and treat the string itself as a possible diff.
-        }
-      }
-      return looksLikeDiffString(trimmed) ? trimmed : undefined;
-    }
-
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        const diff = findDiffString(item, depth + 1);
-        if (diff) return diff;
-      }
-      return undefined;
-    }
-
-    if (typeof value !== "object") return undefined;
-    for (const key of ["diff", "patch", "unifiedDiff"]) {
-      const diff = findDiffString(value[key], depth + 1);
-      if (diff) return diff;
-    }
-    for (const key of ["details", "result", "data"]) {
-      const diff = findDiffString(value[key], depth + 1);
-      if (diff) return diff;
-    }
-    return undefined;
-  }
-
-  function looksLikeDiffString(value: string): boolean {
-    return (
-      value.startsWith("--- ") ||
-      value.startsWith("+++ ") ||
-      value.startsWith("@@ ") ||
-      value.includes("\n@@ ") ||
-      /^[ +-]\s*\d+\s/m.test(value)
-    );
-  }
-
-  function buildDiffStats(
-    toolName: string,
-    _args: JsonObject | undefined,
-    resultDetails: JsonValue | undefined,
-    status: ToolBlockStatus,
-  ): { added: number; removed: number } | undefined {
-    if (toolName !== "edit" || status !== "success") return undefined;
-    const diffText = blockResultDiff(resultDetails);
-    if (!diffText) return undefined;
-    let added = 0;
-    let removed = 0;
-    for (const line of diffText.replace(/\r/g, "").split("\n")) {
-      if (
-        line.startsWith("+++") ||
-        line.startsWith("---") ||
-        line.startsWith("@@")
-      ) {
-        continue;
-      }
-      if (line.startsWith("+")) added += 1;
-      if (line.startsWith("-")) removed += 1;
-    }
-    return added || removed ? { added, removed } : undefined;
-  }
 
   function emptyState(): string {
     if (block.toolStatus === "pending") return "Waiting for tool result.";
@@ -300,25 +47,41 @@
       onclick={() => (expanded = !expanded)}
     >
       <span class="tool-inline-summary">
-        <span class="tool-inline-name">{block.toolName || "tool"}</span>
-        {#if inline.title !== inline.label}
+        <span class="tool-inline-name">{inline.label}</span>
+        {#if inline.variant === "skill"}
+          <span class="tool-inline-skill" title={inline.title}>
+            <span class="tool-inline-skill-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <rect x="4" y="4" width="16" height="16" rx="5" />
+                <path d="M13.2 6.8 8.8 12h3.4l-1.4 5.2 4.5-6h-3.4l1.3-4.4Z" />
+              </svg>
+            </span>
+            <span class="tool-inline-skill-name">{inline.title}</span>
+          </span>
+        {:else if inline.title !== inline.label}
           <span class="tool-inline-params">{inline.title}</span>
         {/if}
       </span>
-      <span class="tool-inline-trailing" hidden={trailingKind === "empty"}>
-        <span class="tool-inline-meta" hidden={trailingKind !== "meta"}>
-          {inline.meta}
+      {#if trailingKind !== "empty"}
+        <span class="tool-inline-trailing">
+          {#if trailingKind === "meta"}
+            <span class="tool-inline-meta">{inline.meta ?? ""}</span>
+          {:else if inline.diffStats}
+            <span
+              class="tool-inline-diff"
+              aria-label={`${inline.diffStats.added} additions, ${inline.diffStats.removed} deletions`}
+            >
+              <span class="tool-inline-diff-added">+{inline.diffStats.added}</span>
+              <span class="tool-inline-diff-removed">-{inline.diffStats.removed}</span>
+            </span>
+          {/if}
         </span>
-        <span class="tool-inline-diff" hidden={trailingKind !== "diff"}>
-          <span class="tool-inline-diff-added">+{inline.diffStats?.added ?? 0}</span>
-          <span class="tool-inline-diff-removed">-{inline.diffStats?.removed ?? 0}</span>
-        </span>
-      </span>
+      {/if}
     </button>
 
     {#if expanded}
       <div class="tool-inline-details">
-        {#if detail.kind !== "empty"}
+        {#if detail.kind !== "empty" && visibleDetailText}
           <section class="tool-inline-section">
             {#if detail.kind === "bash"}
               <div class="tool-inline-code-panel">
@@ -331,10 +94,10 @@
               </div>
             {:else if detail.kind === "code" || detail.kind === "diff"}
               <div class="tool-inline-code-panel">
-                <pre class="tool-inline-code-output">{detail.text}</pre>
+                <pre class="tool-inline-code-output">{visibleDetailText}</pre>
               </div>
             {:else}
-              <pre class="tool-inline-pre">{detail.text}</pre>
+              <pre class="tool-inline-pre">{visibleDetailText}</pre>
             {/if}
           </section>
         {:else}
@@ -348,26 +111,28 @@
 <style>
   .tool-inline-block {
     max-width: 100%;
+    overflow-anchor: none;
   }
 
   .tool-inline {
-    border: 1px solid #d8dee8;
-    border-radius: 7px;
-    background: #f8fafc;
-    overflow: hidden;
+    --tool-skill-accent: #2563eb;
+    --tool-skill-accent-soft: #dbeafe;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    overflow-anchor: none;
   }
 
   .tool-inline-toggle {
     width: 100%;
-    min-height: 38px;
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
-    justify-content: space-between;
-    gap: 12px;
+    column-gap: 8px;
     border: 0;
     background: transparent;
-    padding: 8px 10px;
-    color: #172033;
+    padding: 0;
+    color: inherit;
     cursor: pointer;
     text-align: left;
   }
@@ -380,15 +145,23 @@
 
   .tool-inline-summary {
     min-width: 0;
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: 8px;
+    line-height: 17px;
   }
 
   .tool-inline-name {
-    color: #334155;
-    font-size: 13px;
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    color: #475569;
+    font-family:
+      ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+      monospace;
+    font-size: 12px;
     font-weight: 700;
+    line-height: 17px;
     white-space: nowrap;
   }
 
@@ -396,39 +169,83 @@
     min-width: 0;
     overflow: hidden;
     color: #64748b;
-    font-family:
-      ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-      monospace;
     font-size: 12px;
+    line-height: 17px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tool-inline-skill {
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    line-height: 17px;
+  }
+
+  .tool-inline-skill-icon {
+    width: 17px;
+    height: 17px;
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    color: var(--tool-skill-accent);
+  }
+
+  .tool-inline-skill-icon svg {
+    width: 17px;
+    height: 17px;
+    display: block;
+  }
+
+  .tool-inline-skill-icon rect {
+    fill: var(--tool-skill-accent);
+  }
+
+  .tool-inline-skill-icon path {
+    fill: #ffffff;
+  }
+
+  .tool-inline-skill-name {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--tool-skill-accent);
+    font-size: 13px;
+    font-weight: 680;
+    line-height: 17px;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .tool-inline-trailing {
-    display: flex;
-    flex: 0 0 auto;
-    align-items: center;
-    gap: 8px;
+    flex: none;
+    align-self: center;
+    min-width: 0;
+    max-width: 180px;
   }
 
   .tool-inline-meta,
   .tool-inline-diff {
+    overflow: hidden;
     color: #64748b;
-    font-size: 12px;
+    font-size: 11px;
+    line-height: 17px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tool-inline-meta {
+    display: inline-block;
   }
 
   .tool-inline-diff {
     display: inline-flex;
-    gap: 6px;
+    align-items: center;
+    gap: 8px;
     font-family:
       ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
       monospace;
-  }
-
-  .tool-inline-trailing[hidden],
-  .tool-inline-meta[hidden],
-  .tool-inline-diff[hidden] {
-    display: none;
+    font-weight: 700;
   }
 
   .tool-inline-diff-added {
@@ -445,8 +262,10 @@
   }
 
   .tool-inline-details {
-    border-top: 1px solid #d8dee8;
-    background: #ffffff;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding-top: 1px;
   }
 
   .tool-inline-section {
@@ -454,32 +273,39 @@
   }
 
   .tool-inline-code-panel {
-    max-width: 100%;
-    overflow-x: auto;
+    max-height: 360px;
+    overflow: auto;
+    margin: 0;
+    padding: 12px 14px;
+    border: 1px solid #d8dee8;
+    border-radius: 10px;
     background: #f8fafc;
   }
 
   .tool-inline-code-output,
   .tool-inline-pre {
     margin: 0;
-    padding: 10px 12px;
-    color: #172033;
+    color: #334155;
     font-family:
       ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
       monospace;
     font-size: 12px;
-    line-height: 1.55;
+    line-height: 1.65;
     white-space: pre-wrap;
+    word-break: break-word;
   }
 
   .tool-inline-command-output {
+    padding-bottom: 6px;
+    margin-bottom: 8px;
     border-bottom: 1px solid #d8dee8;
-    color: #475569;
+    color: #64748b;
   }
 
   .tool-inline-empty {
-    padding: 10px 12px;
+    padding: 8px 0;
     color: #64748b;
-    font-size: 13px;
+    font-size: 12px;
+    line-height: 1.45;
   }
 </style>
