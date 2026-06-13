@@ -97,8 +97,8 @@ export function buildToolDetailModel(
 export function toolStatusMeta(
   status: ToolBlockStatus,
 ): string | undefined {
-  if (status === "pending") return "running";
-  if (status === "error") return "error";
+  if (status === "pending") return "运行中";
+  if (status === "error") return "调用失败";
   return undefined;
 }
 

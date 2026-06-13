@@ -23,6 +23,11 @@ export interface TextContentBlock {
   text: string;
 }
 
+export interface ThinkingContentBlock {
+  kind: "thinking";
+  text: string;
+}
+
 export interface ToolContentBlock {
   kind: "tool";
   toolName: string;
@@ -34,7 +39,10 @@ export interface ToolContentBlock {
   toolStatus: ToolBlockStatus;
 }
 
-export type ChatContentBlock = TextContentBlock | ToolContentBlock;
+export type ChatContentBlock =
+  | TextContentBlock
+  | ThinkingContentBlock
+  | ToolContentBlock;
 
 export interface ChatMessage {
   id: string;

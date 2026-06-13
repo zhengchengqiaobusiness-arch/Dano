@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import DOMPurify from "dompurify";
   import hljs from "highlight.js/lib/core";
   import bash from "highlight.js/lib/languages/bash";
@@ -66,8 +66,16 @@
   let root = $state<HTMLDivElement>();
   let mermaidConfigured = false;
   let mermaidLoader: Promise<typeof import("mermaid")> | null = null;
+  const copyResetTimers = new Set<ReturnType<typeof setTimeout>>();
 
   const html = $derived(renderMarkdown(content, status === "streaming"));
+
+  onDestroy(() => {
+    for (const timer of copyResetTimers) {
+      clearTimeout(timer);
+    }
+    copyResetTimers.clear();
+  });
 
   $effect(() => {
     html;
@@ -86,6 +94,16 @@
     });
   });
 
+  $effect(() => {
+    const currentRoot = root;
+    if (!currentRoot) {
+      return;
+    }
+
+    currentRoot.addEventListener("click", handleMarkdownClick);
+    return () => currentRoot.removeEventListener("click", handleMarkdownClick);
+  });
+
   function renderMarkdown(markdown: string, deferMermaid: boolean): string {
     const renderer = new Renderer();
 
@@ -98,11 +116,14 @@
       const languageClass = language && LANGUAGE_CLASS_PATTERN.test(language)
         ? ` language-${language}`
         : "";
+      const languageLabel = language
+        ? `<span class="code-language">${escapeHtml(language)}</span>`
+        : "<span></span>";
 
-      return `<pre><code class="hljs${languageClass}">${highlightCode(
+      return `<div class="code-block"><div class="code-block-header">${languageLabel}<button type="button" class="code-copy-button" aria-label="Copy code" title="Copy code"><span class="code-copy-icon" aria-hidden="true"></span></button></div><pre><code class="hljs${languageClass}">${highlightCode(
         token.text,
         language,
-      )}</code></pre>`;
+      )}</code></pre></div>`;
     };
 
     const rawHtml = marked(markdown, {
@@ -113,8 +134,116 @@
     });
 
     return DOMPurify.sanitize(rawHtml, {
-      ADD_ATTR: ["class", "target", "rel"],
+      ADD_ATTR: [
+        "class",
+        "target",
+        "rel",
+        "type",
+        "title",
+        "aria-label",
+        "aria-hidden",
+      ],
     });
+  }
+
+  async function handleMarkdownClick(event: MouseEvent) {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+
+    const button = target.closest<HTMLButtonElement>(".code-copy-button");
+    if (!button || !root?.contains(button)) {
+      return;
+    }
+
+    const code = button
+      .closest<HTMLElement>(".code-block")
+      ?.querySelector<HTMLElement>("pre code");
+    const text = code?.textContent ?? "";
+    if (!text) {
+      return;
+    }
+
+    try {
+      await copyText(text);
+      showCopiedState(button);
+    } catch {
+      showCopyFailedState(button);
+    }
+  }
+
+  async function copyText(text: string): Promise<void> {
+    try {
+      copyTextWithTextarea(text);
+      return;
+    } catch {
+      // Fall back to the modern Clipboard API when the legacy copy command is unavailable.
+    }
+
+    const clipboard = globalThis.navigator?.clipboard;
+    if (clipboard?.writeText) {
+      await clipboard.writeText(text);
+      return;
+    }
+
+    throw new Error("Clipboard is unavailable");
+  }
+
+  function copyTextWithTextarea(text: string): void {
+    const activeElement = document.activeElement;
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.top = "-9999px";
+    textarea.style.left = "-9999px";
+    textarea.style.pointerEvents = "none";
+    document.body.append(textarea);
+    textarea.focus();
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+
+    try {
+      if (
+        typeof document.execCommand !== "function" ||
+        !document.execCommand("copy")
+      ) {
+        throw new Error("Copy command failed");
+      }
+    } finally {
+      textarea.remove();
+      if (activeElement instanceof HTMLElement) {
+        activeElement.focus({ preventScroll: true });
+      }
+    }
+  }
+
+  function showCopyFailedState(button: HTMLButtonElement) {
+    button.classList.remove("copied");
+    button.title = "Copy failed";
+    button.setAttribute("aria-label", "Copy failed");
+
+    const timer = setTimeout(() => {
+      button.title = "Copy code";
+      button.setAttribute("aria-label", "Copy code");
+      copyResetTimers.delete(timer);
+    }, 1200);
+    copyResetTimers.add(timer);
+  }
+
+  function showCopiedState(button: HTMLButtonElement) {
+    button.classList.add("copied");
+    button.title = "Copied";
+    button.setAttribute("aria-label", "Copied");
+
+    const timer = setTimeout(() => {
+      button.classList.remove("copied");
+      button.title = "Copy code";
+      button.setAttribute("aria-label", "Copy code");
+      copyResetTimers.delete(timer);
+    }, 1200);
+    copyResetTimers.add(timer);
   }
 
   function normalizeLanguage(language: string | undefined): string {
@@ -199,6 +328,7 @@
   .markdown-body :global(ul),
   .markdown-body :global(ol),
   .markdown-body :global(blockquote),
+  .markdown-body :global(.code-block),
   .markdown-body :global(pre),
   .markdown-body :global(table),
   .markdown-body :global(.mermaid) {
@@ -226,6 +356,110 @@
     border: 1px solid #d8dee8;
     border-radius: 7px;
     background: #f8fafc;
+  }
+
+  .markdown-body :global(.code-block) {
+    max-width: 100%;
+    overflow: hidden;
+    border: 1px solid #d8dee8;
+    border-radius: 10px;
+    background: #f1f4f8;
+  }
+
+  .markdown-body :global(.code-block-header) {
+    min-height: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 0 10px 0 14px;
+    color: #8a9099;
+    font-family:
+      ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+      monospace;
+    font-size: 13px;
+    line-height: 1;
+  }
+
+  .markdown-body :global(.code-language) {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .markdown-body :global(.code-copy-button) {
+    width: 28px;
+    height: 28px;
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: #8a9099;
+    cursor: pointer;
+  }
+
+  .markdown-body :global(.code-copy-button:hover),
+  .markdown-body :global(.code-copy-button:focus-visible) {
+    background: #e3e8f0;
+    color: #5f6673;
+  }
+
+  .markdown-body :global(.code-copy-button:focus-visible) {
+    outline: 2px solid rgba(47, 102, 255, 0.26);
+    outline-offset: 2px;
+  }
+
+  .markdown-body :global(.code-copy-button.copied) {
+    color: #047857;
+  }
+
+  .markdown-body :global(.code-copy-icon) {
+    width: 17px;
+    height: 17px;
+    display: block;
+    position: relative;
+  }
+
+  .markdown-body :global(.code-copy-icon::before),
+  .markdown-body :global(.code-copy-icon::after) {
+    content: "";
+    position: absolute;
+    width: 9px;
+    height: 11px;
+    border: 2px solid currentColor;
+    border-radius: 4px;
+    background: transparent;
+  }
+
+  .markdown-body :global(.code-copy-icon::before) {
+    top: 1px;
+    left: 6px;
+  }
+
+  .markdown-body :global(.code-copy-icon::after) {
+    top: 5px;
+    left: 2px;
+    background: #f1f4f8;
+  }
+
+  .markdown-body :global(.code-copy-button:hover .code-copy-icon::after),
+  .markdown-body :global(.code-copy-button:focus-visible .code-copy-icon::after) {
+    background: #e3e8f0;
+  }
+
+  .markdown-body :global(.code-copy-button.copied .code-copy-icon::after) {
+    background: #f1f4f8;
+  }
+
+  .markdown-body :global(.code-block pre) {
+    margin: 0;
+    border: 0;
+    border-top: 1px solid #e0e5ee;
+    border-radius: 0;
+    background: transparent;
   }
 
   .markdown-body :global(pre code) {

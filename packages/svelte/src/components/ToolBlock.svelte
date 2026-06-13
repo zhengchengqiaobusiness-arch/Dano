@@ -32,9 +32,9 @@
   });
 
   function emptyState(): string {
-    if (block.toolStatus === "pending") return "Waiting for tool result.";
-    if (block.toolName === "write" && detail.kind === "empty") return "File is empty.";
-    return "No text result.";
+    if (block.toolStatus === "pending") return "正在等待工具返回结果。";
+    if (block.toolName === "write" && detail.kind === "empty") return "文件为空。";
+    return "没有文本结果。";
   }
 </script>
 

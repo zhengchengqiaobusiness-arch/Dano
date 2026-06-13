@@ -28,7 +28,10 @@ export interface PiCodingAgentRuntimeOptions {
   cwd: string;
   sessionDir?: string;
   timeoutMs?: number;
+  sessionFactory?: () => PromptableSession | Promise<PromptableSession>;
 }
+
+export const DEFAULT_LLM_ACTIVITY_TIMEOUT_MS = 300_000;
 
 type PromptableSession = AgentSession & {
   prompt?: (
@@ -68,6 +71,28 @@ function failureFromError(error: unknown): RuntimeFailure {
     normalized || "The assistant is unavailable.",
     true,
   );
+}
+
+export function createActivityTimeout(
+  timeoutMs: number,
+  onTimeout: () => void,
+) {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  const clear = () => {
+    if (!timeoutId) {
+      return;
+    }
+    clearTimeout(timeoutId);
+    timeoutId = undefined;
+  };
+
+  const refresh = () => {
+    clear();
+    timeoutId = setTimeout(onTimeout, timeoutMs);
+  };
+
+  return { clear, refresh };
 }
 
 function eventMessage(event: AgentSessionEvent): Record<string, unknown> | null {
@@ -113,6 +138,10 @@ function textFromContentItem(item: unknown): string {
     text?: unknown;
     content?: unknown;
   };
+
+  if (data.type === "thinking") {
+    return "";
+  }
 
   if (data.type === "text" && typeof data.text === "string") {
     return data.text;
@@ -277,6 +306,18 @@ function contentBlocksFromAssistantMessage(
       const text = typeof block.text === "string" ? block.text : "";
       return text ? [{ kind: "text", text }] : [];
     }
+    if (block.type === "thinking") {
+      const text =
+        typeof block.thinking === "string"
+          ? block.thinking
+          : typeof block.text === "string"
+            ? block.text
+            : typeof block.content === "string"
+              ? block.content
+              : "";
+      const trimmed = text.trim();
+      return trimmed ? [{ kind: "thinking", text: trimmed }] : [];
+    }
     if (block.type !== "toolCall") {
       return [];
     }
@@ -337,6 +378,19 @@ function mergeContentBlocks(
       continue;
     }
 
+    if (block.kind === "thinking") {
+      if (!block.text) {
+        continue;
+      }
+      const existingIndex = merged.findIndex(item => item.kind === "thinking");
+      if (existingIndex === -1) {
+        merged.push(block);
+      } else {
+        merged[existingIndex] = block;
+      }
+      continue;
+    }
+
     const existingIndex = block.toolCallId
       ? merged.findIndex(
           item => item.kind === "tool" && item.toolCallId === block.toolCallId,
@@ -377,8 +431,8 @@ function contentBlocksWithToolResult(
   });
 }
 
-function hasToolBlocks(blocks: ChatContentBlock[]): boolean {
-  return blocks.some(block => block.kind === "tool");
+function hasAuxiliaryBlocks(blocks: ChatContentBlock[]): boolean {
+  return blocks.some(block => block.kind === "tool" || block.kind === "thinking");
 }
 
 function visibleAssistantText(message: Record<string, unknown> | null): string {
@@ -483,7 +537,6 @@ export class PiCodingAgentRuntime implements ServerLlmRuntime {
     let assistantText = "";
     let assistantBlocks: ChatContentBlock[] = [];
     let settled = false;
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
     let resolveTurn: (() => void) | undefined;
     const toolResults = new Map<
       string,
@@ -495,7 +548,7 @@ export class PiCodingAgentRuntime implements ServerLlmRuntime {
 
     const emitBlocks = (blocks: ChatContentBlock[]) => {
       const nextBlocks = mergeContentBlocks(assistantBlocks, blocks);
-      if (!hasToolBlocks(nextBlocks) && assistantBlocks.length === 0) {
+      if (!hasAuxiliaryBlocks(nextBlocks) && assistantBlocks.length === 0) {
         return;
       }
       if (!blocksChanged(assistantBlocks, nextBlocks)) {
@@ -531,7 +584,19 @@ export class PiCodingAgentRuntime implements ServerLlmRuntime {
       resolveTurn?.();
     };
 
+    const timeoutMs = this.options.timeoutMs ?? DEFAULT_LLM_ACTIVITY_TIMEOUT_MS;
+    const activityTimeout = createActivityTimeout(timeoutMs, () => {
+      fail(
+        runtimeFailure(
+          "LLM_TIMEOUT",
+          "The assistant stopped making progress in time.",
+          true,
+        ),
+      );
+    });
+
     const unsubscribe = session.subscribe(event => {
+      activityTimeout.refresh();
       const message = eventMessage(event);
       const executionResult = toolResultFromExecutionEvent(event);
 
@@ -548,7 +613,7 @@ export class PiCodingAgentRuntime implements ServerLlmRuntime {
           callbacks.onDelta(delta);
         }
         const blocks = contentBlocksFromAssistantMessage(message, toolResults);
-        if (hasToolBlocks(blocks)) {
+        if (hasAuxiliaryBlocks(blocks)) {
           emitBlocks(blocks);
         }
         return;
@@ -591,16 +656,7 @@ export class PiCodingAgentRuntime implements ServerLlmRuntime {
       }
     });
 
-    const timeoutMs = this.options.timeoutMs ?? 30_000;
-    timeoutId = setTimeout(() => {
-      fail(
-        runtimeFailure(
-          "LLM_TIMEOUT",
-          "The assistant did not answer in time.",
-          true,
-        ),
-      );
-    }, timeoutMs);
+    activityTimeout.refresh();
 
     try {
       void this.prompt(session, text).then(
@@ -621,9 +677,7 @@ export class PiCodingAgentRuntime implements ServerLlmRuntime {
 
       await turnDone;
     } finally {
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
+      activityTimeout.clear();
       unsubscribe();
     }
   }
@@ -639,6 +693,10 @@ export class PiCodingAgentRuntime implements ServerLlmRuntime {
   }
 
   private async createSession(): Promise<PromptableSession> {
+    if (this.options.sessionFactory) {
+      return this.options.sessionFactory();
+    }
+
     const cwd = this.options.cwd.trim() || process.cwd();
     const sessionDir = this.options.sessionDir
       ? path.join(this.options.sessionDir, "sessions")

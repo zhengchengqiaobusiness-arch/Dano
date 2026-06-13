@@ -69,6 +69,7 @@ describe("bridgeStore", () => {
       errorMessage: "bad credentials",
       retryable: true,
     });
+    expect(state.lastError).toBe("");
   });
 
   it("applies assistant tool blocks to the active assistant message", () => {
@@ -108,6 +109,42 @@ describe("bridgeStore", () => {
         {
           kind: "text",
           text: "Done.",
+        },
+      ],
+      status: "streaming",
+    });
+  });
+
+  it("preserves thinking blocks without mixing them into visible answer text", () => {
+    let state = createInitialChatState();
+    state = applyServerEvent(state, "assistant.started", {
+      messageId: "msg_2",
+    });
+    state = applyServerEvent(state, "assistant.blocks", {
+      messageId: "msg_2",
+      blocks: [
+        {
+          kind: "thinking",
+          text: "I should inspect the files before answering.",
+        },
+        {
+          kind: "text",
+          text: "The files are ready.",
+        },
+      ],
+    });
+
+    expect(state.messages[0]).toMatchObject({
+      id: "msg_2",
+      content: "The files are ready.",
+      contentBlocks: [
+        {
+          kind: "thinking",
+          text: "I should inspect the files before answering.",
+        },
+        {
+          kind: "text",
+          text: "The files are ready.",
         },
       ],
       status: "streaming",

@@ -3,6 +3,7 @@
   import { cubicOut } from "svelte/easing";
   import { fly } from "svelte/transition";
   import MarkdownMessage from "./components/MarkdownMessage.svelte";
+  import ThinkingBlock from "./components/ThinkingBlock.svelte";
   import ToolBlock from "./components/ToolBlock.svelte";
   import {
     applyServerEvent,
@@ -12,6 +13,7 @@
     type ChatContentBlock,
     type ChatMessage,
     type ChatState,
+    type ConnectionStatus,
   } from "./composables/bridgeStore.svelte";
 
   const EVENT_NAMES = [
@@ -26,10 +28,12 @@
   ];
   const BOTTOM_LOCK_THRESHOLD_PX = 96;
   const SCROLL_BOTTOM_ANIMATION_MS = 420;
+  const COMPOSER_LAYOUT_ANIMATION_MS = 180;
 
   let chat = $state<ChatState>(createInitialChatState());
   let draft = $state("");
   let transcriptElement = $state<HTMLDivElement>();
+  let composerElement = $state<HTMLFormElement>();
   let composerInputElement = $state<HTMLTextAreaElement>();
   let isComposerMultiline = $state(false);
   let isPinnedToBottom = $state(true);
@@ -216,6 +220,8 @@
     }
 
     const maxHeight = 180;
+    const wasMultiline = isComposerMultiline;
+    const layoutBefore = captureComposerLayout();
     composerInputElement.style.height = "auto";
     const measuredHeight = composerInputElement.scrollHeight;
     const computedStyle = getComputedStyle(composerInputElement);
@@ -226,11 +232,66 @@
       (Number.isFinite(lineHeight) ? lineHeight : composerInputElement.clientHeight) +
       paddingTop +
       paddingBottom;
-    isComposerMultiline = measuredHeight > Math.ceil(singleLineHeight) + 2;
+    const nextIsMultiline = measuredHeight > Math.ceil(singleLineHeight) + 2;
+    isComposerMultiline = nextIsMultiline;
     const nextHeight = Math.min(measuredHeight, maxHeight);
     composerInputElement.style.height = `${nextHeight}px`;
     composerInputElement.style.overflowY =
       composerInputElement.scrollHeight > maxHeight ? "auto" : "hidden";
+    if (nextIsMultiline !== wasMultiline) {
+      animateComposerLayout(layoutBefore);
+    }
+  }
+
+  function captureComposerLayout() {
+    if (!composerElement) {
+      return null;
+    }
+
+    const targets = [
+      composerInputElement,
+      composerElement.querySelector<HTMLElement>(".composer-actions-left"),
+      composerElement.querySelector<HTMLElement>(".composer-actions-right"),
+    ].filter((element): element is HTMLElement => Boolean(element));
+
+    return new Map(targets.map(element => [element, element.getBoundingClientRect()]));
+  }
+
+  function animateComposerLayout(layoutBefore: Map<HTMLElement, DOMRect> | null) {
+    if (
+      !layoutBefore ||
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      return;
+    }
+
+    void tick().then(() => {
+      requestAnimationFrame(() => {
+        for (const [element, before] of layoutBefore) {
+          if (!document.contains(element)) {
+            continue;
+          }
+
+          const after = element.getBoundingClientRect();
+          const deltaX = before.left - after.left;
+          const deltaY = before.top - after.top;
+          if (Math.abs(deltaX) < 0.5 && Math.abs(deltaY) < 0.5) {
+            continue;
+          }
+
+          element.animate(
+            [
+              { transform: `translate(${deltaX}px, ${deltaY}px)` },
+              { transform: "translate(0, 0)" },
+            ],
+            {
+              duration: COMPOSER_LAYOUT_ANIMATION_MS,
+              easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
+            },
+          );
+        }
+      });
+    });
   }
 
   function messageScrollKey(message: ChatMessage) {
@@ -238,7 +299,9 @@
       ?.map(block =>
         block.kind === "text"
           ? `text:${block.text.length}`
-          : [
+          : block.kind === "thinking"
+            ? `thinking:${block.text.length}`
+            : [
               "tool",
               block.toolCallId ?? "",
               block.toolName,
@@ -271,6 +334,26 @@
     return blocks
       .flatMap(block => (block.kind === "text" ? [block.text] : []))
       .join("");
+  }
+
+  function shouldShowAssistantLoading(message: ChatMessage): boolean {
+    return Boolean(
+      message.role === "assistant" &&
+        message.status === "streaming" &&
+        !message.content &&
+        !message.contentBlocks?.length,
+    );
+  }
+
+  function connectionStatusLabel(status: ConnectionStatus): string {
+    switch (status) {
+      case "connecting":
+        return "连接中";
+      case "connected":
+        return "已连接";
+      case "disconnected":
+        return "连接断开";
+    }
   }
 
   function handleTranscriptScroll() {
@@ -375,7 +458,7 @@
         <img src="/dano-assistant.svg" alt="Dano Assistant" />
         <div>
           <h1>Dano</h1>
-          <p>{chat.connectionStatus}</p>
+          <p>{connectionStatusLabel(chat.connectionStatus)}</p>
         </div>
       </div>
       <div class:online={chat.connectionStatus === "connected"} class="status-dot"></div>
@@ -396,9 +479,15 @@
         {:else}
           {#each chat.messages as message (message.id)}
             <article class:assistant={message.role === "assistant"} class="message">
-              {#if message.status !== "completed"}
-                <div class="message-meta">
-                  <span>{message.status}</span>
+              {#if shouldShowAssistantLoading(message)}
+                <div
+                  class="assistant-loading"
+                  role="status"
+                  aria-label="Dano is responding"
+                >
+                  <span></span>
+                  <span></span>
+                  <span></span>
                 </div>
               {/if}
               {#if message.contentBlocks?.length}
@@ -411,6 +500,12 @@
                         onrendered={handleMessageRendered}
                       />
                     {/if}
+                  {:else if block.kind === "thinking"}
+                    <ThinkingBlock
+                      {block}
+                      status={message.status}
+                      onrendered={handleMessageRendered}
+                    />
                   {:else}
                     <ToolBlock block={block} onrendered={handleMessageRendered} />
                   {/if}
@@ -422,10 +517,9 @@
                     onrendered={handleMessageRendered}
                   />
                 {/if}
-              {:else}
+              {:else if message.content}
                 <MarkdownMessage
-                  content={message.content ||
-                    (message.status === "streaming" ? "Thinking..." : "")}
+                  content={message.content}
                   status={message.status}
                   onrendered={handleMessageRendered}
                 />
@@ -466,6 +560,7 @@
       class="composer"
       class:multiline={isComposerMultiline}
       class:invalid={Boolean(chat.inputError)}
+      bind:this={composerElement}
       onsubmit={submitComposer}
       aria-label="Send chat message"
     >
@@ -595,7 +690,6 @@
   }
 
   .brand p,
-  .message-meta,
   .input-error {
     font-size: 13px;
     color: #667085;
@@ -693,7 +787,18 @@
       transition: none;
     }
 
+    .composer,
+    .composer-input,
+    .composer-icon-button,
+    .composer-send-button {
+      transition: none;
+    }
+
     .scroll-bottom.scrolling span {
+      animation: none;
+    }
+
+    .assistant-loading span {
       animation: none;
     }
   }
@@ -714,30 +819,72 @@
   }
 
   .message {
-    width: min(72%, 680px);
+    width: fit-content;
+    max-width: min(72%, 680px);
     align-self: flex-end;
-    padding: 12px 14px;
-    border: 1px solid #d8dee8;
-    border-radius: 8px;
-    background: #edf5ff;
+    padding: 12px 18px;
+    border: 0;
+    border-radius: 18px;
+    background: #f1f1f1;
   }
 
   .message.assistant {
+    width: 100%;
+    max-width: 100%;
     align-self: flex-start;
-    background: #f7f8fa;
+    padding: 0;
+    border-radius: 0;
+    background: transparent;
   }
 
   .message :global(.markdown-body + .tool-inline-block),
   .message :global(.tool-inline-block + .markdown-body),
-  .message :global(.tool-inline-block + .tool-inline-block) {
+  .message :global(.tool-inline-block + .tool-inline-block),
+  .message :global(.markdown-body + .thinking-block),
+  .message :global(.thinking-block + .markdown-body),
+  .message :global(.thinking-block + .tool-inline-block),
+  .message :global(.tool-inline-block + .thinking-block),
+  .message :global(.thinking-block + .thinking-block) {
     margin-top: 12px;
   }
 
-  .message-meta {
-    display: flex;
-    justify-content: space-between;
-    gap: 14px;
-    margin-bottom: 8px;
+  .assistant-loading {
+    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: #8a9099;
+  }
+
+  .assistant-loading span {
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: currentColor;
+    opacity: 0.35;
+    animation: assistant-loading-dot 1.05s ease-in-out infinite;
+  }
+
+  .assistant-loading span:nth-child(2) {
+    animation-delay: 140ms;
+  }
+
+  .assistant-loading span:nth-child(3) {
+    animation-delay: 280ms;
+  }
+
+  @keyframes assistant-loading-dot {
+    0%,
+    80%,
+    100% {
+      opacity: 0.35;
+      transform: translateY(0);
+    }
+
+    40% {
+      opacity: 0.95;
+      transform: translateY(-3px);
+    }
   }
 
   .failure-row {
@@ -789,7 +936,10 @@
       0 1px 2px rgba(15, 23, 42, 0.08);
     transition:
       border-color 140ms ease,
-      box-shadow 140ms ease;
+      border-radius 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      box-shadow 140ms ease,
+      gap 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      padding 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
   }
 
   .composer.multiline {
@@ -829,6 +979,9 @@
     font-size: 18px;
     line-height: 1.55;
     outline: none;
+    transition:
+      height 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+      padding 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
   }
 
   .composer:not(.multiline) .composer-input {
@@ -856,6 +1009,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
+    will-change: transform;
   }
 
   .composer-actions-left {

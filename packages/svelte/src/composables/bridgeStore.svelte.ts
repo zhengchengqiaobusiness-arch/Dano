@@ -20,6 +20,10 @@ export type ChatContentBlock =
       text: string;
     }
   | {
+      kind: "thinking";
+      text: string;
+    }
+  | {
       kind: "tool";
       toolName: string;
       toolCallId?: string;
@@ -180,7 +184,7 @@ export function applyServerEvent(
       return {
         ...state,
         sending: false,
-        lastError: data.errorMessage ?? "The assistant failed to answer.",
+        lastError: "",
         messages: state.messages.map(message =>
           message.id === data.messageId
             ? {

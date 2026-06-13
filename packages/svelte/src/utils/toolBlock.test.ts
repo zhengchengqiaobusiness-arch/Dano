@@ -37,7 +37,7 @@ describe("toolBlock", () => {
 
     expect(buildToolInlineModel(block)).toMatchObject({
       title: "README.md:3-4",
-      meta: "running",
+      meta: "运行中",
     });
     expect(buildToolDetailModel(block)).toMatchObject({ kind: "empty" });
   });
@@ -93,7 +93,7 @@ describe("toolBlock", () => {
       variant: "skill",
       label: "使用技能",
       title: "oa-approval",
-      meta: "running",
+      meta: "运行中",
     });
   });
 

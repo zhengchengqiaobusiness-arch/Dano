@@ -1,5 +1,8 @@
 import { ConversationController } from "../http-command-adapter.js";
-import { createPiCodingAgentRuntimeFactory } from "../llm-runtime.js";
+import {
+  DEFAULT_LLM_ACTIVITY_TIMEOUT_MS,
+  createPiCodingAgentRuntimeFactory,
+} from "../llm-runtime.js";
 import { startHttpServer, type DanoHttpServerController } from "../server.js";
 import type { ChatServerConfig, ServerLlmRuntimeFactory } from "../types.js";
 
@@ -25,5 +28,7 @@ export async function startStandaloneServer(
 
 function readTimeoutMs(): number {
   const value = Number.parseInt(process.env.DANO_LLM_TIMEOUT_MS ?? "", 10);
-  return Number.isFinite(value) && value > 0 ? value : 30_000;
+  return Number.isFinite(value) && value > 0
+    ? value
+    : DEFAULT_LLM_ACTIVITY_TIMEOUT_MS;
 }

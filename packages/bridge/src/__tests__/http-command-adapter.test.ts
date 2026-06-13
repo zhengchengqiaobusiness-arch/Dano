@@ -50,6 +50,16 @@ class ToolRuntime implements ServerLlmRuntime {
   }
 }
 
+class TimeoutRuntime implements ServerLlmRuntime {
+  async sendUserMessage(_text: string, callbacks: RuntimeCallbacks): Promise<void> {
+    callbacks.onFailure({
+      code: "LLM_TIMEOUT",
+      errorMessage: "The assistant stopped making progress in time.",
+      retryable: true,
+    });
+  }
+}
+
 function waitForMicrotasks(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
@@ -161,6 +171,29 @@ describe("ConversationController", () => {
       status: "accepted",
     });
     expect(runtime.prompts).toEqual(["Hello", "Hello"]);
+  });
+
+  it("emits timeout failures as retryable message.failed events", async () => {
+    const controller = new ConversationController({
+      runtimeFactory: () => new TimeoutRuntime(),
+    });
+    const conversation = controller.createConversation();
+
+    await controller.sendMessage(conversation.conversationId, {
+      clientMessageId: "timeout-1",
+      text: "Long task",
+    });
+    await waitForMicrotasks();
+
+    const failed = controller.eventBus
+      .getHistory(conversation.conversationId)
+      .find(event => event.event === "message.failed");
+    expect(failed?.data).toMatchObject({
+      messageId: "msg_2",
+      code: "LLM_TIMEOUT",
+      errorMessage: "The assistant stopped making progress in time.",
+      retryable: true,
+    });
   });
 
   it("treats business-action requests as chat text only", async () => {
