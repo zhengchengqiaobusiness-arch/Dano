@@ -1,33 +1,31 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadServerCredentialConfig } from "../credential-config.js";
-import type { ChatServerConfig } from "../types.js";
-import { DEFAULT_STANDALONE_CONFIG } from "./runtime.js";
-import { startStandaloneServer } from "./server.js";
+import { DetachedSessionRegistry } from "../session-registry.js";
+import type { BridgeConfig } from "../types.js";
+import { createStandaloneBridgeContext } from "./backend.js";
+import type { StandaloneBridgeBackend } from "./backend.js";
+import { createStandaloneDevReloadController } from "./dev-reload.js";
+import { loadStandaloneRuntime, type StandaloneRuntime } from "./runtime.js";
 
-interface MainOptions {
-  help: boolean;
-  host: string;
-  port: number;
+const DEFAULT_STANDALONE_PORT = 8080;
+
+export interface StandaloneMainOptions {
   cwd: string;
+  port: number;
   staticDir?: string;
-  sessionDir?: string;
+  help: boolean;
 }
 
 function printHelp(): void {
-  console.log(`dano standalone web chat
+  console.log(`pi-web standalone bridge
 
 Usage:
-  node dist/bridge/standalone/main.js [--host <host>] [--port <port>]
+  node dist/bridge/standalone/main.js [--port <number>]
 
 Options:
-  --host <host>         Host to bind (default: DANO_HOST or 127.0.0.1)
-  --port <port>         Port to bind (default: DANO_PORT or 8080)
-  --static-dir <path>   Built web assets directory (default: nearest web-dist)
-  --cwd <path>          Runtime working directory (default: process cwd)
-  --session-dir <path>  Runtime session directory
-  --help                Show this help
+  --port <number>  Port to bind (default: ${DEFAULT_STANDALONE_PORT})
+  --help           Show this help
 `);
 }
 
@@ -35,6 +33,7 @@ function parseInteger(value: string | undefined, fallback: number): number {
   if (!value) {
     return fallback;
   }
+
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
@@ -63,18 +62,22 @@ function resolveDefaultStaticDir(cwd: string): string | undefined {
     findNearestWebDist(dirname(fileURLToPath(import.meta.url))),
   ];
 
-  return candidates.find(Boolean);
+  for (const candidate of candidates) {
+    if (candidate) {
+      return resolve(candidate);
+    }
+  }
+
+  return undefined;
 }
 
-export function parseMainOptions(argv: string[]): MainOptions {
-  let host = process.env.DANO_HOST?.trim() || DEFAULT_STANDALONE_CONFIG.host;
-  let port = parseInteger(process.env.DANO_PORT, DEFAULT_STANDALONE_CONFIG.port);
-  let cwd = process.cwd();
-  let staticDir: string | undefined;
-  let sessionDir = process.env.DANO_SESSION_DIR?.trim() || undefined;
+export function parseStandaloneMainOptions(
+  argv: string[],
+): StandaloneMainOptions {
+  let port = DEFAULT_STANDALONE_PORT;
   let help = false;
 
-  for (let index = 0; index < argv.length; index += 1) {
+  for (let index = 0; index < argv.length; index++) {
     const token = argv[index];
     if (!token || token === "--") {
       continue;
@@ -84,51 +87,98 @@ export function parseMainOptions(argv: string[]): MainOptions {
       case "--help":
       case "-h":
         help = true;
-        break;
-      case "--host":
-        host = readOptionValue(argv, ++index, "--host");
-        break;
-      case "--port":
-        port = parseInteger(readOptionValue(argv, ++index, "--port"), port);
-        break;
-      case "--cwd":
-        cwd = resolve(readOptionValue(argv, ++index, "--cwd"));
-        break;
-      case "--static-dir":
-        staticDir = resolve(readOptionValue(argv, ++index, "--static-dir"));
-        break;
-      case "--session-dir":
-        sessionDir = resolve(readOptionValue(argv, ++index, "--session-dir"));
-        break;
+        continue;
+      case "--port": {
+        const next = argv[index + 1];
+        if (!next || next.startsWith("--")) {
+          throw new Error("Missing value for --port");
+        }
+        port = parseInteger(next, DEFAULT_STANDALONE_PORT);
+        index++;
+        continue;
+      }
       default:
         throw new Error(`Unknown option: ${token}`);
     }
   }
 
+  const cwd = process.cwd();
   return {
-    help,
-    host,
-    port,
     cwd,
-    staticDir: staticDir ?? resolveDefaultStaticDir(cwd),
-    ...(sessionDir ? { sessionDir } : {}),
+    port,
+    staticDir: resolveDefaultStaticDir(cwd),
+    help,
   };
 }
 
-function readOptionValue(argv: string[], index: number, name: string): string {
-  const value = argv[index];
-  if (!value || value.startsWith("--")) {
-    throw new Error(`Missing value for ${name}`);
+async function runStandaloneBridge(
+  runtime: StandaloneRuntime,
+  config: BridgeConfig,
+  options: StandaloneMainOptions,
+  entryFile: string,
+  backend: StandaloneBridgeBackend,
+  sessionRegistry: DetachedSessionRegistry,
+): Promise<boolean> {
+  let resolveStopped: (() => void) | undefined;
+  const stopped = new Promise<void>(resolve => {
+    resolveStopped = resolve;
+  });
+
+  const bridgeController = await runtime.startStandaloneBridge(config, {
+    cwd: options.cwd,
+    backend,
+    sessionRegistry,
+    onShutdown: () => resolveStopped?.(),
+  });
+
+  const bridgeUrl = bridgeController.getBridgeUrl();
+  if (!bridgeUrl) {
+    await bridgeController.stop();
+    throw new Error("Bridge started without a reachable URL");
   }
-  return value;
+
+  console.log(`[pi-web] Bridge URL: ${bridgeUrl}`);
+  console.log(`[pi-web] HTTP API: ${bridgeUrl}/api/clients`);
+  console.log(`[pi-web] SSE events: ${bridgeUrl}/api/clients/<clientId>/events`);
+  if (options.staticDir) {
+    console.log(`[pi-web] Static Dir: ${options.staticDir}`);
+  }
+  console.log(`[pi-web] Session CWD: ${options.cwd}`);
+
+  const requestStop = async (): Promise<void> => {
+    await bridgeController.stop().catch(error => {
+      console.error("[pi-web] Failed to stop standalone bridge:", error);
+    });
+  };
+
+  const devReload = createStandaloneDevReloadController({
+    entryFile,
+    stop: requestStop,
+  });
+
+  const onSigterm = (): void => {
+    void requestStop();
+  };
+
+  process.on("SIGTERM", onSigterm);
+
+  try {
+    await stopped;
+  } finally {
+    process.off("SIGTERM", onSigterm);
+    devReload?.dispose();
+  }
+
+  return devReload?.reloadRequested() ?? false;
 }
 
-async function runMain(): Promise<number> {
-  let options: MainOptions;
+async function runStandaloneMain(): Promise<number> {
+  let options: StandaloneMainOptions;
   try {
-    options = parseMainOptions(process.argv.slice(2));
+    options = parseStandaloneMainOptions(process.argv.slice(2));
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[pi-web] ${message}`);
     printHelp();
     return 1;
   }
@@ -138,52 +188,46 @@ async function runMain(): Promise<number> {
     return 0;
   }
 
-  const credentials = loadServerCredentialConfig({ cwd: options.cwd });
-  const config: ChatServerConfig = {
-    ...DEFAULT_STANDALONE_CONFIG,
-    host: options.host,
-    port: options.port,
-    cwd: options.cwd,
-    staticDir: options.staticDir,
-    sessionDir: options.sessionDir,
-  };
+  const thisFile = fileURLToPath(import.meta.url);
+  const backend = await createStandaloneBridgeContext({ cwd: options.cwd });
+  const sessionRegistry = new DetachedSessionRegistry(
+    backend.context.state.cwd,
+  );
 
-  const server = await startStandaloneServer(config);
-  console.log(`[dano] Web URL: ${server.getUrl()}`);
-  if (config.staticDir) {
-    console.log(`[dano] Static Dir: ${config.staticDir}`);
-  }
-  if (credentials.loadedEnvFile) {
-    console.log(`[dano] Loaded .env: ${credentials.loadedEnvFile}`);
-  }
-  if (credentials.credentialKeys.length > 0) {
-    console.log(`[dano] Server credential keys: ${credentials.credentialKeys.join(", ")}`);
-  }
+  try {
+    while (true) {
+      const runtime = await loadStandaloneRuntime(thisFile);
+      const config: BridgeConfig = {
+        ...runtime.DEFAULT_BRIDGE_CONFIG,
+        port: options.port,
+        staticDir: options.staticDir,
+      };
 
-  return new Promise<number>(resolveExitCode => {
-    let stopping = false;
-    const stop = async () => {
-      if (stopping) {
-        return;
+      const reloadRequested = await runStandaloneBridge(
+        runtime,
+        config,
+        options,
+        thisFile,
+        backend,
+        sessionRegistry,
+      );
+
+      if (!reloadRequested) {
+        return 0;
       }
-      stopping = true;
-      await server.stop();
-      resolveExitCode(0);
-    };
 
-    process.once("SIGINT", () => {
-      void stop();
-    });
-    process.once("SIGTERM", () => {
-      void stop();
-    });
-  });
+      console.log("[pi-web] Standalone bridge runtime reloaded.");
+    }
+  } finally {
+    sessionRegistry.dispose();
+    await backend.dispose();
+  }
 }
 
 const invokedPath = process.argv[1];
 const thisFile = fileURLToPath(import.meta.url);
 if (invokedPath && realpathSync(resolve(invokedPath)) === realpathSync(resolve(thisFile))) {
-  runMain().then(
+  runStandaloneMain().then(
     code => {
       process.exitCode = code;
     },

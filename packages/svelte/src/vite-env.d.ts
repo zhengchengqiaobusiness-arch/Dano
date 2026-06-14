@@ -1,13 +1,14 @@
+/// <reference types="svelte" />
 /// <reference types="vite/client" />
 
-declare module "highlight.js/lib/core" {
-  import hljs from "highlight.js";
+declare global {
+  const __PI_WEB_DEV_DEBUG__: boolean;
 
-  export default hljs;
+  interface Window {
+    __PI_WEB_CONFIG__?: {
+      debugModeAvailable?: boolean;
+    };
+  }
 }
 
-declare module "highlight.js/lib/languages/*" {
-  const language: (hljs?: any) => any;
-
-  export default language;
-}
+export {};

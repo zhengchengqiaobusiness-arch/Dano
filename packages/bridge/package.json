@@ -1,8 +1,8 @@
 {
-  "name": "@dano/bridge",
-  "version": "0.1.0",
+  "name": "@pi-web/bridge",
+  "version": "0.3.4",
   "private": true,
-  "description": "HTTP and SSE bridge server for Dano Web",
+  "description": "HTTP/SSE RPC bridge server for Pi Web",
   "type": "module",
   "exports": {
     "./*": {
@@ -25,6 +25,9 @@
     "tsdown": "^0.22.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.6"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
   },
   "engines": {
     "node": ">=20.6.0"

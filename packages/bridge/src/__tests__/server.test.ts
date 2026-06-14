@@ -1,125 +1,271 @@
+import * as fs from "node:fs";
 import * as http from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
-import { ConversationController } from "../http-command-adapter.js";
-import { createHttpRequestHandler } from "../server.js";
-import type { RuntimeCallbacks, ServerLlmRuntime } from "../types.js";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { BridgeEventBus } from "../bridge-event-bus.js";
+import {
+  BridgeServer,
+  type RpcConnectionHandler,
+  type RpcConnectionHandlerFactory,
+} from "../server.js";
+import {
+  DEFAULT_BRIDGE_CONFIG,
+  type ClientMessage,
+  type ServerMessage,
+} from "../types.js";
 
-class EchoRuntime implements ServerLlmRuntime {
-  async sendUserMessage(text: string, callbacks: RuntimeCallbacks): Promise<void> {
-    callbacks.onDelta(`Echo: ${text}`);
-    callbacks.onComplete(`Echo: ${text}`);
-  }
+interface SseProbe {
+  close(): void;
+  waitForMessages(count: number): Promise<ServerMessage[]>;
 }
 
-async function startTestServer() {
-  const controller = new ConversationController({
-    runtimeFactory: () => new EchoRuntime(),
-  });
-  const server = http.createServer(
-    createHttpRequestHandler(controller, { heartbeatMs: 50 }),
+const servers: BridgeServer[] = [];
+
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map(server => server.stop()));
+});
+
+function createServer(
+  factory?: (ctx: Parameters<RpcConnectionHandlerFactory>[0]) => RpcConnectionHandler,
+) {
+  const eventBus = new BridgeEventBus(DEFAULT_BRIDGE_CONFIG);
+  const emitEvent = vi.fn();
+  const handlerFactory: RpcConnectionHandlerFactory = ctx =>
+    factory?.(ctx) ?? {
+      handleClientMessage: vi.fn(),
+      dispose: vi.fn(),
+    };
+  const server = new BridgeServer(
+    { ...DEFAULT_BRIDGE_CONFIG, host: "127.0.0.1", port: 0 },
+    handlerFactory,
+    eventBus,
+    emitEvent,
   );
+  servers.push(server);
+  return { server, eventBus, emitEvent };
+}
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
+async function postJson<T>(url: string, body: unknown = {}): Promise<T> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
+  expect(response.ok).toBe(true);
+  return (await response.json()) as T;
+}
 
-  const address = server.address();
-  if (!address || typeof address !== "object") {
-    throw new Error("Missing test server address");
-  }
+async function readJson<T>(url: string): Promise<T> {
+  const response = await fetch(url);
+  expect(response.ok).toBe(true);
+  return (await response.json()) as T;
+}
+
+function openSse(url: string): SseProbe {
+  const messages: ServerMessage[] = [];
+  const waiters: Array<{
+    count: number;
+    resolve: (messages: ServerMessage[]) => void;
+  }> = [];
+  let buffer = "";
+
+  const req = http.get(url, res => {
+    res.setEncoding("utf8");
+    res.on("data", chunk => {
+      buffer += chunk;
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary !== -1) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const data = frame
+          .split(/\r?\n/)
+          .filter(line => line.startsWith("data: "))
+          .map(line => line.slice("data: ".length))
+          .join("\n");
+        if (data) {
+          messages.push(JSON.parse(data) as ServerMessage);
+          for (const waiter of waiters.slice()) {
+            if (messages.length >= waiter.count) {
+              waiters.splice(waiters.indexOf(waiter), 1);
+              waiter.resolve(messages.slice(0, waiter.count));
+            }
+          }
+        }
+        boundary = buffer.indexOf("\n\n");
+      }
+    });
+  });
 
   return {
-    controller,
-    url: `http://127.0.0.1:${address.port}`,
-    stop: () =>
-      new Promise<void>((resolve, reject) => {
-        server.close(error => {
-          if (error) reject(error);
-          else resolve();
-        });
-      }),
+    close() {
+      req.destroy();
+    },
+    waitForMessages(count: number) {
+      if (messages.length >= count) {
+        return Promise.resolve(messages.slice(0, count));
+      }
+      return new Promise<ServerMessage[]>(resolve => {
+        waiters.push({ count, resolve });
+      });
+    },
   };
 }
 
-describe("HTTP server", () => {
-  const stops: Array<() => Promise<void>> = [];
+describe("BridgeServer HTTP/SSE transport", () => {
+  it("serves health over HTTP", async () => {
+    const { server } = createServer();
+    const address = await server.start();
 
-  afterEach(async () => {
-    await Promise.all(stops.splice(0).map(stop => stop()));
+    await expect(
+      readJson<{ status: string }>(`http://127.0.0.1:${address.port}/api/health`),
+    ).resolves.toEqual({ status: "ok" });
   });
 
-  it("returns health through the API", async () => {
-    const server = await startTestServer();
-    stops.push(server.stop);
+  it("creates a logical client without opening an SSE stream first", async () => {
+    const { server, emitEvent } = createServer();
+    const address = await server.start();
 
-    const response = await fetch(`${server.url}/api/health`);
+    const created = await postJson<{
+      client: { id: string; seq: number };
+      eventsUrl: string;
+      messagesUrl: string;
+    }>(`http://127.0.0.1:${address.port}/api/clients`);
 
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ status: "ok" });
+    expect(created.client.id).toMatch(/^client_/);
+    expect(created.client.seq).toBe(1);
+    expect(created.eventsUrl).toContain("/events");
+    expect(created.messagesUrl).toContain("/messages");
+    expect(server.getClientCount()).toBe(1);
+    expect(emitEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "client_connect" }),
+    );
   });
 
-  it("creates conversations without exposing server secrets", async () => {
-    const server = await startTestServer();
-    stops.push(server.stop);
-    process.env.OPENAI_API_KEY = "sk-test-secret";
-
-    const response = await fetch(`${server.url}/api/conversations`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-    const body = await response.text();
-
-    delete process.env.OPENAI_API_KEY;
-    expect(response.status).toBe(201);
-    expect(body).toContain("conv_1");
-    expect(body).not.toContain("sk-test-secret");
-  });
-
-  it("opens EventSource-compatible streams with required headers", async () => {
-    const server = await startTestServer();
-    stops.push(server.stop);
-    const created = await fetch(`${server.url}/api/conversations`, {
-      method: "POST",
-      body: "{}",
-    }).then(response => response.json() as Promise<{ eventsUrl: string }>);
-
-    const abort = new AbortController();
-    const response = await fetch(`${server.url}${created.eventsUrl}`, {
-      signal: abort.signal,
-    });
-    abort.abort();
-
-    expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toContain("text/event-stream");
-    expect(response.headers.get("x-accel-buffering")).toBe("no");
-  });
-
-  it("sends messages through HTTP POST and emits completion events", async () => {
-    const server = await startTestServer();
-    stops.push(server.stop);
-    const created = await fetch(`${server.url}/api/conversations`, {
-      method: "POST",
-      body: "{}",
-    }).then(response => response.json() as Promise<{ conversationId: string }>);
-
-    const response = await fetch(
-      `${server.url}/api/conversations/${created.conversationId}/messages`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ clientMessageId: "smoke-1", text: "Hello" }),
+  it("delivers command responses over SSE after POST accepts the command", async () => {
+    const commandSpy = vi.fn();
+    const { server } = createServer(ctx => ({
+      handleClientMessage(message: ClientMessage) {
+        commandSpy(message);
+        ctx.send({
+          type: "response",
+          payload: {
+            id: "cmd-1",
+            type: "response",
+            command: "get_state",
+            success: true,
+            data: {
+              thinkingLevel: "medium",
+              isStreaming: false,
+              isCompacting: false,
+              steeringMode: "all",
+              followUpMode: "all",
+              sessionId: "session-1",
+              autoCompactionEnabled: true,
+              messageCount: 0,
+              pendingMessageCount: 0,
+            },
+          },
+        });
       },
+      dispose: vi.fn(),
+    }));
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const created = await postJson<{ eventsUrl: string; messagesUrl: string }>(
+      `${origin}/api/clients`,
+    );
+    const sse = openSse(`${origin}${created.eventsUrl}`);
+
+    await postJson(`${origin}${created.messagesUrl}`, {
+      type: "command",
+      payload: { id: "cmd-1", type: "get_state" },
+    });
+
+    const [message] = await sse.waitForMessages(1);
+    sse.close();
+    expect(commandSpy).toHaveBeenCalledWith({
+      type: "command",
+      payload: { id: "cmd-1", type: "get_state" },
+    });
+    expect(message).toMatchObject({
+      type: "response",
+      payload: { id: "cmd-1", success: true },
+    });
+  });
+
+  it("buffers server messages until the SSE stream connects", async () => {
+    const { server } = createServer(ctx => {
+      ctx.send({
+        type: "event",
+        payload: { type: "session_compact" },
+      });
+      return {
+        handleClientMessage: vi.fn(),
+        dispose: vi.fn(),
+      };
+    });
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const created = await postJson<{ eventsUrl: string }>(`${origin}/api/clients`);
+    const sse = openSse(`${origin}${created.eventsUrl}`);
+
+    const [message] = await sse.waitForMessages(1);
+    sse.close();
+    expect(message).toEqual({
+      type: "event",
+      payload: { type: "session_compact" },
+    });
+  });
+
+  it("disconnects clients through the HTTP disconnect endpoint", async () => {
+    const dispose = vi.fn();
+    const { server, emitEvent } = createServer(ctx => ({
+      handleClientMessage: vi.fn(),
+      dispose: () => {
+        dispose();
+        ctx.emitEvent({
+          type: "client_disconnect",
+          client: ctx.client,
+          reason: "adapter_disposed",
+        });
+      },
+    }));
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const created = await postJson<{ client: { id: string } }>(
+      `${origin}/api/clients`,
     );
 
-    await new Promise(resolve => setTimeout(resolve, 0));
+    await postJson(`${origin}/api/clients/${created.client.id}/disconnect`);
 
-    expect(response.status).toBe(202);
-    expect(
-      server.controller.eventBus
-        .getHistory(created.conversationId)
-        .map(event => event.event),
-    ).toContain("assistant.completed");
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(server.getClientCount()).toBe(0);
+    expect(emitEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "client_disconnect" }),
+    );
+  });
+
+  it("serves static assets and falls back to index.html for SPA routes", async () => {
+    const staticDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-static-"));
+    fs.writeFileSync(path.join(staticDir, "index.html"), "<main>index</main>");
+    fs.writeFileSync(path.join(staticDir, "asset.txt"), "asset");
+    const eventBus = new BridgeEventBus(DEFAULT_BRIDGE_CONFIG);
+    const server = new BridgeServer(
+      { ...DEFAULT_BRIDGE_CONFIG, host: "127.0.0.1", port: 0, staticDir },
+      () => ({ handleClientMessage: vi.fn(), dispose: vi.fn() }),
+      eventBus,
+      vi.fn(),
+    );
+    servers.push(server);
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+
+    await expect(fetch(`${origin}/asset.txt`).then(r => r.text())).resolves.toBe(
+      "asset",
+    );
+    await expect(fetch(`${origin}/missing/route`).then(r => r.text())).resolves.toContain(
+      "<main>index</main>",
+    );
   });
 });
