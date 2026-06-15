@@ -210,6 +210,10 @@ function summarizeErrorMessage(message: string, fallback: string): string {
   return line.length > 220 ? `${line.slice(0, 217)}...` : line;
 }
 
+function normalizeBridgePath(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -225,6 +229,8 @@ const SESSION_ROUTE_PARAM = "session";
 let eventSource: EventSource | null = null;
 let clientId: string | null = null;
 let clientMessagesUrl: string | null = null;
+let defaultWorkspacePath: string | null = null;
+let defaultSessionStartedForPage = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectDelay = 1000;
 let disposed = false;
@@ -2467,6 +2473,56 @@ function handleExtensionUIRequest(payload: RpcExtensionUIRequest) {
 // Connect / disconnect
 // ---------------------------------------------------------------------------
 
+async function startDefaultWorkspaceSession(
+  bootstrap: Array<Promise<RpcResponse>>,
+): Promise<boolean> {
+  const workspacePath = defaultWorkspacePath;
+  if (!workspacePath || defaultSessionStartedForPage) return false;
+
+  defaultSessionStartedForPage = true;
+  writeSessionRoutePath(null, "replace");
+
+  try {
+    const registerResp = await registerWorkspace(workspacePath);
+    if (!registerResp.success) {
+      pushNotification(
+        summarizeErrorMessage(
+          registerResp.error ?? "Failed to register default workspace",
+          "Failed to register default workspace",
+        ),
+        "error",
+      );
+      await Promise.all(bootstrap);
+      await restoreLiveSessionState();
+      return true;
+    }
+
+    const registerData = registerResp.data as
+      | { workspacePath?: string; cancelled?: boolean }
+      | undefined;
+    const registeredWorkspacePath =
+      normalizeBridgePath(registerData?.workspacePath) ?? workspacePath;
+    const sessionResp = await newSession(registeredWorkspacePath);
+    await Promise.all(bootstrap);
+
+    if (!sessionResp.success) {
+      pushNotification(
+        summarizeErrorMessage(
+          sessionResp.error ?? "Failed to start default session",
+          "Failed to start default session",
+        ),
+        "error",
+      );
+      await restoreLiveSessionState();
+    }
+
+    return true;
+  } catch (error) {
+    defaultSessionStartedForPage = false;
+    throw error;
+  }
+}
+
 async function fetchInitialState() {
   _transcriptInitialLoading = true;
   const routeSessionPath = readSessionRoutePath();
@@ -2479,6 +2535,10 @@ async function fetchInitialState() {
       sendCommand({ type: "get_available_models" }),
       sendCommand({ type: "get_commands" }),
     ];
+
+    if (await startDefaultWorkspaceSession(bootstrap)) {
+      return;
+    }
 
     if (routeSessionPath) {
       const resp = await sendCommand({
@@ -2564,6 +2624,7 @@ async function connect() {
       client?: { id?: string };
       eventsUrl?: string;
       messagesUrl?: string;
+      defaultWorkspacePath?: string | null;
     };
     const nextClientId = created.client?.id;
     if (!nextClientId || !created.eventsUrl || !created.messagesUrl) {
@@ -2572,6 +2633,7 @@ async function connect() {
 
     clientId = nextClientId;
     clientMessagesUrl = created.messagesUrl;
+    defaultWorkspacePath = normalizeBridgePath(created.defaultWorkspacePath);
     eventSource = new EventSource(created.eventsUrl);
   } catch (error) {
     markDisconnected(

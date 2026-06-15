@@ -2912,6 +2912,43 @@ describe("WsRpcAdapter", () => {
       });
     });
 
+    it("creates the workspace directory when registering a missing workspace", async () => {
+      const workspaceRoot = fs.mkdtempSync(
+        path.join(os.tmpdir(), "pi-web-missing-workspace-"),
+      );
+      const workspaceDir = path.join(workspaceRoot, "created");
+
+      const registerCommand: RpcCommand = {
+        id: "cmd-register-created",
+        type: "register_workspace",
+        workspacePath: workspaceDir,
+      };
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({ type: "command", payload: registerCommand }),
+        ),
+      );
+
+      await new Promise(r => setTimeout(r, 10));
+
+      const sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string),
+      );
+      const registerResponse = sendCalls.find(
+        call =>
+          call.type === "response" &&
+          call.payload.command === "register_workspace" &&
+          call.payload.id === "cmd-register-created",
+      );
+
+      expect(registerResponse?.payload.success).toBe(true);
+      expect(registerResponse?.payload.data.workspacePath).toBe(workspaceDir);
+      expect(fs.statSync(workspaceDir).isDirectory()).toBe(true);
+    });
+
     it("restores registered workspace paths when directory names contain hyphens", async () => {
       const workspaceRoot = fs.mkdtempSync(
         path.join(os.tmpdir(), "pi-web-registered-workspace-"),
@@ -3788,6 +3825,41 @@ describe("WsRpcAdapter", () => {
 
       // Clean up temp dir
       fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("creates the workspace directory when starting a new session", async () => {
+      const workspaceRoot = fs.mkdtempSync(
+        path.join(os.tmpdir(), "pi-web-new-session-workspace-"),
+      );
+      const workspaceDir = path.join(workspaceRoot, "created");
+
+      const command: RpcCommand = {
+        id: "cmd-new-created",
+        type: "new_session",
+        workspacePath: workspaceDir,
+      };
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(JSON.stringify({ type: "command", payload: command })),
+      );
+
+      await new Promise(r => setTimeout(r, 10));
+
+      const sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string),
+      );
+      const responseCall = sendCalls.find(
+        call =>
+          call.type === "response" &&
+          call.payload.command === "new_session" &&
+          call.payload.id === "cmd-new-created",
+      );
+
+      expect(responseCall?.payload.success).toBe(true);
+      expect(responseCall?.payload.data.workspacePath).toBe(workspaceDir);
+      expect(fs.statSync(workspaceDir).isDirectory()).toBe(true);
     });
 
     it("should handle fork command", async () => {

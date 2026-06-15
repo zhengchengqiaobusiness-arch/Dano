@@ -289,6 +289,7 @@ export class BridgeServer {
       client,
       eventsUrl: `/api/clients/${encodeURIComponent(client.id)}/events`,
       messagesUrl: `/api/clients/${encodeURIComponent(client.id)}/messages`,
+      defaultWorkspacePath: this.config.defaultWorkspacePath,
     });
   }
 

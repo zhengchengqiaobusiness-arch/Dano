@@ -796,6 +796,8 @@ export interface BridgeConfig {
   readonly portMax: number;
   /** Directory containing static files to serve (for the web UI bundle). Default: undefined (404) */
   readonly staticDir?: string;
+  /** Workspace path used by browser clients when opening a fresh page. Default: "/tmp/dano" */
+  readonly defaultWorkspacePath?: string;
   /** Timeout in ms for extension UI dialog requests routed to browser clients. Default: 60_000 */
   readonly uiRequestTimeout: number;
   /** Maximum number of SSE messages to buffer per client before dropping oldest. Default: 256 */
@@ -809,6 +811,7 @@ export const DEFAULT_BRIDGE_CONFIG: BridgeConfig = {
   host: "0.0.0.0",
   port: 7036,
   portMax: 0,
+  defaultWorkspacePath: "/tmp/dano",
   uiRequestTimeout: 60_000,
   clientBufferSize: 256,
   heartbeatInterval: 15_000,

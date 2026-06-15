@@ -130,12 +130,14 @@ describe("BridgeServer HTTP/SSE transport", () => {
       client: { id: string; seq: number };
       eventsUrl: string;
       messagesUrl: string;
+      defaultWorkspacePath?: string;
     }>(`http://127.0.0.1:${address.port}/api/clients`);
 
     expect(created.client.id).toMatch(/^client_/);
     expect(created.client.seq).toBe(1);
     expect(created.eventsUrl).toContain("/events");
     expect(created.messagesUrl).toContain("/messages");
+    expect(created.defaultWorkspacePath).toBe("/tmp/dano");
     expect(server.getClientCount()).toBe(1);
     expect(emitEvent).toHaveBeenCalledWith(
       expect.objectContaining({ type: "client_connect" }),

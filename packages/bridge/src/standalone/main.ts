@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DetachedSessionRegistry } from "../session-registry.js";
@@ -10,11 +10,13 @@ import { loadStandaloneRuntime, type StandaloneRuntime } from "./runtime.js";
 
 const DEFAULT_STANDALONE_PORT = 8080;
 const DEFAULT_STANDALONE_HOST = "0.0.0.0";
+const DEFAULT_STANDALONE_WORKSPACE = "/tmp/dano";
 
 export interface StandaloneMainOptions {
   cwd: string;
   host: string;
   port: number;
+  defaultWorkspacePath: string;
   staticDir?: string;
   help: boolean;
 }
@@ -23,12 +25,13 @@ function printHelp(): void {
   console.log(`pi-web standalone bridge
 
 Usage:
-  node dist/bridge/standalone/main.js [--host <host>] [--port <number>]
+  node dist/bridge/standalone/main.js [--host <host>] [--port <number>] [--default-workspace <path>]
 
 Options:
-  --host <host>    Host to bind (default: ${DEFAULT_STANDALONE_HOST})
-  --port <number>  Port to bind (default: ${DEFAULT_STANDALONE_PORT})
-  --help           Show this help
+  --host <host>              Host to bind (default: ${DEFAULT_STANDALONE_HOST})
+  --port <number>            Port to bind (default: ${DEFAULT_STANDALONE_PORT})
+  --default-workspace <path> Default workspace path (env: DANO_DEFAULT_WORKSPACE_PATH, default: ${DEFAULT_STANDALONE_WORKSPACE})
+  --help                     Show this help
 `);
 }
 
@@ -39,6 +42,16 @@ function parseInteger(value: string | undefined, fallback: number): number {
 
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function readDefaultWorkspacePath(
+  env: Record<string, string | undefined>,
+): string {
+  return (
+    env.DANO_DEFAULT_WORKSPACE_PATH?.trim() ||
+    env.DANO_DEFAULT_WORKSPACE?.trim() ||
+    DEFAULT_STANDALONE_WORKSPACE
+  );
 }
 
 function findNearestWebDist(startDir: string): string | undefined {
@@ -76,9 +89,11 @@ function resolveDefaultStaticDir(cwd: string): string | undefined {
 
 export function parseStandaloneMainOptions(
   argv: string[],
+  env: Record<string, string | undefined> = process.env,
 ): StandaloneMainOptions {
   let host = DEFAULT_STANDALONE_HOST;
   let port = DEFAULT_STANDALONE_PORT;
+  let defaultWorkspacePath = readDefaultWorkspacePath(env);
   let help = false;
 
   for (let index = 0; index < argv.length; index++) {
@@ -110,6 +125,15 @@ export function parseStandaloneMainOptions(
         index++;
         continue;
       }
+      case "--default-workspace": {
+        const next = argv[index + 1];
+        if (!next || next.startsWith("--")) {
+          throw new Error("Missing value for --default-workspace");
+        }
+        defaultWorkspacePath = next;
+        index++;
+        continue;
+      }
       default:
         throw new Error(`Unknown option: ${token}`);
     }
@@ -120,9 +144,15 @@ export function parseStandaloneMainOptions(
     cwd,
     host,
     port,
+    defaultWorkspacePath: resolve(cwd, defaultWorkspacePath),
     staticDir: resolveDefaultStaticDir(cwd),
     help,
   };
+}
+
+function ensureDefaultWorkspace(path: string): string {
+  mkdirSync(path, { recursive: true });
+  return path;
 }
 
 async function runStandaloneBridge(
@@ -157,7 +187,7 @@ async function runStandaloneBridge(
   if (options.staticDir) {
     console.log(`[pi-web] Static Dir: ${options.staticDir}`);
   }
-  console.log(`[pi-web] Session CWD: ${options.cwd}`);
+  console.log(`[pi-web] Default Workspace: ${config.defaultWorkspacePath}`);
 
   const requestStop = async (): Promise<void> => {
     await bridgeController.stop().catch(error => {
@@ -203,7 +233,10 @@ async function runStandaloneMain(): Promise<number> {
   }
 
   const thisFile = fileURLToPath(import.meta.url);
-  const backend = await createStandaloneBridgeContext({ cwd: options.cwd });
+  const defaultWorkspacePath = ensureDefaultWorkspace(options.defaultWorkspacePath);
+  const backend = await createStandaloneBridgeContext({
+    cwd: defaultWorkspacePath,
+  });
   const sessionRegistry = new DetachedSessionRegistry(
     backend.context.state.cwd,
   );
@@ -215,6 +248,7 @@ async function runStandaloneMain(): Promise<number> {
         ...runtime.DEFAULT_BRIDGE_CONFIG,
         host: options.host,
         port: options.port,
+        defaultWorkspacePath,
         staticDir: options.staticDir,
       };
 

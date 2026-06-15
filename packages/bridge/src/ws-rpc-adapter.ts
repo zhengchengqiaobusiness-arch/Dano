@@ -649,6 +649,22 @@ function ensureRegisteredWorkspace(workspacePath: string): {
   };
 }
 
+function ensureWorkspaceDirectory(workspacePath: string): string | null {
+  try {
+    if (fs.existsSync(workspacePath)) {
+      return fs.statSync(workspacePath).isDirectory()
+        ? null
+        : "Workspace path is not a directory";
+    }
+    fs.mkdirSync(workspacePath, { recursive: true });
+    return null;
+  } catch (error) {
+    return error instanceof Error && error.message
+      ? error.message
+      : "Workspace path could not be created";
+  }
+}
+
 function listRegisteredWorkspaces(): RegisteredWorkspace[] {
   const sessionsRoot = getSessionsRoot();
   if (!fs.existsSync(sessionsRoot)) return [];
@@ -4960,23 +4976,14 @@ export class WsRpcAdapter {
           command.workspacePath,
         );
         if (workspacePath) {
-          try {
-            if (!fs.statSync(workspacePath).isDirectory()) {
-              return {
-                id: correlationId,
-                type: "response",
-                command: "new_session",
-                success: false,
-                error: "Workspace path is not a directory",
-              };
-            }
-          } catch {
+          const workspaceError = ensureWorkspaceDirectory(workspacePath);
+          if (workspaceError) {
             return {
               id: correlationId,
               type: "response",
               command: "new_session",
               success: false,
-              error: "Workspace path not found",
+              error: workspaceError,
             };
           }
 
@@ -5025,23 +5032,14 @@ export class WsRpcAdapter {
           };
         }
 
-        try {
-          if (!fs.statSync(selectedWorkspacePath).isDirectory()) {
-            return {
-              id: correlationId,
-              type: "response",
-              command: "register_workspace",
-              success: false,
-              error: "Workspace path is not a directory",
-            };
-          }
-        } catch {
+        const workspaceError = ensureWorkspaceDirectory(selectedWorkspacePath);
+        if (workspaceError) {
           return {
             id: correlationId,
             type: "response",
             command: "register_workspace",
             success: false,
-            error: "Workspace path not found",
+            error: workspaceError,
           };
         }
 
