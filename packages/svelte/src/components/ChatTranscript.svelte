@@ -25,7 +25,6 @@
     type PendingTranscriptSessionEvent,
     type ToolContentBlock,
     type TranscriptDisplayItem,
-    type TranscriptSessionEventDisplayItem,
   } from "../utils/transcript";
   import {
     createChatTranscriptBlockState,
@@ -35,6 +34,7 @@
   import HighlightedCode from "./HighlightedCode.svelte";
   import ImageLightbox from "./ImageLightbox.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
+  import { getRuntimeEmptyStateConfig } from "../utils/runtimeConfig";
 
   let {
     sessionPath = null as string | null,
@@ -72,6 +72,8 @@
     readWorkspaceFile?: (path: string) => Promise<{ content: string }>;
   } = $props();
 
+  const emptyStateConfig = getRuntimeEmptyStateConfig();
+
   // ---- DOM refs ----
   let container = $state<HTMLDivElement | null>(null);
 
@@ -98,7 +100,7 @@
     buildTranscriptDisplayItems(
       [...messages, ...streamDisplayMessages],
       { pendingSessionEvent: pendingTranscriptConfigEvent },
-    ),
+    ).filter(item => item.kind !== "session_event"),
   );
   let hasVisibleStreaming = $derived(
     isStreaming || transcriptStreams.length > 0 || transcriptDeltas.length > 0,
@@ -291,13 +293,6 @@
     return item.kind === "message"
       ? messageStableKey(item.message, item.messageIndex)
       : item.key || `session-event:${index}`;
-  }
-
-  function sessionEventModelText(item: TranscriptSessionEventDisplayItem): string {
-    if (!item.model) return "";
-    return item.model.provider
-      ? `${item.model.provider} / ${item.model.id}`
-      : item.model.id;
   }
 
   function roleClass(role: string): "user" | "assistant" | "tool" | "system" {
@@ -658,12 +653,11 @@
     </div>
   {:else if messages.length === 0}
     <div class="empty-state">
-      <p class="empty-title">Start a conversation</p>
-      <p class="empty-subtitle">Start typing to keep the session moving.</p>
-      <div class="empty-hints">
-        <span class="hint-chip">Enter send / steer</span>
-        <span class="hint-chip">Drop or paste images</span>
-      </div>
+      {#if emptyStateConfig.mode === "html"}
+        <div class="empty-html">{@html emptyStateConfig.content}</div>
+      {:else}
+        <p class="empty-text">{emptyStateConfig.content}</p>
+      {/if}
     </div>
   {/if}
 
@@ -681,33 +675,7 @@
   {/if}
 
   {#each displayItems as item, index (displayItemKey(item, index))}
-    {#if item.kind === "session_event"}
-      <div
-        class="session-event-row"
-        data-tree-entry-ids={item.sourceMessageIds.join(" ") || undefined}
-      >
-        <div class="session-event-line" aria-hidden="true"></div>
-        <div class="session-event-body">
-          <span class="session-event-label">{item.label}</span>
-          {#if item.model}
-            <span class="session-event-chip">
-              <span class="session-event-chip-label">Model</span>
-              <span class="session-event-chip-value">{sessionEventModelText(item)}</span>
-            </span>
-          {/if}
-          {#if item.thinkingLevel}
-            <span class="session-event-chip">
-              <span class="session-event-chip-label">Thinking</span>
-              <span class="session-event-chip-value">{item.thinkingLevel}</span>
-            </span>
-          {/if}
-          {#if showMessageIds && item.sourceMessageIds.length > 0}
-            <span class="session-event-debug">IDs {item.sourceMessageIds.join(", ")}</span>
-          {/if}
-        </div>
-        <div class="session-event-line" aria-hidden="true"></div>
-      </div>
-    {:else if isToolResultMessage(item.message)}
+    {#if isToolResultMessage(item.message)}
       <div
         class="message-row tool"
         data-message-id={item.message.id ?? undefined}
@@ -1054,11 +1022,31 @@
 
   .loading-state { min-height: 240px; }
 
-  .empty-title {
+  .empty-title,
+  .empty-text {
     margin: 0;
     font-size: 1.1rem;
     font-weight: 500;
     color: var(--text);
+  }
+
+  .empty-html {
+    max-width: min(620px, 100%);
+    color: var(--text);
+    font-size: 1.1rem;
+    line-height: 1.5;
+  }
+
+  .empty-html :global(*) {
+    max-width: 100%;
+  }
+
+  .empty-html :global(:first-child) {
+    margin-top: 0;
+  }
+
+  .empty-html :global(:last-child) {
+    margin-bottom: 0;
   }
 
   .empty-subtitle {
@@ -1066,25 +1054,6 @@
     max-width: 420px;
     font-size: 0.85rem;
     line-height: 1.6;
-    color: var(--text-subtle);
-  }
-
-  .empty-hints {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    justify-content: center;
-  }
-
-  .hint-chip {
-    display: inline-flex;
-    align-items: center;
-    height: 24px;
-    padding: 0 10px;
-    border-radius: 999px;
-    border: 1px solid var(--border);
-    background: var(--panel);
-    font-size: 0.68rem;
     color: var(--text-subtle);
   }
 
@@ -1112,79 +1081,6 @@
   .history-loader-button:disabled {
     opacity: 0.7;
     cursor: progress;
-  }
-
-  .session-event-row {
-    width: 100%;
-    max-width: 920px;
-    margin: 0 auto;
-    display: grid;
-    grid-template-columns: minmax(24px, 1fr) auto minmax(24px, 1fr);
-    align-items: center;
-    gap: 12px;
-  }
-
-  .session-event-line {
-    height: 1px;
-    background: color-mix(in srgb, var(--border) 88%, transparent);
-  }
-
-  .session-event-body {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    flex-wrap: wrap;
-    gap: 10px;
-    min-width: 0;
-  }
-
-  .session-event-label {
-    font-size: 0.66rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--text-subtle);
-  }
-
-  .session-event-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 10px;
-    border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
-    border-radius: 10px;
-    background: color-mix(in srgb, var(--panel) 76%, transparent);
-    box-shadow: none;
-    font-size: 0.72rem;
-    line-height: 1.2;
-    color: var(--text-muted);
-  }
-
-  .session-event-chip-label {
-    display: inline-flex;
-    align-items: center;
-    padding-right: 8px;
-    border-right: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
-    font-size: 0.58rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    line-height: 1;
-    color: var(--text-subtle);
-  }
-
-  .session-event-chip-value {
-    display: inline-flex;
-    align-items: center;
-    font-weight: 500;
-    line-height: 1.1;
-    color: var(--text);
-  }
-
-  .session-event-debug {
-    font-family: var(--pi-font-mono);
-    font-size: 0.64rem;
-    color: var(--text-subtle);
   }
 
   .message-row {

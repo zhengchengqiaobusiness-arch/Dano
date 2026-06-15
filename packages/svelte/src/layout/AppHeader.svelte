@@ -1,120 +1,35 @@
 <script lang="ts">
-  import Menu from "lucide-svelte/icons/menu";
-  import Moon from "lucide-svelte/icons/moon";
-  import Palette from "lucide-svelte/icons/palette";
-  import PanelLeftClose from "lucide-svelte/icons/panel-left-close";
-  import PanelLeftOpen from "lucide-svelte/icons/panel-left-open";
-  import PanelRightClose from "lucide-svelte/icons/panel-right-close";
-  import PanelRightOpen from "lucide-svelte/icons/panel-right-open";
-  import Sun from "lucide-svelte/icons/sun";
-  import type { ThemeMode } from "../themes";
+  import type { ConnectionStatus } from "../composables/bridgeStore.svelte";
+  import { getRuntimeProductName } from "../utils/runtimeConfig";
 
   let {
-    theme,
-    nextThemeLabel,
-    sessionTitle,
-    workspaceName,
-    sidebarCollapsed = false,
-    showOutlineToggle = false,
-    outlineSidebarOpen = false,
-    onToggleSidebar = () => {},
-    onToggleSidebarCollapse = () => {},
-    onToggleOutlineSidebar = () => {},
-    onToggleTheme = () => {},
-    onOpenThemeSettings = () => {},
+    connectionStatus,
   }: {
-    theme: "dark" | "light";
-    nextThemeLabel: ThemeMode;
-    sessionTitle: string;
-    workspaceName: string | null;
-    sidebarCollapsed?: boolean;
-    showOutlineToggle?: boolean;
-    outlineSidebarOpen?: boolean;
-    onToggleSidebar?: () => void;
-    onToggleSidebarCollapse?: () => void;
-    onToggleOutlineSidebar?: () => void;
-    onToggleTheme?: () => void;
-    onOpenThemeSettings?: () => void;
+    connectionStatus: ConnectionStatus;
   } = $props();
+
+  const productName = getRuntimeProductName();
+
+  const statusMeta = $derived.by(() => {
+    switch (connectionStatus) {
+      case "connected":
+        return { className: "connected", label: "已连接" };
+      case "connecting":
+        return { className: "connecting", label: "连接中" };
+      case "disconnected":
+      default:
+        return { className: "disconnected", label: "已断开" };
+    }
+  });
 </script>
 
-<header
-  class="app-header"
->
+<header class="app-header">
   <div class="header-leading">
-    <button
-      class="hamburger"
-      aria-label="Toggle sidebar"
-      onclick={onToggleSidebar}
-    >
-      <Menu aria-hidden="true" size={20} />
-    </button>
-    <button
-      class="sidebar-collapse"
-      type="button"
-      aria-label={sidebarCollapsed
-        ? "Expand sessions sidebar"
-        : "Collapse sessions sidebar"}
-      title={sidebarCollapsed
-        ? "Expand sessions sidebar"
-        : "Collapse sessions sidebar"}
-      onclick={onToggleSidebarCollapse}
-    >
-      {#if sidebarCollapsed}
-        <PanelLeftOpen aria-hidden="true" size={18} />
-      {:else}
-        <PanelLeftClose aria-hidden="true" size={18} />
-      {/if}
-    </button>
-    <div class="header-brand">
-      {#if workspaceName}
-        <p class="workspace-name">{workspaceName}</p>
-      {/if}
-      <h1 class="app-title">{sessionTitle}</h1>
+    <span class="product-name">{productName}</span>
+    <div class={`connection-status ${statusMeta.className}`}>
+      <span class="status-dot" aria-hidden="true"></span>
+      <span>{statusMeta.label}</span>
     </div>
-  </div>
-  <div class="header-status">
-    {#if showOutlineToggle}
-      <button
-        class="outline-toggle"
-        type="button"
-        aria-label={outlineSidebarOpen
-          ? "Collapse right sidebar"
-          : "Expand right sidebar"}
-        title={outlineSidebarOpen
-          ? "Collapse right sidebar"
-          : "Expand right sidebar"}
-        onclick={onToggleOutlineSidebar}
-      >
-        {#if outlineSidebarOpen}
-          <PanelRightClose aria-hidden="true" size={18} />
-        {:else}
-          <PanelRightOpen aria-hidden="true" size={18} />
-        {/if}
-      </button>
-    {/if}
-    <button
-      class="appearance-toggle"
-      type="button"
-      aria-label="Open appearance settings"
-      title="Open appearance settings"
-      onclick={onOpenThemeSettings}
-    >
-      <Palette aria-hidden="true" size={18} />
-    </button>
-    <button
-      class="theme-toggle"
-      type="button"
-      aria-label={`Switch to ${nextThemeLabel} theme`}
-      title={`Switch to ${nextThemeLabel} theme`}
-      onclick={onToggleTheme}
-    >
-      {#if theme === "dark"}
-        <Sun aria-hidden="true" size={18} />
-      {:else}
-        <Moon aria-hidden="true" size={18} />
-      {/if}
-    </button>
   </div>
 </header>
 
@@ -124,7 +39,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 6px 8px 10px 8px;
+    padding: 0 16px;
     height: 44px;
     border-bottom: 1px solid var(--border);
     border-top-left-radius: 14px;
@@ -136,166 +51,67 @@
   .header-leading {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 14px;
+    height: 100%;
     min-width: 0;
   }
 
-  .hamburger {
-    display: none;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    padding: 0;
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-  }
-
-  .header-brand {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    min-width: 0;
-  }
-
-  .workspace-name,
-  .app-title {
-    margin: 0;
-    max-width: min(100%, 48vw);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .workspace-name {
-    font-size: 0.64rem;
-    line-height: 1.05;
-    font-weight: 600;
-    letter-spacing: 0.03em;
-    color: var(--text-subtle);
-  }
-
-  .app-title {
-    font-size: 0.9rem;
-    line-height: 1;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-    color: var(--text);
-  }
-
-  .header-status {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex-shrink: 0;
-  }
-
-  .sidebar-collapse,
-  .outline-toggle,
-  .appearance-toggle,
-  .theme-toggle {
+  .product-name {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    height: 28px;
-    width: 28px;
-    flex: 0 0 28px;
-    padding: 0 7px;
-    border-radius: 8px;
-    border: none;
-    background: transparent;
-    font-size: 0.72rem;
-    color: var(--text-subtle);
-    cursor: pointer;
-    transition:
-      background 0.15s ease,
-      color 0.15s ease,
-      transform 0.15s ease;
+    height: 26px;
+    flex: 0 0 auto;
+    color: var(--text);
+    font-size: 0.92rem;
+    font-weight: 700;
+    line-height: 1;
   }
 
-  .sidebar-collapse:hover,
-  .outline-toggle:hover,
-  .appearance-toggle:hover,
-  .theme-toggle:hover {
-    background: var(--surface-hover);
+  .connection-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    flex: 0 0 auto;
+    height: 26px;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
     color: var(--text-muted);
-    transform: translateY(-1px);
+    font-size: 0.78rem;
+    font-weight: 650;
+    line-height: 1;
+    background: var(--surface);
   }
 
-  .sidebar-collapse:focus-visible,
-  .outline-toggle:focus-visible,
-  .appearance-toggle:focus-visible,
-  .theme-toggle:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 3px var(--focus-ring);
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 999px;
+    box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent);
   }
 
-  .sidebar-collapse {
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    flex: 0 0 28px;
+  .connection-status.connected .status-dot {
+    background: #16a34a;
+    color: #16a34a;
   }
 
-  .outline-toggle,
-  .appearance-toggle,
-  .theme-toggle {
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    flex: 0 0 28px;
+  .connection-status.connecting .status-dot {
+    background: #f59e0b;
+    color: #f59e0b;
   }
 
-  @media (max-width: 900px) {
-    .hamburger {
-      display: flex;
-    }
-
-    .sidebar-collapse {
-      display: none;
-    }
-
-    .app-header {
-      height: auto;
-      padding: calc(env(safe-area-inset-top) + 7px) 11px 9px;
-      border-top-left-radius: 0;
-    }
-
-    .header-status {
-      gap: 4px;
-    }
+  .connection-status.disconnected .status-dot {
+    background: #dc2626;
+    color: #dc2626;
   }
 
   @media (max-width: 640px) {
     .app-header {
-      padding-inline: 9px;
-      gap: 8px;
+      padding-inline: 12px;
     }
 
     .header-leading {
-      gap: 8px;
-    }
-
-    .workspace-name,
-    .app-title {
-      max-width: min(100%, 42vw);
-    }
-
-    .hamburger {
-      width: 24px;
-      height: 24px;
-    }
-
-    .outline-toggle,
-    .appearance-toggle,
-    .theme-toggle {
-      width: 26px;
-      height: 26px;
-      flex: 0 0 26px;
+      gap: 10px;
     }
   }
 </style>

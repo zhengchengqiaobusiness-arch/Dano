@@ -4,7 +4,6 @@
     RpcImageContent,
     RpcQueuedMessage,
     RpcSessionState,
-    RpcSessionStats,
     RpcSlashCommand,
     RpcThinkingLevel,
     RpcWorkspaceEntry,
@@ -13,7 +12,6 @@
   import ChatTranscript from "../components/ChatTranscript.svelte";
   import CompatWarning from "../components/CompatWarning.svelte";
   import ComposerBar from "../components/ComposerBar.svelte";
-  import SessionStatsBar from "../components/SessionStatsBar.svelte";
   import type { ConnectionStatus, TranscriptDelta, TranscriptEntry, TranscriptStream } from "../composables/bridgeStore.svelte";
   import { isDebugSessionPath } from "../utils/debugSession";
   import type { RpcModelInfo } from "../utils/models";
@@ -45,7 +43,6 @@
     currentModel = null as RpcModelInfo | null,
     currentThinkingLevel = null as RpcThinkingLevel | null,
     autoCompactionEnabled = false,
-    sessionStats = null as RpcSessionStats | null,
     sessionState = null as RpcSessionState | null,
     gitRepoState = null as RpcGitRepoState | null,
     gitRepoLoading = false,
@@ -115,7 +112,6 @@
     currentModel?: RpcModelInfo | null;
     currentThinkingLevel?: RpcThinkingLevel | null;
     autoCompactionEnabled?: boolean;
-    sessionStats?: RpcSessionStats | null;
     sessionState?: RpcSessionState | null;
     gitRepoState?: RpcGitRepoState | null;
     gitRepoLoading?: boolean;
@@ -227,11 +223,6 @@
       {/each}
     </div>
   {/if}
-
-  <SessionStatsBar
-    stats={sessionStats}
-    workspaceEnvironments={sessionState?.workspaceEnvironments ?? []}
-  />
 
   <ComposerBar
     {connectionStatus}

@@ -425,7 +425,7 @@ export class BridgeServer {
 
       const body =
         contentType === "text/html"
-          ? injectRuntimeConfig(data.toString("utf8"))
+          ? injectRuntimeConfig(data.toString("utf8"), this.config)
           : data;
 
       res.writeHead(200, {
@@ -525,8 +525,17 @@ function runtimeDebugModeEnabled(): boolean {
   return normalized === "1" || normalized === "true";
 }
 
-function injectRuntimeConfig(html: string): string {
-  const configScript = `<script>window.__PI_WEB_CONFIG__=${JSON.stringify({ debugModeAvailable: runtimeDebugModeEnabled() })};</script>`;
+function serializeRuntimeConfig(config: unknown): string {
+  return JSON.stringify(config).replace(/</g, "\\u003c");
+}
+
+function injectRuntimeConfig(html: string, config: BridgeConfig): string {
+  const runtimeConfig = {
+    debugModeAvailable: runtimeDebugModeEnabled(),
+    productName: config.productName,
+    emptyState: config.emptyState,
+  };
+  const configScript = `<script>window.__PI_WEB_CONFIG__=${serializeRuntimeConfig(runtimeConfig)};</script>`;
   return html.includes("</head>")
     ? html.replace("</head>", `${configScript}</head>`)
     : `${configScript}${html}`;

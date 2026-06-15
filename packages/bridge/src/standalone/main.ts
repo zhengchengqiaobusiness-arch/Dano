@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DetachedSessionRegistry } from "../session-registry.js";
-import type { BridgeConfig } from "../types.js";
+import type { BridgeConfig, BridgeEmptyStateConfig } from "../types.js";
 import { createStandaloneBridgeContext } from "./backend.js";
 import type { StandaloneBridgeBackend } from "./backend.js";
 import { createStandaloneDevReloadController } from "./dev-reload.js";
@@ -11,12 +11,19 @@ import { loadStandaloneRuntime, type StandaloneRuntime } from "./runtime.js";
 const DEFAULT_STANDALONE_PORT = 8080;
 const DEFAULT_STANDALONE_HOST = "0.0.0.0";
 const DEFAULT_STANDALONE_WORKSPACE = "/tmp/dano";
+const DEFAULT_PRODUCT_NAME = "Dano";
+const DEFAULT_EMPTY_STATE: BridgeEmptyStateConfig = {
+  mode: "text",
+  content: "给 {产品名称} 发消息",
+};
 
 export interface StandaloneMainOptions {
   cwd: string;
   host: string;
   port: number;
   defaultWorkspacePath: string;
+  productName: string;
+  emptyState: BridgeEmptyStateConfig;
   staticDir?: string;
   help: boolean;
 }
@@ -31,6 +38,9 @@ Options:
   --host <host>              Host to bind (default: ${DEFAULT_STANDALONE_HOST})
   --port <number>            Port to bind (default: ${DEFAULT_STANDALONE_PORT})
   --default-workspace <path> Default workspace path (env: DANO_DEFAULT_WORKSPACE_PATH, default: ${DEFAULT_STANDALONE_WORKSPACE})
+  --product-name <name>      Product name shown in browser UI (env: DANO_PRODUCT_NAME, default: ${DEFAULT_PRODUCT_NAME})
+  --empty-state-text <text>  Empty transcript text (env: DANO_EMPTY_STATE_TEXT, default: ${DEFAULT_EMPTY_STATE.content})
+  --empty-state-html <html>  Empty transcript HTML (env: DANO_EMPTY_STATE_HTML)
   --help                     Show this help
 `);
 }
@@ -52,6 +62,26 @@ function readDefaultWorkspacePath(
     env.DANO_DEFAULT_WORKSPACE?.trim() ||
     DEFAULT_STANDALONE_WORKSPACE
   );
+}
+
+function readProductName(env: Record<string, string | undefined>): string {
+  return env.DANO_PRODUCT_NAME?.trim() || DEFAULT_PRODUCT_NAME;
+}
+
+function readEmptyStateConfig(
+  env: Record<string, string | undefined>,
+): BridgeEmptyStateConfig {
+  const html = env.DANO_EMPTY_STATE_HTML;
+  if (html?.trim()) {
+    return { mode: "html", content: html };
+  }
+
+  const text = env.DANO_EMPTY_STATE_TEXT;
+  if (text?.trim()) {
+    return { mode: "text", content: text };
+  }
+
+  return DEFAULT_EMPTY_STATE;
 }
 
 function findNearestWebDist(startDir: string): string | undefined {
@@ -94,6 +124,8 @@ export function parseStandaloneMainOptions(
   let host = DEFAULT_STANDALONE_HOST;
   let port = DEFAULT_STANDALONE_PORT;
   let defaultWorkspacePath = readDefaultWorkspacePath(env);
+  let productName = readProductName(env);
+  let emptyState = readEmptyStateConfig(env);
   let help = false;
 
   for (let index = 0; index < argv.length; index++) {
@@ -134,6 +166,33 @@ export function parseStandaloneMainOptions(
         index++;
         continue;
       }
+      case "--product-name": {
+        const next = argv[index + 1];
+        if (!next || next.startsWith("--")) {
+          throw new Error("Missing value for --product-name");
+        }
+        productName = next.trim() || DEFAULT_PRODUCT_NAME;
+        index++;
+        continue;
+      }
+      case "--empty-state-text": {
+        const next = argv[index + 1];
+        if (!next || next.startsWith("--")) {
+          throw new Error("Missing value for --empty-state-text");
+        }
+        emptyState = { mode: "text", content: next };
+        index++;
+        continue;
+      }
+      case "--empty-state-html": {
+        const next = argv[index + 1];
+        if (!next || next.startsWith("--")) {
+          throw new Error("Missing value for --empty-state-html");
+        }
+        emptyState = { mode: "html", content: next };
+        index++;
+        continue;
+      }
       default:
         throw new Error(`Unknown option: ${token}`);
     }
@@ -145,6 +204,8 @@ export function parseStandaloneMainOptions(
     host,
     port,
     defaultWorkspacePath: resolve(cwd, defaultWorkspacePath),
+    productName,
+    emptyState,
     staticDir: resolveDefaultStaticDir(cwd),
     help,
   };
@@ -249,6 +310,8 @@ async function runStandaloneMain(): Promise<number> {
         host: options.host,
         port: options.port,
         defaultWorkspacePath,
+        productName: options.productName,
+        emptyState: options.emptyState,
         staticDir: options.staticDir,
       };
 

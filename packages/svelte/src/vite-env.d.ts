@@ -7,6 +7,11 @@ declare global {
   interface Window {
     __PI_WEB_CONFIG__?: {
       debugModeAvailable?: boolean;
+      productName?: string;
+      emptyState?: {
+        mode?: "text" | "html";
+        content?: string;
+      };
     };
   }
 }

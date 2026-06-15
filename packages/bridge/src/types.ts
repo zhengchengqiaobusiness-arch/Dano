@@ -787,6 +787,15 @@ export type RpcExtensionUIResponse =
 // ============================================================================
 
 /** Configuration for the bridge server, sourced from extension config or defaults. */
+export type BridgeEmptyStateMode = "text" | "html";
+
+export interface BridgeEmptyStateConfig {
+  /** Render mode for the browser empty transcript area. */
+  readonly mode: BridgeEmptyStateMode;
+  /** Content rendered in the empty transcript area. Supports {产品名称}. */
+  readonly content: string;
+}
+
 export interface BridgeConfig {
   /** Host to bind the HTTP/SSE server to. Default: "localhost" */
   readonly host: string;
@@ -798,6 +807,10 @@ export interface BridgeConfig {
   readonly staticDir?: string;
   /** Workspace path used by browser clients when opening a fresh page. Default: "/tmp/dano" */
   readonly defaultWorkspacePath?: string;
+  /** Browser product name used in branded UI. Default: "Dano" */
+  readonly productName: string;
+  /** Empty transcript content shown before the first message. */
+  readonly emptyState: BridgeEmptyStateConfig;
   /** Timeout in ms for extension UI dialog requests routed to browser clients. Default: 60_000 */
   readonly uiRequestTimeout: number;
   /** Maximum number of SSE messages to buffer per client before dropping oldest. Default: 256 */
@@ -812,6 +825,11 @@ export const DEFAULT_BRIDGE_CONFIG: BridgeConfig = {
   port: 7036,
   portMax: 0,
   defaultWorkspacePath: "/tmp/dano",
+  productName: "Dano",
+  emptyState: {
+    mode: "text",
+    content: "给 {产品名称} 发消息",
+  },
   uiRequestTimeout: 60_000,
   clientBufferSize: 256,
   heartbeatInterval: 15_000,

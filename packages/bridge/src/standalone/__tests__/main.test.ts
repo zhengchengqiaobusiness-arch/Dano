@@ -59,6 +59,52 @@ describe("standalone main", () => {
     expect(options.defaultWorkspacePath).toBe("/tmp/cli-dano");
   });
 
+  it("uses product name and empty text from environment", () => {
+    const options = parseStandaloneMainOptions([], {
+      DANO_PRODUCT_NAME: "My Agent",
+      DANO_EMPTY_STATE_TEXT: "给 {产品名称} 发消息",
+    });
+
+    expect(options.productName).toBe("My Agent");
+    expect(options.emptyState).toEqual({
+      mode: "text",
+      content: "给 {产品名称} 发消息",
+    });
+  });
+
+  it("uses empty html from environment when provided", () => {
+    const options = parseStandaloneMainOptions([], {
+      DANO_EMPTY_STATE_TEXT: "ignored",
+      DANO_EMPTY_STATE_HTML: "<strong>给 {产品名称} 发消息</strong>",
+    });
+
+    expect(options.emptyState).toEqual({
+      mode: "html",
+      content: "<strong>给 {产品名称} 发消息</strong>",
+    });
+  });
+
+  it("lets command line empty state override environment", () => {
+    const options = parseStandaloneMainOptions(
+      [
+        "--product-name",
+        "CLI Agent",
+        "--empty-state-html",
+        "<em>HTML only</em>",
+      ],
+      {
+        DANO_PRODUCT_NAME: "Env Agent",
+        DANO_EMPTY_STATE_TEXT: "env text",
+      },
+    );
+
+    expect(options.productName).toBe("CLI Agent");
+    expect(options.emptyState).toEqual({
+      mode: "html",
+      content: "<em>HTML only</em>",
+    });
+  });
+
   it("accepts help flag", () => {
     const options = parseStandaloneMainOptions(["--help"], {});
     expect(options.help).toBe(true);
@@ -79,6 +125,15 @@ describe("standalone main", () => {
   it("throws on missing default workspace value", () => {
     expect(() => parseStandaloneMainOptions(["--default-workspace"], {})).toThrow(
       "Missing value for --default-workspace",
+    );
+  });
+
+  it("throws on missing empty state values", () => {
+    expect(() => parseStandaloneMainOptions(["--empty-state-text"], {})).toThrow(
+      "Missing value for --empty-state-text",
+    );
+    expect(() => parseStandaloneMainOptions(["--empty-state-html"], {})).toThrow(
+      "Missing value for --empty-state-html",
     );
   });
 

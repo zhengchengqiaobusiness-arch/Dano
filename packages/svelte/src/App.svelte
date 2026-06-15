@@ -14,7 +14,6 @@
   import AppMainContent from "./layout/AppMainContent.svelte";
   import AppNotifications from "./layout/AppNotifications.svelte";
   import AppRightSidebar from "./layout/AppRightSidebar.svelte";
-  import AppSidebar from "./layout/AppSidebar.svelte";
   import {
     listThemes,
     readStoredThemePreference,
@@ -179,7 +178,6 @@
     };
     if (!compactLayout) {
       const columns = [
-        ...(leftSidebarCollapsed ? [] : [`${leftRailWidth}px`]),
         "minmax(0, 1fr)",
         ...(shellRightRailOpen ? [`${rightRailWidth}px`] : []),
       ];
@@ -187,10 +185,6 @@
     }
     return styleString(s);
   });
-  let nextThemeLabel = $derived<ThemeMode>(
-    activeTheme.mode === "dark" ? "light" : "dark",
-  );
-
   function getWorkspaceDisplayName(workspacePath?: string | null): string | null {
     const np = workspacePath?.trim();
     if (!np) return null;
@@ -416,7 +410,6 @@
     activeDebugSession?.sessionState.isStreaming ?? bridge.isStreaming,
   );
   let displayedIsCompacting = $derived(activeDebugSession ? false : bridge.isCompacting);
-  let displayedSessionStats = $derived(activeDebugSession ? null : bridge.sessionStats);
   let displayedTreeEntries = $derived(activeDebugSession ? [] : bridge.treeEntries);
   let displayedHasSessionOutline = $derived(
     activeDebugSession === null && bridge.hasSessionOutline,
@@ -588,10 +581,9 @@
       );
     }
 
-    const rlw = !compactLayout && !leftSidebarCollapsed ? leftRailWidth : 0;
     return Math.max(
       RIGHT_RAIL_MIN_WIDTH,
-      Math.min(RIGHT_RAIL_MAX_WIDTH, vw - rlw - MIN_CENTER_COLUMN_WIDTH),
+      Math.min(RIGHT_RAIL_MAX_WIDTH, vw - MIN_CENTER_COLUMN_WIDTH),
     );
   }
 
@@ -1220,57 +1212,8 @@
   data-light-theme={themePreference.lightThemeId}
   style={allStyle}
 >
-  <AppSidebar
-    workspaces={displayedWorkspaces}
-    workspaceSessions={displayedWorkspaceSessions}
-    activeSessionPath={displayedActiveSessionPath}
-    activeWorkspacePath={displayedActiveWorkspacePath}
-    runningSessionPaths={displayedRunningSessionPaths}
-    workspaceSessionLoaded={displayedWorkspaceSessionLoaded}
-    workspaceSessionLoading={displayedWorkspaceSessionLoading}
-    workspaceSessionCursors={displayedWorkspaceSessionCursors}
-    {sidebarOpen}
-    collapsed={leftSidebarCollapsed}
-    onRegisterWorkspace={handleRegisterWorkspace}
-    onCloseSidebar={() => (sidebarOpen = false)}
-    onSelectSession={handleSessionSelect}
-    onRefreshWorkspaces={handleRefreshWorkspaces}
-    onExpandWorkspace={handleExpandWorkspace}
-    onLoadOlderSessions={handleLoadOlderSessions}
-    onNewSession={handleNewSession}
-    onDeleteSession={handleDeleteSession}
-  />
-
-  {#if showLeftRailResizer}
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-    <div
-      class="rail-resizer left"
-      class:active={activeRailResize?.side === "left"}
-      style={leftRailResizerStyle}
-      role="separator"
-      aria-label="Resize left sidebar. Double-click to reset."
-      tabindex="0"
-      title="Drag to resize bridge.sessions sidebar. Double-click to reset."
-      onpointerdown={(e) => startRailResize("left", e)}
-      ondblclick={() => resetRailWidth("left")}
-    ></div>
-  {/if}
-
   <div class="app-main-column">
-    <AppHeader
-      theme={activeTheme.mode}
-      {nextThemeLabel}
-      sessionTitle={activeSessionLabel}
-      workspaceName={activeWorkspaceLabel}
-      sidebarCollapsed={leftSidebarCollapsed}
-      showOutlineToggle={hasRightSidebarContent}
-      outlineSidebarOpen={outlineSidebarOpen}
-      onToggleSidebar={toggleSessionSidebar}
-      onToggleSidebarCollapse={toggleLeftSidebarCollapse}
-      onToggleOutlineSidebar={toggleOutlineSidebar}
-      onToggleTheme={toggleTheme}
-      onOpenThemeSettings={openThemeSettings}
-    />
+    <AppHeader connectionStatus={bridge.connectionStatus} />
 
     <ReconnectBanner
       visible={bridge.isReconnecting}
@@ -1304,7 +1247,6 @@
         currentModel={displayedCurrentModel}
         currentThinkingLevel={displayedCurrentThinkingLevel}
         autoCompactionEnabled={displayedAutoCompactionEnabled}
-        sessionStats={displayedSessionStats}
         sessionState={displayedSessionState}
         gitRepoState={bridge.gitRepoState}
         gitRepoLoading={bridge.gitRepoLoading}
@@ -1399,7 +1341,7 @@
       ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
       monospace;
     display: grid;
-    grid-template-columns: clamp(280px, 24vw, 360px) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     height: 100vh;
     height: 100dvh;
     width: 100vw;

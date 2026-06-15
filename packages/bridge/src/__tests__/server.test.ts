@@ -254,7 +254,17 @@ describe("BridgeServer HTTP/SSE transport", () => {
     fs.writeFileSync(path.join(staticDir, "asset.txt"), "asset");
     const eventBus = new BridgeEventBus(DEFAULT_BRIDGE_CONFIG);
     const server = new BridgeServer(
-      { ...DEFAULT_BRIDGE_CONFIG, host: "127.0.0.1", port: 0, staticDir },
+      {
+        ...DEFAULT_BRIDGE_CONFIG,
+        host: "127.0.0.1",
+        port: 0,
+        staticDir,
+        productName: "Custom Agent",
+        emptyState: {
+          mode: "html",
+          content: "<strong>给 {产品名称} 发消息</strong>",
+        },
+      },
       () => ({ handleClientMessage: vi.fn(), dispose: vi.fn() }),
       eventBus,
       vi.fn(),
@@ -266,8 +276,12 @@ describe("BridgeServer HTTP/SSE transport", () => {
     await expect(fetch(`${origin}/asset.txt`).then(r => r.text())).resolves.toBe(
       "asset",
     );
-    await expect(fetch(`${origin}/missing/route`).then(r => r.text())).resolves.toContain(
-      "<main>index</main>",
+    const spaHtml = await fetch(`${origin}/missing/route`).then(r => r.text());
+    expect(spaHtml).toContain("<main>index</main>");
+    expect(spaHtml).toContain("window.__PI_WEB_CONFIG__=");
+    expect(spaHtml).toContain('"productName":"Custom Agent"');
+    expect(spaHtml).toContain(
+      '"emptyState":{"mode":"html","content":"\\u003cstrong>给 {产品名称} 发消息\\u003c/strong>"}',
     );
   });
 });
