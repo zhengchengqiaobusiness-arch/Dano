@@ -25,9 +25,22 @@ describe("standalone main", () => {
     const options = parseStandaloneMainOptions(["--port", "8123"]);
 
     expect(options.cwd).toBe(process.cwd());
+    expect(options.host).toBe("0.0.0.0");
     expect(options.port).toBe(8123);
     expect(options.staticDir).toBe(findNearestWebDist(process.cwd()));
     expect(options.help).toBe(false);
+  });
+
+  it("parses host and port overrides", () => {
+    const options = parseStandaloneMainOptions([
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8123",
+    ]);
+
+    expect(options.host).toBe("127.0.0.1");
+    expect(options.port).toBe(8123);
   });
 
   it("accepts help flag", () => {
@@ -38,6 +51,12 @@ describe("standalone main", () => {
   it("throws on missing option value", () => {
     expect(() => parseStandaloneMainOptions(["--port"])).toThrow(
       "Missing value for --port",
+    );
+  });
+
+  it("throws on missing host value", () => {
+    expect(() => parseStandaloneMainOptions(["--host"])).toThrow(
+      "Missing value for --host",
     );
   });
 

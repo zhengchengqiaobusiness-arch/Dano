@@ -9,9 +9,11 @@ import { createStandaloneDevReloadController } from "./dev-reload.js";
 import { loadStandaloneRuntime, type StandaloneRuntime } from "./runtime.js";
 
 const DEFAULT_STANDALONE_PORT = 8080;
+const DEFAULT_STANDALONE_HOST = "0.0.0.0";
 
 export interface StandaloneMainOptions {
   cwd: string;
+  host: string;
   port: number;
   staticDir?: string;
   help: boolean;
@@ -21,9 +23,10 @@ function printHelp(): void {
   console.log(`pi-web standalone bridge
 
 Usage:
-  node dist/bridge/standalone/main.js [--port <number>]
+  node dist/bridge/standalone/main.js [--host <host>] [--port <number>]
 
 Options:
+  --host <host>    Host to bind (default: ${DEFAULT_STANDALONE_HOST})
   --port <number>  Port to bind (default: ${DEFAULT_STANDALONE_PORT})
   --help           Show this help
 `);
@@ -74,6 +77,7 @@ function resolveDefaultStaticDir(cwd: string): string | undefined {
 export function parseStandaloneMainOptions(
   argv: string[],
 ): StandaloneMainOptions {
+  let host = DEFAULT_STANDALONE_HOST;
   let port = DEFAULT_STANDALONE_PORT;
   let help = false;
 
@@ -88,6 +92,15 @@ export function parseStandaloneMainOptions(
       case "-h":
         help = true;
         continue;
+      case "--host": {
+        const next = argv[index + 1];
+        if (!next || next.startsWith("--")) {
+          throw new Error("Missing value for --host");
+        }
+        host = next;
+        index++;
+        continue;
+      }
       case "--port": {
         const next = argv[index + 1];
         if (!next || next.startsWith("--")) {
@@ -105,6 +118,7 @@ export function parseStandaloneMainOptions(
   const cwd = process.cwd();
   return {
     cwd,
+    host,
     port,
     staticDir: resolveDefaultStaticDir(cwd),
     help,
@@ -199,6 +213,7 @@ async function runStandaloneMain(): Promise<number> {
       const runtime = await loadStandaloneRuntime(thisFile);
       const config: BridgeConfig = {
         ...runtime.DEFAULT_BRIDGE_CONFIG,
+        host: options.host,
         port: options.port,
         staticDir: options.staticDir,
       };
