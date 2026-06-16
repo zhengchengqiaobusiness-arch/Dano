@@ -612,6 +612,11 @@ export function createComposerBarState(
     return Array.from(dataTransfer?.types ?? []).includes("Files");
   }
 
+  function preventFileDropNavigation(event: DragEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
   function extractPastedFiles(event: ClipboardEvent): File[] {
     const directFiles = extractSupportedImageFiles(event.clipboardData?.files);
     if (directFiles.length > 0) return directFiles;
@@ -633,23 +638,28 @@ export function createComposerBarState(
 
   function handleDragEnter(event: DragEvent) {
     if (!hasFilePayload(event.dataTransfer)) return;
+    preventFileDropNavigation(event);
     dragDepth += 1;
     isDragActive = true;
   }
 
   function handleDragOver(event: DragEvent) {
     if (!hasFilePayload(event.dataTransfer)) return;
+    preventFileDropNavigation(event);
     if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
     isDragActive = true;
   }
 
   function handleDragLeave(event: DragEvent) {
     if (!hasFilePayload(event.dataTransfer)) return;
+    event.stopPropagation();
     dragDepth = Math.max(0, dragDepth - 1);
     if (dragDepth === 0) isDragActive = false;
   }
 
   async function handleDrop(event: DragEvent) {
+    if (!hasFilePayload(event.dataTransfer)) return;
+    preventFileDropNavigation(event);
     dragDepth = 0;
     isDragActive = false;
     await addAttachmentsFromFiles(event.dataTransfer?.files);

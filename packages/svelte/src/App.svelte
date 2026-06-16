@@ -1060,6 +1060,15 @@
     handleAbort();
   }
 
+  function hasFileDragPayload(event: DragEvent): boolean {
+    return Array.from(event.dataTransfer?.types ?? []).includes("Files");
+  }
+
+  function handleGlobalFileDrag(event: DragEvent) {
+    if (!hasFileDragPayload(event)) return;
+    event.preventDefault();
+  }
+
   // Effects
   $effect(() => {
     if (typeof window !== "undefined" && themePreferenceExplicit) {
@@ -1200,7 +1209,12 @@
   });
 </script>
 
-<svelte:window onresize={syncCompactLayout} onkeydown={handleGlobalKeydown} />
+<svelte:window
+  onresize={syncCompactLayout}
+  onkeydown={handleGlobalKeydown}
+  ondragover={handleGlobalFileDrag}
+  ondrop={handleGlobalFileDrag}
+/>
 
 <div
   class="app-shell"
