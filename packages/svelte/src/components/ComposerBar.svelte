@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import type {
     RpcGitRepoState,
     RpcImageContent,
@@ -6,21 +7,16 @@
     RpcThinkingLevel,
     RpcWorkspaceEntry,
   } from "@dano/bridge/types";
-  import Check from "lucide-svelte/icons/check";
-  import CornerDownLeft from "lucide-svelte/icons/corner-down-left";
-  import ImagePlus from "lucide-svelte/icons/image-plus";
-  import Square from "lucide-svelte/icons/square";
   import X from "lucide-svelte/icons/x";
   import type { ConnectionStatus } from "../composables/bridgeStore.svelte";
   import { COMPOSER_ATTACHMENT_ACCEPT, formatAttachmentSize } from "../utils/attachments";
   import type { RpcModelInfo } from "../utils/models";
   import CommandPalette from "./CommandPalette.svelte";
-  import GitBranchDropdown from "./GitBranchDropdown.svelte";
   import ImageLightbox from "./ImageLightbox.svelte";
-  import ModelDropdown from "./ModelDropdown.svelte";
-  import ThinkingLevelDropdown from "./ThinkingLevelDropdown.svelte";
   import WorkspaceMentionPalette from "./WorkspaceMentionPalette.svelte";
   import { createComposerBarState } from "./composerBarState.svelte";
+
+  const COMPOSER_LAYOUT_ANIMATION_MS = 180;
 
   let {
     connectionStatus = "disconnected" as ConnectionStatus,
@@ -65,6 +61,7 @@
 
   // ---- DOM refs (must stay in .svelte for bind:this) ----
   let composerRootRef = $state<HTMLDivElement | null>(null);
+  let composerDockRef = $state<HTMLDivElement | null>(null);
   let textareaRef = $state<HTMLTextAreaElement | null>(null);
   let fileInputRef = $state<HTMLInputElement | null>(null);
   let commandPaletteRef = $state<CommandPalette | null>(null);
@@ -73,6 +70,7 @@
   // ---- reactive primitives owned by the component (needed for bind:) ----
   let inputText = $state("");
   let cursorOffset = $state(0);
+  let isComposerMultiline = $state(false);
 
   // ---- state module (reads/writes inputText & cursorOffset through $rx) ----
   const composer = createComposerBarState(
@@ -165,12 +163,86 @@
     composer.handleSubmit(false, fileInputRef, textareaRef);
   }
 
+  function captureComposerLayout() {
+    if (!composerDockRef) return null;
+
+    const targets = [
+      textareaRef,
+      composerDockRef.querySelector<HTMLElement>(".composer-actions-left"),
+      composerDockRef.querySelector<HTMLElement>(".composer-actions-right"),
+    ].filter((element): element is HTMLElement => Boolean(element));
+
+    return new Map(targets.map(element => [element, element.getBoundingClientRect()]));
+  }
+
+  function animateComposerLayout(layoutBefore: Map<HTMLElement, DOMRect> | null) {
+    if (
+      !layoutBefore ||
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      return;
+    }
+
+    void tick().then(() => {
+      requestAnimationFrame(() => {
+        for (const [element, before] of layoutBefore) {
+          if (!document.contains(element)) continue;
+
+          const after = element.getBoundingClientRect();
+          const deltaX = before.left - after.left;
+          const deltaY = before.top - after.top;
+          if (Math.abs(deltaX) < 0.5 && Math.abs(deltaY) < 0.5) continue;
+
+          element.animate(
+            [
+              { transform: `translate(${deltaX}px, ${deltaY}px)` },
+              { transform: "translate(0, 0)" },
+            ],
+            {
+              duration: COMPOSER_LAYOUT_ANIMATION_MS,
+              easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
+            },
+          );
+        }
+      });
+    });
+  }
+
+  function updateComposerMultiline() {
+    const el = textareaRef;
+    if (!el) return;
+
+    const wasMultiline = isComposerMultiline;
+    const layoutBefore = captureComposerLayout();
+    const computedStyle = getComputedStyle(el);
+    const lineHeight = Number.parseFloat(computedStyle.lineHeight);
+    const paddingTop = Number.parseFloat(computedStyle.paddingTop) || 0;
+    const paddingBottom = Number.parseFloat(computedStyle.paddingBottom) || 0;
+    const singleLineHeight =
+      (Number.isFinite(lineHeight) ? lineHeight : el.clientHeight) +
+      paddingTop +
+      paddingBottom;
+    const nextIsMultiline =
+      el.value.includes("\n") ||
+      el.scrollHeight > Math.ceil(singleLineHeight * 1.5);
+    isComposerMultiline = nextIsMultiline;
+
+    if (nextIsMultiline !== wasMultiline) {
+      animateComposerLayout(layoutBefore);
+    }
+  }
+
+  function resizeComposerInput() {
+    composer.resizeTextarea(textareaRef);
+    queueMicrotask(updateComposerMultiline);
+  }
+
   // ---- effects that need DOM refs ----
 
   $effect(() => {
     // Resize textarea on input change
     void inputText;
-    composer.resizeTextarea(textareaRef);
+    resizeComposerInput();
   });
 
   $effect(() => {
@@ -196,7 +268,7 @@
 
   // Initial resize
   $effect(() => {
-    composer.resizeTextarea(textareaRef);
+    resizeComposerInput();
   });
 </script>
 
@@ -222,7 +294,9 @@
     {/if}
 
     <div
-      class="composer-dock"
+      bind:this={composerDockRef}
+      class="composer-dock composer"
+      class:multiline={isComposerMultiline}
       class:disabled={composer.isDisabled}
       class:drag-active={composer.isDragActive}
       role="region"
@@ -291,101 +365,49 @@
         </div>
       {/if}
 
-      <div class="composer-main-row">
-        <button
-          type="button"
-          class="attach-btn"
-          title={composer.hasAttachments ? "Add more images" : "Attach images"}
-          onclick={handleFilePickerOpen}
-        >
-          <ImagePlus class="attach-icon" aria-hidden="true" size={16} />
-        </button>
-        <textarea
-          bind:this={textareaRef}
-          bind:value={inputText}
-          class="prompt-input"
-          rows="1"
-          disabled={composer.isDisabled}
-          placeholder={composerPlaceholder}
-          onkeydown={handleInputKeydown}
-          oninput={handleInputInteraction}
-          onkeyup={handleInputInteraction}
-          onclick={handleInputInteraction}
-          oncompositionstart={handleInputCompositionStart}
-          oncompositionend={handleInputCompositionEnd}
-          onselect={handleInputInteraction}
-          onfocus={handleInputInteraction}
-          onpaste={handleInputPaste}
-        ></textarea>
-      </div>
+      <textarea
+        bind:this={textareaRef}
+        bind:value={inputText}
+        class="prompt-input composer-input"
+        rows="1"
+        disabled={composer.isDisabled}
+        placeholder={composerPlaceholder}
+        onkeydown={handleInputKeydown}
+        oninput={handleInputInteraction}
+        onkeyup={handleInputInteraction}
+        onclick={handleInputInteraction}
+        oncompositionstart={handleInputCompositionStart}
+        oncompositionend={handleInputCompositionEnd}
+        onselect={handleInputInteraction}
+        onfocus={handleInputInteraction}
+        onpaste={handleInputPaste}
+      ></textarea>
 
-      <div class="composer-footer-row">
-        <div class="composer-status-cluster">
-          {#if !isDebugSession}
-            <GitBranchDropdown
-              label={gitBranch}
-              repoState={gitRepoState}
-              loading={gitRepoLoading}
-              switching={gitBranchSwitching}
-              disabled={gitActionsDisabled}
-              refresh={refreshGitRepoState}
-              switchBranch={switchGitBranch}
-              createBranch={createGitBranch}
-            />
-          {/if}
-          <ModelDropdown
-            {models}
-            {selectedModel}
-            label={composer.currentModelText}
-            disabled={composer.isDisabled}
-            onSelect={(model: RpcModelInfo) => onSelectModel(model)}
-          />
-          <ThinkingLevelDropdown
-            value={thinkingLevel}
-            disabled={composer.isDisabled}
-            onSelect={(level: RpcThinkingLevel) => onSelectThinkingLevel(level)}
-          />
+      <div class="composer-toolbar">
+        <div class="composer-actions-left">
           <button
             type="button"
-            class="toggle-chip"
-            class:disabled={composer.isDisabled}
-            class:checked={autoCompactionEnabled}
-            disabled={composer.isDisabled}
-            aria-pressed={autoCompactionEnabled}
-            onclick={composer.handleAutoCompactionToggle}
+            class="attach-btn composer-icon-button"
+            aria-label="Add attachment"
+            title={composer.hasAttachments ? "Add more images" : "Attach images"}
+            onclick={handleFilePickerOpen}
           >
-            <span class="toggle-chip-icon" aria-hidden="true">
-              {#if autoCompactionEnabled}
-                <Check size={11} strokeWidth={2.5} />
-              {/if}
-            </span>
-            <span class="toggle-chip-label">Auto compact</span>
+            <span class="plus-icon" aria-hidden="true"></span>
           </button>
         </div>
-        <div class="composer-action-cluster">
-          {#if composer.attachmentSummary}
-            <span class="attachment-summary">{composer.attachmentSummary}</span>
-          {/if}
-          {#if composer.hasPendingMessages}
-            <div
-              class="pending-queue-indicator"
-              title={`${pendingMessageCount} message${pendingMessageCount > 1 ? "s" : ""} queued`}
-            >
-              <span class="pending-pulse"></span>
-              <span class="pending-label">{pendingMessageCount}</span>
-            </div>
-          {/if}
+
+        <div class="composer-actions-right">
           <button
-            class="send-btn"
+            class="send-btn composer-send-button"
             class:stop={composer.showStopButton}
             disabled={composer.showStopButton ? !composer.canAbort : !composer.canSubmit}
             aria-label={composer.showStopButton ? "Stop response" : "Send message"}
             onclick={handlePrimaryAction}
           >
             {#if composer.showStopButton}
-              <Square class="send-icon stop-icon" aria-hidden="true" size={13} />
+              <span class="stop-square-icon" aria-hidden="true"></span>
             {:else}
-              <CornerDownLeft class="send-icon" aria-hidden="true" size={15} />
+              <span class="send-arrow-icon" aria-hidden="true"></span>
             {/if}
           </button>
         </div>
@@ -418,16 +440,33 @@
   }
 
   .composer-dock {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: 40px minmax(0, 1fr) 44px;
+    grid-template-areas: "left input right";
+    align-items: center;
     gap: 10px;
-    padding: 6px;
-    border-radius: 18px;
+    padding: 12px 18px;
+    border-radius: 30px;
     border: 1px solid var(--border);
-    background: var(--bg);
+    background: color-mix(in srgb, var(--panel) 96%, var(--bg) 4%);
+    box-shadow: var(--shadow-raised);
     transition:
       border-color 0.15s ease,
-      background 0.15s ease;
+      border-radius 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+      background 0.15s ease,
+      box-shadow 0.15s ease,
+      gap 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+      padding 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  .composer-dock.multiline {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "input"
+      "toolbar";
+    align-items: stretch;
+    gap: 16px;
+    padding: 18px 18px 16px;
   }
 
   .revision-banner {
@@ -474,12 +513,15 @@
 
   .composer-dock:focus-within {
     border-color: var(--border-strong);
-    background: var(--bg);
+    background: var(--panel);
+    box-shadow:
+      var(--shadow-floating),
+      0 0 0 3px var(--focus-ring-muted);
   }
 
   .composer-dock.drag-active {
     border-color: color-mix(in srgb, var(--accent) 36%, var(--border-strong));
-    background: var(--bg);
+    background: color-mix(in srgb, var(--surface-active) 64%, var(--panel));
   }
 
   .composer-dock.disabled { opacity: 0.74; }
@@ -487,6 +529,7 @@
   .hidden-file-input { display: none; }
 
   .attachment-strip {
+    grid-column: 1 / -1;
     display: flex;
     gap: 8px;
     overflow-x: auto;
@@ -534,41 +577,7 @@
   }
 
   .attachment-chip-name,
-  .attachment-chip-meta,
-  .attachment-summary { font-family: var(--pi-font-mono); }
-
-  .pending-queue-indicator {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 22px;
-    padding: 0 8px;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--border-strong) 60%, transparent);
-    background: color-mix(in srgb, var(--panel-2) 80%, transparent);
-    color: var(--text-subtle);
-    font-size: 0.68rem;
-    user-select: none;
-  }
-
-  .pending-pulse {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--warning);
-    animation: pending-pulse 1.4s ease-in-out infinite;
-  }
-
-  .pending-label {
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-    line-height: 1;
-  }
-
-  @keyframes pending-pulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.5; transform: scale(0.85); }
-  }
+  .attachment-chip-meta { font-family: var(--pi-font-mono); }
 
   .attachment-chip-name {
     max-width: 180px;
@@ -579,8 +588,7 @@
     color: var(--text);
   }
 
-  .attachment-chip-meta,
-  .attachment-summary {
+  .attachment-chip-meta {
     font-size: 0.64rem;
     color: var(--text-subtle);
   }
@@ -603,24 +611,27 @@
       color 0.15s ease;
   }
 
-  .attach-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    width: 24px;
-    height: 24px;
-    margin-top: 8px;
-    border-radius: 10px;
-    border: none;
-    background: var(--bg);
-    color: var(--text-subtle);
+  .composer-icon-button,
+  .composer-send-button {
+    border: 0;
     cursor: pointer;
     transition:
-      background 0.15s ease,
-      border-color 0.15s ease,
-      color 0.15s ease,
-      opacity 0.15s ease;
+      background 0.14s ease,
+      color 0.14s ease,
+      opacity 0.14s ease,
+      transform 0.14s ease;
+  }
+
+  .attach-btn,
+  .composer-icon-button {
+    width: 40px;
+    height: 40px;
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text);
   }
 
   .attachment-chip-open:hover .attachment-chip-name,
@@ -634,41 +645,76 @@
   .attachment-chip-open:focus-visible .attachment-chip-preview,
   .attachment-chip-remove:hover,
   .attach-btn:hover:not(:disabled) {
-    background: var(--bg);
+    background: var(--surface-hover);
   }
 
   .attachment-chip-open:focus-visible,
   .attachment-chip-remove:focus-visible,
   .attach-btn:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--accent) 54%, white 12%);
+    outline: 2px solid var(--focus-ring);
     outline-offset: 2px;
   }
 
-  .composer-main-row {
+  .composer-toolbar {
+    grid-area: toolbar;
     display: flex;
-    align-items: flex-start;
-    gap: 6px;
-    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+  }
+
+  .composer-dock:not(.multiline) .composer-toolbar {
+    display: contents;
+  }
+
+  .composer-actions-left,
+  .composer-actions-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    will-change: transform;
+  }
+
+  .composer-actions-left {
+    grid-area: left;
+  }
+
+  .composer-actions-right {
+    grid-area: right;
+    justify-content: flex-end;
   }
 
   .prompt-input {
     display: block;
     box-sizing: border-box;
-    flex: 1;
+    grid-area: input;
+    width: 100%;
+    min-height: 1.55em;
     min-width: 0;
-    max-height: 160px;
-    padding: 9px 0 10px;
+    max-height: 180px;
+    padding: 0 22px;
     border: none;
     background: transparent;
     color: var(--text);
     font-family: var(--pi-font-sans);
-    font-size: 0.94rem;
+    font-size: 1.04rem;
     font-weight: 400;
     line-height: 1.55;
     outline: none;
     resize: none;
     overflow-y: hidden;
     scrollbar-gutter: stable;
+    transition:
+      height 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+      padding 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  .composer-dock.multiline .prompt-input {
+    padding: 0 22px;
+  }
+
+  .composer-dock:not(.multiline) .prompt-input {
+    padding: 0 4px;
   }
 
   .prompt-input:disabled,
@@ -679,127 +725,108 @@
     line-height: inherit;
   }
 
-  .send-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 25px;
-    height: 25px;
-    border-radius: 12px;
+  .send-btn,
+  .composer-send-button {
+    width: 44px;
+    height: 44px;
+    display: grid;
+    place-items: center;
+    border-radius: 999px;
     border: none;
-    background: var(--bg);
-    color: var(--text);
+    background: var(--accent);
+    color: var(--bg);
     cursor: pointer;
     transition:
       background 0.15s ease,
-      border-color 0.15s ease,
       opacity 0.15s ease,
       transform 0.15s ease;
   }
 
   .send-btn:hover:not(:disabled) {
-    background: var(--bg);
+    background: var(--accent-hover);
     transform: translateY(-1px);
   }
 
+  .send-btn:active:not(:disabled) {
+    transform: translateY(0) scale(0.96);
+  }
+
   .send-btn.stop {
-    background: var(--bg);
-    color: var(--error-text);
+    background: var(--danger);
+    color: var(--bg);
   }
 
   .send-btn.stop:hover:not(:disabled) {
-    background: var(--bg);
+    background: var(--error-text);
   }
 
   .send-btn:disabled {
-    opacity: 0.4;
+    opacity: 0.45;
     cursor: not-allowed;
   }
 
-  .composer-footer-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding-top: 10px;
-    border-top: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
-    min-width: 0;
+  .plus-icon {
+    position: relative;
+    width: 22px;
+    height: 22px;
+    display: inline-block;
   }
 
-  .composer-status-cluster,
-  .composer-action-cluster {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-    flex-wrap: wrap;
-  }
-
-  .composer-action-cluster { justify-content: flex-end; }
-
-  .toggle-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    height: 26px;
-    padding: 0 10px;
+  .plus-icon::before,
+  .plus-icon::after {
+    content: "";
+    position: absolute;
+    inset: 50% auto auto 50%;
+    width: 22px;
+    height: 2px;
     border-radius: 999px;
-    border: none;
-    background: var(--bg);
-    color: var(--text-subtle);
-    cursor: pointer;
-    user-select: none;
-    font: inherit;
-    transition:
-      background 0.15s ease,
-      border-color 0.15s ease,
-      color 0.15s ease,
-      transform 0.15s ease;
+    background: currentColor;
+    transform: translate(-50%, -50%);
   }
 
-  .toggle-chip:hover:not(.disabled) {
-    background: var(--bg);
-    color: var(--text);
+  .plus-icon::after {
+    transform: translate(-50%, -50%) rotate(90deg);
   }
 
-  .toggle-chip:focus-visible {
-    background: var(--bg);
-    color: var(--text);
-    outline: none;
+  .send-arrow-icon {
+    position: relative;
+    width: 22px;
+    height: 22px;
+    display: block;
   }
 
-  .toggle-chip.disabled { opacity: 0.45; cursor: not-allowed; }
-
-  .toggle-chip-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 14px;
-    height: 14px;
-    border-radius: 4px;
-    border: 1px solid color-mix(in srgb, var(--border-strong) 72%, transparent);
-    background: transparent;
-    color: var(--bg);
-    transition:
-      border-color 0.15s ease,
-      background 0.15s ease,
-      color 0.15s ease;
+  .send-arrow-icon::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 4px;
+    width: 3px;
+    height: 15px;
+    border-radius: 999px;
+    background: currentColor;
+    transform: translateX(-50%);
   }
 
-  .toggle-chip.checked {
-    color: var(--text);
+  .send-arrow-icon::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 4px;
+    width: 11px;
+    height: 11px;
+    border-top: 3px solid currentColor;
+    border-left: 3px solid currentColor;
+    border-radius: 2px 0 0 0;
+    transform: translateX(-50%) rotate(45deg);
+    transform-origin: 50% 50%;
   }
 
-  .toggle-chip.checked .toggle-chip-icon {
-    border-color: color-mix(in srgb, var(--text) 72%, transparent);
-    background: var(--text);
-    color: var(--bg);
-  }
-
-  .toggle-chip-label {
-    font-family: var(--pi-font-sans);
-    font-size: 0.66rem;
-    white-space: nowrap;
+  .stop-square-icon {
+    width: 13px;
+    height: 13px;
+    display: block;
+    border-radius: 2px;
+    background: currentColor;
   }
 
   @media (max-width: 900px) {
@@ -814,27 +841,11 @@
     .composer-inner-wrap { width: 100%; }
     .prompt-input { font-size: 16px; }
 
-    .composer-footer-row {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      align-items: center;
-      gap: 10px;
+    .composer-dock {
+      grid-template-columns: 40px minmax(0, 1fr) 44px;
+      padding: 10px 14px;
+      border-radius: 24px;
     }
-
-    .composer-status-cluster {
-      min-width: 0;
-      padding-bottom: 2px;
-      scrollbar-width: none;
-    }
-
-    .composer-status-cluster::-webkit-scrollbar { display: none; }
-
-    .composer-action-cluster {
-      flex-shrink: 0;
-      justify-content: flex-end;
-    }
-
-    .attachment-summary { display: none; }
   }
 
   @media (max-width: 640px) {
@@ -846,21 +857,19 @@
     .revision-banner { flex-direction: column; }
     .revision-cancel-button { align-self: flex-start; }
 
-    .composer-dock { gap: 8px; padding: 8px 10px; border-radius: 16px; }
+    .composer-dock { gap: 8px; padding: 10px 14px; border-radius: 24px; }
+    .composer-dock.multiline { padding: 14px 14px 12px; }
     .attachment-chip { min-width: 200px; }
 
-    .composer-main-row { gap: 8px; align-items: flex-end; }
-
     .attach-btn {
-      width: 26px;
-      height: 39px;
-      margin-top: 0;
-      border-radius: 10px;
+      width: 40px;
+      height: 40px;
     }
 
-    .prompt-input { padding: 5px 0 6px; line-height: 1.5; }
-    .composer-footer-row { gap: 8px; padding-top: 8px; }
+    .prompt-input { font-size: 16px; line-height: 1.5; }
+    .composer-dock.multiline .prompt-input { padding: 0 8px; }
+    .composer-dock:not(.multiline) .prompt-input { padding: 0 4px; }
 
-    .send-btn { width: 32px; height: 32px; border-radius: 10px; }
+    .send-btn { width: 40px; height: 40px; }
   }
 </style>

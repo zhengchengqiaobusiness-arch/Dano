@@ -539,6 +539,7 @@ function listSessionFilesInDir(sessionDir: string): string[] {
 
 function getSessionsRoot(): string {
   return (
+    process.env.DANO_SESSIONS_ROOT ??
     process.env.PI_WEB_SESSIONS_ROOT ??
     path.join(os.homedir(), ".pi", "agent", "sessions")
   );

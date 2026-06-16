@@ -3116,6 +3116,51 @@ describe("WsRpcAdapter", () => {
       });
     });
 
+    it("uses DANO_SESSIONS_ROOT before the Pi compatibility sessions root", async () => {
+      const danoSessionsRoot = fs.mkdtempSync(
+        path.join(os.tmpdir(), "dano-sessions-root-"),
+      );
+      const piSessionsRoot = fs.mkdtempSync(
+        path.join(os.tmpdir(), "pi-web-compat-sessions-root-"),
+      );
+      process.env.DANO_SESSIONS_ROOT = danoSessionsRoot;
+      process.env.PI_WEB_SESSIONS_ROOT = piSessionsRoot;
+
+      const workspaceRoot = fs.mkdtempSync(
+        path.join(os.tmpdir(), "dano-workspace-root-"),
+      );
+      const workspaceDir = path.join(workspaceRoot, "project");
+      fs.mkdirSync(workspaceDir);
+
+      const registerCommand: RpcCommand = {
+        id: "cmd-register-dano-root",
+        type: "register_workspace",
+        workspacePath: workspaceDir,
+      };
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({ type: "command", payload: registerCommand }),
+        ),
+      );
+
+      await new Promise(r => setTimeout(r, 10));
+
+      delete process.env.DANO_SESSIONS_ROOT;
+
+      const sessionDirName = `--${workspaceDir
+        .replace(/^[/\\]/, "")
+        .replace(/[/\\:]/g, "-")}--`;
+      expect(fs.existsSync(path.join(danoSessionsRoot, sessionDirName))).toBe(
+        true,
+      );
+      expect(fs.existsSync(path.join(piSessionsRoot, sessionDirName))).toBe(
+        false,
+      );
+    });
+
     it("creates the workspace directory when registering a missing workspace", async () => {
       const workspaceRoot = fs.mkdtempSync(
         path.join(os.tmpdir(), "pi-web-missing-workspace-"),

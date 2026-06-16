@@ -11,6 +11,7 @@ import { loadStandaloneRuntime, type StandaloneRuntime } from "./runtime.js";
 const DEFAULT_STANDALONE_PORT = 8080;
 const DEFAULT_STANDALONE_HOST = "0.0.0.0";
 const DEFAULT_STANDALONE_WORKSPACE = "/tmp/dano";
+const DEFAULT_STANDALONE_SESSIONS_DIR = ".dano/sessions";
 const DEFAULT_PRODUCT_NAME = "Dano";
 const DEFAULT_EMPTY_STATE: BridgeEmptyStateConfig = {
   mode: "text",
@@ -22,6 +23,7 @@ export interface StandaloneMainOptions {
   host: string;
   port: number;
   defaultWorkspacePath: string;
+  sessionsRootPath: string;
   productName: string;
   emptyState: BridgeEmptyStateConfig;
   staticDir?: string;
@@ -38,6 +40,7 @@ Options:
   --host <host>              Host to bind (default: ${DEFAULT_STANDALONE_HOST})
   --port <number>            Port to bind (default: ${DEFAULT_STANDALONE_PORT})
   --default-workspace <path> Default workspace path (env: DANO_DEFAULT_WORKSPACE_PATH, default: ${DEFAULT_STANDALONE_WORKSPACE})
+  --sessions-root <path>     Directory for session jsonl files (env: DANO_SESSIONS_ROOT, default: <default-workspace>/${DEFAULT_STANDALONE_SESSIONS_DIR})
   --product-name <name>      Product name shown in browser UI (env: DANO_PRODUCT_NAME, default: ${DEFAULT_PRODUCT_NAME})
   --empty-state-text <text>  Empty transcript text (env: DANO_EMPTY_STATE_TEXT, default: ${DEFAULT_EMPTY_STATE.content})
   --empty-state-html <html>  Empty transcript HTML (env: DANO_EMPTY_STATE_HTML)
@@ -61,6 +64,16 @@ function readDefaultWorkspacePath(
     env.DANO_DEFAULT_WORKSPACE_PATH?.trim() ||
     env.DANO_DEFAULT_WORKSPACE?.trim() ||
     DEFAULT_STANDALONE_WORKSPACE
+  );
+}
+
+function readSessionsRootPath(
+  env: Record<string, string | undefined>,
+): string | undefined {
+  return (
+    env.DANO_SESSIONS_ROOT?.trim() ||
+    env.PI_WEB_SESSIONS_ROOT?.trim() ||
+    undefined
   );
 }
 
@@ -124,6 +137,7 @@ export function parseStandaloneMainOptions(
   let host = DEFAULT_STANDALONE_HOST;
   let port = DEFAULT_STANDALONE_PORT;
   let defaultWorkspacePath = readDefaultWorkspacePath(env);
+  let sessionsRootPath = readSessionsRootPath(env);
   let productName = readProductName(env);
   let emptyState = readEmptyStateConfig(env);
   let help = false;
@@ -166,6 +180,15 @@ export function parseStandaloneMainOptions(
         index++;
         continue;
       }
+      case "--sessions-root": {
+        const next = argv[index + 1];
+        if (!next || next.startsWith("--")) {
+          throw new Error("Missing value for --sessions-root");
+        }
+        sessionsRootPath = next;
+        index++;
+        continue;
+      }
       case "--product-name": {
         const next = argv[index + 1];
         if (!next || next.startsWith("--")) {
@@ -199,11 +222,17 @@ export function parseStandaloneMainOptions(
   }
 
   const cwd = process.cwd();
+  const resolvedDefaultWorkspacePath = resolve(cwd, defaultWorkspacePath);
   return {
     cwd,
     host,
     port,
-    defaultWorkspacePath: resolve(cwd, defaultWorkspacePath),
+    defaultWorkspacePath: resolvedDefaultWorkspacePath,
+    sessionsRootPath: resolve(
+      cwd,
+      sessionsRootPath ??
+        join(resolvedDefaultWorkspacePath, DEFAULT_STANDALONE_SESSIONS_DIR),
+    ),
     productName,
     emptyState,
     staticDir: resolveDefaultStaticDir(cwd),
@@ -214,6 +243,17 @@ export function parseStandaloneMainOptions(
 function ensureDefaultWorkspace(path: string): string {
   mkdirSync(path, { recursive: true });
   return path;
+}
+
+function workspaceSessionDirName(workspacePath: string): string {
+  return `--${workspacePath.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+}
+
+function workspaceSessionDirPath(
+  sessionsRootPath: string,
+  workspacePath: string,
+): string {
+  return join(sessionsRootPath, workspaceSessionDirName(workspacePath));
 }
 
 async function runStandaloneBridge(
@@ -249,6 +289,7 @@ async function runStandaloneBridge(
     console.log(`[pi-web] Static Dir: ${options.staticDir}`);
   }
   console.log(`[pi-web] Default Workspace: ${config.defaultWorkspacePath}`);
+  console.log(`[pi-web] Sessions Root: ${options.sessionsRootPath}`);
 
   const requestStop = async (): Promise<void> => {
     await bridgeController.stop().catch(error => {
@@ -295,8 +336,16 @@ async function runStandaloneMain(): Promise<number> {
 
   const thisFile = fileURLToPath(import.meta.url);
   const defaultWorkspacePath = ensureDefaultWorkspace(options.defaultWorkspacePath);
+  mkdirSync(options.sessionsRootPath, { recursive: true });
+  process.env.DANO_SESSIONS_ROOT = options.sessionsRootPath;
+  process.env.PI_WEB_SESSIONS_ROOT = options.sessionsRootPath;
+  const defaultSessionDir = workspaceSessionDirPath(
+    options.sessionsRootPath,
+    defaultWorkspacePath,
+  );
   const backend = await createStandaloneBridgeContext({
     cwd: defaultWorkspacePath,
+    sessionDir: defaultSessionDir,
   });
   const sessionRegistry = new DetachedSessionRegistry(
     backend.context.state.cwd,

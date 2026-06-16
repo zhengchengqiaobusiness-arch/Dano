@@ -28,6 +28,7 @@ describe("standalone main", () => {
     expect(options.host).toBe("0.0.0.0");
     expect(options.port).toBe(8123);
     expect(options.defaultWorkspacePath).toBe("/tmp/dano");
+    expect(options.sessionsRootPath).toBe("/tmp/dano/.dano/sessions");
     expect(options.staticDir).toBe(findNearestWebDist(process.cwd()));
     expect(options.help).toBe(false);
   });
@@ -48,6 +49,7 @@ describe("standalone main", () => {
     });
 
     expect(options.defaultWorkspacePath).toBe("/tmp/custom-dano");
+    expect(options.sessionsRootPath).toBe("/tmp/custom-dano/.dano/sessions");
   });
 
   it("lets command line default workspace override environment", () => {
@@ -57,6 +59,35 @@ describe("standalone main", () => {
     );
 
     expect(options.defaultWorkspacePath).toBe("/tmp/cli-dano");
+    expect(options.sessionsRootPath).toBe("/tmp/cli-dano/.dano/sessions");
+  });
+
+  it("uses Dano sessions root from environment", () => {
+    const options = parseStandaloneMainOptions([], {
+      DANO_DEFAULT_WORKSPACE_PATH: "/tmp/custom-dano",
+      DANO_SESSIONS_ROOT: "/tmp/custom-dano-sessions",
+    });
+
+    expect(options.defaultWorkspacePath).toBe("/tmp/custom-dano");
+    expect(options.sessionsRootPath).toBe("/tmp/custom-dano-sessions");
+  });
+
+  it("keeps PI_WEB_SESSIONS_ROOT compatibility when Dano sessions root is absent", () => {
+    const options = parseStandaloneMainOptions([], {
+      DANO_DEFAULT_WORKSPACE_PATH: "/tmp/custom-dano",
+      PI_WEB_SESSIONS_ROOT: "/tmp/pi-web-sessions",
+    });
+
+    expect(options.sessionsRootPath).toBe("/tmp/pi-web-sessions");
+  });
+
+  it("lets command line sessions root override environment", () => {
+    const options = parseStandaloneMainOptions(
+      ["--sessions-root", "/tmp/cli-sessions"],
+      { DANO_SESSIONS_ROOT: "/tmp/env-sessions" },
+    );
+
+    expect(options.sessionsRootPath).toBe("/tmp/cli-sessions");
   });
 
   it("uses product name and empty text from environment", () => {
@@ -125,6 +156,12 @@ describe("standalone main", () => {
   it("throws on missing default workspace value", () => {
     expect(() => parseStandaloneMainOptions(["--default-workspace"], {})).toThrow(
       "Missing value for --default-workspace",
+    );
+  });
+
+  it("throws on missing sessions root value", () => {
+    expect(() => parseStandaloneMainOptions(["--sessions-root"], {})).toThrow(
+      "Missing value for --sessions-root",
     );
   });
 
