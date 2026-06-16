@@ -25,6 +25,8 @@ function createMockSession() {
     getEntries: vi.fn().mockReturnValue([{ role: "user", content: "Hello" }]),
     getTree: vi.fn().mockReturnValue([]),
     getSessionName: vi.fn().mockReturnValue("test-session"),
+    appendModelChange: vi.fn(),
+    appendThinkingLevelChange: vi.fn(),
   };
 
   const modelRegistry = {
@@ -50,6 +52,11 @@ function createMockSession() {
   const session = {
     sessionManager,
     modelRegistry,
+    settingsManager: {
+      getDefaultProvider: vi.fn().mockReturnValue("openai"),
+      getDefaultModel: vi.fn().mockReturnValue("gpt-4"),
+      getDefaultThinkingLevel: vi.fn().mockReturnValue("medium"),
+    },
     extensionRunner,
     promptTemplates: [{ name: "template", description: "Prompt template" }],
     model: {
@@ -197,6 +204,12 @@ describe("standalone bridge backend", () => {
           modelId,
         });
       }),
+      appendThinkingLevelChange: vi.fn((thinkingLevel: string) => {
+        branchEntries.push({
+          type: "thinking_level_change",
+          thinkingLevel,
+        });
+      }),
     };
     const session = {
       sessionManager,
@@ -206,6 +219,7 @@ describe("standalone bridge backend", () => {
       settingsManager: {
         getDefaultProvider: vi.fn().mockReturnValue("openai"),
         getDefaultModel: vi.fn().mockReturnValue("gpt-4"),
+        getDefaultThinkingLevel: vi.fn().mockReturnValue("medium"),
       },
       extensionRunner: {
         getRegisteredCommands: vi.fn().mockReturnValue([]),
@@ -239,6 +253,184 @@ describe("standalone bridge backend", () => {
       provider: "openai",
       id: "gpt-4",
     });
+    expect(sessionManager.appendModelChange).toHaveBeenCalledWith(
+      "openai",
+      "gpt-4",
+    );
+  });
+
+  it("uses Dano config before Pi settings when hydrating standalone state", () => {
+    const xiaomiModel = {
+      id: "mimo-v2.5",
+      name: "MiMo V2.5",
+      provider: "xiaomi-token-plan-cn",
+      api: "openai-responses",
+      reasoning: true,
+      contextWindow: 128000,
+      maxTokens: 8192,
+    };
+    const openaiModel = {
+      ...xiaomiModel,
+      id: "gpt-4",
+      name: "GPT-4",
+      provider: "openai",
+    };
+    const branchEntries: unknown[] = [];
+    const sessionState: { model?: typeof xiaomiModel; thinkingLevel: string } = {
+      thinkingLevel: "off",
+    };
+    const sessionManager = {
+      getCwd: vi.fn().mockReturnValue("/test/project"),
+      getSessionId: vi.fn().mockReturnValue("session-dano"),
+      getSessionFile: vi.fn().mockReturnValue("/test/session-dano.jsonl"),
+      getBranch: vi.fn(() => branchEntries),
+      appendModelChange: vi.fn((provider: string, modelId: string) => {
+        branchEntries.push({
+          type: "model_change",
+          provider,
+          modelId,
+        });
+      }),
+      appendThinkingLevelChange: vi.fn((thinkingLevel: string) => {
+        branchEntries.push({
+          type: "thinking_level_change",
+          thinkingLevel,
+        });
+      }),
+    };
+    const session = {
+      sessionManager,
+      modelRegistry: {
+        getAvailable: vi.fn().mockReturnValue([openaiModel, xiaomiModel]),
+      },
+      settingsManager: {
+        getDefaultProvider: vi.fn().mockReturnValue("openai"),
+        getDefaultModel: vi.fn().mockReturnValue("gpt-4"),
+        getDefaultThinkingLevel: vi.fn().mockReturnValue("high"),
+      },
+      extensionRunner: {
+        getRegisteredCommands: vi.fn().mockReturnValue([]),
+      },
+      promptTemplates: [],
+      state: sessionState,
+      get model() {
+        return sessionState.model;
+      },
+      get thinkingLevel() {
+        return sessionState.thinkingLevel;
+      },
+      isStreaming: false,
+      getContextUsage: vi.fn().mockReturnValue(null),
+      subscribe: vi.fn().mockReturnValue(vi.fn()),
+      sendUserMessage: vi.fn(),
+      abort: vi.fn(),
+      setModel: vi.fn(),
+      setThinkingLevel: vi.fn(),
+      setSessionName: vi.fn(),
+      dispose: vi.fn(),
+    };
+
+    const backend = createStandaloneBridgeContextFromSession(
+      session as unknown as AgentSession,
+      {
+        defaultProvider: "xiaomi-token-plan-cn",
+        defaultModel: "mimo-v2.5",
+        defaultThinkingLevel: "medium",
+      },
+    );
+
+    expect(backend.context.state.getCurrentModel()).toMatchObject({
+      provider: "xiaomi-token-plan-cn",
+      id: "mimo-v2.5",
+    });
+    expect(backend.context.state.getThinkingLevel()).toBe("medium");
+    expect(sessionManager.appendModelChange).toHaveBeenCalledWith(
+      "xiaomi-token-plan-cn",
+      "mimo-v2.5",
+    );
+    expect(sessionManager.appendThinkingLevelChange).toHaveBeenCalledWith(
+      "medium",
+    );
+  });
+
+  it("falls back to Pi settings when Dano config is missing model fields", () => {
+    const model = {
+      id: "gpt-4",
+      name: "GPT-4",
+      provider: "openai",
+      api: "openai-responses",
+      reasoning: true,
+      contextWindow: 128000,
+      maxTokens: 8192,
+    };
+    const branchEntries: unknown[] = [];
+    const sessionState: { model?: typeof model; thinkingLevel: string } = {
+      thinkingLevel: "off",
+    };
+    const sessionManager = {
+      getCwd: vi.fn().mockReturnValue("/test/project"),
+      getSessionId: vi.fn().mockReturnValue("session-fallback"),
+      getSessionFile: vi.fn().mockReturnValue("/test/session-fallback.jsonl"),
+      getBranch: vi.fn(() => branchEntries),
+      appendModelChange: vi.fn((provider: string, modelId: string) => {
+        branchEntries.push({
+          type: "model_change",
+          provider,
+          modelId,
+        });
+      }),
+      appendThinkingLevelChange: vi.fn((thinkingLevel: string) => {
+        branchEntries.push({
+          type: "thinking_level_change",
+          thinkingLevel,
+        });
+      }),
+    };
+    const session = {
+      sessionManager,
+      modelRegistry: {
+        getAvailable: vi.fn().mockReturnValue([model]),
+      },
+      settingsManager: {
+        getDefaultProvider: vi.fn().mockReturnValue("openai"),
+        getDefaultModel: vi.fn().mockReturnValue("gpt-4"),
+        getDefaultThinkingLevel: vi.fn().mockReturnValue("high"),
+      },
+      extensionRunner: {
+        getRegisteredCommands: vi.fn().mockReturnValue([]),
+      },
+      promptTemplates: [],
+      state: sessionState,
+      get model() {
+        return sessionState.model;
+      },
+      get thinkingLevel() {
+        return sessionState.thinkingLevel;
+      },
+      isStreaming: false,
+      getContextUsage: vi.fn().mockReturnValue(null),
+      subscribe: vi.fn().mockReturnValue(vi.fn()),
+      sendUserMessage: vi.fn(),
+      abort: vi.fn(),
+      setModel: vi.fn(),
+      setThinkingLevel: vi.fn(),
+      setSessionName: vi.fn(),
+      dispose: vi.fn(),
+    };
+
+    const backend = createStandaloneBridgeContextFromSession(
+      session as unknown as AgentSession,
+      {
+        defaultProvider: "xiaomi-token-plan-cn",
+        defaultThinkingLevel: "medium",
+      },
+    );
+
+    expect(backend.context.state.getCurrentModel()).toMatchObject({
+      provider: "openai",
+      id: "gpt-4",
+    });
+    expect(backend.context.state.getThinkingLevel()).toBe("medium");
     expect(sessionManager.appendModelChange).toHaveBeenCalledWith(
       "openai",
       "gpt-4",

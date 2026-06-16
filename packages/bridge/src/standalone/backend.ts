@@ -3,8 +3,14 @@ import {
   type AgentSession,
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
+import type { DanoConfig } from "../dano-config.js";
+import { loadDanoConfig } from "../dano-config.js";
 import { createDetachedAgentSession } from "../detached-session.js";
-import { resolveAgentSessionModel } from "../default-model.js";
+import {
+  resolveAgentSessionDefaults,
+  resolveAgentSessionModel,
+  type DefaultSessionSettings,
+} from "../default-model.js";
 import { createHeadlessUIContext } from "../headless-ui-context.js";
 import type {
   BridgeLiveEvent,
@@ -12,6 +18,7 @@ import type {
   BridgeSessionEvents,
   BridgeSessionState,
 } from "../live-session.js";
+import type { RpcThinkingLevel } from "../types.js";
 import type { WsRpcAdapterContext } from "../ws-rpc-adapter.js";
 
 export interface StandaloneBridgeBackend {
@@ -24,6 +31,7 @@ export interface CreateStandaloneBridgeContextOptions {
   cwd?: string;
   sessionPath?: string;
   sessionDir?: string;
+  danoConfig?: DanoConfig;
 }
 
 type SessionCommandLike = {
@@ -70,6 +78,78 @@ function listSessionCommands(session: AgentSession): Array<{
   );
 }
 
+function normalizeDefaultThinkingLevel(
+  value: string | undefined,
+): RpcThinkingLevel | undefined {
+  switch (value) {
+    case "off":
+    case "minimal":
+    case "low":
+    case "medium":
+    case "high":
+    case "xhigh":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function configuredDanoDefaultModel(
+  danoConfig: DanoConfig,
+): { provider: string; modelId: string } | undefined {
+  return danoConfig.defaultProvider && danoConfig.defaultModel
+    ? {
+        provider: danoConfig.defaultProvider,
+        modelId: danoConfig.defaultModel,
+      }
+    : undefined;
+}
+
+function getSettingsManagerDefaults(session: AgentSession): {
+  provider?: string;
+  modelId?: string;
+  thinkingLevel?: RpcThinkingLevel;
+} {
+  const settingsManager = session.settingsManager as
+    | {
+        getDefaultProvider?: () => string | undefined;
+        getDefaultModel?: () => string | undefined;
+        getDefaultThinkingLevel?: () => string | undefined;
+      }
+    | undefined;
+
+  return {
+    provider: settingsManager?.getDefaultProvider?.(),
+    modelId: settingsManager?.getDefaultModel?.(),
+    thinkingLevel: normalizeDefaultThinkingLevel(
+      settingsManager?.getDefaultThinkingLevel?.(),
+    ),
+  };
+}
+
+function createDefaultSessionSettings(
+  session: AgentSession,
+  danoConfig: DanoConfig,
+): DefaultSessionSettings {
+  const settingsDefaults = getSettingsManagerDefaults(session);
+  const models = [
+    configuredDanoDefaultModel(danoConfig),
+    {
+      provider: settingsDefaults.provider,
+      modelId: settingsDefaults.modelId,
+    },
+  ].filter(
+    (model): model is { provider: string; modelId: string } =>
+      Boolean(model?.provider && model.modelId),
+  );
+
+  return {
+    models,
+    thinkingLevel:
+      danoConfig.defaultThinkingLevel ?? settingsDefaults.thinkingLevel,
+  };
+}
+
 function toBridgeLiveEvent(event: AgentSessionEvent): BridgeLiveEvent | null {
   switch (event.type) {
     case "agent_start":
@@ -89,6 +169,7 @@ function toBridgeLiveEvent(event: AgentSessionEvent): BridgeLiveEvent | null {
 
 export function createStandaloneBridgeContextFromSession(
   session: AgentSession,
+  danoConfig: DanoConfig = {},
 ): StandaloneBridgeBackend {
   let pendingMessageCount = 0;
   const liveEventHandlers = new Set<(event: BridgeLiveEvent) => void>();
@@ -148,18 +229,35 @@ export function createStandaloneBridgeContextFromSession(
     },
 
     getCurrentModel() {
-      return resolveAgentSessionModel(session);
+      return resolveAgentSessionModel(
+        session,
+        createDefaultSessionSettings(session, danoConfig),
+      );
     },
 
     getDefaultModel() {
-      return {
-        provider: session.settingsManager.getDefaultProvider(),
-        modelId: session.settingsManager.getDefaultModel(),
+      const settingsDefaults = getSettingsManagerDefaults(session);
+      return configuredDanoDefaultModel(danoConfig) ?? {
+        provider: settingsDefaults.provider,
+        modelId: settingsDefaults.modelId,
       };
     },
 
+    getDefaultModels() {
+      return [
+        ...(createDefaultSessionSettings(session, danoConfig).models ?? []),
+      ];
+    },
+
+    getDefaultThinkingLevel() {
+      return createDefaultSessionSettings(session, danoConfig).thinkingLevel;
+    },
+
     getThinkingLevel() {
-      return session.thinkingLevel;
+      return resolveAgentSessionDefaults(
+        session,
+        createDefaultSessionSettings(session, danoConfig),
+      ).thinkingLevel;
     },
 
     getContextUsage() {
@@ -223,12 +321,21 @@ export async function createStandaloneBridgeContext(
   options: CreateStandaloneBridgeContextOptions = {},
 ): Promise<StandaloneBridgeBackend> {
   const cwd = options.cwd?.trim() || process.cwd();
+  const danoConfig =
+    options.danoConfig ??
+    loadDanoConfig({
+      cwd: process.cwd(),
+    });
   const sessionManager = options.sessionPath
     ? SessionManager.open(options.sessionPath)
     : SessionManager.create(cwd, options.sessionDir);
   const result = await createDetachedAgentSession(
     sessionManager.getCwd() || cwd,
     sessionManager,
+    {
+      defaultModel: configuredDanoDefaultModel(danoConfig),
+      defaultThinkingLevel: danoConfig.defaultThinkingLevel,
+    },
   );
 
   await result.session.bindExtensions({
@@ -242,5 +349,5 @@ export async function createStandaloneBridgeContext(
     shutdownHandler: () => {},
   });
 
-  return createStandaloneBridgeContextFromSession(result.session);
+  return createStandaloneBridgeContextFromSession(result.session, danoConfig);
 }

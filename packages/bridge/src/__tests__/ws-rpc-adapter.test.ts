@@ -88,6 +88,7 @@ const createMockContext = (): WsRpcAdapterContext => {
     getTree: vi.fn().mockReturnValue([]),
     getSessionName: vi.fn().mockReturnValue("test-session"),
     appendModelChange: vi.fn(),
+    appendThinkingLevelChange: vi.fn(),
   };
 
   const model = {
@@ -128,6 +129,13 @@ const createMockContext = (): WsRpcAdapterContext => {
       provider: "openai",
       modelId: "gpt-4",
     }),
+    getDefaultModels: vi.fn().mockReturnValue([
+      {
+        provider: "openai",
+        modelId: "gpt-4",
+      },
+    ]),
+    getDefaultThinkingLevel: vi.fn().mockReturnValue("medium"),
     getThinkingLevel: vi.fn().mockReturnValue("medium"),
     getContextUsage: vi
       .fn()
@@ -759,9 +767,13 @@ describe("WsRpcAdapter", () => {
         provider: "openai",
         id: "gpt-4",
       });
+      expect(response?.payload.data.thinkingLevel).toBe("medium");
       expect(
         context.state.sessionManager.appendModelChange,
       ).toHaveBeenCalledWith("openai", "gpt-4");
+      expect(
+        context.state.sessionManager.appendThinkingLevelChange,
+      ).toHaveBeenCalledWith("medium");
     });
 
     it("keeps get_state model empty when no models are available", async () => {
@@ -797,9 +809,13 @@ describe("WsRpcAdapter", () => {
 
       expect(response?.payload.success).toBe(true);
       expect(response?.payload.data.model).toBeUndefined();
+      expect(response?.payload.data.thinkingLevel).toBe("off");
       expect(
         context.state.sessionManager.appendModelChange,
       ).not.toHaveBeenCalled();
+      expect(
+        context.state.sessionManager.appendThinkingLevelChange,
+      ).toHaveBeenCalledWith("off");
     });
 
     it("returns the selected model after set_model", async () => {
@@ -3991,6 +4007,7 @@ describe("WsRpcAdapter", () => {
         provider: "openai",
         id: "gpt-4",
       });
+      expect(responseCall?.payload.data.thinkingLevel).toBe("medium");
       expect(responseCall?.payload.data.transcript.messages).toEqual([]);
       expect(responseCall?.payload.data.transcript.hasOlder).toBe(false);
       expect(
@@ -4021,6 +4038,124 @@ describe("WsRpcAdapter", () => {
       });
 
       // Clean up temp dir
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("uses Dano defaults for new_session response, get_state, and persisted jsonl", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-defaults-"));
+      const sm = SessionManager.create(tmpDir, tmpDir);
+      const existingFile = sm.getSessionFile()!;
+      const xiaomiModel = {
+        id: "mimo-v2.5",
+        name: "MiMo V2.5",
+        api: "openai-responses",
+        provider: "xiaomi-token-plan-cn",
+        reasoning: true,
+        contextWindow: 128000,
+        maxTokens: 8192,
+      };
+      (
+        context.state.sessionManager.getSessionFile as ReturnType<typeof vi.fn>
+      ).mockReturnValue(existingFile);
+      (context.state.getAvailableModels as ReturnType<typeof vi.fn>).mockReturnValue(
+        [xiaomiModel],
+      );
+      (context.state.getDefaultModels as ReturnType<typeof vi.fn>).mockReturnValue([
+        {
+          provider: "xiaomi-token-plan-cn",
+          modelId: "mimo-v2.5",
+        },
+        {
+          provider: "openai",
+          modelId: "gpt-4",
+        },
+      ]);
+      (
+        context.state.getDefaultThinkingLevel as ReturnType<typeof vi.fn>
+      ).mockReturnValue("medium");
+
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: { id: "cmd-dano-new", type: "new_session" },
+          }),
+        ),
+      );
+
+      await new Promise(r => setTimeout(r, 10));
+
+      let sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string),
+      );
+      const newSessionResponse = sendCalls.find(
+        call =>
+          call.type === "response" &&
+          call.payload.command === "new_session" &&
+          call.payload.id === "cmd-dano-new",
+      );
+      const sessionPath = newSessionResponse?.payload.data.sessionPath;
+      expect(newSessionResponse?.payload.success).toBe(true);
+      expect(newSessionResponse?.payload.data.model).toMatchObject({
+        provider: "xiaomi-token-plan-cn",
+        id: "mimo-v2.5",
+      });
+      expect(newSessionResponse?.payload.data.thinkingLevel).toBe("medium");
+      expect(typeof sessionPath).toBe("string");
+      expect(fs.existsSync(sessionPath)).toBe(true);
+
+      const entries = fs
+        .readFileSync(sessionPath, "utf8")
+        .trim()
+        .split("\n")
+        .map(line => JSON.parse(line) as { type: string; [key: string]: unknown });
+      expect(entries).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "model_change",
+            provider: "xiaomi-token-plan-cn",
+            modelId: "mimo-v2.5",
+          }),
+          expect.objectContaining({
+            type: "thinking_level_change",
+            thinkingLevel: "medium",
+          }),
+        ]),
+      );
+
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: { id: "cmd-dano-state", type: "get_state" },
+          }),
+        ),
+      );
+
+      await new Promise(r => setTimeout(r, 10));
+
+      sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(call =>
+        JSON.parse(call[0] as string),
+      );
+      const stateResponse = sendCalls.find(
+        call =>
+          call.type === "response" &&
+          call.payload.command === "get_state" &&
+          call.payload.id === "cmd-dano-state",
+      );
+      expect(stateResponse?.payload.success).toBe(true);
+      expect(stateResponse?.payload.data.model).toMatchObject({
+        provider: "xiaomi-token-plan-cn",
+        id: "mimo-v2.5",
+      });
+      expect(stateResponse?.payload.data.thinkingLevel).toBe("medium");
+
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 

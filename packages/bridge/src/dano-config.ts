@@ -1,0 +1,98 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { RpcThinkingLevel } from "./types.js";
+
+const DANO_CONFIG_FILE_NAME = "dano.config.json";
+
+export interface DanoConfig {
+  defaultProvider?: string;
+  defaultModel?: string;
+  defaultThinkingLevel?: RpcThinkingLevel;
+  defaultProjectTrust?: "always" | string;
+}
+
+export const DANO_DEFAULT_CONFIG = {
+  defaultProvider: "xiaomi-token-plan-cn",
+  defaultModel: "mimo-v2.5",
+  defaultThinkingLevel: "medium",
+  defaultProjectTrust: "always",
+} satisfies Required<DanoConfig>;
+
+export interface LoadDanoConfigOptions {
+  cwd?: string;
+  env?: Record<string, string | undefined>;
+  startDir?: string;
+}
+
+function isThinkingLevel(value: unknown): value is RpcThinkingLevel {
+  return (
+    value === "off" ||
+    value === "minimal" ||
+    value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh"
+  );
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeDanoConfig(raw: unknown): DanoConfig {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {};
+  }
+
+  const record = raw as Record<string, unknown>;
+  const defaultProvider = readString(record.defaultProvider);
+  const defaultModel = readString(record.defaultModel);
+  const defaultProjectTrust = readString(record.defaultProjectTrust);
+  const defaultThinkingLevel = isThinkingLevel(record.defaultThinkingLevel)
+    ? record.defaultThinkingLevel
+    : undefined;
+
+  return {
+    ...(defaultProvider ? { defaultProvider } : {}),
+    ...(defaultModel ? { defaultModel } : {}),
+    ...(defaultThinkingLevel ? { defaultThinkingLevel } : {}),
+    ...(defaultProjectTrust ? { defaultProjectTrust } : {}),
+  };
+}
+
+function findNearestDanoConfig(startDir: string): string | undefined {
+  let current = resolve(startDir);
+
+  for (;;) {
+    const candidate = join(current, DANO_CONFIG_FILE_NAME);
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+
+    const parent = dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    current = parent;
+  }
+}
+
+export function loadDanoConfig(
+  options: LoadDanoConfigOptions = {},
+): DanoConfig {
+  const env = options.env ?? process.env;
+  const cwd = options.cwd ?? process.cwd();
+  const explicitPath = env.DANO_CONFIG_PATH?.trim();
+  const configPath = explicitPath
+    ? resolve(cwd, explicitPath)
+    : (findNearestDanoConfig(options.startDir ?? cwd) ??
+      findNearestDanoConfig(dirname(fileURLToPath(import.meta.url))));
+
+  if (!configPath || !existsSync(configPath)) {
+    return {};
+  }
+
+  const raw = JSON.parse(readFileSync(configPath, "utf8")) as unknown;
+  return normalizeDanoConfig(raw);
+}

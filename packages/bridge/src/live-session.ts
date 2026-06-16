@@ -74,6 +74,12 @@ export interface BridgeSessionState {
   /** Saved default model from runtime settings, when available. */
   getDefaultModel?(): { provider?: string; modelId?: string };
 
+  /** Ordered saved default models from runtime settings, when available. */
+  getDefaultModels?(): Array<{ provider?: string; modelId?: string }>;
+
+  /** Saved default thinking level from runtime settings, when available. */
+  getDefaultThinkingLevel?(): string | undefined;
+
   /** Current thinking level. */
   getThinkingLevel(): string;
 

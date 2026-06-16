@@ -1469,6 +1469,7 @@ function applySessionSnapshotResponse(
         transcript: RpcTranscriptPage;
         treeEntries?: TreeEntry[];
         model?: RpcModelInfo | null;
+        thinkingLevel?: RpcThinkingLevel | null;
         sessionId?: string;
         sessionName?: string;
         sessionPath?: string;
@@ -1497,10 +1498,14 @@ function applySessionSnapshotResponse(
   if ("model" in data) {
     updateCurrentModel(data.model);
   }
+  if ("thinkingLevel" in data) {
+    _currentThinkingLevel = normalizeThinkingLevel(data.thinkingLevel);
+  }
   if (data.sessionId) {
     _sessionState = {
       ..._sessionState,
       model: _currentModel ?? undefined,
+      thinkingLevel: _currentThinkingLevel ?? undefined,
       sessionId: data.sessionId,
       sessionName: data.sessionName,
       sessionFile: data.sessionPath ?? _sessionState?.sessionFile,

@@ -4,16 +4,31 @@ import type {
   SessionEntry,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import type { RpcModel } from "./types.js";
+import type { RpcModel, RpcThinkingLevel } from "./types.js";
 
 export interface DefaultModelSettings {
   provider?: string;
   modelId?: string;
 }
 
+export interface DefaultSessionSettings {
+  models?: readonly DefaultModelSettings[];
+  provider?: string;
+  modelId?: string;
+  thinkingLevel?: RpcThinkingLevel;
+}
+
+export interface SessionDefaultsState {
+  model?: RpcModel;
+  thinkingLevel: RpcThinkingLevel;
+}
+
 type ModelSessionManager = Pick<
   SessionManager,
-  "appendModelChange" | "getBranch" | "getSessionFile"
+  | "appendModelChange"
+  | "appendThinkingLevelChange"
+  | "getBranch"
+  | "getSessionFile"
 >;
 
 type FlushableSessionManager = {
@@ -85,14 +100,58 @@ export function findLatestModelInfo(
   return null;
 }
 
+export function findLatestThinkingLevelInfo(
+  branch: readonly SessionEntry[],
+): RpcThinkingLevel | null {
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    const entry = branch[index];
+    if (entry?.type !== "thinking_level_change") {
+      continue;
+    }
+
+    return normalizeThinkingLevel(entry.thinkingLevel);
+  }
+
+  return null;
+}
+
+function normalizeThinkingLevel(value: string): RpcThinkingLevel {
+  switch (value) {
+    case "off":
+    case "minimal":
+    case "low":
+    case "medium":
+    case "high":
+    case "xhigh":
+      return value;
+    default:
+      return "off";
+  }
+}
+
+function normalizeModelDefaults(
+  defaults?: DefaultModelSettings | DefaultSessionSettings,
+): readonly DefaultModelSettings[] {
+  const settings = defaults as DefaultSessionSettings | undefined;
+  if (settings?.models) {
+    return settings.models;
+  }
+
+  return defaults ? [defaults] : [];
+}
+
 export function selectInitialModel(
   availableModels: readonly RpcModel[],
-  defaults?: DefaultModelSettings,
+  defaults?: DefaultModelSettings | DefaultSessionSettings,
 ): RpcModel | null {
-  if (defaults?.provider && defaults.modelId) {
+  for (const candidate of normalizeModelDefaults(defaults)) {
+    if (!candidate.provider || !candidate.modelId) {
+      continue;
+    }
+
     const savedDefault = findAvailableModel(availableModels, {
-      provider: defaults.provider,
-      id: defaults.modelId,
+      provider: candidate.provider,
+      id: candidate.modelId,
     });
     if (savedDefault) {
       return savedDefault;
@@ -126,31 +185,73 @@ export function ensureSessionManagerModelChange(
   flushMissingSessionFile(sessionManager);
 }
 
+export function ensureSessionManagerThinkingLevelChange(
+  sessionManager: ModelSessionManager,
+  thinkingLevel: RpcThinkingLevel,
+): void {
+  const latestThinkingLevel = findLatestThinkingLevelInfo(
+    sessionManager.getBranch(),
+  );
+  if (latestThinkingLevel === thinkingLevel) {
+    flushMissingSessionFile(sessionManager);
+    return;
+  }
+
+  sessionManager.appendThinkingLevelChange(thinkingLevel);
+  flushMissingSessionFile(sessionManager);
+}
+
+export function initializeSessionManagerDefaults(
+  sessionManager: ModelSessionManager,
+  availableModels: readonly RpcModel[],
+  defaults?: DefaultSessionSettings,
+): SessionDefaultsState {
+  const latestModel = findLatestModelInfo(sessionManager.getBranch());
+  const model = latestModel
+    ? (findAvailableModel(availableModels, latestModel) ?? latestModel)
+    : (selectInitialModel(availableModels, defaults) ?? undefined);
+
+  if (!latestModel && model) {
+    ensureSessionManagerModelChange(sessionManager, model);
+  } else {
+    flushMissingSessionFile(sessionManager);
+  }
+
+  const latestThinkingLevel = findLatestThinkingLevelInfo(
+    sessionManager.getBranch(),
+  );
+  const thinkingLevel =
+    latestThinkingLevel ?? (model ? (defaults?.thinkingLevel ?? "off") : "off");
+
+  if (!latestThinkingLevel) {
+    ensureSessionManagerThinkingLevelChange(sessionManager, thinkingLevel);
+  } else {
+    flushMissingSessionFile(sessionManager);
+  }
+
+  return {
+    ...(model ? { model } : {}),
+    thinkingLevel,
+  };
+}
+
 export function initializeSessionManagerModel(
   sessionManager: ModelSessionManager,
   availableModels: readonly RpcModel[],
-  defaults?: DefaultModelSettings,
+  defaults?: DefaultSessionSettings,
 ): RpcModel | undefined {
-  const latestModel = findLatestModelInfo(sessionManager.getBranch());
-  if (latestModel) {
-    flushMissingSessionFile(sessionManager);
-    return findAvailableModel(availableModels, latestModel) ?? latestModel;
-  }
-
-  const initialModel = selectInitialModel(availableModels, defaults);
-  if (!initialModel) {
-    return undefined;
-  }
-
-  ensureSessionManagerModelChange(sessionManager, initialModel);
-  return initialModel;
+  return initializeSessionManagerDefaults(
+    sessionManager,
+    availableModels,
+    defaults,
+  ).model;
 }
 
 function flushMissingSessionFile(
   sessionManager: ModelSessionManager,
 ): void {
   const sessionFile = sessionManager.getSessionFile();
-  if (!sessionFile || existsSync(sessionFile)) {
+  if (!sessionFile) {
     return;
   }
 
@@ -159,35 +260,68 @@ function flushMissingSessionFile(
     return;
   }
 
+  if (existsSync(sessionFile) && flushable.flushed !== false) {
+    return;
+  }
+
   flushable._rewriteFile();
   flushable.flushed = true;
 }
 
+export function resolveAgentSessionDefaults(
+  session: AgentSession,
+  defaults?: DefaultSessionSettings,
+): SessionDefaultsState {
+  const availableModels = session.modelRegistry.getAvailable();
+  const branch = session.sessionManager.getBranch();
+  const latestModel = findLatestModelInfo(branch);
+  const model =
+    session.model ??
+    (latestModel
+      ? (findAvailableModel(availableModels, latestModel) ?? latestModel)
+      : (selectInitialModel(availableModels, defaults) ?? undefined));
+
+  if (model) {
+    const state = session.state as typeof session.state | undefined;
+    if (state) {
+      state.model = model as typeof state.model;
+    }
+  }
+
+  if (!latestModel && model) {
+    ensureSessionManagerModelChange(session.sessionManager, model);
+  }
+
+  const latestThinkingLevel = findLatestThinkingLevelInfo(branch);
+  const thinkingLevel =
+    latestThinkingLevel ??
+    (model
+      ? (defaults?.thinkingLevel ??
+        normalizeThinkingLevel(
+          session.settingsManager.getDefaultThinkingLevel() ?? "off",
+        ))
+      : "off");
+  const state = session.state as typeof session.state | undefined;
+  if (state) {
+    state.thinkingLevel = thinkingLevel;
+  }
+
+  if (!latestThinkingLevel) {
+    ensureSessionManagerThinkingLevelChange(
+      session.sessionManager,
+      thinkingLevel,
+    );
+  }
+
+  return {
+    ...(model ? { model } : {}),
+    thinkingLevel,
+  };
+}
+
 export function resolveAgentSessionModel(
   session: AgentSession,
+  defaults?: DefaultSessionSettings,
 ): RpcModel | undefined {
-  if (session.model) {
-    return session.model;
-  }
-
-  const availableModels = session.modelRegistry.getAvailable();
-  const latestModel = findLatestModelInfo(session.sessionManager.getBranch());
-  if (latestModel) {
-    const restoredModel =
-      findAvailableModel(availableModels, latestModel) ?? latestModel;
-    session.state.model = restoredModel as typeof session.state.model;
-    return restoredModel;
-  }
-
-  const initialModel = selectInitialModel(availableModels, {
-    provider: session.settingsManager.getDefaultProvider(),
-    modelId: session.settingsManager.getDefaultModel(),
-  });
-  if (!initialModel) {
-    return undefined;
-  }
-
-  session.state.model = initialModel as typeof session.state.model;
-  ensureSessionManagerModelChange(session.sessionManager, initialModel);
-  return initialModel;
+  return resolveAgentSessionDefaults(session, defaults).model;
 }

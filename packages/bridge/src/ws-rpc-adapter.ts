@@ -19,8 +19,12 @@ import type {
 } from "./live-session.js";
 import {
   findLatestModelInfo,
-  initializeSessionManagerModel as initializeDefaultModelForSessionManager,
-  resolveAgentSessionModel,
+  findLatestThinkingLevelInfo,
+  initializeSessionManagerDefaults as initializeDefaultSessionManagerDefaults,
+  resolveAgentSessionDefaults,
+  type DefaultModelSettings,
+  type DefaultSessionSettings,
+  type SessionDefaultsState,
 } from "./default-model.js";
 import { DetachedSessionRegistry } from "./session-registry.js";
 import type {
@@ -159,6 +163,7 @@ interface SessionSummary {
   transcript: RpcTranscriptPage;
   treeEntries: RpcTreeEntry[];
   model?: RpcModel;
+  thinkingLevel: RpcThinkingLevel;
   sessionId: string;
   sessionName: string;
   workspacePath?: string;
@@ -3079,13 +3084,35 @@ class SessionRuntime {
     return [];
   }
 
-  private initializeSessionManagerModel(
+  private defaultModelCandidates(): DefaultModelSettings[] {
+    const fromState =
+      this.context.state.getDefaultModels?.() ??
+      [this.context.state.getDefaultModel?.()].filter(
+        (model): model is DefaultModelSettings => Boolean(model),
+      );
+
+    return fromState.filter(model =>
+      Boolean(model.provider && model.modelId),
+    );
+  }
+
+  private defaultSessionSettings(): DefaultSessionSettings {
+    const defaultThinkingLevel = this.context.state.getDefaultThinkingLevel?.();
+    return {
+      models: this.defaultModelCandidates(),
+      ...(defaultThinkingLevel
+        ? { thinkingLevel: normalizeThinkingLevel(defaultThinkingLevel) }
+        : {}),
+    };
+  }
+
+  private initializeSessionManagerDefaults(
     sessionManager: SessionManager,
-  ): RpcModel | undefined {
-    return initializeDefaultModelForSessionManager(
+  ): SessionDefaultsState {
+    return initializeDefaultSessionManagerDefaults(
       sessionManager,
       this.context.state.getAvailableModels(),
-      this.context.state.getDefaultModel?.(),
+      this.defaultSessionSettings(),
     );
   }
 
@@ -3099,9 +3126,13 @@ class SessionRuntime {
           activeSession.sessionManager.getCwd() ?? this.context.state.cwd;
         const workspaceEnvironments =
           detectWorkspaceEnvironments(workspacePath);
+        const defaultsState = resolveAgentSessionDefaults(
+          activeSession,
+          this.defaultSessionSettings(),
+        );
         return {
-          model: resolveAgentSessionModel(activeSession),
-          thinkingLevel: activeSession.thinkingLevel,
+          model: defaultsState.model,
+          thinkingLevel: defaultsState.thinkingLevel,
           isStreaming: activeSession.isStreaming,
           isCompacting: activeSession.isCompacting,
           steeringMode: activeSession.steeringMode,
@@ -3125,7 +3156,7 @@ class SessionRuntime {
         const sessionManager = this.registry
           .openSession(this.selectedSessionPath)
           .getSessionManager();
-        this.initializeSessionManagerModel(sessionManager);
+        this.initializeSessionManagerDefaults(sessionManager);
         return buildStateFromStoredSession(
           sessionManager,
           this.context.state.cwd,
@@ -3135,20 +3166,22 @@ class SessionRuntime {
 
     const sessionFile = this.context.state.sessionManager.getSessionFile();
     const currentModel = this.context.state.getCurrentModel();
+    const defaultsState = this.initializeSessionManagerDefaults(
+      this.context.state.sessionManager,
+    );
     const branch = this.context.state.sessionManager.getBranch();
-    const model =
-      currentModel ??
-      findLatestModelInfo(branch) ??
-      this.initializeSessionManagerModel(this.context.state.sessionManager);
+    const model = currentModel ?? findLatestModelInfo(branch) ?? defaultsState.model;
+    const thinkingLevel = model
+      ? (findLatestThinkingLevelInfo(branch) ??
+        normalizeThinkingLevel(this.context.state.getThinkingLevel()))
+      : defaultsState.thinkingLevel;
     const entries = this.context.state.sessionManager.getEntries() ?? [];
     const workspaceEnvironments = detectWorkspaceEnvironments(
       this.context.state.cwd,
     );
     return {
       model,
-      thinkingLevel: normalizeThinkingLevel(
-        this.context.state.getThinkingLevel(),
-      ),
+      thinkingLevel,
       isStreaming: !this.context.state.isIdle(),
       isCompacting: false,
       steeringMode: "all",
@@ -3199,7 +3232,7 @@ class SessionRuntime {
         : undefined;
 
     const handle = this.registry.createSession({ cwd: targetCwd, sessionDir });
-    this.initializeSessionManagerModel(handle.getSessionManager());
+    this.initializeSessionManagerDefaults(handle.getSessionManager());
     await this.selectSessionPath(handle.sessionPath);
 
     return this.buildSessionSummary(
@@ -3281,6 +3314,9 @@ class SessionRuntime {
       ),
       treeEntries: buildTreeEntriesFromSession(sessionManager),
       model: findLatestModelInfo(sessionManager.getBranch()) ?? undefined,
+      thinkingLevel:
+        findLatestThinkingLevelInfo(sessionManager.getBranch()) ??
+        normalizeThinkingLevel(sessionManager.buildSessionContext().thinkingLevel),
       sessionId: sessionManager.getSessionId(),
       sessionName: sessionDisplayName(sessionManager, sessionPath),
       workspacePath: normalizeOptionalWorkspaceRoot(sessionManager.getCwd()),
@@ -4610,6 +4646,7 @@ export class WsRpcAdapter {
               transcript: autoCreated.transcript,
               treeEntries: autoCreated.treeEntries,
               model: autoCreated.model,
+              thinkingLevel: autoCreated.thinkingLevel,
               sessionId: autoCreated.sessionId,
               sessionName: autoCreated.sessionName,
               sessionPath: autoCreated.sessionPath,
@@ -5017,6 +5054,7 @@ export class WsRpcAdapter {
             transcript: created.transcript,
             treeEntries: created.treeEntries,
             model: created.model,
+            thinkingLevel: created.thinkingLevel,
             sessionId: created.sessionId,
             sessionName: created.sessionName,
             sessionPath: created.sessionPath,

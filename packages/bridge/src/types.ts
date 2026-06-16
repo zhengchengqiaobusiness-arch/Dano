@@ -599,6 +599,7 @@ export interface RpcResponseMap {
     transcript: RpcTranscriptPage;
     treeEntries: RpcTreeEntry[];
     model?: RpcModel;
+    thinkingLevel: RpcThinkingLevel;
     sessionId: string;
     sessionName: string;
     sessionPath: string;
