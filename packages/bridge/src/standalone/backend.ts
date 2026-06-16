@@ -4,6 +4,7 @@ import {
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
 import { createDetachedAgentSession } from "../detached-session.js";
+import { resolveAgentSessionModel } from "../default-model.js";
 import { createHeadlessUIContext } from "../headless-ui-context.js";
 import type {
   BridgeLiveEvent,
@@ -147,7 +148,14 @@ export function createStandaloneBridgeContextFromSession(
     },
 
     getCurrentModel() {
-      return session.model;
+      return resolveAgentSessionModel(session);
+    },
+
+    getDefaultModel() {
+      return {
+        provider: session.settingsManager.getDefaultProvider(),
+        modelId: session.settingsManager.getDefaultModel(),
+      };
     },
 
     getThinkingLevel() {

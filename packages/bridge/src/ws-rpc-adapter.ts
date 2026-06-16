@@ -17,6 +17,11 @@ import type {
   BridgeSessionEvents,
   BridgeSessionState,
 } from "./live-session.js";
+import {
+  findLatestModelInfo,
+  initializeSessionManagerModel as initializeDefaultModelForSessionManager,
+  resolveAgentSessionModel,
+} from "./default-model.js";
 import { DetachedSessionRegistry } from "./session-registry.js";
 import type {
   BridgeConfig,
@@ -153,6 +158,7 @@ interface SessionSummary {
   sessionPath: string;
   transcript: RpcTranscriptPage;
   treeEntries: RpcTreeEntry[];
+  model?: RpcModel;
   sessionId: string;
   sessionName: string;
   workspacePath?: string;
@@ -2358,17 +2364,6 @@ function streamStartMessage(
   };
 }
 
-function findLatestModelInfo(branch: readonly SessionEntry[]): RpcModel | null {
-  for (let index = branch.length - 1; index >= 0; index -= 1) {
-    const entry = branch[index];
-    if (entry?.type === "model_change") {
-      return { provider: entry.provider, id: entry.modelId };
-    }
-  }
-
-  return null;
-}
-
 function normalizeThinkingLevel(value: string): RpcThinkingLevel {
   switch (value) {
     case "off":
@@ -3084,6 +3079,16 @@ class SessionRuntime {
     return [];
   }
 
+  private initializeSessionManagerModel(
+    sessionManager: SessionManager,
+  ): RpcModel | undefined {
+    return initializeDefaultModelForSessionManager(
+      sessionManager,
+      this.context.state.getAvailableModels(),
+      this.context.state.getDefaultModel?.(),
+    );
+  }
+
   buildActiveState(): RpcSessionState {
     if (this.selectedSessionPath) {
       const activeSession = this.registry.getActiveSession(
@@ -3095,10 +3100,7 @@ class SessionRuntime {
         const workspaceEnvironments =
           detectWorkspaceEnvironments(workspacePath);
         return {
-          model:
-            activeSession.model ??
-            findLatestModelInfo(activeSession.sessionManager.getBranch()) ??
-            undefined,
+          model: resolveAgentSessionModel(activeSession),
           thinkingLevel: activeSession.thinkingLevel,
           isStreaming: activeSession.isStreaming,
           isCompacting: activeSession.isCompacting,
@@ -3120,21 +3122,30 @@ class SessionRuntime {
       }
 
       if (!this.isViewingLiveSession()) {
+        const sessionManager = this.registry
+          .openSession(this.selectedSessionPath)
+          .getSessionManager();
+        this.initializeSessionManagerModel(sessionManager);
         return buildStateFromStoredSession(
-          this.registry
-            .openSession(this.selectedSessionPath)
-            .getSessionManager(),
+          sessionManager,
           this.context.state.cwd,
         );
       }
     }
 
     const sessionFile = this.context.state.sessionManager.getSessionFile();
+    const currentModel = this.context.state.getCurrentModel();
+    const branch = this.context.state.sessionManager.getBranch();
+    const model =
+      currentModel ??
+      findLatestModelInfo(branch) ??
+      this.initializeSessionManagerModel(this.context.state.sessionManager);
+    const entries = this.context.state.sessionManager.getEntries() ?? [];
     const workspaceEnvironments = detectWorkspaceEnvironments(
       this.context.state.cwd,
     );
     return {
-      model: this.context.state.getCurrentModel(),
+      model,
       thinkingLevel: normalizeThinkingLevel(
         this.context.state.getThinkingLevel(),
       ),
@@ -3147,8 +3158,7 @@ class SessionRuntime {
       sessionName: sessionDisplayName(
         {
           getSessionName: () => undefined,
-          getEntries: () =>
-            this.context.state.sessionManager.getEntries() ?? [],
+          getEntries: () => entries,
           getSessionId: () => this.context.state.sessionManager.getSessionId(),
         },
         sessionFile,
@@ -3157,7 +3167,7 @@ class SessionRuntime {
       ...(workspaceEnvironments ? { workspaceEnvironments } : {}),
       gitBranch: getCurrentGitBranch(this.context.state.cwd),
       autoCompactionEnabled: false,
-      messageCount: this.context.state.sessionManager.getEntries()?.length ?? 0,
+      messageCount: entries.length,
       pendingMessageCount: this.context.state.hasPendingMessages() ? 1 : 0,
     };
   }
@@ -3189,6 +3199,7 @@ class SessionRuntime {
         : undefined;
 
     const handle = this.registry.createSession({ cwd: targetCwd, sessionDir });
+    this.initializeSessionManagerModel(handle.getSessionManager());
     await this.selectSessionPath(handle.sessionPath);
 
     return this.buildSessionSummary(
@@ -3269,6 +3280,7 @@ class SessionRuntime {
         { limit: transcriptLimit },
       ),
       treeEntries: buildTreeEntriesFromSession(sessionManager),
+      model: findLatestModelInfo(sessionManager.getBranch()) ?? undefined,
       sessionId: sessionManager.getSessionId(),
       sessionName: sessionDisplayName(sessionManager, sessionPath),
       workspacePath: normalizeOptionalWorkspaceRoot(sessionManager.getCwd()),
@@ -4597,6 +4609,7 @@ export class WsRpcAdapter {
             data: {
               transcript: autoCreated.transcript,
               treeEntries: autoCreated.treeEntries,
+              model: autoCreated.model,
               sessionId: autoCreated.sessionId,
               sessionName: autoCreated.sessionName,
               sessionPath: autoCreated.sessionPath,
@@ -5003,6 +5016,7 @@ export class WsRpcAdapter {
           data: {
             transcript: created.transcript,
             treeEntries: created.treeEntries,
+            model: created.model,
             sessionId: created.sessionId,
             sessionName: created.sessionName,
             sessionPath: created.sessionPath,

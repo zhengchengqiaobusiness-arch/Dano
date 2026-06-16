@@ -4,7 +4,7 @@
     RpcImageContent,
     RpcTranscriptContent,
     RpcTranscriptContentBlock,
-  } from "@pi-web/bridge/types";
+  } from "@dano/bridge/types";
   import Pencil from "lucide-svelte/icons/pencil";
   import Sparkle from "lucide-svelte/icons/sparkle";
   import type {

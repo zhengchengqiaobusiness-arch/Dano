@@ -7,7 +7,7 @@ import type {
   RpcTranscriptContentBlock,
   RpcTranscriptMessage,
   RpcWorkspaceSummary,
-} from "@pi-web/bridge/types";
+} from "@dano/bridge/types";
 import type { SessionEntry } from "../composables/bridgeStore.svelte";
 import type { RpcModelInfo } from "./models";
 
@@ -451,7 +451,7 @@ const BASH_FIXTURE_ARGS = {
   timeout: 180,
 };
 const BASH_FIXTURE_PARTIAL_OUTPUT = [
-  "> @pi-web/svelte check",
+  "> @dano/svelte check",
   "Loading svelte-check...",
   "svelte-check found 0 errors and 0 warnings",
   "",

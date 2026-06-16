@@ -64,7 +64,7 @@ importers:
 
   packages/svelte:
     dependencies:
-      '@pi-web/bridge':
+      '@dano/bridge':
         specifier: workspace:*
         version: link:../bridge
     devDependencies:

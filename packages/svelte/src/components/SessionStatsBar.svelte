@@ -2,7 +2,7 @@
   import type {
     RpcSessionStats,
     RpcWorkspaceEnvironment,
-  } from "@pi-web/bridge/types";
+  } from "@dano/bridge/types";
 
   const statsGap = 8;
   const statsSlack = 4;

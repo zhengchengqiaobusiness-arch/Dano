@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { RpcWorkspaceFile } from "@pi-web/bridge/types";
+  import type { RpcWorkspaceFile } from "@dano/bridge/types";
   import X from "lucide-svelte/icons/x";
   import FileViewerPanel from "../components/FileViewerPanel.svelte";
   import SessionTreeRail from "../components/SessionTreeRail.svelte";

@@ -1,4 +1,4 @@
-import type { RpcTreeEntry, RpcTreeTrackColumn } from "@pi-web/bridge/types";
+import type { RpcTreeEntry, RpcTreeTrackColumn } from "@dano/bridge/types";
 
 export type TreeFilterMode =
   | "default"

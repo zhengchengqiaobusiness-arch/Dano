@@ -1,4 +1,4 @@
-import type { RpcSlashCommand } from "@pi-web/bridge/types";
+import type { RpcSlashCommand } from "@dano/bridge/types";
 
 export interface SlashCommandOption {
   name: string;

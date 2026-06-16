@@ -87,6 +87,7 @@ const createMockContext = (): WsRpcAdapterContext => {
     getEntries: vi.fn().mockReturnValue([{ role: "user", content: "Hello" }]),
     getTree: vi.fn().mockReturnValue([]),
     getSessionName: vi.fn().mockReturnValue("test-session"),
+    appendModelChange: vi.fn(),
   };
 
   const model = {
@@ -123,6 +124,10 @@ const createMockContext = (): WsRpcAdapterContext => {
       },
     ]),
     getCurrentModel: vi.fn().mockReturnValue(model),
+    getDefaultModel: vi.fn().mockReturnValue({
+      provider: "openai",
+      modelId: "gpt-4",
+    }),
     getThinkingLevel: vi.fn().mockReturnValue("medium"),
     getContextUsage: vi
       .fn()
@@ -674,6 +679,185 @@ describe("WsRpcAdapter", () => {
           contextWindow: 8000,
           percent: 12.5,
         },
+      });
+    });
+
+    it("returns the live branch model when get_state has no live current model", async () => {
+      (context.state.getCurrentModel as ReturnType<typeof vi.fn>).mockReturnValue(
+        undefined,
+      );
+      (
+        context.state.sessionManager.getBranch as ReturnType<typeof vi.fn>
+      ).mockReturnValue([
+        {
+          type: "model_change",
+          provider: "openai",
+          modelId: "gpt-4.1",
+        },
+      ]);
+
+      const command: RpcCommand = { id: "cmd-model", type: "get_state" };
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(JSON.stringify({ type: "command", payload: command })),
+      );
+
+      await new Promise(r => setTimeout(r, 10));
+
+      const sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string),
+      );
+      const response = sendCalls.find(
+        call =>
+          call.type === "response" &&
+          call.payload.command === "get_state" &&
+          call.payload.id === "cmd-model",
+      );
+
+      expect(response?.payload.success).toBe(true);
+      expect(response?.payload.data.model).toEqual({
+        provider: "openai",
+        id: "gpt-4.1",
+      });
+    });
+
+    it("initializes live get_state from the default available model", async () => {
+      (context.state.getCurrentModel as ReturnType<typeof vi.fn>).mockReturnValue(
+        undefined,
+      );
+      (
+        context.state.sessionManager.getBranch as ReturnType<typeof vi.fn>
+      ).mockReturnValue([]);
+      (
+        context.state.sessionManager.getEntries as ReturnType<typeof vi.fn>
+      ).mockReturnValue([]);
+
+      const command: RpcCommand = { id: "cmd-default-model", type: "get_state" };
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(JSON.stringify({ type: "command", payload: command })),
+      );
+
+      await new Promise(r => setTimeout(r, 10));
+
+      const sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string),
+      );
+      const response = sendCalls.find(
+        call =>
+          call.type === "response" &&
+          call.payload.command === "get_state" &&
+          call.payload.id === "cmd-default-model",
+      );
+
+      expect(response?.payload.success).toBe(true);
+      expect(response?.payload.data.model).toMatchObject({
+        provider: "openai",
+        id: "gpt-4",
+      });
+      expect(
+        context.state.sessionManager.appendModelChange,
+      ).toHaveBeenCalledWith("openai", "gpt-4");
+    });
+
+    it("keeps get_state model empty when no models are available", async () => {
+      (context.state.getCurrentModel as ReturnType<typeof vi.fn>).mockReturnValue(
+        undefined,
+      );
+      (
+        context.state.sessionManager.getBranch as ReturnType<typeof vi.fn>
+      ).mockReturnValue([]);
+      (context.state.getAvailableModels as ReturnType<typeof vi.fn>).mockReturnValue(
+        [],
+      );
+
+      const command: RpcCommand = { id: "cmd-no-model", type: "get_state" };
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(JSON.stringify({ type: "command", payload: command })),
+      );
+
+      await new Promise(r => setTimeout(r, 10));
+
+      const sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string),
+      );
+      const response = sendCalls.find(
+        call =>
+          call.type === "response" &&
+          call.payload.command === "get_state" &&
+          call.payload.id === "cmd-no-model",
+      );
+
+      expect(response?.payload.success).toBe(true);
+      expect(response?.payload.data.model).toBeUndefined();
+      expect(
+        context.state.sessionManager.appendModelChange,
+      ).not.toHaveBeenCalled();
+    });
+
+    it("returns the selected model after set_model", async () => {
+      (context.actions.setModel as ReturnType<typeof vi.fn>).mockImplementation(
+        async model => {
+          (
+            context.state.getCurrentModel as ReturnType<typeof vi.fn>
+          ).mockReturnValue(model);
+        },
+      );
+
+      const setModelCommand: RpcCommand = {
+        id: "cmd-set-model",
+        type: "set_model",
+        provider: "anthropic",
+        modelId: "claude",
+      };
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({ type: "command", payload: setModelCommand }),
+        ),
+      );
+
+      await new Promise(r => setTimeout(r, 10));
+
+      const stateCommand: RpcCommand = {
+        id: "cmd-state-after-set",
+        type: "get_state",
+      };
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(JSON.stringify({ type: "command", payload: stateCommand })),
+      );
+
+      await new Promise(r => setTimeout(r, 10));
+
+      const sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string),
+      );
+      const response = sendCalls.find(
+        call =>
+          call.type === "response" &&
+          call.payload.command === "get_state" &&
+          call.payload.id === "cmd-state-after-set",
+      );
+
+      expect(context.actions.setModel).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: "anthropic", id: "claude" }),
+      );
+      expect(response?.payload.success).toBe(true);
+      expect(response?.payload.data.model).toMatchObject({
+        provider: "anthropic",
+        id: "claude",
       });
     });
 
@@ -2740,7 +2924,11 @@ describe("WsRpcAdapter", () => {
       const pendingSessionPath = newSessionResponse?.payload.data.sessionPath;
 
       expect(typeof pendingSessionPath).toBe("string");
-      expect(fs.existsSync(pendingSessionPath)).toBe(false);
+      expect(
+        newSessionResponse?.payload.data.treeEntries.find(
+          (entry: { type: string }) => entry.type === "model_change",
+        ),
+      ).toBeTruthy();
 
       const switchToLiveCommand: RpcCommand = {
         id: "cmd-switch-live",
@@ -3799,8 +3987,17 @@ describe("WsRpcAdapter", () => {
       expect(responseCall?.payload.data.cancelled).toBe(false);
       expect(responseCall?.payload.data.sessionId).toBeTruthy();
       expect(responseCall?.payload.data.sessionName).toBe("New session");
+      expect(responseCall?.payload.data.model).toMatchObject({
+        provider: "openai",
+        id: "gpt-4",
+      });
       expect(responseCall?.payload.data.transcript.messages).toEqual([]);
       expect(responseCall?.payload.data.transcript.hasOlder).toBe(false);
+      expect(
+        responseCall?.payload.data.treeEntries.find(
+          (entry: { type: string }) => entry.type === "model_change",
+        ),
+      ).toBeTruthy();
 
       const statsEvent = sendCalls.find(
         call =>
@@ -3824,6 +4021,76 @@ describe("WsRpcAdapter", () => {
       });
 
       // Clean up temp dir
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("restores get_state model from an old session model_change", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-old-model-"));
+      const sessionFile = path.join(tmpDir, "old-session.jsonl");
+      fs.writeFileSync(
+        sessionFile,
+        [
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: "old-model-session",
+            timestamp: "2025-01-02T00:00:00Z",
+            cwd: tmpDir,
+          }),
+          JSON.stringify({
+            type: "model_change",
+            id: "old-model-entry",
+            parentId: null,
+            timestamp: "2025-01-02T00:00:01Z",
+            provider: "openai",
+            modelId: "gpt-4.1",
+          }),
+        ].join("\n") + "\n",
+      );
+
+      const switchCommand: RpcCommand = {
+        id: "cmd-switch-old-model",
+        type: "switch_session",
+        sessionPath: sessionFile,
+      };
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(JSON.stringify({ type: "command", payload: switchCommand })),
+      );
+
+      await new Promise(r => setTimeout(r, 10));
+
+      const stateCommand: RpcCommand = {
+        id: "cmd-old-model-state",
+        type: "get_state",
+      };
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(JSON.stringify({ type: "command", payload: stateCommand })),
+      );
+
+      await new Promise(r => setTimeout(r, 10));
+
+      const sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string),
+      );
+      const response = sendCalls.find(
+        call =>
+          call.type === "response" &&
+          call.payload.command === "get_state" &&
+          call.payload.id === "cmd-old-model-state",
+      );
+
+      expect(response?.payload.success).toBe(true);
+      expect(response?.payload.data.model).toEqual({
+        provider: "openai",
+        id: "gpt-4.1",
+      });
+
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { RpcWorkspaceFile } from "@pi-web/bridge/types";
+  import type { RpcWorkspaceFile } from "@dano/bridge/types";
   import { onMount } from "svelte";
   import { highlightCodeLinesHtml } from "../utils/codeHighlight";
 

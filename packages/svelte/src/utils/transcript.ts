@@ -10,7 +10,7 @@ import type {
   RpcTranscriptMessage,
   RpcTranscriptSystemBlock,
   RpcTranscriptToolResultBlock,
-} from "@pi-web/bridge/types";
+} from "@dano/bridge/types";
 
 export type JsonObject = RpcJsonObject;
 export type JsonValue = RpcJsonValue;

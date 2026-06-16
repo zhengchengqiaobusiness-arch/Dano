@@ -28,7 +28,7 @@ import type {
   RpcSessionStatsEvent,
   RpcWorkspaceSummary,
   ServerMessage,
-} from "@pi-web/bridge/types";
+} from "@dano/bridge/types";
 import {
   normalizeRpcModel,
   upsertModel,
@@ -1468,6 +1468,7 @@ function applySessionSnapshotResponse(
     | {
         transcript: RpcTranscriptPage;
         treeEntries?: TreeEntry[];
+        model?: RpcModelInfo | null;
         sessionId?: string;
         sessionName?: string;
         sessionPath?: string;
@@ -1493,9 +1494,13 @@ function applySessionSnapshotResponse(
   if (data.workspacePath) {
     ensureWorkspaceSummary(data.workspacePath);
   }
+  if ("model" in data) {
+    updateCurrentModel(data.model);
+  }
   if (data.sessionId) {
     _sessionState = {
       ..._sessionState,
+      model: _currentModel ?? undefined,
       sessionId: data.sessionId,
       sessionName: data.sessionName,
       sessionFile: data.sessionPath ?? _sessionState?.sessionFile,

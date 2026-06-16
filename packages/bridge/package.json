@@ -1,5 +1,5 @@
 {
-  "name": "@pi-web/bridge",
+  "name": "@dano/bridge",
   "version": "0.3.4",
   "private": true,
   "description": "HTTP/SSE RPC bridge server for Pi Web",

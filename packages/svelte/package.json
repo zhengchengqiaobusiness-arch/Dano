@@ -1,5 +1,5 @@
 {
-  "name": "@pi-web/svelte",
+  "name": "@dano/svelte",
   "version": "0.3.4",
   "private": true,
   "description": "Svelte 5 web client for Pi Web",
@@ -11,7 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@pi-web/bridge": "workspace:*"
+    "@dano/bridge": "workspace:*"
   },
   "devDependencies": {
     "@comark/svelte": "^0.3.1",

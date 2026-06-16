@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { RpcGitBranch, RpcGitRepoState } from "@pi-web/bridge/types";
+  import type { RpcGitBranch, RpcGitRepoState } from "@dano/bridge/types";
   import Check from "lucide-svelte/icons/check";
   import GitBranchIcon from "lucide-svelte/icons/git-branch";
   import Plus from "lucide-svelte/icons/plus";

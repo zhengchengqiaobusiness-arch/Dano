@@ -1,5 +1,5 @@
 {
-  "name": "dano",
+  "name": "@dano/dano",
   "version": "0.1.0",
   "private": true,
   "description": "Dano P0 web LLM chat",

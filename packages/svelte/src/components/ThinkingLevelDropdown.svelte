@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { RpcThinkingLevel } from "@pi-web/bridge/types";
+  import type { RpcThinkingLevel } from "@dano/bridge/types";
   import Check from "lucide-svelte/icons/check";
   import ChevronDown from "lucide-svelte/icons/chevron-down";
   import {

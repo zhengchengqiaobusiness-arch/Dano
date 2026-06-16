@@ -3,7 +3,7 @@ import type {
   RpcSlashCommand,
   RpcThinkingLevel,
   RpcWorkspaceEntry,
-} from "@pi-web/bridge/types";
+} from "@dano/bridge/types";
 import type { ConnectionStatus } from "../composables/bridgeStore.svelte";
 import {
   createComposerAttachments,

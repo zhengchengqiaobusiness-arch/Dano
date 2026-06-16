@@ -5,7 +5,7 @@
     RpcSlashCommand,
     RpcThinkingLevel,
     RpcWorkspaceEntry,
-  } from "@pi-web/bridge/types";
+  } from "@dano/bridge/types";
   import Check from "lucide-svelte/icons/check";
   import CornerDownLeft from "lucide-svelte/icons/corner-down-left";
   import ImagePlus from "lucide-svelte/icons/image-plus";

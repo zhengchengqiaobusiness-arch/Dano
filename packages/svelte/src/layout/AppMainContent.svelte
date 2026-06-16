@@ -8,7 +8,7 @@
     RpcThinkingLevel,
     RpcWorkspaceEntry,
     RpcWorkspaceFile,
-  } from "@pi-web/bridge/types";
+  } from "@dano/bridge/types";
   import ChatTranscript from "../components/ChatTranscript.svelte";
   import CompatWarning from "../components/CompatWarning.svelte";
   import ComposerBar from "../components/ComposerBar.svelte";

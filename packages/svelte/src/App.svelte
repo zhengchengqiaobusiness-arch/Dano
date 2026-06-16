@@ -4,7 +4,7 @@
     RpcThinkingLevel,
     RpcWorkspaceEntry,
     RpcWorkspaceFile,
-  } from "@pi-web/bridge/types";
+  } from "@dano/bridge/types";
   import { onMount } from "svelte";
   import ExtensionDialog from "./components/ExtensionDialog.svelte";
   import ReconnectBanner from "./components/ReconnectBanner.svelte";

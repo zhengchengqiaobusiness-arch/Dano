@@ -173,6 +173,78 @@ describe("standalone bridge backend", () => {
     expect(mock.session.dispose).toHaveBeenCalled();
   });
 
+  it("hydrates a missing standalone current model and writes it to the session", () => {
+    const model = {
+      id: "gpt-4",
+      name: "GPT-4",
+      provider: "openai",
+      api: "openai-responses",
+      reasoning: true,
+      contextWindow: 128000,
+      maxTokens: 8192,
+    };
+    const branchEntries: unknown[] = [];
+    const sessionState: { model?: typeof model } = {};
+    const sessionManager = {
+      getCwd: vi.fn().mockReturnValue("/test/project"),
+      getSessionId: vi.fn().mockReturnValue("session-456"),
+      getSessionFile: vi.fn().mockReturnValue("/test/session-456.jsonl"),
+      getBranch: vi.fn(() => branchEntries),
+      appendModelChange: vi.fn((provider: string, modelId: string) => {
+        branchEntries.push({
+          type: "model_change",
+          provider,
+          modelId,
+        });
+      }),
+    };
+    const session = {
+      sessionManager,
+      modelRegistry: {
+        getAvailable: vi.fn().mockReturnValue([model]),
+      },
+      settingsManager: {
+        getDefaultProvider: vi.fn().mockReturnValue("openai"),
+        getDefaultModel: vi.fn().mockReturnValue("gpt-4"),
+      },
+      extensionRunner: {
+        getRegisteredCommands: vi.fn().mockReturnValue([]),
+      },
+      promptTemplates: [],
+      state: sessionState,
+      get model() {
+        return sessionState.model;
+      },
+      thinkingLevel: "medium",
+      isStreaming: false,
+      getContextUsage: vi.fn().mockReturnValue(null),
+      subscribe: vi.fn().mockReturnValue(vi.fn()),
+      sendUserMessage: vi.fn(),
+      abort: vi.fn(),
+      setModel: vi.fn(),
+      setThinkingLevel: vi.fn(),
+      setSessionName: vi.fn(),
+      dispose: vi.fn(),
+    };
+
+    const backend = createStandaloneBridgeContextFromSession(
+      session as unknown as AgentSession,
+    );
+
+    expect(backend.context.state.getCurrentModel()).toMatchObject({
+      provider: "openai",
+      id: "gpt-4",
+    });
+    expect(session.model).toMatchObject({
+      provider: "openai",
+      id: "gpt-4",
+    });
+    expect(sessionManager.appendModelChange).toHaveBeenCalledWith(
+      "openai",
+      "gpt-4",
+    );
+  });
+
   it("starts and stops the standalone server lifecycle", async () => {
     const mock = createMockSession();
     const backend = createStandaloneBridgeContextFromSession(mock.session);
