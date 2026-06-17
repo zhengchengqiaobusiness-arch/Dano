@@ -19,15 +19,18 @@ log = structlog.get_logger(__name__)
 
 
 class GenerationLoop:
-    def __init__(self, coder: Coder) -> None:
+    def __init__(self, coder: Coder, *, lifecycle=None) -> None:  # noqa: ANN001
         self.coder = coder
+        self.lifecycle = lifecycle                            # 给定则发布后登记到生命周期(已发布)
 
     async def run(self, goal: GoalBrief, strategy) -> GenerationResult:  # noqa: ANN001
-        from dano.agent_tools import tools as T
+        from dano.agent_tools import materials, tools as T
 
+        mat = materials.get(goal.run_id, goal.system_instance_id)
         plan = strategy.decompose(goal)                       # 拆解 + 定方案
         feedback: list[str] = []
         iters: list[IterationRecord] = []
+        result: GenerationResult | None = None
 
         for i in range(goal.budget.max_iters):
             body = await self.coder.generate(plan=plan, feedback=feedback)   # 编码 / 修复
@@ -44,17 +47,37 @@ class GenerationLoop:
                     iters.append(IterationRecord(index=i, passed=True, reasons=[], asset_draft_id=did))
                     log.info("generation.published", flow=goal.flow, iter=i,
                              asset_id=pub["asset_id"], rejections=i)
-                    return GenerationResult(ok=True, flow=goal.flow,
-                                            asset_id=pub["asset_id"], iterations=iters)
+                    if self.lifecycle is not None and mat is not None:   # 登记到生命周期(已发布)
+                        from dano.shared.enums import Subsystem
+                        await self.lifecycle.register_published(
+                            f"{mat.subsystem}.{goal.flow}", Subsystem(mat.subsystem),
+                            goal.flow, pub.get("version", 1))
+                    result = GenerationResult(ok=True, flow=goal.flow,
+                                              asset_id=pub["asset_id"], iterations=iters)
+                    break
                 reasons = [pub.get("reason", "发布失败")]          # 闸门驳回也回灌
 
             iters.append(IterationRecord(index=i, passed=False, reasons=reasons, asset_draft_id=did))
             feedback = reasons or ["未通过验收"]
             log.info("generation.rejected", flow=goal.flow, iter=i, reasons=feedback)
 
-        log.warning("generation.exhausted", flow=goal.flow, iters=len(iters))
-        return GenerationResult(ok=False, flow=goal.flow, asset_id=None,
-                                iterations=iters, reason="耗尽预算仍未通过")
+        if result is None:
+            log.warning("generation.exhausted", flow=goal.flow, iters=len(iters))
+            result = GenerationResult(ok=False, flow=goal.flow, asset_id=None,
+                                      iterations=iters, reason="耗尽预算仍未通过")
+        await self._persist(goal, strategy, result)            # 可追溯(尽力而为)
+        return result
+
+    @staticmethod
+    async def _persist(goal: GoalBrief, strategy, result: GenerationResult) -> None:  # noqa: ANN001
+        """落 generation_runs(审计自动生成);取不到租户作用域则跳过,绝不拖垮生成。"""
+        from dano.agent_tools import materials
+        from dano.generation.store import save_generation_run
+        mat = materials.get(goal.run_id, goal.system_instance_id)
+        if mat is None:
+            return
+        await save_generation_run(result, run_id=goal.run_id, tenant=mat.tenant,
+                                  subsystem=mat.subsystem, strategy=getattr(strategy, "name", None))
 
     @staticmethod
     async def _gates(T, goal: GoalBrief, did: str) -> tuple[bool, list[str], list[str], list[str]]:  # noqa: ANN001

@@ -62,7 +62,9 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
     risk = RiskLevel(skill.risk_level)
     # 阶段4:标题优先用接口 summary(skill.title),退而用内置词典,再退动作名
     title = skill.title or _ACTION_TITLES.get(skill.action, skill.action)
-    if skill.is_workflow:
+    if getattr(skill, "is_adapter", False):
+        integration, kind = "adapter", "流程"      # goal 模式生成的代码 Skill
+    elif skill.is_workflow:
         integration, kind = "workflow", "流程"
     elif skill.has_api:
         integration = "api"

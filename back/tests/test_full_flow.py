@@ -182,7 +182,8 @@ async def test_full_flow_real_pi_discovers_workflow(mock_oa):
     try:
         key = (await c.post("/tenants", json={"tenant": "full"})).json()["api_key"]
         rep = (await c.post("/onboarding", json={"tenant": "full", "subsystem": "A-OA",
-               "openapi": _spec(), "deploy": _DEPLOY, "credentials": _CREDS})).json()
+               "openapi": _spec(), "deploy": _DEPLOY, "credentials": _CREDS,
+               "use_codegen": False})).json()
         assert rep["status"] == "completed", rep
 
         skills = (await c.get("/v1/skills", headers={"X-Tenant-Key": key})).json()

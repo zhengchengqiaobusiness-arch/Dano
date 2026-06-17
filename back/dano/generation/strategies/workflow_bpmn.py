@@ -12,6 +12,13 @@ from __future__ import annotations
 from dano.generation.artifacts import GoalBrief
 from dano.shared.asset_bodies import FactCheckSpec, PlanBody
 
+# 运行期注入的内部字段(非用户业务字段),不计入 user_fields/required_fields
+_RESERVED = {"__base_url__"}
+
+
+def _user_fields(test_input: dict) -> list[str]:
+    return [k for k in test_input if k not in _RESERVED]
+
 
 class WorkflowBpmnStrategy:
     name = "workflow_bpmn"
@@ -37,8 +44,8 @@ class WorkflowBpmnStrategy:
                 "operate_type_submit": "200",
                 "form_save_note": "formData 内层须为 JSON 串 {formData:表单结构, valData:用户填的值};缺 valData 会转换失败",
             },
-            user_fields=list(goal.test_input.keys()),
-            required_fields=list(goal.test_input.keys()),
+            user_fields=_user_fields(goal.test_input),
+            required_fields=_user_fields(goal.test_input),
             success_rule="response.code == null or response.code == 200",
             fact_check=FactCheckSpec(
                 endpoint="/flowable/monitor/listProcess?procInstId={procInsId}&pageNum=1&pageSize=5",

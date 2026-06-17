@@ -54,14 +54,16 @@ class Settings(BaseSettings):
     # 复用 pi 的 OpenAI 兼容凭证(DANO_PI_API_KEY + DANO_PI_BASE_URL);三审各用不同模型,
     # 发布闸门强制 distinct(model_id)=3。后期改模型名即可,无需改代码。
     review_enabled: bool = True
-    review_model_acceptance: str = "deepseek-reasoner"     # 成果验收:是否真满足业务意图
-    review_model_security: str = "deepseek-v4-pro"         # 漏洞检测:注入/越权/密钥/SSRF/PII
-    review_model_compliance: str = "deepseek-v4-flash"     # 合规审核:沙箱/测试凭证/风险分级/确认
+    # 三审各用**不同模型**(SiliconFlow);发布闸门强制 distinct(model_id)=3。改模型名即可,无需改代码。
+    review_model_acceptance: str = "deepseek-ai/DeepSeek-V4-Pro"   # 成果验收:是否真满足业务意图
+    review_model_security: str = "Pro/zai-org/GLM-5.1"            # 漏洞检测:注入/越权/密钥/SSRF/PII
+    review_model_compliance: str = "deepseek-ai/DeepSeek-V3.2"     # 合规审核:沙箱/测试凭证/风险分级/确认
     review_timeout_s: float = 60.0                         # 单次评审 LLM 调用超时
     review_max_retries: int = 2                            # 瞬时错误(超时/5xx/限流)重试次数
     review_retry_backoff_s: float = 1.0                    # 指数退避基数(1s,2s,...)
-    pi_api_key: str = ""                                   # = DANO_PI_API_KEY(评审复用)
-    pi_base_url: str = "https://api.deepseek.com"          # = DANO_PI_BASE_URL(OpenAI 兼容)
+    pi_api_key: str = ""                                   # = DANO_PI_API_KEY(评审 + 编码复用)
+    pi_base_url: str = "https://api.siliconflow.cn/v1"     # = DANO_PI_BASE_URL(OpenAI 兼容)
+    pi_model: str = "deepseek-ai/DeepSeek-V3.2"            # = DANO_PI_MODEL(PiCoder 编码用)
 
     # ── 企业微信接入 ──
     wechat_token: str = ""                        # 企微回调验签 Token

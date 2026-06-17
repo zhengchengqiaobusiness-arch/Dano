@@ -197,7 +197,7 @@ async def test_e2e_goal_discovery(mock_oa):
     report = await onboard(tenant="ph6", subsystem="A-OA", system_instance_id="A-OA", openapi=_spec(),
                            deploy={"base_url": "http://localhost:9002", "auth": {"kind": "token"}},
                            credentials={"token": "ruoyi-mock-token-xyz"}, discover_workflows=True,
-                           timeout_s=300.0)
+                           use_codegen=False, timeout_s=300.0)
     assert report.status == "completed"
     # pi 发现的复合流程出现在已发布 Skill 里(submit_leave 或其他复合名)
     from dano.assets.repository import AssetRepository

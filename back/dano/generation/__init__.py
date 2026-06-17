@@ -7,6 +7,8 @@
 """
 
 from dano.generation.artifacts import Budget, GenerationResult, GoalBrief, IterationRecord
+from dano.generation.coder import PiCoder
 from dano.generation.controller import GenerationLoop
 
-__all__ = ["Budget", "GenerationResult", "GoalBrief", "IterationRecord", "GenerationLoop"]
+__all__ = ["Budget", "GenerationResult", "GoalBrief", "IterationRecord",
+           "GenerationLoop", "PiCoder"]

@@ -85,7 +85,7 @@ async function realRun(start) {
     }
   } catch {}
   return { status: "completed", skills_loaded: skillsLoaded, tool_events: toolEvents,
-           final_text: finalText.slice(0, 600) };
+           final_text: finalText.slice(0, 100000) };   // 足够容纳生成的代码(原 600 会截断 codegen)
 }
 
 async function stubRun(start) {

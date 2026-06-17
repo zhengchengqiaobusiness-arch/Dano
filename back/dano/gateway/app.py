@@ -125,7 +125,40 @@ class OnboardReq(BaseModel):
     openapi: dict
     deploy: dict
     credentials: dict[str, str] = {}
-    policy_text: str = ""          # 制度文件原文(可选,流程4 抽规则)
+    policy_text: str = ""          # 制度文件原文(可选,仅旧声明式路径)
+    include_tags: list[str] = []   # 类别白名单(空=全部业务动作;超大 swagger 先圈范围)
+    flows: list[dict] = []         # 写/复合流程声明 [{flow, actions?, test_input}](codegen 主路径用)
+    use_codegen: bool = True       # 主路径=goal 模式代码自动生成;False=旧声明式
+    max_read_flows: int | None = None   # 自动生成的只读 adapter 上限(None=全部;大 swagger 建议设小)
+
+
+class PreviewReq(BaseModel):
+    openapi: dict
+    subsystem: str = "A-OA"
+
+
+@app.post("/onboarding/preview")
+async def onboarding_preview(req: PreviewReq) -> dict:
+    """接入前预览:按 tag 返回类别清单与动作数(过滤基础设施),供企业勾选要哪些类别。
+
+    只解析、不 spawn pi、不碰凭证;超大 swagger 据此先圈定范围再接入。
+    """
+    from dano.capabilities import doc_parser, endpoint_classifier, oa_templates
+    spec = req.openapi or {}
+    template = oa_templates.match_template(spec)
+    extra = template.infrastructure_patterns() if template else ()
+    categories: dict[str, int] = {}
+    total = 0
+    for a in doc_parser.parse_openapi(spec):
+        if endpoint_classifier.classify(a, extra_infra=extra) == endpoint_classifier.INFRASTRUCTURE:
+            continue
+        total += 1
+        for t in (a.tags or ["(未分类)"]):
+            categories[t] = categories.get(t, 0) + 1
+    return {"template": template.name if template else None,
+            "business_action_count": total,
+            "categories": [{"tag": k, "count": v} for k, v in
+                           sorted(categories.items(), key=lambda kv: -kv[1])]}
 
 
 @app.post("/onboarding")
@@ -133,7 +166,9 @@ async def onboarding(req: OnboardReq) -> dict:
     from dano.onboarding import onboard
     report = await onboard(tenant=req.tenant, subsystem=req.subsystem, openapi=req.openapi,
                            deploy=req.deploy, credentials=req.credentials,
-                           policy_text=req.policy_text, lifecycle=_lifecycle)
+                           policy_text=req.policy_text, include_tags=req.include_tags,
+                           flows=req.flows, use_codegen=req.use_codegen,
+                           max_read_flows=req.max_read_flows, lifecycle=_lifecycle)
     return report.model_dump()
 
 

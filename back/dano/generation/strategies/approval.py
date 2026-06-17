@@ -23,8 +23,8 @@ class ApprovalStrategy:
             steps=["取待办 taskId", "biz/flow/submit(operateType: 200同意/201驳回/202退回, flowTask{taskId,...})"],
             contract={"submit_endpoint": "/biz/flow/submit",
                       "operate_type": {"agree": "200", "reject": "201", "return": "202"}},
-            user_fields=list(goal.test_input.keys()),
-            required_fields=list(goal.test_input.keys()),
+            user_fields=[k for k in goal.test_input if k != "__base_url__"],
+            required_fields=[k for k in goal.test_input if k != "__base_url__"],
             success_rule="response.code == null or response.code == 200",
             fact_check=FactCheckSpec(
                 endpoint="/workflow/todo/list/table?taskId={taskId}&pageNum=1&pageSize=5",

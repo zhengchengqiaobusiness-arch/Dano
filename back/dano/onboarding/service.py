@@ -116,25 +116,54 @@ async def _publish_env_profile(run_id: str, sid: str, deploy: dict) -> None:
                                    "validation_run_ids": h["validation_run_ids"]})
 
 
-async def onboard(*, tenant: str, subsystem: str, openapi: dict, deploy: dict,
-                  credentials: dict, system_instance_id: str | None = None,
-                  lifecycle=None, discover_workflows: bool = True,
-                  policy_text: str = "", timeout_s: float = 180.0) -> OnboardingReport:
-    """接入一个系统实例(阶段一)。前置:PG 池已就绪。lifecycle 给定则登记已发布 Skill。
+async def _onboard_codegen(run_id: str, sid: str, flows: list[dict], coder,  # noqa: ANN001
+                           max_read_flows: int | None) -> dict:
+    """主路径:goal 模式自动生成代码 adapter。
 
-    policy_text 给定则额外抽取并发布制度规则(流程4:抽规则→用例验证→发布)。
+    读流程(GET)自动逐个生成只读 adapter(数量受 max_read_flows 限制,None=全部);
+    写/复合流程按 flows=[{flow, actions?, test_input}] 声明(写操作需测试输入才能沙箱)。
+    __base_url__ 由 deploy 自动注入到测试输入(沙箱时 adapter 需要),声明里只给业务字段。
+    每条流程跑一遍 GenerationLoop(编码→测试→漏洞→审核→事实核查→发布)。
     """
-    sid = system_instance_id or subsystem
-    run_id = f"onb-{uuid4().hex[:8]}"
-    materials.register(materials.MaterialContext(
-        run_id=run_id, tenant=tenant, system_instance_id=sid, subsystem=subsystem,
-        openapi=openapi, deploy=deploy, credentials=credentials, policy_text=policy_text))
-    token = secrets.token_hex(16)
-    runs.register(run_id, token)
+    from dano.agent_tools import materials, tools as T
+    from dano.generation import GenerationLoop, GoalBrief, PiCoder
+    from dano.generation.strategies import select_strategy
 
-    # 先确定性发布环境画像(运行期 invoke 取 base_url+auth 用),走同一发布闸门
-    await _publish_env_profile(run_id, sid, deploy)
+    mat = materials.get(run_id, sid)
+    base_url = (mat.deploy or {}).get("base_url", "") if mat else ""
+    loop = GenerationLoop(coder or PiCoder())
+    parsed = await T.parse_spec(run_id, {"system_instance_id": sid})
+    actions = parsed.get("actions", [])
+    by_name = {a["name"]: a for a in actions}
+    goals: list[GoalBrief] = []
+    declared: set[str] = set()
+    for f in flows:                                       # 写/复合流程:调用方声明 + 测试输入
+        fa = [by_name[n] for n in (f.get("actions") or []) if n in by_name] or actions
+        ti = {**(f.get("test_input") or {}), "__base_url__": base_url}
+        goals.append(GoalBrief(run_id=run_id, system_instance_id=sid, flow=f["flow"],
+                               actions=fa, test_input=ti))
+        declared.update(f.get("actions") or [])
+    reads = 0
+    for a in actions:                                     # 读流程:未被声明的 GET 动作各成一个只读 adapter
+        if (a.get("method") or "GET").upper() != "GET" or a["name"] in declared:
+            continue
+        if max_read_flows is not None and reads >= max_read_flows:
+            break
+        reads += 1
+        goals.append(GoalBrief(run_id=run_id, system_instance_id=sid, flow=a["name"],
+                               actions=[a], test_input={"__base_url__": base_url}))
+    oks = 0
+    for g in goals:
+        r = await loop.run(g, select_strategy(g.actions))
+        oks += 1 if r.ok else 0
+        log.info("onboard.codegen.flow", flow=g.flow, ok=r.ok, rejections=r.rejections)
+    return {"status": "completed",
+            "final_text": f"goal 模式代码生成:{oks}/{len(goals)} 个流程发布"}
 
+
+async def _onboard_legacy(run_id: str, sid: str, token: str, *, discover_workflows: bool,
+                          policy_text: str, timeout_s: float) -> dict:
+    """旧声明式接入:起工具服务 + spawn pi 建连接器/复合流程/制度。返回 completed。"""
     server, task, port = await _start_tool_server()
     prompt = (
         f"接入系统实例 {sid}。步骤:\n"
@@ -182,29 +211,60 @@ async def onboard(*, tenant: str, subsystem: str, openapi: dict, deploy: dict,
         if policy_text:
             await _spawn_pi(run_id=run_id, token=token, port=port, prompt=policy_prompt,
                             context={"system_instance_id": sid}, timeout_s=timeout_s)
+        return completed
     finally:
         server.should_exit = True
         await task
+
+
+async def onboard(*, tenant: str, subsystem: str, openapi: dict, deploy: dict,
+                  credentials: dict, system_instance_id: str | None = None,
+                  lifecycle=None, discover_workflows: bool = True,
+                  policy_text: str = "", include_tags: list[str] | None = None,
+                  flows: list[dict] | None = None, coder=None,  # noqa: ANN001
+                  use_codegen: bool = True, max_read_flows: int | None = None,
+                  timeout_s: float = 180.0) -> OnboardingReport:
+    """接入一个系统实例(阶段一)。前置:PG 池已就绪。
+
+    主路径 use_codegen=True(默认):goal 模式**自动生成代码** adapter——读流程(GET)自动生成,
+      写/复合流程按 flows=[{flow, actions?, test_input}] 声明(写需测试输入才能沙箱)。
+    use_codegen=False:旧声明式(pi 建连接器/复合流程/制度;policy_text/discover_workflows 仅此路径生效)。
+    include_tags 圈定类别;lifecycle 给定则登记已发布 Skill 到「已发布」。
+    """
+    sid = system_instance_id or subsystem
+    run_id = f"onb-{uuid4().hex[:8]}"
+    materials.register(materials.MaterialContext(
+        run_id=run_id, tenant=tenant, system_instance_id=sid, subsystem=subsystem,
+        openapi=openapi, deploy=deploy, credentials=credentials, policy_text=policy_text,
+        include_tags=include_tags or []))
+    token = secrets.token_hex(16)
+    runs.register(run_id, token)
+    # 先确定性发布环境画像(运行期 invoke 取 base_url+auth 用),走同一发布闸门
+    await _publish_env_profile(run_id, sid, deploy)
+    try:
+        if use_codegen:
+            completed = await _onboard_codegen(run_id, sid, flows or [], coder, max_read_flows)
+        else:
+            completed = await _onboard_legacy(run_id, sid, token, discover_workflows=discover_workflows,
+                                              policy_text=policy_text, timeout_s=timeout_s)
+    finally:
         runs.unregister(run_id)
         materials.clear_run(run_id)
 
-    # 收已发布(连接器 + 复合流程;权威来源 = PG)。SkillRegistry 会隐藏复合的步骤动作。
+    # 收已发布(连接器 + 复合流程 + 代码 adapter;权威来源 = PG)。隐藏复合流程的步骤动作。
     repo = AssetRepository()
     scope = Scope(tenant=tenant, subsystem=Subsystem(subsystem))
-    published = await repo.list_published(AssetType.CONNECTOR, scope)
+    connectors = await repo.list_published(AssetType.CONNECTOR, scope)
     workflows = await repo.list_published(AssetType.WORKFLOW, scope)
+    adapters = await repo.list_published(AssetType.ADAPTER, scope)
     hidden = {s.action for e in workflows for s in WorkflowSkillBody.model_validate(e.body).steps}
-    # 对外可见 Skill = 复合流程 + 未被复合消费的连接器(与目录一致,隐藏步骤动作)
-    skills = sorted(
-        [e.body.get("action", e.asset_key) for e in workflows]
-        + [e.body.get("action", e.asset_key) for e in published
-           if e.body.get("action", e.asset_key) not in hidden])
+    visible = [e for e in (workflows + adapters + connectors)
+               if e.body.get("action", e.asset_key) not in hidden]
+    skills = sorted({e.body.get("action", e.asset_key) for e in visible})
     # §5:登记已发布 Skill 到生命周期(停在「已发布」)
     if lifecycle is not None:
-        for e in published + workflows:
+        for e in visible:
             action = e.body.get("action", e.asset_key)
-            if action in hidden:
-                continue
             await lifecycle.register_published(f"{subsystem}.{action}", Subsystem(subsystem), action, e.version)
     status = completed.get("status", "failed")
     log.info("onboard.done", tenant=tenant, system=sid, status=status, published=len(skills))

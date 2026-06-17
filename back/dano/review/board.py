@@ -216,6 +216,10 @@ _ADAPTER_REVIEW_NOTE = (
     "漏洞检测:危险调用(eval/exec/os.system/subprocess shell)、命令/请求注入、SSRF、"
     "硬编码密钥/令牌(源码必须零凭证,凭证应从 creds 运行期注入)、越权;"
     "合规审核:是否仅用测试凭证与沙箱、风险分级与读/写匹配、写操作是否需确认。"
+    "\n【adapter 的 risk_level 与 fact_check 判定要点(避免误判)】"
+    "adapter 会发多次 HTTP;risk_level 反映其**实际执行的操作**——源码里有 POST/PUT/PATCH/DELETE 写操作即应为 L3(运行期需确认),L3 正确不要驳回。"
+    "declarative_body.fact_check 是发布/执行后的**只读回查(流程9 事实核查)**,其 method=GET 是设计如此、用于确认副作用真生效,"
+    "**与动作风险无关**;**切勿因 fact_check 的 method=GET 就要求把 risk_level 降为 L1**——判 risk_level 只看源码里有没有写操作,不看 fact_check 的 method。"
 )
 
 

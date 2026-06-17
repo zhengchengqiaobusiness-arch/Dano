@@ -120,6 +120,32 @@ class SkillRegistry:
                         fact_check_expr=meta.fact_check_expr,
                     )
                 )
+            # 代码适配器(goal 模式生成):从已发布 ADAPTER 资产派生;调用时隔离 runner 执行 source
+            for env in await store.list_published(AssetType.ADAPTER, scope):
+                b = env.body
+                action = b.get("action", env.asset_key)
+                req = list(b.get("required_fields", []))
+                opt = [f for f in b.get("user_fields", []) if f not in req]
+                skills.append(
+                    SkillSpec(
+                        skill_id=f"{sub.value}.{action}",
+                        subsystem=sub,
+                        action=action,
+                        risk_level=RiskLevel(b.get("risk_level", "L3")),
+                        title=b.get("title", ""),
+                        field_docs=dict(b.get("field_docs", {})),
+                        has_api=True,
+                        is_adapter=True,
+                        adapter_asset_id=env.asset_id,
+                        adapter_source=b.get("source", ""),
+                        adapter_entry=b.get("entry", "run"),
+                        adapter_success_rule=b.get("success_rule"),
+                        adapter_fact_check=b.get("fact_check"),
+                        required_fields=req,
+                        optional_fields=opt,
+                        keywords=[w for w in (action, b.get("title", "")) if w],
+                    )
+                )
             # 无 API:从已发布页面脚本派生(流程8)
             for env in await store.list_published(AssetType.PAGE_SCRIPT, scope):
                 # 一个无 API 系统当前一个页面动作;action 取该子系统配置

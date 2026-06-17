@@ -159,6 +159,21 @@ async def flow_xml_and_node(procInsId: str = "", deployId: str = "",
     return _ok(data={"nodeData": nodes})
 
 
+@app.get("/flowable/monitor/listProcess")
+async def list_process(procInstId: str = "", pageNum: int = 1, pageSize: int = 10,
+                       authorization: str | None = Header(default=None)) -> dict:
+    """正在运行的流程实例:忠于真实——只显示已提交过申请节点(applied)的实例。
+
+    workflow_bpmn 的事实核查即查此:procInstId 过滤后 total>0 = 真的提交进了审批。
+    """
+    _auth(authorization)
+    inst = _state["instances"].get(procInstId)
+    if inst and inst.get("applied"):
+        return {"code": 200, "total": 1, "rows": [
+            {"processInstanceId": procInstId, "name": "请假申请", "currentTask": "部门经理审批"}]}
+    return {"code": 200, "total": 0, "rows": []}
+
+
 @app.post("/flowable/definition/save")
 async def save_definition(body: dict | None = None,
                           authorization: str | None = Header(default=None)) -> dict:

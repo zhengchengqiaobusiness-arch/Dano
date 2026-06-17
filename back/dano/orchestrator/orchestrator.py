@@ -198,11 +198,79 @@ class Orchestrator:
             return TaskOutcome(task_id=task_id, state=TaskState.CANCELLED, skill_id=skill.skill_id,
                                message="需用户确认(confirm=true)")
 
+        if skill.is_adapter:
+            return await self._run_adapter(task_id, tenant, skill, intent)
         if skill.is_workflow:
             return await self._run_workflow(task_id, tenant, skill, intent)
         if skill.has_api:
             return await self._run_api(task_id, tenant, skill, intent, confirm=confirm_fn)
         return await self._run_page(task_id, skill, intent, confirm=confirm_fn)
+
+    async def _run_adapter(self, task_id, tenant, skill, intent) -> TaskOutcome:  # noqa: ANN001
+        """代码适配器 Skill(goal 模式生成):隔离 runner 执行 source,过成败规则 + 事实核查。
+
+        凭证运行期注入(不进源码);base_url 取自已发布环境画像;事实核查回查确认真生效。
+        """
+        from dano.execution.adapter import AdapterRunner
+        from dano.execution.connectors.executor import system_key_for
+        scope = Scope(tenant=tenant, subsystem=skill.subsystem)
+        ep = await self.store.get_published(AssetType.ENV_PROFILE, scope, asset_key="env_profile")
+        base_url = ((ep.body.get("base_url") if ep else "") or "")
+        resolved = self.resolve({"token": f"vault://{tenant}/{system_key_for(skill.subsystem)}"})
+        creds = {"token": resolved.get("token") or next(iter(resolved.values()), "")}
+        inputs = {**intent.fields, "__base_url__": base_url}
+
+        res = await AdapterRunner().run(source=skill.adapter_source, inputs=inputs,
+                                        credentials=creds, entry=skill.adapter_entry)
+        ok, detail = res.ok, (res.error or "")
+        if ok and skill.adapter_success_rule:
+            try:
+                ok = bool(safe_eval(skill.adapter_success_rule, {"response": res.output, "http": 200}))
+            except Exception:  # noqa: BLE001
+                ok = False
+            if not ok:
+                detail = f"未满足 success_rule={skill.adapter_success_rule!r}"
+        fc_ev = None
+        if ok and skill.adapter_fact_check:
+            from dano.execution.fact_check import run_fact_check
+            from dano.shared.asset_bodies import FactCheckSpec
+            spec = FactCheckSpec.model_validate(skill.adapter_fact_check)
+            ctx = {**intent.fields, **(res.output if isinstance(res.output, dict) else {})}
+            ok, fc_ev = await run_fact_check(spec, context=ctx,
+                                             call=self._http_caller(base_url, creds))
+            if not ok:
+                detail = f"事实核查未过(疑似空操作): {spec.assert_expr}"
+        out = res.output if isinstance(res.output, dict) else {"value": res.output}
+        er = ExecResult(task_id=task_id, outcome=Outcome.PASSED if ok else Outcome.FAILED,
+                        evidence=Evidence(request_body=inputs, response_body=out),
+                        structured_output=out)
+        log.info("adapter.invoke", skill=skill.skill_id, ok=ok)
+        return TaskOutcome(
+            task_id=task_id, state=TaskState.COMPLETED if ok else TaskState.FAILED,
+            skill_id=skill.skill_id, exec_result=er,
+            message="adapter 完成 + 事实核查通过" if ok else f"adapter 跑不通 → 流程10:{detail}",
+            audit={"output": res.output, "fact_check": fc_ev, "intent": intent.action_hint})
+
+    @staticmethod
+    def _http_caller(base_url: str, creds: dict):  # noqa: ANN205
+        """事实核查回查用的 call(method, path, body)->(http, json)。"""
+        base = base_url.rstrip("/")
+
+        async def call(method: str, path: str, body=None):  # noqa: ANN001
+            import httpx
+            from dano.infra.http import tls_verify
+            async with httpx.AsyncClient(timeout=30, verify=tls_verify()) as c:
+                h = {"Authorization": f"Bearer {creds.get('token', '')}"}
+                if method.upper() == "GET":
+                    r = await c.get(base + path, headers=h)
+                else:
+                    r = await c.request(method, base + path, json=body, headers=h)
+            try:
+                return r.status_code, r.json()
+            except Exception:  # noqa: BLE001
+                return r.status_code, {"raw": r.text}
+
+        return call
 
     async def _run_workflow(self, task_id, tenant, skill, intent) -> TaskOutcome:  # noqa: ANN001
         """复合流程 Skill(阶段2):按 steps 顺序跑连接器,前一步输出串给后一步。

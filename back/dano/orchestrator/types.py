@@ -42,6 +42,14 @@ class SkillSpec(BaseModel):
     workflow_steps: list[dict] = Field(default_factory=list)    # WorkflowStep 字典
     workflow_success_rule: str | None = None
 
+    # 代码适配器(goal 模式生成):调用时由隔离 runner 执行 source
+    is_adapter: bool = False
+    adapter_asset_id: UUID | None = None
+    adapter_source: str = ""
+    adapter_entry: str = "run"
+    adapter_success_rule: str | None = None
+    adapter_fact_check: dict | None = None
+
 
 class TaskOutcome(BaseModel):
     """一次任务终态(流程6 产出)+ 审计。"""
