@@ -1,0 +1,11 @@
+{
+  "name": "dano-pi-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dano 阶段一/三 的 pi SDK Node Sidecar 桥",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.79.4",
+    "typebox": "1.1.38"
+  }
+}
