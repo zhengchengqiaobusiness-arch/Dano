@@ -1191,6 +1191,7 @@
     padding: 12px 16px;
     border: 1px solid var(--border);
     border-radius: 18px 18px 18px 18px;
+    border-end-end-radius: .5rem;
     background: var(--panel);
   }
 

@@ -91,8 +91,7 @@ export interface EditQueuedPayload {
 // Constants
 // ---------------------------------------------------------------------------
 
-const MAX_TEXTAREA_HEIGHT = 160;
-const TEXTAREA_HEIGHT_BUFFER = 4;
+const DEFAULT_MAX_TEXTAREA_VISIBLE_LINES = 5;
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -387,21 +386,27 @@ export function createComposerBarState(
     queueMicrotask(() => {
       const el = textareaEl;
       if (!el) return;
+
       el.style.height = "auto";
       const styles = window.getComputedStyle(el);
       const lineHeight = Number.parseFloat(styles.lineHeight) || 0;
-      const pt = Number.parseFloat(styles.paddingTop) || 0;
-      const pb = Number.parseFloat(styles.paddingBottom) || 0;
-      const minHeight = Math.ceil(
-        lineHeight + pt + pb + TEXTAREA_HEIGHT_BUFFER,
-      );
+      const paddingTop = Number.parseFloat(styles.paddingTop) || 0;
+      const paddingBottom = Number.parseFloat(styles.paddingBottom) || 0;
+      const maxVisibleLines =
+        Number.parseInt(
+          styles.getPropertyValue("--composer-max-visible-lines"),
+          10,
+        ) || DEFAULT_MAX_TEXTAREA_VISIBLE_LINES;
+      const contentPadding = paddingTop + paddingBottom;
+      const singleLineHeight = lineHeight + contentPadding;
+      const maxHeight = lineHeight * maxVisibleLines + contentPadding;
       const nextHeight = Math.min(
-        Math.max(el.scrollHeight + TEXTAREA_HEIGHT_BUFFER, minHeight),
-        MAX_TEXTAREA_HEIGHT,
+        Math.max(el.scrollHeight, singleLineHeight),
+        maxHeight,
       );
-      el.style.height = `${nextHeight}px`;
-      el.style.overflowY =
-        el.scrollHeight > MAX_TEXTAREA_HEIGHT ? "auto" : "hidden";
+
+      el.style.height = `${Math.ceil(nextHeight)}px`;
+      el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
     });
   }
 

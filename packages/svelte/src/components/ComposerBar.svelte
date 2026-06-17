@@ -56,7 +56,7 @@
   let composerPlaceholder = $derived(
     isDebugMode && isDebugSession
       ? "Use /fixture, /tps, /json, or type synthetic markdown"
-      : "Ask anything, or drop an image",
+      : "想让 Dano 帮你处理什么问题",
   );
 
   // ---- DOM refs (must stay in .svelte for bind:this) ----
@@ -440,9 +440,10 @@
   }
 
   .composer-dock {
-    display: grid;
-    grid-template-columns: 40px minmax(0, 1fr) 44px;
-    grid-template-areas: "left input right";
+    --composer-control-size: 36px;
+    --composer-input-line-height: var(--composer-control-size);
+    --composer-max-visible-lines: 5;
+    display: flex;
     align-items: center;
     gap: 10px;
     padding: 12px 18px;
@@ -460,10 +461,7 @@
   }
 
   .composer-dock.multiline {
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "input"
-      "toolbar";
+    flex-direction: column;
     align-items: stretch;
     gap: 16px;
     padding: 18px 18px 16px;
@@ -515,8 +513,12 @@
     border-color: var(--border-strong);
     background: var(--panel);
     box-shadow:
-      var(--shadow-floating),
-      0 0 0 3px var(--focus-ring-muted);
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0.04) 0px 0px 0px 1px,
+      rgba(0, 0, 0, 0.04) 0px 2px 8px 0px;
   }
 
   .composer-dock.drag-active {
@@ -529,7 +531,6 @@
   .hidden-file-input { display: none; }
 
   .attachment-strip {
-    grid-column: 1 / -1;
     display: flex;
     gap: 8px;
     overflow-x: auto;
@@ -624,10 +625,11 @@
 
   .attach-btn,
   .composer-icon-button {
-    width: 40px;
-    height: 40px;
-    display: grid;
-    place-items: center;
+    width: var(--composer-control-size);
+    height: var(--composer-control-size);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
     border-radius: 999px;
     background: transparent;
@@ -656,11 +658,12 @@
   }
 
   .composer-toolbar {
-    grid-area: toolbar;
+    order: 2;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 14px;
+    width: 100%;
   }
 
   .composer-dock:not(.multiline) .composer-toolbar {
@@ -676,45 +679,43 @@
   }
 
   .composer-actions-left {
-    grid-area: left;
+    order: 0;
   }
 
   .composer-actions-right {
-    grid-area: right;
+    order: 2;
+    margin-left: auto;
     justify-content: flex-end;
   }
 
   .prompt-input {
     display: block;
     box-sizing: border-box;
-    grid-area: input;
-    width: 100%;
-    min-height: 1.55em;
+    order: 1;
+    flex: 1 1 auto;
+    width: auto;
     min-width: 0;
-    max-height: 180px;
-    padding: 0 22px;
+    padding: 0;
     border: none;
     background: transparent;
     color: var(--text);
     font-family: var(--pi-font-sans);
     font-size: 1.04rem;
     font-weight: 400;
-    line-height: 1.55;
+    line-height: var(--composer-input-line-height);
     outline: none;
     resize: none;
     overflow-y: hidden;
     scrollbar-gutter: stable;
-    transition:
-      height 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
-      padding 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+    transition: padding 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
   }
 
   .composer-dock.multiline .prompt-input {
-    padding: 0 22px;
+    padding: 0;
   }
 
   .composer-dock:not(.multiline) .prompt-input {
-    padding: 0 4px;
+    padding: 0;
   }
 
   .prompt-input:disabled,
@@ -727,10 +728,11 @@
 
   .send-btn,
   .composer-send-button {
-    width: 44px;
-    height: 44px;
-    display: grid;
-    place-items: center;
+    width: var(--composer-control-size);
+    height: var(--composer-control-size);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border-radius: 999px;
     border: none;
     background: var(--accent);
@@ -841,11 +843,7 @@
     .composer-inner-wrap { width: 100%; }
     .prompt-input { font-size: 16px; }
 
-    .composer-dock {
-      grid-template-columns: 40px minmax(0, 1fr) 44px;
-      padding: 10px 14px;
-      border-radius: 24px;
-    }
+    .composer-dock { padding: 10px 14px; border-radius: 24px; }
   }
 
   @media (max-width: 640px) {
@@ -861,15 +859,8 @@
     .composer-dock.multiline { padding: 14px 14px 12px; }
     .attachment-chip { min-width: 200px; }
 
-    .attach-btn {
-      width: 40px;
-      height: 40px;
-    }
-
-    .prompt-input { font-size: 16px; line-height: 1.5; }
-    .composer-dock.multiline .prompt-input { padding: 0 8px; }
-    .composer-dock:not(.multiline) .prompt-input { padding: 0 4px; }
-
-    .send-btn { width: 40px; height: 40px; }
+    .prompt-input { font-size: 16px; }
+    .composer-dock.multiline .prompt-input { padding: 0; }
+    .composer-dock:not(.multiline) .prompt-input { padding: 0; }
   }
 </style>
