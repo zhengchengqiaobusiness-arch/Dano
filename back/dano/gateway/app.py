@@ -161,6 +161,32 @@ async def onboarding_preview(req: PreviewReq) -> dict:
                            sorted(categories.items(), key=lambda kv: -kv[1])]}
 
 
+class FetchSwaggerReq(BaseModel):
+    base_url: str
+    token: str = ""
+    path: str = "/v3/api-docs"
+
+
+@app.post("/onboarding/fetch-swagger")
+async def fetch_swagger(req: FetchSwaggerReq) -> dict:
+    """代前端从目标系统拉取 OpenAPI(浏览器跨域+自签证书拉不了,由后端代取)。"""
+    import httpx
+    from dano.infra.http import tls_verify
+    url = req.base_url.rstrip("/") + req.path
+    headers = {"Authorization": f"Bearer {req.token}"} if req.token else {}
+    try:
+        async with httpx.AsyncClient(timeout=40, verify=tls_verify()) as c:
+            r = await c.get(url, headers=headers)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"拉取 swagger 失败: {e}") from e
+    if r.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"拉取 swagger HTTP {r.status_code}")
+    try:
+        return r.json()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"swagger 非 JSON: {e}") from e
+
+
 @app.post("/onboarding")
 async def onboarding(req: OnboardReq) -> dict:
     from dano.onboarding import onboard
@@ -170,6 +196,49 @@ async def onboarding(req: OnboardReq) -> dict:
                            flows=req.flows, use_codegen=req.use_codegen,
                            max_read_flows=req.max_read_flows, lifecycle=_lifecycle)
     return report.model_dump()
+
+
+# ── 异步接入(接入向导:启动后台生成 + 轮询进度,避免几分钟同步阻塞/超时)──
+_onboard_jobs: dict[str, dict] = {}
+
+
+@app.post("/onboarding/start")
+async def onboarding_start(req: OnboardReq) -> dict:
+    import asyncio
+    from uuid import uuid4
+    from dano.onboarding import onboard
+    job_id = uuid4().hex[:12]
+    job = {"job_id": job_id, "status": "running", "events": [], "report": None, "error": None}
+    _onboard_jobs[job_id] = job
+
+    def _progress(ev: dict) -> None:
+        job["events"].append(ev)
+
+    async def _run() -> None:
+        try:
+            rep = await onboard(
+                tenant=req.tenant, subsystem=req.subsystem, openapi=req.openapi,
+                deploy=req.deploy, credentials=req.credentials, policy_text=req.policy_text,
+                include_tags=req.include_tags, flows=req.flows, use_codegen=req.use_codegen,
+                max_read_flows=req.max_read_flows, progress=_progress, lifecycle=_lifecycle)
+            job["report"] = rep.model_dump()
+            job["status"] = "completed"
+        except Exception as e:  # noqa: BLE001
+            job["status"] = "failed"
+            job["error"] = str(e)
+            log.warning("onboard.job_failed", job=job_id, error=str(e))
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id}
+
+
+@app.get("/onboarding/jobs/{job_id}")
+async def onboarding_job(job_id: str) -> dict:
+    """轮询接入进度:status(running/completed/failed)+ events(plan/flow_start/rejected/published/...)+ report。"""
+    job = _onboard_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job 不存在")
+    return job
 
 
 # ── 契约目录(租户隔离)──

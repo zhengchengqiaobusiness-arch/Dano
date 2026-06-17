@@ -80,3 +80,23 @@ async def test_onboard_codegen_publishes_adapter_skill():
     reg = await SkillRegistry.from_store(AssetRepository(), tenant="ob6", subsystems=[Subsystem.OA])
     man = {m.name: m for m in build_manifests(reg.skills)}
     assert "A-OA.leave_list" in man and man["A-OA.leave_list"].integration == "adapter"
+
+
+async def test_onboard_codegen_emits_progress():
+    """接入向导用的进度回调:plan / flow_start / published / flow_done 事件齐全。"""
+    from dano.agent_tools import tools as T
+    from dano.onboarding import onboard
+
+    events: list[dict] = []
+    T.set_review_board(_PassBoard())
+    try:
+        await onboard(tenant="ob6", subsystem="A-OA", openapi=_SPEC,
+                      deploy={"base_url": "http://x", "auth": {"kind": "token"}},
+                      credentials={"token": "t"}, use_codegen=True, coder=_Coder(),
+                      progress=lambda ev: events.append(ev))
+    finally:
+        T.set_review_board(None)
+
+    types = [e["type"] for e in events]
+    assert "plan" in types and "flow_start" in types and "flow_done" in types
+    assert any(e["type"] == "published" for e in events)
