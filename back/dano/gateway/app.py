@@ -106,6 +106,55 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+# ── 运行配置(密钥/凭证在页面里填,后端运行时存进进程环境;不落文件/bat,GET 不回明文)──
+class RuntimeConfig(BaseModel):
+    pi_api_key: str | None = None          # SiliconFlow / OpenAI 兼容 key(编码+评审)
+    pi_base_url: str | None = None
+    pi_model: str | None = None
+    insecure_tls: bool | None = None       # 自签证书的目标系统置 true
+    runtime_credentials: dict | None = None  # 调用期 OA 凭证:{"租户/oa": {"token": "..."}}
+
+
+def _runtime_status() -> dict:
+    import json as _json
+    import os
+    from dano.config import get_settings
+    s = get_settings()
+    rc = os.environ.get("DANO_RUNTIME_CREDENTIALS", "")
+    try:
+        rc_keys = list(_json.loads(rc).keys()) if rc else []
+    except Exception:  # noqa: BLE001
+        rc_keys = []
+    return {"pi_key_set": bool(s.pi_api_key), "pi_base_url": s.pi_base_url, "pi_model": s.pi_model,
+            "insecure_tls": s.insecure_tls, "runtime_credential_keys": rc_keys}
+
+
+@app.get("/settings/runtime")
+async def get_runtime() -> dict:
+    return _runtime_status()
+
+
+@app.post("/settings/runtime")
+async def set_runtime(cfg: RuntimeConfig) -> dict:
+    """页面提交密钥/凭证 → 写进后端进程环境(不落文件)。重启后需再次提交(前端会自动重发)。"""
+    import json as _json
+    import os
+    from dano.config import get_settings
+    if cfg.pi_api_key:
+        os.environ["DANO_PI_API_KEY"] = cfg.pi_api_key
+    if cfg.pi_base_url:
+        os.environ["DANO_PI_BASE_URL"] = cfg.pi_base_url
+    if cfg.pi_model:
+        os.environ["DANO_PI_MODEL"] = cfg.pi_model
+    if cfg.insecure_tls is not None:
+        os.environ["DANO_INSECURE_TLS"] = "1" if cfg.insecure_tls else "0"
+    if cfg.runtime_credentials is not None:
+        os.environ["DANO_RUNTIME_CREDENTIALS"] = _json.dumps(cfg.runtime_credentials)
+    get_settings.cache_clear()
+    log.info("settings.runtime_updated", pi_key_set=bool(get_settings().pi_api_key))
+    return _runtime_status()
+
+
 # ── 租户 ──
 class TenantCreate(BaseModel):
     tenant: str

@@ -17,15 +17,16 @@
 先起后端网关(默认 :8000):
 ```bash
 cd ../back
-uvicorn dano.gateway.app:app --host 0.0.0.0 --port 8000
+uvicorn dano.gateway.app:app --host 0.0.0.0 --port 8077
 ```
-再起前端(dev 自动把 /v1、/tenants 等代理到 :8000):
+再起前端(dev 自动把 /v1、/tenants 等代理到 :8077):
 ```bash
 cd skillfrontend
 npm install
 npm run dev          # 打开 http://localhost:5173
-# 网关不在 :8000 时:  DANO_GATEWAY=http://host:port npm run dev
+# 网关换端口时:  DANO_GATEWAY=http://host:port npm run dev
 ```
+更简单:直接双击仓库根的 `start-dano.bat`(conda 起后端 + 前端,端口在 bat 里 PORT= 改)。
 
 构建产物:`npm run build` → `dist/`(生产用 nginx 静态托管,反代网关)。
 

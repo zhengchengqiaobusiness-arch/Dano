@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     # ── PostgreSQL(资产库)──
     pg_dsn: str = Field(
-        default="postgresql://postgres:111111@localhost:5432/dano", description="asyncpg DSN")
+        default="postgresql://postgres:111111@localhost:5432/dano_back", description="asyncpg DSN")
     pg_pool_min: int = 1
     pg_pool_max: int = 10
 
