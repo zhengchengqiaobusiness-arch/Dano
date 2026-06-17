@@ -117,7 +117,7 @@ async def _publish_env_profile(run_id: str, sid: str, deploy: dict) -> None:
 
 
 async def _onboard_codegen(run_id: str, sid: str, flows: list[dict], coder,  # noqa: ANN001
-                           max_read_flows: int | None) -> dict:
+                           max_read_flows: int | None, progress=None) -> dict:
     """主路径:goal 模式自动生成代码 adapter。
 
     读流程(GET)自动逐个生成只读 adapter(数量受 max_read_flows 限制,None=全部);
@@ -131,7 +131,7 @@ async def _onboard_codegen(run_id: str, sid: str, flows: list[dict], coder,  # n
 
     mat = materials.get(run_id, sid)
     base_url = (mat.deploy or {}).get("base_url", "") if mat else ""
-    loop = GenerationLoop(coder or PiCoder())
+    loop = GenerationLoop(coder or PiCoder(), on_event=progress)
     parsed = await T.parse_spec(run_id, {"system_instance_id": sid})
     actions = parsed.get("actions", [])
     by_name = {a["name"]: a for a in actions}
@@ -152,11 +152,18 @@ async def _onboard_codegen(run_id: str, sid: str, flows: list[dict], coder,  # n
         reads += 1
         goals.append(GoalBrief(run_id=run_id, system_instance_id=sid, flow=a["name"],
                                actions=[a], test_input={"__base_url__": base_url}))
+    if progress:
+        progress({"type": "plan", "flows": [g.flow for g in goals]})
     oks = 0
-    for g in goals:
+    for idx, g in enumerate(goals):
+        if progress:
+            progress({"type": "flow_start", "flow": g.flow, "index": idx, "total": len(goals)})
         r = await loop.run(g, select_strategy(g.actions))
         oks += 1 if r.ok else 0
         log.info("onboard.codegen.flow", flow=g.flow, ok=r.ok, rejections=r.rejections)
+        if progress:
+            progress({"type": "flow_done", "flow": g.flow, "ok": r.ok,
+                      "rejections": r.rejections, "asset_id": r.asset_id})
     return {"status": "completed",
             "final_text": f"goal 模式代码生成:{oks}/{len(goals)} 个流程发布"}
 
@@ -223,7 +230,7 @@ async def onboard(*, tenant: str, subsystem: str, openapi: dict, deploy: dict,
                   policy_text: str = "", include_tags: list[str] | None = None,
                   flows: list[dict] | None = None, coder=None,  # noqa: ANN001
                   use_codegen: bool = True, max_read_flows: int | None = None,
-                  timeout_s: float = 180.0) -> OnboardingReport:
+                  progress=None, timeout_s: float = 180.0) -> OnboardingReport:  # noqa: ANN001
     """接入一个系统实例(阶段一)。前置:PG 池已就绪。
 
     主路径 use_codegen=True(默认):goal 模式**自动生成代码** adapter——读流程(GET)自动生成,
@@ -243,7 +250,7 @@ async def onboard(*, tenant: str, subsystem: str, openapi: dict, deploy: dict,
     await _publish_env_profile(run_id, sid, deploy)
     try:
         if use_codegen:
-            completed = await _onboard_codegen(run_id, sid, flows or [], coder, max_read_flows)
+            completed = await _onboard_codegen(run_id, sid, flows or [], coder, max_read_flows, progress)
         else:
             completed = await _onboard_legacy(run_id, sid, token, discover_workflows=discover_workflows,
                                               policy_text=policy_text, timeout_s=timeout_s)

@@ -29,6 +29,9 @@ class InMemoryRegistry:
         self._instances: dict[tuple[str, str], SystemInstance] = {}
 
     async def create_tenant(self, rec: TenantRecord) -> TenantRecord:
+        existing = self._tenants.get(rec.tenant)
+        if existing is not None:            # 幂等:已存在则返回既有(保留其 api_key)
+            return existing
         self._tenants[rec.tenant] = rec
         return rec
 
@@ -64,19 +67,20 @@ class PgRegistry:
         from dano.infra.db import get_pool
 
         async with get_pool().acquire() as conn:
-            await conn.execute(
+            row = await conn.fetchrow(
                 """
                 INSERT INTO tenants (tenant, display_name, deploy, worker_location, log_policy, api_key)
                 VALUES ($1,$2,$3,$4,$5,$6)
                 ON CONFLICT (tenant) DO UPDATE SET
                     display_name=EXCLUDED.display_name, deploy=EXCLUDED.deploy,
                     worker_location=EXCLUDED.worker_location, log_policy=EXCLUDED.log_policy
-                """,  # ON CONFLICT 不覆盖 api_key:保留公司既有唯一标识
+                RETURNING *
+                """,  # ON CONFLICT 不覆盖 api_key:保留既有;RETURNING 拿持久化后的真实行
                 rec.tenant, rec.display_name, rec.deploy, rec.worker_location,
                 rec.log_policy, rec.api_key,
             )
         log.info("registry.tenant_created", tenant=rec.tenant)
-        return rec
+        return TenantRecord(**dict(row))   # 幂等:返回持久化的记录(已存在则带其原 api_key)
 
     async def get_tenant(self, tenant: str) -> TenantRecord | None:
         from dano.infra.db import get_pool

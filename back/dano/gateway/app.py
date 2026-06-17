@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from dano.assets.repository import AssetRepository
-from dano.catalog.manifest import build_manifests
+from dano.catalog.manifest import build_function_tools, build_manifests, skill_id_of
 from dano.execution.connectors.auth import AuthManager
 from dano.execution.connectors.executor import RealActionExecutor, SystemEndpoint, system_key_for
 from dano.execution.harness.harness import Harness
@@ -197,10 +197,8 @@ class InvokeReq(BaseModel):
     confirm: bool = False
 
 
-@app.post("/v1/skills/{skill_id}/invoke")
-async def invoke_skill(skill_id: str, req: InvokeReq,
-                       x_tenant_key: str | None = Header(default=None)) -> dict:
-    tenant = await _auth_tenant(x_tenant_key)
+async def _invoke(tenant: str, skill_id: str, input_: dict, confirm: bool) -> dict:
+    """统一受控调用入口:skill_id→子系统/动作→风险闸门→隔离执行→事实核查。"""
     sub_str, _, action = skill_id.partition(".")
     if not action:
         raise HTTPException(status_code=400, detail="skill_id 应为 {subsystem}.{action}")
@@ -213,8 +211,44 @@ async def invoke_skill(skill_id: str, req: InvokeReq,
     if rec and rec.state == SkillState.SUSPENDED:
         raise HTTPException(status_code=409, detail=f"Skill 异常暂停中,已转保障期: {skill_id}")
     orch = await _orchestrator(tenant)
-    outcome = await orch.invoke_skill(subsystem, action, req.input, tenant=tenant, confirm=req.confirm)
+    outcome = await orch.invoke_skill(subsystem, action, input_, tenant=tenant, confirm=confirm)
     return outcome.model_dump(mode="json")
+
+
+@app.post("/v1/skills/{skill_id}/invoke")
+async def invoke_skill(skill_id: str, req: InvokeReq,
+                       x_tenant_key: str | None = Header(default=None)) -> dict:
+    tenant = await _auth_tenant(x_tenant_key)
+    return await _invoke(tenant, skill_id, req.input, req.confirm)
+
+
+# ── function-calling 工具(给聊天端 LLM:① 列工具喂给 LLM ② 执行 LLM 的工具调用)──
+@app.get("/v1/tools")
+async def list_tools(x_tenant_key: str | None = Header(default=None)) -> list[dict]:
+    """导出本租户 Skill 为 OpenAI function-calling tools 数组,聊天端直接喂给 LLM。"""
+    tenant = await _auth_tenant(x_tenant_key)
+    reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=ALL_SUBSYSTEMS)
+    return build_function_tools(reg.skills)
+
+
+class ToolCallReq(BaseModel):
+    name: str                       # 工具名(= skill_id 的点转 __,如 A-OA__submit_leave)
+    arguments: dict | str = {}      # LLM 产出的参数(对象或 JSON 字符串都行)
+    confirm: bool = False
+
+
+@app.post("/v1/tools/call")
+async def call_tool(req: ToolCallReq, x_tenant_key: str | None = Header(default=None)) -> dict:
+    """执行一次 LLM 工具调用:name→skill_id、arguments→input,走与 /invoke 同一受控链路。"""
+    tenant = await _auth_tenant(x_tenant_key)
+    args = req.arguments
+    if isinstance(args, str):
+        import json as _json
+        try:
+            args = _json.loads(args or "{}")
+        except _json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"arguments 非合法 JSON: {e}") from e
+    return await _invoke(tenant, skill_id_of(req.name), args, req.confirm)
 
 
 @app.get("/assets/published")

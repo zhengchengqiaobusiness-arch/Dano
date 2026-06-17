@@ -19,9 +19,17 @@ log = structlog.get_logger(__name__)
 
 
 class GenerationLoop:
-    def __init__(self, coder: Coder, *, lifecycle=None) -> None:  # noqa: ANN001
+    def __init__(self, coder: Coder, *, lifecycle=None, on_event=None) -> None:  # noqa: ANN001
         self.coder = coder
         self.lifecycle = lifecycle                            # 给定则发布后登记到生命周期(已发布)
+        self.on_event = on_event                              # 进度回调(dict);用于接入向导实时进度
+
+    def _emit(self, **ev) -> None:                            # noqa: ANN003
+        if self.on_event is not None:
+            try:
+                self.on_event(ev)
+            except Exception:  # noqa: BLE001 - 进度回调不应拖垮生成
+                pass
 
     async def run(self, goal: GoalBrief, strategy) -> GenerationResult:  # noqa: ANN001
         from dano.agent_tools import materials, tools as T
@@ -47,6 +55,7 @@ class GenerationLoop:
                     iters.append(IterationRecord(index=i, passed=True, reasons=[], asset_draft_id=did))
                     log.info("generation.published", flow=goal.flow, iter=i,
                              asset_id=pub["asset_id"], rejections=i)
+                    self._emit(type="published", flow=goal.flow, iter=i, asset_id=pub["asset_id"])
                     if self.lifecycle is not None and mat is not None:   # 登记到生命周期(已发布)
                         from dano.shared.enums import Subsystem
                         await self.lifecycle.register_published(
@@ -60,9 +69,11 @@ class GenerationLoop:
             iters.append(IterationRecord(index=i, passed=False, reasons=reasons, asset_draft_id=did))
             feedback = reasons or ["未通过验收"]
             log.info("generation.rejected", flow=goal.flow, iter=i, reasons=feedback)
+            self._emit(type="rejected", flow=goal.flow, iter=i, reasons=feedback)
 
         if result is None:
             log.warning("generation.exhausted", flow=goal.flow, iters=len(iters))
+            self._emit(type="exhausted", flow=goal.flow)
             result = GenerationResult(ok=False, flow=goal.flow, asset_id=None,
                                       iterations=iters, reason="耗尽预算仍未通过")
         await self._persist(goal, strategy, result)            # 可追溯(尽力而为)
