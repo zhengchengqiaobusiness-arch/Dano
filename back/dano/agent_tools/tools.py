@@ -53,7 +53,7 @@ def _adapter_caller(mat):  # noqa: ANN001 —— 返回 fact_check 用的 call(m
     async def call(method: str, path: str, body=None):  # noqa: ANN001
         from dano.infra.http import tls_verify
         async with httpx.AsyncClient(timeout=30, verify=tls_verify()) as c:
-            headers = {"Authorization": f"Bearer {token}"}
+            headers = {"Authorization": f"Bearer {token.strip()}"} if (token or "").strip() else {}
             if method.upper() == "GET":
                 r = await c.get(base + path, headers=headers)
             else:

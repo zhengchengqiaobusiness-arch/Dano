@@ -259,8 +259,9 @@ class Orchestrator:
         async def call(method: str, path: str, body=None):  # noqa: ANN001
             import httpx
             from dano.infra.http import tls_verify
+            tok = (creds.get("token") or "").strip()
             async with httpx.AsyncClient(timeout=30, verify=tls_verify()) as c:
-                h = {"Authorization": f"Bearer {creds.get('token', '')}"}
+                h = {"Authorization": f"Bearer {tok}"} if tok else {}
                 if method.upper() == "GET":
                     r = await c.get(base + path, headers=h)
                 else:

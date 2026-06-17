@@ -197,32 +197,45 @@ async def onboarding_preview(req: PreviewReq) -> dict:
     template = oa_templates.match_template(spec)
     extra = template.infrastructure_patterns() if template else ()
     categories: dict[str, int] = {}
+    actions: list[dict] = []
     total = 0
     for a in doc_parser.parse_openapi(spec):
         if endpoint_classifier.classify(a, extra_infra=extra) == endpoint_classifier.INFRASTRUCTURE:
             continue
         total += 1
-        for t in (a.tags or ["(未分类)"]):
+        tags = list(a.tags or ["(未分类)"])
+        for t in tags:
             categories[t] = categories.get(t, 0) + 1
+        actions.append({"name": a.name, "method": a.method, "endpoint": a.endpoint,
+                        "tags": tags, "summary": a.summary or "",
+                        "required": list(a.required_in or [])})
     return {"template": template.name if template else None,
             "business_action_count": total,
             "categories": [{"tag": k, "count": v} for k, v in
-                           sorted(categories.items(), key=lambda kv: -kv[1])]}
+                           sorted(categories.items(), key=lambda kv: -kv[1])],
+            "actions": actions}
 
 
 class FetchSwaggerReq(BaseModel):
-    base_url: str
+    url: str = ""                  # swagger 文档完整地址(手动导入:直接写地址)
+    base_url: str = ""             # 备用:base_url + path 拼接
     token: str = ""
     path: str = "/v3/api-docs"
 
 
 @app.post("/onboarding/fetch-swagger")
 async def fetch_swagger(req: FetchSwaggerReq) -> dict:
-    """代前端从目标系统拉取 OpenAPI(浏览器跨域+自签证书拉不了,由后端代取)。"""
+    """按你给的 swagger 地址代取 OpenAPI(浏览器跨域+自签证书拉不了,由后端代取)。
+
+    手动导入的两种方式之一:直接写 swagger 地址(url),后端代取;另一种是前端上传 .json 文件(无需本端点)。
+    """
     import httpx
     from dano.infra.http import tls_verify
-    url = req.base_url.rstrip("/") + req.path
-    headers = {"Authorization": f"Bearer {req.token}"} if req.token else {}
+    url = (req.url or "").strip() or (req.base_url.rstrip("/") + req.path)
+    if not url:
+        raise HTTPException(status_code=400, detail="请提供 swagger 地址(url)或 base_url")
+    tok = (req.token or "").strip()
+    headers = {"Authorization": f"Bearer {tok}"} if tok else {}
     try:
         async with httpx.AsyncClient(timeout=40, verify=tls_verify()) as c:
             r = await c.get(url, headers=headers)

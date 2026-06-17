@@ -98,9 +98,11 @@ async def openai_text_spawn(prompt: str, *, timeout_s: float = 300.0) -> str:
 
     from dano.config import get_settings
     s = get_settings()
+    if not (s.pi_api_key or "").strip():
+        raise RuntimeError("未配置模型 API Key:请先在前端「运行配置」填写 SiliconFlow Key 并保存")
     base = s.pi_base_url.rstrip("/")
     url = base + ("/chat/completions" if base.endswith("/v1") else "/v1/chat/completions")
-    headers = {"Authorization": f"Bearer {s.pi_api_key}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {s.pi_api_key.strip()}", "Content-Type": "application/json"}
     payload = {"model": s.pi_model, "temperature": 0,
                "messages": [{"role": "user", "content": prompt}]}
     async with httpx.AsyncClient(timeout=timeout_s) as c:

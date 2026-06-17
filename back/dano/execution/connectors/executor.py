@@ -56,7 +56,8 @@ class HttpActionExecutor:
     def _auth_headers(self, connector: dict, credentials: dict) -> dict[str, str]:
         kind = connector.get("auth_kind")
         if kind == "token":
-            return {"Authorization": f"Bearer {credentials.get('token', '')}"}
+            tok = (credentials.get("token") or "").strip()
+            return {"Authorization": f"Bearer {tok}"} if tok else {}
         if kind == "sso":
             return {"Cookie": credentials.get("session", "")}
         return {}

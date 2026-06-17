@@ -1,12 +1,14 @@
 import { api } from "./client";
 
 export interface Category { tag: string; count: number }
-export interface PreviewResp { template: string | null; business_action_count: number; categories: Category[] }
+export interface ActionInfo { name: string; method: string; endpoint: string; tags: string[]; summary: string; required: string[] }
+export interface PreviewResp { template: string | null; business_action_count: number; categories: Category[]; actions: ActionInfo[] }
 export interface OnboardEvent { type: string; flow?: string; reasons?: string[]; asset_id?: string | null; flows?: string[]; index?: number; total?: number; ok?: boolean; rejections?: number }
 export interface OnboardJob { job_id: string; status: string; events: OnboardEvent[]; report: { published_skills?: string[]; status?: string } | null; error: string | null }
 
-export async function fetchSwagger(base_url: string, token: string, path = "/v3/api-docs") {
-  const { data } = await api.post("/onboarding/fetch-swagger", { base_url, token, path });
+// 手动导入方式一:直接写 swagger 地址,后端代取(浏览器跨域/自签证书拉不了)。
+export async function fetchSwaggerByUrl(url: string, token: string) {
+  const { data } = await api.post("/onboarding/fetch-swagger", { url, token });
   return data;
 }
 
