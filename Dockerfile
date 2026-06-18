@@ -2,6 +2,8 @@ FROM node:22-alpine AS build
 
 WORKDIR /app
 ENV COREPACK_HOME=/tmp/corepack
+ENV PNPM_HOME=/tmp/pnpm-home
+ENV PNPM_STORE_DIR=/tmp/pnpm-store
 RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
 ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
 
@@ -11,11 +13,11 @@ COPY packages/svelte/package.json packages/svelte/package.json
 COPY pnpm-lock.yaml* ./
 RUN npm_config_registry="$NPM_CONFIG_REGISTRY" \
   npm_config_fetch_timeout=600000 \
-  pnpm install --frozen-lockfile=false
+  pnpm install --frozen-lockfile=false --store-dir="$PNPM_STORE_DIR" --package-import-method=copy
 
 COPY . .
 RUN pnpm run build
-RUN CI=true pnpm prune --prod
+RUN CI=true pnpm prune --prod --store-dir="$PNPM_STORE_DIR"
 
 FROM node:22-alpine AS runtime
 
