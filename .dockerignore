@@ -7,3 +7,5 @@ specs
 docs
 *.log
 .env
+runtime-data
+.secrets

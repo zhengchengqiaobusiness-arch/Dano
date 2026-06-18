@@ -63,7 +63,10 @@ function readHost(env: Record<string, string | undefined>): string {
 }
 
 function readPort(env: Record<string, string | undefined>): number {
-  return parseInteger(env.DANO_PORT?.trim() || env.PORT?.trim(), DEFAULT_STANDALONE_PORT);
+  return parseInteger(
+    env.DANO_PORT?.trim() || env.PORT?.trim(),
+    DEFAULT_STANDALONE_PORT,
+  );
 }
 
 function readDefaultWorkspacePath(
@@ -123,11 +126,11 @@ function findNearestWebDist(startDir: string): string | undefined {
   }
 }
 
-function findNearestRuntimeSettingsDir(startDir: string): string | undefined {
+function findNearestRuntimeDefaultsDir(startDir: string): string | undefined {
   let current = resolve(startDir);
 
   for (;;) {
-    const candidate = join(current, ".pi");
+    const candidate = join(current, "deploy", "runtime-defaults");
     if (existsSync(candidate)) {
       return candidate;
     }
@@ -275,8 +278,8 @@ export function initializeStandaloneWorkspaceSettings(
   workspacePath: string,
   sourceCwd: string,
 ): void {
-  const sourceSettingsDir = findNearestRuntimeSettingsDir(sourceCwd);
-  if (!sourceSettingsDir) {
+  const runtimeDefaultsDir = findNearestRuntimeDefaultsDir(sourceCwd);
+  if (!runtimeDefaultsDir) {
     return;
   }
 
@@ -284,7 +287,7 @@ export function initializeStandaloneWorkspaceSettings(
   mkdirSync(targetSettingsDir, { recursive: true });
 
   for (const fileName of DEFAULT_RUNTIME_SETTINGS_FILES) {
-    const sourcePath = join(sourceSettingsDir, fileName);
+    const sourcePath = join(runtimeDefaultsDir, fileName);
     const targetPath = join(targetSettingsDir, fileName);
     if (existsSync(sourcePath) && !existsSync(targetPath)) {
       copyFileSync(sourcePath, targetPath);

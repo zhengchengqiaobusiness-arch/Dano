@@ -14,8 +14,8 @@ files.
 packages/bridge   HTTP API, SSE event bus, and Pi runtime bridge
 packages/svelte   Browser chat UI
 deploy/nginx      nginx reverse proxy config for container deployment
-.pi/settings.json Default Pi model settings copied into the container
-.pi/SYSTEM.md     Custom Dano system prompt copied into the Pi runtime
+deploy/runtime-defaults
+                  Source defaults copied into the runtime workspace on startup
 ```
 
 This repo intentionally does not include the old Pi extension target or
@@ -30,7 +30,8 @@ Electron target.
 
 ## Model
 
-Default Pi settings live in [.pi/settings.json](.pi/settings.json):
+Default Pi settings live in
+[deploy/runtime-defaults/settings.json](deploy/runtime-defaults/settings.json):
 
 ```json
 {
@@ -46,15 +47,17 @@ headless web bridge treats `/model` as normal chat text.
 
 ## System Prompt
 
-The default assistant instruction lives in [.pi/SYSTEM.md](.pi/SYSTEM.md). It is
-copied into the runtime settings directory so Dano starts with the project
-system prompt:
+The default assistant instruction lives in
+[deploy/runtime-defaults/SYSTEM.md](deploy/runtime-defaults/SYSTEM.md). On
+startup the container copies it to `/tmp/dano/.pi/SYSTEM.md` only when that
+runtime file does not already exist:
 
 - answer in a detailed and friendly tone
 - proactively use tools to help users handle OA-related workflows
 
-Edit `.pi/SYSTEM.md` and restart the server/container to change the system
-prompt.
+Edit `deploy/runtime-defaults/SYSTEM.md` to change the source default for new
+runtime workspaces. Edit `/tmp/dano/.pi/SYSTEM.md` inside the persistent runtime
+workspace to change an already initialized deployment.
 
 ## Credentials
 
@@ -132,23 +135,25 @@ pnpm run dev:web
 
 ## Container Run
 
+Deployment details live in [deploy/README.md](deploy/README.md).
+
 Docker:
 
 ```bash
-docker compose --env-file .env up --build
+pnpm run deploy:up
 ```
 
 Podman:
 
 ```bash
-podman compose --env-file .env up --build
+DANO_COMPOSE=podman pnpm run deploy:up
 ```
 
-The nginx browser port defaults to `80`. Override it with
-`DANO_NGINX_PORT`:
+The nginx browser port defaults to `80`. `.env.example` uses `18082` for local
+smoke runs. Override it with `DANO_NGINX_PORT`:
 
 ```bash
-DANO_NGINX_PORT=18082 podman compose --env-file .env up --build
+DANO_NGINX_PORT=18082 pnpm run deploy:up
 ```
 
 Open:
@@ -160,8 +165,18 @@ http://127.0.0.1:18082
 Stop:
 
 ```bash
-DANO_NGINX_PORT=18082 podman compose down
+pnpm run deploy:down
 ```
+
+Production servers should prefer pulling a prebuilt image instead of building
+with pnpm on the target host:
+
+```bash
+DANO_IMAGE=ghcr.io/your-org/dano:latest pnpm run deploy:up
+```
+
+The published app is HTTP-only unless you put TLS in front of it. Use
+`http://host/` directly, or terminate HTTPS at a reverse proxy/load balancer.
 
 ## HTTP/SSE API
 
@@ -171,10 +186,10 @@ Health:
 curl -s http://127.0.0.1:18082/api/health
 ```
 
-Create conversation:
+Create client:
 
 ```bash
-curl -s -X POST http://127.0.0.1:18082/api/conversations \
+curl -s -X POST http://127.0.0.1:18082/api/clients \
   -H 'Content-Type: application/json' \
   -d '{}'
 ```
@@ -182,36 +197,23 @@ curl -s -X POST http://127.0.0.1:18082/api/conversations \
 Open events:
 
 ```bash
-curl -N http://127.0.0.1:18082/api/conversations/<conversationId>/events
+curl -N http://127.0.0.1:18082/api/clients/<clientId>/events
 ```
 
-Send message:
+Send command:
 
 ```bash
-curl -s -X POST http://127.0.0.1:18082/api/conversations/<conversationId>/messages \
+curl -s -X POST http://127.0.0.1:18082/api/clients/<clientId>/messages \
   -H 'Content-Type: application/json' \
-  -d '{"clientMessageId":"smoke-1","text":"Hello, introduce yourself briefly."}'
+  -d '{"type":"command","payload":{"id":"smoke-1","type":"get_state"}}'
 ```
 
-Retry a failed message:
-
-```bash
-curl -s -X POST http://127.0.0.1:18082/api/conversations/<conversationId>/messages/<messageId>/retry \
-  -H 'Content-Type: application/json' \
-  -d '{}'
-```
-
-SSE event names:
+SSE message types:
 
 ```text
-conversation.ready
-message.accepted
-assistant.started
-assistant.delta
-assistant.blocks
-assistant.completed
-message.failed
-heartbeat
+response
+event
+: heartbeat
 ```
 
 ## UI Behavior
@@ -235,8 +237,9 @@ Known-good verification used for the P0 implementation:
 pnpm run check
 pnpm run test
 pnpm run build
-DANO_NGINX_PORT=18082 podman compose --env-file .env up --build -d
+DANO_NGINX_PORT=18082 pnpm run deploy:up
 curl -s http://127.0.0.1:18082/api/health
+DANO_SMOKE_BASE_URL=http://127.0.0.1:18082 pnpm run smoke:deploy
 ```
 
 Expected health response:
@@ -245,6 +248,6 @@ Expected health response:
 {"status":"ok"}
 ```
 
-The implementation was verified with Podman Compose. Docker Compose should use
-the same compose file, but Docker CLI was not available in the local test
-environment.
+The deployment path supports Docker Compose and Podman Compose. For production,
+prefer a prebuilt image through `DANO_IMAGE` so the target server does not build
+with pnpm.

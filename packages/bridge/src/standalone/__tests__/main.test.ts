@@ -56,12 +56,22 @@ describe("standalone main", () => {
 
   it("uses host and port from environment", () => {
     const options = parseStandaloneMainOptions([], {
-      DANO_HOST: "127.0.0.1",
+      DANO_HOST: " 127.0.0.1 ",
       DANO_PORT: "8123",
     });
 
     expect(options.host).toBe("127.0.0.1");
     expect(options.port).toBe(8123);
+  });
+
+  it("keeps HOST and PORT compatibility when Dano bind settings are absent", () => {
+    const options = parseStandaloneMainOptions([], {
+      HOST: "localhost",
+      PORT: "7070",
+    });
+
+    expect(options.host).toBe("localhost");
+    expect(options.port).toBe(7070);
   });
 
   it("lets command line host and port override environment", () => {
@@ -221,12 +231,14 @@ describe("standalone main", () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "dano-main-workspace-"));
 
     try {
-      const sourceSettingsDir = join(sourceRoot, ".pi");
-      mkdirSync(sourceSettingsDir, { recursive: true });
-      writeFileSync(join(sourceSettingsDir, "SYSTEM.md"), "system prompt");
-      writeFileSync(join(sourceSettingsDir, "settings.json"), "{}");
+      const nestedSourceDir = join(sourceRoot, "packages", "bridge");
+      const runtimeDefaultsDir = join(sourceRoot, "deploy", "runtime-defaults");
+      mkdirSync(nestedSourceDir, { recursive: true });
+      mkdirSync(runtimeDefaultsDir, { recursive: true });
+      writeFileSync(join(runtimeDefaultsDir, "SYSTEM.md"), "system prompt");
+      writeFileSync(join(runtimeDefaultsDir, "settings.json"), "{}");
 
-      initializeStandaloneWorkspaceSettings(workspaceRoot, sourceRoot);
+      initializeStandaloneWorkspaceSettings(workspaceRoot, nestedSourceDir);
 
       expect(readFileSync(join(workspaceRoot, ".pi/SYSTEM.md"), "utf8")).toBe(
         "system prompt",
@@ -245,15 +257,27 @@ describe("standalone main", () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "dano-main-workspace-"));
 
     try {
-      mkdirSync(join(sourceRoot, ".pi"), { recursive: true });
+      mkdirSync(join(sourceRoot, "deploy", "runtime-defaults"), {
+        recursive: true,
+      });
       mkdirSync(join(workspaceRoot, ".pi"), { recursive: true });
-      writeFileSync(join(sourceRoot, ".pi/SYSTEM.md"), "source prompt");
+      writeFileSync(
+        join(sourceRoot, "deploy/runtime-defaults/SYSTEM.md"),
+        "source prompt",
+      );
+      writeFileSync(
+        join(sourceRoot, "deploy/runtime-defaults/settings.json"),
+        "{}",
+      );
       writeFileSync(join(workspaceRoot, ".pi/SYSTEM.md"), "workspace prompt");
 
       initializeStandaloneWorkspaceSettings(workspaceRoot, sourceRoot);
 
       expect(readFileSync(join(workspaceRoot, ".pi/SYSTEM.md"), "utf8")).toBe(
         "workspace prompt",
+      );
+      expect(readFileSync(join(workspaceRoot, ".pi/settings.json"), "utf8")).toBe(
+        "{}",
       );
     } finally {
       rmSync(sourceRoot, { recursive: true, force: true });

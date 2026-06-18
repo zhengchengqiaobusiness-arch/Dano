@@ -80,10 +80,10 @@
    - 不迁移或移除 `packages/electron`
    - 移除 Electron scripts/dependencies/workspace entries
 6. 将浏览器通信改为：
-   - `POST /api/conversations`
-   - `GET /api/conversations/:id/events`
-   - `POST /api/conversations/:id/messages`
-   - `POST /api/conversations/:id/messages/:messageId/retry`
+   - `POST /api/clients`
+   - `GET /api/clients/:id/events`
+   - `POST /api/clients/:id/messages`
+   - `POST /api/clients/:id/disconnect`
 7. 实现 SSE 事件：
    - `conversation.ready`
    - `message.accepted`
@@ -142,9 +142,9 @@ pnpm run test
 pnpm run build
 docker compose up --build -d
 curl -s http://localhost/api/health
-curl -s -X POST http://localhost/api/conversations -H 'Content-Type: application/json' -d '{}'
-curl -N http://localhost/api/conversations/<conversationId>/events
-curl -s -X POST http://localhost/api/conversations/<conversationId>/messages -H 'Content-Type: application/json' -d '{"clientMessageId":"smoke-1","text":"Hello, introduce yourself briefly."}'
+curl -s -X POST http://localhost/api/clients -H 'Content-Type: application/json' -d '{}'
+curl -N http://localhost/api/clients/<clientId>/events
+curl -s -X POST http://localhost/api/clients/<clientId>/messages -H 'Content-Type: application/json' -d '{"type":"command","payload":{"id":"smoke-1","type":"get_state"}}'
 ```
 
 ## OUTPUT: 输出要求

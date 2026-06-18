@@ -18,9 +18,9 @@ Returns service readiness for container and proxy checks.
 }
 ```
 
-## `POST /api/conversations`
+## `POST /api/clients`
 
-Creates a browser chat conversation before the EventSource stream starts.
+Creates a logical browser client before the EventSource stream starts.
 
 **Request**:
 
@@ -32,14 +32,20 @@ Creates a browser chat conversation before the EventSource stream starts.
 
 ```json
 {
-  "conversationId": "conv_123",
-  "eventsUrl": "/api/conversations/conv_123/events"
+  "client": {
+    "id": "client_123",
+    "seq": 1,
+    "connectedAt": "2026-06-17T03:25:59.017Z"
+  },
+  "eventsUrl": "/api/clients/client_123/events",
+  "messagesUrl": "/api/clients/client_123/messages",
+  "defaultWorkspacePath": "/tmp/dano"
 }
 ```
 
-## `GET /api/conversations/{conversationId}/events`
+## `GET /api/clients/{clientId}/events`
 
-Opens the EventSource stream for one conversation.
+Opens the EventSource stream for one logical browser client.
 
 **Response headers**:
 
@@ -50,54 +56,35 @@ Connection: keep-alive
 X-Accel-Buffering: no
 ```
 
-**Events**:
+**Messages**:
 
 ```text
-id: 1
-event: conversation.ready
-data: {"conversationId":"conv_123"}
+data: {"type":"response","payload":{"id":"cmd-1","type":"response","command":"get_state","success":true,"data":{}}}
 
-id: 2
-event: message.accepted
-data: {"conversationId":"conv_123","messageId":"msg_1","role":"user","content":"Hello"}
+data: {"type":"event","payload":{"type":"agent_start"}}
 
-id: 3
-event: assistant.started
-data: {"conversationId":"conv_123","messageId":"msg_2"}
-
-id: 4
-event: assistant.delta
-data: {"conversationId":"conv_123","messageId":"msg_2","delta":"Hi"}
-
-id: 5
-event: assistant.blocks
-data: {"conversationId":"conv_123","messageId":"msg_2","blocks":[{"kind":"tool","toolName":"bash","toolCallId":"call_1","toolArgs":{"command":"echo hi"},"argumentsText":"{\"command\":\"echo hi\"}","resultText":"hi","toolStatus":"success"}]}
-
-id: 6
-event: assistant.completed
-data: {"conversationId":"conv_123","messageId":"msg_2","content":"Hi there."}
-
-event: heartbeat
-data: {}
+: heartbeat
 ```
 
-**Failure event**:
+**Failure response**:
 
 ```text
-event: message.failed
-data: {"conversationId":"conv_123","messageId":"msg_2","code":"LLM_TIMEOUT","errorMessage":"The assistant did not answer in time.","retryable":true}
+data: {"type":"response","payload":{"id":"cmd-1","type":"response","command":"prompt","success":false,"error":"No API key found for the selected model."}}
 ```
 
-## `POST /api/conversations/{conversationId}/messages`
+## `POST /api/clients/{clientId}/messages`
 
-Sends a user message to the server-side LLM runtime.
+Sends a command envelope to the server-side LLM runtime.
 
 **Request**:
 
 ```json
 {
-  "clientMessageId": "client_msg_123",
-  "text": "Hello"
+  "type": "command",
+  "payload": {
+    "id": "cmd-1",
+    "type": "get_state"
+  }
 }
 ```
 
@@ -105,8 +92,6 @@ Sends a user message to the server-side LLM runtime.
 
 ```json
 {
-  "conversationId": "conv_123",
-  "messageId": "msg_1",
   "status": "accepted"
 }
 ```
@@ -115,8 +100,7 @@ Sends a user message to the server-side LLM runtime.
 
 ```json
 {
-  "code": "EMPTY_MESSAGE",
-  "errorMessage": "Enter a message before sending."
+  "error": "Request body must be a client message"
 }
 ```
 
@@ -124,14 +108,13 @@ Sends a user message to the server-side LLM runtime.
 
 ```json
 {
-  "code": "CONVERSATION_NOT_FOUND",
-  "errorMessage": "Conversation was not found."
+  "error": "Client was not found"
 }
 ```
 
-## `POST /api/conversations/{conversationId}/messages/{messageId}/retry`
+## `POST /api/clients/{clientId}/disconnect`
 
-Retries a failed user message without requiring the user to retype it.
+Disconnects a logical browser client.
 
 **Request**:
 
@@ -143,9 +126,7 @@ Retries a failed user message without requiring the user to retype it.
 
 ```json
 {
-  "conversationId": "conv_123",
-  "messageId": "msg_3",
-  "status": "accepted"
+  "status": "disconnected"
 }
 ```
 

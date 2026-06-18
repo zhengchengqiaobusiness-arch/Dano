@@ -31,7 +31,7 @@ Edit `.env` with the required server-side LLM provider settings. The browser UI 
 Docker deployment:
 
 ```bash
-docker compose --env-file .env up --build
+pnpm run deploy:up
 ```
 
 Expected result: the app container receives model credentials from server-side environment configuration only. Browser-visible HTML, JavaScript config, and network responses contain no LLM API keys or model access secrets.
@@ -39,7 +39,7 @@ Expected result: the app container receives model credentials from server-side e
 ## Docker Smoke Run
 
 ```bash
-docker compose up --build
+pnpm run deploy:up
 ```
 
 Expected result:
@@ -51,10 +51,10 @@ Expected result:
 
 ## EventSource Contract Smoke
 
-Create a conversation:
+Create a client:
 
 ```bash
-curl -s -X POST http://localhost/api/conversations \
+curl -s -X POST http://localhost/api/clients \
   -H 'Content-Type: application/json' \
   -d '{}'
 ```
@@ -62,18 +62,19 @@ curl -s -X POST http://localhost/api/conversations \
 Open the event stream in another terminal:
 
 ```bash
-curl -N http://localhost/api/conversations/<conversationId>/events
+curl -N http://localhost/api/clients/<clientId>/events
 ```
 
-Send a message:
+Send a command:
 
 ```bash
-curl -s -X POST http://localhost/api/conversations/<conversationId>/messages \
+curl -s -X POST http://localhost/api/clients/<clientId>/messages \
   -H 'Content-Type: application/json' \
-  -d '{"clientMessageId":"smoke-1","text":"Hello, introduce yourself briefly."}'
+  -d '{"type":"command","payload":{"id":"smoke-1","type":"get_state"}}'
 ```
 
-Expected result: the stream emits `message.accepted`, `assistant.started`, one or more `assistant.delta` events, and either `assistant.completed` or `message.failed` within 30 seconds.
+Expected result: the POST returns `{"status":"accepted"}` and the stream emits
+a `response` message for `smoke-1` within 30 seconds.
 
 ## Required P0 Validation Cases
 
