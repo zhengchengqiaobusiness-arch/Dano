@@ -1,4 +1,4 @@
-FROM node:22-alpine AS build
+FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
 ENV COREPACK_HOME=/tmp/corepack
@@ -17,9 +17,9 @@ RUN npm_config_registry="$NPM_CONFIG_REGISTRY" \
 
 COPY . .
 RUN pnpm run build
-RUN CI=true pnpm prune --prod --store-dir="$PNPM_STORE_DIR"
+RUN CI=true pnpm prune --prod
 
-FROM node:22-alpine AS runtime
+FROM node:22-bookworm-slim AS runtime
 
 WORKDIR /app
 ENV NODE_ENV=production

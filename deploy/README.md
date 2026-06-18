@@ -50,8 +50,33 @@ If building on the target host is unavoidable:
 pnpm run deploy:up
 ```
 
-CentOS 7 and older Docker storage stacks may have pnpm/Corepack write issues
-during Docker build. A CI-built image avoids that entire class of failures.
+The Dockerfile intentionally uses `node:22-bookworm-slim` instead of
+`node:22-alpine`. On the CentOS 7 publish host
+(`3.10.0-1160.108.1.el7.x86_64`, Docker 26.1.3, overlay2 on ext4), a minimal
+`node:22-alpine` build with only `is-number` reproduces:
+
+```text
+EPERM: operation not permitted, write
+```
+
+The failure happens after dependency extraction, while pnpm writes temporary
+metadata files such as:
+
+```text
+/app/pnpm-lock.yaml.<random>
+/app/node_modules/.modules.yaml.<random>
+/app/node_modules/.pnpm/lock.yaml.<random>
+```
+
+The following did not fix that Alpine-based failure on the publish host:
+`--package-import-method=copy`, `--ignore-scripts`, `--node-linker=hoisted`,
+`--store-dir=/tmp/pnpm-store`, `--virtual-store-dir=.pnpm`, disabling
+side-effects cache, or changing pnpm between 8, 9, and 10. The same minimal
+pnpm install succeeds with `node:20-alpine` and with `node:22-bookworm-slim`;
+the full Dano image also builds successfully with `node:22-bookworm-slim`.
+
+A CI-built image is still the preferred production path because target-host
+builds depend on host Docker/kernel/storage behavior.
 
 ## Secrets
 
