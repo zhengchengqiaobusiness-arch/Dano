@@ -11,6 +11,7 @@ import type {
   RpcTranscriptSystemBlock,
   RpcTranscriptToolResultBlock,
 } from "@dano/bridge/types";
+import { t } from "../i18n";
 
 export type JsonObject = RpcJsonObject;
 export type JsonValue = RpcJsonValue;
@@ -225,7 +226,7 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
 
         blocks.push({
           kind: "tool",
-          toolName: block.name ?? "unknown",
+          toolName: block.name ?? t("transcript.unknownTool"),
           toolCallId: block.id,
           toolArgs: parseToolArguments(block.arguments),
           argumentsText: toolArgumentsText(block.arguments),
@@ -255,11 +256,11 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
           blocks.push({
             kind: "image",
             src,
-            alt: block.text ?? "Image attachment",
+            alt: block.text ?? t("transcript.imageAttachmentAlt"),
             mimeType: block.mimeType,
           });
         } else {
-          blocks.push({ kind: "text", text: "[image]" });
+          blocks.push({ kind: "text", text: t("transcript.imagePlaceholder") });
         }
         continue;
       }
@@ -301,10 +302,10 @@ export function transcriptConfigState(
     if (block.type === "model_change") {
       state.model = {
         provider: normalizeOptionalText(block.provider),
-        id: normalizeText(block.modelId, "Unknown model"),
+        id: normalizeText(block.modelId, t("transcript.unknownModel")),
       };
     } else {
-      state.thinkingLevel = normalizeText(block.thinkingLevel, "Unknown");
+      state.thinkingLevel = normalizeText(block.thinkingLevel, t("transcript.unknown"));
     }
   }
 
@@ -368,11 +369,11 @@ export function buildTranscriptDisplayItems(
     const normalizedModel = model
       ? {
           provider: normalizeOptionalText(model.provider),
-          id: normalizeText(model.modelId, "Unknown model"),
+          id: normalizeText(model.modelId, t("transcript.unknownModel")),
         }
       : undefined;
     const normalizedThinkingLevel = thinking
-      ? normalizeText(thinking.thinkingLevel, "Unknown")
+      ? normalizeText(thinking.thinkingLevel, t("transcript.unknown"))
       : undefined;
 
     items.push({
@@ -699,11 +700,11 @@ function sessionEventLabel(
   hasModel: boolean,
   hasThinking: boolean,
 ): string {
-  if (!hasSeenNonConfigMessage) return "Session configured";
-  if (hasModel && hasThinking) return "Settings changed";
-  if (hasModel) return "Model switched";
-  if (hasThinking) return "Thinking changed";
-  return "Settings changed";
+  if (!hasSeenNonConfigMessage) return t("transcript.sessionEvent.sessionConfigured");
+  if (hasModel && hasThinking) return t("transcript.sessionEvent.settingsChanged");
+  if (hasModel) return t("transcript.sessionEvent.modelSwitched");
+  if (hasThinking) return t("transcript.sessionEvent.thinkingChanged");
+  return t("transcript.sessionEvent.settingsChanged");
 }
 
 function normalizeOptionalText(value: string | undefined): string | undefined {
@@ -724,7 +725,7 @@ function normalizePendingSessionEventModel(value: {
 } {
   return {
     provider: normalizeOptionalText(value.provider),
-    id: normalizeText(value.id, "Unknown model"),
+    id: normalizeText(value.id, t("transcript.unknownModel")),
   };
 }
 
@@ -798,8 +799,8 @@ function systemContentBlock(
       return {
         kind: "system",
         systemType: "compaction",
-        label: "Compaction",
-        title: "Context compacted",
+        label: t("transcript.system.compactionLabel"),
+        title: t("transcript.system.compactionTitle"),
         body: block.summary.trim() ? block.summary.trim() : undefined,
         meta:
           tokensBefore === null ? undefined : formatTokenCount(tokensBefore),
@@ -809,8 +810,8 @@ function systemContentBlock(
       return {
         kind: "system",
         systemType: "branch_summary",
-        label: "Branch Summary",
-        title: "Branch summarized",
+        label: t("transcript.system.branchSummaryLabel"),
+        title: t("transcript.system.branchSummaryTitle"),
         body: block.summary.trim() ? block.summary.trim() : undefined,
       };
     case "model_change": {
@@ -819,11 +820,11 @@ function systemContentBlock(
         : undefined;
       const modelId = block.modelId.trim()
         ? block.modelId.trim()
-        : "Unknown model";
+        : t("transcript.unknownModel");
       return {
         kind: "system",
         systemType: "model_change",
-        label: "Model",
+        label: t("transcript.system.modelLabel"),
         title: modelId,
         meta: provider,
       };
@@ -831,20 +832,20 @@ function systemContentBlock(
     case "thinking_level_change": {
       const level = block.thinkingLevel.trim()
         ? block.thinkingLevel.trim()
-        : "Unknown";
+        : t("transcript.unknown");
       return {
         kind: "system",
         systemType: "thinking_level_change",
-        label: "Thinking",
+        label: t("transcript.system.thinkingLabel"),
         title: level,
       };
     }
     case "session_info": {
-      const name = block.name?.trim() ? block.name.trim() : "Untitled session";
+      const name = block.name?.trim() ? block.name.trim() : t("transcript.untitledSession");
       return {
         kind: "system",
         systemType: "session_info",
-        label: "Session",
+        label: t("transcript.system.sessionLabel"),
         title: name,
       };
     }
@@ -859,9 +860,11 @@ function systemBlockText(block: RpcTranscriptSystemBlock): string {
 }
 
 function formatTokenCount(count: number): string {
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M tokens`;
-  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k tokens`;
-  return `${count} tokens`;
+  if (count >= 1_000_000)
+    return t("transcript.tokens.millions", { count: (count / 1_000_000).toFixed(1) });
+  if (count >= 1_000)
+    return t("transcript.tokens.thousands", { count: (count / 1_000).toFixed(1) });
+  return t("transcript.tokens.count", { count });
 }
 
 function toolResultText(block: RpcTranscriptToolResultBlock): string {
@@ -901,7 +904,7 @@ function toolResultBlocks(
             blocks.push({
               kind: "image",
               src,
-              alt: item.text ?? "Image attachment",
+              alt: item.text ?? t("transcript.imageAttachmentAlt"),
               mimeType: item.mimeType,
             });
           }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import type { SlashCommandOption } from "../utils/slashCommands";
 
   let {
@@ -17,6 +18,7 @@
 
   let highlightedIndex = $state(0);
   let listRef = $state<HTMLElement | null>(null);
+  const debugEmptyExamples = "`/fixture mixed`, `/fixture edit`, `/tps 12`";
 
   let filtered = $derived.by(() => {
     const q = filter.toLowerCase();
@@ -77,7 +79,7 @@
 {#if filtered.length > 0}
   <div class="command-palette">
     {#if isDebugMode}
-      <div class="command-hint">Debug session commands run locally in memory.</div>
+      <div class="command-hint">{t("commandPalette.debugHint")}</div>
     {/if}
     <ul bind:this={listRef} class="command-list">
       {#each filtered as cmd, idx (cmd.name)}
@@ -105,10 +107,12 @@
 {:else}
   <div class="command-palette empty">
     <span class="empty-text">
-      {isDebugMode ? "No matching debug commands" : "No matching commands"}
+      {isDebugMode
+        ? t("commandPalette.emptyDebug")
+        : t("commandPalette.empty")}
     </span>
     {#if isDebugMode}
-      <span class="empty-hint">Try `/fixture mixed`, `/fixture edit`, or `/tps 12`.</span>
+      <span class="empty-hint">{t("commandPalette.debugEmptyHint", { examples: debugEmptyExamples })}</span>
     {/if}
   </div>
 {/if}

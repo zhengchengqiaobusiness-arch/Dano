@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { RpcWorkspaceFile } from "@dano/bridge/types";
   import { onMount } from "svelte";
+  import { t } from "../i18n";
   import { highlightCodeLinesHtml } from "../utils/codeHighlight";
 
   let {
@@ -42,7 +43,7 @@
       if (version !== loadVersion) return;
       file = null;
       errorMessage =
-        error instanceof Error ? error.message : "Failed to load file preview";
+        error instanceof Error ? error.message : t("fileViewer.loadFailed");
       renderedHtml = "";
     } finally {
       if (version === loadVersion) loading = false;
@@ -122,20 +123,22 @@
     </div>
   {:else if loading && !file}
     <div class="file-viewer-state">
-      Loading file...
+      {t("fileViewer.loading")}
     </div>
   {:else}
     {#if file?.truncated}
       <div class="file-viewer-notice">
-        Showing the first {file.lineCount} lines. The full file is
-        {file.totalBytes} bytes.
+        {t("fileViewer.truncatedNotice", {
+          lineCount: file.lineCount,
+          totalBytes: file.totalBytes,
+        })}
       </div>
     {/if}
     <div bind:this={container} class="file-viewer-code-shell">
       {#if renderedHtml}
         <div class="file-viewer-code">{@html renderedHtml}</div>
       {:else}
-        <div class="file-viewer-empty">This file is empty.</div>
+        <div class="file-viewer-empty">{t("fileViewer.empty")}</div>
       {/if}
     </div>
   {/if}

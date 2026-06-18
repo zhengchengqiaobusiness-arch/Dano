@@ -34,6 +34,7 @@ import {
   upsertModel,
   type RpcModelInfo,
 } from "../utils/models";
+import { t } from "../i18n";
 import {
   normalizeTranscript,
   transcriptConfigState,
@@ -552,8 +553,8 @@ async function applySessionRouteFromLocation() {
     if (!response.success) {
       pushNotification(
         summarizeErrorMessage(
-          response.error ?? "Failed to open session from URL",
-          "Failed to open session from URL",
+          response.error ?? t("store.error.openSessionFromUrlFailed"),
+          t("store.error.openSessionFromUrlFailed"),
         ),
         "error",
       );
@@ -890,7 +891,7 @@ function updatePendingTranscriptConfigEvent(change: {
 
 async function postEnvelope(msg: ClientMessage): Promise<void> {
   if (!clientMessagesUrl || _connectionStatus !== "connected") {
-    throw new Error("Bridge is not connected");
+    throw new Error(t("store.error.sendBridgeMessageFailed"));
   }
 
   const response = await fetch(clientMessagesUrl, {
@@ -907,7 +908,9 @@ async function postEnvelope(msg: ClientMessage): Promise<void> {
     } catch {
       detail = await response.text().catch(() => "");
     }
-    throw new Error(detail || `Bridge request failed (${response.status})`);
+    throw new Error(
+      detail || t("store.error.sendBridgeMessageFailed"),
+    );
   }
 }
 
@@ -915,8 +918,10 @@ function sendEnvelope(msg: ClientMessage) {
   void postEnvelope(msg).catch(error => {
     pushNotification(
       summarizeErrorMessage(
-        error instanceof Error ? error.message : "Failed to send bridge message",
-        "Failed to send bridge message",
+        error instanceof Error
+          ? error.message
+          : t("store.error.sendBridgeMessageFailed"),
+        t("store.error.sendBridgeMessageFailed"),
       ),
       "error",
     );
@@ -964,7 +969,7 @@ async function sendCommand(
     const cmd = { ...payload, id };
     const timer = setTimeout(() => {
       pendingRequests.delete(id);
-      reject(new Error(`RPC timeout: ${cmd.type}`));
+      reject(new Error(t("store.error.sendBridgeMessageFailed")));
     }, options?.timeoutMs ?? 15_000);
     pendingRequests.set(id, { resolve, reject, timer });
     postEnvelope({ type: "command", payload: cmd }).catch(error => {
@@ -1652,7 +1657,9 @@ function applyTranscriptDelta(payload: RpcTranscriptDeltaEvent) {
 
 function appendCompactErrorMessage(message: string) {
   const detail = message.trim();
-  const em = detail ? `Compaction failed: ${detail}` : "Compaction failed";
+  const em = detail
+    ? `${t("store.error.unknownCompaction")}: ${detail}`
+    : t("store.error.unknownCompaction");
   upsertTranscriptMessage({
     transcriptKey: `local:compact-error:${Date.now()}:${requestIdCounter}`,
     role: "assistant",
@@ -1712,8 +1719,8 @@ async function dequeueQueuedMessage(
     if (!resp.success) {
       pushNotification(
         summarizeErrorMessage(
-          resp.error ?? "Failed to update queued messages",
-          "Failed to update queued messages",
+          resp.error ?? t("store.error.queuedMessagesUpdateFailed"),
+          t("store.error.queuedMessagesUpdateFailed"),
         ),
         "error",
       );
@@ -1741,8 +1748,8 @@ async function dequeueQueuedMessage(
       summarizeErrorMessage(
         error instanceof Error
           ? error.message
-          : "Failed to update queued messages",
-        "Failed to update queued messages",
+          : t("store.error.queuedMessagesUpdateFailed"),
+        t("store.error.queuedMessagesUpdateFailed"),
       ),
       "error",
     );
@@ -1824,10 +1831,10 @@ export async function readWorkspaceFile(
     ...(wp ? { workspacePath: wp } : {}),
   });
   if (!resp.success)
-    throw new Error(resp.error ?? "Failed to read workspace file");
+    throw new Error(resp.error ?? t("store.error.workspaceFileReadFailed"));
   const data = resp.data;
   if (!data || typeof data !== "object")
-    throw new Error("Failed to parse workspace file contents");
+    throw new Error(t("store.error.workspaceFileParseFailed"));
   return data as RpcWorkspaceFile;
 }
 
@@ -1844,8 +1851,8 @@ export async function loadGitRepoState(
       if (!resp.success) {
         pushNotification(
           summarizeErrorMessage(
-            resp.error ?? "Failed to load git branches",
-            "Failed to load git branches",
+            resp.error ?? t("store.error.gitBranchLoadFailed"),
+            t("store.error.gitBranchLoadFailed"),
           ),
           "error",
         );
@@ -1853,7 +1860,8 @@ export async function loadGitRepoState(
       }
       const state = normalizeGitRepoState(resp.data);
       _gitRepoState = state;
-      if (!state) pushNotification("Failed to parse git branch data", "error");
+      if (!state)
+        pushNotification(t("store.error.gitBranchParseFailed"), "error");
       return state;
     })
     .catch(error => {
@@ -1861,8 +1869,8 @@ export async function loadGitRepoState(
         summarizeErrorMessage(
           error instanceof Error
             ? error.message
-            : "Failed to load git branches",
-          "Failed to load git branches",
+            : t("store.error.gitBranchLoadFailed"),
+          t("store.error.gitBranchLoadFailed"),
         ),
         "error",
       );
@@ -1896,8 +1904,8 @@ export async function switchGitBranch(
     if (!resp.success) {
       pushNotification(
         summarizeErrorMessage(
-          resp.error ?? "Failed to switch git branch",
-          "Failed to switch git branch",
+          resp.error ?? t("store.error.gitBranchSwitchFailed"),
+          t("store.error.gitBranchSwitchFailed"),
         ),
         "error",
       );
@@ -1905,7 +1913,7 @@ export async function switchGitBranch(
     }
     const state = normalizeGitRepoState(resp.data);
     if (!state) {
-      pushNotification("Failed to parse git branch data", "error");
+      pushNotification(t("store.error.gitBranchParseFailed"), "error");
       return null;
     }
     applyGitRepoMutation(state);
@@ -1913,8 +1921,10 @@ export async function switchGitBranch(
   } catch (error) {
     pushNotification(
       summarizeErrorMessage(
-        error instanceof Error ? error.message : "Failed to switch git branch",
-        "Failed to switch git branch",
+        error instanceof Error
+          ? error.message
+          : t("store.error.gitBranchSwitchFailed"),
+        t("store.error.gitBranchSwitchFailed"),
       ),
       "error",
     );
@@ -1935,8 +1945,8 @@ export async function createGitBranch(
     if (!resp.success) {
       pushNotification(
         summarizeErrorMessage(
-          resp.error ?? "Failed to create git branch",
-          "Failed to create git branch",
+          resp.error ?? t("store.error.gitBranchCreateFailed"),
+          t("store.error.gitBranchCreateFailed"),
         ),
         "error",
       );
@@ -1944,7 +1954,7 @@ export async function createGitBranch(
     }
     const state = normalizeGitRepoState(resp.data);
     if (!state) {
-      pushNotification("Failed to parse git branch data", "error");
+      pushNotification(t("store.error.gitBranchParseFailed"), "error");
       return null;
     }
     applyGitRepoMutation(state);
@@ -1952,8 +1962,10 @@ export async function createGitBranch(
   } catch (error) {
     pushNotification(
       summarizeErrorMessage(
-        error instanceof Error ? error.message : "Failed to create git branch",
-        "Failed to create git branch",
+        error instanceof Error
+          ? error.message
+          : t("store.error.gitBranchCreateFailed"),
+        t("store.error.gitBranchCreateFailed"),
       ),
       "error",
     );
@@ -2043,7 +2055,7 @@ export async function compactSession(customInstructions?: string) {
       { timeoutMs: 120_000 },
     );
     if (!resp.success) {
-      appendCompactErrorMessage(resp.error ?? "Unknown compaction error");
+      appendCompactErrorMessage(resp.error ?? t("store.error.unknownCompaction"));
     }
     return resp;
   } catch (error) {
@@ -2290,7 +2302,7 @@ function handleResponse(payload: RpcResponse) {
         const state = normalizeGitRepoState(payload.data);
         _gitRepoState = state;
         if (!state)
-          pushNotification("Failed to parse git branch data", "error");
+          pushNotification(t("store.error.gitBranchParseFailed"), "error");
         break;
       }
       case "switch_git_branch": {
@@ -2497,8 +2509,8 @@ async function startDefaultWorkspaceSession(
     if (!registerResp.success) {
       pushNotification(
         summarizeErrorMessage(
-          registerResp.error ?? "Failed to register default workspace",
-          "Failed to register default workspace",
+          registerResp.error ?? t("store.error.defaultWorkspaceFailed"),
+          t("store.error.defaultWorkspaceFailed"),
         ),
         "error",
       );
@@ -2518,8 +2530,8 @@ async function startDefaultWorkspaceSession(
     if (!sessionResp.success) {
       pushNotification(
         summarizeErrorMessage(
-          sessionResp.error ?? "Failed to start default session",
-          "Failed to start default session",
+          sessionResp.error ?? t("store.error.defaultSessionFailed"),
+          t("store.error.defaultSessionFailed"),
         ),
         "error",
       );
@@ -2559,8 +2571,8 @@ async function fetchInitialState() {
       if (!resp.success) {
         pushNotification(
           summarizeErrorMessage(
-            resp.error ?? "Failed to restore session from URL",
-            "Failed to restore session from URL",
+            resp.error ?? t("store.error.restoreSessionFromUrlFailed"),
+            t("store.error.restoreSessionFromUrlFailed"),
           ),
           "error",
         );
@@ -2593,7 +2605,7 @@ function rejectPendingRequests(message: string) {
   }
 }
 
-function markDisconnected(reason = "Connection lost") {
+function markDisconnected(reason = t("appHeader.connection.disconnected")) {
   _connectionStatus = "disconnected";
   _remoteCompactionActive = false;
   _reconnectCount++;
@@ -2627,7 +2639,9 @@ async function connect() {
     });
 
     if (!createResponse.ok) {
-      throw new Error(`Bridge client creation failed (${createResponse.status})`);
+      throw new Error(
+        t("store.error.sendBridgeMessageFailed"),
+      );
     }
 
     const created = (await createResponse.json()) as {
@@ -2638,7 +2652,7 @@ async function connect() {
     };
     const nextClientId = created.client?.id;
     if (!nextClientId || !created.eventsUrl || !created.messagesUrl) {
-      throw new Error("Bridge client creation returned an invalid response");
+      throw new Error(t("store.error.sendBridgeMessageFailed"));
     }
 
     clientId = nextClientId;
@@ -2648,8 +2662,10 @@ async function connect() {
   } catch (error) {
     markDisconnected(
       summarizeErrorMessage(
-        error instanceof Error ? error.message : "Connection lost",
-        "Connection lost",
+        error instanceof Error
+          ? error.message
+          : t("appHeader.connection.disconnected"),
+        t("appHeader.connection.disconnected"),
       ),
     );
     scheduleReconnect();
@@ -2669,7 +2685,7 @@ async function connect() {
       return;
     }
     resetTransportState();
-    markDisconnected("Connection lost");
+    markDisconnected(t("appHeader.connection.disconnected"));
     scheduleReconnect();
   });
 

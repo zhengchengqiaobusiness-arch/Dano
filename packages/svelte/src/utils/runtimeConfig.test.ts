@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   getRuntimeEmptyStateConfig,
+  getRuntimeLocale,
   getRuntimeProductName,
 } from "./runtimeConfig";
 
@@ -17,9 +18,23 @@ describe("runtimeConfig", () => {
     vi.stubGlobal("window", {});
 
     expect(getRuntimeProductName()).toBe("Dano");
+    expect(getRuntimeLocale()).toBe("zh-CN");
     expect(getRuntimeEmptyStateConfig()).toEqual({
       mode: "text",
       content: "给 Dano 发消息",
+    });
+  });
+
+  it("uses the configured locale for default empty state copy", () => {
+    stubRuntimeConfig({
+      locale: "en-US",
+      productName: "My Agent",
+    });
+
+    expect(getRuntimeLocale()).toBe("en-US");
+    expect(getRuntimeEmptyStateConfig()).toEqual({
+      mode: "text",
+      content: "Message My Agent",
     });
   });
 

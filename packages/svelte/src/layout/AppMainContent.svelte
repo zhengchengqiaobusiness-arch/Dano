@@ -13,6 +13,7 @@
   import CompatWarning from "../components/CompatWarning.svelte";
   import ComposerBar from "../components/ComposerBar.svelte";
   import type { ConnectionStatus, TranscriptDelta, TranscriptEntry, TranscriptStream } from "../composables/bridgeStore.svelte";
+  import { t } from "../i18n";
   import { isDebugSessionPath } from "../utils/debugSession";
   import type { RpcModelInfo } from "../utils/models";
   import type { PendingTranscriptSessionEvent } from "../utils/transcript";
@@ -195,7 +196,9 @@
         <div class="queued-message-card">
           <div class="queued-message-body">
             <span class="queued-badge">
-              {queued.queueType === "steering" ? "Steering" : "Queued"}
+              {queued.queueType === "steering"
+                ? t("queuedMessages.steering")
+                : t("queuedMessages.queued")}
             </span>
             <span class="queued-text">{queued.text}</span>
           </div>
@@ -204,18 +207,18 @@
               <button
                 type="button"
                 class="queued-action-btn edit"
-                title="Edit"
+                title={t("common.edit")}
                 onclick={() => onEditQueued(qIdx)}
               >
-                Edit
+                {t("common.edit")}
               </button>
               <button
                 type="button"
                 class="queued-action-btn cancel"
-                title="Cancel"
+                title={t("common.cancel")}
                 onclick={() => onCancelQueued(qIdx)}
               >
-                Cancel
+                {t("common.cancel")}
               </button>
             </div>
           {/if}

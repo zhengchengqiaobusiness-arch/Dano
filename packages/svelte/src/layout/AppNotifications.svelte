@@ -1,5 +1,6 @@
 <script lang="ts">
   import X from "lucide-svelte/icons/x";
+  import { t } from "../i18n";
 
   let {
     connectionError = "",
@@ -10,6 +11,20 @@
     }>,
     onDismiss = (_: string) => {},
   } = $props();
+
+  function formatNotifyType(type: string | undefined): string {
+    switch (type) {
+      case "error":
+        return t("notifications.type.error");
+      case "warn":
+        return t("notifications.type.warn");
+      case "info":
+      case undefined:
+        return t("notifications.type.info");
+      default:
+        return type;
+    }
+  }
 </script>
 
 {#if connectionError || notifications.length > 0}
@@ -17,7 +32,7 @@
     {#if connectionError}
       <div class="toast-item error" role="alert">
         <div class="toast-copy">
-          <span class="toast-type">error</span>
+          <span class="toast-type">{t("notifications.type.error")}</span>
           <span class="toast-message">{connectionError}</span>
         </div>
       </div>
@@ -30,12 +45,12 @@
         class:warn={notif.notifyType === "warn"}
       >
         <div class="toast-copy">
-          <span class="toast-type">{notif.notifyType ?? "info"}</span>
+          <span class="toast-type">{formatNotifyType(notif.notifyType)}</span>
           <span class="toast-message">{notif.message}</span>
         </div>
         <button
           class="toast-dismiss"
-          aria-label="Dismiss notification"
+          aria-label={t("notifications.dismiss")}
           onclick={() => onDismiss(notif.id)}
         >
           <X size={14} aria-hidden="true" />

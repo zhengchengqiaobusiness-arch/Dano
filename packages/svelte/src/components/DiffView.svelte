@@ -6,6 +6,7 @@
     readThemePairFromDom,
     resolveShikiTheme,
   } from "../themes";
+  import { t } from "../i18n";
 
   type DiffEdit = { oldText: string; newText: string };
   type ReadWorkspaceFile = (path: string) => Promise<{ content: string }>;
@@ -302,7 +303,8 @@
       if (!line) continue;
 
       const parsedLine = parseNumberedEditLine(line);
-      if (!parsedLine) throw new Error("Unsupported numbered edit diff format");
+      if (!parsedLine)
+        throw new Error(t("diffView.unsupportedNumberedEditDiff"));
       if (parsedLine === "gap") {
         lineDelta += appendNumberedEditHunk(patchLines, hunkLines, lineDelta);
         hunkLines = [];
@@ -443,7 +445,7 @@
       if (hasRenderableDiff(fileDiff)) return fileDiff;
     }
 
-    throw new Error("Unsupported diff format for @pierre/diffs");
+    throw new Error(t("diffView.unsupportedDiffFormat"));
   }
 
   function clearRenderedDiff() {
@@ -493,7 +495,7 @@
     } catch (error) {
       clearRenderedDiff();
       renderError =
-        error instanceof Error ? error.message : "Failed to render diff";
+        error instanceof Error ? error.message : t("diffView.renderFailed");
     } finally {
       if (requestId === renderRequestId) loading = false;
     }
@@ -566,7 +568,7 @@
   <diffs-container bind:this={host} class="diff-view-host"></diffs-container>
 
   {#if loading && !hasRenderedDiff && !renderError}
-    <div class="diff-view-status">Loading diff...</div>
+    <div class="diff-view-status">{t("diffView.loading")}</div>
   {:else if !hasRenderedDiff && fallbackText}
     <div class="diff-view-fallback" role="note">
       {#if renderError}

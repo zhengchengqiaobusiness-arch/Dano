@@ -9,6 +9,7 @@
   } from "@dano/bridge/types";
   import X from "lucide-svelte/icons/x";
   import type { ConnectionStatus } from "../composables/bridgeStore.svelte";
+  import { t } from "../i18n";
   import { COMPOSER_ATTACHMENT_ACCEPT, formatAttachmentSize } from "../utils/attachments";
   import type { RpcModelInfo } from "../utils/models";
   import CommandPalette from "./CommandPalette.svelte";
@@ -56,7 +57,7 @@
   let composerPlaceholder = $derived(
     isDebugMode && isDebugSession
       ? "Use /fixture, /tps, /json, or type synthetic markdown"
-      : "想让 Dano 帮你处理什么问题",
+      : t("composer.placeholder"),
   );
 
   // ---- DOM refs (must stay in .svelte for bind:this) ----
@@ -300,7 +301,7 @@
       class:disabled={composer.isDisabled}
       class:drag-active={composer.isDragActive}
       role="region"
-      aria-label="Message composer"
+      aria-label={t("composer.regionLabel")}
       ondragenter={composer.handleDragEnter}
       ondragover={composer.handleDragOver}
       ondragleave={composer.handleDragLeave}
@@ -316,7 +317,7 @@
             class="revision-cancel-button"
             onclick={handleCancelRevision}
           >
-            Cancel
+            {t("composer.revision.cancel")}
           </button>
         </div>
       {/if}
@@ -337,7 +338,7 @@
               <button
                 type="button"
                 class="attachment-chip-open"
-                aria-label={`View ${attachment.name}`}
+                aria-label={t("composer.attachments.view", { name: attachment.name })}
                 onclick={() => composer.openAttachmentLightbox(index)}
               >
                 <img
@@ -355,7 +356,7 @@
               <button
                 type="button"
                 class="attachment-chip-remove"
-                aria-label={`Remove ${attachment.name}`}
+                aria-label={t("composer.attachments.remove", { name: attachment.name })}
                 onclick={() => composer.removeAttachment(attachment.id)}
               >
                 <X class="attachment-chip-remove-icon" aria-hidden="true" size={14} />
@@ -388,8 +389,8 @@
           <button
             type="button"
             class="attach-btn composer-icon-button"
-            aria-label="Add attachment"
-            title={composer.hasAttachments ? "Add more images" : "Attach images"}
+            aria-label={t("composer.attachments.add")}
+            title={composer.hasAttachments ? t("composer.attachments.addMoreImages") : t("composer.attachments.attachImages")}
             onclick={handleFilePickerOpen}
           >
             <span class="plus-icon" aria-hidden="true"></span>
@@ -401,7 +402,7 @@
             class="send-btn composer-send-button"
             class:stop={composer.showStopButton}
             disabled={composer.showStopButton ? !composer.canAbort : !composer.canSubmit}
-            aria-label={composer.showStopButton ? "Stop response" : "Send message"}
+            aria-label={composer.showStopButton ? t("composer.actions.stopResponse") : t("composer.actions.sendMessage")}
             onclick={handlePrimaryAction}
           >
             {#if composer.showStopButton}

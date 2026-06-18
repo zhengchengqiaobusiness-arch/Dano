@@ -2,6 +2,7 @@
   import Check from "lucide-svelte/icons/check";
   import Search from "lucide-svelte/icons/search";
   import { onMount } from "svelte";
+  import { t } from "../i18n";
   import { filterModels, getModelKey, type RpcModelInfo } from "../utils/models";
   import ProviderIcon from "./ProviderIcon.svelte";
 
@@ -33,7 +34,9 @@
   let filteredModels = $derived(filterModels(models, searchText));
   let triggerTitle = $derived.by(() => {
     if (!selectedModel)
-      return hasModels ? "Select Pi model" : "No Pi models available";
+      return hasModels
+        ? t("modelDropdown.selectPiModel")
+        : t("modelDropdown.noPiModelsAvailable");
     return `${selectedModel.name} (${selectedModel.provider}/${selectedModel.id})`;
   });
 
@@ -169,7 +172,7 @@
     {:else if label}
       <span class="model-trigger-label">{label}</span>
     {:else}
-      <span class="sr-only">Select model</span>
+      <span class="sr-only">{t("modelDropdown.selectModel")}</span>
     {/if}
   </button>
 
@@ -182,7 +185,7 @@
           bind:value={searchText}
           class="model-search-input"
           type="text"
-          placeholder="Search models"
+          placeholder={t("modelDropdown.searchPlaceholder")}
           onkeydown={handleSearchKeydown}
         />
       </label>
@@ -214,7 +217,7 @@
           {/each}
         </ul>
       {:else}
-        <div class="model-empty">No matching models</div>
+        <div class="model-empty">{t("modelDropdown.noMatchingModels")}</div>
       {/if}
     </div>
   {/if}

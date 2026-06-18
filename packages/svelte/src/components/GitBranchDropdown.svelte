@@ -4,6 +4,7 @@
   import GitBranchIcon from "lucide-svelte/icons/git-branch";
   import Plus from "lucide-svelte/icons/plus";
   import RefreshCw from "lucide-svelte/icons/refresh-cw";
+  import { t } from "../i18n";
 
   let {
     label = null as string | null,
@@ -82,12 +83,14 @@
   );
   let canCreateBranch = $derived(Boolean(normalizedQuery) && !exactBranchMatch);
   let createButtonLabel = $derived(
-    normalizedQuery ? `Create ${normalizedQuery}` : "Create branch",
+    normalizedQuery
+      ? t("gitBranchDropdown.createNamed", { branch: normalizedQuery })
+      : t("gitBranchDropdown.create"),
   );
   let triggerTitle = $derived.by(() => {
-    if (!displayLabel) return "Git branch";
+    if (!displayLabel) return t("gitBranchDropdown.triggerTitle");
     if (repoState?.isDirty)
-      return `${displayLabel} (working tree has uncommitted changes)`;
+      return t("gitBranchDropdown.dirtyTitle", { branch: displayLabel });
     return displayLabel;
   });
 
@@ -294,7 +297,7 @@
               bind:value={searchText}
               class="git-search-input"
               type="text"
-              placeholder="Find or create branch"
+              placeholder={t("gitBranchDropdown.searchPlaceholder")}
               onkeydown={handleSearchKeydown}
             />
           </label>
@@ -302,7 +305,7 @@
             class="git-refresh"
             type="button"
             disabled={isBusy}
-            title="Refresh branches"
+            title={t("gitBranchDropdown.refresh")}
             onclick={() => handleRefresh(true)}
           >
             <span
@@ -329,16 +332,16 @@
           </button>
         {:else if repoState && exactBranchMatch}
           <div class="git-match-note">
-            Branch already exists. Press Enter to switch.
+            {t("gitBranchDropdown.branchExists")}
           </div>
         {/if}
 
         {#if loading && !repoState}
-          <div class="git-empty">Loading branches...</div>
+          <div class="git-empty">{t("gitBranchDropdown.loading")}</div>
         {:else if !repoState}
-          <div class="git-empty">No git repository found.</div>
+          <div class="git-empty">{t("gitBranchDropdown.noRepository")}</div>
         {:else if filteredBranches.length === 0}
-          <div class="git-empty">No matching branches</div>
+          <div class="git-empty">{t("gitBranchDropdown.noMatches")}</div>
         {:else}
           <ul
             bind:this={listRef}

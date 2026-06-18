@@ -7,6 +7,7 @@ declare global {
   interface Window {
     __PI_WEB_CONFIG__?: {
       debugModeAvailable?: boolean;
+      locale?: "zh-CN" | "en-US";
       productName?: string;
       emptyState?: {
         mode?: "text" | "html";

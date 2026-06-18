@@ -4,6 +4,7 @@
     RpcExtensionUIResponse,
   } from "@dano/bridge/types";
   import X from "lucide-svelte/icons/x";
+  import { t } from "../i18n";
 
   type DialogExtensionUIRequest = Extract<
     RpcExtensionUIRequest,
@@ -89,10 +90,10 @@
     <div class="dialog-panel" role="dialog" aria-modal="true" aria-label={request.title} tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
       <div class="dialog-header">
         <div>
-          <div class="dialog-kicker">Extension request</div>
+          <div class="dialog-kicker">{t("extensionDialog.kicker")}</div>
           <h3 class="dialog-title">{request.title}</h3>
         </div>
-        <button class="dialog-close" aria-label="Cancel" onclick={handleCancel}>
+        <button class="dialog-close" aria-label={t("common.cancel")} onclick={handleCancel}>
           <X aria-hidden="true" size={16} />
         </button>
       </div>
@@ -123,10 +124,10 @@
           <p class="confirm-message">{request.message}</p>
           <div class="dialog-actions">
             <button class="btn btn-cancel" onclick={() => handleConfirm(false)}>
-              Cancel
+              {t("common.cancel")}
             </button>
             <button class="btn btn-primary" onclick={() => handleConfirm(true)}>
-              Confirm
+              {t("common.confirm")}
             </button>
           </div>
         </div>
@@ -135,13 +136,13 @@
           <input
             bind:value={inputValue}
             class="dialog-input"
-            placeholder={request.placeholder ?? "Enter a value..."}
+            placeholder={request.placeholder ?? t("extensionDialog.inputPlaceholder")}
             onkeydown={(e) => e.key === "Enter" && handleInputSubmit()}
           />
           <div class="dialog-actions">
-            <button class="btn btn-cancel" onclick={handleCancel}>Cancel</button>
+            <button class="btn btn-cancel" onclick={handleCancel}>{t("common.cancel")}</button>
             <button class="btn btn-primary" onclick={handleInputSubmit}>
-              Submit
+              {t("common.submit")}
             </button>
           </div>
         </div>
@@ -155,12 +156,12 @@
               (e.ctrlKey || e.metaKey) && e.key === "Enter" && handleEditorSubmit()}
           ></textarea>
           <div class="dialog-hint">
-            <kbd class="dialog-kbd">Ctrl+Enter</kbd> to submit
+            <kbd class="dialog-kbd">Ctrl+Enter</kbd> {t("extensionDialog.submitShortcutSuffix")}
           </div>
           <div class="dialog-actions">
-            <button class="btn btn-cancel" onclick={handleCancel}>Cancel</button>
+            <button class="btn btn-cancel" onclick={handleCancel}>{t("common.cancel")}</button>
             <button class="btn btn-primary" onclick={handleEditorSubmit}>
-              Submit
+              {t("common.submit")}
             </button>
           </div>
         </div>
@@ -168,7 +169,7 @@
 
       {#if request.method === "select"}
         <div class="dialog-actions select-actions">
-          <button class="btn btn-cancel" onclick={handleCancel}>Cancel</button>
+          <button class="btn btn-cancel" onclick={handleCancel}>{t("common.cancel")}</button>
         </div>
       {/if}
     </div>

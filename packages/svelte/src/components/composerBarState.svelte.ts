@@ -5,6 +5,7 @@ import type {
   RpcWorkspaceEntry,
 } from "@dano/bridge/types";
 import type { ConnectionStatus } from "../composables/bridgeStore.svelte";
+import { t } from "../i18n";
 import {
   createComposerAttachments,
   extractSupportedImageFiles,
@@ -260,7 +261,9 @@ export function createComposerBarState(
 
   let currentModelText = $derived.by(() => {
     if (!props.selectedModel)
-      return props.models.length > 0 ? "choose model" : "no models";
+      return props.models.length > 0
+        ? t("composer.state.chooseModel")
+        : t("composer.state.noModels");
     return props.selectedModel.name ?? props.selectedModel.id;
   });
 
@@ -330,7 +333,9 @@ export function createComposerBarState(
     }
     if (rejectedNames.length > 0) {
       setAttachmentNotice(
-        `Skipped unsupported files: ${rejectedNames.join(", ")}`,
+        t("composerBar.skippedUnsupportedFiles", {
+          files: rejectedNames.join(", "),
+        }),
       );
     }
   }
@@ -498,7 +503,7 @@ export function createComposerBarState(
     const text = normalizedInputText;
     if ((!text && !hasAttachments) || isDisabled) return false;
     if (parseCompactSlashCommand(text) && hasAttachments) {
-      setAttachmentNotice("/compact does not accept image attachments");
+      setAttachmentNotice(t("composer.warning.compactNoImages"));
       return false;
     }
     submitMessage(text, steer, fileInputEl, textareaEl);

@@ -14,6 +14,7 @@
   import AppMainContent from "./layout/AppMainContent.svelte";
   import AppNotifications from "./layout/AppNotifications.svelte";
   import AppRightSidebar from "./layout/AppRightSidebar.svelte";
+  import { t } from "./i18n";
   import {
     listThemes,
     readStoredThemePreference,
@@ -316,7 +317,7 @@
       return bridge.readWorkspaceFile(path);
     }
     if (!workspacePath) {
-      throw new Error("Debug session is not bound to a workspace");
+      throw new Error(t("debugSession.noWorkspace"));
     }
 
     const response = await bridge.sendCommand({
@@ -325,7 +326,7 @@
       workspacePath,
     });
     if (!response.success) {
-      throw new Error(response.error ?? "Failed to read workspace file");
+      throw new Error(response.error ?? t("store.error.workspaceFileReadFailed"));
     }
     return response.data as RpcWorkspaceFile;
   }

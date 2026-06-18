@@ -2,6 +2,7 @@
   import type { RpcThinkingLevel } from "@dano/bridge/types";
   import Check from "lucide-svelte/icons/check";
   import ChevronDown from "lucide-svelte/icons/chevron-down";
+  import { t } from "../i18n";
   import {
     DEFAULT_THINKING_LEVEL,
     THINKING_LEVEL_OPTIONS,
@@ -25,8 +26,7 @@
 
   let selectedLevel = $derived(value ?? DEFAULT_THINKING_LEVEL);
   let selectedLabel = $derived(
-    THINKING_LEVEL_OPTIONS.find(o => o.value === selectedLevel)?.label ??
-      "Off",
+    formatThinkingLevel(selectedLevel),
   );
   let selectedIndex = $derived(
     THINKING_LEVEL_OPTIONS.findIndex(o => o.value === selectedLevel),
@@ -78,6 +78,24 @@
   function selectLevel(level: RpcThinkingLevel) {
     onSelect(level);
     closeDropdown({ focusTrigger: true });
+  }
+
+  function formatThinkingLevel(level: RpcThinkingLevel): string {
+    switch (level) {
+      case "minimal":
+        return t("thinkingLevel.options.minimal");
+      case "low":
+        return t("thinkingLevel.options.low");
+      case "medium":
+        return t("thinkingLevel.options.medium");
+      case "high":
+        return t("thinkingLevel.options.high");
+      case "xhigh":
+        return t("thinkingLevel.options.xhigh");
+      case "off":
+      default:
+        return t("thinkingLevel.options.off");
+    }
   }
 
   function handleTriggerKeydown(event: KeyboardEvent) {
@@ -185,13 +203,13 @@
     disabled={disabled}
     aria-expanded={isOpen}
     aria-haspopup="listbox"
-    aria-label="Thinking level"
+    aria-label={t("thinkingLevel.label")}
     aria-keyshortcuts="Shift+Tab"
-    title="Thinking level · Shift+Tab"
+    title={t("thinkingLevel.titleWithShortcut", { shortcut: "Shift+Tab" })}
     onclick={toggleDropdown}
     onkeydown={handleTriggerKeydown}
   >
-    <span class="thinking-trigger-label" aria-hidden="true">Thinking</span>
+    <span class="thinking-trigger-label" aria-hidden="true">{t("thinkingLevel.triggerLabel")}</span>
     <span class="thinking-trigger-value">{selectedLabel}</span>
     <ChevronDown aria-hidden="true" size={11} style="flex-shrink: 0; color: var(--text-subtle)" />
   </button>
@@ -203,7 +221,7 @@
         class="thinking-list"
         tabindex="-1"
         role="listbox"
-        aria-label="Thinking level options"
+        aria-label={t("thinkingLevel.optionsLabel")}
         onkeydown={handleListKeydown}
       >
         {#each THINKING_LEVEL_OPTIONS as option, index (option.value)}
@@ -218,7 +236,7 @@
               onclick={() => selectLevel(option.value)}
               onmouseenter={() => (highlightedIndex = index)}
             >
-              <span class="thinking-option-label">{option.label}</span>
+              <span class="thinking-option-label">{formatThinkingLevel(option.value)}</span>
               {#if option.value === selectedLevel}
                 <Check
                   aria-hidden="true"

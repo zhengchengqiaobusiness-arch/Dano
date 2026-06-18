@@ -1,3 +1,6 @@
+import { normalizeLocale, type Locale } from "../i18n/locales";
+import { translate } from "../i18n/translate";
+
 export type EmptyStateMode = "text" | "html";
 
 export interface EmptyStateConfig {
@@ -6,7 +9,7 @@ export interface EmptyStateConfig {
 }
 
 const DEFAULT_PRODUCT_NAME = "Dano";
-const DEFAULT_EMPTY_STATE_CONTENT = "给 {产品名称} 发消息";
+const DEFAULT_EMPTY_STATE_KEY = "emptyState.message";
 
 function runtimeConfig() {
   return globalThis.window?.__PI_WEB_CONFIG__;
@@ -28,6 +31,10 @@ export function getRuntimeProductName(): string {
   return normalizedProductName(runtimeConfig()?.productName);
 }
 
+export function getRuntimeLocale(): Locale {
+  return normalizeLocale(runtimeConfig()?.locale);
+}
+
 export function getRuntimeEmptyStateConfig(): EmptyStateConfig {
   const productName = getRuntimeProductName();
   const configured = runtimeConfig()?.emptyState;
@@ -35,7 +42,10 @@ export function getRuntimeEmptyStateConfig(): EmptyStateConfig {
   const rawContent =
     typeof configured?.content === "string" && configured.content.trim()
       ? configured.content
-      : DEFAULT_EMPTY_STATE_CONTENT;
+      : translate(DEFAULT_EMPTY_STATE_KEY, {
+          locale: getRuntimeLocale(),
+          params: { productName },
+        });
 
   return {
     mode,

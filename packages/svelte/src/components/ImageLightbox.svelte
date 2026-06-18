@@ -3,6 +3,7 @@
   import ChevronRight from "lucide-svelte/icons/chevron-right";
   import X from "lucide-svelte/icons/x";
   import { onMount } from "svelte";
+  import { t } from "../i18n";
   import type { ImageContentBlock } from "../utils/transcript";
 
   let {
@@ -25,7 +26,11 @@
   let hasMultipleImages = $derived(images.length > 1);
   let caption = $derived.by(() => {
     const alt = currentImage?.alt?.trim() ?? "";
-    return alt && alt !== "Image attachment" ? alt : "";
+    return alt &&
+      alt !== "Image attachment" &&
+      alt !== t("imageLightbox.defaultAttachmentAlt")
+      ? alt
+      : "";
   });
 
   function handleKeydown(event: KeyboardEvent) {
@@ -67,7 +72,7 @@
       class="image-lightbox-stage"
       role="dialog"
       aria-modal="true"
-      aria-label="Image preview"
+      aria-label={t("imageLightbox.previewLabel")}
       tabindex="-1"
       onclick={onClose}
       onkeydown={(e) => e.key === "Escape" && onClose()}
@@ -75,7 +80,7 @@
       <button
         type="button"
         class="image-lightbox-close"
-        aria-label="Close image preview"
+        aria-label={t("imageLightbox.close")}
         onclick={(event) => {
           event.stopPropagation();
           onClose();
@@ -88,7 +93,7 @@
         <button
           type="button"
           class="image-lightbox-nav prev"
-          aria-label="Previous image"
+          aria-label={t("imageLightbox.previous")}
           onclick={(event) => {
             event.stopPropagation();
             onPrevious();
@@ -114,7 +119,7 @@
         <button
           type="button"
           class="image-lightbox-nav next"
-          aria-label="Next image"
+          aria-label={t("imageLightbox.next")}
           onclick={(event) => {
             event.stopPropagation();
             onNext();

@@ -35,6 +35,7 @@
   import ImageLightbox from "./ImageLightbox.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import { getRuntimeEmptyStateConfig } from "../utils/runtimeConfig";
+  import { t } from "../i18n";
 
   let {
     sessionPath = null as string | null,
@@ -114,7 +115,9 @@
     return -1;
   });
   let busyIndicatorLabel = $derived(
-    isCompacting && !hasVisibleStreaming ? "Compacting context" : "Responding",
+    isCompacting && !hasVisibleStreaming
+      ? t("chatTranscript.compactingContext")
+      : t("chatTranscript.responding"),
   );
 
   // ---- display helpers ----
@@ -317,7 +320,7 @@
     const lines = normalized.split("\n");
     if (lines.length <= maxLines) return normalized;
     const remaining = lines.length - maxLines;
-    return `${lines.slice(0, maxLines).join("\n")}\n... ${remaining} more line${remaining === 1 ? "" : "s"}`;
+    return `${lines.slice(0, maxLines).join("\n")}\n${t("chatTranscript.moreLines", { count: remaining })}`;
   }
 
   function compactInlineText(text: string | undefined, maxLength: number = 96): string | undefined {
@@ -331,7 +334,7 @@
   function toolBlockDescriptor(block: ToolContentBlock) {
     const model = blockState.toolBlockModel(block);
     return {
-      name: block.toolName || "tool",
+      name: block.toolName || t("chatTranscript.toolFallback"),
       params: model.title !== model.label ? model.title : undefined,
       meta: model.meta ?? toolStatusMeta(block.toolStatus),
       status: block.toolStatus,
@@ -353,8 +356,8 @@
   }
 
   function toolStatusMeta(status: ToolContentBlock["toolStatus"] | "success" | "error"): string | undefined {
-    if (status === "pending") return "running";
-    if (status === "error") return "error";
+    if (status === "pending") return t("chatTranscript.toolRunning");
+    if (status === "error") return t("chatTranscript.error");
     return undefined;
   }
 
@@ -365,10 +368,10 @@
   }
 
   function toolBlockEmptyState(block: ToolContentBlock): string {
-    if (block.toolStatus === "pending") return "Waiting for tool result.";
+    if (block.toolStatus === "pending") return t("chatTranscript.waitingForToolResult");
     if (block.toolName === "write" && blockState.toolBlockDetail(block).kind === "empty")
-      return "File is empty.";
-    return "No text result.";
+      return t("chatTranscript.fileEmpty");
+    return t("chatTranscript.noTextResult");
   }
 
   function toolResultText(msg: TranscriptEntry): string {
@@ -389,19 +392,22 @@
   }
 
   function toolResultName(msg: TranscriptEntry): string {
-    return msg.toolName?.trim() || "tool";
+    return msg.toolName?.trim() || t("chatTranscript.toolFallback");
   }
 
   function toolResultMeta(msg: TranscriptEntry): string | undefined {
     const preview = compactInlineText(toolResultPreview(msg));
     if (preview) return preview;
     const images = toolResultImages(msg);
-    if (images.length > 0) return `${images.length} image${images.length === 1 ? "" : "s"}`;
+    if (images.length > 0)
+      return t("chatTranscript.imageCount", { count: images.length });
     return toolStatusMeta(msg.isError ? "error" : "success");
   }
 
   function errorSummaryLabel(msg: TranscriptEntry): string {
-    return isAbortedMessage(msg) ? "cancelled" : "error";
+    return isAbortedMessage(msg)
+      ? t("chatTranscript.cancelled")
+      : t("chatTranscript.error");
   }
 
   function errorSummaryMeta(msg: TranscriptEntry): string | undefined {
@@ -409,7 +415,7 @@
   }
 
   function messageIdLabel(msg: TranscriptEntry): string {
-    return msg.id ?? "missing";
+    return msg.id ?? t("chatTranscript.missingMessageId");
   }
 
   // ---- user message helpers ----
@@ -648,8 +654,8 @@
 <div bind:this={container} class="chat-transcript" onscroll={handleTranscriptScroll}>
   {#if initialLoading}
     <div class="empty-state loading-state">
-      <p class="empty-title">Loading conversation</p>
-      <p class="empty-subtitle">Fetching the latest transcript window.</p>
+      <p class="empty-title">{t("chatTranscript.loadingTitle")}</p>
+      <p class="empty-subtitle">{t("chatTranscript.loadingSubtitle")}</p>
     </div>
   {:else if messages.length === 0}
     <div class="empty-state">
@@ -669,7 +675,9 @@
         disabled={pageLoading}
         onclick={requestOlderTranscript}
       >
-        {pageLoading ? "Loading earlier messages..." : "Load earlier messages"}
+        {pageLoading
+          ? t("chatTranscript.loadingEarlierMessages")
+          : t("chatTranscript.loadEarlierMessages")}
       </button>
     </div>
   {/if}
@@ -700,7 +708,7 @@
             {#if blockState.isToolBlockExpanded(`${messageStableKey(item.message, item.messageIndex)}:tool-result`)}
               <div class="tool-inline-details">
                 {#if showMessageIds}
-                  <span class="message-debug-id">ID {messageIdLabel(item.message)}</span>
+                  <span class="message-debug-id">{t("chatTranscript.messageId", { id: messageIdLabel(item.message) })}</span>
                 {/if}
 
                 {#if toolResultImages(item.message).length > 0}
@@ -710,7 +718,7 @@
                         <button
                           type="button"
                           class="message-image-button"
-                          aria-label={`Open image ${imgIdx + 1}`}
+                          aria-label={t("chatTranscript.openImageNumber", { number: imgIdx + 1 })}
                           onclick={() => lightbox.openImageLightbox(toolResultImages(item.message), imgIdx)}
                         >
                           <img
@@ -736,7 +744,7 @@
                     {/if}
                   </section>
                 {:else if toolResultImages(item.message).length === 0}
-                  <div class="tool-inline-empty">No text result.</div>
+                  <div class="tool-inline-empty">{t("chatTranscript.noTextResult")}</div>
                 {/if}
               </div>
             {/if}
@@ -768,14 +776,14 @@
             {#if blockState.isToolBlockExpanded(`${messageStableKey(item.message, item.messageIndex)}:error`)}
               <div class="tool-inline-details">
                 {#if showMessageIds}
-                  <span class="message-debug-id">ID {messageIdLabel(item.message)}</span>
+                  <span class="message-debug-id">{t("chatTranscript.messageId", { id: messageIdLabel(item.message) })}</span>
                 {/if}
                 {#if errorMessageText(item.message)}
                   <section class="tool-inline-section">
                     <pre class="tool-inline-pre">{errorMessageText(item.message)}</pre>
                   </section>
                 {:else}
-                  <div class="tool-inline-empty">No error message.</div>
+                  <div class="tool-inline-empty">{t("chatTranscript.noErrorMessage")}</div>
                 {/if}
               </div>
             {/if}
@@ -794,7 +802,7 @@
             data-user-message-index={item.message.role === "user" ? item.messageIndex : undefined}
           >
             {#if showMessageIds}
-              <div class="message-debug-id">ID {messageIdLabel(item.message)}</div>
+              <div class="message-debug-id">{t("chatTranscript.messageId", { id: messageIdLabel(item.message) })}</div>
             {/if}
 
             {#each displayContentBlocks(item.message, item.messageIndex) as block, bIdx (contentBlockKey(item.message, item.messageIndex, block, bIdx))}
@@ -822,7 +830,7 @@
                     onclick={() => blockState.toggleThinking(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
                   >
                     <Sparkle class="toggle-icon" aria-hidden="true" size={14} />
-                    Thinking
+                    {t("chatTranscript.thinking")}
                   </button>
                   {#if blockState.isThinkingExpanded(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
                     <MarkdownRenderer
@@ -862,7 +870,10 @@
                           class="tool-inline-diff"
                           hidden={toolBlockTrailingHidden(trailingKind, "diff")}
                           aria-hidden={trailingKind !== "diff"}
-                          aria-label={`${diffStats?.added ?? 0} additions, ${diffStats?.removed ?? 0} deletions`}
+                          aria-label={t("chatTranscript.diffStats", {
+                            additions: diffStats?.added ?? 0,
+                            deletions: diffStats?.removed ?? 0,
+                          })}
                         >
                           <span class="tool-inline-diff-added">+{diffStats?.added ?? 0}</span>
                           <span class="tool-inline-diff-removed">-{diffStats?.removed ?? 0}</span>
@@ -873,7 +884,7 @@
                     {#if blockState.isToolBlockExpanded(toolBlockStateKey(item.message, item.messageIndex, block, bIdx))}
                       <div class="tool-inline-details">
                         {#if showMessageIds && block.resultSourceMessageId}
-                          <span class="message-debug-id">ID {block.resultSourceMessageId}</span>
+                          <span class="message-debug-id">{t("chatTranscript.messageId", { id: block.resultSourceMessageId })}</span>
                         {/if}
 
                         {#if toolBlockImages(block).length > 0}
@@ -883,7 +894,7 @@
                                 <button
                                   type="button"
                                   class="message-image-button"
-                                  aria-label={`Open image ${imgIdx + 1}`}
+                                  aria-label={t("chatTranscript.openImageNumber", { number: imgIdx + 1 })}
                                   onclick={() => lightbox.openImageLightbox(toolBlockImages(block), imgIdx)}
                                 >
                                   <img class="message-image" src={image.src} alt={image.alt} loading="lazy" />
@@ -934,7 +945,7 @@
                   <button
                     type="button"
                     class="message-image-button"
-                    aria-label="Open image"
+                    aria-label={t("chatTranscript.openImage")}
                     onclick={() => lightbox.openImageLightbox([block])}
                   >
                     <img class="message-image" src={block.src} alt={block.alt} loading="lazy" />
@@ -956,8 +967,8 @@
               <button
                 type="button"
                 class="message-action-button"
-                aria-label="Edit message"
-                title="Edit message"
+                aria-label={t("chatTranscript.editMessage")}
+                title={t("chatTranscript.editMessage")}
                 onclick={() => handleRevise(item.message)}
               >
                 <Pencil class="message-action-icon" aria-hidden="true" size={14} />

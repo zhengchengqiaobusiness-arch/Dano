@@ -1,10 +1,11 @@
 <script lang="ts">
+  import { t } from "../i18n";
   import type { WorkspaceMentionSuggestion } from "../utils/workspaceMentions";
 
   let {
     items = [] as readonly WorkspaceMentionSuggestion[],
     loading = false,
-    emptyText = "No matching files",
+    emptyText = t("workspaceMentionPalette.empty"),
     onSelect = (_: WorkspaceMentionSuggestion) => {},
     onClose = () => {},
   }: {
@@ -79,7 +80,7 @@
 <div class="workspace-palette">
   {#if loading}
     <div class="workspace-palette-empty">
-      <span class="workspace-empty-text">Indexing workspace...</span>
+      <span class="workspace-empty-text">{t("workspaceMentionPalette.indexing")}</span>
     </div>
   {:else if hasItems}
     <ul bind:this={listRef} class="workspace-list">

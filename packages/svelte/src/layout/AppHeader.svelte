@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ConnectionStatus } from "../composables/bridgeStore.svelte";
+  import { t } from "../i18n";
   import { getRuntimeProductName } from "../utils/runtimeConfig";
 
   let {
@@ -13,12 +14,12 @@
   const statusMeta = $derived.by(() => {
     switch (connectionStatus) {
       case "connected":
-        return { className: "connected", label: "已连接" };
+        return { className: "connected", label: t("appHeader.connection.connected") };
       case "connecting":
-        return { className: "connecting", label: "连接中" };
+        return { className: "connecting", label: t("appHeader.connection.connecting") };
       case "disconnected":
       default:
-        return { className: "disconnected", label: "已断开" };
+        return { className: "disconnected", label: t("appHeader.connection.disconnected") };
     }
   });
 </script>

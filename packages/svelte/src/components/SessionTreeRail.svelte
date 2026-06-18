@@ -5,6 +5,7 @@
     getTreeEntryDisplayParts,
     type TreeFilterMode,
   } from "../utils/treeOutline";
+  import { t } from "../i18n";
 
   let {
     entries = [] as readonly TreeEntry[],
@@ -20,11 +21,11 @@
   let filterMode = $state<TreeFilterMode>("default");
 
   const filterOptions: Array<{ mode: TreeFilterMode; label: string }> = [
-    { mode: "default", label: "Default" },
-    { mode: "no-tools", label: "No tools" },
-    { mode: "user-only", label: "User" },
-    { mode: "labeled-only", label: "Labels" },
-    { mode: "all", label: "All" },
+    { mode: "default", label: t("sessionTreeRail.filter.default") },
+    { mode: "no-tools", label: t("sessionTreeRail.filter.noTools") },
+    { mode: "user-only", label: t("sessionTreeRail.filter.user") },
+    { mode: "labeled-only", label: t("sessionTreeRail.filter.labels") },
+    { mode: "all", label: t("sessionTreeRail.filter.all") },
   ];
 
   $effect(() => {
@@ -48,7 +49,7 @@
       bind:value={query}
       class="search-input"
       type="search"
-      placeholder="Search..."
+      placeholder={t("sessionTreeRail.searchPlaceholder")}
     />
     <div class="filter-row">
       {#each filterOptions as option (option.mode)}
@@ -104,8 +105,8 @@
     </ol>
   {:else}
     <div class="empty-state">
-      <p class="empty-title">No matching tree entries</p>
-      <p class="empty-copy">Try another filter or search term.</p>
+      <p class="empty-title">{t("sessionTreeRail.emptyTitle")}</p>
+      <p class="empty-copy">{t("sessionTreeRail.emptyCopy")}</p>
     </div>
   {/if}
 </div>

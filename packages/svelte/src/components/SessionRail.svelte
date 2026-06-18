@@ -11,6 +11,7 @@
     SessionEntry,
     WorkspaceSummary,
   } from "../composables/bridgeStore.svelte";
+  import { t } from "../i18n";
 
   let {
     workspaces = [] as readonly WorkspaceSummary[],
@@ -217,7 +218,7 @@
 
   function handleDelete(sessionPath: string) {
     closeMenu();
-    if (!confirm("Delete this session? This cannot be undone.")) return;
+    if (!confirm(t("sessionRail.deleteConfirm"))) return;
     onDelete(sessionPath);
   }
 
@@ -274,7 +275,9 @@
             class="workspace-toggle workspace-root-toggle"
             type="button"
             aria-expanded={workspacesRootExpanded}
-            aria-label={workspacesRootExpanded ? "Collapse workspaces" : "Expand workspaces"}
+            aria-label={workspacesRootExpanded
+              ? t("sessionRail.collapseWorkspaces")
+              : t("sessionRail.expandWorkspaces")}
             onclick={() => (workspacesRootExpanded = !workspacesRootExpanded)}
             onpointerup={(event) => {
               if (event.currentTarget instanceof HTMLButtonElement) {
@@ -298,7 +301,7 @@
               />
             {/if}
             <span class="workspace-copy workspace-root-copy">
-              <span class="workspace-root-label">Workspaces</span>
+              <span class="workspace-root-label">{t("sessionRail.workspaces")}</span>
             </span>
           </button>
           <div class="rail-actions">
@@ -348,8 +351,8 @@
                   <button
                     class="workspace-new-session"
                     type="button"
-                    aria-label={`New session in ${workspace.name}`}
-                    title={`New session in ${workspace.path}`}
+                    aria-label={t("sessionRail.newSessionAria", { workspaceName: workspace.name })}
+                    title={t("sessionRail.newSessionTitle", { workspacePath: workspace.path })}
                     onclick={(event) => {
                       event.stopPropagation();
                       handleWorkspaceNewSession(workspace);
@@ -362,9 +365,9 @@
                 {#if workspace.isExpanded}
                   <div class="session-list">
                     {#if !workspace.isLoaded}
-                      <p class="workspace-empty">Loading sessions...</p>
+                      <p class="workspace-empty">{t("sessionRail.loadingSessions")}</p>
                     {:else if workspace.sessions.length === 0}
-                      <p class="workspace-empty">No sessions yet</p>
+                      <p class="workspace-empty">{t("sessionRail.noSessions")}</p>
                     {/if}
 
                     {#each workspace.recentSessions as session (session.path)}
@@ -381,7 +384,7 @@
                         <span class="item-indicator"></span>
                         <span class="item-label">{session.name}</span>
                         {#if isSessionRunning(session.path)}
-                          <span class="item-status" role="status" aria-label="Agent running" title="Agent running">
+                          <span class="item-status" role="status" aria-label={t("sessionRail.agentRunning")} title={t("sessionRail.agentRunning")}>
                             <span class="item-status-dot" aria-hidden="true"></span>
                           </span>
                         {/if}
@@ -396,7 +399,7 @@
                           aria-haspopup="dialog"
                           onclick={() => openOlderSessions(workspace.id)}
                         >
-                          <span>Browse older sessions</span>
+                          <span>{t("sessionRail.browseOlderSessions")}</span>
                         </button>
                       </div>
                     {/if}
@@ -406,7 +409,7 @@
             {/each}
           </div>
         {:else}
-          <p class="rail-empty nested">No workspaces</p>
+          <p class="rail-empty nested">{t("sessionRail.noWorkspaces")}</p>
         {/if}
       {/if}
     </section>
@@ -425,7 +428,7 @@
       class="older-modal"
       role="dialog"
       aria-modal="true"
-      aria-label={`${activeOlderWorkspace.name} older sessions`}
+      aria-label={t("sessionRail.olderSessionsDialog", { workspaceName: activeOlderWorkspace.name })}
     >
       <label class="modal-session-search">
         <Search size={16} aria-hidden="true" />
@@ -434,7 +437,7 @@
           type="search"
           autocomplete="off"
           spellcheck="false"
-          placeholder="Search older sessions"
+          placeholder={t("sessionRail.searchOlderSessions")}
         />
       </label>
 
@@ -455,7 +458,7 @@
               <span class="modal-session-name">{session.name}</span>
             </span>
             {#if isSessionRunning(session.path)}
-              <span class="item-status" role="status" aria-label="Agent running" title="Agent running">
+              <span class="item-status" role="status" aria-label={t("sessionRail.agentRunning")} title={t("sessionRail.agentRunning")}>
                 <span class="item-status-dot" aria-hidden="true"></span>
               </span>
             {/if}
@@ -469,12 +472,14 @@
             disabled={activeOlderWorkspace.isLoading}
             onclick={() => loadMoreOlderSessions(activeOlderWorkspace)}
           >
-            {activeOlderWorkspace.isLoading ? "Loading..." : "Load more"}
+            {activeOlderWorkspace.isLoading
+              ? t("common.loading")
+              : t("sessionRail.loadMore")}
           </button>
         {/if}
 
         {#if !activeOlderWorkspace.isLoading && activeOlderWorkspace.filteredRemainingSessions.length === 0}
-          <p class="modal-empty">No matching sessions</p>
+          <p class="modal-empty">{t("sessionRail.noMatchingSessions")}</p>
         {/if}
       </div>
     </div>
@@ -501,7 +506,7 @@
         onclick={() => menu.sessionPath && handleDelete(menu.sessionPath)}
       >
         <Trash2 aria-hidden="true" size={13} style="opacity: 0.7; flex-shrink: 0" />
-        <span>Delete</span>
+        <span>{t("common.delete")}</span>
       </button>
     </div>
   </div>

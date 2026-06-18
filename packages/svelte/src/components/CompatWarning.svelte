@@ -1,5 +1,6 @@
 <script lang="ts">
   import X from "lucide-svelte/icons/x";
+  import { t } from "../i18n";
 
   let { visible = false }: { visible?: boolean } = $props();
   let dismissed = $state(false);
@@ -7,14 +8,13 @@
 
 {#if visible && !dismissed}
   <div class="compat-warning" role="alert">
-    <span class="compat-kicker">compat</span>
+    <span class="compat-kicker">{t("compatWarning.kicker")}</span>
     <span class="compat-text">
-      This extension uses a custom TUI interface that is not supported in the
-      browser. Use the terminal for full functionality.
+      {t("compatWarning.message")}
     </span>
     <button
       class="compat-dismiss"
-      aria-label="Dismiss warning"
+      aria-label={t("compatWarning.dismiss")}
       onclick={() => (dismissed = true)}
     >
       <X size={14} aria-hidden="true" />
