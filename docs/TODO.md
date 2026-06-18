@@ -1,0 +1,2 @@
+- 研究 [[OpenCode]] 的 ask 工具，做一个 pi 的版本（先去 pi extension 找一下有没有社区实现）
+- 研究 llm 返回使用动态表单，先找 pi 社区实现, 再找 github 已有实现

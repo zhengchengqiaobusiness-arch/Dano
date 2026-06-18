@@ -1,7 +1,18 @@
-import { existsSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseStandaloneMainOptions } from "../main.js";
+import {
+  initializeStandaloneWorkspaceSettings,
+  parseStandaloneMainOptions,
+} from "../main.js";
 
 function findNearestWebDist(startDir: string): string | undefined {
   let current = resolve(startDir);
@@ -41,6 +52,29 @@ describe("standalone main", () => {
 
     expect(options.host).toBe("127.0.0.1");
     expect(options.port).toBe(8123);
+  });
+
+  it("uses host and port from environment", () => {
+    const options = parseStandaloneMainOptions([], {
+      DANO_HOST: "127.0.0.1",
+      DANO_PORT: "8123",
+    });
+
+    expect(options.host).toBe("127.0.0.1");
+    expect(options.port).toBe(8123);
+  });
+
+  it("lets command line host and port override environment", () => {
+    const options = parseStandaloneMainOptions(
+      ["--host", "0.0.0.0", "--port", "8088"],
+      {
+        DANO_HOST: "127.0.0.1",
+        DANO_PORT: "8123",
+      },
+    );
+
+    expect(options.host).toBe("0.0.0.0");
+    expect(options.port).toBe(8088);
   });
 
   it("uses the default workspace from environment", () => {
@@ -180,5 +214,50 @@ describe("standalone main", () => {
     ).toThrow(
       "Unknown option: --cwd",
     );
+  });
+
+  it("initializes runtime settings in the standalone workspace", () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), "dano-main-source-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "dano-main-workspace-"));
+
+    try {
+      const sourceSettingsDir = join(sourceRoot, ".pi");
+      mkdirSync(sourceSettingsDir, { recursive: true });
+      writeFileSync(join(sourceSettingsDir, "SYSTEM.md"), "system prompt");
+      writeFileSync(join(sourceSettingsDir, "settings.json"), "{}");
+
+      initializeStandaloneWorkspaceSettings(workspaceRoot, sourceRoot);
+
+      expect(readFileSync(join(workspaceRoot, ".pi/SYSTEM.md"), "utf8")).toBe(
+        "system prompt",
+      );
+      expect(readFileSync(join(workspaceRoot, ".pi/settings.json"), "utf8")).toBe(
+        "{}",
+      );
+    } finally {
+      rmSync(sourceRoot, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps existing standalone workspace settings", () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), "dano-main-source-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "dano-main-workspace-"));
+
+    try {
+      mkdirSync(join(sourceRoot, ".pi"), { recursive: true });
+      mkdirSync(join(workspaceRoot, ".pi"), { recursive: true });
+      writeFileSync(join(sourceRoot, ".pi/SYSTEM.md"), "source prompt");
+      writeFileSync(join(workspaceRoot, ".pi/SYSTEM.md"), "workspace prompt");
+
+      initializeStandaloneWorkspaceSettings(workspaceRoot, sourceRoot);
+
+      expect(readFileSync(join(workspaceRoot, ".pi/SYSTEM.md"), "utf8")).toBe(
+        "workspace prompt",
+      );
+    } finally {
+      rmSync(sourceRoot, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
   });
 });

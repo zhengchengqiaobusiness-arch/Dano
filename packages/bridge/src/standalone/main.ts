@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DetachedSessionRegistry } from "../session-registry.js";
@@ -13,6 +13,7 @@ const DEFAULT_STANDALONE_HOST = "0.0.0.0";
 const DEFAULT_STANDALONE_WORKSPACE = "/tmp/dano";
 const DEFAULT_STANDALONE_SESSIONS_DIR = ".dano/sessions";
 const DEFAULT_PRODUCT_NAME = "Dano";
+const DEFAULT_RUNTIME_SETTINGS_FILES = ["SYSTEM.md", "settings.json"] as const;
 const DEFAULT_EMPTY_STATE: BridgeEmptyStateConfig = {
   mode: "text",
   content: "给 {产品名称} 发消息",
@@ -55,6 +56,14 @@ function parseInteger(value: string | undefined, fallback: number): number {
 
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function readHost(env: Record<string, string | undefined>): string {
+  return env.DANO_HOST?.trim() || env.HOST?.trim() || DEFAULT_STANDALONE_HOST;
+}
+
+function readPort(env: Record<string, string | undefined>): number {
+  return parseInteger(env.DANO_PORT?.trim() || env.PORT?.trim(), DEFAULT_STANDALONE_PORT);
 }
 
 function readDefaultWorkspacePath(
@@ -114,6 +123,23 @@ function findNearestWebDist(startDir: string): string | undefined {
   }
 }
 
+function findNearestRuntimeSettingsDir(startDir: string): string | undefined {
+  let current = resolve(startDir);
+
+  for (;;) {
+    const candidate = join(current, ".pi");
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+
+    const parent = dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    current = parent;
+  }
+}
+
 function resolveDefaultStaticDir(cwd: string): string | undefined {
   const candidates = [
     findNearestWebDist(cwd),
@@ -134,8 +160,8 @@ export function parseStandaloneMainOptions(
   argv: string[],
   env: Record<string, string | undefined> = process.env,
 ): StandaloneMainOptions {
-  let host = DEFAULT_STANDALONE_HOST;
-  let port = DEFAULT_STANDALONE_PORT;
+  let host = readHost(env);
+  let port = readPort(env);
   let defaultWorkspacePath = readDefaultWorkspacePath(env);
   let sessionsRootPath = readSessionsRootPath(env);
   let productName = readProductName(env);
@@ -245,6 +271,27 @@ function ensureDefaultWorkspace(path: string): string {
   return path;
 }
 
+export function initializeStandaloneWorkspaceSettings(
+  workspacePath: string,
+  sourceCwd: string,
+): void {
+  const sourceSettingsDir = findNearestRuntimeSettingsDir(sourceCwd);
+  if (!sourceSettingsDir) {
+    return;
+  }
+
+  const targetSettingsDir = join(workspacePath, ".pi");
+  mkdirSync(targetSettingsDir, { recursive: true });
+
+  for (const fileName of DEFAULT_RUNTIME_SETTINGS_FILES) {
+    const sourcePath = join(sourceSettingsDir, fileName);
+    const targetPath = join(targetSettingsDir, fileName);
+    if (existsSync(sourcePath) && !existsSync(targetPath)) {
+      copyFileSync(sourcePath, targetPath);
+    }
+  }
+}
+
 function workspaceSessionDirName(workspacePath: string): string {
   return `--${workspacePath.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 }
@@ -336,6 +383,7 @@ async function runStandaloneMain(): Promise<number> {
 
   const thisFile = fileURLToPath(import.meta.url);
   const defaultWorkspacePath = ensureDefaultWorkspace(options.defaultWorkspacePath);
+  initializeStandaloneWorkspaceSettings(defaultWorkspacePath, options.cwd);
   mkdirSync(options.sessionsRootPath, { recursive: true });
   process.env.DANO_SESSIONS_ROOT = options.sessionsRootPath;
   process.env.PI_WEB_SESSIONS_ROOT = options.sessionsRootPath;

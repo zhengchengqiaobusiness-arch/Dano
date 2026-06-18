@@ -4,6 +4,7 @@
   "private": true,
   "description": "Dano P0 web LLM chat",
   "type": "module",
+  "packageManager": "pnpm@9.15.9",
   "scripts": {
     "build": "pnpm run build:server && pnpm run build:web",
     "build:bridge": "pnpm -C packages/bridge build",
