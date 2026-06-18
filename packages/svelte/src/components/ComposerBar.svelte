@@ -428,8 +428,8 @@
 <style>
   .composer-bar {
     flex-shrink: 0;
-    padding: 6px 24px 12px;
-    padding-bottom: max(12px, env(safe-area-inset-bottom));
+    padding: 6px 24px 36px;
+    padding-bottom: max(36px, env(safe-area-inset-bottom));
     background: var(--bg);
   }
 
