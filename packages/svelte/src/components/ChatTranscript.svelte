@@ -314,6 +314,16 @@
     );
   }
 
+  function isMessageThinkingActive(msg: TranscriptEntry, mi: number): boolean {
+    return shouldDeferMessageMarkdownErrors(msg, mi);
+  }
+
+  function thinkingBlockLabel(msg: TranscriptEntry, mi: number): string {
+    return isMessageThinkingActive(msg, mi)
+      ? t("chatTranscript.thinkingActive")
+      : t("chatTranscript.thinkingComplete");
+  }
+
   function previewText(text: string, maxLines: number = 8): string {
     const normalized = text.replace(/\r/g, "").trim();
     if (!normalized) return "";
@@ -830,7 +840,7 @@
                     onclick={() => blockState.toggleThinking(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
                   >
                     <Sparkle class="toggle-icon" aria-hidden="true" size={14} />
-                    {t("chatTranscript.thinking")}
+                    {thinkingBlockLabel(item.message, item.messageIndex)}
                   </button>
                   {#if blockState.isThinkingExpanded(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
                     <MarkdownRenderer
