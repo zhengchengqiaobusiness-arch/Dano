@@ -67,6 +67,9 @@ class GenerationLoop:
             body = await self.coder.generate(plan=plan, feedback=feedback)   # 编码 / 修复
             if getattr(goal, "business", ""):                 # 展开模式:打业务标签,供导出归组成剧本 skill
                 body.setdefault("business", goal.business)
+            # 风险等级随真实方法:全 GET 只读 → L1(否则三模型会以"GET 只读应 L1"反复驳回,读操作永远上不了架)
+            if goal.actions and all((a.get("method") or "GET").upper() == "GET" for a in goal.actions):
+                body["risk_level"] = "L1"
             src = body.get("source", "") or ""
             self._emit(type="coded", flow=goal.flow, iter=i,
                        lines=src.count("\n") + 1 if src else 0)

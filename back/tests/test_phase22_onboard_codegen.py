@@ -80,6 +80,7 @@ async def test_onboard_codegen_publishes_adapter_skill():
     reg = await SkillRegistry.from_store(AssetRepository(), tenant="ob6", subsystems=[Subsystem.OA])
     man = {m.name: m for m in build_manifests(reg.skills)}
     assert "A-OA.leave_list" in man and man["A-OA.leave_list"].integration == "adapter"
+    assert man["A-OA.leave_list"].risk_level == "L1"   # GET 只读 → L1(否则三模型驳回上不了架)
 
 
 async def test_onboard_codegen_emits_progress():

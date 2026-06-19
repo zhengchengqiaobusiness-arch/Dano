@@ -32,6 +32,7 @@ _OS_ENV_WHITELIST = (
     "NUMBER_OF_PROCESSORS", "OS", "HOMEDRIVE", "HOMEPATH",
 )
 _PI_ENV = ("DANO_PI_API_KEY", "DANO_PI_BASE_URL", "DANO_PI_MODEL", "DANO_PI_PROVIDER")
+_OP_CONCURRENCY = 4        # 一个业务的多操作**并发**生成上限(操作互相独立;限并发防 LLM 限流/池耗尽)
 
 # ── 流程端点收窄(防 planner 在超大 spec 上超时 + 防兜底瞎抓第一个无关接口)──
 # 业务名里的通用动词,不当关键词(否则会匹配到一堆无关端点)
@@ -318,47 +319,59 @@ async def _onboard_codegen(run_id: str, sid: str, flows: list[dict], coder,  # n
              expand_business=expand_business)
     if progress:
         progress({"type": "plan", "flows": [g.flow for g in goals]})
-    oks = 0
-    for idx, g in enumerate(goals):
+    sem = asyncio.Semaphore(_OP_CONCURRENCY)
+
+    async def _gen_one(idx: int, g) -> bool:              # noqa: ANN001
+        """生成一个操作的 adapter(供并发调度)。失败不连累其它操作;错误带 traceback 可定位。"""
         is_read = bool(g.actions) and all((a.get("method") or "GET").upper() == "GET" for a in g.actions)
         log.info("codegen.goal.start", flow=g.flow, idx=idx, total=len(goals),
                  is_read=is_read, n_actions=len(g.actions), business=getattr(g, "business", ""))
-        # 沉淀复用:已发布同名 adapter 直接跳过(模型不必再跑一遍)
-        if coder is None and g.flow in published_keys:
+        if coder is None and g.flow in published_keys:    # 沉淀复用:已发布同名 adapter 直接跳过
             log.info("codegen.goal.reused", flow=g.flow)
             if progress:
                 progress({"type": "flow_start", "flow": g.flow, "index": idx, "total": len(goals), "route": "reused"})
                 progress({"type": "flow_done", "flow": g.flow, "ok": True, "rejections": 0, "asset_id": None})
-            oks += 1
-            continue
-        tid = str(g.test_input.get("__templateId__", ""))
-        if is_read:                                       # 读流程:通用 crud_query(无副作用,确定性)
-            g_coder, planner, strat, src = (coder or PiCoder()), None, select_strategy(g.actions), "read"
-        else:                                             # 写/复合:全模型驱动(证据 + 真报错迭代 + 双层回灌)
-            g_coder = coder or PiCoder()
-            planner = None if coder is not None else LlmPlanner()
-            strat, src = get_strategy("simple_http"), "llm"     # 通用兜底策略(非 OA 专用)
-            g.budget = Budget(max_iters=6)                # 难契约多给几轮真报错迭代
-            # 收窄候选端点到本流程:planner 不再被几百个端点撑爆超时;兜底也只从相关集里选
-            base = g.actions if (g.actions and len(g.actions) < len(actions)) else actions
-            scoped = _scope_actions_for_flow(g.flow, tid, base)
-            scoped = await _existing_endpoints(scoped, base_url, token)   # 剔除文档有/服务器无的幽灵接口
-            g.actions = scoped
-            keep = {a["name"] for a in scoped}
-            g.evidence = (await collect_evidence(spec, template_id=tid, probe=probe,
-                                                 convention=convention, include_names=keep)).model_dump()
-            log.info("codegen.goal.evidence", flow=g.flow, scoped=len(scoped),
-                     endpoints=[a.get("endpoint") for a in scoped][:12])
-        if progress:
-            progress({"type": "flow_start", "flow": g.flow, "index": idx, "total": len(goals), "route": src})
-        r = await GenerationLoop(g_coder, planner=planner, on_event=progress).run(g, strat)
-        oks += 1 if r.ok else 0
-        log.info("codegen.goal.done", flow=g.flow, route=src, ok=r.ok,
-                 rejections=r.rejections, asset_id=str(r.asset_id) if r.asset_id else None,
-                 reason=getattr(r, "reason", None))
-        if progress:
-            progress({"type": "flow_done", "flow": g.flow, "ok": r.ok,
-                      "rejections": r.rejections, "asset_id": r.asset_id})
+            return True
+        async with sem:                                   # 限并发:同时最多 _OP_CONCURRENCY 个操作在跑
+            try:
+                tid = str(g.test_input.get("__templateId__", ""))
+                if is_read:                               # 读流程:通用 crud_query(无副作用)
+                    g_coder, planner, strat, src = (coder or PiCoder()), None, select_strategy(g.actions), "read"
+                else:                                     # 写/复合:全模型驱动(证据 + 真报错迭代 + 双层回灌)
+                    g_coder = coder or PiCoder()
+                    planner = None if coder is not None else LlmPlanner()
+                    strat, src = get_strategy("simple_http"), "llm"
+                    g.budget = Budget(max_iters=6)
+                    base = g.actions if (g.actions and len(g.actions) < len(actions)) else actions
+                    scoped = _scope_actions_for_flow(g.flow, tid, base)
+                    scoped = await _existing_endpoints(scoped, base_url, token)   # 剔除幽灵接口
+                    g.actions = scoped
+                    keep = {a["name"] for a in scoped}
+                    g.evidence = (await collect_evidence(spec, template_id=tid, probe=probe,
+                                                         convention=convention, include_names=keep)).model_dump()
+                    log.info("codegen.goal.evidence", flow=g.flow, scoped=len(scoped),
+                             endpoints=[a.get("endpoint") for a in scoped][:12])
+                if progress:
+                    progress({"type": "flow_start", "flow": g.flow, "index": idx, "total": len(goals), "route": src})
+                r = await GenerationLoop(g_coder, planner=planner, on_event=progress).run(g, strat)
+                log.info("codegen.goal.done", flow=g.flow, route=src, ok=r.ok,
+                         rejections=r.rejections, asset_id=str(r.asset_id) if r.asset_id else None,
+                         reason=getattr(r, "reason", None))
+                if progress:
+                    progress({"type": "flow_done", "flow": g.flow, "ok": r.ok,
+                              "rejections": r.rejections, "asset_id": r.asset_id})
+                return r.ok
+            except Exception as e:  # noqa: BLE001 - 单操作失败不连累其它;记可定位错误(含 traceback)
+                log.exception("codegen.goal.error", flow=g.flow, error=repr(e))
+                if progress:
+                    progress({"type": "flow_done", "flow": g.flow, "ok": False, "rejections": 0,
+                              "asset_id": None, "error": str(e)})
+                return False
+
+    log.info("codegen.parallel.start", total=len(goals), concurrency=_OP_CONCURRENCY)
+    results = await asyncio.gather(*(_gen_one(idx, g) for idx, g in enumerate(goals)))
+    oks = sum(1 for ok in results if ok)
+    log.info("codegen.parallel.done", oks=oks, total=len(goals))
     return {"status": "completed",
             "final_text": f"goal 模式代码生成:{oks}/{len(goals)} 个流程发布"}
 
