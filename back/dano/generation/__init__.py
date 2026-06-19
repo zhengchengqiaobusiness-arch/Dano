@@ -9,6 +9,7 @@
 from dano.generation.artifacts import Budget, GenerationResult, GoalBrief, IterationRecord
 from dano.generation.coder import PiCoder
 from dano.generation.controller import GenerationLoop
+from dano.generation.planner import LlmPlanner, PlanError, validate_plan
 
 __all__ = ["Budget", "GenerationResult", "GoalBrief", "IterationRecord",
-           "GenerationLoop", "PiCoder"]
+           "GenerationLoop", "PiCoder", "LlmPlanner", "PlanError", "validate_plan"]

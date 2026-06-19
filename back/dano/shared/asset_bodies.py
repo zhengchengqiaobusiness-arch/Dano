@@ -198,6 +198,9 @@ class PlanBody(BaseModel):
     contract: dict = Field(default_factory=dict, description="探测/逆向得到的接口契约要点")
     user_fields: list[str] = Field(default_factory=list, description="用户需提供的业务字段")
     required_fields: list[str] = Field(default_factory=list, description="必填业务字段")
+    field_docs: dict[str, str] = Field(default_factory=dict, description="字段→语义描述(供前端/LLM/导出)")
+    consts: dict = Field(default_factory=dict, description="运行期注入的内部常量(如 __templateId__),非用户字段")
+    evidence: dict = Field(default_factory=dict, description="v3:裁剪后的证据(端点/表单字段/样例返回),供编码器据实写码")
     success_rule: str | None = Field(default=None, description="成败判定表达式")
     fact_check: FactCheckSpec | None = Field(default=None, description="事实核查规格")
 
@@ -212,6 +215,7 @@ class AdapterBody(BaseModel):
 
     action: str = Field(description="Skill 名,如 submit_leave")
     title: str = Field(default="", description="人类可读标题")
+    business: str = Field(default="", description="所属业务(同业务多操作 adapter 导出时归为一个 skill)")
     strategy: str = Field(description="生成该适配器的策略名")
     language: str = Field(default="python", description="实现语言(M0 仅 python)")
     source: str = Field(description="适配器源码;入口为 entry 指定的函数")
@@ -219,6 +223,8 @@ class AdapterBody(BaseModel):
     input_schema: dict = Field(default_factory=dict, description="入参 JSON Schema(供前端/校验)")
     user_fields: list[str] = Field(default_factory=list, description="用户需提供的业务字段")
     required_fields: list[str] = Field(default_factory=list, description="必填业务字段")
+    field_docs: dict[str, str] = Field(default_factory=dict, description="字段→语义描述(供前端/LLM/导出)")
+    consts: dict = Field(default_factory=dict, description="运行期注入的内部常量(如 __templateId__),非用户字段")
     risk_level: RiskLevel = RiskLevel.L3
     success_rule: str | None = Field(default=None, description="成败判定表达式;None=HTTP 2xx")
     fact_check: FactCheckSpec | None = Field(default=None, description="事实核查规格")

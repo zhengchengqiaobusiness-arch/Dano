@@ -77,6 +77,34 @@ def _spec():
     return yaml.safe_load((BACK / "examples" / "ruoyi_oa.yaml").read_text(encoding="utf-8"))
 
 
+# 复合流程机制的测试夹具:RuoYi 请假 3 步链(发起→存表单→提交)。
+# 生产 leave.recipe() 不再预设步骤(真实代码由 LLM 生成),本链仅用于验证 draft_workflow
+# →sandbox→评审→publish→invoke 的**编排机制**(步骤折叠/隐藏 + 一次调用串联跑通)。
+_LEAVE_WF_STEPS = [
+    {"action": "start_leave_flow", "inputs": {"templateId": "const:leave_template"}},
+    {"action": "save_leave_form", "inputs": {
+        "templateId": "const:leave_template",
+        "taskId": "step:start_leave_flow.data.taskId",
+        "procInstId": "step:start_leave_flow.data.procInsId",
+        "title": "field:title", "valData.title": "field:title",
+        "valData.leaveType": "field:leaveType", "valData.leaveDays": "field:leaveDays",
+        "valData.reason": "field:reason",
+    }},
+    {"action": "submit_flow_task", "inputs": {
+        "operateType": "const:200",
+        "flowTask.taskId": "step:start_leave_flow.data.taskId",
+        "flowTask.procInsId": "step:start_leave_flow.data.procInsId",
+        "flowTask.executionId": "step:start_leave_flow.data.executionId",
+        "flowTask.deployId": "step:start_leave_flow.data.deployId",
+        "flowTask.defId": "step:start_leave_flow.data.procDefId",
+        "flowTask.taskDefKey": "const:apply",
+        "flowTask.businessId": "step:save_leave_form.data",
+        "flowTask.templateId": "const:leave_template",
+        "flowTask.title": "field:title",
+    }},
+]
+
+
 def _client():
     import dano.gateway.app as gw
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=gw.app), base_url="http://t")
@@ -139,11 +167,11 @@ async def test_full_flow_one_workflow_skill(mock_oa):
             await _publish_connector(run_id, action)
 
         # ③ 根据 swagger 内容把多步编排成"一套流程 = 一个 Skill"
-        recipe = RuoYiFlowableTemplate().workflows()[0]      # submit_leave = 发起→存表单→提交
+        recipe = RuoYiFlowableTemplate().workflows()[0]      # submit_leave 业务画像(字段/标题)
         dw = await T.draft_workflow(run_id, {"system_instance_id": "A-OA", "action": recipe.action,
             "title": recipe.title, "user_fields": recipe.user_fields,
             "required_fields": recipe.required_fields,
-            "steps": [{"action": s.action, "inputs": s.inputs} for s in recipe.steps]})
+            "steps": _LEAVE_WF_STEPS})                       # 步骤链由测试夹具提供(机制验证)
         stw = await T.sandbox_test_workflow(run_id, {"asset_draft_id": dw["asset_draft_id"],
             "test_input": {"leaveType": "annual", "leaveDays": 1, "title": "测试请假", "reason": "回家"}})
         assert stw["passed"], stw["trace"]

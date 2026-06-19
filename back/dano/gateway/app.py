@@ -216,6 +216,163 @@ async def onboarding_preview(req: PreviewReq) -> dict:
             "actions": actions}
 
 
+class DiscoverReq(BaseModel):
+    openapi: dict
+    subsystem: str = "A-OA"
+    include_tags: list[str] = []
+
+
+@app.post("/onboarding/discover-flows")
+async def onboarding_discover(req: DiscoverReq) -> dict:
+    """平台自动「找出合适的流程」(图二步骤2-3):返回复合/连接器流程提案,供前端确认后生成。
+
+    只解析 + 套模板知识,不 spawn pi、不碰凭证。前端据此勾选/微调测试输入,再发 /onboarding/start。
+    """
+    from dano.onboarding.discovery import discover_flows
+    return {"flows": discover_flows(req.openapi or {}, req.include_tags)}
+
+
+class ListTemplatesReq(BaseModel):
+    base_url: str
+    token: str = ""
+
+
+@app.post("/onboarding/list-templates")
+async def list_templates(req: ListTemplatesReq) -> dict:
+    """查询目标 OA 真实的**流程模板清单**(业务场景:请假/报销/出差…),作为可选「业务模板」。
+
+    这就是"自动去匹配查询":各家 OA 模板不同,导入后查它自己的 /template/template/list,
+    把真实模板当菜单给用户选,而不是拿 swagger 原始 tag 当类别、也不写死 templateId。
+    """
+    import httpx
+
+    from dano.infra.http import tls_verify
+    base = req.base_url.rstrip("/")
+    tok = (req.token or "").strip()
+    headers = {"Authorization": f"Bearer {tok}"} if tok else {}
+    last_code = None
+    out: list[dict] = []
+    async with httpx.AsyncClient(timeout=40, verify=tls_verify()) as c:
+        for path in ("/template/template/list?pageNum=1&pageSize=500", "/template/template/select"):
+            try:
+                r = await c.get(base + path, headers=headers)
+                j = r.json()
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(j, dict):
+                continue
+            last_code = j.get("code", last_code)
+            if j.get("code") not in (None, 200, 0):     # RuoYi:HTTP200 + body.code(401 未授权等)
+                continue
+            rows = j.get("rows") or j.get("data") or []
+            if isinstance(rows, dict):
+                rows = rows.get("records") or rows.get("list") or []
+            for it in rows if isinstance(rows, list) else []:
+                if not isinstance(it, dict):
+                    continue
+                tid = it.get("id") or it.get("templateId") or it.get("defKey")
+                if tid is None:
+                    continue
+                out.append({"templateId": str(tid),
+                            "name": it.get("name") or it.get("templateName") or str(tid),
+                            "type": it.get("typeName") or it.get("type") or "",
+                            "defKey": it.get("defKey") or "",
+                            "enableFlag": str(it.get("enableFlag", ""))})
+            if out:
+                break
+    seen: set[str] = set()
+    uniq = [t for t in out if not (t["templateId"] in seen or seen.add(t["templateId"]))]
+    if not uniq:
+        hint = "token 可能已失效(body.code=401)" if last_code not in (None, 200, 0) else "该 OA 无模板配置或路径不同"
+        raise HTTPException(status_code=502, detail=f"未查到流程模板:{hint}")
+    return {"templates": uniq}
+
+
+class TemplateFormReq(BaseModel):
+    base_url: str
+    token: str = ""
+    template_id: str
+
+
+def _walk_form_fields(node: object, out: list[dict]) -> None:
+    """递归遍历表单设计器结构,凡带字段模型(__vModel__/vModel)的控件都收为一个字段。"""
+    if isinstance(node, dict):
+        vm = node.get("__vModel__") or node.get("vModel")
+        if isinstance(vm, str) and vm:
+            cfg = node.get("__config__") if isinstance(node.get("__config__"), dict) else {}
+            label = cfg.get("label") or node.get("label") or vm
+            out.append({"key": vm, "label": str(label),
+                        "type": str(cfg.get("tag") or node.get("tag") or "")})
+        for v in node.values():
+            _walk_form_fields(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _walk_form_fields(v, out)
+
+
+@app.post("/onboarding/template-form")
+async def template_form(req: TemplateFormReq) -> dict:
+    """查某业务模板的**动态表单字段清单**(请假要 title/reason、报销要别的…),供前端预填 values 骨架。
+
+    走 /biz/form/info?templateId=…;data.formData 是 JSON 串,内含表单设计器结构,从中抽出每个字段。
+    抽不出(结构特殊)就返回空,让用户手填——不臆造字段。
+    """
+    import json
+
+    import httpx
+
+    from dano.infra.http import tls_verify
+    base = req.base_url.rstrip("/")
+    tok = (req.token or "").strip()
+    headers = {"Authorization": f"Bearer {tok}"} if tok else {}
+    try:
+        async with httpx.AsyncClient(timeout=40, verify=tls_verify()) as c:
+            r = await c.get(base + "/biz/form/info",
+                            params={"businessId": "", "templateId": req.template_id}, headers=headers)
+        j = r.json()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"取表单失败:{e}") from e
+    if not isinstance(j, dict) or j.get("code") not in (None, 200, 0):
+        code = j.get("code") if isinstance(j, dict) else "?"
+        raise HTTPException(status_code=502, detail=f"取表单失败:body.code={code}(token 是否有效?)")
+    data = j.get("data") if isinstance(j.get("data"), dict) else {}
+    raw = data.get("formData")
+    conf: object = raw
+    if isinstance(raw, str):
+        try:
+            conf = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            conf = {}
+    schema = conf.get("formData") if isinstance(conf, dict) and "formData" in conf else conf
+    fields: list[dict] = []
+    _walk_form_fields(schema, fields)
+    seen: set[str] = set()
+    uniq = [f for f in fields if not (f["key"] in seen or seen.add(f["key"]))]
+    return {"fields": uniq}
+
+
+# ── v2-M1 理解流程:证据采集(静态 + 只读真探针)──
+class UnderstandReq(BaseModel):
+    openapi: dict
+    base_url: str = ""
+    token: str = ""
+    template_id: str = ""
+    include_tags: list[str] = []
+
+
+@app.post("/onboarding/understand-flow")
+async def understand_flow(req: UnderstandReq) -> dict:
+    """v2-M1:采集一条/一组流程的结构化证据(静态 swagger + 只读运行时探针),供后续画像/LLM 拆解。
+
+    只读、不臆造、凭证不进证据。给了 base_url+token 才做真探针(表单字段 + 样例出参结构),否则纯静态。
+    """
+    from dano.onboarding.evidence import collect_evidence, make_http_probe
+    probe = make_http_probe(req.base_url, req.token) if (req.base_url and req.token) else None
+    ev = await collect_evidence(req.openapi or {}, include_tags=req.include_tags,
+                                template_id=req.template_id, probe=probe)
+    return ev.model_dump()
+
+
 class FetchSwaggerReq(BaseModel):
     url: str = ""                  # swagger 文档完整地址(手动导入:直接写地址)
     base_url: str = ""             # 备用:base_url + path 拼接
@@ -257,7 +414,25 @@ async def onboarding(req: OnboardReq) -> dict:
                            policy_text=req.policy_text, include_tags=req.include_tags,
                            flows=req.flows, use_codegen=req.use_codegen,
                            max_read_flows=req.max_read_flows, lifecycle=_lifecycle)
+    await _auto_export(req.tenant)
     return report.model_dump()
+
+
+async def _auto_export(tenant: str) -> None:
+    """接入后自动导出该租户已上架 skill 为 skill-creator 包(无需手动点导出)。
+
+    目录:Linux 用 DANO_EXPORT_DIR(沿用之前目录);Windows/缺省 = 仓库相对 Dano/export/agent-skills。
+    best-effort:导出失败不影响接入结果。
+    """
+    try:
+        import os
+        from pathlib import Path
+        from dano.export.agent_skills import write_skills
+        out = os.environ.get("DANO_EXPORT_DIR") or str(Path(__file__).resolve().parents[3] / "export" / "agent-skills")
+        written = await write_skills(tenant, out)
+        log.info("onboard.auto_export", tenant=tenant, out=out, count=len(written))
+    except Exception as e:  # noqa: BLE001
+        log.warning("onboard.auto_export_failed", error=str(e))
 
 
 # ── 异步接入(接入向导:启动后台生成 + 轮询进度,避免几分钟同步阻塞/超时)──
@@ -274,7 +449,8 @@ async def onboarding_start(req: OnboardReq) -> dict:
     _onboard_jobs[job_id] = job
 
     def _progress(ev: dict) -> None:
-        job["events"].append(ev)
+        import time
+        job["events"].append({"ts": time.time(), **ev})
 
     async def _run() -> None:
         try:
@@ -285,6 +461,7 @@ async def onboarding_start(req: OnboardReq) -> dict:
                 max_read_flows=req.max_read_flows, progress=_progress, lifecycle=_lifecycle)
             job["report"] = rep.model_dump()
             job["status"] = "completed"
+            await _auto_export(req.tenant)             # 接入完成即自动导出 skill-creator 包
         except Exception as e:  # noqa: BLE001
             job["status"] = "failed"
             job["error"] = str(e)
@@ -319,6 +496,23 @@ async def get_skill(skill_id: str, x_tenant_key: str | None = Header(default=Non
     if m is None:
         raise HTTPException(status_code=404, detail=f"本公司无此 Skill: {skill_id}")
     return m.model_dump()
+
+
+@app.delete("/v1/skills/{skill_id}")
+async def delete_skill(skill_id: str, x_tenant_key: str | None = Header(default=None)) -> dict:
+    """删除本租户的某个 skill(删 PG 资产各版本)。便于测试重来;按租户隔离,不碰别家。"""
+    tenant = await _auth_tenant(x_tenant_key)
+    sub_str, _, action = skill_id.partition(".")
+    if not action:
+        raise HTTPException(status_code=400, detail="skill_id 应为 {subsystem}.{action}")
+    try:
+        subsystem = Subsystem(sub_str)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"未知子系统: {sub_str}") from e
+    rows = await repo.delete_by_action(Scope(tenant=tenant, subsystem=subsystem), action)
+    if rows == 0:
+        raise HTTPException(status_code=404, detail=f"本公司无此 Skill: {skill_id}")
+    return {"deleted": rows, "skill_id": skill_id}
 
 
 # ── 瘦执行(前端只给 skill_id + input;endpoint/凭证/断言后端取)──
@@ -380,6 +574,26 @@ async def call_tool(req: ToolCallReq, x_tenant_key: str | None = Header(default=
         except _json.JSONDecodeError as e:
             raise HTTPException(status_code=400, detail=f"arguments 非合法 JSON: {e}") from e
     return await _invoke(tenant, skill_id_of(req.name), args, req.confirm)
+
+
+class ExportSkillsReq(BaseModel):
+    out_dir: str                    # 目标目录(通常是 pi 仓库的 .agents/skills),后端本地写入
+
+
+@app.post("/export/agent-skills")
+async def export_agent_skills_ep(req: ExportSkillsReq,
+                                 x_tenant_key: str | None = Header(default=None)) -> dict:
+    """把本租户已上架 Skill 导出为 pi 文件式 skill(.agents/skills/<name>/),写入 out_dir。
+
+    后端与目标目录同机时直接写文件,免敲命令。真执行仍在 Dano 侧;导出的脚本用 curl 调 /v1/tools/call。
+    """
+    tenant = await _auth_tenant(x_tenant_key)
+    from dano.export.agent_skills import write_skills
+    try:
+        written = await write_skills(tenant, req.out_dir)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=f"写入目录失败:{e}") from e
+    return {"out_dir": req.out_dir, "count": len(written), "written": written}
 
 
 @app.get("/assets/published")

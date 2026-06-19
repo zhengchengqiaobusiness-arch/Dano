@@ -176,3 +176,15 @@ class AssetRepository:
         if row:
             log.info("asset.status_changed", asset_id=str(asset_id), status=status.value)
         return _row_to_envelope(row) if row else None
+
+    async def delete_by_action(self, scope: Scope, action: str) -> int:
+        """删除某租户/子系统下某动作的全部资产行(各类型各版本)。用于「删除 skill」(便于测试)。"""
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            res = await conn.execute(
+                "DELETE FROM assets WHERE tenant = $1 AND subsystem = $2 AND asset_key = $3",
+                scope.tenant, scope.subsystem.value, action,
+            )
+        rows = int(res.split()[-1]) if res and res.split()[-1].isdigit() else 0
+        log.info("asset.deleted", tenant=scope.tenant, subsystem=scope.subsystem.value, action=action, rows=rows)
+        return rows

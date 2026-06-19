@@ -94,8 +94,8 @@ export default function Settings() {
         {status && (
           <span>
             后端当前:模型 key {status.pi_key_set ? <Tag color="green">已配</Tag> : <Tag color="red">未配</Tag>}
-            · {status.pi_model} · TLS校验{status.insecure_tls ? "关" : "开"}
-            · 凭证 {status.runtime_credential_keys.length ? status.runtime_credential_keys.join(",") : "无"}
+            · {status.pi_model || "-"} · TLS校验{status.insecure_tls ? "关" : "开"}
+            · 凭证 {(status.runtime_credential_keys || []).length ? (status.runtime_credential_keys || []).join(",") : "无"}
           </span>
         )}
       </Space>

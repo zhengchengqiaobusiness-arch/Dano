@@ -23,6 +23,8 @@ class GoalBrief:
     actions: list[dict] = field(default_factory=list)   # parse_spec 动作清单(已选类别)
     test_input: dict = field(default_factory=dict)      # 测试账号用的业务字段值
     budget: Budget = field(default_factory=Budget)
+    evidence: dict | None = None                # v2:理解阶段采集的 FlowEvidence(供 LLM 拆解)
+    business: str = ""                          # 展开模式:所属业务(同业务多操作共用,供导出归组成剧本 skill)
 
 
 @dataclass

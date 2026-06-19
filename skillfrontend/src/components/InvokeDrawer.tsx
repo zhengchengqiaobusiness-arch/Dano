@@ -1,5 +1,8 @@
-import { useEffect, useState } from "react";
-import { Drawer, Button, Checkbox, Input, Typography, Tag, Alert, Descriptions, Space, message } from "antd";
+import { useEffect, useMemo, useState } from "react";
+import {
+  Drawer, Button, Checkbox, Input, InputNumber, DatePicker, Radio, Typography, Tag,
+  Alert, Descriptions, Space, message,
+} from "antd";
 import { invokeSkill, SkillManifest, TaskOutcome, JSONSchema } from "../api/skills";
 
 const STATE_COLOR: Record<string, string> = {
@@ -7,34 +10,57 @@ const STATE_COLOR: Record<string, string> = {
   cancelled: "warning", needs_input: "warning",
 };
 
-function skeleton(p: JSONSchema): Record<string, unknown> {
+// 按字段名/描述猜控件类型(manifest 目前统一 type=string,故靠语义猜:日期/数字/文本)
+const isDate = (s: string) => /date|time|日期|时间|起止|开始|结束|起|止/i.test(s);
+const isNum = (s: string) => /days|num|count|amount|qty|天数|数量|金额|时长|个数/i.test(s);
+
+function jsonSkeleton(p: JSONSchema): string {
   const o: Record<string, unknown> = {};
   for (const k of Object.keys(p?.properties || {})) o[k] = "";
-  return o;
+  return JSON.stringify(o, null, 2);
 }
 
 export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest | null; onClose: () => void }) {
+  const [mode, setMode] = useState<"form" | "json">("form");
+  const [values, setValues] = useState<Record<string, unknown>>({});
   const [text, setText] = useState("{}");
   const [confirm, setConfirm] = useState(false);
   const [running, setRunning] = useState(false);
   const [out, setOut] = useState<TaskOutcome | null>(null);
 
+  const props = useMemo(() => skill?.parameters?.properties || {}, [skill]);
+  const required = useMemo(() => new Set(skill?.parameters?.required || []), [skill]);
+
   useEffect(() => {
     if (skill) {
-      setText(JSON.stringify(skeleton(skill.parameters), null, 2));
+      setValues({});
+      setText(jsonSkeleton(skill.parameters));
       setConfirm(skill.requires_confirmation);
+      setMode("form");
       setOut(null);
     }
   }, [skill]);
 
+  const setVal = (k: string, v: unknown) => setValues((p) => ({ ...p, [k]: v }));
+
   async function run() {
     if (!skill) return;
     let input: Record<string, unknown>;
-    try {
-      input = JSON.parse(text || "{}");
-    } catch (e: any) {
-      message.error("输入不是合法 JSON:" + e.message);
-      return;
+    if (mode === "json") {
+      try {
+        input = JSON.parse(text || "{}");
+      } catch (e: any) {
+        message.error("输入不是合法 JSON:" + e.message);
+        return;
+      }
+    } else {
+      const missing = [...required].filter((k) => values[k] === "" || values[k] == null);
+      if (missing.length) {
+        message.error("缺必填:" + missing.join(", "));
+        return;
+      }
+      // 丢掉空的可选字段;数字/日期已是正确类型
+      input = Object.fromEntries(Object.entries(values).filter(([, v]) => v !== "" && v != null));
     }
     setRunning(true);
     setOut(null);
@@ -47,7 +73,31 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
     }
   }
 
-  const req = skill?.parameters?.required || [];
+  const fieldRow = (key: string, p: { description?: string }) => {
+    const label = p.description || key;
+    const hint = `${key} ${label}`;
+    const reqMark = required.has(key) ? <span style={{ color: "#cf1322" }}> *</span> : null;
+    let widget;
+    if (isDate(hint)) {
+      widget = <DatePicker style={{ width: "100%" }} onChange={(_, ds) => setVal(key, ds)} />;
+    } else if (isNum(hint)) {
+      widget = <InputNumber style={{ width: "100%" }} value={values[key] as number}
+                            onChange={(v) => setVal(key, v)} />;
+    } else {
+      widget = <Input value={(values[key] as string) ?? ""} onChange={(e) => setVal(key, e.target.value)}
+                      placeholder={key} />;
+    }
+    return (
+      <div key={key} style={{ marginBottom: 12 }}>
+        <div style={{ marginBottom: 4, fontSize: 13 }}>
+          {label}{reqMark}{label !== key && <Typography.Text type="secondary" style={{ fontSize: 12 }}> · {key}</Typography.Text>}
+        </div>
+        {widget}
+      </div>
+    );
+  };
+
+  const keys = Object.keys(props);
 
   return (
     <Drawer title={skill ? `测试调用 · ${skill.name}` : ""} width={560} open={!!skill} onClose={onClose} destroyOnClose>
@@ -58,14 +108,31 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
               <Tag color={skill.risk_level >= "L3" ? "orange" : "default"}>{skill.risk_level}</Tag>
               {skill.requires_confirmation && <Tag color="orange">写操作需确认</Tag>}
             </Descriptions.Item>
-            <Descriptions.Item label="必填字段">{req.length ? req.join(", ") : "无"}</Descriptions.Item>
+            <Descriptions.Item label="必填字段">{[...required].length ? [...required].join(", ") : "无"}</Descriptions.Item>
           </Descriptions>
 
-          <Typography.Text type="secondary">input（业务字段;__base_url__ 和凭证后端注入,无需填）</Typography.Text>
-          <Input.TextArea value={text} onChange={(e) => setText(e.target.value)} autoSize={{ minRows: 8, maxRows: 18 }} style={{ fontFamily: "monospace", marginTop: 6 }} />
+          <Radio.Group value={mode} onChange={(e) => setMode(e.target.value)} size="small" style={{ marginBottom: 12 }}>
+            <Radio.Button value="form">逐字段填写</Radio.Button>
+            <Radio.Button value="json">原始 JSON</Radio.Button>
+          </Radio.Group>
+
+          {mode === "form" ? (
+            <>
+              <Typography.Text type="secondary" style={{ display: "block", marginBottom: 8 }}>
+                业务字段(__base_url__ / 模板 / 凭证后端注入,无需填)
+              </Typography.Text>
+              {keys.length ? keys.map((k) => fieldRow(k, props[k])) : <Typography.Text type="secondary">该 skill 无参数</Typography.Text>}
+            </>
+          ) : (
+            <>
+              <Typography.Text type="secondary">input(业务字段 JSON)</Typography.Text>
+              <Input.TextArea value={text} onChange={(e) => setText(e.target.value)} autoSize={{ minRows: 8, maxRows: 18 }}
+                              style={{ fontFamily: "monospace", marginTop: 6 }} />
+            </>
+          )}
 
           <Space style={{ marginTop: 12 }}>
-            <Checkbox checked={confirm} onChange={(e) => setConfirm(e.target.checked)}>confirm（L3 写操作必须勾）</Checkbox>
+            <Checkbox checked={confirm} onChange={(e) => setConfirm(e.target.checked)}>confirm(L3 写操作必须勾)</Checkbox>
             <Button type="primary" loading={running} onClick={run}>调用</Button>
           </Space>
 
@@ -77,7 +144,7 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
                 message={<span>state: <b>{out.state}</b></span>}
                 description={out.message}
               />
-              <Typography.Text type="secondary" style={{ display: "block", marginTop: 12 }}>返回（structured_output）</Typography.Text>
+              <Typography.Text type="secondary" style={{ display: "block", marginTop: 12 }}>返回(structured_output)</Typography.Text>
               <Input.TextArea
                 readOnly
                 value={JSON.stringify(out.exec_result?.structured_output ?? null, null, 2)}

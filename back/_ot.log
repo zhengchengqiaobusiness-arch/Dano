@@ -1,0 +1,216 @@
+2026-06-19 16:18:38 [info     ] pg_pool.initialized            dsn=localhost:5432/dano_back
+2026-06-19 16:18:38 [info     ] onboard.start                  expand_business=True flows=1 run_id=onb-6a9f0752 subsystem=A-OA tenant=biz-leave use_codegen=True
+2026-06-19 16:18:38 [info     ] onboard.normalized             paths=339 run_id=onb-6a9f0752
+2026-06-19 16:18:39 [info     ] auth.refreshed                 kind=token system=oa
+2026-06-19 16:18:39 [info     ] asset.created                  asset_type=env_profile subsystem=A-OA version=1
+2026-06-19 16:18:39 [info     ] asset.status_changed           asset_id=8beb9610-0b14-42a8-b5c8-ff0360fa2983 status=published
+2026-06-19 16:18:39 [info     ] publish_asset.ok               action=env_profile asset_id=8beb9610-0b14-42a8-b5c8-ff0360fa2983
+2026-06-19 16:18:39 [info     ] oa_template.matched            template=ruoyi-flowable
+2026-06-19 16:18:39 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=5873 tag=classify timeout_s=300.0
+2026-06-19 16:18:39 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=5411 tag=classify timeout_s=300.0
+2026-06-19 16:18:39 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=5720 tag=classify timeout_s=300.0
+2026-06-19 16:18:39 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=5539 tag=classify timeout_s=300.0
+2026-06-19 16:18:39 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=6264 tag=classify timeout_s=300.0
+2026-06-19 16:18:39 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=4803 tag=classify timeout_s=300.0
+2026-06-19 16:20:12 [info     ] llm.response                   dur_s=93.4 empty=False resp_chars=4274 tag=classify
+2026-06-19 16:20:40 [info     ] llm.response                   dur_s=121.0 empty=False resp_chars=3569 tag=classify
+2026-06-19 16:21:01 [info     ] llm.response                   dur_s=142.3 empty=False resp_chars=4277 tag=classify
+2026-06-19 16:21:11 [info     ] llm.response                   dur_s=152.8 empty=False resp_chars=4377 tag=classify
+2026-06-19 16:22:45 [info     ] llm.response                   dur_s=246.6 empty=False resp_chars=4848 tag=classify
+2026-06-19 16:23:39 [warning  ] llm.network_error              dur_s=300.4 error="ReadTimeout('')" tag=classify
+2026-06-19 16:23:39 [info     ] llm_classify.done              actions=346 batches=6 classified=286
+2026-06-19 16:23:39 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=695 tag=convention timeout_s=300.0
+2026-06-19 16:23:46 [info     ] llm.response                   dur_s=7.3 empty=False resp_chars=68 tag=convention
+2026-06-19 16:23:46 [info     ] llm_convention.detected        name=ruoyi-ajaxresult success_rule='response.code == 200'
+2026-06-19 16:23:46 [info     ] codegen.spec                   actions=322 categories=48 expand_business=True flows=1 success_rule='response.code == 200' template=ruoyi-ajaxresult
+2026-06-19 16:23:46 [info     ] business.expand.start          endpoints=['/biz/flow/submit', '/biz/form/save', '/biz/form/update', '/biz/form/info', '/workflow/done/list', '/workflow/done/{id}', '/workflow/done/urge', '/workflow/handle/startFlow', '/flowable/monitor/listProcess', '/workflow/todo/list/table', '/workflow/todo/list/collapse', '/workflow/todo/count/{tpye}', '/workflow/todo/{id}', '/workflow/todo/readTodo/{id}'] flow=submit_demo_leave scoped=18
+2026-06-19 16:23:46 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=1912 tag=profiler timeout_s=300.0
+2026-06-19 16:25:50 [info     ] llm.response                   dur_s=123.3 empty=False resp_chars=1518 tag=profiler
+2026-06-19 16:25:50 [info     ] business_profiler.done         business=submit_demo_leave n_in=18 ops=['submit_demo_leave', 'correct_demo_leave', 'urge_demo_leave', 'delete_my_draft', 'query_my_drafts', 'query_status', 'query_my_todos', 'query_my_done']
+2026-06-19 16:25:50 [info     ] business.expand.ops            flow=submit_demo_leave ops=[{'op': 'submit_demo_leave', 'write': True, 'endpoints': ['post_workflow_handle_startFlow', 'post_biz_form_save', 'post_biz_flow_submit']}, {'op': 'correct_demo_leave', 'write': True, 'endpoints': ['post_biz_form_update']}, {'op': 'urge_demo_leave', 'write': True, 'endpoints': ['post_workflow_done_urge']}, {'op': 'delete_my_draft', 'write': True, 'endpoints': ['delete_workflow_draft_ids']}, {'op': 'query_my_drafts', 'write': False, 'endpoints': ['get_workflow_draft_list', 'get_workflow_draft_count']}, {'op': 'query_status', 'write': False, 'endpoints': ['get_flowable_monitor_listProcess', 'get_biz_form_info']}, {'op': 'query_my_todos', 'write': False, 'endpoints': ['get_workflow_todo_list_table', 'get_workflow_todo_list_collapse', 'get_workflow_todo_count_tpye', 'get_workflow_todo_id']}, {'op': 'query_my_done', 'write': False, 'endpoints': ['get_workflow_done_list', 'get_workflow_done_id']}]
+  EV business_expanded {'ops': ['submit_demo_leave', 'correct_demo_leave', 'urge_demo_leave', 'delete_my_draft', 'query_my_drafts', 'query_status', 'query_my_todos', 'query_my_done']}
+2026-06-19 16:25:50 [info     ] codegen.goals_planned          expand_business=True goals=['submit_demo_leave', 'correct_demo_leave', 'urge_demo_leave', 'delete_my_draft', 'query_my_drafts', 'query_status', 'query_my_todos', 'query_my_done'] total=8
+  EV plan {'flows': ['submit_demo_leave', 'correct_demo_leave', 'urge_demo_leave', 'delete_my_draft', 'query_my_drafts', 'query_status', 'query_my_todos', 'query_my_done']}
+2026-06-19 16:25:50 [info     ] codegen.goal.start             business=submit_demo_leave flow=submit_demo_leave idx=0 is_read=False n_actions=3 total=8
+2026-06-19 16:25:50 [info     ] oa_template.matched            template=ruoyi-flowable
+2026-06-19 16:25:50 [info     ] codegen.goal.evidence          endpoints=['/workflow/handle/startFlow', '/biz/form/save', '/biz/flow/submit'] flow=submit_demo_leave scoped=3
+  EV flow_start {'index': 0, 'total': 8, 'route': 'llm'}
+2026-06-19 16:25:50 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=1156 tag=planner timeout_s=300.0
+2026-06-19 16:30:49 [info     ] llm.response                   dur_s=298.2 empty=False resp_chars=1089 tag=planner
+2026-06-19 16:30:49 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=1207 tag=planner timeout_s=300.0
+2026-06-19 16:32:56 [info     ] llm.response                   dur_s=127.3 empty=False resp_chars=1391 tag=planner
+2026-06-19 16:32:56 [info     ] gen.start                      business=submit_demo_leave endpoints=3 flow=submit_demo_leave max_iters=6 plan_steps=3 planner=True strategy=llm success_rule='response.code == null or response.code == 200'
+2026-06-19 16:32:56 [info     ] gen.iter                       fixing=False flow=submit_demo_leave iter=0 strategy=llm
+2026-06-19 16:32:56 [info     ] coder.generate                 endpoints=3 fixing=False flow=submit_demo_leave mode=evidence prompt_chars=3675
+2026-06-19 16:32:56 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=3675 tag=coder timeout_s=300.0
+2026-06-19 16:37:45 [info     ] llm.response                   dur_s=288.9 empty=False resp_chars=3726 tag=coder
+2026-06-19 16:37:45 [info     ] coder.source_ready             flow=submit_demo_leave lines=112
+  EV coded {'iter': 0, 'lines': 112}
+2026-06-19 16:37:46 [info     ] adapter.run                    duration_s=0.75 entry=run ok=False
+2026-06-19 16:37:46 [warning  ] gen.gate.sandbox               flow=submit_demo_leave iter=0 kind=code output=None passed=False reasons=['运行失败: RuntimeError: 接口返回失败: code=500, msg=业务表单数据保存失败:业务表单数据转换失败:null']
+  EV gate {'iter': 0, 'gate': '沙箱真跑', 'passed': False, 'detail': '运行失败: RuntimeError: 接口返回失败: code=500, msg=业务表单数据保存失败:业务表单数据转换失败:null'}
+2026-06-19 16:37:46 [info     ] generation.rejected            flow=submit_demo_leave iter=0 reasons=['运行失败: RuntimeError: 接口返回失败: code=500, msg=业务表单数据保存失败:业务表单数据转换失败:null']
+  EV rejected {'iter': 0, 'reasons': ['运行失败: RuntimeError: 接口返回失败: code=500, msg=业务表单数据保存失败:业务表单数据转换失败:null']}
+2026-06-19 16:37:46 [info     ] gen.iter                       fixing=True flow=submit_demo_leave iter=1 strategy=llm
+2026-06-19 16:37:46 [info     ] coder.generate                 endpoints=3 fixing=True flow=submit_demo_leave mode=evidence prompt_chars=3804
+2026-06-19 16:37:46 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=3804 tag=coder timeout_s=300.0
+2026-06-19 16:42:46 [warning  ] llm.network_error              dur_s=300.1 error="ReadTimeout('')" tag=coder
+2026-06-19 16:42:46 [warning  ] coder.no_source                flow=submit_demo_leave resp_chars=0 resp_head=
+  EV coded {'iter': 1, 'lines': 3}
+2026-06-19 16:42:46 [info     ] adapter.run                    duration_s=0.078 entry=run ok=False
+2026-06-19 16:42:46 [warning  ] gen.gate.sandbox               flow=submit_demo_leave iter=1 kind=code output=None passed=False reasons=['运行失败: RuntimeError: pi 未产出可解析源码']
+  EV gate {'iter': 1, 'gate': '沙箱真跑', 'passed': False, 'detail': '运行失败: RuntimeError: pi 未产出可解析源码'}
+2026-06-19 16:42:46 [info     ] generation.rejected            flow=submit_demo_leave iter=1 reasons=['运行失败: RuntimeError: pi 未产出可解析源码']
+  EV rejected {'iter': 1, 'reasons': ['运行失败: RuntimeError: pi 未产出可解析源码']}
+2026-06-19 16:42:46 [info     ] gen.iter                       fixing=True flow=submit_demo_leave iter=2 strategy=llm
+2026-06-19 16:42:46 [info     ] coder.generate                 endpoints=3 fixing=True flow=submit_demo_leave mode=evidence prompt_chars=3767
+2026-06-19 16:42:46 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=3767 tag=coder timeout_s=300.0
+2026-06-19 16:44:53 [info     ] llm.response                   dur_s=127.3 empty=False resp_chars=3873 tag=coder
+2026-06-19 16:44:53 [info     ] coder.source_ready             flow=submit_demo_leave lines=114
+  EV coded {'iter': 2, 'lines': 114}
+2026-06-19 16:44:54 [info     ] adapter.run                    duration_s=0.734 entry=run ok=False
+2026-06-19 16:44:54 [warning  ] gen.gate.sandbox               flow=submit_demo_leave iter=2 kind=code output=None passed=False reasons=['运行失败: RuntimeError: 保存请假表单失败: 业务表单数据保存失败:业务表单数据转换失败:null']
+  EV gate {'iter': 2, 'gate': '沙箱真跑', 'passed': False, 'detail': '运行失败: RuntimeError: 保存请假表单失败: 业务表单数据保存失败:业务表单数据转换失败:null'}
+2026-06-19 16:44:54 [info     ] generation.rejected            flow=submit_demo_leave iter=2 reasons=['运行失败: RuntimeError: 保存请假表单失败: 业务表单数据保存失败:业务表单数据转换失败:null']
+  EV rejected {'iter': 2, 'reasons': ['运行失败: RuntimeError: 保存请假表单失败: 业务表单数据保存失败:业务表单数据转换失败:null']}
+2026-06-19 16:44:54 [info     ] gen.iter                       fixing=True flow=submit_demo_leave iter=3 strategy=llm
+2026-06-19 16:44:54 [info     ] coder.generate                 endpoints=3 fixing=True flow=submit_demo_leave mode=evidence prompt_chars=3792
+2026-06-19 16:44:54 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=3792 tag=coder timeout_s=300.0
+2026-06-19 16:49:54 [warning  ] llm.network_error              dur_s=300.1 error="ReadTimeout('')" tag=coder
+2026-06-19 16:49:54 [warning  ] coder.no_source                flow=submit_demo_leave resp_chars=0 resp_head=
+  EV coded {'iter': 3, 'lines': 3}
+2026-06-19 16:49:55 [info     ] adapter.run                    duration_s=0.094 entry=run ok=False
+2026-06-19 16:49:55 [warning  ] gen.gate.sandbox               flow=submit_demo_leave iter=3 kind=code output=None passed=False reasons=['运行失败: RuntimeError: pi 未产出可解析源码']
+  EV gate {'iter': 3, 'gate': '沙箱真跑', 'passed': False, 'detail': '运行失败: RuntimeError: pi 未产出可解析源码'}
+2026-06-19 16:49:55 [info     ] generation.rejected            flow=submit_demo_leave iter=3 reasons=['运行失败: RuntimeError: pi 未产出可解析源码']
+  EV rejected {'iter': 3, 'reasons': ['运行失败: RuntimeError: pi 未产出可解析源码']}
+2026-06-19 16:49:55 [info     ] gen.iter                       fixing=True flow=submit_demo_leave iter=4 strategy=llm
+2026-06-19 16:49:55 [info     ] coder.generate                 endpoints=3 fixing=True flow=submit_demo_leave mode=evidence prompt_chars=3767
+2026-06-19 16:49:55 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=3767 tag=coder timeout_s=300.0
+2026-06-19 16:53:55 [info     ] llm.response                   dur_s=240.3 empty=False resp_chars=4502 tag=coder
+2026-06-19 16:53:55 [info     ] coder.source_ready             flow=submit_demo_leave lines=107
+  EV coded {'iter': 4, 'lines': 107}
+2026-06-19 16:53:56 [info     ] adapter.run                    duration_s=0.704 entry=run ok=False
+2026-06-19 16:53:56 [warning  ] gen.gate.sandbox               flow=submit_demo_leave iter=4 kind=code output=None passed=False reasons=['运行失败: RuntimeError: post_biz_form_save failed: {"msg": "业务表单数据保存失败:业务表单数据转换失败:null", "code": 500}']
+  EV gate {'iter': 4, 'gate': '沙箱真跑', 'passed': False, 'detail': '运行失败: RuntimeError: post_biz_form_save failed: {"msg": "业务表单数据保存失败:业务表单数据转换失败:null", "code": 500}'}
+2026-06-19 16:53:56 [info     ] generation.rejected            flow=submit_demo_leave iter=4 reasons=['运行失败: RuntimeError: post_biz_form_save failed: {"msg": "业务表单数据保存失败:业务表单数据转换失败:null", "code": 500}']
+  EV rejected {'iter': 4, 'reasons': ['运行失败: RuntimeError: post_biz_form_save failed: {"msg": "业务表单数据保存失败:业务表单数据转换失败:null", "code": 500}']}
+2026-06-19 16:53:56 [info     ] gen.iter                       fixing=True flow=submit_demo_leave iter=5 strategy=llm
+2026-06-19 16:53:56 [info     ] coder.generate                 endpoints=3 fixing=True flow=submit_demo_leave mode=evidence prompt_chars=3833
+2026-06-19 16:53:56 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=3833 tag=coder timeout_s=300.0
+2026-06-19 16:58:56 [warning  ] llm.network_error              dur_s=300.1 error="ReadTimeout('')" tag=coder
+2026-06-19 16:58:56 [warning  ] coder.no_source                flow=submit_demo_leave resp_chars=0 resp_head=
+  EV coded {'iter': 5, 'lines': 3}
+2026-06-19 16:58:56 [info     ] adapter.run                    duration_s=0.094 entry=run ok=False
+2026-06-19 16:58:56 [warning  ] gen.gate.sandbox               flow=submit_demo_leave iter=5 kind=code output=None passed=False reasons=['运行失败: RuntimeError: pi 未产出可解析源码']
+  EV gate {'iter': 5, 'gate': '沙箱真跑', 'passed': False, 'detail': '运行失败: RuntimeError: pi 未产出可解析源码'}
+2026-06-19 16:58:56 [info     ] generation.rejected            flow=submit_demo_leave iter=5 reasons=['运行失败: RuntimeError: pi 未产出可解析源码']
+  EV rejected {'iter': 5, 'reasons': ['运行失败: RuntimeError: pi 未产出可解析源码']}
+2026-06-19 16:58:56 [warning  ] generation.exhausted           flow=submit_demo_leave iters=6
+  EV exhausted {}
+2026-06-19 16:58:56 [info     ] codegen.goal.done              asset_id=None flow=submit_demo_leave ok=False reason=耗尽预算仍未通过 rejections=6 route=llm
+  EV flow_done {'ok': False, 'rejections': 6, 'asset_id': None}
+2026-06-19 16:58:56 [info     ] codegen.goal.start             business=submit_demo_leave flow=correct_demo_leave idx=1 is_read=False n_actions=1 total=8
+2026-06-19 16:58:56 [info     ] oa_template.matched            template=ruoyi-flowable
+2026-06-19 16:58:56 [info     ] codegen.goal.evidence          endpoints=['/biz/form/update'] flow=correct_demo_leave scoped=1
+  EV flow_start {'index': 1, 'total': 8, 'route': 'llm'}
+2026-06-19 16:58:56 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=1051 tag=planner timeout_s=300.0
+2026-06-19 16:59:54 [info     ] llm.response                   dur_s=57.9 empty=False resp_chars=1066 tag=planner
+2026-06-19 16:59:54 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=1102 tag=planner timeout_s=300.0
+2026-06-19 17:01:09 [info     ] llm.response                   dur_s=74.5 empty=False resp_chars=1201 tag=planner
+2026-06-19 17:01:09 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=1102 tag=planner timeout_s=300.0
+2026-06-19 17:03:39 [info     ] llm.response                   dur_s=150.4 empty=False resp_chars=1200 tag=planner
+2026-06-19 17:03:39 [info     ] gen.start                      business=submit_demo_leave endpoints=1 flow=correct_demo_leave max_iters=6 plan_steps=4 planner=True strategy=llm success_rule='response.code == null or response.code == 200'
+2026-06-19 17:03:39 [info     ] gen.iter                       fixing=False flow=correct_demo_leave iter=0 strategy=llm
+2026-06-19 17:03:39 [info     ] coder.generate                 endpoints=1 fixing=False flow=correct_demo_leave mode=evidence prompt_chars=2761
+2026-06-19 17:03:39 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=2761 tag=coder timeout_s=300.0
+2026-06-19 17:06:11 [info     ] llm.response                   dur_s=152.0 empty=False resp_chars=3531 tag=coder
+2026-06-19 17:06:11 [info     ] coder.source_ready             flow=correct_demo_leave lines=97
+  EV coded {'iter': 0, 'lines': 97}
+2026-06-19 17:06:12 [info     ] adapter.run                    duration_s=0.703 entry=run ok=False
+2026-06-19 17:06:12 [warning  ] gen.gate.sandbox               flow=correct_demo_leave iter=0 kind=code output=None passed=False reasons=['运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null']
+  EV gate {'iter': 0, 'gate': '沙箱真跑', 'passed': False, 'detail': '运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null'}
+2026-06-19 17:06:12 [info     ] generation.rejected            flow=correct_demo_leave iter=0 reasons=['运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null']
+  EV rejected {'iter': 0, 'reasons': ['运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null']}
+2026-06-19 17:06:12 [info     ] gen.iter                       fixing=True flow=correct_demo_leave iter=1 strategy=llm
+2026-06-19 17:06:12 [info     ] coder.generate                 endpoints=1 fixing=True flow=correct_demo_leave mode=evidence prompt_chars=2914
+2026-06-19 17:06:12 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=2914 tag=coder timeout_s=300.0
+2026-06-19 17:08:46 [info     ] llm.response                   dur_s=154.1 empty=False resp_chars=3234 tag=coder
+2026-06-19 17:08:46 [info     ] coder.source_ready             flow=correct_demo_leave lines=91
+  EV coded {'iter': 1, 'lines': 91}
+2026-06-19 17:08:47 [info     ] adapter.run                    duration_s=0.719 entry=run ok=False
+2026-06-19 17:08:47 [warning  ] gen.gate.sandbox               flow=correct_demo_leave iter=1 kind=code output=None passed=False reasons=['运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null']
+  EV gate {'iter': 1, 'gate': '沙箱真跑', 'passed': False, 'detail': '运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null'}
+2026-06-19 17:08:47 [info     ] generation.rejected            flow=correct_demo_leave iter=1 reasons=['运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null']
+  EV rejected {'iter': 1, 'reasons': ['运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null']}
+2026-06-19 17:08:47 [info     ] gen.iter                       fixing=True flow=correct_demo_leave iter=2 strategy=llm
+2026-06-19 17:08:47 [info     ] coder.generate                 endpoints=1 fixing=True flow=correct_demo_leave mode=evidence prompt_chars=2914
+2026-06-19 17:08:47 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=2914 tag=coder timeout_s=300.0
+2026-06-19 17:12:59 [info     ] llm.response                   dur_s=252.7 empty=False resp_chars=2761 tag=coder
+2026-06-19 17:12:59 [info     ] coder.source_ready             flow=correct_demo_leave lines=85
+  EV coded {'iter': 2, 'lines': 85}
+2026-06-19 17:13:00 [info     ] adapter.run                    duration_s=0.859 entry=run ok=False
+2026-06-19 17:13:00 [warning  ] gen.gate.sandbox               flow=correct_demo_leave iter=2 kind=code output=None passed=False reasons=['运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null']
+  EV gate {'iter': 2, 'gate': '沙箱真跑', 'passed': False, 'detail': '运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null'}
+2026-06-19 17:13:00 [info     ] generation.rejected            flow=correct_demo_leave iter=2 reasons=['运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null']
+  EV rejected {'iter': 2, 'reasons': ['运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null']}
+2026-06-19 17:13:00 [info     ] gen.iter                       fixing=True flow=correct_demo_leave iter=3 strategy=llm
+2026-06-19 17:13:00 [info     ] coder.generate                 endpoints=1 fixing=True flow=correct_demo_leave mode=evidence prompt_chars=2914
+2026-06-19 17:13:00 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=2914 tag=coder timeout_s=300.0
+2026-06-19 17:16:36 [info     ] llm.response                   dur_s=215.6 empty=False resp_chars=2868 tag=coder
+2026-06-19 17:16:36 [info     ] coder.source_ready             flow=correct_demo_leave lines=88
+  EV coded {'iter': 3, 'lines': 88}
+2026-06-19 17:16:37 [info     ] adapter.run                    duration_s=0.906 entry=run ok=False
+2026-06-19 17:16:37 [warning  ] gen.gate.sandbox               flow=correct_demo_leave iter=3 kind=code output=None passed=False reasons=['运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null']
+  EV gate {'iter': 3, 'gate': '沙箱真跑', 'passed': False, 'detail': '运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null'}
+2026-06-19 17:16:37 [info     ] generation.rejected            flow=correct_demo_leave iter=3 reasons=['运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null']
+  EV rejected {'iter': 3, 'reasons': ['运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null']}
+2026-06-19 17:16:37 [info     ] gen.iter                       fixing=True flow=correct_demo_leave iter=4 strategy=llm
+2026-06-19 17:16:37 [info     ] coder.generate                 endpoints=1 fixing=True flow=correct_demo_leave mode=evidence prompt_chars=2914
+2026-06-19 17:16:37 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=2914 tag=coder timeout_s=300.0
+2026-06-19 17:19:06 [info     ] llm.response                   dur_s=149.4 empty=False resp_chars=3072 tag=coder
+2026-06-19 17:19:06 [info     ] coder.source_ready             flow=correct_demo_leave lines=81
+  EV coded {'iter': 4, 'lines': 81}
+2026-06-19 17:19:07 [info     ] adapter.run                    duration_s=0.75 entry=run ok=False
+2026-06-19 17:19:07 [warning  ] gen.gate.sandbox               flow=correct_demo_leave iter=4 kind=code output=None passed=False reasons=['运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null']
+  EV gate {'iter': 4, 'gate': '沙箱真跑', 'passed': False, 'detail': '运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null'}
+2026-06-19 17:19:07 [info     ] generation.rejected            flow=correct_demo_leave iter=4 reasons=['运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null']
+  EV rejected {'iter': 4, 'reasons': ['运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null']}
+2026-06-19 17:19:07 [info     ] gen.iter                       fixing=True flow=correct_demo_leave iter=5 strategy=llm
+2026-06-19 17:19:07 [info     ] coder.generate                 endpoints=1 fixing=True flow=correct_demo_leave mode=evidence prompt_chars=2914
+2026-06-19 17:19:07 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=2914 tag=coder timeout_s=300.0
+2026-06-19 17:23:41 [info     ] llm.response                   dur_s=274.5 empty=False resp_chars=4714 tag=coder
+2026-06-19 17:23:41 [info     ] coder.source_ready             flow=correct_demo_leave lines=152
+  EV coded {'iter': 5, 'lines': 152}
+2026-06-19 17:23:42 [info     ] adapter.run                    duration_s=0.89 entry=run ok=False
+2026-06-19 17:23:42 [warning  ] gen.gate.sandbox               flow=correct_demo_leave iter=5 kind=code output=None passed=False reasons=["运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null, resp={'msg': '业务表单数据更新失败:业务表单数据转换失败:null', 'code': 500}"]
+  EV gate {'iter': 5, 'gate': '沙箱真跑', 'passed': False, 'detail': "运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null, resp={'msg': '业务表单数据更新失败:业务表单数据转换失败:null', 'code': 500}"}
+2026-06-19 17:23:42 [info     ] generation.rejected            flow=correct_demo_leave iter=5 reasons=["运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null, resp={'msg': '业务表单数据更新失败:业务表单数据转换失败:null', 'code': 500}"]
+  EV rejected {'iter': 5, 'reasons': ["运行失败: RuntimeError: biz/form/update business error: code=500, msg=业务表单数据更新失败:业务表单数据转换失败:null, resp={'msg': '业务表单数据更新失败:业务表单数据转换失败:null', 'code': 500}"]}
+2026-06-19 17:23:42 [warning  ] generation.exhausted           flow=correct_demo_leave iters=6
+  EV exhausted {}
+2026-06-19 17:23:42 [info     ] codegen.goal.done              asset_id=None flow=correct_demo_leave ok=False reason=耗尽预算仍未通过 rejections=6 route=llm
+  EV flow_done {'ok': False, 'rejections': 6, 'asset_id': None}
+2026-06-19 17:23:42 [info     ] codegen.goal.start             business=submit_demo_leave flow=urge_demo_leave idx=2 is_read=False n_actions=1 total=8
+2026-06-19 17:23:43 [info     ] oa_template.matched            template=ruoyi-flowable
+2026-06-19 17:23:43 [info     ] codegen.goal.evidence          endpoints=['/workflow/done/urge'] flow=urge_demo_leave scoped=1
+  EV flow_start {'index': 2, 'total': 8, 'route': 'llm'}
+2026-06-19 17:23:43 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=1054 tag=planner timeout_s=300.0
+2026-06-19 17:24:48 [info     ] llm.response                   dur_s=65.0 empty=False resp_chars=1149 tag=planner
+2026-06-19 17:24:48 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=1105 tag=planner timeout_s=300.0
+2026-06-19 17:26:39 [info     ] llm.response                   dur_s=111.7 empty=False resp_chars=1150 tag=planner
+2026-06-19 17:26:39 [info     ] gen.start                      business=submit_demo_leave endpoints=1 flow=urge_demo_leave max_iters=6 plan_steps=3 planner=True strategy=llm success_rule='response.code == 200'
+2026-06-19 17:26:39 [info     ] gen.iter                       fixing=False flow=urge_demo_leave iter=0 strategy=llm
+2026-06-19 17:26:39 [info     ] coder.generate                 endpoints=1 fixing=False flow=urge_demo_leave mode=evidence prompt_chars=2634
+2026-06-19 17:26:39 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=2634 tag=coder timeout_s=300.0
+2026-06-19 17:30:26 [info     ] llm.response                   dur_s=227.0 empty=False resp_chars=3785 tag=coder
+2026-06-19 17:30:26 [info     ] coder.source_ready             flow=urge_demo_leave lines=104
+  EV coded {'iter': 0, 'lines': 104}
+2026-06-19 17:30:28 [info     ] adapter.run                    duration_s=0.937 entry=run ok=False
+2026-06-19 17:30:28 [warning  ] gen.gate.sandbox               flow=urge_demo_leave iter=0 kind=code output=None passed=False reasons=['运行失败: Exception: POST /workflow/done/urge failed: 操作失败']
+  EV gate {'iter': 0, 'gate': '沙箱真跑', 'passed': False, 'detail': '运行失败: Exception: POST /workflow/done/urge failed: 操作失败'}
+2026-06-19 17:30:28 [info     ] generation.rejected            flow=urge_demo_leave iter=0 reasons=['运行失败: Exception: POST /workflow/done/urge failed: 操作失败']
+  EV rejected {'iter': 0, 'reasons': ['运行失败: Exception: POST /workflow/done/urge failed: 操作失败']}
+2026-06-19 17:30:28 [info     ] gen.iter                       fixing=True flow=urge_demo_leave iter=1 strategy=llm
+2026-06-19 17:30:28 [info     ] coder.generate                 endpoints=1 fixing=True flow=urge_demo_leave mode=evidence prompt_chars=2749
+2026-06-19 17:30:28 [info     ] llm.request                    model=moonshotai/Kimi-K2.7-Code prompt_chars=2749 tag=coder timeout_s=300.0

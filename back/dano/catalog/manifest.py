@@ -34,6 +34,7 @@ class SkillManifest(BaseModel):
     action: str
     title: str
     description: str
+    business: str = ""                # 所属业务(同业务多操作导出时归为一本剧本 skill)
     integration: str                  # 调用方式:adapter / workflow / api / page
     risk_level: str
     requires_confirmation: bool       # L3+ 调用需带 confirm=true
@@ -85,6 +86,7 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         action=skill.action,
         title=title,
         description=f"{title}({skill.subsystem.value} · {kind}类动作)",
+        business=getattr(skill, "business", ""),
         integration=integration,
         risk_level=risk.value,
         requires_confirmation=risk in _CONFIRM_FROM,

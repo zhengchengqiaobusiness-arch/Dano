@@ -33,15 +33,15 @@ class Settings(BaseSettings):
     require_vault: bool = False     # true=必须从 Vault 取,失败即报错(fail-closed,不回退 env)
 
     # ── LLM(pi 编码 + 三模型评审,OpenAI 兼容)──
-    pi_api_key: str = ""                                   # = DANO_PI_API_KEY(编码 + 评审复用)
+    pi_api_key: str = "sk-gsgpzoimegwgeiscfxfjhtwfegifngjvejwjfatuoxrzytmn"                                   # = DANO_PI_API_KEY(编码 + 评审复用)
     pi_base_url: str = "https://api.siliconflow.cn/v1"     # = DANO_PI_BASE_URL
-    pi_model: str = "deepseek-ai/DeepSeek-V3.2"            # = DANO_PI_MODEL(PiCoder 编码用)
+    pi_model: str = "moonshotai/Kimi-K2.7-Code"            # = DANO_PI_MODEL(PiCoder 编码用)
 
     # ── 三模型评审委员会(发布前硬闸门;强制 distinct(model_id)=3,改模型名即可)──
     review_enabled: bool = True
     review_model_acceptance: str = "deepseek-ai/DeepSeek-V4-Pro"   # 成果验收:是否真满足业务意图
     review_model_security: str = "Pro/zai-org/GLM-5.1"            # 漏洞检测:注入/越权/密钥/SSRF/PII
-    review_model_compliance: str = "deepseek-ai/DeepSeek-V3.2"     # 合规审核:沙箱/测试凭证/风险/确认
+    review_model_compliance: str = "deepseek-ai/DeepSeek-V4-Flash"     # 合规审核:沙箱/测试凭证/风险/确认
     review_timeout_s: float = 60.0
     review_max_retries: int = 2
     review_retry_backoff_s: float = 1.0

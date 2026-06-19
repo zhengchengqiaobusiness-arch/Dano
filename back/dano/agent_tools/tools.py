@@ -79,27 +79,56 @@ def _mat(run_id: str, system_instance_id: str) -> materials.MaterialContext:
 
 # ── 侦察:解析接口,智能抽离(过滤基础设施 + 模板识别)──
 async def parse_spec(run_id: str, params: dict) -> dict:
+    """抽业务动作清单。枚举走确定性(完整、不丢接口);**业务/基础设施识别 + 业务分组**
+    在 use_llm_classify=True 时交给 LLM 语义判断(泛化不同企业命名),失败/未启用回退关键词分类。
+    """
     sid = params["system_instance_id"]
     mat = _mat(run_id, sid)
     spec = mat.openapi or {}
-    template = oa_templates.match_template(spec)
+    template = oa_templates.match_template(spec)              # 仅作确定性兜底(框架名/成败规则/infra 关键词)
     extra = template.infrastructure_patterns() if template else ()
+    template_name = template.name if template else None
+    success_rule = template.success_rule() if template else None
     include = {t for t in (params.get("include_tags") or mat.include_tags or [])}
+    all_actions = doc_parser.parse_openapi(spec)              # 确定性枚举:完整、grounded
+    # LLM 语义识别(可选):对已枚举清单逐个判 role + 业务 category;另据真实响应判成功约定;失败回退确定性
+    llm_map: dict = {}
+    if params.get("use_llm_classify") and all_actions:
+        from functools import partial
+
+        from dano.generation.coder import openai_text_spawn
+        try:
+            from dano.capabilities.llm_classifier import classify_actions
+            llm_map = await classify_actions(all_actions, spawn=partial(openai_text_spawn, tag="classify"))
+        except Exception as e:  # noqa: BLE001 - 识别失败不阻断接入,整体回退确定性
+            log.warning("parse_spec.llm_classify_failed", error=str(e))
+        try:                                                  # 框架/成功约定:LLM 读真实响应 → 取代关键词硬匹配
+            from dano.capabilities.llm_template import detect_convention
+            conv = await detect_convention(spec, spawn=partial(openai_text_spawn, tag="convention"))
+            if conv:
+                template_name = conv.get("name") or template_name
+                success_rule = conv.get("success_rule") or success_rule
+        except Exception as e:  # noqa: BLE001 - 约定识别失败回退确定性 match_template
+            log.warning("parse_spec.llm_convention_failed", error=str(e))
     actions, categories = [], {}
-    for a in doc_parser.parse_openapi(spec):
-        role = endpoint_classifier.classify(a, extra_infra=extra)
+    for a in all_actions:
+        info = llm_map.get(a.name)                            # 命中 LLM → 用模型判断,否则确定性兜底
+        role = info["role"] if info else endpoint_classifier.classify(a, extra_infra=extra)
+        category = info.get("category", "") if info else ""
         if role == endpoint_classifier.INFRASTRUCTURE:
             continue
-        for t in (a.tags or ["(未分类)"]):              # 类别统计(供前端按 tag 选)
+        groups = [category] if category else (a.tags or ["(未分类)"])  # LLM 业务分组优先,否则按 tag
+        for t in groups:                                      # 类别统计(供前端选)
             categories[t] = categories.get(t, 0) + 1
-        if include and not (set(a.tags) & include):     # 类别白名单:超大 swagger 圈定范围
+        if include and not (set(a.tags) & include):           # 类别白名单:超大 swagger 圈定范围
             continue
         actions.append({"name": a.name, "method": a.method, "endpoint": a.endpoint,
-                        "role": role, "required_in": a.required_in, "params_in": a.params_in,
+                        "role": role, "category": category,   # category:LLM 识别的业务分组(可空)
+                        "required_in": a.required_in, "params_in": a.params_in,
                         "params_out": a.params_out, "tags": a.tags,   # 出参/标签:供发现流程依赖
                         "summary": a.summary, "field_docs": a.field_docs})
-    return {"system_instance_id": sid, "template": template.name if template else None,
-            "success_rule": template.success_rule() if template else None,
+    return {"system_instance_id": sid, "template": template_name,
+            "success_rule": success_rule,
             "categories": categories, "include_tags": sorted(include),
             "count": len(actions), "actions": actions}
 
@@ -481,10 +510,28 @@ async def draft_adapter(run_id: str, params: dict) -> dict:
             "content_hash": draft.content_hash}
 
 
+_SWALLOWED_ERR_KEYS = ("_adapter_error", "_error", "exception", "traceback")
+
+
+def _adapter_output_error(out: object) -> str | None:
+    """适配器"正常返回"但其实把内部异常吞进了返回值(如 {'_adapter_error': ...})→ 返回原因串。
+
+    教训:沙箱曾因此**假通过**——代码 NameError 被自己 try/except 吞成 {'_adapter_error':...},
+    runner ok=True,而 success_rule(response.code == null)又把"无 code 的错误对象"判成成功。
+    故在判 success_rule **之前**先拦下这类自吞错误,不让成败规则替错误对象背书。
+    """
+    if not isinstance(out, dict):
+        return None
+    for k in _SWALLOWED_ERR_KEYS:
+        if out.get(k):
+            return f"适配器内部异常被吞({k}):{out[k]}"
+    return None
+
+
 async def sandbox_test_adapter(run_id: str, params: dict) -> dict:
     """隔离 runner 跑适配器(测试账号),按 success_rule 判成败,记 sandbox 证据。
 
-    二态:run.ok 且(无 success_rule 或表达式为真)→ passed;失败给结构化 reasons 供驳回重写。
+    二态:run.ok 且(无自吞错误)且(无 success_rule 或表达式为真)→ passed;失败给结构化 reasons 供驳回重写。
     """
     from dano.execution.adapter import AdapterRunner
     from dano.shared.asset_bodies import AdapterBody
@@ -497,8 +544,12 @@ async def sandbox_test_adapter(run_id: str, params: dict) -> dict:
                                     credentials=mat.credentials or {}, entry=body.entry)
     reasons: list[str] = []
     passed = res.ok
+    out_err = _adapter_output_error(res.output) if res.ok else None
     if not res.ok:
         reasons.append(f"运行失败: {res.error}")
+    elif out_err:                                            # 自吞异常 → 直接判失败(堵假通过)
+        passed = False
+        reasons.append(out_err)
     elif body.success_rule:
         from dano.shared.expr import safe_eval
         try:

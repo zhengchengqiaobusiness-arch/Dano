@@ -13,11 +13,23 @@ from dano.generation.artifacts import GoalBrief
 from dano.shared.asset_bodies import FactCheckSpec, PlanBody
 
 # 运行期注入的内部字段(非用户业务字段),不计入 user_fields/required_fields
-_RESERVED = {"__base_url__"}
+_RESERVED = {"__base_url__", "__templateId__"}
 
 
 def _user_fields(test_input: dict) -> list[str]:
     return [k for k in test_input if k not in _RESERVED]
+
+
+def _consts(test_input: dict) -> dict:
+    """从测试输入里抽运行期常量(如 __templateId__),发布后由 invoke 注入(同 __base_url__)。"""
+    return {k: test_input[k] for k in ("__templateId__",) if k in test_input}
+
+
+def _field_docs(goal: GoalBrief, fields: list[str]) -> dict[str, str]:
+    """用证据里的表单字段标签补字段描述(供前端/导出);无证据则空,manifest 回退字段名。"""
+    ev = goal.evidence or {}
+    labels = {f.get("key"): f.get("label") for f in (ev.get("form_fields") or [])}
+    return {k: labels[k] for k in fields if labels.get(k) and labels[k] != k}
 
 
 class WorkflowBpmnStrategy:
@@ -46,6 +58,8 @@ class WorkflowBpmnStrategy:
             },
             user_fields=_user_fields(goal.test_input),
             required_fields=_user_fields(goal.test_input),
+            field_docs=_field_docs(goal, _user_fields(goal.test_input)),
+            consts=_consts(goal.test_input),
             success_rule="response.code == null or response.code == 200",
             fact_check=FactCheckSpec(
                 endpoint="/flowable/monitor/listProcess?procInstId={procInsId}&pageNum=1&pageSize=5",
@@ -59,7 +73,8 @@ class WorkflowBpmnStrategy:
             "def run(inputs, creds):\n"
             "    base = inputs['__base_url__'].rstrip('/')\n"
             "    h = {'Authorization': 'Bearer ' + creds['token']}   # 凭证仅来自 creds,不得入码\n"
-            "    tid = inputs['templateId']; values = inputs['values']\n"
+            "    tid = inputs['__templateId__']   # 模板由发布时常量注入,非用户字段\n"
+            "    values = {k: v for k, v in inputs.items() if not (k.startswith('__') and k.endswith('__'))}\n"
             "    with httpx.Client(timeout=30, verify=False) as c:\n"
             "        # 1) 发起 → 拿 taskId/procInsId/executionId/deployId/procDefId\n"
             "        d = c.post(base + '/workflow/handle/startFlow', json={'templateId': tid}, headers=h).json()['data']\n"

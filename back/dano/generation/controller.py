@@ -19,10 +19,25 @@ log = structlog.get_logger(__name__)
 
 
 class GenerationLoop:
-    def __init__(self, coder: Coder, *, lifecycle=None, on_event=None) -> None:  # noqa: ANN001
+    def __init__(self, coder: Coder, *, planner=None, lifecycle=None, on_event=None,  # noqa: ANN001
+                 max_plan_attempts: int = 2) -> None:
         self.coder = coder
+        self.planner = planner                                # 给定则用 LLM 拆解 + 方案错时重拆(v2-M3)
+        self.max_plan_attempts = max_plan_attempts            # 重拆方案次数上限(有界,防不收敛)
         self.lifecycle = lifecycle                            # 给定则发布后登记到生命周期(已发布)
         self.on_event = on_event                              # 进度回调(dict);用于接入向导实时进度
+
+    async def _initial_plan(self, goal: GoalBrief, strategy):  # noqa: ANN001
+        """有 planner 走 LLM 拆解(失败安全回退确定性 decompose);否则用策略 decompose。"""
+        if self.planner is not None:
+            try:
+                return await self.planner.plan(goal, strategy)
+            except Exception as e:  # noqa: BLE001 - 方案不合规/LLM 失败 → 回退确定性策略,不崩
+                log.warning("generation.plan_fallback", flow=goal.flow, error=str(e))
+        plan = strategy.decompose(goal)
+        if not plan.evidence and goal.evidence:   # 兜底也带上已采集的证据,coder 才有 grounding(不致瞎写)
+            plan.evidence = dict(goal.evidence)
+        return plan
 
     def _emit(self, **ev) -> None:                            # noqa: ANN003
         if self.on_event is not None:
@@ -35,17 +50,30 @@ class GenerationLoop:
         from dano.agent_tools import materials, tools as T
 
         mat = materials.get(goal.run_id, goal.system_instance_id)
-        plan = strategy.decompose(goal)                       # 拆解 + 定方案
+        plan = await self._initial_plan(goal, strategy)        # 拆解 + 定方案(LLM 或确定性)
+        log.info("gen.start", flow=goal.flow, business=getattr(goal, "business", ""),
+                 strategy=plan.strategy, max_iters=goal.budget.max_iters,
+                 planner=bool(self.planner), endpoints=len((goal.evidence or {}).get("actions", [])),
+                 plan_steps=len(plan.steps or []), success_rule=plan.success_rule)
         feedback: list[str] = []
+        plan_attempts = 0
         iters: list[IterationRecord] = []
         result: GenerationResult | None = None
 
         for i in range(goal.budget.max_iters):
+            log.info("gen.iter", flow=goal.flow, iter=i, strategy=plan.strategy, fixing=bool(feedback))
+            self._emit(type="coding", flow=goal.flow, iter=i, strategy=plan.strategy,
+                       fixing=bool(feedback))
             body = await self.coder.generate(plan=plan, feedback=feedback)   # 编码 / 修复
+            if getattr(goal, "business", ""):                 # 展开模式:打业务标签,供导出归组成剧本 skill
+                body.setdefault("business", goal.business)
+            src = body.get("source", "") or ""
+            self._emit(type="coded", flow=goal.flow, iter=i,
+                       lines=src.count("\n") + 1 if src else 0)
             d = await T.draft_adapter(goal.run_id,
                                       {"system_instance_id": goal.system_instance_id, **body})
             did = d["asset_draft_id"]
-            ok, reasons, val_ids, review_ids = await self._gates(T, goal, did)
+            ok, reasons, val_ids, review_ids, kind = await self._gates(T, goal, did, i)
 
             if ok:
                 pub = await T.publish_asset(goal.run_id, {       # 发布闸门(不可伪造,回 PG 重读)
@@ -67,9 +95,21 @@ class GenerationLoop:
                 reasons = [pub.get("reason", "发布失败")]          # 闸门驳回也回灌
 
             iters.append(IterationRecord(index=i, passed=False, reasons=reasons, asset_draft_id=did))
-            feedback = reasons or ["未通过验收"]
-            log.info("generation.rejected", flow=goal.flow, iter=i, reasons=feedback)
-            self._emit(type="rejected", flow=goal.flow, iter=i, reasons=feedback)
+            # 双层回灌:方案被事实核查证伪(kind=plan)且有重拆预算 → 重拆方案;否则回灌重写代码
+            if kind == "plan" and self.planner is not None and plan_attempts < self.max_plan_attempts:
+                plan_attempts += 1
+                log.info("generation.replanned", flow=goal.flow, iter=i, attempt=plan_attempts)
+                self._emit(type="replanned", flow=goal.flow, iter=i, attempt=plan_attempts, reasons=reasons)
+                try:
+                    plan = await self.planner.replan(goal, strategy, plan, reasons)
+                    feedback = []                              # 新方案 → 代码反馈清零
+                except Exception as e:  # noqa: BLE001 - 重拆失败 → 退回重写代码
+                    log.warning("generation.replan_failed", flow=goal.flow, error=str(e))
+                    feedback = reasons or ["未通过验收"]
+            else:
+                feedback = reasons or ["未通过验收"]
+                log.info("generation.rejected", flow=goal.flow, iter=i, reasons=feedback)
+                self._emit(type="rejected", flow=goal.flow, iter=i, reasons=feedback)
 
         if result is None:
             log.warning("generation.exhausted", flow=goal.flow, iters=len(iters))
@@ -90,29 +130,52 @@ class GenerationLoop:
         await save_generation_run(result, run_id=goal.run_id, tenant=mat.tenant,
                                   subsystem=mat.subsystem, strategy=getattr(strategy, "name", None))
 
-    @staticmethod
-    async def _gates(T, goal: GoalBrief, did: str) -> tuple[bool, list[str], list[str], list[str]]:  # noqa: ANN001
+    async def _gates(self, T, goal: GoalBrief, did: str, i: int = 0) -> tuple[bool, list[str], list[str], list[str], str]:  # noqa: ANN001
         """顺序过闸:测试 → 漏洞校验 → 审核。任一失败即短路返回 reasons(不再往下)。
 
-        返回 (是否全过, 驳回原因, 已通过的 validation_run_ids, review_run_ids)。
+        返回 (是否全过, 驳回原因, validation_run_ids, review_run_ids, 失败类型)。
+        失败类型 kind:`plan`=代码能跑但**事实核查证伪**(疑似空操作→拆解/契约错,该重拆方案);
+        其余=`code`(运行异常/成败规则/漏洞/评审/发布→重写代码即可)。
         """
-        # ① 测试(隔离 runner + 成败规则)
+        # ① 测试(隔离 runner + 成败规则 + 事实核查)
+        self._emit(type="testing", flow=goal.flow, iter=i)
         test = await T.sandbox_test_adapter(
             goal.run_id, {"asset_draft_id": did, "test_input": goal.test_input})
         if not test["passed"]:
-            return False, test.get("reasons") or ["未通过沙箱测试"], [], []
+            reasons = test.get("reasons") or ["未通过沙箱测试"]
+            kind = "plan" if any("事实核查未过" in r for r in reasons) else "code"
+            log.warning("gen.gate.sandbox", flow=goal.flow, iter=i, passed=False, kind=kind,
+                        reasons=reasons, output=str(test.get("output"))[:300])
+            self._emit(type="gate", flow=goal.flow, iter=i, gate="沙箱真跑",
+                       passed=False, detail="; ".join(reasons))
+            return False, reasons, [], [], kind
+        log.info("gen.gate.sandbox", flow=goal.flow, iter=i, passed=True)
+        self._emit(type="gate", flow=goal.flow, iter=i, gate="沙箱真跑", passed=True)
         val_ids = list(test["validation_run_ids"])
 
         # ② 漏洞校验(静态扫描)
         vuln = await T.vuln_scan(goal.run_id, {"asset_draft_id": did})
         val_ids += vuln["validation_run_ids"]
         if not vuln["passed"]:
-            return False, [f"漏洞校验未过: {x}" for x in vuln["findings"]], val_ids, []
+            log.warning("gen.gate.vuln", flow=goal.flow, iter=i, passed=False, findings=vuln["findings"])
+            self._emit(type="gate", flow=goal.flow, iter=i, gate="漏洞校验",
+                       passed=False, detail="; ".join(vuln["findings"]))
+            return False, [f"漏洞校验未过: {x}" for x in vuln["findings"]], val_ids, [], "code"
+        log.info("gen.gate.vuln", flow=goal.flow, iter=i, passed=True)
+        self._emit(type="gate", flow=goal.flow, iter=i, gate="漏洞校验", passed=True)
 
         # ③ 审核(三模型:成果验收 / 漏洞检测 / 合规审核)
+        self._emit(type="reviewing", flow=goal.flow, iter=i)
         rev = await T.request_review(goal.run_id, {"asset_draft_id": did})
+        for v in rev.get("verdicts", []):
+            (log.info if v["passed"] else log.warning)(
+                "gen.gate.review", flow=goal.flow, iter=i, role=v["role"], model=v["model"],
+                passed=v["passed"], reasons=v.get("reasons") or [])
+            self._emit(type="verdict", flow=goal.flow, iter=i, role=v["role"], model=v["model"],
+                       passed=v["passed"], detail="" if v["passed"] else "; ".join(v.get("reasons") or []))
         if not rev["all_passed"]:
             bad = [f"{v['role']}({v['model']})驳回: {v['reasons']}"
                    for v in rev.get("verdicts", []) if not v["passed"]]
-            return False, bad or ["三模型评审未通过"], val_ids, rev.get("review_run_ids", [])
-        return True, [], val_ids, rev["review_run_ids"]
+            return False, bad or ["三模型评审未通过"], val_ids, rev.get("review_run_ids", []), "code"
+        log.info("gen.gate.review", flow=goal.flow, iter=i, passed=True, all_passed=True)
+        return True, [], val_ids, rev["review_run_ids"], "code"

@@ -218,7 +218,8 @@ class Orchestrator:
         base_url = ((ep.body.get("base_url") if ep else "") or "")
         resolved = self.resolve({"token": f"vault://{tenant}/{system_key_for(skill.subsystem)}"})
         creds = {"token": resolved.get("token") or next(iter(resolved.values()), "")}
-        inputs = {**intent.fields, "__base_url__": base_url}
+        # 注入运行期内部量:base_url + 发布时常量(如 __templateId__);用户只传业务字段
+        inputs = {**intent.fields, "__base_url__": base_url, **(skill.adapter_consts or {})}
 
         res = await AdapterRunner().run(source=skill.adapter_source, inputs=inputs,
                                         credentials=creds, entry=skill.adapter_entry)

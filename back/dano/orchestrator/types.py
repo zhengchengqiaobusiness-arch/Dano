@@ -42,6 +42,8 @@ class SkillSpec(BaseModel):
     workflow_steps: list[dict] = Field(default_factory=list)    # WorkflowStep 字典
     workflow_success_rule: str | None = None
 
+    business: str = ""                                          # 所属业务(同业务多操作 adapter 导出归组)
+
     # 代码适配器(goal 模式生成):调用时由隔离 runner 执行 source
     is_adapter: bool = False
     adapter_asset_id: UUID | None = None
@@ -49,6 +51,7 @@ class SkillSpec(BaseModel):
     adapter_entry: str = "run"
     adapter_success_rule: str | None = None
     adapter_fact_check: dict | None = None
+    adapter_consts: dict = Field(default_factory=dict)   # 运行期注入的内部常量(如 __templateId__)
 
 
 class TaskOutcome(BaseModel):

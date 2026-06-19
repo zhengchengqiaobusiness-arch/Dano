@@ -15,8 +15,7 @@ from typing import Any
 
 import structlog
 
-from dano.shared.asset_bodies import WorkflowSkillBody, WorkflowStep
-from dano.shared.enums import RiskLevel
+from dano.shared.asset_bodies import WorkflowSkillBody
 
 log = structlog.get_logger(__name__)
 
@@ -68,70 +67,13 @@ class RuoYiFlowableTemplate(OATemplate):
         return ("captcha", "getinfo", "getrouters", "logout")
 
     def workflows(self) -> list[WorkflowSkillBody]:
-        """请假复合流程(已验证真实契约,见 dano.capabilities.ruoyi_leave)。
+        """本框架的业务复合配方,**按业务区分开**定义在 dano.capabilities.business/(请假/出差/…)。
 
-        真实契约是逆向前端 + 对真实系统实测确认的(swagger 只声明形状、不给取值),共 3 步:
-          1) start_leave_flow  POST /workflow/handle/startFlow {templateId}
-                → taskId/procInsId/executionId/deployId/procDefId(停在 apply 节点)
-          2) save_leave_form   POST /biz/form/save(取 /biz/form/info 的动态表单结构,
-                填值后以双层 {formData:结构, valData:值} 存档)→ businessId
-                ※ 不能省:直接 submit 而不先 save,接口会回『操作成功』但什么都不做(空操作)。
-          3) submit_flow_task  POST /biz/flow/submit {operateType:"200", flowTask:{..businessId}}
-
-        成败不看接口的『操作成功』(RuoYi 对任何输入都回 200),而以**事实核查(流程9)**为准:
-          GET /workflow/handle/flowXmlAndNode → apply.completed=True 才算真的提交。
-        因表单存档需动态结构 + 双层编码,执行/核查由 RuoYiLeaveDriver 承担(非通用扁平绑定)。
+        共享 RuoYi 3 步契约(发起→存表单→提交;成败以事实核查为准,不信字面 200),
+        各业务只在字段/模板/风险上区分。新增业务在 business 包加一个模块即可。
         """
-        return [
-            WorkflowSkillBody(
-                action="submit_leave",
-                title="提交请假申请",
-                user_fields=["title", "leaveType", "leaveDays", "reason"],
-                field_docs={
-                    "title": "申请标题,如「张三的年假申请」",
-                    "leaveType": "请假类型(annual年假/personal事假/sick病假/comp调休)",
-                    "leaveDays": "请假天数",
-                    "reason": "请假事由",
-                },
-                required_fields=["title", "leaveType", "leaveDays", "reason"],
-                risk_level=RiskLevel.L3,
-                success_rule=self.success_rule(),
-                steps=[
-                    WorkflowStep(
-                        action="start_leave_flow",
-                        inputs={"templateId": "const:leave_template"},
-                    ),
-                    WorkflowStep(
-                        action="save_leave_form",
-                        inputs={
-                            "templateId": "const:leave_template",
-                            "taskId": "step:start_leave_flow.data.taskId",
-                            "procInstId": "step:start_leave_flow.data.procInsId",
-                            "title": "field:title",
-                            "valData.title": "field:title",
-                            "valData.leaveType": "field:leaveType",
-                            "valData.leaveDays": "field:leaveDays",
-                            "valData.reason": "field:reason",
-                        },
-                    ),
-                    WorkflowStep(
-                        action="submit_flow_task",
-                        inputs={
-                            "operateType": "const:200",
-                            "flowTask.taskId": "step:start_leave_flow.data.taskId",
-                            "flowTask.procInsId": "step:start_leave_flow.data.procInsId",
-                            "flowTask.executionId": "step:start_leave_flow.data.executionId",
-                            "flowTask.deployId": "step:start_leave_flow.data.deployId",
-                            "flowTask.defId": "step:start_leave_flow.data.procDefId",
-                            "flowTask.taskDefKey": "const:apply",
-                            "flowTask.businessId": "step:save_leave_form.data",
-                            "flowTask.templateId": "const:leave_template",
-                            "flowTask.title": "field:title",
-                        },
-                    ),
-                ],
-            )
-        ]
+        from dano.capabilities.business import recipes
+        return recipes()
 
 
 # 注册表(靠前优先)。新增框架插到最前。
