@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import type {
+    BridgeQuickActionConfig,
     RpcGitRepoState,
     RpcImageContent,
     RpcSlashCommand,
@@ -49,6 +50,7 @@
     gitRepoLoading = false,
     gitBranchSwitching = false,
     gitActionsDisabled = false,
+    quickActions = [] as readonly BridgeQuickActionConfig[],
     refreshGitRepoState = (_?: boolean) => Promise.resolve(null as RpcGitRepoState | null),
     switchGitBranch = (_: string) => Promise.resolve(null as RpcGitRepoState | null),
     createGitBranch = (_: string) => Promise.resolve(null as RpcGitRepoState | null),
@@ -161,6 +163,12 @@
       composer.handleAbortAction();
       return;
     }
+    composer.handleSubmit(false, fileInputRef, textareaRef);
+  }
+
+  function handleQuickAction(prompt: string) {
+    if (composer.isDisabled) return;
+    inputText = prompt;
     composer.handleSubmit(false, fileInputRef, textareaRef);
   }
 
@@ -454,6 +462,21 @@
         </div>
       </div>
     </div>
+
+    {#if quickActions.length > 0}
+      <div class="quick-actions" aria-label="常用 OA 功能">
+        {#each quickActions as action (action.label)}
+          <button
+            type="button"
+            class="quick-action-button"
+            disabled={composer.isDisabled}
+            onclick={() => handleQuickAction(action.prompt)}
+          >
+            {action.label}
+          </button>
+        {/each}
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -478,6 +501,46 @@
     position: relative;
     width: min(960px, 100%);
     margin: 0 auto;
+  }
+
+  .quick-actions {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 14px;
+  }
+
+  .quick-action-button {
+    min-height: 40px;
+    padding: 8px 20px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--panel) 90%, transparent);
+    color: var(--text-muted);
+    font: inherit;
+    cursor: pointer;
+    transition:
+      border-color 0.15s ease,
+      color 0.15s ease,
+      background 0.15s ease;
+  }
+
+  .quick-action-button:hover:not(:disabled),
+  .quick-action-button:focus-visible {
+    border-color: var(--border-strong);
+    background: var(--panel);
+    color: var(--text);
+  }
+
+  .quick-action-button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .quick-action-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
   }
 
   .composer-dock {

@@ -534,6 +534,7 @@ function injectRuntimeConfig(html: string, config: BridgeConfig): string {
     debugModeAvailable: runtimeDebugModeEnabled(),
     productName: config.productName,
     emptyState: config.emptyState,
+    quickActions: config.quickActions,
   };
   const configScript = `<script>window.__PI_WEB_CONFIG__=${serializeRuntimeConfig(runtimeConfig)};</script>`;
   return html.includes("</head>")

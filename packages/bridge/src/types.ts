@@ -798,6 +798,11 @@ export interface BridgeEmptyStateConfig {
   readonly content: string;
 }
 
+export interface BridgeQuickActionConfig {
+  readonly label: string;
+  readonly prompt: string;
+}
+
 export interface BridgeConfig {
   /** Host to bind the HTTP/SSE server to. Default: "localhost" */
   readonly host: string;
@@ -813,6 +818,8 @@ export interface BridgeConfig {
   readonly productName: string;
   /** Empty transcript content shown before the first message. */
   readonly emptyState: BridgeEmptyStateConfig;
+  /** Prompt shortcuts shown below the composer before the first message. */
+  readonly quickActions: readonly BridgeQuickActionConfig[];
   /** Timeout in ms for extension UI dialog requests routed to browser clients. Default: 60_000 */
   readonly uiRequestTimeout: number;
   /** Maximum number of SSE messages to buffer per client before dropping oldest. Default: 256 */
@@ -832,6 +839,7 @@ export const DEFAULT_BRIDGE_CONFIG: BridgeConfig = {
     mode: "text",
     content: "给 {产品名称} 发消息",
   },
+  quickActions: [],
   uiRequestTimeout: 60_000,
   clientBufferSize: 256,
   heartbeatInterval: 15_000,

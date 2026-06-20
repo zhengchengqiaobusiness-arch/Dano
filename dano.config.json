@@ -2,5 +2,19 @@
   "defaultProvider": "xiaomi-token-plan-cn",
   "defaultModel": "mimo-v2.5",
   "defaultThinkingLevel": "medium",
-  "defaultProjectTrust": "always"
+  "defaultProjectTrust": "always",
+  "quickActions": [
+    {
+      "label": "请假",
+      "prompt": "我想申请请假，请引导我补充请假类型、开始和结束时间、请假原因，并帮我整理成可提交的请假申请。"
+    },
+    {
+      "label": "报销",
+      "prompt": "我想申请费用报销，请引导我补充费用类型、发生时间、金额和事由，并帮我整理成可提交的报销申请。"
+    },
+    {
+      "label": "出差申请",
+      "prompt": "我想提交出差申请，请引导我补充出差时间、目的地、出差事由和行程安排，并帮我整理成可提交的出差申请。"
+    }
+  ]
 }

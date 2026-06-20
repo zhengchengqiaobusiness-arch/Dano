@@ -15,6 +15,11 @@ describe("Dano config", () => {
         defaultModel: "mimo-v2.5",
         defaultThinkingLevel: "medium",
         defaultProjectTrust: "always",
+        quickActions: [
+          { label: " 请假 ", prompt: " 帮我申请请假 " },
+          { label: "", prompt: "ignored" },
+          { label: "ignored", prompt: " " },
+        ],
       }),
     );
 
@@ -28,6 +33,7 @@ describe("Dano config", () => {
       defaultModel: "mimo-v2.5",
       defaultThinkingLevel: "medium",
       defaultProjectTrust: "always",
+      quickActions: [{ label: "请假", prompt: "帮我申请请假" }],
     });
 
     fs.rmSync(tmpDir, { recursive: true, force: true });

@@ -2,6 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DetachedSessionRegistry } from "../session-registry.js";
+import { loadDanoConfig } from "../dano-config.js";
 import type { BridgeConfig, BridgeEmptyStateConfig } from "../types.js";
 import { createStandaloneBridgeContext } from "./backend.js";
 import type { StandaloneBridgeBackend } from "./backend.js";
@@ -385,6 +386,7 @@ async function runStandaloneMain(): Promise<number> {
   }
 
   const thisFile = fileURLToPath(import.meta.url);
+  const danoConfig = loadDanoConfig({ cwd: options.cwd });
   const defaultWorkspacePath = ensureDefaultWorkspace(options.defaultWorkspacePath);
   initializeStandaloneWorkspaceSettings(defaultWorkspacePath, options.cwd);
   mkdirSync(options.sessionsRootPath, { recursive: true });
@@ -397,6 +399,7 @@ async function runStandaloneMain(): Promise<number> {
   const backend = await createStandaloneBridgeContext({
     cwd: defaultWorkspacePath,
     sessionDir: defaultSessionDir,
+    danoConfig,
   });
   const sessionRegistry = new DetachedSessionRegistry(
     backend.context.state.cwd,
@@ -412,6 +415,7 @@ async function runStandaloneMain(): Promise<number> {
         defaultWorkspacePath,
         productName: options.productName,
         emptyState: options.emptyState,
+        quickActions: danoConfig.quickActions ?? [],
         staticDir: options.staticDir,
       };
 

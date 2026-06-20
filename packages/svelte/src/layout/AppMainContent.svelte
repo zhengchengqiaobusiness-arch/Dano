@@ -16,6 +16,7 @@
   import { t } from "../i18n";
   import { isDebugSessionPath } from "../utils/debugSession";
   import type { RpcModelInfo } from "../utils/models";
+  import { getRuntimeQuickActions } from "../utils/runtimeConfig";
   import type { PendingTranscriptSessionEvent } from "../utils/transcript";
 
   let transcriptRef: ChatTranscript | null = $state(null);
@@ -161,13 +162,17 @@
   } = $props();
 
   let isDebugSession = $derived(isDebugSessionPath(activeSessionPath));
+  let isEmptyConversation = $derived(
+    !transcriptInitialLoading && transcript.length === 0,
+  );
+  const quickActions = getRuntimeQuickActions();
 
   export function scrollToTranscriptEntry(entryId: string): boolean {
     return transcriptRef?.scrollToTranscriptEntry(entryId) ?? false;
   }
 </script>
 
-<main class="center-column">
+<main class="center-column" class:empty-conversation={isEmptyConversation}>
   <CompatWarning visible={compatWarningVisible} />
 
   <ChatTranscript
@@ -260,6 +265,7 @@
     {refreshGitRepoState}
     {switchGitBranch}
     {createGitBranch}
+    quickActions={isEmptyConversation ? quickActions : []}
   />
 </main>
 
@@ -273,6 +279,20 @@
     overflow: hidden;
     border-bottom-left-radius: 14px;
     background: var(--bg);
+  }
+
+  .center-column.empty-conversation {
+    justify-content: center;
+  }
+
+  .empty-conversation :global(.chat-transcript) {
+    flex: 0 0 auto;
+    overflow: visible;
+    padding-bottom: 18px;
+  }
+
+  .empty-conversation :global(.chat-transcript .empty-state) {
+    flex: 0 0 auto;
   }
 
   .queued-messages-strip {

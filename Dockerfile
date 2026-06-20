@@ -32,6 +32,7 @@ COPY --from=build /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/web-dist ./web-dist
+COPY --from=build /app/dano.config.json ./dano.config.json
 COPY deploy/runtime-defaults ./deploy/runtime-defaults
 COPY deploy/docker-entrypoint.sh ./deploy/docker-entrypoint.sh
 RUN chmod +x ./deploy/docker-entrypoint.sh

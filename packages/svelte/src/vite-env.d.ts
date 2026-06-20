@@ -13,6 +13,10 @@ declare global {
         mode?: "text" | "html";
         content?: string;
       };
+      quickActions?: Array<{
+        label?: string;
+        prompt?: string;
+      }>;
     };
   }
 }

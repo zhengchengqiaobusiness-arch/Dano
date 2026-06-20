@@ -3,6 +3,7 @@ import {
   getRuntimeEmptyStateConfig,
   getRuntimeLocale,
   getRuntimeProductName,
+  getRuntimeQuickActions,
 } from "./runtimeConfig";
 
 function stubRuntimeConfig(config: NonNullable<Window["__PI_WEB_CONFIG__"]>) {
@@ -72,5 +73,25 @@ describe("runtimeConfig", () => {
     });
 
     expect(getRuntimeEmptyStateConfig().content).toBe("Message Dano Pro");
+  });
+
+  it("returns configured quick actions and removes invalid entries", () => {
+    stubRuntimeConfig({
+      quickActions: [
+        { label: " 请假 ", prompt: " 帮我申请请假 " },
+        { label: "", prompt: "ignored" },
+        { label: "ignored", prompt: " " },
+      ],
+    });
+
+    expect(getRuntimeQuickActions()).toEqual([
+      { label: "请假", prompt: "帮我申请请假" },
+    ]);
+  });
+
+  it("uses no quick actions when runtime config is absent", () => {
+    vi.stubGlobal("window", {});
+
+    expect(getRuntimeQuickActions()).toEqual([]);
   });
 });

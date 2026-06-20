@@ -1,3 +1,4 @@
+import type { BridgeQuickActionConfig } from "@dano/bridge/types";
 import { normalizeLocale, type Locale } from "../i18n/locales";
 import { translate } from "../i18n/translate";
 
@@ -51,4 +52,15 @@ export function getRuntimeEmptyStateConfig(): EmptyStateConfig {
     mode,
     content: interpolateProductName(rawContent, productName),
   };
+}
+
+export function getRuntimeQuickActions(): BridgeQuickActionConfig[] {
+  const configured = runtimeConfig()?.quickActions;
+  if (!Array.isArray(configured)) return [];
+
+  return configured.flatMap(action => {
+    const label = action?.label?.trim();
+    const prompt = action?.prompt?.trim();
+    return label && prompt ? [{ label, prompt }] : [];
+  });
 }

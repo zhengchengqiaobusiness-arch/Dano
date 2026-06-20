@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { RpcThinkingLevel } from "./types.js";
+import type { BridgeQuickActionConfig, RpcThinkingLevel } from "./types.js";
 
 const DANO_CONFIG_FILE_NAME = "dano.config.json";
 
@@ -10,6 +10,7 @@ export interface DanoConfig {
   defaultModel?: string;
   defaultThinkingLevel?: RpcThinkingLevel;
   defaultProjectTrust?: "always" | string;
+  quickActions?: BridgeQuickActionConfig[];
 }
 
 export const DANO_DEFAULT_CONFIG = {
@@ -17,6 +18,7 @@ export const DANO_DEFAULT_CONFIG = {
   defaultModel: "mimo-v2.5",
   defaultThinkingLevel: "medium",
   defaultProjectTrust: "always",
+  quickActions: [],
 } satisfies Required<DanoConfig>;
 
 export interface LoadDanoConfigOptions {
@@ -40,6 +42,20 @@ function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function readQuickActions(value: unknown): BridgeQuickActionConfig[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+
+  const actions = value.flatMap(item => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const record = item as Record<string, unknown>;
+    const label = readString(record.label);
+    const prompt = readString(record.prompt);
+    return label && prompt ? [{ label, prompt }] : [];
+  });
+
+  return actions.length > 0 ? actions : undefined;
+}
+
 function normalizeDanoConfig(raw: unknown): DanoConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return {};
@@ -52,12 +68,14 @@ function normalizeDanoConfig(raw: unknown): DanoConfig {
   const defaultThinkingLevel = isThinkingLevel(record.defaultThinkingLevel)
     ? record.defaultThinkingLevel
     : undefined;
+  const quickActions = readQuickActions(record.quickActions);
 
   return {
     ...(defaultProvider ? { defaultProvider } : {}),
     ...(defaultModel ? { defaultModel } : {}),
     ...(defaultThinkingLevel ? { defaultThinkingLevel } : {}),
     ...(defaultProjectTrust ? { defaultProjectTrust } : {}),
+    ...(quickActions ? { quickActions } : {}),
   };
 }
 
