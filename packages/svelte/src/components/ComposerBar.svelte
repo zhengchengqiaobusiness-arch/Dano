@@ -223,12 +223,52 @@
       (Number.isFinite(lineHeight) ? lineHeight : el.clientHeight) +
       paddingTop +
       paddingBottom;
+    let measuredScrollHeight = el.scrollHeight;
+
+    if (isComposerMultiline && composerDockRef && !el.value.includes("\n")) {
+      const dockStyle = getComputedStyle(composerDockRef);
+      const leftActions = composerDockRef.querySelector<HTMLElement>(
+        ".composer-actions-left",
+      );
+      const rightActions = composerDockRef.querySelector<HTMLElement>(
+        ".composer-actions-right",
+      );
+      const gap =
+        Number.parseFloat(
+          dockStyle.getPropertyValue("--composer-single-line-gap"),
+        ) || 0;
+      const singleLineWidth =
+        composerDockRef.clientWidth -
+        (Number.parseFloat(dockStyle.paddingLeft) || 0) -
+        (Number.parseFloat(dockStyle.paddingRight) || 0) -
+        (leftActions?.offsetWidth ?? 0) -
+        (rightActions?.offsetWidth ?? 0) -
+        gap * 2;
+      const measurement = el.cloneNode() as HTMLTextAreaElement;
+
+      measurement.value = el.value;
+      measurement.style.position = "fixed";
+      measurement.style.inset = "0 auto auto -9999px";
+      measurement.style.visibility = "hidden";
+      measurement.style.width = `${Math.max(0, singleLineWidth)}px`;
+      measurement.style.height = "auto";
+      measurement.style.font = computedStyle.font;
+      measurement.style.lineHeight = computedStyle.lineHeight;
+      document.body.append(measurement);
+      measuredScrollHeight = measurement.scrollHeight;
+      measurement.remove();
+    }
+
     const nextIsMultiline =
       el.value.includes("\n") ||
-      el.scrollHeight > Math.ceil(singleLineHeight * 1.5);
+      measuredScrollHeight > Math.ceil(singleLineHeight * 1.5);
     isComposerMultiline = nextIsMultiline;
 
     if (nextIsMultiline !== wasMultiline) {
+      if (!nextIsMultiline) {
+        el.style.height = `${Math.ceil(singleLineHeight)}px`;
+        el.style.overflowY = "hidden";
+      }
       animateComposerLayout(layoutBefore);
     }
   }
@@ -444,9 +484,10 @@
     --composer-control-size: 36px;
     --composer-input-line-height: var(--composer-control-size);
     --composer-max-visible-lines: 5;
+    --composer-single-line-gap: 10px;
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: var(--composer-single-line-gap);
     padding: 12px 18px;
     border-radius: 30px;
     border: 1px solid var(--border);
@@ -712,6 +753,7 @@
   }
 
   .composer-dock.multiline .prompt-input {
+    min-height: calc(var(--composer-input-line-height) * 2);
     padding: 0;
   }
 
