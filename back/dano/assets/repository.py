@@ -129,7 +129,7 @@ class AssetRepository:
                 SELECT * FROM assets
                 WHERE asset_type = $1 AND tenant = $2 AND subsystem = $3 AND asset_key = $4
                   AND validation_status = 'published'
-                ORDER BY version DESC
+                ORDER BY version DESC, created_at DESC
                 LIMIT 1
                 """,
                 asset_type.value,
@@ -154,7 +154,7 @@ class AssetRepository:
                 FROM assets
                 WHERE asset_type = $1 AND tenant = $2 AND subsystem = $3
                   AND validation_status = 'published'
-                ORDER BY asset_key, version DESC
+                ORDER BY asset_key, version DESC, created_at DESC
                 """,
                 asset_type.value,
                 scope.tenant,

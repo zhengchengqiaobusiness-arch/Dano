@@ -51,6 +51,21 @@ class GenerationLoop:
 
         mat = materials.get(goal.run_id, goal.system_instance_id)
         plan = await self._initial_plan(goal, strategy)        # 拆解 + 定方案(LLM 或确定性)
+        ov = getattr(goal, "plan_overrides", None)
+        if ov:                                                 # 契约合成:grounded 覆盖 LLM 猜测(成败判定 + 字段映射)
+            from dano.shared.asset_bodies import FactCheckSpec
+            if "success_rule" in ov:
+                plan.success_rule = ov["success_rule"]
+            if "fact_check" in ov:
+                plan.fact_check = FactCheckSpec.model_validate(ov["fact_check"]) if ov["fact_check"] else None
+            if ov.get("user_fields"):
+                plan.user_fields = list(ov["user_fields"])
+            if ov.get("required_fields"):
+                plan.required_fields = list(ov["required_fields"])
+            if ov.get("field_docs"):
+                plan.field_docs = dict(ov["field_docs"])
+            log.info("gen.contract_override", flow=goal.flow, success_rule=plan.success_rule,
+                     fact_check=bool(plan.fact_check), user_fields=plan.user_fields)
         log.info("gen.start", flow=goal.flow, business=getattr(goal, "business", ""),
                  strategy=plan.strategy, max_iters=goal.budget.max_iters,
                  planner=bool(self.planner), endpoints=len((goal.evidence or {}).get("actions", [])),
@@ -65,8 +80,19 @@ class GenerationLoop:
             self._emit(type="coding", flow=goal.flow, iter=i, strategy=plan.strategy,
                        fixing=bool(feedback))
             body = await self.coder.generate(plan=plan, feedback=feedback)   # 编码 / 修复
+            if body.get("_no_source"):       # 模型没返回内容(API Key 失效/限流/模型名错):重写无用,立刻停,报真因
+                reason = ("模型未返回内容:可能 API Key 失效 / 触发限流 / 模型名错——"
+                          "请到「运行配置」检查 Key 与模型名(已停止重试,避免空烧预算)")
+                log.warning("gen.coder_unavailable", flow=goal.flow, iter=i)
+                self._emit(type="rejected", flow=goal.flow, iter=i, reasons=[reason])
+                iters.append(IterationRecord(index=i, passed=False, reasons=[reason]))
+                result = GenerationResult(ok=False, flow=goal.flow, asset_id=None,
+                                          iterations=iters, reason=reason)
+                break
             if getattr(goal, "business", ""):                 # 展开模式:打业务标签,供导出归组成剧本 skill
                 body.setdefault("business", goal.business)
+            if getattr(goal, "title", "") and not body.get("title"):   # 中文标题,供目录/剧本展示
+                body["title"] = goal.title
             # 风险等级随真实方法:全 GET 只读 → L1(否则三模型会以"GET 只读应 L1"反复驳回,读操作永远上不了架)
             if goal.actions and all((a.get("method") or "GET").upper() == "GET" for a in goal.actions):
                 body["risk_level"] = "L1"

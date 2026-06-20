@@ -6,6 +6,7 @@ export interface SkillManifest {
   subsystem: string;
   action: string;
   title: string;
+  business?: string;       // 所属业务(同业务多操作 → 目录里归为一组)
   description: string;
   integration: string;     // adapter / workflow / api / page
   risk_level: string;      // L1..L5

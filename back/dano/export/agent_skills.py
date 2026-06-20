@@ -357,63 +357,17 @@ def _biz_label(business: str, manifests: list[SkillManifest]) -> str:
     return s.replace("_", " ").strip() or business
 
 
-def _playbook_md(subsystem: str, business: str, manifests: list[SkillManifest], slug: str) -> str:
-    """一本业务剧本:操作清单 + 推荐流程(查→办→查状态)+ 输出契约 + 故障排除。"""
-    writes = [m for m in manifests if m.requires_confirmation]
-    reads = [m for m in manifests if not m.requires_confirmation]
-    headline = _biz_label(business, manifests)
-    ordered = reads + writes                                  # 清单按 读→写 排,呼应推荐流程
-    rows = "\n".join(
-        f"| `{m.action}` | `scripts/{m.action}.sh` | {'写·需确认' if m.requires_confirmation else '读'} "
-        f"| {m.title} | {_flags(m) or '(无)'} |" for m in ordered)
-    table = "| 操作 | 脚本 | 类型 | 说明 | 参数 |\n|---|---|---|---|---|\n" + rows
-    desc = (f"办理与查询「{headline}」的完整业务操作集(共 {len(manifests)} 个操作:办理 + 查询/确认)。"
-            f"当用户要办理「{headline}」或查询其在途/待办/状态时,**务必使用本 skill**,即使没说出 skill 名或接口名。")
-    return f"""---
-name: {slug}
-description: {desc}
-compatibility: 需 python3 + 能访问 Dano 网关;每个操作经 Dano 执行真实动作(写操作经确认 + 事实核查)
-metadata:
-  source: dano:{subsystem} business:{business}
-  operations: {len(manifests)}
----
+_DIAGNOSE_SH = """#!/usr/bin/env bash
+# 由 Dano 自动生成:剧本自检(能不能走这条路)。转发到某操作脚本的 --diagnose。
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if command -v python3 >/dev/null 2>&1; then PY=python3; else PY=python; fi
+exec "$PY" "$DIR/__ENTRY__.py" --diagnose
+"""
 
-# {headline} · 业务操作集
-
-这是 Dano **一个业务的多操作剧本**:把「{headline}」相关的办理与查询动作合成一本 skill。
-真正的执行(适配器→目标系统 + 三模型闸门 + 事实核查)都在 Dano 侧;本端只收集参数、按需调用对应操作脚本。
-
-## 操作清单
-{table}
-
-> 每个操作:`bash scripts/<操作>.sh <逐字段 flags>`(写操作加 `--confirm`);自检 `bash scripts/<操作>.sh --diagnose`。
-> `__base_url__`、流程模板、申请人身份(登录凭证)、调用凭证等由 Dano 运行期注入,**不需要也不应**由你提供。
-
-## 推荐流程(像人一样办这件事,而不是只调一个接口)
-1. **办理前核对**(读操作):先用查询类操作(查在途/待办/历史)确认前提、**避免重复办理**。
-2. **办理**(写操作,需确认):先向用户**复述将提交的内容并取得同意**,再带 `--confirm` 调对应办理脚本。
-3. **办理后确认**(读操作):用查状态类操作回查,确认**真生效**(看返回单号/procInsId/状态);**不要因为接口回 200 就报成功**。
-
-> 本业务没有的操作类型(如无"查额度"接口)就跳过那一步,**不要臆造**不存在的操作。
-
-## 输出契约(每个脚本末行 JSON)
-| status | 含义 | 你应做的 |
-|---|---|---|
-| `succeeded` | 真实执行且(写操作)事实核查通过 | 告知结果,附 `output` 里的单号 / procInsId / 列表 |
-| `need_confirm` | 写操作未确认被拦 | 向用户确认后,**带 `--confirm` 重跑** |
-| `failed` | 失败(见 `reason`) | 把 reason 告知用户,**勿谎报成功** |
-
-## 故障排除
-| 现象 | 处理 |
-|---|---|
-| `DANO_URL/DANO_TENANT_KEY 未设置` | 让部署方配好这两个环境变量(勿写进文件) |
-| `HTTP 401` / 凭证无效 | Dano「运行配置」里该租户 OA token 失效,重配 |
-| `缺必填: …` | 补齐该操作"参数"列的必填项再调 |
-| `事实核查未过` | Dano 判定没真生效(疑似空操作),把原始返回给用户,**勿报成功** |
-
-## 运行前置(环境变量,部署方配置,勿写进文件)
-- `DANO_URL`:Dano 网关地址,如 `http://localhost:8077`
-- `DANO_TENANT_KEY`:本租户 api_key(作 `X-Tenant-Key`)
+_DIAGNOSE_PS1 = """# 由 Dano 自动生成:剧本自检。转发到某操作脚本的 --diagnose。
+$dir = Split-Path -Parent $MyInvocation.MyCommand.Path
+python "$dir/__ENTRY__.py" --diagnose
 """
 
 
@@ -454,15 +408,29 @@ def _biz_readme(subsystem: str, business: str, manifests: list[SkillManifest]) -
 
 
 def _write_business_skill(out_dir: Path, subsystem: str, business: str,
-                          manifests: list[SkillManifest]) -> Path:
-    """同业务多 adapter → 一本剧本 skill(多操作脚本 + 剧本 SKILL.md)。"""
+                          manifests: list[SkillManifest], *, md_text: str | None = None) -> Path:
+    """同业务多 adapter → 一本剧本 skill(多操作脚本 + 六段式剧本 SKILL.md)。
+
+    md_text 给定则用它(LLM 动态撰写的);否则用 PlaybookSpec 确定性渲染(grounded 兜底)。
+    """
+    from dano.generation.playbook import build_playbook
+    from dano.generation.playbook_writer import render_playbook_md
     slug = _slug(f"{subsystem}.{business}")
     folder = out_dir / slug
     (folder / "scripts").mkdir(parents=True, exist_ok=True)
     (folder / "references").mkdir(parents=True, exist_ok=True)
-    (folder / "SKILL.md").write_text(_playbook_md(subsystem, business, manifests, slug), encoding="utf-8")
+    if md_text is None:
+        spec = build_playbook(subsystem, business, manifests)
+        md_text = render_playbook_md(spec, slug)
+    (folder / "SKILL.md").write_text(md_text, encoding="utf-8")
     (folder / "references" / "QUICKREF.md").write_text(_biz_quickref(business, manifests), encoding="utf-8")
     (folder / "references" / "README.md").write_text(_biz_readme(subsystem, business, manifests), encoding="utf-8")
+    entry = (manifests[0].action if manifests else "diagnose")   # 自检入口:转发任一操作的 --diagnose
+    (folder / "scripts" / "diagnose.sh").write_text(
+        _DIAGNOSE_SH.replace("__ENTRY__", entry), encoding="utf-8", newline="\n")
+    _chmod_x(folder / "scripts" / "diagnose.sh")
+    (folder / "scripts" / "diagnose.ps1").write_text(
+        _DIAGNOSE_PS1.replace("__ENTRY__", entry), encoding="utf-8")
     for m in manifests:                                       # 每操作一个脚本入口(像 lanxin)
         py = folder / "scripts" / f"{m.action}.py"
         py.write_text(_dano_call_py(m), encoding="utf-8", newline="\n")
@@ -474,12 +442,53 @@ def _write_business_skill(out_dir: Path, subsystem: str, business: str,
     return folder
 
 
-async def write_skills(tenant: str, out_dir: str) -> list[str]:
+# ─────────────────────────── index 路由(总台,自动生成)───────────────────────────
+def _index_md(entries: list[dict], slug: str) -> str:
+    """业务总台:列出所有业务剧本 + 触发词,把用户意图路由到对应剧本。无业务专属逻辑。"""
+    rows = "\n".join(f"| {e['label']} | `{e['folder']}` | {e['ops']} 个操作 |" for e in entries)
+    table = "| 业务 | 剧本目录 | 规模 |\n|---|---|---|\n" + rows
+    names = "、".join(e["label"] for e in entries) or "(暂无)"
+    return f"""---
+name: {slug}
+description: OA 业务总台:统一入口,把用户意图路由到具体业务剧本({names})。当用户提到办理/查询任一 OA 业务时,先看本目录选对剧本。
+metadata:
+  source: dano:index
+  businesses: {len(entries)}
+---
+
+# OA 业务剧本总台
+
+这是所有已生成业务剧本的**路由目录**。用户说要办什么,在下表里找到对应业务,
+打开它的剧本目录(各自一本自包含 skill),按那本剧本的六段流程办。
+
+## 业务目录
+{table}
+
+> 每本剧本都含:①自检 ②办理前校验 ③办理(需确认) ④错误处置 ⑤事后确认 ⑥缺失恢复。
+> 找不到对应业务就如实告知用户"没有这个业务的 skill",**不要臆造**。
+"""
+
+
+def _write_index(out_dir: Path, entries: list[dict]) -> str:
+    slug = "dano-oa-index"
+    folder = out_dir / slug
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "SKILL.md").write_text(_index_md(entries, slug), encoding="utf-8")
+    return slug
+
+
+async def write_skills(tenant: str, out_dir: str, *, rich: bool = True) -> list[str]:
     """核心:读该租户已上架 Skill 写成官方格式 skill;**不管连接池**(供已持有池的网关复用)。
 
-    带 business 标签的 adapter **按业务归组成一本剧本 skill**(多操作);其余各自一个单动作 skill。
+    带 business 标签的 adapter **按业务归组成一本自包含剧本 skill**(多操作);其余各自一个单动作 skill。
+    rich=True:每本剧本的 SKILL.md 用 LLM 据 PlaybookSpec **动态撰写**(失败回退确定性渲染);
+    rich=False:直接确定性渲染(测试/离线用,不调 LLM)。每业务独立 try/except,一个失败不连累其它。
+    最后自动生成 index 路由总台。
     """
     from collections import defaultdict
+
+    from dano.generation.playbook import build_playbook
+    from dano.generation.playbook_writer import render_playbook_md, write_playbook_md
     repo = AssetRepository()
     reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=ALL_SUBSYSTEMS)
     manifests = build_manifests(reg.skills)
@@ -491,13 +500,26 @@ async def write_skills(tenant: str, out_dir: str) -> list[str]:
         (groups[(m.subsystem, m.business)].append(m) if getattr(m, "business", "")
          else standalone.append(m))
     written: list[str] = []
+    index_entries: list[dict] = []
     for (sub, biz), ms in groups.items():
-        folder = _write_business_skill(out, sub, biz, ms)
-        log.info("export.business_skill", business=biz, subsystem=sub,
-                 ops=[m.action for m in ms], folder=folder.name)
-        written.append(folder.name)
+        try:                                                 # 每业务独立:一个崩不连累其它
+            slug = _slug(f"{sub}.{biz}")
+            spec = build_playbook(sub, biz, ms)
+            md = (await write_playbook_md(spec, slug)) if rich else render_playbook_md(spec, slug)
+            folder = _write_business_skill(out, sub, biz, ms, md_text=md)
+            log.info("export.business_skill", business=biz, subsystem=sub,
+                     ops=[m.action for m in ms], folder=folder.name)
+            written.append(folder.name)
+            index_entries.append({"label": spec.label, "folder": folder.name, "ops": len(ms)})
+        except Exception as e:  # noqa: BLE001
+            log.warning("export.business_skill_failed", business=biz, subsystem=sub, error=str(e))
     for m in standalone:
-        written.append(_write_skill(out, m).name)
+        try:
+            written.append(_write_skill(out, m).name)
+        except Exception as e:  # noqa: BLE001
+            log.warning("export.standalone_failed", action=m.action, error=str(e))
+    if index_entries:                                        # 自动生成 index 路由总台
+        written.append(_write_index(out, index_entries))
     log.info("export.agent_skills", tenant=tenant, out=str(out),
              count=len(written), businesses=len(groups), standalone=len(standalone))
     return written

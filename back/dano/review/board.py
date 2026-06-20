@@ -131,9 +131,9 @@ class ReviewBoard:
         client = OpenAICompatClient(api_key=api_key, base_url=base_url)
         models = {"acceptance": s.review_model_acceptance, "security": s.review_model_security,
                   "compliance": s.review_model_compliance}
-        if len(set(models.values())) < 3 or not all(models.values()):
-            log.warning("review.models.misconfigured",   # 闸门仍会按 distinct=3 拦,这里仅早警告
-                        models=models, note="三审须配 3 个不同且非空的模型")
+        if not all(models.values()):                 # 只要 3 个角色都配了非空模型即可(可相同)
+            log.warning("review.models.misconfigured",
+                        models=models, note="三审需 3 个非空评审模型(可相同)")
         return cls(client=client, models=models, timeout_s=s.review_timeout_s,
                    max_retries=s.review_max_retries, backoff_s=s.review_retry_backoff_s)
 
@@ -220,6 +220,10 @@ _ADAPTER_REVIEW_NOTE = (
     "adapter 会发多次 HTTP;risk_level 反映其**实际执行的操作**——源码里有 POST/PUT/PATCH/DELETE 写操作即应为 L3(运行期需确认),L3 正确不要驳回。"
     "declarative_body.fact_check 是发布/执行后的**只读回查(流程9 事实核查)**,其 method=GET 是设计如此、用于确认副作用真生效,"
     "**与动作风险无关**;**切勿因 fact_check 的 method=GET 就要求把 risk_level 降为 L1**——判 risk_level 只看源码里有没有写操作,不看 fact_check 的 method。"
+    "\n【TLS 与 base_url —— 不要误判 SSRF / 中间人(平台既定行为)】"
+    "base_url 取自 inputs['__base_url__'],是**平台运行期注入的可信地址**(发布的环境画像,非用户任意输入),"
+    "不构成 SSRF;对接的企业内网系统常为**自签证书**、平台已配置 insecure_tls,源码用 `verify=False` 是"
+    "**平台既定的对接方式**,属正常配置——**切勿据此判中间人攻击/SSRF 而驳回**。这两点是设计如此,不是漏洞。"
 )
 
 

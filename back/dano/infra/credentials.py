@@ -38,6 +38,22 @@ def _env_lookup(ref: str) -> dict:
     return _env_table().get(path, {})
 
 
+def set_runtime_credential(path: str, creds: dict) -> None:
+    """把一份运行期凭证写进 DANO_RUNTIME_CREDENTIALS env 表(键=vault path 段,如 abc/oa)。
+
+    用途:接入时拿到的 OA token(来自页面)落进运行期凭证库,否则运行期 invoke 解析不到 token
+    (`Bearer ` 为空 → Illegal header value)。强制 Vault(require_vault)时不走这条——
+    生产必须正规写 Vault,此处只补 dev/试点的运行期凭证缺口。凭证只进进程内存,不落文件。
+    """
+    s = get_settings()
+    if s.require_vault or not creds:
+        return
+    table = _env_table()
+    table[path] = {**table.get(path, {}), **{k: v for k, v in creds.items() if v}}
+    os.environ["DANO_RUNTIME_CREDENTIALS"] = json.dumps(table)
+    log.info("creds.runtime_stored", path=path, keys=sorted(creds.keys()))
+
+
 def resolve_credentials(refs: dict[str, str]) -> dict[str, str]:
     """把若干凭证引用解析成明文凭证(运行期受控环境内)。refs:{用途名: vault://...}。"""
     s = get_settings()

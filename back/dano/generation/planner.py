@@ -174,6 +174,8 @@ _CONTRACT = (
     '  user_fields/required_fields: string[](取自证据 form_fields / params_in)\n'
     '  success_rule: string(判定表达式,基于 response;**只能用属性点取/下标/比较**,'
     '如 "response.code == null or response.code == 200";\n'
+    "    **只引用最终接口响应里确实会出现的字段**(如 response.code);**不要臆造 data 等不存在的字段**,"
+    "也别把发起步骤(startFlow)的响应字段(如 data)当成提交步骤的成功标志;\n"
     "    **禁止函数/方法调用(如 .get())**、禁止 None(用 null)、禁止 JS 的 &&/||)\n"
     '  fact_check: {endpoint, method:"GET", assert_expr, retries, backoff_s}\n'
     "    —— 必须能区分『真生效』与『空操作』:回查本业务的列表/详情/待办,用提交返回的 id/单号过滤,"

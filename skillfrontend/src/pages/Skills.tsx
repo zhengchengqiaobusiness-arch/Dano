@@ -11,6 +11,32 @@ const DEFAULT_EXPORT_DIR = "/opt/dano/runtime-data/.agents/skills";
 const RISK_COLOR: Record<string, string> = { L1: "default", L2: "default", L3: "orange", L4: "red", L5: "red" };
 const INTEG_LABEL: Record<string, string> = { adapter: "代码", workflow: "复合流程", api: "接口", page: "页面" };
 
+// 目录行:可能是「业务组」(parent,含 children) 或单个操作。一个业务多操作 → 归为一组。
+type Row = SkillManifest & { __group?: boolean; __ops?: number; children?: SkillManifest[] };
+
+function groupByBusiness(skills: SkillManifest[]): Row[] {
+  const groups = new Map<string, SkillManifest[]>();
+  const flat: SkillManifest[] = [];
+  for (const s of skills) {
+    if (s.business) {
+      if (!groups.has(s.business)) groups.set(s.business, []);
+      groups.get(s.business)!.push(s);
+    } else flat.push(s);
+  }
+  const rows: Row[] = [];
+  for (const [biz, ops] of groups) {
+    if (ops.length <= 1) { flat.push(...ops); continue; }      // 单操作业务不必折叠,直接平铺
+    const write = ops.find((o) => o.requires_confirmation);    // 组标题用「办理」操作的标题
+    const label = write?.title || ops[0].title || biz;
+    rows.push({
+      ...ops[0], name: `business:${biz}`, title: `${label}（${ops.length} 个操作）`,
+      __group: true, __ops: ops.length, children: ops,
+    });
+  }
+  for (const s of flat) rows.push(s as Row);
+  return rows;
+}
+
 export default function Skills() {
   const nav = useNavigate();
   const [data, setData] = useState<SkillManifest[]>([]);
@@ -68,35 +94,45 @@ export default function Skills() {
           <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
         </Space>
       </Space>
-      <Table<SkillManifest>
+      <Table<Row>
         rowKey="name"
         loading={loading}
-        dataSource={data}
+        dataSource={groupByBusiness(data)}
+        expandable={{ defaultExpandAllRows: true }}
         locale={{ emptyText: <Empty description="本租户暂无已发布 Skill,先去接入系统生成" /> }}
         columns={[
           {
             title: "Skill", dataIndex: "name",
-            render: (_, r) => (
-              <a onClick={() => nav(`/skills/${encodeURIComponent(r.name)}`)}>
-                <div>{r.name}</div>
-                <div style={{ fontSize: 12, color: "#999" }}>{r.title}</div>
-              </a>
-            ),
+            render: (_, r) =>
+              r.__group ? (
+                <div>
+                  <Tag color="blue">业务剧本</Tag>
+                  <span style={{ fontWeight: 600 }}>{r.title}</span>
+                </div>
+              ) : (
+                <a onClick={() => nav(`/skills/${encodeURIComponent(r.name)}`)}>
+                  <div>{r.title || r.name}</div>
+                  <div style={{ fontSize: 12, color: "#999" }}>{r.name}</div>
+                </a>
+              ),
           },
-          { title: "类型", dataIndex: "integration", width: 110, render: (v) => <Tag>{INTEG_LABEL[v] || v}</Tag> },
-          { title: "风险", dataIndex: "risk_level", width: 90, render: (v) => <Tag color={RISK_COLOR[v] || "default"}>{v}</Tag> },
-          { title: "需确认", dataIndex: "requires_confirmation", width: 90, render: (v) => (v ? <Tag color="orange">是</Tag> : <Tag>否</Tag>) },
+          { title: "类型", dataIndex: "integration", width: 110, render: (v, r) => (r.__group ? null : <Tag>{INTEG_LABEL[v] || v}</Tag>) },
+          { title: "风险", dataIndex: "risk_level", width: 90, render: (v, r) => (r.__group ? null : <Tag color={RISK_COLOR[v] || "default"}>{v}</Tag>) },
+          { title: "需确认", dataIndex: "requires_confirmation", width: 90, render: (v, r) => (r.__group ? null : v ? <Tag color="orange">是</Tag> : <Tag>否</Tag>) },
           {
             title: "操作", width: 260,
-            render: (_, r) => (
-              <Space>
-                <Button size="small" type="primary" ghost icon={<PlayCircleOutlined />} onClick={() => setInvoke(r)}>测试调用</Button>
-                <Button size="small" onClick={() => nav(`/skills/${encodeURIComponent(r.name)}`)}>详情</Button>
-                <Popconfirm title={`删除 ${r.name}?`} description="删本租户该 skill 的全部资产版本,便于重来" okText="删除" okButtonProps={{ danger: true }} cancelText="取消" onConfirm={() => doDelete(r.name)}>
-                  <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
-                </Popconfirm>
-              </Space>
-            ),
+            render: (_, r) =>
+              r.__group ? (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>共 {r.__ops} 个操作 · 展开调用</Typography.Text>
+              ) : (
+                <Space>
+                  <Button size="small" type="primary" ghost icon={<PlayCircleOutlined />} onClick={() => setInvoke(r)}>测试调用</Button>
+                  <Button size="small" onClick={() => nav(`/skills/${encodeURIComponent(r.name)}`)}>详情</Button>
+                  <Popconfirm title={`删除 ${r.name}?`} description="删本租户该 skill 的全部资产版本,便于重来" okText="删除" okButtonProps={{ danger: true }} cancelText="取消" onConfirm={() => doDelete(r.name)}>
+                    <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
+                  </Popconfirm>
+                </Space>
+              ),
           },
         ]}
       />

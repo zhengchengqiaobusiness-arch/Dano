@@ -134,6 +134,44 @@ async def get_runtime() -> dict:
     return _runtime_status()
 
 
+@app.get("/settings/llm-test")
+async def llm_test() -> dict:
+    """用网关**当前进程的实时配置**真打一发 LLM,返回真实 HTTP 状态——定位生成失败到底是
+    401(key 错)还是 400(模型名错)还是 429(限流),不必再猜。不回显 key 值。"""
+    import time
+
+    import httpx
+
+    from dano.config import get_settings
+    s = get_settings()
+    key = (s.pi_api_key or "").strip()
+    if not key:
+        return {"ok": False, "reason": "no_key", "detail": "网关进程没有 API Key(页面未提交或重启后未重发)"}
+    base = s.pi_base_url.rstrip("/")
+    url = base + ("/chat/completions" if base.endswith("/v1") else "/v1/chat/completions")
+    payload = {"model": s.pi_model, "temperature": 0, "max_tokens": 8,
+               "messages": [{"role": "user", "content": "ping"}]}
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(url, json=payload,
+                             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": "network_error", "detail": repr(e),
+                "base_url": s.pi_base_url, "model": s.pi_model}
+    dur = round(time.monotonic() - t0, 2)
+    ok = r.status_code < 400
+    content_len = 0
+    if ok:
+        try:
+            content_len = len((r.json()["choices"][0]["message"]["content"] or ""))
+        except Exception:  # noqa: BLE001
+            content_len = -1
+    return {"ok": ok, "status": r.status_code, "dur_s": dur, "model": s.pi_model,
+            "base_url": s.pi_base_url, "key_tail": key[-4:], "content_len": content_len,
+            "body": ("" if ok else r.text[:400])}
+
+
 @app.post("/settings/runtime")
 async def set_runtime(cfg: RuntimeConfig) -> dict:
     """页面提交密钥/凭证 → 写进后端进程环境(不落文件)。重启后需再次提交(前端会自动重发)。"""

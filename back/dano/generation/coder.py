@@ -55,11 +55,30 @@ GENERIC_SKELETON = (
 )
 
 
+def _evidence_business_meta(ev: dict | None) -> dict:
+    """从证据里取出业务规则(x-flow):优先顶层 business_meta,否则扫描动作。无则空。"""
+    if not ev:
+        return {}
+    top = ev.get("business_meta")
+    if isinstance(top, dict) and top:
+        return top
+    for a in ev.get("actions") or []:
+        bm = a.get("business_meta")
+        if isinstance(bm, dict) and bm:
+            return bm
+    return {}
+
+
 def _fmt_evidence(ev: dict, *, budget: int = 14000) -> str:
     """把证据压成紧凑文本喂给模型(端点 + 表单字段 + 样例返回结构),限长。"""
     if not ev:
         return "(无)"
     parts = []
+    if ev.get("synthesized_contract"):                    # 已探明的真实契约:最高优先,严格照走
+        c = ev["synthesized_contract"]
+        parts.append("【已探明的真实提交契约 —— 严格照这两步,不要用 form/save 或其它端点】:")
+        parts.extend("  " + s for s in (c.get("steps") or []))
+        parts.append("  成功判定:" + str(c.get("success_rule", "")))
     if ev.get("all_endpoints"):
         parts.append("可用端点全集(name|method|endpoint):")
         parts.extend("  " + e for e in ev["all_endpoints"])
@@ -84,6 +103,26 @@ def _fmt_evidence(ev: dict, *, budget: int = 14000) -> str:
     return text[:budget] + ("\n…(已截断)" if len(text) > budget else "")
 
 
+def _business_rules_prompt(ev: dict | None) -> str:
+    """把 x-flow 业务规则(可本地自检的校验)译成编码约束:办理前先校验、错误归类。无规则则空串。"""
+    bm = _evidence_business_meta(ev)
+    if not bm:
+        return ""
+    checks = []
+    for v in (bm.get("businessValidations") or []):
+        if isinstance(v, dict) and v.get("rule", "").lower() in (
+                "positive", "required", "nonempty", "range", "min", "max", "length", "regex"):
+            checks.append(v.get("desc") or v.get("rule"))
+    lines = ["业务规则(来自文档,务必遵守):"]
+    if checks:
+        lines.append("- **办理前先做这些可本地校验的前置**,不满足就**直接返回**"
+                     " `{'code': -1, 'error_kind': 'invalid', 'msg': '<哪条没过>'}` 且**不要提交**:"
+                     + ";".join(str(c) for c in checks) + "。")
+    lines.append("- 返回 dict 里带 **error_kind**:鉴权失败(401)→'auth';被业务校验/系统驳回→'rejected';"
+                 "正常成功→可不设或 'ok'。这样调用方能按类型处置。")
+    return "\n" + "\n".join(lines) + "\n"
+
+
 def evidence_codegen_prompt(plan: PlanBody, feedback: list[str]) -> str:
     """v3 模型驱动编码提示:给【真实证据 + 步骤 + 真实报错】,模型据实写码,**不给 OA 专用骨架**。"""
     fb = ("\n\n上一轮真打目标系统**失败/被驳回**,以下是**真实报错/响应**,必须据此修正(可能缺步骤/字段/串联错):\n- "
@@ -101,8 +140,17 @@ def evidence_codegen_prompt(plan: PlanBody, feedback: list[str]) -> str:
         "- 证据里某端点给了**请求体示例**时,**严格照它的字段与嵌套结构填**(尤其双层嵌套、变量子对象);"
         "示例里 <xxx> 占位的值,用前序步骤的真实返回填(如 <startFlow.taskId> 取自发起流程的返回)。\n"
         "- 目标系统可能 HTTP200 也返回失败或**空操作**,务必看响应体;返回里带可核查标识(单号/id 等)。\n"
+        "- **标识放请求体、不要拼进 URL 路径**:发起/提交类接口(如 startFlow)的 templateId、procInsId、taskId 等标识"
+        "要放进**请求体 JSON(json=...)**,**不要拼进 URL 路径**(拼进路径会 404,如 .../startFlow/purchase_template 是错的)。\n"
+        "- **templateId 从 inputs 取并兜底**:`template_id = inputs.get('__templateId__') or inputs.get('templateId')`;"
+        "拿不到就用证据/契约里的真实模板 id,**绝不能传空**(传空会被判『模板ID为空』)。\n"
+        "- **返回 dict 的形状**:把最终接口的**业务码放顶层** `code`(如 code=200)、**关键标识**(procInsId/单号/id)"
+        "也**放顶层**;**不要把响应嵌套进 submitResponse 之类子键**——否则成败规则查不到。\n"
+        f"- 成败规则会按 `{plan.success_rule}` 判定你的返回:**你返回的字段必须能被它判成功**"
+        "(若规则查 response.code,你就把 code 放顶层并填真实业务码)。\n"
         f"拆解步骤(参考,可按真实报错调整):{plan.steps}\n"
         f"契约要点:{plan.contract}\n"
+        f"{_business_rules_prompt(plan.evidence)}"
         f"【证据】(真实端点 + 表单字段 + 样例返回结构):\n{_fmt_evidence(plan.evidence)}\n"
         f"通用骨架:\n{GENERIC_SKELETON}"
         f"{fb}"
@@ -157,25 +205,37 @@ class PiCoder:
                  endpoints=len((plan.evidence or {}).get("actions", [])), prompt_chars=len(prompt))
         text = await self._spawn(prompt)
         src = extract_source(text)
-        if not src:
+        no_source = not src
+        if no_source:                                  # 模型没吐内容:多半是 API 错/限流/模型名错,非"写了烂码"
             log.warning("coder.no_source", flow=plan.flow, resp_chars=len(text or ""),
                         resp_head=(text or "")[:160])
-            src = "def run(inputs, creds):\n    raise RuntimeError('pi 未产出可解析源码')\n"
+            src = "def run(inputs, creds):\n    raise RuntimeError('模型未返回可解析源码')\n"
         else:
             log.info("coder.source_ready", flow=plan.flow, lines=src.count("\n") + 1)
-        return {"action": plan.flow, "strategy": plan.strategy, "source": src, "entry": "run",
+        body = {"action": plan.flow, "strategy": plan.strategy, "source": src, "entry": "run",
                 "success_rule": plan.success_rule,
                 "fact_check": plan.fact_check.model_dump() if plan.fact_check else None,
                 "user_fields": plan.user_fields, "required_fields": plan.required_fields,
-                "field_docs": plan.field_docs, "consts": plan.consts, "evidence": plan.evidence}
+                "field_docs": plan.field_docs, "consts": plan.consts, "evidence": plan.evidence,
+                "business_meta": _evidence_business_meta(plan.evidence)}   # x-flow 业务规则 → 落进 adapter 供导出剧本
+        if no_source:
+            body["_no_source"] = True                  # 告知 controller:这是基建故障,别再回灌重写空烧预算
+        return body
 
 
-async def openai_text_spawn(prompt: str, *, timeout_s: float = 300.0, tag: str = "llm") -> str:
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}      # 限流/瞬时故障:退避重试,别当成"模型写了烂码"
+
+
+async def openai_text_spawn(prompt: str, *, timeout_s: float = 300.0, tag: str = "llm",
+                            max_attempts: int = 4) -> str:
     """默认编码 spawn:OpenAI 兼容 /chat/completions(任意 base_url,如 SiliconFlow/DeepSeek)。
 
     用 settings.pi_base_url + pi_api_key + pi_model;纯文本生成(取 <ADAPTER> 源码),不强制 JSON。
     tag 仅用于日志(标识是 planner/coder/classify… 哪一类调用)。
+    **限流/瞬时错(429/5xx/网络/空响应)→ 退避重试**,不要直接返回空(否则上层误判"模型产出烂码",
+    白白烧光生成预算——并发批量调用时尤其致命)。401/400 等不可重试错则立即返回空。
     """
+    import asyncio
     import time
 
     import httpx
@@ -189,26 +249,50 @@ async def openai_text_spawn(prompt: str, *, timeout_s: float = 300.0, tag: str =
     headers = {"Authorization": f"Bearer {s.pi_api_key.strip()}", "Content-Type": "application/json"}
     payload = {"model": s.pi_model, "temperature": 0,
                "messages": [{"role": "user", "content": prompt}]}
-    t0 = time.monotonic()
-    log.info("llm.request", tag=tag, model=s.pi_model, prompt_chars=len(prompt), timeout_s=timeout_s)
-    try:
-        async with httpx.AsyncClient(timeout=timeout_s) as c:
-            r = await c.post(url, json=payload, headers=headers)
-    except Exception as e:  # noqa: BLE001 - 超时/网络错 → 当作"没产出",让循环重试而非崩
-        log.warning("llm.network_error", tag=tag, error=repr(e), dur_s=round(time.monotonic() - t0, 1))
-        return ""
-    dur = round(time.monotonic() - t0, 1)
-    if r.status_code >= 400:
-        log.warning("llm.http_error", tag=tag, status=r.status_code, body=r.text[:300], dur_s=dur)
-        return ""
-    try:
-        out = r.json()["choices"][0]["message"]["content"] or ""
+
+    async def _backoff(attempt: int, retry_after: str | None = None) -> None:
+        ra = (retry_after or "").strip()
+        delay = float(ra) if ra.replace(".", "", 1).isdigit() else min(2.0 ** attempt, 12.0)
+        await asyncio.sleep(delay)
+
+    log.info("llm.request", tag=tag, model=s.pi_model, prompt_chars=len(prompt),
+             timeout_s=timeout_s, max_attempts=max_attempts)
+    for attempt in range(1, max_attempts + 1):
+        t0 = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=timeout_s) as c:
+                r = await c.post(url, json=payload, headers=headers)
+        except Exception as e:  # noqa: BLE001 - 超时/网络错:可重试
+            dur = round(time.monotonic() - t0, 1)
+            log.warning("llm.network_error", tag=tag, error=repr(e), dur_s=dur, attempt=attempt)
+            if attempt < max_attempts:
+                await _backoff(attempt)
+                continue
+            return ""
+        dur = round(time.monotonic() - t0, 1)
+        if r.status_code in _RETRYABLE_STATUS:        # 限流/瞬时 → 退避重试(尊重 Retry-After)
+            log.warning("llm.http_retry", tag=tag, status=r.status_code, dur_s=dur,
+                        attempt=attempt, body=r.text[:200])
+            if attempt < max_attempts:
+                await _backoff(attempt, r.headers.get("retry-after"))
+                continue
+            return ""
+        if r.status_code >= 400:                       # 401/403/400 等:配置/鉴权错,重试无意义
+            log.warning("llm.http_error", tag=tag, status=r.status_code, body=r.text[:300], dur_s=dur)
+            return ""
+        try:
+            out = r.json()["choices"][0]["message"]["content"] or ""
+        except (KeyError, IndexError, TypeError, ValueError) as e:
+            log.warning("llm.bad_response", tag=tag, error=repr(e), body=r.text[:300], dur_s=dur)
+            return ""
+        if not out.strip() and attempt < max_attempts:  # 空响应(推理型偶发)→ 再试一次
+            log.warning("llm.empty_retry", tag=tag, dur_s=dur, attempt=attempt)
+            await _backoff(attempt)
+            continue
         log.info("llm.response", tag=tag, resp_chars=len(out), dur_s=dur,
-                 empty=(not out.strip()))
+                 empty=(not out.strip()), attempt=attempt)
         return out
-    except (KeyError, IndexError, TypeError, ValueError) as e:
-        log.warning("llm.bad_response", tag=tag, error=repr(e), body=r.text[:300], dur_s=dur)
-        return ""
+    return ""
 
 
 async def pi_text_spawn(prompt: str, *, timeout_s: float = 300.0) -> str:

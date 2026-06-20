@@ -216,6 +216,7 @@ class AdapterBody(BaseModel):
     action: str = Field(description="Skill 名,如 submit_leave")
     title: str = Field(default="", description="人类可读标题")
     business: str = Field(default="", description="所属业务(同业务多操作 adapter 导出时归为一个 skill)")
+    business_meta: dict = Field(default_factory=dict, description="业务规则(来自 x-flow:审批链/校验/驳回/记账),供导出剧本的前置/错误/事后确认段")
     strategy: str = Field(description="生成该适配器的策略名")
     language: str = Field(default="python", description="实现语言(M0 仅 python)")
     source: str = Field(description="适配器源码;入口为 entry 指定的函数")

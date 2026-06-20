@@ -86,6 +86,7 @@ class FlowEvidence(BaseModel):
     form_fields: list[FormFieldEvidence] = Field(default_factory=list)
     sample_reads: list[SampleRead] = Field(default_factory=list)
     probes: list[str] = Field(default_factory=list)        # 审计:实际探了哪些只读路径
+    business_meta: dict = Field(default_factory=dict)      # x-flow 业务规则(审批链/校验/驳回/记账),可空
 
 
 def _walk_form_fields(node: object, out: list[FormFieldEvidence]) -> None:
@@ -205,6 +206,12 @@ async def collect_evidence(spec: dict, *, include_tags: list[str] | None = None,
                                 request_example=_request_example(spec, _op_for(spec, a.endpoint, a.method)))
                  for a in in_scope],
     )
+    for a in in_scope:                                  # x-flow 业务规则(取第一个写有的端点,通常是提交)
+        op = _op_for(spec, a.endpoint, a.method) or {}
+        xf = op.get("x-flow")
+        if isinstance(xf, dict) and xf:
+            ev.business_meta = xf
+            break
     if probe is None:
         return ev
 

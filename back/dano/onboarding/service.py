@@ -43,6 +43,26 @@ _FLOW_STOPWORDS = {"submit", "demo", "create", "start", "apply", "flow", "add", 
 _CONTRACT_TOKENS = ("startflow", "/biz/form", "/biz/flow", "form/info", "form/save",
                     "flow/submit", "listprocess", "/draft", "/todo", "/done")
 
+# 通用能力 → 中文短标题(供目录/剧本展示;办理类标题取 x-flow 流程名)
+_OP_TITLES = {
+    "query_my_todo": "查待办", "query_my_done": "查已办", "query_in_progress": "查在途",
+    "query_my_drafts": "查我发起的", "query_status": "查流程状态",
+    "cancel": "撤销/取回", "urge": "催办",
+}
+
+
+def _op_title(op_name: str, write: bool, business_meta: dict, business: str = "") -> str:
+    """给操作起中文标题:通用能力用固定短名;办理类用 x-flow 流程名;兜底用业务名。"""
+    if op_name in _OP_TITLES:
+        return _OP_TITLES[op_name]
+    name = (business_meta or {}).get("name")
+    if write and name:
+        return str(name)
+    if write:
+        base = re.sub(r"^((submit|create|apply|demo|do)[_-]+)+", "", (business or op_name).lower())
+        return f"办理{base.replace('_', '')}" if base else "办理"
+    return op_name
+
 
 def _flow_keywords(flow: str, template_id: str = "") -> set[str]:
     """从流程名 + templateId 提业务关键词(如 submit_demo_overtime → {overtime})。"""
@@ -94,6 +114,41 @@ def _make_status_probe(base: str, token: str):
     return probe
 
 
+async def _fetch_oa_spec(base_url: str, token: str) -> dict | None:
+    """探 OA 自己的 OpenAPI 目录(标准发现路径)→ 拿到**真实全量端点**,供能力发现映射真实路径。
+
+    解决:焦点导入(只含提交两步)时,通用能力(查待办/已办/撤销…)端点不在文件里,LLM 只能猜路径、
+    多半猜错被探针 404 掉。改为从 OA 真目录取真实端点 → LLM 按名映射(不猜)→ 探针确认。
+    标准 OpenAPI 发现路径,非业务硬编码;探不到则回退原行为。
+    """
+    import httpx
+
+    from dano.infra.http import tls_verify
+    if not base_url:
+        return None
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    base = base_url.rstrip("/")
+    for path in ("/v3/api-docs", "/v2/api-docs", "/swagger.json", "/openapi.json", "/api-docs"):
+        try:
+            async with httpx.AsyncClient(timeout=20, verify=tls_verify()) as c:
+                r = await c.get(base + path, headers=headers)
+            if r.status_code == 200:
+                j = r.json()
+                if isinstance(j, dict) and j.get("paths"):
+                    log.info("oa_spec.fetched", path=path, paths=len(j.get("paths") or {}))
+                    return j
+        except Exception:  # noqa: BLE001 - 探不到换下一个路径
+            continue
+    return None
+
+
+def _spec_to_actions(spec: dict) -> list[dict]:
+    """OpenAPI → 端点字典清单(name/method/endpoint/summary),供能力发现。"""
+    from dano.capabilities import doc_parser
+    return [{"name": a.name, "method": a.method, "endpoint": a.endpoint, "summary": a.summary or ""}
+            for a in doc_parser.parse_openapi(spec)]
+
+
 async def _existing_endpoints(actions: list[dict], base_url: str, token: str, *, probe_status=None) -> list[dict]:
     """剔除"文档有、服务器没有"的幽灵端点(GET 探到 **404**)。其余(405/401/500/超时…)一律保留。
 
@@ -121,14 +176,17 @@ async def _existing_endpoints(actions: list[dict], base_url: str, token: str, *,
 
 
 async def _expand_business_goals(run_id: str, sid: str, flow: str, raw_ti: dict,
-                                 actions: list[dict], base_url: str, *, spawn=None):  # noqa: ANN001
+                                 actions: list[dict], base_url: str, *, spawn=None,
+                                 oa_profile=None):  # noqa: ANN001
     """把一条业务 flow 展开成「操作集」的多个 GoalBrief(剖析器产操作 → 每操作一个 goal)。
 
     读操作(GET)→ 只读 adapter(crud_query,确定性);写操作 → LLM。失败/无操作 → None,上层回退单 flow。
     写操作继承业务测试输入(扁平字段 + __templateId__);读操作只给 __base_url__。
+    oa_profile 给定则把 OA 通用能力(查待办/已办/在途/撤销/催办…)实例化进本业务操作集。
     """
     from dano.generation import GoalBrief
     from dano.generation.business_profiler import profile_business
+    from dano.generation.operation_completer import complete_operations
     tid = str(raw_ti.get("templateId") or raw_ti.get("__templateId__") or "")
     scoped = _scope_actions_for_flow(flow, tid, actions)
     log.info("business.expand.start", flow=flow, scoped=len(scoped),
@@ -142,9 +200,16 @@ async def _expand_business_goals(run_id: str, sid: str, flow: str, raw_ti: dict,
     if not ops:
         log.warning("business.expand.empty", flow=flow, note="剖析无操作 → 回退单提交")
         return None
+    # P2:把 OA 共享能力实例化进本业务操作集(已确认存在的才加;合成动作并入端点池)
+    actions = list(actions)
+    ops, synth = complete_operations(ops, oa_profile, template_id=tid)
+    if synth:
+        actions = actions + list(synth.values())
+        log.info("business.expand.completed", flow=flow, added=list(synth.keys()))
     log.info("business.expand.ops", flow=flow,
              ops=[{"op": o["op"], "write": o["write"], "endpoints": o["endpoints"]} for o in ops])
     by_name = {a["name"]: a for a in actions}
+    bmeta = next((a["business_meta"] for a in actions if a.get("business_meta")), {})  # x-flow → 标题取流程名
     goals = []
     for op in ops:
         op_actions = [by_name[n] for n in op["endpoints"] if n in by_name]
@@ -157,10 +222,13 @@ async def _expand_business_goals(run_id: str, sid: str, flow: str, raw_ti: dict,
                     ti["__templateId__"] = raw_ti["templateId"]
             else:
                 ti = {**{k: v for k, v in raw_ti.items() if k != "templateId"}, "__base_url__": base_url}
-        else:                                             # 读:只读 adapter,无需业务输入
+        else:                                             # 读:只读 adapter;带 templateId 供按业务过滤(可选)
             ti = {"__base_url__": base_url}
+            if tid:
+                ti["__templateId__"] = tid
         goals.append(GoalBrief(run_id=run_id, system_instance_id=sid, flow=op["op"],
-                               actions=op_actions, test_input=ti, business=flow))   # 同业务共用 flow 名归组
+                               actions=op_actions, test_input=ti, business=flow,
+                               title=_op_title(op["op"], bool(op.get("write")), bmeta, flow)))   # 中文标题 + 同业务归组
     return goals or None
 
 
@@ -249,7 +317,8 @@ async def _publish_env_profile(run_id: str, sid: str, deploy: dict) -> None:
 
 async def _onboard_codegen(run_id: str, sid: str, flows: list[dict], coder,  # noqa: ANN001
                            max_read_flows: int | None, progress=None,
-                           expand_business: bool = False) -> dict:
+                           expand_business: bool = False,
+                           regenerate: bool = True) -> dict:
     """主路径:goal 模式自动生成代码 adapter。
 
     读流程(GET)自动逐个生成只读 adapter(数量受 max_read_flows 限制,None=全部);
@@ -283,12 +352,42 @@ async def _onboard_codegen(run_id: str, sid: str, flows: list[dict], coder,  # n
              success_rule=parsed.get("success_rule"), categories=len(parsed.get("categories") or {}),
              flows=len(flows), expand_business=expand_business)
     by_name = {a["name"]: a for a in actions}
+    # P0:OA 层探一次(框架 + 通用工作流能力,LLM+探针)→ 全业务共享,供操作发现实例化
+    oa_profile = None
+    if expand_business and coder is None:
+        from dano.generation.oa_profile import build_oa_profile
+        cap_probe = None
+        if base_url and token:                            # 能力探针:接收**端点路径**,内部补 base_url(只 GET)
+            _raw = _make_status_probe(base_url.rstrip("/"), token)
+
+            async def cap_probe(path: str):  # noqa: ANN202
+                return await _raw(base_url.rstrip("/") + (path if path.startswith("/") else "/" + path))
+        cap_actions = actions                             # 默认用导入清单;能取到 OA 真目录则用真目录(端点更全)
+        if base_url and token:
+            full_spec = await _fetch_oa_spec(base_url, token)
+            if full_spec:
+                try:
+                    cap_actions = _spec_to_actions(full_spec) or actions
+                except Exception as e:  # noqa: BLE001
+                    log.warning("oa_spec.parse_failed", error=str(e))
+        try:
+            oa_profile = await build_oa_profile(
+                cap_actions, framework=parsed.get("template") or "",
+                success_rule=parsed.get("success_rule") or "",
+                probe=cap_probe)
+        except Exception as e:  # noqa: BLE001 - 探测失败不阻断,业务仍可单独发现
+            log.warning("codegen.oa_profile_failed", error=str(e))
     goals: list[GoalBrief] = []
     declared: set[str] = set()
     for f in flows:                                       # 写/复合流程:调用方声明 + 测试输入
         raw_ti = f.get("test_input") or {}
         if expand_business and coder is None:             # 业务展开(仅真实路径;注入 coder 的测试不触发实时剖析)
-            exp = await _expand_business_goals(run_id, sid, f["flow"], raw_ti, actions, base_url)
+            try:                                          # 每业务独立:一个业务展开失败不连累其它业务
+                exp = await _expand_business_goals(run_id, sid, f["flow"], raw_ti, actions, base_url,
+                                                   oa_profile=oa_profile)
+            except Exception as e:  # noqa: BLE001 - 展开失败回退该业务单提交,不阻断整体接入
+                log.warning("business.expand.error", flow=f["flow"], error=str(e))
+                exp = None
             if exp:
                 goals.extend(exp)
                 declared.update(a["name"] for g in exp for a in g.actions)
@@ -326,7 +425,7 @@ async def _onboard_codegen(run_id: str, sid: str, flows: list[dict], coder,  # n
         is_read = bool(g.actions) and all((a.get("method") or "GET").upper() == "GET" for a in g.actions)
         log.info("codegen.goal.start", flow=g.flow, idx=idx, total=len(goals),
                  is_read=is_read, n_actions=len(g.actions), business=getattr(g, "business", ""))
-        if coder is None and g.flow in published_keys:    # 沉淀复用:已发布同名 adapter 直接跳过
+        if not regenerate and coder is None and g.flow in published_keys:  # 沉淀复用(opt-in):已发布同名直接跳过
             log.info("codegen.goal.reused", flow=g.flow)
             if progress:
                 progress({"type": "flow_start", "flow": g.flow, "index": idx, "total": len(goals), "route": "reused"})
@@ -351,6 +450,40 @@ async def _onboard_codegen(run_id: str, sid: str, flows: list[dict], coder,  # n
                                                          convention=convention, include_names=keep)).model_dump()
                     log.info("codegen.goal.evidence", flow=g.flow, scoped=len(scoped),
                              endpoints=[a.get("endpoint") for a in scoped][:12])
+                    if not tid:                           # 前端没传 templateId → 从 x-flow 业务规则兜底
+                        bm = g.evidence.get("business_meta") or {}
+                        tid = str(bm.get("templateId") or "")
+                        if tid:
+                            g.test_input["__templateId__"] = tid
+                            log.info("codegen.tid_from_xflow", flow=g.flow, template_id=tid)
+                    # 契约合成:探 form/info 拼出该业务的真实提交契约 → 注入证据 + 用框架真实成功判定(不让 planner 猜)
+                    if tid and base_url and token:
+                        from dano.onboarding.contract_synth import synthesize_contract
+                        contract = await synthesize_contract(tid, base_url, token)
+                        if contract:
+                            # 契约是**两步**(startFlow → /biz/flow/submit,变量直接进 body);把证据**只留这两步**,
+                            # 剔除 form/save——否则模型会走 form/save 三步路撞「转换失败:null」墙。
+                            submit_eps = ("/workflow/handle/startFlow", "/biz/flow/submit")
+                            acts = [a for a in g.evidence.get("actions", []) if (a.get("endpoint") or "") in submit_eps]
+                            for a in acts:
+                                if (a.get("endpoint") or "") == "/biz/flow/submit":
+                                    a["request_example"] = contract["submit_example"]   # 模型照真实契约填
+                            if acts:
+                                g.evidence["actions"] = acts
+                            g.evidence["synthesized_contract"] = contract
+                            cfields = contract["fields"]
+                            # 探到的表单字段 → 直接当 skill 的入参(user_fields/required_fields/field_docs),
+                            # 否则导出脚本 FIELDS=[],调用方不知道要填 title/amount/...(实质缺陷)。
+                            g.plan_overrides = {
+                                "success_rule": contract["success_rule"],   # code==200,grounded
+                                "fact_check": None,   # 两步真建实例;code==200 + 真 procInsId 足证,跳过额外回查
+                                "user_fields": [f["name"] for f in cfields],
+                                "required_fields": [f["name"] for f in cfields if f.get("required")],
+                                "field_docs": {f["name"]: (f.get("label") or f["name"]) for f in cfields},
+                            }
+                            log.info("codegen.contract_synth", flow=g.flow,
+                                     fields=[f["name"] for f in cfields],
+                                     endpoints=[a.get("endpoint") for a in acts])
                 if progress:
                     progress({"type": "flow_start", "flow": g.flow, "index": idx, "total": len(goals), "route": src})
                 r = await GenerationLoop(g_coder, planner=planner, on_event=progress).run(g, strat)
@@ -439,6 +572,7 @@ async def onboard(*, tenant: str, subsystem: str, openapi, deploy: dict,  # noqa
                   flows: list[dict] | None = None, coder=None,  # noqa: ANN001
                   use_codegen: bool = True, max_read_flows: int | None = None,
                   expand_business: bool = True,        # 默认开:一个业务 → 多操作剧本(办理+查在途+查状态…)
+                  regenerate: bool = True,             # 默认开:重新接入同一业务=重新生成(覆盖旧版);关掉才复用已发布
                   progress=None, timeout_s: float = 180.0) -> OnboardingReport:  # noqa: ANN001
     """接入一个系统实例(阶段一)。前置:PG 池已就绪。
 
@@ -454,7 +588,8 @@ async def onboard(*, tenant: str, subsystem: str, openapi, deploy: dict,  # noqa
     sid = system_instance_id or subsystem
     run_id = f"onb-{uuid4().hex[:8]}"
     log.info("onboard.start", tenant=tenant, subsystem=subsystem, run_id=run_id,
-             use_codegen=use_codegen, expand_business=expand_business, flows=len(flows or []))
+             use_codegen=use_codegen, expand_business=expand_business,
+             regenerate=regenerate, flows=len(flows or []))
     from dano.onboarding.ingest import normalize_to_spec
     spec = await normalize_to_spec(openapi)        # 入口归一化:任何格式 → 规范 OpenAPI(结构化零 LLM)
     log.info("onboard.normalized", run_id=run_id, paths=len((spec or {}).get("paths") or {}))
@@ -462,6 +597,12 @@ async def onboard(*, tenant: str, subsystem: str, openapi, deploy: dict,  # noqa
         run_id=run_id, tenant=tenant, system_instance_id=sid, subsystem=subsystem,
         openapi=spec, deploy=deploy, credentials=credentials, policy_text=policy_text,
         include_tags=include_tags or []))
+    # 接入用的 OA 凭证(来自页面)落进运行期凭证库 → 运行期 invoke 才解析得到 token,
+    # 否则 adapter 拼出 `Bearer `(空)→ Illegal header value。键=租户/系统key(如 abc/oa)。
+    if credentials:
+        from dano.execution.connectors.executor import system_key_for
+        from dano.infra.credentials import set_runtime_credential
+        set_runtime_credential(f"{tenant}/{system_key_for(Subsystem(subsystem))}", dict(credentials))
     token = secrets.token_hex(16)
     runs.register(run_id, token)
     # 先确定性发布环境画像(运行期 invoke 取 base_url+auth 用),走同一发布闸门
@@ -469,7 +610,7 @@ async def onboard(*, tenant: str, subsystem: str, openapi, deploy: dict,  # noqa
     try:
         if use_codegen:
             completed = await _onboard_codegen(run_id, sid, flows or [], coder, max_read_flows,
-                                               progress, expand_business)
+                                               progress, expand_business, regenerate)
         else:
             completed = await _onboard_legacy(run_id, sid, token, discover_workflows=discover_workflows,
                                               policy_text=policy_text, timeout_s=timeout_s)

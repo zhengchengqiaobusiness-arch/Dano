@@ -25,6 +25,8 @@ class GoalBrief:
     budget: Budget = field(default_factory=Budget)
     evidence: dict | None = None                # v2:理解阶段采集的 FlowEvidence(供 LLM 拆解)
     business: str = ""                          # 展开模式:所属业务(同业务多操作共用,供导出归组成剧本 skill)
+    title: str = ""                             # 操作中文标题(如「查待办」「采购申请」),供目录/剧本展示
+    plan_overrides: dict | None = None          # 契约合成:覆盖 plan 的 success_rule/fact_check/字段(grounded 优先于 LLM 猜)
 
 
 @dataclass

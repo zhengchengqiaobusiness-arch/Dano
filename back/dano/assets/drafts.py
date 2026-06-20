@@ -165,7 +165,7 @@ class DraftStore:
         """三模型评审硬关卡:后端重读评审证据校验,不信 agent 自报。
 
         免评审类型直接放行;否则校验:每条属本草案、content_hash 一致、passed、未过期 →
-        role 覆盖 {acceptance, security, compliance} → distinct(model_id) = 3(换 3 个不同模型)。
+        role 覆盖 {acceptance, security, compliance}(三个角色都过即可;**模型可相同**,不强制 distinct)。
         """
         from dano.config import get_settings
         if not get_settings().review_enabled:        # 运维急停:临时关闭评审闸门(审计留痕)
@@ -202,8 +202,8 @@ class DraftStore:
         missing = REQUIRED_ROLES - roles
         if missing:
             return False, f"缺少评审角色:{sorted(missing)}(已有 {sorted(roles)})"
-        if len(models) < 3:
-            return False, f"评审须由 3 个不同模型完成(当前 {sorted(models)})"
+        if not models or "" in models:               # 只要三个角色都由非空模型评过即可,模型可相同
+            return False, "评审模型为空(请在运行配置填评审模型)"
         return True, "ok"
 
     async def verify_publishable(

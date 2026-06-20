@@ -134,6 +134,7 @@ class SkillRegistry:
                         risk_level=RiskLevel(b.get("risk_level", "L3")),
                         title=b.get("title", ""),
                         business=b.get("business", ""),
+                        business_meta=dict(b.get("business_meta", {})),
                         field_docs=dict(b.get("field_docs", {})),
                         has_api=True,
                         is_adapter=True,

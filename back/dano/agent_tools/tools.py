@@ -110,6 +110,7 @@ async def parse_spec(run_id: str, params: dict) -> dict:
                 success_rule = conv.get("success_rule") or success_rule
         except Exception as e:  # noqa: BLE001 - 约定识别失败回退确定性 match_template
             log.warning("parse_spec.llm_convention_failed", error=str(e))
+    paths = spec.get("paths") or {}
     actions, categories = [], {}
     for a in all_actions:
         info = llm_map.get(a.name)                            # 命中 LLM → 用模型判断,否则确定性兜底
@@ -122,11 +123,15 @@ async def parse_spec(run_id: str, params: dict) -> dict:
             categories[t] = categories.get(t, 0) + 1
         if include and not (set(a.tags) & include):           # 类别白名单:超大 swagger 圈定范围
             continue
+        # x-flow 业务规则(若文档写了):审批链/校验/驳回/记账 → 供生成剧本的前置/错误/确认段。没有就空。
+        op = (paths.get(a.endpoint) or {}).get((a.method or "").lower(), {})
+        business_meta = op.get("x-flow") if isinstance(op, dict) and isinstance(op.get("x-flow"), dict) else {}
         actions.append({"name": a.name, "method": a.method, "endpoint": a.endpoint,
                         "role": role, "category": category,   # category:LLM 识别的业务分组(可空)
                         "required_in": a.required_in, "params_in": a.params_in,
                         "params_out": a.params_out, "tags": a.tags,   # 出参/标签:供发现流程依赖
-                        "summary": a.summary, "field_docs": a.field_docs})
+                        "summary": a.summary, "field_docs": a.field_docs,
+                        "business_meta": business_meta})      # x-flow → 业务规则(可空)
     return {"system_instance_id": sid, "template": template_name,
             "success_rule": success_rule,
             "categories": categories, "include_tags": sorted(include),
