@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+node_modules/
+.pnpm-store/
+runtime-data/
+.secrets/
+dist/
+web-dist/
+coverage/
+*.log
+*.tsbuildinfo

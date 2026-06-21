@@ -1,0 +1,83 @@
+{
+  "name": "@woxqaq/pi-web",
+  "version": "0.3.4",
+  "description": "Web Shell for pi coding agent",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-package"
+  ],
+  "license": "MIT",
+  "repository": {
+    "url": "https://github.com/woxQAQ/pi-web"
+  },
+  "files": [
+    "dist/bin",
+    "dist/bridge",
+    "web-dist",
+    "README.md"
+  ],
+  "type": "module",
+  "bin": {
+    "pi-web": "./dist/bridge/standalone/main.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "pnpm run build:server && pnpm run build:web",
+    "build:bin": "pnpm -C packages/bin build",
+    "build:bridge": "pnpm -C packages/bridge build",
+    "build:electron": "pnpm run build:web && pnpm -C packages/electron build",
+    "build:server": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && pnpm run build:bridge && pnpm run build:bin",
+    "build:svelte": "pnpm -C packages/svelte build",
+    "build:web": "pnpm run build:svelte",
+    "check": "pnpm run check:type && pnpm run check:electron",
+    "check:electron": "pnpm -C packages/electron check",
+    "check:type": "tsgo --noEmit",
+    "check:web": "pnpm -C packages/svelte check",
+    "dev:bridge:standalone": "node --import jiti/register ./packages/bridge/src/standalone/main.ts",
+    "dev:electron": "node ./scripts/dev-electron.mjs",
+    "dev:pi": "PI_BRIDGE_PORT=${PI_BRIDGE_PORT:-8080} pi -e ./packages/bin/src/index.ts",
+    "dev:pi:inspect": "PI_BRIDGE_PORT=${PI_BRIDGE_PORT:-8080} NODE_OPTIONS='--inspect-brk' pi -e ./packages/bin/src/index.ts",
+    "dev:svelte": "pnpm -C packages/svelte dev",
+    "dev:web": "pnpm run dev:svelte",
+    "dist:electron": "pnpm run build:web && pnpm -C packages/electron dist",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "prepack": "pnpm run build",
+    "smoke:pi-web": "node scripts/smoke-pi-web.mjs",
+    "start:bridge:standalone": "node ./dist/bridge/standalone/main.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "ws": "^8.20.1"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.74.0",
+    "@lobehub/icons-static-svg": "^1.90.0",
+    "@pi-web/bridge": "workspace:*",
+    "@types/node": "^25.8.0",
+    "@typescript/native-preview": "7.0.0-dev.20260413.1",
+    "jiti": "^2.7.0",
+    "oxfmt": "^0.49.0",
+    "oxlint": "^1.64.0",
+    "tsdown": "^0.22.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/bin/index.js"
+    ]
+  }
+}

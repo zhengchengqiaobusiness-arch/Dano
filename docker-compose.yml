@@ -1,0 +1,56 @@
+services:
+  app:
+    image: ${DANO_IMAGE:-dano-app:local}
+    build:
+      context: .
+      args:
+        NPM_CONFIG_REGISTRY: ${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org/}
+    restart: unless-stopped
+    environment:
+      DANO_HOST: 0.0.0.0
+      DANO_PORT: 8080
+      DANO_DEFAULT_WORKSPACE_PATH: ${DANO_DEFAULT_WORKSPACE_PATH:-/tmp/dano}
+      DANO_LLM_TIMEOUT_MS: ${DANO_LLM_TIMEOUT_MS:-30000}
+      AGENT_WORLD_API_KEY: ${AGENT_WORLD_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GOOGLE_GENERATIVE_AI_API_KEY: ${GOOGLE_GENERATIVE_AI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      XIAOMI_API_KEY: ${XIAOMI_API_KEY:-}
+      XIAOMI_TOKEN_PLAN_CN_API_KEY: ${XIAOMI_TOKEN_PLAN_CN_API_KEY:-}
+      OPENAI_API_KEY_FILE: ${OPENAI_API_KEY_FILE:-}
+      ANTHROPIC_API_KEY_FILE: ${ANTHROPIC_API_KEY_FILE:-}
+      DEEPSEEK_API_KEY_FILE: ${DEEPSEEK_API_KEY_FILE:-}
+    expose:
+      - "8080"
+    volumes:
+      - ./runtime-data:/tmp/dano
+      - ./.secrets:/run/secrets:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${DANO_NGINX_PORT:-80}:80"
+    volumes:
+      - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
