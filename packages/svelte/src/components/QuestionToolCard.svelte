@@ -9,9 +9,11 @@
 
   let {
     block,
+    active = true,
     onRespond,
   }: {
     block: ToolContentBlock;
+    active?: boolean;
     onRespond: (
       toolCallId: string,
       response:
@@ -25,7 +27,8 @@
 
   const request = $derived(askUserQuestionRequest(block));
   const result = $derived(askUserQuestionResult(block.resultDetails));
-  const pending = $derived(block.toolStatus === "pending" && !result);
+  const pending = $derived(block.toolStatus === "pending" && !result && active);
+  const interrupted = $derived(block.toolStatus === "pending" && !result && !active);
   let selectedOption = $state("");
   let selectedOptions = $state<string[]>([]);
   let textAnswer = $state("");
@@ -118,6 +121,8 @@
       <div class="question-result">{t("questionTool.answered", { answer: answerText(result.answer) })}</div>
     {:else if result?.status === "cancelled"}
       <div class="question-result muted">{t("questionTool.cancelled")}</div>
+    {:else if interrupted}
+      <div class="question-result muted">{t("questionTool.interrupted")}</div>
     {:else if !pending}
       <div class="question-error" role="alert">{block.resultText}</div>
     {:else if request.kind === "confirm"}

@@ -211,7 +211,14 @@ class AskUserQuestionCoordinator {
   }
 }
 
-export const askUserQuestionCoordinator = new AskUserQuestionCoordinator();
+const coordinatorState = globalThis as typeof globalThis & {
+  __danoAskUserQuestionCoordinator?: AskUserQuestionCoordinator;
+};
+
+// ponytail: dev runtime reloads create separate module graphs in one process.
+export const askUserQuestionCoordinator =
+  (coordinatorState.__danoAskUserQuestionCoordinator ??=
+    new AskUserQuestionCoordinator());
 
 export const askUserQuestionTool = defineTool({
   name: ASK_USER_QUESTION_TOOL_NAME,

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   askUserQuestionCoordinator,
   askUserQuestionTool,
@@ -271,6 +271,17 @@ describe("ask_user_question tool", () => {
     expect(() =>
       askUserQuestionCoordinator.answer("missing", { cancelled: true }),
     ).toThrow("Pending question not found");
+  });
+
+  it("shares pending questions across standalone dev runtime module reloads", async () => {
+    vi.resetModules();
+    const firstRuntime = await import("../ask-user-question.js");
+    vi.resetModules();
+    const reloadedRuntime = await import("../ask-user-question.js");
+
+    expect(reloadedRuntime.askUserQuestionCoordinator).toBe(
+      firstRuntime.askUserQuestionCoordinator,
+    );
   });
 
   it("removes a pending question when its agent turn aborts", async () => {

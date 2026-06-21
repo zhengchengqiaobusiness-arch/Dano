@@ -857,7 +857,7 @@
                 </div>
               {:else if block.kind === "tool"}
                 {#if askUserQuestionRequest(block)}
-                  <QuestionToolCard {block} onRespond={answerQuestion} />
+                  <QuestionToolCard {block} active={isStreaming && !initialLoading} onRespond={answerQuestion} />
                 {:else}
                   {@const descriptor = toolBlockDescriptor(block)}
                   {@const diffStats = toolBlockDiffStats(block)}
