@@ -28,7 +28,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.74.0"
+    "@earendil-works/pi-coding-agent": "0.74.0",
+    "typebox": "1.2.7"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.1.2",

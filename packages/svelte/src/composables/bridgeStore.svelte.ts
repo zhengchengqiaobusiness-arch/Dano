@@ -2098,6 +2098,15 @@ export function respondToUIRequest(payload: RpcExtensionUIResponse) {
   sendEnvelope({ type: "extension_ui_response", payload });
 }
 
+export function answerQuestion(
+  toolCallId: string,
+  response:
+    | { cancelled: true }
+    | { cancelled: false; answer: string },
+): Promise<RpcResponse> {
+  return sendCommand({ type: "answer_question", toolCallId, ...response });
+}
+
 // ---------------------------------------------------------------------------
 // Message handling
 // ---------------------------------------------------------------------------
@@ -2887,6 +2896,7 @@ export function initBridge() {
     cancelQueuedMessage,
     editQueuedMessage,
     respondToUIRequest,
+    answerQuestion,
     dismissNotification,
     disconnect,
   };

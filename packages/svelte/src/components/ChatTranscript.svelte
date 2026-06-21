@@ -7,11 +7,13 @@
   } from "@dano/bridge/types";
   import Pencil from "lucide-svelte/icons/pencil";
   import Sparkle from "lucide-svelte/icons/sparkle";
-  import type {
-    TranscriptDelta,
-    TranscriptEntry,
-    TranscriptStream,
+  import {
+    answerQuestion,
+    type TranscriptDelta,
+    type TranscriptEntry,
+    type TranscriptStream,
   } from "../composables/bridgeStore.svelte";
+  import { askUserQuestionRequest } from "../utils/askUserQuestion";
   import { userMessageCopyText } from "../utils/messageCopy";
   import {
     buildTranscriptDisplayItems,
@@ -34,6 +36,7 @@
   import HighlightedCode from "./HighlightedCode.svelte";
   import ImageLightbox from "./ImageLightbox.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
+  import QuestionToolCard from "./QuestionToolCard.svelte";
   import { getRuntimeEmptyStateConfig } from "../utils/runtimeConfig";
   import { t } from "../i18n";
 
@@ -853,17 +856,20 @@
                   {/if}
                 </div>
               {:else if block.kind === "tool"}
-                {@const descriptor = toolBlockDescriptor(block)}
-                {@const diffStats = toolBlockDiffStats(block)}
-                {@const trailingKind = toolBlockTrailingKind(block)}
-                <div class="tool-inline-block" data-tree-entry-id={block.resultSourceMessageId}>
-                  <div class="tool-inline" data-status={descriptor.status}>
-                    <button
-                      type="button"
-                      class="tool-inline-toggle"
-                      onclick={() => blockState.toggleToolBlock(toolBlockStateKey(item.message, item.messageIndex, block, bIdx))}
-                      aria-expanded={blockState.isToolBlockExpanded(toolBlockStateKey(item.message, item.messageIndex, block, bIdx))}
-                    >
+                {#if askUserQuestionRequest(block)}
+                  <QuestionToolCard {block} onRespond={answerQuestion} />
+                {:else}
+                  {@const descriptor = toolBlockDescriptor(block)}
+                  {@const diffStats = toolBlockDiffStats(block)}
+                  {@const trailingKind = toolBlockTrailingKind(block)}
+                  <div class="tool-inline-block" data-tree-entry-id={block.resultSourceMessageId}>
+                    <div class="tool-inline" data-status={descriptor.status}>
+                      <button
+                        type="button"
+                        class="tool-inline-toggle"
+                        onclick={() => blockState.toggleToolBlock(toolBlockStateKey(item.message, item.messageIndex, block, bIdx))}
+                        aria-expanded={blockState.isToolBlockExpanded(toolBlockStateKey(item.message, item.messageIndex, block, bIdx))}
+                      >
                       <span class="tool-inline-summary">
                         <span class="tool-inline-name">{descriptor.name}</span>
                         {#if descriptor.params}
@@ -889,7 +895,7 @@
                           <span class="tool-inline-diff-removed">-{diffStats?.removed ?? 0}</span>
                         </span>
                       </span>
-                    </button>
+                      </button>
 
                     {#if blockState.isToolBlockExpanded(toolBlockStateKey(item.message, item.messageIndex, block, bIdx))}
                       <div class="tool-inline-details">
@@ -948,8 +954,9 @@
                         {/if}
                       </div>
                     {/if}
+                    </div>
                   </div>
-                </div>
+                {/if}
               {:else if block.kind === "image"}
                 <figure class="message-image-block">
                   <button

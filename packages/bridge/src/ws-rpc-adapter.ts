@@ -26,6 +26,7 @@ import {
   type DefaultSessionSettings,
   type SessionDefaultsState,
 } from "./default-model.js";
+import { askUserQuestionCoordinator } from "./ask-user-question.js";
 import { DetachedSessionRegistry } from "./session-registry.js";
 import type {
   BridgeConfig,
@@ -4729,6 +4730,28 @@ export class WsRpcAdapter {
           type: "response",
           command: "abort",
           success: true,
+        };
+      }
+
+      case "answer_question": {
+        const toolCallId = command.toolCallId.trim();
+        if (!toolCallId) throw new Error("Question tool call ID is required");
+        if (!command.cancelled && typeof command.answer !== "string") {
+          throw new Error("Question answer is required");
+        }
+
+        const result = command.cancelled
+          ? askUserQuestionCoordinator.answer(toolCallId, { cancelled: true })
+          : askUserQuestionCoordinator.answer(toolCallId, {
+              cancelled: false,
+              answer: command.answer,
+            });
+        return {
+          id: correlationId,
+          type: "response",
+          command: "answer_question",
+          success: true,
+          data: result,
         };
       }
 

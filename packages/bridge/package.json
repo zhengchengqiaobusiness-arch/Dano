@@ -18,7 +18,8 @@
     "test": "vitest run --root ../.. --config vitest.config.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.74.0"
+    "@earendil-works/pi-coding-agent": "0.74.0",
+    "typebox": "1.2.7"
   },
   "devDependencies": {
     "@types/node": "^25.8.0",

@@ -39,6 +39,7 @@ import {
   buildDetachedShellCommandPrefix,
   createDetachedAgentSession,
 } from "../detached-session.js";
+import { askUserQuestionTool } from "../ask-user-question.js";
 import { detectWorkspaceEnvironments } from "../workspace-environment.js";
 
 describe("detached-session", () => {
@@ -208,6 +209,7 @@ describe("detached-session", () => {
         bashToolDefinition,
         editToolDefinition,
         writeToolDefinition,
+        askUserQuestionTool,
       ],
     });
     expect(result).toBe(sessionResult);

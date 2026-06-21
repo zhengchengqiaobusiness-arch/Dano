@@ -95,6 +95,12 @@ export type RpcToolArguments = string | RpcJsonObject;
 
 export type RpcToolResultDetails = RpcJsonValue;
 
+export const ASK_USER_QUESTION_TOOL_NAME = "ask_user_question";
+
+export type AskUserQuestionResult =
+  | { status: "answered"; answer: string }
+  | { status: "cancelled" };
+
 export interface RpcCompactionResult {
   summary: string;
   firstKeptEntryId: string;
@@ -241,6 +247,9 @@ export interface RpcCommandMap {
     images?: RpcImageContent[];
   };
   abort: {};
+  answer_question:
+    | { toolCallId: string; cancelled: true }
+    | { toolCallId: string; cancelled: false; answer: string };
   new_session: {
     parentSession?: string;
     limit?: number;
@@ -595,6 +604,7 @@ export interface RpcResponseMap {
   steer: void;
   follow_up: void;
   abort: void;
+  answer_question: AskUserQuestionResult;
   new_session: {
     transcript: RpcTranscriptPage;
     treeEntries: RpcTreeEntry[];

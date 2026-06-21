@@ -21,6 +21,7 @@ import {
   type WsClient,
 } from "../types.js";
 import { WsRpcAdapter, type WsRpcAdapterContext } from "../ws-rpc-adapter.js";
+import { askUserQuestionCoordinator } from "../ask-user-question.js";
 
 interface MockTransport {
   send: ReturnType<typeof vi.fn<(message: string) => void>>;
@@ -645,6 +646,39 @@ describe("WsRpcAdapter", () => {
       await new Promise(r => setTimeout(r, 10));
 
       expect(context.actions.abort).toHaveBeenCalled();
+    });
+
+    it("resolves a pending question through the command channel", async () => {
+      const pending = askUserQuestionCoordinator.wait(
+        "question-call-1",
+        ["Keep", "Replace"],
+        undefined,
+      );
+      const command: RpcCommand = {
+        id: "answer-1",
+        type: "answer_question",
+        toolCallId: "question-call-1",
+        cancelled: false,
+        answer: "Keep",
+      };
+
+      ws.trigger(
+        "message",
+        Buffer.from(JSON.stringify({ type: "command", payload: command })),
+      );
+
+      await expect(pending).resolves.toEqual({
+        status: "answered",
+        answer: "Keep",
+      });
+      await new Promise(r => setTimeout(r, 10));
+      const response = JSON.parse(ws.send.mock.calls.at(-1)?.[0] ?? "null");
+      expect(response.payload).toMatchObject({
+        id: "answer-1",
+        command: "answer_question",
+        success: true,
+        data: { status: "answered", answer: "Keep" },
+      });
     });
 
     it("should handle get_state command", async () => {

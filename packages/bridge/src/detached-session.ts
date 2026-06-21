@@ -11,6 +11,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { buildWorkspaceActivationPrefix } from "./workspace-environment.js";
+import { askUserQuestionTool } from "./ask-user-question.js";
 
 export interface CreateDetachedAgentSessionOptions {
   model?: CreateAgentSessionFromServicesOptions["model"];
@@ -66,6 +67,7 @@ export async function createDetachedAgentSession(
       }),
       createEditToolDefinition(cwd),
       createWriteToolDefinition(cwd),
+      askUserQuestionTool,
     ] as unknown as ToolDefinition[],
   });
 }
