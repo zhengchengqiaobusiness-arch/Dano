@@ -1,7 +1,6 @@
 import {
   createAgentSessionFromServices,
   createAgentSessionServices,
-  createBashToolDefinition,
   createEditToolDefinition,
   createReadToolDefinition,
   createWriteToolDefinition,
@@ -10,8 +9,8 @@ import {
   type SessionManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { buildWorkspaceActivationPrefix } from "./workspace-environment.js";
 import { askUserQuestionTool } from "./ask-user-question.js";
+import { createCurlTool } from "./curl-tool.js";
 
 export interface CreateDetachedAgentSessionOptions {
   model?: CreateAgentSessionFromServicesOptions["model"];
@@ -20,28 +19,12 @@ export interface CreateDetachedAgentSessionOptions {
   defaultThinkingLevel?: CreateAgentSessionFromServicesOptions["thinkingLevel"];
 }
 
-export function buildDetachedShellCommandPrefix(
-  cwd: string,
-  basePrefix?: string,
-): string | undefined {
-  const prefixes = [
-    buildWorkspaceActivationPrefix(cwd),
-    basePrefix?.trim(),
-  ].filter((value): value is string => Boolean(value));
-
-  return prefixes.length > 0 ? prefixes.join("\n") : undefined;
-}
-
 export async function createDetachedAgentSession(
   cwd: string,
   sessionManager: SessionManager,
   options: CreateDetachedAgentSessionOptions = {},
 ): Promise<CreateAgentSessionResult> {
   const services = await createAgentSessionServices({ cwd });
-  const shellCommandPrefix = buildDetachedShellCommandPrefix(
-    cwd,
-    services.settingsManager.getShellCommandPrefix(),
-  );
   const defaultModel =
     options.defaultModel?.provider && options.defaultModel.modelId
       ? services.modelRegistry
@@ -56,15 +39,14 @@ export async function createDetachedAgentSession(
   return createAgentSessionFromServices({
     services,
     sessionManager,
+    noTools: "builtin",
     model: options.model ?? defaultModel,
     thinkingLevel: options.thinkingLevel ?? options.defaultThinkingLevel,
     customTools: [
       createReadToolDefinition(cwd, {
         autoResizeImages: services.settingsManager.getImageAutoResize(),
       }),
-      createBashToolDefinition(cwd, {
-        commandPrefix: shellCommandPrefix,
-      }),
+      createCurlTool(cwd),
       createEditToolDefinition(cwd),
       createWriteToolDefinition(cwd),
       askUserQuestionTool,

@@ -6,14 +6,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const {
   createAgentSessionFromServicesMock,
   createAgentSessionServicesMock,
-  createBashToolDefinitionMock,
+  createCurlToolMock,
   createEditToolDefinitionMock,
   createReadToolDefinitionMock,
   createWriteToolDefinitionMock,
 } = vi.hoisted(() => ({
   createAgentSessionFromServicesMock: vi.fn(),
   createAgentSessionServicesMock: vi.fn(),
-  createBashToolDefinitionMock: vi.fn(),
+  createCurlToolMock: vi.fn(),
   createEditToolDefinitionMock: vi.fn(),
   createReadToolDefinitionMock: vi.fn(),
   createWriteToolDefinitionMock: vi.fn(),
@@ -28,17 +28,17 @@ vi.mock("@earendil-works/pi-coding-agent", async () => {
     ...actual,
     createAgentSessionFromServices: createAgentSessionFromServicesMock,
     createAgentSessionServices: createAgentSessionServicesMock,
-    createBashToolDefinition: createBashToolDefinitionMock,
     createEditToolDefinition: createEditToolDefinitionMock,
     createReadToolDefinition: createReadToolDefinitionMock,
     createWriteToolDefinition: createWriteToolDefinitionMock,
   };
 });
 
-import {
-  buildDetachedShellCommandPrefix,
-  createDetachedAgentSession,
-} from "../detached-session.js";
+vi.mock("../curl-tool.js", () => ({
+  createCurlTool: createCurlToolMock,
+}));
+
+import { createDetachedAgentSession } from "../detached-session.js";
 import { askUserQuestionTool } from "../ask-user-question.js";
 import { detectWorkspaceEnvironments } from "../workspace-environment.js";
 
@@ -49,7 +49,7 @@ describe("detached-session", () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-detached-session-"));
     createAgentSessionFromServicesMock.mockReset();
     createAgentSessionServicesMock.mockReset();
-    createBashToolDefinitionMock.mockReset();
+    createCurlToolMock.mockReset();
     createEditToolDefinitionMock.mockReset();
     createReadToolDefinitionMock.mockReset();
     createWriteToolDefinitionMock.mockReset();
@@ -57,27 +57,6 @@ describe("detached-session", () => {
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("adds direnv and local venv activation ahead of the user prefix", () => {
-    fs.writeFileSync(path.join(tmpDir, ".envrc"), "use nix\n", "utf8");
-    fs.mkdirSync(path.join(tmpDir, ".venv", "bin"), { recursive: true });
-    fs.writeFileSync(
-      path.join(tmpDir, ".venv", "bin", "activate"),
-      "# activate\n",
-      "utf8",
-    );
-
-    const prefix = buildDetachedShellCommandPrefix(tmpDir, "echo base");
-
-    expect(prefix).toContain(
-      'eval "$(direnv export bash 2>/dev/null)" || true',
-    );
-    expect(prefix).toContain(". '.venv/bin/activate'");
-    expect(prefix).toContain("echo base");
-    expect(prefix?.indexOf("direnv export bash")).toBeLessThan(
-      prefix?.indexOf("echo base") ?? 0,
-    );
   });
 
   it("detects the workspace environments exposed to the UI", () => {
@@ -135,29 +114,14 @@ describe("detached-session", () => {
     ]);
   });
 
-  it("returns only the user prefix when no workspace activation is needed", () => {
-    expect(buildDetachedShellCommandPrefix(tmpDir, "echo base")).toBe(
-      "echo base",
-    );
-  });
-
-  it("builds env-aware custom tools for detached sessions", async () => {
-    fs.writeFileSync(path.join(tmpDir, ".envrc"), "use nix\n", "utf8");
-    fs.mkdirSync(path.join(tmpDir, "venv", "bin"), { recursive: true });
-    fs.writeFileSync(
-      path.join(tmpDir, "venv", "bin", "activate"),
-      "# activate\n",
-      "utf8",
-    );
-
+  it("builds custom tools for detached sessions", async () => {
     const services = {
       settingsManager: {
-        getShellCommandPrefix: vi.fn().mockReturnValue("echo base"),
         getImageAutoResize: vi.fn().mockReturnValue(false),
       },
     };
     const readToolDefinition = { name: "read" };
-    const bashToolDefinition = { name: "bash" };
+    const curlToolDefinition = { name: "curl" };
     const editToolDefinition = { name: "edit" };
     const writeToolDefinition = { name: "write" };
     const sessionResult = { session: { sessionId: "session-123" } };
@@ -165,7 +129,7 @@ describe("detached-session", () => {
 
     createAgentSessionServicesMock.mockResolvedValue(services);
     createReadToolDefinitionMock.mockReturnValue(readToolDefinition);
-    createBashToolDefinitionMock.mockReturnValue(bashToolDefinition);
+    createCurlToolMock.mockReturnValue(curlToolDefinition);
     createEditToolDefinitionMock.mockReturnValue(editToolDefinition);
     createWriteToolDefinitionMock.mockReturnValue(writeToolDefinition);
     createAgentSessionFromServicesMock.mockResolvedValue(sessionResult);
@@ -181,32 +145,16 @@ describe("detached-session", () => {
     expect(createReadToolDefinitionMock).toHaveBeenCalledWith(tmpDir, {
       autoResizeImages: false,
     });
-    expect(createBashToolDefinitionMock).toHaveBeenCalledWith(
-      tmpDir,
-      expect.objectContaining({
-        commandPrefix: expect.stringContaining("direnv export bash"),
-      }),
-    );
-    expect(createBashToolDefinitionMock).toHaveBeenCalledWith(
-      tmpDir,
-      expect.objectContaining({
-        commandPrefix: expect.stringContaining("venv/bin/activate"),
-      }),
-    );
-    expect(createBashToolDefinitionMock).toHaveBeenCalledWith(
-      tmpDir,
-      expect.objectContaining({
-        commandPrefix: expect.stringContaining("echo base"),
-      }),
-    );
+    expect(createCurlToolMock).toHaveBeenCalledWith(tmpDir);
     expect(createEditToolDefinitionMock).toHaveBeenCalledWith(tmpDir);
     expect(createWriteToolDefinitionMock).toHaveBeenCalledWith(tmpDir);
     expect(createAgentSessionFromServicesMock).toHaveBeenCalledWith({
       services,
       sessionManager,
+      noTools: "builtin",
       customTools: [
         readToolDefinition,
-        bashToolDefinition,
+        curlToolDefinition,
         editToolDefinition,
         writeToolDefinition,
         askUserQuestionTool,

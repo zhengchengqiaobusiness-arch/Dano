@@ -19,10 +19,6 @@ function fileExists(filePath: string): boolean {
   }
 }
 
-function shellQuote(value: string): string {
-  return "'" + value.replace(/'/g, "'\"'\"'") + "'";
-}
-
 function readTextFile(filePath: string): string | null {
   try {
     return fs.readFileSync(filePath, "utf8");
@@ -129,44 +125,4 @@ export function detectWorkspaceEnvironments(
   );
 
   return environments.length > 0 ? environments : undefined;
-}
-
-export function buildWorkspaceActivationPrefix(
-  cwd: string,
-): string | undefined {
-  const normalizedCwd = cwd.trim();
-  if (!normalizedCwd) {
-    return undefined;
-  }
-
-  const activationSteps: string[] = [];
-  const environments = detectWorkspaceEnvironments(normalizedCwd) ?? [];
-
-  for (const environment of environments) {
-    if (environment.type === "direnv") {
-      activationSteps.push(
-        [
-          "if command -v direnv >/dev/null 2>&1; then",
-          '  eval "$(direnv export bash 2>/dev/null)" || true',
-          "fi",
-        ].join("\n"),
-      );
-      continue;
-    }
-
-    if (environment.type === "python-venv" && environment.detail) {
-      const quotedScriptPath = shellQuote(environment.detail);
-      activationSteps.push(
-        [
-          'if [ -z "${VIRTUAL_ENV:-}" ] && [ -f ' +
-            quotedScriptPath +
-            " ]; then",
-          "  . " + quotedScriptPath,
-          "fi",
-        ].join("\n"),
-      );
-    }
-  }
-
-  return activationSteps.length > 0 ? activationSteps.join("\n") : undefined;
 }

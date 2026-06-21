@@ -237,6 +237,7 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
           toolStatus: toolStatusFromResult(
             resultText,
             resultBlocks,
+            resultDetails,
             resultIsError,
           ),
         });
@@ -946,12 +947,17 @@ function toolArgumentsText(args: RpcToolArguments | undefined): string {
 function toolStatusFromResult(
   resultText: string | undefined,
   resultBlocks: ToolResultBlock[] | undefined,
+  resultDetails: RpcToolResultDetails | undefined,
   isError: boolean | undefined,
 ): ToolBlockStatus {
   const hasText =
     typeof resultText === "string" && resultText.trim().length > 0;
   const hasBlocks = Array.isArray(resultBlocks) && resultBlocks.length > 0;
   if (!hasText && !hasBlocks) return "pending";
+  const exitCode = isJsonObject(resultDetails)
+    ? resultDetails.exitCode
+    : undefined;
+  if (typeof exitCode === "number" && exitCode !== 0) return "error";
   return isError ? "error" : "success";
 }
 

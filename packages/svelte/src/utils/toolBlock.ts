@@ -32,6 +32,7 @@ export function buildToolInlineModel(block: ToolContentBlock): ToolInlineModel {
       block.toolName,
       args,
       block.resultText,
+      block.resultDetails,
       block.toolStatus,
     ),
     diffStats: buildDiffStats(
@@ -71,6 +72,8 @@ function formatToolTitle(
           : "";
       return firstLine + suffix;
     }
+    case "curl":
+      return formatCurlArgs(args) || humanizeToolName(toolName);
     case "edit": {
       const path = stringValue(args, "path");
       return path || humanizeToolName(toolName);
@@ -88,6 +91,7 @@ function formatToolMeta(
   toolName: string,
   args: ToolArgsRecord | undefined,
   resultText: string | undefined,
+  resultDetails: JsonValue | undefined,
   status: ToolBlockStatus,
 ): string | undefined {
   switch (toolName) {
@@ -98,6 +102,10 @@ function formatToolMeta(
       const timeout = numberValue(args, "timeout");
       if (timeout !== undefined) parts.push(`timeout ${timeout}s`);
       return parts.join(" · ") || undefined;
+    }
+    case "curl": {
+      const exitCode = numberValue(asRecord(resultDetails), "exitCode");
+      return exitCode !== undefined ? `exit ${exitCode}` : undefined;
     }
     case "edit":
       return undefined;
@@ -118,6 +126,8 @@ export function buildToolDetailModel(block: ToolContentBlock): ToolDetailModel {
   const command =
     block.toolName === "bash"
       ? formatBashCommand(stringValue(args, "command"))
+      : block.toolName === "curl"
+        ? formatCurlCommand(args)
       : undefined;
   const diff = blockResultDiff(block.resultDetails)?.replace(/\r/g, "").trim();
   if (block.toolName === "edit") {
@@ -136,15 +146,21 @@ export function buildToolDetailModel(block: ToolContentBlock): ToolDetailModel {
     }
   }
 
-  const text = toolResultText(block);
+  const text =
+    toolResultText(block) ||
+    (block.toolName === "curl"
+      ? stringValue(asRecord(block.resultDetails), "stderr")?.trim() ?? ""
+      : "");
   if (!text) {
-    if (block.toolName === "bash" && command) {
+    if ((block.toolName === "bash" || block.toolName === "curl") && command) {
       return { kind: "bash", path, command };
     }
     return { kind: "empty", path };
   }
   if (block.toolName === "read") return { kind: "code", text, path };
-  if (block.toolName === "bash") return { kind: "bash", text, path, command };
+  if (block.toolName === "bash" || block.toolName === "curl") {
+    return { kind: "bash", text, path, command };
+  }
   return { kind: "text", text, path };
 }
 
@@ -257,6 +273,24 @@ function formatBashCommand(command: string | undefined): string | undefined {
     .split("\n")
     .map(line => `$ ${line}`)
     .join("\n");
+}
+
+function formatCurlArgs(args: ToolArgsRecord | undefined): string | undefined {
+  const values = arrayValue(args, "args")?.filter(
+    (value): value is string => typeof value === "string",
+  );
+  if (!values?.length) return undefined;
+  return values.map(formatCommandArg).join(" ");
+}
+
+function formatCurlCommand(args: ToolArgsRecord | undefined): string | undefined {
+  const formattedArgs = formatCurlArgs(args);
+  return formattedArgs ? `$ curl ${formattedArgs}` : undefined;
+}
+
+function formatCommandArg(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./?-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function blockResultDiff(
