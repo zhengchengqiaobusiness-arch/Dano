@@ -651,7 +651,7 @@ describe("WsRpcAdapter", () => {
     it("resolves a pending question through the command channel", async () => {
       const pending = askUserQuestionCoordinator.wait(
         "question-call-1",
-        ["Keep", "Replace"],
+        { options: ["Keep", "Replace"] },
         undefined,
       );
       const command: RpcCommand = {

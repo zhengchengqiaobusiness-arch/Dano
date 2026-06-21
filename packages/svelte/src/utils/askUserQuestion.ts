@@ -4,10 +4,11 @@ import {
 } from "@dano/bridge/types";
 import type { ToolContentBlock } from "./transcript";
 
-export interface AskUserQuestionRequest {
-  question: string;
-  options?: string[];
-}
+export type AskUserQuestionRequest =
+  | { kind: "text"; question: string }
+  | { kind: "single"; question: string; options: string[] }
+  | { kind: "multiple"; question: string; options: string[] }
+  | { kind: "confirm"; question: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -31,7 +32,18 @@ export function askUserQuestionRequest(
   if (!question) return null;
 
   const rawOptions = block.toolArgs.options;
-  if (rawOptions === undefined) return { question };
+  const multiple = block.toolArgs.multiple;
+  const confirm = block.toolArgs.confirm;
+  if (multiple !== undefined && typeof multiple !== "boolean") return null;
+  if (confirm !== undefined && confirm !== true) return null;
+  if (confirm === true) {
+    return rawOptions === undefined && multiple !== true
+      ? { kind: "confirm", question }
+      : null;
+  }
+  if (rawOptions === undefined) {
+    return multiple === true ? null : { kind: "text", question };
+  }
   if (!Array.isArray(rawOptions) || rawOptions.length < 2) return null;
 
   const options: string[] = [];
@@ -42,6 +54,7 @@ export function askUserQuestionRequest(
   if (new Set(options).size !== options.length) return null;
 
   return {
+    kind: multiple ? "multiple" : "single",
     question,
     options,
   };
@@ -52,7 +65,13 @@ export function askUserQuestionResult(
 ): AskUserQuestionResult | null {
   if (!isRecord(details)) return null;
   if (details.status === "cancelled") return { status: "cancelled" };
-  if (details.status === "answered" && typeof details.answer === "string") {
+  if (
+    details.status === "answered" &&
+    (typeof details.answer === "string" ||
+      typeof details.answer === "boolean" ||
+      (Array.isArray(details.answer) &&
+        details.answer.every(value => typeof value === "string")))
+  ) {
     return { status: "answered", answer: details.answer };
   }
   return null;

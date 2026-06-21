@@ -98,7 +98,7 @@ export type RpcToolResultDetails = RpcJsonValue;
 export const ASK_USER_QUESTION_TOOL_NAME = "ask_user_question";
 
 export type AskUserQuestionResult =
-  | { status: "answered"; answer: string }
+  | { status: "answered"; answer: string | string[] | boolean }
   | { status: "cancelled" };
 
 export interface RpcCompactionResult {
@@ -249,7 +249,11 @@ export interface RpcCommandMap {
   abort: {};
   answer_question:
     | { toolCallId: string; cancelled: true }
-    | { toolCallId: string; cancelled: false; answer: string };
+    | {
+        toolCallId: string;
+        cancelled: false;
+        answer: string | string[] | boolean;
+      };
   new_session: {
     parentSession?: string;
     limit?: number;

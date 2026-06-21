@@ -16,7 +16,10 @@
       toolCallId: string,
       response:
         | { cancelled: true }
-        | { cancelled: false; answer: string },
+        | {
+            cancelled: false;
+            answer: string | string[] | boolean;
+          },
     ) => Promise<RpcResponse>;
   } = $props();
 
@@ -24,14 +27,19 @@
   const result = $derived(askUserQuestionResult(block.resultDetails));
   const pending = $derived(block.toolStatus === "pending" && !result);
   let selectedOption = $state("");
+  let selectedOptions = $state<string[]>([]);
   let textAnswer = $state("");
+  let customAnswer = $state("");
   let submitting = $state(false);
   let error = $state("");
 
   async function respond(
     response:
       | { cancelled: true }
-      | { cancelled: false; answer: string },
+      | {
+          cancelled: false;
+          answer: string | string[] | boolean;
+        },
   ) {
     if (!block.toolCallId || submitting) return;
     submitting = true;
@@ -47,8 +55,57 @@
 
   function submit(event: SubmitEvent) {
     event.preventDefault();
-    const answer = request?.options ? selectedOption : textAnswer.trim();
-    if (answer) void respond({ cancelled: false, answer });
+    if (!request) return;
+    if (request.kind === "single" && selectedOption) {
+      void respond({
+        cancelled: false,
+        answer: isOtherOption(selectedOption)
+          ? customAnswer.trim()
+          : selectedOption,
+      });
+    } else if (request.kind === "multiple" && selectedOptions.length > 0) {
+      void respond({
+        cancelled: false,
+        answer: selectedOptions.map(option =>
+          isOtherOption(option) ? customAnswer.trim() : option,
+        ),
+      });
+    } else if (request.kind === "text" && textAnswer.trim()) {
+      void respond({ cancelled: false, answer: textAnswer.trim() });
+    }
+  }
+
+  function canSubmit(): boolean {
+    if (!request) return false;
+    if (request.kind === "single") {
+      return Boolean(selectedOption) &&
+        (!isOtherOption(selectedOption) || Boolean(customAnswer.trim()));
+    }
+    if (request.kind === "multiple") {
+      return selectedOptions.length > 0 &&
+        (!selectedOptions.some(isOtherOption) || Boolean(customAnswer.trim()));
+    }
+    if (request.kind === "text") return Boolean(textAnswer.trim());
+    return false;
+  }
+
+  function isOtherOption(option: string): boolean {
+    const normalized = option.trim().toLocaleLowerCase();
+    return normalized === "其他" || normalized === "other";
+  }
+
+  function customAnswerSelected(): boolean {
+    if (request?.kind === "single") return isOtherOption(selectedOption);
+    if (request?.kind === "multiple") return selectedOptions.some(isOtherOption);
+    return false;
+  }
+
+  function answerText(answer: string | string[] | boolean): string {
+    if (Array.isArray(answer)) return answer.join(", ");
+    if (typeof answer === "boolean") {
+      return t(answer ? "questionTool.confirm" : "questionTool.cancel");
+    }
+    return answer;
   }
 </script>
 
@@ -58,14 +115,23 @@
     <div class="question-text">{request.question}</div>
 
     {#if result?.status === "answered"}
-      <div class="question-result">{t("questionTool.answered", { answer: result.answer })}</div>
+      <div class="question-result">{t("questionTool.answered", { answer: answerText(result.answer) })}</div>
     {:else if result?.status === "cancelled"}
       <div class="question-result muted">{t("questionTool.cancelled")}</div>
     {:else if !pending}
       <div class="question-error" role="alert">{block.resultText}</div>
+    {:else if request.kind === "confirm"}
+      <div class="question-actions">
+        <button type="button" class="secondary" disabled={submitting} onclick={() => void respond({ cancelled: false, answer: false })}>
+          {t("questionTool.cancel")}
+        </button>
+        <button type="button" disabled={submitting} onclick={() => void respond({ cancelled: false, answer: true })}>
+          {t("questionTool.confirm")}
+        </button>
+      </div>
     {:else}
       <form onsubmit={submit}>
-        {#if request.options}
+        {#if request.kind === "single"}
           <fieldset disabled={!pending || submitting}>
             <legend class="sr-only">{request.question}</legend>
             {#each request.options as option}
@@ -75,7 +141,17 @@
               </label>
             {/each}
           </fieldset>
-        {:else}
+        {:else if request.kind === "multiple"}
+          <fieldset disabled={!pending || submitting}>
+            <legend class="sr-only">{request.question}</legend>
+            {#each request.options as option}
+              <label class="question-option">
+                <input type="checkbox" value={option} bind:group={selectedOptions} />
+                <span>{option}</span>
+              </label>
+            {/each}
+          </fieldset>
+        {:else if request.kind === "text"}
           <label class="sr-only" for={`question-${block.toolCallId}`}>{request.question}</label>
           <input
             id={`question-${block.toolCallId}`}
@@ -87,11 +163,25 @@
           />
         {/if}
 
+        {#if customAnswerSelected()}
+          <label class="sr-only" for={`question-other-${block.toolCallId}`}>
+            {t("questionTool.otherPlaceholder")}
+          </label>
+          <input
+            id={`question-other-${block.toolCallId}`}
+            class="question-input"
+            type="text"
+            bind:value={customAnswer}
+            disabled={!pending || submitting}
+            placeholder={t("questionTool.otherPlaceholder")}
+          />
+        {/if}
+
         <div class="question-actions">
           <button type="button" class="secondary" disabled={!pending || submitting} onclick={() => void respond({ cancelled: true })}>
             {t("questionTool.cancel")}
           </button>
-          <button type="submit" disabled={!pending || submitting || !(request.options ? selectedOption : textAnswer.trim())}>
+          <button type="submit" disabled={!pending || submitting || !canSubmit()}>
             {t("questionTool.submit")}
           </button>
         </div>

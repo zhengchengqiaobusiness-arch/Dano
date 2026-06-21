@@ -4736,7 +4736,7 @@ export class WsRpcAdapter {
       case "answer_question": {
         const toolCallId = command.toolCallId.trim();
         if (!toolCallId) throw new Error("Question tool call ID is required");
-        if (!command.cancelled && typeof command.answer !== "string") {
+        if (!command.cancelled && command.answer === undefined) {
           throw new Error("Question answer is required");
         }
 

@@ -2102,7 +2102,10 @@ export function answerQuestion(
   toolCallId: string,
   response:
     | { cancelled: true }
-    | { cancelled: false; answer: string },
+    | {
+        cancelled: false;
+        answer: string | string[] | boolean;
+      },
 ): Promise<RpcResponse> {
   return sendCommand({ type: "answer_question", toolCallId, ...response });
 }
