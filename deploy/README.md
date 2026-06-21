@@ -27,8 +27,12 @@ cp .env.example .env
 DANO_NGINX_PORT=18082 pnpm run deploy:up
 DANO_SMOKE_BASE_URL=http://127.0.0.1:18082 pnpm run smoke:deploy
 pnpm run deploy:logs
+pnpm run deploy:stop
 pnpm run deploy:down
 ```
+
+`deploy:stop` preserves containers and runtime data. `deploy:down` removes the
+containers and Compose network; bind-mounted `runtime-data/` remains intact.
 
 The app container listens on `8080`; nginx publishes `${DANO_NGINX_PORT:-80}`.
 

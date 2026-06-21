@@ -165,8 +165,10 @@ http://127.0.0.1:18082
 Stop:
 
 ```bash
-pnpm run deploy:down
+pnpm run deploy:stop
 ```
+
+Remove the stopped containers and Compose network with `pnpm run deploy:down`.
 
 Production servers should prefer pulling a prebuilt image instead of building
 with pnpm on the target host:

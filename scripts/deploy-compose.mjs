@@ -34,6 +34,9 @@ switch (command) {
   case "down":
     run(["down"]);
     break;
+  case "stop":
+    run(["stop"]);
+    break;
   case "logs":
     run(["logs", "-f", "--tail", "100"]);
     break;
@@ -41,6 +44,6 @@ switch (command) {
     run(["ps"]);
     break;
   default:
-    console.error("Usage: node scripts/deploy-compose.mjs <up|down|logs|ps>");
+    console.error("Usage: node scripts/deploy-compose.mjs <up|stop|down|logs|ps>");
     process.exit(1);
 }

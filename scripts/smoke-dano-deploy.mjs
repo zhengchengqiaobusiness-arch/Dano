@@ -66,10 +66,16 @@ async function waitForSseMessage(response, predicate) {
   try {
     while (Date.now() < deadline) {
       const remaining = deadline - Date.now();
+      let timeoutId;
       const timeout = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error("timed out waiting for SSE")), remaining);
+        timeoutId = setTimeout(
+          () => reject(new Error("timed out waiting for SSE")),
+          remaining,
+        );
       });
-      const { value, done } = await Promise.race([reader.read(), timeout]);
+      const { value, done } = await Promise.race([reader.read(), timeout]).finally(
+        () => clearTimeout(timeoutId),
+      );
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       const parsed = parseSseMessages(buffer);
