@@ -57,13 +57,39 @@ export const customTools = [
   }),
   proxyTool({
     name: "draft_workflow", label: "编排复合流程",
-    description: "把多个已发布动作编排成一个复合流程 Skill。steps 每步给 action 和 inputs(目标路径→来源:" +
-      "const:常量 / field:用户字段 / step:前一步动作.出参点路径,如 step:start_leave_flow.data.taskId)。",
+    description: "把多步编排成一个复合业务 Skill(DSL v2:声明式业务逻辑)。每个 step 有 kind(缺省 call):\n" +
+      "- call:{action, inputs(目标路径→来源)}\n" +
+      "- compute:{outputs(变量名→审计表达式,只准用 business_days/days_between/sum_/round_/min_/max_ 等审计函数)}\n" +
+      "- branch:{condition(布尔表达式), then[子步], otherwise[子步]}\n" +
+      "- foreach:{over(列表来源), as_var(当前项变量名), steps[子步]}\n" +
+      "- select:{from_action(查询动作), list_path, label_template, bind(选中项绑定的变量名)}\n" +
+      "来源前缀:const:常量 / field:用户字段 / step:动作.出参点路径 / var:compute产出 / item:foreach当前项 / select:选中值。\n" +
+      "preconditions/invariants 各为不变量数组 {check(布尔表达式), message, evidence?{query_action, params}}:" +
+      "前置不过则拒、不写;事后不变量回查证实真生效。**动作必须已发布、表达式只准用已声明字段/变量+审计函数**(臆造会被 grounding 拒)。",
     parameters: Type.Object({
       system_instance_id: Type.String(), action: Type.String(), title: Type.String(),
       user_fields: Type.Array(Type.String()), required_fields: Type.Array(Type.String()),
-      steps: Type.Array(Type.Object({ action: Type.String(),
-        inputs: Type.Record(Type.String(), Type.String()) })),
+      steps: Type.Array(Type.Object({
+        kind: Type.Optional(Type.String()),
+        action: Type.Optional(Type.String()),
+        inputs: Type.Optional(Type.Record(Type.String(), Type.String())),
+        outputs: Type.Optional(Type.Record(Type.String(), Type.String())),
+        condition: Type.Optional(Type.String()),
+        then: Type.Optional(Type.Array(Type.Any())),
+        otherwise: Type.Optional(Type.Array(Type.Any())),
+        over: Type.Optional(Type.String()), as_var: Type.Optional(Type.String()),
+        steps: Type.Optional(Type.Array(Type.Any())),
+        from_action: Type.Optional(Type.String()), list_path: Type.Optional(Type.String()),
+        label_template: Type.Optional(Type.String()), bind: Type.Optional(Type.String()),
+      })),
+      preconditions: Type.Optional(Type.Array(Type.Object({
+        check: Type.String(), message: Type.Optional(Type.String()), evidence: Type.Optional(Type.Any()),
+      }))),
+      invariants: Type.Optional(Type.Array(Type.Object({
+        check: Type.String(), message: Type.Optional(Type.String()), evidence: Type.Optional(Type.Any()),
+      }))),
+      preview: Type.Optional(Type.Boolean()),
+      success_rule: Type.Optional(Type.String()),
     }),
   }),
   proxyTool({
@@ -77,6 +103,12 @@ export const customTools = [
   proxyTool({
     name: "get_policy_doc", label: "取制度原文",
     description: "返回该系统实例登记的制度文件原文,供抽取声明式规则。",
+    parameters: Type.Object({ system_instance_id: Type.String() }),
+  }),
+  proxyTool({
+    name: "get_business_rules", label: "取业务规则",
+    description: "返回人工登记的业务规则(阈值/审批链)+ 日历源(holidays)。" +
+      "据此 grounding 分支 condition / 前置·不变量 / compute 的 business_days,**不要臆造规则**。",
     parameters: Type.Object({ system_instance_id: Type.String() }),
   }),
   proxyTool({

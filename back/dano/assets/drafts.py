@@ -34,7 +34,7 @@ REQUIRED_KINDS: dict[AssetType, set[ValidationKind]] = {
     AssetType.ENV_PROFILE: {"health"},
     AssetType.PAGE_SCRIPT: {"replay"},
     AssetType.POLICY_RULE: {"cases"},   # 制度规则须用例全通过(放行/拦截/转审批,生成期离线跑)
-    AssetType.WORKFLOW: {"sandbox"},    # 复合流程须整条按序 dry-run 通过(sandbox_test_workflow)
+    AssetType.WORKFLOW: {"cases"},      # 复合流程须多用例 dry-run + 分支覆盖通过(sandbox_test_workflow 记 cases)
     AssetType.ADAPTER: {"sandbox", "vuln"},  # 代码适配器:隔离 runner 跑通 + 漏洞校验静态扫描
 }
 

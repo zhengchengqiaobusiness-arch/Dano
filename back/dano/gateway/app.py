@@ -83,13 +83,25 @@ async def _load_endpoints(tenant: str) -> dict[str, SystemEndpoint]:
     return endpoints
 
 
+async def _load_holidays(tenant: str) -> list[str]:
+    """汇总该租户各子系统 env_profile 里登记的日历源(供复合流程 compute 的 business_days)。"""
+    out: list[str] = []
+    for sub in ALL_SUBSYSTEMS:
+        env = await repo.get_published(AssetType.ENV_PROFILE, Scope(tenant=tenant, subsystem=sub),
+                                       asset_key=AssetType.ENV_PROFILE.value)
+        if env:
+            out += list((env.body or {}).get("holidays") or [])
+    return sorted(set(out))
+
+
 async def _orchestrator(tenant: str) -> Orchestrator:
     endpoints = await _load_endpoints(tenant)
     executor = RealActionExecutor(endpoints=endpoints, auth_manager=AuthManager())
     registry = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=ALL_SUBSYSTEMS)
     harness = Harness(action_executor=executor, resolve_credentials=_resolve_creds)
     return Orchestrator(registry=registry, store=repo, harness=harness,
-                        action_executor=executor, resolve_credentials=_resolve_creds)
+                        action_executor=executor, resolve_credentials=_resolve_creds,
+                        holidays=await _load_holidays(tenant))
 
 
 async def _auth_tenant(x_tenant_key: str | None) -> str:
@@ -213,9 +225,11 @@ class OnboardReq(BaseModel):
     deploy: dict
     credentials: dict[str, str] = {}
     policy_text: str = ""          # 制度文件原文(可选,仅旧声明式路径)
+    business_rules: list[dict] = []   # 人工业务规则(阈值/审批链)→ pi grounding 分支/前置
+    holidays: list[str] = []          # 日历源(法定节假日)→ env_profile,运行期注入 business_days
     include_tags: list[str] = []   # 类别白名单(空=全部业务动作;超大 swagger 先圈范围)
     flows: list[dict] = []         # 写/复合流程声明 [{flow, actions?, test_input}](codegen 主路径用)
-    use_codegen: bool = True       # 主路径=goal 模式代码自动生成;False=旧声明式
+    use_codegen: bool = False      # 默认单一 pi 路径(产声明式 DSL v2);True=已退役 codegen 逃生舱
     max_read_flows: int | None = None   # 自动生成的只读 adapter 上限(None=全部;大 swagger 建议设小)
 
 
@@ -450,6 +464,7 @@ async def onboarding(req: OnboardReq) -> dict:
     report = await onboard(tenant=req.tenant, subsystem=req.subsystem, openapi=req.openapi,
                            deploy=req.deploy, credentials=req.credentials,
                            policy_text=req.policy_text, include_tags=req.include_tags,
+                           business_rules=req.business_rules, holidays=req.holidays,
                            flows=req.flows, use_codegen=req.use_codegen,
                            max_read_flows=req.max_read_flows, lifecycle=_lifecycle)
     await _auto_export(req.tenant)
@@ -495,7 +510,8 @@ async def onboarding_start(req: OnboardReq) -> dict:
             rep = await onboard(
                 tenant=req.tenant, subsystem=req.subsystem, openapi=req.openapi,
                 deploy=req.deploy, credentials=req.credentials, policy_text=req.policy_text,
-                include_tags=req.include_tags, flows=req.flows, use_codegen=req.use_codegen,
+                include_tags=req.include_tags, business_rules=req.business_rules, holidays=req.holidays,
+                flows=req.flows, use_codegen=req.use_codegen,
                 max_read_flows=req.max_read_flows, progress=_progress, lifecycle=_lifecycle)
             job["report"] = rep.model_dump()
             job["status"] = "completed"

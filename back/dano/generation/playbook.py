@@ -37,6 +37,7 @@ class PlaybookSpec:
     do: Operation | None = None                        # 办理(主写操作)
     preflight: list[str] = field(default_factory=list)
     preconditions: list[dict] = field(default_factory=list)   # {desc, client_checkable}
+    invariants: list[dict] = field(default_factory=list)      # DSL IR 业务不变量 {check, message}(⑤ 渲染)
     errors: list[dict] = field(default_factory=list)          # {when, meaning, action}
     post_check: dict = field(default_factory=dict)            # {stages, ledger, verify}
     recovery: list[dict] = field(default_factory=list)        # {op, needs, prefetch}
@@ -75,8 +76,13 @@ def _business_meta(manifests: list) -> dict:  # noqa: ANN001
 
 
 def build_playbook(subsystem: str, business: str, manifests: list, *,  # noqa: ANN001
-                   template_id: str = "") -> PlaybookSpec:
-    """从该业务的 manifest 列表 + x-flow 业务规则,组装 PlaybookSpec。纯映射,缺则空。"""
+                   template_id: str = "", ir_preconditions: list[dict] | None = None,
+                   ir_invariants: list[dict] | None = None) -> PlaybookSpec:
+    """从该业务的 manifest 列表 + x-flow 业务规则 + **DSL IR 的前置/不变量**,组装 PlaybookSpec。纯映射,缺则空。
+
+    ir_preconditions/ir_invariants:来自声明式 WORKFLOW IR(单一事实源),并入 ②前置 / ⑤事后,
+    使剧本反映**真实业务逻辑**(余额校验/天数核对…),而非只靠 x-flow 注解。
+    """
     ops = [Operation(op=getattr(m, "action", ""), title=getattr(m, "title", "") or getattr(m, "action", ""),
                      write=bool(getattr(m, "requires_confirmation", False)),
                      fields=_op_fields(m),
@@ -140,4 +146,11 @@ def build_playbook(subsystem: str, business: str, manifests: list, *,  # noqa: A
                 "op": kind, "needs": needs,
                 "prefetch": prefetch if prefetch in present else "",
             })
+
+    # DSL IR 单一事实源:前置不变量并入 ②;业务不变量进 ⑤(reflect 真实业务逻辑)
+    for inv in (ir_preconditions or []):
+        spec.preconditions.append(
+            {"desc": inv.get("message") or inv.get("check") or "", "client_checkable": False})
+    spec.invariants = [{"check": i.get("check"), "message": i.get("message") or i.get("check")}
+                       for i in (ir_invariants or [])]
     return spec

@@ -62,25 +62,66 @@ def _get_path(obj, path: str):  # noqa: ANN001
     return cur
 
 
-def _resolve_source(source: str, user_fields: dict, step_outputs: dict):  # noqa: ANN001
-    """解析来源表达式:const:/field:/step:。"""
+def _resolve_source(source: str, ctx: dict):  # noqa: ANN001
+    """解析来源表达式:const:/field:/step:/var:/item:/select:。ctx={fields,vars,steps,item}。"""
     kind, _, rest = source.partition(":")
     if kind == "const":
         return rest
     if kind == "field":
-        return user_fields.get(rest)
+        return ctx.get("fields", {}).get(rest)
+    if kind in ("var", "select"):                 # compute 产出 / select 绑定都落在 vars
+        return ctx.get("vars", {}).get(rest)
     if kind == "step":
         action, _, path = rest.partition(".")
-        return _get_path(step_outputs.get(action, {}), path)
+        return _get_path(ctx.get("steps", {}).get(action, {}), path)
+    if kind == "item":
+        item = ctx.get("item")
+        return _get_path(item, rest) if rest else item
     return None
 
 
-def _resolve_step_inputs(mapping: dict, user_fields: dict, step_outputs: dict) -> dict:
-    """把一步的 {目标路径: 来源} 映射拼成请求体。"""
+def _resolve_step_inputs(mapping: dict, ctx: dict) -> dict:
+    """把一步的 {目标路径: 来源} 映射拼成请求体。ctx={fields,vars,steps,item}。"""
     body: dict = {}
     for target_path, source in mapping.items():
-        _set_path(body, target_path, _resolve_source(source, user_fields, step_outputs))
+        _set_path(body, target_path, _resolve_source(source, ctx))
     return body
+
+
+def _expr_ctx(ctx: dict, response: object = None) -> dict:
+    """组装表达式求值上下文(compute/branch/不变量用):业务字段 + 派生变量 + 当前项 + 回查响应。"""
+    d: dict = {**ctx.get("fields", {}), **ctx.get("vars", {})}
+    if ctx.get("item") is not None:
+        d["item"] = ctx["item"]
+    d["response"] = response if response is not None else {}
+    return d
+
+
+def _candidate_id(c: object):  # noqa: ANN001
+    """从候选项里取标识:优先 id,否则第一个值(消歧选中后绑给后续步)。"""
+    if isinstance(c, dict):
+        if "id" in c:
+            return c["id"]
+        return next(iter(c.values()), None)
+    return c
+
+
+class _StepFailed(Exception):
+    def __init__(self, reason: str, action: str | None = None) -> None:
+        super().__init__(reason)
+        self.reason, self.action = reason, action
+
+
+class _CapabilityGap(Exception):
+    def __init__(self, action: str) -> None:
+        super().__init__(action)
+        self.action = action
+
+
+class _NeedSelect(Exception):
+    def __init__(self, bind: str, candidates: list, label_template: str | None) -> None:
+        super().__init__(bind)
+        self.bind, self.candidates, self.label_template = bind, candidates, label_template
 
 # 确认卡片回调:给定 skill+字段,返回用户是否确认(L3)。默认不确认(安全)。
 ConfirmHandler = Callable[[SkillSpec, dict], bool]
@@ -109,6 +150,7 @@ class Orchestrator:
         page_runtime=None,     # PageActionRuntime(可选,无 API 页面执行)
         failure_handler=None,  # FailureHandler(可选,流程10;Phase 4 接)
         heal_queue=None,       # 漂移自愈触发队列(流程11;Phase 4 接)
+        holidays: list[str] | None = None,   # 日历源:注入复合流程 compute 的 business_days(节假日)
     ) -> None:
         self.registry = registry
         self.store = store
@@ -120,6 +162,7 @@ class Orchestrator:
         self.page_runtime = page_runtime
         self.failure_handler = failure_handler
         self.heal_queue = heal_queue
+        self.holidays = list(holidays or [])
 
     async def _connector_body(self, asset_id: UUID) -> ConnectorBody:
         env = await self.store.get(asset_id)
@@ -275,62 +318,176 @@ class Orchestrator:
         return call
 
     async def _run_workflow(self, task_id, tenant, skill, intent) -> TaskOutcome:  # noqa: ANN001
-        """复合流程 Skill(阶段2):按 steps 顺序跑连接器,前一步输出串给后一步。
-
-        每步执行后按成败规则判定;任一步跑不通即整体失败。绝不为某家写 if/else——
-        步骤与映射来自已发布的 WORKFLOW 资产(声明式),执行层是通用解释器。
+        """复合流程 Skill(DSL v2):前置不变量 → 解释器执行 steps(call/compute/branch/foreach/select)
+        → 业务不变量。步骤/映射/规则全来自已发布 WORKFLOW 资产(声明式),执行层是通用解释器,绝不为某家写 if/else。
         """
         scope = Scope(tenant=tenant, subsystem=skill.subsystem)
-        user_fields = dict(intent.fields)
-        rule = skill.workflow_success_rule
-        step_outputs: dict[str, dict] = {}
-        assertion_results: list[AssertionResult] = []
-        trace: list[dict] = []   # 每步 请求/响应 留痕(诊断真实系统用)
-        creds: dict | None = None
-        last_body: dict = {}
+        # vars 预置 holidays(日历源):compute 的 business_days(start,end,holidays) 可直接引用
+        ctx: dict = {"fields": dict(intent.fields), "vars": {"holidays": self.holidays},
+                     "steps": {}, "item": None}
+        state: dict = {"creds": None, "rule": skill.workflow_success_rule, "scope": scope,
+                       "trace": [], "assertions": [], "last_body": {}, "connectors": {},
+                       "branches": []}    # 记录走过的分支臂(branch_id, 真/假),供沙箱分支覆盖统计
 
-        for step in skill.workflow_steps:
-            action = step["action"]
-            env = await self.store.get_published(AssetType.CONNECTOR, scope, asset_key=action)
-            if env is None:
-                return TaskOutcome(task_id=task_id, state=TaskState.CAPABILITY_GAP, skill_id=skill.skill_id,
-                                   message=f"复合流程缺少步骤连接器: {action}")
-            connector = ConnectorBody.model_validate(env.body)
-            if creds is None:
-                creds = self.resolve({"primary": connector.auth_ref})
-            body = _resolve_step_inputs(step.get("inputs", {}), user_fields, step_outputs)
-            try:
-                resp = await self.executor.execute(connector.model_dump(), body, creds)
-            except Exception as e:  # noqa: BLE001
-                return TaskOutcome(task_id=task_id, state=TaskState.FAILED, skill_id=skill.skill_id,
-                                   message=f"流程步骤 {action} 异常: {e}",
-                                   audit={"failed_step": action, "trace": trace})
-            ok = 200 <= resp.http < 300
-            if ok and rule:
-                try:
-                    ok = bool(safe_eval(rule, {"response": resp.body, "http": resp.http}))
-                except Exception:  # noqa: BLE001
-                    ok = False
-            assertion_results.append(AssertionResult(name=f"step:{action}", passed=ok,
-                                                     detail=f"HTTP {resp.http}"))
-            step_outputs[action] = resp.body
-            last_body = resp.body
-            trace.append({"action": action, "method": connector.method, "endpoint": connector.endpoint,
-                          "request": body, "http": resp.http, "response": resp.body, "ok": ok})
-            log.info("workflow.step", skill=skill.skill_id, step=action, http=resp.http, ok=ok)
+        # ① 前置不变量(办理前校验:不过则拒、绝不写)
+        for inv in (skill.workflow_preconditions or []):
+            ok, detail = await self._check_invariant(inv, ctx, state)
             if not ok:
-                er = ExecResult(task_id=task_id, outcome=Outcome.FAILED,
-                                assertion_results=assertion_results,
-                                evidence=Evidence(request_body=body, response_body=resp.body))
-                return TaskOutcome(task_id=task_id, state=TaskState.FAILED, skill_id=skill.skill_id,
-                                   exec_result=er, message=f"流程步骤 {action} 跑不通 → 流程10",
-                                   audit={"failed_step": action, "trace": trace})
+                return TaskOutcome(task_id=task_id, state=TaskState.REJECTED, skill_id=skill.skill_id,
+                                   message=f"前置校验不通过:{detail}", audit={"trace": state["trace"]})
 
-        er = ExecResult(task_id=task_id, outcome=Outcome.PASSED, assertion_results=assertion_results,
-                        evidence=Evidence(response_body=last_body), structured_output=last_body)
+        # ② 解释器执行步骤
+        try:
+            await self._exec_steps(skill.workflow_steps, ctx, state)
+        except _CapabilityGap as e:
+            return TaskOutcome(task_id=task_id, state=TaskState.CAPABILITY_GAP, skill_id=skill.skill_id,
+                               message=f"复合流程缺少步骤连接器: {e.action}")
+        except _NeedSelect as e:
+            return TaskOutcome(task_id=task_id, state=TaskState.NEEDS_SELECT, skill_id=skill.skill_id,
+                               message=f"需从候选中选择 {e.bind}",
+                               audit={"select": {"bind": e.bind, "candidates": e.candidates,
+                                                 "label_template": e.label_template}, "trace": state["trace"]})
+        except _StepFailed as e:
+            er = ExecResult(task_id=task_id, outcome=Outcome.FAILED, assertion_results=state["assertions"],
+                            evidence=Evidence(response_body=state["last_body"]))
+            return TaskOutcome(task_id=task_id, state=TaskState.FAILED, skill_id=skill.skill_id,
+                               exec_result=er, message=f"{e.reason} → 流程10",
+                               audit={"failed_step": e.action, "trace": state["trace"],
+                                      "branches": state["branches"]})
+
+        # ③ 业务不变量(办理后正确性:回查证实,不只看字面 200)
+        for inv in (skill.workflow_invariants or []):
+            ok, detail = await self._check_invariant(inv, ctx, state)
+            if not ok:
+                er = ExecResult(task_id=task_id, outcome=Outcome.FAILED, assertion_results=state["assertions"],
+                                evidence=Evidence(response_body=state["last_body"]))
+                return TaskOutcome(task_id=task_id, state=TaskState.FAILED, skill_id=skill.skill_id,
+                                   exec_result=er, message=f"业务不变量不通过:{detail}",
+                                   audit={"trace": state["trace"]})
+
+        er = ExecResult(task_id=task_id, outcome=Outcome.PASSED, assertion_results=state["assertions"],
+                        evidence=Evidence(response_body=state["last_body"]), structured_output=state["last_body"])
         return TaskOutcome(task_id=task_id, state=TaskState.COMPLETED, skill_id=skill.skill_id,
-                           exec_result=er, message=f"流程完成({len(skill.workflow_steps)} 步全通过)",
-                           audit={"trace": trace, "intent": intent.action_hint})
+                           exec_result=er, message="流程完成(全步骤 + 不变量通过)",
+                           audit={"trace": state["trace"], "vars": ctx["vars"],
+                                  "branches": state["branches"], "intent": intent.action_hint})
+
+    async def _exec_steps(self, steps: list, ctx: dict, state: dict, prefix: str = "") -> None:  # noqa: ANN001
+        """递归解释器:按序执行 DSL v2 节点。失败/缺连接器/需选择 → 抛异常,由 _run_workflow 转终态。
+
+        prefix:节点在树中的稳定路径(供分支覆盖统计;与 dsl_grounding.branch_ids 同一编号约定)。
+        """
+        for i, step in enumerate(steps):
+            sid = f"{prefix}{i}"
+            kind = step.get("kind", "call")
+            if kind == "compute":
+                for name, expr in (step.get("outputs") or {}).items():
+                    try:
+                        ctx["vars"][name] = safe_eval(expr, _expr_ctx(ctx))
+                    except Exception as e:  # noqa: BLE001
+                        raise _StepFailed(f"派生计算 {name} 失败: {e}", "compute") from e
+                log.info("workflow.compute", outputs=list((step.get("outputs") or {}).keys()))
+            elif kind == "branch":
+                try:
+                    cond = bool(safe_eval(step["condition"], _expr_ctx(ctx)))
+                except Exception as e:  # noqa: BLE001
+                    raise _StepFailed(f"分支条件求值失败: {e}", "branch") from e
+                state["branches"].append([sid, cond])      # 记录该分支走了哪一臂(覆盖统计用)
+                log.info("workflow.branch", condition=step["condition"], taken=cond)
+                arm = step.get("then") if cond else (step.get("otherwise") or [])
+                await self._exec_steps(arm, ctx, state, f"{sid}.{'t' if cond else 'f'}.")
+            elif kind == "foreach":
+                items = _resolve_source(step["over"], ctx)
+                items = items if isinstance(items, list) else []
+                log.info("workflow.foreach", over=step["over"], n=len(items))
+                for it in items:
+                    ctx["item"] = it
+                    await self._exec_steps(step.get("steps") or [], ctx, state, f"{sid}.s.")
+                ctx["item"] = None
+            elif kind == "select":
+                await self._exec_select(step, ctx, state)
+            else:
+                await self._exec_call(step, ctx, state)
+
+    async def _load_connector(self, action: str | None, state: dict) -> ConnectorBody:  # noqa: ANN001
+        if not action:
+            raise _StepFailed("调用步缺 action", None)
+        cache = state["connectors"]
+        if action in cache:
+            return cache[action]
+        env = await self.store.get_published(AssetType.CONNECTOR, state["scope"], asset_key=action)
+        if env is None:
+            raise _CapabilityGap(action)
+        c = ConnectorBody.model_validate(env.body)
+        if state["creds"] is None:
+            state["creds"] = self.resolve({"primary": c.auth_ref})
+        cache[action] = c
+        return c
+
+    async def _exec_call(self, step: dict, ctx: dict, state: dict) -> None:  # noqa: ANN001
+        action = step.get("action")
+        connector = await self._load_connector(action, state)
+        body = _resolve_step_inputs(step.get("inputs") or {}, ctx)
+        try:
+            resp = await self.executor.execute(connector.model_dump(), body, state["creds"])
+        except Exception as e:  # noqa: BLE001
+            raise _StepFailed(f"流程步骤 {action} 异常: {e}", action) from e
+        ok = 200 <= resp.http < 300
+        if ok and state["rule"]:
+            try:
+                ok = bool(safe_eval(state["rule"], {"response": resp.body, "http": resp.http}))
+            except Exception:  # noqa: BLE001
+                ok = False
+        state["assertions"].append(AssertionResult(name=f"step:{action}", passed=ok, detail=f"HTTP {resp.http}"))
+        ctx["steps"][action] = resp.body
+        state["last_body"] = resp.body
+        state["trace"].append({"action": action, "method": connector.method, "endpoint": connector.endpoint,
+                               "request": body, "http": resp.http, "response": resp.body, "ok": ok})
+        log.info("workflow.step", step=action, http=resp.http, ok=ok)
+        if not ok:
+            raise _StepFailed(f"流程步骤 {action} 跑不通", action)
+
+    async def _run_query(self, action: str, params: dict, ctx: dict, state: dict) -> dict:  # noqa: ANN001
+        """回查/取候选用的只读调用(不计入断言/成败,只取响应体)。"""
+        connector = await self._load_connector(action, state)
+        body = _resolve_step_inputs(params or {}, ctx)
+        resp = await self.executor.execute(connector.model_dump(), body, state["creds"])
+        return resp.body if isinstance(resp.body, dict) else {"value": resp.body}
+
+    async def _exec_select(self, step: dict, ctx: dict, state: dict) -> None:  # noqa: ANN001
+        """消歧:从某查询候选里选一个绑给后续步。用户预选(input 给了 bind)或唯一候选 → 自动;
+        否则抛 _NeedSelect(上层暂以 NEEDS_INPUT 返回候选,Phase 5 接 NEEDS_SELECT)。"""
+        bind = step["bind"]
+        pre = ctx["fields"].get(bind)
+        if pre not in (None, ""):
+            ctx["vars"][bind] = pre
+            return
+        body = await self._run_query(step["from_action"], {}, ctx, state)
+        lp = step.get("list_path")
+        candidates = _get_path(body, lp) if lp else body
+        candidates = candidates if isinstance(candidates, list) else []
+        if len(candidates) == 1:
+            ctx["vars"][bind] = _candidate_id(candidates[0])
+            return
+        raise _NeedSelect(bind, candidates, step.get("label_template"))
+
+    async def _check_invariant(self, inv: dict, ctx: dict, state: dict) -> tuple[bool, str]:  # noqa: ANN001
+        """求值一条不变量。给了 evidence 则先回查真实系统(response=回查体);否则 response=末步响应体。"""
+        ev = inv.get("evidence") or {}
+        if ev.get("query_action"):
+            try:
+                resp = await self._run_query(ev["query_action"], ev.get("params") or {}, ctx, state)
+            except _CapabilityGap as e:
+                return False, f"回查动作未发布: {e.action}"
+            except Exception as e:  # noqa: BLE001
+                return False, f"回查失败: {e}"
+        else:
+            resp = state["last_body"]
+        try:
+            ok = bool(safe_eval(inv["check"], _expr_ctx(ctx, response=resp)))
+        except Exception as e:  # noqa: BLE001
+            return False, f"表达式求值失败: {e}"
+        return ok, (inv.get("message") or inv.get("check") or "")
 
     async def _run_api(self, task_id, tenant, skill, intent, *, confirm) -> TaskOutcome:  # noqa: ANN001
         connector = await self._connector_body(skill.connector_asset_id)

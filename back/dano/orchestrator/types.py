@@ -39,8 +39,11 @@ class SkillSpec(BaseModel):
     # 复合流程 Skill(阶段2):多步连接器编排成一个业务能力
     is_workflow: bool = False
     workflow_asset_id: UUID | None = None
-    workflow_steps: list[dict] = Field(default_factory=list)    # WorkflowStep 字典
+    workflow_steps: list[dict] = Field(default_factory=list)    # WorkflowStep 字典(DSL v2 节点)
     workflow_success_rule: str | None = None
+    workflow_preconditions: list[dict] = Field(default_factory=list)   # DSL v2:办理前不变量
+    workflow_invariants: list[dict] = Field(default_factory=list)      # DSL v2:办理后业务正确性不变量
+    workflow_preview: bool = False                                     # DSL v2:写前预览待确认(Phase 5 接)
 
     business: str = ""                                          # 所属业务(同业务多操作 adapter 导出归组)
     business_meta: dict = Field(default_factory=dict)           # 业务规则(x-flow)→ 导出剧本的前置/错误/确认段

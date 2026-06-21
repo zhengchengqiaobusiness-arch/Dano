@@ -105,6 +105,7 @@ metadata:
 | status | 含义 | 你应做的 |
 |---|---|---|
 | `succeeded` | 真实执行且事实核查通过 | 告知成功,附 `output` 里的单号 / procInsId |
+| `need_select` | 复合流程消歧:有多个候选待选 | 把 `candidates` 给用户选,再用 `--json` 把选中项的 `bind` 值带上重跑 |
 | `need_confirm` | 写操作未确认被拦 | 向用户确认后,**带 `--confirm` 重跑** |
 | `failed` | 失败(见 `reason`) | 把 reason 告知用户;缺参/凭证按故障排除处理,**勿谎报成功** |
 
@@ -271,6 +272,10 @@ def main():
     output = (res.get("exec_result") or {}).get("structured_output")
     if state == "completed":
         _emit({"status": "succeeded", "state": state, "output": output, "fact_check": fc})
+    elif state == "needs_select":
+        sel = audit.get("select") or {}
+        _emit({"status": "need_select", "state": state, "message": res.get("message"),
+               "bind": sel.get("bind"), "candidates": sel.get("candidates")})
     elif state == "cancelled" or "确认" in (res.get("message") or ""):
         _emit({"status": "need_confirm", "state": state, "message": res.get("message")})
     else:

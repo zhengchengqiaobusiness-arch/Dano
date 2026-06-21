@@ -111,6 +111,7 @@ class TaskState(StrEnum):
     REJECTED = "rejected"             # 制度/风险闸门拒绝(L4/L5 或规则拦截)
     CANCELLED = "cancelled"           # L3 确认卡片被用户取消
     NEEDS_INPUT = "needs_input"       # 缺必填且追问超限 → 转人工
+    NEEDS_SELECT = "needs_select"     # 复合流程消歧:候选>1 未选 → 返回候选待前端/agent 选(DSL v2)
     NEEDS_KNOWLEDGE = "needs_knowledge"  # 问事 → 转知识检索子智能体(M3)
     CAPABILITY_GAP = "capability_gap"    # 做事但无对应动作 Skill → 新增 Skill(流程12)
     TRANSFER_HUMAN = "transfer_human"    # 兜底转人工

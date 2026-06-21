@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -18,6 +19,40 @@ import structlog
 from dano.shared.asset_bodies import WorkflowSkillBody
 
 log = structlog.get_logger(__name__)
+
+
+def _walk_vmodel_fields(node: object, out: list[dict]) -> None:
+    """递归遍历 element-ui 表单设计器结构,凡带字段模型(__vModel__/vModel)的控件收为一个字段。"""
+    if isinstance(node, dict):
+        vm = node.get("__vModel__") or node.get("vModel")
+        if isinstance(vm, str) and vm:
+            cfg = node.get("__config__") if isinstance(node.get("__config__"), dict) else {}
+            out.append({"key": vm, "label": str(cfg.get("label") or node.get("label") or vm),
+                        "type": str(cfg.get("tag") or node.get("tag") or "")})
+        for v in node.values():
+            _walk_vmodel_fields(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            _walk_vmodel_fields(v, out)
+
+
+def _ruoyi_form_fields(form_info: object) -> list[dict]:
+    """RuoYi 表单探针返回 → 字段清单 [{key,label,type}];data.formData 是 JSON 串(表单设计器结构)。"""
+    if not isinstance(form_info, dict) or form_info.get("code") not in (None, 200, 0):
+        return []
+    data = form_info.get("data") if isinstance(form_info.get("data"), dict) else {}
+    raw = data.get("formData")
+    conf: object = raw
+    if isinstance(raw, str):
+        try:
+            conf = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            conf = {}
+    schema = conf.get("formData") if isinstance(conf, dict) and "formData" in conf else conf
+    fields: list[dict] = []
+    _walk_vmodel_fields(schema, fields)
+    seen: set[str] = set()
+    return [f for f in fields if not (f["key"] in seen or seen.add(f["key"]))]
 
 
 class OATemplate(ABC):
@@ -42,6 +77,28 @@ class OATemplate(ABC):
 
         只声明配方;接入时若配方引用的连接器动作未全部发布,则跳过该复合 Skill。
         """
+        return []
+
+    # ── 系统特定的"复合契约"知识(主流程零字面量:接入编排只问 dialect,不写死端点)──
+    def contract_tokens(self) -> tuple[str, ...]:
+        """本框架共享的"契约/查询"端点子串(收窄候选端点用);通用框架无 → ()。"""
+        return ()
+
+    def submit_endpoints(self) -> tuple[str, ...]:
+        """复合提交契约涉及的有序端点(最后一个 = 最终提交步);无复合契约 → ()。"""
+        return ()
+
+    async def discover_contract(self, template_id: str, base_url: str, token: str, *, get=None):  # noqa: ANN001, ANN201
+        """运行时探出该业务的真实提交契约 {fields, submit_example, success_rule, steps};
+        非工作流框架 / 探不到 → None(上层回退原行为)。系统特定的探测逻辑全在子类。"""
+        return None
+
+    def form_probe_path(self, template_id: str) -> str | None:
+        """该业务模板"动态表单"的只读探针路径(系统特定);通用框架无 → None。"""
+        return None
+
+    def parse_form_fields(self, probe_response: object) -> list[dict]:
+        """把表单探针返回解析成字段清单 [{key,label,type}];非本框架结构 → []。"""
         return []
 
 
@@ -74,6 +131,24 @@ class RuoYiFlowableTemplate(OATemplate):
         """
         from dano.capabilities.business import recipes
         return recipes()
+
+    def contract_tokens(self) -> tuple[str, ...]:
+        return ("startflow", "/biz/form", "/biz/flow", "form/info", "form/save",
+                "flow/submit", "listprocess", "/draft", "/todo", "/done")
+
+    def submit_endpoints(self) -> tuple[str, ...]:
+        # 有序:发起 → 最终提交(最后一个 = 提交步,证据里的 request_example 挂它)
+        return ("/workflow/handle/startFlow", "/biz/flow/submit")
+
+    async def discover_contract(self, template_id: str, base_url: str, token: str, *, get=None):  # noqa: ANN001, ANN201
+        from dano.onboarding.contract_synth import synthesize_contract
+        return await synthesize_contract(template_id, base_url, token, get=get)
+
+    def form_probe_path(self, template_id: str) -> str | None:
+        return f"/biz/form/info?businessId=&templateId={template_id}" if template_id else None
+
+    def parse_form_fields(self, probe_response: object) -> list[dict]:
+        return _ruoyi_form_fields(probe_response)
 
 
 # 注册表(靠前优先)。新增框架插到最前。

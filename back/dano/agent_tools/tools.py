@@ -230,78 +230,97 @@ def _first_example(op: dict):  # noqa: ANN001
 # ── 建复合流程草案(goal 模式:pi 发现流程,给出步骤+io映射)──
 async def draft_workflow(run_id: str, params: dict) -> dict:
     from dano.capabilities import oa_templates
-    from dano.shared.asset_bodies import WorkflowSkillBody, WorkflowStep
+    from dano.generation.dsl_grounding import check_grounding, collect_field_refs
+    from dano.shared.asset_bodies import Invariant, WorkflowSkillBody, WorkflowStep
     sid = params["system_instance_id"]
     mat = _mat(run_id, sid)
-    steps = [WorkflowStep(action=s["action"], inputs=s.get("inputs", {})) for s in params["steps"]]
-    # 每个步骤动作须已发布连接器(否则运行期无法执行)
     scope = Scope(tenant=mat.tenant, subsystem=Subsystem(mat.subsystem))
-    for st in steps:
-        if await _repo.get_published(AssetType.CONNECTOR, scope, asset_key=st.action) is None:
-            raise ToolError(f"步骤连接器未发布,不能编排进流程: {st.action}")
+    # DSL v2:支持 call/compute/branch/foreach/select + 前置/不变量(模型按 kind 强校验)
+    try:
+        steps = [WorkflowStep.model_validate(s) for s in params["steps"]]
+        preconditions = [Invariant.model_validate(p) for p in params.get("preconditions", [])]
+        invariants = [Invariant.model_validate(p) for p in params.get("invariants", [])]
+    except Exception as e:  # noqa: BLE001
+        raise ToolError(f"流程节点结构非法: {e}") from e
+    # 契约自洽:所有 field:X 引用并入 user_fields/required_fields(防"用了却没声明")
+    used = collect_field_refs(steps)
+    required_fields = sorted(set(params.get("required_fields", [])) | used)
+    user_fields = sorted(set(params.get("user_fields", [])) | used)
     tmpl = oa_templates.match_template(mat.openapi or {})
-    # 契约自洽:steps 里所有 field:X 引用到的字段,都并入 required_fields/user_fields
-    # (防"用了却没声明必填"导致运行时缺字段失败)
-    used_fields = {v[len("field:"):] for s in steps for v in s.inputs.values()
-                   if isinstance(v, str) and v.startswith("field:")}
-    required_fields = sorted(set(params.get("required_fields", [])) | used_fields)
-    user_fields = sorted(set(params.get("user_fields", [])) | used_fields)
     body = WorkflowSkillBody(
         action=params["action"], title=params.get("title", params["action"]),
         steps=steps, user_fields=user_fields, required_fields=required_fields,
-        success_rule=tmpl.success_rule() if tmpl else None,
+        preconditions=preconditions, invariants=invariants, preview=bool(params.get("preview", False)),
+        success_rule=params.get("success_rule") or (tmpl.success_rule() if tmpl else None),
     )
+    # grounding 硬关卡:动作必须已发布、表达式只准用已声明字段/变量+审计函数、来源必须可追溯。
+    # ground 不住 → 拒绝并把问题回给 pi(绝不让臆造逻辑进库)。
+    published = {e.body.get("action", e.asset_key)
+                 for e in await _repo.list_published(AssetType.CONNECTOR, scope)}
+    issues = check_grounding(body, published_actions=published)
+    if issues:
+        raise ToolError("流程未通过 grounding 校验(请修正后重试):\n- " + "\n- ".join(issues))
     validate_asset_body(AssetType.WORKFLOW, body.model_dump())
     draft = await _ds.save_draft(run_id=run_id, scope=scope, asset_type=AssetType.WORKFLOW,
                                  asset_key=body.action, body=body.model_dump())
     return {"asset_draft_id": str(draft.asset_draft_id), "action": body.action,
-            "steps": [s.action for s in steps]}
+            "steps": [s.action for s in steps if s.kind == "call"]}
 
 
 # ── 复合流程整条 dry-run(测试账号按序真跑,记 sandbox 证据)──
 async def sandbox_test_workflow(run_id: str, params: dict) -> dict:
+    """用测试账号把复合流程**多用例**经运行期**同一解释器** dry-run,并强制**分支覆盖**(每分支臂≥1 例)。
+
+    cases:用例数组(每个=一组业务字段);兼容旧单个 test_input。**全用例 COMPLETED 且分支全覆盖**才 passed,
+    据此才可发布(否则驳回)。记 kind='cases' 证据。与运行期同一引擎 → test == run。
+    """
+    from uuid import uuid4
+
     from dano.execution.connectors.executor import RealActionExecutor, SystemEndpoint, system_key_for
-    from dano.orchestrator.orchestrator import _resolve_step_inputs
-    from dano.shared.asset_bodies import AuthConfig, ConnectorBody, WorkflowSkillBody
+    from dano.generation.dsl_grounding import branch_ids, coverage_gaps
+    from dano.orchestrator.orchestrator import Orchestrator
+    from dano.orchestrator.skills import SkillRegistry
+    from dano.orchestrator.types import Intent, SkillSpec
+    from dano.shared.asset_bodies import AuthConfig, WorkflowSkillBody
+    from dano.shared.enums import TaskState
     draft = await _ds.get_draft(UUID(params["asset_draft_id"]))
     if draft is None or draft.asset_type != AssetType.WORKFLOW:
         raise ToolError("sandbox_test_workflow 仅用于复合流程草案")
     wf = WorkflowSkillBody.model_validate(draft.body)
     mat = _mat(run_id, draft.subsystem.value)
-    deploy = mat.deploy or {}
     sub = Subsystem(mat.subsystem)
+    deploy = mat.deploy or {}
     endpoints = {system_key_for(sub): SystemEndpoint(
         base_url=deploy.get("base_url", ""), auth=AuthConfig.model_validate(deploy.get("auth", {})))}
     execu = RealActionExecutor(endpoints=endpoints, auth_manager=AuthManager())
-    rule = wf.success_rule
-    user_fields = params.get("test_input", {})    # 流程级测试输入(测试账号,非生产)
-    step_outputs: dict = {}
-    trace, ok_all = [], True
-    for step in wf.steps:
-        env = await _repo.get_published(AssetType.CONNECTOR,
-                                        Scope(tenant=mat.tenant, subsystem=sub), asset_key=step.action)
-        connector = ConnectorBody.model_validate(env.body)
-        body = _resolve_step_inputs(step.inputs, user_fields, step_outputs)
-        try:
-            resp = await execu.execute(connector.model_dump(), body, mat.credentials)
-        except Exception as e:  # noqa: BLE001
-            ok_all = False
-            trace.append({"step": step.action, "error": str(e)}); break
-        ok = 200 <= resp.http < 300
-        if ok and rule:
-            from dano.shared.expr import safe_eval
-            try:
-                ok = bool(safe_eval(rule, {"response": resp.body, "http": resp.http}))
-            except Exception:  # noqa: BLE001
-                ok = False
-        step_outputs[step.action] = resp.body
-        trace.append({"step": step.action, "http": resp.http, "ok": ok})
+    # 复用运行期同一编排器/解释器(store 取已发布步骤连接器;测试凭证经 resolve 直给)
+    orch = Orchestrator(registry=SkillRegistry([]), store=_repo, harness=None,
+                        action_executor=execu, resolve_credentials=lambda refs: mat.credentials)
+    steps_dump = [s.model_dump() for s in wf.steps]
+    skill = SkillSpec(
+        skill_id=f"{mat.subsystem}.{wf.action}", subsystem=sub, action=wf.action,
+        risk_level=wf.risk_level, is_workflow=True,
+        workflow_steps=steps_dump, workflow_success_rule=wf.success_rule,
+        workflow_preconditions=[i.model_dump() for i in wf.preconditions],
+        workflow_invariants=[i.model_dump() for i in wf.invariants])
+    cases = params.get("cases")
+    if not cases:
+        cases = [params["test_input"]] if params.get("test_input") is not None else [{}]
+    static_ids = branch_ids(steps_dump)
+    observed, results, ok_all = [], [], True
+    for c in cases:
+        out = await orch._run_workflow(uuid4(), mat.tenant, skill, Intent(action_hint=wf.action, fields=c))
+        ok = out.state == TaskState.COMPLETED
         ok_all = ok_all and ok
-        if not ok:
-            break
-    v = await _ds.record_validation(asset_draft_id=draft.asset_draft_id, kind="sandbox",
-                                    passed=ok_all, evidence={"trace": trace})
-    return {"passed": ok_all, "validation_run_ids": [str(v.validation_run_id)], "trace": trace}
+        observed.append(out.audit.get("branches", []))
+        results.append({"input": c, "state": out.state.value, "message": out.message})
+    gaps = coverage_gaps(static_ids, observed)
+    passed = ok_all and not gaps
+    v = await _ds.record_validation(
+        asset_draft_id=draft.asset_draft_id, kind="cases", passed=passed,
+        evidence={"cases": results, "branch_ids": static_ids, "coverage_gaps": gaps})
+    return {"passed": passed, "validation_run_ids": [str(v.validation_run_id)],
+            "cases": results, "coverage_gaps": gaps}
 
 
 # ── 建连接器草案(Python 确定性建体,pi 只给动作名)──
@@ -394,6 +413,12 @@ async def get_policy_doc(run_id: str, params: dict) -> dict:
     """返回该系统实例登记的制度文件原文(供 pi 抽取规则;不进运行期)。"""
     mat = _mat(run_id, params["system_instance_id"])
     return {"policy_text": mat.policy_text or ""}
+
+
+async def get_business_rules(run_id: str, params: dict) -> dict:
+    """返回人工登记的业务规则(阈值/审批链)+ 日历源,供 pi grounding 分支/前置/不变量(非臆造)。"""
+    mat = _mat(run_id, params["system_instance_id"])
+    return {"business_rules": mat.business_rules or [], "holidays": mat.holidays or []}
 
 
 async def draft_policy(run_id: str, params: dict) -> dict:
@@ -618,6 +643,7 @@ TOOLS = {
     "write_readback": write_readback,
     "health_check": health_check,
     "get_policy_doc": get_policy_doc,
+    "get_business_rules": get_business_rules,
     "draft_policy": draft_policy,
     "test_policy_cases": test_policy_cases,
     "request_review": request_review,

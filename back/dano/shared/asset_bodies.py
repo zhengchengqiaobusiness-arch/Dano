@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
 
 from dano.shared.enums import AuthKind, MatchKind, RiskLevel
 
@@ -121,6 +123,7 @@ class EnvProfileBody(BaseModel):
     base_url: str = Field(default="", description="系统基址(运行时拼 endpoint),来自部署信息")
     auth: AuthConfig = Field(default_factory=AuthConfig, description="鉴权握手配置")
     credential_policy: CredentialPolicy = Field(default_factory=CredentialPolicy, description="撤销/过期策略")
+    holidays: list[str] = Field(default_factory=list, description="日历源:法定节假日(运行期注入 compute business_days)")
 
 
 # ─────────────────────── ⑤ 页面脚本(无 API,流程8)───────────────────────
@@ -137,26 +140,71 @@ class PageScriptBody(BaseModel):
     dom_fingerprint: str = Field(description="结构指纹,执行前校验改版的基线")
 
 
-# ─────────────────────── ⑥ 复合流程 Skill(阶段2:多步编排成一个业务能力)───────────────────────
-class WorkflowStep(BaseModel):
-    """流程一步:调用一个已发布连接器动作,入参按来源映射拼装。
+# ─────────────────────── ⑥ 复合流程 Skill(阶段2 + DSL v2:声明式业务逻辑)───────────────────────
+StepKind = Literal["call", "compute", "branch", "foreach", "select"]
 
-    inputs:目标参数路径 → 来源。目标支持嵌套点路径(如 'flowTask.taskId')。
-    来源语法:
-      - 'field:<名>'   取用户提供的业务字段(如 field:leaveDays)
-      - 'step:<动作>.<点路径>'  取上一步响应体里的值(如 step:start_leave_flow.data.taskId)
-      - 'const:<字面量>'  常量(如 const:200)
+
+class Invariant(BaseModel):
+    """业务不变量(前置校验 / 事后正确性)。check 为 safe_eval 布尔表达式;
+    给了 evidence 则先回查真实系统再判(grounded),否则只看当前上下文。"""
+
+    check: str = Field(description="布尔表达式(safe_eval),真=通过")
+    message: str = Field(default="", description="不通过时给用户/审计的说明")
+    evidence: dict | None = Field(default=None, description="{query_action, params} 回查真实系统(grounded);None=只看上下文")
+
+
+class WorkflowStep(BaseModel):
+    """流程一步(DSL v2:带类型节点)。kind 缺省 'call' → 向后兼容旧的纯调用步。
+
+    来源语法(inputs 的值 / over):
+      - 'const:<字面量>'         常量(如 const:200)
+      - 'field:<名>'            用户业务字段(如 field:leaveDays)
+      - 'step:<动作>.<点路径>'   某步响应体里的值(如 step:start_leave_flow.data.taskId)
+      - 'var:<名>'              compute 产出的派生变量(如 var:leave_days)
+      - 'item:<点路径>'          foreach 当前项里的值(点路径可空 = 整项)
+      - 'select:<名>'           select 选中项绑定的值
     """
 
-    action: str = Field(description="本步调用的连接器动作名(须为同作用域已发布连接器)")
-    inputs: dict[str, str] = Field(default_factory=dict, description="目标参数路径 → 来源表达式")
+    kind: StepKind = Field(default="call", description="节点类型")
+    # kind=call:调用已发布连接器
+    action: str | None = Field(default=None, description="连接器动作名(call)")
+    inputs: dict[str, str] = Field(default_factory=dict, description="目标参数路径 → 来源(call)")
+    # kind=compute:派生计算(只准审计函数)
+    outputs: dict[str, str] = Field(default_factory=dict, description="变量名 → 审计表达式(compute)")
+    # kind=branch:条件分支
+    condition: str | None = Field(default=None, description="布尔表达式(branch)")
+    then: list[WorkflowStep] = Field(default_factory=list, description="条件真时的子步骤(branch)")
+    otherwise: list[WorkflowStep] = Field(default_factory=list, description="条件假时的子步骤(branch)")
+    # kind=foreach:批量
+    over: str | None = Field(default=None, description="遍历来源(列表)(foreach)")
+    as_var: str = Field(default="item", description="当前项变量名,来源用 item:(foreach)")
+    steps: list[WorkflowStep] = Field(default_factory=list, description="每项执行的子步骤(foreach)")
+    # kind=select:从候选里选(消歧)
+    from_action: str | None = Field(default=None, description="候选来源:已发布查询动作(select)")
+    list_path: str | None = Field(default=None, description="响应里候选列表的点路径(select)")
+    label_template: str | None = Field(default=None, description="候选展示模板,如 '{name}-{dept}'(select)")
+    bind: str | None = Field(default=None, description="选中项绑定到的变量名,来源用 select:(select)")
+
+    @model_validator(mode="after")
+    def _check_kind(self) -> WorkflowStep:
+        required = {
+            "call": ("action",), "compute": ("outputs",), "branch": ("condition",),
+            "foreach": ("over",), "select": ("from_action", "bind"),
+        }[self.kind]
+        missing = [f for f in required if not getattr(self, f)]
+        if missing:
+            raise ValueError(f"kind={self.kind} 缺必填字段: {missing}")
+        return self
+
+
+WorkflowStep.model_rebuild()
 
 
 class WorkflowSkillBody(BaseModel):
     """复合流程 Skill:把多步连接器编排成一个面向用户的业务能力(如「提交请假」)。
 
-    执行层是通用解释器:按 steps 顺序跑,前一步输出按 step: 映射喂给后一步,
-    全步成功才算成功(套用成败规则)。绝不为某家公司写 if/else。
+    执行层是通用解释器(DSL v2):前置不变量 → 按 steps 顺序跑(call/compute/branch/foreach/select)
+    → 业务不变量;前一步输出按 step: 映射喂后一步。绝不为某家公司写 if/else。
     """
 
     action: str = Field(description="复合 Skill 名,如 submit_leave")
@@ -167,6 +215,10 @@ class WorkflowSkillBody(BaseModel):
     required_fields: list[str] = Field(default_factory=list, description="必填业务字段")
     risk_level: RiskLevel = RiskLevel.L3
     success_rule: str | None = Field(default=None, description="每步成败判定表达式;None=HTTP 2xx")
+    # DSL v2:前置/事后不变量 + 写前预览
+    preconditions: list[Invariant] = Field(default_factory=list, description="办理前不变量:不过则拒、不写")
+    invariants: list[Invariant] = Field(default_factory=list, description="办理后业务正确性不变量")
+    preview: bool = Field(default=False, description="写操作:执行前回显将提交内容待确认")
 
 
 # ─────────────────────── 事实核查(流程9·声明式)───────────────────────

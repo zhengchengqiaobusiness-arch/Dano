@@ -10,6 +10,7 @@ PlaybookSpec**(每业务不同)。两条路径:
 from __future__ import annotations
 
 import json
+import re
 from functools import partial
 
 import structlog
@@ -17,6 +18,27 @@ import structlog
 from dano.generation.playbook import Operation, PlaybookSpec
 
 log = structlog.get_logger(__name__)
+
+_GLOBAL_FLAGS = {"confirm", "diagnose", "json", "select", "preview", "help"}
+
+
+def validate_playbook_facts(md: str, *, actions: set[str], fields: set[str]) -> list[str]:
+    """事实校验(导出 ⑩):LLM 写的剧本里提到的**操作脚本名 / 参数 flag 必须真实存在**,不准发明。
+
+    - `scripts/<X>.(sh|py|ps1)` 的 X 必须 ∈ actions ∪ {diagnose}
+    - `--<flag>` 必须 ∈ fields ∪ 全局 flag(confirm/diagnose/json/select/preview)
+    返回问题清单(空=通过)。纯函数,可离线测;有问题则回退确定性渲染(grounded)。
+    """
+    issues: list[str] = []
+    allowed_actions = {a for a in actions} | {"diagnose", "submit", "dano_call"}
+    for name in sorted(set(re.findall(r"scripts/([A-Za-z0-9_]+)\.(?:sh|py|ps1)", md))):
+        if name not in allowed_actions:
+            issues.append(f"剧本引用了不存在的操作脚本: scripts/{name}")
+    allowed_flags = {f.lower() for f in fields} | _GLOBAL_FLAGS
+    for fl in sorted(set(re.findall(r"(?<!\w)--([A-Za-z][A-Za-z0-9_-]*)", md))):
+        if fl.lower() not in allowed_flags:
+            issues.append(f"剧本引用了不存在的参数: --{fl}")
+    return issues
 
 
 def _op_flags(op: Operation) -> str:
@@ -84,10 +106,12 @@ metadata:
         rows = "\n".join(f"| {e['when']} | {e['meaning']} | {e['action']} |" for e in spec.errors)
         out.append("## ④ 错误了怎么办(返回 → 动作)\n| 返回 | 含义 | 你该做 |\n|---|---|---|\n" + rows)
 
-    # ⑤ 事后确认
+    # ⑤ 事后确认(x-flow 审批链/记账 + DSL IR 业务不变量)
     pc = spec.post_check or {}
+    lines = []
     if pc:
-        lines = [f"- {pc.get('verify')}"]
+        if pc.get("verify"):
+            lines.append(f"- {pc.get('verify')}")
         if pc.get("stages"):
             lines.append("- 审批链(看走到哪一步):" + " → ".join(pc["stages"]))
         esc = pc.get("escalation") or {}
@@ -95,6 +119,9 @@ metadata:
             lines.append(f"- 升级规则:{esc.get('when')} 时增加「{esc.get('addApprover', '')}」审批")
         if pc.get("ledger"):
             lines.append(f"- {pc['ledger']}")
+    for inv in spec.invariants:
+        lines.append(f"- 核对(业务不变量):{inv.get('message') or inv.get('check')}")
+    if lines:
         out.append("## ⑤ 办理后(确认真生效)\n" + "\n".join(lines))
 
     # ⑥ 缺失 / 恢复
@@ -110,6 +137,7 @@ metadata:
 | status | 含义 | 你应做的 |
 |---|---|---|
 | `succeeded` | 真实执行且(写操作)事实核查通过 | 告知结果,附 `output` 里的单号 / procInsId / 列表 |
+| `need_select` | 复合流程消歧:多个候选待选 | 把 `candidates` 给用户选,再用 `--json` 带上选中项的 `bind` 值重跑 |
 | `need_confirm` | 写操作未确认被拦 | 向用户确认后,**带 `--confirm` 重跑** |
 | `failed` | 失败(见 `reason` / `error_kind`) | 按错误表处置,**勿谎报成功** |
 
@@ -157,11 +185,16 @@ async def write_playbook_md(spec: PlaybookSpec, slug: str, *, spawn=None) -> str
     text = (text or "").strip()
     if text.startswith("```"):                              # 去掉可能的 ```markdown 围栏
         text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    # grounding 守门:必须非空、带 frontmatter、且不丢操作(漏了就用确定性版,绝不发半成品)
+    # grounding 守门:非空 + 带 frontmatter + 不丢操作 + **事实校验(不准发明脚本/参数)**;任一不过 → 确定性版
     missing = [o.op for o in spec.operations if o.op not in text]
-    if len(text) < 120 or "name:" not in text[:200] or missing:
+    actions = {o.op for o in spec.operations}
+    fields = {f["name"] for o in spec.operations for f in o.fields}
+    fact_issues = validate_playbook_facts(text, actions=actions, fields=fields)
+    if len(text) < 120 or "name:" not in text[:200] or missing or fact_issues:
         log.warning("playbook_writer.fallback", business=spec.business,
-                    reason=("missing_ops:%s" % missing if missing else "too_short_or_no_frontmatter"))
+                    reason=("missing_ops:%s" % missing if missing
+                            else ("fact_issues:%s" % fact_issues if fact_issues
+                                  else "too_short_or_no_frontmatter")))
         return fallback
     log.info("playbook_writer.llm_ok", business=spec.business, chars=len(text))
     return text
