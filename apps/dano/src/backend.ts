@@ -3,23 +3,23 @@ import {
   type AgentSession,
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
-import type { DanoConfig } from "../dano-config.js";
-import { loadDanoConfig } from "../dano-config.js";
-import { createDetachedAgentSession } from "../detached-session.js";
+import type { DanoConfig } from "@dano/bridge/dano-config";
+import { loadDanoConfig } from "@dano/bridge/dano-config";
+import { createDetachedAgentSession } from "@dano/bridge/detached-session";
 import {
   resolveAgentSessionDefaults,
   resolveAgentSessionModel,
   type DefaultSessionSettings,
-} from "../default-model.js";
-import { createHeadlessUIContext } from "../headless-ui-context.js";
+} from "@dano/bridge/default-model";
+import { createHeadlessUIContext } from "@dano/bridge/headless-ui-context";
 import type {
   BridgeLiveEvent,
   BridgeSessionActions,
   BridgeSessionEvents,
   BridgeSessionState,
-} from "../live-session.js";
-import type { RpcThinkingLevel } from "../types.js";
-import type { WsRpcAdapterContext } from "../ws-rpc-adapter.js";
+} from "@dano/bridge/live-session";
+import type { RpcThinkingLevel } from "@dano/bridge/types";
+import type { WsRpcAdapterContext } from "@dano/bridge/ws-rpc-adapter";
 
 export interface StandaloneBridgeBackend {
   readonly context: WsRpcAdapterContext;

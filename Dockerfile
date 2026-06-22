@@ -8,6 +8,7 @@ RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
 ARG NPM_CONFIG_REGISTRY=https://registry.npmjs.org/
 
 COPY package.json pnpm-workspace.yaml tsconfig.json vitest.config.ts ./
+COPY apps/dano/package.json apps/dano/package.json
 COPY packages/bridge/package.json packages/bridge/package.json
 COPY packages/svelte/package.json packages/svelte/package.json
 COPY pnpm-lock.yaml* ./
@@ -17,7 +18,7 @@ RUN npm_config_registry="$NPM_CONFIG_REGISTRY" \
 
 COPY . .
 RUN pnpm run build
-RUN CI=true pnpm prune --prod
+RUN pnpm --filter @dano/app --prod deploy /prod/dano
 
 FROM node:22-bookworm-slim AS runtime
 
@@ -30,9 +31,8 @@ ENV DANO_HOST=0.0.0.0
 ENV DANO_PORT=8080
 ENV DANO_DEFAULT_WORKSPACE_PATH=/tmp/dano
 
-COPY --from=build /app/package.json ./package.json
-COPY --from=build /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
-COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /prod/dano/package.json ./package.json
+COPY --from=build /prod/dano/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/web-dist ./web-dist
 COPY --from=build /app/dano.config.json ./dano.config.json

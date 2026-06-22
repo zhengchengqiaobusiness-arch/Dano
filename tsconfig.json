@@ -14,6 +14,6 @@
     "outDir": "./dist",
     "types": ["node"]
   },
-  "include": ["packages/bridge/src/**/*.ts", "vitest.config.ts"],
+  "include": ["apps/dano/src/**/*.ts", "packages/bridge/src/**/*.ts", "vitest.config.ts"],
   "exclude": ["node_modules", "dist", "web-dist", "references"]
 }
