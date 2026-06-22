@@ -68,6 +68,9 @@ class ConnectorBody(BaseModel):
     risk_level: RiskLevel = RiskLevel.L1
     assertions: Assertions = Field(default_factory=Assertions)
     required_mcp: list[str] = Field(default_factory=list, description="该动作所需的 MCP server(MCP 隔离校验)")
+    # 工作流步骤:只在复合流程里被串用、**不能独立跑**(如提交步需上一步的 taskId)。
+    # → 发布闸门放宽到"连得通即可"(沙箱/评审由复合 sandbox_test_workflow 整链验证);目录里**永不单独露出**。
+    workflow_step: bool = Field(default=False, description="是否为复合流程的隐藏步骤(连接器)")
 
 
 # ─────────────────────── ③ 制度规则(流程4)───────────────────────
@@ -212,7 +215,10 @@ class WorkflowSkillBody(BaseModel):
     steps: list[WorkflowStep] = Field(description="有序步骤(至少 1 步)")
     user_fields: list[str] = Field(default_factory=list, description="用户需提供的业务字段")
     field_docs: dict[str, str] = Field(default_factory=dict, description="业务字段→语义描述(阶段4)")
+    field_types: dict[str, str] = Field(default_factory=dict, description="业务字段→JSON 类型(信源 schema)")
     required_fields: list[str] = Field(default_factory=list, description="必填业务字段")
+    business: str = Field(default="", description="所属业务(导出归组用)")
+    business_meta: dict = Field(default_factory=dict, description="业务规则(x-flow/审批链)→ 导出的审批/前置/确认段")
     risk_level: RiskLevel = RiskLevel.L3
     success_rule: str | None = Field(default=None, description="每步成败判定表达式;None=HTTP 2xx")
     # DSL v2:前置/事后不变量 + 写前预览

@@ -177,6 +177,9 @@ class DraftStore:
             return False, f"草案不存在: {asset_draft_id}"
         if draft.asset_type not in REVIEW_REQUIRED_TYPES:
             return True, "ok(此类型免三模型评审)"
+        # 工作流步骤连接器免单独评审:复合 WORKFLOW 作为整体过三模型评审
+        if draft.asset_type == AssetType.CONNECTOR and draft.body.get("workflow_step"):
+            return True, "ok(工作流步骤连接器免单独评审;复合流程整体评审)"
         async with get_pool().acquire() as conn:
             rows = await conn.fetch(
                 "SELECT * FROM review_runs WHERE review_run_id = ANY($1::uuid[])",
@@ -239,6 +242,9 @@ class DraftStore:
                 return False, f"证据已过期:{r.validation_run_id}"
             covered.add(r.kind)
         required = REQUIRED_KINDS.get(draft.asset_type, set())
+        # 工作流步骤连接器(不能独立跑)放宽到"连得通即可";业务沙箱由复合 sandbox_test_workflow 整链验证
+        if draft.asset_type == AssetType.CONNECTOR and draft.body.get("workflow_step"):
+            required = {"connect"}
         missing = required - covered
         if missing:
             return False, f"缺少必需验证种类:{sorted(missing)}(已有 {sorted(covered)})"

@@ -18,7 +18,7 @@ from uuid import uuid4
 import structlog
 from pydantic import BaseModel, Field
 
-from dano.agent_tools import materials, runs
+from dano.agent_tools import materials, progress as progress_bus, runs
 from dano.assets.repository import AssetRepository
 from dano.shared.asset_bodies import WorkflowSkillBody
 from dano.shared.enums import AssetType, Subsystem
@@ -262,11 +262,22 @@ async def _start_tool_server() -> tuple:
 
 async def _spawn_pi(*, run_id: str, token: str, port: int, prompt: str,
                     context: dict, timeout_s: float) -> dict:
-    """spawn Node Sidecar,送 start_run,读 JSONL 直到 run_completed。env 白名单。"""
+    """spawn Node Sidecar,送 start_run,读 JSONL 直到 run_completed。env 白名单。
+
+    全程记日志(便于真机定位 pi 空跑/报错):spawn 配置 / pi 每个事件 / **stderr 每行** /
+    最终结果(status/事件数/final_text 头/returncode)。pi 没回 run_completed 时把 stderr 尾抬进 error。
+    """
+    from dano.config import get_settings
+    s = get_settings()
     env = {k: os.environ[k] for k in _OS_ENV_WHITELIST if k in os.environ}
+    # pi agent 的 LLM 配置走 config.py(不再靠前端 /settings 写 env);真实进程环境变量可覆盖
+    env.update({"DANO_PI_API_KEY": s.pi_api_key or "", "DANO_PI_BASE_URL": s.pi_base_url or "",
+                "DANO_PI_MODEL": s.pi_model or "", "DANO_PI_PROVIDER": s.pi_provider or ""})
     env.update({k: os.environ[k] for k in _PI_ENV if k in os.environ})
     env.update({"DANO_AGENT_TOKEN": token, "DANO_AGENT_BASE_URL": f"http://127.0.0.1:{port}",
                 "DANO_AGENT_RUN_ID": run_id, "PI_STUB": "0"})
+    log.info("pi.spawn", run_id=run_id, port=port, model=s.pi_model,
+             provider=s.pi_provider or "openai-compat", base_url=s.pi_base_url, key_set=bool(s.pi_api_key))
     proc = await asyncio.create_subprocess_exec(
         "node", str(BACK_DIR / "agent" / "run_pi.mjs"), cwd=str(BACK_DIR), env=env,
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -275,28 +286,62 @@ async def _spawn_pi(*, run_id: str, token: str, port: int, prompt: str,
                         "context": context, "budget": {"timeout_s": int(timeout_s)}}) + "\n"
     proc.stdin.write(start.encode()); await proc.stdin.drain()
     completed: dict = {}
+    stderr_buf: list[str] = []
+    n_events = 0
+
+    async def _read_stderr() -> None:
+        assert proc.stderr
+        async for raw in proc.stderr:
+            s = raw.decode(errors="replace").rstrip()
+            if s:
+                stderr_buf.append(s)
+                log.warning("pi.stderr", run_id=run_id, line=s[:500])
+
+    async def _read_stdout() -> None:
+        nonlocal completed, n_events
+        assert proc.stdout
+        async for raw in proc.stdout:
+            line = raw.decode(errors="replace").strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                log.info("pi.stdout_raw", run_id=run_id, line=line[:300])
+                continue
+            n_events += 1
+            if ev.get("type") == "run_completed":
+                completed = ev
+                return
+            log.info("pi.event", run_id=run_id, ev_type=ev.get("type"),
+                     detail={k: str(v)[:160] for k, v in ev.items() if k != "type"})
+
+    stderr_task = asyncio.create_task(_read_stderr())
     try:
-        async def _read():
-            nonlocal completed
-            assert proc.stdout
-            async for raw in proc.stdout:
-                line = raw.decode().strip()
-                if not line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if ev.get("type") == "run_completed":
-                    completed = ev
-                    return
-        await asyncio.wait_for(_read(), timeout=timeout_s)
+        await asyncio.wait_for(_read_stdout(), timeout=timeout_s)
     except asyncio.TimeoutError:
         completed = {"status": "failed", "error": "timeout"}
+        log.warning("pi.timeout", run_id=run_id, timeout_s=timeout_s)
     finally:
         if proc.returncode is None:
             proc.kill()
         await proc.wait()
+        stderr_task.cancel()
+        try:
+            await stderr_task
+        except BaseException:  # noqa: BLE001 - 取消/读尾异常都吞掉
+            pass
+    final_text = (completed.get("final_text") or "") if completed else ""
+    log.info("pi.result", run_id=run_id, status=(completed.get("status") if completed else "no_completion"),
+             events=n_events, tool_events=completed.get("tool_events") if completed else None,
+             skills_loaded=completed.get("skills_loaded") if completed else None,
+             final_chars=len(final_text), final_head=final_text[:300],
+             error=completed.get("error") if completed else None,
+             returncode=proc.returncode, stderr_lines=len(stderr_buf))
+    if not completed:                       # pi 没回 run_completed:多半启动即崩,把 stderr 尾抬进 error
+        tail = " | ".join(stderr_buf[-8:])
+        log.warning("pi.no_completion", run_id=run_id, stderr_tail=tail[:1000])
+        completed = {"status": "failed", "error": f"pi 未返回 run_completed;stderr 尾: {tail[:500]}"}
     return completed
 
 
@@ -525,36 +570,30 @@ async def _onboard_legacy(run_id: str, sid: str, token: str, *, discover_workflo
     """**单一/默认接入路径**:起工具服务 + spawn pi(自主发现)建连接器(隐藏积木)+ 复合 DSL v2
     业务流程(前置/分支/计算/消歧/不变量,grounded)+ 制度。返回 completed。"""
     server, task, port = await _start_tool_server()
+    # 复合优先:把真实业务做成**一个复合 Skill**(多步串成一个能力),步骤连接器是隐藏积木,只露业务。
     prompt = (
-        f"接入系统实例 {sid}。步骤:\n"
-        f"1) 调 parse_spec(system_instance_id={sid}) 拿业务动作清单。\n"
-        f"2) 对清单里**每一个**动作:依次调 draft_connector(system_instance_id={sid}, action=动作名)拿 asset_draft_id;"
-        f"再调 sandbox_test(asset_draft_id=该id)拿 validation_run_ids;"
-        f"若 connect_passed 且 sandbox_passed 为真,调 request_review(asset_draft_id=该id)跑三模型评审拿 review_run_ids 与 all_passed;"
-        f"仅当 all_passed 为真,调 publish_asset(asset_draft_id=该id, validation_run_ids=沙箱的, review_run_ids=评审的)。"
-        f"若评审未过,按 verdicts 的 reasons 处理,过不了就跳过该动作。\n"
-        f"3) 全部处理完,用一句话总结发布了哪些动作。"
-    )
-    # goal 模式:连接器发布后,让 pi 自主发现多步业务流程并编排成复合 Skill
-    discover_prompt = (
-        f"在系统实例 {sid} 已发布的连接器之上,**发现多步业务流程**并编排成复合 Skill:\n"
-        f"0) 先调 get_business_rules({sid}) 拿人工登记的业务规则(阈值/审批链)+ 日历源 holidays —— "
-        f"分支 condition / 前置 / 不变量 / compute 的 business_days **必须据此 grounding**,没有就别造规则。\n"
-        f"1) 调 parse_spec({sid}) 看动作清单,重点看每个动作的 params_out(出参)和 tags(阶段)。\n"
-        f"2) 找需要**串联**的动作——信号:某动作出参(如 taskId/procInsId/procDefId)正是另一动作所需的入参;"
-        f"或 tags 表明先后阶段(发起→提交→审批)。\n"
-        f"3) 对发现的流程,先用 get_action_schema 看清各步请求体**嵌套结构与示例**,再用 draft_workflow 编排:"
-        f"steps 的 inputs 用 'step:前一步动作.出参点路径'(如 step:start_leave_flow.data.taskId)串联、"
-        f"'const:值' 填固定项、'field:名' 暴露给用户;user_fields/required_fields 给用户要填的业务字段。\n"
-        f"3b) **若发现真实业务逻辑**(DSL v2,仅在证据支持时才加,臆造会被 grounding 拒):用 compute 步做派生计算"
-        f"(只准 business_days/sum_ 等审计函数,如 leave_days=business_days(startDate,endDate))、branch 步按 condition 走不同分支、"
-        f"select 步从某查询候选里选(消歧);preconditions 放办理前校验(如余额≥天数,evidence 给回查动作)、"
-        f"invariants 放办理后回查证实。动作必须已发布、表达式只准用已声明字段/变量+审计函数。\n"
-        f"4) 调 sandbox_test_workflow(asset_draft_id, test_input={{业务字段示例值}}) 整条验证;"
-        f"passed 为真后,调 request_review(asset_draft_id) 跑三模型评审拿 review_run_ids 与 all_passed;"
-        f"仅当 all_passed 为真才调 publish_asset(asset_draft_id, validation_run_ids, review_run_ids)。"
-        f"评审未过则按 verdicts 的 reasons 调整步骤/映射后重测重审。\n"
-        f"若没有可串联的多步流程,直接说明,不要强行编排。"
+        f"接入系统实例 {sid}。目标:把真实业务做成**复合业务 Skill**(多步串成一个能力),步骤接口隐藏,只露业务。\n"
+        f"0) 先调 get_selected_flows({sid}) 看用户**人工勾选的业务**(templateId+测试值)——只针对这些做;"
+        f"再调 get_business_rules({sid}) 拿业务规则(阈值/审批链)+ 日历 holidays(分支/前置/不变量/天数计算**必须据此 grounding**,没有别造);"
+        f"规则按 kind 用:**precondition**→加进 draft_workflow 的 preconditions(用已声明字段,如 amount>0);"
+        f"**server_side/approval_chain**→是服务端行为(升级加签/审批链/记账),写进 preview 文案说明,**不**做客户端分支。规则非空时 draft_workflow 传 preview=true。\n"
+        f"1) 调 parse_spec({sid}) 看动作清单,重点看 params_out(出参)和 tags(阶段),判断哪些要**串联**"
+        f"(信号:某动作出参如 taskId/procInsId 正是另一动作入参;或 tags 表先后阶段)。\n"
+        f"2) 对**每条复合流程**(需串联多步才完成,如 发起→提交):\n"
+        f"   a) 先 get_action_schema(action=动作名,**用 parse_spec 返回的真实 name,别自造**)看清各步请求体嵌套结构与示例;\n"
+        f"   b) 对**每个步骤动作**:draft_connector(action=动作名, **as_step=true**) → sandbox_test(asset_draft_id, **as_step=true**)"
+        f" → publish_asset(asset_draft_id, validation_run_ids=连接测试的, review_run_ids=[])。"
+        f"(as_step 步骤连接器:只需连得通即可发布、免单独沙箱与评审、永不单独上架;真实校验在 d 整链做。)\n"
+        f"   c) draft_workflow(action=业务名如 submit_xxx, title, steps=[各步 {{action, inputs:目标路径→来源}}], user_fields/required_fields,"
+        f" 证据支持时再加 compute/branch/preconditions/invariants):inputs 来源 const:常量 / field:用户字段 /"
+        f" 'step:前一步动作.出参点路径'(如 step:<发起动作>.data.taskId)串联;规则取自 get_business_rules,grounding 不住别加。\n"
+        f"   d) sandbox_test_workflow(asset_draft_id, cases=[用 get_selected_flows 的测试值,覆盖每个分支臂])**整条真跑**;"
+        f"passed 为真后 request_review(asset_draft_id)(评的是复合流程);**仅 all_passed 为真才** "
+        f"publish_asset(asset_draft_id, validation_run_ids=cases 的, review_run_ids=评审的)。不过按返回原因修正后重试,过不了跳过该业务。\n"
+        f"3) 对**独立的查询/单步业务**(不需串联,如查余额/查列表):draft_connector(action,**不传 as_step**) → sandbox_test(带 sample_inputs)"
+        f" → request_review → publish_asset(完整闸门)。\n"
+        f"4) 一句话总结发布了哪些**业务 Skill**(只数复合业务 + 独立业务,不数隐藏步骤)。\n"
+        f"红线:动作名用 parse_spec 的真实 name;串联来源用真实出参路径;表达式只准已声明字段/变量+审计函数;臆造会被 grounding 拒。"
     )
     # 流程4:有制度文件则抽规则 → 用例验证 → 发布(制度免三模型评审,review_run_ids 传空)
     policy_prompt = (
@@ -569,14 +608,16 @@ async def _onboard_legacy(run_id: str, sid: str, token: str, *, discover_workflo
         f"4) 用例不过按 trace 修规则表达式后重试。"
     )
     try:
+        log.info("onboard.pi.phase", run_id=run_id, phase="compose", note="pi 复合优先:建步骤+编排+整链验证")
+        progress_bus.emit(run_id, {"type": "phase", "phase": "compose", "note": "pi 复合优先:发现并编排业务流程"})
         completed = await _spawn_pi(run_id=run_id, token=token, port=port, prompt=prompt,
                                     context={"system_instance_id": sid}, timeout_s=timeout_s)
-        if discover_workflows:
-            await _spawn_pi(run_id=run_id, token=token, port=port, prompt=discover_prompt,
-                            context={"system_instance_id": sid}, timeout_s=timeout_s)
         if policy_text:
+            log.info("onboard.pi.phase", run_id=run_id, phase="policy", note="pi 抽制度规则")
+            progress_bus.emit(run_id, {"type": "phase", "phase": "policy", "note": "pi 抽取制度规则"})
             await _spawn_pi(run_id=run_id, token=token, port=port, prompt=policy_prompt,
                             context={"system_instance_id": sid}, timeout_s=timeout_s)
+        log.info("onboard.pi.done", run_id=run_id)
         return completed
     finally:
         server.should_exit = True
@@ -593,8 +634,10 @@ async def onboard(*, tenant: str, subsystem: str, openapi, deploy: dict,  # noqa
                   use_codegen: bool = False, max_read_flows: int | None = None,   # 默认单一 pi 路径(codegen 已退役;True=逃生舱)
                   expand_business: bool = True,        # 默认开:一个业务 → 多操作剧本(办理+查在途+查状态…)
                   regenerate: bool = True,             # 默认开:重新接入同一业务=重新生成(覆盖旧版);关掉才复用已发布
-                  progress=None, timeout_s: float = 180.0) -> OnboardingReport:  # noqa: ANN001
+                  progress=None, timeout_s: float = 600.0) -> OnboardingReport:  # noqa: ANN001
     """接入一个系统实例(阶段一)。前置:PG 池已就绪。
+
+    timeout_s:单次 pi 会话预算。复合优先一条龙(建步骤+编排+整链真跑+三模型评审≈55s)较慢,给足 10 分钟。
 
     openapi 接受**任意格式**(入口先归一化成规范 OpenAPI):OpenAPI/Swagger 字典原样透传(零 LLM);
       Postman 集合确定性转换;非结构化(HTML/Markdown/纯文本)用 LLM 抽成接口清单再合成 OpenAPI。
@@ -617,7 +660,7 @@ async def onboard(*, tenant: str, subsystem: str, openapi, deploy: dict,  # noqa
         run_id=run_id, tenant=tenant, system_instance_id=sid, subsystem=subsystem,
         openapi=spec, deploy=deploy, credentials=credentials, policy_text=policy_text,
         include_tags=include_tags or [], business_rules=business_rules or [],
-        holidays=holidays or []))
+        holidays=holidays or [], selected_flows=flows or []))
     # 接入用的 OA 凭证(来自页面)落进运行期凭证库 → 运行期 invoke 才解析得到 token,
     # 否则 adapter 拼出 `Bearer `(空)→ Illegal header value。键=租户/系统key(如 abc/oa)。
     if credentials:
@@ -626,8 +669,15 @@ async def onboard(*, tenant: str, subsystem: str, openapi, deploy: dict,  # noqa
         set_runtime_credential(f"{tenant}/{system_key_for(Subsystem(subsystem))}", dict(credentials))
     token = secrets.token_hex(16)
     runs.register(run_id, token)
+    if progress is not None:                    # pi 工具回调 / 各步进度 → 推给接入向导 job
+        progress_bus.register(run_id, progress)
+    path = "codegen(逃生舱)" if use_codegen else "pi(默认单一路径)"
+    log.info("onboard.route", run_id=run_id, path=path)
+    progress_bus.emit(run_id, {"type": "phase", "phase": "env_profile", "note": "发布环境画像"})
     # 先确定性发布环境画像(运行期 invoke 取 base_url+auth+日历源 用),走同一发布闸门
     await _publish_env_profile(run_id, sid, deploy, holidays=holidays)
+    log.info("onboard.env_profile_published", run_id=run_id, base_url=deploy.get("base_url", ""),
+             holidays=len(holidays or []))
     try:
         if use_codegen:        # 逃生舱(已退役):代码 adapter codegen,日常不走;真机验 pi 路径后物理删除
             completed = await _onboard_codegen(run_id, sid, flows or [], coder, max_read_flows,
@@ -637,6 +687,7 @@ async def onboard(*, tenant: str, subsystem: str, openapi, deploy: dict,  # noqa
                                               policy_text=policy_text, timeout_s=timeout_s)
     finally:
         runs.unregister(run_id)
+        progress_bus.unregister(run_id)
         materials.clear_run(run_id)
 
     # 收已发布(连接器 + 复合流程 + 代码 adapter;权威来源 = PG)。隐藏复合流程的步骤动作。
@@ -646,8 +697,9 @@ async def onboard(*, tenant: str, subsystem: str, openapi, deploy: dict,  # noqa
     workflows = await repo.list_published(AssetType.WORKFLOW, scope)
     adapters = await repo.list_published(AssetType.ADAPTER, scope)
     hidden = {s.action for e in workflows for s in WorkflowSkillBody.model_validate(e.body).steps}
+    # 隐藏:复合流程的步骤动作 + 任何 workflow_step 连接器(孤儿步骤也不当 Skill 上架/登记生命周期)
     visible = [e for e in (workflows + adapters + connectors)
-               if e.body.get("action", e.asset_key) not in hidden]
+               if e.body.get("action", e.asset_key) not in hidden and not e.body.get("workflow_step")]
     skills = sorted({e.body.get("action", e.asset_key) for e in visible})
     # §5:登记已发布 Skill 到生命周期(停在「已发布」)
     if lifecycle is not None:

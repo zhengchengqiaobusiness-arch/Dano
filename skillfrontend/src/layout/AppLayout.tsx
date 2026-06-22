@@ -1,5 +1,5 @@
 import { Layout, Menu, Button, Tag, Space, Typography } from "antd";
-import { AppstoreOutlined, ImportOutlined, SafetyOutlined, LogoutOutlined, SettingOutlined } from "@ant-design/icons";
+import { AppstoreOutlined, ImportOutlined, SafetyOutlined, LogoutOutlined } from "@ant-design/icons";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { clearTenant, TENANT_NAME } from "../api/client";
 
@@ -9,8 +9,7 @@ export default function AppLayout() {
   const nav = useNavigate();
   const loc = useLocation();
   const tenant = localStorage.getItem(TENANT_NAME) || "—";
-  const selected = loc.pathname.startsWith("/onboard") ? "onboard"
-    : loc.pathname.startsWith("/settings") ? "settings" : "skills";
+  const selected = loc.pathname.startsWith("/onboard") ? "onboard" : "skills";
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
@@ -22,12 +21,10 @@ export default function AppLayout() {
           onClick={(e) => {
             if (e.key === "skills") nav("/skills");
             if (e.key === "onboard") nav("/onboard");
-            if (e.key === "settings") nav("/settings");
           }}
           items={[
             { key: "skills", icon: <AppstoreOutlined />, label: "Skill 目录" },
             { key: "onboard", icon: <ImportOutlined />, label: "接入系统" },
-            { key: "settings", icon: <SettingOutlined />, label: "运行配置" },
             { key: "ops", icon: <SafetyOutlined />, label: "运维保障(P2)", disabled: true },
           ]}
         />

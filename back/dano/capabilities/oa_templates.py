@@ -101,6 +101,14 @@ class OATemplate(ABC):
         """把表单探针返回解析成字段清单 [{key,label,type}];非本框架结构 → []。"""
         return []
 
+    def parse_approval_chain(self, spec: dict[str, Any], template_id: str) -> dict:
+        """从文档(散文/表格)解析某模板的审批链 → business_meta;非本框架/解析不出 → {}。
+
+        兜底来源:x-flow 没写时,有些框架把审批链写在发起端点的 description 里(表格/箭头),
+        把它结构化成 {flow, templateId, approvalChain, thresholds},供导出渲染审批段(非臆造)。
+        """
+        return {}
+
 
 class RuoYiFlowableTemplate(OATemplate):
     """RuoYi-Vue + Flowable 工作流(请假/审批等 BPMN 流程)。
@@ -149,6 +157,54 @@ class RuoYiFlowableTemplate(OATemplate):
 
     def parse_form_fields(self, probe_response: object) -> list[dict]:
         return _ruoyi_form_fields(probe_response)
+
+    def parse_approval_chain(self, spec: dict[str, Any], template_id: str) -> dict:
+        """解析 /workflow/handle/startFlow 的 description 里"流程目录"表格行(templateId → 审批链)。
+
+        行形如:`| 采购申请 | purchase_template | 发起人填表 → 直属主管 → 〔金额>5000 时〕行政审批 → … |`
+        → {flow, templateId, approvalChain:[{step,condition?}], thresholds:[{field,gt,adds}]}。解析不出 → {}。
+        """
+        import re
+        try:
+            tid = (template_id or "").strip().strip("`")
+            if not tid:
+                return {}
+            op = (((spec.get("paths") or {}).get("/workflow/handle/startFlow") or {}).get("post") or {})
+            desc = op.get("description") or ""
+            flow_name, chain_text = "", ""
+            for line in desc.splitlines():
+                if "|" not in line:
+                    continue
+                cells = [c.strip().strip("`") for c in line.strip().strip("|").split("|")]
+                if len(cells) >= 3 and cells[1] == tid:
+                    flow_name, chain_text = cells[0], cells[2]
+                    break
+            if not chain_text:
+                return {}
+            approval: list[dict] = []
+            thresholds: list[dict] = []
+            for seg in (s.strip() for s in re.split(r"[→➔➜]", chain_text) if s.strip()):
+                # 只在箭头处切(绝不切金额里的 >);逐段抽条件 + 步骤名。
+                cond = None
+                m = re.search(r"〔(.+?)〕", seg)
+                step = re.sub(r"〔.+?〕", "", seg)
+                step = re.sub(r"[(（].*?[)）]", "", step).strip()    # 去掉(动态·部门负责人)等注解
+                if m:
+                    raw = m.group(1).replace("大于等于", "≥").replace("不小于", "≥").replace("大于", ">")
+                    tm = re.search(r"([><≥≤]=?)\s*(\d+)", raw)
+                    if tm:
+                        num = int(tm.group(2))
+                        key = "gte" if ("≥" in tm.group(1) or ">=" in tm.group(1)) else "gt"
+                        cond = f"amount{'≥' if key == 'gte' else '>'}{num}"
+                        thresholds.append({"field": "amount", key: num, "adds": step})
+                if step and step not in ("发起人填表", "发起人", "结束", "系统结束", "填表"):
+                    approval.append({"step": step, **({"condition": cond} if cond else {})})
+            if not approval:
+                return {}
+            return {"flow": flow_name, "templateId": tid,
+                    "approvalChain": approval, "thresholds": thresholds}
+        except Exception:  # noqa: BLE001 - 解析兜底:任何异常都退回空(绝不让脏数据进 business_meta)
+            return {}
 
 
 # 注册表(靠前优先)。新增框架插到最前。

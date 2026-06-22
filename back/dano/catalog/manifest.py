@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from dano.orchestrator.types import SkillSpec
 from dano.shared.enums import RiskLevel
-from dano.shared.std_fields import ALL_STD_FIELDS
+from dano.shared.std_fields import ALL_STD_FIELDS, is_flow_internal, is_numeric_field
 
 # 动作友好标题(可扩展;缺省用 action 名)
 _ACTION_TITLES: dict[str, str] = {
@@ -44,22 +44,33 @@ class SkillManifest(BaseModel):
 
 
 def _is_reserved(field: str) -> bool:
-    """运行期注入的内部字段(如 __base_url__),不进对外契约/function-calling 参数。"""
-    return field.startswith("__") and field.endswith("__")
+    """运行期注入的内部字段,不进对外契约/function-calling 参数:
+    ① `__base_url__` 这类保留名;② 流程内部句柄(templateId/procInsId/taskId…,由 Dano 注入)。
+    """
+    return (field.startswith("__") and field.endswith("__")) or is_flow_internal(field)
+
+
+def _field_type(skill: SkillSpec, field: str, desc: str) -> str:
+    """字段 JSON 类型:信源 schema 声明优先(skill.field_types),退而按名字/描述判定数值。"""
+    declared = (getattr(skill, "field_types", {}) or {}).get(field)
+    if declared in ("number", "integer", "boolean", "string"):
+        return declared
+    return "number" if is_numeric_field(field, desc, declared_type=declared) else "string"
 
 
 def _parameters_schema(skill: SkillSpec) -> dict:
     """构造 JSON Schema(标准函数参数定义):必填 + 可选字段都暴露,required 仅列必填。
 
-    字段描述优先用接口 schema 抽出的语义描述(阶段4),退而用标准字段别名,再退字段名。
-    运行期注入的保留字段(__base_url__ 等)一律剔除,不暴露给前端/LLM。
+    - 字段描述优先用接口 schema 抽出的语义描述(阶段4),退而用标准字段别名,再退字段名。
+    - 字段类型按信源/语义判定(数值字段为 number,不再一律 string)。
+    - 运行期注入字段(__base_url__、templateId 等流程句柄)一律剔除,不暴露给前端/LLM。
     """
     all_fields = [f for f in dict.fromkeys([*skill.required_fields, *skill.optional_fields])
                   if not _is_reserved(f)]
-    props = {
-        f: {"type": "string", "description": skill.field_docs.get(f) or _FIELD_DESC.get(f, f)}
-        for f in all_fields
-    }
+    props = {}
+    for f in all_fields:
+        desc = skill.field_docs.get(f) or _FIELD_DESC.get(f, f)
+        props[f] = {"type": _field_type(skill, f, desc), "description": desc}
     return {
         "type": "object",
         "properties": props,

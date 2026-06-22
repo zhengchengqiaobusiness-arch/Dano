@@ -9,6 +9,9 @@ export interface OnboardEvent {
   iter?: number; strategy?: string; fixing?: boolean; lines?: number;
   gate?: string; passed?: boolean; detail?: string; role?: string; model?: string;
   route?: string; attempt?: number;
+  // pi 单一路径事件:阶段标记 + 每个工具调用(parse_spec/draft_connector/draft_workflow/sandbox/publish…)
+  phase?: string; note?: string; tool?: string; action?: string; dur_s?: number;
+  summary?: Record<string, unknown>; error?: string;
 }
 export interface OnboardJob { job_id: string; status: string; events: OnboardEvent[]; report: { published_skills?: string[]; status?: string } | null; error: string | null }
 

@@ -15,7 +15,7 @@ export default class ErrorBoundary extends React.Component<{ children: React.Rea
         <pre style={{ whiteSpace: "pre-wrap", background: "#fff1f0", padding: 12, borderRadius: 6 }}>
           {String(this.state.err && (this.state.err.stack || this.state.err.message))}
         </pre>
-        <button onClick={() => { this.setState({ err: null }); location.assign("/settings"); }}>回到运行配置</button>
+        <button onClick={() => { this.setState({ err: null }); location.assign("/onboard"); }}>回到接入系统</button>
       </div>
     );
   }

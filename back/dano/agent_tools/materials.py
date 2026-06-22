@@ -24,6 +24,7 @@ class MaterialContext:
     include_tags: list[str] = field(default_factory=list)       # 类别白名单(空=全部业务动作)
     business_rules: list[dict] = field(default_factory=list)    # 人工提供的业务规则(阈值/审批链)→ 供 pi grounding 分支/前置
     holidays: list[str] = field(default_factory=list)           # 日历源:法定节假日(供 compute business_days)
+    selected_flows: list[dict] = field(default_factory=list)    # 人工选的业务(templateId + 测试值)→ pi 聚焦发现 + sandbox cases
 
 
 _REGISTRY: dict[tuple[str, str], MaterialContext] = {}

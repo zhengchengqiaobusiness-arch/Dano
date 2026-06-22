@@ -28,6 +28,7 @@ class SkillSpec(BaseModel):
     risk_level: RiskLevel
     title: str = ""                                             # 人类可读标题(阶段4)
     field_docs: dict[str, str] = Field(default_factory=dict)    # 字段→语义描述(阶段4)
+    field_types: dict[str, str] = Field(default_factory=dict)   # 字段→JSON 类型(信源 schema;缺则按语义判定)
     has_api: bool = True
     connector_asset_id: UUID | None = None   # 有 API
     page_asset_id: UUID | None = None         # 无 API(页面脚本)

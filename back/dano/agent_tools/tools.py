@@ -199,21 +199,25 @@ async def get_action_schema(run_id: str, params: dict) -> dict:
     sid = params["system_instance_id"]
     action_name = params["action"]
     spec = (_mat(run_id, sid).openapi or {})
-    for path, ops in (spec.get("paths") or {}).items():
-        for method, op in (ops.items() if isinstance(ops, dict) else []):
-            if isinstance(op, dict) and (op.get("operationId") == action_name):
-                req = (op.get("requestBody", {}).get("content", {})
-                       .get("application/json", {}).get("schema"))
-                resp = None
-                for code, r in (op.get("responses", {}) or {}).items():
-                    if str(code).startswith("2") and isinstance(r, dict):
-                        resp = r.get("content", {}).get("application/json", {}).get("schema")
-                        break
-                return {"action": action_name, "method": method.upper(), "endpoint": path,
-                        "request_schema": _resolve_tree(spec, req) if req else None,
-                        "response_schema": _resolve_tree(spec, resp) if resp else None,
-                        "request_example": _first_example(op)}
-    raise ToolError(f"接口里无此动作: {action_name}")
+    # 用与 parse_spec **完全相同**的命名(operationId 或 method_path 切片)定位动作 → 取 endpoint/method。
+    # 之前只认 operationId,无 operationId 的 spec 一律找不到,pi 会反复猜名字直到超时。
+    actions = doc_parser.parse_openapi(spec)
+    action = next((a for a in actions if a.name == action_name), None)
+    if action is None:
+        raise ToolError(f"接口里无此动作: {action_name}(可用动作:{[a.name for a in actions]})")
+    ops = (spec.get("paths") or {}).get(action.endpoint)
+    op = ops.get((action.method or "post").lower()) if isinstance(ops, dict) else {}
+    op = op if isinstance(op, dict) else {}
+    req = (op.get("requestBody", {}).get("content", {}).get("application/json", {}).get("schema"))
+    resp = None
+    for code, r in (op.get("responses", {}) or {}).items():
+        if str(code).startswith("2") and isinstance(r, dict):
+            resp = r.get("content", {}).get("application/json", {}).get("schema")
+            break
+    return {"action": action_name, "method": (action.method or "POST").upper(), "endpoint": action.endpoint,
+            "request_schema": _resolve_tree(spec, req) if req else None,
+            "response_schema": _resolve_tree(spec, resp) if resp else None,
+            "request_example": _first_example(op)}
 
 
 def _first_example(op: dict):  # noqa: ANN001
@@ -228,6 +232,79 @@ def _first_example(op: dict):  # noqa: ANN001
 
 
 # ── 建复合流程草案(goal 模式:pi 发现流程,给出步骤+io映射)──
+def _workflow_template_id(spec: dict, body) -> str:  # noqa: ANN001
+    """本流程实际用的 templateId(出现在工作流体里的那个):StartFlowReq.enum 命中优先,退而正则 *_template。"""
+    import json as _json
+    import re as _re
+    body_json = _json.dumps(body.model_dump(), ensure_ascii=False, default=str)
+    enum = ((((spec.get("components", {}) or {}).get("schemas", {}) or {})
+             .get("StartFlowReq", {}) or {}).get("properties", {}).get("templateId", {}) or {}).get("enum") or []
+    for t in enum:
+        if isinstance(t, str) and t in body_json:
+            return t
+    m = _re.search(r"([A-Za-z][\w-]*_template)", body_json)
+    return m.group(1) if m else ""
+
+
+def _workflow_business_meta(spec: dict, tmpl, tid: str) -> dict:  # noqa: ANN001
+    """复合流程的审批链业务规则:x-flow 优先,没写则按 templateId 从发起端点 description 兜底解析。
+
+    解析不出 → {}(不臆造)。
+    """
+    if not isinstance(spec, dict) or tmpl is None:
+        return {}
+    paths = spec.get("paths") or {}
+    for ep in (tmpl.submit_endpoints() or ()):                  # x-flow 优先
+        xf = ((paths.get(ep) or {}).get("post") or {}).get("x-flow")
+        if isinstance(xf, dict) and xf:
+            return xf
+    parse = getattr(tmpl, "parse_approval_chain", None)         # 兜底:散文解析
+    return parse(spec, tid) if (callable(parse) and tid) else {}
+
+
+def _submit_leaf_fields(spec: dict, tmpl, tid: str) -> dict:  # noqa: ANN001
+    """从提交端点请求体 schema 抽**叶子字段** {name: {type, description}}(递归 flowTask.variables 这类嵌套)。
+
+    oneOf 多模板时优先取 `Submit_<templateId>` 那一支(对不上则并集);供 workflow 字段类型/描述信源直通。
+    """
+    from dano.capabilities.doc_parser import _resolve_ref
+    if not isinstance(spec, dict) or tmpl is None:
+        return {}
+    eps = tmpl.submit_endpoints() or ()
+    if not eps:
+        return {}
+    op = ((spec.get("paths") or {}).get(eps[-1]) or {}).get("post") or {}
+    schema = ((((op.get("requestBody") or {}).get("content") or {})
+               .get("application/json") or {}).get("schema")) or {}
+    variants = schema.get("oneOf") or [schema]
+    want = ("Submit_" + tid) if tid else ""
+    chosen = next((v for v in variants if isinstance(v, dict) and want
+                   and str(v.get("$ref", "")).endswith(want)), None)
+    out: dict = {}
+
+    def _walk(node, depth=0):  # noqa: ANN001
+        if depth > 6:
+            return
+        node = _resolve_ref(spec, node)
+        if not isinstance(node, dict):
+            return
+        for k, v in (node.get("properties") or {}).items():
+            vr = _resolve_ref(spec, v)
+            if isinstance(vr, dict) and vr.get("properties"):
+                _walk(vr, depth + 1)
+            elif isinstance(vr, dict):
+                info = {}
+                if vr.get("type"):
+                    info["type"] = vr["type"]
+                if vr.get("description"):
+                    info["description"] = vr["description"]
+                out[k] = info
+    for c in ([chosen] if chosen else variants):
+        if c is not None:
+            _walk(c)
+    return out
+
+
 async def draft_workflow(run_id: str, params: dict) -> dict:
     from dano.capabilities import oa_templates
     from dano.generation.dsl_grounding import check_grounding, collect_field_refs
@@ -253,6 +330,27 @@ async def draft_workflow(run_id: str, params: dict) -> dict:
         preconditions=preconditions, invariants=invariants, preview=bool(params.get("preview", False)),
         success_rule=params.get("success_rule") or (tmpl.success_rule() if tmpl else None),
     )
+    # 信源直通(grounded:有据才写,无则空,绝不臆造,任何异常都不阻断建流程):
+    # ① 审批链 business_meta(x-flow 优先,散文兜底)② 字段类型/描述从提交端点 schema 抽。
+    try:
+        spec = mat.openapi or {}
+        tid = _workflow_template_id(spec, body)
+        bmeta = _workflow_business_meta(spec, tmpl, tid)
+        if bmeta:
+            body.business_meta = bmeta
+            body.business = body.business or bmeta.get("flow", "")
+        leaves = _submit_leaf_fields(spec, tmpl, tid)
+        if leaves:
+            fd, ft = dict(body.field_docs), dict(body.field_types)
+            for f in body.user_fields:
+                info = leaves.get(f) or {}
+                if info.get("description") and not fd.get(f):
+                    fd[f] = info["description"]
+                if info.get("type") and not ft.get(f):
+                    ft[f] = info["type"]
+            body.field_docs, body.field_types = fd, ft
+    except Exception:  # noqa: BLE001 - 兜底:解析失败不阻断建流程
+        pass
     # grounding 硬关卡:动作必须已发布、表达式只准用已声明字段/变量+审计函数、来源必须可追溯。
     # ground 不住 → 拒绝并把问题回给 pi(绝不让臆造逻辑进库)。
     published = {e.body.get("action", e.asset_key)
@@ -336,12 +434,13 @@ async def draft_connector(run_id: str, params: dict) -> dict:
     if action is None:
         raise ToolError(f"接口里无此动作: {action_name}")
     body = build_connector_body(action, tenant=mat.tenant, subsystem=mat.subsystem,
-                                success_rule=success_rule)
+                                success_rule=success_rule, as_step=bool(params.get("as_step")))
     validate_asset_body(AssetType.CONNECTOR, body.model_dump())
     draft = await _ds.save_draft(run_id=run_id, scope=Scope(tenant=mat.tenant, subsystem=Subsystem(mat.subsystem)),
                                  asset_type=AssetType.CONNECTOR, asset_key=action_name, body=body.model_dump())
     return {"asset_draft_id": str(draft.asset_draft_id), "content_hash": draft.content_hash,
-            "action": action_name, "risk_level": body.risk_level.value}
+            "action": action_name, "risk_level": body.risk_level.value,
+            "workflow_step": body.workflow_step}
 
 
 def _action_business_ok(connector_body: dict, resp_body) -> bool:
@@ -370,12 +469,17 @@ async def sandbox_test(run_id: str, params: dict) -> dict:
         raise ToolError("sandbox_test 仅用于连接器草案")
     sb = _real_sandbox(_mat(run_id, draft.subsystem.value))
     conn = await sb.connection_test(draft.body)
+    v1 = await _ds.record_validation(asset_draft_id=draft.asset_draft_id, kind="connect",
+                                     passed=conn.passed, evidence=conn.evidence)
+    # 工作流步骤(不能独立跑,如提交步需上一步 taskId):只做连接测试,真实沙箱交复合 sandbox_test_workflow 整链验证
+    if params.get("as_step") or draft.body.get("workflow_step"):
+        return {"connect_passed": conn.passed, "sandbox_passed": None, "step": True,
+                "validation_run_ids": [str(v1.validation_run_id)],
+                "detail": f"connect={conn.detail}(工作流步骤:业务正确性由复合整链验证)"}
     sample = params.get("sample_inputs") or {}
     act = await sb.run_action(draft.body, inputs=sample)
     resp_body = (act.evidence or {}).get("response")
     sandbox_passed = act.passed and _action_business_ok(draft.body, resp_body)   # HTTP + 业务码双关
-    v1 = await _ds.record_validation(asset_draft_id=draft.asset_draft_id, kind="connect",
-                                     passed=conn.passed, evidence=conn.evidence)
     v2 = await _ds.record_validation(asset_draft_id=draft.asset_draft_id, kind="sandbox",
                                      passed=sandbox_passed, response=resp_body, evidence=act.evidence)
     return {"connect_passed": conn.passed, "sandbox_passed": sandbox_passed,
@@ -415,10 +519,75 @@ async def get_policy_doc(run_id: str, params: dict) -> dict:
     return {"policy_text": mat.policy_text or ""}
 
 
+def _rules_from_spec_xflow(spec: dict) -> list[dict]:
+    """从接口文档的 x-flow 扩展抽业务规则(审批链/校验/升级/记账)。
+
+    人工没登记规则时的兜底来源:enriched swagger 写了 x-flow,就把它变成 pi 能 grounding 的规则,
+    而不是凭空臆造。生鲜 CRUD swagger(无 x-flow)→ 返回空 → 复合流程就该只有真实步骤,不强加逻辑。
+    用法标注(kind):
+    - precondition:能用已声明字段表达的校验(如 amount>0)→ pi 做客户端前置,grounding 得住。
+    - server_side / approval_chain:服务端行为(升级加签/审批链/自动记账)→ 写进 preview 说明,**不**做客户端分支。
+    """
+    if not isinstance(spec, dict):
+        return []
+    paths = spec.get("paths") or {}
+    name_of = {(a.endpoint, (a.method or "").lower()): a.name
+               for a in doc_parser.parse_openapi(spec)}
+    rules: list[dict] = []
+    for path, methods in paths.items():
+        if not isinstance(methods, dict):
+            continue
+        for method, op in methods.items():
+            xf = op.get("x-flow") if isinstance(op, dict) else None
+            if not isinstance(xf, dict):
+                continue
+            action = name_of.get((path, method.lower()), "")
+            flow = xf.get("name") or xf.get("defKey") or action
+            for v in xf.get("businessValidations") or []:
+                if not isinstance(v, dict):
+                    continue
+                pr = v.get("params") or []
+                field = pr[0] if pr else ""
+                label = pr[1] if len(pr) > 1 else field
+                desc = v.get("desc") or ""
+                if v.get("rule") == "positive" and field:          # 可 grounding 的客户端前置
+                    rules.append({"action": action, "flow": flow, "kind": "precondition",
+                                  "check": f"{field} > 0", "fields": [field],
+                                  "message": desc or f"{label}必须大于0"})
+                else:                                              # 无对应查询动作 → 服务端校验,仅说明
+                    rules.append({"action": action, "flow": flow, "kind": "server_side",
+                                  "desc": desc or str(v.get("rule") or "校验")})
+            esc = xf.get("escalation")
+            if isinstance(esc, dict) and esc.get("when"):
+                rules.append({"action": action, "flow": flow, "kind": "server_side",
+                              "condition": esc.get("when"),
+                              "desc": f"满足条件加签:{esc.get('addApprover') or '上级审批'}(服务端自动,写进 preview,不做客户端分支)"})
+            chain = [c.get("step") for c in (xf.get("approvalChain") or []) if isinstance(c, dict) and c.get("step")]
+            if chain:
+                rules.append({"action": action, "flow": flow, "kind": "approval_chain", "chain": chain})
+            if xf.get("rejectBehavior"):
+                rules.append({"action": action, "flow": flow, "kind": "server_side", "desc": str(xf["rejectBehavior"])})
+    return rules
+
+
 async def get_business_rules(run_id: str, params: dict) -> dict:
-    """返回人工登记的业务规则(阈值/审批链)+ 日历源,供 pi grounding 分支/前置/不变量(非臆造)。"""
+    """返回业务规则(阈值/审批链)+ 日历源,供 pi grounding 分支/前置/不变量(非臆造)。
+
+    优先用人工登记的规则;没登记时**兜底从 swagger 的 x-flow 抽**(enriched 文档写了就用,生鲜 CRUD 文档则空)。
+    kind=precondition 的做客户端前置(grounding 得住);kind=server_side/approval_chain 写进 preview 说明。
+    """
     mat = _mat(run_id, params["system_instance_id"])
-    return {"business_rules": mat.business_rules or [], "holidays": mat.holidays or []}
+    rules = mat.business_rules or _rules_from_spec_xflow(mat.openapi or {})
+    return {"business_rules": rules, "holidays": mat.holidays or [],
+            "usage": "kind=precondition→客户端前置(用已声明字段,grounding 得住);"
+                     "kind=server_side/approval_chain→服务端行为,写进 preview 说明,不做客户端分支"}
+
+
+async def get_selected_flows(run_id: str, params: dict) -> dict:
+    """返回**人工勾选的业务**(templateId + 测试值)。pi 只针对这些发现/编排流程,
+    sandbox_test_workflow 用这些测试值当 cases。空 = 用户没圈定,可对全量业务自主发现。"""
+    mat = _mat(run_id, params["system_instance_id"])
+    return {"selected_flows": mat.selected_flows or []}
 
 
 async def draft_policy(run_id: str, params: dict) -> dict:
@@ -482,6 +651,9 @@ async def request_review(run_id: str, params: dict) -> dict:
     if draft.asset_type not in REVIEW_REQUIRED_TYPES:
         return {"all_passed": True, "verdicts": [], "review_run_ids": [],
                 "note": f"{draft.asset_type.value} 免三模型评审"}
+    if draft.asset_type == AssetType.CONNECTOR and draft.body.get("workflow_step"):
+        return {"all_passed": True, "verdicts": [], "review_run_ids": [],
+                "note": "工作流步骤连接器免单独评审(复合流程整体评审)"}
     vals = await _ds.list_validations(draft.asset_draft_id)
     evidence = [{"kind": v.kind, "passed": v.passed, "environment": v.environment,
                  "credential_type": v.credential_type, "evidence": v.evidence, "response": v.response}
@@ -644,6 +816,7 @@ TOOLS = {
     "health_check": health_check,
     "get_policy_doc": get_policy_doc,
     "get_business_rules": get_business_rules,
+    "get_selected_flows": get_selected_flows,
     "draft_policy": draft_policy,
     "test_policy_cases": test_policy_cases,
     "request_review": request_review,

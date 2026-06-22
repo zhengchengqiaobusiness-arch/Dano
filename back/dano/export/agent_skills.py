@@ -51,25 +51,128 @@ def _flags(m: SkillManifest) -> str:
     return " ".join(f"--{k} <{k}>" for k in keys)
 
 
+# ─────────────────────────── 语义抽取(供丰富 SKILL.md)───────────────────────────
+def _numeric_fields(props: dict) -> list[str]:
+    """数值字段:manifest 的 type 优先(已按信源/语义判定),再退按名字/描述。与契约层同一判据。
+
+    用途:① SKILL.md 标注「必须是 JSON 数字」② dano_call.py 提交前 str→number 强转
+    (审批分支按数值比较,字符串会让网关条件失效)。
+    """
+    from dano.shared.std_fields import is_numeric_field
+    return [k for k, v in (props or {}).items()
+            if is_numeric_field(k, str((v or {}).get("description") or ""),
+                                declared_type=(v or {}).get("type"))]
+
+
+def _ptype(k: str, props: dict, numeric: set[str]) -> str:
+    return "number" if k in numeric else ((props.get(k) or {}).get("type") or "string")
+
+
+def _approval_section(meta: dict) -> str:
+    """从 business_meta(x-flow)渲染审批链 / 金额阈值;没有就返回空(不臆造)。"""
+    if not isinstance(meta, dict):
+        return ""
+    chain = meta.get("approvalChain") or meta.get("approval_chain") or []
+    thresholds = meta.get("thresholds") or []
+    if not chain and not thresholds:
+        return ""
+    steps: list[str] = []
+    for c in chain:
+        if isinstance(c, dict) and c.get("step"):
+            cond = c.get("condition")
+            steps.append(f"{c['step']}" + (f"〔{cond}〕" if cond else ""))
+        elif isinstance(c, str):
+            steps.append(c)
+    lines = ["## 审批路径(服务端按规则执行,以下为预测)", ""]
+    if steps:
+        lines += ["```text", "发起人 → " + " → ".join(steps) + " → 结束", "```"]
+    if thresholds:
+        lines.append("\n金额边界规则:")
+        for t in thresholds:
+            if not isinstance(t, dict):
+                continue
+            fld = t.get("field", "amount")
+            adds = t.get("adds", "")
+            if "gt" in t:
+                lines.append(f"- `{fld}` 大于 {t['gt']} → 追加「{adds}」(等于不触发)")
+            elif "gte" in t:
+                lines.append(f"- `{fld}` 大于等于 {t['gte']} → 追加「{adds}」")
+    lines.append("\n> 这是按当前规则做的**预测**;最终审批节点以 OA 工作流引擎实际执行为准。\n")
+    return "\n".join(lines)
+
+
+def _collection_section(props: dict, numeric: list[str]) -> str:
+    names = {k.lower() for k in props}
+    lines = ["## 信息收集与本地校验", "",
+             "- 优先从用户原话提取字段,**不要臆造**数量/金额/单价/事由/物品/审批人等关键信息;缺必填项先补齐再提交。"]
+    if numeric:
+        flds = "、".join(f"`{k}`" for k in numeric)
+        lines.append(f"- 数值字段({flds})必须是 JSON **数字**而非字符串(脚本会自动转换;"
+                     "审批分支按数值比较,字符串会让流程条件判断失效)。")
+    if {"quantity", "unitprice"} <= names and "amount" in names:
+        lines.append("- 用户只给了数量与单价、没给总额时:`amount = quantity × unitPrice`(保留两位小数)。")
+        lines.append("- 三者都给了:校验 `|quantity × unitPrice − amount| ≤ 0.01`;不一致时**不要提交**,"
+                     "向用户指出差异并确认采用哪个金额。")
+    return "\n".join(lines)
+
+
+def _confirm_summary(required: list[str], props: dict) -> str:
+    if not required:
+        return ""
+    lines = ["## 提交前确认(写操作)", "",
+             "调用脚本(带 `--confirm`)前,**先把要提交的内容复述给用户并取得明确同意**,例如:", "", "```text"]
+    for k in required:
+        label = (props.get(k) or {}).get("description") or k
+        lines.append(f"{label}:<{k}>")
+    lines += ["```", "",
+              "仅当用户明确说「提交 / 发起 / 办理 / 创建 / 直接办」等执行性指令后,才带 `--confirm` 调用;",
+              "用户只说「看看怎么填 / 写个草稿」时——**只生成草稿,不调用脚本**。"]
+    return "\n".join(lines)
+
+
+_ERRORS_MD = """## 错误处理(据末行 status)
+- `failed` 且 reason 涉及凭证 / 401:OA 登录态失效,让部署方在 Dano 重配 token,**不要重试**。
+- `failed` 且 `事实核查未过`:疑似空操作(接口 200 但没真生效),把原始返回给用户,**勿报成功**。
+- `need_confirm`:写操作未确认被拦,向用户确认后**带 `--confirm` 重跑**。
+- **超时 / 结果不明**:**不要自动重试写操作**(可能已提交,重试会重复下单);先让用户或运维核对实际状态。"""
+
+_SECURITY_MD = """## 安全
+- 不在回复 / 日志里输出完整 token 或凭证。
+- 不把一笔大额拆成多笔小额以规避更高审批;用户要求规避审批应拒绝。
+- 申请人身份取自登录凭证(谁的 token 就是谁申请);不接受伪造审批人 / 审批结果。"""
+
+
 # ─────────────────────────── SKILL.md ───────────────────────────
 def _skill_md(m: SkillManifest, slug: str) -> str:
     tool = tool_name_of(m.name)
     confirm = m.requires_confirmation
     keys, required, props = _fields(m)
+    numeric = _numeric_fields(props)
+    numset = set(numeric)
+    req_list = [k for k in keys if k in required]
     if keys:
         rows = "\n".join(
-            f"| `{k}` | {'是' if k in required else '否'} | {(props[k] or {}).get('description', '') or k} |"
+            f"| `{k}` | {_ptype(k, props, numset)} | {'是' if k in required else '否'} | "
+            f"{(props[k] or {}).get('description', '') or k} |"
             for k in keys)
-        table = "| 参数 | 必填 | 说明 |\n|---|---|---|\n" + rows
-        ex_args = "{" + ", ".join(f'"{k}": "<{k}>"' for k in keys) + "}"
+        table = "| 参数 | 类型 | 必填 | 说明 |\n|---|---|---|---|\n" + rows
+        ex_args = "{" + ", ".join(
+            (f'"{k}": <{k}>' if k in numset else f'"{k}": "<{k}>"') for k in keys) + "}"
     else:
         table, ex_args = "(无业务参数)", "{}"
     flags = _flags(m)
     cflag = " --confirm" if confirm else ""
-    confirm_note = ("\n> ⚠ 高风险写操作:**执行前必须向用户复述将提交的内容并取得同意**,确认后再带 `--confirm` 调用。\n"
+    confirm_note = ("\n> ⚠ 高风险写操作:**执行前必须向用户复述将提交内容并取得同意**,确认后再带 `--confirm` 调用。\n"
                     if confirm else "")
     desc = (f"{m.description}。当用户想办理「{m.title}」或相关 {m.subsystem} 操作时,**务必使用本 skill**,"
             f"即使用户没有明确说出 skill 名或接口名。")
+    # 中部丰富段(有则插入,无则跳过,绝不臆造)
+    mid = [s for s in (
+        _approval_section(getattr(m, "business_meta", {}) or {}),
+        _collection_section(props, numeric),
+        _confirm_summary(req_list, props) if confirm else "",
+    ) if s]
+    mid_md = ("\n\n".join(mid) + "\n\n") if mid else ""
     return f"""---
 name: {slug}
 description: {desc}
@@ -83,18 +186,20 @@ metadata:
 
 # {m.title}
 
-这是 Dano **已上架 Skill 的代理**。真正的执行(适配器调用目标系统 + 三模型闸门 + 事实核查)都在 Dano 侧完成;本端只收集参数、调用 Dano,**不实现业务逻辑、不接触目标系统凭证**。
+这是 Dano **已上架 Skill 的代理**:真正的两步编排 + 三模型闸门 + 事实核查都在 Dano 侧。本端负责**收集参数、本地校验、提交前确认**,再调用 Dano,**不接触目标系统凭证、不自行发审批结果**。
 {confirm_note}
 ## 何时使用
-{m.description}
+当用户想办理「{m.title}」({m.subsystem})时使用本 skill,即使没说出 skill 名或接口名。
+
+**不该直接使用**:用户只是咨询制度 / 查询已有单据状态 / 要求审批或驳回他人单据;只是模拟或咨询、没明确要正式提交;关键信息(内容 / 数量 / 金额)无法确认。
 
 ## 参数
 {table}
 
 > `__base_url__`、流程模板、申请人身份(来自登录凭证)、调用凭证等由 Dano 运行期注入,**不需要也不应**由你提供。
 
-## 如何执行
-1. 与用户确认意图,收集上面的**必填**参数。{('高风险:先复述将提交的内容并取得同意。' if confirm else '')}
+{mid_md}## 如何执行
+1. 收集并校验上面的**必填**参数(见「信息收集与本地校验」)。{('高风险:先复述提交内容并取得同意。' if confirm else '')}
 2. 运行脚本(自动带 `X-Tenant-Key` 调 Dano):
    - bash:`bash scripts/submit.sh {flags}{cflag}`
    - PowerShell:`pwsh scripts/submit.ps1 {flags}{cflag}`
@@ -115,6 +220,13 @@ metadata:
 {{"status": "failed", "reason": "缺必填: reason"}}
 ```
 
+{_ERRORS_MD}
+
+{_SECURITY_MD}
+
+## 限制
+本 skill 只负责「{m.title}」这一个动作。状态查询、撤回、审批历史、附件上传等若没有对应 skill,**不要声称支持**。
+
 ## 示例
 **Input:** 用户说"帮我提交一条{m.title}"。
 **调用:** `bash scripts/submit.sh {flags}{cflag}`
@@ -125,7 +237,7 @@ metadata:
 |---|---|
 | `DANO_URL/DANO_TENANT_KEY 未设置` | 让部署方配好这两个环境变量(勿写进文件) |
 | `HTTP 401` / 凭证无效 | Dano「运行配置」里该租户 OA token 失效,重配 |
-| `缺必填: …` | 补齐"参数"表里的必填项再调 |
+| `缺必填: …` / `字段 … 需为数字` | 补齐参数表里的必填项 / 把数值字段填成数字再调 |
 | `事实核查未过` | Dano 判定没真生效(疑似空操作),把原始返回给用户,**勿报成功** |
 
 ## 运行前置(环境变量,部署方配置,勿写进文件)
@@ -205,7 +317,7 @@ import urllib.request
 TOOL = "__TOOL__"
 FIELDS = __FIELDS__
 REQUIRED = __REQUIRED__
-CONFIRM_DEFAULT = __CONFIRM__
+NUMERIC = __NUMERIC__          # 数值字段:提交前 str->number,避免审批分支按字符串误判
 
 
 def _emit(obj):
@@ -217,7 +329,8 @@ def main():
     for f in FIELDS:
         ap.add_argument("--" + f, default=None)
     ap.add_argument("--json", dest="raw", default=None, help="直接给 arguments JSON(覆盖逐字段)")
-    ap.add_argument("--confirm", action="store_true", default=CONFIRM_DEFAULT)
+    # 写操作默认**未确认**:不带 --confirm 调用会被 Dano 拦成 need_confirm(确认闸门不被绕过)。
+    ap.add_argument("--confirm", action="store_true", default=False)
     ap.add_argument("--diagnose", action="store_true")
     args = ap.parse_args()
 
@@ -251,6 +364,15 @@ def main():
     if missing:
         _emit({"status": "failed", "reason": "缺必填: %s" % ", ".join(missing)})
         sys.exit(1)
+
+    for f in NUMERIC:                       # 数值字段 str->number(审批分支按数值比较,字符串会误判)
+        v = arguments.get(f)
+        if isinstance(v, str) and v != "":
+            try:
+                arguments[f] = int(v) if v.lstrip("-").isdigit() else float(v)
+            except ValueError:
+                _emit({"status": "failed", "reason": "字段 %s 需为数字,得到: %r" % (f, v)})
+                sys.exit(1)
 
     payload = json.dumps({"name": TOOL, "arguments": arguments, "confirm": bool(args.confirm)}).encode("utf-8")
     req = urllib.request.Request(
@@ -288,13 +410,14 @@ if __name__ == "__main__":
 
 
 def _dano_call_py(m: SkillManifest) -> str:
-    keys, required, _ = _fields(m)
+    keys, required, props = _fields(m)
+    numeric = _numeric_fields(props)
     return (_PY_TEMPLATE
             .replace("__TITLE__", m.title)
             .replace("__TOOL__", tool_name_of(m.name))
             .replace("__FIELDS__", json.dumps(keys, ensure_ascii=False))
             .replace("__REQUIRED__", json.dumps([k for k in keys if k in required], ensure_ascii=False))
-            .replace("__CONFIRM__", "True" if m.requires_confirmation else "False"))
+            .replace("__NUMERIC__", json.dumps(numeric, ensure_ascii=False)))
 
 
 _SUBMIT_SH = """#!/usr/bin/env bash

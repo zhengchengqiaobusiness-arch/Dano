@@ -7,8 +7,17 @@ import { invokeSkill, SkillManifest, TaskOutcome, JSONSchema } from "../api/skil
 
 const STATE_COLOR: Record<string, string> = {
   completed: "success", failed: "error", rejected: "error",
-  cancelled: "warning", needs_input: "warning",
+  cancelled: "warning", needs_input: "warning", needs_select: "warning",
 };
+
+// 候选项标识:优先 id,否则第一个值(与后端 _candidate_id 一致)
+function candidateId(c: Record<string, unknown>): unknown {
+  return c.id ?? Object.values(c)[0];
+}
+function candidateLabel(c: Record<string, unknown>, tmpl?: string): string {
+  if (tmpl) return tmpl.replace(/\{(\w+)\}/g, (_, k) => String(c[k] ?? ""));
+  return JSON.stringify(c);
+}
 
 // 按字段名/描述猜控件类型(manifest 目前统一 type=string,故靠语义猜:日期/数字/文本)
 const isDate = (s: string) => /date|time|日期|时间|起止|开始|结束|起|止/i.test(s);
@@ -27,6 +36,7 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
   const [confirm, setConfirm] = useState(false);
   const [running, setRunning] = useState(false);
   const [out, setOut] = useState<TaskOutcome | null>(null);
+  const [lastInput, setLastInput] = useState<Record<string, unknown>>({});  // 供消歧选中后带同一组输入重调
 
   const props = useMemo(() => skill?.parameters?.properties || {}, [skill]);
   const required = useMemo(() => new Set(skill?.parameters?.required || []), [skill]);
@@ -42,6 +52,20 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
   }, [skill]);
 
   const setVal = (k: string, v: unknown) => setValues((p) => ({ ...p, [k]: v }));
+
+  async function doInvoke(input: Record<string, unknown>) {
+    if (!skill) return;
+    setRunning(true);
+    setOut(null);
+    setLastInput(input);
+    try {
+      setOut(await invokeSkill(skill.name, input, confirm));
+    } catch (e: any) {
+      message.error("调用失败:" + (e?.response?.data?.detail || e.message));
+    } finally {
+      setRunning(false);
+    }
+  }
 
   async function run() {
     if (!skill) return;
@@ -62,15 +86,7 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
       // 丢掉空的可选字段;数字/日期已是正确类型
       input = Object.fromEntries(Object.entries(values).filter(([, v]) => v !== "" && v != null));
     }
-    setRunning(true);
-    setOut(null);
-    try {
-      setOut(await invokeSkill(skill.name, input, confirm));
-    } catch (e: any) {
-      message.error("调用失败:" + (e?.response?.data?.detail || e.message));
-    } finally {
-      setRunning(false);
-    }
+    await doInvoke(input);
   }
 
   const fieldRow = (key: string, p: { description?: string }) => {
@@ -144,6 +160,23 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
                 message={<span>state: <b>{out.state}</b></span>}
                 description={out.message}
               />
+              {out.state === "needs_select" && (() => {
+                const sel = ((out.audit as any)?.select || {}) as { bind?: string; candidates?: Record<string, unknown>[]; label_template?: string };
+                const cands = sel.candidates || [];
+                return (
+                  <div style={{ marginTop: 12 }}>
+                    <Typography.Text>请选择一个候选(将以 <b>{sel.bind}</b> 带同一组输入重新调用):</Typography.Text>
+                    <Space wrap style={{ marginTop: 8 }}>
+                      {cands.map((c, i) => (
+                        <Button key={i} loading={running}
+                                onClick={() => doInvoke({ ...lastInput, [sel.bind as string]: candidateId(c) })}>
+                          {candidateLabel(c, sel.label_template)}
+                        </Button>
+                      ))}
+                    </Space>
+                  </div>
+                );
+              })()}
               <Typography.Text type="secondary" style={{ display: "block", marginTop: 12 }}>返回(structured_output)</Typography.Text>
               <Input.TextArea
                 readOnly

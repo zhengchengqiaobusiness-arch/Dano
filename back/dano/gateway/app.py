@@ -64,7 +64,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 repo = AssetRepository()
 
 
-# ── 凭证解析:配了 Vault 走真实 Vault,否则 dev 回退 DANO_RUNTIME_CREDENTIALS env 表 ──
+# ── 凭证解析:配了 Vault 走真实 Vault,否则 dev 回退 config.py 的 runtime_credentials + 进程内表 ──
 def _resolve_creds(refs: dict[str, str]) -> dict[str, str]:
     from dano.infra.credentials import resolve_credentials
     return resolve_credentials(refs)
@@ -118,38 +118,11 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
-# ── 运行配置(密钥/凭证在页面里填,后端运行时存进进程环境;不落文件/bat,GET 不回明文)──
-class RuntimeConfig(BaseModel):
-    pi_api_key: str | None = None          # SiliconFlow / OpenAI 兼容 key(编码+评审)
-    pi_base_url: str | None = None
-    pi_model: str | None = None
-    insecure_tls: bool | None = None       # 自签证书的目标系统置 true
-    runtime_credentials: dict | None = None  # 调用期 OA 凭证:{"租户/oa": {"token": "..."}}
-
-
-def _runtime_status() -> dict:
-    import json as _json
-    import os
-    from dano.config import get_settings
-    s = get_settings()
-    rc = os.environ.get("DANO_RUNTIME_CREDENTIALS", "")
-    try:
-        rc_keys = list(_json.loads(rc).keys()) if rc else []
-    except Exception:  # noqa: BLE001
-        rc_keys = []
-    return {"pi_key_set": bool(s.pi_api_key), "pi_base_url": s.pi_base_url, "pi_model": s.pi_model,
-            "insecure_tls": s.insecure_tls, "runtime_credential_keys": rc_keys}
-
-
-@app.get("/settings/runtime")
-async def get_runtime() -> dict:
-    return _runtime_status()
-
-
+# ── 运行配置全部走 config.py(不再有前端运行配置页 / 写入端点);仅保留只读 LLM 自检 ──
 @app.get("/settings/llm-test")
 async def llm_test() -> dict:
-    """用网关**当前进程的实时配置**真打一发 LLM,返回真实 HTTP 状态——定位生成失败到底是
-    401(key 错)还是 400(模型名错)还是 429(限流),不必再猜。不回显 key 值。"""
+    """用 config.py 的 LLM 配置真打一发,返回真实 HTTP 状态——定位生成失败是
+    401(key 错)/400(模型名错)/429(限流),不必再猜。不回显 key 值。"""
     import time
 
     import httpx
@@ -158,7 +131,7 @@ async def llm_test() -> dict:
     s = get_settings()
     key = (s.pi_api_key or "").strip()
     if not key:
-        return {"ok": False, "reason": "no_key", "detail": "网关进程没有 API Key(页面未提交或重启后未重发)"}
+        return {"ok": False, "reason": "no_key", "detail": "config.py 未配 pi_api_key"}
     base = s.pi_base_url.rstrip("/")
     url = base + ("/chat/completions" if base.endswith("/v1") else "/v1/chat/completions")
     payload = {"model": s.pi_model, "temperature": 0, "max_tokens": 8,
@@ -182,27 +155,6 @@ async def llm_test() -> dict:
     return {"ok": ok, "status": r.status_code, "dur_s": dur, "model": s.pi_model,
             "base_url": s.pi_base_url, "key_tail": key[-4:], "content_len": content_len,
             "body": ("" if ok else r.text[:400])}
-
-
-@app.post("/settings/runtime")
-async def set_runtime(cfg: RuntimeConfig) -> dict:
-    """页面提交密钥/凭证 → 写进后端进程环境(不落文件)。重启后需再次提交(前端会自动重发)。"""
-    import json as _json
-    import os
-    from dano.config import get_settings
-    if cfg.pi_api_key:
-        os.environ["DANO_PI_API_KEY"] = cfg.pi_api_key
-    if cfg.pi_base_url:
-        os.environ["DANO_PI_BASE_URL"] = cfg.pi_base_url
-    if cfg.pi_model:
-        os.environ["DANO_PI_MODEL"] = cfg.pi_model
-    if cfg.insecure_tls is not None:
-        os.environ["DANO_INSECURE_TLS"] = "1" if cfg.insecure_tls else "0"
-    if cfg.runtime_credentials is not None:
-        os.environ["DANO_RUNTIME_CREDENTIALS"] = _json.dumps(cfg.runtime_credentials)
-    get_settings.cache_clear()
-    log.info("settings.runtime_updated", pi_key_set=bool(get_settings().pi_api_key))
-    return _runtime_status()
 
 
 # ── 租户 ──

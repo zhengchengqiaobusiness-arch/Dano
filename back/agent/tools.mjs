@@ -37,8 +37,13 @@ export const customTools = [
   }),
   proxyTool({
     name: "draft_connector", label: "建连接器草案",
-    description: "为一个动作生成连接器草案(声明式资产体),返回 asset_draft_id。",
-    parameters: Type.Object({ system_instance_id: Type.String(), action: Type.String() }),
+    description: "为一个动作生成连接器草案(声明式资产体),返回 asset_draft_id。" +
+      "**复合流程的步骤动作**(如提交步,不能独立跑)传 as_step=true:发布只需连得通、免单独沙箱/评审," +
+      "且永不单独上架(由复合流程隐藏);真实校验交 sandbox_test_workflow 整链。",
+    parameters: Type.Object({
+      system_instance_id: Type.String(), action: Type.String(),
+      as_step: Type.Optional(Type.Boolean()),
+    }),
   }),
   proxyTool({
     name: "sandbox_test", label: "沙箱验证",
@@ -48,6 +53,7 @@ export const customTools = [
     parameters: Type.Object({
       asset_draft_id: Type.String(),
       sample_inputs: Type.Optional(Type.Record(Type.String(), Type.Any())),
+      as_step: Type.Optional(Type.Boolean()),   // 复合步骤:只做连接测试(整链由 sandbox_test_workflow 验)
     }),
   }),
   proxyTool({
@@ -109,6 +115,12 @@ export const customTools = [
     name: "get_business_rules", label: "取业务规则",
     description: "返回人工登记的业务规则(阈值/审批链)+ 日历源(holidays)。" +
       "据此 grounding 分支 condition / 前置·不变量 / compute 的 business_days,**不要臆造规则**。",
+    parameters: Type.Object({ system_instance_id: Type.String() }),
+  }),
+  proxyTool({
+    name: "get_selected_flows", label: "取勾选业务",
+    description: "返回用户**人工勾选的业务**(templateId + 测试值)。**只针对这些业务**发现/编排复合流程;" +
+      "sandbox_test_workflow 用这些测试值当 cases。返回空才可对全量业务自主发现。",
     parameters: Type.Object({ system_instance_id: Type.String() }),
   }),
   proxyTool({

@@ -33,15 +33,36 @@ async function realRun(start) {
   // key 仅经 env,不落代码。DeepSeek 用内置 'deepseek' provider + 'deepseek-v4-flash'。
   const auth = AuthStorage.inMemory();
   const apiKey = process.env.DANO_PI_API_KEY;
-  const provider = process.env.DANO_PI_PROVIDER || "deepseek";
-  const modelId = process.env.DANO_PI_MODEL || "deepseek-v4-flash";
-  if (apiKey) auth.setRuntimeApiKey(provider, apiKey);
+  const baseUrl = process.env.DANO_PI_BASE_URL;
+  const provider = process.env.DANO_PI_PROVIDER || "openai-compat";
+  const modelId = process.env.DANO_PI_MODEL || "deepseek-ai/DeepSeek-V3.2";
   const registry = ModelRegistry.create(auth);
-  let model = registry.find(provider, modelId);
-  if (!model) model = registry.getAvailable?.()[0];
+  let model;
+  if (baseUrl && apiKey && modelId) {
+    // OpenAI 兼容端点(SiliconFlow / 自托管等):注册自定义 provider,用配的 baseUrl + key + model。
+    // 内置 provider(如 deepseek)会忽略 baseUrl 打官方 API,与 SiliconFlow key 不匹配 → 必须走这条。
+    auth.setRuntimeApiKey(provider, apiKey);
+    registry.registerProvider(provider, {
+      name: provider, baseUrl, apiKey, api: "openai-completions",
+      models: [{
+        id: modelId, name: modelId, reasoning: false, input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 128000, maxTokens: 8192,
+      }],
+    });
+    model = registry.find(provider, modelId);
+    log("registered openai-compatible:", provider, baseUrl, modelId, "->", model ? "ok" : "NONE");
+  } else {
+    // 无 baseUrl → pi 内置 provider(原行为)
+    if (apiKey) auth.setRuntimeApiKey(provider, apiKey);
+    model = registry.find(provider, modelId);
+    if (!model) { log("WARN: registry.find 未命中", provider, modelId, "→ 回退 getAvailable()[0]"); model = registry.getAvailable?.()[0]; }
+  }
   if (!model || (registry.hasConfiguredAuth && !registry.hasConfiguredAuth(model))) {
+    log("ERROR: 无可用模型/凭证", "provider=" + provider, "model=" + modelId, "key_set=" + !!apiKey, "baseUrl=" + (baseUrl || "(none)"));
     return { status: "failed", error: "no_model_or_credentials" };
   }
+  log("model resolved:", provider, modelId, "->", (model.id || model.name || "ok"), "key_set=" + !!apiKey);
 
   // skills:DefaultResourceLoader 需 cwd + agentDir;skill 经 additionalSkillPaths 加入。
   let resourceLoader, skillsLoaded = false;
@@ -67,6 +88,7 @@ async function realRun(start) {
     session.subscribe((ev) => {
       const t = (ev && ev.type) || "";
       if (/tool/i.test(t)) { toolEvents++; emit({ type: "agent_event", run_id: start.run_id, event: t }); }
+      else if (!/delta/i.test(t)) { log("ev:", t); }   // 非 delta 事件记 stderr:看"沉默期"模型在干嘛(思考/出文本/报错)
     });
   } catch (e) { log("subscribe 失败:", e.message); }
 
@@ -84,6 +106,10 @@ async function realRun(start) {
       }
     }
   } catch {}
+  if (toolEvents === 0) {
+    log("WARN: 本次 0 次工具调用 —— 模型可能不支持 function-calling / 未触发工具 / skill 未加载",
+        "(skills_loaded=" + skillsLoaded + ", final_chars=" + finalText.length + ")");
+  }
   return { status: "completed", skills_loaded: skillsLoaded, tool_events: toolEvents,
            final_text: finalText.slice(0, 100000) };   // 足够容纳生成的代码(原 600 会截断 codegen)
 }

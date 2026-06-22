@@ -12,10 +12,31 @@ import {
   BizTemplate, FormField, OnboardJob, OnboardEvent,
 } from "../api/onboarding";
 
+// pi 工具返回摘要 → 紧凑中文(上架/评审/沙箱/动作数/覆盖缺口…)
+function fmtSummary(s?: Record<string, unknown>): string {
+  if (!s || !Object.keys(s).length) return "";
+  const parts: string[] = [];
+  if (s.published) parts.push(`上架 ${s.asset_id ?? ""}`);
+  else if (s.published === false) parts.push("未上架(被闸门驳回)");
+  if (s.all_passed !== undefined) parts.push(`评审${s.all_passed ? "全过" : "驳回"}`);
+  if (s.connect_passed !== undefined || s.sandbox_passed !== undefined) parts.push(`connect=${s.connect_passed} sandbox=${s.sandbox_passed}`);
+  else if (s.passed !== undefined) parts.push(`通过=${s.passed}`);
+  if (s.business_actions !== undefined) parts.push(`${s.business_actions} 个业务动作`);
+  else if (s.action) parts.push(String(s.action));
+  if (Array.isArray(s.coverage_gaps) && s.coverage_gaps.length) parts.push(`分支覆盖缺口 ${s.coverage_gaps.length}`);
+  if (s.rule_count !== undefined) parts.push(`${s.rule_count} 条规则`);
+  return parts.length ? " · " + parts.join(" · ") : "";
+}
+
 // 把一个进度事件渲染成一行控制台日志:{颜色, 文本}
 function logLine(e: OnboardEvent): { color: string; text: string } {
   const r = (e.iter ?? 0) + 1;
   switch (e.type) {
+    // ── pi 单一路径(默认):阶段标记 + 逐个工具调用 ──
+    case "phase": return { color: "#89b4fa", text: `▶ 阶段:${e.note || e.phase}` };
+    case "tool_call": return { color: "#cdd6f4", text: `  · 调用 ${e.tool}${e.action ? `(${e.action})` : ""}…` };
+    case "tool_done": return { color: "#a6e3a1", text: `  ✓ ${e.tool} 完成${e.dur_s ? ` ${e.dur_s}s` : ""}${fmtSummary(e.summary)}` };
+    case "tool_error": return { color: "#f38ba8", text: `  ✗ ${e.tool} 失败:${e.error || ""}` };
     case "plan": return { color: "#89b4fa", text: `计划生成 ${(e.flows || []).length} 个流程:${(e.flows || []).join(", ")}` };
     case "flow_start": return { color: "#89b4fa", text: `▶ [${e.flow}] 开始 (${(e.index ?? 0) + 1}/${e.total})${e.route === "seed" ? " · 种子(已验证)" : e.route === "reused" ? " · 复用已发布" : e.route === "read" ? " · 只读/确定性" : e.route === "llm" ? " · LLM 拆解" : ""}` };
     case "replanned": return { color: "#cba6f7", text: `  ↺ 第${e.attempt ?? 1}次重拆方案(上一版被事实核查证伪)` };

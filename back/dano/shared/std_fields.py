@@ -59,3 +59,37 @@ ALL_STD_FIELDS: list[StdField] = (
 )
 
 STD_FIELD_INDEX: dict[str, StdField] = {f.key: f for f in ALL_STD_FIELDS}
+
+
+# ── 字段语义助手(契约/导出共用,避免各处重复猜)──────────────────────────────
+
+# 流程内部字段:由 Dano 运行期注入(流程模板/实例/任务句柄),**绝不**作为用户参数暴露。
+FLOW_INTERNAL_FIELDS: frozenset[str] = frozenset({
+    "templateid", "procinsid", "procdefid", "defid", "taskid", "bizid", "procdefkey",
+})
+
+# 数值字段判定:名字命中 或 描述含金额/数量/单价等量纲词 → JSON number(审批分支按数值比较)。
+_NUMERIC_NAMES: frozenset[str] = frozenset({
+    "amount", "quantity", "unitprice", "price", "total", "totalamount", "count", "qty",
+    "num", "number", "days", "hours", "duration", "money", "fee", "cost", "budget",
+    "sum", "subtotal",
+})
+_NUMERIC_KEYWORDS: tuple[str, ...] = (
+    "金额", "数量", "单价", "总额", "总价", "价格", "费用", "预算", "天数", "小时", "时长", "(元)", "（元）",
+)
+
+
+def _norm(name: str) -> str:
+    return (name or "").lower().replace("_", "")
+
+
+def is_flow_internal(name: str) -> bool:
+    """是否为流程内部/注入字段(不进对外契约)。"""
+    return _norm(name) in FLOW_INTERNAL_FIELDS
+
+
+def is_numeric_field(name: str, desc: str = "", *, declared_type: str | None = None) -> bool:
+    """字段是否应为 JSON 数字。优先信源 schema 声明的 number/integer,退而按名字/描述判定。"""
+    if declared_type in ("number", "integer"):
+        return True
+    return _norm(name) in _NUMERIC_NAMES or any(w in (desc or "") for w in _NUMERIC_KEYWORDS)

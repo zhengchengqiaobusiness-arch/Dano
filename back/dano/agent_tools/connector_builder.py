@@ -58,7 +58,8 @@ def _build_assertions(bindings: list[FieldBinding], *, risk: RiskLevel,
 
 
 def build_connector_body(action: ActionSpec, *, tenant: str, subsystem: str,
-                         success_rule: str | None = None, auth_hint: str = "") -> ConnectorBody:
+                         success_rule: str | None = None, auth_hint: str = "",
+                         as_step: bool = False) -> ConnectorBody:
     adapter = auth_adapters.select_adapter(auth_hint)
     required_set = set(action.required_in)
     bindings = [b for p in action.params_in
@@ -74,6 +75,6 @@ def build_connector_body(action: ActionSpec, *, tenant: str, subsystem: str,
         endpoint=action.endpoint, method=action.method, auth_kind=adapter.kind,
         auth_ref=f"vault://{tenant}/{sys_key}", action=action.name,
         title=action.summary, field_bindings=bindings, field_docs=field_docs,
-        risk_level=risk, failure_handling=failure,
+        risk_level=risk, failure_handling=failure, workflow_step=as_step,
         assertions=_build_assertions(bindings, risk=risk, success_rule=success_rule),
     )

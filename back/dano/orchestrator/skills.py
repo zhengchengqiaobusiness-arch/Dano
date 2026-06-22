@@ -82,6 +82,9 @@ class SkillRegistry:
                         risk_level=body.risk_level,
                         title=body.title,
                         field_docs=dict(body.field_docs),
+                        field_types=dict(getattr(body, "field_types", {}) or {}),
+                        business=getattr(body, "business", "") or "",
+                        business_meta=dict(getattr(body, "business_meta", {}) or {}),
                         has_api=True,
                         is_workflow=True,
                         workflow_asset_id=env.asset_id,
@@ -99,7 +102,8 @@ class SkillRegistry:
             # 有 API:从已发布连接器派生(被复合流程消费的步骤动作隐藏)
             for env in await store.list_published(AssetType.CONNECTOR, scope):
                 action = env.body.get("action", env.asset_key)
-                if action in hidden_actions:
+                # 复合流程的步骤连接器:永不单独露出(即便其复合流程未发布也不污染目录)
+                if action in hidden_actions or env.body.get("workflow_step"):
                     continue
                 meta = ACTION_META.get(action, ActionMeta(keywords=[action]))
                 bindings = env.body.get("field_bindings", [])
@@ -114,6 +118,7 @@ class SkillRegistry:
                         risk_level=RiskLevel(env.body.get("risk_level", "L1")),
                         title=env.body.get("title", ""),
                         field_docs=dict(env.body.get("field_docs", {})),
+                        field_types=dict(env.body.get("field_types", {}) or {}),
                         has_api=True,
                         connector_asset_id=env.asset_id,
                         required_fields=req,
