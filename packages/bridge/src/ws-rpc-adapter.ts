@@ -3914,7 +3914,6 @@ export class WsRpcAdapter {
   private client: WsClient;
   private send: RpcAdapterSend;
   private context: WsRpcAdapterContext;
-  private config: BridgeConfig;
   private eventBus: BridgeEventBus;
   private emitEvent: (event: BridgeEvent) => void;
 
@@ -3949,7 +3948,6 @@ export class WsRpcAdapter {
     this.client = client;
     this.send = send;
     this.context = context;
-    this.config = config;
     this.eventBus = eventBus;
     this.emitEvent = emitEvent;
     this.detachedSessionRegistry =
