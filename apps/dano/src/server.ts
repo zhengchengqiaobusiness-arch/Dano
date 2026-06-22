@@ -1,13 +1,13 @@
-import { BridgeEventBus } from "../bridge-event-bus.js";
-import { BridgeServer, type RpcConnectionHandlerFactory } from "../server.js";
-import { DetachedSessionRegistry } from "../session-registry.js";
+import { BridgeEventBus } from "@dano/bridge/bridge-event-bus";
+import { BridgeServer, type RpcConnectionHandlerFactory } from "@dano/bridge/server";
+import { DetachedSessionRegistry } from "@dano/bridge/session-registry";
 import type {
   BridgeConfig,
   BridgeEvent,
   BridgeState,
   WsClient,
-} from "../types.js";
-import { WsRpcAdapter } from "../ws-rpc-adapter.js";
+} from "@dano/bridge/types";
+import { WsRpcAdapter } from "@dano/bridge/ws-rpc-adapter";
 import {
   createStandaloneBridgeContext,
   type StandaloneBridgeBackend,

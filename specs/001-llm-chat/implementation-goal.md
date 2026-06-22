@@ -21,7 +21,7 @@
 
 当前计划要求：
 
-- 使用 pi-web 原仓库结构：`packages/bridge` + `packages/svelte`
+- 保留 `packages/bridge` + `packages/svelte`，将可运行 standalone 应用放在 `apps/dano`
 - 移除 `packages/bin` Pi extension 模式
 - 移除 `packages/electron` Electron 模式
 - 保留服务端 LLM runtime 依赖
@@ -67,12 +67,13 @@
 ## PLAN: 执行步骤
 
 1. 阅读 `plan.md`、`contracts/http-sse.md`、`quickstart.md` 和 `references/pi-web-main` 关键文件。
-2. 初始化目标代码结构，按 pi-web 原结构保留：
+2. 初始化目标代码结构：
+   - `apps/dano`
    - `packages/bridge`
    - `packages/svelte`
    - root `package.json`
    - `pnpm-workspace.yaml`
-3. 从 `references/pi-web-main` 迁移 standalone bridge 和 Svelte UI 必需代码。
+3. 从 `references/pi-web-main` 迁移 standalone Dano 应用和 Svelte UI 必需代码。
 4. 删除目标中的 Pi extension 模式：
    - 不迁移或移除 `packages/bin`
    - 移除 root package 中 extension 注册与相关脚本

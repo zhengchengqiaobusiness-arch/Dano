@@ -1,32 +1,26 @@
 {
-  "name": "@dano/bridge",
+  "name": "@dano/app",
   "version": "0.3.4",
   "private": true,
-  "description": "HTTP/SSE RPC bridge server for Pi Web",
+  "description": "Dano standalone browser application",
   "type": "module",
-  "exports": {
-    "./*": {
-      "types": "./src/*.ts",
-      "default": "./src/*.ts"
-    }
-  },
   "scripts": {
     "build": "tsdown",
     "check": "tsc --noEmit",
+    "dev": "node --import jiti/register ./src/main.ts",
+    "start": "node ../../dist/bridge/standalone/main.js",
     "test": "vitest run --root ../.. --config vitest.config.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.74.0",
-    "typebox": "1.2.7"
+    "@dano/bridge": "workspace:*",
+    "@earendil-works/pi-coding-agent": "0.74.0"
   },
   "devDependencies": {
     "@types/node": "^25.8.0",
+    "jiti": "^2.7.0",
     "tsdown": "^0.22.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.6"
-  },
-  "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
   },
   "engines": {
     "node": ">=20.6.0"

@@ -1,6 +1,6 @@
 import { dirname, join, resolve } from "node:path";
-import { DEFAULT_BRIDGE_CONFIG as STATIC_DEFAULT_BRIDGE_CONFIG } from "../types.js";
-import type { BridgeConfig } from "../types.js";
+import { DEFAULT_BRIDGE_CONFIG as STATIC_DEFAULT_BRIDGE_CONFIG } from "@dano/bridge/types";
+import type { BridgeConfig } from "@dano/bridge/types";
 import { resolveStandaloneDevWatchPath } from "./dev-reload.js";
 import {
   startStandaloneBridge as staticStartStandaloneBridge,

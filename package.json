@@ -8,7 +8,7 @@
   "scripts": {
     "build": "pnpm run build:server && pnpm run build:web",
     "build:bridge": "pnpm -C packages/bridge build",
-    "build:server": "pnpm run build:bridge",
+    "build:server": "pnpm run build:bridge && pnpm -C apps/dano build",
     "build:svelte": "pnpm -C packages/svelte build",
     "build:web": "pnpm run build:svelte",
     "check": "pnpm run check:type && pnpm run check:web",
@@ -19,24 +19,19 @@
     "deploy:ps": "node scripts/deploy-compose.mjs ps",
     "deploy:stop": "node scripts/deploy-compose.mjs stop",
     "deploy:up": "node scripts/deploy-compose.mjs up",
-    "dev:bridge:standalone": "node --import jiti/register ./packages/bridge/src/standalone/main.ts",
+    "dev:bridge:standalone": "pnpm -C apps/dano dev",
     "dev:svelte": "pnpm -C packages/svelte dev",
     "dev:web": "pnpm run dev:svelte",
     "secret:set": "node scripts/set-env-secret.mjs",
     "smoke:deploy": "node scripts/smoke-dano-deploy.mjs",
-    "start:bridge:standalone": "node ./dist/bridge/standalone/main.js",
+    "start:bridge:standalone": "pnpm -C apps/dano start",
     "test": "vitest run",
     "test:watch": "vitest"
-  },
-  "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.74.0",
-    "typebox": "1.2.7"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
     "@tsconfig/svelte": "^5.0.8",
     "@types/node": "^25.8.0",
-    "jiti": "^2.7.0",
     "svelte": "^5.55.7",
     "svelte-check": "^4.4.8",
     "tsdown": "^0.22.0",

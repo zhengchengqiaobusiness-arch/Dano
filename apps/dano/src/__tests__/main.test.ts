@@ -9,6 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { resolveStandaloneDevWatchPath } from "../dev-reload.js";
 import {
   initializeStandaloneWorkspaceSettings,
   parseStandaloneMainOptions,
@@ -32,6 +33,19 @@ function findNearestWebDist(startDir: string): string | undefined {
 }
 
 describe("standalone main", () => {
+  it("reloads source runs from the extracted app without treating builds as dev", () => {
+    expect(
+      resolveStandaloneDevWatchPath(
+        join("/tmp", "repo", "apps", "dano", "src", "main.ts"),
+      ),
+    ).toBe(resolve("/tmp/repo/apps/dano"));
+    expect(
+      resolveStandaloneDevWatchPath(
+        join("/tmp", "repo", "dist", "bridge", "standalone", "main.js"),
+      ),
+    ).toBeUndefined();
+  });
+
   it("parses the optional port override", () => {
     const options = parseStandaloneMainOptions(["--port", "8123"], {});
 
@@ -231,7 +245,7 @@ describe("standalone main", () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "dano-main-workspace-"));
 
     try {
-      const nestedSourceDir = join(sourceRoot, "packages", "bridge");
+      const nestedSourceDir = join(sourceRoot, "apps", "dano");
       const runtimeDefaultsDir = join(sourceRoot, "deploy", "runtime-defaults");
       mkdirSync(nestedSourceDir, { recursive: true });
       mkdirSync(runtimeDefaultsDir, { recursive: true });

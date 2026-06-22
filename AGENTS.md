@@ -5,7 +5,7 @@ This project is the Dano P0 browser-only LLM chat app.
 ## Project Context
 
 - Frontend: Svelte 5 browser client built by Vite under `packages/svelte`.
-- Backend: TypeScript/Node standalone bridge under `packages/bridge`.
+- Backend: TypeScript/Node standalone app under `apps/dano`, using reusable bridge capabilities from `packages/bridge`.
 - Origin: this project is derived from `references/pi-web-main/` and customized for the Dano browser-only chat use case.
 - Runtime target: browser frontend + Node backend + optional nginx/container deployment.
 - P0 intentionally excludes Pi extension mode and Electron mode.

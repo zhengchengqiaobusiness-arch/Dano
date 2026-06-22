@@ -5,9 +5,9 @@ import {
   watch,
   type FSWatcher,
 } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 
-const DEV_BRIDGE_ENTRY_SEGMENT = `${sep}packages${sep}bridge${sep}src${sep}`;
+const DEV_APP_ENTRY_SEGMENT = `${sep}apps${sep}dano${sep}src${sep}`;
 const DEFAULT_DEBOUNCE_MS = 75;
 const IGNORED_DIRECTORIES = new Set([".git", "dist", "node_modules"]);
 
@@ -33,13 +33,13 @@ export function resolveStandaloneDevWatchPath(
   entryFile: string,
 ): string | undefined {
   const resolvedEntryFile = resolve(entryFile);
-  const markerIndex = resolvedEntryFile.lastIndexOf(DEV_BRIDGE_ENTRY_SEGMENT);
+  const markerIndex = resolvedEntryFile.lastIndexOf(DEV_APP_ENTRY_SEGMENT);
   if (markerIndex === -1) {
     return undefined;
   }
 
   const workspaceRoot = resolvedEntryFile.slice(0, markerIndex);
-  return join(workspaceRoot, "packages", "bridge");
+  return join(workspaceRoot, "apps", "dano");
 }
 
 function listBridgeWatchDirectories(rootPath: string): string[] {
@@ -94,7 +94,11 @@ export function createStandaloneDevReloadController(
       return;
     }
 
-    const nextDirectories = new Set(listBridgeWatchDirectories(watchPath));
+    const workspaceRoot = dirname(dirname(watchPath));
+    const nextDirectories = new Set([
+      ...listBridgeWatchDirectories(watchPath),
+      ...listBridgeWatchDirectories(join(workspaceRoot, "packages", "bridge")),
+    ]);
 
     for (const [directoryPath, watcher] of watchers) {
       if (nextDirectories.has(directoryPath)) {
@@ -143,7 +147,7 @@ export function createStandaloneDevReloadController(
             ? ` (${lastChange.filename})`
             : "";
           logger.log(
-            `[pi-web] Detected bridge change${changedPath}; reloading standalone runtime...`,
+            `[pi-web] Detected source change${changedPath}; reloading standalone runtime...`,
           );
 
           Promise.resolve(options.stop()).catch(error => {
@@ -166,7 +170,7 @@ export function createStandaloneDevReloadController(
   };
 
   refreshWatchers();
-  logger.log(`[pi-web] Watching standalone bridge sources: ${watchPath}`);
+  logger.log(`[pi-web] Watching standalone sources: ${watchPath}`);
 
   return {
     watchPath,

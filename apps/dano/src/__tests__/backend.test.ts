@@ -3,7 +3,7 @@ import type {
   AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_BRIDGE_CONFIG } from "../../types.js";
+import { DEFAULT_BRIDGE_CONFIG } from "@dano/bridge/types";
 import { createStandaloneBridgeContextFromSession } from "../backend.js";
 import { startStandaloneBridge } from "../server.js";
 

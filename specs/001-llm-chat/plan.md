@@ -62,6 +62,20 @@ deploy/
 └── nginx/
     └── default.conf
 
+apps/
+└── dano/
+    ├── package.json
+    ├── tsconfig.json
+    ├── tsdown.config.ts
+    └── src/
+        ├── __tests__/
+        ├── backend.ts
+        ├── dev-reload.ts
+        ├── main.ts
+        ├── runtime.ts
+        ├── runtime-entry.ts
+        └── server.ts
+
 packages/
 ├── bridge/
 │   ├── package.json
@@ -70,11 +84,6 @@ packages/
 │       ├── sse-event-bus.ts
 │       ├── http-command-adapter.ts
 │       ├── credential-config.ts
-│       ├── standalone/
-│       │   ├── backend.ts
-│       │   ├── main.ts
-│       │   ├── runtime.ts
-│       │   └── server.ts
 │       └── __tests__/
 └── svelte/
     ├── package.json
@@ -90,7 +99,7 @@ web-dist/
 dist/
 ```
 
-**Structure Decision**: Use `references/pi-web-main/` as the source shape, but keep only the standalone backend and Svelte web client. Target code removes `packages/bin/`, `packages/electron/`, Pi extension registration, Electron scripts, Electron dependencies, and WebSocket transport. Target code adds nginx deployment files, Docker packaging, and EventSource-compatible HTTP/SSE bridge endpoints.
+**Structure Decision**: Keep the reusable bridge and Svelte client under `packages/`, and place the runnable standalone backend in `apps/dano`. Target code removes `packages/bin/`, `packages/electron/`, Pi extension registration, Electron scripts, Electron dependencies, and WebSocket transport. Target code adds nginx deployment files, Docker packaging, and EventSource-compatible HTTP/SSE bridge endpoints.
 
 ## Phase 0: Research
 

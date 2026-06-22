@@ -1,9 +1,9 @@
 import { copyFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DetachedSessionRegistry } from "../session-registry.js";
-import { loadDanoConfig } from "../dano-config.js";
-import type { BridgeConfig, BridgeEmptyStateConfig } from "../types.js";
+import { loadDanoConfig } from "@dano/bridge/dano-config";
+import { DetachedSessionRegistry } from "@dano/bridge/session-registry";
+import type { BridgeConfig, BridgeEmptyStateConfig } from "@dano/bridge/types";
 import { createStandaloneBridgeContext } from "./backend.js";
 import type { StandaloneBridgeBackend } from "./backend.js";
 import { createStandaloneDevReloadController } from "./dev-reload.js";
