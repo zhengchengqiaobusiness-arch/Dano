@@ -16,8 +16,15 @@ _FORBIDDEN = ("/biz/flow", "/biz/form", "/workflow/handle", "startflow",
 
 # 已清理、必须保持零字面量的主流程文件(随切片推进扩大)
 _CLEAN = (
-    "dano/onboarding/service.py",     # 切片1:编排入口
-    "dano/onboarding/evidence.py",    # 切片2:证据采集的表单探针
+    "dano/onboarding/service.py",       # 切片1:编排入口
+    "dano/onboarding/evidence.py",      # 切片2:证据采集的表单探针
+    "dano/onboarding/discovery.py",     # 复合流程动态发现(走 dialect.template_ids)
+    "dano/gateway/app.py",              # 网关:模板/表单清单走 dialect
+    "dano/catalog/manifest.py",         # 清单:类型/内部字段判据无系统字面量
+    "dano/export/agent_skills.py",      # 导出:剧本渲染无系统字面量
+    "dano/orchestrator/skills.py",      # 注册表:可见性走 asset_internal
+    "dano/agent_tools/tools.py",        # pi 工具:templateId 定位全委托 dialect.template_id_in
+    "dano/agent_tools/connector_builder.py",
 )
 
 

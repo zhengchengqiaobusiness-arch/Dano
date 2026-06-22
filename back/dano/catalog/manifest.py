@@ -36,6 +36,8 @@ class SkillManifest(BaseModel):
     description: str
     business: str = ""                # 所属业务(同业务多操作导出时归为一本剧本 skill)
     business_meta: dict = Field(default_factory=dict)  # 业务规则(x-flow)→ 导出剧本的前置/错误/确认段
+    goal: dict = Field(default_factory=dict)           # 结构化业务目标(意图/成功判据/禁止步)→ 导出剧本"目标"段
+    field_mappings: list = Field(default_factory=list)  # 可追溯字段映射 → 导出剧本"字段映射"段
     integration: str                  # 调用方式:adapter / workflow / api / page
     risk_level: str
     requires_confirmation: bool       # L3+ 调用需带 confirm=true
@@ -100,6 +102,8 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         description=f"{title}({skill.subsystem.value} · {kind}类动作)",
         business=getattr(skill, "business", ""),
         business_meta=getattr(skill, "business_meta", {}) or {},
+        goal=getattr(skill, "goal", {}) or {},
+        field_mappings=getattr(skill, "field_mappings", []) or [],
         integration=integration,
         risk_level=risk.value,
         requires_confirmation=risk in _CONFIRM_FROM,

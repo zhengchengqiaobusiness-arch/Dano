@@ -42,6 +42,8 @@ class PlaybookSpec:
     post_check: dict = field(default_factory=dict)            # {stages, ledger, verify}
     recovery: list[dict] = field(default_factory=list)        # {op, needs, prefetch}
     approval_chain: list = field(default_factory=list)
+    goal: dict = field(default_factory=dict)                  # 结构化目标(意图/成功判据/禁止步)
+    field_mappings: list = field(default_factory=list)        # 可追溯字段映射(§16)
 
     @property
     def has_write(self) -> bool:
@@ -75,6 +77,16 @@ def _business_meta(manifests: list) -> dict:  # noqa: ANN001
     return {}
 
 
+def _first_attr(manifests: list, attr: str):  # noqa: ANN001, ANN201
+    """取写操作(办理)manifest 上的 attr(goal/field_mappings 挂在复合流程上),退而取任一非空。"""
+    writes = [m for m in manifests if getattr(m, "requires_confirmation", False)]
+    for m in writes + list(manifests):
+        v = getattr(m, attr, None)
+        if v:
+            return v
+    return None
+
+
 def build_playbook(subsystem: str, business: str, manifests: list, *,  # noqa: ANN001
                    template_id: str = "", ir_preconditions: list[dict] | None = None,
                    ir_invariants: list[dict] | None = None) -> PlaybookSpec:
@@ -92,7 +104,9 @@ def build_playbook(subsystem: str, business: str, manifests: list, *,  # noqa: A
     bm = _business_meta(manifests)
     template_id = template_id or str(bm.get("templateId") or "")    # x-flow 里常带 templateId
     spec = PlaybookSpec(business=business, label=_label(business, manifests),
-                        subsystem=subsystem, operations=ops, do=do)
+                        subsystem=subsystem, operations=ops, do=do,
+                        goal=_first_attr(manifests, "goal") or {},
+                        field_mappings=_first_attr(manifests, "field_mappings") or [])
 
     # ① preflight(能不能走这条路):Dano 运行时的真实自检项
     spec.preflight = ["网关可达 + 本租户 X-Tenant-Key 已配(scripts/diagnose 自检)",

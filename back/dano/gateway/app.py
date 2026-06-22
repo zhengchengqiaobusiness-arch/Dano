@@ -245,51 +245,32 @@ class ListTemplatesReq(BaseModel):
 async def list_templates(req: ListTemplatesReq) -> dict:
     """查询目标 OA 真实的**流程模板清单**(业务场景:请假/报销/出差…),作为可选「业务模板」。
 
-    这就是"自动去匹配查询":各家 OA 模板不同,导入后查它自己的 /template/template/list,
-    把真实模板当菜单给用户选,而不是拿 swagger 原始 tag 当类别、也不写死 templateId。
+    系统特定(查哪个端点、怎么解析)全在 dialect:网关只遍历已注册方言、试其 template_list_paths,
+    用 parse_template_list 解析——**主流程零系统字面量**(换框架只改 oa_templates.py)。
     """
     import httpx
 
+    from dano.capabilities import oa_templates
     from dano.infra.http import tls_verify
     base = req.base_url.rstrip("/")
     tok = (req.token or "").strip()
     headers = {"Authorization": f"Bearer {tok}"} if tok else {}
-    last_code = None
-    out: list[dict] = []
+    auth_fail = False
     async with httpx.AsyncClient(timeout=40, verify=tls_verify()) as c:
-        for path in ("/template/template/list?pageNum=1&pageSize=500", "/template/template/select"):
-            try:
-                r = await c.get(base + path, headers=headers)
-                j = r.json()
-            except Exception:  # noqa: BLE001
-                continue
-            if not isinstance(j, dict):
-                continue
-            last_code = j.get("code", last_code)
-            if j.get("code") not in (None, 200, 0):     # RuoYi:HTTP200 + body.code(401 未授权等)
-                continue
-            rows = j.get("rows") or j.get("data") or []
-            if isinstance(rows, dict):
-                rows = rows.get("records") or rows.get("list") or []
-            for it in rows if isinstance(rows, list) else []:
-                if not isinstance(it, dict):
+        for dialect in oa_templates.all_templates():
+            for path in dialect.template_list_paths():
+                try:
+                    r = await c.get(base + (path if path.startswith("/") else "/" + path), headers=headers)
+                    j = r.json()
+                except Exception:  # noqa: BLE001 - 换下一个端点/方言
                     continue
-                tid = it.get("id") or it.get("templateId") or it.get("defKey")
-                if tid is None:
-                    continue
-                out.append({"templateId": str(tid),
-                            "name": it.get("name") or it.get("templateName") or str(tid),
-                            "type": it.get("typeName") or it.get("type") or "",
-                            "defKey": it.get("defKey") or "",
-                            "enableFlag": str(it.get("enableFlag", ""))})
-            if out:
-                break
-    seen: set[str] = set()
-    uniq = [t for t in out if not (t["templateId"] in seen or seen.add(t["templateId"]))]
-    if not uniq:
-        hint = "token 可能已失效(body.code=401)" if last_code not in (None, 200, 0) else "该 OA 无模板配置或路径不同"
-        raise HTTPException(status_code=502, detail=f"未查到流程模板:{hint}")
-    return {"templates": uniq}
+                rows = dialect.parse_template_list(j)
+                if rows:
+                    return {"templates": rows}
+                if isinstance(j, dict) and j.get("code") not in (None, 200, 0):
+                    auth_fail = True
+    hint = "token 可能已失效(body.code 非 200)" if auth_fail else "该 OA 无模板配置或方言不支持"
+    raise HTTPException(status_code=502, detail=f"未查到流程模板:{hint}")
 
 
 class TemplateFormReq(BaseModel):
@@ -298,61 +279,33 @@ class TemplateFormReq(BaseModel):
     template_id: str
 
 
-def _walk_form_fields(node: object, out: list[dict]) -> None:
-    """递归遍历表单设计器结构,凡带字段模型(__vModel__/vModel)的控件都收为一个字段。"""
-    if isinstance(node, dict):
-        vm = node.get("__vModel__") or node.get("vModel")
-        if isinstance(vm, str) and vm:
-            cfg = node.get("__config__") if isinstance(node.get("__config__"), dict) else {}
-            label = cfg.get("label") or node.get("label") or vm
-            out.append({"key": vm, "label": str(label),
-                        "type": str(cfg.get("tag") or node.get("tag") or "")})
-        for v in node.values():
-            _walk_form_fields(v, out)
-    elif isinstance(node, list):
-        for v in node:
-            _walk_form_fields(v, out)
-
-
 @app.post("/onboarding/template-form")
 async def template_form(req: TemplateFormReq) -> dict:
-    """查某业务模板的**动态表单字段清单**(请假要 title/reason、报销要别的…),供前端预填 values 骨架。
+    """查某业务模板的**动态表单字段清单**,供前端预填 values 骨架。抽不出就返回空,让用户手填——不臆造。
 
-    走 /biz/form/info?templateId=…;data.formData 是 JSON 串,内含表单设计器结构,从中抽出每个字段。
-    抽不出(结构特殊)就返回空,让用户手填——不臆造字段。
+    探针路径与表单解析都来自 dialect(form_probe_path + parse_form_fields),网关不写系统端点字面量。
     """
-    import json
-
     import httpx
 
+    from dano.capabilities import oa_templates
     from dano.infra.http import tls_verify
     base = req.base_url.rstrip("/")
     tok = (req.token or "").strip()
     headers = {"Authorization": f"Bearer {tok}"} if tok else {}
-    try:
-        async with httpx.AsyncClient(timeout=40, verify=tls_verify()) as c:
-            r = await c.get(base + "/biz/form/info",
-                            params={"businessId": "", "templateId": req.template_id}, headers=headers)
-        j = r.json()
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"取表单失败:{e}") from e
-    if not isinstance(j, dict) or j.get("code") not in (None, 200, 0):
-        code = j.get("code") if isinstance(j, dict) else "?"
-        raise HTTPException(status_code=502, detail=f"取表单失败:body.code={code}(token 是否有效?)")
-    data = j.get("data") if isinstance(j.get("data"), dict) else {}
-    raw = data.get("formData")
-    conf: object = raw
-    if isinstance(raw, str):
-        try:
-            conf = json.loads(raw)
-        except Exception:  # noqa: BLE001
-            conf = {}
-    schema = conf.get("formData") if isinstance(conf, dict) and "formData" in conf else conf
-    fields: list[dict] = []
-    _walk_form_fields(schema, fields)
-    seen: set[str] = set()
-    uniq = [f for f in fields if not (f["key"] in seen or seen.add(f["key"]))]
-    return {"fields": uniq}
+    async with httpx.AsyncClient(timeout=40, verify=tls_verify()) as c:
+        for dialect in oa_templates.all_templates():
+            path = dialect.form_probe_path(req.template_id)
+            if not path:
+                continue
+            try:
+                r = await c.get(base + (path if path.startswith("/") else "/" + path), headers=headers)
+                j = r.json()
+            except Exception:  # noqa: BLE001 - 换下一个方言
+                continue
+            fields = dialect.parse_form_fields(j)
+            if fields or (isinstance(j, dict) and j.get("code") in (None, 200, 0)):
+                return {"fields": fields}   # 取到了(可能为空:结构特殊,让用户手填)
+    raise HTTPException(status_code=502, detail="取表单失败:token 是否有效 / 模板是否存在?")
 
 
 # ── v2-M1 理解流程:证据采集(静态 + 只读真探针)──

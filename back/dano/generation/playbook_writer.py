@@ -80,6 +80,19 @@ metadata:
 > 每个操作:`bash scripts/<操作>.sh <逐字段 flags>`(写操作加 `--confirm`);自检 `bash scripts/diagnose.sh`。
 > `__base_url__`、流程模板、申请人身份(登录凭证)、调用凭证由 Dano 运行期注入,**不需要也不应**由你提供。"""]
 
+    # 目标(Goal:要达成什么 + 成功判据 + 红线)
+    g = spec.goal or {}
+    if g.get("intent") or g.get("success_criteria"):
+        gl = []
+        if g.get("intent"):
+            gl.append(f"**目标**:{g['intent']}")
+        if g.get("success_criteria"):
+            gl.append("**成功判据**(全满足才算 succeeded,否则勿报成功):\n"
+                      + "\n".join(f"- {s}" for s in g["success_criteria"]))
+        if g.get("forbidden_steps"):
+            gl.append("**红线**:本业务只提交本人申请,**禁止**编入删除/审批他人/驳回/终止/越权类动作。")
+        out.append("## 目标(Goal)\n" + "\n".join(gl))
+
     # ① 能不能走这条路
     if spec.preflight:
         items = "\n".join(f"- {p}" for p in spec.preflight)
@@ -100,6 +113,14 @@ metadata:
     if spec.do:
         out.append(f"## ③ 办理(写,需确认)\n先向用户**复述将提交的内容并取得同意**,再带 `--confirm`:\n"
                    f"```bash\nbash scripts/{spec.do.op}.sh {_op_flags(spec.do)} --confirm\n```")
+
+    # 字段映射(可追溯,§16):业务字段 → 目标点路径 + 来源 schema(审计用,提交由 Dano 完成)
+    if spec.field_mappings:
+        rows = "\n".join(
+            f"| `{m.get('standard_field')}` | `{m.get('target_location')}` | {m.get('target_type') or ''} "
+            f"| `{(m.get('source') or {}).get('schema_ref', '')}` |" for m in spec.field_mappings)
+        out.append("## 字段映射(可追溯)\n字段去向有据可查(来自接口 schema,非凭名猜):\n"
+                   "| 业务字段 | 目标点路径 | 类型 | 来源 |\n|---|---|---|---|\n" + rows)
 
     # ④ 错误处置
     if spec.errors:
@@ -150,8 +171,9 @@ metadata:
 _LLM_PROMPT = """你在为一个业务写一本 agent 用的操作剧本(SKILL.md,中文)。下面是该业务的**结构化规格 JSON**(PlaybookSpec)。
 按规格写一本 Markdown 剧本,**严格只用规格里出现的事实**(操作名/字段/校验/错误/审批链/恢复),**不得臆造**任何
 端点、字段、规则。保留 frontmatter(name/description/metadata),并包含这些小节(规格里为空的小节就省略):
-操作清单(表) / ① 能不能走(自检) / ② 办理前(前置+审核) / ③ 办理(需确认) / ④ 错误处置(表) /
-⑤ 办理后确认 / ⑥ 缺失恢复 / 输出契约 / 运行前置。措辞自然、像操作手册。**只输出 Markdown 正文**,不要解释。
+操作清单(表) / 目标(Goal:intent 意图 + success_criteria 成功判据 + 红线 forbidden) / ① 能不能走(自检) /
+② 办理前(前置+审核) / ③ 办理(需确认) / 字段映射(field_mappings:业务字段→目标点路径+来源,可追溯) /
+④ 错误处置(表) / ⑤ 办理后确认 / ⑥ 缺失恢复 / 输出契约 / 运行前置。措辞自然、像操作手册。**只输出 Markdown 正文**,不要解释。
 
 name(frontmatter 用):{slug}
 
@@ -167,6 +189,7 @@ def _spec_to_dict(spec: PlaybookSpec) -> dict:
                         "fields": o.fields, "purpose": o.purpose} for o in spec.operations],
         "preflight": spec.preflight, "preconditions": spec.preconditions,
         "errors": spec.errors, "post_check": spec.post_check, "recovery": spec.recovery,
+        "goal": spec.goal, "field_mappings": spec.field_mappings,
     }
 
 

@@ -590,9 +590,12 @@ async def _onboard_legacy(run_id: str, sid: str, token: str, *, discover_workflo
         f"   d) sandbox_test_workflow(asset_draft_id, cases=[用 get_selected_flows 的测试值,覆盖每个分支臂])**整条真跑**;"
         f"passed 为真后 request_review(asset_draft_id)(评的是复合流程);**仅 all_passed 为真才** "
         f"publish_asset(asset_draft_id, validation_run_ids=cases 的, review_run_ids=评审的)。不过按返回原因修正后重试,过不了跳过该业务。\n"
-        f"3) 对**独立的查询/单步业务**(不需串联,如查余额/查列表):draft_connector(action,**不传 as_step**) → sandbox_test(带 sample_inputs)"
-        f" → request_review → publish_asset(完整闸门)。\n"
-        f"4) 一句话总结发布了哪些**业务 Skill**(只数复合业务 + 独立业务,不数隐藏步骤)。\n"
+        f"3) 查询接口分两种,别混:\n"
+        f"   - **前置/辅助查询**(某业务办理过程要用的:开表单/查模板/查字段枚举/查余额)→ draft_connector(action,"
+        f" **internal=true, business=<所属业务,如 请假>**):它是该业务的**内部步骤**,免单独评审、**永不单独上架**(和步骤连接器一样隐藏)。\n"
+        f"   - **真正独立的用户级查询业务**(用户会主动发起的,如查我的待办/查工单进度)→ draft_connector(action,**不传 as_step/internal**)"
+        f" → sandbox_test(带 sample_inputs) → request_review → publish_asset(完整闸门)。\n"
+        f"4) 一句话总结发布了哪些**业务 Skill**(只数复合业务 + 独立用户级业务,不数隐藏步骤 / 前置查询)。\n"
         f"红线:动作名用 parse_spec 的真实 name;串联来源用真实出参路径;表达式只准已声明字段/变量+审计函数;臆造会被 grounding 拒。"
     )
     # 流程4:有制度文件则抽规则 → 用例验证 → 发布(制度免三模型评审,review_run_ids 传空)
@@ -696,10 +699,11 @@ async def onboard(*, tenant: str, subsystem: str, openapi, deploy: dict,  # noqa
     connectors = await repo.list_published(AssetType.CONNECTOR, scope)
     workflows = await repo.list_published(AssetType.WORKFLOW, scope)
     adapters = await repo.list_published(AssetType.ADAPTER, scope)
+    from dano.shared.asset_bodies import asset_internal
     hidden = {s.action for e in workflows for s in WorkflowSkillBody.model_validate(e.body).steps}
-    # 隐藏:复合流程的步骤动作 + 任何 workflow_step 连接器(孤儿步骤也不当 Skill 上架/登记生命周期)
+    # 隐藏:复合流程的步骤动作 + 任何 internal 资产(步骤连接器 / 前置查询)——不上架、不登记生命周期
     visible = [e for e in (workflows + adapters + connectors)
-               if e.body.get("action", e.asset_key) not in hidden and not e.body.get("workflow_step")]
+               if e.body.get("action", e.asset_key) not in hidden and not asset_internal(e.body)]
     skills = sorted({e.body.get("action", e.asset_key) for e in visible})
     # §5:登记已发布 Skill 到生命周期(停在「已发布」)
     if lifecycle is not None:

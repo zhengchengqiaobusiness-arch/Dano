@@ -9,10 +9,10 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from dano.capabilities import doc_parser, endpoint_classifier, oa_templates
-from dano.capabilities.business import sample_for
 from dano.generation.strategies.workflow_bpmn import WorkflowBpmnStrategy
 
 
@@ -28,20 +28,24 @@ def discover_flows(spec: dict, include_tags: list[str] | None = None) -> list[di
 
     proposed: list[dict[str, Any]] = []
 
-    # 1) 复合流程:匹配到 OA 模板且 spec 含该框架工作流信号 → 套用其配方(发起→存表单→提交一套一个 skill)
+    # 1) 复合流程:匹配到 OA 模板且 spec 含该框架工作流信号 → 按 spec 的 templateId **动态**提案
+    #    (每个真实模板 = 一个复合业务;审批链从文档解析)。零硬编码业务:没有模板就不提复合流程。
     if template and action_dicts and WorkflowBpmnStrategy().matches(action_dicts):
-        for wf in template.workflows():
+        for tid in template.template_ids(spec):
+            meta = template.parse_approval_chain(spec, tid)
+            base = re.sub(r"_template$", "", tid)
             proposed.append({
-                "flow": wf.action,
-                "title": wf.title,
+                "flow": f"submit_{base}",
+                "title": meta.get("flow") or tid,
                 "kind": "composite",
                 "write": True,                              # 写操作,执行前需确认
                 "actions": [],                              # 空=交给 workflow_bpmn 策略用全量动作编排
                 "method": "POST",
                 "endpoint": "(多步编排)",
-                "required": list(wf.required_fields),
-                "suggested_test_input": sample_for(wf.action) or {"values": {f: "" for f in wf.user_fields}},
-                "reason": "工作流配方:发起→存表单→提交,一套流程串成一个业务 skill",
+                "required": [],
+                "suggested_test_input": {"templateId": tid, "values": {}},
+                "business_meta": meta,                       # 审批链(动态解析,可空)
+                "reason": "工作流模板:发起→提交串成一个业务 skill;模板与审批链来自接入材料,动态发现",
                 "selected": True,
             })
 

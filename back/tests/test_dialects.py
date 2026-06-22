@@ -61,7 +61,26 @@ def test_ruoyi_form_probe_path_and_parse():
         '{"formData":{"fields":[{"__vModel__":"amount",'
         '"__config__":{"label":"金额","tag":"el-input-number"}}]}}')}}
     fields = t.parse_form_fields(resp)
-    assert fields == [{"key": "amount", "label": "金额", "type": "el-input-number"}]
+    assert fields == [{"key": "amount", "label": "金额", "type": "el-input-number",
+                       "json_type": "number", "enum": False}]   # 控件 → 权威 JSON 类型(WS6)
+
+
+def test_ruoyi_template_id_in_locates_id():
+    t = oa_templates.match_template(RUOYI_SPEC)
+    spec = {"components": {"schemas": {"AjaxResult": {},
+            "StartFlowReq": {"properties": {"templateId": {"enum": ["leave_template", "purchase_template"]}}}}}}
+    assert t.template_id_in(spec, '{"x":"purchase_template","y":1}') == "purchase_template"   # 枚举命中优先
+    assert t.template_id_in({}, '{"tid":"custom_xyz_template"}') == "custom_xyz_template"      # 命名约定兜底(方言内)
+    assert t.template_id_in({}, '{"a":1}') == ""                                               # 都无 → ""
+
+
+def test_base_template_id_in_has_no_naming_fallback():
+    # 通用框架:基类只认枚举,无 *_template 命名约定兜底(那是 RuoYi 特定知识,只活在方言)
+    class _Custom(OATemplate):
+        def matches(self, spec):  # noqa: ANN001
+            return True
+
+    assert _Custom().template_id_in({}, '{"tid":"custom_xyz_template"}') == ""
 
 
 def test_base_form_probe_defaults():

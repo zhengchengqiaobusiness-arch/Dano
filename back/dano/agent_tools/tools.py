@@ -232,18 +232,16 @@ def _first_example(op: dict):  # noqa: ANN001
 
 
 # ── 建复合流程草案(goal 模式:pi 发现流程,给出步骤+io映射)──
-def _workflow_template_id(spec: dict, body) -> str:  # noqa: ANN001
-    """本流程实际用的 templateId(出现在工作流体里的那个):StartFlowReq.enum 命中优先,退而正则 *_template。"""
+def _workflow_template_id(spec: dict, body, tmpl) -> str:  # noqa: ANN001
+    """本流程实际用的 templateId:全权委托方言定位(模板枚举/命名约定都在 dialect)。
+
+    主流程零字面量:无方言(通用系统,无模板概念)→ ""。
+    """
+    if tmpl is None:
+        return ""
     import json as _json
-    import re as _re
     body_json = _json.dumps(body.model_dump(), ensure_ascii=False, default=str)
-    enum = ((((spec.get("components", {}) or {}).get("schemas", {}) or {})
-             .get("StartFlowReq", {}) or {}).get("properties", {}).get("templateId", {}) or {}).get("enum") or []
-    for t in enum:
-        if isinstance(t, str) and t in body_json:
-            return t
-    m = _re.search(r"([A-Za-z][\w-]*_template)", body_json)
-    return m.group(1) if m else ""
+    return tmpl.template_id_in(spec, body_json)
 
 
 def _workflow_business_meta(spec: dict, tmpl, tid: str) -> dict:  # noqa: ANN001
@@ -263,8 +261,9 @@ def _workflow_business_meta(spec: dict, tmpl, tid: str) -> dict:  # noqa: ANN001
 
 
 def _submit_leaf_fields(spec: dict, tmpl, tid: str) -> dict:  # noqa: ANN001
-    """从提交端点请求体 schema 抽**叶子字段** {name: {type, description}}(递归 flowTask.variables 这类嵌套)。
+    """从提交端点请求体 schema 抽**叶子字段** {name: {type, description, path}}(递归 flowTask.variables 这类嵌套)。
 
+    `path` = 叶子在请求体里的嵌套点路径(如 flowTask.variables.amount),供字段映射可追溯。
     oneOf 多模板时优先取 `Submit_<templateId>` 那一支(对不上则并集);供 workflow 字段类型/描述信源直通。
     """
     from dano.capabilities.doc_parser import _resolve_ref
@@ -282,7 +281,7 @@ def _submit_leaf_fields(spec: dict, tmpl, tid: str) -> dict:  # noqa: ANN001
                    and str(v.get("$ref", "")).endswith(want)), None)
     out: dict = {}
 
-    def _walk(node, depth=0):  # noqa: ANN001
+    def _walk(node, prefix="", depth=0):  # noqa: ANN001
         if depth > 6:
             return
         node = _resolve_ref(spec, node)
@@ -290,18 +289,85 @@ def _submit_leaf_fields(spec: dict, tmpl, tid: str) -> dict:  # noqa: ANN001
             return
         for k, v in (node.get("properties") or {}).items():
             vr = _resolve_ref(spec, v)
+            path = f"{prefix}.{k}" if prefix else k
             if isinstance(vr, dict) and vr.get("properties"):
-                _walk(vr, depth + 1)
+                _walk(vr, path, depth + 1)
             elif isinstance(vr, dict):
-                info = {}
+                info = {"path": path}
                 if vr.get("type"):
                     info["type"] = vr["type"]
                 if vr.get("description"):
                     info["description"] = vr["description"]
-                out[k] = info
+                out[k] = info          # 同名叶子后写覆盖:取更深/更靠后的(变量层 > 顶层 title)
     for c in ([chosen] if chosen else variants):
         if c is not None:
             _walk(c)
+    return out
+
+
+def _field_mappings(leaves: dict, user_fields: list[str], submit_ep: str, tid: str) -> list[dict]:
+    """据 submit schema 叶子,为每个用户字段建**可追溯映射**(§16):标准字段 → 目标点路径 + 类型 + 来源。
+
+    纯函数:只为能在 submit schema 里找到来源的字段建映射(找不到的不臆造,留空由别处声明)。
+    """
+    ref_base = f"Submit_{tid}" if tid else "Submit"
+    out: list[dict] = []
+    for f in user_fields:
+        info = leaves.get(f)
+        if not info:
+            continue
+        loc = info.get("path") or f
+        out.append({
+            "standard_field": f,
+            "target_field": f,
+            "target_location": loc,
+            "target_type": info.get("type") or "string",
+            "source": {"type": "openapi", "path": submit_ep, "schema_ref": f"{ref_base}.{loc}"},
+        })
+    return out
+
+
+def _merge_field_types(user_fields: list[str], leaves: dict, form_types: dict, existing: dict) -> dict:
+    """字段类型合并优先级(WS6):**真实动态表单(权威)> submit schema > 已有**。纯函数,可测。
+
+    动态表单是字段类型的权威信源(el-input-number→number、el-select→enum…),压过 schema 与名字启发式。
+    """
+    ft = dict(existing)
+    for f in user_fields:
+        if form_types.get(f):
+            ft[f] = form_types[f]
+        elif not ft.get(f) and (leaves.get(f) or {}).get("type"):
+            ft[f] = leaves[f]["type"]
+    return ft
+
+
+async def _probe_form_types(mat, tmpl, tid: str) -> dict:  # noqa: ANN001
+    """探目标系统**真实动态表单** → {字段: json_type}(权威类型)。best-effort:无凭证/探不到 → {}。
+
+    只读 GET(表单定义),不写;系统特定路径与解析都走 dialect(form_probe_path + parse_form_fields)。
+    """
+    if tmpl is None or not tid or mat is None:
+        return {}
+    base = (mat.deploy or {}).get("base_url", "")
+    token = (mat.credentials or {}).get("token", "")
+    path = tmpl.form_probe_path(tid)
+    if not (base and path):
+        return {}
+    import httpx
+
+    from dano.infra.http import tls_verify
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    url = base.rstrip("/") + (path if path.startswith("/") else "/" + path)
+    try:
+        async with httpx.AsyncClient(timeout=15, verify=tls_verify()) as c:
+            r = await c.get(url, headers=headers)
+        payload = r.json()
+    except Exception:  # noqa: BLE001 - 探不到不阻断建流程
+        return {}
+    out: dict = {}
+    for f in tmpl.parse_form_fields(payload):
+        if f.get("key") and f.get("json_type"):
+            out[f["key"]] = f["json_type"]
     return out
 
 
@@ -334,28 +400,48 @@ async def draft_workflow(run_id: str, params: dict) -> dict:
     # ① 审批链 business_meta(x-flow 优先,散文兜底)② 字段类型/描述从提交端点 schema 抽。
     try:
         spec = mat.openapi or {}
-        tid = _workflow_template_id(spec, body)
+        tid = _workflow_template_id(spec, body, tmpl)
         bmeta = _workflow_business_meta(spec, tmpl, tid)
         if bmeta:
             body.business_meta = bmeta
             body.business = body.business or bmeta.get("flow", "")
         leaves = _submit_leaf_fields(spec, tmpl, tid)
-        if leaves:
-            fd, ft = dict(body.field_docs), dict(body.field_types)
+        # WS6:探目标系统真实动态表单 → 字段类型权威信源(best-effort,探不到=空,不阻断)
+        form_types = await _probe_form_types(mat, tmpl, tid)
+        if leaves or form_types:
+            fd = dict(body.field_docs)
             for f in body.user_fields:
                 info = leaves.get(f) or {}
                 if info.get("description") and not fd.get(f):
                     fd[f] = info["description"]
-                if info.get("type") and not ft.get(f):
-                    ft[f] = info["type"]
-            body.field_docs, body.field_types = fd, ft
+            body.field_docs = fd
+            # 类型合并优先级:真实表单(权威)> submit schema > 已有(名字启发式)
+            body.field_types = _merge_field_types(body.user_fields, leaves, form_types, body.field_types)
+            # §16 可追溯字段映射:标准字段 → 目标点路径 + 类型 + 来源 schema_ref(找不到来源的不臆造)
+            if leaves:
+                submit_ep = (tmpl.submit_endpoints()[-1] if tmpl and tmpl.submit_endpoints() else "")
+                body.field_mappings = _field_mappings(leaves, body.user_fields, submit_ep, tid)
     except Exception:  # noqa: BLE001 - 兜底:解析失败不阻断建流程
         pass
+    # 结构化 Goal(WS5):据材料确定性生成,挂到流程体;并作 grounding 锚——步骤不得命中禁止动作。
+    step_actions = [s.action for s in steps if s.kind == "call" and s.action]
+    try:
+        from dano.onboarding.goal import build_goal, goal_grounding
+        goal = build_goal(mat.openapi or {}, tmpl, template_id=tid,
+                          business=body.business, title=body.title,
+                          required_inputs=body.required_fields,
+                          optional_inputs=[f for f in body.user_fields if f not in body.required_fields],
+                          candidate_steps=step_actions, risk_level=body.risk_level.value,
+                          requires_confirmation=bool(body.preview))
+        body.goal = goal.model_dump()
+        goal_issues = goal_grounding(goal, step_actions)
+    except Exception:  # noqa: BLE001 - Goal 合成失败不阻断;但禁止步校验若已得出则仍生效
+        goal_issues = []
     # grounding 硬关卡:动作必须已发布、表达式只准用已声明字段/变量+审计函数、来源必须可追溯。
     # ground 不住 → 拒绝并把问题回给 pi(绝不让臆造逻辑进库)。
     published = {e.body.get("action", e.asset_key)
                  for e in await _repo.list_published(AssetType.CONNECTOR, scope)}
-    issues = check_grounding(body, published_actions=published)
+    issues = check_grounding(body, published_actions=published) + goal_issues
     if issues:
         raise ToolError("流程未通过 grounding 校验(请修正后重试):\n- " + "\n- ".join(issues))
     validate_asset_body(AssetType.WORKFLOW, body.model_dump())
@@ -434,13 +520,15 @@ async def draft_connector(run_id: str, params: dict) -> dict:
     if action is None:
         raise ToolError(f"接口里无此动作: {action_name}")
     body = build_connector_body(action, tenant=mat.tenant, subsystem=mat.subsystem,
-                                success_rule=success_rule, as_step=bool(params.get("as_step")))
+                                success_rule=success_rule, as_step=bool(params.get("as_step")),
+                                business=str(params.get("business") or ""),
+                                internal=bool(params.get("internal")))
     validate_asset_body(AssetType.CONNECTOR, body.model_dump())
     draft = await _ds.save_draft(run_id=run_id, scope=Scope(tenant=mat.tenant, subsystem=Subsystem(mat.subsystem)),
                                  asset_type=AssetType.CONNECTOR, asset_key=action_name, body=body.model_dump())
     return {"asset_draft_id": str(draft.asset_draft_id), "content_hash": draft.content_hash,
             "action": action_name, "risk_level": body.risk_level.value,
-            "workflow_step": body.workflow_step}
+            "workflow_step": body.workflow_step, "visibility": body.visibility}
 
 
 def _action_business_ok(connector_body: dict, resp_body) -> bool:

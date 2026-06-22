@@ -71,6 +71,18 @@ class ConnectorBody(BaseModel):
     # 工作流步骤:只在复合流程里被串用、**不能独立跑**(如提交步需上一步的 taskId)。
     # → 发布闸门放宽到"连得通即可"(沙箱/评审由复合 sandbox_test_workflow 整链验证);目录里**永不单独露出**。
     workflow_step: bool = Field(default=False, description="是否为复合流程的隐藏步骤(连接器)")
+    business: str = Field(default="", description="所属业务(同业务归一本剧本;空=独立能力)")
+    visibility: str = Field(default="catalog",
+                            description="catalog=对外业务能力 / internal=内部步骤(前置查询等),不发现/导出/直调")
+
+
+def asset_internal(body: dict) -> bool:
+    """资产是否为内部步骤,不进目录 / 导出 / 直调:`workflow_step` 或 `visibility==internal`。
+
+    单一判据:网关目录、function-calling tools、导出、生命周期登记,全用它过滤——
+    前置查询(开表单/查模板/查余额)标 internal 后,任何入口都不再泄漏成平级 skill。
+    """
+    return bool(body.get("workflow_step") or body.get("visibility") == "internal")
 
 
 # ─────────────────────── ③ 制度规则(流程4)───────────────────────
@@ -216,15 +228,39 @@ class WorkflowSkillBody(BaseModel):
     user_fields: list[str] = Field(default_factory=list, description="用户需提供的业务字段")
     field_docs: dict[str, str] = Field(default_factory=dict, description="业务字段→语义描述(阶段4)")
     field_types: dict[str, str] = Field(default_factory=dict, description="业务字段→JSON 类型(信源 schema)")
+    field_mappings: list[dict] = Field(default_factory=list,
+                                       description="可追溯字段映射(标准字段→目标点路径+类型+来源 schema_ref),§16")
     required_fields: list[str] = Field(default_factory=list, description="必填业务字段")
     business: str = Field(default="", description="所属业务(导出归组用)")
     business_meta: dict = Field(default_factory=dict, description="业务规则(x-flow/审批链)→ 导出的审批/前置/确认段")
+    visibility: str = Field(default="catalog", description="catalog=对外业务能力 / internal=内部(一般不用,复合流程默认对外)")
     risk_level: RiskLevel = RiskLevel.L3
     success_rule: str | None = Field(default=None, description="每步成败判定表达式;None=HTTP 2xx")
     # DSL v2:前置/事后不变量 + 写前预览
     preconditions: list[Invariant] = Field(default_factory=list, description="办理前不变量:不过则拒、不写")
     invariants: list[Invariant] = Field(default_factory=list, description="办理后业务正确性不变量")
     preview: bool = Field(default=False, description="写操作:执行前回显将提交内容待确认")
+    goal: dict = Field(default_factory=dict, description="结构化业务目标(意图/成功标准/候选步/禁止步),接入期据材料生成")
+
+
+class GoalBody(BaseModel):
+    """结构化业务目标(接入期据材料动态生成):是复合流程的 grounding 锚。
+
+    既给 pi/解释器"要达成什么"(success_criteria),也给出红线(forbidden_steps:删除/审批他人/越权),
+    draft_workflow 校验步骤不得命中 forbidden_steps。内容全部来自接入材料,代码不写死业务字面量。
+    """
+
+    goal_id: str
+    business_type: str = ""
+    selected_template: str = ""
+    intent: str = ""
+    required_inputs: list[str] = Field(default_factory=list)
+    optional_inputs: list[str] = Field(default_factory=list)
+    success_criteria: list[str] = Field(default_factory=list)
+    candidate_steps: list[str] = Field(default_factory=list)
+    forbidden_steps: list[str] = Field(default_factory=list)
+    risk_level: RiskLevel = RiskLevel.L3
+    requires_confirmation: bool = True
 
 
 # ─────────────────────── 事实核查(流程9·声明式)───────────────────────

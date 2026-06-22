@@ -21,14 +21,35 @@ from dano.shared.asset_bodies import WorkflowSkillBody
 log = structlog.get_logger(__name__)
 
 
+# element-ui 控件 → JSON 类型(动态表单是字段类型的**权威信源**,比按字段名猜更准):
+_EL_JSON_TYPE = {"el-input-number": "number", "el-slider": "number", "el-rate": "number",
+                 "el-switch": "boolean"}
+# 选项类控件 → 枚举字段(值来自该业务真实枚举,接入时解析 options,不硬编码)
+_EL_ENUM = {"el-select", "el-radio-group", "el-radio", "el-checkbox-group", "el-checkbox"}
+
+
+def _el_json_type(tag: str) -> tuple[str, bool]:
+    """element-ui 控件 tag → (JSON 类型, 是否枚举)。日期/文本/级联 → string;数值控件 → number。"""
+    if tag in _EL_JSON_TYPE:
+        return _EL_JSON_TYPE[tag], False
+    if tag in _EL_ENUM:
+        return "string", True
+    return "string", False
+
+
 def _walk_vmodel_fields(node: object, out: list[dict]) -> None:
-    """递归遍历 element-ui 表单设计器结构,凡带字段模型(__vModel__/vModel)的控件收为一个字段。"""
+    """递归遍历 element-ui 表单设计器结构,凡带字段模型(__vModel__/vModel)的控件收为一个字段。
+
+    每个字段除 key/label/type(原始控件)外,再给出 json_type(权威类型)与 enum(是否选项类)。
+    """
     if isinstance(node, dict):
         vm = node.get("__vModel__") or node.get("vModel")
         if isinstance(vm, str) and vm:
             cfg = node.get("__config__") if isinstance(node.get("__config__"), dict) else {}
+            tag = str(cfg.get("tag") or node.get("tag") or "")
+            jtype, is_enum = _el_json_type(tag)
             out.append({"key": vm, "label": str(cfg.get("label") or node.get("label") or vm),
-                        "type": str(cfg.get("tag") or node.get("tag") or "")})
+                        "type": tag, "json_type": jtype, "enum": is_enum})
         for v in node.values():
             _walk_vmodel_fields(v, out)
     elif isinstance(node, list):
@@ -109,6 +130,32 @@ class OATemplate(ABC):
         """
         return {}
 
+    def template_list_paths(self) -> tuple[str, ...]:
+        """查询目标系统"业务流程模板清单"的只读端点(系统特定);通用框架无 → ()。"""
+        return ()
+
+    def parse_template_list(self, payload: object) -> list[dict]:
+        """模板清单接口返回 → [{templateId,name,type,defKey,enableFlag}];非本框架结构 → []。"""
+        return []
+
+    def template_ids(self, spec: dict[str, Any]) -> list[str]:
+        """从 spec 静态枚举出本框架的全部流程 templateId(供流程发现动态提案);取不到 → []。
+
+        系统特定(各框架放枚举的地方不同):RuoYi 在 StartFlowReq.templateId.enum。
+        没有就返回空——生鲜 CRUD swagger 不强造复合流程。
+        """
+        return []
+
+    def template_id_in(self, spec: dict[str, Any], body_json: str) -> str:
+        """从一段工作流体 JSON 里定位本框架实际用的 templateId:枚举(template_ids)命中者为准。
+
+        系统特定的"模板枚举在哪 / 命名约定"全在 dialect,主流程零字面量;取不到 → ""。
+        """
+        for t in self.template_ids(spec):
+            if t and t in body_json:
+                return t
+        return ""
+
 
 class RuoYiFlowableTemplate(OATemplate):
     """RuoYi-Vue + Flowable 工作流(请假/审批等 BPMN 流程)。
@@ -132,13 +179,10 @@ class RuoYiFlowableTemplate(OATemplate):
         return ("captcha", "getinfo", "getrouters", "logout")
 
     def workflows(self) -> list[WorkflowSkillBody]:
-        """本框架的业务复合配方,**按业务区分开**定义在 dano.capabilities.business/(请假/出差/…)。
-
-        共享 RuoYi 3 步契约(发起→存表单→提交;成败以事实核查为准,不信字面 200),
-        各业务只在字段/模板/风险上区分。新增业务在 business 包加一个模块即可。
+        """不再内置任何业务配方:复合流程由 `discover_flows` 按 spec 的 templateId + 审批链**动态发现**,
+        业务字段/模板/规则全部来自接入材料(swagger / 动态表单 / 模板元数据 / 业务规则),代码零业务字面量。
         """
-        from dano.capabilities.business import recipes
-        return recipes()
+        return []
 
     def contract_tokens(self) -> tuple[str, ...]:
         return ("startflow", "/biz/form", "/biz/flow", "form/info", "form/save",
@@ -157,6 +201,43 @@ class RuoYiFlowableTemplate(OATemplate):
 
     def parse_form_fields(self, probe_response: object) -> list[dict]:
         return _ruoyi_form_fields(probe_response)
+
+    def template_ids(self, spec: dict[str, Any]) -> list[str]:
+        enum = ((((spec.get("components", {}) or {}).get("schemas", {}) or {})
+                 .get("StartFlowReq", {}) or {}).get("properties", {}).get("templateId", {}) or {}).get("enum") or []
+        return [t for t in enum if isinstance(t, str)]
+
+    def template_id_in(self, spec: dict[str, Any], body_json: str) -> str:
+        t = super().template_id_in(spec, body_json)
+        if t:
+            return t
+        import re
+        m = re.search(r"([A-Za-z][\w-]*_template)", body_json)   # RuoYi 命名约定兜底(*_template)
+        return m.group(1) if m else ""
+
+    def template_list_paths(self) -> tuple[str, ...]:
+        return ("/template/template/list?pageNum=1&pageSize=500", "/template/template/select")
+
+    def parse_template_list(self, payload: object) -> list[dict]:
+        if not isinstance(payload, dict) or payload.get("code") not in (None, 200, 0):
+            return []
+        rows = payload.get("rows") or payload.get("data") or []
+        if isinstance(rows, dict):
+            rows = rows.get("records") or rows.get("list") or []
+        out: list[dict] = []
+        for it in rows if isinstance(rows, list) else []:
+            if not isinstance(it, dict):
+                continue
+            tid = it.get("id") or it.get("templateId") or it.get("defKey")
+            if tid is None:
+                continue
+            out.append({"templateId": str(tid),
+                        "name": it.get("name") or it.get("templateName") or str(tid),
+                        "type": it.get("typeName") or it.get("type") or "",
+                        "defKey": it.get("defKey") or "",
+                        "enableFlag": str(it.get("enableFlag", ""))})
+        seen: set[str] = set()
+        return [t for t in out if not (t["templateId"] in seen or seen.add(t["templateId"]))]
 
     def parse_approval_chain(self, spec: dict[str, Any], template_id: str) -> dict:
         """解析 /workflow/handle/startFlow 的 description 里"流程目录"表格行(templateId → 审批链)。
@@ -213,6 +294,11 @@ _TEMPLATES: list[OATemplate] = [RuoYiFlowableTemplate()]
 
 def register_oa_template(template: OATemplate) -> None:
     _TEMPLATES.insert(0, template)
+
+
+def all_templates() -> list[OATemplate]:
+    """已注册的全部方言(靠前优先)。无 spec 可匹配时(如接入向导只有 base_url+token)按序试探用。"""
+    return list(_TEMPLATES)
 
 
 def match_template(spec: dict[str, Any]) -> OATemplate | None:

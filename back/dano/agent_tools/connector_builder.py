@@ -59,7 +59,8 @@ def _build_assertions(bindings: list[FieldBinding], *, risk: RiskLevel,
 
 def build_connector_body(action: ActionSpec, *, tenant: str, subsystem: str,
                          success_rule: str | None = None, auth_hint: str = "",
-                         as_step: bool = False) -> ConnectorBody:
+                         as_step: bool = False, business: str = "",
+                         internal: bool = False) -> ConnectorBody:
     adapter = auth_adapters.select_adapter(auth_hint)
     required_set = set(action.required_in)
     bindings = [b for p in action.params_in
@@ -71,10 +72,13 @@ def build_connector_body(action: ActionSpec, *, tenant: str, subsystem: str,
     # 写方法不自动重试(无幂等键时重试会重复提交);读可重试
     is_write = action.method.upper() in _WRITE_METHODS
     failure = FailureHandling(max_retries=0) if is_write else FailureHandling(max_retries=2)
+    # 步骤连接器、或显式标 internal 的前置查询(开表单/查模板/查余额)→ 内部:不发现/导出/直调
+    visibility = "internal" if (as_step or internal) else "catalog"
     return ConnectorBody(
         endpoint=action.endpoint, method=action.method, auth_kind=adapter.kind,
         auth_ref=f"vault://{tenant}/{sys_key}", action=action.name,
         title=action.summary, field_bindings=bindings, field_docs=field_docs,
         risk_level=risk, failure_handling=failure, workflow_step=as_step,
+        business=business, visibility=visibility,
         assertions=_build_assertions(bindings, risk=risk, success_rule=success_rule),
     )

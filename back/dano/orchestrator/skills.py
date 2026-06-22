@@ -63,7 +63,7 @@ class SkillRegistry:
     async def from_store(
         cls, store: AssetStore, *, tenant: str, subsystems: list[Subsystem]
     ) -> SkillRegistry:
-        from dano.shared.asset_bodies import WorkflowSkillBody
+        from dano.shared.asset_bodies import WorkflowSkillBody, asset_internal
 
         skills: list[SkillSpec] = []
         for sub in subsystems:
@@ -83,6 +83,8 @@ class SkillRegistry:
                         title=body.title,
                         field_docs=dict(body.field_docs),
                         field_types=dict(getattr(body, "field_types", {}) or {}),
+                        field_mappings=list(getattr(body, "field_mappings", []) or []),
+                        goal=dict(getattr(body, "goal", {}) or {}),
                         business=getattr(body, "business", "") or "",
                         business_meta=dict(getattr(body, "business_meta", {}) or {}),
                         has_api=True,
@@ -102,8 +104,8 @@ class SkillRegistry:
             # 有 API:从已发布连接器派生(被复合流程消费的步骤动作隐藏)
             for env in await store.list_published(AssetType.CONNECTOR, scope):
                 action = env.body.get("action", env.asset_key)
-                # 复合流程的步骤连接器:永不单独露出(即便其复合流程未发布也不污染目录)
-                if action in hidden_actions or env.body.get("workflow_step"):
+                # 步骤连接器 / internal 前置查询:永不单独露出(即便其复合流程未发布也不污染目录)
+                if action in hidden_actions or asset_internal(env.body):
                     continue
                 meta = ACTION_META.get(action, ActionMeta(keywords=[action]))
                 bindings = env.body.get("field_bindings", [])
@@ -117,6 +119,7 @@ class SkillRegistry:
                         action=action,
                         risk_level=RiskLevel(env.body.get("risk_level", "L1")),
                         title=env.body.get("title", ""),
+                        business=env.body.get("business", "") or "",
                         field_docs=dict(env.body.get("field_docs", {})),
                         field_types=dict(env.body.get("field_types", {}) or {}),
                         has_api=True,
