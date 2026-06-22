@@ -6,6 +6,7 @@
     askUserQuestionResult,
   } from "../utils/askUserQuestion";
   import type { ToolContentBlock } from "../utils/transcript";
+  import MarkdownRenderer from "./MarkdownRenderer.svelte";
 
   let {
     block,
@@ -115,7 +116,9 @@
 {#if request}
   <article class="question-card" data-status={result?.status ?? "pending"}>
     <div class="question-label">{t("questionTool.label")}</div>
-    <div class="question-text">{request.question}</div>
+    <div class="question-text">
+      <MarkdownRenderer content={request.question.replaceAll("\\n", "\n")} />
+    </div>
 
     {#if result?.status === "answered"}
       <div class="question-result">{t("questionTool.answered", { answer: answerText(result.answer) })}</div>
