@@ -2457,6 +2457,7 @@ async function startDefaultWorkspaceSession(
 
 async function fetchInitialState() {
   _transcriptInitialLoading = true;
+  const selectedSessionPath = _activeTreeSessionPath;
 
   try {
     const bootstrap = [
@@ -2469,6 +2470,15 @@ async function fetchInitialState() {
 
     if (await startDefaultWorkspaceSession(bootstrap)) {
       return;
+    }
+
+    if (selectedSessionPath) {
+      const response = await sendCommand({
+        type: "switch_session",
+        sessionPath: selectedSessionPath,
+      });
+      await Promise.all(bootstrap);
+      if (response.success) return;
     }
 
     await Promise.all([restoreLiveSessionState(), ...bootstrap]);
