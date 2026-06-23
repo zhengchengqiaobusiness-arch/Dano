@@ -468,19 +468,23 @@ async def onboarding_page_import(req: PageImportReq) -> dict:
     return {**report, "parsed_steps": len(steps), "sample_inputs": sample_inputs}
 
 
-def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict) -> dict:
-    """构造 request_fields 消息:被选请求的字段表 + 所有候选(供前端手选用哪个)+ 当前选中下标。"""
-    from dano.execution.page.request_capture import flatten_body
+def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict,
+                        reads: list[dict] | None = None, storage: dict | None = None) -> dict:
+    """构造 request_fields 消息:字段表 + 候选请求 + select 绑定建议(Q2 选领导)+ identity 字段(Q1 身份)。"""
+    from dano.execution.page.request_capture import flatten_body, suggest_identity, suggest_selects
 
     def _path(u: str) -> str:
         i = u.find("//")
         return u[u.find("/", i + 2):] if i >= 0 and u.find("/", i + 2) >= 0 else u
     cand_list = [{"idx": i, "method": (c.get("method") or "POST").upper(), "path": _path(c.get("url") or "")}
                  for i, c in enumerate(candidates)]
+    pd = chosen.get("post_data")
     return {"type": "request_fields",
             "method": (chosen.get("method") or "POST").upper(), "url": chosen.get("url"),
-            "fields": flatten_body(chosen.get("post_data"), samples),
-            "candidates": cand_list, "chosen_idx": candidates.index(chosen) if chosen in candidates else 0}
+            "fields": flatten_body(pd, samples),
+            "candidates": cand_list, "chosen_idx": candidates.index(chosen) if chosen in candidates else 0,
+            "selects": suggest_selects(pd, reads or []),       # 字段绑候选列表(名字→ID)
+            "identity": suggest_identity(pd, storage)}         # 字段=当前用户/会话值(运行期重取)
 
 
 # ── 方式B:网页内录制(WebSocket:截屏流出 + 输入回传入 + 实时步骤 + 录完发布)──
@@ -510,7 +514,8 @@ async def record_ws(ws: WebSocket) -> None:
                 pass
 
         sess = RecordSession(on_step=on_step, on_request=on_request,
-                             intercept_submit=init.get("intercept", True))
+                             intercept_submit=init.get("intercept", True),
+                             capture_reads=init.get("capture_reads", True))
         await sess.start(init["start_url"], base_url=init.get("base_url", ""),
                          storage_state=init.get("storage_state") or None,
                          token=init.get("token") or None)   # 贴 token → 预置登录态,免在画面里登录
@@ -527,6 +532,8 @@ async def record_ws(ws: WebSocket) -> None:
         pending_req: dict | None = None       # 抓到的提交请求,等用户勾完字段再发布
         pending_candidates: list[dict] = []    # 所有 JSON 写请求(候选),供用户手选用哪个
         pending_samples: dict = {}             # 录制时填的样例值(选别的请求时重算参数建议)
+        pending_reads: list[dict] = []         # 抓到的列表读响应(select 候选源)
+        pending_storage: dict | None = None    # 登录态(认 identity 字段)
         while True:
             msg = await ws.receive_json()
             t = msg.get("type")
@@ -557,9 +564,11 @@ async def record_ws(ws: WebSocket) -> None:
                 if cands:
                     pending_candidates = cands
                     pending_samples = samples
+                    pending_reads = sess.captured_reads()       # select 候选源(选领导)
+                    pending_storage = login_state               # identity 字段识别
                     chosen = pick_submit_request(cands, samples) or cands[-1]
                     pending_req = chosen
-                    await ws.send_json(_request_fields_msg(chosen, cands, samples))
+                    await ws.send_json(_request_fields_msg(chosen, cands, samples, pending_reads, pending_storage))
                     continue
 
                 # 兜底:没抓到 JSON 提交请求 → 老的 DOM 回放路径
@@ -595,7 +604,8 @@ async def record_ws(ws: WebSocket) -> None:
                 idx = msg.get("idx", 0)
                 if pending_candidates and 0 <= idx < len(pending_candidates):
                     pending_req = pending_candidates[idx]
-                    await ws.send_json(_request_fields_msg(pending_req, pending_candidates, pending_samples))
+                    await ws.send_json(_request_fields_msg(pending_req, pending_candidates, pending_samples,
+                                                           pending_reads, pending_storage))
             elif t == "publish_request":
                 # 用户在字段表里勾了哪些是参数、起了名 → 用真实提交请求建 Skill(任意 OA 通用)
                 if pending_req is None:
@@ -603,9 +613,19 @@ async def record_ws(ws: WebSocket) -> None:
                                         "report": {"ok": False, "reason": "没有待发布的提交请求;先点「停止并发布」抓请求"}})
                     continue
                 param_map = {k: v.strip() for k, v in (msg.get("param_map") or {}).items() if v and v.strip()}
-                from dano.execution.page.request_capture import build_api_request
-                apir = build_api_request(pending_req, param_map)
-                if not apir or not apir.get("params"):
+                from dano.execution.page.request_capture import build_api_request, build_api_workflow
+                sels = msg.get("selects") or []         # Q2 选领导:名字→ID
+                idens = msg.get("identity") or []        # Q1 当前用户:运行期重取
+                # 多步:用户勾了多个写请求(step_idxs,有序)→ 组装工作流,参数落在最后一步(提交那步)
+                step_idxs = [i for i in (msg.get("step_idxs") or []) if 0 <= i < len(pending_candidates)]
+                if len(step_idxs) > 1:
+                    writes = [pending_candidates[i] for i in step_idxs]
+                    apir = build_api_workflow(writes, param_map=param_map, selects=sels, identity=idens)
+                    last_params = (apir.get("steps") or [{}])[-1].get("params") or []
+                else:
+                    apir = build_api_request(pending_req, param_map, selects=sels, identity=idens)
+                    last_params = (apir or {}).get("params") or []
+                if not apir or not last_params:
                     await ws.send_json({"type": "result",
                                         "report": {"ok": False, "reason": "至少勾选一个字段作为参数(给它起个参数名)"}})
                     continue
@@ -614,14 +634,16 @@ async def record_ws(ws: WebSocket) -> None:
                 from dano.execution.page.sessions import save_session
                 from dano.onboarding.page_onboard import run_request_onboarding
                 save_session(init["tenant"], sub, login_state)   # 运行期发请求带登录态
+                # 单请求取自身 sample_inputs;工作流取最后一步的(dry 校验用)
+                sample_in = apir.get("sample_inputs") or ((apir.get("steps") or [{}])[-1].get("sample_inputs") or {})
                 rep = await run_request_onboarding(
                     tenant=init["tenant"], subsystem=sub, action=msg["action"],
-                    title=msg.get("title", ""), api_request=apir,
-                    sample_inputs=apir.get("sample_inputs") or {})
+                    title=msg.get("title", ""), api_request=apir, sample_inputs=sample_in)
                 if rep.get("ok"):
                     await _auto_export(init["tenant"])
                 await ws.send_json({"type": "result", "report": rep,
-                                    "parsed_steps": len(apir.get("params") or []), "via": "request"})
+                                    "parsed_steps": len(last_params), "via": "request",
+                                    "workflow_steps": len(apir.get("steps") or []) or None})
             elif t == "stop":
                 break
     except WebSocketDisconnect:

@@ -198,10 +198,14 @@ async def run_request_onboarding(
         run_id=run_id, tenant=tenant, system_instance_id=sid, subsystem=sid,
         deploy=deploy or {}, credentials=credentials or {}))
     try:
+        # 单请求取自身 params;多步工作流(Q3)取最后一步(用户提交那步)的 params
         params = list(api_request.get("params") or [])
+        if not params and api_request.get("steps"):
+            params = list((api_request["steps"][-1] or {}).get("params") or [])
+        # 每个参数都带录制原值作默认(全选也安全)→ 都是可选,缺了用原值,不拦截
         body = PageScriptBody(
             actions=[], dom_fingerprint="", action=action, title=title, api_request=api_request,
-            user_fields=params, required_fields=params, risk_level=RiskLevel.L3).model_dump()
+            user_fields=params, required_fields=[], optional_fields=params, risk_level=RiskLevel.L3).model_dump()
         d = await T.save_draft(run_id, {"system_instance_id": sid, "asset_type": "page_script",
                                         "asset_key": action, "body": body})
         rp = await T.sandbox_replay(run_id, {"asset_draft_id": d["asset_draft_id"],

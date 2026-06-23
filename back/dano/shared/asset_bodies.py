@@ -141,11 +141,69 @@ class EnvProfileBody(BaseModel):
     holidays: list[str] = Field(default_factory=list, description="日历源:法定节假日(运行期注入 compute business_days)")
 
 
+# ─────────────────────── 不变量 / 事实核查(页面与工作流共用·声明式)───────────────────────
+class Invariant(BaseModel):
+    """业务不变量(前置校验 / 事后正确性)。check 为 safe_eval 布尔表达式;
+    给了 evidence 则先回查真实系统再判(grounded),否则只看当前上下文。"""
+
+    check: str = Field(description="布尔表达式(safe_eval),真=通过")
+    message: str = Field(default="", description="不通过时给用户/审计的说明")
+    evidence: dict | None = Field(default=None, description="{query_action, params} 回查真实系统(grounded);None=只看上下文")
+
+
+class FactCheckSpec(BaseModel):
+    """回查确认副作用真的生效(不信接口返回的『操作成功』)。
+
+    执行:按 method 调 endpoint(模板可引用入参/前序输出),对响应跑 assert_expr;
+    submit 多为异步,故带轮询(retries/backoff)再判失败,避免「成功了只是查太早」。
+    """
+
+    endpoint: str = Field(description="回查端点,可含 {占位}")
+    method: str = "GET"
+    params_template: dict[str, str] = Field(default_factory=dict, description="查询参数模板")
+    assert_expr: str = Field(description="对响应的布尔表达式,真=确认生效")
+    retries: int = 5
+    backoff_s: float = 0.8
+
+
+# ─────────────────────── 页面型 Skill 语义标注(P1:机器可读语义)───────────────────────
+class LocatorStrategy(BaseModel):
+    """元素的一条定位策略;一个元素配多条、按优先级排列,运行期依次回退。跨系统稳定的核心。
+
+    优先级建议:testid > role+name > label > placeholder > name > text > css(坐标禁用)。
+    """
+
+    type: Literal["testid", "role", "label", "placeholder", "name", "text", "css", "xpath"]
+    role: str = Field(default="", description="type=role 时的 ARIA role(button/combobox/textbox…)")
+    value: str = Field(default="", description="单值(testid/label/placeholder/name/css/xpath)")
+    patterns: list[str] = Field(default_factory=list, description="可接受的名字/文本候选(role/text;多语言多写法)")
+    negative_patterns: list[str] = Field(default_factory=list, description="命中即拒(防误点删除/作废)")
+
+
+class PageNode(BaseModel):
+    """页面角色(不只是 URL):不同 OA 的 URL 可不同,但页面角色相同。"""
+
+    page_id: str
+    business_entity: str = Field(default="", description="业务实体,如 leave_request")
+    page_role: str = Field(default="", description="create_form / list / detail / login / approval …")
+    entry_evidence: list[str] = Field(default_factory=list, description="判定『已到这页』的证据:heading=请假申请 / url 片段")
+    exit_states: list[str] = Field(default_factory=list, description="离开态:submitted / saved_draft / cancelled")
+
+
+class SuccessEvidence(BaseModel):
+    """分层成功证据:点击完成 ≠ 业务成功。解释器按声明取证(建议至少 ui + business 各一)。"""
+
+    ui: list[str] = Field(default_factory=list, description="UI 证据:toast=提交成功 / status=审批中(语义定位或文本)")
+    network: str | None = Field(default=None, description="网络证据:对提交响应的布尔表达式(success_rule)")
+    business: FactCheckSpec | None = Field(default=None, description="业务证据:回查真实记录(grounded)")
+
+
 # ─────────────────────── ⑤ 页面脚本(无 API,流程8)───────────────────────
 class PageAction(BaseModel):
     """页面动作。仅元素/文本/DOM 定位,绝不用坐标。
 
     向后兼容:旧脚本只有 op/locator/value 仍合法;新增字段均有默认值。
+    P1 标注:semantic_role/field/reversible/risk/locators 让 Agent 看懂「这步在做什么业务、可不可逆」。
     """
 
     op: str = Field(description="goto/fill/select/upload/click/wait/verify/submit")
@@ -155,6 +213,14 @@ class PageAction(BaseModel):
         default=None, description="字段绑定来源:'const:<字面量>' 或 'field:<用户字段>'(优先于 value)")
     assert_visible: bool = Field(default=False, description="逐步元素断言:该步执行后 locator 须可见")
     optional: bool = Field(default=False, description="容错步:找不到元素可跳过,不判失败")
+    # P1 语义标注(新增,默认空,旧脚本兼容)
+    step_id: str = Field(default="", description="步骤稳定 id(供引用/审计)")
+    semantic_role: str = Field(default="", description="业务语义:navigate/fill/select/upload/save_draft/submit/approve/reject/delete/cancel/verify")
+    field: str = Field(default="", description="绑定的标准业务字段名(fill/select 时)")
+    reversible: bool = Field(default=True, description="是否可逆;submit/delete/approve/reject=False")
+    requires_confirmation: bool = Field(default=False, description="执行前需用户确认(不可逆写操作)")
+    risk: RiskLevel = Field(default=RiskLevel.L1, description="该步风险等级")
+    locators: list[LocatorStrategy] = Field(default_factory=list, description="多级定位策略(非空则优先于单 locator)")
 
 
 class PageScriptBody(BaseModel):
@@ -177,19 +243,17 @@ class PageScriptBody(BaseModel):
     # 抓提交请求路径(SPA 内部接口):有它则运行期直接发该请求(不走 DOM 回放),body_template 的 {{字段}} 用参数填回
     api_request: dict | None = Field(
         default=None, description="{method, path, body_template, content_type, params}:录制抓到的提交请求,参数化后直接调")
+    # P1 标注(新增,默认空,旧资产兼容):把页面 Skill 升级为带语义的声明式业务能力
+    goal: dict = Field(default_factory=dict, description="结构化业务目标(GoalBody 形态:intent/success_criteria/forbidden_steps)")
+    page_model: list[PageNode] = Field(default_factory=list, description="页面角色模型(pageId/role/entry/exit),不止 URL")
+    preconditions: list[Invariant] = Field(default_factory=list, description="执行前不变量:登录态/字段齐全/时间先后,不过则拒不写")
+    success_evidence: SuccessEvidence | None = Field(default=None, description="分层成功证据(UI + 网络 + 业务回查),点击完成≠业务成功")
+    fact_check: FactCheckSpec | None = Field(default=None, description="提交后回查真实记录(grounded),决定是否真返回成功")
+    credential_ref: str = Field(default="", description="登录态凭证引用,如 vault://tenant/system/storage-state(不存明文)")
 
 
 # ─────────────────────── ⑥ 复合流程 Skill(阶段2 + DSL v2:声明式业务逻辑)───────────────────────
 StepKind = Literal["call", "compute", "branch", "foreach", "select"]
-
-
-class Invariant(BaseModel):
-    """业务不变量(前置校验 / 事后正确性)。check 为 safe_eval 布尔表达式;
-    给了 evidence 则先回查真实系统再判(grounded),否则只看当前上下文。"""
-
-    check: str = Field(description="布尔表达式(safe_eval),真=通过")
-    message: str = Field(default="", description="不通过时给用户/审计的说明")
-    evidence: dict | None = Field(default=None, description="{query_action, params} 回查真实系统(grounded);None=只看上下文")
 
 
 class WorkflowStep(BaseModel):
@@ -285,22 +349,6 @@ class GoalBody(BaseModel):
     forbidden_steps: list[str] = Field(default_factory=list)
     risk_level: RiskLevel = RiskLevel.L3
     requires_confirmation: bool = True
-
-
-# ─────────────────────── 事实核查(流程9·声明式)───────────────────────
-class FactCheckSpec(BaseModel):
-    """回查确认副作用真的生效(不信接口返回的『操作成功』)。
-
-    执行:按 method 调 endpoint(模板可引用入参/前序输出),对响应跑 assert_expr;
-    submit 多为异步,故带轮询(retries/backoff)再判失败,避免「成功了只是查太早」。
-    """
-
-    endpoint: str = Field(description="回查端点,可含 {占位}")
-    method: str = "GET"
-    params_template: dict[str, str] = Field(default_factory=dict, description="查询参数模板")
-    assert_expr: str = Field(description="对响应的布尔表达式,真=确认生效")
-    retries: int = 5
-    backoff_s: float = 0.8
 
 
 # ─────────────────────── 生成方案(goal 模式·定方案产物)───────────────────────

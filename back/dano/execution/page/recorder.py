@@ -166,13 +166,15 @@ class RecordSession:
 
     def __init__(self, *, on_step: Callable[[dict], None] | None = None,
                  on_request: Callable[[dict], None] | None = None,
-                 intercept_submit: bool = True) -> None:
+                 intercept_submit: bool = True, capture_reads: bool = True) -> None:
         self.steps: list[dict] = []
-        self.requests: list[dict] = []      # 抓到的写请求(method/url/post_data)→ 提交请求参数化用
+        self.requests: list[dict] = []      # 抓到的写请求(有序,method/url/post_data/headers)→ 参数化/多步工作流
+        self.reads: list[dict] = []         # 抓到的读请求(GET+JSON 列表/字典)→ Q2 选领导等 select 的候选源
         self._on_step = on_step
         self._on_request_cb = on_request    # 实时把抓到的请求推给前端(诊断可见)
         # 拦截提交:点提交时抓到业务写请求后,假装成功、不真发给服务器 → 录制不产生真实记录
         self._intercept = intercept_submit
+        self._capture_reads = capture_reads
         self._pw = None
         self._browser = None
         self._context = None
@@ -205,6 +207,8 @@ class RecordSession:
             await self.page.route("**/*", self._route)
         else:
             self.page.on("request", self._on_request)      # 直录模式:照常发,只旁观抓取
+        if self._capture_reads:
+            self.page.on("response", self._resp_dispatch)  # 抓 GET+JSON 读响应(列表/字典)→ select 候选源
         await self.page.goto(full)
 
     def _capture(self, m: str, url: str, pd: str | None, ct: str, headers: dict | None = None) -> None:
@@ -260,6 +264,52 @@ class RecordSession:
 
     def captured_requests(self) -> list[dict]:
         return list(self.requests)
+
+    def captured_reads(self) -> list[dict]:
+        return list(self.reads)
+
+    def _resp_dispatch(self, response) -> None:  # noqa: ANN001 —— 同步快筛后再异步读 body
+        try:
+            m = (response.request.method or "").upper()
+            if m == "GET" or m in ("POST", "PUT", "PATCH"):   # GET=select 候选源;写=取响应(Q3 步链 taskId)
+                asyncio.create_task(self._on_response(response))
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _on_response(self, response) -> None:  # noqa: ANN001 —— GET=读候选源;写=把响应贴回对应请求
+        from dano.execution.page.request_capture import _NOISE, as_list_payload
+        try:
+            m = (response.request.method or "").upper()
+            url = response.url
+            ct = ""
+            try:
+                ct = (response.headers or {}).get("content-type", "")
+            except Exception:  # noqa: BLE001
+                pass
+            if "json" not in (ct or "").lower():
+                return
+            try:
+                data = await response.json()
+            except Exception:  # noqa: BLE001
+                return
+            if m in ("POST", "PUT", "PATCH"):
+                # 写请求的真实响应(taskId 等)→ 贴回第一个同 url、还没响应的已抓写请求,供 Q3 步间数据流发现
+                for r in self.requests:
+                    if r.get("url") == url and "response_json" not in r:
+                        r["response_json"] = data
+                        break
+                return
+            if any(n in url for n in _NOISE):                 # GET:select 候选源,跳噪声
+                return
+            # 只留"列表型"(json 是数组 / dict 里含数组)→ 才可能是下拉/选人候选源;限规模避免存爆
+            items = as_list_payload(data)
+            if items is None:
+                return
+            self.reads.append({"method": "GET", "url": url, "status": response.status,
+                               "json": data if len(self.reads) < 60 else None,
+                               "count": len(items)})
+        except Exception:  # noqa: BLE001
+            pass
 
     def _on_record(self, source, payload: str) -> None:  # noqa: ANN001 —— expose_binding 回调
         try:

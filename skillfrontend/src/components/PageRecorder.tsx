@@ -11,6 +11,9 @@ interface RecReq { method: string; url: string; has_body?: boolean; json?: boole
 interface RecField { path: string; key: string; value: string; suggest_param: boolean; suggest_name: string }
 // 候选写请求(抓到多个时让用户手选用哪个)
 interface RecCand { idx: number; method: string; path: string }
+// P3:字段=选自某列表(选领导:名字→ID)/ 字段=当前用户·会话值(运行期重取)
+interface RecSelect { path: string; source_url: string; value_key: string; label_key: string; label: string; count: number }
+interface RecIdentity { path: string; source: string }
 interface RecResult {
   ok?: boolean; action?: string; risk_level?: string; mode?: string; reason?: string;
   api?: { method?: string; path?: string; params?: string[] };
@@ -38,6 +41,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [reqMeta, setReqMeta] = useState<{ method: string; url: string } | null>(null);
   const [cands, setCands] = useState<RecCand[]>([]);   // 候选写请求(可手选用哪个)
   const [chosenIdx, setChosenIdx] = useState(0);
+  const [stepSel, setStepSel] = useState<Record<number, boolean>>({});   // 多步:勾入工作流的写请求 idx
+  const [selects, setSelects] = useState<Record<string, RecSelect>>({});      // path → select 建议
+  const [identity, setIdentity] = useState<Record<string, RecIdentity>>({});  // path → identity 建议
   const [action, setAction] = useState("submit_form");
   const [title, setTitle] = useState("");
   const [result, setResult] = useState<RecResult | null>(null);
@@ -54,7 +60,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function start() {
     if (!tenant) { message.error("请先到「创建 / 进入租户」"); return; }
     if (!startUrl.trim()) { message.error("请填页面地址 start_url"); return; }
-    setErr(""); setResult(null); setSteps([]); setReqs([]); setFrame(""); setFields([]); setPicked({}); setCands([]);
+    setErr(""); setResult(null); setSteps([]); setReqs([]); setFrame(""); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({});
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/onboarding/page/record`);
     wsRef.current = ws;
@@ -80,19 +86,28 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       else if (m.type === "request") setReqs((r) => [...r, m.request].slice(-40));   // 抓到的写请求(诊断)
       else if (m.type === "request_fields") {   // 抓到提交请求 → 列出请求体字段,让用户勾哪些是参数
         const fs: RecField[] = m.fields || [];
+        const selMap: Record<string, RecSelect> = {};
+        (m.selects || []).forEach((s: RecSelect) => { selMap[s.path] = s; });
+        const idMap: Record<string, RecIdentity> = {};
+        (m.identity || []).forEach((i: RecIdentity) => { idMap[i.path] = i; });
+        setSelects(selMap); setIdentity(idMap);
         setFields(fs);
         const pk: Record<string, { on: boolean; name: string }> = {};
-        fs.forEach((f) => { pk[f.path] = { on: !!f.suggest_param, name: f.suggest_name || f.key }; });
+        fs.forEach((f) => {
+          // 默认全选(每个参数都带录制原值兜底,固定字段不传就不变);仅"当前用户/会话值"默认不勾(运行期自动填)
+          pk[f.path] = { on: !idMap[f.path], name: f.suggest_name || f.key };
+        });
         setPicked(pk);
         setReqMeta({ method: m.method, url: m.url });
         setCands(m.candidates || []);
         setChosenIdx(m.chosen_idx ?? 0);
+        setStepSel({});
         setPhase("recording");
         message.success("抓到提交请求!勾选要让 agent 传值的字段 → 确认发布");
       }
       else if (m.type === "result") {   // 留在录制现场:不关浏览器、不重来
         setResult(m.report); setPhase("recording");
-        if (m.report?.ok) { setFields([]); setPicked({}); setCands([]); }   // 发布成功 → 收起字段表
+        if (m.report?.ok) { setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({}); }   // 发布成功 → 收起字段表
       }
       else if (m.type === "error") { setErr(m.detail || "录制出错"); setPhase("idle"); }
     };
@@ -104,7 +119,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const img = imgRef.current; if (!img) return;
     const r = img.getBoundingClientRect();
     send({ type: "input", event: { kind: "click", nx: (e.clientX - r.left) / r.width, ny: (e.clientY - r.top) / r.height } });
-    kbRef.current?.focus();   // 点完画面把焦点交给隐藏输入框,接下来打字(含中文)才有人接
+    kbRef.current?.focus({ preventScroll: true });   // 点完画面把焦点交给隐藏输入框(preventScroll:别把页面弹到顶部)
   }
   // 隐藏输入框接键入。中文 IME 合成中(isComposing)先不传,等 compositionend 整段传;英文走 onInput。
   function relayKb(el: HTMLInputElement) {
@@ -153,12 +168,19 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const param_map: Record<string, string> = {};
     fields.forEach((f) => { const p = picked[f.path]; if (p?.on && p.name.trim()) param_map[f.path] = p.name.trim(); });
     if (!Object.keys(param_map).length) { message.error("至少勾选一个字段作为参数"); return; }
+    const selList = Object.values(selects).filter((s) => param_map[s.path]);   // 选领导:仅作为参数的
+    const idList = Object.values(identity);                                     // 当前用户:运行期重取
+    // 多步(Q3):勾了 ≥2 个写请求 → 组成工作流,提交那步(chosenIdx)放最后(参数落它)
+    const checked = cands.filter((c) => stepSel[c.idx]).map((c) => c.idx);
+    const step_idxs = checked.length >= 2
+      ? [...checked.filter((i) => i !== chosenIdx).sort((a, b) => a - b), chosenIdx] : [];
     setResult(null); setPhase("publishing");
-    send({ type: "publish_request", action: action.trim(), title: title.trim(), param_map });
+    send({ type: "publish_request", action: action.trim(), title: title.trim(),
+           param_map, selects: selList, identity: idList, step_idxs });
   }
   function stopAll() {
     send({ type: "stop" }); wsRef.current?.close();
-    setPhase("idle"); setResult(null); setSteps([]); setFrame(""); setFields([]); setPicked({}); setCands([]);
+    setPhase("idle"); setResult(null); setSteps([]); setFrame(""); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({});
   }
 
   return (
@@ -221,20 +243,38 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               </Space>}>
               <Alert type="info" showIcon style={{ marginBottom: 8 }}
                 message="勾上的字段 → 变成参数(agent 调用时按需传值);没勾的(内部 ID、流程号、表单类型等)原样提交。已自动勾选像「填写内容」的字段,请核对增减。" />
+              {(Object.keys(selects).length > 0 || Object.keys(identity).length > 0) && (
+                <Alert type="warning" showIcon style={{ marginBottom: 8 }}
+                  message={<span>
+                    {Object.keys(selects).length > 0 && <span><Tag color="purple">📋 选自列表</Tag>这类字段(如选领导)agent 按<b>名字</b>传、运行期查 ID;</span>}
+                    {Object.keys(identity).length > 0 && <span><Tag color="gold">🔒 当前用户</Tag>这类字段默认不作参数、运行期自动填(谁调用就是谁);</span>}
+                    完整生效在后续 P4/P5。
+                  </span>} />
+              )}
               {cands.length > 1 && (
                 <div style={{ marginBottom: 8 }}>
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    抓到 {cands.length} 个写请求,当前用第 {chosenIdx + 1} 个;不是这个就点别的:</Typography.Text>
+                    抓到 {cands.length} 个写请求。点蓝色那个=参数落它(提交那步);多步业务(先起流程→再提交)勾「步骤」组成工作流:</Typography.Text>
                   <div style={{ marginTop: 4 }}>
-                    <Space size={4} wrap>
-                      {cands.map((c) => (
-                        <Tag key={c.idx} color={c.idx === chosenIdx ? "blue" : "default"}
-                             style={{ cursor: "pointer" }} onClick={() => chooseRequest(c.idx)}>
+                    {cands.map((c) => (
+                      <div key={c.idx} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                        <Checkbox checked={!!stepSel[c.idx]}
+                                  onChange={(e) => setStepSel((s) => ({ ...s, [c.idx]: e.target.checked }))}>
+                          <Typography.Text style={{ fontSize: 11 }} type="secondary">步骤</Typography.Text>
+                        </Checkbox>
+                        <Tag color={c.idx === chosenIdx ? "blue" : "default"}
+                             style={{ cursor: "pointer", margin: 0 }} onClick={() => chooseRequest(c.idx)}>
                           {c.method} {c.path}
                         </Tag>
-                      ))}
-                    </Space>
+                      </div>
+                    ))}
                   </div>
+                  {Object.values(stepSel).filter(Boolean).length >= 2 && (
+                    <Typography.Text type="warning" style={{ fontSize: 11 }}>
+                      多步工作流:勾选的写请求按顺序执行,step 间的 taskId 等自动串联(蓝色那步放最后)。
+                      <b>多步需在「关闭拦截提交」下录制</b>(否则拿不到真实 taskId,串联会失败)。
+                    </Typography.Text>
+                  )}
                 </div>
               )}
               <List
@@ -242,11 +282,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 dataSource={fields}
                 renderItem={(f) => {
                   const p = picked[f.path] || { on: false, name: f.key };
+                  const sel = selects[f.path];
+                  const idn = identity[f.path];
                   return (
                     <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
                       <Space size={8} wrap>
                         <Checkbox checked={p.on} onChange={(e) => toggleField(f.path, e.target.checked)}>参数</Checkbox>
                         <Typography.Text code style={{ fontSize: 12 }}>{f.path}</Typography.Text>
+                        {sel && <Tag color="purple" style={{ fontSize: 11 }}>
+                          📋 选自列表 {sel.label_key}→{sel.value_key}(共{sel.count}项)</Tag>}
+                        {idn && <Tag color="gold" style={{ fontSize: 11 }}>🔒 当前用户/会话值(运行期自动填)</Tag>}
                         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                           值={f.value === "" ? "(空)" : (f.value.length > 30 ? f.value.slice(0, 30) + "…" : f.value)}</Typography.Text>
                         {p.on && <>
@@ -301,51 +346,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <Button onClick={stopAll} disabled={phase === "publishing"}>结束录制</Button>
             </Space>
           )}
-
-          {/* 调试区(一般不用看):DOM 步骤 + 抓到的写请求 */}
-          <Collapse ghost style={{ marginTop: 8 }} items={[{
-            key: "dbg",
-            label: <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              调试:DOM 步骤({steps.length}) / 抓到的写请求({reqs.length})—— 一般不用看</Typography.Text>,
-            children: (
-              <>
-                <List
-                  size="small" style={{ maxHeight: 160, overflow: "auto" }}
-                  header={<Typography.Text type="secondary" style={{ fontSize: 12 }}>抓到的写请求(点提交后出现带 JSON 的 = 抓到了)</Typography.Text>}
-                  dataSource={reqs}
-                  locale={{ emptyText: "还没抓到写请求" }}
-                  renderItem={(r) => (
-                    <List.Item>
-                      <Space size={6} wrap>
-                        <Tag color={r.json ? "green" : r.has_body ? "gold" : "default"}>{r.method}</Tag>
-                        {r.json ? <Tag color="green">JSON</Tag> : r.has_body ? <Tag color="gold">非JSON</Tag> : <Tag>无body</Tag>}
-                        <Typography.Text style={{ fontSize: 12 }}>{r.url.replace(/^https?:\/\/[^/]+/, "")}</Typography.Text>
-                      </Space>
-                    </List.Item>
-                  )}
-                />
-                <List
-                  size="small" style={{ marginTop: 8, maxHeight: 160, overflow: "auto" }}
-                  header={<Typography.Text type="secondary" style={{ fontSize: 12 }}>DOM 步骤(仅没抓到请求时作兜底回放,可删)</Typography.Text>}
-                  dataSource={steps}
-                  locale={{ emptyText: "无" }}
-                  renderItem={(s, i) => {
-                    const isField = s.op === "fill" || s.op === "select" || s.op === "upload" || s.op === "pick";
-                    return (
-                      <List.Item actions={[<a key="d" style={{ color: "#cf1322" }} onClick={() => delStep(i)}>删除</a>]}>
-                        <Space size={6} wrap>
-                          <Tag color={s.op === "submit" ? "orange" : isField ? "green" : "blue"}>{i + 1}. {s.op}</Tag>
-                          <Typography.Text code style={{ fontSize: 12 }}>{s.locator}</Typography.Text>
-                          {isField && <Input size="small" value={s.field || ""} placeholder="参数名"
-                                 onChange={(e) => patchStep(i, { field: e.target.value })} style={{ width: 120 }} />}
-                        </Space>
-                      </List.Item>
-                    );
-                  }}
-                />
-              </>
-            ),
-          }]} />
 
           {result && (
             <Alert

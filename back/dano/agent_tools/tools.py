@@ -975,9 +975,9 @@ async def sandbox_replay(run_id: str, params: dict) -> dict:
         raise ToolError("sandbox_replay 仅用于页面脚本草案")
     # 抓请求路径:dry 校验(参数都填上、请求可构造),不开浏览器、不真发(写安全)
     if draft.body.get("api_request"):
-        from dano.execution.page.request_capture import execute_api_request
-        out = await execute_api_request(draft.body["api_request"], params.get("sample_inputs") or {},
-                                        send=False)
+        from dano.execution.page.request_capture import execute_api   # 单请求/多步工作流(Q3)分派
+        out = await execute_api(draft.body["api_request"], params.get("sample_inputs") or {},
+                                send=False)
         v = await _ds.record_validation(asset_draft_id=draft.asset_draft_id, kind="replay",
                                         passed=bool(out.get("ok")), response=out,
                                         evidence={"mode": "request-dry", "request": out})

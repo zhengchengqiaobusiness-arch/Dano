@@ -549,7 +549,7 @@ class Orchestrator:
         if (env.body or {}).get("api_request"):
             import json as _json
 
-            from dano.execution.page.request_capture import execute_api_request
+            from dano.execution.page.request_capture import execute_api   # 单请求或多步工作流(Q3)自动分派
             from dano.execution.page.sessions import session_path_if_exists
             from dano.infra.http import tls_verify
             scope = Scope(tenant=tenant, subsystem=skill.subsystem)
@@ -562,9 +562,9 @@ class Orchestrator:
                     storage = _json.loads(open(sp, encoding="utf-8").read())
                 except Exception:  # noqa: BLE001
                     pass
-            out = await execute_api_request(env.body["api_request"], dict(intent.fields),
-                                            base_url=base_url, storage_state=storage,
-                                            send=True, verify=tls_verify())
+            out = await execute_api(env.body["api_request"], dict(intent.fields),
+                                    base_url=base_url, storage_state=storage,
+                                    send=True, verify=tls_verify())
             ok = bool(out.get("ok"))
             er = ExecResult(task_id=task_id, outcome=Outcome.PASSED if ok else Outcome.FAILED,
                             evidence=Evidence(request_body=dict(intent.fields),
