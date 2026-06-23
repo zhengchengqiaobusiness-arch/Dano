@@ -221,7 +221,6 @@ function normalizeBridgePath(value: unknown): string | null {
 
 const WORKSPACE_ENTRIES_REFRESH_MS = 10_000;
 const MAX_RECONNECT_DELAY = 30_000;
-const SESSION_ROUTE_PARAM = "session";
 
 // ---------------------------------------------------------------------------
 // Bridge state (module-level singletons)
@@ -479,51 +478,6 @@ function invalidateWorkspaceEntries() {
   workspaceEntriesLoadedAt = 0;
 }
 
-function readSessionRoutePath(): string | null {
-  const search = globalThis.location?.search;
-  if (typeof search !== "string") return null;
-  const value = new URLSearchParams(search).get(SESSION_ROUTE_PARAM);
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
-}
-
-function buildSessionRouteUrl(sessionPath: string | null): string | null {
-  const currentLocation = globalThis.location;
-  if (!currentLocation) return null;
-
-  const params = new URLSearchParams(currentLocation.search ?? "");
-  if (sessionPath) {
-    params.set(SESSION_ROUTE_PARAM, sessionPath);
-  } else {
-    params.delete(SESSION_ROUTE_PARAM);
-  }
-
-  const pathname = currentLocation.pathname ?? "/";
-  const search = params.toString();
-  const hash = currentLocation.hash ?? "";
-  return `${pathname}${search ? `?${search}` : ""}${hash}`;
-}
-
-function writeSessionRoutePath(
-  sessionPath: string | null,
-  mode: "push" | "replace" = "replace",
-) {
-  const historyApi = globalThis.history;
-  const nextUrl = buildSessionRouteUrl(sessionPath);
-  if (!historyApi || !nextUrl) return;
-  if (readSessionRoutePath() === sessionPath) return;
-
-  if (mode === "push" && typeof historyApi.pushState === "function") {
-    historyApi.pushState(null, "", nextUrl);
-    return;
-  }
-
-  if (typeof historyApi.replaceState === "function") {
-    historyApi.replaceState(null, "", nextUrl);
-  }
-}
-
 async function restoreLiveSessionState() {
   _activeTreeSessionPath = null;
   _treeEntries = [];
@@ -533,51 +487,6 @@ async function restoreLiveSessionState() {
     sendCommand({ type: "get_messages", direction: "latest", limit: 40 }),
     sendCommand({ type: "get_state" }),
   ]);
-}
-
-async function applySessionRouteFromLocation() {
-  const routeSessionPath = readSessionRoutePath();
-  const currentSessionPath = getDisplayedSessionPath();
-  if (routeSessionPath === currentSessionPath) return;
-
-  try {
-    if (!routeSessionPath) {
-      await restoreLiveSessionState();
-      return;
-    }
-
-    const response = await sendCommand({
-      type: "switch_session",
-      sessionPath: routeSessionPath,
-    });
-    if (!response.success) {
-      pushNotification(
-        summarizeErrorMessage(
-          response.error ?? t("store.error.openSessionFromUrlFailed"),
-          t("store.error.openSessionFromUrlFailed"),
-        ),
-        "error",
-      );
-      writeSessionRoutePath(null, "replace");
-    }
-  } catch {
-    // Leave unchanged
-  }
-}
-
-function handleSessionRoutePopState() {
-  if (_connectionStatus !== "connected") return;
-  void applySessionRouteFromLocation();
-}
-
-function startSessionRouteSync() {
-  // Route sync is done manually at state change points (switchSession, newSession, etc.),
-  // not via $effect to avoid infinite loops with history.replaceState → popstate.
-  globalThis.addEventListener?.("popstate", handleSessionRoutePopState);
-}
-
-function stopSessionRouteSync() {
-  globalThis.removeEventListener?.("popstate", handleSessionRoutePopState);
 }
 
 function shouldApplyQueueUpdate(sessionPath: string | null): boolean {
@@ -2020,21 +1929,11 @@ export async function refreshWorkspaces(): Promise<RpcResponse> {
 }
 
 export async function switchSession(sessionPath: string): Promise<RpcResponse> {
-  const resp = await sendCommand({ type: "switch_session", sessionPath });
-  if (resp.success) {
-    const data = resp.data as { sessionPath?: string } | undefined;
-    writeSessionRoutePath(data?.sessionPath ?? sessionPath, "push");
-  }
-  return resp;
+  return sendCommand({ type: "switch_session", sessionPath });
 }
 
 export async function newSession(workspacePath: string): Promise<RpcResponse> {
-  const resp = await sendCommand({ type: "new_session", workspacePath });
-  if (resp.success) {
-    const data = resp.data as { sessionPath?: string } | undefined;
-    writeSessionRoutePath(data?.sessionPath ?? null, "push");
-  }
-  return resp;
+  return sendCommand({ type: "new_session", workspacePath });
 }
 
 export function registerWorkspace(
@@ -2514,7 +2413,6 @@ async function startDefaultWorkspaceSession(
   if (!workspacePath || defaultSessionStartedForPage) return false;
 
   defaultSessionStartedForPage = true;
-  writeSessionRoutePath(null, "replace");
 
   try {
     const registerResp = await registerWorkspace(workspacePath);
@@ -2559,7 +2457,6 @@ async function startDefaultWorkspaceSession(
 
 async function fetchInitialState() {
   _transcriptInitialLoading = true;
-  const routeSessionPath = readSessionRoutePath();
 
   try {
     const bootstrap = [
@@ -2571,26 +2468,6 @@ async function fetchInitialState() {
     ];
 
     if (await startDefaultWorkspaceSession(bootstrap)) {
-      return;
-    }
-
-    if (routeSessionPath) {
-      const resp = await sendCommand({
-        type: "switch_session",
-        sessionPath: routeSessionPath,
-      });
-      await Promise.all(bootstrap);
-      if (!resp.success) {
-        pushNotification(
-          summarizeErrorMessage(
-            resp.error ?? t("store.error.restoreSessionFromUrlFailed"),
-            t("store.error.restoreSessionFromUrlFailed"),
-          ),
-          "error",
-        );
-        writeSessionRoutePath(null, "replace");
-        await restoreLiveSessionState();
-      }
       return;
     }
 
@@ -2706,7 +2583,6 @@ async function connect() {
 
 function disconnect() {
   disposed = true;
-  stopSessionRouteSync();
   clearDisplayTranscriptDeltas();
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -2738,10 +2614,7 @@ function disconnect() {
 // ---------------------------------------------------------------------------
 
 if (!eventSource && !disposed) {
-  startSessionRouteSync();
   void connect();
-} else if (!disposed) {
-  startSessionRouteSync();
 }
 
 export function initBridge() {
