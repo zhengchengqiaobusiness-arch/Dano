@@ -469,8 +469,9 @@ async def onboarding_page_import(req: PageImportReq) -> dict:
 
 
 def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict,
-                        reads: list[dict] | None = None, storage: dict | None = None) -> dict:
-    """构造 request_fields 消息:字段表 + 候选请求 + select 绑定建议(Q2 选领导)+ identity 字段(Q1 身份)。"""
+                        reads: list[dict] | None = None, storage: dict | None = None,
+                        required_labels: set | None = None) -> dict:
+    """构造 request_fields 消息:字段表(含 type/required)+ 候选请求 + select(Q2)+ identity(Q1)。"""
     from dano.execution.page.request_capture import flatten_body, suggest_identity, suggest_selects
 
     def _path(u: str) -> str:
@@ -481,7 +482,7 @@ def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict,
     pd = chosen.get("post_data")
     return {"type": "request_fields",
             "method": (chosen.get("method") or "POST").upper(), "url": chosen.get("url"),
-            "fields": flatten_body(pd, samples),
+            "fields": flatten_body(pd, samples, required_labels),
             "candidates": cand_list, "chosen_idx": candidates.index(chosen) if chosen in candidates else 0,
             "selects": suggest_selects(pd, reads or []),       # 字段绑候选列表(名字→ID)
             "identity": suggest_identity(pd, storage)}         # 字段=当前用户/会话值(运行期重取)
@@ -534,6 +535,7 @@ async def record_ws(ws: WebSocket) -> None:
         pending_samples: dict = {}             # 录制时填的样例值(选别的请求时重算参数建议)
         pending_reads: list[dict] = []         # 抓到的列表读响应(select 候选源)
         pending_storage: dict | None = None    # 登录态(认 identity 字段)
+        pending_required: set = set()          # 录制时表单 * 必填的字段标签
         while True:
             msg = await ws.receive_json()
             t = msg.get("type")
@@ -550,8 +552,12 @@ async def record_ws(ws: WebSocket) -> None:
                                           field=(s.get("field") or None)) for s in raw]
                     samples = {_std_key(s["field"]): s.get("value", "") for s in raw
                                if s.get("field") and s.get("op") in ("fill", "select", "pick") and s.get("value")}
+                    required_labels = {_std_key(s["field"]) for s in raw
+                                       if s.get("field") and s.get("required")
+                                       and s.get("op") in ("fill", "select", "pick")}
                 else:
                     steps, samples = sess.recorded_steps()
+                    required_labels = sess.recorded_required_labels()
                 sub = init.get("subsystem", "A-报销")
                 login_state = await sess.storage_state()   # 录制会话(已真人登录)的登录态快照
 
@@ -566,9 +572,11 @@ async def record_ws(ws: WebSocket) -> None:
                     pending_samples = samples
                     pending_reads = sess.captured_reads()       # select 候选源(选领导)
                     pending_storage = login_state               # identity 字段识别
+                    pending_required = required_labels          # 表单 * 必填
                     chosen = pick_submit_request(cands, samples) or cands[-1]
                     pending_req = chosen
-                    await ws.send_json(_request_fields_msg(chosen, cands, samples, pending_reads, pending_storage))
+                    await ws.send_json(_request_fields_msg(chosen, cands, samples, pending_reads,
+                                                           pending_storage, pending_required))
                     continue
 
                 # 兜底:没抓到 JSON 提交请求 → 老的 DOM 回放路径
@@ -605,7 +613,7 @@ async def record_ws(ws: WebSocket) -> None:
                 if pending_candidates and 0 <= idx < len(pending_candidates):
                     pending_req = pending_candidates[idx]
                     await ws.send_json(_request_fields_msg(pending_req, pending_candidates, pending_samples,
-                                                           pending_reads, pending_storage))
+                                                           pending_reads, pending_storage, pending_required))
             elif t == "publish_request":
                 # 用户在字段表里勾了哪些是参数、起了名 → 用真实提交请求建 Skill(任意 OA 通用)
                 if pending_req is None:

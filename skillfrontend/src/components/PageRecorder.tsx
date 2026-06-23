@@ -8,7 +8,8 @@ import { useNavigate } from "react-router-dom";
 interface RecStep { op: string; locator?: string; field?: string; value?: string }
 interface RecReq { method: string; url: string; has_body?: boolean; json?: boolean }
 // 提交请求体拍平后的一个叶子字段(给用户勾选哪些是参数)
-interface RecField { path: string; key: string; value: string; suggest_param: boolean; suggest_name: string }
+interface RecField { path: string; key: string; value: string; suggest_param: boolean; suggest_name: string;
+  type?: string; required?: boolean }
 // 候选写请求(抓到多个时让用户手选用哪个)
 interface RecCand { idx: number; method: string; path: string }
 // P3:字段=选自某列表(选领导:名字→ID)/ 字段=当前用户·会话值(运行期重取)
@@ -37,7 +38,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [steps, setSteps] = useState<RecStep[]>([]);
   const [reqs, setReqs] = useState<RecReq[]>([]);   // 诊断:抓到的写请求
   const [fields, setFields] = useState<RecField[]>([]);   // 提交请求体的字段表(供勾选成参数)
-  const [picked, setPicked] = useState<Record<string, { on: boolean; name: string }>>({});  // path → {勾选, 参数名}
+  const [picked, setPicked] = useState<Record<string, { on: boolean; name: string; req: boolean }>>({});  // path → {勾选, 参数名, 必填}
   const [reqMeta, setReqMeta] = useState<{ method: string; url: string } | null>(null);
   const [cands, setCands] = useState<RecCand[]>([]);   // 候选写请求(可手选用哪个)
   const [chosenIdx, setChosenIdx] = useState(0);
@@ -92,10 +93,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         (m.identity || []).forEach((i: RecIdentity) => { idMap[i.path] = i; });
         setSelects(selMap); setIdentity(idMap);
         setFields(fs);
-        const pk: Record<string, { on: boolean; name: string }> = {};
+        const pk: Record<string, { on: boolean; name: string; req: boolean }> = {};
         fs.forEach((f) => {
-          // 默认全选(每个参数都带录制原值兜底,固定字段不传就不变);仅"当前用户/会话值"默认不勾(运行期自动填)
-          pk[f.path] = { on: !idMap[f.path], name: f.suggest_name || f.key };
+          // 默认:变化字段(用户填的)勾=参数;固定字段(billType/流程号等)不勾=常量,结构上原样提交;
+          // 当前用户/会话值不勾(运行期自动填)。这样"非参数字段一律原样"是结构保证,agent 改不到固定字段。
+          const on = idMap[f.path] ? false : (selMap[f.path] ? true : !!f.suggest_param);
+          pk[f.path] = { on, name: f.suggest_name || f.key, req: !!f.required };  // 必填默认按表单 *
         });
         setPicked(pk);
         setReqMeta({ method: m.method, url: m.url });
@@ -163,6 +166,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function renameField(path: string, name: string) {
     setPicked((p) => ({ ...p, [path]: { ...p[path], name } }));
   }
+  function toggleReq(path: string, req: boolean) {
+    setPicked((p) => ({ ...p, [path]: { ...p[path], req } }));
+  }
   function publishRequest() {
     if (!action.trim()) { message.error("请填 Skill 动作名(英文)"); return; }
     const param_map: Record<string, string> = {};
@@ -170,9 +176,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!Object.keys(param_map).length) { message.error("至少勾选一个字段作为参数"); return; }
     const selList = Object.values(selects).filter((s) => param_map[s.path]);   // 选领导:仅作为参数的
     const idList = Object.values(identity);                                     // 当前用户:运行期重取
-    // 必填=勾选的"变化字段"(suggest_param);固定字段(billType 等)=非必填,缺了用录制原值
+    // 必填=用户确认的「必填」勾选(默认按表单 *);非必填的参数缺了用录制原值
     const required = fields
-      .filter((f) => param_map[f.path] && f.suggest_param && !identity[f.path])
+      .filter((f) => param_map[f.path] && picked[f.path]?.req && !identity[f.path])
       .map((f) => param_map[f.path]);
     // 多步(Q3):勾了 ≥2 个写请求 → 组成工作流,提交那步(chosenIdx)放最后(参数落它)
     const checked = cands.filter((c) => stepSel[c.idx]).map((c) => c.idx);
@@ -297,14 +303,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                           📋 选自列表 {sel.label_key}→{sel.value_key}(共{sel.count}项)</Tag>}
                         {idn && <Tag color="gold" style={{ fontSize: 11 }}>🔒 当前用户/会话值(运行期自动填)</Tag>}
                         {!sel && !idn && (f.suggest_param
-                          ? <Tag color="blue" style={{ fontSize: 11 }}>必填(agent 传值)</Tag>
-                          : <Tag style={{ fontSize: 11 }}>非必填·用原值</Tag>)}
+                          ? <Tag color="blue" style={{ fontSize: 11 }}>参数·agent 传值</Tag>
+                          : <Tag style={{ fontSize: 11 }}>固定值·原样提交</Tag>)}
+                        {f.type && f.type !== "string" && <Tag style={{ fontSize: 11 }}>{f.type}</Tag>}
                         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                           值={f.value === "" ? "(空)" : (f.value.length > 30 ? f.value.slice(0, 30) + "…" : f.value)}</Typography.Text>
                         {p.on && <>
                           <Typography.Text type="secondary" style={{ fontSize: 12 }}>参数名</Typography.Text>
                           <Input size="small" value={p.name} placeholder="参数名(英文/拼音)"
                                  onChange={(e) => renameField(f.path, e.target.value)} style={{ width: 150 }} />
+                          <Checkbox checked={p.req} onChange={(e) => toggleReq(f.path, e.target.checked)}>
+                            <Typography.Text style={{ fontSize: 11 }}>必填</Typography.Text></Checkbox>
                         </>}
                       </Space>
                     </List.Item>

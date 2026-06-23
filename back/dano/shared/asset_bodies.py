@@ -239,6 +239,7 @@ class PageScriptBody(BaseModel):
     required_fields: list[str] = Field(default_factory=list, description="必填(缺则拦截)")
     optional_fields: list[str] = Field(default_factory=list, description="可选(契约暴露但不强制)")
     field_docs: dict[str, str] = Field(default_factory=dict, description="字段→语义描述")
+    field_types: dict[str, str] = Field(default_factory=dict, description="字段→类型(number/date/enum/string…,给 agent/契约)")
     risk_level: RiskLevel = Field(default=RiskLevel.L3, description="写页面默认 L3 → 运行期提交前确认")
     # 抓提交请求路径(SPA 内部接口):有它则运行期直接发该请求(不走 DOM 回放),body_template 的 {{字段}} 用参数填回
     api_request: dict | None = Field(

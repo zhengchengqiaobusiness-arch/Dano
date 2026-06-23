@@ -14,9 +14,12 @@ import json
 import re as _re
 
 _WRITE = {"POST", "PUT", "PATCH", "DELETE"}
-# 提交无关的高频路径(登录/校验码/字典/心跳等),挑提交请求时排除
+# 提交无关的高频路径(登录/校验码/字典/心跳等),挑提交「写请求」时排除
 _NOISE = ("/login", "/captcha", "/getInfo", "/dict/", "/heartbeat", "/refresh", "/upload",
           "/sse", "/socket", "/ws", ".png", ".jpg", ".css", ".js")
+# 「读请求」噪声:只排静态资源/流/心跳;**保留 /dict/ 等列表接口**(代码型下拉的选项源,select 要用)
+_READ_NOISE = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".js", ".woff", ".ico",
+               "/sse", "/socket", "/ws", "/heartbeat")
 
 
 # 浏览器通用头(回放交给 httpx / storageState 处理,不照搬);其余应用自定义头(鉴权/租户)要带上
@@ -76,12 +79,13 @@ _LIST_KEYS = ("rows", "records", "list", "data", "content", "items", "result", "
 
 
 def as_list_payload(data):
-    """从读响应里取出"候选列表"(下拉/选人源):data 本身是非空数组,或常见包装键里的非空数组。无则 None。
+    """从读响应里取出"候选列表"(下拉/选人源):data 本身是非空数组,或包装键里的非空数组。无则 None。
 
-    通用:不认任何系统专属结构,只按常见列表包装键挖一到两层。供 Q2「选领导」等 select 解析。
+    通用:① 常见包装键(rows/data/records…)挖一到两层;② **兜底:任意值是非空对象数组**(覆盖未知包装键
+    如 options/payload/choices,不挑系统)。供 Q2「选领导/代码下拉」等 select 解析。
     """
     if isinstance(data, list):
-        return data or None
+        return data if data and isinstance(data[0], (dict, str, int, float)) else None
     if isinstance(data, dict):
         for k in _LIST_KEYS:
             v = data.get(k)
@@ -92,6 +96,9 @@ def as_list_payload(data):
                     v2 = v.get(k2)
                     if isinstance(v2, list) and v2:
                         return v2
+        for v in data.values():                         # 兜底:任意"非空对象数组"键(覆盖未知包装键)
+            if isinstance(v, list) and v and isinstance(v[0], dict):
+                return v
     return None
 
 
@@ -160,14 +167,18 @@ _NAME_LIKE = ("nickname", "name", "realname", "username", "label", "title", "tex
 
 
 def _pick_label_key(item: dict, value_key: str) -> str:
-    """从列表项里挑"像名字"的字段当 label(nickName/name/realName…);没有就用 value_key。"""
+    """从列表项里挑"像名字"的字段当 label:① 名字类字段名(nickName/name/label…);
+    ② 兜底挑一个非 value_key 的「文字字段」(最长字符串值=显示名,覆盖未知 label 字段名);③ 都没有用 value_key。"""
     for k in item:
         if k != value_key and any(n in k.lower() for n in _NAME_LIKE) and item[k] not in (None, ""):
             return k
+    text = [(k, item[k]) for k in item if k != value_key and isinstance(item[k], str) and item[k]]
+    if text:
+        return max(text, key=lambda kv: len(kv[1]))[0]      # 最长字符串字段=显示名(通用兜底)
     return value_key
 
 
-_IDLIKE = _re.compile(r"(id|code|key|value|no|num)$", _re.I)
+_IDLIKE = _re.compile(r"(id|code|key|value|no|num|guid|uuid|oid|sn)$", _re.I)
 
 
 def _is_idlike(key: str) -> bool:
@@ -175,25 +186,32 @@ def _is_idlike(key: str) -> bool:
     return bool(key) and bool(_IDLIKE.search(key))
 
 
-def suggest_selects(post_data: str | None, reads: list[dict]) -> list[dict]:
-    """提交体里"等于某候选列表项 ID 的值"的字段 → 绑 select(Q2 选领导:Agent 传名字→查 ID)。
+_SMALL_LIST = 50    # "字典型下拉"是小列表(事假/病假…);城市/数据大字典是大列表 → 区分短码真假命中
 
-    防误报(真实表单上 't'/'1' 这类短值会碰巧命中大字典):① 跳过长度 <2 的值;② 命中的列表字段必须
-    是 ID 类(value_key 像 id/code/value…);③ 一个源命中 >3 个不同字段 = 太泛(通用字典),整源丢弃。
+
+def suggest_selects(post_data: str | None, reads: list[dict]) -> list[dict]:
+    """提交体里"等于某候选列表项 ID 的值"的字段 → 绑 select(Q2:Agent 传名字/文字→运行期查内部 ID)。
+
+    覆盖:选领导(approverId=12↔user/list)+ **代码型下拉(type=2↔字典 dictValue=2,agent 传"事假")**。
+    防误报:① 命中字段必须是 ID 类(value_key 像 id/code/value…);② 一个源命中 >3 个字段=通用字典,整源丢弃;
+    ③ **短码(len<2)只在小列表(≤50,像字典型下拉)里认**,避免 't'/'1' 碰巧命中上千项的大字典。
     """
     body = _parse_body(post_data)
     if body is None:
         return []
-    leaves = [(p, sv) for p, sv, _ in _leaf_paths(body) if len(sv) >= 2]   # 跳过 t/1 等过短值
+    leaves = _leaf_paths(body)
     out: list[dict] = []
     seen: set[str] = set()
     for r in reads:
         items = as_list_payload(r.get("json"))
         if not items or not isinstance(items[0], dict):
             continue
+        small = len(items) <= _SMALL_LIST
         hits: list[dict] = []
-        for path, sv in leaves:
-            if path in seen:
+        for path, sv, _raw in leaves:
+            if not sv or path in seen:
+                continue
+            if len(sv) < 2 and not small:               # 短码只在小列表里认(避免命中大字典)
                 continue
             for it in items:
                 vk = next((k for k, v in it.items() if str(v) == sv and _is_idlike(k)), None)
@@ -355,6 +373,26 @@ def _is_const_value(v) -> bool:
                or _re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+", s))  # snake_case 标识(oa_duty_leave)
 
 
+def _infer_type(node, key: str = "") -> str:
+    """从值推断字段类型(通用,给 agent 知道该传什么):boolean/number/datetime/date/array/object/string。"""
+    if isinstance(node, bool):
+        return "boolean"
+    if isinstance(node, int):
+        if len(str(abs(node))) == 13 and _TIME_KEY.search(key):    # 13 位毫秒时间戳 + 时间类 key
+            return "datetime"
+        return "number"
+    if isinstance(node, float):
+        return "number"
+    if isinstance(node, list):
+        return "array"
+    if isinstance(node, dict):
+        return "object"
+    s = str(node)
+    if _re.fullmatch(r"\d{4}-\d{2}-\d{2}([ T].*)?", s):
+        return "date"
+    return "string"
+
+
 def _date_keys(s) -> set:
     """从一个值里抽出 YYYY-MM-DD(支持 ISO 串 / 12-13 位毫秒时间戳),用于日期字段跨格式匹配。"""
     out: set = set()
@@ -372,24 +410,37 @@ def _date_keys(s) -> set:
     return out
 
 
-def flatten_body(post_data: str | None, samples: dict | None = None) -> list[dict]:
+def flatten_body(post_data: str | None, samples: dict | None = None,
+                 required_labels: set | None = None) -> list[dict]:
     """把请求体拍平成叶子字段列表 + 参数建议,供前端勾选。任意嵌套(dict/list)→ 点路径。
 
-    suggest_name=字段中文名(录制时的 DOM 标签),对不上时退回原始 key。文本按值直接对;**日期跨格式对**
-    (请求体毫秒戳 ↔ 表单显示的 2026-06-24)。下拉的代码值(2↔事假)无法按值对,退 key。
+    suggest_name=字段中文名(录制时的 DOM 标签),**只在能确定时给**(文本按值对;日期跨格式对毫秒戳↔显示),
+    对不上就退回原始 key(诚实,不瞎猜)。同值字段(都填 123123123)按录制顺序各取一个标签,不抢同一个。
+    type=字段类型(值推断);required=表单 * 必填(label 命中 required_labels)。
     """
     body = _parse_body(post_data)
     if body is None:
         return []
     samples = samples or {}
-    val2field = {str(v): k for k, v in samples.items() if v not in ("", None)}
-    date2field: dict[str, str] = {}                             # 日期(YYYY-MM-DD)→ 中文标签
-    for disp, field in val2field.items():
-        for dk in _date_keys(disp):
-            date2field.setdefault(dk, field)
-    out: list[dict] = []
+    required_labels = required_labels or set()
+    # 样例按录制顺序:(值字符串, 标签, 该值的日期集);allow 同值多标签按序消费
+    sample_list = [(str(v), k, _date_keys(v)) for k, v in samples.items() if v not in ("", None)]
+    used_i: set = set()
 
-    used: set = set()
+    def match_label(sv: str):
+        for i, (v, lab, _dk) in enumerate(sample_list):        # 文本精确对(同值取下一个还没用的标签)
+            if i not in used_i and v == sv:
+                used_i.add(i)
+                return lab
+        sv_dates = _date_keys(sv)
+        if sv_dates:                                           # 日期跨格式对(毫秒戳 ↔ 显示日期)
+            for i, (v, lab, dk) in enumerate(sample_list):
+                if i not in used_i and (dk & sv_dates):
+                    used_i.add(i)
+                    return lab
+        return None
+
+    out: list[dict] = []
 
     def walk(node, path):
         if isinstance(node, dict):
@@ -401,32 +452,16 @@ def flatten_body(post_data: str | None, samples: dict | None = None) -> list[dic
         else:
             sv = "" if node is None else str(node)
             key = path.split(".")[-1].split("[")[0]
-            label = val2field.get(sv)                           # 文本直接对(原因…)
-            if label is None:                                   # 日期跨格式对(毫秒戳 ↔ 显示日期)
-                for dk in _date_keys(sv):
-                    if dk in date2field:
-                        label = date2field[dk]
-                        break
-            if label is not None:
-                used.add(label)
+            label = match_label(sv)
             time_like = bool(_TIME_KEY.search(key))
             const = (not time_like) and (bool(_ID_KEY.search(key)) or _is_const_value(node))
             out.append({"path": path, "key": key, "value": sv,
                         "suggest_param": bool(label is not None or (not const and sv != "")),
-                        "suggest_name": label or key, "_const": const, "_matched": label is not None})
+                        "suggest_name": label or key,            # 对不上 → 退原始 key(不瞎猜)
+                        "type": _infer_type(node, key),           # 字段类型(值推断),给 agent/契约
+                        "required": bool(label is not None and label in required_labels)})  # 表单 * 必填
 
     walk(body, "")
-    # 顺序兜底:剩下没按值/日期对上的 DOM 标签(按录制顺序),补给还没拿到中文名的"变化字段"(如下拉 type↔请假类型)
-    rem = [lab for lab in samples if lab not in used]
-    i = 0
-    for e in out:
-        if not e["_matched"] and not e["_const"] and e["suggest_param"] and e["suggest_name"] == e["key"]:
-            if i < len(rem):
-                e["suggest_name"] = rem[i]
-                i += 1
-    for e in out:
-        e.pop("_const", None)
-        e.pop("_matched", None)
     return out
 
 
@@ -443,6 +478,7 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
         return None
     params: list[str] = []
     samples: dict[str, str] = {}
+    types: dict[str, str] = {}
 
     def walk(node, path):
         if isinstance(node, dict):
@@ -453,6 +489,7 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
             name = param_map[path]
             params.append(name)
             samples[name] = "" if node is None else str(node)
+            types[name] = _infer_type(node, path.split(".")[-1].split("[")[0])   # 字段类型(值推断)
             return "{{" + name + "}}"
         return node
 
@@ -469,12 +506,14 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
     sel_meta = [{"param": param_map[s["path"]], "source_url": s.get("source_url"),
                  "value_key": s.get("value_key"), "label_key": s.get("label_key")}
                 for s in (selects or []) if s.get("path") in param_map]
+    for s in sel_meta:                                          # 选领导/代码下拉 → 类型=枚举(传名字/文字)
+        types[s["param"]] = "enum"
     id_meta = [{"path": i["path"], "source": i.get("source", "")} for i in (identity or [])]
     return {"method": (req.get("method") or "POST").upper(), "path": path, "url": url,
             "content_type": req.get("content_type", "application/json"),
             "body_template": templ, "params": list(dict.fromkeys(params)), "sample_inputs": samples,
             "auth_headers": extract_auth_headers(req.get("headers")),
-            "selects": sel_meta, "identity": id_meta}
+            "field_types": types, "selects": sel_meta, "identity": id_meta}
 
 
 def substitute(template, fields: dict, defaults: dict | None = None):

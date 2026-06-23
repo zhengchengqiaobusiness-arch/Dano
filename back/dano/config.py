@@ -32,9 +32,9 @@ class Settings(BaseSettings):
     require_vault: bool = False     # true=必须从 Vault 取,失败即报错(fail-closed,不回退 env)
 
     # ── LLM(pi 编码 + 三模型评审,OpenAI 兼容)──
-    pi_api_key: str = "tp-cy21f1whspdd33jmu45yev7h9hoqf04ywiii9gu0018cssiq"                                   # = DANO_PI_API_KEY(编码 + 评审复用)
-    pi_base_url: str = "https://api.xiaomimimo.com/v1"     # = DANO_PI_BASE_URL(openai_text_spawn 评审/分类用)
-    pi_model: str = "mimo-v2.5-pro"            # = DANO_PI_MODEL(评审/分类的 OpenAI 兼容模型)
+    pi_api_key: str = "sk-gsgpzoimegwgeiscfxfjhtwfegifngjvejwjfatuoxrzytmn"                                   # = DANO_PI_API_KEY(编码 + 评审复用)
+    pi_base_url: str = "https://api.siliconflow.cn/v1"     # = DANO_PI_BASE_URL(openai_text_spawn 评审/分类用)
+    pi_model: str = "moonshotai/Kimi-K2.7-Code"            # = DANO_PI_MODEL(评审/分类的 OpenAI 兼容模型)
     # pi agent(run_pi.mjs)的 provider 名:配了 pi_base_url 时,run_pi.mjs 会注册一个 **OpenAI 兼容** provider
     # (用 pi_base_url + pi_api_key + pi_model,api=openai-completions),SiliconFlow 这类直接可用;留空=用 "openai-compat"。
     # 仅当不配 pi_base_url 时才退回 pi 内置 provider(那时这里填内置名,如 deepseek)。
@@ -46,9 +46,9 @@ class Settings(BaseSettings):
 
     # ── 三模型评审委员会(发布前硬闸门;强制 distinct(model_id)=3,改模型名即可)──
     review_enabled: bool = True
-    review_model_acceptance: str = "mimo-v2.5-pro"   # 成果验收:是否真满足业务意图
-    review_model_security: str = "mimo-v2.5-pro"            # 漏洞检测:注入/越权/密钥/SSRF/PII
-    review_model_compliance: str = "mimo-v2.5-pro"     # 合规审核:沙箱/测试凭证/风险/确认
+    review_model_acceptance: str = "zai-org/GLM-5.2"   # 成果验收:是否真满足业务意图
+    review_model_security: str = "Pro/moonshotai/Kimi-K2.6"            # 漏洞检测:注入/越权/密钥/SSRF/PII
+    review_model_compliance: str = "deepseek-ai/DeepSeek-V4-Flash"     # 合规审核:沙箱/测试凭证/风险/确认
     review_timeout_s: float = 240.0   # 单模型评审超时:OpenAI 兼容共享端点(SiliconFlow)拥塞时单次可达 ~180s,给足余量
     review_max_retries: int = 2
     review_retry_backoff_s: float = 1.0

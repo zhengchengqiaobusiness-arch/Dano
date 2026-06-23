@@ -78,6 +78,44 @@ def test_suggest_selects_binds_field_to_list_source():
     assert b["source_url"].endswith("/system/user/list") and b["count"] == 2
 
 
+def test_suggest_selects_code_dropdown_via_small_dict():
+    """代码型下拉:type=2 命中字典小列表 dictValue=2 → 绑 select,agent 传"病假"、运行期换 2。"""
+    submit = '{"type":2,"reason":"回家"}'
+    dict_read = [{"url": "http://oa.x/system/dict/data/type/leave_type",
+                  "json": {"code": 200, "data": [{"dictLabel": "事假", "dictValue": "1"},
+                                                 {"dictLabel": "病假", "dictValue": "2"},
+                                                 {"dictLabel": "年假", "dictValue": "3"}]}}]
+    s = suggest_selects(submit, dict_read)
+    assert len(s) == 1
+    b = s[0]
+    assert b["path"] == "type" and b["value_key"] == "dictValue" and b["label_key"] == "dictLabel"
+    assert b["label"] == "病假"                    # type=2 → dictValue 2 → dictLabel 病假
+    assert b["source_url"].endswith("/type/leave_type")
+
+
+def test_suggest_selects_generic_non_ruoyi_shape():
+    """泛化证明:换一套完全不同形态(包装键 options、字段 optionCode/caption,非若依 data/dictValue/dictLabel)
+    照样识别 → select 靠结构(id 类值字段 + 文字标签字段),不写死任何系统字段名。"""
+    submit = '{"category":"VIP"}'
+    read = [{"url": "http://other.sys/api/categories",
+             "json": {"options": [{"optionCode": "STD", "caption": "标准"},
+                                   {"optionCode": "VIP", "caption": "贵宾"}]}}]
+    s = suggest_selects(submit, read)
+    assert len(s) == 1
+    b = s[0]
+    assert b["path"] == "category"
+    assert b["value_key"] == "optionCode"      # 值字段(code 结尾)= ID 类
+    assert b["label_key"] == "caption"         # 没有 name/label 类字段 → 最长文字字段兜底
+    assert b["label"] == "贵宾"                 # category=VIP → optionCode VIP → caption 贵宾
+
+
+def test_suggest_selects_short_code_not_matched_in_big_dict():
+    """短码仍不在大字典里乱认:type=2 撞到 1431 项城市字典 → 不绑(避免误报)。"""
+    submit = '{"type":2}'
+    big = {"data": [{"value": str(i)} for i in range(1431)]}
+    assert suggest_selects(submit, [{"url": "/sys/city", "json": big}]) == []
+
+
 def test_suggest_selects_empty_when_no_list_match():
     submit = '{"reason":"回家","leaveType":"事假"}'
     reads = [{"url": "/u/list", "json": {"rows": [{"userId": 99, "nickName": "王"}]}}]
@@ -314,6 +352,31 @@ def test_non_json_body_returns_none():
     assert parameterize_request({"method": "POST", "url": "/x", "post_data": "a=1&b=2"}, _SAMPLES) is None
 
 
+def test_real_leave_body_fixed_fields_preserved_generally():
+    """用户真实请假 body:billType/processDefKey=oa_duty_leave 是实际提交值,两条路径都通用保留;
+    审批人嵌套数组([144]/[118])也原样。证明"非参数字段一律原样提交"不是 billType 特例。"""
+    raw = ('{"type":2,"reason":"123123123","startTime":1782144000000,"endTime":1782748800000,'
+           '"billType":"oa_duty_leave","processDefKey":"oa_duty_leave",'
+           '"startUserSelectAssignees":{"Activity_09dlq0g":[144],"Activity_0ag2wyz":[118]}}')
+    req = {"method": "POST", "url": "http://oa.x/oa/duty-leave/submit-process", "post_data": raw}
+
+    # 路径A:billType/processDefKey 不作参数(固定字段)→ body_template 里就是常量,原样提交
+    a = build_api_request(req, {"reason": "原因"})
+    assert a["body_template"]["billType"] == "oa_duty_leave"
+    assert a["body_template"]["processDefKey"] == "oa_duty_leave"
+    assert a["body_template"]["startUserSelectAssignees"]["Activity_09dlq0g"] == [144]   # 审批人嵌套数组原样
+    assert a["body_template"]["startUserSelectAssignees"]["Activity_0ag2wyz"] == [118]
+    body_a = substitute(a["body_template"], {"原因": "换个理由"})
+    assert body_a["billType"] == "oa_duty_leave" and body_a["reason"] == "换个理由"
+
+    # 路径B:全选(billType/processDefKey 也作参数)→ agent 不传时用录制原值(sample_inputs)
+    b = build_api_request(req, {"reason": "原因", "billType": "billType", "processDefKey": "processDefKey"})
+    assert b["sample_inputs"]["billType"] == "oa_duty_leave"
+    body_b = substitute(b["body_template"], {"原因": "换个理由"}, b["sample_inputs"])
+    assert body_b["billType"] == "oa_duty_leave"        # 没传 → 录制原值,不变
+    assert body_b["processDefKey"] == "oa_duty_leave"
+
+
 # ── 新流程:拍平请求体 → 用户按字段勾选(任意 OA / 业务 / 字段都通用,不靠值匹配)──
 # 嵌套请求体(很多 OA 把表单包在 form/variables 里):证明深层字段也能拍平+勾选
 _NESTED = ('{"form":{"leaveType":"事假","days":3,"reason":"回家","attachments":[]},'
@@ -343,13 +406,65 @@ def test_flatten_date_field_gets_chinese_label_across_formats():
     assert p["type"] == "type"             # 下拉代码(2)对不上「事假」→ 退原始 key(诚实)
 
 
-def test_flatten_order_fallback_labels_dropdown():
-    """下拉代码值对不上文本,但"剩下的标签"按顺序补:请假类型→type(用户录了该字段时)。"""
-    body = '{"type":2,"reason":"回家"}'
-    samples = {"原因": "回家", "请假类型": "事假"}     # 用户录了这两个字段
+def test_flatten_dropdown_text_value_matches_label():
+    """下拉提交的是文字(type=周末)→ 按值对上标签「加班类型」;不靠瞎猜。"""
+    body = '{"type":"周末","reason":"回家"}'
+    samples = {"加班类型": "周末", "原因": "回家"}      # 录制时选了下拉、填了原因
     p = {f["key"]: f["suggest_name"] for f in flatten_body(body, samples)}
-    assert p["reason"] == "原因"            # 文本直接对
-    assert p["type"] == "请假类型"          # 值对不上(2≠事假),但剩下的标签「请假类型」按序补给它
+    assert p["type"] == "加班类型"          # 文字直接对上
+    assert p["reason"] == "原因"
+
+
+def test_flatten_no_blind_guess_for_unmatched():
+    """对不上的字段(下拉代码 / 没录的字段)退回原始 key,绝不瞎塞剩余标签(避免张冠李戴)。"""
+    body = '{"type":2,"reason":"回家"}'
+    samples = {"原因": "回家", "加班类型": "周末"}     # 加班类型 的值是「周末」,但 body 里 type=2(代码)
+    p = {f["key"]: f["suggest_name"] for f in flatten_body(body, samples)}
+    assert p["reason"] == "原因"
+    assert p["type"] == "type"             # 2≠周末 → 退 key(不会被错塞成「加班类型」)
+
+
+def test_flatten_same_value_fields_take_distinct_labels():
+    """两个字段都填 123123123(reason/remark)→ 按录制顺序各取一个标签,不抢同一个。"""
+    body = '{"reason":"123123123","remark":"123123123"}'
+    samples = {"加班原因": "123123123", "备注": "123123123"}   # 录制顺序:先加班原因、后备注
+    p = {f["key"]: f["suggest_name"] for f in flatten_body(body, samples)}
+    assert p["reason"] == "加班原因"        # 第一个同值字段取第一个标签
+    assert p["remark"] == "备注"            # 第二个取下一个(不再都变「备注」)
+
+
+def test_flatten_infers_field_types():
+    """字段类型从值推断(通用):文本/数字/毫秒时间戳→datetime/布尔/数组。"""
+    body = '{"reason":"回家","amount":12.5,"days":3,"startTime":1782230400000,"draft":false,"checkin":"2026-06-24"}'
+    t = {f["key"]: f["type"] for f in flatten_body(body)}
+    assert t["reason"] == "string"
+    assert t["amount"] == "number" and t["days"] == "number"
+    assert t["startTime"] == "datetime"        # 13 位毫秒 + 时间类 key
+    assert t["checkin"] == "date"              # YYYY-MM-DD 字符串
+    assert t["draft"] == "boolean"
+
+
+def test_build_api_request_field_types_with_enum():
+    """build_api_request 产出 field_types;select(选领导/代码下拉)→ enum。"""
+    req = {"method": "POST", "url": "http://x/s",
+           "post_data": '{"reason":"回家","days":3,"amount":100,"approverId":12}'}
+    apir = build_api_request(req, {"reason": "reason", "days": "days", "amount": "amount", "approverId": "approver"},
+                             selects=[{"path": "approverId", "source_url": "/u",
+                                       "value_key": "userId", "label_key": "nickName"}])
+    assert apir["field_types"]["reason"] == "string"
+    assert apir["field_types"]["days"] == "number" and apir["field_types"]["amount"] == "number"
+    assert apir["field_types"]["approver"] == "enum"     # select → 枚举(传名字/文字)
+
+
+def test_flatten_required_from_form_star():
+    """表单 * 必填:录制时标了必填的字段(其标签在 required_labels)→ field.required=True。"""
+    body = '{"reason":"回家","street":"中山路","type":"周末"}'
+    samples = {"原因": "回家", "所在街道": "中山路", "加班类型": "周末"}
+    req_labels = {"原因", "加班类型"}      # 原因/加班类型 有 *,所在街道没有
+    fields = {f["key"]: f for f in flatten_body(body, samples, req_labels)}
+    assert fields["reason"]["required"] is True and fields["reason"]["suggest_name"] == "原因"
+    assert fields["type"]["required"] is True
+    assert fields["street"]["required"] is False   # 没 * → 非必填
 
 
 def test_flatten_body_non_json_returns_empty():
@@ -503,6 +618,45 @@ async def test_capture_reads_e2e():
     leaders = [c for c in cands if c["url"].endswith("/system/user/list")]
     assert leaders and leaders[0]["count"] == 2                     # 抓到 2 人的候选列表
     assert "userId" in leaders[0]["item_keys"] and "nickName" in leaders[0]["item_keys"]  # 供 P3 绑 value/label
+
+
+async def test_recorder_captures_required_star_elementui():
+    """真浏览器:Element-UI 结构(el-form-item.is-required + label[for])→ 录制捕获 * 必填 + 中文标签。"""
+    pytest.importorskip("playwright")
+    from dano.execution.page.driver import PlaywrightPageDriver
+    from dano.execution.page.recorder import RecordSession
+    try:
+        d, _ = await PlaywrightPageDriver.launch(headless=True); await d.close()
+    except Exception:  # noqa: BLE001
+        pytest.skip("chromium 未安装")
+    html = ('<!doctype html><html><head><meta charset="utf-8"></head><body><form>'
+            '<div class="el-form-item is-required"><label for="dest">目的地</label><input id="dest"></div>'
+            '<div class="el-form-item"><label for="remark">备注</label><input id="remark"></div>'
+            '</form></body></html>').encode("utf-8")
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):  # noqa: ANN001
+            pass
+
+        def do_GET(self):
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.end_headers()
+            self.wfile.write(html)
+
+    httpd = socketserver.TCPServer(("127.0.0.1", 0), H)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        sess = RecordSession()
+        await sess.start(f"http://127.0.0.1:{port}/")
+        await sess.page.fill("#dest", "北京")
+        await sess.page.fill("#remark", "无")
+        await sess.page.wait_for_timeout(300)
+        req_labels = sess.recorded_required_labels()
+        await sess.stop()
+    finally:
+        httpd.shutdown()
+    assert "目的地" in req_labels        # is-required → 必填
+    assert "备注" not in req_labels      # 无 is-required → 非必填
 
 
 async def test_request_onboarding_publish_and_execute(tmp_path):

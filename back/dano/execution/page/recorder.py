@@ -91,9 +91,19 @@ _RECORDER_JS = r"""() => {
   function onLoginPage() {
     try { return /\/(login|signin|sign-in|sso)(?:[/?#]|$)/i.test(location.href); } catch (e) { return false; }
   }
-  function emit(op, loc, value, field) {
+  function requiredOf(el) {                       // 该字段是否必填:读表单 * 标记(通用,跨 Element-UI / Ant / 原生)
+    try {
+      if (el.required || el.getAttribute('aria-required') === 'true') return true;
+      var item = el.closest('.el-form-item,.ant-form-item,[class*="form-item"],[class*="form_item"]');
+      if (item && /required/i.test(item.className)) return true;   // el is-required / ant-form-item-required
+      var lab = item && item.querySelector('label');
+      if (lab && lab.textContent.indexOf('*') >= 0) return true;   // 少数把 * 直接写进 label 文本
+    } catch (e) {}
+    return false;
+  }
+  function emit(op, loc, value, field, required) {
     if (!loc || onLoginPage()) return;            // 登录页上的任何操作一律不录(自动跳过登录,免手点「从这里开始录」)
-    try { window.__danoRecord(JSON.stringify({ op: op, locator: loc, value: value || '', field: field || '' })); } catch (e) {}
+    try { window.__danoRecord(JSON.stringify({ op: op, locator: loc, value: value || '', field: field || '', required: !!required })); } catch (e) {}
   }
   // 找交互目标:role 属交互集 / a / button,否则向上找 cursor:pointer 且短文本的(卡片/自定义控件)。
   function target(t) {
@@ -110,13 +120,13 @@ _RECORDER_JS = r"""() => {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
     // 密码框绝不录(安全);非文本类型跳过
     if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','password','hidden'].indexOf(ty) < 0)) {
-      var loc = locateField(el); emit('fill', loc, el.value, fieldOf(loc));
+      var loc = locateField(el); emit('fill', loc, el.value, fieldOf(loc), requiredOf(el));
     }
   }, true);
   document.addEventListener('change', function (e) {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
-    if (tag === 'select') { var l1 = locateField(el); emit('select', l1, el.value, fieldOf(l1)); }
-    else if (tag === 'input' && ty === 'file') { var l2 = locateField(el); emit('upload', l2, el.value || '', fieldOf(l2)); }
+    if (tag === 'select') { var l1 = locateField(el); emit('select', l1, el.value, fieldOf(l1), requiredOf(el)); }
+    else if (tag === 'input' && ty === 'file') { var l2 = locateField(el); emit('upload', l2, el.value || '', fieldOf(l2), requiredOf(el)); }
   }, true);
   // 选择型控件参数化(框架无关):日期/下拉/级联是"点"出来的,不该录成写死的点击,而该录成一个
   // pick 参数步(触发框 + 选中的最终值)。识别弹层 + 触发框,选完读触发框 input 的最终值。
@@ -139,7 +149,7 @@ _RECORDER_JS = r"""() => {
     if (!trig || !trig.querySelector) return;
     var inp = trig.querySelector('input'); if (!inp) return;
     var v = clean(inp.value); if (!v) return;
-    var loc = locateField(inp); if (loc) emit('pick', loc, v, fieldOf(loc));
+    var loc = locateField(inp); if (loc) emit('pick', loc, v, fieldOf(loc), requiredOf(trig) || requiredOf(inp));
   }
   document.addEventListener('click', function (e) {
     // A) 点在日期/下拉弹层内 = 正在选择 → 不记这次点击;选完(微延时)读触发框最终值作 pick
@@ -277,7 +287,7 @@ class RecordSession:
             pass
 
     async def _on_response(self, response) -> None:  # noqa: ANN001 —— GET=读候选源;写=把响应贴回对应请求
-        from dano.execution.page.request_capture import _NOISE, as_list_payload
+        from dano.execution.page.request_capture import _READ_NOISE, as_list_payload
         try:
             m = (response.request.method or "").upper()
             url = response.url
@@ -299,7 +309,7 @@ class RecordSession:
                         r["response_json"] = data
                         break
                 return
-            if any(n in url for n in _NOISE):                 # GET:select 候选源,跳噪声
+            if any(n in url.lower() for n in _READ_NOISE):    # GET:select 候选源,只跳静态/流(保留字典接口)
                 return
             # 只留"列表型"(json 是数组 / dict 里含数组)→ 才可能是下拉/选人候选源;限规模避免存爆
             items = as_list_payload(data)
@@ -385,6 +395,12 @@ class RecordSession:
             if field and s.get("op") in ("fill", "select", "pick") and s.get("value") != "":
                 samples[_std_key(field)] = s.get("value", "")
         return steps, samples
+
+    def recorded_required_labels(self) -> set:
+        """录制中标了表单 * 必填的字段标签集(供 flatten 标 required)。"""
+        from dano.agent_tools.page_builder import _std_key
+        return {_std_key(s["field"]) for s in self.steps
+                if s.get("field") and s.get("required") and s.get("op") in ("fill", "select", "pick")}
 
     async def stop(self) -> None:
         for obj, meth in ((self._context, "close"), (self._browser, "close"), (self._pw, "stop")):

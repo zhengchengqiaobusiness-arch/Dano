@@ -179,6 +179,7 @@ class SkillRegistry:
                             risk_level=RiskLevel(body.get("risk_level", "L3")),
                             title=body.get("title", ""),
                             field_docs=dict(body.get("field_docs", {})),
+                            field_types=dict(body.get("field_types", {}) or {}),
                             has_api=False,
                             page_asset_id=env.asset_id,
                             page_start_url=body.get("start_url", ""),

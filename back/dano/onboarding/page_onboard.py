@@ -205,10 +205,14 @@ async def run_request_onboarding(
         # 必填=前端标的"变化字段"(没给则全部必填,向后兼容);其余=可选,缺了用录制原值(固定字段不改)
         req_fields = [r for r in (required if required is not None else params) if r in params]
         opt_fields = [p for p in params if p not in req_fields]
+        # 字段类型:单请求取自身,工作流取最后一步
+        ftypes = dict(api_request.get("field_types") or {})
+        if not ftypes and api_request.get("steps"):
+            ftypes = dict((api_request["steps"][-1] or {}).get("field_types") or {})
         body = PageScriptBody(
             actions=[], dom_fingerprint="", action=action, title=title, api_request=api_request,
             user_fields=params, required_fields=req_fields, optional_fields=opt_fields,
-            risk_level=RiskLevel.L3).model_dump()
+            field_types=ftypes, risk_level=RiskLevel.L3).model_dump()
         d = await T.save_draft(run_id, {"system_instance_id": sid, "asset_type": "page_script",
                                         "asset_key": action, "body": body})
         rp = await T.sandbox_replay(run_id, {"asset_draft_id": d["asset_draft_id"],
