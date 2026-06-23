@@ -9,10 +9,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -56,6 +57,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         log.warning("gateway.db_unavailable", error=str(e))
     yield
+    from dano.execution.page.pool import shutdown_browser_pool
+    await shutdown_browser_pool()      # 释放常驻浏览器(页面运行时池)
     await close_pool()
 
 
@@ -95,12 +98,15 @@ async def _load_holidays(tenant: str) -> list[str]:
 
 
 async def _orchestrator(tenant: str) -> Orchestrator:
+    from dano.execution.page import build_page_runtime
+
     endpoints = await _load_endpoints(tenant)
     executor = RealActionExecutor(endpoints=endpoints, auth_manager=AuthManager())
     registry = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=ALL_SUBSYSTEMS)
     harness = Harness(action_executor=executor, resolve_credentials=_resolve_creds)
     return Orchestrator(registry=registry, store=repo, harness=harness,
                         action_executor=executor, resolve_credentials=_resolve_creds,
+                        page_runtime=build_page_runtime(),
                         holidays=await _load_holidays(tenant))
 
 
@@ -374,6 +380,287 @@ async def onboarding(req: OnboardReq) -> dict:
                            max_read_flows=req.max_read_flows, lifecycle=_lifecycle)
     await _auto_export(req.tenant)
     return report.model_dump()
+
+
+# ── 页面型系统接入(流程8,无 API):确定性侦察→建体→回放→发布,不走 pi/LLM ──
+class PageScoutReq(BaseModel):
+    tenant: str
+    subsystem: str = "A-报销"
+    start_url: str
+    deploy: dict = {}
+    credentials: dict[str, str] = {}
+    headless: bool = True
+
+
+@app.post("/onboarding/page/scout")
+async def onboarding_page_scout(req: PageScoutReq) -> dict:
+    """仅侦察页面:返回候选字段 / 提交按钮 / 建议步骤 / 结构指纹(供向导预览,无副作用)。"""
+    from dano.onboarding.page_onboard import scout_page_only
+    try:
+        return await scout_page_only(
+            tenant=req.tenant, subsystem=req.subsystem, start_url=req.start_url,
+            deploy=req.deploy, credentials=req.credentials, headless=req.headless)
+    except Exception as e:  # noqa: BLE001 —— 浏览器/页面打不开 → 友好报错
+        raise HTTPException(status_code=502, detail=f"侦察页面失败: {e}") from e
+
+
+class PageOnboardReq(BaseModel):
+    tenant: str
+    subsystem: str = "A-报销"
+    start_url: str                       # 表单页地址(绝对 URL,或相对 deploy.base_url)
+    action: str                          # 派生 Skill 名,如 submit_reimburse
+    title: str = ""
+    success_marker: str | None = None    # 成功标志元素/文本(语义定位),如 "text=保存成功"
+    deploy: dict = {}                    # {base_url} 等
+    credentials: dict[str, str] = {}     # 测试登录态(如 {storage_state: <path>})
+    sample_inputs: dict = {}             # 回放用字段测试值
+    headless: bool = True
+    steps: list[dict] = []               # 前端改过字段映射的步骤(空=后端自动侦察)
+    dom_fingerprint: str = ""            # 与 steps 配套的结构指纹(向导从 scout 取)
+
+
+@app.post("/onboarding/page")
+async def onboarding_page(req: PageOnboardReq) -> dict:
+    """页面型系统接入:真实浏览器侦察 + 确定性建体 + 沙箱回放 + 发布闸门。写页面默认 dry 回放 + 需评审。"""
+    from dano.onboarding.page_onboard import run_page_onboarding
+    report = await run_page_onboarding(
+        tenant=req.tenant, subsystem=req.subsystem, start_url=req.start_url, action=req.action,
+        title=req.title, success_marker=req.success_marker, deploy=req.deploy,
+        credentials=req.credentials, sample_inputs=req.sample_inputs, headless=req.headless,
+        steps=req.steps or None, dom_fingerprint=req.dom_fingerprint or None)
+    if report.get("ok"):
+        await _auto_export(req.tenant)
+    return report
+
+
+class PageImportReq(BaseModel):
+    tenant: str
+    subsystem: str = "A-报销"
+    codegen: str                         # Playwright codegen 脚本(Python/JS)
+    action: str
+    title: str = ""
+    success_marker: str | None = None
+    start_url: str = ""                  # 覆盖脚本里的 page.goto(可选)
+    deploy: dict = {}
+    credentials: dict[str, str] = {}
+    sample_inputs: dict = {}             # 覆盖/补充录制里的样例值
+
+
+@app.post("/onboarding/page/import")
+async def onboarding_page_import(req: PageImportReq) -> dict:
+    """方式A:导入 Playwright codegen 录制 → 解析步骤 → 建体 → 回放 → 发布(录制无指纹基线,跳过漂移)。"""
+    from dano.execution.page.codegen_import import parse_playwright_codegen
+    from dano.onboarding.page_onboard import run_page_onboarding
+    steps, parsed_url, samples = parse_playwright_codegen(req.codegen)
+    if not steps:
+        raise HTTPException(status_code=400, detail="未能从录制脚本解析出步骤(请贴 Playwright codegen 的 Python/JS 输出)")
+    start_url = req.start_url or parsed_url
+    if not start_url:
+        raise HTTPException(status_code=400, detail="录制脚本无 page.goto,请填 start_url")
+    sample_inputs = {**samples, **(req.sample_inputs or {})}
+    report = await run_page_onboarding(
+        tenant=req.tenant, subsystem=req.subsystem, start_url=start_url, action=req.action,
+        title=req.title, success_marker=req.success_marker, deploy=req.deploy,
+        credentials=req.credentials, sample_inputs=sample_inputs,
+        steps=[s.model_dump() for s in steps], dom_fingerprint="")
+    if report.get("ok"):
+        await _auto_export(req.tenant)
+    return {**report, "parsed_steps": len(steps), "sample_inputs": sample_inputs}
+
+
+def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict) -> dict:
+    """构造 request_fields 消息:被选请求的字段表 + 所有候选(供前端手选用哪个)+ 当前选中下标。"""
+    from dano.execution.page.request_capture import flatten_body
+
+    def _path(u: str) -> str:
+        i = u.find("//")
+        return u[u.find("/", i + 2):] if i >= 0 and u.find("/", i + 2) >= 0 else u
+    cand_list = [{"idx": i, "method": (c.get("method") or "POST").upper(), "path": _path(c.get("url") or "")}
+                 for i, c in enumerate(candidates)]
+    return {"type": "request_fields",
+            "method": (chosen.get("method") or "POST").upper(), "url": chosen.get("url"),
+            "fields": flatten_body(chosen.get("post_data"), samples),
+            "candidates": cand_list, "chosen_idx": candidates.index(chosen) if chosen in candidates else 0}
+
+
+# ── 方式B:网页内录制(WebSocket:截屏流出 + 输入回传入 + 实时步骤 + 录完发布)──
+@app.websocket("/onboarding/page/record")
+async def record_ws(ws: WebSocket) -> None:
+    """客户在网页里操作我们托管的浏览器,免安装/免命令行。协议见前端 PageRecorder。"""
+    await ws.accept()
+    sess = None
+    try:
+        init = await ws.receive_json()
+        if init.get("type") != "start" or not init.get("start_url"):
+            await ws.send_json({"type": "error", "detail": "首帧须为 {type:'start', start_url, ...}"})
+            return
+        from dano.execution.page.recorder import RecordSession
+        loop = asyncio.get_event_loop()
+
+        def on_step(step: dict) -> None:
+            try:
+                loop.create_task(ws.send_json({"type": "step", "step": step}))
+            except Exception:  # noqa: BLE001
+                pass
+
+        def on_request(r: dict) -> None:                  # 诊断:抓到的写请求实时推给前端
+            try:
+                loop.create_task(ws.send_json({"type": "request", "request": r}))
+            except Exception:  # noqa: BLE001
+                pass
+
+        sess = RecordSession(on_step=on_step, on_request=on_request,
+                             intercept_submit=init.get("intercept", True))
+        await sess.start(init["start_url"], base_url=init.get("base_url", ""),
+                         storage_state=init.get("storage_state") or None,
+                         token=init.get("token") or None)   # 贴 token → 预置登录态,免在画面里登录
+
+        async def on_frame(data: str) -> None:
+            try:
+                await ws.send_json({"type": "frame", "data": data})
+            except Exception:  # noqa: BLE001
+                pass
+
+        await sess.start_screencast(on_frame)
+        await ws.send_json({"type": "started"})
+
+        pending_req: dict | None = None       # 抓到的提交请求,等用户勾完字段再发布
+        pending_candidates: list[dict] = []    # 所有 JSON 写请求(候选),供用户手选用哪个
+        pending_samples: dict = {}             # 录制时填的样例值(选别的请求时重算参数建议)
+        while True:
+            msg = await ws.receive_json()
+            t = msg.get("type")
+            if t == "input":
+                await sess.dispatch_input(msg.get("event") or {})
+            elif t == "reset":
+                sess.reset()                          # 登录后:丢弃登录步骤,只录业务流程
+                await ws.send_json({"type": "reset_ok"})
+            elif t == "finalize":
+                raw = msg.get("steps")
+                if raw is not None:           # 前端编辑后的步骤(删了噪声/重复/调序)→ 以它为准
+                    from dano.agent_tools.page_builder import RecordedStep, _std_key
+                    steps = [RecordedStep(op=s["op"], locator=s.get("locator"),
+                                          field=(s.get("field") or None)) for s in raw]
+                    samples = {_std_key(s["field"]): s.get("value", "") for s in raw
+                               if s.get("field") and s.get("op") in ("fill", "select", "pick") and s.get("value")}
+                else:
+                    steps, samples = sess.recorded_steps()
+                sub = init.get("subsystem", "A-报销")
+                login_state = await sess.storage_state()   # 录制会话(已真人登录)的登录态快照
+
+                # ★ 抓请求路径优先:列出所有 JSON 写请求(候选),默认选最像提交的那个,把它请求体拍平给
+                #   前端勾字段。用户也可在候选里手选别的(应对噪声误判 / 多写请求)。勾完发 publish_request 才建 Skill。
+                from dano.execution.page.request_capture import (flatten_body, json_write_requests,
+                                                                 pick_submit_request)
+                cands = [c for c in json_write_requests(sess.captured_requests())
+                         if flatten_body(c.get("post_data"))]   # 只留有可勾字段的
+                if cands:
+                    pending_candidates = cands
+                    pending_samples = samples
+                    chosen = pick_submit_request(cands, samples) or cands[-1]
+                    pending_req = chosen
+                    await ws.send_json(_request_fields_msg(chosen, cands, samples))
+                    continue
+
+                # 兜底:没抓到 JSON 提交请求 → 老的 DOM 回放路径
+                if not steps:
+                    await ws.send_json({"type": "result",
+                                        "report": {"ok": False, "reason": "没抓到提交请求,也没录到可用步骤;"
+                                                   "请确认是否点了「提交」,或换「逐步确认」方式"}, "parsed_steps": 0})
+                    continue
+                from dano.onboarding.page_onboard import run_page_onboarding
+                deploy = init.get("deploy") or ({"base_url": init["base_url"]} if init.get("base_url") else {})
+                creds = dict(init.get("credentials") or {})
+                if init.get("token"):
+                    creds["token"] = init["token"]
+                if login_state:
+                    creds["storage_state"] = login_state   # 录制登录态 → 回放浏览器带着它,不再被挡登录
+                report = await run_page_onboarding(
+                    tenant=init["tenant"], subsystem=sub,
+                    start_url=init["start_url"], action=msg["action"], title=msg.get("title", ""),
+                    success_marker=msg.get("success_marker") or None, deploy=deploy,
+                    credentials=creds,
+                    sample_inputs={**samples, **(msg.get("sample_inputs") or {})},
+                    steps=[s.model_dump() for s in steps], dom_fingerprint="")
+                from dano.execution.page.sessions import save_session
+                saved = save_session(init["tenant"], sub, login_state)   # 存盘供运行期复用
+                if report.get("ok"):
+                    await _auto_export(init["tenant"])
+                await ws.send_json({"type": "result",
+                                    "report": {**report, **({"session_saved": saved} if saved else {})},
+                                    "parsed_steps": len(steps)})
+                # 不 break:发布后会话保留,用户可删步骤重发或继续录;由 stop / 断连结束
+            elif t == "choose_request":
+                # 用户在候选里手选用哪个写请求(噪声误判/多写请求时)→ 重发该请求的字段表
+                idx = msg.get("idx", 0)
+                if pending_candidates and 0 <= idx < len(pending_candidates):
+                    pending_req = pending_candidates[idx]
+                    await ws.send_json(_request_fields_msg(pending_req, pending_candidates, pending_samples))
+            elif t == "publish_request":
+                # 用户在字段表里勾了哪些是参数、起了名 → 用真实提交请求建 Skill(任意 OA 通用)
+                if pending_req is None:
+                    await ws.send_json({"type": "result",
+                                        "report": {"ok": False, "reason": "没有待发布的提交请求;先点「停止并发布」抓请求"}})
+                    continue
+                param_map = {k: v.strip() for k, v in (msg.get("param_map") or {}).items() if v and v.strip()}
+                from dano.execution.page.request_capture import build_api_request
+                apir = build_api_request(pending_req, param_map)
+                if not apir or not apir.get("params"):
+                    await ws.send_json({"type": "result",
+                                        "report": {"ok": False, "reason": "至少勾选一个字段作为参数(给它起个参数名)"}})
+                    continue
+                sub = init.get("subsystem", "A-报销")
+                login_state = await sess.storage_state()
+                from dano.execution.page.sessions import save_session
+                from dano.onboarding.page_onboard import run_request_onboarding
+                save_session(init["tenant"], sub, login_state)   # 运行期发请求带登录态
+                rep = await run_request_onboarding(
+                    tenant=init["tenant"], subsystem=sub, action=msg["action"],
+                    title=msg.get("title", ""), api_request=apir,
+                    sample_inputs=apir.get("sample_inputs") or {})
+                if rep.get("ok"):
+                    await _auto_export(init["tenant"])
+                await ws.send_json({"type": "result", "report": rep,
+                                    "parsed_steps": len(apir.get("params") or []), "via": "request"})
+            elif t == "stop":
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:  # noqa: BLE001
+        try:
+            await ws.send_json({"type": "error", "detail": str(e)})
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        if sess is not None:
+            await sess.stop()
+        try:
+            await ws.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+class PagePiReq(BaseModel):
+    tenant: str
+    subsystem: str = "A-报销"
+    start_url: str
+    action_hint: str = ""
+    deploy: dict = {}
+    credentials: dict[str, str] = {}
+    timeout_s: float = 600.0
+
+
+@app.post("/onboarding/page/pi")
+async def onboarding_page_pi(req: PagePiReq) -> dict:
+    """pi 自主驱动的页面接入:spawn Node sidecar,pi 按 onboard-page 技能自己侦察→建体→回放→评审→发布。"""
+    from dano.onboarding.page_onboard import run_page_onboarding_pi
+    report = await run_page_onboarding_pi(
+        tenant=req.tenant, subsystem=req.subsystem, start_url=req.start_url,
+        action_hint=req.action_hint, deploy=req.deploy, credentials=req.credentials,
+        timeout_s=req.timeout_s)
+    if report.get("published_skills"):
+        await _auto_export(req.tenant)
+    return report
 
 
 async def _auto_export(tenant: str) -> None:

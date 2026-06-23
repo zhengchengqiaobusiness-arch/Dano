@@ -43,6 +43,7 @@ class SkillManifest(BaseModel):
     requires_confirmation: bool       # L3+ 调用需带 confirm=true
     parameters: dict = Field(default_factory=dict)   # 输入 JSON Schema(function-calling 风格)
     output_schema: dict = Field(default_factory=lambda: {"type": "object"})  # 输出 schema(通用对象)
+    page: dict | None = None          # 页面型 Skill 专属:{start_url, success_marker, steps[]}(供详情可视化)
 
 
 def _is_reserved(field: str) -> bool:
@@ -94,6 +95,12 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         kind = "查询" if skill.fact_check_query is None and skill.action.startswith("query") else "操作"
     else:
         integration, kind = "page", "操作"
+    # 页面型 Skill:带上步骤/起始页/成功标志,供前端详情可视化(非 function-calling 参数)
+    page = None
+    if not skill.has_api and (getattr(skill, "page_steps", None) or getattr(skill, "page_start_url", "")):
+        page = {"start_url": getattr(skill, "page_start_url", ""),
+                "success_marker": getattr(skill, "page_success_marker", None),
+                "steps": getattr(skill, "page_steps", []) or []}
     return SkillManifest(
         name=skill.skill_id,
         subsystem=skill.subsystem.value,
@@ -108,6 +115,7 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         risk_level=risk.value,
         requires_confirmation=risk in _CONFIRM_FROM,
         parameters=_parameters_schema(skill),
+        page=page,
     )
 
 

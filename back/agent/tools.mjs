@@ -188,4 +188,42 @@ export const customTools = [
       "有 findings 必须按其修复后重扫。发布需附本步的 validation_run_ids。",
     parameters: Type.Object({ asset_draft_id: Type.String() }),
   }),
+  // ── 页面型 Skill(流程8,无 API):侦察 → 建体 → 回放 ──
+  proxyTool({
+    name: "scout_page", label: "侦察页面",
+    description: "用真实浏览器打开一个页面,抽取表单候选字段 / 提交按钮 / 结构指纹,返回 suggested_steps " +
+      "(可直接喂 draft_page_script)。语义定位(label/placeholder/name),绝不用坐标。start_url 给绝对地址或相对系统基址。",
+    parameters: Type.Object({
+      system_instance_id: Type.String(), start_url: Type.String(),
+      headless: Type.Optional(Type.Boolean()),
+    }),
+  }),
+  proxyTool({
+    name: "draft_page_script", label: "建页面脚本草案",
+    description: "把页面步骤建成页面脚本草案(无 API,流程8)。每个 step:{op(goto/fill/select/upload/click/wait/verify/submit), " +
+      "locator(语义定位), field(绑定的字段名,设置则成为 Skill 参数), value(常量值), required, doc}。" +
+      "含 submit 步 → 写页面默认 L3(运行期提交前必确认)+需三模型评审。返回 asset_draft_id/risk_level/needs_review。",
+    parameters: Type.Object({
+      system_instance_id: Type.String(), action: Type.String(),
+      dom_fingerprint: Type.String(),
+      steps: Type.Array(Type.Object({
+        op: Type.String(), locator: Type.Optional(Type.String()),
+        field: Type.Optional(Type.String()), value: Type.Optional(Type.String()),
+        required: Type.Optional(Type.Boolean()), optional_step: Type.Optional(Type.Boolean()),
+        doc: Type.Optional(Type.String()),
+      })),
+      title: Type.Optional(Type.String()), start_url: Type.Optional(Type.String()),
+      success_marker: Type.Optional(Type.String()),
+    }),
+  }),
+  proxyTool({
+    name: "sandbox_replay", label: "沙箱回放页面",
+    description: "用测试账号回放页面脚本草案,记 replay 证据(发布闸门要求)。写页面默认 dry 回放" +
+      "(填字段+断言提交按钮可见,不真点提交);返回 passed/mode/validation_run_ids。sample_inputs 给字段测试值。",
+    parameters: Type.Object({
+      asset_draft_id: Type.String(),
+      sample_inputs: Type.Optional(Type.Record(Type.String(), Type.Any())),
+      headless: Type.Optional(Type.Boolean()),
+    }),
+  }),
 ];

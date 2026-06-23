@@ -143,16 +143,40 @@ class EnvProfileBody(BaseModel):
 
 # ─────────────────────── ⑤ 页面脚本(无 API,流程8)───────────────────────
 class PageAction(BaseModel):
-    """页面动作。仅元素/文本/DOM 定位,绝不用坐标。"""
+    """页面动作。仅元素/文本/DOM 定位,绝不用坐标。
 
-    op: str = Field(description="goto/fill/select/upload/click/wait/verify")
-    locator: str | None = Field(default=None, description="语义定位:role/text/DOM 路径")
-    value: str | None = None
+    向后兼容:旧脚本只有 op/locator/value 仍合法;新增字段均有默认值。
+    """
+
+    op: str = Field(description="goto/fill/select/upload/click/wait/verify/submit")
+    locator: str | None = Field(default=None, description="语义定位:role=button[name=提交]/label=/placeholder=/text=/css=")
+    value: str | None = Field(default=None, description="字面值(向后兼容);新脚本优先用 value_from 做字段绑定")
+    value_from: str | None = Field(
+        default=None, description="字段绑定来源:'const:<字面量>' 或 'field:<用户字段>'(优先于 value)")
+    assert_visible: bool = Field(default=False, description="逐步元素断言:该步执行后 locator 须可见")
+    optional: bool = Field(default=False, description="容错步:找不到元素可跳过,不判失败")
 
 
 class PageScriptBody(BaseModel):
+    """页面脚本资产(流程8)。声明式步骤序列 + 结构指纹 + 成功标志,运行期由通用解释器执行。
+
+    仅 actions/dom_fingerprint 为旧字段(必填);其余为加厚字段,均有默认值,旧资产可直接校验通过。
+    """
+
     actions: list[PageAction]
     dom_fingerprint: str = Field(description="结构指纹,执行前校验改版的基线")
+    action: str = Field(default="", description="派生 Skill 名,如 submit_reimburse;空则按子系统兜底")
+    title: str = Field(default="", description="人类可读标题")
+    start_url: str = Field(default="", description="入口页:绝对 URL 或相对 env_profile.base_url")
+    success_marker: str | None = Field(default=None, description="成功标志元素/文本的语义定位,回放与运行期判二态")
+    user_fields: list[str] = Field(default_factory=list, description="暴露给前端/调用方的参数")
+    required_fields: list[str] = Field(default_factory=list, description="必填(缺则拦截)")
+    optional_fields: list[str] = Field(default_factory=list, description="可选(契约暴露但不强制)")
+    field_docs: dict[str, str] = Field(default_factory=dict, description="字段→语义描述")
+    risk_level: RiskLevel = Field(default=RiskLevel.L3, description="写页面默认 L3 → 运行期提交前确认")
+    # 抓提交请求路径(SPA 内部接口):有它则运行期直接发该请求(不走 DOM 回放),body_template 的 {{字段}} 用参数填回
+    api_request: dict | None = Field(
+        default=None, description="{method, path, body_template, content_type, params}:录制抓到的提交请求,参数化后直接调")
 
 
 # ─────────────────────── ⑥ 复合流程 Skill(阶段2 + DSL v2:声明式业务逻辑)───────────────────────

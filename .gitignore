@@ -1,5 +1,33 @@
+# ── Python 缓存 / 字节码 ──
 __pycache__/
-back/agent/node_modules/
-backend/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ── 密钥 / 运行配置(绝不入库;.env.example 模板保留入库)──
+.env
+back/.env
+back/.secrets/
+*storage*.json
+back/.dano-sessions/      # 录制保存的页面登录态(storageState,含凭证)
+
+# ── pi agent 运行态(每 run 变动,临时)──
+back/.pi-agent/
+
+# ── 生成产物(频繁变动,不入库:接入自动导出的 skill 包等)──
+export/
 back/examples/_chunks/
+
+# ── 前端依赖 / 构建产物 ──
+back/agent/node_modules/
+skillfrontend/node_modules/
+skillfrontend/dist/
+
+# ── 其它本地/工具 ──
 .claude/launch.json
+back/_e2e_leave2.log
+oa.json
+get_token.py
+PAGE_SKILL_PLAN.md
+back/_e2e_leave2.log

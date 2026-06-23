@@ -71,3 +71,68 @@ export async function getJob(jobId: string): Promise<OnboardJob> {
   const { data } = await api.get(`/onboarding/jobs/${jobId}`);
   return data;
 }
+
+// ── 页面型系统接入(流程8,无 API):侦察 → 改字段映射 → 生成发布 ──
+export interface PageField {
+  tag: string; type: string; name: string; id: string; placeholder: string; label: string; required: boolean;
+}
+export interface PageStep {
+  op: string; locator?: string | null; field?: string | null; value?: string | null;
+  required?: boolean; optional_step?: boolean; doc?: string | null;
+}
+export interface PageScoutResp {
+  start_url: string; dom_fingerprint: string; fields: PageField[];
+  buttons: { text: string }[]; submit_locator: string | null; suggested_steps: PageStep[];
+}
+export interface ReviewVerdict { role: string; model: string; passed: boolean; reasons: string[] }
+export interface PageOnboardReport {
+  ok: boolean; stage?: string; action?: string; risk_level?: string; mode?: string;
+  asset_id?: string | null; reason?: string; verdicts?: ReviewVerdict[]; detail?: unknown;
+}
+
+export interface PageScoutReq {
+  tenant: string; subsystem: string; start_url: string;
+  deploy?: Record<string, unknown>; credentials?: Record<string, string>; headless?: boolean;
+}
+export async function scoutPage(req: PageScoutReq): Promise<PageScoutResp> {
+  const { data } = await api.post("/onboarding/page/scout", req);
+  return data;
+}
+
+export interface PageOnboardReq extends PageScoutReq {
+  action: string; title?: string; success_marker?: string | null;
+  sample_inputs?: Record<string, unknown>; steps?: PageStep[]; dom_fingerprint?: string;
+}
+export async function onboardPage(req: PageOnboardReq): Promise<PageOnboardReport> {
+  const { data } = await api.post("/onboarding/page", req);
+  return data;
+}
+
+// pi 自主驱动:给个地址,pi 自己侦察→建体→回放→评审→发布
+export interface PagePiReq {
+  tenant: string; subsystem: string; start_url: string; action_hint?: string;
+  deploy?: Record<string, unknown>; credentials?: Record<string, string>; timeout_s?: number;
+}
+export interface PagePiReport {
+  pi_status?: string; published_skills?: string[]; tool_events?: number;
+  final_text?: string; error?: string;
+}
+export async function onboardPagePi(req: PagePiReq): Promise<PagePiReport> {
+  const { data } = await api.post("/onboarding/page/pi", req);
+  return data;
+}
+
+// 方式A:导入 Playwright codegen 录制脚本 → 解析步骤 → 建体 → 回放 → 发布
+export interface PageImportReq {
+  tenant: string; subsystem: string; codegen: string; action: string;
+  title?: string; success_marker?: string | null; start_url?: string;
+  deploy?: Record<string, unknown>; credentials?: Record<string, string>;
+  sample_inputs?: Record<string, unknown>;
+}
+export interface PageImportReport extends PageOnboardReport {
+  parsed_steps?: number; sample_inputs?: Record<string, unknown>;
+}
+export async function onboardPageImport(req: PageImportReq): Promise<PageImportReport> {
+  const { data } = await api.post("/onboarding/page/import", req);
+  return data;
+}

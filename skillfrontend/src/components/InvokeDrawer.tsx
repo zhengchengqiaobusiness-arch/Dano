@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Drawer, Button, Checkbox, Input, InputNumber, DatePicker, Radio, Typography, Tag,
-  Alert, Descriptions, Space, message,
+  Alert, Descriptions, Space, message, Image,
 } from "antd";
 import { invokeSkill, SkillManifest, TaskOutcome, JSONSchema } from "../api/skills";
 
@@ -184,6 +184,26 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
                 autoSize={{ minRows: 4, maxRows: 14 }}
                 style={{ fontFamily: "monospace", marginTop: 6 }}
               />
+              {(() => {
+                const shots = (((out.exec_result as any)?.evidence?.screenshots) || []) as string[];
+                const imgs = shots.filter((s) => typeof s === "string" && s.startsWith("data:image"));
+                if (!imgs.length) return null;
+                return (
+                  <div style={{ marginTop: 12 }}>
+                    <Typography.Text type="secondary" style={{ display: "block", marginBottom: 6 }}>
+                      页面执行截图({imgs.length})· 点击放大
+                    </Typography.Text>
+                    <Image.PreviewGroup>
+                      <Space wrap>
+                        {imgs.map((src, i) => (
+                          <Image key={i} src={src} width={130}
+                                 style={{ border: "1px solid #f0f0f0", borderRadius: 4 }} />
+                        ))}
+                      </Space>
+                    </Image.PreviewGroup>
+                  </div>
+                );
+              })()}
               {out.audit && (out.audit as any).fact_check && (
                 <Alert style={{ marginTop: 10 }} type="info" message="事实核查证据" description={<pre style={{ margin: 0, fontSize: 12 }}>{JSON.stringify((out.audit as any).fact_check, null, 2)}</pre>} />
               )}

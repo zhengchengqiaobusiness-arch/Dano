@@ -1,5 +1,5 @@
 import { Layout, Menu, Button, Tag, Space, Typography } from "antd";
-import { AppstoreOutlined, ImportOutlined, SafetyOutlined, LogoutOutlined } from "@ant-design/icons";
+import { AppstoreOutlined, ImportOutlined, SafetyOutlined, LogoutOutlined, GlobalOutlined } from "@ant-design/icons";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { clearTenant, TENANT_NAME } from "../api/client";
 
@@ -9,7 +9,9 @@ export default function AppLayout() {
   const nav = useNavigate();
   const loc = useLocation();
   const tenant = localStorage.getItem(TENANT_NAME) || "—";
-  const selected = loc.pathname.startsWith("/onboard") ? "onboard" : "skills";
+  const selected = loc.pathname.startsWith("/onboard-page")
+    ? "onboard-page"
+    : loc.pathname.startsWith("/onboard") ? "onboard" : "skills";
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
@@ -21,10 +23,12 @@ export default function AppLayout() {
           onClick={(e) => {
             if (e.key === "skills") nav("/skills");
             if (e.key === "onboard") nav("/onboard");
+            if (e.key === "onboard-page") nav("/onboard-page");
           }}
           items={[
             { key: "skills", icon: <AppstoreOutlined />, label: "Skill 目录" },
-            { key: "onboard", icon: <ImportOutlined />, label: "接入系统" },
+            { key: "onboard", icon: <ImportOutlined />, label: "接入系统(API)" },
+            { key: "onboard-page", icon: <GlobalOutlined />, label: "接入页面(无 API)" },
             { key: "ops", icon: <SafetyOutlined />, label: "运维保障(P2)", disabled: true },
           ]}
         />

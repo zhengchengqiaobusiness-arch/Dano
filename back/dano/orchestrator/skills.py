@@ -162,22 +162,50 @@ class SkillRegistry:
                 )
             # 无 API:从已发布页面脚本派生(流程8)
             for env in await store.list_published(AssetType.PAGE_SCRIPT, scope):
-                # 一个无 API 系统当前一个页面动作;action 取该子系统配置
-                action = _PAGE_ACTION_BY_SUBSYSTEM.get(sub, "create_reimburse_draft")
-                meta = ACTION_META.get(action, ActionMeta(keywords=[action]))
-                skills.append(
-                    SkillSpec(
-                        skill_id=f"{sub.value}.{action}",
-                        subsystem=sub,
-                        action=action,
-                        risk_level=RiskLevel.L2,   # 报销草稿 L2
-                        has_api=False,
-                        page_asset_id=env.asset_id,
-                        required_fields=meta.required_fields,
-                        keywords=meta.keywords,
-                        fact_check_expr=meta.fact_check_expr,
+                body = env.body or {}
+                body_action = (body.get("action") or "").strip()
+                if body_action:
+                    # 加厚后的页面脚本:动作/字段/风险/标题来自资产体本身
+                    req = list(body.get("required_fields") or [])
+                    user = list(body.get("user_fields") or [])
+                    opt = [f for f in (user + list(body.get("optional_fields") or []))
+                           if f not in req]
+                    opt = list(dict.fromkeys(opt))
+                    skills.append(
+                        SkillSpec(
+                            skill_id=f"{sub.value}.{body_action}",
+                            subsystem=sub,
+                            action=body_action,
+                            risk_level=RiskLevel(body.get("risk_level", "L3")),
+                            title=body.get("title", ""),
+                            field_docs=dict(body.get("field_docs", {})),
+                            has_api=False,
+                            page_asset_id=env.asset_id,
+                            page_start_url=body.get("start_url", ""),
+                            page_success_marker=body.get("success_marker"),
+                            page_steps=list(body.get("actions") or []),
+                            required_fields=req,
+                            optional_fields=opt,
+                            keywords=[w for w in (body_action, body.get("title", "")) if w],
+                        )
                     )
-                )
+                else:
+                    # 旧页面脚本(仅 actions+dom_fingerprint):按子系统兜底,行为与之前一致
+                    action = _PAGE_ACTION_BY_SUBSYSTEM.get(sub, "create_reimburse_draft")
+                    meta = ACTION_META.get(action, ActionMeta(keywords=[action]))
+                    skills.append(
+                        SkillSpec(
+                            skill_id=f"{sub.value}.{action}",
+                            subsystem=sub,
+                            action=action,
+                            risk_level=RiskLevel.L2,   # 报销草稿 L2
+                            has_api=False,
+                            page_asset_id=env.asset_id,
+                            required_fields=meta.required_fields,
+                            keywords=meta.keywords,
+                            fact_check_expr=meta.fact_check_expr,
+                        )
+                    )
         log.info("skills.registered", count=len(skills), skills=[s.skill_id for s in skills])
         return cls(skills)
 

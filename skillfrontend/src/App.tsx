@@ -5,6 +5,7 @@ import Tenant from "./pages/Tenant";
 import Skills from "./pages/Skills";
 import SkillDetail from "./pages/SkillDetail";
 import Onboard from "./pages/Onboard";
+import PageOnboard from "./pages/PageOnboard";
 import { getTenantKey } from "./api/client";
 
 // 仅按租户隔离的数据页(Skill 目录)需要租户;无租户时在布局内提示而不是踢出去,
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="/skills" element={<RequireTenant><Skills /></RequireTenant>} />
         <Route path="/skills/:skillId" element={<RequireTenant><SkillDetail /></RequireTenant>} />
         <Route path="/onboard" element={<Onboard />} />
+        <Route path="/onboard-page" element={<PageOnboard />} />
         <Route path="*" element={<Navigate to="/onboard" replace />} />
       </Route>
     </Routes>

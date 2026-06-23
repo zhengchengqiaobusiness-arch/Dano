@@ -289,13 +289,18 @@ async def _spawn_pi(*, run_id: str, token: str, port: int, prompt: str,
     stderr_buf: list[str] = []
     n_events = 0
 
+    # pi SDK 每条消息更新都往 stderr 打一行(message_update/start/end、delta、turn/agent 边界)→ 纯噪声,不刷日志
+    _noise = ("ev: message_update", "ev: message_start", "ev: message_end", "ev: text",
+              "ev: delta", "ev: turn_start", "ev: turn_end", "ev: agent_start", "ev: agent_end")
+
     async def _read_stderr() -> None:
         assert proc.stderr
         async for raw in proc.stderr:
             s = raw.decode(errors="replace").rstrip()
             if s:
-                stderr_buf.append(s)
-                log.warning("pi.stderr", run_id=run_id, line=s[:500])
+                stderr_buf.append(s)                       # 仍留缓冲,出错时抬尾巴进 error
+                if not any(n in s for n in _noise):        # 路由噪声不刷 warning,只留真错/真事件
+                    log.warning("pi.stderr", run_id=run_id, line=s[:500])
 
     async def _read_stdout() -> None:
         nonlocal completed, n_events
@@ -637,10 +642,11 @@ async def onboard(*, tenant: str, subsystem: str, openapi, deploy: dict,  # noqa
                   use_codegen: bool = False, max_read_flows: int | None = None,   # 默认单一 pi 路径(codegen 已退役;True=逃生舱)
                   expand_business: bool = True,        # 默认开:一个业务 → 多操作剧本(办理+查在途+查状态…)
                   regenerate: bool = True,             # 默认开:重新接入同一业务=重新生成(覆盖旧版);关掉才复用已发布
-                  progress=None, timeout_s: float = 600.0) -> OnboardingReport:  # noqa: ANN001
+                  progress=None, timeout_s: float = 1800.0) -> OnboardingReport:  # noqa: ANN001
     """接入一个系统实例(阶段一)。前置:PG 池已就绪。
 
-    timeout_s:单次 pi 会话预算。复合优先一条龙(建步骤+编排+整链真跑+三模型评审≈55s)较慢,给足 10 分钟。
+    timeout_s:单次 pi 会话预算。复合优先一条龙(全量 spec 发现 ~4min + 整链真跑 + 三模型评审,
+    评审在共享端点拥塞时单模型可达 ~180s)较慢,给足 30 分钟,避免在评审重试时耗尽预算。
 
     openapi 接受**任意格式**(入口先归一化成规范 OpenAPI):OpenAPI/Swagger 字典原样透传(零 LLM);
       Postman 集合确定性转换;非结构化(HTML/Markdown/纯文本)用 LLM 抽成接口清单再合成 OpenAPI。

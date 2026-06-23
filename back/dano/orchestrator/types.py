@@ -34,6 +34,9 @@ class SkillSpec(BaseModel):
     has_api: bool = True
     connector_asset_id: UUID | None = None   # 有 API
     page_asset_id: UUID | None = None         # 无 API(页面脚本)
+    page_start_url: str = ""                   # 页面脚本:入口页(详情展示)
+    page_success_marker: str | None = None     # 页面脚本:成功标志
+    page_steps: list[dict] = Field(default_factory=list)   # 页面脚本:动作步骤(PageAction 字典,详情时间线)
     required_fields: list[str] = Field(default_factory=list)   # 必填(缺则拦截)
     optional_fields: list[str] = Field(default_factory=list)   # 可选(契约暴露但不强制)
     keywords: list[str] = Field(default_factory=list)

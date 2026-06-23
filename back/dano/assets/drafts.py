@@ -38,9 +38,19 @@ REQUIRED_KINDS: dict[AssetType, set[ValidationKind]] = {
     AssetType.ADAPTER: {"sandbox", "vuln"},  # 代码适配器:隔离 runner 跑通 + 漏洞校验静态扫描
 }
 
-# 须过三模型评审委员会才可发布的资产类型(业务 Skill);其余(如确定性发布的 env_profile)免评审
-REVIEW_REQUIRED_TYPES: set[AssetType] = {AssetType.CONNECTOR, AssetType.WORKFLOW, AssetType.ADAPTER}
+# 须过三模型评审委员会才可发布的资产类型(业务 Skill);其余(如确定性发布的 env_profile)免评审。
+# PAGE_SCRIPT 纳入,但仅**写页面**(有提交步/风险 L3+)真过评审;纯查询页面经 page_is_write 豁免。
+REVIEW_REQUIRED_TYPES: set[AssetType] = {
+    AssetType.CONNECTOR, AssetType.WORKFLOW, AssetType.ADAPTER, AssetType.PAGE_SCRIPT}
 REQUIRED_ROLES: set[str] = {"acceptance", "security", "compliance"}
+
+
+def page_is_write(body: dict | None) -> bool:
+    """页面脚本是否为写操作:有提交步(op==submit)或风险等级 L3+。查询类页面免三模型评审。"""
+    b = body or {}
+    if b.get("risk_level") in ("L3", "L4", "L5"):
+        return True
+    return any((a or {}).get("op") == "submit" for a in (b.get("actions") or []))
 
 
 class AssetDraft(BaseModel):
@@ -180,6 +190,12 @@ class DraftStore:
         # 工作流步骤连接器免单独评审:复合 WORKFLOW 作为整体过三模型评审
         if draft.asset_type == AssetType.CONNECTOR and draft.body.get("workflow_step"):
             return True, "ok(工作流步骤连接器免单独评审;复合流程整体评审)"
+        # 纯查询页面免评审;写页面(提交步/L3+)与写连接器一致须过三模型评审
+        if draft.asset_type == AssetType.PAGE_SCRIPT and not page_is_write(draft.body):
+            return True, "ok(查询类页面免三模型评审)"
+        # 抓请求路径:是用户在真实系统里亲手提交的请求(非 AI 臆造)→ 免三模型评审,靠运行期 L3 确认把关
+        if draft.asset_type == AssetType.PAGE_SCRIPT and draft.body.get("api_request"):
+            return True, "ok(抓请求路径:用户真实提交,免三模型评审)"
         async with get_pool().acquire() as conn:
             rows = await conn.fetch(
                 "SELECT * FROM review_runs WHERE review_run_id = ANY($1::uuid[])",

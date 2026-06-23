@@ -1,0 +1,346 @@
+"""方式B:服务端托管浏览器的「网页内录制」会话。
+
+客户在前端网页里操作我们托管的浏览器(截屏流投到网页 + 点击/键盘回传),注入页面的录制器
+把真实 DOM 事件转成**语义步骤**(label/role/placeholder/name/text 定位,绝不用坐标)推回后端。
+客户全程**免安装、免命令行**。录完 → 复用 page_builder→回放→评审→发布 管道出页面 Skill。
+
+三层:① 截屏(CDP Page.startScreencast → base64 jpeg 帧)② 输入回传(归一坐标 → page.mouse/keyboard)
+③ 动作捕获(注入 _RECORDER_JS,事件→语义步骤→expose_binding 回 Python)。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import Awaitable, Callable
+
+import structlog
+
+log = structlog.get_logger(__name__)
+
+_VIEW_W, _VIEW_H = 1280, 800
+
+# 注入到每个页面的录制器:把表单输入/选择/提交点击转成语义步骤,推回 window.__danoRecord。
+_RECORDER_JS = r"""() => {
+  if (window.__danoRecorderInstalled) return;
+  window.__danoRecorderInstalled = true;
+  // 通用语义引擎(与框架/语言/公司无关):ARIA role + accessible name 优先,文本/属性兜底。
+  // 不按标签/class 白名单,故 Element-UI / Ant Design / 原生 / 任意自定义控件一视同仁。
+  var SUBMIT = ['提交','保存','确定','确认','申请','发起','送出','申报','submit','save','ok','confirm','apply'];
+  var TESTID = ['data-testid','data-test','data-test-id','data-cy','data-qa'];
+  var INTERACTIVE = {button:1,link:1,menuitem:1,menuitemcheckbox:1,menuitemradio:1,tab:1,option:1,
+                     checkbox:1,radio:1,switch:1,treeitem:1};
+  function clean(s) { return ((s || '') + '').replace(/\s+/g, ' ').trim(); }
+  function roleOf(el) {                                  // 显式 role,否则按标签推隐式 ARIA role
+    var r = el.getAttribute && el.getAttribute('role'); if (r) return r;
+    var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
+    if (tag === 'a' && el.hasAttribute('href')) return 'link';
+    if (tag === 'button' || tag === 'summary') return 'button';
+    if (tag === 'select') return 'combobox';
+    if (tag === 'textarea') return 'textbox';
+    if (tag === 'input') {
+      if (ty === 'submit' || ty === 'button' || ty === 'reset') return 'button';
+      if (ty === 'checkbox') return 'checkbox';
+      if (ty === 'radio') return 'radio';
+      if (['text','email','tel','url','search','password','number',''].indexOf(ty) >= 0) return 'textbox';
+    }
+    return '';
+  }
+  function labelText(el) {                               // 关联 label / aria-labelledby
+    try { if (el.id) { var l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l) return clean(l.innerText); } } catch (e) {}
+    var w = el.closest ? el.closest('label') : null; if (w) return clean(w.innerText);
+    var lb = el.getAttribute && el.getAttribute('aria-labelledby');
+    if (lb) { var t = ''; lb.split(/\s+/).forEach(function (id) { var n = document.getElementById(id); if (n) t += clean(n.innerText) + ' '; }); if (clean(t)) return clean(t); }
+    return '';
+  }
+  function accName(el) {                                 // 可访问名(简化 WAI-ARIA),仅用于可点元素
+    var al = el.getAttribute && el.getAttribute('aria-label'); if (clean(al)) return clean(al);
+    var lt = labelText(el); if (lt) return lt;
+    var t = clean(el.innerText) || clean(el.value); if (t) return t;
+    var ti = el.getAttribute && el.getAttribute('title'); if (clean(ti)) return clean(ti);
+    return '';
+  }
+  function esc(s) { try { return CSS.escape(s); } catch (e) { return s; } }
+  function stableId(el) { return el.id && !/^[0-9]/.test(el.id) && !/^(el-id|ant|rc_|radix)/i.test(el.id); }
+  function locateField(el) {                             // 表单字段:label > placeholder > name > id(绝不用值当名)
+    var lt = labelText(el); if (lt) return 'label=' + lt;
+    var ph = el.getAttribute('placeholder'); if (clean(ph)) return 'placeholder=' + clean(ph);
+    var ar = el.getAttribute('aria-label'); if (clean(ar)) return 'role=textbox[name=' + clean(ar) + ']';
+    var nm = el.getAttribute('name'); if (nm) return 'css=[name="' + esc(nm) + '"]';
+    if (stableId(el)) return 'css=#' + esc(el.id);
+    return null;
+  }
+  function locateClickable(el) {                         // 可点元素:testid > role+name > text > id
+    for (var i = 0; i < TESTID.length; i++) { var a = el.getAttribute && el.getAttribute(TESTID[i]); if (a) return 'css=[' + TESTID[i] + '="' + a + '"]'; }
+    var role = roleOf(el); var name = accName(el);
+    if (name.length > 60) name = '';                     // 名字过长(整块容器)不可靠
+    if (role && name) return 'role=' + role + '[name=' + name + ']';
+    if (name) return 'text=' + name;
+    if (stableId(el)) return 'css=#' + esc(el.id);
+    return null;
+  }
+  function fieldOf(loc) {
+    if (!loc) return '';
+    var i = loc.indexOf('='); var k = loc.slice(0, i); var r = loc.slice(i + 1);
+    if (k === 'role') { var m = r.match(/\[name=(.*)\]/); return m ? m[1] : ''; }
+    if (k === 'css') { var c = r.match(/\[name="([^"]+)"\]/); if (c) return c[1]; return r.replace(/^[#.]/, ''); }
+    return r;
+  }
+  // 登录页检测(通用、保守):URL 命中 login/signin(SPA 路由守卫重定向就长这样)。登录不是业务步骤,不录。
+  // 只看 URL,不看密码框 —— 免把业务里的"修改密码"页或测试登录表单整页误跳过。
+  function onLoginPage() {
+    try { return /\/(login|signin|sign-in|sso)(?:[/?#]|$)/i.test(location.href); } catch (e) { return false; }
+  }
+  function emit(op, loc, value, field) {
+    if (!loc || onLoginPage()) return;            // 登录页上的任何操作一律不录(自动跳过登录,免手点「从这里开始录」)
+    try { window.__danoRecord(JSON.stringify({ op: op, locator: loc, value: value || '', field: field || '' })); } catch (e) {}
+  }
+  // 找交互目标:role 属交互集 / a / button,否则向上找 cursor:pointer 且短文本的(卡片/自定义控件)。
+  function target(t) {
+    var node = t;
+    for (var i = 0; i < 8 && node && node !== document.body; i++) {
+      var tag = (node.tagName || '').toLowerCase(); var role = roleOf(node);
+      if ((role && INTERACTIVE[role]) || tag === 'a' || tag === 'button') return node;
+      try { var tx = clean(node.innerText); if (getComputedStyle(node).cursor === 'pointer' && tx && tx.length <= 40) return node; } catch (e) {}
+      node = node.parentElement;
+    }
+    return null;
+  }
+  document.addEventListener('input', function (e) {
+    var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
+    // 密码框绝不录(安全);非文本类型跳过
+    if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','password','hidden'].indexOf(ty) < 0)) {
+      var loc = locateField(el); emit('fill', loc, el.value, fieldOf(loc));
+    }
+  }, true);
+  document.addEventListener('change', function (e) {
+    var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
+    if (tag === 'select') { var l1 = locateField(el); emit('select', l1, el.value, fieldOf(l1)); }
+    else if (tag === 'input' && ty === 'file') { var l2 = locateField(el); emit('upload', l2, el.value || '', fieldOf(l2)); }
+  }, true);
+  // 选择型控件参数化(框架无关):日期/下拉/级联是"点"出来的,不该录成写死的点击,而该录成一个
+  // pick 参数步(触发框 + 选中的最终值)。识别弹层 + 触发框,选完读触发框 input 的最终值。
+  var POPUP = '.el-picker-panel,.el-select-dropdown,.el-cascader__dropdown,.el-time-panel,.el-time-spinner,' +
+              '.el-date-table,.el-month-table,.el-year-table,.el-autocomplete-suggestion,' +
+              '.ant-picker-dropdown,.ant-select-dropdown,.ant-cascader-dropdown,[role="listbox"]';
+  var TRIGGER_CLS = '.el-date-editor,.el-select,.el-cascader,.el-time-select,.el-time-picker,' +
+                    '.ant-picker,.ant-select,.ant-cascader-picker';
+  var activeTrigger = null;
+  function triggerOf(t) {                               // 触发型字段:已知选择器类 / 含 readonly input / aria-haspopup
+    var k = t.closest ? t.closest(TRIGGER_CLS + ',[aria-haspopup]') : null; if (k) return k;
+    var node = t;
+    for (var i = 0; i < 4 && node && node !== document.body; i++) {
+      try { if (node.querySelector && node.querySelector('input[readonly]')) return node; } catch (e) {}
+      node = node.parentElement;
+    }
+    return null;
+  }
+  function readPick(trig) {                             // 读触发框 input 的最终值 → pick 参数步
+    if (!trig || !trig.querySelector) return;
+    var inp = trig.querySelector('input'); if (!inp) return;
+    var v = clean(inp.value); if (!v) return;
+    var loc = locateField(inp); if (loc) emit('pick', loc, v, fieldOf(loc));
+  }
+  document.addEventListener('click', function (e) {
+    // A) 点在日期/下拉弹层内 = 正在选择 → 不记这次点击;选完(微延时)读触发框最终值作 pick
+    if (e.target.closest && e.target.closest(POPUP)) {
+      var tg = activeTrigger; setTimeout(function () { readPick(tg); }, 80); return;
+    }
+    // B) 点的是选择型触发框 → 记住它,本次不单独记;延时读值(覆盖单击即选的下拉)
+    var trig = triggerOf(e.target);
+    if (trig) { activeTrigger = trig; var t2 = trig; setTimeout(function () { readPick(t2); }, 450); return; }
+    // C) 普通输入框点击 = 聚焦噪声(打字会另记 fill)→ 跳过
+    if (e.target.closest && e.target.closest('input,select,textarea')) return;
+    // D) 普通可点元素(按钮/卡片/菜单/链接)
+    var el = target(e.target); if (!el) return;
+    var loc = locateClickable(el); if (!loc) return;
+    var role = roleOf(el); var name = accName(el);
+    var isSubmit = role === 'button' && SUBMIT.some(function (h) { return name.toLowerCase().indexOf(h) >= 0; });
+    emit(isSubmit ? 'submit' : 'click', loc, '', '');
+  }, true);
+}"""
+
+
+class RecordSession:
+    """一次网页内录制。start→(用户经截屏+输入回传操作)→recorded_steps→stop。"""
+
+    def __init__(self, *, on_step: Callable[[dict], None] | None = None,
+                 on_request: Callable[[dict], None] | None = None,
+                 intercept_submit: bool = True) -> None:
+        self.steps: list[dict] = []
+        self.requests: list[dict] = []      # 抓到的写请求(method/url/post_data)→ 提交请求参数化用
+        self._on_step = on_step
+        self._on_request_cb = on_request    # 实时把抓到的请求推给前端(诊断可见)
+        # 拦截提交:点提交时抓到业务写请求后,假装成功、不真发给服务器 → 录制不产生真实记录
+        self._intercept = intercept_submit
+        self._pw = None
+        self._browser = None
+        self._context = None
+        self._cdp = None
+        self.page = None
+
+    async def start(self, start_url: str, *, base_url: str = "", headless: bool = True,
+                    storage_state: str | None = None, token: str | None = None,
+                    token_key: str = "Admin-Token") -> None:
+        from playwright.async_api import async_playwright
+
+        from dano.execution.page.driver import apply_token_auth
+        from dano.infra.http import tls_verify
+        self._pw = await async_playwright().start()
+        self._browser = await self._pw.chromium.launch(headless=headless)
+        ctx_kwargs: dict = {"viewport": {"width": _VIEW_W, "height": _VIEW_H},
+                            "ignore_https_errors": not tls_verify()}
+        if storage_state:
+            ctx_kwargs["storage_state"] = storage_state
+        self._context = await self._browser.new_context(**ctx_kwargs)
+        full = start_url if start_url.startswith(("http", "file")) else f"{base_url.rstrip('/')}{start_url}"
+        if token:                                          # 预置登录态:免在画面里登录,开局即业务页
+            await apply_token_auth(self._context, token=token, url=full, token_key=token_key)
+        # add_init_script 只执行脚本、不调用函数 → 包成 IIFE 才会真正安装录制器(与 evaluate 不同)
+        await self._context.add_init_script(f"({_RECORDER_JS})()")
+        self.page = await self._context.new_page()
+        await self.page.expose_binding("__danoRecord", self._on_record)
+        if self._intercept:
+            # 拦截模式:抓到业务写请求后假装成功、不真发 → 录制不产生真实记录(登录/校验码等放行)
+            await self.page.route("**/*", self._route)
+        else:
+            self.page.on("request", self._on_request)      # 直录模式:照常发,只旁观抓取
+        await self.page.goto(full)
+
+    def _capture(self, m: str, url: str, pd: str | None, ct: str, headers: dict | None = None) -> None:
+        """登记一个写请求(含请求头,回放鉴权用)+ 实时推给前端诊断。"""
+        if pd:
+            self.requests.append({"method": m, "url": url, "post_data": pd,
+                                  "content_type": ct, "headers": headers or {}})
+        if self._on_request_cb is not None:
+            is_json = "json" in (ct or "").lower() or (pd or "").lstrip().startswith(("{", "["))
+            try:
+                self._on_request_cb({"method": m, "url": url, "has_body": bool(pd),
+                                     "json": bool(pd) and is_json})
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _on_request(self, request) -> None:  # noqa: ANN001 —— playwright Request(直录模式旁观)
+        try:
+            m = (request.method or "").upper()
+            if m not in ("POST", "PUT", "PATCH", "DELETE"):
+                return
+            hd = {}
+            try:
+                hd = dict(request.headers or {})
+            except Exception:  # noqa: BLE001
+                pass
+            self._capture(m, request.url, request.post_data, hd.get("content-type", ""), hd)
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _route(self, route, request) -> None:  # noqa: ANN001 —— 拦截模式
+        from dano.execution.page.request_capture import _NOISE
+        try:
+            m = (request.method or "").upper()
+            url = request.url
+            pd = request.post_data if m in ("POST", "PUT", "PATCH", "DELETE") else None
+            # 业务写请求(非登录/校验码等噪声)→ 抓下来,假装成功不真发;其余照常放行
+            if pd and not any(n in url for n in _NOISE):
+                hd = {}
+                try:
+                    hd = dict(request.headers or {})
+                except Exception:  # noqa: BLE001
+                    pass
+                self._capture(m, url, pd, hd.get("content-type", ""), hd)
+                await route.fulfill(status=200, content_type="application/json",
+                                    body='{"code":200,"msg":"录制已拦截:抓到请求,未真正提交"}')
+                return
+            await route.continue_()
+        except Exception:  # noqa: BLE001
+            try:
+                await route.continue_()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def captured_requests(self) -> list[dict]:
+        return list(self.requests)
+
+    def _on_record(self, source, payload: str) -> None:  # noqa: ANN001 —— expose_binding 回调
+        try:
+            step = json.loads(payload)
+        except Exception:  # noqa: BLE001
+            return
+        # 同一 locator 连续 fill/select/pick(用户改了又改/逐字符)→ 覆盖,只留最后一次
+        if (self.steps and self.steps[-1].get("locator") == step.get("locator")
+                and step.get("op") in ("fill", "select", "pick")):
+            self.steps[-1] = step
+        else:
+            self.steps.append(step)
+        if self._on_step is not None:
+            try:
+                self._on_step(step)
+            except Exception:  # noqa: BLE001
+                pass
+
+    # ── 截屏流 ──
+    async def start_screencast(self, on_frame: Callable[[str], Awaitable[None]]) -> None:
+        self._cdp = await self._context.new_cdp_session(self.page)
+
+        async def _emit(params: dict) -> None:
+            try:
+                await self._cdp.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
+                await on_frame(params["data"])     # base64 jpeg
+            except Exception:  # noqa: BLE001
+                pass
+
+        self._cdp.on("Page.screencastFrame", lambda p: asyncio.create_task(_emit(p)))
+        await self._cdp.send("Page.startScreencast",
+                             {"format": "jpeg", "quality": 50, "maxWidth": _VIEW_W, "maxHeight": _VIEW_H})
+
+    # ── 输入回传(归一坐标 0~1 → 视口像素)──
+    async def dispatch_input(self, ev: dict) -> None:
+        k = ev.get("kind")
+        if k == "click":
+            await self.page.mouse.click(ev.get("nx", 0) * _VIEW_W, ev.get("ny", 0) * _VIEW_H)
+        elif k == "dblclick":
+            await self.page.mouse.dblclick(ev.get("nx", 0) * _VIEW_W, ev.get("ny", 0) * _VIEW_H)
+        elif k == "text":
+            # insert_text 直接插入文本(含中文 CJK)并触发 input 事件;type 模拟物理键对 CJK 不可靠
+            await self.page.keyboard.insert_text(ev.get("text", ""))
+        elif k == "key":
+            await self.page.keyboard.press(ev.get("key", ""))
+        elif k == "scroll":
+            await self.page.mouse.wheel(0, ev.get("dy", 0))
+
+    def reset(self) -> None:
+        """清空已录步骤(用户登录完后点「从这里开始录」,丢弃登录步骤,只留业务流程)。"""
+        self.steps.clear()
+
+    async def storage_state(self) -> dict | None:
+        """抓当前会话登录态快照(所有 cookie + localStorage),不管系统把 token 存哪。
+
+        用户在画面里真人登录后调用 → 回放/运行期复用这份登录态,免再登录(验证码/RSA 都已过)。
+        """
+        if self._context is None:
+            return None
+        try:
+            return await self._context.storage_state()
+        except Exception:  # noqa: BLE001
+            return None
+
+    def recorded_steps(self):
+        """已捕获步骤 → (RecordedStep 列表, sample_inputs)。填写值作样例,按标准字段 key 对齐。"""
+        from dano.agent_tools.page_builder import RecordedStep, _std_key
+        steps: list[RecordedStep] = []
+        samples: dict[str, str] = {}
+        for s in self.steps:
+            field = s.get("field") or None
+            steps.append(RecordedStep(op=s["op"], locator=s.get("locator"), field=field))
+            if field and s.get("op") in ("fill", "select", "pick") and s.get("value") != "":
+                samples[_std_key(field)] = s.get("value", "")
+        return steps, samples
+
+    async def stop(self) -> None:
+        for obj, meth in ((self._context, "close"), (self._browser, "close"), (self._pw, "stop")):
+            if obj is not None:
+                try:
+                    await getattr(obj, meth)()
+                except Exception:  # noqa: BLE001
+                    pass
+        self._context = self._browser = self._pw = self.page = None

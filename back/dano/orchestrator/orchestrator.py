@@ -247,7 +247,7 @@ class Orchestrator:
             return await self._run_workflow(task_id, tenant, skill, intent)
         if skill.has_api:
             return await self._run_api(task_id, tenant, skill, intent, confirm=confirm_fn)
-        return await self._run_page(task_id, skill, intent, confirm=confirm_fn)
+        return await self._run_page(task_id, skill, intent, confirm=confirm_fn, tenant=tenant)
 
     async def _run_adapter(self, task_id, tenant, skill, intent) -> TaskOutcome:  # noqa: ANN001
         """代码适配器 Skill(goal 模式生成):隔离 runner 执行 source,过成败规则 + 事实核查。
@@ -540,17 +540,53 @@ class Orchestrator:
             audit={"before": before, "after": after, "intent": intent.action_hint},
         )
 
-    async def _run_page(self, task_id, skill, intent, *, confirm) -> TaskOutcome:  # noqa: ANN001
-        """无 API 页面辅助执行(流程8)。"""
+    async def _run_page(self, task_id, skill, intent, *, confirm, tenant="") -> TaskOutcome:  # noqa: ANN001
+        """无 API 页面辅助执行(流程8)。有 api_request(抓请求路径)则直接发请求,不开浏览器。"""
+        env = await self.store.get(skill.page_asset_id)
+        assert env is not None, "页面脚本资产不存在"
+
+        # 抓请求路径:带登录态直接发 SPA 内部接口(参数填回 body_template)。已过 L3 确认闸门。
+        if (env.body or {}).get("api_request"):
+            import json as _json
+
+            from dano.execution.page.request_capture import execute_api_request
+            from dano.execution.page.sessions import session_path_if_exists
+            from dano.infra.http import tls_verify
+            scope = Scope(tenant=tenant, subsystem=skill.subsystem)
+            ep = await self.store.get_published(AssetType.ENV_PROFILE, scope, asset_key="env_profile")
+            base_url = ((ep.body.get("base_url") if ep else "") or "")
+            storage = None
+            sp = session_path_if_exists(tenant, skill.subsystem.value)
+            if sp:
+                try:
+                    storage = _json.loads(open(sp, encoding="utf-8").read())
+                except Exception:  # noqa: BLE001
+                    pass
+            out = await execute_api_request(env.body["api_request"], dict(intent.fields),
+                                            base_url=base_url, storage_state=storage,
+                                            send=True, verify=tls_verify())
+            ok = bool(out.get("ok"))
+            er = ExecResult(task_id=task_id, outcome=Outcome.PASSED if ok else Outcome.FAILED,
+                            evidence=Evidence(request_body=dict(intent.fields),
+                                              response_body=out.get("response")),
+                            structured_output=out)
+            return TaskOutcome(
+                task_id=task_id, state=TaskState.COMPLETED if ok else TaskState.FAILED,
+                skill_id=skill.skill_id, exec_result=er,
+                message=(f"已提交(HTTP {out.get('status')})" if ok
+                         else f"提交失败(HTTP {out.get('status')}):{out.get('response')}"),
+                audit={"api": out})
+
         if self.page_runtime is None:
             return TaskOutcome(task_id=task_id, state=TaskState.TRANSFER_HUMAN,
                                skill_id=skill.skill_id, message="页面运行时未装配")
-        env = await self.store.get(skill.page_asset_id)
-        assert env is not None, "页面脚本资产不存在"
         script = PageScriptBody.model_validate(env.body)
 
+        # 复用录制时保存的登录态(该子系统有则带上,免运行期被挡登录)
+        from dano.execution.page.sessions import session_path_if_exists
+        storage = session_path_if_exists(tenant, skill.subsystem.value)
         exec_result = await self.page_runtime.run(
-            task_id, script, intent.fields, confirm=lambda f: confirm(skill, f)
+            task_id, script, intent.fields, confirm=lambda f: confirm(skill, f), storage_state=storage
         )
         # 漂移 → 转流程11;取消 → CANCELLED
         if exec_result.structured_output.get("drift"):

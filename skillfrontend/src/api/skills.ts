@@ -13,6 +13,15 @@ export interface SkillManifest {
   requires_confirmation: boolean;
   parameters: JSONSchema;  // 输入 JSON Schema
   output_schema?: Record<string, unknown>;
+  page?: PageSkillView | null;   // 页面型 Skill 专属(详情可视化)
+}
+
+export interface PageStepView {
+  op: string; locator?: string | null; value_from?: string | null;
+  assert_visible?: boolean; optional?: boolean;
+}
+export interface PageSkillView {
+  start_url?: string; success_marker?: string | null; steps?: PageStepView[];
 }
 
 export interface JSONSchema {

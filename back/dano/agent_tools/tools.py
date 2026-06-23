@@ -8,20 +8,20 @@
 
 from __future__ import annotations
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import structlog
 
 from dano.agent_tools import materials
-from dano.assets.drafts import REVIEW_REQUIRED_TYPES, DraftStore
+from dano.assets.drafts import REVIEW_REQUIRED_TYPES, DraftStore, page_is_write
 from dano.assets.repository import AssetRepository
 from dano.capabilities import doc_parser, endpoint_classifier, fingerprint, oa_templates
 from dano.execution.connectors.auth import AuthManager
 from dano.execution.connectors.executor import SystemEndpoint, system_key_for
 from dano.capabilities.sandbox import RealSandbox
 from dano.schemas import validate_asset_body
-from dano.shared.asset_bodies import AuthConfig
-from dano.shared.enums import AssetType, Subsystem, ValidationStatus
+from dano.shared.asset_bodies import AuthConfig, PageScriptBody
+from dano.shared.enums import AssetType, Outcome, Subsystem, ValidationStatus
 from dano.shared.models import AssetEnvelope, Scope
 
 log = structlog.get_logger(__name__)
@@ -742,6 +742,9 @@ async def request_review(run_id: str, params: dict) -> dict:
     if draft.asset_type == AssetType.CONNECTOR and draft.body.get("workflow_step"):
         return {"all_passed": True, "verdicts": [], "review_run_ids": [],
                 "note": "工作流步骤连接器免单独评审(复合流程整体评审)"}
+    if draft.asset_type == AssetType.PAGE_SCRIPT and not page_is_write(draft.body):
+        return {"all_passed": True, "verdicts": [], "review_run_ids": [],
+                "note": "查询类页面免三模型评审"}
     vals = await _ds.list_validations(draft.asset_draft_id)
     evidence = [{"kind": v.kind, "passed": v.passed, "environment": v.environment,
                  "credential_type": v.credential_type, "evidence": v.evidence, "response": v.response}
@@ -890,6 +893,119 @@ async def vuln_scan(run_id: str, params: dict) -> dict:
     return {"passed": passed, "validation_run_ids": [str(v.validation_run_id)], "findings": findings}
 
 
+# ── 页面型 Skill(流程8,无 API):真实浏览器侦察 → 确定性建体 → 沙箱回放 ──
+async def _launch_page_driver(mat, *, headless: bool = True):  # noqa: ANN001
+    """从材料起一个真实 Playwright 驱动(base_url + 测试登录态)。缺 playwright → ToolError。"""
+    try:
+        from dano.execution.page.driver import PlaywrightPageDriver
+    except Exception as e:  # noqa: BLE001
+        raise ToolError(f"页面工具需要 playwright:{e}") from e
+    base = (mat.deploy or {}).get("base_url", "") if mat else ""
+    creds = (mat.credentials or {}) if mat else {}
+    storage = creds.get("storage_state") or None
+    token = creds.get("token") or None        # OA Bearer token → 预置登录态(免登录),侦察/回放都用
+    drv, _ = await PlaywrightPageDriver.launch(base_url=base, headless=headless, storage_state=storage,
+                                               token=token, auth_url=base)
+    return drv
+
+
+async def scout_page(run_id: str, params: dict) -> dict:
+    """真实浏览器侦察一个页面:返回候选字段 / 提交按钮 / 结构指纹 / 建议步骤(供 pi 决策或确定性兜底)。"""
+    mat = _mat(run_id, params["system_instance_id"])
+    start_url = params["start_url"]
+    drv = await _launch_page_driver(mat, headless=params.get("headless", True))
+    try:
+        await drv.open(start_url)
+        dom = await drv.scout()
+        fp = await drv.fingerprint()
+    finally:
+        await drv.close()
+    from dano.execution.page import to_recorded_steps
+    steps, submit = to_recorded_steps(dom)
+    return {"start_url": start_url, "dom_fingerprint": fp,
+            "fields": dom.get("fields", []), "buttons": dom.get("buttons", []),
+            "submit_locator": submit, "suggested_steps": [s.model_dump() for s in steps]}
+
+
+async def draft_page_script(run_id: str, params: dict) -> dict:
+    """pi 给 action + steps(+成功标志/标题)→ 确定性建 PageScriptBody → 存草案。"""
+    from dano.agent_tools.page_builder import RecordedStep, build_page_script
+    mat = _mat(run_id, params["system_instance_id"])
+    steps = [RecordedStep.model_validate(s) for s in params["steps"]]
+    body = build_page_script(
+        steps, action=params["action"], dom_fingerprint=params["dom_fingerprint"],
+        title=params.get("title", ""), start_url=params.get("start_url", ""),
+        success_marker=params.get("success_marker"))
+    dump = body.model_dump()
+    validate_asset_body(AssetType.PAGE_SCRIPT, dump)
+    scope = Scope(tenant=mat.tenant, subsystem=Subsystem(mat.subsystem))  # type: ignore[arg-type]
+    draft = await _ds.save_draft(run_id=run_id, scope=scope, asset_type=AssetType.PAGE_SCRIPT,
+                                 asset_key=body.action, body=dump)
+    return {"asset_draft_id": str(draft.asset_draft_id), "action": body.action,
+            "risk_level": body.risk_level.value, "needs_review": page_is_write(dump),
+            "content_hash": draft.content_hash}
+
+
+def _dry_replay_script(body: dict) -> PageScriptBody:
+    """写页面未授权真提交时的 dry 回放:submit 步降为 verify(断言提交按钮可见),去成功标志。
+
+    替代真点提交 —— 证明所有字段可填、提交按钮在位、结构未漂移,但不在测试系统真建单。
+    页面写要"真提交+成功标志",须 DANO_PAGE_WRITE_PROBE=1 显式授权(测试账号)。
+    """
+    b = dict(body)
+    acts = []
+    for a in b.get("actions", []):
+        a = dict(a)
+        if a.get("op") == "submit":
+            a["op"], a["assert_visible"] = "verify", True
+        acts.append(a)
+    b["actions"], b["success_marker"] = acts, None
+    return PageScriptBody.model_validate(b)
+
+
+async def sandbox_replay(run_id: str, params: dict) -> dict:
+    """测试账号回放页面脚本草案,记 replay 证据(发布闸门要求)。
+
+    写页面默认 **dry 回放**(填字段 + 断言提交按钮可见,不真点提交);
+    DANO_PAGE_WRITE_PROBE=1 时才真提交 + 校验成功标志。查询页面始终全程回放。
+    """
+    from dano.execution.page import PageActionRuntime
+    draft = await _ds.get_draft(UUID(params["asset_draft_id"]))
+    if draft is None or draft.asset_type != AssetType.PAGE_SCRIPT:
+        raise ToolError("sandbox_replay 仅用于页面脚本草案")
+    # 抓请求路径:dry 校验(参数都填上、请求可构造),不开浏览器、不真发(写安全)
+    if draft.body.get("api_request"):
+        from dano.execution.page.request_capture import execute_api_request
+        out = await execute_api_request(draft.body["api_request"], params.get("sample_inputs") or {},
+                                        send=False)
+        v = await _ds.record_validation(asset_draft_id=draft.asset_draft_id, kind="replay",
+                                        passed=bool(out.get("ok")), response=out,
+                                        evidence={"mode": "request-dry", "request": out})
+        return {"passed": bool(out.get("ok")), "mode": "request-dry",
+                "structured_output": out, "validation_run_ids": [str(v.validation_run_id)]}
+    mat = _mat(run_id, draft.subsystem.value)
+    is_write = page_is_write(draft.body)
+    from dano.config import get_settings
+    allow_write = get_settings().page_write_probe
+    dry = is_write and not allow_write
+    script = _dry_replay_script(draft.body) if dry else PageScriptBody.model_validate(draft.body)
+
+    async def factory():  # noqa: ANN202
+        return await _launch_page_driver(mat, headless=params.get("headless", True))
+
+    res = await PageActionRuntime(factory).run(
+        uuid4(), script, params.get("sample_inputs") or {}, confirm=lambda f: True)
+    passed = res.outcome == Outcome.PASSED
+    mode = "dry" if dry else "full"
+    v = await _ds.record_validation(
+        asset_draft_id=draft.asset_draft_id, kind="replay", passed=passed,
+        response=res.structured_output,
+        evidence={"mode": mode, "screenshots": res.evidence.screenshots,
+                  "assertions": [r.model_dump() for r in res.assertion_results]})
+    return {"passed": passed, "mode": mode, "structured_output": res.structured_output,
+            "validation_run_ids": [str(v.validation_run_id)]}
+
+
 # 工具注册表(白名单)。验证类工具天然只走 sandbox/test。
 TOOLS = {
     "parse_spec": parse_spec,
@@ -912,4 +1028,8 @@ TOOLS = {
     "draft_adapter": draft_adapter,
     "sandbox_test_adapter": sandbox_test_adapter,
     "vuln_scan": vuln_scan,
+    # 页面型 Skill(流程8,无 API)
+    "scout_page": scout_page,
+    "draft_page_script": draft_page_script,
+    "sandbox_replay": sandbox_replay,
 }
