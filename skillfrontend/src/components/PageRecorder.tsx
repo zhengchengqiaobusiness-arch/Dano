@@ -170,13 +170,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!Object.keys(param_map).length) { message.error("至少勾选一个字段作为参数"); return; }
     const selList = Object.values(selects).filter((s) => param_map[s.path]);   // 选领导:仅作为参数的
     const idList = Object.values(identity);                                     // 当前用户:运行期重取
+    // 必填=勾选的"变化字段"(suggest_param);固定字段(billType 等)=非必填,缺了用录制原值
+    const required = fields
+      .filter((f) => param_map[f.path] && f.suggest_param && !identity[f.path])
+      .map((f) => param_map[f.path]);
     // 多步(Q3):勾了 ≥2 个写请求 → 组成工作流,提交那步(chosenIdx)放最后(参数落它)
     const checked = cands.filter((c) => stepSel[c.idx]).map((c) => c.idx);
     const step_idxs = checked.length >= 2
       ? [...checked.filter((i) => i !== chosenIdx).sort((a, b) => a - b), chosenIdx] : [];
     setResult(null); setPhase("publishing");
     send({ type: "publish_request", action: action.trim(), title: title.trim(),
-           param_map, selects: selList, identity: idList, step_idxs });
+           param_map, selects: selList, identity: idList, step_idxs, required });
   }
   function stopAll() {
     send({ type: "stop" }); wsRef.current?.close();
@@ -292,6 +296,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                         {sel && <Tag color="purple" style={{ fontSize: 11 }}>
                           📋 选自列表 {sel.label_key}→{sel.value_key}(共{sel.count}项)</Tag>}
                         {idn && <Tag color="gold" style={{ fontSize: 11 }}>🔒 当前用户/会话值(运行期自动填)</Tag>}
+                        {!sel && !idn && (f.suggest_param
+                          ? <Tag color="blue" style={{ fontSize: 11 }}>必填(agent 传值)</Tag>
+                          : <Tag style={{ fontSize: 11 }}>非必填·用原值</Tag>)}
                         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                           值={f.value === "" ? "(空)" : (f.value.length > 30 ? f.value.slice(0, 30) + "…" : f.value)}</Typography.Text>
                         {p.on && <>

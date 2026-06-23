@@ -638,7 +638,8 @@ async def record_ws(ws: WebSocket) -> None:
                 sample_in = apir.get("sample_inputs") or ((apir.get("steps") or [{}])[-1].get("sample_inputs") or {})
                 rep = await run_request_onboarding(
                     tenant=init["tenant"], subsystem=sub, action=msg["action"],
-                    title=msg.get("title", ""), api_request=apir, sample_inputs=sample_in)
+                    title=msg.get("title", ""), api_request=apir, sample_inputs=sample_in,
+                    required=msg.get("required"))    # 前端标的"变化字段"=必填;其余可选用原值
                 if rep.get("ok"):
                     await _auto_export(init["tenant"])
                 await ws.send_json({"type": "result", "report": rep,

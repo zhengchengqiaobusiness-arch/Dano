@@ -181,7 +181,7 @@ async def run_page_onboarding_pi(
 
 async def run_request_onboarding(
     *, tenant: str, subsystem: str, action: str, title: str = "",
-    api_request: dict, sample_inputs: dict | None = None,
+    api_request: dict, sample_inputs: dict | None = None, required: list[str] | None = None,
     deploy: dict | None = None, credentials: dict | None = None, run_id: str | None = None,
 ) -> dict:
     """抓请求路径:把录制抓到的提交请求(已参数化)落成可执行 Skill → dry 校验 → 发布。
@@ -202,10 +202,13 @@ async def run_request_onboarding(
         params = list(api_request.get("params") or [])
         if not params and api_request.get("steps"):
             params = list((api_request["steps"][-1] or {}).get("params") or [])
-        # 每个参数都带录制原值作默认(全选也安全)→ 都是可选,缺了用原值,不拦截
+        # 必填=前端标的"变化字段"(没给则全部必填,向后兼容);其余=可选,缺了用录制原值(固定字段不改)
+        req_fields = [r for r in (required if required is not None else params) if r in params]
+        opt_fields = [p for p in params if p not in req_fields]
         body = PageScriptBody(
             actions=[], dom_fingerprint="", action=action, title=title, api_request=api_request,
-            user_fields=params, required_fields=[], optional_fields=params, risk_level=RiskLevel.L3).model_dump()
+            user_fields=params, required_fields=req_fields, optional_fields=opt_fields,
+            risk_level=RiskLevel.L3).model_dump()
         d = await T.save_draft(run_id, {"system_instance_id": sid, "asset_type": "page_script",
                                         "asset_key": action, "body": body})
         rp = await T.sandbox_replay(run_id, {"asset_draft_id": d["asset_draft_id"],

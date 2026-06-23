@@ -343,6 +343,15 @@ def test_flatten_date_field_gets_chinese_label_across_formats():
     assert p["type"] == "type"             # 下拉代码(2)对不上「事假」→ 退原始 key(诚实)
 
 
+def test_flatten_order_fallback_labels_dropdown():
+    """下拉代码值对不上文本,但"剩下的标签"按顺序补:请假类型→type(用户录了该字段时)。"""
+    body = '{"type":2,"reason":"回家"}'
+    samples = {"原因": "回家", "请假类型": "事假"}     # 用户录了这两个字段
+    p = {f["key"]: f["suggest_name"] for f in flatten_body(body, samples)}
+    assert p["reason"] == "原因"            # 文本直接对
+    assert p["type"] == "请假类型"          # 值对不上(2≠事假),但剩下的标签「请假类型」按序补给它
+
+
 def test_flatten_body_non_json_returns_empty():
     assert flatten_body("a=1&b=2") == []
     assert flatten_body(None) == []

@@ -389,6 +389,8 @@ def flatten_body(post_data: str | None, samples: dict | None = None) -> list[dic
             date2field.setdefault(dk, field)
     out: list[dict] = []
 
+    used: set = set()
+
     def walk(node, path):
         if isinstance(node, dict):
             for k, v in node.items():
@@ -405,13 +407,26 @@ def flatten_body(post_data: str | None, samples: dict | None = None) -> list[dic
                     if dk in date2field:
                         label = date2field[dk]
                         break
+            if label is not None:
+                used.add(label)
             time_like = bool(_TIME_KEY.search(key))
             const = (not time_like) and (bool(_ID_KEY.search(key)) or _is_const_value(node))
             out.append({"path": path, "key": key, "value": sv,
                         "suggest_param": bool(label is not None or (not const and sv != "")),
-                        "suggest_name": label or key})           # 参数名=中文字段名,对不上退原始 key
+                        "suggest_name": label or key, "_const": const, "_matched": label is not None})
 
     walk(body, "")
+    # 顺序兜底:剩下没按值/日期对上的 DOM 标签(按录制顺序),补给还没拿到中文名的"变化字段"(如下拉 type↔请假类型)
+    rem = [lab for lab in samples if lab not in used]
+    i = 0
+    for e in out:
+        if not e["_matched"] and not e["_const"] and e["suggest_param"] and e["suggest_name"] == e["key"]:
+            if i < len(rem):
+                e["suggest_name"] = rem[i]
+                i += 1
+    for e in out:
+        e.pop("_const", None)
+        e.pop("_matched", None)
     return out
 
 
