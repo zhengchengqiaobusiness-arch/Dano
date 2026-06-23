@@ -68,12 +68,20 @@ export interface SystemContentBlock {
   meta?: string;
 }
 
+export interface SkillContentBlock {
+  kind: "skill";
+  skillName: string;
+  skillLocation: string;
+  content: string;
+}
+
 export type ContentBlock =
   | TextContentBlock
   | ToolContentBlock
   | ThinkingContentBlock
   | ImageContentBlock
-  | SystemContentBlock;
+  | SystemContentBlock
+  | SkillContentBlock;
 
 type ConfigSystemBlock = Extract<
   RpcTranscriptSystemBlock,
@@ -171,17 +179,40 @@ export function messageContent(
   return content.map(contentItemText).filter(Boolean).join("\n");
 }
 
+const SKILL_BLOCK_REGEX = /^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/;
+
+function parseSkillBlockFromText(text: string): SkillContentBlock | null {
+  const match = text.match(SKILL_BLOCK_REGEX);
+  if (!match) return null;
+  return {
+    kind: "skill",
+    skillName: match[1],
+    skillLocation: match[2],
+    content: match[3],
+  };
+}
+
 export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
   const content = msg.content;
   const blocks: ContentBlock[] = [];
 
   if (typeof content === "string") {
-    blocks.push({ kind: "text", text: content });
+    const skillBlock = parseSkillBlockFromText(content);
+    if (skillBlock) {
+      blocks.push(skillBlock);
+    } else {
+      blocks.push({ kind: "text", text: content });
+    }
     return blocks;
   }
 
   if (typeof msg.text === "string") {
-    blocks.push({ kind: "text", text: msg.text });
+    const skillBlock = parseSkillBlockFromText(msg.text);
+    if (skillBlock) {
+      blocks.push(skillBlock);
+    } else {
+      blocks.push({ kind: "text", text: msg.text });
+    }
     return blocks;
   }
 
@@ -190,7 +221,12 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
   for (let index = 0; index < content.length; index++) {
     const block = content[index];
     if (typeof block === "string") {
-      blocks.push({ kind: "text", text: block });
+      const skillBlock = parseSkillBlockFromText(block);
+      if (skillBlock) {
+        blocks.push(skillBlock);
+      } else {
+        blocks.push({ kind: "text", text: block });
+      }
       continue;
     }
 
