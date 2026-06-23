@@ -621,9 +621,11 @@ async def record_ws(ws: WebSocket) -> None:
                                         "report": {"ok": False, "reason": "没有待发布的提交请求;先点「停止并发布」抓请求"}})
                     continue
                 param_map = {k: v.strip() for k, v in (msg.get("param_map") or {}).items() if v and v.strip()}
-                from dano.execution.page.request_capture import build_api_request, build_api_workflow
+                from dano.execution.page.request_capture import (build_api_request, build_api_workflow,
+                                                                 suggest_fact_check)
                 sels = msg.get("selects") or []         # Q2 选领导:名字→ID
                 idens = msg.get("identity") or []        # Q1 当前用户:运行期重取
+                fc = suggest_fact_check(pending_samples, pending_reads)   # 回查源(录到"我的记录"列表才有)
                 # 多步:用户勾了多个写请求(step_idxs,有序)→ 组装工作流,参数落在最后一步(提交那步)
                 step_idxs = [i for i in (msg.get("step_idxs") or []) if 0 <= i < len(pending_candidates)]
                 if len(step_idxs) > 1:
@@ -633,6 +635,8 @@ async def record_ws(ws: WebSocket) -> None:
                 else:
                     apir = build_api_request(pending_req, param_map, selects=sels, identity=idens)
                     last_params = (apir or {}).get("params") or []
+                if apir and fc:
+                    apir["fact_check"] = fc            # 提交后回查记录确认真生效(grounded)
                 if not apir or not last_params:
                     await ws.send_json({"type": "result",
                                         "report": {"ok": False, "reason": "至少勾选一个字段作为参数(给它起个参数名)"}})

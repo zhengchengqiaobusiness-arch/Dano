@@ -34,10 +34,18 @@ ALL_SUBSYSTEMS = [Subsystem.OA, Subsystem.TICKET, Subsystem.REIMBURSE]
 
 
 def _slug(skill_id: str) -> str:
-    """skill_id(如 A-OA.submit_leave)→ 文件夹名(kebab,如 dano-a-oa-submit-leave)。"""
+    """skill_id(如 A-OA.submit_leave)→ 文件夹名(kebab,如 dano-a-oa-submit-leave)。
+
+    动作名含非 ASCII(中文)时 ASCII 化会塌成只剩子系统前缀、多个 skill 撞同一目录互相覆盖 →
+    补 skill_id 短哈希保唯一(动作名建议用英文,中文放标题)。
+    """
     s = ("dano-" + skill_id).lower().replace(".", "-").replace("_", "-")
-    s = re.sub(r"[^a-z0-9-]+", "-", s).strip("-")
-    return re.sub(r"-{2,}", "-", s)
+    s = re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9-]+", "-", s).strip("-"))
+    if re.search(r"[^\x00-\x7f]", skill_id):                # 含中文等非 ASCII → 加哈希后缀防撞目录
+        import hashlib
+        h = hashlib.md5(skill_id.encode("utf-8")).hexdigest()[:6]
+        s = (f"{s}-{h}".strip("-")) if s else f"dano-{h}"
+    return s
 
 
 def _fields(m: SkillManifest) -> tuple[list[str], set[str], dict]:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dano.execution.page.request_capture import (
+    _response_ok,
     as_list_payload,
     build_api_request,
     build_api_workflow,
@@ -17,6 +18,7 @@ from dano.execution.page.request_capture import (
     pick_submit_request,
     resolve_identity_value,
     substitute,
+    suggest_fact_check,
     suggest_identity,
     suggest_selects,
 )
@@ -222,6 +224,101 @@ async def test_execute_resolves_select_name_to_id_and_identity(tmp_path):
         assert received["reason"] == "回家"
     finally:
         httpd.shutdown()
+
+
+async def test_execute_business_fail_despite_http_200():
+    """不信 HTTP 200:服务器回 200 但 body code=500 → 判失败(空操作);code=200 → 成功。通用。"""
+    import http.server as _h
+    import json as _j
+    import socketserver as _s
+    import threading as _t
+
+    mode = {"code": 500}
+
+    class H(_h.BaseHTTPRequestHandler):
+        def log_message(self, *a):  # noqa: ANN001
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.wfile.write(_j.dumps({"code": mode["code"], "msg": "结果"}).encode())
+
+    httpd = _s.TCPServer(("127.0.0.1", 0), H)
+    port = httpd.server_address[1]
+    _t.Thread(target=httpd.serve_forever, daemon=True).start()
+    apir = {"method": "POST", "url": f"http://127.0.0.1:{port}/submit", "content_type": "application/json",
+            "body_template": {"reason": "{{原因}}"}, "params": ["原因"], "auth_headers": {}}
+    try:
+        mode["code"] = 500                                    # HTTP 200 但业务失败
+        out = await execute_api_request(apir, {"原因": "x"}, send=True, verify=False)
+        assert out["status"] == 200 and out["ok"] is False and out["business_ok"] is False
+        mode["code"] = 200                                    # 业务成功
+        out2 = await execute_api_request(apir, {"原因": "x"}, send=True, verify=False)
+        assert out2["ok"] is True
+    finally:
+        httpd.shutdown()
+
+
+def test_suggest_fact_check_finds_records_list():
+    """录到"我的记录"列表(含刚提交的原因)→ 回查源:endpoint + match_field + param。"""
+    samples = {"原因": "去北京出差三天", "类型": "事假"}
+    reads = [{"url": "http://oa.x/leave/list",
+              "json": {"rows": [{"id": 9, "reason": "去北京出差三天", "status": "审批中"}]}}]
+    fc = suggest_fact_check(samples, reads)
+    assert fc == {"endpoint": "http://oa.x/leave/list", "match_field": "reason", "param": "原因"}
+
+
+async def test_execute_api_grounded_fact_check():
+    """grounded 回查:提交后 GET 记录列表,提交值在记录里 → 真生效;不在 → 判失败(空操作)。"""
+    import http.server as _h
+    import json as _j
+    import socketserver as _s
+    import threading as _t
+
+    state = {"persist": True, "records": []}
+
+    class H(_h.BaseHTTPRequestHandler):
+        def log_message(self, *a):  # noqa: ANN001
+            pass
+
+        def do_POST(self):
+            body = _j.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            if state["persist"]:
+                state["records"].append({"reason": body.get("reason")})
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.wfile.write(b'{"code":200}')
+
+        def do_GET(self):
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.wfile.write(_j.dumps({"rows": state["records"]}).encode())
+
+    httpd = _s.TCPServer(("127.0.0.1", 0), H)
+    port = httpd.server_address[1]
+    _t.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{port}"
+    apir = {"method": "POST", "url": f"{base}/submit", "content_type": "application/json",
+            "body_template": {"reason": "{{原因}}"}, "params": ["原因"], "auth_headers": {},
+            "fact_check": {"endpoint": f"{base}/list", "match_field": "reason", "param": "原因",
+                           "retries": 2, "backoff_s": 0.05}}
+    try:
+        out = await execute_api(apir, {"原因": "回家A"}, send=True, verify=False)
+        assert out["ok"] is True and out["fact_check_passed"] is True   # POST 入库 → 列表含 → 回查过
+        state["persist"] = False
+        out2 = await execute_api(apir, {"原因": "回家B"}, send=True, verify=False)
+        assert out2["fact_check_passed"] is False and out2["ok"] is False  # 不入库 → 列表没有 → 空操作判失败
+    finally:
+        httpd.shutdown()
+
+
+def test_response_ok_judges_business_code():
+    """业务成功判定(纯函数,通用):code/status/success;无成功字段→靠 HTTP。"""
+    assert _response_ok({"code": 200, "msg": "ok"})[0] is True
+    assert _response_ok({"code": 500, "msg": "余额不足"})[0] is False
+    assert _response_ok({"status": 0})[0] is True
+    assert _response_ok({"success": False})[0] is False
+    assert _response_ok({"rows": [1, 2], "total": 2})[0] is True   # 列表响应无业务码 → 靠 HTTP
+    assert _response_ok("OK")[0] is True
 
 
 def test_discover_step_links_finds_taskid_chain():

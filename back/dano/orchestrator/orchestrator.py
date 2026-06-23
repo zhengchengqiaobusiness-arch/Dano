@@ -570,11 +570,13 @@ class Orchestrator:
                             evidence=Evidence(request_body=dict(intent.fields),
                                               response_body=out.get("response")),
                             structured_output=out)
+            # 不信 HTTP 200:业务码失败(out.business_ok=False)也判 FAILED,把业务原因带出来
+            fail_reason = out.get("detail") or out.get("response")
             return TaskOutcome(
                 task_id=task_id, state=TaskState.COMPLETED if ok else TaskState.FAILED,
                 skill_id=skill.skill_id, exec_result=er,
                 message=(f"已提交(HTTP {out.get('status')})" if ok
-                         else f"提交失败(HTTP {out.get('status')}):{out.get('response')}"),
+                         else f"提交未生效(HTTP {out.get('status')}):{fail_reason}"),
                 audit={"api": out})
 
         if self.page_runtime is None:

@@ -149,7 +149,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function delStep(i: number) { setSteps((s) => s.filter((_, k) => k !== i)); }   // 删掉某一步(噪声/重复/误操作)
   function patchStep(i: number, p: Partial<RecStep>) { setSteps((s) => s.map((x, k) => (k === i ? { ...x, ...p } : x))); }
   function finalize() {
-    if (!action.trim()) { message.error("请填 Skill 动作名(英文)"); return; }
+    if (!action.trim() || badAction(action.trim())) return;
     if (!steps.length && !reqs.length) { message.error("还没抓到提交请求、也没录到步骤;在画面里填表并点「提交」"); return; }
     setResult(null); setPhase("publishing");
     // 后端优先用抓到的提交请求:回 request_fields 让你勾字段;没抓到才走 DOM 步骤直接发布
@@ -169,8 +169,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function toggleReq(path: string, req: boolean) {
     setPicked((p) => ({ ...p, [path]: { ...p[path], req } }));
   }
+  function badAction(a: string) {
+    // 动作名是函数调用/工具标识,必须英文标识符;中文会导致导出目录冲突、function-call 名非法
+    if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(a)) {
+      message.error("动作名请用英文标识(字母开头,如 submit_daily_report);中文写到「标题」里");
+      return true;
+    }
+    return false;
+  }
   function publishRequest() {
-    if (!action.trim()) { message.error("请填 Skill 动作名(英文)"); return; }
+    if (!action.trim() || badAction(action.trim())) return;
     const param_map: Record<string, string> = {};
     fields.forEach((f) => { const p = picked[f.path]; if (p?.on && p.name.trim()) param_map[f.path] = p.name.trim(); });
     if (!Object.keys(param_map).length) { message.error("至少勾选一个字段作为参数"); return; }

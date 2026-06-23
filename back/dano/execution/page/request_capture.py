@@ -280,6 +280,27 @@ def suggest_identity(post_data: str | None, storage_state: dict | None) -> list[
     return out
 
 
+def suggest_fact_check(samples: dict, reads: list[dict]) -> dict | None:
+    """提交后回查源(grounded):用户提交后看了"我的记录"列表 → 该列表含刚提交的值。
+
+    在抓到的列表读响应里找"含某提交值"的列表项 → 返回 {endpoint, match_field(项里等于该值的字段),
+    param(对应用户参数/标签)}。优先用最独特(最长)的提交值,降低巧合。通用,不挑系统。
+    """
+    cand = sorted(((str(v), k) for k, v in (samples or {}).items() if v not in ("", None) and len(str(v)) >= 2),
+                  key=lambda x: -len(x[0]))
+    for r in reads or []:
+        items = as_list_payload(r.get("json"))
+        if not items:
+            continue
+        for sv, param in cand:
+            for it in items:
+                if isinstance(it, dict):
+                    mf = next((k for k, v in it.items() if str(v) == sv), None)
+                    if mf:
+                        return {"endpoint": r.get("url"), "match_field": mf, "param": param}
+    return None
+
+
 def list_read_requests(reads: list[dict]) -> list[dict]:
     """从抓到的读响应里挑出「列表型」候选(select 候选源),给出条数 + 列表项字段名。
 
@@ -664,6 +685,29 @@ def _auth_headers(storage_state: dict | None, host: str, token_key: str = "Admin
     return headers
 
 
+# 响应体里常见的"业务成功码"字段(不信 HTTP 200,看它);200/0 = 成功(通用约定)
+_OK_CODE_KEYS = ("code", "status", "errcode", "errCode", "resultCode", "rspCode", "retCode", "flag")
+
+
+def _response_ok(data) -> tuple[bool, str]:
+    """业务成功判定(通用,不挑系统):响应体有成功码字段 → 按 200/0 判;有 success → 按它;否则靠 HTTP。
+
+    解决"HTTP 200 但 body 里 code=500 / success=false = 空操作"。返回 (是否成功, 失败原因)。
+    """
+    if not isinstance(data, dict):
+        return True, ""                                       # 非对象(数组/文本)→ 没业务码,靠 HTTP
+    for k in _OK_CODE_KEYS:
+        v = data.get(k)
+        if v is not None and not isinstance(v, (dict, list)):
+            ok = str(v) in ("200", "0", "true", "True", "success", "ok")
+            msg = data.get("msg") or data.get("message") or data.get("error") or ""
+            return ok, ("" if ok else f"业务返回失败({k}={v}):{msg}")
+    if "success" in data:
+        ok = bool(data["success"])
+        return ok, ("" if ok else f"业务返回 success=false:{data.get('msg') or data.get('message') or ''}")
+    return True, ""                                           # 无成功码字段 → 靠 HTTP 2xx
+
+
 async def execute_api_request(api_request: dict, fields: dict, *, base_url: str = "",
                               storage_state: dict | None = None, send: bool = True,
                               verify: bool = True, token_key: str = "Admin-Token",
@@ -708,8 +752,12 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
         data = r.json()
     except Exception:  # noqa: BLE001
         data = {"raw": r.text[:1000]}
-    return {"ok": 200 <= r.status_code < 300, "status": r.status_code, "response": data,
-            "method": method, "url": url}
+    http_ok = 200 <= r.status_code < 300
+    biz_ok, biz_reason = _response_ok(data)                  # 不信 HTTP 200:看响应体业务码(真生效)
+    ok = http_ok and biz_ok
+    detail = (biz_reason if (http_ok and not biz_ok) else ("" if http_ok else f"HTTP {r.status_code}"))
+    return {"ok": ok, "status": r.status_code, "response": data, "business_ok": biz_ok,
+            "detail": detail, "method": method, "url": url}
 
 
 async def execute_api_workflow(workflow: dict, fields: dict, *, base_url: str = "",
@@ -739,11 +787,44 @@ async def execute_api_workflow(workflow: dict, fields: dict, *, base_url: str = 
             "status": last.get("status"), "response": last.get("response"), "final": last}
 
 
+async def _grounded_recheck(fc: dict, fields: dict, *, base_url: str, storage_state, token_key: str,
+                            verify: bool, auth_headers: dict | None,
+                            retries: int = 4, backoff: float = 0.6) -> tuple[bool, str]:
+    """提交后回查:GET 记录列表,确认提交的值真出现在记录里(grounded,不信接口自报成功)。
+
+    异步写多有延迟 → 轮询 retries 次再判失败。param 没传(可能被改名)→ 跳过回查不误判。
+    """
+    import asyncio
+    param, mf, ep = fc.get("param"), fc.get("match_field"), fc.get("endpoint", "")
+    retries = int(fc.get("retries", retries))
+    backoff = float(fc.get("backoff_s", backoff))
+    target = fields.get(param)
+    if target is None or not ep:
+        return True, ""
+    for i in range(max(1, retries)):
+        items = await _fetch_list(ep, base_url, storage_state, token_key, verify, auth_headers)
+        if any(isinstance(it, dict) and str(it.get(mf)) == str(target) for it in items):
+            return True, ""
+        if i < retries - 1:
+            await asyncio.sleep(backoff)
+    return False, f"回查未生效:记录列表里没找到 {param}={target}(疑似空操作)"
+
+
 async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
-    """统一入口:api_request 有 steps → 多步工作流(Q3);否则单请求。调用方不必关心是几步。"""
-    if api_request.get("steps"):
-        return await execute_api_workflow(api_request, fields, **kw)
-    return await execute_api_request(api_request, fields, **kw)
+    """统一入口:api_request 有 steps → 多步工作流(Q3),否则单请求;成功后若配了 fact_check → grounded 回查。"""
+    runner = execute_api_workflow if api_request.get("steps") else execute_api_request
+    out = await runner(api_request, fields, **kw)
+    fc = api_request.get("fact_check")
+    if kw.get("send", True) and out.get("ok") and fc:
+        auth = api_request.get("auth_headers") or ((api_request.get("steps") or [{}])[-1].get("auth_headers"))
+        fok, freason = await _grounded_recheck(
+            fc, fields, base_url=kw.get("base_url", ""), storage_state=kw.get("storage_state"),
+            token_key=kw.get("token_key", "Admin-Token"), verify=kw.get("verify", True), auth_headers=auth)
+        out["fact_check_passed"] = fok
+        if not fok:
+            out["ok"] = False
+            out["detail"] = freason
+    return out
 
 
 def build_api_workflow(writes: list[dict], *, param_map: dict, base_url: str = "",
