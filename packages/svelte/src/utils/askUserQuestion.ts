@@ -10,6 +10,10 @@ export type AskUserQuestionRequest =
   | { kind: "multiple"; question: string; options: string[] }
   | { kind: "confirm"; question: string };
 
+export function askUserQuestionMarkdown(question: string): string {
+  return question.replace(/\\+(?:r\\+n|n)/g, "\n");
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

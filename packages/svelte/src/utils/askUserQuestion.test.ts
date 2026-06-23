@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  askUserQuestionMarkdown,
   askUserQuestionRequest,
   askUserQuestionResult,
 } from "./askUserQuestion";
@@ -21,6 +22,16 @@ function block(
 }
 
 describe("ask user question transcript data", () => {
+  it.each([
+    ["real newlines", "| A | B |\n| --- | --- |", "| A | B |\n| --- | --- |"],
+    ["escaped LF", String.raw`| A | B |\n| --- | --- |`, "| A | B |\n| --- | --- |"],
+    ["escaped CRLF", String.raw`| A | B |\r\n| --- | --- |`, "| A | B |\n| --- | --- |"],
+    ["double-escaped LF", String.raw`| A | B |\\n| --- | --- |`, "| A | B |\n| --- | --- |"],
+    ["double-escaped CRLF", String.raw`| A | B |\\r\\n| --- | --- |`, "| A | B |\n| --- | --- |"],
+  ])("normalizes %s for Markdown block rows", (_, question, expected) => {
+    expect(askUserQuestionMarkdown(question)).toBe(expected);
+  });
+
   it("parses a text question", () => {
     expect(askUserQuestionRequest(block({ question: "Name?" }))).toEqual({
       kind: "text",
