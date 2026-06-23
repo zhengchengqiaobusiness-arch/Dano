@@ -2,6 +2,7 @@
   import type { RpcResponse } from "@dano/bridge/types";
   import { t } from "../i18n";
   import {
+    askUserQuestionMarkdown,
     askUserQuestionRequest,
     askUserQuestionResult,
   } from "../utils/askUserQuestion";
@@ -117,7 +118,7 @@
   <article class="question-card" data-status={result?.status ?? "pending"}>
     <div class="question-label">{t("questionTool.label")}</div>
     <div class="question-text">
-      <MarkdownRenderer content={request.question.replaceAll("\\n", "\n")} />
+      <MarkdownRenderer content={askUserQuestionMarkdown(request.question)} />
     </div>
 
     {#if result?.status === "answered"}
