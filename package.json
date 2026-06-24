@@ -41,5 +41,10 @@
   },
   "engines": {
     "node": ">=20.6.0"
+  },
+  "pnpm": {
+    "patchedDependencies": {
+      "@casualjim/pi-heimdall@0.2.10": "patches/@casualjim__pi-heimdall@0.2.10.patch"
+    }
   }
 }

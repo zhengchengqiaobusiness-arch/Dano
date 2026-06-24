@@ -41,12 +41,18 @@ describe("standalone main", () => {
     const appPackage = JSON.parse(
       readFileSync(resolve("apps/dano/package.json"), "utf8"),
     ) as { dependencies?: Record<string, string> };
+    const rootPackage = JSON.parse(readFileSync(resolve("package.json"), "utf8")) as {
+      pnpm?: { patchedDependencies?: Record<string, string> };
+    };
     const heimdall = JSON.parse(
       readFileSync(join(runtimeDefaultsDir, "heimdall.json"), "utf8"),
     ) as {
-      sandbox?: { enabled?: boolean };
+      sandbox?: { enabled?: boolean; userNamespace?: boolean };
       commandPolicies?: Array<{ blocked?: string[] }>;
     };
+    const heimdallPatchPath =
+      rootPackage.pnpm?.patchedDependencies?.["@casualjim/pi-heimdall@0.2.10"];
+    const heimdallPatch = readFileSync(resolve(heimdallPatchPath ?? ""), "utf8");
 
     for (const packageJson of [bridgePackage, appPackage]) {
       expect(packageJson.dependencies?.["@casualjim/pi-heimdall"]).toBe(
@@ -57,6 +63,11 @@ describe("standalone main", () => {
       ).toBe("npm:@earendil-works/pi-coding-agent@0.74.0");
     }
     expect(heimdall.sandbox?.enabled).toBe(true);
+    expect(heimdall.sandbox?.userNamespace).toBe(false);
+    expect(heimdallPatchPath).toBe("patches/@casualjim__pi-heimdall@0.2.10.patch");
+    expect(heimdallPatch).toContain(
+      'if (config.userNamespace) args.push("--unshare-user");',
+    );
     expect(heimdall.commandPolicies).toContainEqual(
       expect.objectContaining({ blocked: ["rm", "-rf", "/"] }),
     );
@@ -291,7 +302,7 @@ describe("standalone main", () => {
         "{}",
       );
       expect(readFileSync(join(workspaceRoot, ".pi/heimdall.json"), "utf8")).toBe(
-        "{}",
+        '{\n  "sandbox": {\n    "userNamespace": false\n  }\n}\n',
       );
     } finally {
       rmSync(sourceRoot, { recursive: true, force: true });
@@ -331,8 +342,43 @@ describe("standalone main", () => {
         "{}",
       );
       expect(readFileSync(join(workspaceRoot, ".pi/heimdall.json"), "utf8")).toBe(
+        '{\n  "sandbox": {\n    "userNamespace": false\n  }\n}\n',
+      );
+    } finally {
+      rmSync(sourceRoot, { recursive: true, force: true });
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves Heimdall runtime settings while disabling user namespaces by default", () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), "dano-main-source-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "dano-main-workspace-"));
+
+    try {
+      mkdirSync(join(sourceRoot, "deploy", "runtime-defaults"), {
+        recursive: true,
+      });
+      mkdirSync(join(workspaceRoot, ".pi"), { recursive: true });
+      writeFileSync(
+        join(sourceRoot, "deploy/runtime-defaults/heimdall.json"),
         "{}",
       );
+      writeFileSync(
+        join(workspaceRoot, ".pi/heimdall.json"),
+        JSON.stringify({
+          sandbox: { enabled: true },
+          commandPolicies: [{ name: "keep", blocked: ["x"], message: "y" }],
+        }),
+      );
+
+      initializeStandaloneWorkspaceSettings(workspaceRoot, sourceRoot);
+
+      expect(
+        JSON.parse(readFileSync(join(workspaceRoot, ".pi/heimdall.json"), "utf8")),
+      ).toEqual({
+        sandbox: { enabled: true, userNamespace: false },
+        commandPolicies: [{ name: "keep", blocked: ["x"], message: "y" }],
+      });
     } finally {
       rmSync(sourceRoot, { recursive: true, force: true });
       rmSync(workspaceRoot, { recursive: true, force: true });

@@ -1,4 +1,11 @@
-import { copyFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadDanoConfig } from "@dano/bridge/dano-config";
@@ -298,6 +305,31 @@ export function initializeStandaloneWorkspaceSettings(
       copyFileSync(sourcePath, targetPath);
     }
   }
+
+  migrateHeimdallRuntimeSettings(join(targetSettingsDir, "heimdall.json"));
+}
+
+function migrateHeimdallRuntimeSettings(path: string): void {
+  if (!existsSync(path)) return;
+
+  let settings: unknown;
+  try {
+    settings = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return;
+  }
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) return;
+
+  const root = settings as { sandbox?: unknown };
+  if (!root.sandbox || typeof root.sandbox !== "object" || Array.isArray(root.sandbox)) {
+    root.sandbox = {};
+  }
+
+  const sandbox = root.sandbox as { userNamespace?: unknown };
+  if (sandbox.userNamespace !== undefined) return;
+
+  sandbox.userNamespace = false;
+  writeFileSync(path, `${JSON.stringify(root, null, 2)}\n`);
 }
 
 function workspaceSessionDirName(workspacePath: string): string {
