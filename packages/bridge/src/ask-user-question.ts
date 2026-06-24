@@ -2,20 +2,39 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
   ASK_USER_QUESTION_TOOL_NAME,
+  type AskUserQuestionAnswer,
   type AskUserQuestionResult,
 } from "./types.js";
 
-export const askUserQuestionParameters = Type.Object({
-  question: Type.String({
-    minLength: 1,
-    description: "The clear, specific question to ask the user.",
-  }),
+const askUserQuestionAnswerSchema = Type.Union([
+  Type.String(),
+  Type.Array(Type.String()),
+  Type.Boolean(),
+], {
+  description:
+    "Default or answer value: string for text/single-choice, string[] for multiple-choice, boolean for confirmation.",
+});
+
+const groupedRetryError =
+  "You called ask_user_question while another question card is still waiting. Do not call ask_user_question multiple times in the same response. Retry silently with exactly one ask_user_question call using {\"questions\":[...]} so all fields render in one card with one submit button. When using questions, omit top-level question, options, multiple, default, and confirm. Do not explain this correction to the user.";
+
+const mixedGroupedFieldsError =
+  "Invalid ask_user_question call: when using questions, the top level may contain only questions. Move question, options, multiple, and default into each questions[] item. Do not include top-level question, options, multiple, default, or confirm with questions. Retry silently; do not explain this correction to the user.";
+
+const askUserQuestionFields = {
+  question: Type.Optional(
+    Type.String({
+      minLength: 1,
+      description:
+        "Single-question call only: the clear, specific question to ask the user. If collecting more than one answer, omit this top-level field and put every question inside questions[].",
+    }),
+  ),
   options: Type.Optional(
     Type.Array(Type.String({ minLength: 1 }), {
       minItems: 2,
       uniqueItems: true,
       description:
-        "Answers for a single-choice or multiple-choice question. Include '其他' or 'Other' to let the user enter one custom answer. Omit for free-text or confirmation input.",
+        "Choices for this question. Include '其他' or 'Other' to let the user enter one custom answer. Omit for free-text or confirmation input.",
     }),
   ),
   multiple: Type.Optional(
@@ -24,10 +43,38 @@ export const askUserQuestionParameters = Type.Object({
       description: "Set true with options to allow multiple selections.",
     }),
   ),
+  default: Type.Optional(askUserQuestionAnswerSchema),
+};
+
+export const askUserQuestionParameters = Type.Object({
+  ...askUserQuestionFields,
   confirm: Type.Optional(
     Type.Literal(true, {
       description: "Set true without options to ask for confirmation.",
     }),
+  ),
+  questions: Type.Optional(
+    Type.Array(
+      Type.Object({
+        id: Type.Optional(
+          Type.String({
+            minLength: 1,
+            description:
+              "Stable key for this answer. If omitted, answers use q1, q2, and so on.",
+          }),
+        ),
+        ...askUserQuestionFields,
+        question: Type.String({
+          minLength: 1,
+          description: "The clear, specific question to ask the user.",
+        }),
+      }),
+      {
+        minItems: 1,
+        description:
+          "Preferred for collecting more than one answer. Make exactly one ask_user_question call with questions: [{ id, question, default, options?, multiple? }, ...]. This renders one card with one submit button. Do not include top-level question, options, multiple, default, or confirm when questions is present.",
+      },
+    ),
   ),
 });
 
@@ -35,17 +82,23 @@ export const askUserQuestionResultSchema = Type.Union([
   Type.Object({
     status: Type.Literal("answered"),
     answer: Type.Union([
-      Type.String(),
-      Type.Array(Type.String()),
-      Type.Boolean(),
+      askUserQuestionAnswerSchema,
+      Type.Record(Type.String(), askUserQuestionAnswerSchema),
     ]),
   }),
   Type.Object({ status: Type.Literal("cancelled") }),
 ]);
 
-interface PendingQuestion {
-  kind: "text" | "single" | "multiple" | "confirm";
+type PendingQuestionKind = "text" | "single" | "multiple" | "confirm";
+
+interface PendingQuestionItem {
+  id: string;
+  kind: PendingQuestionKind;
   options?: readonly string[];
+}
+
+interface PendingQuestion {
+  questions: readonly PendingQuestionItem[];
   resolve(result: AskUserQuestionResult): void;
   reject(error: Error): void;
   removeAbortListener(): void;
@@ -62,9 +115,19 @@ class AskUserQuestionCoordinator {
   wait(
     toolCallId: string,
     request: {
+      question?: string;
       options?: readonly string[];
       multiple?: boolean;
       confirm?: true;
+      default?: AskUserQuestionAnswer;
+      questions?: readonly {
+        id?: string;
+        question: string;
+        options?: readonly string[];
+        multiple?: boolean;
+        confirm?: true;
+        default?: AskUserQuestionAnswer;
+      }[];
     },
     signal: AbortSignal | undefined,
   ): Promise<AskUserQuestionResult> {
@@ -74,28 +137,23 @@ class AskUserQuestionCoordinator {
       );
     }
 
-    if (request.confirm && (request.options || request.multiple)) {
+    const questions = normalizeRequestQuestions(request);
+    if (typeof questions === "string") {
+      return Promise.reject(new Error(questions));
+    }
+    if (questions.length === 0) {
+      return Promise.reject(new Error("Question is required"));
+    }
+    if (this.pending.size > 0) {
+      const error = new Error(groupedRetryError);
+      this.rejectAll(error);
+      return Promise.reject(error);
+    }
+    if (request.confirm && (request.options || request.multiple || request.questions)) {
       return Promise.reject(
         new Error("Confirmation questions cannot provide options or multiple"),
       );
     }
-    if (request.multiple && !request.options) {
-      return Promise.reject(new Error("Multiple-choice questions require options"));
-    }
-    const options = request.options?.map(option => option.trim());
-    if (
-      options?.some(option => !option) ||
-      (options && new Set(options).size !== options.length)
-    ) {
-      return Promise.reject(
-        new Error("Question options must be non-empty and unique"),
-      );
-    }
-
-    let kind: PendingQuestion["kind"] = "text";
-    if (request.confirm) kind = "confirm";
-    else if (request.multiple) kind = "multiple";
-    else if (options) kind = "single";
 
     return new Promise((resolve, reject) => {
       const abort = () => {
@@ -105,8 +163,7 @@ class AskUserQuestionCoordinator {
       signal?.addEventListener("abort", abort, { once: true });
 
       this.pending.set(toolCallId, {
-        kind,
-        options,
+        questions,
         resolve,
         reject,
         removeAbortListener: () => signal?.removeEventListener("abort", abort),
@@ -122,7 +179,7 @@ class AskUserQuestionCoordinator {
       | { cancelled: true; answer?: undefined }
       | {
           cancelled: false;
-          answer: string | string[] | boolean;
+          answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>;
         },
   ): AskUserQuestionResult {
     const pending = this.pending.get(toolCallId);
@@ -133,66 +190,26 @@ class AskUserQuestionCoordinator {
       result = { status: "cancelled" };
     } else {
       const { answer } = response;
-      if (pending.kind === "confirm") {
-        if (typeof answer !== "boolean") {
-          throw new Error("Confirmation answer must be boolean");
+      if (pending.questions.length > 1) {
+        if (!isAnswerRecord(answer)) {
+          throw new Error("Grouped question answer must be an object");
         }
-        result = { status: "answered", answer };
-      } else if (pending.kind === "multiple") {
-        if (
-          !Array.isArray(answer) ||
-          answer.length === 0 ||
-          !answer.every(value => typeof value === "string")
-        ) {
-          throw new Error(
-            "Multiple-choice answer must contain unique provided options",
-          );
-        }
-        const normalized = answer.map(value => value.trim());
-        if (
-          normalized.some(value => !value) ||
-          new Set(normalized).size !== normalized.length
-        ) {
-          throw new Error(
-            "Multiple-choice answer must contain unique provided options",
-          );
-        }
-        if (normalized.some(isOtherOption)) {
-          throw new Error("Other requires a custom answer");
-        }
-        const customAnswers = normalized.filter(
-          value => !pending.options?.includes(value),
-        );
-        const allowsCustom = pending.options?.some(isOtherOption) ?? false;
-        if (customAnswers.length > 1 && allowsCustom) {
-          throw new Error(
-            "Multiple-choice answer may contain only one custom answer",
-          );
-        }
-        if (customAnswers.length > 0 && !allowsCustom) {
-          throw new Error(
-            "Multiple-choice answer must contain unique provided options",
-          );
+        const normalized: Record<string, AskUserQuestionAnswer> = {};
+        for (const question of pending.questions) {
+          if (!(question.id in answer)) {
+            throw new Error(`Missing answer for grouped question: ${question.id}`);
+          }
+          normalized[question.id] = normalizeAnswer(question, answer[question.id]);
         }
         result = { status: "answered", answer: normalized };
       } else {
-        if (typeof answer !== "string" || !answer.trim()) {
-          throw new Error("Question answer cannot be empty");
+        if (isAnswerRecord(answer)) {
+          throw new Error("Single question answer cannot be an object");
         }
-        const normalized = answer.trim();
-        if (pending.options && isOtherOption(normalized)) {
-          throw new Error("Other requires a custom answer");
-        }
-        if (
-          pending.options &&
-          !pending.options.includes(normalized) &&
-          !pending.options.some(isOtherOption)
-        ) {
-          throw new Error(
-            "Question answer must match one of the provided options",
-          );
-        }
-        result = { status: "answered", answer: normalized };
+        result = {
+          status: "answered",
+          answer: normalizeAnswer(pending.questions[0], answer),
+        };
       }
     }
 
@@ -203,12 +220,163 @@ class AskUserQuestionCoordinator {
   }
 
   cancelAll(): void {
+    this.rejectAll(new Error("Question coordinator was disposed"));
+  }
+
+  private rejectAll(error: Error): void {
     for (const [toolCallId, pending] of this.pending) {
       this.pending.delete(toolCallId);
       pending.removeAbortListener();
-      pending.reject(new Error("Question coordinator was disposed"));
+      pending.reject(error);
     }
   }
+}
+
+function normalizeRequestQuestions(
+  request: Parameters<AskUserQuestionCoordinator["wait"]>[1],
+): string | PendingQuestionItem[] {
+  if (request.questions) {
+    if (
+      request.question ||
+      request.options ||
+      request.multiple ||
+      request.default ||
+      request.confirm
+    ) {
+      return mixedGroupedFieldsError;
+    }
+    const seenIds = new Set<string>();
+    const questions: PendingQuestionItem[] = [];
+    for (let index = 0; index < request.questions.length; index += 1) {
+      const question = request.questions[index];
+      const normalized = normalizeQuestion(question, `q${index + 1}`);
+      if (typeof normalized === "string") return normalized;
+      if (seenIds.has(normalized.id)) {
+        return `Grouped question ids must be unique: ${normalized.id}`;
+      }
+      seenIds.add(normalized.id);
+      questions.push(normalized);
+    }
+    return questions;
+  }
+
+  if (!request.question?.trim()) return "Question is required";
+  const question = normalizeQuestion(
+    { ...request, id: "answer", question: request.question },
+    "answer",
+  );
+  return typeof question === "string" ? question : [question];
+}
+
+function normalizeQuestion(
+  request: {
+    id?: string;
+    question: string;
+    options?: readonly string[];
+    multiple?: boolean;
+    confirm?: true;
+    default?: AskUserQuestionAnswer;
+  },
+  fallbackId: string,
+): PendingQuestionItem | string {
+  if (request.multiple && !request.options) {
+    return "Multiple-choice questions require options";
+  }
+  if (request.confirm && (request.options || request.multiple)) {
+    return "Confirmation questions cannot provide options or multiple";
+  }
+  const options = request.options?.map(option => option.trim());
+  if (
+    options?.some(option => !option) ||
+    (options && new Set(options).size !== options.length)
+  ) {
+    return "Question options must be non-empty and unique";
+  }
+
+  let kind: PendingQuestionKind = "text";
+  if (request.confirm) kind = "confirm";
+  else if (request.multiple) kind = "multiple";
+  else if (options) kind = "single";
+
+  const question: PendingQuestionItem = {
+    id: request.id?.trim() || fallbackId,
+    kind,
+    options,
+  };
+  if (request.default !== undefined) {
+    normalizeAnswer(question, request.default);
+  }
+  return question;
+}
+
+function normalizeAnswer(
+  pending: PendingQuestionItem,
+  answer: AskUserQuestionAnswer,
+): AskUserQuestionAnswer {
+  if (pending.kind === "confirm") {
+    if (typeof answer !== "boolean") {
+      throw new Error("Confirmation answer must be boolean");
+    }
+    return answer;
+  }
+  if (pending.kind === "multiple") {
+    if (
+      !Array.isArray(answer) ||
+      answer.length === 0 ||
+      !answer.every(value => typeof value === "string")
+    ) {
+      throw new Error(
+        "Multiple-choice answer must contain unique provided options",
+      );
+    }
+    const normalized = answer.map(value => value.trim());
+    if (
+      normalized.some(value => !value) ||
+      new Set(normalized).size !== normalized.length
+    ) {
+      throw new Error(
+        "Multiple-choice answer must contain unique provided options",
+      );
+    }
+    if (normalized.some(isOtherOption)) {
+      throw new Error("Other requires a custom answer");
+    }
+    const customAnswers = normalized.filter(
+      value => !pending.options?.includes(value),
+    );
+    const allowsCustom = pending.options?.some(isOtherOption) ?? false;
+    if (customAnswers.length > 1 && allowsCustom) {
+      throw new Error("Multiple-choice answer may contain only one custom answer");
+    }
+    if (customAnswers.length > 0 && !allowsCustom) {
+      throw new Error(
+        "Multiple-choice answer must contain unique provided options",
+      );
+    }
+    return normalized;
+  }
+
+  if (typeof answer !== "string" || !answer.trim()) {
+    throw new Error("Question answer cannot be empty");
+  }
+  const normalized = answer.trim();
+  if (pending.options && isOtherOption(normalized)) {
+    throw new Error("Other requires a custom answer");
+  }
+  if (
+    pending.options &&
+    !pending.options.includes(normalized) &&
+    !pending.options.some(isOtherOption)
+  ) {
+    throw new Error("Question answer must match one of the provided options");
+  }
+  return normalized;
+}
+
+function isAnswerRecord(
+  answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>,
+): answer is Record<string, AskUserQuestionAnswer> {
+  return typeof answer === "object" && answer !== null && !Array.isArray(answer);
 }
 
 const coordinatorState = globalThis as typeof globalThis & {
@@ -223,15 +391,21 @@ export const askUserQuestionCoordinator =
 export const askUserQuestionTool = defineTool({
   name: ASK_USER_QUESTION_TOOL_NAME,
   label: "Ask User Question",
-  description: `Ask the user one structured question during execution.
+  description: `Ask the user for structured input during execution.
 
-Provide options for a single-choice question, add multiple: true for multiple choice, set confirm: true without options for confirmation, or omit all three for free-text input. The user may cancel non-confirmation questions; cancellation stops the current workflow. The answer is returned as a tool result and execution then continues.`,
+Use exactly one ask_user_question call per assistant response. If you need more than one answer, use only the questions array: {"questions":[{"id":"leave_type","question":"请假类型？","options":["事假","病假"],"default":"事假"},{"id":"reason","question":"原因？","default":"个人事务"}]}. Do not include top-level question, options, multiple, default, or confirm when questions is present.
+
+For a single question, use top-level question/options/multiple/default/confirm. For multiple questions, use questions[]. Set default on every non-confirmation question, including every questions[] item. Confirmation is a separate single-question call with question + confirm: true and no options/multiple/questions. The answer is returned as a tool result and execution then continues.`,
   promptSnippet:
-    "Ask the user one single-choice, multiple-choice, confirmation, or free-text question when execution requires their decision",
+    "Ask the user one native question card; for several fields use one questions array with one submit button",
   promptGuidelines: [
     "Use ask_user_question whenever you need user input to continue; do not ask the question only in assistant text.",
+    "Call ask_user_question at most once per assistant response. If you need several answers, put every item in one questions array.",
     "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
     "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
+    "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
+    "Set default on every non-confirmation question, including every item in questions, using the most likely or safest answer while still letting the user change it.",
+    "When using questions, the top level must contain only questions. Put id, question, options, multiple, and default inside each questions item.",
     "For forms, applications, or other user-reviewed summaries, call ask_user_question with confirm: true after presenting the final summary and before treating it as confirmed, ready to submit, or complete.",
   ],
   parameters: askUserQuestionParameters,

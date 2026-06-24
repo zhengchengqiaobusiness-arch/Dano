@@ -1,13 +1,16 @@
 <script lang="ts">
-  import type { RpcResponse } from "@dano/bridge/types";
+  import type { AskUserQuestionAnswer, RpcResponse } from "@dano/bridge/types";
   import { t } from "../i18n";
   import {
+    type AskUserQuestionItem,
     askUserQuestionMarkdown,
     askUserQuestionRequest,
     askUserQuestionResult,
   } from "../utils/askUserQuestion";
   import type { ToolContentBlock } from "../utils/transcript";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
+
+  const PENDING_RENDER_DELAY_MS = 400;
 
   let {
     block,
@@ -22,28 +25,72 @@
         | { cancelled: true }
         | {
             cancelled: false;
-            answer: string | string[] | boolean;
+            answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>;
           },
     ) => Promise<RpcResponse>;
   } = $props();
 
   const request = $derived(askUserQuestionRequest(block));
+  const questionItems = $derived(
+    request ? (request.batch ? request.questions : [request]) : [],
+  );
   const result = $derived(askUserQuestionResult(block.resultDetails));
   const pending = $derived(block.toolStatus === "pending" && !result && active);
   const interrupted = $derived(block.toolStatus === "pending" && !result && !active);
-  let selectedOption = $state("");
-  let selectedOptions = $state<string[]>([]);
-  let textAnswer = $state("");
-  let customAnswer = $state("");
+  const requestKey = $derived(request ? JSON.stringify(request) : "");
+  let initializedRequestKey = $state("");
+  let selectedOption = $state<Record<string, string>>({});
+  let selectedOptions = $state<Record<string, string[]>>({});
+  let textAnswer = $state<Record<string, string>>({});
+  let customAnswer = $state<Record<string, string>>({});
   let submitting = $state(false);
   let error = $state("");
+  let pendingReady = $state(false);
+  const showCard = $derived(Boolean(request) && (!pending || pendingReady));
+
+  $effect(() => {
+    if (!request || initializedRequestKey === requestKey) return;
+    selectedOption = {};
+    selectedOptions = {};
+    textAnswer = {};
+    customAnswer = {};
+
+    for (const item of questionItems) {
+      if (item.kind === "text") {
+        textAnswer[item.id] = item.default ?? "";
+      } else if (item.kind === "single") {
+        selectedOption[item.id] = selectedOptionForDefault(item, item.default);
+        customAnswer[item.id] = customAnswerForDefault(item, item.default);
+      } else if (item.kind === "multiple") {
+        selectedOptions[item.id] = selectedOptionsForDefault(item, item.default);
+        customAnswer[item.id] = customAnswerForDefault(item, item.default?.find(
+          answer => !item.options.includes(answer),
+        ));
+      }
+    }
+
+    initializedRequestKey = requestKey;
+  });
+
+  $effect(() => {
+    if (!pending) {
+      pendingReady = false;
+      return;
+    }
+    pendingReady = false;
+    // ponytail: hide transient invalid-tool retries; real pending questions show after this delay.
+    const timer = setTimeout(() => {
+      pendingReady = true;
+    }, PENDING_RENDER_DELAY_MS);
+    return () => clearTimeout(timer);
+  });
 
   async function respond(
     response:
       | { cancelled: true }
       | {
           cancelled: false;
-          answer: string | string[] | boolean;
+          answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>;
         },
   ) {
     if (!block.toolCallId || submitting) return;
@@ -61,37 +108,44 @@
   function submit(event: SubmitEvent) {
     event.preventDefault();
     if (!request) return;
-    if (request.kind === "single" && selectedOption) {
-      void respond({
-        cancelled: false,
-        answer: isOtherOption(selectedOption)
-          ? customAnswer.trim()
-          : selectedOption,
-      });
-    } else if (request.kind === "multiple" && selectedOptions.length > 0) {
-      void respond({
-        cancelled: false,
-        answer: selectedOptions.map(option =>
-          isOtherOption(option) ? customAnswer.trim() : option,
-        ),
-      });
-    } else if (request.kind === "text" && textAnswer.trim()) {
-      void respond({ cancelled: false, answer: textAnswer.trim() });
+    if (request.batch) {
+      const answers: Record<string, AskUserQuestionAnswer> = {};
+      for (const item of questionItems) {
+        const answer = answerForItem(item);
+        if (answer === null) return;
+        answers[item.id] = answer;
+      }
+      void respond({ cancelled: false, answer: answers });
+      return;
+    }
+
+    const answer = answerForItem(request);
+    if (answer !== null) {
+      void respond({ cancelled: false, answer });
     }
   }
 
   function canSubmit(): boolean {
-    if (!request) return false;
-    if (request.kind === "single") {
-      return Boolean(selectedOption) &&
-        (!isOtherOption(selectedOption) || Boolean(customAnswer.trim()));
+    return questionItems.length > 0 &&
+      questionItems.every(item => answerForItem(item) !== null);
+  }
+
+  function answerForItem(item: AskUserQuestionItem): AskUserQuestionAnswer | null {
+    if (item.kind === "single") {
+      const selected = selectedOption[item.id] ?? "";
+      if (!selected) return null;
+      return isOtherOption(selected) ? customAnswer[item.id]?.trim() || null : selected;
     }
-    if (request.kind === "multiple") {
-      return selectedOptions.length > 0 &&
-        (!selectedOptions.some(isOtherOption) || Boolean(customAnswer.trim()));
+    if (item.kind === "multiple") {
+      const selected = selectedOptions[item.id] ?? [];
+      if (selected.length === 0) return null;
+      if (selected.some(isOtherOption) && !customAnswer[item.id]?.trim()) return null;
+      return selected.map(option =>
+        isOtherOption(option) ? customAnswer[item.id].trim() : option,
+      );
     }
-    if (request.kind === "text") return Boolean(textAnswer.trim());
-    return false;
+    if (item.kind === "text") return textAnswer[item.id]?.trim() || null;
+    return null;
   }
 
   function isOtherOption(option: string): boolean {
@@ -99,27 +153,70 @@
     return normalized === "其他" || normalized === "other";
   }
 
-  function customAnswerSelected(): boolean {
-    if (request?.kind === "single") return isOtherOption(selectedOption);
-    if (request?.kind === "multiple") return selectedOptions.some(isOtherOption);
+  function customAnswerSelected(item: AskUserQuestionItem): boolean {
+    if (item.kind === "single") return isOtherOption(selectedOption[item.id] ?? "");
+    if (item.kind === "multiple") {
+      return (selectedOptions[item.id] ?? []).some(isOtherOption);
+    }
     return false;
   }
 
-  function answerText(answer: string | string[] | boolean): string {
+  function selectedOptionForDefault(
+    item: Extract<AskUserQuestionItem, { kind: "single" | "multiple" }>,
+    answer: string | undefined,
+  ): string {
+    if (!answer) return "";
+    if (item.options.includes(answer)) return answer;
+    return item.options.find(isOtherOption) ?? "";
+  }
+
+  function selectedOptionsForDefault(
+    item: Extract<AskUserQuestionItem, { kind: "multiple" }>,
+    answers: string[] | undefined,
+  ): string[] {
+    if (!answers) return [];
+    const selected = new Set<string>();
+    const other = item.options.find(isOtherOption);
+    for (const answer of answers) {
+      if (item.options.includes(answer)) selected.add(answer);
+      else if (other) selected.add(other);
+    }
+    return [...selected];
+  }
+
+  function customAnswerForDefault(
+    item: Extract<AskUserQuestionItem, { kind: "single" | "multiple" }>,
+    answer: string | undefined,
+  ): string {
+    return answer && !item.options.includes(answer) && item.options.some(isOtherOption)
+      ? answer
+      : "";
+  }
+
+  function answerText(
+    answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>,
+  ): string {
     if (Array.isArray(answer)) return answer.join(", ");
     if (typeof answer === "boolean") {
       return t(answer ? "questionTool.confirm" : "questionTool.cancel");
+    }
+    if (typeof answer === "object") {
+      return Object.entries(answer)
+        .map(([key, value]) => `${key}: ${answerText(value)}`)
+        .join("; ");
     }
     return answer;
   }
 </script>
 
-{#if request}
+{#if request && showCard}
   <article class="question-card" data-status={result?.status ?? "pending"}>
     <div class="question-label">{t("questionTool.label")}</div>
-    <div class="question-text">
-      <MarkdownRenderer content={askUserQuestionMarkdown(request.question)} />
-    </div>
+    {#if !request.batch}
+      <div class="question-text">
+        <MarkdownRenderer content={askUserQuestionMarkdown(request.question)} />
+      </div>
+    {/if}
 
     {#if result?.status === "answered"}
       <div class="question-result">{t("questionTool.answered", { answer: answerText(result.answer) })}</div>
@@ -129,7 +226,7 @@
       <div class="question-result muted">{t("questionTool.interrupted")}</div>
     {:else if !pending}
       <div class="question-error" role="alert">{block.resultText}</div>
-    {:else if request.kind === "confirm"}
+    {:else if !request.batch && request.kind === "confirm"}
       <div class="question-actions">
         <button type="button" class="secondary" disabled={submitting} onclick={() => void respond({ cancelled: false, answer: false })}>
           {t("questionTool.cancel")}
@@ -140,51 +237,61 @@
       </div>
     {:else}
       <form onsubmit={submit}>
-        {#if request.kind === "single"}
-          <fieldset disabled={!pending || submitting}>
-            <legend class="sr-only">{request.question}</legend>
-            {#each request.options as option}
-              <label class="question-option">
-                <input type="radio" name={`question-${block.toolCallId}`} value={option} bind:group={selectedOption} />
-                <span>{option}</span>
-              </label>
-            {/each}
-          </fieldset>
-        {:else if request.kind === "multiple"}
-          <fieldset disabled={!pending || submitting}>
-            <legend class="sr-only">{request.question}</legend>
-            {#each request.options as option}
-              <label class="question-option">
-                <input type="checkbox" value={option} bind:group={selectedOptions} />
-                <span>{option}</span>
-              </label>
-            {/each}
-          </fieldset>
-        {:else if request.kind === "text"}
-          <label class="sr-only" for={`question-${block.toolCallId}`}>{request.question}</label>
-          <input
-            id={`question-${block.toolCallId}`}
-            class="question-input"
-            type="text"
-            bind:value={textAnswer}
-            disabled={!pending || submitting}
-            placeholder={t("questionTool.inputPlaceholder")}
-          />
-        {/if}
+        {#each questionItems as item}
+          <div class:question-group={request.batch}>
+            {#if request.batch}
+              <div class="question-text">
+                <MarkdownRenderer content={askUserQuestionMarkdown(item.question)} />
+              </div>
+            {/if}
 
-        {#if customAnswerSelected()}
-          <label class="sr-only" for={`question-other-${block.toolCallId}`}>
-            {t("questionTool.otherPlaceholder")}
-          </label>
-          <input
-            id={`question-other-${block.toolCallId}`}
-            class="question-input"
-            type="text"
-            bind:value={customAnswer}
-            disabled={!pending || submitting}
-            placeholder={t("questionTool.otherPlaceholder")}
-          />
-        {/if}
+            {#if item.kind === "single"}
+              <fieldset disabled={!pending || submitting}>
+                <legend class="sr-only">{item.question}</legend>
+                {#each item.options as option}
+                  <label class="question-option">
+                    <input type="radio" name={`question-${block.toolCallId}-${item.id}`} value={option} bind:group={selectedOption[item.id]} />
+                    <span>{option}</span>
+                  </label>
+                {/each}
+              </fieldset>
+            {:else if item.kind === "multiple"}
+              <fieldset disabled={!pending || submitting}>
+                <legend class="sr-only">{item.question}</legend>
+                {#each item.options as option}
+                  <label class="question-option">
+                    <input type="checkbox" value={option} bind:group={selectedOptions[item.id]} />
+                    <span>{option}</span>
+                  </label>
+                {/each}
+              </fieldset>
+            {:else if item.kind === "text"}
+              <label class="sr-only" for={`question-${block.toolCallId}-${item.id}`}>{item.question}</label>
+              <input
+                id={`question-${block.toolCallId}-${item.id}`}
+                class="question-input"
+                type="text"
+                bind:value={textAnswer[item.id]}
+                disabled={!pending || submitting}
+                placeholder={t("questionTool.inputPlaceholder")}
+              />
+            {/if}
+
+            {#if customAnswerSelected(item)}
+              <label class="sr-only" for={`question-other-${block.toolCallId}-${item.id}`}>
+                {t("questionTool.otherPlaceholder")}
+              </label>
+              <input
+                id={`question-other-${block.toolCallId}-${item.id}`}
+                class="question-input"
+                type="text"
+                bind:value={customAnswer[item.id]}
+                disabled={!pending || submitting}
+                placeholder={t("questionTool.otherPlaceholder")}
+              />
+            {/if}
+          </div>
+        {/each}
 
         <div class="question-actions">
           <button type="button" class="secondary" disabled={!pending || submitting} onclick={() => void respond({ cancelled: true })}>
@@ -233,6 +340,18 @@
 
   form { display: flex; flex-direction: column; gap: 12px; }
   fieldset { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; }
+
+  .question-group {
+    display: grid;
+    gap: 10px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+
+  .question-group:first-child {
+    padding-top: 0;
+    border-top: 0;
+  }
 
   .question-option {
     display: flex;
