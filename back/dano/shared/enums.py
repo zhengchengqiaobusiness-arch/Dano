@@ -38,11 +38,26 @@ class RiskLevel(StrEnum):
 
 
 class Subsystem(StrEnum):
-    """A 公司原型的系统实例(作用域的一部分)。"""
+    """系统实例标识(作用域的一部分)。**开放**:任意租户的任意系统都可作为一个 subsystem,
+    不再限于 A 公司三件套 —— OA/TICKET/REIMBURSE 只是原型常量,新系统用任意字符串即可。
+
+    `_missing_` 让 `Subsystem("任意系统key")` 返回一个动态成员(而非抛 ValueError),从而 `Subsystem(sid)`
+    在全库各处构造点都通用;pydantic v2 校验 `subsystem: Subsystem` 字段时也会经此放行未登记值(已实测)。
+    动态成员不进 `_member_map_`(`list(Subsystem)` 仍只列三件套原型),但 `.value`/相等/哈希都按字符串正常工作。
+    """
 
     OA = "A-OA"
     TICKET = "A-工单"
     REIMBURSE = "A-报销"
+
+    @classmethod
+    def _missing_(cls, value: object) -> "Subsystem | None":
+        if isinstance(value, str):
+            member = str.__new__(cls, value)
+            member._name_ = value
+            member._value_ = value
+            return member
+        return None
 
 
 class FailureClass(StrEnum):

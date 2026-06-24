@@ -216,7 +216,8 @@ class PiCoder:
                 "success_rule": plan.success_rule,
                 "fact_check": plan.fact_check.model_dump() if plan.fact_check else None,
                 "user_fields": plan.user_fields, "required_fields": plan.required_fields,
-                "field_docs": plan.field_docs, "consts": plan.consts, "evidence": plan.evidence,
+                "field_docs": plan.field_docs, "field_types": plan.field_types,
+                "consts": plan.consts, "evidence": plan.evidence,
                 "business_meta": _evidence_business_meta(plan.evidence)}   # x-flow 业务规则 → 落进 adapter 供导出剧本
         if no_source:
             body["_no_source"] = True                  # 告知 controller:这是基建故障,别再回灌重写空烧预算

@@ -12,14 +12,20 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import re as _re
+from urllib.parse import urlparse
 
 _WRITE = {"POST", "PUT", "PATCH", "DELETE"}
-# 提交无关的高频路径(登录/校验码/字典/心跳等),挑提交「写请求」时排除
-_NOISE = ("/login", "/captcha", "/getInfo", "/dict/", "/heartbeat", "/refresh", "/upload",
-          "/sse", "/socket", "/ws", ".png", ".jpg", ".css", ".js")
-# 「读请求」噪声:只排静态资源/流/心跳;**保留 /dict/ 等列表接口**(代码型下拉的选项源,select 要用)
+# 「读请求」噪声:只排静态资源/流/心跳(通用,无任何业务路径名);保留字典/列表接口(select 候选源)。
 _READ_NOISE = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".js", ".woff", ".ico",
                "/sse", "/socket", "/ws", "/heartbeat")
+# 鉴权/基建写请求识别(P0#3:用「URL 路径段 + 请求体内容」判,**绝不写死任何系统的业务路径**)。
+# 这类录制时放行真发、也绝不当成"提交候选"。提交请求改由"带最多用户填入值"识别(因果/值驱动,见 pick_submit_request)。
+# ① URL 路径**整段**命中通用鉴权/上传/流概念(跨框架通用,非某系统专属;整段匹配避免 'lesson' 含 'sso' 之类误伤):
+_INFRA_PATH_SEGS = frozenset({"login", "logout", "signin", "sign-in", "sso", "oauth", "oauth2",
+                              "token", "refresh", "captcha", "upload", "sse", "socket", "ws"})
+# ② 或请求体里带密码/验证码/凭证/OAuth 字段(按内容判,最稳:登录体必带这些,跨系统通用):
+_AUTH_BODY_HINTS = ("password", "passwd", "captcha", "verifycode", "vcode", "credential",
+                    "refreshtoken", "grant_type", "client_secret", "clientsecret")
 
 
 # 浏览器通用头(回放交给 httpx / storageState 处理,不照搬);其余应用自定义头(鉴权/租户)要带上
@@ -63,6 +69,34 @@ def _values(node) -> list[str]:
     elif node is not None and not isinstance(node, bool):
         out.append(str(node))
     return out
+
+
+def _all_keys(node) -> list[str]:
+    """递归取 body 里所有 key(小写),用于按内容识别登录/鉴权请求。"""
+    out: list[str] = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            out.append(str(k).lower())
+            out += _all_keys(v)
+    elif isinstance(node, list):
+        for v in node:
+            out += _all_keys(v)
+    return out
+
+
+def looks_like_auth_write(url: str, body=None) -> bool:
+    """这条写请求是否登录/鉴权/基建(而非业务提交)。**通用判定,不依赖任何系统的业务路径名**:
+    ① URL 路径整段命中通用鉴权/上传/流概念(login/sso/oauth/token/captcha/upload…);
+    ② 或请求体带密码/验证码/凭证/OAuth 字段。命中则:录制时放行真发、且不作为"提交候选"。
+
+    body 可传已解析 dict 或原始 post_data 字符串(自动解析)。
+    """
+    if isinstance(body, str):
+        body = _parse_body(body)
+    segs = {s for s in urlparse(url or "").path.lower().split("/") if s}
+    if segs & _INFRA_PATH_SEGS:
+        return True
+    return any(any(h in k for h in _AUTH_BODY_HINTS) for k in _all_keys(body))
 
 
 def json_write_requests(requests: list[dict]) -> list[dict]:
@@ -326,17 +360,17 @@ def list_read_requests(reads: list[dict]) -> list[dict]:
 
 
 def pick_submit_request(requests: list[dict], samples: dict) -> dict | None:
-    """从抓到的请求里挑"提交请求":写方法 + JSON body + 含最多用户填的值。都不含则取最后一个写请求。"""
+    """从抓到的请求里挑"提交请求"。**因果/值驱动,不挑系统**:提交 = 带最多用户填入值的那条业务写请求
+    (噪声如心跳/字典/自动存草稿都不含用户填的值)。登录/鉴权写请求按内容排除。都不含用户值则取最后一条业务写请求。"""
     sample_vals = {str(v) for v in samples.values() if v not in ("", None)}
     best, best_score, last_write = None, -1, None
     for r in requests:
         if (r.get("method") or "").upper() not in _WRITE:
             continue
-        url = r.get("url") or ""
-        if any(n in url for n in _NOISE):
-            continue
         body = _parse_body(r.get("post_data"))
         if body is None:
+            continue
+        if looks_like_auth_write(r.get("url") or "", body):   # 登录/鉴权/基建写请求 → 不是业务提交
             continue
         last_write = r
         vals = set(_values(body))
@@ -637,11 +671,10 @@ def _apply_identity(body, api_request: dict, storage_state: dict | None) -> None
             _set_by_path(body, idn.get("path", ""), val)
 
 
-async def _fetch_list(url: str, base_url: str, storage_state, token_key: str, verify: bool,
-                      auth_headers: dict | None) -> list:
-    """带登录态 GET 一个候选列表(选领导源),用 as_list_payload 取出数组。失败返回 []。"""
+async def _get_json(url: str, base_url: str, storage_state, token_key: str | None, verify: bool,
+                    auth_headers: dict | None):
+    """带登录态 GET 一个 URL,返回解析后的 JSON(失败返回 None)。鉴权头通用构造,不挑系统。"""
     full = url if url.startswith("http") else (base_url or "").rstrip("/") + url
-    from urllib.parse import urlparse
     host = urlparse(full).hostname or ""
     headers: dict = dict(auth_headers or {})
     ck = _auth_headers(storage_state, host, token_key)
@@ -653,13 +686,43 @@ async def _fetch_list(url: str, base_url: str, storage_state, token_key: str, ve
     try:
         async with httpx.AsyncClient(timeout=30, verify=verify) as c:
             r = await c.get(full, headers=headers)
-        return as_list_payload(r.json()) or []
+        return r.json()
     except Exception:  # noqa: BLE001
-        return []
+        return None
+
+
+async def _fetch_list(url: str, base_url: str, storage_state, token_key: str | None, verify: bool,
+                      auth_headers: dict | None) -> list:
+    """带登录态 GET 一个候选列表(选领导源),用 as_list_payload 取出数组。失败返回 []。"""
+    data = await _get_json(url, base_url, storage_state, token_key, verify, auth_headers)
+    return as_list_payload(data) or []
+
+
+# 分页响应里"总记录数"字段(通用,不挑系统):total/totalCount/totalElements/recordsTotal…
+_PAGE_TOTAL_KEYS = ("total", "totalcount", "totalelements", "totalrows", "totalnum",
+                    "recordstotal", "totalsize")
+
+
+def _extract_total(data) -> int | None:
+    """从分页响应里抽"总记录数"(顶层或一层包装如 data.total)。无分页信息 → None。"""
+    def scan(d):
+        if not isinstance(d, dict):
+            return None
+        for k, v in d.items():
+            if (str(k).lower().replace("_", "") in _PAGE_TOTAL_KEYS
+                    and isinstance(v, (int, float)) and not isinstance(v, bool)):
+                return int(v)
+        for v in d.values():                       # 一层包装(data.total)
+            if isinstance(v, dict):
+                t = scan(v)
+                if t is not None:
+                    return t
+        return None
+    return scan(data)
 
 
 async def _resolve_selects(api_request: dict, fields: dict, *, base_url: str, storage_state,
-                           token_key: str, verify: bool) -> dict:
+                           token_key: str | None, verify: bool) -> dict:
     """Q2 选领导:参数传的是名字 → 查候选列表把它换成内部 ID。查不到则原样(可能用户直接给了 ID)。"""
     for s in api_request.get("selects") or []:
         param = s.get("param")
@@ -675,25 +738,52 @@ async def _resolve_selects(api_request: dict, fields: dict, *, base_url: str, st
     return fields
 
 
-def _auth_headers(storage_state: dict | None, host: str, token_key: str = "Admin-Token") -> dict:
-    """从登录态快照构造鉴权头:同域 cookie 全带上 + token(cookie/localStorage)→ Authorization Bearer。"""
+# token 在 cookie/localStorage 里的"键名"概念词(通用,不挑系统:Admin-Token/satoken/Authorization/access_token/jwt…)
+_TOKEN_KEY_HINTS = ("token", "satoken", "jwt", "authorization", "auth", "access", "session", "ticket")
+
+
+def _looks_like_token_key(name: str) -> bool:
+    return any(h in (name or "").lower() for h in _TOKEN_KEY_HINTS)
+
+
+def _token_like_value(v) -> bool:
+    """像登录令牌的值:较长的不透明字符串(JWT/雪花/uuid/satoken),排除短码/带空格。"""
+    s = str(v or "")
+    return len(s) >= 16 and " " not in s
+
+
+def _auth_headers(storage_state: dict | None, host: str, token_key: str | None = None) -> dict:
+    """从登录态快照构造鉴权头(**通用,不挑系统**):同域 cookie 全带上 + 自动识别 token → Authorization Bearer。
+
+    token 来源:① 显式 token_key 命中的 cookie/localStorage 条目(调用方已知头名时);
+    ② 否则**自动识别**——键名含 token/satoken/jwt/access… 且值像令牌(长不透明串)的条目(不再写死 Admin-Token)。
+    仅作"没抓到自定义鉴权头时"的兜底;主路径用录制时抓到的真实鉴权头原样带上(头名/方案都准)。
+    """
     headers: dict[str, str] = {}
     if not storage_state:
         return headers
     pairs: list[str] = []
-    tok = ""
+    tok_explicit, tok_auto = "", ""
+
+    def consider(name: str, val: str) -> None:
+        nonlocal tok_explicit, tok_auto
+        if token_key and name == token_key:
+            tok_explicit = val
+        elif not tok_auto and _looks_like_token_key(name) and _token_like_value(val):
+            tok_auto = val
+
     for c in storage_state.get("cookies") or []:
         cd = (c.get("domain") or "").lstrip(".")
         if host and cd and cd not in host and host not in cd:
             continue
-        pairs.append(f"{c.get('name')}={c.get('value')}")
-        if c.get("name") == token_key:
-            tok = c.get("value", "")
-    if not tok:
+        name, val = c.get("name", ""), c.get("value", "")
+        pairs.append(f"{name}={val}")
+        consider(name, val)
+    if not tok_explicit:
         for o in storage_state.get("origins") or []:
             for it in o.get("localStorage") or []:
-                if it.get("name") == token_key:
-                    tok = it.get("value", "")
+                consider(it.get("name", ""), it.get("value", ""))
+    tok = tok_explicit or tok_auto
     if pairs:
         headers["Cookie"] = "; ".join(pairs)
     if tok:
@@ -701,32 +791,158 @@ def _auth_headers(storage_state: dict | None, host: str, token_key: str = "Admin
     return headers
 
 
-# 响应体里常见的"业务成功码"字段(不信 HTTP 200,看它);200/0 = 成功(通用约定)
+# 响应体里常见的"业务成功码"字段(不信 HTTP 200,看它)。**字段名通用,但成功值不写死单一系统约定**:
+# 不同系统成功值各异(若依 code=200;阿里系 code=0/"00000";有的 success=true / status="OK")。
+# 故运行期**优先用资产级 success_rule**(录制期从该系统自己的真实响应学到),无则才退下面这套兜底集。
 _OK_CODE_KEYS = ("code", "status", "errcode", "errCode", "resultCode", "rspCode", "retCode", "flag")
+# 兜底成功值集(仅在没学到资产级规则时用;尽量覆盖常见约定,但**不能假设**——这正是 success_rule 存在的原因)
+_OK_FALLBACK_VALUES = frozenset({"200", "0", "00000", "true", "success", "ok", "1"})
+_MSG_KEYS = ("msg", "message", "error", "errmsg", "errMsg")
 
 
-def _response_ok(data) -> tuple[bool, str]:
-    """业务成功判定(通用,不挑系统):响应体有成功码字段 → 按 200/0 判;有 success → 按它;否则靠 HTTP。
+def _result_msg(data: dict) -> str:
+    for k in _MSG_KEYS:
+        v = data.get(k)
+        if v:
+            return str(v)
+    return ""
 
-    解决"HTTP 200 但 body 里 code=500 / success=false = 空操作"。返回 (是否成功, 失败原因)。
+
+def infer_success_rule(reads: list[dict]) -> dict | None:
+    """从录制期抓到的**成功**读响应里,学这套系统自己的"业务成功"约定(泛化核心:不挑系统、不假设 200)。
+
+    录制时抓到的 GET 列表响应都是真成功的 → 它们响应里出现的"成功码字段 + 该值"就是本系统的成功标志。
+    多数票:同一(字段,值)在多个读响应里出现得最多者胜 → {field, ok_values}。无则 None(运行期退兜底启发式)。
+    例:若依的读响应普遍是 {"code":200,...} → 学出 {"field":"code","ok_values":["200"]};
+        阿里系 {"code":"0",...} → {"field":"code","ok_values":["0"]};不会把 200 强加给后者。
+    """
+    from collections import Counter
+    votes: Counter = Counter()
+    for r in reads or []:
+        data = r.get("json")
+        if not isinstance(data, dict):
+            continue
+        for k in _OK_CODE_KEYS:                              # 一个响应只取第一个命中的码字段(与 _response_ok 同序)
+            v = data.get(k)
+            if v is not None and not isinstance(v, (dict, list)):
+                votes[(k, str(v))] += 1
+                break
+        else:
+            if isinstance(data.get("success"), bool) and data["success"]:
+                votes[("success", "true")] += 1
+    if not votes:
+        return None
+    (field, val), _ = votes.most_common(1)[0]
+    return {"field": field, "ok_values": [val]}
+
+
+def _response_ok(data, rule: dict | None = None) -> tuple[bool, str]:
+    """业务成功判定。**优先用资产级 success_rule**(录制期从该系统真实响应学到的约定:{field, ok_values}),
+    无则按通用兜底启发式(成功码字段∈兜底成功值集 / success 布尔);都没有 → 靠 HTTP 2xx。
+
+    解决"HTTP 200 但 body 里 code=500 / success=false = 空操作",且**不把任何单一系统的成功值写死**。
+    返回 (是否成功, 失败原因)。
     """
     if not isinstance(data, dict):
         return True, ""                                       # 非对象(数组/文本)→ 没业务码,靠 HTTP
+    msg = _result_msg(data)
+    if rule and rule.get("field"):                            # 资产级学到的成功约定优先
+        f = rule["field"]
+        if f in data and not isinstance(data.get(f), (dict, list)):
+            oks = {str(x) for x in (rule.get("ok_values") or [])}
+            ok = str(data.get(f)) in oks
+            return ok, ("" if ok else f"业务返回失败({f}={data.get(f)}):{msg}")
+        # 规则字段这次没出现/类型异常 → 不硬判,退兜底启发式(系统响应结构可能变了)
     for k in _OK_CODE_KEYS:
         v = data.get(k)
         if v is not None and not isinstance(v, (dict, list)):
-            ok = str(v) in ("200", "0", "true", "True", "success", "ok")
-            msg = data.get("msg") or data.get("message") or data.get("error") or ""
+            ok = str(v).lower() in _OK_FALLBACK_VALUES
             return ok, ("" if ok else f"业务返回失败({k}={v}):{msg}")
     if "success" in data:
         ok = bool(data["success"])
-        return ok, ("" if ok else f"业务返回 success=false:{data.get('msg') or data.get('message') or ''}")
+        return ok, ("" if ok else f"业务返回 success=false:{msg}")
     return True, ""                                           # 无成功码字段 → 靠 HTTP 2xx
+
+
+# ── 运行期值归一:让 agent 传"人话"值,按字段声明类型(field_types)+ 录制样例格式转成目标系统要的形态 ──
+# 通用、不挑字段:number→数字、boolean→布尔、datetime/date→录制时那个字段的格式(毫秒戳/秒戳/日期串)。
+# 这样 body_template 里 {{字段}} 填回去就是目标系统认的类型/格式,而不是一律字符串(否则数值条件失效、日期格式错被拒)。
+_EPOCH = _dt.datetime(1970, 1, 1)
+_DT_FORMATS = ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M",
+               "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d", "%Y/%m/%d %H:%M:%S")
+
+
+def _parse_dt(s):
+    """把一个值解析成东八区 wall-time datetime(naive,贴合中国 OA);失败 None。支持毫秒/秒戳、ISO、常见日期串。"""
+    s = str(s).strip()
+    if not s:
+        return None
+    if s.lstrip("-").isdigit():                              # 时间戳(秒/毫秒)→ 东八区 wall time
+        try:
+            return _EPOCH + _dt.timedelta(seconds=(int(s) / 1000 if len(s) >= 12 else int(s)), hours=8)
+        except Exception:  # noqa: BLE001
+            return None
+    for fmt in _DT_FORMATS:
+        try:
+            return _dt.datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    try:
+        return _dt.datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _coerce_datetime(value, sample, ftype):
+    """把日期/时间值归一成**录制样例 sample 揭示的目标形态**(毫秒戳/秒戳=数字、或日期(时间)串)。
+    样例缺失或解析不了 → 原样返回(best-effort,绝不破坏请求);时间戳目标统一返回数字(与原 body 一致)。"""
+    ss = str(sample or "").strip()
+    dt = _parse_dt(value)
+    if dt is None:
+        return value
+    epoch_s = (dt - _EPOCH - _dt.timedelta(hours=8)).total_seconds()
+    if ss.isdigit() and len(ss) >= 12:                       # 目标:毫秒戳(数字)
+        return int(epoch_s * 1000)
+    if ss.isdigit() and len(ss) == 10:                       # 目标:秒戳(数字)
+        return int(epoch_s)
+    if ftype == "date":
+        return dt.strftime("%Y-%m-%d")
+    sep = "T" if "T" in ss else " "
+    return dt.strftime(f"%Y-%m-%d{sep}%H:%M:%S")
+
+
+def _coerce_by_type(value, ftype, sample):
+    """按字段声明类型把 agent 值归一(通用,不挑字段)。类型未知/空/转不动 → 原样。"""
+    if value is None:
+        return value
+    if ftype in ("number", "integer"):
+        if isinstance(value, str) and value.strip():
+            t = value.strip()
+            try:
+                return int(t) if t.lstrip("-").isdigit() else float(t)
+            except ValueError:
+                return value
+        return value
+    if ftype == "boolean":
+        return value if isinstance(value, bool) else str(value).strip().lower() in ("true", "1", "yes", "y", "是", "on")
+    if ftype in ("datetime", "date"):
+        return _coerce_datetime(value, sample, ftype)
+    return value
+
+
+def _coerce_fields(fields: dict, api_request: dict) -> dict:
+    """对运行期参数按 api_request.field_types 逐个归一(日期格式取自录制样例)。无 field_types → 原样不动。"""
+    ftypes = api_request.get("field_types") or {}
+    if not ftypes:
+        return fields
+    samples = api_request.get("sample_inputs") or {}
+    return {k: (_coerce_by_type(v, ftypes.get(k), samples.get(k)) if k in ftypes else v)
+            for k, v in fields.items()}
 
 
 async def execute_api_request(api_request: dict, fields: dict, *, base_url: str = "",
                               storage_state: dict | None = None, send: bool = True,
-                              verify: bool = True, token_key: str = "Admin-Token",
+                              verify: bool = True, token_key: str | None = None,
                               overrides: dict | None = None) -> dict:
     """参数填回 body_template,带登录态发请求(send=True)或只校验参数齐全(send=False,dry,写安全)。
 
@@ -738,6 +954,8 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     if send:                                                 # 选领导:名字→ID(需连网查候选列表)
         fields = await _resolve_selects(api_request, fields, base_url=base_url,
                                         storage_state=storage_state, token_key=token_key, verify=verify)
+    # 按字段声明类型归一值(number/bool/日期格式),让 body 填回的是目标系统认的类型/格式 —— 通用,不挑字段
+    fields = _coerce_fields(fields, api_request)
     body = substitute(api_request.get("body_template"), fields, api_request.get("sample_inputs") or {})
     _apply_identity(body, api_request, storage_state)        # 当前用户/会话值运行期重取覆盖
     for p, v in (overrides or {}).items():                   # Q3:上一步响应值注入(taskId 等)
@@ -769,7 +987,8 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     except Exception:  # noqa: BLE001
         data = {"raw": r.text[:1000]}
     http_ok = 200 <= r.status_code < 300
-    biz_ok, biz_reason = _response_ok(data)                  # 不信 HTTP 200:看响应体业务码(真生效)
+    # 不信 HTTP 200:看响应体业务码。**优先用资产级 success_rule**(录制期学到的本系统成功约定),不挑系统
+    biz_ok, biz_reason = _response_ok(data, api_request.get("success_rule"))
     ok = http_ok and biz_ok
     detail = (biz_reason if (http_ok and not biz_ok) else ("" if http_ok else f"HTTP {r.status_code}"))
     return {"ok": ok, "status": r.status_code, "response": data, "business_ok": biz_ok,
@@ -778,7 +997,7 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
 
 async def execute_api_workflow(workflow: dict, fields: dict, *, base_url: str = "",
                                storage_state: dict | None = None, send: bool = True,
-                               verify: bool = True, token_key: str = "Admin-Token") -> dict:
+                               verify: bool = True, token_key: str | None = None) -> dict:
     """Q3 多写步链:按 steps 顺序执行(每步=录到的一个请求);step.links 把更早步「响应」里的值注入本步 body
     (如 taskId)。每步带各自 select/identity。任一步失败整体失败;最终步即业务结果。
     """
@@ -803,7 +1022,7 @@ async def execute_api_workflow(workflow: dict, fields: dict, *, base_url: str = 
             "status": last.get("status"), "response": last.get("response"), "final": last}
 
 
-async def _grounded_recheck(fc: dict, fields: dict, *, base_url: str, storage_state, token_key: str,
+async def _grounded_recheck(fc: dict, fields: dict, *, base_url: str, storage_state, token_key: str | None,
                             verify: bool, auth_headers: dict | None,
                             retries: int = 4, backoff: float = 0.6) -> tuple[bool, str]:
     """提交后回查:GET 记录列表,确认提交的值真出现在记录里(grounded,不信接口自报成功)。
@@ -817,12 +1036,20 @@ async def _grounded_recheck(fc: dict, fields: dict, *, base_url: str, storage_st
     target = fields.get(param)
     if target is None or not ep:
         return True, ""
+    truncated, total = False, None                    # truncated:列表确有更多页未取(total>已取)→ 不武断判失败
     for i in range(max(1, retries)):
-        items = await _fetch_list(ep, base_url, storage_state, token_key, verify, auth_headers)
+        data = await _get_json(ep, base_url, storage_state, token_key, verify, auth_headers)
+        items = as_list_payload(data) or []
         if any(isinstance(it, dict) and str(it.get(mf)) == str(target) for it in items):
-            return True, ""
+            return True, ""                           # 找到刚提交的记录 → 强阳性,确认真生效
+        total = _extract_total(data)
+        truncated = total is not None and total > len(items)   # 仅"明确分页且还有更多页"才算证据不足
         if i < retries - 1:
             await asyncio.sleep(backoff)
+    if truncated:
+        # 列表分页、记录可能在别的页 → 证据不足,不把"接口已自报成功"翻成失败(咨询性,避免误杀)
+        return True, f"回查不确定:列表分页(共{total}条,仅取部分),未在已取页找到 {param}={target}(不据此判失败)"
+    # 无分页(整表已取)却没有 → 真"空操作",一票否决(接地核查的价值所在)
     return False, f"回查未生效:记录列表里没找到 {param}={target}(疑似空操作)"
 
 
@@ -835,11 +1062,13 @@ async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
         auth = api_request.get("auth_headers") or ((api_request.get("steps") or [{}])[-1].get("auth_headers"))
         fok, freason = await _grounded_recheck(
             fc, fields, base_url=kw.get("base_url", ""), storage_state=kw.get("storage_state"),
-            token_key=kw.get("token_key", "Admin-Token"), verify=kw.get("verify", True), auth_headers=auth)
+            token_key=kw.get("token_key"), verify=kw.get("verify", True), auth_headers=auth)
         out["fact_check_passed"] = fok
         if not fok:
             out["ok"] = False
             out["detail"] = freason
+        elif freason:                                # 通过但不确定(列表分页未找到)→ 记咨询性说明,不翻失败
+            out["fact_check_note"] = freason
     return out
 
 

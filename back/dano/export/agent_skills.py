@@ -30,7 +30,21 @@ from dano.orchestrator.skills import SkillRegistry
 from dano.shared.enums import Subsystem
 
 log = structlog.get_logger(__name__)
-ALL_SUBSYSTEMS = [Subsystem.OA, Subsystem.TICKET, Subsystem.REIMBURSE]
+# 原型常量仅作空租户 / 无 DB 兜底;真实系统由 _tenant_subsystems 从该租户已发布资产发现(任意系统,不写死)。
+_PROTOTYPE_SUBSYSTEMS = [Subsystem.OA, Subsystem.TICKET, Subsystem.REIMBURSE]
+
+
+async def _tenant_subsystems(repo: AssetRepository, tenant: str) -> list[Subsystem]:
+    """该租户**实际拥有**的系统(发现式,支持任意系统);发现为空 / DB 不可用才退回原型常量。
+
+    与网关 `_tenant_subsystems` 一致:任意系统接入发布后自动被发现并导出,不必在代码里预先登记。
+    """
+    try:
+        subs = await repo.distinct_subsystems(tenant)
+    except Exception as e:  # noqa: BLE001 —— DB 不可用时退原型,不致导出整体失败
+        log.warning("export.discover_subsystems_failed", tenant=tenant, error=str(e))
+        subs = []
+    return subs or _PROTOTYPE_SUBSYSTEMS
 
 
 def _slug(skill_id: str) -> str:
@@ -73,7 +87,22 @@ def _numeric_fields(props: dict) -> list[str]:
 
 
 def _ptype(k: str, props: dict, numeric: set[str]) -> str:
-    return "number" if k in numeric else ((props.get(k) or {}).get("type") or "string")
+    """SKILL.md 参数表的「类型」列:把 manifest 的 format 还原成对 agent 有意义的语义类型,
+    不再把选择型/日期都显示成 string(那会让 agent 不知道该传名字还是 ID、是否日期)。"""
+    p = props.get(k) or {}
+    fmt = p.get("format")
+    if fmt == "name-ref":
+        return "枚举·名字→ID"
+    if fmt == "date-time":
+        return "datetime"
+    if fmt == "date":
+        return "date"
+    return "number" if k in numeric else (p.get("type") or "string")
+
+
+def _select_fields(props: dict) -> list[str]:
+    """名字→ID 的选择型字段(选领导/字典下拉):agent 传名字,Dano 运行期查内部 ID。"""
+    return [k for k, v in (props or {}).items() if (v or {}).get("format") == "name-ref"]
 
 
 def _approval_section(meta: dict) -> str:
@@ -117,6 +146,11 @@ def _collection_section(props: dict, numeric: list[str]) -> str:
         flds = "、".join(f"`{k}`" for k in numeric)
         lines.append(f"- 数值字段({flds})必须是 JSON **数字**而非字符串(脚本会自动转换;"
                      "审批分支按数值比较,字符串会让流程条件判断失效)。")
+    selects = _select_fields(props)
+    if selects:
+        flds = "、".join(f"`{k}`" for k in selects)
+        lines.append(f"- 选择型字段({flds})**传名字/选项文字**(如审批人姓名、假期类型名),"
+                     "**不要传内部 ID/编号**——Dano 运行期按名字到目标系统查对应 ID 再提交。")
     if {"quantity", "unitprice"} <= names and "amount" in names:
         lines.append("- 用户只给了数量与单价、没给总额时:`amount = quantity × unitPrice`(保留两位小数)。")
         lines.append("- 三者都给了:校验 `|quantity × unitPrice − amount| ≤ 0.01`;不一致时**不要提交**,"
@@ -626,7 +660,8 @@ async def write_skills(tenant: str, out_dir: str, *, rich: bool = True) -> list[
     from dano.generation.playbook import build_playbook
     from dano.generation.playbook_writer import render_playbook_md, write_playbook_md
     repo = AssetRepository()
-    reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=ALL_SUBSYSTEMS)
+    subs = await _tenant_subsystems(repo, tenant)   # 发现该租户真实系统(任意系统),与网关一致
+    reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=subs)
     manifests = build_manifests(reg.skills)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)

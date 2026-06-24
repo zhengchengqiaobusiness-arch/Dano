@@ -34,7 +34,18 @@ from dano.resilience.circuit_breaker import InMemoryCounter
 from dano.shared.enums import SkillState
 
 log = structlog.get_logger(__name__)
-ALL_SUBSYSTEMS = [Subsystem.OA, Subsystem.TICKET, Subsystem.REIMBURSE]
+# 三件套只是**原型常量**(空租户兜底);真实系统由 _tenant_subsystems 从该租户已发布资产里发现,不写死。
+_PROTOTYPE_SUBSYSTEMS = [Subsystem.OA, Subsystem.TICKET, Subsystem.REIMBURSE]
+
+
+async def _tenant_subsystems(tenant: str) -> list[Subsystem]:
+    """该租户**实际拥有**的系统实例(发现式,支持任意系统);发现为空(尚无发布)才退回原型常量兜底。"""
+    try:
+        subs = await repo.distinct_subsystems(tenant)
+    except Exception as e:  # noqa: BLE001 —— DB 异常时不致整体 500,退原型
+        log.warning("tenant_subsystems.discover_failed", tenant=tenant, error=str(e))
+        subs = []
+    return subs or _PROTOTYPE_SUBSYSTEMS
 _registry = InMemoryRegistry()       # DB 就绪换 PgRegistry(lifespan)
 _lifecycle = SkillLifecycle()        # 流程12 Skill 生命周期(进程内;可换 PgSkillStore)
 _breaker = InMemoryCounter()         # 流程10 失败计数/熔断
@@ -73,9 +84,9 @@ def _resolve_creds(refs: dict[str, str]) -> dict[str, str]:
     return resolve_credentials(refs)
 
 
-async def _load_endpoints(tenant: str) -> dict[str, SystemEndpoint]:
+async def _load_endpoints(tenant: str, subs: list[Subsystem]) -> dict[str, SystemEndpoint]:
     endpoints: dict[str, SystemEndpoint] = {}
-    for sub in ALL_SUBSYSTEMS:
+    for sub in subs:
         env = await repo.get_published(AssetType.ENV_PROFILE, Scope(tenant=tenant, subsystem=sub),
                                        asset_key=AssetType.ENV_PROFILE.value)
         if env is None:
@@ -86,10 +97,10 @@ async def _load_endpoints(tenant: str) -> dict[str, SystemEndpoint]:
     return endpoints
 
 
-async def _load_holidays(tenant: str) -> list[str]:
-    """汇总该租户各子系统 env_profile 里登记的日历源(供复合流程 compute 的 business_days)。"""
+async def _load_holidays(tenant: str, subs: list[Subsystem]) -> list[str]:
+    """汇总该租户各系统 env_profile 里登记的日历源(供复合流程 compute 的 business_days)。"""
     out: list[str] = []
-    for sub in ALL_SUBSYSTEMS:
+    for sub in subs:
         env = await repo.get_published(AssetType.ENV_PROFILE, Scope(tenant=tenant, subsystem=sub),
                                        asset_key=AssetType.ENV_PROFILE.value)
         if env:
@@ -100,14 +111,15 @@ async def _load_holidays(tenant: str) -> list[str]:
 async def _orchestrator(tenant: str) -> Orchestrator:
     from dano.execution.page import build_page_runtime
 
-    endpoints = await _load_endpoints(tenant)
+    subs = await _tenant_subsystems(tenant)            # 发现该租户的真实系统(任意系统,不写死)
+    endpoints = await _load_endpoints(tenant, subs)
     executor = RealActionExecutor(endpoints=endpoints, auth_manager=AuthManager())
-    registry = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=ALL_SUBSYSTEMS)
+    registry = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=subs)
     harness = Harness(action_executor=executor, resolve_credentials=_resolve_creds)
     return Orchestrator(registry=registry, store=repo, harness=harness,
                         action_executor=executor, resolve_credentials=_resolve_creds,
                         page_runtime=build_page_runtime(),
-                        holidays=await _load_holidays(tenant))
+                        holidays=await _load_holidays(tenant, subs))
 
 
 async def _auth_tenant(x_tenant_key: str | None) -> str:
@@ -547,14 +559,16 @@ async def record_ws(ws: WebSocket) -> None:
             elif t == "finalize":
                 raw = msg.get("steps")
                 if raw is not None:           # 前端编辑后的步骤(删了噪声/重复/调序)→ 以它为准
-                    from dano.agent_tools.page_builder import RecordedStep, _std_key
+                    from dano.agent_tools.page_builder import RecordedStep, assign_field_keys
                     steps = [RecordedStep(op=s["op"], locator=s.get("locator"),
                                           field=(s.get("field") or None)) for s in raw]
-                    samples = {_std_key(s["field"]): s.get("value", "") for s in raw
-                               if s.get("field") and s.get("op") in ("fill", "select", "pick") and s.get("value")}
-                    required_labels = {_std_key(s["field"]) for s in raw
-                                       if s.get("field") and s.get("required")
-                                       and s.get("op") in ("fill", "select", "pick")}
+                    # 字段 key 与 build_page_script 同算法分配(同序),samples/required 与脚本参数一致(P1#6)
+                    fb_idx = [i for i, s in enumerate(raw) if s.get("field")]
+                    keymap = dict(zip(fb_idx, assign_field_keys([raw[i]["field"] for i in fb_idx])))
+                    samples = {keymap[i]: raw[i].get("value", "") for i in fb_idx
+                               if raw[i].get("op") in ("fill", "select", "pick") and raw[i].get("value")}
+                    required_labels = {keymap[i] for i in fb_idx
+                                       if raw[i].get("required") and raw[i].get("op") in ("fill", "select", "pick")}
                 else:
                     steps, samples = sess.recorded_steps()
                     required_labels = sess.recorded_required_labels()
@@ -564,9 +578,10 @@ async def record_ws(ws: WebSocket) -> None:
                 # ★ 抓请求路径优先:列出所有 JSON 写请求(候选),默认选最像提交的那个,把它请求体拍平给
                 #   前端勾字段。用户也可在候选里手选别的(应对噪声误判 / 多写请求)。勾完发 publish_request 才建 Skill。
                 from dano.execution.page.request_capture import (flatten_body, json_write_requests,
-                                                                 pick_submit_request)
+                                                                 looks_like_auth_write, pick_submit_request)
                 cands = [c for c in json_write_requests(sess.captured_requests())
-                         if flatten_body(c.get("post_data"))]   # 只留有可勾字段的
+                         if flatten_body(c.get("post_data"))                       # 有可勾字段的
+                         and not looks_like_auth_write(c.get("url") or "", c.get("post_data"))]  # 排除登录/鉴权写
                 if cands:
                     pending_candidates = cands
                     pending_samples = samples
@@ -622,10 +637,11 @@ async def record_ws(ws: WebSocket) -> None:
                     continue
                 param_map = {k: v.strip() for k, v in (msg.get("param_map") or {}).items() if v and v.strip()}
                 from dano.execution.page.request_capture import (build_api_request, build_api_workflow,
-                                                                 suggest_fact_check)
+                                                                 infer_success_rule, suggest_fact_check)
                 sels = msg.get("selects") or []         # Q2 选领导:名字→ID
                 idens = msg.get("identity") or []        # Q1 当前用户:运行期重取
                 fc = suggest_fact_check(pending_samples, pending_reads)   # 回查源(录到"我的记录"列表才有)
+                sr = infer_success_rule(pending_reads)   # 学这套系统自己的"业务成功"约定(不挑系统,见 P0#2)
                 # 多步:用户勾了多个写请求(step_idxs,有序)→ 组装工作流,参数落在最后一步(提交那步)
                 step_idxs = [i for i in (msg.get("step_idxs") or []) if 0 <= i < len(pending_candidates)]
                 if len(step_idxs) > 1:
@@ -637,6 +653,10 @@ async def record_ws(ws: WebSocket) -> None:
                     last_params = (apir or {}).get("params") or []
                 if apir and fc:
                     apir["fact_check"] = fc            # 提交后回查记录确认真生效(grounded)
+                if apir and sr:                        # 学到的成功约定:落到资产(工作流则落最后一步=提交那步)
+                    apir["success_rule"] = sr
+                    if apir.get("steps"):
+                        apir["steps"][-1]["success_rule"] = sr
                 if not apir or not last_params:
                     await ws.send_json({"type": "result",
                                         "report": {"ok": False, "reason": "至少勾选一个字段作为参数(给它起个参数名)"}})
@@ -766,14 +786,14 @@ async def onboarding_job(job_id: str) -> dict:
 @app.get("/v1/skills")
 async def list_skills(x_tenant_key: str | None = Header(default=None)) -> list[dict]:
     tenant = await _auth_tenant(x_tenant_key)
-    reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=ALL_SUBSYSTEMS)
+    reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=await _tenant_subsystems(tenant))
     return [m.model_dump() for m in build_manifests(reg.skills)]
 
 
 @app.get("/v1/skills/{skill_id}")
 async def get_skill(skill_id: str, x_tenant_key: str | None = Header(default=None)) -> dict:
     tenant = await _auth_tenant(x_tenant_key)
-    reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=ALL_SUBSYSTEMS)
+    reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=await _tenant_subsystems(tenant))
     m = next((x for x in build_manifests(reg.skills) if x.name == skill_id), None)
     if m is None:
         raise HTTPException(status_code=404, detail=f"本公司无此 Skill: {skill_id}")
@@ -787,10 +807,7 @@ async def delete_skill(skill_id: str, x_tenant_key: str | None = Header(default=
     sub_str, _, action = skill_id.partition(".")
     if not action:
         raise HTTPException(status_code=400, detail="skill_id 应为 {subsystem}.{action}")
-    try:
-        subsystem = Subsystem(sub_str)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"未知子系统: {sub_str}") from e
+    subsystem = Subsystem(sub_str)            # 系统标识开放:任意系统皆合法(不存在则下面按 0 行返回 404)
     rows = await repo.delete_by_action(Scope(tenant=tenant, subsystem=subsystem), action)
     if rows == 0:
         raise HTTPException(status_code=404, detail=f"本公司无此 Skill: {skill_id}")
@@ -809,10 +826,7 @@ async def _invoke(tenant: str, skill_id: str, input_: dict, confirm: bool) -> di
     sub_str, _, action = skill_id.partition(".")
     if not action:
         raise HTTPException(status_code=400, detail="skill_id 应为 {subsystem}.{action}")
-    try:
-        subsystem = Subsystem(sub_str)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"未知子系统: {sub_str}") from e
+    subsystem = Subsystem(sub_str)            # 系统标识开放:任意系统皆合法(无对应 Skill 时编排按能力缺口处理)
     # 流程12:异常暂停的 Skill 不可调用(保障期闸门)
     rec = await _lifecycle.store.get(skill_id)
     if rec and rec.state == SkillState.SUSPENDED:
@@ -834,7 +848,7 @@ async def invoke_skill(skill_id: str, req: InvokeReq,
 async def list_tools(x_tenant_key: str | None = Header(default=None)) -> list[dict]:
     """导出本租户 Skill 为 OpenAI function-calling tools 数组,聊天端直接喂给 LLM。"""
     tenant = await _auth_tenant(x_tenant_key)
-    reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=ALL_SUBSYSTEMS)
+    reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=await _tenant_subsystems(tenant))
     return build_function_tools(reg.skills)
 
 

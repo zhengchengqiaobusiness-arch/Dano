@@ -67,6 +67,9 @@ class ConnectorBody(BaseModel):
     failure_handling: FailureHandling = Field(default_factory=FailureHandling)
     risk_level: RiskLevel = RiskLevel.L1
     assertions: Assertions = Field(default_factory=Assertions)
+    # 事实核查(流程9)随资产走,而非按动作名硬编码在运行期字典:声明才核查,grounded。
+    fact_check_query: str | None = Field(default=None, description="成功后重查哪个动作(查询类/无需核查=None)")
+    fact_check_expr: str | None = Field(default=None, description="操作前后比对的布尔表达式(声明才核查)")
     required_mcp: list[str] = Field(default_factory=list, description="该动作所需的 MCP server(MCP 隔离校验)")
     # 工作流步骤:只在复合流程里被串用、**不能独立跑**(如提交步需上一步的 taskId)。
     # → 发布闸门放宽到"连得通即可"(沙箱/评审由复合 sandbox_test_workflow 整链验证);目录里**永不单独露出**。
@@ -366,6 +369,7 @@ class PlanBody(BaseModel):
     user_fields: list[str] = Field(default_factory=list, description="用户需提供的业务字段")
     required_fields: list[str] = Field(default_factory=list, description="必填业务字段")
     field_docs: dict[str, str] = Field(default_factory=dict, description="字段→语义描述(供前端/LLM/导出)")
+    field_types: dict[str, str] = Field(default_factory=dict, description="字段→类型(信源 schema/表单);契约层据此判数值,空才退关键词启发")
     consts: dict = Field(default_factory=dict, description="运行期注入的内部常量(如 __templateId__),非用户字段")
     evidence: dict = Field(default_factory=dict, description="v3:裁剪后的证据(端点/表单字段/样例返回),供编码器据实写码")
     success_rule: str | None = Field(default=None, description="成败判定表达式")
@@ -392,6 +396,7 @@ class AdapterBody(BaseModel):
     user_fields: list[str] = Field(default_factory=list, description="用户需提供的业务字段")
     required_fields: list[str] = Field(default_factory=list, description="必填业务字段")
     field_docs: dict[str, str] = Field(default_factory=dict, description="字段→语义描述(供前端/LLM/导出)")
+    field_types: dict[str, str] = Field(default_factory=dict, description="字段→类型(信源 schema/表单);契约层据此判数值,空才退关键词启发")
     consts: dict = Field(default_factory=dict, description="运行期注入的内部常量(如 __templateId__),非用户字段")
     risk_level: RiskLevel = RiskLevel.L3
     success_rule: str | None = Field(default=None, description="成败判定表达式;None=HTTP 2xx")

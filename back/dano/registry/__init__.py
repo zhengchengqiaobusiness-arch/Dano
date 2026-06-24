@@ -9,6 +9,9 @@ from dano.registry.models import (
     SystemInstance,
     SystemTemplate,
     TenantRecord,
+    all_system_templates,
+    get_system_template,
+    register_system_template,
 )
 from dano.registry.store import InMemoryRegistry, PgRegistry, RegistryStore
 
@@ -17,6 +20,9 @@ __all__ = [
     "SystemInstance",
     "SystemTemplate",
     "SYSTEM_TEMPLATES",
+    "register_system_template",
+    "all_system_templates",
+    "get_system_template",
     "RegistryStore",
     "InMemoryRegistry",
     "PgRegistry",

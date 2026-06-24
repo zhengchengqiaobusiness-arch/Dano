@@ -260,25 +260,18 @@ def _workflow_business_meta(spec: dict, tmpl, tid: str) -> dict:  # noqa: ANN001
     return parse(spec, tid) if (callable(parse) and tid) else {}
 
 
-def _submit_leaf_fields(spec: dict, tmpl, tid: str) -> dict:  # noqa: ANN001
-    """从提交端点请求体 schema 抽**叶子字段** {name: {type, description, path}}(递归 flowTask.variables 这类嵌套)。
+def _norm_template_id(s: str) -> str:
+    """归一 templateId:去掉 `_template` 后缀,使 'purchase' 与 'purchase_template' 等价匹配。"""
+    s = (s or "").strip()
+    return s[: -len("_template")] if s.endswith("_template") else s
 
-    `path` = 叶子在请求体里的嵌套点路径(如 flowTask.variables.amount),供字段映射可追溯。
-    oneOf 多模板时优先取 `Submit_<templateId>` 那一支(对不上则并集);供 workflow 字段类型/描述信源直通。
+
+def _walk_variant(spec: dict, root) -> dict:  # noqa: ANN001
+    """walk 单个 submit 变体 schema → 叶子字段 {name:{type,description,path,required}}。
+
+    `required` = 该叶子是否在其**直属对象**的 required 列表里(变量层字段的必填以变量对象为准)。
     """
     from dano.capabilities.doc_parser import _resolve_ref
-    if not isinstance(spec, dict) or tmpl is None:
-        return {}
-    eps = tmpl.submit_endpoints() or ()
-    if not eps:
-        return {}
-    op = ((spec.get("paths") or {}).get(eps[-1]) or {}).get("post") or {}
-    schema = ((((op.get("requestBody") or {}).get("content") or {})
-               .get("application/json") or {}).get("schema")) or {}
-    variants = schema.get("oneOf") or [schema]
-    want = ("Submit_" + tid) if tid else ""
-    chosen = next((v for v in variants if isinstance(v, dict) and want
-                   and str(v.get("$ref", "")).endswith(want)), None)
     out: dict = {}
 
     def _walk(node, prefix="", depth=0):  # noqa: ANN001
@@ -287,21 +280,63 @@ def _submit_leaf_fields(spec: dict, tmpl, tid: str) -> dict:  # noqa: ANN001
         node = _resolve_ref(spec, node)
         if not isinstance(node, dict):
             return
+        req = set(node.get("required") or [])
         for k, v in (node.get("properties") or {}).items():
             vr = _resolve_ref(spec, v)
             path = f"{prefix}.{k}" if prefix else k
             if isinstance(vr, dict) and vr.get("properties"):
                 _walk(vr, path, depth + 1)
             elif isinstance(vr, dict):
-                info = {"path": path}
+                info = {"path": path, "required": k in req}
                 if vr.get("type"):
                     info["type"] = vr["type"]
                 if vr.get("description"):
                     info["description"] = vr["description"]
                 out[k] = info          # 同名叶子后写覆盖:取更深/更靠后的(变量层 > 顶层 title)
-    for c in ([chosen] if chosen else variants):
-        if c is not None:
-            _walk(c)
+    _walk(root)
+    return out
+
+
+def _submit_leaf_fields(spec: dict, tmpl, tid: str) -> dict:  # noqa: ANN001
+    """从提交端点请求体 schema 抽**叶子字段** {name:{type,description,path,required}}(递归 flowTask.variables)。
+
+    oneOf 多模板时**只取本业务那一支**(Submit_<templateId>,容忍 tid 带/不带 `_template` 后缀);
+    锁不定具体模板时**绝不跨模板并集**——并集会让 A 模板的字段语义串到 B 模板(如把销假模板的「销假说明」
+    安到采购的 reason 上)。退而只保留所有变体中**完全一致**的字段:宁可少给描述,也绝不臆造错描述。
+    """
+    if not isinstance(spec, dict) or tmpl is None:
+        return {}
+    eps = tmpl.submit_endpoints() or ()
+    if not eps:
+        return {}
+    op = ((spec.get("paths") or {}).get(eps[-1]) or {}).get("post") or {}
+    schema = ((((op.get("requestBody") or {}).get("content") or {})
+               .get("application/json") or {}).get("schema")) or {}
+    variants = [v for v in (schema.get("oneOf") or [schema]) if isinstance(v, dict)]
+    if not variants:
+        return {}
+    # ① 优先锁定本业务模板那一支(ref 名 Submit_<tid>,容忍 _template 后缀差异)
+    want = _norm_template_id(tid)
+    chosen = None
+    if want:
+        for v in variants:
+            ref_name = str(v.get("$ref", "")).rsplit("/", 1)[-1]
+            if ref_name.startswith("Submit_") and _norm_template_id(ref_name[len("Submit_"):]) == want:
+                chosen = v
+                break
+    if chosen is not None:
+        return _walk_variant(spec, chosen)
+    if len(variants) == 1:
+        return _walk_variant(spec, variants[0])
+    # ② 锁不定本业务:只保留所有变体里**完全一致**的字段(避免跨模板串台);冲突字段宁缺毋错
+    per = [_walk_variant(spec, v) for v in variants]
+    out: dict = {}
+    for k in set.intersection(*[set(d) for d in per]):
+        infos = [d[k] for d in per]
+        first = infos[0]
+        if all(i.get("type") == first.get("type") and i.get("description") == first.get("description")
+               and i.get("required") == first.get("required") for i in infos):
+            out[k] = first
     return out
 
 
@@ -385,10 +420,12 @@ async def draft_workflow(run_id: str, params: dict) -> dict:
         invariants = [Invariant.model_validate(p) for p in params.get("invariants", [])]
     except Exception as e:  # noqa: BLE001
         raise ToolError(f"流程节点结构非法: {e}") from e
-    # 契约自洽:所有 field:X 引用并入 user_fields/required_fields(防"用了却没声明")
+    # 契约自洽:所有 field:X 引用并入 **user_fields**(防"用了却没声明",grounding 认 user_fields)。
+    # 但**"被步骤引用 ≠ 必填"**:必填只认 pi 显式声明 + 提交 schema 标 required 的(下方按 leaves 收敛),
+    # 绝不把所有引用字段强标必填(否则 spec 明明可选的字段也被拦成必填)。
     used = collect_field_refs(steps)
-    required_fields = sorted(set(params.get("required_fields", [])) | used)
     user_fields = sorted(set(params.get("user_fields", [])) | used)
+    required_fields = sorted(set(params.get("required_fields", [])) & set(user_fields))
     tmpl = oa_templates.match_template(mat.openapi or {})
     body = WorkflowSkillBody(
         action=params["action"], title=params.get("title", params["action"]),
@@ -406,6 +443,11 @@ async def draft_workflow(run_id: str, params: dict) -> dict:
             body.business_meta = bmeta
             body.business = body.business or bmeta.get("flow", "")
         leaves = _submit_leaf_fields(spec, tmpl, tid)
+        # 必填忠实于提交 schema:叶子标 required 的才必填(并集 pi 显式声明),最终 ⊆ user_fields。
+        # 这样"被步骤引用但 schema 可选"的字段不再被强标必填(修"全字段标必填"缺陷)。
+        if leaves:
+            schema_req = {f for f in body.user_fields if (leaves.get(f) or {}).get("required")}
+            body.required_fields = sorted((set(body.required_fields) | schema_req) & set(body.user_fields))
         # WS6:探目标系统真实动态表单 → 字段类型权威信源(best-effort,探不到=空,不阻断)
         form_types = await _probe_form_types(mat, tmpl, tid)
         if leaves or form_types:
@@ -522,7 +564,9 @@ async def draft_connector(run_id: str, params: dict) -> dict:
     body = build_connector_body(action, tenant=mat.tenant, subsystem=mat.subsystem,
                                 success_rule=success_rule, as_step=bool(params.get("as_step")),
                                 business=str(params.get("business") or ""),
-                                internal=bool(params.get("internal")))
+                                internal=bool(params.get("internal")),
+                                fact_check_query=params.get("fact_check_query") or None,
+                                fact_check_expr=params.get("fact_check_expr") or None)
     validate_asset_body(AssetType.CONNECTOR, body.model_dump())
     draft = await _ds.save_draft(run_id=run_id, scope=Scope(tenant=mat.tenant, subsystem=Subsystem(mat.subsystem)),
                                  asset_type=AssetType.CONNECTOR, asset_key=action_name, body=body.model_dump())

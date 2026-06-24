@@ -4,10 +4,13 @@ from __future__ import annotations
 from dano.execution.page.request_capture import (
     _response_ok,
     as_list_payload,
+    infer_success_rule,
     build_api_request,
     build_api_workflow,
+    _extract_total,
     discover_step_links,
     execute_api,
+    looks_like_auth_write,
     execute_api_request,
     execute_api_workflow,
     extract_auth_headers,
@@ -319,6 +322,64 @@ def test_response_ok_judges_business_code():
     assert _response_ok({"success": False})[0] is False
     assert _response_ok({"rows": [1, 2], "total": 2})[0] is True   # 列表响应无业务码 → 靠 HTTP
     assert _response_ok("OK")[0] is True
+
+
+def test_extract_total_detects_pagination_generally():
+    """P2:从分页响应抽 total(顶层/一层包装,跨系统),无分页则 None → 回查不据此误判失败。"""
+    assert _extract_total({"code": 200, "rows": [1, 2], "total": 57}) == 57
+    assert _extract_total({"data": {"records": [1], "total": 120}}) == 120
+    assert _extract_total({"rows": [1, 2, 3]}) is None        # 无分页字段
+    assert _extract_total({"success": True, "data": [1]}) is None   # bool 不当 total
+
+
+def test_subsystem_is_open_for_any_system():
+    """P0#1:系统标识开放 —— 任意租户任意系统都可作 subsystem,不再限于三件套原型。"""
+    from dano.shared.enums import Subsystem
+    from dano.shared.models import Scope
+    assert Subsystem.OA.value == "A-OA"                       # 原型常量仍在
+    x = Subsystem("B-合同审批")                                # 任意系统:不抛 ValueError
+    assert x.value == "B-合同审批" and x == "B-合同审批"
+    sc = Scope(tenant="acme", subsystem=Subsystem("C-门户"))   # pydantic 字段接受任意系统
+    assert sc.subsystem.value == "C-门户"
+    assert {Subsystem("新"): 1}[Subsystem("新")] == 1          # 可作字典键
+    assert [s.value for s in Subsystem] == ["A-OA", "A-工单", "A-报销"]   # 枚举仍只列原型
+
+
+def test_pick_submit_excludes_auth_by_content_not_path():
+    """P0#3:提交识别不靠系统专属路径名 —— 登录(含 password)按内容排除,业务提交按"带用户值"选中。"""
+    reqs = [
+        {"method": "POST", "url": "http://x/any/login-action", "post_data": '{"user":"u","password":"p"}'},
+        {"method": "POST", "url": "http://x/biz/apply", "post_data": '{"reason":"大地色多","days":2}'},
+        {"method": "POST", "url": "http://x/keepalive", "post_data": '{"t":1}'},   # 心跳:不含用户值
+    ]
+    got = pick_submit_request(reqs, {"原因": "大地色多"})
+    assert got is not None and got["url"] == "http://x/biz/apply"
+    # 整段匹配避免子串误伤:'lesson' 不因含 'sso' 被当鉴权;'/oauth/token' 命中
+    assert looks_like_auth_write("http://x/lesson/submit", '{"reason":"r"}') is False
+    assert looks_like_auth_write("http://x/oauth/token", "{}") is True
+    assert looks_like_auth_write("http://x/biz/token-apply", '{"reason":"r"}') is False
+
+
+def test_infer_success_rule_learns_system_convention():
+    """P0#2 泛化核心:从本系统真实成功读响应学成功约定,不假设 200。"""
+    # 若依:读响应普遍 code=200
+    assert infer_success_rule([{"json": {"code": 200, "rows": [1]}},
+                               {"json": {"code": 200, "data": [2]}}]) == {"field": "code", "ok_values": ["200"]}
+    # 阿里系:code="0" —— 绝不被强加成 200
+    assert infer_success_rule([{"json": {"code": "0", "data": {"list": [1]}}}]) == {"field": "code", "ok_values": ["0"]}
+    # success 布尔约定
+    assert infer_success_rule([{"json": {"success": True, "data": [1]}}]) == {"field": "success", "ok_values": ["true"]}
+    # 没有可学的(纯数组/无码字段)→ None
+    assert infer_success_rule([{"json": [1, 2, 3]}, {"json": None}]) is None
+
+
+def test_response_ok_honors_learned_rule_over_200_assumption():
+    """P0#2:某系统 code=1 才是成功 → 用学到的规则判对;且 code=200 在该系统反而判失败。"""
+    rule = {"field": "code", "ok_values": ["1"]}
+    assert _response_ok({"code": 1, "msg": "ok"}, rule)[0] is True
+    assert _response_ok({"code": 200}, rule)[0] is False        # 不再无脑认 200
+    # 规则字段这次没出现 → 退兜底启发式,不硬判
+    assert _response_ok({"status": 0}, rule)[0] is True
 
 
 def test_discover_step_links_finds_taskid_chain():

@@ -11,23 +11,31 @@ import json
 from typing import Protocol, runtime_checkable
 
 
-async def apply_token_auth(context, *, token: str, url: str, token_key: str = "Admin-Token") -> None:  # noqa: ANN001
-    """预置登录态:把 OA token 注入 context,免在画面里登录。
+# 前端常见的"存 token 的键名"(cookie + localStorage):给定 raw token 但不知系统约定时,一并注入这组,
+# SPA 拦截器会从它认识的那个键读到 token、其余被忽略 —— 通用,不写死单一系统(原 'Admin-Token' 只是其一)。
+_COMMON_TOKEN_KEYS = ("Admin-Token", "satoken", "token", "access_token", "accessToken",
+                      "Authorization", "jwt", "X-Token")
 
-    RuoYi(vue-element-admin)从 Cookie `Admin-Token` 读 token;部分变体读 localStorage —— 两处都塞。
-    必须在 goto 之前调用。token_key 默认 RuoYi 的 'Admin-Token',其它系统可传。
+
+async def apply_token_auth(context, *, token: str, url: str, token_key: str | None = None) -> None:  # noqa: ANN001
+    """预置登录态:把 raw token 注入 context(cookie + localStorage),免在画面里登录。必须在 goto 前调用。
+
+    token_key 显式给定(系统已知,如来自系统画像)→ 只注入该键;否则**注入一组常见 token 键名**
+    (通用,不挑系统:Admin-Token/satoken/access_token… 都塞,SPA 读它认识的那个,其余忽略)。
     """
     if not token or not url:
         return
     from urllib.parse import urlparse
     host = urlparse(url).hostname
-    if host:
-        try:
-            await context.add_cookies([{"name": token_key, "value": token, "domain": host, "path": "/"}])
-        except Exception:  # noqa: BLE001
-            pass
-    await context.add_init_script(
-        f"try{{localStorage.setItem({json.dumps(token_key)},{json.dumps(token)});}}catch(e){{}}")
+    keys = [token_key] if token_key else list(_COMMON_TOKEN_KEYS)
+    for k in keys:
+        if host:
+            try:
+                await context.add_cookies([{"name": k, "value": token, "domain": host, "path": "/"}])
+            except Exception:  # noqa: BLE001
+                pass
+        await context.add_init_script(
+            f"try{{localStorage.setItem({json.dumps(k)},{json.dumps(token)});}}catch(e){{}}")
 
 
 @runtime_checkable
@@ -136,7 +144,7 @@ class PlaywrightPageDriver:
     @classmethod
     async def launch(cls, *, base_url: str = "", headless: bool = True,
                      storage_state: str | None = None, token: str | None = None,
-                     token_key: str = "Admin-Token", auth_url: str = "") -> tuple["PlaywrightPageDriver", object]:
+                     token_key: str | None = None, auth_url: str = "") -> tuple["PlaywrightPageDriver", object]:
         """起浏览器/上下文/页,返回 (driver, playwright_ctx_mgr) —— 调用方负责 close 释放。
 
         token 给定 → 预置登录态(免登录),注入域取 auth_url 或 base_url。

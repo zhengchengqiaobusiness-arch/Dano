@@ -53,19 +53,35 @@ def _is_reserved(field: str) -> bool:
     return (field.startswith("__") and field.endswith("__")) or is_flow_internal(field)
 
 
-def _field_type(skill: SkillSpec, field: str, desc: str) -> str:
-    """字段 JSON 类型:信源 schema 声明优先(skill.field_types),退而按名字/描述判定数值。"""
+def _schema_prop(skill: SkillSpec, field: str, desc: str) -> dict:
+    """字段 → JSON Schema 属性。**type 保持合法**(function-calling 可直接用),但**语义不丢**:
+
+    - `enum`(选领导/字典下拉):type=string + format=name-ref + 描述提示「传名字→运行期查内部 ID」
+      (这是关键:agent 必须传名字/选项文字,而非内部 ID/编号,否则提交进的是错值);
+    - `datetime`/`date`:type=string + 标准 format,告诉 agent 这是日期时间字段;
+    - 其余按信源声明 / 数值语义判定。format 为 JSON Schema 扩展位,校验器忽略未知值,安全。
+    """
     declared = (getattr(skill, "field_types", {}) or {}).get(field)
-    if declared in ("number", "integer", "boolean", "string"):
-        return declared
-    return "number" if is_numeric_field(field, desc, declared_type=declared) else "string"
+    if declared == "enum":
+        return {"type": "string", "format": "name-ref",
+                "description": desc + "(传名字/选项文字,如『张三』;Dano 运行期自动查内部 ID,**勿直接传 ID/编号**)"}
+    if declared == "datetime":
+        return {"type": "string", "format": "date-time",
+                "description": desc + "(日期时间;传 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss`,Dano 运行期自动转成目标系统格式,**勿自己拼时间戳**)"}
+    if declared == "date":
+        return {"type": "string", "format": "date",
+                "description": desc + "(日期;传 `YYYY-MM-DD`,Dano 运行期自动转成目标系统格式)"}
+    if declared in ("number", "integer", "boolean", "array", "object"):
+        return {"type": declared, "description": desc}
+    return {"type": "number" if is_numeric_field(field, desc, declared_type=declared) else "string",
+            "description": desc}
 
 
 def _parameters_schema(skill: SkillSpec) -> dict:
     """构造 JSON Schema(标准函数参数定义):必填 + 可选字段都暴露,required 仅列必填。
 
     - 字段描述优先用接口 schema 抽出的语义描述(阶段4),退而用标准字段别名,再退字段名。
-    - 字段类型按信源/语义判定(数值字段为 number,不再一律 string)。
+    - 字段类型/语义按信源判定(数值=number、选择型=name-ref、日期=date(-time)),不再一律塌成 string。
     - 运行期注入字段(__base_url__、templateId 等流程句柄)一律剔除,不暴露给前端/LLM。
     """
     all_fields = [f for f in dict.fromkeys([*skill.required_fields, *skill.optional_fields])
@@ -73,7 +89,7 @@ def _parameters_schema(skill: SkillSpec) -> dict:
     props = {}
     for f in all_fields:
         desc = skill.field_docs.get(f) or _FIELD_DESC.get(f, f)
-        props[f] = {"type": _field_type(skill, f, desc), "description": desc}
+        props[f] = _schema_prop(skill, f, desc)
     return {
         "type": "object",
         "properties": props,

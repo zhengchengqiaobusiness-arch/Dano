@@ -193,7 +193,7 @@ class RecordSession:
 
     async def start(self, start_url: str, *, base_url: str = "", headless: bool = True,
                     storage_state: str | None = None, token: str | None = None,
-                    token_key: str = "Admin-Token") -> None:
+                    token_key: str | None = None) -> None:
         from playwright.async_api import async_playwright
 
         from dano.execution.page.driver import apply_token_auth
@@ -248,14 +248,31 @@ class RecordSession:
         except Exception:  # noqa: BLE001
             pass
 
+    def _success_envelope(self) -> str:
+        """伪造的"提交成功"响应体 —— **镜像本系统自己的成功约定**(从已抓到的成功读响应学),不写死若依 code=200。
+
+        这样不管 SPA 前端检查 code===0 / code===200 / success===true,拦截后都能正确显示成功 → 用户能继续到
+        "我的记录"页(供 fact_check 抓回查源)。学不到约定时给一个并集兜底(同时带 code/success,尽量通吃)。
+        """
+        import json as _json
+
+        from dano.execution.page.request_capture import infer_success_rule
+        body: dict = {"msg": "录制已拦截:抓到请求,未真正提交", "success": True}
+        rule = infer_success_rule(self.reads)
+        if rule and rule.get("field") and rule.get("ok_values"):
+            body[rule["field"]] = rule["ok_values"][0]      # 用本系统的成功字段+成功值
+        else:
+            body["code"] = 200                              # 兜底:最常见约定(同时已带 success:true)
+        return _json.dumps(body, ensure_ascii=False)
+
     async def _route(self, route, request) -> None:  # noqa: ANN001 —— 拦截模式
-        from dano.execution.page.request_capture import _NOISE
+        from dano.execution.page.request_capture import looks_like_auth_write
         try:
             m = (request.method or "").upper()
             url = request.url
             pd = request.post_data if m in ("POST", "PUT", "PATCH", "DELETE") else None
-            # 业务写请求(非登录/校验码等噪声)→ 抓下来,假装成功不真发;其余照常放行
-            if pd and not any(n in url for n in _NOISE):
+            # 业务写请求 → 抓下来,假装成功不真发;登录/鉴权/上传等基建写请求照常放行(用户要真登录,不能拦)
+            if pd and not looks_like_auth_write(url, pd):
                 hd = {}
                 try:
                     hd = dict(request.headers or {})
@@ -263,7 +280,7 @@ class RecordSession:
                     pass
                 self._capture(m, url, pd, hd.get("content-type", ""), hd)
                 await route.fulfill(status=200, content_type="application/json",
-                                    body='{"code":200,"msg":"录制已拦截:抓到请求,未真正提交"}')
+                                    body=self._success_envelope())
                 return
             await route.continue_()
         except Exception:  # noqa: BLE001
@@ -385,22 +402,28 @@ class RecordSession:
             return None
 
     def recorded_steps(self):
-        """已捕获步骤 → (RecordedStep 列表, sample_inputs)。填写值作样例,按标准字段 key 对齐。"""
-        from dano.agent_tools.page_builder import RecordedStep, _std_key
+        """已捕获步骤 → (RecordedStep 列表, sample_inputs)。字段 key 用 assign_field_keys 统一分配
+        (与 build_page_script 同序同算法 → samples key 与脚本参数 key 一致;多字段塌缩同一 std_key 也不丢,P1#6)。"""
+        from dano.agent_tools.page_builder import RecordedStep, assign_field_keys
+        fb_idx = [i for i, s in enumerate(self.steps) if s.get("field")]
+        keys = assign_field_keys([self.steps[i]["field"] for i in fb_idx])
+        keymap = dict(zip(fb_idx, keys))
         steps: list[RecordedStep] = []
         samples: dict[str, str] = {}
-        for s in self.steps:
+        for i, s in enumerate(self.steps):
             field = s.get("field") or None
             steps.append(RecordedStep(op=s["op"], locator=s.get("locator"), field=field))
             if field and s.get("op") in ("fill", "select", "pick") and s.get("value") != "":
-                samples[_std_key(field)] = s.get("value", "")
+                samples[keymap[i]] = s.get("value", "")
         return steps, samples
 
     def recorded_required_labels(self) -> set:
-        """录制中标了表单 * 必填的字段标签集(供 flatten 标 required)。"""
-        from dano.agent_tools.page_builder import _std_key
-        return {_std_key(s["field"]) for s in self.steps
-                if s.get("field") and s.get("required") and s.get("op") in ("fill", "select", "pick")}
+        """录制中标了表单 * 必填的字段(供 flatten 标 required)。key 与 recorded_steps 同算法分配,保持一致。"""
+        from dano.agent_tools.page_builder import assign_field_keys
+        fb_idx = [i for i, s in enumerate(self.steps) if s.get("field")]
+        keys = assign_field_keys([self.steps[i]["field"] for i in fb_idx])
+        return {k for i, k in zip(fb_idx, keys)
+                if self.steps[i].get("required") and self.steps[i].get("op") in ("fill", "select", "pick")}
 
     async def stop(self) -> None:
         for obj, meth in ((self._context, "close"), (self._browser, "close"), (self._pw, "stop")):

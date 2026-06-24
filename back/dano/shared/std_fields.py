@@ -89,7 +89,11 @@ def is_flow_internal(name: str) -> bool:
 
 
 def is_numeric_field(name: str, desc: str = "", *, declared_type: str | None = None) -> bool:
-    """字段是否应为 JSON 数字。优先信源 schema 声明的 number/integer,退而按名字/描述判定。"""
+    """字段是否应为 JSON 数字。**信源声明的类型最权威,两个方向都认**:
+    声明 number/integer→是;声明 string/boolean/array/object→否(关键词启发式**不得越权**改写显式声明,
+    否则「预算标题」这类文本字段会因描述含「预算」被误判为数字)。无声明时才退而按名字/描述启发判定。"""
     if declared_type in ("number", "integer"):
         return True
+    if declared_type in ("string", "boolean", "array", "object"):
+        return False
     return _norm(name) in _NUMERIC_NAMES or any(w in (desc or "") for w in _NUMERIC_KEYWORDS)

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from dano.agent_tools.page_builder import RecordedStep, build_page_script
+from dano.agent_tools.page_builder import RecordedStep, assign_field_keys, build_page_script
 from dano.execution.page import FakePageDriver, PageActionRuntime
 from dano.shared.enums import Outcome, RiskLevel
 
@@ -36,6 +36,28 @@ def test_builds_bindings_and_required_split() -> None:
     # 含提交步 → 写页面默认 L3
     assert body.risk_level == RiskLevel.L3
     assert body.success_marker == "text=保存成功"
+
+
+def test_assign_field_keys_no_collision_when_std_collapses() -> None:
+    """P1#6:多个字段塌缩到同一 std_key 时保唯一、不丢字段;无碰撞时与旧行为一致。"""
+    # 无碰撞:标准对齐 + 原样保留
+    assert assign_field_keys(["请假天数", "事由", "项目名称"]) == ["days", "reason", "项目名称"]
+    # 碰撞:'开始时间' 与别名 'begin' 都→start_time;第二个退回原始标签保唯一
+    assert assign_field_keys(["开始时间", "begin", "结束时间"]) == ["start_time", "begin", "end_time"]
+    # 原始标签也重复 → 加 #n
+    assert assign_field_keys(["项目名称", "项目名称"]) == ["项目名称", "项目名称#2"]
+
+
+def test_build_page_script_two_fields_same_std_key_kept_distinct() -> None:
+    """两个字段都对齐到同一标准 key,build_page_script 不再覆盖丢失,二者各自成参数。"""
+    steps = [RecordedStep(op="fill", locator="label=开始时间", field="开始时间"),
+             RecordedStep(op="fill", locator="label=生效起", field="begin"),   # 别名也→start_time
+             RecordedStep(op="submit", locator="role=button[name=提交]")]
+    body = build_page_script(steps, action="x", dom_fingerprint="fp")
+    assert body.user_fields == ["start_time", "begin"]   # 两个字段都在,未互相覆盖
+    a0 = next(a for a in body.actions if a.locator == "label=开始时间")
+    a1 = next(a for a in body.actions if a.locator == "label=生效起")
+    assert a0.value_from == "field:start_time" and a1.value_from == "field:begin"
 
 
 def test_unknown_field_kept_and_no_submit_is_l1() -> None:

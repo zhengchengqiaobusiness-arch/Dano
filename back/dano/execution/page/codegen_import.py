@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-from dano.agent_tools.page_builder import RecordedStep, _std_key
+from dano.agent_tools.page_builder import RecordedStep, assign_field_keys
 
 _SUBMIT_HINTS = ("提交", "保存", "确定", "确认", "申请", "发起", "submit", "save", "ok", "confirm")
 _LINE_RE = re.compile(r"^page\.(\w+)\((.*?)\)\.(\w+)\((.*)\)\s*;?\s*$")
@@ -68,7 +68,7 @@ def parse_playwright_codegen(script: str) -> tuple[list[RecordedStep], str, dict
     """解析 codegen 脚本 → (步骤, start_url, sample_inputs)。sample_inputs 按标准字段 key 对齐 page_builder。"""
     steps: list[RecordedStep] = []
     start_url = ""
-    samples: dict[str, str] = {}
+    val_at: dict[int, str] = {}          # 步索引 → 样例值(fill/select);key 在循环后用 assign_field_keys 统一分配
     for raw in script.splitlines():
         line = raw.strip()
         if line.startswith("await "):
@@ -90,15 +90,11 @@ def parse_playwright_codegen(script: str) -> tuple[list[RecordedStep], str, dict
             continue
         a = act.lower().replace("_", "")
         if a == "fill":
-            field = _field_hint(locator)
-            steps.append(RecordedStep(op="fill", locator=locator, field=field))
-            if field:
-                samples[_std_key(field)] = _q(act_args) or ""
+            val_at[len(steps)] = _q(act_args) or ""
+            steps.append(RecordedStep(op="fill", locator=locator, field=_field_hint(locator)))
         elif a == "selectoption":
-            field = _field_hint(locator)
-            steps.append(RecordedStep(op="select", locator=locator, field=field))
-            if field:
-                samples[_std_key(field)] = _q(act_args) or ""
+            val_at[len(steps)] = _q(act_args) or ""
+            steps.append(RecordedStep(op="select", locator=locator, field=_field_hint(locator)))
         elif a == "setinputfiles":
             steps.append(RecordedStep(op="upload", locator=locator, field=_field_hint(locator)))
         elif a in ("click", "check"):
@@ -108,4 +104,8 @@ def parse_playwright_codegen(script: str) -> tuple[list[RecordedStep], str, dict
                 h in locator.lower() for h in _SUBMIT_HINTS)
             steps.append(RecordedStep(op="submit" if is_submit else "click", locator=locator))
         # press / hover / 其它动作:忽略
+    # 字段 key 与 build_page_script 同序同算法分配(多字段塌缩同一 std_key 也保唯一,P1#6)
+    fb_idx = [i for i, s in enumerate(steps) if s.field]
+    keymap = dict(zip(fb_idx, assign_field_keys([steps[i].field for i in fb_idx])))
+    samples = {keymap[i]: v for i, v in val_at.items() if i in keymap}
     return steps, start_url, samples

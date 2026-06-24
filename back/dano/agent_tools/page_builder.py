@@ -39,6 +39,28 @@ def _std_key(field: str) -> str:
     return (field or "").strip()
 
 
+def assign_field_keys(raw_fields: list[str | None]) -> list[str]:
+    """把按出现顺序的一串录制字段标签 → **唯一**字段 key 列表(等长、保序)。修 P1#6 字段碰撞:
+
+    `_std_key` 是多对一映射(多个字段可塌缩到同一标准 key,如两个日期都→start_time),直接拿它当字段身份会
+    互相覆盖、丢字段。此处:优先标准词典对齐(第一个占用该 std_key 保持跨资产一致);**后续塌缩到同一 key 的
+    字段退回各自原始标签**,原始标签再撞则加 `#n` 后缀 → 任意表单都保证每个录制字段拿到独立的 key,不丢不串。
+    无碰撞时与旧行为完全一致(每个字段就是它的 std_key/原始标签)。
+    """
+    used: set[str] = set()
+    out: list[str] = []
+    for f in raw_fields:
+        std = _std_key(f or "")
+        cand = std if (std and std not in used) else ((f or "").strip() or std or "field")
+        key, n = cand, 2
+        while key in used:
+            key = f"{cand}#{n}"
+            n += 1
+        used.add(key)
+        out.append(key)
+    return out
+
+
 def build_page_script(
     steps: list[RecordedStep],
     *,
@@ -61,11 +83,13 @@ def build_page_script(
     user: list[str] = []
     docs: dict[str, str] = {}
 
+    # 字段 key 统一分配:标准词典对齐为主,**多字段塌缩同一 std_key 时保唯一**(不丢字段,P1#6)
+    field_keys = iter(assign_field_keys([s.field for s in steps if s.field]))
     for s in steps:
         value_from: str | None = None
         assert_v = False
         if s.field:
-            key = _std_key(s.field)
+            key = next(field_keys)
             value_from = f"field:{key}"
             assert_v = s.op in _INPUT_OPS
             user.append(key)

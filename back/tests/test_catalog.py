@@ -52,6 +52,27 @@ async def test_workflow_steps_hidden_only_business_skill_shown():
     assert sl.is_workflow is True
 
 
+async def test_connector_fact_check_from_body_not_gated_by_action_name():
+    """P3:事实核查随**连接器资产体**走 —— 通用动作也能带核查;ACTION_META 退为原型 demo 兜底。"""
+    store = _Store({AssetType.CONNECTOR: [
+        _Env({"action": "create_customer", "field_bindings": [], "risk_level": "L3",
+              "fact_check_query": "query_customer", "fact_check_expr": "response.id != null"},
+             "create_customer"),
+        _Env({"action": "create_order", "field_bindings": [], "risk_level": "L3"}, "create_order"),
+        _Env({"action": "create_leave", "field_bindings": [], "risk_level": "L3"}, "create_leave"),
+    ]})
+    reg = await SkillRegistry.from_store(store, tenant="t", subsystems=[Subsystem("B-CRM")])
+    by = {s.action: s for s in reg.skills}
+    # 资产体声明 → 通用连接器(非 demo 动作名)也有事实核查
+    assert by["create_customer"].fact_check_query == "query_customer"
+    assert by["create_customer"].fact_check_expr == "response.id != null"
+    # 通用连接器无声明、非 demo 动作 → 无核查(诚实,不臆造)
+    assert by["create_order"].fact_check_query is None
+    assert by["create_order"].fact_check_expr is None
+    # 原型 demo 动作未在体里声明 → ACTION_META 兜底(向后兼容)
+    assert by["create_leave"].fact_check_query == "query_balance"
+
+
 async def test_workflow_step_connector_never_exposed():
     # 即便某 workflow_step 连接器没有任何复合流程引用(孤儿),也绝不单独露出,不污染目录
     store = _Store({AssetType.CONNECTOR: [_conn_env("query_balance"),
@@ -92,6 +113,32 @@ def test_field_types_override_wins_over_heuristic():
     props = to_manifest(sk).parameters["properties"]
     assert props["code"]["type"] == "string"     # 信源声明 string,压过名字启发式
     assert props["qty"]["type"] == "integer"
+
+
+def test_manifest_preserves_select_and_datetime_semantics():
+    """选择型(enum)/日期(datetime)字段的语义不被塌成裸 string:
+    enum → type=string + format=name-ref + 描述提示「传名字→ID」;datetime → format=date-time。
+    (修真实导出里 领导/人力 显示成 string、日期丢类型的缺陷。)"""
+    from dano.catalog.manifest import to_manifest
+    from dano.export.agent_skills import _ptype, _select_fields
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    sk = SkillSpec(skill_id="A-OA.submit_form", subsystem=Subsystem.OA, action="submit_form",
+                   risk_level=RiskLevel.L3,
+                   field_types={"领导": "enum", "人力": "enum", "startTime": "datetime", "请假类型": "number"},
+                   required_fields=["领导", "人力", "startTime", "请假类型"], optional_fields=[])
+    props = to_manifest(sk).parameters["properties"]
+    # 选择型:不再是裸 string,带 name-ref 标记 + 「传名字→ID」提示
+    assert props["领导"]["type"] == "string" and props["领导"]["format"] == "name-ref"
+    assert "查内部 ID" in props["领导"]["description"] and "勿直接传 ID" in props["领导"]["description"]
+    # 日期:带 date-time format
+    assert props["startTime"]["format"] == "date-time"
+    # 导出层「类型」列还原成语义类型,不再显示 string
+    assert _ptype("领导", props, set()) == "枚举·名字→ID"
+    assert _ptype("startTime", props, set()) == "datetime"
+    assert _ptype("请假类型", props, {"请假类型"}) == "number"
+    assert _select_fields(props) == ["领导", "人力"]
 
 
 def test_ruoyi_parses_approval_chain_from_prose():

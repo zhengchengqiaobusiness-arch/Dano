@@ -2,7 +2,8 @@
 
 Skill = Action 强约束(文档6.1节六):每个动作 Skill 有且仅有一个 action。
 运行期只消费 published 连接器(命中消费)。事实核查策略(重查哪个动作 + 比对表达式)
-按动作配置在 ACTION_META —— 这是运行期领域知识,后续可下沉到连接器资产。
+**优先随连接器资产体走**(接入期 grounded 写入 fact_check_query/expr);ACTION_META 仅作
+A 公司原型 demo 的兜底增强,不再是通用连接器的唯一来源(否则只有 5 个 demo 动作有事实核查)。
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import structlog
 from pydantic import BaseModel, Field
 
 from dano.assets.store import AssetStore
+from dano.execution.connectors.executor import system_key_for
 from dano.orchestrator.types import Intent, SkillSpec
 from dano.shared.enums import AssetType, RiskLevel, Subsystem
 from dano.shared.models import Scope
@@ -108,6 +110,9 @@ class SkillRegistry:
                 if action in hidden_actions or asset_internal(env.body):
                     continue
                 meta = ACTION_META.get(action, ActionMeta(keywords=[action]))
+                # 事实核查优先取**资产体**(随资产走,接入期可 grounded 写入);ACTION_META 仅作原型 demo 兜底
+                fc_query = env.body.get("fact_check_query") or meta.fact_check_query
+                fc_expr = env.body.get("fact_check_expr") or meta.fact_check_expr
                 bindings = env.body.get("field_bindings", [])
                 # 必填/可选按连接器绑定的 required 拆分(缺省 True,兼容旧资产)
                 req = [b["platform_std"] for b in bindings if b.get("required", True)]
@@ -127,8 +132,8 @@ class SkillRegistry:
                         required_fields=req,
                         optional_fields=opt,
                         keywords=meta.keywords,
-                        fact_check_query=meta.fact_check_query,
-                        fact_check_expr=meta.fact_check_expr,
+                        fact_check_query=fc_query,
+                        fact_check_expr=fc_expr,
                     )
                 )
             # 代码适配器(goal 模式生成):从已发布 ADAPTER 资产派生;调用时隔离 runner 执行 source
@@ -147,6 +152,7 @@ class SkillRegistry:
                         business=b.get("business", ""),
                         business_meta=dict(b.get("business_meta", {})),
                         field_docs=dict(b.get("field_docs", {})),
+                        field_types=dict(b.get("field_types", {}) or {}),
                         has_api=True,
                         is_adapter=True,
                         adapter_asset_id=env.asset_id,
@@ -191,8 +197,9 @@ class SkillRegistry:
                         )
                     )
                 else:
-                    # 旧页面脚本(仅 actions+dom_fingerprint):按子系统兜底,行为与之前一致
-                    action = _PAGE_ACTION_BY_SUBSYSTEM.get(sub, "create_reimburse_draft")
+                    # 旧页面脚本(仅 actions+dom_fingerprint,无 action 字段):原型子系统沿用已知映射;
+                    # 任意其它系统派生中性动作名 `submit_<系统key>`,**不臆造**成报销动作。
+                    action = _PAGE_ACTION_BY_SUBSYSTEM.get(sub) or f"submit_{system_key_for(sub)}"
                     meta = ACTION_META.get(action, ActionMeta(keywords=[action]))
                     skills.append(
                         SkillSpec(

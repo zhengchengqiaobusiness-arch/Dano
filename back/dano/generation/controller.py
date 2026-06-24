@@ -64,6 +64,8 @@ class GenerationLoop:
                 plan.required_fields = list(ov["required_fields"])
             if ov.get("field_docs"):
                 plan.field_docs = dict(ov["field_docs"])
+            if ov.get("field_types"):
+                plan.field_types = dict(ov["field_types"])   # 信源类型直通,契约层不再靠关键词猜数值
             log.info("gen.contract_override", flow=goal.flow, success_rule=plan.success_rule,
                      fact_check=bool(plan.fact_check), user_fields=plan.user_fields)
         log.info("gen.start", flow=goal.flow, business=getattr(goal, "business", ""),

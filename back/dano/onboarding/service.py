@@ -541,6 +541,8 @@ async def _onboard_codegen(run_id: str, sid: str, flows: list[dict], coder,  # n
                                 "user_fields": [f["name"] for f in cfields],
                                 "required_fields": [f["name"] for f in cfields if f.get("required")],
                                 "field_docs": {f["name"]: (f.get("label") or f["name"]) for f in cfields},
+                                # 表单字段类型直通(信源):契约层据此判数值,标题等文本字段不再因描述含「预算」被误判 number
+                                "field_types": {f["name"]: f["type"] for f in cfields if f.get("type")},
                             }
                             log.info("codegen.contract_synth", flow=g.flow,
                                      fields=[f["name"] for f in cfields],

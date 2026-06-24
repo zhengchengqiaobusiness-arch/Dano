@@ -162,6 +162,20 @@ class AssetRepository:
             )
         return [_row_to_envelope(r) for r in rows]
 
+    async def distinct_subsystems(self, tenant: str) -> list[Subsystem]:
+        """发现该租户**实际拥有**的系统实例(已发布资产里出现过的 distinct subsystem)。
+
+        取代写死的三件套枚举:任意系统接入并发布后都会被自动发现 → skill 注册/导出/编排都自然覆盖到,
+        不必预先在代码里登记。配合 Subsystem 的开放类型(_missing_),实现"多企业多系统直接用"。
+        """
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT DISTINCT subsystem FROM assets "
+                "WHERE tenant = $1 AND validation_status = 'published' ORDER BY subsystem",
+                tenant)
+        return [Subsystem(r["subsystem"]) for r in rows]
+
     async def set_status(
         self, asset_id: UUID, status: ValidationStatus
     ) -> AssetEnvelope | None:

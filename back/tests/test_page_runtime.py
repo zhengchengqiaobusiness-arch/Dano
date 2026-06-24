@@ -90,6 +90,16 @@ async def test_registry_backward_compat_old_page_body() -> None:
     assert skill is not None and skill.has_api is False and skill.risk_level == RiskLevel.L2
 
 
+async def test_legacy_page_body_arbitrary_system_neutral_action() -> None:
+    """P3:任意系统的旧页面脚本不再臆造成报销动作,派生中性 `submit_<系统key>`。"""
+    aid = uuid4()
+    old = {"actions": [{"op": "click", "locator": "text=提交"}], "dom_fingerprint": "fp"}
+    reg = await SkillRegistry.from_store(_PageStore(old, aid), tenant="t",
+                                         subsystems=[Subsystem("B-门户")])
+    assert reg.by_action(Subsystem("B-门户"), "create_reimburse_draft") is None
+    assert reg.by_action(Subsystem("B-门户"), "submit_门户") is not None
+
+
 # ───────────────────────── M2:运行期解释器(直接驱动)─────────────────────────
 async def test_runtime_passed() -> None:
     fake = FakePageDriver(fingerprint="fp-v1")
