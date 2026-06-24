@@ -11,6 +11,10 @@ services:
       DANO_PORT: 8080
       DANO_DEFAULT_WORKSPACE_PATH: ${DANO_DEFAULT_WORKSPACE_PATH:-/tmp/dano}
       DANO_LLM_TIMEOUT_MS: ${DANO_LLM_TIMEOUT_MS:-30000}
+      # 接入同机 skillmanner 网关(dano agent 的 A-OA skill 经此执行真实动作)。
+      # 实际值由部署方在 .env 注入;切勿把 DANO_TENANT_KEY 提交进仓库。
+      DANO_URL: ${DANO_URL:-}
+      DANO_TENANT_KEY: ${DANO_TENANT_KEY:-}
       AGENT_WORLD_API_KEY: ${AGENT_WORLD_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -31,6 +35,9 @@ services:
     volumes:
       - ./runtime-data:/tmp/dano
       - ./.secrets:/run/secrets:ro
+    networks:
+      - default
+      - skillmanner
     healthcheck:
       test:
         [
@@ -54,3 +61,13 @@ services:
       - "${DANO_NGINX_PORT:-80}:80"
     volumes:
       - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - default
+      - skillmanner
+
+networks:
+  # 与同机 skillmanner 互通(由 skillmanner 的 compose 创建的外部网络)。
+  # 独立部署 dano(无 skillmanner)时,删掉本段以及 app/nginx 下的 networks 引用即可。
+  skillmanner:
+    external: true
+    name: skillmanner_default
