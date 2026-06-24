@@ -37,6 +37,7 @@
   import ImageLightbox from "./ImageLightbox.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import QuestionToolCard from "./QuestionToolCard.svelte";
+  import SkillInvocationCard from "./SkillInvocationCard.svelte";
   import { getRuntimeEmptyStateConfig } from "../utils/runtimeConfig";
   import { t } from "../i18n";
 
@@ -275,6 +276,8 @@
         return `${messageKey}:thinking:${blockIndex}`;
       case "text":
         return `${messageKey}:text:${blockIndex}`;
+      case "skill":
+        return `${messageKey}:skill:${block.skillName}:${blockIndex}`;
     }
   }
 
@@ -378,6 +381,24 @@
     return (block.resultBlocks ?? []).filter(
       (item): item is ImageContentBlock => item.kind === "image",
     );
+  }
+
+  type ReadClassification = { kind: string; label: string };
+
+  function getReadClassification(block: ToolContentBlock): ReadClassification | null {
+    if (block.toolName !== "read") return null;
+    const args = block.toolArgs;
+    if (!args || typeof args !== "object") return null;
+    const rawPath = (args as Record<string, unknown>).file_path ?? (args as Record<string, unknown>).path;
+    if (typeof rawPath !== "string" || !rawPath) return null;
+    const normalized = rawPath.replace(/\\/g, "/");
+    const fileName = normalized.split("/").pop() ?? "";
+    if (fileName === "SKILL.md") {
+      const segments = normalized.split("/");
+      const idx = segments.lastIndexOf("SKILL.md");
+      return { kind: "skill", label: idx > 0 ? segments[idx - 1] : fileName };
+    }
+    return null;
   }
 
   function toolBlockEmptyState(block: ToolContentBlock): string {
@@ -858,6 +879,8 @@
               {:else if block.kind === "tool"}
                 {#if askUserQuestionRequest(block)}
                   <QuestionToolCard {block} active={isStreaming && !initialLoading} onRespond={answerQuestion} />
+                {:else if getReadClassification(block)?.kind === "skill"}
+                  <SkillInvocationCard skillName={getReadClassification(block)!.label} />
                 {:else}
                   {@const descriptor = toolBlockDescriptor(block)}
                   {@const diffStats = toolBlockDiffStats(block)}
@@ -968,6 +991,8 @@
                     <img class="message-image" src={block.src} alt={block.alt} loading="lazy" />
                   </button>
                 </figure>
+              {:else if block.kind === "skill"}
+                <SkillInvocationCard skillName={block.skillName} />
               {:else if block.kind === "text" && block.text}
                 <MarkdownRenderer
                   content={block.text}
