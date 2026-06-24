@@ -40,6 +40,10 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 - Use `pnpm run build` before validating the built standalone server.
 - For UI changes, verify the rendered app in a browser against the relevant flow.
 
+## GitHub Workflow
+
+- Each time an issue is solved and verified, create a pull request to `upstream`.
+
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan

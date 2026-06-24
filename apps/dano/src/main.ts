@@ -31,6 +31,11 @@ const DEFAULT_EMPTY_STATE: BridgeEmptyStateConfig = {
   content: "给 {产品名称} 发消息",
 };
 
+interface StandalonePackageInfo {
+  name: string;
+  version: string;
+}
+
 export interface StandaloneMainOptions {
   cwd: string;
   host: string;
@@ -169,6 +174,46 @@ function resolveDefaultStaticDir(cwd: string): string | undefined {
   }
 
   return undefined;
+}
+
+function readPackageInfo(path: string): StandalonePackageInfo | undefined {
+  if (!existsSync(path)) return undefined;
+
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as {
+      name?: unknown;
+      version?: unknown;
+    };
+    return typeof raw.name === "string" && typeof raw.version === "string"
+      ? { name: raw.name, version: raw.version }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function readStandalonePackageInfo(
+  cwd: string,
+  entryFile: string,
+): StandalonePackageInfo {
+  const candidates = [
+    join(cwd, "apps", "dano", "package.json"),
+    join(cwd, "package.json"),
+    join(dirname(entryFile), "..", "package.json"),
+    join(dirname(entryFile), "..", "..", "package.json"),
+  ];
+
+  for (const candidate of candidates) {
+    const info = readPackageInfo(candidate);
+    if (info?.name === "@dano/app") return info;
+  }
+
+  for (const candidate of candidates) {
+    const info = readPackageInfo(candidate);
+    if (info) return info;
+  }
+
+  return { name: "@dano/app", version: "unknown" };
 }
 
 export function parseStandaloneMainOptions(
@@ -422,6 +467,9 @@ async function runStandaloneMain(): Promise<number> {
   }
 
   const thisFile = fileURLToPath(import.meta.url);
+  const packageInfo = readStandalonePackageInfo(options.cwd, thisFile);
+  process.env.DANO_PACKAGE_NAME ??= packageInfo.name;
+  process.env.DANO_VERSION ??= packageInfo.version;
   const danoConfig = loadDanoConfig({ cwd: options.cwd });
   const defaultWorkspacePath = ensureDefaultWorkspace(options.defaultWorkspacePath);
   initializeStandaloneWorkspaceSettings(defaultWorkspacePath, options.cwd);

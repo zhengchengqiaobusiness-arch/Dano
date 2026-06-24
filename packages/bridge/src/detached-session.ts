@@ -12,6 +12,7 @@ import {
 import { fileURLToPath } from "node:url";
 import { askUserQuestionTool } from "./ask-user-question.js";
 import { createCurlTool } from "./curl-tool.js";
+import { danoVersionTool } from "./dano-version-tool.js";
 
 const HEIMDALL_EXTENSION_PATH = fileURLToPath(
   import.meta.resolve("@casualjim/pi-heimdall/extensions/heimdall.ts"),
@@ -59,6 +60,7 @@ export async function createDetachedAgentSession(
       createCurlTool(cwd),
       createEditToolDefinition(cwd),
       createWriteToolDefinition(cwd),
+      danoVersionTool,
       askUserQuestionTool,
     ] as unknown as ToolDefinition[],
   });
