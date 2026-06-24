@@ -13,7 +13,10 @@
     type TranscriptEntry,
     type TranscriptStream,
   } from "../composables/bridgeStore.svelte";
-  import { askUserQuestionRequest } from "../utils/askUserQuestion";
+  import {
+    askUserQuestionRequest,
+    hideAskUserQuestionToolBlock,
+  } from "../utils/askUserQuestion";
   import { userMessageCopyText } from "../utils/messageCopy";
   import {
     buildTranscriptDisplayItems,
@@ -248,8 +251,12 @@
   function displayContentBlocks(msg: TranscriptEntry, index: number) {
     // Stream display messages already have deltas applied before they enter
     // `displayItems`, so avoid replaying the same deltas a second time.
-    if (index >= messages.length) return contentBlocks(msg);
-    return contentBlocks(messageWithTranscriptDeltas(msg, index));
+    const blocks = index >= messages.length
+      ? contentBlocks(msg)
+      : contentBlocks(messageWithTranscriptDeltas(msg, index));
+    return blocks.filter(
+      block => block.kind !== "tool" || !hideAskUserQuestionToolBlock(block),
+    );
   }
 
   function toolBlockIdentity(block: ToolContentBlock, blockIndex: number): string {
@@ -445,7 +452,14 @@
   }
 
   function errorSummaryMeta(msg: TranscriptEntry): string | undefined {
+    if (isAbortedMessage(msg)) return undefined;
     return compactInlineText(errorMessageText(msg), 120);
+  }
+
+  function errorDetailText(msg: TranscriptEntry): string {
+    return isAbortedMessage(msg)
+      ? t("chatTranscript.cancelled")
+      : errorMessageText(msg);
   }
 
   function messageIdLabel(msg: TranscriptEntry): string {
@@ -812,9 +826,9 @@
                 {#if showMessageIds}
                   <span class="message-debug-id">{t("chatTranscript.messageId", { id: messageIdLabel(item.message) })}</span>
                 {/if}
-                {#if errorMessageText(item.message)}
+                {#if errorDetailText(item.message)}
                   <section class="tool-inline-section">
-                    <pre class="tool-inline-pre">{errorMessageText(item.message)}</pre>
+                    <pre class="tool-inline-pre">{errorDetailText(item.message)}</pre>
                   </section>
                 {:else}
                   <div class="tool-inline-empty">{t("chatTranscript.noErrorMessage")}</div>

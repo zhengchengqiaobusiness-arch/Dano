@@ -143,7 +143,7 @@
       textareaEl: textareaRef,
       commandPaletteEl: commandPaletteRef,
       mentionPaletteEl: mentionPaletteRef,
-    }, isStreaming);
+    }, false);
   }
 
   function handleCommandSelect(commandName: string) {

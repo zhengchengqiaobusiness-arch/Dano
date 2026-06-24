@@ -3,6 +3,7 @@ import {
   askUserQuestionMarkdown,
   askUserQuestionRequest,
   askUserQuestionResult,
+  hideAskUserQuestionToolBlock,
 } from "./askUserQuestion";
 import type { ToolContentBlock } from "./transcript";
 
@@ -34,6 +35,8 @@ describe("ask user question transcript data", () => {
 
   it("parses a text question", () => {
     expect(askUserQuestionRequest(block({ question: "Name?" }))).toEqual({
+      batch: false,
+      id: "answer",
       kind: "text",
       question: "Name?",
     });
@@ -44,7 +47,13 @@ describe("ask user question transcript data", () => {
       askUserQuestionRequest(
         block({ question: " Choose? ", options: [" A ", "B"] }),
       ),
-    ).toEqual({ kind: "single", question: "Choose?", options: ["A", "B"] });
+    ).toEqual({
+      batch: false,
+      id: "answer",
+      kind: "single",
+      question: "Choose?",
+      options: ["A", "B"],
+    });
   });
 
   it("parses multiple-choice and confirmation questions", () => {
@@ -53,13 +62,89 @@ describe("ask user question transcript data", () => {
         block({ question: "Choose?", options: ["A", "B"], multiple: true }),
       ),
     ).toEqual({
+      batch: false,
+      id: "answer",
       kind: "multiple",
       question: "Choose?",
       options: ["A", "B"],
     });
     expect(
       askUserQuestionRequest(block({ question: "Continue?", confirm: true })),
-    ).toEqual({ kind: "confirm", question: "Continue?" });
+    ).toEqual({
+      batch: false,
+      id: "answer",
+      kind: "confirm",
+      question: "Continue?",
+    });
+  });
+
+  it("parses defaults for text, choice, multiple-choice, and confirmation questions", () => {
+    expect(
+      askUserQuestionRequest(block({ question: "Name?", default: " Dano " })),
+    ).toMatchObject({ kind: "text", default: "Dano" });
+    expect(
+      askUserQuestionRequest(
+        block({ question: "Pick?", options: ["A", "B"], default: "B" }),
+      ),
+    ).toMatchObject({ kind: "single", default: "B" });
+    expect(
+      askUserQuestionRequest(
+        block({
+          question: "Pick?",
+          options: ["A", "B"],
+          multiple: true,
+          default: ["A"],
+        }),
+      ),
+    ).toMatchObject({ kind: "multiple", default: ["A"] });
+    expect(
+      askUserQuestionRequest(
+        block({ question: "Continue?", confirm: true, default: false }),
+      ),
+    ).toMatchObject({ kind: "confirm", default: false });
+  });
+
+  it("parses grouped questions for one shared submit", () => {
+    expect(
+      askUserQuestionRequest(
+        block({
+          questions: [
+            { id: "name", question: "Name?", default: "Dano" },
+            {
+              id: "env",
+              question: "Environment?",
+              options: ["Test", "Prod"],
+              default: "Test",
+            },
+            {
+              question: "Features?",
+              options: ["Chat", "Deploy"],
+              multiple: true,
+              default: ["Chat"],
+            },
+          ],
+        }),
+      ),
+    ).toEqual({
+      batch: true,
+      questions: [
+        { id: "name", kind: "text", question: "Name?", default: "Dano" },
+        {
+          id: "env",
+          kind: "single",
+          question: "Environment?",
+          options: ["Test", "Prod"],
+          default: "Test",
+        },
+        {
+          id: "q3",
+          kind: "multiple",
+          question: "Features?",
+          options: ["Chat", "Deploy"],
+          default: ["Chat"],
+        },
+      ],
+    });
   });
 
   it("rejects malformed or unrelated tool calls", () => {
@@ -80,6 +165,11 @@ describe("ask user question transcript data", () => {
         block({ question: "Name?" }, { toolName: "other_tool" }),
       ),
     ).toBeNull();
+    expect(
+      askUserQuestionRequest(
+        block({ questions: [{ id: "dup", question: "A?" }, { id: "dup", question: "B?" }] }),
+      ),
+    ).toBeNull();
   });
 
   it("parses answered result details", () => {
@@ -92,6 +182,15 @@ describe("ask user question transcript data", () => {
     expect(
       askUserQuestionResult({ status: "answered", answer: true }),
     ).toEqual({ status: "answered", answer: true });
+    expect(
+      askUserQuestionResult({
+        status: "answered",
+        answer: { name: "Dano", features: ["Chat"], ok: true },
+      }),
+    ).toEqual({
+      status: "answered",
+      answer: { name: "Dano", features: ["Chat"], ok: true },
+    });
   });
 
   it("parses cancellation and rejects invalid results", () => {
@@ -100,5 +199,23 @@ describe("ask user question transcript data", () => {
     });
     expect(askUserQuestionResult({ status: "answered" })).toBeNull();
     expect(askUserQuestionResult(null)).toBeNull();
+  });
+
+  it("hides failed ask_user_question tool calls from the transcript UI", () => {
+    expect(
+      hideAskUserQuestionToolBlock(
+        block({ question: "Name?" }, { toolStatus: "error" }),
+      ),
+    ).toBe(true);
+    expect(
+      hideAskUserQuestionToolBlock(
+        block({ question: "Name?" }, { toolStatus: "success" }),
+      ),
+    ).toBe(false);
+    expect(
+      hideAskUserQuestionToolBlock(
+        block({ question: "Name?" }, { toolName: "curl", toolStatus: "error" }),
+      ),
+    ).toBe(false);
   });
 });

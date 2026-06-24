@@ -97,8 +97,13 @@ export type RpcToolResultDetails = RpcJsonValue;
 
 export const ASK_USER_QUESTION_TOOL_NAME = "ask_user_question";
 
+export type AskUserQuestionAnswer = string | string[] | boolean;
+
 export type AskUserQuestionResult =
-  | { status: "answered"; answer: string | string[] | boolean }
+  | {
+      status: "answered";
+      answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>;
+    }
   | { status: "cancelled" };
 
 export interface RpcCompactionResult {
@@ -252,7 +257,7 @@ export interface RpcCommandMap {
     | {
         toolCallId: string;
         cancelled: false;
-        answer: string | string[] | boolean;
+        answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>;
       };
   new_session: {
     parentSession?: string;

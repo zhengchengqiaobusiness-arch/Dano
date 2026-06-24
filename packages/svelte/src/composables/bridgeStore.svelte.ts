@@ -1,4 +1,5 @@
 import type {
+  AskUserQuestionAnswer,
   ClientMessage,
   RpcBridgeEvent,
   RpcCommand,
@@ -2001,10 +2002,10 @@ export function answerQuestion(
   toolCallId: string,
   response:
     | { cancelled: true }
-    | {
-        cancelled: false;
-        answer: string | string[] | boolean;
-      },
+      | {
+          cancelled: false;
+          answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>;
+        },
 ): Promise<RpcResponse> {
   return sendCommand({ type: "answer_question", toolCallId, ...response });
 }

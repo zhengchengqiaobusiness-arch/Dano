@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AskUserQuestionAnswer } from "../types.js";
 import {
   askUserQuestionCoordinator,
   askUserQuestionTool,
@@ -11,6 +12,14 @@ function executeQuestion(
     options?: string[];
     multiple?: boolean;
     confirm?: true;
+    default?: AskUserQuestionAnswer;
+    questions?: {
+      id?: string;
+      question: string;
+      options?: string[];
+      multiple?: boolean;
+      default?: AskUserQuestionAnswer;
+    }[];
   },
   signal?: AbortSignal,
 ) {
@@ -29,8 +38,12 @@ describe("ask_user_question tool", () => {
   it("instructs the model to collect required input and confirm final summaries", () => {
     expect(askUserQuestionTool.promptGuidelines).toEqual([
       "Use ask_user_question whenever you need user input to continue; do not ask the question only in assistant text.",
+      "Call ask_user_question at most once per assistant response. If you need several answers, put every item in one questions array.",
       "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
       "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
+      "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
+      "Set default on every non-confirmation question, including every item in questions, using the most likely or safest answer while still letting the user change it.",
+      "When using questions, the top level must contain only questions. Put id, question, options, multiple, and default inside each questions item.",
       "For forms, applications, or other user-reviewed summaries, call ask_user_question with confirm: true after presenting the final summary and before treating it as confirmed, ready to submit, or complete.",
     ]);
   });
@@ -59,6 +72,22 @@ describe("ask_user_question tool", () => {
     });
 
     askUserQuestionCoordinator.answer("choice-1", {
+      cancelled: false,
+      answer: "Yes",
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: "Yes" },
+    });
+  });
+
+  it("accepts a valid default answer without changing the final user answer", async () => {
+    const execution = executeQuestion("choice-default", {
+      question: "Deploy now?",
+      options: ["Yes", "No"],
+      default: "No",
+    });
+
+    askUserQuestionCoordinator.answer("choice-default", {
       cancelled: false,
       answer: "Yes",
     });
@@ -199,6 +228,121 @@ describe("ask_user_question tool", () => {
     });
   });
 
+  it("returns grouped answers from one tool confirmation", async () => {
+    const execution = askUserQuestionTool.execute(
+      "group-1",
+      {
+        questions: [
+          { id: "name", question: "Name?", default: "Dano" },
+          {
+            id: "env",
+            question: "Environment?",
+            options: ["Test", "Production"],
+            default: "Test",
+          },
+          {
+            id: "features",
+            question: "Features?",
+            options: ["Chat", "Deploy"],
+            multiple: true,
+            default: ["Chat"],
+          },
+        ],
+      },
+      undefined,
+      undefined,
+      {} as never,
+    );
+
+    askUserQuestionCoordinator.answer("group-1", {
+      cancelled: false,
+      answer: {
+        name: "Dano",
+        env: "Production",
+        features: ["Chat", "Deploy"],
+      },
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: {
+        status: "answered",
+        answer: {
+          name: "Dano",
+          env: "Production",
+          features: ["Chat", "Deploy"],
+        },
+      },
+    });
+  });
+
+  it("rejects simultaneous separate questions so the model retries as one grouped card", async () => {
+    const first = executeQuestion("separate-1", {
+      question: "Leave type?",
+      options: ["Annual", "Sick"],
+      default: "Annual",
+    });
+    const second = executeQuestion("separate-2", {
+      question: "Start date?",
+      options: ["Today", "Tomorrow"],
+      default: "Today",
+    });
+
+    await expect(second).rejects.toThrow("exactly one ask_user_question call");
+    await expect(first).rejects.toThrow("exactly one ask_user_question call");
+    expect(() =>
+      askUserQuestionCoordinator.answer("separate-1", {
+        cancelled: false,
+        answer: "Annual",
+      }),
+    ).toThrow("Pending question not found");
+  });
+
+  it("explains how to fix grouped calls that mix top-level question fields", async () => {
+    await expect(
+      askUserQuestionTool.execute(
+        "group-mixed",
+        {
+          question: "Leave details?",
+          default: "事假",
+          questions: [
+            { id: "leave_type", question: "Leave type?", default: "事假" },
+          ],
+        },
+        undefined,
+        undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow("top level may contain only questions");
+  });
+
+  it("rejects grouped answers missing a question id", async () => {
+    const execution = askUserQuestionTool.execute(
+      "group-missing",
+      {
+        questions: [
+          { id: "name", question: "Name?" },
+          { id: "env", question: "Environment?", options: ["Test", "Prod"] },
+        ],
+      },
+      undefined,
+      undefined,
+      {} as never,
+    );
+
+    expect(() =>
+      askUserQuestionCoordinator.answer("group-missing", {
+        cancelled: false,
+        answer: { name: "Dano" },
+      }),
+    ).toThrow("Missing answer");
+    askUserQuestionCoordinator.answer("group-missing", {
+      cancelled: false,
+      answer: { name: "Dano", env: "Test" },
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered" },
+    });
+  });
+
   it("rejects invalid multiple-choice answers without settling", async () => {
     const execution = executeQuestion("multiple-2", {
       question: "Choose environments",
@@ -229,6 +373,33 @@ describe("ask_user_question tool", () => {
         confirm: true,
       }),
     ).rejects.toThrow("cannot provide options");
+  });
+
+  it("rejects grouped confirmation parameters instead of waiting forever", async () => {
+    await expect(
+      askUserQuestionTool.execute(
+        "group-confirm-invalid",
+        {
+          questions: [
+            {
+              id: "confirm_leave",
+              question: "Submit leave request?",
+              options: ["Submit", "Revise"],
+              confirm: true,
+            },
+          ],
+        },
+        undefined,
+        undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow("cannot provide options");
+    expect(() =>
+      askUserQuestionCoordinator.answer("group-confirm-invalid", {
+        cancelled: false,
+        answer: true,
+      }),
+    ).toThrow("Pending question not found");
   });
 
   it("returns cancellation as a successful tool result", async () => {
