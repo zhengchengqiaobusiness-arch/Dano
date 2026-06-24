@@ -141,6 +141,11 @@ describe("detached-session", () => {
 
     expect(createAgentSessionServicesMock).toHaveBeenCalledWith({
       cwd: tmpDir,
+      resourceLoaderOptions: {
+        additionalExtensionPaths: [
+          expect.stringContaining("pi-heimdall/extensions/heimdall.ts"),
+        ],
+      },
     });
     expect(createReadToolDefinitionMock).toHaveBeenCalledWith(tmpDir, {
       autoResizeImages: false,

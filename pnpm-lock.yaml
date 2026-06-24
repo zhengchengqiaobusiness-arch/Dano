@@ -38,12 +38,18 @@ importers:
 
   apps/dano:
     dependencies:
+      '@casualjim/pi-heimdall':
+        specifier: 0.2.10
+        version: 0.2.10(@earendil-works/pi-coding-agent@0.74.0(ws@8.21.0)(zod@4.4.3))
       '@dano/bridge':
         specifier: workspace:*
         version: link:../../packages/bridge
       '@earendil-works/pi-coding-agent':
         specifier: 0.74.0
         version: 0.74.0(ws@8.21.0)(zod@4.4.3)
+      '@mariozechner/pi-coding-agent':
+        specifier: npm:@earendil-works/pi-coding-agent@0.74.0
+        version: '@earendil-works/pi-coding-agent@0.74.0(ws@8.21.0)(zod@4.4.3)'
     devDependencies:
       '@types/node':
         specifier: ^25.8.0
@@ -63,9 +69,15 @@ importers:
 
   packages/bridge:
     dependencies:
+      '@casualjim/pi-heimdall':
+        specifier: 0.2.10
+        version: 0.2.10(@earendil-works/pi-coding-agent@0.74.0(ws@8.21.0)(zod@4.4.3))
       '@earendil-works/pi-coding-agent':
         specifier: 0.74.0
         version: 0.74.0(ws@8.21.0)(zod@4.4.3)
+      '@mariozechner/pi-coding-agent':
+        specifier: npm:@earendil-works/pi-coding-agent@0.74.0
+        version: '@earendil-works/pi-coding-agent@0.74.0(ws@8.21.0)(zod@4.4.3)'
       typebox:
         specifier: 1.2.7
         version: 1.2.7
@@ -273,6 +285,12 @@ packages:
 
   '@borewit/text-codec@0.2.2':
     resolution: {integrity: sha512-DDaRehssg1aNrH4+2hnj1B7vnUGEjU6OIlyRdkMd0aUdIUvKXrJfXsy8LVtXAy7DRvYVluWbMspsRhz2lcW0mQ==}
+
+  '@casualjim/pi-heimdall@0.2.10':
+    resolution: {integrity: sha512-Cp+RyAWSTQ3Lk41clqRA1yorVxr6AGAMqCn2xtP+AJxZDEMx+tPg0n1Hy93pgVgEyIaV9VL2zpgBQIUtwK2l3g==}
+    engines: {node: '>=22.0.0'}
+    peerDependencies:
+      '@mariozechner/pi-coding-agent': '*'
 
   '@comark/svelte@0.3.1':
     resolution: {integrity: sha512-yp5sE8q50S/0/0freDA/aERhCfpCt7VDzbjcYYpBfQwx5oSCQS5atxBHoROybgu4XG7099sr0o8J8Nz3jW5C0g==}
@@ -1612,6 +1630,10 @@ packages:
     engines: {node: '>=10'}
     hasBin: true
 
+  shell-quote@1.8.4:
+    resolution: {integrity: sha512-VsC6n6vz1ihYYyZZwX7YZSF5l5x36ca17OC+a69h94YqB7X6XLwf+5MOgynYir2SLFUbl8gIYvBo8K8RoNQ6bQ==}
+    engines: {node: '>= 0.4'}
+
   shiki@4.2.0:
     resolution: {integrity: sha512-hjNax6o/ylDy9lefQEaSDtzaT3iVNtZ3WmpQnbuQNoG4xvnSKf2kSKbihZVO4JRG1TTMejs7CmNRYlWgAL66pQ==}
     engines: {node: '>=20'}
@@ -2201,6 +2223,11 @@ snapshots:
       '@babel/helper-validator-identifier': 8.0.0-rc.6
 
   '@borewit/text-codec@0.2.2': {}
+
+  '@casualjim/pi-heimdall@0.2.10(@earendil-works/pi-coding-agent@0.74.0(ws@8.21.0)(zod@4.4.3))':
+    dependencies:
+      '@mariozechner/pi-coding-agent': '@earendil-works/pi-coding-agent@0.74.0(ws@8.21.0)(zod@4.4.3)'
+      shell-quote: 1.8.4
 
   '@comark/svelte@0.3.1(beautiful-mermaid@1.1.3)(katex@0.16.47)(shiki@4.2.0)(svelte@5.56.3)':
     dependencies:
@@ -3476,6 +3503,8 @@ snapshots:
   scheduler@0.27.0: {}
 
   semver@7.8.4: {}
+
+  shell-quote@1.8.4: {}
 
   shiki@4.2.0:
     dependencies:

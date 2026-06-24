@@ -33,6 +33,35 @@ function findNearestWebDist(startDir: string): string | undefined {
 }
 
 describe("standalone main", () => {
+  it("ships bash behind the pinned Heimdall guards", () => {
+    const runtimeDefaultsDir = resolve("deploy/runtime-defaults");
+    const bridgePackage = JSON.parse(
+      readFileSync(resolve("packages/bridge/package.json"), "utf8"),
+    ) as { dependencies?: Record<string, string> };
+    const appPackage = JSON.parse(
+      readFileSync(resolve("apps/dano/package.json"), "utf8"),
+    ) as { dependencies?: Record<string, string> };
+    const heimdall = JSON.parse(
+      readFileSync(join(runtimeDefaultsDir, "heimdall.json"), "utf8"),
+    ) as {
+      sandbox?: { enabled?: boolean };
+      commandPolicies?: Array<{ blocked?: string[] }>;
+    };
+
+    for (const packageJson of [bridgePackage, appPackage]) {
+      expect(packageJson.dependencies?.["@casualjim/pi-heimdall"]).toBe(
+        "0.2.10",
+      );
+      expect(
+        packageJson.dependencies?.["@mariozechner/pi-coding-agent"],
+      ).toBe("npm:@earendil-works/pi-coding-agent@0.74.0");
+    }
+    expect(heimdall.sandbox?.enabled).toBe(true);
+    expect(heimdall.commandPolicies).toContainEqual(
+      expect.objectContaining({ blocked: ["rm", "-rf", "/"] }),
+    );
+  });
+
   it("reloads source runs from the extracted app without treating builds as dev", () => {
     expect(
       resolveStandaloneDevWatchPath(
@@ -251,6 +280,7 @@ describe("standalone main", () => {
       mkdirSync(runtimeDefaultsDir, { recursive: true });
       writeFileSync(join(runtimeDefaultsDir, "SYSTEM.md"), "system prompt");
       writeFileSync(join(runtimeDefaultsDir, "settings.json"), "{}");
+      writeFileSync(join(runtimeDefaultsDir, "heimdall.json"), "{}");
 
       initializeStandaloneWorkspaceSettings(workspaceRoot, nestedSourceDir);
 
@@ -258,6 +288,9 @@ describe("standalone main", () => {
         "system prompt",
       );
       expect(readFileSync(join(workspaceRoot, ".pi/settings.json"), "utf8")).toBe(
+        "{}",
+      );
+      expect(readFileSync(join(workspaceRoot, ".pi/heimdall.json"), "utf8")).toBe(
         "{}",
       );
     } finally {
@@ -283,6 +316,10 @@ describe("standalone main", () => {
         join(sourceRoot, "deploy/runtime-defaults/settings.json"),
         "{}",
       );
+      writeFileSync(
+        join(sourceRoot, "deploy/runtime-defaults/heimdall.json"),
+        "{}",
+      );
       writeFileSync(join(workspaceRoot, ".pi/SYSTEM.md"), "workspace prompt");
 
       initializeStandaloneWorkspaceSettings(workspaceRoot, sourceRoot);
@@ -291,6 +328,9 @@ describe("standalone main", () => {
         "workspace prompt",
       );
       expect(readFileSync(join(workspaceRoot, ".pi/settings.json"), "utf8")).toBe(
+        "{}",
+      );
+      expect(readFileSync(join(workspaceRoot, ".pi/heimdall.json"), "utf8")).toBe(
         "{}",
       );
     } finally {
