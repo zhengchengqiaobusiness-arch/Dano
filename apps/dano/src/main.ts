@@ -32,9 +32,17 @@ const DEFAULT_EMPTY_STATE: BridgeEmptyStateConfig = {
 };
 
 interface StandalonePackageInfo {
+  key: string;
   name: string;
   version: string;
 }
+
+const VERSION_PACKAGE_PATHS = [
+  { key: "root", path: ["package.json"] },
+  { key: "app", path: ["apps", "dano", "package.json"] },
+  { key: "bridge", path: ["packages", "bridge", "package.json"] },
+  { key: "svelte", path: ["packages", "svelte", "package.json"] },
+] as const;
 
 export interface StandaloneMainOptions {
   cwd: string;
@@ -176,7 +184,10 @@ function resolveDefaultStaticDir(cwd: string): string | undefined {
   return undefined;
 }
 
-function readPackageInfo(path: string): StandalonePackageInfo | undefined {
+function readPackageInfo(
+  key: string,
+  path: string,
+): StandalonePackageInfo | undefined {
   if (!existsSync(path)) return undefined;
 
   try {
@@ -185,35 +196,24 @@ function readPackageInfo(path: string): StandalonePackageInfo | undefined {
       version?: unknown;
     };
     return typeof raw.name === "string" && typeof raw.version === "string"
-      ? { name: raw.name, version: raw.version }
+      ? { key, name: raw.name, version: raw.version }
       : undefined;
   } catch {
     return undefined;
   }
 }
 
-export function readStandalonePackageInfo(
-  cwd: string,
-  entryFile: string,
-): StandalonePackageInfo {
-  const candidates = [
-    join(cwd, "apps", "dano", "package.json"),
-    join(cwd, "package.json"),
-    join(dirname(entryFile), "..", "package.json"),
-    join(dirname(entryFile), "..", "..", "package.json"),
-  ];
-
-  for (const candidate of candidates) {
-    const info = readPackageInfo(candidate);
-    if (info?.name === "@dano/app") return info;
-  }
-
-  for (const candidate of candidates) {
-    const info = readPackageInfo(candidate);
-    if (info) return info;
-  }
-
-  return { name: "@dano/app", version: "unknown" };
+export function readStandalonePackageInfos(cwd: string): StandalonePackageInfo[] {
+  return VERSION_PACKAGE_PATHS.flatMap(packagePath => {
+    const devPath = join(cwd, ...packagePath.path);
+    const packagedPath = join(cwd, "package-versions", ...packagePath.path);
+    const fallbackPath = packagePath.key === "app" ? join(cwd, "package.json") : "";
+    const info =
+      readPackageInfo(packagePath.key, packagedPath) ??
+      readPackageInfo(packagePath.key, devPath) ??
+      (fallbackPath ? readPackageInfo(packagePath.key, fallbackPath) : undefined);
+    return info ? [info] : [];
+  });
 }
 
 export function parseStandaloneMainOptions(
@@ -467,9 +467,17 @@ async function runStandaloneMain(): Promise<number> {
   }
 
   const thisFile = fileURLToPath(import.meta.url);
-  const packageInfo = readStandalonePackageInfo(options.cwd, thisFile);
-  process.env.DANO_PACKAGE_NAME ??= packageInfo.name;
-  process.env.DANO_VERSION ??= packageInfo.version;
+  const packageInfos = readStandalonePackageInfos(options.cwd);
+  process.env.DANO_PACKAGE_VERSIONS ??= JSON.stringify(
+    packageInfos.map(info => ({
+      key: info.key,
+      packageName: info.name,
+      version: info.version,
+    })),
+  );
+  const appPackageInfo = packageInfos.find(info => info.key === "app");
+  process.env.DANO_PACKAGE_NAME ??= appPackageInfo?.name ?? "@dano/app";
+  process.env.DANO_VERSION ??= appPackageInfo?.version ?? "unknown";
   const danoConfig = loadDanoConfig({ cwd: options.cwd });
   const defaultWorkspacePath = ensureDefaultWorkspace(options.defaultWorkspacePath);
   initializeStandaloneWorkspaceSettings(defaultWorkspacePath, options.cwd);
