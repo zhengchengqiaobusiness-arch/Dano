@@ -3,6 +3,9 @@ name: onboard-page
 description: 接入一个无 API 的页面型系统:侦察表单、生成页面脚本、沙箱回放、过硬关卡发布。只用测试账号,绝不碰生产写。
 ---
 
+<!-- 维护:本文件硬编码了工具名(scout_page/draft_page_script/sandbox_replay/request_review/publish_asset)。
+     改 agent_tools/tools.py 的 TOOLS 注册名须同步此处。提示词全景见 back/doc/PROMPTS.md。 -->
+
 # 接入页面型系统(阶段一 · 流程8 · 无 API)
 
 你是 Dano 的资产工厂。把一个**没有开放接口**的系统页面(报销页、老 OA 页等)转成

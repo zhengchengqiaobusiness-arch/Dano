@@ -3,8 +3,13 @@
 由另一个大模型独立审查整条执行轨迹是否合理(意图与动作匹配、断言是否真被满足、
 有无越界副作用、证据是否自洽),输出「合理 / 不合理 + 理由」。
 
-何时开:接入期自测默认开;运行期 L3+ 或新发布/刚自愈 skill 灰度期开。
-它叠在断言与事实核查之上,不替代二者。接口化以便注入 fake / 关闭。
+⚠ **当前默认关闭**:验证闭环 `VerificationClosure(judge=None)` 默认不注入 JudgeAgent
+(见 verification/closure.py:`_should_judge` —— judge is None 即恒不审判),运行期判定主要靠
+**确定性的断言 + 事实核查**,LLM 推理归 pi。本模块是"接好但未启用"的可选层,**不是死代码**。
+
+何时启用(须显式注入 JudgeAgent 到 VerificationClosure):接入期自测可 force_judge=True 开;
+运行期对 L3+(judge_min_risk 默认 L3)或新发布/刚自愈 skill 灰度期开。它叠在断言与事实核查之上,
+不替代二者。接口化(StructuredLLM Protocol)以便注入 fake / 切换实现。
 """
 
 from __future__ import annotations

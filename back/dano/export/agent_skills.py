@@ -138,50 +138,162 @@ def _approval_section(meta: dict) -> str:
     return "\n".join(lines)
 
 
-def _collection_section(props: dict, numeric: list[str]) -> str:
-    names = {k.lower() for k in props}
-    lines = ["## 信息收集与本地校验", "",
-             "- 优先从用户原话提取字段,**不要臆造**数量/金额/单价/事由/物品/审批人等关键信息;缺必填项先补齐再提交。"]
-    if numeric:
-        flds = "、".join(f"`{k}`" for k in numeric)
-        lines.append(f"- 数值字段({flds})必须是 JSON **数字**而非字符串(脚本会自动转换;"
-                     "审批分支按数值比较,字符串会让流程条件判断失效)。")
-    selects = _select_fields(props)
-    if selects:
-        flds = "、".join(f"`{k}`" for k in selects)
-        lines.append(f"- 选择型字段({flds})**传名字/选项文字**(如审批人姓名、假期类型名),"
-                     "**不要传内部 ID/编号**——Dano 运行期按名字到目标系统查对应 ID 再提交。")
-    if {"quantity", "unitprice"} <= names and "amount" in names:
-        lines.append("- 用户只给了数量与单价、没给总额时:`amount = quantity × unitPrice`(保留两位小数)。")
-        lines.append("- 三者都给了:校验 `|quantity × unitPrice − amount| ≤ 0.01`;不一致时**不要提交**,"
-                     "向用户指出差异并确认采用哪个金额。")
-    return "\n".join(lines)
+def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
+    """操作步骤(SOP):**纯函数渲染,数据全取自 manifest**(parameters / flow / business_meta),
+    **零业务/框架字面量**——步数取 `flow.step_count`、计算取 `flow.computes`、前置取 `flow.preconditions`、
+    审批取 `business_meta`。任意业务/任意框架自然适配;源为空则该段省略,绝不臆造。
+    """
+    keys, required, props = _fields(m)
+    numset = set(_numeric_fields(props))
+    f = m.flow or {}
+    n = int(f.get("step_count", 1) or 1)
+    write = m.requires_confirmation
+    bm = m.business_meta or {}
+    has_appr = bool(bm.get("approvalChain") or bm.get("approval_chain") or bm.get("thresholds"))
+    L: list[str] = ["## 操作步骤(SOP)", "",
+                    "按序执行;每步依据都来自本 Skill 的契约,不要自行加戏。", ""]
+
+    # 阶段1 · 识别与前置自检
+    L += ["### 阶段1 · 识别与前置自检",
+          f"- 确认这是「{m.title}」({m.subsystem}),不是查询/咨询/代他人审批 → 否则停(见「不该直接使用」)。"]
+    pre = f.get("preconditions") or []
+    if pre:
+        L.append("- 前置自检(Dano 会再校验一遍,你先自检免得白跑):")
+        for p in pre:
+            msg = (p.get("message") or "").strip() or p.get("check")
+            L.append(f"  · {msg}(`{p.get('check')}`)")
+        L.append("  不满足 → 不要提交,向用户说明缺口。")
+
+    # 阶段2 · 信息收集
+    L += ["", "### 阶段2 · 信息收集(逐字段,缺则追问,不臆造)"]
+    if keys:
+        for k in keys:
+            tag = "必填" if k in required else "可选"
+            L.append(f"- `{k}`:{(props[k] or {}).get('description', k)}({_ptype(k, props, numset)}·{tag})")
+    else:
+        L.append("- 本动作无业务参数。")
+    for c in (f.get("computes") or []):
+        L.append(f"- `{c['out']}` 由系统按 `{c['expr']}` 计算,通常不必用户提供;用户给了则需与计算值一致。")
+    sel = _select_fields(props)
+    if sel:
+        L.append(f"- 选择型字段({'、'.join('`' + k + '`' for k in sel)})传**名字/选项文字**,"
+                 "Dano 运行期查内部 ID 再提交,**勿直接传 ID/编号**。")
+    num = [k for k in keys if k in numset]
+    if num:
+        L.append(f"- 数值字段({'、'.join('`' + k + '`' for k in num)})传 JSON **数字**"
+                 "(脚本会自动转;字符串会让 Dano 的数值条件判断失效)。")
+
+    # 阶段3 · 提交前预演(写操作)
+    if write:
+        L += ["", "### 阶段3 · 提交前预演(取得用户同意)",
+              "- 向用户**逐项复述**将提交的字段值,取得明确同意后才提交:"]
+        if keys:
+            L.append("  ```text")
+            L += [f"  {(props[k] or {}).get('description', k)}:<{k}>" for k in keys]
+            L.append("  ```")
+        if has_appr:
+            L.append("- 并告知审批走向(见上方「审批路径」),让用户知道这单大概要谁批、会不会触发更高审批。")
+        L.append("- 仅当用户明确说「提交 / 办理 / 发起 / 直接办」才进入下一步;只说「看看怎么填」则**只出草稿,不调用**。")
+
+    # 阶段4 · 受控提交
+    L += ["", "### 阶段4 · 受控提交",
+          f"- 运行:`bash scripts/submit.sh {flags}{cflag}`(或 `pwsh scripts/submit.ps1 …`);自检 `--diagnose`。"]
+    detail = [f"{n} 步受控编排(各步对调用方隐藏)" if n > 1 else "一步受控调用"]
+    if f.get("judged_by_code"):
+        detail.append("成败以业务返回码判定(不认 HTTP 字面成功)")
+    if f.get("verify"):
+        detail.append("执行后回查确认真生效(堵空操作)")
+    L.append(f"- Dano 侧:{';'.join(detail)}。你不必自己做,但要理解以便解读结果。")
+
+    # 阶段5 · 结果处置
+    L += ["", "### 阶段5 · 结果处置(读末行 JSON 的 status)",
+          "- `succeeded` → 告知成功 + `output` 里的业务标识;提示可去目标系统查后续进度。",
+          "- `need_confirm` → 漏带 `--confirm`,向用户确认后重跑。",
+          "- `need_select` → 出现多候选,把 `candidates` 给用户选,用 `--json` 带选中项的 `bind` 重跑。",
+          "- `failed` → 按 `reason` 分流:凭证/401=登录失效(别重试);回查未过=疑似空操作(**勿报成功**);缺字段=补齐。"]
+    if write:
+        L.append("- 超时 / 结果不明 → **绝不自动重跑**(可能已生效),让用户或运维核对实际状态后再决定。")
+    return "\n".join(L)
 
 
-def _confirm_summary(required: list[str], props: dict) -> str:
-    if not required:
-        return ""
-    lines = ["## 提交前确认(写操作)", "",
-             "调用脚本(带 `--confirm`)前,**先把要提交的内容复述给用户并取得明确同意**,例如:", "", "```text"]
-    for k in required:
-        label = (props.get(k) or {}).get("description") or k
-        lines.append(f"{label}:<{k}>")
-    lines += ["```", "",
-              "仅当用户明确说「提交 / 发起 / 办理 / 创建 / 直接办」等执行性指令后,才带 `--confirm` 调用;",
-              "用户只说「看看怎么填 / 写个草稿」时——**只生成草稿,不调用脚本**。"]
-    return "\n".join(lines)
+def _quality_section(m: SkillManifest) -> str:
+    """质量标准(怎样算做好):**纯函数、grounded、零业务/框架字面量**。
+
+    输入合格 ← preconditions/computes/parameters;落点正确 ← business_meta;
+    结果合格 ← flow.verify / judged_by_code;达成目标 ← goal.success_criteria;红线 ← goal.forbidden_steps。
+    源空即省略该项;只读类给轻量"如实反映"。任意业务/框架自适配。
+    """
+    keys, required, props = _fields(m)
+    numset = set(_numeric_fields(props))
+    f = m.flow or {}
+    g = m.goal or {}
+    bm = m.business_meta or {}
+    write = m.requires_confirmation
+    # 只读查询(非写、无前置、无成功标准)→ 轻量验收
+    if not write and not (f.get("preconditions") or g.get("success_criteria")):
+        return ("## 质量标准(怎样算做好)\n\n"
+                "- 结果应**如实反映系统数据**;查不到 / 为空就如实告知,**不要编造**记录或字段。")
+    L = ["## 质量标准(怎样算做好)", "", "逐条自检;不全过就**不算做好**,不要对用户报成功。", ""]
+
+    # ① 输入合格
+    L.append("**① 输入合格(提交前)**")
+    reqs = [k for k in keys if k in required]
+    L.append(f"- 必填字段齐全:{'、'.join('`' + k + '`' for k in reqs)}。" if reqs
+             else "- 用户给定的字段已逐项确认,无臆造。")
+    num = [k for k in keys if k in numset]
+    if num:
+        L.append(f"- 数值字段({'、'.join('`' + k + '`' for k in num)})为数字。")
+    sel = _select_fields(props)
+    if sel:
+        L.append(f"- 选择型字段({'、'.join('`' + k + '`' for k in sel)})传名字/选项文字,**非内部 ID**。")
+    for c in (f.get("computes") or []):
+        L.append(f"- `{c['out']}` 与 `{c['expr']}` 的计算结果一致(给了不一致先与用户确认)。")
+    for p in (f.get("preconditions") or []):
+        msg = (p.get("message") or "").strip() or p.get("check")
+        L.append(f"- 满足前置:{msg}。")
+
+    # ② 落点正确
+    L += ["", "**② 落点正确**",
+          "- 返回 `succeeded` 且带**业务标识**(单号/实例号)= 已真正进入业务流程。"]
+    chain = bm.get("approvalChain") or bm.get("approval_chain") or []
+    if chain:
+        steps = " → ".join((c.get("step", "") if isinstance(c, dict) else str(c)) for c in chain if c)
+        L.append(f"- 已进入正确审批链:{steps}。")
+    if bm.get("thresholds"):
+        L.append("- 达到阈值时按规则自动加签(见上方「审批路径」)。")
+
+    # ③ 结果合格
+    L += ["", "**③ 结果合格(真生效)**"]
+    if f.get("verify"):
+        L.append("- `status=succeeded` **且事实核查通过**(Dano 回查确认)才算成功;"
+                 "回查未过 / 接口 200 但空操作 → **不算成功**,原样返回给用户,**勿谎报**。")
+    elif f.get("judged_by_code"):
+        L.append("- 以**业务返回码**判成功(非 HTTP 字面);失败码即不算成功,**勿谎报**。")
+    else:
+        L.append("- `status=succeeded` 才算成功;`failed` 据 `reason` 处置,**勿把失败说成成功**。")
+    for sc in (g.get("success_criteria") or []):
+        L.append(f"- 达成:{sc}。")
+
+    # 红线
+    L += ["", "**红线(命中即不合格)**"]
+    L.append("- 不重复提交(超时/结果不明 → 先核对,别重跑);不绕过 `--confirm` / 不伪造身份或结果。"
+             if write else "- 不伪造数据或结果;不绕过平台闸门。")
+    forb = g.get("forbidden_steps") or []
+    if forb:
+        L.append(f"- 不执行越权/破坏动作:{'、'.join('`' + s + '`' for s in forb[:8])}。")
+    return "\n".join(L)
 
 
 _ERRORS_MD = """## 错误处理(据末行 status)
-- `failed` 且 reason 涉及凭证 / 401:OA 登录态失效,让部署方在 Dano 重配 token,**不要重试**。
+- `failed` 且 reason 涉及凭证 / 401:目标系统登录态失效,让部署方在 Dano 重配 token,**不要重试**。
 - `failed` 且 `事实核查未过`:疑似空操作(接口 200 但没真生效),把原始返回给用户,**勿报成功**。
 - `need_confirm`:写操作未确认被拦,向用户确认后**带 `--confirm` 重跑**。
-- **超时 / 结果不明**:**不要自动重试写操作**(可能已提交,重试会重复下单);先让用户或运维核对实际状态。"""
+- **超时 / 结果不明**:**不要自动重试写操作**(可能已生效,重试会造成重复执行);先让用户或运维核对实际状态。"""
 
 _SECURITY_MD = """## 安全
 - 不在回复 / 日志里输出完整 token 或凭证。
-- 不把一笔大额拆成多笔小额以规避更高审批;用户要求规避审批应拒绝。
-- 申请人身份取自登录凭证(谁的 token 就是谁申请);不接受伪造审批人 / 审批结果。"""
+- 不规避平台的风险闸门 / 确认(如拆分、绕过 `--confirm`);用户要求规避应拒绝。
+- 调用者身份取自登录凭证(谁的 token 就是谁操作);不伪造身份或执行结果。"""
 
 
 # ─────────────────────────── SKILL.md ───────────────────────────
@@ -189,9 +301,7 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
     tool = tool_name_of(m.name)
     confirm = m.requires_confirmation
     keys, required, props = _fields(m)
-    numeric = _numeric_fields(props)
-    numset = set(numeric)
-    req_list = [k for k in keys if k in required]
+    numset = set(_numeric_fields(props))
     if keys:
         rows = "\n".join(
             f"| `{k}` | {_ptype(k, props, numset)} | {'是' if k in required else '否'} | "
@@ -208,13 +318,11 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
                     if confirm else "")
     desc = (f"{m.description}。当用户想办理「{m.title}」或相关 {m.subsystem} 操作时,**务必使用本 skill**,"
             f"即使用户没有明确说出 skill 名或接口名。")
-    # 中部丰富段(有则插入,无则跳过,绝不臆造)
-    mid = [s for s in (
-        _approval_section(getattr(m, "business_meta", {}) or {}),
-        _collection_section(props, numeric),
-        _confirm_summary(req_list, props) if confirm else "",
-    ) if s]
-    mid_md = ("\n\n".join(mid) + "\n\n") if mid else ""
+    # 审批路径(有 business_meta 才出,grounded);放在 SOP 前,供阶段3 引用
+    approval = _approval_section(getattr(m, "business_meta", {}) or {})
+    approval_md = (approval + "\n\n") if approval else ""
+    sop = _sop_section(m, flags, cflag)            # 操作步骤(SOP):纯函数渲染,零业务/框架字面量
+    quality = _quality_section(m)                   # 质量标准(怎样算做好):grounded 验收清单
     return f"""---
 name: {slug}
 description: {desc}
@@ -228,30 +336,26 @@ metadata:
 
 # {m.title}
 
-这是 Dano **已上架 Skill 的代理**:真正的两步编排 + 三模型闸门 + 事实核查都在 Dano 侧。本端负责**收集参数、本地校验、提交前确认**,再调用 Dano,**不接触目标系统凭证、不自行发审批结果**。
+这是 Dano **已上架 Skill 的代理**:真正的业务编排、风险闸门与事实核查都在 Dano 侧。本端负责**收集参数、本地校验、提交前确认**,再调用 Dano,**不接触目标系统凭证、不自行裁定结果**。
 {confirm_note}
 ## 何时使用
 当用户想办理「{m.title}」({m.subsystem})时使用本 skill,即使没说出 skill 名或接口名。
 
-**不该直接使用**:用户只是咨询制度 / 查询已有单据状态 / 要求审批或驳回他人单据;只是模拟或咨询、没明确要正式提交;关键信息(内容 / 数量 / 金额)无法确认。
+**不该直接使用**:用户只是咨询制度 / 查询已有记录状态 / 要求代他人审批或驳回;只是模拟或咨询、没明确要正式提交;关键信息(必填字段)无法确认。
 
 ## 参数
 {table}
 
-> `__base_url__`、流程模板、申请人身份(来自登录凭证)、调用凭证等由 Dano 运行期注入,**不需要也不应**由你提供。
+> 流程句柄/模板、调用者身份(取自登录凭证)、调用凭证等由 Dano 运行期注入,**不需要也不应**由你提供。
 
-{mid_md}## 如何执行
-1. 收集并校验上面的**必填**参数(见「信息收集与本地校验」)。{('高风险:先复述提交内容并取得同意。' if confirm else '')}
-2. 运行脚本(自动带 `X-Tenant-Key` 调 Dano):
-   - bash:`bash scripts/submit.sh {flags}{cflag}`
-   - PowerShell:`pwsh scripts/submit.ps1 {flags}{cflag}`
-   - 自检:`bash scripts/submit.sh --diagnose`
-3. 读脚本输出的**最后一行 JSON 状态**,据下表行动,再把结果转述给用户。
+{approval_md}{sop}
+
+{quality}
 
 ## 输出契约(脚本末行 JSON)
 | status | 含义 | 你应做的 |
 |---|---|---|
-| `succeeded` | 真实执行且事实核查通过 | 告知成功,附 `output` 里的单号 / procInsId |
+| `succeeded` | 真实执行且事实核查通过 | 告知成功,附 `output` 里的业务标识(单号/实例号) |
 | `need_select` | 复合流程消歧:有多个候选待选 | 把 `candidates` 给用户选,再用 `--json` 把选中项的 `bind` 值带上重跑 |
 | `need_confirm` | 写操作未确认被拦 | 向用户确认后,**带 `--confirm` 重跑** |
 | `failed` | 失败(见 `reason`) | 把 reason 告知用户;缺参/凭证按故障排除处理,**勿谎报成功** |
@@ -259,7 +363,7 @@ metadata:
 示例:
 ```json
 {{"status": "succeeded", "state": "completed", "output": {{}}, "fact_check": {{"passed": true}}}}
-{{"status": "failed", "reason": "缺必填: reason"}}
+{{"status": "failed", "reason": "缺必填: <字段>"}}
 ```
 
 {_ERRORS_MD}
@@ -267,10 +371,10 @@ metadata:
 {_SECURITY_MD}
 
 ## 限制
-本 skill 只负责「{m.title}」这一个动作。状态查询、撤回、审批历史、附件上传等若没有对应 skill,**不要声称支持**。
+本 skill 只负责「{m.title}」这一个动作。查询、撤回、历史等其它动作若没有对应 skill,**不要声称支持**。
 
 ## 示例
-**Input:** 用户说"帮我提交一条{m.title}"。
+**Input:** 用户说"帮我办理一条{m.title}"。
 **调用:** `bash scripts/submit.sh {flags}{cflag}`
 **参数 JSON(等价):** `{ex_args}`
 
@@ -278,7 +382,7 @@ metadata:
 | 现象 | 处理 |
 |---|---|
 | `DANO_URL/DANO_TENANT_KEY 未设置` | 让部署方配好这两个环境变量(勿写进文件) |
-| `HTTP 401` / 凭证无效 | Dano「运行配置」里该租户 OA token 失效,重配 |
+| `HTTP 401` / 凭证无效 | Dano「运行配置」里该租户目标系统 token 失效,重配 |
 | `缺必填: …` / `字段 … 需为数字` | 补齐参数表里的必填项 / 把数值字段填成数字再调 |
 | `事实核查未过` | Dano 判定没真生效(疑似空操作),把原始返回给用户,**勿报成功** |
 
@@ -322,6 +426,10 @@ def _readme(m: SkillManifest) -> str:
     field_lines = "\n".join(
         f"- `{k}`（{'必填' if k in required else '可选'}）:{(props[k] or {}).get('description', '') or k}"
         for k in keys) or "- (无业务参数)"
+    crit = (m.goal or {}).get("success_criteria") or []
+    verdict = ("\n".join(f"- {c}" for c in crit) if crit else
+               ("- `status=succeeded`" + ("(且事实核查通过)" if (m.flow or {}).get("verify") else "")
+                + " 才算成功;`failed` 据 `reason` 处置,**勿谎报成功**。"))
     return f"""# {m.title} — 详细说明
 
 `source: dano:{m.name}` · 风险 {m.risk_level} · {'写操作需确认' if m.requires_confirmation else '读操作'}
@@ -329,13 +437,16 @@ def _readme(m: SkillManifest) -> str:
 ## 字段
 {field_lines}
 
-不需要填的(Dano 运行期注入):流程模板、`__base_url__`、调用凭证;**申请人**取自登录凭证(谁的 token 就是谁申请),不作参数。
+不需要填的(Dano 运行期注入):流程句柄/模板、`__base_url__`、调用凭证;**调用者身份**取自登录凭证(谁的 token 就是谁操作),不作参数。
 
 ## 执行与判定
 脚本把字段组装成 `arguments`,POST 到 Dano `/v1/tools/call`(带 `X-Tenant-Key`)。Dano 侧:风险闸门(写操作要 `--confirm`)→ 隔离执行适配器 → **事实核查**回查是否真生效。脚本末行 JSON 的 `status` 是唯一可信结论:
-- `succeeded`:接口成功**且**事实核查通过(真生效);`output` 含单号/procInsId。
+- `succeeded`:接口成功**且**事实核查通过(真生效);`output` 含业务标识(单号/实例号)。
 - `need_confirm`:写操作没带 `--confirm` 被拦;向用户确认后重跑。
 - `failed`:含 `reason`;`事实核查未过` 表示疑似空操作,**不要**因为接口回了 200 就报成功。
+
+## 验收(怎样算做好)
+{verdict}
 
 ## 环境变量(部署方配置,勿写进文件)
 - `DANO_URL` / `DANO_TENANT_KEY`
@@ -347,7 +458,7 @@ _PY_TEMPLATE = r'''#!/usr/bin/env python3
 """由 Dano 自动生成:调用已上架 Skill「__TITLE__」(真实执行在 Dano 侧)。
 
 逐字段 flags -> 组装 arguments -> POST Dano /v1/tools/call;最后一行打印 JSON 状态供 agent 解析。
-凭证 / 模板 / base_url / 申请人身份由 Dano 注入,本端不接触。
+凭证 / 模板 / base_url / 调用者身份由 Dano 注入,本端不接触。
 """
 import argparse
 import json

@@ -51,6 +51,13 @@ _RECORDER_JS = r"""() => {
     var w = el.closest ? el.closest('label') : null; if (w) return clean(w.innerText);
     var lb = el.getAttribute && el.getAttribute('aria-labelledby');
     if (lb) { var t = ''; lb.split(/\s+/).forEach(function (id) { var n = document.getElementById(id); if (n) t += clean(n.innerText) + ' '; }); if (clean(t)) return clean(t); }
+    // 兜底:最近表单项的标签(.el-form-item__label / .ant-form-item-label)—— 现代框架 label 常不带 for,
+    // 控件(el-select/日期/输入)靠这个才能拿到"请假类型"这类中文字段名,而不是退回 placeholder。
+    try {
+      var item = el.closest && el.closest('.el-form-item,.ant-form-item,[class*="form-item"],[class*="form_item"]');
+      var lab = item && item.querySelector('.el-form-item__label,.ant-form-item-label,label');
+      if (lab) { var lt = clean(lab.innerText).replace(/[:：*]\s*$/, ''); if (lt) return lt; }
+    } catch (e) {}
     return '';
   }
   function accName(el) {                                 // 可访问名(简化 WAI-ARIA),仅用于可点元素
@@ -135,7 +142,7 @@ _RECORDER_JS = r"""() => {
               '.ant-picker-dropdown,.ant-select-dropdown,.ant-cascader-dropdown,[role="listbox"]';
   var TRIGGER_CLS = '.el-date-editor,.el-select,.el-cascader,.el-time-select,.el-time-picker,' +
                     '.ant-picker,.ant-select,.ant-cascader-picker';
-  var activeTrigger = null;
+  var activeTrigger = null, prevVal = '', pickTimer = null;
   function triggerOf(t) {                               // 触发型字段:已知选择器类 / 含 readonly input / aria-haspopup
     var k = t.closest ? t.closest(TRIGGER_CLS + ',[aria-haspopup]') : null; if (k) return k;
     var node = t;
@@ -145,20 +152,42 @@ _RECORDER_JS = r"""() => {
     }
     return null;
   }
-  function readPick(trig) {                             // 读触发框 input 的最终值 → pick 参数步
-    if (!trig || !trig.querySelector) return;
-    var inp = trig.querySelector('input'); if (!inp) return;
-    var v = clean(inp.value); if (!v) return;
-    var loc = locateField(inp); if (loc) emit('pick', loc, v, fieldOf(loc), requiredOf(trig) || requiredOf(inp));
+  // 取触发框当前"显示值":优先 input.value(旧 Element UI),退而读触发框可见文本
+  // —— Element Plus(Vue3)等现代框架选中值在文本节点里、input.value 为空,必须读 innerText 才抓得到。
+  function pickVal(trig) {
+    if (!trig) return '';
+    var inp = trig.querySelector ? trig.querySelector('input') : null;
+    var v = inp ? clean(inp.value) : '';
+    return v || clean((trig.innerText || ''));
+  }
+  // 选中值落定检测:**不靠固定延时**,轮询显示值直到变成「非空且与点击前不同」才记 pick
+  // —— 异步/远程搜索/级联(值晚一点回填)也能稳抓,不会读太早拿空值而漏掉(框架无关)。
+  function pollPick(trig) {
+    if (pickTimer) { clearInterval(pickTimer); pickTimer = null; }
+    if (!trig) return;
+    var tries = 0;
+    pickTimer = setInterval(function () {
+      tries++;
+      var v = pickVal(trig);
+      if (v && v !== prevVal) {                         // 显示值已落定(与点击前不同)→ 记 pick
+        clearInterval(pickTimer); pickTimer = null;
+        var inp = trig.querySelector ? trig.querySelector('input') : null;
+        var loc = locateField(inp || trig);
+        if (loc) emit('pick', loc, v, fieldOf(loc), requiredOf(trig) || (inp && requiredOf(inp)));
+      } else if (tries >= 25) { clearInterval(pickTimer); pickTimer = null; }   // ~2.5s 仍没变 → 放弃
+    }, 100);
   }
   document.addEventListener('click', function (e) {
-    // A) 点在日期/下拉弹层内 = 正在选择 → 不记这次点击;选完(微延时)读触发框最终值作 pick
-    if (e.target.closest && e.target.closest(POPUP)) {
-      var tg = activeTrigger; setTimeout(function () { readPick(tg); }, 80); return;
-    }
-    // B) 点的是选择型触发框 → 记住它,本次不单独记;延时读值(覆盖单击即选的下拉)
+    // A) 点在日期/下拉弹层内 = 正在选择 → 不记这次点击;轮询触发框值落定后记 pick(选完即生效)
+    if (e.target.closest && e.target.closest(POPUP)) { pollPick(activeTrigger); return; }
+    // B) 点选择型触发框 → 记住它 + 点击前的显示值,开始轮询(覆盖单击即选 / 远程搜索异步回填 / 级联)
     var trig = triggerOf(e.target);
-    if (trig) { activeTrigger = trig; var t2 = trig; setTimeout(function () { readPick(t2); }, 450); return; }
+    if (trig) {
+      activeTrigger = trig;
+      prevVal = pickVal(trig);
+      pollPick(trig);
+      return;
+    }
     // C) 普通输入框点击 = 聚焦噪声(打字会另记 fill)→ 跳过
     if (e.target.closest && e.target.closest('input,select,textarea')) return;
     // D) 普通可点元素(按钮/卡片/菜单/链接)
@@ -219,7 +248,8 @@ class RecordSession:
             self.page.on("request", self._on_request)      # 直录模式:照常发,只旁观抓取
         if self._capture_reads:
             self.page.on("response", self._resp_dispatch)  # 抓 GET+JSON 读响应(列表/字典)→ select 候选源
-        await self.page.goto(full)
+        # SPA 常不触发 "load"(长连接/轮询挂着)→ 用 domcontentloaded,否则 goto 卡到超时(与运行期 driver 一致)
+        await self.page.goto(full, wait_until="domcontentloaded")
 
     def _capture(self, m: str, url: str, pd: str | None, ct: str, headers: dict | None = None) -> None:
         """登记一个写请求(含请求头,回放鉴权用)+ 实时推给前端诊断。"""
@@ -325,14 +355,15 @@ class RecordSession:
                     if r.get("url") == url and "response_json" not in r:
                         r["response_json"] = data
                         break
+                # 不 return:有些系统用 POST 查"下拉/选人"列表(带过滤条件)→ 列表型响应也当 select 候选源
+            if any(n in url.lower() for n in _READ_NOISE):    # 只跳静态/流(保留字典/列表接口)
                 return
-            if any(n in url.lower() for n in _READ_NOISE):    # GET:select 候选源,只跳静态/流(保留字典接口)
-                return
-            # 只留"列表型"(json 是数组 / dict 里含数组)→ 才可能是下拉/选人候选源;限规模避免存爆
+            # 只留"列表型"(json 是数组 / dict 里含数组)→ 才可能是下拉/选人候选源;限规模避免存爆。
+            # 提交那条写请求返回的是结果对象、非列表 → as_list_payload 为 None,不会被误当候选源。
             items = as_list_payload(data)
             if items is None:
                 return
-            self.reads.append({"method": "GET", "url": url, "status": response.status,
+            self.reads.append({"method": m, "url": url, "status": response.status,
                                "json": data if len(self.reads) < 60 else None,
                                "count": len(items)})
         except Exception:  # noqa: BLE001

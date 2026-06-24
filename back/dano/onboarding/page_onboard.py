@@ -226,9 +226,18 @@ async def run_request_onboarding(
         pub = await T.publish_asset(run_id, {"asset_draft_id": d["asset_draft_id"],
                                              "validation_run_ids": rp["validation_run_ids"],
                                              "review_run_ids": []})
+        # 安全网:产出的参数里若漏了"内部机器标识"(如 BPM 节点 Activity_xxx、hash)→ 告警提示改名,
+        # 绝不让无意义参数名静默上架(即便命名桥接没兜住,如候选列表被缓存没抓到)。
+        from dano.execution.page.request_capture import looks_internal_param_name
+        bad = [p for p in params if looks_internal_param_name(p)]
+        warnings = ([f"参数 `{p}` 像内部标识(非人类名),建议在录制界面给它起个名字(如审批人/类型),否则 agent 难以正确调用"
+                     for p in bad] if bad else [])
+        if warnings:
+            log.warning("request_onboard.internal_param_names", action=action, params=bad)
         log.info("request_onboard.done", action=action, published=pub.get("published"))
         return {"ok": pub.get("published", False), "stage": "publish", "action": action,
                 "asset_id": pub.get("asset_id"), "mode": "request", "reason": pub.get("reason", ""),
+                "warnings": warnings,
                 "api": {"method": api_request.get("method"), "path": api_request.get("path"),
                         "params": params}}
     finally:

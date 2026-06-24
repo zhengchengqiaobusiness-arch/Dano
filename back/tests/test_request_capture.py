@@ -23,6 +23,7 @@ from dano.execution.page.request_capture import (
     substitute,
     suggest_fact_check,
     suggest_identity,
+    suggest_select_names,
     suggest_selects,
 )
 
@@ -141,6 +142,73 @@ def test_suggest_selects_drops_overly_generic_source():
     submit = '{"aCode":"AAAA","bCode":"BBBB","cCode":"CCCC","dCode":"DDDD"}'
     generic = {"rows": [{"value": v} for v in ("AAAA", "BBBB", "CCCC", "DDDD")]}
     assert suggest_selects(submit, [{"url": "/sys/dict", "json": generic}]) == []
+
+
+def test_suggest_selects_value_key_not_named_id():
+    """泛化:值字段名不带 id/code(如字典 {type,name})也能绑 select —— 靠"小项 + 独立文字标签"结构判定,
+    不写死值字段名,多公司/多系统的下拉字典都覆盖。"""
+    sub = '{"leaveType":2}'
+    read = [{"url": "/dict", "json": {"data": [{"type": 1, "name": "事假"}, {"type": 2, "name": "病假"}]}}]
+    s = suggest_selects(sub, read)
+    assert len(s) == 1
+    assert s[0]["value_key"] == "type" and s[0]["label_key"] == "name" and s[0]["label"] == "病假"
+
+
+def test_suggest_selects_rejects_id_only_list_without_label():
+    """只有 ID、没有名字/文字字段的列表不绑(没名字可传 → 不是名字→ID 下拉,防误绑)。"""
+    sub = '{"x": "AAAA"}'
+    read = [{"url": "/d", "json": {"rows": [{"value": "AAAA"}, {"value": "BBBB"}]}}]
+    assert suggest_selects(sub, read) == []
+
+
+def test_date_keys_handles_seconds_and_slash_formats():
+    """日期跨格式泛化:10 位秒戳、13 位毫秒戳、斜杠/单位数日期串都能抽出 YYYY-MM-DD,供日期字段标签匹配。"""
+    from dano.execution.page.request_capture import _date_keys
+    assert "2024-06-24" in _date_keys("1719196800")        # 10 位秒级时间戳(原来不支持)
+    assert "2026-06-24" in _date_keys("1782230400000")     # 13 位毫秒(原有)
+    assert _date_keys("2026/6/24") == {"2026-06-24"}       # 斜杠 + 单位数月日
+
+
+def test_looks_internal_param_name_flags_machine_ids_only():
+    """安全网:产出参数名若漏成内部机器标识(BPM 节点 Activity_xxx / hash)→ 判 True 供告警;
+    正常字段名(reason/apply_reason/leave_type/startTime/中文)不误判。"""
+    from dano.execution.page.request_capture import looks_internal_param_name as L
+    assert L("Activity_09dlq0g") and L("Activity_0ag2wyz") and L("550e8400e29b41d4")
+    assert not L("reason") and not L("apply_reason") and not L("leave_type")
+    assert not L("startTime") and not L("type") and not L("领导") and not L("请假类型")
+
+
+def test_suggest_selects_binds_short_code_in_big_dict_when_recorded_confirms():
+    """大全局字典(上千项)里短码 type=2:无录制佐证不绑(防误报);录制确实选了『病假』→ 精确绑对 oa_leave_type 那项。
+    修"假期类型在全局字典里绑不上"的根因 —— 用录制选中值消歧/确认,不靠列表大小一刀切。"""
+    big = ([{"dictType": "sys_yes_no", "value": "2", "label": "否"}]
+           + [{"dictType": "oa_leave_type", "value": v, "label": l} for v, l in (("1", "事假"), ("2", "病假"))]
+           + [{"dictType": "x", "value": "2", "label": "噪声"} for _ in range(1430)])
+    read = [{"url": "/admin-api/system/dict-data/simple-list", "json": {"code": 0, "data": big}}]
+    sub = '{"type": 2, "reason": "x"}'
+    assert suggest_selects(sub, read) == []                            # 无 samples → 大字典短码不乱绑(原精度)
+    s = suggest_selects(sub, read, {"请假类型": "病假", "原因": "x"})    # 录制选了"病假" → 确认命中
+    assert len(s) == 1 and s[0]["path"] == "type" and s[0]["label"] == "病假"
+
+
+def test_pick_label_key_prefers_display_name_over_login():
+    """选人列表 {id, username, nickname}:label 取**显示名** nickname(张三),不取登录名 username(zhangsan)。
+    否则名字→ID 桥接与运行期解析都对不上(用户选人看的是显示名)。"""
+    from dano.execution.page.request_capture import _pick_label_key
+    assert _pick_label_key({"id": 138, "username": "zhangsan", "nickname": "张三"}, "id") == "nickname"
+    assert _pick_label_key({"userId": 1, "nickName": "张经理", "deptName": "研发"}, "userId") == "nickName"
+
+
+def test_suggest_select_names_bridges_picker_label_to_param_name():
+    """select/选人字段参数名:候选显示名(张三)== 录制样例某字段的值 → 用那字段标签(领导)当参数名,
+    修"选人字段参数名漏成内部 key(Activity_xxx/嵌套键)"的根因。通用,不挑字段。"""
+    selects = [{"path": "startUserSelectAssignees.Activity_09dlq0g[0]", "label": "张三"},
+               {"path": "startUserSelectAssignees.Activity_0ag2wyz[0]", "label": "李四"}]
+    samples = {"领导": "张三", "人力": "李四", "原因": "回家"}
+    out = suggest_select_names(selects, samples)
+    assert out["startUserSelectAssignees.Activity_09dlq0g[0]"] == "领导"
+    assert out["startUserSelectAssignees.Activity_0ag2wyz[0]"] == "人力"
+    assert suggest_select_names([], samples) == {}              # 无 select → 空,不瞎给
 
 
 def test_suggest_identity_flags_current_user_fields():

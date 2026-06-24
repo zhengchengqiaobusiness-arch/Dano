@@ -197,19 +197,29 @@ def discover_step_links(writes: list[dict]) -> list[dict]:
     return links
 
 
-_NAME_LIKE = ("nickname", "name", "realname", "username", "label", "title", "text", "fullname", "dept")
+# 显示名(给人看的)字段提示;**登录名(username/account)排最后** —— 选人下拉里用户认的是"张三"而非"zhangsan",
+# 用对显示名字段,name→ID 桥接与运行期解析才对得上。通用,不挑系统。
+_DISPLAY_HINTS = ("nickname", "realname", "fullname", "truename", "cnname", "displayname",
+                  "name", "label", "title", "caption", "text", "dept")
+_LOGIN_HINTS = ("username", "loginname", "account", "loginid", "useraccount")
 
 
 def _pick_label_key(item: dict, value_key: str) -> str:
-    """从列表项里挑"像名字"的字段当 label:① 名字类字段名(nickName/name/label…);
-    ② 兜底挑一个非 value_key 的「文字字段」(最长字符串值=显示名,覆盖未知 label 字段名);③ 都没有用 value_key。"""
-    for k in item:
-        if k != value_key and any(n in k.lower() for n in _NAME_LIKE) and item[k] not in (None, ""):
-            return k
-    text = [(k, item[k]) for k in item if k != value_key and isinstance(item[k], str) and item[k]]
-    if text:
-        return max(text, key=lambda kv: len(kv[1]))[0]      # 最长字符串字段=显示名(通用兜底)
-    return value_key
+    """从列表项里挑"显示名"字段当 label:优先真正给人看的名字(nickname/realname/name/label…),
+    **登录名(username/account)排最后**(选人下拉用户看的是显示名);同档取最长文字。无文字字段 → 用 value_key。"""
+    text = [k for k in item if k != value_key and isinstance(item[k], str) and item[k].strip()]
+    if not text:
+        return value_key
+
+    def rank(k: str) -> int:
+        kl = k.lower()
+        if any(h in kl for h in _LOGIN_HINTS) and "nick" not in kl:
+            return 2                                     # 登录名最后(username/account)
+        if any(h in kl for h in _DISPLAY_HINTS):
+            return 0                                     # 显示名优先
+        return 1                                         # 其它文字字段居中
+
+    return min(text, key=lambda k: (rank(k), -len(item[k])))
 
 
 _IDLIKE = _re.compile(r"(id|code|key|value|no|num|guid|uuid|oid|sn)$", _re.I)
@@ -223,17 +233,19 @@ def _is_idlike(key: str) -> bool:
 _SMALL_LIST = 50    # "字典型下拉"是小列表(事假/病假…);城市/数据大字典是大列表 → 区分短码真假命中
 
 
-def suggest_selects(post_data: str | None, reads: list[dict]) -> list[dict]:
-    """提交体里"等于某候选列表项 ID 的值"的字段 → 绑 select(Q2:Agent 传名字/文字→运行期查内部 ID)。
+def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | None = None) -> list[dict]:
+    """提交体里"等于某候选列表项 ID 的值"的字段 → 绑 select(Agent 传名字/文字→运行期查内部 ID)。
 
-    覆盖:选领导(approverId=12↔user/list)+ **代码型下拉(type=2↔字典 dictValue=2,agent 传"事假")**。
-    防误报:① 命中字段必须是 ID 类(value_key 像 id/code/value…);② 一个源命中 >3 个字段=通用字典,整源丢弃;
-    ③ **短码(len<2)只在小列表(≤50,像字典型下拉)里认**,避免 't'/'1' 碰巧命中上千项的大字典。
+    覆盖:选领导(approverId↔user/list)+ 代码型下拉(type=2↔字典 value=2,agent 传"事假")。
+    **录制样例(samples)= 消歧器**:候选项的显示名正是用户录制时选中的值(label∈samples 值)→「确认命中」,
+    是强证据 → **即便在上千项的全局大字典里、即便短码也照绑**,并据此精确选中正确那项(避免大字典里 value=2 撞多组)。
+    无录制佐证时维持原精度闸门:短码(len<2)只在小列表认、同源未确认命中 >3 个按通用字典整源丢弃。
     """
     body = _parse_body(post_data)
     if body is None:
         return []
     leaves = _leaf_paths(body)
+    sample_vals = {str(v) for v in (samples or {}).values() if v not in (None, "")}
     out: list[dict] = []
     seen: set[str] = set()
     for r in reads:
@@ -247,30 +259,90 @@ def suggest_selects(post_data: str | None, reads: list[dict]) -> list[dict]:
                 continue
             if _is_const_value(raw):                    # 系统常量(流程键 oa_hotel_apply/uuid/雪花)绝不是"按名字选"的下拉
                 continue
-            if len(sv) < 2 and not small:               # 短码只在小列表里认(避免命中大字典)
-                continue
+            chosen = None                               # (value_key, label_key, label, confirmed)
             for it in items:
+                # 值字段:优先 ID 类(id/code/value…);选项型小项(≤4 字段)允许值字段名不带 id/code(不写死字段名)
                 vk = next((k for k, v in it.items() if str(v) == sv and _is_idlike(k)), None)
+                if vk is None and len(it) <= 4:
+                    vk = next((k for k, v in it.items()
+                               if str(v) == sv and not isinstance(v, (dict, list))), None)
                 if vk is None:
                     continue
                 lk = _pick_label_key(it, vk)
-                hits.append({"path": path, "value": sv, "source_url": r.get("url"),
-                             "value_key": vk, "label_key": lk,
-                             "label": str(it.get(lk, "")), "count": len(items)})
-                break
-        # 同一个源里多个字段命中"同一个短值"(如 roomCount/roomLevel/userCount 都=1 碰巧等于某 userId=1)
-        # = 数字巧合,不是真下拉 → 丢掉这些短值命中(长 ID 多选,如选两个领导,值各不同且长,保留)
+                label = str(it.get(lk, "")).strip()
+                if lk == vk or not label:               # 无独立显示名 → 不是名字→ID 下拉,防误绑
+                    continue
+                if any(_name_match(label, v) for v in sample_vals):   # 确认命中:正是用户录制选的显示名(含带后缀)
+                    chosen = (vk, lk, label, True)
+                    break
+                if chosen is None and (len(sv) >= 2 or small):   # 暂存未确认命中(短码在大列表里不暂存)
+                    chosen = (vk, lk, label, False)
+            if chosen is None:
+                continue
+            vk, lk, label, confirmed = chosen
+            hits.append({"path": path, "value": sv, "source_url": r.get("url"), "value_key": vk,
+                         "label_key": lk, "label": label, "count": len(items), "_confirmed": confirmed})
+        # 短值数字巧合去重(仅对未确认);同源未确认命中 >3 = 通用字典误命中(整源只留确认的)。确认命中永远保留。
         vcount: dict[str, int] = {}
         for h in hits:
-            vcount[h["value"]] = vcount.get(h["value"], 0) + 1
-        hits = [h for h in hits if not (len(h["value"]) <= 2 and vcount[h["value"]] >= 2)]
-        if len(hits) > 3:                 # 一个源命中 >3 个不同字段 = 通用字典误命中,整源丢弃
-            continue
+            if not h["_confirmed"]:
+                vcount[h["value"]] = vcount.get(h["value"], 0) + 1
+        hits = [h for h in hits
+                if h["_confirmed"] or not (len(h["value"]) <= 2 and vcount.get(h["value"], 0) >= 2)]
+        if len([h for h in hits if not h["_confirmed"]]) > 3:
+            hits = [h for h in hits if h["_confirmed"]]
         for h in hits:
             if h["path"] in seen:
                 continue
             seen.add(h["path"])
-            out.append(h)
+            out.append({k: v for k, v in h.items() if k != "_confirmed"})
+    return out
+
+
+# 像"内部机器标识"的参数名 —— 仅高置信形态,避免误伤正常 snake_case(apply_reason/leave_type 不该告警):
+_INTERNAL_NAME_RE = _re.compile(
+    r"^(activity|node|task|flow|gateway|sequenceflow|usertask|bpmn|element)[_-]?\w*$"  # BPM 流程节点 ID
+    r"|[0-9a-f]{8,}"                                                                   # 长 hex / hash / uuid 片段
+    r"|_[0-9][0-9a-z]{4,}$",                                                           # _后数字开头随机码(_09dlq0g)
+    _re.I)
+
+
+def looks_internal_param_name(name: str) -> bool:
+    """参数名是否像"内部机器标识"(流程节点 ID / hash / 字母_随机码)而非人类字段名 → 产出时告警、提示改名。
+    含中文等非 ASCII(已是人话)或常规英文字段名(reason/startTime)不命中。通用,不挑系统/字段。"""
+    n = (name or "").strip()
+    if not n or not n.isascii():
+        return False
+    return bool(_INTERNAL_NAME_RE.search(n))
+
+
+def _name_match(label: str, value) -> bool:
+    """候选显示名与"录制选中值"是否同指:精确相等,或一方是另一方的子串(≥2 字)——容忍真实选人下拉
+    常见的带后缀显示名(如『张三(研发部)』『病假(年度)』)。≥2 字防单字噪声误配。通用,不挑系统。"""
+    a, b = (label or "").strip(), (str(value) or "").strip()
+    if not a or not b:
+        return False
+    return a == b or (len(a) >= 2 and a in b) or (len(b) >= 2 and b in a)
+
+
+def suggest_select_names(selects: list[dict], samples: dict | None) -> dict:
+    """给 select/选人字段配**人类参数名**(修"选人/下拉字段参数名退回内部 key 如 Activity_xxx"的根因)。
+
+    桥接:select 的候选**标签**(label,如"张三")== 录制样例里某字段的值 → 用那个字段的录制标签(如"领导")
+    当参数名。选人字段没法靠"值匹配"命名(body 存的是内部 ID,用户选的是名字),只能经候选列表这座桥连回 DOM 标签。
+    **通用、不挑字段/系统**:任何 select 都走"候选标签↔录制选项值"这一座桥;桥不上 → 不给(上层退回原名,诚实不瞎编)。
+    返回 {body点路径 → 建议参数名}。
+    """
+    pairs = [(k, v) for k, v in (samples or {}).items() if v not in (None, "")]
+    out: dict[str, str] = {}
+    for s in selects or []:
+        label = str(s.get("label", "")).strip()
+        path = s.get("path")
+        if not (path and label):
+            continue
+        field = next((k for k, v in pairs if _name_match(label, v)), None)   # 含带后缀显示名的子串匹配
+        if field:
+            out[path] = field
     return out
 
 
@@ -457,19 +529,22 @@ def _infer_type(node, key: str = "") -> str:
 
 
 def _date_keys(s) -> set:
-    """从一个值里抽出 YYYY-MM-DD(支持 ISO 串 / 12-13 位毫秒时间戳),用于日期字段跨格式匹配。"""
+    """从一个值里抽出 YYYY-MM-DD,用于日期字段跨格式匹配(通用,不挑系统):
+    支持 ISO / 带斜杠日期串(2026-06-24、2026/6/24)、**10 位秒级时间戳**、12-13 位毫秒时间戳。
+    时间戳按东八区(中国 OA)+ UTC 两种日期都给,容忍时区差。"""
     out: set = set()
     s = str(s)
-    m = _re.search(r"\d{4}-\d{2}-\d{2}", s)
-    if m:
-        out.add(m.group(0))
-    elif s.isdigit() and 12 <= len(s) <= 13:
-        try:
-            ms = int(s) if len(s) == 13 else int(s) * 1000
-            for off in (8, 0):                                  # 优先东八区(中国 OA),再 UTC
-                out.add(_dt.datetime.fromtimestamp(ms / 1000 + off * 3600, _dt.timezone.utc).strftime("%Y-%m-%d"))
-        except Exception:  # noqa: BLE001
-            pass
+    for m in _re.finditer(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", s):       # - 或 / 分隔的日期串
+        out.add(f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}")
+    if not out and s.isdigit():
+        ms = int(s) if len(s) == 13 else (int(s) * 1000 if len(s) == 10 else None)   # 13位毫秒 / 10位秒
+        if ms is not None:
+            try:
+                for off in (8, 0):                                       # 优先东八区,再 UTC
+                    out.add(_dt.datetime.fromtimestamp(ms / 1000 + off * 3600,
+                                                       _dt.timezone.utc).strftime("%Y-%m-%d"))
+            except Exception:  # noqa: BLE001
+                pass
     return out
 
 

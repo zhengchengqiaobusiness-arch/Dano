@@ -195,6 +195,17 @@ class GenerationLoop:
         log.info("gen.gate.vuln", flow=goal.flow, iter=i, passed=True)
         self._emit(type="gate", flow=goal.flow, iter=i, gate="漏洞校验", passed=True)
 
+        # ②.5 编码契约校验(确定性、跨系统通用:入口签名 / 不吞异常 / 库未 import)
+        lint = await T.lint_adapter(goal.run_id, {"asset_draft_id": did})
+        val_ids += lint["validation_run_ids"]
+        if not lint["passed"]:
+            log.warning("gen.gate.lint", flow=goal.flow, iter=i, passed=False, findings=lint["findings"])
+            self._emit(type="gate", flow=goal.flow, iter=i, gate="编码契约",
+                       passed=False, detail="; ".join(lint["findings"]))
+            return False, [f"编码契约未过: {x}" for x in lint["findings"]], val_ids, [], "code"
+        log.info("gen.gate.lint", flow=goal.flow, iter=i, passed=True)
+        self._emit(type="gate", flow=goal.flow, iter=i, gate="编码契约", passed=True)
+
         # ③ 审核(三模型:成果验收 / 漏洞检测 / 合规审核)
         self._emit(type="reviewing", flow=goal.flow, iter=i)
         rev = await T.request_review(goal.run_id, {"asset_draft_id": did})

@@ -196,7 +196,7 @@ async def _expand_business_goals(run_id: str, sid: str, flow: str, raw_ti: dict,
         from functools import partial
 
         from dano.generation.coder import openai_text_spawn
-        spawn = partial(openai_text_spawn, tag="profiler")
+        spawn = partial(openai_text_spawn, tag="profiler", json_mode=True)
     ops = await profile_business(flow, scoped, spawn=spawn)
     if not ops:
         log.warning("business.expand.empty", flow=flow, note="剖析无操作 → 回退单提交")

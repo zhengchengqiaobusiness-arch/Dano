@@ -18,6 +18,7 @@ import structlog
 from dano.generation.coder import openai_text_spawn
 from dano.generation.artifacts import GoalBrief
 from dano.shared.asset_bodies import FactCheckSpec, PlanBody
+from dano.shared.prompt_utils import estimate_tokens
 
 log = structlog.get_logger(__name__)
 
@@ -54,6 +55,14 @@ def _allowed(evidence: dict | None) -> tuple[set[str], set[str]]:
 
 _JS_ISMS = ("&&", "||", "===", "!==")          # null/true/false 是 safe_eval 合法字面量,不算 JS
 _CALL = re.compile(r"[A-Za-z_]\w*\s*\(")       # 标识符紧跟左括号 = 函数/方法调用(safe_eval 不支持)
+
+# 判定表达式规则的**唯一文案来源**:prompt 与下方 `_expr_problem` 校验器同遵此规则,改这里即同步。
+# (planner 的 _CONTRACT、capabilities/llm_template 的 success_rule 说明都引用它,避免两处漂移。)
+EXPR_RULE_TEXT = (
+    "判定表达式基于变量 response,**只能用**:属性点取(如 response.code)、下标(如 response['code'])、"
+    "比较(== != > < >= <=)、and/or/not、字面量 null/true/false;"
+    "**禁止**函数/方法调用(如 .get()、len())、禁止用 None(写 null)、禁止 JS 的 ===/&&/||。"
+)
 
 
 def _expr_problem(expr: object, label: str) -> str | None:
@@ -130,19 +139,48 @@ def _trim_evidence(ev: dict | None, endpoints: list[str]) -> dict:
             "form_fields": ev.get("form_fields") or [], "sample_reads": ev.get("sample_reads") or []}
 
 
-def _compact_evidence(ev: dict | None) -> str:
-    """给拆解器的紧凑证据:**列出全部端点** + 表单字段 + 样例返回(不截掉关键端点)。"""
+# 喂拆解器的证据 token 预算。按**优先级**(写端点 > 表单字段 > 读端点 > 样例返回)在**行边界**截断,
+# 而非旧的 [:16000] 字符硬切——字符切会低估 CJK token 量、且可能切碎某行或挤掉关键写端点。
+_EVIDENCE_TOKEN_BUDGET = 6000
+
+
+def _compact_evidence(ev: dict | None, *, max_tokens: int = _EVIDENCE_TOKEN_BUDGET) -> str:
+    """给拆解器的紧凑证据,按 token 预算在行边界截断;**写端点与表单字段优先**,流程必需项不被海量读端点挤掉。
+
+    截断绝不切碎某行;丢弃任何行都会 log.warning 记数 + 在文本里留标记——杜绝"静默丢关键端点"。
+    """
     ev = ev or {}
-    lines = ["全部端点(name|method|endpoint):"]
-    for a in (ev.get("actions") or []):
-        lines.append(f"  {a.get('name')}|{(a.get('method') or 'GET')}|{a.get('endpoint')}")
-    if ev.get("form_fields"):
-        lines.append("表单字段(key|label):")
-        lines += [f"  {f.get('key')}|{f.get('label')}" for f in ev["form_fields"]]
-    if ev.get("sample_reads"):
-        lines.append("样例返回(端点→出参路径):")
-        lines += [f"  {s.get('endpoint')} → {(s.get('output_paths') or [])[:15]}" for s in ev["sample_reads"]]
-    return "\n".join(lines)
+    acts = ev.get("actions") or []
+    is_write = lambda a: (a.get("method") or "GET").upper() != "GET"   # noqa: E731
+    ep = lambda a: f"  {a.get('name')}|{(a.get('method') or 'GET')}|{a.get('endpoint')}"  # noqa: E731
+    # (section_header, [lines]) 按优先级排列;预算也按此顺序消耗,故低优先项(读端点/样例)先被丢。
+    sections = [
+        ("端点·写(name|method|endpoint):", [ep(a) for a in acts if is_write(a)]),
+        ("表单字段(key|label):", [f"  {f.get('key')}|{f.get('label')}" for f in (ev.get("form_fields") or [])]),
+        ("端点·读(name|method|endpoint):", [ep(a) for a in acts if not is_write(a)]),
+        ("样例返回(端点→出参路径):",
+         [f"  {s.get('endpoint')} → {(s.get('output_paths') or [])[:15]}" for s in (ev.get("sample_reads") or [])]),
+    ]
+    out: list[str] = []
+    used = 0
+    dropped = 0
+    for header, lines in sections:
+        kept: list[str] = []
+        for ln in lines:
+            t = estimate_tokens(ln)
+            if used + t > max_tokens:
+                dropped += 1
+                continue
+            kept.append(ln)
+            used += t
+        if kept:
+            out.append(header)
+            out.extend(kept)
+    if dropped:
+        out.append(f"…(证据过长,已按预算丢弃 {dropped} 行低优先项;写端点/表单字段已优先保留)")
+        log.warning("planner.evidence_truncated", dropped_lines=dropped,
+                    max_tokens=max_tokens, total_actions=len(acts))
+    return "\n".join(out)
 
 
 def _build_plan(data: dict, goal: GoalBrief) -> PlanBody:
@@ -166,31 +204,44 @@ def _build_plan(data: dict, goal: GoalBrief) -> PlanBody:
     )
 
 
+# few-shot:一份合法 Plan 的 JSON 形状。用**抽象结构占位**(start/submit/mine、title/amount),
+# 不绑定任何业务/系统,跨企业通用。其 success_rule / fact_check.assert_expr 刻意满足 `_expr_problem`
+# 校验——即「教给模型的」与「校验器接受的」一致(test_phase51 守这条不变量)。
+_PLAN_EXAMPLE = (
+    '{"steps": ["发起流程拿 procInsId", "用 procInsId 提交并带表单字段"], '
+    '"endpoints": ["startProc", "submitProc"], "contract": {"note": "提交需先发起拿 procInsId"}, '
+    '"user_fields": ["title", "amount"], "required_fields": ["title"], '
+    '"success_rule": "response.code == null or response.code == 200", '
+    '"fact_check": {"endpoint": "myList", "method": "GET", "assert_expr": "response.total > 0", '
+    '"retries": 3, "backoff_s": 1}}'
+)
+
 _CONTRACT = (
     "只输出一个 JSON 对象(不要其它文字),字段:\n"
     '  steps: string[](人类可读步骤)\n'
     '  endpoints: string[](本流程要调的端点,必须取自下方证据 actions.endpoint;**只列相关的,别贪多**)\n'
     '  contract: object(关键契约要点)\n'
     '  user_fields/required_fields: string[](取自证据 form_fields / params_in)\n'
-    '  success_rule: string(判定表达式,基于 response;**只能用属性点取/下标/比较**,'
-    '如 "response.code == null or response.code == 200";\n'
+    '  success_rule: string(' + EXPR_RULE_TEXT + '\n'
+    '    例:"response.code == null or response.code == 200";\n'
     "    **只引用最终接口响应里确实会出现的字段**(如 response.code);**不要臆造 data 等不存在的字段**,"
-    "也别把发起步骤(startFlow)的响应字段(如 data)当成提交步骤的成功标志;\n"
-    "    **禁止函数/方法调用(如 .get())**、禁止 None(用 null)、禁止 JS 的 &&/||)\n"
+    "也别把发起步骤(startFlow)的响应字段(如 data)当成提交步骤的成功标志)\n"
     '  fact_check: {endpoint, method:"GET", assert_expr, retries, backoff_s}\n'
-    "    —— 必须能区分『真生效』与『空操作』:回查本业务的列表/详情/待办,用提交返回的 id/单号过滤,"
-    "断言出现新记录或状态变化,如 \"response.total > 0\";**不要只断言『返回200』,也不要用 .get()**。\n"
-    "硬约束:endpoints 与 fact_check.endpoint 只能用证据里出现过的端点,字段只能用证据里的;不得凭空捏造;"
-    "判定表达式只用 属性点取(response.code)/下标/比较/null,**不准函数调用**。"
+    "    —— assert_expr 同上表达式规则;必须能区分『真生效』与『空操作』:回查本业务的列表/详情/待办,"
+    "用提交返回的 id/单号过滤,断言出现新记录或状态变化,如 \"response.total > 0\";**不要只断言『返回200』**。\n"
+    "硬约束:endpoints 与 fact_check.endpoint 只能用证据里出现过的端点,字段只能用证据里的;不得凭空捏造。\n"
+    "示例(只示意 JSON 形状,**不要照抄端点/字段名**,按真实证据填):若证据有端点 "
+    "startProc(POST /proc/start)、submitProc(POST /proc/submit)、myList(GET /proc/mine),"
+    "表单字段 title、amount,一个合法方案是:\n" + _PLAN_EXAMPLE
 )
 
 
 def _plan_prompt(goal: GoalBrief, reasons: list[str] | None, prev: PlanBody | None) -> str:
-    ev = _compact_evidence(goal.evidence)[:16000]
+    ev = _compact_evidence(goal.evidence)        # 已按 token 预算 + 优先级在行边界截断(见函数内)
     base = (f"目标:为业务流程「{goal.flow}」按下方**证据**拆解出可执行方案。\n"
-            f"证据(全部端点 + 表单字段 + 样例返回):\n{ev}\n\n{_CONTRACT}\n"
-            "注意:证据里**已列出全部端点**,本流程要用的发起/存表单/提交端点就在其中,自己找出来;"
-            "若确实缺某端点,在 contract 里说明,**不要凭空捏造**。")
+            f"证据(端点[写在前] + 表单字段 + 样例返回):\n{ev}\n\n{_CONTRACT}\n"
+            "注意:本流程要用的发起/存表单/提交端点就在证据端点里,自己找出来;"
+            "若确实缺某端点(或证据末尾标注了已截断),在 contract 里说明,**不要凭空捏造**。")
     if prev is not None:
         base += (f"\n\n上一版方案被**事实核查证伪**(代码能跑但没真生效),原因:\n- "
                  + "\n- ".join(reasons or []) + "\n请据此**重拆方案**(可能缺步骤/串联错/契约错),再输出 JSON。")
@@ -206,7 +257,8 @@ class LlmPlanner:
 
     def __init__(self, *, spawn: TextSpawn | None = None) -> None:
         from functools import partial
-        self._spawn = spawn or partial(openai_text_spawn, tag="planner")
+        # 契约是「只输出一个 JSON 对象」→ 开 JSON 模式;_extract_json 仍兜底容错。
+        self._spawn = spawn or partial(openai_text_spawn, tag="planner", json_mode=True)
 
     async def _produce(self, goal: GoalBrief, strategy, *, reasons=None, prev=None) -> PlanBody:  # noqa: ANN001
         # v3:全模型驱动 + 不合规重提示重试(不回退硬编码领域基线)

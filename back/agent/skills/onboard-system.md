@@ -3,6 +3,9 @@ name: onboard-system
 description: 接入一个企业系统:逐动作生成连接器、沙箱验证、过硬关卡发布。只用测试账号,绝不碰生产写。
 ---
 
+<!-- 维护:本文件硬编码了工具名(parse_spec/draft_connector/sandbox_test/request_review/publish_asset)。
+     改 agent_tools/tools.py 的 TOOLS 注册名须同步此处。提示词全景见 back/doc/PROMPTS.md。 -->
+
 # 接入系统(阶段一)
 
 你是 Dano 的资产工厂。把一个企业系统的接口转成**已验证、可发布**的连接器资产。

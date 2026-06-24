@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from dano.orchestrator.types import SkillSpec
 from dano.shared.enums import RiskLevel
-from dano.shared.std_fields import ALL_STD_FIELDS, is_flow_internal, is_numeric_field
+from dano.shared.std_fields import ALL_STD_FIELDS, is_flow_internal, is_form_envelope, is_numeric_field
 
 # 动作友好标题(可扩展;缺省用 action 名)
 _ACTION_TITLES: dict[str, str] = {
@@ -44,13 +44,16 @@ class SkillManifest(BaseModel):
     parameters: dict = Field(default_factory=dict)   # 输入 JSON Schema(function-calling 风格)
     output_schema: dict = Field(default_factory=lambda: {"type": "object"})  # 输出 schema(通用对象)
     page: dict | None = None          # 页面型 Skill 专属:{start_url, success_marker, steps[]}(供详情可视化)
+    flow: dict = Field(default_factory=dict)   # 执行画像(供导出 SOP):步数/前置/计算/回查/成败约定;全部 grounded、零框架字面量
 
 
 def _is_reserved(field: str) -> bool:
     """运行期注入的内部字段,不进对外契约/function-calling 参数:
-    ① `__base_url__` 这类保留名;② 流程内部句柄(templateId/procInsId/taskId…,由 Dano 注入)。
+    ① `__base_url__` 这类保留名;② 流程内部句柄(templateId/procInsId/taskId…,由 Dano 注入);
+    ③ 整表序列化信封(formData 等,应拆成业务叶子,绝不暴露黑盒)。
     """
-    return (field.startswith("__") and field.endswith("__")) or is_flow_internal(field)
+    return ((field.startswith("__") and field.endswith("__"))
+            or is_flow_internal(field) or is_form_envelope(field))
 
 
 def _schema_prop(skill: SkillSpec, field: str, desc: str) -> dict:
@@ -98,6 +101,38 @@ def _parameters_schema(skill: SkillSpec) -> dict:
     }
 
 
+def _flow_meta(skill: SkillSpec) -> dict:
+    """执行画像:供导出 SOP 渲染的**通用 grounded 数据**——步数、前置、计算、是否回查、是否按业务码判成败。
+
+    全部从资产体抽,**不含任何业务/框架字面量**(渲染器据此产 SOP,而非写死"两步/采购/taskId")。
+    各类 Skill 都给得出:工作流取 steps/preconditions;连接器/适配器/页面各按自身字段。
+    """
+    if skill.is_workflow:
+        steps = list(getattr(skill, "workflow_steps", []) or [])
+        n = sum(1 for s in steps if (s.get("kind") or "call") == "call")
+        pre = [{"check": p.get("check", ""), "message": p.get("message", "")}
+               for p in (getattr(skill, "workflow_preconditions", []) or []) if p.get("check")]
+        comp = [{"out": o, "expr": e}
+                for s in steps if s.get("kind") == "compute"
+                for o, e in (s.get("outputs") or {}).items()]
+        verify = any((i.get("evidence") or {}).get("query_action")
+                     for i in (getattr(skill, "workflow_invariants", []) or []))
+        return {"step_count": max(n, 1), "preconditions": pre, "computes": comp,
+                "verify": verify, "judged_by_code": bool(getattr(skill, "workflow_success_rule", None))}
+    if not skill.has_api:        # 页面型
+        return {"step_count": len(getattr(skill, "page_steps", []) or []) or 1,
+                "preconditions": [], "computes": [],
+                "verify": bool(getattr(skill, "page_success_marker", None)), "judged_by_code": False}
+    if getattr(skill, "is_adapter", False):
+        return {"step_count": 1, "preconditions": [], "computes": [],
+                "verify": bool(getattr(skill, "adapter_fact_check", None)),
+                "judged_by_code": bool(getattr(skill, "adapter_success_rule", None))}
+    # 普通连接器
+    return {"step_count": 1, "preconditions": [], "computes": [],
+            "verify": bool(getattr(skill, "fact_check_query", None) or getattr(skill, "fact_check_expr", None)),
+            "judged_by_code": False}
+
+
 def to_manifest(skill: SkillSpec) -> SkillManifest:
     risk = RiskLevel(skill.risk_level)
     # 阶段4:标题优先用接口 summary(skill.title),退而用内置词典,再退动作名
@@ -132,6 +167,7 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         requires_confirmation=risk in _CONFIRM_FROM,
         parameters=_parameters_schema(skill),
         page=page,
+        flow=_flow_meta(skill),
     )
 
 

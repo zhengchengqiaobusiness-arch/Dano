@@ -99,12 +99,14 @@ async def parse_spec(run_id: str, params: dict) -> dict:
         from dano.generation.coder import openai_text_spawn
         try:
             from dano.capabilities.llm_classifier import classify_actions
-            llm_map = await classify_actions(all_actions, spawn=partial(openai_text_spawn, tag="classify"))
+            llm_map = await classify_actions(
+                all_actions, spawn=partial(openai_text_spawn, tag="classify", json_mode=True))
         except Exception as e:  # noqa: BLE001 - 识别失败不阻断接入,整体回退确定性
             log.warning("parse_spec.llm_classify_failed", error=str(e))
         try:                                                  # 框架/成功约定:LLM 读真实响应 → 取代关键词硬匹配
             from dano.capabilities.llm_template import detect_convention
-            conv = await detect_convention(spec, spawn=partial(openai_text_spawn, tag="convention"))
+            conv = await detect_convention(
+                spec, spawn=partial(openai_text_spawn, tag="convention", json_mode=True))
             if conv:
                 template_name = conv.get("name") or template_name
                 success_rule = conv.get("success_rule") or success_rule
@@ -340,6 +342,32 @@ def _submit_leaf_fields(spec: dict, tmpl, tid: str) -> dict:  # noqa: ANN001
     return out
 
 
+def _decompose_form_envelopes(steps, user_fields: list[str], leaves: dict) -> list[str]:  # noqa: ANN001
+    """整表信封防泄漏:把用户字段里的**序列化信封**(formData 等)拆成提交 schema 的业务叶子,
+    并把步骤里 `field:<信封>` 的映射重写成**逐叶子映射到其真实嵌套路径**——信封是一堆业务字段的
+    序列化容器,目标系统提交体里根本没有它,暴露给调用方就是个填不进去的黑盒。
+
+    能拆(有叶子)→ 信封换叶子 + 步骤重写;拆不出 → 仅把信封剔出用户字段(绝不暴露黑盒)。
+    就地改 steps 的 inputs;返回新的 user_fields(纯函数语义,可离线单测)。
+    """
+    from dano.shared.std_fields import is_flow_internal, is_form_envelope
+    envelopes = {f for f in user_fields if is_form_envelope(f)}
+    if not envelopes:
+        return user_fields
+    leaf_names = [k for k in leaves if not is_flow_internal(k) and not is_form_envelope(k)]
+    for s in steps:
+        if (getattr(s, "kind", "call") or "call") != "call":
+            continue
+        hit = [t for t, src in s.inputs.items()
+               if isinstance(src, str) and src.startswith("field:") and src[len("field:"):] in envelopes]
+        for t in hit:
+            del s.inputs[t]
+        if hit:                                   # 信封步骤 → 逐叶子映射到真实嵌套点路径
+            for ln in leaf_names:
+                s.inputs[(leaves[ln].get("path") or ln)] = f"field:{ln}"
+    return sorted((set(user_fields) - envelopes) | set(leaf_names))
+
+
 def _field_mappings(leaves: dict, user_fields: list[str], submit_ep: str, tid: str) -> list[dict]:
     """据 submit schema 叶子,为每个用户字段建**可追溯映射**(§16):标准字段 → 目标点路径 + 类型 + 来源。
 
@@ -443,6 +471,9 @@ async def draft_workflow(run_id: str, params: dict) -> dict:
             body.business_meta = bmeta
             body.business = body.business or bmeta.get("flow", "")
         leaves = _submit_leaf_fields(spec, tmpl, tid)
+        # 整表信封防泄漏:formData 这类序列化串绝不作用户参数 → 拆成提交 schema 业务叶子 + 重写步骤映射。
+        body.user_fields = _decompose_form_envelopes(body.steps, body.user_fields, leaves)
+        body.required_fields = sorted(set(body.required_fields) & set(body.user_fields))
         # 必填忠实于提交 schema:叶子标 required 的才必填(并集 pi 显式声明),最终 ⊆ user_fields。
         # 这样"被步骤引用但 schema 可选"的字段不再被强标必填(修"全字段标必填"缺陷)。
         if leaves:
@@ -940,6 +971,25 @@ async def vuln_scan(run_id: str, params: dict) -> dict:
     return {"passed": passed, "validation_run_ids": [str(v.validation_run_id)], "findings": findings}
 
 
+async def lint_adapter(run_id: str, params: dict) -> dict:
+    """编码契约校验:确定性静态检查生成代码(入口签名 / 不吞异常 / 库未 import),记 lint 证据。
+
+    与 vuln_scan(安全)分工:本关查**可执行契约**——普适硬错,跨企业/跨系统通用,零误报优先。
+    二态:无 findings → passed;否则作驳回原因回灌编码器修复。
+    """
+    from dano.generation.coder_lint import scan_source
+    from dano.shared.asset_bodies import AdapterBody
+    draft = await _ds.get_draft(UUID(params["asset_draft_id"]))
+    if draft is None or draft.asset_type != AssetType.ADAPTER:
+        raise ToolError("lint_adapter 仅用于适配器草案")
+    body = AdapterBody.model_validate(draft.body)
+    findings = scan_source(body.source)
+    passed = not findings
+    v = await _ds.record_validation(asset_draft_id=draft.asset_draft_id, kind="lint",
+                                    passed=passed, evidence={"findings": findings})
+    return {"passed": passed, "validation_run_ids": [str(v.validation_run_id)], "findings": findings}
+
+
 # ── 页面型 Skill(流程8,无 API):真实浏览器侦察 → 确定性建体 → 沙箱回放 ──
 async def _launch_page_driver(mat, *, headless: bool = True):  # noqa: ANN001
     """从材料起一个真实 Playwright 驱动(base_url + 测试登录态)。缺 playwright → ToolError。"""
@@ -1075,6 +1125,7 @@ TOOLS = {
     "draft_adapter": draft_adapter,
     "sandbox_test_adapter": sandbox_test_adapter,
     "vuln_scan": vuln_scan,
+    "lint_adapter": lint_adapter,
     # 页面型 Skill(流程8,无 API)
     "scout_page": scout_page,
     "draft_page_script": draft_page_script,

@@ -42,26 +42,44 @@ def _cache_put_pass(key: str, reasons: list[str]) -> None:
         _VERDICT_CACHE.pop(next(iter(_VERDICT_CACHE)), None)
     _VERDICT_CACHE[key] = list(reasons)
 
-# 三审 system prompt(各自只看自己关心的维度,统一输出 JSON {passed, reasons})
+# 三审 system prompt:各看一维,逐项清单核对 + 每条理由点名依据(防橡皮图章泛泛而谈),统一输出
+# JSON {passed, reasons}。**判定纪律**:通过 = 逐项核对且证据支持,不是"没看出问题"就放行;但也要尊重
+# 用户消息里【运行架构】列出的"设计如此"项,不要把它们误判成问题(否则空烧生成预算)。
+_OUT = "输出 JSON 对象:{\"passed\": true/false, \"reasons\": [\"每条都点名所依据的字段/端点/源码行\"]}。"
+_DISCIPLINE = ("判定纪律:**通过 = 你逐项核对过清单且证据支持**,而非『没看出问题』就放行;"
+               "每条 reason 必须落到**具体**字段/端点/源码行,禁止泛泛而谈。"
+               "同时:用户消息【运行架构】里标注『设计如此』的项不要误判成问题。")
 _ROLE_SYSTEM: dict[str, str] = {
     "acceptance": (
-        "你是『成果验收』评审员。审查一个自动生成的 API 接入资产(连接器/复合流程)是否**真满足业务意图**:"
-        "动作语义与字段映射是否对得上业务、断言是否有意义(防只校验 HTTP 200 的表面通过)、"
-        "沙箱执行证据是否自洽可信、必填项是否齐全。"
-        "发现实质问题就判不通过。只输出 JSON 对象:{\"passed\": true/false, \"reasons\": [\"中文理由\"]}。"
+        "你是『成果验收』评审员,只判:这份自动生成的 API 接入资产是否**真满足业务意图**。逐项核对:\n"
+        "1) 动作语义与字段映射是否对得上业务(看 asset_key、参数/field_bindings、adapter 看 source);\n"
+        "2) 成败判定是否**有意义**:success_rule/断言能否真区分业务成功与失败,而非只校验 HTTP 200;\n"
+        "3) 沙箱证据(sandbox_evidence)是否自洽、确实跑通了本业务动作;\n"
+        "4) 必填项是否齐全。\n" + _DISCIPLINE + _OUT
     ),
     "security": (
-        "你是『漏洞检测』评审员。只从安全角度审查该资产声明体:"
-        "请求拼接是否有注入风险、base_url/回调是否可能 SSRF、鉴权是否缺失或过宽、"
-        "写操作是否缺幂等键、模板里是否硬编码了密钥/令牌、是否暴露 PII/敏感字段。"
-        "发现任一高危就判不通过。只输出 JSON 对象:{\"passed\": true/false, \"reasons\": [\"中文理由\"]}。"
+        "你是『漏洞检测』评审员,只从安全维度逐行审(adapter 必须逐行审 source)。逐项核对:\n"
+        "1) 危险调用:eval/exec/os.system/subprocess shell;\n"
+        "2) 注入:外部输入是否未经处理拼进 URL/SQL/shell;\n"
+        "3) 鉴权是否缺失或过宽、写操作是否缺幂等键;\n"
+        "4) 硬编码密钥/令牌(源码必须零凭证,凭证应从 creds 运行期注入);\n"
+        "5) 是否暴露 PII/敏感字段。\n"
+        "发现任一**具体**高危即不通过,reason 点名位置(如 `source 第N行`/字段名)。"
+        "fail-closed:对你**发现的可疑高危项**,若证据不足以排除,按不通过处理并说明缺什么证据"
+        "(注意:这只针对你看出的可疑点,不是没问题也拒)。\n"
+        "**设计如此、切勿误判为漏洞**:body 不含明文 token、base_url 为平台注入的可信地址、"
+        "企业内网自签证书下 verify=False、fact_check 的 method=GET——详见用户消息【运行架构】/【代码评审要求】。\n"
+        + _DISCIPLINE + _OUT
     ),
     "compliance": (
-        "你是『合规审核』评审员。只从合规与发布纪律审查:"
-        "验证证据是否全部 environment=sandbox 且 credential_type=test(严禁生产/真凭证)、"
-        "风险分级是否与动作(读/写/删)匹配、写/删操作是否要求确认(confirm)、"
-        "是否指向生产端点、是否违反最小权限。"
-        "不合规就判不通过。只输出 JSON 对象:{\"passed\": true/false, \"reasons\": [\"中文理由\"]}。"
+        "你是『合规审核』评审员,只审合规与发布纪律。逐项核对:\n"
+        "1) 验证证据是否**全部** environment=sandbox 且 credential_type=test(严禁生产/真凭证);\n"
+        "2) 风险分级 risk_level 是否与动作匹配(GET 只读=L1;写=L3 需确认);\n"
+        "3) 写/删操作是否要求确认(confirm,由 risk_level 运行期强制);\n"
+        "4) 是否指向生产端点、是否违反最小权限。\n"
+        "fail-closed(发布红线):第 1 项**证据未能确认全为 sandbox+test 就判不通过**,不得默认放行。\n"
+        "**设计如此、不要误判**:confirm 不在 body 字段、单步 field_bindings 为空、fact_check 的 method=GET"
+        "——详见用户消息【运行架构】。\n" + _DISCIPLINE + _OUT
     ),
 }
 
@@ -134,6 +152,9 @@ class ReviewBoard:
         if not all(models.values()):                 # 只要 3 个角色都配了非空模型即可(可相同)
             log.warning("review.models.misconfigured",
                         models=models, note="三审需 3 个非空评审模型(可相同)")
+        elif len(set(models.values())) < 3:           # 配成同一个不报错,但提示盲点相关风险
+            log.warning("review.models.not_distinct", models=models,
+                        note="三审建议用不同模型,避免三审共享盲点(相关失效削弱硬闸门)")
         return cls(client=client, models=models, timeout_s=s.review_timeout_s,
                    max_retries=s.review_max_retries, backoff_s=s.review_retry_backoff_s)
 

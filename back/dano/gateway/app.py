@@ -484,7 +484,8 @@ def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict,
                         reads: list[dict] | None = None, storage: dict | None = None,
                         required_labels: set | None = None) -> dict:
     """构造 request_fields 消息:字段表(含 type/required)+ 候选请求 + select(Q2)+ identity(Q1)。"""
-    from dano.execution.page.request_capture import flatten_body, suggest_identity, suggest_selects
+    from dano.execution.page.request_capture import (flatten_body, suggest_identity, suggest_select_names,
+                                                     suggest_selects)
 
     def _path(u: str) -> str:
         i = u.find("//")
@@ -492,11 +493,19 @@ def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict,
     cand_list = [{"idx": i, "method": (c.get("method") or "POST").upper(), "path": _path(c.get("url") or "")}
                  for i, c in enumerate(candidates)]
     pd = chosen.get("post_data")
+    fields = flatten_body(pd, samples, required_labels)
+    # 传 samples:用录制选中的显示名消歧/确认(大字典里短码也能精确绑对那项)
+    selects = suggest_selects(pd, reads or [], samples)
+    # select/选人字段:用录制选项标签当默认参数名(经候选列表桥接),避免漏内部 key(Activity_xxx/嵌套键)
+    sel_names = suggest_select_names(selects, samples)
+    for f in fields:
+        if f.get("path") in sel_names:
+            f["suggest_name"] = sel_names[f["path"]]
     return {"type": "request_fields",
             "method": (chosen.get("method") or "POST").upper(), "url": chosen.get("url"),
-            "fields": flatten_body(pd, samples, required_labels),
+            "fields": fields,
             "candidates": cand_list, "chosen_idx": candidates.index(chosen) if chosen in candidates else 0,
-            "selects": suggest_selects(pd, reads or []),       # 字段绑候选列表(名字→ID)
+            "selects": selects,
             "identity": suggest_identity(pd, storage)}         # 字段=当前用户/会话值(运行期重取)
 
 

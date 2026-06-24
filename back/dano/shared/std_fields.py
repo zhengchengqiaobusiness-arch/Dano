@@ -68,6 +68,13 @@ FLOW_INTERNAL_FIELDS: frozenset[str] = frozenset({
     "templateid", "procinsid", "procdefid", "defid", "taskid", "bizid", "procdefkey",
 })
 
+# 整表序列化信封字段:把"整张表单"打包成一个串/对象的容器(如 RuoYi 的 formData)。
+# 它**不是**业务字段,而是一堆业务字段的序列化容器——绝不能作用户参数暴露(调用方对着黑盒无从填),
+# 应拆成提交 schema 的业务叶子(由 Dano 运行期组装回去)。
+FORM_ENVELOPE_FIELDS: frozenset[str] = frozenset({
+    "formdata", "formjson", "formmodel", "formcontent", "formfields", "formbody",
+})
+
 # 数值字段判定:名字命中 或 描述含金额/数量/单价等量纲词 → JSON number(审批分支按数值比较)。
 _NUMERIC_NAMES: frozenset[str] = frozenset({
     "amount", "quantity", "unitprice", "price", "total", "totalamount", "count", "qty",
@@ -86,6 +93,11 @@ def _norm(name: str) -> str:
 def is_flow_internal(name: str) -> bool:
     """是否为流程内部/注入字段(不进对外契约)。"""
     return _norm(name) in FLOW_INTERNAL_FIELDS
+
+
+def is_form_envelope(name: str) -> bool:
+    """是否为整表序列化信封字段(如 formData):不进对外契约,应拆成业务叶子。"""
+    return _norm(name) in FORM_ENVELOPE_FIELDS
 
 
 def is_numeric_field(name: str, desc: str = "", *, declared_type: str | None = None) -> bool:
