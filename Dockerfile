@@ -36,9 +36,6 @@ ENV DANO_DEFAULT_WORKSPACE_PATH=/tmp/dano
 
 COPY --from=build /prod/dano/package.json ./package.json
 COPY --from=build /app/package.json ./package-versions/package.json
-COPY --from=build /app/apps/dano/package.json ./package-versions/apps/dano/package.json
-COPY --from=build /app/packages/bridge/package.json ./package-versions/packages/bridge/package.json
-COPY --from=build /app/packages/svelte/package.json ./package-versions/packages/svelte/package.json
 COPY --from=build /prod/dano/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/web-dist ./web-dist

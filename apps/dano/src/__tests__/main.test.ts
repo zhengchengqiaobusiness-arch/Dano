@@ -13,7 +13,7 @@ import { resolveStandaloneDevWatchPath } from "../dev-reload.js";
 import {
   initializeStandaloneWorkspaceSettings,
   parseStandaloneMainOptions,
-  readStandalonePackageInfos,
+  readStandalonePackageInfo,
 } from "../main.js";
 
 function findNearestWebDist(startDir: string): string | undefined {
@@ -87,79 +87,40 @@ describe("standalone main", () => {
     ).toBeUndefined();
   });
 
-  it("reads all Dano package versions from a dev checkout", () => {
+  it("reads the Dano product version from a dev checkout", () => {
     const root = mkdtempSync(join(tmpdir(), "dano-package-dev-"));
     try {
-      mkdirSync(join(root, "apps", "dano"), { recursive: true });
-      mkdirSync(join(root, "packages", "bridge"), { recursive: true });
-      mkdirSync(join(root, "packages", "svelte"), { recursive: true });
-      writeFileSync(
-        join(root, "apps", "dano", "package.json"),
-        '{"name":"@dano/app","version":"0.3.4"}\n',
-      );
       writeFileSync(
         join(root, "package.json"),
         '{"name":"@dano/dano","version":"0.1.0"}\n',
       );
-      writeFileSync(
-        join(root, "packages", "bridge", "package.json"),
-        '{"name":"@dano/bridge","version":"0.3.4"}\n',
-      );
-      writeFileSync(
-        join(root, "packages", "svelte", "package.json"),
-        '{"name":"@dano/svelte","version":"0.3.4"}\n',
-      );
 
-      expect(readStandalonePackageInfos(root)).toEqual([
-        { key: "root", name: "@dano/dano", version: "0.1.0" },
-        { key: "app", name: "@dano/app", version: "0.3.4" },
-        { key: "bridge", name: "@dano/bridge", version: "0.3.4" },
-        { key: "svelte", name: "@dano/svelte", version: "0.3.4" },
-      ]);
+      expect(readStandalonePackageInfo(root)).toEqual({
+        name: "@dano/dano",
+        version: "0.1.0",
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it("reads all Dano package versions from the packaged runtime", () => {
+  it("reads the Dano product version from the packaged runtime", () => {
     const root = mkdtempSync(join(tmpdir(), "dano-package-prod-"));
     try {
-      mkdirSync(join(root, "package-versions", "apps", "dano"), {
-        recursive: true,
-      });
-      mkdirSync(join(root, "package-versions", "packages", "bridge"), {
-        recursive: true,
-      });
-      mkdirSync(join(root, "package-versions", "packages", "svelte"), {
-        recursive: true,
-      });
+      mkdirSync(join(root, "package-versions"), { recursive: true });
       writeFileSync(
         join(root, "package-versions", "package.json"),
         '{"name":"@dano/dano","version":"0.1.0"}\n',
-      );
-      writeFileSync(
-        join(root, "package-versions", "apps", "dano", "package.json"),
-        '{"name":"@dano/app","version":"0.3.4"}\n',
-      );
-      writeFileSync(
-        join(root, "package-versions", "packages", "bridge", "package.json"),
-        '{"name":"@dano/bridge","version":"0.3.4"}\n',
-      );
-      writeFileSync(
-        join(root, "package-versions", "packages", "svelte", "package.json"),
-        '{"name":"@dano/svelte","version":"0.3.4"}\n',
       );
       writeFileSync(
         join(root, "package.json"),
         '{"name":"@dano/app","version":"0.3.4"}\n',
       );
 
-      expect(readStandalonePackageInfos(root)).toEqual([
-        { key: "root", name: "@dano/dano", version: "0.1.0" },
-        { key: "app", name: "@dano/app", version: "0.3.4" },
-        { key: "bridge", name: "@dano/bridge", version: "0.3.4" },
-        { key: "svelte", name: "@dano/svelte", version: "0.3.4" },
-      ]);
+      expect(readStandalonePackageInfo(root)).toEqual({
+        name: "@dano/dano",
+        version: "0.1.0",
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -44,6 +44,11 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 
 - Each time an issue is solved and verified, create a pull request to `upstream`.
 
+## Versioning
+
+- Dano's product version is the root `package.json` version only.
+- When users ask for the Dano version, answer with the root `package.json` version; do not present workspace package versions as product versions.
+
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan

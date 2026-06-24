@@ -12,94 +12,68 @@ function executeVersionTool() {
 }
 
 describe("dano version tool", () => {
-  it("reads all package versions from Dano env", () => {
+  it("reads the Dano product version from env", () => {
     expect(
       readDanoVersionInfo({
-        DANO_PACKAGE_VERSIONS: JSON.stringify([
-          { key: "root", packageName: "@dano/dano", version: "0.1.0" },
-          { key: "app", packageName: "@dano/app", version: "0.3.4" },
-          { key: "bridge", packageName: "@dano/bridge", version: "0.3.4" },
-          { key: "svelte", packageName: "@dano/svelte", version: "0.3.4" },
-        ]),
+        DANO_PACKAGE_NAME: "@dano/dano",
+        DANO_VERSION: "0.1.0",
       }),
-    ).toEqual({
-      packages: [
-        { key: "root", packageName: "@dano/dano", version: "0.1.0" },
-        { key: "app", packageName: "@dano/app", version: "0.3.4" },
-        { key: "bridge", packageName: "@dano/bridge", version: "0.3.4" },
-        { key: "svelte", packageName: "@dano/svelte", version: "0.3.4" },
-      ],
-    });
+    ).toEqual({ packageName: "@dano/dano", version: "0.1.0" });
   });
 
   it("trims env values before exposing them to the agent", () => {
     expect(
       readDanoVersionInfo({
-        DANO_PACKAGE_VERSIONS:
-          '[{"key":" app ","packageName":" @dano/app ","version":" 0.3.4 "}]',
+        DANO_PACKAGE_NAME: " @dano/dano ",
+        DANO_VERSION: " 0.1.0 ",
       }),
-    ).toEqual({
-      packages: [{ key: "app", packageName: "@dano/app", version: "0.3.4" }],
-    });
+    ).toEqual({ packageName: "@dano/dano", version: "0.1.0" });
   });
 
-  it("keeps single-package env compatibility", () => {
-    expect(
-      readDanoVersionInfo({
-        DANO_PACKAGE_NAME: "@dano/app",
-        DANO_VERSION: "0.3.4",
-      }),
-    ).toEqual({
-      packages: [{ key: "app", packageName: "@dano/app", version: "0.3.4" }],
-    });
-  });
-
-  it("falls back loudly when no versions are configured", () => {
+  it("falls back loudly when no version is configured", () => {
     expect(readDanoVersionInfo({})).toEqual({
-      packages: [{ key: "app", packageName: "@dano/app", version: "unknown" }],
+      packageName: "@dano/dano",
+      version: "unknown",
     });
   });
 
   it("includes optional build metadata when configured", () => {
     expect(
       readDanoVersionInfo({
-        DANO_PACKAGE_VERSIONS:
-          '[{"key":"app","packageName":"@dano/app","version":"0.3.4"}]',
+        DANO_PACKAGE_NAME: "@dano/dano",
+        DANO_VERSION: "0.1.0",
         DANO_BUILD_SHA: "abc123",
         DANO_BUILD_TIME: "2026-06-24T00:00:00Z",
       }),
     ).toEqual({
-      packages: [{ key: "app", packageName: "@dano/app", version: "0.3.4" }],
+      packageName: "@dano/dano",
+      version: "0.1.0",
       buildSha: "abc123",
       buildTime: "2026-06-24T00:00:00Z",
     });
   });
 
   it("returns JSON content the assistant can quote directly", async () => {
-    const originalPackageVersions = process.env.DANO_PACKAGE_VERSIONS;
-    process.env.DANO_PACKAGE_VERSIONS =
-      '[{"key":"app","packageName":"@dano/app","version":"0.3.4"}]';
+    const originalPackageName = process.env.DANO_PACKAGE_NAME;
+    const originalVersion = process.env.DANO_VERSION;
+    process.env.DANO_PACKAGE_NAME = "@dano/dano";
+    process.env.DANO_VERSION = "0.1.0";
 
     try {
       await expect(executeVersionTool()).resolves.toMatchObject({
         content: [
           {
             type: "text",
-            text: '{"packages":[{"key":"app","packageName":"@dano/app","version":"0.3.4"}]}',
+            text: '{"packageName":"@dano/dano","version":"0.1.0"}',
           },
         ],
-        details: {
-          packages: [
-            { key: "app", packageName: "@dano/app", version: "0.3.4" },
-          ],
-        },
+        details: { packageName: "@dano/dano", version: "0.1.0" },
       });
     } finally {
-      if (originalPackageVersions === undefined) {
-        delete process.env.DANO_PACKAGE_VERSIONS;
-      } else {
-        process.env.DANO_PACKAGE_VERSIONS = originalPackageVersions;
-      }
+      if (originalPackageName === undefined) delete process.env.DANO_PACKAGE_NAME;
+      else process.env.DANO_PACKAGE_NAME = originalPackageName;
+      if (originalVersion === undefined) delete process.env.DANO_VERSION;
+      else process.env.DANO_VERSION = originalVersion;
     }
   });
 });
