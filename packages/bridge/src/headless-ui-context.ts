@@ -22,7 +22,9 @@ export function createHeadlessUIContext(): ExtensionUIContext {
     custom: async <T>() => undefined as T,
     pasteToEditor: noop,
     setEditorComponent: noop,
-    theme: {} as ExtensionUIContext["theme"],
+    theme: {
+      fg: (_color: string, text: string) => text,
+    } as ExtensionUIContext["theme"],
     getAllThemes: () => [],
     getTheme: () => undefined,
     setTheme: () => ({ success: false, error: "Not supported" }),

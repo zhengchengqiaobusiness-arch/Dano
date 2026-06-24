@@ -14,7 +14,11 @@ const DEFAULT_STANDALONE_HOST = "0.0.0.0";
 const DEFAULT_STANDALONE_WORKSPACE = "/tmp/dano";
 const DEFAULT_STANDALONE_SESSIONS_DIR = ".dano/sessions";
 const DEFAULT_PRODUCT_NAME = "Dano";
-const DEFAULT_RUNTIME_SETTINGS_FILES = ["SYSTEM.md", "settings.json"] as const;
+const DEFAULT_RUNTIME_SETTINGS_FILES = [
+  "SYSTEM.md",
+  "settings.json",
+  "heimdall.json",
+] as const;
 const DEFAULT_EMPTY_STATE: BridgeEmptyStateConfig = {
   mode: "text",
   content: "给 {产品名称} 发消息",

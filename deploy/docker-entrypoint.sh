@@ -26,6 +26,7 @@ copy_default_if_missing() {
 
 copy_default_if_missing "SYSTEM.md"
 copy_default_if_missing "settings.json"
+copy_default_if_missing "heimdall.json"
 
 if [ "$#" -eq 0 ]; then
   set -- node ./dist/bridge/standalone/main.js

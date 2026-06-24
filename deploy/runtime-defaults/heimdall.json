@@ -1,0 +1,12 @@
+{
+  "sandbox": {
+    "enabled": true
+  },
+  "commandPolicies": [
+    {
+      "name": "block-root-deletion",
+      "blocked": ["rm", "-rf", "/"],
+      "message": "Deleting the root filesystem is blocked."
+    }
+  ]
+}

@@ -3753,6 +3753,7 @@ class ExtensionUIBridge {
         ),
 
       notify: (message: string, notifyType?: "info" | "warning" | "error") => {
+        if (/^heimdall(?:\s|:)/.test(message)) return;
         this.sendRequest({
           type: "extension_ui_request",
           id: crypto.randomUUID(),

@@ -9,8 +9,13 @@ import {
   type SessionManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { fileURLToPath } from "node:url";
 import { askUserQuestionTool } from "./ask-user-question.js";
 import { createCurlTool } from "./curl-tool.js";
+
+const HEIMDALL_EXTENSION_PATH = fileURLToPath(
+  import.meta.resolve("@casualjim/pi-heimdall/extensions/heimdall.ts"),
+);
 
 export interface CreateDetachedAgentSessionOptions {
   model?: CreateAgentSessionFromServicesOptions["model"];
@@ -24,7 +29,12 @@ export async function createDetachedAgentSession(
   sessionManager: SessionManager,
   options: CreateDetachedAgentSessionOptions = {},
 ): Promise<CreateAgentSessionResult> {
-  const services = await createAgentSessionServices({ cwd });
+  const services = await createAgentSessionServices({
+    cwd,
+    resourceLoaderOptions: {
+      additionalExtensionPaths: [HEIMDALL_EXTENSION_PATH],
+    },
+  });
   const defaultModel =
     options.defaultModel?.provider && options.defaultModel.modelId
       ? services.modelRegistry

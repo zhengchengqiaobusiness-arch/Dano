@@ -1430,6 +1430,43 @@ describe("WsRpcAdapter", () => {
   });
 
   describe("extension UI routing", () => {
+    it.each([
+      ["heimdall: 6 guards active", "info"],
+      [
+        "heimdall sandbox: not supported on darwin (Linux only)",
+        "warning",
+      ],
+      ["heimdall: blocked risky kubectl command", "warning"],
+    ] as const)("should suppress Heimdall notification %j", (message, notifyType) => {
+      const uiContext = adapter.createExtensionUIContext();
+      ws.send.mockClear();
+
+      uiContext.notify(message, notifyType);
+
+      expect(ws.send).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["Extension loaded", "info"],
+      ["heimdallish extension loaded", "warning"],
+    ] as const)("should preserve non-Heimdall notification %j", (message, notifyType) => {
+      const uiContext = adapter.createExtensionUIContext();
+      ws.send.mockClear();
+
+      uiContext.notify(message, notifyType);
+
+      expect(JSON.parse(ws.send.mock.calls[0][0])).toEqual(
+        expect.objectContaining({
+          type: "extension_ui_request",
+          payload: expect.objectContaining({
+            method: "notify",
+            message,
+            notifyType,
+          }),
+        }),
+      );
+    });
+
     it("should send fire-and-forget UI requests to the client", () => {
       const uiContext = adapter.createExtensionUIContext();
 

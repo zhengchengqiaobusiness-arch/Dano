@@ -15,10 +15,14 @@ On container startup, `deploy/docker-entrypoint.sh` creates:
 ```text
 /tmp/dano/.pi/SYSTEM.md
 /tmp/dano/.pi/settings.json
+/tmp/dano/.pi/heimdall.json
 ```
 
 The entrypoint copies those files from `deploy/runtime-defaults/` only when the
 runtime file is missing. It does not overwrite user-modified runtime files.
+
+The app service grants `SYS_ADMIN` and disables its outer seccomp profile so
+Heimdall can create the nested Bubblewrap namespace used by guarded bash calls.
 
 ## Local Compose Run
 
