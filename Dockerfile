@@ -35,6 +35,7 @@ ENV DANO_PORT=8080
 ENV DANO_DEFAULT_WORKSPACE_PATH=/tmp/dano
 
 COPY --from=build /prod/dano/package.json ./package.json
+COPY --from=build /app/package.json ./package-versions/package.json
 COPY --from=build /prod/dano/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/web-dist ./web-dist

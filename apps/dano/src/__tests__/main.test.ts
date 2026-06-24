@@ -13,6 +13,7 @@ import { resolveStandaloneDevWatchPath } from "../dev-reload.js";
 import {
   initializeStandaloneWorkspaceSettings,
   parseStandaloneMainOptions,
+  readStandalonePackageInfo,
 } from "../main.js";
 
 function findNearestWebDist(startDir: string): string | undefined {
@@ -84,6 +85,45 @@ describe("standalone main", () => {
         join("/tmp", "repo", "dist", "bridge", "standalone", "main.js"),
       ),
     ).toBeUndefined();
+  });
+
+  it("reads the Dano product version from a dev checkout", () => {
+    const root = mkdtempSync(join(tmpdir(), "dano-package-dev-"));
+    try {
+      writeFileSync(
+        join(root, "package.json"),
+        '{"name":"@dano/dano","version":"0.1.0"}\n',
+      );
+
+      expect(readStandalonePackageInfo(root)).toEqual({
+        name: "@dano/dano",
+        version: "0.1.0",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reads the Dano product version from the packaged runtime", () => {
+    const root = mkdtempSync(join(tmpdir(), "dano-package-prod-"));
+    try {
+      mkdirSync(join(root, "package-versions"), { recursive: true });
+      writeFileSync(
+        join(root, "package-versions", "package.json"),
+        '{"name":"@dano/dano","version":"0.1.0"}\n',
+      );
+      writeFileSync(
+        join(root, "package.json"),
+        '{"name":"@dano/app","version":"0.3.4"}\n',
+      );
+
+      expect(readStandalonePackageInfo(root)).toEqual({
+        name: "@dano/dano",
+        version: "0.1.0",
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("parses the optional port override", () => {

@@ -40,6 +40,7 @@ vi.mock("../curl-tool.js", () => ({
 
 import { createDetachedAgentSession } from "../detached-session.js";
 import { askUserQuestionTool } from "../ask-user-question.js";
+import { danoVersionTool } from "../dano-version-tool.js";
 import { detectWorkspaceEnvironments } from "../workspace-environment.js";
 
 describe("detached-session", () => {
@@ -162,6 +163,7 @@ describe("detached-session", () => {
         curlToolDefinition,
         editToolDefinition,
         writeToolDefinition,
+        danoVersionTool,
         askUserQuestionTool,
       ],
     });
