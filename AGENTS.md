@@ -46,8 +46,8 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 
 ## Versioning
 
-- Dano's product version is the root `package.json` version only.
-- When users ask for the Dano version, answer with the root `package.json` version; do not present workspace package versions as product versions.
+- Treat the root `package.json` version as Dano's only product version.
+- Do not rely on `AGENTS.md` for runtime model behavior; runtime-facing version behavior belongs in server code, runtime defaults, or tool prompt metadata.
 
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
