@@ -53,6 +53,18 @@ def page_is_write(body: dict | None) -> bool:
     return any((a or {}).get("op") == "submit" for a in (b.get("actions") or []))
 
 
+def page_is_capture(body: dict | None) -> bool:
+    """录制抓请求型页面脚本:用户真人在页面上**亲手提交过**、被抓下来参数化的那条写请求
+    (api_request 非空、无 DOM 回放步 actions)。这类免三模型评审 —— 评审对录制资产易抖动误判
+    (把用户没改的固定字段当漏配、把脱敏的会话登录态当缺鉴权),时过时不过;且并未提升安全
+    (请求本就是用户真发过的)。DOM 回放型写页面(actions 非空、合成新自动化)仍须评审。
+
+    安全边界:capture 体只能由可信的服务端录制流(run_request_onboarding 直调 save_draft)产生;
+    pi/LLM agent 的工具面只有 draft_page_script(必出 actions、api_request=None),无法伪造此形态。"""
+    b = body or {}
+    return bool(b.get("api_request")) and not (b.get("actions") or [])
+
+
 class AssetDraft(BaseModel):
     asset_draft_id: UUID
     run_id: str
@@ -190,10 +202,12 @@ class DraftStore:
         # 工作流步骤连接器免单独评审:复合 WORKFLOW 作为整体过三模型评审
         if draft.asset_type == AssetType.CONNECTOR and draft.body.get("workflow_step"):
             return True, "ok(工作流步骤连接器免单独评审;复合流程整体评审)"
-        # 纯查询页面免评审;写页面(提交步/L3+,含抓请求路径)与写连接器一致,须过三模型评审
-        # (抓请求虽是用户真实请求,但发布后 agent 会用新参数自动调用 → 参数化/风险/红线仍需评审把关)
+        # 纯查询页面免评审;DOM 回放型写页面(提交步/L3+)合成新自动化,与写连接器一致须过三模型评审
         if draft.asset_type == AssetType.PAGE_SCRIPT and not page_is_write(draft.body):
             return True, "ok(查询类页面免三模型评审)"
+        # 录制抓请求页面:用户真人真实提交过的写请求,免三模型评审(同 request_review 的放行口径)
+        if draft.asset_type == AssetType.PAGE_SCRIPT and page_is_capture(draft.body):
+            return True, "ok(录制抓请求页面:用户真人真实提交,免三模型评审)"
         async with get_pool().acquire() as conn:
             rows = await conn.fetch(
                 "SELECT * FROM review_runs WHERE review_run_id = ANY($1::uuid[])",

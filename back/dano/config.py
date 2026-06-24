@@ -1,20 +1,27 @@
-"""集中配置(**唯一来源 = 本文件**)。**不读 .env**;在这里改默认值即生效。
+"""集中配置。**密钥/凭证绝不写在本文件**,放 `back/.env`(已 gitignore,绝不入库);非密钥默认值在本文件改即生效。
 
-进程环境变量(DANO_ 前缀)仍可临时覆盖,但日常配置全在本文件改。
+读取优先级:进程环境变量(DANO_ 前缀)> `back/.env` > 本文件默认值。
+.env 里用 DANO_ 前缀(如 `DANO_PI_API_KEY=...`);模板见 `back/.env.example`(入库,只放占位符)。
 只保留实际被引用的配置项;Redis/Temporal/旧 LLM(openai/anthropic)等未接依赖已移除,需要时再加。
 """
 
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# .env 固定在后端根目录(back/.env),按本文件位置定位 → 不管从哪个 CWD 启动(uvicorn/docker/pytest)都能读到;
+# 仍 gitignore、绝不入库。密钥只放这,不写进源码。
+_ENV_FILE = str(Path(__file__).resolve().parents[1] / ".env")
+
 
 class Settings(BaseSettings):
-    # 不配 env_file → 不读 .env;config.py 默认值为准(DANO_ 前缀的进程环境变量仍可覆盖)
-    model_config = SettingsConfigDict(env_prefix="DANO_", extra="ignore")
+    # 读 back/.env(密钥放这);优先级:进程环境变量 > .env > 下面的默认值
+    model_config = SettingsConfigDict(env_prefix="DANO_", env_file=_ENV_FILE,
+                                      env_file_encoding="utf-8", extra="ignore")
 
     # ── TLS ──
     insecure_tls: bool = Field(
@@ -32,9 +39,10 @@ class Settings(BaseSettings):
     require_vault: bool = False     # true=必须从 Vault 取,失败即报错(fail-closed,不回退 env)
 
     # ── LLM(pi 编码 + 三模型评审,OpenAI 兼容)──
-    pi_api_key: str = "sk-gsgpzoimegwgeiscfxfjhtwfegifngjvejwjfatuoxrzytmn"                                   # = DANO_PI_API_KEY(编码 + 评审复用)
-    pi_base_url: str = "https://api.siliconflow.cn/v1"     # = DANO_PI_BASE_URL(openai_text_spawn 评审/分类用)
-    pi_model: str = "moonshotai/Kimi-K2.7-Code"            # = DANO_PI_MODEL(评审/分类的 OpenAI 兼容模型)
+    # ⚠ 密钥放 back/.env 的 DANO_PI_API_KEY,**勿写进本文件**(本文件入库=明文泄露)。默认空 → 必须由 .env/环境提供。
+    pi_api_key: str = Field(default="", description="= DANO_PI_API_KEY;密钥只放 back/.env,勿硬编码")
+    pi_base_url: str = "https://token-plan-cn.xiaomimimo.com/v1"     # = DANO_PI_BASE_URL(非密钥,可 .env 覆盖)
+    pi_model: str = "mimo-v2.5-pro"            # = DANO_PI_MODEL(评审/分类的 OpenAI 兼容模型)
     # pi agent(run_pi.mjs)的 provider 名:配了 pi_base_url 时,run_pi.mjs 会注册一个 **OpenAI 兼容** provider
     # (用 pi_base_url + pi_api_key + pi_model,api=openai-completions),SiliconFlow 这类直接可用;留空=用 "openai-compat"。
     # 仅当不配 pi_base_url 时才退回 pi 内置 provider(那时这里填内置名,如 deepseek)。
@@ -46,9 +54,9 @@ class Settings(BaseSettings):
 
     # ── 三模型评审委员会(发布前硬闸门;强制 distinct(model_id)=3,改模型名即可)──
     review_enabled: bool = True
-    review_model_acceptance: str = "zai-org/GLM-5.2"   # 成果验收:是否真满足业务意图
-    review_model_security: str = "Pro/moonshotai/Kimi-K2.6"            # 漏洞检测:注入/越权/密钥/SSRF/PII
-    review_model_compliance: str = "deepseek-ai/DeepSeek-V4-Flash"     # 合规审核:沙箱/测试凭证/风险/确认
+    review_model_acceptance: str = "mimo-v2.5-pro"   # 成果验收:是否真满足业务意图
+    review_model_security: str = "mimo-v2.5-pro"            # 漏洞检测:注入/越权/密钥/SSRF/PII
+    review_model_compliance: str = "mimo-v2.5-pro"     # 合规审核:沙箱/测试凭证/风险/确认
     review_timeout_s: float = 240.0   # 单模型评审超时:OpenAI 兼容共享端点(SiliconFlow)拥塞时单次可达 ~180s,给足余量
     review_max_retries: int = 2
     review_retry_backoff_s: float = 1.0

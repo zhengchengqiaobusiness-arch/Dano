@@ -227,16 +227,40 @@ _ADAPTER_REVIEW_NOTE = (
 )
 
 
-def _build_user(asset_type: str, asset_key: str, body: dict, evidence: list[dict]) -> str:
-    """拼评审输入(运行架构上下文 + 声明式信息 + 沙箱证据,无凭证)。
+# 凭证脱敏:评审输入绝不带明文凭证(也绝不把令牌发给外部 LLM provider)。按 key 名脱敏,
+# 不按值猜(避免误删 acceptance 需要看的业务字段)。命中 key 的整段值替换为说明串。
+_SECRET_KEY_HINTS = ("authorization", "auth_headers", "auth_header", "cookie", "token", "password",
+                     "passwd", "secret", "credential", "apikey", "api_key", "satoken", "session",
+                     "x-tenant-key", "set-cookie")
+_SECRET_MASK = "***[运行期注入的会话登录态/凭证,模板不存明文,已脱敏]***"
 
-    adapter:把生成源码单列一节并附代码评审要求,确保三角色逐行审代码层面问题。
+
+def _redact_secrets(node):
+    """深拷贝并按 key 名脱敏凭证(auth_headers/Authorization/Cookie/token…)。结构保留,值打码。"""
+    if isinstance(node, dict):
+        out: dict = {}
+        for k, v in node.items():
+            if any(h in str(k).lower() for h in _SECRET_KEY_HINTS):
+                out[k] = _SECRET_MASK
+            else:
+                out[k] = _redact_secrets(v)
+        return out
+    if isinstance(node, list):
+        return [_redact_secrets(x) for x in node]
+    return node
+
+
+def _build_user(asset_type: str, asset_key: str, body: dict, evidence: list[dict]) -> str:
+    """拼评审输入(运行架构上下文 + 声明式信息 + 沙箱证据,**凭证已脱敏**)。
+
+    adapter:把生成源码单列一节并附代码评审要求。
+    注:录制抓请求页面(page_is_capture)免评审、不到此处;到此的 page_script 仅 DOM 回放型。
     """
     payload = json.dumps({
         "asset_type": asset_type,
         "asset_key": asset_key,
-        "declarative_body": body,
-        "sandbox_evidence": evidence,
+        "declarative_body": _redact_secrets(body),     # 脱敏:不把 auth_headers/Cookie/token 喂给评审模型
+        "sandbox_evidence": _redact_secrets(evidence),
     }, ensure_ascii=False, indent=2)
     user = _SYSTEM_CONTEXT + "\n\n【待评审资产】\n" + payload
     if asset_type == "adapter":

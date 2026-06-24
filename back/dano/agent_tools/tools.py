@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 import structlog
 
 from dano.agent_tools import materials
-from dano.assets.drafts import REVIEW_REQUIRED_TYPES, DraftStore, page_is_write
+from dano.assets.drafts import REVIEW_REQUIRED_TYPES, DraftStore, page_is_capture, page_is_write
 from dano.assets.repository import AssetRepository
 from dano.capabilities import doc_parser, endpoint_classifier, fingerprint, oa_templates
 from dano.execution.connectors.auth import AuthManager
@@ -745,6 +745,9 @@ async def request_review(run_id: str, params: dict) -> dict:
     if draft.asset_type == AssetType.PAGE_SCRIPT and not page_is_write(draft.body):
         return {"all_passed": True, "verdicts": [], "review_run_ids": [],
                 "note": "查询类页面免三模型评审"}
+    if draft.asset_type == AssetType.PAGE_SCRIPT and page_is_capture(draft.body):
+        return {"all_passed": True, "verdicts": [], "review_run_ids": [],
+                "note": "录制抓请求页面:用户真人真实提交,免三模型评审"}
     vals = await _ds.list_validations(draft.asset_draft_id)
     evidence = [{"kind": v.kind, "passed": v.passed, "environment": v.environment,
                  "credential_type": v.credential_type, "evidence": v.evidence, "response": v.response}

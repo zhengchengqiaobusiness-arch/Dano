@@ -799,7 +799,7 @@ async def test_request_onboarding_publish_and_execute(tmp_path):
     port = httpd.server_address[1]
     _th.Thread(target=httpd.serve_forever, daemon=True).start()
     from dano.agent_tools import tools as _T
-    _T.set_review_board(_FakeBoard())                       # 写页面 skill 现在过三模型评审 → 注入 fake 全过板
+    _T.set_review_board(_FakeBoard())                       # 录制抓请求免评审;留 fake 板作安全网(绝不触真 LLM)
     tenant = f"req-e2e-{uuid4().hex[:8]}"
     sid = Subsystem.REIMBURSE.value
     try:
@@ -818,7 +818,7 @@ async def test_request_onboarding_publish_and_execute(tmp_path):
         rep = await run_request_onboarding(tenant=tenant, subsystem=sid, action="submit_leave",
                                            title="请假", api_request=apir,
                                            sample_inputs=apir["sample_inputs"])
-        assert rep["ok"] is True, rep                       # 发布成功(写操作过三模型评审[fake 全过] + dry 校验)
+        assert rep["ok"] is True, rep                       # 发布成功(录制抓请求免三模型评审 + dry 校验)
 
         reg = await SkillRegistry.from_store(AssetRepository(), tenant=tenant,
                                              subsystems=[Subsystem.REIMBURSE])

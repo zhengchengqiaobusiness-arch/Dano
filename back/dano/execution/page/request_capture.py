@@ -208,8 +208,10 @@ def suggest_selects(post_data: str | None, reads: list[dict]) -> list[dict]:
             continue
         small = len(items) <= _SMALL_LIST
         hits: list[dict] = []
-        for path, sv, _raw in leaves:
+        for path, sv, raw in leaves:
             if not sv or path in seen:
+                continue
+            if _is_const_value(raw):                    # 系统常量(流程键 oa_hotel_apply/uuid/雪花)绝不是"按名字选"的下拉
                 continue
             if len(sv) < 2 and not small:               # 短码只在小列表里认(避免命中大字典)
                 continue
@@ -222,6 +224,12 @@ def suggest_selects(post_data: str | None, reads: list[dict]) -> list[dict]:
                              "value_key": vk, "label_key": lk,
                              "label": str(it.get(lk, "")), "count": len(items)})
                 break
+        # 同一个源里多个字段命中"同一个短值"(如 roomCount/roomLevel/userCount 都=1 碰巧等于某 userId=1)
+        # = 数字巧合,不是真下拉 → 丢掉这些短值命中(长 ID 多选,如选两个领导,值各不同且长,保留)
+        vcount: dict[str, int] = {}
+        for h in hits:
+            vcount[h["value"]] = vcount.get(h["value"], 0) + 1
+        hits = [h for h in hits if not (len(h["value"]) <= 2 and vcount[h["value"]] >= 2)]
         if len(hits) > 3:                 # 一个源命中 >3 个不同字段 = 通用字典误命中,整源丢弃
             continue
         for h in hits:
@@ -447,19 +455,26 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
     # 样例按录制顺序:(值字符串, 标签, 该值的日期集);allow 同值多标签按序消费
     sample_list = [(str(v), k, _date_keys(v)) for k, v in samples.items() if v not in ("", None)]
     used_i: set = set()
+    # 值的全局重数:同一个值被多个表单字段共用(测试时都填 123123 / 多个字段都=1)→ 该值落到哪个字段不确定,
+    # 中文名仍按录制顺序尽力给,但**不据此判必填**(避免把 房间等级=1 误当成必填的 入住人数)
+    _val_mult: dict[str, int] = {}
+    for _v, _lab, _dk in sample_list:
+        _val_mult[_v] = _val_mult.get(_v, 0) + 1
 
     def match_label(sv: str):
+        """→ (中文标签 or None, 是否可信)。可信=该值在表单里唯一对应一个字段,可据此判必填。"""
         for i, (v, lab, _dk) in enumerate(sample_list):        # 文本精确对(同值取下一个还没用的标签)
             if i not in used_i and v == sv:
                 used_i.add(i)
-                return lab
+                return lab, _val_mult.get(sv, 0) == 1
         sv_dates = _date_keys(sv)
         if sv_dates:                                           # 日期跨格式对(毫秒戳 ↔ 显示日期)
             for i, (v, lab, dk) in enumerate(sample_list):
                 if i not in used_i and (dk & sv_dates):
                     used_i.add(i)
-                    return lab
-        return None
+                    dmult = sum(1 for _v, _l, _d in sample_list if _d & sv_dates)
+                    return lab, dmult == 1
+        return None, False
 
     out: list[dict] = []
 
@@ -473,14 +488,15 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         else:
             sv = "" if node is None else str(node)
             key = path.split(".")[-1].split("[")[0]
-            label = match_label(sv)
+            label, confident = match_label(sv)
             time_like = bool(_TIME_KEY.search(key))
             const = (not time_like) and (bool(_ID_KEY.search(key)) or _is_const_value(node))
             out.append({"path": path, "key": key, "value": sv,
                         "suggest_param": bool(label is not None or (not const and sv != "")),
                         "suggest_name": label or key,            # 对不上 → 退原始 key(不瞎猜)
                         "type": _infer_type(node, key),           # 字段类型(值推断),给 agent/契约
-                        "required": bool(label is not None and label in required_labels)})  # 表单 * 必填
+                        # 表单 * 必填:仅当该值唯一对应一个字段(confident)才据标签判必填,模糊命中不误标
+                        "required": bool(label is not None and confident and label in required_labels)})
 
     walk(body, "")
     return out
