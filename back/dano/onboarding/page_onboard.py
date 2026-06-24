@@ -220,9 +220,16 @@ async def run_request_onboarding(
         if not rp["passed"]:
             return {"ok": False, "stage": "validate", "action": action,
                     "reason": "请求参数化校验未过(参数没全填上)", "detail": rp.get("structured_output")}
+        # 写操作过三模型评审(查询类 / review_enabled=false 时 request_review 自动放行,不卡零配置)
+        rv = await T.request_review(run_id, {"asset_draft_id": d["asset_draft_id"]})
+        if not rv["all_passed"]:
+            return {"ok": False, "stage": "review", "action": action,
+                    "reason": ("三模型评审未通过" if rv.get("review_run_ids")
+                               else "需三模型评审但未运行(请在运行配置填评审模型,或临时关 review_enabled 降级)"),
+                    "verdicts": rv.get("verdicts")}
         pub = await T.publish_asset(run_id, {"asset_draft_id": d["asset_draft_id"],
                                              "validation_run_ids": rp["validation_run_ids"],
-                                             "review_run_ids": []})
+                                             "review_run_ids": rv.get("review_run_ids") or []})
         log.info("request_onboard.done", action=action, published=pub.get("published"))
         return {"ok": pub.get("published", False), "stage": "publish", "action": action,
                 "asset_id": pub.get("asset_id"), "mode": "request", "reason": pub.get("reason", ""),

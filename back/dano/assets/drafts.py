@@ -190,12 +190,10 @@ class DraftStore:
         # 工作流步骤连接器免单独评审:复合 WORKFLOW 作为整体过三模型评审
         if draft.asset_type == AssetType.CONNECTOR and draft.body.get("workflow_step"):
             return True, "ok(工作流步骤连接器免单独评审;复合流程整体评审)"
-        # 纯查询页面免评审;写页面(提交步/L3+)与写连接器一致须过三模型评审
+        # 纯查询页面免评审;写页面(提交步/L3+,含抓请求路径)与写连接器一致,须过三模型评审
+        # (抓请求虽是用户真实请求,但发布后 agent 会用新参数自动调用 → 参数化/风险/红线仍需评审把关)
         if draft.asset_type == AssetType.PAGE_SCRIPT and not page_is_write(draft.body):
             return True, "ok(查询类页面免三模型评审)"
-        # 抓请求路径:是用户在真实系统里亲手提交的请求(非 AI 臆造)→ 免三模型评审,靠运行期 L3 确认把关
-        if draft.asset_type == AssetType.PAGE_SCRIPT and draft.body.get("api_request"):
-            return True, "ok(抓请求路径:用户真实提交,免三模型评审)"
         async with get_pool().acquire() as conn:
             rows = await conn.fetch(
                 "SELECT * FROM review_runs WHERE review_run_id = ANY($1::uuid[])",

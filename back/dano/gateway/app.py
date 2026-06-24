@@ -699,16 +699,17 @@ async def onboarding_page_pi(req: PagePiReq) -> dict:
 
 
 async def _auto_export(tenant: str) -> None:
-    """接入后自动导出该租户已上架 skill 为 skill-creator 包(无需手动点导出)。
+    """接入后自动导出该租户已上架 skill(无需手动点)。
 
-    目录:Linux 用 DANO_EXPORT_DIR(沿用之前目录);Windows/缺省 = 仓库相对 Dano/export/agent-skills。
+    目录:**页面配过的(持久化)> DANO_EXPORT_DIR > 仓库默认** —— 与手动导出落同一处。
     best-effort:导出失败不影响接入结果。
     """
     try:
-        import os
         from pathlib import Path
+
+        from dano.execution.page.sessions import get_export_dir
         from dano.export.agent_skills import write_skills
-        out = os.environ.get("DANO_EXPORT_DIR") or str(Path(__file__).resolve().parents[3] / "export" / "agent-skills")
+        out = get_export_dir(str(Path(__file__).resolve().parents[3] / "export" / "agent-skills"))
         written = await write_skills(tenant, out)
         log.info("onboard.auto_export", tenant=tenant, out=out, count=len(written))
     except Exception as e:  # noqa: BLE001
@@ -869,12 +870,15 @@ async def export_agent_skills_ep(req: ExportSkillsReq,
     后端与目标目录同机时直接写文件,免敲命令。真执行仍在 Dano 侧;导出的脚本用 curl 调 /v1/tools/call。
     """
     tenant = await _auth_tenant(x_tenant_key)
+    from dano.execution.page.sessions import save_export_dir
     from dano.export.agent_skills import write_skills
+    out = req.out_dir
     try:
-        written = await write_skills(tenant, req.out_dir)
+        written = await write_skills(tenant, out)
     except OSError as e:
         raise HTTPException(status_code=400, detail=f"写入目录失败:{e}") from e
-    return {"out_dir": req.out_dir, "count": len(written), "written": written}
+    save_export_dir(out)                                 # 记住此目录 → 录完自动发布落同一处
+    return {"out_dir": out, "count": len(written), "written": written}
 
 
 @app.get("/assets/published")

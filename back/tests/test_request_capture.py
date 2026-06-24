@@ -627,6 +627,19 @@ import threading  # noqa: E402
 
 import pytest  # noqa: E402
 
+
+class _FakeVerdict:
+    def __init__(self, role: str) -> None:
+        self.role, self.model_id, self.passed, self.reasons = role, f"fake-{role}", True, []
+
+
+class _FakeBoard:
+    """三模型评审 fake:三角色全通过(测写页面评审闸门,不烧 LLM)。"""
+
+    async def review(self, *, asset_type, asset_key, body, evidence):  # noqa: ANN001
+        return [_FakeVerdict(r) for r in ("acceptance", "security", "compliance")]
+
+
 _HTML = (b'<!doctype html><html><head><meta charset="utf-8"></head><body>'
          b'<input id="reason">'
          b'<button id="submit" type="button" onclick="fetch(\'/prod-api/oa/leave/start\','
@@ -785,6 +798,8 @@ async def test_request_onboarding_publish_and_execute(tmp_path):
     httpd = _ss.TCPServer(("127.0.0.1", 0), _Handler)
     port = httpd.server_address[1]
     _th.Thread(target=httpd.serve_forever, daemon=True).start()
+    from dano.agent_tools import tools as _T
+    _T.set_review_board(_FakeBoard())                       # 写页面 skill 现在过三模型评审 → 注入 fake 全过板
     tenant = f"req-e2e-{uuid4().hex[:8]}"
     sid = Subsystem.REIMBURSE.value
     try:
@@ -803,7 +818,7 @@ async def test_request_onboarding_publish_and_execute(tmp_path):
         rep = await run_request_onboarding(tenant=tenant, subsystem=sid, action="submit_leave",
                                            title="请假", api_request=apir,
                                            sample_inputs=apir["sample_inputs"])
-        assert rep["ok"] is True, rep                       # 发布成功(免评审,dry 校验过)
+        assert rep["ok"] is True, rep                       # 发布成功(写操作过三模型评审[fake 全过] + dry 校验)
 
         reg = await SkillRegistry.from_store(AssetRepository(), tenant=tenant,
                                              subsystems=[Subsystem.REIMBURSE])
@@ -817,6 +832,7 @@ async def test_request_onboarding_publish_and_execute(tmp_path):
         assert out["ok"] and out["status"] == 200
         assert out["response"]["echo"]["reason"] == "感冒"
     finally:
+        _T.set_review_board(None)
         httpd.shutdown()
         async with get_pool().acquire() as c:
             await c.execute("DELETE FROM asset_drafts WHERE tenant=$1", tenant)

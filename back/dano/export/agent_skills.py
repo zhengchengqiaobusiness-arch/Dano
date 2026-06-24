@@ -630,6 +630,7 @@ async def write_skills(tenant: str, out_dir: str, *, rich: bool = True) -> list[
     manifests = build_manifests(reg.skills)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    log.info("export.target", out_abs=str(out.resolve()), tenant=tenant)   # 落盘绝对路径(排查"看不到文件")
     groups: dict = defaultdict(list)
     standalone: list[SkillManifest] = []
     for m in manifests:
