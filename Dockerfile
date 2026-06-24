@@ -11,6 +11,7 @@ COPY package.json pnpm-workspace.yaml tsconfig.json vitest.config.ts ./
 COPY apps/dano/package.json apps/dano/package.json
 COPY packages/bridge/package.json packages/bridge/package.json
 COPY packages/svelte/package.json packages/svelte/package.json
+COPY patches patches
 COPY pnpm-lock.yaml* ./
 RUN npm_config_registry="$NPM_CONFIG_REGISTRY" \
   npm_config_fetch_timeout=600000 \
