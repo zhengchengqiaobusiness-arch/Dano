@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@casualjim/pi-heimdall@0.2.10':
+    hash: exosz7shdnqzkpkg42rj7vic5i
+    path: patches/@casualjim__pi-heimdall@0.2.10.patch
+
 importers:
 
   .:
@@ -40,7 +45,7 @@ importers:
     dependencies:
       '@casualjim/pi-heimdall':
         specifier: 0.2.10
-        version: 0.2.10(@earendil-works/pi-coding-agent@0.74.0(ws@8.21.0)(zod@4.4.3))
+        version: 0.2.10(patch_hash=exosz7shdnqzkpkg42rj7vic5i)(@earendil-works/pi-coding-agent@0.74.0(ws@8.21.0)(zod@4.4.3))
       '@dano/bridge':
         specifier: workspace:*
         version: link:../../packages/bridge
@@ -71,7 +76,7 @@ importers:
     dependencies:
       '@casualjim/pi-heimdall':
         specifier: 0.2.10
-        version: 0.2.10(@earendil-works/pi-coding-agent@0.74.0(ws@8.21.0)(zod@4.4.3))
+        version: 0.2.10(patch_hash=exosz7shdnqzkpkg42rj7vic5i)(@earendil-works/pi-coding-agent@0.74.0(ws@8.21.0)(zod@4.4.3))
       '@earendil-works/pi-coding-agent':
         specifier: 0.74.0
         version: 0.74.0(ws@8.21.0)(zod@4.4.3)
@@ -2224,7 +2229,7 @@ snapshots:
 
   '@borewit/text-codec@0.2.2': {}
 
-  '@casualjim/pi-heimdall@0.2.10(@earendil-works/pi-coding-agent@0.74.0(ws@8.21.0)(zod@4.4.3))':
+  '@casualjim/pi-heimdall@0.2.10(patch_hash=exosz7shdnqzkpkg42rj7vic5i)(@earendil-works/pi-coding-agent@0.74.0(ws@8.21.0)(zod@4.4.3))':
     dependencies:
       '@mariozechner/pi-coding-agent': '@earendil-works/pi-coding-agent@0.74.0(ws@8.21.0)(zod@4.4.3)'
       shell-quote: 1.8.4

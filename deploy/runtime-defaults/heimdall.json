@@ -1,6 +1,7 @@
 {
   "sandbox": {
-    "enabled": true
+    "enabled": true,
+    "userNamespace": false
   },
   "commandPolicies": [
     {
