@@ -1258,7 +1258,6 @@
     padding: 12px 16px;
     border: 1px solid var(--border);
     border-radius: 18px 18px 18px 18px;
-    border-end-end-radius: .5rem;
     background: var(--panel);
   }
 
@@ -1600,7 +1599,7 @@
     .message-content.user {
       max-width: min(580px, 100%);
       padding: 10px 14px;
-      border-radius: 16px 16px 6px 16px;
+      border-radius: 16px;
     }
   }
 </style>
