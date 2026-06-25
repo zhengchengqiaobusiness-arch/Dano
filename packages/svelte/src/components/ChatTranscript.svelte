@@ -1334,7 +1334,7 @@
     color: var(--text);
   }
 
-  .system-block-body {
+  .system-block :global(.system-block-body) {
     margin: 0;
     color: var(--text-muted);
     font-size: 0.76rem;
@@ -1390,7 +1390,7 @@
 
   .thinking-toggle:hover { color: var(--text); }
 
-  .thinking-content {
+  .thinking-block :global(.thinking-content) {
     margin: 0;
     padding: 0;
     font-size: 0.74rem;
