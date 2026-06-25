@@ -35,7 +35,7 @@ describe("curl transcript status", () => {
 });
 
 describe("assistant thinking blocks", () => {
-  it("keeps structured thinking, text, and tool calls in content order", () => {
+  it("keeps structured thinking, text, and tool calls in content order without exposing signatures", () => {
     const blocks = contentBlocks({
       role: "assistant",
       content: [
@@ -45,6 +45,11 @@ describe("assistant thinking blocks", () => {
           thinkingSignature: "hidden",
         },
         { type: "text", text: "Final **answer**." },
+        {
+          type: "thinking",
+          thinking: "Check tool result",
+          thinkingSignature: "also hidden",
+        },
         {
           type: "toolCall",
           id: "tool-1",
@@ -57,8 +62,10 @@ describe("assistant thinking blocks", () => {
     expect(blocks.map(block => block.kind)).toEqual([
       "thinking",
       "text",
+      "thinking",
       "tool",
     ]);
     expect(blocks[0]).toEqual({ kind: "thinking", text: "Inspect the repo" });
+    expect(blocks[2]).toEqual({ kind: "thinking", text: "Check tool result" });
   });
 });
