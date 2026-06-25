@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import type {
   AgentSession,
   SessionEntry,
@@ -25,16 +24,8 @@ export interface SessionDefaultsState {
 
 type ModelSessionManager = Pick<
   SessionManager,
-  | "appendModelChange"
-  | "appendThinkingLevelChange"
-  | "getBranch"
-  | "getSessionFile"
+  "appendModelChange" | "appendThinkingLevelChange" | "getBranch"
 >;
-
-type FlushableSessionManager = {
-  _rewriteFile?: () => void;
-  flushed?: boolean;
-};
 
 // Mirrors pi-coding-agent 0.80.2; the resolver module is not exported.
 const DEFAULT_MODEL_PER_PROVIDER: Record<string, string> = {
@@ -181,12 +172,10 @@ export function ensureSessionManagerModelChange(
 ): void {
   const latestModel = findLatestModelInfo(sessionManager.getBranch());
   if (sameModel(latestModel, model)) {
-    flushMissingSessionFile(sessionManager);
     return;
   }
 
   sessionManager.appendModelChange(model.provider, model.id);
-  flushMissingSessionFile(sessionManager);
 }
 
 export function ensureSessionManagerThinkingLevelChange(
@@ -197,12 +186,10 @@ export function ensureSessionManagerThinkingLevelChange(
     sessionManager.getBranch(),
   );
   if (latestThinkingLevel === thinkingLevel) {
-    flushMissingSessionFile(sessionManager);
     return;
   }
 
   sessionManager.appendThinkingLevelChange(thinkingLevel);
-  flushMissingSessionFile(sessionManager);
 }
 
 export function initializeSessionManagerDefaults(
@@ -217,8 +204,6 @@ export function initializeSessionManagerDefaults(
 
   if (!latestModel && model) {
     ensureSessionManagerModelChange(sessionManager, model);
-  } else {
-    flushMissingSessionFile(sessionManager);
   }
 
   const latestThinkingLevel = findLatestThinkingLevelInfo(
@@ -229,8 +214,6 @@ export function initializeSessionManagerDefaults(
 
   if (!latestThinkingLevel) {
     ensureSessionManagerThinkingLevelChange(sessionManager, thinkingLevel);
-  } else {
-    flushMissingSessionFile(sessionManager);
   }
 
   return {
@@ -249,27 +232,6 @@ export function initializeSessionManagerModel(
     availableModels,
     defaults,
   ).model;
-}
-
-function flushMissingSessionFile(
-  sessionManager: ModelSessionManager,
-): void {
-  const sessionFile = sessionManager.getSessionFile();
-  if (!sessionFile) {
-    return;
-  }
-
-  const flushable = sessionManager as unknown as FlushableSessionManager;
-  if (typeof flushable._rewriteFile !== "function") {
-    return;
-  }
-
-  if (existsSync(sessionFile) && flushable.flushed !== false) {
-    return;
-  }
-
-  flushable._rewriteFile();
-  flushable.flushed = true;
 }
 
 export function resolveAgentSessionDefaults(

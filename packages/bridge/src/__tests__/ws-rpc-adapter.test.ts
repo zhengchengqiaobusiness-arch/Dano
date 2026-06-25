@@ -375,19 +375,19 @@ describe("WsRpcAdapter", () => {
         lines.push(JSON.stringify(entry));
       }
       fs.writeFileSync(sessionFile, lines.join("\n"));
-      (sessionManager as unknown as { flushed: boolean }).flushed = true;
+      const resumedSessionManager = SessionManager.open(sessionFile);
 
       const promptSpy = vi.fn().mockResolvedValue(undefined);
       const subscribeSpy = vi.fn().mockReturnValue(() => {});
       createAgentSessionMock.mockResolvedValue({
         session: {
           sessionFile,
-          sessionId: sessionManager.getSessionId(),
+          sessionId: resumedSessionManager.getSessionId(),
           isStreaming: false,
           bindExtensions: vi.fn().mockResolvedValue(undefined),
           subscribe: subscribeSpy,
           prompt: promptSpy,
-          sessionManager,
+          sessionManager: resumedSessionManager,
         },
       });
 
@@ -433,13 +433,13 @@ describe("WsRpcAdapter", () => {
         source: "rpc",
       });
 
-      sessionManager.appendMessage({
+      resumedSessionManager.appendMessage({
         role: "user",
         content: [{ type: "text", text: "Continue here" }],
         timestamp: Date.now(),
       } as any);
-      const newUserEntry = sessionManager.getLeafEntry();
-      sessionManager.appendMessage({
+      const newUserEntry = resumedSessionManager.getLeafEntry();
+      resumedSessionManager.appendMessage({
         role: "assistant",
         content: [{ type: "text", text: "Done" }],
         timestamp: Date.now(),
@@ -4158,7 +4158,7 @@ describe("WsRpcAdapter", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
-    it("uses Dano defaults for new_session response, get_state, and persisted jsonl", async () => {
+    it("uses Dano defaults without forcing an empty session jsonl", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-defaults-"));
       const sm = SessionManager.create(tmpDir, tmpDir);
       const existingFile = sm.getSessionFile()!;
@@ -4222,26 +4222,7 @@ describe("WsRpcAdapter", () => {
       });
       expect(newSessionResponse?.payload.data.thinkingLevel).toBe("medium");
       expect(typeof sessionPath).toBe("string");
-      expect(fs.existsSync(sessionPath)).toBe(true);
-
-      const entries = fs
-        .readFileSync(sessionPath, "utf8")
-        .trim()
-        .split("\n")
-        .map(line => JSON.parse(line) as { type: string; [key: string]: unknown });
-      expect(entries).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            type: "model_change",
-            provider: "xiaomi-token-plan-cn",
-            modelId: "mimo-v2.5",
-          }),
-          expect.objectContaining({
-            type: "thinking_level_change",
-            thinkingLevel: "medium",
-          }),
-        ]),
-      );
+      expect(fs.existsSync(sessionPath)).toBe(false);
 
       (
         ws as unknown as { trigger: (event: string, data: Buffer) => void }
