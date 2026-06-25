@@ -108,6 +108,37 @@ export const ASK_USER_QUESTION_TOOL_NAME = "ask_user_question";
 
 export type AskUserQuestionAnswer = string | string[] | boolean;
 
+export type AskUserQuestionOption = {
+  id: string;
+  label: string;
+  extra?: Record<string, unknown>;
+};
+
+export type AskUserQuestionInputType =
+  | "text"
+  | "radio"
+  | "checkbox"
+  | "select"
+  | "treeSelect"
+  | "confirm";
+
+export type AskUserQuestionDataSource = {
+  type: "api";
+  endpoint: string;
+  method?: "GET" | "POST";
+  params?: Record<string, unknown>;
+  searchParam?: string;
+  pageParam?: string;
+  pageSizeParam?: string;
+  pageSize?: number;
+  resultPath?: string;
+  totalPath?: string;
+  idField?: string;
+  labelField?: string;
+  childrenField?: string;
+  extraFields?: string[];
+};
+
 export type AskUserQuestionResult =
   | {
       status: "answered";
