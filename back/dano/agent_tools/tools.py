@@ -1073,15 +1073,33 @@ async def sandbox_replay(run_id: str, params: dict) -> dict:
     # 抓请求路径:dry 校验(参数都填上、请求可构造),不开浏览器、不真发(写安全)
     if draft.body.get("api_request"):
         from dano.execution.page.request_capture import execute_api   # 单请求/多步工作流(Q3)分派
-        out = await execute_api(draft.body["api_request"], params.get("sample_inputs") or {},
-                                send=False)
-        # 录制抓请求:承重闸门=确定性 self_check(out.ok 已含 self_check 全过 + 无 {{}} 残留),记为 self_check 证据
+        apir = draft.body["api_request"]
+        sample_inputs = params.get("sample_inputs") or {}
+        out = await execute_api(apir, sample_inputs, send=False)        # 承重闸门=确定性 self_check(dry,写安全)
         v = await _ds.record_validation(asset_draft_id=draft.asset_draft_id, kind="self_check",
                                         passed=bool(out.get("ok")), response=out,
                                         evidence={"mode": "self_check", "violations": out.get("self_check") or [],
                                                   "request": out})
+        log.info("sandbox_replay.self_check", draft=str(draft.asset_draft_id), passed=bool(out.get("ok")),
+                 violations=out.get("self_check") or [])
+        vrids = [str(v.validation_run_id)]
+        # 活体验证(仅当上层判定**可逆沙箱 + 带测试登录态**):真发写 + fact_check(execute_api 内置回查)→ 记 replay 证据。
+        # 不可逆/未声明环境不会走到这(plan=structural),所以默认绝不真发,避免污染。
+        if params.get("live") and params.get("storage_state") is not None and out.get("ok"):
+            live = await execute_api(apir, sample_inputs, base_url=params.get("base_url", ""),
+                                     storage_state=params.get("storage_state"), send=True,
+                                     verify=params.get("verify", False))
+            live_ok = bool(live.get("ok")) and live.get("fact_check_passed", True) is not False
+            vr = await _ds.record_validation(asset_draft_id=draft.asset_draft_id, kind="replay",
+                                             passed=live_ok, response=live,
+                                             evidence={"mode": "live", "fact_check_passed": live.get("fact_check_passed")})
+            log.info("sandbox_replay.live", draft=str(draft.asset_draft_id), passed=live_ok,
+                     status=live.get("status"), fact_check=live.get("fact_check_passed"))
+            vrids.append(str(vr.validation_run_id))
+            return {"passed": bool(out.get("ok")) and live_ok, "mode": "live", "live": live,
+                    "structured_output": out, "validation_run_ids": vrids}
         return {"passed": bool(out.get("ok")), "mode": "self_check",
-                "structured_output": out, "validation_run_ids": [str(v.validation_run_id)]}
+                "structured_output": out, "validation_run_ids": vrids}
     mat = _mat(run_id, draft.subsystem.value)
     is_write = page_is_write(draft.body)
     from dano.config import get_settings

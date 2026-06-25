@@ -65,19 +65,21 @@ def _schema_prop(skill: SkillSpec, field: str, desc: str) -> dict:
     - 其余按信源声明 / 数值语义判定。format 为 JSON Schema 扩展位,校验器忽略未知值,安全。
     """
     declared = (getattr(skill, "field_types", {}) or {}).get(field)
+    # label=字段纯语义(给 SOP/复述用,简洁);description=语义 + 调用约定(给参数表/function-calling 用)。
+    # 约定不写死示例值(『张三』只适合选人,不适合选值如请假类型);示例由前端/样例值提供,不在此臆造。
     if declared == "enum":
-        return {"type": "string", "format": "name-ref",
-                "description": desc + "(传名字/选项文字,如『张三』;Dano 运行期自动查内部 ID,**勿直接传 ID/编号**)"}
+        return {"type": "string", "format": "name-ref", "label": desc,
+                "description": desc + "(传名字/选项文字,Dano 运行期自动查内部 ID,**勿直接传 ID/编号**)"}
     if declared == "datetime":
-        return {"type": "string", "format": "date-time",
+        return {"type": "string", "format": "date-time", "label": desc,
                 "description": desc + "(日期时间;传 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss`,Dano 运行期自动转成目标系统格式,**勿自己拼时间戳**)"}
     if declared == "date":
-        return {"type": "string", "format": "date",
+        return {"type": "string", "format": "date", "label": desc,
                 "description": desc + "(日期;传 `YYYY-MM-DD`,Dano 运行期自动转成目标系统格式)"}
     if declared in ("number", "integer", "boolean", "array", "object"):
-        return {"type": declared, "description": desc}
+        return {"type": declared, "label": desc, "description": desc}
     return {"type": "number" if is_numeric_field(field, desc, declared_type=declared) else "string",
-            "description": desc}
+            "label": desc, "description": desc}
 
 
 def _parameters_schema(skill: SkillSpec) -> dict:

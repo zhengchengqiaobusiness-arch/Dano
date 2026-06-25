@@ -179,10 +179,40 @@ async def run_page_onboarding_pi(
             "error": completed.get("error")}
 
 
+async def _advisory_notes(action: str, api_request: dict) -> list[str]:
+    """录制 skill 的**非阻断**语义顾问:仅当评审 client 已注入(生产启动注入;测试默认无)才跑。
+    任何失败/未配置都返回 [] —— 顾问绝不阻断发布。"""
+    try:
+        from dano.agent_tools import tools as T
+        board = T._review_board
+        if board is None:
+            return []
+        from dano.review.board import advisory_capture_review
+        return await advisory_capture_review(board.client, (getattr(board, "models", None) or {}).get("acceptance"),
+                                             action=action, api_request=api_request)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+async def _auto_goal(action: str, api_request: dict) -> dict:
+    """LLM 就绪时自动提炼业务 Goal(随资产存档);未注入/失败 → {}。提议性质,不因 LLM 抖动阻断发布。"""
+    try:
+        from dano.agent_tools import tools as T
+        board = T._review_board
+        if board is None:
+            return {}
+        from dano.review.board import generate_goal
+        return await generate_goal(board.client, (getattr(board, "models", None) or {}).get("acceptance"),
+                                   action=action, api_request=api_request)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 async def run_request_onboarding(
     *, tenant: str, subsystem: str, action: str, title: str = "",
     api_request: dict, sample_inputs: dict | None = None, required: list[str] | None = None,
     deploy: dict | None = None, credentials: dict | None = None, run_id: str | None = None,
+    goal: dict | None = None, storage_state: dict | None = None,
 ) -> dict:
     """抓请求路径:把录制抓到的提交请求(已参数化)落成可执行 Skill → dry 校验 → 发布。
 
@@ -198,17 +228,60 @@ async def run_request_onboarding(
         run_id=run_id, tenant=tenant, system_instance_id=sid, subsystem=sid,
         deploy=deploy or {}, credentials=credentials or {}))
     try:
+        from dano.infra.logging import configure_logging
+        configure_logging()                                   # 幂等:直连/离线调用也能看到日志
+        structlog.contextvars.bind_contextvars(run_id=run_id, action=action, tenant=tenant, subsystem=str(sid))
+        log.info("ingest.start", title=title, has_steps=bool(api_request.get("steps")),
+                 method=api_request.get("method"), url=api_request.get("url") or api_request.get("path"))
         # 单请求取自身 params;多步工作流(Q3)取最后一步(用户提交那步)的 params
         params = list(api_request.get("params") or [])
         if not params and api_request.get("steps"):
             params = list((api_request["steps"][-1] or {}).get("params") or [])
         # 没有可参数化的写请求体 → 无法做有意义的自检/真跑 → 诚实标 unsupported,不静默发空 skill
         if not (api_request.get("body_template") or api_request.get("steps")):
+            log.warning("ingest.gate.unsupported", reason="no body_template/steps")
             return {"ok": False, "stage": "ingest", "status": IngestionStatus.UNSUPPORTED.value,
                     "action": action, "reason": "没有可参数化的写请求体(无 body_template/steps)—— 无法安全自动化"}
+        # 业务相关性门:危险写请求(删除/驳回/终止/撤销)不做自动化录入 → 拒发(避免代他人删单/驳回审批)
+        from dano.execution.page.request_capture import classify_request_role, looks_dangerous_write
+        log.info("ingest.request_role", **classify_request_role(api_request))   # node 4 语义角色
+        if looks_dangerous_write(api_request):
+            log.warning("ingest.gate.dangerous_write_rejected",
+                        method=api_request.get("method"), url=api_request.get("url") or api_request.get("path"))
+            return {"ok": False, "stage": "relevance", "status": IngestionStatus.REJECTED.value,
+                    "action": action,
+                    "reason": "识别到危险写请求(删除/驳回/终止/撤销)—— 这类不做自动化录入,请人工处理"}
+        # 业务 Goal:用户确认的优先;没传则 LLM 就绪时**自动提炼**(随资产存档,Goal 无条件化)。Goal 完整性门:
+        #   用户确认的 goal 不过 → 阻断(需澄清);自动提炼的不过 → 仅作建议(不因 LLM 抖动阻断发布)。
+        from dano.execution.page.request_capture import goal_needs_confirmation, validate_goal
+        user_confirmed = bool(goal)
+        if not goal:
+            goal = await _auto_goal(action, api_request)
+        goal_issues: list[str] = validate_goal(goal, api_request) if goal else []
+        if goal:
+            api_request = {**api_request, "goal": goal}
+        log.info("ingest.goal", source=("user" if user_confirmed else "auto"),
+                 has_goal=bool(goal), intent=(goal or {}).get("intent"), issues=len(goal_issues))
+        if user_confirmed and goal_issues:                    # 仅用户确认的 goal 不过才硬拦
+            log.warning("ingest.gate.goal_needs_clarify", issues=goal_issues)
+            return {"ok": False, "stage": "goal", "status": IngestionStatus.NEEDS_CLARIFICATION.value,
+                    "action": action, "clarifications": goal_issues,
+                    "reason": "业务 Goal 完整性门未过(意图/必填来源/成功标准/禁止动作/风险)",
+                    "goal": goal, "goal_confirmation_required": goal_needs_confirmation(goal)}
         # 必填=前端标的"变化字段"(没给则全部必填,向后兼容);其余=可选,缺了用录制原值(固定字段不改)
         req_fields = [r for r in (required if required is not None else params) if r in params]
         opt_fields = [p for p in params if p not in req_fields]
+        # 字段语义门:**必填**参数若是内部机器标识(Activity_xxx/hash,非人类名)→ 阻断,让用户命名;可选的仅告警
+        from dano.execution.page.request_capture import looks_internal_param_name
+        bad_req = [p for p in req_fields if looks_internal_param_name(p)]
+        log.info("ingest.fields", params=params, required=req_fields, optional=opt_fields)
+        if bad_req:
+            log.warning("ingest.gate.field_semantics_needs_clarify", required_internal=bad_req)
+            return {"ok": False, "stage": "field_semantics", "status": IngestionStatus.NEEDS_CLARIFICATION.value,
+                    "action": action,
+                    "clarifications": [f"必填参数 `{p}` 是内部机器标识(非人类名),请在录制界面给它起个业务名"
+                                       f"(如审批人/领导)再发布" for p in bad_req],
+                    "reason": "字段语义门:必填参数名不可读(内部机器标识),需澄清命名"}
         # 字段类型:单请求取自身,工作流取最后一步
         ftypes = dict(api_request.get("field_types") or {})
         if not ftypes and api_request.get("steps"):
@@ -219,13 +292,34 @@ async def run_request_onboarding(
             field_types=ftypes, risk_level=RiskLevel.L3).model_dump()
         d = await T.save_draft(run_id, {"system_instance_id": sid, "asset_type": "page_script",
                                         "asset_key": action, "body": body})
+        log.info("ingest.draft_saved", draft_id=d.get("asset_draft_id"))
+        # 自适应活体验证:仅当环境可逆沙箱 + 有回查手段(plan=live)且带测试登录态,才真发写 + fact_check → 可升 verified
+        from dano.execution.page.request_capture import capture_verification_plan
+        plan = capture_verification_plan(deploy, api_request)
+        do_live = plan.get("mode") == "live" and storage_state is not None
+        log.info("ingest.verification_plan", mode=plan.get("mode"),
+                 controllability=plan.get("controllability"), do_live=do_live)
         rp = await T.sandbox_replay(run_id, {"asset_draft_id": d["asset_draft_id"],
-                                             "sample_inputs": sample_inputs or {}})
+                                             "sample_inputs": sample_inputs or {},
+                                             "live": do_live, "storage_state": storage_state, "verify": False})
+        log.info("ingest.replay", passed=rp.get("passed"), mode=rp.get("mode"))
         if not rp["passed"]:
             sc = (rp.get("structured_output") or {}).get("self_check") or []
+            live = rp.get("live") or {}
+            if sc:                                            # 结构自检未过 → 需澄清
+                log.warning("ingest.gate.self_check_failed", violations=sc)
+                return {"ok": False, "stage": "validate", "status": IngestionStatus.NEEDS_CLARIFICATION.value,
+                        "action": action, "clarifications": sc, "reason": "确定性自检未过,需澄清/修正",
+                        "detail": rp.get("structured_output")}
+            if live and not live.get("ok"):                   # 活体真跑未过业务生效门 → 拒发(不上线坏 skill)
+                log.warning("ingest.gate.live_failed", detail=live.get("detail"),
+                            fact_check=live.get("fact_check_passed"))
+                return {"ok": False, "stage": "live", "status": IngestionStatus.REJECTED.value,
+                        "action": action, "reason": "活体真跑未通过业务生效门:" + str(live.get("detail", "")),
+                        "live": live, "detail": rp.get("structured_output")}
+            log.warning("ingest.gate.validate_failed", reason="leftover placeholders")
             return {"ok": False, "stage": "validate", "status": IngestionStatus.NEEDS_CLARIFICATION.value,
-                    "action": action, "clarifications": sc,
-                    "reason": ("确定性自检未过,需澄清/修正" if sc else "请求参数化校验未过(参数没全填上)"),
+                    "action": action, "clarifications": [], "reason": "请求参数化校验未过(参数没全填上)",
                     "detail": rp.get("structured_output")}
         # 录制抓请求资产 = 用户真人在页面上**亲手提交过**的写请求 → 免三模型评审,直接发布。
         # 评审对录制资产易抖动误判(把固定字段当漏配、把脱敏登录态当缺鉴权,时过时不过),且并未提升
@@ -233,26 +327,33 @@ async def run_request_onboarding(
         pub = await T.publish_asset(run_id, {"asset_draft_id": d["asset_draft_id"],
                                              "validation_run_ids": rp["validation_run_ids"],
                                              "review_run_ids": []})
-        # 安全网:产出的参数里若漏了"内部机器标识"(如 BPM 节点 Activity_xxx、hash)→ 告警提示改名,
-        # 绝不让无意义参数名静默上架(即便命名桥接没兜住,如候选列表被缓存没抓到)。
-        from dano.execution.page.request_capture import looks_internal_param_name
-        bad = [p for p in params if looks_internal_param_name(p)]
-        warnings = ([f"参数 `{p}` 像内部标识(非人类名),建议在录制界面给它起个名字(如审批人/类型),否则 agent 难以正确调用"
+        # 安全网:**可选**参数里若有"内部机器标识"(必填的已在字段语义门拦下)→ 仅告警(agent 不传时用录制原值)。
+        bad = [p for p in opt_fields if looks_internal_param_name(p)]
+        warnings = ([f"可选参数 `{p}` 像内部标识(非人类名),建议命名;agent 不传它时用录制原值"
                      for p in bad] if bad else [])
         if warnings:
-            log.warning("request_onboard.internal_param_names", action=action, params=bad)
+            log.warning("ingest.warn.optional_internal_names", params=bad)
         published = pub.get("published", False)
-        log.info("request_onboard.done", action=action, published=published)
-        # capture 走 dry self_check(从不真发写请求)→ 结构已验、活体未验 → partially_verified(诚实);发布失败 → rejected。
-        # verification_plan 告诉调用方:这套环境能否进一步做活体验证(可逆沙箱+有回查 → 可升 verified)。
-        from dano.execution.page.request_capture import capture_verification_plan
-        plan = capture_verification_plan(deploy, api_request)
-        return {"ok": published, "stage": "publish",
-                "status": (IngestionStatus.PARTIALLY_VERIFIED if published else IngestionStatus.REJECTED).value,
-                "action": action, "verification_plan": plan,
+        # 结构 + 活体(真跑+fact_check)均过 → verified;只做了 dry 结构验 → partially_verified(诚实降级);发布失败 → rejected
+        live_ok = rp.get("mode") == "live" and bool(rp.get("passed"))
+        status = (IngestionStatus.REJECTED if not published else
+                  IngestionStatus.VERIFIED if live_ok else IngestionStatus.PARTIALLY_VERIFIED)
+        log.info("ingest.published", published=published, status=status.value,
+                 asset_id=pub.get("asset_id"), live_ok=live_ok, reason=pub.get("reason", ""))
+        review_notes = await _advisory_notes(action, api_request) if published else []
+        role = classify_request_role(api_request if not api_request.get("steps")
+                                     else ((api_request["steps"][-1] or {})))   # node 4 语义角色(确定性)
+        return {"ok": published, "stage": "publish", "status": status.value,
+                "action": action, "verification_plan": plan, "review_notes": review_notes,
+                "request_role": role,
+                "goal": goal, "goal_issues": goal_issues,   # 自动提炼 Goal 的完整性问题(建议性,不阻断)
                 "asset_id": pub.get("asset_id"), "mode": "request", "reason": pub.get("reason", ""),
                 "warnings": warnings,
                 "api": {"method": api_request.get("method"), "path": api_request.get("path"),
                         "params": params}}
+    except Exception:
+        log.error("ingest.error", exc_info=True)              # 带 traceback,快速定位崩在哪一步
+        raise
     finally:
         materials.clear_run(run_id)
+        structlog.contextvars.clear_contextvars()

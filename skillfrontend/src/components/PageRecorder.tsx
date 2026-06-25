@@ -9,7 +9,7 @@ interface RecStep { op: string; locator?: string; field?: string; value?: string
 interface RecReq { method: string; url: string; has_body?: boolean; json?: boolean }
 // 提交请求体拍平后的一个叶子字段(给用户勾选哪些是参数)
 interface RecField { path: string; key: string; value: string; suggest_param: boolean; suggest_name: string;
-  type?: string; required?: boolean }
+  type?: string; required?: boolean; confidence?: number; confidence_tier?: string; name_source?: string }
 // 候选写请求(抓到多个时让用户手选用哪个)
 interface RecCand { idx: number; method: string; path: string }
 // P3:字段=选自某列表(选领导:名字→ID)/ 字段=当前用户·会话值(运行期重取)
@@ -17,8 +17,19 @@ interface RecSelect { path: string; source_url: string; value_key: string; label
 interface RecIdentity { path: string; source: string }
 interface RecResult {
   ok?: boolean; action?: string; risk_level?: string; mode?: string; reason?: string;
+  status?: string; warnings?: string[]; review_notes?: string[]; clarifications?: string[];
+  verification_plan?: { mode?: string; controllability?: string; reason?: string };
   api?: { method?: string; path?: string; params?: string[] };
 }
+
+// 录入产出状态机(后端 IngestionStatus):决定结果徽标的颜色与文案
+const STATUS_META: Record<string, { color: string; label: string }> = {
+  verified: { color: "success", label: "已验证 · 结构+活体" },
+  partially_verified: { color: "warning", label: "部分验证 · 结构已验/活体未验" },
+  needs_clarification: { color: "warning", label: "待澄清" },
+  unsupported: { color: "default", label: "不支持 · 无法安全自动化" },
+  rejected: { color: "error", label: "已拒绝" },
+};
 
 const KEYMAP: Record<string, string> = {
   Enter: "Enter", Backspace: "Backspace", Tab: "Tab", Delete: "Delete",
@@ -48,6 +59,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [action, setAction] = useState("submit_form");
   const [title, setTitle] = useState("");
   const [result, setResult] = useState<RecResult | null>(null);
+  const [goal, setGoal] = useState<Record<string, unknown> | null>(null);   // P3:AI 提炼的业务 Goal(用户确认后随发布)
   const [intercept, setIntercept] = useState(true);   // 拦截提交:抓到请求但不真发,录制不产生真实记录
   const [err, setErr] = useState("");
 
@@ -61,7 +73,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function start() {
     if (!tenant) { message.error("请先到「创建 / 进入租户」"); return; }
     if (!startUrl.trim()) { message.error("请填页面地址 start_url"); return; }
-    setErr(""); setResult(null); setSteps([]); setReqs([]); setFrame(""); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({});
+    setErr(""); setResult(null); setSteps([]); setReqs([]); setFrame(""); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({}); setGoal(null);
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/onboarding/page/record`);
     wsRef.current = ws;
@@ -108,9 +120,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         setPhase("recording");
         message.success("抓到提交请求!勾选要让 agent 传值的字段 → 确认发布");
       }
+      else if (m.type === "goal_proposal") {   // P3:AI 提炼的业务 Goal 草案 → 展示给用户确认,确认后随发布
+        const g = m.goal && Object.keys(m.goal).length ? m.goal : null;
+        setGoal(g);
+        message.info(g ? "AI 提炼了业务目标,请核对后再发布" : "AI 未能提炼出业务目标(可直接发布)");
+      }
       else if (m.type === "result") {   // 留在录制现场:不关浏览器、不重来
         setResult(m.report); setPhase("recording");
-        if (m.report?.ok) { setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({}); }   // 发布成功 → 收起字段表
+        if (m.report?.ok) { setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({}); setGoal(null); }   // 发布成功 → 收起字段表
       }
       else if (m.type === "error") { setErr(m.detail || "录制出错"); setPhase("idle"); }
     };
@@ -177,24 +194,34 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     }
     return false;
   }
-  function publishRequest() {
-    if (!action.trim() || badAction(action.trim())) return;
+  function _payload() {
     const param_map: Record<string, string> = {};
     fields.forEach((f) => { const p = picked[f.path]; if (p?.on && p.name.trim()) param_map[f.path] = p.name.trim(); });
-    if (!Object.keys(param_map).length) { message.error("至少勾选一个字段作为参数"); return; }
     const selList = Object.values(selects).filter((s) => param_map[s.path]);   // 选领导:仅作为参数的
     const idList = Object.values(identity);                                     // 当前用户:运行期重取
-    // 必填=用户确认的「必填」勾选(默认按表单 *);非必填的参数缺了用录制原值
-    const required = fields
-      .filter((f) => param_map[f.path] && picked[f.path]?.req && !identity[f.path])
-      .map((f) => param_map[f.path]);
     // 多步(Q3):勾了 ≥2 个写请求 → 组成工作流,提交那步(chosenIdx)放最后(参数落它)
     const checked = cands.filter((c) => stepSel[c.idx]).map((c) => c.idx);
     const step_idxs = checked.length >= 2
       ? [...checked.filter((i) => i !== chosenIdx).sort((a, b) => a - b), chosenIdx] : [];
+    return { param_map, selList, idList, step_idxs };
+  }
+  function proposeGoal() {   // P3:让 AI 就当前勾选提炼业务 Goal(只提议,用户核对)
+    if (!action.trim()) return;
+    const { param_map, selList, idList, step_idxs } = _payload();
+    if (!Object.keys(param_map).length) { message.error("先勾选参数,再让 AI 提炼目标"); return; }
+    send({ type: "propose_goal", action: action.trim(), param_map, selects: selList, identity: idList, step_idxs });
+  }
+  function publishRequest() {
+    if (!action.trim() || badAction(action.trim())) return;
+    const { param_map, selList, idList, step_idxs } = _payload();
+    if (!Object.keys(param_map).length) { message.error("至少勾选一个字段作为参数"); return; }
+    // 必填=用户确认的「必填」勾选(默认按表单 *);非必填的参数缺了用录制原值
+    const required = fields
+      .filter((f) => param_map[f.path] && picked[f.path]?.req && !identity[f.path])
+      .map((f) => param_map[f.path]);
     setResult(null); setPhase("publishing");
     send({ type: "publish_request", action: action.trim(), title: title.trim(),
-           param_map, selects: selList, identity: idList, step_idxs, required });
+           param_map, selects: selList, identity: idList, step_idxs, required, goal });   // goal:用户已核对的业务目标
   }
   function stopAll() {
     send({ type: "stop" }); wsRef.current?.close();
@@ -314,6 +341,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                           ? <Tag color="blue" style={{ fontSize: 11 }}>参数·agent 传值</Tag>
                           : <Tag style={{ fontSize: 11 }}>固定值·原样提交</Tag>)}
                         {f.type && f.type !== "string" && <Tag style={{ fontSize: 11 }}>{f.type}</Tag>}
+                        {f.name_source === "llm" && <Tag color="geekblue" style={{ fontSize: 11 }}>AI 拟名·待核</Tag>}
+                        {f.confidence_tier && f.confidence_tier !== "auto" &&
+                          <Tag color="orange" style={{ fontSize: 11 }}>低置信·建议确认</Tag>}
                         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                           值={f.value === "" ? "(空)" : (f.value.length > 30 ? f.value.slice(0, 30) + "…" : f.value)}</Typography.Text>
                         {p.on && <>
@@ -335,10 +365,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 <Form.Item label="标题" style={{ marginBottom: 0 }}>
                   <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="提交请假" style={{ width: 160 }} />
                 </Form.Item>
+                <Button onClick={proposeGoal} disabled={phase === "publishing"}>AI 提炼业务目标</Button>
                 <Button type="primary" loading={phase === "publishing"} onClick={publishRequest}>
                   确认发布(用勾选的字段建 Skill)
                 </Button>
               </Space>
+              {goal && (
+                <Alert style={{ marginTop: 8 }} type="info" showIcon
+                  message={`AI 业务目标:${(goal.intent as string) || "(未提炼出意图)"}`}
+                  description={
+                    <Space direction="vertical" size={0}>
+                      {Array.isArray(goal.success_criteria) && goal.success_criteria.length
+                        ? <span>成功标准:{(goal.success_criteria as string[]).join("、")}</span> : null}
+                      {Array.isArray(goal.forbidden_actions) && goal.forbidden_actions.length
+                        ? <span>禁止动作:{(goal.forbidden_actions as string[]).join("、")}</span> : null}
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        核对无误后点「确认发布」即随 Skill 存档(L3 写需你确认);不对可忽略。</Typography.Text>
+                    </Space>
+                  } />
+              )}
             </Card>
           )}
 
@@ -374,7 +419,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           {result && (
             <Alert
               style={{ marginTop: 12 }} type={result.ok ? "success" : "error"} showIcon
-              message={result.ok ? `已发布:${result.action}` : `未发布(${result.reason || "见原因"})`}
+              message={
+                <Space size={8} wrap>
+                  <span>{result.ok ? `已发布:${result.action}` : `未发布(${result.reason || "见原因"})`}</span>
+                  {result.status && STATUS_META[result.status] &&
+                    <Tag color={STATUS_META[result.status].color}>{STATUS_META[result.status].label}</Tag>}
+                </Space>
+              }
               description={
                 <Space direction="vertical" size={2}>
                   {result.ok && result.api
@@ -383,6 +434,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     : result.ok
                       ? <span>风险 {result.risk_level} · 回放 {result.mode} —— 浏览器还开着,可继续录下一个或结束。</span>
                       : <span>删掉不对的步骤(或调整),再点「改完重新发布」。浏览器没关,现场还在。</span>}
+                  {result.status === "partially_verified" &&
+                    <Typography.Text type="warning" style={{ fontSize: 12 }}>
+                      仅结构已验、未真跑活体;在可逆沙箱配置登录态后可升为「已验证」。</Typography.Text>}
+                  {(result.warnings || []).map((w, i) =>
+                    <Typography.Text key={"w" + i} type="warning" style={{ fontSize: 12 }}>⚠ {w}</Typography.Text>)}
+                  {(result.review_notes || []).map((n, i) =>
+                    <Typography.Text key={"r" + i} type="secondary" style={{ fontSize: 12 }}>AI 顾问:{n}</Typography.Text>)}
+                  {(result.clarifications || []).map((c, i) =>
+                    <Typography.Text key={"c" + i} type="danger" style={{ fontSize: 12 }}>需澄清:{c}</Typography.Text>)}
                   {result.ok && <Button type="primary" size="small" style={{ marginTop: 4 }} onClick={() => nav("/skills")}>去 Skill 目录调用</Button>}
                 </Space>
               }

@@ -25,9 +25,11 @@ skillfrontend/node_modules/
 skillfrontend/dist/
 
 # ── 其它本地/工具 ──
-.claude/launch.json
+
 back/_e2e_leave2.log
 oa.json
 get_token.py
 PAGE_SKILL_PLAN.md
 back/_e2e_leave2.log
+back/.dano-sessions/
+/.claude

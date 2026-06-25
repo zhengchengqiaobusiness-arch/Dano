@@ -290,3 +290,116 @@ def _build_user(asset_type: str, asset_key: str, body: dict, evidence: list[dict
             user += "\n\n【生成代码 source】\n```python\n" + str(src) + "\n```"
         user += _ADAPTER_REVIEW_NOTE
     return user
+
+
+# ─────────── P3:录制 skill 的**非阻断**语义顾问(LLM 只提议,不当结构闸门) ───────────
+_CAPTURE_ADVISORY_SYSTEM = (
+    "你是录制型 API Skill 的**语义顾问**(非硬闸门、不阻断发布)。这份 skill 的**结构正确性"
+    "(参数能否替换、身份能否覆盖、多步能否串联)已由确定性 self_check 验过 —— 不归你管、也不要重判**。"
+    "你只从**语义**给**建议**,逐项看:\n"
+    "1) 参数名是否人类可读、表意(像内部机器标识 Activity_xxx / hash / 纯数字随机码 → 建议起人话名);\n"
+    "2) 动作是否疑似越权/危险(删除、驳回、代他人审批),与「用户提交自己的单据」不符;\n"
+    "3) method/path 是否疑似指向生产而非测试环境;\n"
+    "4) 申请人/当前用户类字段是否**应**标 identity(否则会冻结成录制者)。\n"
+    "只就**确有依据**的点提建议、点名具体参数/字段;没问题就给空数组。"
+    "输出 JSON 对象:{\"notes\": [\"每条点名所依据的参数/字段/端点\"]}。"
+)
+
+
+async def advisory_capture_review(client: "ChatClient | None", model: str | None, *,
+                                  action: str, api_request: dict,
+                                  self_check_passed: bool = True) -> list[str]:
+    """录制 skill 的**非阻断**语义顾问:只给命名/越权/生产/身份建议,**不判发布**。
+
+    只喂**非敏感元数据**(动作名 + 参数名/类型 + identity 路径 + method/path),**绝不带 body 值/凭证/登录态**。
+    未配置 client/model 或调用失败 → 返回 [](顾问失败绝不阻断发布,安全降级)。"""
+    if client is None or not model:
+        return []
+    payload = json.dumps({
+        "action": action,
+        "params": api_request.get("params"),
+        "field_types": api_request.get("field_types"),
+        "identity_fields": [i.get("path") for i in (api_request.get("identity") or [])],
+        "method": api_request.get("method"), "path": api_request.get("path"),
+        "structure_verified_by_self_check": self_check_passed,
+    }, ensure_ascii=False)
+    try:
+        out = await client.complete_json(model=model, system=_CAPTURE_ADVISORY_SYSTEM,
+                                         user="【待评 skill 元数据】\n" + payload, timeout_s=30.0)
+    except Exception:  # noqa: BLE001 —— 顾问性质,失败不阻断发布
+        log.warning("advisory_capture_review.failed", action=action)
+        return []
+    notes = out.get("notes") if isinstance(out, dict) else None
+    if not isinstance(notes, list):
+        return []
+    return [str(n) for n in notes if str(n).strip()]
+
+
+# ─────────── P3:LLM 业务 Goal 提炼(只提议,程序校验 + 用户确认才作数) ───────────
+_GOAL_SYSTEM = (
+    "你是 API 自动化的**业务目标提炼器**。根据一条录制下来的写操作(只给元数据,无 body 值/凭证),"
+    "提炼**结构化业务 Goal**。原则:你只**提议**,所有结论后续由程序校验 + 用户确认;"
+    "**严禁编造**没有依据的字段/步骤——required_inputs 只能从给定 params 里选。\n"
+    "输出 JSON 对象:{\n"
+    "  \"intent\": \"一句话业务意图(如:创建并提交采购申请)\",\n"
+    "  \"business_type\": \"业务类型(purchase/leave/reimburse/...)\",\n"
+    "  \"required_inputs\": [\"必须由调用者提供的参数名,**只能取自给定 params**\"],\n"
+    "  \"success_criteria\": [\"可验证的成功标准(如:单据已创建、审批流程已发起)\"],\n"
+    "  \"forbidden_actions\": [\"该 Skill 绝不应做的危险动作(删除/驳回/代他人审批/终止流程)\"],\n"
+    "  \"risk_level\": \"L1(只读)或 L3(写)\"\n}"
+)
+
+
+async def generate_goal(client: "ChatClient | None", model: str | None, *,
+                        action: str, api_request: dict) -> dict:
+    """LLM 提炼业务 Goal(**提议**,非定论)。只喂非敏感元数据;未配置/失败 → {}。"""
+    if client is None or not model:
+        return {}
+    steps = api_request.get("steps")
+    last = (steps[-1] if steps else {}) or {}
+    meta = {
+        "action": action, "method": api_request.get("method"), "path": api_request.get("path"),
+        "step_count": len(steps) if steps else 1,
+        "params": api_request.get("params") or last.get("params"),
+        "field_types": api_request.get("field_types") or last.get("field_types"),
+        "identity_fields": [i.get("path") for i in (api_request.get("identity") or [])],
+        "has_success_rule": bool(api_request.get("success_rule")),
+        "has_fact_check": bool(api_request.get("fact_check")),
+    }
+    try:
+        out = await client.complete_json(model=model, system=_GOAL_SYSTEM,
+                                         user="【录制写操作元数据】\n" + json.dumps(meta, ensure_ascii=False),
+                                         timeout_s=30.0)
+    except Exception:  # noqa: BLE001 —— 提炼失败不阻断(无 Goal 仍可走原流程)
+        log.warning("generate_goal.failed", action=action)
+        return {}
+    return out if isinstance(out, dict) else {}
+
+
+# ─────────── P3:LLM 字段语义增强(只为确定性命名没把握的字段补名,有把握的不覆盖) ───────────
+_FIELD_NAME_SYSTEM = (
+    "你是表单字段**命名助手**。给定一组**机器字段名**(英文 key / 路径,**无值**),为每个起一个**简短中文业务名**。"
+    "原则:只对**能合理推断**的起名(applicantId→申请人、leaveType→请假类型、processDefKey→流程标识);"
+    "**像随机码/无意义标识**(Activity_09dlq0g、hash、纯数字)无法推断 → **省略该项**(绝不瞎编)。"
+    "输出 JSON 对象:{\"names\": {\"原始key\": \"中文名\"}}(只含你有把握的项)。"
+)
+
+
+async def suggest_field_names_llm(client: "ChatClient | None", model: str | None, *,
+                                  action: str, fields: list[dict]) -> dict:
+    """为**确定性命名没把握**的字段(suggest_name==key)提议中文名。只喂 key/type/path(**无值**)。失败/无项 → {}。"""
+    if client is None or not model:
+        return {}
+    need = [{"key": f.get("key"), "type": f.get("type"), "path": f.get("path")}
+            for f in (fields or []) if f.get("suggest_name") == f.get("key")]
+    if not need:
+        return {}
+    payload = json.dumps({"action": action, "fields": need}, ensure_ascii=False)
+    try:
+        out = await client.complete_json(model=model, system=_FIELD_NAME_SYSTEM,
+                                         user="【待命名字段(仅机器名,无值)】\n" + payload, timeout_s=30.0)
+    except Exception:  # noqa: BLE001 —— 命名增强失败不影响录制(退回确定性 key 名)
+        log.warning("suggest_field_names_llm.failed", action=action)
+        return {}
+    names = out.get("names") if isinstance(out, dict) else None
+    return {str(k): str(v) for k, v in names.items() if str(v).strip()} if isinstance(names, dict) else {}

@@ -54,6 +54,9 @@ _breaker = InMemoryCounter()         # 流程10 失败计数/熔断
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from dano.infra.db import close_pool, init_pool, run_migrations
+    from dano.infra.logging import configure_logging
+    configure_logging()                    # **先配日志**:否则后台看不到任何记录
+    log.info("gateway.starting")
     global _registry, _lifecycle, _breaker
     try:
         await init_pool()
@@ -67,6 +70,12 @@ async def lifespan(app: FastAPI):
         log.info("gateway.db_ready")
     except Exception as e:  # noqa: BLE001
         log.warning("gateway.db_unavailable", error=str(e))
+    try:                                   # 注入三模型评审 client(发布硬闸门 + 录制语义顾问复用同一 client)
+        from dano.agent_tools.tools import set_review_board
+        from dano.review.board import ReviewBoard
+        set_review_board(ReviewBoard.from_settings())
+    except Exception as e:  # noqa: BLE001
+        log.warning("gateway.review_board_unavailable", error=str(e))
     yield
     from dano.execution.page.pool import shutdown_browser_pool
     await shutdown_browser_pool()      # 释放常驻浏览器(页面运行时池)
@@ -480,9 +489,9 @@ async def onboarding_page_import(req: PageImportReq) -> dict:
     return {**report, "parsed_steps": len(steps), "sample_inputs": sample_inputs}
 
 
-def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict,
-                        reads: list[dict] | None = None, storage: dict | None = None,
-                        required_labels: set | None = None) -> dict:
+async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict,
+                              reads: list[dict] | None = None, storage: dict | None = None,
+                              required_labels: set | None = None) -> dict:
     """构造 request_fields 消息:字段表(含 type/required)+ 候选请求 + select(Q2)+ identity(Q1)。"""
     from dano.execution.page.request_capture import (flatten_body, suggest_identity, suggest_select_names,
                                                      suggest_selects)
@@ -501,6 +510,19 @@ def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict,
     for f in fields:
         if f.get("path") in sel_names:
             f["suggest_name"] = sel_names[f["path"]]
+    # LLM 字段语义增强(最佳努力):只给"确定性没把握(名字仍=原始 key)"的字段补中文名;确信的不覆盖,失败不影响。
+    try:
+        from dano.agent_tools import tools as _T
+        from dano.execution.page.request_capture import merge_llm_field_names
+        from dano.review.board import suggest_field_names_llm
+        _board = _T._review_board
+        if _board is not None:
+            _names = await suggest_field_names_llm(
+                _board.client, (getattr(_board, "models", None) or {}).get("acceptance"),
+                action=_path(chosen.get("url") or ""), fields=fields)
+            fields = merge_llm_field_names(fields, _names)
+    except Exception:  # noqa: BLE001
+        pass
     return {"type": "request_fields",
             "method": (chosen.get("method") or "POST").upper(), "url": chosen.get("url"),
             "fields": fields,
@@ -599,8 +621,8 @@ async def record_ws(ws: WebSocket) -> None:
                     pending_required = required_labels          # 表单 * 必填
                     chosen = pick_submit_request(cands, samples) or cands[-1]
                     pending_req = chosen
-                    await ws.send_json(_request_fields_msg(chosen, cands, samples, pending_reads,
-                                                           pending_storage, pending_required))
+                    await ws.send_json(await _request_fields_msg(chosen, cands, samples, pending_reads,
+                                                                 pending_storage, pending_required))
                     continue
 
                 # 兜底:没抓到 JSON 提交请求 → 老的 DOM 回放路径
@@ -636,8 +658,8 @@ async def record_ws(ws: WebSocket) -> None:
                 idx = msg.get("idx", 0)
                 if pending_candidates and 0 <= idx < len(pending_candidates):
                     pending_req = pending_candidates[idx]
-                    await ws.send_json(_request_fields_msg(pending_req, pending_candidates, pending_samples,
-                                                           pending_reads, pending_storage, pending_required))
+                    await ws.send_json(await _request_fields_msg(pending_req, pending_candidates, pending_samples,
+                                                                 pending_reads, pending_storage, pending_required))
             elif t == "publish_request":
                 # 用户在字段表里勾了哪些是参数、起了名 → 用真实提交请求建 Skill(任意 OA 通用)
                 if pending_req is None:
@@ -682,12 +704,37 @@ async def record_ws(ws: WebSocket) -> None:
                 rep = await run_request_onboarding(
                     tenant=init["tenant"], subsystem=sub, action=msg["action"],
                     title=msg.get("title", ""), api_request=apir, sample_inputs=sample_in,
-                    required=msg.get("required"))    # 前端标的"变化字段"=必填;其余可选用原值
+                    required=msg.get("required"),    # 前端标的"变化字段"=必填;其余可选用原值
+                    goal=msg.get("goal"),            # 用户确认的业务 Goal(经 Goal 完整性门);P3
+                    deploy=init.get("deploy"), storage_state=login_state)  # 可逆沙箱+登录态 → 可活体真跑升 verified;P2
                 if rep.get("ok"):
                     await _auto_export(init["tenant"])
                 await ws.send_json({"type": "result", "report": rep,
                                     "parsed_steps": len(last_params), "via": "request",
                                     "workflow_steps": len(apir.get("steps") or []) or None})
+            elif t == "propose_goal":
+                # P3:用现成 LLM 为当前(待发布)请求提炼业务 Goal 草案 → 前端展示给用户确认后,再带 goal 走 publish_request。
+                if pending_req is None:
+                    await ws.send_json({"type": "goal_proposal", "goal": {}, "note": "先点「停止并发布」抓请求"})
+                    continue
+                from dano.agent_tools import tools as _T
+                from dano.execution.page.request_capture import build_api_request, build_api_workflow
+                from dano.review.board import generate_goal
+                pm = {k: v.strip() for k, v in (msg.get("param_map") or {}).items() if v and v.strip()}
+                sx = [i for i in (msg.get("step_idxs") or []) if 0 <= i < len(pending_candidates)]
+                if len(sx) > 1:
+                    apir = build_api_workflow([pending_candidates[i] for i in sx], param_map=pm,
+                                              selects=msg.get("selects") or [], identity=msg.get("identity") or [],
+                                              typed=pending_samples)
+                else:
+                    apir = build_api_request(pending_req, pm, selects=msg.get("selects") or [],
+                                             identity=msg.get("identity") or [], typed=pending_samples)
+                board = _T._review_board                       # 启动注入的现成 LLM client
+                goal = {}
+                if apir and board is not None:
+                    goal = await generate_goal(board.client, (getattr(board, "models", None) or {}).get("acceptance"),
+                                               action=msg.get("action", "action"), api_request=apir)
+                await ws.send_json({"type": "goal_proposal", "goal": goal})
             elif t == "stop":
                 break
     except WebSocketDisconnect:

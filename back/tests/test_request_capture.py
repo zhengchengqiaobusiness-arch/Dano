@@ -270,7 +270,8 @@ def test_build_api_request_stores_select_and_identity_meta():
     assert apir["selects"] == [{"param": "approver", "source_url": "/system/user/list",
                                 "value_key": "userId", "label_key": "nickName"}]
     assert apir["identity"] == [{"path": "applicantId", "source": "localStorage:userInfo.userId",
-                                 "tokens": ["applicantId"]}]   # tokens 自动反查补全(无歧义注入)
+                                 "evidence": ["request://body.applicantId", "identity://localStorage:userInfo.userId"],
+                                 "tokens": ["applicantId"]}]   # tokens 反查补全 + 证据来源(node 8)
 
 
 def test_resolve_identity_value_from_storage():
@@ -1356,3 +1357,238 @@ def test_capture_verification_plan_adaptive():
 def test_test_data_tag():
     from dano.execution.page.request_capture import test_data_tag
     assert test_data_tag("run-20260625-001") == "[DANO-TEST-run-20260625-001]"
+
+
+# ─────────── P3:LLM 非阻断语义顾问(只提议,不当结构闸门;喂元数据不带凭证) ───────────
+class _FakeChat:
+    def __init__(self, out):
+        self.out = out
+        self.seen = {}
+
+    async def complete_json(self, *, model, system, user, timeout_s):
+        self.seen = {"model": model, "system": system, "user": user}
+        return self.out
+
+
+async def test_advisory_capture_review_returns_notes_and_redacts():
+    from dano.review.board import advisory_capture_review
+    fake = _FakeChat({"notes": ["参数 Activity_09dlq0g 像内部标识,建议起人话名"]})
+    apir = {"params": ["Activity_09dlq0g"], "field_types": {"Activity_09dlq0g": "enum"},
+            "identity": [{"path": "applicantId"}], "method": "POST", "path": "/oa/leave/submit"}
+    notes = await advisory_capture_review(fake, "m", action="submit_leave", api_request=apir)
+    assert notes == ["参数 Activity_09dlq0g 像内部标识,建议起人话名"]
+    # 只喂元数据:参数名在,但绝不带 body 值/凭证字样
+    assert "Activity_09dlq0g" in fake.seen["user"]
+    assert "password" not in fake.seen["user"].lower() and "cookie" not in fake.seen["user"].lower()
+
+
+async def test_advisory_capture_review_safe_degrade():
+    """无 client / 无 model / 调用抛错 / 返回非法 → 一律 [](顾问绝不阻断发布)。"""
+    from dano.review.board import advisory_capture_review
+    assert await advisory_capture_review(None, "m", action="a", api_request={}) == []
+    assert await advisory_capture_review(_FakeChat({}), "", action="a", api_request={}) == []
+    assert await advisory_capture_review(_FakeChat({"notes": "不是数组"}), "m", action="a", api_request={}) == []
+
+    class _Boom:
+        async def complete_json(self, **k):
+            raise RuntimeError("LLM down")
+    assert await advisory_capture_review(_Boom(), "m", action="a", api_request={}) == []
+
+
+# ─────────── P3:LLM 业务 Goal 提炼 + 确定性 Goal 完整性门 + L3 必确认 ───────────
+async def test_generate_goal_proposes_and_redacts():
+    from dano.review.board import generate_goal
+    fake = _FakeChat({"intent": "创建并提交采购申请", "business_type": "purchase",
+                      "required_inputs": ["title", "amount"], "success_criteria": ["单据已创建"],
+                      "forbidden_actions": ["删除", "代他人审批"], "risk_level": "L3"})
+    apir = {"params": ["title", "amount"], "method": "POST", "path": "/oa/purchase/create",
+            "field_types": {"amount": "number"}}
+    goal = await generate_goal(fake, "m", action="submit_purchase", api_request=apir)
+    assert goal["intent"] == "创建并提交采购申请" and goal["risk_level"] == "L3"
+    assert "amount" in fake.seen["user"] and "password" not in fake.seen["user"].lower()
+
+
+async def test_generate_goal_safe_degrade():
+    from dano.review.board import generate_goal
+    assert await generate_goal(None, "m", action="a", api_request={}) == {}
+    assert await generate_goal(_FakeChat({}), "", action="a", api_request={}) == {}
+
+    class _Boom:
+        async def complete_json(self, **k):
+            raise RuntimeError("down")
+    assert await generate_goal(_Boom(), "m", action="a", api_request={}) == {}
+
+
+def test_validate_goal_grounded_passes():
+    from dano.execution.page.request_capture import validate_goal
+    goal = {"intent": "提交采购", "required_inputs": ["title"], "success_criteria": ["已创建"],
+            "forbidden_actions": ["删除"], "risk_level": "L3"}
+    assert validate_goal(goal, {"params": ["title", "amount"]}) == []
+
+
+def test_validate_goal_catches_hallucinated_input_and_gaps():
+    """LLM 臆造的 required_input(不在实际参数)+ 缺成功标准/禁止动作 → Goal 门拦下。"""
+    from dano.execution.page.request_capture import validate_goal
+    goal = {"intent": "", "required_inputs": ["ghost_field"], "success_criteria": [],
+            "forbidden_actions": [], "risk_level": ""}
+    probs = validate_goal(goal, {"params": ["title"]})
+    assert any("臆造" in p or "无来源" in p for p in probs)
+    assert any("intent" in p for p in probs) and any("success_criteria" in p for p in probs)
+    assert any("forbidden_actions" in p for p in probs) and any("risk_level" in p for p in probs)
+
+
+def test_goal_needs_confirmation_l3_required():
+    from dano.execution.page.request_capture import goal_needs_confirmation
+    assert goal_needs_confirmation({"risk_level": "L3"}) is True
+    assert goal_needs_confirmation({"risk_level": ""}) is True      # 未识别 → 保守要确认
+    assert goal_needs_confirmation({"risk_level": "L1"}) is False
+
+
+# ─────────── P2 收尾:可逆沙箱活体真跑 → verified(本地服务器模拟可控目标系统) ───────────
+async def test_onboarding_live_verify_reaches_verified():
+    """可逆沙箱 + fact_check + 登录态 → 真发写 + 事实回查通过 → status=verified(而非 partially_verified)。"""
+    pytest.importorskip("asyncpg")
+    import http.server
+    import threading
+    from uuid import uuid4
+
+    from dano.infra.db import close_pool, get_pool, init_pool
+    from dano.onboarding.page_onboard import run_request_onboarding
+    from dano.shared.enums import Subsystem
+    try:
+        await init_pool()
+    except Exception:  # noqa: BLE001
+        pytest.skip("PG 不可用")
+
+    store: dict = {}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):                                   # 写接口:存下提交的 reason,回 code=200
+            n = int(self.headers.get("Content-Length", 0))
+            store["reason"] = _json.loads(self.rfile.read(n).decode()).get("reason")
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.wfile.write(b'{"code":200}')
+
+        def do_GET(self):                                    # 「我的记录」:返回刚提交的值(供 fact_check 回查)
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.wfile.write(_json.dumps({"rows": [{"reason": store.get("reason")}]}).encode())
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    tenant = f"live-e2e-{uuid4().hex[:8]}"
+    try:
+        apir = {"method": "POST", "url": f"http://127.0.0.1:{port}/save",
+                "body_template": {"reason": "{{原因}}"}, "params": ["原因"],
+                "sample_inputs": {"原因": "录制原因"}, "auth_headers": {},
+                "success_rule": {"field": "code", "ok_values": ["200"]},
+                "fact_check": {"param": "原因", "match_field": "reason",
+                               "endpoint": f"http://127.0.0.1:{port}/my", "retries": 1, "backoff_s": 0}}
+        rep = await run_request_onboarding(
+            tenant=tenant, subsystem=Subsystem.REIMBURSE.value, action="live_submit",
+            api_request=apir, sample_inputs={"原因": "回家真跑"},
+            deploy={"environment": "sandbox"}, storage_state={})
+        assert rep["status"] == "verified", rep              # 结构 + 活体均验 → verified
+        assert store["reason"] == "回家真跑"                  # 真发确实带了新值
+    finally:
+        async with get_pool().acquire() as c:
+            await c.execute("DELETE FROM asset_drafts WHERE tenant=$1", tenant)
+            await c.execute("DELETE FROM assets WHERE tenant=$1", tenant)
+        srv.shutdown()
+        await close_pool()
+
+
+# ─────────── P3:LLM 字段语义增强(只补确定性没把握的字段,有把握的不覆盖) ───────────
+async def test_suggest_field_names_llm_only_unnamed_and_redacts():
+    """只把"名字仍=key"的字段送 LLM 命名;且只喂机器名/类型/路径,不带值。"""
+    from dano.review.board import suggest_field_names_llm
+    fake = _FakeChat({"names": {"applicantId": "申请人", "leaveType": "请假类型"}})
+    fields = [
+        {"key": "reason", "suggest_name": "原因", "type": "string", "path": "reason", "value": "回家"},  # 已确信
+        {"key": "applicantId", "suggest_name": "applicantId", "type": "string", "path": "applicantId", "value": "118"},
+        {"key": "leaveType", "suggest_name": "leaveType", "type": "string", "path": "leaveType", "value": "事假"},
+    ]
+    names = await suggest_field_names_llm(fake, "m", action="submit", fields=fields)
+    assert names == {"applicantId": "申请人", "leaveType": "请假类型"}
+    # 只送了没命名的两个;确信的 reason 不送;且 user 里没有值"回家"/"118"
+    assert "applicantId" in fake.seen["user"] and "leaveType" in fake.seen["user"]
+    assert "回家" not in fake.seen["user"] and "118" not in fake.seen["user"]
+
+
+async def test_suggest_field_names_llm_safe_degrade():
+    from dano.review.board import suggest_field_names_llm
+    assert await suggest_field_names_llm(None, "m", action="a", fields=[]) == {}
+    # 所有字段都已命名 → 不调 LLM
+    named = [{"key": "reason", "suggest_name": "原因"}]
+    assert await suggest_field_names_llm(_FakeChat({"names": {"x": "y"}}), "m", action="a", fields=named) == {}
+
+
+def test_merge_llm_field_names_fills_only_keyfallback():
+    """LLM 名只补到 suggest_name==key 的字段;确信的 DOM 标签名不被覆盖。"""
+    from dano.execution.page.request_capture import merge_llm_field_names
+    fields = [
+        {"key": "reason", "suggest_name": "原因"},                  # 确信 → 不动
+        {"key": "applicantId", "suggest_name": "applicantId"},      # key 兜底 → 补
+        {"key": "Activity_09dlq0g", "suggest_name": "Activity_09dlq0g"},  # LLM 也没给 → 保持
+    ]
+    merge_llm_field_names(fields, {"applicantId": "申请人"})
+    by = {f["key"]: f for f in fields}
+    assert by["reason"]["suggest_name"] == "原因" and "name_source" not in by["reason"]
+    assert by["applicantId"]["suggest_name"] == "申请人" and by["applicantId"]["name_source"] == "llm"
+    assert by["Activity_09dlq0g"]["suggest_name"] == "Activity_09dlq0g"   # 没补,保持原 key
+
+
+# ─────────── 补齐:业务相关性门 / 字段语义门 / 步骤依赖门(无源) ───────────
+def test_looks_dangerous_write():
+    from dano.execution.page.request_capture import looks_dangerous_write
+    assert looks_dangerous_write({"method": "DELETE", "url": "http://x/api/order/9"}) is True
+    assert looks_dangerous_write({"method": "POST", "url": "http://x/bpm/task/reject"}) is True
+    assert looks_dangerous_write({"method": "POST", "url": "http://x/flow/terminate"}) is True
+    assert looks_dangerous_write({"method": "POST", "url": "http://x/leave/submit"}) is False
+    assert looks_dangerous_write({"method": "POST", "url": "http://x/order/cancellation-policy"}) is False  # 整段才算
+
+
+def test_self_check_step_link_no_source_flagged():
+    """步骤依赖门:link 目标可达但**无来源** → 也报(运行期取不到值)。"""
+    wf = {"steps": [
+        {"body_template": {"x": "{{a}}"}, "params": ["a"]},
+        {"body_template": {"flowTask": {"taskId": ""}}, "params": [],
+         "links": [{"target_path": "flowTask.taskId"}]},   # 无 source_step / source_path
+    ]}
+    assert any("无来源" in p for p in self_check(wf))
+
+
+async def test_onboarding_rejects_dangerous_write():
+    """业务相关性门:DELETE/驳回类写请求 → rejected(发布前 return,不连库)。"""
+    from dano.onboarding.page_onboard import run_request_onboarding
+    out = await run_request_onboarding(tenant="t-x", subsystem="reimburse", action="del",
+                                       api_request={"method": "DELETE", "url": "http://x/order/1",
+                                                    "body_template": {"id": 1}, "params": []})
+    assert out["ok"] is False and out["status"] == "rejected"
+
+
+async def test_onboarding_field_semantics_blocks_internal_required():
+    """字段语义门:必填参数是内部机器标识(Activity_xxx)→ needs_clarification(不静默泄漏)。"""
+    from dano.onboarding.page_onboard import run_request_onboarding
+    apir = {"method": "POST", "url": "http://x/submit",
+            "body_template": {"a": "{{Activity_09dlq0g}}"}, "params": ["Activity_09dlq0g"]}
+    out = await run_request_onboarding(tenant="t-x", subsystem="reimburse", action="sub",
+                                       api_request=apir, required=["Activity_09dlq0g"])
+    assert out["status"] == "needs_clarification"
+    assert any("Activity_09dlq0g" in c for c in out["clarifications"])
+
+
+# ─────────── 补齐:请求语义角色(确定性 node 4)+ identity 证据来源(node 8) ───────────
+def test_classify_request_role():
+    from dano.execution.page.request_capture import classify_request_role
+    assert classify_request_role({"method": "DELETE", "url": "http://x/order/1"})["semanticRole"] == "destructive"
+    assert classify_request_role({"method": "POST", "url": "http://x/prod-api/login",
+                                  "post_data": '{"password":"x"}'})["semanticRole"] == "auth"
+    assert classify_request_role({"method": "GET", "url": "http://x/system/user/list"})["semanticRole"] == "enum_options"
+    assert classify_request_role({"method": "GET", "url": "http://x/info"})["semanticRole"] == "query"
+    sub = classify_request_role({"method": "POST", "url": "http://x/oa/leave/submit"})
+    assert sub["semanticRole"] == "workflow_submit" and sub["riskLevel"] == "L3"
+    assert classify_request_role({"method": "POST", "url": "http://x/api/save"})["semanticRole"] == "business_write"

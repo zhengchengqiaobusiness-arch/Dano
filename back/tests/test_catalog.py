@@ -139,6 +139,9 @@ def test_manifest_preserves_select_and_datetime_semantics():
     assert _ptype("startTime", props, set()) == "datetime"
     assert _ptype("请假类型", props, {"请假类型"}) == "number"
     assert _select_fields(props) == ["领导", "人力"]
+    # 不再硬塞人名示例『张三』(对选值字段如请假类型是错的);label=纯语义,供 SOP/复述用(简洁、不带约定括号)
+    assert "张三" not in props["领导"]["description"]
+    assert props["领导"]["label"] == "领导" and "传名字" not in props["领导"]["label"]
 
 
 def test_ruoyi_parses_approval_chain_from_prose():

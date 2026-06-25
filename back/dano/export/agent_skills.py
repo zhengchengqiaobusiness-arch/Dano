@@ -105,6 +105,13 @@ def _select_fields(props: dict) -> list[str]:
     return [k for k, v in (props or {}).items() if (v or {}).get("format") == "name-ref"]
 
 
+def _label(props: dict, k: str) -> str:
+    """字段纯语义(SOP/复述用,简洁);无 label 退回 description、再退回 key。
+    调用约定(传名字/勿传ID、日期格式)集中在参数表 description 与 SOP 通用提示里说一次,SOP 逐字段不再重复。"""
+    p = props.get(k) or {}
+    return p.get("label") or p.get("description") or k
+
+
 def _approval_section(meta: dict) -> str:
     """从 business_meta(x-flow)渲染审批链 / 金额阈值;没有就返回空(不臆造)。"""
     if not isinstance(meta, dict):
@@ -169,7 +176,7 @@ def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
     if keys:
         for k in keys:
             tag = "必填" if k in required else "可选"
-            L.append(f"- `{k}`:{(props[k] or {}).get('description', k)}({_ptype(k, props, numset)}·{tag})")
+            L.append(f"- `{k}`:{_label(props, k)}({_ptype(k, props, numset)}·{tag})")
     else:
         L.append("- 本动作无业务参数。")
     for c in (f.get("computes") or []):
@@ -189,7 +196,7 @@ def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
               "- 向用户**逐项复述**将提交的字段值,取得明确同意后才提交:"]
         if keys:
             L.append("  ```text")
-            L += [f"  {(props[k] or {}).get('description', k)}:<{k}>" for k in keys]
+            L += [f"  {_label(props, k)}:<{k}>" for k in keys]
             L.append("  ```")
         if has_appr:
             L.append("- 并告知审批走向(见上方「审批路径」),让用户知道这单大概要谁批、会不会触发更高审批。")

@@ -683,6 +683,88 @@ def test_data_tag(run_id: str) -> str:
     return f"[DANO-TEST-{run_id}]"
 
 
+# 危险写概念(整段命中,跨系统通用):删除/驳回/终止/撤销 —— 这类不做自动化录入(代他人删/驳回风险)。
+# 只收明确破坏性的词;不收 cancel/abort 等易在合法端点出现的歧义词,避免误伤。
+_DANGER_PATH_SEGS = frozenset({"delete", "remove", "destroy", "reject", "terminate", "revoke"})
+
+
+def looks_dangerous_write(api_request: dict) -> bool:
+    """危险写请求识别(确定性,业务相关性门):DELETE 方法,或 URL 路径**整段**命中删除/驳回/终止/撤销概念。
+    命中则该录制不应静默自动化(代他人删单/驳回审批等),应拒发让人工处理。通用,不挑系统。"""
+    for r in (api_request.get("steps") or [api_request]):
+        if (r.get("method") or "").upper() == "DELETE":
+            return True
+        url = r.get("url") or r.get("path") or ""
+        path = urlparse(url).path if str(url).startswith("http") else str(url)
+        segs = {s for s in _re.split(r"[^a-zA-Z0-9]+", path.lower()) if s}
+        if segs & _DANGER_PATH_SEGS:
+            return True
+    return False
+
+
+def classify_request_role(req: dict) -> dict:
+    """请求语义角色(**确定性**,node 4 语义分类):method + 路径段 + 内容 → {semanticRole, sideEffect, riskLevel}。
+    跨系统通用、零业务字面量;供录入去噪/审计标注。比 LLM 分类更稳(且不占录制热路径)。"""
+    method = (req.get("method") or "GET").upper()
+    if looks_dangerous_write(req):
+        return {"semanticRole": "destructive", "sideEffect": "delete", "riskLevel": "L4"}
+    url = req.get("url") or req.get("path") or ""
+    if looks_like_auth_write(url, req.get("post_data")):
+        return {"semanticRole": "auth", "sideEffect": "none", "riskLevel": "L1"}
+    path = (urlparse(url).path if str(url).startswith("http") else str(url)).lower()
+    segs = {s for s in _re.split(r"[^a-zA-Z0-9]+", path) if s}
+    if method not in _WRITE:
+        role = "enum_options" if (segs & {"list", "options", "dict", "select", "candidates"}) else "query"
+        return {"semanticRole": role, "sideEffect": "read", "riskLevel": "L1"}
+    role = ("workflow_submit" if (segs & {"submit", "start", "apply", "create", "flow", "process", "task"})
+            else "business_write")
+    return {"semanticRole": role, "sideEffect": "write", "riskLevel": "L3"}
+
+
+def validate_goal(goal: dict, api_request: dict) -> list[str]:
+    """Goal 完整性门(**确定性,不信 LLM 自说**):intent 非空、required_inputs 有来源(∈实际参数,
+    防 LLM 臆造)、success_criteria 可验证(非空)、forbidden_actions 已明确、risk_level 已识别。
+    返回违规清单(空=通过)。通用,不挑系统/业务。"""
+    out: list[str] = []
+    g = goal or {}
+    if not str(g.get("intent") or "").strip():
+        out.append("Goal.intent 为空(业务意图不清)")
+    params = set(api_request.get("params") or [])
+    if not params and api_request.get("steps"):
+        params = set(((api_request["steps"][-1] or {})).get("params") or [])
+    ungrounded = [r for r in (g.get("required_inputs") or []) if r not in params]
+    if ungrounded:
+        out.append(f"Goal.required_inputs 含无来源项(不在实际参数里,疑似 LLM 臆造):{ungrounded}")
+    if not (g.get("success_criteria") or []):
+        out.append("Goal.success_criteria 为空(成功标准无法验证)")
+    if not (g.get("forbidden_actions") or []):
+        out.append("Goal.forbidden_actions 未明确(未声明禁止的危险动作)")
+    if not str(g.get("risk_level") or "").strip():
+        out.append("Goal.risk_level 未识别")
+    return out
+
+
+def merge_llm_field_names(fields: list[dict], llm_names: dict) -> list[dict]:
+    """把 LLM 提议的字段中文名**只**补到「确定性没把握」的字段上(suggest_name 仍等于原始 key);
+    确定性已确信的名字(值对到 DOM 标签)**绝不覆盖**。打 `name_source="llm"` 标记。通用,不挑系统。"""
+    if not llm_names:
+        return fields
+    for f in fields:
+        key = f.get("key")
+        proposed = llm_names.get(key) or llm_names.get(f.get("path"))
+        if proposed and f.get("suggest_name") == key and str(proposed).strip() and str(proposed).strip() != key:
+            f["suggest_name"] = str(proposed).strip()
+            f["name_source"] = "llm"                  # 标明此名是 LLM 提议(供前端区分/用户确认)
+    return fields
+
+
+def goal_needs_confirmation(goal: dict | None) -> bool:
+    """写操作(L3+)的 Goal **必须经用户确认**才发布 —— LLM 自信但错代价最高,这是唯一不可跳过的人工关。
+    风险未识别也保守要求确认。"""
+    rl = str((goal or {}).get("risk_level") or "").upper()
+    return rl in ("", "L3", "L4", "L5")
+
+
 def flatten_body(post_data: str | None, samples: dict | None = None,
                  required_labels: set | None = None) -> list[dict]:
     """把请求体拍平成叶子字段列表 + 参数建议,供前端勾选。任意嵌套(dict/list)→ 点路径。
@@ -808,7 +890,10 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
     id_meta = []
     for i in (identity or []):
         toks = i.get("tokens") or _leaf_tok.get(i.get("path"))
-        id_meta.append({"path": i["path"], "source": i.get("source", ""),
+        ev = [f"request://body.{i['path']}"]                  # 证据来源(node 8):该字段在请求体的位置 + 登录态来源
+        if i.get("source"):
+            ev.append(f"identity://{i['source']}")
+        id_meta.append({"path": i["path"], "source": i.get("source", ""), "evidence": ev,
                         **({"tokens": toks} if toks else {})})
     return {"method": (req.get("method") or "POST").upper(), "path": path, "url": url,
             "content_type": req.get("content_type", "application/json"),
@@ -977,9 +1062,11 @@ def _check_step_links(workflow: dict) -> list[str]:
         nested = substitute(templ, probes, {})
         for lk in st.get("links") or []:
             tp = lk.get("target_tokens") or lk.get("target_path", "")
+            disp = lk.get("target_path") or tp
             if not tp or _path_lookup(nested, tp) is _PATH_MISSING:
-                disp = lk.get("target_path") or tp
                 out.append(f"步骤{i + 1}:串联目标路径 `{disp}` 找不到落点 —— 运行期 taskId 等会串不进(脏数据)")
+            if lk.get("source_step") is None or not (lk.get("source_tokens") or lk.get("source_path")):
+                out.append(f"步骤{i + 1}:串联 `{disp}` 无来源(source_step/source_path 为空)—— 运行期取不到值,无法串联")
     return out
 
 
