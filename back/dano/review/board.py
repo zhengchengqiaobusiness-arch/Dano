@@ -271,11 +271,26 @@ def _redact_secrets(node):
     return node
 
 
+# 录制抓请求页面的审核要求:结构已被 self_check 确定性验过 → 三模型**只判语义**,**拿 Goal 当业务方案对照**,
+# 不重判结构/必填/鉴权脱敏(这正是当年评审对录制资产抖动误判的根因)。
+_CAPTURE_REVIEW_NOTE = (
+    "\n\n【录制抓请求审核要求(本资产=用户真人在页面上**亲手提交过**的写请求,已参数化)】\n"
+    "**结构正确性(参数能否替换 / 身份能否覆盖 / 多步串联)已由确定性 self_check 验过**"
+    "(见 sandbox_evidence 里 kind=self_check、violations=[]);副作用已由 fact_check 回查。"
+    "**你只在语义层判,严禁重判结构 / 必填齐全 / 鉴权脱敏**(那些不归你、且会误判)。三维各判:\n"
+    "1) 成果验收(**业务逻辑**):**拿 declarative_body.api_request.goal 当业务方案逐项对照** —— 这个 skill"
+    "(action + 参数 + identity)真能实现 `goal.intent` 吗?`goal.required_inputs` 都在参数里吗?"
+    "`goal.success_criteria` 与它实际校验/回查的一致吗?**对不上才否决并点名**。\n"
+    "2) 漏洞检测:是否触碰 `goal.forbidden_actions`(删除/驳回/代他人审批)、越权、凭证泄漏 —— 确有则否决。\n"
+    "3) 合规审核:是否指向生产、是否违反最小权限 —— 确有问题才否决。\n"
+    "**只在确有依据时否决,reason 点名具体参数/字段/goal 项;没问题就 passed=true。**"
+)
+
+
 def _build_user(asset_type: str, asset_key: str, body: dict, evidence: list[dict]) -> str:
     """拼评审输入(运行架构上下文 + 声明式信息 + 沙箱证据,**凭证已脱敏**)。
 
-    adapter:把生成源码单列一节并附代码评审要求。
-    注:录制抓请求页面(page_is_capture)免评审、不到此处;到此的 page_script 仅 DOM 回放型。
+    adapter:把生成源码单列一节并附代码评审要求;录制抓请求页面:附 capture 审核要求(结构已验、只判语义)。
     """
     payload = json.dumps({
         "asset_type": asset_type,
@@ -289,6 +304,8 @@ def _build_user(asset_type: str, asset_key: str, body: dict, evidence: list[dict
         if src:
             user += "\n\n【生成代码 source】\n```python\n" + str(src) + "\n```"
         user += _ADAPTER_REVIEW_NOTE
+    elif asset_type == "page_script" and (body or {}).get("api_request") and not (body or {}).get("actions"):
+        user += _CAPTURE_REVIEW_NOTE   # 录制抓请求:三模型只判语义、拿 Goal 当业务方案对照
     return user
 
 

@@ -820,9 +820,8 @@ async def request_review(run_id: str, params: dict) -> dict:
     if draft.asset_type == AssetType.PAGE_SCRIPT and not page_is_write(draft.body):
         return {"all_passed": True, "verdicts": [], "review_run_ids": [],
                 "note": "查询类页面免三模型评审"}
-    if draft.asset_type == AssetType.PAGE_SCRIPT and page_is_capture(draft.body):
-        return {"all_passed": True, "verdicts": [], "review_run_ids": [],
-                "note": "录制抓请求页面:用户真人真实提交,免三模型评审"}
+    # 录制抓请求页面:不再整体豁免 —— 结构由 self_check 硬卡,这里三模型只判**语义**(业务逻辑/越权/合规),
+    # 拿 Goal 当业务方案对照(评审 prompt 见 _CAPTURE_REVIEW_NOTE)。调用方(run_request_onboarding)按风险驳回。
     vals = await _ds.list_validations(draft.asset_draft_id)
     evidence = [{"kind": v.kind, "passed": v.passed, "environment": v.environment,
                  "credential_type": v.credential_type, "evidence": v.evidence, "response": v.response}

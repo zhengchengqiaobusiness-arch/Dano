@@ -1592,3 +1592,45 @@ def test_classify_request_role():
     sub = classify_request_role({"method": "POST", "url": "http://x/oa/leave/submit"})
     assert sub["semanticRole"] == "workflow_submit" and sub["riskLevel"] == "L3"
     assert classify_request_role({"method": "POST", "url": "http://x/api/save"})["semanticRole"] == "business_write"
+
+
+# ─────────── LLM 三维审核接入:驳回 → needs_clarification + 把理由还回(测试驳回) ───────────
+class _RejectVerdict:
+    def __init__(self, role, passed, reasons):
+        self.role, self.model_id, self.passed, self.reasons = role, f"fake-{role}", passed, reasons
+
+
+class _RejectBoard:
+    """业务逻辑(acceptance)驳回、安全/合规通过 —— 测审核闸门能拦 + 把 reason 还回。"""
+    async def review(self, *, asset_type, asset_key, body, evidence):  # noqa: ANN001
+        return [_RejectVerdict("acceptance", False, ["参数 amount 与 goal.required_inputs 不符,无法实现业务意图"]),
+                _RejectVerdict("security", True, []), _RejectVerdict("compliance", True, [])]
+
+
+async def test_onboarding_review_gate_rejects_and_returns_reasons():
+    """三维审核驳回(业务逻辑不过)→ stage=review · needs_clarification · clarifications 带模型 reason。"""
+    from uuid import uuid4
+
+    from dano.agent_tools import tools as _T
+    from dano.infra.db import close_pool, get_pool, init_pool
+    from dano.onboarding.page_onboard import run_request_onboarding
+    from dano.shared.enums import Subsystem
+    try:
+        await init_pool()
+    except Exception:  # noqa: BLE001
+        pytest.skip("PG 不可用")
+    tenant = f"rev-e2e-{uuid4().hex[:8]}"
+    _T.set_review_board(_RejectBoard())
+    try:
+        apir = {"method": "POST", "url": "http://oa.x/submit", "body_template": {"reason": "{{原因}}"},
+                "params": ["原因"], "sample_inputs": {"原因": "录制原因"}}
+        out = await run_request_onboarding(tenant=tenant, subsystem=Subsystem.REIMBURSE.value,
+                                           action="rev_test", api_request=apir, sample_inputs={"原因": "回家"})
+        assert out["ok"] is False and out["status"] == "needs_clarification" and out["stage"] == "review"
+        assert any("acceptance" in c and "amount" in c for c in out["clarifications"]), out["clarifications"]
+    finally:
+        _T.set_review_board(None)
+        async with get_pool().acquire() as c:
+            await c.execute("DELETE FROM asset_drafts WHERE tenant=$1", tenant)
+            await c.execute("DELETE FROM assets WHERE tenant=$1", tenant)
+        await close_pool()

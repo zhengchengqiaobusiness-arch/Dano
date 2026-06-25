@@ -321,12 +321,27 @@ async def run_request_onboarding(
             return {"ok": False, "stage": "validate", "status": IngestionStatus.NEEDS_CLARIFICATION.value,
                     "action": action, "clarifications": [], "reason": "请求参数化校验未过(参数没全填上)",
                     "detail": rp.get("structured_output")}
-        # 录制抓请求资产 = 用户真人在页面上**亲手提交过**的写请求 → 免三模型评审,直接发布。
-        # 评审对录制资产易抖动误判(把固定字段当漏配、把脱敏登录态当缺鉴权,时过时不过),且并未提升
-        # 安全(请求本就是用户真发过的);发布闸门 verify_reviewed 对 page_is_capture 同样放行。
+        # LLM 三维审核(格式 / 业务逻辑 / 风险合规):结构已由 self_check 硬卡,这里三模型**只判语义**、拿 Goal 当业务方案对照。
+        # 仅当评审 client 已注入(生产启动注入;测试默认无 / 注入 fake)才跑 —— LLM 不可用则跳过,不让评审挂了发不出。
+        # 任一角色带证据驳回 → needs_clarification(测试驳回,把理由还给用户重录/改),不发布。
+        review_run_ids: list = []
+        if T._review_board is not None:
+            rev = await T.request_review(run_id, {"asset_draft_id": d["asset_draft_id"]})
+            review_run_ids = rev.get("review_run_ids", []) or []
+            log.info("ingest.review", all_passed=rev.get("all_passed"),
+                     verdicts=[(v.get("role"), v.get("passed")) for v in (rev.get("verdicts") or [])])
+            if not rev.get("all_passed", True):
+                reasons = [f"{v.get('role')}: {r}" for v in (rev.get("verdicts") or [])
+                           if not v.get("passed") for r in (v.get("reasons") or ["未通过"])]
+                log.warning("ingest.gate.review_rejected", reasons=reasons)
+                return {"ok": False, "stage": "review", "status": IngestionStatus.NEEDS_CLARIFICATION.value,
+                        "action": action, "clarifications": reasons or ["三模型审核未通过"],
+                        "reason": "审核未通过(格式 / 业务逻辑 / 风险合规)—— 见 clarifications",
+                        "verdicts": rev.get("verdicts")}
+        # 发布硬闸门:verify_publishable(self_check 等证据)+ verify_reviewed(capture 仍按既定放行,审核闸门在上方编排层把守)
         pub = await T.publish_asset(run_id, {"asset_draft_id": d["asset_draft_id"],
                                              "validation_run_ids": rp["validation_run_ids"],
-                                             "review_run_ids": []})
+                                             "review_run_ids": review_run_ids})
         # 安全网:**可选**参数里若有"内部机器标识"(必填的已在字段语义门拦下)→ 仅告警(agent 不传时用录制原值)。
         bad = [p for p in opt_fields if looks_internal_param_name(p)]
         warnings = ([f"可选参数 `{p}` 像内部标识(非人类名),建议命名;agent 不传它时用录制原值"
