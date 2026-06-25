@@ -908,7 +908,11 @@
                   {@const diffStats = toolBlockDiffStats(block)}
                   {@const trailingKind = toolBlockTrailingKind(block)}
                   <div class="tool-inline-block" data-tree-entry-id={block.resultSourceMessageId}>
-                    <div class="tool-inline" data-status={descriptor.status}>
+                    <div
+                      class="tool-inline"
+                      data-status={descriptor.status}
+                      data-question-error={isAskUserQuestionToolError(block) ? true : undefined}
+                    >
                       <button
                         type="button"
                         class="tool-inline-toggle"
@@ -1507,6 +1511,11 @@
 
   .tool-inline[data-status="error"] .tool-inline-name,
   .tool-inline[data-status="error"] .tool-inline-meta { color: var(--error-text); }
+
+  .tool-inline[data-question-error="true"] .tool-inline-name,
+  .tool-inline[data-question-error="true"] .tool-inline-meta {
+    color: var(--text-muted);
+  }
 
   .tool-inline-details {
     display: flex;
