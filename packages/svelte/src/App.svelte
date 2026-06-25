@@ -2,6 +2,7 @@
   import type {
     RpcImageContent,
     RpcThinkingLevel,
+    RpcUploadedFileRef,
     RpcWorkspaceEntry,
     RpcWorkspaceFile,
   } from "@dano/bridge/types";
@@ -920,6 +921,7 @@
   async function handlePrompt(payload: {
     message: string;
     images: RpcImageContent[];
+    files: RpcUploadedFileRef[];
     revisionEntryId?: string;
     steer?: boolean;
   }) {
@@ -962,6 +964,7 @@
     bridge.sendPrompt(
       payload.message,
       payload.images,
+      payload.files,
       payload.steer ? "steer" : "followUp",
     );
   }

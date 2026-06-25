@@ -62,6 +62,14 @@ async function readJson<T>(url: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+async function postBytes(
+  url: string,
+  body: Uint8Array,
+  headers: Record<string, string> = {},
+): Promise<Response> {
+  return fetch(url, { method: "POST", headers, body });
+}
+
 function openSse(url: string): SseProbe {
   const messages: ServerMessage[] = [];
   const waiters: Array<{
@@ -289,5 +297,99 @@ describe("BridgeServer HTTP/SSE transport", () => {
     expect(spaHtml).toContain(
       '"quickActions":[{"label":"请假","prompt":"帮我申请请假"}]',
     );
+  });
+
+  it("uploads an image to server temp storage and serves its preview", async () => {
+    const { server } = createServer();
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const body = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+
+    const uploadResponse = await postBytes(
+      `${origin}/api/uploads?name=sample.png&mimeType=image/png`,
+      body,
+      { "Content-Type": "image/png" },
+    );
+    expect(uploadResponse.status).toBe(201);
+    const uploaded = (await uploadResponse.json()) as {
+      id: string;
+      name: string;
+      size: number;
+      mimeType: string;
+      path: string;
+      previewUrl: string;
+    };
+
+    expect(uploaded).toMatchObject({
+      name: "sample.png",
+      size: body.length,
+      mimeType: "image/png",
+    });
+    expect(fs.existsSync(uploaded.path)).toBe(true);
+
+    const previewResponse = await fetch(`${origin}${uploaded.previewUrl}`);
+    expect(previewResponse.status).toBe(200);
+    expect(previewResponse.headers.get("content-type")).toBe("image/png");
+    expect(new Uint8Array(await previewResponse.arrayBuffer())).toEqual(body);
+  });
+
+  it("rejects uploads without a file name", async () => {
+    const { server } = createServer();
+    const address = await server.start();
+
+    const response = await postBytes(
+      `http://127.0.0.1:${address.port}/api/uploads?mimeType=image/png`,
+      new Uint8Array([1]),
+      { "Content-Type": "image/png" },
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects unsupported upload types", async () => {
+    const { server } = createServer();
+    const address = await server.start();
+
+    const response = await postBytes(
+      `http://127.0.0.1:${address.port}/api/uploads?name=note.txt&mimeType=text/plain`,
+      new Uint8Array([1]),
+      { "Content-Type": "text/plain" },
+    );
+
+    expect(response.status).toBe(415);
+  });
+
+  it("rejects image uploads over the 50 MB limit before storing them", async () => {
+    const { server } = createServer();
+    const address = await server.start();
+    const response = await new Promise<http.IncomingMessage>(resolve => {
+      const req = http.request(
+        {
+          host: "127.0.0.1",
+          port: address.port,
+          path: "/api/uploads?name=large.png&mimeType=image/png",
+          method: "POST",
+          headers: {
+            "Content-Type": "image/png",
+            "Content-Length": String(50 * 1024 * 1024 + 1),
+          },
+        },
+        resolve,
+      );
+      req.end();
+    });
+
+    expect(response.statusCode).toBe(413);
+  });
+
+  it("returns 404 for missing upload previews", async () => {
+    const { server } = createServer();
+    const address = await server.start();
+
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/api/uploads/missing/preview`,
+    );
+
+    expect(response.status).toBe(404);
   });
 });

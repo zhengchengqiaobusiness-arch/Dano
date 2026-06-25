@@ -6,12 +6,13 @@
     RpcImageContent,
     RpcSlashCommand,
     RpcThinkingLevel,
+    RpcUploadedFileRef,
     RpcWorkspaceEntry,
   } from "@dano/bridge/types";
   import X from "lucide-svelte/icons/x";
   import type { ConnectionStatus } from "../composables/bridgeStore.svelte";
   import { t } from "../i18n";
-  import { COMPOSER_ATTACHMENT_ACCEPT, formatAttachmentSize } from "../utils/attachments";
+  import { COMPOSER_ATTACHMENT_ACCEPT, MAX_COMPOSER_ATTACHMENT_BYTES, MAX_COMPOSER_ATTACHMENTS, formatAttachmentSize } from "../utils/attachments";
   import type { RpcModelInfo } from "../utils/models";
   import CommandPalette from "./CommandPalette.svelte";
   import ImageLightbox from "./ImageLightbox.svelte";
@@ -39,7 +40,7 @@
     pendingMessageCount = 0,
     editQueuedPayload = null as { text: string; images: RpcImageContent[] } | null,
     onInteraction = (() => {}) as () => void,
-    onSubmit = ((_: { message: string; images: RpcImageContent[]; revisionEntryId?: string; steer?: boolean }) => {}) as (payload: { message: string; images: RpcImageContent[]; revisionEntryId?: string; steer?: boolean }) => void,
+    onSubmit = ((_: { message: string; images: RpcImageContent[]; files: RpcUploadedFileRef[]; revisionEntryId?: string; steer?: boolean }) => {}) as (payload: { message: string; images: RpcImageContent[]; files: RpcUploadedFileRef[]; revisionEntryId?: string; steer?: boolean }) => void,
     onAbort = (() => {}) as () => void,
     onCancelRevision = (() => {}) as () => void,
     onSelectModel = ((_: RpcModelInfo) => {}) as (model: RpcModelInfo) => void,
@@ -114,6 +115,7 @@
   // ---- event handler glue (wires state methods to DOM refs) ----
 
   function handleFilePickerOpen() {
+    if (!composer.canAddAttachments) return;
     composer.handleFilePickerOpen(fileInputRef);
   }
 
@@ -346,6 +348,7 @@
       bind:this={composerDockRef}
       class="composer-dock composer"
       class:multiline={isComposerMultiline}
+      class:has-attachments={composer.hasAttachments}
       class:disabled={composer.isDisabled}
       class:drag-active={composer.isDragActive}
       role="region"
@@ -382,7 +385,11 @@
       {#if composer.attachments.length > 0}
         <div class="attachment-strip">
           {#each composer.attachments as attachment, index (attachment.id)}
-            <div class="attachment-chip">
+            <div
+              class="attachment-chip"
+              class:uploading={attachment.status === "uploading"}
+              class:failed={attachment.status === "failed"}
+            >
               <button
                 type="button"
                 class="attachment-chip-open"
@@ -397,7 +404,13 @@
                 <div class="attachment-chip-body">
                   <span class="attachment-chip-name">{attachment.name}</span>
                   <span class="attachment-chip-meta">
-                    {formatAttachmentSize(attachment.size)}
+                    {#if attachment.status === "uploading"}
+                      {t("composer.attachments.uploading")}
+                    {:else if attachment.status === "failed"}
+                      {t("composer.attachments.uploadFailed")}
+                    {:else}
+                      {formatAttachmentSize(attachment.size)}
+                    {/if}
                   </span>
                 </div>
               </button>
@@ -438,7 +451,11 @@
             type="button"
             class="attach-btn composer-icon-button"
             aria-label={t("composer.attachments.add")}
-            title={composer.hasAttachments ? t("composer.attachments.addMoreImages") : t("composer.attachments.attachImages")}
+            title={t("composer.attachments.limitHint", {
+              count: MAX_COMPOSER_ATTACHMENTS,
+              size: formatAttachmentSize(MAX_COMPOSER_ATTACHMENT_BYTES),
+            })}
+            disabled={!composer.canAddAttachments}
             onclick={handleFilePickerOpen}
           >
             <span class="plus-icon" aria-hidden="true"></span>
@@ -572,6 +589,12 @@
     padding: 18px 18px 16px;
   }
 
+  .composer-dock.has-attachments:not(.multiline) {
+    flex-wrap: wrap;
+    row-gap: 10px;
+    border-radius: 24px;
+  }
+
   .revision-banner {
     display: flex;
     align-items: center;
@@ -636,8 +659,11 @@
   .hidden-file-input { display: none; }
 
   .attachment-strip {
+    flex: 0 0 100%;
+    order: -1;
     display: flex;
     gap: 8px;
+    width: 100%;
     overflow-x: auto;
     padding: 2px 2px 0;
     scrollbar-width: thin;
@@ -652,6 +678,14 @@
     border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
     border-radius: 14px;
     background: color-mix(in srgb, var(--panel) 74%, transparent);
+  }
+
+  .attachment-chip.uploading {
+    opacity: 0.72;
+  }
+
+  .attachment-chip.failed {
+    border-color: color-mix(in srgb, var(--danger) 52%, var(--border));
   }
 
   .attachment-chip-open {

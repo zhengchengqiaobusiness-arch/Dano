@@ -62,6 +62,7 @@ import type {
   RpcTranscriptStartEvent,
   RpcTranscriptUpsertEvent,
   RpcTreeEntry,
+  RpcUploadedFileRef,
   RpcWorkspaceEntry,
   RpcWorkspaceFile,
   RpcWorkspaceSummary,
@@ -70,6 +71,7 @@ import type {
   WsClient,
 } from "./types.js";
 import { detectWorkspaceEnvironments } from "./workspace-environment.js";
+import { resolveUploadedFileRef } from "./server.js";
 
 /** Model shape mirrored from Pi — used in shaping helpers below. */
 type PiModel = {
@@ -2644,6 +2646,65 @@ function normalizeRpcImages(images: unknown): RpcImageContent[] | undefined {
   return normalized.length > 0 ? normalized : undefined;
 }
 
+function normalizeRpcUploadedFiles(
+  files: unknown,
+): RpcUploadedFileRef[] | undefined {
+  if (!Array.isArray(files)) return undefined;
+
+  const normalized = files.flatMap((file): RpcUploadedFileRef[] => {
+    if (typeof file !== "object" || file === null) return [];
+    const data = file as Partial<RpcUploadedFileRef>;
+    if (
+      typeof data.id !== "string" ||
+      typeof data.name !== "string" ||
+      typeof data.path !== "string" ||
+      typeof data.mimeType !== "string" ||
+      typeof data.size !== "number" ||
+      !data.mimeType.startsWith("image/")
+    ) {
+      return [];
+    }
+    return [
+      {
+        id: data.id,
+        name: data.name,
+        path: data.path,
+        mimeType: data.mimeType,
+        size: data.size,
+        previewUrl:
+          typeof data.previewUrl === "string" ? data.previewUrl : undefined,
+      },
+    ];
+  });
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+async function uploadedFilesToRpcImages(
+  files: RpcUploadedFileRef[] | undefined,
+): Promise<RpcImageContent[] | undefined> {
+  if (!files?.length) return undefined;
+
+  const images: RpcImageContent[] = [];
+  for (const file of files) {
+    const stored = resolveUploadedFileRef(file);
+    if (!stored) {
+      throw new Error(`Uploaded file was not found: ${file.name}`);
+    }
+    const data = await fs.promises.readFile(stored.path, "base64");
+    images.push({ type: "image", data, mimeType: stored.mimeType });
+  }
+  return images;
+}
+
+function mergeRpcImages(
+  images: RpcImageContent[] | undefined,
+  uploadedImages: RpcImageContent[] | undefined,
+): RpcImageContent[] | undefined {
+  const merged = [...(images ?? []), ...(uploadedImages ?? [])];
+  return merged.length > 0 ? merged : undefined;
+}
+
 function buildUserMessageContent(
   message: string,
   images?: RpcImageContent[],
@@ -4598,7 +4659,10 @@ export class WsRpcAdapter {
        * ================================================================== */
 
       case "prompt": {
-        const images = normalizeRpcImages(command.images);
+        const images = mergeRpcImages(
+          normalizeRpcImages(command.images),
+          await uploadedFilesToRpcImages(normalizeRpcUploadedFiles(command.files)),
+        );
 
         // Auto-create a detached session when no session is selected.
         // Without this, the fallback calls this.context.actions.sendUserMessage() which
@@ -4665,7 +4729,10 @@ export class WsRpcAdapter {
       }
 
       case "steer": {
-        const images = normalizeRpcImages(command.images);
+        const images = mergeRpcImages(
+          normalizeRpcImages(command.images),
+          await uploadedFilesToRpcImages(normalizeRpcUploadedFiles(command.files)),
+        );
         if (this.sessionRuntime.hasDetachedSelection()) {
           const session = await this.sessionRuntime.ensureDetachedSession();
           void session.steer(command.message, images).catch(error => {
@@ -4691,7 +4758,10 @@ export class WsRpcAdapter {
       }
 
       case "follow_up": {
-        const images = normalizeRpcImages(command.images);
+        const images = mergeRpcImages(
+          normalizeRpcImages(command.images),
+          await uploadedFilesToRpcImages(normalizeRpcUploadedFiles(command.files)),
+        );
         if (this.sessionRuntime.hasDetachedSelection()) {
           const session = await this.sessionRuntime.ensureDetachedSession();
           void session.followUp(command.message, images).catch(error => {

@@ -6,6 +6,7 @@
     RpcSessionState,
     RpcSlashCommand,
     RpcThinkingLevel,
+    RpcUploadedFileRef,
     RpcWorkspaceEntry,
     RpcWorkspaceFile,
   } from "@dano/bridge/types";
@@ -70,6 +71,7 @@
     onSubmit = (_: {
       message: string;
       images: RpcImageContent[];
+      files: RpcUploadedFileRef[];
       revisionEntryId?: string;
       steer?: boolean;
     }) => {},
@@ -139,6 +141,7 @@
     onSubmit?: (payload: {
       message: string;
       images: RpcImageContent[];
+      files: RpcUploadedFileRef[];
       revisionEntryId?: string;
       steer?: boolean;
     }) => void;
