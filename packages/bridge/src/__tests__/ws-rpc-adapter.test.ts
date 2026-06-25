@@ -375,6 +375,7 @@ describe("WsRpcAdapter", () => {
         lines.push(JSON.stringify(entry));
       }
       fs.writeFileSync(sessionFile, lines.join("\n"));
+      (sessionManager as unknown as { flushed: boolean }).flushed = true;
 
       const promptSpy = vi.fn().mockResolvedValue(undefined);
       const subscribeSpy = vi.fn().mockReturnValue(() => {});
@@ -651,7 +652,7 @@ describe("WsRpcAdapter", () => {
     it("resolves a pending question through the command channel", async () => {
       const pending = askUserQuestionCoordinator.wait(
         "question-call-1",
-        { options: ["Keep", "Replace"] },
+        { question: "Keep or replace?", options: ["Keep", "Replace"] },
         undefined,
       );
       const command: RpcCommand = {

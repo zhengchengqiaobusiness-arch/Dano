@@ -1,6 +1,6 @@
 {
   "name": "@dano/dano",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Dano P0 web LLM chat",
   "type": "module",
@@ -40,7 +40,7 @@
     "vitest": "^4.1.6"
   },
   "engines": {
-    "node": ">=20.6.0"
+    "node": ">=22.19.0"
   },
   "pnpm": {
     "patchedDependencies": {
