@@ -67,8 +67,9 @@ services:
 
 networks:
   default:
-  # 与同机 skillmanner 互通(由 skillmanner 的 compose 创建的外部网络)。
-  # 独立部署 dano(无 skillmanner)时,删掉本段以及 app/nginx 下的 networks 引用即可。
+  # skillmanner 是同机业务动作网关的 Compose 网络;A-OA skill 通过它执行真实业务动作。
+  # 该网络由 skillmanner 的 compose 创建。独立部署 Dano 且不接业务网关时,
+  # 删掉本段以及 app/nginx 下的 skillmanner networks 引用即可。
   skillmanner:
     external: true
     name: skillmanner_default
