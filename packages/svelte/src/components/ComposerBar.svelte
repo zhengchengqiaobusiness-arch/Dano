@@ -678,7 +678,10 @@
   .attachment-chip {
     display: flex;
     align-items: center;
-    gap: 10px;
+    justify-content: space-between;
+    gap: 12px;
+    width: 200px;
+    max-width: 100%;
     min-width: 0;
     padding: 8px 10px;
     border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
@@ -699,6 +702,7 @@
     align-items: center;
     gap: 10px;
     min-width: 0;
+    flex: 1 1 auto;
     padding: 0;
     border: none;
     background: transparent;
@@ -869,7 +873,9 @@
 
   .prompt-input::placeholder {
     color: var(--text-subtle);
+    color: color-mix(in srgb, var(--text-subtle) 68%, var(--panel));
     line-height: inherit;
+    opacity: 1;
   }
 
   .send-btn,
@@ -1003,7 +1009,6 @@
 
     .composer-dock { gap: 8px; padding: 10px 14px; border-radius: 24px; }
     .composer-dock.multiline { padding: 14px 14px 12px; }
-    .attachment-chip { min-width: 200px; }
 
     .prompt-input { font-size: 16px; }
     .composer-dock.multiline .prompt-input { padding: 0; }
