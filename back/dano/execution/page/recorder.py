@@ -218,6 +218,7 @@ class RecordSession:
         self._browser = None
         self._context = None
         self._cdp = None
+        self._on_frame: Callable[[str], Awaitable[None]] | None = None   # 截屏回调(切活动页时复用)
         self.page = None
 
     async def start(self, start_url: str, *, base_url: str = "", headless: bool = True,
@@ -239,17 +240,48 @@ class RecordSession:
             await apply_token_auth(self._context, token=token, url=full, token_key=token_key)
         # add_init_script 只执行脚本、不调用函数 → 包成 IIFE 才会真正安装录制器(与 evaluate 不同)
         await self._context.add_init_script(f"({_RECORDER_JS})()")
-        self.page = await self._context.new_page()
-        await self.page.expose_binding("__danoRecord", self._on_record)
+        # 录制器回调 / 路由 / 响应抓取**全部挂在 context 上** → 自动覆盖当前页 + 之后弹出的新标签页/新窗口。
+        # (Playwright 一个 Page 只管一个标签页;旧实现只挂在 self.page 上,用户点开 target=_blank/window.open
+        #  的新页时,新页既没装录制绑定、又没被截屏 → 表现为"新页打不开"。挂到 context 后新页天然继承。)
+        await self._context.expose_binding("__danoRecord", self._on_record)
         if self._intercept:
             # 拦截模式:抓到业务写请求后假装成功、不真发 → 录制不产生真实记录(登录/校验码等放行)
-            await self.page.route("**/*", self._route)
+            await self._context.route("**/*", self._route)
         else:
-            self.page.on("request", self._on_request)      # 直录模式:照常发,只旁观抓取
+            self._context.on("request", self._on_request)  # 直录模式:照常发,只旁观抓取
         if self._capture_reads:
-            self.page.on("response", self._resp_dispatch)  # 抓 GET+JSON 读响应(列表/字典)→ select 候选源
+            self._context.on("response", self._resp_dispatch)  # 抓 GET+JSON 读响应(列表/字典)→ select 候选源
+        # 新页面(target=_blank / window.open / 弹窗)→ **跟随它**:设为活动页 + 把截屏切过去(否则用户看不到=打不开)
+        self._context.on("page", lambda p: asyncio.create_task(self._on_new_page(p)))
+        self.page = await self._context.new_page()
         # SPA 常不触发 "load"(长连接/轮询挂着)→ 用 domcontentloaded,否则 goto 卡到超时(与运行期 driver 一致)
         await self.page.goto(full, wait_until="domcontentloaded")
+
+    async def _on_new_page(self, page) -> None:  # noqa: ANN001 —— 新标签页/新窗口(context "page" 事件)
+        """用户操作打开了新页(target=_blank / window.open / 弹窗)→ 跟随:设为活动页,把截屏切过去。
+        否则新页在后台,用户看不到、也操作不到,表现为"新页打不开"。录制绑定/路由已在 context 级,自动覆盖新页。"""
+        try:
+            page.on("close", lambda: asyncio.create_task(self._on_page_close(page)))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await page.wait_for_load_state("domcontentloaded")
+        except Exception:  # noqa: BLE001
+            pass
+        self.page = page
+        if self._on_frame is not None:        # 截屏已开 → 切到新页;未开则等 start_screencast 自然开在最新页
+            await self._restart_screencast()
+
+    async def _on_page_close(self, page) -> None:  # noqa: ANN001
+        """活动页被关掉(用户关新标签/弹窗)→ 回退到仍打开的页,截屏切回去,避免黑屏。"""
+        if page is not self.page or self._context is None:
+            return
+        rest = [p for p in self._context.pages if not p.is_closed()]
+        if not rest:
+            return
+        self.page = rest[-1]
+        if self._on_frame is not None:
+            await self._restart_screencast()
 
     def _capture(self, m: str, url: str, pd: str | None, ct: str, headers: dict | None = None) -> None:
         """登记一个写请求(含请求头,回放鉴权用)+ 实时推给前端诊断。"""
@@ -386,23 +418,45 @@ class RecordSession:
             except Exception:  # noqa: BLE001
                 pass
 
-    # ── 截屏流 ──
+    # ── 截屏流(跟随活动页:用户点开新标签/弹窗时切过去)──
     async def start_screencast(self, on_frame: Callable[[str], Awaitable[None]]) -> None:
-        self._cdp = await self._context.new_cdp_session(self.page)
+        self._on_frame = on_frame
+        await self._open_screencast()
+
+    async def _open_screencast(self) -> None:
+        """在当前活动页 self.page 上开一路截屏。切页时配合 _restart_screencast 复用。"""
+        if self._context is None or self.page is None:
+            return
+        cdp = await self._context.new_cdp_session(self.page)
+        self._cdp = cdp
 
         async def _emit(params: dict) -> None:
             try:
-                await self._cdp.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
-                await on_frame(params["data"])     # base64 jpeg
+                await cdp.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
+                if self._on_frame is not None and cdp is self._cdp:   # 只发**活动页**的帧(切页后旧帧丢弃)
+                    await self._on_frame(params["data"])              # base64 jpeg
             except Exception:  # noqa: BLE001
                 pass
 
-        self._cdp.on("Page.screencastFrame", lambda p: asyncio.create_task(_emit(p)))
-        await self._cdp.send("Page.startScreencast",
-                             {"format": "jpeg", "quality": 50, "maxWidth": _VIEW_W, "maxHeight": _VIEW_H})
+        cdp.on("Page.screencastFrame", lambda p: asyncio.create_task(_emit(p)))
+        await cdp.send("Page.startScreencast",
+                       {"format": "jpeg", "quality": 50, "maxWidth": _VIEW_W, "maxHeight": _VIEW_H})
+
+    async def _restart_screencast(self) -> None:
+        """活动页变了(切到新标签/回退)→ 关旧页截屏,在新活动页重开,画面跟随。"""
+        old = self._cdp
+        self._cdp = None
+        if old is not None:
+            try:
+                await old.detach()
+            except Exception:  # noqa: BLE001
+                pass
+        await self._open_screencast()
 
     # ── 输入回传(归一坐标 0~1 → 视口像素)──
     async def dispatch_input(self, ev: dict) -> None:
+        if self.page is None or self.page.is_closed():    # 切页瞬间 / 活动页已关 → 丢弃,避免抛错
+            return
         k = ev.get("kind")
         if k == "click":
             await self.page.mouse.click(ev.get("nx", 0) * _VIEW_W, ev.get("ny", 0) * _VIEW_H)

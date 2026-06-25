@@ -67,6 +67,56 @@ def test_renderer_emits_no_framework_blacktalk():
         assert not leaks, f"渲染器黑话泄漏: {leaks}"
 
 
+def _capture_multistep() -> SkillSpec:
+    """抓请求型多接口 page_script:api_request 带 steps(草稿→提交两个接口)+ 成功约定 + 回查。"""
+    return SkillSpec(
+        skill_id="A-OA.submit_form", subsystem=Subsystem("A-OA"), action="submit_form",
+        risk_level=RiskLevel.L3, has_api=False, title="提交表单",
+        required_fields=["原因"], optional_fields=[],
+        api_request={
+            "steps": [
+                {"method": "POST", "path": "/api/draft/create", "params": []},
+                {"method": "POST", "path": "/api/task/submit", "params": ["原因"],
+                 "success_rule": "response.code==200"},
+            ],
+            "success_rule": "response.code==200",
+            "fact_check": {"query_action": "q1"},
+        })
+
+
+def test_capture_multistep_step_count_from_api_request():
+    """抓请求型:step_count/judged_by_code/verify 从 api_request 还原(不再恒报"一步")。"""
+    m = to_manifest(_capture_multistep())
+    assert m.flow["step_count"] == 2
+    assert m.flow["judged_by_code"] is True       # ← api_request.success_rule
+    assert m.flow["verify"] is True               # ← api_request.fact_check
+    assert [s["path"] for s in m.flow["step_paths"]] == ["/api/draft/create", "/api/task/submit"]
+
+
+def test_capture_multistep_sop_lists_interfaces():
+    """SOP 阶段4 **显式列出**编排的各接口(用户能看到多接口编排,不再"隐藏")。"""
+    sop = _sop_section(to_manifest(_capture_multistep()), "--原因 <原因>", " --confirm")
+    assert "2 步受控编排" in sop
+    assert "各步对调用方隐藏" not in sop           # 抓请求型:展示而非隐藏
+    assert "POST /api/draft/create" in sop
+    assert "POST /api/task/submit" in sop
+    assert "一次调用即可" in sop
+
+
+def test_capture_single_step_no_orchestration_text():
+    """抓请求型单接口:仍是"一步受控调用",不臆造多步编排。"""
+    sk = SkillSpec(
+        skill_id="A-OA.submit_one", subsystem=Subsystem("A-OA"), action="submit_one",
+        risk_level=RiskLevel.L3, has_api=False, title="提交",
+        required_fields=["原因"], api_request={
+            "method": "POST", "path": "/api/submit", "params": ["原因"],
+            "success_rule": "response.code==200"})
+    m = to_manifest(sk)
+    assert m.flow["step_count"] == 1 and m.flow["judged_by_code"] is True
+    sop = _sop_section(m, "--原因 <原因>", " --confirm")
+    assert "一步受控调用" in sop and "受控编排" not in sop
+
+
 # ── 质量标准(怎样算做好):grounded 验收清单,随业务/框架自适配 ──────────────────
 def _wf_goal() -> SkillSpec:
     """工作流 + goal(success_criteria/forbidden)+ 审批 + 前置 + 回查(全量资产)。"""

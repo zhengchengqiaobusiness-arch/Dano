@@ -4,6 +4,7 @@ from __future__ import annotations
 from dano.execution.page.request_capture import (
     _response_ok,
     as_list_payload,
+    auto_required_fields,
     infer_success_rule,
     build_api_request,
     build_api_workflow,
@@ -734,6 +735,60 @@ def test_flatten_required_from_form_star():
     assert fields["street"]["required"] is False   # 没 * → 非必填
 
 
+def test_flatten_required_defaults_all_when_no_star():
+    """表单没抓到任何 * 必填标记(required_labels 空)→ 参数字段**默认全部必填**(写操作宁多勿漏,免手动勾选)。"""
+    body = '{"reason":"回家","street":"中山路","type":"周末"}'
+    samples = {"原因": "回家", "所在街道": "中山路", "加班类型": "周末"}
+    fields = {f["key"]: f for f in flatten_body(body, samples)}     # 不传 required_labels
+    assert fields["reason"]["required"] is True
+    assert fields["street"]["required"] is True
+    assert fields["type"]["required"] is True
+
+
+def test_flatten_required_unconfident_defaults_required():
+    """表单区分了必填(有 * ),但某字段值有歧义(同值多字段)映射不确信 → 不敢判可选,默认必填。"""
+    body = '{"a":"1","b":"1"}'                 # 两字段同值 1 → 映射不确信
+    samples = {"甲": "1", "乙": "1"}
+    req_labels = {"甲"}                          # 表单确实区分了必填(甲有 *)
+    fields = {f["key"]: f for f in flatten_body(body, samples, req_labels)}
+    assert fields["a"]["required"] is True and fields["b"]["required"] is True
+
+
+def test_flatten_required_nonparam_is_optional():
+    """常量/内部 id 不是用户要填的项 → required=False(它本就原样提交,不进必填清单)。"""
+    body = '{"reason":"回家","procDefKey":"oa_duty_leave"}'
+    fields = {f["key"]: f for f in flatten_body(body, {"原因": "回家"})}
+    assert fields["reason"]["required"] is True
+    assert fields["procDefKey"]["suggest_param"] is False and fields["procDefKey"]["required"] is False
+
+
+def test_auto_required_defaults_all_params():
+    """auto_required_fields:没 * 信息 → 全部参数必填(默认),经 param_map 桥到参数名。"""
+    body = '{"reason":"回家","days":"3"}'
+    samples = {"原因": "回家", "天数": "3"}
+    param_map = {"reason": "原因", "days": "天数"}
+    out = auto_required_fields(body, samples, param_map, params=["原因", "天数"])
+    assert out == ["原因", "天数"]
+
+
+def test_auto_required_downgrades_with_star():
+    """auto_required_fields:表单区分了必填(有 *)→ 没标 * 的参数降级可选;标了的保持必填。"""
+    body = '{"reason":"回家","street":"中山路"}'
+    samples = {"原因": "回家", "街道": "中山路"}
+    param_map = {"reason": "原因", "street": "街道"}
+    out = auto_required_fields(body, samples, param_map,
+                               form_required_labels={"原因"}, params=["原因", "街道"])
+    assert out == ["原因"]                       # 街道没 * → 可选,不在必填清单
+
+
+def test_auto_required_unknown_path_defaults_required():
+    """多步:早期步的参数不在提交那条请求体里(path 找不到)→ 默认必填(宁多勿漏)。"""
+    body = '{"reason":"回家"}'
+    out = auto_required_fields(body, {"原因": "回家"}, {"reason": "原因", "taskTitle": "标题"},
+                               params=["原因", "标题"])
+    assert set(out) == {"原因", "标题"}
+
+
 def test_flatten_body_non_json_returns_empty():
     assert flatten_body("plain text no kv") == []     # 非 JSON 非表单 → 空(form 体现已支持,另有专测)
     assert flatten_body(None) == []
@@ -748,6 +803,88 @@ def test_flatten_suggestions_match_real_oa_fields():
     assert p["reason"] is True and p["type"] is True          # 请假原因 / 类型 → 参数
     assert p["billType"] is False                             # snake_case 标识(表单类型)→ 不勾
     assert p["processDefKey"] is False                        # key 以 Key 结尾(流程定义键)→ 不勾
+
+
+def test_flatten_drops_system_timestamps_not_user_input():
+    """治日报 bug:submitTime/createTime 是系统提交时写入的时间戳(用户没填、对不上任何录制样例)
+    → 当常量不参数化(否则 agent 会被要求"提供创建时间");用户真选的日期(对上样例)照常当参数。"""
+    body = ('{"reportDate":"2026-06-25","todayWorkContent":"1",'
+            '"submitTime":1782380760000,"createTime":1782380760000}')
+    samples = {"日报日期": "2026-06-25", "今日工作内容": "1"}
+    p = {f["key"]: f["suggest_param"] for f in flatten_body(body, samples)}
+    assert p["reportDate"] is True            # 用户选的日期(对上样例)→ 参数
+    assert p["todayWorkContent"] is True      # 用户填的 → 参数
+    assert p["submitTime"] is False           # 系统时间戳,对不上样例 → 不参数化
+    assert p["createTime"] is False
+
+
+def test_flatten_keeps_user_picked_timestamp_dates():
+    """对照:用户**真选**的日期即便存成毫秒时间戳(startTime/endTime 对上录制样例)→ 仍是参数(不误杀)。"""
+    body = '{"startTime":1782230400000,"endTime":1782403200000}'
+    samples = {"开始日期": "2026-06-24", "结束日期": "2026-06-26"}   # 用户选的日期 ↔ 时间戳跨格式对上
+    p = {f["key"]: f["suggest_param"] for f in flatten_body(body, samples)}
+    assert p["startTime"] is True and p["endTime"] is True
+
+
+def test_flatten_system_field_does_not_steal_user_value():
+    """治日报 bug:processStatus=4 与用户填的 备注=4 同值;系统字段(status 结尾)不得抢走真字段的样例标签
+    → processStatus 不作参数(固定值),备注 才拿到"备注"名并作参数。两遍配样例:真字段先认领。"""
+    body = '{"processStatus":4,"remark":"4"}'         # processStatus 在前(易抢);remark 是用户填的
+    samples = {"备注": "4"}
+    f = {x["key"]: x for x in flatten_body(body, samples)}
+    assert f["processStatus"]["suggest_param"] is False   # 系统状态码 → 不参数化
+    assert f["remark"]["suggest_param"] is True and f["remark"]["suggest_name"] == "备注"
+
+
+def test_flatten_marks_system_timestamp_value():
+    """系统时间戳标 system_value=True(前端展示"系统值·运行期自动填"),且不作参数。"""
+    body = '{"reportDate":"2026-06-25","submitTime":1782380760000}'
+    samples = {"日报日期": "2026-06-25"}
+    f = {x["key"]: x for x in flatten_body(body, samples)}
+    assert f["submitTime"]["system_value"] is True and f["submitTime"]["suggest_param"] is False
+    assert f["reportDate"]["system_value"] is False and f["reportDate"]["suggest_param"] is True
+
+
+def test_build_api_request_collects_system_timestamps():
+    """build:系统时间戳(用户没勾)落 system_values(运行期填 now),不进 params、不焊死会话值。"""
+    req = {"method": "POST", "url": "http://oa.x/api/daily/submit",
+           "post_data": '{"reportDate":"2026-06-25","submitTime":1782380760000,"createTime":1782380760000}'}
+    apir = build_api_request(req, {"reportDate": "日报日期"})
+    sysv = {s["path"]: s["kind"] for s in apir["system_values"]}
+    assert sysv == {"submitTime": "now_ms", "createTime": "now_ms"}
+    assert apir["params"] == ["日报日期"]                # 时间戳不作参数
+
+
+def test_collect_findings_skips_system_timestamps():
+    """检出器:system_values 里的时间戳不报"焊死会话值"(运行期填 now)→ 不白拦发布;别的会话值仍报。"""
+    from dano.execution.page.repair_ops import collect_repair_findings
+    req = {"method": "POST", "url": "http://oa.x/api/daily/submit",
+           "post_data": '{"reportDate":"2026-06-25","submitTime":1782380760000}'}
+    apir = build_api_request(req, {"reportDate": "日报日期"})
+    kinds = [f["kind"] for f in collect_repair_findings(apir)]
+    assert "session_constant" not in kinds              # submitTime 已 system_values → 不报
+
+
+async def test_execute_fills_system_timestamp_with_now():
+    """运行期:dry 校验通过(self_check 不因时间戳挂);真发时 body 里时间戳被填成当前毫秒(非录制旧值)。"""
+    import time as _t
+    from dano.execution.page.request_capture import execute_api_request
+    req = {"method": "POST", "url": "http://oa.x/api/daily/submit",
+           "post_data": '{"reportDate":"2026-06-25","submitTime":1782380760000}'}
+    apir = build_api_request(req, {"reportDate": "日报日期"})
+    res = await execute_api_request(apir, {"日报日期": "2026-06-30"}, send=False)
+    assert res["ok"] is True                            # 结构自检通过(时间戳不再拦)
+    assert res["body"]["submitTime"] >= int(_t.time() * 1000) - 5000   # 填成"现在",不是 1782380760000
+
+
+def test_suggest_selects_skips_user_typed_value_colliding_code():
+    """治日报 bug:用户把"1"打进文本域(明日工作计划/备注),恰好撞上某状态小字典 value=1 →
+    不能误判成"名字→ID 枚举"。用户亲手填的值即自由文本;真下拉录到的样例会是显示名(与提交码不同)。"""
+    submit = '{"tomorrowWorkPlan":"1","remark":"1"}'
+    samples = {"明日工作计划": "1", "备注": "1"}        # 用户亲手 fill 了 1
+    status = [{"url": "http://oa.x/sys/status",
+               "json": {"data": [{"label": "草稿", "value": "1"}, {"label": "已提交", "value": "2"}]}}]
+    assert suggest_selects(submit, status, samples) == []    # sv 正是录制样例 → 不当下拉
 
 
 def test_build_api_request_from_user_chosen_paths():

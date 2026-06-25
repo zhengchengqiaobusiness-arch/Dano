@@ -63,7 +63,12 @@ def collect_repair_findings(api_request: dict) -> list[dict]:
     for si, tgt in enumerate(api_request.get("steps") or [api_request]):
         templ = tgt.get("body_template")
         if isinstance(templ, (dict, list)):
+            # 系统时间戳(submitTime/createTime)已标 system_values、运行期填 now → 不是"焊死会话值",免报(否则白拦发布)
+            sys_paths = {s.get("path") for s in (tgt.get("system_values") or [])}
+            sys_toks = {tuple(s.get("tokens") or []) for s in (tgt.get("system_values") or [])}
             for p, toks, sv, raw in _leaf_paths(templ):
+                if p in sys_paths or tuple(toks) in sys_toks:
+                    continue
                 if not _is_placeholder(sv) and looks_session_specific(raw):
                     out.append({"kind": "session_constant", "step": si, "path": toks, "value": sv,
                                 "detail": f"常量 `{p}`={sv} 像一次性会话值,不该焊进 skill(应串联/参数化/删步)"})

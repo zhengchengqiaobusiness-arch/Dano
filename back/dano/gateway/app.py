@@ -668,9 +668,9 @@ async def record_ws(ws: WebSocket) -> None:
                                         "report": {"ok": False, "reason": "没有待发布的提交请求;先点「停止并发布」抓请求"}})
                     continue
                 param_map = {k: v.strip() for k, v in (msg.get("param_map") or {}).items() if v and v.strip()}
-                from dano.execution.page.request_capture import (build_api_request, build_api_workflow,
-                                                                 infer_success_rule, suggest_fact_check,
-                                                                 suggest_workflow_steps)
+                from dano.execution.page.request_capture import (auto_required_fields, build_api_request,
+                                                                 build_api_workflow, infer_success_rule,
+                                                                 suggest_fact_check, suggest_workflow_steps)
                 sels = msg.get("selects") or []         # Q2 选领导:名字→ID
                 idens = msg.get("identity") or []        # Q1 当前用户:运行期重取
                 fc = suggest_fact_check(pending_samples, pending_reads)   # 回查源(录到"我的记录"列表才有)
@@ -698,6 +698,11 @@ async def record_ws(ws: WebSocket) -> None:
                     await ws.send_json({"type": "result",
                                         "report": {"ok": False, "reason": "至少勾选一个字段作为参数(给它起个参数名)"}})
                     continue
+                # 必填**自动判定**(免手动勾选,默认全部必填;表单抓到 * 区分时据 * 降级可选)。
+                # 以提交那条请求体为锚(用户填值在此),经 param_map 桥到参数名;多步早期步的参数默认必填。
+                auto_required = auto_required_fields(
+                    pending_req.get("post_data"), pending_samples, param_map,
+                    form_required_labels=pending_required, params=last_params)
                 sub = init.get("subsystem", "A-报销")
                 login_state = await sess.storage_state()
                 from dano.execution.page.sessions import save_session
@@ -708,7 +713,7 @@ async def record_ws(ws: WebSocket) -> None:
                 rep = await run_request_onboarding(
                     tenant=init["tenant"], subsystem=sub, action=msg["action"],
                     title=msg.get("title", ""), api_request=apir, sample_inputs=sample_in,
-                    required=msg.get("required"),    # 前端标的"变化字段"=必填;其余可选用原值
+                    required=auto_required,    # 自动判定:默认全部必填,表单 * 区分时降级可选(免手动勾选)
                     goal=msg.get("goal"),            # 一般为 None → run_request_onboarding 内 _auto_goal 自动提炼(一键发布)
                     deploy=init.get("deploy"), storage_state=login_state)  # 可逆沙箱+登录态 → 可活体真跑升 verified;P2
                 if rep.get("ok"):

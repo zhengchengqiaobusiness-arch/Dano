@@ -103,6 +103,21 @@ def _parameters_schema(skill: SkillSpec) -> dict:
     }
 
 
+def _req_path(req: dict) -> str:
+    """从一步请求里取干净的 path(去协议+域名,留 path,丢 query/敏感参数),供 SOP 展示编排。"""
+    u = str(req.get("path") or req.get("url") or "")
+    i = u.find("//")
+    if i >= 0:
+        j = u.find("/", i + 2)
+        u = u[j:] if j >= 0 else "/"
+    return (u.split("?")[0] or "/")
+
+
+def _step_paths(steps: list[dict]) -> list[dict]:
+    """各步接口签名(method + path),供导出 SOP 把多接口编排显式列出来(grounded,不臆造)。"""
+    return [{"method": (s.get("method") or "POST").upper(), "path": _req_path(s)} for s in steps]
+
+
 def _flow_meta(skill: SkillSpec) -> dict:
     """执行画像:供导出 SOP 渲染的**通用 grounded 数据**——步数、前置、计算、是否回查、是否按业务码判成败。
 
@@ -122,6 +137,16 @@ def _flow_meta(skill: SkillSpec) -> dict:
         return {"step_count": max(n, 1), "preconditions": pre, "computes": comp,
                 "verify": verify, "judged_by_code": bool(getattr(skill, "workflow_success_rule", None))}
     if not skill.has_api:        # 页面型
+        apir = getattr(skill, "api_request", None) or {}
+        if apir:                 # 抓请求型:编排/成功约定/事实核查随 api_request 走(不再恒报"一步")
+            steps = list(apir.get("steps") or [])
+            wf = [s for s in steps if (s.get("method") or s.get("path") or s.get("url"))]
+            last = (wf[-1] if wf else apir)
+            verify = bool(apir.get("fact_check") or last.get("fact_check"))
+            judged = bool(apir.get("success_rule") or last.get("success_rule"))
+            return {"step_count": max(len(wf), 1), "preconditions": [], "computes": [],
+                    "verify": verify, "judged_by_code": judged,
+                    "step_paths": _step_paths(wf or [apir])}   # 各步 接口(method+path),供 SOP 展示编排
         return {"step_count": len(getattr(skill, "page_steps", []) or []) or 1,
                 "preconditions": [], "computes": [],
                 "verify": bool(getattr(skill, "page_success_marker", None)), "judged_by_code": False}

@@ -191,6 +191,7 @@ class SkillRegistry:
                             page_start_url=body.get("start_url", ""),
                             page_success_marker=body.get("success_marker"),
                             page_steps=list(body.get("actions") or []),
+                            api_request=dict(body.get("api_request") or {}),   # 抓请求型:多步工作流/成功约定/事实核查随资产走(供导出还原编排)
                             required_fields=req,
                             optional_fields=opt,
                             keywords=[w for w in (body_action, body.get("title", "")) if w],

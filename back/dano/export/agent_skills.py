@@ -202,15 +202,22 @@ def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
             L.append("- 并告知审批走向(见上方「审批路径」),让用户知道这单大概要谁批、会不会触发更高审批。")
         L.append("- 仅当用户明确说「提交 / 办理 / 发起 / 直接办」才进入下一步;只说「看看怎么填」则**只出草稿,不调用**。")
 
-    # 阶段4 · 受控提交
+    # 阶段4 · 受控提交。抓请求型多接口(有 step_paths)→ **显式列出编排的各步接口**(你一次调用,Dano 服务端按序调)
     L += ["", "### 阶段4 · 受控提交",
           f"- 运行:`bash scripts/submit.sh {flags}{cflag}`(或 `pwsh scripts/submit.ps1 …`);自检 `--diagnose`。"]
-    detail = [f"{n} 步受控编排(各步对调用方隐藏)" if n > 1 else "一步受控调用"]
+    sp = f.get("step_paths") or []
+    head = (f"{n} 步受控编排" + ("" if sp else "(各步对调用方隐藏)")) if n > 1 else "一步受控调用"
+    detail = [head]
     if f.get("judged_by_code"):
         detail.append("成败以业务返回码判定(不认 HTTP 字面成功)")
     if f.get("verify"):
         detail.append("执行后回查确认真生效(堵空操作)")
     L.append(f"- Dano 侧:{';'.join(detail)}。你不必自己做,但要理解以便解读结果。")
+    if n > 1 and sp:        # 多接口业务:你**一次调用**即可,Dano 在服务端**按序调用下面这些接口**
+        L.append(f"- 这 {n} 个接口由 Dano 服务端**按序自动调用**(步间 taskId/实例号/草稿号等自动串联),"
+                 "你**一次调用即可,不必、也不应**自己逐个调:")
+        for i, s in enumerate(sp, 1):
+            L.append(f"  {i}. `{s['method']} {s['path']}`")
 
     # 阶段5 · 结果处置
     L += ["", "### 阶段5 · 结果处置(读末行 JSON 的 status)",

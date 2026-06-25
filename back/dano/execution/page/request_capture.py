@@ -342,7 +342,10 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
                 if any(_name_match(label, v) for v in sample_vals):   # 确认命中:正是用户录制选的显示名(含带后缀)
                     chosen = (vk, lk, label, True)
                     break
-                if chosen is None and (len(sv) >= 2 or small):   # 暂存未确认命中(短码在大列表里不暂存)
+                # 暂存未确认命中(短码在大列表里不暂存)。但**用户亲手填进去的值**(sv 正好是某录制样例)
+                # 不可作未确认下拉:真下拉录到的样例是显示名(label)、提交体里是码,二者不同;sv==样例 ⟹ 是自由文本
+                # 填写(如把"1"打进工作计划/备注文本域),与某状态字典 value=1 撞码 → 不能误判成"名字→ID 枚举"。
+                if (chosen is None and (len(sv) >= 2 or small) and sv not in sample_vals):
                     chosen = (vk, lk, label, False)
             if chosen is None:
                 continue
@@ -614,6 +617,13 @@ def _is_const_value(v) -> bool:
                or _re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+", s))  # snake_case 标识(oa_duty_leave)
 
 
+def _is_system_timestamp(key: str, value) -> bool:
+    """系统在提交时**自动写入**的时间戳(submitTime/createTime/updateTime 等):时间类 key + 裸 10–13 位时间戳。
+    用于三处一致判定:① flatten 不参数化 ② build 标 system_values(运行期填 now)③ 检出器不报"焊死会话值"。
+    用户**真选**的日期会经 match_label 跨格式对上录制样例(由调用方另判 label),不走本判据。通用,不挑系统。"""
+    return bool(_TIME_KEY.search(key or "")) and bool(_re.fullmatch(r"-?\d{10,13}", str(value if value is not None else "")))
+
+
 def _infer_type(node, key: str = "") -> str:
     """从值推断字段类型(通用,给 agent 知道该传什么):boolean/number/datetime/date/array/object/string。"""
     if isinstance(node, bool):
@@ -841,7 +851,9 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
                     return lab, dmult == 1
         return None, False
 
-    out: list[dict] = []
+    # 先收集所有叶子(保录制序),再**两遍配样例**:真业务字段(非内部 id/状态)先认领样例值,内部标识字段
+    # (id/code/status…)只认领剩余 —— 避免系统字段(processStatus=4)抢走真字段(备注=4)同值的样例标签。
+    leaves: list[tuple] = []          # (path, key, node, sv, time_like, internal)
 
     def walk(node, path):
         if isinstance(node, dict):
@@ -853,22 +865,70 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         else:
             sv = "" if node is None else str(node)
             key = path.split(".")[-1].split("[")[0]
-            label, confident = match_label(sv)
             time_like = bool(_TIME_KEY.search(key))
-            const = (not time_like) and (bool(_ID_KEY.search(key)) or _is_const_value(node))
-            is_param = bool(label is not None or (not const and sv != ""))
-            conf = _field_confidence(label, confident, key, is_param)
-            out.append({"path": path, "key": key, "value": sv,
-                        "suggest_param": is_param,
-                        "suggest_name": label or key,            # 对不上 → 退原始 key(不瞎猜)
-                        "type": _infer_type(node, key),           # 字段类型(值推断),给 agent/契约
-                        "confidence": conf,                       # 字段语义置信度(P1)
-                        "confidence_tier": confidence_tier(conf),  # auto / clarify / reject(需澄清)
-                        # 表单 * 必填:仅当该值唯一对应一个字段(confident)才据标签判必填,模糊命中不误标
-                        "required": bool(label is not None and confident and label in required_labels)})
+            internal = (not time_like) and (bool(_ID_KEY.search(key)) or _is_const_value(node))
+            leaves.append((path, key, node, sv, time_like, internal))
 
     walk(body, "")
+    labels: dict[int, tuple] = {}
+    for i, (_p, _k, _n, sv, _tl, internal) in enumerate(leaves):   # ① 真业务字段先认领样例
+        if not internal:
+            labels[i] = match_label(sv)
+    for i, (_p, _k, _n, sv, _tl, internal) in enumerate(leaves):   # ② 内部标识字段认领剩余(不与真字段抢同值)
+        if internal:
+            labels[i] = match_label(sv)
+
+    out: list[dict] = []
+    for i, (path, key, node, sv, time_like, internal) in enumerate(leaves):
+        label, confident = labels[i]
+        # 系统生成的时间戳(submitTime/createTime 等):时间类 key + 裸 10–13 位时间戳,且**对不上任何录制样例**
+        #  → 系统在提交时自动写入、用户没填 → 当常量不参数化(运行期 build 会标 system_values 填 now,而非焊死)。
+        #  用户**真选的日期**会经 match_label 跨格式对上录制样例(label 非空)→ 不命中本规则,照常当参数。
+        #  仅在**有录制样例可比对**时启用(无样例的纯离线判断退回原逻辑:时间戳当日期参数)。
+        sys_time = bool(sample_list) and label is None and _is_system_timestamp(key, sv)
+        const = sys_time or internal
+        is_param = bool(label is not None or (not const and sv != ""))
+        conf = _field_confidence(label, confident, key, is_param)
+        # 必填判定(默认必填,写操作宁多勿漏;自动判,免手动勾选):
+        #  · 非参数(常量/内部 id)→ 非必填(本就不是用户要填的项)
+        #  · 表单确实区分了必填(抓到 * 标记,required_labels 非空)且本字段被**确信**映射到某 DOM 标签
+        #    → 信表单:标了 * 才必填,没标 * 即可选
+        #  · 其余(表单没区分 / 映射不确信)→ 默认必填(不敢判可选,宁多勿漏)
+        if not is_param:
+            required = False
+        elif required_labels and label is not None and confident:
+            required = label in required_labels
+        else:
+            required = True
+        out.append({"path": path, "key": key, "value": sv,
+                    "suggest_param": is_param,
+                    "suggest_name": label or key,            # 对不上 → 退原始 key(不瞎猜)
+                    "type": _infer_type(node, key),           # 字段类型(值推断),给 agent/契约
+                    "confidence": conf,                       # 字段语义置信度(P1)
+                    "confidence_tier": confidence_tier(conf),  # auto / clarify / reject(需澄清)
+                    "required": required,
+                    "system_value": bool(sys_time)})          # 系统运行期自动填(submitTime/createTime),前端可标
     return out
+
+
+def auto_required_fields(post_data: str | None, samples: dict | None, param_map: dict | None,
+                         *, form_required_labels: set | None = None,
+                         params: list[str] | None = None) -> list[str]:
+    """**自动**判定哪些参数必填(免手动勾选,默认全部必填,写操作宁多勿漏)。
+
+    post_data/samples/form_required_labels 同 flatten_body;param_map:{字段点路径→参数名};
+    params:最终参数名(给定则按它过滤+排序,适配多步取最后一步的 params)。
+    判据复用 flatten_body 的 required(已按"默认必填 + 表单 * 区分时降级可选"算好),
+    再经 param_map 把点路径桥到参数名;本请求体里找不到的路径(如多步早期步)默认必填。
+    返回必填参数名(有序、去重)。"""
+    fl = flatten_body(post_data, samples, form_required_labels)
+    path_req = {f["path"]: bool(f.get("required")) for f in fl}
+    name_req: dict[str, bool] = {}
+    for path, name in (param_map or {}).items():
+        r = path_req.get(path, True)
+        name_req[name] = name_req.get(name, False) or r       # 多路径绑同名 → 任一必填则必填
+    names = list(params) if params is not None else list(dict.fromkeys(name_req))
+    return [p for p in names if name_req.get(p, True)]         # 未知参数 → 默认必填
 
 
 def build_api_request(req: dict, param_map: dict, base_url: str = "",
@@ -934,11 +994,21 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
             ev.append(f"identity://{i['source']}")
         id_meta.append({"path": i["path"], "source": i.get("source", ""), "evidence": ev,
                         **({"tokens": toks} if toks else {})})
+    # 系统时间戳(submitTime/createTime 等:时间类 key + 裸时间戳,用户没勾成参数)→ **运行期填 now**,
+    # 而非焊死录制时刻(否则每次提交都带过去的旧时间;也不会被检出器当"一次性会话值焊死"而拦发布)。通用,不挑系统。
+    system_values = []
+    for p, toks, _sv, raw in _leaf_paths(body):
+        if p in param_map:
+            continue
+        if _is_system_timestamp(p.split(".")[-1].split("[")[0], raw):
+            system_values.append({"path": p, "tokens": toks,
+                                  "kind": "now_ms" if len(str(raw)) == 13 else "now_s"})
     return {"method": (req.get("method") or "POST").upper(), "path": path, "url": url,
             "content_type": req.get("content_type", "application/json"),
             "body_template": templ, "params": list(dict.fromkeys(params)), "sample_inputs": samples,
             "auth_headers": extract_auth_headers(req.get("headers")),
-            "field_types": types, "selects": sel_meta, "identity": id_meta}
+            "field_types": types, "selects": sel_meta, "identity": id_meta,
+            "system_values": system_values}
 
 
 def substitute(template, fields: dict, defaults: dict | None = None):
@@ -1053,6 +1123,15 @@ def _apply_identity(body, api_request: dict, storage_state: dict | None) -> None
         val = resolve_identity_value(idn.get("source", ""), storage_state)
         if val is not None:
             _set_by_path(body, idn.get("tokens") or idn.get("path", ""), val)   # tokens 优先(键含点也无歧义)
+
+
+def _apply_system_values(body, api_request: dict) -> None:
+    """系统生成的时间戳(submitTime/createTime 等)运行期填**当前时间**,而非焊死录制时刻。通用,不挑系统。"""
+    import time as _time
+    now_ms = int(_time.time() * 1000)
+    for sv in api_request.get("system_values") or []:
+        val = now_ms if sv.get("kind") == "now_ms" else now_ms // 1000
+        _set_by_path(body, sv.get("tokens") or sv.get("path", ""), val)
 
 
 # ─────────── P0:发布前确定性自检(self_check) + 运行期换身后置审计 ───────────
@@ -1459,6 +1538,7 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     fields = _coerce_fields(fields, api_request)
     body = substitute(api_request.get("body_template"), fields, api_request.get("sample_inputs") or {})
     _apply_identity(body, api_request, storage_state)        # 当前用户/会话值运行期重取覆盖(此刻 blob 仍是嵌套结构)
+    _apply_system_values(body, api_request)                  # 系统时间戳(submitTime/createTime)运行期填 now,不焊死录制时刻
     for p, v in (overrides or {}).items():                   # Q3:上一步响应值注入(taskId 等)
         _set_by_path(body, p, v)
     id_issues = _identity_audit(body, api_request, storage_state) if send else []   # 换身后置审计(blob 仍嵌套,可达)

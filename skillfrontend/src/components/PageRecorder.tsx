@@ -9,7 +9,8 @@ interface RecStep { op: string; locator?: string; field?: string; value?: string
 interface RecReq { method: string; url: string; has_body?: boolean; json?: boolean }
 // 提交请求体拍平后的一个叶子字段(给用户勾选哪些是参数)
 interface RecField { path: string; key: string; value: string; suggest_param: boolean; suggest_name: string;
-  type?: string; required?: boolean; confidence?: number; confidence_tier?: string; name_source?: string }
+  type?: string; required?: boolean; confidence?: number; confidence_tier?: string; name_source?: string;
+  system_value?: boolean }
 // 候选写请求(抓到多个时让用户手选用哪个)
 interface RecCand { idx: number; method: string; path: string }
 // P3:字段=选自某列表(选领导:名字→ID)/ 字段=当前用户·会话值(运行期重取)
@@ -49,7 +50,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [steps, setSteps] = useState<RecStep[]>([]);
   const [reqs, setReqs] = useState<RecReq[]>([]);   // 诊断:抓到的写请求
   const [fields, setFields] = useState<RecField[]>([]);   // 提交请求体的字段表(供勾选成参数)
-  const [picked, setPicked] = useState<Record<string, { on: boolean; name: string; req: boolean }>>({});  // path → {勾选, 参数名, 必填}
+  const [picked, setPicked] = useState<Record<string, { on: boolean; name: string }>>({});  // path → {勾选, 参数名};必填由后端自动判定
   const [reqMeta, setReqMeta] = useState<{ method: string; url: string } | null>(null);
   const [cands, setCands] = useState<RecCand[]>([]);   // 候选写请求(可手选用哪个)
   const [chosenIdx, setChosenIdx] = useState(0);
@@ -104,12 +105,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         (m.identity || []).forEach((i: RecIdentity) => { idMap[i.path] = i; });
         setSelects(selMap); setIdentity(idMap);
         setFields(fs);
-        const pk: Record<string, { on: boolean; name: string; req: boolean }> = {};
+        const pk: Record<string, { on: boolean; name: string }> = {};
         fs.forEach((f) => {
           // 默认:变化字段(用户填的)勾=参数;固定字段(billType/流程号等)不勾=常量,结构上原样提交;
           // 当前用户/会话值不勾(运行期自动填)。这样"非参数字段一律原样"是结构保证,agent 改不到固定字段。
           const on = idMap[f.path] ? false : (selMap[f.path] ? true : !!f.suggest_param);
-          pk[f.path] = { on, name: f.suggest_name || f.key, req: !!f.required };  // 必填默认按表单 *
+          pk[f.path] = { on, name: f.suggest_name || f.key };  // 必填由后端自动判定,前端不再手动勾
         });
         setPicked(pk);
         setReqMeta({ method: m.method, url: m.url });
@@ -178,9 +179,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function renameField(path: string, name: string) {
     setPicked((p) => ({ ...p, [path]: { ...p[path], name } }));
   }
-  function toggleReq(path: string, req: boolean) {
-    setPicked((p) => ({ ...p, [path]: { ...p[path], req } }));
-  }
   function badAction(a: string) {
     // 动作名是函数调用/工具标识,必须英文标识符;中文会导致导出目录冲突、function-call 名非法
     if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(a)) {
@@ -204,14 +202,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!action.trim() || badAction(action.trim())) return;
     const { param_map, selList, idList, step_idxs } = _payload();
     if (!Object.keys(param_map).length) { message.error("至少勾选一个字段作为参数"); return; }
-    // 必填=用户确认的「必填」勾选(默认按表单 *);非必填的参数缺了用录制原值
-    const required = fields
-      .filter((f) => param_map[f.path] && picked[f.path]?.req && !identity[f.path])
-      .map((f) => param_map[f.path]);
     setResult(null); setPhase("publishing");
-    // 一键发布:后端自动提炼业务 Goal + self_check + 审核 + 自动修复;无需手动提炼/确认
+    // 一键发布:后端自动提炼业务 Goal + self_check + 审核 + 自动修复;必填也由后端**自动判定**
+    //(默认全部必填,表单抓到 * 区分时据 * 降级可选),无需手动勾选/确认
     send({ type: "publish_request", action: action.trim(), title: title.trim(),
-           param_map, selects: selList, identity: idList, step_idxs, required });
+           param_map, selects: selList, identity: idList, step_idxs });
   }
   function stopAll() {
     send({ type: "stop" }); wsRef.current?.close();
@@ -329,19 +324,23 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                         {idn && <Tag color="gold" style={{ fontSize: 11 }}>🔒 当前用户/会话值(运行期自动填)</Tag>}
                         {!sel && !idn && (f.suggest_param
                           ? <Tag color="blue" style={{ fontSize: 11 }}>参数·agent 传值</Tag>
-                          : <Tag style={{ fontSize: 11 }}>固定值·原样提交</Tag>)}
+                          : (f.system_value
+                            ? <Tag color="gold" style={{ fontSize: 11 }}>🕒 系统值·运行期自动填</Tag>
+                            : <Tag style={{ fontSize: 11 }}>固定值·原样提交</Tag>))}
                         {f.type && f.type !== "string" && <Tag style={{ fontSize: 11 }}>{f.type}</Tag>}
                         {f.name_source === "llm" && <Tag color="geekblue" style={{ fontSize: 11 }}>AI 拟名·待核</Tag>}
                         {f.confidence_tier && f.confidence_tier !== "auto" &&
                           <Tag color="orange" style={{ fontSize: 11 }}>低置信·建议确认</Tag>}
                         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                           值={f.value === "" ? "(空)" : (f.value.length > 30 ? f.value.slice(0, 30) + "…" : f.value)}</Typography.Text>
-                        {p.on && <>
+                        {p.on && !idn && <>
                           <Typography.Text type="secondary" style={{ fontSize: 12 }}>参数名</Typography.Text>
                           <Input size="small" value={p.name} placeholder="参数名(英文/拼音)"
                                  onChange={(e) => renameField(f.path, e.target.value)} style={{ width: 150 }} />
-                          <Checkbox checked={p.req} onChange={(e) => toggleReq(f.path, e.target.checked)}>
-                            <Typography.Text style={{ fontSize: 11 }}>必填</Typography.Text></Checkbox>
+                          {/* 必填由后端自动判定(默认全部必填,表单 * 区分时降级可选),这里只读展示,免手动勾选 */}
+                          {f.required
+                            ? <Tag color="red" style={{ fontSize: 11 }}>必填(自动)</Tag>
+                            : <Tag style={{ fontSize: 11 }}>可选(自动)</Tag>}
                         </>}
                       </Space>
                     </List.Item>

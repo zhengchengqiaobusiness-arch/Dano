@@ -222,6 +222,40 @@ async def test_picker_recorded_as_pick_param_not_clicks(tmp_path) -> None:  # no
     assert samples.get("请假类型") == "事假"             # 选中值作样例
 
 
+_OPENER = """<!doctype html><html><head><meta charset="utf-8"></head><body>
+<button id="open" onclick="window.open(NEWURL,'_blank')">打开新页</button>
+</body></html>"""
+
+_NEWPAGE = """<!doctype html><html><head><meta charset="utf-8"></head><body>
+<form><label for="amt">金额</label><input id="amt" name="amount" type="text"></form>
+</body></html>"""
+
+
+async def test_follows_new_tab_and_records_on_it(tmp_path) -> None:  # noqa: ANN001
+    """多页 bug 修复:用户点开新标签页/新窗口(window.open / target=_blank)→ 录制会话**跟随**到新页,
+    且新页上的操作经 context 级绑定照样被录到(旧实现只挂 self.page,新页既不录又不截屏=打不开)。"""
+    if not await _chromium_available():
+        pytest.skip("chromium 未安装")
+    new = tmp_path / "new.html"
+    new.write_text(_NEWPAGE, encoding="utf-8")
+    opener = tmp_path / "opener.html"
+    opener.write_text(_OPENER.replace("NEWURL", repr(new.as_uri())), encoding="utf-8")
+    sess = RecordSession()
+    try:
+        await sess.start(opener.as_uri())
+        first = sess.page
+        await sess.page.get_by_role("button", name="打开新页").click()
+        await sess.page.wait_for_timeout(600)              # 等新页打开 + 跟随切换
+        assert sess.page is not first                       # 活动页已切到新标签页
+        await sess.page.get_by_label("金额").fill("100")    # 新页上的输入也要被录到
+        await sess.page.wait_for_timeout(300)
+        steps, samples = sess.recorded_steps()
+    finally:
+        await sess.stop()
+    assert ("fill", "label=金额") in [(s.op, s.locator) for s in steps]
+    assert samples.get("amount") == "100"
+
+
 async def test_token_auth_sets_login_cookie() -> None:
     """贴 token → 预置登录态:Admin-Token cookie 注入 context(免在画面里登录)。"""
     if not await _chromium_available():
