@@ -6,6 +6,7 @@ import type {
   RpcAgentEndEvent,
   RpcAgentStartEvent,
   RpcImageContent,
+  RpcUploadedFileRef,
   RpcResponse,
   RpcSessionState,
   RpcSessionStats,
@@ -1588,6 +1589,7 @@ function setCompactionState(compacting: boolean) {
 function sendPrompt(
   message: string,
   images?: RpcImageContent[],
+  files?: RpcUploadedFileRef[],
   streamingBehavior: "steer" | "followUp" = "followUp",
 ) {
   if (_isStreaming) {
@@ -1603,7 +1605,7 @@ function sendPrompt(
   }
   sendEnvelope({
     type: "command",
-    payload: { type: "prompt", message, images, streamingBehavior },
+    payload: { type: "prompt", message, images, files, streamingBehavior },
   });
 }
 

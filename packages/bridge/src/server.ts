@@ -10,18 +10,54 @@
 
 import * as fs from "node:fs";
 import * as http from "node:http";
+import * as os from "node:os";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
+import { once } from "node:events";
 import type { BridgeEventBus } from "./bridge-event-bus.js";
 import { getLanIps, isTailscaleIp } from "./network.js";
 import type {
   BridgeConfig,
   BridgeEvent,
   ClientMessage,
+  RpcUploadedFileRef,
   ServerMessage,
   WsClient,
 } from "./types.js";
 
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
+const MAX_UPLOAD_BODY_BYTES = 50 * 1024 * 1024;
+const UPLOAD_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+]);
+const UPLOAD_EXTENSION_BY_MIME_TYPE: Record<string, string> = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/gif": ".gif",
+  "image/webp": ".webp",
+};
+
+const uploadedFiles = new Map<string, RpcUploadedFileRef>();
+
+export function resolveUploadedFileRef(
+  ref: Pick<RpcUploadedFileRef, "id" | "path">,
+): RpcUploadedFileRef | null {
+  const stored = uploadedFiles.get(ref.id);
+  if (!stored || stored.path !== ref.path) return null;
+  return stored;
+}
+
+class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 export interface RpcConnectionHandler {
   handleClientMessage(message: ClientMessage): void;
@@ -55,6 +91,8 @@ export class BridgeServer {
   private httpServer: http.Server | undefined;
   private handlers = new Map<string, RpcConnectionHandler>();
   private clients = new Map<string, WsClient>();
+  private uploadDir: string | undefined;
+  private uploadIds = new Set<string>();
 
   private isRunning = false;
   private host: string = "localhost";
@@ -172,6 +210,12 @@ export class BridgeServer {
 
     this.isRunning = false;
     this.port = 0;
+    for (const id of this.uploadIds) uploadedFiles.delete(id);
+    this.uploadIds.clear();
+    if (this.uploadDir) {
+      await fs.promises.rm(this.uploadDir, { recursive: true, force: true });
+    }
+    this.uploadDir = undefined;
 
     this.emitEvent({ type: "server_stop" });
   }
@@ -209,6 +253,19 @@ export class BridgeServer {
       if (req.method === "POST" && pathname === "/api/clients") {
         await readJsonBody(req);
         this.createClient(res);
+        return;
+      }
+
+      if (req.method === "POST" && pathname === "/api/uploads") {
+        await this.handleUploadRequest(req, res, url);
+        return;
+      }
+
+      const uploadPreviewMatch = /^\/api\/uploads\/([^/]+)\/preview$/.exec(
+        pathname,
+      );
+      if (req.method === "GET" && uploadPreviewMatch?.[1]) {
+        this.handleUploadPreview(res, decodeURIComponent(uploadPreviewMatch[1]));
         return;
       }
 
@@ -253,9 +310,83 @@ export class BridgeServer {
 
       this.handleStaticRequest(req, res);
     } catch (error) {
+      if (error instanceof HttpError) {
+        writeJson(res, error.status, { error: error.message });
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       writeJson(res, 500, { error: message || "Internal Server Error" });
     }
+  }
+
+  private ensureUploadDir(): string {
+    if (!this.uploadDir) {
+      this.uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-uploads-"));
+    }
+    return this.uploadDir;
+  }
+
+  private async handleUploadRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    const mimeType = normalizeUploadMimeType(
+      url.searchParams.get("mimeType") ?? req.headers["content-type"],
+    );
+    if (!mimeType) throw new HttpError(415, "Unsupported upload type");
+
+    const name = normalizeUploadName(url.searchParams.get("name"));
+    if (!name) throw new HttpError(400, "Upload name is required");
+
+    const contentLength = Number(req.headers["content-length"] ?? NaN);
+    if (Number.isFinite(contentLength) && contentLength > MAX_UPLOAD_BODY_BYTES) {
+      throw new HttpError(413, "Upload is too large");
+    }
+
+    const id = randomUUID();
+    const filePath = path.join(
+      this.ensureUploadDir(),
+      `${id}${UPLOAD_EXTENSION_BY_MIME_TYPE[mimeType]}`,
+    );
+    const size = await writeUploadBody(req, filePath, MAX_UPLOAD_BODY_BYTES);
+    const ref: RpcUploadedFileRef = {
+      id,
+      name,
+      size,
+      mimeType,
+      path: filePath,
+      previewUrl: `/api/uploads/${encodeURIComponent(id)}/preview`,
+    };
+    uploadedFiles.set(id, ref);
+    this.uploadIds.add(id);
+    writeJson(res, 201, ref);
+  }
+
+  private handleUploadPreview(
+    res: http.ServerResponse,
+    id: string,
+  ): void {
+    const ref = uploadedFiles.get(id);
+    if (!ref) {
+      writeJson(res, 404, { error: "Upload was not found" });
+      return;
+    }
+
+    const filePath = path.resolve(ref.path);
+    fs.stat(filePath, (statErr, stats) => {
+      if (statErr || !stats.isFile()) {
+        writeJson(res, 404, { error: "Upload was not found" });
+        return;
+      }
+
+      res.writeHead(200, {
+        "Content-Type": ref.mimeType,
+        "Content-Length": stats.size,
+        "Cache-Control": "no-cache",
+      });
+      fs.createReadStream(filePath).pipe(res);
+    });
   }
 
   private createClient(res: http.ServerResponse): void {
@@ -482,6 +613,46 @@ async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
     return JSON.parse(text) as unknown;
   } catch {
     throw new Error("Request body must be JSON");
+  }
+}
+
+function normalizeUploadMimeType(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const mimeType = value.split(";")[0]?.trim().toLowerCase() ?? "";
+  return UPLOAD_MIME_TYPES.has(mimeType) ? mimeType : null;
+}
+
+function normalizeUploadName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const base = path.basename(value.trim());
+  return base && base !== "." && base !== ".." ? base : null;
+}
+
+async function writeUploadBody(
+  req: http.IncomingMessage,
+  filePath: string,
+  maxBytes: number,
+): Promise<number> {
+  const out = fs.createWriteStream(filePath, { flags: "wx" });
+  let size = 0;
+  try {
+    for await (const chunk of req) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > maxBytes) {
+        throw new HttpError(413, "Upload is too large");
+      }
+      if (!out.write(buffer)) {
+        await once(out, "drain");
+      }
+    }
+    out.end();
+    await once(out, "finish");
+    return size;
+  } catch (error) {
+    out.destroy();
+    fs.rm(filePath, { force: true }, () => {});
+    throw error;
   }
 }
 

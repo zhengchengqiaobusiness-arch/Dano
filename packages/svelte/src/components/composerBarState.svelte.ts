@@ -2,14 +2,20 @@ import type {
   RpcImageContent,
   RpcSlashCommand,
   RpcThinkingLevel,
+  RpcUploadedFileRef,
   RpcWorkspaceEntry,
 } from "@dano/bridge/types";
 import type { ConnectionStatus } from "../composables/bridgeStore.svelte";
 import { t } from "../i18n";
 import {
-  createComposerAttachments,
+  MAX_COMPOSER_ATTACHMENT_BYTES,
+  MAX_COMPOSER_ATTACHMENTS,
+  createUploadingComposerAttachment,
   extractSupportedImageFiles,
+  getSupportedImageMimeType,
   toRpcImageContent,
+  toRpcUploadedFileRefs,
+  uploadComposerAttachment,
   type ComposerAttachment,
 } from "../utils/attachments";
 import type { RpcModelInfo } from "../utils/models";
@@ -59,6 +65,7 @@ export interface ComposerBarCallbacks {
   readonly onSubmit: (payload: {
     message: string;
     images: RpcImageContent[];
+    files: RpcUploadedFileRef[];
     revisionEntryId?: string;
     steer?: boolean;
   }) => void;
@@ -139,6 +146,7 @@ function attachmentsFromRpcImages(
       name: `image-${idx + 1}.${ext}`,
       size: restoredAttachmentSize(image.data),
       previewUrl: `data:${image.mimeType};base64,${image.data}`,
+      status: "uploaded",
     };
   });
 }
@@ -269,8 +277,25 @@ export function createComposerBarState(
 
   let normalizedInputText = $derived(normalizeSubmittedText($rx.inputText));
   let hasAttachments = $derived(attachments.length > 0);
+  let hasUploadingAttachments = $derived(
+    attachments.some(attachment => attachment.status === "uploading"),
+  );
+  let hasFailedAttachments = $derived(
+    attachments.some(attachment => attachment.status === "failed"),
+  );
+  let hasSubmittableAttachments = $derived(
+    attachments.some(
+      attachment => attachment.status === "uploaded" && (attachment.file || attachment.data),
+    ),
+  );
+  let canAddAttachments = $derived(
+    !isDisabled && attachments.length < MAX_COMPOSER_ATTACHMENTS,
+  );
   let canSubmit = $derived(
-    !isDisabled && (normalizedInputText.length > 0 || hasAttachments),
+    !isDisabled &&
+      !hasUploadingAttachments &&
+      !hasFailedAttachments &&
+      (normalizedInputText.length > 0 || hasSubmittableAttachments),
   );
   let canAbort = $derived(!isDisabled && props.isStreaming);
   let showStopButton = $derived(props.isStreaming && !canSubmit);
@@ -314,6 +339,7 @@ export function createComposerBarState(
   // ---- attachment management ----
 
   function clearAttachments(fileInputEl?: HTMLInputElement | null) {
+    for (const attachment of attachments) disposeAttachment(attachment);
     attachments = [];
     lightboxAttachmentIndex = -1;
     if (fileInputEl) fileInputEl.value = "";
@@ -325,24 +351,97 @@ export function createComposerBarState(
     if (!files) return;
     const incomingFiles = Array.from(files);
     if (!incomingFiles.length) return;
-    const { attachments: nextAttachments, rejectedNames } =
-      await createComposerAttachments(incomingFiles);
+
+    const rejectedNames: string[] = [];
+    const nextAttachments: Array<{ attachment: ComposerAttachment; file: File }> = [];
+    const remainingSlots = Math.max(0, MAX_COMPOSER_ATTACHMENTS - attachments.length);
+
+    for (const file of incomingFiles) {
+      if (nextAttachments.length >= remainingSlots) {
+        rejectedNames.push(file.name);
+        continue;
+      }
+      const mimeType = getSupportedImageMimeType(file);
+      if (!mimeType || file.size > MAX_COMPOSER_ATTACHMENT_BYTES) {
+        rejectedNames.push(file.name);
+        continue;
+      }
+      const abortController = new AbortController();
+      nextAttachments.push({
+        file,
+        attachment: createUploadingComposerAttachment(
+          file,
+          mimeType,
+          abortController,
+        ),
+      });
+    }
+
     if (nextAttachments.length > 0) {
-      attachments = [...attachments, ...nextAttachments];
+      attachments = [...attachments, ...nextAttachments.map(item => item.attachment)];
       setAttachmentNotice(null);
+      for (const item of nextAttachments) {
+        void finishAttachmentUpload(item.attachment.id, item.file);
+      }
     }
     if (rejectedNames.length > 0) {
       setAttachmentNotice(
         t("composerBar.skippedUnsupportedFiles", {
-          files: rejectedNames.join(", "),
+          count: rejectedNames.length,
         }),
       );
+    }
+  }
+
+  async function finishAttachmentUpload(id: string, file: File) {
+    const attachment = attachments.find(a => a.id === id);
+    if (!attachment?.abortController) return;
+    try {
+      const uploaded = await uploadComposerAttachment(
+        file,
+        attachment.mimeType,
+        attachment.abortController.signal,
+      );
+      if (uploaded.previewUrl && attachment.previewUrl.startsWith("blob:")) {
+        URL.revokeObjectURL(attachment.previewUrl);
+      }
+      attachments = attachments.map(item =>
+        item.id === id
+          ? {
+              ...item,
+              status: "uploaded",
+              file: uploaded,
+              previewUrl: uploaded.previewUrl ?? item.previewUrl,
+              abortController: undefined,
+            }
+          : item,
+      );
+    } catch (error) {
+      if ((error as { name?: unknown }).name === "AbortError") return;
+      attachments = attachments.map(item =>
+        item.id === id
+          ? {
+              ...item,
+              status: "failed",
+              error: error instanceof Error ? error.message : String(error),
+              abortController: undefined,
+            }
+          : item,
+      );
+    }
+  }
+
+  function disposeAttachment(attachment: ComposerAttachment) {
+    attachment.abortController?.abort();
+    if (attachment.previewUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(attachment.previewUrl);
     }
   }
 
   function removeAttachment(id: string) {
     const index = attachments.findIndex(a => a.id === id);
     if (index === -1) return;
+    disposeAttachment(attachments[index]!);
     const nextAttachments = attachments.filter(a => a.id !== id);
     if (lightboxAttachmentIndex === index) {
       lightboxAttachmentIndex =
@@ -488,6 +587,7 @@ export function createComposerBarState(
     callbacks.onSubmit({
       message,
       images: toRpcImageContent(attachments),
+      files: toRpcUploadedFileRefs(attachments),
       revisionEntryId: props.revision?.entryId,
       steer,
     });
@@ -501,7 +601,7 @@ export function createComposerBarState(
     textareaEl?: HTMLTextAreaElement | null,
   ): boolean {
     const text = normalizedInputText;
-    if ((!text && !hasAttachments) || isDisabled) return false;
+    if (!canSubmit) return false;
     if (parseCompactSlashCommand(text) && hasAttachments) {
       setAttachmentNotice(t("composer.warning.compactNoImages"));
       return false;
@@ -880,6 +980,9 @@ export function createComposerBarState(
     },
     get canSubmit() {
       return canSubmit;
+    },
+    get canAddAttachments() {
+      return canAddAttachments;
     },
     get canAbort() {
       return canAbort;

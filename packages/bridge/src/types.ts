@@ -17,6 +17,15 @@ export interface RpcImageContent {
   mimeType: string;
 }
 
+export interface RpcUploadedFileRef {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  path: string;
+  previewUrl?: string;
+}
+
 export interface RpcQueuedMessage {
   text: string;
   images: RpcImageContent[];
@@ -241,15 +250,18 @@ export interface RpcCommandMap {
   prompt: {
     message: string;
     images?: RpcImageContent[];
+    files?: RpcUploadedFileRef[];
     streamingBehavior?: "steer" | "followUp";
   };
   steer: {
     message: string;
     images?: RpcImageContent[];
+    files?: RpcUploadedFileRef[];
   };
   follow_up: {
     message: string;
     images?: RpcImageContent[];
+    files?: RpcUploadedFileRef[];
   };
   abort: {};
   answer_question:

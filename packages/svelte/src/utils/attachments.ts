@@ -1,4 +1,4 @@
-import type { RpcImageContent } from "@dano/bridge/types";
+import type { RpcImageContent, RpcUploadedFileRef } from "@dano/bridge/types";
 
 const SUPPORTED_IMAGE_MIME_TYPES = new Set([
   "image/png",
@@ -15,11 +15,21 @@ const MIME_TYPE_BY_EXTENSION: Record<string, string> = {
   ".webp": "image/webp",
 };
 
-export interface ComposerAttachment extends RpcImageContent {
+export const MAX_COMPOSER_ATTACHMENTS = 10;
+export const MAX_COMPOSER_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+
+export interface ComposerAttachment {
   id: string;
+  type: "image";
   name: string;
   size: number;
+  mimeType: string;
   previewUrl: string;
+  status: "uploading" | "uploaded" | "failed";
+  data?: string;
+  file?: RpcUploadedFileRef;
+  error?: string;
+  abortController?: AbortController;
 }
 
 export const COMPOSER_ATTACHMENT_ACCEPT = [
@@ -78,20 +88,62 @@ export async function createComposerAttachments(
       mimeType,
       data,
       previewUrl: createDataUrl(mimeType, data),
+      status: "uploaded",
     });
   }
 
   return { attachments, rejectedNames };
 }
 
+export function createUploadingComposerAttachment(
+  file: File,
+  mimeType: string,
+  abortController: AbortController,
+): ComposerAttachment {
+  return {
+    id: createAttachmentId(),
+    type: "image",
+    name: file.name,
+    size: file.size,
+    mimeType,
+    previewUrl: URL.createObjectURL(file),
+    status: "uploading",
+    abortController,
+  };
+}
+
+export async function uploadComposerAttachment(
+  file: File,
+  mimeType: string,
+  signal: AbortSignal,
+): Promise<RpcUploadedFileRef> {
+  const query = new URLSearchParams({ name: file.name, mimeType });
+  const response = await fetch(`/api/uploads?${query.toString()}`, {
+    method: "POST",
+    headers: { "Content-Type": mimeType },
+    body: file,
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(`Upload failed (${response.status})`);
+  }
+  return (await response.json()) as RpcUploadedFileRef;
+}
+
 export function toRpcImageContent(
   attachments: readonly ComposerAttachment[],
 ): RpcImageContent[] {
-  return attachments.map(({ type, data, mimeType }) => ({
-    type,
-    data,
-    mimeType,
-  }));
+  return attachments.flatMap(({ data, mimeType }) =>
+    data ? [{ type: "image" as const, data, mimeType }] : [],
+  );
+}
+
+export function toRpcUploadedFileRefs(
+  attachments: readonly ComposerAttachment[],
+): RpcUploadedFileRef[] {
+  return attachments.flatMap(attachment =>
+    attachment.status === "uploaded" && attachment.file ? [attachment.file] : [],
+  );
 }
 
 function createAttachmentId(): string {
