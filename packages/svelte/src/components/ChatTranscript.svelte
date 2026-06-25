@@ -16,6 +16,7 @@
   import {
     askUserQuestionRequest,
     hideAskUserQuestionToolBlock,
+    isAskUserQuestionToolError,
   } from "../utils/askUserQuestion";
   import { userMessageCopyText } from "../utils/messageCopy";
   import {
@@ -254,9 +255,17 @@
     const blocks = index >= messages.length
       ? contentBlocks(msg)
       : contentBlocks(messageWithTranscriptDeltas(msg, index));
-    return blocks.filter(
-      block => block.kind !== "tool" || !hideAskUserQuestionToolBlock(block),
-    );
+    let failedAskUserQuestionIndex = 0;
+    return blocks.filter(block => {
+      if (block.kind !== "tool") return true;
+      if (!isAskUserQuestionToolError(block)) return true;
+      const hide = hideAskUserQuestionToolBlock(
+        block,
+        failedAskUserQuestionIndex,
+      );
+      failedAskUserQuestionIndex += 1;
+      return !hide;
+    });
   }
 
   function toolBlockIdentity(block: ToolContentBlock, blockIndex: number): string {
@@ -355,6 +364,14 @@
   }
 
   function toolBlockDescriptor(block: ToolContentBlock) {
+    if (isAskUserQuestionToolError(block)) {
+      return {
+        name: t("chatTranscript.askUserQuestionRetryFailure"),
+        params: undefined,
+        meta: t("chatTranscript.askUserQuestionRetryFailureMeta"),
+        status: block.toolStatus,
+      };
+    }
     const model = blockState.toolBlockModel(block);
     return {
       name: block.toolName || t("chatTranscript.toolFallback"),
@@ -959,7 +976,11 @@
                           </div>
                         {/if}
 
-                        {#if blockState.toolBlockDetail(block).kind !== "empty"}
+                        {#if isAskUserQuestionToolError(block)}
+                          <section class="tool-inline-section">
+                            <pre class="tool-inline-pre">{t("chatTranscript.askUserQuestionRetryFailureDetail")}</pre>
+                          </section>
+                        {:else if blockState.toolBlockDetail(block).kind !== "empty"}
                           <section class="tool-inline-section">
                             {#if blockState.toolBlockDetail(block).kind === "diff"}
                               <DiffView
