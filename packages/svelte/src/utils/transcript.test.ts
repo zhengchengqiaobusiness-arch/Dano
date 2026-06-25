@@ -33,3 +33,50 @@ describe("curl transcript status", () => {
     );
   });
 });
+
+describe("assistant thinking blocks", () => {
+  it("keeps structured thinking, text, and tool calls in content order", () => {
+    const blocks = contentBlocks({
+      role: "assistant",
+      content: [
+        {
+          type: "thinking",
+          thinking: "Inspect the repo",
+          thinkingSignature: "hidden",
+        },
+        { type: "text", text: "Final **answer**." },
+        {
+          type: "toolCall",
+          id: "tool-1",
+          name: "read",
+          arguments: { path: "README.md" },
+        },
+      ],
+    } as never);
+
+    expect(blocks.map(block => block.kind)).toEqual([
+      "thinking",
+      "text",
+      "tool",
+    ]);
+    expect(blocks[0]).toEqual({ kind: "thinking", text: "Inspect the repo" });
+  });
+
+  it("keeps redacted thinking visible without exposing internal fields", () => {
+    const blocks = contentBlocks({
+      role: "assistant",
+      content: [
+        {
+          type: "thinking",
+          thinking: "",
+          thinkingSignature: "hidden",
+          redacted: true,
+        },
+      ],
+    } as never);
+
+    expect(blocks).toEqual([
+      { kind: "thinking", text: "", redacted: true },
+    ]);
+  });
+});
