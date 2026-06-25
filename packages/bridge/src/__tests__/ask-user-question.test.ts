@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AskUserQuestionAnswer } from "../types.js";
+import type {
+  AskUserQuestionAnswer,
+  AskUserQuestionDataSource,
+  AskUserQuestionInputType,
+  AskUserQuestionOption,
+} from "../types.js";
 import {
   askUserQuestionCoordinator,
   askUserQuestionTool,
@@ -9,14 +14,18 @@ function executeQuestion(
   toolCallId: string,
   params: {
     question: string;
-    options?: string[];
+    options?: (string | AskUserQuestionOption)[];
+    inputType?: AskUserQuestionInputType;
+    dataSource?: AskUserQuestionDataSource;
     multiple?: boolean;
     confirm?: true;
     default?: AskUserQuestionAnswer;
     questions?: {
       id?: string;
       question: string;
-      options?: string[];
+      options?: (string | AskUserQuestionOption)[];
+      inputType?: AskUserQuestionInputType;
+      dataSource?: AskUserQuestionDataSource;
       multiple?: boolean;
       default?: AskUserQuestionAnswer;
     }[];
@@ -43,7 +52,7 @@ describe("ask_user_question tool", () => {
       "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
       "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
       "Set default on every non-confirmation question, including every item in questions, using the most likely or safest answer while still letting the user change it.",
-      "When using questions, the top level must contain only questions. Put id, question, options, multiple, and default inside each questions item.",
+      "When using questions, the top level must contain only questions. Put id, question, options, inputType, dataSource, multiple, and default inside each questions item.",
       "For forms, applications, or other user-reviewed summaries, call ask_user_question with confirm: true after presenting the final summary and before treating it as confirmed, ready to submit, or complete.",
     ]);
   });
@@ -77,6 +86,65 @@ describe("ask_user_question tool", () => {
     });
     await expect(execution).resolves.toMatchObject({
       details: { status: "answered", answer: "Yes" },
+    });
+  });
+
+  it("returns structured option ids while keeping labels for display", async () => {
+    const execution = executeQuestion("structured-choice", {
+      question: "Employee?",
+      inputType: "select",
+      options: [
+        { id: "emp_1001", label: "Alice Chen", extra: { title: "Manager" } },
+        { id: "emp_1002", label: "Bob Li" },
+      ],
+      default: "emp_1002",
+    });
+
+    askUserQuestionCoordinator.answer("structured-choice", {
+      cancelled: false,
+      answer: "emp_1001",
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: "emp_1001" },
+    });
+  });
+
+  it("rejects duplicate structured option ids", async () => {
+    await expect(
+      executeQuestion("duplicate-ids", {
+        question: "Employee?",
+        options: [
+          { id: "emp_1001", label: "Alice" },
+          { id: "emp_1001", label: "Alice duplicate" },
+        ],
+      }),
+    ).rejects.toThrow("non-empty and unique");
+  });
+
+  it("accepts remote select ids without requiring static options", async () => {
+    const execution = executeQuestion("remote-select", {
+      question: "Employee?",
+      inputType: "select",
+      dataSource: {
+        type: "api",
+        endpoint: "/api/employees",
+        searchParam: "keyword",
+        pageParam: "page",
+        pageSizeParam: "pageSize",
+        resultPath: "data.list",
+        totalPath: "data.total",
+        idField: "id",
+        labelField: "name",
+      },
+      default: "emp_1002",
+    });
+
+    askUserQuestionCoordinator.answer("remote-select", {
+      cancelled: false,
+      answer: "emp_1001",
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: "emp_1001" },
     });
   });
 

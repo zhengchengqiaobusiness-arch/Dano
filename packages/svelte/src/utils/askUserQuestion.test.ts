@@ -52,7 +52,10 @@ describe("ask user question transcript data", () => {
       id: "answer",
       kind: "single",
       question: "Choose?",
-      options: ["A", "B"],
+      options: [
+        { id: "A", label: "A" },
+        { id: "B", label: "B" },
+      ],
     });
   });
 
@@ -66,7 +69,10 @@ describe("ask user question transcript data", () => {
       id: "answer",
       kind: "multiple",
       question: "Choose?",
-      options: ["A", "B"],
+      options: [
+        { id: "A", label: "A" },
+        { id: "B", label: "B" },
+      ],
     });
     expect(
       askUserQuestionRequest(block({ question: "Continue?", confirm: true })),
@@ -133,17 +139,74 @@ describe("ask user question transcript data", () => {
           id: "env",
           kind: "single",
           question: "Environment?",
-          options: ["Test", "Prod"],
+          options: [
+            { id: "Test", label: "Test" },
+            { id: "Prod", label: "Prod" },
+          ],
           default: "Test",
         },
         {
           id: "q3",
           kind: "multiple",
           question: "Features?",
-          options: ["Chat", "Deploy"],
+          options: [
+            { id: "Chat", label: "Chat" },
+            { id: "Deploy", label: "Deploy" },
+          ],
           default: ["Chat"],
         },
       ],
+    });
+  });
+
+  it("parses structured options and remote select data sources", () => {
+    expect(
+      askUserQuestionRequest(
+        block({
+          question: "Employee?",
+          inputType: "select",
+          options: [
+            { id: "emp_1001", label: "Alice Chen", extra: { title: "Manager" } },
+            { id: "emp_1002", label: "Bob Li" },
+          ],
+          default: "emp_1002",
+        }),
+      ),
+    ).toEqual({
+      batch: false,
+      id: "answer",
+      kind: "select",
+      question: "Employee?",
+      options: [
+        { id: "emp_1001", label: "Alice Chen", extra: { title: "Manager" } },
+        { id: "emp_1002", label: "Bob Li" },
+      ],
+      default: "emp_1002",
+    });
+
+    expect(
+      askUserQuestionRequest(
+        block({
+          question: "Employee?",
+          inputType: "select",
+          dataSource: {
+            type: "api",
+            endpoint: "/api/employees",
+            searchParam: "keyword",
+            pageParam: "page",
+            pageSizeParam: "pageSize",
+            resultPath: "data.list",
+            totalPath: "data.total",
+            idField: "id",
+            labelField: "name",
+          },
+        }),
+      ),
+    ).toMatchObject({
+      batch: false,
+      kind: "select",
+      dataSource: { endpoint: "/api/employees" },
+      options: [],
     });
   });
 

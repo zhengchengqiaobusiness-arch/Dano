@@ -3,6 +3,9 @@ import { Type } from "typebox";
 import {
   ASK_USER_QUESTION_TOOL_NAME,
   type AskUserQuestionAnswer,
+  type AskUserQuestionDataSource,
+  type AskUserQuestionInputType,
+  type AskUserQuestionOption,
   type AskUserQuestionResult,
 } from "./types.js";
 
@@ -19,7 +22,42 @@ const groupedRetryError =
   "You called ask_user_question while another question card is still waiting. Do not call ask_user_question multiple times in the same response. Retry silently with exactly one ask_user_question call using {\"questions\":[...]} so all fields render in one card with one submit button. When using questions, omit top-level question, options, multiple, default, and confirm. Do not explain this correction to the user.";
 
 const mixedGroupedFieldsError =
-  "Invalid ask_user_question call: when using questions, the top level may contain only questions. Move question, options, multiple, and default into each questions[] item. Do not include top-level question, options, multiple, default, or confirm with questions. Retry silently; do not explain this correction to the user.";
+  "Invalid ask_user_question call: when using questions, the top level may contain only questions. Move question, options, inputType, dataSource, multiple, and default into each questions[] item. Do not include top-level question, options, inputType, dataSource, multiple, default, or confirm with questions. Retry silently; do not explain this correction to the user.";
+
+const askUserQuestionOptionSchema = Type.Union([
+  Type.String({ minLength: 1 }),
+  Type.Object({
+    id: Type.String({ minLength: 1 }),
+    label: Type.String({ minLength: 1 }),
+    extra: Type.Optional(Type.Record(Type.String(), Type.Any())),
+  }),
+]);
+
+const askUserQuestionInputTypeSchema = Type.Union([
+  Type.Literal("text"),
+  Type.Literal("radio"),
+  Type.Literal("checkbox"),
+  Type.Literal("select"),
+  Type.Literal("treeSelect"),
+  Type.Literal("confirm"),
+]);
+
+const askUserQuestionDataSourceSchema = Type.Object({
+  type: Type.Literal("api"),
+  endpoint: Type.String({ minLength: 1 }),
+  method: Type.Optional(Type.Union([Type.Literal("GET"), Type.Literal("POST")])),
+  params: Type.Optional(Type.Record(Type.String(), Type.Any())),
+  searchParam: Type.Optional(Type.String({ minLength: 1 })),
+  pageParam: Type.Optional(Type.String({ minLength: 1 })),
+  pageSizeParam: Type.Optional(Type.String({ minLength: 1 })),
+  pageSize: Type.Optional(Type.Number({ minimum: 1 })),
+  resultPath: Type.Optional(Type.String({ minLength: 1 })),
+  totalPath: Type.Optional(Type.String({ minLength: 1 })),
+  idField: Type.Optional(Type.String({ minLength: 1 })),
+  labelField: Type.Optional(Type.String({ minLength: 1 })),
+  childrenField: Type.Optional(Type.String({ minLength: 1 })),
+  extraFields: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+});
 
 const askUserQuestionFields = {
   question: Type.Optional(
@@ -30,13 +68,14 @@ const askUserQuestionFields = {
     }),
   ),
   options: Type.Optional(
-    Type.Array(Type.String({ minLength: 1 }), {
+    Type.Array(askUserQuestionOptionSchema, {
       minItems: 2,
-      uniqueItems: true,
       description:
-        "Choices for this question. Include '其他' or 'Other' to let the user enter one custom answer. Omit for free-text or confirmation input.",
+        "Choices for this question. Strings remain supported; objects use stable id plus label. Include '其他' or 'Other' to let the user enter one custom answer. Omit for free-text, confirmation, or remote dataSource input.",
     }),
   ),
+  inputType: Type.Optional(askUserQuestionInputTypeSchema),
+  dataSource: Type.Optional(askUserQuestionDataSourceSchema),
   multiple: Type.Optional(
     Type.Boolean({
       default: false,
@@ -91,10 +130,17 @@ export const askUserQuestionResultSchema = Type.Union([
 
 type PendingQuestionKind = "text" | "single" | "multiple" | "confirm";
 
+type PendingQuestionOption = {
+  id: string;
+  label: string;
+};
+
 interface PendingQuestionItem {
   id: string;
   kind: PendingQuestionKind;
-  options?: readonly string[];
+  inputType: AskUserQuestionInputType;
+  options?: readonly PendingQuestionOption[];
+  dataSource?: AskUserQuestionDataSource;
 }
 
 interface PendingQuestion {
@@ -104,8 +150,10 @@ interface PendingQuestion {
   removeAbortListener(): void;
 }
 
-function isOtherOption(value: string): boolean {
-  const normalized = value.trim().toLocaleLowerCase();
+function isOtherOption(value: string | PendingQuestionOption): boolean {
+  const normalized = (typeof value === "string" ? value : value.label)
+    .trim()
+    .toLocaleLowerCase();
   return normalized === "其他" || normalized === "other";
 }
 
@@ -116,14 +164,18 @@ class AskUserQuestionCoordinator {
     toolCallId: string,
     request: {
       question?: string;
-      options?: readonly string[];
+      options?: readonly (string | AskUserQuestionOption)[];
+      inputType?: AskUserQuestionInputType;
+      dataSource?: AskUserQuestionDataSource;
       multiple?: boolean;
       confirm?: true;
       default?: AskUserQuestionAnswer;
       questions?: readonly {
         id?: string;
         question: string;
-        options?: readonly string[];
+        options?: readonly (string | AskUserQuestionOption)[];
+        inputType?: AskUserQuestionInputType;
+        dataSource?: AskUserQuestionDataSource;
         multiple?: boolean;
         confirm?: true;
         default?: AskUserQuestionAnswer;
@@ -149,7 +201,7 @@ class AskUserQuestionCoordinator {
       this.rejectAll(error);
       return Promise.reject(error);
     }
-    if (request.confirm && (request.options || request.multiple || request.questions)) {
+    if (request.confirm && (request.options || request.multiple || request.questions || request.dataSource)) {
       return Promise.reject(
         new Error("Confirmation questions cannot provide options or multiple"),
       );
@@ -239,6 +291,8 @@ function normalizeRequestQuestions(
     if (
       request.question ||
       request.options ||
+      request.inputType ||
+      request.dataSource ||
       request.multiple ||
       request.default ||
       request.confirm
@@ -272,41 +326,81 @@ function normalizeQuestion(
   request: {
     id?: string;
     question: string;
-    options?: readonly string[];
+    options?: readonly (string | AskUserQuestionOption)[];
+    inputType?: AskUserQuestionInputType;
+    dataSource?: AskUserQuestionDataSource;
     multiple?: boolean;
     confirm?: true;
     default?: AskUserQuestionAnswer;
   },
   fallbackId: string,
 ): PendingQuestionItem | string {
-  if (request.multiple && !request.options) {
-    return "Multiple-choice questions require options";
-  }
-  if (request.confirm && (request.options || request.multiple)) {
+  const inputType = request.confirm
+    ? "confirm"
+    : (request.inputType ?? (request.multiple ? "checkbox" : request.options ? "radio" : "text"));
+  if (inputType === "confirm" && request.options) {
     return "Confirmation questions cannot provide options or multiple";
   }
-  const options = request.options?.map(option => option.trim());
-  if (
-    options?.some(option => !option) ||
-    (options && new Set(options).size !== options.length)
-  ) {
+  if (request.confirm && (request.options || request.multiple || request.dataSource)) {
+    return "Confirmation questions cannot provide options or multiple";
+  }
+  const rawOptions = request.options?.map(normalizeOption);
+  if (rawOptions?.some(option => !option)) {
     return "Question options must be non-empty and unique";
+  }
+  const options = rawOptions as PendingQuestionOption[] | undefined;
+  const optionIds = options?.map(option => option.id) ?? [];
+  if (new Set(optionIds).size !== optionIds.length) {
+    return "Question options must be non-empty and unique";
+  }
+  if (request.dataSource && inputType !== "select" && inputType !== "treeSelect") {
+    return "Data sources require select or treeSelect inputType";
+  }
+  if (
+    (request.multiple || inputType === "checkbox") &&
+    !options &&
+    !request.dataSource
+  ) {
+    return "Multiple-choice questions require options or dataSource";
+  }
+  if (
+    (inputType === "radio" || inputType === "select" || inputType === "treeSelect") &&
+    !options &&
+    !request.dataSource
+  ) {
+    return "Choice questions require options or dataSource";
   }
 
   let kind: PendingQuestionKind = "text";
-  if (request.confirm) kind = "confirm";
-  else if (request.multiple) kind = "multiple";
-  else if (options) kind = "single";
+  if (inputType === "confirm") kind = "confirm";
+  else if (request.multiple || inputType === "checkbox") kind = "multiple";
+  else if (options || request.dataSource || inputType === "radio" || inputType === "select" || inputType === "treeSelect") {
+    kind = "single";
+  }
 
   const question: PendingQuestionItem = {
     id: request.id?.trim() || fallbackId,
     kind,
-    options,
+    inputType,
+    ...(options ? { options } : {}),
+    ...(request.dataSource ? { dataSource: request.dataSource } : {}),
   };
   if (request.default !== undefined) {
     normalizeAnswer(question, request.default);
   }
   return question;
+}
+
+function normalizeOption(
+  option: string | AskUserQuestionOption,
+): PendingQuestionOption | null {
+  if (typeof option === "string") {
+    const value = option.trim();
+    return value ? { id: value, label: value } : null;
+  }
+  const id = option.id.trim();
+  const label = option.label.trim();
+  return id && label ? { id, label } : null;
 }
 
 function normalizeAnswer(
@@ -341,14 +435,15 @@ function normalizeAnswer(
     if (normalized.some(isOtherOption)) {
       throw new Error("Other requires a custom answer");
     }
+    const optionIds = pending.options?.map(option => option.id);
     const customAnswers = normalized.filter(
-      value => !pending.options?.includes(value),
+      value => !optionIds?.includes(value),
     );
     const allowsCustom = pending.options?.some(isOtherOption) ?? false;
     if (customAnswers.length > 1 && allowsCustom) {
       throw new Error("Multiple-choice answer may contain only one custom answer");
     }
-    if (customAnswers.length > 0 && !allowsCustom) {
+    if (customAnswers.length > 0 && !allowsCustom && !pending.dataSource) {
       throw new Error(
         "Multiple-choice answer must contain unique provided options",
       );
@@ -363,10 +458,11 @@ function normalizeAnswer(
   if (pending.options && isOtherOption(normalized)) {
     throw new Error("Other requires a custom answer");
   }
+  const optionIds = pending.options?.map(option => option.id);
   if (
-    pending.options &&
-    !pending.options.includes(normalized) &&
-    !pending.options.some(isOtherOption)
+    optionIds &&
+    !optionIds.includes(normalized) &&
+    !pending.options?.some(isOtherOption)
   ) {
     throw new Error("Question answer must match one of the provided options");
   }
@@ -393,9 +489,9 @@ export const askUserQuestionTool = defineTool({
   label: "Ask User Question",
   description: `Ask the user for structured input during execution.
 
-Use exactly one ask_user_question call per assistant response. If you need more than one answer, use only the questions array: {"questions":[{"id":"leave_type","question":"请假类型？","options":["事假","病假"],"default":"事假"},{"id":"reason","question":"原因？","default":"个人事务"}]}. Do not include top-level question, options, multiple, default, or confirm when questions is present.
+Use exactly one ask_user_question call per assistant response. If you need more than one answer, use only the questions array: {"questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假"},{"id":"reason","question":"原因？","default":"个人事务"}]}. Do not include top-level question, options, inputType, dataSource, multiple, default, or confirm when questions is present.
 
-For a single question, use top-level question/options/multiple/default/confirm. For multiple questions, use questions[]. Set default on every non-confirmation question, including every questions[] item. Confirmation is a separate single-question call with question + confirm: true and no options/multiple/questions. The answer is returned as a tool result and execution then continues.`,
+For a single question, use top-level question/options/inputType/dataSource/multiple/default/confirm. For multiple questions, use questions[]. Set default on every non-confirmation question, including every questions[] item. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. Confirmation is a separate single-question call with question + confirm: true and no options/multiple/questions. The answer is returned as a tool result and execution then continues.`,
   promptSnippet:
     "Ask the user one native question card; for several fields use one questions array with one submit button",
   promptGuidelines: [
@@ -405,7 +501,7 @@ For a single question, use top-level question/options/multiple/default/confirm. 
     "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
     "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
     "Set default on every non-confirmation question, including every item in questions, using the most likely or safest answer while still letting the user change it.",
-    "When using questions, the top level must contain only questions. Put id, question, options, multiple, and default inside each questions item.",
+    "When using questions, the top level must contain only questions. Put id, question, options, inputType, dataSource, multiple, and default inside each questions item.",
     "For forms, applications, or other user-reviewed summaries, call ask_user_question with confirm: true after presenting the final summary and before treating it as confirmed, ready to submit, or complete.",
   ],
   parameters: askUserQuestionParameters,

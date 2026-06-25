@@ -1,8 +1,13 @@
 <script lang="ts">
-  import type { AskUserQuestionAnswer, RpcResponse } from "@dano/bridge/types";
+  import type {
+    AskUserQuestionAnswer,
+    AskUserQuestionDataSource,
+    RpcResponse,
+  } from "@dano/bridge/types";
   import { t } from "../i18n";
   import {
     type AskUserQuestionItem,
+    type NormalizedAskUserQuestionOption,
     askUserQuestionMarkdown,
     askUserQuestionRequest,
     askUserQuestionResult,
@@ -43,6 +48,12 @@
   let selectedOptions = $state<Record<string, string[]>>({});
   let textAnswer = $state<Record<string, string>>({});
   let customAnswer = $state<Record<string, string>>({});
+  let remoteOptions = $state<Record<string, NormalizedAskUserQuestionOption[]>>({});
+  let remoteSearch = $state<Record<string, string>>({});
+  let remotePage = $state<Record<string, number>>({});
+  let remoteHasMore = $state<Record<string, boolean>>({});
+  let remoteLoading = $state<Record<string, boolean>>({});
+  let remoteError = $state<Record<string, string>>({});
   let submitting = $state(false);
   let error = $state("");
   let pendingReady = $state(false);
@@ -54,18 +65,28 @@
     selectedOptions = {};
     textAnswer = {};
     customAnswer = {};
+    remoteOptions = {};
+    remoteSearch = {};
+    remotePage = {};
+    remoteHasMore = {};
+    remoteLoading = {};
+    remoteError = {};
 
     for (const item of questionItems) {
       if (item.kind === "text") {
         textAnswer[item.id] = item.default ?? "";
-      } else if (item.kind === "single") {
+      } else if (item.kind === "single" || item.kind === "select" || item.kind === "treeSelect") {
         selectedOption[item.id] = selectedOptionForDefault(item, item.default);
         customAnswer[item.id] = customAnswerForDefault(item, item.default);
+        if ((item.kind === "select" || item.kind === "treeSelect") && item.dataSource) {
+          void loadRemoteOptions(item, 1, "", false);
+        }
       } else if (item.kind === "multiple") {
         selectedOptions[item.id] = selectedOptionsForDefault(item, item.default);
         customAnswer[item.id] = customAnswerForDefault(item, item.default?.find(
-          answer => !item.options.includes(answer),
+          answer => !itemOptions(item).some(option => option.id === answer),
         ));
+        if (item.dataSource) void loadRemoteOptions(item, 1, "", false);
       }
     }
 
@@ -131,43 +152,47 @@
   }
 
   function answerForItem(item: AskUserQuestionItem): AskUserQuestionAnswer | null {
-    if (item.kind === "single") {
+    if (item.kind === "single" || item.kind === "select" || item.kind === "treeSelect") {
       const selected = selectedOption[item.id] ?? "";
       if (!selected) return null;
-      return isOtherOption(selected) ? customAnswer[item.id]?.trim() || null : selected;
+      return selectedOptionIsOther(item, selected) ? customAnswer[item.id]?.trim() || null : selected;
     }
     if (item.kind === "multiple") {
       const selected = selectedOptions[item.id] ?? [];
       if (selected.length === 0) return null;
-      if (selected.some(isOtherOption) && !customAnswer[item.id]?.trim()) return null;
+      if (selected.some(option => selectedOptionIsOther(item, option)) && !customAnswer[item.id]?.trim()) return null;
       return selected.map(option =>
-        isOtherOption(option) ? customAnswer[item.id].trim() : option,
+        selectedOptionIsOther(item, option) ? customAnswer[item.id].trim() : option,
       );
     }
     if (item.kind === "text") return textAnswer[item.id]?.trim() || null;
     return null;
   }
 
-  function isOtherOption(option: string): boolean {
-    const normalized = option.trim().toLocaleLowerCase();
+  function isOtherOption(option: string | NormalizedAskUserQuestionOption): boolean {
+    const normalized = (typeof option === "string" ? option : option.label)
+      .trim()
+      .toLocaleLowerCase();
     return normalized === "其他" || normalized === "other";
   }
 
   function customAnswerSelected(item: AskUserQuestionItem): boolean {
-    if (item.kind === "single") return isOtherOption(selectedOption[item.id] ?? "");
+    if (item.kind === "single" || item.kind === "select" || item.kind === "treeSelect") {
+      return selectedOptionIsOther(item, selectedOption[item.id] ?? "");
+    }
     if (item.kind === "multiple") {
-      return (selectedOptions[item.id] ?? []).some(isOtherOption);
+      return (selectedOptions[item.id] ?? []).some(option => selectedOptionIsOther(item, option));
     }
     return false;
   }
 
   function selectedOptionForDefault(
-    item: Extract<AskUserQuestionItem, { kind: "single" | "multiple" }>,
+    item: ChoiceQuestionItem,
     answer: string | undefined,
   ): string {
     if (!answer) return "";
-    if (item.options.includes(answer)) return answer;
-    return item.options.find(isOtherOption) ?? "";
+    if (itemOptions(item).some(option => option.id === answer)) return answer;
+    return itemOptions(item).find(isOtherOption)?.id ?? "";
   }
 
   function selectedOptionsForDefault(
@@ -176,22 +201,154 @@
   ): string[] {
     if (!answers) return [];
     const selected = new Set<string>();
-    const other = item.options.find(isOtherOption);
+    const other = itemOptions(item).find(isOtherOption);
     for (const answer of answers) {
-      if (item.options.includes(answer)) selected.add(answer);
-      else if (other) selected.add(other);
+      if (itemOptions(item).some(option => option.id === answer)) selected.add(answer);
+      else if (other) selected.add(other.id);
     }
     return [...selected];
   }
 
   function customAnswerForDefault(
-    item: Extract<AskUserQuestionItem, { kind: "single" | "multiple" }>,
+    item: ChoiceQuestionItem,
     answer: string | undefined,
   ): string {
-    return answer && !item.options.includes(answer) && item.options.some(isOtherOption)
+    return answer &&
+      !itemOptions(item).some(option => option.id === answer) &&
+      itemOptions(item).some(isOtherOption)
       ? answer
       : "";
   }
+
+  type ChoiceQuestionItem = Extract<
+    AskUserQuestionItem,
+    { kind: "single" | "multiple" | "select" | "treeSelect" }
+  >;
+
+  function itemOptions(item: ChoiceQuestionItem): NormalizedAskUserQuestionOption[] {
+    const byId = new Map<string, NormalizedAskUserQuestionOption>();
+    for (const option of item.options) byId.set(option.id, option);
+    for (const option of remoteOptions[item.id] ?? []) byId.set(option.id, option);
+    return [...byId.values()];
+  }
+
+  function selectedOptionIsOther(item: ChoiceQuestionItem, selected: string): boolean {
+    const option = itemOptions(item).find(candidate => candidate.id === selected);
+    return option ? isOtherOption(option) : isOtherOption(selected);
+  }
+
+  async function loadRemoteOptions(
+    item: RemoteQuestionItem,
+    page: number,
+    search: string,
+    append: boolean,
+  ): Promise<void> {
+    if (!item.dataSource || remoteLoading[item.id]) return;
+    remoteLoading[item.id] = true;
+    remoteError[item.id] = "";
+    try {
+      const pageSize = item.dataSource.pageSize ?? 20;
+      const response = await fetchDataSource(item.dataSource, search, page, pageSize);
+      const options = normalizeRemoteOptions(
+        response.data,
+        item.dataSource,
+        item.kind === "treeSelect" || item.inputType === "treeSelect",
+      );
+      remoteOptions[item.id] = append ? [...(remoteOptions[item.id] ?? []), ...options] : options;
+      remotePage[item.id] = page;
+      remoteHasMore[item.id] =
+        typeof response.total === "number"
+          ? remoteOptions[item.id].length < response.total
+          : options.length >= pageSize;
+    } catch (cause) {
+      remoteError[item.id] = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      remoteLoading[item.id] = false;
+    }
+  }
+
+  async function fetchDataSource(
+    dataSource: NonNullable<RemoteQuestionItem["dataSource"]>,
+    search: string,
+    page: number,
+    pageSize: number,
+  ): Promise<{ data: unknown; total?: number }> {
+    const method = dataSource.method ?? "GET";
+    const params = { ...(dataSource.params ?? {}) } as Record<string, unknown>;
+    if (dataSource.searchParam && search) params[dataSource.searchParam] = search;
+    if (dataSource.pageParam) params[dataSource.pageParam] = page;
+    if (dataSource.pageSizeParam) params[dataSource.pageSizeParam] = pageSize;
+
+    const url = new URL(dataSource.endpoint, window.location.origin);
+    if (url.origin !== window.location.origin) {
+      throw new Error("Remote question dataSource must be same-origin");
+    }
+    const init: RequestInit = { method };
+    if (method === "GET") {
+      for (const [key, value] of Object.entries(params)) {
+        if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
+      }
+    } else {
+      init.headers = { "content-type": "application/json" };
+      init.body = JSON.stringify(params);
+    }
+
+    const response = await fetch(url, init);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const json = await response.json() as unknown;
+    const data = dataSource.resultPath ? valueAtPath(json, dataSource.resultPath) : json;
+    const totalValue = dataSource.totalPath ? valueAtPath(json, dataSource.totalPath) : undefined;
+    return { data, total: typeof totalValue === "number" ? totalValue : undefined };
+  }
+
+  function normalizeRemoteOptions(
+    data: unknown,
+    dataSource: NonNullable<RemoteQuestionItem["dataSource"]>,
+    flattenChildren: boolean,
+  ): NormalizedAskUserQuestionOption[] {
+    const rows = Array.isArray(data) ? data : [];
+    const idField = dataSource.idField ?? "id";
+    const labelField = dataSource.labelField ?? "label";
+    const childrenField = dataSource.childrenField ?? "children";
+    const extraFields = dataSource.extraFields ?? [];
+    const options: NormalizedAskUserQuestionOption[] = [];
+
+    const visit = (row: unknown, depth: number) => {
+      if (!isRecord(row)) return;
+      const id = row[idField];
+      const label = row[labelField];
+      if (typeof id !== "string" && typeof id !== "number") return;
+      if (typeof label !== "string" && typeof label !== "number") return;
+      const extra: Record<string, unknown> = {};
+      for (const field of extraFields) extra[field] = row[field];
+      options.push({
+        id: String(id),
+        label: `${"  ".repeat(depth)}${String(label)}`,
+        ...(extraFields.length > 0 ? { extra } : {}),
+      });
+      if (flattenChildren && Array.isArray(row[childrenField])) {
+        for (const child of row[childrenField]) visit(child, depth + 1);
+      }
+    };
+
+    for (const row of rows) visit(row, 0);
+    return options;
+  }
+
+  function valueAtPath(value: unknown, path: string): unknown {
+    return path.split(".").reduce<unknown>((current, part) => {
+      return isRecord(current) ? current[part] : undefined;
+    }, value);
+  }
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  type RemoteQuestionItem = Extract<
+    AskUserQuestionItem,
+    { kind: "select" | "treeSelect" | "multiple" }
+  > & { dataSource?: AskUserQuestionDataSource; inputType?: "treeSelect" };
 
   function answerText(
     answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>,
@@ -248,23 +405,100 @@
             {#if item.kind === "single"}
               <fieldset disabled={!pending || submitting}>
                 <legend class="sr-only">{item.question}</legend>
-                {#each item.options as option}
+                {#each itemOptions(item) as option}
                   <label class="question-option">
-                    <input type="radio" name={`question-${block.toolCallId}-${item.id}`} value={option} bind:group={selectedOption[item.id]} />
-                    <span>{option}</span>
+                    <input type="radio" name={`question-${block.toolCallId}-${item.id}`} value={option.id} bind:group={selectedOption[item.id]} />
+                    <span>{option.label}</span>
                   </label>
                 {/each}
               </fieldset>
+            {:else if item.kind === "select" || item.kind === "treeSelect"}
+              {#if item.dataSource}
+                <div class="question-remote-row">
+                  <input
+                    class="question-input"
+                    type="search"
+                    bind:value={remoteSearch[item.id]}
+                    disabled={!pending || submitting || remoteLoading[item.id]}
+                    placeholder={t("questionTool.searchPlaceholder")}
+                  />
+                  <button
+                    type="button"
+                    class="secondary"
+                    disabled={!pending || submitting || remoteLoading[item.id]}
+                    onclick={() => void loadRemoteOptions(item, 1, remoteSearch[item.id] ?? "", false)}
+                  >
+                    {t("questionTool.search")}
+                  </button>
+                </div>
+              {/if}
+              <label class="sr-only" for={`question-${block.toolCallId}-${item.id}`}>{item.question}</label>
+              <select
+                id={`question-${block.toolCallId}-${item.id}`}
+                class="question-input"
+                bind:value={selectedOption[item.id]}
+                disabled={!pending || submitting || remoteLoading[item.id]}
+              >
+                <option value="">{t("questionTool.selectPlaceholder")}</option>
+                {#each itemOptions(item) as option}
+                  <option value={option.id}>{option.label}</option>
+                {/each}
+              </select>
+              {#if remoteError[item.id]}
+                <div class="question-error" role="alert">{remoteError[item.id]}</div>
+              {/if}
+              {#if item.dataSource && remoteHasMore[item.id]}
+                <button
+                  type="button"
+                  class="secondary load-more"
+                  disabled={!pending || submitting || remoteLoading[item.id]}
+                  onclick={() => void loadRemoteOptions(item, (remotePage[item.id] ?? 1) + 1, remoteSearch[item.id] ?? "", true)}
+                >
+                  {remoteLoading[item.id] ? t("questionTool.loading") : t("questionTool.loadMore")}
+                </button>
+              {/if}
             {:else if item.kind === "multiple"}
+              {#if item.dataSource}
+                <div class="question-remote-row">
+                  <input
+                    class="question-input"
+                    type="search"
+                    bind:value={remoteSearch[item.id]}
+                    disabled={!pending || submitting || remoteLoading[item.id]}
+                    placeholder={t("questionTool.searchPlaceholder")}
+                  />
+                  <button
+                    type="button"
+                    class="secondary"
+                    disabled={!pending || submitting || remoteLoading[item.id]}
+                    onclick={() => void loadRemoteOptions(item, 1, remoteSearch[item.id] ?? "", false)}
+                  >
+                    {t("questionTool.search")}
+                  </button>
+                </div>
+              {/if}
               <fieldset disabled={!pending || submitting}>
                 <legend class="sr-only">{item.question}</legend>
-                {#each item.options as option}
+                {#each itemOptions(item) as option}
                   <label class="question-option">
-                    <input type="checkbox" value={option} bind:group={selectedOptions[item.id]} />
-                    <span>{option}</span>
+                    <input type="checkbox" value={option.id} bind:group={selectedOptions[item.id]} />
+                    <span>{option.label}</span>
                   </label>
                 {/each}
               </fieldset>
+              {#if remoteError[item.id]}
+                <div class="question-error" role="alert">{remoteError[item.id]}</div>
+              {/if}
+              {#if item.dataSource && remoteHasMore[item.id]}
+                <button
+                  type="button"
+                  class="secondary load-more"
+                  disabled={!pending || submitting || remoteLoading[item.id]}
+                  onclick={() => void loadRemoteOptions(item, (remotePage[item.id] ?? 1) + 1, remoteSearch[item.id] ?? "", true)}
+                >
+                  {remoteLoading[item.id] ? t("questionTool.loading") : t("questionTool.loadMore")}
+                </button>
+              {/if}
             {:else if item.kind === "text"}
               <label class="sr-only" for={`question-${block.toolCallId}-${item.id}`}>{item.question}</label>
               <input
@@ -371,6 +605,12 @@
 
   .question-option input { accent-color: var(--accent); }
 
+  .question-remote-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+  }
+
   .question-input {
     box-sizing: border-box;
     width: 100%;
@@ -390,6 +630,8 @@
   }
 
   .question-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+  .load-more { justify-self: start; }
 
   button {
     padding: 8px 14px;
