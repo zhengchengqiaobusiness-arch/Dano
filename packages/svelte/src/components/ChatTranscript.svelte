@@ -872,7 +872,9 @@
                   {/if}
                 </article>
               {:else if block.kind === "thinking"}
-                <div class="thinking-block">
+                <div
+                  class={`thinking-block ${blockState.isThinkingExpanded(thinkingBlockStateKey(item.message, item.messageIndex, bIdx)) ? "expanded" : ""}`}
+                >
                   <button
                     class="thinking-toggle"
                     onclick={() => blockState.toggleThinking(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
@@ -1261,26 +1263,26 @@
     background: var(--panel);
   }
 
-  :global(.markdown-body) + :global(.markdown-body),
-  :global(.markdown-body) + .thinking-block,
-  :global(.markdown-body) + .tool-inline-block,
-  :global(.markdown-body) + .message-image-block,
-  :global(.markdown-body) + .system-block,
-  .thinking-block + :global(.markdown-body),
+  :global(.markdown-renderer) + :global(.markdown-renderer),
+  :global(.markdown-renderer) + .thinking-block,
+  :global(.markdown-renderer) + .tool-inline-block,
+  :global(.markdown-renderer) + .message-image-block,
+  :global(.markdown-renderer) + .system-block,
+  .thinking-block + :global(.markdown-renderer),
   .thinking-block + .thinking-block,
   .thinking-block + .tool-inline-block,
   .thinking-block + .message-image-block,
   .thinking-block + .system-block,
-  .tool-inline-block + :global(.markdown-body),
+  .tool-inline-block + :global(.markdown-renderer),
   .tool-inline-block + .thinking-block,
   .tool-inline-block + .message-image-block,
   .tool-inline-block + .system-block,
-  .message-image-block + :global(.markdown-body),
+  .message-image-block + :global(.markdown-renderer),
   .message-image-block + .thinking-block,
   .message-image-block + .tool-inline-block,
   .message-image-block + .message-image-block,
   .message-image-block + .system-block,
-  .system-block + :global(.markdown-body),
+  .system-block + :global(.markdown-renderer),
   .system-block + .thinking-block,
   .system-block + .tool-inline-block,
   .system-block + .message-image-block,
@@ -1290,6 +1292,10 @@
 
   .tool-inline-block + .tool-inline-block {
     margin-top: 6px;
+  }
+
+  .thinking-block.expanded + :global(.markdown-renderer) {
+    margin-top: 10px;
   }
 
   .tool-inline-block,

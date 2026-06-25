@@ -452,7 +452,7 @@
 
 </script>
 
-<div bind:this={container} role="button" tabindex="0" onclick={handleClick} onkeydown={(e) => (e.key === "Enter" || e.key === " ") && handleClickTarget(e.target)}>
+<div class="markdown-renderer" bind:this={container} role="button" tabindex="0" onclick={handleClick} onkeydown={(e) => (e.key === "Enter" || e.key === " ") && handleClickTarget(e.target)}>
   <Comark
     markdown={content}
     options={COMARK_OPTIONS}
