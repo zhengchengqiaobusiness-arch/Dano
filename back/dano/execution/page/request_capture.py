@@ -51,6 +51,9 @@ def extract_auth_headers(headers: dict | None) -> dict:
 # 标记"这层原本是字符串化的 JSON"(如若依/工作流把整张表单打成一段 JSON 文本塞进 formData):
 # 运行期 substitute 据此把填好值的内层结构 re-stringify 回字符串,目标系统照常解析。
 _JSONSTR = "__dano_jsonstr__"
+# 段拼接模板:值嵌在长串里时(如 "请假事由:回家",用户只填"回家")只参数化那一段、保留常量前后缀。
+# 形如 {__dano_seg__: ["请假事由:", {"$p": "原因"}, "后缀"]} → 运行期 substitute join 成最终字符串。
+_SEG = "__dano_seg__"
 
 
 def _unwrap_json_strings(node, depth: int = 0):
@@ -79,8 +82,13 @@ def _parse_body(post_data: str | None):
     if not post_data:
         return None
     try:
-        return _unwrap_json_strings(json.loads(post_data))   # 解析 + 解开内层 stringified JSON,内层字段可参数化
-    except Exception:  # noqa: BLE001 —— 非 JSON(form-urlencoded 等)暂不处理
+        return _unwrap_json_strings(json.loads(post_data))   # JSON:解析 + 解开内层 stringified JSON,内层字段可参数化
+    except Exception:  # noqa: BLE001 —— 非 JSON,尝试 application/x-www-form-urlencoded(a=1&b=2)
+        if "=" in post_data:
+            from urllib.parse import parse_qsl
+            pairs = parse_qsl(post_data, keep_blank_values=True)
+            if pairs:
+                return dict(pairs)                           # 扁平表单字段(同样可参数化 / identity / select)
         return None
 
 
@@ -607,6 +615,74 @@ def _date_keys(s) -> set:
     return out
 
 
+# 字段置信度阈值(P1):≥0.90 自动录入;0.70–0.90 建议用户确认;<0.70 不应自动录入(需澄清)
+CONF_AUTO = 0.90
+CONF_CLARIFY = 0.70
+
+
+def confidence_tier(c: float) -> str:
+    """置信度 → 路由:auto(自动录)/ clarify(建议用户确认)/ reject(不自动录,需澄清)。"""
+    if c >= CONF_AUTO:
+        return "auto"
+    if c >= CONF_CLARIFY:
+        return "clarify"
+    return "reject"
+
+
+def _field_confidence(label, confident: bool, key: str, is_param: bool) -> float:
+    """对字段语义(名字/含义)的置信度。固定字段不影响调用记高;参数按 DOM 标签佐证强弱与 key 形态评分。
+    通用,不挑系统/字段。"""
+    if not is_param:
+        return 0.95                                # 固定字段:不参数化,语义不影响调用
+    if label and confident:
+        return 0.96                                # 值唯一对到 DOM 标签 → 高(可自动)
+    if label:
+        return 0.78                                # 有标签但值有歧义/跨格式对 → 中(建议确认)
+    if looks_internal_param_name(key):
+        return 0.45                                # 无标签且 key 像内部机器标识(Activity_xxx/hash)→ 低(需澄清)
+    return 0.72                                    # 无标签但 key 人类可读 → 中(可勉强自动,建议确认)
+
+
+# ─────────── P2:活体验证自适应策略(可逆沙箱才硬卡真跑,不可逆只结构验、诚实降级) ───────────
+def env_controllability(deploy: dict | None) -> str:
+    """环境可控性分级 —— 决定活体验证能否硬卡(可逆沙箱可真发写+撤销;不可逆真发会污染、删不掉)。
+
+    reversible:声明的可逆测试沙箱(env=sandbox/test/staging 或 reversible=True)→ 可真跑+回查+清理;
+    irreversible:生产/不可逆(env=prod/live 或 reversible=False)→ 只做结构验,降级 partially_verified;
+    unknown:未声明 → **保守当不可逆**(宁可降级,不冒险真发)。通用,不挑系统。"""
+    d = deploy or {}
+    if d.get("reversible") is True:
+        return "reversible"
+    if d.get("reversible") is False:
+        return "irreversible"
+    env = str(d.get("environment") or d.get("env") or "").lower()
+    if env in ("sandbox", "test", "staging"):
+        return "reversible"
+    if env in ("prod", "production", "live"):
+        return "irreversible"
+    return "unknown"
+
+
+def capture_verification_plan(deploy: dict | None, api_request: dict) -> dict:
+    """录制 skill 该做哪种验证(自适应闸门 = f(可控性 × 回查手段)):
+
+    live:环境可逆 **且** 有 fact_check 回查手段 → 可真跑+事实核查 → 通过即 verified;
+    structural:否则只做确定性 self_check → partially_verified(诚实降级,不假装活体验过)。"""
+    ctrl = env_controllability(deploy)
+    has_fc = bool(api_request.get("fact_check"))
+    if ctrl == "reversible" and has_fc:
+        return {"mode": "live", "controllability": ctrl, "fact_check": True,
+                "reason": "环境可逆且有回查手段 → 可真跑 + 事实核查(verified)"}
+    reason = ("环境不可逆/未声明 → 不真发写,避免污染(partially_verified)" if ctrl != "reversible"
+              else "缺回查手段(未录「查看记录」步)→ 无法确认业务真生效(partially_verified)")
+    return {"mode": "structural", "controllability": ctrl, "fact_check": has_fc, "reason": reason}
+
+
+def test_data_tag(run_id: str) -> str:
+    """活体真跑时给测试单据打的唯一标记 → 便于事后识别/撤销,避免污染真实审批队列。"""
+    return f"[DANO-TEST-{run_id}]"
+
+
 def flatten_body(post_data: str | None, samples: dict | None = None,
                  required_labels: set | None = None) -> list[dict]:
     """把请求体拍平成叶子字段列表 + 参数建议,供前端勾选。任意嵌套(dict/list)→ 点路径。
@@ -659,10 +735,14 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
             label, confident = match_label(sv)
             time_like = bool(_TIME_KEY.search(key))
             const = (not time_like) and (bool(_ID_KEY.search(key)) or _is_const_value(node))
+            is_param = bool(label is not None or (not const and sv != ""))
+            conf = _field_confidence(label, confident, key, is_param)
             out.append({"path": path, "key": key, "value": sv,
-                        "suggest_param": bool(label is not None or (not const and sv != "")),
+                        "suggest_param": is_param,
                         "suggest_name": label or key,            # 对不上 → 退原始 key(不瞎猜)
                         "type": _infer_type(node, key),           # 字段类型(值推断),给 agent/契约
+                        "confidence": conf,                       # 字段语义置信度(P1)
+                        "confidence_tier": confidence_tier(conf),  # auto / clarify / reject(需澄清)
                         # 表单 * 必填:仅当该值唯一对应一个字段(confident)才据标签判必填,模糊命中不误标
                         "required": bool(label is not None and confident and label in required_labels)})
 
@@ -671,11 +751,14 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
 
 
 def build_api_request(req: dict, param_map: dict, base_url: str = "",
-                      selects: list[dict] | None = None, identity: list[dict] | None = None) -> dict | None:
+                      selects: list[dict] | None = None, identity: list[dict] | None = None,
+                      typed: dict | None = None) -> dict | None:
     """param_map: {字段点路径 → 参数名}。把这些路径的叶子替换成 {{参数名}},其余原样。
 
     selects:[{path, source_url, value_key, label_key}](Q2 选领导,path 须在 param_map 里 → 运行期名字→ID);
-    identity:[{path, source}](Q1 当前用户/会话值,运行期重取覆盖,不作参数)。
+    identity:[{path, source}](Q1 当前用户/会话值,运行期重取覆盖,不作参数);
+    typed:{参数名 → 录制时用户填写值}。仅当某参数的填写值是其叶子的**真子串**(如叶子"请假事由:回家"、填写"回家")
+    时,改成段拼接(B2):只参数化那一段、保留常量前后缀。其余情况整值替换(不变)。
     返回 {method, path, url, content_type, body_template, params, sample_inputs, auth_headers, selects, identity}。
     """
     body = _parse_body(req.get("post_data"))
@@ -692,9 +775,15 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
             return [walk(v, f"{path}[{i}]") for i, v in enumerate(node)]
         if path in param_map:
             name = param_map[path]
+            sv = "" if node is None else str(node)
             params.append(name)
-            samples[name] = "" if node is None else str(node)
             types[name] = _infer_type(node, path.split(".")[-1].split("[")[0])   # 字段类型(值推断)
+            rec = str(typed.get(name)) if (typed and typed.get(name) not in (None, "")) else None
+            if rec and len(rec) >= 2 and rec != sv and isinstance(node, str) and rec in sv:
+                samples[name] = rec                          # B2:填写值是真子串 → 段拼接,保留常量前后缀
+                pre, _, post = sv.partition(rec)
+                return {_SEG: [s for s in (pre, {"$p": name}, post) if s != ""]}
+            samples[name] = sv
             return "{{" + name + "}}"
         return node
 
@@ -735,6 +824,16 @@ def substitute(template, fields: dict, defaults: dict | None = None):
     if isinstance(template, dict):
         if set(template) == {_JSONSTR}:                  # 这层原本是 JSON 字符串:**先保留标记**,
             return {_JSONSTR: substitute(template[_JSONSTR], fields, defaults)}   # 等 identity/串联注入后再 re-stringify
+        if set(template) == {_SEG}:                      # 段拼接:常量 + {{参数}} 子串 → join 成最终字符串
+            out = []
+            for it in template[_SEG]:
+                if isinstance(it, dict) and "$p" in it:
+                    k = it["$p"]
+                    out.append(str(fields[k]) if k in fields else
+                               (str(defaults[k]) if k in defaults else "{{" + k + "}}"))
+                else:
+                    out.append(str(it))
+            return "".join(out)
         return {k: substitute(v, fields, defaults) for k, v in template.items()}
     if isinstance(template, list):
         return [substitute(x, fields, defaults) for x in template]
@@ -1253,7 +1352,8 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
                 "detail": "；".join(id_issues) + " —— 已拒绝提交(避免以录制者身份写入)"}
     from urllib.parse import urlparse
     host = urlparse(url).hostname or ""
-    headers = {"Content-Type": api_request.get("content_type") or "application/json"}
+    ct = api_request.get("content_type") or "application/json"
+    headers = {"Content-Type": ct}
     # ① 录制时抓到的应用自定义鉴权头(Authorization / Admin-Token / satoken / 租户号…)原样带上 —— 通用,不挑系统
     headers.update(api_request.get("auth_headers") or {})
     # ② Cookie 用 storageState 的(更全/可能更新);没抓到自定义头时,才回退到按 token_key 猜 Authorization
@@ -1263,8 +1363,13 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     if "Authorization" not in headers and not (api_request.get("auth_headers") or {}) and ck.get("Authorization"):
         headers["Authorization"] = ck["Authorization"]
     import httpx
+    # 按录制时的编码发:form-urlencoded 走 data(httpx 自动 urlencode 扁平表单),否则 JSON body —— 通用,不挑系统
+    is_form = "form-urlencoded" in ct.lower()
+    send_kw = ({"data": {k: ("" if v is None else v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+                              if isinstance(v, (dict, list)) else str(v)) for k, v in (body or {}).items()}}
+               if is_form else {"json": body})
     async with httpx.AsyncClient(timeout=30, verify=verify) as c:
-        r = await c.request(method, url, json=body, headers=headers)
+        r = await c.request(method, url, headers=headers, **send_kw)
     try:
         data = r.json()
     except Exception:  # noqa: BLE001
@@ -1356,7 +1461,8 @@ async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
 
 
 def build_api_workflow(writes: list[dict], *, param_map: dict, base_url: str = "",
-                       selects: list[dict] | None = None, identity: list[dict] | None = None) -> dict:
+                       selects: list[dict] | None = None, identity: list[dict] | None = None,
+                       typed: dict | None = None) -> dict:
     """把有序写请求组装成多步工作流(Q3):每步=一个抓到的请求;**最后一步**带用户参数/select/identity,
     其余步是常量(其动态值靠步链注入);自动发现步间数据流(taskId 等)挂到对应目标步。
 
@@ -1368,7 +1474,8 @@ def build_api_workflow(writes: list[dict], *, param_map: dict, base_url: str = "
         last = i == n - 1
         apir = build_api_request(w, param_map if last else {}, base_url,
                                  selects=selects if last else None,
-                                 identity=identity if last else None)
+                                 identity=identity if last else None,
+                                 typed=typed if last else None)
         steps.append(apir or {})
     for lk in discover_step_links(writes):                   # 步间数据流挂到目标步
         steps[lk["target_step"]].setdefault("links", []).append(

@@ -614,7 +614,8 @@ def test_substitute_falls_back_to_recorded_default():
 
 
 def test_non_json_body_returns_none():
-    assert parameterize_request({"method": "POST", "url": "/x", "post_data": "a=1&b=2"}, _SAMPLES) is None
+    # 纯文本(非 JSON、非表单)→ None;form-urlencoded 现已支持,见 test_parse_body_form_urlencoded
+    assert parameterize_request({"method": "POST", "url": "/x", "post_data": "plain text no kv"}, _SAMPLES) is None
 
 
 def test_real_leave_body_fixed_fields_preserved_generally():
@@ -733,7 +734,7 @@ def test_flatten_required_from_form_star():
 
 
 def test_flatten_body_non_json_returns_empty():
-    assert flatten_body("a=1&b=2") == []
+    assert flatten_body("plain text no kv") == []     # 非 JSON 非表单 → 空(form 体现已支持,另有专测)
     assert flatten_body(None) == []
 
 
@@ -1221,3 +1222,137 @@ def test_property_fuzz_self_check_catches_dropped_param():
         apir, _p, _i = _fuzz_apir(rng)
         apir["params"] = apir["params"] + ["__ghost__"]
         assert any("__ghost__" in p for p in self_check(apir)), f"seed={seed} 漏报丢参数"
+
+
+# ─────────── P1:多编码 —— application/x-www-form-urlencoded 表单(不止 JSON) ───────────
+def test_parse_body_form_urlencoded():
+    """非 JSON 的 form 体能解析成扁平字段(可参数化),不再整体 unsupported。"""
+    from dano.execution.page.request_capture import _parse_body
+    assert _parse_body("title=测试&amount=100&applicant=张三") == {
+        "title": "测试", "amount": "100", "applicant": "张三"}
+    assert _parse_body("not a form, plain text") is None     # 无 '=' 不误判成表单
+
+
+def test_build_api_request_form_urlencoded_parameterizes():
+    """form 体同样按值参数化(扁平字段)。"""
+    req = {"method": "POST", "url": "http://oa.x/sys/save",
+           "content_type": "application/x-www-form-urlencoded",
+           "post_data": "title=旧标题&amount=100"}
+    apir = build_api_request(req, {"title": "标题", "amount": "金额"})
+    assert apir["body_template"] == {"title": "{{标题}}", "amount": "{{金额}}"}
+    assert apir["content_type"] == "application/x-www-form-urlencoded"
+
+
+async def test_execute_sends_form_urlencoded():
+    """form 表单:解析→参数化→真发按 form 编码(不是 JSON),服务器收到正确字段与 Content-Type。"""
+    import http.server
+    import threading
+    import urllib.parse as _up
+    received: dict = {}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            received["form"] = dict(_up.parse_qsl(self.rfile.read(n).decode()))
+            received["ct"] = self.headers.get("Content-Type", "")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"code":200}')
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        req = {"method": "POST", "url": f"http://127.0.0.1:{port}/save",
+               "content_type": "application/x-www-form-urlencoded",
+               "post_data": "title=旧标题&amount=100"}
+        apir = build_api_request(req, {"title": "标题", "amount": "金额"})
+        out = await execute_api_request(apir, {"标题": "新标题", "金额": "200"}, send=True, verify=False)
+        assert out["ok"] and out["status"] == 200, out
+        assert received["form"] == {"title": "新标题", "amount": "200"}
+        assert "form-urlencoded" in received["ct"]
+    finally:
+        srv.shutdown()
+
+
+# ─────────── P1:字段置信度打分 + 阈值路由 ───────────
+def test_flatten_body_confidence_scoring():
+    """字段置信度:值对到 DOM 标签 → 高(auto);内部机器标识 key 无标签 → 低(需澄清)。"""
+    body = '{"reason":"回家","Activity_09dlq0g":"待定选项"}'
+    fields = {f["key"]: f for f in flatten_body(body, {"原因": "回家"})}
+    assert fields["reason"]["confidence_tier"] == "auto"          # 值唯一对到标签"原因"
+    act = fields["Activity_09dlq0g"]                              # 无标签 + 像 BPM 节点 ID
+    assert act["confidence"] < 0.90 and act["confidence_tier"] in ("clarify", "reject")
+
+
+def test_confidence_tier_thresholds():
+    from dano.execution.page.request_capture import confidence_tier
+    assert confidence_tier(0.96) == "auto"
+    assert confidence_tier(0.75) == "clarify"
+    assert confidence_tier(0.4) == "reject"
+
+
+# ─────────── P1:B2 子串参数化(值嵌在长串里,只参数化那一段、保留常量前后缀) ───────────
+def test_substitute_segments_join():
+    from dano.execution.page.request_capture import _SEG
+    out = substitute({_SEG: ["请假事由:", {"$p": "原因"}]}, {"原因": "回家"})
+    assert out == "请假事由:回家"
+    # 没填该参数 → 留 {{}} 占位(供 leftover 检测)
+    assert "{{原因}}" in substitute({_SEG: ["x", {"$p": "原因"}]}, {})
+
+
+def test_build_api_request_substring_keeps_constant_prefix():
+    """填写值是叶子真子串 → 段拼接;改参数只动那一段,前缀常量保留。"""
+    from dano.execution.page.request_capture import _SEG
+    req = {"method": "POST", "url": "http://x/y", "post_data": '{"remark":"请假事由:回家"}'}
+    apir = build_api_request(req, {"remark": "原因"}, typed={"原因": "回家"})
+    assert apir["body_template"]["remark"] == {_SEG: ["请假事由:", {"$p": "原因"}]}
+    out = substitute(apir["body_template"], {"原因": "出差三天"})
+    assert out["remark"] == "请假事由:出差三天"               # 前缀保留,只换子串
+
+
+def test_build_api_request_whole_value_not_split():
+    """填写值==整个叶子 → 整值替换(不切段);未标记字段保持常量(不被误切)。"""
+    req = {"method": "POST", "url": "http://x/y",
+           "post_data": '{"title":"测试采购","note":"采购说明:测试采购"}'}
+    apir = build_api_request(req, {"title": "标题"}, typed={"标题": "测试采购"})
+    assert apir["body_template"]["title"] == "{{标题}}"       # 整值=填写值 → 整体替换
+    assert apir["body_template"]["note"] == "采购说明:测试采购"  # 未标记 → 常量,虽含"测试采购"也不切
+
+
+def test_self_check_passes_with_segment_template():
+    from dano.execution.page.request_capture import _SEG
+    apir = {"body_template": {"remark": {_SEG: ["前缀:", {"$p": "原因"}]}}, "params": ["原因"]}
+    assert self_check(apir) == []
+
+
+# ─────────── P2:活体验证自适应策略(可控性分级 + 验证计划 + 测试数据标记) ───────────
+def test_env_controllability_classification():
+    from dano.execution.page.request_capture import env_controllability
+    assert env_controllability({"environment": "sandbox"}) == "reversible"
+    assert env_controllability({"reversible": True}) == "reversible"
+    assert env_controllability({"environment": "prod"}) == "irreversible"
+    assert env_controllability({"reversible": False}) == "irreversible"
+    assert env_controllability({}) == "unknown"            # 未声明 → 保守当不可逆
+    assert env_controllability(None) == "unknown"
+
+
+def test_capture_verification_plan_adaptive():
+    """自适应闸门:可逆+有回查→live(可 verified);否则 structural(partially_verified)。"""
+    from dano.execution.page.request_capture import capture_verification_plan
+    live = capture_verification_plan({"environment": "sandbox"}, {"fact_check": {"endpoint": "/my"}})
+    assert live["mode"] == "live" and live["controllability"] == "reversible"
+    no_fc = capture_verification_plan({"environment": "sandbox"}, {})
+    assert no_fc["mode"] == "structural" and no_fc["fact_check"] is False
+    prod = capture_verification_plan({"environment": "prod"}, {"fact_check": {"endpoint": "/my"}})
+    assert prod["mode"] == "structural" and prod["controllability"] == "irreversible"
+    assert capture_verification_plan({}, {"fact_check": {}})["mode"] == "structural"
+
+
+def test_test_data_tag():
+    from dano.execution.page.request_capture import test_data_tag
+    assert test_data_tag("run-20260625-001") == "[DANO-TEST-run-20260625-001]"

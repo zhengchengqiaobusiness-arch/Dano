@@ -655,10 +655,12 @@ async def record_ws(ws: WebSocket) -> None:
                 step_idxs = [i for i in (msg.get("step_idxs") or []) if 0 <= i < len(pending_candidates)]
                 if len(step_idxs) > 1:
                     writes = [pending_candidates[i] for i in step_idxs]
-                    apir = build_api_workflow(writes, param_map=param_map, selects=sels, identity=idens)
+                    apir = build_api_workflow(writes, param_map=param_map, selects=sels, identity=idens,
+                                              typed=pending_samples)
                     last_params = (apir.get("steps") or [{}])[-1].get("params") or []
                 else:
-                    apir = build_api_request(pending_req, param_map, selects=sels, identity=idens)
+                    apir = build_api_request(pending_req, param_map, selects=sels, identity=idens,
+                                             typed=pending_samples)
                     last_params = (apir or {}).get("params") or []
                 if apir and fc:
                     apir["fact_check"] = fc            # 提交后回查记录确认真生效(grounded)

@@ -243,10 +243,13 @@ async def run_request_onboarding(
             log.warning("request_onboard.internal_param_names", action=action, params=bad)
         published = pub.get("published", False)
         log.info("request_onboard.done", action=action, published=published)
-        # capture 是 dry-only(从不真发写请求)→ 结构已验、活体未验 → partially_verified(诚实);发布失败 → rejected
+        # capture 走 dry self_check(从不真发写请求)→ 结构已验、活体未验 → partially_verified(诚实);发布失败 → rejected。
+        # verification_plan 告诉调用方:这套环境能否进一步做活体验证(可逆沙箱+有回查 → 可升 verified)。
+        from dano.execution.page.request_capture import capture_verification_plan
+        plan = capture_verification_plan(deploy, api_request)
         return {"ok": published, "stage": "publish",
                 "status": (IngestionStatus.PARTIALLY_VERIFIED if published else IngestionStatus.REJECTED).value,
-                "action": action,
+                "action": action, "verification_plan": plan,
                 "asset_id": pub.get("asset_id"), "mode": "request", "reason": pub.get("reason", ""),
                 "warnings": warnings,
                 "api": {"method": api_request.get("method"), "path": api_request.get("path"),
