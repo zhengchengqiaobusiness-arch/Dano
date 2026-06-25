@@ -46,10 +46,17 @@ export function askUserQuestionMarkdown(question: string): string {
   return question.replace(/\\+(?:r\\+n|n)/g, "\n");
 }
 
-export function hideAskUserQuestionToolBlock(block: ToolContentBlock): boolean {
+export function isAskUserQuestionToolError(block: ToolContentBlock): boolean {
   return (
     block.toolName === ASK_USER_QUESTION_TOOL_NAME && block.toolStatus === "error"
   );
+}
+
+export function hideAskUserQuestionToolBlock(
+  block: ToolContentBlock,
+  failedAskUserQuestionIndex = 0,
+): boolean {
+  return isAskUserQuestionToolError(block) && failedAskUserQuestionIndex === 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

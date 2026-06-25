@@ -4,6 +4,7 @@ import {
   askUserQuestionRequest,
   askUserQuestionResult,
   hideAskUserQuestionToolBlock,
+  isAskUserQuestionToolError,
 } from "./askUserQuestion";
 import type { ToolContentBlock } from "./transcript";
 
@@ -264,12 +265,16 @@ describe("ask user question transcript data", () => {
     expect(askUserQuestionResult(null)).toBeNull();
   });
 
-  it("hides failed ask_user_question tool calls from the transcript UI", () => {
+  it("hides only the first failed ask_user_question tool call from the transcript UI", () => {
+    const failedBlock = block({ question: "Name?" }, { toolStatus: "error" });
+
+    expect(isAskUserQuestionToolError(failedBlock)).toBe(true);
     expect(
       hideAskUserQuestionToolBlock(
-        block({ question: "Name?" }, { toolStatus: "error" }),
+        failedBlock,
       ),
     ).toBe(true);
+    expect(hideAskUserQuestionToolBlock(failedBlock, 1)).toBe(false);
     expect(
       hideAskUserQuestionToolBlock(
         block({ question: "Name?" }, { toolStatus: "success" }),
