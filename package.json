@@ -17,6 +17,7 @@
     "deploy:down": "node scripts/deploy-compose.mjs down",
     "deploy:logs": "node scripts/deploy-compose.mjs logs",
     "deploy:ps": "node scripts/deploy-compose.mjs ps",
+    "deploy:release": "node scripts/deploy-release.mjs",
     "deploy:stop": "node scripts/deploy-compose.mjs stop",
     "deploy:up": "node scripts/deploy-compose.mjs up",
     "dev:bridge:standalone": "pnpm -C apps/dano dev",

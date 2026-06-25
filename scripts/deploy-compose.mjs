@@ -25,10 +25,8 @@ switch (command) {
   case "up": {
     if (process.env.DANO_IMAGE?.trim()) {
       run(["pull", "app"]);
-      run(["up", "-d", "--no-build"]);
-    } else {
-      run(["up", "--build", "-d"]);
     }
+    run(["up", "-d", "--no-build"]);
     break;
   }
   case "down":

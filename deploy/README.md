@@ -7,8 +7,13 @@ This directory contains deployment-specific defaults and proxy config.
 - Source runtime defaults live in `deploy/runtime-defaults/`.
 - The runtime compatibility directory is `$DANO_DEFAULT_WORKSPACE_PATH/.pi`.
 - The default workspace is `/tmp/dano`.
-- Docker Compose mounts `./runtime-data:/tmp/dano`, so runtime sessions and
-  user-modified `.pi` files survive container recreation.
+- Production deployment keeps three directories separate:
+  - `/tmp/dano-build-*` is the disposable source checkout and image build dir.
+  - `/opt/dano/deploy` stores Compose, `.env`, secrets, and nginx config.
+  - `/opt/dano/runtime-data` is mounted at `/tmp/dano` for runtime state.
+- Docker Compose mounts `${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/tmp/dano`, so
+  runtime sessions and user-modified `.pi` files survive container recreation
+  without writing into a source checkout.
 
 On container startup, `deploy/docker-entrypoint.sh` creates:
 
@@ -28,6 +33,7 @@ Heimdall can create the nested Bubblewrap namespace used by guarded bash calls.
 
 ```bash
 cp .env.example .env
+docker build -t dano-app:local .
 DANO_NGINX_PORT=18082 pnpm run deploy:up
 DANO_SMOKE_BASE_URL=http://127.0.0.1:18082 pnpm run smoke:deploy
 pnpm run deploy:logs
@@ -35,28 +41,34 @@ pnpm run deploy:stop
 pnpm run deploy:down
 ```
 
-`deploy:stop` preserves containers and runtime data. `deploy:down` removes the
-containers and Compose network; bind-mounted `runtime-data/` remains intact.
+For local runs, point `DANO_RUNTIME_DIR`, `DANO_NGINX_CONF`, and
+`DANO_SECRETS_DIR` in `.env` at local paths. `deploy:up` runs Compose with
+`--no-build`; build the image first or use `deploy:release`. `deploy:stop`
+preserves containers and runtime data. `deploy:down` removes the containers and
+Compose network; the bind-mounted runtime directory remains intact.
 
 The app container listens on `8080`; nginx publishes `${DANO_NGINX_PORT:-80}`.
 
 ## Production Server Run
 
-Prefer pulling a prebuilt image instead of building with pnpm on the target
-host:
+The release script builds from a temporary source checkout, copies only deploy
+inputs to `/opt/dano/deploy`, starts the prebuilt image, runs the smoke test,
+and removes `/tmp/dano-build-*` even when a step fails:
 
 ```bash
-DANO_IMAGE=ghcr.io/your-org/dano:latest pnpm run deploy:up
+DANO_REPO_URL=git@github.com:zhengchengqiaobusiness-arch/Dano.git \
+DANO_GIT_REF=main \
+pnpm run deploy:release
 ```
 
-When `DANO_IMAGE` is set, `scripts/deploy-compose.mjs` pulls the app image and
-runs Compose with `--no-build`.
-
-If building on the target host is unavoidable:
+To start from an already-built local or pulled image in `/opt/dano/deploy`:
 
 ```bash
-pnpm run deploy:up
+cd /opt/dano/deploy
+DANO_IMAGE=dano-app:local docker compose --env-file .env up -d --no-build
 ```
+
+`scripts/deploy-compose.mjs` uses the same `--no-build` path.
 
 The Dockerfile intentionally uses `node:22-bookworm-slim` instead of
 `node:22-alpine`. On the CentOS 7 publish host
@@ -88,7 +100,7 @@ builds depend on host Docker/kernel/storage behavior.
 
 ## Secrets
 
-Do not commit `.env`, `runtime-data/`, or `.secrets/`.
+Do not commit `.env`, runtime data, or `.secrets/`.
 
 Set provider credentials in `.env`:
 
@@ -118,7 +130,7 @@ chmod 600 .secrets/openai_api_key
 OPENAI_API_KEY_FILE=/run/secrets/openai_api_key pnpm run deploy:up
 ```
 
-Compose mounts `./.secrets:/run/secrets:ro`.
+Compose mounts `${DANO_SECRETS_DIR:-/opt/dano/deploy/.secrets}:/run/secrets:ro`.
 
 ## HTTP and TLS
 
