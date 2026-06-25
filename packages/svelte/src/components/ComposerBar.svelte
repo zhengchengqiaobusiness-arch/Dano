@@ -595,6 +595,12 @@
     border-radius: 24px;
   }
 
+  .composer-dock:has(.attachment-strip):not(.multiline) {
+    flex-wrap: wrap;
+    row-gap: 10px;
+    border-radius: 24px;
+  }
+
   .revision-banner {
     display: flex;
     align-items: center;
