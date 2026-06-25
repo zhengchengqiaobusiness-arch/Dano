@@ -43,7 +43,6 @@ export interface ToolContentBlock {
 export interface ThinkingContentBlock {
   kind: "thinking";
   text: string;
-  redacted?: boolean;
 }
 
 export interface ImageContentBlock {
@@ -211,8 +210,6 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
     const skillBlock = parseSkillBlockFromText(msg.text);
     if (skillBlock) {
       blocks.push(skillBlock);
-    } else if (msg.role === "assistant") {
-      blocks.push(...textContentBlocks(msg.text));
     } else {
       blocks.push({ kind: "text", text: msg.text });
     }
@@ -227,8 +224,6 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
       const skillBlock = parseSkillBlockFromText(block);
       if (skillBlock) {
         blocks.push(skillBlock);
-      } else if (msg.role === "assistant") {
-        blocks.push(...textContentBlocks(block));
       } else {
         blocks.push({ kind: "text", text: block });
       }
@@ -244,20 +239,12 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
 
     switch (block.type) {
       case "text":
-        if (msg.role === "assistant") {
-          blocks.push(...textContentBlocks(block.text));
-        } else {
-          blocks.push({ kind: "text", text: block.text });
-        }
+        blocks.push({ kind: "text", text: block.text });
         continue;
       case "thinking": {
         const thinkingText = block.thinking.trim();
-        if (thinkingText || block.redacted) {
-          blocks.push({
-            kind: "thinking",
-            text: thinkingText,
-            redacted: block.redacted,
-          });
+        if (thinkingText) {
+          blocks.push({ kind: "thinking", text: thinkingText });
         }
         continue;
       }
@@ -318,123 +305,6 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
   }
 
   return blocks;
-}
-
-interface ThinkTagRange {
-  start: number;
-  openEnd: number;
-  closeStart: number;
-  closeEnd: number;
-}
-
-interface FenceRange {
-  start: number;
-  end: number;
-}
-
-const THINK_OPEN = "<think>";
-const THINK_CLOSE = "</think>";
-
-function textContentBlocks(text: string): ContentBlock[] {
-  const ranges = thinkTagRangesOutsideFences(text);
-  if (ranges.length === 0) return [{ kind: "text", text }];
-
-  const blocks: ContentBlock[] = [];
-  let previousEnd = 0;
-
-  for (const range of ranges) {
-    if (range.start > previousEnd) {
-      blocks.push({ kind: "text", text: text.slice(previousEnd, range.start) });
-    }
-
-    const thinking = text.slice(range.openEnd, range.closeStart).trim();
-    if (thinking) {
-      blocks.push({ kind: "thinking", text: thinking });
-    }
-
-    previousEnd = range.closeEnd;
-  }
-
-  if (previousEnd < text.length) {
-    blocks.push({ kind: "text", text: text.slice(previousEnd) });
-  }
-
-  return blocks.length > 0 ? blocks : [{ kind: "text", text }];
-}
-
-function thinkTagRangesOutsideFences(text: string): ThinkTagRange[] {
-  const fences = codeFenceRanges(text);
-  const lowerText = text.toLowerCase();
-  const ranges: ThinkTagRange[] = [];
-  let cursor = 0;
-
-  while (cursor < text.length) {
-    const start = lowerText.indexOf(THINK_OPEN, cursor);
-    if (start === -1) break;
-
-    const startFence = containingRange(fences, start);
-    if (startFence) {
-      cursor = startFence.end;
-      continue;
-    }
-
-    const openEnd = start + THINK_OPEN.length;
-    let closeStart = lowerText.indexOf(THINK_CLOSE, openEnd);
-    while (closeStart !== -1) {
-      const closeFence = containingRange(fences, closeStart);
-      if (!closeFence) break;
-      closeStart = lowerText.indexOf(THINK_CLOSE, closeFence.end);
-    }
-
-    if (closeStart === -1) break;
-
-    const closeEnd = closeStart + THINK_CLOSE.length;
-    ranges.push({ start, openEnd, closeStart, closeEnd });
-    cursor = closeEnd;
-  }
-
-  return ranges;
-}
-
-function codeFenceRanges(text: string): FenceRange[] {
-  const ranges: FenceRange[] = [];
-  let offset = 0;
-  let fenceStart: number | null = null;
-  let fenceMarker: "`" | "~" | null = null;
-
-  for (const line of text.match(/[^\n]*(?:\n|$)/g) ?? []) {
-    if (!line) continue;
-
-    const marker = line.match(/^[ \t]*(```+|~~~+)/)?.[1]?.[0] as
-      | "`"
-      | "~"
-      | undefined;
-    if (marker && (!fenceMarker || marker === fenceMarker)) {
-      if (fenceStart === null) {
-        fenceStart = offset;
-        fenceMarker = marker;
-      } else {
-        ranges.push({ start: fenceStart, end: offset + line.length });
-        fenceStart = null;
-        fenceMarker = null;
-      }
-    }
-
-    offset += line.length;
-  }
-
-  if (fenceStart !== null) {
-    ranges.push({ start: fenceStart, end: text.length });
-  }
-
-  return ranges;
-}
-
-function containingRange(
-  ranges: readonly FenceRange[],
-  offset: number,
-): FenceRange | undefined {
-  return ranges.find(range => offset >= range.start && offset < range.end);
 }
 
 export function normalizeTranscript(

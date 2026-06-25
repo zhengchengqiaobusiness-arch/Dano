@@ -881,17 +881,13 @@
                     {thinkingBlockLabel(item.message, item.messageIndex)}
                   </button>
                   {#if blockState.isThinkingExpanded(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
-                    {#if block.redacted}
-                      <p class="thinking-content">{t("chatTranscript.thinkingRedacted")}</p>
-                    {:else}
-                      <MarkdownRenderer
-                        class="thinking-content"
-                        content={block.text}
-                        streaming={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
-                        deferMermaidErrors={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
-                        onOpenFileReference={onOpenFileReference}
-                      />
-                    {/if}
+                    <MarkdownRenderer
+                      class="thinking-content"
+                      content={block.text}
+                      streaming={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
+                      deferMermaidErrors={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
+                      onOpenFileReference={onOpenFileReference}
+                    />
                   {/if}
                 </div>
               {:else if block.kind === "tool"}
