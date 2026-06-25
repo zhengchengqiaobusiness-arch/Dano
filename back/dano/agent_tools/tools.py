@@ -1075,10 +1075,12 @@ async def sandbox_replay(run_id: str, params: dict) -> dict:
         from dano.execution.page.request_capture import execute_api   # 单请求/多步工作流(Q3)分派
         out = await execute_api(draft.body["api_request"], params.get("sample_inputs") or {},
                                 send=False)
-        v = await _ds.record_validation(asset_draft_id=draft.asset_draft_id, kind="replay",
+        # 录制抓请求:承重闸门=确定性 self_check(out.ok 已含 self_check 全过 + 无 {{}} 残留),记为 self_check 证据
+        v = await _ds.record_validation(asset_draft_id=draft.asset_draft_id, kind="self_check",
                                         passed=bool(out.get("ok")), response=out,
-                                        evidence={"mode": "request-dry", "request": out})
-        return {"passed": bool(out.get("ok")), "mode": "request-dry",
+                                        evidence={"mode": "self_check", "violations": out.get("self_check") or [],
+                                                  "request": out})
+        return {"passed": bool(out.get("ok")), "mode": "self_check",
                 "structured_output": out, "validation_run_ids": [str(v.validation_run_id)]}
     mat = _mat(run_id, draft.subsystem.value)
     is_write = page_is_write(draft.body)

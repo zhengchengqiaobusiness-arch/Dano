@@ -27,6 +27,24 @@ class ValidationStatus(StrEnum):
     DEPRECATED = "deprecated"
 
 
+class IngestionStatus(StrEnum):
+    """录入(录制→产出)阶段的**产出状态机**。与资产生命周期 ValidationStatus 分离 —— 它描述
+    "这次录入要不要发、发成什么样、为什么不发",供前端/调用方据此提示用户。
+
+    设计原则:能证则自动发,不能证则诚实降级(partially_verified / needs_clarification / unsupported),
+    绝不静默产出错的 skill。"""
+
+    DRAFT = "draft"
+    NEEDS_CLARIFICATION = "needs_clarification"   # 字段语义/Goal/多步关系/成功标准不清 → 需用户补充
+    TESTING = "testing"
+    REVIEWING = "reviewing"
+    VERIFIED = "verified"                         # 结构 + 活体均已验
+    PARTIALLY_VERIFIED = "partially_verified"     # 结构已验、活体未验(dry-only / 环境不可控)
+    PUBLISHED = "published"
+    UNSUPPORTED = "unsupported"                   # 验证码/UKey/无回查手段等,当前无法安全自动化
+    REJECTED = "rejected"                         # 越权/删除/代审批/自检失败/活体未生效
+
+
 class RiskLevel(StrEnum):
     """风险等级(流程6 闸门):L4/L5 拒绝,L3 需确认卡片,L1/L2 直接执行。"""
 

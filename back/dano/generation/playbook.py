@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 
 # 客户端可自检的校验规则(其余如预算/查重需服务端数据,归到"错误处置"靠服务端驳回)
 _CLIENT_CHECKABLE = {"positive", "required", "nonempty", "range", "min", "max", "length", "regex"}
-# 哪些操作 kind 是"生命周期写"(恢复段),及其依赖的前置标识
-_RECOVERY_NEEDS = {"cancel": ("procInsId", "query_in_progress"),
-                   "urge": ("taskId", "query_my_todo")}
+# 哪些操作 kind 是"生命周期写"(恢复段),及其依赖的前置标识(用中立概念,不写某框架字段名)
+_RECOVERY_NEEDS = {"cancel": ("流程实例标识", "query_in_progress"),
+                   "urge": ("待办任务标识", "query_my_todo")}
 
 
 @dataclass
@@ -108,11 +108,11 @@ def build_playbook(subsystem: str, business: str, manifests: list, *,  # noqa: A
                         goal=_first_attr(manifests, "goal") or {},
                         field_mappings=_first_attr(manifests, "field_mappings") or [])
 
-    # ① preflight(能不能走这条路):Dano 运行时的真实自检项
+    # ① preflight(能不能走这条路):Dano 运行时的真实自检项(中立措辞,不写具体系统名)
     spec.preflight = ["网关可达 + 本租户 X-Tenant-Key 已配(scripts/diagnose 自检)",
-                      "OA 调用凭证有效(失效会 401,去运行配置换 token)"]
+                      "目标系统调用凭证有效(失效会 401,去运行配置换 token)"]
     if template_id:
-        spec.preflight.append(f"流程模板 {template_id} 存在、表单字段可探")
+        spec.preflight.append(f"流程模板/句柄 {template_id} 存在、表单字段可探")
 
     # ② 前置校验 ← x-flow.businessValidations(可本地自检的标 client)
     for v in (bm.get("businessValidations") or []):
@@ -132,7 +132,7 @@ def build_playbook(subsystem: str, business: str, manifests: list, *,  # noqa: A
             stages.append(str(s.get("step") or s.get("assignee") or s.get("by") or ""))
     acct = bm.get("autoAccounting") or {}
     spec.post_check = {
-        "verify": "办理后回查在途/历史,确认返回的 procInsId 真出现在列表(勿因接口 200 就报成功)",
+        "verify": "办理后回查在途/历史,确认返回的业务标识(单号/实例号)真出现在列表(勿因接口 200 就报成功)",
         "stages": [s for s in stages if s],
         "ledger": (f"末位审批通过后自动记账:{acct.get('financeLedgerType')}" if acct else ""),
         "escalation": bm.get("escalation") or {},
@@ -140,7 +140,7 @@ def build_playbook(subsystem: str, business: str, manifests: list, *,  # noqa: A
 
     # ④ 错误处置:通用框架错误 + x-flow.rejectBehavior(业务驳回语义)
     spec.errors = [
-        {"when": "error_kind=auth / HTTP 401", "meaning": "OA token 失效",
+        {"when": "error_kind=auth / HTTP 401", "meaning": "目标系统登录态/token 失效",
          "action": "去运行配置换 token 后重试"},
         {"when": "code≠200", "meaning": "提交未成功", "action": "把 msg 告知用户,按提示改正重提"},
         {"when": "接口 200 但事实核查未过", "meaning": "疑似空操作(false 200)",

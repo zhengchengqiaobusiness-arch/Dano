@@ -190,7 +190,7 @@ async def run_request_onboarding(
     """
     from dano.agent_tools import tools as T
     from dano.shared.asset_bodies import PageScriptBody
-    from dano.shared.enums import RiskLevel
+    from dano.shared.enums import IngestionStatus, RiskLevel
 
     run_id = run_id or f"req-{uuid4().hex[:8]}"
     sid = subsystem
@@ -202,6 +202,10 @@ async def run_request_onboarding(
         params = list(api_request.get("params") or [])
         if not params and api_request.get("steps"):
             params = list((api_request["steps"][-1] or {}).get("params") or [])
+        # 没有可参数化的写请求体 → 无法做有意义的自检/真跑 → 诚实标 unsupported,不静默发空 skill
+        if not (api_request.get("body_template") or api_request.get("steps")):
+            return {"ok": False, "stage": "ingest", "status": IngestionStatus.UNSUPPORTED.value,
+                    "action": action, "reason": "没有可参数化的写请求体(无 body_template/steps)—— 无法安全自动化"}
         # 必填=前端标的"变化字段"(没给则全部必填,向后兼容);其余=可选,缺了用录制原值(固定字段不改)
         req_fields = [r for r in (required if required is not None else params) if r in params]
         opt_fields = [p for p in params if p not in req_fields]
@@ -218,8 +222,11 @@ async def run_request_onboarding(
         rp = await T.sandbox_replay(run_id, {"asset_draft_id": d["asset_draft_id"],
                                              "sample_inputs": sample_inputs or {}})
         if not rp["passed"]:
-            return {"ok": False, "stage": "validate", "action": action,
-                    "reason": "请求参数化校验未过(参数没全填上)", "detail": rp.get("structured_output")}
+            sc = (rp.get("structured_output") or {}).get("self_check") or []
+            return {"ok": False, "stage": "validate", "status": IngestionStatus.NEEDS_CLARIFICATION.value,
+                    "action": action, "clarifications": sc,
+                    "reason": ("确定性自检未过,需澄清/修正" if sc else "请求参数化校验未过(参数没全填上)"),
+                    "detail": rp.get("structured_output")}
         # 录制抓请求资产 = 用户真人在页面上**亲手提交过**的写请求 → 免三模型评审,直接发布。
         # 评审对录制资产易抖动误判(把固定字段当漏配、把脱敏登录态当缺鉴权,时过时不过),且并未提升
         # 安全(请求本就是用户真发过的);发布闸门 verify_reviewed 对 page_is_capture 同样放行。
@@ -234,8 +241,12 @@ async def run_request_onboarding(
                      for p in bad] if bad else [])
         if warnings:
             log.warning("request_onboard.internal_param_names", action=action, params=bad)
-        log.info("request_onboard.done", action=action, published=pub.get("published"))
-        return {"ok": pub.get("published", False), "stage": "publish", "action": action,
+        published = pub.get("published", False)
+        log.info("request_onboard.done", action=action, published=published)
+        # capture 是 dry-only(从不真发写请求)→ 结构已验、活体未验 → partially_verified(诚实);发布失败 → rejected
+        return {"ok": published, "stage": "publish",
+                "status": (IngestionStatus.PARTIALLY_VERIFIED if published else IngestionStatus.REJECTED).value,
+                "action": action,
                 "asset_id": pub.get("asset_id"), "mode": "request", "reason": pub.get("reason", ""),
                 "warnings": warnings,
                 "api": {"method": api_request.get("method"), "path": api_request.get("path"),

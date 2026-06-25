@@ -41,6 +41,23 @@ def validate_playbook_facts(md: str, *, actions: set[str], fields: set[str]) -> 
     return issues
 
 
+# 框架专有标识(某 OA/工作流引擎的字段/端点名):LLM 若写了**且规格 JSON 里没有**=凭空发明的系统黑话。
+# 规格里出现的(如 field_mappings 的 flowTask.variables.x、真实端点)是 grounded 数据,不算泄漏。
+_FRAMEWORK_BLACKTALK = (
+    "procinsid", "procdefid", "procdefkey", "taskid", "defkey", "startflow",
+    "ajaxresult", "/biz/flow", "/workflow/handle", "post_workflow_handle", "flowtask",
+)
+
+
+def framework_leaks(md: str, spec_json: str) -> list[str]:
+    """LLM 输出里出现、但规格 JSON 里没有的框架专有标识 = 凭空发明的系统黑话(应回退确定性版)。
+
+    纯函数,可离线测。grounded(在规格里)的同名 token 放行——保证多业务/多系统/不同公司都通用。
+    """
+    low_md, low_spec = (md or "").lower(), (spec_json or "").lower()
+    return [t for t in _FRAMEWORK_BLACKTALK if t in low_md and t not in low_spec]
+
+
 def _op_flags(op: Operation) -> str:
     return " ".join(f"--{f['name']} <{f['name']}>" for f in op.fields) or ""
 
@@ -78,7 +95,7 @@ metadata:
 {_op_table(spec)}
 
 > 每个操作:`bash scripts/<操作>.sh <逐字段 flags>`(写操作加 `--confirm`);自检 `bash scripts/diagnose.sh`。
-> `__base_url__`、流程模板、申请人身份(登录凭证)、调用凭证由 Dano 运行期注入,**不需要也不应**由你提供。"""]
+> `__base_url__`、流程句柄/模板、调用者身份(登录凭证)、调用凭证由 Dano 运行期注入,**不需要也不应**由你提供。"""]
 
     # 目标(Goal:要达成什么 + 成功判据 + 红线)
     g = spec.goal or {}
@@ -157,7 +174,7 @@ metadata:
     out.append("""## 输出契约(每个脚本末行 JSON)
 | status | 含义 | 你应做的 |
 |---|---|---|
-| `succeeded` | 真实执行且(写操作)事实核查通过 | 告知结果,附 `output` 里的单号 / procInsId / 列表 |
+| `succeeded` | 真实执行且(写操作)事实核查通过 | 告知结果,附 `output` 里的业务标识(单号/实例号)/ 列表 |
 | `need_select` | 复合流程消歧:多个候选待选 | 把 `candidates` 给用户选,再用 `--json` 带上选中项的 `bind` 值重跑 |
 | `need_confirm` | 写操作未确认被拦 | 向用户确认后,**带 `--confirm` 重跑** |
 | `failed` | 失败(见 `reason` / `error_kind`) | 按错误表处置,**勿谎报成功** |
@@ -170,7 +187,15 @@ metadata:
 
 _LLM_PROMPT = """你在为一个业务写一本 agent 用的操作剧本(SKILL.md,中文)。下面是该业务的**结构化规格 JSON**(PlaybookSpec)。
 按规格写一本 Markdown 剧本,**严格只用规格里出现的事实**(操作名/字段/校验/错误/审批链/恢复),**不得臆造**任何
-端点、字段、规则。保留 frontmatter(name/description/metadata),并包含这些小节(规格里为空的小节就省略):
+端点、字段、规则。
+
+**中立措辞铁律(保证换公司/换系统/换框架都通用)**:
+- 用「目标系统」指代被接入的系统,**不要**写 OA/钉钉/泛微/RuoYi 等具体系统或框架名(除非它正是 subsystem 字段的值);
+- 回查/返回标识统一叫「业务标识(单号/实例号)」,**不要**写 procInsId/procDefId/taskId/defKey 等某框架专有字段名;
+- 红线动作**只引用 goal.forbidden_steps 里的真实动作名**,**不要**写 post_workflow_handle_*、/biz/flow、startFlow、AjaxResult 这类某框架端点/前缀;
+- 规格 JSON 里**没出现**的端点、字段名、系统专有标识一律不准写。
+
+保留 frontmatter(name/description/metadata),并包含这些小节(规格里为空的小节就省略):
 操作清单(表) / 目标(Goal:intent 意图 + success_criteria 成功判据 + 红线 forbidden) / ① 能不能走(自检) /
 ② 办理前(前置+审核) / ③ 办理(需确认) / 字段映射(field_mappings:业务字段→目标点路径+来源,可追溯) /
 ④ 错误处置(表) / ⑤ 办理后确认 / ⑥ 缺失恢复 / 输出契约 / 运行前置。措辞自然、像操作手册。**只输出 Markdown 正文**,不要解释。
@@ -199,25 +224,28 @@ async def write_playbook_md(spec: PlaybookSpec, slug: str, *, spawn=None) -> str
     if spawn is None:
         from dano.generation.coder import openai_text_spawn
         spawn = partial(openai_text_spawn, tag="playbook")
+    spec_json = json.dumps(_spec_to_dict(spec), ensure_ascii=False)
     try:
-        text = await spawn(_LLM_PROMPT.format(slug=slug, spec_json=json.dumps(
-            _spec_to_dict(spec), ensure_ascii=False)))
+        text = await spawn(_LLM_PROMPT.format(slug=slug, spec_json=spec_json))
     except Exception as e:  # noqa: BLE001
         log.warning("playbook_writer.llm_failed", business=spec.business, error=str(e))
         return fallback
     text = (text or "").strip()
     if text.startswith("```"):                              # 去掉可能的 ```markdown 围栏
         text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    # grounding 守门:非空 + 带 frontmatter + 不丢操作 + **事实校验(不准发明脚本/参数)**;任一不过 → 确定性版
+    # grounding 守门:非空 + 带 frontmatter + 不丢操作 + 事实校验(不准发明脚本/参数)
+    # + **框架黑话校验(不准凭空写某框架专有字段/端点名)**;任一不过 → 回退确定性版(已清零字面量)
     missing = [o.op for o in spec.operations if o.op not in text]
     actions = {o.op for o in spec.operations}
     fields = {f["name"] for o in spec.operations for f in o.fields}
     fact_issues = validate_playbook_facts(text, actions=actions, fields=fields)
-    if len(text) < 120 or "name:" not in text[:200] or missing or fact_issues:
+    leaks = framework_leaks(text, spec_json)
+    if len(text) < 120 or "name:" not in text[:200] or missing or fact_issues or leaks:
         log.warning("playbook_writer.fallback", business=spec.business,
                     reason=("missing_ops:%s" % missing if missing
                             else ("fact_issues:%s" % fact_issues if fact_issues
-                                  else "too_short_or_no_frontmatter")))
+                                  else ("framework_leaks:%s" % leaks if leaks
+                                        else "too_short_or_no_frontmatter"))))
         return fallback
     log.info("playbook_writer.llm_ok", business=spec.business, chars=len(text))
     return text

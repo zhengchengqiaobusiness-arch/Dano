@@ -48,11 +48,38 @@ def extract_auth_headers(headers: dict | None) -> dict:
     return out
 
 
+# 标记"这层原本是字符串化的 JSON"(如若依/工作流把整张表单打成一段 JSON 文本塞进 formData):
+# 运行期 substitute 据此把填好值的内层结构 re-stringify 回字符串,目标系统照常解析。
+_JSONSTR = "__dano_jsonstr__"
+
+
+def _unwrap_json_strings(node, depth: int = 0):
+    """递归把"值是 JSON 文本"的字符串叶子解开成嵌套结构,用 {__dano_jsonstr__: 解开后} 包住(以便运行期再 stringify)。
+
+    只解 dict / 非空对象数组(防把 'true'/'123'/'[]'/普通文本误当结构);限深度防套娃。通用,不挑系统/字段——
+    任何把表单序列化成 JSON 字符串的请求体,内层字段都能被后续参数化逻辑当独立字段看到。
+    """
+    if isinstance(node, dict):
+        return {k: _unwrap_json_strings(v, depth) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_unwrap_json_strings(v, depth) for v in node]
+    if isinstance(node, str) and depth < 4:
+        s = node.strip()
+        if s[:1] in ("{", "[") and len(s) >= 2:
+            try:
+                inner = json.loads(s)
+            except Exception:  # noqa: BLE001
+                return node
+            if isinstance(inner, dict) or (isinstance(inner, list) and inner and isinstance(inner[0], dict)):
+                return {_JSONSTR: _unwrap_json_strings(inner, depth + 1)}
+    return node
+
+
 def _parse_body(post_data: str | None):
     if not post_data:
         return None
     try:
-        return json.loads(post_data)
+        return _unwrap_json_strings(json.loads(post_data))   # 解析 + 解开内层 stringified JSON,内层字段可参数化
     except Exception:  # noqa: BLE001 —— 非 JSON(form-urlencoded 等)暂不处理
         return None
 
@@ -137,20 +164,23 @@ def as_list_payload(data):
 
 
 def _leaf_paths(body) -> list[tuple]:
-    """body 拍平成 [(点路径, 值字符串, 原始值)]。"""
+    """body 拍平成 [(点路径, tokens, 值字符串, 原始值)]。
+
+    tokens=真实分段列表(str 键 / int 下标),用于**无歧义**按路径注入——键名含 '.'/'[' 也安全。
+    点路径仅供展示/前端协议(键名特殊时有歧义,故 identity/串联注入一律走 tokens)。"""
     out: list[tuple] = []
 
-    def walk(node, path):
+    def walk(node, path, toks):
         if isinstance(node, dict):
             for k, v in node.items():
-                walk(v, f"{path}.{k}" if path else k)
+                walk(v, f"{path}.{k}" if path else k, toks + [k])
         elif isinstance(node, list):
             for i, v in enumerate(node):
-                walk(v, f"{path}[{i}]")
+                walk(v, f"{path}[{i}]", toks + [i])
         else:
-            out.append((path, "" if node is None else str(node), node))
+            out.append((path, toks, "" if node is None else str(node), node))
 
-    walk(body, "")
+    walk(body, "", [])
     return out
 
 
@@ -171,6 +201,34 @@ def _find_value_path(node, value, prefix: str = "") -> str | None:
     return None
 
 
+def _tokens_to_str(toks) -> str:
+    """tokens → 点路径字符串(仅供展示;注入仍用 tokens)。"""
+    out = ""
+    for t in toks:
+        out += f"[{t}]" if isinstance(t, int) else (f".{t}" if out else str(t))
+    return out
+
+
+def _find_value_tokens(node, value, toks=None):
+    """在 node 里找一个叶子值 == value 的 **tokens 路径**(深度优先,第一个)。无则 None。
+
+    与 _find_value_path 同义,但返回真实分段列表 → 读响应取值时键含点也无歧义。"""
+    toks = toks or []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            r = _find_value_tokens(v, value, toks + [k])
+            if r is not None:
+                return r
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            r = _find_value_tokens(v, value, toks + [i])
+            if r is not None:
+                return r
+    elif node is not None and not isinstance(node, bool) and str(node) == str(value):
+        return toks or None
+    return None
+
+
 def discover_step_links(writes: list[dict]) -> list[dict]:
     """有序写请求(含 response_json)→ 步间数据流(Q3):某步 body 的值 == 更早某步「响应」里的值 → step: 链。
 
@@ -182,17 +240,18 @@ def discover_step_links(writes: list[dict]) -> list[dict]:
     for i, body in enumerate(bodies):
         if body is None:
             continue
-        for tpath, tval, _raw in _leaf_paths(body):
+        for tpath, ttoks, tval, _raw in _leaf_paths(body):
             if len(tval) < 4:
                 continue
             for j in range(i):
                 resp = writes[j].get("response_json")
                 if resp is None:
                     continue
-                sp = _find_value_path(resp, tval)
-                if sp is not None:
-                    links.append({"target_step": i, "target_path": tpath,
-                                  "source_step": j, "source_path": sp})
+                stoks = _find_value_tokens(resp, tval)
+                if stoks is not None:
+                    links.append({"target_step": i, "target_path": tpath, "target_tokens": ttoks,
+                                  "source_step": j, "source_path": _tokens_to_str(stoks),
+                                  "source_tokens": stoks})
                     break
     return links
 
@@ -254,7 +313,7 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
             continue
         small = len(items) <= _SMALL_LIST
         hits: list[dict] = []
-        for path, sv, raw in leaves:
+        for path, _toks, sv, raw in leaves:
             if not sv or path in seen:
                 continue
             if _is_const_value(raw):                    # 系统常量(流程键 oa_hotel_apply/uuid/雪花)绝不是"按名字选"的下拉
@@ -388,9 +447,9 @@ def suggest_identity(post_data: str | None, storage_state: dict | None) -> list[
         return []
     scal = _storage_scalars(storage_state)
     out: list[dict] = []
-    for path, sv, _raw in _leaf_paths(body):
+    for path, toks, sv, _raw in _leaf_paths(body):
         if sv and sv in scal:
-            out.append({"path": path, "value": sv, "source": scal[sv]})
+            out.append({"path": path, "tokens": toks, "value": sv, "source": scal[sv]})
     return out
 
 
@@ -654,7 +713,14 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
                 for s in (selects or []) if s.get("path") in param_map]
     for s in sel_meta:                                          # 选领导/代码下拉 → 类型=枚举(传名字/文字)
         types[s["param"]] = "enum"
-    id_meta = [{"path": i["path"], "source": i.get("source", "")} for i in (identity or [])]
+    # identity 注入路径优先用 tokens(无歧义,键含点也安全);录制端没带 tokens 时,从 body 叶子按点路径**反查补全**
+    # —— 用点路径当 dict 键查预存 tokens(不 _split_path 重切),对正常键无损,从而不依赖前端是否回传 tokens。
+    _leaf_tok = {p: t for p, t, _sv, _raw in _leaf_paths(body)}
+    id_meta = []
+    for i in (identity or []):
+        toks = i.get("tokens") or _leaf_tok.get(i.get("path"))
+        id_meta.append({"path": i["path"], "source": i.get("source", ""),
+                        **({"tokens": toks} if toks else {})})
     return {"method": (req.get("method") or "POST").upper(), "path": path, "url": url,
             "content_type": req.get("content_type", "application/json"),
             "body_template": templ, "params": list(dict.fromkeys(params)), "sample_inputs": samples,
@@ -667,6 +733,8 @@ def substitute(template, fields: dict, defaults: dict | None = None):
     → "全选"也安全:agent 没改的字段保持录制值(固定字段不变),不会留下空占位。"""
     defaults = defaults or {}
     if isinstance(template, dict):
+        if set(template) == {_JSONSTR}:                  # 这层原本是 JSON 字符串:**先保留标记**,
+            return {_JSONSTR: substitute(template[_JSONSTR], fields, defaults)}   # 等 identity/串联注入后再 re-stringify
         return {k: substitute(v, fields, defaults) for k, v in template.items()}
     if isinstance(template, list):
         return [substitute(x, fields, defaults) for x in template]
@@ -678,9 +746,27 @@ def substitute(template, fields: dict, defaults: dict | None = None):
     return template
 
 
+def _finalize_jsonstr(node):
+    """把 substitute 后仍带 __dano_jsonstr__ 标记的内层结构 re-stringify 回字符串。
+
+    **必须在 identity 重取 / 步链注入(_apply_identity / overrides 的 _set_by_path)之后调用** —— 那些按路径写值的
+    操作要在结构还是嵌套时做(blob 内的申请人/taskId 才改得到);改完再压回字符串,否则申请人会被冻结成录制者。
+    """
+    if isinstance(node, dict):
+        if set(node) == {_JSONSTR}:
+            # 紧凑分隔符,贴近前端 JSON.stringify 的原始形态(无多余空格),减少与录制时 payload 的差异
+            return json.dumps(_finalize_jsonstr(node[_JSONSTR]), ensure_ascii=False, separators=(",", ":"))
+        return {k: _finalize_jsonstr(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_finalize_jsonstr(x) for x in node]
+    return node
+
+
 # ─────────── P4:select 名字→ID / identity 运行期重取 ───────────
-def _split_path(path: str) -> list:
-    """'form.items[0].id' → ['form','items',0,'id'](点路径 + 数组下标)。"""
+def _split_path(path) -> list:
+    """'form.items[0].id' → ['form','items',0,'id'];**已是 tokens 列表/元组则原样返回**(无歧义,键含点也安全)。"""
+    if isinstance(path, (list, tuple)):
+        return list(path)
     out: list = []
     for seg in path.split("."):
         bits = seg.split("[")
@@ -743,7 +829,119 @@ def _apply_identity(body, api_request: dict, storage_state: dict | None) -> None
     for idn in api_request.get("identity") or []:
         val = resolve_identity_value(idn.get("source", ""), storage_state)
         if val is not None:
-            _set_by_path(body, idn.get("path", ""), val)
+            _set_by_path(body, idn.get("tokens") or idn.get("path", ""), val)   # tokens 优先(键含点也无歧义)
+
+
+# ─────────── P0:发布前确定性自检(self_check) + 运行期换身后置审计 ───────────
+_PROBE_PREFIX = "__DANO_PROBE_"        # 唯一哨兵前缀;穿过 blob re-stringify 后在外层 dumps 里仍是连续子串
+_PATH_MISSING = object()               # "走不到"哨兵,区别于"值恰好是 None"
+
+
+def _path_lookup(node, path: str):
+    """按 path(与 _set_by_path 同一套 _split_path 约定,含 __dano_jsonstr__ 段)取值;走不到返回 _PATH_MISSING。
+
+    与运行期 _set_by_path 的可达性判定**完全一致**——它写得进的这里就取得到;它写不进的(键含点被 _split_path
+    拆错、blob 提前压字符串等)这里就报缺失。所以自检对 identity/link 的判定 == 运行期真实行为。"""
+    try:
+        keys = _split_path(path)
+    except Exception:  # noqa: BLE001  —— 键含 '[' 等导致解析异常,等同不可达
+        return _PATH_MISSING
+    cur = node
+    for k in keys:
+        if isinstance(cur, dict):
+            if k not in cur:
+                return _PATH_MISSING
+            cur = cur[k]
+        elif isinstance(cur, list):
+            if not isinstance(k, int) or not (-len(cur) <= k < len(cur)):
+                return _PATH_MISSING
+            cur = cur[k]
+        else:
+            return _PATH_MISSING
+    return cur
+
+
+def _wellformed_identity_source(src: str) -> bool:
+    kind, sep, rest = (src or "").partition(":")
+    return bool(sep) and kind in ("cookie", "localStorage") and bool(rest)
+
+
+def _check_step_links(workflow: dict) -> list[str]:
+    """多步串联:每条 link 的目标路径必须在「目标步」构造结果里真实可达,否则运行期 overrides 的
+    _set_by_path 静默写不进(taskId 串不上,脏数据)。通用,不挑系统。"""
+    out: list[str] = []
+    for i, st in enumerate(workflow.get("steps") or []):
+        templ = st.get("body_template")
+        if not isinstance(templ, (dict, list)):
+            continue
+        probes = {p: f"{_PROBE_PREFIX}{j}__" for j, p in enumerate(st.get("params") or [])}
+        nested = substitute(templ, probes, {})
+        for lk in st.get("links") or []:
+            tp = lk.get("target_tokens") or lk.get("target_path", "")
+            if not tp or _path_lookup(nested, tp) is _PATH_MISSING:
+                disp = lk.get("target_path") or tp
+                out.append(f"步骤{i + 1}:串联目标路径 `{disp}` 找不到落点 —— 运行期 taskId 等会串不进(脏数据)")
+    return out
+
+
+def self_check(api_request: dict) -> list[str]:
+    """录制产出的「请求 skill」发布前**确定性**自检(零网络、零会话)。返回违规清单(空=通过)。
+
+    校验 skill 数据喂给**运行期同一解释器**能否构造出"对"的请求,断言后置不变量(通用,不挑系统/字段):
+      a) 每个 identity 字段的注入路径在 body 结构里真实可达、取值来源合法 —— 否则运行期换身静默失败(申请人冻结)。
+      b) 不留 {{}} 残缺(参数声明与 body_template 一致)。
+      c) 填入参数的值能穿过整条流水线(含 blob re-stringify)出现在最终 body —— 否则"改了也不生效"。
+      d) 多步串联(links)的目标路径在对应步 body 里真实可达。
+    多步工作流逐步校验 + 跨步 link 校验。
+    """
+    steps = api_request.get("steps")
+    if steps:
+        out: list[str] = []
+        for i, st in enumerate(steps):
+            out += [f"步骤{i + 1}:{m}" for m in self_check({**st, "steps": None})]
+        return out + _check_step_links(api_request)
+
+    templ = api_request.get("body_template")
+    if not isinstance(templ, (dict, list)):
+        return []                                       # GET/查询类无请求体,免检
+    params = list(api_request.get("params") or [])
+    problems: list[str] = []
+
+    # (b)+(c):每个参数一个唯一哨兵 → 跑完整构造流水线(substitute→finalize)→ 哨兵必须都出现在最终 body
+    probes = {p: f"{_PROBE_PREFIX}{i}__" for i, p in enumerate(params)}
+    nested = substitute(templ, probes, {})              # 不喂 defaults:逼出"参数无占位"的问题
+    final_str = json.dumps(_finalize_jsonstr(nested), ensure_ascii=False)
+    if "{{" in final_str:
+        problems.append("模板里仍残留 {{}} 占位 —— 参数声明与 body_template 不一致(有参数没填上)")
+    for p, probe in probes.items():
+        if probe not in final_str:
+            problems.append(f"参数 `{p}` 填入的值进不了最终请求体(被覆盖/丢失/未真正参数化)—— agent 改了也不生效")
+
+    # (a):identity 路径在"未 finalize 的嵌套结构"上必须可达(blob 内段含 __dano_jsonstr__)
+    for idn in api_request.get("identity") or []:
+        path, src = idn.get("path", ""), idn.get("source", "")
+        pathlike = idn.get("tokens") or path                # tokens 优先(键含点也能准确判可达)
+        if not pathlike or _path_lookup(nested, pathlike) is _PATH_MISSING:
+            problems.append(f"identity 字段路径 `{path}` 在请求体里找不到落点 —— 运行期换身会静默失败(申请人冻结)")
+        elif not _wellformed_identity_source(src):
+            problems.append(f"identity 字段 `{path}` 取值来源 `{src}` 非法(应为 cookie:KEY 或 localStorage:KEY.path)")
+    return problems
+
+
+def _identity_audit(body, api_request: dict, storage_state: dict | None) -> list[str]:
+    """运行期换身后置审计:identity 源能取到值、但 body 该路径的值 != 取到的值 → 换身失败(冻结)。
+
+    **须在 _finalize_jsonstr 之前**调用(blob 仍嵌套,路径含 __dano_jsonstr__ 才走得到)。
+    只在确证"源有值却没写进去"时报警 —— 无会话值(val=None)一律跳过,绝不误伤正常调用。"""
+    bad: list[str] = []
+    for idn in api_request.get("identity") or []:
+        val = resolve_identity_value(idn.get("source", ""), storage_state)
+        if val is None:
+            continue
+        cur = _path_lookup(body, idn.get("tokens") or idn.get("path", ""))
+        if cur is _PATH_MISSING or str(cur) != str(val):
+            bad.append(f"identity `{idn.get('path')}` 未成功换身(仍为录制值)")
+    return bad
 
 
 async def _get_json(url: str, base_url: str, storage_state, token_key: str | None, verify: bool,
@@ -1032,17 +1230,27 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     # 按字段声明类型归一值(number/bool/日期格式),让 body 填回的是目标系统认的类型/格式 —— 通用,不挑字段
     fields = _coerce_fields(fields, api_request)
     body = substitute(api_request.get("body_template"), fields, api_request.get("sample_inputs") or {})
-    _apply_identity(body, api_request, storage_state)        # 当前用户/会话值运行期重取覆盖
+    _apply_identity(body, api_request, storage_state)        # 当前用户/会话值运行期重取覆盖(此刻 blob 仍是嵌套结构)
     for p, v in (overrides or {}).items():                   # Q3:上一步响应值注入(taskId 等)
         _set_by_path(body, p, v)
+    id_issues = _identity_audit(body, api_request, storage_state) if send else []   # 换身后置审计(blob 仍嵌套,可达)
+    body = _finalize_jsonstr(body)                           # identity/串联注入后,再把内层 JSON 压回字符串
     method = (api_request.get("method") or "POST").upper()
     path = api_request.get("path") or ""
     # 优先用录制时的完整 url(同一 OA host 不变);否则 base_url + path
     url = api_request.get("url") or (path if path.startswith("http") else (base_url or "").rstrip("/") + path)
     if not send:
         leftover = "{{" in json.dumps(body, ensure_ascii=False)   # 还有没填上的 {{字段}}?
-        return {"ok": not leftover, "dry": True, "method": method, "url": url, "body": body,
-                "detail": "有参数没填上" if leftover else "请求可构造(dry,未真发)"}
+        problems = self_check(api_request)                        # P0:发布前确定性自检(skill 数据,承重闸门)
+        ok = (not leftover) and not problems
+        return {"ok": ok, "dry": True, "method": method, "url": url, "body": body,
+                "self_check": problems,
+                "detail": ("；".join(problems) if problems else
+                           ("有参数没填上" if leftover else "请求可构造(dry,未真发)"))}
+    if id_issues:                                            # 真发前最后一道:换身失败就拒发,绝不以录制者身份写入
+        return {"ok": False, "blocked": True, "method": method, "url": url,
+                "identity_issues": id_issues,
+                "detail": "；".join(id_issues) + " —— 已拒绝提交(避免以录制者身份写入)"}
     from urllib.parse import urlparse
     host = urlparse(url).hostname or ""
     headers = {"Content-Type": api_request.get("content_type") or "application/json"}
@@ -1084,9 +1292,9 @@ async def execute_api_workflow(workflow: dict, fields: dict, *, base_url: str = 
         for lk in step.get("links") or []:
             src = responses[lk["source_step"]] if 0 <= lk.get("source_step", -1) < len(responses) else None
             if src is not None:
-                val = _get_by_path(src, lk.get("source_path", ""))
-                if val is not None:
-                    overrides[lk.get("target_path", "")] = val
+                val = _get_by_path(src, lk.get("source_tokens") or lk.get("source_path", ""))
+                if val is not None:                          # tokens 优先,且用元组(可 hash)做 overrides 键
+                    overrides[tuple(_split_path(lk.get("target_tokens") or lk.get("target_path", "")))] = val
         out = await execute_api_request(step, fields, base_url=base_url, storage_state=storage_state,
                                         send=send, verify=verify, token_key=token_key, overrides=overrides)
         last = out
@@ -1164,6 +1372,7 @@ def build_api_workflow(writes: list[dict], *, param_map: dict, base_url: str = "
         steps.append(apir or {})
     for lk in discover_step_links(writes):                   # 步间数据流挂到目标步
         steps[lk["target_step"]].setdefault("links", []).append(
-            {"target_path": lk["target_path"], "source_step": lk["source_step"],
-             "source_path": lk["source_path"]})
+            {"target_path": lk["target_path"], "target_tokens": lk.get("target_tokens"),
+             "source_step": lk["source_step"],
+             "source_path": lk["source_path"], "source_tokens": lk.get("source_tokens")})
     return {"steps": steps}

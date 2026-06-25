@@ -20,6 +20,7 @@ from dano.execution.page.request_capture import (
     parameterize_request,
     pick_submit_request,
     resolve_identity_value,
+    self_check,
     substitute,
     suggest_fact_check,
     suggest_identity,
@@ -169,6 +170,39 @@ def test_date_keys_handles_seconds_and_slash_formats():
     assert _date_keys("2026/6/24") == {"2026-06-24"}       # 斜杠 + 单位数月日
 
 
+def test_stringified_json_body_field_unwrapped_and_restringified():
+    """若依/工作流把整张表单打成 JSON 字符串塞进 formData → 内层字段可独立参数化;运行期 re-stringify 回字符串。
+    通用:任何"请求体里被字符串化的 JSON"都解得开,不挑系统/字段。"""
+    import json as _j
+    inner = {"formData": {"fields": [{"label": "数量", "value": 5}, {"label": "单价", "value": 120}]}}
+    body = {"templateId": "t", "formData": {"taskId": "", "formData": _j.dumps(inner, ensure_ascii=False)}}
+    pd = _j.dumps(body, ensure_ascii=False)
+    # 内层 value 叶子被拍出来,且按用户填的值对上中文名
+    leaves = flatten_body(pd, {"数量": "5", "单价": "120"})
+    by_val = {f["value"]: f["suggest_name"] for f in leaves}
+    assert by_val.get("5") == "数量" and by_val.get("120") == "单价"
+    # 参数化内层"数量" → 运行期填 9 → finalize 后 formData.formData 是字符串且值已变
+    from dano.execution.page.request_capture import _finalize_jsonstr
+    qpath = next(f["path"] for f in leaves if f["value"] == "5")
+    apir = build_api_request({"method": "POST", "url": "http://x/save", "post_data": pd}, {qpath: "数量"})
+    out = _finalize_jsonstr(substitute(apir["body_template"], {"数量": 9}, apir["sample_inputs"]))
+    fs = out["formData"]["formData"]
+    assert isinstance(fs, str) and _j.loads(fs)["formData"]["fields"][0]["value"] == 9
+    assert out["formData"]["taskId"] == ""              # 顶层字段不受影响(仍可被串联/identity 注入)
+
+
+def test_identity_inside_jsonstr_blob_applied_before_restringify():
+    """BUG 回归:申请人/串联值在 blob 内层时,必须在 re-stringify 前注入,否则会冻结成录制者。
+    substitute(保留标记) → _set_by_path 改 blob 内字段 → _finalize_jsonstr 压回字符串,顺序对 → 值真被改。"""
+    import json as _j
+    from dano.execution.page.request_capture import _JSONSTR, _finalize_jsonstr, _set_by_path
+    body = substitute({"formData": {_JSONSTR: {"applicant": "录制者"}}}, {}, {})
+    assert body["formData"] == {_JSONSTR: {"applicant": "录制者"}}     # substitute 后仍是嵌套(未提前压字符串)
+    _set_by_path(body, f"formData.{_JSONSTR}.applicant", "当前用户")   # identity 重取(blob 内可达)
+    out = _finalize_jsonstr(body)
+    assert _j.loads(out["formData"])["applicant"] == "当前用户"        # 不再是录制者 ✓
+
+
 def test_looks_internal_param_name_flags_machine_ids_only():
     """安全网:产出参数名若漏成内部机器标识(BPM 节点 Activity_xxx / hash)→ 判 True 供告警;
     正常字段名(reason/apply_reason/leave_type/startTime/中文)不误判。"""
@@ -235,7 +269,8 @@ def test_build_api_request_stores_select_and_identity_meta():
     assert apir["body_template"]["applicantId"] == 118                  # identity 留常量,运行期覆盖
     assert apir["selects"] == [{"param": "approver", "source_url": "/system/user/list",
                                 "value_key": "userId", "label_key": "nickName"}]
-    assert apir["identity"] == [{"path": "applicantId", "source": "localStorage:userInfo.userId"}]
+    assert apir["identity"] == [{"path": "applicantId", "source": "localStorage:userInfo.userId",
+                                 "tokens": ["applicantId"]}]   # tokens 自动反查补全(无歧义注入)
 
 
 def test_resolve_identity_value_from_storage():
@@ -458,7 +493,9 @@ def test_discover_step_links_finds_taskid_chain():
     ]
     links = discover_step_links(writes)
     assert links == [{"target_step": 1, "target_path": "flowTask.taskId",
-                      "source_step": 0, "source_path": "data.taskId"}]
+                      "target_tokens": ["flowTask", "taskId"],
+                      "source_step": 0, "source_path": "data.taskId",
+                      "source_tokens": ["data", "taskId"]}]
 
 
 def test_discover_step_links_ignores_short_constants():
@@ -526,7 +563,9 @@ def test_build_api_workflow_assembles_steps_links_and_last_params():
     assert wf["steps"][0]["body_template"] == {"procDefKey": "oa_leave"}     # 前置步全常量
     assert wf["steps"][1]["body_template"]["reason"] == "{{reason}}"          # 最后一步带用户参数
     assert wf["steps"][1]["params"] == ["reason"]
-    assert wf["steps"][1]["links"] == [{"target_path": "taskId", "source_step": 0, "source_path": "data.taskId"}]
+    assert wf["steps"][1]["links"] == [{"target_path": "taskId", "target_tokens": ["taskId"],
+                                        "source_step": 0, "source_path": "data.taskId",
+                                        "source_tokens": ["data", "taskId"]}]
 
 
 async def test_execute_api_dispatches_single_and_workflow():
@@ -947,7 +986,8 @@ async def test_request_onboarding_publish_and_execute(tmp_path):
         rep = await run_request_onboarding(tenant=tenant, subsystem=sid, action="submit_leave",
                                            title="请假", api_request=apir,
                                            sample_inputs=apir["sample_inputs"])
-        assert rep["ok"] is True, rep                       # 发布成功(录制抓请求免三模型评审 + dry 校验)
+        assert rep["ok"] is True, rep                       # 发布成功(录制抓请求免三模型评审 + self_check)
+        assert rep["status"] == "partially_verified"        # capture dry-only:结构已验、活体未验(诚实降级)
 
         reg = await SkillRegistry.from_store(AssetRepository(), tenant=tenant,
                                              subsystems=[Subsystem.REIMBURSE])
@@ -967,3 +1007,217 @@ async def test_request_onboarding_publish_and_execute(tmp_path):
             await c.execute("DELETE FROM asset_drafts WHERE tenant=$1", tenant)
             await c.execute("DELETE FROM assets WHERE tenant=$1", tenant)
         await close_pool()
+
+
+# ─────────── P0:发布前确定性自检 self_check + 运行期换身后置审计 ───────────
+def test_self_check_clean_request_passes():
+    """良构请求:参数有占位、identity 路径可达且来源合法 → 无违规。"""
+    apir = {"body_template": {"reason": "{{reason}}", "applicantId": 118},
+            "params": ["reason"],
+            "identity": [{"path": "applicantId", "source": "localStorage:userInfo.userId"}]}
+    assert self_check(apir) == []
+
+
+def test_self_check_flags_unreachable_identity_path():
+    """identity 路径在 body 里不存在 → 命中(运行期换身会冻结成录制者)。"""
+    apir = {"body_template": {"reason": "{{reason}}"}, "params": ["reason"],
+            "identity": [{"path": "applicantId", "source": "localStorage:userInfo.userId"}]}
+    assert any("找不到落点" in p for p in self_check(apir))
+
+
+def test_self_check_flags_bad_identity_source():
+    """identity 路径可达但取值来源非法 → 命中。"""
+    apir = {"body_template": {"applicantId": 118}, "params": [],
+            "identity": [{"path": "applicantId", "source": "屏幕上看到的"}]}
+    assert any("取值来源" in p for p in self_check(apir))
+
+
+def test_self_check_blob_nested_identity_reachable_passes():
+    """blob 内层 identity(path 含 __dano_jsonstr__)可达 → 不误报。"""
+    from dano.execution.page.request_capture import _JSONSTR
+    apir = {"body_template": {"formData": {_JSONSTR: {"applicant": 118, "reason": "{{reason}}"}}},
+            "params": ["reason"],
+            "identity": [{"path": f"formData.{_JSONSTR}.applicant",
+                          "source": "localStorage:userInfo.userId"}]}
+    assert self_check(apir) == []
+
+
+def test_self_check_flags_param_without_placeholder():
+    """声明了参数但模板里没有它的占位 → 值进不了 body(改了不生效)→ 命中。"""
+    apir = {"body_template": {"title": "固定值"}, "params": ["title"]}
+    assert any("进不了最终请求体" in p for p in self_check(apir))
+
+
+def test_self_check_flags_leftover_placeholder():
+    """模板有 {{ghost}} 但 ghost 不在 params(占位永远填不上)→ 命中残缺。"""
+    apir = {"body_template": {"a": "{{ghost}}"}, "params": []}
+    assert any("残留 {{}}" in p for p in self_check(apir))
+
+
+def test_self_check_step_link_unreachable_target_flagged():
+    """多步:link 目标路径在目标步 body 里不存在 → 串联会失败 → 命中。"""
+    wf = {"steps": [
+        {"body_template": {"x": "{{a}}"}, "params": ["a"]},
+        {"body_template": {"flowTask": {"taskId": ""}}, "params": [],
+         "links": [{"source_step": 0, "source_path": "data.id", "target_path": "missing.taskId"}]},
+    ]}
+    assert any("串联目标路径" in p and "missing.taskId" in p for p in self_check(wf))
+
+
+def test_self_check_step_link_reachable_passes():
+    """多步:link 目标路径可达 → 不报。"""
+    wf = {"steps": [
+        {"body_template": {"x": "{{a}}"}, "params": ["a"]},
+        {"body_template": {"flowTask": {"taskId": ""}}, "params": [],
+         "links": [{"source_step": 0, "source_path": "data.id", "target_path": "flowTask.taskId"}]},
+    ]}
+    assert self_check(wf) == []
+
+
+async def test_dry_replay_fails_on_self_check():
+    """坏 skill 走 dry(send=False)→ ok=False 且带 self_check 违规清单(发布前被拦)。"""
+    apir = {"method": "POST", "url": "http://x/submit",
+            "body_template": {"reason": "{{reason}}"}, "params": ["reason"],
+            "identity": [{"path": "applicantId", "source": "localStorage:userInfo.userId"}]}
+    out = await execute_api_request(apir, {"reason": "回家"}, send=False)
+    assert out["ok"] is False and out["self_check"]
+
+
+async def test_identity_audit_blocks_frozen_submit():
+    """换身路径不可达 + 会话能取到值 → 拒发(blocked),且在发网络前就 return(不连网)。"""
+    import json as _j
+    storage = {"origins": [{"localStorage": [{"name": "userInfo",
+                                              "value": _j.dumps({"userId": "999"})}]}]}
+    apir = {"method": "POST", "url": "http://127.0.0.1:1/submit",     # 不可达端口:真发会连不上,验证没走到这
+            "body_template": {"applicantId": 118}, "params": [],
+            "identity": [{"path": "nope.applicantId", "source": "localStorage:userInfo.userId"}]}
+    out = await execute_api_request(apir, {}, storage_state=storage, send=True, verify=False)
+    assert out.get("blocked") is True and out["ok"] is False and out["identity_issues"]
+
+
+# ─────────── P0:token 列表路径(B1 根治:键名含 '.'/'[]' 也能无歧义注入) ───────────
+def test_dotted_key_identity_injected_via_tokens():
+    """键名含点:用 tokens 注入能写进(纯字符串路径会被 _split_path 拆错 → 写不进)。"""
+    from dano.execution.page.request_capture import _apply_identity
+    body = {"formData": {"user.id": 0}}
+    storage = {"origins": [{"localStorage": [{"name": "u", "value": '{"id":"777"}'}]}]}
+    apir = {"identity": [{"path": "formData.user.id", "tokens": ["formData", "user.id"],
+                          "source": "localStorage:u.id"}]}
+    _apply_identity(body, apir, storage)
+    assert body["formData"]["user.id"] == "777"          # tokens 注入成功(B1 根治)
+
+
+def test_self_check_dotted_key_reachable_with_tokens():
+    """有 tokens → 自检判定可达,通过。"""
+    apir = {"body_template": {"formData": {"user.id": 0}}, "params": [],
+            "identity": [{"path": "formData.user.id", "tokens": ["formData", "user.id"],
+                          "source": "localStorage:u.id"}]}
+    assert self_check(apir) == []
+
+
+def test_self_check_dotted_key_without_tokens_flagged():
+    """无 tokens、只靠点路径 → _split_path 拆错 → 自检如实报不可达(把 B1 从静默变显式)。"""
+    apir = {"body_template": {"formData": {"user.id": 0}}, "params": [],
+            "identity": [{"path": "formData.user.id", "source": "localStorage:u.id"}]}
+    assert any("找不到落点" in p for p in self_check(apir))
+
+
+def test_suggest_identity_emits_tokens_for_dotted_key():
+    """suggest_identity 对嵌套字段输出 tokens(供运行期无歧义注入)。"""
+    import json as _j
+    storage = {"origins": [{"localStorage": [{"name": "userInfo",
+                                              "value": _j.dumps({"userId": "118"})}]}]}
+    pd = _j.dumps({"formData": {"applicantId": "118"}})
+    out = suggest_identity(pd, storage)
+    assert out and out[0]["tokens"] == ["formData", "applicantId"]
+
+
+def test_workflow_step_link_taskid_chains_via_tokens():
+    """Q3:多步串联带 tokens;link 目标路径可达 → self_check 通过。"""
+    writes = [
+        {"method": "POST", "url": "http://oa.x/flow/start",
+         "post_data": '{"procDefKey":"oa_leave"}', "response_json": {"code": 200, "data": {"taskId": "TASK-5566"}}},
+        {"method": "POST", "url": "http://oa.x/flow/submit",
+         "post_data": '{"flowTask":{"taskId":"TASK-5566"},"reason":"回家"}', "response_json": {"code": 200}},
+    ]
+    wf = build_api_workflow(writes, param_map={"reason": "reason"})
+    assert wf["steps"][1]["links"][0]["target_tokens"] == ["flowTask", "taskId"]
+    assert self_check(wf) == []
+
+
+async def test_onboarding_unsupported_when_no_writeable_body():
+    """录入:没有可参数化的写请求体 → 诚实标 unsupported(发布前 return,不连库,不发空 skill)。"""
+    from dano.onboarding.page_onboard import run_request_onboarding
+    out = await run_request_onboarding(tenant="t-x", subsystem="reimburse", action="noop",
+                                       api_request={"method": "POST", "url": "http://x/y"})
+    assert out["ok"] is False and out["status"] == "unsupported"
+
+
+# ─────────── P0:零依赖属性模糊 —— 对不变量、不对系统,把 B1/B2/B3/blob 各形状一次锁死 ───────────
+import json as _json       # noqa: E402
+import random as _random   # noqa: E402
+
+_FUZZ_KEYS = ["a", "b", "field", "user.name", "k.k", "中文键", "f_1", "a[0]", "x.y.z", "amount"]
+
+
+def _fuzz_node(rng, depth, params, idents, toks):
+    """随机生成 body 节点;沿途把 (param, tokens) 记入 params、identity 落点 tokens 记入 idents。
+    blob 在记录子路径时插入 __dano_jsonstr__ 段(与运行期一致)。"""
+    from dano.execution.page.request_capture import _JSONSTR
+    if depth <= 0 or rng.random() < 0.4:
+        r = rng.random()
+        if r < 0.55:
+            p = f"p{len(params)}"
+            params.append((p, list(toks)))
+            return "{{" + p + "}}"
+        if r < 0.72 and toks:
+            idents.append(list(toks))
+            return 0                                       # identity 常量(运行期被换身覆盖)
+        return rng.choice([1, "const", True, "oa_x"])      # 固定常量
+    kind = rng.choice(["dict", "list", "blob"])
+    if kind == "list":
+        return [_fuzz_node(rng, depth - 1, params, idents, toks + [i]) for i in range(rng.randint(1, 3))]
+    keys = rng.sample(_FUZZ_KEYS, rng.randint(1, 3))
+    if kind == "blob":
+        return {_JSONSTR: {k: _fuzz_node(rng, depth - 1, params, idents, toks + [_JSONSTR, k]) for k in keys}}
+    return {k: _fuzz_node(rng, depth - 1, params, idents, toks + [k]) for k in keys}
+
+
+def _fuzz_apir(rng):
+    from dano.execution.page.request_capture import _tokens_to_str
+    params, idents = [], []
+    keys = rng.sample(_FUZZ_KEYS, rng.randint(1, 4))
+    templ = {k: _fuzz_node(rng, 4, params, idents, [k]) for k in keys}
+    apir = {"body_template": templ, "params": [p for p, _t in params],
+            "identity": [{"path": _tokens_to_str(t), "tokens": t, "source": "localStorage:u.id"} for t in idents]}
+    return apir, params, idents
+
+
+def test_property_fuzz_pipeline_invariants():
+    """对 250 种随机 body 形状断言三条不变量(self_check + 端到端往返当 oracle)。"""
+    from dano.execution.page.request_capture import _apply_identity, _finalize_jsonstr, _path_lookup
+    storage = {"origins": [{"localStorage": [{"name": "u", "value": '{"id":"ID999"}'}]}]}
+    for seed in range(250):
+        rng = _random.Random(seed)
+        apir, params, idents = _fuzz_apir(rng)
+        # ① 良构 skill → self_check 必过(无误报)
+        assert self_check(apir) == [], f"seed={seed} self_check 误报: {self_check(apir)}"
+        # ② 每个参数值穿过 substitute→finalize 出现在最终 body(B2/blob 往返不丢值)
+        probes = {p: f"@@V{i}@@" for i, (p, _t) in enumerate(params)}
+        final = _json.dumps(_finalize_jsonstr(substitute(apir["body_template"], probes, {})), ensure_ascii=False)
+        for pr in probes.values():
+            assert pr in final, f"seed={seed} 参数值丢失: {pr}"
+        # ③ identity 按 tokens 落到正确位置(B1/B3:键含点/方括号/blob 内层也准)
+        body = substitute(apir["body_template"], {p: "x" for p, _ in params}, {})
+        _apply_identity(body, apir, storage)
+        for t in idents:
+            assert _path_lookup(body, t) == "ID999", f"seed={seed} identity 注入失败 @ {t}"
+
+
+def test_property_fuzz_self_check_catches_dropped_param():
+    """负面:给任意良构 skill 加一个无占位的幽灵参数 → self_check 必报(无漏报)。"""
+    for seed in range(150):
+        rng = _random.Random(seed)
+        apir, _p, _i = _fuzz_apir(rng)
+        apir["params"] = apir["params"] + ["__ghost__"]
+        assert any("__ghost__" in p for p in self_check(apir)), f"seed={seed} 漏报丢参数"

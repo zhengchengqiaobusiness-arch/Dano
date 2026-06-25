@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-ValidationKind = Literal["connect", "sandbox", "readback", "health", "replay", "cases", "vuln"]
+ValidationKind = Literal["connect", "sandbox", "readback", "health", "replay", "cases", "vuln", "self_check"]
 ReviewRole = Literal["acceptance", "security", "compliance"]
 
 # 各资产类型发布所需的验证种类(硬关卡:全覆盖才可发布)
@@ -273,6 +273,9 @@ class DraftStore:
         # 工作流步骤连接器(不能独立跑)放宽到"连得通即可";业务沙箱由复合 sandbox_test_workflow 整链验证
         if draft.asset_type == AssetType.CONNECTOR and draft.body.get("workflow_step"):
             required = {"connect"}
+        # 录制抓请求页面:承重闸门是**确定性 self_check**(不做 DOM 回放)→ 必须有 self_check 证据覆盖
+        elif draft.asset_type == AssetType.PAGE_SCRIPT and page_is_capture(draft.body):
+            required = {"self_check"}
         missing = required - covered
         if missing:
             return False, f"缺少必需验证种类:{sorted(missing)}(已有 {sorted(covered)})"
