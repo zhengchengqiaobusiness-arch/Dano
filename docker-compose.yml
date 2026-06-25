@@ -66,6 +66,7 @@ services:
       - skillmanner
 
 networks:
+  default:
   # 与同机 skillmanner 互通(由 skillmanner 的 compose 创建的外部网络)。
   # 独立部署 dano(无 skillmanner)时,删掉本段以及 app/nginx 下的 networks 引用即可。
   skillmanner:
