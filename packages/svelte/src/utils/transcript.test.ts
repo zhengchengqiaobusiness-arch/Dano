@@ -61,22 +61,4 @@ describe("assistant thinking blocks", () => {
     ]);
     expect(blocks[0]).toEqual({ kind: "thinking", text: "Inspect the repo" });
   });
-
-  it("keeps redacted thinking visible without exposing internal fields", () => {
-    const blocks = contentBlocks({
-      role: "assistant",
-      content: [
-        {
-          type: "thinking",
-          thinking: "",
-          thinkingSignature: "hidden",
-          redacted: true,
-        },
-      ],
-    } as never);
-
-    expect(blocks).toEqual([
-      { kind: "thinking", text: "", redacted: true },
-    ]);
-  });
 });

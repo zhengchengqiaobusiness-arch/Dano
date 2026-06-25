@@ -43,7 +43,6 @@ export interface ToolContentBlock {
 export interface ThinkingContentBlock {
   kind: "thinking";
   text: string;
-  redacted?: boolean;
 }
 
 export interface ImageContentBlock {
@@ -244,12 +243,8 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
         continue;
       case "thinking": {
         const thinkingText = block.thinking.trim();
-        if (thinkingText || block.redacted) {
-          blocks.push({
-            kind: "thinking",
-            text: thinkingText,
-            redacted: block.redacted,
-          });
+        if (thinkingText) {
+          blocks.push({ kind: "thinking", text: thinkingText });
         }
         continue;
       }
