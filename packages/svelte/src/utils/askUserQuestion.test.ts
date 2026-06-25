@@ -265,7 +265,7 @@ describe("ask user question transcript data", () => {
     expect(askUserQuestionResult(null)).toBeNull();
   });
 
-  it("hides only the first failed ask_user_question tool call from the transcript UI", () => {
+  it("shows failed ask_user_question tool calls in the transcript UI", () => {
     const failedBlock = block({ question: "Name?" }, { toolStatus: "error" });
 
     expect(isAskUserQuestionToolError(failedBlock)).toBe(true);
@@ -273,8 +273,7 @@ describe("ask user question transcript data", () => {
       hideAskUserQuestionToolBlock(
         failedBlock,
       ),
-    ).toBe(true);
-    expect(hideAskUserQuestionToolBlock(failedBlock, 1)).toBe(false);
+    ).toBe(false);
     expect(
       hideAskUserQuestionToolBlock(
         block({ question: "Name?" }, { toolStatus: "success" }),

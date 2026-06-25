@@ -15,7 +15,6 @@
   } from "../composables/bridgeStore.svelte";
   import {
     askUserQuestionRequest,
-    hideAskUserQuestionToolBlock,
     isAskUserQuestionToolError,
   } from "../utils/askUserQuestion";
   import { userMessageCopyText } from "../utils/messageCopy";
@@ -255,17 +254,7 @@
     const blocks = index >= messages.length
       ? contentBlocks(msg)
       : contentBlocks(messageWithTranscriptDeltas(msg, index));
-    let failedAskUserQuestionIndex = 0;
-    return blocks.filter(block => {
-      if (block.kind !== "tool") return true;
-      if (!isAskUserQuestionToolError(block)) return true;
-      const hide = hideAskUserQuestionToolBlock(
-        block,
-        failedAskUserQuestionIndex,
-      );
-      failedAskUserQuestionIndex += 1;
-      return !hide;
-    });
+    return blocks;
   }
 
   function toolBlockIdentity(block: ToolContentBlock, blockIndex: number): string {
@@ -910,7 +899,7 @@
                   {/if}
                 </div>
               {:else if block.kind === "tool"}
-                {#if askUserQuestionRequest(block)}
+                {#if askUserQuestionRequest(block) && !isAskUserQuestionToolError(block)}
                   <QuestionToolCard {block} active={isStreaming && !initialLoading} onRespond={answerQuestion} />
                 {:else if getReadClassification(block)?.kind === "skill"}
                   <SkillInvocationCard skillName={getReadClassification(block)!.label} />

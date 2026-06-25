@@ -54,9 +54,8 @@ export function isAskUserQuestionToolError(block: ToolContentBlock): boolean {
 
 export function hideAskUserQuestionToolBlock(
   block: ToolContentBlock,
-  failedAskUserQuestionIndex = 0,
 ): boolean {
-  return isAskUserQuestionToolError(block) && failedAskUserQuestionIndex === 0;
+  return false;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
