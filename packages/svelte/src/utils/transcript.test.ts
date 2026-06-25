@@ -96,26 +96,6 @@ describe("assistant thinking blocks", () => {
     expect(blocks).toEqual([{ kind: "text", text }]);
   });
 
-  it("does not parse think tags inside quoted prose", () => {
-    const text = 'The docs say "<think>literal</think>" before continuing.';
-    const blocks = contentBlocks({
-      role: "assistant",
-      content: [{ type: "text", text }],
-    } as never);
-
-    expect(blocks).toEqual([{ kind: "text", text }]);
-  });
-
-  it("does not parse think tags inside Markdown blockquotes", () => {
-    const text = "> <think>quoted</think>\n\nVisible answer.";
-    const blocks = contentBlocks({
-      role: "assistant",
-      content: [{ type: "text", text }],
-    } as never);
-
-    expect(blocks).toEqual([{ kind: "text", text }]);
-  });
-
   it("leaves unmatched assistant think tags as normal text while streaming", () => {
     const text = "<think>still streaming";
     const blocks = contentBlocks({

@@ -373,8 +373,8 @@ function thinkTagRangesOutsideFences(text: string): ThinkTagRange[] {
     if (start === -1) break;
 
     const startFence = containingRange(fences, start);
-    if (startFence || !startsPlainLine(text, start)) {
-      cursor = startFence?.end ?? start + THINK_OPEN.length;
+    if (startFence) {
+      cursor = startFence.end;
       continue;
     }
 
@@ -394,11 +394,6 @@ function thinkTagRangesOutsideFences(text: string): ThinkTagRange[] {
   }
 
   return ranges;
-}
-
-function startsPlainLine(text: string, offset: number): boolean {
-  const lineStart = text.lastIndexOf("\n", offset - 1) + 1;
-  return text.slice(lineStart, offset).trim() === "";
 }
 
 function codeFenceRanges(text: string): FenceRange[] {
