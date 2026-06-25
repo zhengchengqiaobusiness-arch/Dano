@@ -59,7 +59,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [action, setAction] = useState("submit_form");
   const [title, setTitle] = useState("");
   const [result, setResult] = useState<RecResult | null>(null);
-  const [goal, setGoal] = useState<Record<string, unknown> | null>(null);   // P3:AI 提炼的业务 Goal(用户确认后随发布)
   const [intercept, setIntercept] = useState(true);   // 拦截提交:抓到请求但不真发,录制不产生真实记录
   const [err, setErr] = useState("");
 
@@ -73,7 +72,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function start() {
     if (!tenant) { message.error("请先到「创建 / 进入租户」"); return; }
     if (!startUrl.trim()) { message.error("请填页面地址 start_url"); return; }
-    setErr(""); setResult(null); setSteps([]); setReqs([]); setFrame(""); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({}); setGoal(null);
+    setErr(""); setResult(null); setSteps([]); setReqs([]); setFrame(""); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({});
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/onboarding/page/record`);
     wsRef.current = ws;
@@ -116,18 +115,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         setReqMeta({ method: m.method, url: m.url });
         setCands(m.candidates || []);
         setChosenIdx(m.chosen_idx ?? 0);
-        setStepSel({});
+        // 自动判出的业务流程步预勾上(用户可改);后端没给则不勾
+        setStepSel(Object.fromEntries((m.suggested_steps || []).map((i: number) => [i, true])));
         setPhase("recording");
         message.success("抓到提交请求!勾选要让 agent 传值的字段 → 确认发布");
       }
-      else if (m.type === "goal_proposal") {   // P3:AI 提炼的业务 Goal 草案 → 展示给用户确认,确认后随发布
-        const g = m.goal && Object.keys(m.goal).length ? m.goal : null;
-        setGoal(g);
-        message.info(g ? "AI 提炼了业务目标,请核对后再发布" : "AI 未能提炼出业务目标(可直接发布)");
-      }
       else if (m.type === "result") {   // 留在录制现场:不关浏览器、不重来
         setResult(m.report); setPhase("recording");
-        if (m.report?.ok) { setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({}); setGoal(null); }   // 发布成功 → 收起字段表
+        if (m.report?.ok) { setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({}); }   // 发布成功 → 收起字段表
       }
       else if (m.type === "error") { setErr(m.detail || "录制出错"); setPhase("idle"); }
     };
@@ -205,12 +200,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       ? [...checked.filter((i) => i !== chosenIdx).sort((a, b) => a - b), chosenIdx] : [];
     return { param_map, selList, idList, step_idxs };
   }
-  function proposeGoal() {   // P3:让 AI 就当前勾选提炼业务 Goal(只提议,用户核对)
-    if (!action.trim()) return;
-    const { param_map, selList, idList, step_idxs } = _payload();
-    if (!Object.keys(param_map).length) { message.error("先勾选参数,再让 AI 提炼目标"); return; }
-    send({ type: "propose_goal", action: action.trim(), param_map, selects: selList, identity: idList, step_idxs });
-  }
   function publishRequest() {
     if (!action.trim() || badAction(action.trim())) return;
     const { param_map, selList, idList, step_idxs } = _payload();
@@ -220,8 +209,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       .filter((f) => param_map[f.path] && picked[f.path]?.req && !identity[f.path])
       .map((f) => param_map[f.path]);
     setResult(null); setPhase("publishing");
+    // 一键发布:后端自动提炼业务 Goal + self_check + 审核 + 自动修复;无需手动提炼/确认
     send({ type: "publish_request", action: action.trim(), title: title.trim(),
-           param_map, selects: selList, identity: idList, step_idxs, required, goal });   // goal:用户已核对的业务目标
+           param_map, selects: selList, identity: idList, step_idxs, required });
   }
   function stopAll() {
     send({ type: "stop" }); wsRef.current?.close();
@@ -365,25 +355,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 <Form.Item label="标题" style={{ marginBottom: 0 }}>
                   <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="提交请假" style={{ width: 160 }} />
                 </Form.Item>
-                <Button onClick={proposeGoal} disabled={phase === "publishing"}>AI 提炼业务目标</Button>
                 <Button type="primary" loading={phase === "publishing"} onClick={publishRequest}>
-                  确认发布(用勾选的字段建 Skill)
+                  确认发布(AI 自动提炼目标 + 审核 + 修复)
                 </Button>
               </Space>
-              {goal && (
-                <Alert style={{ marginTop: 8 }} type="info" showIcon
-                  message={`AI 业务目标:${(goal.intent as string) || "(未提炼出意图)"}`}
-                  description={
-                    <Space direction="vertical" size={0}>
-                      {Array.isArray(goal.success_criteria) && goal.success_criteria.length
-                        ? <span>成功标准:{(goal.success_criteria as string[]).join("、")}</span> : null}
-                      {Array.isArray(goal.forbidden_actions) && goal.forbidden_actions.length
-                        ? <span>禁止动作:{(goal.forbidden_actions as string[]).join("、")}</span> : null}
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        核对无误后点「确认发布」即随 Skill 存档(L3 写需你确认);不对可忽略。</Typography.Text>
-                    </Space>
-                  } />
-              )}
             </Card>
           )}
 

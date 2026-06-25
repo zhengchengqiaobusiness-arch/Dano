@@ -18,7 +18,7 @@ _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-")
 _PLACEHOLDER_NAME_RE = re.compile(r"^(请输入|请选择|请填写|如\s|例如|placeholder)")
 
 _FIX_OPS = {"drop_step", "reorder_steps", "set_success_rule", "parameterize",
-            "link_step", "rename_param", "remap_field", "set_identity"}
+            "link_step", "rename_param", "remap_field", "set_identity", "bind_placeholder"}
 
 
 def looks_session_specific(value) -> bool:
@@ -89,8 +89,18 @@ def apply_fix_ops(api_request: dict, ops: list[dict]) -> tuple[dict, list, list]
     apir = copy.deepcopy(api_request)
     applied, rejected = [], []
     for op in (ops or []):
+        before = copy.deepcopy(apir)
+        base = set(self_check(apir))                       # 改前结构基线
         ok, detail = _apply_fix_one(apir, op)
-        (applied if ok else rejected).append({**op, "ok": ok, "detail": detail})
+        if not ok:
+            rejected.append({**op, "ok": False, "detail": detail})
+            continue
+        new_bad = set(self_check(apir)) - base             # 这步是否**引入新结构问题**
+        if new_bad:                                        # 坏操作 → **逐 op 回滚**(执行后立刻 self_check)
+            apir = before
+            rejected.append({**op, "ok": False, "detail": "回滚(引入结构问题):" + "; ".join(list(new_bad)[:2])})
+        else:
+            applied.append({**op, "ok": True, "detail": detail})
     return apir, applied, rejected
 
 
@@ -164,12 +174,33 @@ def _apply_fix_one(apir, op) -> tuple[bool, str]:  # noqa: C901
         if _path_lookup(steps[ti].get("body_template"), tp) is _PATH_MISSING:
             return False, "target_path 不存在"
         sp = op.get("source_path")
+        if not sp:                                         # source_path 必填,且要在来源步响应里真实存在
+            return False, "缺 source_path"
+        src_resp = steps[si].get("response_json")
+        if src_resp is not None and _path_lookup(src_resp, sp) is _PATH_MISSING:
+            return False, "source_path 在来源步响应里不存在(引用必须真实)"
         steps[ti].setdefault("links", []).append({
             "target_path": _tokens_to_str(tp) if isinstance(tp, list) else tp,
             "target_tokens": tp if isinstance(tp, list) else _split_path(tp),
             "source_step": si,
             "source_path": _tokens_to_str(sp) if isinstance(sp, list) else sp,
-            "source_tokens": sp if isinstance(sp, list) else (_split_path(sp) if sp else None)})
+            "source_tokens": sp if isinstance(sp, list) else _split_path(sp)})
+        return True, "ok"
+    if name == "bind_placeholder":
+        tgt = _fix_target(apir, op.get("step"))
+        templ = (tgt or {}).get("body_template")
+        param, tp = op.get("param"), op.get("target_path")
+        if templ is None or not param:
+            return False, "缺 body_template/param"
+        if _path_lookup(templ, tp) is _PATH_MISSING:
+            return False, "target_path 不存在"
+        old = _find_param_tokens(templ, param)             # 把占位绑到 target_path;清掉它在别处的占位(避免一参填多处)
+        _set_by_path(templ, tp, "{{" + param + "}}")
+        tp_toks = tp if isinstance(tp, list) else _split_path(tp)
+        if old is not None and list(old) != list(tp_toks):
+            _set_by_path(templ, old, "")
+        if param not in tgt.setdefault("params", []):
+            tgt["params"].append(param)
         return True, "ok"
     if name == "rename_param":
         old, new = (op.get("old") or op.get("param")), op.get("new")

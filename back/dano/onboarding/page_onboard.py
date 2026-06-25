@@ -208,6 +208,16 @@ async def _auto_goal(action: str, api_request: dict) -> dict:
         return {}
 
 
+def _focus_question(action: str, findings: list) -> str:
+    """把剩余 findings 聚成**一个**精准问题(而非一长串):取最关键一条,提示还有几项,确认完接着问。"""
+    items = [(f.get("detail") if isinstance(f, dict) else str(f)) for f in (findings or [])]
+    items = [s for s in items if s]
+    if not items:
+        return f"为完成「{action}」,请补充缺失信息。"
+    q = f"为完成「{action}」,请先确认:{items[0]}"
+    return q + (f"(确认后还有 {len(items) - 1} 项)" if len(items) > 1 else "")
+
+
 def _build_page_body(api_request: dict, action: str, title: str, required):
     """从 api_request 算 params/必填/类型并建 PageScriptBody(修复后参数会变,故抽出可重算重建)。"""
     from dano.shared.asset_bodies import PageScriptBody
@@ -370,19 +380,21 @@ async def run_request_onboarding(
                         return {"ok": False, "stage": "review", "status": IngestionStatus.NEEDS_CLARIFICATION.value,
                                 "action": action, "clarifications": reasons or ["修复后仍未通过,需人工确认"],
                                 "reason": "自动修复后仍未通过审核 —— 需澄清(非重录)"}
-                else:                                                 # 改不动 → 一个精准问题(非重录)
-                    qs = [f.get("detail") for f in (remaining or findings)][:6]
-                    log.warning("ingest.gate.repair_unresolved", remaining=len(remaining or findings))
+                else:                                                 # 改不动 → **一个精准问题**(非重录)
+                    rem = remaining or findings
+                    log.warning("ingest.gate.repair_unresolved", remaining=len(rem))
                     return {"ok": False, "stage": "repair", "status": IngestionStatus.NEEDS_CLARIFICATION.value,
-                            "action": action, "clarifications": qs,
-                            "reason": "自动修复未能完全解决,请确认这几项(无需重录)"}
+                            "action": action, "question": _focus_question(action, rem),
+                            "clarifications": [f.get("detail") for f in rem if f.get("detail")],
+                            "reason": "自动修复未能完全解决(无需重录,确认问题即可)"}
             elif not rev.get("all_passed", True):                     # 无修复器 + 审核不过 → 驳回(把理由还回)
                 reasons = [f"{v.get('role')}: {r}" for v in (rev.get("verdicts") or [])
                            if not v.get("passed") for r in (v.get("reasons") or ["未通过"])]
                 log.warning("ingest.gate.review_rejected", reasons=reasons)
                 return {"ok": False, "stage": "review", "status": IngestionStatus.NEEDS_CLARIFICATION.value,
-                        "action": action, "clarifications": reasons or ["三模型审核未通过"],
-                        "reason": "审核未通过(格式 / 业务逻辑 / 风险合规)—— 见 clarifications"}
+                        "action": action, "question": _focus_question(action, [{"detail": r} for r in reasons]),
+                        "clarifications": reasons or ["三模型审核未通过"],
+                        "reason": "审核未通过(格式 / 业务逻辑 / 风险合规)"}
         # 发布硬闸门:verify_publishable(self_check 等证据)+ verify_reviewed(capture 仍按既定放行,审核闸门在上方编排层把守)
         pub = await T.publish_asset(run_id, {"asset_draft_id": d["asset_draft_id"],
                                              "validation_run_ids": rp["validation_run_ids"],

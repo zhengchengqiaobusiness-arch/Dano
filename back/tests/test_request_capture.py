@@ -1480,6 +1480,8 @@ async def test_onboarding_live_verify_reaches_verified():
     port = srv.server_address[1]
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     tenant = f"live-e2e-{uuid4().hex[:8]}"
+    from dano.agent_tools import tools as _T
+    _T.set_review_board(_FakeBoard())                        # capture 写须过评审(发布硬闸门),注 fake 板
     try:
         apir = {"method": "POST", "url": f"http://127.0.0.1:{port}/save",
                 "body_template": {"reason": "{{原因}}"}, "params": ["原因"],
@@ -1494,6 +1496,7 @@ async def test_onboarding_live_verify_reaches_verified():
         assert rep["status"] == "verified", rep              # 结构 + 活体均验 → verified
         assert store["reason"] == "回家真跑"                  # 真发确实带了新值
     finally:
+        _T.set_review_board(None)
         async with get_pool().acquire() as c:
             await c.execute("DELETE FROM asset_drafts WHERE tenant=$1", tenant)
             await c.execute("DELETE FROM assets WHERE tenant=$1", tenant)
@@ -1781,3 +1784,100 @@ async def test_onboarding_repair_loop_fixes_and_publishes():
             await c.execute("DELETE FROM asset_drafts WHERE tenant=$1", tenant)
             await c.execute("DELETE FROM assets WHERE tenant=$1", tenant)
         await close_pool()
+
+
+# ─────────── 多接口自动判流程:提交锚点 + 数据依赖闭包,丢噪声 ───────────
+def test_suggest_workflow_steps_drops_noise_keeps_chain():
+    from dano.execution.page.request_capture import suggest_workflow_steps
+    writes = [
+        {"method": "POST", "url": "http://x/task/create", "post_data": '{"name":"x"}',
+         "response_json": {"data": {"taskId": "TASK-9988"}}},                       # 0 创建(产 taskId)
+        {"method": "PUT", "url": "http://x/old/SEQ-1/status", "post_data": '{"status":"done"}',
+         "response_json": {"code": 0}},                                             # 1 改旧实体(噪声)
+        {"method": "POST", "url": "http://x/task/submit",
+         "post_data": '{"taskId":"TASK-9988","reason":"回家"}', "response_json": {"code": 0}},  # 2 提交
+    ]
+    assert suggest_workflow_steps(writes, {"原因": "回家"}) == [0, 2]   # 提交+其依赖;噪声步1被丢
+
+
+def test_suggest_workflow_steps_single_submit():
+    from dano.execution.page.request_capture import suggest_workflow_steps
+    writes = [{"method": "POST", "url": "http://x/submit", "post_data": '{"reason":"回家"}',
+               "response_json": {"code": 0}}]
+    assert suggest_workflow_steps(writes, {"原因": "回家"}) == [0]
+
+
+def test_suggest_workflow_steps_excludes_auth():
+    from dano.execution.page.request_capture import suggest_workflow_steps
+    writes = [
+        {"method": "POST", "url": "http://x/login", "post_data": '{"password":"p"}', "response_json": {}},  # 鉴权,排除
+        {"method": "POST", "url": "http://x/submit", "post_data": '{"reason":"回家"}', "response_json": {"code": 0}},
+    ]
+    assert suggest_workflow_steps(writes, {"原因": "回家"}) == [1]
+
+
+# ─────────── 审计修复:回滚/source_path/bind_placeholder/多占位/脱敏/聚焦问题 ───────────
+def test_redact_keeps_credential_type_and_environment():
+    """脱敏 bug 修复:credential_type/environment 是评审元数据,绝不脱敏(否则 compliance fail-closed 误判)。"""
+    from dano.review.board import _redact_secrets
+    out = _redact_secrets({"credential_type": "test", "environment": "sandbox",
+                           "authorization": "Bearer x", "password": "p"})
+    assert out["credential_type"] == "test" and out["environment"] == "sandbox"
+    assert out["authorization"] != "Bearer x" and out["password"] != "p"   # 真凭证仍脱敏
+
+
+def test_apply_fix_ops_rolls_back_op_that_breaks_structure():
+    """#2 逐 op 回滚:parameterize 把 b 也设成已有参数 X → X 填两处(自检报错)→ 回滚该 op。"""
+    from dano.execution.page.repair_ops import apply_fix_ops
+    apir = {"body_template": {"a": "{{X}}", "b": "const"}, "params": ["X"]}
+    out, applied, rejected = apply_fix_ops(apir, [{"op": "parameterize", "path": ["b"], "param": "X"}])
+    assert not applied and rejected and "回滚" in rejected[0]["detail"]
+    assert out["body_template"]["b"] == "const"            # 已回滚
+
+
+def test_apply_fix_ops_link_step_validates_source_path():
+    """#3 link_step 的 source_path 必须在来源步响应里真实存在,否则拒。"""
+    from dano.execution.page.repair_ops import apply_fix_ops
+    apir = {"steps": [
+        {"body_template": {"x": "{{a}}"}, "params": ["a"], "response_json": {"data": {"id": "T1"}}},
+        {"body_template": {"taskId": ""}, "params": []},
+    ]}
+    _o1, ap1, _r1 = apply_fix_ops(apir, [{"op": "link_step", "target_step": 1, "target_path": ["taskId"],
+                                          "source_step": 0, "source_path": ["data", "id"]}])
+    assert ap1                                              # 真实 source_path → 接受
+    _o2, ap2, rej2 = apply_fix_ops(apir, [{"op": "link_step", "target_step": 1, "target_path": ["taskId"],
+                                           "source_step": 0, "source_path": ["data", "nope"]}])
+    assert not ap2 and rej2 and "source_path" in rej2[0]["detail"]   # 不存在 → 拒
+
+
+def test_apply_fix_ops_bind_placeholder():
+    """#4 bind_placeholder:把占位参数绑到正确字段,清掉它在别处的占位。"""
+    from dano.execution.page.repair_ops import apply_fix_ops
+    apir = {"body_template": {"x": "{{请输入编号}}", "y": "const"}, "params": ["请输入编号"]}
+    out, applied, _r = apply_fix_ops(apir, [{"op": "bind_placeholder", "param": "请输入编号", "target_path": ["y"]}])
+    assert applied and out["body_template"]["y"] == "{{请输入编号}}" and out["body_template"]["x"] == ""
+
+
+def test_self_check_flags_param_in_multiple_leaves():
+    """#5 同一参数填多处(扁平/嵌套键歧义)→ self_check 报错。"""
+    apir = {"body_template": {"a": "{{X}}", "b": "{{X}}"}, "params": ["X"]}
+    assert any("同时填入" in p for p in self_check(apir))
+
+
+def test_focus_question_single():
+    """#7 改不动 → 聚成一个精准问题(非一长串)。"""
+    from dano.onboarding.page_onboard import _focus_question
+    q = _focus_question("提交请假", [{"detail": "参数A语义不清"}, {"detail": "参数B不清"}])
+    assert "提交请假" in q and "参数A语义不清" in q and "还有 1 项" in q
+
+
+def test_suggest_workflow_steps_keeps_user_value_step():
+    """多接口优化:含用户填写值的业务写也纳入(非噪声),即便它不数据依赖提交。"""
+    from dano.execution.page.request_capture import suggest_workflow_steps
+    writes = [
+        {"method": "POST", "url": "http://x/draft", "post_data": '{"title":"我的标题"}', "response_json": {"code": 0}},
+        {"method": "POST", "url": "http://x/heartbeat", "post_data": '{"t":1}', "response_json": {"code": 0}},  # 噪声
+        {"method": "POST", "url": "http://x/submit", "post_data": '{"reason":"回家"}', "response_json": {"code": 0}},
+    ]
+    out = suggest_workflow_steps(writes, {"标题": "我的标题", "原因": "回家"})
+    assert 0 in out and 2 in out and 1 not in out          # draft(含用户值)+提交;心跳(无值)丢

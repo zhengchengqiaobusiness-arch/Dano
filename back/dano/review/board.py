@@ -254,14 +254,21 @@ _SECRET_KEY_HINTS = ("authorization", "auth_headers", "auth_header", "cookie", "
                      "passwd", "secret", "credential", "apikey", "api_key", "satoken", "session",
                      "x-tenant-key", "set-cookie")
 _SECRET_MASK = "***[运行期注入的会话登录态/凭证,模板不存明文,已脱敏]***"
+# **绝不脱敏**:这些是评审需要看的非密元数据(尤其 credential_type 含 "credential" 会被误命中 →
+# compliance 看不到 'test' → fail-closed 误判不通过)。
+_NEVER_MASK = {"credential_type", "environment", "kind", "passed", "method"}
 
 
 def _redact_secrets(node):
-    """深拷贝并按 key 名脱敏凭证(auth_headers/Authorization/Cookie/token…)。结构保留,值打码。"""
+    """深拷贝并按 key 名脱敏凭证(auth_headers/Authorization/Cookie/token…)。结构保留,值打码;
+    但 _NEVER_MASK 里的评审元数据(credential_type/environment 等)绝不脱敏(否则 compliance 误判)。"""
     if isinstance(node, dict):
         out: dict = {}
         for k, v in node.items():
-            if any(h in str(k).lower() for h in _SECRET_KEY_HINTS):
+            kl = str(k).lower()
+            if kl in _NEVER_MASK:
+                out[k] = _redact_secrets(v) if isinstance(v, (dict, list)) else v
+            elif any(h in kl for h in _SECRET_KEY_HINTS):
                 out[k] = _SECRET_MASK
             else:
                 out[k] = _redact_secrets(v)
