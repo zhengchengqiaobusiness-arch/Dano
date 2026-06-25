@@ -9,14 +9,26 @@ import {
   type SessionManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { createRequire } from "node:module";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { askUserQuestionTool } from "./ask-user-question.js";
 import { createCurlTool } from "./curl-tool.js";
 import { danoVersionTool } from "./dano-version-tool.js";
 
-const HEIMDALL_EXTENSION_PATH = fileURLToPath(
-  import.meta.resolve("@casualjim/pi-heimdall/extensions/heimdall.ts"),
-);
+function resolveHeimdallExtensionPath(): string {
+  try {
+    return createRequire(join(process.cwd(), "package.json")).resolve(
+      "@casualjim/pi-heimdall/extensions/heimdall.ts",
+    );
+  } catch {
+    return fileURLToPath(
+      import.meta.resolve("@casualjim/pi-heimdall/extensions/heimdall.ts"),
+    );
+  }
+}
+
+const HEIMDALL_EXTENSION_PATH = resolveHeimdallExtensionPath();
 
 export interface CreateDetachedAgentSessionOptions {
   model?: CreateAgentSessionFromServicesOptions["model"];

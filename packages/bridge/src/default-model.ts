@@ -36,13 +36,15 @@ type FlushableSessionManager = {
   flushed?: boolean;
 };
 
-// Mirrors pi-coding-agent 0.74.0; the resolver module is not exported.
+// Mirrors pi-coding-agent 0.80.2; the resolver module is not exported.
 const DEFAULT_MODEL_PER_PROVIDER: Record<string, string> = {
   "amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
-  anthropic: "claude-opus-4-7",
+  "ant-ling": "Ring-2.6-1T",
+  anthropic: "claude-opus-4-8",
   openai: "gpt-5.4",
   "azure-openai-responses": "gpt-5.4",
   "openai-codex": "gpt-5.5",
+  nvidia: "nvidia/nemotron-3-super-120b-a12b",
   deepseek: "deepseek-v4-pro",
   google: "gemini-3.1-pro-preview",
   "google-vertex": "gemini-3.1-pro-preview",
@@ -53,6 +55,7 @@ const DEFAULT_MODEL_PER_PROVIDER: Record<string, string> = {
   groq: "openai/gpt-oss-120b",
   cerebras: "zai-glm-4.7",
   zai: "glm-5.1",
+  "zai-coding-cn": "glm-5.1",
   mistral: "devstral-medium-latest",
   minimax: "MiniMax-M2.7",
   "minimax-cn": "MiniMax-M2.7",
@@ -60,6 +63,7 @@ const DEFAULT_MODEL_PER_PROVIDER: Record<string, string> = {
   "moonshotai-cn": "kimi-k2.6",
   huggingface: "moonshotai/Kimi-K2.6",
   fireworks: "accounts/fireworks/models/kimi-k2p6",
+  together: "moonshotai/Kimi-K2.6",
   opencode: "kimi-k2.6",
   "opencode-go": "kimi-k2.6",
   "kimi-coding": "kimi-for-coding",

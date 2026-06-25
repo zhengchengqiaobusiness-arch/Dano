@@ -24,7 +24,7 @@ Electron target.
 
 ## Requirements
 
-- Node.js `>=20.6.0`
+- Node.js `>=22.19.0`
 - pnpm
 - Docker Compose or Podman Compose
 - A server-side LLM credential for the selected model provider

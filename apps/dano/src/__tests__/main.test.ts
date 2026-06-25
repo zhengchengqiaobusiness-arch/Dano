@@ -59,9 +59,12 @@ describe("standalone main", () => {
       expect(packageJson.dependencies?.["@casualjim/pi-heimdall"]).toBe(
         "0.2.10",
       );
+      expect(packageJson.dependencies?.["@earendil-works/pi-coding-agent"]).toBe(
+        "0.80.2",
+      );
       expect(
         packageJson.dependencies?.["@mariozechner/pi-coding-agent"],
-      ).toBe("npm:@earendil-works/pi-coding-agent@0.74.0");
+      ).toBe("npm:@earendil-works/pi-coding-agent@0.80.2");
     }
     expect(heimdall.sandbox?.enabled).toBe(true);
     expect(heimdall.sandbox?.userNamespace).toBe(false);
