@@ -441,8 +441,18 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     <Typography.Text key={"w" + i} type="warning" style={{ fontSize: 12 }}>⚠ {w}</Typography.Text>)}
                   {(result.review_notes || []).map((n, i) =>
                     <Typography.Text key={"r" + i} type="secondary" style={{ fontSize: 12 }}>AI 顾问:{n}</Typography.Text>)}
-                  {(result.clarifications || []).map((c, i) =>
-                    <Typography.Text key={"c" + i} type="danger" style={{ fontSize: 12 }}>需澄清:{c}</Typography.Text>)}
+                  {(result.clarifications || []).length > 0 && (
+                    <div style={{ marginTop: 6, padding: "6px 10px", border: "1px solid #ffd591",
+                                  borderRadius: 6, background: "#fffbe6" }}>
+                      <Typography.Text strong style={{ fontSize: 12 }}>
+                        请补充/确认以下 {result.clarifications!.length} 项即可(AI 已自动修复其余问题,<b>无需重录</b>):
+                      </Typography.Text>
+                      <ol style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                        {result.clarifications!.map((c, i) =>
+                          <li key={"c" + i}><Typography.Text style={{ fontSize: 12 }}>{c}</Typography.Text></li>)}
+                      </ol>
+                    </div>
+                  )}
                   {result.ok && <Button type="primary" size="small" style={{ marginTop: 4 }} onClick={() => nav("/skills")}>去 Skill 目录调用</Button>}
                 </Space>
               }

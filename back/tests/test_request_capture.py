@@ -1634,3 +1634,150 @@ async def test_onboarding_review_gate_rejects_and_returns_reasons():
             await c.execute("DELETE FROM asset_drafts WHERE tenant=$1", tenant)
             await c.execute("DELETE FROM assets WHERE tenant=$1", tenant)
         await close_pool()
+
+
+# ─────────── LLM 修复循环 P0:执行器 + 检出器 + 循环骨架(fake propose,离线可测) ───────────
+def test_looks_session_specific():
+    from dano.execution.page.repair_ops import looks_session_specific as f
+    assert f("SEQ-20260625-2F29") is True
+    assert f("1782144000000") is True
+    assert f("550e8400-e29b-41d4-a716-446655440000") is True
+    assert f("oa_leave") is False and f("100") is False and f("事假") is False and f("") is False
+
+
+def test_looks_placeholder_name():
+    from dano.execution.page.repair_ops import looks_placeholder_name as f
+    assert f("请输入运行编号") is True and f("请选择类型") is True and f("如 Homo sapiens") is True
+    assert f("物种") is False and f("amount") is False
+
+
+def test_apply_fix_ops_parameterize_and_reject_bad_ref():
+    from dano.execution.page.repair_ops import apply_fix_ops
+    apir = {"body_template": {"taskId": "SEQ-1", "reason": "{{原因}}"}, "params": ["原因"]}
+    out, applied, rejected = apply_fix_ops(apir, [
+        {"op": "parameterize", "path": ["taskId"], "param": "任务号"},
+        {"op": "remap_field", "param": "鬼", "target_path": ["reason"]},   # param 不存在 → 拒
+    ])
+    assert out["body_template"]["taskId"] == "{{任务号}}" and "任务号" in out["params"]
+    assert len(applied) == 1 and len(rejected) == 1 and rejected[0]["op"] == "remap_field"
+    assert apir["body_template"]["taskId"] == "SEQ-1"      # 原对象不被改(深拷贝)
+
+
+def test_apply_fix_ops_remap_swaps_fields():
+    from dano.execution.page.repair_ops import apply_fix_ops
+    apir = {"body_template": {"species": "{{a}}", "method": "{{b}}"}, "params": ["a", "b"]}
+    out, _applied, _rej = apply_fix_ops(apir, [{"op": "remap_field", "param": "a", "target_path": ["method"]}])
+    assert out["body_template"]["method"] == "{{a}}" and out["body_template"]["species"] == "{{b}}"
+
+
+def test_apply_fix_ops_rename_and_success_rule():
+    from dano.execution.page.repair_ops import apply_fix_ops
+    apir = {"body_template": {"x": "{{请输入运行编号}}"}, "params": ["请输入运行编号"]}
+    out, _a, _r = apply_fix_ops(apir, [
+        {"op": "rename_param", "old": "请输入运行编号", "new": "运行编号"},
+        {"op": "set_success_rule", "field": "code", "ok_values": ["0"]},
+    ])
+    assert out["body_template"]["x"] == "{{运行编号}}" and "运行编号" in out["params"]
+    assert out["success_rule"] == {"field": "code", "ok_values": ["0"]}
+
+
+def test_apply_fix_ops_drop_step_fixes_links():
+    from dano.execution.page.repair_ops import apply_fix_ops
+    apir = {"steps": [
+        {"body_template": {"a": 1}, "params": []},
+        {"body_template": {"taskId": ""}, "params": [],
+         "links": [{"target_path": "taskId", "source_step": 0, "source_path": "data.id"}]},
+    ]}
+    out, _a, _r = apply_fix_ops(apir, [{"op": "drop_step", "step": 0}])
+    assert len(out["steps"]) == 1 and out["steps"][0].get("links") == []   # 源步删 → link 丢弃
+
+
+def test_collect_repair_findings():
+    from dano.execution.page.repair_ops import collect_repair_findings
+    apir = {"body_template": {"taskId": "SEQ-20260625-2F29", "x": "{{请输入编号}}"}, "params": ["请输入编号"]}
+    kinds = {f["kind"] for f in collect_repair_findings(apir)}
+    assert "session_constant" in kinds and "placeholder_name" in kinds
+
+
+async def test_run_repair_loop_converges_with_fake_propose():
+    """脏 skill(会话常量焊死 + 占位名参数)→ fake 修复器出 parameterize+rename → 循环后 findings 清零。"""
+    from dano.execution.page.repair_ops import collect_repair_findings
+    from dano.onboarding.repair import run_repair_loop
+    apir = {"body_template": {"taskId": "SEQ-20260625-2F29", "x": "{{请输入编号}}"}, "params": ["请输入编号"]}
+
+    async def fake_propose(a, findings, goal):
+        ops = []
+        for f in findings:
+            if f["kind"] == "session_constant":
+                ops.append({"op": "parameterize", "path": f["path"], "param": "任务号"})
+            elif f["kind"] == "placeholder_name":
+                ops.append({"op": "rename_param", "old": f["param"], "new": "编号"})
+        return ops
+
+    repaired, _rounds, _hist, remaining = await run_repair_loop(apir, fake_propose)
+    assert remaining == [] and collect_repair_findings(repaired) == []
+    assert repaired["body_template"]["taskId"] == "{{任务号}}" and repaired["body_template"]["x"] == "{{编号}}"
+
+
+# ─────────── 修复循环 P1:LLM 修复器 + 审核 findings 转换 + 接进主流程(自动修复,不重录) ───────────
+async def test_generate_fix_ops_redacts_and_returns_ops():
+    from dano.onboarding.repair import generate_fix_ops
+    fake = _FakeChat({"ops": [{"op": "parameterize", "path": ["taskId"], "param": "任务号"}]})
+    apir = {"body_template": {"taskId": "SEQ-1", "reason": "{{原因}}"}, "params": ["原因"],
+            "method": "POST", "path": "/x"}
+    ops = await generate_fix_ops(fake, "m", goal={"intent": "创建"}, api_request=apir,
+                                 findings=[{"kind": "session_constant", "detail": "x"}])
+    assert ops == [{"op": "parameterize", "path": ["taskId"], "param": "任务号"}]
+    assert "原因" in fake.seen["user"] and "SEQ-1" not in fake.seen["user"]   # 只喂骨架(param↔path),不带 body 值
+
+
+async def test_generate_fix_ops_safe_degrade():
+    from dano.onboarding.repair import generate_fix_ops
+    assert await generate_fix_ops(None, "m", goal={}, api_request={}, findings=[{"x": 1}]) == []
+    assert await generate_fix_ops(_FakeChat({"ops": []}), "m", goal={}, api_request={}, findings=[]) == []
+
+
+def test_review_findings_converter():
+    from dano.onboarding.repair import review_findings
+    vs = [{"role": "acceptance", "passed": False, "reasons": ["业务逻辑不符"]},
+          {"role": "security", "passed": True, "reasons": []}]
+    assert review_findings(vs) == [{"kind": "review_acceptance", "detail": "业务逻辑不符"}]
+
+
+async def test_onboarding_repair_loop_fixes_and_publishes():
+    """脏 skill(硬编码 task ID 常量)+ 注入修复器(参数化它)→ 自动修复 → 发布(不重录)。"""
+    from uuid import uuid4
+
+    from dano.agent_tools import tools as _T
+    from dano.infra.db import close_pool, get_pool, init_pool
+    from dano.onboarding.page_onboard import run_request_onboarding
+    from dano.shared.enums import Subsystem
+    try:
+        await init_pool()
+    except Exception:  # noqa: BLE001
+        pytest.skip("PG 不可用")
+    tenant = f"rep-e2e-{uuid4().hex[:8]}"
+    _T.set_review_board(_FakeBoard())            # 审核全过
+
+    async def fake_propose(api_request, findings, goal):
+        ops = []
+        for f in findings:
+            if f.get("kind") == "session_constant":
+                ops.append({"op": "parameterize", "path": f["path"], "param": "任务号"})
+        return ops
+    _T.set_fix_proposer(fake_propose)
+    try:
+        apir = {"method": "POST", "url": "http://oa.x/submit",
+                "body_template": {"taskId": "SEQ-20260625-2F29", "reason": "{{原因}}"},
+                "params": ["原因"], "sample_inputs": {"原因": "录制原因"}}
+        out = await run_request_onboarding(tenant=tenant, subsystem=Subsystem.REIMBURSE.value,
+                                           action="rep_test", api_request=apir, sample_inputs={"原因": "回家"})
+        assert out["ok"] is True, out
+        assert "任务号" in (out["api"]["params"] or [])    # 硬编码 task ID 被自动参数化,无需重录
+    finally:
+        _T.set_review_board(None)
+        _T.set_fix_proposer(None)
+        async with get_pool().acquire() as c:
+            await c.execute("DELETE FROM asset_drafts WHERE tenant=$1", tenant)
+            await c.execute("DELETE FROM assets WHERE tenant=$1", tenant)
+        await close_pool()

@@ -28,11 +28,17 @@ log = structlog.get_logger(__name__)
 _ds = DraftStore()
 _repo = AssetRepository()
 _review_board = None      # 可注入(测试用 fake);None 时按配置从环境构造真实三模型评审
+_fix_proposer = None      # 修复器:propose(api_request, findings, goal)->ops。可注入(测试 fake);None 时用 board.client 走 generate_fix_ops
 
 
 def set_review_board(board) -> None:  # noqa: ANN001 —— 测试注入 fake 评审委员会
     global _review_board
     _review_board = board
+
+
+def set_fix_proposer(fn) -> None:  # noqa: ANN001 —— 测试注入 fake 修复器(出修复操作)
+    global _fix_proposer
+    _fix_proposer = fn
 
 
 _adapter_caller_factory = None    # 可注入(测试用 fake);None 时按 materials 构造真实 httpx 调用
