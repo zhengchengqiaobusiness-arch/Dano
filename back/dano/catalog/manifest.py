@@ -56,11 +56,25 @@ def _is_reserved(field: str) -> bool:
             or is_flow_internal(field) or is_form_envelope(field))
 
 
-def _schema_prop(skill: SkillSpec, field: str, desc: str) -> dict:
+_OPTIONS_INLINE_MAX = 50    # 候选 ≤ 此数 → 内置 enum 进 schema(agent 直接选);更多 → 只留来源,运行期 --list-options 现拉
+
+
+def _api_selects(skill: SkillSpec) -> dict:
+    """从 api_request(单请求 + 多步各步)汇总 select 元数据 → {参数名: select}。供字段 schema 补枚举/来源。"""
+    apir = getattr(skill, "api_request", None) or {}
+    sels = list(apir.get("selects") or [])
+    for st in (apir.get("steps") or []):
+        sels += list(st.get("selects") or [])
+    return {s.get("param"): s for s in sels if s.get("param")}
+
+
+def _schema_prop(skill: SkillSpec, field: str, desc: str, sel: dict | None = None) -> dict:
     """字段 → JSON Schema 属性。**type 保持合法**(function-calling 可直接用),但**语义不丢**:
 
     - `enum`(选领导/字典下拉):type=string + format=name-ref + 描述提示「传名字→运行期查内部 ID」
       (这是关键:agent 必须传名字/选项文字,而非内部 ID/编号,否则提交进的是错值);
+      **候选选项内置进 schema**(≤50 条直接 `enum`;更多则带 `x-options-source`,运行期 --list-options 现拉)→
+      agent 从真实可选值里选,不再凭空猜名(问题1:稳固、不易错);
     - `datetime`/`date`:type=string + 标准 format,告诉 agent 这是日期时间字段;
     - 其余按信源声明 / 数值语义判定。format 为 JSON Schema 扩展位,校验器忽略未知值,安全。
     """
@@ -68,8 +82,20 @@ def _schema_prop(skill: SkillSpec, field: str, desc: str) -> dict:
     # label=字段纯语义(给 SOP/复述用,简洁);description=语义 + 调用约定(给参数表/function-calling 用)。
     # 约定不写死示例值(『张三』只适合选人,不适合选值如请假类型);示例由前端/样例值提供,不在此臆造。
     if declared == "enum":
-        return {"type": "string", "format": "name-ref", "label": desc,
-                "description": desc + "(传名字/选项文字,Dano 运行期自动查内部 ID,**勿直接传 ID/编号**)"}
+        prop = {"type": "string", "format": "name-ref", "label": desc,
+                "description": desc + ("(传名字/选项文字,Dano 提交时按名字现查内部 ID,**勿直接传 ID/编号**;"
+                                       f"选前先 `--list-options {field}` 实时拉可选项再选)")}
+        opts = [o for o in ((sel or {}).get("options") or []) if str(o).strip()]
+        cnt = int((sel or {}).get("count") or len(opts))
+        if (sel or {}).get("source_url"):
+            prop["x-options-source"] = True                  # 该字段有来源接口 → 可 --list-options 实时拉
+        if opts:
+            prop["x-options"] = opts                         # 候选快照(≤500),写进 references/OPTIONS.md 供离线参考
+            if len(opts) <= _OPTIONS_INLINE_MAX:
+                prop["enum"] = opts                          # ≤50 直接内置 enum:function-calling 层就约束 agent 只能选真实值
+            if cnt > len(opts):                              # 快照被截断(候选 >500)→ 以实时拉取为准
+                prop["x-options-truncated"] = True
+        return prop
     if declared == "datetime":
         return {"type": "string", "format": "date-time", "label": desc,
                 "description": desc + "(日期时间;传 `YYYY-MM-DD` 或 `YYYY-MM-DD HH:mm:ss`,Dano 运行期自动转成目标系统格式,**勿自己拼时间戳**)"}
@@ -91,10 +117,11 @@ def _parameters_schema(skill: SkillSpec) -> dict:
     """
     all_fields = [f for f in dict.fromkeys([*skill.required_fields, *skill.optional_fields])
                   if not _is_reserved(f)]
+    sels = _api_selects(skill)                               # 选择型字段的候选选项/来源(内置进 schema)
     props = {}
     for f in all_fields:
         desc = skill.field_docs.get(f) or _FIELD_DESC.get(f, f)
-        props[f] = _schema_prop(skill, f, desc)
+        props[f] = _schema_prop(skill, f, desc, sels.get(f))
     return {
         "type": "object",
         "properties": props,

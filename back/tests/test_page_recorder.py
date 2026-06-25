@@ -256,6 +256,20 @@ async def test_follows_new_tab_and_records_on_it(tmp_path) -> None:  # noqa: ANN
     assert samples.get("amount") == "100"
 
 
+async def test_multipage_handlers_safe_during_teardown() -> None:
+    """治 TargetClosedError:会话拆除中(_closing)迟到的 page close / 新页事件不得在已关 context 上
+    new_cdp_session 抛错 —— 确定性:_closing 置位后这些 handler 全部安全返回(无浏览器即可验)。"""
+    sess = RecordSession()
+    sess._closing = True
+    sess._on_frame = lambda d: None        # noqa: E731 —— 截屏已"开"过,验切页不会重开
+    # 以下在 _closing 下都应安全返回(不触发 new_cdp_session、不抛)
+    await sess._open_screencast()
+    await sess._restart_screencast()
+    await sess._on_page_close(object())
+    await sess._on_new_page(object())
+    assert sess._cdp is None
+
+
 async def test_token_auth_sets_login_cookie() -> None:
     """贴 token → 预置登录态:Admin-Token cookie 注入 context(免在画面里登录)。"""
     if not await _chromium_available():

@@ -163,6 +163,204 @@ def test_suggest_selects_rejects_id_only_list_without_label():
     assert suggest_selects(sub, read) == []
 
 
+def test_find_field_select_single_and_workflow():
+    """find_field_select:单请求 + 多步各步里按参数名找 select 元数据(供实时拉选项)。"""
+    from dano.execution.page.request_capture import find_field_select
+    apir = {"selects": [{"param": "请假类型", "source_url": "/d", "value_key": "v", "label_key": "l"}]}
+    assert find_field_select(apir, "请假类型")["source_url"] == "/d"
+    assert find_field_select(apir, "不存在") is None
+    wf = {"steps": [{}, {"selects": [{"param": "领导", "source_url": "/u", "value_key": "id", "label_key": "name"}]}]}
+    assert find_field_select(wf, "领导")["label_key"] == "name"
+
+
+async def test_fetch_field_options_live(monkeypatch):
+    """问题1 实时拉取:fetch_field_options 直接调来源接口 → {field, options:[{label,value}], count}。
+    非选择型/无来源 → options=[] 并说明(不抛,让 agent 退回传名字)。"""
+    from dano.execution.page import request_capture as rc
+    apir = {"selects": [{"param": "请假类型", "source_url": "/dict/leave",
+                         "value_key": "dictValue", "label_key": "dictLabel"}],
+            "auth_headers": {}}
+
+    async def fake_fetch(url, base_url, storage_state, token_key, verify, auth_headers):
+        assert url == "/dict/leave"
+        return [{"dictValue": "1", "dictLabel": "事假"}, {"dictValue": "2", "dictLabel": "病假"}]
+    monkeypatch.setattr(rc, "_fetch_list", fake_fetch)
+    out = await rc.fetch_field_options(apir, "请假类型")
+    assert out["count"] == 2
+    assert out["options"] == [{"label": "事假", "value": "1"}, {"label": "病假", "value": "2"}]
+    # 非选择型字段 → 空 + 说明
+    out2 = await rc.fetch_field_options(apir, "原因")
+    assert out2["options"] == [] and "note" in out2
+
+
+def test_suggest_selects_prefers_confirmed_over_huge_generic_dict():
+    """根因:type=2 同时撞**1431 项通用大字典**(未确认,垃圾标签)和**小请假类型字典**(确认命中 事假)→
+    必须绑确认的小字典(事假/病假/年假),不能绑通用大字典(治"请假类型绑到歌词模式/OpenAI…")。"""
+    sub = '{"type":2}'
+    huge = {"data": [{"id": str(i), "name": f"模型{i}"} for i in range(1431)]}
+    huge["data"][2] = {"id": "2", "name": "歌词模式"}            # type=2 在大字典里撞到"歌词模式"(垃圾)
+    leave = {"data": [{"dictValue": "1", "dictLabel": "事假"},
+                      {"dictValue": "2", "dictLabel": "病假"},
+                      {"dictValue": "3", "dictLabel": "年假"}]}
+    reads = [{"url": "/ai/models", "json": huge},            # 通用大字典**先**出现(旧逻辑会 first-win 绑错)
+             {"url": "/dict/leave_type", "json": leave}]
+    s = suggest_selects(sub, reads, {"请假类型": "病假"})       # 录制选了"病假"
+    assert len(s) == 1
+    assert s[0]["label"] == "病假" and s[0]["count"] == 3 and s[0]["label_key"] == "dictLabel"
+    assert s[0]["options"] == ["事假", "病假", "年假"]           # 选项快照是小字典(不是垃圾大字典)
+
+
+def test_suggest_selects_picks_smaller_dict_when_both_unconfirmed():
+    """无录制佐证时,跨源择优取**更小(更专门)**的字典,而非通用大字典。"""
+    sub = '{"type":"VIP"}'
+    big = {"rows": [{"code": f"C{i}", "name": f"X{i}"} for i in range(120)] + [{"code": "VIP", "name": "大字典贵宾"}]}
+    small = {"rows": [{"code": "STD", "name": "标准"}, {"code": "VIP", "name": "小字典贵宾"}]}
+    s = suggest_selects(sub, [{"url": "/big", "json": big}, {"url": "/small", "json": small}])
+    assert len(s) == 1 and s[0]["count"] == 2 and s[0]["label"] == "小字典贵宾"
+
+
+def test_suggest_selects_snapshots_options():
+    """问题1:select 把候选**显示名快照**进 entry.options(存进 skill 让 agent 从真实选项里选,不凭空猜)。"""
+    sub = '{"type":2}'
+    read = [{"url": "/dict", "json": {"data": [{"dictValue": "1", "dictLabel": "事假"},
+                                               {"dictValue": "2", "dictLabel": "病假"},
+                                               {"dictValue": "3", "dictLabel": "年假"}]}}]
+    s = suggest_selects(sub, read)
+    assert s[0]["options"] == ["事假", "病假", "年假"]
+
+
+def test_manifest_enum_inlines_small_options():
+    """问题1:候选 ≤50 → manifest schema 内置 enum(function-calling 层就约束 agent 只能选真实值)。"""
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel, Subsystem
+    sk = SkillSpec(skill_id="A-OA.f", subsystem=Subsystem.OA, action="f", risk_level=RiskLevel.L3,
+                   field_types={"请假类型": "enum"}, required_fields=["请假类型"],
+                   api_request={"selects": [{"param": "请假类型", "source_url": "/d",
+                                             "value_key": "dictValue", "label_key": "dictLabel",
+                                             "options": ["事假", "病假", "年假"], "count": 3}]})
+    p = to_manifest(sk).parameters["properties"]["请假类型"]
+    assert p["enum"] == ["事假", "病假", "年假"] and p["x-options"] == ["事假", "病假", "年假"]
+
+
+def test_manifest_large_options_no_inline_enum_but_snapshot():
+    """问题1:候选 >50 → 不内置 enum(过大),但仍快照进 x-options(写 OPTIONS.md 供 agent 选)。"""
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel, Subsystem
+    opts = [f"系统{i}" for i in range(135)]
+    sk = SkillSpec(skill_id="A-OA.g", subsystem=Subsystem.OA, action="g", risk_level=RiskLevel.L3,
+                   field_types={"应用系统名称": "enum"}, required_fields=["应用系统名称"],
+                   api_request={"selects": [{"param": "应用系统名称", "source_url": "/x",
+                                             "value_key": "id", "label_key": "xtmc",
+                                             "options": opts, "count": 135}]})
+    p = to_manifest(sk).parameters["properties"]["应用系统名称"]
+    assert "enum" not in p and len(p["x-options"]) == 135      # 不内置 enum,但快照全在
+    assert p.get("x-options-source") is True                   # 有来源接口 → 可 --list-options 实时拉
+    assert "--list-options" in p["description"]
+
+
+def test_export_options_md_lists_candidates():
+    """问题1:导出 references/OPTIONS.md 列出选择型候选值;无候选则不产生该段。"""
+    from dano.catalog.manifest import to_manifest
+    from dano.export.agent_skills import _options_md
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel, Subsystem
+    sk = SkillSpec(skill_id="A-OA.f", subsystem=Subsystem.OA, action="f", risk_level=RiskLevel.L3,
+                   field_types={"请假类型": "enum"}, required_fields=["请假类型"], title="请假",
+                   api_request={"selects": [{"param": "请假类型", "source_url": "/d",
+                                             "value_key": "dictValue", "label_key": "dictLabel",
+                                             "options": ["事假", "病假"], "count": 2}]})
+    md = _options_md(to_manifest(sk))
+    assert md and "事假" in md and "病假" in md and "请假类型" in md
+
+
+def test_suggest_selects_name_id_pair_detected():
+    """名/ID 配对(根治问题4):body 里 yyxtmc=显示名 + 兄弟 yyxtid=内部 id 一次选定 →
+    绑 yyxtmc(传名),并带 id_path=yyxtid → 运行期解析后同时写回 id,不冻结。通用,不挑系统。"""
+    sub = ('{"ywsxList":[{"yyxtmc":"徐州市审计局_共享交换数据服务应用",'
+           '"yyxtid":"02021060111315890400001010018"}]}')
+    read = [{"url": "http://oa/api/getXxxtListByBm", "json": {"data": [
+        {"id": "02021060111315890400001010018", "xtmc": "徐州市审计局_共享交换数据服务应用"},
+        {"id": "99990000", "xtmc": "其它系统"}]}}]
+    samples = {"应用系统名称": "徐州市审计局_共享交换数据服务应用"}
+    s = suggest_selects(sub, read, samples)
+    assert len(s) == 1
+    b = s[0]
+    assert b["path"] == "ywsxList[0].yyxtmc"           # 显示名字段作 select 参数(agent 传名)
+    assert b["value_key"] == "id" and b["label_key"] == "xtmc"
+    assert b["id_path"] == "ywsxList[0].yyxtid"         # 配对 id 字段(运行期同步)
+    assert b["id_tokens"] == ["ywsxList", 0, "yyxtid"]
+
+
+def test_build_api_request_learns_success_rule_from_own_response():
+    """P1:单提交接口**自身响应**(code=200)→ 资产带 success_rule + response_json 证据,
+    无需额外 GET 查询读 → acceptance 能验"业务成功",不再报"无法验证"。"""
+    req = {"method": "POST", "url": "http://oa/x", "post_data": '{"reason":"回家"}',
+           "response_json": {"code": 200, "msg": "ok", "data": {"taskId": "T1"}}}
+    apir = build_api_request(req, {"reason": "原因"})
+    assert apir["success_rule"] == {"field": "code", "ok_values": ["200"]}
+    assert apir["response_json"]["data"]["taskId"] == "T1"
+
+
+def test_build_api_workflow_last_step_learns_success_rule():
+    """P1(多步):最后一步(提交)从自身响应学 success_rule,即便没单独 GET 查询读。"""
+    writes = [
+        {"method": "POST", "url": "http://oa/create", "post_data": '{"x":1}',
+         "response_json": {"code": 200, "data": {"taskId": "T9"}}},
+        {"method": "POST", "url": "http://oa/submit", "post_data": '{"reason":"回家","taskId":"T9"}',
+         "response_json": {"success": True}},
+    ]
+    wf = build_api_workflow(writes, param_map={"reason": "原因"}, typed={"原因": "回家"})
+    assert wf["steps"][-1]["success_rule"]["field"] == "success"
+
+
+def test_build_api_request_carries_select_id_pair():
+    """build:名/ID 配对的 id 字段路径进 sel_meta;id 字段本身是常量(不作参数)。"""
+    req = {"method": "POST", "url": "http://oa/x",
+           "post_data": '{"ywsxList":[{"yyxtmc":"应用A","yyxtid":"02021060111315890400001010018"}]}'}
+    selects = [{"path": "ywsxList[0].yyxtmc", "source_url": "http://oa/list",
+                "value_key": "id", "label_key": "xtmc",
+                "id_path": "ywsxList[0].yyxtid", "id_tokens": ["ywsxList", 0, "yyxtid"]}]
+    apir = build_api_request(req, {"ywsxList[0].yyxtmc": "应用系统名称"}, selects=selects)
+    assert apir["params"] == ["应用系统名称"]            # id 字段不是参数(常量)
+    sm = apir["selects"][0]
+    assert sm["id_tokens"] == ["ywsxList", 0, "yyxtid"]
+
+
+async def test_resolve_selects_sets_both_name_and_id(monkeypatch):
+    """运行期(根治问题4):agent 传应用系统名 → 同时规整显示名 + 写回配对 id 字段(换选项 id 不冻结)。"""
+    from dano.execution.page import request_capture as rc
+    apir = {"method": "POST", "url": "http://oa/x",
+            "selects": [{"param": "应用系统名称", "source_url": "http://oa/list",
+                         "value_key": "id", "label_key": "xtmc",
+                         "id_path": "ywsxList[0].yyxtid", "id_tokens": ["ywsxList", 0, "yyxtid"]}]}
+
+    async def fake_fetch(*a, **k):
+        return [{"id": "ID_NEW_777", "xtmc": "应用B"}, {"id": "ID_A_111", "xtmc": "应用A"}]
+    monkeypatch.setattr(rc, "_fetch_list", fake_fetch)
+    # agent 选了"应用B"(与录制的"应用A"不同)→ 名字段规整=应用B、配对 id=该项 id(不再是录制的 02021…)
+    fields, overrides = await rc._resolve_selects(apir, {"应用系统名称": "应用B"}, base_url="",
+                                                  storage_state=None, token_key=None, verify=False)
+    assert fields["应用系统名称"] == "应用B"             # 显示名规整成候选规范名
+    assert overrides[("ywsxList", 0, "yyxtid")] == "ID_NEW_777"   # 配对 id 同步成新选项的 id
+
+
+async def test_resolve_selects_single_code_field_unchanged():
+    """对照:单码字段(无 id_path)仍是把字段值换成 id(老行为不变)。"""
+    from dano.execution.page import request_capture as rc
+
+    async def fake_fetch(*a, **k):
+        return [{"userId": 12, "nickName": "张经理"}, {"userId": 34, "nickName": "李总"}]
+    import pytest as _pt
+    with _pt.MonkeyPatch.context() as mp:
+        mp.setattr(rc, "_fetch_list", fake_fetch)
+        apir = {"selects": [{"param": "审批人", "source_url": "/u", "value_key": "userId", "label_key": "nickName"}]}
+        fields, overrides = await rc._resolve_selects(apir, {"审批人": "张经理"}, base_url="",
+                                                      storage_state=None, token_key=None, verify=False)
+    assert fields["审批人"] == 12 and overrides == {}   # 字段值换成 id;无配对 id 覆盖
+
+
 def test_date_keys_handles_seconds_and_slash_formats():
     """日期跨格式泛化:10 位秒戳、13 位毫秒戳、斜杠/单位数日期串都能抽出 YYYY-MM-DD,供日期字段标签匹配。"""
     from dano.execution.page.request_capture import _date_keys
@@ -268,8 +466,11 @@ def test_build_api_request_stores_select_and_identity_meta():
                              identity=[{"path": "applicantId", "source": "localStorage:userInfo.userId"}])
     assert apir["body_template"]["approverId"] == "{{approver}}"        # select 字段是参数
     assert apir["body_template"]["applicantId"] == 118                  # identity 留常量,运行期覆盖
-    assert apir["selects"] == [{"param": "approver", "source_url": "/system/user/list",
-                                "value_key": "userId", "label_key": "nickName"}]
+    sm = apir["selects"][0]
+    assert {k: sm[k] for k in ("param", "source_url", "value_key", "label_key")} == {
+        "param": "approver", "source_url": "/system/user/list",
+        "value_key": "userId", "label_key": "nickName"}
+    assert "options" in sm                                  # 选项快照位(此处无 reads → 空)
     assert apir["identity"] == [{"path": "applicantId", "source": "localStorage:userInfo.userId",
                                  "evidence": ["request://body.applicantId", "identity://localStorage:userInfo.userId"],
                                  "tokens": ["applicantId"]}]   # tokens 反查补全 + 证据来源(node 8)
@@ -818,12 +1019,81 @@ def test_flatten_drops_system_timestamps_not_user_input():
     assert p["createTime"] is False
 
 
+def test_user_date_timestamp_never_system_overwritten():
+    """治"开始时间/结束时间被标系统值":用户挑的日期字段(startTime/endTime,即便对不上样例)
+    **绝不**当系统时间戳被 now 覆盖;只有 create/submit/update 这类系统 key 才填 now。"""
+    body = ('{"startTime":1782316800000,"endTime":1782403200000,'
+            '"createTime":1782380760000,"submitTime":1782380760000}')
+    # 没有任何样例(模拟日期 pick 没被录到)→ startTime/endTime 仍不能被当系统值
+    f = {x["key"]: x for x in flatten_body(body, {})}
+    assert f["startTime"]["system_value"] is False and f["endTime"]["system_value"] is False
+    assert f["createTime"]["system_value"] is True and f["submitTime"]["system_value"] is True
+    # build:只有 create/submit 进 system_values(运行期 now);startTime/endTime 不进(用户日期不被覆盖)
+    apir = build_api_request({"method": "POST", "url": "http://oa/x", "post_data": body}, {})
+    sysp = {s["path"] for s in apir["system_values"]}
+    assert sysp == {"createTime", "submitTime"}
+
+
 def test_flatten_keeps_user_picked_timestamp_dates():
     """对照:用户**真选**的日期即便存成毫秒时间戳(startTime/endTime 对上录制样例)→ 仍是参数(不误杀)。"""
     body = '{"startTime":1782230400000,"endTime":1782403200000}'
     samples = {"开始日期": "2026-06-24", "结束日期": "2026-06-26"}   # 用户选的日期 ↔ 时间戳跨格式对上
     p = {f["key"]: f["suggest_param"] for f in flatten_body(body, samples)}
     assert p["startTime"] is True and p["endTime"] is True
+
+
+def test_suggest_identity_skips_user_typed_value():
+    """治日报2 bug:用户填的值(二级内设机构=2/职能描述=3)恰好撞会话标量(roleLevel=2/orgType=3)→
+    不得冻结成 identity(否则运行期被会话值覆盖、且当不了参数、参数名也改不了)。"""
+    submit = '{"ercsmc":"2","qzms":"3","applicantId":"118"}'
+    storage = {"cookies": [{"name": "roleLevel", "value": "2"}, {"name": "orgType", "value": "3"},
+                           {"name": "uid", "value": "118"}], "origins": []}
+    samples = {"二级内设机构": "2", "职能描述": "3"}     # 用户亲手填的
+    ids = {i["path"] for i in suggest_identity(submit, storage, samples)}
+    assert "ercsmc" not in ids and "qzms" not in ids   # 用户填的 → 参数,不是会话身份
+    assert "applicantId" in ids                         # 用户没填、=会话 uid → 仍是 identity
+
+
+def test_build_api_request_param_wins_over_identity():
+    """同一字段既被参数化又被判 identity → 参数优先,identity 丢弃(避免运行期覆盖 + 自检冲突)。"""
+    req = {"method": "POST", "url": "http://oa/x", "post_data": '{"ercsmc":"2"}'}
+    apir = build_api_request(req, {"ercsmc": "二级内设机构"},
+                            identity=[{"path": "ercsmc", "source": "cookie:roleLevel"}])
+    assert apir["params"] == ["二级内设机构"]
+    assert apir["identity"] == []                        # 已参数化 → 不再当 identity
+
+
+def test_looks_like_read_request_general():
+    """POST 形态的读/查询(getXxxList/queryXxx/getKbListByXxxtId)识别为读,不当业务写。"""
+    from dano.execution.page.request_capture import looks_like_read_request
+    assert looks_like_read_request("http://oa/appgateway/dcensus/v1.0/qzqdsl/getQzqdSlList")
+    assert looks_like_read_request("http://oa/appgateway/xzdz/v1.0/nrgl/queryNrxxListForKfmh")
+    assert looks_like_read_request("http://oa/api/getKbListByXxxtId?t=1&xxxtId=02021")
+    assert not looks_like_read_request("http://oa/appgateway/dcensus/v1.0/qzqdsl/createQzqdSl")
+    assert not looks_like_read_request("http://oa/admin-api/oa/daily-report/submit-process")
+
+
+def test_json_write_requests_excludes_post_reads():
+    """候选提交请求里排除 POST 形态的读(getXxxList 等)→ 只剩真正的写(createQzqdSl)。"""
+    reqs = [
+        {"method": "POST", "url": "http://oa/x/getQzqdSlList", "post_data": '{"page":1}'},
+        {"method": "POST", "url": "http://oa/x/queryNrxxListForKfmh", "post_data": '{"k":1}'},
+        {"method": "POST", "url": "http://oa/x/createQzqdSl", "post_data": '{"csmc":"1"}'},
+    ]
+    urls = [c["url"] for c in json_write_requests(reqs)]
+    assert urls == ["http://oa/x/createQzqdSl"]
+
+
+async def test_execute_dry_ok_when_param_lacks_default():
+    """治日报3 bug:参数声明正确但**没有录制默认值**(运行期由 agent 提供)→ dry 不该判失败。
+    self_check 是唯一承重闸门:它已证明参数结构正确;残留 {{}} 仅因缺默认值,不拦发布。"""
+    from dano.execution.page.request_capture import execute_api_request
+    # 手工造一个参数声明正确、但 sample_inputs 缺该参数默认值的 api_request
+    apir = {"method": "POST", "url": "http://oa/x", "content_type": "application/json",
+            "body_template": {"csmc": "{{处室名称}}"}, "params": ["处室名称"], "sample_inputs": {}}
+    res = await execute_api_request(apir, {}, send=False)
+    assert res["ok"] is True and res["self_check"] == []   # 结构正确 → 通过(不再误报"参数没全填上")
+    assert res["leftover_no_default"] is True               # 信息:该参数无默认值(运行期填)
 
 
 def test_flatten_system_field_does_not_steal_user_value():
@@ -1517,6 +1787,61 @@ async def test_advisory_capture_review_returns_notes_and_redacts():
     # 只喂元数据:参数名在,但绝不带 body 值/凭证字样
     assert "Activity_09dlq0g" in fake.seen["user"]
     assert "password" not in fake.seen["user"].lower() and "cookie" not in fake.seen["user"].lower()
+
+
+def test_is_dry_mode_reason_recognizes_design_safe_mode():
+    """识别"dry/self_check 未真跑"类否决理由(录制 by-design 安全模式);真问题理由不误命中。"""
+    from dano.onboarding.repair import is_dry_mode_reason
+    assert is_dry_mode_reason(
+        "sandbox_evidence 中 kind=self_check 的 evidence.request.dry=true,无法验证该请求在 sandbox 环境下真实跑通,"
+        "违反【运行架构】第 6 点 'sandbox_evidence 已证明该资产...真实跑通' 的要求。")
+    assert is_dry_mode_reason("请求仅构造未真发")
+    assert not is_dry_mode_reason("method/path 指向生产端点 admin.prod.com,违反最小权限")
+    assert not is_dry_mode_reason("参数 `领导` 像内部机器标识,建议起人话名")
+
+
+async def test_request_review_scrubs_dry_rejection_publishes_partial():
+    """根因修复:评审仅因'dry/self_check 未真跑'否决 **dry-only** 资产(录制 by-design 安全模式)→
+    request_review 确定性剔除该理由(改 DB 证据 → verify_reviewed 也认)→ 照常发布为 partially_verified。"""
+    import http.server  # noqa: F401 —— 保持与 e2e 同风格;此处用不到真服务器
+    from uuid import uuid4
+    import pytest
+    from dano.infra.db import close_pool, get_pool, init_pool
+    from dano.onboarding.page_onboard import run_request_onboarding
+    from dano.shared.enums import Subsystem
+    try:
+        await init_pool()
+    except Exception:  # noqa: BLE001
+        pytest.skip("PG 不可用")
+
+    class _DryRejectBoard:
+        """acceptance/security 过;compliance **只因 dry/未真跑** 否决 → 应被确定性剔除,不阻断。"""
+        async def review(self, *, asset_type, asset_key, body, evidence):  # noqa: ANN001
+            acc, sec = _FakeVerdict("acceptance"), _FakeVerdict("security")
+            comp = _FakeVerdict("compliance")
+            comp.passed = False
+            comp.reasons = ["sandbox_evidence 中 kind=self_check 的 evidence.request.dry=true,"
+                            "无法验证该请求在 sandbox 环境下真实跑通,违反【运行架构】第 6 点。"]
+            return [acc, sec, comp]
+
+    tenant = f"dry-scrub-{uuid4().hex[:8]}"
+    from dano.agent_tools import tools as _T
+    _T.set_review_board(_DryRejectBoard())
+    try:
+        apir = {"method": "POST", "url": "http://oa.x/submit",
+                "body_template": {"reason": "{{原因}}"}, "params": ["原因"],
+                "sample_inputs": {"原因": "录制原因"}, "auth_headers": {},
+                "success_rule": {"field": "code", "ok_values": ["200"]}}
+        rep = await run_request_onboarding(
+            tenant=tenant, subsystem=Subsystem.REIMBURSE.value, action="dry_scrub_pub",
+            api_request=apir, sample_inputs={"原因": "回家"})   # 无 storage_state → dry-only(do_live=False)
+        assert rep["ok"] is True and rep["status"] == "partially_verified", rep
+    finally:
+        _T.set_review_board(None)
+        async with get_pool().acquire() as c:
+            await c.execute("DELETE FROM asset_drafts WHERE tenant=$1", tenant)
+            await c.execute("DELETE FROM assets WHERE tenant=$1", tenant)
+        await close_pool()
 
 
 async def test_advisory_capture_review_safe_degrade():

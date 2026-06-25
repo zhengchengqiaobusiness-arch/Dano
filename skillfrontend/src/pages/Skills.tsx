@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { Table, Tag, Button, Space, Typography, message, Empty, Modal, Input, Alert, Popconfirm } from "antd";
-import { PlayCircleOutlined, ReloadOutlined, ExportOutlined, DeleteOutlined } from "@ant-design/icons";
+import { PlayCircleOutlined, ReloadOutlined, ExportOutlined, DeleteOutlined, KeyOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import { listSkills, exportAgentSkills, deleteSkill, SkillManifest } from "../api/skills";
 import InvokeDrawer from "../components/InvokeDrawer";
+import TokenModal from "../components/TokenModal";
+import { TENANT_NAME } from "../api/client";
 
 const EXPORT_DIR_LS = "dano.exportDir";
 const DEFAULT_EXPORT_DIR = "/opt/dano/runtime-data/.agents/skills";
@@ -45,6 +47,8 @@ export default function Skills() {
   const [exportOpen, setExportOpen] = useState(false);
   const [exportDir, setExportDir] = useState(localStorage.getItem(EXPORT_DIR_LS) || DEFAULT_EXPORT_DIR);
   const [exporting, setExporting] = useState(false);
+  const [tokenSub, setTokenSub] = useState<string | null>(null);   // 打开运行期 token 弹窗的子系统
+  const tenant = localStorage.getItem(TENANT_NAME) || "";
 
   async function doExport() {
     if (!exportDir.trim()) { message.error("请填目标目录"); return; }
@@ -127,6 +131,9 @@ export default function Skills() {
               ) : (
                 <Space>
                   <Button size="small" type="primary" ghost icon={<PlayCircleOutlined />} onClick={() => setInvoke(r)}>测试调用</Button>
+                  {r.integration === "page" && (
+                    <Button size="small" icon={<KeyOutlined />} onClick={() => setTokenSub(r.subsystem)}>凭证</Button>
+                  )}
                   <Button size="small" onClick={() => nav(`/skills/${encodeURIComponent(r.name)}`)}>详情</Button>
                   <Popconfirm title={`删除 ${r.name}?`} description="删本租户该 skill 的全部资产版本,便于重来" okText="删除" okButtonProps={{ danger: true }} cancelText="取消" onConfirm={() => doDelete(r.name)}>
                     <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
@@ -137,6 +144,7 @@ export default function Skills() {
         ]}
       />
       <InvokeDrawer skill={invoke} onClose={() => setInvoke(null)} />
+      <TokenModal tenant={tenant} subsystem={tokenSub || ""} open={!!tokenSub} onClose={() => setTokenSub(null)} />
 
       <Modal
         title="导出为 pi 文件式 skill(.agents/skills/)"

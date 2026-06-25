@@ -88,3 +88,32 @@ export async function exportAgentSkills(out_dir: string): Promise<{ out_dir: str
   const { data } = await api.post("/export/agent-skills", { out_dir });
   return data;
 }
+
+// ── 运行期 token(页面型 skill 抓请求路径鉴权):录制自动抓 → 存 PG;过期前端换一份即可,免重录 ──
+export interface RuntimeToken {
+  tenant: string;
+  subsystem: string;
+  has_token: boolean;
+  headers: Record<string, string>;   // 默认打码;reveal=true 才明文
+  source?: string;                   // recording(录制自动抓)/ manual(手动刷新)
+  updated_at?: string;
+}
+
+export async function getRuntimeToken(tenant: string, subsystem: string, reveal = false): Promise<RuntimeToken> {
+  const { data } = await api.get("/settings/token", { params: { tenant, subsystem, reveal } });
+  return data;
+}
+
+export interface PutRuntimeTokenReq {
+  tenant: string;
+  subsystem: string;
+  token?: string;                    // 只换一个头(默认 Authorization),与已存合并
+  header_name?: string;
+  token_prefix?: string;
+  headers?: Record<string, string>;  // 或整组覆盖
+}
+
+export async function putRuntimeToken(req: PutRuntimeTokenReq): Promise<{ ok: boolean; headers: Record<string, string>; updated_at: string }> {
+  const { data } = await api.put("/settings/token", req);
+  return data;
+}

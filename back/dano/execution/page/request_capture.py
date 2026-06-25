@@ -134,11 +134,29 @@ def looks_like_auth_write(url: str, body=None) -> bool:
     return any(any(h in k for h in _AUTH_BODY_HINTS) for k in _all_keys(body))
 
 
+# POST 其实是"读/查询"的常见动词前缀(很多系统用 POST 传查询条件):get/query/list/search/page…
+# 这类不是业务写(不该当提交候选/工作流步骤,录制时也不该被拦成假成功,否则下拉/列表加载不出来)。通用,不挑系统。
+_READ_VERB_RE = _re.compile(
+    r"^(get|query|list|search|find|load|page|count|tree|fetch|select|view|export|download|stat|statistic)",
+    _re.I)
+
+
+def looks_like_read_request(url: str, body=None) -> bool:
+ 
+    segs = [s for s in urlparse(url or "").path.split("/") if s]
+    if not segs:
+        return False
+    last = segs[-1].split("?")[0]
+    return bool(_READ_VERB_RE.match(last))
+
+
 def json_write_requests(requests: list[dict]) -> list[dict]:
-    """抓到的请求里所有「带 JSON body 的写请求」(候选提交请求),保序。供前端列出来手选用哪个。"""
+    """抓到的请求里所有「带 JSON body 的写请求」(候选提交请求),保序。供前端列出来手选用哪个。
+    """
     out: list[dict] = []
     for r in requests:
-        if (r.get("method") or "").upper() in _WRITE and _parse_body(r.get("post_data")) is not None:
+        if ((r.get("method") or "").upper() in _WRITE and _parse_body(r.get("post_data")) is not None
+                and not looks_like_read_request(r.get("url") or "")):
             out.append(r)
     return out
 
@@ -298,61 +316,120 @@ def _is_idlike(key: str) -> bool:
 
 
 _SMALL_LIST = 50    # "字典型下拉"是小列表(事假/病假…);城市/数据大字典是大列表 → 区分短码真假命中
+_OPTIONS_SNAPSHOT_MAX = 500    # 快照进 skill 的候选选项上限(再多就只存来源、运行期 --list-options 现拉)
+
+
+def _list_options(items: list[dict], label_key: str) -> list[str]:
+    """从候选列表抽出**显示名选项**(agent 该传的值),去重保序、限量。供 skill 内置枚举 / 选项参考。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for it in items:
+        lab = str(it.get(label_key, "")).strip() if isinstance(it, dict) else ""
+        if lab and lab not in seen:
+            seen.add(lab)
+            out.append(lab)
+        if len(out) >= _OPTIONS_SNAPSHOT_MAX:
+            break
+    return out
+
+
+def _is_scalar(v) -> bool:
+    return isinstance(v, (str, int, float)) and not isinstance(v, bool)
+
+
+def _parent_path(path: str) -> str:
+    """叶子点路径的父对象路径:'ywsxList[0].yyxtmc' → 'ywsxList[0]';'csmc' → ''。用于找"名/ID 配对"的兄弟字段。"""
+    if path.endswith("]"):
+        return path[:path.rfind("[")]
+    i = path.rfind(".")
+    return path[:i] if i >= 0 else ""
+
+
+def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool):
+    """判提交值 sv 对应候选列表里哪种选项 → (mode, value_key, label_key, label, confirmed) 或 None。
+    mode='name':字段存的是**显示名**(配对 id 字段另存,如 yyxtmc=名 / yyxtid=id);
+    mode='code':字段存的是**码/ID**(单字段,如 type=2 / approverId=12,agent 传名运行期换码)。通用,不挑系统。"""
+    name_cand = code_cand = None
+    for it in items:
+        id_vk = next((k for k, v in it.items() if _is_scalar(v) and _is_idlike(k)), None)
+        if id_vk is not None:                            # NAME:sv 命中该项的**显示名**字段(非随便某文字)+ 项里另有 id 类字段
+            disp = _pick_label_key(it, id_vk)            # 项的规范显示名字段(nickName/xtmc/label…),非 dictType 这类分类键
+            if disp != id_vk and not _is_idlike(disp) and _is_scalar(it.get(disp)) and str(it.get(disp)) == sv:
+                conf = any(_name_match(sv, s) for s in sample_vals)
+                if name_cand is None or (conf and not name_cand[4]):
+                    name_cand = ("name", id_vk, disp, sv, conf)
+                if conf:
+                    break
+        cvk = next((k for k, v in it.items() if _is_scalar(v) and str(v) == sv and _is_idlike(k)), None)
+        if cvk is None and len(it) <= 4:                 # 小项允许值字段名不带 id/code(不写死字段名)
+            cvk = next((k for k, v in it.items() if _is_scalar(v) and str(v) == sv), None)
+        if cvk is not None:                              # CODE:sv 命中 id 类字段 + 项里另有独立文字标签
+            clk = _pick_label_key(it, cvk)
+            label = str(it.get(clk, "")).strip()
+            if clk != cvk and label:
+                conf = any(_name_match(label, s) for s in sample_vals)
+                if code_cand is None or (conf and not code_cand[4]):
+                    code_cand = ("code", cvk, clk, label, conf)
+    cands = [c for c in (name_cand, code_cand) if c]
+    if not cands:
+        return None
+    cands.sort(key=lambda c: (c[4], c[0] == "name"), reverse=True)   # 确认命中优先;其次 name(更贴近人选)
+    best = cands[0]
+    mode, _vk, _lk, _label, conf = best
+    if conf:                                             # 录制选项佐证 → 强证据,直接采纳
+        return best
+    if not (len(sv) >= 2 or small):                      # 未确认 + 过短 + 大列表 → 巧合,拒
+        return None
+    if mode == "code" and sv in sample_vals:             # 用户亲手填的值当码 → 自由文本,拒(治"1"撞状态字典)
+        return None
+    if mode == "name" and not small:                     # 未确认的名选只在小列表认(大列表巧合多)
+        return None
+    return best
 
 
 def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | None = None) -> list[dict]:
-    """提交体里"等于某候选列表项 ID 的值"的字段 → 绑 select(Agent 传名字/文字→运行期查内部 ID)。
+    """提交体里"对应某候选列表项"的字段 → 绑 select(Agent 传名字/文字→运行期查内部 ID)。
 
-    覆盖:选领导(approverId↔user/list)+ 代码型下拉(type=2↔字典 value=2,agent 传"事假")。
-    **录制样例(samples)= 消歧器**:候选项的显示名正是用户录制时选中的值(label∈samples 值)→「确认命中」,
-    是强证据 → **即便在上千项的全局大字典里、即便短码也照绑**,并据此精确选中正确那项(避免大字典里 value=2 撞多组)。
-    无录制佐证时维持原精度闸门:短码(len<2)只在小列表认、同源未确认命中 >3 个按通用字典整源丢弃。
+    两形态(通用,不挑系统):① **单码字段**(type=2↔字典 value=2、approverId=12↔user/list:字段存码,agent 传名)
+    ② **名/ID 配对**(yyxtmc=显示名 + 兄弟 yyxtid=内部 id:两字段一次选定)→ 输出 id_path/id_tokens,运行期
+    解析后**同时**写回显示名字段与配对 id 字段(换一个选项时 id 不再冻结成录制值)。
+    **录制样例(samples)= 消歧器**:候选显示名 == 用户录制选中值 →「确认命中」强证据(大列表/短码也照绑)。
+    无佐证时:短码(<2)只在小列表认、用户亲填值不当码、同源未确认命中 >3 个按通用字典整源丢弃。
     """
     body = _parse_body(post_data)
     if body is None:
         return []
-    leaves = _leaf_paths(body)
+    leaves = _leaf_paths(body)                            # [(path, tokens, sv, raw)]
     sample_vals = {str(v) for v in (samples or {}).values() if v not in (None, "")}
-    out: list[dict] = []
-    seen: set[str] = set()
+    by_path: dict[str, list[dict]] = {}                   # path → 跨**所有** read 源的候选绑定(供择优)
     for r in reads:
         items = as_list_payload(r.get("json"))
         if not items or not isinstance(items[0], dict):
             continue
         small = len(items) <= _SMALL_LIST
         hits: list[dict] = []
-        for path, _toks, sv, raw in leaves:
-            if not sv or path in seen:
+        for path, toks, sv, raw in leaves:
+            if not sv or _is_const_value(raw):           # 系统常量(流程键/uuid/雪花)不作"按名字选"的下拉参数
                 continue
-            if _is_const_value(raw):                    # 系统常量(流程键 oa_hotel_apply/uuid/雪花)绝不是"按名字选"的下拉
+            m = _match_select(sv, items, sample_vals, small)
+            if m is None:
                 continue
-            chosen = None                               # (value_key, label_key, label, confirmed)
-            for it in items:
-                # 值字段:优先 ID 类(id/code/value…);选项型小项(≤4 字段)允许值字段名不带 id/code(不写死字段名)
-                vk = next((k for k, v in it.items() if str(v) == sv and _is_idlike(k)), None)
-                if vk is None and len(it) <= 4:
-                    vk = next((k for k, v in it.items()
-                               if str(v) == sv and not isinstance(v, (dict, list))), None)
-                if vk is None:
-                    continue
-                lk = _pick_label_key(it, vk)
-                label = str(it.get(lk, "")).strip()
-                if lk == vk or not label:               # 无独立显示名 → 不是名字→ID 下拉,防误绑
-                    continue
-                if any(_name_match(label, v) for v in sample_vals):   # 确认命中:正是用户录制选的显示名(含带后缀)
-                    chosen = (vk, lk, label, True)
-                    break
-                # 暂存未确认命中(短码在大列表里不暂存)。但**用户亲手填进去的值**(sv 正好是某录制样例)
-                # 不可作未确认下拉:真下拉录到的样例是显示名(label)、提交体里是码,二者不同;sv==样例 ⟹ 是自由文本
-                # 填写(如把"1"打进工作计划/备注文本域),与某状态字典 value=1 撞码 → 不能误判成"名字→ID 枚举"。
-                if (chosen is None and (len(sv) >= 2 or small) and sv not in sample_vals):
-                    chosen = (vk, lk, label, False)
-            if chosen is None:
-                continue
-            vk, lk, label, confirmed = chosen
-            hits.append({"path": path, "value": sv, "source_url": r.get("url"), "value_key": vk,
-                         "label_key": lk, "label": label, "count": len(items), "_confirmed": confirmed})
-        # 短值数字巧合去重(仅对未确认);同源未确认命中 >3 = 通用字典误命中(整源只留确认的)。确认命中永远保留。
+            mode, vk, lk, label, confirmed = m
+            entry = {"path": path, "tokens": toks, "value": sv, "source_url": r.get("url"),
+                     "value_key": vk, "label_key": lk, "label": label, "count": len(items),
+                     "options": _list_options(items, lk),   # 候选显示名快照(存进 skill 让 agent 从中选,问题1)
+                     "_confirmed": confirmed}
+            if mode == "name":                           # 名/ID 配对:找兄弟"内部 id"字段(同父 + 值==该项的 id)
+                it = next((x for x in items if str(x.get(lk)) == sv), None)
+                idval = str(it.get(vk)) if it and it.get(vk) is not None else None
+                if idval is not None:
+                    par = _parent_path(path)
+                    sib = next(((lp, lt) for lp, lt, lsv, _lr in leaves
+                                if lp != path and _parent_path(lp) == par and lsv == idval), None)
+                    if sib:
+                        entry["id_path"], entry["id_tokens"] = sib[0], sib[1]
+            hits.append(entry)
+        # 同源内防护(沿用):短值数字巧合去重 + 未确认命中 >3 = 通用字典误命中(整源只留确认的)。确认命中永远保留。
         vcount: dict[str, int] = {}
         for h in hits:
             if not h["_confirmed"]:
@@ -362,10 +439,20 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
         if len([h for h in hits if not h["_confirmed"]]) > 3:
             hits = [h for h in hits if h["_confirmed"]]
         for h in hits:
-            if h["path"] in seen:
-                continue
-            seen.add(h["path"])
-            out.append({k: v for k, v in h.items() if k != "_confirmed"})
+            by_path.setdefault(h["path"], []).append(h)
+    # **跨源择优(根治"请假类型绑到 1431 项通用大字典"):每条 leaf 在所有源里选最佳 ——
+    #  ① 确认命中(候选显示名==录制选中值)优先 ② 其次列表更小(更专门的字典,而非通用大字典)。**
+    out: list[dict] = []
+    claimed: set[str] = set()                             # 已被某 select 接管的路径(含配对 id 字段),不重复绑
+    order = {p: i for i, (p, _t, _s, _r) in enumerate(leaves)}
+    for path in sorted(by_path, key=lambda p: order.get(p, 1 << 30)):
+        if path in claimed:
+            continue
+        best = sorted(by_path[path], key=lambda e: (e["_confirmed"], -e["count"]), reverse=True)[0]
+        claimed.add(path)
+        if best.get("id_path"):
+            claimed.add(best["id_path"])
+        out.append({k: v for k, v in best.items() if not k.startswith("_")})
     return out
 
 
@@ -451,16 +538,26 @@ def _storage_scalars(storage_state: dict | None) -> dict:
     return out
 
 
-def suggest_identity(post_data: str | None, storage_state: dict | None) -> list[dict]:
-    """提交体里"等于登录态里某值"的字段(如 applicantId=当前用户)→ 建议标 identity(运行期重取,不冻结)。"""
+def suggest_identity(post_data: str | None, storage_state: dict | None,
+                     samples: dict | None = None) -> list[dict]:
+    """提交体里"等于登录态里某值"的字段(如 applicantId=当前用户)→ 建议标 identity(运行期重取,不冻结)。
+
+    防误判(通用,不挑系统):**用户亲手填的值不算 identity** —— sv 是录制样例(用户填的)就是参数,
+    即便它恰好等于某会话标量(如二级内设机构=2 撞会话 roleLevel=2、职能描述=3 撞 orgType=3),也不冻结成会话值。
+    真 identity(applicantId=当前用户 id 等)是系统自动带上的、用户没填,故不在样例里,照常识别。
+    """
     body = _parse_body(post_data)
     if body is None:
         return []
     scal = _storage_scalars(storage_state)
+    typed = {str(v) for v in (samples or {}).values() if v not in (None, "")}
     out: list[dict] = []
     for path, toks, sv, _raw in _leaf_paths(body):
-        if sv and sv in scal:
-            out.append({"path": path, "tokens": toks, "value": sv, "source": scal[sv]})
+        if not sv or sv not in scal:
+            continue
+        if sv in typed:                                  # 用户填的值 → 参数,不是会话身份值(治 ercsmc=2/qzms=3 误判)
+            continue
+        out.append({"path": path, "tokens": toks, "value": sv, "source": scal[sv]})
     return out
 
 
@@ -534,6 +631,8 @@ def suggest_workflow_steps(writes: list[dict], samples: dict) -> list[int]:
             continue
         body = _parse_body(w.get("post_data"))
         if body is None or looks_like_auth_write(w.get("url") or "", body):   # 排除登录/鉴权/基建写
+            continue
+        if looks_like_read_request(w.get("url") or ""):                       # 排除 POST 形态的读/查询(下拉/列表源)
             continue
         biz.append((i, w))
     if not biz:
@@ -617,11 +716,19 @@ def _is_const_value(v) -> bool:
                or _re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)+", s))  # snake_case 标识(oa_duty_leave)
 
 
+# 系统**自动写入**的时间戳 key(创建/提交/修改/同步…)—— 这类才该运行期填 now;
+# **用户挑选的日期**(startTime/endTime/beginTime/applyDate/leaveDate…)绝不在此列,不能被 now 覆盖(否则改坏用户选的日期)。
+_SYS_TIME_KEY = _re.compile(
+    r"(create|created|submit|submitted|update|updated|modif|gmt|insert|record|audit|oper|sync|"
+    r"add_?time|reg_?time|log_?time|last_?time)", _re.I)
+
+
 def _is_system_timestamp(key: str, value) -> bool:
-    """系统在提交时**自动写入**的时间戳(submitTime/createTime/updateTime 等):时间类 key + 裸 10–13 位时间戳。
+    """系统在提交时**自动写入**的时间戳(submitTime/createTime/updateTime/gmtCreate 等):**系统类时间 key** + 裸 10–13 位时间戳。
     用于三处一致判定:① flatten 不参数化 ② build 标 system_values(运行期填 now)③ 检出器不报"焊死会话值"。
-    用户**真选**的日期会经 match_label 跨格式对上录制样例(由调用方另判 label),不走本判据。通用,不挑系统。"""
-    return bool(_TIME_KEY.search(key or "")) and bool(_re.fullmatch(r"-?\d{10,13}", str(value if value is not None else "")))
+    **关键**:只认系统类 key(create/submit/update…);**用户挑的日期(startTime/endTime/beginTime…)不命中** ——
+    它们是参数(由 match_label 跨格式对样例命名),绝不能被 now 覆盖。通用,不挑系统。"""
+    return bool(_SYS_TIME_KEY.search(key or "")) and bool(_re.fullmatch(r"-?\d{10,13}", str(value if value is not None else "")))
 
 
 def _infer_type(node, key: str = "") -> str:
@@ -881,11 +988,11 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
     out: list[dict] = []
     for i, (path, key, node, sv, time_like, internal) in enumerate(leaves):
         label, confident = labels[i]
-        # 系统生成的时间戳(submitTime/createTime 等):时间类 key + 裸 10–13 位时间戳,且**对不上任何录制样例**
-        #  → 系统在提交时自动写入、用户没填 → 当常量不参数化(运行期 build 会标 system_values 填 now,而非焊死)。
-        #  用户**真选的日期**会经 match_label 跨格式对上录制样例(label 非空)→ 不命中本规则,照常当参数。
-        #  仅在**有录制样例可比对**时启用(无样例的纯离线判断退回原逻辑:时间戳当日期参数)。
-        sys_time = bool(sample_list) and label is None and _is_system_timestamp(key, sv)
+        # 系统生成的时间戳(submitTime/createTime/updateTime 等):**系统类时间 key** + 裸时间戳 + 对不上任何录制样例
+        #  → 系统在提交时自动写入、用户没填 → 当常量不参数化(运行期 build 标 system_values 填 now,而非焊死)。
+        #  判据用系统类 key(create/submit/update…),**用户挑的日期(startTime/endTime…)不命中**,
+        #  且即便对不上样例也只当参数、绝不被 now 覆盖。用户真选的日期另经 match_label 跨格式对样例命名。
+        sys_time = label is None and _is_system_timestamp(key, sv)
         const = sys_time or internal
         is_param = bool(label is not None or (not const and sv != ""))
         conf = _field_confidence(label, confident, key, is_param)
@@ -977,17 +1084,28 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
         from urllib.parse import urlparse
         u = urlparse(url)
         path = (u.path or "/") + (("?" + u.query) if u.query else "")
-    # select 元数据:path 须是参数(在 param_map),记成 param→源/键,运行期按名字查 ID
-    sel_meta = [{"param": param_map[s["path"]], "source_url": s.get("source_url"),
-                 "value_key": s.get("value_key"), "label_key": s.get("label_key")}
-                for s in (selects or []) if s.get("path") in param_map]
+    # 叶子点路径→tokens(无歧义注入用;键含点也安全)。select/identity 注入都优先用 tokens。
+    _leaf_tok = {p: t for p, t, _sv, _raw in _leaf_paths(body)}
+    # select 元数据:path 须是参数(在 param_map),记成 param→源/键,运行期按名字查 ID。
+    # 名/ID 配对(yyxtmc+yyxtid)额外带 id 字段路径 → 运行期解析后**同时**写回配对 id 字段(不冻结)。
+    sel_meta = []
+    for s in (selects or []):
+        if s.get("path") not in param_map:
+            continue
+        meta = {"param": param_map[s["path"]], "source_url": s.get("source_url"),
+                "value_key": s.get("value_key"), "label_key": s.get("label_key"),
+                "options": list(s.get("options") or []),     # 候选选项快照(存进 skill 让 agent 从中选,问题1)
+                "count": s.get("count")}
+        if s.get("id_path") or s.get("id_tokens"):
+            meta["id_path"] = s.get("id_path")
+            meta["id_tokens"] = s.get("id_tokens") or _leaf_tok.get(s.get("id_path"))
+        sel_meta.append(meta)
     for s in sel_meta:                                          # 选领导/代码下拉 → 类型=枚举(传名字/文字)
         types[s["param"]] = "enum"
-    # identity 注入路径优先用 tokens(无歧义,键含点也安全);录制端没带 tokens 时,从 body 叶子按点路径**反查补全**
-    # —— 用点路径当 dict 键查预存 tokens(不 _split_path 重切),对正常键无损,从而不依赖前端是否回传 tokens。
-    _leaf_tok = {p: t for p, t, _sv, _raw in _leaf_paths(body)}
     id_meta = []
     for i in (identity or []):
+        if i.get("path") in param_map:        # 同一字段不能既是参数又是 identity:用户既已参数化 → 参数优先,不再运行期覆盖
+            continue
         toks = i.get("tokens") or _leaf_tok.get(i.get("path"))
         ev = [f"request://body.{i['path']}"]                  # 证据来源(node 8):该字段在请求体的位置 + 登录态来源
         if i.get("source"):
@@ -1003,12 +1121,21 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
         if _is_system_timestamp(p.split(".")[-1].split("[")[0], raw):
             system_values.append({"path": p, "tokens": toks,
                                   "kind": "now_ms" if len(str(raw)) == 13 else "now_s"})
-    return {"method": (req.get("method") or "POST").upper(), "path": path, "url": url,
-            "content_type": req.get("content_type", "application/json"),
-            "body_template": templ, "params": list(dict.fromkeys(params)), "sample_inputs": samples,
-            "auth_headers": extract_auth_headers(req.get("headers")),
-            "field_types": types, "selects": sel_meta, "identity": id_meta,
-            "system_values": system_values}
+    out = {"method": (req.get("method") or "POST").upper(), "path": path, "url": url,
+           "content_type": req.get("content_type", "application/json"),
+           "body_template": templ, "params": list(dict.fromkeys(params)), "sample_inputs": samples,
+           "auth_headers": extract_auth_headers(req.get("headers")),
+           "field_types": types, "selects": sel_meta, "identity": id_meta,
+           "system_values": system_values}
+    # P1:把提交请求**自身的响应**学成业务成功约定(code=200/success=true 等)+ 留证据。
+    # 单接口即便没有额外 GET 查询读,资产里也有 success_rule → acceptance 能验"业务成功",不再报"无法验证"。
+    resp = req.get("response_json")
+    if resp is not None:
+        out["response_json"] = resp                       # 证据(node 8):提交真实/拦截响应
+        sr = infer_success_rule([{"json": resp}])
+        if sr:
+            out["success_rule"] = sr
+    return out
 
 
 def substitute(template, fields: dict, defaults: dict | None = None):
@@ -1278,6 +1405,39 @@ async def _fetch_list(url: str, base_url: str, storage_state, token_key: str | N
     return as_list_payload(data) or []
 
 
+def find_field_select(api_request: dict, field: str) -> dict | None:
+    """在 api_request(单请求 + 多步各步)里找参数名==field 的 select 元数据(source_url/value_key/label_key)。
+    供运行期"实时拉该字段当前可选项"(问题1:把接口放进 skill,选字段时直接调接口)。无则 None。"""
+    sels = list((api_request or {}).get("selects") or [])
+    for st in (api_request or {}).get("steps") or []:
+        sels += list((st or {}).get("selects") or [])
+    return next((s for s in sels if s.get("param") == field), None)
+
+
+async def fetch_field_options(api_request: dict, field: str, *, base_url: str = "",
+                              storage_state=None, token_key: str | None = None,
+                              verify: bool = True, limit: int = 500) -> dict:
+    """**实时**拉某选择型字段的当前可选项(直接调它的来源接口,带登录态)→ {field, options:[{label,value}], count}。
+    通用,不挑系统。该字段不是选择型/无来源 → options=[] 并说明。失败 → options=[] 不抛(让 agent 退回传名字)。"""
+    sel = find_field_select(api_request, field)
+    if not sel or not sel.get("source_url"):
+        return {"field": field, "options": [], "count": 0,
+                "note": "该字段不是选择型(或无来源接口);直接按字段说明传值即可"}
+    lk, vk = sel.get("label_key"), sel.get("value_key")
+    items = await _fetch_list(sel["source_url"], base_url, storage_state, token_key, verify,
+                              (api_request or {}).get("auth_headers"))
+    opts = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        lab = str(it.get(lk, "")).strip()
+        if lab:
+            opts.append({"label": lab, "value": it.get(vk)})
+        if len(opts) >= limit:
+            break
+    return {"field": field, "options": opts, "count": len(items)}
+
+
 # 分页响应里"总记录数"字段(通用,不挑系统):total/totalCount/totalElements/recordsTotal…
 _PAGE_TOTAL_KEYS = ("total", "totalcount", "totalelements", "totalrows", "totalnum",
                     "recordstotal", "totalsize")
@@ -1302,8 +1462,15 @@ def _extract_total(data) -> int | None:
 
 
 async def _resolve_selects(api_request: dict, fields: dict, *, base_url: str, storage_state,
-                           token_key: str | None, verify: bool) -> dict:
-    """Q2 选领导:参数传的是名字 → 查候选列表把它换成内部 ID。查不到则原样(可能用户直接给了 ID)。"""
+                           token_key: str | None, verify: bool) -> tuple[dict, dict]:
+    """选择型:参数传的是名字 → 查候选列表换成内部 ID。返回 (fields, id_overrides)。
+
+    两形态:① **单码字段**(approverId/type:字段本身就该存码)→ fields[param] 直接换成 id;
+    ② **名/ID 配对**(yyxtmc 显示名 + yyxtid 内部 id)→ fields[param] 规整成候选规范显示名,
+       配对 id 字段经 id_overrides({tokens 元组: id 值})在 substitute 后写回(换选项时 id 不冻结)。
+    查不到则原样(可能用户直接给了 ID)。
+    """
+    id_overrides: dict = {}
     for s in api_request.get("selects") or []:
         param = s.get("param")
         if param not in fields:
@@ -1313,9 +1480,17 @@ async def _resolve_selects(api_request: dict, fields: dict, *, base_url: str, st
                                   api_request.get("auth_headers"))
         lk, vk = s.get("label_key"), s.get("value_key")
         match = next((it for it in items if isinstance(it, dict) and str(it.get(lk)) == str(name)), None)
-        if match is not None and vk in match:
+        if match is None:
+            continue
+        if s.get("id_tokens") or s.get("id_path"):       # 名/ID 配对:显示名字段保留名、配对 id 字段写 id
+            if lk in match:
+                fields[param] = match[lk]                 # 规整成候选里的规范显示名
+            if vk in match:
+                toks = s.get("id_tokens") or _split_path(s.get("id_path", ""))
+                id_overrides[tuple(toks)] = match[vk]
+        elif vk in match:                                # 单码字段:字段值换成 id
             fields[param] = match[vk]
-    return fields
+    return fields, id_overrides
 
 
 # token 在 cookie/localStorage 里的"键名"概念词(通用,不挑系统:Admin-Token/satoken/Authorization/access_token/jwt…)
@@ -1531,14 +1706,17 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     (Q3 步链,如 taskId)。dry 不连网,只校验参数齐全。
     """
     fields = dict(fields)
-    if send:                                                 # 选领导:名字→ID(需连网查候选列表)
-        fields = await _resolve_selects(api_request, fields, base_url=base_url,
-                                        storage_state=storage_state, token_key=token_key, verify=verify)
+    sel_overrides: dict = {}
+    if send:                                                 # 选择型:名字→ID(需连网查候选列表);名/ID 配对返回 id 覆盖
+        fields, sel_overrides = await _resolve_selects(api_request, fields, base_url=base_url,
+                                                        storage_state=storage_state, token_key=token_key, verify=verify)
     # 按字段声明类型归一值(number/bool/日期格式),让 body 填回的是目标系统认的类型/格式 —— 通用,不挑字段
     fields = _coerce_fields(fields, api_request)
     body = substitute(api_request.get("body_template"), fields, api_request.get("sample_inputs") or {})
     _apply_identity(body, api_request, storage_state)        # 当前用户/会话值运行期重取覆盖(此刻 blob 仍是嵌套结构)
     _apply_system_values(body, api_request)                  # 系统时间戳(submitTime/createTime)运行期填 now,不焊死录制时刻
+    for toks, v in sel_overrides.items():                    # 名/ID 配对:把解析出的内部 id 写回配对 id 字段(不冻结)
+        _set_by_path(body, list(toks), v)
     for p, v in (overrides or {}).items():                   # Q3:上一步响应值注入(taskId 等)
         _set_by_path(body, p, v)
     id_issues = _identity_audit(body, api_request, storage_state) if send else []   # 换身后置审计(blob 仍嵌套,可达)
@@ -1548,13 +1726,14 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     # 优先用录制时的完整 url(同一 OA host 不变);否则 base_url + path
     url = api_request.get("url") or (path if path.startswith("http") else (base_url or "").rstrip("/") + path)
     if not send:
-        leftover = "{{" in json.dumps(body, ensure_ascii=False)   # 还有没填上的 {{字段}}?
+        # **self_check 是唯一承重闸门**:它用哨兵填满每个参数,既查"残留 {{}}(参数未声明)"也查"参数填不进 body"。
+        # 这里再用录制默认值看 leftover 只作信息——某参数**没有录制默认值**(运行期由 agent 提供)会留 {{}},
+        # 但那不是缺陷(self_check 已证明该参数结构正确),不能因此拦发布(否则误报"参数没全填上")。
+        leftover = "{{" in json.dumps(body, ensure_ascii=False)
         problems = self_check(api_request)                        # P0:发布前确定性自检(skill 数据,承重闸门)
-        ok = (not leftover) and not problems
-        return {"ok": ok, "dry": True, "method": method, "url": url, "body": body,
-                "self_check": problems,
-                "detail": ("；".join(problems) if problems else
-                           ("有参数没填上" if leftover else "请求可构造(dry,未真发)"))}
+        return {"ok": not problems, "dry": True, "method": method, "url": url, "body": body,
+                "self_check": problems, "leftover_no_default": leftover,
+                "detail": ("；".join(problems) if problems else "请求可构造(dry,未真发)")}
     if id_issues:                                            # 真发前最后一道:换身失败就拒发,绝不以录制者身份写入
         return {"ok": False, "blocked": True, "method": method, "url": url,
                 "identity_issues": id_issues,

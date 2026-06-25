@@ -219,6 +219,7 @@ class RecordSession:
         self._context = None
         self._cdp = None
         self._on_frame: Callable[[str], Awaitable[None]] | None = None   # 截屏回调(切活动页时复用)
+        self._closing = False        # stop()/断连中:页面 close 事件不再重开截屏(避免在已关 context 上 new_cdp_session 抛错)
         self.page = None
 
     async def start(self, start_url: str, *, base_url: str = "", headless: bool = True,
@@ -260,6 +261,8 @@ class RecordSession:
     async def _on_new_page(self, page) -> None:  # noqa: ANN001 —— 新标签页/新窗口(context "page" 事件)
         """用户操作打开了新页(target=_blank / window.open / 弹窗)→ 跟随:设为活动页,把截屏切过去。
         否则新页在后台,用户看不到、也操作不到,表现为"新页打不开"。录制绑定/路由已在 context 级,自动覆盖新页。"""
+        if self._closing:
+            return
         try:
             page.on("close", lambda: asyncio.create_task(self._on_page_close(page)))
         except Exception:  # noqa: BLE001
@@ -268,15 +271,21 @@ class RecordSession:
             await page.wait_for_load_state("domcontentloaded")
         except Exception:  # noqa: BLE001
             pass
+        if self._closing or page.is_closed():     # 等待期间会话已在拆 / 新页已关 → 不切、不重开截屏
+            return
         self.page = page
         if self._on_frame is not None:        # 截屏已开 → 切到新页;未开则等 start_screencast 自然开在最新页
             await self._restart_screencast()
 
     async def _on_page_close(self, page) -> None:  # noqa: ANN001
-        """活动页被关掉(用户关新标签/弹窗)→ 回退到仍打开的页,截屏切回去,避免黑屏。"""
-        if page is not self.page or self._context is None:
+        """活动页被关掉(用户关新标签/弹窗)→ 回退到仍打开的页,截屏切回去,避免黑屏。
+        **会话拆除(stop/断连)期间一律不动**——否则会在正在关闭的 context 上 new_cdp_session 抛 TargetClosedError。"""
+        if self._closing or self._context is None or page is not self.page:
             return
-        rest = [p for p in self._context.pages if not p.is_closed()]
+        try:
+            rest = [p for p in self._context.pages if not p.is_closed()]
+        except Exception:  # noqa: BLE001 —— context 已开始关闭
+            return
         if not rest:
             return
         self.page = rest[-1]
@@ -328,13 +337,14 @@ class RecordSession:
         return _json.dumps(body, ensure_ascii=False)
 
     async def _route(self, route, request) -> None:  # noqa: ANN001 —— 拦截模式
-        from dano.execution.page.request_capture import looks_like_auth_write
+        from dano.execution.page.request_capture import looks_like_auth_write, looks_like_read_request
         try:
             m = (request.method or "").upper()
             url = request.url
             pd = request.post_data if m in ("POST", "PUT", "PATCH", "DELETE") else None
-            # 业务写请求 → 抓下来,假装成功不真发;登录/鉴权/上传等基建写请求照常放行(用户要真登录,不能拦)
-            if pd and not looks_like_auth_write(url, pd):
+            # 业务写请求 → 抓下来,假装成功不真发;登录/鉴权/上传等基建写、以及 POST 形态的读/查询
+            #(getXxxList/queryXxx:下拉/列表源)照常放行真发(否则录制时下拉/列表加载不出来,选不了值)
+            if pd and not looks_like_auth_write(url, pd) and not looks_like_read_request(url):
                 hd = {}
                 try:
                     hd = dict(request.headers or {})
@@ -424,10 +434,14 @@ class RecordSession:
         await self._open_screencast()
 
     async def _open_screencast(self) -> None:
-        """在当前活动页 self.page 上开一路截屏。切页时配合 _restart_screencast 复用。"""
-        if self._context is None or self.page is None:
+        """在当前活动页 self.page 上开一路截屏。切页时配合 _restart_screencast 复用。
+        会话拆除中 / 页面已关 → 直接返回;new_cdp_session 自身抛错(context 关闭竞态)也吞掉,绝不冒泡成未捕获异常。"""
+        if self._closing or self._context is None or self.page is None or self.page.is_closed():
             return
-        cdp = await self._context.new_cdp_session(self.page)
+        try:
+            cdp = await self._context.new_cdp_session(self.page)
+        except Exception:  # noqa: BLE001 —— TargetClosedError 等(context/page 关闭竞态)→ 不重开,静默
+            return
         self._cdp = cdp
 
         async def _emit(params: dict) -> None:
@@ -439,11 +453,14 @@ class RecordSession:
                 pass
 
         cdp.on("Page.screencastFrame", lambda p: asyncio.create_task(_emit(p)))
-        await cdp.send("Page.startScreencast",
-                       {"format": "jpeg", "quality": 50, "maxWidth": _VIEW_W, "maxHeight": _VIEW_H})
+        try:
+            await cdp.send("Page.startScreencast",
+                           {"format": "jpeg", "quality": 50, "maxWidth": _VIEW_W, "maxHeight": _VIEW_H})
+        except Exception:  # noqa: BLE001
+            pass
 
     async def _restart_screencast(self) -> None:
-        """活动页变了(切到新标签/回退)→ 关旧页截屏,在新活动页重开,画面跟随。"""
+        """活动页变了(切到新标签/回退)→ 关旧页截屏,在新活动页重开,画面跟随。会话拆除中不重开。"""
         old = self._cdp
         self._cdp = None
         if old is not None:
@@ -451,7 +468,8 @@ class RecordSession:
                 await old.detach()
             except Exception:  # noqa: BLE001
                 pass
-        await self._open_screencast()
+        if not self._closing:
+            await self._open_screencast()
 
     # ── 输入回传(归一坐标 0~1 → 视口像素)──
     async def dispatch_input(self, ev: dict) -> None:
@@ -511,6 +529,7 @@ class RecordSession:
                 if self.steps[i].get("required") and self.steps[i].get("op") in ("fill", "select", "pick")}
 
     async def stop(self) -> None:
+        self._closing = True         # 先置位:此后任何 page close 事件都不再重开截屏(避免在关闭中的 context 上 new_cdp_session)
         for obj, meth in ((self._context, "close"), (self._browser, "close"), (self._pw, "stop")):
             if obj is not None:
                 try:

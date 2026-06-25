@@ -105,6 +105,16 @@ def _select_fields(props: dict) -> list[str]:
     return [k for k, v in (props or {}).items() if (v or {}).get("format") == "name-ref"]
 
 
+def _opts_hint(prop: dict, cap: int = 12) -> str:
+    """枚举字段在参数表/SOP 里的"可选值"提示:列前 cap 个候选;超出指向 references/OPTIONS.md。"""
+    opts = (prop or {}).get("x-options") or (prop or {}).get("enum") or []
+    if not opts:
+        return ""
+    shown = " / ".join(str(o) for o in opts[:cap])
+    more = f" …(共 {len(opts)} 项,见 references/OPTIONS.md)" if len(opts) > cap else ""
+    return f"可选:{shown}{more}"
+
+
 def _label(props: dict, k: str) -> str:
     """字段纯语义(SOP/复述用,简洁);无 label 退回 description、再退回 key。
     调用约定(传名字/勿传ID、日期格式)集中在参数表 description 与 SOP 通用提示里说一次,SOP 逐字段不再重复。"""
@@ -183,8 +193,11 @@ def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
         L.append(f"- `{c['out']}` 由系统按 `{c['expr']}` 计算,通常不必用户提供;用户给了则需与计算值一致。")
     sel = _select_fields(props)
     if sel:
-        L.append(f"- 选择型字段({'、'.join('`' + k + '`' for k in sel)})传**名字/选项文字**,"
-                 "Dano 运行期查内部 ID 再提交,**勿直接传 ID/编号**。")
+        has_opts = any((props.get(k) or {}).get("x-options") for k in sel)
+        L.append(f"- 选择型字段({'、'.join('`' + k + '`' for k in sel)})传**名字/选项文字**(勿传 ID/编号)。"
+                 "**选这类字段前,先运行 `bash scripts/submit.sh --list-options <字段名>` 实时拉它当前可选项**"
+                 "(直接调来源接口,最准),从返回的 `options` 里选准确名字再提交"
+                 + ("(离线快照见 `references/OPTIONS.md`)" if has_opts else "") + "。")
     num = [k for k in keys if k in numset]
     if num:
         L.append(f"- 数值字段({'、'.join('`' + k + '`' for k in num)})传 JSON **数字**"
@@ -317,9 +330,13 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
     keys, required, props = _fields(m)
     numset = set(_numeric_fields(props))
     if keys:
+        def _cell(k: str) -> str:
+            p = props[k] or {}
+            d = p.get("description", "") or k
+            h = _opts_hint(p)
+            return (d + ("；" + h if h else "")).replace("\n", " ").replace("|", "\\|")
         rows = "\n".join(
-            f"| `{k}` | {_ptype(k, props, numset)} | {'是' if k in required else '否'} | "
-            f"{(props[k] or {}).get('description', '') or k} |"
+            f"| `{k}` | {_ptype(k, props, numset)} | {'是' if k in required else '否'} | {_cell(k)} |"
             for k in keys)
         table = "| 参数 | 类型 | 必填 | 说明 |\n|---|---|---|---|\n" + rows
         ex_args = "{" + ", ".join(
@@ -435,6 +452,29 @@ bash scripts/submit.sh {flags}{cflag}
 """
 
 
+def _options_md(m: SkillManifest) -> str | None:
+    """references/OPTIONS.md:选择型字段的**候选值清单**(快照进 skill,让 agent 从真实选项里选,不凭空猜)。
+    无任何选择型候选 → 返回 None(不产生空文件)。提交时 Dano 仍按名字现查内部 ID(选项更新以运行期为准)。"""
+    keys, _required, props = _fields(m)
+    blocks: list[str] = []
+    for k in keys:
+        p = props.get(k) or {}
+        opts = p.get("x-options")
+        if not opts:
+            continue
+        head = f"## {_label(props, k)}(`{k}`)— 共 {len(opts)} 项"
+        if p.get("x-options-truncated"):
+            head += "(快照截断,完整以运行期现查为准)"
+        lst = "\n".join(f"- {o}" for o in opts)
+        blocks.append(f"{head}\n\n传**名字/选项文字**(勿传 ID/编号):\n{lst}")
+    if not blocks:
+        return None
+    return ("# 可选值参考\n\n选择型字段的候选值。**首选实时拉取**(最准):"
+            "`bash scripts/submit.sh --list-options <字段名>` —— Dano 直接调来源接口返回当前 `options`,从中选。\n"
+            "下面是录制时抓取的**离线快照**(可能过时,仅供快速参考);agent 传**名字/选项文字**,Dano 提交时按名字现查内部 ID。\n\n"
+            + "\n\n".join(blocks) + "\n")
+
+
 def _readme(m: SkillManifest) -> str:
     keys, required, props = _fields(m)
     field_lines = "\n".join(
@@ -499,6 +539,9 @@ def main():
     # 写操作默认**未确认**:不带 --confirm 调用会被 Dano 拦成 need_confirm(确认闸门不被绕过)。
     ap.add_argument("--confirm", action="store_true", default=False)
     ap.add_argument("--diagnose", action="store_true")
+    # 选某选择型字段前,**实时**拉它当前可选项(直接调来源接口):--list-options 字段名 → 从返回里选准确名字再提交。
+    ap.add_argument("--list-options", dest="list_options", default=None, metavar="字段",
+                    help="实时列出某选择型字段的当前可选项(Dano 调来源接口),再从中选准确名字")
     args = ap.parse_args()
 
     url = os.environ.get("DANO_URL")
@@ -507,6 +550,21 @@ def main():
         _emit({"status": "failed", "reason": "DANO_URL/DANO_TENANT_KEY 未设置(部署方配置,勿写进文件)"})
         sys.exit(2)
     url = url.rstrip("/")
+
+    if args.list_options:                       # 实时拉某字段可选项(选择型)→ agent 从中选准确名字
+        payload = json.dumps({"name": TOOL, "field": args.list_options}).encode("utf-8")
+        req = urllib.request.Request(
+            url + "/v1/tools/options", data=payload, method="POST",
+            headers={"Content-Type": "application/json", "X-Tenant-Key": key})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                res = json.loads(r.read().decode("utf-8"))
+        except Exception as e:
+            _emit({"status": "failed", "reason": "拉可选项失败: %s" % e})
+            sys.exit(1)
+        _emit({"status": "options", "field": res.get("field"), "count": res.get("count"),
+               "options": res.get("options"), "note": res.get("note")})
+        return
 
     if args.diagnose:
         try:
@@ -618,6 +676,9 @@ def _write_skill(out_dir: Path, m: SkillManifest) -> Path:
     (folder / "SKILL.md").write_text(_skill_md(m, slug), encoding="utf-8")
     (folder / "references" / "QUICKREF.md").write_text(_quickref(m), encoding="utf-8")
     (folder / "references" / "README.md").write_text(_readme(m), encoding="utf-8")
+    opts_md = _options_md(m)                          # 选择型候选值清单(让 agent 从真实选项里选,问题1)
+    if opts_md:
+        (folder / "references" / "OPTIONS.md").write_text(opts_md, encoding="utf-8")
     py = folder / "scripts" / "dano_call.py"
     py.write_text(_dano_call_py(m), encoding="utf-8", newline="\n")
     _chmod_x(py)

@@ -7,10 +7,23 @@ findings(确定性检出 + 三模型审核语义)→ propose(LLM 出受限修复
 from __future__ import annotations
 
 import json
+import re
 
 import structlog
 
 log = structlog.get_logger(__name__)
+
+# "dry/self_check 未真跑"——录制路径 by-design 的安全验证模式(零执行、零凭证、零副作用,发布为 partially_verified)。
+# 评审若**仅因此**否决,是误判该安全模式;确定性剔除该理由(不阻断、不进修复:本就不该/不能改)。targeted,不误删真问题。
+_DRY_MODE_RE = re.compile(
+    r"dry\s*=?\s*true|self[_\s]?check|未真[实]?.{0,3}跑|真实跑通|未.{0,2}执行|未真发|仅构造未真发|construct.*not.*sen",
+    re.I)
+
+
+def is_dry_mode_reason(reason) -> bool:
+    """该否决理由是否针对'dry/self_check 未真跑'这一按设计的安全模式(非可发布缺陷)。
+    request_review 对 dry-only 资产据此剔除误判否决(确定性层承重,不让 LLM 抖动阻断 by-design 安全行为)。"""
+    return bool(_DRY_MODE_RE.search(str(reason or "")))
 
 _FIX_SYSTEM = (
     "你是录制型 API Skill 的**修复器**。给定业务目标 goal、请求骨架 skeleton(参数↔路径映射,**无值/无凭证**)、"

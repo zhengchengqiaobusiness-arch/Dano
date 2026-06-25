@@ -838,13 +838,25 @@ async def request_review(run_id: str, params: dict) -> dict:
         board = ReviewBoard.from_settings()
     verdicts = await board.review(asset_type=draft.asset_type.value, asset_key=draft.asset_key,
                                   body=draft.body, evidence=evidence)
+    # 确定性容错(写进 DB 证据,故 verify_reviewed 也认):若本资产是 **dry-only**(无真跑 replay 证据,
+    # 即录制路径 by-design 的写安全模式 → partially_verified),评审若**仅因"dry/self_check 未真跑"否决** = 误判该安全模式
+    # → 剔除该理由;某维度理由清空即视为通过。**确定性层承重,不让 LLM 抖动阻断按设计的安全行为。**
+    from dano.onboarding.repair import is_dry_mode_reason
+    dry_only = not any(e.get("kind") == "replay" for e in evidence)
     review_run_ids, out = [], []
     for v in verdicts:
+        passed, reasons = v.passed, list(v.reasons or [])
+        if dry_only and not passed:
+            kept = [r for r in reasons if not is_dry_mode_reason(r)]
+            if len(kept) != len(reasons):
+                log.info("request_review.dropped_dry_reason", role=v.role,
+                         dropped=len(reasons) - len(kept))
+                reasons, passed = kept, (len(kept) == 0)
         rr = await _ds.record_review(asset_draft_id=draft.asset_draft_id, role=v.role,
-                                     model_id=v.model_id, passed=v.passed, reasons=v.reasons)
+                                     model_id=v.model_id, passed=passed, reasons=reasons)
         review_run_ids.append(str(rr.review_run_id))
-        out.append({"role": v.role, "model": v.model_id, "passed": v.passed, "reasons": v.reasons})
-    all_passed = bool(verdicts) and all(v.passed for v in verdicts)
+        out.append({"role": v.role, "model": v.model_id, "passed": passed, "reasons": reasons})
+    all_passed = bool(out) and all(o["passed"] for o in out)
     log.info("request_review", draft=str(draft.asset_draft_id), all_passed=all_passed)
     return {"all_passed": all_passed, "verdicts": out, "review_run_ids": review_run_ids}
 

@@ -242,9 +242,11 @@ async def run_request_onboarding(
     deploy: dict | None = None, credentials: dict | None = None, run_id: str | None = None,
     goal: dict | None = None, storage_state: dict | None = None,
 ) -> dict:
-    """抓请求路径:把录制抓到的提交请求(已参数化)落成可执行 Skill → dry 校验 → 发布。
+    """抓请求路径:把录制抓到的提交请求(已参数化)落成可执行 Skill → dry 自检 → 三模型评审+自动修复 → 发布。
 
-    不走 DOM 回放、不真发(写安全);运行期 invoke 时才带登录态真发。免三模型评审(用户真实提交)。
+    不走 DOM 回放、不真发(写安全);运行期 invoke 时才带登录态真发。
+    写抓请求页面**须过三模型评审**(发布层硬闸门,见 verify_reviewed):评审 client(_review_board)由网关启动注入;
+    审核出 findings → LLM 自动修复循环 → 改不动才回一个精准问题(非重录)。LLM 不可用时按 review_enabled 急停降级。
     """
     from dano.agent_tools import tools as T
     from dano.shared.asset_bodies import PageScriptBody
@@ -344,9 +346,21 @@ async def run_request_onboarding(
         # → 喂 LLM 出受限修复操作 → 确定性执行 + self_check 复验 → 循环到干净 → 重审核 → 发布;
         # **改不动(信息真缺)才问一个精准问题(非重录)**。修复器/审核 client 没注入(LLM 不可用)则退回原逻辑,不阻断。
         review_run_ids: list = []
+        # P2:写抓请求页面发布层**硬要求三模型评审证据**(verify_reviewed)。评审 client 未注入但评审已启用 →
+        # 直接 return 可执行指引,**不静默跳过后在 publish 阶段以"缺角色"晦涩失败**(主路径网关启动会注入)。
+        from dano.config import get_settings as _get_settings
+        if T._review_board is None and _get_settings().review_enabled:
+            log.warning("ingest.gate.review_unavailable", review_enabled=True)
+            return {"ok": False, "stage": "review", "status": IngestionStatus.NEEDS_CLARIFICATION.value,
+                    "action": action,
+                    "reason": "评审已启用(review_enabled=true)但未配置审核模型 —— 写操作 skill 过不了发布层三模型评审闸门。"
+                              "请配置审核模型(网关启动自动注入;离线直调需先 set_review_board),或运维临时设 "
+                              "review_enabled=false 降级发布。"}
         if T._review_board is not None:
             from dano.execution.page.repair_ops import collect_repair_findings
             from dano.onboarding.repair import generate_fix_ops, review_findings, run_repair_loop
+            # 注:dry/self_check(录制 by-design 安全模式)的误判否决已在 request_review 内确定性剔除(改 DB 证据),
+            # 故此处 verdicts 已是修正后的(评审仅因"未真跑"否决不会误阻断发布)。
             rev = await T.request_review(run_id, {"asset_draft_id": d["asset_draft_id"]})
             review_run_ids = rev.get("review_run_ids", []) or []
             rev_find = review_findings(rev.get("verdicts"))

@@ -184,6 +184,48 @@ async def llm_test() -> dict:
             "body": ("" if ok else r.text[:400])}
 
 
+# ── 运行期 token(抓请求路径):录制自动抓 → 存 PG(表 runtime_token),可查/可刷新;过期前端换一下即可,免重录 ──
+class TokenUpsertReq(BaseModel):
+    tenant: str
+    subsystem: str
+    headers: dict[str, str] | None = None     # 整组鉴权头(优先);或下面 token 三件套只更一个头
+    token: str | None = None
+    header_name: str = "Authorization"
+    token_prefix: str = "Bearer "
+
+
+@app.get("/settings/token")
+async def get_runtime_token(tenant: str, subsystem: str, reveal: bool = False) -> dict:
+    """查某 (tenant, subsystem) 运行期用的鉴权头(token)。默认打码;reveal=true 明文(管理用)。"""
+    from dano.infra.token_store import get_token, mask_headers
+    rec = await get_token(tenant, subsystem)
+    if not rec:
+        return {"tenant": tenant, "subsystem": subsystem, "has_token": False, "headers": {}}
+    headers = rec.get("headers") or {}
+    return {"tenant": tenant, "subsystem": subsystem, "has_token": bool(headers),
+            "headers": headers if reveal else mask_headers(headers),
+            "source": rec.get("source"), "updated_at": rec.get("updated_at")}
+
+
+@app.put("/settings/token")
+async def put_runtime_token(req: TokenUpsertReq) -> dict:
+    """更新/刷新某 (tenant, subsystem) 的运行期 token(过期时换一份,免重录)。
+    传 headers 用整组;或只传 token(+header_name/token_prefix)更一个头 —— 都会与已存的合并
+    (可只换 Authorization,保留 Tenant-Id 等)。"""
+    from dano.infra.token_store import get_token_headers, mask_headers, save_token
+    headers = {k: v for k, v in (req.headers or {}).items() if v}
+    if not headers and req.token:
+        headers[req.header_name] = f"{req.token_prefix}{req.token}"
+    if not headers:
+        raise HTTPException(status_code=400, detail="需提供 headers 或 token")
+    merged = {**(await get_token_headers(req.tenant, req.subsystem)), **headers}
+    rec = await save_token(req.tenant, req.subsystem, merged, source="manual")
+    if not rec:
+        raise HTTPException(status_code=500, detail="token 保存失败(DB 不可用?)")
+    return {"ok": True, "tenant": req.tenant, "subsystem": req.subsystem,
+            "headers": mask_headers(merged), "updated_at": rec.get("updated_at")}
+
+
 # ── 租户 ──
 class TenantCreate(BaseModel):
     tenant: str
@@ -529,7 +571,7 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
             "candidates": cand_list, "chosen_idx": candidates.index(chosen) if chosen in candidates else 0,
             "suggested_steps": suggest_workflow_steps(candidates, samples),   # 自动建议哪几条组成业务流程(前端预勾)
             "selects": selects,
-            "identity": suggest_identity(pd, storage)}         # 字段=当前用户/会话值(运行期重取)
+            "identity": suggest_identity(pd, storage, samples)}   # 字段=当前用户/会话值(运行期重取;排除用户填值/平凡撞值)
 
 
 # ── 方式B:网页内录制(WebSocket:截屏流出 + 输入回传入 + 实时步骤 + 录完发布)──
@@ -611,9 +653,19 @@ async def record_ws(ws: WebSocket) -> None:
                 #   前端勾字段。用户也可在候选里手选别的(应对噪声误判 / 多写请求)。勾完发 publish_request 才建 Skill。
                 from dano.execution.page.request_capture import (flatten_body, json_write_requests,
                                                                  looks_like_auth_write, pick_submit_request)
-                cands = [c for c in json_write_requests(sess.captured_requests())
+                all_caps = sess.captured_requests()
+                cands = [c for c in json_write_requests(all_caps)
                          if flatten_body(c.get("post_data"))                       # 有可勾字段的
                          and not looks_like_auth_write(c.get("url") or "", c.get("post_data"))]  # 排除登录/鉴权写
+                log.info("record.finalize", captured=len(all_caps), cands=len(cands), steps=len(steps),
+                         captured_urls=[((c.get("method") or ""), (c.get("url") or "")[:140]) for c in all_caps][:25])
+                if not cands and not all_caps:
+                    # 一条写请求都没抓到 → 多半是**没点「提交」**或刚重连过会话(新浏览器没有旧请求)→ 明确引导重点提交,
+                    # **不落到脆弱的 DOM 回放**(那会报"pick 没找到元素",更迷惑)。现场还在,重点一次提交即可。
+                    await ws.send_json({"type": "result", "parsed_steps": len(steps), "report": {"ok": False,
+                        "reason": "没抓到任何提交接口请求 —— 拦截模式下**点一次「提交」**才会抓到那条请求。"
+                                  "若刚重连过会话/浏览器,请在画面里**重新点一次「提交」**(现场还在),然后再发布。"}})
+                    continue
                 if cands:
                     pending_candidates = cands
                     pending_samples = samples
@@ -708,6 +760,11 @@ async def record_ws(ws: WebSocket) -> None:
                 from dano.execution.page.sessions import save_session
                 from dano.onboarding.page_onboard import run_request_onboarding
                 save_session(init["tenant"], sub, login_state)   # 运行期发请求带登录态
+                # 录制时抓到的鉴权头(Authorization/Tenant-Id/satoken…)单独存进 token_store(PG)→ 运行期覆盖旧 token、前端可查/可刷新
+                from dano.infra.token_store import headers_from_api_request, save_token
+                _tok_headers = headers_from_api_request(apir)
+                if _tok_headers:
+                    await save_token(init["tenant"], sub, _tok_headers, source="recording")
                 # 单请求取自身 sample_inputs;工作流取最后一步的(dry 校验用)
                 sample_in = apir.get("sample_inputs") or ((apir.get("steps") or [{}])[-1].get("sample_inputs") or {})
                 rep = await run_request_onboarding(
@@ -914,6 +971,24 @@ async def call_tool(req: ToolCallReq, x_tenant_key: str | None = Header(default=
         except _json.JSONDecodeError as e:
             raise HTTPException(status_code=400, detail=f"arguments 非合法 JSON: {e}") from e
     return await _invoke(tenant, skill_id_of(req.name), args, req.confirm)
+
+
+class ToolOptionsReq(BaseModel):
+    name: str                       # 工具名(= skill_id 点转 __)
+    field: str                      # 要列可选项的**参数名**(选择型字段)
+
+
+@app.post("/v1/tools/options")
+async def tool_options(req: ToolOptionsReq, x_tenant_key: str | None = Header(default=None)) -> dict:
+    """**实时**列出某选择型字段的当前可选项(问题1:把接口放进 skill,选字段时直接调来源接口拉真实选项)。
+    skill 不持目标系统凭证 → 经 Dano 用运行期登录态调来源接口,返回 {field, options:[{label,value}], count}。"""
+    tenant = await _auth_tenant(x_tenant_key)
+    skill_id = skill_id_of(req.name)
+    sub_str, _, action = skill_id.partition(".")
+    if not action:
+        raise HTTPException(status_code=400, detail="name 应能解析为 {subsystem}.{action}")
+    orch = await _orchestrator(tenant)
+    return await orch.list_field_options(Subsystem(sub_str), action, req.field, tenant=tenant)
 
 
 class ExportSkillsReq(BaseModel):

@@ -540,6 +540,39 @@ class Orchestrator:
             audit={"before": before, "after": after, "intent": intent.action_hint},
         )
 
+    async def list_field_options(self, subsystem: Subsystem, action: str, field: str,
+                                 *, tenant: str = "") -> dict:
+        """**实时**列出某选择型字段的当前可选项 —— 直接调它的来源接口,带运行期登录态(与 invoke 同一套配置)。
+        问题1:把接口放进 skill。选字段前先拉真实选项,agent 从中选,不凭空猜、不靠过时快照。失败 → options=[]。"""
+        import json as _json
+
+        from dano.execution.page.request_capture import fetch_field_options
+        from dano.execution.page.sessions import session_path_if_exists
+        from dano.infra.http import tls_verify
+        from dano.infra.token_store import get_token_headers, merge_auth_headers
+        skill = self.registry.by_action(subsystem, action)
+        if skill is None or not getattr(skill, "page_asset_id", None):
+            return {"field": field, "options": [], "count": 0, "note": "未知动作 / 非页面型 skill"}
+        env = await self.store.get(skill.page_asset_id)
+        apir = (env.body or {}).get("api_request") if env else None
+        if not apir:
+            return {"field": field, "options": [], "count": 0, "note": "该 skill 无接口请求"}
+        scope = Scope(tenant=tenant, subsystem=skill.subsystem)
+        ep = await self.store.get_published(AssetType.ENV_PROFILE, scope, asset_key="env_profile")
+        base_url = ((ep.body.get("base_url") if ep else "") or "")
+        storage = None
+        sp = session_path_if_exists(tenant, skill.subsystem.value)
+        if sp:
+            try:
+                storage = _json.loads(open(sp, encoding="utf-8").read())
+            except Exception:  # noqa: BLE001
+                pass
+        override = await get_token_headers(tenant, skill.subsystem.value)   # 运行期最新鉴权头(治焊死旧 token 过期)
+        if override:
+            apir = merge_auth_headers(apir, override)
+        return await fetch_field_options(apir, field, base_url=base_url, storage_state=storage,
+                                         verify=tls_verify())
+
     async def _run_page(self, task_id, skill, intent, *, confirm, tenant="") -> TaskOutcome:  # noqa: ANN001
         """无 API 页面辅助执行(流程8)。有 api_request(抓请求路径)则直接发请求,不开浏览器。"""
         env = await self.store.get(skill.page_asset_id)
@@ -562,7 +595,14 @@ class Orchestrator:
                     storage = _json.loads(open(sp, encoding="utf-8").read())
                 except Exception:  # noqa: BLE001
                     pass
-            out = await execute_api(env.body["api_request"], dict(intent.fields),
+            # 运行期真鉴权:用 token_store(PG)里最新存的鉴权头覆盖**焊进资产的旧 token**(录制那刻的会过期)。
+            # token 过期时前端 PUT /settings/token 换一份即可恢复,无需重录整条流程(治本 401)。
+            from dano.infra.token_store import get_token_headers, merge_auth_headers
+            api_request = env.body["api_request"]
+            override = await get_token_headers(tenant, skill.subsystem.value)
+            if override:
+                api_request = merge_auth_headers(api_request, override)
+            out = await execute_api(api_request, dict(intent.fields),
                                     base_url=base_url, storage_state=storage,
                                     send=True, verify=tls_verify())
             ok = bool(out.get("ok"))

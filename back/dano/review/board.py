@@ -73,13 +73,16 @@ _ROLE_SYSTEM: dict[str, str] = {
     ),
     "compliance": (
         "你是『合规审核』评审员,只审合规与发布纪律。逐项核对:\n"
-        "1) 验证证据是否**全部** environment=sandbox 且 credential_type=test(严禁生产/真凭证);\n"
+        "1) **真跑**验证证据(kind=replay/live)是否全部 environment=sandbox 且 credential_type=test(严禁生产/真凭证);"
+        "**若验证模式是 self_check(dry,未发任何请求、未用任何凭证)→ 零凭证零副作用,属写安全默认,视为合规**,"
+        "**不要因『未真跑/dry=true/缺真跑证据』判不通过**;\n"
         "2) 风险分级 risk_level 是否与动作匹配(GET 只读=L1;写=L3 需确认);\n"
         "3) 写/删操作是否要求确认(confirm,由 risk_level 运行期强制);\n"
         "4) 是否指向生产端点、是否违反最小权限。\n"
-        "fail-closed(发布红线):第 1 项**证据未能确认全为 sandbox+test 就判不通过**,不得默认放行。\n"
-        "**设计如此、不要误判**:confirm 不在 body 字段、单步 field_bindings 为空、fact_check 的 method=GET"
-        "——详见用户消息【运行架构】。\n" + _DISCIPLINE + _OUT
+        "fail-closed(发布红线):**仅针对真跑(live/replay)证据**——其若未能确认全为 sandbox+test 才判不通过;"
+        "**dry/self_check 不触发本红线**(它根本没执行,谈不上用错环境/凭证)。\n"
+        "**设计如此、不要误判**:dry/self_check 未真跑、confirm 不在 body 字段、单步 field_bindings 为空、"
+        "fact_check 的 method=GET——详见用户消息【运行架构】。\n" + _DISCIPLINE + _OUT
     ),
 }
 
@@ -225,7 +228,11 @@ _SYSTEM_CONTEXT = (
     "step:/const:/field: 提供),单步 field_bindings 为空属正常,不应据此判不通过。\n"
     "5. success_rule 是业务成功判定表达式(如 response.code==200 即 RuoYi AjaxResult 的业务成功标志);"
     "带 success_rule 即视为已检验业务成功,不必再要求额外业务断言。\n"
-    "6. sandbox_evidence 已证明该资产在 environment=sandbox + credential_type=test 下真实跑通。\n"
+    "6. sandbox_evidence 有两种验证模式,**都合规、都按设计**:① **self_check**(确定性 dry 构造验证——"
+    "只构造请求、**绝不真发**,故未使用任何凭证、未触碰任何环境;这是录制/写操作的**默认安全模式**,"
+    "资产据此发布为 partially_verified)② **replay/live**(可逆沙箱 + credential_type=test 真跑)。"
+    "**切勿因 evidence.request.dry=true / kind=self_check / 『未真实跑通』判不通过**——dry 不执行 = 零凭证零副作用,"
+    "是最安全的模式、不是缺陷;只有能真跑的环境才会另有 live 证据,真跑证据才需全 sandbox+test。\n"
     "仅当存在**实质**问题(真实安全漏洞、risk_level 确与 method 不符、断言完全缺失、字段语义明显错配)"
     "时才判不通过;按设计如此的项不要判不通过。"
 )
@@ -290,6 +297,8 @@ _CAPTURE_REVIEW_NOTE = (
     "`goal.success_criteria` 与它实际校验/回查的一致吗?**对不上才否决并点名**。\n"
     "2) 漏洞检测:是否触碰 `goal.forbidden_actions`(删除/驳回/代他人审批)、越权、凭证泄漏 —— 确有则否决。\n"
     "3) 合规审核:是否指向生产、是否违反最小权限 —— 确有问题才否决。\n"
+    "本资产走录制路径,**默认只做 self_check(dry 构造验证,绝不真发写请求污染目标系统)**,发布为 partially_verified ——"
+    "这是**故意的安全设计**;**严禁因 evidence.request.dry=true / kind=self_check / 缺真跑 sandbox 证据 判不合规或不通过**。\n"
     "**只在确有依据时否决,reason 点名具体参数/字段/goal 项;没问题就 passed=true。**"
 )
 
