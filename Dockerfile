@@ -15,8 +15,6 @@ RUN registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-$DANO_DEFAULT_NPM_REGISTRY}
 
 COPY package.json pnpm-workspace.yaml tsconfig.json vitest.config.ts ./
 COPY apps/dano/package.json apps/dano/package.json
-COPY packages/bridge/package.json packages/bridge/package.json
-COPY packages/svelte/package.json packages/svelte/package.json
 COPY patches patches
 COPY pnpm-lock.yaml* ./
 RUN registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-$DANO_DEFAULT_NPM_REGISTRY}}" \
@@ -51,8 +49,7 @@ ENV DANO_DEFAULT_WORKSPACE_PATH=/tmp/dano
 COPY --from=build /prod/dano/package.json ./package.json
 COPY --from=build /app/package.json ./package-versions/package.json
 COPY --from=build /prod/dano/node_modules ./node_modules
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/web-dist ./web-dist
+COPY --from=build /app/apps/dano/dist ./dist
 COPY --from=build /app/dano.config.json ./dano.config.json
 COPY deploy/runtime-defaults ./deploy/runtime-defaults
 COPY deploy/docker-entrypoint.sh ./deploy/docker-entrypoint.sh
@@ -60,4 +57,4 @@ RUN chmod +x ./deploy/docker-entrypoint.sh
 
 EXPOSE 8080
 ENTRYPOINT ["./deploy/docker-entrypoint.sh"]
-CMD ["node", "./dist/bridge/standalone/main.js"]
+CMD ["node", "./dist/server/main.js"]

@@ -1,27 +1,44 @@
 {
   "name": "@dano/app",
-  "version": "0.3.4",
   "private": true,
-  "description": "Dano standalone browser application",
+  "description": "Dano browser application",
   "type": "module",
   "scripts": {
-    "build": "tsdown",
-    "check": "tsc --noEmit",
-    "dev": "node --import jiti/register ./src/main.ts",
-    "start": "node ../../dist/bridge/standalone/main.js",
+    "build": "pnpm run build:server && pnpm run build:web",
+    "build:server": "tsdown",
+    "build:web": "vite build",
+    "check": "pnpm run check:server && pnpm run check:web",
+    "check:server": "tsc -p tsconfig.server.json --noEmit",
+    "check:web": "svelte-check --tsconfig ./tsconfig.web.json",
+    "dev:server": "node --import jiti/register ./src/main.ts",
+    "dev:web": "vite",
+    "start": "node ./dist/server/main.js",
     "test": "vitest run --root ../.. --config vitest.config.ts"
   },
   "dependencies": {
     "@casualjim/pi-heimdall": "0.2.10",
-    "@dano/bridge": "workspace:*",
     "@earendil-works/pi-coding-agent": "0.80.2",
-    "@mariozechner/pi-coding-agent": "npm:@earendil-works/pi-coding-agent@0.80.2"
+    "@mariozechner/pi-coding-agent": "npm:@earendil-works/pi-coding-agent@0.80.2",
+    "typebox": "1.2.7"
   },
   "devDependencies": {
+    "@comark/svelte": "^0.3.1",
+    "@lobehub/icons-static-svg": "^1.90.0",
+    "@pierre/diffs": "^1.1.22",
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@tsconfig/svelte": "^5.0.8",
     "@types/node": "^25.8.0",
+    "beautiful-mermaid": "^1.1.3",
+    "dompurify": "^3.4.3",
     "jiti": "^2.7.0",
+    "katex": "^0.16.46",
+    "lucide-svelte": "^1.0.1",
+    "shiki": "^4.0.2",
+    "svelte": "^5.55.7",
+    "svelte-check": "^4.4.8",
     "tsdown": "^0.22.0",
     "typescript": "^6.0.3",
+    "vite": "^8.0.13",
     "vitest": "^4.1.6"
   },
   "engines": {

@@ -4,8 +4,8 @@ This project is the Dano P0 browser-only LLM chat app.
 
 ## Project Context
 
-- Frontend: Svelte 5 browser client built by Vite under `packages/svelte`.
-- Backend: TypeScript/Node standalone app under `apps/dano`, using reusable bridge capabilities from `packages/bridge`.
+- Frontend: Svelte 5 browser client built by Vite under `apps/dano/web`.
+- Backend: TypeScript/Node app under `apps/dano`, with bridge capabilities in `apps/dano/src/bridge`.
 - Origin: this project is derived from `references/pi-web-main/` and customized for the Dano browser-only chat use case.
 - Runtime target: browser frontend + Node backend + optional nginx/container deployment.
 - P0 intentionally excludes Pi extension mode and Electron mode.
@@ -22,10 +22,10 @@ This project is the Dano P0 browser-only LLM chat app.
 - Unit/integration tests: `pnpm test`
 - Full build: `pnpm run build`
 - Web build only: `pnpm run build:web`
-- Bridge build only: `pnpm run build:bridge`
-- Standalone backend dev: `pnpm run dev:bridge:standalone`
+- Server build only: `pnpm run build:server`
+- Server dev: `pnpm run dev:server`
 - Svelte dev server: `pnpm run dev:web`
-- Built standalone backend: `pnpm run start:bridge:standalone`
+- Built backend: `pnpm run start`
 
 If the shell cannot find `pnpm` or `node`, use the Codex bundled Node runtime by prepending:
 
@@ -37,9 +37,9 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 
 - Use `pnpm run check` for type and Svelte diagnostics.
 - Use `pnpm test` for Vitest coverage.
-- Use `pnpm run build` before validating the built standalone server.
+- Use `pnpm run build` before validating the built server.
 - For UI changes, verify the rendered app in a browser against the relevant flow.
-- After Podman-based deployment or smoke tests, remove Dano temporary images/tags and dangling build layers after confirming no containers reference them; keep reusable base images unless explicitly asked.
+- After Podman-based deployment or smoke tests, stop and remove the test containers and pods, then remove Dano temporary images/tags and dangling build layers after confirming no containers reference them; keep reusable base images unless explicitly asked.
 
 ## GitHub Workflow
 

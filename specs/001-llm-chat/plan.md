@@ -6,7 +6,7 @@
 
 ## Summary
 
-Adapt `references/pi-web-main/` into a browser-only Dano assistant that keeps the standalone web runtime and server-side LLM session path, removes Pi extension mode and Electron mode, and replaces browser WebSocket RPC with HTTP command endpoints plus EventSource streaming. Package the resulting app with Docker and place nginx in front as the browser-facing reverse proxy. Use `references/dano-assistant.svg` as the product icon.
+Adapt `references/pi-web-main/` into a browser-only Dano assistant that keeps the server-side LLM session path, removes Pi extension mode and Electron mode, and replaces browser WebSocket RPC with HTTP command endpoints plus EventSource streaming. Package the resulting app with Docker and place nginx in front as the browser-facing reverse proxy. Use `references/dano-assistant.svg` as the product icon.
 
 ## Technical Context
 
@@ -20,13 +20,13 @@ Adapt `references/pi-web-main/` into a browser-only Dano assistant that keeps th
 
 **Target Platform**: Modern desktop browser, Node.js app container, nginx reverse proxy container.
 
-**Project Type**: Web application with browser frontend, Node.js standalone backend, Docker deployment.
+**Project Type**: Web application with browser frontend, Node.js backend, Docker deployment.
 
 **Performance Goals**: First visible processing feedback after send within 1 second on a healthy local deployment; normal messages produce a visible LLM answer or clear failure within 30 seconds in at least 95% of controlled P0 verification attempts.
 
 **Constraints**: P0 is chat-only; no enterprise form submission, approval, business record creation, Pi extension mode, or Electron desktop mode. Browser must not receive, accept, persist, or display model credentials or runtime secrets. Browser-to-server event stream must use EventSource/SSE rather than WebSocket.
 
-**Scale/Scope**: Single standalone web app for P0 pilot validation; one active browser user/session is sufficient for P0 acceptance, with implementation not intentionally blocking additional browser clients.
+**Scale/Scope**: Single browser-served web app for P0 pilot validation; one active browser user/session is sufficient for P0 acceptance, with implementation not intentionally blocking additional browser clients.
 
 ## Constitution Check
 
@@ -66,40 +66,34 @@ apps/
 └── dano/
     ├── package.json
     ├── tsconfig.json
+    ├── tsconfig.server.json
+    ├── tsconfig.web.json
     ├── tsdown.config.ts
+    ├── vite.config.ts
+    ├── web/
+    │   ├── index.html
+    │   ├── public/
+    │   │   └── dano-assistant.svg
+    │   └── src/
+    │       ├── App.svelte
+    │       ├── composables/
+    │       │   └── bridgeStore.svelte.ts
+    │       └── components/
     └── src/
         ├── __tests__/
+        ├── bridge/
         ├── backend.ts
         ├── dev-reload.ts
         ├── main.ts
         ├── runtime.ts
         ├── runtime-entry.ts
         └── server.ts
-
-packages/
-├── bridge/
-│   ├── package.json
-│   └── src/
-│       ├── server.ts
-│       ├── sse-event-bus.ts
-│       ├── http-command-adapter.ts
-│       ├── credential-config.ts
-│       └── __tests__/
-└── svelte/
-    ├── package.json
-    ├── public/
-    │   └── dano-assistant.svg
-    └── src/
-        ├── App.svelte
-        ├── composables/
-        │   └── bridgeStore.svelte.ts
-        └── components/
-
-web-dist/
-dist/
+    └── dist/
+        ├── server/
+        └── web/
 ```
 
-**Structure Decision**: Keep the reusable bridge and Svelte client under `packages/`, and place the runnable standalone backend in `apps/dano`. Target code removes `packages/bin/`, `packages/electron/`, Pi extension registration, Electron scripts, Electron dependencies, and WebSocket transport. Target code adds nginx deployment files, Docker packaging, and EventSource-compatible HTTP/SSE bridge endpoints.
+**Structure Decision**: Keep the runnable Dano app in `apps/dano`, with bridge code under `apps/dano/src/bridge` and the Svelte client under `apps/dano/web`. Target code removes the old `packages/` split, `packages/bin/`, `packages/electron/`, Pi extension registration, Electron scripts, Electron dependencies, and WebSocket transport. Target code adds nginx deployment files, Docker packaging, and EventSource-compatible HTTP/SSE bridge endpoints.
 
 ## Phase 0: Research
 

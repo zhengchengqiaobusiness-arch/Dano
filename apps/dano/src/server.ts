@@ -1,46 +1,46 @@
-import { BridgeEventBus } from "@dano/bridge/bridge-event-bus";
-import { BridgeServer, type RpcConnectionHandlerFactory } from "@dano/bridge/server";
-import { DetachedSessionRegistry } from "@dano/bridge/session-registry";
+import { BridgeEventBus } from "./bridge/bridge-event-bus.js";
+import { BridgeRpcAdapter } from "./bridge/bridge-rpc-adapter.js";
+import { BridgeServer, type RpcConnectionHandlerFactory } from "./bridge/server.js";
+import { DetachedSessionRegistry } from "./bridge/session-registry.js";
 import type {
+  BridgeClient,
   BridgeConfig,
   BridgeEvent,
   BridgeState,
-  WsClient,
-} from "@dano/bridge/types";
-import { WsRpcAdapter } from "@dano/bridge/ws-rpc-adapter";
+} from "./bridge/types.js";
 import {
-  createStandaloneBridgeContext,
-  type StandaloneBridgeBackend,
+  createDanoBackend,
+  type DanoBackend,
 } from "./backend.js";
 
-export interface StartStandaloneBridgeOptions {
+export interface StartDanoServerOptions {
   cwd?: string;
   sessionPath?: string;
   sessionDir?: string;
   captureSigint?: boolean;
-  backend?: StandaloneBridgeBackend;
+  backend?: DanoBackend;
   sessionRegistry?: DetachedSessionRegistry;
   onShutdown?: () => void;
 }
 
-export interface StandaloneBridgeController {
+export interface DanoServerController {
   getState(): BridgeState;
   getBridgeUrl(): string | undefined;
-  getClients(): WsClient[];
+  getClients(): BridgeClient[];
   stop(): Promise<void>;
   subscribe(handler: (event: BridgeEvent) => void): () => void;
 }
 
-export async function startStandaloneBridge(
+export async function startDanoServer(
   config: BridgeConfig,
-  options: StartStandaloneBridgeOptions = {},
-): Promise<StandaloneBridgeController> {
+  options: StartDanoServerOptions = {},
+): Promise<DanoServerController> {
   const eventBus = new BridgeEventBus(config);
   const eventHandlers: Array<(event: BridgeEvent) => void> = [];
 
   const backend =
     options.backend ??
-    (await createStandaloneBridgeContext({
+    (await createDanoBackend({
       cwd: options.cwd,
       sessionPath: options.sessionPath,
       sessionDir: options.sessionDir,
@@ -58,7 +58,7 @@ export async function startStandaloneBridge(
         handler(event);
       } catch (error) {
         console.error(
-          "Standalone bridge lifecycle event handler error:",
+          "Dano server lifecycle event handler error:",
           error,
         );
       }
@@ -67,7 +67,7 @@ export async function startStandaloneBridge(
   };
 
   const handlerFactory: RpcConnectionHandlerFactory = connCtx => {
-    return new WsRpcAdapter(
+    return new BridgeRpcAdapter(
       connCtx.client,
       connCtx.send,
       backend.context,
@@ -124,7 +124,7 @@ export async function startStandaloneBridge(
         state = { status: "stopped" };
         emitEvent({ type: "shutdown_complete" });
       } catch (error) {
-        console.error("Standalone bridge shutdown error:", error);
+        console.error("Dano server shutdown error:", error);
         state = { status: "stopped" };
         throw error;
       } finally {
@@ -137,7 +137,7 @@ export async function startStandaloneBridge(
 
   if (options.captureSigint !== false) {
     sigintHandler = () => {
-      console.log("\n[Bridge] SIGINT received, shutting down...");
+      console.log("\n[dano] SIGINT received, shutting down...");
       void shutdown();
     };
     process.on("SIGINT", sigintHandler);

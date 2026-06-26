@@ -6,20 +6,21 @@ import {
   realpathSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadDanoConfig } from "@dano/bridge/dano-config";
-import { DetachedSessionRegistry } from "@dano/bridge/session-registry";
-import type { BridgeConfig, BridgeEmptyStateConfig } from "@dano/bridge/types";
-import { createStandaloneBridgeContext } from "./backend.js";
-import type { StandaloneBridgeBackend } from "./backend.js";
-import { createStandaloneDevReloadController } from "./dev-reload.js";
-import { loadStandaloneRuntime, type StandaloneRuntime } from "./runtime.js";
+import { createDanoBackend } from "./backend.js";
+import type { DanoBackend } from "./backend.js";
+import { loadDanoConfig } from "./bridge/dano-config.js";
+import { DetachedSessionRegistry } from "./bridge/session-registry.js";
+import type { BridgeConfig } from "./bridge/types.js";
+import { createDanoDevReloadController } from "./dev-reload.js";
+import { loadDanoRuntime, type DanoRuntime } from "./runtime.js";
+import type { BridgeEmptyStateConfig } from "../types/protocol.js";
 
-const DEFAULT_STANDALONE_PORT = 8080;
-const DEFAULT_STANDALONE_HOST = "0.0.0.0";
-const DEFAULT_STANDALONE_WORKSPACE = "/tmp/dano";
-const DEFAULT_STANDALONE_SESSIONS_DIR = ".dano/sessions";
+const DEFAULT_DANO_PORT = 8080;
+const DEFAULT_DANO_HOST = "0.0.0.0";
+const DEFAULT_DANO_WORKSPACE = "/tmp/dano";
+const DEFAULT_DANO_SESSIONS_DIR = ".dano/sessions";
 const DEFAULT_PRODUCT_NAME = "Dano";
 const DEFAULT_RUNTIME_SETTINGS_FILES = [
   "SYSTEM.md",
@@ -31,12 +32,12 @@ const DEFAULT_EMPTY_STATE: BridgeEmptyStateConfig = {
   content: "给 {产品名称} 发消息",
 };
 
-interface StandalonePackageInfo {
+interface DanoPackageInfo {
   name: string;
   version: string;
 }
 
-export interface StandaloneMainOptions {
+export interface DanoServerOptions {
   cwd: string;
   host: string;
   port: number;
@@ -49,16 +50,16 @@ export interface StandaloneMainOptions {
 }
 
 function printHelp(): void {
-  console.log(`pi-web standalone bridge
+  console.log(`Dano server
 
 Usage:
-  node dist/bridge/standalone/main.js [--host <host>] [--port <number>] [--default-workspace <path>]
+  node dist/server/main.js [--host <host>] [--port <number>] [--default-workspace <path>]
 
 Options:
-  --host <host>              Host to bind (default: ${DEFAULT_STANDALONE_HOST})
-  --port <number>            Port to bind (default: ${DEFAULT_STANDALONE_PORT})
-  --default-workspace <path> Default workspace path (env: DANO_DEFAULT_WORKSPACE_PATH, default: ${DEFAULT_STANDALONE_WORKSPACE})
-  --sessions-root <path>     Directory for session jsonl files (env: DANO_SESSIONS_ROOT, default: <default-workspace>/${DEFAULT_STANDALONE_SESSIONS_DIR})
+  --host <host>              Host to bind (default: ${DEFAULT_DANO_HOST})
+  --port <number>            Port to bind (default: ${DEFAULT_DANO_PORT})
+  --default-workspace <path> Default workspace path (env: DANO_DEFAULT_WORKSPACE_PATH, default: ${DEFAULT_DANO_WORKSPACE})
+  --sessions-root <path>     Directory for session jsonl files (env: DANO_SESSIONS_ROOT, default: <default-workspace>/${DEFAULT_DANO_SESSIONS_DIR})
   --product-name <name>      Product name shown in browser UI (env: DANO_PRODUCT_NAME, default: ${DEFAULT_PRODUCT_NAME})
   --empty-state-text <text>  Empty transcript text (env: DANO_EMPTY_STATE_TEXT, default: ${DEFAULT_EMPTY_STATE.content})
   --empty-state-html <html>  Empty transcript HTML (env: DANO_EMPTY_STATE_HTML)
@@ -76,13 +77,13 @@ function parseInteger(value: string | undefined, fallback: number): number {
 }
 
 function readHost(env: Record<string, string | undefined>): string {
-  return env.DANO_HOST?.trim() || env.HOST?.trim() || DEFAULT_STANDALONE_HOST;
+  return env.DANO_HOST?.trim() || env.HOST?.trim() || DEFAULT_DANO_HOST;
 }
 
 function readPort(env: Record<string, string | undefined>): number {
   return parseInteger(
     env.DANO_PORT?.trim() || env.PORT?.trim(),
-    DEFAULT_STANDALONE_PORT,
+    DEFAULT_DANO_PORT,
   );
 }
 
@@ -92,7 +93,7 @@ function readDefaultWorkspacePath(
   return (
     env.DANO_DEFAULT_WORKSPACE_PATH?.trim() ||
     env.DANO_DEFAULT_WORKSPACE?.trim() ||
-    DEFAULT_STANDALONE_WORKSPACE
+    DEFAULT_DANO_WORKSPACE
   );
 }
 
@@ -126,12 +127,13 @@ function readEmptyStateConfig(
   return DEFAULT_EMPTY_STATE;
 }
 
-function findNearestWebDist(startDir: string): string | undefined {
+function findNearestProductPackageJson(startDir: string): string | undefined {
   let current = resolve(startDir);
 
   for (;;) {
-    const candidate = join(current, "web-dist");
-    if (existsSync(candidate)) {
+    const candidate = join(current, "package.json");
+    const packageInfo = readPackageInfo(candidate);
+    if (packageInfo && packageInfo.name !== "@dano/app") {
       return candidate;
     }
 
@@ -160,23 +162,39 @@ function findNearestRuntimeDefaultsDir(startDir: string): string | undefined {
   }
 }
 
-function resolveDefaultStaticDir(cwd: string): string | undefined {
-  const candidates = [
-    findNearestWebDist(cwd),
-    findNearestWebDist(process.cwd()),
-    findNearestWebDist(dirname(fileURLToPath(import.meta.url))),
-  ];
+function resolveStaticDirCandidate(entryFile: string): string | undefined {
+  const resolvedEntryFile = resolve(entryFile);
+  const sourceMarker = `${sep}apps${sep}dano${sep}src${sep}`;
+  const sourceIndex = resolvedEntryFile.lastIndexOf(sourceMarker);
+  if (sourceIndex !== -1) {
+    return join(
+      resolvedEntryFile.slice(0, sourceIndex),
+      "apps",
+      "dano",
+      "dist",
+      "web",
+    );
+  }
 
-  for (const candidate of candidates) {
-    if (candidate) {
-      return resolve(candidate);
-    }
+  const serverMarker = `${sep}dist${sep}server${sep}`;
+  const serverIndex = resolvedEntryFile.lastIndexOf(serverMarker);
+  if (serverIndex !== -1) {
+    return join(resolvedEntryFile.slice(0, serverIndex), "dist", "web");
   }
 
   return undefined;
 }
 
-function readPackageInfo(path: string): StandalonePackageInfo | undefined {
+export function resolveDefaultStaticDir(entryFile: string): string | undefined {
+  const candidate = resolveStaticDirCandidate(entryFile);
+  if (!candidate || !existsSync(join(candidate, "index.html"))) {
+    return undefined;
+  }
+
+  return resolve(candidate);
+}
+
+function readPackageInfo(path: string): DanoPackageInfo | undefined {
   if (!existsSync(path)) return undefined;
 
   try {
@@ -192,33 +210,33 @@ function readPackageInfo(path: string): StandalonePackageInfo | undefined {
   }
 }
 
-export function readStandalonePackageInfo(cwd: string): StandalonePackageInfo {
+export function readDanoPackageInfo(cwd: string): DanoPackageInfo {
   const packagedRoot = readPackageInfo(
     join(cwd, "package-versions", "package.json"),
   );
   if (packagedRoot) return packagedRoot;
 
-  const devRoot = readPackageInfo(join(cwd, "package.json"));
-  if (devRoot?.name !== "@dano/app") {
-    return devRoot ?? {
-      name: "@dano/dano",
-      version: "unknown",
-    };
+  const devRoot = findNearestProductPackageJson(cwd);
+  if (devRoot) {
+    return (
+      readPackageInfo(devRoot) ?? { name: "@dano/dano", version: "unknown" }
+    );
   }
 
   return { name: "@dano/dano", version: "unknown" };
 }
 
-export function parseStandaloneMainOptions(
+export function parseDanoServerOptions(
   argv: string[],
   env: Record<string, string | undefined> = process.env,
-): StandaloneMainOptions {
+): DanoServerOptions {
   let host = readHost(env);
   let port = readPort(env);
   let defaultWorkspacePath = readDefaultWorkspacePath(env);
   let sessionsRootPath = readSessionsRootPath(env);
   let productName = readProductName(env);
   let emptyState = readEmptyStateConfig(env);
+  const staticDirOverride = env.DANO_STATIC_DIR?.trim();
   let help = false;
 
   for (let index = 0; index < argv.length; index++) {
@@ -246,7 +264,7 @@ export function parseStandaloneMainOptions(
         if (!next || next.startsWith("--")) {
           throw new Error("Missing value for --port");
         }
-        port = parseInteger(next, DEFAULT_STANDALONE_PORT);
+        port = parseInteger(next, DEFAULT_DANO_PORT);
         index++;
         continue;
       }
@@ -310,11 +328,13 @@ export function parseStandaloneMainOptions(
     sessionsRootPath: resolve(
       cwd,
       sessionsRootPath ??
-        join(resolvedDefaultWorkspacePath, DEFAULT_STANDALONE_SESSIONS_DIR),
+        join(resolvedDefaultWorkspacePath, DEFAULT_DANO_SESSIONS_DIR),
     ),
     productName,
     emptyState,
-    staticDir: resolveDefaultStaticDir(cwd),
+    staticDir: staticDirOverride
+      ? resolve(cwd, staticDirOverride)
+      : resolveDefaultStaticDir(fileURLToPath(import.meta.url)),
     help,
   };
 }
@@ -324,7 +344,7 @@ function ensureDefaultWorkspace(path: string): string {
   return path;
 }
 
-export function initializeStandaloneWorkspaceSettings(
+export function initializeDanoWorkspaceSettings(
   workspacePath: string,
   sourceCwd: string,
 ): void {
@@ -381,12 +401,12 @@ function workspaceSessionDirPath(
   return join(sessionsRootPath, workspaceSessionDirName(workspacePath));
 }
 
-async function runStandaloneBridge(
-  runtime: StandaloneRuntime,
+async function runDanoServer(
+  runtime: DanoRuntime,
   config: BridgeConfig,
-  options: StandaloneMainOptions,
+  options: DanoServerOptions,
   entryFile: string,
-  backend: StandaloneBridgeBackend,
+  backend: DanoBackend,
   sessionRegistry: DetachedSessionRegistry,
 ): Promise<boolean> {
   let resolveStopped: (() => void) | undefined;
@@ -394,7 +414,7 @@ async function runStandaloneBridge(
     resolveStopped = resolve;
   });
 
-  const bridgeController = await runtime.startStandaloneBridge(config, {
+  const bridgeController = await runtime.startDanoServer(config, {
     cwd: options.cwd,
     backend,
     sessionRegistry,
@@ -407,22 +427,22 @@ async function runStandaloneBridge(
     throw new Error("Bridge started without a reachable URL");
   }
 
-  console.log(`[pi-web] Bridge URL: ${bridgeUrl}`);
-  console.log(`[pi-web] HTTP API: ${bridgeUrl}/api/clients`);
-  console.log(`[pi-web] SSE events: ${bridgeUrl}/api/clients/<clientId>/events`);
+  console.log(`[dano] Server URL: ${bridgeUrl}`);
+  console.log(`[dano] HTTP API: ${bridgeUrl}/api/clients`);
+  console.log(`[dano] SSE events: ${bridgeUrl}/api/clients/<clientId>/events`);
   if (options.staticDir) {
-    console.log(`[pi-web] Static Dir: ${options.staticDir}`);
+    console.log(`[dano] Static Dir: ${options.staticDir}`);
   }
-  console.log(`[pi-web] Default Workspace: ${config.defaultWorkspacePath}`);
-  console.log(`[pi-web] Sessions Root: ${options.sessionsRootPath}`);
+  console.log(`[dano] Default Workspace: ${config.defaultWorkspacePath}`);
+  console.log(`[dano] Sessions Root: ${options.sessionsRootPath}`);
 
   const requestStop = async (): Promise<void> => {
     await bridgeController.stop().catch(error => {
-      console.error("[pi-web] Failed to stop standalone bridge:", error);
+      console.error("[dano] Failed to stop Dano server:", error);
     });
   };
 
-  const devReload = createStandaloneDevReloadController({
+  const devReload = createDanoDevReloadController({
     entryFile,
     stop: requestStop,
   });
@@ -443,13 +463,13 @@ async function runStandaloneBridge(
   return devReload?.reloadRequested() ?? false;
 }
 
-async function runStandaloneMain(): Promise<number> {
-  let options: StandaloneMainOptions;
+async function runDanoMain(): Promise<number> {
+  let options: DanoServerOptions;
   try {
-    options = parseStandaloneMainOptions(process.argv.slice(2));
+    options = parseDanoServerOptions(process.argv.slice(2));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`[pi-web] ${message}`);
+    console.error(`[dano] ${message}`);
     printHelp();
     return 1;
   }
@@ -460,12 +480,12 @@ async function runStandaloneMain(): Promise<number> {
   }
 
   const thisFile = fileURLToPath(import.meta.url);
-  const packageInfo = readStandalonePackageInfo(options.cwd);
+  const packageInfo = readDanoPackageInfo(options.cwd);
   process.env.DANO_PACKAGE_NAME ??= packageInfo.name;
   process.env.DANO_VERSION ??= packageInfo.version;
   const danoConfig = loadDanoConfig({ cwd: options.cwd });
   const defaultWorkspacePath = ensureDefaultWorkspace(options.defaultWorkspacePath);
-  initializeStandaloneWorkspaceSettings(defaultWorkspacePath, options.cwd);
+  initializeDanoWorkspaceSettings(defaultWorkspacePath, options.cwd);
   mkdirSync(options.sessionsRootPath, { recursive: true });
   process.env.DANO_SESSIONS_ROOT = options.sessionsRootPath;
   process.env.PI_WEB_SESSIONS_ROOT = options.sessionsRootPath;
@@ -473,7 +493,7 @@ async function runStandaloneMain(): Promise<number> {
     options.sessionsRootPath,
     defaultWorkspacePath,
   );
-  const backend = await createStandaloneBridgeContext({
+  const backend = await createDanoBackend({
     cwd: defaultWorkspacePath,
     sessionDir: defaultSessionDir,
     danoConfig,
@@ -484,7 +504,7 @@ async function runStandaloneMain(): Promise<number> {
 
   try {
     while (true) {
-      const runtime = await loadStandaloneRuntime(thisFile);
+      const runtime = await loadDanoRuntime(thisFile);
       const config: BridgeConfig = {
         ...runtime.DEFAULT_BRIDGE_CONFIG,
         host: options.host,
@@ -496,7 +516,7 @@ async function runStandaloneMain(): Promise<number> {
         staticDir: options.staticDir,
       };
 
-      const reloadRequested = await runStandaloneBridge(
+      const reloadRequested = await runDanoServer(
         runtime,
         config,
         options,
@@ -509,7 +529,7 @@ async function runStandaloneMain(): Promise<number> {
         return 0;
       }
 
-      console.log("[pi-web] Standalone bridge runtime reloaded.");
+      console.log("[dano] Dano server runtime reloaded.");
     }
   } finally {
     sessionRegistry.dispose();
@@ -520,7 +540,7 @@ async function runStandaloneMain(): Promise<number> {
 const invokedPath = process.argv[1];
 const thisFile = fileURLToPath(import.meta.url);
 if (invokedPath && realpathSync(resolve(invokedPath)) === realpathSync(resolve(thisFile))) {
-  runStandaloneMain().then(
+  runDanoMain().then(
     code => {
       process.exitCode = code;
     },

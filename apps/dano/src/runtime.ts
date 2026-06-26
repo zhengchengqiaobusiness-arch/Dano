@@ -1,30 +1,32 @@
 import { dirname, join, resolve } from "node:path";
-import { DEFAULT_BRIDGE_CONFIG as STATIC_DEFAULT_BRIDGE_CONFIG } from "@dano/bridge/types";
-import type { BridgeConfig } from "@dano/bridge/types";
-import { resolveStandaloneDevWatchPath } from "./dev-reload.js";
 import {
-  startStandaloneBridge as staticStartStandaloneBridge,
-  type StandaloneBridgeController,
-  type StartStandaloneBridgeOptions,
+  DEFAULT_BRIDGE_CONFIG as STATIC_DEFAULT_BRIDGE_CONFIG,
+  type BridgeConfig,
+} from "./bridge/types.js";
+import { resolveDanoDevWatchPath } from "./dev-reload.js";
+import {
+  startDanoServer as staticStartDanoServer,
+  type DanoServerController,
+  type StartDanoServerOptions,
 } from "./server.js";
 
-export interface StandaloneRuntime {
+export interface DanoRuntime {
   DEFAULT_BRIDGE_CONFIG: BridgeConfig;
-  startStandaloneBridge: (
+  startDanoServer: (
     config: BridgeConfig,
-    options?: StartStandaloneBridgeOptions,
-  ) => Promise<StandaloneBridgeController>;
+    options?: StartDanoServerOptions,
+  ) => Promise<DanoServerController>;
 }
 
-const staticRuntime: StandaloneRuntime = {
+const staticRuntime: DanoRuntime = {
   DEFAULT_BRIDGE_CONFIG: STATIC_DEFAULT_BRIDGE_CONFIG,
-  startStandaloneBridge: staticStartStandaloneBridge,
+  startDanoServer: staticStartDanoServer,
 };
 
-export async function loadStandaloneRuntime(
+export async function loadDanoRuntime(
   entryFile: string,
-): Promise<StandaloneRuntime> {
-  if (!resolveStandaloneDevWatchPath(entryFile)) {
+): Promise<DanoRuntime> {
+  if (!resolveDanoDevWatchPath(entryFile)) {
     return staticRuntime;
   }
 

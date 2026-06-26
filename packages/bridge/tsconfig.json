@@ -1,9 +1,0 @@
-{
-  "extends": "../../tsconfig.json",
-  "compilerOptions": {
-    "rootDir": ".",
-    "outDir": "../../dist/bridge"
-  },
-  "include": ["./src/**/*.ts"],
-  "exclude": ["node_modules", "__tests__"]
-}

@@ -1,18 +1,18 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "tsdown";
 
 export default defineConfig({
   platform: "node",
-  target: "node20",
+  target: "node22",
   format: "esm",
   fixedExtension: false,
   clean: true,
   sourcemap: false,
-  entry: ["src/**/*.ts", "!src/**/__tests__/**"],
-  root: "src",
-  outDir: "../../dist/bridge/standalone",
+  entry: ["src/main.ts"],
+  outDir: "dist/server",
   dts: false,
-  tsconfig: "./tsconfig.json",
-  deps: {
-    alwaysBundle: [/^@dano\/bridge(?:\/|$)/],
+  tsconfig: "./tsconfig.server.json",
+  alias: {
+    "@dano/types": fileURLToPath(new URL("./types", import.meta.url)),
   },
 });

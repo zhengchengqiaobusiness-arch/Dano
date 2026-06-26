@@ -38,11 +38,11 @@ if (fileName === "SKILL.md") {
 
 | 文件 | 操作 | 状态 |
 |------|------|------|
-| `packages/svelte/src/assets/skill-icon.png` | 新增 | ✅ |
-| `packages/svelte/src/assets/skill-icon.svg` | 新增 | ✅ |
-| `packages/svelte/src/utils/transcript.ts` | 添加 SkillContentBlock | ✅ |
-| `packages/svelte/src/components/SkillInvocationCard.svelte` | 新增 | ✅ |
-| `packages/svelte/src/components/ChatTranscript.svelte` | 集成渲染 + read 工具检测 | ✅ |
+| `apps/dano/web/src/assets/skill-icon.png` | 新增 | ✅ |
+| `apps/dano/web/src/assets/skill-icon.svg` | 新增 | ✅ |
+| `apps/dano/web/src/utils/transcript.ts` | 添加 SkillContentBlock | ✅ |
+| `apps/dano/web/src/components/SkillInvocationCard.svelte` | 新增 | ✅ |
+| `apps/dano/web/src/components/ChatTranscript.svelte` | 集成渲染 + read 工具检测 | ✅ |
 
 ## 验证结果
 

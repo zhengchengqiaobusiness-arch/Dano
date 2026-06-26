@@ -1,31 +1,29 @@
 {
   "name": "@dano/dano",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "private": true,
   "description": "Dano P0 web LLM chat",
   "type": "module",
   "packageManager": "pnpm@9.15.9",
   "scripts": {
-    "build": "pnpm run build:server && pnpm run build:web",
-    "build:bridge": "pnpm -C packages/bridge build",
-    "build:server": "pnpm run build:bridge && pnpm -C apps/dano build",
-    "build:svelte": "pnpm -C packages/svelte build",
-    "build:web": "pnpm run build:svelte",
-    "check": "pnpm run check:type && pnpm run check:web",
-    "check:type": "tsc -p tsconfig.json --noEmit",
-    "check:web": "pnpm -C packages/svelte check",
+    "build": "pnpm -C apps/dano build",
+    "build:server": "pnpm -C apps/dano build:server",
+    "build:web": "pnpm -C apps/dano build:web",
+    "check": "pnpm -C apps/dano check",
+    "check:server": "pnpm -C apps/dano check:server",
+    "check:type": "pnpm run check:server",
+    "check:web": "pnpm -C apps/dano check:web",
     "deploy:down": "node scripts/deploy-compose.mjs down",
     "deploy:logs": "node scripts/deploy-compose.mjs logs",
     "deploy:ps": "node scripts/deploy-compose.mjs ps",
     "deploy:release": "node scripts/deploy-release.mjs",
     "deploy:stop": "node scripts/deploy-compose.mjs stop",
     "deploy:up": "node scripts/deploy-compose.mjs up",
-    "dev:bridge:standalone": "pnpm -C apps/dano dev",
-    "dev:svelte": "pnpm -C packages/svelte dev",
-    "dev:web": "pnpm run dev:svelte",
+    "dev:server": "pnpm -C apps/dano dev:server",
+    "dev:web": "pnpm -C apps/dano dev:web",
     "secret:set": "node scripts/set-env-secret.mjs",
     "smoke:deploy": "node scripts/smoke-dano-deploy.mjs",
-    "start:bridge:standalone": "pnpm -C apps/dano start",
+    "start": "pnpm -C apps/dano start",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -42,10 +40,5 @@
   },
   "engines": {
     "node": ">=22.19.0"
-  },
-  "pnpm": {
-    "patchedDependencies": {
-      "@casualjim/pi-heimdall@0.2.10": "patches/@casualjim__pi-heimdall@0.2.10.patch"
-    }
   }
 }
