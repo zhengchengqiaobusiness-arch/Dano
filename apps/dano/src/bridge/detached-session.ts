@@ -19,11 +19,11 @@ import { danoVersionTool } from "./dano-version-tool.js";
 function resolveHeimdallExtensionPath(): string {
   try {
     return createRequire(join(process.cwd(), "package.json")).resolve(
-      "@casualjim/pi-heimdall/extensions/heimdall.ts",
+      "@josephyoung/pi-heimdall/extensions/heimdall.ts",
     );
   } catch {
     return fileURLToPath(
-      import.meta.resolve("@casualjim/pi-heimdall/extensions/heimdall.ts"),
+      import.meta.resolve("@josephyoung/pi-heimdall/extensions/heimdall.ts"),
     );
   }
 }

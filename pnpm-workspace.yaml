@@ -1,11 +1,11 @@
 packages:
   - "apps/*"
-patchedDependencies:
-  '@casualjim/pi-heimdall@0.2.10': patches/@casualjim__pi-heimdall@0.2.10.patch
 allowBuilds:
   '@google/genai': true
   koffi: true
   protobufjs: true
+minimumReleaseAgeExclude:
+  - '@josephyoung/pi-heimdall@0.2.12'
 onlyBuiltDependencies:
   - "@google/genai"
   - esbuild
