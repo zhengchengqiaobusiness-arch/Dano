@@ -535,8 +535,8 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
                               reads: list[dict] | None = None, storage: dict | None = None,
                               required_labels: set | None = None) -> dict:
     """构造 request_fields 消息:字段表(含 type/required)+ 候选请求 + select(Q2)+ identity(Q1)。"""
-    from dano.execution.page.request_capture import (flatten_body, suggest_identity, suggest_select_names,
-                                                     suggest_selects, suggest_workflow_steps)
+    from dano.execution.page.request_capture import (flatten_body, fold_array_select_fields, suggest_identity,
+                                                     suggest_select_names, suggest_selects, suggest_workflow_steps)
 
     def _path(u: str) -> str:
         i = u.find("//")
@@ -552,6 +552,7 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
     for f in fields:
         if f.get("path") in sel_names:
             f["suggest_name"] = sel_names[f["path"]]
+    fields, selects = fold_array_select_fields(pd, fields, selects)
     # LLM 字段语义增强(最佳努力):只给"确定性没把握(名字仍=原始 key)"的字段补中文名;确信的不覆盖,失败不影响。
     try:
         from dano.agent_tools import tools as _T
@@ -723,7 +724,7 @@ async def record_ws(ws: WebSocket) -> None:
                 from dano.execution.page.request_capture import (auto_required_fields, build_api_request,
                                                                  build_api_workflow, infer_success_rule,
                                                                  suggest_fact_check, suggest_workflow_steps)
-                sels = msg.get("selects") or []         # Q2 选领导:名字→ID
+                sels = msg.get("selects") or []         # Q2 选领导:展示 label、提交 value
                 idens = msg.get("identity") or []        # Q1 当前用户:运行期重取
                 fc = suggest_fact_check(pending_samples, pending_reads)   # 回查源(录到"我的记录"列表才有)
                 sr = infer_success_rule(pending_reads)   # 学这套系统自己的"业务成功"约定(不挑系统,见 P0#2)

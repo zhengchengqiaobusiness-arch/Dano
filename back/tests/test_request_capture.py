@@ -16,6 +16,7 @@ from dano.execution.page.request_capture import (
     execute_api_workflow,
     extract_auth_headers,
     flatten_body,
+    fold_array_select_fields,
     json_write_requests,
     list_read_requests,
     parameterize_request,
@@ -175,19 +176,24 @@ def test_find_field_select_single_and_workflow():
 
 async def test_fetch_field_options_live(monkeypatch):
     """问题1 实时拉取:fetch_field_options 直接调来源接口 → {field, options:[{label,value}], count}。
-    非选择型/无来源 → options=[] 并说明(不抛,让 agent 退回传名字)。"""
+    非选择型/无来源 → options=[] 并说明。"""
     from dano.execution.page import request_capture as rc
     apir = {"selects": [{"param": "请假类型", "source_url": "/dict/leave",
-                         "value_key": "dictValue", "label_key": "dictLabel"}],
+                         "value_key": "dictValue", "label_key": "dictLabel",
+                         "option_filter": {"dictType": "oa_leave_type"}}],
             "auth_headers": {}}
 
     async def fake_fetch(url, base_url, storage_state, token_key, verify, auth_headers):
         assert url == "/dict/leave"
-        return [{"dictValue": "1", "dictLabel": "事假"}, {"dictValue": "2", "dictLabel": "病假"}]
+        return [{"dictType": "oa_leave_type", "dictValue": "1", "dictLabel": "事假"},
+                {"dictType": "oa_leave_type", "dictValue": "2", "dictLabel": "病假"},
+                {"dictType": "other", "dictValue": "2", "dictLabel": "噪声"}]
     monkeypatch.setattr(rc, "_fetch_list", fake_fetch)
     out = await rc.fetch_field_options(apir, "请假类型")
     assert out["count"] == 2
     assert out["options"] == [{"label": "事假", "value": "1"}, {"label": "病假", "value": "2"}]
+    assert out["submit_mode"] == "value"
+    assert out["option_filter"] == {"dictType": "oa_leave_type"}
     # 非选择型字段 → 空 + 说明
     out2 = await rc.fetch_field_options(apir, "原因")
     assert out2["options"] == [] and "note" in out2
@@ -207,7 +213,11 @@ def test_suggest_selects_prefers_confirmed_over_huge_generic_dict():
     s = suggest_selects(sub, reads, {"请假类型": "病假"})       # 录制选了"病假"
     assert len(s) == 1
     assert s[0]["label"] == "病假" and s[0]["count"] == 3 and s[0]["label_key"] == "dictLabel"
-    assert s[0]["options"] == ["事假", "病假", "年假"]           # 选项快照是小字典(不是垃圾大字典)
+    assert s[0]["options"] == [                               # 选项快照是小字典(不是垃圾大字典)
+        {"label": "事假", "value": "1"},
+        {"label": "病假", "value": "2"},
+        {"label": "年假", "value": "3"},
+    ]
 
 
 def test_suggest_selects_picks_smaller_dict_when_both_unconfirmed():
@@ -220,17 +230,21 @@ def test_suggest_selects_picks_smaller_dict_when_both_unconfirmed():
 
 
 def test_suggest_selects_snapshots_options():
-    """问题1:select 把候选**显示名快照**进 entry.options(存进 skill 让 agent 从真实选项里选,不凭空猜)。"""
+    """问题1:select 把候选 {label,value} 快照进 entry.options,前端展示 label、提交 value。"""
     sub = '{"type":2}'
     read = [{"url": "/dict", "json": {"data": [{"dictValue": "1", "dictLabel": "事假"},
                                                {"dictValue": "2", "dictLabel": "病假"},
                                                {"dictValue": "3", "dictLabel": "年假"}]}}]
     s = suggest_selects(sub, read)
-    assert s[0]["options"] == ["事假", "病假", "年假"]
+    assert s[0]["options"] == [
+        {"label": "事假", "value": "1"},
+        {"label": "病假", "value": "2"},
+        {"label": "年假", "value": "3"},
+    ]
 
 
 def test_manifest_enum_inlines_small_options():
-    """问题1:候选 ≤50 → manifest schema 内置 enum(function-calling 层就约束 agent 只能选真实值)。"""
+    """问题1:候选 ≤50 → manifest schema 内置 enum(function-calling 层约束提交 value)。"""
     from dano.catalog.manifest import to_manifest
     from dano.orchestrator.types import SkillSpec
     from dano.shared.enums import RiskLevel, Subsystem
@@ -238,9 +252,15 @@ def test_manifest_enum_inlines_small_options():
                    field_types={"请假类型": "enum"}, required_fields=["请假类型"],
                    api_request={"selects": [{"param": "请假类型", "source_url": "/d",
                                              "value_key": "dictValue", "label_key": "dictLabel",
-                                             "options": ["事假", "病假", "年假"], "count": 3}]})
+                                             "options": [{"label": "事假", "value": "1"},
+                                                         {"label": "病假", "value": "2"},
+                                                         {"label": "年假", "value": "3"}], "count": 3}]})
     p = to_manifest(sk).parameters["properties"]["请假类型"]
-    assert p["enum"] == ["事假", "病假", "年假"] and p["x-options"] == ["事假", "病假", "年假"]
+    assert p["enum"] == ["1", "2", "3"]
+    assert p["x-options"] == [{"label": "事假", "value": "1"},
+                              {"label": "病假", "value": "2"},
+                              {"label": "年假", "value": "3"}]
+    assert p["x-submit-mode"] == "value"
 
 
 def test_manifest_large_options_no_inline_enum_but_snapshot():
@@ -248,7 +268,7 @@ def test_manifest_large_options_no_inline_enum_but_snapshot():
     from dano.catalog.manifest import to_manifest
     from dano.orchestrator.types import SkillSpec
     from dano.shared.enums import RiskLevel, Subsystem
-    opts = [f"系统{i}" for i in range(135)]
+    opts = [{"label": f"系统{i}", "value": f"id{i}"} for i in range(135)]
     sk = SkillSpec(skill_id="A-OA.g", subsystem=Subsystem.OA, action="g", risk_level=RiskLevel.L3,
                    field_types={"应用系统名称": "enum"}, required_fields=["应用系统名称"],
                    api_request={"selects": [{"param": "应用系统名称", "source_url": "/x",
@@ -256,6 +276,7 @@ def test_manifest_large_options_no_inline_enum_but_snapshot():
                                              "options": opts, "count": 135}]})
     p = to_manifest(sk).parameters["properties"]["应用系统名称"]
     assert "enum" not in p and len(p["x-options"]) == 135      # 不内置 enum,但快照全在
+    assert p["x-options"][0] == {"label": "系统0", "value": "id0"}
     assert p.get("x-options-source") is True                   # 有来源接口 → 可 --list-options 实时拉
     assert "--list-options" in p["description"]
 
@@ -270,9 +291,10 @@ def test_export_options_md_lists_candidates():
                    field_types={"请假类型": "enum"}, required_fields=["请假类型"], title="请假",
                    api_request={"selects": [{"param": "请假类型", "source_url": "/d",
                                              "value_key": "dictValue", "label_key": "dictLabel",
-                                             "options": ["事假", "病假"], "count": 2}]})
+                                             "options": [{"label": "事假", "value": "1"},
+                                                         {"label": "病假", "value": "2"}], "count": 2}]})
     md = _options_md(to_manifest(sk))
-    assert md and "事假" in md and "病假" in md and "请假类型" in md
+    assert md and "事假" in md and "value: `1`" in md and "病假" in md and "请假类型" in md
 
 
 def test_suggest_selects_name_id_pair_detected():
@@ -291,6 +313,65 @@ def test_suggest_selects_name_id_pair_detected():
     assert b["value_key"] == "id" and b["label_key"] == "xtmc"
     assert b["id_path"] == "ywsxList[0].yyxtid"         # 配对 id 字段(运行期同步)
     assert b["id_tokens"] == ["ywsxList", 0, "yyxtid"]
+
+
+def test_fold_array_select_fields_collapses_participants():
+    """会议/协同类多选人员:participants[0/1].xxx 不应暴露成 N×字段,折叠成一个数组选择参数。"""
+    body = ('{"meetingTitle":"周会","participants":['
+            '{"userId":144,"userName":"姜楠","userAvatar":"old-a","participantType":2},'
+            '{"userId":139,"userName":"李四","userAvatar":"old-b","participantType":2}]}')
+    fields = flatten_body(body, {"会议主题": "周会"})
+    selects = [
+        {"path": "participants[0].userId", "source_url": "/users", "value_key": "id", "label_key": "name",
+         "options": [{"label": "姜楠", "value": "144"}, {"label": "李四", "value": "139"}], "count": 2},
+        {"path": "participants[1].userId", "source_url": "/users", "value_key": "id", "label_key": "name",
+         "options": [{"label": "姜楠", "value": "144"}, {"label": "李四", "value": "139"}], "count": 2},
+    ]
+    out_fields, out_selects = fold_array_select_fields(body, fields, selects)
+    assert any(f["path"] == "participants" and f["suggest_name"] == "参会人" and f["type"] == "array"
+               for f in out_fields)
+    assert not any(str(f["path"]).startswith("participants[") for f in out_fields)
+    arr = next(s for s in out_selects if s.get("kind") == "array")
+    assert arr["path"] == "participants" and arr["target_key"] == "userId"
+
+
+async def test_array_select_rebuilds_participants_and_self_check_passes(monkeypatch):
+    """运行期:参会人提交 value 数组 → 重建 participants 对象数组,姓名/头像从候选项派生,type 常量保留。"""
+    from dano.execution.page import request_capture as rc
+    req = {"method": "POST", "url": "http://oa/meeting",
+           "post_data": ('{"meetingTitle":"周会","participants":['
+                         '{"userId":144,"userName":"姜楠","userAvatar":"old-a","participantType":2},'
+                         '{"userId":139,"userName":"李四","userAvatar":"old-b","participantType":2}]}')}
+    selects = [
+        {"path": "participants[0].userId", "source_url": "/users", "value_key": "id", "label_key": "name",
+         "options": [{"label": "姜楠", "value": "144"}, {"label": "李四", "value": "139"}], "count": 2},
+        {"path": "participants[1].userId", "source_url": "/users", "value_key": "id", "label_key": "name",
+         "options": [{"label": "姜楠", "value": "144"}, {"label": "李四", "value": "139"}], "count": 2},
+    ]
+    apir = build_api_request(req, {"meetingTitle": "会议主题",
+                                   "participants[0].userId": "用户ID",
+                                   "participants[1].userId": "用户ID",
+                                   "participants[0].userName": "用户姓名",
+                                   "participants[1].userName": "用户姓名"},
+                             selects=selects)
+    assert apir["params"] == ["会议主题", "参会人"]
+    assert apir["field_types"]["参会人"] == "array"
+    assert apir["selects"][0]["kind"] == "array"
+    assert self_check(apir) == []
+
+    async def fake_fetch(*a, **k):
+        return [{"id": 139, "name": "李四", "avatar": "new-b"},
+                {"id": 144, "name": "姜楠", "avatar": "new-a"}]
+    monkeypatch.setattr(rc, "_fetch_list", fake_fetch)
+    fields, overrides = await rc._resolve_selects(apir, {"会议主题": "周会", "参会人": ["139", "144"]},
+                                                  base_url="", storage_state=None, token_key=None, verify=False)
+    body2 = substitute(apir["body_template"], fields, apir["sample_inputs"])
+    for toks, v in overrides.items():
+        rc._set_by_path(body2, list(toks), v)
+    assert body2["participants"] == [
+        {"userId": 139, "userName": "李四", "userAvatar": "new-b", "participantType": 2},
+        {"userId": 144, "userName": "姜楠", "userAvatar": "new-a", "participantType": 2},
+    ]
 
 
 def test_build_api_request_learns_success_rule_from_own_response():
@@ -329,7 +410,7 @@ def test_build_api_request_carries_select_id_pair():
 
 
 async def test_resolve_selects_sets_both_name_and_id(monkeypatch):
-    """运行期(根治问题4):agent 传应用系统名 → 同时规整显示名 + 写回配对 id 字段(换选项 id 不冻结)。"""
+    """运行期(根治问题4):提交 value → 同时规整显示名 + 写回配对 id 字段(换选项 id 不冻结)。"""
     from dano.execution.page import request_capture as rc
     apir = {"method": "POST", "url": "http://oa/x",
             "selects": [{"param": "应用系统名称", "source_url": "http://oa/list",
@@ -339,15 +420,45 @@ async def test_resolve_selects_sets_both_name_and_id(monkeypatch):
     async def fake_fetch(*a, **k):
         return [{"id": "ID_NEW_777", "xtmc": "应用B"}, {"id": "ID_A_111", "xtmc": "应用A"}]
     monkeypatch.setattr(rc, "_fetch_list", fake_fetch)
-    # agent 选了"应用B"(与录制的"应用A"不同)→ 名字段规整=应用B、配对 id=该项 id(不再是录制的 02021…)
-    fields, overrides = await rc._resolve_selects(apir, {"应用系统名称": "应用B"}, base_url="",
+    # 前端提交 value=ID_NEW_777(与录制的"应用A"不同)→ 名字段规整=应用B、配对 id=该项 id(不再是录制的 02021…)
+    fields, overrides = await rc._resolve_selects(apir, {"应用系统名称": "ID_NEW_777"}, base_url="",
                                                   storage_state=None, token_key=None, verify=False)
     assert fields["应用系统名称"] == "应用B"             # 显示名规整成候选规范名
     assert overrides[("ywsxList", 0, "yyxtid")] == "ID_NEW_777"   # 配对 id 同步成新选项的 id
 
 
+async def test_resolve_selects_accepts_legacy_label(monkeypatch):
+    """旧调用仍可传 label,运行期兼容解析到 value。"""
+    from dano.execution.page import request_capture as rc
+    apir = {"selects": [{"param": "应用系统名称", "source_url": "/x",
+                         "value_key": "id", "label_key": "xtmc",
+                         "id_path": "ywsxList[0].yyxtid", "id_tokens": ["ywsxList", 0, "yyxtid"]}]}
+
+    async def fake_fetch(*a, **k):
+        return [{"id": "ID_NEW_777", "xtmc": "应用B"}]
+    monkeypatch.setattr(rc, "_fetch_list", fake_fetch)
+    fields, overrides = await rc._resolve_selects(apir, {"应用系统名称": "应用B"}, base_url="",
+                                                  storage_state=None, token_key=None, verify=False)
+    assert fields["应用系统名称"] == "应用B"
+    assert overrides[("ywsxList", 0, "yyxtid")] == "ID_NEW_777"
+
+
+async def test_resolve_selects_rejects_unknown_value(monkeypatch):
+    """枚举值不在候选里时 fail-closed,不再静默原样塞进请求体。"""
+    import pytest
+    from dano.execution.page import request_capture as rc
+    apir = {"selects": [{"param": "审批人", "source_url": "/u", "value_key": "userId", "label_key": "nickName"}]}
+
+    async def fake_fetch(*a, **k):
+        return [{"userId": 12, "nickName": "张经理"}]
+    monkeypatch.setattr(rc, "_fetch_list", fake_fetch)
+    with pytest.raises(ValueError, match="不在候选项"):
+        await rc._resolve_selects(apir, {"审批人": "不存在"}, base_url="",
+                                  storage_state=None, token_key=None, verify=False)
+
+
 async def test_resolve_selects_single_code_field_unchanged():
-    """对照:单码字段(无 id_path)仍是把字段值换成 id(老行为不变)。"""
+    """对照:单码字段(无 id_path)仍是把字段 value 换成目标系统原始 id。"""
     from dano.execution.page import request_capture as rc
 
     async def fake_fetch(*a, **k):
@@ -356,7 +467,7 @@ async def test_resolve_selects_single_code_field_unchanged():
     with _pt.MonkeyPatch.context() as mp:
         mp.setattr(rc, "_fetch_list", fake_fetch)
         apir = {"selects": [{"param": "审批人", "source_url": "/u", "value_key": "userId", "label_key": "nickName"}]}
-        fields, overrides = await rc._resolve_selects(apir, {"审批人": "张经理"}, base_url="",
+        fields, overrides = await rc._resolve_selects(apir, {"审批人": "12"}, base_url="",
                                                       storage_state=None, token_key=None, verify=False)
     assert fields["审批人"] == 12 and overrides == {}   # 字段值换成 id;无配对 id 覆盖
 
@@ -413,7 +524,7 @@ def test_looks_internal_param_name_flags_machine_ids_only():
 
 def test_suggest_selects_binds_short_code_in_big_dict_when_recorded_confirms():
     """大全局字典(上千项)里短码 type=2:无录制佐证不绑(防误报);录制确实选了『病假』→ 精确绑对 oa_leave_type 那项。
-    修"假期类型在全局字典里绑不上"的根因 —— 用录制选中值消歧/确认,不靠列表大小一刀切。"""
+    并只暴露同 dictType 分组,不把全局字典其它候选一起塞进 skill。"""
     big = ([{"dictType": "sys_yes_no", "value": "2", "label": "否"}]
            + [{"dictType": "oa_leave_type", "value": v, "label": l} for v, l in (("1", "事假"), ("2", "病假"))]
            + [{"dictType": "x", "value": "2", "label": "噪声"} for _ in range(1430)])
@@ -422,6 +533,9 @@ def test_suggest_selects_binds_short_code_in_big_dict_when_recorded_confirms():
     assert suggest_selects(sub, read) == []                            # 无 samples → 大字典短码不乱绑(原精度)
     s = suggest_selects(sub, read, {"请假类型": "病假", "原因": "x"})    # 录制选了"病假" → 确认命中
     assert len(s) == 1 and s[0]["path"] == "type" and s[0]["label"] == "病假"
+    assert s[0]["option_filter"] == {"dictType": "oa_leave_type"}
+    assert s[0]["count"] == 2
+    assert s[0]["options"] == [{"label": "事假", "value": "1"}, {"label": "病假", "value": "2"}]
 
 
 def test_pick_label_key_prefers_display_name_over_login():
@@ -488,8 +602,8 @@ def test_resolve_identity_value_from_storage():
     assert resolve_identity_value("localStorage:missing.x", storage) is None
 
 
-async def test_execute_resolves_select_name_to_id_and_identity(tmp_path):
-    """P4 真 HTTP(无需 PG/chromium):传"张经理"→ 查 user/list 换成 ID 12;applicantId 用会话当前用户覆盖。"""
+async def test_execute_resolves_select_value_to_id_and_identity(tmp_path):
+    """P4 真 HTTP(无需 PG/chromium):传 value=12 → 查 user/list 换成目标系统原始 ID;applicantId 用会话当前用户覆盖。"""
     import http.server as _h
     import json as _j
     import socketserver as _s
@@ -525,10 +639,10 @@ async def test_execute_resolves_select_name_to_id_and_identity(tmp_path):
                 "selects": [{"param": "approver", "source_url": f"{base}/system/user/list",
                              "value_key": "userId", "label_key": "nickName"}],
                 "identity": [{"path": "applicantId", "source": "localStorage:userInfo.userId"}]}
-        out = await execute_api_request(apir, {"approver": "张经理", "reason": "回家"},
+        out = await execute_api_request(apir, {"approver": "12", "reason": "回家"},
                                         storage_state=storage, send=True, verify=False)
         assert out["ok"] and out["status"] == 200
-        assert received["approverId"] == 12          # 名字"张经理"→ 内部 ID 12(Q2)
+        assert received["approverId"] == 12          # 稳定 value "12"→ 目标系统原始 ID 12(Q2)
         assert received["applicantId"] == 118        # 申请人=会话当前用户,非录制的 999(Q1)
         assert received["reason"] == "回家"
     finally:

@@ -117,7 +117,7 @@ def test_field_types_override_wins_over_heuristic():
 
 def test_manifest_preserves_select_and_datetime_semantics():
     """选择型(enum)/日期(datetime)字段的语义不被塌成裸 string:
-    enum → type=string + format=name-ref + 描述提示「传名字→ID」;datetime → format=date-time。
+    enum → type=string + format=name-ref + x-submit-mode=value;datetime → format=date-time。
     (修真实导出里 领导/人力 显示成 string、日期丢类型的缺陷。)"""
     from dano.catalog.manifest import to_manifest
     from dano.export.agent_skills import _ptype, _select_fields
@@ -129,13 +129,14 @@ def test_manifest_preserves_select_and_datetime_semantics():
                    field_types={"领导": "enum", "人力": "enum", "startTime": "datetime", "请假类型": "number"},
                    required_fields=["领导", "人力", "startTime", "请假类型"], optional_fields=[])
     props = to_manifest(sk).parameters["properties"]
-    # 选择型:不再是裸 string,带 name-ref 标记 + 「传名字→ID」提示
+    # 选择型:不再是裸 string,带 name-ref 标记 + value 提交约定
     assert props["领导"]["type"] == "string" and props["领导"]["format"] == "name-ref"
-    assert "查内部 ID" in props["领导"]["description"] and "勿直接传 ID" in props["领导"]["description"]
+    assert props["领导"]["x-submit-mode"] == "value"
+    assert "提交 value" in props["领导"]["description"]
     # 日期:带 date-time format
     assert props["startTime"]["format"] == "date-time"
     # 导出层「类型」列还原成语义类型,不再显示 string
-    assert _ptype("领导", props, set()) == "枚举·名字→ID"
+    assert _ptype("领导", props, set()) == "枚举·提交value"
     assert _ptype("startTime", props, set()) == "datetime"
     assert _ptype("请假类型", props, {"请假类型"}) == "number"
     assert _select_fields(props) == ["领导", "人力"]

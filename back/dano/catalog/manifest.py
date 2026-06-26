@@ -68,11 +68,32 @@ def _api_selects(skill: SkillSpec) -> dict:
     return {s.get("param"): s for s in sels if s.get("param")}
 
 
+def _option_snapshots(raw: list | None) -> list[dict]:
+    """兼容旧快照(list[str])与新快照(list[{label,value}]),统一给前端/导出层消费。"""
+    opts: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for o in raw or []:
+        if isinstance(o, dict):
+            label = str(o.get("label", "")).strip()
+            value = "" if o.get("value") is None else str(o.get("value"))
+        else:
+            label = str(o).strip()
+            value = label
+        if not label:
+            continue
+        key = (label, value)
+        if key in seen:
+            continue
+        seen.add(key)
+        opts.append({"label": label, "value": value})
+    return opts
+
+
 def _schema_prop(skill: SkillSpec, field: str, desc: str, sel: dict | None = None) -> dict:
     """字段 → JSON Schema 属性。**type 保持合法**(function-calling 可直接用),但**语义不丢**:
 
-    - `enum`(选领导/字典下拉):type=string + format=name-ref + 描述提示「传名字→运行期查内部 ID」
-      (这是关键:agent 必须传名字/选项文字,而非内部 ID/编号,否则提交进的是错值);
+    - `enum`(选领导/字典下拉):type=string + format=name-ref + x-submit-mode=value。
+      前端展示 label,提交稳定 value;旧 label 仅作运行期兼容。
       **候选选项内置进 schema**(≤50 条直接 `enum`;更多则带 `x-options-source`,运行期 --list-options 现拉)→
       agent 从真实可选值里选,不再凭空猜名(问题1:稳固、不易错);
     - `datetime`/`date`:type=string + 标准 format,告诉 agent 这是日期时间字段;
@@ -81,18 +102,40 @@ def _schema_prop(skill: SkillSpec, field: str, desc: str, sel: dict | None = Non
     declared = (getattr(skill, "field_types", {}) or {}).get(field)
     # label=字段纯语义(给 SOP/复述用,简洁);description=语义 + 调用约定(给参数表/function-calling 用)。
     # 约定不写死示例值(『张三』只适合选人,不适合选值如请假类型);示例由前端/样例值提供,不在此臆造。
+    if declared == "array" and sel and sel.get("kind") == "array":
+        prop = {"type": "array", "items": {"type": "string"}, "format": "name-ref-list",
+                "label": desc,
+                "description": desc + ("(多选字段:前端展示 label,调用时提交 value 数组;"
+                                       f"选前先 `--list-options {field}` 实时拉可选项;旧 label 输入仅兼容)"),
+                "x-submit-mode": "value[]",
+                "x-option-label": "label",
+                "x-option-value": "value"}
+        opts = _option_snapshots((sel or {}).get("options") or [])
+        cnt = int((sel or {}).get("count") or len(opts))
+        if (sel or {}).get("source_url"):
+            prop["x-options-source"] = True
+        if opts:
+            prop["x-options"] = opts
+            if len(opts) <= _OPTIONS_INLINE_MAX:
+                prop["items"]["enum"] = [o["value"] for o in opts]
+            if cnt > len(opts):
+                prop["x-options-truncated"] = True
+        return prop
     if declared == "enum":
         prop = {"type": "string", "format": "name-ref", "label": desc,
-                "description": desc + ("(传名字/选项文字,Dano 提交时按名字现查内部 ID,**勿直接传 ID/编号**;"
-                                       f"选前先 `--list-options {field}` 实时拉可选项再选)")}
-        opts = [o for o in ((sel or {}).get("options") or []) if str(o).strip()]
+                "description": desc + ("(选择型字段:前端展示 label,调用时提交 value;"
+                                       f"选前先 `--list-options {field}` 实时拉可选项;旧 label 输入仅兼容)"),
+                "x-submit-mode": "value",
+                "x-option-label": "label",
+                "x-option-value": "value"}
+        opts = _option_snapshots((sel or {}).get("options") or [])
         cnt = int((sel or {}).get("count") or len(opts))
         if (sel or {}).get("source_url"):
             prop["x-options-source"] = True                  # 该字段有来源接口 → 可 --list-options 实时拉
         if opts:
-            prop["x-options"] = opts                         # 候选快照(≤500),写进 references/OPTIONS.md 供离线参考
+            prop["x-options"] = opts                         # 候选 {label,value} 快照(≤500),写进 references/OPTIONS.md 供离线参考
             if len(opts) <= _OPTIONS_INLINE_MAX:
-                prop["enum"] = opts                          # ≤50 直接内置 enum:function-calling 层就约束 agent 只能选真实值
+                prop["enum"] = [o["value"] for o in opts]     # ≤50 直接约束提交 value,不是显示名
             if cnt > len(opts):                              # 快照被截断(候选 >500)→ 以实时拉取为准
                 prop["x-options-truncated"] = True
         return prop

@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  Drawer, Button, Checkbox, Input, InputNumber, DatePicker, Radio, Typography, Tag,
+  Drawer, Button, Checkbox, Input, InputNumber, DatePicker, Radio, Select, Typography, Tag,
   Alert, Descriptions, Space, message, Image,
 } from "antd";
-import { invokeSkill, SkillManifest, TaskOutcome, JSONSchema } from "../api/skills";
+import {
+  invokeSkill, listSkillOptions, SkillManifest, TaskOutcome, JSONSchema, JSONSchemaProperty, ToolOption,
+} from "../api/skills";
 
 const STATE_COLOR: Record<string, string> = {
   completed: "success", failed: "error", rejected: "error",
@@ -22,6 +24,26 @@ function candidateLabel(c: Record<string, unknown>, tmpl?: string): string {
 // 按字段名/描述猜控件类型(manifest 目前统一 type=string,故靠语义猜:日期/数字/文本)
 const isDate = (s: string) => /date|time|日期|时间|起止|开始|结束|起|止/i.test(s);
 const isNum = (s: string) => /days|num|count|amount|qty|天数|数量|金额|时长|个数/i.test(s);
+const isSelectProp = (p: JSONSchemaProperty) =>
+  p?.format === "name-ref" || p?.["x-options-source"] || Array.isArray(p?.["x-options"]) || Array.isArray(p?.enum);
+const isMultiSelectProp = (p: JSONSchemaProperty) => p?.type === "array" || p?.format === "name-ref-list";
+
+function normalizeOptions(p: JSONSchemaProperty): ToolOption[] {
+  const raw = (Array.isArray(p?.["x-options"]) && p["x-options"]!.length ? p["x-options"] : p?.enum) || [];
+  const out: ToolOption[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const rec = item as Record<string, unknown>;
+    const label = typeof item === "object" && item !== null && "label" in rec ? String(rec.label ?? "") : String(item ?? "");
+    const value = typeof item === "object" && item !== null && "value" in rec ? String(rec.value ?? "") : String(item ?? "");
+    if (!label) continue;
+    const key = `${label}\u0000${value}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ label, value });
+  }
+  return out;
+}
 
 function jsonSkeleton(p: JSONSchema): string {
   const o: Record<string, unknown> = {};
@@ -37,6 +59,8 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
   const [running, setRunning] = useState(false);
   const [out, setOut] = useState<TaskOutcome | null>(null);
   const [lastInput, setLastInput] = useState<Record<string, unknown>>({});  // 供消歧选中后带同一组输入重调
+  const [optionCache, setOptionCache] = useState<Record<string, ToolOption[]>>({});
+  const [optionLoading, setOptionLoading] = useState<Record<string, boolean>>({});
 
   const props = useMemo(() => skill?.parameters?.properties || {}, [skill]);
   const required = useMemo(() => new Set(skill?.parameters?.required || []), [skill]);
@@ -48,10 +72,32 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
       setConfirm(skill.requires_confirmation);
       setMode("form");
       setOut(null);
+      setOptionCache({});
+      setOptionLoading({});
     }
   }, [skill]);
 
   const setVal = (k: string, v: unknown) => setValues((p) => ({ ...p, [k]: v }));
+
+  async function loadOptions(key: string, p: JSONSchemaProperty) {
+    if (!skill || optionCache[key] || optionLoading[key]) return;
+    const fallback = normalizeOptions(p);
+    if (!p?.["x-options-source"]) {
+      setOptionCache((prev) => ({ ...prev, [key]: fallback }));
+      return;
+    }
+    setOptionLoading((prev) => ({ ...prev, [key]: true }));
+    try {
+      const res = await listSkillOptions(skill.name, key);
+      setOptionCache((prev) => ({ ...prev, [key]: (res.options || []).length ? res.options : fallback }));
+      if (res.note && !(res.options || []).length) message.warning(res.note);
+    } catch (e: any) {
+      setOptionCache((prev) => ({ ...prev, [key]: fallback }));
+      message.error(`拉取 ${key} 候选失败:` + (e?.response?.data?.detail || e.message));
+    } finally {
+      setOptionLoading((prev) => ({ ...prev, [key]: false }));
+    }
+  }
 
   async function doInvoke(input: Record<string, unknown>) {
     if (!skill) return;
@@ -89,12 +135,31 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
     await doInvoke(input);
   }
 
-  const fieldRow = (key: string, p: { description?: string }) => {
+  const fieldRow = (key: string, p: JSONSchemaProperty) => {
     const label = p.description || key;
     const hint = `${key} ${label}`;
     const reqMark = required.has(key) ? <span style={{ color: "#cf1322" }}> *</span> : null;
     let widget;
-    if (isDate(hint)) {
+    if (isSelectProp(p)) {
+      const options = optionCache[key] || normalizeOptions(p);
+      const multi = isMultiSelectProp(p);
+      widget = (
+        <Select
+          mode={multi ? "multiple" : undefined}
+          showSearch
+          allowClear
+          optionFilterProp="label"
+          style={{ width: "100%" }}
+          value={(values[key] as any) ?? undefined}
+          options={options}
+          loading={!!optionLoading[key]}
+          placeholder={key}
+          onFocus={() => loadOptions(key, p)}
+          onDropdownVisibleChange={(open) => { if (open) loadOptions(key, p); }}
+          onChange={(v) => setVal(key, v)}
+        />
+      );
+    } else if (isDate(hint)) {
       widget = <DatePicker style={{ width: "100%" }} onChange={(_, ds) => setVal(key, ds)} />;
     } else if (isNum(hint)) {
       widget = <InputNumber style={{ width: "100%" }} value={values[key] as number}

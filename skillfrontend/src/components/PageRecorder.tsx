@@ -13,7 +13,7 @@ interface RecField { path: string; key: string; value: string; suggest_param: bo
   system_value?: boolean }
 // 候选写请求(抓到多个时让用户手选用哪个)
 interface RecCand { idx: number; method: string; path: string }
-// P3:字段=选自某列表(选领导:名字→ID)/ 字段=当前用户·会话值(运行期重取)
+// P3:字段=选自某列表(展示 label、提交 value)/ 字段=当前用户·会话值(运行期重取)
 interface RecSelect { path: string; source_url: string; value_key: string; label_key: string; label: string; count: number }
 interface RecIdentity { path: string; source: string }
 interface RecResult {
@@ -276,7 +276,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               {(Object.keys(selects).length > 0 || Object.keys(identity).length > 0) && (
                 <Alert type="warning" showIcon style={{ marginBottom: 8 }}
                   message={<span>
-                    {Object.keys(selects).length > 0 && <span><Tag color="purple">📋 选自列表</Tag>这类字段(如选领导)agent 按<b>名字</b>传、运行期查 ID;</span>}
+                    {Object.keys(selects).length > 0 && <span><Tag color="purple">📋 选自列表</Tag>这类字段展示 label、提交 value,运行期回填目标系统值;</span>}
                     {Object.keys(identity).length > 0 && <span><Tag color="gold">🔒 当前用户</Tag>这类字段默认不作参数、运行期自动填(谁调用就是谁);</span>}
                     完整生效在后续 P4/P5。
                   </span>} />

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import copy as _copy
 import json
 import re as _re
 from urllib.parse import urlparse
@@ -283,7 +284,7 @@ def discover_step_links(writes: list[dict]) -> list[dict]:
 
 
 # 显示名(给人看的)字段提示;**登录名(username/account)排最后** —— 选人下拉里用户认的是"张三"而非"zhangsan",
-# 用对显示名字段,name→ID 桥接与运行期解析才对得上。通用,不挑系统。
+# 用对显示名字段,label/value 桥接与运行期解析才对得上。通用,不挑系统。
 _DISPLAY_HINTS = ("nickname", "realname", "fullname", "truename", "cnname", "displayname",
                   "name", "label", "title", "caption", "text", "dept")
 _LOGIN_HINTS = ("username", "loginname", "account", "loginid", "useraccount")
@@ -317,17 +318,77 @@ def _is_idlike(key: str) -> bool:
 
 _SMALL_LIST = 50    # "字典型下拉"是小列表(事假/病假…);城市/数据大字典是大列表 → 区分短码真假命中
 _OPTIONS_SNAPSHOT_MAX = 500    # 快照进 skill 的候选选项上限(再多就只存来源、运行期 --list-options 现拉)
+_GROUP_KEY_HINTS = ("dicttype", "dict_type", "category", "group", "kind", "class", "parent")
+_ARRAY_PARAM_LABELS = (
+    ("participant", "参会人"),
+    ("attendee", "参会人"),
+    ("member", "人员"),
+    ("user", "人员"),
+    ("person", "人员"),
+    ("employee", "员工"),
+    ("approver", "审批人"),
+    ("assignee", "处理人"),
+)
 
 
-def _list_options(items: list[dict], label_key: str) -> list[str]:
-    """从候选列表抽出**显示名选项**(agent 该传的值),去重保序、限量。供 skill 内置枚举 / 选项参考。"""
-    out: list[str] = []
-    seen: set[str] = set()
-    for it in items:
+def _option_value(v) -> str:
+    """对外暴露的选择项 value 统一用字符串;运行期再按来源接口回填目标系统原始值。"""
+    return "" if v is None else str(v)
+
+
+def _apply_option_filter(items: list, option_filter: dict | None) -> list:
+    """全局字典接口常一次返回多组枚举;已知分组时只保留当前字段所在组。"""
+    if not option_filter:
+        return items
+    return [it for it in items if isinstance(it, dict)
+            and all(str(it.get(k)) == str(v) for k, v in option_filter.items())]
+
+
+def _derive_option_filter(match_item: dict | None, items: list[dict], value_key: str, label_key: str) -> dict | None:
+    """从命中项反推枚举分组键,避免把全局字典的其它业务候选一起暴露给前端。"""
+    if not isinstance(match_item, dict) or len(items) <= _SMALL_LIST:
+        return None
+    cands: list[tuple[int, str, object]] = []
+    for k, v in match_item.items():
+        kl = str(k).lower()
+        if k in (value_key, label_key) or not _is_scalar(v):
+            continue
+        if not (any(h in kl for h in _GROUP_KEY_HINTS) or kl.endswith("type")):
+            continue
+        cnt = sum(1 for it in items if isinstance(it, dict) and str(it.get(k)) == str(v))
+        if 1 < cnt < len(items):
+            cands.append((cnt, k, v))
+    if not cands:
+        return None
+    # 优先取过滤后更小的分组;它通常就是页面下拉实际绑定的那一组枚举。
+    _cnt, key, val = sorted(cands, key=lambda x: x[0])[0]
+    return {key: val}
+
+
+def _find_select_item(items: list[dict], value_key: str, label_key: str, value, mode: str,
+                      label: str | None = None) -> dict | None:
+    if label is not None:
+        hit = next((it for it in items
+                    if isinstance(it, dict)
+                    and str(it.get(value_key if mode != "name" else label_key)) == str(value)
+                    and str(it.get(label_key)) == str(label)), None)
+        if hit is not None:
+            return hit
+    key = label_key if mode == "name" else value_key
+    return next((it for it in items if isinstance(it, dict) and str(it.get(key)) == str(value)), None)
+
+
+def _list_options(items: list[dict], label_key: str, value_key: str, option_filter: dict | None = None) -> list[dict]:
+    """从候选列表抽出 {label,value} 快照。前端展示 label,调用提交稳定 value。"""
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for it in _apply_option_filter(items, option_filter):
         lab = str(it.get(label_key, "")).strip() if isinstance(it, dict) else ""
-        if lab and lab not in seen:
-            seen.add(lab)
-            out.append(lab)
+        val = _option_value(it.get(value_key)) if isinstance(it, dict) else ""
+        key = (lab, val)
+        if lab and key not in seen:
+            seen.add(key)
+            out.append({"label": lab, "value": val})
         if len(out) >= _OPTIONS_SNAPSHOT_MAX:
             break
     return out
@@ -343,6 +404,150 @@ def _parent_path(path: str) -> str:
         return path[:path.rfind("[")]
     i = path.rfind(".")
     return path[:i] if i >= 0 else ""
+
+
+def _array_leaf_info(toks: list) -> tuple[list, int, list] | None:
+    """tokens 若形如 root[0].field → (root_tokens, index, item_relative_tokens)。"""
+    for i, t in enumerate(toks):
+        if isinstance(t, int):
+            if i == 0 or i == len(toks) - 1:
+                return None
+            return toks[:i], t, toks[i + 1:]
+    return None
+
+
+def _path_under_array_root(path: str, root_tokens: list) -> bool:
+    try:
+        toks = _split_path(path)
+    except Exception:  # noqa: BLE001
+        return False
+    info = _array_leaf_info(toks)
+    return bool(info and info[0] == root_tokens)
+
+
+def _node_at_tokens(node, toks: list):
+    cur = node
+    for t in toks:
+        try:
+            cur = cur[t]
+        except Exception:  # noqa: BLE001
+            return None
+    return cur
+
+
+def _array_param_name(root_tokens: list, fallback: str) -> str:
+    root = str(root_tokens[-1] if root_tokens else fallback or "").strip()
+    norm = root.lower().replace("_", "").replace("-", "")
+    for hint, label in _ARRAY_PARAM_LABELS:
+        if hint in norm:
+            return label
+    # 叶子名如"用户ID"只能说明数组项字段,不能说明整个数组;根名不可读时再退回。
+    return fallback or root or "列表项"
+
+
+def _array_select_specs(body, path_names: dict, selects: list[dict] | None) -> list[dict]:
+    """把 participants[0].userId / participants[1].userId 这类重复数组叶子折叠成一个 array_select。
+
+    判据:同一对象数组下,至少两个下标被参数化/选中,且其中有可回查候选源的 select 字段。
+    输出的参数是数组 value 列表;运行期按候选项重建目标系统要求的对象数组。
+    """
+    if not isinstance(body, dict) or not path_names or not selects:
+        return []
+    leaves = {p: (t, raw) for p, t, _sv, raw in _leaf_paths(body)}
+    sels_by_path = {s.get("path"): s for s in selects or [] if s.get("path")}
+    groups: dict[str, dict] = {}
+    for path in path_names:
+        if path not in leaves:
+            continue
+        toks, _raw = leaves[path]
+        info = _array_leaf_info(toks)
+        if not info:
+            continue
+        root_toks, idx, rel_toks = info
+        root_path = _tokens_to_str(root_toks)
+        g = groups.setdefault(root_path, {"root_tokens": root_toks, "indices": set(), "paths": [], "selects": []})
+        g["indices"].add(idx)
+        g["paths"].append((path, toks, rel_toks))
+        if path in sels_by_path:
+            g["selects"].append(sels_by_path[path])
+    out: list[dict] = []
+    for root_path, g in groups.items():
+        if len(g["indices"]) < 2 or not g["selects"]:
+            continue
+        candidates = []
+        for s in g["selects"]:
+            toks, _raw = leaves.get(s.get("path"), ([], None))
+            info = _array_leaf_info(toks)
+            rel = info[2] if info else []
+            leaf = str(rel[-1]) if rel else ""
+            score = (2 if _is_idlike(leaf) else 0) + (1 if "user" in leaf.lower() or "person" in leaf.lower() else 0)
+            candidates.append((score, s, leaf))
+        if not candidates:
+            continue
+        _score, primary, target_key = sorted(candidates, key=lambda x: x[0], reverse=True)[0]
+        if not target_key:
+            continue
+        root_node = _node_at_tokens(body, g["root_tokens"])
+        if not isinstance(root_node, list) or not root_node or not isinstance(root_node[0], dict):
+            continue
+        fallback = path_names.get(primary.get("path")) or target_key
+        param = _array_param_name(g["root_tokens"], fallback)
+        values = []
+        for item in root_node:
+            if isinstance(item, dict) and item.get(target_key) not in (None, ""):
+                values.append(_option_value(item.get(target_key)))
+        spec = {k: v for k, v in primary.items() if k not in ("path", "tokens", "value", "label")}
+        spec.update({
+            "kind": "array",
+            "path": root_path,
+            "array_path": root_path,
+            "array_tokens": g["root_tokens"],
+            "param": param,
+            "target_key": target_key,
+            "item_template": _copy.deepcopy(root_node[0]),
+            "sample_values": values,
+            "remove_paths": [_tokens_to_str(toks) for _p, toks, _rel in g["paths"]],
+        })
+        out.append(spec)
+    return out
+
+
+def fold_array_select_fields(post_data: str | None, fields: list[dict], selects: list[dict]) -> tuple[list[dict], list[dict]]:
+    """前端字段表展示前折叠数组型选择:多个人员/成员只显示一个数组参数。"""
+    body = _parse_body(post_data)
+    if body is None:
+        return fields, selects
+    guess = {f.get("path"): (f.get("suggest_name") or f.get("key") or "") for f in fields if f.get("path")}
+    specs = _array_select_specs(body, guess, selects)
+    if not specs:
+        return fields, selects
+    remove: set[str] = set()
+    spec_by_insert: dict[int, dict] = {}
+    order = {f.get("path"): i for i, f in enumerate(fields)}
+    for spec in specs:
+        root = spec.get("array_tokens") or []
+        paths = {f.get("path") for f in fields if f.get("path") and _path_under_array_root(f["path"], root)}
+        remove |= paths
+        first = min((order[p] for p in paths if p in order), default=len(fields))
+        spec_by_insert[first] = spec
+    out_fields: list[dict] = []
+    for i, f in enumerate(fields):
+        if i in spec_by_insert:
+            spec = spec_by_insert[i]
+            labels = [str(o.get("label")) for o in (spec.get("options") or []) if isinstance(o, dict)]
+            out_fields.append({
+                "path": spec["path"], "key": str((spec.get("array_tokens") or [spec["path"]])[-1]),
+                "value": ", ".join(labels[:3]) if labels else ",".join(spec.get("sample_values") or []),
+                "suggest_param": True, "suggest_name": spec["param"], "type": "array",
+                "confidence": 0.9, "confidence_tier": "auto", "required": True,
+                "array_select": True,
+            })
+        if f.get("path") not in remove:
+            out_fields.append(f)
+    out_selects = [s for s in selects if not any(_path_under_array_root(s.get("path", ""), spec.get("array_tokens") or [])
+                                                 for spec in specs)]
+    out_selects.extend(specs)
+    return out_fields, out_selects
 
 
 def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool):
@@ -388,9 +593,9 @@ def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool):
 
 
 def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | None = None) -> list[dict]:
-    """提交体里"对应某候选列表项"的字段 → 绑 select(Agent 传名字/文字→运行期查内部 ID)。
+    """提交体里"对应某候选列表项"的字段 → 绑 select(前端展示 label,调用提交 value;旧 label 兼容)。
 
-    两形态(通用,不挑系统):① **单码字段**(type=2↔字典 value=2、approverId=12↔user/list:字段存码,agent 传名)
+    两形态(通用,不挑系统):① **单码字段**(type=2↔字典 value=2、approverId=12↔user/list:字段存码,调用传 value)
     ② **名/ID 配对**(yyxtmc=显示名 + 兄弟 yyxtid=内部 id:两字段一次选定)→ 输出 id_path/id_tokens,运行期
     解析后**同时**写回显示名字段与配对 id 字段(换一个选项时 id 不再冻结成录制值)。
     **录制样例(samples)= 消歧器**:候选显示名 == 用户录制选中值 →「确认命中」强证据(大列表/短码也照绑)。
@@ -409,18 +614,24 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
         small = len(items) <= _SMALL_LIST
         hits: list[dict] = []
         for path, toks, sv, raw in leaves:
-            if not sv or _is_const_value(raw):           # 系统常量(流程键/uuid/雪花)不作"按名字选"的下拉参数
+            if not sv or _is_const_value(raw):           # 系统常量(流程键/uuid/雪花)不作下拉参数
                 continue
             m = _match_select(sv, items, sample_vals, small)
             if m is None:
                 continue
             mode, vk, lk, label, confirmed = m
+            match_item = _find_select_item(items, vk, lk, sv, mode, label)
+            option_filter = _derive_option_filter(match_item, items, vk, lk)
+            option_items = _apply_option_filter(items, option_filter)
             entry = {"path": path, "tokens": toks, "value": sv, "source_url": r.get("url"),
-                     "value_key": vk, "label_key": lk, "label": label, "count": len(items),
-                     "options": _list_options(items, lk),   # 候选显示名快照(存进 skill 让 agent 从中选,问题1)
+                     "value_key": vk, "label_key": lk, "label": label, "count": len(option_items),
+                     "options": _list_options(items, lk, vk, option_filter),   # 候选 {label,value} 快照,前端提交稳定 value
+                     "submit_mode": "value",
                      "_confirmed": confirmed}
+            if option_filter:
+                entry["option_filter"] = option_filter
             if mode == "name":                           # 名/ID 配对:找兄弟"内部 id"字段(同父 + 值==该项的 id)
-                it = next((x for x in items if str(x.get(lk)) == sv), None)
+                it = match_item
                 idval = str(it.get(vk)) if it and it.get(vk) is not None else None
                 if idval is not None:
                     par = _parent_path(path)
@@ -1043,7 +1254,7 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
                       typed: dict | None = None) -> dict | None:
     """param_map: {字段点路径 → 参数名}。把这些路径的叶子替换成 {{参数名}},其余原样。
 
-    selects:[{path, source_url, value_key, label_key}](Q2 选领导,path 须在 param_map 里 → 运行期名字→ID);
+    selects:[{path, source_url, value_key, label_key}](Q2 选领导,path 须在 param_map 里 → 运行期 value→目标系统值);
     identity:[{path, source}](Q1 当前用户/会话值,运行期重取覆盖,不作参数);
     typed:{参数名 → 录制时用户填写值}。仅当某参数的填写值是其叶子的**真子串**(如叶子"请假事由:回家"、填写"回家")
     时,改成段拼接(B2):只参数化那一段、保留常量前后缀。其余情况整值替换(不变)。
@@ -1055,13 +1266,25 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
     params: list[str] = []
     samples: dict[str, str] = {}
     types: dict[str, str] = {}
+    prebuilt_arrays: list[dict] = []
+    for s in selects or []:
+        if s.get("kind") == "array":
+            ss = dict(s)
+            if ss.get("path") in param_map:
+                ss["param"] = param_map[ss["path"]]
+            prebuilt_arrays.append(ss)
+    array_selects = prebuilt_arrays + _array_select_specs(body, param_map, [s for s in (selects or []) if s.get("kind") != "array"])
+    folded_roots = [s.get("array_tokens") or [] for s in array_selects]
+
+    def folded(path: str) -> bool:
+        return any(_path_under_array_root(path, root) for root in folded_roots)
 
     def walk(node, path):
         if isinstance(node, dict):
             return {k: walk(v, f"{path}.{k}" if path else k) for k, v in node.items()}
         if isinstance(node, list):
             return [walk(v, f"{path}[{i}]") for i, v in enumerate(node)]
-        if path in param_map:
+        if path in param_map and not folded(path):
             name = param_map[path]
             sv = "" if node is None else str(node)
             params.append(name)
@@ -1086,22 +1309,37 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
         path = (u.path or "/") + (("?" + u.query) if u.query else "")
     # 叶子点路径→tokens(无歧义注入用;键含点也安全)。select/identity 注入都优先用 tokens。
     _leaf_tok = {p: t for p, t, _sv, _raw in _leaf_paths(body)}
-    # select 元数据:path 须是参数(在 param_map),记成 param→源/键,运行期按名字查 ID。
+    # select 元数据:path 须是参数(在 param_map),记成 param→源/键,运行期按 value 查目标系统值。
     # 名/ID 配对(yyxtmc+yyxtid)额外带 id 字段路径 → 运行期解析后**同时**写回配对 id 字段(不冻结)。
     sel_meta = []
     for s in (selects or []):
+        if s.get("kind") == "array":
+            continue
+        if folded(s.get("path", "")):
+            continue
         if s.get("path") not in param_map:
             continue
         meta = {"param": param_map[s["path"]], "source_url": s.get("source_url"),
                 "value_key": s.get("value_key"), "label_key": s.get("label_key"),
-                "options": list(s.get("options") or []),     # 候选选项快照(存进 skill 让 agent 从中选,问题1)
-                "count": s.get("count")}
+                "options": list(s.get("options") or []),     # 候选 {label,value} 快照,给前端/导出 skill 使用
+                "count": s.get("count"), "submit_mode": "value"}
+        if s.get("option_filter"):
+            meta["option_filter"] = dict(s.get("option_filter") or {})
         if s.get("id_path") or s.get("id_tokens"):
             meta["id_path"] = s.get("id_path")
             meta["id_tokens"] = s.get("id_tokens") or _leaf_tok.get(s.get("id_path"))
         sel_meta.append(meta)
-    for s in sel_meta:                                          # 选领导/代码下拉 → 类型=枚举(传名字/文字)
-        types[s["param"]] = "enum"
+    for s in array_selects:
+        param = s.get("param")
+        if not param:
+            continue
+        params.append(param)
+        samples[param] = list(s.get("sample_values") or [])
+        meta = {k: v for k, v in s.items() if k not in ("remove_paths", "sample_values")}
+        meta["submit_mode"] = "value[]"
+        sel_meta.append(meta)
+    for s in sel_meta:                                          # 选领导/代码下拉 → 类型=枚举(label 展示,value 提交)
+        types[s["param"]] = "array" if s.get("kind") == "array" else "enum"
     id_meta = []
     for i in (identity or []):
         if i.get("path") in param_map:        # 同一字段不能既是参数又是 identity:用户既已参数化 → 参数优先,不再运行期覆盖
@@ -1182,7 +1420,7 @@ def _finalize_jsonstr(node):
     return node
 
 
-# ─────────── P4:select 名字→ID / identity 运行期重取 ───────────
+# ─────────── P4:select value→目标系统值 / identity 运行期重取 ───────────
 def _split_path(path) -> list:
     """'form.items[0].id' → ['form','items',0,'id'];**已是 tokens 列表/元组则原样返回**(无歧义,键含点也安全)。"""
     if isinstance(path, (list, tuple)):
@@ -1336,6 +1574,8 @@ def self_check(api_request: dict) -> list[str]:
     if not isinstance(templ, (dict, list)):
         return []                                       # GET/查询类无请求体,免检
     params = list(api_request.get("params") or [])
+    array_selects = {s.get("param"): s for s in (api_request.get("selects") or [])
+                     if s.get("kind") == "array" and s.get("param")}
     problems: list[str] = []
 
     # (b)+(c):每个参数一个唯一哨兵 → 跑完整构造流水线(substitute→finalize)→ 哨兵必须都出现在最终 body
@@ -1345,11 +1585,18 @@ def self_check(api_request: dict) -> list[str]:
     if "{{" in final_str:
         problems.append("模板里仍残留 {{}} 占位 —— 参数声明与 body_template 不一致(有参数没填上)")
     for p, probe in probes.items():
+        if p in array_selects:
+            continue
         cnt = final_str.count(probe)
         if cnt == 0:
             problems.append(f"参数 `{p}` 填入的值进不了最终请求体(被覆盖/丢失/未真正参数化)—— agent 改了也不生效")
         elif cnt > 1:
             problems.append(f"参数 `{p}` 同时填入 {cnt} 处(疑似扁平/嵌套键路径歧义,一个参数替换了多个字段)")
+
+    for p, s in array_selects.items():
+        pathlike = s.get("array_tokens") or s.get("array_path") or s.get("path", "")
+        if not pathlike or _path_lookup(nested, pathlike) is _PATH_MISSING:
+            problems.append(f"数组选择参数 `{p}` 的目标数组 `{s.get('array_path') or s.get('path')}` 在请求体里找不到落点")
 
     # (a):identity 路径在"未 finalize 的嵌套结构"上必须可达(blob 内段含 __dano_jsonstr__)
     for idn in api_request.get("identity") or []:
@@ -1418,24 +1665,32 @@ async def fetch_field_options(api_request: dict, field: str, *, base_url: str = 
                               storage_state=None, token_key: str | None = None,
                               verify: bool = True, limit: int = 500) -> dict:
     """**实时**拉某选择型字段的当前可选项(直接调它的来源接口,带登录态)→ {field, options:[{label,value}], count}。
-    通用,不挑系统。该字段不是选择型/无来源 → options=[] 并说明。失败 → options=[] 不抛(让 agent 退回传名字)。"""
+    通用,不挑系统。前端展示 label,提交 value;旧 label 由运行期兼容。
+    该字段不是选择型/无来源 → options=[] 并说明。失败 → options=[] 不抛。"""
     sel = find_field_select(api_request, field)
+    mode = "value[]" if (sel or {}).get("kind") == "array" else "value"
     if not sel or not sel.get("source_url"):
         return {"field": field, "options": [], "count": 0,
+                "submit_mode": mode,
                 "note": "该字段不是选择型(或无来源接口);直接按字段说明传值即可"}
     lk, vk = sel.get("label_key"), sel.get("value_key")
     items = await _fetch_list(sel["source_url"], base_url, storage_state, token_key, verify,
                               (api_request or {}).get("auth_headers"))
+    items = _apply_option_filter(items, sel.get("option_filter"))
     opts = []
     for it in items:
         if not isinstance(it, dict):
             continue
         lab = str(it.get(lk, "")).strip()
         if lab:
-            opts.append({"label": lab, "value": it.get(vk)})
+            opts.append({"label": lab, "value": _option_value(it.get(vk))})
         if len(opts) >= limit:
             break
-    return {"field": field, "options": opts, "count": len(items)}
+    out = {"field": field, "options": opts, "count": len(items), "submit_mode": mode,
+           "label_key": lk, "value_key": vk}
+    if sel.get("option_filter"):
+        out["option_filter"] = sel.get("option_filter")
+    return out
 
 
 # 分页响应里"总记录数"字段(通用,不挑系统):total/totalCount/totalElements/recordsTotal…
@@ -1461,27 +1716,116 @@ def _extract_total(data) -> int | None:
     return scan(data)
 
 
+def _match_select_item(items: list, label_key: str, value_key: str, submitted) -> tuple[dict | None, str | None]:
+    """按提交值匹配候选项。value 优先,label 仅作旧调用兼容。"""
+    if isinstance(submitted, dict) and "value" in submitted:
+        submitted = submitted.get("value")
+    value_match = next((it for it in items
+                        if isinstance(it, dict) and str(it.get(value_key)) == str(submitted)), None)
+    if value_match is not None:
+        return value_match, "value"
+    label_match = next((it for it in items
+                        if isinstance(it, dict) and str(it.get(label_key)) == str(submitted)), None)
+    if label_match is not None:
+        return label_match, "label"
+    return None, None
+
+
+def _select_values(value) -> list:
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        vals = list(value)
+    else:
+        vals = [value]
+    out = []
+    for v in vals:
+        out.append(v.get("value") if isinstance(v, dict) and "value" in v else v)
+    return [v for v in out if v not in (None, "")]
+
+
+def _source_key_for_target(match: dict, target_key: str, *, value_key: str, label_key: str) -> str | None:
+    if target_key in match:
+        return target_key
+    tl = target_key.lower().replace("_", "")
+    for k in match:
+        if k.lower().replace("_", "") == tl:
+            return k
+    if _is_idlike(target_key):
+        return value_key
+    if any(h in tl for h in ("name", "nick", "title", "label", "text")):
+        return label_key
+    if any(h in tl for h in ("avatar", "photo", "image", "head", "portrait")):
+        return next((k for k in match
+                     if any(h in k.lower().replace("_", "") for h in ("avatar", "photo", "image", "head", "portrait"))),
+                    None)
+    return None
+
+
+def _build_array_select_items(sel: dict, matches: list[dict]) -> list[dict]:
+    """把多选 value 列表重建成目标系统要的对象数组,派生 name/avatar,保留 type 等常量。"""
+    template = sel.get("item_template") if isinstance(sel.get("item_template"), dict) else {}
+    target = sel.get("target_key") or sel.get("value_key")
+    vk, lk = sel.get("value_key"), sel.get("label_key")
+    out: list[dict] = []
+    for m in matches:
+        item = _copy.deepcopy(template) if template else {}
+        if not item and target:
+            item[target] = m.get(vk)
+        for k in list(item.keys()):
+            src = _source_key_for_target(m, k, value_key=vk, label_key=lk)
+            if src is not None and src in m:
+                item[k] = m[src]
+        if target and vk in m:
+            item[target] = m[vk]
+        out.append(item)
+    return out
+
+
 async def _resolve_selects(api_request: dict, fields: dict, *, base_url: str, storage_state,
                            token_key: str | None, verify: bool) -> tuple[dict, dict]:
-    """选择型:参数传的是名字 → 查候选列表换成内部 ID。返回 (fields, id_overrides)。
+    """选择型:前端提交稳定 value → 查候选列表回填目标系统值;旧 label 输入兼容。返回 (fields, id_overrides)。
 
     两形态:① **单码字段**(approverId/type:字段本身就该存码)→ fields[param] 直接换成 id;
     ② **名/ID 配对**(yyxtmc 显示名 + yyxtid 内部 id)→ fields[param] 规整成候选规范显示名,
        配对 id 字段经 id_overrides({tokens 元组: id 值})在 substitute 后写回(换选项时 id 不冻结)。
-    查不到则原样(可能用户直接给了 ID)。
+    查不到候选时 fail-closed,避免把显示名/错误值静默塞进目标系统字段。
     """
     id_overrides: dict = {}
     for s in api_request.get("selects") or []:
         param = s.get("param")
         if param not in fields:
             continue
-        name = fields[param]
-        items = await _fetch_list(s.get("source_url", ""), base_url, storage_state, token_key, verify,
-                                  api_request.get("auth_headers"))
-        lk, vk = s.get("label_key"), s.get("value_key")
-        match = next((it for it in items if isinstance(it, dict) and str(it.get(lk)) == str(name)), None)
-        if match is None:
+        submitted = fields[param]
+        source = s.get("source_url") or ""
+        if not source:
             continue
+        items = await _fetch_list(source, base_url, storage_state, token_key, verify,
+                                  api_request.get("auth_headers"))
+        items = _apply_option_filter(items, s.get("option_filter"))
+        lk, vk = s.get("label_key"), s.get("value_key")
+        if not items:
+            raise ValueError(f"枚举字段 {param} 无法获取候选项,不能确认提交值 {submitted!r}")
+        if s.get("kind") == "array":
+            vals = _select_values(submitted)
+            matches: list[dict] = []
+            for v in vals:
+                m, _by = _match_select_item(items, lk, vk, v)
+                if m is None:
+                    raise ValueError(f"枚举数组字段 {param} 的值 {v!r} 不在候选项中")
+                matches.append(m)
+            toks = s.get("array_tokens") or _split_path(s.get("array_path") or s.get("path", ""))
+            id_overrides[tuple(toks)] = _build_array_select_items(s, matches)
+            continue
+        match, _by = _match_select_item(items, lk, vk, submitted)
+        if match is None:
+            shown = []
+            for it in items[:8]:
+                if isinstance(it, dict) and it.get(lk) is not None:
+                    shown.append(f"{it.get(lk)}({_option_value(it.get(vk))})")
+            hint = "、".join(shown)
+            raise ValueError(f"枚举字段 {param} 的值 {submitted!r} 不在候选项中"
+                             + (f";可选前几项:{hint}" if hint else ""))
         if s.get("id_tokens") or s.get("id_path"):       # 名/ID 配对:显示名字段保留名、配对 id 字段写 id
             if lk in match:
                 fields[param] = match[lk]                 # 规整成候选里的规范显示名
@@ -1707,9 +2051,16 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     """
     fields = dict(fields)
     sel_overrides: dict = {}
-    if send:                                                 # 选择型:名字→ID(需连网查候选列表);名/ID 配对返回 id 覆盖
-        fields, sel_overrides = await _resolve_selects(api_request, fields, base_url=base_url,
-                                                        storage_state=storage_state, token_key=token_key, verify=verify)
+    if send:                                                 # 选择型:value→目标系统值(需连网查候选列表);名/ID 配对返回 id 覆盖
+        try:
+            fields, sel_overrides = await _resolve_selects(api_request, fields, base_url=base_url,
+                                                            storage_state=storage_state, token_key=token_key, verify=verify)
+        except ValueError as e:
+            method0 = (api_request.get("method") or "POST").upper()
+            path0 = api_request.get("path") or ""
+            url0 = api_request.get("url") or (path0 if path0.startswith("http") else (base_url or "").rstrip("/") + path0)
+            return {"ok": False, "status": 0, "response": None, "business_ok": False,
+                    "detail": str(e), "method": method0, "url": url0}
     # 按字段声明类型归一值(number/bool/日期格式),让 body 填回的是目标系统认的类型/格式 —— 通用,不挑字段
     fields = _coerce_fields(fields, api_request)
     body = substitute(api_request.get("body_template"), fields, api_request.get("sample_inputs") or {})

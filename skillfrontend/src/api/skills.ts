@@ -26,9 +26,36 @@ export interface PageSkillView {
 
 export interface JSONSchema {
   type?: string;
-  properties?: Record<string, { type?: string; description?: string }>;
+  properties?: Record<string, JSONSchemaProperty>;
   required?: string[];
   additionalProperties?: boolean;
+}
+
+export interface JSONSchemaProperty {
+  type?: string;
+  format?: string;
+  description?: string;
+  label?: string;
+  enum?: unknown[];
+  "x-options-source"?: boolean;
+  "x-options"?: unknown[];
+  "x-options-truncated"?: boolean;
+  "x-submit-mode"?: "value" | string;
+  "x-option-label"?: string;
+  "x-option-value"?: string;
+}
+
+export interface ToolOption {
+  label: string;
+  value: string;
+}
+
+export interface ToolOptionsResponse {
+  field: string;
+  count: number;
+  options: ToolOption[];
+  submit_mode?: string;
+  note?: string;
 }
 
 // 与后端 TaskOutcome 对齐(部分字段)
@@ -70,6 +97,12 @@ export async function invokeSkill(
     input,
     confirm,
   });
+  return data;
+}
+
+export async function listSkillOptions(skillId: string, field: string): Promise<ToolOptionsResponse> {
+  const toolName = skillId.split(".").join("__");
+  const { data } = await api.post("/v1/tools/options", { name: toolName, field });
   return data;
 }
 

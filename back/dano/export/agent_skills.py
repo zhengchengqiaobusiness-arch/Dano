@@ -88,11 +88,13 @@ def _numeric_fields(props: dict) -> list[str]:
 
 def _ptype(k: str, props: dict, numeric: set[str]) -> str:
     """SKILL.md 参数表的「类型」列:把 manifest 的 format 还原成对 agent 有意义的语义类型,
-    不再把选择型/日期都显示成 string(那会让 agent 不知道该传名字还是 ID、是否日期)。"""
+    不再把选择型/日期都显示成 string(那会让 agent 不知道该查候选还是按日期处理)。"""
     p = props.get(k) or {}
     fmt = p.get("format")
+    if fmt == "name-ref-list":
+        return "枚举数组·提交value[]"
     if fmt == "name-ref":
-        return "枚举·名字→ID"
+        return "枚举·提交value"
     if fmt == "date-time":
         return "datetime"
     if fmt == "date":
@@ -101,8 +103,18 @@ def _ptype(k: str, props: dict, numeric: set[str]) -> str:
 
 
 def _select_fields(props: dict) -> list[str]:
-    """名字→ID 的选择型字段(选领导/字典下拉):agent 传名字,Dano 运行期查内部 ID。"""
-    return [k for k, v in (props or {}).items() if (v or {}).get("format") == "name-ref"]
+    """选择型字段(选领导/字典下拉):展示 label,提交 value;Dano 运行期回填目标系统值。"""
+    return [k for k, v in (props or {}).items() if (v or {}).get("format") in ("name-ref", "name-ref-list")]
+
+
+def _opt_label(o) -> str:
+    return str((o or {}).get("label") if isinstance(o, dict) else o).strip()
+
+
+def _opt_value(o) -> str:
+    if isinstance(o, dict):
+        return "" if o.get("value") is None else str(o.get("value"))
+    return str(o)
 
 
 def _opts_hint(prop: dict, cap: int = 12) -> str:
@@ -110,14 +122,15 @@ def _opts_hint(prop: dict, cap: int = 12) -> str:
     opts = (prop or {}).get("x-options") or (prop or {}).get("enum") or []
     if not opts:
         return ""
-    shown = " / ".join(str(o) for o in opts[:cap])
+    shown = " / ".join((_opt_label(o) if _opt_label(o) == _opt_value(o)
+                        else f"{_opt_label(o)}(value={_opt_value(o)})") for o in opts[:cap])
     more = f" …(共 {len(opts)} 项,见 references/OPTIONS.md)" if len(opts) > cap else ""
     return f"可选:{shown}{more}"
 
 
 def _label(props: dict, k: str) -> str:
     """字段纯语义(SOP/复述用,简洁);无 label 退回 description、再退回 key。
-    调用约定(传名字/勿传ID、日期格式)集中在参数表 description 与 SOP 通用提示里说一次,SOP 逐字段不再重复。"""
+    调用约定(选择项 value、日期格式)集中在参数表 description 与 SOP 通用提示里说一次,SOP 逐字段不再重复。"""
     p = props.get(k) or {}
     return p.get("label") or p.get("description") or k
 
@@ -194,9 +207,9 @@ def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
     sel = _select_fields(props)
     if sel:
         has_opts = any((props.get(k) or {}).get("x-options") for k in sel)
-        L.append(f"- 选择型字段({'、'.join('`' + k + '`' for k in sel)})传**名字/选项文字**(勿传 ID/编号)。"
-                 "**选这类字段前,先运行 `bash scripts/submit.sh --list-options <字段名>` 实时拉它当前可选项**"
-                 "(直接调来源接口,最准),从返回的 `options` 里选准确名字再提交"
+        L.append(f"- 选择型字段({'、'.join('`' + k + '`' for k in sel)})先取候选再填:"
+                 "**运行 `bash scripts/submit.sh --list-options <字段名>` 实时拉当前可选项**"
+                 "(直接调来源接口,最准),单选提交 `value`,多选提交 `value` 数组"
                  + ("(离线快照见 `references/OPTIONS.md`)" if has_opts else "") + "。")
     num = [k for k in keys if k in numset]
     if num:
@@ -272,7 +285,7 @@ def _quality_section(m: SkillManifest) -> str:
         L.append(f"- 数值字段({'、'.join('`' + k + '`' for k in num)})为数字。")
     sel = _select_fields(props)
     if sel:
-        L.append(f"- 选择型字段({'、'.join('`' + k + '`' for k in sel)})传名字/选项文字,**非内部 ID**。")
+        L.append(f"- 选择型字段({'、'.join('`' + k + '`' for k in sel)})已从候选项中选择,提交的是对应 `value`。")
     for c in (f.get("computes") or []):
         L.append(f"- `{c['out']}` 与 `{c['expr']}` 的计算结果一致(给了不一致先与用户确认)。")
     for p in (f.get("preconditions") or []):
@@ -454,7 +467,7 @@ bash scripts/submit.sh {flags}{cflag}
 
 def _options_md(m: SkillManifest) -> str | None:
     """references/OPTIONS.md:选择型字段的**候选值清单**(快照进 skill,让 agent 从真实选项里选,不凭空猜)。
-    无任何选择型候选 → 返回 None(不产生空文件)。提交时 Dano 仍按名字现查内部 ID(选项更新以运行期为准)。"""
+    无任何选择型候选 → 返回 None(不产生空文件)。提交时用 value;选项更新以运行期为准。"""
     keys, _required, props = _fields(m)
     blocks: list[str] = []
     for k in keys:
@@ -465,13 +478,14 @@ def _options_md(m: SkillManifest) -> str | None:
         head = f"## {_label(props, k)}(`{k}`)— 共 {len(opts)} 项"
         if p.get("x-options-truncated"):
             head += "(快照截断,完整以运行期现查为准)"
-        lst = "\n".join(f"- {o}" for o in opts)
-        blocks.append(f"{head}\n\n传**名字/选项文字**(勿传 ID/编号):\n{lst}")
+        lst = "\n".join(f"- label: {_opt_label(o)} | value: `{_opt_value(o)}`" for o in opts)
+        blocks.append(f"{head}\n\n展示 `label`,提交对应 `value`:\n{lst}")
     if not blocks:
         return None
     return ("# 可选值参考\n\n选择型字段的候选值。**首选实时拉取**(最准):"
-            "`bash scripts/submit.sh --list-options <字段名>` —— Dano 直接调来源接口返回当前 `options`,从中选。\n"
-            "下面是录制时抓取的**离线快照**(可能过时,仅供快速参考);agent 传**名字/选项文字**,Dano 提交时按名字现查内部 ID。\n\n"
+            "`bash scripts/submit.sh --list-options <字段名>` —— Dano 直接调来源接口返回当前 `options`。"
+            "调用方展示 `label`,提交 `value`。\n"
+            "下面是录制时抓取的**离线快照**(可能过时,仅供快速参考);实时结果优先。\n\n"
             + "\n\n".join(blocks) + "\n")
 
 
@@ -539,9 +553,9 @@ def main():
     # 写操作默认**未确认**:不带 --confirm 调用会被 Dano 拦成 need_confirm(确认闸门不被绕过)。
     ap.add_argument("--confirm", action="store_true", default=False)
     ap.add_argument("--diagnose", action="store_true")
-    # 选某选择型字段前,**实时**拉它当前可选项(直接调来源接口):--list-options 字段名 → 从返回里选准确名字再提交。
+    # 选某选择型字段前,**实时**拉它当前可选项(直接调来源接口):--list-options 字段名 → 展示 label,提交 value。
     ap.add_argument("--list-options", dest="list_options", default=None, metavar="字段",
-                    help="实时列出某选择型字段的当前可选项(Dano 调来源接口),再从中选准确名字")
+                    help="实时列出某选择型字段的当前可选项(Dano 调来源接口);展示 label,提交 value")
     args = ap.parse_args()
 
     url = os.environ.get("DANO_URL")
@@ -551,7 +565,7 @@ def main():
         sys.exit(2)
     url = url.rstrip("/")
 
-    if args.list_options:                       # 实时拉某字段可选项(选择型)→ agent 从中选准确名字
+    if args.list_options:                       # 实时拉某字段可选项(选择型)→ 调用方展示 label,提交 value
         payload = json.dumps({"name": TOOL, "field": args.list_options}).encode("utf-8")
         req = urllib.request.Request(
             url + "/v1/tools/options", data=payload, method="POST",
