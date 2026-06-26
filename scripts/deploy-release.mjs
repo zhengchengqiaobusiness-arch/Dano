@@ -20,6 +20,11 @@ const runtimeDir = process.env.DANO_RUNTIME_DIR || "/opt/dano/runtime-data";
 const secretsDir = process.env.DANO_SECRETS_DIR || join(deployDir, ".secrets");
 const nginxConf = process.env.DANO_NGINX_CONF || join(deployDir, "nginx/default.conf");
 const envPath = join(deployDir, ".env");
+const defaultNpmRegistry = "https://mirrors.cloud.tencent.com/npm/";
+const npmRegistry =
+  process.env.NPM_REGISTRY ||
+  process.env.NPM_CONFIG_REGISTRY ||
+  defaultNpmRegistry;
 
 let buildDir;
 
@@ -91,7 +96,7 @@ try {
   run(composeBin, [
     "build",
     "--build-arg",
-    `NPM_CONFIG_REGISTRY=${process.env.NPM_CONFIG_REGISTRY || "https://registry.npmjs.org/"}`,
+    `NPM_REGISTRY=${npmRegistry}`,
     "-t",
     image,
     buildDir,

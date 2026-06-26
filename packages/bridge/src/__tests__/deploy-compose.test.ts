@@ -59,6 +59,75 @@ appendFileSync(process.env.DANO_COMPOSE_LOG, JSON.stringify(process.argv.slice(2
     .map(line => JSON.parse(line));
 }
 
+function runRelease(options: { env?: NodeJS.ProcessEnv } = {}) {
+  const cwd = mkdtempSync(join(tmpdir(), "dano-release-test-"));
+  tempDirs.push(cwd);
+  const fakeRepo = join(cwd, "repo");
+  const fakeBin = join(cwd, "bin");
+  const buildParent = join(cwd, "tmp");
+  const deployDir = join(cwd, "deploy");
+  const runtimeDir = join(cwd, "runtime");
+  const secretsDir = join(deployDir, ".secrets");
+  const nginxConf = join(deployDir, "nginx/default.conf");
+  const logPath = join(cwd, "commands.log");
+
+  mkdirSync(join(fakeRepo, "deploy/nginx"), { recursive: true });
+  mkdirSync(join(fakeRepo, "scripts"), { recursive: true });
+  mkdirSync(fakeBin);
+  mkdirSync(buildParent);
+  writeFileSync(join(fakeRepo, "docker-compose.yml"), "services:\n  app:\n");
+  writeFileSync(join(fakeRepo, "deploy/nginx/default.conf"), "server {}\n");
+  writeFileSync(
+    join(fakeRepo, "scripts/smoke-dano-deploy.mjs"),
+    "import { appendFileSync } from 'node:fs'; appendFileSync(process.env.DANO_COMMAND_LOG, 'smoke\\n');\n",
+  );
+  writeFileSync(
+    join(fakeBin, "git"),
+    `#!/usr/bin/env node
+import { cpSync } from "node:fs";
+const args = process.argv.slice(2);
+if (args[0] === "clone") cpSync(process.env.DANO_FAKE_REPO, args.at(-1), { recursive: true });
+`,
+  );
+  writeFileSync(
+    join(fakeBin, "compose"),
+    `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+appendFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");
+`,
+  );
+  chmodSync(join(fakeBin, "git"), 0o755);
+  chmodSync(join(fakeBin, "compose"), 0o755);
+
+  execFileSync(process.execPath, [releaseScript], {
+    cwd,
+    env: {
+      ...process.env,
+      ...options.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      DANO_COMMAND_LOG: logPath,
+      DANO_COMPOSE: "compose",
+      DANO_FAKE_REPO: fakeRepo,
+      DANO_REPO_URL: "fake",
+      DANO_GIT_REF: "abc123",
+      DANO_BUILD_PARENT_DIR: buildParent,
+      DANO_DEPLOY_DIR: deployDir,
+      DANO_RUNTIME_DIR: runtimeDir,
+      DANO_SECRETS_DIR: secretsDir,
+      DANO_NGINX_CONF: nginxConf,
+      DANO_SMOKE_BASE_URL: "http://127.0.0.1:18082",
+    },
+  });
+
+  return {
+    buildParent,
+    deployDir,
+    runtimeDir,
+    nginxConf,
+    logLines: readFileSync(logPath, "utf8").trim().split("\n"),
+  };
+}
+
 afterEach(() => {
   for (const path of tempDirs.splice(0)) rmSync(path, { recursive: true });
 });
@@ -100,63 +169,8 @@ describe("deploy compose wrapper", () => {
   });
 
   it("builds releases from a temporary checkout and cleans it up", () => {
-    const cwd = mkdtempSync(join(tmpdir(), "dano-release-test-"));
-    tempDirs.push(cwd);
-    const fakeRepo = join(cwd, "repo");
-    const fakeBin = join(cwd, "bin");
-    const buildParent = join(cwd, "tmp");
-    const deployDir = join(cwd, "deploy");
-    const runtimeDir = join(cwd, "runtime");
-    const secretsDir = join(deployDir, ".secrets");
-    const nginxConf = join(deployDir, "nginx/default.conf");
-    const logPath = join(cwd, "commands.log");
-
-    mkdirSync(join(fakeRepo, "deploy/nginx"), { recursive: true });
-    mkdirSync(join(fakeRepo, "scripts"), { recursive: true });
-    mkdirSync(fakeBin);
-    mkdirSync(buildParent);
-    writeFileSync(join(fakeRepo, "docker-compose.yml"), "services:\n  app:\n");
-    writeFileSync(join(fakeRepo, "deploy/nginx/default.conf"), "server {}\n");
-    writeFileSync(
-      join(fakeRepo, "scripts/smoke-dano-deploy.mjs"),
-      "import { appendFileSync } from 'node:fs'; appendFileSync(process.env.DANO_COMMAND_LOG, 'smoke\\n');\n",
-    );
-    writeFileSync(
-      join(fakeBin, "git"),
-      `#!/usr/bin/env node
-import { cpSync } from "node:fs";
-const args = process.argv.slice(2);
-if (args[0] === "clone") cpSync(process.env.DANO_FAKE_REPO, args.at(-1), { recursive: true });
-`,
-    );
-    writeFileSync(
-      join(fakeBin, "compose"),
-      `#!/usr/bin/env node
-import { appendFileSync } from "node:fs";
-appendFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");
-`,
-    );
-    chmodSync(join(fakeBin, "git"), 0o755);
-    chmodSync(join(fakeBin, "compose"), 0o755);
-
-    execFileSync(process.execPath, [releaseScript], {
-      cwd,
-      env: {
-        ...process.env,
-        PATH: `${fakeBin}:${process.env.PATH}`,
-        DANO_COMMAND_LOG: logPath,
-        DANO_COMPOSE: "compose",
-        DANO_FAKE_REPO: fakeRepo,
-        DANO_REPO_URL: "fake",
-        DANO_GIT_REF: "abc123",
-        DANO_BUILD_PARENT_DIR: buildParent,
-        DANO_DEPLOY_DIR: deployDir,
-        DANO_RUNTIME_DIR: runtimeDir,
-        DANO_SECRETS_DIR: secretsDir,
-        DANO_NGINX_CONF: nginxConf,
-        DANO_SMOKE_BASE_URL: "http://127.0.0.1:18082",
-      },
-    });
+    const { buildParent, deployDir, runtimeDir, nginxConf, logLines } =
+      runRelease();
 
     expect(readdirSync(buildParent)).toEqual([]);
     expect(readFileSync(join(deployDir, "docker-compose.yml"), "utf8")).toContain(
@@ -166,11 +180,10 @@ appendFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2
     expect(readFileSync(join(deployDir, ".env"), "utf8")).toContain(
       `DANO_RUNTIME_DIR=${runtimeDir}`,
     );
-    const logLines = readFileSync(logPath, "utf8").trim().split("\n");
     expect(JSON.parse(logLines[0])).toEqual([
       "build",
       "--build-arg",
-      "NPM_CONFIG_REGISTRY=https://registry.npmjs.org/",
+      "NPM_REGISTRY=https://mirrors.cloud.tencent.com/npm/",
       "-t",
       "dano-app:abc123",
       expect.stringContaining("dano-build-"),
@@ -184,5 +197,25 @@ appendFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2
       "--no-build",
     ]);
     expect(logLines[2]).toBe("smoke");
+  });
+
+  it("lets NPM_REGISTRY override the default release build registry", () => {
+    const { logLines } = runRelease({
+      env: { NPM_REGISTRY: "https://registry.npmjs.org/" },
+    });
+
+    expect(JSON.parse(logLines[0])).toContain(
+      "NPM_REGISTRY=https://registry.npmjs.org/",
+    );
+  });
+
+  it("keeps NPM_CONFIG_REGISTRY as a release build compatibility override", () => {
+    const { logLines } = runRelease({
+      env: { NPM_CONFIG_REGISTRY: "https://registry.example.test/" },
+    });
+
+    expect(JSON.parse(logLines[0])).toContain(
+      "NPM_REGISTRY=https://registry.example.test/",
+    );
   });
 });

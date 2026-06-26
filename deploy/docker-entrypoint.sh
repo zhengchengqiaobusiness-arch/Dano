@@ -4,8 +4,17 @@ set -eu
 workspace="${DANO_DEFAULT_WORKSPACE_PATH:-${DANO_DEFAULT_WORKSPACE:-/tmp/dano}}"
 runtime_defaults_dir="${DANO_RUNTIME_DEFAULTS_DIR:-/app/deploy/runtime-defaults}"
 runtime_settings_dir="$workspace/.pi"
+npm_registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-${DANO_DEFAULT_NPM_REGISTRY:-https://mirrors.cloud.tencent.com/npm/}}}"
 
 mkdir -p "$runtime_settings_dir"
+
+if command -v npm >/dev/null 2>&1; then
+  npm config set registry "$npm_registry" >/dev/null
+fi
+
+if command -v pnpm >/dev/null 2>&1; then
+  pnpm config set registry "$npm_registry" >/dev/null
+fi
 
 copy_default_if_missing() {
   file_name="$1"
