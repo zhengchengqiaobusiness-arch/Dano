@@ -6,4 +6,4 @@ The runtime image installs `ca-certificates` from the base Debian source before 
 
 Registry changes are verified at three boundaries: the release script build argument, the build stage npm/pnpm config used for dependency installs, and the runtime container npm config used for operational inspection.
 
-Code touchpoints: `Dockerfile`, `deploy/docker-entrypoint.sh`, `scripts/deploy-release.mjs`, and `packages/bridge/src/__tests__/deploy-compose.test.ts`.
+Code touchpoints: `Dockerfile`, `deploy/docker-entrypoint.sh`, `scripts/deploy-release.mjs`, and `apps/dano/src/bridge/__tests__/deploy-compose.test.ts`.
