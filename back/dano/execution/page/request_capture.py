@@ -13,7 +13,7 @@ import datetime as _dt
 import copy as _copy
 import json
 import re as _re
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 _WRITE = {"POST", "PUT", "PATCH", "DELETE"}
 # 「读请求」噪声:只排静态资源/流/心跳(通用,无任何业务路径名);保留字典/列表接口(select 候选源)。
@@ -333,6 +333,10 @@ _NAME_KEY_HINTS = ("name", "nick", "real", "full", "title", "label", "text", "ca
 _AVATAR_KEY_HINTS = ("avatar", "photo", "image", "head", "portrait", "icon")
 _ORG_KEY_HINTS = ("dept", "department", "org", "organ", "company", "unit", "group")
 _COUNT_KEY_HINTS = ("count", "num", "number", "qty", "quantity", "total", "size", "人数", "数量")
+_TYPE_KEY_HINTS = ("type", "kind", "category", "class", "role")
+_STATE_KEY_HINTS = ("status", "state", "stage", "phase")
+_PERSON_PATH_HINTS = ("participant", "attendee", "member", "employee", "person", "user", "staff",
+                      "approver", "assignee")
 
 
 def _norm_key(key: str) -> str:
@@ -352,6 +356,10 @@ def _key_role(key: str) -> str:
     raw = _norm_key(key)
     if _is_idlike(k) or _is_idlike(raw) or k in ("id", "userid", "uid"):
         return "id"
+    if any(h in k for h in _STATE_KEY_HINTS) or any(h in raw for h in _STATE_KEY_HINTS):
+        return "state"
+    if any(h in k for h in _TYPE_KEY_HINTS) or any(h in raw for h in _TYPE_KEY_HINTS):
+        return "type"
     if any(h in k for h in _AVATAR_KEY_HINTS) or any(h in raw for h in _AVATAR_KEY_HINTS):
         return "avatar"
     if any(h in k for h in _NAME_KEY_HINTS) or any(h in raw for h in _NAME_KEY_HINTS):
@@ -369,13 +377,74 @@ def _source_keys(sel: dict) -> set[str]:
     return {k for k in keys if k}
 
 
+def _path_entity_role(path: str) -> str:
+    raw = _norm_key(path)
+    if any(h in raw for h in _PERSON_PATH_HINTS):
+        return "person"
+    if any(h in raw for h in _ORG_KEY_HINTS):
+        return "org"
+    return ""
+
+
+def _path_last_key(path: str) -> str:
+    try:
+        toks = _split_path(path)
+        for tok in reversed(toks):
+            if not isinstance(tok, int):
+                return str(tok)
+    except Exception:  # noqa: BLE001
+        pass
+    tail = str(path or "").split(".")[-1]
+    return tail.split("[")[0]
+
+
+def _url_id_query_mentions_value(url: str | None, value) -> bool:
+    """Whether a read URL looks bound to the already selected entity id.
+
+    Example: ``/user/online-status?userIds=144,139`` can describe current
+    selected users, but it is not the general option source for choosing users.
+    """
+    u = str(url or "")
+    if not u or value in (None, ""):
+        return False
+    sv = str(value)
+    try:
+        query = urlparse(u).query
+    except Exception:  # noqa: BLE001
+        return False
+    for key, raw in parse_qsl(query, keep_blank_values=True):
+        nk = _norm_key(key)
+        if not (nk == "id" or nk.endswith("id") or nk.endswith("ids")):
+            continue
+        vals = [v.strip() for v in _re.split(r"[,;\s]+", str(raw)) if v.strip()]
+        if sv in vals:
+            return True
+    return False
+
+
+def _select_source_compatible_with_path(path: str, source_url: str | None, value_key: str,
+                                        label_key: str, source_keys: set[str], selected_value) -> bool:
+    if _url_id_query_mentions_value(source_url, selected_value):
+        return False
+    target_key = _path_last_key(path)
+    target_role = _key_role(target_key)
+    label_role = _key_role(label_key)
+    source_roles = {_key_role(k) for k in source_keys | {value_key, label_key} if k}
+    entity = _path_entity_role(path)
+    if entity == "person" and label_role == "org" and "name" not in source_roles:
+        return False
+    if target_role == "name" and label_role not in {"name", "other"} and "name" not in source_roles:
+        return False
+    return True
+
+
 def _compatible_source_key(target_key: str, source_key: str, *, value_key: str, label_key: str) -> bool:
     tr, sr = _key_role(target_key), _key_role(source_key)
     if _norm_key(target_key) == _norm_key(source_key):
         return True
     if tr == "id" and source_key == value_key:
         return True
-    if tr == "name" and source_key == label_key:
+    if tr == "name" and source_key == label_key and _key_role(label_key) == "name":
         return True
     if tr in ("avatar", "org") and tr == sr:
         return True
@@ -396,8 +465,10 @@ def _array_source_score(template: dict, sel: dict, leaf_key: str) -> int:
         role = _key_role(tk)
         if role == "id" and vkey:
             score += 4
-        elif role == "name" and lkey:
+        elif role == "name" and _key_role(lkey) == "name":
             score += 5
+        elif role == "name" and any(_key_role(sk) == "name" for sk in skeys):
+            score += 3
         elif role in ("avatar", "org") and any(_key_role(sk) == role for sk in skeys):
             score += 4
         elif any(_compatible_source_key(tk, sk, value_key=vkey, label_key=lkey) for sk in skeys):
@@ -409,6 +480,54 @@ def _array_source_score(template: dict, sel: dict, leaf_key: str) -> int:
     score += 2 if _is_idlike(leaf_key) else 0
     score += 1 if _key_role(leaf_key) == "name" else 0
     return score
+
+
+def _fingerprint_value(value) -> str:
+    if isinstance(value, (dict, list)):
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except Exception:  # noqa: BLE001
+            return str(value)
+    return _norm_scalar(value)
+
+
+def _array_variable_item_keys(items: list) -> set[str]:
+    keys: set[str] = set()
+    if not all(isinstance(it, dict) for it in items):
+        return keys
+    all_keys = set().union(*(it.keys() for it in items))
+    for key in all_keys:
+        vals = {_fingerprint_value(it.get(key)) for it in items if it.get(key) not in (None, "")}
+        if len(vals) > 1:
+            keys.add(str(key))
+    return keys
+
+
+def _array_source_covers_item_shape(items: list, sel: dict, leaf_key: str, selected_value) -> bool:
+    """Hard gate for folding object arrays into a public array selector.
+
+    The source must be a real reusable option list, and it must explain every
+    per-item field that changes with the chosen option. Constant fields such as
+    participantType=2 stay in the item template; userId/userName/avatar must
+    come from the selected option source.
+    """
+    explicit_source_keys = bool(sel.get("source_keys"))
+    source_keys = _source_keys(sel)
+    path = str(sel.get("path") or "")
+    vkey, lkey = str(sel.get("value_key") or ""), str(sel.get("label_key") or "")
+    if not _select_source_compatible_with_path(path, sel.get("source_url"), vkey, lkey, source_keys, selected_value):
+        return False
+    variable_keys = _array_variable_item_keys(items)
+    variable_keys.add(str(leaf_key or sel.get("target_key") or vkey or ""))
+    for key in variable_keys:
+        role = _key_role(key)
+        if role not in {"id", "name", "avatar", "org"}:
+            continue
+        if role in {"avatar", "org"} and not explicit_source_keys:
+            continue
+        if not any(_compatible_source_key(key, sk, value_key=vkey, label_key=lkey) for sk in source_keys):
+            return False
+    return True
 
 
 def _array_target_key(paths: list[tuple[str, list, list]], primary_leaf: str, sel: dict) -> str:
@@ -454,6 +573,29 @@ def _format_mirror_value(value, style: str):
     return value
 
 
+_MIRROR_STRICT_ROLES = {"id", "type", "state", "count", "avatar", "org"}
+
+
+def _has_list_index(tokens: list) -> bool:
+    return any(isinstance(t, int) for t in tokens or [])
+
+
+def _mirror_allowed(src_path: str, src_toks: list, tgt_path: str, tgt_toks: list) -> bool:
+    src_key = _path_last_key(src_path)
+    tgt_key = _path_last_key(tgt_path)
+    src_role = _key_role(src_key)
+    tgt_role = _key_role(tgt_key)
+    if tgt_role in _MIRROR_STRICT_ROLES and src_role != tgt_role:
+        return False
+    if src_role in _MIRROR_STRICT_ROLES and src_role != tgt_role:
+        return False
+    if tgt_role == "name" and src_role not in {"name", "other"}:
+        return False
+    if not _has_list_index(tgt_toks) and _norm_key(src_key) != _norm_key(tgt_key):
+        return False
+    return True
+
+
 def _derived_mirror_specs(body, path_names: dict) -> list[dict]:
     """Find duplicated scalar leaves where one user input should mirror another body path.
 
@@ -482,6 +624,8 @@ def _derived_mirror_specs(body, path_names: dict) -> list[dict]:
             if tgt_path == src_path or tgt_path in path_names or tgt_path in seen_targets:
                 continue
             if "[" not in tgt_path and len(rows) > 2:
+                continue
+            if not _mirror_allowed(src_path, src_toks, tgt_path, tgt_toks):
                 continue
             seen_targets.add(tgt_path)
             out.append({
@@ -665,6 +809,8 @@ def _array_select_specs(body, path_names: dict, selects: list[dict] | None) -> l
             info = _array_leaf_info(toks)
             rel = info[2] if info else []
             leaf = str(rel[-1]) if rel else ""
+            if not _array_source_covers_item_shape(root_node, s, leaf, _raw):
+                continue
             score = _array_source_score(item_template, s, leaf)
             candidates.append((score, s, leaf))
         if not candidates:
@@ -809,10 +955,13 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
             match_item = _find_select_item(items, vk, lk, sv, mode, label)
             option_filter = _derive_option_filter(match_item, items, vk, lk)
             option_items = _apply_option_filter(items, option_filter)
+            source_keys = set(match_item.keys()) if isinstance(match_item, dict) else set()
+            if not _select_source_compatible_with_path(path, r.get("url"), vk, lk, source_keys, sv):
+                continue
             entry = {"path": path, "tokens": toks, "value": sv, "source_url": r.get("url"),
                      "value_key": vk, "label_key": lk, "label": label, "count": len(option_items),
                      "options": _list_options(items, lk, vk, option_filter),   # 候选 {label,value} 快照,前端提交稳定 value
-                     "source_keys": sorted(match_item.keys()) if isinstance(match_item, dict) else [],
+                     "source_keys": sorted(source_keys),
                      "submit_mode": "value",
                      "_confirmed": confirmed}
             if option_filter:

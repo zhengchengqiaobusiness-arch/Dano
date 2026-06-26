@@ -132,6 +132,33 @@ def _source_schema(selects: list[dict]) -> dict:
     return sources
 
 
+def _derived(api_request: dict | None, selects: list[dict]) -> list[dict]:
+    apir = api_request or {}
+    last = _last_request(apir)
+    out = copy.deepcopy(apir.get("derived_fields") or last.get("derived_fields") or [])
+    seen = {
+        (d.get("kind") or "mirror", d.get("target_path"), d.get("source_path"), d.get("input"))
+        for d in out if isinstance(d, dict)
+    }
+    for s in selects:
+        if s.get("kind") != "array":
+            continue
+        for d in s.get("derived_count_paths") or []:
+            item = {
+                "kind": "array_count",
+                "input": s.get("param"),
+                "source_path": s.get("array_path") or s.get("path"),
+                "target_path": d.get("path"),
+                "target_tokens": d.get("tokens"),
+                "step": s.get("step", 0),
+            }
+            key = (item["kind"], item["target_path"], item["source_path"], item["input"])
+            if item["target_path"] and key not in seen:
+                seen.add(key)
+                out.append(item)
+    return out
+
+
 def _input_schema(params: list[str], field_types: dict, selects: list[dict],
                   required_fields: list[str] | None) -> dict:
     sel_by_param = {s.get("param"): s for s in selects if s.get("param")}
@@ -178,7 +205,7 @@ def build_skill_interface(api_request: dict | None, *,
         "source_schema": _source_schema(sels),
         "bindings": bindings,
         "identity": copy.deepcopy(apir.get("identity") or last.get("identity") or []),
-        "derived": copy.deepcopy(apir.get("derived_fields") or last.get("derived_fields") or []),
+        "derived": _derived(apir, sels),
         "success": copy.deepcopy(apir.get("success_rule") or last.get("success_rule") or {}),
         "provenance": {
             "transaction_ir_version": (tx_ir or {}).get("version"),

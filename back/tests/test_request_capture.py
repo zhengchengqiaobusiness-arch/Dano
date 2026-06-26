@@ -329,6 +329,8 @@ def test_skill_interface_describes_sources_bindings_and_derived():
     bind = next(b for b in iface["bindings"] if b["input"] == "参会人")
     assert bind["mode"] == "expand_array" and bind["target_path"] == "participants"
     assert bind["expand_fields"] and "userId" in bind["expand_fields"]
+    assert any(d["kind"] == "array_count" and d["input"] == "参会人" and d["target_path"] == "userCount"
+               for d in iface["derived"])
     assert "姜楠" not in json.dumps(iface, ensure_ascii=False)
 
 
@@ -441,6 +443,37 @@ def test_array_select_prefers_source_that_explains_whole_item_shape():
     assert not any(f["path"] == "userCount" for f in out_fields)
 
 
+def test_suggest_selects_rejects_instance_bound_status_source_for_person_picker():
+    """详情/状态接口只描述当前已选对象,不能作为前端可选枚举源暴露。"""
+    body = ('{"participants":['
+            '{"userId":144,"userName":"姜楠","userAvatar":"old-a","participantType":2},'
+            '{"userId":139,"userName":"李四","userAvatar":"old-b","participantType":2}]}')
+    reads = [{"url": "/im/user/online-status?userIds=144,139", "json": {"data": [
+        {"id": 144, "deptName": "市场部门", "online": True},
+        {"id": 139, "deptName": "财务部门", "online": False},
+    ]}}]
+    assert suggest_selects(body, reads, {"参会人": "姜楠"}) == []
+
+
+def test_array_select_does_not_fold_when_source_cannot_cover_variable_item_fields():
+    """只命中 id 但不能解释 name/avatar 的源,不能折叠成数组选择参数。"""
+    body = ('{"userCount":2,"participants":['
+            '{"userId":144,"userName":"姜楠","userAvatar":"old-a","participantType":2},'
+            '{"userId":139,"userName":"李四","userAvatar":"old-b","participantType":2}]}')
+    fields = flatten_body(body, {"参会人": "姜楠"})
+    selects = [
+        {"path": "participants[0].userId", "source_url": "/dept/tree", "value_key": "id",
+         "label_key": "deptName", "source_keys": ["id", "deptName"],
+         "options": [{"label": "市场部门", "value": "144"}], "count": 8},
+        {"path": "participants[1].userId", "source_url": "/dept/tree", "value_key": "id",
+         "label_key": "deptName", "source_keys": ["id", "deptName"],
+         "options": [{"label": "财务部门", "value": "139"}], "count": 8},
+    ]
+    out_fields, out_selects = fold_array_select_fields(body, fields, selects)
+    assert not any(s.get("kind") == "array" for s in out_selects)
+    assert not any(f.get("path") == "participants" and f.get("array_select") for f in out_fields)
+
+
 def test_derived_mirror_field_collapses_duplicate_scalar_list_value():
     """展示字段 + 列表副本:只暴露一个输入,副本由运行期派生同步。"""
     body = '{"timeSlot":"10:00 - 10:30","timeRangeList":["10:00-10:30"],"remark":"x"}'
@@ -456,6 +489,16 @@ def test_derived_mirror_field_collapses_duplicate_scalar_list_value():
         "param": "时间段",
         "style": "compact_dash",
     }]
+
+
+def test_derived_mirror_does_not_cross_semantic_roles():
+    body = ('{"organizer":2,"participants":['
+            '{"userId":144,"userName":"姜楠","participantType":2},'
+            '{"userId":139,"userName":"李四","participantType":2}]}')
+    fields = flatten_body(body, {"组织人": 2})
+    out_fields, mirrors = fold_derived_mirror_fields(body, fields)
+    assert any(f["path"] == "organizer" for f in out_fields)
+    assert not mirrors
 
 
 def test_build_api_request_applies_derived_mirror_field():
