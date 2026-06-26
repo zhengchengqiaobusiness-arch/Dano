@@ -89,7 +89,7 @@ describe("bash tool block", () => {
     ).toBeUndefined();
   });
 
-  it("keeps non-zero exit metadata for failed bash calls", () => {
+  it("hides non-zero exit metadata for failed bash calls", () => {
     expect(
       buildToolInlineModel(
         bashBlock({
@@ -97,7 +97,7 @@ describe("bash tool block", () => {
           resultText: "failed\nCommand exited with code 2",
         }),
       ).meta,
-    ).toBe("exit 2");
+    ).toBeUndefined();
   });
 
   it("keeps bash timeout metadata without adding exit 0", () => {
