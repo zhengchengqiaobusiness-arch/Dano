@@ -39,7 +39,7 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 - Use `pnpm test` for Vitest coverage.
 - Use `pnpm run build` before validating the built server.
 - For UI changes, verify the rendered app in a browser against the relevant flow.
-- After Podman-based deployment or smoke tests, remove Dano temporary images/tags and dangling build layers after confirming no containers reference them; keep reusable base images unless explicitly asked.
+- After Podman-based deployment or smoke tests, stop and remove the test containers and pods, then remove Dano temporary images/tags and dangling build layers after confirming no containers reference them; keep reusable base images unless explicitly asked.
 
 ## GitHub Workflow
 
