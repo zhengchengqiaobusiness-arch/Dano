@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": "../..",
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "isolatedModules": true,
+    "noEmit": true,
+    "types": ["svelte"]
+  },
+  "include": ["web/src/**/*.ts", "web/src/**/*.svelte"]
+}

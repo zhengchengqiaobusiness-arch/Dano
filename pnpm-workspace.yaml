@@ -1,6 +1,7 @@
 packages:
   - "apps/*"
-  - "packages/*"
+patchedDependencies:
+  '@casualjim/pi-heimdall@0.2.10': patches/@casualjim__pi-heimdall@0.2.10.patch
 allowBuilds:
   '@google/genai': true
   koffi: true

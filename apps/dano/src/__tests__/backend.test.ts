@@ -3,9 +3,9 @@ import type {
   AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_BRIDGE_CONFIG } from "@dano/bridge/types";
-import { createStandaloneBridgeContextFromSession } from "../backend.js";
-import { startStandaloneBridge } from "../server.js";
+import { DEFAULT_BRIDGE_CONFIG } from "../bridge/types.js";
+import { createDanoBackendFromSession } from "../backend.js";
+import { startDanoServer } from "../server.js";
 
 function createMockSession() {
   let eventHandler: ((event: AgentSessionEvent) => void) | undefined;
@@ -101,10 +101,10 @@ function createMockSession() {
   };
 }
 
-describe("standalone bridge backend", () => {
+describe("Dano backend", () => {
   it("adapts an AgentSession into bridge state, actions, and events", async () => {
     const mock = createMockSession();
-    const backend = createStandaloneBridgeContextFromSession(mock.session);
+    const backend = createDanoBackendFromSession(mock.session);
     const received: string[] = [];
 
     backend.context.events.subscribe(event => {
@@ -180,7 +180,7 @@ describe("standalone bridge backend", () => {
     expect(mock.session.dispose).toHaveBeenCalled();
   });
 
-  it("hydrates a missing standalone current model and writes it to the session", () => {
+  it("hydrates a missing Dano current model and writes it to the session", () => {
     const model = {
       id: "gpt-4",
       name: "GPT-4",
@@ -241,7 +241,7 @@ describe("standalone bridge backend", () => {
       dispose: vi.fn(),
     };
 
-    const backend = createStandaloneBridgeContextFromSession(
+    const backend = createDanoBackendFromSession(
       session as unknown as AgentSession,
     );
 
@@ -259,7 +259,7 @@ describe("standalone bridge backend", () => {
     );
   });
 
-  it("uses Dano config before Pi settings when hydrating standalone state", () => {
+  it("uses Dano config before Pi settings when hydrating Dano state", () => {
     const xiaomiModel = {
       id: "mimo-v2.5",
       name: "MiMo V2.5",
@@ -330,7 +330,7 @@ describe("standalone bridge backend", () => {
       dispose: vi.fn(),
     };
 
-    const backend = createStandaloneBridgeContextFromSession(
+    const backend = createDanoBackendFromSession(
       session as unknown as AgentSession,
       {
         defaultProvider: "xiaomi-token-plan-cn",
@@ -418,7 +418,7 @@ describe("standalone bridge backend", () => {
       dispose: vi.fn(),
     };
 
-    const backend = createStandaloneBridgeContextFromSession(
+    const backend = createDanoBackendFromSession(
       session as unknown as AgentSession,
       {
         defaultProvider: "xiaomi-token-plan-cn",
@@ -437,10 +437,10 @@ describe("standalone bridge backend", () => {
     );
   });
 
-  it("starts and stops the standalone server lifecycle", async () => {
+  it("starts and stops the Dano server lifecycle", async () => {
     const mock = createMockSession();
-    const backend = createStandaloneBridgeContextFromSession(mock.session);
-    const controller = await startStandaloneBridge(
+    const backend = createDanoBackendFromSession(mock.session);
+    const controller = await startDanoServer(
       { ...DEFAULT_BRIDGE_CONFIG, port: 0 },
       {
         backend,
@@ -460,9 +460,9 @@ describe("standalone bridge backend", () => {
 
   it("reuses a provided backend across bridge restarts", async () => {
     const mock = createMockSession();
-    const backend = createStandaloneBridgeContextFromSession(mock.session);
+    const backend = createDanoBackendFromSession(mock.session);
 
-    const first = await startStandaloneBridge(
+    const first = await startDanoServer(
       { ...DEFAULT_BRIDGE_CONFIG, port: 0 },
       {
         backend,
@@ -471,7 +471,7 @@ describe("standalone bridge backend", () => {
     );
     await first.stop();
 
-    const second = await startStandaloneBridge(
+    const second = await startDanoServer(
       { ...DEFAULT_BRIDGE_CONFIG, port: 0 },
       {
         backend,

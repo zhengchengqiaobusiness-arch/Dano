@@ -3,31 +3,31 @@ import {
   type AgentSession,
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
-import type { DanoConfig } from "@dano/bridge/dano-config";
-import { loadDanoConfig } from "@dano/bridge/dano-config";
-import { createDetachedAgentSession } from "@dano/bridge/detached-session";
+import type { DanoConfig } from "./bridge/dano-config.js";
+import { loadDanoConfig } from "./bridge/dano-config.js";
+import { createDetachedAgentSession } from "./bridge/detached-session.js";
 import {
   resolveAgentSessionDefaults,
   resolveAgentSessionModel,
   type DefaultSessionSettings,
-} from "@dano/bridge/default-model";
-import { createHeadlessUIContext } from "@dano/bridge/headless-ui-context";
+} from "./bridge/default-model.js";
+import { createHeadlessUIContext } from "./bridge/headless-ui-context.js";
 import type {
   BridgeLiveEvent,
   BridgeSessionActions,
   BridgeSessionEvents,
   BridgeSessionState,
-} from "@dano/bridge/live-session";
-import type { RpcThinkingLevel } from "@dano/bridge/types";
-import type { WsRpcAdapterContext } from "@dano/bridge/ws-rpc-adapter";
+} from "./bridge/live-session.js";
+import type { BridgeRpcAdapterContext } from "./bridge/bridge-rpc-adapter.js";
+import type { RpcThinkingLevel } from "../types/protocol.js";
 
-export interface StandaloneBridgeBackend {
-  readonly context: WsRpcAdapterContext;
+export interface DanoBackend {
+  readonly context: BridgeRpcAdapterContext;
   readonly session: AgentSession;
   dispose(): Promise<void>;
 }
 
-export interface CreateStandaloneBridgeContextOptions {
+export interface CreateDanoBackendOptions {
   cwd?: string;
   sessionPath?: string;
   sessionDir?: string;
@@ -167,10 +167,10 @@ function toBridgeLiveEvent(event: AgentSessionEvent): BridgeLiveEvent | null {
   }
 }
 
-export function createStandaloneBridgeContextFromSession(
+export function createDanoBackendFromSession(
   session: AgentSession,
   danoConfig: DanoConfig = {},
-): StandaloneBridgeBackend {
+): DanoBackend {
   let pendingMessageCount = 0;
   const liveEventHandlers = new Set<(event: BridgeLiveEvent) => void>();
 
@@ -179,7 +179,7 @@ export function createStandaloneBridgeContextFromSession(
       try {
         handler(event);
       } catch (error) {
-        console.error("Standalone bridge event handler error:", error);
+        console.error("Dano server event handler error:", error);
       }
     }
   };
@@ -317,9 +317,9 @@ export function createStandaloneBridgeContextFromSession(
   };
 }
 
-export async function createStandaloneBridgeContext(
-  options: CreateStandaloneBridgeContextOptions = {},
-): Promise<StandaloneBridgeBackend> {
+export async function createDanoBackend(
+  options: CreateDanoBackendOptions = {},
+): Promise<DanoBackend> {
   const cwd = options.cwd?.trim() || process.cwd();
   const danoConfig =
     options.danoConfig ??
@@ -339,15 +339,15 @@ export async function createStandaloneBridgeContext(
   );
 
   await result.session.bindExtensions({
-    uiContext: createHeadlessUIContext(),
-    onError: error => {
-      console.error(
-        `Standalone bridge extension error (${error.extensionPath}):`,
-        error.error,
-      );
+      uiContext: createHeadlessUIContext(),
+      onError: error => {
+        console.error(
+          `Dano server extension error (${error.extensionPath}):`,
+          error.error,
+        );
     },
     shutdownHandler: () => {},
   });
 
-  return createStandaloneBridgeContextFromSession(result.session, danoConfig);
+  return createDanoBackendFromSession(result.session, danoConfig);
 }

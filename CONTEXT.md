@@ -9,5 +9,5 @@ A native network capability for the Dano Agent, which does not expose a shell. I
 _Avoid_: REST runtime, HTTP client, policy engine
 
 **Dano Bridge**:
-The internal HTTP/SSE and RPC subsystem inside the Dano server that connects browser clients to runtime session capabilities. It is a source-module boundary, not an independent workspace package or standalone service.
-_Avoid_: @dano/bridge package, standalone bridge, bridge service
+The internal HTTP/SSE and RPC subsystem inside the Dano server that connects browser clients to runtime session capabilities. It is a source-module boundary, not an independent workspace package or separate service.
+_Avoid_: bridge workspace package, separate bridge service

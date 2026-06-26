@@ -38,7 +38,7 @@ copy_default_if_missing "settings.json"
 copy_default_if_missing "heimdall.json"
 
 if [ "$#" -eq 0 ]; then
-  set -- node ./dist/bridge/standalone/main.js
+  set -- node ./dist/server/main.js
 fi
 
 exec "$@"

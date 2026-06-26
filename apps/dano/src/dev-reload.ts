@@ -11,25 +11,26 @@ const DEV_APP_ENTRY_SEGMENT = `${sep}apps${sep}dano${sep}src${sep}`;
 const DEFAULT_DEBOUNCE_MS = 75;
 const IGNORED_DIRECTORIES = new Set([".git", "dist", "node_modules"]);
 
-export interface StandaloneDevReloadController {
+export interface DanoDevReloadController {
   readonly watchPath: string;
+  readonly watchPaths: readonly string[];
   reloadRequested(): boolean;
   dispose(): void;
 }
 
-export interface StandaloneDevReloadControllerOptions {
+export interface DanoDevReloadControllerOptions {
   entryFile: string;
   stop: () => Promise<void> | void;
   debounceMs?: number;
   logger?: Pick<Console, "error" | "log">;
 }
 
-interface StandaloneDevReloadChange {
+interface DanoDevReloadChange {
   eventType: "change" | "rename";
   filename?: string;
 }
 
-export function resolveStandaloneDevWatchPath(
+export function resolveDanoDevWatchPath(
   entryFile: string,
 ): string | undefined {
   const resolvedEntryFile = resolve(entryFile);
@@ -39,10 +40,10 @@ export function resolveStandaloneDevWatchPath(
   }
 
   const workspaceRoot = resolvedEntryFile.slice(0, markerIndex);
-  return join(workspaceRoot, "apps", "dano");
+  return join(workspaceRoot, "apps", "dano", "src");
 }
 
-function listBridgeWatchDirectories(rootPath: string): string[] {
+function listDanoWatchDirectories(rootPath: string): string[] {
   const directories: string[] = [];
 
   const visit = (directoryPath: string): void => {
@@ -60,10 +61,10 @@ function listBridgeWatchDirectories(rootPath: string): string[] {
   return directories;
 }
 
-export function createStandaloneDevReloadController(
-  options: StandaloneDevReloadControllerOptions,
-): StandaloneDevReloadController | undefined {
-  const watchPath = resolveStandaloneDevWatchPath(options.entryFile);
+export function createDanoDevReloadController(
+  options: DanoDevReloadControllerOptions,
+): DanoDevReloadController | undefined {
+  const watchPath = resolveDanoDevWatchPath(options.entryFile);
   if (
     !watchPath ||
     !existsSync(watchPath) ||
@@ -74,12 +75,17 @@ export function createStandaloneDevReloadController(
 
   const debounceMs = options.debounceMs ?? DEFAULT_DEBOUNCE_MS;
   const logger = options.logger ?? console;
+  const appRoot = dirname(watchPath);
+  const watchPaths = [
+    watchPath,
+    join(appRoot, "types"),
+  ].filter(path => existsSync(path) && statSync(path).isDirectory());
 
   let disposed = false;
   let requested = false;
   let debounceTimer: NodeJS.Timeout | undefined;
   let rescanScheduled = false;
-  let lastChange: StandaloneDevReloadChange = { eventType: "change" };
+  let lastChange: DanoDevReloadChange = { eventType: "change" };
   const watchers = new Map<string, FSWatcher>();
 
   const cleanupWatchers = (): void => {
@@ -94,11 +100,9 @@ export function createStandaloneDevReloadController(
       return;
     }
 
-    const workspaceRoot = dirname(dirname(watchPath));
-    const nextDirectories = new Set([
-      ...listBridgeWatchDirectories(watchPath),
-      ...listBridgeWatchDirectories(join(workspaceRoot, "packages", "bridge")),
-    ]);
+    const nextDirectories = new Set(
+      watchPaths.flatMap(path => listDanoWatchDirectories(path)),
+    );
 
     for (const [directoryPath, watcher] of watchers) {
       if (nextDirectories.has(directoryPath)) {
@@ -147,12 +151,12 @@ export function createStandaloneDevReloadController(
             ? ` (${lastChange.filename})`
             : "";
           logger.log(
-            `[pi-web] Detected source change${changedPath}; reloading standalone runtime...`,
+            `[dano] Detected source change${changedPath}; reloading Dano runtime...`,
           );
 
           Promise.resolve(options.stop()).catch(error => {
             logger.error(
-              "[pi-web] Failed to stop standalone bridge for hot reload:",
+              "[dano] Failed to stop Dano server for hot reload:",
               error,
             );
           });
@@ -161,7 +165,7 @@ export function createStandaloneDevReloadController(
 
       watcher.on("error", error => {
         if (!disposed) {
-          logger.error("[pi-web] Standalone bridge dev watcher error:", error);
+          logger.error("[dano] Dano server dev watcher error:", error);
         }
       });
 
@@ -170,10 +174,11 @@ export function createStandaloneDevReloadController(
   };
 
   refreshWatchers();
-  logger.log(`[pi-web] Watching standalone sources: ${watchPath}`);
+  logger.log(`[dano] Watching Dano sources: ${watchPaths.join(", ")}`);
 
   return {
     watchPath,
+    watchPaths,
     reloadRequested() {
       return requested;
     },

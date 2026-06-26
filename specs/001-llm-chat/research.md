@@ -1,18 +1,18 @@
 # Research: P0 LLM Chat
 
-## Decision: Adapt `pi-web-main` standalone path, not Pi extension or Electron paths
+## Decision: Adapt `pi-web-main` browser-server path, not Pi extension or Electron paths
 
-**Rationale**: The reference project already has the useful P0 shape: a standalone Node bridge and a Svelte browser UI. The user explicitly asked to remove `pi-extension` mode and Electron mode while keeping web standalone mode. Keeping only `packages/bridge` and `packages/svelte` gives the shortest path to a browser chat that talks to a server-side LLM runtime.
+**Rationale**: The reference project already has the useful P0 shape: a Node bridge and a Svelte browser UI. The user explicitly asked to remove `pi-extension` mode and Electron mode while keeping browser + server mode. Consolidating bridge and web code into `apps/dano` gives the shortest path to a browser chat that talks to a server-side LLM runtime.
 
 **Alternatives considered**:
 
 - Keep Pi extension mode: rejected because P0 must be browser + server LLM, not Pi TUI extension.
-- Keep Electron mode: rejected because P0 deployment target is web standalone and Docker.
+- Keep Electron mode: rejected because P0 deployment target is browser + server and Docker.
 - Rebuild from scratch: rejected because `pi-web-main` already contains working chat/session UI patterns and runtime wiring.
 
 ## Decision: Keep server-side runtime dependency
 
-**Rationale**: `references/pi-web-main/packages/bridge/src/standalone/backend.ts` creates a detached agent session using the runtime dependency and exposes session actions. P0 requires the LLM to run on the server side. Keeping that runtime dependency prevents model credentials and execution state from moving into the browser.
+**Rationale**: The reference server path creates a detached agent session using the runtime dependency and exposes session actions. P0 requires the LLM to run on the server side. Keeping that runtime dependency prevents model credentials and execution state from moving into the browser.
 
 **Alternatives considered**:
 
@@ -52,7 +52,7 @@
 
 ## Decision: Docker Compose for P0 packaging
 
-**Rationale**: A multi-stage Dockerfile can build the TypeScript/Svelte app and produce a small runtime image for the standalone Node server. Docker Compose can pair that app image with nginx without introducing a multi-process container.
+**Rationale**: A multi-stage Dockerfile can build the TypeScript/Svelte app and produce a small runtime image for the Node server. Docker Compose can pair that app image with nginx without introducing a multi-process container.
 
 **Alternatives considered**:
 
@@ -62,7 +62,7 @@
 
 ## Decision: Use `dano-assistant.svg` as browser-visible product icon
 
-**Rationale**: The provided SVG is already a standalone product icon with accessible label. It should be copied into the web client's public assets and referenced from HTML/favicon and visible app branding.
+**Rationale**: The provided SVG is already a product icon with accessible label. It should be copied into the web client's public assets and referenced from HTML/favicon and visible app branding.
 
 **Alternatives considered**:
 

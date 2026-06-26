@@ -7,7 +7,6 @@ node_modules/
 runtime-data/
 .secrets/
 dist/
-web-dist/
 coverage/
 *.log
 *.tsbuildinfo

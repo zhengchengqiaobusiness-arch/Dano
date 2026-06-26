@@ -11,9 +11,7 @@ files.
 ## Structure
 
 ```text
-apps/dano         Standalone Dano server and Pi runtime application
-packages/bridge   Reusable HTTP API and SSE bridge capabilities
-packages/svelte   Browser chat UI
+apps/dano         Dano server, browser UI, and Pi runtime application
 deploy/nginx      nginx reverse proxy config for container deployment
 deploy/runtime-defaults
                   Source defaults copied into the runtime workspace on startup
@@ -115,11 +113,11 @@ pnpm run test
 pnpm run build
 ```
 
-Run the standalone Dano app after building:
+Run the Dano app after building:
 
 ```bash
 pnpm run build
-pnpm run start:bridge:standalone -- --host 127.0.0.1 --port 8080
+pnpm run start -- --host 127.0.0.1 --port 8080
 ```
 
 Open:
