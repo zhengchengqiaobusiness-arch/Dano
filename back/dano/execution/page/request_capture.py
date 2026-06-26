@@ -329,6 +329,187 @@ _ARRAY_PARAM_LABELS = (
     ("approver", "审批人"),
     ("assignee", "处理人"),
 )
+_NAME_KEY_HINTS = ("name", "nick", "real", "full", "title", "label", "text", "caption")
+_AVATAR_KEY_HINTS = ("avatar", "photo", "image", "head", "portrait", "icon")
+_ORG_KEY_HINTS = ("dept", "department", "org", "organ", "company", "unit", "group")
+_COUNT_KEY_HINTS = ("count", "num", "number", "qty", "quantity", "total", "size", "人数", "数量")
+
+
+def _norm_key(key: str) -> str:
+    return str(key or "").lower().replace("_", "").replace("-", "")
+
+
+def _strip_entity_prefix(key: str) -> str:
+    k = _norm_key(key)
+    for p in ("participant", "attendee", "member", "employee", "person", "user", "staff", "approver", "assignee"):
+        if k.startswith(p) and len(k) > len(p):
+            return k[len(p):]
+    return k
+
+
+def _key_role(key: str) -> str:
+    k = _strip_entity_prefix(key)
+    raw = _norm_key(key)
+    if _is_idlike(k) or _is_idlike(raw) or k in ("id", "userid", "uid"):
+        return "id"
+    if any(h in k for h in _AVATAR_KEY_HINTS) or any(h in raw for h in _AVATAR_KEY_HINTS):
+        return "avatar"
+    if any(h in k for h in _NAME_KEY_HINTS) or any(h in raw for h in _NAME_KEY_HINTS):
+        return "name"
+    if any(h in raw for h in _ORG_KEY_HINTS):
+        return "org"
+    if any(h in raw for h in _COUNT_KEY_HINTS):
+        return "count"
+    return "other"
+
+
+def _source_keys(sel: dict) -> set[str]:
+    keys = {str(k) for k in (sel.get("source_keys") or []) if k}
+    keys |= {str(sel.get("value_key") or ""), str(sel.get("label_key") or "")}
+    return {k for k in keys if k}
+
+
+def _compatible_source_key(target_key: str, source_key: str, *, value_key: str, label_key: str) -> bool:
+    tr, sr = _key_role(target_key), _key_role(source_key)
+    if _norm_key(target_key) == _norm_key(source_key):
+        return True
+    if tr == "id" and source_key == value_key:
+        return True
+    if tr == "name" and source_key == label_key:
+        return True
+    if tr in ("avatar", "org") and tr == sr:
+        return True
+    return False
+
+
+def _array_source_score(template: dict, sel: dict, leaf_key: str) -> int:
+    """Score one candidate source against the whole target array item shape.
+
+    This is intentionally shape-based, not business-name based: a user list that
+    can explain id + name + avatar should beat a department tree that only happens
+    to share the recorded id value.
+    """
+    vkey, lkey = str(sel.get("value_key") or ""), str(sel.get("label_key") or "")
+    skeys = _source_keys(sel)
+    score = 0
+    for tk in template:
+        role = _key_role(tk)
+        if role == "id" and vkey:
+            score += 4
+        elif role == "name" and lkey:
+            score += 5
+        elif role in ("avatar", "org") and any(_key_role(sk) == role for sk in skeys):
+            score += 4
+        elif any(_compatible_source_key(tk, sk, value_key=vkey, label_key=lkey) for sk in skeys):
+            score += 2
+    root_roles = {_key_role(k) for k in template}
+    label_role = _key_role(lkey)
+    if {"id", "name"} <= root_roles and label_role == "org" and any(_key_role(k) == "avatar" for k in template):
+        score -= 8                                      # 人员对象别被组织/部门树抢源
+    score += 2 if _is_idlike(leaf_key) else 0
+    score += 1 if _key_role(leaf_key) == "name" else 0
+    return score
+
+
+def _array_target_key(paths: list[tuple[str, list, list]], primary_leaf: str, sel: dict) -> str:
+    leaves = [str(rel[-1]) for _p, _toks, rel in paths if rel]
+    for leaf in leaves:
+        if _key_role(leaf) == "id":
+            return leaf
+    return primary_leaf or str(sel.get("value_key") or "")
+
+
+def _derived_count_paths(body, array_tokens: list, array_len: int) -> list[dict]:
+    """Find scalar count fields that are mechanically derived from an array length."""
+    out: list[dict] = []
+    for path, toks, sv, raw in _leaf_paths(body):
+        if _path_under_array_root(path, array_tokens):
+            continue
+        key = str(toks[-1] if toks else path)
+        if _key_role(key) != "count":
+            continue
+        try:
+            if int(raw) != int(array_len):
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        out.append({"path": path, "tokens": toks, "source": _tokens_to_str(array_tokens)})
+    return out
+
+
+def _norm_scalar(v) -> str:
+    return _re.sub(r"\s+", "", str(v if v is not None else "")).strip().lower()
+
+
+def _mirror_style(target_raw) -> str:
+    s = str(target_raw if target_raw is not None else "")
+    if "-" in s and " - " not in s:
+        return "compact_dash"
+    return "same"
+
+
+def _format_mirror_value(value, style: str):
+    if style == "compact_dash" and isinstance(value, str):
+        return _re.sub(r"\s*-\s*", "-", value)
+    return value
+
+
+def _derived_mirror_specs(body, path_names: dict) -> list[dict]:
+    """Find duplicated scalar leaves where one user input should mirror another body path.
+
+    Generic example: ``timeSlot`` and ``timeRangeList[0]`` contain the same
+    value. The non-indexed field is exposed once; the indexed/list copy is
+    updated deterministically at runtime.
+    """
+    if not isinstance(body, (dict, list)) or not path_names:
+        return []
+    leaves = [(p, toks, sv, raw) for p, toks, sv, raw in _leaf_paths(body) if sv]
+    by_value: dict[str, list[tuple[str, list, str, object]]] = {}
+    for row in leaves:
+        by_value.setdefault(_norm_scalar(row[2]), []).append(row)
+    out: list[dict] = []
+    seen_targets: set[str] = set()
+    for rows in by_value.values():
+        if len(rows) < 2:
+            continue
+        sources = [r for r in rows if r[0] in path_names]
+        if not sources:
+            continue
+        # Prefer a simple non-indexed path as the canonical input.
+        sources.sort(key=lambda r: ("[" in r[0], len(r[0])))
+        src_path, src_toks, _src_sv, _src_raw = sources[0]
+        for tgt_path, tgt_toks, _tgt_sv, tgt_raw in rows:
+            if tgt_path == src_path or tgt_path in path_names or tgt_path in seen_targets:
+                continue
+            if "[" not in tgt_path and len(rows) > 2:
+                continue
+            seen_targets.add(tgt_path)
+            out.append({
+                "source_path": src_path,
+                "source_tokens": src_toks,
+                "target_path": tgt_path,
+                "target_tokens": tgt_toks,
+                "param": path_names[src_path],
+                "style": _mirror_style(tgt_raw),
+            })
+    return out
+
+
+def fold_derived_mirror_fields(post_data: str | None, fields: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Hide mechanically duplicated body leaves from the recorder field table."""
+    body = _parse_body(post_data)
+    if body is None:
+        return fields, []
+    guesses = {f.get("path"): (f.get("suggest_name") or f.get("key") or "") for f in fields
+               if f.get("path") and f.get("suggest_param") and "[" not in str(f.get("path"))}
+    if not guesses:
+        guesses = {f.get("path"): (f.get("suggest_name") or f.get("key") or "") for f in fields
+                   if f.get("path") and f.get("suggest_param")}
+    mirrors = _derived_mirror_specs(body, guesses)
+    if not mirrors:
+        return fields, []
+    remove = {m["target_path"] for m in mirrors}
+    return [f for f in fields if f.get("path") not in remove], mirrors
 
 
 def _option_value(v) -> str:
@@ -474,21 +655,23 @@ def _array_select_specs(body, path_names: dict, selects: list[dict] | None) -> l
     for root_path, g in groups.items():
         if len(g["indices"]) < 2 or not g["selects"]:
             continue
+        root_node = _node_at_tokens(body, g["root_tokens"])
+        if not isinstance(root_node, list) or not root_node or not isinstance(root_node[0], dict):
+            continue
+        item_template = root_node[0]
         candidates = []
         for s in g["selects"]:
             toks, _raw = leaves.get(s.get("path"), ([], None))
             info = _array_leaf_info(toks)
             rel = info[2] if info else []
             leaf = str(rel[-1]) if rel else ""
-            score = (2 if _is_idlike(leaf) else 0) + (1 if "user" in leaf.lower() or "person" in leaf.lower() else 0)
+            score = _array_source_score(item_template, s, leaf)
             candidates.append((score, s, leaf))
         if not candidates:
             continue
         _score, primary, target_key = sorted(candidates, key=lambda x: x[0], reverse=True)[0]
+        target_key = _array_target_key(g["paths"], target_key, primary)
         if not target_key:
-            continue
-        root_node = _node_at_tokens(body, g["root_tokens"])
-        if not isinstance(root_node, list) or not root_node or not isinstance(root_node[0], dict):
             continue
         fallback = path_names.get(primary.get("path")) or target_key
         param = _array_param_name(g["root_tokens"], fallback)
@@ -504,8 +687,9 @@ def _array_select_specs(body, path_names: dict, selects: list[dict] | None) -> l
             "array_tokens": g["root_tokens"],
             "param": param,
             "target_key": target_key,
-            "item_template": _copy.deepcopy(root_node[0]),
+            "item_template": _copy.deepcopy(item_template),
             "sample_values": values,
+            "derived_count_paths": _derived_count_paths(body, g["root_tokens"], len(root_node)),
             "remove_paths": [_tokens_to_str(toks) for _p, toks, _rel in g["paths"]],
         })
         out.append(spec)
@@ -527,8 +711,10 @@ def fold_array_select_fields(post_data: str | None, fields: list[dict], selects:
     for spec in specs:
         root = spec.get("array_tokens") or []
         paths = {f.get("path") for f in fields if f.get("path") and _path_under_array_root(f["path"], root)}
+        paths |= {d.get("path") for d in (spec.get("derived_count_paths") or []) if d.get("path")}
         remove |= paths
-        first = min((order[p] for p in paths if p in order), default=len(fields))
+        first = min((order[p] for p in paths if p in order and _path_under_array_root(p, root)),
+                    default=min((order[p] for p in paths if p in order), default=len(fields)))
         spec_by_insert[first] = spec
     out_fields: list[dict] = []
     for i, f in enumerate(fields):
@@ -626,6 +812,7 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
             entry = {"path": path, "tokens": toks, "value": sv, "source_url": r.get("url"),
                      "value_key": vk, "label_key": lk, "label": label, "count": len(option_items),
                      "options": _list_options(items, lk, vk, option_filter),   # 候选 {label,value} 快照,前端提交稳定 value
+                     "source_keys": sorted(match_item.keys()) if isinstance(match_item, dict) else [],
                      "submit_mode": "value",
                      "_confirmed": confirmed}
             if option_filter:
@@ -1359,12 +1546,13 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
         if _is_system_timestamp(p.split(".")[-1].split("[")[0], raw):
             system_values.append({"path": p, "tokens": toks,
                                   "kind": "now_ms" if len(str(raw)) == 13 else "now_s"})
+    derived_fields = _derived_mirror_specs(body, param_map)
     out = {"method": (req.get("method") or "POST").upper(), "path": path, "url": url,
            "content_type": req.get("content_type", "application/json"),
            "body_template": templ, "params": list(dict.fromkeys(params)), "sample_inputs": samples,
            "auth_headers": extract_auth_headers(req.get("headers")),
            "field_types": types, "selects": sel_meta, "identity": id_meta,
-           "system_values": system_values}
+           "system_values": system_values, "derived_fields": derived_fields}
     # P1:把提交请求**自身的响应**学成业务成功约定(code=200/success=true 等)+ 留证据。
     # 单接口即便没有额外 GET 查询读,资产里也有 success_rule → acceptance 能验"业务成功",不再报"无法验证"。
     resp = req.get("response_json")
@@ -1499,6 +1687,17 @@ def _apply_system_values(body, api_request: dict) -> None:
         _set_by_path(body, sv.get("tokens") or sv.get("path", ""), val)
 
 
+def _apply_derived_fields(body, api_request: dict, fields: dict) -> None:
+    """Apply deterministic mirrors derived from exposed inputs."""
+    for d in api_request.get("derived_fields") or []:
+        param = d.get("param")
+        val = fields.get(param) if param in fields else _get_by_path(body, d.get("source_tokens") or d.get("source_path", ""))
+        if val is None:
+            continue
+        _set_by_path(body, d.get("target_tokens") or d.get("target_path", ""),
+                     _format_mirror_value(val, d.get("style") or "same"))
+
+
 # ─────────── P0:发布前确定性自检(self_check) + 运行期换身后置审计 ───────────
 _PROBE_PREFIX = "__DANO_PROBE_"        # 唯一哨兵前缀;穿过 blob re-stringify 后在外层 dumps 里仍是连续子串
 _PATH_MISSING = object()               # "走不到"哨兵,区别于"值恰好是 None"
@@ -1597,6 +1796,13 @@ def self_check(api_request: dict) -> list[str]:
         pathlike = s.get("array_tokens") or s.get("array_path") or s.get("path", "")
         if not pathlike or _path_lookup(nested, pathlike) is _PATH_MISSING:
             problems.append(f"数组选择参数 `{p}` 的目标数组 `{s.get('array_path') or s.get('path')}` 在请求体里找不到落点")
+
+    for d in api_request.get("derived_fields") or []:
+        if d.get("param") not in params:
+            problems.append(f"派生字段 `{d.get('target_path')}` 的来源参数 `{d.get('param')}` 未声明")
+        target = d.get("target_tokens") or d.get("target_path", "")
+        if not target or _path_lookup(nested, target) is _PATH_MISSING:
+            problems.append(f"派生字段目标路径 `{d.get('target_path')}` 在请求体里找不到落点")
 
     # (a):identity 路径在"未 finalize 的嵌套结构"上必须可达(blob 内段含 __dano_jsonstr__)
     for idn in api_request.get("identity") or []:
@@ -1815,7 +2021,11 @@ async def _resolve_selects(api_request: dict, fields: dict, *, base_url: str, st
                     raise ValueError(f"枚举数组字段 {param} 的值 {v!r} 不在候选项中")
                 matches.append(m)
             toks = s.get("array_tokens") or _split_path(s.get("array_path") or s.get("path", ""))
-            id_overrides[tuple(toks)] = _build_array_select_items(s, matches)
+            rebuilt = _build_array_select_items(s, matches)
+            id_overrides[tuple(toks)] = rebuilt
+            for d in s.get("derived_count_paths") or []:
+                dtoks = d.get("tokens") or _split_path(d.get("path", ""))
+                id_overrides[tuple(dtoks)] = len(rebuilt)
             continue
         match, _by = _match_select_item(items, lk, vk, submitted)
         if match is None:
@@ -2068,6 +2278,7 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     _apply_system_values(body, api_request)                  # 系统时间戳(submitTime/createTime)运行期填 now,不焊死录制时刻
     for toks, v in sel_overrides.items():                    # 名/ID 配对:把解析出的内部 id 写回配对 id 字段(不冻结)
         _set_by_path(body, list(toks), v)
+    _apply_derived_fields(body, api_request, fields)          # 展示字段/列表副本等派生字段随参数同步
     for p, v in (overrides or {}).items():                   # Q3:上一步响应值注入(taskId 等)
         _set_by_path(body, p, v)
     id_issues = _identity_audit(body, api_request, storage_state) if send else []   # 换身后置审计(blob 仍嵌套,可达)

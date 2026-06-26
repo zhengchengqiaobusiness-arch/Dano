@@ -57,6 +57,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [stepSel, setStepSel] = useState<Record<number, boolean>>({});   // 多步:勾入工作流的写请求 idx
   const [selects, setSelects] = useState<Record<string, RecSelect>>({});      // path → select 建议
   const [identity, setIdentity] = useState<Record<string, RecIdentity>>({});  // path → identity 建议
+  const [transactionIr, setTransactionIr] = useState<Record<string, any> | null>(null);
   const [action, setAction] = useState("submit_form");
   const [title, setTitle] = useState("");
   const [result, setResult] = useState<RecResult | null>(null);
@@ -73,7 +74,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function start() {
     if (!tenant) { message.error("请先到「创建 / 进入租户」"); return; }
     if (!startUrl.trim()) { message.error("请填页面地址 start_url"); return; }
-    setErr(""); setResult(null); setSteps([]); setReqs([]); setFrame(""); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({});
+    setErr(""); setResult(null); setSteps([]); setReqs([]); setFrame(""); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setTransactionIr(null); setStepSel({});
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/onboarding/page/record`);
     wsRef.current = ws;
@@ -104,6 +105,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         const idMap: Record<string, RecIdentity> = {};
         (m.identity || []).forEach((i: RecIdentity) => { idMap[i.path] = i; });
         setSelects(selMap); setIdentity(idMap);
+        setTransactionIr(m.transaction_ir || null);
         setFields(fs);
         const pk: Record<string, { on: boolean; name: string }> = {};
         fs.forEach((f) => {
@@ -123,7 +125,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
       else if (m.type === "result") {   // 留在录制现场:不关浏览器、不重来
         setResult(m.report); setPhase("recording");
-        if (m.report?.ok) { setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({}); }   // 发布成功 → 收起字段表
+        if (m.report?.ok) { setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setTransactionIr(null); setStepSel({}); }   // 发布成功 → 收起字段表
       }
       else if (m.type === "error") { setErr(m.detail || "录制出错"); setPhase("idle"); }
     };
@@ -206,11 +208,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     // 一键发布:后端自动提炼业务 Goal + self_check + 审核 + 自动修复;必填也由后端**自动判定**
     //(默认全部必填,表单抓到 * 区分时据 * 降级可选),无需手动勾选/确认
     send({ type: "publish_request", action: action.trim(), title: title.trim(),
-           param_map, selects: selList, identity: idList, step_idxs });
+           param_map, selects: selList, identity: idList, step_idxs, transaction_ir: transactionIr });
   }
   function stopAll() {
     send({ type: "stop" }); wsRef.current?.close();
-    setPhase("idle"); setResult(null); setSteps([]); setFrame(""); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({});
+    setPhase("idle"); setResult(null); setSteps([]); setFrame(""); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setTransactionIr(null); setStepSel({});
   }
 
   return (
@@ -256,11 +258,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                    autoComplete="off" aria-hidden="true"
                    style={{ position: "absolute", left: 0, top: 0, width: 1, height: 1, opacity: 0, border: 0, padding: 0 }} />
           </div>
-          <Alert type="info" showIcon style={{ marginTop: 8, marginBottom: 4 }}
-            message={<span>正常填表即可:日期、下拉<b>随便点选</b>;我们抓的是你点「提交」那一下发出的<b>整条请求</b>里的最终值,不靠记录每次点击。</span>}
+          {/* <Alert type="info" showIcon style={{ marginTop: 8, marginBottom: 4 }}
+            message={<span> </span>}
             description={intercept
-              ? "已开启「拦截提交」:点提交只用来抓请求,不会产生真实记录。"
-              : "未开启拦截:点提交会真的提交一次(产生一条真实记录)。"} />
+              ? " "
+              : " "} /> */}
 
           {/* ★ 主路径:抓到提交请求 → 勾字段建 Skill */}
           {fields.length > 0 && (
@@ -276,9 +278,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               {(Object.keys(selects).length > 0 || Object.keys(identity).length > 0) && (
                 <Alert type="warning" showIcon style={{ marginBottom: 8 }}
                   message={<span>
-                    {Object.keys(selects).length > 0 && <span><Tag color="purple">📋 选自列表</Tag>这类字段展示 label、提交 value,运行期回填目标系统值;</span>}
-                    {Object.keys(identity).length > 0 && <span><Tag color="gold">🔒 当前用户</Tag>这类字段默认不作参数、运行期自动填(谁调用就是谁);</span>}
-                    完整生效在后续 P4/P5。
+                    {Object.keys(selects).length > 0 && <span><Tag color="purple">📋 选自列表</Tag>
+                    l、提交 value,运行期回填目标系统值;</span>}
+                    {Object.keys(identity).length > 0 && <span><Tag color="gold">🔒 当前用户</Tag>
+                     </span>}
+                     
                   </span>} />
               )}
               {cands.length > 1 && (

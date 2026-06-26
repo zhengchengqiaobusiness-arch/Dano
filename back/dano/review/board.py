@@ -339,6 +339,41 @@ _CAPTURE_ADVISORY_SYSTEM = (
 )
 
 
+def _transaction_ir_summary(api_request: dict) -> dict:
+    """Redacted transaction dataflow for LLM review/goal prompts.
+
+    Keep semantic topology (inputs/sources/bindings/success), drop captured
+    values and option labels to avoid leaking form data or credentials.
+    """
+    ir = (api_request or {}).get("transaction_ir") or {}
+    if not isinstance(ir, dict):
+        return {}
+    return {
+        "version": ir.get("version"),
+        "inputs": [
+            {"name": i.get("name"), "type": i.get("type"), "submit_mode": i.get("submit_mode"),
+             "source_id": i.get("source_id"), "required": i.get("required")}
+            for i in (ir.get("inputs") or [])
+        ],
+        "sources": [
+            {"id": s.get("id"), "kind": s.get("kind"), "has_url": bool(s.get("url")),
+             "value_key": s.get("value_key"), "label_key": s.get("label_key"), "count": s.get("count")}
+            for s in (ir.get("sources") or [])
+        ],
+        "bindings": [
+            {"input": b.get("input"), "target_path": b.get("target_path"), "mode": b.get("mode"),
+             "source_id": b.get("source_id"), "target_key": b.get("target_key")}
+            for b in (ir.get("bindings") or [])
+        ],
+        "derived": [
+            {"kind": d.get("kind"), "source_path": d.get("source_path"),
+             "target_path": d.get("target_path"), "param": d.get("param")}
+            for d in (ir.get("derived") or [])
+        ],
+        "success": ir.get("success") or {},
+    }
+
+
 async def advisory_capture_review(client: "ChatClient | None", model: str | None, *,
                                   action: str, api_request: dict,
                                   self_check_passed: bool = True) -> list[str]:
@@ -354,6 +389,7 @@ async def advisory_capture_review(client: "ChatClient | None", model: str | None
         "field_types": api_request.get("field_types"),
         "identity_fields": [i.get("path") for i in (api_request.get("identity") or [])],
         "method": api_request.get("method"), "path": api_request.get("path"),
+        "transaction_ir": _transaction_ir_summary(api_request),
         "structure_verified_by_self_check": self_check_passed,
     }, ensure_ascii=False)
     try:
@@ -398,6 +434,7 @@ async def generate_goal(client: "ChatClient | None", model: str | None, *,
         "identity_fields": [i.get("path") for i in (api_request.get("identity") or [])],
         "has_success_rule": bool(api_request.get("success_rule")),
         "has_fact_check": bool(api_request.get("fact_check")),
+        "transaction_ir": _transaction_ir_summary(api_request),
     }
     try:
         out = await client.complete_json(model=model, system=_GOAL_SYSTEM,

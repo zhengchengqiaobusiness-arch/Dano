@@ -534,25 +534,18 @@ async def onboarding_page_import(req: PageImportReq) -> dict:
 async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict,
                               reads: list[dict] | None = None, storage: dict | None = None,
                               required_labels: set | None = None) -> dict:
-    """构造 request_fields 消息:字段表(含 type/required)+ 候选请求 + select(Q2)+ identity(Q1)。"""
-    from dano.execution.page.request_capture import (flatten_body, fold_array_select_fields, suggest_identity,
-                                                     suggest_select_names, suggest_selects, suggest_workflow_steps)
+    """构造 request_fields 消息:事务 IR + 字段表 + 候选请求 + select(Q2)+ identity(Q1)。"""
+    from dano.execution.page.dataflow import build_transaction_ir, infer_request_transaction
 
     def _path(u: str) -> str:
         i = u.find("//")
         return u[u.find("/", i + 2):] if i >= 0 and u.find("/", i + 2) >= 0 else u
     cand_list = [{"idx": i, "method": (c.get("method") or "POST").upper(), "path": _path(c.get("url") or "")}
                  for i, c in enumerate(candidates)]
-    pd = chosen.get("post_data")
-    fields = flatten_body(pd, samples, required_labels)
-    # 传 samples:用录制选中的显示名消歧/确认(大字典里短码也能精确绑对那项)
-    selects = suggest_selects(pd, reads or [], samples)
-    # select/选人字段:用录制选项标签当默认参数名(经候选列表桥接),避免漏内部 key(Activity_xxx/嵌套键)
-    sel_names = suggest_select_names(selects, samples)
-    for f in fields:
-        if f.get("path") in sel_names:
-            f["suggest_name"] = sel_names[f["path"]]
-    fields, selects = fold_array_select_fields(pd, fields, selects)
+    tx = infer_request_transaction(chosen, candidates, samples, reads, storage, required_labels)
+    fields = tx["fields"]
+    selects = tx["selects"]
+    identity = tx["identity"]
     # LLM 字段语义增强(最佳努力):只给"确定性没把握(名字仍=原始 key)"的字段补中文名;确信的不覆盖,失败不影响。
     try:
         from dano.agent_tools import tools as _T
@@ -566,13 +559,17 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
             fields = merge_llm_field_names(fields, _names)
     except Exception:  # noqa: BLE001
         pass
+    tx["transaction_ir"] = build_transaction_ir(chosen=chosen, candidates=candidates, fields=fields,
+                                                selects=selects, identity=identity, samples=samples,
+                                                reads=reads or [], mirrors=tx.get("derived_mirrors") or [])
     return {"type": "request_fields",
             "method": (chosen.get("method") or "POST").upper(), "url": chosen.get("url"),
             "fields": fields,
             "candidates": cand_list, "chosen_idx": candidates.index(chosen) if chosen in candidates else 0,
-            "suggested_steps": suggest_workflow_steps(candidates, samples),   # 自动建议哪几条组成业务流程(前端预勾)
+            "suggested_steps": tx["suggested_steps"],   # 自动建议哪几条组成业务流程(前端预勾)
             "selects": selects,
-            "identity": suggest_identity(pd, storage, samples)}   # 字段=当前用户/会话值(运行期重取;排除用户填值/平凡撞值)
+            "identity": identity,
+            "transaction_ir": tx["transaction_ir"]}   # 字段=当前用户/会话值(运行期重取;排除用户填值/平凡撞值)
 
 
 # ── 方式B:网页内录制(WebSocket:截屏流出 + 输入回传入 + 实时步骤 + 录完发布)──
@@ -623,6 +620,7 @@ async def record_ws(ws: WebSocket) -> None:
         pending_reads: list[dict] = []         # 抓到的列表读响应(select 候选源)
         pending_storage: dict | None = None    # 登录态(认 identity 字段)
         pending_required: set = set()          # 录制时表单 * 必填的字段标签
+        pending_ir: dict | None = None         # 事务级 IR: inputs/sources/bindings/constants/success 的权威捕获模型
         while True:
             msg = await ws.receive_json()
             t = msg.get("type")
@@ -675,8 +673,10 @@ async def record_ws(ws: WebSocket) -> None:
                     pending_required = required_labels          # 表单 * 必填
                     chosen = pick_submit_request(cands, samples) or cands[-1]
                     pending_req = chosen
-                    await ws.send_json(await _request_fields_msg(chosen, cands, samples, pending_reads,
-                                                                 pending_storage, pending_required))
+                    rf = await _request_fields_msg(chosen, cands, samples, pending_reads,
+                                                   pending_storage, pending_required)
+                    pending_ir = rf.get("transaction_ir")
+                    await ws.send_json(rf)
                     continue
 
                 # 兜底:没抓到 JSON 提交请求 → 老的 DOM 回放路径
@@ -712,8 +712,10 @@ async def record_ws(ws: WebSocket) -> None:
                 idx = msg.get("idx", 0)
                 if pending_candidates and 0 <= idx < len(pending_candidates):
                     pending_req = pending_candidates[idx]
-                    await ws.send_json(await _request_fields_msg(pending_req, pending_candidates, pending_samples,
-                                                                 pending_reads, pending_storage, pending_required))
+                    rf = await _request_fields_msg(pending_req, pending_candidates, pending_samples,
+                                                   pending_reads, pending_storage, pending_required)
+                    pending_ir = rf.get("transaction_ir")
+                    await ws.send_json(rf)
             elif t == "publish_request":
                 # 用户在字段表里勾了哪些是参数、起了名 → 用真实提交请求建 Skill(任意 OA 通用)
                 if pending_req is None:
@@ -721,11 +723,13 @@ async def record_ws(ws: WebSocket) -> None:
                                         "report": {"ok": False, "reason": "没有待发布的提交请求;先点「停止并发布」抓请求"}})
                     continue
                 param_map = {k: v.strip() for k, v in (msg.get("param_map") or {}).items() if v and v.strip()}
-                from dano.execution.page.request_capture import (auto_required_fields, build_api_request,
-                                                                 build_api_workflow, infer_success_rule,
+                from dano.execution.page.ir_compiler import (compile_api_request_from_ir,
+                                                             compile_api_workflow_from_ir)
+                from dano.execution.page.request_capture import (auto_required_fields, infer_success_rule,
                                                                  suggest_fact_check, suggest_workflow_steps)
                 sels = msg.get("selects") or []         # Q2 选领导:展示 label、提交 value
                 idens = msg.get("identity") or []        # Q1 当前用户:运行期重取
+                tx_ir = msg.get("transaction_ir") or pending_ir
                 fc = suggest_fact_check(pending_samples, pending_reads)   # 回查源(录到"我的记录"列表才有)
                 sr = infer_success_rule(pending_reads)   # 学这套系统自己的"业务成功"约定(不挑系统,见 P0#2)
                 # 多步:用户勾了哪几条(step_idxs,有序);**没勾则自动判流程**(提交锚点+数据依赖,丢噪声)
@@ -734,12 +738,12 @@ async def record_ws(ws: WebSocket) -> None:
                     step_idxs = suggest_workflow_steps(pending_candidates, pending_samples)   # 自动建议流程步
                 if len(step_idxs) > 1:
                     writes = [pending_candidates[i] for i in step_idxs]
-                    apir = build_api_workflow(writes, param_map=param_map, selects=sels, identity=idens,
-                                              typed=pending_samples)
+                    apir = compile_api_workflow_from_ir(writes, param_map=param_map, selects=sels, identity=idens,
+                                                        typed=pending_samples, transaction_ir=tx_ir)
                     last_params = (apir.get("steps") or [{}])[-1].get("params") or []
                 else:
-                    apir = build_api_request(pending_req, param_map, selects=sels, identity=idens,
-                                             typed=pending_samples)
+                    apir = compile_api_request_from_ir(pending_req, param_map, selects=sels, identity=idens,
+                                                       typed=pending_samples, transaction_ir=tx_ir)
                     last_params = (apir or {}).get("params") or []
                 if apir and fc:
                     apir["fact_check"] = fc            # 提交后回查记录确认真生效(grounded)

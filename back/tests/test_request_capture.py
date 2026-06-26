@@ -17,6 +17,7 @@ from dano.execution.page.request_capture import (
     extract_auth_headers,
     flatten_body,
     fold_array_select_fields,
+    fold_derived_mirror_fields,
     json_write_requests,
     list_read_requests,
     parameterize_request,
@@ -29,6 +30,8 @@ from dano.execution.page.request_capture import (
     suggest_select_names,
     suggest_selects,
 )
+from dano.execution.page.dataflow import infer_request_transaction
+from dano.execution.page.ir_compiler import compile_api_request_from_ir
 
 _SAMPLES = {"请假类型": "事假", "开始时间": "2026-06-24", "结束时间": "2026-06-26", "原因": "大地色多"}
 _SUBMIT = ('{"leaveType":"事假","startTime":"2026-06-24","endTime":"2026-06-26",'
@@ -335,11 +338,65 @@ def test_fold_array_select_fields_collapses_participants():
     assert arr["path"] == "participants" and arr["target_key"] == "userId"
 
 
+def test_array_select_prefers_source_that_explains_whole_item_shape():
+    """泛化修复:数组源按 item 结构评分,用户列表应胜过偶然 id 命中的部门树。"""
+    body = ('{"userCount":2,"participants":['
+            '{"userId":144,"userName":"姜楠","userAvatar":"old-a","participantType":2},'
+            '{"userId":139,"userName":"李四","userAvatar":"old-b","participantType":2}]}')
+    fields = flatten_body(body, {"参会人": "姜楠"})
+    selects = [
+        {"path": "participants[0].userId", "source_url": "/dept/tree", "value_key": "id", "label_key": "deptName",
+         "source_keys": ["id", "deptName"], "options": [{"label": "市场部门", "value": "144"}], "count": 8},
+        {"path": "participants[0].userName", "source_url": "/user/list", "value_key": "id", "label_key": "name",
+         "source_keys": ["id", "name", "avatar"], "options": [{"label": "姜楠", "value": "144"}], "count": 13},
+        {"path": "participants[1].userName", "source_url": "/user/list", "value_key": "id", "label_key": "name",
+         "source_keys": ["id", "name", "avatar"], "options": [{"label": "李四", "value": "139"}], "count": 13},
+    ]
+    out_fields, out_selects = fold_array_select_fields(body, fields, selects)
+    arr = next(s for s in out_selects if s.get("kind") == "array")
+    assert arr["source_url"] == "/user/list"
+    assert arr["target_key"] == "userId"
+    assert arr["derived_count_paths"][0]["path"] == "userCount"
+    assert any(f["path"] == "participants" and f["suggest_name"] == "参会人" for f in out_fields)
+    assert not any(f["path"] == "userCount" for f in out_fields)
+
+
+def test_derived_mirror_field_collapses_duplicate_scalar_list_value():
+    """展示字段 + 列表副本:只暴露一个输入,副本由运行期派生同步。"""
+    body = '{"timeSlot":"10:00 - 10:30","timeRangeList":["10:00-10:30"],"remark":"x"}'
+    fields = flatten_body(body, {"时间段": "10:00 - 10:30"})
+    out_fields, mirrors = fold_derived_mirror_fields(body, fields)
+    assert any(f["path"] == "timeSlot" for f in out_fields)
+    assert not any(f["path"] == "timeRangeList[0]" for f in out_fields)
+    assert mirrors == [{
+        "source_path": "timeSlot",
+        "source_tokens": ["timeSlot"],
+        "target_path": "timeRangeList[0]",
+        "target_tokens": ["timeRangeList", 0],
+        "param": "时间段",
+        "style": "compact_dash",
+    }]
+
+
+def test_build_api_request_applies_derived_mirror_field():
+    from dano.execution.page import request_capture as rc
+    req = {"method": "POST", "url": "http://oa/meeting",
+           "post_data": '{"timeSlot":"10:00 - 10:30","timeRangeList":["10:00-10:30"]}'}
+    apir = build_api_request(req, {"timeSlot": "时间段"}, typed={"时间段": "10:00 - 10:30"})
+    assert apir["params"] == ["时间段"]
+    assert apir["derived_fields"][0]["target_path"] == "timeRangeList[0]"
+    assert self_check(apir) == []
+    body2 = substitute(apir["body_template"], {"时间段": "11:00 - 11:30"}, apir["sample_inputs"])
+    rc._apply_derived_fields(body2, apir, {"时间段": "11:00 - 11:30"})
+    assert body2["timeSlot"] == "11:00 - 11:30"
+    assert body2["timeRangeList"][0] == "11:00-11:30"
+
+
 async def test_array_select_rebuilds_participants_and_self_check_passes(monkeypatch):
     """运行期:参会人提交 value 数组 → 重建 participants 对象数组,姓名/头像从候选项派生,type 常量保留。"""
     from dano.execution.page import request_capture as rc
     req = {"method": "POST", "url": "http://oa/meeting",
-           "post_data": ('{"meetingTitle":"周会","participants":['
+           "post_data": ('{"meetingTitle":"周会","userCount":2,"participants":['
                          '{"userId":144,"userName":"姜楠","userAvatar":"old-a","participantType":2},'
                          '{"userId":139,"userName":"李四","userAvatar":"old-b","participantType":2}]}')}
     selects = [
@@ -355,23 +412,75 @@ async def test_array_select_rebuilds_participants_and_self_check_passes(monkeypa
                                    "participants[1].userName": "用户姓名"},
                              selects=selects)
     assert apir["params"] == ["会议主题", "参会人"]
+    assert "userCount" not in apir["params"]
     assert apir["field_types"]["参会人"] == "array"
     assert apir["selects"][0]["kind"] == "array"
+    assert apir["selects"][0]["derived_count_paths"][0]["path"] == "userCount"
     assert self_check(apir) == []
 
     async def fake_fetch(*a, **k):
         return [{"id": 139, "name": "李四", "avatar": "new-b"},
                 {"id": 144, "name": "姜楠", "avatar": "new-a"}]
     monkeypatch.setattr(rc, "_fetch_list", fake_fetch)
-    fields, overrides = await rc._resolve_selects(apir, {"会议主题": "周会", "参会人": ["139", "144"]},
+    fields, overrides = await rc._resolve_selects(apir, {"会议主题": "周会", "参会人": ["139"]},
                                                   base_url="", storage_state=None, token_key=None, verify=False)
     body2 = substitute(apir["body_template"], fields, apir["sample_inputs"])
     for toks, v in overrides.items():
         rc._set_by_path(body2, list(toks), v)
     assert body2["participants"] == [
         {"userId": 139, "userName": "李四", "userAvatar": "new-b", "participantType": 2},
-        {"userId": 144, "userName": "姜楠", "userAvatar": "new-a", "participantType": 2},
     ]
+    assert body2["userCount"] == 1
+
+
+def test_transaction_ir_captures_array_option_source_and_binding():
+    """事务级 IR:复杂人员数组先表达成 input/source/binding,不以 N 个 body leaf 为源头。"""
+    chosen = {"method": "POST", "url": "http://oa/meeting",
+              "post_data": ('{"meetingTitle":"周会","userCount":2,"participants":['
+                            '{"userId":144,"userName":"姜楠","userAvatar":"old-a","participantType":2},'
+                            '{"userId":139,"userName":"李四","userAvatar":"old-b","participantType":2}]}'),
+              "response_json": {"code": 200, "msg": "ok"}}
+    reads = [{"url": "/users", "json": {"data": [
+        {"id": 144, "name": "姜楠", "avatar": "new-a"},
+        {"id": 139, "name": "李四", "avatar": "new-b"},
+    ]}}]
+    tx = infer_request_transaction(chosen, [chosen], {"会议主题": "周会", "参会人": "姜楠"}, reads)
+    ir = tx["transaction_ir"]
+    names = {i["name"]: i for i in ir["inputs"]}
+    assert names["参会人"]["type"] == "array"
+    assert names["参会人"]["submit_mode"] == "value[]"
+    assert ir["sources"][0]["url"] == "/users"
+    bind = next(b for b in ir["bindings"] if b["input"] == "参会人")
+    assert bind["mode"] == "expand_array"
+    assert bind["target_path"] == "participants"
+    assert set(bind["expand_fields"]) >= {"userId", "userName", "participantType"}
+    assert any(d["kind"] == "array_count" and d["target_path"] == "userCount"
+               for d in ir.get("derived", []))
+    assert ir["success"] == {"field": "code", "ok_values": ["200"]}
+
+
+def test_ir_compiler_attaches_publish_time_transaction_ir():
+    chosen = {"method": "POST", "url": "http://oa/meeting",
+              "post_data": ('{"meetingTitle":"周会","participants":['
+                            '{"userId":144,"userName":"姜楠","userAvatar":"old-a","participantType":2},'
+                            '{"userId":139,"userName":"李四","userAvatar":"old-b","participantType":2}]}')}
+    reads = [{"url": "/users", "json": {"data": [
+        {"id": 144, "name": "姜楠", "avatar": "new-a"},
+        {"id": 139, "name": "李四", "avatar": "new-b"},
+    ]}}]
+    tx = infer_request_transaction(chosen, [chosen], {"会议主题": "周会", "参会人": "姜楠"}, reads)
+    apir = compile_api_request_from_ir(
+        chosen,
+        {"meetingTitle": "会议主题", "participants": "参会人"},
+        selects=tx["selects"],
+        typed={"会议主题": "周会"},
+        transaction_ir=tx["transaction_ir"],
+    )
+    assert apir["params"] == ["会议主题", "参会人"]
+    assert apir["transaction_ir"]["version"] == "transaction-ir/v1"
+    assert [i["name"] for i in apir["transaction_ir"]["inputs"]] == ["会议主题", "参会人"]
+    assert apir["transaction_ir"]["bindings"][-1]["mode"] == "expand_array"
+    assert self_check(apir) == []
 
 
 def test_build_api_request_learns_success_rule_from_own_response():
@@ -1895,11 +2004,20 @@ async def test_advisory_capture_review_returns_notes_and_redacts():
     from dano.review.board import advisory_capture_review
     fake = _FakeChat({"notes": ["参数 Activity_09dlq0g 像内部标识,建议起人话名"]})
     apir = {"params": ["Activity_09dlq0g"], "field_types": {"Activity_09dlq0g": "enum"},
-            "identity": [{"path": "applicantId"}], "method": "POST", "path": "/oa/leave/submit"}
+            "identity": [{"path": "applicantId"}], "method": "POST", "path": "/oa/leave/submit",
+            "transaction_ir": {"version": "transaction-ir/v1",
+                               "inputs": [{"name": "参会人", "type": "array", "submit_mode": "value[]",
+                                           "source_id": "src_user", "sample": ["姜楠"]}],
+                               "sources": [{"id": "src_user", "url": "/users", "value_key": "id",
+                                            "label_key": "name",
+                                            "options": [{"label": "姜楠", "value": "144"}]}],
+                               "bindings": [{"input": "参会人", "target_path": "participants",
+                                             "mode": "expand_array", "source_id": "src_user"}]}}
     notes = await advisory_capture_review(fake, "m", action="submit_leave", api_request=apir)
     assert notes == ["参数 Activity_09dlq0g 像内部标识,建议起人话名"]
     # 只喂元数据:参数名在,但绝不带 body 值/凭证字样
     assert "Activity_09dlq0g" in fake.seen["user"]
+    assert "expand_array" in fake.seen["user"] and "姜楠" not in fake.seen["user"]
     assert "password" not in fake.seen["user"].lower() and "cookie" not in fake.seen["user"].lower()
 
 
@@ -1978,10 +2096,14 @@ async def test_generate_goal_proposes_and_redacts():
                       "required_inputs": ["title", "amount"], "success_criteria": ["单据已创建"],
                       "forbidden_actions": ["删除", "代他人审批"], "risk_level": "L3"})
     apir = {"params": ["title", "amount"], "method": "POST", "path": "/oa/purchase/create",
-            "field_types": {"amount": "number"}}
+            "field_types": {"amount": "number"},
+            "transaction_ir": {"version": "transaction-ir/v1",
+                               "inputs": [{"name": "amount", "type": "number"}],
+                               "bindings": [{"input": "amount", "target_path": "amount", "mode": "direct"}]}}
     goal = await generate_goal(fake, "m", action="submit_purchase", api_request=apir)
     assert goal["intent"] == "创建并提交采购申请" and goal["risk_level"] == "L3"
-    assert "amount" in fake.seen["user"] and "password" not in fake.seen["user"].lower()
+    assert "amount" in fake.seen["user"] and "transaction-ir/v1" in fake.seen["user"]
+    assert "password" not in fake.seen["user"].lower()
 
 
 async def test_generate_goal_safe_degrade():
