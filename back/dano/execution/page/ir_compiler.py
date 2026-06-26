@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from dano.execution.page.skill_interface import build_skill_interface
 from dano.execution.page.request_capture import build_api_request, build_api_workflow
 
 
@@ -64,6 +65,7 @@ def compile_api_request_from_ir(req: dict, param_map: dict, *, base_url: str = "
         ir = _materialize_ir(transaction_ir, param_map, selects, identity)
         if ir:
             api_request["transaction_ir"] = ir
+        api_request["skill_interface"] = build_skill_interface(api_request)
     return api_request
 
 
@@ -77,6 +79,7 @@ def compile_api_workflow_from_ir(writes: list[dict], *, param_map: dict, base_ur
     ir = _materialize_ir(transaction_ir, param_map, selects, identity)
     if ir:
         api_request["transaction_ir"] = ir
+    api_request["skill_interface"] = build_skill_interface(api_request)
     return api_request
 
 

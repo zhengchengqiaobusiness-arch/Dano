@@ -42,6 +42,9 @@ class SkillManifest(BaseModel):
     risk_level: str
     requires_confirmation: bool       # L3+ 调用需带 confirm=true
     parameters: dict = Field(default_factory=dict)   # 输入 JSON Schema(function-calling 风格)
+    skill_interface: dict = Field(default_factory=dict)  # 录入型稳定接口:inputs/sources/bindings/derived/identity/success
+    input_schema: dict = Field(default_factory=dict)      # skill_interface.input_schema 的便捷投影
+    source_schema: dict = Field(default_factory=dict)     # skill_interface.source_schema 的便捷投影
     output_schema: dict = Field(default_factory=lambda: {"type": "object"})  # 输出 schema(通用对象)
     page: dict | None = None          # 页面型 Skill 专属:{start_url, success_marker, steps[]}(供详情可视化)
     flow: dict = Field(default_factory=dict)   # 执行画像(供导出 SOP):步数/前置/计算/回查/成败约定;全部 grounded、零框架字面量
@@ -173,6 +176,24 @@ def _parameters_schema(skill: SkillSpec) -> dict:
     }
 
 
+def _skill_interface(skill: SkillSpec) -> dict:
+    """Expose recorded request interface without changing function-call schema."""
+    si = dict(getattr(skill, "skill_interface", {}) or {})
+    if si:
+        return si
+    apir = getattr(skill, "api_request", None) or {}
+    si = dict(apir.get("skill_interface") or {})
+    if si:
+        return si
+    if apir:
+        try:
+            from dano.execution.page.skill_interface import build_skill_interface
+            return build_skill_interface(apir, required_fields=list(getattr(skill, "required_fields", []) or []))
+        except Exception:  # noqa: BLE001
+            return {}
+    return si
+
+
 def _req_path(req: dict) -> str:
     """从一步请求里取干净的 path(去协议+域名,留 path,丢 query/敏感参数),供 SOP 展示编排。"""
     u = str(req.get("path") or req.get("url") or "")
@@ -249,6 +270,7 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         page = {"start_url": getattr(skill, "page_start_url", ""),
                 "success_marker": getattr(skill, "page_success_marker", None),
                 "steps": getattr(skill, "page_steps", []) or []}
+    si = _skill_interface(skill)
     return SkillManifest(
         name=skill.skill_id,
         subsystem=skill.subsystem.value,
@@ -263,6 +285,9 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         risk_level=risk.value,
         requires_confirmation=risk in _CONFIRM_FROM,
         parameters=_parameters_schema(skill),
+        skill_interface=si,
+        input_schema=dict(si.get("input_schema") or {}),
+        source_schema=dict(si.get("source_schema") or {}),
         page=page,
         flow=_flow_meta(skill),
     )

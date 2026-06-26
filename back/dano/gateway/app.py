@@ -533,7 +533,8 @@ async def onboarding_page_import(req: PageImportReq) -> dict:
 
 async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict,
                               reads: list[dict] | None = None, storage: dict | None = None,
-                              required_labels: set | None = None) -> dict:
+                              required_labels: set | None = None,
+                              trace_ir: dict | None = None) -> dict:
     """构造 request_fields 消息:事务 IR + 字段表 + 候选请求 + select(Q2)+ identity(Q1)。"""
     from dano.execution.page.dataflow import build_transaction_ir, infer_request_transaction
 
@@ -542,7 +543,8 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
         return u[u.find("/", i + 2):] if i >= 0 and u.find("/", i + 2) >= 0 else u
     cand_list = [{"idx": i, "method": (c.get("method") or "POST").upper(), "path": _path(c.get("url") or "")}
                  for i, c in enumerate(candidates)]
-    tx = infer_request_transaction(chosen, candidates, samples, reads, storage, required_labels)
+    tx = infer_request_transaction(chosen, candidates, samples, reads, storage, required_labels,
+                                   trace_ir=trace_ir)
     fields = tx["fields"]
     selects = tx["selects"]
     identity = tx["identity"]
@@ -561,7 +563,8 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
         pass
     tx["transaction_ir"] = build_transaction_ir(chosen=chosen, candidates=candidates, fields=fields,
                                                 selects=selects, identity=identity, samples=samples,
-                                                reads=reads or [], mirrors=tx.get("derived_mirrors") or [])
+                                                reads=reads or [], mirrors=tx.get("derived_mirrors") or [],
+                                                trace_ir=trace_ir)
     return {"type": "request_fields",
             "method": (chosen.get("method") or "POST").upper(), "url": chosen.get("url"),
             "fields": fields,
@@ -569,7 +572,29 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
             "suggested_steps": tx["suggested_steps"],   # 自动建议哪几条组成业务流程(前端预勾)
             "selects": selects,
             "identity": identity,
+            "trace_ir": {"version": (trace_ir or {}).get("version"),
+                         "capture_hash": (trace_ir or {}).get("capture_hash"),
+                         "trace_hash": (trace_ir or {}).get("trace_hash")},
             "transaction_ir": tx["transaction_ir"]}   # 字段=当前用户/会话值(运行期重取;排除用户填值/平凡撞值)
+
+
+def _trusted_transaction_ir(server_ir: dict | None, client_ir: dict | None,
+                            trace_ir: dict | None = None) -> dict | None:
+    """Prefer server-side IR; accept client echo only when trace hashes match."""
+    from dano.execution.page.transaction_ir import validate_transaction_ir
+    if server_ir:
+        if validate_transaction_ir(server_ir):
+            return None
+        return server_ir
+    if not client_ir:
+        return None
+    expected = (trace_ir or {}).get("trace_hash")
+    actual = ((client_ir or {}).get("capture") or {}).get("trace_hash")
+    if expected and expected != actual:
+        return None
+    if validate_transaction_ir(client_ir):
+        return None
+    return client_ir
 
 
 # ── 方式B:网页内录制(WebSocket:截屏流出 + 输入回传入 + 实时步骤 + 录完发布)──
@@ -621,6 +646,7 @@ async def record_ws(ws: WebSocket) -> None:
         pending_storage: dict | None = None    # 登录态(认 identity 字段)
         pending_required: set = set()          # 录制时表单 * 必填的字段标签
         pending_ir: dict | None = None         # 事务级 IR: inputs/sources/bindings/constants/success 的权威捕获模型
+        pending_trace: dict | None = None      # Trace IR:录制事实时间线(仅 hash/事件引用进前端协议)
         while True:
             msg = await ws.receive_json()
             t = msg.get("type")
@@ -671,10 +697,17 @@ async def record_ws(ws: WebSocket) -> None:
                     pending_reads = sess.captured_reads()       # select 候选源(选领导)
                     pending_storage = login_state               # identity 字段识别
                     pending_required = required_labels          # 表单 * 必填
+                    from dano.execution.page.capture_bundle import build_capture_bundle
+                    from dano.execution.page.trace_normalizer import normalize_capture_bundle
+                    bundle = build_capture_bundle(
+                        start_url=init.get("start_url") or "", steps=raw or [s.model_dump() for s in steps],
+                        writes=all_caps, reads=pending_reads, storage_state=login_state,
+                        samples=pending_samples, required_labels=pending_required)
+                    pending_trace = normalize_capture_bundle(bundle)
                     chosen = pick_submit_request(cands, samples) or cands[-1]
                     pending_req = chosen
                     rf = await _request_fields_msg(chosen, cands, samples, pending_reads,
-                                                   pending_storage, pending_required)
+                                                   pending_storage, pending_required, pending_trace)
                     pending_ir = rf.get("transaction_ir")
                     await ws.send_json(rf)
                     continue
@@ -713,7 +746,7 @@ async def record_ws(ws: WebSocket) -> None:
                 if pending_candidates and 0 <= idx < len(pending_candidates):
                     pending_req = pending_candidates[idx]
                     rf = await _request_fields_msg(pending_req, pending_candidates, pending_samples,
-                                                   pending_reads, pending_storage, pending_required)
+                                                   pending_reads, pending_storage, pending_required, pending_trace)
                     pending_ir = rf.get("transaction_ir")
                     await ws.send_json(rf)
             elif t == "publish_request":
@@ -729,7 +762,7 @@ async def record_ws(ws: WebSocket) -> None:
                                                                  suggest_fact_check, suggest_workflow_steps)
                 sels = msg.get("selects") or []         # Q2 选领导:展示 label、提交 value
                 idens = msg.get("identity") or []        # Q1 当前用户:运行期重取
-                tx_ir = msg.get("transaction_ir") or pending_ir
+                tx_ir = _trusted_transaction_ir(pending_ir, msg.get("transaction_ir"), pending_trace)
                 fc = suggest_fact_check(pending_samples, pending_reads)   # 回查源(录到"我的记录"列表才有)
                 sr = infer_success_rule(pending_reads)   # 学这套系统自己的"业务成功"约定(不挑系统,见 P0#2)
                 # 多步:用户勾了哪几条(step_idxs,有序);**没勾则自动判流程**(提交锚点+数据依赖,丢噪声)

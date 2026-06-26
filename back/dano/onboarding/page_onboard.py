@@ -220,6 +220,7 @@ def _focus_question(action: str, findings: list) -> str:
 
 def _build_page_body(api_request: dict, action: str, title: str, required):
     """从 api_request 算 params/必填/类型并建 PageScriptBody(修复后参数会变,故抽出可重算重建)。"""
+    from dano.execution.page.skill_interface import build_skill_interface
     from dano.shared.asset_bodies import PageScriptBody
     from dano.shared.enums import RiskLevel
     params = list(api_request.get("params") or [])
@@ -230,6 +231,7 @@ def _build_page_body(api_request: dict, action: str, title: str, required):
     ftypes = dict(api_request.get("field_types") or {})
     if not ftypes and api_request.get("steps"):
         ftypes = dict((api_request["steps"][-1] or {}).get("field_types") or {})
+    api_request = {**api_request, "skill_interface": build_skill_interface(api_request, required_fields=req_fields)}
     body = PageScriptBody(actions=[], dom_fingerprint="", action=action, title=title, api_request=api_request,
                           user_fields=params, required_fields=req_fields, optional_fields=opt_fields,
                           field_types=ftypes, risk_level=RiskLevel.L3).model_dump()

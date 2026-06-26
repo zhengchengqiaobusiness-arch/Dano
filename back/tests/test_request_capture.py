@@ -1,6 +1,8 @@
 """方式B 升级:抓提交请求 → 参数化(纯函数,离线)。"""
 from __future__ import annotations
 
+import json
+
 from dano.execution.page.request_capture import (
     _response_ok,
     as_list_payload,
@@ -32,6 +34,9 @@ from dano.execution.page.request_capture import (
 )
 from dano.execution.page.dataflow import infer_request_transaction
 from dano.execution.page.ir_compiler import compile_api_request_from_ir
+from dano.execution.page.capture_bundle import build_capture_bundle
+from dano.execution.page.trace_normalizer import event_for_request, normalize_capture_bundle
+from dano.execution.page.transaction_ir import validate_transaction_ir
 
 _SAMPLES = {"请假类型": "事假", "开始时间": "2026-06-24", "结束时间": "2026-06-26", "原因": "大地色多"}
 _SUBMIT = ('{"leaveType":"事假","startTime":"2026-06-24","endTime":"2026-06-26",'
@@ -300,6 +305,81 @@ def test_export_options_md_lists_candidates():
     assert md and "事假" in md and "value: `1`" in md and "病假" in md and "请假类型" in md
 
 
+def test_skill_interface_describes_sources_bindings_and_derived():
+    from dano.execution.page.skill_interface import build_skill_interface
+    req = {"method": "POST", "url": "http://oa/meeting",
+           "post_data": ('{"meetingTitle":"周会","userCount":2,"participants":['
+                         '{"userId":144,"userName":"姜楠","userAvatar":"old-a","participantType":2},'
+                         '{"userId":139,"userName":"李四","userAvatar":"old-b","participantType":2}]}')}
+    selects = [
+        {"path": "participants[0].userId", "source_url": "/users", "value_key": "id", "label_key": "name",
+         "options": [{"label": "姜楠", "value": "144"}, {"label": "李四", "value": "139"}], "count": 2},
+        {"path": "participants[1].userId", "source_url": "/users", "value_key": "id", "label_key": "name",
+         "options": [{"label": "姜楠", "value": "144"}, {"label": "李四", "value": "139"}], "count": 2},
+    ]
+    apir = build_api_request(req, {"meetingTitle": "会议主题", "participants[0].userId": "用户ID",
+                                   "participants[1].userId": "用户ID"}, selects=selects)
+    iface = build_skill_interface(apir, required_fields=["会议主题", "参会人"])
+
+    assert iface["version"] == "skill-interface/v1"
+    assert iface["input_schema"]["properties"]["参会人"]["format"] == "name-ref-list"
+    assert iface["source_schema"]
+    src = next(iter(iface["source_schema"].values()))
+    assert src["url"] == "/users" and src["value_key"] == "id" and src["label_key"] == "name"
+    bind = next(b for b in iface["bindings"] if b["input"] == "参会人")
+    assert bind["mode"] == "expand_array" and bind["target_path"] == "participants"
+    assert bind["expand_fields"] and "userId" in bind["expand_fields"]
+    assert "姜楠" not in json.dumps(iface, ensure_ascii=False)
+
+
+def test_manifest_and_export_write_skill_interface(tmp_path):
+    from dano.catalog.manifest import to_manifest
+    from dano.export.agent_skills import _dano_call_py, _write_skill
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel, Subsystem
+
+    iface = {"version": "skill-interface/v1",
+             "input_schema": {"type": "object", "properties": {"参会人": {"type": "array"}},
+                              "required": ["参会人"]},
+             "source_schema": {"src_users": {"id": "src_users", "url": "/users",
+                                             "value_key": "id", "label_key": "name"}},
+             "bindings": [{"input": "参会人", "target_path": "participants", "mode": "expand_array"}]}
+    sk = SkillSpec(skill_id="A-OA.meet", subsystem=Subsystem.OA, action="meet", risk_level=RiskLevel.L3,
+                   title="会议申请", required_fields=["参会人"], field_types={"参会人": "array"},
+                   skill_interface=iface,
+                   api_request={"skill_interface": iface,
+                                "selects": [{"param": "参会人", "kind": "array", "source_url": "/users",
+                                             "value_key": "id", "label_key": "name",
+                                             "submit_mode": "value[]"}]})
+    m = to_manifest(sk)
+    assert m.skill_interface["bindings"][0]["mode"] == "expand_array"
+    assert m.input_schema["required"] == ["参会人"]
+    assert m.source_schema["src_users"]["url"] == "/users"
+    py = _dano_call_py(m)
+    assert 'ARRAY_FIELDS = ["参会人"]' in py and "def _coerce_array" in py
+
+    folder = _write_skill(tmp_path, m)
+    interface_path = folder / "references" / "INTERFACE.json"
+    assert interface_path.exists()
+    assert json.loads(interface_path.read_text(encoding="utf-8"))["source_schema"]["src_users"]["url"] == "/users"
+
+
+def test_manifest_builds_skill_interface_from_legacy_api_request():
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel, Subsystem
+
+    sk = SkillSpec(skill_id="A-OA.old", subsystem=Subsystem.OA, action="old", risk_level=RiskLevel.L3,
+                   required_fields=["审批人"], field_types={"审批人": "enum"},
+                   api_request={"params": ["审批人"], "body_template": {"approverId": "{{审批人}}"},
+                                "selects": [{"param": "审批人", "path": "approverId", "source_url": "/users",
+                                             "value_key": "id", "label_key": "name"}]})
+    m = to_manifest(sk)
+    assert m.skill_interface["input_schema"]["properties"]["审批人"]["x-source-id"]
+    assert next(iter(m.source_schema.values()))["url"] == "/users"
+    assert m.skill_interface["bindings"][0]["target_path"] == "approverId"
+
+
 def test_suggest_selects_name_id_pair_detected():
     """名/ID 配对(根治问题4):body 里 yyxtmc=显示名 + 兄弟 yyxtid=内部 id 一次选定 →
     绑 yyxtmc(传名),并带 id_path=yyxtid → 运行期解析后同时写回 id,不冻结。通用,不挑系统。"""
@@ -457,6 +537,100 @@ def test_transaction_ir_captures_array_option_source_and_binding():
     assert any(d["kind"] == "array_count" and d["target_path"] == "userCount"
                for d in ir.get("derived", []))
     assert ir["success"] == {"field": "code", "ok_values": ["200"]}
+
+
+def test_capture_bundle_trace_ir_feeds_transaction_evidence_hashes():
+    """CaptureBundle/Trace IR 是事实层:Transaction IR 只引用 hash/ref,不依赖重新录制。"""
+    chosen = {"method": "POST", "url": "http://oa/meeting",
+              "post_data": '{"meetingTitle":"周会"}',
+              "response_json": {"code": 200}}
+    reads = [{"method": "GET", "url": "http://oa/rooms", "json": {"data": []}, "count": 0}]
+    bundle = build_capture_bundle(
+        start_url="http://oa/meeting/new",
+        steps=[{"op": "fill", "field": "会议主题", "value": "周会", "locator": "input"}],
+        writes=[chosen],
+        reads=reads,
+        storage_state={"cookies": [{"name": "sid", "value": "secret"}],
+                       "origins": [{"origin": "http://oa", "localStorage": [{"name": "token", "value": "secret"}]}]},
+        samples={"会议主题": "周会"},
+        required_labels={"会议主题"},
+    )
+    assert bundle["evidence_hash"]
+    assert bundle["storage"]["cookie_names"] == ["sid"]
+    assert "secret" not in str(bundle["storage"])
+    trace = normalize_capture_bundle(bundle)
+    assert trace["capture_hash"] == bundle["evidence_hash"]
+    assert trace["trace_hash"]
+    assert any(e["type"] == "network.write" for e in trace["events"])
+    tx = infer_request_transaction(chosen, [chosen], {"会议主题": "周会"}, reads, trace_ir=trace)
+    ir = tx["transaction_ir"]
+    assert ir["capture"]["capture_hash"] == trace["capture_hash"]
+    assert ir["capture"]["trace_hash"] == trace["trace_hash"]
+    assert ir["inputs"][0]["evidence"][1].startswith("trace://evt-write-")
+
+
+def test_trace_ir_disambiguates_repeated_endpoint_by_body_hash():
+    first = {"method": "POST", "url": "http://oa/meeting", "post_data": '{"draft":true}'}
+    second = {"method": "POST", "url": "http://oa/meeting", "post_data": '{"draft":false}'}
+    bundle = build_capture_bundle(writes=[first, second])
+    trace = normalize_capture_bundle(bundle)
+
+    ref1 = event_for_request(trace, first, "write")
+    ref2 = event_for_request(trace, second, "write")
+
+    assert ref1 and ref2 and ref1 != ref2
+
+
+def test_transaction_ir_source_keeps_read_trace_evidence():
+    chosen = {"method": "POST", "url": "http://oa/meeting",
+              "post_data": '{"meetingRoomId":"r1","meetingRoomName":"大会议室"}'}
+    reads = [{"method": "GET", "url": "http://oa/rooms",
+              "json": {"data": [{"id": "r1", "name": "大会议室"}]}, "count": 1}]
+    bundle = build_capture_bundle(writes=[chosen], reads=reads)
+    trace = normalize_capture_bundle(bundle)
+
+    tx = infer_request_transaction(chosen, [chosen], {"会议室": "大会议室"}, reads, trace_ir=trace)
+
+    assert tx["transaction_ir"]["sources"][0]["evidence"][0].startswith("trace://evt-read-")
+
+
+def test_transaction_ir_validation_rejects_broken_references():
+    ir = {
+        "version": "transaction-ir/v1",
+        "inputs": [{"name": "会议主题", "path": "meetingTitle"}],
+        "sources": [{"id": "src_users", "url": "/users"}],
+        "bindings": [{"input": "参会人", "source_id": "src_missing", "target_path": "participants"}],
+    }
+    issues = validate_transaction_ir(ir)
+    assert "bindings[0].input references unknown input 参会人" in issues
+    assert "bindings[0].source_id references unknown source src_missing" in issues
+
+
+def test_trusted_transaction_ir_rejects_stale_or_invalid_client_echo():
+    from dano.gateway.app import _trusted_transaction_ir
+
+    server_ir = {
+        "version": "transaction-ir/v1",
+        "inputs": [{"name": "会议主题", "path": "meetingTitle"}],
+        "bindings": [{"input": "会议主题", "target_path": "meetingTitle"}],
+        "capture": {"trace_hash": "trace-a"},
+    }
+    stale_client = {
+        "version": "transaction-ir/v1",
+        "inputs": [{"name": "会议主题", "path": "meetingTitle"}],
+        "bindings": [{"input": "会议主题", "target_path": "meetingTitle"}],
+        "capture": {"trace_hash": "trace-b"},
+    }
+    broken_client = {
+        "version": "transaction-ir/v1",
+        "inputs": [{"name": "会议主题", "path": "meetingTitle"}],
+        "bindings": [{"input": "参会人", "target_path": "participants"}],
+        "capture": {"trace_hash": "trace-a"},
+    }
+
+    assert _trusted_transaction_ir(server_ir, stale_client, {"trace_hash": "trace-a"}) == server_ir
+    assert _trusted_transaction_ir(None, stale_client, {"trace_hash": "trace-a"}) is None
+    assert _trusted_transaction_ir(None, broken_client, {"trace_hash": "trace-a"}) is None
 
 
 def test_ir_compiler_attaches_publish_time_transaction_ir():
@@ -2425,11 +2599,24 @@ async def test_generate_fix_ops_redacts_and_returns_ops():
     from dano.onboarding.repair import generate_fix_ops
     fake = _FakeChat({"ops": [{"op": "parameterize", "path": ["taskId"], "param": "任务号"}]})
     apir = {"body_template": {"taskId": "SEQ-1", "reason": "{{原因}}"}, "params": ["原因"],
-            "method": "POST", "path": "/x"}
+            "method": "POST", "path": "/x",
+            "transaction_ir": {
+                "version": "transaction-ir/v1",
+                "inputs": [{"name": "参会人", "path": "participants", "type": "array",
+                            "source_id": "src_users", "sample": "姜楠"}],
+                "sources": [{"id": "src_users", "kind": "http_list", "url": "/users",
+                             "value_key": "id", "label_key": "name",
+                             "options": [{"id": 144, "name": "姜楠"}],
+                             "evidence": ["trace://evt-read-0001"]}],
+                "bindings": [{"input": "参会人", "target_path": "participants",
+                              "mode": "expand_array", "source_id": "src_users"}],
+            }}
     ops = await generate_fix_ops(fake, "m", goal={"intent": "创建"}, api_request=apir,
                                  findings=[{"kind": "session_constant", "detail": "x"}])
     assert ops == [{"op": "parameterize", "path": ["taskId"], "param": "任务号"}]
     assert "原因" in fake.seen["user"] and "SEQ-1" not in fake.seen["user"]   # 只喂骨架(param↔path),不带 body 值
+    assert "expand_array" in fake.seen["user"] and "src_users" in fake.seen["user"]
+    assert "姜楠" not in fake.seen["user"]                                    # IR 摘要不带 sample/options label
 
 
 async def test_generate_fix_ops_safe_degrade():

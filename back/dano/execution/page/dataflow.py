@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from dano.execution.page.trace_normalizer import event_for_request, event_for_url
 from dano.execution.page.request_capture import (
     flatten_body,
     fold_array_select_fields,
@@ -41,7 +42,7 @@ def _select_source_id(s: dict) -> str:
     return stable_source_id(s.get("source_url"), s.get("value_key"), s.get("label_key"))
 
 
-def _source_specs(selects: list[dict]) -> list[SourceSpec]:
+def _source_specs(selects: list[dict], trace_ir: dict | None = None) -> list[SourceSpec]:
     out: dict[str, SourceSpec] = {}
     for s in selects or []:
         url = s.get("source_url")
@@ -50,6 +51,7 @@ def _source_specs(selects: list[dict]) -> list[SourceSpec]:
         sid = _select_source_id(s)
         if sid in out:
             continue
+        evidence_ref = event_for_url(trace_ir, url, "read")
         out[sid] = SourceSpec(
             id=sid,
             kind="http_list",
@@ -59,6 +61,7 @@ def _source_specs(selects: list[dict]) -> list[SourceSpec]:
             count=s.get("count"),
             options=list(s.get("options") or []),
             option_filter=dict(s.get("option_filter") or {}) or None,
+            evidence=[evidence_ref] if evidence_ref else [],
         )
     return list(out.values())
 
@@ -106,7 +109,8 @@ def _binding_for(field: dict, select: dict | None) -> BindingSpec:
 
 def build_transaction_ir(*, chosen: dict, candidates: list[dict] | None, fields: list[dict],
                          selects: list[dict], identity: list[dict], samples: dict | None,
-                         reads: list[dict] | None = None, mirrors: list[dict] | None = None) -> dict:
+                         reads: list[dict] | None = None, mirrors: list[dict] | None = None,
+                         trace_ir: dict | None = None) -> dict:
     sel_by_path = {s.get("path"): s for s in selects or [] if s.get("path")}
     id_paths = {i.get("path") for i in identity or []}
     inputs: list[InputSpec] = []
@@ -119,6 +123,10 @@ def build_transaction_ir(*, chosen: dict, candidates: list[dict] | None, fields:
         sel = sel_by_path.get(path)
         selected = bool(sel or f.get("suggest_param")) and path not in id_paths
         if selected:
+            ev = [f"request://body.{path}"]
+            tref = event_for_request(trace_ir, chosen, "write")
+            if tref:
+                ev.append(tref)
             inp = InputSpec(
                 name=_field_name(f),
                 path=path,
@@ -129,7 +137,7 @@ def build_transaction_ir(*, chosen: dict, candidates: list[dict] | None, fields:
                 submit_mode=_submit_mode(sel),
                 confidence=f.get("confidence"),
                 selected_default=True,
-                evidence=[f"request://body.{path}"],
+                evidence=ev,
             )
             inputs.append(inp)
             bindings.append(_binding_for(f, sel))
@@ -164,7 +172,7 @@ def build_transaction_ir(*, chosen: dict, candidates: list[dict] | None, fields:
         url=chosen.get("url") or "",
         path=request_path(chosen.get("url")),
         inputs=inputs,
-        sources=_source_specs(selects),
+        sources=_source_specs(selects, trace_ir),
         bindings=bindings,
         constants=constants,
         identity=[
@@ -179,6 +187,9 @@ def build_transaction_ir(*, chosen: dict, candidates: list[dict] | None, fields:
             "field_count": len(fields or []),
             "select_count": len(selects or []),
             "identity_count": len(identity or []),
+            "capture_hash": (trace_ir or {}).get("capture_hash"),
+            "trace_hash": (trace_ir or {}).get("trace_hash"),
+            "write_event": event_for_request(trace_ir, chosen, "write"),
         },
     )
     return ir_to_dict(ir)
@@ -186,7 +197,8 @@ def build_transaction_ir(*, chosen: dict, candidates: list[dict] | None, fields:
 
 def infer_request_transaction(chosen: dict, candidates: list[dict] | None, samples: dict | None,
                               reads: list[dict] | None = None, storage: dict | None = None,
-                              required_labels: set | None = None) -> dict[str, Any]:
+                              required_labels: set | None = None,
+                              trace_ir: dict | None = None) -> dict[str, Any]:
     """Infer field suggestions and Transaction IR for one chosen write request."""
     post_data = chosen.get("post_data")
     fields = flatten_body(post_data, samples or {}, required_labels)
@@ -207,6 +219,7 @@ def infer_request_transaction(chosen: dict, candidates: list[dict] | None, sampl
         samples=samples or {},
         reads=reads or [],
         mirrors=mirrors,
+        trace_ir=trace_ir,
     )
     return {"fields": fields, "selects": selects, "identity": identity,
             "suggested_steps": suggest_workflow_steps(candidates or [], samples or {}),

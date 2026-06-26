@@ -38,6 +38,7 @@ class SkillSpec(BaseModel):
     page_success_marker: str | None = None     # 页面脚本:成功标志
     page_steps: list[dict] = Field(default_factory=list)   # 页面脚本:动作步骤(PageAction 字典,详情时间线)
     api_request: dict = Field(default_factory=dict)        # 抓请求型页面脚本:参数化后的提交请求/多步工作流(steps/success_rule/fact_check)
+    skill_interface: dict = Field(default_factory=dict)    # 抓请求型:对外字段/来源/绑定/派生/成功判定接口描述
     required_fields: list[str] = Field(default_factory=list)   # 必填(缺则拦截)
     optional_fields: list[str] = Field(default_factory=list)   # 可选(契约暴露但不强制)
     keywords: list[str] = Field(default_factory=list)

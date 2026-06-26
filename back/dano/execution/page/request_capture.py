@@ -1507,6 +1507,7 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
         if s.get("path") not in param_map:
             continue
         meta = {"param": param_map[s["path"]], "source_url": s.get("source_url"),
+                "path": s.get("path"), "tokens": _leaf_tok.get(s.get("path")),
                 "value_key": s.get("value_key"), "label_key": s.get("label_key"),
                 "options": list(s.get("options") or []),     # 候选 {label,value} 快照,给前端/导出 skill 使用
                 "count": s.get("count"), "submit_mode": "value"}

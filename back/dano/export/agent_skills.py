@@ -539,10 +539,28 @@ TOOL = "__TOOL__"
 FIELDS = __FIELDS__
 REQUIRED = __REQUIRED__
 NUMERIC = __NUMERIC__          # 数值字段:提交前 str->number,避免审批分支按字符串误判
+ARRAY_FIELDS = __ARRAY_FIELDS__  # 枚举数组/数组字段:逐字段 flag 支持逗号或 JSON 数组字符串
 
 
 def _emit(obj):
     print(json.dumps(obj, ensure_ascii=False))
+
+
+def _coerce_array(v):
+    if v in (None, ""):
+        return []
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str):
+        s = v.strip()
+        if s.startswith("["):
+            try:
+                parsed = json.loads(s)
+                return parsed if isinstance(parsed, list) else [parsed]
+            except Exception:
+                pass
+        return [x.strip() for x in s.split(",") if x.strip()]
+    return [v]
 
 
 def main():
@@ -612,6 +630,9 @@ def main():
             except ValueError:
                 _emit({"status": "failed", "reason": "字段 %s 需为数字,得到: %r" % (f, v)})
                 sys.exit(1)
+    for f in ARRAY_FIELDS:
+        if f in arguments:
+            arguments[f] = _coerce_array(arguments[f])
 
     payload = json.dumps({"name": TOOL, "arguments": arguments, "confirm": bool(args.confirm)}).encode("utf-8")
     req = urllib.request.Request(
@@ -651,12 +672,15 @@ if __name__ == "__main__":
 def _dano_call_py(m: SkillManifest) -> str:
     keys, required, props = _fields(m)
     numeric = _numeric_fields(props)
+    arrays = [k for k, v in props.items() if (v or {}).get("type") == "array"
+              or (v or {}).get("format") == "name-ref-list"]
     return (_PY_TEMPLATE
             .replace("__TITLE__", m.title)
             .replace("__TOOL__", tool_name_of(m.name))
             .replace("__FIELDS__", json.dumps(keys, ensure_ascii=False))
             .replace("__REQUIRED__", json.dumps([k for k in keys if k in required], ensure_ascii=False))
-            .replace("__NUMERIC__", json.dumps(numeric, ensure_ascii=False)))
+            .replace("__NUMERIC__", json.dumps(numeric, ensure_ascii=False))
+            .replace("__ARRAY_FIELDS__", json.dumps(arrays, ensure_ascii=False)))
 
 
 _SUBMIT_SH = """#!/usr/bin/env bash
@@ -693,6 +717,9 @@ def _write_skill(out_dir: Path, m: SkillManifest) -> Path:
     opts_md = _options_md(m)                          # 选择型候选值清单(让 agent 从真实选项里选,问题1)
     if opts_md:
         (folder / "references" / "OPTIONS.md").write_text(opts_md, encoding="utf-8")
+    if m.skill_interface:
+        (folder / "references" / "INTERFACE.json").write_text(
+            json.dumps(m.skill_interface, ensure_ascii=False, indent=2), encoding="utf-8")
     py = folder / "scripts" / "dano_call.py"
     py.write_text(_dano_call_py(m), encoding="utf-8", newline="\n")
     _chmod_x(py)

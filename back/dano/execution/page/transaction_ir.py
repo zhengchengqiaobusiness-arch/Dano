@@ -30,6 +30,7 @@ class SourceSpec:
     count: int | None = None
     options: list[dict] = field(default_factory=list)
     option_filter: dict | None = None
+    evidence: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -121,3 +122,46 @@ def request_path(url: str | None) -> str:
         j = u.find("/", i + 2)
         u = u[j:] if j >= 0 else "/"
     return u or "/"
+
+
+def validate_transaction_ir(ir: dict | None) -> list[str]:
+    """Validate the IR graph before trusting it as publish-time provenance."""
+    if not isinstance(ir, dict):
+        return ["ir must be an object"]
+    issues: list[str] = []
+    if ir.get("version") != IR_VERSION:
+        issues.append("version must be transaction-ir/v1")
+    input_names: set[str] = set()
+    for i, inp in enumerate(ir.get("inputs") or []):
+        name = str((inp or {}).get("name") or "")
+        path = str((inp or {}).get("path") or "")
+        if not name:
+            issues.append(f"inputs[{i}].name is required")
+        elif name in input_names:
+            issues.append(f"inputs[{i}].name duplicates {name}")
+        input_names.add(name)
+        if not path:
+            issues.append(f"inputs[{i}].path is required")
+    source_ids: set[str] = set()
+    for i, src in enumerate(ir.get("sources") or []):
+        sid = str((src or {}).get("id") or "")
+        if not sid:
+            issues.append(f"sources[{i}].id is required")
+        elif sid in source_ids:
+            issues.append(f"sources[{i}].id duplicates {sid}")
+        source_ids.add(sid)
+        if not (src or {}).get("url"):
+            issues.append(f"sources[{i}].url is required")
+    for i, binding in enumerate(ir.get("bindings") or []):
+        name = str((binding or {}).get("input") or "")
+        if name and input_names and name not in input_names:
+            issues.append(f"bindings[{i}].input references unknown input {name}")
+        sid = (binding or {}).get("source_id")
+        if sid and source_ids and sid not in source_ids:
+            issues.append(f"bindings[{i}].source_id references unknown source {sid}")
+        if not (binding or {}).get("target_path"):
+            issues.append(f"bindings[{i}].target_path is required")
+    for i, item in enumerate(ir.get("derived") or []):
+        if item.get("kind") in {"array_count", "mirror"} and not item.get("target_path"):
+            issues.append(f"derived[{i}].target_path is required")
+    return issues

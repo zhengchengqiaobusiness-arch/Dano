@@ -52,6 +52,41 @@ def _request_skeleton(api_request: dict) -> dict:
     """给修复器看的"骨架":每步 param↔path 映射 + identity + method/path(**元数据,无 body 值/凭证**)。"""
     from dano.execution.page.request_capture import _leaf_paths
 
+    def tx_ir(ir: dict) -> dict:
+        if not isinstance(ir, dict):
+            return {}
+        return {
+            "version": ir.get("version"),
+            "inputs": [
+                {"name": i.get("name"), "path": i.get("path"), "type": i.get("type"),
+                 "submit_mode": i.get("submit_mode"), "source_id": i.get("source_id"),
+                 "required": i.get("required"), "evidence": i.get("evidence")}
+                for i in (ir.get("inputs") or [])
+            ],
+            "sources": [
+                {"id": s.get("id"), "kind": s.get("kind"), "has_url": bool(s.get("url")),
+                 "value_key": s.get("value_key"), "label_key": s.get("label_key"),
+                 "count": s.get("count"), "evidence": s.get("evidence")}
+                for s in (ir.get("sources") or [])
+            ],
+            "bindings": [
+                {"input": b.get("input"), "target_path": b.get("target_path"),
+                 "mode": b.get("mode"), "source_id": b.get("source_id"),
+                 "target_key": b.get("target_key"), "expand_fields": b.get("expand_fields")}
+                for b in (ir.get("bindings") or [])
+            ],
+            "derived": [
+                {"kind": d.get("kind"), "source_path": d.get("source_path"),
+                 "target_path": d.get("target_path"), "param": d.get("param"),
+                 "style": d.get("style")}
+                for d in (ir.get("derived") or [])
+            ],
+            "success": ir.get("success") or {},
+            "capture": {"capture_hash": (ir.get("capture") or {}).get("capture_hash"),
+                        "trace_hash": (ir.get("capture") or {}).get("trace_hash"),
+                        "write_event": (ir.get("capture") or {}).get("write_event")},
+        }
+
     def one(req: dict) -> dict:
         templ = req.get("body_template")
         placements = []
@@ -63,7 +98,9 @@ def _request_skeleton(api_request: dict) -> dict:
                 "placements": placements, "identity": [i.get("path") for i in (req.get("identity") or [])]}
 
     steps = api_request.get("steps")
-    return {"steps": [one(s) for s in steps]} if steps else one(api_request)
+    skeleton = {"steps": [one(s) for s in steps]} if steps else one(api_request)
+    skeleton["transaction_ir"] = tx_ir(api_request.get("transaction_ir") or {})
+    return skeleton
 
 
 def review_findings(verdicts) -> list[dict]:

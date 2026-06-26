@@ -12,6 +12,9 @@ export interface SkillManifest {
   risk_level: string;      // L1..L5
   requires_confirmation: boolean;
   parameters: JSONSchema;  // 输入 JSON Schema
+  skill_interface?: Record<string, unknown>; // 录入型稳定接口:input/source/binding/identity/derived/success
+  input_schema?: JSONSchema;
+  source_schema?: Record<string, unknown>;
   output_schema?: Record<string, unknown>;
   page?: PageSkillView | null;   // 页面型 Skill 专属(详情可视化)
 }
