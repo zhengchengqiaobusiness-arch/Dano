@@ -1,5 +1,5 @@
 """集中配置。**密钥/凭证绝不写在本文件**,放 `back/.env`(已 gitignore,绝不入库);非密钥默认值在本文件改即生效。
-
+1231212123
 读取优先级:进程环境变量(DANO_ 前缀)> `back/.env` > 本文件默认值。
 .env 里用 DANO_ 前缀(如 `DANO_PI_API_KEY=...`);模板见 `back/.env.example`(入库,只放占位符)。
 只保留实际被引用的配置项;Redis/Temporal/旧 LLM(openai/anthropic)等未接依赖已移除,需要时再加。
