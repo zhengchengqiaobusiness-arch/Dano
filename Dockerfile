@@ -15,7 +15,6 @@ RUN registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-$DANO_DEFAULT_NPM_REGISTRY}
 
 COPY package.json pnpm-workspace.yaml tsconfig.json vitest.config.ts ./
 COPY apps/dano/package.json apps/dano/package.json
-COPY patches patches
 COPY pnpm-lock.yaml* ./
 RUN registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-$DANO_DEFAULT_NPM_REGISTRY}}" \
   && npm_config_registry="$registry" \
