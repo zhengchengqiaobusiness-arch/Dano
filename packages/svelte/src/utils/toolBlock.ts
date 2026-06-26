@@ -98,7 +98,8 @@ function formatToolMeta(
     case "bash": {
       const parts: string[] = [];
       const exitCode = bashExitCode(resultText, status);
-      if (exitCode !== undefined) parts.push(`exit ${exitCode}`);
+      if (exitCode !== undefined && exitCode !== 0)
+        parts.push(`exit ${exitCode}`);
       const timeout = numberValue(args, "timeout");
       if (timeout !== undefined) parts.push(`timeout ${timeout}s`);
       return parts.join(" · ") || undefined;
