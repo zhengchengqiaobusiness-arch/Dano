@@ -18,6 +18,22 @@ function curlBlock(
   };
 }
 
+function bashBlock(
+  overrides: Partial<ToolContentBlock> = {},
+): ToolContentBlock {
+  return {
+    kind: "tool",
+    toolName: "bash",
+    toolArgs: {
+      command: "echo ok",
+    },
+    argumentsText: "",
+    toolStatus: "success",
+    resultText: "ok",
+    ...overrides,
+  };
+}
+
 describe("curl tool block", () => {
   it("shows curl arguments in the inline title", () => {
     expect(buildToolInlineModel(curlBlock()).title).toBe(
@@ -55,5 +71,53 @@ describe("curl tool block", () => {
         }),
       ).meta,
     ).toBe("exit 77");
+  });
+});
+
+describe("bash tool block", () => {
+  it("hides successful exit metadata because exit 0 is not useful inline", () => {
+    expect(buildToolInlineModel(bashBlock()).meta).toBeUndefined();
+  });
+
+  it("hides explicit zero exit text from historical bash results", () => {
+    expect(
+      buildToolInlineModel(
+        bashBlock({
+          resultText: "ok\nCommand exited with code 0",
+        }),
+      ).meta,
+    ).toBeUndefined();
+  });
+
+  it("hides non-zero exit metadata for failed bash calls", () => {
+    expect(
+      buildToolInlineModel(
+        bashBlock({
+          toolStatus: "error",
+          resultText: "failed\nCommand exited with code 2",
+        }),
+      ).meta,
+    ).toBeUndefined();
+  });
+
+  it("keeps bash timeout metadata without adding exit 0", () => {
+    expect(
+      buildToolInlineModel(
+        bashBlock({
+          toolArgs: { command: "sleep 1", timeout: 30 },
+        }),
+      ).meta,
+    ).toBe("timeout 30s");
+  });
+
+  it("does not infer exit metadata for pending bash calls", () => {
+    expect(
+      buildToolInlineModel(
+        bashBlock({
+          toolStatus: "pending",
+          resultText: undefined,
+        }),
+      ).meta,
+    ).toBeUndefined();
   });
 });

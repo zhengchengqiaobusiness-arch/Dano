@@ -31,9 +31,7 @@ export function buildToolInlineModel(block: ToolContentBlock): ToolInlineModel {
     meta: formatToolMeta(
       block.toolName,
       args,
-      block.resultText,
       block.resultDetails,
-      block.toolStatus,
     ),
     diffStats: buildDiffStats(
       block.toolName,
@@ -90,15 +88,11 @@ function formatToolTitle(
 function formatToolMeta(
   toolName: string,
   args: ToolArgsRecord | undefined,
-  resultText: string | undefined,
   resultDetails: JsonValue | undefined,
-  status: ToolBlockStatus,
 ): string | undefined {
   switch (toolName) {
     case "bash": {
       const parts: string[] = [];
-      const exitCode = bashExitCode(resultText, status);
-      if (exitCode !== undefined) parts.push(`exit ${exitCode}`);
       const timeout = numberValue(args, "timeout");
       if (timeout !== undefined) parts.push(`timeout ${timeout}s`);
       return parts.join(" · ") || undefined;
@@ -194,16 +188,6 @@ function numberValue(
 ): number | undefined {
   const value = args?.[key];
   return typeof value === "number" ? value : undefined;
-}
-
-function bashExitCode(
-  resultText: string | undefined,
-  status: ToolBlockStatus,
-): number | undefined {
-  if (!resultText) return status === "success" ? 0 : undefined;
-  const match = resultText.match(/Command exited with code (\d+)/i);
-  if (match) return Number(match[1]);
-  return status === "success" ? 0 : undefined;
 }
 
 function editDiffStats(
