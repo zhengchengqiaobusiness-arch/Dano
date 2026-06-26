@@ -5,6 +5,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -25,29 +26,39 @@ describe("Dano main", () => {
     const appPackage = JSON.parse(
       readFileSync(resolve("apps/dano/package.json"), "utf8"),
     ) as { dependencies?: Record<string, string> };
-    const workspaceConfig = readFileSync(resolve("pnpm-workspace.yaml"), "utf8");
+    const appRequire = createRequire(resolve("apps/dano/package.json"));
+    const heimdallPackage = JSON.parse(
+      readFileSync(
+        appRequire.resolve("@josephyoung/pi-heimdall/package.json"),
+        "utf8",
+      ),
+    ) as { peerDependencies?: Record<string, string> };
+    const sandboxGuard = readFileSync(
+      appRequire.resolve("@josephyoung/pi-heimdall/guards/sandbox-guard.ts"),
+      "utf8",
+    );
     const heimdall = JSON.parse(
       readFileSync(join(runtimeDefaultsDir, "heimdall.json"), "utf8"),
     ) as {
       sandbox?: { enabled?: boolean; userNamespace?: boolean };
       commandPolicies?: Array<{ blocked?: string[] }>;
     };
-    const heimdallPatchPath = workspaceConfig.match(
-      /'@casualjim\/pi-heimdall@0\.2\.10':\s*(\S+)/,
-    )?.[1];
-    const heimdallPatch = readFileSync(resolve(heimdallPatchPath ?? ""), "utf8");
 
-    expect(appPackage.dependencies?.["@casualjim/pi-heimdall"]).toBe("0.2.10");
+    expect(appPackage.dependencies?.["@josephyoung/pi-heimdall"]).toBe(
+      "0.2.12",
+    );
     expect(appPackage.dependencies?.["@earendil-works/pi-coding-agent"]).toBe(
       "0.80.2",
     );
-    expect(appPackage.dependencies?.["@mariozechner/pi-coding-agent"]).toBe(
-      "npm:@earendil-works/pi-coding-agent@0.80.2",
-    );
+    expect(
+      appPackage.dependencies?.["@mariozechner/pi-coding-agent"],
+    ).toBeUndefined();
+    expect(heimdallPackage.peerDependencies).toEqual({
+      "@earendil-works/pi-coding-agent": "*",
+    });
     expect(heimdall.sandbox?.enabled).toBe(true);
     expect(heimdall.sandbox?.userNamespace).toBe(false);
-    expect(heimdallPatchPath).toBe("patches/@casualjim__pi-heimdall@0.2.10.patch");
-    expect(heimdallPatch).toContain(
+    expect(sandboxGuard).toContain(
       'if (config.userNamespace) args.push("--unshare-user");',
     );
     expect(heimdall.commandPolicies).toContainEqual(

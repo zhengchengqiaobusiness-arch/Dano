@@ -16,9 +16,8 @@
     "test": "vitest run --root ../.. --config vitest.config.ts"
   },
   "dependencies": {
-    "@casualjim/pi-heimdall": "0.2.10",
     "@earendil-works/pi-coding-agent": "0.80.2",
-    "@mariozechner/pi-coding-agent": "npm:@earendil-works/pi-coding-agent@0.80.2",
+    "@josephyoung/pi-heimdall": "0.2.12",
     "typebox": "1.2.7"
   },
   "devDependencies": {

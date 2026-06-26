@@ -199,9 +199,8 @@ git rm packages/bridge/package.json packages/bridge/tsconfig.json packages/bridg
 
 依赖迁移到 `apps/dano/package.json`：
 
-- `@casualjim/pi-heimdall` 保留在 `dependencies`。
 - `@earendil-works/pi-coding-agent` 保留在 `dependencies`。
-- `@mariozechner/pi-coding-agent` 保留在 `dependencies`。
+- `@josephyoung/pi-heimdall` 保留在 `dependencies`。
 - `typebox` 加入 `dependencies`，因为 tool schema 在运行时使用。
 
 ### D. 拆出共享 protocol types

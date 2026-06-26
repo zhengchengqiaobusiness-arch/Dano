@@ -31,7 +31,7 @@ describe("Heimdall extension", () => {
         additionalExtensionPaths: [
           fileURLToPath(
             import.meta.resolve(
-              "@casualjim/pi-heimdall/extensions/heimdall.ts",
+              "@josephyoung/pi-heimdall/extensions/heimdall.ts",
             ),
           ),
         ],
