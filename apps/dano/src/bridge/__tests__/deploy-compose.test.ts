@@ -161,6 +161,7 @@ describe("deploy compose wrapper", () => {
 
   it("keeps production compose independent from the source checkout", () => {
     const compose = readFileSync(composeFile, "utf8");
+    expect(compose).toContain("name: dano");
     expect(compose).not.toContain("build:");
     expect(compose).not.toContain("./runtime-data");
     expect(compose).toContain("${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/tmp/dano");
@@ -169,18 +170,18 @@ describe("deploy compose wrapper", () => {
     );
   });
 
-  it("rewrites Debian apt sources to Tencent HTTP mirrors", () => {
+  it("rewrites Debian apt sources to Aliyun HTTP mirrors", () => {
     const dockerfileText = readFileSync(dockerfile, "utf8");
 
     expect(dockerfileText).toContain("https\\?://deb.debian.org/debian");
     expect(dockerfileText).toContain(
-      "http://mirrors.tencent.com/debian-security",
+      "http://mirrors.aliyun.com/debian-security",
     );
-    expect(dockerfileText).toContain("http://mirrors.tencent.com/debian");
+    expect(dockerfileText).toContain("http://mirrors.aliyun.com/debian");
     expect(dockerfileText).not.toContain(
-      "https://mirrors.tencent.com/debian-security",
+      "https://mirrors.aliyun.com/debian-security",
     );
-    expect(dockerfileText).not.toContain("https://mirrors.tencent.com/debian");
+    expect(dockerfileText).not.toContain("https://mirrors.aliyun.com/debian");
   });
 
   it("builds releases from a temporary checkout and cleans it up", () => {
