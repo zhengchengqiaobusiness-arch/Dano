@@ -5,6 +5,7 @@
     RpcTranscriptContent,
     RpcTranscriptContentBlock,
   } from "@dano/types/protocol";
+  import Copy from "lucide-svelte/icons/copy";
   import Pencil from "lucide-svelte/icons/pencil";
   import Sparkle from "lucide-svelte/icons/sparkle";
   import {
@@ -17,7 +18,11 @@
     askUserQuestionRequest,
     isAskUserQuestionToolError,
   } from "../utils/askUserQuestion";
-  import { userMessageCopyText } from "../utils/messageCopy";
+  import {
+    copyTextToClipboard,
+    userMessageCopyText,
+    userMessagePlainText,
+  } from "../utils/messageCopy";
   import {
     buildTranscriptDisplayItems,
     contentBlocks,
@@ -506,6 +511,16 @@
         typeof msg.id === "string" &&
         userMessageText(msg),
     );
+  }
+
+  function canCopyMessage(msg: TranscriptEntry): boolean {
+    return Boolean(userMessagePlainText(msg));
+  }
+
+  async function handleCopyMessage(msg: TranscriptEntry) {
+    const text = userMessagePlainText(msg);
+    if (!text) return;
+    await copyTextToClipboard(text);
   }
 
   function handleRevise(msg: TranscriptEntry) {
@@ -1034,17 +1049,31 @@
             {/each}
           </div>
 
-          {#if canReviseMessage(item.message)}
+          {#if canCopyMessage(item.message) || canReviseMessage(item.message)}
             <div class="message-actions">
-              <button
-                type="button"
-                class="message-action-button"
-                aria-label={t("chatTranscript.editMessage")}
-                title={t("chatTranscript.editMessage")}
-                onclick={() => handleRevise(item.message)}
-              >
-                <Pencil class="message-action-icon" aria-hidden="true" size={14} />
-              </button>
+              {#if canCopyMessage(item.message)}
+                <button
+                  type="button"
+                  class="message-action-button"
+                  aria-label={t("chatTranscript.copyMessage")}
+                  title={t("chatTranscript.copyMessage")}
+                  onclick={() => handleCopyMessage(item.message)}
+                >
+                  <Copy class="message-action-icon" aria-hidden="true" size={14} />
+                </button>
+              {/if}
+
+              {#if canReviseMessage(item.message)}
+                <button
+                  type="button"
+                  class="message-action-button"
+                  aria-label={t("chatTranscript.editMessage")}
+                  title={t("chatTranscript.editMessage")}
+                  onclick={() => handleRevise(item.message)}
+                >
+                  <Pencil class="message-action-icon" aria-hidden="true" size={14} />
+                </button>
+              {/if}
             </div>
           {/if}
         </div>
@@ -1227,6 +1256,7 @@
 
   .message-actions {
     display: flex;
+    gap: 2px;
     justify-content: flex-end;
     width: fit-content;
     max-width: min(720px, 100%);
@@ -1245,7 +1275,6 @@
     color: var(--text-subtle);
     cursor: pointer;
     opacity: 0;
-    pointer-events: none;
     transform: translateY(-2px);
     transition:
       opacity 0.14s ease,
@@ -1257,7 +1286,6 @@
   .message-stack.user:hover .message-action-button,
   .message-stack.user:focus-within .message-action-button {
     opacity: 1;
-    pointer-events: auto;
     transform: translateY(0);
   }
 
