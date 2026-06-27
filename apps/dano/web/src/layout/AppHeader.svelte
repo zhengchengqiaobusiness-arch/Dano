@@ -61,13 +61,20 @@
     flex: 0 0 auto;
     height: 26px;
     padding: 0 10px;
-    border: 1px solid var(--border);
+    border: none;
     border-radius: 999px;
     color: var(--text-muted);
     font-size: 0.78rem;
     font-weight: 650;
     line-height: 1;
-    background: var(--surface);
+    background: var(--composer-dock-bg);
+    box-shadow:
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0.04) 0px 0px 0px 1px,
+      rgba(0, 0, 0, 0.04) 0px 2px 8px 0px;
   }
 
   .status-dot {
