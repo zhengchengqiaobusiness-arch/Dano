@@ -352,9 +352,11 @@
         <button
           type="button"
           class="revision-cancel-button"
+          aria-label={t("composer.revision.cancel")}
+          title={t("composer.revision.cancel")}
           onclick={handleCancelRevision}
         >
-          {t("composer.revision.cancel")}
+          <X aria-hidden="true" size={14} />
         </button>
       </div>
     {/if}
@@ -602,12 +604,13 @@
   }
 
   .revision-banner {
+    position: relative;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 12px;
+    justify-content: center;
     margin: 0 0 8px;
-    padding: 10px 12px;
+    min-height: 48px;
+    padding: 10px 46px 10px 12px;
     border-radius: 14px;
     border: 1px solid color-mix(in srgb, var(--border-strong) 82%, transparent);
     background: color-mix(in srgb, var(--panel-2) 88%, transparent);
@@ -620,12 +623,19 @@
     font-size: 0.82rem;
     line-height: 1.45;
     color: var(--text);
+    text-align: center;
   }
 
   .revision-cancel-button {
-    flex-shrink: 0;
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
     height: 28px;
-    padding: 0 10px;
+    padding: 0;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--bg);
@@ -1004,9 +1014,6 @@
       padding: 8px 12px 10px;
       padding-bottom: max(10px, env(safe-area-inset-bottom));
     }
-
-    .revision-banner { flex-direction: column; }
-    .revision-cancel-button { align-self: flex-start; }
 
     .composer-dock { gap: 8px; padding: 10px 14px; border-radius: 24px; }
     .composer-dock.multiline { padding: 14px 14px 12px; }
