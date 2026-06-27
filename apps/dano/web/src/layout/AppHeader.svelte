@@ -1,15 +1,12 @@
 <script lang="ts">
   import type { ConnectionStatus } from "../composables/bridgeStore.svelte";
   import { t } from "../i18n";
-  import { getRuntimeProductName } from "../utils/runtimeConfig";
 
   let {
     connectionStatus,
   }: {
     connectionStatus: ConnectionStatus;
   } = $props();
-
-  const productName = getRuntimeProductName();
 
   const statusMeta = $derived.by(() => {
     switch (connectionStatus) {
@@ -26,7 +23,6 @@
 
 <header class="app-header">
   <div class="header-leading">
-    <span class="product-name">{productName}</span>
     <div class={`connection-status ${statusMeta.className}`}>
       <span class="status-dot" aria-hidden="true"></span>
       <span>{statusMeta.label}</span>
@@ -36,13 +32,18 @@
 
 <style>
   .app-header {
+    position: fixed;
+    top: 0;
+    left: 0;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 0 16px;
-    height: 44px;
+    height: auto;
+    margin: 10px 0 0 10px;
+    border-radius: 999px;
     flex-shrink: 0;
+    z-index: 20;
   }
 
   .header-leading {
@@ -51,17 +52,6 @@
     gap: 14px;
     height: 100%;
     min-width: 0;
-  }
-
-  .product-name {
-    display: inline-flex;
-    align-items: center;
-    height: 26px;
-    flex: 0 0 auto;
-    color: var(--text);
-    font-size: 0.92rem;
-    font-weight: 700;
-    line-height: 1;
   }
 
   .connection-status {
@@ -104,7 +94,7 @@
 
   @media (max-width: 640px) {
     .app-header {
-      padding-inline: 12px;
+      margin: 10px 0 0 10px;
     }
 
     .header-leading {
