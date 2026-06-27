@@ -5,6 +5,8 @@
   import { onMount, tick } from "svelte";
   import { highlightCodeHtml, readThemeMode } from "../utils/codeHighlight";
   import { parseInlineFileReference } from "../utils/fileReferences";
+  import { copyTextToClipboard } from "../utils/messageCopy";
+  import { t } from "../i18n";
 
   let {
     class: className = "",
@@ -269,6 +271,50 @@
     }
   }
 
+  function copyButton(label: string): HTMLButtonElement {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "markdown-copy-button";
+    button.dataset.markdownCopy = "true";
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    button.textContent = t("common.copy");
+    return button;
+  }
+
+  function copyableBlockText(block: HTMLElement): string {
+    if (block.classList.contains("mermaid-block")) {
+      return block.dataset.mermaidSource ?? "";
+    }
+    if (block instanceof HTMLPreElement) {
+      return block.dataset.codeSource ?? block.textContent ?? "";
+    }
+    return block.textContent ?? "";
+  }
+
+  function wrapCopyableBlock(block: HTMLElement, label: string) {
+    if (block.closest(".markdown-copy-frame")) return;
+    const frame = document.createElement("div");
+    frame.className = "markdown-copy-frame";
+    block.before(frame);
+    frame.append(block, copyButton(label));
+  }
+
+  function enhanceCopyableBlocks() {
+    const root = markdownBody();
+    if (!root) return;
+
+    for (const block of root.querySelectorAll<HTMLElement>("pre, blockquote, .mermaid-block")) {
+      if (block.closest(".mermaid-block") && !block.classList.contains("mermaid-block")) continue;
+      wrapCopyableBlock(
+        block,
+        block instanceof HTMLPreElement || block.classList.contains("mermaid-block")
+          ? t("chatTranscript.copyCodeBlock")
+          : t("chatTranscript.copyMarkdownBlock"),
+      );
+    }
+  }
+
   async function renderCodeBlocks(force = false) {
     const version = ++codeRenderVersion;
     await tick();
@@ -385,12 +431,52 @@
       enhanceInlineFileReferences();
       await renderCodeBlocks(shouldForceCode);
       await renderMermaidBlocks(shouldForceMermaid);
+      enhanceCopyableBlocks();
     });
   }
 
   function handleClick(event: MouseEvent) {
+    if (handleCopyClick(event.target)) {
+      event.preventDefault();
+      return;
+    }
     handleClickTarget(event.target);
     event.preventDefault();
+  }
+
+  function copyableBlockForButton(button: HTMLButtonElement): HTMLElement | null {
+    const frame = button.closest<HTMLElement>(".markdown-copy-frame");
+    if (!frame) return null;
+    for (const child of frame.children) {
+      if (child === button || !(child instanceof HTMLElement)) continue;
+      if (
+        child.matches("pre, blockquote") ||
+        child.classList.contains("mermaid-block")
+      ) {
+        return child;
+      }
+    }
+    return null;
+  }
+
+  function handleCopyClick(target: EventTarget | null): boolean {
+    const button = target instanceof Element
+      ? target.closest<HTMLButtonElement>("button[data-markdown-copy]")
+      : null;
+    if (!button) return false;
+    const block = copyableBlockForButton(button);
+    if (!block) return true;
+    copyTextToClipboard(copyableBlockText(block))
+      .then(ok => {
+        button.dataset.copyState = ok ? "copied" : "error";
+        window.setTimeout(() => {
+          delete button.dataset.copyState;
+        }, 1200);
+      })
+      .catch(() => {
+        button.dataset.copyState = "error";
+      });
+    return true;
   }
 
   function handleClickTarget(target: EventTarget | null) {
@@ -523,6 +609,65 @@
     color: var(--text-muted);
     background: var(--panel);
     border-radius: 0 6px 6px 0;
+  }
+
+  :global(.markdown-body .markdown-copy-frame) {
+    position: relative;
+    margin: 0.6em 0;
+  }
+
+  :global(.markdown-body .markdown-copy-frame > pre),
+  :global(.markdown-body .markdown-copy-frame > blockquote),
+  :global(.markdown-body .markdown-copy-frame > .mermaid-block) {
+    margin: 0;
+  }
+
+  :global(.markdown-body .markdown-copy-button) {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 24px;
+    min-width: 44px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--panel-2) 88%, transparent);
+    color: var(--text-subtle);
+    font: inherit;
+    font-size: 0.68rem;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition:
+      opacity 0.14s ease,
+      color 0.14s ease,
+      border-color 0.14s ease,
+      background 0.14s ease;
+  }
+
+  :global(.markdown-body .markdown-copy-frame:hover > .markdown-copy-button),
+  :global(.markdown-body .markdown-copy-button:focus-visible),
+  :global(.markdown-body .markdown-copy-button[data-copy-state]) {
+    opacity: 1;
+  }
+
+  :global(.markdown-body .markdown-copy-button:hover),
+  :global(.markdown-body .markdown-copy-button:focus-visible) {
+    border-color: var(--border-strong);
+    color: var(--text);
+  }
+
+  :global(.markdown-body .markdown-copy-button[data-copy-state="copied"]) {
+    border-color: color-mix(in srgb, var(--success) 60%, var(--border));
+    color: var(--success);
+  }
+
+  :global(.markdown-body .markdown-copy-button[data-copy-state="error"]) {
+    border-color: color-mix(in srgb, var(--error-text) 60%, var(--border));
+    color: var(--error-text);
   }
 
   :global(.markdown-body blockquote p) {
