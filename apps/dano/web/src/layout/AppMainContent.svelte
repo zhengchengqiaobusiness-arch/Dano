@@ -191,6 +191,7 @@
     {isStreaming}
     {isCompacting}
     showMessageIds={isDebugMode}
+    {allowRevision}
     onLoadOlder={onLoadOlderTranscript}
     onRevise={onReviseMessage}
     onOpenFileReference={onOpenFileReference}

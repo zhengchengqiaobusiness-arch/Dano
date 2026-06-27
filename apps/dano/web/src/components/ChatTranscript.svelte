@@ -1256,6 +1256,7 @@
 
   .message-actions {
     display: flex;
+    gap: 2px;
     justify-content: flex-end;
     width: fit-content;
     max-width: min(720px, 100%);
@@ -1274,7 +1275,6 @@
     color: var(--text-subtle);
     cursor: pointer;
     opacity: 0;
-    pointer-events: none;
     transform: translateY(-2px);
     transition:
       opacity 0.14s ease,
@@ -1286,7 +1286,6 @@
   .message-stack.user:hover .message-action-button,
   .message-stack.user:focus-within .message-action-button {
     opacity: 1;
-    pointer-events: auto;
     transform: translateY(0);
   }
 

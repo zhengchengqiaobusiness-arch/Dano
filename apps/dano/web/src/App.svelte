@@ -1274,7 +1274,7 @@
         createGitBranch={bridge.createGitBranch}
         prefillText={bridge.prefillText}
         {pendingRevision}
-        allowRevision={!activeDebugSessionPath && bridge.connectionStatus === "connected"}
+        allowRevision={bridge.connectionStatus === "connected"}
         pendingMessageCount={displayedPendingMessageCount}
         queuedUserMessages={displayedQueuedUserMessages}
         {editQueuedPayload}
