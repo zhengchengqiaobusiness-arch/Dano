@@ -24,6 +24,7 @@ const composeFile = new URL(
   "../../../../../docker-compose.yml",
   import.meta.url,
 ).pathname;
+const dockerfile = new URL("../../../../../Dockerfile", import.meta.url).pathname;
 const tempDirs: string[] = [];
 
 function run(
@@ -166,6 +167,20 @@ describe("deploy compose wrapper", () => {
     expect(compose).toContain(
       "${DANO_NGINX_CONF:-/opt/dano/deploy/nginx/default.conf}",
     );
+  });
+
+  it("rewrites Debian apt sources to Tencent HTTP mirrors", () => {
+    const dockerfileText = readFileSync(dockerfile, "utf8");
+
+    expect(dockerfileText).toContain("https\\?://deb.debian.org/debian");
+    expect(dockerfileText).toContain(
+      "http://mirrors.tencent.com/debian-security",
+    );
+    expect(dockerfileText).toContain("http://mirrors.tencent.com/debian");
+    expect(dockerfileText).not.toContain(
+      "https://mirrors.tencent.com/debian-security",
+    );
+    expect(dockerfileText).not.toContain("https://mirrors.tencent.com/debian");
   });
 
   it("builds releases from a temporary checkout and cleans it up", () => {
