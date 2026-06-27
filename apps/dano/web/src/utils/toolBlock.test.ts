@@ -41,8 +41,8 @@ describe("curl tool block", () => {
     );
   });
 
-  it("shows the curl exit code as inline metadata", () => {
-    expect(buildToolInlineModel(curlBlock()).meta).toBe("exit 0");
+  it("hides the curl exit code inline", () => {
+    expect(buildToolInlineModel(curlBlock()).meta).toBeUndefined();
   });
 
   it("formats the expanded curl command", () => {
@@ -62,7 +62,7 @@ describe("curl tool block", () => {
     ).toBe("curl: (77) missing CA");
   });
 
-  it("shows non-zero curl exit metadata", () => {
+  it("hides non-zero curl exit metadata", () => {
     expect(
       buildToolInlineModel(
         curlBlock({
@@ -70,7 +70,7 @@ describe("curl tool block", () => {
           resultDetails: { stderr: "failed", exitCode: 77 },
         }),
       ).meta,
-    ).toBe("exit 77");
+    ).toBeUndefined();
   });
 });
 

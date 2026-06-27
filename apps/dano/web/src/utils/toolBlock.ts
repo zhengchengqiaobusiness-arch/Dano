@@ -97,10 +97,8 @@ function formatToolMeta(
       if (timeout !== undefined) parts.push(`timeout ${timeout}s`);
       return parts.join(" · ") || undefined;
     }
-    case "curl": {
-      const exitCode = numberValue(asRecord(resultDetails), "exitCode");
-      return exitCode !== undefined ? `exit ${exitCode}` : undefined;
-    }
+    case "curl":
+      return undefined;
     case "edit":
       return undefined;
     case "write": {
