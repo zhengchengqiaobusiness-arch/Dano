@@ -344,6 +344,21 @@
       />
     {/if}
 
+    {#if revision}
+      <div class="revision-banner">
+        <div class="revision-banner-copy">
+          <p class="revision-preview">{revision.preview}</p>
+        </div>
+        <button
+          type="button"
+          class="revision-cancel-button"
+          onclick={handleCancelRevision}
+        >
+          {t("composer.revision.cancel")}
+        </button>
+      </div>
+    {/if}
+
     <div
       bind:this={composerDockRef}
       class="composer-dock composer"
@@ -358,21 +373,6 @@
       ondragleave={composer.handleDragLeave}
       ondrop={composer.handleDrop}
     >
-      {#if revision}
-        <div class="revision-banner">
-          <div class="revision-banner-copy">
-            <p class="revision-preview">{revision.preview}</p>
-          </div>
-          <button
-            type="button"
-            class="revision-cancel-button"
-            onclick={handleCancelRevision}
-          >
-            {t("composer.revision.cancel")}
-          </button>
-        </div>
-      {/if}
-
       <input
         bind:this={fileInputRef}
         class="hidden-file-input"
@@ -606,6 +606,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 12px;
+    margin: 0 0 8px;
     padding: 10px 12px;
     border-radius: 14px;
     border: 1px solid color-mix(in srgb, var(--border-strong) 82%, transparent);
