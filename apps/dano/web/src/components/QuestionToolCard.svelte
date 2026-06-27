@@ -551,10 +551,11 @@
     max-width: 640px;
     width: 100%;
     padding: 16px;
-    border: 1px solid var(--border);
     border-radius: 14px;
-    background: var(--panel);
-    box-shadow: var(--shadow-raised);
+    background: color-mix(in srgb, var(--panel) 84%, var(--panel-2));
+    box-shadow:
+      0 1px 0 color-mix(in srgb, var(--bg) 64%, transparent) inset,
+      var(--shadow-raised);
   }
 
   .question-label {
