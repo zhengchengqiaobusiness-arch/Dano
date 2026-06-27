@@ -1136,7 +1136,7 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 24px 32px 12px;
+    padding: 42px 32px 12px;
     display: flex;
     flex-direction: column;
     gap: 8px;
@@ -1692,14 +1692,14 @@
 
   @media (max-width: 900px) {
     .chat-transcript {
-      padding: 16px 16px 8px;
+      padding: 42px 16px 8px;
       gap: 6px;
     }
   }
 
   @media (max-width: 640px) {
     .chat-transcript {
-      padding: 12px 12px 8px;
+      padding: 42px 12px 8px;
     }
 
     .message-content.user {
