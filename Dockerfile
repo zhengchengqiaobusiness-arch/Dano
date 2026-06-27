@@ -33,7 +33,7 @@ ARG NPM_REGISTRY=
 ARG NPM_CONFIG_REGISTRY=
 RUN registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-$DANO_DEFAULT_NPM_REGISTRY}}" \
   && npm config set registry "$registry"
-RUN sed -i 's|https\?://deb.debian.org/debian-security|http://mirrors.tencent.com/debian-security|g; s|https\?://deb.debian.org/debian|http://mirrors.tencent.com/debian|g' /etc/apt/sources.list.d/debian.sources \
+RUN sed -i 's|https\?://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; s|https\?://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources \
   && apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates bubblewrap curl python3 \
   && chmod u+s /usr/bin/bwrap \
