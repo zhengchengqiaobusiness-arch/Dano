@@ -51,9 +51,13 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
   textarea.value = text;
   textarea.setAttribute("readonly", "");
   textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
   textarea.style.opacity = "0";
   document.body.append(textarea);
+  textarea.focus({ preventScroll: true });
   textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
   try {
     return document.execCommand("copy");
   } finally {

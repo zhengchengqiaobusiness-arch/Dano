@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import type {
     RpcImageContent,
     RpcTranscriptContent,
     RpcTranscriptContentBlock,
   } from "@dano/types/protocol";
   import Copy from "lucide-svelte/icons/copy";
+  import Check from "lucide-svelte/icons/check";
   import Pencil from "lucide-svelte/icons/pencil";
   import Sparkle from "lucide-svelte/icons/sparkle";
   import {
@@ -119,6 +120,8 @@
     isStreaming || transcriptStreams.length > 0 || transcriptDeltas.length > 0,
   );
   let showBusyIndicator = $derived(hasVisibleStreaming || isCompacting);
+  let copiedMessageKey = $state<string | null>(null);
+  let copiedMessageResetTimer: number | undefined;
   let streamingAssistantMessageIndex = $derived.by(() => {
     if (!hasVisibleStreaming) return -1;
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -517,10 +520,26 @@
     return Boolean(userMessagePlainText(msg));
   }
 
-  async function handleCopyMessage(msg: TranscriptEntry) {
+  function messageCopyLabel(key: string): string {
+    return copiedMessageKey === key ? t("common.copied") : t("chatTranscript.copyMessage");
+  }
+
+  function showCopiedMessageState(key: string) {
+    copiedMessageKey = key;
+    if (copiedMessageResetTimer !== undefined) {
+      window.clearTimeout(copiedMessageResetTimer);
+    }
+    copiedMessageResetTimer = window.setTimeout(() => {
+      if (copiedMessageKey === key) copiedMessageKey = null;
+      copiedMessageResetTimer = undefined;
+    }, 1200);
+  }
+
+  async function handleCopyMessage(msg: TranscriptEntry, key: string) {
     const text = userMessagePlainText(msg);
     if (!text) return;
-    await copyTextToClipboard(text);
+    const copied = await copyTextToClipboard(text);
+    if (copied) showCopiedMessageState(key);
   }
 
   function handleRevise(msg: TranscriptEntry) {
@@ -666,6 +685,12 @@
       cancelAnimationFrame(stickToBottomFrame);
       stickToBottomFrame = 0;
     };
+  });
+
+  onDestroy(() => {
+    if (copiedMessageResetTimer !== undefined) {
+      window.clearTimeout(copiedMessageResetTimer);
+    }
   });
 
   // ---- copy handling ----
@@ -1052,14 +1077,20 @@
           {#if canCopyMessage(item.message) || canReviseMessage(item.message)}
             <div class="message-actions">
               {#if canCopyMessage(item.message)}
+                {@const copyKey = messageStableKey(item.message, item.messageIndex)}
                 <button
                   type="button"
                   class="message-action-button"
-                  aria-label={t("chatTranscript.copyMessage")}
-                  title={t("chatTranscript.copyMessage")}
-                  onclick={() => handleCopyMessage(item.message)}
+                  data-copy-state={copiedMessageKey === copyKey ? "copied" : undefined}
+                  data-tooltip={messageCopyLabel(copyKey)}
+                  aria-label={messageCopyLabel(copyKey)}
+                  title={messageCopyLabel(copyKey)}
+                  onclick={() => handleCopyMessage(item.message, copyKey)}
                 >
-                  <Copy class="message-action-icon" aria-hidden="true" size={14} />
+                  <span class="copy-action-icon" aria-hidden="true">
+                    <Copy class="message-action-icon copy-base-icon" size={14} />
+                    <Check class="message-action-check" size={10} strokeWidth={3} />
+                  </span>
                 </button>
               {/if}
 
@@ -1264,6 +1295,7 @@
   }
 
   .message-action-button {
+    position: relative;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -1284,7 +1316,8 @@
   }
 
   .message-stack.user:hover .message-action-button,
-  .message-stack.user:focus-within .message-action-button {
+  .message-stack.user:focus-within .message-action-button,
+  .message-action-button[data-copy-state="copied"] {
     opacity: 1;
     transform: translateY(0);
   }
@@ -1293,6 +1326,66 @@
   .message-action-button:focus-visible {
     background: var(--surface-hover);
     color: var(--text);
+  }
+
+  .copy-action-icon {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+  }
+
+  .copy-action-icon :global(.copy-base-icon),
+  .copy-action-icon :global(.message-action-check) {
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    transition:
+      opacity 0.18s cubic-bezier(0.2, 0, 0, 1),
+      transform 0.18s cubic-bezier(0.2, 0, 0, 1),
+      filter 0.18s cubic-bezier(0.2, 0, 0, 1),
+      color 0.18s cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  .copy-action-icon :global(.message-action-check) {
+    color: var(--success);
+    opacity: 0;
+    filter: blur(4px);
+    transform: scale(0.25);
+  }
+
+  .message-action-button[data-copy-state="copied"] .copy-action-icon :global(.copy-base-icon) {
+    color: var(--text-muted);
+    opacity: 0.42;
+    transform: scale(0.92);
+  }
+
+  .message-action-button[data-copy-state="copied"] .copy-action-icon :global(.message-action-check) {
+    opacity: 1;
+    filter: blur(0);
+    transform: scale(1);
+  }
+
+  .message-action-button[data-copy-state="copied"]::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 7px);
+    z-index: 2;
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    box-shadow: var(--shadow-raised);
+    color: var(--text);
+    font-size: 0.68rem;
+    line-height: 1;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 1;
+    transform: translateX(-50%);
   }
 
   .message-content.user {

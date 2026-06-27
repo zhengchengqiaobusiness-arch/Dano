@@ -109,6 +109,25 @@
     return `${Math.round(zoom * 100)}%`;
   }
 
+  function createSvgIcon(className: string, paths: string[]): SVGSVGElement {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", className);
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("width", "14");
+    svg.setAttribute("height", "14");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    for (const pathData of paths) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", pathData);
+      svg.append(path);
+    }
+    return svg;
+  }
+
   function updateMermaidZoom(block: HTMLElement, zoom: number) {
     const nextZoom = clampMermaidZoom(zoom);
     const baseWidth = Number(block.dataset.mermaidBaseWidth);
@@ -276,9 +295,21 @@
     button.type = "button";
     button.className = "markdown-copy-button";
     button.dataset.markdownCopy = "true";
+    button.dataset.copyLabel = label;
+    button.dataset.tooltip = label;
     button.title = label;
     button.setAttribute("aria-label", label);
-    button.textContent = t("common.copy");
+    const icon = document.createElement("span");
+    icon.className = "markdown-copy-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.append(
+      createSvgIcon("markdown-copy-base-icon", [
+        "M8 8h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2Z",
+        "M16 8V4a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4",
+      ]),
+      createSvgIcon("markdown-copy-check-icon", ["M20 6 9 17l-5-5"]),
+    );
+    button.append(icon);
     return button;
   }
 
@@ -469,8 +500,17 @@
     copyTextToClipboard(copyableBlockText(block))
       .then(ok => {
         button.dataset.copyState = ok ? "copied" : "error";
+        if (ok) {
+          button.dataset.tooltip = t("common.copied");
+          button.title = t("common.copied");
+          button.setAttribute("aria-label", t("common.copied"));
+        }
         window.setTimeout(() => {
           delete button.dataset.copyState;
+          const label = button.dataset.copyLabel ?? t("common.copy");
+          button.dataset.tooltip = label;
+          button.title = label;
+          button.setAttribute("aria-label", label);
         }, 1200);
       })
       .catch(() => {
@@ -629,9 +669,9 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    height: 24px;
-    min-width: 44px;
-    padding: 0 8px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
     border: 1px solid var(--border);
     border-radius: 999px;
     background: color-mix(in srgb, var(--panel-2) 88%, transparent);
@@ -648,6 +688,34 @@
       background 0.14s ease;
   }
 
+  :global(.markdown-body .markdown-copy-icon) {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+  }
+
+  :global(.markdown-body .markdown-copy-base-icon),
+  :global(.markdown-body .markdown-copy-check-icon) {
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    transition:
+      opacity 0.18s cubic-bezier(0.2, 0, 0, 1),
+      transform 0.18s cubic-bezier(0.2, 0, 0, 1),
+      filter 0.18s cubic-bezier(0.2, 0, 0, 1),
+      color 0.18s cubic-bezier(0.2, 0, 0, 1);
+  }
+
+  :global(.markdown-body .markdown-copy-check-icon) {
+    color: var(--success);
+    opacity: 0;
+    filter: blur(4px);
+    transform: scale(0.25);
+  }
+
   :global(.markdown-body .markdown-copy-frame:hover > .markdown-copy-button),
   :global(.markdown-body .markdown-copy-button:focus-visible),
   :global(.markdown-body .markdown-copy-button[data-copy-state]) {
@@ -662,7 +730,37 @@
 
   :global(.markdown-body .markdown-copy-button[data-copy-state="copied"]) {
     border-color: color-mix(in srgb, var(--success) 60%, var(--border));
-    color: var(--success);
+  }
+
+  :global(.markdown-body .markdown-copy-button[data-copy-state="copied"] .markdown-copy-base-icon) {
+    color: var(--text-muted);
+    opacity: 0.42;
+    transform: scale(0.92);
+  }
+
+  :global(.markdown-body .markdown-copy-button[data-copy-state="copied"] .markdown-copy-check-icon) {
+    opacity: 1;
+    filter: blur(0);
+    transform: scale(1);
+  }
+
+  :global(.markdown-body .markdown-copy-button[data-copy-state="copied"]::after) {
+    content: attr(data-tooltip);
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 7px);
+    z-index: 2;
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    box-shadow: var(--shadow-raised);
+    color: var(--text);
+    font-size: 0.68rem;
+    line-height: 1;
+    white-space: nowrap;
+    pointer-events: none;
+    transform: translateX(-50%);
   }
 
   :global(.markdown-body .markdown-copy-button[data-copy-state="error"]) {
