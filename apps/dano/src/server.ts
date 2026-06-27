@@ -74,6 +74,7 @@ export async function startDanoServer(
       connCtx.config,
       connCtx.eventBus,
       connCtx.emitEvent,
+      connCtx.uploadRegistry,
       sessionRegistry,
     );
   };

@@ -10,12 +10,11 @@
 
 import * as fs from "node:fs";
 import * as http from "node:http";
-import * as os from "node:os";
 import * as path from "node:path";
-import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import type { BridgeEventBus } from "./bridge-event-bus.js";
 import { getLanIps, isTailscaleIp } from "./network.js";
+import { UploadRegistry } from "./upload-registry.js";
 import type {
   BridgeConfig,
   BridgeEvent,
@@ -33,23 +32,6 @@ const UPLOAD_MIME_TYPES = new Set([
   "image/gif",
   "image/webp",
 ]);
-const UPLOAD_EXTENSION_BY_MIME_TYPE: Record<string, string> = {
-  "image/png": ".png",
-  "image/jpeg": ".jpg",
-  "image/gif": ".gif",
-  "image/webp": ".webp",
-};
-
-const uploadedFiles = new Map<string, RpcUploadedFileRef>();
-
-export function resolveUploadedFileRef(
-  ref: Pick<RpcUploadedFileRef, "id" | "path">,
-): RpcUploadedFileRef | null {
-  const stored = uploadedFiles.get(ref.id);
-  if (!stored || stored.path !== ref.path) return null;
-  return stored;
-}
-
 class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -68,6 +50,7 @@ export interface RpcConnectionContext {
   client: BridgeClient;
   config: BridgeConfig;
   eventBus: BridgeEventBus;
+  uploadRegistry: UploadRegistry;
   emitEvent: (event: BridgeEvent) => void;
   send: (message: ServerMessage) => void;
 }
@@ -91,8 +74,8 @@ export class BridgeServer {
   private httpServer: http.Server | undefined;
   private handlers = new Map<string, RpcConnectionHandler>();
   private clients = new Map<string, BridgeClient>();
-  private uploadDir: string | undefined;
-  private uploadIds = new Set<string>();
+  private uploadRegistry: UploadRegistry;
+  private cleanupInterval: ReturnType<typeof setInterval> | undefined;
 
   private isRunning = false;
   private host: string = "localhost";
@@ -108,6 +91,7 @@ export class BridgeServer {
     this.handlerFactory = handlerFactory;
     this.eventBus = eventBus;
     this.emitEvent = emitEvent;
+    this.uploadRegistry = new UploadRegistry(config.upload);
   }
 
   async start(): Promise<{ host: string; port: number }> {
@@ -120,6 +104,8 @@ export class BridgeServer {
 
     let boundPort = 0;
     let lastError: Error | undefined;
+
+    await this.uploadRegistry.initialize();
 
     for (
       let tryPort = startPort;
@@ -147,6 +133,7 @@ export class BridgeServer {
       }
     }
 
+    this.startUploadCleanupInterval();
     this.host = this.config.host;
     this.port = boundPort;
     this.isRunning = true;
@@ -186,6 +173,21 @@ export class BridgeServer {
     });
   }
 
+  private startUploadCleanupInterval(): void {
+    if (this.cleanupInterval) clearInterval(this.cleanupInterval);
+    this.cleanupInterval = setInterval(() => {
+      void this.uploadRegistry.cleanupExpiredUploads().catch(error => {
+        console.warn("Dano upload cleanup failed:", error);
+      });
+    }, this.config.upload.cleanupIntervalMs);
+    if (
+      typeof this.cleanupInterval === "object" &&
+      "unref" in this.cleanupInterval
+    ) {
+      this.cleanupInterval.unref();
+    }
+  }
+
   async stop(): Promise<void> {
     if (!this.isRunning) {
       return;
@@ -210,12 +212,11 @@ export class BridgeServer {
 
     this.isRunning = false;
     this.port = 0;
-    for (const id of this.uploadIds) uploadedFiles.delete(id);
-    this.uploadIds.clear();
-    if (this.uploadDir) {
-      await fs.promises.rm(this.uploadDir, { recursive: true, force: true });
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = undefined;
     }
-    this.uploadDir = undefined;
+    await this.uploadRegistry.dispose();
 
     this.emitEvent({ type: "server_stop" });
   }
@@ -269,6 +270,22 @@ export class BridgeServer {
         return;
       }
 
+      const uploadOrphanMatch = /^\/api\/uploads\/([^/]+)\/orphan$/.exec(
+        pathname,
+      );
+      if (
+        (req.method === "POST" || req.method === "DELETE") &&
+        uploadOrphanMatch?.[1]
+      ) {
+        await readJsonBody(req);
+        this.handleUploadOrphan(
+          res,
+          decodeURIComponent(uploadOrphanMatch[1]),
+          url,
+        );
+        return;
+      }
+
       const clientEventsMatch = /^\/api\/clients\/([^/]+)\/events$/.exec(
         pathname,
       );
@@ -319,13 +336,6 @@ export class BridgeServer {
     }
   }
 
-  private ensureUploadDir(): string {
-    if (!this.uploadDir) {
-      this.uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-uploads-"));
-    }
-    return this.uploadDir;
-  }
-
   private async handleUploadRequest(
     req: http.IncomingMessage,
     res: http.ServerResponse,
@@ -344,12 +354,24 @@ export class BridgeServer {
       throw new HttpError(413, "Upload is too large");
     }
 
-    const id = randomUUID();
-    const filePath = path.join(
-      this.ensureUploadDir(),
-      `${id}${UPLOAD_EXTENSION_BY_MIME_TYPE[mimeType]}`,
-    );
-    const size = await writeUploadBody(req, filePath, MAX_UPLOAD_BODY_BYTES);
+    const ownerClientId = url.searchParams.get("clientId");
+    if (!ownerClientId || !this.clients.has(ownerClientId)) {
+      throw new HttpError(400, "Valid clientId is required");
+    }
+    if (
+      Number.isFinite(contentLength) &&
+      !(await this.uploadRegistry.cleanupBeforeUpload(contentLength))
+    ) {
+      throw new HttpError(413, "Upload storage limit exceeded");
+    }
+
+    const { id, filePath, partPath } = this.uploadRegistry.createFilePath(mimeType);
+    const size = await writeUploadBody(req, partPath, MAX_UPLOAD_BODY_BYTES);
+    if (!(await this.uploadRegistry.cleanupBeforeUpload(size))) {
+      await fs.promises.rm(partPath, { force: true });
+      throw new HttpError(413, "Upload storage limit exceeded");
+    }
+    await fs.promises.rename(partPath, filePath);
     const ref: RpcUploadedFileRef = {
       id,
       name,
@@ -358,8 +380,7 @@ export class BridgeServer {
       path: filePath,
       previewUrl: `/api/uploads/${encodeURIComponent(id)}/preview`,
     };
-    uploadedFiles.set(id, ref);
-    this.uploadIds.add(id);
+    this.uploadRegistry.register(ref, { ownerClientId });
     writeJson(res, 201, ref);
   }
 
@@ -367,7 +388,7 @@ export class BridgeServer {
     res: http.ServerResponse,
     id: string,
   ): void {
-    const ref = uploadedFiles.get(id);
+    const ref = this.uploadRegistry.touch(id);
     if (!ref) {
       writeJson(res, 404, { error: "Upload was not found" });
       return;
@@ -389,6 +410,29 @@ export class BridgeServer {
     });
   }
 
+  private handleUploadOrphan(
+    res: http.ServerResponse,
+    id: string,
+    url: URL,
+  ): void {
+    const clientId = url.searchParams.get("clientId");
+    const upload = this.uploadRegistry.touch(id);
+    if (!upload) {
+      writeJson(res, 404, { error: "Upload was not found" });
+      return;
+    }
+    if (!clientId || upload.ownerClientId !== clientId) {
+      writeJson(res, 403, { error: "Upload does not belong to this client" });
+      return;
+    }
+    if (upload.state === "reading") {
+      writeJson(res, 409, { error: "Upload is currently being read" });
+      return;
+    }
+    this.uploadRegistry.markOrphaned(id);
+    writeJson(res, 202, { status: "orphaned" });
+  }
+
   private createClient(res: http.ServerResponse): void {
     clientSeqCounter++;
     const client: BridgeClient = {
@@ -404,6 +448,7 @@ export class BridgeServer {
       client,
       config: this.config,
       eventBus: this.eventBus,
+      uploadRegistry: this.uploadRegistry,
       emitEvent: this.emitEvent,
       send: message => {
         this.eventBus.sendToClient(client.id, message);
@@ -482,6 +527,7 @@ export class BridgeServer {
     const client = this.clients.get(clientId);
     if (!handler || !client) return;
 
+    this.uploadRegistry.markClientDraftsOrphaned(clientId);
     handler.dispose();
     this.handlers.delete(clientId);
     this.clients.delete(clientId);

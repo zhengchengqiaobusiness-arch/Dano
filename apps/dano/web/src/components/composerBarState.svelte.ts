@@ -15,6 +15,7 @@ import {
   getSupportedImageMimeType,
   toRpcImageContent,
   toRpcUploadedFileRefs,
+  markComposerAttachmentOrphaned,
   uploadComposerAttachment,
   type ComposerAttachment,
 } from "../utils/attachments";
@@ -441,7 +442,11 @@ export function createComposerBarState(
   function removeAttachment(id: string) {
     const index = attachments.findIndex(a => a.id === id);
     if (index === -1) return;
-    disposeAttachment(attachments[index]!);
+    const attachment = attachments[index]!;
+    disposeAttachment(attachment);
+    if (attachment.status === "uploaded" && attachment.file) {
+      void markComposerAttachmentOrphaned(attachment.file);
+    }
     const nextAttachments = attachments.filter(a => a.id !== id);
     if (lightboxAttachmentIndex === index) {
       lightboxAttachmentIndex =

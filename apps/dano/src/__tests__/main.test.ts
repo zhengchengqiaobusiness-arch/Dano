@@ -219,6 +219,58 @@ describe("Dano main", () => {
     expect(options.staticDir).toBe(resolve(process.cwd(), "custom-web"));
   });
 
+  it("uses default upload configuration", () => {
+    const options = parseDanoServerOptions([], {});
+
+    expect(options.upload).toEqual({
+      uploadDir: "/tmp/dano/.dano/uploads",
+      maxTotalBytes: 10 * 1024 * 1024 * 1024,
+      draftTtlMs: 2 * 60 * 60 * 1000,
+      referencedTtlMs: 24 * 60 * 60 * 1000,
+      orphanedTtlMs: 5 * 60 * 1000,
+      cleanupIntervalMs: 60 * 60 * 1000,
+    });
+  });
+
+  it("uses upload configuration from environment", () => {
+    const options = parseDanoServerOptions([], {
+      DANO_UPLOAD_DIR: " custom-uploads ",
+      DANO_UPLOAD_MAX_TOTAL_BYTES: "123",
+      DANO_UPLOAD_DRAFT_TTL_MS: "234",
+      DANO_UPLOAD_REFERENCED_TTL_MS: "345",
+      DANO_UPLOAD_ORPHANED_TTL_MS: "456",
+      DANO_UPLOAD_CLEANUP_INTERVAL_MS: "567",
+    });
+
+    expect(options.upload).toEqual({
+      uploadDir: resolve(process.cwd(), "custom-uploads"),
+      maxTotalBytes: 123,
+      draftTtlMs: 234,
+      referencedTtlMs: 345,
+      orphanedTtlMs: 456,
+      cleanupIntervalMs: 567,
+    });
+  });
+
+  it("falls back to upload defaults for invalid numeric environment values", () => {
+    const options = parseDanoServerOptions([], {
+      DANO_UPLOAD_MAX_TOTAL_BYTES: "0",
+      DANO_UPLOAD_DRAFT_TTL_MS: "-1",
+      DANO_UPLOAD_REFERENCED_TTL_MS: "not-a-number",
+      DANO_UPLOAD_ORPHANED_TTL_MS: "",
+      DANO_UPLOAD_CLEANUP_INTERVAL_MS: "0",
+    });
+
+    expect(options.upload).toEqual({
+      uploadDir: "/tmp/dano/.dano/uploads",
+      maxTotalBytes: 10 * 1024 * 1024 * 1024,
+      draftTtlMs: 2 * 60 * 60 * 1000,
+      referencedTtlMs: 24 * 60 * 60 * 1000,
+      orphanedTtlMs: 5 * 60 * 1000,
+      cleanupIntervalMs: 60 * 60 * 1000,
+    });
+  });
+
   it("keeps the no-static-dir fallback when index.html is missing", () => {
     const root = mkdtempSync(join(tmpdir(), "dano-static-missing-"));
     try {

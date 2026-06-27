@@ -11,6 +11,15 @@ export { ASK_USER_QUESTION_TOOL_NAME } from "../../types/protocol.js";
 // ============================================================================
 
 /** Configuration for the bridge server, sourced from extension config or defaults. */
+export interface UploadConfig {
+  readonly uploadDir: string;
+  readonly maxTotalBytes: number;
+  readonly draftTtlMs: number;
+  readonly referencedTtlMs: number;
+  readonly orphanedTtlMs: number;
+  readonly cleanupIntervalMs: number;
+}
+
 export interface BridgeConfig {
   /** Host to bind the HTTP/SSE server to. Default: "localhost" */
   readonly host: string;
@@ -34,6 +43,8 @@ export interface BridgeConfig {
   readonly clientBufferSize: number;
   /** Heartbeat interval for SSE streams. Default: 15_000 */
   readonly heartbeatInterval: number;
+  /** Upload storage and cleanup limits. */
+  readonly upload: UploadConfig;
 }
 
 /** Sensible defaults for bridge configuration. */
@@ -51,6 +62,14 @@ export const DEFAULT_BRIDGE_CONFIG: BridgeConfig = {
   uiRequestTimeout: 60_000,
   clientBufferSize: 256,
   heartbeatInterval: 15_000,
+  upload: {
+    uploadDir: "/tmp/dano/.dano/uploads",
+    maxTotalBytes: 10 * 1024 * 1024 * 1024,
+    draftTtlMs: 2 * 60 * 60 * 1000,
+    referencedTtlMs: 24 * 60 * 60 * 1000,
+    orphanedTtlMs: 5 * 60 * 1000,
+    cleanupIntervalMs: 60 * 60 * 1000,
+  },
 };
 
 // ============================================================================

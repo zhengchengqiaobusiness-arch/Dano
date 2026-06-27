@@ -1,4 +1,5 @@
 import type { RpcImageContent, RpcUploadedFileRef } from "@dano/types/protocol";
+import { getBridgeClientId } from "../composables/bridgeStore.svelte";
 
 const SUPPORTED_IMAGE_MIME_TYPES = new Set([
   "image/png",
@@ -117,7 +118,9 @@ export async function uploadComposerAttachment(
   mimeType: string,
   signal: AbortSignal,
 ): Promise<RpcUploadedFileRef> {
-  const query = new URLSearchParams({ name: file.name, mimeType });
+  const clientId = getBridgeClientId();
+  if (!clientId) throw new Error("Upload requires an active client");
+  const query = new URLSearchParams({ clientId, name: file.name, mimeType });
   const response = await fetch(`/api/uploads?${query.toString()}`, {
     method: "POST",
     headers: { "Content-Type": mimeType },
@@ -128,6 +131,19 @@ export async function uploadComposerAttachment(
     throw new Error(`Upload failed (${response.status})`);
   }
   return (await response.json()) as RpcUploadedFileRef;
+}
+
+export async function markComposerAttachmentOrphaned(
+  file: RpcUploadedFileRef,
+): Promise<void> {
+  const clientId = getBridgeClientId();
+  if (!clientId) return;
+  const query = new URLSearchParams({ clientId });
+  await fetch(`/api/uploads/${encodeURIComponent(file.id)}/orphan?${query}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
 }
 
 export function toRpcImageContent(

@@ -12,7 +12,7 @@ import { createDanoBackend } from "./backend.js";
 import type { DanoBackend } from "./backend.js";
 import { loadDanoConfig } from "./bridge/dano-config.js";
 import { DetachedSessionRegistry } from "./bridge/session-registry.js";
-import type { BridgeConfig } from "./bridge/types.js";
+import type { BridgeConfig, UploadConfig } from "./bridge/types.js";
 import { createDanoDevReloadController } from "./dev-reload.js";
 import { loadDanoRuntime, type DanoRuntime } from "./runtime.js";
 import type { BridgeEmptyStateConfig } from "../types/protocol.js";
@@ -21,6 +21,12 @@ const DEFAULT_DANO_PORT = 8080;
 const DEFAULT_DANO_HOST = "0.0.0.0";
 const DEFAULT_DANO_WORKSPACE = "/tmp/dano";
 const DEFAULT_DANO_SESSIONS_DIR = ".dano/sessions";
+const DEFAULT_DANO_UPLOAD_DIR = "/tmp/dano/.dano/uploads";
+const DEFAULT_DANO_UPLOAD_MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024;
+const DEFAULT_DANO_UPLOAD_DRAFT_TTL_MS = 2 * 60 * 60 * 1000;
+const DEFAULT_DANO_UPLOAD_REFERENCED_TTL_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_DANO_UPLOAD_ORPHANED_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_DANO_UPLOAD_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_PRODUCT_NAME = "Dano";
 const DEFAULT_RUNTIME_SETTINGS_FILES = [
   "SYSTEM.md",
@@ -45,6 +51,7 @@ export interface DanoServerOptions {
   sessionsRootPath: string;
   productName: string;
   emptyState: BridgeEmptyStateConfig;
+  upload: UploadConfig;
   staticDir?: string;
   help: boolean;
 }
@@ -74,6 +81,14 @@ function parseInteger(value: string | undefined, fallback: number): number {
 
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parsePositiveInteger(
+  value: string | undefined,
+  fallback: number,
+): number {
+  const parsed = parseInteger(value, fallback);
+  return parsed > 0 ? parsed : fallback;
 }
 
 function readHost(env: Record<string, string | undefined>): string {
@@ -125,6 +140,34 @@ function readEmptyStateConfig(
   }
 
   return DEFAULT_EMPTY_STATE;
+}
+
+function readUploadConfig(
+  env: Record<string, string | undefined>,
+): UploadConfig {
+  return {
+    uploadDir: env.DANO_UPLOAD_DIR?.trim() || DEFAULT_DANO_UPLOAD_DIR,
+    maxTotalBytes: parsePositiveInteger(
+      env.DANO_UPLOAD_MAX_TOTAL_BYTES?.trim(),
+      DEFAULT_DANO_UPLOAD_MAX_TOTAL_BYTES,
+    ),
+    draftTtlMs: parsePositiveInteger(
+      env.DANO_UPLOAD_DRAFT_TTL_MS?.trim(),
+      DEFAULT_DANO_UPLOAD_DRAFT_TTL_MS,
+    ),
+    referencedTtlMs: parsePositiveInteger(
+      env.DANO_UPLOAD_REFERENCED_TTL_MS?.trim(),
+      DEFAULT_DANO_UPLOAD_REFERENCED_TTL_MS,
+    ),
+    orphanedTtlMs: parsePositiveInteger(
+      env.DANO_UPLOAD_ORPHANED_TTL_MS?.trim(),
+      DEFAULT_DANO_UPLOAD_ORPHANED_TTL_MS,
+    ),
+    cleanupIntervalMs: parsePositiveInteger(
+      env.DANO_UPLOAD_CLEANUP_INTERVAL_MS?.trim(),
+      DEFAULT_DANO_UPLOAD_CLEANUP_INTERVAL_MS,
+    ),
+  };
 }
 
 function findNearestProductPackageJson(startDir: string): string | undefined {
@@ -236,6 +279,7 @@ export function parseDanoServerOptions(
   let sessionsRootPath = readSessionsRootPath(env);
   let productName = readProductName(env);
   let emptyState = readEmptyStateConfig(env);
+  const upload = readUploadConfig(env);
   const staticDirOverride = env.DANO_STATIC_DIR?.trim();
   let help = false;
 
@@ -332,6 +376,10 @@ export function parseDanoServerOptions(
     ),
     productName,
     emptyState,
+    upload: {
+      ...upload,
+      uploadDir: resolve(cwd, upload.uploadDir),
+    },
     staticDir: staticDirOverride
       ? resolve(cwd, staticDirOverride)
       : resolveDefaultStaticDir(fileURLToPath(import.meta.url)),
@@ -512,6 +560,7 @@ async function runDanoMain(): Promise<number> {
         defaultWorkspacePath,
         productName: options.productName,
         emptyState: options.emptyState,
+        upload: options.upload,
         quickActions: danoConfig.quickActions ?? [],
         staticDir: options.staticDir,
       };
