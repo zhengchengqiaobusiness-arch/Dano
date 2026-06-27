@@ -42,10 +42,7 @@
     gap: 12px;
     padding: 0 16px;
     height: 44px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg);
     flex-shrink: 0;
-    z-index: 20;
   }
 
   .header-leading {
