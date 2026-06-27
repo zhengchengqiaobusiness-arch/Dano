@@ -31,6 +31,12 @@ interface MockTransport {
 let adapter: BridgeRpcAdapter;
 let client: BridgeClient;
 let emitEvent: ReturnType<typeof vi.fn<(event: unknown) => void>>;
+let uploadRegistry: {
+  resolve: ReturnType<typeof vi.fn>;
+  markReading: ReturnType<typeof vi.fn>;
+  markReferenced: ReturnType<typeof vi.fn>;
+  markDraft: ReturnType<typeof vi.fn>;
+};
 
 const createMockTransport = (): MockTransport => {
   return {
@@ -174,6 +180,12 @@ describe("BridgeRpcAdapter", () => {
     context = createMockContext();
     eventBus = new BridgeEventBus(DEFAULT_BRIDGE_CONFIG);
     emitEvent = vi.fn<(event: unknown) => void>();
+    uploadRegistry = {
+      resolve: vi.fn(),
+      markReading: vi.fn(),
+      markReferenced: vi.fn(),
+      markDraft: vi.fn(),
+    };
     client = {
       id: "test-client",
       seq: 1,
@@ -186,6 +198,7 @@ describe("BridgeRpcAdapter", () => {
       DEFAULT_BRIDGE_CONFIG,
       eventBus,
       emitEvent as any,
+      uploadRegistry as any,
     );
   });
 
@@ -347,6 +360,107 @@ describe("BridgeRpcAdapter", () => {
       });
 
       fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("marks uploaded files referenced after converting them to image content", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-upload-"));
+      try {
+        const filePath = path.join(tmpDir, "sample.png");
+        fs.writeFileSync(filePath, "uploaded-image");
+        uploadRegistry.resolve.mockReturnValue({
+          id: "upload-1",
+          name: "sample.png",
+          size: 14,
+          mimeType: "image/png",
+          path: filePath,
+        });
+
+        const command: RpcCommand = {
+          id: "cmd-upload",
+          type: "steer",
+          message: "Inspect upload",
+          files: [
+            {
+              id: "upload-1",
+              name: "sample.png",
+              size: 14,
+              mimeType: "image/png",
+              path: filePath,
+            },
+          ],
+        };
+        (
+          ws as unknown as { trigger: (event: string, data: Buffer) => void }
+        ).trigger(
+          "message",
+          Buffer.from(JSON.stringify({ type: "command", payload: command })),
+        );
+
+        await new Promise(r => setTimeout(r, 20));
+
+        expect(uploadRegistry.markReading).toHaveBeenCalledWith("upload-1");
+        expect(uploadRegistry.markReferenced).toHaveBeenCalledWith("upload-1", {
+          correlationId: "cmd-upload",
+        });
+        expect(context.actions.sendUserMessage).toHaveBeenCalledWith(
+          [
+            { type: "text", text: "Inspect upload" },
+            {
+              type: "image",
+              mimeType: "image/png",
+              data: Buffer.from("uploaded-image").toString("base64"),
+            },
+          ],
+          { deliverAs: "steer" },
+        );
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("restores uploaded files to draft when image conversion fails", async () => {
+      const filePath = path.join(os.tmpdir(), "missing-upload.png");
+      uploadRegistry.resolve.mockReturnValue({
+        id: "upload-1",
+        name: "sample.png",
+        size: 14,
+        mimeType: "image/png",
+        path: filePath,
+      });
+
+      const command: RpcCommand = {
+        id: "cmd-upload-fail",
+        type: "steer",
+        message: "Inspect upload",
+        files: [
+          {
+            id: "upload-1",
+            name: "sample.png",
+            size: 14,
+            mimeType: "image/png",
+            path: filePath,
+          },
+        ],
+      };
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(JSON.stringify({ type: "command", payload: command })),
+      );
+
+      await new Promise(r => setTimeout(r, 20));
+
+      expect(uploadRegistry.markReading).toHaveBeenCalledWith("upload-1");
+      expect(uploadRegistry.markDraft).toHaveBeenCalledWith("upload-1");
+      expect(context.actions.sendUserMessage).not.toHaveBeenCalled();
+      expect(emitEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "command_error",
+          commandType: "steer",
+          correlationId: "cmd-upload-fail",
+        }),
+      );
     });
 
     it("continues the selected session instead of using pi.sendUserMessage", async () => {
@@ -1549,6 +1663,7 @@ describe("BridgeRpcAdapter", () => {
         shortTimeoutConfig,
         eventBus,
         emitEvent as any,
+        uploadRegistry as any,
       );
 
       const uiContext = shortAdapter.createExtensionUIContext();

@@ -21,14 +21,20 @@ interface SseProbe {
 }
 
 const servers: BridgeServer[] = [];
+const uploadRoots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map(server => server.stop()));
+  for (const root of uploadRoots.splice(0)) {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function createServer(
   factory?: (ctx: Parameters<RpcConnectionHandlerFactory>[0]) => RpcConnectionHandler,
 ) {
+  const uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-server-upload-"));
+  uploadRoots.push(uploadDir);
   const eventBus = new BridgeEventBus(DEFAULT_BRIDGE_CONFIG);
   const emitEvent = vi.fn();
   const handlerFactory: RpcConnectionHandlerFactory = ctx =>
@@ -37,7 +43,12 @@ function createServer(
       dispose: vi.fn(),
     };
   const server = new BridgeServer(
-    { ...DEFAULT_BRIDGE_CONFIG, host: "127.0.0.1", port: 0 },
+    {
+      ...DEFAULT_BRIDGE_CONFIG,
+      host: "127.0.0.1",
+      port: 0,
+      upload: { ...DEFAULT_BRIDGE_CONFIG.upload, uploadDir },
+    },
     handlerFactory,
     eventBus,
     emitEvent,
@@ -303,10 +314,13 @@ describe("BridgeServer HTTP/SSE transport", () => {
     const { server } = createServer();
     const address = await server.start();
     const origin = `http://127.0.0.1:${address.port}`;
+    const created = await postJson<{ client: { id: string } }>(
+      `${origin}/api/clients`,
+    );
     const body = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
 
     const uploadResponse = await postBytes(
-      `${origin}/api/uploads?name=sample.png&mimeType=image/png`,
+      `${origin}/api/uploads?clientId=${encodeURIComponent(created.client.id)}&name=sample.png&mimeType=image/png`,
       body,
       { "Content-Type": "image/png" },
     );
@@ -333,12 +347,59 @@ describe("BridgeServer HTTP/SSE transport", () => {
     expect(new Uint8Array(await previewResponse.arrayBuffer())).toEqual(body);
   });
 
-  it("rejects uploads without a file name", async () => {
+  it("rejects uploads without a valid client id", async () => {
     const { server } = createServer();
     const address = await server.start();
 
     const response = await postBytes(
-      `http://127.0.0.1:${address.port}/api/uploads?mimeType=image/png`,
+      `http://127.0.0.1:${address.port}/api/uploads?name=sample.png&mimeType=image/png`,
+      new Uint8Array([1]),
+      { "Content-Type": "image/png" },
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it("marks uploaded drafts orphaned only for their owner client", async () => {
+    const { server } = createServer();
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const owner = await postJson<{ client: { id: string } }>(
+      `${origin}/api/clients`,
+    );
+    const other = await postJson<{ client: { id: string } }>(
+      `${origin}/api/clients`,
+    );
+    const uploadResponse = await postBytes(
+      `${origin}/api/uploads?clientId=${encodeURIComponent(owner.client.id)}&name=sample.png&mimeType=image/png`,
+      new Uint8Array([1]),
+      { "Content-Type": "image/png" },
+    );
+    expect(uploadResponse.status).toBe(201);
+    const uploaded = (await uploadResponse.json()) as { id: string };
+
+    const forbidden = await fetch(
+      `${origin}/api/uploads/${encodeURIComponent(uploaded.id)}/orphan?clientId=${encodeURIComponent(other.client.id)}`,
+      { method: "POST", body: "{}" },
+    );
+    expect(forbidden.status).toBe(403);
+
+    const orphaned = await fetch(
+      `${origin}/api/uploads/${encodeURIComponent(uploaded.id)}/orphan?clientId=${encodeURIComponent(owner.client.id)}`,
+      { method: "POST", body: "{}" },
+    );
+    expect(orphaned.status).toBe(202);
+  });
+
+  it("rejects uploads without a file name", async () => {
+    const { server } = createServer();
+    const address = await server.start();
+    const created = await postJson<{ client: { id: string } }>(
+      `http://127.0.0.1:${address.port}/api/clients`,
+    );
+
+    const response = await postBytes(
+      `http://127.0.0.1:${address.port}/api/uploads?clientId=${encodeURIComponent(created.client.id)}&mimeType=image/png`,
       new Uint8Array([1]),
       { "Content-Type": "image/png" },
     );
@@ -349,9 +410,12 @@ describe("BridgeServer HTTP/SSE transport", () => {
   it("rejects unsupported upload types", async () => {
     const { server } = createServer();
     const address = await server.start();
+    const created = await postJson<{ client: { id: string } }>(
+      `http://127.0.0.1:${address.port}/api/clients`,
+    );
 
     const response = await postBytes(
-      `http://127.0.0.1:${address.port}/api/uploads?name=note.txt&mimeType=text/plain`,
+      `http://127.0.0.1:${address.port}/api/uploads?clientId=${encodeURIComponent(created.client.id)}&name=note.txt&mimeType=text/plain`,
       new Uint8Array([1]),
       { "Content-Type": "text/plain" },
     );
@@ -362,12 +426,15 @@ describe("BridgeServer HTTP/SSE transport", () => {
   it("rejects image uploads over the 50 MB limit before storing them", async () => {
     const { server } = createServer();
     const address = await server.start();
+    const created = await postJson<{ client: { id: string } }>(
+      `http://127.0.0.1:${address.port}/api/clients`,
+    );
     const response = await new Promise<http.IncomingMessage>(resolve => {
       const req = http.request(
         {
           host: "127.0.0.1",
           port: address.port,
-          path: "/api/uploads?name=large.png&mimeType=image/png",
+          path: `/api/uploads?clientId=${encodeURIComponent(created.client.id)}&name=large.png&mimeType=image/png`,
           method: "POST",
           headers: {
             "Content-Type": "image/png",

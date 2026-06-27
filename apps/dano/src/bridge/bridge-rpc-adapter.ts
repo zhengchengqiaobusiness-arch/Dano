@@ -71,7 +71,7 @@ import type {
   BridgeClient,
 } from "./types.js";
 import { detectWorkspaceEnvironments } from "./workspace-environment.js";
-import { resolveUploadedFileRef } from "./server.js";
+import type { UploadRegistry } from "./upload-registry.js";
 
 /** Model shape mirrored from Pi — used in shaping helpers below. */
 type PiModel = {
@@ -2682,17 +2682,28 @@ function normalizeRpcUploadedFiles(
 
 async function uploadedFilesToRpcImages(
   files: RpcUploadedFileRef[] | undefined,
+  uploadRegistry: UploadRegistry,
+  correlationId: string,
 ): Promise<RpcImageContent[] | undefined> {
   if (!files?.length) return undefined;
 
   const images: RpcImageContent[] = [];
-  for (const file of files) {
-    const stored = resolveUploadedFileRef(file);
-    if (!stored) {
-      throw new Error(`Uploaded file was not found: ${file.name}`);
+  const readingIds: string[] = [];
+  try {
+    for (const file of files) {
+      const stored = uploadRegistry.resolve(file);
+      if (!stored) {
+        throw new Error(`Uploaded file was not found: ${file.name}`);
+      }
+      uploadRegistry.markReading(stored.id);
+      readingIds.push(stored.id);
+      const data = await fs.promises.readFile(stored.path, "base64");
+      uploadRegistry.markReferenced(stored.id, { correlationId });
+      images.push({ type: "image", data, mimeType: stored.mimeType });
     }
-    const data = await fs.promises.readFile(stored.path, "base64");
-    images.push({ type: "image", data, mimeType: stored.mimeType });
+  } catch (error) {
+    for (const id of readingIds) uploadRegistry.markDraft(id);
+    throw error;
   }
   return images;
 }
@@ -3978,6 +3989,7 @@ export class BridgeRpcAdapter {
   private context: BridgeRpcAdapterContext;
   private eventBus: BridgeEventBus;
   private emitEvent: (event: BridgeEvent) => void;
+  private uploadRegistry: UploadRegistry;
 
   private readonly sessionRuntime: SessionRuntime;
   private readonly transcriptProjector = new TranscriptProjector();
@@ -4005,6 +4017,7 @@ export class BridgeRpcAdapter {
     config: BridgeConfig,
     eventBus: BridgeEventBus,
     emitEvent: (event: BridgeEvent) => void,
+    uploadRegistry: UploadRegistry,
     sessionRegistry?: DetachedSessionRegistry,
   ) {
     this.client = client;
@@ -4012,6 +4025,7 @@ export class BridgeRpcAdapter {
     this.context = context;
     this.eventBus = eventBus;
     this.emitEvent = emitEvent;
+    this.uploadRegistry = uploadRegistry;
     this.detachedSessionRegistry =
       sessionRegistry ?? new DetachedSessionRegistry(context.state.cwd);
     this.uiBridge = new ExtensionUIBridge(client.id, config, message => {
@@ -4661,7 +4675,11 @@ export class BridgeRpcAdapter {
       case "prompt": {
         const images = mergeRpcImages(
           normalizeRpcImages(command.images),
-          await uploadedFilesToRpcImages(normalizeRpcUploadedFiles(command.files)),
+          await uploadedFilesToRpcImages(
+            normalizeRpcUploadedFiles(command.files),
+            this.uploadRegistry,
+            correlationId,
+          ),
         );
 
         // Auto-create a detached session when no session is selected.
@@ -4731,7 +4749,11 @@ export class BridgeRpcAdapter {
       case "steer": {
         const images = mergeRpcImages(
           normalizeRpcImages(command.images),
-          await uploadedFilesToRpcImages(normalizeRpcUploadedFiles(command.files)),
+          await uploadedFilesToRpcImages(
+            normalizeRpcUploadedFiles(command.files),
+            this.uploadRegistry,
+            correlationId,
+          ),
         );
         if (this.sessionRuntime.hasDetachedSelection()) {
           const session = await this.sessionRuntime.ensureDetachedSession();
@@ -4760,7 +4782,11 @@ export class BridgeRpcAdapter {
       case "follow_up": {
         const images = mergeRpcImages(
           normalizeRpcImages(command.images),
-          await uploadedFilesToRpcImages(normalizeRpcUploadedFiles(command.files)),
+          await uploadedFilesToRpcImages(
+            normalizeRpcUploadedFiles(command.files),
+            this.uploadRegistry,
+            correlationId,
+          ),
         );
         if (this.sessionRuntime.hasDetachedSelection()) {
           const session = await this.sessionRuntime.ensureDetachedSession();

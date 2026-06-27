@@ -238,6 +238,10 @@ let reconnectDelay = 1000;
 let disposed = false;
 let requestIdCounter = 0;
 let pendingTranscriptConfigEventCounter = 0;
+
+export function getBridgeClientId(): string | null {
+  return clientId;
+}
 let workspaceEntriesRequest: Promise<RpcWorkspaceEntry[]> | null = null;
 let workspaceEntriesRequestId: string | null = null;
 let workspaceEntriesRequestContextKey: string | null = null;
