@@ -898,7 +898,7 @@
     justify-content: center;
     border-radius: 999px;
     border: none;
-    background: var(--accent);
+    background: var(--send-button-bg);
     color: var(--bg);
     cursor: pointer;
     transition:

@@ -281,7 +281,7 @@
     min-height: 0;
     overflow: hidden;
     border-bottom-left-radius: 14px;
-    background: var(--bg);
+    background: var(--center-column-bg);
   }
 
   .center-column.empty-conversation {
