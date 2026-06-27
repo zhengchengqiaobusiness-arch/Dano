@@ -1,3 +1,5 @@
+name: dano
+
 services:
   app:
     image: ${DANO_IMAGE:-dano-app:local}
