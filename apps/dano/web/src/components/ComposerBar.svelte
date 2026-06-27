@@ -513,7 +513,6 @@
     flex-shrink: 0;
     padding: 6px 24px 36px;
     padding-bottom: max(36px, env(safe-area-inset-bottom));
-    background: var(--bg);
   }
 
   .composer-inner-wrap {
@@ -908,7 +907,7 @@
   }
 
   .send-btn:hover:not(:disabled) {
-    background: var(--accent-hover);
+    background: color-mix(in srgb, var(--send-button-bg) 88%, black);
     transform: translateY(-1px);
   }
 
@@ -917,12 +916,12 @@
   }
 
   .send-btn.stop {
-    background: var(--danger);
+    background: color-mix(in srgb, var(--send-button-bg) 72%, black);
     color: var(--bg);
   }
 
   .send-btn.stop:hover:not(:disabled) {
-    background: var(--error-text);
+    background: color-mix(in srgb, var(--send-button-bg) 62%, black);
   }
 
   .send-btn:disabled {
