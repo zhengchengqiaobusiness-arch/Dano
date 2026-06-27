@@ -1353,9 +1353,9 @@
     max-width: min(720px, 100%);
     margin-left: auto;
     padding: 12px 16px;
-    border: 1px solid var(--border);
+    border: none;
     border-radius: 18px 18px 18px 18px;
-    background: var(--panel);
+    background: var(--user-message-bg);
   }
 
   :global(.markdown-renderer) + :global(.markdown-renderer),

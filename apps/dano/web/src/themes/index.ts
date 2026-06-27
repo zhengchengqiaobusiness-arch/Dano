@@ -218,6 +218,9 @@ export function resolveAppThemeVars(
     "--selection-bg": toRgba(base16.base0D, mode === "dark" ? 0.22 : 0.16),
     "--button-bg": base30.one_bg2,
     "--button-hover": base30.one_bg3,
+    "--user-message-bg": mode === "dark"
+      ? toRgba(base16.base0B, 0.18)
+      : toRgba(base16.base0B, 0.14),
     "--shadow-raised": `0 8px 24px ${toRgba(shadowSource, mode === "dark" ? 0.28 : 0.08)}`,
     "--shadow-floating": `0 20px 48px ${toRgba(shadowSource, mode === "dark" ? 0.4 : 0.12)}`,
     "--shadow": `0 24px 60px ${toRgba(shadowSource, mode === "dark" ? 0.36 : 0.08)}`,
