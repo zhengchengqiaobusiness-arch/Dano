@@ -43,7 +43,6 @@
     padding: 0 16px;
     height: 44px;
     border-bottom: 1px solid var(--border);
-    border-top-left-radius: 14px;
     background: var(--bg);
     flex-shrink: 0;
     z-index: 20;

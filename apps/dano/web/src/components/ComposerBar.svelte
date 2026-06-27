@@ -571,11 +571,16 @@
     gap: var(--composer-single-line-gap);
     padding: 12px 18px;
     border-radius: 30px;
-    border: 1px solid var(--border);
-    background: color-mix(in srgb, var(--panel) 96%, var(--bg) 4%);
-    box-shadow: var(--shadow-raised);
+    border: none;
+    background: var(--composer-dock-bg);
+    box-shadow:
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0.04) 0px 0px 0px 1px,
+      rgba(0, 0, 0, 0.04) 0px 2px 8px 0px;
     transition:
-      border-color 0.15s ease,
       border-radius 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
       background 0.15s ease,
       box-shadow 0.15s ease,
@@ -651,18 +656,6 @@
     border-color: var(--border-strong);
     background: var(--bg);
     color: var(--text);
-  }
-
-  .composer-dock:focus-within {
-    border-color: var(--border-strong);
-    background: var(--panel);
-    box-shadow:
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0.04) 0px 0px 0px 1px,
-      rgba(0, 0, 0, 0.04) 0px 2px 8px 0px;
   }
 
   .composer-dock.drag-active {
