@@ -303,11 +303,10 @@
     icon.className = "markdown-copy-icon";
     icon.setAttribute("aria-hidden", "true");
     icon.append(
-      createSvgIcon("markdown-copy-base-icon", [
+      createSvgIcon("markdown-copy-icon-svg", [
         "M8 8h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2Z",
         "M16 8V4a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4",
       ]),
-      createSvgIcon("markdown-copy-check-icon", ["M20 6 9 17l-5-5"]),
     );
     button.append(icon);
     return button;
@@ -697,23 +696,9 @@
     height: 14px;
   }
 
-  :global(.markdown-body .markdown-copy-base-icon),
-  :global(.markdown-body .markdown-copy-check-icon) {
-    position: absolute;
-    inset: 0;
-    margin: auto;
+  :global(.markdown-body .markdown-copy-icon-svg) {
     transition:
-      opacity 0.18s cubic-bezier(0.2, 0, 0, 1),
-      transform 0.18s cubic-bezier(0.2, 0, 0, 1),
-      filter 0.18s cubic-bezier(0.2, 0, 0, 1),
       color 0.18s cubic-bezier(0.2, 0, 0, 1);
-  }
-
-  :global(.markdown-body .markdown-copy-check-icon) {
-    color: var(--success);
-    opacity: 0;
-    filter: blur(4px);
-    transform: scale(0.25);
   }
 
   :global(.markdown-body .markdown-copy-frame:hover > .markdown-copy-button),
@@ -730,18 +715,7 @@
 
   :global(.markdown-body .markdown-copy-button[data-copy-state="copied"]) {
     border-color: color-mix(in srgb, var(--success) 60%, var(--border));
-  }
-
-  :global(.markdown-body .markdown-copy-button[data-copy-state="copied"] .markdown-copy-base-icon) {
-    color: var(--text-muted);
-    opacity: 0.42;
-    transform: scale(0.92);
-  }
-
-  :global(.markdown-body .markdown-copy-button[data-copy-state="copied"] .markdown-copy-check-icon) {
-    opacity: 1;
-    filter: blur(0);
-    transform: scale(1);
+    color: var(--success);
   }
 
   :global(.markdown-body .markdown-copy-button[data-copy-state="copied"]::after) {

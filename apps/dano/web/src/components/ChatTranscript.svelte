@@ -6,7 +6,6 @@
     RpcTranscriptContentBlock,
   } from "@dano/types/protocol";
   import Copy from "lucide-svelte/icons/copy";
-  import Check from "lucide-svelte/icons/check";
   import Pencil from "lucide-svelte/icons/pencil";
   import Sparkle from "lucide-svelte/icons/sparkle";
   import {
@@ -1076,6 +1075,18 @@
 
           {#if canCopyMessage(item.message) || canReviseMessage(item.message)}
             <div class="message-actions">
+              {#if canReviseMessage(item.message)}
+                <button
+                  type="button"
+                  class="message-action-button"
+                  aria-label={t("chatTranscript.editMessage")}
+                  title={t("chatTranscript.editMessage")}
+                  onclick={() => handleRevise(item.message)}
+                >
+                  <Pencil class="message-action-icon" aria-hidden="true" size={14} />
+                </button>
+              {/if}
+
               {#if canCopyMessage(item.message)}
                 {@const copyKey = messageStableKey(item.message, item.messageIndex)}
                 <button
@@ -1087,22 +1098,7 @@
                   title={messageCopyLabel(copyKey)}
                   onclick={() => handleCopyMessage(item.message, copyKey)}
                 >
-                  <span class="copy-action-icon" aria-hidden="true">
-                    <Copy class="message-action-icon copy-base-icon" size={14} />
-                    <Check class="message-action-check" size={10} strokeWidth={3} />
-                  </span>
-                </button>
-              {/if}
-
-              {#if canReviseMessage(item.message)}
-                <button
-                  type="button"
-                  class="message-action-button"
-                  aria-label={t("chatTranscript.editMessage")}
-                  title={t("chatTranscript.editMessage")}
-                  onclick={() => handleRevise(item.message)}
-                >
-                  <Pencil class="message-action-icon" aria-hidden="true" size={14} />
+                  <Copy class="message-action-icon copy-base-icon" aria-hidden="true" size={14} />
                 </button>
               {/if}
             </div>
@@ -1328,44 +1324,8 @@
     color: var(--text);
   }
 
-  .copy-action-icon {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 14px;
-    height: 14px;
-  }
-
-  .copy-action-icon :global(.copy-base-icon),
-  .copy-action-icon :global(.message-action-check) {
-    position: absolute;
-    inset: 0;
-    margin: auto;
-    transition:
-      opacity 0.18s cubic-bezier(0.2, 0, 0, 1),
-      transform 0.18s cubic-bezier(0.2, 0, 0, 1),
-      filter 0.18s cubic-bezier(0.2, 0, 0, 1),
-      color 0.18s cubic-bezier(0.2, 0, 0, 1);
-  }
-
-  .copy-action-icon :global(.message-action-check) {
+  .message-action-button[data-copy-state="copied"] {
     color: var(--success);
-    opacity: 0;
-    filter: blur(4px);
-    transform: scale(0.25);
-  }
-
-  .message-action-button[data-copy-state="copied"] .copy-action-icon :global(.copy-base-icon) {
-    color: var(--text-muted);
-    opacity: 0.42;
-    transform: scale(0.92);
-  }
-
-  .message-action-button[data-copy-state="copied"] .copy-action-icon :global(.message-action-check) {
-    opacity: 1;
-    filter: blur(0);
-    transform: scale(1);
   }
 
   .message-action-button[data-copy-state="copied"]::after {
