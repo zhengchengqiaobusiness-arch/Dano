@@ -344,6 +344,23 @@
       />
     {/if}
 
+    {#if revision}
+      <div class="revision-banner">
+        <div class="revision-banner-copy">
+          <p class="revision-preview">{revision.preview}</p>
+        </div>
+        <button
+          type="button"
+          class="revision-cancel-button"
+          aria-label={t("composer.revision.cancel")}
+          title={t("composer.revision.cancel")}
+          onclick={handleCancelRevision}
+        >
+          <X aria-hidden="true" size={14} />
+        </button>
+      </div>
+    {/if}
+
     <div
       bind:this={composerDockRef}
       class="composer-dock composer"
@@ -358,21 +375,6 @@
       ondragleave={composer.handleDragLeave}
       ondrop={composer.handleDrop}
     >
-      {#if revision}
-        <div class="revision-banner">
-          <div class="revision-banner-copy">
-            <p class="revision-preview">{revision.preview}</p>
-          </div>
-          <button
-            type="button"
-            class="revision-cancel-button"
-            onclick={handleCancelRevision}
-          >
-            {t("composer.revision.cancel")}
-          </button>
-        </div>
-      {/if}
-
       <input
         bind:this={fileInputRef}
         class="hidden-file-input"
@@ -511,7 +513,6 @@
     flex-shrink: 0;
     padding: 6px 24px 36px;
     padding-bottom: max(36px, env(safe-area-inset-bottom));
-    background: var(--bg);
   }
 
   .composer-inner-wrap {
@@ -570,11 +571,16 @@
     gap: var(--composer-single-line-gap);
     padding: 12px 18px;
     border-radius: 30px;
-    border: 1px solid var(--border);
-    background: color-mix(in srgb, var(--panel) 96%, var(--bg) 4%);
-    box-shadow: var(--shadow-raised);
+    border: none;
+    background: var(--composer-dock-bg);
+    box-shadow:
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0.04) 0px 0px 0px 1px,
+      rgba(0, 0, 0, 0.04) 0px 2px 8px 0px;
     transition:
-      border-color 0.15s ease,
       border-radius 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
       background 0.15s ease,
       box-shadow 0.15s ease,
@@ -602,11 +608,13 @@
   }
 
   .revision-banner {
+    position: relative;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 10px 12px;
+    justify-content: center;
+    margin: 0 0 8px;
+    min-height: 48px;
+    padding: 10px 46px 10px 12px;
     border-radius: 14px;
     border: 1px solid color-mix(in srgb, var(--border-strong) 82%, transparent);
     background: color-mix(in srgb, var(--panel-2) 88%, transparent);
@@ -619,12 +627,19 @@
     font-size: 0.82rem;
     line-height: 1.45;
     color: var(--text);
+    text-align: center;
   }
 
   .revision-cancel-button {
-    flex-shrink: 0;
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
     height: 28px;
-    padding: 0 10px;
+    padding: 0;
     border-radius: 999px;
     border: 1px solid var(--border);
     background: var(--bg);
@@ -641,18 +656,6 @@
     border-color: var(--border-strong);
     background: var(--bg);
     color: var(--text);
-  }
-
-  .composer-dock:focus-within {
-    border-color: var(--border-strong);
-    background: var(--panel);
-    box-shadow:
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0.04) 0px 0px 0px 1px,
-      rgba(0, 0, 0, 0.04) 0px 2px 8px 0px;
   }
 
   .composer-dock.drag-active {
@@ -887,7 +890,7 @@
     justify-content: center;
     border-radius: 999px;
     border: none;
-    background: var(--accent);
+    background: var(--send-button-bg);
     color: var(--bg);
     cursor: pointer;
     transition:
@@ -897,7 +900,7 @@
   }
 
   .send-btn:hover:not(:disabled) {
-    background: var(--accent-hover);
+    background: color-mix(in srgb, var(--send-button-bg) 88%, black);
     transform: translateY(-1px);
   }
 
@@ -906,12 +909,12 @@
   }
 
   .send-btn.stop {
-    background: var(--danger);
+    background: color-mix(in srgb, var(--send-button-bg) 72%, black);
     color: var(--bg);
   }
 
   .send-btn.stop:hover:not(:disabled) {
-    background: var(--error-text);
+    background: color-mix(in srgb, var(--send-button-bg) 62%, black);
   }
 
   .send-btn:disabled {
@@ -1003,9 +1006,6 @@
       padding: 8px 12px 10px;
       padding-bottom: max(10px, env(safe-area-inset-bottom));
     }
-
-    .revision-banner { flex-direction: column; }
-    .revision-cancel-button { align-self: flex-start; }
 
     .composer-dock { gap: 8px; padding: 10px 14px; border-radius: 24px; }
     .composer-dock.multiline { padding: 14px 14px 12px; }

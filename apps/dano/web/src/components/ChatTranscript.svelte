@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import type {
     RpcImageContent,
     RpcTranscriptContent,
@@ -119,6 +119,8 @@
     isStreaming || transcriptStreams.length > 0 || transcriptDeltas.length > 0,
   );
   let showBusyIndicator = $derived(hasVisibleStreaming || isCompacting);
+  let copiedMessageKey = $state<string | null>(null);
+  let copiedMessageResetTimer: number | undefined;
   let streamingAssistantMessageIndex = $derived.by(() => {
     if (!hasVisibleStreaming) return -1;
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -517,10 +519,26 @@
     return Boolean(userMessagePlainText(msg));
   }
 
-  async function handleCopyMessage(msg: TranscriptEntry) {
+  function messageCopyLabel(key: string): string {
+    return copiedMessageKey === key ? t("common.copied") : t("chatTranscript.copyMessage");
+  }
+
+  function showCopiedMessageState(key: string) {
+    copiedMessageKey = key;
+    if (copiedMessageResetTimer !== undefined) {
+      window.clearTimeout(copiedMessageResetTimer);
+    }
+    copiedMessageResetTimer = window.setTimeout(() => {
+      if (copiedMessageKey === key) copiedMessageKey = null;
+      copiedMessageResetTimer = undefined;
+    }, 1200);
+  }
+
+  async function handleCopyMessage(msg: TranscriptEntry, key: string) {
     const text = userMessagePlainText(msg);
     if (!text) return;
-    await copyTextToClipboard(text);
+    const copied = await copyTextToClipboard(text);
+    if (copied) showCopiedMessageState(key);
   }
 
   function handleRevise(msg: TranscriptEntry) {
@@ -666,6 +684,12 @@
       cancelAnimationFrame(stickToBottomFrame);
       stickToBottomFrame = 0;
     };
+  });
+
+  onDestroy(() => {
+    if (copiedMessageResetTimer !== undefined) {
+      window.clearTimeout(copiedMessageResetTimer);
+    }
   });
 
   // ---- copy handling ----
@@ -1051,18 +1075,6 @@
 
           {#if canCopyMessage(item.message) || canReviseMessage(item.message)}
             <div class="message-actions">
-              {#if canCopyMessage(item.message)}
-                <button
-                  type="button"
-                  class="message-action-button"
-                  aria-label={t("chatTranscript.copyMessage")}
-                  title={t("chatTranscript.copyMessage")}
-                  onclick={() => handleCopyMessage(item.message)}
-                >
-                  <Copy class="message-action-icon" aria-hidden="true" size={14} />
-                </button>
-              {/if}
-
               {#if canReviseMessage(item.message)}
                 <button
                   type="button"
@@ -1072,6 +1084,21 @@
                   onclick={() => handleRevise(item.message)}
                 >
                   <Pencil class="message-action-icon" aria-hidden="true" size={14} />
+                </button>
+              {/if}
+
+              {#if canCopyMessage(item.message)}
+                {@const copyKey = messageStableKey(item.message, item.messageIndex)}
+                <button
+                  type="button"
+                  class="message-action-button"
+                  data-copy-state={copiedMessageKey === copyKey ? "copied" : undefined}
+                  data-tooltip={messageCopyLabel(copyKey)}
+                  aria-label={messageCopyLabel(copyKey)}
+                  title={messageCopyLabel(copyKey)}
+                  onclick={() => handleCopyMessage(item.message, copyKey)}
+                >
+                  <Copy class="message-action-icon copy-base-icon" aria-hidden="true" size={14} />
                 </button>
               {/if}
             </div>
@@ -1264,6 +1291,7 @@
   }
 
   .message-action-button {
+    position: relative;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -1284,7 +1312,8 @@
   }
 
   .message-stack.user:hover .message-action-button,
-  .message-stack.user:focus-within .message-action-button {
+  .message-stack.user:focus-within .message-action-button,
+  .message-action-button[data-copy-state="copied"] {
     opacity: 1;
     transform: translateY(0);
   }
@@ -1295,14 +1324,38 @@
     color: var(--text);
   }
 
+  .message-action-button[data-copy-state="copied"] {
+    color: var(--success);
+  }
+
+  .message-action-button[data-copy-state="copied"]::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 7px);
+    z-index: 2;
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    box-shadow: var(--shadow-raised);
+    color: var(--text);
+    font-size: 0.68rem;
+    line-height: 1;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 1;
+    transform: translateX(-50%);
+  }
+
   .message-content.user {
     width: fit-content;
     max-width: min(720px, 100%);
     margin-left: auto;
     padding: 12px 16px;
-    border: 1px solid var(--border);
+    border: none;
     border-radius: 18px 18px 18px 18px;
-    background: var(--panel);
+    background: var(--user-message-bg);
   }
 
   :global(.markdown-renderer) + :global(.markdown-renderer),
