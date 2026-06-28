@@ -46,6 +46,27 @@ export function askUserQuestionMarkdown(question: string): string {
   return question.replace(/\\+(?:r\\+n|n)/g, "\n");
 }
 
+export function askUserQuestionAnswerMarkdown(
+  request: AskUserQuestionRequest,
+  answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>,
+  labels: { confirm: string; cancel: string },
+): string {
+  if (!request.batch) return answerValueMarkdown(request, answer, labels);
+  if (!isAnswerRecord(answer)) return answerValueMarkdown(undefined, answer, labels);
+
+  const used = new Set<string>();
+  const lines: string[] = [];
+  for (const item of request.questions) {
+    if (!(item.id in answer)) continue;
+    used.add(item.id);
+    lines.push(`- ${questionLabel(item.question)}：${answerValueMarkdown(item, answer[item.id], labels)}`);
+  }
+  for (const [key, value] of Object.entries(answer)) {
+    if (!used.has(key)) lines.push(`- ${key}：${answerValueMarkdown(undefined, value, labels)}`);
+  }
+  return lines.length > 0 ? `\n${lines.join("\n")}` : "";
+}
+
 export function isAskUserQuestionToolError(block: ToolContentBlock): boolean {
   return (
     block.toolName === ASK_USER_QUESTION_TOOL_NAME && block.toolStatus === "error"
@@ -60,6 +81,38 @@ export function hideAskUserQuestionToolBlock(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function questionLabel(question: string): string {
+  return askUserQuestionMarkdown(question)
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[：:？?。.!！]+$/u, "");
+}
+
+function answerValueMarkdown(
+  item: AskUserQuestionItem | undefined,
+  answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>,
+  labels: { confirm: string; cancel: string },
+): string {
+  if (Array.isArray(answer)) {
+    return answer.map(value => answerOptionLabel(item, value)).join("、");
+  }
+  if (typeof answer === "boolean") return answer ? labels.confirm : labels.cancel;
+  if (typeof answer === "object") {
+    return Object.entries(answer)
+      .map(([key, value]) => `${key}: ${answerValueMarkdown(undefined, value, labels)}`)
+      .join("; ");
+  }
+  return answerOptionLabel(item, answer);
+}
+
+function answerOptionLabel(
+  item: AskUserQuestionItem | undefined,
+  answer: string,
+): string {
+  if (!item || item.kind === "text" || item.kind === "confirm") return answer;
+  return item.options.find(option => option.id === answer)?.label ?? answer;
 }
 
 export function askUserQuestionRequest(

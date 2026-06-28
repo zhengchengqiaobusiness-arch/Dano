@@ -8,6 +8,7 @@
   import {
     type AskUserQuestionItem,
     type NormalizedAskUserQuestionOption,
+    askUserQuestionAnswerMarkdown,
     askUserQuestionMarkdown,
     askUserQuestionRequest,
     askUserQuestionResult,
@@ -350,20 +351,16 @@
     { kind: "select" | "treeSelect" | "multiple" }
   > & { dataSource?: AskUserQuestionDataSource; inputType?: "treeSelect" };
 
-  function answerText(
-    answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>,
-  ): string {
-    if (Array.isArray(answer)) return answer.join(", ");
-    if (typeof answer === "boolean") {
-      return t(answer ? "questionTool.confirm" : "questionTool.cancel");
-    }
-    if (typeof answer === "object") {
-      return Object.entries(answer)
-        .map(([key, value]) => `${key}: ${answerText(value)}`)
-        .join("; ");
-    }
-    return answer;
-  }
+  const answeredMarkdown = $derived(
+    request && result?.status === "answered"
+      ? t("questionTool.answered", {
+          answer: askUserQuestionAnswerMarkdown(request, result.answer, {
+            confirm: t("questionTool.confirm"),
+            cancel: t("questionTool.cancel"),
+          }),
+        })
+      : "",
+  );
 </script>
 
 {#if request && showCard}
@@ -376,7 +373,9 @@
     {/if}
 
     {#if result?.status === "answered"}
-      <div class="question-result">{t("questionTool.answered", { answer: answerText(result.answer) })}</div>
+      <div class="question-result">
+        <MarkdownRenderer content={answeredMarkdown} />
+      </div>
     {:else if result?.status === "cancelled"}
       <div class="question-result muted">{t("questionTool.cancelled")}</div>
     {:else if interrupted}

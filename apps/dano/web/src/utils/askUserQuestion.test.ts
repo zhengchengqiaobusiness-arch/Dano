@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  askUserQuestionAnswerMarkdown,
   askUserQuestionMarkdown,
   askUserQuestionRequest,
   askUserQuestionResult,
@@ -255,6 +256,56 @@ describe("ask user question transcript data", () => {
       status: "answered",
       answer: { name: "Dano", features: ["Chat"], ok: true },
     });
+  });
+
+  it("formats grouped answers with question labels and markdown bullets", () => {
+    const request = askUserQuestionRequest(
+      block({
+        questions: [
+          { id: "expense_type", question: "费用类型？", default: "交通费" },
+          { id: "expense_date", question: "发生时间：", default: "2026-06-28" },
+          { id: "expense_amount", question: "金额", default: "0" },
+          { id: "expense_reason", question: "事由", default: "办公相关支出" },
+        ],
+      }),
+    );
+
+    expect(request).not.toBeNull();
+    expect(
+      askUserQuestionAnswerMarkdown(
+        request!,
+        {
+          expense_type: "交通费",
+          expense_date: "2026-06-28",
+          expense_amount: "0",
+          expense_reason: "办公相关支出",
+        },
+        { confirm: "确认", cancel: "取消" },
+      ),
+    ).toBe(
+      "\n- 费用类型：交通费\n- 发生时间：2026-06-28\n- 金额：0\n- 事由：办公相关支出",
+    );
+  });
+
+  it("formats structured option answers with user-facing labels", () => {
+    const request = askUserQuestionRequest(
+      block({
+        question: "请选择员工",
+        options: [
+          { id: "emp_1001", label: "张三" },
+          { id: "emp_1002", label: "李四" },
+        ],
+      }),
+    );
+
+    expect(request).not.toBeNull();
+    expect(
+      askUserQuestionAnswerMarkdown(
+        request!,
+        "emp_1002",
+        { confirm: "确认", cancel: "取消" },
+      ),
+    ).toBe("李四");
   });
 
   it("parses cancellation and rejects invalid results", () => {
