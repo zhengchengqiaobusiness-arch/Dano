@@ -4,6 +4,7 @@ import {
   type AskUserQuestionDataSource,
   type AskUserQuestionInputType,
   type AskUserQuestionOption,
+  type AskUserQuestionOptionId,
   type AskUserQuestionResult,
 } from "@dano/types/protocol";
 import type { ToolContentBlock } from "./transcript";
@@ -17,7 +18,7 @@ export type AskUserQuestionItem =
       kind: "single";
       question: string;
       options: NormalizedAskUserQuestionOption[];
-      default?: string;
+      default?: AskUserQuestionOptionId;
     }
   | {
       id: string;
@@ -25,7 +26,7 @@ export type AskUserQuestionItem =
       question: string;
       options: NormalizedAskUserQuestionOption[];
       dataSource?: AskUserQuestionDataSource;
-      default?: string;
+      default?: AskUserQuestionOptionId;
     }
   | {
       id: string;
@@ -34,7 +35,7 @@ export type AskUserQuestionItem =
       options: NormalizedAskUserQuestionOption[];
       dataSource?: AskUserQuestionDataSource;
       inputType?: "treeSelect";
-      default?: string[];
+      default?: AskUserQuestionOptionId[];
     }
   | { id: string; kind: "confirm"; question: string; default?: boolean };
 
@@ -109,10 +110,10 @@ function answerValueMarkdown(
 
 function answerOptionLabel(
   item: AskUserQuestionItem | undefined,
-  answer: string,
+  answer: AskUserQuestionOptionId,
 ): string {
-  if (!item || item.kind === "text" || item.kind === "confirm") return answer;
-  return item.options.find(option => option.id === answer)?.label ?? answer;
+  if (!item || item.kind === "text" || item.kind === "confirm") return String(answer);
+  return item.options.find(option => option.id === answer)?.label ?? String(answer);
 }
 
 export function askUserQuestionRequest(
@@ -208,9 +209,8 @@ function parseQuestionItem(
       options,
       ...(dataSource ? { dataSource } : {}),
       ...(inputType === "treeSelect" ? { inputType } : {}),
-      ...(Array.isArray(rawDefault) &&
-      rawDefault.every(value => typeof value === "string")
-        ? { default: rawDefault.map(value => value.trim()).filter(Boolean) }
+      ...(Array.isArray(rawDefault)
+        ? { default: rawDefault.map(normalizeAnswerInput).filter(isOptionId) }
         : {}),
     };
   }
@@ -222,8 +222,8 @@ function parseQuestionItem(
       question,
       options,
       ...(dataSource ? { dataSource } : {}),
-      ...(typeof rawDefault === "string" && rawDefault.trim()
-        ? { default: rawDefault.trim() }
+      ...(isOptionId(normalizeAnswerInput(rawDefault))
+        ? { default: normalizeAnswerInput(rawDefault) }
         : {}),
     };
   }
@@ -233,8 +233,8 @@ function parseQuestionItem(
     kind: "single",
     question,
     options,
-    ...(typeof rawDefault === "string" && rawDefault.trim()
-      ? { default: rawDefault.trim() }
+    ...(isOptionId(normalizeAnswerInput(rawDefault))
+      ? { default: normalizeAnswerInput(rawDefault) }
       : {}),
   };
 }
@@ -245,14 +245,31 @@ function normalizeOption(value: unknown): NormalizedAskUserQuestionOption | null
     return option ? { id: option, label: option } : null;
   }
   if (!isRecord(value)) return null;
-  const id = typeof value.id === "string" ? value.id.trim() : "";
+  const id = normalizeOptionId(value.id);
   const label = typeof value.label === "string" ? value.label.trim() : "";
-  if (!id || !label) return null;
+  if (id === undefined || !label) return null;
   return {
     id,
     label,
     ...(isRecord(value.extra) ? { extra: value.extra } : {}),
   };
+}
+
+function normalizeAnswerInput(value: unknown): AskUserQuestionOptionId | undefined {
+  if (isRecord(value)) return normalizeOption(value)?.id;
+  return normalizeOptionId(value);
+}
+
+function normalizeOptionId(value: unknown): AskUserQuestionOptionId | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
+  }
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function isOptionId(value: unknown): value is AskUserQuestionOptionId {
+  return typeof value === "string" || typeof value === "number";
 }
 
 function parseInputType(value: unknown): AskUserQuestionInputType | undefined {
@@ -285,9 +302,10 @@ export function askUserQuestionResult(
   if (
     details.status === "answered" &&
     (typeof details.answer === "string" ||
+      typeof details.answer === "number" ||
       typeof details.answer === "boolean" ||
       (Array.isArray(details.answer) &&
-        details.answer.every(value => typeof value === "string")) ||
+        details.answer.every(isOptionId)) ||
       isAnswerRecord(details.answer))
   ) {
     return { status: "answered", answer: details.answer };
@@ -302,8 +320,9 @@ function isAnswerRecord(
   return Object.values(value).every(
     answer =>
       typeof answer === "string" ||
+      typeof answer === "number" ||
       typeof answer === "boolean" ||
       (Array.isArray(answer) &&
-        answer.every(item => typeof item === "string")),
+        answer.every(isOptionId)),
   );
 }

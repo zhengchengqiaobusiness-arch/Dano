@@ -3,19 +3,45 @@ import { Type } from "typebox";
 import {
   ASK_USER_QUESTION_TOOL_NAME,
   type AskUserQuestionAnswer,
+  type AskUserQuestionAnswerInput,
   type AskUserQuestionDataSource,
   type AskUserQuestionInputType,
   type AskUserQuestionOption,
+  type AskUserQuestionOptionId,
   type AskUserQuestionResult,
 } from "./types.js";
 
-const askUserQuestionAnswerSchema = Type.Union([
+const askUserQuestionOptionItemSchema = Type.Object({
+  id: Type.Union([Type.String({ minLength: 1 }), Type.Number()]),
+  label: Type.String({ minLength: 1 }),
+  extra: Type.Optional(Type.Record(Type.String(), Type.Any())),
+});
+
+const askUserQuestionAnswerInputSchema = Type.Union([
   Type.String(),
-  Type.Array(Type.String()),
+  Type.Number(),
+  askUserQuestionOptionItemSchema,
+  Type.Array(
+    Type.Union([
+      Type.String(),
+      Type.Number(),
+      askUserQuestionOptionItemSchema,
+    ]),
+  ),
   Type.Boolean(),
 ], {
   description:
-    "Default or answer value: string for text/single-choice, string[] for multiple-choice, boolean for confirmation.",
+    "Default or answer value: string for text/single-choice labels, string or number option ids, option item objects, arrays for multiple-choice, boolean for confirmation.",
+});
+
+const askUserQuestionAnswerSchema = Type.Union([
+  Type.String(),
+  Type.Number(),
+  Type.Array(Type.Union([Type.String(), Type.Number()])),
+  Type.Boolean(),
+], {
+  description:
+    "Canonical answer value returned to the model: string or number id, id array, text string, or boolean confirmation.",
 });
 
 const groupedRetryError =
@@ -26,11 +52,7 @@ const mixedGroupedFieldsError =
 
 const askUserQuestionOptionSchema = Type.Union([
   Type.String({ minLength: 1 }),
-  Type.Object({
-    id: Type.String({ minLength: 1 }),
-    label: Type.String({ minLength: 1 }),
-    extra: Type.Optional(Type.Record(Type.String(), Type.Any())),
-  }),
+  askUserQuestionOptionItemSchema,
 ]);
 
 const askUserQuestionInputTypeSchema = Type.Union([
@@ -82,7 +104,7 @@ const askUserQuestionFields = {
       description: "Set true with options to allow multiple selections.",
     }),
   ),
-  default: Type.Optional(askUserQuestionAnswerSchema),
+  default: Type.Optional(askUserQuestionAnswerInputSchema),
 };
 
 export const askUserQuestionParameters = Type.Object({
@@ -131,7 +153,7 @@ export const askUserQuestionResultSchema = Type.Union([
 type PendingQuestionKind = "text" | "single" | "multiple" | "confirm";
 
 type PendingQuestionOption = {
-  id: string;
+  id: AskUserQuestionOptionId;
   label: string;
 };
 
@@ -169,7 +191,7 @@ class AskUserQuestionCoordinator {
       dataSource?: AskUserQuestionDataSource;
       multiple?: boolean;
       confirm?: true;
-      default?: AskUserQuestionAnswer;
+      default?: AskUserQuestionAnswerInput;
       questions?: readonly {
         id?: string;
         question: string;
@@ -178,7 +200,7 @@ class AskUserQuestionCoordinator {
         dataSource?: AskUserQuestionDataSource;
         multiple?: boolean;
         confirm?: true;
-        default?: AskUserQuestionAnswer;
+        default?: AskUserQuestionAnswerInput;
       }[];
     },
     signal: AbortSignal | undefined,
@@ -231,7 +253,9 @@ class AskUserQuestionCoordinator {
       | { cancelled: true; answer?: undefined }
       | {
           cancelled: false;
-          answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>;
+          answer:
+            | AskUserQuestionAnswerInput
+            | Record<string, AskUserQuestionAnswerInput>;
         },
   ): AskUserQuestionResult {
     const pending = this.pending.get(toolCallId);
@@ -255,12 +279,15 @@ class AskUserQuestionCoordinator {
         }
         result = { status: "answered", answer: normalized };
       } else {
-        if (isAnswerRecord(answer)) {
-          throw new Error("Single question answer cannot be an object");
+        if (isAnswerRecord(answer) && !isOptionObject(answer)) {
+          throw new Error("请选择一个有效选项");
         }
         result = {
           status: "answered",
-          answer: normalizeAnswer(pending.questions[0], answer),
+          answer: normalizeAnswer(
+            pending.questions[0],
+            answer as AskUserQuestionAnswerInput,
+          ),
         };
       }
     }
@@ -331,7 +358,7 @@ function normalizeQuestion(
     dataSource?: AskUserQuestionDataSource;
     multiple?: boolean;
     confirm?: true;
-    default?: AskUserQuestionAnswer;
+    default?: AskUserQuestionAnswerInput;
   },
   fallbackId: string,
 ): PendingQuestionItem | string {
@@ -398,80 +425,111 @@ function normalizeOption(
     const value = option.trim();
     return value ? { id: value, label: value } : null;
   }
-  const id = option.id.trim();
+  const id =
+    typeof option.id === "string" ? option.id.trim() : option.id;
   const label = option.label.trim();
-  return id && label ? { id, label } : null;
+  return isValidOptionId(id) && label ? { id, label } : null;
 }
 
 function normalizeAnswer(
   pending: PendingQuestionItem,
-  answer: AskUserQuestionAnswer,
+  answer: AskUserQuestionAnswerInput,
 ): AskUserQuestionAnswer {
   if (pending.kind === "confirm") {
     if (typeof answer !== "boolean") {
-      throw new Error("Confirmation answer must be boolean");
+      throw new Error("请确认或取消");
     }
     return answer;
   }
   if (pending.kind === "multiple") {
-    if (
-      !Array.isArray(answer) ||
-      answer.length === 0 ||
-      !answer.every(value => typeof value === "string")
-    ) {
-      throw new Error(
-        "Multiple-choice answer must contain unique provided options",
-      );
+    if (!Array.isArray(answer) || answer.length === 0) {
+      throw new Error("请至少选择一个选项");
     }
-    const normalized = answer.map(value => value.trim());
-    if (
-      normalized.some(value => !value) ||
-      new Set(normalized).size !== normalized.length
-    ) {
-      throw new Error(
-        "Multiple-choice answer must contain unique provided options",
-      );
-    }
-    if (normalized.some(isOtherOption)) {
-      throw new Error("Other requires a custom answer");
-    }
-    const optionIds = pending.options?.map(option => option.id);
-    const customAnswers = normalized.filter(
-      value => !optionIds?.includes(value),
-    );
-    const allowsCustom = pending.options?.some(isOtherOption) ?? false;
-    if (customAnswers.length > 1 && allowsCustom) {
-      throw new Error("Multiple-choice answer may contain only one custom answer");
-    }
-    if (customAnswers.length > 0 && !allowsCustom && !pending.dataSource) {
-      throw new Error(
-        "Multiple-choice answer must contain unique provided options",
-      );
+    const normalized = answer.map(value => normalizeChoiceAnswer(pending, value));
+    const keys = normalized.map(optionKey);
+    if (new Set(keys).size !== keys.length) throw new Error("不能重复选择同一选项");
+    const customAnswers = normalized.filter(value => !hasExactOption(pending, value));
+    if (customAnswers.length > 1 && pending.options?.some(isOtherOption)) {
+      throw new Error("只能填写一个其他回答");
     }
     return normalized;
   }
 
+  if (pending.kind === "single") {
+    return normalizeChoiceAnswer(pending, answer);
+  }
+
   if (typeof answer !== "string" || !answer.trim()) {
-    throw new Error("Question answer cannot be empty");
+    throw new Error("答案不能为空");
   }
-  const normalized = answer.trim();
-  if (pending.options && isOtherOption(normalized)) {
-    throw new Error("Other requires a custom answer");
+  return answer.trim();
+}
+
+function normalizeChoiceAnswer(
+  pending: PendingQuestionItem,
+  answer: AskUserQuestionAnswerInput,
+): AskUserQuestionOptionId {
+  const rawCandidate = isOptionObject(answer) ? answer.id : answer;
+  const candidate =
+    typeof rawCandidate === "string" ? rawCandidate.trim() : rawCandidate;
+  if (!isValidOptionId(candidate)) throw new Error("请选择一个有效选项");
+
+  const options = pending.options ?? [];
+  if (options.length === 0) return candidate;
+
+  const exact = options.find(option => option.id === candidate);
+  if (exact) {
+    if (isOtherOption(exact)) throw new Error("请输入其他回答");
+    return exact.id;
   }
-  const optionIds = pending.options?.map(option => option.id);
-  if (
-    optionIds &&
-    !optionIds.includes(normalized) &&
-    !pending.options?.some(isOtherOption)
-  ) {
-    throw new Error("Question answer must match one of the provided options");
+
+  const byStringifiedId = options.filter(
+    option => String(option.id) === String(candidate),
+  );
+  if (byStringifiedId.length === 1) {
+    if (isOtherOption(byStringifiedId[0])) throw new Error("请输入其他回答");
+    return byStringifiedId[0].id;
   }
-  return normalized;
+  if (byStringifiedId.length > 1) throw new Error("选项不唯一，请重新选择");
+
+  if (typeof candidate === "string") {
+    const byLabel = options.filter(option => option.label === candidate);
+    if (byLabel.length === 1) {
+      if (isOtherOption(byLabel[0])) throw new Error("请输入其他回答");
+      return byLabel[0].id;
+    }
+    if (byLabel.length > 1) throw new Error("选项标签不唯一，请重新选择");
+    if (options.some(isOtherOption)) return candidate;
+  }
+
+  throw new Error("答案必须匹配一个可选项");
+}
+
+function isValidOptionId(value: unknown): value is AskUserQuestionOptionId {
+  return (
+    (typeof value === "string" && value.trim().length > 0) ||
+    (typeof value === "number" && Number.isFinite(value))
+  );
+}
+
+function hasExactOption(
+  pending: PendingQuestionItem,
+  answer: AskUserQuestionOptionId,
+): boolean {
+  return pending.options?.some(option => option.id === answer) ?? false;
+}
+
+function optionKey(value: AskUserQuestionOptionId): string {
+  return `${typeof value}:${String(value)}`;
+}
+
+function isOptionObject(value: unknown): value is AskUserQuestionOption {
+  return isAnswerRecord(value) && isValidOptionId(value.id);
 }
 
 function isAnswerRecord(
-  answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>,
-): answer is Record<string, AskUserQuestionAnswer> {
+  answer: unknown,
+): answer is Record<string, AskUserQuestionAnswerInput> {
   return typeof answer === "object" && answer !== null && !Array.isArray(answer);
 }
 

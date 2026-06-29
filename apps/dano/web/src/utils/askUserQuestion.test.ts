@@ -212,6 +212,54 @@ describe("ask user question transcript data", () => {
     });
   });
 
+  it("parses number option ids without stringifying them", () => {
+    expect(
+      askUserQuestionRequest(
+        block({
+          question: "Department?",
+          inputType: "select",
+          options: [
+            { id: 0, label: "未分配" },
+            { id: 1, label: "研发部" },
+            { id: "1", label: "财务部" },
+          ],
+          default: { id: 1, label: "研发部" },
+        }),
+      ),
+    ).toEqual({
+      batch: false,
+      id: "answer",
+      kind: "select",
+      question: "Department?",
+      options: [
+        { id: 0, label: "未分配" },
+        { id: 1, label: "研发部" },
+        { id: "1", label: "财务部" },
+      ],
+      default: 1,
+    });
+  });
+
+  it("parses multiple-choice defaults from option items and number ids", () => {
+    expect(
+      askUserQuestionRequest(
+        block({
+          question: "Departments?",
+          options: [
+            { id: 1, label: "研发部" },
+            { id: 2, label: "财务部" },
+          ],
+          multiple: true,
+          default: [{ id: 1, label: "研发部" }, 2],
+        }),
+      ),
+    ).toMatchObject({
+      kind: "multiple",
+      default: [1, 2],
+    });
+  });
+
+
   it("rejects malformed or unrelated tool calls", () => {
     expect(askUserQuestionRequest(block({ question: "" }))).toBeNull();
     expect(
@@ -245,16 +293,22 @@ describe("ask user question transcript data", () => {
       askUserQuestionResult({ status: "answered", answer: ["Blue", "Green"] }),
     ).toEqual({ status: "answered", answer: ["Blue", "Green"] });
     expect(
+      askUserQuestionResult({ status: "answered", answer: 1 }),
+    ).toEqual({ status: "answered", answer: 1 });
+    expect(
+      askUserQuestionResult({ status: "answered", answer: [1, "2"] }),
+    ).toEqual({ status: "answered", answer: [1, "2"] });
+    expect(
       askUserQuestionResult({ status: "answered", answer: true }),
     ).toEqual({ status: "answered", answer: true });
     expect(
       askUserQuestionResult({
         status: "answered",
-        answer: { name: "Dano", features: ["Chat"], ok: true },
+        answer: { name: "Dano", department: 1, features: ["Chat"], ok: true },
       }),
     ).toEqual({
       status: "answered",
-      answer: { name: "Dano", features: ["Chat"], ok: true },
+      answer: { name: "Dano", department: 1, features: ["Chat"], ok: true },
     });
   });
 
@@ -306,6 +360,27 @@ describe("ask user question transcript data", () => {
         { confirm: "确认", cancel: "取消" },
       ),
     ).toBe("李四");
+  });
+
+  it("formats number option answers with user-facing labels", () => {
+    const request = askUserQuestionRequest(
+      block({
+        question: "请选择部门",
+        options: [
+          { id: 1, label: "研发部" },
+          { id: 2, label: "财务部" },
+        ],
+      }),
+    );
+
+    expect(request).not.toBeNull();
+    expect(
+      askUserQuestionAnswerMarkdown(
+        request!,
+        2,
+        { confirm: "确认", cancel: "取消" },
+      ),
+    ).toBe("财务部");
   });
 
   it("parses cancellation and rejects invalid results", () => {
