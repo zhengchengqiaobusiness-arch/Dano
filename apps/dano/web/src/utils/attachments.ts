@@ -79,6 +79,16 @@ export async function uploadComposerAttachment(
   return (await response.json()) as RpcUploadedFileRef;
 }
 
+export async function imageFileToRpcData(file: File): Promise<string | undefined> {
+  if (!getComposerUploadMimeType(file).startsWith("image/")) return undefined;
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
+}
+
 export async function markComposerAttachmentOrphaned(
   file: RpcUploadedFileRef,
 ): Promise<void> {

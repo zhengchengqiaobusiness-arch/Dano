@@ -13,6 +13,7 @@ import {
   toRpcImageContent,
   toRpcUploadedFileRefs,
   uploadComposerAttachment,
+  imageFileToRpcData,
 } from "./attachments";
 
 describe("composer attachment uploads", () => {
@@ -146,7 +147,17 @@ describe("composer attachment uploads", () => {
     );
   });
 
-  it("does not convert uploaded file refs into image payloads", () => {
+  it("keeps image uploads available for model image input", async () => {
+    await expect(
+      imageFileToRpcData(
+        new File([new Uint8Array([1, 2, 3])], "sample.png", {
+          type: "image/png",
+        }),
+      ),
+    ).resolves.toBe("AQID");
+  });
+
+  it("does not convert non-image uploaded file refs into image payloads", () => {
     const attachment = {
       id: "attachment-1",
       type: "file" as const,

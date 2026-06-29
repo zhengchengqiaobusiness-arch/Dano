@@ -69,3 +69,23 @@ describe("assistant thinking blocks", () => {
     expect(blocks[2]).toEqual({ kind: "thinking", text: "Check tool result" });
   });
 });
+
+describe("uploaded file blocks", () => {
+  it("renders structured file blocks as file cards", () => {
+    const blocks = contentBlocks({
+      role: "user",
+      content: [
+        {
+          type: "file",
+          name: "photo.png",
+          path: "/workspace/uploads/abc123.png",
+          relativePath: "uploads/abc123.png",
+        },
+      ],
+    } as never);
+
+    expect(blocks).toEqual([
+      { kind: "file", name: "photo.png", path: "uploads/abc123.png" },
+    ]);
+  });
+});

@@ -361,6 +361,17 @@ describe("BridgeServer HTTP/SSE transport", () => {
     expect(previewResponse.status).toBe(200);
     expect(previewResponse.headers.get("content-type")).toBe("text/plain");
     expect(new Uint8Array(await previewResponse.arrayBuffer())).toEqual(body);
+
+    const workspacePreview = await fetch(
+      `${origin}/api/workspace-files/preview?clientId=${encodeURIComponent(created.client.id)}&path=${encodeURIComponent(uploaded.relativePath)}`,
+    );
+    expect(workspacePreview.status).toBe(200);
+    expect(await workspacePreview.text()).toBe("hello backend storage");
+
+    const outsidePreview = await fetch(
+      `${origin}/api/workspace-files/preview?clientId=${encodeURIComponent(created.client.id)}&path=..%2Fsecret.txt`,
+    );
+    expect(outsidePreview.status).toBe(403);
   });
 
   it("accepts uploads with empty or unknown MIME by using octet-stream", async () => {

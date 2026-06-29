@@ -263,6 +263,11 @@ export class BridgeServer {
         return;
       }
 
+      if (req.method === "GET" && pathname === "/api/workspace-files/preview") {
+        this.handleWorkspaceFilePreview(res, url);
+        return;
+      }
+
       const uploadPreviewMatch = /^\/api\/uploads\/([^/]+)\/preview$/.exec(
         pathname,
       );
@@ -465,6 +470,43 @@ export class BridgeServer {
 
       res.writeHead(200, {
         "Content-Type": ref.mimeType,
+        "Content-Length": stats.size,
+        "Cache-Control": "no-cache",
+      });
+      fs.createReadStream(filePath).pipe(res);
+    });
+  }
+
+  private handleWorkspaceFilePreview(
+    res: http.ServerResponse,
+    url: URL,
+  ): void {
+    const clientId = url.searchParams.get("clientId");
+    const requestedPath = url.searchParams.get("path")?.trim();
+    if (!clientId || !this.clients.has(clientId)) {
+      writeJson(res, 400, { error: "Valid clientId is required" });
+      return;
+    }
+    if (!requestedPath) {
+      writeJson(res, 400, { error: "File path is required" });
+      return;
+    }
+
+    const workspacePath = path.resolve(this.getClientWorkspacePath(clientId));
+    const filePath = path.resolve(workspacePath, requestedPath);
+    if (filePath !== workspacePath && !filePath.startsWith(workspacePath + path.sep)) {
+      writeJson(res, 403, { error: "File path is outside the workspace" });
+      return;
+    }
+
+    fs.stat(filePath, (statErr, stats) => {
+      if (statErr || !stats.isFile()) {
+        writeJson(res, 404, { error: "File was not found" });
+        return;
+      }
+
+      res.writeHead(200, {
+        "Content-Type": workspacePreviewMimeType(filePath),
         "Content-Length": stats.size,
         "Cache-Control": "no-cache",
       });
@@ -734,6 +776,18 @@ function normalizeUploadName(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const base = path.basename(value.trim());
   return base && base !== "." && base !== ".." ? base : null;
+}
+
+function workspacePreviewMimeType(filePath: string): string {
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension === ".png") return "image/png";
+  if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
+  if (extension === ".gif") return "image/gif";
+  if (extension === ".webp") return "image/webp";
+  if (extension === ".svg") return "image/svg+xml";
+  if (extension === ".md" || extension === ".markdown") return "text/markdown; charset=utf-8";
+  if (extension === ".txt" || extension === ".log") return "text/plain; charset=utf-8";
+  return "application/octet-stream";
 }
 
 function normalizeSha256(value: unknown): string | null {

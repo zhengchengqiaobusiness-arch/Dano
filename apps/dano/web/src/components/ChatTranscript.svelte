@@ -6,10 +6,18 @@
     RpcTranscriptContentBlock,
   } from "@dano/types/protocol";
   import Copy from "lucide-svelte/icons/copy";
+  import FileText from "lucide-svelte/icons/file-text";
+  import Maximize from "lucide-svelte/icons/maximize";
+  import Maximize2 from "lucide-svelte/icons/maximize-2";
+  import Minimize2 from "lucide-svelte/icons/minimize-2";
   import Pencil from "lucide-svelte/icons/pencil";
   import Sparkle from "lucide-svelte/icons/sparkle";
+  import X from "lucide-svelte/icons/x";
+  import ZoomIn from "lucide-svelte/icons/zoom-in";
+  import ZoomOut from "lucide-svelte/icons/zoom-out";
   import {
     answerQuestion,
+    getBridgeClientId,
     type TranscriptDelta,
     type TranscriptEntry,
     type TranscriptStream,
@@ -31,6 +39,7 @@
     isErrorMessage,
     isToolResultMessage,
     messageContent,
+    type FileContentBlock,
     type ImageContentBlock,
     type PendingTranscriptSessionEvent,
     type ToolContentBlock,
@@ -121,6 +130,24 @@
   let showBusyIndicator = $derived(hasVisibleStreaming || isCompacting);
   let copiedMessageKey = $state<string | null>(null);
   let copiedMessageResetTimer: number | undefined;
+  let filePreview = $state<{
+    block: FileContentBlock;
+    src?: string;
+    content?: string;
+    loading: boolean;
+    error: string;
+  } | null>(null);
+  let filePreviewRequestId = 0;
+  let imagePreviewFit = $state(true);
+  let imagePreviewScale = $state(1);
+  let imagePreviewNaturalWidth = $state(0);
+  let imagePreviewNaturalHeight = $state(0);
+  let filePreviewMaximized = $state(false);
+  let filePreviewBody = $state<HTMLDivElement | undefined>();
+  let filePreviewDragging = $state(false);
+  let filePreviewDragStart:
+    | { x: number; y: number; scrollLeft: number; scrollTop: number }
+    | null = null;
   let streamingAssistantMessageIndex = $derived.by(() => {
     if (!hasVisibleStreaming) return -1;
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -261,6 +288,12 @@
     const blocks = index >= messages.length
       ? contentBlocks(msg)
       : contentBlocks(messageWithTranscriptDeltas(msg, index));
+    if (
+      msg.role === "user" &&
+      blocks.some(block => block.kind === "file" && isImageFile(block))
+    ) {
+      return blocks.filter(block => block.kind !== "image");
+    }
     return blocks;
   }
 
@@ -282,6 +315,8 @@
         return `${messageKey}:${toolBlockIdentity(block, blockIndex)}`;
       case "image":
         return `${messageKey}:image:${block.src}:${blockIndex}`;
+      case "file":
+        return `${messageKey}:file:${block.path}:${blockIndex}`;
       case "system":
         return `${messageKey}:system:${block.systemType}:${block.title}:${blockIndex}`;
       case "thinking":
@@ -444,6 +479,178 @@
       (block): block is ImageContentBlock => block.kind === "image",
     );
   }
+
+  function openFileBlock(block: FileContentBlock) {
+    const src = workspaceFilePreviewUrl(block);
+    if (isImageFile(block)) {
+      if (src) {
+        resetImagePreviewZoom();
+        filePreviewMaximized = false;
+        filePreview = { block, src, loading: false, error: "" };
+        return;
+      }
+    }
+    const requestId = ++filePreviewRequestId;
+    filePreviewMaximized = false;
+    filePreview = { block, loading: true, error: "" };
+    if (src) {
+      fetch(src)
+        .then(async response => {
+          if (!response.ok) throw new Error(await response.text());
+          return response.text();
+        })
+        .then(content => {
+          if (requestId !== filePreviewRequestId) return;
+          filePreview = { block, content, loading: false, error: "" };
+        })
+        .catch(error => {
+          if (requestId !== filePreviewRequestId) return;
+          filePreview = {
+            block,
+            loading: false,
+            error: error instanceof Error ? error.message : t("fileViewer.loadFailed"),
+          };
+        });
+      return;
+    }
+
+    if (!readWorkspaceFile) {
+      filePreview = {
+        block,
+        loading: false,
+        error: t("fileViewer.loadFailed"),
+      };
+      return;
+    }
+    readWorkspaceFile(block.path)
+      .then(file => {
+        if (requestId !== filePreviewRequestId) return;
+        filePreview = {
+          block,
+          content: file.content,
+          loading: false,
+          error: "",
+        };
+      })
+      .catch(error => {
+        if (requestId !== filePreviewRequestId) return;
+        filePreview = {
+          block,
+          loading: false,
+          error: error instanceof Error ? error.message : t("fileViewer.loadFailed"),
+        };
+      });
+  }
+
+  function openImageBlock(block: ImageContentBlock) {
+    resetImagePreviewZoom();
+    filePreviewMaximized = false;
+    filePreview = {
+      block: { kind: "file", name: block.alt || t("transcript.imageAttachmentAlt"), path: "" },
+      src: block.src,
+      loading: false,
+      error: "",
+    };
+  }
+
+  function closeFilePreview() {
+    filePreviewRequestId += 1;
+    filePreview = null;
+    filePreviewMaximized = false;
+    endFilePreviewPan();
+  }
+
+  function resetImagePreviewZoom() {
+    imagePreviewFit = true;
+    imagePreviewScale = 1;
+    imagePreviewNaturalWidth = 0;
+    imagePreviewNaturalHeight = 0;
+  }
+
+  function setImagePreviewFit() {
+    imagePreviewFit = true;
+    imagePreviewScale = 1;
+  }
+
+  function setImagePreviewOriginalSize() {
+    imagePreviewFit = false;
+    imagePreviewScale = 1;
+  }
+
+  function zoomImagePreview(multiplier: number) {
+    imagePreviewFit = false;
+    imagePreviewScale = Math.min(8, Math.max(0.1, imagePreviewScale * multiplier));
+  }
+
+  function handleImagePreviewLoad(event: Event) {
+    const image = event.currentTarget as HTMLImageElement;
+    imagePreviewNaturalWidth = image.naturalWidth;
+    imagePreviewNaturalHeight = image.naturalHeight;
+  }
+
+  function handleFilePreviewWheel(event: WheelEvent) {
+    if (!filePreview?.src) return;
+    event.preventDefault();
+    zoomImagePreview(event.deltaY < 0 ? 1.1 : 1 / 1.1);
+  }
+
+  function startFilePreviewPan(event: MouseEvent) {
+    if (!filePreview?.src || !filePreviewBody || event.button !== 0) return;
+    filePreviewDragging = true;
+    filePreviewDragStart = {
+      x: event.clientX,
+      y: event.clientY,
+      scrollLeft: filePreviewBody.scrollLeft,
+      scrollTop: filePreviewBody.scrollTop,
+    };
+  }
+
+  function moveFilePreviewPan(event: MouseEvent) {
+    if (!filePreviewDragging || !filePreviewDragStart || !filePreviewBody) return;
+    event.preventDefault();
+    filePreviewBody.scrollLeft =
+      filePreviewDragStart.scrollLeft - (event.clientX - filePreviewDragStart.x);
+    filePreviewBody.scrollTop =
+      filePreviewDragStart.scrollTop - (event.clientY - filePreviewDragStart.y);
+  }
+
+  function endFilePreviewPan() {
+    filePreviewDragging = false;
+    filePreviewDragStart = null;
+  }
+
+  function imagePreviewStyle(): string {
+    if (imagePreviewFit || !imagePreviewNaturalWidth || !imagePreviewNaturalHeight)
+      return "";
+    return `width: ${Math.round(imagePreviewNaturalWidth * imagePreviewScale)}px; height: ${Math.round(imagePreviewNaturalHeight * imagePreviewScale)}px;`;
+  }
+
+  function isImageFile(block: FileContentBlock): boolean {
+    return /\.(png|jpe?g|gif|webp|svg)$/i.test(block.name || block.path);
+  }
+
+  function workspaceFilePreviewUrl(block: FileContentBlock): string | null {
+    const clientId = getBridgeClientId();
+    if (!clientId) return null;
+    const query = new URLSearchParams({ clientId, path: block.path });
+    return `/api/workspace-files/preview?${query.toString()}`;
+  }
+
+  function handleFilePreviewKeydown(event: KeyboardEvent) {
+    if (!filePreview || event.key !== "Escape") return;
+    event.preventDefault();
+    closeFilePreview();
+  }
+
+  $effect(() => {
+    if (typeof document === "undefined" || !filePreview) return;
+    document.addEventListener("keydown", handleFilePreviewKeydown);
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", handleFilePreviewKeydown);
+      document.body.style.removeProperty("overflow");
+    };
+  });
 
   function toolResultName(msg: TranscriptEntry): string {
     return msg.toolName?.trim() || t("chatTranscript.toolFallback");
@@ -1055,11 +1262,41 @@
                     type="button"
                     class="message-image-button"
                     aria-label={t("chatTranscript.openImage")}
-                    onclick={() => lightbox.openImageLightbox([block])}
+                    onclick={() => openImageBlock(block)}
                   >
                     <img class="message-image" src={block.src} alt={block.alt} loading="lazy" />
                   </button>
                 </figure>
+              {:else if block.kind === "file"}
+                {@const previewSrc = isImageFile(block) ? workspaceFilePreviewUrl(block) : null}
+                <div class="message-file-attachment">
+                  {#if previewSrc}
+                    <button
+                      type="button"
+                      class="message-file-preview-button"
+                      aria-label={block.name}
+                      title={block.name}
+                      onclick={() => openFileBlock(block)}
+                    >
+                      <img
+                        class="message-file-preview-image"
+                        src={previewSrc}
+                        alt={block.name}
+                        loading="lazy"
+                      />
+                    </button>
+                  {:else}
+                    <button
+                      type="button"
+                      class="message-file-card"
+                      title={block.path}
+                      onclick={() => openFileBlock(block)}
+                    >
+                      <FileText class="message-file-icon" aria-hidden="true" size={18} />
+                      <span class="message-file-name">{block.name}</span>
+                    </button>
+                  {/if}
+                </div>
               {:else if block.kind === "skill"}
                 <SkillInvocationCard skillName={block.skillName} />
               {:else if block.kind === "text" && block.text}
@@ -1129,6 +1366,121 @@
     onPrevious={lightbox.showPreviousLightboxImage}
     onNext={lightbox.showNextLightboxImage}
   />
+
+  {#if filePreview}
+    <div class="file-preview-shell">
+      <button
+        type="button"
+        class="file-preview-backdrop"
+        aria-label={t("common.cancel")}
+        onclick={closeFilePreview}
+      ></button>
+      <div
+        class="file-preview-dialog"
+        class:maximized={filePreviewMaximized}
+        role="dialog"
+        aria-modal="true"
+        aria-label={filePreview.block.name}
+        tabindex="-1"
+      >
+        <header class="file-preview-header">
+          <div class="file-preview-title">{filePreview.block.name}</div>
+          {#if filePreview.src}
+            <div class="file-preview-controls">
+              <button
+                type="button"
+                class="file-preview-control"
+                aria-label="Zoom out"
+                title="Zoom out"
+                onclick={() => zoomImagePreview(1 / 1.25)}
+              >
+                <ZoomOut aria-hidden="true" size={16} />
+              </button>
+              <button
+                type="button"
+                class="file-preview-control"
+                aria-label="Original size"
+                title="Original size"
+                onclick={setImagePreviewOriginalSize}
+              >
+                1:1
+              </button>
+              <button
+                type="button"
+                class="file-preview-control"
+                aria-label="Fit to view"
+                title="Fit to view"
+                onclick={setImagePreviewFit}
+              >
+                <Maximize2 aria-hidden="true" size={16} />
+              </button>
+              <button
+                type="button"
+                class="file-preview-control"
+                aria-label="Zoom in"
+                title="Zoom in"
+                onclick={() => zoomImagePreview(1.25)}
+              >
+                <ZoomIn aria-hidden="true" size={16} />
+              </button>
+            </div>
+          {/if}
+          <button
+            type="button"
+            class="file-preview-control"
+            aria-label={filePreviewMaximized ? "Restore dialog" : "Maximize dialog"}
+            title={filePreviewMaximized ? "Restore dialog" : "Maximize dialog"}
+            onclick={() => (filePreviewMaximized = !filePreviewMaximized)}
+          >
+            {#if filePreviewMaximized}
+              <Minimize2 aria-hidden="true" size={16} />
+            {:else}
+              <Maximize aria-hidden="true" size={16} />
+            {/if}
+          </button>
+          <button
+            type="button"
+            class="file-preview-close"
+            aria-label={t("common.cancel")}
+            onclick={closeFilePreview}
+          >
+            <X aria-hidden="true" size={18} />
+          </button>
+        </header>
+        <!-- svelte-ignore a11y_no_static_element_interactions, a11y_no_noninteractive_element_interactions: drag-to-pan is mouse-only sugar; native scrolling still works -->
+        <div
+          bind:this={filePreviewBody}
+          class="file-preview-body"
+          class:pannable={Boolean(filePreview.src)}
+          class:panning={filePreviewDragging}
+          onwheel={handleFilePreviewWheel}
+          onmousedown={startFilePreviewPan}
+          onmousemove={moveFilePreviewPan}
+          onmouseup={endFilePreviewPan}
+          onmouseleave={endFilePreviewPan}
+        >
+          {#if filePreview.src}
+            <img
+              class="file-preview-image"
+              class:fit={imagePreviewFit}
+              src={filePreview.src}
+              alt={filePreview.block.name}
+              style={imagePreviewStyle()}
+              onload={handleImagePreviewLoad}
+            />
+          {:else if filePreview.loading}
+            <div class="file-preview-state">{t("fileViewer.loading")}</div>
+          {:else if filePreview.error}
+            <div class="file-preview-state error">{filePreview.error}</div>
+          {:else if !(filePreview.content ?? "")}
+            <div class="file-preview-state">{t("fileViewer.empty")}</div>
+          {:else}
+            <pre class="file-preview-text">{filePreview.content ?? ""}</pre>
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -1366,21 +1718,41 @@
   :global(.markdown-renderer) + .thinking-block,
   :global(.markdown-renderer) + .tool-inline-block,
   :global(.markdown-renderer) + .message-image-block,
+  :global(.markdown-renderer) + .message-file-attachment,
+  :global(.markdown-renderer) + .message-file-card,
   :global(.markdown-renderer) + .system-block,
   .thinking-block + :global(.markdown-renderer),
   .thinking-block + .thinking-block,
   .thinking-block + .tool-inline-block,
   .thinking-block + .message-image-block,
+  .thinking-block + .message-file-attachment,
+  .thinking-block + .message-file-card,
   .thinking-block + .system-block,
   .tool-inline-block + :global(.markdown-renderer),
   .tool-inline-block + .thinking-block,
   .tool-inline-block + .message-image-block,
+  .tool-inline-block + .message-file-attachment,
+  .tool-inline-block + .message-file-card,
   .tool-inline-block + .system-block,
   .message-image-block + :global(.markdown-renderer),
   .message-image-block + .thinking-block,
   .message-image-block + .tool-inline-block,
   .message-image-block + .message-image-block,
+  .message-image-block + .message-file-attachment,
+  .message-image-block + .message-file-card,
   .message-image-block + .system-block,
+  .message-file-attachment + :global(.markdown-renderer),
+  .message-file-attachment + .thinking-block,
+  .message-file-attachment + .tool-inline-block,
+  .message-file-attachment + .message-image-block,
+  .message-file-attachment + .message-file-attachment,
+  .message-file-attachment + .system-block,
+  .message-file-card + :global(.markdown-renderer),
+  .message-file-card + .thinking-block,
+  .message-file-card + .tool-inline-block,
+  .message-file-card + .message-image-block,
+  .message-file-card + .message-file-card,
+  .message-file-card + .system-block,
   .system-block + :global(.markdown-renderer),
   .system-block + .thinking-block,
   .system-block + .tool-inline-block,
@@ -1446,6 +1818,221 @@
   }
 
   .message-image-block { margin: 0; }
+
+  .message-file-attachment {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    max-width: 100%;
+  }
+
+  .message-file-card {
+    display: inline-grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    max-width: min(100%, 360px);
+    padding: 9px 11px;
+    border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--panel) 64%, transparent);
+    color: var(--text);
+    font: inherit;
+    line-height: 1.25;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .message-file-card:hover,
+  .message-file-card:focus-visible {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--focus-ring);
+  }
+
+  .message-file-icon {
+    color: var(--text-muted);
+    flex: 0 0 auto;
+  }
+
+  .message-file-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+
+  .message-file-preview-button {
+    display: block;
+    width: min(100%, 420px);
+    max-height: 420px;
+    padding: 0;
+    border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--panel) 64%, transparent);
+    overflow: hidden;
+    cursor: zoom-in;
+  }
+
+  .message-file-preview-button:hover,
+  .message-file-preview-button:focus-visible {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--focus-ring);
+  }
+
+  .message-file-preview-image {
+    display: block;
+    width: 100%;
+    max-height: 420px;
+    object-fit: contain;
+  }
+
+  .file-preview-shell {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+  }
+
+  .file-preview-backdrop {
+    position: absolute;
+    inset: 0;
+    border: 0;
+    background: color-mix(in srgb, #000 42%, transparent);
+    cursor: default;
+  }
+
+  .file-preview-dialog {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    width: min(860px, 100%);
+    height: min(720px, calc(100dvh - 48px));
+    border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+    border-radius: 14px;
+    background: var(--panel);
+    box-shadow: var(--shadow-floating);
+    overflow: hidden;
+  }
+
+  .file-preview-dialog.maximized {
+    width: calc(100dvw - 48px);
+    height: calc(100dvh - 48px);
+  }
+
+  .file-preview-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  }
+
+  .file-preview-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.85rem;
+    font-weight: 700;
+  }
+
+  .file-preview-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .file-preview-control,
+  .file-preview-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+
+  .file-preview-control {
+    font-size: 0.72rem;
+    font-weight: 700;
+  }
+
+  .file-preview-control:hover,
+  .file-preview-control:focus-visible,
+  .file-preview-close:hover,
+  .file-preview-close:focus-visible {
+    background: var(--surface-hover);
+    color: var(--text);
+  }
+
+  .file-preview-body {
+    display: grid;
+    place-items: center;
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 14px;
+  }
+
+  .file-preview-body.pannable {
+    cursor: grab;
+  }
+
+  .file-preview-body.panning {
+    cursor: grabbing;
+    user-select: none;
+  }
+
+  .file-preview-image {
+    display: block;
+    margin: 0 auto;
+    object-fit: contain;
+    max-width: none;
+    max-height: none;
+    user-select: none;
+    -webkit-user-drag: none;
+  }
+
+  .file-preview-image.fit {
+    max-width: 100%;
+    max-height: 100%;
+  }
+
+  .file-preview-text {
+    align-self: start;
+    justify-self: stretch;
+    margin: 0;
+    font-family: var(--pi-font-mono);
+    font-size: 0.78rem;
+    line-height: 1.65;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .file-preview-state {
+    padding: 16px;
+    border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+    border-radius: 10px;
+    color: var(--text-muted);
+    background: color-mix(in srgb, var(--panel) 84%, transparent);
+  }
+
+  .file-preview-state.error {
+    border-color: color-mix(in srgb, var(--danger) 38%, var(--border));
+    color: var(--error-text);
+    background: color-mix(in srgb, var(--error-bg) 72%, transparent);
+  }
 
   .message-image-button {
     display: block;
@@ -1713,6 +2300,36 @@
       max-width: min(580px, 100%);
       padding: 10px 14px;
       border-radius: 16px;
+    }
+
+    .file-preview-shell {
+      place-items: end stretch;
+      padding: 0;
+    }
+
+    .file-preview-dialog {
+      width: 100%;
+      height: 82dvh;
+      border-right: 0;
+      border-bottom: 0;
+      border-left: 0;
+      border-radius: 16px 16px 0 0;
+    }
+
+    .file-preview-dialog.maximized {
+      width: 100%;
+      height: 100dvh;
+      border-radius: 0;
+    }
+
+    .file-preview-header {
+      grid-template-columns: minmax(0, 1fr) auto auto;
+    }
+
+    .file-preview-controls {
+      grid-column: 1 / -1;
+      justify-content: center;
+      order: 3;
     }
   }
 </style>

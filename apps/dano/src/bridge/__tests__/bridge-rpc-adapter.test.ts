@@ -306,13 +306,14 @@ describe("BridgeRpcAdapter", () => {
 
       const promptSpy = vi.fn().mockResolvedValue(undefined);
       const sendCustomMessageSpy = vi.fn().mockResolvedValue(undefined);
+      const subscribeSpy = vi.fn().mockReturnValue(() => {});
       createAgentSessionMock.mockResolvedValue({
         session: {
           sessionFile,
           sessionId: sessionManager.getSessionId(),
           isStreaming: false,
           bindExtensions: vi.fn().mockResolvedValue(undefined),
-          subscribe: vi.fn().mockReturnValue(() => {}),
+          subscribe: subscribeSpy,
           prompt: promptSpy,
           sendCustomMessage: sendCustomMessageSpy,
           sessionManager,
@@ -320,6 +321,8 @@ describe("BridgeRpcAdapter", () => {
       });
 
       // Now send prompt with image
+      fs.mkdirSync(path.join(tmpDir, "uploads"), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, "uploads", "sample.pdf"), "fake upload");
       uploadRegistry.resolve.mockReturnValue({
         id: "upload-1",
         name: "sample.pdf",
@@ -366,7 +369,7 @@ describe("BridgeRpcAdapter", () => {
       expect(sendCustomMessageSpy).not.toHaveBeenCalled();
       expect(context.actions.sendUserMessage).not.toHaveBeenCalled();
       expect(promptSpy).toHaveBeenCalledWith(
-        "Inspect this image\n\nProject file references:\n- uploads/sample.pdf",
+        `Inspect this image\n\nProject file references:\n- ${path.join(tmpDir, "uploads", "sample.pdf")} (sample.pdf)`,
         {
           source: "rpc",
           images: [
@@ -378,14 +381,64 @@ describe("BridgeRpcAdapter", () => {
           ],
         },
       );
+      (ws.send as ReturnType<typeof vi.fn>).mockClear();
+      const sessionEventHandler = subscribeSpy.mock.calls[0]?.[0] as
+        | ((event: object) => void)
+        | undefined;
+      sessionEventHandler?.({
+        type: "message_start",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `Inspect this image\n\nProject file references:\n- ${path.join(tmpDir, "uploads", "sample.pdf")} (sample.pdf)`,
+            },
+            {
+              type: "image",
+              mimeType: "image/png",
+              data: "ZmFrZS1pbWFnZQ==",
+            },
+          ],
+        },
+      });
+
+      const transcriptStart = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+        .map(call => JSON.parse(call[0] as string))
+        .find(
+          call =>
+            call.type === "event" && call.payload.type === "transcript_start",
+        );
+      expect(transcriptStart?.payload.message.content).toEqual([
+        { type: "text", text: "Inspect this image" },
+        {
+          type: "image",
+          mimeType: "image/png",
+          data: "ZmFrZS1pbWFnZQ==",
+        },
+        {
+          type: "file",
+          id: "upload-1",
+          name: "sample.pdf",
+          size: 14,
+          mimeType: "application/pdf",
+          path: "uploads/sample.pdf",
+          relativePath: "uploads/sample.pdf",
+          previewUrl: undefined,
+        },
+      ]);
 
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
     it("passes uploaded files as project file references in live steering", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-upload-"));
+      const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-upload-source-"));
       try {
-        const filePath = path.join(tmpDir, "uploads", "sample.pdf");
+        (context.state as { cwd: string }).cwd = tmpDir;
+        const filePath = path.join(sourceDir, "uploads", "sample.pdf");
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, "fake upload");
         uploadRegistry.resolve.mockReturnValue({
           id: "upload-1",
           name: "sample.pdf",
@@ -423,12 +476,16 @@ describe("BridgeRpcAdapter", () => {
         expect(uploadRegistry.markReferenced).toHaveBeenCalledWith("upload-1", {
           correlationId: "cmd-upload",
         });
+        expect(fs.readFileSync(path.join(tmpDir, "uploads", "sample.pdf"), "utf8")).toBe(
+          "fake upload",
+        );
         expect(context.actions.sendUserMessage).toHaveBeenCalledWith(
-          "Inspect upload\n\nProject file references:\n- uploads/sample.pdf",
+          `Inspect upload\n\nProject file references:\n- ${path.join(tmpDir, "uploads", "sample.pdf")} (sample.pdf)`,
           { deliverAs: "steer" },
         );
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
+        fs.rmSync(sourceDir, { recursive: true, force: true });
       }
     });
 
