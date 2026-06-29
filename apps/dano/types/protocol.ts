@@ -23,6 +23,7 @@ export interface RpcUploadedFileRef {
   size: number;
   mimeType: string;
   path: string;
+  relativePath?: string;
   previewUrl?: string;
 }
 
@@ -525,6 +526,17 @@ export interface RpcTranscriptImageUrlBlock {
   url?: string;
 }
 
+export interface RpcTranscriptFileBlock {
+  type: "file";
+  id?: string;
+  name: string;
+  size?: number;
+  mimeType?: string;
+  path: string;
+  relativePath?: string;
+  previewUrl?: string;
+}
+
 export interface RpcTranscriptToolCallBlock {
   type: "toolCall";
   id?: string;
@@ -587,6 +599,7 @@ export type RpcTranscriptContentBlock =
   | RpcTranscriptThinkingBlock
   | RpcTranscriptImageBlock
   | RpcTranscriptImageUrlBlock
+  | RpcTranscriptFileBlock
   | RpcTranscriptToolCallBlock
   | RpcTranscriptToolResultBlock
   | RpcTranscriptSystemBlock;

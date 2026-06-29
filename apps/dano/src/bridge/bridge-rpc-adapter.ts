@@ -89,6 +89,7 @@ type UserMessageContent =
       | { type: "text"; text: string }
       | { type: "image"; data: string; mimeType: string }
     >;
+type UploadedProjectFileRef = RpcUploadedFileRef & { relativePath?: string };
 type UserMessageBlock = Exclude<UserMessageContent, string>[number];
 type PiTextContent = Extract<UserMessageBlock, { type: "text" }>;
 type PiAgentMessage = NonNullable<PiAgentEndEvent["messages"]>[number];
@@ -109,6 +110,8 @@ type RpcAgentUserContentBlock = Exclude<
   Extract<RpcAgentMessage, { role: "user" }>["content"],
   string
 >[number];
+
+const PROJECT_FILE_REFERENCES_MARKER = "Project file references:\n";
 type RpcAgentAssistantContentBlock = Extract<
   RpcAgentMessage,
   { role: "assistant" }
@@ -158,6 +161,12 @@ interface TranscriptSyncState {
   openKeysByRole: Map<string, string[]>;
   lastMessagesByKey: Map<string, RpcTranscriptMessage>;
   closedKeys: Set<string>;
+}
+
+interface PendingStructuredUserMessage {
+  sessionPath: string | null;
+  injectedText: string;
+  content: RpcTranscriptContentBlock[];
 }
 
 interface SessionSummary {
@@ -2298,6 +2307,31 @@ function transcriptContentItems(
   return [];
 }
 
+function transcriptTextCandidates(message: RpcTranscriptMessage): string[] {
+  const candidates: string[] = [];
+  if (typeof message.content === "string") {
+    candidates.push(message.content);
+  }
+  if (typeof message.text === "string") {
+    candidates.push(message.text);
+  }
+  if (Array.isArray(message.content)) {
+    for (const item of message.content) {
+      if (typeof item === "string") {
+        candidates.push(item);
+      } else if (
+        item &&
+        typeof item === "object" &&
+        item.type === "text" &&
+        typeof item.text === "string"
+      ) {
+        candidates.push(item.text);
+      }
+    }
+  }
+  return candidates;
+}
+
 function stringFromToolArguments(value: unknown): string {
   if (typeof value === "string") return value;
   if (value === undefined || value === null) return "";
@@ -2648,19 +2682,18 @@ function normalizeRpcImages(images: unknown): RpcImageContent[] | undefined {
 
 function normalizeRpcUploadedFiles(
   files: unknown,
-): RpcUploadedFileRef[] | undefined {
+): UploadedProjectFileRef[] | undefined {
   if (!Array.isArray(files)) return undefined;
 
-  const normalized = files.flatMap((file): RpcUploadedFileRef[] => {
+  const normalized = files.flatMap((file): UploadedProjectFileRef[] => {
     if (typeof file !== "object" || file === null) return [];
-    const data = file as Partial<RpcUploadedFileRef>;
+    const data = file as Partial<UploadedProjectFileRef>;
     if (
       typeof data.id !== "string" ||
       typeof data.name !== "string" ||
       typeof data.path !== "string" ||
       typeof data.mimeType !== "string" ||
-      typeof data.size !== "number" ||
-      !data.mimeType.startsWith("image/")
+      typeof data.size !== "number"
     ) {
       return [];
     }
@@ -2671,6 +2704,8 @@ function normalizeRpcUploadedFiles(
         path: data.path,
         mimeType: data.mimeType,
         size: data.size,
+        relativePath:
+          typeof data.relativePath === "string" ? data.relativePath : undefined,
         previewUrl:
           typeof data.previewUrl === "string" ? data.previewUrl : undefined,
       },
@@ -2680,40 +2715,140 @@ function normalizeRpcUploadedFiles(
   return normalized.length > 0 ? normalized : undefined;
 }
 
-async function uploadedFilesToRpcImages(
-  files: RpcUploadedFileRef[] | undefined,
-  uploadRegistry: UploadRegistry,
-  correlationId: string,
-): Promise<RpcImageContent[] | undefined> {
-  if (!files?.length) return undefined;
-
-  const images: RpcImageContent[] = [];
-  const readingIds: string[] = [];
-  try {
-    for (const file of files) {
-      const stored = uploadRegistry.resolve(file);
-      if (!stored) {
-        throw new Error(`Uploaded file was not found: ${file.name}`);
-      }
-      uploadRegistry.markReading(stored.id);
-      readingIds.push(stored.id);
-      const data = await fs.promises.readFile(stored.path, "base64");
-      uploadRegistry.markReferenced(stored.id, { correlationId });
-      images.push({ type: "image", data, mimeType: stored.mimeType });
-    }
-  } catch (error) {
-    for (const id of readingIds) uploadRegistry.markDraft(id);
-    throw error;
+function normalizeProjectFileReference(filePath: string): string | null {
+  const normalized = path.posix.normalize(filePath.replace(/\\/g, "/"));
+  if (
+    normalized === "." ||
+    normalized.startsWith("/") ||
+    normalized === ".." ||
+    normalized.startsWith("../")
+  ) {
+    return null;
   }
-  return images;
+  return normalized;
 }
 
-function mergeRpcImages(
+function uploadedFilesToProjectFileReferences(
+  files: UploadedProjectFileRef[] | undefined,
+  uploadRegistry: UploadRegistry,
+  correlationId: string,
+  workspacePath: string,
+): UploadedProjectFileRef[] | undefined {
+  if (!files?.length) return undefined;
+
+  const resolved: UploadedProjectFileRef[] = [];
+  for (const file of files) {
+    const stored = uploadRegistry.resolve(file) as UploadedProjectFileRef | null;
+    if (!stored) {
+      throw new Error(`Uploaded file was not found: ${file.name}`);
+    }
+    const relativePath = normalizeProjectFileReference(
+      stored.relativePath ?? file.relativePath ?? "",
+    );
+    if (!relativePath) {
+      throw new Error(`Uploaded file is missing a project path: ${file.name}`);
+    }
+    const targetPath = path.resolve(workspacePath, relativePath);
+    if (!targetPath.startsWith(path.resolve(workspacePath) + path.sep)) {
+      throw new Error(`Uploaded file is outside the project path: ${file.name}`);
+    }
+    if (!fs.existsSync(targetPath)) {
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.copyFileSync(stored.path, targetPath);
+    }
+    resolved.push({
+      id: stored.id,
+      name: stored.name,
+      path: targetPath,
+      relativePath,
+      size: stored.size,
+      mimeType: stored.mimeType,
+      previewUrl: stored.previewUrl,
+    });
+  }
+
+  for (const file of resolved) {
+    uploadRegistry.markReferenced(file.id, { correlationId });
+  }
+  return resolved;
+}
+
+function appendProjectFileReferences(
+  message: string,
+  files: UploadedProjectFileRef[] | undefined,
+): string {
+  if (!files?.length) return message;
+  const fileText = files
+    .map(file => `- ${file.path} (${file.name})`)
+    .join("\n");
+  return `${message}${message ? "\n\n" : ""}${PROJECT_FILE_REFERENCES_MARKER}${fileText}`;
+}
+
+function stripProjectFileReferences(text: string): string {
+  const markerIndex = text.lastIndexOf(PROJECT_FILE_REFERENCES_MARKER);
+  if (markerIndex < 0) return text;
+  return text.slice(0, markerIndex).replace(/\n\n$/, "").trimEnd();
+}
+
+function stripProjectFileReferencesFromMessage(
+  message: RpcTranscriptMessage,
+): RpcTranscriptMessage {
+  if (message.role !== "user") return message;
+
+  const next: RpcTranscriptMessage = { ...message };
+  if (typeof next.content === "string") {
+    next.content = stripProjectFileReferences(next.content);
+  } else if (Array.isArray(next.content)) {
+    const content: Array<string | RpcTranscriptContentBlock> = [];
+    for (const item of next.content) {
+      if (typeof item === "string") {
+        const text = stripProjectFileReferences(item);
+        if (text) content.push(text);
+        continue;
+      }
+      if (
+        item &&
+        typeof item === "object" &&
+        item.type === "text" &&
+        typeof item.text === "string"
+      ) {
+        const text = stripProjectFileReferences(item.text);
+        if (text) content.push({ ...item, text });
+        continue;
+      }
+      content.push(item);
+    }
+    next.content = content;
+  }
+  if (typeof next.text === "string") {
+    next.text = stripProjectFileReferences(next.text);
+  }
+  return next;
+}
+
+function buildStructuredUserTranscriptContent(
+  message: string,
   images: RpcImageContent[] | undefined,
-  uploadedImages: RpcImageContent[] | undefined,
-): RpcImageContent[] | undefined {
-  const merged = [...(images ?? []), ...(uploadedImages ?? [])];
-  return merged.length > 0 ? merged : undefined;
+  files: UploadedProjectFileRef[] | undefined,
+): RpcTranscriptContentBlock[] {
+  return [
+    ...(message.trim() ? [{ type: "text" as const, text: message }] : []),
+    ...(images ?? []).map(image => ({
+      type: "image" as const,
+      data: image.data,
+      mimeType: image.mimeType,
+    })),
+    ...(files ?? []).map(file => ({
+      type: "file" as const,
+      id: file.id,
+      name: file.name,
+      size: file.size,
+      mimeType: file.mimeType,
+      path: file.relativePath ?? file.path,
+      relativePath: file.relativePath,
+      previewUrl: file.previewUrl,
+    })),
+  ];
 }
 
 function buildUserMessageContent(
@@ -3454,6 +3589,9 @@ class SessionRuntime {
  * ========================================================================== */
 
 class TranscriptProjector {
+  private readonly pendingStructuredUserMessages: PendingStructuredUserMessage[] =
+    [];
+
   private state: TranscriptSyncState = {
     sessionPath: null,
     nextEphemeralId: 0,
@@ -3463,10 +3601,30 @@ class TranscriptProjector {
     closedKeys: new Set(),
   };
 
+  registerStructuredUserMessage(message: PendingStructuredUserMessage): void {
+    this.pendingStructuredUserMessages.push(message);
+    if (this.pendingStructuredUserMessages.length > 100) {
+      this.pendingStructuredUserMessages.shift();
+    }
+  }
+
+  projectPage(page: RpcTranscriptPage): RpcTranscriptPage {
+    const sessionPath = page.sessionPath ?? null;
+    return {
+      ...page,
+      messages: page.messages.map(message =>
+        this.projectStructuredUserMessage(message, sessionPath),
+      ),
+    };
+  }
+
   syncPage(page: {
     messages: readonly RpcTranscriptMessage[];
     sessionPath?: string | null;
   }): void {
+    const projectedMessages = page.messages.map(message =>
+      this.projectStructuredUserMessage(message, page.sessionPath ?? null),
+    );
     const previousClosedKeys = this.state.closedKeys;
     this.state = {
       sessionPath: page.sessionPath ?? null,
@@ -3477,7 +3635,7 @@ class TranscriptProjector {
       closedKeys: new Set(),
     };
 
-    for (const message of page.messages) {
+    for (const message of projectedMessages) {
       const key = message.transcriptKey ?? message.id;
       if (!key) continue;
       if (message.id) {
@@ -3491,10 +3649,11 @@ class TranscriptProjector {
   }
 
   buildSnapshotEvent(page: RpcTranscriptPage): RpcTranscriptSnapshotEvent {
-    this.syncPage(page);
+    const projectedPage = this.projectPage(page);
+    this.syncPage(projectedPage);
     return {
       type: "transcript_snapshot",
-      ...page,
+      ...projectedPage,
     };
   }
 
@@ -3513,8 +3672,12 @@ class TranscriptProjector {
     const transcriptKey = this.resolveTranscriptKey(eventType, message);
     if (!transcriptKey) return null;
 
-    const transcriptMessage = this.toTranscriptMessage(message, transcriptKey);
-    if (!transcriptMessage) return null;
+    const baseTranscriptMessage = this.toTranscriptMessage(message, transcriptKey);
+    if (!baseTranscriptMessage) return null;
+    const transcriptMessage = this.projectStructuredUserMessage(
+      baseTranscriptMessage,
+      sessionPath,
+    );
     const payloadMessage =
       eventType === "message_start"
         ? streamStartMessage(transcriptMessage)
@@ -3551,8 +3714,12 @@ class TranscriptProjector {
     const role = typeof message.role === "string" ? message.role : null;
     if (!role) return null;
 
-    const transcriptMessage = this.toTranscriptMessage(message, transcriptKey);
-    if (!transcriptMessage) return null;
+    const baseTranscriptMessage = this.toTranscriptMessage(message, transcriptKey);
+    if (!baseTranscriptMessage) return null;
+    const transcriptMessage = this.projectStructuredUserMessage(
+      baseTranscriptMessage,
+      sessionPath,
+    );
 
     const deltaEvent =
       extractAssistantMessageDeltaEvent(event, transcriptMessage) ??
@@ -3671,6 +3838,31 @@ class TranscriptProjector {
       role,
       timestamp:
         typeof message.timestamp === "string" ? message.timestamp : undefined,
+    };
+  }
+
+  private projectStructuredUserMessage(
+    message: RpcTranscriptMessage,
+    sessionPath: string | null,
+  ): RpcTranscriptMessage {
+    if (!message || message.role !== "user") return message;
+
+    const pending = this.pendingStructuredUserMessages.find(candidate => {
+      if (
+        candidate.sessionPath &&
+        sessionPath &&
+        candidate.sessionPath !== sessionPath
+      ) {
+        return false;
+      }
+      return transcriptTextCandidates(message).includes(candidate.injectedText);
+    });
+    if (!pending) return stripProjectFileReferencesFromMessage(message);
+
+    return {
+      ...message,
+      content: pending.content,
+      text: undefined,
     };
   }
 }
@@ -4053,6 +4245,10 @@ export class BridgeRpcAdapter {
     this.sessionStatsPusher.queue(
       this.sessionRuntime.currentTranscriptSessionPath(),
     );
+  }
+
+  currentGitCwd(): string {
+    return this.sessionRuntime.currentGitCwd();
   }
 
   /* ------------------------------------------------------------------------
@@ -4673,14 +4869,7 @@ export class BridgeRpcAdapter {
        * ================================================================== */
 
       case "prompt": {
-        const images = mergeRpcImages(
-          normalizeRpcImages(command.images),
-          await uploadedFilesToRpcImages(
-            normalizeRpcUploadedFiles(command.files),
-            this.uploadRegistry,
-            correlationId,
-          ),
-        );
+        const images = normalizeRpcImages(command.images);
 
         // Auto-create a detached session when no session is selected.
         // Without this, the fallback calls this.context.actions.sendUserMessage() which
@@ -4692,6 +4881,12 @@ export class BridgeRpcAdapter {
         }
 
         const session = await this.sessionRuntime.ensureDetachedSession();
+        const projectFiles = uploadedFilesToProjectFileReferences(
+          normalizeRpcUploadedFiles(command.files),
+          this.uploadRegistry,
+          correlationId,
+          this.sessionRuntime.currentGitCwd(),
+        );
         const promptOptions = session.isStreaming
           ? {
               source: "rpc" as const,
@@ -4699,26 +4894,43 @@ export class BridgeRpcAdapter {
               streamingBehavior: command.streamingBehavior ?? "steer",
             }
           : { source: "rpc" as const, images };
+        const injectedMessage = appendProjectFileReferences(
+          command.message,
+          projectFiles,
+        );
+        if (projectFiles?.length) {
+          this.transcriptProjector.registerStructuredUserMessage({
+            sessionPath: this.sessionRuntime.currentTranscriptSessionPath(),
+            injectedText: injectedMessage,
+            content: buildStructuredUserTranscriptContent(
+              command.message,
+              images,
+              projectFiles,
+            ),
+          });
+        }
 
         setTimeout(() => {
-          void session.prompt(command.message, promptOptions).catch(error => {
-            const message =
-              error instanceof Error ? error.message : String(error);
-            const sessionPath = session.sessionFile ?? null;
-            console.error(
-              `BridgeRpcAdapter[${this.client.id}]: Detached prompt failed:`,
-              message,
-            );
-            this.emitEvent({
-              type: "command_error",
-              client: this.client,
-              commandType: "prompt",
-              correlationId,
-              error: message,
+          void session
+            .prompt(injectedMessage, promptOptions)
+            .catch(error => {
+              const message =
+                error instanceof Error ? error.message : String(error);
+              const sessionPath = session.sessionFile ?? null;
+              console.error(
+                `BridgeRpcAdapter[${this.client.id}]: Detached prompt failed:`,
+                message,
+              );
+              this.emitEvent({
+                type: "command_error",
+                client: this.client,
+                commandType: "prompt",
+                correlationId,
+                error: message,
+              });
+              this.sendEvent(toRpcAgentEndEvent({}, sessionPath));
+              if (sessionPath) this.sessionStatsPusher.queue(sessionPath);
             });
-            this.sendEvent(toRpcAgentEndEvent({}, sessionPath));
-            if (sessionPath) this.sessionStatsPusher.queue(sessionPath);
-          });
         }, 0);
 
         if (autoCreated) {
@@ -4750,25 +4962,41 @@ export class BridgeRpcAdapter {
       }
 
       case "steer": {
-        const images = mergeRpcImages(
-          normalizeRpcImages(command.images),
-          await uploadedFilesToRpcImages(
-            normalizeRpcUploadedFiles(command.files),
-            this.uploadRegistry,
-            correlationId,
-          ),
+        const images = normalizeRpcImages(command.images);
+        const projectFiles = uploadedFilesToProjectFileReferences(
+          normalizeRpcUploadedFiles(command.files),
+          this.uploadRegistry,
+          correlationId,
+          this.sessionRuntime.currentGitCwd(),
         );
+        const injectedMessage = appendProjectFileReferences(
+          command.message,
+          projectFiles,
+        );
+        if (projectFiles?.length) {
+          this.transcriptProjector.registerStructuredUserMessage({
+            sessionPath: this.sessionRuntime.currentTranscriptSessionPath(),
+            injectedText: injectedMessage,
+            content: buildStructuredUserTranscriptContent(
+              command.message,
+              images,
+              projectFiles,
+            ),
+          });
+        }
         if (this.sessionRuntime.hasDetachedSelection()) {
           const session = await this.sessionRuntime.ensureDetachedSession();
-          void session.steer(command.message, images).catch(error => {
-            console.error(
-              `BridgeRpcAdapter[${this.client.id}]: Detached steer failed:`,
-              error,
-            );
-          });
+          void session
+            .steer(injectedMessage, images)
+            .catch(error => {
+              console.error(
+                `BridgeRpcAdapter[${this.client.id}]: Detached steer failed:`,
+                error,
+              );
+            });
         } else {
           this.context.actions.sendUserMessage(
-            buildUserMessageContent(command.message, images),
+            buildUserMessageContent(injectedMessage, images),
             {
               deliverAs: "steer",
             },
@@ -4783,25 +5011,41 @@ export class BridgeRpcAdapter {
       }
 
       case "follow_up": {
-        const images = mergeRpcImages(
-          normalizeRpcImages(command.images),
-          await uploadedFilesToRpcImages(
-            normalizeRpcUploadedFiles(command.files),
-            this.uploadRegistry,
-            correlationId,
-          ),
+        const images = normalizeRpcImages(command.images);
+        const projectFiles = uploadedFilesToProjectFileReferences(
+          normalizeRpcUploadedFiles(command.files),
+          this.uploadRegistry,
+          correlationId,
+          this.sessionRuntime.currentGitCwd(),
         );
+        const injectedMessage = appendProjectFileReferences(
+          command.message,
+          projectFiles,
+        );
+        if (projectFiles?.length) {
+          this.transcriptProjector.registerStructuredUserMessage({
+            sessionPath: this.sessionRuntime.currentTranscriptSessionPath(),
+            injectedText: injectedMessage,
+            content: buildStructuredUserTranscriptContent(
+              command.message,
+              images,
+              projectFiles,
+            ),
+          });
+        }
         if (this.sessionRuntime.hasDetachedSelection()) {
           const session = await this.sessionRuntime.ensureDetachedSession();
-          void session.followUp(command.message, images).catch(error => {
-            console.error(
-              `BridgeRpcAdapter[${this.client.id}]: Detached follow_up failed:`,
-              error,
-            );
-          });
+          void session
+            .followUp(injectedMessage, images)
+            .catch(error => {
+              console.error(
+                `BridgeRpcAdapter[${this.client.id}]: Detached follow_up failed:`,
+                error,
+              );
+            });
         } else {
           this.context.actions.sendUserMessage(
-            buildUserMessageContent(command.message, images),
+            buildUserMessageContent(injectedMessage, images),
             {
               deliverAs: "followUp",
             },

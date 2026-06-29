@@ -11,10 +11,9 @@ import {
   MAX_COMPOSER_ATTACHMENT_BYTES,
   MAX_COMPOSER_ATTACHMENTS,
   createUploadingComposerAttachment,
-  extractSupportedImageFiles,
-  getSupportedImageMimeType,
   toRpcImageContent,
   toRpcUploadedFileRefs,
+  imageFileToRpcData,
   markComposerAttachmentOrphaned,
   uploadComposerAttachment,
   type ComposerAttachment,
@@ -286,7 +285,8 @@ export function createComposerBarState(
   );
   let hasSubmittableAttachments = $derived(
     attachments.some(
-      attachment => attachment.status === "uploaded" && (attachment.file || attachment.data),
+      attachment =>
+        attachment.status === "uploaded" && (attachment.file || attachment.data),
     ),
   );
   let canAddAttachments = $derived(
@@ -304,17 +304,23 @@ export function createComposerBarState(
   let attachmentSummary = $derived(attachmentNotice ?? "");
 
   let lightboxImages = $derived.by(() =>
-    attachments.map<ImageContentBlock>(a => ({
-      kind: "image",
-      src: a.previewUrl,
-      alt: a.name,
-      mimeType: a.mimeType,
-    })),
+    attachments.flatMap<ImageContentBlock>(a =>
+      a.type === "image" && a.previewUrl
+        ? [
+            {
+              kind: "image",
+              src: a.previewUrl,
+              alt: a.name,
+              mimeType: a.mimeType,
+            },
+          ]
+        : [],
+    ),
   );
 
   let lightboxOpen = $derived(
     lightboxAttachmentIndex >= 0 &&
-      lightboxAttachmentIndex < attachments.length,
+      lightboxAttachmentIndex < lightboxImages.length,
   );
 
   // ---- attachment notice helpers ----
@@ -362,19 +368,14 @@ export function createComposerBarState(
         rejectedNames.push(file.name);
         continue;
       }
-      const mimeType = getSupportedImageMimeType(file);
-      if (!mimeType || file.size > MAX_COMPOSER_ATTACHMENT_BYTES) {
+      if (file.size > MAX_COMPOSER_ATTACHMENT_BYTES) {
         rejectedNames.push(file.name);
         continue;
       }
       const abortController = new AbortController();
       nextAttachments.push({
         file,
-        attachment: createUploadingComposerAttachment(
-          file,
-          mimeType,
-          abortController,
-        ),
+        attachment: createUploadingComposerAttachment(file, abortController),
       });
     }
 
@@ -400,10 +401,10 @@ export function createComposerBarState(
     try {
       const uploaded = await uploadComposerAttachment(
         file,
-        attachment.mimeType,
         attachment.abortController.signal,
       );
-      if (uploaded.previewUrl && attachment.previewUrl.startsWith("blob:")) {
+      const imageData = await imageFileToRpcData(file);
+      if (uploaded.previewUrl && attachment.previewUrl?.startsWith("blob:")) {
         URL.revokeObjectURL(attachment.previewUrl);
       }
       attachments = attachments.map(item =>
@@ -411,8 +412,12 @@ export function createComposerBarState(
           ? {
               ...item,
               status: "uploaded",
-              file: uploaded,
-              previewUrl: uploaded.previewUrl ?? item.previewUrl,
+              file: { ...uploaded, name: item.name },
+              data: imageData,
+              previewUrl:
+                item.type === "image"
+                  ? (uploaded.previewUrl ?? item.previewUrl)
+                  : undefined,
               abortController: undefined,
             }
           : item,
@@ -434,7 +439,7 @@ export function createComposerBarState(
 
   function disposeAttachment(attachment: ComposerAttachment) {
     attachment.abortController?.abort();
-    if (attachment.previewUrl.startsWith("blob:")) {
+    if (attachment.previewUrl?.startsWith("blob:")) {
       URL.revokeObjectURL(attachment.previewUrl);
     }
   }
@@ -464,7 +469,11 @@ export function createComposerBarState(
 
   function openAttachmentLightbox(index: number) {
     if (index < 0 || index >= attachments.length) return;
-    lightboxAttachmentIndex = index;
+    const attachment = attachments[index];
+    if (attachment?.type !== "image" || !attachment.previewUrl) return;
+    lightboxAttachmentIndex = attachments
+      .slice(0, index + 1)
+      .filter(a => a.type === "image" && a.previewUrl).length - 1;
   }
 
   function closeAttachmentLightbox() {
@@ -472,15 +481,16 @@ export function createComposerBarState(
   }
 
   function showPreviousAttachmentLightboxImage() {
-    if (attachments.length <= 1 || lightboxAttachmentIndex < 0) return;
+    if (lightboxImages.length <= 1 || lightboxAttachmentIndex < 0) return;
     lightboxAttachmentIndex =
-      (lightboxAttachmentIndex + attachments.length - 1) % attachments.length;
+      (lightboxAttachmentIndex + lightboxImages.length - 1) %
+      lightboxImages.length;
   }
 
   function showNextAttachmentLightboxImage() {
-    if (attachments.length <= 1 || lightboxAttachmentIndex < 0) return;
+    if (lightboxImages.length <= 1 || lightboxAttachmentIndex < 0) return;
     lightboxAttachmentIndex =
-      (lightboxAttachmentIndex + 1) % attachments.length;
+      (lightboxAttachmentIndex + 1) % lightboxImages.length;
   }
 
   // ---- textarea helpers (need DOM refs) ----
@@ -733,13 +743,12 @@ export function createComposerBarState(
   }
 
   function extractPastedFiles(event: ClipboardEvent): File[] {
-    const directFiles = extractSupportedImageFiles(event.clipboardData?.files);
+    const directFiles = Array.from(event.clipboardData?.files ?? []);
     if (directFiles.length > 0) return directFiles;
-    const pastedFiles = Array.from(event.clipboardData?.items ?? [])
+    return Array.from(event.clipboardData?.items ?? [])
       .filter(i => i.kind === "file")
       .map(i => i.getAsFile())
       .filter((f): f is File => f !== null);
-    return extractSupportedImageFiles(pastedFiles);
   }
 
   async function handleInputPaste(event: ClipboardEvent) {

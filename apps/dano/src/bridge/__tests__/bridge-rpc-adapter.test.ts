@@ -202,6 +202,10 @@ describe("BridgeRpcAdapter", () => {
     );
   });
 
+  it("exposes the current workspace cwd for bridge-owned upload routing", () => {
+    expect(adapter.currentGitCwd()).toBe("/test/project");
+  });
+
   describe("command dispatch", () => {
     it("should handle prompt command by auto-creating a session", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-prompt-"));
@@ -267,7 +271,7 @@ describe("BridgeRpcAdapter", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
-    it("wraps prompt attachments into Pi image content (with selected session)", async () => {
+    it("keeps explicit prompt images and passes files as hidden project refs", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-attach-"));
       const sessionManager = SessionManager.create(tmpDir, tmpDir);
       sessionManager.appendMessage({
@@ -293,39 +297,41 @@ describe("BridgeRpcAdapter", () => {
           ...rawEntries.map(e => JSON.stringify(e)),
         ].join("\n"),
       );
+      (
+        context.state.sessionManager.getSessionFile as ReturnType<typeof vi.fn>
+      ).mockReturnValue(sessionFile);
+      (
+        context.state.sessionManager.getCwd as ReturnType<typeof vi.fn>
+      ).mockReturnValue(tmpDir);
 
       const promptSpy = vi.fn().mockResolvedValue(undefined);
+      const sendCustomMessageSpy = vi.fn().mockResolvedValue(undefined);
+      const subscribeSpy = vi.fn().mockReturnValue(() => {});
       createAgentSessionMock.mockResolvedValue({
         session: {
           sessionFile,
           sessionId: sessionManager.getSessionId(),
           isStreaming: false,
           bindExtensions: vi.fn().mockResolvedValue(undefined),
-          subscribe: vi.fn().mockReturnValue(() => {}),
+          subscribe: subscribeSpy,
           prompt: promptSpy,
+          sendCustomMessage: sendCustomMessageSpy,
           sessionManager,
         },
       });
 
-      // Switch to a session first
-      (
-        ws as unknown as { trigger: (event: string, data: Buffer) => void }
-      ).trigger(
-        "message",
-        Buffer.from(
-          JSON.stringify({
-            type: "command",
-            payload: {
-              id: "switch-1",
-              type: "switch_session",
-              sessionPath: sessionFile,
-            },
-          }),
-        ),
-      );
-      await new Promise(r => setTimeout(r, 10));
-
       // Now send prompt with image
+      fs.mkdirSync(path.join(tmpDir, "uploads"), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, "uploads", "sample.pdf"), "fake upload");
+      uploadRegistry.resolve.mockReturnValue({
+        id: "upload-1",
+        name: "sample.pdf",
+        size: 14,
+        mimeType: "application/pdf",
+        path: path.join(tmpDir, "uploads", "sample.pdf"),
+        relativePath: "uploads/sample.pdf",
+      });
+
       const command: RpcCommand = {
         id: "cmd-2",
         type: "prompt",
@@ -337,6 +343,16 @@ describe("BridgeRpcAdapter", () => {
             data: "ZmFrZS1pbWFnZQ==",
           },
         ],
+        files: [
+          {
+            id: "upload-1",
+            name: "sample.pdf",
+            size: 14,
+            mimeType: "application/pdf",
+            path: path.join(tmpDir, "uploads", "sample.pdf"),
+            relativePath: "uploads/sample.pdf",
+          } as any,
+        ],
       };
       (
         ws as unknown as { trigger: (event: string, data: Buffer) => void }
@@ -345,34 +361,91 @@ describe("BridgeRpcAdapter", () => {
         Buffer.from(JSON.stringify({ type: "command", payload: command })),
       );
 
-      await new Promise(r => setTimeout(r, 20));
+      await new Promise(r => setTimeout(r, 50));
 
-      expect(context.actions.sendUserMessage).not.toHaveBeenCalled();
-      expect(promptSpy).toHaveBeenCalledWith("Inspect this image", {
-        source: "rpc",
-        images: [
-          {
-            type: "image",
-            mimeType: "image/png",
-            data: "ZmFrZS1pbWFnZQ==",
-          },
-        ],
+      expect(uploadRegistry.markReferenced).toHaveBeenCalledWith("upload-1", {
+        correlationId: "cmd-2",
       });
+      expect(sendCustomMessageSpy).not.toHaveBeenCalled();
+      expect(context.actions.sendUserMessage).not.toHaveBeenCalled();
+      expect(promptSpy).toHaveBeenCalledWith(
+        `Inspect this image\n\nProject file references:\n- ${path.join(tmpDir, "uploads", "sample.pdf")} (sample.pdf)`,
+        {
+          source: "rpc",
+          images: [
+            {
+              type: "image",
+              mimeType: "image/png",
+              data: "ZmFrZS1pbWFnZQ==",
+            },
+          ],
+        },
+      );
+      (ws.send as ReturnType<typeof vi.fn>).mockClear();
+      const sessionEventHandler = subscribeSpy.mock.calls[0]?.[0] as
+        | ((event: object) => void)
+        | undefined;
+      sessionEventHandler?.({
+        type: "message_start",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `Inspect this image\n\nProject file references:\n- ${path.join(tmpDir, "uploads", "sample.pdf")} (sample.pdf)`,
+            },
+            {
+              type: "image",
+              mimeType: "image/png",
+              data: "ZmFrZS1pbWFnZQ==",
+            },
+          ],
+        },
+      });
+
+      const transcriptStart = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+        .map(call => JSON.parse(call[0] as string))
+        .find(
+          call =>
+            call.type === "event" && call.payload.type === "transcript_start",
+        );
+      expect(transcriptStart?.payload.message.content).toEqual([
+        { type: "text", text: "Inspect this image" },
+        {
+          type: "image",
+          mimeType: "image/png",
+          data: "ZmFrZS1pbWFnZQ==",
+        },
+        {
+          type: "file",
+          id: "upload-1",
+          name: "sample.pdf",
+          size: 14,
+          mimeType: "application/pdf",
+          path: "uploads/sample.pdf",
+          relativePath: "uploads/sample.pdf",
+          previewUrl: undefined,
+        },
+      ]);
 
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
-    it("marks uploaded files referenced after converting them to image content", async () => {
+    it("passes uploaded files as project file references in live steering", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-upload-"));
+      const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-upload-source-"));
       try {
-        const filePath = path.join(tmpDir, "sample.png");
-        fs.writeFileSync(filePath, "uploaded-image");
+        (context.state as { cwd: string }).cwd = tmpDir;
+        const filePath = path.join(sourceDir, "uploads", "sample.pdf");
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, "fake upload");
         uploadRegistry.resolve.mockReturnValue({
           id: "upload-1",
-          name: "sample.png",
+          name: "sample.pdf",
           size: 14,
-          mimeType: "image/png",
+          mimeType: "application/pdf",
           path: filePath,
+          relativePath: "uploads/sample.pdf",
         });
 
         const command: RpcCommand = {
@@ -382,11 +455,12 @@ describe("BridgeRpcAdapter", () => {
           files: [
             {
               id: "upload-1",
-              name: "sample.png",
+              name: "sample.pdf",
               size: 14,
-              mimeType: "image/png",
+              mimeType: "application/pdf",
               path: filePath,
-            },
+              relativePath: "uploads/sample.pdf",
+            } as any,
           ],
         };
         (
@@ -398,27 +472,24 @@ describe("BridgeRpcAdapter", () => {
 
         await new Promise(r => setTimeout(r, 20));
 
-        expect(uploadRegistry.markReading).toHaveBeenCalledWith("upload-1");
+        expect(uploadRegistry.markReading).not.toHaveBeenCalled();
         expect(uploadRegistry.markReferenced).toHaveBeenCalledWith("upload-1", {
           correlationId: "cmd-upload",
         });
+        expect(fs.readFileSync(path.join(tmpDir, "uploads", "sample.pdf"), "utf8")).toBe(
+          "fake upload",
+        );
         expect(context.actions.sendUserMessage).toHaveBeenCalledWith(
-          [
-            { type: "text", text: "Inspect upload" },
-            {
-              type: "image",
-              mimeType: "image/png",
-              data: Buffer.from("uploaded-image").toString("base64"),
-            },
-          ],
+          `Inspect upload\n\nProject file references:\n- ${path.join(tmpDir, "uploads", "sample.pdf")} (sample.pdf)`,
           { deliverAs: "steer" },
         );
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
+        fs.rmSync(sourceDir, { recursive: true, force: true });
       }
     });
 
-    it("restores uploaded files to draft when image conversion fails", async () => {
+    it("rejects uploaded files without project paths", async () => {
       const filePath = path.join(os.tmpdir(), "missing-upload.png");
       uploadRegistry.resolve.mockReturnValue({
         id: "upload-1",
@@ -451,8 +522,9 @@ describe("BridgeRpcAdapter", () => {
 
       await new Promise(r => setTimeout(r, 20));
 
-      expect(uploadRegistry.markReading).toHaveBeenCalledWith("upload-1");
-      expect(uploadRegistry.markDraft).toHaveBeenCalledWith("upload-1");
+      expect(uploadRegistry.markReading).not.toHaveBeenCalled();
+      expect(uploadRegistry.markDraft).not.toHaveBeenCalled();
+      expect(uploadRegistry.markReferenced).not.toHaveBeenCalled();
       expect(context.actions.sendUserMessage).not.toHaveBeenCalled();
       expect(emitEvent).toHaveBeenCalledWith(
         expect.objectContaining({

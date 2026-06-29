@@ -8,10 +8,12 @@ const DAY = 24 * 60 * 60 * 1000;
 
 let tmpDir: string;
 let now: number;
+let uploadSeq: number;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-upload-registry-"));
   now = Date.UTC(2026, 0, 1);
+  uploadSeq = 0;
 });
 
 afterEach(() => {
@@ -30,12 +32,18 @@ function registry(maxTotalBytes = 1024): UploadRegistry {
   });
 }
 
-function writeUpload(
+async function writeUpload(
   uploads: UploadRegistry,
   size: number,
   ownerClientId = "client_1",
 ) {
-  const { id, filePath } = uploads.createFilePath("image/png");
+  uploadSeq++;
+  const hash = uploadSeq.toString(16).padStart(64, "a");
+  const { id, filePath, relativePath } = await uploads.createFilePath(
+    tmpDir,
+    hash,
+    "sample.png",
+  );
   fs.writeFileSync(filePath, Buffer.alloc(size));
   return uploads.register(
     {
@@ -44,6 +52,7 @@ function writeUpload(
       size,
       mimeType: "image/png",
       path: filePath,
+      relativePath,
       previewUrl: `/api/uploads/${encodeURIComponent(id)}/preview`,
     },
     { ownerClientId },
@@ -54,20 +63,24 @@ describe("UploadRegistry", () => {
   it("registers managed paths and rejects mismatched resolve paths", async () => {
     const uploads = registry();
     await uploads.initialize();
-    const upload = writeUpload(uploads, 4);
+    const upload = await writeUpload(uploads, 4);
 
-    expect(path.dirname(upload.path)).toBe(tmpDir);
-    expect(path.basename(upload.path)).toMatch(/^upload-[0-9a-f-]+\.png$/);
+    expect(path.dirname(upload.path)).toBe(path.join(tmpDir, "uploads"));
+    expect(path.basename(upload.path)).toMatch(/^[a-f0-9]{64}\.png$/);
+    expect(upload.relativePath).toBe(`uploads/${path.basename(upload.path)}`);
     expect(uploads.resolve({ id: upload.id, path: upload.path })).toBe(upload);
     expect(
-      uploads.resolve({ id: upload.id, path: path.join(tmpDir, "other.png") }),
+      uploads.resolve({
+        id: upload.id,
+        path: path.join(tmpDir, "uploads", "other.png"),
+      }),
     ).toBeNull();
   });
 
   it("removes expired orphaned uploads", async () => {
     const uploads = registry();
     await uploads.initialize();
-    const upload = writeUpload(uploads, 3);
+    const upload = await writeUpload(uploads, 3);
     uploads.markOrphaned(upload.id);
     now += 5 * 60 * 1000 + 1;
 
@@ -79,7 +92,7 @@ describe("UploadRegistry", () => {
   it("keeps expired reading uploads because model reads must not lose files", async () => {
     const uploads = registry();
     await uploads.initialize();
-    const upload = writeUpload(uploads, 3);
+    const upload = await writeUpload(uploads, 3);
     uploads.markReading(upload.id);
     now += DAY * 3;
 
@@ -91,7 +104,7 @@ describe("UploadRegistry", () => {
   it("uses referenced TTL separately from draft TTL", async () => {
     const uploads = registry();
     await uploads.initialize();
-    const upload = writeUpload(uploads, 3);
+    const upload = await writeUpload(uploads, 3);
     uploads.markReferenced(upload.id);
     now += DAY + 1;
 
@@ -106,17 +119,36 @@ describe("UploadRegistry", () => {
   it("refuses cleanupBeforeUpload when active uploads already exceed capacity", async () => {
     const uploads = registry(5);
     await uploads.initialize();
-    writeUpload(uploads, 6);
+    await writeUpload(uploads, 6);
 
     await expect(uploads.cleanupBeforeUpload(1)).resolves.toBe(false);
+  });
+
+  it("counts deduped refs pointing at the same stored file once", async () => {
+    const uploads = registry();
+    await uploads.initialize();
+    const upload = await writeUpload(uploads, 6, "client_1");
+    uploads.register(
+      {
+        id: `${upload.id}-copy`,
+        name: "copy.png",
+        size: upload.size,
+        mimeType: upload.mimeType,
+        path: upload.path,
+        relativePath: upload.relativePath,
+      },
+      { ownerClientId: "client_2" },
+    );
+
+    expect(uploads.getTotalBytes()).toBe(6);
   });
 
   it("deletes orphaned uploads before refusing a new upload", async () => {
     const uploads = registry(8);
     await uploads.initialize();
-    const orphaned = writeUpload(uploads, 6);
+    const orphaned = await writeUpload(uploads, 6);
     uploads.markOrphaned(orphaned.id);
-    const active = writeUpload(uploads, 6);
+    const active = await writeUpload(uploads, 6);
 
     await expect(uploads.cleanupBeforeUpload(1)).resolves.toBe(true);
     expect(fs.existsSync(orphaned.path)).toBe(false);
@@ -127,8 +159,8 @@ describe("UploadRegistry", () => {
   it("marks client draft uploads orphaned without touching reading uploads", async () => {
     const uploads = registry();
     await uploads.initialize();
-    const draft = writeUpload(uploads, 1, "client_1");
-    const reading = writeUpload(uploads, 1, "client_1");
+    const draft = await writeUpload(uploads, 1, "client_1");
+    const reading = await writeUpload(uploads, 1, "client_1");
     uploads.markReading(reading.id);
 
     expect(uploads.markClientDraftsOrphaned("client_1")).toBe(1);
@@ -137,13 +169,16 @@ describe("UploadRegistry", () => {
   });
 
   it("scans only managed upload files and adopts fresh files while deleting expired managed files", async () => {
-    const freshId = "11111111-1111-4111-8111-111111111111";
-    const expiredId = "22222222-2222-4222-8222-222222222222";
+    const uploadDir = path.join(tmpDir, "uploads");
+    fs.mkdirSync(uploadDir);
+    const freshHash = "1".repeat(64);
+    const expiredHash = "2".repeat(64);
+    const partHash = "3".repeat(64);
     const partId = "33333333-3333-4333-8333-333333333333";
-    const freshPath = path.join(tmpDir, `upload-${freshId}.png`);
-    const expiredPath = path.join(tmpDir, `upload-${expiredId}.jpg`);
-    const partPath = path.join(tmpDir, `upload-${partId}.part`);
-    const ignoredPath = path.join(tmpDir, "user-file.png");
+    const freshPath = path.join(uploadDir, `${freshHash}.png`);
+    const expiredPath = path.join(uploadDir, `${expiredHash}.jpg`);
+    const partPath = path.join(uploadDir, `.${partHash}-${partId}.part`);
+    const ignoredPath = path.join(uploadDir, "user-file.png");
     fs.writeFileSync(freshPath, Buffer.alloc(7));
     fs.writeFileSync(expiredPath, Buffer.alloc(5));
     fs.writeFileSync(partPath, Buffer.alloc(4));
@@ -153,14 +188,13 @@ describe("UploadRegistry", () => {
     fs.utimesSync(partPath, old, old);
 
     const uploads = registry();
-    await uploads.initialize();
+    await uploads.scanUploadDir(uploadDir);
 
-    expect(uploads.resolve({ id: freshId, path: freshPath })?.state).toBe(
-      "orphaned",
-    );
+    expect(
+      uploads.getTotalBytes(),
+    ).toBe(7);
     expect(fs.existsSync(expiredPath)).toBe(false);
     expect(fs.existsSync(partPath)).toBe(false);
     expect(fs.existsSync(ignoredPath)).toBe(true);
-    expect(uploads.getTotalBytes()).toBe(7);
   });
 });

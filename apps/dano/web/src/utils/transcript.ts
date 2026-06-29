@@ -52,6 +52,12 @@ export interface ImageContentBlock {
   mimeType?: string;
 }
 
+export interface FileContentBlock {
+  kind: "file";
+  name: string;
+  path: string;
+}
+
 export type SystemBlockType =
   | "compaction"
   | "branch_summary"
@@ -80,6 +86,7 @@ export type ContentBlock =
   | ToolContentBlock
   | ThinkingContentBlock
   | ImageContentBlock
+  | FileContentBlock
   | SystemContentBlock
   | SkillContentBlock;
 
@@ -181,6 +188,15 @@ export function messageContent(
 
 const SKILL_BLOCK_REGEX = /^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/;
 
+function pushTextBlocks(blocks: ContentBlock[], text: string): void {
+  const skillBlock = parseSkillBlockFromText(text);
+  if (skillBlock) {
+    blocks.push(skillBlock);
+  } else if (text) {
+    blocks.push({ kind: "text", text });
+  }
+}
+
 function parseSkillBlockFromText(text: string): SkillContentBlock | null {
   const match = text.match(SKILL_BLOCK_REGEX);
   if (!match) return null;
@@ -197,22 +213,12 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
   const blocks: ContentBlock[] = [];
 
   if (typeof content === "string") {
-    const skillBlock = parseSkillBlockFromText(content);
-    if (skillBlock) {
-      blocks.push(skillBlock);
-    } else {
-      blocks.push({ kind: "text", text: content });
-    }
+    pushTextBlocks(blocks, content);
     return blocks;
   }
 
   if (typeof msg.text === "string") {
-    const skillBlock = parseSkillBlockFromText(msg.text);
-    if (skillBlock) {
-      blocks.push(skillBlock);
-    } else {
-      blocks.push({ kind: "text", text: msg.text });
-    }
+    pushTextBlocks(blocks, msg.text);
     return blocks;
   }
 
@@ -221,12 +227,7 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
   for (let index = 0; index < content.length; index++) {
     const block = content[index];
     if (typeof block === "string") {
-      const skillBlock = parseSkillBlockFromText(block);
-      if (skillBlock) {
-        blocks.push(skillBlock);
-      } else {
-        blocks.push({ kind: "text", text: block });
-      }
+      pushTextBlocks(blocks, block);
       continue;
     }
 
@@ -239,7 +240,7 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
 
     switch (block.type) {
       case "text":
-        blocks.push({ kind: "text", text: block.text });
+        pushTextBlocks(blocks, block.text);
         continue;
       case "thinking": {
         const thinkingText = block.thinking.trim();
@@ -301,6 +302,13 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
         }
         continue;
       }
+      case "file":
+        blocks.push({
+          kind: "file",
+          name: block.name,
+          path: block.relativePath ?? block.path,
+        });
+        continue;
     }
   }
 

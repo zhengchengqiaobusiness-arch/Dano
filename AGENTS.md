@@ -26,6 +26,7 @@ This project is the Dano P0 browser-only LLM chat app.
 - Server dev: `pnpm run dev:server`
 - Svelte dev server: `pnpm run dev:web`
 - Built backend: `pnpm run start`
+- Do not set the current project checkout as the Dano runtime directory. Use a separate runtime/workspace path so generated `.dano`, `.pi`, `uploads`, session, and upload files do not land in the repo checkout.
 
 If the shell cannot find `pnpm` or `node`, use the Codex bundled Node runtime by prepending:
 
