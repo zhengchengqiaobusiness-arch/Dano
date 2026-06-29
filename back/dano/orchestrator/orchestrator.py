@@ -556,7 +556,17 @@ class Orchestrator:
         env = await self.store.get(skill.page_asset_id)
         apir = (env.body or {}).get("api_request") if env else None
         if not apir:
-            return {"field": field, "options": [], "count": 0, "note": "该 skill 无接口请求"}
+            # 页面直驱(无 api_request):从**活 DOM** 实时读选项(数据源是页面,不调任何接口)
+            if env is not None and self.page_runtime is not None:
+                from dano.execution.page.sessions import session_path_if_exists
+                from dano.shared.asset_bodies import PageScriptBody
+                try:
+                    script = PageScriptBody.model_validate(env.body)
+                except Exception:  # noqa: BLE001
+                    return {"field": field, "options": [], "count": 0, "note": "页面脚本无效"}
+                storage = session_path_if_exists(tenant, skill.subsystem.value)
+                return await self.page_runtime.list_options(script, field, storage_state=storage)
+            return {"field": field, "options": [], "count": 0, "note": "该 skill 无接口请求 / 页面运行时未装配"}
         scope = Scope(tenant=tenant, subsystem=skill.subsystem)
         ep = await self.store.get_published(AssetType.ENV_PROFILE, scope, asset_key="env_profile")
         base_url = ((ep.body.get("base_url") if ep else "") or "")

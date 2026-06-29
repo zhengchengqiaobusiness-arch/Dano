@@ -12,6 +12,11 @@ export interface OnboardEvent {
   // pi 单一路径事件:阶段标记 + 每个工具调用(parse_spec/draft_connector/draft_workflow/sandbox/publish…)
   phase?: string; note?: string; tool?: string; action?: string; dur_s?: number;
   summary?: Record<string, unknown>; error?: string;
+  // 页面直驱富进度(page_session_open/observe/act 推送):看 Agent 操作页面 + 截图 + 登录状态
+  event?: string; url?: string; at_login?: boolean; errors?: string[];
+  op?: string; field?: string; fields?: number; dry?: boolean; screenshot?: string;
+  // 三维审核结果(request_review 推送):成果验收/漏洞检测/合规审核
+  all_passed?: boolean; reviews?: { role: string; passed: boolean }[];
 }
 export interface OnboardJob { job_id: string; status: string; events: OnboardEvent[]; report: { published_skills?: string[]; status?: string } | null; error: string | null }
 
@@ -119,6 +124,17 @@ export interface PagePiReport {
 }
 export async function onboardPagePi(req: PagePiReq): Promise<PagePiReport> {
   const { data } = await api.post("/onboarding/page/pi", req);
+  return data;
+}
+
+// 页面直驱(Agent 自主):给 URL + 一句话业务目标 + 测试登录态,Agent 自己操作真实页面跑通 → 结晶为 Skill。
+// 异步:返回 job_id,前端轮询 getJob 看 Agent 逐步操作(observe/act)+ 最终结果。
+export interface PageAgentReq {
+  tenant: string; subsystem: string; start_url: string; goal: string; action?: string;
+  deploy?: Record<string, unknown>; credentials?: Record<string, string>; timeout_s?: number;
+}
+export async function startPageAgent(req: PageAgentReq): Promise<{ job_id: string }> {
+  const { data } = await api.post("/onboarding/page-agent", req);
   return data;
 }
 

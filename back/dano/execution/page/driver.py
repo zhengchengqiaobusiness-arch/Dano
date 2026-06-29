@@ -17,6 +17,40 @@ _COMMON_TOKEN_KEYS = ("Admin-Token", "satoken", "token", "access_token", "access
                       "Authorization", "jwt", "X-Token")
 
 
+# 页面反馈抽取 JS(供 PlaywrightPageDriver.observe_feedback):单次求值,纯语义/CSS 选择器,绝不用坐标。
+# - errors:可见的校验错误文本(框架无关:Element-UI/Ant 表单错误 + 任意含 error 类/role=alert +
+#   文案命中 必填|不能为空|错误|失败|请输入 的元素);去重去空,只取可见(offsetParent 非空)。
+# - toast:成功/失败的轻提示文本(.el-message / .ant-message / [class*=toast]),取第一条可见的。
+_FEEDBACK_JS = r"""() => {
+  const vis = (e) => !!e && (e.offsetParent !== null || (e.getClientRects && e.getClientRects().length > 0));
+  const txt = (e) => ((e.innerText || e.textContent || '') + '').trim();
+  const errSel = ['.el-form-item__error', '.ant-form-item-explain-error', '[class*="error"]', '[role=alert]'];
+  const errSet = new Set();
+  for (const sel of errSel) {
+    for (const e of Array.from(document.querySelectorAll(sel))) {
+      if (vis(e)) { const t = txt(e); if (t) errSet.add(t); }
+    }
+  }
+  const KW = /必填|不能为空|错误|失败|请输入/;
+  for (const e of Array.from(document.querySelectorAll('body *'))) {
+    if (!vis(e)) continue;
+    const t = txt(e);
+    if (t && t.length <= 80 && KW.test(t)) {
+      // 只收叶子节点的命中文本,避免把整页容器文本卷进来
+      if (e.children.length === 0) errSet.add(t);
+    }
+  }
+  let toast = null;
+  for (const sel of ['.el-message', '.ant-message', '[class*="toast"]']) {
+    for (const e of Array.from(document.querySelectorAll(sel))) {
+      if (vis(e)) { const t = txt(e); if (t) { toast = t; break; } }
+    }
+    if (toast) break;
+  }
+  return { errors: Array.from(errSet), toast };
+}"""
+
+
 async def apply_token_auth(context, *, token: str, url: str, token_key: str | None = None) -> None:  # noqa: ANN001
     """预置登录态:把 raw token 注入 context(cookie + localStorage),免在画面里登录。必须在 goto 前调用。
 
@@ -72,12 +106,30 @@ class FakePageDriver:
         visible: list[str] | None = None,
         fail_locators: list[str] | None = None,
         captured: dict | None = None,
+        fields: list[dict] | None = None,
+        buttons: list[dict] | None = None,
+        feedback: dict | None = None,
+        url: str = "about:fake",
+        rows: list[str] | None = None,
+        options: list[dict] | None = None,
+        submit_adds_row: str | None = None,
     ) -> None:
         self._fp = fingerprint
         self._visible: set[str] | None = None if visible is None else set(visible)
         self._fail = set(fail_locators or [])
         self._captured = dict(captured or {})
         self.ops: list[tuple] = []   # 执行序列,供测试断言
+        # 页面直驱(自主操作)用:可注入的侦察结果 + 反馈,模拟活页面 observe(零浏览器)
+        self._fields = list(fields or [])
+        self._buttons = list(buttons or [])
+        self._feedback = dict(feedback or {})
+        self.url = url
+        # M2 可观测回查:rows=验证视图的记录行文本(可变,测试可改);options=选择型字段候选;
+        # submit_adds_row:点提交时往 rows 追加一行(模拟"提交后数据真变了")。
+        self.rows = list(rows or [])
+        self.options = list(options or [])
+        self._submit_adds_row = submit_adds_row
+        self._submit_done = False
 
     async def open(self, url: str) -> None:
         self.ops.append(("open", url))
@@ -102,6 +154,11 @@ class FakePageDriver:
         return await self._act("pick", locator, value)
 
     async def click(self, locator: str) -> bool:
+        # 模拟"提交触发副作用":点提交类按钮 → 验证视图多一条记录(供回查测试)
+        if (self._submit_adds_row and not self._submit_done and locator
+                and any(h in locator for h in ("提交", "保存", "确定", "确认", "submit"))):
+            self.rows.append(self._submit_adds_row)
+            self._submit_done = True
         return await self._act("click", locator)
 
     async def upload(self, locator: str, value: str) -> bool:
@@ -123,6 +180,24 @@ class FakePageDriver:
     def captured(self) -> dict:
         return dict(self._captured)
 
+    async def scout(self) -> dict:
+        """离线侦察:返回注入的表单语义结构(供 observe 复用)。"""
+        return {"fields": list(self._fields), "buttons": list(self._buttons)}
+
+    async def observe_feedback(self) -> dict:
+        """离线反馈:返回注入的页面反馈(校验错误/toast),模拟活页面回应。"""
+        return dict(self._feedback)
+
+    async def query_texts(self, locator: str) -> list[str]:
+        """离线回查:返回当前验证视图的记录行文本(self.rows,提交后由 click 追加)。"""
+        self.ops.append(("query_texts", locator))
+        return list(self.rows)
+
+    async def list_options(self, locator: str) -> list[dict]:
+        """离线选项:返回注入的选择型字段候选。"""
+        self.ops.append(("list_options", locator))
+        return list(self.options)
+
     async def close(self) -> None:
         self.ops.append(("close",))
 
@@ -140,6 +215,12 @@ class PlaywrightPageDriver:
         self._captured: dict = {}
         self._context = None        # 池化模式下持有 context;close 只关它
         self._owns_browser = True   # True=独立启动(close 关浏览器);False=来自池(close 只关 context)
+        # 单步元素操作超时:Agent 猜错定位时 N 毫秒内快速失败(否则 Playwright 默认死等 30s,整条回路被拖垮)。
+        try:
+            from dano.config import get_settings
+            self._act_to = get_settings().page_action_timeout_ms
+        except Exception:  # noqa: BLE001
+            self._act_to = 6000
 
     @classmethod
     async def launch(cls, *, base_url: str = "", headless: bool = True,
@@ -228,14 +309,14 @@ class PlaywrightPageDriver:
 
     async def fill(self, locator: str, value: str) -> bool:
         try:
-            await self._resolve(locator).first.fill(value or "")   # .first:同名多匹配不触发 strict 报错
+            await self._resolve(locator).first.fill(value or "", timeout=self._act_to)  # .first:同名多匹配不触发 strict
             return True
         except Exception:  # noqa: BLE001
             return False
 
     async def select(self, locator: str, value: str) -> bool:
         try:
-            await self._resolve(locator).first.select_option(value)
+            await self._resolve(locator).first.select_option(value, timeout=self._act_to)
             return True
         except Exception:  # noqa: BLE001
             return False
@@ -245,23 +326,30 @@ class PlaywrightPageDriver:
         点不到则把 value 打进触发框输入并回车(日期/可输下拉)。value 即用户要传的参数值。"""
         try:
             trig = self._resolve(locator).first
-            await trig.click()                                   # 打开日期/下拉弹层
+            await trig.click(timeout=self._act_to)               # 打开日期/下拉弹层(猜错快速失败)
             await self._page.wait_for_timeout(350)
             v = (value or "").strip()
             if not v:
                 return True
-            # 1) 弹层里点完全匹配文本的选项(下拉:value=选项可见文本,如「事假」)
+            # 1) 在**下拉弹层内**按文本选(优先精确、其次包含;避免点到页面别处同名文字)。弹层多挂在 body。
+            pop = ".el-select-dropdown__item, .ant-select-item-option, [role=option], li[role=option]"
             try:
-                opt = self._page.get_by_text(v, exact=True)
-                if await opt.count() > 0 and await opt.first.is_visible():
-                    await opt.first.click()
-                    return True
+                await self._page.wait_for_selector(pop, timeout=2000, state="visible")
             except Exception:  # noqa: BLE001
                 pass
+            for opt in (self._page.locator(pop).get_by_text(v, exact=True),
+                        self._page.locator(pop).filter(has_text=v),
+                        self._page.get_by_text(v, exact=True)):
+                try:
+                    if await opt.count() > 0 and await opt.first.is_visible():
+                        await opt.first.click(timeout=self._act_to)
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
             # 2) 点不到 → 把值打进触发框输入并回车(日期/可输下拉:value=完整值如 2025-06-30)
             try:
                 inp = trig.locator("input").first
-                await inp.fill(v)
+                await inp.fill(v, timeout=self._act_to)
                 await self._page.keyboard.press("Enter")
                 return True
             except Exception:  # noqa: BLE001
@@ -271,14 +359,14 @@ class PlaywrightPageDriver:
 
     async def click(self, locator: str) -> bool:
         try:
-            await self._resolve(locator).first.click()
+            await self._resolve(locator).first.click(timeout=self._act_to)
             return True
         except Exception:  # noqa: BLE001
             return False
 
     async def upload(self, locator: str, value: str) -> bool:
         try:
-            await self._resolve(locator).first.set_input_files(value)
+            await self._resolve(locator).first.set_input_files(value, timeout=self._act_to)
             return True
         except Exception:  # noqa: BLE001
             return False
@@ -314,6 +402,43 @@ class PlaywrightPageDriver:
         """抽取当前页表单语义结构(供接入期侦察)。需先 open。"""
         from dano.execution.page.scout import scout_dom
         return await scout_dom(self._page)
+
+    async def observe_feedback(self) -> dict:
+        """抓当前页面反馈:可见校验错误文本 + toast/消息文本(单次 JS 求值,纯语义选择器,绝不用坐标)。
+
+        失败一律吞掉 → 返回 {"errors":[], "toast":None},绝不让观察因抓反馈崩掉。
+        """
+        try:
+            return await self._page.evaluate(_FEEDBACK_JS)
+        except Exception:  # noqa: BLE001
+            return {"errors": [], "toast": None}
+
+    async def query_texts(self, locator: str) -> list[str]:
+        """读某语义定位下所有匹配元素的可见文本(供回查"数据是否变":记录行文本集合)。失败→[]。"""
+        try:
+            return await self._resolve(locator).all_inner_texts()
+        except Exception:  # noqa: BLE001
+            return []
+
+    async def list_options(self, locator: str) -> list[dict]:
+        """读选择型控件当前可选项(框架无关):原生 select 读 <option>;自定义下拉点开读弹层文本。
+
+        返回 [{label, value}](显示名;value 同 label —— 页面层按显示名选,内部 id 由页面自转,我们不碰)。失败→[]。
+        """
+        try:
+            loc = self._resolve(locator).first
+            opts = loc.locator("option")
+            if await opts.count() > 0:                         # 原生 <select>
+                texts = await opts.all_inner_texts()
+                return [{"label": t.strip(), "value": t.strip()} for t in texts if t.strip()]
+            await loc.click()                                  # 自定义下拉:点开触发框
+            await self._page.wait_for_timeout(350)
+            items = self._page.locator(
+                ".el-select-dropdown__item, .ant-select-item-option, [role=option], li[role=option]")
+            texts = await items.all_inner_texts()
+            return [{"label": t.strip(), "value": t.strip()} for t in texts if t.strip()]
+        except Exception:  # noqa: BLE001
+            return []
 
     async def close(self) -> None:
         if not self._owns_browser:                 # 池化:只关 context,共享浏览器常驻

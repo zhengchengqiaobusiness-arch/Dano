@@ -16,7 +16,9 @@ log = structlog.get_logger(__name__)
 # "dry/self_check 未真跑"——录制路径 by-design 的安全验证模式(零执行、零凭证、零副作用,发布为 partially_verified)。
 # 评审若**仅因此**否决,是误判该安全模式;确定性剔除该理由(不阻断、不进修复:本就不该/不能改)。targeted,不误删真问题。
 _DRY_MODE_RE = re.compile(
-    r"dry\s*=?\s*true|self[_\s]?check|未真[实]?.{0,3}跑|真实跑通|未.{0,2}执行|未真发|仅构造未真发|construct.*not.*sen",
+    r"dry\s*=?\s*true|dry\s*模式|self[_\s]?check|未真[实]?.{0,3}(跑|提交|发)|真实跑通|未.{0,2}执行|"
+    r"未真发|仅构造未真发|未(真|实际|真正)?.{0,3}提交|submitted\s*[=:：]?\s*(false|否)|"
+    r"未实际提交|没有真[正实].{0,3}提交|construct.*not.*sen",
     re.I)
 
 

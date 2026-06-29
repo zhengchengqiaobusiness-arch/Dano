@@ -261,8 +261,12 @@ async def _start_tool_server() -> tuple:
 
 
 async def _spawn_pi(*, run_id: str, token: str, port: int, prompt: str,
-                    context: dict, timeout_s: float) -> dict:
+                    context: dict, timeout_s: float, progress=None,
+                    allowed_tools=None) -> dict:  # noqa: ANN001
     """spawn Node Sidecar,送 start_run,读 JSONL 直到 run_completed。env 白名单。
+
+    progress(可选):每个 pi 事件(工具调用 page_observe/page_act 等)回调一次 → 供前端流式展示
+    Agent 操作。默认 None(不回调,行为与从前完全一致),回调失败一律吞掉不影响主流程。
 
     全程记日志(便于真机定位 pi 空跑/报错):spawn 配置 / pi 每个事件 / **stderr 每行** /
     最终结果(status/事件数/final_text 头/returncode)。pi 没回 run_completed 时把 stderr 尾抬进 error。
@@ -276,6 +280,8 @@ async def _spawn_pi(*, run_id: str, token: str, port: int, prompt: str,
     env.update({k: os.environ[k] for k in _PI_ENV if k in os.environ})
     env.update({"DANO_AGENT_TOKEN": token, "DANO_AGENT_BASE_URL": f"http://127.0.0.1:{port}",
                 "DANO_AGENT_RUN_ID": run_id, "PI_STUB": "0"})
+    if allowed_tools:                          # 工具白名单(页面直驱只暴露页面工具,防乱钻)
+        env["DANO_ALLOWED_TOOLS"] = ",".join(allowed_tools)
     log.info("pi.spawn", run_id=run_id, port=port, model=s.pi_model,
              provider=s.pi_provider or "openai-compat", base_url=s.pi_base_url, key_set=bool(s.pi_api_key))
     proc = await asyncio.create_subprocess_exec(
@@ -318,6 +324,11 @@ async def _spawn_pi(*, run_id: str, token: str, port: int, prompt: str,
             if ev.get("type") == "run_completed":
                 completed = ev
                 return
+            if progress is not None:                 # 流式回调:把 pi 事件推给前端(best-effort,绝不影响主流程)
+                try:
+                    progress(ev)
+                except Exception:  # noqa: BLE001
+                    pass
             log.info("pi.event", run_id=run_id, ev_type=ev.get("type"),
                      detail={k: str(v)[:160] for k, v in ev.items() if k != "type"})
 

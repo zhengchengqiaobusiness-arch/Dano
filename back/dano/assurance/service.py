@@ -143,12 +143,24 @@ async def _is_page_action(tenant: str, subsystem: str, action: str) -> bool:
     return env is not None
 
 
+def page_heal_strategy(body: dict) -> str:
+    """页面漂移自愈策略路由(纯函数):
+
+    - "agent":页面直驱(operate-page)结晶的 skill(资产带 goal.intent)→ Agent **自主重驱动**重结晶
+      (页面真改版时,一次性侦察拼不回多步轨迹,得让 Agent 凭目标重新自己跑通)。
+    - "scout":老的 onboard-page / 无目标页面脚本 → 重新侦察补丁(单表单足够)。
+    """
+    if (body.get("goal") or {}).get("intent"):
+        return "agent"
+    return "scout"
+
+
 async def _reheal_page(run_id: str, sid: str, subsystem: str, action: str,
                        tenant: str, lifecycle: SkillLifecycle) -> bool:
-    """页面漂移自愈(流程11 页面版):**重新侦察**当前页面 → 用最新指纹/字段重建脚本 →
-    沙箱回放 → 写页面过三模型评审 → 发布新版本(旧版保留)→ 恢复 Skill 到「已发布」。
+    """页面漂移自愈(流程11 页面版):按策略分流——
 
-    start_url / success_marker / title 取自当前已发布的页面脚本资产(不需调用方再传)。
+    带 goal 的页面直驱 skill → `_reheal_page_agent`(Agent 自主重驱动);否则 **重新侦察**补丁。
+    两条都走"发布新版本(旧版保留可回滚)→ 恢复 Skill 到已发布"的同一闸门。
     """
     from dano.agent_tools import tools as T
     from dano.assets.repository import AssetRepository
@@ -159,6 +171,8 @@ async def _reheal_page(run_id: str, sid: str, subsystem: str, action: str,
     if env is None:
         return False
     body = env.body
+    if page_heal_strategy(body) == "agent":              # 页面直驱:Agent 自主重驱动重结晶
+        return await _reheal_page_agent(subsystem, action, tenant, body, lifecycle)
     start_url = body.get("start_url", "")
     sc = await T.scout_page(run_id, {"system_instance_id": sid, "start_url": start_url})
     if not sc.get("suggested_steps"):
@@ -184,6 +198,31 @@ async def _reheal_page(run_id: str, sid: str, subsystem: str, action: str,
     rec = await lifecycle.store.get(skill_id)
     if rec and rec.state == SkillState.SUSPENDED:
         await lifecycle.recover_to_published(skill_id, (rec.asset_version or 1) + 1)
+    return True
+
+
+async def _reheal_page_agent(subsystem: str, action: str, tenant: str, body: dict,
+                             lifecycle: SkillLifecycle) -> bool:
+    """页面直驱自愈:Agent 凭原 goal **自主重驱动**真实页面 → 重结晶新版本(operate-page 全套闸门:
+    回放 + 三模型评审 + 发布硬闸门)→ 旧版 append-only 保留可回滚 → 恢复 Skill 到「已发布」。
+
+    复用 M2 的 `run_page_agent_onboarding`(spawn pi operate-page);权威结果 = PG 新发布的 PAGE_SCRIPT。
+    需 Node + pi LLM + 浏览器 + 测试登录态;不可用/重驱动失败 → False(旧版不动,安全)。
+    """
+    from dano.onboarding.page_onboard import run_page_agent_onboarding
+    goal = (body.get("goal") or {}).get("intent", "")
+    start_url = body.get("start_url", "")
+    if not (goal and start_url):
+        return False
+    report = await run_page_agent_onboarding(
+        tenant=tenant, subsystem=subsystem, start_url=start_url, goal=goal)
+    if action not in (report.get("published_skills") or []):     # 重驱动没把这条业务重新跑通发布 → 自愈失败
+        return False
+    skill_id = f"{subsystem}.{action}"
+    rec = await lifecycle.store.get(skill_id)
+    if rec and rec.state == SkillState.SUSPENDED:                 # 灰度:新版发布通过后才把 Skill 恢复到已发布
+        await lifecycle.recover_to_published(skill_id, (rec.asset_version or 1) + 1)
+    log.info("assurance.reheal_page_agent", subsystem=subsystem, action=action, goal=goal[:60])
     return True
 
 

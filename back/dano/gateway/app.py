@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from contextlib import asynccontextmanager
 
 import structlog
@@ -535,6 +536,8 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
                               reads: list[dict] | None = None, storage: dict | None = None,
                               required_labels: set | None = None, dom_options: dict | None = None) -> dict:
     """构造 request_fields 消息:字段表(含 type/required)+ 候选请求 + select(Q2)+ identity(Q1)。"""
+    import time as _time
+    _t0 = _time.monotonic()                       # P4 埋点:量字段表/参数推断耗时(先量后优,定位多接口慢在哪)
     from dano.execution.page.request_capture import (apply_dom_options, dom_enum_selects, flatten_body,
                                                      looks_internal_param_name, suggest_assignee_names,
                                                      suggest_identity, suggest_list_selects,
@@ -583,13 +586,28 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
             fields = merge_llm_field_names(fields, _names)
     except Exception:  # noqa: BLE001
         pass
+    id_list = suggest_identity(pd, storage, samples)   # 字段=当前用户/会话值(运行期重取;排除用户填值/平凡撞值)
+    # P3:给每个字段标**角色**(field_role)→ 录制 UI 用统一徽章区分(用户填/活接口/审批人/系统值/常量…),
+    #   与导出/manifest 的 FieldRole 同一套口径。录制期无完整 api_request,直接按字段标志确定性派生。
+    from dano.execution.page.screenplay import _is_assignee_path, classify_field_role
+    _sel_by_path = {s.get("path"): s for s in selects}
+    _id_paths = {i.get("path") for i in (id_list or [])}
+    for f in fields:
+        p = f.get("path") or ""
+        f["field_role"] = classify_field_role(
+            is_param=bool(f.get("suggest_param")), select=_sel_by_path.get(p),
+            is_assignee=_is_assignee_path(p), is_identity=p in _id_paths,
+            is_system=bool(f.get("system_value"))).value
+    log.info("request_fields.built", ms=round((_time.monotonic() - _t0) * 1000),
+             fields=len(fields), selects=len(selects), reads=len(reads or []),
+             cands=len(candidates))           # P4 埋点:多接口/大字典时定位耗时
     return {"type": "request_fields",
             "method": (chosen.get("method") or "POST").upper(), "url": chosen.get("url"),
             "fields": fields,
             "candidates": cand_list, "chosen_idx": candidates.index(chosen) if chosen in candidates else 0,
             "suggested_steps": suggest_workflow_steps(candidates, samples),   # 自动建议哪几条组成业务流程(前端预勾)
             "selects": selects,
-            "identity": suggest_identity(pd, storage, samples)}   # 字段=当前用户/会话值(运行期重取;排除用户填值/平凡撞值)
+            "identity": id_list}
 
 
 # ── 方式B:网页内录制(WebSocket:截屏流出 + 输入回传入 + 实时步骤 + 录完发布)──
@@ -626,8 +644,11 @@ async def record_ws(ws: WebSocket) -> None:
                          token=init.get("token") or None)   # 贴 token → 预置登录态,免在画面里登录
 
         async def on_frame(data: str) -> None:
+            # 截屏帧走**二进制 WS 消息**(原始 jpeg 字节),不再 base64 塞进 JSON:
+            #   省 ~33% 体积 + 免去前端每帧 JSON.parse 大字符串的主线程卡顿(治"画面掉帧/不流畅",远程网关尤甚)。
+            #   其余消息仍走 send_json(文本);前端按"二进制=帧、文本=JSON"区分。
             try:
-                await ws.send_json({"type": "frame", "data": data})
+                await ws.send_bytes(base64.b64decode(data))
             except Exception:  # noqa: BLE001
                 pass
 
@@ -740,6 +761,39 @@ async def record_ws(ws: WebSocket) -> None:
                     await ws.send_json(await _request_fields_msg(pending_req, pending_candidates, pending_samples,
                                                                  pending_reads, pending_storage, pending_required,
                                                                  pending_dom_options))
+            elif t == "optimize_description":
+                # P2:业务描述 AI 优化 —— 用与发布**同样**的方式构造临时 api_request(不落库),抽**剧本骨架**(无值/无凭证)
+                #   连同用户草稿喂 LLM,回结构化业务说明。失败/无 LLM → 原样回草稿(绝不阻断)。
+                draft = (msg.get("draft") or "").strip()
+                text = draft
+                if pending_req is not None:
+                    try:
+                        from dano.execution.page.request_capture import (apply_dom_options, build_api_request,
+                                                                         build_api_workflow, suggest_workflow_steps)
+                        from dano.execution.page.screenplay import build_screenplay, screenplay_skeleton
+                        pm = {k: v.strip() for k, v in (msg.get("param_map") or {}).items() if v and v.strip()}
+                        sels = msg.get("selects") or []
+                        apply_dom_options(sels, pending_dom_options)
+                        idens = msg.get("identity") or []
+                        sidx = [i for i in (msg.get("step_idxs") or []) if 0 <= i < len(pending_candidates)] \
+                            or suggest_workflow_steps(pending_candidates, pending_samples)
+                        if len(sidx) > 1:
+                            apir = build_api_workflow([pending_candidates[i] for i in sidx], param_map=pm,
+                                                      selects=sels, identity=idens, typed=pending_samples)
+                        else:
+                            apir = build_api_request(pending_req, pm, selects=sels, identity=idens, typed=pending_samples)
+                        skel = screenplay_skeleton(build_screenplay(apir or {}))
+                        skel["title"] = msg.get("title") or ""
+                        from dano.agent_tools import tools as _T
+                        from dano.review.board import optimize_business_description_llm
+                        _b = _T._review_board
+                        if _b is not None:
+                            text = await optimize_business_description_llm(
+                                _b.client, (getattr(_b, "models", None) or {}).get("acceptance"),
+                                draft=draft, skeleton=skel)
+                    except Exception as e:  # noqa: BLE001 —— 润色失败不阻断,回草稿
+                        log.warning("optimize_description.error", error=str(e))
+                await ws.send_json({"type": "description", "description": text})
             elif t == "publish_request":
                 # 用户在字段表里勾了哪些是参数、起了名 → 用真实提交请求建 Skill(任意 OA 通用)
                 if pending_req is None:
@@ -808,6 +862,7 @@ async def record_ws(ws: WebSocket) -> None:
                     title=msg.get("title", ""), api_request=apir, sample_inputs=sample_in,
                     required=auto_required,    # 自动判定:默认全部必填,表单 * 区分时降级可选(免手动勾选)
                     goal=msg.get("goal"),            # 一般为 None → run_request_onboarding 内 _auto_goal 自动提炼(一键发布)
+                    business_description=(msg.get("description") or "").strip(),   # P2:业务说明(手填 + AI 优化)随资产走
                     deploy=init.get("deploy"), storage_state=login_state)  # 可逆沙箱+登录态 → 可活体真跑升 verified;P2
                 if rep.get("ok"):
                     await _auto_export(init["tenant"])
@@ -853,6 +908,54 @@ async def onboarding_page_pi(req: PagePiReq) -> dict:
     if report.get("published_skills"):
         await _auto_export(req.tenant)
     return report
+
+
+class PageAgentReq(BaseModel):
+    tenant: str
+    subsystem: str = "A-报销"
+    start_url: str
+    goal: str                       # 业务目标(一句话),驱动 operate-page 自主回路
+    action: str = ""                # 导出 skill 名(手填);空则后端生成唯一随机名
+    deploy: dict = {}
+    credentials: dict[str, str] = {}
+    timeout_s: float = 900.0
+
+
+@app.post("/onboarding/page-agent")
+async def onboarding_page_agent(req: PageAgentReq) -> dict:
+    """页面直驱接入(operate-page):pi 亲自操作真实页面达成 goal,把成功轨迹结晶为页面 Skill。
+
+    **异步 + 流式**:立即返回 job_id;前端轮询 GET /onboarding/jobs/{job_id} 看 Agent 逐步操作 + 最终结果。
+    首跑默认 dry(只填不真提交,partially_verified)。需 Node + pi LLM + 浏览器 + PG + 测试登录态。
+    """
+    import asyncio
+    import time
+    from uuid import uuid4
+
+    from dano.onboarding.page_onboard import run_page_agent_onboarding
+    job_id = uuid4().hex[:12]
+    job = {"job_id": job_id, "status": "running", "events": [], "report": None, "error": None}
+    _onboard_jobs[job_id] = job
+
+    def _progress(ev: dict) -> None:
+        job["events"].append({"ts": time.time(), **ev})
+
+    async def _run() -> None:
+        try:
+            rep = await run_page_agent_onboarding(
+                tenant=req.tenant, subsystem=req.subsystem, start_url=req.start_url, goal=req.goal,
+                action=req.action, deploy=req.deploy, credentials=req.credentials,
+                timeout_s=req.timeout_s, progress=_progress)
+            job["report"] = rep
+            job["status"] = "completed"
+            if rep.get("published_skills"):
+                await _auto_export(req.tenant)
+        except Exception as e:  # noqa: BLE001
+            job["status"] = "failed"
+            job["error"] = str(e)
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id}
 
 
 async def _auto_export(tenant: str) -> None:

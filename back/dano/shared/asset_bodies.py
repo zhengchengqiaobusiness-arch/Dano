@@ -236,6 +236,7 @@ class PageScriptBody(BaseModel):
     dom_fingerprint: str = Field(description="结构指纹,执行前校验改版的基线")
     action: str = Field(default="", description="派生 Skill 名,如 submit_reimburse;空则按子系统兜底")
     title: str = Field(default="", description="人类可读标题")
+    business_description: str = Field(default="", description="P2:业务说明(手填 + AI 优化),随资产走 → 导出剧本『业务说明』段")
     start_url: str = Field(default="", description="入口页:绝对 URL 或相对 env_profile.base_url")
     success_marker: str | None = Field(default=None, description="成功标志元素/文本的语义定位,回放与运行期判二态")
     user_fields: list[str] = Field(default_factory=list, description="暴露给前端/调用方的参数")
@@ -254,6 +255,9 @@ class PageScriptBody(BaseModel):
     success_evidence: SuccessEvidence | None = Field(default=None, description="分层成功证据(UI + 网络 + 业务回查),点击完成≠业务成功")
     fact_check: FactCheckSpec | None = Field(default=None, description="提交后回查真实记录(grounded),决定是否真返回成功")
     credential_ref: str = Field(default="", description="登录态凭证引用,如 vault://tenant/system/storage-state(不存明文)")
+    readback: dict = Field(
+        default_factory=dict,
+        description="可观测回查视图(ReadbackView 形态:verify_url/row_locator/expect_contains):提交后回验证视图断言数据真变;空=不回查→partially_verified")
 
 
 # ─────────────────────── ⑥ 复合流程 Skill(阶段2 + DSL v2:声明式业务逻辑)───────────────────────

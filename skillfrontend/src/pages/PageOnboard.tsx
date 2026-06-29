@@ -6,8 +6,8 @@ import {
 import { useNavigate } from "react-router-dom";
 import { TENANT_NAME } from "../api/client";
 import {
-  scoutPage, onboardPage, onboardPagePi,
-  PageScoutResp, PageStep, PageOnboardReport, PagePiReport,
+  scoutPage, onboardPage, onboardPagePi, startPageAgent, getJob,
+  PageScoutResp, PageStep, PageOnboardReport, PagePiReport, OnboardJob, OnboardEvent,
 } from "../api/onboarding";
 import PageRecorder from "../components/PageRecorder";
 
@@ -26,12 +26,20 @@ export default function PageOnboard() {
   const tenant = localStorage.getItem(TENANT_NAME) || "";
   const [step, setStep] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [genMode, setGenMode] = useState<"manual" | "pi" | "record">("record");
+  const [genMode, setGenMode] = useState<"manual" | "pi" | "record" | "agent">("record");
+
+  // ── 页面直驱(Agent 自主)模式 ──
+  const [goal, setGoal] = useState("");                    // 一句话业务目标(默认空)
+  const [token, setToken] = useState("");                  // 登录 token(默认空;治登录:注入会话免登录)
+  const [agentAction, setAgentAction] = useState("");      // 导出 skill 名(手填;空则后端随机唯一)
+  const [agentJob, setAgentJob] = useState<OnboardJob | null>(null);
 
   // ── 接入目标 / 登录 ──(subsystem = OA 系统实例,固定几个;不同业务用不同「动作名」区分)
   const [subsystem, setSubsystem] = useState("A-OA");
   const [baseUrl, setBaseUrl] = useState("");
-  const [storageState, setStorageState] = useState("");
+  // 默认填本机登录态文件(页面直驱免登录);token/goal 保持空,按需填
+  const [storageState, setStorageState] = useState(
+    "E:\\python\\try\\Dano\\back\\.dano-sessions\\123123123__A-OA.json");
 
   // ── 各模式自己的输入 ──
   const [startUrl, setStartUrl] = useState("");
@@ -45,7 +53,12 @@ export default function PageOnboard() {
   const [report, setReport] = useState<PageOnboardReport | null>(null);
 
   function deploy(): Record<string, string> { return baseUrl.trim() ? { base_url: baseUrl.trim() } : {}; }
-  function creds(): Record<string, string> { return storageState.trim() ? { storage_state: storageState.trim() } : {}; }
+  function creds(): Record<string, string> {
+    const c: Record<string, string> = {};
+    if (storageState.trim()) c.storage_state = storageState.trim();
+    if (token.trim()) c.token = token.trim();   // 预置登录态:注入 cookie+localStorage 免登录
+    return c;
+  }
 
   async function doScout() {
     if (!tenant) { message.error("请先到「创建 / 进入租户」"); return; }
@@ -103,6 +116,72 @@ export default function PageOnboard() {
     } finally { setBusy(false); }
   }
 
+  async function doAgent() {
+    if (!tenant) { message.error("请先到「创建 / 进入租户」"); return; }
+    if (!startUrl.trim()) { message.error("请填页面地址 start_url"); return; }
+    if (!goal.trim()) { message.error("请填业务目标(如:提交一张请假单)"); return; }
+    setBusy(true);
+    setAgentJob(null);
+    try {
+      const { job_id } = await startPageAgent({
+        tenant, subsystem, start_url: startUrl.trim(), goal: goal.trim(),
+        action: agentAction.trim(),          // 空则后端生成唯一随机 skill 名
+        deploy: deploy(), credentials: creds(),
+      });
+      let done = false;
+      while (!done) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const job = await getJob(job_id);
+        setAgentJob(job);
+        if (job.status === "completed" || job.status === "failed") done = true;
+      }
+    } catch (e: any) {
+      message.error("页面直驱接入失败:" + (e?.response?.data?.detail || e.message));
+    } finally { setBusy(false); }
+  }
+
+  // 进度事件 → 一句人话(看 Agent 在干什么)
+  function agentStepText(ev: OnboardEvent): string {
+    const tool = ev.tool || "";
+    if (tool === "page_session_open")
+      return ev.at_login ? "⚠ 打开页面 —— 当前停在登录页(登录态无效)"
+                         : `打开页面会话(发现 ${ev.fields ?? 0} 个字段)`;
+    if (tool === "page_observe")
+      return ev.errors && ev.errors.length
+        ? `观察页面 · 校验报错:${ev.errors.join("; ")}`
+        : `观察页面(${ev.fields ?? 0} 个字段)`;
+    if (tool === "page_act")
+      return `操作:${ev.op || "?"}${ev.field ? " " + ev.field : ""}${ev.dry ? "(dry)" : ""}` +
+             `${ev.ok === false ? " ✗ 未命中元素" : ""}`;
+    if (tool === "page_crystallize") return "固化成功轨迹为 Skill";
+    if (tool === "sandbox_replay") return "回放验证";
+    if (tool === "request_review") return "三模型评审";
+    if (tool === "publish_asset") return "发布";
+    if (ev.event) return "模型调用工具…";          // pi 原始事件兜底(无细节)
+    return ev.note || ev.type || "…";
+  }
+
+  // 把事件流映射成流水线阶段(可视化:操作页面→生成候选→Self Check→三维审核→发布)
+  const PIPELINE = ["操作页面", "生成 Skill 候选", "确定性 Self Check", "成果验收/漏洞/合规", "发布"];
+  function agentStage(): { current: number; status: "process" | "finish" | "error" } {
+    const evs = agentJob?.events || [];
+    let cur = 0;
+    for (const e of evs) {
+      if (e.tool === "page_crystallize") cur = 1;
+      else if (e.tool === "sandbox_replay") cur = 2;
+      else if (e.tool === "request_review") cur = 3;
+      else if (e.tool === "publish_asset") cur = 4;
+      else if (e.tool && e.tool.indexOf("page_") === 0) cur = 0;
+    }
+    let status: "process" | "finish" | "error" = "process";
+    if (agentJob?.status === "failed") status = "error";
+    if (agentJob?.report?.published_skills?.length) { cur = 4; status = "finish"; }
+    return { current: cur, status };
+  }
+  const REVIEW_LABEL: Record<string, string> = {
+    acceptance: "成果验收", security: "漏洞检测", compliance: "合规审核",
+  };
+
   const hasSubmit = !!scout?.submit_locator;
   const wide = { maxWidth: 1180, margin: "0 auto" };
 
@@ -122,10 +201,11 @@ export default function PageOnboard() {
 
       <Segmented
         value={genMode} block
-        onChange={(v) => setGenMode(v as "manual" | "pi" | "record")}
+        onChange={(v) => setGenMode(v as "manual" | "pi" | "record" | "agent")}
         style={{ marginBottom: 16 }}
         options={[
           { label: "网页录制(推荐 · 免安装 · 需登录的系统用它)", value: "record" },
+          { label: "页面直驱(Agent 自主操作 · 给目标即可)", value: "agent" },
           // { label: "逐步确认", value: "manual" },
           // { label: "pi 自动接入", value: "pi" },
         ]}
@@ -273,6 +353,134 @@ export default function PageOnboard() {
                 </Space>
               }
             />
+          )}
+        </Card>
+      )}
+
+      {genMode === "agent" && (
+        <Card size="small">
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+            给一个<b>页面地址</b> + 一句<b>业务目标</b> + 测试登录态,<b>Agent 自己打开页面、理解、操作、跑通</b>,
+            把它自己跑通的成功轨迹固化为可调用的 Skill。<b>无需录人</b>;首跑默认 dry(只填不真提交)。
+          </Typography.Paragraph>
+          <Space size="large" wrap align="end" style={{ marginBottom: 4 }}>
+            <Form.Item label="页面地址 start_url" required style={{ marginBottom: 8 }}>
+              <Input value={startUrl} onChange={(e) => setStartUrl(e.target.value)}
+                     placeholder="https://oa.example.com/leave/new" style={{ width: 360 }} />
+            </Form.Item>
+            <Form.Item label="Skill 名称(可选)" style={{ marginBottom: 8 }}
+                       tooltip="导出的 Skill 名,英文/拼音;留空则系统生成唯一随机名">
+              <Input value={agentAction} onChange={(e) => setAgentAction(e.target.value)}
+                     placeholder="留空=随机唯一" style={{ width: 220 }} />
+            </Form.Item>
+          </Space>
+          {/* 业务目标 goal 与 登录 token 同一排,均默认空 */}
+          <Space size="large" wrap align="end" style={{ marginBottom: 8 }}>
+            <Form.Item label="业务目标 goal" required style={{ marginBottom: 8 }}
+                       tooltip="一句话说清要 Agent 达成什么,如:提交一张请假单 / 新建一条报销">
+              <Input value={goal} onChange={(e) => setGoal(e.target.value)}
+                     placeholder="" style={{ width: 320 }} />
+            </Form.Item>
+            <Form.Item label="登录 token" style={{ marginBottom: 8 }}
+                       tooltip="需登录的系统必填:粘贴一个有效登录 token,系统在打开页面前注入(cookie+localStorage),免登录。RSA/验证码登录的系统改用高级里的 storage_state。">
+              <Input.Password value={token} onChange={(e) => setToken(e.target.value)}
+                              placeholder="" style={{ width: 360 }} />
+            </Form.Item>
+          </Space>
+          <div>
+            <Button type="primary" loading={busy} onClick={doAgent}>Agent 自主接入</Button>
+            <Typography.Text type="secondary" style={{ marginLeft: 12, fontSize: 12 }}>
+              Agent 真实打开页面、逐步操作并自纠错,约 1–5 分钟;下方实时展示操作步骤。
+            </Typography.Text>
+          </div>
+
+          {agentJob && (() => {
+            const st = agentStage();
+            const lastReview = [...(agentJob.events || [])].reverse().find((e) => e.reviews);
+            return (
+              <Card size="small" type="inner" title="接入流水线" style={{ marginTop: 16 }}>
+                <Steps size="small" current={st.current} status={st.status}
+                       items={PIPELINE.map((t) => ({ title: t }))} />
+                {lastReview?.reviews && (
+                  <div style={{ marginTop: 12 }}>
+                    <Space size={8} wrap>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>三维审核:</Typography.Text>
+                      {lastReview.reviews.map((r) => (
+                        <Tag key={r.role} color={r.passed ? "green" : "red"}>
+                          {REVIEW_LABEL[r.role] || r.role} {r.passed ? "✓" : "✗"}
+                        </Tag>
+                      ))}
+                      {lastReview.all_passed === false &&
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>(有阻断项 → 受限修复后重审)</Typography.Text>}
+                    </Space>
+                  </div>
+                )}
+              </Card>
+            );
+          })()}
+
+          {(() => {
+            const evs = agentJob?.events || [];
+            const atLogin = evs.some((e) => e.at_login);
+            const shotEv = [...evs].reverse().find((e) => e.screenshot);
+            return (
+              <>
+                {atLogin && (
+                  <Alert style={{ marginTop: 16 }} type="error" showIcon
+                    message="Agent 打开页面后停在登录页 —— 登录态无效"
+                    description="该系统需要登录。请在上方「登录 token」填一个有效 token(或在高级里填 storage_state)后重试,否则 Agent 无法操作页面。" />
+                )}
+                {shotEv?.screenshot && (
+                  <Card size="small" type="inner" title="当前页面(Agent 实时所见)" style={{ marginTop: 16 }}>
+                    <img src={shotEv.screenshot} alt="page" style={{ maxWidth: "100%", border: "1px solid #f0f0f0", borderRadius: 4 }} />
+                  </Card>
+                )}
+              </>
+            );
+          })()}
+
+          {agentJob && (agentJob.events.length > 0 || agentJob.status === "running") && (
+            <Card size="small" type="inner" title="Agent 操作过程(实时)" style={{ marginTop: 16 }}>
+              <List
+                size="small" dataSource={agentJob.events} locale={{ emptyText: "等待 Agent 启动…" }}
+                style={{ maxHeight: 280, overflow: "auto" }}
+                renderItem={(ev) => (
+                  <List.Item style={{ padding: "4px 0" }}>
+                    <Space size={6}>
+                      <Tag color={ev.errors && ev.errors.length ? "red" : ev.tool ? "blue" : "default"}>
+                        {ev.tool || ev.event || ev.phase || ev.type}
+                      </Tag>
+                      <Typography.Text style={{ fontSize: 13 }}>{agentStepText(ev)}</Typography.Text>
+                    </Space>
+                  </List.Item>
+                )}
+              />
+              {agentJob.status === "running" && (
+                <div style={{ textAlign: "center", marginTop: 8 }}>
+                  <Spin size="small" /> <Typography.Text type="secondary" style={{ fontSize: 12 }}>进行中…</Typography.Text>
+                </div>
+              )}
+            </Card>
+          )}
+
+          {agentJob?.report && (
+            <Alert
+              style={{ marginTop: 16 }} showIcon
+              type={agentJob.report.published_skills?.length ? "success" : "warning"}
+              message={agentJob.report.published_skills?.length
+                ? `Agent 已发布:${agentJob.report.published_skills.join(", ")}`
+                : `未发布(状态:${agentJob.report.status || agentJob.status})`}
+              description={
+                <Space direction="vertical" size={2}>
+                  {!!agentJob.report.published_skills?.length &&
+                    <Button type="primary" size="small" style={{ marginTop: 6 }}
+                            onClick={() => nav("/skills")}>去 Skill 目录调用</Button>}
+                </Space>
+              }
+            />
+          )}
+          {agentJob?.status === "failed" && agentJob.error && (
+            <Alert style={{ marginTop: 12 }} type="error" showIcon message="接入失败" description={agentJob.error} />
           )}
         </Card>
       )}

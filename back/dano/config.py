@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # ── LLM(pi 编码 + 三模型评审,OpenAI 兼容)──
     # ⚠ 密钥放 back/.env 的 DANO_PI_API_KEY,**勿写进本文件**(本文件入库=明文泄露)。默认空 → 必须由 .env/环境提供。
     pi_api_key: str = Field(default="", description="= DANO_PI_API_KEY;密钥只放 back/.env,勿硬编码")
+    # 页面直驱(operate-page)改用 Stagehand 框架:需标准 OpenAI key(自定义端点 mimo 接不进 Stagehand)
+    stagehand_api_key: str = Field(default="", description="= DANO_STAGEHAND_API_KEY:Stagehand 用的 OpenAI key(空则回退 pi_api_key)")
+    stagehand_model: str = "openai/gpt-4o"     # = DANO_STAGEHAND_MODEL:Stagehand provider/model(如 openai/gpt-4o)
     pi_base_url: str = "https://token-plan-cn.xiaomimimo.com/v1"     # = DANO_PI_BASE_URL(非密钥,可 .env 覆盖)
     pi_model: str = "mimo-v2.5-pro"            # = DANO_PI_MODEL(评审/分类的 OpenAI 兼容模型)
     # pi agent(run_pi.mjs)的 provider 名:配了 pi_base_url 时,run_pi.mjs 会注册一个 **OpenAI 兼容** provider
@@ -67,6 +70,8 @@ class Settings(BaseSettings):
     browser_pool_size: int = 2           # = DANO_BROWSER_POOL_SIZE:运行期并发浏览器上限(信号量)
     page_timeout_s: float = 120.0        # = DANO_PAGE_TIMEOUT_S:单次页面运行总超时(防卡死)
     page_write_probe: bool = False       # = DANO_PAGE_WRITE_PROBE:写页面沙箱回放是否真点提交(默认 dry,不真建单)
+    page_agent_max_steps: int = 60       # = DANO_PAGE_AGENT_MAX_STEPS:Agent 回路单次最大步数,防无限循环(多字段表单需余量)
+    page_action_timeout_ms: int = 4000   # = DANO_PAGE_ACTION_TIMEOUT_MS:单个 fill/click/select 等元素操作超时;猜错定位快速失败(否则 Playwright 默认死等 30s)
     page_base_url: str = ""              # = DANO_PAGE_BASE_URL:运行期相对 start_url 的拼接基址
     page_storage_state: str = ""         # = DANO_PAGE_STORAGE_STATE:登录态(Playwright storageState JSON 路径)
 

@@ -37,6 +37,15 @@ def _resolve_value(action: PageAction, fields: dict) -> str | None:
     return action.value
 
 
+def _option_locator_for(script: PageScriptBody, field: str) -> str | None:
+    """找绑定到 field 的选择型(select/pick)步的 locator —— 供实时拉选项。无则 None。"""
+    want = f"field:{field}"
+    for a in script.actions:
+        if a.op in ("select", "pick") and (a.value_from == want or a.field == field):
+            return a.locator
+    return None
+
+
 class PageActionRuntime:
     """通用页面解释器。driver_factory: 可调用,返回(或 await 出)一个 PageDriver。"""
 
@@ -85,6 +94,16 @@ class PageActionRuntime:
                        confirm: Callable[[dict], bool]) -> ExecResult:
         shots: list[str] = []
         results: list[AssertionResult] = []
+
+        # 0. 回查前态(提交前先看验证视图,记基线)。空 readback 跳过 → 行为与从前完全一致。
+        before_snap: dict | None = None
+        if script.readback:
+            from dano.execution.page.readback import ReadbackView, snapshot_observable
+            try:
+                before_snap = await snapshot_observable(driver, ReadbackView(**script.readback))
+            except Exception:  # noqa: BLE001
+                before_snap = {}
+
         if script.start_url:
             await driver.open(script.start_url)
 
@@ -137,13 +156,49 @@ class PageActionRuntime:
                                            detail=script.success_marker))
         shots.append(await driver.screenshot("final"))
 
+        # 4. 可观测回查(承重):提交后回验证视图,断言数据**真的变了**。声明了 readback 且真提交了才跑。
+        #    DOM 成功标志只证明"点了提交",回查才证明"业务真生效";有 readback 时它是二态权威。
+        rb_ev: dict | None = None
+        if script.readback and submitted and before_snap is not None:
+            from dano.execution.page.readback import ReadbackView, verify_readback
+            rb_ok, rb_ev = await verify_readback(driver, before=before_snap, view=ReadbackView(**script.readback))
+            results.append(AssertionResult(name="readback", passed=rb_ok,
+                                           detail=f"数据变更回查 {rb_ev.get('before_count')}→{rb_ev.get('after_count')}"))
+
         output = {"submitted": submitted, "success_marker": marker_ok, **driver.captured()}
-        outcome = Outcome.PASSED if marker_ok is not False else Outcome.FAILED
+        if rb_ev is not None:
+            output["readback"], output["readback_passed"] = rb_ev, rb_ev["passed"]
+            outcome = Outcome.PASSED if rb_ev["passed"] else Outcome.FAILED   # 有回查 → 数据没变即跑不通
+        else:
+            outcome = Outcome.PASSED if marker_ok is not False else Outcome.FAILED
         return ExecResult(
             task_id=task_id, outcome=outcome, assertion_results=results,
             evidence=Evidence(request_body=dict(fields), response_body=output, screenshots=shots),
             structured_output=output,
         )
+
+    async def list_options(self, script: PageScriptBody, field: str, *, storage_state=None) -> dict:  # noqa: ANN001
+        """页面直驱实时选项(Q4/Q6):开页面 → 定位该字段的 select/pick 步 → **从活 DOM 读当前选项**。
+
+        不调任何来源接口(数据源是页面);非选择型 / 找不到下拉步 → options=[]。绝不抛。
+        """
+        loc = _option_locator_for(script, field)
+        if not loc:
+            return {"field": field, "options": [], "count": 0, "note": "该字段非选择型 / 未找到下拉步"}
+        driver = await self._make_driver(storage_state)
+        try:
+            if script.start_url:
+                await driver.open(script.start_url)
+            fn = getattr(driver, "list_options", None)
+            opts = list(await fn(loc)) if fn else []
+        except Exception:  # noqa: BLE001
+            opts = []
+        finally:
+            try:
+                await driver.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return {"field": field, "options": opts, "count": len(opts)}
 
     async def _do(self, driver: PageDriver, action: PageAction, fields: dict) -> tuple[bool, str]:
         op, loc = action.op, action.locator

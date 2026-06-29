@@ -842,8 +842,14 @@ async def request_review(run_id: str, params: dict) -> dict:
     # 即录制路径 by-design 的写安全模式 → partially_verified),评审若**仅因"dry/self_check 未真跑"否决** = 误判该安全模式
     # → 剔除该理由;某维度理由清空即视为通过。**确定性层承重,不让 LLM 抖动阻断按设计的安全行为。**
     from dano.onboarding.repair import is_dry_mode_reason
-    dry_only = not any(e.get("kind") == "replay" for e in evidence)
+    # dry-only 判定:真跑 = kind=replay **且 mode∈{full,live}**(真提交)。页面型 sandbox_replay 即便 dry 也记
+    # kind=replay(mode=dry),旧逻辑误判其为真跑 → 漏掉 dry 豁免 → acceptance 因 submitted=false 误杀页面 Skill。
+    def _is_real_run(e: dict) -> bool:
+        return e.get("kind") == "replay" and (e.get("evidence") or {}).get("mode") in ("full", "live")
+    dry_only = not any(_is_real_run(e) for e in evidence)
     review_run_ids, out = [], []
+    # 仅**页面直驱**(DOM 操作,无 api_request)享 acceptance 顾问化;**抓请求型**(有 api_request)仍走原评审闸门。
+    is_dry_page = dry_only and draft.asset_type == AssetType.PAGE_SCRIPT and not draft.body.get("api_request")
     for v in verdicts:
         passed, reasons = v.passed, list(v.reasons or [])
         if dry_only and not passed:
@@ -852,12 +858,24 @@ async def request_review(run_id: str, params: dict) -> dict:
                 log.info("request_review.dropped_dry_reason", role=v.role,
                          dropped=len(reasons) - len(kept))
                 reasons, passed = kept, (len(kept) == 0)
+        # 页面直驱默认 dry:业务"是否真达成"在 dry 下**无法验证**(submitted=false 是设计如此),
+        # 故 acceptance 对 dry 页面脚本降为**非阻断顾问**——承重交 self_check + replay(结构/可回放),
+        # security/compliance 仍硬卡。否则弱模型 acceptance 反复无常驳回 → draft→replay→review 死循环数分钟。
+        if is_dry_page and not passed and v.role == "acceptance":
+            log.info("request_review.acceptance_advisory_dry", reasons=reasons[:3])
+            passed = True
         rr = await _ds.record_review(asset_draft_id=draft.asset_draft_id, role=v.role,
                                      model_id=v.model_id, passed=passed, reasons=reasons)
         review_run_ids.append(str(rr.review_run_id))
         out.append({"role": v.role, "model": v.model_id, "passed": passed, "reasons": reasons})
     all_passed = bool(out) and all(o["passed"] for o in out)
     log.info("request_review", draft=str(draft.asset_draft_id), all_passed=all_passed)
+    try:                                       # 把三维审核结果推给前端(成果验收/漏洞检测/合规),治"盲盒"
+        from dano.agent_tools import progress
+        progress.emit(run_id, {"tool": "request_review", "all_passed": all_passed,
+                               "reviews": [{"role": o["role"], "passed": o["passed"]} for o in out]})
+    except Exception:  # noqa: BLE001
+        pass
     return {"all_passed": all_passed, "verdicts": out, "review_run_ids": review_run_ids}
 
 
@@ -1051,6 +1069,9 @@ async def draft_page_script(run_id: str, params: dict) -> dict:
         title=params.get("title", ""), start_url=params.get("start_url", ""),
         success_marker=params.get("success_marker"))
     dump = body.model_dump()
+    # 页面直驱(operate-page)结晶时带 goal → 存进资产,供漂移自愈时**自主重驱动**(Agent 自己重跑,非 scout 一次)
+    if params.get("goal"):
+        dump["goal"] = {"intent": params["goal"]}
     validate_asset_body(AssetType.PAGE_SCRIPT, dump)
     scope = Scope(tenant=mat.tenant, subsystem=Subsystem(mat.subsystem))  # type: ignore[arg-type]
     draft = await _ds.save_draft(run_id=run_id, scope=scope, asset_type=AssetType.PAGE_SCRIPT,

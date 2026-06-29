@@ -76,9 +76,15 @@ async function realRun(start) {
     skillsLoaded = true;
   } catch (e) { log("resourceLoader 构造失败(跳过 skills):", e.message); }
 
+  // 工具白名单:DANO_ALLOWED_TOOLS 给定时只暴露这几个工具(页面直驱只给 7 个页面工具,
+  // 防弱模型乱钻 scout_page/parse_spec/draft_adapter 等无关工具 → 又慢又乱)。未给则全量(原行为)。
+  const _allow = (process.env.DANO_ALLOWED_TOOLS || "").split(",").map((s) => s.trim()).filter(Boolean);
+  const _tools = _allow.length ? customTools.filter((t) => _allow.includes(t.name)) : customTools;
+  log("tools exposed:", _allow.length ? _tools.map((t) => t.name).join(",") : "(all " + customTools.length + ")");
+
   const { session } = await createAgentSession({
     model, authStorage: auth, modelRegistry: registry,   // ← 用我的 auth/registry(带 key)
-    customTools, noTools: "builtin",
+    customTools: _tools, noTools: "builtin",
     ...(resourceLoader ? { resourceLoader } : {}),
     sessionManager: SessionManager.inMemory ? SessionManager.inMemory() : undefined,
   });

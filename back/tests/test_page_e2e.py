@@ -81,7 +81,7 @@ async def test_page_onboarding_e2e(tmp_path) -> None:  # noqa: ANN001
     try:
         # 1. 真实侦察
         sc = await tools.scout_page(run_id, {"system_instance_id": sid, "start_url": url})
-        assert sc["submit_locator"] == "role=button[name=提交]"
+        assert sc["submit_locator"] == "css=#sub"            # scout 给 id 精确定位(比 role 更稳,治真实 OA 提交未命中)
         assert {"amount", "category"} <= {f["name"] for f in sc["fields"]}
 
         # 2. 确定性建体 + 存草案(写页面 → L3 + 需评审)

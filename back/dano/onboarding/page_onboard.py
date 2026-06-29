@@ -179,6 +179,96 @@ async def run_page_onboarding_pi(
             "error": completed.get("error")}
 
 
+async def run_page_agent_onboarding(
+    *, tenant: str, subsystem: str, start_url: str, goal: str, action: str = "",
+    deploy: dict | None = None, credentials: dict | None = None, timeout_s: float = 900.0,
+    progress=None,  # noqa: ANN001 —— 可选:每阶段回调一次,供前端流式看流水线
+) -> dict:
+    """页面直驱接入(operate-page)—— 用 **Stagehand**(成熟 AI 浏览器操作框架,非手搓)自主操作真实页面
+    达成 goal,把录到的稳定动作序列结晶成确定性页面 Skill。
+
+    分工:Stagehand 做**感知 + 自定义控件机械(下拉/日期/级联)+ 规划 + 每步稳定 selector**;
+    Dano 守自己的价值:**结晶建体 → 沙箱回放 → 三维审核 → 发布**(全复用现有 Python 工具,不再 spawn pi)。
+    需:OpenAI key(config.stagehand_api_key / 回退 pi_api_key)+ 浏览器(Stagehand 本地自带)+ PG。
+    """
+    from dano.agent_tools import tools as T
+    from dano.assets.repository import AssetRepository
+    from dano.config import get_settings
+    from dano.execution.page.stagehand_operate import OperateError, operate_page
+    from dano.shared.enums import AssetType, Subsystem
+    from dano.shared.models import Scope
+
+    s = get_settings()
+    api_key = (s.stagehand_api_key or s.pi_api_key or "").strip()
+    sid = subsystem
+    skill_action = action.strip() or f"skill_{uuid4().hex[:8]}"   # 手填名优先;空则唯一随机
+    run_id = f"page-agent-{uuid4().hex[:8]}"
+    creds = credentials or {}
+
+    def _emit(ev: dict) -> None:
+        if progress is not None:
+            try:
+                progress({"ts": __import__("time").time(), **ev})
+            except Exception:  # noqa: BLE001
+                pass
+
+    # ── 步骤①+②:Stagehand 自主操作真实页面(登录态走 storage_state / user_data_dir)──
+    _emit({"tool": "page_session_open", "note": "Stagehand 打开页面、自主操作"})
+    try:
+        result = await operate_page(
+            start_url=start_url, goal=goal, api_key=api_key, model=s.stagehand_model,
+            headless=s.browser_headless, user_data_dir=creds.get("user_data_dir") or None,
+            storage_state=creds.get("storage_state") or None, max_steps=s.page_agent_max_steps)
+    except OperateError as e:
+        log.warning("page_agent.operate_failed", run_id=run_id, error=str(e))
+        _emit({"tool": "page_act", "errors": [str(e)]})
+        return {"pi_status": "failed", "published_skills": [], "error": str(e)}
+    steps = result["steps"]
+    _emit({"tool": "page_act", "note": f"录到 {len(steps)} 个可定位动作", "fields": len(steps),
+           "url": result.get("final_url")})
+
+    # ── 结晶 → 回放 → 三维审核 → 发布(复用现有工具;operate 已不走 pi)──
+    materials.register(materials.MaterialContext(
+        run_id=run_id, tenant=tenant, system_instance_id=sid, subsystem=sid,
+        deploy=deploy or {}, credentials=creds))
+    pub: dict = {}
+    try:
+        d = await T.draft_page_script(run_id, {
+            "system_instance_id": sid, "action": skill_action, "dom_fingerprint": "",
+            "start_url": start_url, "title": goal, "steps": steps})
+        draft_id = d["asset_draft_id"]
+        _emit({"tool": "page_crystallize", "action": skill_action, "steps": len(steps)})
+        rp = await T.sandbox_replay(run_id, {"asset_draft_id": draft_id, "sample_inputs": {}})
+        _emit({"tool": "sandbox_replay", "ok": bool(rp.get("passed"))})
+        if not rp.get("passed"):
+            return {"pi_status": "completed", "published_skills": [], "error": "沙箱回放未通过",
+                    "structured_output": rp.get("structured_output")}
+        review_ids: list[str] = []
+        if d.get("needs_review"):
+            rev = await T.request_review(run_id, {"asset_draft_id": draft_id})
+            _emit({"tool": "request_review", "all_passed": bool(rev.get("all_passed")),
+                   "reviews": [{"role": v["role"], "passed": v["passed"]} for v in rev.get("verdicts", [])]})
+            if not rev.get("all_passed"):
+                return {"pi_status": "completed", "published_skills": [], "error": "三维审核未通过",
+                        "verdicts": rev.get("verdicts")}
+            review_ids = rev["review_run_ids"]
+        pub = await T.publish_asset(run_id, {"asset_draft_id": draft_id,
+                                             "validation_run_ids": rp["validation_run_ids"],
+                                             "review_run_ids": review_ids})
+        _emit({"tool": "publish_asset", "ok": bool(pub.get("published"))})
+    finally:
+        materials.clear_run(run_id)
+
+    repo = AssetRepository()
+    scope = Scope(tenant=tenant, subsystem=Subsystem(sid))
+    published = [e.body.get("action", e.asset_key)
+                 for e in await repo.list_published(AssetType.PAGE_SCRIPT, scope)] if pub.get("published") else []
+    log.info("page_onboard.agent.done", run_id=run_id, published=published, operated_steps=len(steps))
+    return {"pi_status": "completed" if pub.get("published") else "review",
+            "published_skills": published, "operated_steps": len(steps),
+            "completed": result.get("completed"), "error": None if pub.get("published") else "未发布"}
+
+
 async def _advisory_notes(action: str, api_request: dict) -> list[str]:
     """录制 skill 的**非阻断**语义顾问:仅当评审 client 已注入(生产启动注入;测试默认无)才跑。
     任何失败/未配置都返回 [] —— 顾问绝不阻断发布。"""
@@ -218,7 +308,7 @@ def _focus_question(action: str, findings: list) -> str:
     return q + (f"(确认后还有 {len(items) - 1} 项)" if len(items) > 1 else "")
 
 
-def _build_page_body(api_request: dict, action: str, title: str, required):
+def _build_page_body(api_request: dict, action: str, title: str, required, business_description: str = ""):
     """从 api_request 算 params/必填/类型并建 PageScriptBody(修复后参数会变,故抽出可重算重建)。"""
     from dano.shared.asset_bodies import PageScriptBody
     from dano.shared.enums import RiskLevel
@@ -231,6 +321,7 @@ def _build_page_body(api_request: dict, action: str, title: str, required):
     if not ftypes and api_request.get("steps"):
         ftypes = dict((api_request["steps"][-1] or {}).get("field_types") or {})
     body = PageScriptBody(actions=[], dom_fingerprint="", action=action, title=title, api_request=api_request,
+                          business_description=business_description,
                           user_fields=params, required_fields=req_fields, optional_fields=opt_fields,
                           field_types=ftypes, risk_level=RiskLevel.L3).model_dump()
     return body, params, req_fields, opt_fields
@@ -240,7 +331,7 @@ async def run_request_onboarding(
     *, tenant: str, subsystem: str, action: str, title: str = "",
     api_request: dict, sample_inputs: dict | None = None, required: list[str] | None = None,
     deploy: dict | None = None, credentials: dict | None = None, run_id: str | None = None,
-    goal: dict | None = None, storage_state: dict | None = None,
+    goal: dict | None = None, storage_state: dict | None = None, business_description: str = "",
 ) -> dict:
     """抓请求路径:把录制抓到的提交请求(已参数化)落成可执行 Skill → dry 自检 → 三模型评审+自动修复 → 发布。
 
@@ -299,7 +390,7 @@ async def run_request_onboarding(
                     "reason": "业务 Goal 完整性门未过(意图/必填来源/成功标准/禁止动作/风险)",
                     "goal": goal, "goal_confirmation_required": goal_needs_confirmation(goal)}
         # 编码:算 params/必填/类型并建 body(修复后会重算重建)
-        body, params, req_fields, opt_fields = _build_page_body(api_request, action, title, required)
+        body, params, req_fields, opt_fields = _build_page_body(api_request, action, title, required, business_description)
         # 字段语义门:**必填**参数若是内部机器标识(Activity_xxx/hash,非人类名)→ 阻断,让用户命名;可选的仅告警
         from dano.execution.page.request_capture import looks_internal_param_name
         bad_req = [p for p in req_fields if looks_internal_param_name(p)]
@@ -379,7 +470,7 @@ async def run_request_onboarding(
                 log.info("ingest.repair", rounds=rounds, remaining=len(remaining), fixed=fixed)
                 if fixed:                                             # 修好 → 重建/重存/重自检/重审核
                     api_request = repaired
-                    body, params, req_fields, opt_fields = _build_page_body(api_request, action, title, required)
+                    body, params, req_fields, opt_fields = _build_page_body(api_request, action, title, required, business_description)
                     d = await T.save_draft(run_id, {"system_instance_id": sid, "asset_type": "page_script",
                                                     "asset_key": action, "body": body})
                     rp = await T.sandbox_replay(run_id, {"asset_draft_id": d["asset_draft_id"],

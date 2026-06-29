@@ -139,7 +139,7 @@ async def test_real_scout_to_build_to_execute(tmp_path) -> None:  # noqa: ANN001
     names = {f["name"] for f in dom["fields"]}
     assert {"amount", "category"} <= names                  # 两个表单字段被发现
     steps, submit = to_recorded_steps(dom)
-    assert submit == "role=button[name=提交]"               # 提交按钮被识别
+    assert submit == "css=#sub"                             # 提交按钮被识别(scout 给 id 精确定位,比 role 更稳)
 
     # 2. 确定性建体
     script = build_page_script(steps, action="submit_reimburse", dom_fingerprint=fp,
