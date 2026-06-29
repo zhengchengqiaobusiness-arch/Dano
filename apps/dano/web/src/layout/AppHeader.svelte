@@ -67,7 +67,7 @@
     font-size: 0.78rem;
     font-weight: 650;
     line-height: 1;
-    background: var(--composer-dock-bg);
+    background: var(--panel);
     box-shadow:
       rgba(0, 0, 0, 0) 0px 0px 0px 0px,
       rgba(0, 0, 0, 0) 0px 0px 0px 0px,

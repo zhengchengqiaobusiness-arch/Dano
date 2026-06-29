@@ -1355,7 +1355,11 @@
     padding: 12px 16px;
     border: none;
     border-radius: 18px 18px 18px 18px;
-    background: var(--user-message-bg);
+    background: color-mix(in srgb, var(--accent) 16%, var(--bg));
+  }
+
+  :global(.app-shell[data-theme-mode="dark"]) .message-content.user {
+    background: color-mix(in srgb, var(--accent) 55%, var(--bg));
   }
 
   :global(.markdown-renderer) + :global(.markdown-renderer),

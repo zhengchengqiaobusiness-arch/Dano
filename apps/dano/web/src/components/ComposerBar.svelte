@@ -572,7 +572,7 @@
     padding: 12px 18px;
     border-radius: 30px;
     border: none;
-    background: var(--composer-dock-bg);
+    background: var(--panel);
     box-shadow:
       rgba(0, 0, 0, 0) 0px 0px 0px 0px,
       rgba(0, 0, 0, 0) 0px 0px 0px 0px,
@@ -890,7 +890,7 @@
     justify-content: center;
     border-radius: 999px;
     border: none;
-    background: var(--send-button-bg);
+    background: var(--accent);
     color: var(--bg);
     cursor: pointer;
     transition:
@@ -900,7 +900,7 @@
   }
 
   .send-btn:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--send-button-bg) 88%, black);
+    background: color-mix(in srgb, var(--accent) 88%, black);
     transform: translateY(-1px);
   }
 
@@ -909,12 +909,12 @@
   }
 
   .send-btn.stop {
-    background: color-mix(in srgb, var(--send-button-bg) 72%, black);
+    background: color-mix(in srgb, var(--accent) 72%, black);
     color: var(--bg);
   }
 
   .send-btn.stop:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--send-button-bg) 62%, black);
+    background: color-mix(in srgb, var(--accent) 62%, black);
   }
 
   .send-btn:disabled {
