@@ -108,8 +108,8 @@ export async function markComposerAttachmentOrphaned(
 export function toRpcImageContent(
   attachments: readonly ComposerAttachment[],
 ): RpcImageContent[] {
-  return attachments.flatMap(({ data, mimeType }) =>
-    data ? [{ type: "image" as const, data, mimeType }] : [],
+  return attachments.flatMap(({ data, file, mimeType }) =>
+    data && !file ? [{ type: "image" as const, data, mimeType }] : [],
   );
 }
 

@@ -489,6 +489,70 @@ describe("BridgeRpcAdapter", () => {
       }
     });
 
+    it("passes uploaded image files to the model without requiring JSON image payloads", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-upload-"));
+      const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-upload-source-"));
+      try {
+        (context.state as { cwd: string }).cwd = tmpDir;
+        const filePath = path.join(sourceDir, "uploads", "sample.png");
+        const imageBytes = Buffer.from("fake-image");
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, imageBytes);
+        uploadRegistry.resolve.mockReturnValue({
+          id: "upload-1",
+          name: "sample.png",
+          size: imageBytes.length,
+          mimeType: "image/png",
+          path: filePath,
+          relativePath: "uploads/sample.png",
+          previewUrl: "/api/uploads/upload-1/preview",
+        });
+
+        const command: RpcCommand = {
+          id: "cmd-upload-image",
+          type: "steer",
+          message: "Inspect upload",
+          files: [
+            {
+              id: "upload-1",
+              name: "sample.png",
+              size: imageBytes.length,
+              mimeType: "image/png",
+              path: filePath,
+              relativePath: "uploads/sample.png",
+              previewUrl: "/api/uploads/upload-1/preview",
+            } as any,
+          ],
+        };
+        (
+          ws as unknown as { trigger: (event: string, data: Buffer) => void }
+        ).trigger(
+          "message",
+          Buffer.from(JSON.stringify({ type: "command", payload: command })),
+        );
+
+        await new Promise(r => setTimeout(r, 20));
+
+        expect(context.actions.sendUserMessage).toHaveBeenCalledWith(
+          [
+            {
+              type: "text",
+              text: `Inspect upload\n\nProject file references:\n- ${path.join(tmpDir, "uploads", "sample.png")} (sample.png)`,
+            },
+            {
+              type: "image",
+              data: imageBytes.toString("base64"),
+              mimeType: "image/png",
+            },
+          ],
+          { deliverAs: "steer" },
+        );
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+        fs.rmSync(sourceDir, { recursive: true, force: true });
+      }
+    });
+
     it("rejects uploaded files without project paths", async () => {
       const filePath = path.join(os.tmpdir(), "missing-upload.png");
       uploadRegistry.resolve.mockReturnValue({

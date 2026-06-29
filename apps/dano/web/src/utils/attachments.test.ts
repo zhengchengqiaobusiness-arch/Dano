@@ -199,6 +199,29 @@ describe("composer attachment uploads", () => {
     expect(toRpcUploadedFileRefs([attachment])).toEqual([attachment.file]);
   });
 
+  it("keeps uploaded image refs out of the JSON image payload", () => {
+    const attachment = {
+      id: "attachment-1",
+      type: "image" as const,
+      name: "large.png",
+      size: 7 * 1024 * 1024,
+      mimeType: "image/png",
+      status: "uploaded" as const,
+      previewUrl: "/api/uploads/upload-1/preview",
+      data: "big-base64",
+      file: {
+        id: "upload-1",
+        name: "large.png",
+        size: 7 * 1024 * 1024,
+        mimeType: "image/png",
+        path: "/tmp/large.png",
+      },
+    };
+
+    expect(toRpcImageContent([attachment])).toEqual([]);
+    expect(toRpcUploadedFileRefs([attachment])).toEqual([attachment.file]);
+  });
+
   it("marks uploaded attachments orphaned for the current client", async () => {
     getBridgeClientId.mockReturnValue("client_1");
 

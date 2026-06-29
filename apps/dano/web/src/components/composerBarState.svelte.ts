@@ -13,7 +13,6 @@ import {
   createUploadingComposerAttachment,
   toRpcImageContent,
   toRpcUploadedFileRefs,
-  imageFileToRpcData,
   markComposerAttachmentOrphaned,
   uploadComposerAttachment,
   type ComposerAttachment,
@@ -404,7 +403,6 @@ export function createComposerBarState(
         file,
         attachment.abortController.signal,
       );
-      const imageData = await imageFileToRpcData(file);
       if (uploaded.previewUrl && attachment.previewUrl?.startsWith("blob:")) {
         URL.revokeObjectURL(attachment.previewUrl);
       }
@@ -414,7 +412,6 @@ export function createComposerBarState(
               ...item,
               status: "uploaded",
               file: { ...uploaded, name: item.name },
-              data: imageData,
               previewUrl:
                 item.type === "image"
                   ? (uploaded.previewUrl ?? item.previewUrl)
