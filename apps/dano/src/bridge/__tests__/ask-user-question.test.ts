@@ -109,6 +109,34 @@ describe("ask_user_question tool", () => {
     });
   });
 
+  it.each([
+    ["string id", "string:emp_1001", "emp_1001"],
+    ["number id", "number:1", 1],
+    ["numeric string id", "string:1", "1"],
+    ["date string id", "string:2026-06-30 18:00:00", "2026-06-30 18:00:00"],
+    ["colon string id", "string:leave:end", "leave:end"],
+  ])("accepts select DOM typed keys for %s", async (_, answer, expected) => {
+    const execution = executeQuestion(`typed-key-${String(expected)}`, {
+      question: "Pick one",
+      inputType: "select",
+      options: [
+        { id: "emp_1001", label: "Alice Chen" },
+        { id: 1, label: "研发部" },
+        { id: "1", label: "财务部" },
+        { id: "2026-06-30 18:00:00", label: "2026-06-30 18:00:00（下班时间）" },
+        { id: "leave:end", label: "结束时间" },
+      ],
+    });
+
+    askUserQuestionCoordinator.answer(`typed-key-${String(expected)}`, {
+      cancelled: false,
+      answer,
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: expected },
+    });
+  });
+
   it("normalizes choice answers from ids, labels, and option items", async () => {
     const numberId = executeQuestion("choice-number", {
       question: "Department?",
