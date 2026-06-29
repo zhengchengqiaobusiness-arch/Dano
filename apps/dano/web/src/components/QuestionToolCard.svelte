@@ -605,6 +605,28 @@
 
   .question-option input { accent-color: var(--accent); }
 
+  .question-option input[type="radio"] {
+    appearance: none;
+    -webkit-appearance: none;
+    flex: 0 0 auto;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    border: 2px solid var(--border-strong);
+    border-radius: 999px;
+    background: var(--bg);
+    transition:
+      border-color 0.12s ease,
+      background 0.12s ease;
+  }
+
+  .question-option input[type="radio"]:checked {
+    border-color: var(--accent);
+    background:
+      radial-gradient(circle, var(--accent) 0 38%, transparent 42%),
+      var(--bg);
+  }
+
   .question-remote-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
@@ -620,6 +642,16 @@
     background: var(--bg);
     color: var(--text);
     font: inherit;
+  }
+
+  select.question-input {
+    appearance: none;
+    -webkit-appearance: none;
+    padding-right: 36px;
+    background:
+      linear-gradient(45deg, transparent 50%, var(--text-muted) 50%) right 17px center / 6px 6px no-repeat,
+      linear-gradient(135deg, var(--text-muted) 50%, transparent 50%) right 12px center / 6px 6px no-repeat,
+      var(--bg);
   }
 
   .question-input:focus-visible,
