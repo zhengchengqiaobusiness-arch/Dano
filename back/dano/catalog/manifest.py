@@ -68,13 +68,28 @@ def _api_selects(skill: SkillSpec) -> dict:
     return {s.get("param"): s for s in sels if s.get("param")}
 
 
+def _enum_facts(sel: dict | None) -> tuple[list, bool, bool]:
+    """选择型字段的候选事实 → (opts, has_source, is_static_enum)。
+
+    **静态页面枚举**(DOM 抓的固定下拉,如 请假类型=病假/事假/婚假;或无来源的纯枚举)→ 完整且稳定 → 可烤进 schema;
+    **活接口目录**(用户/部门/审批人等网络源:会变、常被截断)→ **绝不烤静态清单**(否则前端被陈旧/错误选项硬约束,
+    选的值与实际不符 → 入库失败),只暴露来源让调用方运行期 `--list-options` 现拉。通用,不挑系统/字段。
+    """
+    opts = [o for o in ((sel or {}).get("options") or []) if str(o).strip()]
+    cnt = int((sel or {}).get("count") or len(opts))
+    has_source = bool((sel or {}).get("source_url"))
+    dom = bool((sel or {}).get("dom_options"))               # DOM 抓的固定下拉 = 静态枚举的强证据
+    truncated = bool(opts) and cnt > len(opts)
+    static = bool(opts) and not truncated and (dom or not has_source)
+    return opts, has_source, static
+
+
 def _schema_prop(skill: SkillSpec, field: str, desc: str, sel: dict | None = None) -> dict:
     """字段 → JSON Schema 属性。**type 保持合法**(function-calling 可直接用),但**语义不丢**:
 
-    - `enum`(选领导/字典下拉):type=string + format=name-ref + 描述提示「传名字→运行期查内部 ID」
-      (这是关键:agent 必须传名字/选项文字,而非内部 ID/编号,否则提交进的是错值);
-      **候选选项内置进 schema**(≤50 条直接 `enum`;更多则带 `x-options-source`,运行期 --list-options 现拉)→
-      agent 从真实可选值里选,不再凭空猜名(问题1:稳固、不易错);
+    - `enum`(选择型):type=string + format=name-ref + 描述提示「传名字→运行期查内部 ID」;
+      **静态页面枚举**(固定下拉)烤进 `enum` 硬约束;**活接口目录**(选人/选部门/审批人:会变)**不烤** —— 只标
+      `x-options-source`,让调用方 `--list-options` 实时拉当前可选项(否则陈旧/错误清单硬约束 agent → 入库失败);
     - `datetime`/`date`:type=string + 标准 format,告诉 agent 这是日期时间字段;
     - 其余按信源声明 / 数值语义判定。format 为 JSON Schema 扩展位,校验器忽略未知值,安全。
     """
@@ -82,19 +97,42 @@ def _schema_prop(skill: SkillSpec, field: str, desc: str, sel: dict | None = Non
     # label=字段纯语义(给 SOP/复述用,简洁);description=语义 + 调用约定(给参数表/function-calling 用)。
     # 约定不写死示例值(『张三』只适合选人,不适合选值如请假类型);示例由前端/样例值提供,不在此臆造。
     if declared == "enum":
-        prop = {"type": "string", "format": "name-ref", "label": desc,
-                "description": desc + ("(传名字/选项文字,Dano 提交时按名字现查内部 ID,**勿直接传 ID/编号**;"
-                                       f"选前先 `--list-options {field}` 实时拉可选项再选)")}
-        opts = [o for o in ((sel or {}).get("options") or []) if str(o).strip()]
-        cnt = int((sel or {}).get("count") or len(opts))
-        if (sel or {}).get("source_url"):
-            prop["x-options-source"] = True                  # 该字段有来源接口 → 可 --list-options 实时拉
-        if opts:
-            prop["x-options"] = opts                         # 候选快照(≤500),写进 references/OPTIONS.md 供离线参考
+        opts, has_source, static = _enum_facts(sel)
+        prop = {"type": "string", "format": "name-ref", "label": desc}
+        if static:                                           # 静态页面枚举(固定下拉)→ 烤清单
+            prop["description"] = desc + ("(传名字/选项文字,Dano 提交时按名字现查内部 ID,**勿直接传 ID/编号**;"
+                                          f"可先 `--list-options {field}` 实时拉可选项再选)")
+            if has_source:
+                prop["x-options-source"] = True
+            prop["x-options"] = opts
             if len(opts) <= _OPTIONS_INLINE_MAX:
-                prop["enum"] = opts                          # ≤50 直接内置 enum:function-calling 层就约束 agent 只能选真实值
-            if cnt > len(opts):                              # 快照被截断(候选 >500)→ 以实时拉取为准
-                prop["x-options-truncated"] = True
+                prop["enum"] = opts                          # 静态枚举 ≤50:烤进 enum,function-calling 层约束只能选真实值
+        elif has_source:                                     # 活接口目录(选人/部门/审批人:会变)→ 不烤清单,只暴露实时接口
+            prop["description"] = desc + ("(传名字,Dano 提交时按名字现查内部 ID,**勿直接传 ID/编号**;"
+                                          f"**该字段选项来自实时接口、会随人员/组织变化** —— 选前**必须**先 `--list-options {field}` "
+                                          "拉当前可选项再传名字,**勿照搬旧快照**)")
+            prop["x-options-source"] = True
+        else:                                                # 既无固定清单也无来源接口:中性 name-ref(只提示传名字)
+            prop["description"] = desc + "(传名字/选项文字,Dano 提交时按名字现查内部 ID,**勿直接传 ID/编号**)"
+        return prop
+    if declared == "list-enum":
+        # 列表多选(参会人/抄送人…):agent 传**名字数组**,运行期每个名字经来源接口拼成整条记录。
+        opts, has_source, static = _enum_facts(sel)
+        item = {"type": "string", "format": "name-ref"}
+        prop = {"type": "array", "items": item, "label": desc}
+        if static:
+            prop["description"] = desc + ("(**多选**:传**名字列表**,Dano 按每个名字现查内部信息拼成整条记录,"
+                                          f"**勿传 ID/编号**;可先 `--list-options {field}` 实时拉可选项)")
+            if has_source:
+                prop["x-options-source"] = True
+            prop["x-options"] = opts
+            if len(opts) <= _OPTIONS_INLINE_MAX:
+                item["enum"] = opts                          # 静态枚举 ≤50:内置 items.enum
+        else:                                                # 活接口目录(选人多选):不烤清单,暴露实时接口
+            prop["description"] = desc + ("(**多选**:传**名字列表**;**选项来自实时接口、会变** —— 选前**必须**先 "
+                                          f"`--list-options {field}` 拉当前可选项再传名字,**勿传 ID/编号、勿照搬旧快照**)")
+            if has_source:
+                prop["x-options-source"] = True
         return prop
     if declared == "datetime":
         return {"type": "string", "format": "date-time", "label": desc,

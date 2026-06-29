@@ -108,9 +108,35 @@ _RECORDER_JS = r"""() => {
     } catch (e) {}
     return false;
   }
-  function emit(op, loc, value, field, required) {
+  function emit(op, loc, value, field, required, options) {
     if (!loc || onLoginPage()) return;            // 登录页上的任何操作一律不录(自动跳过登录,免手点「从这里开始录」)
-    try { window.__danoRecord(JSON.stringify({ op: op, locator: loc, value: value || '', field: field || '', required: !!required })); } catch (e) {}
+    try { window.__danoRecord(JSON.stringify({ op: op, locator: loc, value: value || '', field: field || '', required: !!required, options: options || [] })); } catch (e) {}
+  }
+  // 下拉/级联弹层里**当前可见的选项文字**(地面真值枚举):工作日加班/周末加班/节假日加班 …
+  // —— 直接读 DOM,胜过拿提交值去网络字典里猜命中(治"加班类型/请假类型绑到几百项全量字典")。框架无关。
+  function popupOptions(pop) {
+    if (!pop) return [];
+    try {
+      var sel = '[role="option"],.el-select-dropdown__item,.ant-select-item-option,.el-cascader-node,' +
+                '.ant-cascader-menu-item,.el-autocomplete-suggestion li,li';
+      var nodes = pop.querySelectorAll(sel); var out = [], seen = {};
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i];
+        if (n.offsetParent === null) continue;                      // 不可见(折叠的级联子层)跳过
+        var t = clean(n.innerText || n.textContent || '');
+        if (t && t.length <= 60 && !seen[t]) { seen[t] = 1; out.push(t); }
+        if (out.length >= 500) break;
+      }
+      return out;
+    } catch (e) { return []; }
+  }
+  // 原生 <select> 的全部 <option> 文字(去掉占位空项)
+  function nativeOptions(el) {
+    try {
+      var out = [];
+      for (var i = 0; i < el.options.length; i++) { var t = clean(el.options[i].text); if (t) out.push(t); }
+      return out;
+    } catch (e) { return []; }
   }
   // 找交互目标:role 属交互集 / a / button,否则向上找 cursor:pointer 且短文本的(卡片/自定义控件)。
   function target(t) {
@@ -132,7 +158,7 @@ _RECORDER_JS = r"""() => {
   }, true);
   document.addEventListener('change', function (e) {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
-    if (tag === 'select') { var l1 = locateField(el); emit('select', l1, el.value, fieldOf(l1), requiredOf(el)); }
+    if (tag === 'select') { var l1 = locateField(el); emit('select', l1, el.value, fieldOf(l1), requiredOf(el), nativeOptions(el)); }
     else if (tag === 'input' && ty === 'file') { var l2 = locateField(el); emit('upload', l2, el.value || '', fieldOf(l2), requiredOf(el)); }
   }, true);
   // 选择型控件参数化(框架无关):日期/下拉/级联是"点"出来的,不该录成写死的点击,而该录成一个
@@ -142,7 +168,7 @@ _RECORDER_JS = r"""() => {
               '.ant-picker-dropdown,.ant-select-dropdown,.ant-cascader-dropdown,[role="listbox"]';
   var TRIGGER_CLS = '.el-date-editor,.el-select,.el-cascader,.el-time-select,.el-time-picker,' +
                     '.ant-picker,.ant-select,.ant-cascader-picker';
-  var activeTrigger = null, prevVal = '', pickTimer = null;
+  var activeTrigger = null, prevVal = '', pickTimer = null, lastPickOptions = [];
   function triggerOf(t) {                               // 触发型字段:已知选择器类 / 含 readonly input / aria-haspopup
     var k = t.closest ? t.closest(TRIGGER_CLS + ',[aria-haspopup]') : null; if (k) return k;
     var node = t;
@@ -173,13 +199,18 @@ _RECORDER_JS = r"""() => {
         clearInterval(pickTimer); pickTimer = null;
         var inp = trig.querySelector ? trig.querySelector('input') : null;
         var loc = locateField(inp || trig);
-        if (loc) emit('pick', loc, v, fieldOf(loc), requiredOf(trig) || (inp && requiredOf(inp)));
+        if (loc) emit('pick', loc, v, fieldOf(loc), requiredOf(trig) || (inp && requiredOf(inp)), lastPickOptions);
+        lastPickOptions = [];                           // 用过即清,下一个下拉重新抓
       } else if (tries >= 25) { clearInterval(pickTimer); pickTimer = null; }   // ~2.5s 仍没变 → 放弃
     }, 100);
   }
   document.addEventListener('click', function (e) {
-    // A) 点在日期/下拉弹层内 = 正在选择 → 不记这次点击;轮询触发框值落定后记 pick(选完即生效)
-    if (e.target.closest && e.target.closest(POPUP)) { pollPick(activeTrigger); return; }
+    // A) 点在日期/下拉弹层内 = 正在选择 → 不记这次点击;先把**此刻弹层里可见的选项**抓下来(地面真值枚举),
+    //    再轮询触发框值落定后随 pick 一起回传(选完即生效)
+    if (e.target.closest && e.target.closest(POPUP)) {
+      var _opts = popupOptions(e.target.closest(POPUP)); if (_opts.length) lastPickOptions = _opts;
+      pollPick(activeTrigger); return;
+    }
     // B) 点选择型触发框 → 记住它 + 点击前的显示值,开始轮询(覆盖单击即选 / 远程搜索异步回填 / 级联)
     var trig = triggerOf(e.target);
     if (trig) {
@@ -519,6 +550,19 @@ class RecordSession:
             if field and s.get("op") in ("fill", "select", "pick") and s.get("value") != "":
                 samples[keymap[i]] = s.get("value", "")
         return steps, samples
+
+    def recorded_dom_options(self) -> dict:
+        """录制时下拉/级联里**真实可见的选项文字**(DOM 抓的枚举地面真值)→ {字段key: [选项文字]}。
+        key 与 recorded_steps 同算法分配,保持一致 → 上层据此覆盖 select 的候选快照,治"绑到几百项全量字典"。"""
+        from dano.agent_tools.page_builder import assign_field_keys
+        fb_idx = [i for i, s in enumerate(self.steps) if s.get("field")]
+        keys = assign_field_keys([self.steps[i]["field"] for i in fb_idx])
+        keymap = dict(zip(fb_idx, keys))
+        out: dict[str, list] = {}
+        for i, s in enumerate(self.steps):
+            if s.get("op") in ("pick", "select") and s.get("options") and i in keymap:
+                out[keymap[i]] = list(s["options"])
+        return out
 
     def recorded_required_labels(self) -> set:
         """录制中标了表单 * 必填的字段(供 flatten 标 required)。key 与 recorded_steps 同算法分配,保持一致。"""

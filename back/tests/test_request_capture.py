@@ -24,10 +24,23 @@ from dano.execution.page.request_capture import (
     self_check,
     substitute,
     suggest_fact_check,
+    apply_dom_options,
+    dom_enum_selects,
+    suggest_assignee_names,
     suggest_identity,
+    suggest_list_selects,
     suggest_select_names,
     suggest_selects,
 )
+
+# 参会人多选(participants[] = 选了 3 个人;抓到的用户列表里只含其中 1 个 → 测"≥1 命中即识别")
+_PART_SUBMIT = ('{"meetingTitle":"1","participants":['
+                '{"userId":142,"userName":"亚历山大大帝","userAvatar":"http://a/142.png","participantType":2},'
+                '{"userId":118,"userName":"狗蛋","userAvatar":"http://a/118.png","participantType":2},'
+                '{"userId":117,"userName":"测试号02","userAvatar":"http://a/117.png","participantType":2}]}')
+_USER_READ = [{"url": "/system/user/list",
+               "json": {"rows": [{"userId": 117, "nickName": "测试号02", "avatar": "http://a/117.png", "deptId": 1},
+                                 {"userId": 200, "nickName": "张三", "avatar": "http://a/200.png", "deptId": 2}]}}]
 
 _SAMPLES = {"请假类型": "事假", "开始时间": "2026-06-24", "结束时间": "2026-06-26", "原因": "大地色多"}
 _SUBMIT = ('{"leaveType":"事假","startTime":"2026-06-24","endTime":"2026-06-26",'
@@ -229,8 +242,189 @@ def test_suggest_selects_snapshots_options():
     assert s[0]["options"] == ["事假", "病假", "年假"]
 
 
-def test_manifest_enum_inlines_small_options():
-    """问题1:候选 ≤50 → manifest schema 内置 enum(function-calling 层就约束 agent 只能选真实值)。"""
+def _agg_dict_items():
+    """模拟"按 dictType 聚合的全量字典"(若依 dict_data):同码('00/01/02')在多个 dictType 下重复出现;
+    请假类型只是其中一个类目(oa_leave_type=事假/病假/年假),码 L0/L1/L2。共 57 项 > _AGG_MIN_ITEMS。"""
+    items = []
+    for t in range(15):                                  # 撑到 >50 项,且码在各类目重复(聚合字典的标志)
+        for c in ("00", "01", "02"):
+            items.append({"dictValue": c, "dictLabel": f"占位{t}_{c}", "dictType": f"misc{t}"})
+    groups = {"ai_mode": [("M0", "歌词模式"), ("M1", "描述模式"), ("M2", "聊天")],
+              "archive": [("A0", "文书档案"), ("A1", "科技档案"), ("A2", "会计档案")],
+              "bank": [("B0", "工商银行"), ("B1", "建设银行"), ("B2", "农业银行")],
+              "oa_leave_type": [("L0", "事假"), ("L1", "病假"), ("L2", "年假")]}
+    for dt, opts in groups.items():
+        for code, lab in opts:
+            items.append({"dictValue": code, "dictLabel": lab, "dictType": dt})
+    return items
+
+
+def test_suggest_selects_narrows_aggregate_dict_by_category():
+    """根因(治"请假类型绑到 1431 项含歌词模式/档案/银行…全量字典"):来源是按 dictType 聚合的全量字典 +
+    录制确认选了"病假" → 按命中项的分类键 dictType 收窄成**只属于请假类型的 3 项**,并把分类过滤随 select 走。"""
+    sub = '{"type":"L1"}'                                 # 请假类型存码 L1(=病假)
+    read = [{"url": "/system/dict/data/list", "json": {"rows": _agg_dict_items()}}]
+    s = suggest_selects(sub, read, {"请假类型": "病假", "原因": "回家"})
+    assert len(s) == 1
+    b = s[0]
+    assert b["label"] == "病假" and b["count"] == 3
+    assert b["options"] == ["事假", "病假", "年假"]        # 收窄到 oa_leave_type,不是全量垃圾
+    assert b["category_key"] == "dictType" and b["category_value"] == "oa_leave_type"
+
+
+def test_suggest_selects_drops_unconfirmed_aggregate_match():
+    """全量聚合字典 + 无录制佐证(判不出属于哪个类目)→ 宁可**不绑**(字段退回普通参数),
+    也不把 1431 项垃圾选项塞给 agent。码 '00' 够长(≥2)能过短码闸,但因聚合+未确认被丢。"""
+    sub = '{"type":"00"}'
+    read = [{"url": "/system/dict/data/list", "json": {"rows": _agg_dict_items()}}]
+    assert suggest_selects(sub, read) == []
+
+
+def test_suggest_selects_big_unique_list_not_treated_as_aggregate():
+    """防误伤:大但**码全局唯一**的单字段列表(城市/用户)不是聚合字典 → 照常整列表绑定,不收窄不丢弃。"""
+    sub = '{"city":"C100"}'
+    big = {"rows": [{"cityId": f"C{i}", "cityName": f"市{i}"} for i in range(200)]}
+    s = suggest_selects(sub, [{"url": "/sys/city", "json": big}], {"城市": "市100"})
+    assert len(s) == 1 and s[0]["count"] == 200
+    assert s[0]["label"] == "市100" and "category_key" not in s[0]
+
+
+async def test_fetch_field_options_filters_aggregate_category(monkeypatch):
+    """运行期实时拉取:select 带 category_key/value → 只列该字段所属类目(与录制快照一致),不返回全量字典。"""
+    from dano.execution.page import request_capture as rc
+    apir = {"selects": [{"param": "请假类型", "source_url": "/dict/all", "value_key": "dictValue",
+                         "label_key": "dictLabel", "category_key": "dictType",
+                         "category_value": "oa_leave_type"}], "auth_headers": {}}
+
+    async def fake(url, base_url, storage_state, token_key, verify, auth_headers):
+        return [{"dictValue": "M0", "dictLabel": "歌词模式", "dictType": "ai_mode"},
+                {"dictValue": "L0", "dictLabel": "事假", "dictType": "oa_leave_type"},
+                {"dictValue": "L1", "dictLabel": "病假", "dictType": "oa_leave_type"}]
+    monkeypatch.setattr(rc, "_fetch_list", fake)
+    out = await rc.fetch_field_options(apir, "请假类型")
+    assert out["count"] == 2
+    assert out["options"] == [{"label": "事假", "value": "L0"}, {"label": "病假", "value": "L1"}]
+
+
+async def test_resolve_selects_filters_aggregate_category(monkeypatch):
+    """运行期名→ID:聚合字典里**同名跨类目**(两个"病假")时,只在本字段类目内换码,不被别类目串到。"""
+    from dano.execution.page import request_capture as rc
+    apir = {"selects": [{"param": "请假类型", "source_url": "/dict/all", "value_key": "dictValue",
+                         "label_key": "dictLabel", "category_key": "dictType",
+                         "category_value": "oa_leave_type"}]}
+
+    async def fake(url, base_url, storage_state, token_key, verify, auth_headers):
+        return [{"dictValue": "X1", "dictLabel": "病假", "dictType": "other"},   # 别类目的同名"病假"
+                {"dictValue": "L1", "dictLabel": "病假", "dictType": "oa_leave_type"}]
+    monkeypatch.setattr(rc, "_fetch_list", fake)
+    fields, _ov = await rc._resolve_selects(apir, {"请假类型": "病假"}, base_url="",
+                                            storage_state=None, token_key=None, verify=True)
+    assert fields["请假类型"] == "L1"                      # 只在 oa_leave_type 里换码,不串到 other 的 X1
+
+
+def test_suggest_assignee_names_from_flow_definition():
+    """治"审批人参数名退回 Activity_09dlq0g 内部节点 ID":抓到的流程定义读响应里有 节点ID→节点名 →
+    审批人字段命名成"领导审批""人力审批"(理解后命名,确定性,不靠 LLM 猜不透明 ID)。"""
+    sub = ('{"billType":"oa_duty_leave",'
+           '"startUserSelectAssignees":{"Activity_09dlq0g":[118],"Activity_0ag2wyz":[117]}}')
+    reads = [{"url": "/flowable/start/node/list",
+              "json": {"data": [{"nodeId": "Activity_09dlq0g", "nodeName": "领导审批"},
+                                 {"nodeId": "Activity_0ag2wyz", "nodeName": "人力审批"}]}}]
+    out = suggest_assignee_names(sub, reads)
+    assert out["startUserSelectAssignees.Activity_09dlq0g[0]"] == "领导审批"
+    assert out["startUserSelectAssignees.Activity_0ag2wyz[0]"] == "人力审批"
+
+
+def test_suggest_assignee_names_ordinal_fallback():
+    """流程定义没抓到节点名时:按审批节点出现序兜底"审批人1/审批人2"(也比裸 Activity_xxx 强)。"""
+    sub = '{"startUserSelectAssignees":{"Activity_09dlq0g":[118],"Activity_0ag2wyz":[117]}}'
+    out = suggest_assignee_names(sub, [])
+    assert out["startUserSelectAssignees.Activity_09dlq0g[0]"] == "审批人1"
+    assert out["startUserSelectAssignees.Activity_0ag2wyz[0]"] == "审批人2"
+
+
+def test_suggest_assignee_names_single_node():
+    """只有一个审批节点 → "审批人"(不加序号)。"""
+    sub = '{"startUserSelectAssignees":{"Activity_09dlq0g":[118]}}'
+    assert suggest_assignee_names(sub, [])["startUserSelectAssignees.Activity_09dlq0g[0]"] == "审批人"
+
+
+def test_suggest_assignee_names_ignores_normal_list_id_name():
+    """防误伤:普通列表的 id+name(非 BPMN 节点 ID 形态)不被当节点名映射;非审批字段不命名。"""
+    sub = '{"reason":"回家","deptId":118}'
+    reads = [{"url": "/dept/list", "json": {"data": [{"id": 118, "name": "研发部"}]}}]
+    assert suggest_assignee_names(sub, reads) == {}
+
+
+def test_suggest_list_selects_collapses_participants_array():
+    """根因(治"选了多个人却被拆成 participants[0].userId… 一堆、前几个还冻成固定值"):对象数组多选 →
+    识别成**一个列表参数**,推出元素模板(userId←userId、userName←nickName、头像←avatar、type=常量)。
+    抓到的用户列表只含 3 人里的 1 人,仍按"≥1 命中"识别(运行期用完整列表解析全部名字)。"""
+    s = suggest_list_selects(_PART_SUBMIT, _USER_READ, {"参会人": "测试号02"})
+    assert len(s) == 1
+    b = s[0]
+    assert b["path"] == "participants" and b["multi"] is True
+    assert b["value_key"] == "userId" and b["label_key"] == "nickName" and b["label_subkey"] == "userName"
+    assert b["element_template"]["userId"] == {"from": "item", "item_key": "userId"}
+    assert b["element_template"]["userName"] == {"from": "item", "item_key": "nickName"}
+    assert b["element_template"]["userAvatar"] == {"from": "item", "item_key": "avatar"}
+    assert b["element_template"]["participantType"] == {"const": 2}
+    assert b["_confirmed"] is True and b["values"] == ["亚历山大大帝", "狗蛋", "测试号02"]
+
+
+def test_suggest_list_selects_ignores_non_entity_arrays():
+    """防误伤:字符串数组(timeRangeList)、无 id 子键的对象数组、对不上任何来源的对象数组 → 不当多选。"""
+    assert suggest_list_selects('{"timeRangeList":["06:00-06:30","07:00-07:30"]}', _USER_READ) == []
+    assert suggest_list_selects('{"tags":[{"text":"a"},{"text":"b"}]}', _USER_READ) == []   # 无 id 子键
+    assert suggest_list_selects(_PART_SUBMIT, []) == []                                       # 无来源可对
+
+
+def test_flatten_body_collapses_list_select_into_one_field():
+    """列表多选接管的数组 → flatten 折叠成**一个** list-enum 字段,前端不再见 participants[0].userId… 一堆。"""
+    fields = flatten_body(_PART_SUBMIT, {"参会人": "测试号02"}, collapse_paths=["participants"])
+    assert not any(f["path"].startswith("participants[") for f in fields)
+    pf = [f for f in fields if f["path"] == "participants"]
+    assert len(pf) == 1 and pf[0]["type"] == "list-enum" and pf[0]["suggest_param"] is True
+    assert any(f["path"] == "meetingTitle" for f in fields)        # 其它字段照常
+
+
+def test_build_api_request_list_select_one_param_no_split():
+    """build:数组路径在 param_map → 整个数组替成一个 {{参会人}} 占位(不拆元素),并带 multi 元素模板;self_check 通过。"""
+    list_sels = suggest_list_selects(_PART_SUBMIT, _USER_READ, {"参会人": "测试号02"})
+    pm = {"meetingTitle": "会议主题", "participants": "参会人"}
+    apir = build_api_request({"url": "http://oa.x/meeting/apply", "post_data": _PART_SUBMIT}, pm, selects=list_sels)
+    assert apir["body_template"]["participants"] == "{{参会人}}"
+    assert "参会人" in apir["params"] and apir["field_types"]["参会人"] == "list-enum"
+    sm = next(s for s in apir["selects"] if s["param"] == "参会人")
+    assert sm["multi"] is True and sm["value_key"] == "userId" and sm["label_subkey"] == "userName"
+    assert sm["element_template"]["participantType"] == {"const": 2}
+    assert self_check(apir) == []                                   # 无残留占位、参数能进 body
+
+
+async def test_resolve_list_selects_expands_names_to_objects(monkeypatch):
+    """运行期:参会人=名字列表 → 每个名字经来源接口拼成整份元素对象(userId/userName/头像/type)。"""
+    from dano.execution.page import request_capture as rc
+    apir = {"selects": [{"param": "参会人", "multi": True, "source_url": "/u", "value_key": "userId",
+                         "label_key": "nickName", "label_subkey": "userName",
+                         "element_template": {"userId": {"from": "item", "item_key": "userId"},
+                                              "userName": {"from": "item", "item_key": "nickName"},
+                                              "userAvatar": {"from": "item", "item_key": "avatar"},
+                                              "participantType": {"const": 2}}}]}
+
+    async def fake(url, base_url, storage_state, token_key, verify, auth_headers):
+        return [{"userId": 117, "nickName": "测试号02", "avatar": "http://a/117.png"},
+                {"userId": 118, "nickName": "狗蛋", "avatar": "http://a/118.png"},
+                {"userId": 142, "nickName": "亚历山大大帝", "avatar": "http://a/142.png"}]
+    monkeypatch.setattr(rc, "_fetch_list", fake)
+    fields = await rc._resolve_list_selects(apir, {"参会人": ["亚历山大大帝", "狗蛋"]},
+                                            base_url="", storage_state=None, token_key=None, verify=True)
+    assert fields["参会人"] == [
+        {"userId": 142, "userName": "亚历山大大帝", "userAvatar": "http://a/142.png", "participantType": 2},
+        {"userId": 118, "userName": "狗蛋", "userAvatar": "http://a/118.png", "participantType": 2}]
+
+
+def test_manifest_static_dom_enum_inlines_small_options():
+    """**静态页面枚举**(DOM 抓的固定下拉,dom_options=True)且 ≤50 → manifest 内置 enum(约束 agent 只能选真实值)。"""
     from dano.catalog.manifest import to_manifest
     from dano.orchestrator.types import SkillSpec
     from dano.shared.enums import RiskLevel, Subsystem
@@ -238,13 +432,97 @@ def test_manifest_enum_inlines_small_options():
                    field_types={"请假类型": "enum"}, required_fields=["请假类型"],
                    api_request={"selects": [{"param": "请假类型", "source_url": "/d",
                                              "value_key": "dictValue", "label_key": "dictLabel",
-                                             "options": ["事假", "病假", "年假"], "count": 3}]})
+                                             "options": ["事假", "病假", "年假"], "count": 3,
+                                             "dom_options": True}]})       # ← DOM 抓的固定下拉=静态枚举
     p = to_manifest(sk).parameters["properties"]["请假类型"]
     assert p["enum"] == ["事假", "病假", "年假"] and p["x-options"] == ["事假", "病假", "年假"]
 
 
-def test_manifest_large_options_no_inline_enum_but_snapshot():
-    """问题1:候选 >50 → 不内置 enum(过大),但仍快照进 x-options(写 OPTIONS.md 供 agent 选)。"""
+def test_manifest_live_directory_enum_no_inline_enum():
+    """**活接口目录**(选人/部门/审批人:网络源、无 DOM 固定下拉)→ **不烤 enum、不烤快照**,只暴露 x-options-source,
+    让调用方运行期 `--list-options` 现拉(治"审批人烤成 6 个部门、与实际人选不符导致入库失败")。"""
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel, Subsystem
+    sk = SkillSpec(skill_id="A-OA.appr", subsystem=Subsystem.OA, action="appr", risk_level=RiskLevel.L3,
+                   field_types={"审批人1": "enum"}, required_fields=["审批人1"],
+                   api_request={"selects": [{"param": "审批人1", "source_url": "/system/user/list",
+                                             "value_key": "userId", "label_key": "nickName",
+                                             "options": ["财务部门", "市场部门", "研发部门"], "count": 6}]})
+    p = to_manifest(sk).parameters["properties"]["审批人1"]
+    assert "enum" not in p and "x-options" not in p           # 不把活目录烤成静态清单
+    assert p["x-options-source"] is True and "--list-options" in p["description"]
+
+
+def test_apply_dom_options_overrides_garbage_dict():
+    """根因(治"加班类型绑到 222 项含工作日/档案/银行…全量字典"):录制时下拉里真实可见的 3 个选项(DOM 抓的)
+    覆盖网络匹配出的 222 项快照 —— 地面真值,胜过拿提交值去字典里猜命中。并撤掉按类目收窄。"""
+    selects = [{"path": "type", "label": "周末加班", "value": "2", "source_url": "/dict",
+                "value_key": "dictValue", "label_key": "dictLabel",
+                "options": [f"x{i}" for i in range(222)], "count": 222,
+                "category_key": "dictType", "category_value": "misc"}]
+    apply_dom_options(selects, {"周末加班": ["工作日加班", "周末加班", "节假日加班"]})
+    s = selects[0]
+    assert s["options"] == ["工作日加班", "周末加班", "节假日加班"] and s["count"] == 3
+    assert s["dom_options"] is True and "category_key" not in s     # DOM 即权威,不再按类目收窄
+    assert s["source_url"] == "/dict"                               # 来源保留(运行期名→ID 仍用它)
+
+
+def test_dom_enum_selects_creates_sourceless_enum():
+    """页面只有 3 个选项、提交体存的就是显示名、又没绑上任何网络源 → 造**无来源** enum(agent 传名字即原样提交)。"""
+    sub = '{"overtimeType":"周末加班","reason":"x"}'
+    out = dom_enum_selects(sub, {"周末加班": ["工作日加班", "周末加班", "节假日加班"]}, set())
+    assert len(out) == 1
+    s = out[0]
+    assert s["path"] == "overtimeType" and s["options"] == ["工作日加班", "周末加班", "节假日加班"]
+    assert s["source_url"] == "" and s["dom_options"] is True
+    assert dom_enum_selects(sub, {"周末加班": ["a", "b"]}, {"overtimeType"}) == []   # 已被别的 select 接管 → 不重复造
+
+
+def test_build_api_request_carries_dom_options():
+    """发布构建:DOM 覆盖后的 3 项选项随 select 进资产(导出/manifest 就只见 3 项,不是 222)。"""
+    selects = [{"path": "type", "label": "周末加班", "value": "2", "source_url": "/dict",
+                "value_key": "dictValue", "label_key": "dictLabel",
+                "options": ["工作日加班", "周末加班", "节假日加班"], "count": 3, "dom_options": True}]
+    apir = build_api_request({"url": "http://x/ot", "post_data": '{"type":"2"}'}, {"type": "加班类型"}, selects=selects)
+    sm = next(s for s in apir["selects"] if s["param"] == "加班类型")
+    assert sm["options"] == ["工作日加班", "周末加班", "节假日加班"] and apir["field_types"]["加班类型"] == "enum"
+
+
+def test_manifest_list_enum_live_directory_no_inline_enum():
+    """列表多选**选人**(参会人:网络源、人会变)= 活接口目录 → schema=数组,items=name-ref,**不烤 items.enum/快照**,
+    只暴露 x-options-source 让调用方运行期 --list-options 现拉(治"前端选了陈旧/错误人名导致入库失败")。"""
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel, Subsystem
+    sk = SkillSpec(skill_id="A-OA.m", subsystem=Subsystem.OA, action="m", risk_level=RiskLevel.L3,
+                   field_types={"参会人": "list-enum"}, required_fields=["参会人"],
+                   api_request={"selects": [{"param": "参会人", "multi": True, "source_url": "/u",
+                                             "value_key": "userId", "label_key": "nickName",
+                                             "options": ["测试号02", "狗蛋", "张三"], "count": 3}]})
+    p = to_manifest(sk).parameters["properties"]["参会人"]
+    assert p["type"] == "array" and p["items"]["format"] == "name-ref"
+    assert "enum" not in p["items"] and "x-options" not in p   # 活目录:不烤静态清单
+    assert p["x-options-source"] is True and "--list-options" in p["description"]
+
+
+def test_manifest_list_enum_static_dom_inlines():
+    """列表多选但来自**固定下拉**(dom_options=True,如固定标签多选)→ 静态枚举 → items.enum 内置(≤50)。"""
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel, Subsystem
+    sk = SkillSpec(skill_id="A-OA.tags", subsystem=Subsystem.OA, action="tags", risk_level=RiskLevel.L3,
+                   field_types={"标签": "list-enum"}, required_fields=["标签"],
+                   api_request={"selects": [{"param": "标签", "multi": True, "source_url": "",
+                                             "value_key": "v", "label_key": "l",
+                                             "options": ["紧急", "重要", "常规"], "count": 3,
+                                             "dom_options": True}]})
+    p = to_manifest(sk).parameters["properties"]["标签"]
+    assert p["items"]["enum"] == ["紧急", "重要", "常规"] and p["x-options"] == ["紧急", "重要", "常规"]
+
+
+def test_manifest_large_static_dom_enum_no_inline_but_snapshot():
+    """**静态**页面枚举 >50(dom_options=True 的大固定下拉)→ 不内置 enum(过大),但仍快照进 x-options。"""
     from dano.catalog.manifest import to_manifest
     from dano.orchestrator.types import SkillSpec
     from dano.shared.enums import RiskLevel, Subsystem
@@ -253,7 +531,7 @@ def test_manifest_large_options_no_inline_enum_but_snapshot():
                    field_types={"应用系统名称": "enum"}, required_fields=["应用系统名称"],
                    api_request={"selects": [{"param": "应用系统名称", "source_url": "/x",
                                              "value_key": "id", "label_key": "xtmc",
-                                             "options": opts, "count": 135}]})
+                                             "options": opts, "count": 135, "dom_options": True}]})
     p = to_manifest(sk).parameters["properties"]["应用系统名称"]
     assert "enum" not in p and len(p["x-options"]) == 135      # 不内置 enum,但快照全在
     assert p.get("x-options-source") is True                   # 有来源接口 → 可 --list-options 实时拉
@@ -261,7 +539,7 @@ def test_manifest_large_options_no_inline_enum_but_snapshot():
 
 
 def test_export_options_md_lists_candidates():
-    """问题1:导出 references/OPTIONS.md 列出选择型候选值;无候选则不产生该段。"""
+    """问题1:导出 references/OPTIONS.md 列出**静态枚举**(DOM 固定下拉)候选值;无候选则不产生该段。"""
     from dano.catalog.manifest import to_manifest
     from dano.export.agent_skills import _options_md
     from dano.orchestrator.types import SkillSpec
@@ -270,9 +548,25 @@ def test_export_options_md_lists_candidates():
                    field_types={"请假类型": "enum"}, required_fields=["请假类型"], title="请假",
                    api_request={"selects": [{"param": "请假类型", "source_url": "/d",
                                              "value_key": "dictValue", "label_key": "dictLabel",
-                                             "options": ["事假", "病假"], "count": 2}]})
+                                             "options": ["事假", "病假"], "count": 2, "dom_options": True}]})
     md = _options_md(to_manifest(sk))
     assert md and "事假" in md and "病假" in md and "请假类型" in md
+
+
+def test_export_options_md_live_directory_points_to_runtime():
+    """活接口目录字段(选人/审批人:无 DOM 固定下拉)→ OPTIONS.md **不列陈旧快照**,只指向运行期 --list-options。"""
+    from dano.catalog.manifest import to_manifest
+    from dano.export.agent_skills import _options_md
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel, Subsystem
+    sk = SkillSpec(skill_id="A-OA.appr", subsystem=Subsystem.OA, action="appr", risk_level=RiskLevel.L3,
+                   field_types={"审批人1": "enum"}, required_fields=["审批人1"], title="请假",
+                   api_request={"selects": [{"param": "审批人1", "source_url": "/system/user/list",
+                                             "value_key": "userId", "label_key": "nickName",
+                                             "options": ["财务部门", "研发部门"], "count": 6}]})
+    md = _options_md(to_manifest(sk))
+    assert md and "实时接口" in md and "--list-options 审批人1" in md
+    assert "财务部门" not in md                              # 不列陈旧/错误快照
 
 
 def test_suggest_selects_name_id_pair_detected():

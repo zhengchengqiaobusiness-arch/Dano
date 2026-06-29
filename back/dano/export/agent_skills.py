@@ -93,6 +93,8 @@ def _ptype(k: str, props: dict, numeric: set[str]) -> str:
     fmt = p.get("format")
     if fmt == "name-ref":
         return "枚举·名字→ID"
+    if p.get("type") == "array" and ((p.get("items") or {}).get("format") == "name-ref"):
+        return "多选·名字列表→记录"                       # 列表多选(参会人):传名字数组
     if fmt == "date-time":
         return "datetime"
     if fmt == "date":
@@ -100,16 +102,24 @@ def _ptype(k: str, props: dict, numeric: set[str]) -> str:
     return "number" if k in numeric else (p.get("type") or "string")
 
 
+def _is_name_ref(p: dict) -> bool:
+    """名字→ID 选择型(单选 name-ref,或**多选** array<name-ref>):agent 传名字,Dano 运行期查内部信息。"""
+    p = p or {}
+    return p.get("format") == "name-ref" or (
+        p.get("type") == "array" and (p.get("items") or {}).get("format") == "name-ref")
+
+
 def _select_fields(props: dict) -> list[str]:
-    """名字→ID 的选择型字段(选领导/字典下拉):agent 传名字,Dano 运行期查内部 ID。"""
-    return [k for k, v in (props or {}).items() if (v or {}).get("format") == "name-ref"]
+    """名字→ID 的选择型字段(选领导/字典下拉/参会人多选):agent 传名字,Dano 运行期查内部 ID。"""
+    return [k for k, v in (props or {}).items() if _is_name_ref(v)]
 
 
 def _opts_hint(prop: dict, cap: int = 12) -> str:
-    """枚举字段在参数表/SOP 里的"可选值"提示:列前 cap 个候选;超出指向 references/OPTIONS.md。"""
+    """枚举字段在参数表/SOP 里的"可选值"提示:静态枚举列前 cap 个候选(超出指向 OPTIONS.md);
+    **活接口目录**(选人/部门/审批人:有来源、无内置清单)→ 提示运行期实时拉,**不列陈旧快照**。"""
     opts = (prop or {}).get("x-options") or (prop or {}).get("enum") or []
     if not opts:
-        return ""
+        return "选项来自实时接口:先 `--list-options` 拉当前可选项再传名字" if (prop or {}).get("x-options-source") else ""
     shown = " / ".join(str(o) for o in opts[:cap])
     more = f" …(共 {len(opts)} 项,见 references/OPTIONS.md)" if len(opts) > cap else ""
     return f"可选:{shown}{more}"
@@ -461,6 +471,10 @@ def _options_md(m: SkillManifest) -> str | None:
         p = props.get(k) or {}
         opts = p.get("x-options")
         if not opts:
+            if p.get("x-options-source"):                    # 活接口目录:无内置快照,只指向实时拉取(不列陈旧/错误清单)
+                blocks.append(f"## {_label(props, k)}(`{k}`)— **实时接口**\n\n"
+                              f"选项来自实时接口、会随人员/组织变化:运行 `bash scripts/submit.sh --list-options {k}` "
+                              "拉当前可选项,从中选名字传入(**勿照搬快照、勿传 ID/编号**)。")
             continue
         head = f"## {_label(props, k)}(`{k}`)— 共 {len(opts)} 项"
         if p.get("x-options-truncated"):

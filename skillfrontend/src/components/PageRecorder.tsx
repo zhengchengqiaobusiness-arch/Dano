@@ -14,7 +14,7 @@ interface RecField { path: string; key: string; value: string; suggest_param: bo
 // 候选写请求(抓到多个时让用户手选用哪个)
 interface RecCand { idx: number; method: string; path: string }
 // P3:字段=选自某列表(选领导:名字→ID)/ 字段=当前用户·会话值(运行期重取)
-interface RecSelect { path: string; source_url: string; value_key: string; label_key: string; label: string; count: number }
+interface RecSelect { path: string; source_url: string; value_key: string; label_key: string; label: string; count: number; multi?: boolean; dom_options?: boolean }
 interface RecIdentity { path: string; source: string }
 interface RecResult {
   ok?: boolean; action?: string; risk_level?: string; mode?: string; reason?: string;
@@ -320,7 +320,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                         <Checkbox checked={p.on} onChange={(e) => toggleField(f.path, e.target.checked)}>参数</Checkbox>
                         <Typography.Text code style={{ fontSize: 12 }}>{f.path}</Typography.Text>
                         {sel && <Tag color="purple" style={{ fontSize: 11 }}>
-                          📋 选自列表 {sel.label_key}→{sel.value_key}(共{sel.count}项)</Tag>}
+                          {sel.dom_options && !sel.source_url
+                            ? <>📋 页面枚举(共{sel.count}项,从下拉里选)</>
+                            : <>📋 选自列表{sel.multi ? "·多选" : ""}{sel.dom_options ? "·页面枚举" : ""} {sel.label_key}→{sel.value_key}(共{sel.count}项{sel.multi ? ",传名字列表" : ""})</>}</Tag>}
                         {idn && <Tag color="gold" style={{ fontSize: 11 }}>🔒 当前用户/会话值(运行期自动填)</Tag>}
                         {!sel && !idn && (f.suggest_param
                           ? <Tag color="blue" style={{ fontSize: 11 }}>参数·agent 传值</Tag>

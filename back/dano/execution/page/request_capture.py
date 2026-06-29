@@ -345,10 +345,48 @@ def _parent_path(path: str) -> str:
     return path[:i] if i >= 0 else ""
 
 
+_AGG_MIN_ITEMS = 50    # 列表 ≥ 此规模才考虑"按类目聚合的全量字典"判定(更小的就是单字段选项列表)
+# 像"分类/类目键"的字段名(若依 dictType / type / category / group …):聚合字典靠它分组,收窄时优先认它。
+_CATEGORY_KEY_RE = _re.compile(
+    r"(dicttype|type|categ|category|group|kind|class|classify|module|biztype|sort|parent)", _re.I)
+
+
+def _aggregate_category(items: list[dict], value_key: str, label_key: str) -> str | None:
+    """列表是不是"按类目聚合的**全量**字典"(若依 dict_data 这类:同一码在不同 dictType 下重复出现)?
+    是 → 返回**分类键**(供按"所选项所属类目"把全量收窄成真正属于该字段的选项);否(单字段选项源:
+    城市/用户/部门,码/ID 全局唯一)→ None。**通用,不挑系统/字段名**。
+
+    判据:① 列表够大(>_AGG_MIN_ITEMS);② 值键取值在整列表里**大量重复**(distinct < 0.7×N)——单字段
+    选项源的码基本唯一,只有"多字段拼在一起的全量字典"才会重码;③ 存在一个标量、近乎全员都有、取值数
+    1<distinct<N 的列表字段当分类键(名字像 type/category/dictType 的加分,再取分组更粗的)。
+    """
+    n = len(items)
+    if n < _AGG_MIN_ITEMS:
+        return None
+    vals = [str(it.get(value_key)) for it in items if isinstance(it, dict) and it.get(value_key) is not None]
+    if not vals or len(set(vals)) >= 0.7 * len(vals):       # 码基本唯一 → 单字段选项源,不是聚合
+        return None
+    first = items[0] if isinstance(items[0], dict) else {}
+    best = None
+    for k in first:
+        if k in (value_key, label_key):
+            continue
+        col = [it.get(k) for it in items if isinstance(it, dict)]
+        if sum(1 for v in col if _is_scalar(v)) < 0.8 * n:  # 不是"近乎全员都有的标量"列 → 不当分类键
+            continue
+        distinct = len({str(v) for v in col if v is not None})
+        if 1 < distinct < n:                                # 能分组(既非全同也非全异)
+            score = (1 if _CATEGORY_KEY_RE.search(str(k)) else 0, -distinct)
+            if best is None or score > best[0]:
+                best = (score, k)
+    return best[1] if best else None
+
+
 def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool):
-    """判提交值 sv 对应候选列表里哪种选项 → (mode, value_key, label_key, label, confirmed) 或 None。
+    """判提交值 sv 对应候选列表里哪种选项 → (mode, value_key, label_key, label, confirmed, item) 或 None。
     mode='name':字段存的是**显示名**(配对 id 字段另存,如 yyxtmc=名 / yyxtid=id);
-    mode='code':字段存的是**码/ID**(单字段,如 type=2 / approverId=12,agent 传名运行期换码)。通用,不挑系统。"""
+    mode='code':字段存的是**码/ID**(单字段,如 type=2 / approverId=12,agent 传名运行期换码)。通用,不挑系统。
+    返回里带命中的**列表项 item**:聚合字典需读它的分类键(dictType…)把全量收窄成该字段的真实选项。"""
     name_cand = code_cand = None
     for it in items:
         id_vk = next((k for k, v in it.items() if _is_scalar(v) and _is_idlike(k)), None)
@@ -357,7 +395,7 @@ def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool):
             if disp != id_vk and not _is_idlike(disp) and _is_scalar(it.get(disp)) and str(it.get(disp)) == sv:
                 conf = any(_name_match(sv, s) for s in sample_vals)
                 if name_cand is None or (conf and not name_cand[4]):
-                    name_cand = ("name", id_vk, disp, sv, conf)
+                    name_cand = ("name", id_vk, disp, sv, conf, it)
                 if conf:
                     break
         cvk = next((k for k, v in it.items() if _is_scalar(v) and str(v) == sv and _is_idlike(k)), None)
@@ -369,13 +407,13 @@ def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool):
             if clk != cvk and label:
                 conf = any(_name_match(label, s) for s in sample_vals)
                 if code_cand is None or (conf and not code_cand[4]):
-                    code_cand = ("code", cvk, clk, label, conf)
+                    code_cand = ("code", cvk, clk, label, conf, it)
     cands = [c for c in (name_cand, code_cand) if c]
     if not cands:
         return None
     cands.sort(key=lambda c: (c[4], c[0] == "name"), reverse=True)   # 确认命中优先;其次 name(更贴近人选)
     best = cands[0]
-    mode, _vk, _lk, _label, conf = best
+    mode, _vk, _lk, _label, conf, _it = best
     if conf:                                             # 录制选项佐证 → 强证据,直接采纳
         return best
     if not (len(sv) >= 2 or small):                      # 未确认 + 过短 + 大列表 → 巧合,拒
@@ -387,7 +425,8 @@ def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool):
     return best
 
 
-def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | None = None) -> list[dict]:
+def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | None = None,
+                    skip_paths: list[str] | None = None) -> list[dict]:
     """提交体里"对应某候选列表项"的字段 → 绑 select(Agent 传名字/文字→运行期查内部 ID)。
 
     两形态(通用,不挑系统):① **单码字段**(type=2↔字典 value=2、approverId=12↔user/list:字段存码,agent 传名)
@@ -395,11 +434,16 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
     解析后**同时**写回显示名字段与配对 id 字段(换一个选项时 id 不再冻结成录制值)。
     **录制样例(samples)= 消歧器**:候选显示名 == 用户录制选中值 →「确认命中」强证据(大列表/短码也照绑)。
     无佐证时:短码(<2)只在小列表认、用户亲填值不当码、同源未确认命中 >3 个按通用字典整源丢弃。
+    skip_paths:已被**列表多选**(suggest_list_selects)整体接管的对象数组路径 → 其下逐元素叶子不再单独绑
+    (修"选了多个人却被拆成 participants[0].userId 冻死、只认最后一个"的根因)。
     """
     body = _parse_body(post_data)
     if body is None:
         return []
     leaves = _leaf_paths(body)                            # [(path, tokens, sv, raw)]
+    skip_pref = tuple((p + "[") for p in (skip_paths or []))   # 数组多选路径下的逐元素叶子(participants[0]…)整体跳过
+    if skip_pref:
+        leaves = [lf for lf in leaves if not lf[0].startswith(skip_pref)]
     sample_vals = {str(v) for v in (samples or {}).values() if v not in (None, "")}
     by_path: dict[str, list[dict]] = {}                   # path → 跨**所有** read 源的候选绑定(供择优)
     for r in reads:
@@ -414,11 +458,27 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
             m = _match_select(sv, items, sample_vals, small)
             if m is None:
                 continue
-            mode, vk, lk, label, confirmed = m
+            mode, vk, lk, label, confirmed, item = m
+            # 来源是"按类目聚合的全量字典"(若依 dict_data:同码跨 dictType 重复)→ 整表不是这个字段的选项。
+            #   · 已确认(录制选中文字命中某项)→ 按命中项的**分类键**收窄成真正属于该字段的选项(治"请假类型
+            #     绑到 1431 项含歌词模式/OpenAI/档案/银行…的全量字典");并把分类过滤随 select 走,运行期同样收窄。
+            #   · 未确认 → 无从判定属于哪个类目,绑全量必错 → **不绑**(字段退回普通参数,诚实不瞎给选项)。
+            cat_key = _aggregate_category(items, vk, lk)
+            cat_val = None
+            opt_items = items
+            if cat_key is not None:
+                if not confirmed:
+                    continue
+                cat_val = item.get(cat_key)
+                if cat_val is not None:
+                    opt_items = [it for it in items
+                                 if isinstance(it, dict) and str(it.get(cat_key)) == str(cat_val)]
             entry = {"path": path, "tokens": toks, "value": sv, "source_url": r.get("url"),
-                     "value_key": vk, "label_key": lk, "label": label, "count": len(items),
-                     "options": _list_options(items, lk),   # 候选显示名快照(存进 skill 让 agent 从中选,问题1)
+                     "value_key": vk, "label_key": lk, "label": label, "count": len(opt_items),
+                     "options": _list_options(opt_items, lk),   # 候选显示名快照(存进 skill 让 agent 从中选,问题1)
                      "_confirmed": confirmed}
+            if cat_key is not None and cat_val is not None:     # 分类过滤随 select 走(运行期 list-options / 名→ID 同样收窄)
+                entry["category_key"], entry["category_value"] = cat_key, str(cat_val)
             if mode == "name":                           # 名/ID 配对:找兄弟"内部 id"字段(同父 + 值==该项的 id)
                 it = next((x for x in items if str(x.get(lk)) == sv), None)
                 idval = str(it.get(vk)) if it and it.get(vk) is not None else None
@@ -453,6 +513,133 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
         if best.get("id_path"):
             claimed.add(best["id_path"])
         out.append({k: v for k, v in best.items() if not k.startswith("_")})
+    return out
+
+
+def _array_object_paths(body) -> list[tuple]:
+    """body 里**对象数组**的点路径 → [(path, tokens, elements)];元素须同构 dict(键集一致,≥1 个)。
+    供"列表多选"识别(participants[]=选了多个人 → 一个数组里几份同形对象)。通用,不挑系统。"""
+    out: list[tuple] = []
+
+    def walk(node, path, toks):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, f"{path}.{k}" if path else k, toks + [k])
+        elif isinstance(node, list):
+            if node and all(isinstance(e, dict) for e in node):
+                keys = set(node[0].keys())
+                if all(set(e.keys()) == keys for e in node):
+                    out.append((path, list(toks), node))
+            for i, v in enumerate(node):
+                walk(v, f"{path}[{i}]", toks + [i])
+
+    walk(body, "", [])
+    return out
+
+
+def suggest_list_selects(post_data: str | None, reads: list[dict] | None,
+                         samples: dict | None = None) -> list[dict]:
+    """**列表多选**:提交体里"选了多个对象"的数组(participants[]=多个参会人、抄送人…)→ 绑成**一个列表参数**
+    (agent 传**名字列表**,运行期每个名字经来源接口换成整份元素 {userId,userName,avatar,type…}),
+    而不是把数组拆成 participants[0].userId / [1].userId… 一堆字段(还把前几个冻成固定值)。
+
+    判据(通用,不挑系统/字段):① body 里某对象数组,元素同构、且每个元素有 id 类子键 + 文字子键(像选出来的"实体");
+    ② 抓到的某读响应(选人列表)里,**≥1 个元素**能按 id 子键命中其某项 → 认定该数组来自这个多选源;
+    ③ 用命中的元素 + 其源项,推出**元素模板**:每个子键来自源项哪个字段(userId←id、userName←nickName、
+       头像←avatar),整列一致的子键当常量(participantType=2)。运行期用模板把"名字列表"展开成对象数组。
+    录制样例命中元素显示名 → 确认命中(强证据)。返回 [{path, multi, source_url, value_key, label_key,
+    element_template, label_subkey, options, count, label, values, _confirmed}]。
+    """
+    body = _parse_body(post_data)
+    if body is None:
+        return []
+    sample_vals = {str(v) for v in (samples or {}).values() if v not in (None, "")}
+    out: list[dict] = []
+    for path, toks, elems in _array_object_paths(body):
+        e0 = elems[0]
+        id_subs = [k for k in e0 if _is_scalar(e0.get(k)) and _is_idlike(k)]
+        name_subs = [k for k in e0 if isinstance(e0.get(k), str) and e0.get(k).strip() and not _is_idlike(k)]
+        if not id_subs or not name_subs:                 # 非"实体多选"(无 id 子键或无文字子键)→ 跳过
+            continue
+        best = None                                      # (命中数, url, value_key, sub, items, item_by_val, matched)
+        for r in reads or []:
+            items = as_list_payload(r.get("json"))
+            if not items or not isinstance(items[0], dict):
+                continue
+            item_idks = [k for k in items[0] if _is_scalar(items[0].get(k)) and _is_idlike(k)]
+            for sub in id_subs:
+                for vk in item_idks:
+                    by_val = {str(it.get(vk)): it for it in items if isinstance(it, dict) and it.get(vk) is not None}
+                    matched = [e for e in elems if str(e.get(sub)) in by_val]
+                    if matched and (best is None or len(matched) > best[0]):
+                        best = (len(matched), r.get("url"), vk, sub, items, by_val, matched)
+        if not best:
+            continue
+        _n, src_url, vk, sub, items, by_val, matched = best
+        e, it = matched[0], by_val[str(matched[0].get(sub))]
+        lk = _pick_label_key(it, vk)
+        template: dict = {}                              # 子键 → {"from":"item","item_key":..} | {"const":..}
+        for sk in e0:
+            if sk == sub:
+                template[sk] = {"from": "item", "item_key": vk}
+            elif (ikm := next((k for k in it if _is_scalar(it.get(k)) and str(it.get(k)) == str(e.get(sk))), None)) is not None:
+                template[sk] = {"from": "item", "item_key": ikm}     # 子键值==源项某字段 → 来自源项
+            elif len({str(x.get(sk)) for x in elems}) == 1:
+                template[sk] = {"const": e0.get(sk)}                 # 整列一致 → 常量(participantType=2)
+            else:
+                template[sk] = {"const": e.get(sk)}                  # 兜底(罕见,无源可对又不一致)
+        label_sub = next((sk for sk, m in template.items() if m.get("item_key") == lk), None) or name_subs[0]
+        labels = [str(x.get(label_sub, "")).strip() for x in elems if str(x.get(label_sub, "")).strip()]
+        confirmed = any(any(_name_match(lb, s) for s in sample_vals) for lb in labels)
+        out.append({"path": path, "tokens": list(toks), "multi": True, "source_url": src_url,
+                    "value_key": vk, "label_key": lk, "element_template": template,
+                    "label_subkey": label_sub, "options": _list_options(items, lk),
+                    "count": len(items), "label": labels[0] if labels else "",
+                    "values": labels, "_confirmed": confirmed})
+    return out
+
+
+def apply_dom_options(selects: list[dict], dom_options: dict | None) -> list[dict]:
+    """用**录制时下拉里真实可见的选项**(DOM 抓的枚举地面真值)覆盖 select 的候选快照 —— 这是地面真值,
+    胜过拿提交值去网络字典里猜命中(治"加班类型/请假类型绑到几百项含工作日/档案/银行…的全量字典")。
+
+    dom_options:{选中显示值: [选项文字]}。按"选中显示值 ⟺ 某 select 的 label/value(精确或子串)"把 DOM 选项
+    挂到该 select:options/count 换成 DOM 选项,标 dom_options=True,并撤掉按类目收窄(DOM 即权威)。通用,不挑系统。
+    """
+    if not dom_options:
+        return selects
+    pairs = [(k, v) for k, v in dom_options.items() if v]
+    for s in selects or []:
+        lbl, val = str(s.get("label") or ""), str(s.get("value") or "")
+        opts = next((ov for kv, ov in pairs if _name_match(kv, lbl) or _name_match(kv, val)), None)
+        if opts:
+            s["options"], s["count"], s["dom_options"] = list(opts), len(opts), True
+            s.pop("category_key", None)
+            s.pop("category_value", None)
+    return selects
+
+
+def dom_enum_selects(post_data: str | None, dom_options: dict | None,
+                     existing_paths: set | None = None) -> list[dict]:
+    """录到了下拉选项、但提交体里这个字段**没绑上任何来源 select**(纯枚举:body 存的就是显示名)→
+    造一个**无来源**枚举 select(options=DOM 选项),agent 传名字即原样提交。治"页面明明只有 3 个选项,
+    却因为匹配不到网络字典而被当普通文本"。通用,不挑系统。dom_options:{选中显示值: [选项文字]}。"""
+    body = _parse_body(post_data)
+    if body is None or not dom_options:
+        return []
+    existing = existing_paths or set()
+    out: list[dict] = []
+    for picked, opts in dom_options.items():
+        if not opts:
+            continue
+        toks = _find_value_tokens(body, picked)          # body 里值==选中显示名的叶子(纯名枚举)
+        if toks is None:
+            continue
+        path = _tokens_to_str(toks)
+        if path in existing or any(o.get("path") == path for o in out):
+            continue
+        out.append({"path": path, "tokens": toks, "source_url": "", "value_key": "", "label_key": "",
+                    "label": picked, "count": len(opts), "options": list(opts), "dom_options": True})
     return out
 
 
@@ -500,6 +687,81 @@ def suggest_select_names(selects: list[dict], samples: dict | None) -> dict:
         field = next((k for k, v in pairs if _name_match(label, v)), None)   # 含带后缀显示名的子串匹配
         if field:
             out[path] = field
+    return out
+
+
+# BPMN/Flowable「发起人自选审批人」容器键 + 流程节点 ID 形态(通用,不挑租户):
+#   提交体里审批人挂在 startUserSelectAssignees / approvers / candidate… 下,叶子键是节点 ID(Activity_xxx)。
+_ASSIGNEE_CONTAINER_RE = _re.compile(
+    r"(start_?user_?select_?assignees|assignees?|approvers?|candidate(?:users?|groups?)?)", _re.I)
+_BPMN_NODE_RE = _re.compile(r"^(activity|usertask|task|node|flow|gateway|sequenceflow|sid)[_-]", _re.I)
+# 流程定义读响应里"节点 ID"字段 / "节点名"字段的概念词(通用):
+_NODE_ID_RE = _re.compile(r"(^id$|node_?id|task_?id|act_?id|activity_?id|sid|element_?id)", _re.I)
+_NODE_NAME_RE = _re.compile(r"(node_?name|task_?name|activity_?name|^name$|label|title|caption)", _re.I)
+
+
+def _iter_dicts(node):
+    """深度遍历出所有 dict 节点(用于在任意嵌套读响应里找"节点ID→节点名"映射)。"""
+    if isinstance(node, dict):
+        yield node
+        for v in node.values():
+            yield from _iter_dicts(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _iter_dicts(v)
+
+
+def _bpmn_node_names(reads: list[dict]) -> dict:
+    """从抓到的读响应里建 {BPMN 节点 ID → 显示名}(流程定义/下一节点列表常返回 nodeId+nodeName)。
+
+    只认**节点 ID 形态**(Activity_xxx/Task_xxx)的项,避免把普通列表的 id+name 误当节点名。通用,不挑系统。
+    """
+    idx: dict[str, str] = {}
+    for r in reads or []:
+        for it in _iter_dicts(r.get("json")):
+            nid = next((str(it[k]) for k in it
+                        if _is_scalar(it[k]) and _NODE_ID_RE.search(str(k))
+                        and _BPMN_NODE_RE.search(str(it[k]))), None)
+            if not nid:
+                continue
+            nm = next((it[k].strip() for k in it
+                       if isinstance(it[k], str) and it[k].strip()
+                       and _NODE_NAME_RE.search(str(k)) and not _is_idlike(str(k))), None)
+            if nm:
+                idx.setdefault(nid, nm)
+    return idx
+
+
+def suggest_assignee_names(post_data: str | None, reads: list[dict] | None,
+                           samples: dict | None = None) -> dict:
+    """给 BPMN/Flowable「发起人自选审批人」字段配**人类参数名**(治"审批人参数名退回 Activity_09dlq0g 内部节点 ID")。
+
+    判据(通用,不挑租户):叶子键是流程节点 ID(Activity_xxx)或路径挂在 startUserSelectAssignees/approvers 容器下。
+    名字来源(择优):① 抓到的流程定义读响应里有 节点ID→节点名 → 用节点名(如"领导审批""人力审批",**理解后命名**);
+       ② 否则按节点出现序给"审批人1/审批人2"(只有一个审批节点就"审批人")。返回 {body点路径 → 建议参数名}。
+    """
+    body = _parse_body(post_data)
+    if body is None:
+        return {}
+    node_names = _bpmn_node_names(reads or [])
+    cands: list[tuple] = []                                   # (path, node_id or None)
+    for path, _toks, _sv, _raw in _leaf_paths(body):
+        leaf_key = path.split(".")[-1].split("[")[0]
+        is_node = bool(_BPMN_NODE_RE.search(leaf_key))
+        if not (is_node or _ASSIGNEE_CONTAINER_RE.search(path)):
+            continue
+        cands.append((path, leaf_key if is_node else None))
+    nodes: list = []
+    for _p, nid in cands:                                    # 去重保序:几个审批节点
+        if nid not in nodes:
+            nodes.append(nid)
+    multi = len(nodes) > 1
+    out: dict[str, str] = {}
+    for path, nid in cands:
+        if nid and nid in node_names:                        # 流程定义里有节点名 → 直接用("领导审批")
+            out[path] = node_names[nid]
+        else:
+            out[path] = f"审批人{nodes.index(nid) + 1}" if multi else "审批人"
     return out
 
 
@@ -922,12 +1184,15 @@ def goal_needs_confirmation(goal: dict | None) -> bool:
 
 
 def flatten_body(post_data: str | None, samples: dict | None = None,
-                 required_labels: set | None = None) -> list[dict]:
+                 required_labels: set | None = None,
+                 collapse_paths: list[str] | None = None) -> list[dict]:
     """把请求体拍平成叶子字段列表 + 参数建议,供前端勾选。任意嵌套(dict/list)→ 点路径。
 
     suggest_name=字段中文名(录制时的 DOM 标签),**只在能确定时给**(文本按值对;日期跨格式对毫秒戳↔显示),
     对不上就退回原始 key(诚实,不瞎猜)。同值字段(都填 123123123)按录制顺序各取一个标签,不抢同一个。
     type=字段类型(值推断);required=表单 * 必填(label 命中 required_labels)。
+    collapse_paths:**列表多选**接管的对象数组路径(participants…)→ 其下逐元素叶子折叠成**一个**列表参数字段
+    (type=list-enum),前端只见一个"选多个人"的参数,不再是 participants[0].userId… 一堆。
     """
     body = _parse_body(post_data)
     if body is None:
@@ -1015,6 +1280,19 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
                     "confidence_tier": confidence_tier(conf),  # auto / clarify / reject(需澄清)
                     "required": required,
                     "system_value": bool(sys_time)})          # 系统运行期自动填(submitTime/createTime),前端可标
+    # 列表多选:把每个被接管的对象数组的逐元素叶子,折叠成**一个**列表参数字段(原位插回,前端只见一个参数)
+    for ap in (collapse_paths or []):
+        pref = ap + "["
+        idxs = [i for i, f in enumerate(out) if f["path"].startswith(pref)]
+        if not idxs:
+            continue
+        pos = idxs[0]
+        out = [f for f in out if not f["path"].startswith(pref)]
+        key = ap.split(".")[-1].split("[")[0]
+        out.insert(min(pos, len(out)),
+                   {"path": ap, "key": key, "value": "", "suggest_param": True,
+                    "suggest_name": key, "type": "list-enum", "confidence": 0.78,
+                    "confidence_tier": "clarify", "required": True, "system_value": False})
     return out
 
 
@@ -1057,6 +1335,12 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
     types: dict[str, str] = {}
 
     def walk(node, path):
+        if path in param_map and isinstance(node, (list, dict)):   # 列表多选/整段对象:整个结构=一个参数
+            name = param_map[path]                                  # 不递归进元素 → 不再拆 participants[0].userId…
+            params.append(name)
+            types[name] = "list-enum" if isinstance(node, list) else "object"
+            samples[name] = node                                   # 默认值=录制时整份结构(agent 没传则用录制选中项)
+            return "{{" + name + "}}"
         if isinstance(node, dict):
             return {k: walk(v, f"{path}.{k}" if path else k) for k, v in node.items()}
         if isinstance(node, list):
@@ -1096,12 +1380,20 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
                 "value_key": s.get("value_key"), "label_key": s.get("label_key"),
                 "options": list(s.get("options") or []),     # 候选选项快照(存进 skill 让 agent 从中选,问题1)
                 "count": s.get("count")}
+        if s.get("category_key"):                            # 聚合字典:分类过滤随 select 走 → 运行期同样按类目收窄
+            meta["category_key"], meta["category_value"] = s["category_key"], s.get("category_value")
+        if s.get("dom_options"):                             # DOM 抓的固定下拉(静态枚举)→ 可烤进 schema;否则=活接口目录(只暴露来源)
+            meta["dom_options"] = True
+        if s.get("multi"):                                   # 列表多选:整份元素模板随 select 走 → 运行期把名字列表展开成对象数组
+            meta["multi"] = True
+            meta["element_template"] = s.get("element_template") or {}
+            meta["label_subkey"] = s.get("label_subkey")
         if s.get("id_path") or s.get("id_tokens"):
             meta["id_path"] = s.get("id_path")
             meta["id_tokens"] = s.get("id_tokens") or _leaf_tok.get(s.get("id_path"))
         sel_meta.append(meta)
-    for s in sel_meta:                                          # 选领导/代码下拉 → 类型=枚举(传名字/文字)
-        types[s["param"]] = "enum"
+    for s in sel_meta:                                          # 选领导/代码下拉 → 枚举;列表多选 → 列表枚举(传名字列表)
+        types[s["param"]] = "list-enum" if s.get("multi") else "enum"
     id_meta = []
     for i in (identity or []):
         if i.get("path") in param_map:        # 同一字段不能既是参数又是 identity:用户既已参数化 → 参数优先,不再运行期覆盖
@@ -1405,6 +1697,15 @@ async def _fetch_list(url: str, base_url: str, storage_state, token_key: str | N
     return as_list_payload(data) or []
 
 
+def _filter_category(items: list, sel: dict) -> list:
+    """聚合字典的 select 带分类过滤(category_key/value)→ 运行期把全量收窄到该字段所属类目;无过滤则原样。
+    与录制期快照 _aggregate_category 收窄**完全一致**——快照里是哪几项,现拉/名→ID 也只在那几项里。"""
+    ck, cv = sel.get("category_key"), sel.get("category_value")
+    if not ck:
+        return items
+    return [it for it in items if isinstance(it, dict) and str(it.get(ck)) == str(cv)]
+
+
 def find_field_select(api_request: dict, field: str) -> dict | None:
     """在 api_request(单请求 + 多步各步)里找参数名==field 的 select 元数据(source_url/value_key/label_key)。
     供运行期"实时拉该字段当前可选项"(问题1:把接口放进 skill,选字段时直接调接口)。无则 None。"""
@@ -1426,6 +1727,7 @@ async def fetch_field_options(api_request: dict, field: str, *, base_url: str = 
     lk, vk = sel.get("label_key"), sel.get("value_key")
     items = await _fetch_list(sel["source_url"], base_url, storage_state, token_key, verify,
                               (api_request or {}).get("auth_headers"))
+    items = _filter_category(items, sel)        # 聚合字典 → 只列该字段所属类目(与录制快照一致)
     opts = []
     for it in items:
         if not isinstance(it, dict):
@@ -1472,12 +1774,15 @@ async def _resolve_selects(api_request: dict, fields: dict, *, base_url: str, st
     """
     id_overrides: dict = {}
     for s in api_request.get("selects") or []:
+        if s.get("multi"):                               # 列表多选另走 _resolve_list_selects(展开成对象数组)
+            continue
         param = s.get("param")
         if param not in fields:
             continue
         name = fields[param]
         items = await _fetch_list(s.get("source_url", ""), base_url, storage_state, token_key, verify,
                                   api_request.get("auth_headers"))
+        items = _filter_category(items, s)        # 聚合字典 → 只在该字段所属类目里名→ID(同名跨类目不串)
         lk, vk = s.get("label_key"), s.get("value_key")
         match = next((it for it in items if isinstance(it, dict) and str(it.get(lk)) == str(name)), None)
         if match is None:
@@ -1491,6 +1796,53 @@ async def _resolve_selects(api_request: dict, fields: dict, *, base_url: str, st
         elif vk in match:                                # 单码字段:字段值换成 id
             fields[param] = match[vk]
     return fields, id_overrides
+
+
+def _build_element(item: dict | None, template: dict, name: str, label_subkey: str | None) -> dict:
+    """按元素模板把"一个选中项"拼成对象数组的一份元素:子键来自源项字段 / 常量;查不到源项时
+    显示名子键保留传入名字、其余留空(best-effort,不破坏请求结构)。"""
+    elem: dict = {}
+    for sk, m in (template or {}).items():
+        if isinstance(m, dict) and "const" in m:
+            elem[sk] = m["const"]
+        elif item is not None and isinstance(m, dict) and m.get("item_key") in (item or {}):
+            elem[sk] = item.get(m["item_key"])
+        else:
+            elem[sk] = name if sk == label_subkey else ""
+    return elem
+
+
+async def _resolve_list_selects(api_request: dict, fields: dict, *, base_url: str, storage_state,
+                                token_key: str | None, verify: bool) -> dict:
+    """列表多选:参数传的是**名字列表**(["亚历山大大帝","狗蛋",…])→ 每个名字经来源接口查到整项,
+    按元素模板拼成对象数组({userId,userName,avatar,participantType}…),回填 fields[param]。
+    传单个名字/逗号串也容忍;查不到的名字仍保留(显示名字段=原名,其余空),不静默丢人。通用,不挑系统。"""
+    for s in api_request.get("selects") or []:
+        if not s.get("multi"):
+            continue
+        param = s.get("param")
+        if param not in fields:
+            continue
+        val = fields[param]
+        if isinstance(val, str):
+            names = [x.strip() for x in val.split(",") if x.strip()]
+        elif isinstance(val, list):
+            names = [x if isinstance(x, str) else str(x) for x in val]
+        else:
+            continue
+        if not names or all(not isinstance(x, str) for x in names):
+            continue
+        items = await _fetch_list(s.get("source_url", ""), base_url, storage_state, token_key, verify,
+                                  api_request.get("auth_headers"))
+        items = _filter_category(items, s)
+        lk = s.get("label_key")
+        tmpl, label_sub = s.get("element_template") or {}, s.get("label_subkey")
+        built = []
+        for nm in names:
+            it = next((x for x in items if isinstance(x, dict) and _name_match(str(x.get(lk)), nm)), None)
+            built.append(_build_element(it, tmpl, nm, label_sub))
+        fields[param] = built
+    return fields
 
 
 # token 在 cookie/localStorage 里的"键名"概念词(通用,不挑系统:Admin-Token/satoken/Authorization/access_token/jwt…)
@@ -1710,6 +2062,9 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     if send:                                                 # 选择型:名字→ID(需连网查候选列表);名/ID 配对返回 id 覆盖
         fields, sel_overrides = await _resolve_selects(api_request, fields, base_url=base_url,
                                                         storage_state=storage_state, token_key=token_key, verify=verify)
+        # 列表多选:名字列表 → 对象数组(参会人[]:每个名字经来源接口拼成整份元素);须在 substitute 前
+        fields = await _resolve_list_selects(api_request, fields, base_url=base_url,
+                                             storage_state=storage_state, token_key=token_key, verify=verify)
     # 按字段声明类型归一值(number/bool/日期格式),让 body 填回的是目标系统认的类型/格式 —— 通用,不挑字段
     fields = _coerce_fields(fields, api_request)
     body = substitute(api_request.get("body_template"), fields, api_request.get("sample_inputs") or {})

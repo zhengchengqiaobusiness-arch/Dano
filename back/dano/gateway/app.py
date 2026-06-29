@@ -533,10 +533,13 @@ async def onboarding_page_import(req: PageImportReq) -> dict:
 
 async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict,
                               reads: list[dict] | None = None, storage: dict | None = None,
-                              required_labels: set | None = None) -> dict:
+                              required_labels: set | None = None, dom_options: dict | None = None) -> dict:
     """构造 request_fields 消息:字段表(含 type/required)+ 候选请求 + select(Q2)+ identity(Q1)。"""
-    from dano.execution.page.request_capture import (flatten_body, suggest_identity, suggest_select_names,
-                                                     suggest_selects, suggest_workflow_steps)
+    from dano.execution.page.request_capture import (apply_dom_options, dom_enum_selects, flatten_body,
+                                                     looks_internal_param_name, suggest_assignee_names,
+                                                     suggest_identity, suggest_list_selects,
+                                                     suggest_select_names, suggest_selects,
+                                                     suggest_workflow_steps)
 
     def _path(u: str) -> str:
         i = u.find("//")
@@ -544,14 +547,29 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
     cand_list = [{"idx": i, "method": (c.get("method") or "POST").upper(), "path": _path(c.get("url") or "")}
                  for i, c in enumerate(candidates)]
     pd = chosen.get("post_data")
-    fields = flatten_body(pd, samples, required_labels)
-    # 传 samples:用录制选中的显示名消歧/确认(大字典里短码也能精确绑对那项)
-    selects = suggest_selects(pd, reads or [], samples)
+    # 列表多选(participants[]=选了多个人)先识别 → 折叠成**一个**列表参数,逐元素叶子不再单独冒出来
+    list_selects = suggest_list_selects(pd, reads or [], samples)
+    list_paths = [s["path"] for s in list_selects]
+    fields = flatten_body(pd, samples, required_labels, collapse_paths=list_paths)
+    # 传 samples:用录制选中的显示名消歧/确认(大字典里短码也能精确绑对那项);跳过已被列表多选接管的数组下逐元素叶子
+    selects = suggest_selects(pd, reads or [], samples, skip_paths=list_paths) + list_selects
+    # 页面枚举地面真值:用录制时下拉里真实可见的选项覆盖候选快照(治"加班类型绑到 222 项全量字典");
+    #   并为"只在 DOM 有选项、没绑上网络源"的纯枚举字段补一个无来源 enum(agent 传名字即原样提交)。
+    apply_dom_options(selects, dom_options)
+    selects += dom_enum_selects(pd, dom_options, {s["path"] for s in selects})
     # select/选人字段:用录制选项标签当默认参数名(经候选列表桥接),避免漏内部 key(Activity_xxx/嵌套键)
     sel_names = suggest_select_names(selects, samples)
     for f in fields:
         if f.get("path") in sel_names:
             f["suggest_name"] = sel_names[f["path"]]
+    # BPMN/Flowable「发起人自选审批人」字段:名字仍是内部节点 ID(Activity_xxx)→ 用流程定义里的节点名
+    #   (领导审批/人力审批)或"审批人N"覆盖(确定性,不靠 LLM 猜不透明 ID;DOM/样例已确信的名字不动)。
+    assignee_names = suggest_assignee_names(pd, reads or [], samples)
+    for f in fields:
+        nm = f.get("suggest_name") or ""
+        if f.get("path") in assignee_names and (nm == f.get("key") or looks_internal_param_name(nm)):
+            f["suggest_name"] = assignee_names[f["path"]]
+            f["name_source"] = "assignee"
     # LLM 字段语义增强(最佳努力):只给"确定性没把握(名字仍=原始 key)"的字段补中文名;确信的不覆盖,失败不影响。
     try:
         from dano.agent_tools import tools as _T
@@ -622,6 +640,7 @@ async def record_ws(ws: WebSocket) -> None:
         pending_reads: list[dict] = []         # 抓到的列表读响应(select 候选源)
         pending_storage: dict | None = None    # 登录态(认 identity 字段)
         pending_required: set = set()          # 录制时表单 * 必填的字段标签
+        pending_dom_options: dict = {}         # 录制时下拉里真实可见的选项 {选中显示值: [选项文字]}(枚举地面真值)
         while True:
             msg = await ws.receive_json()
             t = msg.get("type")
@@ -643,9 +662,15 @@ async def record_ws(ws: WebSocket) -> None:
                                if raw[i].get("op") in ("fill", "select", "pick") and raw[i].get("value")}
                     required_labels = {keymap[i] for i in fb_idx
                                        if raw[i].get("required") and raw[i].get("op") in ("fill", "select", "pick")}
+                    # 下拉真实可见选项(枚举地面真值){选中显示值: [选项文字]}
+                    dom_options = {raw[i].get("value", ""): raw[i]["options"] for i in fb_idx
+                                   if raw[i].get("op") in ("pick", "select") and raw[i].get("options")
+                                   and raw[i].get("value")}
                 else:
                     steps, samples = sess.recorded_steps()
                     required_labels = sess.recorded_required_labels()
+                    _dom = sess.recorded_dom_options()               # {字段key: [选项]} → 按选中显示值重键
+                    dom_options = {samples[k]: v for k, v in _dom.items() if k in samples and v}
                 sub = init.get("subsystem", "A-报销")
                 login_state = await sess.storage_state()   # 录制会话(已真人登录)的登录态快照
 
@@ -672,10 +697,11 @@ async def record_ws(ws: WebSocket) -> None:
                     pending_reads = sess.captured_reads()       # select 候选源(选领导)
                     pending_storage = login_state               # identity 字段识别
                     pending_required = required_labels          # 表单 * 必填
+                    pending_dom_options = dom_options           # 下拉枚举地面真值
                     chosen = pick_submit_request(cands, samples) or cands[-1]
                     pending_req = chosen
                     await ws.send_json(await _request_fields_msg(chosen, cands, samples, pending_reads,
-                                                                 pending_storage, pending_required))
+                                                                 pending_storage, pending_required, dom_options))
                     continue
 
                 # 兜底:没抓到 JSON 提交请求 → 老的 DOM 回放路径
@@ -712,7 +738,8 @@ async def record_ws(ws: WebSocket) -> None:
                 if pending_candidates and 0 <= idx < len(pending_candidates):
                     pending_req = pending_candidates[idx]
                     await ws.send_json(await _request_fields_msg(pending_req, pending_candidates, pending_samples,
-                                                                 pending_reads, pending_storage, pending_required))
+                                                                 pending_reads, pending_storage, pending_required,
+                                                                 pending_dom_options))
             elif t == "publish_request":
                 # 用户在字段表里勾了哪些是参数、起了名 → 用真实提交请求建 Skill(任意 OA 通用)
                 if pending_req is None:
@@ -720,10 +747,19 @@ async def record_ws(ws: WebSocket) -> None:
                                         "report": {"ok": False, "reason": "没有待发布的提交请求;先点「停止并发布」抓请求"}})
                     continue
                 param_map = {k: v.strip() for k, v in (msg.get("param_map") or {}).items() if v and v.strip()}
-                from dano.execution.page.request_capture import (auto_required_fields, build_api_request,
-                                                                 build_api_workflow, infer_success_rule,
-                                                                 suggest_fact_check, suggest_workflow_steps)
+                from dano.execution.page.request_capture import (apply_dom_options, auto_required_fields,
+                                                                 build_api_request, build_api_workflow,
+                                                                 infer_success_rule, looks_internal_param_name,
+                                                                 suggest_assignee_names, suggest_fact_check,
+                                                                 suggest_workflow_steps)
+                # 审批人字段名兜底:param_map 里仍是内部节点 ID(Activity_xxx)→ 换流程定义节点名/"审批人N"
+                #   (发布的 skill 不留机器名,即便前端没改/审核命名步没跑)。确定性,通用,不挑系统。
+                _assignee_names = suggest_assignee_names(pending_req.get("post_data"), pending_reads, pending_samples)
+                for _path, _nm in list(param_map.items()):
+                    if looks_internal_param_name(_nm) and _path in _assignee_names:
+                        param_map[_path] = _assignee_names[_path]
                 sels = msg.get("selects") or []         # Q2 选领导:名字→ID
+                apply_dom_options(sels, pending_dom_options)   # 页面枚举地面真值兜底:发布也用 DOM 选项盖掉网络字典快照
                 idens = msg.get("identity") or []        # Q1 当前用户:运行期重取
                 fc = suggest_fact_check(pending_samples, pending_reads)   # 回查源(录到"我的记录"列表才有)
                 sr = infer_success_rule(pending_reads)   # 学这套系统自己的"业务成功"约定(不挑系统,见 P0#2)
