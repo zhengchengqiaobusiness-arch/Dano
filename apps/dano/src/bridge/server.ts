@@ -350,10 +350,11 @@ export class BridgeServer {
     const mimeType = normalizeUploadMimeType(
       url.searchParams.get("mimeType") ?? req.headers["content-type"],
     );
-    const declaredHash = normalizeSha256(
-      url.searchParams.get("sha256") ?? url.searchParams.get("hash"),
-    );
-    if (!declaredHash) throw new HttpError(400, "Upload sha256 is required");
+    const rawHash = url.searchParams.get("sha256") ?? url.searchParams.get("hash");
+    const declaredHash = normalizeSha256(rawHash);
+    if (rawHash !== null && !declaredHash) {
+      throw new HttpError(400, "Upload sha256 is invalid");
+    }
 
     const name = normalizeUploadName(url.searchParams.get("name"));
     if (!name) throw new HttpError(400, "Upload name is required");
@@ -368,9 +369,26 @@ export class BridgeServer {
       throw new HttpError(400, "Valid clientId is required");
     }
     const workspacePath = this.getClientWorkspacePath(ownerClientId);
-    const { id, filePath, partPath, relativePath } =
-      await this.uploadRegistry.createFilePath(workspacePath, declaredHash, name);
-    const finalFileExists = fs.existsSync(filePath);
+    let uploadPath: { id: string; partPath: string };
+    let storagePath: { id: string; filePath: string; relativePath: string } | null;
+    if (declaredHash) {
+      const pathInfo = await this.uploadRegistry.createFilePath(
+        workspacePath,
+        declaredHash,
+        name,
+      );
+      uploadPath = { id: pathInfo.id, partPath: pathInfo.partPath };
+      storagePath = {
+        id: pathInfo.id,
+        filePath: pathInfo.filePath,
+        relativePath: pathInfo.relativePath,
+      };
+    } else {
+      uploadPath = await this.uploadRegistry.createIncomingPartPath(workspacePath);
+      storagePath = null;
+    }
+    const finalFileExists =
+      storagePath !== null && fs.existsSync(storagePath.filePath);
     if (
       Number.isFinite(contentLength) &&
       !finalFileExists &&
@@ -379,28 +397,33 @@ export class BridgeServer {
       throw new HttpError(413, "Upload storage limit exceeded");
     }
 
-    const { size, hash } = await writeUploadBody(req, partPath, MAX_UPLOAD_BODY_BYTES);
-    if (hash !== declaredHash) {
-      await fs.promises.rm(partPath, { force: true });
+    const { size, hash } = await writeUploadBody(
+      req,
+      uploadPath.partPath,
+      MAX_UPLOAD_BODY_BYTES,
+    );
+    if (declaredHash && hash !== declaredHash) {
+      await fs.promises.rm(uploadPath.partPath, { force: true });
       throw new HttpError(400, "Upload sha256 mismatch");
     }
-    if (!fs.existsSync(filePath)) {
+    storagePath ??= await this.uploadRegistry.createFilePath(workspacePath, hash, name);
+    if (!fs.existsSync(storagePath.filePath)) {
       if (!(await this.uploadRegistry.cleanupBeforeUpload(size, workspacePath))) {
-        await fs.promises.rm(partPath, { force: true });
+        await fs.promises.rm(uploadPath.partPath, { force: true });
         throw new HttpError(413, "Upload storage limit exceeded");
       }
-      await fs.promises.rename(partPath, filePath);
+      await fs.promises.rename(uploadPath.partPath, storagePath.filePath);
     } else {
-      await fs.promises.rm(partPath, { force: true });
+      await fs.promises.rm(uploadPath.partPath, { force: true });
     }
     const ref: RpcUploadedFileRef = {
-      id,
+      id: storagePath.id,
       name,
       size,
       mimeType,
-      path: filePath,
-      relativePath,
-      previewUrl: `/api/uploads/${encodeURIComponent(id)}/preview`,
+      path: storagePath.filePath,
+      relativePath: storagePath.relativePath,
+      previewUrl: `/api/uploads/${encodeURIComponent(storagePath.id)}/preview`,
     };
     this.uploadRegistry.register(ref, { ownerClientId });
     writeJson(res, 201, ref);

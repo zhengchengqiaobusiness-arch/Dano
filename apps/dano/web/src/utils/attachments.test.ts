@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const getBridgeClientId = vi.hoisted(() => vi.fn());
 
@@ -39,6 +39,10 @@ describe("composer attachment uploads", () => {
     );
   });
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("includes the current bridge client id when uploading", async () => {
     getBridgeClientId.mockReturnValue("client_1");
 
@@ -67,6 +71,23 @@ describe("composer attachment uploads", () => {
         headers: { "Content-Type": "image/png" },
       }),
     );
+  });
+
+  it("posts bytes without lookup when WebCrypto hashing is unavailable", async () => {
+    getBridgeClientId.mockReturnValue("client_1");
+    vi.stubGlobal("crypto", {});
+
+    await uploadComposerAttachment(
+      new File(["abc"], "http-only.txt", { type: "text/plain" }),
+      new AbortController().signal,
+    );
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [url] = vi.mocked(fetch).mock.calls[0]!;
+    const parsed = new URL(String(url), "http://dano.test");
+    expect(parsed.pathname).toBe("/api/uploads");
+    expect(parsed.searchParams.get("clientId")).toBe("client_1");
+    expect(parsed.searchParams.get("sha256")).toBeNull();
   });
 
   it("uses application/octet-stream when the browser provides no MIME type", async () => {

@@ -56,16 +56,19 @@ export async function uploadComposerAttachment(
   if (!clientId) throw new Error("Upload requires an active client");
   const mimeType = getComposerUploadMimeType(file);
   const sha256 = await sha256File(file);
-  const query = new URLSearchParams({ clientId, name: file.name, mimeType, sha256 });
-  const existing = await fetch(`/api/uploads/lookup?${query.toString()}`, {
-    method: "GET",
-    signal,
-  });
-  if (existing.ok) {
-    return (await existing.json()) as RpcUploadedFileRef;
-  }
-  if (existing.status !== 404) {
-    throw new Error(`Upload lookup failed (${existing.status})`);
+  const query = new URLSearchParams({ clientId, name: file.name, mimeType });
+  if (sha256) {
+    query.set("sha256", sha256);
+    const existing = await fetch(`/api/uploads/lookup?${query.toString()}`, {
+      method: "GET",
+      signal,
+    });
+    if (existing.ok) {
+      return (await existing.json()) as RpcUploadedFileRef;
+    }
+    if (existing.status !== 404) {
+      throw new Error(`Upload lookup failed (${existing.status})`);
+    }
   }
   const response = await fetch(`/api/uploads?${query.toString()}`, {
     method: "POST",
@@ -126,7 +129,8 @@ function createAttachmentId(): string {
   return `attachment_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 }
 
-async function sha256File(file: File): Promise<string> {
+async function sha256File(file: File): Promise<string | null> {
+  if (!globalThis.crypto?.subtle) return null;
   const digest = await globalThis.crypto.subtle.digest(
     "SHA-256",
     await file.arrayBuffer(),
