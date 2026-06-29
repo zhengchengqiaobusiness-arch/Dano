@@ -2773,6 +2773,26 @@ function uploadedFilesToProjectFileReferences(
   return resolved;
 }
 
+function uploadedImageFilesToRpcImages(
+  files: UploadedProjectFileRef[] | undefined,
+): RpcImageContent[] | undefined {
+  const images = files
+    ?.filter(file => file.mimeType.startsWith("image/"))
+    .map(file => ({
+      type: "image" as const,
+      data: fs.readFileSync(file.path).toString("base64"),
+      mimeType: file.mimeType,
+    }));
+  return images?.length ? images : undefined;
+}
+
+function mergeRpcImages(
+  ...groups: Array<RpcImageContent[] | undefined>
+): RpcImageContent[] | undefined {
+  const images = groups.flatMap(group => group ?? []);
+  return images.length ? images : undefined;
+}
+
 function appendProjectFileReferences(
   message: string,
   files: UploadedProjectFileRef[] | undefined,
@@ -4869,7 +4889,7 @@ export class BridgeRpcAdapter {
        * ================================================================== */
 
       case "prompt": {
-        const images = normalizeRpcImages(command.images);
+        const transcriptImages = normalizeRpcImages(command.images);
 
         // Auto-create a detached session when no session is selected.
         // Without this, the fallback calls this.context.actions.sendUserMessage() which
@@ -4886,6 +4906,10 @@ export class BridgeRpcAdapter {
           this.uploadRegistry,
           correlationId,
           this.sessionRuntime.currentGitCwd(),
+        );
+        const images = mergeRpcImages(
+          transcriptImages,
+          uploadedImageFilesToRpcImages(projectFiles),
         );
         const promptOptions = session.isStreaming
           ? {
@@ -4904,7 +4928,7 @@ export class BridgeRpcAdapter {
             injectedText: injectedMessage,
             content: buildStructuredUserTranscriptContent(
               command.message,
-              images,
+              transcriptImages,
               projectFiles,
             ),
           });
@@ -4962,12 +4986,16 @@ export class BridgeRpcAdapter {
       }
 
       case "steer": {
-        const images = normalizeRpcImages(command.images);
+        const transcriptImages = normalizeRpcImages(command.images);
         const projectFiles = uploadedFilesToProjectFileReferences(
           normalizeRpcUploadedFiles(command.files),
           this.uploadRegistry,
           correlationId,
           this.sessionRuntime.currentGitCwd(),
+        );
+        const images = mergeRpcImages(
+          transcriptImages,
+          uploadedImageFilesToRpcImages(projectFiles),
         );
         const injectedMessage = appendProjectFileReferences(
           command.message,
@@ -4979,7 +5007,7 @@ export class BridgeRpcAdapter {
             injectedText: injectedMessage,
             content: buildStructuredUserTranscriptContent(
               command.message,
-              images,
+              transcriptImages,
               projectFiles,
             ),
           });
@@ -5011,12 +5039,16 @@ export class BridgeRpcAdapter {
       }
 
       case "follow_up": {
-        const images = normalizeRpcImages(command.images);
+        const transcriptImages = normalizeRpcImages(command.images);
         const projectFiles = uploadedFilesToProjectFileReferences(
           normalizeRpcUploadedFiles(command.files),
           this.uploadRegistry,
           correlationId,
           this.sessionRuntime.currentGitCwd(),
+        );
+        const images = mergeRpcImages(
+          transcriptImages,
+          uploadedImageFilesToRpcImages(projectFiles),
         );
         const injectedMessage = appendProjectFileReferences(
           command.message,
@@ -5028,7 +5060,7 @@ export class BridgeRpcAdapter {
             injectedText: injectedMessage,
             content: buildStructuredUserTranscriptContent(
               command.message,
-              images,
+              transcriptImages,
               projectFiles,
             ),
           });
