@@ -493,6 +493,12 @@ function normalizeChoiceAnswer(
   if (byStringifiedId.length > 1) throw new Error("选项不唯一，请重新选择");
 
   if (typeof candidate === "string") {
+    const byTypedKey = options.filter(option => optionKey(option.id) === candidate);
+    if (byTypedKey.length === 1) {
+      if (isOtherOption(byTypedKey[0])) throw new Error("请输入其他回答");
+      return byTypedKey[0].id;
+    }
+
     const byLabel = options.filter(option => option.label === candidate);
     if (byLabel.length === 1) {
       if (isOtherOption(byLabel[0])) throw new Error("请输入其他回答");
