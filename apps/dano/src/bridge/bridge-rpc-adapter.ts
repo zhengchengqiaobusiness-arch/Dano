@@ -4704,6 +4704,7 @@ export class BridgeRpcAdapter {
           void session.prompt(command.message, promptOptions).catch(error => {
             const message =
               error instanceof Error ? error.message : String(error);
+            const sessionPath = session.sessionFile ?? null;
             console.error(
               `BridgeRpcAdapter[${this.client.id}]: Detached prompt failed:`,
               message,
@@ -4715,6 +4716,8 @@ export class BridgeRpcAdapter {
               correlationId,
               error: message,
             });
+            this.sendEvent(toRpcAgentEndEvent({}, sessionPath));
+            if (sessionPath) this.sessionStatsPusher.queue(sessionPath);
           });
         }, 0);
 

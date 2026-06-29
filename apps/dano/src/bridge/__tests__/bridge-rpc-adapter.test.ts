@@ -1544,6 +1544,89 @@ describe("BridgeRpcAdapter", () => {
 
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
+
+    it("ends the active turn when a detached prompt rejects asynchronously", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-prompt-fail-"));
+      const sessionManager = SessionManager.create(tmpDir, tmpDir);
+      sessionManager.appendMessage({
+        role: "user",
+        content: [{ type: "text", text: "Initial" }],
+        timestamp: Date.now(),
+      });
+      const sessionFile = sessionManager.getSessionFile();
+      if (!sessionFile) throw new Error("session file was not created");
+      (
+        context.state.sessionManager.getSessionFile as ReturnType<typeof vi.fn>
+      ).mockReturnValue(sessionFile);
+
+      createAgentSessionMock.mockResolvedValue({
+        session: {
+          sessionFile,
+          sessionId: sessionManager.getSessionId(),
+          isStreaming: false,
+          bindExtensions: vi.fn().mockResolvedValue(undefined),
+          subscribe: vi.fn().mockReturnValue(() => {}),
+          prompt: vi.fn().mockRejectedValue(new Error("Session write failed")),
+          sessionManager,
+        },
+      });
+
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: {
+              id: "switch-prompt-fail",
+              type: "switch_session",
+              sessionPath: sessionFile,
+            },
+          }),
+        ),
+      );
+      await new Promise(r => setTimeout(r, 10));
+
+      ws.send.mockClear();
+      emitEvent.mockClear();
+
+      const command: RpcCommand = {
+        id: "cmd-prompt-fail",
+        type: "prompt",
+        message: "Hello",
+      };
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(JSON.stringify({ type: "command", payload: command })),
+      );
+
+      await new Promise(r => setTimeout(r, 30));
+
+      expect(emitEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "command_error",
+          client,
+          commandType: "prompt",
+          correlationId: "cmd-prompt-fail",
+          error: "Session write failed",
+        }),
+      );
+      expect(
+        ws.send.mock.calls
+          .map(call => JSON.parse(call[0] as string))
+          .some(
+            call =>
+              call.type === "event" &&
+              call.payload.type === "agent_end" &&
+              call.payload.sessionPath === sessionFile,
+          ),
+      ).toBe(true);
+
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
   });
 
   describe("extension UI routing", () => {
