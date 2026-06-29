@@ -54,6 +54,7 @@ class SkillSpec(BaseModel):
 
     business: str = ""                                          # 所属业务(同业务多操作 adapter 导出归组)
     business_meta: dict = Field(default_factory=dict)           # 业务规则(x-flow)→ 导出剧本的前置/错误/确认段
+    business_description: str = ""                              # P2:业务说明(手填 + AI 优化)→ 导出"业务说明"段 + 剧本叙事
 
     # 代码适配器(goal 模式生成):调用时由隔离 runner 执行 source
     is_adapter: bool = False

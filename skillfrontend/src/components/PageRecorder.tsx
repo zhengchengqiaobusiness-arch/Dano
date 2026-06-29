@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Card, Form, Input, Button, Space, Typography, Alert, Tag, List, Checkbox, Collapse, Switch, message } from "antd";
+import { Card, Form, Input, Button, Space, Typography, Alert, Tag, Tooltip, List, Checkbox, Collapse, Switch, message } from "antd";
 import { useNavigate } from "react-router-dom";
 
 // 方式B:网页内录制。连 WebSocket → 后端托管浏览器,画面投到这里,点击/键盘回传,实时显示捕获的步骤。
@@ -10,7 +10,20 @@ interface RecReq { method: string; url: string; has_body?: boolean; json?: boole
 // 提交请求体拍平后的一个叶子字段(给用户勾选哪些是参数)
 interface RecField { path: string; key: string; value: string; suggest_param: boolean; suggest_name: string;
   type?: string; required?: boolean; confidence?: number; confidence_tier?: string; name_source?: string;
-  system_value?: boolean }
+  system_value?: boolean; field_role?: string }
+// P3:字段角色 → 统一徽章(中文标签 + 颜色 + 悬浮说明),与后端 FieldRole 同一套口径
+const ROLE_META: Record<string, { cn: string; color: string; tip: string }> = {
+  user_input:   { cn: "用户填",     color: "blue",     tip: "用户/agent 直接填写" },
+  enum_static:  { cn: "固定枚举",   color: "green",    tip: "固定下拉选项(随 skill 内置);传名字,运行期查内部 ID" },
+  enum_live:    { cn: "活接口·实时拉", color: "geekblue", tip: "选项来自实时接口、会变;选前先 --list-options 拉当前可选项再传名字" },
+  list_select:  { cn: "多选名单",   color: "purple",   tip: "多选:传名字列表,运行期每个名字拼成整条记录" },
+  name_id_pair: { cn: "名/ID配对",  color: "cyan",     tip: "显示名 + 配对 id 字段:换选项时 id 同步,不冻结" },
+  assignee:     { cn: "审批人·活接口", color: "magenta", tip: "审批人(选人接口):选前先 --list-options 拉当前人选" },
+  step_chained: { cn: "上一步带出", color: "gold",     tip: "取自上一步接口响应(如 taskId),运行期自动注入,勿手填" },
+  identity:     { cn: "当前用户",   color: "gold",     tip: "当前登录用户/会话值,运行期重取(谁调用就是谁)" },
+  system_value: { cn: "系统自动填", color: "gold",     tip: "系统自动填(提交/创建时间等 = now),勿手填" },
+  constant:     { cn: "固定常量",   color: "default",  tip: "流程模板常量,原样提交,勿改" },
+};
 // 候选写请求(抓到多个时让用户手选用哪个)
 interface RecCand { idx: number; method: string; path: string }
 // P3:字段=选自某列表(选领导:名字→ID)/ 字段=当前用户·会话值(运行期重取)
@@ -59,6 +72,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [identity, setIdentity] = useState<Record<string, RecIdentity>>({});  // path → identity 建议
   const [action, setAction] = useState("submit_form");
   const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");   // P2:业务说明(手填 + AI 优化)
+  const [optimizing, setOptimizing] = useState(false);
   const [result, setResult] = useState<RecResult | null>(null);
   const [intercept, setIntercept] = useState(true);   // 拦截提交:抓到请求但不真发,录制不产生真实记录
   const [err, setErr] = useState("");
@@ -76,6 +91,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setErr(""); setResult(null); setSteps([]); setReqs([]); setFrame(""); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({});
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/onboarding/page/record`);
+    ws.binaryType = "blob";        // 截屏帧走二进制(Blob)→ 免去每帧 JSON.parse 大字符串卡顿
     wsRef.current = ws;
     ws.onopen = () => send({
       type: "start", tenant, subsystem, start_url: startUrl.trim(),
@@ -84,9 +100,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       intercept,   // 是否拦截提交(不产生真实记录)
     });
     ws.onmessage = (ev) => {
+      if (typeof ev.data !== "string") {        // 二进制 = 截屏帧(jpeg Blob)→ 直接转 objectURL 贴到 <img>,不走 JSON
+        const url = URL.createObjectURL(ev.data as Blob);
+        setFrame((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });   // 换帧即回收上一帧 URL,不泄漏
+        return;
+      }
       let m: any; try { m = JSON.parse(ev.data); } catch { return; }
       if (m.type === "started") setPhase("recording");
-      else if (m.type === "frame") setFrame(m.data);
       else if (m.type === "step") setSteps((s) => {
         const st = m.step;
         // 同一字段连续 fill/select(逐字符记)→ 覆盖上一条,实时列表一字段只显示一行最新值
@@ -121,9 +141,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         setPhase("recording");
         message.success("抓到提交请求!勾选要让 agent 传值的字段 → 确认发布");
       }
+      else if (m.type === "description") { setDescription(m.description || ""); setOptimizing(false); }   // P2:AI 优化后的业务说明
       else if (m.type === "result") {   // 留在录制现场:不关浏览器、不重来
         setResult(m.report); setPhase("recording");
-        if (m.report?.ok) { setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({}); }   // 发布成功 → 收起字段表
+        if (m.report?.ok) { setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({}); setDescription(""); }   // 发布成功 → 收起字段表
       }
       else if (m.type === "error") { setErr(m.detail || "录制出错"); setPhase("idle"); }
     };
@@ -198,6 +219,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       ? [...checked.filter((i) => i !== chosenIdx).sort((a, b) => a - b), chosenIdx] : [];
     return { param_map, selList, idList, step_idxs };
   }
+  function optimizeDescription() {   // P2:把手填草稿 + 当前字段/编排骨架交后端 LLM 优化(后端只见结构,不见值)
+    const { param_map, selList, idList, step_idxs } = _payload();
+    setOptimizing(true);
+    send({ type: "optimize_description", draft: description, title: title.trim(),
+           param_map, selects: selList, identity: idList, step_idxs });
+  }
   function publishRequest() {
     if (!action.trim() || badAction(action.trim())) return;
     const { param_map, selList, idList, step_idxs } = _payload();
@@ -206,7 +233,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     // 一键发布:后端自动提炼业务 Goal + self_check + 审核 + 自动修复;必填也由后端**自动判定**
     //(默认全部必填,表单抓到 * 区分时据 * 降级可选),无需手动勾选/确认
     send({ type: "publish_request", action: action.trim(), title: title.trim(),
-           param_map, selects: selList, identity: idList, step_idxs });
+           description: description.trim(), param_map, selects: selList, identity: idList, step_idxs });
   }
   function stopAll() {
     send({ type: "stop" }); wsRef.current?.close();
@@ -247,7 +274,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           </Space>
           <div style={{ border: "1px solid #d9d9d9", borderRadius: 6, overflow: "hidden", lineHeight: 0, position: "relative" }}>
             {frame
-              ? <img ref={imgRef} src={`data:image/jpeg;base64,${frame}`} onClick={onImgClick} draggable={false}
+              ? <img ref={imgRef} src={frame} onClick={onImgClick} draggable={false}
                      onWheel={(e) => send({ type: "input", event: { kind: "scroll", dy: e.deltaY } })}
                      style={{ width: "100%", display: "block", cursor: "crosshair" }} alt="录制画面" />
               : <div style={{ padding: 40, textAlign: "center", color: "#999", lineHeight: 1.6 }}>等待浏览器画面…(若停在登录页,直接在画面里登录即可)</div>}
@@ -319,16 +346,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                       <Space size={8} wrap>
                         <Checkbox checked={p.on} onChange={(e) => toggleField(f.path, e.target.checked)}>参数</Checkbox>
                         <Typography.Text code style={{ fontSize: 12 }}>{f.path}</Typography.Text>
+                        {f.field_role && ROLE_META[f.field_role] && (
+                          <Tooltip title={ROLE_META[f.field_role].tip}>
+                            <Tag color={ROLE_META[f.field_role].color} style={{ fontSize: 11 }}>
+                              {ROLE_META[f.field_role].cn}</Tag>
+                          </Tooltip>)}
                         {sel && <Tag color="purple" style={{ fontSize: 11 }}>
                           {sel.dom_options && !sel.source_url
                             ? <>📋 页面枚举(共{sel.count}项,从下拉里选)</>
                             : <>📋 选自列表{sel.multi ? "·多选" : ""}{sel.dom_options ? "·页面枚举" : ""} {sel.label_key}→{sel.value_key}(共{sel.count}项{sel.multi ? ",传名字列表" : ""})</>}</Tag>}
-                        {idn && <Tag color="gold" style={{ fontSize: 11 }}>🔒 当前用户/会话值(运行期自动填)</Tag>}
-                        {!sel && !idn && (f.suggest_param
-                          ? <Tag color="blue" style={{ fontSize: 11 }}>参数·agent 传值</Tag>
-                          : (f.system_value
-                            ? <Tag color="gold" style={{ fontSize: 11 }}>🕒 系统值·运行期自动填</Tag>
-                            : <Tag style={{ fontSize: 11 }}>固定值·原样提交</Tag>))}
                         {f.type && f.type !== "string" && <Tag style={{ fontSize: 11 }}>{f.type}</Tag>}
                         {f.name_source === "llm" && <Tag color="geekblue" style={{ fontSize: 11 }}>AI 拟名·待核</Tag>}
                         {f.confidence_tier && f.confidence_tier !== "auto" &&
@@ -356,6 +382,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 <Form.Item label="标题" style={{ marginBottom: 0 }}>
                   <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="提交请假" style={{ width: 160 }} />
                 </Form.Item>
+              </Space>
+              <Form.Item label="业务说明(随 skill 导出;可手写,也可让 AI 按抓到的接口/字段优化)"
+                         style={{ marginTop: 8, marginBottom: 0 }}>
+                <Input.TextArea value={description} onChange={(e) => setDescription(e.target.value)} rows={3}
+                                placeholder="一句话说明这个操作办什么业务、关键字段含义/来源;留空也可发布。点「AI 优化」让它按抓到的接口编排与字段来源补全。" />
+              </Form.Item>
+              <Space style={{ marginTop: 8 }} wrap>
+                <Button loading={optimizing} onClick={optimizeDescription}>AI 优化业务说明</Button>
                 <Button type="primary" loading={phase === "publishing"} onClick={publishRequest}>
                   确认发布(AI 自动提炼目标 + 审核 + 修复)
                 </Button>

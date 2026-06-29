@@ -125,6 +125,73 @@ def _opts_hint(prop: dict, cap: int = 12) -> str:
     return f"可选:{shown}{more}"
 
 
+# P1 剧本:字段角色中文标签(前端徽章/导出说明用,与 screenplay.FieldRole 对应)
+_ROLE_CN = {
+    "user_input": "用户填", "enum_static": "固定枚举", "enum_live": "活接口·实时拉",
+    "list_select": "多选·名字列表", "name_id_pair": "名/ID配对", "assignee": "审批人·活接口",
+    "step_chained": "上一步带出", "identity": "当前用户", "system_value": "系统自动填", "constant": "固定常量",
+}
+
+
+def _provenance_hint(prop: dict) -> str:
+    """字段角色徽章 + 来源(剧本 x-field-role/x-provenance 渲染成一句话:这字段是什么、从哪来)。"""
+    role = (prop or {}).get("x-field-role")
+    if not role:
+        return ""
+    frm = ((prop or {}).get("x-provenance") or {}).get("from") or {}
+    kind = frm.get("kind")
+    src = ""
+    if kind == "interface":
+        src = f"来源 {frm.get('interface')}"
+        if frm.get("params"):                       # 来源接口带参数(t/xxxtId…)→ 标出,提示可能级联
+            src += f"(参数 {'/'.join(frm['params'])})"
+    elif kind == "previous_step":
+        src = f"来自第 {(frm.get('step') or 0) + 1} 步响应 `{frm.get('ref')}`"
+    elif kind == "session":
+        src = "运行期取当前登录用户"
+    elif kind == "system":
+        src = "运行期系统填 now"
+    elif kind == "constant":
+        src = "流程模板常量,勿改"
+    badge = _ROLE_CN.get(role, role)
+    return f"[{badge}]" + (f" {src}" if src else "")
+
+
+def _orchestration_md(m: SkillManifest) -> str:
+    """「接口编排」段(P1 剧本:多接口完整回填 + 字段共享)。仅当多步或有选项来源接口时产出,否则空串。
+    全部 grounded(写步骤/选项来源/数据流均来自 screenplay 派生),不臆造。"""
+    f = m.flow or {}
+    write_steps = f.get("write_steps") or []
+    option_sources = f.get("option_sources") or []
+    data_flow = f.get("data_flow") or []
+    preset = f.get("preset_fields") or []
+    if not (f.get("multi_step") or option_sources or data_flow or preset):
+        return ""
+    L = ["## 接口编排(Dano 服务端按序执行,你一次调用即可)", ""]
+    if write_steps:
+        L.append("**写步骤**(按序):")
+        for s in write_steps:
+            L.append(f"- {s['index'] + 1}. `{s['method']} {s['path']}` —— {_ROLE_CN.get(s['role'], s['role'])}")
+        L.append("")
+    if option_sources:
+        L.append("**选项来源接口**(下列字段的可选值实时取自这些接口,选前先 `--list-options <字段>`):")
+        for o in option_sources:
+            L.append(f"- `{o['interface']}` → 供字段:{'、'.join('`' + x + '`' for x in o['for_fields'])}")
+        L.append("")
+    if data_flow:
+        L.append("**步间数据流**(上一步响应自动注入下一步,**勿手填**):")
+        for d in data_flow:
+            L.append(f"- 第 {(d.get('from_step') or 0) + 1} 步响应 `{d.get('from')}` → 第 {(d.get('to_step') or 0) + 1} 步 `{d.get('to')}`")
+        L.append("")
+    if preset:
+        L.append("**系统预设 ID 字段**(运行期原样带上、调用方无需填写;但**有来源、值与环境相关**,"
+                 "跨环境/跨租户复用前请人工确认是否需替换 —— 录制时探不到其确切来源):")
+        for p in preset:
+            L.append(f"- `{p['name']}`")
+        L.append("")
+    return "\n".join(L)
+
+
 def _label(props: dict, k: str) -> str:
     """字段纯语义(SOP/复述用,简洁);无 label 退回 description、再退回 key。
     调用约定(传名字/勿传ID、日期格式)集中在参数表 description 与 SOP 通用提示里说一次,SOP 逐字段不再重复。"""
@@ -344,7 +411,8 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
             p = props[k] or {}
             d = p.get("description", "") or k
             h = _opts_hint(p)
-            return (d + ("；" + h if h else "")).replace("\n", " ").replace("|", "\\|")
+            pv = _provenance_hint(p)                       # P1 剧本:角色徽章 + 来源(字段从哪来、怎么用)
+            return (d + ("；" + h if h else "") + ("；" + pv if pv else "")).replace("\n", " ").replace("|", "\\|")
         rows = "\n".join(
             f"| `{k}` | {_ptype(k, props, numset)} | {'是' if k in required else '否'} | {_cell(k)} |"
             for k in keys)
@@ -362,6 +430,10 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
     # 审批路径(有 business_meta 才出,grounded);放在 SOP 前,供阶段3 引用
     approval = _approval_section(getattr(m, "business_meta", {}) or {})
     approval_md = (approval + "\n\n") if approval else ""
+    orchestration = _orchestration_md(m)           # 接口编排(P1 剧本:多接口完整回填 + 选项来源 + 数据流)
+    orchestration_md = (orchestration + "\n") if orchestration else ""
+    bd = (getattr(m, "business_description", "") or "").strip()   # P2:业务说明(手填 + AI 优化)
+    biz_desc_md = (f"\n## 业务说明\n\n{bd}\n" if bd else "")
     sop = _sop_section(m, flags, cflag)            # 操作步骤(SOP):纯函数渲染,零业务/框架字面量
     quality = _quality_section(m)                   # 质量标准(怎样算做好):grounded 验收清单
     return f"""---
@@ -378,7 +450,7 @@ metadata:
 # {m.title}
 
 这是 Dano **已上架 Skill 的代理**:真正的业务编排、风险闸门与事实核查都在 Dano 侧。本端负责**收集参数、本地校验、提交前确认**,再调用 Dano,**不接触目标系统凭证、不自行裁定结果**。
-{confirm_note}
+{confirm_note}{biz_desc_md}
 ## 何时使用
 当用户想办理「{m.title}」({m.subsystem})时使用本 skill,即使没说出 skill 名或接口名。
 
@@ -389,7 +461,7 @@ metadata:
 
 > 流程句柄/模板、调用者身份(取自登录凭证)、调用凭证等由 Dano 运行期注入,**不需要也不应**由你提供。
 
-{approval_md}{sop}
+{orchestration_md}{approval_md}{sop}
 
 {quality}
 

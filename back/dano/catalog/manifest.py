@@ -35,6 +35,7 @@ class SkillManifest(BaseModel):
     title: str
     description: str
     business: str = ""                # 所属业务(同业务多操作导出时归为一本剧本 skill)
+    business_description: str = ""    # P2:业务说明(手填 + AI 优化)→ 导出剧本「业务说明」段
     business_meta: dict = Field(default_factory=dict)  # 业务规则(x-flow)→ 导出剧本的前置/错误/确认段
     goal: dict = Field(default_factory=dict)           # 结构化业务目标(意图/成功判据/禁止步)→ 导出剧本"目标"段
     field_mappings: list = Field(default_factory=list)  # 可追溯字段映射 → 导出剧本"字段映射"段
@@ -160,6 +161,17 @@ def _parameters_schema(skill: SkillSpec) -> dict:
     for f in all_fields:
         desc = skill.field_docs.get(f) or _FIELD_DESC.get(f, f)
         props[f] = _schema_prop(skill, f, desc, sels.get(f))
+    # P1 剧本注释:给每个字段标**角色**(x-field-role)+ **来源/用法**(x-provenance)——前端据此区分、导出据此说明。
+    #   纯派生、确定性;扩展位(x- 前缀)校验器忽略,安全。仅抓请求型(有 api_request)可派生。
+    apir = getattr(skill, "api_request", None) or {}
+    if apir:
+        from dano.execution.page.screenplay import build_screenplay
+        by_name = {fd["name"]: fd for fd in build_screenplay(apir).get("fields", [])}
+        for f, p in props.items():
+            fd = by_name.get(f)
+            if fd:
+                p["x-field-role"] = fd["role"]
+                p["x-provenance"] = fd["provenance"]
     return {
         "type": "object",
         "properties": props,
@@ -209,9 +221,17 @@ def _flow_meta(skill: SkillSpec) -> dict:
             last = (wf[-1] if wf else apir)
             verify = bool(apir.get("fact_check") or last.get("fact_check"))
             judged = bool(apir.get("success_rule") or last.get("success_rule"))
+            # P1 剧本:写步骤角色 + 选项来源接口(字段共享)+ 步间数据流,供导出「接口编排」完整回填(grounded)。
+            from dano.execution.page.screenplay import build_screenplay
+            sp = build_screenplay(apir)
+            # 系统预设 ID 字段(ssbmId/bmId 这类不透明常量:无需填,但有来源、跨环境需人工确认)→ 导出显式列出。
+            preset = [{"name": f["name"], "path": f["path"]} for f in sp["fields"]
+                      if (f.get("provenance") or {}).get("from", {}).get("kind") == "system_preset"]
             return {"step_count": max(len(wf), 1), "preconditions": [], "computes": [],
                     "verify": verify, "judged_by_code": judged,
-                    "step_paths": _step_paths(wf or [apir])}   # 各步 接口(method+path),供 SOP 展示编排
+                    "step_paths": _step_paths(wf or [apir]),   # 各步 接口(method+path),供 SOP 展示编排
+                    "write_steps": sp["write_steps"], "option_sources": sp["option_sources"],
+                    "data_flow": sp["data_flow"], "multi_step": sp["multi_step"], "preset_fields": preset}
         return {"step_count": len(getattr(skill, "page_steps", []) or []) or 1,
                 "preconditions": [], "computes": [],
                 "verify": bool(getattr(skill, "page_success_marker", None)), "judged_by_code": False}
@@ -251,6 +271,7 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         title=title,
         description=f"{title}({skill.subsystem.value} · {kind}类动作)",
         business=getattr(skill, "business", ""),
+        business_description=getattr(skill, "business_description", "") or "",   # P2:业务说明 → 导出"业务说明"段
         business_meta=getattr(skill, "business_meta", {}) or {},
         goal=getattr(skill, "goal", {}) or {},
         field_mappings=getattr(skill, "field_mappings", []) or [],

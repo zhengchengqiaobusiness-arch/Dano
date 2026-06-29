@@ -85,6 +85,43 @@ def test_list_read_requests_surfaces_select_candidates():
     assert "userId" in cands[0]["item_keys"] and "nickName" in cands[0]["item_keys"]
 
 
+def test_pick_label_key_person_over_department():
+    """根因(治"审批人/选领导被标成『财务部门』而非人名"):一行里同时有本体名(nickname)和归属名(deptName)→ 取 nickname。
+    deptName 含子串 'name' 又可能更长,旧逻辑(显示名同档取最长)会误取它;新逻辑把归属/分类名降到最次。"""
+    from dano.execution.page.request_capture import _pick_label_key
+    # 若依-vue 用户分页真实形态:nickname=本体名(财务A),deptName=归属名(财务部门,更长)
+    item = {"id": 145, "username": "caiwuA", "nickname": "财务A", "deptId": 109, "deptName": "财务部门"}
+    assert _pick_label_key(item, "id") == "nickname"
+    # 没有 nickname 时退到登录名(唯一标识到人),也不取部门名
+    assert _pick_label_key({"id": 1, "username": "zhangsan", "deptName": "财务部门"}, "id") == "username"
+    # 纯部门列表:deptName 是唯一文字 → 仍用它(选部门时它本就是对的 label)
+    assert _pick_label_key({"deptId": 100, "deptName": "财务部门"}, "deptId") == "deptName"
+    # 字典型 {dictLabel, dictType}:取 dictLabel(本体名),不取 dictType(分类名)
+    assert _pick_label_key({"dictValue": "2", "dictLabel": "病假", "dictType": "leave"}, "dictValue") == "dictLabel"
+
+
+def test_suggest_selects_picks_person_name_not_department():
+    """端到端:审批人 approverId 命中用户分页(同时有 nickname 与 deptName)→ label_key=nickname、label=人名,
+    选项是人(不是部门)。治"选审批人列出 6 个部门"。"""
+    submit = '{"approverId":117}'
+    reads = [{"url": "http://oa/admin-api/system/user/page",
+              "json": {"data": {"list": [{"id": 117, "username": "admin123", "nickname": "测试号02", "deptName": "点狮信息"},
+                                          {"id": 118, "username": "goudan", "nickname": "狗蛋", "deptName": "研发部门"}]}}}]
+    s = suggest_selects(submit, reads, {"审批人": "测试号02"})
+    assert len(s) == 1 and s[0]["label_key"] == "nickname" and s[0]["label"] == "测试号02"
+    assert s[0]["options"] == ["测试号02", "狗蛋"]      # 选项是人名,不是部门
+
+
+def test_pick_label_key_person_over_department():
+    """根因(治"审批人/选人被标成'财务部门'而非人名"):一行里同时有本体名(nickname)和归属名(deptName)→
+    取 nickname。deptName 含子串 'name' 又可能更长,旧逻辑会误取它;新逻辑把归属/分类名降到最次。"""
+    from dano.execution.page.request_capture import _pick_label_key
+    item = {"id": 145, "username": "caiwuA", "nickname": "财务A", "deptId": 109, "deptName": "财务部门"}
+    assert _pick_label_key(item, "id") == "nickname"                       # 本体名 > 归属名(即便部门名更长)
+    assert _pick_label_key({"id": 1, "username": "zhangsan", "deptName": "财务部门"}, "id") == "username"  # 无昵称退登录名(唯一标识人),也不取部门
+    assert _pick_label_key({"deptId": 100, "deptName": "财务部门"}, "deptId") == "deptName"   # 纯部门列表:deptName 是唯一文字 → 仍用它
+
+
 def test_suggest_selects_binds_field_to_list_source():
     """Q2 选领导:提交体 approverId=12 命中 user/list 里 userId=12 → 建议 select(value=userId,label=nickName)。"""
     submit = '{"reason":"回家","approverId":12,"leaveType":"事假"}'
@@ -750,6 +787,24 @@ def test_suggest_identity_flags_current_user_fields():
     assert "reason" not in ids and "procDefKey" not in ids        # 业务/常量不误判
 
 
+def test_suggest_identity_rejects_short_coincidental_values():
+    """根因(治 ercsmc=2/qzms=3 反复被误判成"当前用户"):短值撞会话标量(roleLevel=2/orgType=3)是巧合,
+    字段名又不像身份 → **不认 identity**;即便没传 samples 也挡得住。长值/身份名才认。"""
+    storage = {"origins": [{"localStorage": [
+        {"name": "info", "value": '{"roleLevel":2,"orgType":3,"userId":"088812345678"}'}]}]}
+    submit = '{"ercsmc":"2","qzms":"3","applicantId":"088812345678","deptLevel":"2"}'
+    paths = {o["path"] for o in suggest_identity(submit, storage, samples={})}
+    assert "ercsmc" not in paths and "qzms" not in paths and "deptLevel" not in paths   # 短值+非身份名 → 不冻结
+    assert "applicantId" in paths                                                       # 长值(会话 userId)→ 真 identity
+
+
+def test_suggest_identity_keeps_short_value_when_name_is_identity():
+    """短值但字段名像身份(applicantId=12)→ 仍认 identity;同样短值的普通字段(x=12)→ 不认。"""
+    storage = {"origins": [{"localStorage": [{"name": "u", "value": '{"userId":12}'}]}]}
+    out = {o["path"] for o in suggest_identity('{"applicantId":"12","x":"12"}', storage, {})}
+    assert "applicantId" in out and "x" not in out
+
+
 def test_build_api_request_stores_select_and_identity_meta():
     """P4:勾选的 select(path 是参数)记成 param→源/键;identity 记 path→来源,供运行期。"""
     req = {"method": "POST", "url": "http://oa.x/api/leave/submit",
@@ -1000,6 +1055,17 @@ def test_discover_step_links_ignores_short_constants():
     writes = [{"post_data": '{"x":1}', "response_json": {"code": 1}},
               {"post_data": '{"y":1}', "response_json": {"code": 200}}]
     assert discover_step_links(writes) == []
+
+
+def test_discover_step_links_index_first_occurrence_and_no_response():
+    """P4 索引化后行为不变:命中响应里**首次出现**的路径;无响应步正确跳过、跨多步正常。"""
+    writes = [
+        {"post_data": '{"a":"X"}', "response_json": None},                                  # 无响应步 → 跳过
+        {"post_data": '{"reason":"r"}', "response_json": {"dup": "VAL12345", "data": {"dup": "VAL12345"}}},
+        {"post_data": '{"ref":"VAL12345"}', "response_json": {"code": 200}},
+    ]
+    assert discover_step_links(writes) == [{"target_step": 2, "target_path": "ref", "target_tokens": ["ref"],
+                                            "source_step": 1, "source_path": "dup", "source_tokens": ["dup"]}]
 
 
 async def test_execute_api_workflow_chains_taskid_two_steps():

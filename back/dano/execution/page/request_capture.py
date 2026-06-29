@@ -255,13 +255,36 @@ def _find_value_tokens(node, value, toks=None):
     return None
 
 
+def _index_values(node, toks, out: dict) -> None:
+    """把 node 里所有 ≥4 长叶子值建成 {值字符串: tokens}(**首次出现**,DFS 顺序与 _find_value_tokens 一致)。
+    供步链发现一次建索引、多次 O(1) 查,替代每个目标值重扫整份响应(多接口录制提速)。"""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            _index_values(v, toks + [k], out)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            _index_values(v, toks + [i], out)
+    elif node is not None and not isinstance(node, bool) and toks:
+        s = str(node)
+        if len(s) >= 4:
+            out.setdefault(s, list(toks))           # 首次出现优先(与 _find_value_tokens 同义)
+
+
 def discover_step_links(writes: list[dict]) -> list[dict]:
     """有序写请求(含 response_json)→ 步间数据流(Q3):某步 body 的值 == 更早某步「响应」里的值 → step: 链。
 
     返回 [{target_step, target_path, source_step, source_path}]。如第2步 flowTask.taskId 来自第1步响应 data.taskId。
     只认 ≥4 长的值,避免 0/1/短码误连。通用,不挑系统。
+    **每步响应预建值索引**(_index_values),目标值 O(1) 命中,避免逐目标重扫响应(多接口/大响应提速,结果不变)。
     """
     bodies = [_parse_body(w.get("post_data")) for w in writes]
+    resp_index: list[dict] = []                     # 每步响应的 {值: tokens} 索引(只建一次)
+    for w in writes:
+        idx: dict = {}
+        r = w.get("response_json")
+        if r is not None:
+            _index_values(r, [], idx)
+        resp_index.append(idx)
     links: list[dict] = []
     for i, body in enumerate(bodies):
         if body is None:
@@ -270,11 +293,8 @@ def discover_step_links(writes: list[dict]) -> list[dict]:
             if len(tval) < 4:
                 continue
             for j in range(i):
-                resp = writes[j].get("response_json")
-                if resp is None:
-                    continue
-                stoks = _find_value_tokens(resp, tval)
-                if stoks is not None:
+                stoks = resp_index[j].get(tval)
+                if stoks:
                     links.append({"target_step": i, "target_path": tpath, "target_tokens": ttoks,
                                   "source_step": j, "source_path": _tokens_to_str(stoks),
                                   "source_tokens": stoks})
@@ -282,26 +302,39 @@ def discover_step_links(writes: list[dict]) -> list[dict]:
     return links
 
 
-# 显示名(给人看的)字段提示;**登录名(username/account)排最后** —— 选人下拉里用户认的是"张三"而非"zhangsan",
-# 用对显示名字段,name→ID 桥接与运行期解析才对得上。通用,不挑系统。
+# 显示名(本体名,给人看的)字段提示。选人下拉用户认的是"张三"而非登录名"zhangsan",更不是他所属的"财务部门"。
+# 用对本体显示名,name→ID 桥接与运行期解析才对得上。通用,不挑系统。
 _DISPLAY_HINTS = ("nickname", "realname", "fullname", "truename", "cnname", "displayname",
-                  "name", "label", "title", "caption", "text", "dept")
+                  "name", "label", "title", "caption", "text")
 _LOGIN_HINTS = ("username", "loginname", "account", "loginid", "useraccount")
+# 归属/分类名:描述的是该项**所属的组/类别**而非它本身(deptName/orgName/typeName/roleName/postName…)。
+# 这类字段常含 "name" 子串、还可能比本体名更长,旧逻辑会把它误当显示名(把"审批人"标成"财务部门")→
+# 单列一档**最次**,只有在没有任何本体名/登录名时才退到它(如纯部门列表 deptName 本就该当 label)。
+_ATTR_HINTS = ("dept", "depart", "org", "organ", "group", "company", "corp", "team", "branch",
+               "division", "type", "categ", "class", "role", "post", "position", "parent", "grade")
+
+
+def _is_attr_name(kl: str) -> bool:
+    """字段名像"归属/分类名"(部门/组织/类型/角色…)而非本体名 → 选 label 时降到最次。"""
+    return any(h in kl for h in _ATTR_HINTS)
 
 
 def _pick_label_key(item: dict, value_key: str) -> str:
-    """从列表项里挑"显示名"字段当 label:优先真正给人看的名字(nickname/realname/name/label…),
-    **登录名(username/account)排最后**(选人下拉用户看的是显示名);同档取最长文字。无文字字段 → 用 value_key。"""
+    """从列表项里挑"显示名"字段当 label。**本体名优先**(nickname/realname/name/label…),
+    **登录名次之**(username/account),**归属/分类名最次**(deptName/typeName/roleName… —— 它是该项所属的组/类,
+    不是它自己;否则"选审批人"会被标成"财务部门")。同档取最长文字。无文字字段 → 用 value_key。通用,不挑系统。"""
     text = [k for k in item if k != value_key and isinstance(item[k], str) and item[k].strip()]
     if not text:
         return value_key
 
     def rank(k: str) -> int:
         kl = k.lower()
+        if _is_attr_name(kl):                            # 归属/分类名(部门/组织/类型/角色…)最次
+            return 3
         if any(h in kl for h in _LOGIN_HINTS) and "nick" not in kl:
-            return 2                                     # 登录名最后(username/account)
+            return 2                                     # 登录名次之(zhangsan)
         if any(h in kl for h in _DISPLAY_HINTS):
-            return 0                                     # 显示名优先
+            return 0                                     # 本体显示名优先(张三)
         return 1                                         # 其它文字字段居中
 
     return min(text, key=lambda k: (rank(k), -len(item[k])))
@@ -800,13 +833,28 @@ def _storage_scalars(storage_state: dict | None) -> dict:
     return out
 
 
+# 真·会话身份值通常较长(userId/雪花/uuid);短值撞会话标量(roleLevel=2/orgType=3)多是巧合。
+_IDENTITY_MIN_LEN = 6
+# 字段名"像身份/当前用户/创建人"才允许把**短值**也认成 identity(applicantId=12 这种)。通用,不挑系统。
+_IDENTITY_NAME_RE = _re.compile(
+    r"(applicant|creator|create_?by|created_?by|create_?user|founder|submitter|submit_?by|"
+    r"operator|oper_?by|user_?id|^uid$|login_?id|login_?name|account_?id|current_?user|cur_?user|"
+    r"owner_?id|emp_?id|empno|staff_?id|member_?id)", _re.I)
+
+
+def _is_identity_name(key: str) -> bool:
+    return bool(_IDENTITY_NAME_RE.search(key or ""))
+
+
 def suggest_identity(post_data: str | None, storage_state: dict | None,
                      samples: dict | None = None) -> list[dict]:
     """提交体里"等于登录态里某值"的字段(如 applicantId=当前用户)→ 建议标 identity(运行期重取,不冻结)。
 
-    防误判(通用,不挑系统):**用户亲手填的值不算 identity** —— sv 是录制样例(用户填的)就是参数,
-    即便它恰好等于某会话标量(如二级内设机构=2 撞会话 roleLevel=2、职能描述=3 撞 orgType=3),也不冻结成会话值。
-    真 identity(applicantId=当前用户 id 等)是系统自动带上的、用户没填,故不在样例里,照常识别。
+    防误判(通用,不挑系统):
+      ① **用户亲手填的值不算 identity** —— sv 是录制样例就是参数,即便恰好等于某会话标量也不冻结。
+      ② **短值 + 非身份字段名 = 巧合,不认** —— 二级内设机构=2 撞会话 roleLevel=2、职能描述=3 撞 orgType=3,
+         不能因此把用户填的字段冻成会话值(治 ercsmc=2/qzms=3 反复误判)。
+    真 identity(applicantId=当前用户 id):值要么够长(雪花/uuid/userId),要么字段名像身份(applicantId/createBy…)。
     """
     body = _parse_body(post_data)
     if body is None:
@@ -817,7 +865,10 @@ def suggest_identity(post_data: str | None, storage_state: dict | None,
     for path, toks, sv, _raw in _leaf_paths(body):
         if not sv or sv not in scal:
             continue
-        if sv in typed:                                  # 用户填的值 → 参数,不是会话身份值(治 ercsmc=2/qzms=3 误判)
+        if sv in typed:                                  # ① 用户填的值 → 参数,不是会话身份值
+            continue
+        leaf = path.split(".")[-1].split("[")[0]
+        if len(sv) < _IDENTITY_MIN_LEN and not _is_identity_name(leaf):   # ② 短值 + 非身份名 → 巧合,不认
             continue
         out.append({"path": path, "tokens": toks, "value": sv, "source": scal[sv]})
     return out

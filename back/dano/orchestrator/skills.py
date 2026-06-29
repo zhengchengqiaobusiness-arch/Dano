@@ -184,6 +184,7 @@ class SkillRegistry:
                             action=body_action,
                             risk_level=RiskLevel(body.get("risk_level", "L3")),
                             title=body.get("title", ""),
+                            business_description=body.get("business_description", ""),   # P2:业务说明随资产走 → 导出
                             field_docs=dict(body.get("field_docs", {})),
                             field_types=dict(body.get("field_types", {}) or {}),
                             has_api=False,

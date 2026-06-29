@@ -436,9 +436,13 @@ class RecordSession:
             items = as_list_payload(data)
             if items is None:
                 return
-            self.reads.append({"method": m, "url": url, "status": response.status,
-                               "json": data if len(self.reads) < 60 else None,
-                               "count": len(items)})
+            entry = {"method": m, "url": url, "status": response.status,
+                     "json": data if len(self.reads) < 60 else None, "count": len(items)}
+            for i, r in enumerate(self.reads):       # 同 URL 去重:用最新一次覆盖(同接口重复抓 N 次只留 1 条 → 省内存 + 加速参数推断)
+                if r.get("url") == url:
+                    self.reads[i] = entry
+                    return
+            self.reads.append(entry)
         except Exception:  # noqa: BLE001
             pass
 
