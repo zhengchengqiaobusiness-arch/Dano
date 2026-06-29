@@ -30,7 +30,10 @@ const UUID =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const SHA256 = "[a-f0-9]{64}";
 const UPLOAD_FILE_RE = new RegExp(`^(${SHA256})(\\.[a-z0-9][a-z0-9._-]*)?$`, "i");
-const UPLOAD_PART_RE = new RegExp(`^\\.(${SHA256})-${UUID}\\.part$`, "i");
+const UPLOAD_PART_RE = new RegExp(
+  `^(?:\\.(${SHA256})-${UUID}|\\.incoming-${UUID})\\.part$`,
+  "i",
+);
 
 export class UploadRegistry {
   private readonly uploads = new Map<string, StoredUpload>();
@@ -64,6 +67,19 @@ export class UploadRegistry {
       filePath,
       partPath: path.join(uploadDir, `.${hash}-${id}.part`),
       relativePath: path.posix.join("uploads", storageName),
+    };
+  }
+
+  async createIncomingPartPath(workspacePath: string): Promise<{
+    id: string;
+    partPath: string;
+  }> {
+    const id = randomUUID();
+    const uploadDir = this.workspaceUploadDir(workspacePath);
+    await fs.mkdir(uploadDir, { recursive: true });
+    return {
+      id,
+      partPath: path.join(uploadDir, `.incoming-${id}.part`),
     };
   }
 

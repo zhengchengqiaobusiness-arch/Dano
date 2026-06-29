@@ -395,6 +395,34 @@ describe("BridgeServer HTTP/SSE transport", () => {
     });
   });
 
+  it("computes the storage hash when uploads omit a declared sha256", async () => {
+    const { server, workspaceDir } = createServer();
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const created = await postJson<{ client: { id: string } }>(
+      `${origin}/api/clients`,
+    );
+    const body = new TextEncoder().encode("hash me on the server");
+    const hash = sha256(body);
+
+    const response = await postBytes(
+      `${origin}/api/uploads?clientId=${encodeURIComponent(created.client.id)}&name=http-only.txt&mimeType=text/plain`,
+      body,
+      { "Content-Type": "text/plain" },
+    );
+
+    expect(response.status).toBe(201);
+    const uploaded = (await response.json()) as { previewUrl: string };
+    expect(uploaded).toMatchObject({
+      name: "http-only.txt",
+      path: path.join(workspaceDir, "uploads", `${hash}.txt`),
+      relativePath: `uploads/${hash}.txt`,
+    });
+    const preview = await fetch(`${origin}${uploaded.previewUrl}`);
+    expect(preview.status).toBe(200);
+    expect(await preview.text()).toBe("hash me on the server");
+  });
+
   it("rejects uploads without a valid client id", async () => {
     const { server } = createServer();
     const address = await server.start();
@@ -455,7 +483,7 @@ describe("BridgeServer HTTP/SSE transport", () => {
     expect(response.status).toBe(400);
   });
 
-  it("rejects uploads without a declared sha256", async () => {
+  it("rejects uploads with an invalid declared sha256", async () => {
     const { server } = createServer();
     const address = await server.start();
     const created = await postJson<{ client: { id: string } }>(
@@ -463,7 +491,7 @@ describe("BridgeServer HTTP/SSE transport", () => {
     );
 
     const response = await postBytes(
-      `http://127.0.0.1:${address.port}/api/uploads?clientId=${encodeURIComponent(created.client.id)}&name=note.txt&mimeType=text/plain`,
+      `http://127.0.0.1:${address.port}/api/uploads?clientId=${encodeURIComponent(created.client.id)}&name=note.txt&mimeType=text/plain&sha256=not-a-hash`,
       new Uint8Array([1]),
       { "Content-Type": "text/plain" },
     );
