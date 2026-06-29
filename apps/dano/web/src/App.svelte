@@ -856,7 +856,7 @@
     path: string;
     lineNumber: number;
   }) {
-    openFileViewer(payload.path, payload.lineNumber);
+    void payload;
   }
 
   function handleRefreshTree() {

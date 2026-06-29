@@ -274,6 +274,22 @@
     }
   }
 
+  function externalHref(value: string): string | null {
+    const text = value.trim();
+    if (!text) return null;
+    if (/^https?:\/\//i.test(text)) return text;
+    if (/^(?:localhost|\d{1,3}(?:\.\d{1,3}){3}|[a-z0-9.-]+\.[a-z]{2,}):\d+(?:\/\S*)?$/i.test(text)) {
+      return `http://${text}`;
+    }
+    return null;
+  }
+
+  function openExternalHref(href: string): boolean {
+    if (!/^https?:\/\//i.test(href)) return false;
+    window.open(href, "_blank", "noreferrer");
+    return true;
+  }
+
   function replaceMermaidCodeBlocks(root: HTMLElement) {
     const codeBlocks = root.querySelectorAll<HTMLElement>("pre > code");
     for (const code of codeBlocks) {
@@ -470,8 +486,24 @@
       event.preventDefault();
       return;
     }
-    handleClickTarget(event.target);
-    event.preventDefault();
+    if (isFileReferenceClick(event.target)) {
+      event.preventDefault();
+      return;
+    }
+    if (handleExternalClick(event.target)) {
+      event.preventDefault();
+    }
+  }
+
+  function handleKeydown(event: KeyboardEvent) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    if (isFileReferenceClick(event.target)) {
+      event.preventDefault();
+      return;
+    }
+    if (handleExternalClick(event.target)) {
+      event.preventDefault();
+    }
   }
 
   function copyableBlockForButton(button: HTMLButtonElement): HTMLElement | null {
@@ -518,15 +550,20 @@
     return true;
   }
 
-  function handleClickTarget(target: EventTarget | null) {
-    const el = target instanceof Element
-      ? target.closest<HTMLAnchorElement>("a[data-file-path][data-file-line]")
-      : null;
-    if (!el) return;
-    const path = el.dataset.filePath?.trim();
-    const lineNumber = Number.parseInt(el.dataset.fileLine ?? "", 10);
-    if (!path || !Number.isInteger(lineNumber) || lineNumber < 1) return;
-    onOpenFileReference({ path, lineNumber });
+  function isFileReferenceClick(target: EventTarget | null): boolean {
+    return target instanceof Element &&
+      !!target.closest<HTMLAnchorElement>("a[data-file-path][data-file-line]");
+  }
+
+  function handleExternalClick(target: EventTarget | null): boolean {
+    if (!(target instanceof Element)) return false;
+
+    const anchor = target.closest<HTMLAnchorElement>("a[href]");
+    if (anchor && openExternalHref(anchor.href)) return true;
+
+    const code = target.closest<HTMLElement>("code:not(pre code)");
+    const href = code ? externalHref(code.textContent ?? "") : null;
+    return href ? openExternalHref(href) : false;
   }
 
   onMount(() => {
@@ -577,7 +614,7 @@
 
 </script>
 
-<div class="markdown-renderer" bind:this={container} role="button" tabindex="0" onclick={handleClick} onkeydown={(e) => (e.key === "Enter" || e.key === " ") && handleClickTarget(e.target)}>
+<div class="markdown-renderer" bind:this={container} role="button" tabindex="0" onclick={handleClick} onkeydown={handleKeydown}>
   <Comark
     markdown={content}
     options={COMARK_OPTIONS}
