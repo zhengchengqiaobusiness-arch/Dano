@@ -87,6 +87,7 @@ function runRelease(options: { env?: NodeJS.ProcessEnv } = {}) {
     `#!/usr/bin/env node
 import { cpSync } from "node:fs";
 const args = process.argv.slice(2);
+if (process.env.DANO_FAKE_GIT_REJECT_FILTER && args.includes("--filter=blob:none")) process.exit(129);
 if (args[0] === "clone") cpSync(process.env.DANO_FAKE_REPO, args.at(-1), { recursive: true });
 `,
   );
@@ -223,6 +224,14 @@ describe("deploy compose wrapper", () => {
     expect(JSON.parse(logLines[0])).toContain(
       "NPM_REGISTRY=https://registry.npmjs.org/",
     );
+  });
+
+  it("falls back to full clone when partial clone is unavailable", () => {
+    const { logLines } = runRelease({
+      env: { DANO_FAKE_GIT_REJECT_FILTER: "1" },
+    });
+
+    expect(JSON.parse(logLines[0])[0]).toBe("build");
   });
 
   it("keeps NPM_CONFIG_REGISTRY as a release build compatibility override", () => {

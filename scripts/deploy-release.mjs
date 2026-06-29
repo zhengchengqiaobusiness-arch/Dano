@@ -53,6 +53,21 @@ function run(command, args, options = {}) {
   }
 }
 
+function cloneRepo(repoUrl, targetDir) {
+  const filteredArgs = ["clone", "--filter=blob:none", repoUrl, targetDir];
+  console.log(`[deploy-release] git ${filteredArgs.join(" ")}`);
+  const filtered = spawnSync("git", filteredArgs, {
+    stdio: "inherit",
+    env: process.env,
+  });
+  if (filtered.error) throw filtered.error;
+  if (filtered.status === 0) return;
+
+  console.log("[deploy-release] partial clone failed; retrying full clone");
+  rmSync(targetDir, { recursive: true, force: true });
+  run("git", ["clone", repoUrl, targetDir]);
+}
+
 function requireValue(name, value) {
   if (!value) {
     throw new Error(`${name} is required`);
@@ -91,7 +106,7 @@ try {
   const image = process.env.DANO_IMAGE || `dano-app:${shortRef}`;
 
   buildDir = mkdtempSync(join(buildParent, "dano-build-"));
-  run("git", ["clone", "--filter=blob:none", repoUrl, buildDir]);
+  cloneRepo(repoUrl, buildDir);
   run("git", ["checkout", gitRef], { cwd: buildDir });
   run(composeBin, [
     "build",
