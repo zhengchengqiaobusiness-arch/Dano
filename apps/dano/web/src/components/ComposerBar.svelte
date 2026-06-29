@@ -9,6 +9,7 @@
     RpcUploadedFileRef,
     RpcWorkspaceEntry,
   } from "@dano/types/protocol";
+  import FileIcon from "lucide-svelte/icons/file";
   import X from "lucide-svelte/icons/x";
   import type { ConnectionStatus } from "../composables/bridgeStore.svelte";
   import { t } from "../i18n";
@@ -392,30 +393,50 @@
               class:uploading={attachment.status === "uploading"}
               class:failed={attachment.status === "failed"}
             >
-              <button
-                type="button"
-                class="attachment-chip-open"
-                aria-label={t("composer.attachments.view", { name: attachment.name })}
-                onclick={() => composer.openAttachmentLightbox(index)}
-              >
-                <img
-                  class="attachment-chip-preview"
-                  src={attachment.previewUrl}
-                  alt={attachment.name}
-                />
-                <div class="attachment-chip-body">
-                  <span class="attachment-chip-name">{attachment.name}</span>
-                  <span class="attachment-chip-meta">
-                    {#if attachment.status === "uploading"}
-                      {t("composer.attachments.uploading")}
-                    {:else if attachment.status === "failed"}
-                      {t("composer.attachments.uploadFailed")}
-                    {:else}
-                      {formatAttachmentSize(attachment.size)}
-                    {/if}
+              {#if attachment.type === "image" && attachment.previewUrl}
+                <button
+                  type="button"
+                  class="attachment-chip-open"
+                  aria-label={t("composer.attachments.view", { name: attachment.name })}
+                  onclick={() => composer.openAttachmentLightbox(index)}
+                >
+                  <img
+                    class="attachment-chip-preview"
+                    src={attachment.previewUrl}
+                    alt={attachment.name}
+                  />
+                  <div class="attachment-chip-body">
+                    <span class="attachment-chip-name">{attachment.name}</span>
+                    <span class="attachment-chip-meta">
+                      {#if attachment.status === "uploading"}
+                        {t("composer.attachments.uploading")}
+                      {:else if attachment.status === "failed"}
+                        {t("composer.attachments.uploadFailed")}
+                      {:else}
+                        {formatAttachmentSize(attachment.size)}
+                      {/if}
+                    </span>
+                  </div>
+                </button>
+              {:else}
+                <div class="attachment-chip-open attachment-chip-static">
+                  <span class="attachment-chip-preview attachment-chip-file-icon" aria-hidden="true">
+                    <FileIcon size={18} />
                   </span>
+                  <div class="attachment-chip-body">
+                    <span class="attachment-chip-name">{attachment.name}</span>
+                    <span class="attachment-chip-meta">
+                      {#if attachment.status === "uploading"}
+                        {t("composer.attachments.uploading")}
+                      {:else if attachment.status === "failed"}
+                        {t("composer.attachments.uploadFailed")}
+                      {:else}
+                        {formatAttachmentSize(attachment.size)}
+                      {/if}
+                    </span>
+                  </div>
                 </div>
-              </button>
+              {/if}
               <button
                 type="button"
                 class="attachment-chip-remove"
@@ -714,6 +735,10 @@
     text-align: left;
   }
 
+  .attachment-chip-static {
+    cursor: default;
+  }
+
   .attachment-chip-preview {
     width: 36px;
     height: 36px;
@@ -721,6 +746,13 @@
     object-fit: cover;
     background: var(--panel);
     border: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+  }
+
+  .attachment-chip-file-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-subtle);
   }
 
   .attachment-chip-body {

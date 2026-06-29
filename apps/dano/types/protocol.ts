@@ -23,6 +23,7 @@ export interface RpcUploadedFileRef {
   size: number;
   mimeType: string;
   path: string;
+  relativePath?: string;
   previewUrl?: string;
 }
 

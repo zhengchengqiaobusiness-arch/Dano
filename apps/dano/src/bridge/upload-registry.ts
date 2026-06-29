@@ -28,11 +28,9 @@ export interface StoredUpload extends RpcUploadedFileRef {
 
 const UUID =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-const UPLOAD_FILE_RE = new RegExp(
-  `^upload-(${UUID})(\\.[a-z0-9][a-z0-9._-]*)$`,
-  "i",
-);
-const UPLOAD_PART_RE = new RegExp(`^upload-(${UUID})\\.part$`, "i");
+const SHA256 = "[a-f0-9]{64}";
+const UPLOAD_FILE_RE = new RegExp(`^(${SHA256})(\\.[a-z0-9][a-z0-9._-]*)?$`, "i");
+const UPLOAD_PART_RE = new RegExp(`^\\.(${SHA256})-${UUID}\\.part$`, "i");
 
 export class UploadRegistry {
   private readonly uploads = new Map<string, StoredUpload>();
@@ -46,21 +44,26 @@ export class UploadRegistry {
 
   async initialize(): Promise<void> {
     await fs.mkdir(this.uploadDir, { recursive: true });
-    await this.scanUploadDir();
+    await this.scanUploadDir(this.uploadDir);
   }
 
-  createFilePath(mimeType: string): {
+  async createFilePath(workspacePath: string, hash: string, name: string): Promise<{
     id: string;
     filePath: string;
     partPath: string;
-  } {
+    relativePath: string;
+  }> {
     const id = randomUUID();
-    const extension = extensionForMimeType(mimeType);
-    const filePath = path.join(this.uploadDir, `upload-${id}${extension}`);
+    const uploadDir = this.workspaceUploadDir(workspacePath);
+    await fs.mkdir(uploadDir, { recursive: true });
+    const extension = extensionForName(name);
+    const storageName = `${hash}${extension}`;
+    const filePath = path.join(uploadDir, storageName);
     return {
       id,
       filePath,
-      partPath: path.join(this.uploadDir, `upload-${id}.part`),
+      partPath: path.join(uploadDir, `.${hash}-${id}.part`),
+      relativePath: path.posix.join("uploads", storageName),
     };
   }
 
@@ -141,12 +144,12 @@ export class UploadRegistry {
     await this.remove(upload);
   }
 
-  async scanUploadDir(): Promise<void> {
-    await fs.mkdir(this.uploadDir, { recursive: true });
-    const entries = await fs.readdir(this.uploadDir, { withFileTypes: true });
+  async scanUploadDir(uploadDir = this.uploadDir): Promise<void> {
+    await fs.mkdir(uploadDir, { recursive: true });
+    const entries = await fs.readdir(uploadDir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isFile()) continue;
-      const filePath = path.join(this.uploadDir, entry.name);
+      const filePath = path.join(uploadDir, entry.name);
       const partMatch = UPLOAD_PART_RE.exec(entry.name);
       if (partMatch) {
         await this.removeExpiredPath(filePath, this.config.orphanedTtlMs);
@@ -155,8 +158,7 @@ export class UploadRegistry {
 
       const fileMatch = UPLOAD_FILE_RE.exec(entry.name);
       if (!fileMatch) continue;
-      const [, id] = fileMatch;
-      if (!id || this.uploads.has(id)) continue;
+      if (this.hasPath(filePath)) continue;
 
       const stats = await fs.stat(filePath);
       if (this.isExpired(stats.mtimeMs, this.config.orphanedTtlMs)) {
@@ -165,12 +167,14 @@ export class UploadRegistry {
       }
 
       const now = this.now();
+      const id = randomUUID();
       this.uploads.set(id, {
         id,
         name: entry.name,
         size: stats.size,
         mimeType: "application/octet-stream",
         path: path.resolve(filePath),
+        relativePath: path.posix.join("uploads", entry.name),
         previewUrl: `/api/uploads/${encodeURIComponent(id)}/preview`,
         state: "orphaned",
         createdAt: stats.mtimeMs || now,
@@ -190,8 +194,12 @@ export class UploadRegistry {
     return removed;
   }
 
-  async cleanupBeforeUpload(incomingSize: number): Promise<boolean> {
-    await this.scanUploadDir();
+  async cleanupBeforeUpload(
+    incomingSize: number,
+    workspacePath?: string,
+  ): Promise<boolean> {
+    if (workspacePath) await this.scanUploadDir(this.workspaceUploadDir(workspacePath));
+    else await this.scanUploadDir();
     for (const upload of [...this.uploads.values()]) {
       if (upload.state === "orphaned") await this.remove(upload);
     }
@@ -201,7 +209,12 @@ export class UploadRegistry {
 
   getTotalBytes(): number {
     let total = 0;
-    for (const upload of this.uploads.values()) total += upload.size;
+    const seenPaths = new Set<string>();
+    for (const upload of this.uploads.values()) {
+      if (seenPaths.has(upload.path)) continue;
+      seenPaths.add(upload.path);
+      total += upload.size;
+    }
     return total;
   }
 
@@ -235,7 +248,9 @@ export class UploadRegistry {
 
   private async remove(upload: StoredUpload): Promise<void> {
     this.uploads.delete(upload.id);
-    await fs.rm(upload.path, { force: true });
+    if (![...this.uploads.values()].some(other => other.path === upload.path)) {
+      await fs.rm(upload.path, { force: true });
+    }
   }
 
   private async removeExpiredPath(filePath: string, ttlMs: number): Promise<void> {
@@ -252,25 +267,24 @@ export class UploadRegistry {
   private assertManagedPath(filePath: string): void {
     const resolved = path.resolve(filePath);
     if (
-      path.dirname(resolved) !== this.uploadDir ||
+      path.basename(path.dirname(resolved)) !== "uploads" ||
       !UPLOAD_FILE_RE.test(path.basename(resolved))
     ) {
-      throw new Error("Upload path must be a Dano-managed file inside uploadDir");
+      throw new Error("Upload path must be a Dano-managed file inside uploads");
     }
+  }
+
+  private workspaceUploadDir(workspacePath: string): string {
+    return path.join(path.resolve(workspacePath), "uploads");
+  }
+
+  private hasPath(filePath: string): boolean {
+    const resolved = path.resolve(filePath);
+    return [...this.uploads.values()].some(upload => upload.path === resolved);
   }
 }
 
-function extensionForMimeType(mimeType: string): string {
-  switch (mimeType) {
-    case "image/png":
-      return ".png";
-    case "image/jpeg":
-      return ".jpg";
-    case "image/gif":
-      return ".gif";
-    case "image/webp":
-      return ".webp";
-    default:
-      return ".bin";
-  }
+function extensionForName(name: string): string {
+  const extension = path.extname(name).toLowerCase();
+  return /^\.[a-z0-9][a-z0-9._-]{0,31}$/i.test(extension) ? extension : "";
 }

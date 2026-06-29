@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BridgeEventBus } from "../bridge-event-bus.js";
 import {
@@ -22,10 +23,14 @@ interface SseProbe {
 
 const servers: BridgeServer[] = [];
 const uploadRoots: string[] = [];
+const workspaceRoots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map(server => server.stop()));
   for (const root of uploadRoots.splice(0)) {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+  for (const root of workspaceRoots.splice(0)) {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -34,12 +39,15 @@ function createServer(
   factory?: (ctx: Parameters<RpcConnectionHandlerFactory>[0]) => RpcConnectionHandler,
 ) {
   const uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-server-upload-"));
+  const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-workspace-"));
   uploadRoots.push(uploadDir);
+  workspaceRoots.push(workspaceDir);
   const eventBus = new BridgeEventBus(DEFAULT_BRIDGE_CONFIG);
   const emitEvent = vi.fn();
   const handlerFactory: RpcConnectionHandlerFactory = ctx =>
     factory?.(ctx) ?? {
       handleClientMessage: vi.fn(),
+      currentGitCwd: () => workspaceDir,
       dispose: vi.fn(),
     };
   const server = new BridgeServer(
@@ -54,7 +62,7 @@ function createServer(
     emitEvent,
   );
   servers.push(server);
-  return { server, eventBus, emitEvent };
+  return { server, eventBus, emitEvent, workspaceDir };
 }
 
 async function postJson<T>(url: string, body: unknown = {}): Promise<T> {
@@ -79,6 +87,10 @@ async function postBytes(
   headers: Record<string, string> = {},
 ): Promise<Response> {
   return fetch(url, { method: "POST", headers, body });
+}
+
+function sha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 function openSse(url: string): SseProbe {
@@ -310,19 +322,20 @@ describe("BridgeServer HTTP/SSE transport", () => {
     );
   });
 
-  it("uploads an image to server temp storage and serves its preview", async () => {
-    const { server } = createServer();
+  it("uploads arbitrary files into the current workspace by declared hash", async () => {
+    const { server, workspaceDir } = createServer();
     const address = await server.start();
     const origin = `http://127.0.0.1:${address.port}`;
     const created = await postJson<{ client: { id: string } }>(
       `${origin}/api/clients`,
     );
-    const body = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const body = new TextEncoder().encode("hello backend storage");
+    const hash = sha256(body);
 
     const uploadResponse = await postBytes(
-      `${origin}/api/uploads?clientId=${encodeURIComponent(created.client.id)}&name=sample.png&mimeType=image/png`,
+      `${origin}/api/uploads?clientId=${encodeURIComponent(created.client.id)}&name=notes.txt&mimeType=text/plain&sha256=${hash}&workspacePath=/tmp/ignored`,
       body,
-      { "Content-Type": "image/png" },
+      { "Content-Type": "text/plain" },
     );
     expect(uploadResponse.status).toBe(201);
     const uploaded = (await uploadResponse.json()) as {
@@ -331,20 +344,44 @@ describe("BridgeServer HTTP/SSE transport", () => {
       size: number;
       mimeType: string;
       path: string;
+      relativePath: string;
       previewUrl: string;
     };
 
     expect(uploaded).toMatchObject({
-      name: "sample.png",
+      name: "notes.txt",
       size: body.length,
-      mimeType: "image/png",
+      mimeType: "text/plain",
+      relativePath: `uploads/${hash}.txt`,
     });
+    expect(uploaded.path).toBe(path.join(workspaceDir, "uploads", `${hash}.txt`));
     expect(fs.existsSync(uploaded.path)).toBe(true);
 
     const previewResponse = await fetch(`${origin}${uploaded.previewUrl}`);
     expect(previewResponse.status).toBe(200);
-    expect(previewResponse.headers.get("content-type")).toBe("image/png");
+    expect(previewResponse.headers.get("content-type")).toBe("text/plain");
     expect(new Uint8Array(await previewResponse.arrayBuffer())).toEqual(body);
+  });
+
+  it("accepts uploads with empty or unknown MIME by using octet-stream", async () => {
+    const { server } = createServer();
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const created = await postJson<{ client: { id: string } }>(
+      `${origin}/api/clients`,
+    );
+    const body = new Uint8Array([1, 2, 3]);
+
+    const response = await postBytes(
+      `${origin}/api/uploads?clientId=${encodeURIComponent(created.client.id)}&name=blob&mimeType=&sha256=${sha256(body)}`,
+      body,
+    );
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      name: "blob",
+      mimeType: "application/octet-stream",
+    });
   });
 
   it("rejects uploads without a valid client id", async () => {
@@ -352,7 +389,7 @@ describe("BridgeServer HTTP/SSE transport", () => {
     const address = await server.start();
 
     const response = await postBytes(
-      `http://127.0.0.1:${address.port}/api/uploads?name=sample.png&mimeType=image/png`,
+      `http://127.0.0.1:${address.port}/api/uploads?name=sample.png&mimeType=image/png&sha256=${sha256(new Uint8Array([1]))}`,
       new Uint8Array([1]),
       { "Content-Type": "image/png" },
     );
@@ -371,7 +408,7 @@ describe("BridgeServer HTTP/SSE transport", () => {
       `${origin}/api/clients`,
     );
     const uploadResponse = await postBytes(
-      `${origin}/api/uploads?clientId=${encodeURIComponent(owner.client.id)}&name=sample.png&mimeType=image/png`,
+      `${origin}/api/uploads?clientId=${encodeURIComponent(owner.client.id)}&name=sample.png&mimeType=image/png&sha256=${sha256(new Uint8Array([1]))}`,
       new Uint8Array([1]),
       { "Content-Type": "image/png" },
     );
@@ -399,7 +436,7 @@ describe("BridgeServer HTTP/SSE transport", () => {
     );
 
     const response = await postBytes(
-      `http://127.0.0.1:${address.port}/api/uploads?clientId=${encodeURIComponent(created.client.id)}&mimeType=image/png`,
+      `http://127.0.0.1:${address.port}/api/uploads?clientId=${encodeURIComponent(created.client.id)}&mimeType=image/png&sha256=${sha256(new Uint8Array([1]))}`,
       new Uint8Array([1]),
       { "Content-Type": "image/png" },
     );
@@ -407,7 +444,7 @@ describe("BridgeServer HTTP/SSE transport", () => {
     expect(response.status).toBe(400);
   });
 
-  it("rejects unsupported upload types", async () => {
+  it("rejects uploads without a declared sha256", async () => {
     const { server } = createServer();
     const address = await server.start();
     const created = await postJson<{ client: { id: string } }>(
@@ -420,7 +457,89 @@ describe("BridgeServer HTTP/SSE transport", () => {
       { "Content-Type": "text/plain" },
     );
 
-    expect(response.status).toBe(415);
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects hash mismatches and removes the partial file", async () => {
+    const { server, workspaceDir } = createServer();
+    const address = await server.start();
+    const created = await postJson<{ client: { id: string } }>(
+      `http://127.0.0.1:${address.port}/api/clients`,
+    );
+    const body = new TextEncoder().encode("real content");
+    const wrongHash = "0".repeat(64);
+
+    const response = await postBytes(
+      `http://127.0.0.1:${address.port}/api/uploads?clientId=${encodeURIComponent(created.client.id)}&name=note.md&mimeType=text/markdown&sha256=${wrongHash}`,
+      body,
+      { "Content-Type": "text/markdown" },
+    );
+
+    expect(response.status).toBe(400);
+    expect(fs.readdirSync(path.join(workspaceDir, "uploads"))).toEqual([]);
+  });
+
+  it("dedupes storage by hash while keeping each ref owner and original name", async () => {
+    const { server } = createServer();
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const owner = await postJson<{ client: { id: string } }>(
+      `${origin}/api/clients`,
+    );
+    const other = await postJson<{ client: { id: string } }>(
+      `${origin}/api/clients`,
+    );
+    const body = new TextEncoder().encode("same bytes");
+    const hash = sha256(body);
+
+    const first = await postBytes(
+      `${origin}/api/uploads?clientId=${encodeURIComponent(owner.client.id)}&name=first.txt&mimeType=text/plain&sha256=${hash}`,
+      body,
+      { "Content-Type": "text/plain" },
+    ).then(response => response.json() as Promise<{ path: string }>);
+    const second = await postBytes(
+      `${origin}/api/uploads?clientId=${encodeURIComponent(other.client.id)}&name=second.txt&mimeType=text/plain&sha256=${hash}`,
+      body,
+      { "Content-Type": "text/plain" },
+    ).then(response => response.json() as Promise<{ id: string; name: string; path: string }>);
+
+    expect(second).toMatchObject({ name: "second.txt", path: first.path });
+
+    await fetch(
+      `${origin}/api/uploads/${encodeURIComponent(second.id)}/orphan?clientId=${encodeURIComponent(other.client.id)}`,
+      { method: "POST", body: "{}" },
+    );
+    expect(fs.existsSync(first.path)).toBe(true);
+  });
+
+  it("returns an existing upload by hash lookup without reading a request body", async () => {
+    const { server } = createServer();
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const created = await postJson<{ client: { id: string } }>(
+      `${origin}/api/clients`,
+    );
+    const body = new TextEncoder().encode("lookup bytes");
+    const hash = sha256(body);
+    const uploaded = await postBytes(
+      `${origin}/api/uploads?clientId=${encodeURIComponent(created.client.id)}&name=first.pdf&mimeType=application/pdf&sha256=${hash}`,
+      body,
+      { "Content-Type": "application/pdf" },
+    ).then(
+      response =>
+        response.json() as Promise<{ path: string; relativePath: string }>,
+    );
+
+    const lookup = await fetch(
+      `${origin}/api/uploads/lookup?clientId=${encodeURIComponent(created.client.id)}&name=second.pdf&mimeType=application/pdf&sha256=${hash}`,
+    );
+
+    expect(lookup.status).toBe(200);
+    await expect(lookup.json()).resolves.toMatchObject({
+      name: "second.pdf",
+      path: uploaded.path,
+      relativePath: uploaded.relativePath,
+    });
   });
 
   it("rejects image uploads over the 50 MB limit before storing them", async () => {
@@ -434,7 +553,7 @@ describe("BridgeServer HTTP/SSE transport", () => {
         {
           host: "127.0.0.1",
           port: address.port,
-          path: `/api/uploads?clientId=${encodeURIComponent(created.client.id)}&name=large.png&mimeType=image/png`,
+          path: `/api/uploads?clientId=${encodeURIComponent(created.client.id)}&name=large.png&mimeType=image/png&sha256=${"0".repeat(64)}`,
           method: "POST",
           headers: {
             "Content-Type": "image/png",

@@ -11,6 +11,7 @@
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import type { BridgeEventBus } from "./bridge-event-bus.js";
 import { getLanIps, isTailscaleIp } from "./network.js";
@@ -26,12 +27,6 @@ import type {
 
 const MAX_JSON_BODY_BYTES = 1024 * 1024;
 const MAX_UPLOAD_BODY_BYTES = 50 * 1024 * 1024;
-const UPLOAD_MIME_TYPES = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-]);
 class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -43,6 +38,7 @@ class HttpError extends Error {
 
 export interface RpcConnectionHandler {
   handleClientMessage(message: ClientMessage): void;
+  currentGitCwd?(): string;
   dispose(): void;
 }
 
@@ -262,6 +258,11 @@ export class BridgeServer {
         return;
       }
 
+      if (req.method === "GET" && pathname === "/api/uploads/lookup") {
+        await this.handleUploadLookupRequest(res, url);
+        return;
+      }
+
       const uploadPreviewMatch = /^\/api\/uploads\/([^/]+)\/preview$/.exec(
         pathname,
       );
@@ -344,7 +345,10 @@ export class BridgeServer {
     const mimeType = normalizeUploadMimeType(
       url.searchParams.get("mimeType") ?? req.headers["content-type"],
     );
-    if (!mimeType) throw new HttpError(415, "Unsupported upload type");
+    const declaredHash = normalizeSha256(
+      url.searchParams.get("sha256") ?? url.searchParams.get("hash"),
+    );
+    if (!declaredHash) throw new HttpError(400, "Upload sha256 is required");
 
     const name = normalizeUploadName(url.searchParams.get("name"));
     if (!name) throw new HttpError(400, "Upload name is required");
@@ -358,30 +362,88 @@ export class BridgeServer {
     if (!ownerClientId || !this.clients.has(ownerClientId)) {
       throw new HttpError(400, "Valid clientId is required");
     }
+    const workspacePath = this.getClientWorkspacePath(ownerClientId);
+    const { id, filePath, partPath, relativePath } =
+      await this.uploadRegistry.createFilePath(workspacePath, declaredHash, name);
+    const finalFileExists = fs.existsSync(filePath);
     if (
       Number.isFinite(contentLength) &&
-      !(await this.uploadRegistry.cleanupBeforeUpload(contentLength))
+      !finalFileExists &&
+      !(await this.uploadRegistry.cleanupBeforeUpload(contentLength, workspacePath))
     ) {
       throw new HttpError(413, "Upload storage limit exceeded");
     }
 
-    const { id, filePath, partPath } = this.uploadRegistry.createFilePath(mimeType);
-    const size = await writeUploadBody(req, partPath, MAX_UPLOAD_BODY_BYTES);
-    if (!(await this.uploadRegistry.cleanupBeforeUpload(size))) {
+    const { size, hash } = await writeUploadBody(req, partPath, MAX_UPLOAD_BODY_BYTES);
+    if (hash !== declaredHash) {
       await fs.promises.rm(partPath, { force: true });
-      throw new HttpError(413, "Upload storage limit exceeded");
+      throw new HttpError(400, "Upload sha256 mismatch");
     }
-    await fs.promises.rename(partPath, filePath);
+    if (!fs.existsSync(filePath)) {
+      if (!(await this.uploadRegistry.cleanupBeforeUpload(size, workspacePath))) {
+        await fs.promises.rm(partPath, { force: true });
+        throw new HttpError(413, "Upload storage limit exceeded");
+      }
+      await fs.promises.rename(partPath, filePath);
+    } else {
+      await fs.promises.rm(partPath, { force: true });
+    }
     const ref: RpcUploadedFileRef = {
       id,
       name,
       size,
       mimeType,
       path: filePath,
+      relativePath,
       previewUrl: `/api/uploads/${encodeURIComponent(id)}/preview`,
     };
     this.uploadRegistry.register(ref, { ownerClientId });
     writeJson(res, 201, ref);
+  }
+
+  private async handleUploadLookupRequest(
+    res: http.ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    const mimeType = normalizeUploadMimeType(url.searchParams.get("mimeType"));
+    const declaredHash = normalizeSha256(url.searchParams.get("sha256"));
+    if (!declaredHash) throw new HttpError(400, "Upload sha256 is required");
+
+    const name = normalizeUploadName(url.searchParams.get("name"));
+    if (!name) throw new HttpError(400, "Upload name is required");
+
+    const ownerClientId = url.searchParams.get("clientId");
+    if (!ownerClientId || !this.clients.has(ownerClientId)) {
+      throw new HttpError(400, "Valid clientId is required");
+    }
+    const workspacePath = this.getClientWorkspacePath(ownerClientId);
+    const { id, filePath, relativePath } =
+      await this.uploadRegistry.createFilePath(workspacePath, declaredHash, name);
+    if (!fs.existsSync(filePath)) {
+      writeJson(res, 404, { error: "Upload was not found" });
+      return;
+    }
+    const stats = await fs.promises.stat(filePath);
+    const ref: RpcUploadedFileRef = {
+      id,
+      name,
+      size: stats.size,
+      mimeType,
+      path: filePath,
+      relativePath,
+      previewUrl: `/api/uploads/${encodeURIComponent(id)}/preview`,
+    };
+    this.uploadRegistry.register(ref, { ownerClientId });
+    writeJson(res, 200, ref);
+  }
+
+  private getClientWorkspacePath(clientId: string): string {
+    const handler = this.handlers.get(clientId);
+    const workspacePath = handler?.currentGitCwd?.().trim();
+    if (!workspacePath) {
+      throw new HttpError(409, "Client workspace is not ready");
+    }
+    return workspacePath;
   }
 
   private handleUploadPreview(
@@ -662,10 +724,10 @@ async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
   }
 }
 
-function normalizeUploadMimeType(value: unknown): string | null {
-  if (typeof value !== "string") return null;
+function normalizeUploadMimeType(value: unknown): string {
+  if (typeof value !== "string") return "application/octet-stream";
   const mimeType = value.split(";")[0]?.trim().toLowerCase() ?? "";
-  return UPLOAD_MIME_TYPES.has(mimeType) ? mimeType : null;
+  return mimeType || "application/octet-stream";
 }
 
 function normalizeUploadName(value: unknown): string | null {
@@ -674,12 +736,19 @@ function normalizeUploadName(value: unknown): string | null {
   return base && base !== "." && base !== ".." ? base : null;
 }
 
+function normalizeSha256(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const hash = value.trim().toLowerCase();
+  return /^[a-f0-9]{64}$/.test(hash) ? hash : null;
+}
+
 async function writeUploadBody(
   req: http.IncomingMessage,
   filePath: string,
   maxBytes: number,
-): Promise<number> {
+): Promise<{ size: number; hash: string }> {
   const out = fs.createWriteStream(filePath, { flags: "wx" });
+  const hash = createHash("sha256");
   let size = 0;
   try {
     for await (const chunk of req) {
@@ -688,13 +757,14 @@ async function writeUploadBody(
       if (size > maxBytes) {
         throw new HttpError(413, "Upload is too large");
       }
+      hash.update(buffer);
       if (!out.write(buffer)) {
         await once(out, "drain");
       }
     }
     out.end();
     await once(out, "finish");
-    return size;
+    return { size, hash: hash.digest("hex") };
   } catch (error) {
     out.destroy();
     fs.rm(filePath, { force: true }, () => {});

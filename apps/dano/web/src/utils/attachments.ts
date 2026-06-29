@@ -1,31 +1,17 @@
 import type { RpcImageContent, RpcUploadedFileRef } from "@dano/types/protocol";
 import { getBridgeClientId } from "../composables/bridgeStore.svelte";
 
-const SUPPORTED_IMAGE_MIME_TYPES = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-]);
-
-const MIME_TYPE_BY_EXTENSION: Record<string, string> = {
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-};
-
 export const MAX_COMPOSER_ATTACHMENTS = 10;
 export const MAX_COMPOSER_ATTACHMENT_BYTES = 50 * 1024 * 1024;
+export const DEFAULT_ATTACHMENT_MIME_TYPE = "application/octet-stream";
 
 export interface ComposerAttachment {
   id: string;
-  type: "image";
+  type: "file" | "image";
   name: string;
   size: number;
   mimeType: string;
-  previewUrl: string;
+  previewUrl?: string;
   status: "uploading" | "uploaded" | "failed";
   data?: string;
   file?: RpcUploadedFileRef;
@@ -33,14 +19,7 @@ export interface ComposerAttachment {
   abortController?: AbortController;
 }
 
-export const COMPOSER_ATTACHMENT_ACCEPT = [
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".gif",
-  ".webp",
-  ...SUPPORTED_IMAGE_MIME_TYPES,
-].join(",");
+export const COMPOSER_ATTACHMENT_ACCEPT = "";
 
 export function formatAttachmentSize(size: number): string {
   if (size < 1024) return `${size} B`;
@@ -48,66 +27,22 @@ export function formatAttachmentSize(size: number): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function getSupportedImageMimeType(
-  file: Pick<File, "name" | "type">,
-): string | null {
-  const mimeType = file.type.trim().toLowerCase();
-  if (SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)) {
-    return mimeType;
-  }
-
-  const extension = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
-  return MIME_TYPE_BY_EXTENSION[extension] ?? null;
-}
-
-export function extractSupportedImageFiles(
-  source: Iterable<File> | ArrayLike<File> | null | undefined,
-): File[] {
-  if (!source) return [];
-  return Array.from(source).filter(file => getSupportedImageMimeType(file));
-}
-
-export async function createComposerAttachments(
-  files: Iterable<File> | ArrayLike<File>,
-): Promise<{ attachments: ComposerAttachment[]; rejectedNames: string[] }> {
-  const attachments: ComposerAttachment[] = [];
-  const rejectedNames: string[] = [];
-
-  for (const file of Array.from(files)) {
-    const mimeType = getSupportedImageMimeType(file);
-    if (!mimeType) {
-      rejectedNames.push(file.name);
-      continue;
-    }
-
-    const data = await fileToBase64(file);
-    attachments.push({
-      id: createAttachmentId(),
-      type: "image",
-      name: file.name,
-      size: file.size,
-      mimeType,
-      data,
-      previewUrl: createDataUrl(mimeType, data),
-      status: "uploaded",
-    });
-  }
-
-  return { attachments, rejectedNames };
+export function getComposerUploadMimeType(file: Pick<File, "type">): string {
+  return file.type.trim().toLowerCase() || DEFAULT_ATTACHMENT_MIME_TYPE;
 }
 
 export function createUploadingComposerAttachment(
   file: File,
-  mimeType: string,
   abortController: AbortController,
 ): ComposerAttachment {
+  const mimeType = getComposerUploadMimeType(file);
   return {
     id: createAttachmentId(),
-    type: "image",
+    type: mimeType.startsWith("image/") ? "image" : "file",
     name: file.name,
     size: file.size,
     mimeType,
-    previewUrl: URL.createObjectURL(file),
+    previewUrl: mimeType.startsWith("image/") ? URL.createObjectURL(file) : undefined,
     status: "uploading",
     abortController,
   };
@@ -115,12 +50,23 @@ export function createUploadingComposerAttachment(
 
 export async function uploadComposerAttachment(
   file: File,
-  mimeType: string,
   signal: AbortSignal,
 ): Promise<RpcUploadedFileRef> {
   const clientId = getBridgeClientId();
   if (!clientId) throw new Error("Upload requires an active client");
-  const query = new URLSearchParams({ clientId, name: file.name, mimeType });
+  const mimeType = getComposerUploadMimeType(file);
+  const sha256 = await sha256File(file);
+  const query = new URLSearchParams({ clientId, name: file.name, mimeType, sha256 });
+  const existing = await fetch(`/api/uploads/lookup?${query.toString()}`, {
+    method: "GET",
+    signal,
+  });
+  if (existing.ok) {
+    return (await existing.json()) as RpcUploadedFileRef;
+  }
+  if (existing.status !== 404) {
+    throw new Error(`Upload lookup failed (${existing.status})`);
+  }
   const response = await fetch(`/api/uploads?${query.toString()}`, {
     method: "POST",
     headers: { "Content-Type": mimeType },
@@ -170,25 +116,12 @@ function createAttachmentId(): string {
   return `attachment_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 }
 
-function createDataUrl(mimeType: string, data: string): string {
-  return `data:${mimeType};base64,${data}`;
-}
-
-async function fileToBase64(file: File): Promise<string> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  return bytesToBase64(bytes);
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  const chunkSize = 0x8000;
-
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    const chunk = bytes.subarray(index, index + chunkSize);
-    for (let chunkIndex = 0; chunkIndex < chunk.length; chunkIndex += 1) {
-      binary += String.fromCharCode(chunk[chunkIndex] ?? 0);
-    }
-  }
-
-  return btoa(binary);
+async function sha256File(file: File): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    await file.arrayBuffer(),
+  );
+  return Array.from(new Uint8Array(digest), byte =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
 }

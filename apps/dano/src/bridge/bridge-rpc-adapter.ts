@@ -89,6 +89,7 @@ type UserMessageContent =
       | { type: "text"; text: string }
       | { type: "image"; data: string; mimeType: string }
     >;
+type UploadedProjectFileRef = RpcUploadedFileRef & { relativePath?: string };
 type UserMessageBlock = Exclude<UserMessageContent, string>[number];
 type PiTextContent = Extract<UserMessageBlock, { type: "text" }>;
 type PiAgentMessage = NonNullable<PiAgentEndEvent["messages"]>[number];
@@ -2648,19 +2649,18 @@ function normalizeRpcImages(images: unknown): RpcImageContent[] | undefined {
 
 function normalizeRpcUploadedFiles(
   files: unknown,
-): RpcUploadedFileRef[] | undefined {
+): UploadedProjectFileRef[] | undefined {
   if (!Array.isArray(files)) return undefined;
 
-  const normalized = files.flatMap((file): RpcUploadedFileRef[] => {
+  const normalized = files.flatMap((file): UploadedProjectFileRef[] => {
     if (typeof file !== "object" || file === null) return [];
-    const data = file as Partial<RpcUploadedFileRef>;
+    const data = file as Partial<UploadedProjectFileRef>;
     if (
       typeof data.id !== "string" ||
       typeof data.name !== "string" ||
       typeof data.path !== "string" ||
       typeof data.mimeType !== "string" ||
-      typeof data.size !== "number" ||
-      !data.mimeType.startsWith("image/")
+      typeof data.size !== "number"
     ) {
       return [];
     }
@@ -2671,6 +2671,8 @@ function normalizeRpcUploadedFiles(
         path: data.path,
         mimeType: data.mimeType,
         size: data.size,
+        relativePath:
+          typeof data.relativePath === "string" ? data.relativePath : undefined,
         previewUrl:
           typeof data.previewUrl === "string" ? data.previewUrl : undefined,
       },
@@ -2680,40 +2682,54 @@ function normalizeRpcUploadedFiles(
   return normalized.length > 0 ? normalized : undefined;
 }
 
-async function uploadedFilesToRpcImages(
-  files: RpcUploadedFileRef[] | undefined,
-  uploadRegistry: UploadRegistry,
-  correlationId: string,
-): Promise<RpcImageContent[] | undefined> {
-  if (!files?.length) return undefined;
-
-  const images: RpcImageContent[] = [];
-  const readingIds: string[] = [];
-  try {
-    for (const file of files) {
-      const stored = uploadRegistry.resolve(file);
-      if (!stored) {
-        throw new Error(`Uploaded file was not found: ${file.name}`);
-      }
-      uploadRegistry.markReading(stored.id);
-      readingIds.push(stored.id);
-      const data = await fs.promises.readFile(stored.path, "base64");
-      uploadRegistry.markReferenced(stored.id, { correlationId });
-      images.push({ type: "image", data, mimeType: stored.mimeType });
-    }
-  } catch (error) {
-    for (const id of readingIds) uploadRegistry.markDraft(id);
-    throw error;
+function normalizeProjectFileReference(filePath: string): string | null {
+  const normalized = path.posix.normalize(filePath.replace(/\\/g, "/"));
+  if (
+    normalized === "." ||
+    normalized.startsWith("/") ||
+    normalized === ".." ||
+    normalized.startsWith("../")
+  ) {
+    return null;
   }
-  return images;
+  return normalized;
 }
 
-function mergeRpcImages(
-  images: RpcImageContent[] | undefined,
-  uploadedImages: RpcImageContent[] | undefined,
-): RpcImageContent[] | undefined {
-  const merged = [...(images ?? []), ...(uploadedImages ?? [])];
-  return merged.length > 0 ? merged : undefined;
+function uploadedFilesToProjectFileReferences(
+  files: UploadedProjectFileRef[] | undefined,
+  uploadRegistry: UploadRegistry,
+  correlationId: string,
+): string[] | undefined {
+  if (!files?.length) return undefined;
+
+  const resolved: Array<{ id: string; name: string; relativePath: string }> = [];
+  for (const file of files) {
+    const stored = uploadRegistry.resolve(file) as UploadedProjectFileRef | null;
+    if (!stored) {
+      throw new Error(`Uploaded file was not found: ${file.name}`);
+    }
+    const relativePath = normalizeProjectFileReference(
+      stored.relativePath ?? file.relativePath ?? "",
+    );
+    if (!relativePath) {
+      throw new Error(`Uploaded file is missing a project path: ${file.name}`);
+    }
+    resolved.push({ id: stored.id, name: stored.name, relativePath });
+  }
+
+  for (const file of resolved) {
+    uploadRegistry.markReferenced(file.id, { correlationId });
+  }
+  return resolved.map(file => file.relativePath);
+}
+
+function appendProjectFileReferences(
+  message: string,
+  files: string[] | undefined,
+): string {
+  if (!files?.length) return message;
+  const fileText = files.map(file => `- ${file}`).join("\n");
+  return `${message}${message ? "\n\n" : ""}Project file references:\n${fileText}`;
 }
 
 function buildUserMessageContent(
@@ -4055,6 +4071,10 @@ export class BridgeRpcAdapter {
     );
   }
 
+  currentGitCwd(): string {
+    return this.sessionRuntime.currentGitCwd();
+  }
+
   /* ------------------------------------------------------------------------
    * Live event fan-out
    * ---------------------------------------------------------------------- */
@@ -4673,13 +4693,11 @@ export class BridgeRpcAdapter {
        * ================================================================== */
 
       case "prompt": {
-        const images = mergeRpcImages(
-          normalizeRpcImages(command.images),
-          await uploadedFilesToRpcImages(
-            normalizeRpcUploadedFiles(command.files),
-            this.uploadRegistry,
-            correlationId,
-          ),
+        const images = normalizeRpcImages(command.images);
+        const projectFiles = uploadedFilesToProjectFileReferences(
+          normalizeRpcUploadedFiles(command.files),
+          this.uploadRegistry,
+          correlationId,
         );
 
         // Auto-create a detached session when no session is selected.
@@ -4701,24 +4719,29 @@ export class BridgeRpcAdapter {
           : { source: "rpc" as const, images };
 
         setTimeout(() => {
-          void session.prompt(command.message, promptOptions).catch(error => {
-            const message =
-              error instanceof Error ? error.message : String(error);
-            const sessionPath = session.sessionFile ?? null;
-            console.error(
-              `BridgeRpcAdapter[${this.client.id}]: Detached prompt failed:`,
-              message,
-            );
-            this.emitEvent({
-              type: "command_error",
-              client: this.client,
-              commandType: "prompt",
-              correlationId,
-              error: message,
+          void session
+            .prompt(
+              appendProjectFileReferences(command.message, projectFiles),
+              promptOptions,
+            )
+            .catch(error => {
+              const message =
+                error instanceof Error ? error.message : String(error);
+              const sessionPath = session.sessionFile ?? null;
+              console.error(
+                `BridgeRpcAdapter[${this.client.id}]: Detached prompt failed:`,
+                message,
+              );
+              this.emitEvent({
+                type: "command_error",
+                client: this.client,
+                commandType: "prompt",
+                correlationId,
+                error: message,
+              });
+              this.sendEvent(toRpcAgentEndEvent({}, sessionPath));
+              if (sessionPath) this.sessionStatsPusher.queue(sessionPath);
             });
-            this.sendEvent(toRpcAgentEndEvent({}, sessionPath));
-            if (sessionPath) this.sessionStatsPusher.queue(sessionPath);
-          });
         }, 0);
 
         if (autoCreated) {
@@ -4750,25 +4773,28 @@ export class BridgeRpcAdapter {
       }
 
       case "steer": {
-        const images = mergeRpcImages(
-          normalizeRpcImages(command.images),
-          await uploadedFilesToRpcImages(
-            normalizeRpcUploadedFiles(command.files),
-            this.uploadRegistry,
-            correlationId,
-          ),
+        const images = normalizeRpcImages(command.images);
+        const projectFiles = uploadedFilesToProjectFileReferences(
+          normalizeRpcUploadedFiles(command.files),
+          this.uploadRegistry,
+          correlationId,
         );
         if (this.sessionRuntime.hasDetachedSelection()) {
           const session = await this.sessionRuntime.ensureDetachedSession();
-          void session.steer(command.message, images).catch(error => {
-            console.error(
-              `BridgeRpcAdapter[${this.client.id}]: Detached steer failed:`,
-              error,
-            );
-          });
+          void session
+            .steer(appendProjectFileReferences(command.message, projectFiles), images)
+            .catch(error => {
+              console.error(
+                `BridgeRpcAdapter[${this.client.id}]: Detached steer failed:`,
+                error,
+              );
+            });
         } else {
           this.context.actions.sendUserMessage(
-            buildUserMessageContent(command.message, images),
+            buildUserMessageContent(
+              appendProjectFileReferences(command.message, projectFiles),
+              images,
+            ),
             {
               deliverAs: "steer",
             },
@@ -4783,25 +4809,31 @@ export class BridgeRpcAdapter {
       }
 
       case "follow_up": {
-        const images = mergeRpcImages(
-          normalizeRpcImages(command.images),
-          await uploadedFilesToRpcImages(
-            normalizeRpcUploadedFiles(command.files),
-            this.uploadRegistry,
-            correlationId,
-          ),
+        const images = normalizeRpcImages(command.images);
+        const projectFiles = uploadedFilesToProjectFileReferences(
+          normalizeRpcUploadedFiles(command.files),
+          this.uploadRegistry,
+          correlationId,
         );
         if (this.sessionRuntime.hasDetachedSelection()) {
           const session = await this.sessionRuntime.ensureDetachedSession();
-          void session.followUp(command.message, images).catch(error => {
-            console.error(
-              `BridgeRpcAdapter[${this.client.id}]: Detached follow_up failed:`,
-              error,
-            );
-          });
+          void session
+            .followUp(
+              appendProjectFileReferences(command.message, projectFiles),
+              images,
+            )
+            .catch(error => {
+              console.error(
+                `BridgeRpcAdapter[${this.client.id}]: Detached follow_up failed:`,
+                error,
+              );
+            });
         } else {
           this.context.actions.sendUserMessage(
-            buildUserMessageContent(command.message, images),
+            buildUserMessageContent(
+              appendProjectFileReferences(command.message, projectFiles),
+              images,
+            ),
             {
               deliverAs: "followUp",
             },
