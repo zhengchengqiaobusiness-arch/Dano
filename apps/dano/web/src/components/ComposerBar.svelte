@@ -382,6 +382,7 @@
         type="file"
         multiple
         accept={COMPOSER_ATTACHMENT_ACCEPT}
+        disabled={!composer.canAddAttachments}
         onchange={handleFileInputChange}
       />
 

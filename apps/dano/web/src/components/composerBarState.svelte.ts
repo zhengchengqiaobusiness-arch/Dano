@@ -355,6 +355,7 @@ export function createComposerBarState(
   async function addAttachmentsFromFiles(
     files: Iterable<File> | ArrayLike<File> | null | undefined,
   ) {
+    if (!canAddAttachments) return;
     if (!files) return;
     const incomingFiles = Array.from(files);
     if (!incomingFiles.length) return;
