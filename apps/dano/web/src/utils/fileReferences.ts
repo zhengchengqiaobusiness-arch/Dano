@@ -18,14 +18,21 @@ const SPECIAL_FILE_NAMES = new Set([
   "tsconfig.json",
 ]);
 
+function looksLikeExternalAddress(path: string): boolean {
+  const trimmedPath = path.trim();
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmedPath)) {
+    return true;
+  }
+  if (/^(?:localhost|\d{1,3}(?:\.\d{1,3}){3}|[a-z0-9.-]+\.[a-z]{2,})$/i.test(trimmedPath)) {
+    return true;
+  }
+  return false;
+}
+
 function looksLikeFilePath(path: string): boolean {
   const trimmedPath = path.trim();
   if (!trimmedPath || trimmedPath === "." || trimmedPath === "..") {
     return false;
-  }
-
-  if (trimmedPath.includes("/") || trimmedPath.includes("\\")) {
-    return true;
   }
 
   const fileName = trimmedPath.split(/[/\\]/).pop()?.toLowerCase() ?? "";
@@ -34,6 +41,13 @@ function looksLikeFilePath(path: string): boolean {
   }
 
   if (SPECIAL_FILE_NAMES.has(fileName)) {
+    return true;
+  }
+  if (looksLikeExternalAddress(trimmedPath)) {
+    return false;
+  }
+
+  if (trimmedPath.includes("/") || trimmedPath.includes("\\")) {
     return true;
   }
 
