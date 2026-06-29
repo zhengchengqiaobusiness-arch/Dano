@@ -50,7 +50,7 @@ export const PI_BASE46_LIGHT_THEME: Base46Theme = {
     base0A: "#9a6700",
     base0B: "#1f7a3f",
     base0C: "#1b7c83",
-    base0D: "#4285f4",
+    base0D: "#53b559",
     base0E: "#8250df",
     base0F: "#953800",
   },
