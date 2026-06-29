@@ -290,7 +290,7 @@
   .empty-conversation :global(.chat-transcript) {
     flex: 0 0 auto;
     overflow: visible;
-    padding-bottom: 18px;
+    padding: 0;
   }
 
   .empty-conversation :global(.chat-transcript .empty-state) {

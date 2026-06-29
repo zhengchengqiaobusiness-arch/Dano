@@ -1512,7 +1512,7 @@
   .tool-inline-toggle {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    align-items: baseline;
+    align-items: center;
     column-gap: 8px;
     width: 100%;
     padding: 0;
@@ -1529,7 +1529,7 @@
 
   .tool-inline-summary {
     display: inline-flex;
-    align-items: baseline;
+    align-items: center;
     gap: 8px;
     min-width: 0;
   }
@@ -1554,6 +1554,9 @@
   }
 
   .tool-inline-trailing {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
     flex: none;
     min-width: 0;
     max-width: 180px;
