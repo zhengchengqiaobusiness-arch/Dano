@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
-  AskUserQuestionAnswer,
+  AskUserQuestionAnswerInput,
   AskUserQuestionDataSource,
   AskUserQuestionInputType,
   AskUserQuestionOption,
@@ -19,7 +19,7 @@ function executeQuestion(
     dataSource?: AskUserQuestionDataSource;
     multiple?: boolean;
     confirm?: true;
-    default?: AskUserQuestionAnswer;
+    default?: AskUserQuestionAnswerInput;
     questions?: {
       id?: string;
       question: string;
@@ -27,7 +27,7 @@ function executeQuestion(
       inputType?: AskUserQuestionInputType;
       dataSource?: AskUserQuestionDataSource;
       multiple?: boolean;
-      default?: AskUserQuestionAnswer;
+      default?: AskUserQuestionAnswerInput;
     }[];
   },
   signal?: AbortSignal,
@@ -106,6 +106,123 @@ describe("ask_user_question tool", () => {
     });
     await expect(execution).resolves.toMatchObject({
       details: { status: "answered", answer: "emp_1001" },
+    });
+  });
+
+  it("normalizes choice answers from ids, labels, and option items", async () => {
+    const numberId = executeQuestion("choice-number", {
+      question: "Department?",
+      options: [
+        { id: 1, label: "研发部" },
+        { id: 2, label: "财务部" },
+      ],
+    });
+    askUserQuestionCoordinator.answer("choice-number", {
+      cancelled: false,
+      answer: 1,
+    });
+    await expect(numberId).resolves.toMatchObject({
+      details: { status: "answered", answer: 1 },
+    });
+
+    const objectItem = executeQuestion("choice-object", {
+      question: "Department?",
+      options: [{ id: 1, label: "研发部" }, { id: 2, label: "财务部" }],
+    });
+    askUserQuestionCoordinator.answer("choice-object", {
+      cancelled: false,
+      answer: { id: 1, label: "研发部" },
+    });
+    await expect(objectItem).resolves.toMatchObject({
+      details: { status: "answered", answer: 1 },
+    });
+
+    const label = executeQuestion("choice-label", {
+      question: "Department?",
+      options: [{ id: 1, label: "研发部" }, { id: 2, label: "财务部" }],
+    });
+    askUserQuestionCoordinator.answer("choice-label", {
+      cancelled: false,
+      answer: "研发部",
+    });
+    await expect(label).resolves.toMatchObject({
+      details: { status: "answered", answer: 1 },
+    });
+
+    const zero = executeQuestion("choice-zero", {
+      question: "Department?",
+      options: [{ id: 0, label: "未分配" }, { id: 1, label: "研发部" }],
+    });
+    askUserQuestionCoordinator.answer("choice-zero", {
+      cancelled: false,
+      answer: 0,
+    });
+    await expect(zero).resolves.toMatchObject({
+      details: { status: "answered", answer: 0 },
+    });
+
+    const stringified = executeQuestion("choice-stringified", {
+      question: "Department?",
+      options: [{ id: 1, label: "研发部" }],
+    });
+    askUserQuestionCoordinator.answer("choice-stringified", {
+      cancelled: false,
+      answer: "1",
+    });
+    await expect(stringified).resolves.toMatchObject({
+      details: { status: "answered", answer: 1 },
+    });
+  });
+
+  it("keeps number and string option ids distinct", async () => {
+    const execution = executeQuestion("choice-id-type", {
+      question: "Department?",
+      options: [{ id: 1, label: "A" }, { id: "1", label: "B" }],
+    });
+
+    askUserQuestionCoordinator.answer("choice-id-type", {
+      cancelled: false,
+      answer: "1",
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: "1" },
+    });
+  });
+
+  it("normalizes multiple-choice option items to ids", async () => {
+    const execution = executeQuestion("multiple-object", {
+      question: "Departments?",
+      options: [{ id: 1, label: "研发部" }, { id: 2, label: "财务部" }],
+      multiple: true,
+    });
+
+    askUserQuestionCoordinator.answer("multiple-object", {
+      cancelled: false,
+      answer: [{ id: 1, label: "研发部" }, "财务部"],
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: [1, 2] },
+    });
+  });
+
+  it("reports ambiguous labels as a user-facing validation error", async () => {
+    const execution = executeQuestion("choice-duplicate-label", {
+      question: "Department?",
+      options: [{ id: 1, label: "研发部" }, { id: 2, label: "研发部" }],
+    });
+
+    expect(() =>
+      askUserQuestionCoordinator.answer("choice-duplicate-label", {
+        cancelled: false,
+        answer: "研发部",
+      }),
+    ).toThrow("选项标签不唯一，请重新选择");
+    askUserQuestionCoordinator.answer("choice-duplicate-label", {
+      cancelled: false,
+      answer: 1,
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: 1 },
     });
   });
 
@@ -228,7 +345,7 @@ describe("ask_user_question tool", () => {
         cancelled: false,
         answer: "其他",
       }),
-    ).toThrow("custom answer");
+    ).toThrow("请输入其他回答");
     askUserQuestionCoordinator.answer("bare-other", {
       cancelled: false,
       answer: "志愿者假",
@@ -249,7 +366,7 @@ describe("ask_user_question tool", () => {
         cancelled: false,
         answer: "志愿者假",
       }),
-    ).toThrow("provided options");
+    ).toThrow("答案必须匹配一个可选项");
     askUserQuestionCoordinator.answer("custom-not-offered", {
       cancelled: false,
       answer: "年假",
@@ -271,7 +388,7 @@ describe("ask_user_question tool", () => {
         cancelled: false,
         answer: ["Disaster recovery", "Development"],
       }),
-    ).toThrow("one custom answer");
+    ).toThrow("只能填写一个其他回答");
     askUserQuestionCoordinator.answer("multiple-custom", {
       cancelled: false,
       answer: ["Test", "Development"],
@@ -423,7 +540,7 @@ describe("ask_user_question tool", () => {
         cancelled: false,
         answer: ["Unknown"],
       }),
-    ).toThrow("unique provided options");
+    ).toThrow("答案必须匹配一个可选项");
     askUserQuestionCoordinator.answer("multiple-2", {
       cancelled: false,
       answer: ["Production"],
@@ -496,7 +613,7 @@ describe("ask_user_question tool", () => {
         cancelled: false,
         answer: "C",
       }),
-    ).toThrow("must match");
+    ).toThrow("答案必须匹配一个可选项");
     askUserQuestionCoordinator.answer("choice-2", {
       cancelled: false,
       answer: "B",

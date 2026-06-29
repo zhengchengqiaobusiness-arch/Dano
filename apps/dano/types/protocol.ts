@@ -106,13 +106,28 @@ export type RpcToolResultDetails = RpcJsonValue;
 
 export const ASK_USER_QUESTION_TOOL_NAME = "ask_user_question";
 
-export type AskUserQuestionAnswer = string | string[] | boolean;
+export type AskUserQuestionOptionId = string | number;
 
 export type AskUserQuestionOption = {
-  id: string;
+  id: AskUserQuestionOptionId;
   label: string;
   extra?: Record<string, unknown>;
 };
+
+export type AskUserQuestionChoiceAnswerInput =
+  | AskUserQuestionOptionId
+  | AskUserQuestionOption;
+
+export type AskUserQuestionAnswerInput =
+  | AskUserQuestionOptionId
+  | boolean
+  | AskUserQuestionOption
+  | AskUserQuestionChoiceAnswerInput[];
+
+export type AskUserQuestionAnswer =
+  | AskUserQuestionOptionId
+  | AskUserQuestionOptionId[]
+  | boolean;
 
 export type AskUserQuestionInputType =
   | "text"
@@ -300,7 +315,9 @@ export interface RpcCommandMap {
     | {
         toolCallId: string;
         cancelled: false;
-        answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>;
+        answer:
+          | AskUserQuestionAnswerInput
+          | Record<string, AskUserQuestionAnswerInput>;
       };
   new_session: {
     parentSession?: string;

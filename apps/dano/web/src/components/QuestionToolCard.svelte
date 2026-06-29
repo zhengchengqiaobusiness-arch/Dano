@@ -2,6 +2,7 @@
   import type {
     AskUserQuestionAnswer,
     AskUserQuestionDataSource,
+    AskUserQuestionOptionId,
     RpcResponse,
   } from "@dano/types/protocol";
   import { t } from "../i18n";
@@ -156,14 +157,18 @@
     if (item.kind === "single" || item.kind === "select" || item.kind === "treeSelect") {
       const selected = selectedOption[item.id] ?? "";
       if (!selected) return null;
-      return selectedOptionIsOther(item, selected) ? customAnswer[item.id]?.trim() || null : selected;
+      return selectedOptionIsOther(item, selected)
+        ? customAnswer[item.id]?.trim() || null
+        : selectedOptionValue(item, selected);
     }
     if (item.kind === "multiple") {
       const selected = selectedOptions[item.id] ?? [];
       if (selected.length === 0) return null;
       if (selected.some(option => selectedOptionIsOther(item, option)) && !customAnswer[item.id]?.trim()) return null;
       return selected.map(option =>
-        selectedOptionIsOther(item, option) ? customAnswer[item.id].trim() : option,
+        selectedOptionIsOther(item, option)
+          ? customAnswer[item.id].trim()
+          : selectedOptionValue(item, option),
       );
     }
     if (item.kind === "text") return textAnswer[item.id]?.trim() || null;
@@ -189,32 +194,33 @@
 
   function selectedOptionForDefault(
     item: ChoiceQuestionItem,
-    answer: string | undefined,
+    answer: AskUserQuestionOptionId | undefined,
   ): string {
-    if (!answer) return "";
-    if (itemOptions(item).some(option => option.id === answer)) return answer;
-    return itemOptions(item).find(isOtherOption)?.id ?? "";
+    if (answer === undefined) return "";
+    if (itemOptions(item).some(option => option.id === answer)) return optionKey(answer);
+    const other = itemOptions(item).find(isOtherOption);
+    return other ? optionKey(other.id) : "";
   }
 
   function selectedOptionsForDefault(
     item: Extract<AskUserQuestionItem, { kind: "multiple" }>,
-    answers: string[] | undefined,
+    answers: AskUserQuestionOptionId[] | undefined,
   ): string[] {
     if (!answers) return [];
     const selected = new Set<string>();
     const other = itemOptions(item).find(isOtherOption);
     for (const answer of answers) {
-      if (itemOptions(item).some(option => option.id === answer)) selected.add(answer);
-      else if (other) selected.add(other.id);
+      if (itemOptions(item).some(option => option.id === answer)) selected.add(optionKey(answer));
+      else if (other) selected.add(optionKey(other.id));
     }
     return [...selected];
   }
 
   function customAnswerForDefault(
     item: ChoiceQuestionItem,
-    answer: string | undefined,
+    answer: AskUserQuestionOptionId | undefined,
   ): string {
-    return answer &&
+    return typeof answer === "string" &&
       !itemOptions(item).some(option => option.id === answer) &&
       itemOptions(item).some(isOtherOption)
       ? answer
@@ -228,14 +234,25 @@
 
   function itemOptions(item: ChoiceQuestionItem): NormalizedAskUserQuestionOption[] {
     const byId = new Map<string, NormalizedAskUserQuestionOption>();
-    for (const option of item.options) byId.set(option.id, option);
-    for (const option of remoteOptions[item.id] ?? []) byId.set(option.id, option);
+    for (const option of item.options) byId.set(optionKey(option.id), option);
+    for (const option of remoteOptions[item.id] ?? []) byId.set(optionKey(option.id), option);
     return [...byId.values()];
   }
 
   function selectedOptionIsOther(item: ChoiceQuestionItem, selected: string): boolean {
-    const option = itemOptions(item).find(candidate => candidate.id === selected);
+    const option = itemOptions(item).find(candidate => optionKey(candidate.id) === selected);
     return option ? isOtherOption(option) : isOtherOption(selected);
+  }
+
+  function selectedOptionValue(
+    item: ChoiceQuestionItem,
+    selected: string,
+  ): AskUserQuestionOptionId {
+    return itemOptions(item).find(option => optionKey(option.id) === selected)?.id ?? selected;
+  }
+
+  function optionKey(id: AskUserQuestionOptionId): string {
+    return `${typeof id}:${String(id)}`;
   }
 
   async function loadRemoteOptions(
@@ -323,7 +340,7 @@
       const extra: Record<string, unknown> = {};
       for (const field of extraFields) extra[field] = row[field];
       options.push({
-        id: String(id),
+        id,
         label: `${"  ".repeat(depth)}${String(label)}`,
         ...(extraFields.length > 0 ? { extra } : {}),
       });
@@ -406,7 +423,7 @@
                 <legend class="sr-only">{item.question}</legend>
                 {#each itemOptions(item) as option}
                   <label class="question-option">
-                    <input type="radio" name={`question-${block.toolCallId}-${item.id}`} value={option.id} bind:group={selectedOption[item.id]} />
+                    <input type="radio" name={`question-${block.toolCallId}-${item.id}`} value={optionKey(option.id)} bind:group={selectedOption[item.id]} />
                     <span>{option.label}</span>
                   </label>
                 {/each}
@@ -440,7 +457,7 @@
               >
                 <option value="">{t("questionTool.selectPlaceholder")}</option>
                 {#each itemOptions(item) as option}
-                  <option value={option.id}>{option.label}</option>
+                  <option value={optionKey(option.id)}>{option.label}</option>
                 {/each}
               </select>
               {#if remoteError[item.id]}
@@ -480,7 +497,7 @@
                 <legend class="sr-only">{item.question}</legend>
                 {#each itemOptions(item) as option}
                   <label class="question-option">
-                    <input type="checkbox" value={option.id} bind:group={selectedOptions[item.id]} />
+                    <input type="checkbox" value={optionKey(option.id)} bind:group={selectedOptions[item.id]} />
                     <span>{option.label}</span>
                   </label>
                 {/each}
