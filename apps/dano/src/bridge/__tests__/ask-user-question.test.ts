@@ -47,6 +47,7 @@ describe("ask_user_question tool", () => {
   it("instructs the model to collect required input and confirm final summaries", () => {
     expect(askUserQuestionTool.promptGuidelines).toEqual([
       "Use ask_user_question whenever you need user input to continue; do not ask the question only in assistant text.",
+      "When the user asks to fill in a form, complete a form, or provide form fields, collect the fields with ask_user_question.",
       "Call ask_user_question at most once per assistant response. If you need several answers, put every item in one questions array.",
       "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
       "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
