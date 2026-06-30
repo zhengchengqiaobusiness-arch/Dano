@@ -997,7 +997,8 @@ function toolStatusFromResult(
   const hasText =
     typeof resultText === "string" && resultText.trim().length > 0;
   const hasBlocks = Array.isArray(resultBlocks) && resultBlocks.length > 0;
-  if (!hasText && !hasBlocks) return "pending";
+  const hasDetails = isJsonObject(resultDetails);
+  if (!hasText && !hasBlocks && !hasDetails) return "pending";
   const exitCode = isJsonObject(resultDetails)
     ? resultDetails.exitCode
     : undefined;

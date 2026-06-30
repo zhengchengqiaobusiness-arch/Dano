@@ -3,6 +3,7 @@
     AskUserQuestionAnswer,
     AskUserQuestionDataSource,
     AskUserQuestionOptionId,
+    AskUserQuestionResult,
     FieldAssistAction,
     FieldAssistCommandPayload,
     FieldAssistResult,
@@ -52,7 +53,10 @@
   const questionItems = $derived(
     request ? (request.batch ? request.questions : [request]) : [],
   );
-  const result = $derived(askUserQuestionResult(block.resultDetails));
+  let submittedResult = $state<AskUserQuestionResult | null>(null);
+  const result = $derived(
+    askUserQuestionResult(block.resultDetails) ?? submittedResult,
+  );
   const pending = $derived(block.toolStatus === "pending" && !result && active);
   const interrupted = $derived(block.toolStatus === "pending" && !result && !active);
   const requestKey = $derived(request ? JSON.stringify(request) : "");
@@ -94,6 +98,7 @@
     aiAssistError = {};
     aiAssistWarning = {};
     aiAssistSeq += 1;
+    submittedResult = null;
 
     for (const item of questionItems) {
       if (item.kind === "text") {
@@ -143,6 +148,12 @@
     try {
       const rpc = await onRespond(block.toolCallId, response);
       if (!rpc.success) throw new Error(rpc.error);
+      submittedResult = response.cancelled
+        ? { status: "cancelled" }
+        : askUserQuestionResult(rpc.data) ?? {
+            status: "answered",
+            answer: response.answer,
+          };
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
       submitting = false;

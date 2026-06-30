@@ -32,6 +32,42 @@ describe("curl transcript status", () => {
       "error",
     );
   });
+
+  it("marks structured tool results as complete even when text content is empty", () => {
+    const messages = normalizeTranscript([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "question-1",
+            name: "ask_user_question",
+            arguments: { question: "请填写说明", inputType: "textarea" },
+          },
+        ],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "question-1",
+        toolName: "ask_user_question",
+        content: [{ type: "text", text: "" }],
+        details: { status: "answered", answer: "默认内容" },
+        isError: false,
+      },
+    ] as never);
+
+    const block = contentBlocks(messages[0]!).find(
+      item => item.kind === "tool",
+    );
+
+    expect(block?.kind === "tool" ? block.toolStatus : undefined).toBe(
+      "success",
+    );
+    expect(block?.kind === "tool" ? block.resultDetails : undefined).toEqual({
+      status: "answered",
+      answer: "默认内容",
+    });
+  });
 });
 
 describe("assistant thinking blocks", () => {
