@@ -84,16 +84,32 @@ export function createFieldAssistService(options: {
       assertAllowed(input);
 
       const model = options.getCurrentModel();
-      const raw = await options.ai.generateText({
-        model,
-        messages:
-          input.action === "polish"
-            ? buildPolishMessages(input)
-            : buildRegenerateMessages(input),
-        timeoutMs: options.timeoutMs ?? 60_000,
-      });
-      const value = normalizeFieldAssistOutput(raw, input.fieldType);
-      assertFieldAssistOutput(value);
+      const messages =
+        input.action === "polish"
+          ? buildPolishMessages(input)
+          : buildRegenerateMessages(input);
+      let value = "";
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const raw = await options.ai.generateText({
+          model,
+          messages: attempt === 0 ? messages : buildRetryMessages(messages),
+          timeoutMs: options.timeoutMs ?? 60_000,
+        });
+        value = normalizeFieldAssistOutput(raw, input.fieldType);
+        try {
+          assertFieldAssistOutput(value);
+          break;
+        } catch (cause) {
+          if (
+            attempt === 0 &&
+            cause instanceof FieldAssistError &&
+            cause.code === "INVALID_MODEL_OUTPUT"
+          ) {
+            continue;
+          }
+          throw cause;
+        }
+      }
       const metadata: FieldAssistMetadata = {
         action: input.action,
         fieldType: input.fieldType,
@@ -235,6 +251,17 @@ export function buildRegenerateMessages(
         currentValue: input.currentValue,
         prefill: input.prefill,
       }),
+    },
+  ];
+}
+
+function buildRetryMessages(messages: FieldAssistMessage[]): FieldAssistMessage[] {
+  return [
+    ...messages,
+    {
+      role: "system",
+      content:
+        "上一次输出不是可直接填入字段的正文。请只返回改写后的字段值，不要追问用户，不要请求补充信息，不要调用工具。",
     },
   ];
 }

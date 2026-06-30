@@ -74,6 +74,35 @@ describe("field assist", () => {
     expect(ai.generateText).toHaveBeenCalledTimes(1);
   });
 
+  it("retries once when model output asks a follow-up question", async () => {
+    const ai = {
+      generateText: vi.fn()
+        .mockResolvedValueOnce("请问您需要请假的具体原因是什么？")
+        .mockResolvedValueOnce("因个人事务需要请假处理。"),
+    };
+    const service = createFieldAssistService({
+      ai,
+      getCurrentModel: () => ({ id: "gpt-4", provider: "openai" }),
+    });
+
+    await expect(
+      service.assist({
+        requestId: "req-1",
+        action: "polish",
+        fieldType: "textarea",
+        requestMethod: "editor",
+        title: "请假原因",
+        currentValue: "个人事务",
+      }),
+    ).resolves.toMatchObject({
+      value: "因个人事务需要请假处理。",
+    });
+    expect(ai.generateText).toHaveBeenCalledTimes(2);
+    expect(ai.generateText.mock.calls[1]?.[0].messages.at(-1).content).toContain(
+      "不要追问用户",
+    );
+  });
+
   it("rejects obvious secret values before model calls", () => {
     expect(() =>
       assertAllowed({
