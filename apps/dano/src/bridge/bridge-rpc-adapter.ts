@@ -3869,7 +3869,8 @@ class TranscriptProjector {
   ): RpcTranscriptMessage {
     if (!message || message.role !== "user") return message;
 
-    const pending = this.pendingStructuredUserMessages.find(candidate => {
+    const candidates = transcriptTextCandidates(message);
+    const pendingIndex = this.pendingStructuredUserMessages.findIndex(candidate => {
       if (
         candidate.sessionPath &&
         sessionPath &&
@@ -3877,8 +3878,12 @@ class TranscriptProjector {
       ) {
         return false;
       }
-      return transcriptTextCandidates(message).includes(candidate.injectedText);
+      return candidates.includes(candidate.injectedText) || candidates.length === 0;
     });
+    const pending =
+      pendingIndex >= 0
+        ? this.pendingStructuredUserMessages.splice(pendingIndex, 1)[0]
+        : undefined;
     if (!pending) return stripProjectFileReferencesFromMessage(message);
 
     return {
@@ -4924,17 +4929,15 @@ export class BridgeRpcAdapter {
           command.message,
           projectFiles,
         );
-        if (projectFiles?.length) {
-          this.transcriptProjector.registerStructuredUserMessage({
-            sessionPath: this.sessionRuntime.currentTranscriptSessionPath(),
-            injectedText: injectedMessage,
-            content: buildStructuredUserTranscriptContent(
-              command.message,
-              transcriptImages,
-              projectFiles,
-            ),
-          });
-        }
+        this.transcriptProjector.registerStructuredUserMessage({
+          sessionPath: this.sessionRuntime.currentTranscriptSessionPath(),
+          injectedText: injectedMessage,
+          content: buildStructuredUserTranscriptContent(
+            command.message,
+            transcriptImages,
+            projectFiles,
+          ),
+        });
 
         setTimeout(() => {
           void session
@@ -5003,17 +5006,15 @@ export class BridgeRpcAdapter {
           command.message,
           projectFiles,
         );
-        if (projectFiles?.length) {
-          this.transcriptProjector.registerStructuredUserMessage({
-            sessionPath: this.sessionRuntime.currentTranscriptSessionPath(),
-            injectedText: injectedMessage,
-            content: buildStructuredUserTranscriptContent(
-              command.message,
-              transcriptImages,
-              projectFiles,
-            ),
-          });
-        }
+        this.transcriptProjector.registerStructuredUserMessage({
+          sessionPath: this.sessionRuntime.currentTranscriptSessionPath(),
+          injectedText: injectedMessage,
+          content: buildStructuredUserTranscriptContent(
+            command.message,
+            transcriptImages,
+            projectFiles,
+          ),
+        });
         if (this.sessionRuntime.hasDetachedSelection()) {
           const session = await this.sessionRuntime.ensureDetachedSession();
           void session
@@ -5056,17 +5057,15 @@ export class BridgeRpcAdapter {
           command.message,
           projectFiles,
         );
-        if (projectFiles?.length) {
-          this.transcriptProjector.registerStructuredUserMessage({
-            sessionPath: this.sessionRuntime.currentTranscriptSessionPath(),
-            injectedText: injectedMessage,
-            content: buildStructuredUserTranscriptContent(
-              command.message,
-              transcriptImages,
-              projectFiles,
-            ),
-          });
-        }
+        this.transcriptProjector.registerStructuredUserMessage({
+          sessionPath: this.sessionRuntime.currentTranscriptSessionPath(),
+          injectedText: injectedMessage,
+          content: buildStructuredUserTranscriptContent(
+            command.message,
+            transcriptImages,
+            projectFiles,
+          ),
+        });
         if (this.sessionRuntime.hasDetachedSelection()) {
           const session = await this.sessionRuntime.ensureDetachedSession();
           void session

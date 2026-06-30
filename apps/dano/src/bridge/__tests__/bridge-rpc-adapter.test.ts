@@ -431,6 +431,71 @@ describe("BridgeRpcAdapter", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
+    it("projects plain prompt text when the live user start event is empty", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-prompt-text-"));
+      const sessionManager = SessionManager.create(tmpDir, tmpDir);
+      const sessionFile = sessionManager.getSessionFile();
+      if (!sessionFile) throw new Error("session file was not created");
+      (
+        context.state.sessionManager.getSessionFile as ReturnType<typeof vi.fn>
+      ).mockReturnValue(sessionFile);
+
+      const subscribeSpy = vi.fn().mockReturnValue(() => {});
+      createAgentSessionMock.mockResolvedValue({
+        session: {
+          sessionFile,
+          sessionId: sessionManager.getSessionId(),
+          isStreaming: false,
+          bindExtensions: vi.fn().mockResolvedValue(undefined),
+          subscribe: subscribeSpy,
+          prompt: vi.fn().mockResolvedValue(undefined),
+          sessionManager,
+        },
+      });
+
+      const text = `ask_user_question {
+  "question": "请填写说明",
+  "inputType": "textarea",
+  "default": "默认内容"
+}`;
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: { id: "cmd-plain-text", type: "prompt", message: text },
+          }),
+        ),
+      );
+      await new Promise(r => setTimeout(r, 30));
+
+      (ws.send as ReturnType<typeof vi.fn>).mockClear();
+      const sessionEventHandler = subscribeSpy.mock.calls[0]?.[0] as
+        | ((event: object) => void)
+        | undefined;
+      sessionEventHandler?.({
+        type: "message_start",
+        message: {
+          role: "user",
+          content: [],
+        },
+      });
+
+      const transcriptStart = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+        .map(call => JSON.parse(call[0] as string))
+        .find(
+          call =>
+            call.type === "event" && call.payload.type === "transcript_start",
+        );
+      expect(transcriptStart?.payload.message.content).toEqual([
+        { type: "text", text },
+      ]);
+
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
     it("passes uploaded files as project file references in live steering", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-upload-"));
       const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-upload-source-"));
