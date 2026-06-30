@@ -161,12 +161,6 @@
     }
     return -1;
   });
-  let busyIndicatorLabel = $derived(
-    isCompacting && !hasVisibleStreaming
-      ? t("chatTranscript.compactingContext")
-      : t("chatTranscript.responding"),
-  );
-
   // ---- display helpers ----
   function messageStableKey(msg: TranscriptEntry, index: number): string {
     return msg.transcriptKey ?? msg.id ?? `message:${index}`;
@@ -1352,19 +1346,6 @@
     {/if}
   {/each}
 
-  {#if showBusyIndicator}
-    <div class="message-row assistant streaming-indicator-row">
-      <div class="message-content assistant">
-        <div class="streaming-indicator">
-          <span class="busy-label">{busyIndicatorLabel}</span>
-          <span class="dot"></span>
-          <span class="dot"></span>
-          <span class="dot"></span>
-        </div>
-      </div>
-    </div>
-  {/if}
-
   <ImageLightbox
     open={lightbox.lightboxImages.length > 0}
     images={lightbox.lightboxImages}
@@ -2249,46 +2230,6 @@
     font-size: 0.72rem;
     line-height: 1.45;
     color: var(--text-subtle);
-  }
-
-  .streaming-indicator-row {
-    overflow-anchor: none;
-  }
-
-  .streaming-indicator {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--text-subtle);
-    font-size: 0.72rem;
-    line-height: 1.3;
-  }
-
-  .busy-label { font-size: 0.7rem; }
-
-  .dot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--text-subtle);
-    display: inline-block;
-    animation: typing-dot 1.2s ease-in-out infinite;
-  }
-
-  .dot:nth-child(2) { animation-delay: 0.2s; }
-  .dot:nth-child(3) { animation-delay: 0.4s; }
-
-  @keyframes typing-dot {
-    0%,
-    60%,
-    100% {
-      opacity: 0.2;
-      transform: scale(0.7);
-    }
-    30% {
-      opacity: 1;
-      transform: scale(1);
-    }
   }
 
   @media (max-width: 900px) {
