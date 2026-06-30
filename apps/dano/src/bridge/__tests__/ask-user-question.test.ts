@@ -509,8 +509,10 @@ describe("ask_user_question tool", () => {
       default: "Today",
     });
 
-    await expect(second).rejects.toThrow("exactly one ask_user_question call");
-    await expect(first).rejects.toThrow("exactly one ask_user_question call");
+    await expect(second).rejects.toThrow("exactly one native ask_user_question call");
+    await expect(second).rejects.not.toThrow("waiting");
+    await expect(first).rejects.toThrow("exactly one native ask_user_question call");
+    await expect(first).rejects.not.toThrow("waiting");
     expect(() =>
       askUserQuestionCoordinator.answer("separate-1", {
         cancelled: false,
