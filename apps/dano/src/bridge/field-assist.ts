@@ -166,7 +166,7 @@ export function createPiSdkFieldAssistClient(options: {
         });
 
         try {
-          await Promise.race([session.prompt(userPrompt), timedPrompt]);
+          await Promise.race([session.prompt(userPrompt, { expandPromptTemplates: false }), timedPrompt]);
         } finally {
           unsubscribe();
         }
