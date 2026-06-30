@@ -52,7 +52,7 @@ describe("ask_user_question tool", () => {
       "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
       "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
       "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
-      "Set default on every non-confirmation question, including every item in questions, using the most likely or safest answer while still letting the user change it.",
+      "Set a valid non-empty default on every non-confirmation question, including every item in questions, using the most likely or safest answer while still letting the user change it. Never use an empty string as default.",
       "When using questions, the top level must contain only questions. Put id, question, options, inputType, dataSource, multiple, and default inside each questions item.",
       "For forms, applications, or other user-reviewed summaries, call ask_user_question with confirm: true after presenting the final summary and before treating it as confirmed, ready to submit, or complete.",
     ]);
@@ -308,6 +308,15 @@ describe("ask_user_question tool", () => {
     await expect(execution).resolves.toMatchObject({
       details: { status: "answered", answer: "Yes" },
     });
+  });
+
+  it("rejects empty text defaults with a default-specific error", async () => {
+    await expect(
+      executeQuestion("empty-default", {
+        question: "Reason?",
+        default: "",
+      }),
+    ).rejects.toThrow("默认答案无效：答案不能为空");
   });
 
   it("returns multiple selected options", async () => {
