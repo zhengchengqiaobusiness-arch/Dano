@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   FieldAssistError,
   assertAllowed,
+  assertFieldAssistOutput,
   buildPolishMessages,
   buildRegenerateMessages,
   createFieldAssistService,
@@ -24,6 +25,7 @@ describe("field assist", () => {
       role: "user",
       content: " 明天上午请假半天 ",
     });
+    expect(messages[0]?.content).toContain("不要追问用户");
   });
 
   it("uses structured context for regenerate, including empty current value", () => {
@@ -88,6 +90,12 @@ describe("field assist", () => {
   it("normalizes input and textarea output within field limits", () => {
     expect(normalizeFieldAssistOutput(" a\n b\t c ", "input")).toBe("a b c");
     expect(normalizeFieldAssistOutput("a \r\nb  ", "textarea")).toBe("a\nb");
+  });
+
+  it("rejects follow-up questions from field assist output", () => {
+    expect(() =>
+      assertFieldAssistOutput("请问您需要请假的具体原因是什么？"),
+    ).toThrowError(FieldAssistError);
   });
 
   it("keeps warning detection text-only and reusable", () => {

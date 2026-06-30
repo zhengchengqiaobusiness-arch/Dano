@@ -55,6 +55,9 @@ const WARNING_PATTERN =
 const SECRET_VALUE_PATTERN =
   /\b(?:sk-[A-Za-z0-9_-]{16,}|[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,})\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|(?:token|secret|api[ _-]?key|authorization|bearer)\s*[:=]\s*\S{8,}/i;
 
+const FOLLOW_UP_QUESTION_PATTERN =
+  /ask_user_question|(?:请问|请您|麻烦您|需要您)|(?:请|麻烦|需要)(?:补充|提供|告知|填写|输入|说明|确认)|(?:还需要|需要更多|缺少).*(?:信息|内容)/i;
+
 export interface FieldAssistClient {
   generateText(request: {
     model?: RpcModel;
@@ -90,6 +93,7 @@ export function createFieldAssistService(options: {
         timeoutMs: options.timeoutMs ?? 60_000,
       });
       const value = normalizeFieldAssistOutput(raw, input.fieldType);
+      assertFieldAssistOutput(value);
       const metadata: FieldAssistMetadata = {
         action: input.action,
         fieldType: input.fieldType,
@@ -196,6 +200,7 @@ export function buildPolishMessages(
         "你是文本润色助手。",
         "只优化表达，不新增事实。",
         "不改变金额、时间、数量、人名、部门、审批事项、编号、专有名词。",
+        "如果信息不足，保留原意做最小润色，不要追问用户，不要请求补充信息。",
         "保持原文语种。",
         "只输出润色后的正文。",
         "不要解释，不要加标题，不要用 Markdown 包裹。",
@@ -290,6 +295,15 @@ export function normalizeFieldAssistOutput(
       ? LIMITS.inputOutputMaxChars
       : LIMITS.textareaOutputMaxChars;
   return normalized.length > max ? normalized.slice(0, max).trimEnd() : normalized;
+}
+
+export function assertFieldAssistOutput(value: string): void {
+  if (FOLLOW_UP_QUESTION_PATTERN.test(value)) {
+    throw new FieldAssistError(
+      "INVALID_MODEL_OUTPUT",
+      "AI 辅助返回了追问内容，请重试",
+    );
+  }
 }
 
 function createLockedResourceLoader(systemPrompt: string): ResourceLoader {
