@@ -194,6 +194,12 @@
     return null;
   }
 
+  function preventEnterSubmit(event: KeyboardEvent) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+    }
+  }
+
   function textItemFieldType(item: AskUserQuestionItem): "input" | "textarea" {
     return item.kind === "text" && item.inputType === "textarea"
       ? "textarea"
@@ -510,6 +516,7 @@
                     bind:value={remoteSearch[item.id]}
                     disabled={!pending || submitting || remoteLoading[item.id]}
                     placeholder={t("questionTool.searchPlaceholder")}
+                    onkeydown={preventEnterSubmit}
                   />
                   <button
                     type="button"
@@ -555,6 +562,7 @@
                     bind:value={remoteSearch[item.id]}
                     disabled={!pending || submitting || remoteLoading[item.id]}
                     placeholder={t("questionTool.searchPlaceholder")}
+                    onkeydown={preventEnterSubmit}
                   />
                   <button
                     type="button"
@@ -607,6 +615,7 @@
                   bind:value={textAnswer[item.id]}
                   disabled={!pending || submitting}
                   placeholder={t("questionTool.inputPlaceholder")}
+                  onkeydown={preventEnterSubmit}
                 />
               {/if}
               <div class="question-ai-actions">
@@ -646,6 +655,7 @@
                 bind:value={customAnswer[item.id]}
                 disabled={!pending || submitting}
                 placeholder={t("questionTool.otherPlaceholder")}
+                onkeydown={preventEnterSubmit}
               />
             {/if}
           </div>
