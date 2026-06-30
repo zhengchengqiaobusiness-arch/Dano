@@ -1,10 +1,17 @@
 <script lang="ts">
   import type {
+    FieldAssistAction,
+    FieldAssistCommandPayload,
+    FieldAssistResult,
     RpcExtensionUIRequest,
     RpcExtensionUIResponse,
   } from "@dano/types/protocol";
   import X from "lucide-svelte/icons/x";
   import { t } from "../i18n";
+  import {
+    getFieldAssistWarning,
+    toFieldAssistErrorMessage,
+  } from "../utils/fieldAssist";
 
   type DialogExtensionUIRequest = Extract<
     RpcExtensionUIRequest,
@@ -14,11 +21,18 @@
   let {
     request = null as DialogExtensionUIRequest | null,
     onRespond = (_: RpcExtensionUIResponse) => {},
+    onFieldAssist = undefined as
+      | ((payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>)
+      | undefined,
   } = $props();
 
   let inputValue = $state("");
   let editorValue = $state("");
   let selectedIndex = $state(-1);
+  let aiAssistLoading = $state<null | FieldAssistAction>(null);
+  let aiAssistError = $state("");
+  let aiAssistWarning = $state("");
+  let aiAssistSeq = $state(0);
 
   function handleSelect(option: string) {
     if (!request) return;
@@ -39,7 +53,7 @@
   }
 
   function handleInputSubmit() {
-    if (!request) return;
+    if (!request || aiAssistLoading) return;
     onRespond({
       type: "extension_ui_response",
       id: request.id,
@@ -49,7 +63,7 @@
   }
 
   function handleEditorSubmit() {
-    if (!request) return;
+    if (!request || aiAssistLoading) return;
     onRespond({
       type: "extension_ui_response",
       id: request.id,
@@ -67,10 +81,15 @@
     });
     inputValue = "";
     editorValue = "";
+    aiAssistSeq += 1;
+    aiAssistLoading = null;
+    aiAssistError = "";
+    aiAssistWarning = "";
   }
 
   function initFromRequest() {
     if (!request) return;
+    aiAssistSeq += 1;
     if (request.method === "input") inputValue = "";
     if (request.method === "editor" && request.prefill) {
       editorValue = request.prefill;
@@ -78,6 +97,77 @@
       editorValue = "";
     }
     selectedIndex = -1;
+    aiAssistLoading = null;
+    aiAssistError = "";
+    aiAssistWarning = "";
+  }
+
+  function currentFieldValue() {
+    return request?.method === "input" ? inputValue : editorValue;
+  }
+
+  async function runFieldAssist(action: FieldAssistAction) {
+    if (!request || (request.method !== "input" && request.method !== "editor")) {
+      return;
+    }
+    if (!onFieldAssist) {
+      aiAssistError = t("extensionDialog.aiAssistFailed");
+      return;
+    }
+
+    const fieldType = request.method === "input" ? "input" : "textarea";
+    const currentValue = currentFieldValue();
+    const placeholder =
+      request.method === "input" ? request.placeholder : undefined;
+    const prefill = request.method === "editor" ? request.prefill : undefined;
+    aiAssistWarning = getFieldAssistWarning({
+      title: request.title,
+      placeholder,
+      prefill,
+    });
+
+    if (action === "polish" && !currentValue.trim()) {
+      aiAssistError = t("extensionDialog.aiAssistEmptyPolish");
+      return;
+    }
+
+    const seq = ++aiAssistSeq;
+    const previousValue = currentValue;
+    aiAssistLoading = action;
+    aiAssistError = "";
+
+    try {
+      const result = await onFieldAssist({
+        requestId: request.id,
+        action,
+        fieldType,
+        requestMethod: request.method,
+        title: request.title,
+        placeholder,
+        currentValue,
+        prefill,
+      });
+
+      if (seq !== aiAssistSeq) return;
+      aiAssistWarning =
+        result.metadata.warnings?.[0]?.message ?? aiAssistWarning;
+      if (fieldType === "input") {
+        inputValue = result.value;
+      } else {
+        editorValue = result.value;
+      }
+    } catch (error) {
+      if (fieldType === "input") {
+        inputValue = previousValue;
+      } else {
+        editorValue = previousValue;
+      }
+      aiAssistError = toFieldAssistErrorMessage(error);
+    } finally {
+      if (seq === aiAssistSeq) {
+        aiAssistLoading = null;
+      }
+    }
   }
 
   $effect(() => {
@@ -137,11 +227,36 @@
             bind:value={inputValue}
             class="dialog-input"
             placeholder={request.placeholder ?? t("extensionDialog.inputPlaceholder")}
-            onkeydown={(e) => e.key === "Enter" && handleInputSubmit()}
+            onkeydown={(e) =>
+              e.key === "Enter" && !aiAssistLoading && handleInputSubmit()}
           />
+          <div class="ai-assist-actions">
+            <button
+              class="btn btn-secondary"
+              type="button"
+              disabled={aiAssistLoading !== null}
+              onclick={() => runFieldAssist("regenerate")}
+            >
+              {aiAssistLoading === "regenerate" ? t("extensionDialog.aiAssistGenerating") : t("extensionDialog.aiAssistRegenerate")}
+            </button>
+            <button
+              class="btn btn-secondary"
+              type="button"
+              disabled={aiAssistLoading !== null || !inputValue.trim()}
+              onclick={() => runFieldAssist("polish")}
+            >
+              {aiAssistLoading === "polish" ? t("extensionDialog.aiAssistPolishing") : t("extensionDialog.aiAssistPolish")}
+            </button>
+          </div>
+          {#if aiAssistWarning}
+            <div class="ai-assist-warning" role="status">{aiAssistWarning}</div>
+          {/if}
+          {#if aiAssistError}
+            <div class="ai-assist-error" role="alert">{aiAssistError}</div>
+          {/if}
           <div class="dialog-actions">
             <button class="btn btn-cancel" onclick={handleCancel}>{t("common.cancel")}</button>
-            <button class="btn btn-primary" onclick={handleInputSubmit}>
+            <button class="btn btn-primary" disabled={aiAssistLoading !== null} onclick={handleInputSubmit}>
               {t("common.submit")}
             </button>
           </div>
@@ -158,9 +273,33 @@
           <div class="dialog-hint">
             <kbd class="dialog-kbd">Ctrl+Enter</kbd> {t("extensionDialog.submitShortcutSuffix")}
           </div>
+          <div class="ai-assist-actions">
+            <button
+              class="btn btn-secondary"
+              type="button"
+              disabled={aiAssistLoading !== null}
+              onclick={() => runFieldAssist("regenerate")}
+            >
+              {aiAssistLoading === "regenerate" ? t("extensionDialog.aiAssistGenerating") : t("extensionDialog.aiAssistRegenerate")}
+            </button>
+            <button
+              class="btn btn-secondary"
+              type="button"
+              disabled={aiAssistLoading !== null || !editorValue.trim()}
+              onclick={() => runFieldAssist("polish")}
+            >
+              {aiAssistLoading === "polish" ? t("extensionDialog.aiAssistPolishing") : t("extensionDialog.aiAssistPolish")}
+            </button>
+          </div>
+          {#if aiAssistWarning}
+            <div class="ai-assist-warning" role="status">{aiAssistWarning}</div>
+          {/if}
+          {#if aiAssistError}
+            <div class="ai-assist-error" role="alert">{aiAssistError}</div>
+          {/if}
           <div class="dialog-actions">
             <button class="btn btn-cancel" onclick={handleCancel}>{t("common.cancel")}</button>
-            <button class="btn btn-primary" onclick={handleEditorSubmit}>
+            <button class="btn btn-primary" disabled={aiAssistLoading !== null} onclick={handleEditorSubmit}>
               {t("common.submit")}
             </button>
           </div>
@@ -349,6 +488,29 @@
     padding: 0 20px 18px;
   }
 
+  .ai-assist-actions {
+    display: flex;
+    justify-content: flex-start;
+    gap: 8px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+  }
+
+  .ai-assist-warning,
+  .ai-assist-error {
+    margin-top: 8px;
+    font-size: 0.78rem;
+    line-height: 1.45;
+  }
+
+  .ai-assist-warning {
+    color: var(--text-muted);
+  }
+
+  .ai-assist-error {
+    color: var(--danger, #dc2626);
+  }
+
   .select-actions {
     padding-top: 0;
   }
@@ -375,6 +537,16 @@
   .btn-primary:hover {
     background: var(--button-hover);
     border-color: var(--border-strong);
+  }
+
+  .btn-secondary {
+    background: var(--panel-2);
+    color: var(--text-muted);
+  }
+
+  .btn-secondary:hover:not(:disabled) {
+    border-color: var(--border-strong);
+    color: var(--text);
   }
 
   .btn-cancel {

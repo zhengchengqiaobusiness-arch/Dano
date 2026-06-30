@@ -1,6 +1,8 @@
 import type {
   AskUserQuestionAnswer,
   ClientMessage,
+  FieldAssistCommandPayload,
+  FieldAssistResult,
   RpcBridgeEvent,
   RpcCommand,
   RpcAgentEndEvent,
@@ -2016,6 +2018,19 @@ export function answerQuestion(
   return sendCommand({ type: "answer_question", toolCallId, ...response });
 }
 
+export async function fieldAssist(
+  payload: FieldAssistCommandPayload,
+): Promise<FieldAssistResult> {
+  const response = await sendCommand(
+    { type: "field_assist", ...payload },
+    { timeoutMs: 65_000 },
+  );
+  if (!response.success) {
+    throw new Error(response.error || t("store.error.sendBridgeMessageFailed"));
+  }
+  return response.data as FieldAssistResult;
+}
+
 // ---------------------------------------------------------------------------
 // Message handling
 // ---------------------------------------------------------------------------
@@ -2790,6 +2805,7 @@ export function initBridge() {
     editQueuedMessage,
     respondToUIRequest,
     answerQuestion,
+    fieldAssist,
     dismissNotification,
     disconnect,
   };

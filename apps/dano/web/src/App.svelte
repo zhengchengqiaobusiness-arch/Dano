@@ -1348,6 +1348,7 @@
   <ExtensionDialog
     request={bridge.pendingExtensionRequest}
     onRespond={handleUIRespond}
+    onFieldAssist={(payload) => bridge.fieldAssist(payload)}
   />
 </div>
 
