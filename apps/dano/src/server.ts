@@ -79,13 +79,7 @@ export async function startDanoServer(
     );
   };
 
-  const server = new BridgeServer(
-    config,
-    handlerFactory,
-    eventBus,
-    emitEvent,
-    backend.context.actions.runFieldAssist,
-  );
+  const server = new BridgeServer(config, handlerFactory, eventBus, emitEvent);
   let state: BridgeState = { status: "starting", port: config.port };
 
   try {

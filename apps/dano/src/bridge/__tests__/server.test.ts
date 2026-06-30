@@ -7,7 +7,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BridgeEventBus } from "../bridge-event-bus.js";
 import {
   BridgeServer,
-  type FieldAssistHandler,
   type RpcConnectionHandler,
   type RpcConnectionHandlerFactory,
 } from "../server.js";
@@ -38,7 +37,6 @@ afterEach(async () => {
 
 function createServer(
   factory?: (ctx: Parameters<RpcConnectionHandlerFactory>[0]) => RpcConnectionHandler,
-  fieldAssistHandler?: FieldAssistHandler,
 ) {
   const uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-server-upload-"));
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-workspace-"));
@@ -62,7 +60,6 @@ function createServer(
     handlerFactory,
     eventBus,
     emitEvent,
-    fieldAssistHandler,
   );
   servers.push(server);
   return { server, eventBus, emitEvent, workspaceDir };
@@ -154,48 +151,6 @@ describe("BridgeServer HTTP/SSE transport", () => {
     await expect(
       readJson<{ status: string }>(`http://127.0.0.1:${address.port}/api/health`),
     ).resolves.toEqual({ status: "ok" });
-  });
-
-  it("routes field assist requests without creating a client", async () => {
-    const { server } = createServer(undefined, async request => ({
-      value: `${request.action}:${request.fieldType}`,
-    }));
-    const address = await server.start();
-
-    await expect(
-      postJson<{ value: string }>(`http://127.0.0.1:${address.port}/api/field-assist`, {
-        requestId: "req-1",
-        action: "regenerate",
-        fieldType: "input",
-        title: "事由",
-        currentValue: "",
-      }),
-    ).resolves.toEqual({ value: "regenerate:input" });
-    expect(server.getClientCount()).toBe(0);
-  });
-
-  it("returns coded field assist validation errors", async () => {
-    const { server } = createServer(undefined, async () => ({ value: "unused" }));
-    const address = await server.start();
-    const response = await fetch(
-      `http://127.0.0.1:${address.port}/api/field-assist`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          requestId: "req-1",
-          action: "polish",
-          fieldType: "input",
-          title: "事由",
-          currentValue: "",
-        }),
-      },
-    );
-
-    await expect(response.json()).resolves.toMatchObject({
-      code: "EMPTY_POLISH_INPUT",
-    });
-    expect(response.status).toBe(400);
   });
 
   it("creates a logical client without opening an SSE stream first", async () => {

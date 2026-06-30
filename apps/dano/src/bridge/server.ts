@@ -16,12 +16,6 @@ import { once } from "node:events";
 import type { BridgeEventBus } from "./bridge-event-bus.js";
 import { getLanIps, isTailscaleIp } from "./network.js";
 import { UploadRegistry } from "./upload-registry.js";
-import {
-  FieldAssistError,
-  parseFieldAssistRequest,
-  type FieldAssistRequest,
-  type FieldAssistResponse,
-} from "./field-assist.js";
 import type {
   BridgeConfig,
   BridgeEvent,
@@ -61,10 +55,6 @@ export type RpcConnectionHandlerFactory = (
   ctx: RpcConnectionContext,
 ) => RpcConnectionHandler;
 
-export type FieldAssistHandler = (
-  request: FieldAssistRequest,
-) => Promise<FieldAssistResponse>;
-
 let clientSeqCounter = 0;
 
 function generateClientId(): string {
@@ -92,7 +82,6 @@ export class BridgeServer {
     handlerFactory: RpcConnectionHandlerFactory,
     eventBus: BridgeEventBus,
     emitEvent: (event: BridgeEvent) => void,
-    private readonly fieldAssistHandler?: FieldAssistHandler,
   ) {
     this.config = config;
     this.handlerFactory = handlerFactory;
@@ -264,11 +253,6 @@ export class BridgeServer {
         return;
       }
 
-      if (req.method === "POST" && pathname === "/api/field-assist") {
-        await this.handleFieldAssistRequest(req, res);
-        return;
-      }
-
       if (req.method === "POST" && pathname === "/api/uploads") {
         await this.handleUploadRequest(req, res, url);
         return;
@@ -353,30 +337,9 @@ export class BridgeServer {
         writeJson(res, error.status, { error: error.message });
         return;
       }
-      if (error instanceof FieldAssistError) {
-        writeJson(res, error.status, { error: error.message, code: error.code });
-        return;
-      }
       const message = error instanceof Error ? error.message : String(error);
       writeJson(res, 500, { error: message || "Internal Server Error" });
     }
-  }
-
-  private async handleFieldAssistRequest(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-  ): Promise<void> {
-    if (!this.fieldAssistHandler) {
-      throw new FieldAssistError(
-        503,
-        "AI_ASSIST_FAILED",
-        "AI assist is not configured",
-      );
-    }
-
-    const request = parseFieldAssistRequest(await readJsonBody(req));
-    const result = await this.fieldAssistHandler(request);
-    writeJson(res, 200, result);
   }
 
   private async handleUploadRequest(

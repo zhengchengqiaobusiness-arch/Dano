@@ -11,7 +11,6 @@ import {
   resolveAgentSessionModel,
   type DefaultSessionSettings,
 } from "./bridge/default-model.js";
-import { createFieldAssistHandler } from "./bridge/field-assist.js";
 import { createHeadlessUIContext } from "./bridge/headless-ui-context.js";
 import type {
   BridgeLiveEvent,
@@ -306,14 +305,6 @@ export function createDanoBackendFromSession(
     getCommands() {
       return listSessionCommands(session);
     },
-
-    runFieldAssist: createFieldAssistHandler({
-      getCurrentModel: () =>
-        resolveAgentSessionModel(
-          session,
-          createDefaultSessionSettings(session, danoConfig),
-        ),
-    }),
   };
 
   return {

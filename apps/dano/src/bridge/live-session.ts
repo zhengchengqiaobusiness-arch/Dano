@@ -10,10 +10,6 @@
  */
 
 import type { SessionManager } from "@earendil-works/pi-coding-agent";
-import type {
-  FieldAssistRequest,
-  FieldAssistResponse,
-} from "./field-assist.js";
 
 // ============================================================================
 // 1. BridgeSessionEvents  — subscribe to live-session lifecycle events
@@ -128,7 +124,4 @@ export interface BridgeSessionActions {
 
   /** List registered slash commands. */
   getCommands(): Array<{ name: string; description?: string }>;
-
-  /** Generate or polish text for extension input/editor fields. */
-  runFieldAssist?(request: FieldAssistRequest): Promise<FieldAssistResponse>;
 }
