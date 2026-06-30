@@ -72,6 +72,7 @@ import type {
 } from "./types.js";
 import { detectWorkspaceEnvironments } from "./workspace-environment.js";
 import type { UploadRegistry } from "./upload-registry.js";
+import type { FieldAssistService } from "./field-assist.js";
 
 /** Model shape mirrored from Pi — used in shaping helpers below. */
 type PiModel = {
@@ -137,6 +138,7 @@ export interface BridgeRpcAdapterContext {
   events: BridgeSessionEvents;
   state: BridgeSessionState;
   actions: BridgeSessionActions;
+  fieldAssist?: FieldAssistService;
 }
 
 /**
@@ -5072,6 +5074,22 @@ export class BridgeRpcAdapter {
           type: "response",
           command: "abort",
           success: true,
+        };
+      }
+
+      case "field_assist": {
+        if (!this.context.fieldAssist) {
+          throw new Error("FIELD_ASSIST_DISABLED");
+        }
+        const result = await this.context.fieldAssist.assist(command, {
+          clientId: this.client.id,
+        });
+        return {
+          id: correlationId,
+          type: "response",
+          command: "field_assist",
+          success: true,
+          data: result,
         };
       }
 

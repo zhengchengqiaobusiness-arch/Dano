@@ -870,6 +870,49 @@ describe("BridgeRpcAdapter", () => {
       });
     });
 
+    it("runs field assist through the command channel without transcript events", async () => {
+      context.fieldAssist = {
+        assist: vi.fn().mockResolvedValue({
+          value: "润色后",
+          metadata: {
+            action: "polish",
+            fieldType: "input",
+            inputLength: 2,
+            outputLength: 3,
+            elapsedMs: 1,
+          },
+        }),
+      };
+      const command: RpcCommand = {
+        id: "field-1",
+        type: "field_assist",
+        requestId: "question-1",
+        action: "polish",
+        fieldType: "input",
+        requestMethod: "input",
+        title: "事由",
+        currentValue: "请假",
+      };
+
+      ws.trigger(
+        "message",
+        Buffer.from(JSON.stringify({ type: "command", payload: command })),
+      );
+      await new Promise(r => setTimeout(r, 10));
+
+      expect(context.fieldAssist.assist).toHaveBeenCalledWith(command, {
+        clientId: "test-client",
+      });
+      expect(context.actions.sendUserMessage).not.toHaveBeenCalled();
+      const response = JSON.parse(ws.send.mock.calls.at(-1)?.[0] ?? "null");
+      expect(response.payload).toMatchObject({
+        id: "field-1",
+        command: "field_assist",
+        success: true,
+        data: { value: "润色后" },
+      });
+    });
+
     it("should handle get_state command", async () => {
       const command: RpcCommand = { id: "cmd-1", type: "get_state" };
       (

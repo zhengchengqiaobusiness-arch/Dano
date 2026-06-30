@@ -162,6 +162,42 @@ export type AskUserQuestionResult =
     }
   | { status: "cancelled" };
 
+export type FieldAssistAction = "regenerate" | "polish";
+export type FieldAssistFieldType = "input" | "textarea";
+export type FieldAssistWarningCode = "SENSITIVE_FIELD";
+
+export interface FieldAssistCommandPayload {
+  requestId: string;
+  action: FieldAssistAction;
+  fieldType: FieldAssistFieldType;
+  requestMethod: "input" | "editor";
+  title: string;
+  placeholder?: string;
+  currentValue: string;
+  prefill?: string;
+}
+
+export interface FieldAssistWarning {
+  code: FieldAssistWarningCode;
+  message: string;
+}
+
+export interface FieldAssistMetadata {
+  action: FieldAssistAction;
+  fieldType: FieldAssistFieldType;
+  inputLength: number;
+  outputLength: number;
+  elapsedMs: number;
+  model?: RpcModel;
+  degraded?: boolean;
+  warnings?: FieldAssistWarning[];
+}
+
+export interface FieldAssistResult {
+  value: string;
+  metadata: FieldAssistMetadata;
+}
+
 export interface RpcCompactionResult {
   summary: string;
   firstKeptEntryId: string;
@@ -311,6 +347,7 @@ export interface RpcCommandMap {
     files?: RpcUploadedFileRef[];
   };
   abort: {};
+  field_assist: FieldAssistCommandPayload;
   answer_question:
     | { toolCallId: string; cancelled: true }
     | {
@@ -686,6 +723,7 @@ export interface RpcResponseMap {
   steer: void;
   follow_up: void;
   abort: void;
+  field_assist: FieldAssistResult;
   answer_question: AskUserQuestionResult;
   new_session: {
     transcript: RpcTranscriptPage;

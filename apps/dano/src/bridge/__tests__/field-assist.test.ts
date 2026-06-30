@@ -1,0 +1,97 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  FieldAssistError,
+  assertAllowed,
+  buildPolishMessages,
+  buildRegenerateMessages,
+  createFieldAssistService,
+  getFieldAssistWarnings,
+  normalizeFieldAssistOutput,
+} from "../field-assist.js";
+
+describe("field assist", () => {
+  it("keeps polish user prompt as the raw current value", () => {
+    const messages = buildPolishMessages({
+      requestId: "req-1",
+      action: "polish",
+      fieldType: "textarea",
+      requestMethod: "editor",
+      title: "请假原因",
+      currentValue: " 明天上午请假半天 ",
+    });
+
+    expect(messages[1]).toEqual({
+      role: "user",
+      content: " 明天上午请假半天 ",
+    });
+  });
+
+  it("uses structured context for regenerate, including empty current value", () => {
+    const messages = buildRegenerateMessages({
+      requestId: "req-1",
+      action: "regenerate",
+      fieldType: "input",
+      requestMethod: "input",
+      title: "请假原因",
+      placeholder: "请输入原因",
+      currentValue: "",
+      prefill: "病假",
+    });
+
+    expect(JSON.parse(messages[1]?.content ?? "{}")).toEqual({
+      title: "请假原因",
+      placeholder: "请输入原因",
+      fieldType: "input",
+      currentValue: "",
+      prefill: "病假",
+    });
+  });
+
+  it("warns on sensitive field labels without blocking the request", async () => {
+    const ai = { generateText: vi.fn().mockResolvedValue("可用内容") };
+    const service = createFieldAssistService({
+      ai,
+      getCurrentModel: () => ({ id: "gpt-4", provider: "openai" }),
+    });
+
+    await expect(
+      service.assist({
+        requestId: "req-1",
+        action: "regenerate",
+        fieldType: "input",
+        requestMethod: "input",
+        title: "API token 说明",
+        currentValue: "",
+      }),
+    ).resolves.toMatchObject({
+      value: "可用内容",
+      metadata: {
+        warnings: [{ code: "SENSITIVE_FIELD" }],
+      },
+    });
+    expect(ai.generateText).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects obvious secret values before model calls", () => {
+    expect(() =>
+      assertAllowed({
+        requestId: "req-1",
+        action: "polish",
+        fieldType: "input",
+        requestMethod: "input",
+        title: "备注",
+        currentValue: "api_key=sk-1234567890abcdefghijklmnop",
+      }),
+    ).toThrowError(FieldAssistError);
+  });
+
+  it("normalizes input and textarea output within field limits", () => {
+    expect(normalizeFieldAssistOutput(" a\n b\t c ", "input")).toBe("a b c");
+    expect(normalizeFieldAssistOutput("a \r\nb  ", "textarea")).toBe("a\nb");
+  });
+
+  it("keeps warning detection text-only and reusable", () => {
+    expect(getFieldAssistWarnings({ title: "手机号" })).toHaveLength(1);
+    expect(getFieldAssistWarnings({ title: "请假原因" })).toHaveLength(0);
+  });
+});
