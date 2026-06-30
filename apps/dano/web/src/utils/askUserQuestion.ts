@@ -74,6 +74,16 @@ export function isAskUserQuestionToolError(block: ToolContentBlock): boolean {
   );
 }
 
+export function isPendingAskUserQuestionBlock(
+  block: ToolContentBlock,
+): boolean {
+  return (
+    block.toolName === ASK_USER_QUESTION_TOOL_NAME &&
+    block.toolStatus === "pending" &&
+    Boolean(block.toolCallId)
+  );
+}
+
 export function hideAskUserQuestionToolBlock(
   block: ToolContentBlock,
 ): boolean {

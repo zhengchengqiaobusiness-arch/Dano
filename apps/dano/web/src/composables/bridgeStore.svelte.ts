@@ -40,10 +40,12 @@ import {
 } from "../utils/models";
 import { t } from "../i18n";
 import {
+  contentBlocks,
   normalizeTranscript,
   transcriptConfigState,
   type PendingTranscriptSessionEvent,
 } from "../utils/transcript";
+import { isPendingAskUserQuestionBlock } from "../utils/askUserQuestion";
 
 type TranscriptConfigSnapshot = ReturnType<typeof transcriptConfigState>;
 
@@ -2545,6 +2547,50 @@ function markDisconnected(reason = t("appHeader.connection.disconnected")) {
   rejectPendingRequests(reason);
 }
 
+function pendingAskUserQuestionToolCallIds(): string[] {
+  const ids = new Set<string>();
+  for (const message of _transcript) {
+    for (const block of contentBlocks(message)) {
+      if (
+        block.kind === "tool" &&
+        isPendingAskUserQuestionBlock(block) &&
+        block.toolCallId
+      ) {
+        ids.add(block.toolCallId);
+      }
+    }
+  }
+  return [...ids];
+}
+
+function cancelPendingQuestionsOnDisconnect() {
+  if (!clientMessagesUrl) return;
+  for (const toolCallId of pendingAskUserQuestionToolCallIds()) {
+    const body = JSON.stringify({
+      type: "command",
+      payload: {
+        id: `cancel-question:${toolCallId}`,
+        type: "answer_question",
+        toolCallId,
+        cancelled: true,
+      },
+    } satisfies ClientMessage);
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon(
+        clientMessagesUrl,
+        new Blob([body], { type: "application/json" }),
+      );
+    } else {
+      void fetch(clientMessagesUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        keepalive: true,
+      }).catch(() => {});
+    }
+  }
+}
+
 async function connect() {
   if (disposed) return;
 
@@ -2623,6 +2669,7 @@ function disconnect() {
   const disconnectUrl = clientId
     ? `/api/clients/${encodeURIComponent(clientId)}/disconnect`
     : null;
+  cancelPendingQuestionsOnDisconnect();
   if (disconnectUrl) {
     if (navigator.sendBeacon) {
       navigator.sendBeacon(

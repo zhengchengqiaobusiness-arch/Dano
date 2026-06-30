@@ -6,6 +6,7 @@ import {
   askUserQuestionResult,
   hideAskUserQuestionToolBlock,
   isAskUserQuestionToolError,
+  isPendingAskUserQuestionBlock,
 } from "./askUserQuestion";
 import type { ToolContentBlock } from "./transcript";
 
@@ -42,6 +43,25 @@ describe("ask user question transcript data", () => {
       kind: "text",
       question: "Name?",
     });
+  });
+
+  it("detects pending native question cards that can be cancelled on page unload", () => {
+    expect(isPendingAskUserQuestionBlock(block({ question: "Name?" }))).toBe(true);
+    expect(
+      isPendingAskUserQuestionBlock(
+        block({ question: "Name?" }, { toolStatus: "success" }),
+      ),
+    ).toBe(false);
+    expect(
+      isPendingAskUserQuestionBlock(
+        block({ question: "Name?" }, { toolName: "curl" }),
+      ),
+    ).toBe(false);
+    expect(
+      isPendingAskUserQuestionBlock(
+        block({ question: "Name?" }, { toolCallId: undefined }),
+      ),
+    ).toBe(false);
   });
 
   it("parses and trims a single-choice question", () => {
