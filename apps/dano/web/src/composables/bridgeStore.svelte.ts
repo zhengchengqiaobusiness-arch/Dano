@@ -40,6 +40,10 @@ import {
 } from "../utils/models";
 import { t } from "../i18n";
 import {
+  bridgeServerErrorMessage,
+  isStaleBridgeClientError,
+} from "../utils/bridgeErrors";
+import {
   contentBlocks,
   normalizeTranscript,
   transcriptConfigState,
@@ -827,9 +831,14 @@ async function postEnvelope(msg: ClientMessage): Promise<void> {
     } catch {
       detail = await response.text().catch(() => "");
     }
-    throw new Error(
-      detail || t("store.error.sendBridgeMessageFailed"),
-    );
+    if (isStaleBridgeClientError(detail)) {
+      _connectionStatus = "disconnected";
+      _connectionError = t("store.error.staleClient");
+    }
+    throw new Error(bridgeServerErrorMessage(detail, {
+      staleClient: t("store.error.staleClient"),
+      fallback: t("store.error.sendBridgeMessageFailed"),
+    }));
   }
 }
 
