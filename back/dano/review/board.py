@@ -440,26 +440,26 @@ async def suggest_field_names_llm(client: "ChatClient | None", model: str | None
 
 # ─────────── P2:业务描述润色(手填草稿 + 剧本骨架 → 结构化业务说明;只见结构,不见任何值/凭证) ───────────
 _DESC_SYSTEM = (
-    "你是把录制好的接口编排整理成一段**业务说明**的助手。依据给定的**剧本骨架**(接口编排 + 字段角色 + 字段来源,"
-    "**不含任何具体值/人名/ID/凭证**)和用户草稿,产出一段**面向调用方**的业务说明:这个 skill 办什么业务、"
-    "每个字段是什么/从哪来/怎么填(尤其『活接口』字段要先 `--list-options` 实时拉再传名字)、多接口如何编排、"
-    "步间数据怎么流。**铁律**:只依据骨架与草稿,**绝不编造**骨架里没有的接口/字段/步骤;**不输出**任何具体值、"
-    "人名、ID、选项清单、凭证;中文、简洁分段。输出 JSON:{\"description\": \"……\"}。"
+    "你的唯一任务:依据**剧本骨架**(接口编排 + 字段角色 + 字段来源,**不含任何具体值/人名/ID/凭证**)和用户草稿,"
+    "提炼出**一句话业务目的**——本 skill 到底办什么业务(如『提交加班申请』『创建三定职能清单』『发起请假审批』)。"
+    "**铁律**:只产出这一句话目的,**不要**罗列字段/接口/步骤/数据流(那些由系统**确定性**渲染,不归你);"
+    "**绝不编造**骨架里没有的东西;**不输出**任何具体值、人名、ID、选项清单、凭证;中文,≤30 字。"
+    "输出 JSON:{\"purpose\": \"……\"}。"
 )
 
 
-async def optimize_business_description_llm(client: "ChatClient | None", model: str | None, *,
-                                            draft: str, skeleton: dict) -> str:
-    """业务描述润色:手填草稿 + 剧本骨架(无值)→ 结构化业务说明。
-    无 client/model 或失败 → **原样返回 draft**(绝不阻断录制;描述是叙事层,失败不影响发布)。"""
+async def refine_business_purpose_llm(client: "ChatClient | None", model: str | None, *,
+                                      draft: str, skeleton: dict) -> str:
+    """只提炼**一句话业务目的**(业务说明的结构由 `render_business_description` 确定性渲染,LLM 不碰)。
+    无 client/model 或失败 → **原样返回 draft**(绝不阻断;失败不影响发布)。治"AI 优化每次产出都不一样/会编错"。"""
     if client is None or not model:
         return draft or ""
     payload = json.dumps({"draft": draft or "", "screenplay": skeleton or {}}, ensure_ascii=False)
     try:
         out = await client.complete_json(model=model, system=_DESC_SYSTEM,
                                          user="【用户草稿 + 剧本骨架(无值)】\n" + payload, timeout_s=45.0)
-    except Exception:  # noqa: BLE001 —— 润色失败不阻断(退回草稿)
-        log.warning("optimize_description.failed")
+    except Exception:  # noqa: BLE001 —— 失败不阻断(退回草稿)
+        log.warning("refine_purpose.failed")
         return draft or ""
-    d = out.get("description") if isinstance(out, dict) else None
+    d = out.get("purpose") if isinstance(out, dict) else None
     return str(d).strip() if d and str(d).strip() else (draft or "")

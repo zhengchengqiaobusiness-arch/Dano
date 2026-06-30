@@ -94,7 +94,7 @@ def _ptype(k: str, props: dict, numeric: set[str]) -> str:
     if fmt == "name-ref":
         return "枚举·名字→ID"
     if p.get("type") == "array" and ((p.get("items") or {}).get("format") == "name-ref"):
-        return "多选·名字列表→记录"                       # 列表多选(参会人):传名字数组
+        return "明细子表·名字列表" if p.get("x-columns") else "多选·名字列表→记录"   # 列表多选(参会人)/ 明细子表(权责清单)
     if fmt == "date-time":
         return "datetime"
     if fmt == "date":
@@ -133,6 +133,13 @@ _ROLE_CN = {
 }
 
 
+def _columns_hint(prop: dict) -> str:
+    """明细子表(权责清单/商品明细…)的每行列说明:每行含哪些列、哪些必填。来自 DOM 抓到的 x-columns。"""
+    cols = (prop or {}).get("x-columns") or []
+    parts = [f"{c.get('name')}{'(必填)' if c.get('required') else ''}" for c in cols if c.get("name")]
+    return ("明细子表,每行含:" + "、".join(parts)) if parts else ""
+
+
 def _provenance_hint(prop: dict) -> str:
     """字段角色徽章 + 来源(剧本 x-field-role/x-provenance 渲染成一句话:这字段是什么、从哪来)。"""
     role = (prop or {}).get("x-field-role")
@@ -163,15 +170,22 @@ def _orchestration_md(m: SkillManifest) -> str:
     f = m.flow or {}
     write_steps = f.get("write_steps") or []
     option_sources = f.get("option_sources") or []
+    prefetch_sources = f.get("prefetch_sources") or []
     data_flow = f.get("data_flow") or []
     preset = f.get("preset_fields") or []
-    if not (f.get("multi_step") or option_sources or data_flow or preset):
+    detail_tables = f.get("detail_tables") or []
+    if not (f.get("multi_step") or option_sources or prefetch_sources or data_flow or preset or detail_tables):
         return ""
     L = ["## 接口编排(Dano 服务端按序执行,你一次调用即可)", ""]
     if write_steps:
         L.append("**写步骤**(按序):")
         for s in write_steps:
             L.append(f"- {s['index'] + 1}. `{s['method']} {s['path']}` —— {_ROLE_CN.get(s['role'], s['role'])}")
+        L.append("")
+    if prefetch_sources:
+        L.append("**前置接口**(提供下列「系统预设」字段的值 —— 运行期从这里取,**来源已追到**,不必人工猜):")
+        for o in prefetch_sources:
+            L.append(f"- `{o['interface']}` → 提供:{'、'.join('`' + x + '`' for x in o['provides'])}")
         L.append("")
     if option_sources:
         L.append("**选项来源接口**(下列字段的可选值实时取自这些接口,选前先 `--list-options <字段>`):")
@@ -188,6 +202,14 @@ def _orchestration_md(m: SkillManifest) -> str:
                  "跨环境/跨租户复用前请人工确认是否需替换 —— 录制时探不到其确切来源):")
         for p in preset:
             L.append(f"- `{p['name']}`")
+        L.append("")
+    if detail_tables:
+        L.append("**明细子表**(逐行填写的子表;每行按列填齐必填项,可加多行):")
+        for t in detail_tables:
+            cols = "、".join(f"{c.get('name')}{'(必填)' if c.get('required') else ''}"
+                            for c in (t.get("columns") or []) if c.get("name"))
+            req = "(必填,至少一行)" if t.get("required") else ""
+            L.append(f"- 「{t.get('label') or '明细表'}」{req} → 每行列:{cols}")
         L.append("")
     return "\n".join(L)
 
@@ -264,6 +286,9 @@ def _sop_section(m: SkillManifest, flags: str, cflag: str) -> str:
         for k in keys:
             tag = "必填" if k in required else "可选"
             L.append(f"- `{k}`:{_label(props, k)}({_ptype(k, props, numset)}·{tag})")
+            ch = _columns_hint(props.get(k) or {})        # 明细子表:逐行需填哪些列(权责清单/所属系统…)
+            if ch:
+                L.append(f"  · 这是{ch};每行**逐列填齐必填项**,可加多行")
     else:
         L.append("- 本动作无业务参数。")
     for c in (f.get("computes") or []):
@@ -409,7 +434,7 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
     if keys:
         def _cell(k: str) -> str:
             p = props[k] or {}
-            d = p.get("description", "") or k
+            d = p.get("description", "") or k              # description 已含明细子表列说明(manifest 注入,只说一次)
             h = _opts_hint(p)
             pv = _provenance_hint(p)                       # P1 剧本:角色徽章 + 来源(字段从哪来、怎么用)
             return (d + ("；" + h if h else "") + ("；" + pv if pv else "")).replace("\n", " ").replace("|", "\\|")

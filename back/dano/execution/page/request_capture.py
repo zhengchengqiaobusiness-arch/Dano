@@ -302,6 +302,94 @@ def discover_step_links(writes: list[dict]) -> list[dict]:
     return links
 
 
+# ─────────── Part B:网络交互图追溯(常量来源 + 选项源级联参数)───────────
+def _clean_url_path(url) -> str:
+    u = str(url or "")
+    return (urlparse(u).path or "/") if u.startswith("http") else ((u.split("?")[0] or u) or "/")
+
+
+def _read_value_index(reads: list[dict] | None) -> dict:
+    """所有读响应的 {值: (read, ref点路径)}(首次出现,≥4 长)→ 供常量来源 O(1) 追溯(ssbmId 来自哪个前置接口)。"""
+    idx: dict = {}
+    for r in reads or []:
+        j = r.get("json")
+        if j is None:
+            continue
+        tmp: dict = {}
+        _index_values(j, [], tmp)
+        for v, toks in tmp.items():
+            idx.setdefault(v, (r, _tokens_to_str(toks)))
+    return idx
+
+
+def _const_template_leaves(node, path: str, out: list) -> None:
+    """body_template 里的**常量叶子**(非 {{参数}} 占位、非段拼接)→ [(点路径, 值)]。"""
+    if isinstance(node, dict):
+        if set(node) == {_JSONSTR}:
+            _const_template_leaves(node[_JSONSTR], path, out)
+            return
+        if set(node) == {_SEG}:
+            return
+        for k, v in node.items():
+            _const_template_leaves(v, f"{path}.{k}" if path else k, out)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            _const_template_leaves(v, f"{path}[{i}]", out)
+    elif isinstance(node, str) and node.startswith("{{") and node.endswith("}}"):
+        return
+    elif node is not None and not isinstance(node, bool):
+        out.append((path, node))
+
+
+_CACHE_BUSTER_PARAMS = frozenset({"t", "_", "ts", "time", "timestamp", "r", "rand", "random", "v", "nocache"})
+
+
+def enrich_provenance(api_request: dict, reads: list[dict] | None) -> dict:
+    """**Part B**:从抓到的读响应追溯接口交互图,确定性补全(原地写进 api_request,随资产走 → 剧本/导出可显示):
+      ① **常量来源**:某常量值(ssbmId/bmId)在某前置读响应里出现 → 记 {来源接口, 取值路径}(治"来源未探知")。
+      ② **选项源级联参数**:某 select 的来源 URL 参数值 == 某 body 字段/常量值(或为其前缀)→ 记级联依赖(治"xxxtId 哪来的")。
+    无读/对不上 → 不记(诚实)。通用,不挑系统。返回同一 api_request(已富化)。"""
+    if not api_request:
+        return api_request
+    target = (api_request.get("steps") or [api_request])[-1]   # 提交那步(常量/选项源在此)
+    ridx = _read_value_index(reads)
+    # ① 常量来源
+    consts: list = []
+    _const_template_leaves(target.get("body_template"), "", consts)
+    field_vals: dict = {}                          # 值 → 字段路径/参数名(供级联匹配)
+    const_src: list = []
+    for path, val in consts:
+        sv = str(val)
+        field_vals.setdefault(sv, path)
+        if len(sv) >= 6 and sv in ridx:            # 短常量(oa_leave/状态码)不追,避免噪声
+            r, ref = ridx[sv]
+            const_src.append({"path": path, "interface": "GET " + _clean_url_path(r.get("url")), "ref": ref})
+    for param, val in (target.get("sample_inputs") or {}).items():
+        if val not in (None, ""):
+            field_vals.setdefault(str(val), param)
+    if const_src:
+        target["constant_sources"] = const_src
+        if api_request is not target:
+            api_request.setdefault("constant_sources", const_src)
+    # ② 选项源级联参数
+    for s in target.get("selects") or []:
+        q = urlparse(str(s.get("source_url") or "")).query
+        deps: dict = {}
+        for kv in q.split("&"):
+            if "=" not in kv:
+                continue
+            pk, pv = kv.split("=", 1)
+            if pk.lower() in _CACHE_BUSTER_PARAMS or len(pv) < 4:
+                continue
+            dep = next((fp for fv, fp in field_vals.items()
+                        if fv == pv or (len(pv) >= 8 and fv.startswith(pv))), None)
+            if dep:
+                deps[pk] = dep                     # 该源参数 = 某字段/常量的值(或前缀)→ 级联依赖
+        if deps:
+            s["source_param_deps"] = deps
+    return api_request
+
+
 # 显示名(本体名,给人看的)字段提示。选人下拉用户认的是"张三"而非登录名"zhangsan",更不是他所属的"财务部门"。
 # 用对本体显示名,name→ID 桥接与运行期解析才对得上。通用,不挑系统。
 _DISPLAY_HINTS = ("nickname", "realname", "fullname", "truename", "cnname", "displayname",
@@ -458,6 +546,27 @@ def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool):
     return best
 
 
+def _url_keys_value(url: str, value: str) -> bool:
+    """读接口的**查询参数值**里出现了该字段**自身的选中值**(如 `online-status?userIds=114,118`)→ 这个读是选择的
+    **消费/后果**(拿选中的 id 去查状态/详情),**不是选项来源**。通用信号,治"审批人绑到 online-status 这类反查接口"。"""
+    if not url or value in (None, ""):
+        return False
+    try:
+        for kv in urlparse(str(url)).query.split("&"):
+            if "=" not in kv:
+                continue
+            _k, v = kv.split("=", 1)
+            if any(tok == str(value) for tok in _re.split(r"[,;]|%2C", v) if tok):   # userIds=114,118(含编码逗号)
+                return True
+    except Exception:  # noqa: BLE001
+        return False
+    return False
+
+
+def _url_keys_any(url: str, values) -> bool:
+    return any(_url_keys_value(url, v) for v in (values or []))
+
+
 def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | None = None,
                     skip_paths: list[str] | None = None) -> list[dict]:
     """提交体里"对应某候选列表项"的字段 → 绑 select(Agent 传名字/文字→运行期查内部 ID)。
@@ -487,6 +596,8 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
         hits: list[dict] = []
         for path, toks, sv, raw in leaves:
             if not sv or _is_const_value(raw):           # 系统常量(流程键/uuid/雪花)不作"按名字选"的下拉参数
+                continue
+            if _url_keys_value(r.get("url"), sv):        # 这个读被该字段**自身值**反查(online-status?userIds=…)= 后果非来源 → 跳
                 continue
             m = _match_select(sv, items, sample_vals, small)
             if m is None:
@@ -798,6 +909,55 @@ def suggest_assignee_names(post_data: str | None, reads: list[dict] | None,
     return out
 
 
+def unify_assignee_sources(selects: list[dict], post_data: str | None,
+                           reads: list[dict] | None = None) -> list[dict]:
+    """**多个审批人字段统一到同一组织目录**(同类字段 → 同一来源)。治"审批人1 绑 /system/user/page、审批人2 因
+    分页(只录到首页)或'小列表更专门'误判而绑到 /im/user/online-status 这种**反查接口**"导致来源分裂/遗漏。
+
+    目录 = 被审批人字段指向、且**非被审批人自身值反查**(online-status?userIds=… 排除)、被引用最多的人名列表源;
+    把**所有**审批人字段(含因分页没在首页命中、本来没来源的)都指到该目录,选项快照取目录的(运行期
+    `--list-options` 翻页/搜索取全)。通用,不挑租户/接口名。
+    """
+    body = _parse_body(post_data)
+    if body is None:
+        return selects
+    leaf_meta = {path: (toks, sv) for path, toks, sv, _raw in _leaf_paths(body)}
+    assignee_paths = [p for p in leaf_meta
+                      if _BPMN_NODE_RE.search(p.split(".")[-1].split("[")[0]) or _ASSIGNEE_CONTAINER_RE.search(p)]
+    if len(assignee_paths) < 2:                          # 单审批人无须统一
+        return selects
+    sel_by_path = {s.get("path"): s for s in selects}
+    assignee_vals = {str(leaf_meta[p][1]) for p in assignee_paths if leaf_meta[p][1]}
+    votes: dict[str, int] = {}                           # 候选目录 url → 被多少审批人字段指向(排除反查接口)
+    proto_by_url: dict[str, dict] = {}
+    for p in assignee_paths:
+        s = sel_by_path.get(p)
+        url = (s or {}).get("source_url") or ""
+        if not url or _url_keys_any(url, assignee_vals):  # 被审批人自身值反查的源(online-status)不算目录
+            continue
+        votes[url] = votes.get(url, 0) + 1
+        proto_by_url.setdefault(url, s)
+    if not votes:
+        return selects
+    best_url = max(votes, key=lambda u: votes[u])
+    proto = proto_by_url[best_url]
+    out = list(selects)
+    have = {s.get("path"): s for s in out}
+    for p in assignee_paths:
+        toks, sv = leaf_meta[p]
+        s = have.get(p)
+        if s is None:                                    # 因分页/反查没命中任何源 → 新建,指向统一目录
+            out.append({"path": p, "tokens": list(toks), "value": str(sv or ""), "source_url": best_url,
+                        "value_key": proto.get("value_key"), "label_key": proto.get("label_key"),
+                        "label": "", "count": proto.get("count"), "options": list(proto.get("options") or [])})
+        elif s.get("source_url") != best_url:            # 绑到了错源(反查接口/别的目录)→ 改到统一目录
+            s["source_url"], s["value_key"], s["label_key"] = best_url, proto.get("value_key"), proto.get("label_key")
+            s["options"], s["count"] = list(proto.get("options") or []), proto.get("count")
+            s.pop("category_key", None)
+            s.pop("category_value", None)
+    return out
+
+
 def _storage_scalars(storage_state: dict | None) -> dict:
     """登录态里所有离散标量值(localStorage 值递归解析 JSON + cookie 值)→ {值: 来源路径}。
 
@@ -847,10 +1007,11 @@ def _is_identity_name(key: str) -> bool:
 
 
 def suggest_identity(post_data: str | None, storage_state: dict | None,
-                     samples: dict | None = None) -> list[dict]:
+                     samples: dict | None = None, form_paths: set | None = None) -> list[dict]:
     """提交体里"等于登录态里某值"的字段(如 applicantId=当前用户)→ 建议标 identity(运行期重取,不冻结)。
 
     防误判(通用,不挑系统):
+      ⓿ **DOM 表单里用户可填的字段绝不是 identity** —— form_paths(按 name 直配到表单控件的路径)直接排除(最强证据)。
       ① **用户亲手填的值不算 identity** —— sv 是录制样例就是参数,即便恰好等于某会话标量也不冻结。
       ② **短值 + 非身份字段名 = 巧合,不认** —— 二级内设机构=2 撞会话 roleLevel=2、职能描述=3 撞 orgType=3,
          不能因此把用户填的字段冻成会话值(治 ercsmc=2/qzms=3 反复误判)。
@@ -861,8 +1022,11 @@ def suggest_identity(post_data: str | None, storage_state: dict | None,
         return []
     scal = _storage_scalars(storage_state)
     typed = {str(v) for v in (samples or {}).values() if v not in (None, "")}
+    form_paths = set(form_paths or ())
     out: list[dict] = []
     for path, toks, sv, _raw in _leaf_paths(body):
+        if path in form_paths:                           # ⓿ 表单里用户填的字段 → 必是参数,绝非会话身份值
+            continue
         if not sv or sv not in scal:
             continue
         if sv in typed:                                  # ① 用户填的值 → 参数,不是会话身份值
@@ -1234,10 +1398,140 @@ def goal_needs_confirmation(goal: dict | None) -> bool:
     return rl in ("", "L3", "L4", "L5")
 
 
+# ─────────── DOM 表单结构化绑定(地基):按 name 直配 body key,取代脆弱的值匹配 ───────────
+def _html_type(t: str) -> str:
+    """HTML 控件 type → 字段类型(给 agent/契约)。select/text/textarea/email/tel… → string。"""
+    t = (t or "").strip().lower()
+    if t == "number":
+        return "number"
+    if t == "date":
+        return "date"
+    if t in ("datetime", "datetime-local"):
+        return "datetime"
+    if t in ("checkbox", "radio"):
+        return "boolean"
+    return "string"
+
+
+def bind_form_fields(post_data: str | None, form_snapshot: list[dict] | None) -> dict:
+    """**DOM 表单结构化绑定**:提交体叶子 ↔ 表单控件 → {body 点路径: 表单字段{name,label,type,required,options,value}}。
+
+    两段绑定(通用,不挑系统/框架):
+      ① **name 直配**(最强):`<input name="csmc">` → body `csmc`,与值无关、撞值也不怕(传统表单)。
+      ② **value 配**(SPA 兜底):Element/Ant/Vue 渲染的 input 常**没 name**(key↔field 在 JS 模型里),
+         退而按控件**当前值**配(同值按序各取一个,与旧样例逻辑同),但拿到的是**整张表单的** label/type/required
+         —— 比"靠 fill 事件抓样例"更全(没主动填的默认值字段也在),且带权威类型/必填。
+    根治"用短值倒推结构"的脆弱(ercsmc=2 撞会话/名字错/必填错/字段遗漏)。配不上的叶子不返回(退回原逻辑,诚实)。
+    """
+    body = _parse_body(post_data)
+    if body is None or not form_snapshot:
+        return {}
+    ctrls = [f for f in form_snapshot if isinstance(f, dict)]
+    by_name: dict[str, dict] = {}
+    by_value: dict[str, list] = {}
+    for f in ctrls:
+        n = str(f.get("name") or "").strip()
+        if n:
+            by_name.setdefault(n, f)
+        v = f.get("value")
+        if v not in (None, ""):
+            by_value.setdefault(str(v), []).append(f)
+    leaves = _leaf_paths(body)
+    out: dict[str, dict] = {}
+    used: set = set()
+    for path, _toks, _sv, _raw in leaves:            # ① name 直配
+        key = path.split(".")[-1].split("[")[0]
+        f = by_name.get(key)
+        if f is not None and id(f) not in used:
+            out[path] = f
+            used.add(id(f))
+    for path, _toks, sv, _raw in leaves:             # ② 剩余按 value 配(SPA 无 name);同值按序各取一个
+        if path in out or not sv:
+            continue
+        f = next((c for c in (by_value.get(sv) or []) if id(c) not in used), None)
+        if f is not None:
+            out[path] = f
+            used.add(id(f))
+    return out
+
+
+def _table_fields(form_snapshot: list[dict] | None) -> list[dict]:
+    """form_snapshot 里的明细子表(type==table,带 columns 列结构)。"""
+    return [f for f in (form_snapshot or [])
+            if isinstance(f, dict) and f.get("type") == "table" and f.get("columns")]
+
+
+def _table_primary(table: dict) -> tuple[str, str]:
+    """子表的 (代表参数名, 区段标题):代表名=首个必填列名(没必填取首列);标题=子表 label。"""
+    cols = table.get("columns") or []
+    req = [c for c in cols if c.get("required")]
+    primary = ((req[0] if req else (cols[0] if cols else {})) or {}).get("name", "")
+    return primary, (table.get("label") or (primary and primary + "明细") or "明细表")
+
+
+def bind_table_fields(form_snapshot: list[dict] | None,
+                      list_selects: list[dict] | None) -> list[dict]:
+    """**DOM 明细子表 → 列表参数**:复杂业务表单(权责清单/商品明细/附件行…)的子表本就以"对象数组"提交,
+    已被 `suggest_list_selects` 折叠成**一个列表参数**;但那只剩"猜的名字 + 无列结构"。这里用 DOM 抓到的
+    子表(`type==table` 含 columns)给它**正名(权威列名)+ 附完整列说明**——DOM 当真值,治"子表被压成一个
+    没头没脑的多选 / 名字错 / 列丢"。通用,不挑系统/框架。
+
+    配对(就地 enrich `list_selects`,加 columns/table_label/primary_column/dom_name):
+      ① 唯一:一张子表 ↔ 一个列表参数 → 直接配(最常见,覆盖单子表表单);
+      ② 多个:按"列名 ∩ 该参数选项标签/参数名" 打分,贪心取最高(>0)的唯一配;再不行按出现顺序位置配。
+    配不上的子表作为**孤表**返回(调用方仍要呈现,绝不静默丢字段)。
+    """
+    tables = _table_fields(form_snapshot)
+    lss = list_selects or []
+    if not tables:
+        return []
+    if not lss:
+        return list(tables)                      # 无列表参数可挂 → 全是孤表,交调用方呈现
+
+    def _score(t: dict, ls: dict) -> int:
+        cols = [str(c.get("name") or "") for c in (t.get("columns") or [])]
+        opts = [str(o) for o in (ls.get("options") or [])][:60]
+        s = sum(1 for cn in cols if cn for ol in opts if cn in ol or ol in cn)
+        hay = str(ls.get("label") or "") + "|" + str(ls.get("value_key") or "") + "|" + str(ls.get("path") or "")
+        s += sum(1 for cn in cols if cn and cn in hay)
+        return s
+
+    pairs: dict[int, int] = {}                   # table_idx -> ls_idx
+    if len(tables) == 1 and len(lss) == 1:
+        pairs[0] = 0
+    else:
+        scored = sorted(
+            ((_score(t, ls), ti, li) for ti, t in enumerate(tables) for li, ls in enumerate(lss)),
+            key=lambda x: -x[0])
+        used_t, used_l = set(), set()
+        for sc, ti, li in scored:
+            if sc <= 0 or ti in used_t or li in used_l:
+                continue
+            pairs[ti] = li
+            used_t.add(ti)
+            used_l.add(li)
+        if not pairs and len(tables) == len(lss):    # 都没分但数目相同 → 按位置配(保守兜底)
+            pairs = {i: i for i in range(len(tables))}
+
+    for ti, li in pairs.items():
+        t, ls = tables[ti], lss[li]
+        primary, title = _table_primary(t)
+        ls["columns"] = t.get("columns") or []
+        ls["table_label"] = title
+        ls["primary_column"] = primary
+        if primary:
+            ls["dom_name"] = primary                 # 权威参数名(覆盖按 key 猜的"业务事项列表")
+    return [t for ti, t in enumerate(tables) if ti not in pairs]    # 孤表
+
+
 def flatten_body(post_data: str | None, samples: dict | None = None,
                  required_labels: set | None = None,
-                 collapse_paths: list[str] | None = None) -> list[dict]:
+                 collapse_paths: list[str] | None = None,
+                 form_binding: dict | None = None) -> list[dict]:
     """把请求体拍平成叶子字段列表 + 参数建议,供前端勾选。任意嵌套(dict/list)→ 点路径。
+
+    form_binding:`bind_form_fields` 的结果({path: DOM 表单字段})。**有则按 DOM 结构权威定**字段名/类型/必填/
+    是参数(地面真值,不靠值匹配);无则退回原有"值匹配 DOM 样例"。这是治"字段遗漏/认错/名字错/必填错"的地基。
 
     suggest_name=字段中文名(录制时的 DOM 标签),**只在能确定时给**(文本按值对;日期跨格式对毫秒戳↔显示),
     对不上就退回原始 key(诚实,不瞎猜)。同值字段(都填 123123123)按录制顺序各取一个标签,不抢同一个。
@@ -1250,6 +1544,7 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         return []
     samples = samples or {}
     required_labels = required_labels or set()
+    fb = form_binding or {}                           # {path: DOM 表单字段}(地面真值,优先于值匹配)
     # 样例按录制顺序:(值字符串, 标签, 该值的日期集);allow 同值多标签按序消费
     sample_list = [(str(v), k, _date_keys(v)) for k, v in samples.items() if v not in ("", None)]
     used_i: set = set()
@@ -1303,6 +1598,18 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
 
     out: list[dict] = []
     for i, (path, key, node, sv, time_like, internal) in enumerate(leaves):
+        ff = fb.get(path)
+        if ff is not None:                            # ★ DOM 结构化绑定:按 name 直配到的表单字段 = 权威,不靠值匹配
+            dom_label = str(ff.get("label") or "").strip() or key
+            dom_type = "enum" if ff.get("options") else _html_type(ff.get("type"))
+            out.append({"path": path, "key": key, "value": sv,
+                        "suggest_param": True,            # 表单里用户可填的控件 → 一定是参数(非 identity/常量)
+                        "suggest_name": dom_label,        # 权威中文名(DOM label),不再退回 key/LLM 猜
+                        "type": dom_type,
+                        "confidence": 0.97, "confidence_tier": "auto",
+                        "required": bool(ff.get("required")),   # 权威必填(DOM 的 required/星号)
+                        "system_value": False, "name_source": "dom"})
+            continue
         label, confident = labels[i]
         # 系统生成的时间戳(submitTime/createTime/updateTime 等):**系统类时间 key** + 裸时间戳 + 对不上任何录制样例
         #  → 系统在提交时自动写入、用户没填 → 当常量不参数化(运行期 build 标 system_values 填 now,而非焊死)。
@@ -1439,6 +1746,10 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
             meta["multi"] = True
             meta["element_template"] = s.get("element_template") or {}
             meta["label_subkey"] = s.get("label_subkey")
+        if s.get("columns"):                                 # DOM 明细子表列结构(权责清单/所属系统…)→ 随 select 进资产,导出渲染每行列说明
+            meta["columns"] = s.get("columns")
+            if s.get("table_label"):
+                meta["table_label"] = s.get("table_label")
         if s.get("id_path") or s.get("id_tokens"):
             meta["id_path"] = s.get("id_path")
             meta["id_tokens"] = s.get("id_tokens") or _leaf_tok.get(s.get("id_path"))

@@ -393,6 +393,37 @@ def test_suggest_assignee_names_ignores_normal_list_id_name():
     assert suggest_assignee_names(sub, reads) == {}
 
 
+def test_assignee_sources_reject_reverse_lookup_and_unify():
+    """多审批人统一到同一组织目录:① 反查接口(online-status?userIds=选中id)不当来源;② 因分页只录到首页、
+    某审批人没在首页命中,也指到同一目录(治"审批人2 绑到 online-status / 来源分裂 / 遗漏")。通用,不挑接口名。"""
+    import json
+
+    from dano.execution.page.request_capture import suggest_selects, unify_assignee_sources
+    post = json.dumps({"startUserSelectAssignees": {"Activity_09dlq0g": ["118"], "Activity_0ag2wyz": ["114"]}},
+                      ensure_ascii=False)
+    reads = [
+        {"method": "GET", "url": "http://x/admin-api/system/user/page?pageNo=1&pageSize=10",   # 组织目录(分页,首页无114)
+         "json": [{"id": "118", "nickname": "姜楠"}, {"id": "120", "nickname": "财务A"}]},
+        {"method": "GET", "url": "http://x/admin-api/im/user/online-status?userIds=114,118",     # 反查:拿选中 id 查在线
+         "json": [{"id": "114", "nickname": "源码"}, {"id": "118", "nickname": "姜楠"}]},
+    ]
+    sels0 = suggest_selects(post, reads, {})
+    # 反查接口不被当任何审批人的来源
+    assert all("online-status" not in (s.get("source_url") or "") for s in sels0)
+    sels = unify_assignee_sources(sels0, post, reads)
+    asg = {s["path"]: s for s in sels if "Assignees" in s["path"]}
+    assert len(asg) == 2                                   # 审批人2 没被遗漏
+    assert {s["source_url"] for s in asg.values()} == {"http://x/admin-api/system/user/page?pageNo=1&pageSize=10"}
+
+
+def test_url_keys_value_signal():
+    """反查信号:读 URL 的查询值里出现该字段自身选中值 → True(消费/后果,非来源)。"""
+    from dano.execution.page.request_capture import _url_keys_value
+    assert _url_keys_value("http://x/online-status?userIds=114,118", "114") is True
+    assert _url_keys_value("http://x/online-status?userIds=114,118", "999") is False
+    assert _url_keys_value("http://x/user/page?pageNo=1&pageSize=10", "118") is False   # 分页参数不是字段值
+
+
 def test_suggest_list_selects_collapses_participants_array():
     """根因(治"选了多个人却被拆成 participants[0].userId… 一堆、前几个还冻成固定值"):对象数组多选 →
     识别成**一个列表参数**,推出元素模板(userId←userId、userName←nickName、头像←avatar、type=常量)。
@@ -775,6 +806,48 @@ def test_suggest_select_names_bridges_picker_label_to_param_name():
     assert suggest_select_names([], samples) == {}              # 无 select → 空,不瞎给
 
 
+def test_bind_form_fields_by_name_structural():
+    """地基:body key 按 DOM 表单控件的 name **直配**(不靠值匹配)→ 拿到权威 label/type/required。"""
+    from dano.execution.page.request_capture import bind_form_fields
+    submit = '{"csmc":"1","ercsmc":"2","qzms":"3","ssbmId":"020210601113158904000001"}'
+    snap = [{"name": "csmc", "label": "一级内设机构", "type": "text", "required": True},
+            {"name": "ercsmc", "label": "二级内设机构", "type": "text", "required": False},
+            {"name": "qzms", "label": "职能描述", "type": "textarea", "required": True}]
+    b = bind_form_fields(submit, snap)
+    assert b["csmc"]["label"] == "一级内设机构" and b["qzms"]["label"] == "职能描述"
+    assert "ssbmId" not in b                              # 不在表单里(隐藏常量)→ 不绑,退回原逻辑
+
+
+def test_bind_form_fields_value_fallback_for_spa():
+    """SPA(Element/Ant)渲染的控件常**没 name** → 按当前值配,仍拿到整张表单的 label/type/required。"""
+    from dano.execution.page.request_capture import bind_form_fields
+    submit = '{"csmc":"1","qzms":"3"}'
+    snap = [{"name": "", "label": "一级内设机构", "type": "text", "required": True, "value": "1"},
+            {"name": "", "label": "职能描述", "type": "textarea", "required": True, "value": "3"}]
+    b = bind_form_fields(submit, snap)
+    assert b["csmc"]["label"] == "一级内设机构" and b["qzms"]["label"] == "职能描述"
+
+
+def test_flatten_body_dom_binding_authoritative():
+    """有 form_binding → 字段名/必填/参数**按 DOM 权威定**,不再用短值瞎猜(治 csmc 名字错、必填错)。"""
+    submit = '{"csmc":"1","ercsmc":"2","qzms":"3"}'
+    snap = [{"name": "csmc", "label": "一级内设机构", "type": "text", "required": True},
+            {"name": "ercsmc", "label": "二级内设机构", "type": "text", "required": False},
+            {"name": "qzms", "label": "职能描述", "type": "textarea", "required": True}]
+    fb = __import__("dano.execution.page.request_capture", fromlist=["bind_form_fields"]).bind_form_fields(submit, snap)
+    fields = {f["path"]: f for f in flatten_body(submit, {}, form_binding=fb)}
+    assert fields["csmc"]["suggest_name"] == "一级内设机构" and fields["csmc"]["name_source"] == "dom"
+    assert fields["csmc"]["required"] is True and fields["ercsmc"]["required"] is False   # DOM 权威必填
+    assert all(fields[p]["suggest_param"] for p in ("csmc", "ercsmc", "qzms"))            # 表单字段=参数
+
+
+def test_suggest_identity_excludes_form_fields():
+    """⓿ DOM 表单里用户可填的字段绝不是 identity —— 即便值撞会话标量(ercsmc=2 撞 roleLevel=2)也排除。"""
+    storage = {"origins": [{"localStorage": [{"name": "i", "value": '{"roleLevel":2,"orgType":3}'}]}]}
+    submit = '{"ercsmc":"2","qzms":"3"}'
+    assert suggest_identity(submit, storage, {}, form_paths={"ercsmc", "qzms"}) == []
+
+
 def test_suggest_identity_flags_current_user_fields():
     """Q1 身份坑:提交体 applicantId=118 等于登录态 userInfo.userId → 标 identity(运行期重取,不冻结)。"""
     submit = '{"applicantId":118,"applicant":"赵六","reason":"回家","procDefKey":"oa_leave"}'
@@ -1055,6 +1128,23 @@ def test_discover_step_links_ignores_short_constants():
     writes = [{"post_data": '{"x":1}', "response_json": {"code": 1}},
               {"post_data": '{"y":1}', "response_json": {"code": 200}}]
     assert discover_step_links(writes) == []
+
+
+def test_enrich_provenance_traces_constant_and_cascade():
+    """Part B:常量 ssbmId 在某前置读响应里出现 → 记来源接口+路径;选项源参数 xxxtId 是 ssbmId 前缀 → 记级联依赖。"""
+    from dano.execution.page.request_capture import enrich_provenance
+    apir = {"method": "POST", "path": "/qzqdsl/create", "url": "http://x/qzqdsl/create",
+            "body_template": {"ssbmId": "020210601113158904000001010018", "ywsxList": "{{业务事项列表}}"},
+            "params": ["业务事项列表"], "sample_inputs": {"业务事项列表": "x"},
+            "selects": [{"param": "业务事项列表",
+                         "source_url": "http://x/sxqd/getSxqdBmList?t=1782&xxxtId=02021060111",
+                         "value_key": "id", "label_key": "lmFid"}]}
+    reads = [{"url": "http://x/qzqdsl/getBmList?t=1",
+              "json": {"data": {"ssbmId": "020210601113158904000001010018", "name": "徐州"}}}]
+    out = enrich_provenance(apir, reads)
+    cs = out["constant_sources"]
+    assert cs == [{"path": "ssbmId", "interface": "GET /qzqdsl/getBmList", "ref": "data.ssbmId"}]
+    assert out["selects"][0]["source_param_deps"] == {"xxxtId": "ssbmId"}   # t= 是 cache-buster 被忽略
 
 
 def test_discover_step_links_index_first_occurrence_and_no_response():

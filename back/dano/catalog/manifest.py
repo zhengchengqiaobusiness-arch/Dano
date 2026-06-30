@@ -121,6 +121,12 @@ def _schema_prop(skill: SkillSpec, field: str, desc: str, sel: dict | None = Non
         opts, has_source, static = _enum_facts(sel)
         item = {"type": "string", "format": "name-ref"}
         prop = {"type": "array", "items": item, "label": desc}
+        cols = (sel or {}).get("columns") or []              # DOM 明细子表列结构 → 每行包含哪些列(权责清单/所属系统…)
+        if cols:
+            prop["x-columns"] = cols                         # 结构化列(导出/前端渲染);label 保持简洁,列说明只在 description 说一次
+            _cn = "、".join(f"{c.get('name')}{'(必填)' if c.get('required') else ''}" for c in cols if c.get("name"))
+            if _cn:
+                desc = desc + f"(明细子表,每行含:{_cn})"
         if static:
             prop["description"] = desc + ("(**多选**:传**名字列表**,Dano 按每个名字现查内部信息拼成整条记录,"
                                           f"**勿传 ID/编号**;可先 `--list-options {field}` 实时拉可选项)")
@@ -231,7 +237,9 @@ def _flow_meta(skill: SkillSpec) -> dict:
                     "verify": verify, "judged_by_code": judged,
                     "step_paths": _step_paths(wf or [apir]),   # 各步 接口(method+path),供 SOP 展示编排
                     "write_steps": sp["write_steps"], "option_sources": sp["option_sources"],
-                    "data_flow": sp["data_flow"], "multi_step": sp["multi_step"], "preset_fields": preset}
+                    "prefetch_sources": sp.get("prefetch_sources") or [],   # Part B:提供常量的前置接口(ssbmId 来自哪)
+                    "data_flow": sp["data_flow"], "multi_step": sp["multi_step"], "preset_fields": preset,
+                    "detail_tables": apir.get("tables") or []}   # 没对接上列表参数的明细子表(孤表)→ 导出仍呈现,绝不丢
         return {"step_count": len(getattr(skill, "page_steps", []) or []) or 1,
                 "preconditions": [], "computes": [],
                 "verify": bool(getattr(skill, "page_success_marker", None)), "judged_by_code": False}

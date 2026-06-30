@@ -534,15 +534,17 @@ async def onboarding_page_import(req: PageImportReq) -> dict:
 
 async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict,
                               reads: list[dict] | None = None, storage: dict | None = None,
-                              required_labels: set | None = None, dom_options: dict | None = None) -> dict:
+                              required_labels: set | None = None, dom_options: dict | None = None,
+                              form_snapshot: list[dict] | None = None) -> dict:
     """构造 request_fields 消息:字段表(含 type/required)+ 候选请求 + select(Q2)+ identity(Q1)。"""
     import time as _time
     _t0 = _time.monotonic()                       # P4 埋点:量字段表/参数推断耗时(先量后优,定位多接口慢在哪)
-    from dano.execution.page.request_capture import (apply_dom_options, dom_enum_selects, flatten_body,
-                                                     looks_internal_param_name, suggest_assignee_names,
-                                                     suggest_identity, suggest_list_selects,
-                                                     suggest_select_names, suggest_selects,
-                                                     suggest_workflow_steps)
+    from dano.execution.page.request_capture import (apply_dom_options, bind_form_fields, bind_table_fields,
+                                                     dom_enum_selects, flatten_body, looks_internal_param_name,
+                                                     suggest_assignee_names, suggest_identity,
+                                                     suggest_list_selects, suggest_select_names,
+                                                     suggest_selects, suggest_workflow_steps,
+                                                     unify_assignee_sources)
 
     def _path(u: str) -> str:
         i = u.find("//")
@@ -550,16 +552,22 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
     cand_list = [{"idx": i, "method": (c.get("method") or "POST").upper(), "path": _path(c.get("url") or "")}
                  for i, c in enumerate(candidates)]
     pd = chosen.get("post_data")
+    # ★ DOM 表单结构化绑定(地基):body 字段按表单控件 name/值 直配 → 权威 名字/类型/必填,取代脆弱值匹配
+    form_binding = bind_form_fields(pd, form_snapshot)
     # 列表多选(participants[]=选了多个人)先识别 → 折叠成**一个**列表参数,逐元素叶子不再单独冒出来
     list_selects = suggest_list_selects(pd, reads or [], samples)
     list_paths = [s["path"] for s in list_selects]
-    fields = flatten_body(pd, samples, required_labels, collapse_paths=list_paths)
+    # ★ DOM 明细子表(权责清单/商品明细…)→ 给对应列表参数正名(权威列名)+ 附列结构;配不上的子表=孤表,仍要呈现
+    orphan_tables = bind_table_fields(form_snapshot, list_selects)
+    fields = flatten_body(pd, samples, required_labels, collapse_paths=list_paths, form_binding=form_binding)
     # 传 samples:用录制选中的显示名消歧/确认(大字典里短码也能精确绑对那项);跳过已被列表多选接管的数组下逐元素叶子
     selects = suggest_selects(pd, reads or [], samples, skip_paths=list_paths) + list_selects
     # 页面枚举地面真值:用录制时下拉里真实可见的选项覆盖候选快照(治"加班类型绑到 222 项全量字典");
     #   并为"只在 DOM 有选项、没绑上网络源"的纯枚举字段补一个无来源 enum(agent 传名字即原样提交)。
     apply_dom_options(selects, dom_options)
     selects += dom_enum_selects(pd, dom_options, {s["path"] for s in selects})
+    # 多审批人统一到同一组织目录:治"审批人2 因分页/反查接口绑错源",同类字段同来源、不遗漏(通用)
+    selects = unify_assignee_sources(selects, pd, reads or [])
     # select/选人字段:用录制选项标签当默认参数名(经候选列表桥接),避免漏内部 key(Activity_xxx/嵌套键)
     sel_names = suggest_select_names(selects, samples)
     for f in fields:
@@ -586,7 +594,18 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
             fields = merge_llm_field_names(fields, _names)
     except Exception:  # noqa: BLE001
         pass
-    id_list = suggest_identity(pd, storage, samples)   # 字段=当前用户/会话值(运行期重取;排除用户填值/平凡撞值)
+    # DOM 子表列结构 → 挂到对应列表参数字段:权威列名覆盖一切猜测(与 form_binding 同口径),columns 供导出渲染明细
+    _ls_cols = {s.get("path"): s for s in list_selects if s.get("columns")}
+    for f in fields:
+        _ls = _ls_cols.get(f.get("path"))
+        if _ls:
+            if _ls.get("dom_name"):
+                f["suggest_name"] = _ls["dom_name"]
+                f["name_source"] = "dom"
+            f["columns"] = _ls.get("columns")
+            f["table_label"] = _ls.get("table_label")
+    # 字段=当前用户/会话值(运行期重取);⓿ DOM 表单里用户可填的字段(form_binding)绝不当 identity,直接排除
+    id_list = suggest_identity(pd, storage, samples, form_paths=set(form_binding.keys()))
     # P3:给每个字段标**角色**(field_role)→ 录制 UI 用统一徽章区分(用户填/活接口/审批人/系统值/常量…),
     #   与导出/manifest 的 FieldRole 同一套口径。录制期无完整 api_request,直接按字段标志确定性派生。
     from dano.execution.page.screenplay import _is_assignee_path, classify_field_role
@@ -598,6 +617,21 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
             is_param=bool(f.get("suggest_param")), select=_sel_by_path.get(p),
             is_assignee=_is_assignee_path(p), is_identity=p in _id_paths,
             is_system=bool(f.get("system_value"))).value
+    # 业务说明**识别即自动回填**(确定性,不调 LLM、不随机):用建议参数名搭临时 api_request → 剧本 → 渲染固定模板。
+    #   前端拿它预填业务说明框(空则补结构,而非留空);用户可改,发布以页面内容为准。失败不阻断字段下发。
+    description = ""
+    try:
+        from dano.execution.page.request_capture import build_api_request as _bar
+        from dano.execution.page.screenplay import build_screenplay as _bs
+        from dano.execution.page.screenplay import render_business_description as _rbd
+        _pm = {f["path"]: (f.get("suggest_name") or f.get("key") or f.get("path"))
+               for f in fields if f.get("suggest_param") and f.get("path")}
+        _req = {(f.get("suggest_name") or f.get("key") or f.get("path"))
+                for f in fields if f.get("suggest_param") and f.get("required")}
+        _apir = _bar(chosen, _pm, selects=selects, identity=id_list, typed=samples)
+        description = _rbd(_bs(_apir or {}), purpose="", required=_req)
+    except Exception:  # noqa: BLE001 —— 自动回填失败不阻断字段下发
+        description = ""
     log.info("request_fields.built", ms=round((_time.monotonic() - _t0) * 1000),
              fields=len(fields), selects=len(selects), reads=len(reads or []),
              cands=len(candidates))           # P4 埋点:多接口/大字典时定位耗时
@@ -607,6 +641,7 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
             "candidates": cand_list, "chosen_idx": candidates.index(chosen) if chosen in candidates else 0,
             "suggested_steps": suggest_workflow_steps(candidates, samples),   # 自动建议哪几条组成业务流程(前端预勾)
             "selects": selects,
+            "description": description,        # 识别即回填的确定性业务说明(前端预填业务说明框)
             "identity": id_list}
 
 
@@ -662,6 +697,7 @@ async def record_ws(ws: WebSocket) -> None:
         pending_storage: dict | None = None    # 登录态(认 identity 字段)
         pending_required: set = set()          # 录制时表单 * 必填的字段标签
         pending_dom_options: dict = {}         # 录制时下拉里真实可见的选项 {选中显示值: [选项文字]}(枚举地面真值)
+        pending_form_snapshot: list = []       # 提交瞬间整张表单快照(name/label/type/required)→ 结构化绑定 body 字段
         while True:
             msg = await ws.receive_json()
             t = msg.get("type")
@@ -719,10 +755,12 @@ async def record_ws(ws: WebSocket) -> None:
                     pending_storage = login_state               # identity 字段识别
                     pending_required = required_labels          # 表单 * 必填
                     pending_dom_options = dom_options           # 下拉枚举地面真值
+                    pending_form_snapshot = sess.captured_form_snapshot()   # 提交瞬间表单快照(结构化绑定)
                     chosen = pick_submit_request(cands, samples) or cands[-1]
                     pending_req = chosen
                     await ws.send_json(await _request_fields_msg(chosen, cands, samples, pending_reads,
-                                                                 pending_storage, pending_required, dom_options))
+                                                                 pending_storage, pending_required, dom_options,
+                                                                 pending_form_snapshot))
                     continue
 
                 # 兜底:没抓到 JSON 提交请求 → 老的 DOM 回放路径
@@ -760,17 +798,18 @@ async def record_ws(ws: WebSocket) -> None:
                     pending_req = pending_candidates[idx]
                     await ws.send_json(await _request_fields_msg(pending_req, pending_candidates, pending_samples,
                                                                  pending_reads, pending_storage, pending_required,
-                                                                 pending_dom_options))
+                                                                 pending_dom_options, pending_form_snapshot))
             elif t == "optimize_description":
-                # P2:业务描述 AI 优化 —— 用与发布**同样**的方式构造临时 api_request(不落库),抽**剧本骨架**(无值/无凭证)
-                #   连同用户草稿喂 LLM,回结构化业务说明。失败/无 LLM → 原样回草稿(绝不阻断)。
+                # P2:业务说明 = **确定性模板渲染**(结构全来自剧本,同录制每次一致)+ **仅一句话业务目的**经 LLM 提炼。
+                #   治"AI 优化每次都不一样/会编错":LLM 退出结构,只碰目的那一行;无 LLM/失败 → 用草稿当目的,结构照渲染。
                 draft = (msg.get("draft") or "").strip()
                 text = draft
                 if pending_req is not None:
                     try:
                         from dano.execution.page.request_capture import (apply_dom_options, build_api_request,
                                                                          build_api_workflow, suggest_workflow_steps)
-                        from dano.execution.page.screenplay import build_screenplay, screenplay_skeleton
+                        from dano.execution.page.screenplay import (build_screenplay, render_business_description,
+                                                                    screenplay_skeleton)
                         pm = {k: v.strip() for k, v in (msg.get("param_map") or {}).items() if v and v.strip()}
                         sels = msg.get("selects") or []
                         apply_dom_options(sels, pending_dom_options)
@@ -782,16 +821,19 @@ async def record_ws(ws: WebSocket) -> None:
                                                       selects=sels, identity=idens, typed=pending_samples)
                         else:
                             apir = build_api_request(pending_req, pm, selects=sels, identity=idens, typed=pending_samples)
-                        skel = screenplay_skeleton(build_screenplay(apir or {}))
-                        skel["title"] = msg.get("title") or ""
+                        sp = build_screenplay(apir or {})
+                        purpose = draft                              # 草稿即业务目的种子;有 LLM 则只润色这一句
                         from dano.agent_tools import tools as _T
-                        from dano.review.board import optimize_business_description_llm
+                        from dano.review.board import refine_business_purpose_llm
                         _b = _T._review_board
                         if _b is not None:
-                            text = await optimize_business_description_llm(
+                            skel = screenplay_skeleton(sp)
+                            skel["title"] = msg.get("title") or ""
+                            purpose = await refine_business_purpose_llm(
                                 _b.client, (getattr(_b, "models", None) or {}).get("acceptance"),
                                 draft=draft, skeleton=skel)
-                    except Exception as e:  # noqa: BLE001 —— 润色失败不阻断,回草稿
+                        text = render_business_description(sp, purpose=purpose, required=set(pm.values()))
+                    except Exception as e:  # noqa: BLE001 —— 失败不阻断,回草稿
                         log.warning("optimize_description.error", error=str(e))
                 await ws.send_json({"type": "description", "description": text})
             elif t == "publish_request":
@@ -814,6 +856,12 @@ async def record_ws(ws: WebSocket) -> None:
                         param_map[_path] = _assignee_names[_path]
                 sels = msg.get("selects") or []         # Q2 选领导:名字→ID
                 apply_dom_options(sels, pending_dom_options)   # 页面枚举地面真值兜底:发布也用 DOM 选项盖掉网络字典快照
+                # 多审批人统一组织目录(确定性,不靠前端回传保真):治审批人2 绑错反查接口/分页遗漏
+                from dano.execution.page.request_capture import unify_assignee_sources
+                sels = unify_assignee_sources(sels, pending_req.get("post_data"), pending_reads)
+                # DOM 明细子表 → 重新对接列表参数(确定性,不靠前端回传保真):给列表参数附列结构;孤表单独留存,绝不丢
+                from dano.execution.page.request_capture import bind_table_fields
+                _orphan_tables = bind_table_fields(pending_form_snapshot, sels)
                 idens = msg.get("identity") or []        # Q1 当前用户:运行期重取
                 fc = suggest_fact_check(pending_samples, pending_reads)   # 回查源(录到"我的记录"列表才有)
                 sr = infer_success_rule(pending_reads)   # 学这套系统自己的"业务成功"约定(不挑系统,见 P0#2)
@@ -830,6 +878,13 @@ async def record_ws(ws: WebSocket) -> None:
                     apir = build_api_request(pending_req, param_map, selects=sels, identity=idens,
                                              typed=pending_samples)
                     last_params = (apir or {}).get("params") or []
+                if apir:                               # Part B:从抓到的读响应追溯常量来源 + 选项源级联参数,写进资产
+                    from dano.execution.page.request_capture import enrich_provenance
+                    enrich_provenance(apir, pending_reads)
+                if apir and _orphan_tables:            # 没对接上列表参数的明细子表 → 单独留存,导出时呈现(绝不静默丢字段)
+                    apir["tables"] = [{"label": _t.get("label"), "required": bool(_t.get("required")),
+                                       "columns": _t.get("columns") or [], "rows": _t.get("rows", 0)}
+                                      for _t in _orphan_tables]
                 if apir and fc:
                     apir["fact_check"] = fc            # 提交后回查记录确认真生效(grounded)
                 if apir and sr:                        # 学到的成功约定:落到资产(工作流则落最后一步=提交那步)

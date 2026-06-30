@@ -138,6 +138,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         setChosenIdx(m.chosen_idx ?? 0);
         // 自动判出的业务流程步预勾上(用户可改);后端没给则不勾
         setStepSel(Object.fromEntries((m.suggested_steps || []).map((i: number) => [i, true])));
+        // 业务说明**识别即回填**(确定性模板):空才填,不覆盖用户已写;发布以页面内容为准
+        if (m.description) setDescription((d) => (d.trim() ? d : m.description));
         setPhase("recording");
         message.success("抓到提交请求!勾选要让 agent 传值的字段 → 确认发布");
       }
@@ -383,13 +385,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="提交请假" style={{ width: 160 }} />
                 </Form.Item>
               </Space>
-              <Form.Item label="业务说明(随 skill 导出;可手写,也可让 AI 按抓到的接口/字段优化)"
+              <Form.Item 
                          style={{ marginTop: 8, marginBottom: 0 }}>
-                <Input.TextArea value={description} onChange={(e) => setDescription(e.target.value)} rows={3}
-                                placeholder="一句话说明这个操作办什么业务、关键字段含义/来源;留空也可发布。点「AI 优化」让它按抓到的接口编排与字段来源补全。" />
+                <Input.TextArea value={description} onChange={(e) => setDescription(e.target.value)} rows={8}
+                                placeholder="抓到提交请求后,这里会按接口编排/字段来源自动填一段固定结构的业务说明(同录制每次一致)。你可直接改;【业务目的】那一行点「AI 优化」让它据接口/字段提炼一句话。" />
               </Form.Item>
               <Space style={{ marginTop: 8 }} wrap>
-                <Button loading={optimizing} onClick={optimizeDescription}>AI 优化业务说明</Button>
+                <Button loading={optimizing} onClick={optimizeDescription}>AI 优化业务目的</Button>
                 <Button type="primary" loading={phase === "publishing"} onClick={publishRequest}>
                   确认发布(AI 自动提炼目标 + 审核 + 修复)
                 </Button>

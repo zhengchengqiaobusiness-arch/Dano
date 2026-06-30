@@ -98,13 +98,19 @@ _RECORDER_JS = r"""() => {
   function onLoginPage() {
     try { return /\/(login|signin|sign-in|sso)(?:[/?#]|$)/i.test(location.href); } catch (e) { return false; }
   }
-  function requiredOf(el) {                       // 该字段是否必填:读表单 * 标记(通用,跨 Element-UI / Ant / 原生)
+  function requiredOf(el) {                       // 该字段是否必填:读表单 * 标记(通用,跨 Element-UI / Ant / Vant / 原生)
     try {
       if (el.required || el.getAttribute('aria-required') === 'true') return true;
-      var item = el.closest('.el-form-item,.ant-form-item,[class*="form-item"],[class*="form_item"]');
-      if (item && /required/i.test(item.className)) return true;   // el is-required / ant-form-item-required
-      var lab = item && item.querySelector('label');
-      if (lab && lab.textContent.indexOf('*') >= 0) return true;   // 少数把 * 直接写进 label 文本
+      // 逐祖先看必填类(is-required / xxx-required / required)+ 该容器标签带 *。**不能用 closest('[class*=form-item]')** —— 它会
+      //   命中 BEM 子节点 `el-form-item__content`(含 "form-item" 子串却无 required 类),把必填判丢。逐级走才稳。
+      var node = el;
+      for (var i = 0; i < 6 && node && node !== document.body; i++) {
+        var c = (typeof node.className === 'string') ? node.className : '';
+        if (/(^|[ _-])(is-)?required($|[ _-])/i.test(c)) return true;            // is-required / ant-form-item-required …
+        var lab = node.querySelector ? node.querySelector('label,[class*="label"]') : null;
+        if (lab && !lab.contains(el) && (lab.textContent || '').indexOf('*') >= 0) return true;   // * 写进标签文本
+        node = node.parentElement;
+      }
     } catch (e) {}
     return false;
   }
@@ -204,12 +210,141 @@ _RECORDER_JS = r"""() => {
       } else if (tries >= 25) { clearInterval(pickTimer); pickTimer = null; }   // ~2.5s 仍没变 → 放弃
     }, 100);
   }
+  // 提交时给整张表单拍快照(每控件:name/label/type/required/value)→ 后端按 name/值**结构化绑定** body 字段,
+  // 取代脆弱的值匹配(治字段遗漏/认错/名字错/必填错)。框架无关:Element/Ant 的 form-item + 原生控件都覆盖。
+  function _itemLabel(item) {
+    var l = item.querySelector('.el-form-item__label,.ant-form-item-label,label');
+    return l ? clean(l.innerText).replace(/[:：*]\s*$/, '') : '';
+  }
+  function _itemRequired(item, ctrl) {
+    try {
+      if (item.className && /is-required|required/.test(item.className)) return true;
+      var l = item.querySelector('.el-form-item__label,.ant-form-item-label,label');
+      if (l && (l.querySelector('[class*="required"]') || l.textContent.indexOf('*') >= 0)) return true;
+    } catch (e) {}
+    return !!(ctrl && ctrl.required);
+  }
+  function _ctrlType(ctrl) {
+    var t = (ctrl.tagName || '').toLowerCase();
+    if (t === 'textarea') return 'textarea';
+    if (t === 'select') return 'select';
+    if (t === 'input') return (ctrl.type || 'text').toLowerCase();
+    return 'select';
+  }
+  // 明细子表(el-table / ant-table / 原生 table:权责清单、商品明细、附件行…)的**列结构**。复杂业务表单
+  // 普遍带"新增一行"的重复子表;扁平 form-item 扫描会整张漏掉。读表头列名 + 必填,跳过序号/操作列。框架无关。
+  function _tableCols(tbl) {
+    var ths = tbl.querySelectorAll('thead th,[role="columnheader"],.el-table__header th,.ant-table-thead th');
+    var cols = []; var seenC = {};
+    for (var i = 0; i < ths.length; i++) {
+      var th = ths[i]; var cell = th.querySelector('.cell') || th;
+      var nm = clean(cell.innerText || cell.textContent || '').replace(/[:：*\s]+$/, '');
+      if (!nm || nm === '#' || /^(序号|操作|action|#)$/i.test(nm) || seenC[nm]) continue;
+      if (th.querySelector && th.querySelector('input[type=checkbox]')) continue;   // 多选勾选列
+      seenC[nm] = 1;
+      var req = /is-required|required/.test(th.className || '') ||
+                (cell.querySelector && cell.querySelector('[class*="required"]')) ||
+                ((th.textContent || '').indexOf('*') >= 0);
+      cols.push({ name: nm, required: !!req });
+    }
+    return cols;
+  }
+  function _tableRows(tbl) {
+    try {
+      var trs = tbl.querySelectorAll('.el-table__body-wrapper tbody tr,.ant-table-tbody tr,tbody tr');
+      var n = 0;
+      for (var i = 0; i < trs.length; i++) {
+        if (trs[i].querySelector('.el-table__empty-block,.ant-empty')) continue;   // 暂无数据占位行不算
+        if (clean(trs[i].innerText || '')) n++;
+      }
+      return n;
+    } catch (e) { return 0; }
+  }
+  // 就近标签(labelText 的 a11y 路径失败后用):往上 ≤4 层找"行容器"里的标签元素 —— 各框架标签类名不同
+  //   (el-form-item__label / ant-form-item-label / van-field__label / form-label / MuiInputLabel / ivu-form-item-label),
+  //   统一按 <label>/legend/dt/[class*=label] 命中,取短文本。**不靠 class 白名单**,故任意组件库都覆盖。
+  function _nearLabel(el) {
+    var selfTxt = '';
+    try { selfTxt = /^(input|textarea|select)$/i.test(el.tagName || '') ? clean(el.value || '') : clean(el.innerText || el.textContent || ''); } catch (e) {}
+    var CC = 'input:not([type=hidden]):not([type=button]):not([type=submit]),textarea,select,[contenteditable="true"],[role="combobox"],[role="textbox"]';
+    var node = el;
+    for (var i = 0; i < 5 && node && node !== document.body; i++) {
+      try {
+        if (node !== el && node.querySelectorAll(CC).length > 1) break;   // 越过"本字段的行"(容器含多控件)→ 停,免借到别字段/整表的 label
+        var cand = node.querySelector('label,legend,dt,[class*="label"],[class*="Label"],[class*="field__label"],[class*="item-label"]');
+        if (cand && !cand.contains(el)) {
+          var t = clean(cand.innerText || cand.textContent || '').replace(/[:：*]\s*$/, '');
+          if (t && t.length <= 30) return t;
+        }
+        if (node !== el) {                                               // 无语义 label 元素(纯自定义)→ 行内文本去掉控件值 = 标签
+          var ot = clean(node.innerText || node.textContent || '');
+          if (selfTxt) ot = clean(ot.split(selfTxt).join(' '));
+          ot = ot.replace(/[:：*]\s*$/, '');
+          if (ot && ot.length <= 20) return ot;
+        }
+      } catch (e) {}
+      node = node.parentElement;
+    }
+    return '';
+  }
+  function formSnapshot(submitEl) {
+    try {
+      var form = (submitEl && submitEl.closest && submitEl.closest('form,.el-form,.ant-form,[role="form"]')) || document.body;
+      var out = []; var seen = [];
+      // **控件级**扫描(框架无关,治"换个框架就识别不全"):原生控件 + ARIA 输入角色 + 可编辑元素;
+      //   逐控件用 a11y(label[for]/包裹 label/aria) → 就近标签 取名,不再靠 `.el-form-item` 这类**类名约定**。
+      var CTRL = 'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=checkbox]):not([type=radio]),' +
+                 'textarea,select,[contenteditable=""],[contenteditable="true"],' +
+                 '[role="combobox"],[role="textbox"],[role="spinbutton"],[role="searchbox"]';
+      var ctrls = form.querySelectorAll(CTRL);
+      for (var i = 0; i < ctrls.length && out.length < 200; i++) {
+        var el = ctrls[i];
+        if (el.closest && el.closest('.el-table,.ant-table,[role="grid"],table')) continue;   // 子表单元格 → 交下面表格扫描
+        // 复合控件:role=combobox/可编辑常在外层 div 上、内部还有真 input → 取内部 input,按真实控件判重(避免一个字段抓两条)
+        var inp = /^(input|textarea|select)$/i.test(el.tagName || '') ? el : (el.querySelector('input,textarea,select') || el);
+        if (seen.indexOf(inp) >= 0) continue;
+        seen.push(inp); if (inp !== el) seen.push(el);
+        var isCtrl = /^(input|textarea|select)$/i.test(inp.tagName || '');
+        var label = labelText(inp) || _nearLabel(inp);
+        var value = isCtrl ? clean(inp.value) : '';
+        if (!value) { try { value = clean(inp.innerText || inp.textContent || '').slice(0, 80); } catch (e) {} }
+        out.push({ name: (inp.getAttribute && inp.getAttribute('name')) || '', label: clean(label),
+                   type: isCtrl ? _ctrlType(inp) : 'select', required: requiredOf(inp), value: value });
+      }
+      // 明细子表:扫描表格控件,把"列结构"建模成一个 type=table 字段(含 columns/行数),不再整张丢掉
+      var tbls = form.querySelectorAll('.el-table,.ant-table');
+      if (!tbls.length) tbls = form.querySelectorAll('table');
+      for (var j = 0; j < tbls.length && out.length < 220; j++) {
+        var tbl = tbls[j];
+        if (tbl.parentElement && tbl.parentElement.closest && tbl.parentElement.closest('.el-table,.ant-table')) continue;  // 嵌套表只取最外层
+        var cols = _tableCols(tbl); if (!cols.length) continue;
+        var fitem = tbl.closest && tbl.closest('.el-form-item,.ant-form-item,[class*="form-item"]');
+        var tlabel = (fitem && _itemLabel(fitem)) || '';
+        if (!tlabel) { var rc = cols.filter(function (c) { return c.required; }); tlabel = (rc[0] ? rc[0].name : cols[0].name) + '明细'; }
+        var treq = cols.some(function (c) { return c.required; }) || !!(fitem && /is-required|required/.test(fitem.className || ''));
+        out.push({ name: '', label: clean(tlabel), type: 'table', required: treq, value: '', columns: cols, rows: _tableRows(tbl) });
+      }
+      return out;
+    } catch (e) { return []; }
+  }
   document.addEventListener('click', function (e) {
     // A) 点在日期/下拉弹层内 = 正在选择 → 不记这次点击;先把**此刻弹层里可见的选项**抓下来(地面真值枚举),
     //    再轮询触发框值落定后随 pick 一起回传(选完即生效)
     if (e.target.closest && e.target.closest(POPUP)) {
       var _opts = popupOptions(e.target.closest(POPUP)); if (_opts.length) lastPickOptions = _opts;
       pollPick(activeTrigger); return;
+    }
+    // A2) 提交按钮**优先**判定:点提交永远当提交(拍表单快照 + 记 submit),绝不被下面的"选择触发框"误吞。
+    //     真实表单里日期/下拉都是 readonly input,triggerOf 的 readonly 兜底会把提交点误判成开下拉而提前 return,
+    //     导致快照永不触发、submit 也漏记。语义上点「提交」就是提交,先于 picker 逻辑裁定。
+    var sbEl = target(e.target);
+    if (sbEl) {
+      var sbRole = roleOf(sbEl), sbName = accName(sbEl);
+      if (sbRole === 'button' && SUBMIT.some(function (h) { return sbName.toLowerCase().indexOf(h) >= 0; })) {
+        if (!onLoginPage()) { try { window.__danoRecord(JSON.stringify({ op: 'form_snapshot', fields: formSnapshot(sbEl) })); } catch (e2) {} }
+        var sbLoc = locateClickable(sbEl); if (sbLoc) emit('submit', sbLoc, '', '');
+        return;
+      }
     }
     // B) 点选择型触发框 → 记住它 + 点击前的显示值,开始轮询(覆盖单击即选 / 远程搜索异步回填 / 级联)
     var trig = triggerOf(e.target);
@@ -221,12 +356,10 @@ _RECORDER_JS = r"""() => {
     }
     // C) 普通输入框点击 = 聚焦噪声(打字会另记 fill)→ 跳过
     if (e.target.closest && e.target.closest('input,select,textarea')) return;
-    // D) 普通可点元素(按钮/卡片/菜单/链接)
+    // D) 普通可点元素(按钮/卡片/菜单/链接)—— 提交已在 A2 处理,这里只记普通点击
     var el = target(e.target); if (!el) return;
     var loc = locateClickable(el); if (!loc) return;
-    var role = roleOf(el); var name = accName(el);
-    var isSubmit = role === 'button' && SUBMIT.some(function (h) { return name.toLowerCase().indexOf(h) >= 0; });
-    emit(isSubmit ? 'submit' : 'click', loc, '', '');
+    emit('click', loc, '', '');
   }, true);
 }"""
 
@@ -240,6 +373,7 @@ class RecordSession:
         self.steps: list[dict] = []
         self.requests: list[dict] = []      # 抓到的写请求(有序,method/url/post_data/headers)→ 参数化/多步工作流
         self.reads: list[dict] = []         # 抓到的读请求(GET+JSON 列表/字典)→ Q2 选领导等 select 的候选源
+        self.form_snapshot: list[dict] = []  # 提交瞬间整张表单快照(name/label/type/required/value)→ 结构化绑定 body 字段
         self._on_step = on_step
         self._on_request_cb = on_request    # 实时把抓到的请求推给前端(诊断可见)
         # 拦截提交:点提交时抓到业务写请求后,假装成功、不真发给服务器 → 录制不产生真实记录
@@ -398,6 +532,9 @@ class RecordSession:
     def captured_reads(self) -> list[dict]:
         return list(self.reads)
 
+    def captured_form_snapshot(self) -> list[dict]:
+        return list(self.form_snapshot)
+
     def _resp_dispatch(self, response) -> None:  # noqa: ANN001 —— 同步快筛后再异步读 body
         try:
             m = (response.request.method or "").upper()
@@ -450,6 +587,11 @@ class RecordSession:
         try:
             step = json.loads(payload)
         except Exception:  # noqa: BLE001
+            return
+        if step.get("op") == "form_snapshot":          # 提交瞬间的表单快照 → 存起来,不当步骤
+            fs = step.get("fields") or []
+            if isinstance(fs, list) and fs:
+                self.form_snapshot = fs
             return
         # 同一 locator 连续 fill/select/pick(用户改了又改/逐字符)→ 覆盖,只留最后一次
         if (self.steps and self.steps[-1].get("locator") == step.get("locator")

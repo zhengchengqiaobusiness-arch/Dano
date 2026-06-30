@@ -34,10 +34,18 @@ def _is_opaque_id(value) -> bool:
     return bool(_OPAQUE_ID_RE.match(str(value if value is not None else "")))
 
 
+# 分页 / 缓存破坏 / 排序等**非级联**查询参数:它们不随业务上下文变化,列出来只会误导成"级联依赖",过滤掉。
+_NOISE_PARAMS = _re.compile(
+    r"^(page|pageno|pagenum|pagesize|page_size|size|current|limit|offset|start|count|"
+    r"sort|order|orderby|asc|desc|_t|t|timestamp|_|rnd|random|nocache|v|version)$", _re.I)
+
+
 def _source_params(source_url: str) -> list[str]:
-    """选项来源接口 URL 上的查询参数名(如 t、xxxtId)→ 让人/agent 知道这个源**带参数**(可能级联依赖别的字段)。"""
+    """选项来源接口 URL 上的**业务**查询参数名(如 xxxtId)→ 提示这个源**带参数**(可能级联依赖别的字段)。
+    过滤分页/缓存破坏/排序等噪声参(pageNo/pageSize/t…):它们不随上下文变,列出来会被误读成级联依赖。"""
     q = urlparse(str(source_url or "")).query
-    return [p.split("=", 1)[0] for p in q.split("&") if p and "=" in p]
+    names = [p.split("=", 1)[0] for p in q.split("&") if p and "=" in p]
+    return [n for n in names if not _NOISE_PARAMS.match(n)]
 
 
 class FieldRole(str, Enum):
@@ -143,7 +151,8 @@ def classify_field_role(*, is_param: bool, select: dict | None = None,
 
 
 def _provenance(role: FieldRole, *, select: dict | None = None, identity: dict | None = None,
-                system: dict | None = None, link: dict | None = None, value=None) -> dict:
+                system: dict | None = None, link: dict | None = None, value=None,
+                const_src: dict | None = None) -> dict:
     """字段来源 + 用法(你要的"这个字段来源于哪里、怎么用")。确定性推导,推不出就诚实标 unknown。"""
     if role == FieldRole.STEP_CHAINED and link:
         src = link.get("source_step")
@@ -164,16 +173,24 @@ def _provenance(role: FieldRole, *, select: dict | None = None, identity: dict |
         params = _source_params(select["source_url"])     # 来源接口的查询参数(t/xxxtId…)→ 显式标出,别藏
         if params:
             frm["params"] = params
+        deps = select.get("source_param_deps") or {}       # Part B:级联参数追到具体字段(xxxtId=某字段值)
+        if deps:
+            frm["cascade"] = deps
         usage = (f"选前先 `--list-options` 实时拉当前可选项;运行期按名字查 `{select.get('value_key')}` 回填"
                  + ("(并同步写回配对 id 字段)" if select.get("id_path") else "")
-                 + (f";来源接口带参数 {', '.join(params)} —— 若选项随其它字段(如所属部门/系统)变化,属**级联**,"
-                    "需运行期按当前上下文带参,勿照搬录制参数" if params else ""))
+                 + (f";来源接口带参数 {', '.join(params)}" if params else "")
+                 + (f" —— **级联**:{('、'.join(f'{k}=字段「{v}」' for k, v in deps.items()))},运行期按所选上下文带参,勿照搬录制值"
+                    if deps else ("(若选项随其它字段变化属级联,需按当前上下文带参)" if params else "")))
         return {"from": frm, "usage": usage}
     if select and role in (FieldRole.ENUM_STATIC, FieldRole.LIST_SELECT):
         return {"from": {"kind": "dom", "options": list(select.get("options") or [])},
                 "usage": "从固定下拉选项里选(选项随 skill 走;名字提交,运行期查内部 ID)"}
     if role == FieldRole.CONSTANT:
-        if _is_opaque_id(value):                          # 不透明内部 ID(ssbmId/bmId 这类)≠ 安全字面量:标明来源未探知
+        if const_src:                                     # Part B:常量已追到来源接口 → 标明真实出处(不再"未探知")
+            return {"from": {"kind": "interface", "interface": const_src.get("interface"), "ref": const_src.get("ref")},
+                    "usage": f"系统预设内部 ID,**来源已追到**:由 `{const_src.get('interface')}` 的 "
+                             f"`{const_src.get('ref')}` 提供(运行期原样提交,用户无需填;跨环境复用时按该接口取最新值)"}
+        if _is_opaque_id(value):                          # 不透明内部 ID 但没追到来源 → 诚实标"来源未探知"
             return {"from": {"kind": "system_preset"},
                     "usage": "系统预设的内部 ID(运行期原样提交,用户无需填);**来源未探知** —— 跨环境/跨租户复用前"
                              "请人工确认该值是否需替换(可能来自登录部门/上一页上下文/某前置接口)"}
@@ -203,6 +220,7 @@ def _step_fields(step: dict, step_index: int) -> list[dict]:
     identity_by_path = {i.get("path"): i for i in (step.get("identity") or [])}
     system_by_path = {s.get("path"): s for s in (step.get("system_values") or [])}
     link_by_path = {lk.get("target_path"): lk for lk in (step.get("links") or [])}
+    const_src_by_path = {c.get("path"): c for c in (step.get("constant_sources") or [])}   # Part B:常量已追到的来源
     types = step.get("field_types") or {}
 
     fields: list[dict] = []
@@ -218,12 +236,15 @@ def _step_fields(step: dict, step_index: int) -> list[dict]:
             is_identity=idn is not None, is_system=sysv is not None,
             is_link_target=link is not None)
         prov = _provenance(role, select=select, identity=idn, system=sysv, link=link,
-                           value=(payload if not is_param else None))   # 常量传值 → 判是否不透明内部 ID
+                           value=(payload if not is_param else None),   # 常量传值 → 判是否不透明内部 ID
+                           const_src=const_src_by_path.get(path))        # 常量已追到来源接口 → 标真实出处
         entry = {"step": step_index, "name": name, "path": path, "role": role.value,
                  "type": types.get(name, "string" if is_param else "const"),
                  "provenance": prov}
         if select and select.get("options"):
             entry["options"] = list(select["options"])
+        if select and select.get("columns"):            # DOM 明细子表列结构 → 随字段进剧本(导出渲染每行列说明)
+            entry["columns"] = list(select["columns"])
         fields.append(entry)
     return fields
 
@@ -243,6 +264,7 @@ def build_screenplay(api_request: dict, reads: list[dict] | None = None) -> dict
     fields: list[dict] = []
     data_flow: list[dict] = []
     option_sources: dict[str, list[str]] = {}
+    prefetch_sources: dict[str, list[str]] = {}        # Part B:提供常量(ssbmId/bmId)的前置接口
 
     for idx, st in enumerate(steps):
         write_steps.append({"index": idx, "role": _step_role(st).value,
@@ -252,7 +274,8 @@ def build_screenplay(api_request: dict, reads: list[dict] | None = None) -> dict
             fields.append(fld)
             frm = fld["provenance"]["from"]
             if frm.get("kind") == "interface":
-                option_sources.setdefault(frm["interface"], []).append(fld["name"])
+                bucket = prefetch_sources if fld["role"] == FieldRole.CONSTANT.value else option_sources
+                bucket.setdefault(frm["interface"], []).append(fld["name"])
         for lk in (st.get("links") or []):
             data_flow.append({"to_step": idx, "to": lk.get("target_path"),
                               "from_step": lk.get("source_step"), "from": lk.get("source_path")})
@@ -262,6 +285,7 @@ def build_screenplay(api_request: dict, reads: list[dict] | None = None) -> dict
         "multi_step": multi,
         "write_steps": write_steps,
         "option_sources": [{"interface": k, "for_fields": v} for k, v in option_sources.items()],
+        "prefetch_sources": [{"interface": k, "provides": v} for k, v in prefetch_sources.items()],
         "verify": verify,
         "fields": fields,
         "data_flow": data_flow,
@@ -280,6 +304,9 @@ def screenplay_skeleton(sp: dict) -> dict:
             out["interface"] = frm["interface"]      # 接口路径(非值)
         if frm.get("ref"):
             out["from_ref"] = frm["ref"]              # 取值字段路径(非值)
+        if f.get("columns"):                          # 明细子表列名(纯结构标签,无值)→ 助 LLM 准确描述子表
+            out["columns"] = [{"name": c.get("name"), "required": bool(c.get("required"))}
+                              for c in f["columns"] if c.get("name")]
         return out
     return {
         "multi_step": sp.get("multi_step"),
@@ -289,3 +316,87 @@ def screenplay_skeleton(sp: dict) -> dict:
         "data_flow": sp.get("data_flow") or [],               # 路径,无值
         "fields": [_f(f) for f in sp.get("fields") or []],     # 不含 options/样例值
     }
+
+
+# ── 业务说明:固定模板的**确定性**渲染(同剧本每次字节级一致;空段省略,绝不臘造)──
+_FIELD_ROLE_CN = {
+    "user_input": "用户填", "enum_static": "固定枚举", "enum_live": "活接口·实时拉",
+    "list_select": "多选/明细·名字列表", "name_id_pair": "名/ID配对", "assignee": "审批人·活接口",
+    "step_chained": "上一步带出", "identity": "当前用户", "system_value": "系统自动填", "constant": "固定常量",
+}
+_STEP_ROLE_CN = {
+    "option_source": "选项来源(读)", "prefetch": "前置读", "workflow_submit": "发起/提交",
+    "business_write": "业务写", "verify_readback": "提交后回查",
+}
+_USER_ROLES = {"user_input", "enum_static", "enum_live", "list_select", "name_id_pair", "assignee"}
+
+
+def _desc_field_line(f: dict, required: set) -> str:
+    """字段一行:名(必填/选填)· [角色] · 来源用法(复用 provenance.usage,已 grounded)· 枚举选项/子表列。"""
+    name = f.get("name") or f.get("path") or ""
+    tag = (("(必填)" if name in required else "(选填)") if required else "")
+    role_cn = _FIELD_ROLE_CN.get(f.get("role"), f.get("role") or "")
+    usage = ((f.get("provenance") or {}).get("usage") or "").strip()
+    extra = ""
+    cols, opts = f.get("columns"), f.get("options")
+    if cols:
+        cn = "、".join(f"{c.get('name')}{'(必填)' if c.get('required') else ''}" for c in cols if c.get("name"))
+        if cn:
+            extra = f";每行含:{cn}"
+    elif opts:
+        shown = "/".join(str(o) for o in list(opts)[:8])
+        extra = f";可选:{shown}" + (f"…(共{len(opts)}项)" if len(opts) > 8 else "")
+    return f"  - `{name}`{tag}:[{role_cn}] {usage}{extra}".rstrip()
+
+
+def render_business_description(screenplay: dict, purpose: str = "", required=None) -> str:
+    """剧本 → **固定模板**业务说明(确定性,同剧本每次一致)。结构全来自 grounded 的 screenplay,
+    **零业务/字段/系统字面量**;有什么段渲染什么,没有的省略,绝不臘造。LLM/手写**只动【业务目的】一行**。
+
+    通用:不同业务(单写/多步/带子表/读多写少)各自按抓到的事实自适应渲染,不是某类业务的写死模板。
+    """
+    sp = screenplay or {}
+    req = set(required or [])
+    L: list[str] = ["【业务目的】" + ((purpose or "").strip() or "(待补充:一句话说明本操作办什么业务)")]
+
+    ws = sp.get("write_steps") or []
+    if ws:
+        L += ["", f"【办理流程】(服务端按序执行,共 {len(ws)} 步写操作)"]
+        for s in ws:
+            L.append(f"  {(s.get('index') or 0) + 1}. `{(s.get('method') or 'POST')} {s.get('path') or ''}`"
+                     f" —— {_STEP_ROLE_CN.get(s.get('role'), s.get('role'))}")
+
+    pf, osrc = sp.get("prefetch_sources") or [], sp.get("option_sources") or []
+    if pf or osrc:
+        L += ["", "【前置/数据来源接口】(下列字段的值/选项实时取自这些接口)"]
+        for o in pf:
+            L.append(f"  - `{o.get('interface')}` → 提供:{'、'.join(o.get('provides') or [])}(系统预设,运行期取)")
+        for o in osrc:
+            L.append(f"  - `{o.get('interface')}` → 供字段:{'、'.join(o.get('for_fields') or [])}(选前先 --list-options)")
+
+    fields = sp.get("fields") or []
+    user_like = [f for f in fields if f.get("role") in _USER_ROLES]
+    auto_like = [f for f in fields if f.get("role") not in _USER_ROLES]
+    if user_like:
+        L += ["", "【需填写/选择的字段】(调用方提供;选择型传名字,运行期查内部 ID)"]
+        L += [_desc_field_line(f, req) for f in user_like]
+    if auto_like:
+        L += ["", "【自动填充 / 无需提供的字段】(运行期注入,调用方勿填)"]
+        L += [_desc_field_line(f, req) for f in auto_like]
+
+    df = sp.get("data_flow") or []
+    if df:
+        L += ["", "【步间数据流】(上一步响应自动注入下一步,勿手填)"]
+        for d in df:
+            L.append(f"  - 第{(d.get('from_step') or 0) + 1}步响应 `{d.get('from')}` → "
+                     f"第{(d.get('to_step') or 0) + 1}步 `{d.get('to')}`")
+
+    tail = []
+    if sp.get("verify"):
+        tail.append("提交后回查记录确认真生效(按业务返回码判成败,非 HTTP 字面)")
+    if sp.get("multi_step"):
+        tail.append("多步写:按上面办理流程顺序逐步执行,中途失败不重复提交")
+    if tail:
+        L += ["", "【后续 / 校验】"] + ["  - " + t for t in tail]
+
+    return "\n".join(L).rstrip() + "\n"

@@ -233,24 +233,24 @@ def test_screenplay_skeleton_strips_values():
     assert f["请假类型"]["role"] == "enum_static" and f["请假类型"]["source"] == "dom"
 
 
-async def test_optimize_business_description_llm(monkeypatch):
-    """P2:有 client → 用草稿+骨架产出说明;无 client / 异常 → 原样退回草稿(绝不阻断)。"""
+async def test_refine_business_purpose_llm(monkeypatch):
+    """P2:LLM 只提炼**一句话业务目的**(结构由 render_business_description 确定性渲染);无 client/异常 → 退回草稿(绝不阻断)。"""
     from dano.review import board
 
     class _FakeClient:
         async def complete_json(self, *, model, system, user, timeout_s):
             assert "病假" not in user and "localStorage" not in user   # 仍守红线:输入无值
-            return {"description": "本 skill 用于发起请假申请:审批人需先实时拉取再选。"}
+            return {"purpose": "发起请假审批"}
 
-    out = await board.optimize_business_description_llm(_FakeClient(), "m", draft="请假", skeleton={"fields": []})
-    assert "请假申请" in out
+    out = await board.refine_business_purpose_llm(_FakeClient(), "m", draft="请假", skeleton={"fields": []})
+    assert out == "发起请假审批"
     # 无 client → 退草稿
-    assert await board.optimize_business_description_llm(None, None, draft="原草稿", skeleton={}) == "原草稿"
+    assert await board.refine_business_purpose_llm(None, None, draft="原草稿", skeleton={}) == "原草稿"
 
     class _BoomClient:
         async def complete_json(self, **kw):
             raise RuntimeError("network")
-    assert await board.optimize_business_description_llm(_BoomClient(), "m", draft="退回", skeleton={}) == "退回"
+    assert await board.refine_business_purpose_llm(_BoomClient(), "m", draft="退回", skeleton={}) == "退回"
 
 
 def test_manifest_and_export_carry_business_description():
@@ -294,9 +294,9 @@ def test_provenance_opaque_id_constant_and_source_params():
     assert f["ssbmId"]["provenance"]["from"]["kind"] == "system_preset"
     assert "来源未探知" in f["ssbmId"]["provenance"]["usage"]
     assert f["processDefKey"]["provenance"]["from"]["kind"] == "constant"   # oa_leave 是字面量,不误标
-    # ② 活接口来源带参数 → 显式列出 + 级联提示
+    # ② 活接口来源带**业务**参数 → 显式列出(分页/缓存破坏参 t 被过滤,只留 xxxtId,免误读成级联)
     yp = f["业务事项列表"]["provenance"]["from"]
-    assert yp["kind"] == "interface" and yp.get("params") == ["t", "xxxtId"]
+    assert yp["kind"] == "interface" and yp.get("params") == ["xxxtId"]
     assert "级联" in f["业务事项列表"]["provenance"]["usage"]
 
 
@@ -315,7 +315,145 @@ def test_export_lists_system_preset_fields():
                             "identity": [], "system_values": []})
     md = _skill_md(to_manifest(sk), "dano-a-oa-x")
     assert "系统预设 ID 字段" in md and "ssbmId" in md and "人工确认" in md
-    assert "参数 t/xxxtId" in md          # 源接口参数显式标出(治"源参数没考虑/没说明")
+    assert "参数 xxxtId" in md             # 业务源参数显式标出(分页/缓存破坏参 t 已过滤,免误读)
+
+
+_SUBTABLE_APIR = {
+    "method": "POST", "path": "/qzqdsl/createQzqdSl", "url": "http://x/qzqdsl/createQzqdSl",
+    "body_template": {"csmc": "{{一级内设机构}}", "ywsxList": "{{权责清单}}"},
+    "params": ["一级内设机构", "权责清单"],
+    "field_types": {"一级内设机构": "string", "权责清单": "list-enum"},
+    "selects": [{"param": "权责清单", "multi": True, "source_url": "http://x/sxqd/getSxqdBmList",
+                 "value_key": "id", "label_key": "lmFid", "options": ["行政审批", "财务核销"], "count": 81,
+                 "element_template": {"lmFid": {"from": "item", "item_key": "id"}}, "label_subkey": "lmFid",
+                 "table_label": "权责清单明细",
+                 "columns": [{"name": "权责清单", "required": True}, {"name": "所属系统", "required": False},
+                             {"name": "系统库表", "required": False}, {"name": "编目状态", "required": False}]}],
+    "identity": [], "system_values": []}
+
+
+def test_subtable_columns_flow_capture_to_export():
+    """全链路:DOM 明细子表的列结构(权责清单/所属系统/系统库表/编目状态)从 select → 剧本 → manifest schema → SKILL.md。
+    治"复杂业务(带新增一行的子表)整张丢/被压成一个没头没脑的多选";泛化:任何子表都按列结构呈现。"""
+    from dano.catalog.manifest import to_manifest
+    from dano.export.agent_skills import _skill_md
+
+    # ① 剧本字段带 columns,角色=list_select
+    sp = build_screenplay(_SUBTABLE_APIR)
+    fd = {x["name"]: x for x in sp["fields"]}
+    assert fd["权责清单"]["role"] == "list_select"
+    assert [c["name"] for c in fd["权责清单"]["columns"]] == ["权责清单", "所属系统", "系统库表", "编目状态"]
+    # ② 价值无关骨架也带列名(助 LLM 描述子表),但绝不含值
+    from dano.execution.page.screenplay import screenplay_skeleton
+    skel = screenplay_skeleton(sp)
+    skf = {x["name"]: x for x in skel["fields"]}
+    assert [c["name"] for c in skf["权责清单"]["columns"]] == ["权责清单", "所属系统", "系统库表", "编目状态"]
+    assert "options" not in skf["权责清单"]                   # 无值/无快照
+
+    # ③ manifest schema:x-columns + 描述标注明细子表
+    sk = _spec(field_types={"一级内设机构": "string", "权责清单": "list-enum"},
+               required_fields=["一级内设机构", "权责清单"], api_request=_SUBTABLE_APIR)
+    m = to_manifest(sk)
+    p = m.parameters["properties"]["权责清单"]
+    assert p["type"] == "array"
+    assert [c["name"] for c in p["x-columns"]] == ["权责清单", "所属系统", "系统库表", "编目状态"]
+    assert p["x-columns"][0]["required"] is True
+    assert "明细子表" in (p.get("label", "") + p.get("description", ""))
+
+    # ④ 导出 SKILL.md:参数表 + SOP 都看得到每行列(所属系统/系统库表/编目状态),不再整张丢
+    md = _skill_md(m, "dano-a-oa-sanding")
+    assert "明细子表" in md
+    for col in ("所属系统", "系统库表", "编目状态"):
+        assert col in md, f"{col} 没出现在导出"
+
+
+def test_orphan_subtable_still_rendered():
+    """没对接上列表参数的明细子表(孤表,apir['tables'])仍在「接口编排」呈现 → 绝不静默丢字段。"""
+    from dano.catalog.manifest import to_manifest
+    from dano.export.agent_skills import _skill_md
+    apir = {"method": "POST", "path": "/qzqdsl/create", "url": "http://x/qzqdsl/create",
+            "body_template": {"reason": "{{原因}}"}, "params": ["原因"], "field_types": {"原因": "string"},
+            "selects": [], "identity": [], "system_values": [],
+            "tables": [{"label": "权责清单明细", "required": True, "rows": 0,
+                        "columns": [{"name": "权责清单", "required": True}, {"name": "所属系统", "required": False}]}]}
+    sk = _spec(field_types={"原因": "string"}, required_fields=["原因"], api_request=apir)
+    md = _skill_md(to_manifest(sk), "dano-a-oa-x")
+    assert "明细子表" in md and "权责清单明细" in md and "所属系统" in md
+
+
+def test_business_description_deterministic_and_adaptive():
+    """业务说明渲染:① 同剧本两次**字节级一致**(固定模板,不随机);② 不同业务**自适应**段结构(非写死模板)。"""
+    from dano.execution.page.screenplay import build_screenplay, render_business_description
+    spA = build_screenplay(_SUBTABLE_APIR)
+    a1 = render_business_description(spA, purpose="创建三定职能清单", required={"一级内设机构", "权责清单"})
+    a2 = render_business_description(spA, purpose="创建三定职能清单", required={"一级内设机构", "权责清单"})
+    assert a1 == a2                                   # 确定性:字节级一致
+    # 三定:有"前置/数据来源接口"、子表列、系统预设;无步间数据流
+    assert "【办理流程】" in a1 and "【前置/数据来源接口】" in a1
+    assert "每行含:权责清单(必填)、所属系统、系统库表" in a1
+    assert "【步间数据流】" not in a1
+
+    spB = build_screenplay(_WF_APIR)
+    b = render_business_description(spB, purpose="")
+    # 多步:有 2 步办理流程 + 步间数据流;无"前置/数据来源接口"(本例无读源)
+    assert "共 2 步写操作" in b and "【步间数据流】" in b
+    assert "【前置/数据来源接口】" not in b
+    # 空目的 → 占位提示(确定性补充,非随机文本)
+    assert "(待补充:一句话说明本操作办什么业务)" in b
+    assert a1 != b                                    # 不同业务 → 不同产出
+
+
+def test_business_description_zero_business_literals():
+    """渲染器**零业务/字段字面量**:换个完全不同的业务,照样按事实渲染,不含任何硬编码业务词。"""
+    from dano.execution.page.screenplay import build_screenplay, render_business_description
+    apir = {"method": "POST", "path": "/expense/submit", "url": "http://x/expense/submit",
+            "body_template": {"amount": "{{金额}}", "category": "{{类别}}"},
+            "params": ["金额", "类别"], "field_types": {"金额": "number", "类别": "enum"},
+            "selects": [{"param": "类别", "source_url": "/dict/expenseType", "value_key": "v", "label_key": "l",
+                         "options": ["差旅", "办公"], "count": 2, "dom_options": True}],
+            "identity": [], "system_values": []}
+    out = render_business_description(build_screenplay(apir), purpose="提交报销")
+    assert "提交报销" in out and "`金额`" in out and "`类别`" in out
+    assert "可选:差旅/办公" in out                    # 静态枚举:选项内联(非活接口来源),口径与 schema 一致
+
+
+def test_screenplay_constant_traced_source_and_prefetch():
+    """Part B:常量已追到来源(constant_sources)→ provenance 标真实接口(不再"来源未探知");剧本出 prefetch_sources。"""
+    apir = {"method": "POST", "path": "/qzqdsl/create", "url": "http://x/qzqdsl/create",
+            "body_template": {"ssbmId": "020210601113158904000001010018", "reason": "{{原因}}"},
+            "params": ["原因"], "field_types": {"原因": "string"}, "selects": [], "identity": [], "system_values": [],
+            "constant_sources": [{"path": "ssbmId", "interface": "GET /qzqdsl/getBmList", "ref": "data.ssbmId"}]}
+    sp = build_screenplay(apir)
+    f = {x["name"]: x for x in sp["fields"]}
+    assert f["ssbmId"]["provenance"]["from"]["kind"] == "interface"
+    assert "来源已追到" in f["ssbmId"]["provenance"]["usage"]
+    assert sp["prefetch_sources"] == [{"interface": "GET /qzqdsl/getBmList", "provides": ["ssbmId"]}]
+
+
+def test_screenplay_cascade_dep_in_source():
+    """Part B:选项源带级联依赖(xxxtId=字段「X」)→ provenance.from.cascade + 用法点名依赖字段。"""
+    apir = {"method": "POST", "path": "/c", "url": "http://x/c",
+            "body_template": {"ywsx": "{{业务事项}}"}, "params": ["业务事项"], "field_types": {"业务事项": "enum"},
+            "selects": [{"param": "业务事项", "source_url": "http://x/list?xxxtId=02021", "value_key": "id",
+                         "label_key": "n", "source_param_deps": {"xxxtId": "ssbmId"}}],
+            "identity": [], "system_values": []}
+    pv = {x["name"]: x for x in build_screenplay(apir)["fields"]}["业务事项"]["provenance"]
+    assert pv["from"]["cascade"] == {"xxxtId": "ssbmId"} and "级联" in pv["usage"] and "ssbmId" in pv["usage"]
+
+
+def test_export_prefetch_sources_section():
+    """导出「接口编排」出**前置接口**段:ssbmId 由哪个接口提供(来源已追到)。"""
+    from dano.catalog.manifest import to_manifest
+    from dano.export.agent_skills import _skill_md
+    sk = _spec(field_types={"原因": "string"}, required_fields=["原因"],
+               api_request={"method": "POST", "path": "/qzqdsl/create", "url": "http://x/qzqdsl/create",
+                            "body_template": {"ssbmId": "020210601113158904000001010018", "reason": "{{原因}}"},
+                            "params": ["原因"], "field_types": {"原因": "string"}, "selects": [], "identity": [],
+                            "system_values": [],
+                            "constant_sources": [{"path": "ssbmId", "interface": "GET /qzqdsl/getBmList",
+                                                  "ref": "data.ssbmId"}]})
+    md = _skill_md(to_manifest(sk), "x")
+    assert "前置接口" in md and "/qzqdsl/getBmList" in md and "ssbmId" in md and "来源已追到" in md
 
 
 def test_screenplay_skeleton_still_value_free_with_opaque_ids():
