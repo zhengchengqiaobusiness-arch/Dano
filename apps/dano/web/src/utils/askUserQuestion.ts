@@ -12,7 +12,13 @@ import type { ToolContentBlock } from "./transcript";
 export type NormalizedAskUserQuestionOption = AskUserQuestionOption;
 
 export type AskUserQuestionItem =
-  | { id: string; kind: "text"; question: string; default?: string }
+  | {
+      id: string;
+      kind: "text";
+      question: string;
+      inputType?: "text" | "textarea";
+      default?: string;
+    }
   | {
       id: string;
       kind: "single";
@@ -195,6 +201,7 @@ function parseQuestionItem(
           id: stringOrFallback(args.id, fallbackId),
           kind: "text",
           question,
+          ...(inputType === "textarea" ? { inputType } : {}),
           ...(typeof rawDefault === "string" && rawDefault.trim()
             ? { default: rawDefault.trim() }
             : {}),
@@ -284,6 +291,7 @@ function isOptionId(value: unknown): value is AskUserQuestionOptionId {
 
 function parseInputType(value: unknown): AskUserQuestionInputType | undefined {
   return value === "text" ||
+    value === "textarea" ||
     value === "radio" ||
     value === "checkbox" ||
     value === "select" ||

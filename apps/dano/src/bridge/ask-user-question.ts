@@ -57,6 +57,7 @@ const askUserQuestionOptionSchema = Type.Union([
 
 const askUserQuestionInputTypeSchema = Type.Union([
   Type.Literal("text"),
+  Type.Literal("textarea"),
   Type.Literal("radio"),
   Type.Literal("checkbox"),
   Type.Literal("select"),

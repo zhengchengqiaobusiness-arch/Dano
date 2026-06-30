@@ -45,6 +45,20 @@ describe("ask user question transcript data", () => {
     });
   });
 
+  it("parses a textarea question", () => {
+    expect(
+      askUserQuestionRequest(
+        block({ question: "Reason?", inputType: "textarea" }),
+      ),
+    ).toEqual({
+      batch: false,
+      id: "answer",
+      kind: "text",
+      inputType: "textarea",
+      question: "Reason?",
+    });
+  });
+
   it("detects pending native question cards that can be cancelled on page unload", () => {
     expect(isPendingAskUserQuestionBlock(block({ question: "Name?" }))).toBe(true);
     expect(

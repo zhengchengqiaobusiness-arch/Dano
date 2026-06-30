@@ -132,6 +132,7 @@ export type AskUserQuestionAnswer =
 
 export type AskUserQuestionInputType =
   | "text"
+  | "textarea"
   | "radio"
   | "checkbox"
   | "select"

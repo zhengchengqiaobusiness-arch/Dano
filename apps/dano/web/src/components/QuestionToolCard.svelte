@@ -3,6 +3,9 @@
     AskUserQuestionAnswer,
     AskUserQuestionDataSource,
     AskUserQuestionOptionId,
+    FieldAssistAction,
+    FieldAssistCommandPayload,
+    FieldAssistResult,
     RpcResponse,
   } from "@dano/types/protocol";
   import { t } from "../i18n";
@@ -14,6 +17,10 @@
     askUserQuestionRequest,
     askUserQuestionResult,
   } from "../utils/askUserQuestion";
+  import {
+    getFieldAssistWarning,
+    toFieldAssistErrorMessage,
+  } from "../utils/fieldAssist";
   import type { ToolContentBlock } from "../utils/transcript";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
 
@@ -23,6 +30,9 @@
     block,
     active = true,
     onRespond,
+    onFieldAssist = undefined as
+      | ((payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>)
+      | undefined,
   }: {
     block: ToolContentBlock;
     active?: boolean;
@@ -33,8 +43,9 @@
         | {
             cancelled: false;
             answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>;
-          },
+        },
     ) => Promise<RpcResponse>;
+    onFieldAssist?: (payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>;
   } = $props();
 
   const request = $derived(askUserQuestionRequest(block));
@@ -59,6 +70,10 @@
   let submitting = $state(false);
   let error = $state("");
   let pendingReady = $state(false);
+  let aiAssistLoading = $state<Record<string, FieldAssistAction | undefined>>({});
+  let aiAssistError = $state<Record<string, string>>({});
+  let aiAssistWarning = $state<Record<string, string>>({});
+  let aiAssistSeq = $state(0);
   const showCard = $derived(Boolean(request) && (!pending || pendingReady));
 
   $effect(() => {
@@ -73,6 +88,10 @@
     remoteHasMore = {};
     remoteLoading = {};
     remoteError = {};
+    aiAssistLoading = {};
+    aiAssistError = {};
+    aiAssistWarning = {};
+    aiAssistSeq += 1;
 
     for (const item of questionItems) {
       if (item.kind === "text") {
@@ -173,6 +192,60 @@
     }
     if (item.kind === "text") return textAnswer[item.id]?.trim() || null;
     return null;
+  }
+
+  function textItemFieldType(item: AskUserQuestionItem): "input" | "textarea" {
+    return item.kind === "text" && item.inputType === "textarea"
+      ? "textarea"
+      : "input";
+  }
+
+  async function runFieldAssist(item: AskUserQuestionItem, action: FieldAssistAction) {
+    if (item.kind !== "text") return;
+    if (!onFieldAssist) {
+      aiAssistError[item.id] = t("questionTool.aiAssistFailed");
+      return;
+    }
+
+    const currentValue = textAnswer[item.id] ?? "";
+    aiAssistWarning[item.id] = getFieldAssistWarning({
+      title: item.question,
+      placeholder: t("questionTool.inputPlaceholder"),
+      prefill: item.default,
+    });
+
+    if (action === "polish" && !currentValue.trim()) {
+      aiAssistError[item.id] = t("questionTool.aiAssistEmptyPolish");
+      return;
+    }
+
+    const fieldType = textItemFieldType(item);
+    const seq = ++aiAssistSeq;
+    const previousValue = currentValue;
+    aiAssistLoading[item.id] = action;
+    aiAssistError[item.id] = "";
+
+    try {
+      const result = await onFieldAssist({
+        requestId: `${block.toolCallId ?? "question"}:${item.id}`,
+        action,
+        fieldType,
+        requestMethod: fieldType === "textarea" ? "editor" : "input",
+        title: item.question,
+        placeholder: t("questionTool.inputPlaceholder"),
+        currentValue,
+        prefill: item.default,
+      });
+      if (seq !== aiAssistSeq) return;
+      aiAssistWarning[item.id] =
+        result.metadata.warnings?.[0]?.message ?? aiAssistWarning[item.id] ?? "";
+      textAnswer[item.id] = result.value;
+    } catch (cause) {
+      textAnswer[item.id] = previousValue;
+      aiAssistError[item.id] = toFieldAssistErrorMessage(cause);
+    } finally {
+      if (seq === aiAssistSeq) aiAssistLoading[item.id] = undefined;
+    }
   }
 
   function isOtherOption(option: string | NormalizedAskUserQuestionOption): boolean {
@@ -517,14 +590,49 @@
               {/if}
             {:else if item.kind === "text"}
               <label class="sr-only" for={`question-${block.toolCallId}-${item.id}`}>{item.question}</label>
-              <input
-                id={`question-${block.toolCallId}-${item.id}`}
-                class="question-input"
-                type="text"
-                bind:value={textAnswer[item.id]}
-                disabled={!pending || submitting}
-                placeholder={t("questionTool.inputPlaceholder")}
-              />
+              {#if item.inputType === "textarea"}
+                <textarea
+                  id={`question-${block.toolCallId}-${item.id}`}
+                  class="question-input question-textarea"
+                  rows="4"
+                  bind:value={textAnswer[item.id]}
+                  disabled={!pending || submitting}
+                  placeholder={t("questionTool.inputPlaceholder")}
+                ></textarea>
+              {:else}
+                <input
+                  id={`question-${block.toolCallId}-${item.id}`}
+                  class="question-input"
+                  type="text"
+                  bind:value={textAnswer[item.id]}
+                  disabled={!pending || submitting}
+                  placeholder={t("questionTool.inputPlaceholder")}
+                />
+              {/if}
+              <div class="question-ai-actions">
+                <button
+                  type="button"
+                  class="secondary"
+                  disabled={!pending || submitting || Boolean(aiAssistLoading[item.id])}
+                  onclick={() => void runFieldAssist(item, "regenerate")}
+                >
+                  {aiAssistLoading[item.id] === "regenerate" ? t("questionTool.aiAssistGenerating") : t("questionTool.aiAssistRegenerate")}
+                </button>
+                <button
+                  type="button"
+                  class="secondary"
+                  disabled={!pending || submitting || Boolean(aiAssistLoading[item.id]) || !textAnswer[item.id]?.trim()}
+                  onclick={() => void runFieldAssist(item, "polish")}
+                >
+                  {aiAssistLoading[item.id] === "polish" ? t("questionTool.aiAssistPolishing") : t("questionTool.aiAssistPolish")}
+                </button>
+              </div>
+              {#if aiAssistWarning[item.id]}
+                <div class="question-warning" role="status">{aiAssistWarning[item.id]}</div>
+              {/if}
+              {#if aiAssistError[item.id]}
+                <div class="question-error" role="alert">{aiAssistError[item.id]}</div>
+              {/if}
             {/if}
 
             {#if customAnswerSelected(item)}
@@ -661,6 +769,11 @@
     font: inherit;
   }
 
+  .question-textarea {
+    min-height: 96px;
+    resize: vertical;
+  }
+
   select.question-input {
     appearance: none;
     -webkit-appearance: none;
@@ -679,6 +792,7 @@
   }
 
   .question-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .question-ai-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
   .load-more { justify-self: start; }
 
@@ -702,6 +816,7 @@
   button:disabled { cursor: not-allowed; opacity: 0.5; }
   .question-result { color: var(--text); }
   .question-result.muted { color: var(--text-muted); }
+  .question-warning { color: var(--text-muted); font-size: 0.76rem; }
   .question-error { color: var(--error-text); font-size: 0.76rem; }
 
   .sr-only {

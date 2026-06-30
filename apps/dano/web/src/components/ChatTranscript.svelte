@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy, tick } from "svelte";
   import type {
+    FieldAssistCommandPayload,
+    FieldAssistResult,
     RpcImageContent,
     RpcTranscriptContent,
     RpcTranscriptContentBlock,
@@ -75,6 +77,9 @@
     onRevise = (_: { entryId: string; text: string; preview: string; hasImages: boolean; images: RpcImageContent[] }) => {},
     onOpenFileReference = (_: { path: string; lineNumber: number }) => {},
     readWorkspaceFile,
+    onFieldAssist = undefined as
+      | ((payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>)
+      | undefined,
   }: {
     sessionPath?: string | null;
     messages?: readonly TranscriptEntry[];
@@ -92,6 +97,7 @@
     onRevise?: (payload: { entryId: string; text: string; preview: string; hasImages: boolean; images: RpcImageContent[] }) => void;
     onOpenFileReference?: (payload: { path: string; lineNumber: number }) => void;
     readWorkspaceFile?: (path: string) => Promise<{ content: string }>;
+    onFieldAssist?: (payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>;
   } = $props();
 
   const emptyStateConfig = getRuntimeEmptyStateConfig();
@@ -1146,7 +1152,7 @@
                 </div>
               {:else if block.kind === "tool"}
                 {#if askUserQuestionRequest(block) && !isAskUserQuestionToolError(block)}
-                  <QuestionToolCard {block} active={isStreaming && !initialLoading} onRespond={answerQuestion} />
+                  <QuestionToolCard {block} active={isStreaming && !initialLoading} onRespond={answerQuestion} {onFieldAssist} />
                 {:else if getReadClassification(block)?.kind === "skill"}
                   <SkillInvocationCard skillName={getReadClassification(block)!.label} />
                 {:else}

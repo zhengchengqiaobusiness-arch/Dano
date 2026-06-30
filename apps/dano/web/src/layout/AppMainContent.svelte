@@ -9,6 +9,8 @@
     RpcUploadedFileRef,
     RpcWorkspaceEntry,
     RpcWorkspaceFile,
+    FieldAssistCommandPayload,
+    FieldAssistResult,
   } from "@dano/types/protocol";
   import ChatTranscript from "../components/ChatTranscript.svelte";
   import CompatWarning from "../components/CompatWarning.svelte";
@@ -92,6 +94,9 @@
     onEditQueued = (_: number) => {},
     onOpenFileReference = (_: { path: string; lineNumber: number }) => {},
     readWorkspaceFile = (_: string) => Promise.reject(new Error("Workspace file reader unavailable")),
+    onFieldAssist = undefined as
+      | ((payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>)
+      | undefined,
   }: {
     compatWarningVisible?: boolean;
     statusEntries?: Record<string, string>;
@@ -162,6 +167,7 @@
     onEditQueued?: (index: number) => void;
     onOpenFileReference?: (payload: { path: string; lineNumber: number }) => void;
     readWorkspaceFile?: (path: string) => Promise<RpcWorkspaceFile>;
+    onFieldAssist?: (payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>;
   } = $props();
 
   let isDebugSession = $derived(isDebugSessionPath(activeSessionPath));
@@ -196,6 +202,7 @@
     onRevise={onReviseMessage}
     onOpenFileReference={onOpenFileReference}
     {readWorkspaceFile}
+    {onFieldAssist}
   />
 
   {#if queuedUserMessages.length > 0}
