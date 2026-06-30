@@ -1306,12 +1306,16 @@
               {:else if block.kind === "skill"}
                 <SkillInvocationCard skillName={block.skillName} />
               {:else if block.kind === "text" && block.text}
-                <MarkdownRenderer
-                  content={block.text}
-                  streaming={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
-                  deferMermaidErrors={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
-                  onOpenFileReference={onOpenFileReference}
-                />
+                {#if item.message.role === "user"}
+                  <div class="user-text-block">{block.text}</div>
+                {:else}
+                  <MarkdownRenderer
+                    content={block.text}
+                    streaming={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
+                    deferMermaidErrors={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
+                    onOpenFileReference={onOpenFileReference}
+                  />
+                {/if}
               {/if}
             {/each}
           </div>
@@ -1718,6 +1722,11 @@
 
   :global(.app-shell[data-theme-mode="dark"]) .message-content.user {
     background: color-mix(in srgb, var(--accent) 55%, var(--bg));
+  }
+
+  .user-text-block {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   :global(.markdown-renderer) + :global(.markdown-renderer),
