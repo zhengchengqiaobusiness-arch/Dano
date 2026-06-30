@@ -1,4 +1,4 @@
-# feat: ask_user_question 的 input/editor 支持生产化 AI 辅助
+# feat: ask_user_question 的 input / textarea 支持生产化 AI 辅助
 
 ## 背景
 
@@ -32,10 +32,10 @@
   - 已有 `answer_question` 命令用于回答 `ask_user_question`。
   - 定义 `RpcExtensionUIRequest` / `RpcExtensionUIResponse`。
   - 定义 browser/server wire protocol：browser 通过 `{ type: "command", payload: RpcCommand }` 发送命令，server 通过 SSE 发送 response/event/extension UI request。
-- `apps/dano/web/src/components/ExtensionDialog.svelte`
-  - 当前负责渲染 `ask_user_question` 的 `input` / `editor` 等 UI。
-  - 当前有 `inputValue` / `editorValue` 本地状态。
-  - 当前 `handleInputSubmit()` / `handleEditorSubmit()` 通过 `extension_ui_response` 提交用户回答。
+- `apps/dano/web/src/components/QuestionToolCard.svelte`
+  - 当前负责渲染 transcript 中原生 `ask_user_question` 问题卡。
+  - 文本回答字段当前由 `AskUserQuestionItem.kind === "text"` 渲染。
+  - 当前通过 `answer_question` command 提交用户最终回答。
 - `apps/dano/web/src/composables/bridgeStore.svelte.ts`
   - 当前浏览器侧 command / SSE 状态管理入口。
 - `apps/dano/src/bridge/bridge-rpc-adapter.ts`
@@ -69,8 +69,8 @@ Pi SDK 文档中的关键点：
 
 覆盖范围：
 
-- `request.method === "input"`
-- `request.method === "editor"`
+- 原生 `ask_user_question` 问题卡里的单行文本字段：`inputType` 缺省或 `inputType === "text"`。
+- 原生 `ask_user_question` 问题卡里的多行文本字段：`inputType === "textarea"`。
 
 行为要求：
 
@@ -82,7 +82,7 @@ Pi SDK 文档中的关键点：
 - 不自动提交用户回答。
 - 请求失败时保留原内容。
 - AI 润色时，当前输入框文本必须作为模型的 `user` prompt 本身。
-- 重新生成允许基于字段标题、placeholder、字段类型、当前值和 prefill 生成业务内容；空内容也允许生成。
+- 重新生成允许基于字段标题、placeholder、字段类型、当前值和默认值生成业务内容；空内容也允许生成。
 
 ## 非目标
 
@@ -102,13 +102,14 @@ Pi SDK 文档中的关键点：
 - 不触发 tools。
 - 不触发 browser / bash / file edit 等 extension side effect。
 - 不自动提交 ask_user_question 的最终回答。
+- 不改 `ExtensionDialog.svelte`；该组件属于 Pi extension UI 兼容弹窗，不是本 issue 的目标 UI。
 
 ## 总体方案
 
 新增一个 production-ready 的 `field_assist` command，走现有 Dano command 通道：
 
 ```text
-ExtensionDialog.svelte
+QuestionToolCard.svelte
   ↓
 bridgeStore.fieldAssist(...)
   ↓
@@ -152,7 +153,7 @@ export interface FieldAssistCommandPayload {
   requestId: string;
   action: FieldAssistAction;
   fieldType: FieldAssistFieldType;
-  requestMethod: "input" | "editor";
+  requestMethod: "input" | "editor"; // textarea 复用 editor 语义，仅作为字段来源元数据
   title: string;
   placeholder?: string;
   currentValue: string;
@@ -695,9 +696,12 @@ const FIELD_ASSIST_ERROR_MESSAGES: Record<FieldAssistErrorCode, string> = {
 改动文件：
 
 ```text
-apps/dano/web/src/components/ExtensionDialog.svelte
+apps/dano/web/src/components/QuestionToolCard.svelte
+apps/dano/web/src/components/ChatTranscript.svelte
+apps/dano/web/src/layout/AppMainContent.svelte
 apps/dano/web/src/composables/bridgeStore.svelte.ts
 apps/dano/web/src/utils/fieldAssist.ts
+apps/dano/web/src/utils/askUserQuestion.ts
 ```
 
 `apps/dano/web/src/utils/fieldAssist.ts` 只放前端纯函数：
@@ -708,118 +712,27 @@ apps/dano/web/src/utils/fieldAssist.ts
 
 后端敏感字段判断放在 `apps/dano/src/bridge/field-assist/policy.ts`。前后端用相同 fixture 覆盖关键词口径，避免 UI 提示和服务端响应漂移。
 
-### ExtensionDialog.svelte
+### QuestionToolCard.svelte
 
-新增 prop：
+`QuestionToolCard` 接收 `onFieldAssist`，只对 `AskUserQuestionItem.kind === "text"` 显示按钮。
 
-```ts
-type Props = {
-  request: RpcExtensionUIRequest;
-  onRespond: (response: RpcExtensionUIResponse) => void;
-  onFieldAssist?: (
-    payload: FieldAssistCommandPayload,
-  ) => Promise<FieldAssistResult>;
-};
-```
-
-新增状态：
+字段类型映射：
 
 ```ts
-let aiAssistLoading = $state<null | FieldAssistAction>(null);
-let aiAssistError = $state("");
-let aiAssistWarning = $state("");
-let aiAssistSeq = $state(0);
-```
-
-当前字段值：
-
-```ts
-const currentFieldValue = $derived(
-  request.method === "input" ? inputValue : editorValue,
-);
-```
-
-执行逻辑：
-
-```ts
-async function runFieldAssist(action: FieldAssistAction) {
-  if (request.method !== "input" && request.method !== "editor") {
-    return;
-  }
-
-  const fieldType = request.method === "input" ? "input" : "textarea";
-  const currentValue = fieldType === "input" ? inputValue : editorValue;
-  aiAssistWarning = getFieldAssistWarning({
-    title: "title" in request ? request.title : "",
-    placeholder: "placeholder" in request ? request.placeholder : undefined,
-    currentValue,
-    prefill: "prefill" in request ? request.prefill : undefined,
-  });
-
-  if (action === "polish" && !currentValue.trim()) {
-    aiAssistError = "请先输入需要润色的内容";
-    return;
-  }
-
-  const seq = ++aiAssistSeq;
-  const previousValue = currentValue;
-
-  aiAssistLoading = action;
-  aiAssistError = "";
-
-  try {
-    const result = await onFieldAssist?.({
-      requestId: request.id,
-      action,
-      fieldType,
-      requestMethod: request.method,
-      title: "title" in request ? request.title : "",
-      placeholder: "placeholder" in request ? request.placeholder : undefined,
-      currentValue,
-      prefill: "prefill" in request ? request.prefill : undefined,
-    });
-
-    if (!result || typeof result.value !== "string") {
-      throw new Error("INVALID_MODEL_OUTPUT");
-    }
-    aiAssistWarning = result.metadata.warnings?.[0]?.message ?? aiAssistWarning;
-
-    // request changed or newer assist finished first; ignore stale response
-    if (seq !== aiAssistSeq) {
-      return;
-    }
-
-    if (fieldType === "input") {
-      inputValue = result.value;
-    } else {
-      editorValue = result.value;
-    }
-  } catch (error) {
-    if (fieldType === "input") {
-      inputValue = previousValue;
-    } else {
-      editorValue = previousValue;
-    }
-
-    aiAssistError = toFieldAssistErrorMessage(error);
-  } finally {
-    if (seq === aiAssistSeq) {
-      aiAssistLoading = null;
-    }
-  }
-}
+const fieldType =
+  item.inputType === "textarea" ? "textarea" : "input";
 ```
 
 按钮规则：
 
 ```text
 重新生成：
-- input/editor 均显示
+- text / textarea 均显示
 - 空内容也可点击
 - AI 请求中禁用
 
 AI 润色：
-- input/editor 均显示
+- text / textarea 均显示
 - 当前内容 trim 后为空时禁用
 - AI 请求中禁用
 
@@ -827,17 +740,29 @@ AI 润色：
 - AI 请求中建议禁用，避免提交旧值或中间态
 ```
 
-请求变更时清理状态：
+成功行为：
 
-```ts
-function initFromRequest() {
-  aiAssistSeq += 1;
-  aiAssistLoading = null;
-  aiAssistError = "";
-  aiAssistWarning = "";
-  // existing init logic...
-}
-```
+- 只替换当前问题卡字段的 `textAnswer[item.id]`。
+- 不调用 `answer_question`。
+- 不自动提交整个问题卡。
+- 如果问题卡切换或新请求先完成，旧响应不得覆盖新字段。
+
+失败行为：
+
+- 保留原 `textAnswer[item.id]`。
+- 在当前字段下显示错误。
+
+`inputType: "textarea"`：
+
+- `ask_user_question` protocol 和 parser 接受 `textarea`。
+- `QuestionToolCard` 渲染 `<textarea>`。
+- `field_assist` payload 使用 `fieldType: "textarea"`。
+
+`ExtensionDialog.svelte`：
+
+- 不接入本功能。
+- 不传 `onFieldAssist`。
+- 不展示 Field Assist 按钮。
 
 ### bridgeStore.svelte.ts
 
@@ -970,9 +895,9 @@ DANO_FIELD_ASSIST_MAX_CONCURRENT_GLOBAL=4
 ### 4. 前端组件测试
 
 - [ ] `input` 类型展示“重新生成”和“AI 润色”。
-- [ ] `editor` 类型展示“重新生成”和“AI 润色”。
+- [ ] `textarea` 类型展示“重新生成”和“AI 润色”。
 - [ ] 空 `input` 可以点击“重新生成”。
-- [ ] 空 `editor` 可以点击“重新生成”。
+- [ ] 空 `textarea` 可以点击“重新生成”。
 - [ ] 空内容时“AI 润色”禁用或提示。
 - [ ] 点击“重新生成”成功后直接替换当前内容。
 - [ ] 点击“AI 润色”成功后直接替换当前内容。
@@ -1018,7 +943,7 @@ pnpm --filter @dano/app run deploy:smoke
 
 - 增加 `field_assist` protocol 类型。
 - 增加 `bridgeStore.fieldAssist()`。
-- `ExtensionDialog.svelte` 加按钮和直接替换逻辑。
+- `QuestionToolCard.svelte` 给 text / textarea 字段加按钮和直接替换逻辑。
 - 服务端用 mock `FieldAssistService` 返回固定文本。
 - 完成前端和协议测试。
 
@@ -1054,7 +979,7 @@ pnpm --filter @dano/app run deploy:smoke
 ### 产品行为
 
 - [ ] `ask_user_question` 的 `input` 展示“重新生成”和“AI 润色”。
-- [ ] `ask_user_question` 的 `editor` 展示“重新生成”和“AI 润色”。
+- [ ] `ask_user_question` 的 `textarea` 展示“重新生成”和“AI 润色”。
 - [ ] “重新生成”成功后直接替换当前字段内容。
 - [ ] “AI 润色”成功后直接替换当前字段内容。
 - [ ] “AI 润色”使用当前字段文本作为模型 `user` prompt 本身。
