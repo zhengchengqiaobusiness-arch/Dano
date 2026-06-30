@@ -47,6 +47,7 @@ describe("field assist", () => {
       currentValue: "",
       prefill: "病假",
     });
+    expect(messages[0]?.content).toContain("不同于 currentValue 和 prefill");
   });
 
   it("warns on sensitive field labels without blocking the request", async () => {
@@ -161,6 +162,47 @@ describe("field assist", () => {
       }),
     ).rejects.toThrow("AI 辅助返回了追问内容，请重试");
     expect(ai.generateText).toHaveBeenCalledTimes(2);
+  });
+
+  it("counts retries per field assist call", async () => {
+    const ai = {
+      generateText: vi.fn()
+        .mockResolvedValueOnce("请问您需要请假的具体原因是什么？")
+        .mockResolvedValueOnce("因个人事务需要请假处理。")
+        .mockResolvedValueOnce("请问您需要填写什么说明？")
+        .mockResolvedValueOnce("请在此处详细描述项目目标、范围和关键要求。"),
+    };
+    const service = createFieldAssistService({
+      ai,
+      getCurrentModel: () => ({ id: "gpt-4", provider: "openai" }),
+      maxRetries: 1,
+    });
+
+    await expect(
+      service.assist({
+        requestId: "req-1",
+        action: "regenerate",
+        fieldType: "textarea",
+        requestMethod: "editor",
+        title: "请假原因",
+        currentValue: "",
+      }),
+    ).resolves.toMatchObject({
+      value: "因个人事务需要请假处理。",
+    });
+    await expect(
+      service.assist({
+        requestId: "req-2",
+        action: "regenerate",
+        fieldType: "textarea",
+        requestMethod: "editor",
+        title: "请填写说明",
+        currentValue: "",
+      }),
+    ).resolves.toMatchObject({
+      value: "请在此处详细描述项目目标、范围和关键要求。",
+    });
+    expect(ai.generateText).toHaveBeenCalledTimes(4);
   });
 
   it("retries regenerate outputs that only echo the current value or prefill", async () => {

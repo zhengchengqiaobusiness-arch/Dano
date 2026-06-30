@@ -244,6 +244,7 @@ export function buildRegenerateMessages(
       content: [
         "你是 ask_user_question 字段生成助手。",
         "根据字段标题、placeholder、字段类型和已有内容生成一个可直接填入字段的答案。",
+        "重新生成时必须给出不同于 currentValue 和 prefill 的新内容，不要只复读、补标点或微调空白。",
         "只输出字段值。",
         "不要解释，不要加标题，不要用 Markdown 包裹。",
         input.fieldType === "input"
@@ -270,7 +271,7 @@ function buildRetryMessages(messages: FieldAssistMessage[]): FieldAssistMessage[
     {
       role: "system",
       content:
-        "上一次输出不是可直接填入字段的正文。请只返回改写后的字段值，不要追问用户，不要请求补充信息，不要调用工具。",
+        "上一次输出不是可直接填入字段的正文，或只是复读了已有内容。请返回一个不同于 currentValue 和 prefill 的字段值，不要追问用户，不要请求补充信息，不要调用工具。",
     },
   ];
 }
