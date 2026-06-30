@@ -103,6 +103,46 @@ describe("Dano main", () => {
     }
   });
 
+  it("polls source files so dev reload works when OS watchers are unavailable", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dano-watch-poll-"));
+    let timeout: NodeJS.Timeout | undefined;
+
+    try {
+      const srcDir = join(root, "apps", "dano", "src");
+      const typesDir = join(root, "apps", "dano", "types");
+      mkdirSync(srcDir, { recursive: true });
+      mkdirSync(typesDir, { recursive: true });
+      const sourceFile = join(srcDir, "main.ts");
+      writeFileSync(sourceFile, "export const value = 1;\n");
+      writeFileSync(join(typesDir, "protocol.ts"), "export type Value = 1;\n");
+
+      const reloaded = new Promise<void>((resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("Timed out waiting for dev reload")),
+          1000,
+        );
+        const controller = createDanoDevReloadController({
+          entryFile: sourceFile,
+          stop: () => {
+            clearTimeout(timeout);
+            controller?.dispose();
+            resolve();
+          },
+          debounceMs: 0,
+          pollIntervalMs: 10,
+          logger: { log: () => {}, error: () => {} },
+        });
+      });
+
+      writeFileSync(sourceFile, "export const value = 2;\n");
+
+      await reloaded;
+    } finally {
+      clearTimeout(timeout);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("reads the Dano product version from a dev checkout", () => {
     const root = mkdtempSync(join(tmpdir(), "dano-package-dev-"));
     try {
