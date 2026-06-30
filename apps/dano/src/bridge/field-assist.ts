@@ -106,6 +106,7 @@ export function createFieldAssistService(options: {
         value = normalizeFieldAssistOutput(raw, input.fieldType);
         try {
           assertFieldAssistOutput(value);
+          assertFieldAssistChangedOutput(input, value);
           break;
         } catch (cause) {
           if (
@@ -337,6 +338,30 @@ export function assertFieldAssistOutput(value: string): void {
     throw new FieldAssistError(
       "INVALID_MODEL_OUTPUT",
       "AI 辅助返回了追问内容，请重试",
+    );
+  }
+}
+
+function comparableFieldAssistValue(value: string | undefined): string {
+  return (value ?? "")
+    .toLocaleLowerCase()
+    .replace(/[\s\u3000，。！？、,.!?:：；;'"“”‘’（）()[\]{}<>《》【】\-—_]+/g, "");
+}
+
+function assertFieldAssistChangedOutput(
+  input: FieldAssistCommandPayload,
+  value: string,
+): void {
+  if (input.action !== "regenerate") return;
+  const output = comparableFieldAssistValue(value);
+  if (!output) return;
+  const repeated = [input.currentValue, input.prefill]
+    .map(comparableFieldAssistValue)
+    .some(original => original && original === output);
+  if (repeated) {
+    throw new FieldAssistError(
+      "INVALID_MODEL_OUTPUT",
+      "AI 辅助返回了重复内容，请重试",
     );
   }
 }

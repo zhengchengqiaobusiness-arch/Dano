@@ -163,6 +163,33 @@ describe("field assist", () => {
     expect(ai.generateText).toHaveBeenCalledTimes(2);
   });
 
+  it("retries regenerate outputs that only echo the current value or prefill", async () => {
+    const ai = {
+      generateText: vi.fn()
+        .mockResolvedValueOnce("默认内容。")
+        .mockResolvedValueOnce("请在此处详细描述项目目标、范围和关键要求。"),
+    };
+    const service = createFieldAssistService({
+      ai,
+      getCurrentModel: () => ({ id: "gpt-4", provider: "openai" }),
+    });
+
+    await expect(
+      service.assist({
+        requestId: "req-1",
+        action: "regenerate",
+        fieldType: "textarea",
+        requestMethod: "editor",
+        title: "请填写说明",
+        currentValue: "默认内容。",
+        prefill: "默认内容",
+      }),
+    ).resolves.toMatchObject({
+      value: "请在此处详细描述项目目标、范围和关键要求。",
+    });
+    expect(ai.generateText).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects obvious secret values before model calls", () => {
     expect(() =>
       assertAllowed({
