@@ -88,6 +88,8 @@
     remoteHasMore = {};
     remoteLoading = {};
     remoteError = {};
+    submitting = false;
+    error = "";
     aiAssistLoading = {};
     aiAssistError = {};
     aiAssistWarning = {};
