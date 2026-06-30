@@ -2,13 +2,12 @@ import {
   existsSync,
   readdirSync,
   statSync,
-  watch,
-  type FSWatcher,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 
 const DEV_APP_ENTRY_SEGMENT = `${sep}apps${sep}dano${sep}src${sep}`;
 const DEFAULT_DEBOUNCE_MS = 75;
+const DEFAULT_POLL_INTERVAL_MS = 500;
 const IGNORED_DIRECTORIES = new Set([".git", "dist", "node_modules"]);
 
 export interface DanoDevReloadController {
@@ -22,12 +21,8 @@ export interface DanoDevReloadControllerOptions {
   entryFile: string;
   stop: () => Promise<void> | void;
   debounceMs?: number;
+  pollIntervalMs?: number;
   logger?: Pick<Console, "error" | "log">;
-}
-
-interface DanoDevReloadChange {
-  eventType: "change" | "rename";
-  filename?: string;
 }
 
 export function resolveDanoDevWatchPath(
@@ -43,22 +38,63 @@ export function resolveDanoDevWatchPath(
   return join(workspaceRoot, "apps", "dano", "src");
 }
 
-function listDanoWatchDirectories(rootPath: string): string[] {
-  const directories: string[] = [];
+function snapshotDanoWatchFiles(rootPaths: readonly string[]): Map<string, string> {
+  const snapshot = new Map<string, string>();
 
   const visit = (directoryPath: string): void => {
-    directories.push(directoryPath);
+    let entries;
+    try {
+      entries = readdirSync(directoryPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
 
-    for (const entry of readdirSync(directoryPath, { withFileTypes: true })) {
-      if (!entry.isDirectory() || IGNORED_DIRECTORIES.has(entry.name)) {
+    for (const entry of entries) {
+      const entryPath = join(directoryPath, entry.name);
+      if (entry.isDirectory()) {
+        if (!IGNORED_DIRECTORIES.has(entry.name)) {
+          visit(entryPath);
+        }
         continue;
       }
-      visit(join(directoryPath, entry.name));
+
+      if (!entry.isFile()) {
+        continue;
+      }
+
+      try {
+        const stats = statSync(entryPath);
+        snapshot.set(entryPath, `${stats.mtimeMs}:${stats.size}`);
+      } catch {
+        continue;
+      }
     }
   };
 
-  visit(rootPath);
-  return directories;
+  for (const rootPath of rootPaths) {
+    visit(rootPath);
+  }
+
+  return snapshot;
+}
+
+function findDanoWatchChange(
+  previous: ReadonlyMap<string, string>,
+  next: ReadonlyMap<string, string>,
+): string | undefined {
+  for (const [path, signature] of next) {
+    if (previous.get(path) !== signature) {
+      return path;
+    }
+  }
+
+  for (const path of previous.keys()) {
+    if (!next.has(path)) {
+      return path;
+    }
+  }
+
+  return undefined;
 }
 
 export function createDanoDevReloadController(
@@ -74,6 +110,7 @@ export function createDanoDevReloadController(
   }
 
   const debounceMs = options.debounceMs ?? DEFAULT_DEBOUNCE_MS;
+  const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const logger = options.logger ?? console;
   const appRoot = dirname(watchPath);
   const watchPaths = [
@@ -84,96 +121,40 @@ export function createDanoDevReloadController(
   let disposed = false;
   let requested = false;
   let debounceTimer: NodeJS.Timeout | undefined;
-  let rescanScheduled = false;
-  let lastChange: DanoDevReloadChange = { eventType: "change" };
-  const watchers = new Map<string, FSWatcher>();
-
-  const cleanupWatchers = (): void => {
-    for (const watcher of watchers.values()) {
-      watcher.close();
-    }
-    watchers.clear();
-  };
-
-  const refreshWatchers = (): void => {
-    if (disposed) {
+  let snapshot = snapshotDanoWatchFiles(watchPaths);
+  const pollTimer = setInterval(() => {
+    if (disposed || requested) {
       return;
     }
 
-    const nextDirectories = new Set(
-      watchPaths.flatMap(path => listDanoWatchDirectories(path)),
-    );
+    const nextSnapshot = snapshotDanoWatchFiles(watchPaths);
+    const changedPath = findDanoWatchChange(snapshot, nextSnapshot);
+    snapshot = nextSnapshot;
 
-    for (const [directoryPath, watcher] of watchers) {
-      if (nextDirectories.has(directoryPath)) {
-        continue;
-      }
-      watcher.close();
-      watchers.delete(directoryPath);
+    if (!changedPath) {
+      return;
     }
 
-    for (const directoryPath of nextDirectories) {
-      if (watchers.has(directoryPath)) {
-        continue;
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      if (disposed || requested) {
+        return;
       }
 
-      const watcher = watch(directoryPath, (eventType, filename) => {
-        if (disposed || requested) {
-          return;
-        }
+      requested = true;
+      logger.log(
+        `[dano] Detected source change (${changedPath}); reloading Dano runtime...`,
+      );
 
-        lastChange = {
-          eventType,
-          filename:
-            typeof filename === "string" && filename.length > 0
-              ? filename
-              : undefined,
-        };
-
-        if (eventType === "rename" && !rescanScheduled) {
-          rescanScheduled = true;
-          queueMicrotask(() => {
-            rescanScheduled = false;
-            if (!disposed) {
-              refreshWatchers();
-            }
-          });
-        }
-
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
-          if (disposed || requested) {
-            return;
-          }
-
-          requested = true;
-          const changedPath = lastChange.filename
-            ? ` (${lastChange.filename})`
-            : "";
-          logger.log(
-            `[dano] Detected source change${changedPath}; reloading Dano runtime...`,
-          );
-
-          Promise.resolve(options.stop()).catch(error => {
-            logger.error(
-              "[dano] Failed to stop Dano server for hot reload:",
-              error,
-            );
-          });
-        }, debounceMs);
+      Promise.resolve(options.stop()).catch(error => {
+        logger.error(
+          "[dano] Failed to stop Dano server for hot reload:",
+          error,
+        );
       });
+    }, debounceMs);
+  }, pollIntervalMs);
 
-      watcher.on("error", error => {
-        if (!disposed) {
-          logger.error("[dano] Dano server dev watcher error:", error);
-        }
-      });
-
-      watchers.set(directoryPath, watcher);
-    }
-  };
-
-  refreshWatchers();
   logger.log(`[dano] Watching Dano sources: ${watchPaths.join(", ")}`);
 
   return {
@@ -188,7 +169,7 @@ export function createDanoDevReloadController(
       }
       disposed = true;
       clearTimeout(debounceTimer);
-      cleanupWatchers();
+      clearInterval(pollTimer);
     },
   };
 }
