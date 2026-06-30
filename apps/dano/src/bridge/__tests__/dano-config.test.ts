@@ -15,6 +15,9 @@ describe("Dano config", () => {
         defaultModel: "mimo-v2.5",
         defaultThinkingLevel: "medium",
         defaultProjectTrust: "always",
+        fieldAssist: {
+          maxRetries: 10,
+        },
         quickActions: [
           { label: " 请假 ", prompt: " 帮我申请请假 " },
           { label: "", prompt: "ignored" },
@@ -33,6 +36,9 @@ describe("Dano config", () => {
       defaultModel: "mimo-v2.5",
       defaultThinkingLevel: "medium",
       defaultProjectTrust: "always",
+      fieldAssist: {
+        maxRetries: 10,
+      },
       quickActions: [{ label: "请假", prompt: "帮我申请请假" }],
     });
 

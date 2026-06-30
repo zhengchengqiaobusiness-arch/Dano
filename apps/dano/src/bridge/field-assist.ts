@@ -58,6 +58,12 @@ const SECRET_VALUE_PATTERN =
 const FOLLOW_UP_QUESTION_PATTERN =
   /ask_user_question|(?:请问|请您|麻烦您|需要您)|(?:请|麻烦|需要)(?:补充|提供|告知|填写|输入|说明|确认)|(?:还需要|需要更多|缺少).*(?:信息|内容)/i;
 
+function fieldAssistMaxRetries(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.trunc(value))
+    : 10;
+}
+
 export interface FieldAssistClient {
   generateText(request: {
     model?: RpcModel;
@@ -77,6 +83,7 @@ export function createFieldAssistService(options: {
   ai: FieldAssistClient;
   getCurrentModel: () => RpcModel | undefined;
   timeoutMs?: number;
+  maxRetries?: number;
 }): FieldAssistService {
   return {
     async assist(input) {
@@ -88,8 +95,9 @@ export function createFieldAssistService(options: {
         input.action === "polish"
           ? buildPolishMessages(input)
           : buildRegenerateMessages(input);
+      const maxAttempts = 1 + fieldAssistMaxRetries(options.maxRetries);
       let value = "";
-      for (let attempt = 0; attempt < 2; attempt += 1) {
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         const raw = await options.ai.generateText({
           model,
           messages: attempt === 0 ? messages : buildRetryMessages(messages),
@@ -101,7 +109,7 @@ export function createFieldAssistService(options: {
           break;
         } catch (cause) {
           if (
-            attempt === 0 &&
+            attempt < maxAttempts - 1 &&
             cause instanceof FieldAssistError &&
             cause.code === "INVALID_MODEL_OUTPUT"
           ) {

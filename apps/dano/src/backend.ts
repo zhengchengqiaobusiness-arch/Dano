@@ -322,6 +322,7 @@ export function createDanoBackendFromSession(
           session,
         }),
         getCurrentModel: state.getCurrentModel,
+        maxRetries: danoConfig.fieldAssist?.maxRetries,
       }),
     },
     session,

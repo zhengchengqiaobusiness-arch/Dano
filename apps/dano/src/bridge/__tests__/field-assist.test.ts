@@ -74,7 +74,7 @@ describe("field assist", () => {
     expect(ai.generateText).toHaveBeenCalledTimes(1);
   });
 
-  it("retries once when model output asks a follow-up question", async () => {
+  it("retries when model output asks a follow-up question", async () => {
     const ai = {
       generateText: vi.fn()
         .mockResolvedValueOnce("请问您需要请假的具体原因是什么？")
@@ -101,6 +101,66 @@ describe("field assist", () => {
     expect(ai.generateText.mock.calls[1]?.[0].messages.at(-1).content).toContain(
       "不要追问用户",
     );
+  });
+
+  it("defaults to ten field assist retries", async () => {
+    const ai = {
+      generateText: vi.fn()
+        .mockResolvedValueOnce("请问您需要请假的具体原因是什么？")
+        .mockResolvedValueOnce("请补充一下请假原因")
+        .mockResolvedValueOnce("请问需要写什么说明？")
+        .mockResolvedValueOnce("请问您希望我生成什么内容？")
+        .mockResolvedValueOnce("还需要更多信息才能生成")
+        .mockResolvedValueOnce("请提供字段内容")
+        .mockResolvedValueOnce("请确认要填写什么")
+        .mockResolvedValueOnce("需要您补充说明")
+        .mockResolvedValueOnce("麻烦您输入说明")
+        .mockResolvedValueOnce("请填写具体原因")
+        .mockResolvedValueOnce("因个人事务需要请假处理。"),
+    };
+    const service = createFieldAssistService({
+      ai,
+      getCurrentModel: () => ({ id: "gpt-4", provider: "openai" }),
+    });
+
+    await expect(
+      service.assist({
+        requestId: "req-1",
+        action: "regenerate",
+        fieldType: "textarea",
+        requestMethod: "editor",
+        title: "请假原因",
+        currentValue: "",
+      }),
+    ).resolves.toMatchObject({
+      value: "因个人事务需要请假处理。",
+    });
+    expect(ai.generateText).toHaveBeenCalledTimes(11);
+  });
+
+  it("uses configured field assist retry count", async () => {
+    const ai = {
+      generateText: vi.fn()
+        .mockResolvedValueOnce("请问您需要请假的具体原因是什么？")
+        .mockResolvedValueOnce("请补充一下请假原因"),
+    };
+    const service = createFieldAssistService({
+      ai,
+      getCurrentModel: () => ({ id: "gpt-4", provider: "openai" }),
+      maxRetries: 1,
+    });
+
+    await expect(
+      service.assist({
+        requestId: "req-1",
+        action: "regenerate",
+        fieldType: "textarea",
+        requestMethod: "editor",
+        title: "请假原因",
+        currentValue: "",
+      }),
+    ).rejects.toThrow("AI 辅助返回了追问内容，请重试");
+    expect(ai.generateText).toHaveBeenCalledTimes(2);
   });
 
   it("rejects obvious secret values before model calls", () => {
