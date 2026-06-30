@@ -2271,6 +2271,71 @@ describe("BridgeRpcAdapter", () => {
       });
     });
 
+    it("preserves streamed tool call arguments when final update is sparse", async () => {
+      (ws.send as ReturnType<typeof vi.fn>).mockClear();
+
+      const handler = (context.events.subscribe as ReturnType<typeof vi.fn>)
+        .mock.calls[0]?.[0] as
+        | ((event: Record<string, unknown>) => void)
+        | undefined;
+
+      handler?.({
+        type: "message_start",
+        message: { id: "assistant-1", role: "assistant", content: [] },
+      });
+      handler?.({
+        type: "message_update",
+        message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "tool-1",
+              name: "ask_user_question",
+              arguments: "",
+            },
+          ],
+        },
+        assistantMessageEvent: {
+          type: "toolcall_delta",
+          contentIndex: 0,
+          delta: '{"question":"请填写说明","inputType":"textarea","default":"默认内容"}',
+        },
+      });
+      handler?.({
+        type: "message_end",
+        message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "tool-1",
+              name: "ask_user_question",
+              arguments: "",
+            },
+          ],
+        },
+      });
+
+      await new Promise(r => setTimeout(r, 250));
+
+      const sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string),
+      );
+      const finalUpsert = sendCalls.find(
+        call => call.payload?.type === "transcript_upsert",
+      );
+
+      expect(finalUpsert?.payload.message.content[0]).toMatchObject({
+        type: "toolCall",
+        id: "tool-1",
+        name: "ask_user_question",
+        arguments: '{"question":"请填写说明","inputType":"textarea","default":"默认内容"}',
+      });
+    });
+
     it("includes tool metadata in synthesized tool call deltas", async () => {
       (ws.send as ReturnType<typeof vi.fn>).mockClear();
 

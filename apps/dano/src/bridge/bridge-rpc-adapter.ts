@@ -2398,6 +2398,108 @@ function synthesizeTranscriptDelta(
   return null;
 }
 
+function applyTranscriptDeltaToMessage(
+  base: RpcTranscriptMessage,
+  delta: Omit<
+    RpcTranscriptDeltaEvent,
+    "type" | "sessionPath" | "transcriptKey" | "messageId" | "role"
+  >,
+): RpcTranscriptMessage {
+  const content = Array.isArray(base.content) ? [...base.content] : [];
+  while (content.length <= delta.contentIndex) {
+    content.push({ type: "text", text: "" });
+  }
+
+  const block = content[delta.contentIndex];
+  if (delta.blockType === "text") {
+    if (typeof block === "string") {
+      content[delta.contentIndex] = `${block}${delta.delta}`;
+    } else if (block?.type === "text") {
+      content[delta.contentIndex] = { ...block, text: `${block.text}${delta.delta}` };
+    } else {
+      content[delta.contentIndex] = { type: "text", text: delta.delta };
+    }
+  } else if (delta.blockType === "thinking") {
+    if (block && typeof block === "object" && block.type === "thinking") {
+      content[delta.contentIndex] = {
+        ...block,
+        thinking: `${block.thinking}${delta.delta}`,
+      };
+    } else {
+      content[delta.contentIndex] = { type: "thinking", thinking: delta.delta };
+    }
+  } else if (delta.blockType === "toolCall") {
+    if (block && typeof block === "object" && block.type === "toolCall") {
+      const currentArguments = stringFromToolArguments(block.arguments);
+      content[delta.contentIndex] = {
+        ...block,
+        id: delta.toolCallId ?? block.id,
+        name: delta.toolName ?? block.name,
+        arguments: `${currentArguments}${delta.delta}`,
+      };
+    } else {
+      content[delta.contentIndex] = {
+        type: "toolCall",
+        id: delta.toolCallId,
+        name: delta.toolName ?? "tool",
+        arguments: delta.delta,
+      };
+    }
+  }
+
+  return { ...base, content };
+}
+
+function mergeSparseTranscriptMessage(
+  previous: RpcTranscriptMessage | undefined,
+  next: RpcTranscriptMessage,
+): RpcTranscriptMessage {
+  if (!previous || !Array.isArray(previous.content) || !Array.isArray(next.content)) {
+    return next;
+  }
+
+  let changed = false;
+  const content = next.content.map((block, index) => {
+    const previousBlock = previous.content?.[index];
+    if (
+      typeof block === "object" &&
+      block?.type === "toolCall" &&
+      typeof previousBlock === "object" &&
+      previousBlock?.type === "toolCall" &&
+      !stringFromToolArguments(block.arguments) &&
+      stringFromToolArguments(previousBlock.arguments)
+    ) {
+      changed = true;
+      return { ...block, arguments: previousBlock.arguments };
+    }
+    if (
+      typeof block === "object" &&
+      block?.type === "text" &&
+      typeof previousBlock === "object" &&
+      previousBlock?.type === "text" &&
+      !block.text &&
+      previousBlock.text
+    ) {
+      changed = true;
+      return { ...block, text: previousBlock.text };
+    }
+    if (
+      typeof block === "object" &&
+      block?.type === "thinking" &&
+      typeof previousBlock === "object" &&
+      previousBlock?.type === "thinking" &&
+      !block.thinking &&
+      previousBlock.thinking
+    ) {
+      changed = true;
+      return { ...block, thinking: previousBlock.thinking };
+    }
+    return block;
+  });
+
+  return changed ? { ...next, content } : next;
+}
+
 function streamStartMessage(
   message: RpcTranscriptMessage,
 ): RpcTranscriptMessage {
@@ -3696,9 +3798,9 @@ class TranscriptProjector {
 
     const baseTranscriptMessage = this.toTranscriptMessage(message, transcriptKey);
     if (!baseTranscriptMessage) return null;
-    const transcriptMessage = this.projectStructuredUserMessage(
-      baseTranscriptMessage,
-      sessionPath,
+    const transcriptMessage = mergeSparseTranscriptMessage(
+      this.state.lastMessagesByKey.get(transcriptKey),
+      this.projectStructuredUserMessage(baseTranscriptMessage, sessionPath),
     );
     const payloadMessage =
       eventType === "message_start"
@@ -3743,14 +3845,23 @@ class TranscriptProjector {
       sessionPath,
     );
 
+    const previousMessage = this.state.lastMessagesByKey.get(transcriptKey);
     const deltaEvent =
       extractAssistantMessageDeltaEvent(event, transcriptMessage) ??
       synthesizeTranscriptDelta(
-        this.state.lastMessagesByKey.get(transcriptKey),
+        previousMessage,
         transcriptMessage,
       );
-    this.rememberTranscriptMessage(transcriptMessage);
-    if (!deltaEvent) return null;
+    if (!deltaEvent) {
+      this.rememberTranscriptMessage(transcriptMessage);
+      return null;
+    }
+    this.rememberTranscriptMessage(
+      applyTranscriptDeltaToMessage(
+        previousMessage ?? transcriptMessage,
+        deltaEvent,
+      ),
+    );
 
     return {
       type: "transcript_delta",
