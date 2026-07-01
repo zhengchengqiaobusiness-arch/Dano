@@ -39,6 +39,29 @@ export function toFieldAssistErrorMessage(error: unknown): string {
   return "AI 辅助请求失败";
 }
 
+export function nextFieldAssistRunId(
+  runs: Record<string, number>,
+  fieldId: string,
+): number {
+  return (runs[fieldId] ?? 0) + 1;
+}
+
+export function isCurrentFieldAssistRun(
+  runs: Record<string, number>,
+  fieldId: string,
+  runId: number,
+): boolean {
+  return runs[fieldId] === runId;
+}
+
+export function invalidateFieldAssistRuns(
+  runs: Record<string, number>,
+): Record<string, number> {
+  return Object.fromEntries(
+    Object.entries(runs).map(([fieldId, runId]) => [fieldId, runId + 1]),
+  );
+}
+
 export function readFieldAssistResponse(response: RpcResponse): FieldAssistResult {
   if (!response.success) {
     throw new Error(response.error || "AI 辅助请求失败");

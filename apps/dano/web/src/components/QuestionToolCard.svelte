@@ -20,6 +20,9 @@
   } from "../utils/askUserQuestion";
   import {
     getFieldAssistWarning,
+    invalidateFieldAssistRuns,
+    isCurrentFieldAssistRun,
+    nextFieldAssistRunId,
     toFieldAssistErrorMessage,
   } from "../utils/fieldAssist";
   import type { ToolContentBlock } from "../utils/transcript";
@@ -79,7 +82,7 @@
   let aiAssistLoading = $state<Record<string, FieldAssistAction | undefined>>({});
   let aiAssistError = $state<Record<string, string>>({});
   let aiAssistWarning = $state<Record<string, string>>({});
-  let aiAssistSeq = $state(0);
+  let aiAssistSeq = $state<Record<string, number>>({});
   const showCard = $derived(Boolean(request) && (!pending || pendingReady));
 
   $effect(() => {
@@ -99,7 +102,7 @@
     aiAssistLoading = {};
     aiAssistError = {};
     aiAssistWarning = {};
-    aiAssistSeq += 1;
+    aiAssistSeq = invalidateFieldAssistRuns(aiAssistSeq);
     submittedResult = null;
 
     for (const item of questionItems) {
@@ -241,7 +244,8 @@
     }
 
     const fieldType = textItemFieldType(item);
-    const seq = ++aiAssistSeq;
+    const seq = nextFieldAssistRunId(aiAssistSeq, item.id);
+    aiAssistSeq[item.id] = seq;
     const previousValue = currentValue;
     aiAssistLoading[item.id] = action;
     aiAssistError[item.id] = "";
@@ -257,15 +261,18 @@
         currentValue,
         prefill: item.default,
       });
-      if (seq !== aiAssistSeq) return;
+      if (!isCurrentFieldAssistRun(aiAssistSeq, item.id, seq)) return;
       aiAssistWarning[item.id] =
         result.metadata.warnings?.[0]?.message ?? aiAssistWarning[item.id] ?? "";
       textAnswer[item.id] = result.value;
     } catch (cause) {
+      if (!isCurrentFieldAssistRun(aiAssistSeq, item.id, seq)) return;
       textAnswer[item.id] = previousValue;
       aiAssistError[item.id] = toFieldAssistErrorMessage(cause);
     } finally {
-      if (seq === aiAssistSeq) aiAssistLoading[item.id] = undefined;
+      if (isCurrentFieldAssistRun(aiAssistSeq, item.id, seq)) {
+        aiAssistLoading[item.id] = undefined;
+      }
     }
   }
 
