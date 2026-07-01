@@ -5189,6 +5189,12 @@ export class BridgeRpcAdapter {
                 correlationId,
                 error: message,
               });
+              this.sendEvent({
+                type: "command_error",
+                commandType: "prompt",
+                correlationId,
+                error: message,
+              });
               this.sendEvent(toRpcAgentEndEvent({}, sessionPath));
               if (sessionPath) this.sessionStatsPusher.queue(sessionPath);
             });

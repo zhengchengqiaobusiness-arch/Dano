@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  bridgeCommandErrorNotificationMessage,
   bridgeServerErrorMessage,
   isStaleBridgeClientError,
 } from "./bridgeErrors";
@@ -28,5 +29,27 @@ describe("bridge error helpers", () => {
         fallback: "发送 bridge 消息失败",
       }),
     ).toBe("发送 bridge 消息失败");
+  });
+
+  it("surfaces bridge command errors as notification text", () => {
+    expect(
+      bridgeCommandErrorNotificationMessage(
+        {
+          type: "command_error",
+          error: "No API key found for xiaomi-token-plan-cn.\nUse /login",
+        },
+        "发送 bridge 消息失败",
+      ),
+    ).toBe("No API key found for xiaomi-token-plan-cn.");
+
+    expect(
+      bridgeCommandErrorNotificationMessage(
+        {
+          type: "transcript_delta",
+          error: "not a command error",
+        },
+        "发送 bridge 消息失败",
+      ),
+    ).toBeNull();
   });
 });

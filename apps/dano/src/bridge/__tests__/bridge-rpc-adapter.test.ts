@@ -1872,6 +1872,18 @@ describe("BridgeRpcAdapter", () => {
           .some(
             call =>
               call.type === "event" &&
+              call.payload.type === "command_error" &&
+              call.payload.commandType === "prompt" &&
+              call.payload.correlationId === "cmd-prompt-fail" &&
+              call.payload.error === "Session write failed",
+          ),
+      ).toBe(true);
+      expect(
+        ws.send.mock.calls
+          .map(call => JSON.parse(call[0] as string))
+          .some(
+            call =>
+              call.type === "event" &&
               call.payload.type === "agent_end" &&
               call.payload.sessionPath === sessionFile,
           ),
