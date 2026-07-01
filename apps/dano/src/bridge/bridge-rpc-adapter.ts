@@ -74,6 +74,11 @@ import { detectWorkspaceEnvironments } from "./workspace-environment.js";
 import type { UploadRegistry } from "./upload-registry.js";
 import type { FieldAssistService } from "./field-assist.js";
 
+type RpcTranscriptToolCallBlock = Extract<
+  RpcTranscriptContentBlock,
+  { type: "toolCall" }
+>;
+
 /** Model shape mirrored from Pi — used in shaping helpers below. */
 type PiModel = {
   id: string;
@@ -2344,6 +2349,15 @@ function stringFromToolArguments(value: unknown): string {
   }
 }
 
+function hasToolArguments(value: unknown): boolean {
+  if (typeof value === "string") return Boolean(value.trim());
+  if (value === undefined || value === null) return false;
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return Object.keys(value).length > 0;
+  }
+  return true;
+}
+
 function streamTextForContentItem(
   item: string | RpcTranscriptContentBlock | undefined,
 ): { blockType: RpcTranscriptDeltaEvent["blockType"]; text: string } | null {
@@ -2429,16 +2443,27 @@ function applyTranscriptDeltaToMessage(
       content[delta.contentIndex] = { type: "thinking", thinking: delta.delta };
     }
   } else if (delta.blockType === "toolCall") {
-    if (block && typeof block === "object" && block.type === "toolCall") {
-      const currentArguments = stringFromToolArguments(block.arguments);
-      content[delta.contentIndex] = {
-        ...block,
-        id: delta.toolCallId ?? block.id,
-        name: delta.toolName ?? block.name,
+    const targetIndex =
+      block && typeof block === "object" &&
+      block.type === "toolCall" &&
+      isDifferentToolCall(block, delta)
+        ? findMatchingToolCallIndex(content, delta) ?? content.length
+        : delta.contentIndex;
+    const targetBlock = content[targetIndex];
+    if (
+      targetBlock &&
+      typeof targetBlock === "object" &&
+      targetBlock.type === "toolCall"
+    ) {
+      const currentArguments = stringFromToolArguments(targetBlock.arguments);
+      content[targetIndex] = {
+        ...targetBlock,
+        id: delta.toolCallId ?? targetBlock.id,
+        name: delta.toolName ?? targetBlock.name,
         arguments: `${currentArguments}${delta.delta}`,
       };
     } else {
-      content[delta.contentIndex] = {
+      content[targetIndex] = {
         type: "toolCall",
         id: delta.toolCallId,
         name: delta.toolName ?? "tool",
@@ -2450,12 +2475,70 @@ function applyTranscriptDeltaToMessage(
   return { ...base, content };
 }
 
+function isDifferentToolCall(
+  block: RpcTranscriptToolCallBlock,
+  delta: Pick<
+    RpcTranscriptDeltaEvent,
+    "toolCallId" | "toolName"
+  >,
+): boolean {
+  return (
+    Boolean(delta.toolCallId && block.id && delta.toolCallId !== block.id) ||
+    Boolean(delta.toolName && block.name && delta.toolName !== block.name)
+  );
+}
+
+function findMatchingToolCallIndex(
+  content: (string | RpcTranscriptContentBlock)[],
+  delta: Pick<
+    RpcTranscriptDeltaEvent,
+    "toolCallId" | "toolName"
+  >,
+): number | null {
+  const index = content.findIndex(block =>
+    Boolean(
+      block &&
+        typeof block === "object" &&
+        block.type === "toolCall" &&
+        (!delta.toolCallId || block.id === delta.toolCallId) &&
+        (!delta.toolName || block.name === delta.toolName),
+    ),
+  );
+  return index >= 0 ? index : null;
+}
+
 function mergeSparseTranscriptMessage(
   previous: RpcTranscriptMessage | undefined,
   next: RpcTranscriptMessage,
 ): RpcTranscriptMessage {
   if (!previous || !Array.isArray(previous.content) || !Array.isArray(next.content)) {
     return next;
+  }
+
+  if (hasSparseToolCallContent(previous.content, next.content)) {
+    const content = [...previous.content];
+    for (const block of next.content) {
+      if (!block || typeof block !== "object" || block.type !== "toolCall") {
+        continue;
+      }
+      const index = content.findIndex(previousBlock =>
+        Boolean(
+          previousBlock &&
+            typeof previousBlock === "object" &&
+            previousBlock.type === "toolCall" &&
+            previousBlock.id === block.id &&
+            previousBlock.name === block.name,
+        ),
+      );
+      if (index >= 0) {
+        content[index] = hasToolArguments(block.arguments)
+          ? block
+          : content[index];
+      } else {
+        content.push(block);
+      }
+    }
+    return { ...next, content };
   }
 
   let changed = false;
@@ -2466,8 +2549,10 @@ function mergeSparseTranscriptMessage(
       block?.type === "toolCall" &&
       typeof previousBlock === "object" &&
       previousBlock?.type === "toolCall" &&
-      !stringFromToolArguments(block.arguments) &&
-      stringFromToolArguments(previousBlock.arguments)
+      block.id === previousBlock.id &&
+      block.name === previousBlock.name &&
+      !hasToolArguments(block.arguments) &&
+      hasToolArguments(previousBlock.arguments)
     ) {
       changed = true;
       return { ...block, arguments: previousBlock.arguments };
@@ -2498,6 +2583,39 @@ function mergeSparseTranscriptMessage(
   });
 
   return changed ? { ...next, content } : next;
+}
+
+function hasSparseToolCallContent(
+  previous: (string | RpcTranscriptContentBlock)[],
+  next: (string | RpcTranscriptContentBlock)[],
+): boolean {
+  const nextHasSparseToolCall = next.some(block =>
+    Boolean(
+      block &&
+        typeof block === "object" &&
+        block.type === "toolCall" &&
+        !hasToolArguments(block.arguments),
+    ),
+  );
+  if (!nextHasSparseToolCall) return false;
+
+  return previous.some(previousBlock =>
+    Boolean(
+      previousBlock &&
+        typeof previousBlock === "object" &&
+        previousBlock.type === "toolCall" &&
+        hasToolArguments(previousBlock.arguments) &&
+        !next.some(nextBlock =>
+          Boolean(
+            nextBlock &&
+              typeof nextBlock === "object" &&
+              nextBlock.type === "toolCall" &&
+              nextBlock.id === previousBlock.id &&
+              nextBlock.name === previousBlock.name,
+          ),
+        ),
+    ),
+  );
 }
 
 function streamStartMessage(
@@ -4553,7 +4671,10 @@ export class BridgeRpcAdapter {
       left.role === right.role &&
       left.blockType === right.blockType &&
       left.contentIndex === right.contentIndex &&
-      (left.messageId ?? null) === (right.messageId ?? null)
+      (left.messageId ?? null) === (right.messageId ?? null) &&
+      (left.blockType !== "toolCall" ||
+        ((left.toolCallId ?? null) === (right.toolCallId ?? null) &&
+          (left.toolName ?? null) === (right.toolName ?? null)))
     );
   }
 

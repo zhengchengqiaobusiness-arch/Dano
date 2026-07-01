@@ -603,7 +603,7 @@ function mergeToolResultIntoContent(
   if (!Array.isArray(content)) return null;
 
   const cloned = content.map(cloneContentItem);
-  const targetIndex = findNextUnmatchedToolCallIndex(cloned);
+  const targetIndex = findToolCallIndexForResult(cloned, toolResultMessage);
   if (targetIndex === -1) return null;
 
   const toolResultBlock: TranscriptToolResultBlockWithSource = {
@@ -620,6 +620,21 @@ function mergeToolResultIntoContent(
 
   cloned.splice(targetIndex + 1, 0, toolResultBlock);
   return cloned;
+}
+
+function findToolCallIndexForResult(
+  content: TranscriptContentItem[],
+  toolResultMessage: TranscriptEntryLike,
+): number {
+  if (typeof toolResultMessage.toolCallId === "string") {
+    const index = content.findIndex(block =>
+      typeof block === "object" &&
+      block.type === "toolCall" &&
+      block.id === toolResultMessage.toolCallId,
+    );
+    if (index >= 0) return index;
+  }
+  return findNextUnmatchedToolCallIndex(content);
 }
 
 function findNextUnmatchedToolCallIndex(

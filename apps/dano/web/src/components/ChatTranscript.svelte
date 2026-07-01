@@ -100,6 +100,11 @@
     onFieldAssist?: (payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>;
   } = $props();
 
+  type RpcTranscriptToolCallBlock = Extract<
+    RpcTranscriptContentBlock,
+    { type: "toolCall" }
+  >;
+
   const emptyStateConfig = getRuntimeEmptyStateConfig();
 
   // ---- DOM refs ----
@@ -217,6 +222,17 @@
     }
 
     if (block && typeof block === "object" && block.type === "toolCall") {
+      const isDifferentToolCall =
+        (delta.toolCallId && block.id && delta.toolCallId !== block.id) ||
+        (delta.toolName && block.name && delta.toolName !== block.name);
+      if (isDifferentToolCall) {
+        return {
+          type: "toolCall",
+          id: delta.toolCallId,
+          name: delta.toolName ?? "tool",
+          arguments: delta.delta,
+        };
+      }
       const currentArguments =
         typeof block.arguments === "string"
           ? block.arguments
@@ -237,6 +253,32 @@
       name: delta.toolName ?? "tool",
       arguments: delta.delta,
     };
+  }
+
+  function isDifferentToolCall(
+    block: RpcTranscriptToolCallBlock,
+    delta: TranscriptDelta,
+  ): boolean {
+    return (
+      Boolean(delta.toolCallId && block.id && delta.toolCallId !== block.id) ||
+      Boolean(delta.toolName && block.name && delta.toolName !== block.name)
+    );
+  }
+
+  function findMatchingToolCallIndex(
+    content: (string | RpcTranscriptContentBlock)[],
+    delta: TranscriptDelta,
+  ): number | null {
+    const index = content.findIndex(block =>
+      Boolean(
+        block &&
+          typeof block === "object" &&
+          block.type === "toolCall" &&
+          (!delta.toolCallId || block.id === delta.toolCallId) &&
+          (!delta.toolName || block.name === delta.toolName),
+      ),
+    );
+    return index >= 0 ? index : null;
   }
 
   function messageWithTranscriptDeltas(
@@ -267,8 +309,18 @@
         contentItems.push(defaultDeltaContentBlock());
       }
 
-      contentItems[delta.contentIndex] = appendDeltaToContentBlock(
-        contentItems[delta.contentIndex],
+      const block = contentItems[delta.contentIndex];
+      const targetIndex =
+        delta.blockType === "toolCall" &&
+        block &&
+        typeof block === "object" &&
+        block.type === "toolCall" &&
+        isDifferentToolCall(block, delta)
+          ? findMatchingToolCallIndex(contentItems, delta) ?? contentItems.length
+          : delta.contentIndex;
+
+      contentItems[targetIndex] = appendDeltaToContentBlock(
+        contentItems[targetIndex],
         delta,
       );
       content = contentItems;
