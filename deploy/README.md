@@ -97,6 +97,18 @@ DANO_IMAGE=dano-app:local docker compose --env-file .env up -d --no-build
 
 `scripts/deploy-compose.mjs` uses the same `--no-build` path.
 
+如果绕过 `scripts/deploy-release.mjs` 手动运行 Compose，需要确认持久化运行目录
+可被容器内 `node` 用户写入：
+
+```bash
+mkdir -p /opt/dano/runtime-data
+chown -R 1000:1000 /opt/dano/runtime-data
+```
+
+全新 release 部署会自动处理这一步。通常只有旧版 root 容器写过
+`runtime-data`，或手动创建挂载目录后直接 `docker compose up`，才需要手动修正
+权限。
+
 The Dockerfile intentionally uses `node:22-bookworm-slim` instead of
 `node:22-alpine`. On the CentOS 7 publish host
 (`3.10.0-1160.108.1.el7.x86_64`, Docker 26.1.3, overlay2 on ext4), a minimal
