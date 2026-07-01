@@ -134,6 +134,27 @@ def looks_like_auth_write(url: str, body=None) -> bool:
     return any(any(h in k for h in _AUTH_BODY_HINTS) for k in _all_keys(body))
 
 
+# AI 对话/助手调用(conversationID/responseMode/appID… 或 /chat /ai /assistant 路径):是 UI 智能助手,**不是业务写**。
+#   表单提交常顺带触发它(把填的内容喂给 AI),会被误当工作流步骤(治"病原表单把 /chat/message 扫进业务写")。通用。
+_ASSISTANT_PATH_SEGS = {"chat", "ai", "assistant", "copilot", "llm", "conversation", "conversations",
+                        "completion", "completions", "copilots", "agent", "agents", "ask", "qa", "chatbot"}
+_ASSISTANT_BODY_KEYS = {"conversationid", "responsemode", "enabledeepthink", "appconfigid", "appid",
+                        "messages", "prompt", "systemprompt", "completion", "temperature", "maxtokens",
+                        "stream", "deepthink", "knowledgebaseid", "agentid", "chatid", "sessionid"}
+
+
+def looks_like_assistant_call(url: str, body=None) -> bool:
+    """AI 对话/助手调用 → 不是业务提交(剔出工作流)。判据(通用,不挑系统):① URL 段命中
+    chat/ai/assistant/conversation…;② 或请求体带 ≥2 个对话特征键(conversationID/responseMode/appID/messages…)。"""
+    if isinstance(body, str):
+        body = _parse_body(body)
+    segs = {s.split("?")[0] for s in urlparse(url or "").path.lower().split("/") if s}
+    if segs & _ASSISTANT_PATH_SEGS:
+        return True
+    keys = {str(k).lower().replace("_", "") for k in _all_keys(body)}
+    return len(keys & _ASSISTANT_BODY_KEYS) >= 2
+
+
 # POST 其实是"读/查询"的常见动词前缀(很多系统用 POST 传查询条件):get/query/list/search/page…
 # 这类不是业务写(不该当提交候选/工作流步骤,录制时也不该被拦成假成功,否则下拉/列表加载不出来)。通用,不挑系统。
 _READ_VERB_RE = _re.compile(
@@ -838,7 +859,10 @@ def suggest_select_names(selects: list[dict], samples: dict | None) -> dict:
 #   提交体里审批人挂在 startUserSelectAssignees / approvers / candidate… 下,叶子键是节点 ID(Activity_xxx)。
 _ASSIGNEE_CONTAINER_RE = _re.compile(
     r"(start_?user_?select_?assignees|assignees?|approvers?|candidate(?:users?|groups?)?)", _re.I)
-_BPMN_NODE_RE = _re.compile(r"^(activity|usertask|task|node|flow|gateway|sequenceflow|sid)[_-]", _re.I)
+# 节点 ID 必须是**带随机哈希后缀**的形态(Activity_09dlq0g / Flow_1a2b3c):前缀 + 分隔 + 含**数字**的 token。
+#   收紧后不再误吞 `task_type` / `node_name` 这类**语义字段名**(无数字哈希)→ 治"病原表单冒出假审批人2"。
+_BPMN_NODE_RE = _re.compile(
+    r"^(activity|usertask|task|node|flow|gateway|sequenceflow|event|sid)[_-][0-9a-z]*[0-9][0-9a-z]*$", _re.I)
 # 流程定义读响应里"节点 ID"字段 / "节点名"字段的概念词(通用):
 _NODE_ID_RE = _re.compile(r"(^id$|node_?id|task_?id|act_?id|activity_?id|sid|element_?id)", _re.I)
 _NODE_NAME_RE = _re.compile(r"(node_?name|task_?name|activity_?name|^name$|label|title|caption)", _re.I)
@@ -1088,6 +1112,8 @@ def pick_submit_request(requests: list[dict], samples: dict) -> dict | None:
             continue
         if looks_like_auth_write(r.get("url") or "", body):   # 登录/鉴权/基建写请求 → 不是业务提交
             continue
+        if looks_like_assistant_call(r.get("url") or "", body):   # AI 对话/助手调用 → 不是业务提交
+            continue
         last_write = r
         vals = set(_values(body))
         score = len(sample_vals & vals)               # body 里命中几个用户填的值
@@ -1108,6 +1134,8 @@ def suggest_workflow_steps(writes: list[dict], samples: dict) -> list[int]:
             continue
         body = _parse_body(w.get("post_data"))
         if body is None or looks_like_auth_write(w.get("url") or "", body):   # 排除登录/鉴权/基建写
+            continue
+        if looks_like_assistant_call(w.get("url") or "", body):               # 排除 AI 对话/助手调用(/chat/message 等)
             continue
         if looks_like_read_request(w.get("url") or ""):                       # 排除 POST 形态的读/查询(下拉/列表源)
             continue
@@ -1602,11 +1630,13 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         if ff is not None:                            # ★ DOM 结构化绑定:按 name 直配到的表单字段 = 权威,不靠值匹配
             dom_label = str(ff.get("label") or "").strip() or key
             dom_type = "enum" if ff.get("options") else _html_type(ff.get("type"))
+            _low = str(ff.get("confidence") or "").lower() == "low"   # a11y 只拿到占位符/无名 → 低置信,标"建议确认"
             out.append({"path": path, "key": key, "value": sv,
                         "suggest_param": True,            # 表单里用户可填的控件 → 一定是参数(非 identity/常量)
-                        "suggest_name": dom_label,        # 权威中文名(DOM label),不再退回 key/LLM 猜
+                        "suggest_name": dom_label,        # 权威中文名(DOM/a11y label),不再退回 key/LLM 猜
                         "type": dom_type,
-                        "confidence": 0.97, "confidence_tier": "auto",
+                        "confidence": 0.6 if _low else 0.97,
+                        "confidence_tier": "clarify" if _low else "auto",
                         "required": bool(ff.get("required")),   # 权威必填(DOM 的 required/星号)
                         "system_value": False, "name_source": "dom"})
             continue

@@ -755,7 +755,14 @@ async def record_ws(ws: WebSocket) -> None:
                     pending_storage = login_state               # identity 字段识别
                     pending_required = required_labels          # 表单 * 必填
                     pending_dom_options = dom_options           # 下拉枚举地面真值
-                    pending_form_snapshot = sess.captured_form_snapshot()   # 提交瞬间表单快照(结构化绑定)
+                    # 提交瞬间表单快照(结构化绑定)。优先用**无障碍树合成**的权威字段表(名/必填/角色更准);
+                    #   等其异步抓取完成(有上限),没抓到/超时则退回手搓 form_snapshot。
+                    await sess.await_form_ax()
+                    from dano.execution.page.formspec import form_ax_to_snapshot
+                    _ax = sess.captured_form_ax()
+                    pending_form_snapshot = form_ax_to_snapshot(_ax) if _ax else sess.captured_form_snapshot()
+                    log.info("field_table.source", form_ax=len(_ax),                 # 字段名/必填权威源:a11y 表 vs 手搓快照
+                             fallback_snapshot=0 if _ax else len(sess.captured_form_snapshot()))
                     chosen = pick_submit_request(cands, samples) or cands[-1]
                     pending_req = chosen
                     await ws.send_json(await _request_fields_msg(chosen, cands, samples, pending_reads,

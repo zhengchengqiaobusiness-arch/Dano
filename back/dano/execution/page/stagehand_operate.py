@@ -153,8 +153,10 @@ async def operate_page(
     try:
         session = await sh.sessions.start(model_name=model, browser=browser)
         await session.navigate(url=start_url)
-        # 自主操作(Stagehand agent 做感知+控件机械+规划)
-        exe = await session.execute(input={"instruction": goal, "maxSteps": max_steps})
+        # 自主操作(Stagehand agent 做感知+控件机械+规划)。execute 需 agent_config + execute_options。
+        exe = await session.execute(
+            agent_config={"model": model},
+            execute_options={"instruction": goal, "max_steps": float(max_steps)})
         exe_d = exe.to_dict() if hasattr(exe, "to_dict") else dict(exe)
         completed = bool((exe_d.get("data") or {}).get("result", {}) and
                          any(a.get("taskCompleted") for a in

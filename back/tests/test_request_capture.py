@@ -416,6 +416,36 @@ def test_assignee_sources_reject_reverse_lookup_and_unify():
     assert {s["source_url"] for s in asg.values()} == {"http://x/admin-api/system/user/page?pageNo=1&pageSize=10"}
 
 
+def test_assistant_calls_excluded_from_orchestration():
+    """AI 对话/助手调用(/chat/message,conversationID/responseMode/appID)不当业务提交、不进工作流(治病原把它扫进业务写)。"""
+    import json
+
+    from dano.execution.page.request_capture import (looks_like_assistant_call, pick_submit_request,
+                                                     suggest_workflow_steps)
+    writes = [
+        {"method": "PUT", "url": "http://x/api/tasks/SEQ-1", "post_data": json.dumps({"status": "running"})},
+        {"method": "POST", "url": "http://x/api/chat/message",
+         "post_data": json.dumps({"conversationID": "c", "responseMode": "streaming",
+                                  "enableDeepThink": True, "appID": "p", "content": "分析 Homo"})},
+        {"method": "POST", "url": "http://x/api/identifications/pathogen",
+         "post_data": json.dumps({"species": "Homo", "platform": "Illumina", "operator": "张三"})},
+    ]
+    samples = {"物种": "Homo", "平台": "Illumina", "操作人": "张三"}
+    assert looks_like_assistant_call(writes[1]["url"], json.loads(writes[1]["post_data"])) is True
+    assert looks_like_assistant_call(writes[2]["url"], json.loads(writes[2]["post_data"])) is False
+    assert pick_submit_request(writes, samples)["url"].endswith("/pathogen")   # 提交锚定到带表单字段的写
+    steps = suggest_workflow_steps(writes, samples)
+    assert all("chat" not in writes[i]["url"] for i in steps)                  # 工作流里没有 AI 对话
+
+
+def test_assistant_call_by_body_keys_not_path():
+    """无 chat 路径但 body 是对话特征键(≥2)→ 也判助手调用;正常业务提交不误伤。"""
+    from dano.execution.page.request_capture import looks_like_assistant_call
+    assert looks_like_assistant_call("http://x/api/v1/send",
+                                     {"conversationID": "c", "responseMode": "blocking", "query": "hi"}) is True
+    assert looks_like_assistant_call("http://x/api/oa/submit", {"reason": "x", "leaveType": "病假"}) is False
+
+
 def test_url_keys_value_signal():
     """反查信号:读 URL 的查询值里出现该字段自身选中值 → True(消费/后果,非来源)。"""
     from dano.execution.page.request_capture import _url_keys_value

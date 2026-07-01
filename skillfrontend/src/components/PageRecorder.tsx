@@ -285,11 +285,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                    autoComplete="off" aria-hidden="true"
                    style={{ position: "absolute", left: 0, top: 0, width: 1, height: 1, opacity: 0, border: 0, padding: 0 }} />
           </div>
-          <Alert type="info" showIcon style={{ marginTop: 8, marginBottom: 4 }}
-            message={<span>正常填表即可:日期、下拉<b>随便点选</b>;我们抓的是你点「提交」那一下发出的<b>整条请求</b>里的最终值,不靠记录每次点击。</span>}
-            description={intercept
-              ? "已开启「拦截提交」:点提交只用来抓请求,不会产生真实记录。"
-              : "未开启拦截:点提交会真的提交一次(产生一条真实记录)。"} />
+          {/* <Alert type="info" showIcon style={{ marginTop: 8, marginBottom: 4 }}
+            // message={<span>正常填表即可:日期、下拉<b>随便点选</b>;我们抓的是你点「提交」那一下发出的<b>整条请求</b>里的最终值,不靠记录每次点击。</span>}
+            // description={intercept
+            //   ? "已开启「拦截提交」:点提交只用来抓请求,不会产生真实记录。"
+            //   : "未开启拦截:点提交会真的提交一次(产生一条真实记录)。"} 
+              /> */}
 
           {/* ★ 主路径:抓到提交请求 → 勾字段建 Skill */}
           {fields.length > 0 && (
@@ -300,16 +301,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   {reqMeta.method} {reqMeta.url.replace(/^https?:\/\/[^/]+/, "")}</Typography.Text>}
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>勾选要让 agent 传值的字段</Typography.Text>
               </Space>}>
-              <Alert type="info" showIcon style={{ marginBottom: 8 }}
-                message="勾上的字段 → 变成参数(agent 调用时按需传值);没勾的(内部 ID、流程号、表单类型等)原样提交。已自动勾选像「填写内容」的字段,请核对增减。" />
-              {(Object.keys(selects).length > 0 || Object.keys(identity).length > 0) && (
-                <Alert type="warning" showIcon style={{ marginBottom: 8 }}
-                  message={<span>
-                    {Object.keys(selects).length > 0 && <span><Tag color="purple">📋 选自列表</Tag>这类字段(如选领导)agent 按<b>名字</b>传、运行期查 ID;</span>}
-                    {Object.keys(identity).length > 0 && <span><Tag color="gold">🔒 当前用户</Tag>这类字段默认不作参数、运行期自动填(谁调用就是谁);</span>}
-                    完整生效在后续 P4/P5。
-                  </span>} />
-              )}
+              {/* <Alert type="info" showIcon style={{ marginBottom: 8 }}
+                  /> */}
+              {(Object.keys(selects).length > 0 || Object.keys(identity).length > 0)  }
               {cands.length > 1 && (
                 <div style={{ marginBottom: 8 }}>
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>

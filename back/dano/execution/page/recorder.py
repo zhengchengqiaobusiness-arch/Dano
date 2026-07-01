@@ -107,8 +107,9 @@ _RECORDER_JS = r"""() => {
       for (var i = 0; i < 6 && node && node !== document.body; i++) {
         var c = (typeof node.className === 'string') ? node.className : '';
         if (/(^|[ _-])(is-)?required($|[ _-])/i.test(c)) return true;            // is-required / ant-form-item-required …
-        var lab = node.querySelector ? node.querySelector('label,[class*="label"]') : null;
-        if (lab && !lab.contains(el) && (lab.textContent || '').indexOf('*') >= 0) return true;   // * 写进标签文本
+        // 标签/标题区写了 * = 必填(各框架标签类名不一,含纯 div 标题)。不限 <label>,故 .ttl/.title 也覆盖
+        var lab = node.querySelector ? node.querySelector('label,legend,dt,[class*="label"],[class*="Label"],[class*="title"],[class*="ttl"]') : null;
+        if (lab && !lab.contains(el) && (lab.textContent || '').indexOf('*') >= 0) return true;
         node = node.parentElement;
       }
     } catch (e) {}
@@ -263,6 +264,7 @@ _RECORDER_JS = r"""() => {
   // 就近标签(labelText 的 a11y 路径失败后用):往上 ≤4 层找"行容器"里的标签元素 —— 各框架标签类名不同
   //   (el-form-item__label / ant-form-item-label / van-field__label / form-label / MuiInputLabel / ivu-form-item-label),
   //   统一按 <label>/legend/dt/[class*=label] 命中,取短文本。**不靠 class 白名单**,故任意组件库都覆盖。
+  function _isUnit(s) { return /^[\/\\\s]*([µμ]?[a-zA-Z]{1,3}|%|‰)[\/\\\s]*$/.test(s || ''); }   // /μL、ng、% 等纯单位不是字段名
   function _nearLabel(el) {
     var selfTxt = '';
     try { selfTxt = /^(input|textarea|select)$/i.test(el.tagName || '') ? clean(el.value || '') : clean(el.innerText || el.textContent || ''); } catch (e) {}
@@ -274,13 +276,15 @@ _RECORDER_JS = r"""() => {
         var cand = node.querySelector('label,legend,dt,[class*="label"],[class*="Label"],[class*="field__label"],[class*="item-label"]');
         if (cand && !cand.contains(el)) {
           var t = clean(cand.innerText || cand.textContent || '').replace(/[:：*]\s*$/, '');
-          if (t && t.length <= 30) return t;
+          if (t && t.length <= 30 && !_isUnit(t)) return t;
         }
-        if (node !== el) {                                               // 无语义 label 元素(纯自定义)→ 行内文本去掉控件值 = 标签
+        if (node !== el) {                                               // 无语义 label 元素(纯自定义)→ 行内文本去掉控件值/按钮/单位 = 标签
           var ot = clean(node.innerText || node.textContent || '');
           if (selfTxt) ot = clean(ot.split(selfTxt).join(' '));
-          ot = ot.replace(/[:：*]\s*$/, '');
-          if (ot && ot.length <= 20) return ot;
+          ot = ot.replace(/(选择文件|选择|上传|浏览|添加|browse|choose|upload)\s*$/i, '');         // 去尾部按钮词(文件选择器)
+          ot = ot.replace(/[\s\/]*((ng|m?g|[µμ]?l|m?l|pg|kg|bp|kb|rpm|[nµμm]m|cm|%|‰|个|条|次|份))+\s*$/i, '');   // 去尾部单位(/μL、ng)
+          ot = ot.replace(/[:：*\s]+$/, '');
+          if (ot && ot.length <= 20 && !_isUnit(ot)) return ot;
         }
       } catch (e) {}
       node = node.parentElement;
@@ -327,6 +331,49 @@ _RECORDER_JS = r"""() => {
       return out;
     } catch (e) { return []; }
   }
+  // 给每个表单控件打 data-danofid 标记 + 抽 DOM 字段(label/必填/值/类型/name)。供后端把**无障碍树**(浏览器算好的
+  //   可访问名/角色/必填)按 backendDOMNodeId 与这里对齐,合成权威字段表(a11y 主 + DOM 兜底)。框架无关。
+  window.__danoFormDom = function (pfx) {
+    try {
+      pfx = pfx || '';
+      var CTRL = 'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=checkbox]):not([type=radio]),' +
+                 'textarea,select,[contenteditable="true"],[role="combobox"],[role="textbox"],[role="spinbutton"],[role="searchbox"]';
+      var ctrls = document.querySelectorAll(CTRL); var out = []; var seen = []; var fid = 0;
+      for (var i = 0; i < ctrls.length && out.length < 300; i++) {
+        var el = ctrls[i];
+        if (el.closest && el.closest('.el-table,.ant-table,[role="grid"],table')) continue;
+        var inp = /^(input|textarea|select)$/i.test(el.tagName || '') ? el : (el.querySelector('input,textarea,select') || el);
+        if (seen.indexOf(inp) >= 0) continue; seen.push(inp); if (inp !== el) seen.push(el);
+        var f = pfx + String(fid++); try { inp.setAttribute('data-danofid', f); } catch (e3) {}
+        var isCtrl = /^(input|textarea|select)$/i.test(inp.tagName || '');
+        var label = labelText(inp) || _nearLabel(inp);
+        var value = isCtrl ? clean(inp.value) : clean(inp.innerText || inp.textContent || '').slice(0, 80);
+        out.push({ fid: f, name: (inp.getAttribute && inp.getAttribute('name')) || '', label: clean(label),
+                   type: isCtrl ? _ctrlType(inp) : 'select', required: requiredOf(inp), value: value });
+      }
+      // 单选组:同 name 的 radio = **一个**字段(治"核酸来源被整组漏/拆散")。标签取组容器(aria/label),
+      //   值取**选中项**的 value(供按值绑 body 的 source 参数);组容器打 fid → 与 a11y radiogroup 对齐。框架无关。
+      var groups = {}; var radios = document.querySelectorAll('input[type="radio"]');
+      for (var k = 0; k < radios.length; k++) {
+        var rb = radios[k];
+        if (rb.closest && rb.closest('.el-table,.ant-table,table')) continue;
+        var gn = rb.getAttribute('name') || '';
+        var cont = (rb.closest && rb.closest('[role="radiogroup"],.ant-radio-group,.el-radio-group,fieldset')) ||
+                   (rb.closest && rb.closest('.ant-form-item,.el-form-item,[class*="form-item"]')) || rb.parentElement;
+        var gkey = gn || (cont && cont.__dfk) || ('r' + k);
+        if (cont && !cont.__dfk) { cont.__dfk = gkey; }
+        if (!groups[gkey]) {
+          var f2 = pfx + String(fid++); if (cont) { try { cont.setAttribute('data-danofid', f2); } catch (e5) {} }
+          var glabel = (cont ? (labelText(cont) || _nearLabel(cont)) : '') || gn;
+          groups[gkey] = { fid: f2, name: gn, label: clean(glabel), type: 'radio',
+                           required: cont ? requiredOf(cont) : false, value: '' };
+          out.push(groups[gkey]);
+        }
+        if (rb.checked) { groups[gkey].value = clean(rb.value) || clean((rb.parentElement && rb.parentElement.innerText) || ''); }
+      }
+      return out;
+    } catch (e) { return []; }
+  };
   document.addEventListener('click', function (e) {
     // A) 点在日期/下拉弹层内 = 正在选择 → 不记这次点击;先把**此刻弹层里可见的选项**抓下来(地面真值枚举),
     //    再轮询触发框值落定后随 pick 一起回传(选完即生效)
@@ -374,6 +421,8 @@ class RecordSession:
         self.requests: list[dict] = []      # 抓到的写请求(有序,method/url/post_data/headers)→ 参数化/多步工作流
         self.reads: list[dict] = []         # 抓到的读请求(GET+JSON 列表/字典)→ Q2 选领导等 select 的候选源
         self.form_snapshot: list[dict] = []  # 提交瞬间整张表单快照(name/label/type/required/value)→ 结构化绑定 body 字段
+        self.form_ax: list[dict] = []        # 提交瞬间**无障碍树+DOM 合成**的权威字段表(build_form_spec)→ 名/必填/角色更准
+        self._form_ax_task = None            # _capture_form_ax 的异步任务句柄(发布前 await 一下,确保抓完)
         self._on_step = on_step
         self._on_request_cb = on_request    # 实时把抓到的请求推给前端(诊断可见)
         # 拦截提交:点提交时抓到业务写请求后,假装成功、不真发给服务器 → 录制不产生真实记录
@@ -535,6 +584,46 @@ class RecordSession:
     def captured_form_snapshot(self) -> list[dict]:
         return list(self.form_snapshot)
 
+    def captured_form_ax(self) -> list[dict]:
+        return list(self.form_ax)
+
+    async def await_form_ax(self, timeout: float = 8.0) -> None:
+        """发布/构造字段表前调一下:等无障碍树抓取任务完成(有上限,超时就用已有结果/退回 form_snapshot)。"""
+        t = self._form_ax_task
+        if t is None or t.done():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(t), timeout=timeout)
+        except Exception:  # noqa: BLE001 —— 超时/出错都不阻断,退回 form_snapshot
+            pass
+
+    async def _capture_form_ax(self) -> None:
+        """提交瞬间抓**无障碍树(CDP)+ DOM** → build_form_spec 合成权威字段表(名/必填/角色更准)。失败不阻断录制。
+        用独立短命 CDP 会话(不动截屏那路);提交被拦截、页面未跳转,此刻 DOM 完好,正是抓取时机。"""
+        if self._closing or self._context is None or self.page is None or self.page.is_closed():
+            return
+        cdp = None
+        try:
+            from dano.execution.page.formspec import capture_form_ax
+            cdp = await self._context.new_cdp_session(self.page)
+            spec = await capture_form_ax(self.page, cdp)
+            if spec:
+                self.form_ax = spec
+            # 可观测:权威字段表抓到几个、名字来源分布(a11y/dom/占位符)→ 录制日志一眼看出是否真生效,免猜
+            src: dict = {}
+            for f in spec or []:
+                src[f.get("source", "?")] = src.get(f.get("source", "?"), 0) + 1
+            log.info("form_ax.captured", n=len(spec or []), frames=len(getattr(self.page, "frames", []) or []),
+                     by_source=src)
+        except Exception as e:  # noqa: BLE001 —— a11y 抓取失败 → 退回 form_snapshot,绝不影响发布
+            log.warning("form_ax.failed", error=str(e))
+        finally:
+            if cdp is not None:
+                try:
+                    await cdp.detach()
+                except Exception:  # noqa: BLE001
+                    pass
+
     def _resp_dispatch(self, response) -> None:  # noqa: ANN001 —— 同步快筛后再异步读 body
         try:
             m = (response.request.method or "").upper()
@@ -592,6 +681,10 @@ class RecordSession:
             fs = step.get("fields") or []
             if isinstance(fs, list) and fs:
                 self.form_snapshot = fs
+            try:
+                self._form_ax_task = asyncio.create_task(self._capture_form_ax())   # 抓**无障碍树**合成权威字段表(异步)
+            except Exception:  # noqa: BLE001
+                pass
             return
         # 同一 locator 连续 fill/select/pick(用户改了又改/逐字符)→ 覆盖,只留最后一次
         if (self.steps and self.steps[-1].get("locator") == step.get("locator")
