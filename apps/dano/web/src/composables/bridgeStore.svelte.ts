@@ -40,8 +40,10 @@ import {
 } from "../utils/models";
 import { t } from "../i18n";
 import {
+  bridgeCommandErrorNotificationMessage,
   bridgeServerErrorMessage,
   isStaleBridgeClientError,
+  summarizeErrorMessage,
 } from "../utils/bridgeErrors";
 import {
   contentBlocks,
@@ -210,15 +212,6 @@ function normalizeThinkingLevel(value: unknown): RpcThinkingLevel | null {
     default:
       return null;
   }
-}
-
-function summarizeErrorMessage(message: string, fallback: string): string {
-  const line = message
-    .split(/\r?\n/)
-    .map(part => part.trim())
-    .find(Boolean);
-  if (!line) return fallback;
-  return line.length > 220 ? `${line.slice(0, 217)}...` : line;
 }
 
 function normalizeBridgePath(value: unknown): string | null {
@@ -2288,6 +2281,14 @@ function handleResponse(payload: RpcResponse) {
 
 function handleEvent(payload: RpcBridgeEvent) {
   switch (payload.type) {
+    case "command_error": {
+      const message = bridgeCommandErrorNotificationMessage(
+        payload,
+        t("store.error.sendBridgeMessageFailed"),
+      );
+      if (message) pushNotification(message, "error");
+      break;
+    }
     case "transcript_snapshot": {
       const data = payload as RpcTranscriptSnapshotEvent;
       if (Array.isArray(data.messages)) applyTranscriptPage(data, "replace");

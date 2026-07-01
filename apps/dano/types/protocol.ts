@@ -714,6 +714,13 @@ export interface RpcQueueUpdateEvent {
   followUp: RpcQueuedMessage[];
 }
 
+export interface RpcCommandErrorEvent {
+  type: "command_error";
+  commandType: string;
+  correlationId?: string;
+  error: string;
+}
+
 // ============================================================================
 // RPC Responses (server → client)
 // ============================================================================
@@ -951,6 +958,7 @@ export type RpcBridgeEvent =
   | RpcModelSelectEvent
   | RpcCompactionStartEvent
   | RpcCompactionEndEvent
+  | RpcCommandErrorEvent
   | { type: "session_compact" };
 
 export type ServerMessage =

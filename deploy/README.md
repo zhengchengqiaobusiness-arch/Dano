@@ -7,13 +7,16 @@ This directory contains deployment-specific defaults and proxy config.
 - Source runtime defaults live in `deploy/runtime-defaults/`.
 - The runtime compatibility directory is `$DANO_DEFAULT_WORKSPACE_PATH/.pi`.
 - The default workspace is `/tmp/dano`.
+- The app container runs as the non-root `node` user (`1000:1000`) with
+  `HOME=/home/node`.
 - Production deployment keeps three directories separate:
   - `/tmp/dano-build-*` is the disposable source checkout and image build dir.
   - `/opt/dano/deploy` stores Compose, `.env`, secrets, and nginx config.
   - `/opt/dano/runtime-data` is mounted at `/tmp/dano` for runtime state.
-- Docker Compose mounts `${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/tmp/dano`, so
-  runtime sessions and user-modified `.pi` files survive container recreation
-  without writing into a source checkout.
+- Docker Compose mounts `${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/tmp/dano`.
+  That host directory must be writable by UID/GID `1000:1000`, so runtime
+  sessions and user-modified `.pi` files survive container recreation without
+  writing into a source checkout.
 
 On container startup, `deploy/docker-entrypoint.sh` creates:
 
@@ -48,6 +51,27 @@ preserves containers and runtime data. `deploy:down` removes the containers and
 Compose network; the bind-mounted runtime directory remains intact.
 
 The app container listens on `8080`; nginx publishes `${DANO_NGINX_PORT:-80}`.
+
+### Local Podman Notes
+
+If `podman compose` fails with `could not find a matching machine`, check the
+first error line before debugging Dano. On macOS, `podman compose` may fail
+while listing machines if it cannot create or update the machine lockfile, for
+example:
+
+```text
+open ~/.config/containers/podman/machine/applehv/podman-machine-default.lock:
+operation not permitted
+```
+
+`podman info` can still work in that state because the remote socket is valid;
+the failure is in Compose's machine enumeration. Fix the lockfile permission or
+run Compose from a shell that can write Podman's machine state.
+
+Do not use a plain `podman run` as a Compose-equivalent secret test. Compose
+loads `.env` and passes variables such as `XIAOMI_TOKEN_PLAN_CN_API_KEY`; a
+manual `podman run` only receives the environment values explicitly passed with
+`-e`, so it can produce a false `No API key found` error.
 
 ## Production Server Run
 
@@ -129,6 +153,7 @@ Example:
 ```bash
 mkdir -p .secrets
 printf '%s' "$OPENAI_API_KEY" > .secrets/openai_api_key
+chown 1000:1000 .secrets/openai_api_key
 chmod 600 .secrets/openai_api_key
 OPENAI_API_KEY_FILE=/run/secrets/openai_api_key pnpm run deploy:up
 ```
