@@ -12,6 +12,10 @@ _Avoid_: REST runtime, HTTP client, policy engine
 The internal HTTP/SSE and RPC subsystem inside the Dano server that connects browser clients to runtime session capabilities. It is a source-module boundary, not an independent workspace package or separate service.
 _Avoid_: bridge workspace package, separate bridge service
 
+**Field Assist**:
+A transient AI helper for ask_user_question input and editor fields that rewrites or generates the field value without submitting the answer or creating a normal Dano conversation turn.
+_Avoid_: detached session, user prompt, field workflow, preview candidate
+
 **Uploaded Project File**:
 A user-selected file that Dano stores inside the current session workspace and presents to Pi as a project file path reference. The browser may show the user's original filename, but Pi consumes the workspace-relative path.
 _Avoid_: image attachment, temporary upload blob, base64 file payload

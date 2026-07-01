@@ -47,11 +47,12 @@ describe("ask_user_question tool", () => {
   it("instructs the model to collect required input and confirm final summaries", () => {
     expect(askUserQuestionTool.promptGuidelines).toEqual([
       "Use ask_user_question whenever you need user input to continue; do not ask the question only in assistant text.",
+      "When the user asks to fill in a form, complete a form, or provide form fields, collect the fields with ask_user_question.",
       "Call ask_user_question at most once per assistant response. If you need several answers, put every item in one questions array.",
       "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
       "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
       "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
-      "Set default on every non-confirmation question, including every item in questions, using the most likely or safest answer while still letting the user change it.",
+      "Set a valid non-empty default on every non-confirmation question, including every item in questions, using the most likely or safest answer while still letting the user change it. Never use an empty string as default.",
       "When using questions, the top level must contain only questions. Put id, question, options, inputType, dataSource, multiple, and default inside each questions item.",
       "For forms, applications, or other user-reviewed summaries, call ask_user_question with confirm: true after presenting the final summary and before treating it as confirmed, ready to submit, or complete.",
     ]);
@@ -309,6 +310,15 @@ describe("ask_user_question tool", () => {
     });
   });
 
+  it("rejects empty text defaults with a default-specific error", async () => {
+    await expect(
+      executeQuestion("empty-default", {
+        question: "Reason?",
+        default: "",
+      }),
+    ).rejects.toThrow("默认答案无效：答案不能为空");
+  });
+
   it("returns multiple selected options", async () => {
     const execution = executeQuestion("multiple-1", {
       question: "Choose environments",
@@ -487,6 +497,62 @@ describe("ask_user_question tool", () => {
     });
   });
 
+  it("accepts compatible single-question object and alias fields", async () => {
+    const execution = askUserQuestionTool.execute(
+      "compat-single-object",
+      {
+        questions: {
+          key: "description",
+          title: "请填写说明",
+          type: "textarea",
+          defaultValue: "默认内容",
+        },
+      } as never,
+      undefined,
+      undefined,
+      {} as never,
+    );
+
+    askUserQuestionCoordinator.answer("compat-single-object", {
+      cancelled: false,
+      answer: { description: "更新后的说明" },
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: {
+        status: "answered",
+        answer: { description: "更新后的说明" },
+      },
+    });
+  });
+
+  it("accepts JSON-stringified compatible questions", async () => {
+    const execution = askUserQuestionTool.execute(
+      "compat-json-string",
+      {
+        questions: JSON.stringify({
+          key: "description",
+          title: "请填写说明",
+          type: "textarea",
+          defaultValue: "默认内容",
+        }),
+      } as never,
+      undefined,
+      undefined,
+      {} as never,
+    );
+
+    askUserQuestionCoordinator.answer("compat-json-string", {
+      cancelled: false,
+      answer: { description: "默认内容" },
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: {
+        status: "answered",
+        answer: { description: "默认内容" },
+      },
+    });
+  });
+
   it("rejects simultaneous separate questions so the model retries as one grouped card", async () => {
     const first = executeQuestion("separate-1", {
       question: "Leave type?",
@@ -499,8 +565,10 @@ describe("ask_user_question tool", () => {
       default: "Today",
     });
 
-    await expect(second).rejects.toThrow("exactly one ask_user_question call");
-    await expect(first).rejects.toThrow("exactly one ask_user_question call");
+    await expect(second).rejects.toThrow("exactly one native ask_user_question call");
+    await expect(second).rejects.not.toThrow("waiting");
+    await expect(first).rejects.toThrow("exactly one native ask_user_question call");
+    await expect(first).rejects.not.toThrow("waiting");
     expect(() =>
       askUserQuestionCoordinator.answer("separate-1", {
         cancelled: false,

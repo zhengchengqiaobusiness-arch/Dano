@@ -1,6 +1,8 @@
 import type {
   AskUserQuestionAnswer,
   ClientMessage,
+  FieldAssistCommandPayload,
+  FieldAssistResult,
   RpcBridgeEvent,
   RpcCommand,
   RpcAgentEndEvent,
@@ -38,10 +40,16 @@ import {
 } from "../utils/models";
 import { t } from "../i18n";
 import {
+  bridgeServerErrorMessage,
+  isStaleBridgeClientError,
+} from "../utils/bridgeErrors";
+import {
+  contentBlocks,
   normalizeTranscript,
   transcriptConfigState,
   type PendingTranscriptSessionEvent,
 } from "../utils/transcript";
+import { isPendingAskUserQuestionBlock } from "../utils/askUserQuestion";
 
 type TranscriptConfigSnapshot = ReturnType<typeof transcriptConfigState>;
 
@@ -823,9 +831,14 @@ async function postEnvelope(msg: ClientMessage): Promise<void> {
     } catch {
       detail = await response.text().catch(() => "");
     }
-    throw new Error(
-      detail || t("store.error.sendBridgeMessageFailed"),
-    );
+    if (isStaleBridgeClientError(detail)) {
+      _connectionStatus = "disconnected";
+      _connectionError = t("store.error.staleClient");
+    }
+    throw new Error(bridgeServerErrorMessage(detail, {
+      staleClient: t("store.error.staleClient"),
+      fallback: t("store.error.sendBridgeMessageFailed"),
+    }));
   }
 }
 
@@ -2016,6 +2029,19 @@ export function answerQuestion(
   return sendCommand({ type: "answer_question", toolCallId, ...response });
 }
 
+export async function fieldAssist(
+  payload: FieldAssistCommandPayload,
+): Promise<FieldAssistResult> {
+  const response = await sendCommand(
+    { type: "field_assist", ...payload },
+    { timeoutMs: 65_000 },
+  );
+  if (!response.success) {
+    throw new Error(response.error || t("store.error.sendBridgeMessageFailed"));
+  }
+  return response.data as FieldAssistResult;
+}
+
 // ---------------------------------------------------------------------------
 // Message handling
 // ---------------------------------------------------------------------------
@@ -2530,6 +2556,50 @@ function markDisconnected(reason = t("appHeader.connection.disconnected")) {
   rejectPendingRequests(reason);
 }
 
+function pendingAskUserQuestionToolCallIds(): string[] {
+  const ids = new Set<string>();
+  for (const message of _transcript) {
+    for (const block of contentBlocks(message)) {
+      if (
+        block.kind === "tool" &&
+        isPendingAskUserQuestionBlock(block) &&
+        block.toolCallId
+      ) {
+        ids.add(block.toolCallId);
+      }
+    }
+  }
+  return [...ids];
+}
+
+function cancelPendingQuestionsOnDisconnect() {
+  if (!clientMessagesUrl) return;
+  for (const toolCallId of pendingAskUserQuestionToolCallIds()) {
+    const body = JSON.stringify({
+      type: "command",
+      payload: {
+        id: `cancel-question:${toolCallId}`,
+        type: "answer_question",
+        toolCallId,
+        cancelled: true,
+      },
+    } satisfies ClientMessage);
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon(
+        clientMessagesUrl,
+        new Blob([body], { type: "application/json" }),
+      );
+    } else {
+      void fetch(clientMessagesUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        keepalive: true,
+      }).catch(() => {});
+    }
+  }
+}
+
 async function connect() {
   if (disposed) return;
 
@@ -2608,6 +2678,7 @@ function disconnect() {
   const disconnectUrl = clientId
     ? `/api/clients/${encodeURIComponent(clientId)}/disconnect`
     : null;
+  cancelPendingQuestionsOnDisconnect();
   if (disconnectUrl) {
     if (navigator.sendBeacon) {
       navigator.sendBeacon(
@@ -2790,6 +2861,7 @@ export function initBridge() {
     editQueuedMessage,
     respondToUIRequest,
     answerQuestion,
+    fieldAssist,
     dismissNotification,
     disconnect,
   };

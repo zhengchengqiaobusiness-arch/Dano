@@ -64,6 +64,14 @@ const createMockTransport = (): MockTransport => {
   };
 };
 
+function lastTranscriptUpsert(sendCalls: any[]) {
+  for (let index = sendCalls.length - 1; index >= 0; index -= 1) {
+    const call = sendCalls[index];
+    if (call.payload?.type === "transcript_upsert") return call;
+  }
+  return undefined;
+}
+
 // Mock context
 function runGit(cwd: string, args: string[]) {
   const result = spawnSync("git", args, {
@@ -426,6 +434,71 @@ describe("BridgeRpcAdapter", () => {
           relativePath: "uploads/sample.pdf",
           previewUrl: undefined,
         },
+      ]);
+
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("projects plain prompt text when the live user start event is empty", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-prompt-text-"));
+      const sessionManager = SessionManager.create(tmpDir, tmpDir);
+      const sessionFile = sessionManager.getSessionFile();
+      if (!sessionFile) throw new Error("session file was not created");
+      (
+        context.state.sessionManager.getSessionFile as ReturnType<typeof vi.fn>
+      ).mockReturnValue(sessionFile);
+
+      const subscribeSpy = vi.fn().mockReturnValue(() => {});
+      createAgentSessionMock.mockResolvedValue({
+        session: {
+          sessionFile,
+          sessionId: sessionManager.getSessionId(),
+          isStreaming: false,
+          bindExtensions: vi.fn().mockResolvedValue(undefined),
+          subscribe: subscribeSpy,
+          prompt: vi.fn().mockResolvedValue(undefined),
+          sessionManager,
+        },
+      });
+
+      const text = `ask_user_question {
+  "question": "请填写说明",
+  "inputType": "textarea",
+  "default": "默认内容"
+}`;
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: { id: "cmd-plain-text", type: "prompt", message: text },
+          }),
+        ),
+      );
+      await new Promise(r => setTimeout(r, 30));
+
+      (ws.send as ReturnType<typeof vi.fn>).mockClear();
+      const sessionEventHandler = subscribeSpy.mock.calls[0]?.[0] as
+        | ((event: object) => void)
+        | undefined;
+      sessionEventHandler?.({
+        type: "message_start",
+        message: {
+          role: "user",
+          content: [],
+        },
+      });
+
+      const transcriptStart = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+        .map(call => JSON.parse(call[0] as string))
+        .find(
+          call =>
+            call.type === "event" && call.payload.type === "transcript_start",
+        );
+      expect(transcriptStart?.payload.message.content).toEqual([
+        { type: "text", text },
       ]);
 
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -931,6 +1004,49 @@ describe("BridgeRpcAdapter", () => {
         command: "answer_question",
         success: true,
         data: { status: "answered", answer: "Keep" },
+      });
+    });
+
+    it("runs field assist through the command channel without transcript events", async () => {
+      context.fieldAssist = {
+        assist: vi.fn().mockResolvedValue({
+          value: "润色后",
+          metadata: {
+            action: "polish",
+            fieldType: "input",
+            inputLength: 2,
+            outputLength: 3,
+            elapsedMs: 1,
+          },
+        }),
+      };
+      const command: RpcCommand = {
+        id: "field-1",
+        type: "field_assist",
+        requestId: "question-1",
+        action: "polish",
+        fieldType: "input",
+        requestMethod: "input",
+        title: "事由",
+        currentValue: "请假",
+      };
+
+      ws.trigger(
+        "message",
+        Buffer.from(JSON.stringify({ type: "command", payload: command })),
+      );
+      await new Promise(r => setTimeout(r, 10));
+
+      expect(context.fieldAssist.assist).toHaveBeenCalledWith(command, {
+        clientId: "test-client",
+      });
+      expect(context.actions.sendUserMessage).not.toHaveBeenCalled();
+      const response = JSON.parse(ws.send.mock.calls.at(-1)?.[0] ?? "null");
+      expect(response.payload).toMatchObject({
+        id: "field-1",
+        command: "field_assist",
+        success: true,
+        data: { value: "润色后" },
       });
     });
 
@@ -2161,6 +2277,223 @@ describe("BridgeRpcAdapter", () => {
         toolCallId: "tool-1",
         toolName: "read",
       });
+    });
+
+    it("preserves streamed tool call arguments when final update is sparse", async () => {
+      (ws.send as ReturnType<typeof vi.fn>).mockClear();
+
+      const handler = (context.events.subscribe as ReturnType<typeof vi.fn>)
+        .mock.calls[0]?.[0] as
+        | ((event: Record<string, unknown>) => void)
+        | undefined;
+
+      handler?.({
+        type: "message_start",
+        message: { id: "assistant-1", role: "assistant", content: [] },
+      });
+      handler?.({
+        type: "message_update",
+        message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "tool-1",
+              name: "ask_user_question",
+              arguments: "",
+            },
+          ],
+        },
+        assistantMessageEvent: {
+          type: "toolcall_delta",
+          contentIndex: 0,
+          delta: '{"question":"请填写说明","inputType":"textarea","default":"默认内容"}',
+        },
+      });
+      handler?.({
+        type: "message_end",
+        message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "tool-1",
+              name: "ask_user_question",
+              arguments: "",
+            },
+          ],
+        },
+      });
+
+      await new Promise(r => setTimeout(r, 250));
+
+      const sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string),
+      );
+      const finalUpsert = lastTranscriptUpsert(sendCalls);
+
+      expect(finalUpsert?.payload.message.content[0]).toMatchObject({
+        type: "toolCall",
+        id: "tool-1",
+        name: "ask_user_question",
+        arguments: '{"question":"请填写说明","inputType":"textarea","default":"默认内容"}',
+      });
+    });
+
+    it("preserves streamed tool call arguments when final update has empty object arguments", async () => {
+      (ws.send as ReturnType<typeof vi.fn>).mockClear();
+
+      const handler = (context.events.subscribe as ReturnType<typeof vi.fn>)
+        .mock.calls[0]?.[0] as
+        | ((event: Record<string, unknown>) => void)
+        | undefined;
+
+      handler?.({
+        type: "message_start",
+        message: { id: "assistant-1", role: "assistant", content: [] },
+      });
+      handler?.({
+        type: "message_update",
+        message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "tool-1",
+              name: "ask_user_question",
+              arguments: "",
+            },
+          ],
+        },
+        assistantMessageEvent: {
+          type: "toolcall_delta",
+          contentIndex: 0,
+          delta: '{"question":"请填写说明","inputType":"textarea","default":"默认内容"}',
+        },
+      });
+      handler?.({
+        type: "message_end",
+        message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "tool-1",
+              name: "ask_user_question",
+              arguments: {},
+            },
+          ],
+        },
+      });
+
+      await new Promise(r => setTimeout(r, 250));
+
+      const sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string),
+      );
+      const finalUpsert = lastTranscriptUpsert(sendCalls);
+
+      expect(finalUpsert?.payload.message.content[0]).toMatchObject({
+        type: "toolCall",
+        id: "tool-1",
+        name: "ask_user_question",
+        arguments: '{"question":"请填写说明","inputType":"textarea","default":"默认内容"}',
+      });
+    });
+
+    it("keeps the previous question card when another question tool streams at the same index", async () => {
+      (ws.send as ReturnType<typeof vi.fn>).mockClear();
+
+      const handler = (context.events.subscribe as ReturnType<typeof vi.fn>)
+        .mock.calls[0]?.[0] as
+        | ((event: Record<string, unknown>) => void)
+        | undefined;
+
+      handler?.({
+        type: "message_start",
+        message: { id: "assistant-1", role: "assistant", content: [] },
+      });
+      handler?.({
+        type: "message_update",
+        message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "tool-1",
+              name: "ask_user_question",
+              arguments: "",
+            },
+          ],
+        },
+        assistantMessageEvent: {
+          type: "toolcall_delta",
+          contentIndex: 0,
+          delta: '{"question":"选择配置","options":["A","B"],"default":"A"}',
+        },
+      });
+      handler?.({
+        type: "message_update",
+        message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "tool-2",
+              name: "ask_user_question",
+              arguments: "",
+            },
+          ],
+        },
+        assistantMessageEvent: {
+          type: "toolcall_delta",
+          contentIndex: 0,
+          delta: '{"question":"请填写说明","inputType":"textarea","default":"默认内容"}',
+        },
+      });
+      handler?.({
+        type: "message_end",
+        message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "tool-2",
+              name: "ask_user_question",
+              arguments: "",
+            },
+          ],
+        },
+      });
+
+      await new Promise(r => setTimeout(r, 250));
+
+      const sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string),
+      );
+      const finalUpsert = lastTranscriptUpsert(sendCalls);
+
+      expect(finalUpsert?.payload.message.content).toEqual([
+        {
+          type: "toolCall",
+          id: "tool-1",
+          name: "ask_user_question",
+          arguments: '{"question":"选择配置","options":["A","B"],"default":"A"}',
+        },
+        {
+          type: "toolCall",
+          id: "tool-2",
+          name: "ask_user_question",
+          arguments: '{"question":"请填写说明","inputType":"textarea","default":"默认内容"}',
+        },
+      ]);
     });
 
     it("includes tool metadata in synthesized tool call deltas", async () => {

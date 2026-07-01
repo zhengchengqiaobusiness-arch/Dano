@@ -11,12 +11,14 @@
   let {
     class: className = "",
     content = "",
+    fallbackText = "",
     streaming = false,
     deferMermaidErrors = false,
     onOpenFileReference = (_: { path: string; lineNumber: number }) => {},
   }: {
     class?: string;
     content?: string;
+    fallbackText?: string;
     streaming?: boolean;
     deferMermaidErrors?: boolean;
     onOpenFileReference?: (payload: { path: string; lineNumber: number }) => void;
@@ -40,9 +42,34 @@
   let postProcessScheduled = false;
   let forceCodeRender = false;
   let forceMermaidRender = false;
+  let showFallback = $state(false);
 
   function markdownBody(): HTMLElement | null {
-    return container?.querySelector<HTMLElement>(".markdown-body") ?? null;
+    return container?.querySelector<HTMLElement>(".markdown-rendered") ?? null;
+  }
+
+  function markdownBodyHasContent(root: HTMLElement): boolean {
+    if (root.textContent?.trim()) return true;
+    return Boolean(root.querySelector("img, svg, pre, code, table, ul, ol, blockquote, hr, details"));
+  }
+
+  function markdownBodyDroppedJsonLikePayload(root: HTMLElement, source: string): boolean {
+    if (!/\{[\s\S]*\}/.test(source)) return false;
+    const renderedText = root.textContent ?? "";
+    if (renderedText.includes("{") || renderedText.includes("}")) return false;
+
+    const braceIndex = source.indexOf("{");
+    const payload = source.slice(braceIndex).trim();
+    return /["'][^"']+["']\s*:/.test(payload);
+  }
+
+  function updateFallbackVisibility() {
+    const root = markdownBody();
+    showFallback = Boolean(fallbackText.trim()) && (
+      !root ||
+      !markdownBodyHasContent(root) ||
+      markdownBodyDroppedJsonLikePayload(root, fallbackText)
+    );
   }
 
   function languageName(value?: string | null): string {
@@ -478,6 +505,7 @@
       await renderCodeBlocks(shouldForceCode);
       await renderMermaidBlocks(shouldForceMermaid);
       enhanceCopyableBlocks();
+      updateFallbackVisibility();
     });
   }
 
@@ -608,7 +636,8 @@
   });
 
   $effect(() => {
-    void [content, streaming, deferMermaidErrors];
+    void [content, fallbackText, streaming, deferMermaidErrors];
+    showFallback = false;
     schedulePostProcess();
   });
 
@@ -619,8 +648,11 @@
     markdown={content}
     options={COMARK_OPTIONS}
     streaming={streaming}
-    class={`markdown-body ${className}`.trim()}
+    class={`markdown-body markdown-rendered ${showFallback ? "markdown-rendered-hidden" : ""} ${className}`.trim()}
   />
+  {#if showFallback}
+    <div class={`markdown-body markdown-fallback ${className}`.trim()}>{fallbackText}</div>
+  {/if}
 </div>
 
 <style>
@@ -643,6 +675,15 @@
   :global(.markdown-body p) {
     margin: 0.4em 0;
     white-space: pre-wrap;
+  }
+
+  :global(.markdown-fallback) {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  :global(.markdown-rendered-hidden) {
+    display: none;
   }
 
   :global(.markdown-body h1),

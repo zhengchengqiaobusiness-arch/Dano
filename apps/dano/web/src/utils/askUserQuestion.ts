@@ -12,7 +12,13 @@ import type { ToolContentBlock } from "./transcript";
 export type NormalizedAskUserQuestionOption = AskUserQuestionOption;
 
 export type AskUserQuestionItem =
-  | { id: string; kind: "text"; question: string; default?: string }
+  | {
+      id: string;
+      kind: "text";
+      question: string;
+      inputType?: "text" | "textarea";
+      default?: string;
+    }
   | {
       id: string;
       kind: "single";
@@ -74,6 +80,16 @@ export function isAskUserQuestionToolError(block: ToolContentBlock): boolean {
   );
 }
 
+export function isPendingAskUserQuestionBlock(
+  block: ToolContentBlock,
+): boolean {
+  return (
+    block.toolName === ASK_USER_QUESTION_TOOL_NAME &&
+    block.toolStatus === "pending" &&
+    Boolean(block.toolCallId)
+  );
+}
+
 export function hideAskUserQuestionToolBlock(
   block: ToolContentBlock,
 ): boolean {
@@ -127,7 +143,8 @@ export function askUserQuestionRequest(
     return null;
   }
 
-  const rawQuestions = block.toolArgs.questions;
+  const toolArgs = normalizeCompatibleArgs(block.toolArgs);
+  const rawQuestions = toolArgs.questions;
   if (rawQuestions !== undefined) {
     if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) return null;
     const seenIds = new Set<string>();
@@ -147,8 +164,85 @@ export function askUserQuestionRequest(
     return { batch: true, questions };
   }
 
-  const item = parseQuestionItem(block.toolArgs, "answer", true);
+  const item = parseQuestionItem(toolArgs, "answer", true);
   return item ? { ...item, batch: false } : null;
+}
+
+function normalizeCompatibleArgs(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  const normalized = normalizeCompatibleQuestionArgs(args);
+  const rawQuestions = args.questions;
+  if (rawQuestions !== undefined) {
+    const parsedQuestions = parseJsonString(rawQuestions);
+    const rawItems = Array.isArray(parsedQuestions)
+      ? parsedQuestions
+      : isRecord(parsedQuestions)
+        ? [parsedQuestions]
+        : undefined;
+    normalized.questions = rawItems?.map(normalizeCompatibleQuestionArgs);
+  }
+  return normalized;
+}
+
+function normalizeCompatibleQuestionArgs(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  const normalized: Record<string, unknown> = { ...args };
+  const id = firstString(args.id, args.key, args.name);
+  if (id) normalized.id = id;
+
+  const question = firstString(args.question, args.title, args.label, args.prompt);
+  if (question) normalized.question = question;
+
+  if (args.options === undefined && args.choices !== undefined) {
+    normalized.options = args.choices;
+  }
+
+  const inputType = normalizeInputTypeAlias(
+    args.inputType ?? args.input_type ?? args.type ?? args.component,
+  );
+  if (inputType) normalized.inputType = inputType;
+
+  if (args.dataSource === undefined && args.data_source !== undefined) {
+    normalized.dataSource = args.data_source;
+  }
+
+  if (args.multiple === undefined) {
+    normalized.multiple = args.multi ?? args.multipleSelect;
+  }
+
+  if (args.default === undefined) {
+    normalized.default = firstDefined(args.defaultValue, args.prefill, args.value);
+  }
+
+  if (inputType === "confirm") normalized.confirm = true;
+
+  return normalized;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed) return trimmed;
+  }
+  return undefined;
+}
+
+function firstDefined(...values: unknown[]): unknown {
+  return values.find(value => value !== undefined);
+}
+
+function parseJsonString(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return value;
+  }
 }
 
 function parseQuestionItem(
@@ -185,6 +279,7 @@ function parseQuestionItem(
           id: stringOrFallback(args.id, fallbackId),
           kind: "text",
           question,
+          ...(inputType === "textarea" ? { inputType } : {}),
           ...(typeof rawDefault === "string" && rawDefault.trim()
             ? { default: rawDefault.trim() }
             : {}),
@@ -273,14 +368,35 @@ function isOptionId(value: unknown): value is AskUserQuestionOptionId {
 }
 
 function parseInputType(value: unknown): AskUserQuestionInputType | undefined {
-  return value === "text" ||
+  return normalizeInputTypeAlias(value);
+}
+
+function normalizeInputTypeAlias(value: unknown): AskUserQuestionInputType | undefined {
+  if (
+    value === "text" ||
+    value === "textarea" ||
     value === "radio" ||
     value === "checkbox" ||
     value === "select" ||
     value === "treeSelect" ||
     value === "confirm"
-    ? value
-    : undefined;
+  ) {
+    return value;
+  }
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().replace(/[-_\s]/g, "").toLocaleLowerCase();
+  if (normalized === "textarea" || normalized === "multiline" || normalized === "longtext") {
+    return "textarea";
+  }
+  if (normalized === "text" || normalized === "input" || normalized === "string") {
+    return "text";
+  }
+  if (normalized === "radio") return "radio";
+  if (normalized === "checkbox" || normalized === "multiselect") return "checkbox";
+  if (normalized === "select" || normalized === "dropdown") return "select";
+  if (normalized === "treeselect") return "treeSelect";
+  if (normalized === "confirm" || normalized === "boolean") return "confirm";
+  return undefined;
 }
 
 function parseDataSource(value: unknown): AskUserQuestionDataSource | undefined {

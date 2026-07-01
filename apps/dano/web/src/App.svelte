@@ -1290,6 +1290,7 @@
         onToggleAutoCompaction={handleAutoCompactionToggle}
         onOpenFileReference={handleOpenFileReference}
         readWorkspaceFile={readDisplayedWorkspaceFile}
+        onFieldAssist={(payload) => bridge.fieldAssist(payload)}
       />
 
     </div>

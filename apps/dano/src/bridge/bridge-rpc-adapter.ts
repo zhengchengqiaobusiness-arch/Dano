@@ -72,6 +72,12 @@ import type {
 } from "./types.js";
 import { detectWorkspaceEnvironments } from "./workspace-environment.js";
 import type { UploadRegistry } from "./upload-registry.js";
+import type { FieldAssistService } from "./field-assist.js";
+
+type RpcTranscriptToolCallBlock = Extract<
+  RpcTranscriptContentBlock,
+  { type: "toolCall" }
+>;
 
 /** Model shape mirrored from Pi — used in shaping helpers below. */
 type PiModel = {
@@ -137,6 +143,7 @@ export interface BridgeRpcAdapterContext {
   events: BridgeSessionEvents;
   state: BridgeSessionState;
   actions: BridgeSessionActions;
+  fieldAssist?: FieldAssistService;
 }
 
 /**
@@ -2342,6 +2349,15 @@ function stringFromToolArguments(value: unknown): string {
   }
 }
 
+function hasToolArguments(value: unknown): boolean {
+  if (typeof value === "string") return Boolean(value.trim());
+  if (value === undefined || value === null) return false;
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return Object.keys(value).length > 0;
+  }
+  return true;
+}
+
 function streamTextForContentItem(
   item: string | RpcTranscriptContentBlock | undefined,
 ): { blockType: RpcTranscriptDeltaEvent["blockType"]; text: string } | null {
@@ -2394,6 +2410,212 @@ function synthesizeTranscriptDelta(
   }
 
   return null;
+}
+
+function applyTranscriptDeltaToMessage(
+  base: RpcTranscriptMessage,
+  delta: Omit<
+    RpcTranscriptDeltaEvent,
+    "type" | "sessionPath" | "transcriptKey" | "messageId" | "role"
+  >,
+): RpcTranscriptMessage {
+  const content = Array.isArray(base.content) ? [...base.content] : [];
+  while (content.length <= delta.contentIndex) {
+    content.push({ type: "text", text: "" });
+  }
+
+  const block = content[delta.contentIndex];
+  if (delta.blockType === "text") {
+    if (typeof block === "string") {
+      content[delta.contentIndex] = `${block}${delta.delta}`;
+    } else if (block?.type === "text") {
+      content[delta.contentIndex] = { ...block, text: `${block.text}${delta.delta}` };
+    } else {
+      content[delta.contentIndex] = { type: "text", text: delta.delta };
+    }
+  } else if (delta.blockType === "thinking") {
+    if (block && typeof block === "object" && block.type === "thinking") {
+      content[delta.contentIndex] = {
+        ...block,
+        thinking: `${block.thinking}${delta.delta}`,
+      };
+    } else {
+      content[delta.contentIndex] = { type: "thinking", thinking: delta.delta };
+    }
+  } else if (delta.blockType === "toolCall") {
+    const targetIndex =
+      block && typeof block === "object" &&
+      block.type === "toolCall" &&
+      isDifferentToolCall(block, delta)
+        ? findMatchingToolCallIndex(content, delta) ?? content.length
+        : delta.contentIndex;
+    const targetBlock = content[targetIndex];
+    if (
+      targetBlock &&
+      typeof targetBlock === "object" &&
+      targetBlock.type === "toolCall"
+    ) {
+      const currentArguments = stringFromToolArguments(targetBlock.arguments);
+      content[targetIndex] = {
+        ...targetBlock,
+        id: delta.toolCallId ?? targetBlock.id,
+        name: delta.toolName ?? targetBlock.name,
+        arguments: `${currentArguments}${delta.delta}`,
+      };
+    } else {
+      content[targetIndex] = {
+        type: "toolCall",
+        id: delta.toolCallId,
+        name: delta.toolName ?? "tool",
+        arguments: delta.delta,
+      };
+    }
+  }
+
+  return { ...base, content };
+}
+
+function isDifferentToolCall(
+  block: RpcTranscriptToolCallBlock,
+  delta: Pick<
+    RpcTranscriptDeltaEvent,
+    "toolCallId" | "toolName"
+  >,
+): boolean {
+  return (
+    Boolean(delta.toolCallId && block.id && delta.toolCallId !== block.id) ||
+    Boolean(delta.toolName && block.name && delta.toolName !== block.name)
+  );
+}
+
+function findMatchingToolCallIndex(
+  content: (string | RpcTranscriptContentBlock)[],
+  delta: Pick<
+    RpcTranscriptDeltaEvent,
+    "toolCallId" | "toolName"
+  >,
+): number | null {
+  const index = content.findIndex(block =>
+    Boolean(
+      block &&
+        typeof block === "object" &&
+        block.type === "toolCall" &&
+        (!delta.toolCallId || block.id === delta.toolCallId) &&
+        (!delta.toolName || block.name === delta.toolName),
+    ),
+  );
+  return index >= 0 ? index : null;
+}
+
+function mergeSparseTranscriptMessage(
+  previous: RpcTranscriptMessage | undefined,
+  next: RpcTranscriptMessage,
+): RpcTranscriptMessage {
+  if (!previous || !Array.isArray(previous.content) || !Array.isArray(next.content)) {
+    return next;
+  }
+
+  if (hasSparseToolCallContent(previous.content, next.content)) {
+    const content = [...previous.content];
+    for (const block of next.content) {
+      if (!block || typeof block !== "object" || block.type !== "toolCall") {
+        continue;
+      }
+      const index = content.findIndex(previousBlock =>
+        Boolean(
+          previousBlock &&
+            typeof previousBlock === "object" &&
+            previousBlock.type === "toolCall" &&
+            previousBlock.id === block.id &&
+            previousBlock.name === block.name,
+        ),
+      );
+      if (index >= 0) {
+        content[index] = hasToolArguments(block.arguments)
+          ? block
+          : content[index];
+      } else {
+        content.push(block);
+      }
+    }
+    return { ...next, content };
+  }
+
+  let changed = false;
+  const content = next.content.map((block, index) => {
+    const previousBlock = previous.content?.[index];
+    if (
+      typeof block === "object" &&
+      block?.type === "toolCall" &&
+      typeof previousBlock === "object" &&
+      previousBlock?.type === "toolCall" &&
+      block.id === previousBlock.id &&
+      block.name === previousBlock.name &&
+      !hasToolArguments(block.arguments) &&
+      hasToolArguments(previousBlock.arguments)
+    ) {
+      changed = true;
+      return { ...block, arguments: previousBlock.arguments };
+    }
+    if (
+      typeof block === "object" &&
+      block?.type === "text" &&
+      typeof previousBlock === "object" &&
+      previousBlock?.type === "text" &&
+      !block.text &&
+      previousBlock.text
+    ) {
+      changed = true;
+      return { ...block, text: previousBlock.text };
+    }
+    if (
+      typeof block === "object" &&
+      block?.type === "thinking" &&
+      typeof previousBlock === "object" &&
+      previousBlock?.type === "thinking" &&
+      !block.thinking &&
+      previousBlock.thinking
+    ) {
+      changed = true;
+      return { ...block, thinking: previousBlock.thinking };
+    }
+    return block;
+  });
+
+  return changed ? { ...next, content } : next;
+}
+
+function hasSparseToolCallContent(
+  previous: (string | RpcTranscriptContentBlock)[],
+  next: (string | RpcTranscriptContentBlock)[],
+): boolean {
+  const nextHasSparseToolCall = next.some(block =>
+    Boolean(
+      block &&
+        typeof block === "object" &&
+        block.type === "toolCall" &&
+        !hasToolArguments(block.arguments),
+    ),
+  );
+  if (!nextHasSparseToolCall) return false;
+
+  return previous.some(previousBlock =>
+    Boolean(
+      previousBlock &&
+        typeof previousBlock === "object" &&
+        previousBlock.type === "toolCall" &&
+        hasToolArguments(previousBlock.arguments) &&
+        !next.some(nextBlock =>
+          Boolean(
+            nextBlock &&
+              typeof nextBlock === "object" &&
+              nextBlock.type === "toolCall" &&
+              nextBlock.id === previousBlock.id &&
+              nextBlock.name === previousBlock.name,
+          ),
+        ),
+    ),
+  );
 }
 
 function streamStartMessage(
@@ -3694,9 +3916,9 @@ class TranscriptProjector {
 
     const baseTranscriptMessage = this.toTranscriptMessage(message, transcriptKey);
     if (!baseTranscriptMessage) return null;
-    const transcriptMessage = this.projectStructuredUserMessage(
-      baseTranscriptMessage,
-      sessionPath,
+    const transcriptMessage = mergeSparseTranscriptMessage(
+      this.state.lastMessagesByKey.get(transcriptKey),
+      this.projectStructuredUserMessage(baseTranscriptMessage, sessionPath),
     );
     const payloadMessage =
       eventType === "message_start"
@@ -3741,14 +3963,23 @@ class TranscriptProjector {
       sessionPath,
     );
 
+    const previousMessage = this.state.lastMessagesByKey.get(transcriptKey);
     const deltaEvent =
       extractAssistantMessageDeltaEvent(event, transcriptMessage) ??
       synthesizeTranscriptDelta(
-        this.state.lastMessagesByKey.get(transcriptKey),
+        previousMessage,
         transcriptMessage,
       );
-    this.rememberTranscriptMessage(transcriptMessage);
-    if (!deltaEvent) return null;
+    if (!deltaEvent) {
+      this.rememberTranscriptMessage(transcriptMessage);
+      return null;
+    }
+    this.rememberTranscriptMessage(
+      applyTranscriptDeltaToMessage(
+        previousMessage ?? transcriptMessage,
+        deltaEvent,
+      ),
+    );
 
     return {
       type: "transcript_delta",
@@ -3867,7 +4098,8 @@ class TranscriptProjector {
   ): RpcTranscriptMessage {
     if (!message || message.role !== "user") return message;
 
-    const pending = this.pendingStructuredUserMessages.find(candidate => {
+    const candidates = transcriptTextCandidates(message);
+    const pendingIndex = this.pendingStructuredUserMessages.findIndex(candidate => {
       if (
         candidate.sessionPath &&
         sessionPath &&
@@ -3875,8 +4107,12 @@ class TranscriptProjector {
       ) {
         return false;
       }
-      return transcriptTextCandidates(message).includes(candidate.injectedText);
+      return candidates.includes(candidate.injectedText) || candidates.length === 0;
     });
+    const pending =
+      pendingIndex >= 0
+        ? this.pendingStructuredUserMessages.splice(pendingIndex, 1)[0]
+        : undefined;
     if (!pending) return stripProjectFileReferencesFromMessage(message);
 
     return {
@@ -4435,7 +4671,10 @@ export class BridgeRpcAdapter {
       left.role === right.role &&
       left.blockType === right.blockType &&
       left.contentIndex === right.contentIndex &&
-      (left.messageId ?? null) === (right.messageId ?? null)
+      (left.messageId ?? null) === (right.messageId ?? null) &&
+      (left.blockType !== "toolCall" ||
+        ((left.toolCallId ?? null) === (right.toolCallId ?? null) &&
+          (left.toolName ?? null) === (right.toolName ?? null)))
     );
   }
 
@@ -4922,17 +5161,15 @@ export class BridgeRpcAdapter {
           command.message,
           projectFiles,
         );
-        if (projectFiles?.length) {
-          this.transcriptProjector.registerStructuredUserMessage({
-            sessionPath: this.sessionRuntime.currentTranscriptSessionPath(),
-            injectedText: injectedMessage,
-            content: buildStructuredUserTranscriptContent(
-              command.message,
-              transcriptImages,
-              projectFiles,
-            ),
-          });
-        }
+        this.transcriptProjector.registerStructuredUserMessage({
+          sessionPath: this.sessionRuntime.currentTranscriptSessionPath(),
+          injectedText: injectedMessage,
+          content: buildStructuredUserTranscriptContent(
+            command.message,
+            transcriptImages,
+            projectFiles,
+          ),
+        });
 
         setTimeout(() => {
           void session
@@ -5001,17 +5238,15 @@ export class BridgeRpcAdapter {
           command.message,
           projectFiles,
         );
-        if (projectFiles?.length) {
-          this.transcriptProjector.registerStructuredUserMessage({
-            sessionPath: this.sessionRuntime.currentTranscriptSessionPath(),
-            injectedText: injectedMessage,
-            content: buildStructuredUserTranscriptContent(
-              command.message,
-              transcriptImages,
-              projectFiles,
-            ),
-          });
-        }
+        this.transcriptProjector.registerStructuredUserMessage({
+          sessionPath: this.sessionRuntime.currentTranscriptSessionPath(),
+          injectedText: injectedMessage,
+          content: buildStructuredUserTranscriptContent(
+            command.message,
+            transcriptImages,
+            projectFiles,
+          ),
+        });
         if (this.sessionRuntime.hasDetachedSelection()) {
           const session = await this.sessionRuntime.ensureDetachedSession();
           void session
@@ -5054,17 +5289,15 @@ export class BridgeRpcAdapter {
           command.message,
           projectFiles,
         );
-        if (projectFiles?.length) {
-          this.transcriptProjector.registerStructuredUserMessage({
-            sessionPath: this.sessionRuntime.currentTranscriptSessionPath(),
-            injectedText: injectedMessage,
-            content: buildStructuredUserTranscriptContent(
-              command.message,
-              transcriptImages,
-              projectFiles,
-            ),
-          });
-        }
+        this.transcriptProjector.registerStructuredUserMessage({
+          sessionPath: this.sessionRuntime.currentTranscriptSessionPath(),
+          injectedText: injectedMessage,
+          content: buildStructuredUserTranscriptContent(
+            command.message,
+            transcriptImages,
+            projectFiles,
+          ),
+        });
         if (this.sessionRuntime.hasDetachedSelection()) {
           const session = await this.sessionRuntime.ensureDetachedSession();
           void session
@@ -5104,6 +5337,22 @@ export class BridgeRpcAdapter {
           type: "response",
           command: "abort",
           success: true,
+        };
+      }
+
+      case "field_assist": {
+        if (!this.context.fieldAssist) {
+          throw new Error("FIELD_ASSIST_DISABLED");
+        }
+        const result = await this.context.fieldAssist.assist(command, {
+          clientId: this.client.id,
+        });
+        return {
+          id: correlationId,
+          type: "response",
+          command: "field_assist",
+          success: true,
+          data: result,
         };
       }
 

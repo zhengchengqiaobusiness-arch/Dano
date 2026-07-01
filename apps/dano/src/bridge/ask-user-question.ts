@@ -45,7 +45,7 @@ const askUserQuestionAnswerSchema = Type.Union([
 });
 
 const groupedRetryError =
-  "You called ask_user_question while another question card is still waiting. Do not call ask_user_question multiple times in the same response. Retry silently with exactly one ask_user_question call using {\"questions\":[...]} so all fields render in one card with one submit button. When using questions, omit top-level question, options, multiple, default, and confirm. Do not explain this correction to the user.";
+  "You called ask_user_question more than once in the same response, so the previous question call was cancelled. Retry silently with exactly one native ask_user_question call using {\"questions\":[...]} so all fields render in one card with one submit button. When using questions, omit top-level question, options, multiple, default, and confirm. Do not explain this correction to the user.";
 
 const mixedGroupedFieldsError =
   "Invalid ask_user_question call: when using questions, the top level may contain only questions. Move question, options, inputType, dataSource, multiple, and default into each questions[] item. Do not include top-level question, options, inputType, dataSource, multiple, default, or confirm with questions. Retry silently; do not explain this correction to the user.";
@@ -57,6 +57,7 @@ const askUserQuestionOptionSchema = Type.Union([
 
 const askUserQuestionInputTypeSchema = Type.Union([
   Type.Literal("text"),
+  Type.Literal("textarea"),
   Type.Literal("radio"),
   Type.Literal("checkbox"),
   Type.Literal("select"),
@@ -89,6 +90,9 @@ const askUserQuestionFields = {
         "Single-question call only: the clear, specific question to ask the user. If collecting more than one answer, omit this top-level field and put every question inside questions[].",
     }),
   ),
+  title: Type.Optional(Type.String({ minLength: 1 })),
+  label: Type.Optional(Type.String({ minLength: 1 })),
+  prompt: Type.Optional(Type.String({ minLength: 1 })),
   options: Type.Optional(
     Type.Array(askUserQuestionOptionSchema, {
       minItems: 2,
@@ -96,15 +100,25 @@ const askUserQuestionFields = {
         "Choices for this question. Strings remain supported; objects use stable id plus label. Include '其他' or 'Other' to let the user enter one custom answer. Omit for free-text, confirmation, or remote dataSource input.",
     }),
   ),
+  choices: Type.Optional(Type.Array(askUserQuestionOptionSchema, { minItems: 2 })),
   inputType: Type.Optional(askUserQuestionInputTypeSchema),
+  type: Type.Optional(Type.String({ minLength: 1 })),
+  input_type: Type.Optional(Type.String({ minLength: 1 })),
+  component: Type.Optional(Type.String({ minLength: 1 })),
   dataSource: Type.Optional(askUserQuestionDataSourceSchema),
+  data_source: Type.Optional(askUserQuestionDataSourceSchema),
   multiple: Type.Optional(
     Type.Boolean({
       default: false,
       description: "Set true with options to allow multiple selections.",
     }),
   ),
+  multi: Type.Optional(Type.Boolean()),
+  multipleSelect: Type.Optional(Type.Boolean()),
   default: Type.Optional(askUserQuestionAnswerInputSchema),
+  defaultValue: Type.Optional(askUserQuestionAnswerInputSchema),
+  prefill: Type.Optional(askUserQuestionAnswerInputSchema),
+  value: Type.Optional(askUserQuestionAnswerInputSchema),
 };
 
 export const askUserQuestionParameters = Type.Object({
@@ -115,27 +129,10 @@ export const askUserQuestionParameters = Type.Object({
     }),
   ),
   questions: Type.Optional(
-    Type.Array(
-      Type.Object({
-        id: Type.Optional(
-          Type.String({
-            minLength: 1,
-            description:
-              "Stable key for this answer. If omitted, answers use q1, q2, and so on.",
-          }),
-        ),
-        ...askUserQuestionFields,
-        question: Type.String({
-          minLength: 1,
-          description: "The clear, specific question to ask the user.",
-        }),
-      }),
-      {
-        minItems: 1,
-        description:
-          "Preferred for collecting more than one answer. Make exactly one ask_user_question call with questions: [{ id, question, default, options?, multiple? }, ...]. This renders one card with one submit button. Do not include top-level question, options, multiple, default, or confirm when questions is present.",
-      },
-    ),
+    Type.Any({
+      description:
+        "Preferred for collecting more than one answer. Make exactly one ask_user_question call with questions: [{ id, question, default, options?, multiple? }, ...]. A single question object is also accepted and normalized to an array. Do not include top-level question, options, multiple, default, or confirm when questions is present.",
+    }),
   ),
 });
 
@@ -152,6 +149,36 @@ export const askUserQuestionResultSchema = Type.Union([
 
 type PendingQuestionKind = "text" | "single" | "multiple" | "confirm";
 
+type AskUserQuestionRequestItem = {
+  id?: string;
+  key?: string;
+  name?: string;
+  question?: string;
+  title?: string;
+  label?: string;
+  prompt?: string;
+  options?: readonly (string | AskUserQuestionOption)[];
+  choices?: readonly (string | AskUserQuestionOption)[];
+  inputType?: AskUserQuestionInputType;
+  type?: string;
+  input_type?: string;
+  component?: string;
+  dataSource?: AskUserQuestionDataSource;
+  data_source?: AskUserQuestionDataSource;
+  multiple?: boolean;
+  multi?: boolean;
+  multipleSelect?: boolean;
+  confirm?: true;
+  default?: AskUserQuestionAnswerInput;
+  defaultValue?: AskUserQuestionAnswerInput;
+  prefill?: AskUserQuestionAnswerInput;
+  value?: AskUserQuestionAnswerInput;
+};
+
+type AskUserQuestionRequestParams = AskUserQuestionRequestItem & {
+  questions?: unknown;
+};
+
 type PendingQuestionOption = {
   id: AskUserQuestionOptionId;
   label: string;
@@ -166,6 +193,7 @@ interface PendingQuestionItem {
 }
 
 interface PendingQuestion {
+  grouped: boolean;
   questions: readonly PendingQuestionItem[];
   resolve(result: AskUserQuestionResult): void;
   reject(error: Error): void;
@@ -184,25 +212,7 @@ class AskUserQuestionCoordinator {
 
   wait(
     toolCallId: string,
-    request: {
-      question?: string;
-      options?: readonly (string | AskUserQuestionOption)[];
-      inputType?: AskUserQuestionInputType;
-      dataSource?: AskUserQuestionDataSource;
-      multiple?: boolean;
-      confirm?: true;
-      default?: AskUserQuestionAnswerInput;
-      questions?: readonly {
-        id?: string;
-        question: string;
-        options?: readonly (string | AskUserQuestionOption)[];
-        inputType?: AskUserQuestionInputType;
-        dataSource?: AskUserQuestionDataSource;
-        multiple?: boolean;
-        confirm?: true;
-        default?: AskUserQuestionAnswerInput;
-      }[];
-    },
+    rawRequest: AskUserQuestionRequestParams,
     signal: AbortSignal | undefined,
   ): Promise<AskUserQuestionResult> {
     if (this.pending.has(toolCallId)) {
@@ -211,6 +221,7 @@ class AskUserQuestionCoordinator {
       );
     }
 
+    const request = normalizeCompatibleRequest(rawRequest);
     const questions = normalizeRequestQuestions(request);
     if (typeof questions === "string") {
       return Promise.reject(new Error(questions));
@@ -237,6 +248,7 @@ class AskUserQuestionCoordinator {
       signal?.addEventListener("abort", abort, { once: true });
 
       this.pending.set(toolCallId, {
+        grouped: request.questions !== undefined,
         questions,
         resolve,
         reject,
@@ -266,7 +278,7 @@ class AskUserQuestionCoordinator {
       result = { status: "cancelled" };
     } else {
       const { answer } = response;
-      if (pending.questions.length > 1) {
+      if (pending.grouped) {
         if (!isAnswerRecord(answer)) {
           throw new Error("Grouped question answer must be an object");
         }
@@ -311,10 +323,165 @@ class AskUserQuestionCoordinator {
   }
 }
 
+type NormalizedAskUserQuestionRequestItem = {
+  id?: string;
+  question?: string;
+  options?: readonly (string | AskUserQuestionOption)[];
+  inputType?: AskUserQuestionInputType;
+  dataSource?: AskUserQuestionDataSource;
+  multiple?: boolean;
+  confirm?: true;
+  default?: AskUserQuestionAnswerInput;
+};
+
+type NormalizedAskUserQuestionRequest = NormalizedAskUserQuestionRequestItem & {
+  questions?: readonly NormalizedAskUserQuestionRequestItem[];
+};
+
+function normalizeCompatibleRequest(
+  request: AskUserQuestionRequestParams,
+): NormalizedAskUserQuestionRequest {
+  const normalized: NormalizedAskUserQuestionRequest =
+    normalizeCompatibleQuestion(request);
+  const rawQuestions = request.questions;
+  if (rawQuestions !== undefined) {
+    normalized.questions = normalizeCompatibleQuestions(rawQuestions);
+  }
+  return normalized;
+}
+
+function normalizeCompatibleQuestions(
+  value: AskUserQuestionRequestParams["questions"],
+): NormalizedAskUserQuestionRequestItem[] {
+  const parsed = parseJsonString(value);
+  const rawItems = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
+  return rawItems
+    .filter(isPlainRecord)
+    .map(value => normalizeCompatibleQuestion(value));
+}
+
+function normalizeCompatibleQuestion(
+  request: AskUserQuestionRequestItem | Record<string, unknown>,
+): NormalizedAskUserQuestionRequestItem {
+  const normalized: NormalizedAskUserQuestionRequestItem = {};
+  const id = firstString(request.id, request.key, request.name);
+  if (id) normalized.id = id;
+
+  const question = firstString(
+    request.question,
+    request.title,
+    request.label,
+    request.prompt,
+  );
+  if (question) normalized.question = question;
+
+  const options = request.options ?? request.choices;
+  if (Array.isArray(options)) {
+    normalized.options = options as readonly (string | AskUserQuestionOption)[];
+  }
+
+  const inputType = normalizeInputType(
+    request.inputType ?? request.input_type ?? request.type ?? request.component,
+  );
+  if (inputType) normalized.inputType = inputType;
+
+  const dataSource = request.dataSource ?? request.data_source;
+  if (isCompatibleDataSource(dataSource)) normalized.dataSource = dataSource;
+
+  const multiple = request.multiple ?? request.multi ?? request.multipleSelect;
+  if (typeof multiple === "boolean") normalized.multiple = multiple;
+
+  if (request.confirm === true || inputType === "confirm") {
+    normalized.confirm = true;
+  }
+
+  const defaultValue = firstDefined(
+    request.default,
+    request.defaultValue,
+    request.prefill,
+    request.value,
+  );
+  if (isAnswerInput(defaultValue)) normalized.default = defaultValue;
+
+  return normalized;
+}
+
+function parseJsonString(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed) return value;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+function isCompatibleDataSource(
+  value: unknown,
+): value is AskUserQuestionDataSource {
+  return (
+    isPlainRecord(value) &&
+    value.type === "api" &&
+    typeof value.endpoint === "string" &&
+    value.endpoint.trim().length > 0
+  );
+}
+
+function isAnswerInput(value: unknown): value is AskUserQuestionAnswerInput {
+  return (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean" ||
+    isOptionObject(value) ||
+    (Array.isArray(value) &&
+      value.every(
+        item =>
+          typeof item === "string" ||
+          typeof item === "number" ||
+          isOptionObject(item),
+      ))
+  );
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed) return trimmed;
+  }
+  return undefined;
+}
+
+function firstDefined<T>(...values: T[]): T | undefined {
+  return values.find(value => value !== undefined);
+}
+
+function normalizeInputType(value: unknown): AskUserQuestionInputType | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().replace(/[-_\s]/g, "").toLocaleLowerCase();
+  if (normalized === "textarea" || normalized === "multiline" || normalized === "longtext") {
+    return "textarea";
+  }
+  if (normalized === "text" || normalized === "input" || normalized === "string") {
+    return "text";
+  }
+  if (normalized === "radio") return "radio";
+  if (normalized === "checkbox" || normalized === "multiselect") return "checkbox";
+  if (normalized === "select" || normalized === "dropdown") return "select";
+  if (normalized === "treeselect") return "treeSelect";
+  if (normalized === "confirm" || normalized === "boolean") return "confirm";
+  return undefined;
+}
+
 function normalizeRequestQuestions(
-  request: Parameters<AskUserQuestionCoordinator["wait"]>[1],
+  request: NormalizedAskUserQuestionRequest,
 ): string | PendingQuestionItem[] {
-  if (request.questions) {
+  if (request.questions !== undefined) {
     if (
       request.question ||
       request.options ||
@@ -352,7 +519,7 @@ function normalizeRequestQuestions(
 function normalizeQuestion(
   request: {
     id?: string;
-    question: string;
+    question?: string;
     options?: readonly (string | AskUserQuestionOption)[];
     inputType?: AskUserQuestionInputType;
     dataSource?: AskUserQuestionDataSource;
@@ -362,6 +529,7 @@ function normalizeQuestion(
   },
   fallbackId: string,
 ): PendingQuestionItem | string {
+  if (!request.question?.trim()) return "Question is required";
   const inputType = request.confirm
     ? "confirm"
     : (request.inputType ?? (request.multiple ? "checkbox" : request.options ? "radio" : "text"));
@@ -413,7 +581,12 @@ function normalizeQuestion(
     ...(request.dataSource ? { dataSource: request.dataSource } : {}),
   };
   if (request.default !== undefined) {
-    normalizeAnswer(question, request.default);
+    try {
+      normalizeAnswer(question, request.default);
+    } catch (cause) {
+      if (cause instanceof Error) return `默认答案无效：${cause.message}`;
+      return "默认答案无效";
+    }
   }
   return question;
 }
@@ -553,6 +726,8 @@ export const askUserQuestionTool = defineTool({
   label: "Ask User Question",
   description: `Ask the user for structured input during execution.
 
+When the user asks to fill in a form, complete a form, or provide form fields, use ask_user_question to collect the fields instead of asking in assistant text. Defaults must be valid, non-empty answers; never use "" as a default.
+
 Use exactly one ask_user_question call per assistant response. If you need more than one answer, use only the questions array: {"questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假"},{"id":"reason","question":"原因？","default":"个人事务"}]}. Do not include top-level question, options, inputType, dataSource, multiple, default, or confirm when questions is present.
 
 For a single question, use top-level question/options/inputType/dataSource/multiple/default/confirm. For multiple questions, use questions[]. Set default on every non-confirmation question, including every questions[] item. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. Confirmation is a separate single-question call with question + confirm: true and no options/multiple/questions. The answer is returned as a tool result and execution then continues.`,
@@ -560,11 +735,12 @@ For a single question, use top-level question/options/inputType/dataSource/multi
     "Ask the user one native question card; for several fields use one questions array with one submit button",
   promptGuidelines: [
     "Use ask_user_question whenever you need user input to continue; do not ask the question only in assistant text.",
+    "When the user asks to fill in a form, complete a form, or provide form fields, collect the fields with ask_user_question.",
     "Call ask_user_question at most once per assistant response. If you need several answers, put every item in one questions array.",
     "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
     "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
     "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
-    "Set default on every non-confirmation question, including every item in questions, using the most likely or safest answer while still letting the user change it.",
+    "Set a valid non-empty default on every non-confirmation question, including every item in questions, using the most likely or safest answer while still letting the user change it. Never use an empty string as default.",
     "When using questions, the top level must contain only questions. Put id, question, options, inputType, dataSource, multiple, and default inside each questions item.",
     "For forms, applications, or other user-reviewed summaries, call ask_user_question with confirm: true after presenting the final summary and before treating it as confirmed, ready to submit, or complete.",
   ],

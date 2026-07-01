@@ -7,6 +7,10 @@ import type { DanoConfig } from "./bridge/dano-config.js";
 import { loadDanoConfig } from "./bridge/dano-config.js";
 import { createDetachedAgentSession } from "./bridge/detached-session.js";
 import {
+  createFieldAssistService,
+  createPiSdkFieldAssistClient,
+} from "./bridge/field-assist.js";
+import {
   resolveAgentSessionDefaults,
   resolveAgentSessionModel,
   type DefaultSessionSettings,
@@ -308,7 +312,19 @@ export function createDanoBackendFromSession(
   };
 
   return {
-    context: { events, state, actions },
+    context: {
+      events,
+      state,
+      actions,
+      fieldAssist: createFieldAssistService({
+        ai: createPiSdkFieldAssistClient({
+          cwd: session.sessionManager.getCwd(),
+          session,
+        }),
+        getCurrentModel: state.getCurrentModel,
+        maxRetries: danoConfig.fieldAssist?.maxRetries,
+      }),
+    },
     session,
     async dispose() {
       unsubscribeSession();

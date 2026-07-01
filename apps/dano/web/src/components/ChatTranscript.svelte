@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy, tick } from "svelte";
   import type {
+    FieldAssistCommandPayload,
+    FieldAssistResult,
     RpcImageContent,
     RpcTranscriptContent,
     RpcTranscriptContentBlock,
@@ -75,6 +77,9 @@
     onRevise = (_: { entryId: string; text: string; preview: string; hasImages: boolean; images: RpcImageContent[] }) => {},
     onOpenFileReference = (_: { path: string; lineNumber: number }) => {},
     readWorkspaceFile,
+    onFieldAssist = undefined as
+      | ((payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>)
+      | undefined,
   }: {
     sessionPath?: string | null;
     messages?: readonly TranscriptEntry[];
@@ -92,7 +97,13 @@
     onRevise?: (payload: { entryId: string; text: string; preview: string; hasImages: boolean; images: RpcImageContent[] }) => void;
     onOpenFileReference?: (payload: { path: string; lineNumber: number }) => void;
     readWorkspaceFile?: (path: string) => Promise<{ content: string }>;
+    onFieldAssist?: (payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>;
   } = $props();
+
+  type RpcTranscriptToolCallBlock = Extract<
+    RpcTranscriptContentBlock,
+    { type: "toolCall" }
+  >;
 
   const emptyStateConfig = getRuntimeEmptyStateConfig();
 
@@ -155,12 +166,6 @@
     }
     return -1;
   });
-  let busyIndicatorLabel = $derived(
-    isCompacting && !hasVisibleStreaming
-      ? t("chatTranscript.compactingContext")
-      : t("chatTranscript.responding"),
-  );
-
   // ---- display helpers ----
   function messageStableKey(msg: TranscriptEntry, index: number): string {
     return msg.transcriptKey ?? msg.id ?? `message:${index}`;
@@ -217,6 +222,17 @@
     }
 
     if (block && typeof block === "object" && block.type === "toolCall") {
+      const isDifferentToolCall =
+        (delta.toolCallId && block.id && delta.toolCallId !== block.id) ||
+        (delta.toolName && block.name && delta.toolName !== block.name);
+      if (isDifferentToolCall) {
+        return {
+          type: "toolCall",
+          id: delta.toolCallId,
+          name: delta.toolName ?? "tool",
+          arguments: delta.delta,
+        };
+      }
       const currentArguments =
         typeof block.arguments === "string"
           ? block.arguments
@@ -237,6 +253,32 @@
       name: delta.toolName ?? "tool",
       arguments: delta.delta,
     };
+  }
+
+  function isDifferentToolCall(
+    block: RpcTranscriptToolCallBlock,
+    delta: TranscriptDelta,
+  ): boolean {
+    return (
+      Boolean(delta.toolCallId && block.id && delta.toolCallId !== block.id) ||
+      Boolean(delta.toolName && block.name && delta.toolName !== block.name)
+    );
+  }
+
+  function findMatchingToolCallIndex(
+    content: (string | RpcTranscriptContentBlock)[],
+    delta: TranscriptDelta,
+  ): number | null {
+    const index = content.findIndex(block =>
+      Boolean(
+        block &&
+          typeof block === "object" &&
+          block.type === "toolCall" &&
+          (!delta.toolCallId || block.id === delta.toolCallId) &&
+          (!delta.toolName || block.name === delta.toolName),
+      ),
+    );
+    return index >= 0 ? index : null;
   }
 
   function messageWithTranscriptDeltas(
@@ -267,8 +309,18 @@
         contentItems.push(defaultDeltaContentBlock());
       }
 
-      contentItems[delta.contentIndex] = appendDeltaToContentBlock(
-        contentItems[delta.contentIndex],
+      const block = contentItems[delta.contentIndex];
+      const targetIndex =
+        delta.blockType === "toolCall" &&
+        block &&
+        typeof block === "object" &&
+        block.type === "toolCall" &&
+        isDifferentToolCall(block, delta)
+          ? findMatchingToolCallIndex(contentItems, delta) ?? contentItems.length
+          : delta.contentIndex;
+
+      contentItems[targetIndex] = appendDeltaToContentBlock(
+        contentItems[targetIndex],
         delta,
       );
       content = contentItems;
@@ -1146,7 +1198,7 @@
                 </div>
               {:else if block.kind === "tool"}
                 {#if askUserQuestionRequest(block) && !isAskUserQuestionToolError(block)}
-                  <QuestionToolCard {block} active={isStreaming && !initialLoading} onRespond={answerQuestion} />
+                  <QuestionToolCard {block} active={isStreaming && !initialLoading} onRespond={answerQuestion} {onFieldAssist} />
                 {:else if getReadClassification(block)?.kind === "skill"}
                   <SkillInvocationCard skillName={getReadClassification(block)!.label} />
                 {:else}
@@ -1302,6 +1354,7 @@
               {:else if block.kind === "text" && block.text}
                 <MarkdownRenderer
                   content={block.text}
+                  fallbackText={item.message.role === "user" ? block.text : ""}
                   streaming={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
                   deferMermaidErrors={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
                   onOpenFileReference={onOpenFileReference}
@@ -1344,19 +1397,6 @@
       </div>
     {/if}
   {/each}
-
-  {#if showBusyIndicator}
-    <div class="message-row assistant streaming-indicator-row">
-      <div class="message-content assistant">
-        <div class="streaming-indicator">
-          <span class="busy-label">{busyIndicatorLabel}</span>
-          <span class="dot"></span>
-          <span class="dot"></span>
-          <span class="dot"></span>
-        </div>
-      </div>
-    </div>
-  {/if}
 
   <ImageLightbox
     open={lightbox.lightboxImages.length > 0}
@@ -2242,46 +2282,6 @@
     font-size: 0.72rem;
     line-height: 1.45;
     color: var(--text-subtle);
-  }
-
-  .streaming-indicator-row {
-    overflow-anchor: none;
-  }
-
-  .streaming-indicator {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--text-subtle);
-    font-size: 0.72rem;
-    line-height: 1.3;
-  }
-
-  .busy-label { font-size: 0.7rem; }
-
-  .dot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--text-subtle);
-    display: inline-block;
-    animation: typing-dot 1.2s ease-in-out infinite;
-  }
-
-  .dot:nth-child(2) { animation-delay: 0.2s; }
-  .dot:nth-child(3) { animation-delay: 0.4s; }
-
-  @keyframes typing-dot {
-    0%,
-    60%,
-    100% {
-      opacity: 0.2;
-      transform: scale(0.7);
-    }
-    30% {
-      opacity: 1;
-      transform: scale(1);
-    }
   }
 
   @media (max-width: 900px) {
