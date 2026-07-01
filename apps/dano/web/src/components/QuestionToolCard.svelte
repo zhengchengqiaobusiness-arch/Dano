@@ -24,6 +24,8 @@
   } from "../utils/fieldAssist";
   import type { ToolContentBlock } from "../utils/transcript";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
+  import RefreshCw from "lucide-svelte/icons/refresh-cw";
+  import Sparkle from "lucide-svelte/icons/sparkle";
 
   const PENDING_RENDER_DELAY_MS = 400;
 
@@ -475,7 +477,7 @@
 {#if request && showCard}
   <article class="question-card" data-status={result?.status ?? "pending"}>
     <div class="question-label">{t("questionTool.label")}</div>
-    {#if !request.batch}
+    {#if !request.batch && request.kind !== "text"}
       <div class="question-text">
         <MarkdownRenderer content={askUserQuestionMarkdown(request.question)} />
       </div>
@@ -504,7 +506,7 @@
       <form onsubmit={submit}>
         {#each questionItems as item}
           <div class:question-group={request.batch}>
-            {#if request.batch}
+            {#if request.batch && item.kind !== "text"}
               <div class="question-text">
                 <MarkdownRenderer content={askUserQuestionMarkdown(item.question)} />
               </div>
@@ -610,44 +612,62 @@
                 </button>
               {/if}
             {:else if item.kind === "text"}
+              <div class="question-field-header">
+                <div class="question-text">
+                  <MarkdownRenderer content={askUserQuestionMarkdown(item.question)} />
+                </div>
+                <div class="question-ai-actions" aria-label={`${t("questionTool.aiAssistRegenerate")} / ${t("questionTool.aiAssistPolish")}`}>
+                  <button
+                    type="button"
+                    class="secondary icon-button"
+                    disabled={!pending || submitting || Boolean(aiAssistLoading[item.id])}
+                    onclick={() => void runFieldAssist(item, "regenerate")}
+                    aria-label={aiAssistLoading[item.id] === "regenerate" ? t("questionTool.aiAssistGenerating") : t("questionTool.aiAssistRegenerate")}
+                    title={aiAssistLoading[item.id] === "regenerate" ? t("questionTool.aiAssistGenerating") : t("questionTool.aiAssistRegenerate")}
+                    data-tooltip={aiAssistLoading[item.id] === "regenerate" ? t("questionTool.aiAssistGenerating") : t("questionTool.aiAssistRegenerate")}
+                  >
+                    <RefreshCw size={16} aria-hidden="true" />
+                  </button>
+                  <button
+                    type="button"
+                    class="secondary icon-button"
+                    disabled={!pending || submitting || Boolean(aiAssistLoading[item.id]) || !textAnswer[item.id]?.trim()}
+                    onclick={() => void runFieldAssist(item, "polish")}
+                    aria-label={aiAssistLoading[item.id] === "polish" ? t("questionTool.aiAssistPolishing") : t("questionTool.aiAssistPolish")}
+                    title={aiAssistLoading[item.id] === "polish" ? t("questionTool.aiAssistPolishing") : t("questionTool.aiAssistPolish")}
+                    data-tooltip={aiAssistLoading[item.id] === "polish" ? t("questionTool.aiAssistPolishing") : t("questionTool.aiAssistPolish")}
+                  >
+                    <Sparkle size={16} aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
               <label class="sr-only" for={`question-${block.toolCallId}-${item.id}`}>{item.question}</label>
-              {#if item.inputType === "textarea"}
-                <textarea
-                  id={`question-${block.toolCallId}-${item.id}`}
-                  class="question-input question-textarea"
-                  rows="4"
-                  bind:value={textAnswer[item.id]}
-                  disabled={!pending || submitting}
-                  placeholder={t("questionTool.inputPlaceholder")}
-                ></textarea>
-              {:else}
-                <input
-                  id={`question-${block.toolCallId}-${item.id}`}
-                  class="question-input"
-                  type="text"
-                  bind:value={textAnswer[item.id]}
-                  disabled={!pending || submitting}
-                  placeholder={t("questionTool.inputPlaceholder")}
-                  onkeydown={preventEnterSubmit}
-                />
-              {/if}
-              <div class="question-ai-actions">
-                <button
-                  type="button"
-                  class="secondary"
-                  disabled={!pending || submitting || Boolean(aiAssistLoading[item.id])}
-                  onclick={() => void runFieldAssist(item, "regenerate")}
-                >
-                  {aiAssistLoading[item.id] === "regenerate" ? t("questionTool.aiAssistGenerating") : t("questionTool.aiAssistRegenerate")}
-                </button>
-                <button
-                  type="button"
-                  class="secondary"
-                  disabled={!pending || submitting || Boolean(aiAssistLoading[item.id]) || !textAnswer[item.id]?.trim()}
-                  onclick={() => void runFieldAssist(item, "polish")}
-                >
-                  {aiAssistLoading[item.id] === "polish" ? t("questionTool.aiAssistPolishing") : t("questionTool.aiAssistPolish")}
-                </button>
+              <div class="question-input-wrap" class:loading={Boolean(aiAssistLoading[item.id])}>
+                {#if item.inputType === "textarea"}
+                  <textarea
+                    id={`question-${block.toolCallId}-${item.id}`}
+                    class="question-input question-textarea"
+                    rows="4"
+                    bind:value={textAnswer[item.id]}
+                    disabled={!pending || submitting}
+                    readonly={Boolean(aiAssistLoading[item.id])}
+                    placeholder={t("questionTool.inputPlaceholder")}
+                  ></textarea>
+                {:else}
+                  <input
+                    id={`question-${block.toolCallId}-${item.id}`}
+                    class="question-input"
+                    type="text"
+                    bind:value={textAnswer[item.id]}
+                    disabled={!pending || submitting}
+                    readonly={Boolean(aiAssistLoading[item.id])}
+                    placeholder={t("questionTool.inputPlaceholder")}
+                    onkeydown={preventEnterSubmit}
+                  />
+                {/if}
+                {#if aiAssistLoading[item.id]}
+                  <span class="question-input-spinner" aria-hidden="true"></span>
+                {/if}
               </div>
               {#if aiAssistWarning[item.id]}
                 <div class="question-warning" role="status">{aiAssistWarning[item.id]}</div>
@@ -695,7 +715,6 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
-    max-width: 640px;
     width: 100%;
     padding: 16px;
     border-radius: 14px;
@@ -792,6 +811,37 @@
     font: inherit;
   }
 
+  .question-input-wrap {
+    position: relative;
+  }
+
+  .question-input-wrap.loading .question-input {
+    padding-right: calc(1em + 28px);
+  }
+
+  .question-input-spinner {
+    position: absolute;
+    top: 50%;
+    right: 1em;
+    width: 16px;
+    height: 16px;
+    margin-top: -8px;
+    border: 2px solid color-mix(in srgb, var(--accent) 24%, transparent);
+    border-top-color: var(--accent);
+    border-radius: 999px;
+    animation: question-input-spin 0.75s linear infinite;
+    pointer-events: none;
+  }
+
+  .question-textarea + .question-input-spinner {
+    top: 13px;
+    margin-top: 0;
+  }
+
+  @keyframes question-input-spin {
+    to { transform: rotate(360deg); }
+  }
+
   .question-textarea {
     min-height: 96px;
     resize: vertical;
@@ -815,7 +865,65 @@
   }
 
   .question-actions { display: flex; justify-content: flex-end; gap: 8px; }
-  .question-ai-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+  .question-field-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .question-field-header .question-text {
+    min-width: 0;
+  }
+
+  .question-ai-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+
+  button.icon-button {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text-subtle);
+    transition:
+      background-color 0.12s ease,
+      color 0.12s ease,
+      transform 0.12s ease;
+  }
+
+  button.icon-button::after {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 6px);
+    z-index: 2;
+    display: none;
+    padding: 5px 7px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--panel-3) 84%, var(--accent));
+    color: var(--text);
+    content: attr(data-tooltip);
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1;
+    box-shadow: 0 8px 18px color-mix(in srgb, var(--accent) 18%, transparent);
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
+  button.icon-button:hover::after,
+  button.icon-button:focus-visible::after {
+    display: block;
+  }
 
   .load-more { justify-self: start; }
 
@@ -834,6 +942,24 @@
     border-color: var(--border);
     background: transparent;
     color: var(--text-muted);
+  }
+
+  button.secondary.icon-button {
+    border: 0;
+    background: transparent;
+    color: var(--text-subtle);
+  }
+
+  button.secondary.icon-button:hover,
+  button.secondary.icon-button:focus-visible {
+    background: transparent;
+    color: var(--accent);
+  }
+
+  button.secondary.icon-button:active:not(:disabled) {
+    background: transparent;
+    color: var(--accent-hover);
+    transform: scale(0.96);
   }
 
   button:disabled { cursor: not-allowed; opacity: 0.5; }

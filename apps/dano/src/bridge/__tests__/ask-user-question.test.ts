@@ -497,6 +497,62 @@ describe("ask_user_question tool", () => {
     });
   });
 
+  it("accepts compatible single-question object and alias fields", async () => {
+    const execution = askUserQuestionTool.execute(
+      "compat-single-object",
+      {
+        questions: {
+          key: "description",
+          title: "请填写说明",
+          type: "textarea",
+          defaultValue: "默认内容",
+        },
+      } as never,
+      undefined,
+      undefined,
+      {} as never,
+    );
+
+    askUserQuestionCoordinator.answer("compat-single-object", {
+      cancelled: false,
+      answer: { description: "更新后的说明" },
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: {
+        status: "answered",
+        answer: { description: "更新后的说明" },
+      },
+    });
+  });
+
+  it("accepts JSON-stringified compatible questions", async () => {
+    const execution = askUserQuestionTool.execute(
+      "compat-json-string",
+      {
+        questions: JSON.stringify({
+          key: "description",
+          title: "请填写说明",
+          type: "textarea",
+          defaultValue: "默认内容",
+        }),
+      } as never,
+      undefined,
+      undefined,
+      {} as never,
+    );
+
+    askUserQuestionCoordinator.answer("compat-json-string", {
+      cancelled: false,
+      answer: { description: "默认内容" },
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: {
+        status: "answered",
+        answer: { description: "默认内容" },
+      },
+    });
+  });
+
   it("rejects simultaneous separate questions so the model retries as one grouped card", async () => {
     const first = executeQuestion("separate-1", {
       question: "Leave type?",

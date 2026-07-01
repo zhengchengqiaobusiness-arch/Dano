@@ -195,6 +195,57 @@ describe("ask user question transcript data", () => {
     });
   });
 
+  it("parses compatible single-question object and alias fields", () => {
+    expect(
+      askUserQuestionRequest(
+        block({
+          questions: {
+            key: "description",
+            title: "请填写说明",
+            type: "textarea",
+            defaultValue: "默认内容",
+          },
+        }),
+      ),
+    ).toEqual({
+      batch: true,
+      questions: [
+        {
+          id: "description",
+          kind: "text",
+          inputType: "textarea",
+          question: "请填写说明",
+          default: "默认内容",
+        },
+      ],
+    });
+  });
+
+  it("parses JSON-stringified compatible questions", () => {
+    expect(
+      askUserQuestionRequest(
+        block({
+          questions: JSON.stringify({
+            key: "description",
+            title: "请填写说明",
+            type: "textarea",
+            defaultValue: "默认内容",
+          }),
+        }),
+      ),
+    ).toMatchObject({
+      batch: true,
+      questions: [
+        {
+          id: "description",
+          inputType: "textarea",
+          question: "请填写说明",
+          default: "默认内容",
+        },
+      ],
+    });
+  });
+
   it("parses structured options and remote select data sources", () => {
     expect(
       askUserQuestionRequest(
