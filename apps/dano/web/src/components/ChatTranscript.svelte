@@ -52,6 +52,7 @@
     createChatTranscriptBlockState,
     createChatTranscriptLightboxState,
   } from "./chatTranscriptBlockState.svelte";
+  import { classifyReadToolBlock } from "../utils/toolBlock";
   import DiffView from "./DiffView.svelte";
   import HighlightedCode from "./HighlightedCode.svelte";
   import ImageLightbox from "./ImageLightbox.svelte";
@@ -489,24 +490,6 @@
     return (block.resultBlocks ?? []).filter(
       (item): item is ImageContentBlock => item.kind === "image",
     );
-  }
-
-  type ReadClassification = { kind: string; label: string };
-
-  function getReadClassification(block: ToolContentBlock): ReadClassification | null {
-    if (block.toolName !== "read") return null;
-    const args = block.toolArgs;
-    if (!args || typeof args !== "object") return null;
-    const rawPath = (args as Record<string, unknown>).file_path ?? (args as Record<string, unknown>).path;
-    if (typeof rawPath !== "string" || !rawPath) return null;
-    const normalized = rawPath.replace(/\\/g, "/");
-    const fileName = normalized.split("/").pop() ?? "";
-    if (fileName === "SKILL.md") {
-      const segments = normalized.split("/");
-      const idx = segments.lastIndexOf("SKILL.md");
-      return { kind: "skill", label: idx > 0 ? segments[idx - 1] : fileName };
-    }
-    return null;
   }
 
   function toolBlockEmptyState(block: ToolContentBlock): string {
@@ -1240,10 +1223,11 @@
                   {/if}
                 </div>
               {:else if block.kind === "tool"}
+                {@const readClassification = classifyReadToolBlock(block)}
                 {#if askUserQuestionRequest(block) && !isAskUserQuestionToolError(block)}
                   <QuestionToolCard {block} active={isStreaming && !initialLoading} onRespond={answerQuestion} {onFieldAssist} />
-                {:else if getReadClassification(block)?.kind === "skill"}
-                  <SkillInvocationCard skillName={getReadClassification(block)!.label} />
+                {:else if readClassification?.kind === "skill"}
+                  <SkillInvocationCard skillName={readClassification.label} />
                 {:else}
                   {@const descriptor = toolBlockDescriptor(block)}
                   {@const diffStats = toolBlockDiffStats(block)}

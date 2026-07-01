@@ -20,6 +20,8 @@ export interface ToolDetailModel {
   edits?: Array<{ oldText: string; newText: string }>;
 }
 
+export type ReadClassification = { kind: "skill"; label: string };
+
 type ToolArgsRecord = JsonObject;
 
 export function buildToolInlineModel(block: ToolContentBlock): ToolInlineModel {
@@ -154,6 +156,37 @@ export function buildToolDetailModel(block: ToolContentBlock): ToolDetailModel {
     return { kind: "bash", text, path, command };
   }
   return { kind: "text", text, path };
+}
+
+export function classifyReadToolBlock(
+  block: ToolContentBlock,
+): ReadClassification | null {
+  if (block.toolName !== "read") return null;
+  const args = asRecord(block.toolArgs);
+  const rawPath = stringValue(args, "file_path") ?? stringValue(args, "path");
+  if (!rawPath) return null;
+  const normalized = rawPath.replace(/\\/g, "/");
+  const segments = normalized.split("/");
+  const fileName = segments.at(-1) ?? "";
+  if (fileName !== "SKILL.md") return null;
+  const fallback = segments.at(-2) ?? fileName;
+  return {
+    kind: "skill",
+    label: skillNameFromText(toolResultText(block)) ?? fallback,
+  };
+}
+
+function skillNameFromText(text: string): string | undefined {
+  const match = text.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
+  if (!match) return undefined;
+  for (const line of match[1].split("\n")) {
+    const name = line.match(/^\s*name\s*:\s*(.+?)\s*$/)?.[1];
+    if (!name) continue;
+    const unquoted = name.match(/^(['"])(.*)\1$/)?.[2] ?? name;
+    const trimmed = unquoted.trim();
+    if (trimmed) return trimmed;
+  }
+  return undefined;
 }
 
 function humanizeToolName(toolName: string): string {
