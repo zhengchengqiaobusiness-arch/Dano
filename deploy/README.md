@@ -52,6 +52,27 @@ Compose network; the bind-mounted runtime directory remains intact.
 
 The app container listens on `8080`; nginx publishes `${DANO_NGINX_PORT:-80}`.
 
+### Local Podman Notes
+
+If `podman compose` fails with `could not find a matching machine`, check the
+first error line before debugging Dano. On macOS, `podman compose` may fail
+while listing machines if it cannot create or update the machine lockfile, for
+example:
+
+```text
+open ~/.config/containers/podman/machine/applehv/podman-machine-default.lock:
+operation not permitted
+```
+
+`podman info` can still work in that state because the remote socket is valid;
+the failure is in Compose's machine enumeration. Fix the lockfile permission or
+run Compose from a shell that can write Podman's machine state.
+
+Do not use a plain `podman run` as a Compose-equivalent secret test. Compose
+loads `.env` and passes variables such as `XIAOMI_TOKEN_PLAN_CN_API_KEY`; a
+manual `podman run` only receives the environment values explicitly passed with
+`-e`, so it can produce a false `No API key found` error.
+
 ## Production Server Run
 
 The release script builds from a temporary source checkout, copies only deploy
