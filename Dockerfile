@@ -42,6 +42,7 @@ ENV NODE_ENV=production
 ENV DANO_HOST=0.0.0.0
 ENV DANO_PORT=8080
 ENV DANO_DEFAULT_WORKSPACE_PATH=/tmp/dano
+ENV HOME=/home/node
 
 COPY --from=build /prod/dano/package.json ./package.json
 COPY --from=build /app/package.json ./package-versions/package.json
@@ -50,8 +51,11 @@ COPY --from=build /app/apps/dano/dist ./dist
 COPY --from=build /app/dano.config.json ./dano.config.json
 COPY deploy/runtime-defaults ./deploy/runtime-defaults
 COPY deploy/docker-entrypoint.sh ./deploy/docker-entrypoint.sh
-RUN chmod +x ./deploy/docker-entrypoint.sh
+RUN chmod +x ./deploy/docker-entrypoint.sh \
+  && mkdir -p /tmp/dano \
+  && chown -R node:node /tmp/dano /home/node
 
 EXPOSE 8080
+USER node
 ENTRYPOINT ["./deploy/docker-entrypoint.sh"]
 CMD ["node", "./dist/server/main.js"]

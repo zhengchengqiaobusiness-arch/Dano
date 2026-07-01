@@ -98,8 +98,16 @@ import { appendFileSync } from "node:fs";
 appendFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");
 `,
   );
+  writeFileSync(
+    join(fakeBin, "chown"),
+    `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+appendFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(["chown", ...process.argv.slice(2)]) + "\\n");
+`,
+  );
   chmodSync(join(fakeBin, "git"), 0o755);
   chmodSync(join(fakeBin, "compose"), 0o755);
+  chmodSync(join(fakeBin, "chown"), 0o755);
 
   execFileSync(process.execPath, [releaseScript], {
     cwd,
@@ -185,6 +193,18 @@ describe("deploy compose wrapper", () => {
     expect(dockerfileText).not.toContain("https://mirrors.aliyun.com/debian");
   });
 
+  it("runs the production container as the non-root node user", () => {
+    const dockerfileText = readFileSync(dockerfile, "utf8");
+
+    expect(dockerfileText).toContain("ENV HOME=/home/node");
+    expect(dockerfileText).toContain("mkdir -p /tmp/dano");
+    expect(dockerfileText).toContain("chown -R node:node /tmp/dano /home/node");
+    expect(dockerfileText).toContain("USER node");
+    expect(dockerfileText.indexOf("USER node")).toBeGreaterThan(
+      dockerfileText.indexOf("apt-get install"),
+    );
+  });
+
   it("builds releases from a temporary checkout and cleans it up", () => {
     const { buildParent, deployDir, runtimeDir, nginxConf, logLines } =
       runRelease();
@@ -206,6 +226,12 @@ describe("deploy compose wrapper", () => {
       expect.stringContaining("dano-build-"),
     ]);
     expect(JSON.parse(logLines[1])).toEqual([
+      "chown",
+      "-R",
+      "1000:1000",
+      runtimeDir,
+    ]);
+    expect(JSON.parse(logLines[2])).toEqual([
       "compose",
       "--env-file",
       ".env",
@@ -213,7 +239,7 @@ describe("deploy compose wrapper", () => {
       "-d",
       "--no-build",
     ]);
-    expect(logLines[2]).toBe("smoke");
+    expect(logLines[3]).toBe("smoke");
   });
 
   it("lets NPM_REGISTRY override the default release build registry", () => {

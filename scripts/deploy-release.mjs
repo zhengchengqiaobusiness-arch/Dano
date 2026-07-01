@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -20,6 +21,7 @@ const runtimeDir = process.env.DANO_RUNTIME_DIR || "/opt/dano/runtime-data";
 const secretsDir = process.env.DANO_SECRETS_DIR || join(deployDir, ".secrets");
 const nginxConf = process.env.DANO_NGINX_CONF || join(deployDir, "nginx/default.conf");
 const envPath = join(deployDir, ".env");
+const runtimeOwner = "1000:1000";
 const defaultNpmRegistry = "https://mirrors.cloud.tencent.com/npm/";
 const npmRegistry =
   process.env.NPM_REGISTRY ||
@@ -91,6 +93,12 @@ function updateEnvFile(values) {
   writeFileSync(envPath, `${next.join("\n")}\n`, { mode: 0o600 });
 }
 
+function prepareRuntimeDir() {
+  mkdirSync(runtimeDir, { recursive: true });
+  chmodSync(runtimeDir, 0o755);
+  run("chown", ["-R", runtimeOwner, runtimeDir]);
+}
+
 try {
   const repoUrl = requireValue(
     "DANO_REPO_URL",
@@ -118,7 +126,7 @@ try {
   ]);
 
   mkdirSync(join(deployDir, "nginx"), { recursive: true });
-  mkdirSync(runtimeDir, { recursive: true });
+  prepareRuntimeDir();
   mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
   cpSync(join(buildDir, "docker-compose.yml"), join(deployDir, "docker-compose.yml"));
   cpSync(join(buildDir, "deploy/nginx/default.conf"), nginxConf);

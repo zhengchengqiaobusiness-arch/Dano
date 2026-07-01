@@ -7,13 +7,16 @@ This directory contains deployment-specific defaults and proxy config.
 - Source runtime defaults live in `deploy/runtime-defaults/`.
 - The runtime compatibility directory is `$DANO_DEFAULT_WORKSPACE_PATH/.pi`.
 - The default workspace is `/tmp/dano`.
+- The app container runs as the non-root `node` user (`1000:1000`) with
+  `HOME=/home/node`.
 - Production deployment keeps three directories separate:
   - `/tmp/dano-build-*` is the disposable source checkout and image build dir.
   - `/opt/dano/deploy` stores Compose, `.env`, secrets, and nginx config.
   - `/opt/dano/runtime-data` is mounted at `/tmp/dano` for runtime state.
-- Docker Compose mounts `${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/tmp/dano`, so
-  runtime sessions and user-modified `.pi` files survive container recreation
-  without writing into a source checkout.
+- Docker Compose mounts `${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/tmp/dano`.
+  That host directory must be writable by UID/GID `1000:1000`, so runtime
+  sessions and user-modified `.pi` files survive container recreation without
+  writing into a source checkout.
 
 On container startup, `deploy/docker-entrypoint.sh` creates:
 
@@ -129,6 +132,7 @@ Example:
 ```bash
 mkdir -p .secrets
 printf '%s' "$OPENAI_API_KEY" > .secrets/openai_api_key
+chown 1000:1000 .secrets/openai_api_key
 chmod 600 .secrets/openai_api_key
 OPENAI_API_KEY_FILE=/run/secrets/openai_api_key pnpm run deploy:up
 ```
