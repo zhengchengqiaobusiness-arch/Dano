@@ -7,6 +7,7 @@
     RpcTranscriptContent,
     RpcTranscriptContentBlock,
   } from "@dano/types/protocol";
+  import ArrowDown from "lucide-svelte/icons/arrow-down";
   import Copy from "lucide-svelte/icons/copy";
   import FileText from "lucide-svelte/icons/file-text";
   import Maximize from "lucide-svelte/icons/maximize";
@@ -111,7 +112,7 @@
   let container = $state<HTMLDivElement | null>(null);
 
   const BOTTOM_LOCK_THRESHOLD = 24;
-  let shouldStickToBottom = true;
+  let shouldStickToBottom = $state(true);
   let stickToBottomFrame = 0;
   let lastSessionPath: string | null | undefined = undefined;
 
@@ -831,9 +832,12 @@
     shouldStickToBottom = isNearBottom(container);
   }
 
-  function scrollTranscriptToBottom() {
+  export function scrollTranscriptToBottom(options: { smooth?: boolean } = {}) {
     if (!container) return;
-    container.scrollTop = container.scrollHeight;
+    container.scrollTo({
+      top: container.scrollHeight,
+      behavior: options.smooth ? "smooth" : "auto",
+    });
     updateBottomLock();
   }
 
@@ -847,6 +851,10 @@
 
   function handleTranscriptScroll() {
     updateBottomLock();
+  }
+
+  function shouldShowScrollToBottom(): boolean {
+    return !initialLoading && messages.length > 0 && !shouldStickToBottom;
   }
 
   export function preserveBottomPosition(gracePx: number = 48): boolean {
@@ -893,19 +901,54 @@
   $effect(() => {
     const el = container;
     if (!el || typeof ResizeObserver === "undefined") return;
+    const transcriptEl = el;
 
-    let lastHeight = el.clientHeight;
-    const observer = new ResizeObserver(() => {
+    let lastClientHeight = transcriptEl.clientHeight;
+    let lastScrollHeight = transcriptEl.scrollHeight;
+    const observedChildren = new Set<Element>();
+
+    function handleTranscriptResize() {
       const keepBottomLocked = shouldStickToBottom;
-      const nextHeight = el.clientHeight;
-      if (nextHeight === lastHeight) return;
-      lastHeight = nextHeight;
+      const nextClientHeight = transcriptEl.clientHeight;
+      const nextScrollHeight = transcriptEl.scrollHeight;
+      if (
+        nextClientHeight === lastClientHeight &&
+        nextScrollHeight === lastScrollHeight
+      ) return;
+      lastClientHeight = nextClientHeight;
+      lastScrollHeight = nextScrollHeight;
       if (keepBottomLocked) scheduleStickToBottom();
       else updateBottomLock();
-    });
+    }
 
-    observer.observe(el);
-    return () => observer.disconnect();
+    const observer = new ResizeObserver(handleTranscriptResize);
+
+    function observeTranscriptChildren() {
+      const currentChildren = new Set(Array.from(transcriptEl.children));
+      for (const child of observedChildren) {
+        if (currentChildren.has(child)) continue;
+        observer.unobserve(child);
+        observedChildren.delete(child);
+      }
+      for (const child of currentChildren) {
+        if (observedChildren.has(child)) continue;
+        observedChildren.add(child);
+        observer.observe(child);
+      }
+    }
+
+    observer.observe(transcriptEl);
+    observeTranscriptChildren();
+    const mutationObserver =
+      typeof MutationObserver === "undefined"
+        ? null
+        : new MutationObserver(observeTranscriptChildren);
+    mutationObserver?.observe(transcriptEl, { childList: true });
+
+    return () => {
+      mutationObserver?.disconnect();
+      observer.disconnect();
+    };
   });
 
   $effect(() => {
@@ -1398,6 +1441,20 @@
     {/if}
   {/each}
 
+  {#if shouldShowScrollToBottom()}
+    <div class="scroll-bottom-overlay">
+      <button
+        type="button"
+        class="scroll-bottom-button"
+        aria-label={t("chatTranscript.scrollToBottom")}
+        title={t("chatTranscript.scrollToBottom")}
+        onclick={() => scrollTranscriptToBottom({ smooth: true })}
+      >
+        <ArrowDown aria-hidden="true" size={18} />
+      </button>
+    </div>
+  {/if}
+
   <ImageLightbox
     open={lightbox.lightboxImages.length > 0}
     images={lightbox.lightboxImages}
@@ -1539,6 +1596,49 @@
   }
 
   .chat-transcript::-webkit-scrollbar { display: none; }
+
+  .scroll-bottom-overlay {
+    position: sticky;
+    bottom: 8px;
+    z-index: 5;
+    height: 0;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+  }
+
+  .scroll-bottom-button {
+    width: 40px;
+    height: 40px;
+    border: 0;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--panel) 92%, transparent);
+    color: var(--text);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--border) 70%, transparent),
+      var(--shadow-raised);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    pointer-events: auto;
+    transform: translateY(-48px);
+    transition:
+      background 0.16s ease,
+      box-shadow 0.16s ease,
+      transform 0.12s ease;
+  }
+
+  .scroll-bottom-button:hover {
+    background: var(--panel-2);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--border-strong) 80%, transparent),
+      var(--shadow-floating);
+  }
+
+  .scroll-bottom-button:active {
+    transform: translateY(-48px) scale(0.96);
+  }
 
   .empty-state {
     display: flex;
