@@ -636,6 +636,7 @@ async def record_ws(ws: WebSocket) -> None:
 
         pending_req: dict | None = None       # 抓到的提交请求,等用户勾完字段再发布
         pending_candidates: list[dict] = []    # 所有 JSON 写请求(候选),供用户手选用哪个
+        pending_flow_spec = None               # Step A/B/C/D:可编辑的完整 FlowSpec
         pending_samples: dict = {}             # 录制时填的样例值(选别的请求时重算参数建议)
         pending_reads: list[dict] = []         # 抓到的列表读响应(select 候选源)
         pending_storage: dict | None = None    # 登录态(认 identity 字段)
@@ -702,6 +703,28 @@ async def record_ws(ws: WebSocket) -> None:
                     pending_req = chosen
                     await ws.send_json(await _request_fields_msg(chosen, cands, samples, pending_reads,
                                                                  pending_storage, pending_required, dom_options))
+                    # Step A: 灰度附带下发 flow_spec 摘要 + 完整 spec;前端暂不消费,零回归。
+                    # 同时把 spec 存到 pending_flow_spec 供后续 flow_update / step_naming / 业务说明编辑。
+                    try:
+                        from dano.execution.page.flow_spec import to_flow_spec
+                        pending_flow_spec = to_flow_spec(
+                            captured_requests=cands,
+                            reads=pending_reads,
+                            samples=pending_samples,
+                            storage_state=pending_storage,
+                            required_labels=pending_required,
+                            dom_options=pending_dom_options,
+                            tenant=init.get("tenant", ""),
+                            subsystem=init.get("subsystem", ""),
+                        )
+                        from dano.execution.page.flow_spec import flow_spec_to_summary
+                        await ws.send_json({
+                            "type": "flow_spec",
+                            "flow_spec": flow_spec_to_summary(pending_flow_spec),
+                            "full_spec": pending_flow_spec.model_dump(),
+                        })
+                    except Exception as _fs_err:  # noqa: BLE001 —— 灰度不影响主路径
+                        log.warning("flow_spec.emit_failed", error=str(_fs_err))
                     continue
 
                 # 兜底:没抓到 JSON 提交请求 → 老的 DOM 回放路径
@@ -740,6 +763,88 @@ async def record_ws(ws: WebSocket) -> None:
                     await ws.send_json(await _request_fields_msg(pending_req, pending_candidates, pending_samples,
                                                                  pending_reads, pending_storage, pending_required,
                                                                  pending_dom_options))
+            # Step B: 前端编辑 FlowSpec → 应用编辑,返回新 spec
+            elif t == "flow_update":
+                if pending_flow_spec is None:
+                    await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
+                    continue
+                edits = msg.get("edits") or []
+                try:
+                    from dano.execution.page.flow_spec import apply_flow_edits, flow_spec_to_summary
+                    pending_flow_spec = apply_flow_edits(pending_flow_spec, edits)
+                    await ws.send_json({
+                        "type": "flow_spec_updated",
+                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
+                        "full_spec": pending_flow_spec.model_dump(),
+                    })
+                except Exception as e:  # noqa: BLE001
+                    await ws.send_json({"type": "error", "detail": f"flow_update failed: {e}"})
+            # Bug 修复: 前端收到 "step not found" 时主动刷新 spec
+            elif t == "refresh_flow_spec":
+                if pending_flow_spec is None:
+                    await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
+                    continue
+                from dano.execution.page.flow_spec import flow_spec_to_summary
+                await ws.send_json({
+                    "type": "flow_spec",
+                    "flow_spec": flow_spec_to_summary(pending_flow_spec),
+                    "full_spec": pending_flow_spec.model_dump(),
+                })
+            # Step D2: LLM 给每个 step 起业务名
+            elif t == "step_naming":
+                if pending_flow_spec is None:
+                    await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
+                    continue
+                try:
+                    from dano.execution.page.flow_spec import rename_steps_with_llm, flow_spec_to_summary
+                    # TODO: 接入真实 LLM client;目前用 deterministic fallback
+                    pending_flow_spec = rename_steps_with_llm(pending_flow_spec, llm_client=None)
+                    await ws.send_json({
+                        "type": "step_names",
+                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
+                        "full_spec": pending_flow_spec.model_dump(),
+                    })
+                except Exception as e:  # noqa: BLE001
+                    await ws.send_json({"type": "error", "detail": f"step_naming failed: {e}"})
+            # Step D3: LLM 生成业务说明
+            elif t == "business_description":
+                if pending_flow_spec is None:
+                    await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
+                    continue
+                try:
+                    from dano.execution.page.flow_spec import render_business_description, flow_spec_to_summary
+                    desc = render_business_description(pending_flow_spec, llm_client=None)
+                    pending_flow_spec.business_description = desc
+                    await ws.send_json({
+                        "type": "business_description",
+                        "description": desc,
+                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
+                        "full_spec": pending_flow_spec.model_dump(),
+                    })
+                except Exception as e:  # noqa: BLE001
+                    await ws.send_json({"type": "error", "detail": f"business_description failed: {e}"})
+            # Step D5: 前端上报 console 错误
+            elif t == "console_log_upload":
+                entries = msg.get("entries") or []
+                if isinstance(entries, list):
+                    from dano.execution.page.console_monitor import (
+                        ConsoleEntry, filter_errors, is_relevant_error, summarize_console_logs,
+                    )
+                    parsed = [ConsoleEntry.from_dict(e) for e in entries if isinstance(e, dict)]
+                    errors = filter_errors(parsed)
+                    relevant = [e for e in errors if is_relevant_error(e.type, e.text)]
+                    summary = summarize_console_logs(parsed)
+                    if relevant:
+                        log.warning("frontend.console_errors",
+                                    count=len(relevant),
+                                    tenant=init.get("tenant", ""),
+                                    subsystem=init.get("subsystem", ""),
+                                    sample=relevant[0].text[:200])
+                    else:
+                        log.info("frontend.console_logs",
+                                 total=summary["total"],
+                                 errors=summary["errors"],
+                                 warnings=summary["warnings"])
             elif t == "publish_request":
                 # 用户在字段表里勾了哪些是参数、起了名 → 用真实提交请求建 Skill(任意 OA 通用)
                 if pending_req is None:

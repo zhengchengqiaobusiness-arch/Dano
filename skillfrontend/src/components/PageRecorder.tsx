@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Card, Form, Input, Button, Space, Typography, Alert, Tag, List, Checkbox, Collapse, Switch, message } from "antd";
+import { Card, Form, Input, Button, Space, Typography, Alert, Tag, List, Checkbox, Collapse, Switch, message, Select } from "antd";
 import { useNavigate } from "react-router-dom";
 
 // 方式B:网页内录制。连 WebSocket → 后端托管浏览器,画面投到这里,点击/键盘回传,实时显示捕获的步骤。
@@ -16,6 +16,11 @@ interface RecCand { idx: number; method: string; path: string }
 // P3:字段=选自某列表(选领导:名字→ID)/ 字段=当前用户·会话值(运行期重取)
 interface RecSelect { path: string; source_url: string; value_key: string; label_key: string; label: string; count: number; multi?: boolean; dom_options?: boolean }
 interface RecIdentity { path: string; source: string }
+// Step B/C/D: FlowSpec 编辑模型(前端只消费,通过 flow_update 同步后端)
+interface FlowParam { path: string; key: string; value: string; type: string; required: boolean; name_source?: string }
+interface FlowStepData { step_id: string; name: string; method: string; url: string; path: string; risk_level: string; params: FlowParam[] }
+interface FlowLinkData { link_id: string; source_step_id: string; source_path: string; target_step_id: string; target_path: string; confirmed?: boolean; confidence?: number }
+interface FlowSpecData { flow_id: string; title: string; steps: FlowStepData[]; links: FlowLinkData[]; risk_level: string; business_description?: string }
 interface RecResult {
   ok?: boolean; action?: string; risk_level?: string; mode?: string; reason?: string;
   status?: string; warnings?: string[]; review_notes?: string[]; clarifications?: string[];
@@ -62,6 +67,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [result, setResult] = useState<RecResult | null>(null);
   const [intercept, setIntercept] = useState(true);   // 拦截提交:抓到请求但不真发,录制不产生真实记录
   const [err, setErr] = useState("");
+  // Step B/C/D: 多接口编排面板
+  const [flowSpec, setFlowSpec] = useState<FlowSpecData | null>(null);
+  const [flowSpecCollapsed, setFlowSpecCollapsed] = useState(true);
+  const [newLink, setNewLink] = useState({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
 
   useEffect(() => () => { wsRef.current?.close(); }, []);   // 卸载时断开
 
@@ -125,7 +134,42 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         setResult(m.report); setPhase("recording");
         if (m.report?.ok) { setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({}); }   // 发布成功 → 收起字段表
       }
-      else if (m.type === "error") { setErr(m.detail || "录制出错"); setPhase("idle"); }
+      // Step A: 后端随 request_fields 下发 FlowSpec
+      else if (m.type === "flow_spec") {
+        if (m.full_spec) setFlowSpec(m.full_spec);
+        else if (m.flow_spec) setFlowSpec(m.flow_spec);
+        setFlowSpecCollapsed(false);
+      }
+      // Step B/C: flow_update 编辑后返回新 spec
+      else if (m.type === "flow_spec_updated") {
+        if (m.full_spec) setFlowSpec(m.full_spec);
+        else if (m.flow_spec) setFlowSpec(m.flow_spec);
+        message.success("流程已更新");
+      }
+      // Step D2: LLM 命名返回
+      else if (m.type === "step_names") {
+        if (m.full_spec) setFlowSpec(m.full_spec);
+        const count = m.names ? Object.keys(m.names).length : (m.flow_spec?.steps?.length || 0);
+        message.success(count > 0 ? `已为 ${count} 个步骤命名` : "命名完成");
+      }
+      // Step D3: LLM 业务说明返回
+      else if (m.type === "business_description") {
+        if (m.description && flowSpec) {
+          setFlowSpec({ ...flowSpec, business_description: m.description });
+        }
+        message.success(m.description ? "业务说明已生成" : "LLM 暂不可用,未生成说明");
+      }
+      // Bug: step_id 漂移时自动同步
+      else if (m.type === "error") {
+        const detail = m.detail || "录制出错";
+        if (detail.includes("step not found") || detail.includes("link not found")) {
+          message.warning("流程已变更,正在自动同步最新版本…");
+          send({ type: "refresh_flow_spec" });
+          setErr("");
+        } else {
+          setErr(detail);
+        }
+      }
     };
     ws.onerror = () => setErr("WebSocket 连接失败(后端是否启动、是否支持 ws 代理?)");
     ws.onclose = () => { if (phase === "recording") setPhase("idle"); };
@@ -390,6 +434,173 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <Button loading={phase === "publishing"} onClick={finalize}>重新抓取提交请求</Button>
               <Button onClick={stopAll} disabled={phase === "publishing"}>结束录制</Button>
             </Space>
+          )}
+
+          {/* Step B/C/D: 多接口编排面板(只展示编排关系,字段编辑在上面) */}
+          {flowSpec && (
+            <Collapse
+              style={{ marginTop: 16 }}
+              activeKey={flowSpecCollapsed ? [] : ["flow-editor"]}
+              onChange={(keys) => setFlowSpecCollapsed(keys.length === 0)}
+            >
+              <Collapse.Panel
+                key="flow-editor"
+                header={
+                  <Space>
+                    <Typography.Text strong>多接口编排</Typography.Text>
+                    <Tag color="blue">{flowSpec.steps?.length || 0} 步</Tag>
+                    <Tag color="orange">风险: {flowSpec.risk_level}</Tag>
+                  </Space>
+                }
+              >
+                {/* LLM 命名 + 业务说明 */}
+                <Space style={{ marginBottom: 12 }} wrap>
+                  <Button size="small" onClick={() => {
+                    send({ type: "step_naming" });
+                    message.info("正在让 AI 给每个步骤起业务名…");
+                  }}>🤖 AI 命名步骤</Button>
+                  <Button size="small" onClick={() => {
+                    send({ type: "business_description" });
+                    message.info("正在生成业务流程说明…");
+                  }}>📝 生成业务说明</Button>
+                </Space>
+                {flowSpec.business_description && (
+                  <Alert type="info" showIcon style={{ marginBottom: 12, fontSize: 12 }}
+                    message="业务说明" description={flowSpec.business_description} />
+                )}
+
+                {/* 步骤列表(含重排按钮) */}
+                <Card size="small" style={{ marginBottom: 12 }} title="步骤列表">
+                  <List
+                    size="small" dataSource={flowSpec.steps}
+                    renderItem={(step, stepIdx) => (
+                      <List.Item
+                        actions={[
+                          <Button key="up" size="small" disabled={stepIdx === 0} title="上移"
+                            onClick={() => {
+                              if (!flowSpec.steps || stepIdx <= 0) return;
+                              const ids = flowSpec.steps.map((s) => s.step_id);
+                              [ids[stepIdx - 1], ids[stepIdx]] = [ids[stepIdx], ids[stepIdx - 1]];
+                              send({ type: "flow_update", edits: [{ op: "reorder_steps", step_ids: ids }] });
+                            }}>↑</Button>,
+                          <Button key="down" size="small" disabled={stepIdx === flowSpec.steps.length - 1} title="下移"
+                            onClick={() => {
+                              if (!flowSpec.steps || stepIdx >= flowSpec.steps.length - 1) return;
+                              const ids = flowSpec.steps.map((s) => s.step_id);
+                              [ids[stepIdx], ids[stepIdx + 1]] = [ids[stepIdx + 1], ids[stepIdx]];
+                              send({ type: "flow_update", edits: [{ op: "reorder_steps", step_ids: ids }] });
+                            }}>↓</Button>,
+                        ]}
+                      >
+                        <Space size={8} wrap>
+                          <Tag color="purple">第 {stepIdx + 1} 步</Tag>
+                          <Tag>{step.method}</Tag>
+                          <Typography.Text code style={{ fontSize: 11 }}>{step.path}</Typography.Text>
+                          <Tag>{step.risk_level}</Tag>
+                          {step.name && <Typography.Text strong style={{ fontSize: 11 }}>· {step.name}</Typography.Text>}
+                          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                            {step.params?.length || 0} 个参数
+                          </Typography.Text>
+                        </Space>
+                      </List.Item>
+                    )}
+                  />
+                </Card>
+
+                {/* 步骤间链接 */}
+                {flowSpec.steps && flowSpec.steps.length >= 2 && (
+                  <Card size="small" title={
+                    <Space>
+                      <Typography.Text strong>步骤间数据流</Typography.Text>
+                      <Tag>{flowSpec.links?.length || 0} 条链接</Tag>
+                    </Space>
+                  }>
+                    {(!flowSpec.links || flowSpec.links.length === 0) && (
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        暂无自动探测的串联关系(如 taskId)。可手动添加。
+                      </Typography.Text>
+                    )}
+                    <List
+                      size="small" dataSource={flowSpec.links || []}
+                      renderItem={(link) => {
+                        const sourceStep = flowSpec.steps!.find((s) => s.step_id === link.source_step_id);
+                        const targetStep = flowSpec.steps!.find((s) => s.step_id === link.target_step_id);
+                        return (
+                          <List.Item actions={[
+                            <Checkbox key="confirmed" checked={link.confirmed || false}
+                              onChange={(e) => send({ type: "flow_update", edits: [{
+                                op: "update", link_id: link.link_id,
+                                field: "confirmed", value: e.target.checked,
+                              }] })}
+                            >
+                              <Typography.Text style={{ fontSize: 11 }}>人工确认</Typography.Text>
+                            </Checkbox>,
+                            <Button key="del" size="small" danger
+                              onClick={() => send({ type: "flow_update", edits: [{
+                                op: "remove", link_id: link.link_id,
+                              }] })}
+                            >删除</Button>,
+                          ]}>
+                            <Space size={4} wrap>
+                              <Tag color="blue">{sourceStep?.path || link.source_step_id}</Tag>
+                              <Typography.Text code style={{ fontSize: 11 }}>{link.source_path}</Typography.Text>
+                              <Typography.Text>→</Typography.Text>
+                              <Tag color="green">{targetStep?.path || link.target_step_id}</Tag>
+                              <Typography.Text code style={{ fontSize: 11 }}>{link.target_path}</Typography.Text>
+                              {link.confirmed ?
+                                <Tag color="success" style={{ fontSize: 11 }}>✓ 已确认</Tag> :
+                                <Tag color="warning" style={{ fontSize: 11 }}>待确认</Tag>}
+                            </Space>
+                          </List.Item>
+                        );
+                      }}
+                    />
+
+                    {/* 添加新链接 */}
+                    <div style={{ marginTop: 12, padding: 8, border: "1px dashed #d9d9d9", borderRadius: 4 }}>
+                      <Typography.Text strong style={{ fontSize: 12 }}>+ 添加新链接</Typography.Text>
+                      <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr auto", gap: 8, alignItems: "center" }}>
+                        <Select size="small" placeholder="源步骤"
+                          value={newLink.source_step_id || undefined}
+                          onChange={(value) => setNewLink((s) => ({ ...s, source_step_id: value }))}
+                          options={flowSpec.steps.map((s) => ({ label: `${s.method} ${s.path}`, value: s.step_id }))}
+                        />
+                        <Input size="small" placeholder="源字段路径 (如 data.id)"
+                          value={newLink.source_path}
+                          onChange={(e) => setNewLink((s) => ({ ...s, source_path: e.target.value }))}
+                        />
+                        <Select size="small" placeholder="目标步骤"
+                          value={newLink.target_step_id || undefined}
+                          onChange={(value) => setNewLink((s) => ({ ...s, target_step_id: value }))}
+                          options={flowSpec.steps.map((s) => ({ label: `${s.method} ${s.path}`, value: s.step_id }))}
+                        />
+                        <Input size="small" placeholder="目标字段路径 (如 body.id)"
+                          value={newLink.target_path}
+                          onChange={(e) => setNewLink((s) => ({ ...s, target_path: e.target.value }))}
+                        />
+                        <Button size="small" type="primary" onClick={() => {
+                          if (!newLink.source_step_id || !newLink.target_step_id
+                              || !newLink.source_path || !newLink.target_path) {
+                            message.warning("请填写源步骤/源路径/目标步骤/目标路径");
+                            return;
+                          }
+                          send({ type: "flow_update", edits: [{
+                            op: "add", step_id: newLink.source_step_id,
+                            link: {
+                              source_step_id: newLink.source_step_id,
+                              source_path: newLink.source_path,
+                              target_step_id: newLink.target_step_id,
+                              target_path: newLink.target_path,
+                            },
+                          }] });
+                          setNewLink({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
+                        }}>添加</Button>
+                      </div>
+                    </div>
+                  </Card>
+                )}
+              </Collapse.Panel>
+            </Collapse>
           )}
 
           {result && (
