@@ -27,7 +27,6 @@ import {
   slashCommandOptionsFromRpc,
 } from "../utils/slashCommands";
 import { getNextThinkingLevel } from "../utils/thinkingLevels";
-import type { ImageContentBlock } from "../utils/transcript";
 import {
   applyWorkspaceMentionCompletion,
   getWorkspaceMentionContext,
@@ -203,10 +202,6 @@ export function createComposerBarState(
   let attachmentNotice = $state<string | null>(null);
   let attachmentNoticeTimer: ReturnType<typeof setTimeout> | null = null;
 
-  // ---- lightbox ----
-
-  let lightboxAttachmentIndex = $state(-1);
-
   // ---- revision backup ----
 
   let revisionBackup = $state<{
@@ -302,26 +297,6 @@ export function createComposerBarState(
   let hasPendingMessages = $derived(props.pendingMessageCount > 0);
   let attachmentSummary = $derived(attachmentNotice ?? "");
 
-  let lightboxImages = $derived.by(() =>
-    attachments.flatMap<ImageContentBlock>(a =>
-      a.type === "image" && a.previewUrl
-        ? [
-            {
-              kind: "image",
-              src: a.previewUrl,
-              alt: a.name,
-              mimeType: a.mimeType,
-            },
-          ]
-        : [],
-    ),
-  );
-
-  let lightboxOpen = $derived(
-    lightboxAttachmentIndex >= 0 &&
-      lightboxAttachmentIndex < lightboxImages.length,
-  );
-
   // ---- attachment notice helpers ----
 
   function clearAttachmentNotice() {
@@ -347,7 +322,6 @@ export function createComposerBarState(
   function clearAttachments(fileInputEl?: HTMLInputElement | null) {
     for (const attachment of attachments) disposeAttachment(attachment);
     attachments = [];
-    lightboxAttachmentIndex = -1;
     if (fileInputEl) fileInputEl.value = "";
   }
 
@@ -450,45 +424,8 @@ export function createComposerBarState(
     if (attachment.status === "uploaded" && attachment.file) {
       void markComposerAttachmentOrphaned(attachment.file);
     }
-    const nextAttachments = attachments.filter(a => a.id !== id);
-    if (lightboxAttachmentIndex === index) {
-      lightboxAttachmentIndex =
-        nextAttachments.length > 0
-          ? Math.min(index, nextAttachments.length - 1)
-          : -1;
-    } else if (lightboxAttachmentIndex > index) {
-      lightboxAttachmentIndex -= 1;
-    }
-    attachments = nextAttachments;
+    attachments = attachments.filter(a => a.id !== id);
     if (attachments.length === 0) clearAttachmentNotice();
-  }
-
-  // ---- lightbox ----
-
-  function openAttachmentLightbox(index: number) {
-    if (index < 0 || index >= attachments.length) return;
-    const attachment = attachments[index];
-    if (attachment?.type !== "image" || !attachment.previewUrl) return;
-    lightboxAttachmentIndex = attachments
-      .slice(0, index + 1)
-      .filter(a => a.type === "image" && a.previewUrl).length - 1;
-  }
-
-  function closeAttachmentLightbox() {
-    lightboxAttachmentIndex = -1;
-  }
-
-  function showPreviousAttachmentLightboxImage() {
-    if (lightboxImages.length <= 1 || lightboxAttachmentIndex < 0) return;
-    lightboxAttachmentIndex =
-      (lightboxAttachmentIndex + lightboxImages.length - 1) %
-      lightboxImages.length;
-  }
-
-  function showNextAttachmentLightboxImage() {
-    if (lightboxImages.length <= 1 || lightboxAttachmentIndex < 0) return;
-    lightboxAttachmentIndex =
-      (lightboxAttachmentIndex + 1) % lightboxImages.length;
   }
 
   // ---- textarea helpers (need DOM refs) ----
@@ -946,16 +883,6 @@ export function createComposerBarState(
     get attachmentNotice() {
       return attachmentNotice;
     },
-    get lightboxAttachmentIndex() {
-      return lightboxAttachmentIndex;
-    },
-    get lightboxImages() {
-      return lightboxImages;
-    },
-    get lightboxOpen() {
-      return lightboxOpen;
-    },
-
     // derived
     get isDisabled() {
       return isDisabled;
@@ -1013,10 +940,6 @@ export function createComposerBarState(
     addAttachmentsFromFiles,
     removeAttachment,
     clearAttachments,
-    openAttachmentLightbox,
-    closeAttachmentLightbox,
-    showPreviousAttachmentLightboxImage,
-    showNextAttachmentLightboxImage,
     clearAttachmentNotice,
     setAttachmentNotice,
 
