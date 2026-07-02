@@ -642,12 +642,6 @@
     );
   }
 
-  function handleFilePreviewWheel(event: WheelEvent) {
-    if (!filePreview?.src) return;
-    event.preventDefault();
-    zoomImagePreview(event.deltaY < 0 ? 1.1 : 1 / 1.1);
-  }
-
   function startFilePreviewPan(event: MouseEvent) {
     if (!filePreview?.src || !filePreviewBody || event.button !== 0) return;
     filePreviewDragging = true;
@@ -1582,7 +1576,6 @@
           class="file-preview-body"
           class:pannable={Boolean(filePreview.src)}
           class:panning={filePreviewDragging}
-          onwheel={handleFilePreviewWheel}
           onmousedown={startFilePreviewPan}
           onmousemove={moveFilePreviewPan}
           onmouseup={endFilePreviewPan}
@@ -2178,6 +2171,7 @@
     max-height: none;
     user-select: none;
     -webkit-user-drag: none;
+    touch-action: none;
   }
 
   .file-preview-image.fit {
