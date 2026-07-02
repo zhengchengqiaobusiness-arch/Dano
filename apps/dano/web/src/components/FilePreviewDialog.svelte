@@ -35,7 +35,12 @@
     | { x: number; y: number; scrollLeft: number; scrollTop: number }
     | null = null;
   let pinchStart:
-    | { distance: number; scale: number }
+    | {
+        distance: number;
+        scale: number;
+        imageX: number;
+        imageY: number;
+      }
     | null = null;
 
   function resetImageZoom() {
@@ -79,24 +84,32 @@
     imageNaturalHeight = image.naturalHeight;
   }
 
-  function startPan(event: MouseEvent) {
-    if (!preview?.src || !bodyElement || event.button !== 0) return;
+  function startPanAt(x: number, y: number) {
+    if (!preview?.src || !bodyElement) return;
     dragging = true;
     dragStart = {
-      x: event.clientX,
-      y: event.clientY,
+      x,
+      y,
       scrollLeft: bodyElement.scrollLeft,
       scrollTop: bodyElement.scrollTop,
     };
   }
 
-  function movePan(event: MouseEvent) {
+  function movePanTo(x: number, y: number) {
     if (!dragging || !dragStart || !bodyElement) return;
+    bodyElement.scrollLeft = dragStart.scrollLeft - (x - dragStart.x);
+    bodyElement.scrollTop = dragStart.scrollTop - (y - dragStart.y);
+  }
+
+  function startPan(event: MouseEvent) {
+    if (event.button !== 0) return;
+    startPanAt(event.clientX, event.clientY);
+  }
+
+  function movePan(event: MouseEvent) {
+    if (!dragging) return;
     event.preventDefault();
-    bodyElement.scrollLeft =
-      dragStart.scrollLeft - (event.clientX - dragStart.x);
-    bodyElement.scrollTop =
-      dragStart.scrollTop - (event.clientY - dragStart.y);
+    movePanTo(event.clientX, event.clientY);
   }
 
   function endPan() {
@@ -109,29 +122,86 @@
     return Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY);
   }
 
+  function touchCenter(touches: TouchList): { x: number; y: number } {
+    const [first, second] = [touches[0], touches[1]];
+    return {
+      x: (first.clientX + second.clientX) / 2,
+      y: (first.clientY + second.clientY) / 2,
+    };
+  }
+
   function startPinch(event: TouchEvent) {
-    if (!preview?.src || event.touches.length !== 2) return;
+    if (
+      !preview?.src ||
+      !imageElement ||
+      event.touches.length !== 2
+    ) return;
     event.preventDefault();
     endPan();
+    const center = touchCenter(event.touches);
+    const imageRect = imageElement.getBoundingClientRect();
+    const scale = currentImageScale();
     pinchStart = {
       distance: touchDistance(event.touches),
-      scale: currentImageScale(),
+      scale,
+      imageX: (center.x - imageRect.left) / scale,
+      imageY: (center.y - imageRect.top) / scale,
     };
   }
 
   function movePinch(event: TouchEvent) {
-    if (!pinchStart || event.touches.length !== 2) return;
+    if (!pinchStart || event.touches.length !== 2 || !bodyElement || !imageElement)
+      return;
     event.preventDefault();
     const distance = touchDistance(event.touches);
     if (!pinchStart.distance) return;
-    imageFit = false;
-    imageScale = clampImageScale(
+    const center = touchCenter(event.touches);
+    const nextScale = clampImageScale(
       pinchStart.scale * (distance / pinchStart.distance),
     );
+    imageFit = false;
+    imageScale = nextScale;
+    requestAnimationFrame(() => {
+      if (!bodyElement || !imageElement || !pinchStart) return;
+      const imageRect = imageElement.getBoundingClientRect();
+      bodyElement.scrollLeft +=
+        imageRect.left - (center.x - pinchStart.imageX * nextScale);
+      bodyElement.scrollTop +=
+        imageRect.top - (center.y - pinchStart.imageY * nextScale);
+    });
   }
 
   function endPinch(event: TouchEvent) {
     if (event.touches.length < 2) pinchStart = null;
+  }
+
+  function startTouch(event: TouchEvent) {
+    if (!preview?.src) return;
+    if (event.touches.length === 2) {
+      startPinch(event);
+      return;
+    }
+    if (event.touches.length !== 1 || pinchStart) return;
+    event.preventDefault();
+    const touch = event.touches[0];
+    startPanAt(touch.clientX, touch.clientY);
+  }
+
+  function moveTouch(event: TouchEvent) {
+    if (!preview?.src) return;
+    if (event.touches.length === 2) {
+      movePinch(event);
+      return;
+    }
+    if (event.touches.length !== 1 || !dragging) return;
+    event.preventDefault();
+    const touch = event.touches[0];
+    movePanTo(touch.clientX, touch.clientY);
+  }
+
+  function endTouch(event: TouchEvent) {
+    if (event.touches.length < 2) pinchStart = null;
+    if (event.touches.length === 0) endPan();
   }
 
   function imageStyle(): string {
@@ -166,6 +236,21 @@
         document.body.style.removeProperty("overflow");
       };
     }
+  });
+
+  $effect(() => {
+    const element = bodyElement;
+    if (!element) return;
+    element.addEventListener("touchstart", startTouch, { passive: false });
+    element.addEventListener("touchmove", moveTouch, { passive: false });
+    element.addEventListener("touchend", endTouch, { passive: false });
+    element.addEventListener("touchcancel", endTouch, { passive: false });
+    return () => {
+      element.removeEventListener("touchstart", startTouch);
+      element.removeEventListener("touchmove", moveTouch);
+      element.removeEventListener("touchend", endTouch);
+      element.removeEventListener("touchcancel", endTouch);
+    };
   });
 </script>
 
@@ -259,10 +344,6 @@
         onmousemove={movePan}
         onmouseup={endPan}
         onmouseleave={endPan}
-        ontouchstart={startPinch}
-        ontouchmove={movePinch}
-        ontouchend={endPinch}
-        ontouchcancel={endPinch}
       >
         {#if preview.src}
           <img
@@ -387,6 +468,7 @@
 
   .file-preview-body.pannable {
     cursor: grab;
+    touch-action: none;
   }
 
   .file-preview-body.panning {
@@ -457,6 +539,9 @@
 
     .file-preview-controls {
       gap: 0;
+      grid-column: 1 / -1;
+      justify-content: center;
+      order: 3;
     }
   }
 </style>
