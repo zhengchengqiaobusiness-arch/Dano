@@ -45,6 +45,7 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 ## GitHub Workflow
 
 - Each time an issue is solved and verified, create a pull request to `upstream`.
+- Before updating the server deployment, switch to `main` and run `git sync-upstream`.
 
 ## Versioning
 
