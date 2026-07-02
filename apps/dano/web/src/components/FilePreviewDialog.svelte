@@ -432,19 +432,23 @@
 
   @media (max-width: 720px) {
     .file-preview-shell {
+      place-items: end stretch;
       padding: 0;
     }
 
     .file-preview-dialog {
-      width: 100dvw;
-      height: 100dvh;
-      border-radius: 0;
-      border: 0;
+      width: 100%;
+      height: 82dvh;
+      border-right: 0;
+      border-bottom: 0;
+      border-left: 0;
+      border-radius: 16px 16px 0 0;
     }
 
     .file-preview-dialog.maximized {
-      width: 100dvw;
+      width: 100%;
       height: 100dvh;
+      border-radius: 0;
     }
 
     .file-preview-header {
