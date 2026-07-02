@@ -14,9 +14,10 @@
   import type { ConnectionStatus } from "../composables/bridgeStore.svelte";
   import { t } from "../i18n";
   import { COMPOSER_ATTACHMENT_ACCEPT, MAX_COMPOSER_ATTACHMENT_BYTES, MAX_COMPOSER_ATTACHMENTS, formatAttachmentSize } from "../utils/attachments";
+  import type { ComposerAttachment } from "../utils/attachments";
   import type { RpcModelInfo } from "../utils/models";
   import CommandPalette from "./CommandPalette.svelte";
-  import ImageLightbox from "./ImageLightbox.svelte";
+  import FilePreviewDialog from "./FilePreviewDialog.svelte";
   import WorkspaceMentionPalette from "./WorkspaceMentionPalette.svelte";
   import { createComposerBarState } from "./composerBarState.svelte";
 
@@ -76,6 +77,14 @@
   let inputText = $state("");
   let cursorOffset = $state(0);
   let isComposerMultiline = $state(false);
+  let attachmentPreview = $state<{
+    name: string;
+    src?: string;
+    content?: string;
+    loading: boolean;
+    error: string;
+  } | null>(null);
+  let attachmentPreviewRequestId = 0;
 
   // ---- state module (reads/writes inputText & cursorOffset through $rx) ----
   const composer = createComposerBarState(
@@ -173,6 +182,50 @@
     if (composer.isDisabled) return;
     inputText = prompt;
     composer.handleSubmit(false, fileInputRef, textareaRef);
+  }
+
+  function openAttachmentPreview(attachment: ComposerAttachment) {
+    if (attachment.status !== "uploaded") return;
+    if (attachment.type === "image" && attachment.previewUrl) {
+      attachmentPreview = {
+        name: attachment.name,
+        src: attachment.previewUrl,
+        loading: false,
+        error: "",
+      };
+      return;
+    }
+    const previewUrl = attachment.file?.previewUrl;
+    if (!previewUrl) return;
+    const requestId = ++attachmentPreviewRequestId;
+    attachmentPreview = { name: attachment.name, loading: true, error: "" };
+    fetch(previewUrl)
+      .then(async response => {
+        if (!response.ok) throw new Error(await response.text());
+        return response.text();
+      })
+      .then(content => {
+        if (requestId !== attachmentPreviewRequestId) return;
+        attachmentPreview = {
+          name: attachment.name,
+          content,
+          loading: false,
+          error: "",
+        };
+      })
+      .catch(error => {
+        if (requestId !== attachmentPreviewRequestId) return;
+        attachmentPreview = {
+          name: attachment.name,
+          loading: false,
+          error: error instanceof Error ? error.message : t("fileViewer.loadFailed"),
+        };
+      });
+  }
+
+  function closeAttachmentPreview() {
+    attachmentPreviewRequestId += 1;
+    attachmentPreview = null;
   }
 
   function captureComposerLayout() {
@@ -388,7 +441,7 @@
 
       {#if composer.attachments.length > 0}
         <div class="attachment-strip">
-          {#each composer.attachments as attachment, index (attachment.id)}
+          {#each composer.attachments as attachment (attachment.id)}
             <div
               class="attachment-chip"
               class:uploading={attachment.status === "uploading"}
@@ -399,7 +452,8 @@
                   type="button"
                   class="attachment-chip-open"
                   aria-label={t("composer.attachments.view", { name: attachment.name })}
-                  onclick={() => composer.openAttachmentLightbox(index)}
+                  disabled={attachment.status !== "uploaded"}
+                  onclick={() => openAttachmentPreview(attachment)}
                 >
                   <img
                     class="attachment-chip-preview"
@@ -420,7 +474,13 @@
                   </div>
                 </button>
               {:else}
-                <div class="attachment-chip-open attachment-chip-static">
+                <button
+                  type="button"
+                  class="attachment-chip-open"
+                  aria-label={t("composer.attachments.view", { name: attachment.name })}
+                  disabled={attachment.status !== "uploaded" || !attachment.file?.previewUrl}
+                  onclick={() => openAttachmentPreview(attachment)}
+                >
                   <span class="attachment-chip-preview attachment-chip-file-icon" aria-hidden="true">
                     <FileIcon size={18} />
                   </span>
@@ -436,7 +496,7 @@
                       {/if}
                     </span>
                   </div>
-                </div>
+                </button>
               {/if}
               <button
                 type="button"
@@ -521,14 +581,7 @@
   </div>
 </div>
 
-<ImageLightbox
-  open={composer.lightboxOpen}
-  images={composer.lightboxImages}
-  index={composer.lightboxAttachmentIndex}
-  onClose={composer.closeAttachmentLightbox}
-  onPrevious={composer.showPreviousAttachmentLightboxImage}
-  onNext={composer.showNextAttachmentLightboxImage}
-/>
+<FilePreviewDialog preview={attachmentPreview} onClose={closeAttachmentPreview} />
 
 <style>
   .composer-bar {
@@ -736,7 +789,7 @@
     text-align: left;
   }
 
-  .attachment-chip-static {
+  .attachment-chip-open:disabled {
     cursor: default;
   }
 
