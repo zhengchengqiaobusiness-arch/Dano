@@ -155,11 +155,15 @@
   let imagePreviewScale = $state(1);
   let imagePreviewNaturalWidth = $state(0);
   let imagePreviewNaturalHeight = $state(0);
+  let imagePreviewImage = $state<HTMLImageElement | undefined>();
   let filePreviewMaximized = $state(false);
   let filePreviewBody = $state<HTMLDivElement | undefined>();
   let filePreviewDragging = $state(false);
   let filePreviewDragStart:
     | { x: number; y: number; scrollLeft: number; scrollTop: number }
+    | null = null;
+  let filePreviewPinchStart:
+    | { distance: number; scale: number }
     | null = null;
   let streamingAssistantMessageIndex = $derived.by(() => {
     if (!hasVisibleStreaming) return -1;
@@ -594,6 +598,7 @@
     filePreview = null;
     filePreviewMaximized = false;
     endFilePreviewPan();
+    filePreviewPinchStart = null;
   }
 
   function resetImagePreviewZoom() {
@@ -614,14 +619,27 @@
   }
 
   function zoomImagePreview(multiplier: number) {
+    const baseScale = currentImagePreviewScale();
     imagePreviewFit = false;
-    imagePreviewScale = Math.min(8, Math.max(0.1, imagePreviewScale * multiplier));
+    imagePreviewScale = clampImagePreviewScale(baseScale * multiplier);
   }
 
   function handleImagePreviewLoad(event: Event) {
     const image = event.currentTarget as HTMLImageElement;
     imagePreviewNaturalWidth = image.naturalWidth;
     imagePreviewNaturalHeight = image.naturalHeight;
+  }
+
+  function clampImagePreviewScale(scale: number): number {
+    return Math.min(8, Math.max(0.1, scale));
+  }
+
+  function currentImagePreviewScale(): number {
+    if (!imagePreviewFit || !imagePreviewImage || !imagePreviewNaturalWidth)
+      return imagePreviewScale;
+    return clampImagePreviewScale(
+      imagePreviewImage.getBoundingClientRect().width / imagePreviewNaturalWidth,
+    );
   }
 
   function handleFilePreviewWheel(event: WheelEvent) {
@@ -653,6 +671,36 @@
   function endFilePreviewPan() {
     filePreviewDragging = false;
     filePreviewDragStart = null;
+  }
+
+  function touchDistance(touches: TouchList): number {
+    const [first, second] = [touches[0], touches[1]];
+    return Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY);
+  }
+
+  function startFilePreviewPinch(event: TouchEvent) {
+    if (!filePreview?.src || event.touches.length !== 2) return;
+    event.preventDefault();
+    endFilePreviewPan();
+    filePreviewPinchStart = {
+      distance: touchDistance(event.touches),
+      scale: currentImagePreviewScale(),
+    };
+  }
+
+  function moveFilePreviewPinch(event: TouchEvent) {
+    if (!filePreviewPinchStart || event.touches.length !== 2) return;
+    event.preventDefault();
+    const distance = touchDistance(event.touches);
+    if (!filePreviewPinchStart.distance) return;
+    imagePreviewFit = false;
+    imagePreviewScale = clampImagePreviewScale(
+      filePreviewPinchStart.scale * (distance / filePreviewPinchStart.distance),
+    );
+  }
+
+  function endFilePreviewPinch(event: TouchEvent) {
+    if (event.touches.length < 2) filePreviewPinchStart = null;
   }
 
   function imagePreviewStyle(): string {
@@ -1539,9 +1587,14 @@
           onmousemove={moveFilePreviewPan}
           onmouseup={endFilePreviewPan}
           onmouseleave={endFilePreviewPan}
+          ontouchstart={startFilePreviewPinch}
+          ontouchmove={moveFilePreviewPinch}
+          ontouchend={endFilePreviewPinch}
+          ontouchcancel={endFilePreviewPinch}
         >
           {#if filePreview.src}
             <img
+              bind:this={imagePreviewImage}
               class="file-preview-image"
               class:fit={imagePreviewFit}
               src={filePreview.src}
