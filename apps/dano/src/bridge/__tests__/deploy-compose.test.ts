@@ -290,6 +290,105 @@ describe("deploy compose wrapper", () => {
     ).toContain("bwrap errors: no");
   });
 
+  it("checks OA gateway presence markers in model-triggered bash output", () => {
+    const runtimeDir = mkdtempSync(join(tmpdir(), "dano-bash-acceptance-"));
+    tempDirs.push(runtimeDir);
+    const sessionDir = join(runtimeDir, "workspaces/ws_test/.dano/sessions");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "session.jsonl"),
+      [
+        JSON.stringify({ type: "toolCall", name: "bash" }),
+        JSON.stringify({
+          role: "toolResult",
+          toolName: "bash",
+          isError: false,
+          content: [
+            {
+              type: "text",
+              text: "DANO_BASH_OK\nURL_PRESENT\nTENANT_PRESENT\nleave options listed",
+            },
+          ],
+        }),
+        "",
+      ].join("\n"),
+    );
+
+    const output = execFileSync(process.execPath, [bashAcceptanceScript, sessionDir], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        DANO_BASH_ACCEPTANCE_REQUIRED_MARKERS: "URL_PRESENT,TENANT_PRESENT",
+        DANO_BASH_ACCEPTANCE_FORBIDDEN_MARKERS:
+          "URL_MISSING,TENANT_MISSING,DANO_URL/DANO_TENANT_KEY 未设置",
+      },
+    });
+
+    expect(output).toContain("required marker URL_PRESENT: yes");
+    expect(output).toContain("required marker TENANT_PRESENT: yes");
+    expect(output).toContain("forbidden marker TENANT_MISSING: no");
+  });
+
+  it("fails OA gateway acceptance when tenant is missing", () => {
+    const runtimeDir = mkdtempSync(join(tmpdir(), "dano-bash-acceptance-"));
+    tempDirs.push(runtimeDir);
+    mkdirSync(runtimeDir, { recursive: true });
+    writeFileSync(
+      join(runtimeDir, "session.jsonl"),
+      [
+        JSON.stringify({ type: "toolCall", name: "bash" }),
+        JSON.stringify({
+          role: "toolResult",
+          toolName: "bash",
+          isError: false,
+          content: "DANO_BASH_OK\nURL_PRESENT\nTENANT_MISSING",
+        }),
+        "",
+      ].join("\n"),
+    );
+
+    expect(() =>
+      execFileSync(process.execPath, [bashAcceptanceScript, runtimeDir], {
+        env: {
+          ...process.env,
+          DANO_BASH_ACCEPTANCE_REQUIRED_MARKERS: "URL_PRESENT,TENANT_PRESENT",
+          DANO_BASH_ACCEPTANCE_FORBIDDEN_MARKERS: "TENANT_MISSING",
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("fails OA gateway acceptance when the skill reports missing env", () => {
+    const runtimeDir = mkdtempSync(join(tmpdir(), "dano-bash-acceptance-"));
+    tempDirs.push(runtimeDir);
+    mkdirSync(runtimeDir, { recursive: true });
+    writeFileSync(
+      join(runtimeDir, "session.jsonl"),
+      [
+        JSON.stringify({ type: "toolCall", name: "bash" }),
+        JSON.stringify({
+          role: "toolResult",
+          toolName: "bash",
+          isError: false,
+          content:
+            'DANO_BASH_OK\nURL_PRESENT\nTENANT_PRESENT\n{"status":"failed","reason":"DANO_URL/DANO_TENANT_KEY 未设置(部署方配置,勿写进文件)"}',
+        }),
+        "",
+      ].join("\n"),
+    );
+
+    expect(() =>
+      execFileSync(process.execPath, [bashAcceptanceScript, runtimeDir], {
+        env: {
+          ...process.env,
+          DANO_BASH_ACCEPTANCE_REQUIRED_MARKERS: "URL_PRESENT,TENANT_PRESENT",
+          DANO_BASH_ACCEPTANCE_FORBIDDEN_MARKERS:
+            "DANO_URL/DANO_TENANT_KEY 未设置",
+        },
+      }),
+    ).toThrow();
+  });
+
   it("checks only the requested bash acceptance session", () => {
     const runtimeDir = mkdtempSync(join(tmpdir(), "dano-bash-acceptance-"));
     tempDirs.push(runtimeDir);

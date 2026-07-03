@@ -96,6 +96,46 @@ minimum acceptance sequence against the Podman Compose deployment:
    `DANO_BASH_OK` tool result was recorded, and whether any `bwrap` error text
    appeared in session JSONL.
 
+   For OA gateway changes, distinguish the host shell, app container shell, and
+   model-triggered bash environment. Use presence markers only; never print
+   `KEY=value` pairs or secret values.
+
+   Host shell check:
+
+   ```bash
+   test -n "${DANO_URL:-}" && echo HOST_URL_PRESENT || echo HOST_URL_MISSING
+   test -n "${DANO_TENANT_KEY:-}" && echo HOST_TENANT_PRESENT || echo HOST_TENANT_MISSING
+   ```
+
+   App container shell check:
+
+   ```bash
+   podman compose --env-file .env exec app sh -lc 'test -n "${DANO_URL:-}" && echo APP_URL_PRESENT || echo APP_URL_MISSING; test -n "${DANO_TENANT_KEY:-}" && echo APP_TENANT_PRESENT || echo APP_TENANT_MISSING; /opt/dano/runtime-data/.agents/skills/dano-a-oa-qingjia/scripts/submit.sh --list-options 请假类型'
+   ```
+
+   Browser model bash prompt:
+
+   ```text
+   Use the bash tool to run this exact command. Do not print secret values:
+   printf '%s\n' OA_ENV_CHECK
+   test -n "${DANO_URL:-}" && echo URL_PRESENT || echo URL_MISSING
+   test -n "${DANO_TENANT_KEY:-}" && echo TENANT_PRESENT || echo TENANT_MISSING
+   /opt/dano/runtime-data/.agents/skills/dano-a-oa-qingjia/scripts/submit.sh --list-options 请假类型
+   ```
+
+   Then check the model-triggered bash session:
+
+   ```bash
+   DANO_BASH_ACCEPTANCE_MARKER=OA_ENV_CHECK \
+   DANO_BASH_ACCEPTANCE_REQUIRED_MARKERS=URL_PRESENT,TENANT_PRESENT \
+   DANO_BASH_ACCEPTANCE_FORBIDDEN_MARKERS='URL_MISSING,TENANT_MISSING,DANO_URL/DANO_TENANT_KEY 未设置' \
+   pnpm run deploy:check-bash -- /path/to/runtime-data/workspaces/<workspace>/.dano/sessions/<session>.jsonl
+   ```
+
+   This OA check is required because `smoke:deploy`, upload checks, host shell
+   checks, and direct app-container shell checks do not prove the filtered
+   model-triggered bash tool environment.
+
    For diagnostics only, scan the full mounted runtime directory explicitly:
 
    ```bash
