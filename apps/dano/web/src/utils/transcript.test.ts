@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { contentBlocks, normalizeTranscript } from "./transcript";
+import {
+  buildTranscriptDisplayItems,
+  buildTranscriptProcessGroups,
+  contentBlocks,
+  formatTranscriptDuration,
+  latestThinkingLine,
+  normalizeTranscript,
+} from "./transcript";
 
 describe("curl transcript status", () => {
   it("marks a completed non-zero curl result as an error", () => {
@@ -153,6 +160,129 @@ describe("assistant thinking blocks", () => {
     ]);
     expect(blocks[0]).toEqual({ kind: "thinking", text: "Inspect the repo" });
     expect(blocks[2]).toEqual({ kind: "thinking", text: "Check tool result" });
+  });
+});
+
+describe("transcript process groups", () => {
+  it("collapses structured thinking and tool work before a final answer", () => {
+    const messages = normalizeTranscript([
+      {
+        id: "user-1",
+        role: "user",
+        content: "inspect",
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "Check files" },
+          {
+            type: "toolCall",
+            id: "tool-1",
+            name: "read",
+            arguments: { path: "README.md" },
+          },
+        ],
+        stopReason: "toolUse",
+        timestamp: "2026-01-01T00:00:02.000Z",
+      },
+      {
+        id: "tool-result-1",
+        role: "toolResult",
+        toolCallId: "tool-1",
+        toolName: "read",
+        content: [{ type: "text", text: "README" }],
+        isError: false,
+        timestamp: "2026-01-01T00:00:03.000Z",
+      },
+      {
+        id: "assistant-2",
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "Summarize" },
+          { type: "text", text: "Final answer" },
+        ],
+        stopReason: "stop",
+        timestamp: "2026-01-01T00:00:04.000Z",
+      },
+    ] as never);
+
+    const groups = buildTranscriptProcessGroups(buildTranscriptDisplayItems(messages));
+
+    expect(groups).toEqual([
+      {
+        key: "user-1",
+        startItemIndex: 0,
+        endItemIndex: 2,
+        finalAnswerItemIndex: 2,
+        finalAnswerBlockIndex: 1,
+        entryIds: ["user-1", "assistant-1", "tool-result-1", "assistant-2"],
+        durationMs: 4000,
+      },
+    ]);
+  });
+
+  it("does not collapse plain text that merely mentions thinking", () => {
+    const groups = buildTranscriptProcessGroups(buildTranscriptDisplayItems([
+      { id: "user-1", role: "user", content: "question" },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "我的思考过程是：final answer",
+        stopReason: "stop",
+      },
+    ] as never));
+
+    expect(groups).toEqual([]);
+  });
+
+  it("does not collapse a still-active turn", () => {
+    const items = buildTranscriptDisplayItems([
+      { id: "user-1", role: "user", content: "question" },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "still going" },
+          { type: "text", text: "Final answer" },
+        ],
+      },
+    ] as never);
+
+    const groups = buildTranscriptProcessGroups(items, {
+      isMessageActive: message => message.id === "assistant-1",
+    });
+
+    expect(groups).toEqual([]);
+  });
+
+  it("does not hide errors when there is no final answer", () => {
+    const groups = buildTranscriptProcessGroups(buildTranscriptDisplayItems([
+      { id: "user-1", role: "user", content: "question" },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "try" }],
+        stopReason: "error",
+        errorMessage: "failed",
+      },
+    ] as never));
+
+    expect(groups).toEqual([]);
+  });
+});
+
+describe("thinking transcript helpers", () => {
+  it("uses the latest non-empty thinking line while streaming", () => {
+    expect(latestThinkingLine("first\nsecond\n")).toBe("second");
+    expect(latestThinkingLine("first\n  ")).toBe("first");
+  });
+
+  it("formats compact process durations", () => {
+    expect(formatTranscriptDuration(4200)).toBe("4s");
+    expect(formatTranscriptDuration(62_000)).toBe("1m2s");
+    expect(formatTranscriptDuration(3_780_000)).toBe("1h03m");
   });
 });
 
