@@ -246,6 +246,36 @@ describe("ask user question transcript data", () => {
     });
   });
 
+  it.each([
+    ["question", { question: "Leave details?" }],
+    ["options", { options: ["A", "B"] }],
+    ["inputType", { inputType: "date" }],
+    ["dateFormat", { dateFormat: "yyyy-MM-dd" }],
+    ["dataSource", { dataSource: { type: "api", endpoint: "/api/options" } }],
+    ["multiple false", { multiple: false }],
+    ["required false", { required: false }],
+    ["empty default", { default: "" }],
+    ["zero default", { default: 0 }],
+    ["false default", { default: false }],
+    ["confirm", { confirm: true }],
+  ])("rejects grouped questions mixed with top-level %s", (_, mixed) => {
+    expect(
+      askUserQuestionRequest(
+        block({
+          ...mixed,
+          questions: [
+            {
+              id: "start_at",
+              question: "Start time?",
+              inputType: "date",
+              dateFormat: "yyyy-MM-dd",
+            },
+          ],
+        }),
+      ),
+    ).toBeNull();
+  });
+
   it("parses compatible single-question object and alias fields", () => {
     expect(
       askUserQuestionRequest(
@@ -419,6 +449,21 @@ describe("ask user question transcript data", () => {
     expect(
       askUserQuestionRequest(
         block({ question: "When?", inputType: "date", dateFormat: "yyyy-MM-dd", required: "yes" }),
+      ),
+    ).toBeNull();
+    expect(
+      askUserQuestionRequest(
+        block({
+          questions: [
+            {
+              id: "start_at",
+              question: "When?",
+              inputType: "date",
+              dateFormat: "yyyy-MM-dd",
+              required: "yes",
+            },
+          ],
+        }),
       ),
     ).toBeNull();
     expect(
