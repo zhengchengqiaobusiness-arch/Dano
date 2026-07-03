@@ -3,6 +3,8 @@
   import { Calendar } from "bits-ui";
   import ChevronDown from "lucide-svelte/icons/chevron-down";
   import { formatAskUserQuestionDateValue, isAskUserQuestionDateTimeFormat, parseAskUserQuestionDateValue } from "@dano/types/ask-user-question-date";
+  import { t } from "../i18n";
+  import "./questionToolControls.css";
 
   let {
     id,
@@ -111,9 +113,9 @@
       >
         {#snippet children({ months, weekdays })}
           <Calendar.Header class="question-calendar-header">
-            <Calendar.PrevButton class="question-calendar-nav" aria-label="Previous month">‹</Calendar.PrevButton>
+            <Calendar.PrevButton class="question-button secondary question-calendar-nav" aria-label="Previous month">‹</Calendar.PrevButton>
             <Calendar.Heading class="question-calendar-heading" />
-            <Calendar.NextButton class="question-calendar-nav" aria-label="Next month">›</Calendar.NextButton>
+            <Calendar.NextButton class="question-button secondary question-calendar-nav" aria-label="Next month">›</Calendar.NextButton>
           </Calendar.Header>
           {#each months as month}
             <Calendar.Grid class="question-calendar-grid">
@@ -156,11 +158,11 @@
   {#if !required && dateValue}
     <button
       type="button"
-      class="secondary question-date-clear"
+      class="question-button secondary question-date-clear"
       disabled={disabled}
       onclick={clearValue}
     >
-      Clear
+      {t("questionTool.clearDate")}
     </button>
   {/if}
 </div>
@@ -178,6 +180,7 @@
     justify-content: space-between;
     gap: 8px;
     text-align: left;
+    cursor: pointer;
   }
 
   :global(.question-date-popover) {
@@ -186,6 +189,7 @@
     border: 1px solid var(--border);
     border-radius: 10px;
     background: var(--panel);
+    color: var(--text);
     box-shadow: var(--shadow-raised);
   }
 
@@ -208,18 +212,10 @@
     text-align: center;
   }
 
-  :global(.question-calendar-nav),
-  .question-date-clear {
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--bg);
-    color: var(--text);
-    cursor: pointer;
-  }
-
   :global(.question-calendar-nav) {
     width: 32px;
     height: 32px;
+    padding: 0;
   }
 
   :global(.question-calendar-grid) {
@@ -244,18 +240,45 @@
     place-items: center;
     width: 30px;
     height: 30px;
+    border: 1px solid transparent;
     border-radius: 8px;
     color: var(--text);
     cursor: pointer;
   }
 
-  :global(.question-calendar-day):hover {
+  :global(.question-calendar-day:hover:not([data-disabled]):not([data-unavailable]):not([data-selected])) {
     background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+    border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+  }
+
+  :global(.question-calendar-day[data-today]:not([data-selected])) {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  :global(.question-calendar-day[data-outside-month]),
+  :global(.question-calendar-day[data-outside-visible-months]) {
+    color: var(--text-subtle);
+    opacity: 0.46;
   }
 
   :global(.question-calendar-day[data-selected]) {
     background: var(--accent);
     color: var(--bg);
+    font-weight: 700;
+  }
+
+  :global(.question-calendar-day[data-disabled]),
+  :global(.question-calendar-day[data-unavailable]) {
+    cursor: not-allowed;
+    opacity: 0.35;
+    text-decoration: line-through;
+  }
+
+  :global(.question-calendar-day[data-focused]),
+  :global(.question-calendar-day:focus-visible) {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
   }
 
   .question-time-input {
@@ -264,6 +287,5 @@
 
   .question-date-clear {
     width: fit-content;
-    padding: 8px 10px;
   }
 </style>
