@@ -12,13 +12,26 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Awaitable, Callable
+from urllib.parse import parse_qs, urlparse
 
 import structlog
 
 log = structlog.get_logger(__name__)
 
 _VIEW_W, _VIEW_H = 1280, 800
+
+# 诊断消息截断上限(防爆,统一:console/pageerror/requestfailed 一致)
+_DIAG_MSG_MAX = 2000
+
+
+def _parse_url_query(url: str) -> dict:
+    """URL 的 query string → {key: [values]}。空 / 无 query → {}。给 all_requests["query"] 用。"""
+    try:
+        return parse_qs(urlparse(url or "").query) or {}
+    except Exception:  # noqa: BLE001
+        return {}
 
 # 注入到每个页面的录制器:把表单输入/选择/提交点击转成语义步骤,推回 window.__danoRecord。
 _RECORDER_JS = r"""() => {
@@ -283,10 +296,9 @@ class RecordSession:
         # (Playwright 一个 Page 只管一个标签页;旧实现只挂在 self.page 上,用户点开 target=_blank/window.open
         #  的新页时,新页既没装录制绑定、又没被截屏 → 表现为"新页打不开"。挂到 context 后新页天然继承。)
         await self._context.expose_binding("__danoRecord", self._on_record)
-        # P0-1:诊断事件(console/pageerror/requestfailed)挂 context,新标签页天然继承。
-        self._context.on("console", self._on_console)
-        self._context.on("pageerror", self._on_pageerror)
-        self._context.on("requestfailed", self._on_requestfailed)
+        # P0-1:诊断事件(console/pageerror/requestfailed)。Playwright 的 BrowserContext **没有** pageerror/
+        # console/requestfailed 事件(只有 Page 有),所以挂在 self.page;新页在 _on_new_page 里也挂。
+        self._attach_diag_handlers(self.page)
         if self._intercept:
             # 拦截模式:抓到业务写请求后假装成功、不真发 → 录制不产生真实记录(登录/校验码等放行)
             await self._context.route("**/*", self._route)
@@ -302,7 +314,9 @@ class RecordSession:
 
     async def _on_new_page(self, page) -> None:  # noqa: ANN001 —— 新标签页/新窗口(context "page" 事件)
         """用户操作打开了新页(target=_blank / window.open / 弹窗)→ 跟随:设为活动页,把截屏切过去。
-        否则新页在后台,用户看不到、也操作不到,表现为"新页打不开"。录制绑定/路由已在 context 级,自动覆盖新页。"""
+        否则新页在后台,用户看不到、也操作不到,表现为"新页打不开"。录制绑定/路由已在 context 级,自动覆盖新页。
+
+        P0-1:诊断事件是 page 级,新页要重新挂(否则新页 pageerror 进不来)。"""
         if self._closing:
             return
         try:
@@ -316,8 +330,18 @@ class RecordSession:
         if self._closing or page.is_closed():     # 等待期间会话已在拆 / 新页已关 → 不切、不重开截屏
             return
         self.page = page
+        self._attach_diag_handlers(page)         # P0-1:新页挂诊断(浏览器无 context 级 pageerror)
         if self._on_frame is not None:        # 截屏已开 → 切到新页;未开则等 start_screencast 自然开在最新页
             await self._restart_screencast()
+
+    def _attach_diag_handlers(self, page) -> None:  # noqa: ANN001
+        """在指定 page 上挂 console/pageerror/requestfailed 三个诊断事件。重复挂安全(同名 handler 会去重)。"""
+        try:
+            page.on("console", self._on_console)
+            page.on("pageerror", self._on_pageerror)
+            page.on("requestfailed", self._on_requestfailed)
+        except Exception:  # noqa: BLE001
+            pass
 
     async def _on_page_close(self, page) -> None:  # noqa: ANN001
         """活动页被关掉(用户关新标签/弹窗)→ 回退到仍打开的页,截屏切回去,避免黑屏。
@@ -341,8 +365,8 @@ class RecordSession:
 
         - 不做任何 method / 角色过滤:先抓全,后续 P0-2 角色分类 + P0-3 依赖闭包基于这份原数据工作。
         - requestfailed / 异常响应也记,response_json=None 时仍占行,便于"接口没返回"等隐蔽故障回溯。
+        - query 字段:调用方显式传就用;否则从 url 自动解析(治"GET 携带什么参数"看不到)。
         """
-        import time as _time
         idx = self._req_counter
         self._req_counter += 1
         entry: dict = {
@@ -350,33 +374,69 @@ class RecordSession:
             "method": (m or "").upper(),
             "url": url or "",
             "headers": dict(headers or {}),
-            "query": dict(query or {}),
+            "query": dict(query) if query is not None else _parse_url_query(url),
             "post_data": pd,
             "response_json": response_json,
             "status": status,
             "content_type": content_type,
-            "timestamp": int(_time.time() * 1000),
+            "timestamp": int(time.time() * 1000),
+            # P0-2:角色分类字段。响应未到时先按现有信息初分(_classify_entry),响应落地后再 _classify_entry 一次。
+            # classify_field 缺失 = 还没分类过(兜底用)。
         }
         self.all_requests.append(entry)
+        self._classify_entry(entry)
         return idx
+
+    def _attach_response(self, *, url: str, method: str, response_json, status, content_type: str) -> bool:
+        """把响应贴回 all_requests 里同 url+method 的最近一条未回填记录。返回是否贴成功。
+
+        集中处理反查 + 改字段,避免 _route / _on_response / 后续 P0-3 依赖闭包都各自遍历 all_requests。
+        P0-2:贴完响应后顺手再分类一次(此时 read_option / business_get 才能判准)。"""
+        for r in reversed(self.all_requests):
+            if r.get("url") == url and r.get("method") == method and r.get("response_json") is None:
+                r["response_json"] = response_json
+                r["status"] = status
+                r["content_type"] = content_type or r.get("content_type", "")
+                self._classify_entry(r)                  # P0-2:响应落地后再分一次(更准)
+                return True
+        return False
+
+    def _classify_entry(self, entry: dict) -> None:
+        """P0-2:对单条 all_requests entry 调用 classify_network_request,把结果写到 entry 上。
+
+        失败/异常时静默留空(下游 captured_all_requests 会兜底重试)。"""
+        try:
+            from dano.execution.page.request_capture import classify_network_request
+            cls = classify_network_request({
+                "method": entry.get("method"),
+                "url": entry.get("url"),
+                "post_data": entry.get("post_data"),
+                "response_json": entry.get("response_json"),
+            })
+            entry["role"] = cls["role"]
+            entry["keep"] = cls["keep"]
+            entry["reason"] = cls["reason"]
+            entry["confidence"] = cls["confidence"]
+        except Exception:  # noqa: BLE001 —— 分类失败不影响事实链路,留空给兜底
+            pass
 
     def _record_diag(self, kind: str, payload: dict) -> None:
         """记录一条诊断事件:console/pageerror/requestfailed。
 
         统一结构 {type, level?, message, url?, timestamp, request_index?},供 P0-6 review_items 与人工排错使用。
         request_index 关联到 all_requests 里同源请求(失败请求 → request_index=关联到该请求的 index)。"""
-        import time as _time
-        rec = {"type": kind, "timestamp": int(_time.time() * 1000)}
+        rec = {"type": kind, "timestamp": int(time.time() * 1000)}
         rec.update({k: v for k, v in (payload or {}).items() if v is not None})
         self.diagnostics.append(rec)
 
     def _capture(self, m: str, url: str, pd: str | None, ct: str, headers: dict | None = None) -> None:
         """登记一个写请求(含请求头,回放鉴权用)+ 实时推给前端诊断。
-        同步落 all_requests(P0-1)与原 requests 列表,确保两路事实一致(否则后续依赖闭包会缺数据)。"""
+
+        P0-1 收敛:本函数只负责写 self.requests 与触发 on_request_cb;all_requests 由调用方
+        (_route / _on_request)在调本函数**之前**自己 _record_all,避免同一请求被记两次。"""
         if pd:
             self.requests.append({"method": m, "url": url, "post_data": pd,
                                   "content_type": ct, "headers": headers or {}})
-        self._record_all(m, url, pd=pd, headers=headers, content_type=ct)
         if self._on_request_cb is not None:
             is_json = "json" in (ct or "").lower() or (pd or "").lstrip().startswith(("{", "["))
             try:
@@ -395,7 +455,8 @@ class RecordSession:
                 hd = dict(request.headers or {})
             except Exception:  # noqa: BLE001
                 pass
-            # GET 也落 all_requests(全量捕获)。原 requests 列表只收写请求(避免淹没筛选)。
+            # P0-1:GET 也落 all_requests(全量捕获,治"业务 GET 前置接口被早筛丢")。
+            # _record_all 是 all_requests 的唯一写入点;_capture 只负责写 requests(写请求才走)。
             self._record_all(m, url, pd=pd, headers=hd, content_type=hd.get("content-type", ""))
             if m in ("POST", "PUT", "PATCH", "DELETE"):
                 self._capture(m, url, pd, hd.get("content-type", ""), hd)
@@ -455,8 +516,15 @@ class RecordSession:
     def captured_all_requests(self) -> list[dict]:
         """P0-1:全量网络请求(GET/POST/PUT/PATCH/DELETE 都记)。先抓全再筛 → P0-3 依赖闭包基于此。
 
+        P0-2:每条 entry 已带 role/keep/reason/confidence(由 _classify_entry 写入,响应落地后再分一次);
+        万一某条漏分类(异常路径),返回前兜底再分一次。
+
         返回不可变副本,避免外部误改污染内部状态。每条字段:index/method/url/headers/query/post_data
-        /response_json/status/content_type/timestamp。"""
+        /response_json/status/content_type/timestamp/role/keep/reason/confidence。"""
+        # 兜底:漏分类的 entry 在返回前再分一次
+        for r in self.all_requests:
+            if "role" not in r:
+                self._classify_entry(r)
         return [dict(r) for r in self.all_requests]
 
     def captured_diagnostics(self) -> list[dict]:
@@ -483,20 +551,17 @@ class RecordSession:
                 ct = (response.headers or {}).get("content-type", "")
             except Exception:  # noqa: BLE001
                 pass
-            # P0-1:全量捕获响应(JSON body)。先按 url+method 反查最近一条 all_requests 同源记录,
-            # 把 status / response_json / content_type 补回,保持 all_requests 每条都有完整的事实行。
+            # P0-1:全量捕获响应(JSON body)→ 贴回 all_requests 同源记录(P0-3 依赖闭包靠它发现 step 串联)。
+            # 写请求同时贴回 self.requests(Q3 步链 taskId);读候选源走 as_list_payload 单独进 self.reads。
+            # 容错:content-type 不是 JSON 也再试一次 response.json()(治"没设 ct 但 body 是 JSON 文本")。
             if "json" in (ct or "").lower():
                 try:
                     data = await response.json()
                 except Exception:  # noqa: BLE001
                     data = None
                 if data is not None:
-                    for r in reversed(self.all_requests):
-                        if r.get("url") == url and r.get("method") == m and r.get("response_json") is None:
-                            r["response_json"] = data
-                            r["status"] = response.status
-                            r["content_type"] = ct or r.get("content_type", "")
-                            break
+                    self._attach_response(url=url, method=m, response_json=data,
+                                          status=response.status, content_type=ct)
                     if m in ("POST", "PUT", "PATCH"):
                         for r in self.requests:
                             if r.get("url") == url and "response_json" not in r:
@@ -542,10 +607,9 @@ class RecordSession:
     # ── P0-1 诊断事件:console / pageerror / requestfailed ──
     def _on_console(self, msg) -> None:  # noqa: ANN001 —— context 级 console 事件
         try:
-            text = (msg.text or "")[:2000]    # 截断防爆
             self._record_diag("console", {
                 "level": (msg.type or "log"),  # log/info/warn/error/debug
-                "message": text,
+                "message": (msg.text or "")[:_DIAG_MSG_MAX],
             })
         except Exception:  # noqa: BLE001
             pass
@@ -554,7 +618,7 @@ class RecordSession:
         try:
             self._record_diag("pageerror", {
                 "level": "error",
-                "message": (str(err) or "")[:2000],
+                "message": (str(err) or "")[:_DIAG_MSG_MAX],
             })
         except Exception:  # noqa: BLE001
             pass
@@ -571,7 +635,7 @@ class RecordSession:
                     break
             failure_text = ""
             try:
-                failure_text = (getattr(request.failure, "error_text", "") or "")[:500]
+                failure_text = (getattr(request.failure, "error_text", "") or "")[:_DIAG_MSG_MAX]
             except Exception:  # noqa: BLE001
                 pass
             self._record_diag("requestfailed", {

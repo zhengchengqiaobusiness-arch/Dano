@@ -143,6 +143,36 @@ def test_remove_step_removes_related_links():
     assert [s.step_id for s in spec.steps] == ["A", "B", "C"]
 
 
+def test_dedupe_steps_keeps_latest_repeated_read_step():
+    def _get(sid, url):
+        return FlowStep(
+            step_id=sid,
+            name=sid,
+            method="GET",
+            url=url,
+            path=url,
+            source_meta={"role": "business_get"},
+            params=[ParamField(path="query.day", key="day", value="1", type="number")],
+        )
+
+    spec = FlowSpec(flow_id="f", steps=[
+        _get("old1", "/admin-api/bpm/process-instance/get-approval-detail?processVariablesStr=null"),
+        _get("old2", "/admin-api/bpm/process-instance/get-approval-detail?processVariablesStr=1"),
+        FlowStep(step_id="submit", name="submit", method="POST", url="/admin-api/oa/duty-leave/submit-process",
+                 path="/admin-api/oa/duty-leave/submit-process"),
+    ])
+    spec.links = [
+        FlowLink(link_id="bad", source_step_id="old1", source_path="data.id", target_step_id="submit", target_path="x"),
+        FlowLink(link_id="ok", source_step_id="old2", source_path="data.id", target_step_id="submit", target_path="y"),
+    ]
+
+    new = apply_flow_edits(spec, [{"op": "dedupe_steps"}])
+
+    assert [s.step_id for s in new.steps] == ["old2", "submit"]
+    assert [l.link_id for l in new.links] == ["ok"]
+    assert new.meta["deduped_step_count"] == 1
+
+
 # ── Link 编辑 ──
 def _two_step_spec_with_link():
     s1 = FlowStep(step_id="A", name="A", method="POST", url="/a", path="/a",
@@ -204,6 +234,38 @@ def test_resolve_review_item_is_preserved_in_validation():
     assert next(i for i in new.review_items if i.id == item.id).resolved is True
     report = validate_flow_spec(new)
     assert next(i for i in report["review_items"] if i["id"] == item.id)["resolved"] is True
+
+
+def test_resolve_reviews_excluding_high():
+    spec = _two_step_spec_with_link()
+    spec.steps[0].risk_level = "L4"
+    spec = apply_flow_edits(spec, [])
+
+    new = apply_flow_edits(spec, [{
+        "op": "resolve_reviews",
+        "exclude_severities": ["high"],
+        "resolved": True,
+    }])
+
+    for item in new.review_items:
+        if item.severity == "high":
+            assert item.resolved is False
+        else:
+            assert item.resolved is True
+
+
+def test_runtime_unknown_review_is_not_duplicated_as_field_category():
+    spec = _make_spec()
+    param = spec.steps[0].params[0]
+    param.category = "runtime_var"
+    param.source_kind = "unknown"
+    param.need_human_confirm = True
+
+    new = apply_flow_edits(spec, [])
+    target_items = [i for i in new.review_items if i.target.get("path") == param.path]
+
+    assert [i.type for i in target_items] == ["runtime_var_source"]
+    assert target_items[0].severity == "high"
 
 
 # ── Type inference ──

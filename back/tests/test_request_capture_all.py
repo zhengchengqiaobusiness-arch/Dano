@@ -56,13 +56,16 @@ def _dataiq_requests():
 # ── 1. all_requests 字段结构 ──
 def test_all_requests_captures_post():
     s = _new_sess()
+    # 模拟 _route 路径:先 _record_all,再 _capture(写请求才走 _capture)
+    s._record_all("POST", "https://x/api/submit", pd='{"a":1}',
+                  headers={"Authorization": "Bearer t"}, content_type="application/json")
     s._capture("POST", "https://x/api/submit", '{"a":1}',
                "application/json", {"Authorization": "Bearer t"})
     cap = s.captured_all_requests()
     assert len(cap) == 1
     r = cap[0]
     # 字段齐全
-    for k in ("index", "method", "url", "headers", "post_data",
+    for k in ("index", "method", "url", "headers", "post_data", "query",
               "response_json", "status", "content_type", "timestamp"):
         assert k in r, f"missing field {k}"
     assert r["method"] == "POST"
@@ -70,6 +73,7 @@ def test_all_requests_captures_post():
     assert r["post_data"] == '{"a":1}'
     assert r["headers"]["Authorization"] == "Bearer t"
     assert r["content_type"] == "application/json"
+    assert r["query"] == {}     # URL 无 query string
     assert isinstance(r["timestamp"], int) and r["timestamp"] > 0
 
 
@@ -100,21 +104,39 @@ def test_all_requests_index_monotonic():
 
 
 def test_all_requests_appends_response_back():
-    """_on_response 路径:同 url/method 的最近一条未回填 all_requests 记录应被贴上 response_json/status。"""
+    """_attach_response 路径:同 url+method 最近一条未回填的 all_requests 应被贴上 response_json/status。"""
     s = _new_sess()
     idx = s._record_all("GET", "https://x/api/foo", content_type="application/json")
     r = s.all_requests[0]
     assert r["response_json"] is None
-    # 模拟 _on_response 贴回
+    # 调收口后的真实助手 _attach_response,不再手工写 for 循环(那是 P0-1 临时方案)
     payload = {"code": 200, "data": [1, 2, 3]}
-    for x in reversed(s.all_requests):
-        if x.get("url") == "https://x/api/foo" and x.get("method") == "GET" and x.get("response_json") is None:
-            x["response_json"] = payload
-            x["status"] = 200
-            break
+    ok = s._attach_response(url="https://x/api/foo", method="GET",
+                            response_json=payload, status=200, content_type="application/json")
+    assert ok is True
     assert s.all_requests[0]["response_json"] == payload
     assert s.all_requests[0]["status"] == 200
     assert s.all_requests[0]["index"] == idx
+
+
+def test_attach_response_no_double_attach():
+    """同一请求被响应两次 → 只贴首次,避免覆盖(治"网络抖动重试场景被覆盖丢真值")。"""
+    s = _new_sess()
+    s._record_all("GET", "https://x/api/foo")
+    s._attach_response(url="https://x/api/foo", method="GET",
+                       response_json={"first": True}, status=200, content_type="application/json")
+    s._attach_response(url="https://x/api/foo", method="GET",
+                       response_json={"second": True}, status=200, content_type="application/json")
+    assert s.all_requests[0]["response_json"] == {"first": True}
+
+
+def test_attach_response_unknown_request():
+    """未在 all_requests 里的 url → 返回 False,不抛错(治"响应先于 _record_all 到达"的竞态)。"""
+    s = _new_sess()
+    ok = s._attach_response(url="https://x/api/unknown", method="GET",
+                            response_json={"x": 1}, status=200, content_type="application/json")
+    assert ok is False
+    assert s.all_requests == []
 
 
 # ── 2. dataiq 验收场景 ──
@@ -132,12 +154,23 @@ def test_dataiq_three_requests_all_present():
     assert any("save_dataiq_chat_list" in u for u in urls), urls
     assert any("getappid" in u for u in urls), urls
     assert any("sjws_chat" in u for u in urls), urls
-    # query 解析:getappid URL 带 ?appId=auto&appName=auto
-    from urllib.parse import urlparse, parse_qs
+    # query 字段:_record_all 自动从 URL 解析(治"看不到 GET 携带什么参数")
     for r in cap:
         if "getappid" in r["url"]:
-            # query 字段由调用方解析后填入;此处 url 已含 query
-            assert "?appId=auto" in r["url"]
+            assert r["query"] == {"appId": ["auto"], "appName": ["auto"]}, \
+                f"getappid query 应被解析,实际 {r['query']}"
+        else:
+            assert r["query"] == {}, f"无 query 的 URL 不应有 query 字段,实际 {r['query']}"
+
+
+def test_query_auto_parsed_for_all_methods():
+    """任何 method 的 URL 含 query → query 字段都自动被填充。"""
+    s = _new_sess()
+    s._record_all("GET", "https://x/a?k=v&k=v2&z=1")
+    s._record_all("POST", "https://x/b?token=t")     # POST 即使带 query 也解析
+    cap = s.captured_all_requests()
+    assert cap[0]["query"] == {"k": ["v", "v2"], "z": ["1"]}
+    assert cap[1]["query"] == {"token": ["t"]}
 
 
 def test_dataiq_response_attached_to_correct_request():
@@ -217,10 +250,35 @@ def test_diagnostics_requestfailed_no_link_when_unknown():
     assert "request_index" not in d
 
 
+def test_diagnostics_truncation_unified():
+    """三种诊断事件 message 截断上限一致(_DIAG_MSG_MAX = 2000),避免某一种特殊化。"""
+    s = _new_sess()
+    long_text = "x" * 5000
+    class _ConsoleMsg:
+        type = "error"
+        text = long_text
+    s._on_console(_ConsoleMsg())
+    s._on_pageerror(Exception(long_text))
+
+    class _Req:
+        url = "https://x/api/y"
+        method = "POST"
+        class _F:
+            error_text = long_text
+        failure = _F()
+    s._on_requestfailed(_Req())
+
+    msgs = [d["message"] for d in s.captured_diagnostics()]
+    for m in msgs:
+        assert len(m) == 2000, f"诊断 message 截断不一致: {len(m)}"
+
+
 # ── 4. 不破坏既有 captured_requests / captured_reads ──
 def test_legacy_captured_requests_still_works_for_writes_only():
     """原 captured_requests 只收写请求;GET 不进 requests,但 all_requests 全收。"""
     s = _new_sess()
+    # 模拟 _route 拦截模式:_record_all 唯一写入 all_requests,_capture 只落 requests(写请求)
+    s._record_all("POST", "https://x/api/submit", pd='{"a":1}', content_type="application/json")
     s._capture("POST", "https://x/api/submit", '{"a":1}', "application/json", {})
     s._record_all("GET", "https://x/api/foo")     # 全量,但不进 requests
     assert len(s.captured_requests()) == 1
@@ -228,11 +286,16 @@ def test_legacy_captured_requests_still_works_for_writes_only():
     assert len(s.captured_all_requests()) == 2    # GET + POST 都在
 
 
-def test_capture_writes_to_both_requests_and_all_requests():
-    """_capture 写请求同步落 all_requests(治"前端 FlowSpec 漏 GET")。"""
+def test_capture_does_not_touch_all_requests():
+    """_capture 只管 self.requests,不调 _record_all —— 避免与调用方双重记录同一请求。"""
     s = _new_sess()
     s._capture("POST", "https://x/api/submit", '{"a":1}', "application/json", {"X": "1"})
     assert len(s.requests) == 1
+    assert len(s.all_requests) == 0                # _capture 不写 all_requests
+    # 完整路径(模拟 _route):先 _record_all 再 _capture → 两路各一条,无双倍
+    s._record_all("POST", "https://x/api/submit", pd='{"a":1}',
+                  headers={"X": "1"}, content_type="application/json")
+    assert len(s.requests) == 1                   # 不会因多调一次 _capture 而变 2
     assert len(s.all_requests) == 1
     assert s.all_requests[0]["headers"]["X"] == "1"
 

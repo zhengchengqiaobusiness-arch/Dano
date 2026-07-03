@@ -308,3 +308,93 @@ async def test_recorded_steps_build_and_publishable_shape(tmp_path) -> None:  # 
     body = build_page_script(steps, action="submit_reimburse", dom_fingerprint="",
                              start_url=page.as_uri(), success_marker="text=保存成功")
     assert body.risk_level.value == "L3" and any(a.op == "submit" for a in body.actions)
+
+
+# ── P0-1 真实浏览器集成:验证 all_requests / diagnostics 在真浏览器链路里真能抓到 ──
+_HTML_FETCH = """<!doctype html><html><head></head><body>
+<button id="g">go</button>
+<script>
+document.getElementById('g').onclick = async () => {
+  await fetch('/api/list?appId=auto&appName=auto');
+  document.title = 'GET_DONE';
+};
+</script>
+</body></html>"""
+
+_HTML_THROW = """<!doctype html><html><head></head><body>
+<button id="bad">bad</button>
+<script>
+console.error('init-warning');
+// 顶层 throw:Playwright context 级 pageerror 事件必触发
+window.addEventListener('error', function (e) { console.log('caught:' + e.message); });
+throw new Error('boom-from-page');
+</script>
+</body></html>"""
+
+
+async def test_real_browser_all_requests_captures_get(tmp_path) -> None:  # noqa: ANN001
+    """真实浏览器:fetch GET 应进 all_requests,且 query 字段被自动解析。
+
+    不依赖远端服务(发同源 fetch 经 service worker / 静态 server 都易跨域踩坑);用 file:// 起一个
+    内置 server 起 1 个 GET 接口验。"""
+    if not await _chromium_available():
+        pytest.skip("chromium 未安装")
+    from aiohttp import web
+    page = tmp_path / "fetch.html"
+    page.write_text(_HTML_FETCH, encoding="utf-8")
+
+    async def handler(req):
+        return web.json_response({"rows": []})
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]    # noqa: SLF001 —— aiohttp 没暴露取端口 API
+    # 改写 HTML 让 fetch 走真端口
+    html = _HTML_FETCH.replace("/api/list", f"http://127.0.0.1:{port}/api/list")
+    page.write_text(html, encoding="utf-8")
+
+    sess = RecordSession(intercept_submit=False, capture_reads=False)
+    try:
+        await sess.start(page.as_uri())
+        await sess.page.get_by_role("button", name="go").click()
+        try:
+            await sess.page.wait_for_function("document.title === 'GET_DONE'", timeout=5000)
+        except Exception:  # noqa: BLE001
+            pass
+        await sess.page.wait_for_timeout(500)
+    finally:
+        await runner.cleanup()
+        await sess.stop()
+    cap = sess.captured_all_requests()
+    methods = [r["method"] for r in cap]
+    assert "GET" in methods, f"GET 应进 all_requests,实际 {methods}"
+    # 不重复记录(治 P0-1 重构前的 _record_all 双重记录 bug)
+    target = [r for r in cap if "/api/list" in r["url"]]
+    assert len(target) == 1, f"同一 GET 在 all_requests 中只能占一行,实际 {len(target)}"
+    # query 自动解析(治"看不到 GET 携带什么参数")
+    assert target[0]["query"] == {"appId": ["auto"], "appName": ["auto"]}, \
+        f"query 应被解析,实际 {target[0]['query']}"
+
+
+async def test_real_browser_diagnostics_captures_console_and_pageerror(tmp_path) -> None:  # noqa: ANN001
+    """真实浏览器:console.error 与 throw 抛出的 pageerror 都应进 diagnostics。"""
+    if not await _chromium_available():
+        pytest.skip("chromium 未安装")
+    page = tmp_path / "throw.html"
+    page.write_text(_HTML_THROW, encoding="utf-8")
+    sess = RecordSession(intercept_submit=False, capture_reads=False)
+    try:
+        await sess.start(page.as_uri())
+        # 等 init-warning console 与 setTimeout throw 落地
+        await sess.page.wait_for_timeout(500)
+    finally:
+        await sess.stop()
+    types = [d["type"] for d in sess.captured_diagnostics()]
+    assert "console" in types, f"console 事件应进 diagnostics,实际 {types}"
+    assert "pageerror" in types, f"pageerror 应进 diagnostics,实际 {types}"
+    # pageerror.message 含原异常文案
+    page_errors = [d for d in sess.captured_diagnostics() if d["type"] == "pageerror"]
+    assert any("boom-from-page" in d["message"] for d in page_errors), page_errors

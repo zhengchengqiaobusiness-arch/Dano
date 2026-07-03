@@ -1139,6 +1139,100 @@ def classify_request_role(req: dict) -> dict:
     return {"semanticRole": role, "sideEffect": "write", "riskLevel": "L3"}
 
 
+# 提交锚点路径段(P0-2 强信号:用户主动提交触发,优先级高于普通 business_write)
+_SUBMIT_PATH_SEGS = frozenset({"submit", "save", "send", "create", "apply", "start", "flow", "process", "task",
+                               "chat", "complete", "finish", "publish"})
+# 静态资源 / 长连接 / 噪声(扩展名命中即丢)
+_NOISE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".js", ".woff", ".woff2", ".ico",
+               ".map", ".ttf", ".mp4", ".mp3", ".wav", ".zip", ".rar")
+# 业务 GET 响应形态关键词(返回值是单值/对象,不是列表 → 像 getappid 这类)
+_OBJECT_VALUE_KEYS = ("code", "value", "data", "appcode", "config", "result", "id")
+
+
+def classify_network_request(req: dict) -> dict:
+    """P0-2:把每条网络请求翻译成 {role, keep, reason, confidence},供前端 + 后续 P0-3 依赖闭包使用。
+
+    复用既有 classify_request_role / looks_dangerous_write / looks_like_read_request / as_list_payload,加层薄壳
+    转成 P0-2 约定的角色枚举 + keep/reason/confidence 字段。**单请求判定**:跨请求的"业务 GET 是否被后续 step
+    引用"留给 P0-3 依赖闭包,本函数只判单条本身。
+
+    输出:
+        role ∈ {auth, noise, read_option, read_context, business_get, business_write,
+                 submit_anchor, post_submit_verify, destructive, unknown}
+        keep ∈ {True, False}: 是否进入主流程步骤(destructive / noise / auth / read_option 都不进)
+        reason: 给人看的一句话解释
+        confidence: 0~1,0.9+ 高置信,0.7~0.9 中等,<0.7 让人工确认
+    """
+    method = (req.get("method") or "GET").upper()
+    url = req.get("url") or req.get("path") or ""
+    pd = req.get("post_data")
+    resp = req.get("response_json")
+
+    # 1) 静态资源 / 长连接 → noise(最低优先级,但最高效)
+    ul = (url or "").lower()
+    if any(ul.endswith(ext) for ext in _NOISE_EXTS):
+        return {"role": "noise", "keep": False,
+                "reason": "静态资源/二进制,非业务接口", "confidence": 0.99}
+    if any(n in ul for n in _READ_NOISE):
+        return {"role": "noise", "keep": False,
+                "reason": "长连接/SSE/心跳,非业务接口", "confidence": 0.95}
+
+    # 2) 危险写:DELETE 或路径含 delete/remove/destroy/reject/terminate/revoke
+    if looks_dangerous_write(req):
+        return {"role": "destructive", "keep": False,
+                "reason": "DELETE 或路径含删除/驳回/终止/撤销概念,代他人操作风险高",
+                "confidence": 0.95}
+
+    # 3) 登录/鉴权/基建写
+    if looks_like_auth_write(url, pd):
+        return {"role": "auth", "keep": False,
+                "reason": "URL 或请求体命中登录/鉴权/凭证概念,基建而非业务",
+                "confidence": 0.95}
+
+    path = (urlparse(url).path if str(url).startswith("http") else str(url)).lower()
+    segs = {s for s in _re.split(r"[^a-zA-Z0-9]+", path) if s}
+
+    # 4) GET 路径:细分 read_option / read_context / business_get
+    if method not in _WRITE:
+        # 4a) 列表型响应 → read_option(下拉/选人/字典源,作为字段来源,不入主流程)
+        items = as_list_payload(resp) if resp is not None else None
+        if items:
+            seg_hint = "路径含 list/options/dict/select/candidates" if (segs & {"list", "options", "dict", "select", "candidates", "tree", "menu", "candidates"}) else "响应为列表"
+            return {"role": "read_option", "keep": False,
+                    "reason": f"{seg_hint} → 作为下拉/选人/字典源,供字段绑定,不进主流程",
+                    "confidence": 0.92}
+        # 4b) 单值/对象响应 → 业务 GET(像 getappid 返回 appCode;像 config/getConfig)
+        if resp is not None:
+            if isinstance(resp, dict) and any(k in resp for k in _OBJECT_VALUE_KEYS):
+                return {"role": "business_get", "keep": True,
+                        "reason": "响应是单值/对象,可能含业务 ID/配置,留作依赖闭包候选",
+                        "confidence": 0.78}
+            if not isinstance(resp, (list, dict)):
+                return {"role": "read_context", "keep": True,
+                        "reason": "GET 返回非结构化值(可能是用户档案/上下文),保留备查",
+                        "confidence": 0.65}
+        # 4c) 兜底:无响应或响应非业务形态 → 未知 GET(给中低置信,等 P0-3 依赖闭包裁决)
+        return {"role": "read_context", "keep": False,
+                "reason": "GET 但响应未落地或非业务形态(可能上下文/初始化查询),不进主流程",
+                "confidence": 0.5}
+
+    # 5) POST/PUT/PATCH:细分 submit_anchor / business_write / read_option
+    # 5a) POST 形态的读/查询(getXxxList/queryXxx)→ 不当业务写
+    if method == "POST" and looks_like_read_request(url, pd):
+        return {"role": "read_option", "keep": False,
+                "reason": "POST 路径动词是 get/query/list/search(下拉/列表源)",
+                "confidence": 0.9}
+    # 5b) 路径含 submit/save/send/create/apply/start 等 → submit_anchor 候选
+    if segs & _SUBMIT_PATH_SEGS:
+        return {"role": "submit_anchor", "keep": True,
+                "reason": f"路径含提交动作({','.join(sorted(segs & _SUBMIT_PATH_SEGS))}) → 主流程锚点",
+                "confidence": 0.88}
+    # 5c) 兜底业务写
+    return {"role": "business_write", "keep": True,
+            "reason": "写请求(POST/PUT/PATCH)且不属于登录/查询/危险,默认进入业务步骤",
+            "confidence": 0.7}
+
+
 def validate_goal(goal: dict, api_request: dict) -> list[str]:
     """Goal 完整性门(**确定性,不信 LLM 自说**):intent 非空、required_inputs 有来源(∈实际参数,
     防 LLM 臆造)、success_criteria 可验证(非空)、forbidden_actions 已明确、risk_level 已识别。
@@ -1511,11 +1605,19 @@ def _set_by_path(node, path: str, value) -> None:
         pass
 
 
-def resolve_identity_value(source: str, storage_state: dict | None):
+def resolve_identity_value(source: str, storage_state: dict | None, auth_headers: dict | None = None):
     """从登录态按 source 取"当前用户/会话值"。source 形如 localStorage:userInfo.userId / cookie:JSESSIONID。"""
-    if not storage_state or not source:
+    if not source:
         return None
     kind, _, rest = source.partition(":")
+    if kind == "requestHeader":
+        for k, v in (auth_headers or {}).items():
+            if str(k).lower() == rest.lower():
+                val = str(v or "")
+                return val[7:].strip() if val.lower().startswith("bearer ") else val
+        return None
+    if not storage_state:
+        return None
     if kind == "cookie":
         for c in storage_state.get("cookies") or []:
             if c.get("name") == rest:
@@ -1539,7 +1641,7 @@ def resolve_identity_value(source: str, storage_state: dict | None):
 def _apply_identity(body, api_request: dict, storage_state: dict | None) -> None:
     """把 identity 字段在运行期用会话里的当前用户值覆盖(不冻结成录制者)。"""
     for idn in api_request.get("identity") or []:
-        val = resolve_identity_value(idn.get("source", ""), storage_state)
+        val = resolve_identity_value(idn.get("source", ""), storage_state, api_request.get("auth_headers"))
         if val is not None:
             _set_by_path(body, idn.get("tokens") or idn.get("path", ""), val)   # tokens 优先(键含点也无歧义)
 
@@ -1611,7 +1713,7 @@ def _merge_query_into_url(url: str, query: dict | None) -> str:
 
 def _wellformed_identity_source(src: str) -> bool:
     kind, sep, rest = (src or "").partition(":")
-    return bool(sep) and kind in ("cookie", "localStorage") and bool(rest)
+    return bool(sep) and kind in ("cookie", "localStorage", "requestHeader") and bool(rest)
 
 
 def _check_step_links(workflow: dict) -> list[str]:
@@ -1721,7 +1823,7 @@ def _identity_audit(body, api_request: dict, storage_state: dict | None) -> list
     只在确证"源有值却没写进去"时报警 —— 无会话值(val=None)一律跳过,绝不误伤正常调用。"""
     bad: list[str] = []
     for idn in api_request.get("identity") or []:
-        val = resolve_identity_value(idn.get("source", ""), storage_state)
+        val = resolve_identity_value(idn.get("source", ""), storage_state, api_request.get("auth_headers"))
         if val is None:
             continue
         cur = _path_lookup(body, idn.get("tokens") or idn.get("path", ""))

@@ -165,6 +165,26 @@ class ToFlowSpecTest(unittest.TestCase):
             elif sv.path == "createTime":
                 self.assertEqual(sv.kind, "now_s")
 
+    def test_token_field_can_come_from_request_header(self):
+        captured = [_post(
+            "https://oa/api/submit",
+            {"token": "DPORTAL20260623102834", "reason": "请假"},
+            headers={"token": "DPORTAL20260623102834", "Content-Type": "application/json"},
+            resp={"code": 200},
+        )]
+        spec = to_flow_spec(captured, samples={"reason": "请假"})
+        param = {p.path: p for p in spec.steps[0].params}["token"]
+        self.assertEqual(param.category, "runtime_var")
+        self.assertEqual(param.source_kind, "request_header")
+        self.assertEqual(param.source["header"], "token")
+        self.assertFalse(param.exposed_to_user)
+        self.assertFalse(param.need_human_confirm)
+        self.assertFalse(any(i.target.get("path") == "token" for i in spec.review_items))
+
+        apir, errors = flow_spec_to_api_request(spec)
+        self.assertEqual(errors, [])
+        self.assertTrue(any(i["path"] == "token" and i["source"] == "requestHeader:token" for i in apir["identity"]))
+
     def test_summary_shape(self):
         captured = [_post("https://oa/api/submit", {"a": 1}, resp={"code": 200})]
         spec = to_flow_spec(captured, samples={"a": "1"}, tenant="acme", subsystem="HR")
@@ -312,6 +332,61 @@ class GetBusinessStepTest(unittest.TestCase):
         users_role = next(r for r in roles if "/api/users" in r["path"])
         self.assertEqual(users_role["role"], "read_option")
         self.assertFalse(users_role["keep"])
+
+    def test_repeated_preread_gets_are_deduped_and_option_reads_stay_out(self):
+        """录制中反复触发的审批详情 GET 只保留最后一次；选人列表不进入主流程。"""
+        process_definition_id = "oa_duty_leave:4:f92ff5fc-75e0-11f1-9f05-7683e518321b"
+        approval_null = (
+            "https://oa/admin-api/bpm/process-instance/get-approval-detail"
+            "?processDefinitionId=oa_duty_leave%3A4%3Af92ff5fc-75e0-11f1-9f05-7683e518321b"
+            "&activityId=StartUserNode&processVariablesStr=%7B%22day%22%3Anull%7D"
+        )
+        approval_day_1 = approval_null.replace("%22day%22%3Anull", "%22day%22%3A1")
+        approval_resp = {
+            "code": 0,
+            "data": {
+                "processDefinition": {"id": process_definition_id, "key": "oa_duty_leave"},
+                "startUserNode": {"id": "StartUserNode"},
+            },
+        }
+        captured = [
+            {"method": "GET", "url": approval_null, "response_json": approval_resp},
+            {"method": "GET", "url": approval_null, "response_json": approval_resp},
+            *[
+                {"method": "GET", "url": approval_day_1, "response_json": approval_resp}
+                for _ in range(10)
+            ],
+            {"method": "GET",
+             "url": "https://oa/admin-api/system/user/page?pageNo=1&pageSize=10",
+             "response_json": {"code": 0, "data": {"list": [{"id": "u-139", "nickname": "梅玄"}]}}},
+            {"method": "GET",
+             "url": "https://oa/admin-api/system/user/page?pageNo=1&pageSize=10",
+             "response_json": {"code": 0, "data": {"list": [{"id": "u-139", "nickname": "梅玄"}]}}},
+            _post("https://oa/admin-api/oa/duty-leave/submit-process", {
+                "processDefinitionId": process_definition_id,
+                "activityId": "StartUserNode",
+                "day": 1,
+                "approver": "u-139",
+            }, resp={"code": 0, "data": {"id": "pi-1"}}),
+        ]
+
+        spec = to_flow_spec(captured_requests=captured)
+
+        self.assertEqual(len(spec.steps), 2)
+        paths = [s.path for s in spec.steps]
+        self.assertTrue(any("/get-approval-detail" in p for p in paths), paths)
+        self.assertTrue(any("/submit-process" in p for p in paths), paths)
+        self.assertFalse(any("/system/user/page" in p for p in paths), paths)
+        approval_step = next(s for s in spec.steps if "/get-approval-detail" in s.path)
+        self.assertIn("%22day%22%3A1", approval_step.path)
+        self.assertEqual(spec.meta["captured_preread_candidates_before_dedupe"], 12)
+        self.assertEqual(spec.meta["captured_preread_candidates"], 1)
+
+        roles = spec.meta.get("request_roles") or []
+        self.assertEqual(sum(1 for r in roles if r["role"] == "business_get"), 12)
+        user_page_roles = [r for r in roles if "/system/user/page" in r["path"]]
+        self.assertTrue(user_page_roles)
+        self.assertTrue(all(r["role"] == "read_option" and not r["keep"] for r in user_page_roles))
 
 
 class RequestRoleTest(unittest.TestCase):

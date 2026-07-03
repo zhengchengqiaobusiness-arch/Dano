@@ -243,6 +243,33 @@ def _looks_runtime_field(key: str, path: str) -> bool:
     ))
 
 
+def _looks_token_field(key: str, path: str) -> bool:
+    k = _norm_field_name(key, path)
+    return any(x in k for x in ("token", "accesstoken", "refreshtoken", "authorization", "satoken"))
+
+
+def _header_value_matches_token(field_value: str, header_value: str) -> bool:
+    fv = str(field_value or "").strip()
+    hv = str(header_value or "").strip()
+    if not fv or not hv:
+        return False
+    if hv == fv:
+        return True
+    low = hv.lower()
+    if low.startswith("bearer ") and hv[7:].strip() == fv:
+        return True
+    return False
+
+
+def _request_header_source_for_token(key: str, path: str, value: str, request_headers: dict | None) -> dict[str, Any] | None:
+    if not _looks_token_field(key, path):
+        return None
+    for header, header_value in (request_headers or {}).items():
+        if _header_value_matches_token(value, str(header_value)):
+            return {"kind": "request_header", "header": str(header), "path": path}
+    return None
+
+
 def _looks_system_const_field(key: str, path: str) -> bool:
     k = _norm_field_name(key, path)
     return any(x in k for x in (
@@ -262,8 +289,21 @@ def _param_source_guess(
     system_paths: set[str],
     select_paths: set[str],
     samples: dict,
+    request_headers: dict | None = None,
 ) -> dict[str, Any]:
     value = str(field.get("value") or "")
+
+    header_source = _request_header_source_for_token(key, path, value, request_headers)
+    if header_source:
+        return {
+            "category": "runtime_var",
+            "source_kind": "request_header",
+            "source": header_source,
+            "editable": False,
+            "exposed_to_user": False,
+            "reason": f"该 token 字段与请求头 `{header_source['header']}` 一致，运行期从请求头读取，不使用录制旧值",
+            "need_human_confirm": False,
+        }
 
     if path in identity_paths:
         return {
@@ -484,6 +524,7 @@ def _build_step_from_capture(
             system_paths=system_paths,
             select_paths=select_paths,
             samples=samples,
+            request_headers=req.get("headers") or {},
         )
 
         params.append(ParamField(
@@ -755,15 +796,15 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
     segs = _request_segments(req)
 
     if method not in _WRITE_METHODS:
-        if response_ref:
-            return _role_row(req, role="business_get", keep=True,
-                             reason="GET 响应值被后续业务请求引用，作为前置步骤保留",
-                             confidence=0.96, semantic=semantic, evidence=response_ref)
         if list_items is not None or segs & _OPTION_SEGS:
             count = len(list_items or [])
             return _role_row(req, role="read_option", keep=False,
                              reason=f"读接口返回候选列表/枚举源({count}项)，作为字段来源，不进入主流程",
                              confidence=0.9, semantic=semantic)
+        if response_ref:
+            return _role_row(req, role="business_get", keep=True,
+                             reason="GET 响应值被后续业务请求引用，作为前置步骤保留",
+                             confidence=0.96, semantic=semantic, evidence=response_ref)
         return _role_row(req, role="read_context", keep=False,
                          reason="普通读接口，未发现后续业务请求依赖，默认不进入主流程",
                          confidence=0.68, semantic=semantic)
@@ -810,6 +851,21 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
 
 def _request_role_key(req: dict) -> Any:
     return req.get("index") if req.get("index") is not None else id(req)
+
+
+def _preread_dedupe_key(req: dict) -> tuple[str, str]:
+    return ((req.get("method") or "GET").upper(), _request_path(req))
+
+
+def _dedupe_preread_candidates(preread_cands: list[dict]) -> list[dict]:
+    """同一路径的前置读请求反复触发时，只保留最后一次录制结果。"""
+    latest_by_path: dict[tuple[str, str], Any] = {}
+    for req in preread_cands:
+        latest_by_path[_preread_dedupe_key(req)] = _request_role_key(req)
+    return [
+        req for req in preread_cands
+        if latest_by_path.get(_preread_dedupe_key(req)) == _request_role_key(req)
+    ]
 
 
 def _attach_request_role(req: dict, role: dict) -> dict:
@@ -912,6 +968,8 @@ def to_flow_spec(
         if (role_by_key.get(_request_role_key(r), {}).get("keep")
             and role_by_key.get(_request_role_key(r), {}).get("role") in {"business_get", "read_context"})
     ]
+    preread_before_dedupe = len(preread_cands)
+    preread_cands = _dedupe_preread_candidates(preread_cands)
 
     if not write_cands and not preread_cands:
         return ensure_flow_version(refresh_review_items(FlowSpec(
@@ -1021,6 +1079,7 @@ def to_flow_spec(
             "captured_total": len(captured_requests),
             "captured_write_candidates": len(write_cands),
             "captured_business_gets": len([r for r in request_roles if r.get("role") == "business_get"]),
+            "captured_preread_candidates_before_dedupe": preread_before_dedupe,
             "captured_preread_candidates": len(preread_cands),
             "captured_workflow_steps": len(step_objs),
             "reads_count": len(reads),
@@ -1143,7 +1202,9 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
             }
             guess = f"{p.category}/{p.source_kind}"
 
-            if p.need_human_confirm:
+            runtime_unknown = p.category == "runtime_var" and p.source_kind == "unknown"
+
+            if p.need_human_confirm and not runtime_unknown:
                 severity = "high" if p.category == "runtime_var" and p.source_kind == "unknown" else "medium"
                 items.append(_review_item(
                     "field_category",
@@ -1156,15 +1217,15 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
                     confidence=p.confidence,
                 ))
 
-            if p.category == "runtime_var" and p.source_kind == "unknown":
+            if runtime_unknown:
                 items.append(_review_item(
                     "runtime_var_source",
                     severity="high",
-                    title=f"补充运行期变量 {p.path} 的来源",
+                    title=f"补充字段 {p.path} 的运行期来源",
                     target=target,
                     current_guess=guess,
                     suggested_action="bind_runtime_source",
-                    reason="运行期变量不能使用录制旧值，必须绑定上游响应、当前用户、系统时间或页面上下文",
+                    reason="运行期变量不能使用录制旧值；请在字段页绑定上游响应，或改为当前用户、系统时间、页面上下文",
                     confidence=p.confidence,
                 ))
 
@@ -1574,7 +1635,14 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
         req,
         param_map,
         selects=[s.model_dump(exclude_none=True) for s in step.selects],
-        identity=[i.model_dump(exclude_none=True) for i in step.identity],
+        identity=[
+            *[i.model_dump(exclude_none=True) for i in step.identity],
+            *[
+                {"path": p.path, "source": f"requestHeader:{p.source.get('header')}", "value": p.value}
+                for p in step.params
+                if p.category == "runtime_var" and p.source_kind == "request_header" and p.source.get("header")
+            ],
+        ],
         typed=_step_samples(step),
     )
     if apir is None:
@@ -1932,15 +2000,80 @@ def _remove_step(spec: FlowSpec, step_id: str) -> None:
     ]
 
 
+def _step_dedupe_key(step: FlowStep) -> tuple[str, str]:
+    return ((step.method or "GET").upper(), _request_path({"url": step.path or step.url}))
+
+
+def _is_dedupable_read_step(step: FlowStep) -> bool:
+    if (step.method or "").upper() in _WRITE_METHODS:
+        return False
+    role = (step.source_meta or {}).get("role") or step.semantic_role or ""
+    return role in {"", "business_get", "read_context", "read_option"}
+
+
+def _dedupe_flow_steps(spec: FlowSpec) -> int:
+    latest_by_key: dict[tuple[str, str], str] = {}
+    for step in spec.steps:
+        if _is_dedupable_read_step(step):
+            latest_by_key[_step_dedupe_key(step)] = step.step_id
+
+    keep_ids: set[str] = set()
+    removed_ids: set[str] = set()
+    for step in spec.steps:
+        if _is_dedupable_read_step(step) and latest_by_key.get(_step_dedupe_key(step)) != step.step_id:
+            removed_ids.add(step.step_id)
+        else:
+            keep_ids.add(step.step_id)
+
+    if not removed_ids:
+        return 0
+
+    spec.steps = [step for step in spec.steps if step.step_id in keep_ids]
+    spec.links = [
+        lk for lk in spec.links
+        if lk.source_step_id not in removed_ids and lk.target_step_id not in removed_ids
+    ]
+    spec.review_items = [
+        item for item in spec.review_items
+        if item.target.get("step_id") not in removed_ids
+        and item.target.get("source_step_id") not in removed_ids
+        and item.target.get("target_step_id") not in removed_ids
+    ]
+    spec.meta = {
+        **(spec.meta or {}),
+        "deduped_step_count": int(spec.meta.get("deduped_step_count") or 0) + len(removed_ids),
+    }
+    return len(removed_ids)
+
+
 def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
     """应用编辑列表，返回新 FlowSpec（深拷贝）。"""
     if not edits:
         return refresh_review_items(spec.model_copy(deep=True))
 
     new_spec = spec.model_copy(deep=True)
+    bulk_review_resolutions: list[tuple[set, set, bool]] = []
 
     for edit in edits:
         op = edit.get("op")
+
+        if op == "resolve_reviews":
+            resolved = bool(edit.get("resolved", True))
+            severities = set(edit.get("severities") or [])
+            exclude_severities = set(edit.get("exclude_severities") or [])
+            bulk_review_resolutions.append((severities, exclude_severities, resolved))
+            generated = build_review_items(new_spec)
+            old_by_id = {item.id: item for item in new_spec.review_items}
+            for item in generated:
+                if item.id in old_by_id:
+                    item.resolved = old_by_id[item.id].resolved
+                if severities and item.severity not in severities:
+                    continue
+                if exclude_severities and item.severity in exclude_severities:
+                    continue
+                item.resolved = resolved
+            new_spec.review_items = generated
+            continue
 
         if op == "resolve_review":
             item_id = str(edit.get("review_id") or "")
@@ -1972,6 +2105,10 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             if field not in allowed:
                 raise ValueError(f"unknown flow field: {field}")
             setattr(new_spec, field, value)
+            continue
+
+        if op == "dedupe_steps":
+            _dedupe_flow_steps(new_spec)
             continue
 
         # 重排步骤
@@ -2017,6 +2154,14 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 elif field == "target_path":
                     _validate_link_endpoint(new_spec, link.target_step_id, "target")
                     link.target_path = str(value)
+                    link.target_tokens = None
+                elif field == "source_step_id":
+                    _validate_link_endpoint(new_spec, str(value), "source")
+                    link.source_step_id = str(value)
+                    link.source_tokens = None
+                elif field == "target_step_id":
+                    _validate_link_endpoint(new_spec, str(value), "target")
+                    link.target_step_id = str(value)
                     link.target_tokens = None
                 elif hasattr(link, field):
                     setattr(link, field, value)
@@ -2132,6 +2277,19 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             raise ValueError(f"unknown edit op: {op}")
 
     _sync_link_sources(new_spec.steps, new_spec.links)
+    if bulk_review_resolutions:
+        generated = build_review_items(new_spec)
+        old_by_id = {item.id: item for item in new_spec.review_items}
+        for item in generated:
+            if item.id in old_by_id:
+                item.resolved = old_by_id[item.id].resolved
+            for severities, exclude_severities, resolved in bulk_review_resolutions:
+                if severities and item.severity not in severities:
+                    continue
+                if exclude_severities and item.severity in exclude_severities:
+                    continue
+                item.resolved = resolved
+        new_spec.review_items = generated
 
     # 验证
     try:
@@ -2294,6 +2452,9 @@ def _description_source_text(param: ParamField) -> str:
         return f"来自 {step} 的 {path}"
     if kind == "current_user":
         return "运行期从当前登录态读取"
+    if kind == "request_header":
+        header = source.get("header") or "请求头"
+        return f"运行期从请求头 {header} 读取"
     if kind == "system_time":
         return "运行期由系统时间生成"
     if kind == "page_context":
