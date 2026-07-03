@@ -25,6 +25,10 @@ const bashAcceptanceScript = new URL(
   "../../../../../scripts/check-bash-acceptance.mjs",
   import.meta.url,
 ).pathname;
+const bashAcceptanceContainerScript = new URL(
+  "../../../../../scripts/check-bash-acceptance-container.sh",
+  import.meta.url,
+).pathname;
 const composeFile = new URL(
   "../../../../../docker-compose.yml",
   import.meta.url,
@@ -245,6 +249,52 @@ describe("deploy compose wrapper", () => {
     expect(dockerfileText.indexOf("USER node")).toBeGreaterThan(
       dockerfileText.indexOf("apt-get install"),
     );
+  });
+
+  it("runs bash acceptance in a read-only Node container", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "dano-bash-container-"));
+    tempDirs.push(cwd);
+    const fakeBin = join(cwd, "bin");
+    const runtimeDir = join(cwd, "runtime-data");
+    const sessionPath = join(runtimeDir, "workspaces/ws/.dano/sessions/session.jsonl");
+    const logPath = join(cwd, "podman.json");
+    mkdirSync(fakeBin);
+    mkdirSync(join(runtimeDir, "workspaces/ws/.dano/sessions"), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(fakeBin, "podman"),
+      `#!/usr/bin/env node
+const { writeFileSync } = require("node:fs");
+writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)));
+`,
+    );
+    chmodSync(join(fakeBin, "podman"), 0o755);
+
+    execFileSync(bashAcceptanceContainerScript, [sessionPath], {
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        DANO_COMMAND_LOG: logPath,
+        DANO_RUNTIME_DIR: runtimeDir,
+        DANO_BASH_ACCEPTANCE_MARKER: "DANO_BASH_OK",
+        DANO_BASH_ACCEPTANCE_FORBIDDEN_MARKERS: "TOKEN missing",
+      },
+    });
+
+    const args = JSON.parse(readFileSync(logPath, "utf8"));
+    expect(args).toContain("node:22-bookworm-slim");
+    expect(args).toContain("/app/scripts/check-bash-acceptance.mjs");
+    expect(args).toContain("/runtime/workspaces/ws/.dano/sessions/session.jsonl");
+    expect(args).toContain("-v");
+    expect(args).toContain(`${runtimeDir}:/runtime:ro`);
+    expect(args).toContain("-e");
+    expect(args).toContain("DANO_RUNTIME_DIR=/runtime");
+    expect(args).toContain("DANO_BASH_ACCEPTANCE_MARKER=DANO_BASH_OK");
+    expect(args).toContain("DANO_BASH_ACCEPTANCE_FORBIDDEN_MARKERS=TOKEN missing");
+    expect(
+      args.find((arg: string) => arg.endsWith(":/app:ro")),
+    ).toBeTruthy();
   });
 
   it("checks real bash acceptance from session jsonl without reading secrets", () => {

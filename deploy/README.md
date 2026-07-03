@@ -92,6 +92,14 @@ minimum acceptance sequence against the Podman Compose deployment:
    pnpm run deploy:check-bash -- /path/to/runtime-data/workspaces/<workspace>/.dano/sessions/<session>.jsonl
    ```
 
+   If the server host does not have Node or pnpm, run the same checker through
+   a read-only Node container:
+
+   ```bash
+   DANO_RUNTIME_DIR=/path/to/runtime-data \
+   sh scripts/check-bash-acceptance-container.sh /path/to/runtime-data/workspaces/<workspace>/.dano/sessions/<session>.jsonl
+   ```
+
    It reports whether a `bash` tool call occurred, whether a successful
    `DANO_BASH_OK` tool result was recorded, and whether any `bwrap` error text
    appeared in session JSONL.
@@ -146,6 +154,16 @@ minimum acceptance sequence against the Podman Compose deployment:
    pnpm run deploy:check-bash -- /path/to/runtime-data/workspaces/<workspace>/.dano/sessions/<session>.jsonl
    ```
 
+   Without host Node or pnpm:
+
+   ```bash
+   DANO_RUNTIME_DIR=/path/to/runtime-data \
+   DANO_BASH_ACCEPTANCE_MARKER=OA_ENV_CHECK \
+   DANO_BASH_ACCEPTANCE_REQUIRED_MARKERS=URL_PRESENT,TENANT_PRESENT \
+   DANO_BASH_ACCEPTANCE_FORBIDDEN_MARKERS='URL_MISSING,TENANT_MISSING,DANO_URL/DANO_TENANT_KEY 未设置' \
+   sh scripts/check-bash-acceptance-container.sh /path/to/runtime-data/workspaces/<workspace>/.dano/sessions/<session>.jsonl
+   ```
+
    This OA check is required because `smoke:deploy`, upload checks, host shell
    checks, and direct app-container shell checks do not prove the filtered
    model-triggered bash tool environment.
@@ -154,6 +172,12 @@ minimum acceptance sequence against the Podman Compose deployment:
 
    ```bash
    DANO_RUNTIME_DIR=/path/to/runtime-data DANO_BASH_ACCEPTANCE_SCAN_ALL=1 pnpm run deploy:check-bash
+   ```
+
+   Without host Node or pnpm:
+
+   ```bash
+   DANO_RUNTIME_DIR=/path/to/runtime-data DANO_BASH_ACCEPTANCE_SCAN_ALL=1 sh scripts/check-bash-acceptance-container.sh
    ```
 7. Confirm the app container still runs as `node`, Heimdall is the expected
    package version, and `bwrap` can enter the Runtime Workspace.
