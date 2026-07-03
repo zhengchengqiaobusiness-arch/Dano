@@ -267,10 +267,86 @@ describe("deploy compose wrapper", () => {
     );
 
     expect(
-      execFileSync(process.execPath, [bashAcceptanceScript, runtimeDir], {
+      execFileSync(process.execPath, [bashAcceptanceScript, sessionDir], {
         encoding: "utf8",
       }),
     ).toContain("bwrap errors: no");
+  });
+
+  it("checks only the requested bash acceptance session", () => {
+    const runtimeDir = mkdtempSync(join(tmpdir(), "dano-bash-acceptance-"));
+    tempDirs.push(runtimeDir);
+    const oldSessionDir = join(runtimeDir, "workspaces/old/.dano/sessions");
+    const newSessionDir = join(runtimeDir, "workspaces/new/.dano/sessions");
+    mkdirSync(oldSessionDir, { recursive: true });
+    mkdirSync(newSessionDir, { recursive: true });
+    writeFileSync(
+      join(oldSessionDir, "session.jsonl"),
+      [
+        JSON.stringify({ type: "toolCall", name: "bash" }),
+        JSON.stringify({
+          role: "toolResult",
+          toolName: "bash",
+          isError: true,
+          content: "bwrap must be installed setuid",
+        }),
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(newSessionDir, "session.jsonl"),
+      [
+        JSON.stringify({ type: "toolCall", name: "bash" }),
+        JSON.stringify({
+          role: "toolResult",
+          toolName: "bash",
+          isError: false,
+          content: [{ type: "text", text: "DANO_BASH_OK" }],
+        }),
+        "",
+      ].join("\n"),
+    );
+
+    expect(
+      execFileSync(process.execPath, [bashAcceptanceScript, newSessionDir], {
+        encoding: "utf8",
+      }),
+    ).toContain("bwrap errors: no");
+  });
+
+  it("requires an explicit bash acceptance scope by default", () => {
+    const runtimeDir = mkdtempSync(join(tmpdir(), "dano-bash-acceptance-"));
+    tempDirs.push(runtimeDir);
+
+    expect(() =>
+      execFileSync(process.execPath, [bashAcceptanceScript], {
+        env: { ...process.env, DANO_RUNTIME_DIR: runtimeDir },
+      }),
+    ).toThrow();
+  });
+
+  it("does not treat the runtime root as a bash acceptance session directory", () => {
+    const runtimeDir = mkdtempSync(join(tmpdir(), "dano-bash-acceptance-"));
+    tempDirs.push(runtimeDir);
+    const sessionDir = join(runtimeDir, "workspaces/ws_test/.dano/sessions");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "session.jsonl"),
+      [
+        JSON.stringify({ type: "toolCall", name: "bash" }),
+        JSON.stringify({
+          role: "toolResult",
+          toolName: "bash",
+          isError: false,
+          content: [{ type: "text", text: "DANO_BASH_OK" }],
+        }),
+        "",
+      ].join("\n"),
+    );
+
+    expect(() =>
+      execFileSync(process.execPath, [bashAcceptanceScript, runtimeDir]),
+    ).toThrow();
   });
 
   it("fails bash acceptance when Bubblewrap errors appear", () => {

@@ -2,8 +2,23 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-const root = process.argv[2] || process.env.DANO_RUNTIME_DIR || "/opt/dano/runtime-data";
+const runtimeRoot = process.env.DANO_RUNTIME_DIR || "/opt/dano/runtime-data";
+const root =
+  process.argv[2] ||
+  process.env.DANO_BASH_ACCEPTANCE_SESSION ||
+  runtimeRoot;
 const expected = process.env.DANO_BASH_ACCEPTANCE_TEXT || "DANO_BASH_OK";
+const since = process.env.DANO_BASH_ACCEPTANCE_SINCE
+  ? Date.parse(process.env.DANO_BASH_ACCEPTANCE_SINCE)
+  : undefined;
+const marker = process.env.DANO_BASH_ACCEPTANCE_MARKER;
+const scanAll = process.env.DANO_BASH_ACCEPTANCE_SCAN_ALL === "1";
+const hasExplicitScope =
+  Boolean(process.argv[2]) ||
+  Boolean(process.env.DANO_BASH_ACCEPTANCE_SESSION) ||
+  since !== undefined ||
+  Boolean(marker) ||
+  scanAll;
 const bwrapError = /\bbwrap\b.*(error|failed|Operation not permitted|must be installed setuid)|bubblewrap.*(error|failed)/i;
 
 function walk(dir, files = []) {
@@ -23,18 +38,52 @@ function textOf(value) {
   return "";
 }
 
+function jsonlFiles(path) {
+  const stat = statSync(path);
+  if (stat.isDirectory()) {
+    const directFiles = readdirSync(path)
+      .filter(entry => entry.endsWith(".jsonl"))
+      .map(entry => join(path, entry));
+    if (directFiles.length > 0) return directFiles;
+    if (scanAll || since !== undefined || marker) return walk(path);
+    throw new Error(
+      "session directory must contain JSONL files directly; set DANO_BASH_ACCEPTANCE_SCAN_ALL=1, DANO_BASH_ACCEPTANCE_SINCE, or DANO_BASH_ACCEPTANCE_MARKER to scan recursively",
+    );
+  }
+  return path.endsWith(".jsonl") ? [path] : [];
+}
+
+function fileContains(file, text) {
+  return readFileSync(file, "utf8").includes(text);
+}
+
+if (!hasExplicitScope) {
+  throw new Error(
+    "set DANO_BASH_ACCEPTANCE_SESSION, DANO_BASH_ACCEPTANCE_SINCE, DANO_BASH_ACCEPTANCE_MARKER, pass a session path, or set DANO_BASH_ACCEPTANCE_SCAN_ALL=1 for diagnostic runtime scans",
+  );
+}
+
+if (since !== undefined && Number.isNaN(since)) {
+  throw new Error(`invalid DANO_BASH_ACCEPTANCE_SINCE: ${process.env.DANO_BASH_ACCEPTANCE_SINCE}`);
+}
+
 if (!existsSync(root)) {
-  throw new Error(`runtime directory not found: ${root}`);
+  throw new Error(`session path not found: ${root}`);
 }
 
 let sawBashCall = false;
 let sawSuccessfulResult = false;
 let sawBwrapError = false;
+let sawMarker = !marker;
 
-for (const file of walk(root)) {
+for (const file of jsonlFiles(root)) {
+  if (since !== undefined && statSync(file).mtimeMs < since) continue;
+  if (marker && !fileContains(file, marker)) continue;
+
   for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
     if (!line.trim()) continue;
     const text = line;
+    if (marker && text.includes(marker)) sawMarker = true;
     if (bwrapError.test(text)) sawBwrapError = true;
 
     let entry;
@@ -44,6 +93,7 @@ for (const file of walk(root)) {
       continue;
     }
 
+    if (marker && textOf(entry).includes(marker)) sawMarker = true;
     if (entry.type === "toolCall" && entry.name === "bash") sawBashCall = true;
     if (entry.role === "toolResult" && entry.toolName === "bash") {
       const content = textOf(entry.content);
@@ -58,7 +108,8 @@ for (const file of walk(root)) {
 console.log(`bash tool call: ${sawBashCall ? "yes" : "no"}`);
 console.log(`bash result ${expected}: ${sawSuccessfulResult ? "yes" : "no"}`);
 console.log(`bwrap errors: ${sawBwrapError ? "yes" : "no"}`);
+if (marker) console.log(`marker: ${sawMarker ? "yes" : "no"}`);
 
-if (!sawBashCall || !sawSuccessfulResult || sawBwrapError) {
+if (!sawBashCall || !sawSuccessfulResult || sawBwrapError || !sawMarker) {
   process.exit(1);
 }
