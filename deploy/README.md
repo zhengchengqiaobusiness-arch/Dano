@@ -85,15 +85,22 @@ minimum acceptance sequence against the Podman Compose deployment:
    Use the bash tool to run: printf DANO_BASH_OK
    ```
 
-6. Run the bash acceptance checker against the mounted runtime directory:
+6. Run the bash acceptance checker against the JSONL file or session directory
+   created by this browser run:
 
    ```bash
-   DANO_RUNTIME_DIR=/path/to/runtime-data pnpm run deploy:check-bash
+   pnpm run deploy:check-bash -- /path/to/runtime-data/workspaces/<workspace>/.dano/sessions/<session>.jsonl
    ```
 
    It reports whether a `bash` tool call occurred, whether a successful
    `DANO_BASH_OK` tool result was recorded, and whether any `bwrap` error text
    appeared in session JSONL.
+
+   For diagnostics only, scan the full mounted runtime directory explicitly:
+
+   ```bash
+   DANO_RUNTIME_DIR=/path/to/runtime-data DANO_BASH_ACCEPTANCE_SCAN_ALL=1 pnpm run deploy:check-bash
+   ```
 7. Confirm the app container still runs as `node`, Heimdall is the expected
    package version, and `bwrap` can enter the Runtime Workspace.
 8. Stop the Compose stack and remove temporary Dano test images/layers.
