@@ -1,4 +1,5 @@
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -14,14 +15,14 @@ import {
   resolveDanoDevWatchPath,
 } from "../dev-reload.js";
 import {
-  initializeDanoWorkspaceSettings,
+  initializeDanoAgentSettings,
   parseDanoServerOptions,
   readDanoPackageInfo,
   resolveDefaultStaticDir,
 } from "../main.js";
 
 describe("Dano main", () => {
-  it("ships bash behind the pinned Heimdall guards", () => {
+  it("ships bash with pinned Heimdall guards", () => {
     const runtimeDefaultsDir = resolve("deploy/runtime-defaults");
     const appPackage = JSON.parse(
       readFileSync(resolve("apps/dano/package.json"), "utf8"),
@@ -45,7 +46,7 @@ describe("Dano main", () => {
     };
 
     expect(appPackage.dependencies?.["@josephyoung/pi-heimdall"]).toBe(
-      "0.2.12",
+      "0.2.14",
     );
     expect(appPackage.dependencies?.["@earendil-works/pi-coding-agent"]).toBe(
       "0.80.2",
@@ -61,6 +62,12 @@ describe("Dano main", () => {
     expect(sandboxGuard).toContain(
       'if (config.userNamespace) args.push("--unshare-user");',
     );
+    expect(sandboxGuard).toContain("HEIMDALL_BWRAP_BIND_KERNEL_FS");
+    expect(sandboxGuard).toContain("HEIMDALL_BWRAP_BIND_ROOT");
+    expect(sandboxGuard).toContain("function bwrapBindRoot()");
+    expect(sandboxGuard).toContain("writeMounts.push(bindRoot");
+    expect(sandboxGuard).toContain('args.push("--dev-bind", "/dev", "/dev");');
+    expect(sandboxGuard).toContain('args.push("--ro-bind", "/proc", "/proc");');
     expect(heimdall.commandPolicies).toContainEqual(
       expect.objectContaining({ blocked: ["rm", "-rf", "/"] }),
     );
@@ -194,8 +201,12 @@ describe("Dano main", () => {
     expect(options.cwd).toBe(process.cwd());
     expect(options.host).toBe("0.0.0.0");
     expect(options.port).toBe(8123);
-    expect(options.defaultWorkspacePath).toBe("/tmp/dano");
-    expect(options.sessionsRootPath).toBe("/tmp/dano/.dano/sessions");
+    expect(options.defaultWorkspacePath).toMatch(
+      /^\/opt\/dano\/runtime-data\/workspaces\/ws_[0-9a-f-]{36}$/,
+    );
+    expect(options.sessionsRootPath).toBe(
+      `${options.defaultWorkspacePath}/.dano/sessions`,
+    );
     expect(options.staticDir).toBe(
       resolveDefaultStaticDir(resolve("apps/dano/src/main.ts")),
     );
@@ -263,13 +274,27 @@ describe("Dano main", () => {
     const options = parseDanoServerOptions([], {});
 
     expect(options.upload).toEqual({
-      uploadDir: "/tmp/dano/.dano/uploads",
+      uploadDir: "/opt/dano/runtime-data/.dano/uploads",
       maxTotalBytes: 10 * 1024 * 1024 * 1024,
       draftTtlMs: 2 * 60 * 60 * 1000,
       referencedTtlMs: 24 * 60 * 60 * 1000,
       orphanedTtlMs: 5 * 60 * 1000,
       cleanupIntervalMs: 60 * 60 * 1000,
     });
+  });
+
+  it("resolves the global agent directory from environment or runtime root", () => {
+    expect(
+      parseDanoServerOptions([], {
+        DANO_RUNTIME_DIR: "/tmp/dano-runtime",
+        PI_CODING_AGENT_DIR: " /tmp/pi-agent ",
+      }).agentConfigDir,
+    ).toBe("/tmp/pi-agent");
+    expect(
+      parseDanoServerOptions([], {
+        DANO_RUNTIME_DIR: "/tmp/dano-runtime",
+      }).agentConfigDir,
+    ).toBe("/tmp/dano-runtime/default-settings/.pi/agent");
   });
 
   it("uses upload configuration from environment", () => {
@@ -302,7 +327,7 @@ describe("Dano main", () => {
     });
 
     expect(options.upload).toEqual({
-      uploadDir: "/tmp/dano/.dano/uploads",
+      uploadDir: "/opt/dano/runtime-data/.dano/uploads",
       maxTotalBytes: 10 * 1024 * 1024 * 1024,
       draftTtlMs: 2 * 60 * 60 * 1000,
       referencedTtlMs: 24 * 60 * 60 * 1000,
@@ -369,23 +394,36 @@ describe("Dano main", () => {
     expect(options.port).toBe(8088);
   });
 
-  it("uses the default workspace from environment", () => {
+  it("ignores deprecated default workspace environment when selecting the Runtime Workspace", () => {
     const options = parseDanoServerOptions([], {
+      DANO_RUNTIME_DIR: "/tmp/dano-runtime",
       DANO_DEFAULT_WORKSPACE_PATH: "/tmp/custom-dano",
+      DANO_DEFAULT_WORKSPACE: "/tmp/legacy-dano",
     });
 
-    expect(options.defaultWorkspacePath).toBe("/tmp/custom-dano");
-    expect(options.sessionsRootPath).toBe("/tmp/custom-dano/.dano/sessions");
+    expect(options.defaultWorkspacePath).toMatch(
+      /^\/tmp\/dano-runtime\/workspaces\/ws_[0-9a-f-]{36}$/,
+    );
+    expect(options.defaultWorkspacePath).not.toBe("/tmp/custom-dano");
+    expect(options.defaultWorkspacePath).not.toBe("/tmp/legacy-dano");
+    expect(options.sessionsRootPath).toBe(
+      `${options.defaultWorkspacePath}/.dano/sessions`,
+    );
   });
 
-  it("lets command line default workspace override environment", () => {
+  it("accepts deprecated default workspace flags without selecting the Runtime Workspace", () => {
     const options = parseDanoServerOptions(
       ["--default-workspace", "/tmp/cli-dano"],
       { DANO_DEFAULT_WORKSPACE_PATH: "/tmp/env-dano" },
     );
 
-    expect(options.defaultWorkspacePath).toBe("/tmp/cli-dano");
-    expect(options.sessionsRootPath).toBe("/tmp/cli-dano/.dano/sessions");
+    expect(options.defaultWorkspacePath).toMatch(
+      /^\/opt\/dano\/runtime-data\/workspaces\/ws_[0-9a-f-]{36}$/,
+    );
+    expect(options.defaultWorkspacePath).not.toBe("/tmp/cli-dano");
+    expect(options.sessionsRootPath).toBe(
+      `${options.defaultWorkspacePath}/.dano/sessions`,
+    );
   });
 
   it("uses Dano sessions root from environment", () => {
@@ -394,7 +432,9 @@ describe("Dano main", () => {
       DANO_SESSIONS_ROOT: "/tmp/custom-dano-sessions",
     });
 
-    expect(options.defaultWorkspacePath).toBe("/tmp/custom-dano");
+    expect(options.defaultWorkspacePath).toMatch(
+      /^\/opt\/dano\/runtime-data\/workspaces\/ws_[0-9a-f-]{36}$/,
+    );
     expect(options.sessionsRootPath).toBe("/tmp/custom-dano-sessions");
   });
 
@@ -508,9 +548,10 @@ describe("Dano main", () => {
     );
   });
 
-  it("initializes runtime settings in the Dano workspace", () => {
+  it("initializes runtime settings in the global agent directory", () => {
     const sourceRoot = mkdtempSync(join(tmpdir(), "dano-main-source-"));
     const workspaceRoot = mkdtempSync(join(tmpdir(), "dano-main-workspace-"));
+    const agentRoot = mkdtempSync(join(tmpdir(), "dano-main-agent-"));
 
     try {
       const nestedSourceDir = join(sourceRoot, "apps", "dano");
@@ -521,32 +562,33 @@ describe("Dano main", () => {
       writeFileSync(join(runtimeDefaultsDir, "settings.json"), "{}");
       writeFileSync(join(runtimeDefaultsDir, "heimdall.json"), "{}");
 
-      initializeDanoWorkspaceSettings(workspaceRoot, nestedSourceDir);
+      initializeDanoAgentSettings(agentRoot, nestedSourceDir);
 
-      expect(readFileSync(join(workspaceRoot, ".pi/SYSTEM.md"), "utf8")).toBe(
+      expect(readFileSync(join(agentRoot, "SYSTEM.md"), "utf8")).toBe(
         "system prompt",
       );
-      expect(readFileSync(join(workspaceRoot, ".pi/settings.json"), "utf8")).toBe(
+      expect(readFileSync(join(agentRoot, "settings.json"), "utf8")).toBe(
         "{}",
       );
-      expect(readFileSync(join(workspaceRoot, ".pi/heimdall.json"), "utf8")).toBe(
+      expect(readFileSync(join(agentRoot, "heimdall.json"), "utf8")).toBe(
         '{\n  "sandbox": {\n    "userNamespace": false\n  }\n}\n',
       );
+      expect(existsSync(join(workspaceRoot, ".pi"))).toBe(false);
     } finally {
       rmSync(sourceRoot, { recursive: true, force: true });
       rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(agentRoot, { recursive: true, force: true });
     }
   });
 
-  it("keeps existing Dano workspace settings", () => {
+  it("keeps existing global agent settings", () => {
     const sourceRoot = mkdtempSync(join(tmpdir(), "dano-main-source-"));
-    const workspaceRoot = mkdtempSync(join(tmpdir(), "dano-main-workspace-"));
+    const agentRoot = mkdtempSync(join(tmpdir(), "dano-main-agent-"));
 
     try {
       mkdirSync(join(sourceRoot, "deploy", "runtime-defaults"), {
         recursive: true,
       });
-      mkdirSync(join(workspaceRoot, ".pi"), { recursive: true });
       writeFileSync(
         join(sourceRoot, "deploy/runtime-defaults/SYSTEM.md"),
         "source prompt",
@@ -559,57 +601,57 @@ describe("Dano main", () => {
         join(sourceRoot, "deploy/runtime-defaults/heimdall.json"),
         "{}",
       );
-      writeFileSync(join(workspaceRoot, ".pi/SYSTEM.md"), "workspace prompt");
+      writeFileSync(join(agentRoot, "SYSTEM.md"), "agent prompt");
 
-      initializeDanoWorkspaceSettings(workspaceRoot, sourceRoot);
+      initializeDanoAgentSettings(agentRoot, sourceRoot);
 
-      expect(readFileSync(join(workspaceRoot, ".pi/SYSTEM.md"), "utf8")).toBe(
-        "workspace prompt",
+      expect(readFileSync(join(agentRoot, "SYSTEM.md"), "utf8")).toBe(
+        "agent prompt",
       );
-      expect(readFileSync(join(workspaceRoot, ".pi/settings.json"), "utf8")).toBe(
+      expect(readFileSync(join(agentRoot, "settings.json"), "utf8")).toBe(
         "{}",
       );
-      expect(readFileSync(join(workspaceRoot, ".pi/heimdall.json"), "utf8")).toBe(
+      expect(readFileSync(join(agentRoot, "heimdall.json"), "utf8")).toBe(
         '{\n  "sandbox": {\n    "userNamespace": false\n  }\n}\n',
       );
     } finally {
       rmSync(sourceRoot, { recursive: true, force: true });
-      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(agentRoot, { recursive: true, force: true });
     }
   });
 
   it("preserves Heimdall runtime settings while disabling user namespaces by default", () => {
     const sourceRoot = mkdtempSync(join(tmpdir(), "dano-main-source-"));
-    const workspaceRoot = mkdtempSync(join(tmpdir(), "dano-main-workspace-"));
+    const agentRoot = mkdtempSync(join(tmpdir(), "dano-main-agent-"));
 
     try {
       mkdirSync(join(sourceRoot, "deploy", "runtime-defaults"), {
         recursive: true,
       });
-      mkdirSync(join(workspaceRoot, ".pi"), { recursive: true });
       writeFileSync(
         join(sourceRoot, "deploy/runtime-defaults/heimdall.json"),
         "{}",
       );
       writeFileSync(
-        join(workspaceRoot, ".pi/heimdall.json"),
+        join(agentRoot, "heimdall.json"),
         JSON.stringify({
           sandbox: { enabled: true },
           commandPolicies: [{ name: "keep", blocked: ["x"], message: "y" }],
         }),
       );
 
-      initializeDanoWorkspaceSettings(workspaceRoot, sourceRoot);
+      initializeDanoAgentSettings(agentRoot, sourceRoot);
 
       expect(
-        JSON.parse(readFileSync(join(workspaceRoot, ".pi/heimdall.json"), "utf8")),
+        JSON.parse(readFileSync(join(agentRoot, "heimdall.json"), "utf8")),
       ).toEqual({
         sandbox: { enabled: true, userNamespace: false },
         commandPolicies: [{ name: "keep", blocked: ["x"], message: "y" }],
       });
     } finally {
       rmSync(sourceRoot, { recursive: true, force: true });
-      rmSync(workspaceRoot, { recursive: true, force: true });
+      rmSync(agentRoot, { recursive: true, force: true });
     }
   });
+
 });

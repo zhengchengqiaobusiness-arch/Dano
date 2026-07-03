@@ -6,6 +6,7 @@ import {
   realpathSync,
   writeFileSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createDanoBackend } from "./backend.js";
@@ -19,9 +20,9 @@ import type { BridgeEmptyStateConfig } from "../types/protocol.js";
 
 const DEFAULT_DANO_PORT = 8080;
 const DEFAULT_DANO_HOST = "0.0.0.0";
-const DEFAULT_DANO_WORKSPACE = "/tmp/dano";
+const DEFAULT_DANO_RUNTIME_DIR = "/opt/dano/runtime-data";
 const DEFAULT_DANO_SESSIONS_DIR = ".dano/sessions";
-const DEFAULT_DANO_UPLOAD_DIR = "/tmp/dano/.dano/uploads";
+const DEFAULT_DANO_UPLOAD_DIR = ".dano/uploads";
 const DEFAULT_DANO_UPLOAD_MAX_TOTAL_BYTES = 10 * 1024 * 1024 * 1024;
 const DEFAULT_DANO_UPLOAD_DRAFT_TTL_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_DANO_UPLOAD_REFERENCED_TTL_MS = 24 * 60 * 60 * 1000;
@@ -48,6 +49,7 @@ export interface DanoServerOptions {
   host: string;
   port: number;
   defaultWorkspacePath: string;
+  agentConfigDir: string;
   sessionsRootPath: string;
   productName: string;
   emptyState: BridgeEmptyStateConfig;
@@ -65,7 +67,7 @@ Usage:
 Options:
   --host <host>              Host to bind (default: ${DEFAULT_DANO_HOST})
   --port <number>            Port to bind (default: ${DEFAULT_DANO_PORT})
-  --default-workspace <path> Default workspace path (env: DANO_DEFAULT_WORKSPACE_PATH, default: ${DEFAULT_DANO_WORKSPACE})
+  --default-workspace <path> Deprecated; new sessions use DANO_RUNTIME_DIR/workspaces/ws_<random>
   --sessions-root <path>     Directory for session jsonl files (env: DANO_SESSIONS_ROOT, default: <default-workspace>/${DEFAULT_DANO_SESSIONS_DIR})
   --product-name <name>      Product name shown in browser UI (env: DANO_PRODUCT_NAME, default: ${DEFAULT_PRODUCT_NAME})
   --empty-state-text <text>  Empty transcript text (env: DANO_EMPTY_STATE_TEXT, default: ${DEFAULT_EMPTY_STATE.content})
@@ -102,13 +104,21 @@ function readPort(env: Record<string, string | undefined>): number {
   );
 }
 
-function readDefaultWorkspacePath(
+function readRuntimeRootPath(env: Record<string, string | undefined>): string {
+  return env.DANO_RUNTIME_DIR?.trim() || DEFAULT_DANO_RUNTIME_DIR;
+}
+
+function readDefaultWorkspacePath(runtimeRootPath: string): string {
+  return join(runtimeRootPath, "workspaces", `ws_${randomUUID()}`);
+}
+
+function readAgentConfigDir(
   env: Record<string, string | undefined>,
+  runtimeRootPath: string,
 ): string {
   return (
-    env.DANO_DEFAULT_WORKSPACE_PATH?.trim() ||
-    env.DANO_DEFAULT_WORKSPACE?.trim() ||
-    DEFAULT_DANO_WORKSPACE
+    env.PI_CODING_AGENT_DIR?.trim() ||
+    join(runtimeRootPath, "default-settings", ".pi", "agent")
   );
 }
 
@@ -144,9 +154,11 @@ function readEmptyStateConfig(
 
 function readUploadConfig(
   env: Record<string, string | undefined>,
+  runtimeRootPath: string,
 ): UploadConfig {
   return {
-    uploadDir: env.DANO_UPLOAD_DIR?.trim() || DEFAULT_DANO_UPLOAD_DIR,
+    uploadDir:
+      env.DANO_UPLOAD_DIR?.trim() || join(runtimeRootPath, DEFAULT_DANO_UPLOAD_DIR),
     maxTotalBytes: parsePositiveInteger(
       env.DANO_UPLOAD_MAX_TOTAL_BYTES?.trim(),
       DEFAULT_DANO_UPLOAD_MAX_TOTAL_BYTES,
@@ -275,11 +287,11 @@ export function parseDanoServerOptions(
 ): DanoServerOptions {
   let host = readHost(env);
   let port = readPort(env);
-  let defaultWorkspacePath = readDefaultWorkspacePath(env);
+  const runtimeRootPath = readRuntimeRootPath(env);
   let sessionsRootPath = readSessionsRootPath(env);
   let productName = readProductName(env);
   let emptyState = readEmptyStateConfig(env);
-  const upload = readUploadConfig(env);
+  const upload = readUploadConfig(env, runtimeRootPath);
   const staticDirOverride = env.DANO_STATIC_DIR?.trim();
   let help = false;
 
@@ -317,7 +329,6 @@ export function parseDanoServerOptions(
         if (!next || next.startsWith("--")) {
           throw new Error("Missing value for --default-workspace");
         }
-        defaultWorkspacePath = next;
         index++;
         continue;
       }
@@ -363,12 +374,19 @@ export function parseDanoServerOptions(
   }
 
   const cwd = process.cwd();
-  const resolvedDefaultWorkspacePath = resolve(cwd, defaultWorkspacePath);
+  const resolvedRuntimeRootPath = resolve(cwd, runtimeRootPath);
+  const resolvedDefaultWorkspacePath = readDefaultWorkspacePath(
+    resolvedRuntimeRootPath,
+  );
   return {
     cwd,
     host,
     port,
     defaultWorkspacePath: resolvedDefaultWorkspacePath,
+    agentConfigDir: resolve(
+      cwd,
+      readAgentConfigDir(env, resolvedRuntimeRootPath),
+    ),
     sessionsRootPath: resolve(
       cwd,
       sessionsRootPath ??
@@ -392,8 +410,8 @@ function ensureDefaultWorkspace(path: string): string {
   return path;
 }
 
-export function initializeDanoWorkspaceSettings(
-  workspacePath: string,
+export function initializeDanoAgentSettings(
+  agentDir: string,
   sourceCwd: string,
 ): void {
   const runtimeDefaultsDir = findNearestRuntimeDefaultsDir(sourceCwd);
@@ -401,7 +419,7 @@ export function initializeDanoWorkspaceSettings(
     return;
   }
 
-  const targetSettingsDir = join(workspacePath, ".pi");
+  const targetSettingsDir = agentDir;
   mkdirSync(targetSettingsDir, { recursive: true });
 
   for (const fileName of DEFAULT_RUNTIME_SETTINGS_FILES) {
@@ -533,7 +551,10 @@ async function runDanoMain(): Promise<number> {
   process.env.DANO_VERSION ??= packageInfo.version;
   const danoConfig = loadDanoConfig({ cwd: options.cwd });
   const defaultWorkspacePath = ensureDefaultWorkspace(options.defaultWorkspacePath);
-  initializeDanoWorkspaceSettings(defaultWorkspacePath, options.cwd);
+  if (!process.env.PI_CODING_AGENT_DIR?.trim()) {
+    process.env.PI_CODING_AGENT_DIR = options.agentConfigDir;
+  }
+  initializeDanoAgentSettings(options.agentConfigDir, options.cwd);
   mkdirSync(options.sessionsRootPath, { recursive: true });
   process.env.DANO_SESSIONS_ROOT = options.sessionsRootPath;
   process.env.PI_WEB_SESSIONS_ROOT = options.sessionsRootPath;

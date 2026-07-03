@@ -5,7 +5,7 @@ allowBuilds:
   koffi: true
   protobufjs: true
 minimumReleaseAgeExclude:
-  - '@josephyoung/pi-heimdall@0.2.12'
+  - '@josephyoung/pi-heimdall@0.2.14'
 onlyBuiltDependencies:
   - "@google/genai"
   - esbuild

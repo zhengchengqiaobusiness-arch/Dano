@@ -36,13 +36,15 @@ RUN registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-$DANO_DEFAULT_NPM_REGISTRY}
 RUN sed -i 's|https\?://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; s|https\?://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources \
   && apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates bubblewrap curl python3 \
-  && chmod u+s /usr/bin/bwrap \
+  && chmod 0755 /usr/bin/bwrap \
   && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production
 ENV DANO_HOST=0.0.0.0
 ENV DANO_PORT=8080
-ENV DANO_DEFAULT_WORKSPACE_PATH=/tmp/dano
+ENV DANO_RUNTIME_DIR=/opt/dano/runtime-data
 ENV HOME=/home/node
+ENV HEIMDALL_BWRAP_BIND_KERNEL_FS=1
+ENV HEIMDALL_BWRAP_BIND_ROOT=/opt/dano
 
 COPY --from=build /prod/dano/package.json ./package.json
 COPY --from=build /app/package.json ./package-versions/package.json
@@ -52,8 +54,8 @@ COPY --from=build /app/dano.config.json ./dano.config.json
 COPY deploy/runtime-defaults ./deploy/runtime-defaults
 COPY deploy/docker-entrypoint.sh ./deploy/docker-entrypoint.sh
 RUN chmod +x ./deploy/docker-entrypoint.sh \
-  && mkdir -p /tmp/dano \
-  && chown -R node:node /tmp/dano /home/node
+  && mkdir -p /opt/dano/runtime-data \
+  && chown -R node:node /opt/dano /home/node
 
 EXPOSE 8080
 USER node

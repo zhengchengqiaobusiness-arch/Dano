@@ -264,7 +264,7 @@ export class BridgeServer {
       }
 
       if (req.method === "GET" && pathname === "/api/workspace-files/preview") {
-        this.handleWorkspaceFilePreview(res, url);
+        await this.handleWorkspaceFilePreview(res, url);
         return;
       }
 
@@ -387,6 +387,10 @@ export class BridgeServer {
       uploadPath = await this.uploadRegistry.createIncomingPartPath(workspacePath);
       storagePath = null;
     }
+    await assertWorkspaceWriteParent(uploadPath.partPath, workspacePath);
+    if (storagePath) {
+      await assertWorkspaceWriteParent(storagePath.filePath, workspacePath);
+    }
     const finalFileExists =
       storagePath !== null && fs.existsSync(storagePath.filePath);
     if (
@@ -407,6 +411,7 @@ export class BridgeServer {
       throw new HttpError(400, "Upload sha256 mismatch");
     }
     storagePath ??= await this.uploadRegistry.createFilePath(workspacePath, hash, name);
+    await assertWorkspaceWriteParent(storagePath.filePath, workspacePath);
     if (!fs.existsSync(storagePath.filePath)) {
       if (!(await this.uploadRegistry.cleanupBeforeUpload(size, workspacePath))) {
         await fs.promises.rm(uploadPath.partPath, { force: true });
@@ -447,6 +452,7 @@ export class BridgeServer {
     const workspacePath = this.getClientWorkspacePath(ownerClientId);
     const { id, filePath, relativePath } =
       await this.uploadRegistry.createFilePath(workspacePath, declaredHash, name);
+    await assertWorkspaceWriteParent(filePath, workspacePath);
     if (!fs.existsSync(filePath)) {
       writeJson(res, 404, { error: "Upload was not found" });
       return;
@@ -500,10 +506,10 @@ export class BridgeServer {
     });
   }
 
-  private handleWorkspaceFilePreview(
+  private async handleWorkspaceFilePreview(
     res: http.ServerResponse,
     url: URL,
-  ): void {
+  ): Promise<void> {
     const clientId = url.searchParams.get("clientId");
     const requestedPath = url.searchParams.get("path")?.trim();
     if (!clientId || !this.clients.has(clientId)) {
@@ -522,19 +528,31 @@ export class BridgeServer {
       return;
     }
 
-    fs.stat(filePath, (statErr, stats) => {
-      if (statErr || !stats.isFile()) {
+    let realFilePath: string;
+    try {
+      realFilePath = await realPathInsideWorkspace(filePath, workspacePath);
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      writeJson(res, 404, { error: "File was not found" });
+      return;
+    }
+
+    try {
+      const stats = await fs.promises.stat(realFilePath);
+      if (!stats.isFile()) {
         writeJson(res, 404, { error: "File was not found" });
         return;
       }
 
       res.writeHead(200, {
-        "Content-Type": workspacePreviewMimeType(filePath),
+        "Content-Type": workspacePreviewMimeType(realFilePath),
         "Content-Length": stats.size,
         "Cache-Control": "no-cache",
       });
-      fs.createReadStream(filePath).pipe(res);
-    });
+      fs.createReadStream(realFilePath).pipe(res);
+    } catch {
+      writeJson(res, 404, { error: "File was not found" });
+    }
   }
 
   private handleUploadOrphan(
@@ -817,6 +835,31 @@ function normalizeSha256(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const hash = value.trim().toLowerCase();
   return /^[a-f0-9]{64}$/.test(hash) ? hash : null;
+}
+
+async function assertWorkspaceWriteParent(
+  filePath: string,
+  workspacePath: string,
+): Promise<void> {
+  await realPathInsideWorkspace(path.dirname(filePath), workspacePath);
+}
+
+async function realPathInsideWorkspace(
+  targetPath: string,
+  workspacePath: string,
+): Promise<string> {
+  const [workspaceRealPath, parentRealPath] = await Promise.all([
+    fs.promises.realpath(workspacePath),
+    fs.promises.realpath(targetPath),
+  ]);
+  if (!isInsidePath(parentRealPath, workspaceRealPath)) {
+    throw new HttpError(403, "File path is outside the workspace");
+  }
+  return parentRealPath;
+}
+
+function isInsidePath(targetPath: string, rootPath: string): boolean {
+  return targetPath === rootPath || targetPath.startsWith(rootPath + path.sep);
 }
 
 async function writeUploadBody(

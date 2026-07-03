@@ -374,6 +374,47 @@ describe("BridgeServer HTTP/SSE transport", () => {
     expect(outsidePreview.status).toBe(403);
   });
 
+  it("rejects uploads when the workspace uploads directory resolves outside the workspace", async () => {
+    const { server, workspaceDir } = createServer();
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-upload-outside-"));
+    uploadRoots.push(outsideDir);
+    fs.symlinkSync(outsideDir, path.join(workspaceDir, "uploads"), "dir");
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const created = await postJson<{ client: { id: string } }>(
+      `${origin}/api/clients`,
+    );
+    const body = new TextEncoder().encode("must stay inside workspace");
+
+    const response = await postBytes(
+      `${origin}/api/uploads?clientId=${encodeURIComponent(created.client.id)}&name=notes.txt&mimeType=text/plain&sha256=${sha256(body)}`,
+      body,
+      { "Content-Type": "text/plain" },
+    );
+
+    expect(response.status).toBe(403);
+    expect(fs.readdirSync(outsideDir)).toEqual([]);
+  });
+
+  it("rejects workspace file previews when a symlink resolves outside the workspace", async () => {
+    const { server, workspaceDir } = createServer();
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-preview-outside-"));
+    uploadRoots.push(outsideDir);
+    fs.writeFileSync(path.join(outsideDir, "secret.txt"), "outside");
+    fs.symlinkSync(path.join(outsideDir, "secret.txt"), path.join(workspaceDir, "link.txt"));
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const created = await postJson<{ client: { id: string } }>(
+      `${origin}/api/clients`,
+    );
+
+    const response = await fetch(
+      `${origin}/api/workspace-files/preview?clientId=${encodeURIComponent(created.client.id)}&path=link.txt`,
+    );
+
+    expect(response.status).toBe(403);
+  });
+
   it("accepts uploads with empty or unknown MIME by using octet-stream", async () => {
     const { server } = createServer();
     const address = await server.start();

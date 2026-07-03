@@ -42,8 +42,8 @@ importers:
         specifier: 0.80.2
         version: 0.80.2(ws@8.21.0)(zod@4.4.3)
       '@josephyoung/pi-heimdall':
-        specifier: 0.2.12
-        version: 0.2.12(@earendil-works/pi-coding-agent@0.80.2(ws@8.21.0)(zod@4.4.3))
+        specifier: 0.2.14
+        version: 0.2.14(@earendil-works/pi-coding-agent@0.80.2(ws@8.21.0)(zod@4.4.3))
       typebox:
         specifier: 1.2.7
         version: 1.2.7
@@ -291,8 +291,8 @@ packages:
       '@modelcontextprotocol/sdk':
         optional: true
 
-  '@josephyoung/pi-heimdall@0.2.12':
-    resolution: {integrity: sha512-fUAPnO0jhf0zyBrimO0xSv6FdVamo5sLRxng6mGHUw3ZwZOq8lfnESlvmY1PRGHIotV/0+9mr3E4fjdUwEFpQA==}
+  '@josephyoung/pi-heimdall@0.2.14':
+    resolution: {integrity: sha512-Rorf+oLan0QbFgotUbf9YJ5ERebwz7vxKjF4Jd7gKQJ4csJHQC0zWVA/PbJ0PCTWm/oooG4KEABRjvf6GVMFsw==}
     engines: {node: '>=22.19.0'}
     peerDependencies:
       '@earendil-works/pi-coding-agent': '*'
@@ -2180,7 +2180,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@josephyoung/pi-heimdall@0.2.12(@earendil-works/pi-coding-agent@0.80.2(ws@8.21.0)(zod@4.4.3))':
+  '@josephyoung/pi-heimdall@0.2.14(@earendil-works/pi-coding-agent@0.80.2(ws@8.21.0)(zod@4.4.3))':
     dependencies:
       '@earendil-works/pi-coding-agent': 0.80.2(ws@8.21.0)(zod@4.4.3)
       shell-quote: 1.8.4

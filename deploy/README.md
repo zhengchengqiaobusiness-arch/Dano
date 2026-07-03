@@ -5,32 +5,42 @@ This directory contains deployment-specific defaults and proxy config.
 ## Runtime Layout
 
 - Source runtime defaults live in `deploy/runtime-defaults/`.
-- The runtime compatibility directory is `$DANO_DEFAULT_WORKSPACE_PATH/.pi`.
-- The default workspace is `/tmp/dano`.
-- The app container runs as the non-root `node` user (`1000:1000`) with
-  `HOME=/home/node`.
+- The runtime root is `${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}`.
+- The Pi agent config directory is
+  `${PI_CODING_AGENT_DIR:-$DANO_RUNTIME_DIR/default-settings/.pi/agent}`.
 - Production deployment keeps three directories separate:
   - `/tmp/dano-build-*` is the disposable source checkout and image build dir.
   - `/opt/dano/deploy` stores Compose, `.env`, secrets, and nginx config.
-  - `/opt/dano/runtime-data` is mounted at `/tmp/dano` for runtime state.
-- Docker Compose mounts `${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/tmp/dano`.
+  - `/opt/dano/runtime-data` is mounted at `/opt/dano/runtime-data` for runtime state.
+- Docker Compose mounts
+  `${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/opt/dano/runtime-data`.
   That host directory must be writable by UID/GID `1000:1000`, so runtime
-  sessions and user-modified `.pi` files survive container recreation without
-  writing into a source checkout.
+  sessions and user-modified agent config files survive container recreation
+  without writing into a source checkout.
 
 On container startup, `deploy/docker-entrypoint.sh` creates:
 
 ```text
-/tmp/dano/.pi/SYSTEM.md
-/tmp/dano/.pi/settings.json
-/tmp/dano/.pi/heimdall.json
+/opt/dano/runtime-data/default-settings/.pi/agent/SYSTEM.md
+/opt/dano/runtime-data/default-settings/.pi/agent/settings.json
+/opt/dano/runtime-data/default-settings/.pi/agent/heimdall.json
 ```
 
 The entrypoint copies those files from `deploy/runtime-defaults/` only when the
 runtime file is missing. It does not overwrite user-modified runtime files.
+It does not copy defaults into a Runtime Workspace `.pi` directory.
 
-The app service grants `SYS_ADMIN` and disables its outer seccomp profile so
-Heimdall can create the nested Bubblewrap namespace used by guarded bash calls.
+The app container runs as the non-root `node` user (`1000:1000`) with
+`HOME=/home/node`. The image keeps `/usr/bin/bwrap` non-setuid (`0755`) and
+sets `HEIMDALL_BWRAP_BIND_KERNEL_FS=1` so Heimdall binds the container's
+existing `/dev` and `/proc` instead of asking Bubblewrap to mount nested kernel
+filesystems. It also sets `HEIMDALL_BWRAP_BIND_ROOT=/opt/dano` because non-root
+Bubblewrap cannot remount the Podman bind-mounted `/opt/dano/runtime-data`
+subtree directly, while binding the container-owned parent keeps Runtime
+Workspace paths usable. Rootless Podman fails setuid Bubblewrap from the
+non-root app user with `bwrap: capset failed: Operation not permitted`, and
+adding `SYS_ADMIN` capabilities makes non-setuid Bubblewrap reject the process
+capabilities.
 
 ## Local Compose Run
 
@@ -45,12 +55,30 @@ pnpm run deploy:down
 ```
 
 For local runs, point `DANO_RUNTIME_DIR`, `DANO_NGINX_CONF`, and
-`DANO_SECRETS_DIR` in `.env` at local paths. `deploy:up` runs Compose with
+`DANO_SECRETS_DIR` in `.env` at local host paths. The app container still uses
+`/opt/dano/runtime-data` internally; the host `DANO_RUNTIME_DIR` only selects
+what is mounted there. `deploy:up` runs Compose with
 `--no-build`; build the image first or use `deploy:release`. `deploy:stop`
 preserves containers and runtime data. `deploy:down` removes the containers and
 Compose network; the bind-mounted runtime directory remains intact.
 
 The app container listens on `8080`; nginx publishes `${DANO_NGINX_PORT:-80}`.
+
+### Full Local Podman Acceptance
+
+For changes that affect model runtime, uploads, Heimdall, bash, container
+permissions, or runtime directories, `smoke:deploy` is not enough. Run this
+minimum acceptance sequence against the Podman Compose deployment:
+
+1. Build and start the image with Podman Compose.
+2. Run `smoke:deploy` against nginx.
+3. In the browser, send a plain text chat and confirm the model replies.
+4. In the browser, upload an image and confirm the model can read it.
+5. In the browser, ask the model to run `bash ls` and confirm the transcript
+   shows a successful bash tool call.
+6. Confirm the app container still runs as `node`, Heimdall is the expected
+   package version, and `bwrap` can enter the Runtime Workspace.
+7. Stop the Compose stack and remove temporary Dano test images/layers.
 
 ### Local Podman Notes
 
@@ -105,9 +133,7 @@ mkdir -p /opt/dano/runtime-data
 chown -R 1000:1000 /opt/dano/runtime-data
 ```
 
-全新 release 部署会自动处理这一步。通常只有旧版 root 容器写过
-`runtime-data`，或手动创建挂载目录后直接 `docker compose up`，才需要手动修正
-权限。
+全新 release 部署会自动处理这一步。
 
 The Dockerfile intentionally uses `node:22-bookworm-slim` instead of
 `node:22-alpine`. On the CentOS 7 publish host
