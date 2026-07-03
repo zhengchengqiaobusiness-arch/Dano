@@ -97,12 +97,22 @@ minimum acceptance sequence against the Podman Compose deployment:
    appeared in session JSONL.
 
    For OA gateway changes, distinguish the host shell, app container shell, and
-   model-triggered bash environment. Use presence markers only; never print
-   `KEY=value` pairs or secret values.
+   model-triggered bash environment. `/opt/dano/deploy/.env` is read by Docker
+   Compose or Podman Compose when `--env-file .env` is used; it does not make
+   `DANO_URL` or `DANO_TENANT_KEY` available to an interactive host shell. The
+   Compose service maps those values into the app container environment
+   (`dano-app-1` for the default project name). Model-triggered `bash` then runs
+   through Heimdall's sandbox env filter, so it is a third environment boundary,
+   distinct from both the host shell and a direct container shell.
+
+   Use presence markers only; never print `KEY=value` pairs or secret values.
+   Secret redaction can make `KEY=value` output ambiguous, while markers such as
+   `TENANT_PRESENT` / `TENANT_MISSING` prove presence without exposing values.
 
    Host shell check:
 
    ```bash
+   cd /opt/dano/deploy
    test -n "${DANO_URL:-}" && echo HOST_URL_PRESENT || echo HOST_URL_MISSING
    test -n "${DANO_TENANT_KEY:-}" && echo HOST_TENANT_PRESENT || echo HOST_TENANT_MISSING
    ```
@@ -112,6 +122,10 @@ minimum acceptance sequence against the Podman Compose deployment:
    ```bash
    podman compose --env-file .env exec app sh -lc 'test -n "${DANO_URL:-}" && echo APP_URL_PRESENT || echo APP_URL_MISSING; test -n "${DANO_TENANT_KEY:-}" && echo APP_TENANT_PRESENT || echo APP_TENANT_MISSING; /opt/dano/runtime-data/.agents/skills/dano-a-oa-qingjia/scripts/submit.sh --list-options 请假类型'
    ```
+
+   The direct app-container command proves Compose injected the variables and
+   the OA leave skill can reach the gateway from `dano-app-1`; it does not prove
+   the model-triggered bash tool received the same environment.
 
    Browser model bash prompt:
 
