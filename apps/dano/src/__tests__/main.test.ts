@@ -41,7 +41,11 @@ describe("Dano main", () => {
     const heimdall = JSON.parse(
       readFileSync(join(runtimeDefaultsDir, "heimdall.json"), "utf8"),
     ) as {
-      sandbox?: { enabled?: boolean; userNamespace?: boolean };
+      sandbox?: {
+        enabled?: boolean;
+        userNamespace?: boolean;
+        env?: { allow?: string[]; deny?: string[] };
+      };
       commandPolicies?: Array<{ blocked?: string[] }>;
     };
 
@@ -59,6 +63,10 @@ describe("Dano main", () => {
     });
     expect(heimdall.sandbox?.enabled).toBe(true);
     expect(heimdall.sandbox?.userNamespace).toBe(false);
+    expect(heimdall.sandbox?.env?.allow).toEqual(
+      expect.arrayContaining(["DANO_URL", "DANO_TENANT_KEY"]),
+    );
+    expect(heimdall.sandbox?.env?.deny).toEqual([]);
     expect(sandboxGuard).toContain(
       'if (config.userNamespace) args.push("--unshare-user");',
     );
@@ -571,7 +579,7 @@ describe("Dano main", () => {
         "{}",
       );
       expect(readFileSync(join(agentRoot, "heimdall.json"), "utf8")).toBe(
-        '{\n  "sandbox": {\n    "userNamespace": false\n  }\n}\n',
+        '{\n  "sandbox": {\n    "userNamespace": false,\n    "env": {\n      "allow": [\n        "PATH",\n        "HOME",\n        "SHELL",\n        "USER",\n        "LOGNAME",\n        "LANG",\n        "LC_*",\n        "TMPDIR",\n        "DANO_URL",\n        "DANO_TENANT_KEY"\n      ],\n      "deny": []\n    }\n  }\n}\n',
       );
       expect(existsSync(join(workspaceRoot, ".pi"))).toBe(false);
     } finally {
@@ -612,7 +620,7 @@ describe("Dano main", () => {
         "{}",
       );
       expect(readFileSync(join(agentRoot, "heimdall.json"), "utf8")).toBe(
-        '{\n  "sandbox": {\n    "userNamespace": false\n  }\n}\n',
+        '{\n  "sandbox": {\n    "userNamespace": false,\n    "env": {\n      "allow": [\n        "PATH",\n        "HOME",\n        "SHELL",\n        "USER",\n        "LOGNAME",\n        "LANG",\n        "LC_*",\n        "TMPDIR",\n        "DANO_URL",\n        "DANO_TENANT_KEY"\n      ],\n      "deny": []\n    }\n  }\n}\n',
       );
     } finally {
       rmSync(sourceRoot, { recursive: true, force: true });
@@ -635,7 +643,10 @@ describe("Dano main", () => {
       writeFileSync(
         join(agentRoot, "heimdall.json"),
         JSON.stringify({
-          sandbox: { enabled: true },
+          sandbox: {
+            enabled: true,
+            env: { allow: ["CUSTOM_ENV"], deny: ["*_KEY", "BLOCKED_ENV"] },
+          },
           commandPolicies: [{ name: "keep", blocked: ["x"], message: "y" }],
         }),
       );
@@ -645,7 +656,18 @@ describe("Dano main", () => {
       expect(
         JSON.parse(readFileSync(join(agentRoot, "heimdall.json"), "utf8")),
       ).toEqual({
-        sandbox: { enabled: true, userNamespace: false },
+        sandbox: {
+          enabled: true,
+          userNamespace: false,
+          env: {
+            allow: expect.arrayContaining([
+              "CUSTOM_ENV",
+              "DANO_URL",
+              "DANO_TENANT_KEY",
+            ]),
+            deny: ["BLOCKED_ENV"],
+          },
+        },
         commandPolicies: [{ name: "keep", blocked: ["x"], message: "y" }],
       });
     } finally {
