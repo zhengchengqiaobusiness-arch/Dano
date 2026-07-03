@@ -39,7 +39,7 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 - Use `pnpm run check` for type and Svelte diagnostics.
 - Use `pnpm test` for Vitest coverage.
 - Use `pnpm run build` before validating the built server.
-- For UI changes, verify the rendered app in a browser against the relevant flow.
+- For UI changes, verify the rendered app in a browser against the relevant flow and capture a screenshot as validation evidence.
 - For Podman/deploy/runtime/Heimdall/bash/upload validation, `smoke:deploy` alone is not enough. Also verify in a browser: plain text chat, image upload with model read/description, and a model-triggered `bash ls` tool call.
 - After Podman-based deployment or smoke tests, stop and remove the test containers and pods, then remove Dano temporary images/tags and dangling build layers after confirming no containers reference them; keep reusable base images unless explicitly asked.
 
