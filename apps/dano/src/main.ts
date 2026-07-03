@@ -34,6 +34,18 @@ const DEFAULT_RUNTIME_SETTINGS_FILES = [
   "settings.json",
   "heimdall.json",
 ] as const;
+const DANO_HEIMDALL_SANDBOX_ENV_ALLOW = [
+  "PATH",
+  "HOME",
+  "SHELL",
+  "USER",
+  "LOGNAME",
+  "LANG",
+  "LC_*",
+  "TMPDIR",
+  "DANO_URL",
+  "DANO_TENANT_KEY",
+] as const;
 const DEFAULT_EMPTY_STATE: BridgeEmptyStateConfig = {
   mode: "text",
   content: "给 {产品名称} 发消息",
@@ -433,6 +445,18 @@ export function initializeDanoAgentSettings(
   migrateHeimdallRuntimeSettings(join(targetSettingsDir, "heimdall.json"));
 }
 
+function mergeStringArray(value: unknown, required: readonly string[]): string[] {
+  const existing = Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+  return [...new Set([...existing, ...required])];
+}
+
+function globPatternMatches(pattern: string, value: string): boolean {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`).test(value);
+}
+
 function migrateHeimdallRuntimeSettings(path: string): void {
   if (!existsSync(path)) return;
 
@@ -449,10 +473,24 @@ function migrateHeimdallRuntimeSettings(path: string): void {
     root.sandbox = {};
   }
 
-  const sandbox = root.sandbox as { userNamespace?: unknown };
-  if (sandbox.userNamespace !== undefined) return;
+  const sandbox = root.sandbox as { userNamespace?: unknown; env?: unknown };
+  if (sandbox.userNamespace === undefined) {
+    sandbox.userNamespace = false;
+  }
 
-  sandbox.userNamespace = false;
+  if (!sandbox.env || typeof sandbox.env !== "object" || Array.isArray(sandbox.env)) {
+    sandbox.env = {};
+  }
+  const env = sandbox.env as { allow?: unknown; deny?: unknown };
+  env.allow = mergeStringArray(env.allow, DANO_HEIMDALL_SANDBOX_ENV_ALLOW);
+  env.deny = Array.isArray(env.deny)
+    ? env.deny.filter(
+        (item): item is string =>
+          typeof item === "string" &&
+          !globPatternMatches(item, "DANO_URL") &&
+          !globPatternMatches(item, "DANO_TENANT_KEY"),
+      )
+    : [];
   writeFileSync(path, `${JSON.stringify(root, null, 2)}\n`);
 }
 

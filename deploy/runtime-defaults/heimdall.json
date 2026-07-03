@@ -1,7 +1,22 @@
 {
   "sandbox": {
     "enabled": true,
-    "userNamespace": false
+    "userNamespace": false,
+    "env": {
+      "allow": [
+        "PATH",
+        "HOME",
+        "SHELL",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LC_*",
+        "TMPDIR",
+        "DANO_URL",
+        "DANO_TENANT_KEY"
+      ],
+      "deny": []
+    }
   },
   "commandPolicies": [
     {
