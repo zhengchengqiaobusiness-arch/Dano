@@ -1931,6 +1931,12 @@ describe("BridgeRpcAdapter", () => {
       );
     });
 
+    it("should support extension status formatting in browser UI mode", () => {
+      const uiContext = adapter.createExtensionUIContext();
+
+      expect(uiContext.theme.fg("accent", "guarded")).toBe("guarded");
+    });
+
     it("should send fire-and-forget UI requests to the client", () => {
       const uiContext = adapter.createExtensionUIContext();
 

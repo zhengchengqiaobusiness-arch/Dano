@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -25,6 +26,14 @@ const composeFile = new URL(
   import.meta.url,
 ).pathname;
 const dockerfile = new URL("../../../../../Dockerfile", import.meta.url).pathname;
+const dockerignoreFile = new URL(
+  "../../../../../.dockerignore",
+  import.meta.url,
+).pathname;
+const entrypointFile = new URL(
+  "../../../../../deploy/docker-entrypoint.sh",
+  import.meta.url,
+).pathname;
 const tempDirs: string[] = [];
 
 function run(
@@ -173,7 +182,18 @@ describe("deploy compose wrapper", () => {
     expect(compose).toContain("name: dano");
     expect(compose).not.toContain("build:");
     expect(compose).not.toContain("./runtime-data");
-    expect(compose).toContain("${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/tmp/dano");
+    expect(compose).not.toContain("cap_add:");
+    expect(compose).not.toContain("seccomp=unconfined");
+    expect(compose).toContain(
+      "DANO_RUNTIME_DIR: /opt/dano/runtime-data",
+    );
+    expect(compose).toContain(
+      "DANO_UPLOAD_DIR: /opt/dano/runtime-data/.dano/uploads",
+    );
+    expect(compose).toContain(
+      "${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/opt/dano/runtime-data",
+    );
+    expect(compose).not.toContain(":/tmp/dano");
     expect(compose).toContain(
       "${DANO_NGINX_CONF:-/opt/dano/deploy/nginx/default.conf}",
     );
@@ -193,16 +213,113 @@ describe("deploy compose wrapper", () => {
     expect(dockerfileText).not.toContain("https://mirrors.aliyun.com/debian");
   });
 
+  it("keeps local package stores out of the Docker build context", () => {
+    const dockerignoreText = readFileSync(dockerignoreFile, "utf8");
+
+    expect(dockerignoreText).toContain("node_modules");
+    expect(dockerignoreText).toContain(".pnpm-store");
+  });
+
   it("runs the production container as the non-root node user", () => {
     const dockerfileText = readFileSync(dockerfile, "utf8");
 
     expect(dockerfileText).toContain("ENV HOME=/home/node");
-    expect(dockerfileText).toContain("mkdir -p /tmp/dano");
-    expect(dockerfileText).toContain("chown -R node:node /tmp/dano /home/node");
+    expect(dockerfileText).toContain("ENV DANO_RUNTIME_DIR=/opt/dano/runtime-data");
+    expect(dockerfileText).toContain("ENV HEIMDALL_BWRAP_BIND_KERNEL_FS=1");
+    expect(dockerfileText).toContain("ENV HEIMDALL_BWRAP_BIND_ROOT=/opt/dano");
+    expect(dockerfileText).not.toContain("COPY patches");
+    expect(dockerfileText).not.toContain("patched_heimdall_dir=");
+    expect(dockerfileText).not.toContain("prod_heimdall_dir=");
+    expect(dockerfileText).toContain("mkdir -p /opt/dano/runtime-data");
+    expect(dockerfileText).toContain("chown -R node:node /opt/dano /home/node");
+    expect(dockerfileText).toContain("chmod 0755 /usr/bin/bwrap");
+    expect(dockerfileText).not.toContain("chmod u+s /usr/bin/bwrap");
+    expect(dockerfileText).not.toContain("/tmp/dano");
     expect(dockerfileText).toContain("USER node");
     expect(dockerfileText.indexOf("USER node")).toBeGreaterThan(
       dockerfileText.indexOf("apt-get install"),
     );
+  });
+
+  it("initializes runtime defaults in the global agent config directory", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "dano-entrypoint-test-"));
+    tempDirs.push(cwd);
+    const defaultsDir = join(cwd, "defaults");
+    const runtimeDir = join(cwd, "runtime-data");
+    const workspaceDir = join(cwd, "workspace");
+    const agentDir = join(runtimeDir, "default-settings/.pi/agent");
+    const agentDirOut = join(cwd, "agent-dir.txt");
+
+    mkdirSync(defaultsDir, { recursive: true });
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(defaultsDir, "SYSTEM.md"), "default system\n");
+    writeFileSync(join(defaultsDir, "settings.json"), "{\"default\":true}\n");
+    writeFileSync(join(defaultsDir, "heimdall.json"), "{\"guard\":true}\n");
+    writeFileSync(join(agentDir, "settings.json"), "{\"custom\":true}\n");
+
+    execFileSync("sh", [
+      entrypointFile,
+      "/bin/sh",
+      "-c",
+      'printf "%s" "$PI_CODING_AGENT_DIR" > "$DANO_AGENT_DIR_OUT"',
+    ], {
+      env: {
+        ...process.env,
+        PATH: "/usr/bin:/bin",
+        DANO_RUNTIME_DEFAULTS_DIR: defaultsDir,
+        DANO_RUNTIME_DIR: runtimeDir,
+        DANO_DEFAULT_WORKSPACE_PATH: workspaceDir,
+        DANO_AGENT_DIR_OUT: agentDirOut,
+      },
+    });
+
+    expect(readFileSync(agentDirOut, "utf8")).toBe(agentDir);
+    expect(readFileSync(join(agentDir, "SYSTEM.md"), "utf8")).toBe(
+      "default system\n",
+    );
+    expect(readFileSync(join(agentDir, "settings.json"), "utf8")).toBe(
+      "{\"custom\":true}\n",
+    );
+    expect(readFileSync(join(agentDir, "heimdall.json"), "utf8")).toBe(
+      "{\"guard\":true}\n",
+    );
+    expect(existsSync(join(workspaceDir, ".pi"))).toBe(false);
+  });
+
+  it("honors an existing PI_CODING_AGENT_DIR", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "dano-entrypoint-test-"));
+    tempDirs.push(cwd);
+    const defaultsDir = join(cwd, "defaults");
+    const runtimeDir = join(cwd, "runtime-data");
+    const agentDir = join(cwd, "custom-agent");
+    const agentDirOut = join(cwd, "agent-dir.txt");
+
+    mkdirSync(defaultsDir, { recursive: true });
+    writeFileSync(join(defaultsDir, "SYSTEM.md"), "default system\n");
+    writeFileSync(join(defaultsDir, "settings.json"), "{\"default\":true}\n");
+    writeFileSync(join(defaultsDir, "heimdall.json"), "{\"guard\":true}\n");
+
+    execFileSync("sh", [
+      entrypointFile,
+      "/bin/sh",
+      "-c",
+      'printf "%s" "$PI_CODING_AGENT_DIR" > "$DANO_AGENT_DIR_OUT"',
+    ], {
+      env: {
+        ...process.env,
+        PATH: "/usr/bin:/bin",
+        DANO_RUNTIME_DEFAULTS_DIR: defaultsDir,
+        DANO_RUNTIME_DIR: runtimeDir,
+        PI_CODING_AGENT_DIR: agentDir,
+        DANO_AGENT_DIR_OUT: agentDirOut,
+      },
+    });
+
+    expect(readFileSync(agentDirOut, "utf8")).toBe(agentDir);
+    expect(readFileSync(join(agentDir, "SYSTEM.md"), "utf8")).toBe(
+      "default system\n",
+    );
+    expect(existsSync(join(runtimeDir, "default-settings"))).toBe(false);
   });
 
   it("builds releases from a temporary checkout and cleans it up", () => {

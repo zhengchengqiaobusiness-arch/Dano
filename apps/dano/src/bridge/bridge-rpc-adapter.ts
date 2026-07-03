@@ -4330,7 +4330,9 @@ class ExtensionUIBridge {
         setEditorText(text);
       },
       setEditorComponent: () => {}, // Not supported
-      theme: {} as ExtensionUIContext["theme"], // Not available
+      theme: {
+        fg: (_color: string, text: string) => text,
+      } as ExtensionUIContext["theme"],
       getAllThemes: () => [],
       getTheme: () => undefined,
       setTheme: () => ({ success: false, error: "Not supported" }),

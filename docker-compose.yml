@@ -4,15 +4,11 @@ services:
   app:
     image: ${DANO_IMAGE:-dano-app:local}
     restart: unless-stopped
-    cap_add:
-      - SYS_ADMIN
-    security_opt:
-      - seccomp=unconfined
     environment:
       DANO_HOST: 0.0.0.0
       DANO_PORT: 8080
-      DANO_DEFAULT_WORKSPACE_PATH: ${DANO_DEFAULT_WORKSPACE_PATH:-/tmp/dano}
-      DANO_UPLOAD_DIR: ${DANO_UPLOAD_DIR:-/tmp/dano/.dano/uploads}
+      DANO_RUNTIME_DIR: /opt/dano/runtime-data
+      DANO_UPLOAD_DIR: /opt/dano/runtime-data/.dano/uploads
       DANO_UPLOAD_MAX_TOTAL_BYTES: ${DANO_UPLOAD_MAX_TOTAL_BYTES:-10737418240}
       DANO_UPLOAD_DRAFT_TTL_MS: ${DANO_UPLOAD_DRAFT_TTL_MS:-7200000}
       DANO_UPLOAD_REFERENCED_TTL_MS: ${DANO_UPLOAD_REFERENCED_TTL_MS:-86400000}
@@ -41,7 +37,7 @@ services:
     expose:
       - "8080"
     volumes:
-      - ${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/tmp/dano
+      - ${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/opt/dano/runtime-data
       - ${DANO_SECRETS_DIR:-/opt/dano/deploy/.secrets}:/run/secrets:ro
     networks:
       - default

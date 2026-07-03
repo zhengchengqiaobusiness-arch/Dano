@@ -16,6 +16,10 @@ _Avoid_: Source checkout, runtime data
 The host directory mounted into the app container for Dano runtime state that must survive container recreation.
 _Avoid_: Deploy directory, source checkout
 
+**Agent Config Directory**:
+The Pi global agent directory selected by `PI_CODING_AGENT_DIR`, where Dano stores shared agent settings and system prompt files for all Runtime Workspaces.
+_Avoid_: Runtime Workspace, user home, project `.pi`
+
 **Runtime Defaults**:
-Source-controlled files copied into a new runtime workspace only when the corresponding runtime file is missing.
+Source-controlled files copied into the Agent Config Directory only when the corresponding runtime file is missing.
 _Avoid_: Runtime state, generated config

@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.80.2",
-    "@josephyoung/pi-heimdall": "0.2.12",
+    "@josephyoung/pi-heimdall": "0.2.14",
     "typebox": "1.2.7"
   },
   "devDependencies": {
