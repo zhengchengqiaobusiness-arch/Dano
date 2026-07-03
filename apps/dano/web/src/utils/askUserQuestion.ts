@@ -7,6 +7,7 @@ import {
   type AskUserQuestionOptionId,
   type AskUserQuestionResult,
 } from "@dano/types/protocol";
+import { validateAskUserQuestionDateFormat } from "@dano/types/ask-user-question-date";
 import type { ToolContentBlock } from "./transcript";
 
 export type NormalizedAskUserQuestionOption = AskUserQuestionOption;
@@ -17,6 +18,15 @@ export type AskUserQuestionItem =
       kind: "text";
       question: string;
       inputType?: "text" | "textarea";
+      required?: boolean;
+      default?: string;
+    }
+  | {
+      id: string;
+      kind: "date";
+      question: string;
+      dateFormat: string;
+      required?: boolean;
       default?: string;
     }
   | {
@@ -24,6 +34,7 @@ export type AskUserQuestionItem =
       kind: "single";
       question: string;
       options: NormalizedAskUserQuestionOption[];
+      required?: boolean;
       default?: AskUserQuestionOptionId;
     }
   | {
@@ -32,6 +43,7 @@ export type AskUserQuestionItem =
       question: string;
       options: NormalizedAskUserQuestionOption[];
       dataSource?: AskUserQuestionDataSource;
+      required?: boolean;
       default?: AskUserQuestionOptionId;
     }
   | {
@@ -41,9 +53,10 @@ export type AskUserQuestionItem =
       options: NormalizedAskUserQuestionOption[];
       dataSource?: AskUserQuestionDataSource;
       inputType?: "treeSelect";
+      required?: boolean;
       default?: AskUserQuestionOptionId[];
     }
-  | { id: string; kind: "confirm"; question: string; default?: boolean };
+  | { id: string; kind: "confirm"; question: string; required?: boolean; default?: boolean };
 
 export type AskUserQuestionRequest =
   | (AskUserQuestionItem & { batch: false })
@@ -128,7 +141,7 @@ function answerOptionLabel(
   item: AskUserQuestionItem | undefined,
   answer: AskUserQuestionOptionId,
 ): string {
-  if (!item || item.kind === "text" || item.kind === "confirm") return String(answer);
+  if (!item || item.kind === "text" || item.kind === "date" || item.kind === "confirm") return String(answer);
   return item.options.find(option => option.id === answer)?.label ?? String(answer);
 }
 
@@ -204,6 +217,8 @@ function normalizeCompatibleQuestionArgs(
   );
   if (inputType) normalized.inputType = inputType;
 
+  if (args.dateFormat !== undefined) normalized.dateFormat = args.dateFormat;
+
   if (args.dataSource === undefined && args.data_source !== undefined) {
     normalized.dataSource = args.data_source;
   }
@@ -211,6 +226,8 @@ function normalizeCompatibleQuestionArgs(
   if (args.multiple === undefined) {
     normalized.multiple = args.multi ?? args.multipleSelect;
   }
+
+  if (args.required !== undefined) normalized.required = args.required;
 
   if (args.default === undefined) {
     normalized.default = firstDefined(args.defaultValue, args.prefill, args.value);
@@ -261,17 +278,33 @@ function parseQuestionItem(
   const confirm = args.confirm;
   const rawDefault = args.default;
   if (multiple !== undefined && typeof multiple !== "boolean") return null;
+  if (args.required !== undefined && typeof args.required !== "boolean") return null;
   if (confirm !== undefined && confirm !== true) return null;
+  const required = args.required === true;
   if (confirm === true || inputType === "confirm") {
     return allowConfirm && rawOptions === undefined && multiple !== true && !dataSource
       ? {
           id: stringOrFallback(args.id, fallbackId),
           kind: "confirm",
           question,
+          ...(required ? { required } : {}),
           ...(typeof rawDefault === "boolean" ? { default: rawDefault } : {}),
         }
       : null;
   }
+  if (inputType === "date") {
+    if (validateAskUserQuestionDateFormat(args.dateFormat)) return null;
+    if (rawOptions !== undefined || dataSource || multiple === true) return null;
+    return {
+      id: stringOrFallback(args.id, fallbackId),
+      kind: "date",
+      question,
+      dateFormat: String(args.dateFormat).trim(),
+      ...(required ? { required } : {}),
+      ...(typeof rawDefault === "string" ? { default: rawDefault } : {}),
+    };
+  }
+  if (args.dateFormat !== undefined) return null;
   if (rawOptions === undefined && !dataSource) {
     return multiple === true
       ? null
@@ -279,8 +312,9 @@ function parseQuestionItem(
           id: stringOrFallback(args.id, fallbackId),
           kind: "text",
           question,
+          ...(required ? { required } : {}),
           ...(inputType === "textarea" ? { inputType } : {}),
-          ...(typeof rawDefault === "string" && rawDefault.trim()
+          ...(typeof rawDefault === "string" && (rawDefault.trim() || !required)
             ? { default: rawDefault.trim() }
             : {}),
         };
@@ -302,6 +336,7 @@ function parseQuestionItem(
       kind: "multiple",
       question,
       options,
+      ...(required ? { required } : {}),
       ...(dataSource ? { dataSource } : {}),
       ...(inputType === "treeSelect" ? { inputType } : {}),
       ...(Array.isArray(rawDefault)
@@ -316,6 +351,7 @@ function parseQuestionItem(
       kind: inputType,
       question,
       options,
+      ...(required ? { required } : {}),
       ...(dataSource ? { dataSource } : {}),
       ...(isOptionId(normalizeAnswerInput(rawDefault))
         ? { default: normalizeAnswerInput(rawDefault) }
@@ -328,6 +364,7 @@ function parseQuestionItem(
     kind: "single",
     question,
     options,
+    ...(required ? { required } : {}),
     ...(isOptionId(normalizeAnswerInput(rawDefault))
       ? { default: normalizeAnswerInput(rawDefault) }
       : {}),
@@ -375,6 +412,7 @@ function normalizeInputTypeAlias(value: unknown): AskUserQuestionInputType | und
   if (
     value === "text" ||
     value === "textarea" ||
+    value === "date" ||
     value === "radio" ||
     value === "checkbox" ||
     value === "select" ||
@@ -391,6 +429,7 @@ function normalizeInputTypeAlias(value: unknown): AskUserQuestionInputType | und
   if (normalized === "text" || normalized === "input" || normalized === "string") {
     return "text";
   }
+  if (normalized === "date" || normalized === "datepicker") return "date";
   if (normalized === "radio") return "radio";
   if (normalized === "checkbox" || normalized === "multiselect") return "checkbox";
   if (normalized === "select" || normalized === "dropdown") return "select";

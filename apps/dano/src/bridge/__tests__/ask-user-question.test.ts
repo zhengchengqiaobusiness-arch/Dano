@@ -19,6 +19,8 @@ function executeQuestion(
     dataSource?: AskUserQuestionDataSource;
     multiple?: boolean;
     confirm?: true;
+    dateFormat?: unknown;
+    required?: unknown;
     default?: AskUserQuestionAnswerInput;
     questions?: {
       id?: string;
@@ -27,6 +29,8 @@ function executeQuestion(
       inputType?: AskUserQuestionInputType;
       dataSource?: AskUserQuestionDataSource;
       multiple?: boolean;
+      dateFormat?: unknown;
+      required?: unknown;
       default?: AskUserQuestionAnswerInput;
     }[];
   },
@@ -52,8 +56,10 @@ describe("ask_user_question tool", () => {
       "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
       "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
       "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
-      "Set a valid non-empty default on every non-confirmation question, including every item in questions, using the most likely or safest answer while still letting the user change it. Never use an empty string as default.",
-      "When using questions, the top level must contain only questions. Put id, question, options, inputType, dataSource, multiple, and default inside each questions item.",
+      "Set required:true only when an answer is mandatory. required defaults to false.",
+      "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
+      "Dano returns the user's date answer as submitted; convert it yourself if a downstream interface needs another business format.",
+      "When using questions, the top level must contain only questions. Put id, question, options, inputType, dateFormat, required, dataSource, multiple, and default inside each questions item.",
       "For forms, applications, or other user-reviewed summaries, call ask_user_question with confirm: true after presenting the final summary and before treating it as confirmed, ready to submit, or complete.",
     ]);
   });
@@ -310,13 +316,151 @@ describe("ask_user_question tool", () => {
     });
   });
 
-  it("rejects empty text defaults with a default-specific error", async () => {
+  it("accepts empty optional text defaults without requiring user correction", async () => {
+    const execution = executeQuestion("empty-default", {
+      question: "Reason?",
+      default: "",
+    });
+
+    askUserQuestionCoordinator.answer("empty-default", {
+      cancelled: false,
+      answer: "",
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: "" },
+    });
+  });
+
+  it("returns date answers exactly as submitted", async () => {
+    const execution = executeQuestion("date-1", {
+      question: "Start date?",
+      inputType: "date",
+      dateFormat: "yyyy-MM-dd",
+      required: true,
+    });
+
+    askUserQuestionCoordinator.answer("date-1", {
+      cancelled: false,
+      answer: "2026/07/03",
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: "2026/07/03" },
+    });
+  });
+
+  it("accepts date-time-to-minute formats for date questions", async () => {
+    const execution = executeQuestion("date-time-1", {
+      question: "Start time?",
+      inputType: "date",
+      dateFormat: "yyyy-MM-dd HH:mm",
+      default: "2026-07-03 09:30",
+    });
+
+    askUserQuestionCoordinator.answer("date-time-1", {
+      cancelled: false,
+      answer: "2026-07-03 10:45",
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: "2026-07-03 10:45" },
+    });
+  });
+
+  it("accepts custom dateFormat strings supported by the frontend formatter", async () => {
+    const execution = executeQuestion("date-custom-format", {
+      question: "Start time?",
+      inputType: "date",
+      dateFormat: "yyyy/MM/dd HH:mm",
+      default: "2026/07/03 09:30",
+    });
+
+    askUserQuestionCoordinator.answer("date-custom-format", {
+      cancelled: false,
+      answer: "2026/07/03 10:45",
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: "2026/07/03 10:45" },
+    });
+  });
+
+  it("requires dateFormat on date questions", async () => {
     await expect(
-      executeQuestion("empty-default", {
-        question: "Reason?",
-        default: "",
+      executeQuestion("date-missing-format", {
+        question: "Start date?",
+        inputType: "date",
       }),
-    ).rejects.toThrow("默认答案无效：答案不能为空");
+    ).rejects.toThrow("dateFormat is required");
+  });
+
+  it("rejects unsupported dateFormat values before rendering", async () => {
+    await expect(
+      executeQuestion("date-format-seconds", {
+        question: "Start time?",
+        inputType: "date",
+        dateFormat: "yyyy-MM-dd HH:mm:ss",
+      }),
+    ).rejects.toThrow("seconds and time zones are not supported");
+
+    await expect(
+      executeQuestion("date-format-missing-day", {
+        question: "Start month?",
+        inputType: "date",
+        dateFormat: "yyyy-MM",
+      }),
+    ).rejects.toThrow("must include year, month, and day");
+
+    await expect(
+      executeQuestion("date-format-12-hour", {
+        question: "Start time?",
+        inputType: "date",
+        dateFormat: "yyyy-MM-dd h:mm",
+      }),
+    ).rejects.toThrow("must use 24-hour H/HH tokens");
+  });
+
+  it("uses required only to decide whether blank date answers are allowed", async () => {
+    const optional = executeQuestion("date-empty-optional", {
+      question: "Start date?",
+      inputType: "date",
+      dateFormat: "yyyy-MM-dd",
+    });
+    askUserQuestionCoordinator.answer("date-empty-optional", {
+      cancelled: false,
+      answer: "",
+    });
+    await expect(optional).resolves.toMatchObject({
+      details: { status: "answered", answer: "" },
+    });
+
+    const required = executeQuestion("date-empty-required", {
+      question: "Start date?",
+      inputType: "date",
+      dateFormat: "yyyy-MM-dd",
+      required: true,
+    });
+    expect(() =>
+      askUserQuestionCoordinator.answer("date-empty-required", {
+        cancelled: false,
+        answer: "",
+      }),
+    ).toThrow("答案不能为空");
+    askUserQuestionCoordinator.answer("date-empty-required", {
+      cancelled: false,
+      answer: "2026-07-03",
+    });
+    await expect(required).resolves.toMatchObject({
+      details: { status: "answered", answer: "2026-07-03" },
+    });
+  });
+
+  it("validates non-empty date defaults against dateFormat", async () => {
+    await expect(
+      executeQuestion("date-invalid-default", {
+        question: "Start date?",
+        inputType: "date",
+        dateFormat: "yyyy-MM-dd",
+        default: "2026/07/03",
+      }),
+    ).rejects.toThrow("默认日期必须匹配 dateFormat: yyyy-MM-dd");
   });
 
   it("returns multiple selected options", async () => {
@@ -595,7 +739,7 @@ describe("ask_user_question tool", () => {
     ).rejects.toThrow("top level may contain only questions");
   });
 
-  it("rejects grouped answers missing a question id", async () => {
+  it("omits optional grouped answers that are not submitted", async () => {
     const execution = askUserQuestionTool.execute(
       "group-missing",
       {
@@ -609,18 +753,41 @@ describe("ask_user_question tool", () => {
       {} as never,
     );
 
+    askUserQuestionCoordinator.answer("group-missing", {
+      cancelled: false,
+      answer: { name: "Dano" },
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: { name: "Dano" } },
+    });
+  });
+
+  it("rejects grouped answers missing a required question id", async () => {
+    const execution = askUserQuestionTool.execute(
+      "group-missing-required",
+      {
+        questions: [
+          { id: "name", question: "Name?" },
+          { id: "env", question: "Environment?", options: ["Test", "Prod"], required: true },
+        ],
+      },
+      undefined,
+      undefined,
+      {} as never,
+    );
+
     expect(() =>
-      askUserQuestionCoordinator.answer("group-missing", {
+      askUserQuestionCoordinator.answer("group-missing-required", {
         cancelled: false,
         answer: { name: "Dano" },
       }),
     ).toThrow("Missing answer");
-    askUserQuestionCoordinator.answer("group-missing", {
+    askUserQuestionCoordinator.answer("group-missing-required", {
       cancelled: false,
       answer: { name: "Dano", env: "Test" },
     });
     await expect(execution).resolves.toMatchObject({
-      details: { status: "answered" },
+      details: { status: "answered", answer: { name: "Dano", env: "Test" } },
     });
   });
 

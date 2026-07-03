@@ -27,6 +27,7 @@
   } from "../utils/fieldAssist";
   import type { ToolContentBlock } from "../utils/transcript";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
+  import QuestionDateField from "./QuestionDateField.svelte";
   import RefreshCw from "lucide-svelte/icons/refresh-cw";
   import Sparkle from "lucide-svelte/icons/sparkle";
 
@@ -69,6 +70,7 @@
   let selectedOption = $state<Record<string, string>>({});
   let selectedOptions = $state<Record<string, string[]>>({});
   let textAnswer = $state<Record<string, string>>({});
+  let dateAnswer = $state<Record<string, string | undefined>>({});
   let customAnswer = $state<Record<string, string>>({});
   let remoteOptions = $state<Record<string, NormalizedAskUserQuestionOption[]>>({});
   let remoteSearch = $state<Record<string, string>>({});
@@ -90,6 +92,7 @@
     selectedOption = {};
     selectedOptions = {};
     textAnswer = {};
+    dateAnswer = {};
     customAnswer = {};
     remoteOptions = {};
     remoteSearch = {};
@@ -108,6 +111,8 @@
     for (const item of questionItems) {
       if (item.kind === "text") {
         textAnswer[item.id] = item.default ?? "";
+      } else if (item.kind === "date") {
+        dateAnswer[item.id] = item.default;
       } else if (item.kind === "single" || item.kind === "select" || item.kind === "treeSelect") {
         selectedOption[item.id] = selectedOptionForDefault(item, item.default);
         customAnswer[item.id] = customAnswerForDefault(item, item.default);
@@ -173,7 +178,7 @@
       for (const item of questionItems) {
         const answer = answerForItem(item);
         if (answer === null) return;
-        answers[item.id] = answer;
+        if (answer !== undefined) answers[item.id] = answer;
       }
       void respond({ cancelled: false, answer: answers });
       return;
@@ -181,7 +186,7 @@
 
     const answer = answerForItem(request);
     if (answer !== null) {
-      void respond({ cancelled: false, answer });
+      void respond({ cancelled: false, answer: answer ?? "" });
     }
   }
 
@@ -190,17 +195,17 @@
       questionItems.every(item => answerForItem(item) !== null);
   }
 
-  function answerForItem(item: AskUserQuestionItem): AskUserQuestionAnswer | null {
+  function answerForItem(item: AskUserQuestionItem): AskUserQuestionAnswer | null | undefined {
     if (item.kind === "single" || item.kind === "select" || item.kind === "treeSelect") {
       const selected = selectedOption[item.id] ?? "";
-      if (!selected) return null;
+      if (!selected) return item.required ? null : undefined;
       return selectedOptionIsOther(item, selected)
         ? customAnswer[item.id]?.trim() || null
         : selectedOptionValue(item, selected);
     }
     if (item.kind === "multiple") {
       const selected = selectedOptions[item.id] ?? [];
-      if (selected.length === 0) return null;
+      if (selected.length === 0) return item.required ? null : [];
       if (selected.some(option => selectedOptionIsOther(item, option)) && !customAnswer[item.id]?.trim()) return null;
       return selected.map(option =>
         selectedOptionIsOther(item, option)
@@ -208,7 +213,14 @@
           : selectedOptionValue(item, option),
       );
     }
-    if (item.kind === "text") return textAnswer[item.id]?.trim() || null;
+    if (item.kind === "date") {
+      const answer = dateAnswer[item.id];
+      return item.required && !answer ? null : answer;
+    }
+    if (item.kind === "text") {
+      const answer = textAnswer[item.id]?.trim() ?? "";
+      return item.required && !answer ? null : answer;
+    }
     return null;
   }
 
@@ -682,6 +694,19 @@
               {#if aiAssistError[item.id]}
                 <div class="question-error" role="alert">{aiAssistError[item.id]}</div>
               {/if}
+            {:else if item.kind === "date"}
+              <label class="sr-only" for={`question-${block.toolCallId}-${item.id}-trigger`}>{item.question}</label>
+              <QuestionDateField
+                id={`question-${block.toolCallId}-${item.id}`}
+                value={dateAnswer[item.id]}
+                dateFormat={item.dateFormat}
+                required={item.required}
+                disabled={!pending || submitting}
+                placeholder={item.dateFormat}
+                onValueChange={(value) => {
+                  dateAnswer[item.id] = value;
+                }}
+              />
             {/if}
 
             {#if customAnswerSelected(item)}
