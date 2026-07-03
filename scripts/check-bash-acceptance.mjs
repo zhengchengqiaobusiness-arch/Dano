@@ -13,6 +13,8 @@ const since = process.env.DANO_BASH_ACCEPTANCE_SINCE
   : undefined;
 const marker = process.env.DANO_BASH_ACCEPTANCE_MARKER;
 const scanAll = process.env.DANO_BASH_ACCEPTANCE_SCAN_ALL === "1";
+const requiredMarkers = parseMarkers(process.env.DANO_BASH_ACCEPTANCE_REQUIRED_MARKERS);
+const forbiddenMarkers = parseMarkers(process.env.DANO_BASH_ACCEPTANCE_FORBIDDEN_MARKERS);
 const hasExplicitScope =
   Boolean(process.argv[2]) ||
   Boolean(process.env.DANO_BASH_ACCEPTANCE_SESSION) ||
@@ -20,6 +22,14 @@ const hasExplicitScope =
   Boolean(marker) ||
   scanAll;
 const bwrapError = /\bbwrap\b.*(error|failed|Operation not permitted|must be installed setuid)|bubblewrap.*(error|failed)/i;
+
+function parseMarkers(value) {
+  if (!value) return [];
+  return value
+    .split(/[\n,]/)
+    .map(item => item.trim())
+    .filter(Boolean);
+}
 
 function walk(dir, files = []) {
   for (const entry of readdirSync(dir)) {
@@ -86,6 +96,17 @@ let sawSuccessfulResult = false;
 let sawBwrapError = false;
 let sawMarker = !marker;
 const bashToolCallIds = new Set();
+const requiredMarkerHits = new Map(requiredMarkers.map(item => [item, false]));
+const forbiddenMarkerHits = new Map(forbiddenMarkers.map(item => [item, false]));
+
+function scanMarkerText(text) {
+  for (const requiredMarker of requiredMarkers) {
+    if (text.includes(requiredMarker)) requiredMarkerHits.set(requiredMarker, true);
+  }
+  for (const forbiddenMarker of forbiddenMarkers) {
+    if (text.includes(forbiddenMarker)) forbiddenMarkerHits.set(forbiddenMarker, true);
+  }
+}
 
 for (const file of jsonlFiles(root)) {
   if (since !== undefined && statSync(file).mtimeMs < since) continue;
@@ -95,6 +116,7 @@ for (const file of jsonlFiles(root)) {
     if (!line.trim()) continue;
     const text = line;
     if (marker && text.includes(marker)) sawMarker = true;
+    scanMarkerText(text);
     if (bwrapError.test(text)) sawBwrapError = true;
 
     let entry;
@@ -105,6 +127,7 @@ for (const file of jsonlFiles(root)) {
     }
 
     if (marker && textOf(entry).includes(marker)) sawMarker = true;
+    scanMarkerText(textOf(entry));
     const message = messageOf(entry);
     const toolCalls = bashToolCalls(message);
     if (toolCalls.length > 0) {
@@ -130,7 +153,20 @@ console.log(`bash tool call: ${sawBashCall ? "yes" : "no"}`);
 console.log(`bash result ${expected}: ${sawSuccessfulResult ? "yes" : "no"}`);
 console.log(`bwrap errors: ${sawBwrapError ? "yes" : "no"}`);
 if (marker) console.log(`marker: ${sawMarker ? "yes" : "no"}`);
+for (const [requiredMarkerName, present] of requiredMarkerHits) {
+  console.log(`required marker ${requiredMarkerName}: ${present ? "yes" : "no"}`);
+}
+for (const [forbiddenMarkerName, present] of forbiddenMarkerHits) {
+  console.log(`forbidden marker ${forbiddenMarkerName}: ${present ? "yes" : "no"}`);
+}
 
-if (!sawBashCall || !sawSuccessfulResult || sawBwrapError || !sawMarker) {
+if (
+  !sawBashCall ||
+  !sawSuccessfulResult ||
+  sawBwrapError ||
+  !sawMarker ||
+  [...requiredMarkerHits.values()].some(present => !present) ||
+  [...forbiddenMarkerHits.values()].some(present => present)
+) {
   process.exit(1);
 }
