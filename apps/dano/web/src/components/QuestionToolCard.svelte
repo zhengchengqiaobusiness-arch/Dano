@@ -30,6 +30,7 @@
   import QuestionDateField from "./QuestionDateField.svelte";
   import RefreshCw from "lucide-svelte/icons/refresh-cw";
   import Sparkle from "lucide-svelte/icons/sparkle";
+  import "./questionToolControls.css";
 
   const PENDING_RENDER_DELAY_MS = 400;
 
@@ -514,10 +515,10 @@
       <div class="question-error" role="alert">{block.resultText}</div>
     {:else if !request.batch && request.kind === "confirm"}
       <div class="question-actions">
-        <button type="button" class="secondary" disabled={submitting} onclick={() => void respond({ cancelled: false, answer: false })}>
+        <button type="button" class="question-button secondary" disabled={submitting} onclick={() => void respond({ cancelled: false, answer: false })}>
           {t("questionTool.cancel")}
         </button>
-        <button type="button" disabled={submitting} onclick={() => void respond({ cancelled: false, answer: true })}>
+        <button type="button" class="question-button" disabled={submitting} onclick={() => void respond({ cancelled: false, answer: true })}>
           {t("questionTool.confirm")}
         </button>
       </div>
@@ -554,7 +555,7 @@
                   />
                   <button
                     type="button"
-                    class="secondary"
+                    class="question-button secondary"
                     disabled={!pending || submitting || remoteLoading[item.id]}
                     onclick={() => void loadRemoteOptions(item, 1, remoteSearch[item.id] ?? "", false)}
                   >
@@ -580,7 +581,7 @@
               {#if item.dataSource && remoteHasMore[item.id]}
                 <button
                   type="button"
-                  class="secondary load-more"
+                  class="question-button secondary load-more"
                   disabled={!pending || submitting || remoteLoading[item.id]}
                   onclick={() => void loadRemoteOptions(item, (remotePage[item.id] ?? 1) + 1, remoteSearch[item.id] ?? "", true)}
                 >
@@ -600,7 +601,7 @@
                   />
                   <button
                     type="button"
-                    class="secondary"
+                    class="question-button secondary"
                     disabled={!pending || submitting || remoteLoading[item.id]}
                     onclick={() => void loadRemoteOptions(item, 1, remoteSearch[item.id] ?? "", false)}
                   >
@@ -623,7 +624,7 @@
               {#if item.dataSource && remoteHasMore[item.id]}
                 <button
                   type="button"
-                  class="secondary load-more"
+                  class="question-button secondary load-more"
                   disabled={!pending || submitting || remoteLoading[item.id]}
                   onclick={() => void loadRemoteOptions(item, (remotePage[item.id] ?? 1) + 1, remoteSearch[item.id] ?? "", true)}
                 >
@@ -638,7 +639,7 @@
                 <div class="question-ai-actions" aria-label={`${t("questionTool.aiAssistRegenerate")} / ${t("questionTool.aiAssistPolish")}`}>
                   <button
                     type="button"
-                    class="secondary icon-button"
+                    class="question-button secondary icon-button"
                     disabled={!pending || submitting || Boolean(aiAssistLoading[item.id])}
                     onclick={() => void runFieldAssist(item, "regenerate")}
                     aria-label={aiAssistLoading[item.id] === "regenerate" ? t("questionTool.aiAssistGenerating") : t("questionTool.aiAssistRegenerate")}
@@ -649,7 +650,7 @@
                   </button>
                   <button
                     type="button"
-                    class="secondary icon-button"
+                    class="question-button secondary icon-button"
                     disabled={!pending || submitting || Boolean(aiAssistLoading[item.id]) || !textAnswer[item.id]?.trim()}
                     onclick={() => void runFieldAssist(item, "polish")}
                     aria-label={aiAssistLoading[item.id] === "polish" ? t("questionTool.aiAssistPolishing") : t("questionTool.aiAssistPolish")}
@@ -727,10 +728,10 @@
         {/each}
 
         <div class="question-actions">
-          <button type="button" class="secondary" disabled={!pending || submitting} onclick={() => void respond({ cancelled: true })}>
+          <button type="button" class="question-button secondary" disabled={!pending || submitting} onclick={() => void respond({ cancelled: true })}>
             {t("questionTool.cancel")}
           </button>
-          <button type="submit" disabled={!pending || submitting || !canSubmit()}>
+          <button type="submit" class="question-button" disabled={!pending || submitting || !canSubmit()}>
             {t("questionTool.submit")}
           </button>
         </div>
@@ -761,7 +762,6 @@
     font-size: 0.68rem;
     font-weight: 700;
     letter-spacing: 0.08em;
-    text-transform: uppercase;
   }
 
   .question-text {
@@ -832,17 +832,6 @@
     gap: 8px;
   }
 
-  .question-input {
-    box-sizing: border-box;
-    width: 100%;
-    padding: 10px 12px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: var(--bg);
-    color: var(--text);
-    font: inherit;
-  }
-
   .question-input-wrap {
     position: relative;
   }
@@ -879,23 +868,6 @@
     resize: vertical;
   }
 
-  select.question-input {
-    appearance: none;
-    -webkit-appearance: none;
-    padding-right: 36px;
-    background:
-      linear-gradient(45deg, transparent 50%, var(--text-muted) 50%) right 17px center / 6px 6px no-repeat,
-      linear-gradient(135deg, var(--text-muted) 50%, transparent 50%) right 12px center / 6px 6px no-repeat,
-      var(--bg);
-  }
-
-  .question-input:focus-visible,
-  button:focus-visible,
-  .question-option:focus-within {
-    outline: 2px solid var(--focus-ring);
-    outline-offset: 2px;
-  }
-
   .question-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
   .question-field-header {
@@ -915,7 +887,7 @@
     gap: 6px;
   }
 
-  button.icon-button {
+  .question-button.icon-button {
     position: relative;
     display: inline-flex;
     align-items: center;
@@ -933,7 +905,7 @@
       transform 0.12s ease;
   }
 
-  button.icon-button::after {
+  .question-button.icon-button::after {
     position: absolute;
     right: 0;
     bottom: calc(100% + 6px);
@@ -952,49 +924,31 @@
     pointer-events: none;
   }
 
-  button.icon-button:hover::after,
-  button.icon-button:focus-visible::after {
+  .question-button.icon-button:hover::after,
+  .question-button.icon-button:focus-visible::after {
     display: block;
   }
 
   .load-more { justify-self: start; }
 
-  button {
-    padding: 8px 14px;
-    border: 1px solid var(--accent);
-    border-radius: 9px;
-    background: var(--accent);
-    color: var(--bg);
-    font: inherit;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  button.secondary {
-    border-color: var(--border);
-    background: transparent;
-    color: var(--text-muted);
-  }
-
-  button.secondary.icon-button {
+  .question-button.secondary.icon-button {
     border: 0;
     background: transparent;
     color: var(--text-subtle);
   }
 
-  button.secondary.icon-button:hover,
-  button.secondary.icon-button:focus-visible {
+  .question-button.secondary.icon-button:hover,
+  .question-button.secondary.icon-button:focus-visible {
     background: transparent;
     color: var(--accent);
   }
 
-  button.secondary.icon-button:active:not(:disabled) {
+  .question-button.secondary.icon-button:active:not(:disabled) {
     background: transparent;
     color: var(--accent-hover);
     transform: scale(0.96);
   }
 
-  button:disabled { cursor: not-allowed; opacity: 0.5; }
   .question-result { color: var(--text); }
   .question-result.muted { color: var(--text-muted); }
   .question-warning { color: var(--text-muted); font-size: 0.76rem; }
