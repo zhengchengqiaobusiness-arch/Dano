@@ -4,6 +4,10 @@ services:
   app:
     image: ${DANO_IMAGE:-dano-app:local}
     restart: unless-stopped
+    cap_add:
+      - ALL
+    security_opt:
+      - seccomp=unconfined
     environment:
       DANO_HOST: 0.0.0.0
       DANO_PORT: 8080

@@ -21,6 +21,10 @@ const releaseScript = new URL(
   "../../../../../scripts/deploy-release.mjs",
   import.meta.url,
 ).pathname;
+const bashAcceptanceScript = new URL(
+  "../../../../../scripts/check-bash-acceptance.mjs",
+  import.meta.url,
+).pathname;
 const composeFile = new URL(
   "../../../../../docker-compose.yml",
   import.meta.url,
@@ -182,8 +186,11 @@ describe("deploy compose wrapper", () => {
     expect(compose).toContain("name: dano");
     expect(compose).not.toContain("build:");
     expect(compose).not.toContain("./runtime-data");
-    expect(compose).not.toContain("cap_add:");
-    expect(compose).not.toContain("seccomp=unconfined");
+    expect(compose).toContain("cap_add:");
+    expect(compose).toContain("- ALL");
+    expect(compose).toContain("security_opt:");
+    expect(compose).toContain("- seccomp=unconfined");
+    expect(compose).not.toContain("privileged: true");
     expect(compose).toContain(
       "DANO_RUNTIME_DIR: /opt/dano/runtime-data",
     );
@@ -232,13 +239,61 @@ describe("deploy compose wrapper", () => {
     expect(dockerfileText).not.toContain("prod_heimdall_dir=");
     expect(dockerfileText).toContain("mkdir -p /opt/dano/runtime-data");
     expect(dockerfileText).toContain("chown -R node:node /opt/dano /home/node");
-    expect(dockerfileText).toContain("chmod 0755 /usr/bin/bwrap");
-    expect(dockerfileText).not.toContain("chmod u+s /usr/bin/bwrap");
+    expect(dockerfileText).toContain("chmod 4755 /usr/bin/bwrap");
     expect(dockerfileText).not.toContain("/tmp/dano");
     expect(dockerfileText).toContain("USER node");
     expect(dockerfileText.indexOf("USER node")).toBeGreaterThan(
       dockerfileText.indexOf("apt-get install"),
     );
+  });
+
+  it("checks real bash acceptance from session jsonl without reading secrets", () => {
+    const runtimeDir = mkdtempSync(join(tmpdir(), "dano-bash-acceptance-"));
+    tempDirs.push(runtimeDir);
+    const sessionDir = join(runtimeDir, "workspaces/ws_test/.dano/sessions");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "session.jsonl"),
+      [
+        JSON.stringify({ type: "toolCall", name: "bash" }),
+        JSON.stringify({
+          role: "toolResult",
+          toolName: "bash",
+          isError: false,
+          content: [{ type: "text", text: "DANO_BASH_OK" }],
+        }),
+        "",
+      ].join("\n"),
+    );
+
+    expect(
+      execFileSync(process.execPath, [bashAcceptanceScript, runtimeDir], {
+        encoding: "utf8",
+      }),
+    ).toContain("bwrap errors: no");
+  });
+
+  it("fails bash acceptance when Bubblewrap errors appear", () => {
+    const runtimeDir = mkdtempSync(join(tmpdir(), "dano-bash-acceptance-"));
+    tempDirs.push(runtimeDir);
+    mkdirSync(runtimeDir, { recursive: true });
+    writeFileSync(
+      join(runtimeDir, "session.jsonl"),
+      [
+        JSON.stringify({ type: "toolCall", name: "bash" }),
+        JSON.stringify({
+          role: "toolResult",
+          toolName: "bash",
+          isError: true,
+          content: "bwrap must be installed setuid",
+        }),
+        "",
+      ].join("\n"),
+    );
+
+    expect(() =>
+      execFileSync(process.execPath, [bashAcceptanceScript, runtimeDir]),
+    ).toThrow();
   });
 
   it("initializes runtime defaults in the global agent config directory", () => {

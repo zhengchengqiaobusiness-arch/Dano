@@ -31,16 +31,20 @@ runtime file is missing. It does not overwrite user-modified runtime files.
 It does not copy defaults into a Runtime Workspace `.pi` directory.
 
 The app container runs as the non-root `node` user (`1000:1000`) with
-`HOME=/home/node`. The image keeps `/usr/bin/bwrap` non-setuid (`0755`) and
-sets `HEIMDALL_BWRAP_BIND_KERNEL_FS=1` so Heimdall binds the container's
-existing `/dev` and `/proc` instead of asking Bubblewrap to mount nested kernel
-filesystems. It also sets `HEIMDALL_BWRAP_BIND_ROOT=/opt/dano` because non-root
-Bubblewrap cannot remount the Podman bind-mounted `/opt/dano/runtime-data`
-subtree directly, while binding the container-owned parent keeps Runtime
-Workspace paths usable. Rootless Podman fails setuid Bubblewrap from the
-non-root app user with `bwrap: capset failed: Operation not permitted`, and
-adding `SYS_ADMIN` capabilities makes non-setuid Bubblewrap reject the process
-capabilities.
+`HOME=/home/node`. The image installs `/usr/bin/bwrap` setuid (`4755`) because
+the verified production Docker host rejects non-setuid Bubblewrap with `bwrap
+must be installed setuid`, even when container capabilities are added. Compose
+adds `cap_add: ALL` and `security_opt: seccomp=unconfined`; this is broader than
+the default container profile, but narrower than `privileged: true`, and is the
+verified working combination for model-triggered Heimdall `bash`. The app
+process still runs as `node`, not root.
+
+The image also sets `HEIMDALL_BWRAP_BIND_KERNEL_FS=1` so Heimdall binds the
+container's existing `/dev` and `/proc` instead of asking Bubblewrap to mount
+nested kernel filesystems. It sets `HEIMDALL_BWRAP_BIND_ROOT=/opt/dano` because
+non-root Bubblewrap cannot remount the bind-mounted
+`/opt/dano/runtime-data` subtree directly, while binding the container-owned
+parent keeps Runtime Workspace paths usable.
 
 ## Local Compose Run
 
@@ -74,11 +78,25 @@ minimum acceptance sequence against the Podman Compose deployment:
 2. Run `smoke:deploy` against nginx.
 3. In the browser, send a plain text chat and confirm the model replies.
 4. In the browser, upload an image and confirm the model can read it.
-5. In the browser, ask the model to run `bash ls` and confirm the transcript
-   shows a successful bash tool call.
-6. Confirm the app container still runs as `node`, Heimdall is the expected
+5. In the browser, ask the model to run exactly this safe command and not read
+   files, environment variables, runtime data, or secrets:
+
+   ```text
+   Use the bash tool to run: printf DANO_BASH_OK
+   ```
+
+6. Run the bash acceptance checker against the mounted runtime directory:
+
+   ```bash
+   DANO_RUNTIME_DIR=/path/to/runtime-data pnpm run deploy:check-bash
+   ```
+
+   It reports whether a `bash` tool call occurred, whether a successful
+   `DANO_BASH_OK` tool result was recorded, and whether any `bwrap` error text
+   appeared in session JSONL.
+7. Confirm the app container still runs as `node`, Heimdall is the expected
    package version, and `bwrap` can enter the Runtime Workspace.
-7. Stop the Compose stack and remove temporary Dano test images/layers.
+8. Stop the Compose stack and remove temporary Dano test images/layers.
 
 ### Local Podman Notes
 
