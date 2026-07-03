@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { CalendarDate, getLocalTimeZone, type DateValue } from "@internationalized/date";
   import { Calendar } from "bits-ui";
   import ChevronDown from "lucide-svelte/icons/chevron-down";
@@ -25,11 +26,16 @@
   } = $props();
 
   const includesTime = $derived(isAskUserQuestionDateTimeFormat(dateFormat));
+  const POPOVER_GAP_PX = 8;
+  const ESTIMATED_POPOVER_HEIGHT_PX = 314;
   let open = $state(false);
+  let popoverPlacement = $state<"bottom" | "top">("bottom");
   let dateValue = $state<DateValue | undefined>();
   let timeValue = $state("00:00");
   let initialValueSynced = $state(false);
   let lastPropValue = $state<string | undefined>(undefined);
+  let controlRowEl: HTMLDivElement | null = $state(null);
+  let popoverEl: HTMLDivElement | null = $state(null);
   const displayValue = $derived(formattedValue(dateValue, timeValue));
 
   $effect(() => {
@@ -84,76 +90,108 @@
     timeValue = "00:00";
     onValueChange(undefined);
   }
+
+  function setOpen(nextOpen: boolean) {
+    if (nextOpen) updatePopoverPlacement(ESTIMATED_POPOVER_HEIGHT_PX);
+    open = nextOpen;
+    if (nextOpen) void updatePopoverPlacement();
+  }
+
+  async function updatePopoverPlacement(estimatedHeight?: number) {
+    if (!controlRowEl) return;
+    const rowRect = controlRowEl.getBoundingClientRect();
+    let popoverHeight = estimatedHeight;
+    if (popoverHeight === undefined) {
+      await tick();
+      popoverHeight = popoverEl?.getBoundingClientRect().height ?? ESTIMATED_POPOVER_HEIGHT_PX;
+    }
+    const spaceBelow = window.innerHeight - rowRect.bottom - POPOVER_GAP_PX;
+    const spaceAbove = rowRect.top - POPOVER_GAP_PX;
+    popoverPlacement = spaceBelow < popoverHeight && spaceAbove > spaceBelow
+      ? "top"
+      : "bottom";
+  }
 </script>
 
-<div class="question-date-field">
-  <button
-    id={`${id}-trigger`}
-    type="button"
-    class="question-input question-date-trigger"
-    disabled={disabled}
-    aria-expanded={open}
-    onclick={() => {
-      open = !open;
-    }}
-  >
-    <span>{displayValue ?? placeholder}</span>
-    <ChevronDown size={16} aria-hidden="true" />
-  </button>
+<svelte:window onresize={() => {
+  if (open) void updatePopoverPlacement();
+}} />
 
-  {#if open}
-    <div class="question-date-popover">
-      <Calendar.Root
-        type="single"
-        bind:value={dateValue}
-        onValueChange={handleDateChange}
-        fixedWeeks
-        {disabled}
-        class="question-calendar"
+<div class="question-date-field">
+  <div class="question-date-control-row" class:datetime={includesTime} bind:this={controlRowEl}>
+    <button
+      id={`${id}-trigger`}
+      type="button"
+      class="question-input question-date-trigger"
+      disabled={disabled}
+      aria-expanded={open}
+      onclick={() => {
+        setOpen(!open);
+      }}
+    >
+      <span>{displayValue ?? placeholder}</span>
+      <ChevronDown size={16} aria-hidden="true" />
+    </button>
+
+    {#if includesTime}
+      <input
+        class="question-input question-time-input"
+        type="time"
+        step="60"
+        value={timeValue}
+        disabled={disabled || !dateValue}
+        oninput={handleTimeInput}
+      />
+    {/if}
+
+    {#if open}
+      <div
+        class="question-date-popover"
+        class:above={popoverPlacement === "top"}
+        bind:this={popoverEl}
       >
-        {#snippet children({ months, weekdays })}
-          <Calendar.Header class="question-calendar-header">
-            <Calendar.PrevButton class="question-button secondary question-calendar-nav" aria-label="Previous month">‹</Calendar.PrevButton>
-            <Calendar.Heading class="question-calendar-heading" />
-            <Calendar.NextButton class="question-button secondary question-calendar-nav" aria-label="Next month">›</Calendar.NextButton>
-          </Calendar.Header>
-          {#each months as month}
-            <Calendar.Grid class="question-calendar-grid">
-              <Calendar.GridHead>
-                <Calendar.GridRow>
-                  {#each weekdays as weekday}
-                    <Calendar.HeadCell class="question-calendar-weekday">{weekday}</Calendar.HeadCell>
-                  {/each}
-                </Calendar.GridRow>
-              </Calendar.GridHead>
-              <Calendar.GridBody>
-                {#each month.weeks as week}
+        <Calendar.Root
+          type="single"
+          bind:value={dateValue}
+          onValueChange={handleDateChange}
+          fixedWeeks
+          preventDeselect
+          {disabled}
+          class="question-calendar"
+        >
+          {#snippet children({ months, weekdays })}
+            <Calendar.Header class="question-calendar-header">
+              <Calendar.PrevButton class="question-button secondary question-calendar-nav" aria-label="Previous month">‹</Calendar.PrevButton>
+              <Calendar.Heading class="question-calendar-heading" />
+              <Calendar.NextButton class="question-button secondary question-calendar-nav" aria-label="Next month">›</Calendar.NextButton>
+            </Calendar.Header>
+            {#each months as month}
+              <Calendar.Grid class="question-calendar-grid">
+                <Calendar.GridHead>
                   <Calendar.GridRow>
-                    {#each week as date}
-                      <Calendar.Cell {date} month={month.value} class="question-calendar-cell">
-                        <Calendar.Day class="question-calendar-day" />
-                      </Calendar.Cell>
+                    {#each weekdays as weekday}
+                      <Calendar.HeadCell class="question-calendar-weekday">{weekday}</Calendar.HeadCell>
                     {/each}
                   </Calendar.GridRow>
-                {/each}
-              </Calendar.GridBody>
-            </Calendar.Grid>
-          {/each}
-        {/snippet}
-      </Calendar.Root>
-    </div>
-  {/if}
-
-  {#if includesTime}
-    <input
-      class="question-input question-time-input"
-      type="time"
-      step="60"
-      value={timeValue}
-      disabled={disabled || !dateValue}
-      oninput={handleTimeInput}
-    />
-  {/if}
+                </Calendar.GridHead>
+                <Calendar.GridBody>
+                  {#each month.weeks as week}
+                    <Calendar.GridRow>
+                      {#each week as date}
+                        <Calendar.Cell {date} month={month.value} class="question-calendar-cell">
+                          <Calendar.Day class="question-calendar-day" />
+                        </Calendar.Cell>
+                      {/each}
+                    </Calendar.GridRow>
+                  {/each}
+                </Calendar.GridBody>
+              </Calendar.Grid>
+            {/each}
+          {/snippet}
+        </Calendar.Root>
+      </div>
+    {/if}
+  </div>
 
   {#if !required && dateValue}
     <button
@@ -174,6 +212,18 @@
     gap: 8px;
   }
 
+  .question-date-control-row {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .question-date-control-row.datetime {
+    grid-template-columns: minmax(0, 1fr) minmax(140px, 180px);
+    align-items: start;
+  }
+
   :global(.question-date-trigger) {
     display: flex;
     align-items: center;
@@ -184,13 +234,22 @@
   }
 
   :global(.question-date-popover) {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
     z-index: 20;
+    width: max-content;
     padding: 10px;
     border: 1px solid var(--border);
     border-radius: 10px;
     background: var(--panel);
     color: var(--text);
     box-shadow: var(--shadow-raised);
+  }
+
+  :global(.question-date-popover.above) {
+    top: auto;
+    bottom: calc(100% + 8px);
   }
 
   :global(.question-calendar) {
@@ -287,5 +346,19 @@
 
   .question-date-clear {
     width: fit-content;
+  }
+
+  @media (max-width: 640px) {
+    .question-date-control-row.datetime {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    :global(.question-date-popover) {
+      width: min(100%, 320px);
+    }
+
+    .question-time-input {
+      max-width: none;
+    }
   }
 </style>

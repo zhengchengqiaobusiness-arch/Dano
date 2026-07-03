@@ -762,7 +762,6 @@
     font-size: 0.68rem;
     font-weight: 700;
     letter-spacing: 0.08em;
-    text-transform: uppercase;
   }
 
   .question-text {
