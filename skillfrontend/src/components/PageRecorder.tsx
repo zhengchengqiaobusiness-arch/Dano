@@ -17,15 +17,50 @@ interface RecCand { idx: number; method: string; path: string }
 interface RecSelect { path: string; source_url: string; value_key: string; label_key: string; label: string; count: number; multi?: boolean; dom_options?: boolean }
 interface RecIdentity { path: string; source: string }
 // Step B/C/D: FlowSpec 编辑模型(前端只消费,通过 flow_update 同步后端)
-interface FlowParam { path: string; key: string; value: string; type: string; required: boolean; name_source?: string }
-interface FlowStepData { step_id: string; name: string; method: string; url: string; path: string; risk_level: string; params: FlowParam[] }
+interface FlowParam {
+  path: string; key: string; label?: string; value: string; type: string; required: boolean; name_source?: string;
+  category?: string; source_kind?: string; reason?: string; exposed_to_user?: boolean; need_human_confirm?: boolean; editable?: boolean;
+}
+interface FlowStepData {
+  step_id: string; name: string; method: string; url: string; path: string; risk_level: string; params: FlowParam[];
+  source_meta?: { role?: string; [key: string]: any }; semantic_role?: string;
+}
 interface FlowLinkData { link_id: string; source_step_id: string; source_path: string; target_step_id: string; target_path: string; confirmed?: boolean; confidence?: number }
-interface FlowSpecData { flow_id: string; title: string; steps: FlowStepData[]; links: FlowLinkData[]; risk_level: string; business_description?: string }
+interface RequestRoleData {
+  index?: number; method: string; path: string; role: string; keep: boolean; reason: string; confidence?: number;
+}
+interface ReviewItemData {
+  id: string; type: string; severity: string; title: string; reason: string; current_guess?: string; suggested_action?: string;
+  resolved?: boolean; confidence?: number; target?: { kind?: string; step_id?: string; path?: string; link_id?: string; [key: string]: any };
+}
+interface FlowSpecData {
+  flow_id: string; title: string; steps: FlowStepData[]; links: FlowLinkData[]; risk_level: string;
+  business_description?: string; review_items?: ReviewItemData[];
+  meta?: {
+    request_roles?: RequestRoleData[];
+    versions?: Array<{ version: number; action: string; reason?: string; created_at?: string; summary?: any }>;
+    current_version?: number;
+  };
+}
+interface FlowCheckReport {
+  passed?: boolean;
+  errors?: string[];
+  warnings?: string[];
+  dry_run?: {
+    ok?: boolean; mode?: string; stage?: string; request_count?: number;
+    missing_params?: string[]; self_check?: string[]; build_errors?: string[];
+    fact_check?: { configured?: boolean; passed?: boolean; reason?: string; missing?: string[] };
+  };
+  review_items?: ReviewItemData[];
+  review_summary?: { total?: number; high?: number; medium?: number; low?: number };
+  api_preview?: { workflow_steps?: number; method?: string; path?: string; params?: string[]; required?: string[] };
+}
 interface RecResult {
   ok?: boolean; action?: string; risk_level?: string; mode?: string; reason?: string;
   status?: string; warnings?: string[]; review_notes?: string[]; clarifications?: string[];
   verification_plan?: { mode?: string; controllability?: string; reason?: string };
   api?: { method?: string; path?: string; params?: string[] };
+  check_report?: FlowCheckReport;
 }
 
 // 录入产出状态机(后端 IngestionStatus):决定结果徽标的颜色与文案
@@ -41,6 +76,27 @@ const KEYMAP: Record<string, string> = {
   Enter: "Enter", Backspace: "Backspace", Tab: "Tab", Delete: "Delete",
   ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight", ArrowUp: "ArrowUp", ArrowDown: "ArrowDown",
 };
+
+const CATEGORY_OPTIONS = [
+  { label: "用户参数", value: "user_param" },
+  { label: "运行期变量", value: "runtime_var" },
+  { label: "系统常量", value: "system_const" },
+];
+const SOURCE_KIND_OPTIONS = [
+  { label: "用户输入", value: "user_input" },
+  { label: "上游响应", value: "previous_response" },
+  { label: "当前用户", value: "current_user" },
+  { label: "系统时间", value: "system_time" },
+  { label: "页面上下文", value: "page_context" },
+  { label: "固定值", value: "constant" },
+  { label: "下拉/枚举", value: "form_option" },
+  { label: "未知", value: "unknown" },
+];
+const PARAM_TYPE_OPTIONS = ["string", "number", "boolean", "datetime", "date", "array", "object", "list-enum"]
+  .map((x) => ({ label: x, value: x }));
+const STEP_ROLE_OPTIONS = [
+  "submit_anchor", "business_write", "business_get", "read_context", "read_option", "auth", "noise",
+].map((x) => ({ label: x, value: x }));
 
 export default function PageRecorder({ tenant, subsystem, baseUrl, storageState }: {
   tenant: string; subsystem: string; baseUrl: string; storageState: string;
@@ -70,7 +126,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   // Step B/C/D: 多接口编排面板
   const [flowSpec, setFlowSpec] = useState<FlowSpecData | null>(null);
   const [flowSpecCollapsed, setFlowSpecCollapsed] = useState(true);
+  const [checkReport, setCheckReport] = useState<FlowCheckReport | null>(null);
   const [newLink, setNewLink] = useState({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
+  const [newParam, setNewParam] = useState({ step_id: "", path: "", key: "", type: "string", category: "user_param" });
+  const [jsonDraft, setJsonDraft] = useState("");
+  const [jsonErr, setJsonErr] = useState("");
 
   useEffect(() => () => { wsRef.current?.close(); }, []);   // 卸载时断开
 
@@ -82,7 +142,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function start() {
     if (!tenant) { message.error("请先到「创建 / 进入租户」"); return; }
     if (!startUrl.trim()) { message.error("请填页面地址 start_url"); return; }
-    setErr(""); setResult(null); setSteps([]); setReqs([]); setFrame(""); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({});
+    setErr(""); setResult(null); setSteps([]); setReqs([]); setFrame(""); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({}); setFlowSpec(null); setCheckReport(null); setJsonDraft(""); setJsonErr("");
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/onboarding/page/record`);
     wsRef.current = ws;
@@ -132,31 +192,38 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
       else if (m.type === "result") {   // 留在录制现场:不关浏览器、不重来
         setResult(m.report); setPhase("recording");
+        if (m.report?.check_report) setCheckReport(m.report.check_report);
         if (m.report?.ok) { setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({}); }   // 发布成功 → 收起字段表
       }
       // Step A: 后端随 request_fields 下发 FlowSpec
       else if (m.type === "flow_spec") {
         if (m.full_spec) setFlowSpec(m.full_spec);
         else if (m.flow_spec) setFlowSpec(m.flow_spec);
+        if (m.check_report) setCheckReport(m.check_report);
         setFlowSpecCollapsed(false);
       }
       // Step B/C: flow_update 编辑后返回新 spec
       else if (m.type === "flow_spec_updated") {
         if (m.full_spec) setFlowSpec(m.full_spec);
         else if (m.flow_spec) setFlowSpec(m.flow_spec);
+        if (m.check_report) setCheckReport(m.check_report);
         message.success("流程已更新");
       }
       // Step D2: LLM 命名返回
       else if (m.type === "step_names") {
         if (m.full_spec) setFlowSpec(m.full_spec);
+        if (m.check_report) setCheckReport(m.check_report);
         const count = m.names ? Object.keys(m.names).length : (m.flow_spec?.steps?.length || 0);
         message.success(count > 0 ? `已为 ${count} 个步骤命名` : "命名完成");
       }
       // Step D3: LLM 业务说明返回
       else if (m.type === "business_description") {
-        if (m.description && flowSpec) {
+        if (m.full_spec) {
+          setFlowSpec(m.full_spec);
+        } else if (m.description && flowSpec) {
           setFlowSpec({ ...flowSpec, business_description: m.description });
         }
+        if (m.check_report) setCheckReport(m.check_report);
         message.success(m.description ? "业务说明已生成" : "LLM 暂不可用,未生成说明");
       }
       // Bug: step_id 漂移时自动同步
@@ -245,17 +312,90 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function publishRequest() {
     if (!action.trim() || badAction(action.trim())) return;
     const { param_map, selList, idList, step_idxs } = _payload();
-    if (!Object.keys(param_map).length) { message.error("至少勾选一个字段作为参数"); return; }
+    const useFlowSpec = !!flowSpec;
+    if (!useFlowSpec && !Object.keys(param_map).length) { message.error("至少勾选一个字段作为参数"); return; }
     setResult(null); setPhase("publishing");
     // 一键发布:后端自动提炼业务 Goal + self_check + 审核 + 自动修复;必填也由后端**自动判定**
     //(默认全部必填,表单抓到 * 区分时据 * 降级可选),无需手动勾选/确认
     send({ type: "publish_request", action: action.trim(), title: title.trim(),
-           param_map, selects: selList, identity: idList, step_idxs });
+           param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: useFlowSpec });
   }
   function stopAll() {
     send({ type: "stop" }); wsRef.current?.close();
-    setPhase("idle"); setResult(null); setSteps([]); setFrame(""); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({});
+    setPhase("idle"); setResult(null); setSteps([]); setFrame(""); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({}); setFlowSpec(null); setCheckReport(null); setJsonDraft(""); setJsonErr("");
   }
+  function updateStepField(stepId: string, field: string, value: any) {
+    send({ type: "flow_update", edits: [{ op: "update", step_id: stepId, field, value }] });
+  }
+  function updateParamField(stepId: string, paramPath: string, field: string, value: any) {
+    send({ type: "flow_update", edits: [{ op: "update", step_id: stepId, param_path: paramPath, field, value }] });
+  }
+  function updateParamCategory(stepId: string, p: FlowParam, category: string) {
+    const sourceKind = category === "user_param" ? "user_input" : category === "system_const" ? "constant" : (p.source_kind || "unknown");
+    send({ type: "flow_update", edits: [
+      { op: "update", step_id: stepId, param_path: p.path, field: "category", value: category },
+      { op: "update", step_id: stepId, param_path: p.path, field: "source_kind", value: sourceKind },
+      { op: "update", step_id: stepId, param_path: p.path, field: "source", value: { kind: sourceKind, path: p.path, manual: true } },
+      { op: "update", step_id: stepId, param_path: p.path, field: "exposed_to_user", value: category === "user_param" },
+      { op: "update", step_id: stepId, param_path: p.path, field: "need_human_confirm", value: false },
+    ] });
+  }
+  function updateParamSourceKind(stepId: string, p: FlowParam, sourceKind: string) {
+    send({ type: "flow_update", edits: [
+      { op: "update", step_id: stepId, param_path: p.path, field: "source_kind", value: sourceKind },
+      { op: "update", step_id: stepId, param_path: p.path, field: "source", value: sourceKind === "unknown" ? {} : { kind: sourceKind, path: p.path, manual: true } },
+      { op: "update", step_id: stepId, param_path: p.path, field: "need_human_confirm", value: sourceKind === "unknown" },
+    ] });
+  }
+  function resolveReview(reviewId: string, resolved = true) {
+    send({ type: "flow_update", edits: [{ op: "resolve_review", review_id: reviewId, resolved }] });
+  }
+  function addParam() {
+    const stepId = newParam.step_id || flowSpec?.steps?.[0]?.step_id || "";
+    const path = newParam.path.trim();
+    const key = newParam.key.trim();
+    if (!stepId || !path || !key) {
+      message.warning("请选择步骤并填写字段路径和参数名");
+      return;
+    }
+    const sourceKind = newParam.category === "user_param" ? "user_input" : newParam.category === "system_const" ? "constant" : "unknown";
+    send({ type: "flow_update", edits: [{
+      op: "add",
+      step_id: stepId,
+      param: {
+        path, key,
+        label: key,
+        value: "",
+        type: newParam.type,
+        required: false,
+        category: newParam.category,
+        source_kind: sourceKind,
+        source: sourceKind === "unknown" ? {} : { kind: sourceKind, path, manual: true },
+        exposed_to_user: newParam.category === "user_param",
+        editable: true,
+        reason: "人工新增字段",
+        need_human_confirm: false,
+      },
+    }] });
+    setNewParam({ step_id: stepId, path: "", key: "", type: "string", category: "user_param" });
+  }
+  function applyJsonDraft() {
+    try {
+      const parsed = JSON.parse(jsonDraft);
+      setJsonErr("");
+      send({ type: "flow_replace", flow_spec: parsed });
+    } catch (e: any) {
+      setJsonErr(e?.message || "JSON 解析失败");
+    }
+  }
+  function loadJsonDraft() {
+    if (!flowSpec) return;
+    setJsonDraft(JSON.stringify(flowSpec, null, 2));
+    setJsonErr("");
+  }
+  const allReviewItems = (checkReport?.review_items?.length ? checkReport.review_items : flowSpec?.review_items) || [];
+  const reviewItems = allReviewItems.filter((i) => !i.resolved);
+  const reviewColor = (severity?: string) => severity === "high" ? "error" : severity === "medium" ? "warning" : "default";
 
   return (
     <Card size="small" title="网页录制 → 抓提交请求 → 选字段建 Skill">
@@ -468,6 +608,170 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   <Alert type="info" showIcon style={{ marginBottom: 12, fontSize: 12 }}
                     message="业务说明" description={flowSpec.business_description} />
                 )}
+                <Card size="small" style={{ marginBottom: 12 }} title="流程标题与说明">
+                  <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                    <Input
+                      size="small"
+                      placeholder="流程标题"
+                      defaultValue={flowSpec.title}
+                      onBlur={(e) => {
+                        const value = e.currentTarget.value.trim();
+                        if (value && value !== flowSpec.title) {
+                          send({ type: "flow_update", edits: [{ op: "update_flow", field: "title", value }] });
+                        }
+                      }}
+                      onPressEnter={(e) => e.currentTarget.blur()}
+                    />
+                    <Input.TextArea
+                      rows={5}
+                      placeholder="业务说明，可先点击生成业务说明后再人工修正"
+                      value={flowSpec.business_description || ""}
+                      onChange={(e) => setFlowSpec({ ...flowSpec, business_description: e.target.value })}
+                      onBlur={(e) => send({ type: "flow_update", edits: [{
+                        op: "update_flow", field: "business_description", value: e.currentTarget.value,
+                      }] })}
+                    />
+                  </Space>
+                </Card>
+                {checkReport && (
+                  <Alert
+                    type={checkReport.passed ? "success" : "warning"}
+                    showIcon
+                    style={{ marginBottom: 12, fontSize: 12 }}
+                    message={checkReport.passed ? "FlowSpec 发布校验通过" : "FlowSpec 发布校验需要处理"}
+                    description={
+                      <Space direction="vertical" size={2}>
+                        {(checkReport.api_preview?.params || []).length > 0 && (
+                          <Typography.Text style={{ fontSize: 12 }}>
+                            Skill 参数: {(checkReport.api_preview?.params || []).join(", ")}
+                          </Typography.Text>
+                        )}
+                        {checkReport.dry_run && (
+                          <Typography.Text
+                            type={checkReport.dry_run.ok ? "success" : "warning"}
+                            style={{ fontSize: 12 }}
+                          >
+                            Dry-run: {checkReport.dry_run.ok ? "请求可构造" : "需要处理"}
+                            {typeof checkReport.dry_run.request_count === "number"
+                              ? ` · ${checkReport.dry_run.request_count} 步` : ""}
+                            {checkReport.dry_run.fact_check?.configured
+                              ? ` · fact_check ${checkReport.dry_run.fact_check.passed ? "完整" : "不完整"}`
+                              : " · 未配置 fact_check"}
+                          </Typography.Text>
+                        )}
+                        {(checkReport.dry_run?.missing_params || []).map((x, i) =>
+                          <Typography.Text key={"dm" + i} type="warning" style={{ fontSize: 12 }}>Dry-run 缺少参数: {x}</Typography.Text>)}
+                        {(checkReport.dry_run?.self_check || []).map((x, i) =>
+                          <Typography.Text key={"ds" + i} type="danger" style={{ fontSize: 12 }}>Self-check: {x}</Typography.Text>)}
+                        {(checkReport.dry_run?.build_errors || []).map((x, i) =>
+                          <Typography.Text key={"db" + i} type="danger" style={{ fontSize: 12 }}>Build: {x}</Typography.Text>)}
+                        {checkReport.dry_run?.fact_check?.reason && (
+                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                            Fact-check: {checkReport.dry_run.fact_check.reason}
+                          </Typography.Text>
+                        )}
+                        {(checkReport.errors || []).map((x, i) =>
+                          <Typography.Text key={"fe" + i} type="danger" style={{ fontSize: 12 }}>{x}</Typography.Text>)}
+                        {(checkReport.warnings || []).map((x, i) =>
+                          <Typography.Text key={"fw" + i} type="warning" style={{ fontSize: 12 }}>{x}</Typography.Text>)}
+                      </Space>
+                    }
+                  />
+                )}
+                {reviewItems.length > 0 && (
+                  <Card size="small" style={{ marginBottom: 12 }} title={
+                    <Space>
+                      <Typography.Text strong>待确认项</Typography.Text>
+                      <Tag color="error">{reviewItems.filter((i) => i.severity === "high").length} 高</Tag>
+                      <Tag color="warning">{reviewItems.filter((i) => i.severity === "medium").length} 中</Tag>
+                      <Tag>{reviewItems.filter((i) => i.severity === "low").length} 低</Tag>
+                    </Space>
+                  }>
+                    <List
+                      size="small"
+                      dataSource={reviewItems.slice(0, 50)}
+                      renderItem={(item) => (
+                        <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
+                          <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                            <Space size={6} wrap>
+                              <Tag color={reviewColor(item.severity)}>{item.severity || "medium"}</Tag>
+                              <Tag>{item.type}</Tag>
+                              <Typography.Text strong style={{ fontSize: 12 }}>{item.title}</Typography.Text>
+                              {item.current_guess && <Tag>{item.current_guess}</Tag>}
+                              {typeof item.confidence === "number" && item.confidence > 0 && (
+                                <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                                  置信度 {Math.round(item.confidence * 100)}%
+                                </Typography.Text>
+                              )}
+                            </Space>
+                            <Space size={6} wrap>
+                              {(item.target?.path || item.target?.link_id || item.target?.step_id) && (
+                                <Typography.Text code style={{ fontSize: 11 }}>
+                                  {item.target?.path || item.target?.link_id || item.target?.step_id}
+                                </Typography.Text>
+                              )}
+                              <Typography.Text type="secondary" style={{ fontSize: 11 }}>{item.reason}</Typography.Text>
+                              <Button size="small" onClick={() => resolveReview(item.id, true)}>确认/忽略</Button>
+                            </Space>
+                          </Space>
+                        </List.Item>
+                      )}
+                    />
+                  </Card>
+                )}
+                {(flowSpec.meta?.versions || []).length > 0 && (
+                  <Card size="small" style={{ marginBottom: 12 }} title={
+                    <Space>
+                      <Typography.Text strong>版本历史</Typography.Text>
+                      <Tag>v{flowSpec.meta?.current_version || flowSpec.meta?.versions?.length}</Tag>
+                    </Space>
+                  }>
+                    <List
+                      size="small"
+                      dataSource={(flowSpec.meta?.versions || []).slice().reverse().slice(0, 8)}
+                      renderItem={(v) => (
+                        <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
+                          <Space size={6} wrap>
+                            <Tag color={v.version === flowSpec.meta?.current_version ? "blue" : "default"}>v{v.version}</Tag>
+                            <Tag>{v.action}</Tag>
+                            {v.summary?.steps !== undefined && <Typography.Text type="secondary" style={{ fontSize: 11 }}>{v.summary.steps} 步</Typography.Text>}
+                            {v.summary?.links !== undefined && <Typography.Text type="secondary" style={{ fontSize: 11 }}>{v.summary.links} 链接</Typography.Text>}
+                            {v.reason && <Typography.Text type="secondary" style={{ fontSize: 11 }}>{v.reason}</Typography.Text>}
+                          </Space>
+                        </List.Item>
+                      )}
+                    />
+                  </Card>
+                )}
+                {(flowSpec.meta?.request_roles || []).length > 0 && (
+                  <Card size="small" style={{ marginBottom: 12 }} title={
+                    <Space>
+                      <Typography.Text strong>接口筛选</Typography.Text>
+                      <Tag>{flowSpec.meta?.request_roles?.length || 0} 条</Tag>
+                    </Space>
+                  }>
+                    <List
+                      size="small"
+                      dataSource={(flowSpec.meta?.request_roles || []).slice(0, 40)}
+                      renderItem={(r) => (
+                        <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
+                          <Space size={6} wrap>
+                            <Tag color={r.keep ? "success" : "default"}>{r.keep ? "保留" : "过滤"}</Tag>
+                            <Tag>{r.role}</Tag>
+                            <Tag>{r.method}</Tag>
+                            <Typography.Text code style={{ fontSize: 11 }}>{r.path}</Typography.Text>
+                            {typeof r.confidence === "number" && (
+                              <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                                置信度 {Math.round(r.confidence * 100)}%
+                              </Typography.Text>
+                            )}
+                            <Typography.Text type="secondary" style={{ fontSize: 11 }}>{r.reason}</Typography.Text>
+                          </Space>
+                        </List.Item>
+                      )}
+                    />
+                  </Card>
+                )}
 
                 {/* 步骤列表(含重排按钮) */}
                 <Card size="small" style={{ marginBottom: 12 }} title="步骤列表">
@@ -490,21 +794,179 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                               [ids[stepIdx], ids[stepIdx + 1]] = [ids[stepIdx + 1], ids[stepIdx]];
                               send({ type: "flow_update", edits: [{ op: "reorder_steps", step_ids: ids }] });
                             }}>↓</Button>,
+                          <Button key="remove-step" size="small" danger title="删除步骤"
+                            onClick={() => send({ type: "flow_update", edits: [{ op: "remove_step", step_id: step.step_id }] })}
+                          >删除</Button>,
                         ]}
                       >
-                        <Space size={8} wrap>
-                          <Tag color="purple">第 {stepIdx + 1} 步</Tag>
-                          <Tag>{step.method}</Tag>
-                          <Typography.Text code style={{ fontSize: 11 }}>{step.path}</Typography.Text>
-                          <Tag>{step.risk_level}</Tag>
-                          {step.name && <Typography.Text strong style={{ fontSize: 11 }}>· {step.name}</Typography.Text>}
-                          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                            {step.params?.length || 0} 个参数
-                          </Typography.Text>
+                        <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                          <Space size={8} wrap>
+                            <Tag color="purple">第 {stepIdx + 1} 步</Tag>
+                            <Tag>{step.method}</Tag>
+                            <Typography.Text code style={{ fontSize: 11 }}>{step.path}</Typography.Text>
+                            <Tag>{step.risk_level}</Tag>
+                            {step.name && <Typography.Text strong style={{ fontSize: 11 }}>· {step.name}</Typography.Text>}
+                            <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                              {step.params?.length || 0} 个参数
+                            </Typography.Text>
+                          </Space>
+                          <Space size={6} wrap>
+                            <Input
+                              size="small"
+                              placeholder="步骤名"
+                              defaultValue={step.name}
+                              style={{ width: 180 }}
+                              onBlur={(e) => {
+                                const value = e.currentTarget.value.trim();
+                                if (value !== (step.name || "")) updateStepField(step.step_id, "name", value);
+                              }}
+                              onPressEnter={(e) => e.currentTarget.blur()}
+                            />
+                            <Select
+                              size="small"
+                              placeholder="角色"
+                              value={step.source_meta?.role || step.semantic_role || undefined}
+                              style={{ width: 150 }}
+                              options={STEP_ROLE_OPTIONS}
+                              onChange={(value) => updateStepField(step.step_id, "role", value)}
+                            />
+                          </Space>
+                          {(step.params || []).length > 0 && (
+                            <List
+                              size="small"
+                              dataSource={(step.params || []).slice(0, 12)}
+                              renderItem={(p) => (
+                                <List.Item style={{ padding: "6px 0" }}>
+                                  <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                                    <Space size={6} wrap>
+                                      <Tag
+                                        color={p.category === "runtime_var" ? "gold" : p.category === "system_const" ? "default" : "blue"}
+                                        style={{ fontSize: 11 }}
+                                        title={p.reason || p.path}
+                                      >
+                                        {p.path}
+                                      </Tag>
+                                      {p.need_human_confirm && <Tag color="warning">待确认</Tag>}
+                                      <Input
+                                        size="small"
+                                        placeholder="参数名"
+                                        defaultValue={p.key}
+                                        style={{ width: 140 }}
+                                        onBlur={(e) => {
+                                          const value = e.currentTarget.value.trim();
+                                          if (value && value !== p.key) updateParamField(step.step_id, p.path, "key", value);
+                                        }}
+                                        onPressEnter={(e) => e.currentTarget.blur()}
+                                      />
+                                      <Select
+                                        size="small"
+                                        value={p.type}
+                                        style={{ width: 112 }}
+                                        options={PARAM_TYPE_OPTIONS}
+                                        onChange={(value) => updateParamField(step.step_id, p.path, "type", value)}
+                                      />
+                                      <Select
+                                        size="small"
+                                        value={p.category || "user_param"}
+                                        style={{ width: 126 }}
+                                        options={CATEGORY_OPTIONS}
+                                        onChange={(value) => updateParamCategory(step.step_id, p, value)}
+                                      />
+                                      <Select
+                                        size="small"
+                                        value={p.source_kind || "unknown"}
+                                        style={{ width: 126 }}
+                                        options={SOURCE_KIND_OPTIONS}
+                                        onChange={(value) => updateParamSourceKind(step.step_id, p, value)}
+                                      />
+                                    </Space>
+                                    <Space size={10} wrap>
+                                      <Checkbox
+                                        checked={!!p.required}
+                                        onChange={(e) => updateParamField(step.step_id, p.path, "required", e.target.checked)}
+                                      >
+                                        <Typography.Text style={{ fontSize: 11 }}>必填</Typography.Text>
+                                      </Checkbox>
+                                      <Checkbox
+                                        checked={p.exposed_to_user !== false}
+                                        onChange={(e) => updateParamField(step.step_id, p.path, "exposed_to_user", e.target.checked)}
+                                      >
+                                        <Typography.Text style={{ fontSize: 11 }}>暴露给用户</Typography.Text>
+                                      </Checkbox>
+                                      {p.need_human_confirm && (
+                                        <Button size="small" onClick={() => updateParamField(step.step_id, p.path, "need_human_confirm", false)}>
+                                          确认字段
+                                        </Button>
+                                      )}
+                                      <Button
+                                        size="small"
+                                        danger
+                                        onClick={() => send({ type: "flow_update", edits: [{
+                                          op: "remove", step_id: step.step_id, param_path: p.path,
+                                        }] })}
+                                      >
+                                        删除字段
+                                      </Button>
+                                      {p.reason && (
+                                        <Typography.Text type="secondary" style={{ fontSize: 11 }}>{p.reason}</Typography.Text>
+                                      )}
+                                    </Space>
+                                  </Space>
+                                </List.Item>
+                              )}
+                            />
+                          )}
+                          {(step.params || []).length > 12 && (
+                            <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                              还有 {(step.params || []).length - 12} 个字段
+                            </Typography.Text>
+                          )}
                         </Space>
                       </List.Item>
                     )}
                   />
+                </Card>
+
+                <Card size="small" style={{ marginBottom: 12 }} title="新增参数">
+                  <Space size={8} wrap>
+                    <Select
+                      size="small"
+                      placeholder="步骤"
+                      value={newParam.step_id || undefined}
+                      style={{ width: 220 }}
+                      options={(flowSpec.steps || []).map((s) => ({ label: `${s.method} ${s.path}`, value: s.step_id }))}
+                      onChange={(value) => setNewParam((s) => ({ ...s, step_id: value }))}
+                    />
+                    <Input
+                      size="small"
+                      placeholder="字段路径"
+                      value={newParam.path}
+                      style={{ width: 160 }}
+                      onChange={(e) => setNewParam((s) => ({ ...s, path: e.target.value }))}
+                    />
+                    <Input
+                      size="small"
+                      placeholder="参数名"
+                      value={newParam.key}
+                      style={{ width: 140 }}
+                      onChange={(e) => setNewParam((s) => ({ ...s, key: e.target.value }))}
+                    />
+                    <Select
+                      size="small"
+                      value={newParam.type}
+                      style={{ width: 112 }}
+                      options={PARAM_TYPE_OPTIONS}
+                      onChange={(value) => setNewParam((s) => ({ ...s, type: value }))}
+                    />
+                    <Select
+                      size="small"
+                      value={newParam.category}
+                      style={{ width: 126 }}
+                      options={CATEGORY_OPTIONS}
+                      onChange={(value) => setNewParam((s) => ({ ...s, category: value }))}
+                    />
+                    <Button size="small" type="primary" onClick={addParam}>添加参数</Button>
+                  </Space>
                 </Card>
 
                 {/* 步骤间链接 */}
@@ -599,6 +1061,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     </div>
                   </Card>
                 )}
+
+                <Card size="small" style={{ marginTop: 12 }} title="FlowSpec JSON">
+                  <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                    <Space size={8} wrap>
+                      <Button size="small" onClick={loadJsonDraft}>载入当前 JSON</Button>
+                      <Button size="small" type="primary" onClick={applyJsonDraft} disabled={!jsonDraft.trim()}>
+                        应用 JSON
+                      </Button>
+                      {jsonErr && <Typography.Text type="danger" style={{ fontSize: 12 }}>{jsonErr}</Typography.Text>}
+                    </Space>
+                    <Input.TextArea
+                      rows={10}
+                      value={jsonDraft}
+                      onChange={(e) => setJsonDraft(e.target.value)}
+                      placeholder="FlowSpec JSON"
+                      style={{ fontFamily: "monospace", fontSize: 11 }}
+                    />
+                  </Space>
+                </Card>
               </Collapse.Panel>
             </Collapse>
           )}

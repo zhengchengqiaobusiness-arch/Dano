@@ -240,6 +240,13 @@ class RecordSession:
         self.steps: list[dict] = []
         self.requests: list[dict] = []      # 抓到的写请求(有序,method/url/post_data/headers)→ 参数化/多步工作流
         self.reads: list[dict] = []         # 抓到的读请求(GET+JSON 列表/字典)→ Q2 选领导等 select 的候选源
+        # P0-1:全量捕获(基础事实)。先抓全再筛 → 治"GET 业务接口被早筛丢"等根因。
+        # 不管 method / 业务角色,只要页面发出,就落一行,供后续 P0-2 角色分类 + P0-3 依赖闭包使用。
+        # 字段:method/url/headers/query/post_data/response_json/status/content_type/timestamp/index。
+        self.all_requests: list[dict] = []
+        # P0-1:诊断事件(console/pageerror/requestfailed)→ 排查"接口成功但页面报错"等隐蔽故障。
+        self.diagnostics: list[dict] = []
+        self._req_counter: int = 0          # 顺序号,作为 all_requests[i]["index"] 与 diagnostics 关联锚点
         self._on_step = on_step
         self._on_request_cb = on_request    # 实时把抓到的请求推给前端(诊断可见)
         # 拦截提交:点提交时抓到业务写请求后,假装成功、不真发给服务器 → 录制不产生真实记录
@@ -276,6 +283,10 @@ class RecordSession:
         # (Playwright 一个 Page 只管一个标签页;旧实现只挂在 self.page 上,用户点开 target=_blank/window.open
         #  的新页时,新页既没装录制绑定、又没被截屏 → 表现为"新页打不开"。挂到 context 后新页天然继承。)
         await self._context.expose_binding("__danoRecord", self._on_record)
+        # P0-1:诊断事件(console/pageerror/requestfailed)挂 context,新标签页天然继承。
+        self._context.on("console", self._on_console)
+        self._context.on("pageerror", self._on_pageerror)
+        self._context.on("requestfailed", self._on_requestfailed)
         if self._intercept:
             # 拦截模式:抓到业务写请求后假装成功、不真发 → 录制不产生真实记录(登录/校验码等放行)
             await self._context.route("**/*", self._route)
@@ -323,11 +334,49 @@ class RecordSession:
         if self._on_frame is not None:
             await self._restart_screencast()
 
+    def _record_all(self, m: str, url: str, *, pd: str | None = None, query: dict | None = None,
+                    headers: dict | None = None, status: int | None = None,
+                    response_json=None, content_type: str = "") -> int:
+        """全量捕获一条网络请求(GET/POST/PUT/PATCH/DELETE 都记)。返回 index。
+
+        - 不做任何 method / 角色过滤:先抓全,后续 P0-2 角色分类 + P0-3 依赖闭包基于这份原数据工作。
+        - requestfailed / 异常响应也记,response_json=None 时仍占行,便于"接口没返回"等隐蔽故障回溯。
+        """
+        import time as _time
+        idx = self._req_counter
+        self._req_counter += 1
+        entry: dict = {
+            "index": idx,
+            "method": (m or "").upper(),
+            "url": url or "",
+            "headers": dict(headers or {}),
+            "query": dict(query or {}),
+            "post_data": pd,
+            "response_json": response_json,
+            "status": status,
+            "content_type": content_type,
+            "timestamp": int(_time.time() * 1000),
+        }
+        self.all_requests.append(entry)
+        return idx
+
+    def _record_diag(self, kind: str, payload: dict) -> None:
+        """记录一条诊断事件:console/pageerror/requestfailed。
+
+        统一结构 {type, level?, message, url?, timestamp, request_index?},供 P0-6 review_items 与人工排错使用。
+        request_index 关联到 all_requests 里同源请求(失败请求 → request_index=关联到该请求的 index)。"""
+        import time as _time
+        rec = {"type": kind, "timestamp": int(_time.time() * 1000)}
+        rec.update({k: v for k, v in (payload or {}).items() if v is not None})
+        self.diagnostics.append(rec)
+
     def _capture(self, m: str, url: str, pd: str | None, ct: str, headers: dict | None = None) -> None:
-        """登记一个写请求(含请求头,回放鉴权用)+ 实时推给前端诊断。"""
+        """登记一个写请求(含请求头,回放鉴权用)+ 实时推给前端诊断。
+        同步落 all_requests(P0-1)与原 requests 列表,确保两路事实一致(否则后续依赖闭包会缺数据)。"""
         if pd:
             self.requests.append({"method": m, "url": url, "post_data": pd,
                                   "content_type": ct, "headers": headers or {}})
+        self._record_all(m, url, pd=pd, headers=headers, content_type=ct)
         if self._on_request_cb is not None:
             is_json = "json" in (ct or "").lower() or (pd or "").lstrip().startswith(("{", "["))
             try:
@@ -339,14 +388,17 @@ class RecordSession:
     def _on_request(self, request) -> None:  # noqa: ANN001 —— playwright Request(直录模式旁观)
         try:
             m = (request.method or "").upper()
-            if m not in ("POST", "PUT", "PATCH", "DELETE"):
-                return
+            url = request.url
+            pd = request.post_data if m in ("POST", "PUT", "PATCH", "DELETE") else None
             hd = {}
             try:
                 hd = dict(request.headers or {})
             except Exception:  # noqa: BLE001
                 pass
-            self._capture(m, request.url, request.post_data, hd.get("content-type", ""), hd)
+            # GET 也落 all_requests(全量捕获)。原 requests 列表只收写请求(避免淹没筛选)。
+            self._record_all(m, url, pd=pd, headers=hd, content_type=hd.get("content-type", ""))
+            if m in ("POST", "PUT", "PATCH", "DELETE"):
+                self._capture(m, url, pd, hd.get("content-type", ""), hd)
         except Exception:  # noqa: BLE001
             pass
 
@@ -373,14 +425,16 @@ class RecordSession:
             m = (request.method or "").upper()
             url = request.url
             pd = request.post_data if m in ("POST", "PUT", "PATCH", "DELETE") else None
+            hd = {}
+            try:
+                hd = dict(request.headers or {})
+            except Exception:  # noqa: BLE001
+                pass
+            # P0-1:GET 也落 all_requests(全量捕获)。后续 P0-3 依赖闭包要靠它发现"业务 GET 前置接口"。
+            self._record_all(m, url, pd=pd, headers=hd, content_type=hd.get("content-type", ""))
             # 业务写请求 → 抓下来,假装成功不真发;登录/鉴权/上传等基建写、以及 POST 形态的读/查询
             #(getXxxList/queryXxx:下拉/列表源)照常放行真发(否则录制时下拉/列表加载不出来,选不了值)
             if pd and not looks_like_auth_write(url, pd) and not looks_like_read_request(url):
-                hd = {}
-                try:
-                    hd = dict(request.headers or {})
-                except Exception:  # noqa: BLE001
-                    pass
                 self._capture(m, url, pd, hd.get("content-type", ""), hd)
                 await route.fulfill(status=200, content_type="application/json",
                                     body=self._success_envelope())
@@ -397,6 +451,19 @@ class RecordSession:
 
     def captured_reads(self) -> list[dict]:
         return list(self.reads)
+
+    def captured_all_requests(self) -> list[dict]:
+        """P0-1:全量网络请求(GET/POST/PUT/PATCH/DELETE 都记)。先抓全再筛 → P0-3 依赖闭包基于此。
+
+        返回不可变副本,避免外部误改污染内部状态。每条字段:index/method/url/headers/query/post_data
+        /response_json/status/content_type/timestamp。"""
+        return [dict(r) for r in self.all_requests]
+
+    def captured_diagnostics(self) -> list[dict]:
+        """P0-1:诊断事件(console/pageerror/requestfailed)。返回不可变副本。
+
+        每条字段:type/level?(console 用)/message/url?/timestamp/request_index?(requestfailed 用)。"""
+        return [dict(d) for d in self.diagnostics]
 
     def _resp_dispatch(self, response) -> None:  # noqa: ANN001 —— 同步快筛后再异步读 body
         try:
@@ -416,28 +483,41 @@ class RecordSession:
                 ct = (response.headers or {}).get("content-type", "")
             except Exception:  # noqa: BLE001
                 pass
-            if "json" not in (ct or "").lower():
-                return
-            try:
-                data = await response.json()
-            except Exception:  # noqa: BLE001
-                return
-            if m in ("POST", "PUT", "PATCH"):
-                # 写请求的真实响应(taskId 等)→ 贴回第一个同 url、还没响应的已抓写请求,供 Q3 步间数据流发现
-                for r in self.requests:
-                    if r.get("url") == url and "response_json" not in r:
-                        r["response_json"] = data
-                        break
-                # 不 return:有些系统用 POST 查"下拉/选人"列表(带过滤条件)→ 列表型响应也当 select 候选源
+            # P0-1:全量捕获响应(JSON body)。先按 url+method 反查最近一条 all_requests 同源记录,
+            # 把 status / response_json / content_type 补回,保持 all_requests 每条都有完整的事实行。
+            if "json" in (ct or "").lower():
+                try:
+                    data = await response.json()
+                except Exception:  # noqa: BLE001
+                    data = None
+                if data is not None:
+                    for r in reversed(self.all_requests):
+                        if r.get("url") == url and r.get("method") == m and r.get("response_json") is None:
+                            r["response_json"] = data
+                            r["status"] = response.status
+                            r["content_type"] = ct or r.get("content_type", "")
+                            break
+                    if m in ("POST", "PUT", "PATCH"):
+                        for r in self.requests:
+                            if r.get("url") == url and "response_json" not in r:
+                                r["response_json"] = data
+                                break
+                    # 不 return:有些系统用 POST 查"下拉/选人"列表(带过滤条件)→ 列表型响应也当 select 候选源
             if any(n in url.lower() for n in _READ_NOISE):    # 只跳静态/流(保留字典/列表接口)
                 return
             # 只留"列表型"(json 是数组 / dict 里含数组)→ 才可能是下拉/选人候选源;限规模避免存爆。
             # 提交那条写请求返回的是结果对象、非列表 → as_list_payload 为 None,不会被误当候选源。
-            items = as_list_payload(data)
+            data_for_list = data if 'data' in locals() else None
+            if data_for_list is None:
+                try:
+                    data_for_list = await response.json()
+                except Exception:  # noqa: BLE001
+                    return
+            items = as_list_payload(data_for_list)
             if items is None:
                 return
             self.reads.append({"method": m, "url": url, "status": response.status,
-                               "json": data if len(self.reads) < 60 else None,
+                               "json": data_for_list if len(self.reads) < 60 else None,
                                "count": len(items)})
         except Exception:  # noqa: BLE001
             pass
@@ -458,6 +538,50 @@ class RecordSession:
                 self._on_step(step)
             except Exception:  # noqa: BLE001
                 pass
+
+    # ── P0-1 诊断事件:console / pageerror / requestfailed ──
+    def _on_console(self, msg) -> None:  # noqa: ANN001 —— context 级 console 事件
+        try:
+            text = (msg.text or "")[:2000]    # 截断防爆
+            self._record_diag("console", {
+                "level": (msg.type or "log"),  # log/info/warn/error/debug
+                "message": text,
+            })
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_pageerror(self, err) -> None:  # noqa: ANN001 —— 页面 JS 异常
+        try:
+            self._record_diag("pageerror", {
+                "level": "error",
+                "message": (str(err) or "")[:2000],
+            })
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_requestfailed(self, request) -> None:  # noqa: ANN001 —— 请求失败(网络/CORS/超时/aborted)
+        try:
+            url = request.url
+            # 关联到 all_requests 同源记录(若有):requestfailed 触发后 _record_all 仍会先于该事件登记(顺序不绝对,
+            # 这里用"最近一条同 url/method 未失败的记录"做软关联)。
+            linked = None
+            for r in reversed(self.all_requests):
+                if r.get("url") == url and r.get("method") == (request.method or "").upper():
+                    linked = r
+                    break
+            failure_text = ""
+            try:
+                failure_text = (getattr(request.failure, "error_text", "") or "")[:500]
+            except Exception:  # noqa: BLE001
+                pass
+            self._record_diag("requestfailed", {
+                "level": "error",
+                "message": failure_text or "request failed",
+                "url": url,
+                **({"request_index": linked["index"]} if linked else {}),
+            })
+        except Exception:  # noqa: BLE001
+            pass
 
     # ── 截屏流(跟随活动页:用户点开新标签/弹窗时切过去)──
     async def start_screencast(self, on_frame: Callable[[str], Awaitable[None]]) -> None:
@@ -520,8 +644,12 @@ class RecordSession:
             await self.page.mouse.wheel(0, ev.get("dy", 0))
 
     def reset(self) -> None:
-        """清空已录步骤(用户登录完后点「从这里开始录」,丢弃登录步骤,只留业务流程)。"""
+        """清空已录步骤(用户登录完后点「从这里开始录」,丢弃登录步骤,只留业务流程)。
+        同时清 all_requests/diagnostics 与请求计数——后续诊断基于录制期抓的事实,登录噪声不计。"""
         self.steps.clear()
+        self.all_requests.clear()
+        self.diagnostics.clear()
+        self._req_counter = 0
 
     async def storage_state(self) -> dict | None:
         """抓当前会话登录态快照(所有 cookie + localStorage),不管系统把 token 存哪。

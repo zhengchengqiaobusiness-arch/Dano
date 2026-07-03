@@ -4,7 +4,7 @@ import pytest
 
 from dano.execution.page.flow_spec import (
     FlowSpec, FlowStep, FlowLink, ParamField,
-    apply_flow_edits, _infer_type_from_value,
+    apply_flow_edits, validate_flow_spec, _infer_type_from_value,
 )
 
 
@@ -26,6 +26,8 @@ def test_edit_key():
     assert spec.steps[0].params[0].key == "userId"
     assert new.steps[0].params[0].key == "newUserId"
     assert new.steps[0].params[0].name_source == "manual"
+    assert new.meta["current_version"] == 1
+    assert new.meta["versions"][0]["action"] == "flow_edit"
 
 
 def test_edit_required():
@@ -90,6 +92,22 @@ def test_edit_headers():
     assert new.steps[0].headers == {"X-Foo": "bar"}
 
 
+def test_edit_step_role_updates_source_meta_and_semantic_role():
+    new = apply_flow_edits(_make_spec(), [{"op": "update", "step_id": "step1",
+                                           "field": "role", "value": "submit_anchor"}])
+    assert new.steps[0].source_meta["role"] == "submit_anchor"
+    assert new.steps[0].semantic_role == "submit_anchor"
+
+
+def test_update_flow_business_description():
+    new = apply_flow_edits(_make_spec(), [{
+        "op": "update_flow",
+        "field": "business_description",
+        "value": "人工修正说明",
+    }])
+    assert new.business_description == "人工修正说明"
+
+
 # ── Reorder ──
 def _three_step_spec():
     def _st(sid, p):
@@ -109,6 +127,20 @@ def test_reorder_missing_raises():
     spec = _three_step_spec()
     with pytest.raises(ValueError, match="reorder_steps"):
         apply_flow_edits(spec, [{"op": "reorder_steps", "step_ids": ["A", "B"]}])
+
+
+def test_remove_step_removes_related_links():
+    spec = _three_step_spec()
+    spec.links = [
+        FlowLink(link_id="ab", source_step_id="A", source_path="data.x", target_step_id="B", target_path="x"),
+        FlowLink(link_id="bc", source_step_id="B", source_path="data.y", target_step_id="C", target_path="x"),
+    ]
+
+    new = apply_flow_edits(spec, [{"op": "remove_step", "step_id": "B"}])
+
+    assert [s.step_id for s in new.steps] == ["A", "C"]
+    assert new.links == []
+    assert [s.step_id for s in spec.steps] == ["A", "B", "C"]
 
 
 # ── Link 编辑 ──
@@ -160,6 +192,18 @@ def test_nonexistent_link_lists_available():
     msg = str(exc.value)
     assert "available:" in msg
     assert "l1" in msg
+
+
+def test_resolve_review_item_is_preserved_in_validation():
+    spec = _two_step_spec_with_link()
+    spec = apply_flow_edits(spec, [])
+    item = next(i for i in spec.review_items if i.type == "link_confirmation")
+
+    new = apply_flow_edits(spec, [{"op": "resolve_review", "review_id": item.id, "resolved": True}])
+
+    assert next(i for i in new.review_items if i.id == item.id).resolved is True
+    report = validate_flow_spec(new)
+    assert next(i for i in report["review_items"] if i["id"] == item.id)["resolved"] is True
 
 
 # ── Type inference ──

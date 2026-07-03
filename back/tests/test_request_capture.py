@@ -1047,6 +1047,37 @@ async def test_execute_api_workflow_chains_taskid_two_steps():
         httpd.shutdown()
 
 
+async def test_execute_api_workflow_dry_uses_recorded_response_for_links():
+    """dry-run 不触网时使用录制响应样例串联 GET 前置值,避免 appCode/taskId 仍停在旧值。"""
+    workflow = {"steps": [
+        {"method": "GET", "url": "http://x/apigateway/getappid",
+         "query_template": {"appId": "auto"}, "params": [],
+         "response_json": {"code": 200, "data": "APP-CODE"}},
+        {"method": "POST", "url": "http://x/dataiq/sjws_chat",
+         "content_type": "application/json",
+         "body_template": {"sys_query": "{{sys_query}}", "appCode": "OLD"},
+         "params": ["sys_query"], "sample_inputs": {"sys_query": "分析销售"},
+         "links": [{"target_path": "appCode", "source_step": 0, "source_path": "data"}]},
+    ]}
+
+    out = await execute_api_workflow(workflow, {}, send=False)
+
+    assert out["ok"] is True
+    assert out["final"]["body"]["appCode"] == "APP-CODE"
+    assert out["final"]["body"]["sys_query"] == "分析销售"
+
+
+def test_self_check_flags_missing_link_source_path_when_response_sample_exists():
+    """link 的 source_path 若在上游响应样例里不存在,发布前就要拦住。"""
+    workflow = {"steps": [
+        {"body_template": {"x": "1"}, "params": [], "response_json": {"data": {"id": "T1"}}},
+        {"body_template": {"taskId": "OLD"}, "params": [],
+         "links": [{"target_path": "taskId", "source_step": 0, "source_path": "data.missing"}]},
+    ]}
+
+    assert any("来源路径" in p and "data.missing" in p for p in self_check(workflow))
+
+
 def test_build_api_workflow_assembles_steps_links_and_last_params():
     """组装多步:参数落最后一步;步链(taskId)自动挂到目标步;前置步是常量。"""
     writes = [
@@ -1073,6 +1104,33 @@ async def test_execute_api_dispatches_single_and_workflow():
     wf = {"steps": [{"body_template": {"x": "{{a}}"}, "params": ["a"]}]}
     out2 = await execute_api(wf, {"a": "1"}, send=False)
     assert out2["ok"] and out2["steps"] == 1
+
+
+async def test_execute_get_query_template_dry_run():
+    """GET 前置接口无 body 也可发布:query_template 负责把参数和页面常量构造成 URL。"""
+    apir = {
+        "method": "GET",
+        "url": "http://x/api/getappid?fixed=1",
+        "query_template": {"q": "{{q}}", "appId": "auto"},
+        "params": ["q"],
+        "sample_inputs": {"q": "销售分析"},
+    }
+
+    assert self_check(apir) == []
+    out = await execute_api_request(apir, {}, send=False)
+
+    assert out["ok"] is True
+    assert out["body"] is None
+    assert out["query"] == {"q": "销售分析", "appId": "auto"}
+    assert "fixed=1" in out["url"]
+    assert "q=%E9%94%80%E5%94%AE%E5%88%86%E6%9E%90" in out["url"]
+    assert "appId=auto" in out["url"]
+
+
+def test_self_check_flags_query_param_without_template():
+    """声明了参数但既没有 body_template 也没有 query_template 时必须拦住。"""
+    apir = {"method": "GET", "url": "http://x/api/getappid", "params": ["q"]}
+    assert any("query_template" in p for p in self_check(apir))
 
 
 def test_pick_submit_skips_noise_and_picks_by_value_match():

@@ -679,7 +679,8 @@ async def record_ws(ws: WebSocket) -> None:
                 #   前端勾字段。用户也可在候选里手选别的(应对噪声误判 / 多写请求)。勾完发 publish_request 才建 Skill。
                 from dano.execution.page.request_capture import (flatten_body, json_write_requests,
                                                                  looks_like_auth_write, pick_submit_request)
-                all_caps = sess.captured_requests()
+                all_caps = (sess.captured_all_requests()
+                            if hasattr(sess, "captured_all_requests") else sess.captured_requests())
                 cands = [c for c in json_write_requests(all_caps)
                          if flatten_body(c.get("post_data"))                       # 有可勾字段的
                          and not looks_like_auth_write(c.get("url") or "", c.get("post_data"))]  # 排除登录/鉴权写
@@ -708,7 +709,7 @@ async def record_ws(ws: WebSocket) -> None:
                     try:
                         from dano.execution.page.flow_spec import to_flow_spec
                         pending_flow_spec = to_flow_spec(
-                            captured_requests=cands,
+                            captured_requests=all_caps,
                             reads=pending_reads,
                             samples=pending_samples,
                             storage_state=pending_storage,
@@ -717,11 +718,16 @@ async def record_ws(ws: WebSocket) -> None:
                             tenant=init.get("tenant", ""),
                             subsystem=init.get("subsystem", ""),
                         )
-                        from dano.execution.page.flow_spec import flow_spec_to_summary
+                        from dano.execution.page.flow_spec import (
+                            flow_spec_to_client,
+                            flow_spec_to_summary,
+                            validate_flow_spec,
+                        )
                         await ws.send_json({
                             "type": "flow_spec",
                             "flow_spec": flow_spec_to_summary(pending_flow_spec),
-                            "full_spec": pending_flow_spec.model_dump(),
+                            "full_spec": flow_spec_to_client(pending_flow_spec),
+                            "check_report": validate_flow_spec(pending_flow_spec),
                         })
                     except Exception as _fs_err:  # noqa: BLE001 —— 灰度不影响主路径
                         log.warning("flow_spec.emit_failed", error=str(_fs_err))
@@ -770,25 +776,79 @@ async def record_ws(ws: WebSocket) -> None:
                     continue
                 edits = msg.get("edits") or []
                 try:
-                    from dano.execution.page.flow_spec import apply_flow_edits, flow_spec_to_summary
+                    from dano.execution.page.flow_spec import (
+                        apply_flow_edits,
+                        flow_spec_to_client,
+                        flow_spec_to_summary,
+                        validate_flow_spec,
+                    )
                     pending_flow_spec = apply_flow_edits(pending_flow_spec, edits)
                     await ws.send_json({
                         "type": "flow_spec_updated",
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
-                        "full_spec": pending_flow_spec.model_dump(),
+                        "full_spec": flow_spec_to_client(pending_flow_spec),
+                        "check_report": validate_flow_spec(pending_flow_spec),
                     })
                 except Exception as e:  # noqa: BLE001
                     await ws.send_json({"type": "error", "detail": f"flow_update failed: {e}"})
+            elif t == "flow_replace":
+                try:
+                    from dano.execution.page.flow_spec import (
+                        FlowSpec,
+                        append_flow_version,
+                        flow_spec_to_client,
+                        flow_spec_to_summary,
+                        refresh_review_items,
+                        validate_flow_spec,
+                    )
+                    raw_spec = msg.get("flow_spec")
+                    if not isinstance(raw_spec, dict):
+                        await ws.send_json({"type": "error", "detail": "flow_replace missing flow_spec object"})
+                        continue
+                    if pending_flow_spec is not None:
+                        old_by_id = {s.step_id: s for s in pending_flow_spec.steps}
+                        for step in raw_spec.get("steps") or []:
+                            if not isinstance(step, dict):
+                                continue
+                            old = old_by_id.get(str(step.get("step_id") or ""))
+                            if old is None:
+                                continue
+                            if not step.get("body_source"):
+                                step["body_source"] = old.body_source
+                            headers = step.get("headers")
+                            if (not headers) or all(v == "***" for v in (headers or {}).values()):
+                                step["headers"] = old.headers
+                            old_identity = {i.path: i for i in old.identity}
+                            for idn in step.get("identity") or []:
+                                if isinstance(idn, dict) and idn.get("value") == "***":
+                                    old_idn = old_identity.get(str(idn.get("path") or ""))
+                                    if old_idn is not None:
+                                        idn["value"] = old_idn.value
+                    pending_flow_spec = append_flow_version(
+                        refresh_review_items(FlowSpec.model_validate(raw_spec)),
+                        "json_replace",
+                        reason="前端 JSON 编辑回写",
+                        actor="user",
+                    )
+                    await ws.send_json({
+                        "type": "flow_spec_updated",
+                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
+                        "full_spec": flow_spec_to_client(pending_flow_spec),
+                        "check_report": validate_flow_spec(pending_flow_spec),
+                    })
+                except Exception as e:  # noqa: BLE001
+                    await ws.send_json({"type": "error", "detail": f"flow_replace failed: {e}"})
             # Bug 修复: 前端收到 "step not found" 时主动刷新 spec
             elif t == "refresh_flow_spec":
                 if pending_flow_spec is None:
                     await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
-                from dano.execution.page.flow_spec import flow_spec_to_summary
+                from dano.execution.page.flow_spec import flow_spec_to_client, flow_spec_to_summary, validate_flow_spec
                 await ws.send_json({
                     "type": "flow_spec",
                     "flow_spec": flow_spec_to_summary(pending_flow_spec),
-                    "full_spec": pending_flow_spec.model_dump(),
+                    "full_spec": flow_spec_to_client(pending_flow_spec),
+                    "check_report": validate_flow_spec(pending_flow_spec),
                 })
             # Step D2: LLM 给每个 step 起业务名
             elif t == "step_naming":
@@ -796,13 +856,19 @@ async def record_ws(ws: WebSocket) -> None:
                     await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 try:
-                    from dano.execution.page.flow_spec import rename_steps_with_llm, flow_spec_to_summary
+                    from dano.execution.page.flow_spec import (
+                        flow_spec_to_client,
+                        flow_spec_to_summary,
+                        rename_steps_with_llm,
+                        validate_flow_spec,
+                    )
                     # TODO: 接入真实 LLM client;目前用 deterministic fallback
                     pending_flow_spec = rename_steps_with_llm(pending_flow_spec, llm_client=None)
                     await ws.send_json({
                         "type": "step_names",
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
-                        "full_spec": pending_flow_spec.model_dump(),
+                        "full_spec": flow_spec_to_client(pending_flow_spec),
+                        "check_report": validate_flow_spec(pending_flow_spec),
                     })
                 except Exception as e:  # noqa: BLE001
                     await ws.send_json({"type": "error", "detail": f"step_naming failed: {e}"})
@@ -812,14 +878,26 @@ async def record_ws(ws: WebSocket) -> None:
                     await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 try:
-                    from dano.execution.page.flow_spec import render_business_description, flow_spec_to_summary
+                    from dano.execution.page.flow_spec import (
+                        append_flow_version,
+                        flow_spec_to_client,
+                        flow_spec_to_summary,
+                        render_business_description,
+                        validate_flow_spec,
+                    )
                     desc = render_business_description(pending_flow_spec, llm_client=None)
                     pending_flow_spec.business_description = desc
+                    pending_flow_spec = append_flow_version(
+                        pending_flow_spec,
+                        "business_description",
+                        reason="生成结构化业务说明",
+                    )
                     await ws.send_json({
                         "type": "business_description",
                         "description": desc,
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
-                        "full_spec": pending_flow_spec.model_dump(),
+                        "full_spec": flow_spec_to_client(pending_flow_spec),
+                        "check_report": validate_flow_spec(pending_flow_spec),
                     })
                 except Exception as e:  # noqa: BLE001
                     await ws.send_json({"type": "error", "detail": f"business_description failed: {e}"})
@@ -847,11 +925,94 @@ async def record_ws(ws: WebSocket) -> None:
                                  warnings=summary["warnings"])
             elif t == "publish_request":
                 # 用户在字段表里勾了哪些是参数、起了名 → 用真实提交请求建 Skill(任意 OA 通用)
-                if pending_req is None:
+                use_flow_spec = bool(msg.get("use_flow_spec")) and pending_flow_spec is not None
+                if pending_req is None and not use_flow_spec:
                     await ws.send_json({"type": "result",
                                         "report": {"ok": False, "reason": "没有待发布的提交请求;先点「停止并发布」抓请求"}})
                     continue
                 param_map = {k: v.strip() for k, v in (msg.get("param_map") or {}).items() if v and v.strip()}
+                if use_flow_spec:
+                    try:
+                        from dano.execution.page.flow_spec import (
+                            apply_flow_publish_selection,
+                            flow_spec_required_params,
+                            flow_spec_to_api_request,
+                            flow_spec_to_summary,
+                            validate_flow_spec,
+                        )
+                        selected_scope_paths = None
+                        if pending_req is not None:
+                            from dano.execution.page.request_capture import flatten_body as _flatten_body
+                            selected_scope_paths = {
+                                f.get("path", "") for f in _flatten_body(
+                                    pending_req.get("post_data"),
+                                    pending_samples,
+                                    pending_required,
+                                )
+                                if f.get("path")
+                            }
+                        pending_flow_spec = apply_flow_publish_selection(
+                            pending_flow_spec,
+                            param_map,
+                            selected_scope_paths=selected_scope_paths,
+                        )
+                        check_report = validate_flow_spec(pending_flow_spec)
+                        if not check_report.get("passed"):
+                            await ws.send_json({
+                                "type": "result",
+                                "report": {
+                                    "ok": False,
+                                    "stage": "flow_spec_validate",
+                                    "reason": "FlowSpec 发布前校验未通过",
+                                    "clarifications": check_report.get("errors") or [],
+                                    "check_report": check_report,
+                                },
+                            })
+                            continue
+                        apir, build_errors = flow_spec_to_api_request(pending_flow_spec)
+                        if build_errors or not apir:
+                            await ws.send_json({
+                                "type": "result",
+                                "report": {
+                                    "ok": False,
+                                    "stage": "flow_spec_build",
+                                    "reason": "FlowSpec 无法转换成可执行请求",
+                                    "clarifications": build_errors,
+                                    "check_report": check_report,
+                                },
+                            })
+                            continue
+                        apir["_flow_spec"] = flow_spec_to_summary(pending_flow_spec)
+                        required = flow_spec_required_params(pending_flow_spec)
+                        last_params = apir.get("params") or ((apir.get("steps") or [{}])[-1].get("params") or [])
+                    except Exception as e:  # noqa: BLE001
+                        await ws.send_json({"type": "result",
+                                            "report": {"ok": False, "stage": "flow_spec_build",
+                                                       "reason": f"FlowSpec 发布构造失败:{e}"}})
+                        continue
+
+                    sub = init.get("subsystem", "A-报销")
+                    login_state = await sess.storage_state()
+                    from dano.execution.page.sessions import save_session
+                    from dano.onboarding.page_onboard import run_request_onboarding
+                    save_session(init["tenant"], sub, login_state)
+                    from dano.infra.token_store import headers_from_api_request, save_token
+                    _tok_headers = headers_from_api_request(apir)
+                    if _tok_headers:
+                        await save_token(init["tenant"], sub, _tok_headers, source="recording")
+                    sample_in = apir.get("sample_inputs") or ((apir.get("steps") or [{}])[-1].get("sample_inputs") or {})
+                    rep = await run_request_onboarding(
+                        tenant=init["tenant"], subsystem=sub, action=msg["action"],
+                        title=msg.get("title", ""), api_request=apir, sample_inputs=sample_in,
+                        required=required,
+                        goal=msg.get("goal") or (pending_flow_spec.goal if pending_flow_spec else None),
+                        deploy=init.get("deploy"), storage_state=login_state)
+                    if rep.get("ok"):
+                        await _auto_export(init["tenant"])
+                    await ws.send_json({"type": "result", "report": {**rep, "check_report": check_report},
+                                        "parsed_steps": len(last_params), "via": "flow_spec",
+                                        "workflow_steps": len(apir.get("steps") or []) or None})
+                    continue
                 from dano.execution.page.request_capture import (apply_dom_options, auto_required_fields,
                                                                  build_api_request, build_api_workflow,
                                                                  infer_success_rule, looks_internal_param_name,

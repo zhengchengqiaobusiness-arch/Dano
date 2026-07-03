@@ -104,17 +104,19 @@ def test_no_llm_single_step():
     s = _step(name="提交", path="/api/submit")
     spec = FlowSpec(flow_id="f", steps=[s], risk_level="L3")
     desc = render_business_description(spec)
-    assert "1 步" in desc
+    assert "# 业务流程说明" in desc
+    assert "## 1. 业务目的" in desc
+    assert "## 5. 执行步骤" in desc
     assert "提交" in desc
-    assert "POST /api/submit" in desc
+    assert "`POST /api/submit`" in desc
 
 
 def test_no_llm_multi_step():
     s1, s2 = _step(name="启动", path="/api/start"), _step(name="提交", path="/api/submit")
     spec = FlowSpec(flow_id="f", steps=[s1, s2], risk_level="L4")
     desc = render_business_description(spec)
-    assert "2 步" in desc
-    assert "1." in desc and "2." in desc
+    assert "2 个步骤" in desc
+    assert "1. 启动" in desc and "2. 提交" in desc
     assert "L4" in desc
 
 
@@ -124,12 +126,15 @@ def test_no_llm_links_present():
                   target_step_id="s2", target_path="x", confirmed=False, confidence=0.85)
     spec = FlowSpec(flow_id="f", steps=[s1, s2], links=[lk])
     desc = render_business_description(spec)
-    assert "1 条数据流串联" in desc
+    assert "## 6. 接口依赖关系" in desc
+    assert "data.x" in desc
+    assert "body.x" in desc
 
 
 def test_no_steps_returns_empty_message():
     desc = render_business_description(FlowSpec(flow_id="f"))
     assert "未包含" in desc
+    assert "## 9. 需要人工确认的问题" in desc
 
 
 def test_with_llm_happy():
@@ -137,7 +142,9 @@ def test_with_llm_happy():
     spec = FlowSpec(flow_id="f", steps=[s])
     llm = _StubLLM(summarize="用户提交请假申请。")
     desc = render_business_description(spec, llm_client=llm)
-    assert desc == "用户提交请假申请。"
+    assert "用户提交请假申请。" in desc
+    assert "## 2. 用户需要提供的参数" in desc
+    assert "`POST /api/submit`" in desc
 
 
 def test_with_llm_truncates():
@@ -145,7 +152,8 @@ def test_with_llm_truncates():
     spec = FlowSpec(flow_id="f", steps=[s])
     llm = _StubLLM(summarize="x" * 500)
     desc = render_business_description(spec, llm_client=llm)
-    assert len(desc) == 300
+    assert "x" * 240 in desc
+    assert "## 5. 执行步骤" in desc
 
 
 def test_with_llm_exception_falls_back():

@@ -12,7 +12,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import re as _re
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 _WRITE = {"POST", "PUT", "PATCH", "DELETE"}
 # 「读请求」噪声:只排静态资源/流/心跳(通用,无任何业务路径名);保留字典/列表接口(select 候选源)。
@@ -1582,6 +1582,33 @@ def _path_lookup(node, path: str):
     return cur
 
 
+def _query_path_tokens(path) -> list | None:
+    toks = _split_path(path)
+    if toks and toks[0] == "query":
+        return toks[1:]
+    return None
+
+
+def _render_query_template(query_template, fields: dict, defaults: dict | None = None) -> dict:
+    """把 query_template 渲染成 dict；None 值不进入 URL，其余保留给 urlencode 处理。"""
+    if not isinstance(query_template, dict):
+        return {}
+    rendered = substitute(query_template, fields, defaults or {})
+    if not isinstance(rendered, dict):
+        return {}
+    return {str(k): v for k, v in rendered.items() if v is not None}
+
+
+def _merge_query_into_url(url: str, query: dict | None) -> str:
+    if not query:
+        return url
+    parsed = urlparse(url or "")
+    existing = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    merged = {**existing, **query}
+    encoded = urlencode(merged, doseq=True)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, encoded, parsed.fragment))
+
+
 def _wellformed_identity_source(src: str) -> bool:
     kind, sep, rest = (src or "").partition(":")
     return bool(sep) and kind in ("cookie", "localStorage") and bool(rest)
@@ -1591,19 +1618,38 @@ def _check_step_links(workflow: dict) -> list[str]:
     """多步串联:每条 link 的目标路径必须在「目标步」构造结果里真实可达,否则运行期 overrides 的
     _set_by_path 静默写不进(taskId 串不上,脏数据)。通用,不挑系统。"""
     out: list[str] = []
-    for i, st in enumerate(workflow.get("steps") or []):
+    steps = workflow.get("steps") or []
+    for i, st in enumerate(steps):
         templ = st.get("body_template")
-        if not isinstance(templ, (dict, list)):
+        query_templ = st.get("query_template")
+        has_body = isinstance(templ, (dict, list))
+        has_query = isinstance(query_templ, dict)
+        if not has_body and not has_query:
             continue
         probes = {p: f"{_PROBE_PREFIX}{j}__" for j, p in enumerate(st.get("params") or [])}
-        nested = substitute(templ, probes, {})
+        nested = substitute(templ, probes, {}) if has_body else None
+        query = _render_query_template(query_templ, probes, {}) if has_query else {}
         for lk in st.get("links") or []:
             tp = lk.get("target_tokens") or lk.get("target_path", "")
             disp = lk.get("target_path") or tp
-            if not tp or _path_lookup(nested, tp) is _PATH_MISSING:
+            source_step = lk.get("source_step")
+            source_path = lk.get("source_tokens") or lk.get("source_path", "")
+            query_tokens = _query_path_tokens(tp)
+            if query_tokens is not None:
+                missing_target = _path_lookup(query, query_tokens) is _PATH_MISSING
+            else:
+                missing_target = (not has_body) or _path_lookup(nested, tp) is _PATH_MISSING
+            if not tp or missing_target:
                 out.append(f"步骤{i + 1}:串联目标路径 `{disp}` 找不到落点 —— 运行期 taskId 等会串不进(脏数据)")
-            if lk.get("source_step") is None or not (lk.get("source_tokens") or lk.get("source_path")):
+            if source_step is None or not source_path:
                 out.append(f"步骤{i + 1}:串联 `{disp}` 无来源(source_step/source_path 为空)—— 运行期取不到值,无法串联")
+                continue
+            if not isinstance(source_step, int) or source_step < 0 or source_step >= len(steps):
+                out.append(f"步骤{i + 1}:串联 `{disp}` 的 source_step={source_step} 越界—— 运行期取不到上游响应")
+                continue
+            response_json = steps[source_step].get("response_json")
+            if response_json is not None and _path_lookup(response_json, source_path) is _PATH_MISSING:
+                out.append(f"步骤{i + 1}:串联 `{disp}` 的来源路径 `{lk.get('source_path') or source_path}` 在上游响应样例里找不到")
     return out
 
 
@@ -1625,32 +1671,46 @@ def self_check(api_request: dict) -> list[str]:
         return out + _check_step_links(api_request)
 
     templ = api_request.get("body_template")
-    if not isinstance(templ, (dict, list)):
-        return []                                       # GET/查询类无请求体,免检
+    query_templ = api_request.get("query_template")
+    has_body = isinstance(templ, (dict, list))
+    has_query = isinstance(query_templ, dict)
     params = list(api_request.get("params") or [])
     problems: list[str] = []
+    if not has_body and not has_query:
+        for p in params:
+            problems.append(f"参数 `{p}` 没有 body_template/query_template 落点 —— agent 改了也不生效")
+        return problems
 
     # (b)+(c):每个参数一个唯一哨兵 → 跑完整构造流水线(substitute→finalize)→ 哨兵必须都出现在最终 body
     probes = {p: f"{_PROBE_PREFIX}{i}__" for i, p in enumerate(params)}
-    nested = substitute(templ, probes, {})              # 不喂 defaults:逼出"参数无占位"的问题
-    final_str = json.dumps(_finalize_jsonstr(nested), ensure_ascii=False)
+    nested = substitute(templ, probes, {}) if has_body else None              # 不喂 defaults:逼出"参数无占位"的问题
+    query = _render_query_template(query_templ, probes, {}) if has_query else {}
+    final_parts: list[str] = []
+    if has_body:
+        final_parts.append(json.dumps(_finalize_jsonstr(nested), ensure_ascii=False))
+    if has_query:
+        final_parts.append(json.dumps(query, ensure_ascii=False))
+    final_str = "\n".join(final_parts)
     if "{{" in final_str:
-        problems.append("模板里仍残留 {{}} 占位 —— 参数声明与 body_template 不一致(有参数没填上)")
+        problems.append("模板里仍残留 {{}} 占位 —— 参数声明与 body_template/query_template 不一致(有参数没填上)")
     for p, probe in probes.items():
         cnt = final_str.count(probe)
         if cnt == 0:
-            problems.append(f"参数 `{p}` 填入的值进不了最终请求体(被覆盖/丢失/未真正参数化)—— agent 改了也不生效")
+            problems.append(f"参数 `{p}` 填入的值进不了最终请求体/查询参数(被覆盖/丢失/未真正参数化)—— agent 改了也不生效")
         elif cnt > 1:
             problems.append(f"参数 `{p}` 同时填入 {cnt} 处(疑似扁平/嵌套键路径歧义,一个参数替换了多个字段)")
 
     # (a):identity 路径在"未 finalize 的嵌套结构"上必须可达(blob 内段含 __dano_jsonstr__)
-    for idn in api_request.get("identity") or []:
-        path, src = idn.get("path", ""), idn.get("source", "")
-        pathlike = idn.get("tokens") or path                # tokens 优先(键含点也能准确判可达)
-        if not pathlike or _path_lookup(nested, pathlike) is _PATH_MISSING:
-            problems.append(f"identity 字段路径 `{path}` 在请求体里找不到落点 —— 运行期换身会静默失败(申请人冻结)")
-        elif not _wellformed_identity_source(src):
-            problems.append(f"identity 字段 `{path}` 取值来源 `{src}` 非法(应为 cookie:KEY 或 localStorage:KEY.path)")
+    if has_body:
+        for idn in api_request.get("identity") or []:
+            path, src = idn.get("path", ""), idn.get("source", "")
+            pathlike = idn.get("tokens") or path                # tokens 优先(键含点也能准确判可达)
+            if not pathlike or _path_lookup(nested, pathlike) is _PATH_MISSING:
+                problems.append(f"identity 字段路径 `{path}` 在请求体里找不到落点 —— 运行期换身会静默失败(申请人冻结)")
+            elif not _wellformed_identity_source(src):
+                problems.append(f"identity 字段 `{path}` 取值来源 `{src}` 非法(应为 cookie:KEY 或 localStorage:KEY.path)")
+    elif api_request.get("identity"):
+        problems.append("无 body_template 的请求暂不支持 identity 写入 —— 运行期换身没有落点")
     return problems
 
 
@@ -2067,36 +2127,43 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
                                              storage_state=storage_state, token_key=token_key, verify=verify)
     # 按字段声明类型归一值(number/bool/日期格式),让 body 填回的是目标系统认的类型/格式 —— 通用,不挑字段
     fields = _coerce_fields(fields, api_request)
-    body = substitute(api_request.get("body_template"), fields, api_request.get("sample_inputs") or {})
-    _apply_identity(body, api_request, storage_state)        # 当前用户/会话值运行期重取覆盖(此刻 blob 仍是嵌套结构)
-    _apply_system_values(body, api_request)                  # 系统时间戳(submitTime/createTime)运行期填 now,不焊死录制时刻
-    for toks, v in sel_overrides.items():                    # 名/ID 配对:把解析出的内部 id 写回配对 id 字段(不冻结)
-        _set_by_path(body, list(toks), v)
-    for p, v in (overrides or {}).items():                   # Q3:上一步响应值注入(taskId 等)
-        _set_by_path(body, p, v)
-    id_issues = _identity_audit(body, api_request, storage_state) if send else []   # 换身后置审计(blob 仍嵌套,可达)
-    body = _finalize_jsonstr(body)                           # identity/串联注入后,再把内层 JSON 压回字符串
     method = (api_request.get("method") or "POST").upper()
     path = api_request.get("path") or ""
     # 优先用录制时的完整 url(同一 OA host 不变);否则 base_url + path
     url = api_request.get("url") or (path if path.startswith("http") else (base_url or "").rstrip("/") + path)
+    body_template = api_request.get("body_template")
+    body = substitute(body_template, fields, api_request.get("sample_inputs") or {}) if isinstance(body_template, (dict, list)) else None
+    query = _render_query_template(api_request.get("query_template"), fields, api_request.get("sample_inputs") or {})
+    if body is not None:
+        _apply_identity(body, api_request, storage_state)        # 当前用户/会话值运行期重取覆盖(此刻 blob 仍是嵌套结构)
+        _apply_system_values(body, api_request)                  # 系统时间戳(submitTime/createTime)运行期填 now,不焊死录制时刻
+        for toks, v in sel_overrides.items():                    # 名/ID 配对:把解析出的内部 id 写回配对 id 字段(不冻结)
+            _set_by_path(body, list(toks), v)
+    for p, v in (overrides or {}).items():                       # Q3:上一步响应值注入(taskId/appCode 等)
+        query_tokens = _query_path_tokens(p)
+        if query_tokens is not None:
+            _set_by_path(query, query_tokens, v)
+        elif body is not None:
+            _set_by_path(body, p, v)
+    id_issues = _identity_audit(body, api_request, storage_state) if send and body is not None else []   # 换身后置审计(blob 仍嵌套,可达)
+    body = _finalize_jsonstr(body) if body is not None else None  # identity/串联注入后,再把内层 JSON 压回字符串
+    url = _merge_query_into_url(url, query)
     if not send:
         # **self_check 是唯一承重闸门**:它用哨兵填满每个参数,既查"残留 {{}}(参数未声明)"也查"参数填不进 body"。
         # 这里再用录制默认值看 leftover 只作信息——某参数**没有录制默认值**(运行期由 agent 提供)会留 {{}},
         # 但那不是缺陷(self_check 已证明该参数结构正确),不能因此拦发布(否则误报"参数没全填上")。
-        leftover = "{{" in json.dumps(body, ensure_ascii=False)
+        leftover = "{{" in json.dumps(body, ensure_ascii=False) or "{{" in json.dumps(query, ensure_ascii=False)
         problems = self_check(api_request)                        # P0:发布前确定性自检(skill 数据,承重闸门)
-        return {"ok": not problems, "dry": True, "method": method, "url": url, "body": body,
+        return {"ok": not problems, "dry": True, "method": method, "url": url, "body": body, "query": query,
                 "self_check": problems, "leftover_no_default": leftover,
                 "detail": ("；".join(problems) if problems else "请求可构造(dry,未真发)")}
     if id_issues:                                            # 真发前最后一道:换身失败就拒发,绝不以录制者身份写入
         return {"ok": False, "blocked": True, "method": method, "url": url,
                 "identity_issues": id_issues,
                 "detail": "；".join(id_issues) + " —— 已拒绝提交(避免以录制者身份写入)"}
-    from urllib.parse import urlparse
     host = urlparse(url).hostname or ""
     ct = api_request.get("content_type") or "application/json"
-    headers = {"Content-Type": ct}
+    headers = {"Content-Type": ct} if body is not None else {}
     # ① 录制时抓到的应用自定义鉴权头(Authorization / Admin-Token / satoken / 租户号…)原样带上 —— 通用,不挑系统
     headers.update(api_request.get("auth_headers") or {})
     # ② Cookie 用 storageState 的(更全/可能更新);没抓到自定义头时,才回退到按 token_key 猜 Authorization
@@ -2108,9 +2175,12 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     import httpx
     # 按录制时的编码发:form-urlencoded 走 data(httpx 自动 urlencode 扁平表单),否则 JSON body —— 通用,不挑系统
     is_form = "form-urlencoded" in ct.lower()
-    send_kw = ({"data": {k: ("" if v is None else v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
-                              if isinstance(v, (dict, list)) else str(v)) for k, v in (body or {}).items()}}
-               if is_form else {"json": body})
+    if method in ("GET", "HEAD") or body is None:
+        send_kw = {}
+    else:
+        send_kw = ({"data": {k: ("" if v is None else v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+                                  if isinstance(v, (dict, list)) else str(v)) for k, v in (body or {}).items()}}
+                   if is_form else {"json": body})
     async with httpx.AsyncClient(timeout=30, verify=verify) as c:
         r = await c.request(method, url, headers=headers, **send_kw)
     try:
@@ -2146,7 +2216,12 @@ async def execute_api_workflow(workflow: dict, fields: dict, *, base_url: str = 
         out = await execute_api_request(step, fields, base_url=base_url, storage_state=storage_state,
                                         send=send, verify=verify, token_key=token_key, overrides=overrides)
         last = out
-        responses.append(out.get("response") if send else out.get("body"))
+        if send:
+            responses.append(out.get("response"))
+        elif step.get("response_json") is not None:
+            responses.append(step.get("response_json"))
+        else:
+            responses.append(out.get("body") if out.get("body") is not None else {"query": out.get("query")})
         if not out.get("ok"):
             return {"ok": False, "failed_step": i, "detail": f"第{i + 1}步失败", "step_result": out}
     return {"ok": bool(last.get("ok", True)), "steps": len(steps),
