@@ -143,6 +143,16 @@ export type TranscriptDisplayItem =
   | TranscriptMessageDisplayItem
   | TranscriptSessionEventDisplayItem;
 
+export interface TranscriptProcessGroup {
+  key: string;
+  startItemIndex: number;
+  endItemIndex: number;
+  finalAnswerItemIndex: number;
+  finalAnswerBlockIndex: number;
+  entryIds: string[];
+  durationMs?: number;
+}
+
 interface TranscriptToolResultBlockWithSource extends RpcTranscriptToolResultBlock {
   sourceMessageId?: string;
 }
@@ -436,6 +446,215 @@ export function buildTranscriptDisplayItems(
   }
 
   return insertPendingSessionEvent(items, options?.pendingSessionEvent);
+}
+
+export function buildTranscriptProcessGroups(
+  items: readonly TranscriptDisplayItem[],
+  options: {
+    blocksForMessage?: (
+      message: TranscriptEntryLike,
+      messageIndex: number,
+    ) => readonly ContentBlock[];
+    isMessageActive?: (
+      message: TranscriptEntryLike,
+      messageIndex: number,
+    ) => boolean;
+    messageKey?: (message: TranscriptEntryLike, messageIndex: number) => string;
+  } = {},
+): TranscriptProcessGroup[] {
+  const groups: TranscriptProcessGroup[] = [];
+  let index = 0;
+
+  while (index < items.length) {
+    const item = items[index];
+    if (item?.kind !== "message" || item.message.role !== "user") {
+      index += 1;
+      continue;
+    }
+
+    const startItemIndex = index;
+    index += 1;
+    while (index < items.length) {
+      const nextItem = items[index];
+      if (nextItem?.kind === "message" && nextItem.message.role === "user") {
+        break;
+      }
+      index += 1;
+    }
+
+    const group = transcriptProcessGroupForRange(
+      items,
+      startItemIndex,
+      index - 1,
+      options,
+    );
+    if (group) groups.push(group);
+  }
+
+  return groups;
+}
+
+export function latestThinkingLine(text: string): string {
+  const lines = text.replace(/\r/g, "").split("\n");
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index]?.trim();
+    if (line) return line;
+  }
+  return "";
+}
+
+export function formatTranscriptDuration(durationMs: number | undefined): string | null {
+  if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs < 0) {
+    return null;
+  }
+
+  const totalSeconds = Math.max(1, Math.round(durationMs / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (totalMinutes < 60) return seconds ? `${totalMinutes}m${seconds}s` : `${totalMinutes}m`;
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes ? `${hours}h${String(minutes).padStart(2, "0")}m` : `${hours}h`;
+}
+
+function transcriptProcessGroupForRange(
+  items: readonly TranscriptDisplayItem[],
+  startItemIndex: number,
+  endItemIndex: number,
+  options: {
+    blocksForMessage?: (
+      message: TranscriptEntryLike,
+      messageIndex: number,
+    ) => readonly ContentBlock[];
+    isMessageActive?: (
+      message: TranscriptEntryLike,
+      messageIndex: number,
+    ) => boolean;
+    messageKey?: (message: TranscriptEntryLike, messageIndex: number) => string;
+  },
+): TranscriptProcessGroup | null {
+  const blocksForMessage = options.blocksForMessage ?? contentBlocks;
+  let finalAnswerItemIndex = -1;
+  let finalAnswerBlockIndex = -1;
+  let hasActiveMessage = false;
+
+  for (let index = endItemIndex; index > startItemIndex; index--) {
+    const item = items[index];
+    if (item?.kind !== "message") continue;
+    if (options.isMessageActive?.(item.message, item.messageIndex)) {
+      hasActiveMessage = true;
+    }
+    if (finalAnswerItemIndex !== -1 || item.message.role !== "assistant") continue;
+    if (isErrorMessage(item.message)) continue;
+
+    const answerBlockIndex = blocksForMessage(
+      item.message,
+      item.messageIndex,
+    ).findIndex(block => block.kind === "text" && block.text.trim());
+    if (answerBlockIndex === -1) continue;
+
+    finalAnswerItemIndex = index;
+    finalAnswerBlockIndex = answerBlockIndex;
+  }
+
+  if (hasActiveMessage || finalAnswerItemIndex === -1) return null;
+  if (!hasProcessBeforeAnswer(
+    items,
+    startItemIndex,
+    finalAnswerItemIndex,
+    finalAnswerBlockIndex,
+    blocksForMessage,
+  )) return null;
+
+  const userItem = items[startItemIndex];
+  const finalAnswerItem = items[finalAnswerItemIndex];
+  if (userItem?.kind !== "message" || finalAnswerItem?.kind !== "message") {
+    return null;
+  }
+
+  return {
+    key: options.messageKey?.(userItem.message, userItem.messageIndex) ??
+      transcriptMessageKey(userItem.message, userItem.messageIndex),
+    startItemIndex,
+    endItemIndex,
+    finalAnswerItemIndex,
+    finalAnswerBlockIndex,
+    entryIds: transcriptProcessEntryIds(
+      items,
+      startItemIndex,
+      endItemIndex,
+      blocksForMessage,
+    ),
+    durationMs: transcriptDurationMs(userItem.message, finalAnswerItem.message),
+  };
+}
+
+function hasProcessBeforeAnswer(
+  items: readonly TranscriptDisplayItem[],
+  startItemIndex: number,
+  finalAnswerItemIndex: number,
+  finalAnswerBlockIndex: number,
+  blocksForMessage: (
+    message: TranscriptEntryLike,
+    messageIndex: number,
+  ) => readonly ContentBlock[],
+): boolean {
+  if (finalAnswerItemIndex - startItemIndex > 1) return true;
+
+  const finalItem = items[finalAnswerItemIndex];
+  if (finalItem?.kind !== "message") return false;
+  return blocksForMessage(finalItem.message, finalItem.messageIndex)
+    .slice(0, finalAnswerBlockIndex)
+    .some(isProcessBlock);
+}
+
+function isProcessBlock(block: ContentBlock): boolean {
+  return block.kind === "thinking" || block.kind === "tool";
+}
+
+function transcriptProcessEntryIds(
+  items: readonly TranscriptDisplayItem[],
+  startItemIndex: number,
+  endItemIndex: number,
+  blocksForMessage: (
+    message: TranscriptEntryLike,
+    messageIndex: number,
+  ) => readonly ContentBlock[],
+): string[] {
+  const ids = new Set<string>();
+
+  for (let index = startItemIndex; index <= endItemIndex; index++) {
+    const item = items[index];
+    if (item?.kind !== "message") continue;
+
+    if (item.message.id) ids.add(item.message.id);
+    for (const block of blocksForMessage(item.message, item.messageIndex)) {
+      if (block.kind === "tool" && block.resultSourceMessageId) {
+        ids.add(block.resultSourceMessageId);
+      }
+    }
+  }
+
+  return [...ids];
+}
+
+function transcriptDurationMs(
+  startMessage: TranscriptEntryLike,
+  endMessage: TranscriptEntryLike,
+): number | undefined {
+  const start = transcriptTimestampMs(startMessage.timestamp);
+  const end = transcriptTimestampMs(endMessage.timestamp);
+  if (start === undefined || end === undefined || end < start) return undefined;
+  return end - start;
+}
+
+function transcriptTimestampMs(timestamp: string | undefined): number | undefined {
+  if (!timestamp) return undefined;
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 interface TranscriptDisplayState extends TranscriptConfigState {

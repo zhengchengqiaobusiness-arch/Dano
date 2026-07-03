@@ -8,11 +8,13 @@
     RpcTranscriptContentBlock,
   } from "@dano/types/protocol";
   import ArrowDown from "lucide-svelte/icons/arrow-down";
+  import ChevronRight from "lucide-svelte/icons/chevron-right";
   import Copy from "lucide-svelte/icons/copy";
   import FileText from "lucide-svelte/icons/file-text";
   import Pencil from "lucide-svelte/icons/pencil";
   import Sparkle from "lucide-svelte/icons/sparkle";
   import X from "lucide-svelte/icons/x";
+  import { slide } from "svelte/transition";
   import {
     answerQuestion,
     getBridgeClientId,
@@ -31,17 +33,22 @@
   } from "../utils/messageCopy";
   import {
     buildTranscriptDisplayItems,
+    buildTranscriptProcessGroups,
     contentBlocks,
     errorMessageText,
+    formatTranscriptDuration,
     isAbortedMessage,
     isErrorMessage,
     isToolResultMessage,
+    latestThinkingLine,
     messageContent,
     type FileContentBlock,
     type ImageContentBlock,
     type PendingTranscriptSessionEvent,
+    type ContentBlock,
     type ToolContentBlock,
     type TranscriptDisplayItem,
+    type TranscriptProcessGroup,
   } from "../utils/transcript";
   import {
     createChatTranscriptBlockState,
@@ -104,6 +111,7 @@
   >;
 
   const emptyStateConfig = getRuntimeEmptyStateConfig();
+  const transcriptRevealTransition = { duration: 160 };
 
   // ---- DOM refs ----
   let container = $state<HTMLDivElement | null>(null);
@@ -133,6 +141,11 @@
       { pendingSessionEvent: pendingTranscriptConfigEvent },
     ).filter(item => item.kind !== "session_event"),
   );
+  let processGroups = $derived(buildTranscriptProcessGroups(displayItems, {
+    blocksForMessage: displayContentBlocks,
+    isMessageActive: shouldDeferMessageMarkdownErrors,
+    messageKey: messageStableKey,
+  }));
   let hasVisibleStreaming = $derived(
     isStreaming || transcriptStreams.length > 0 || transcriptDeltas.length > 0,
   );
@@ -149,7 +162,14 @@
   let filePreviewRequestId = 0;
   let streamingAssistantMessageIndex = $derived.by(() => {
     if (!hasVisibleStreaming) return -1;
+    let lastUserIndex = -1;
     for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i]?.role !== "user") continue;
+      lastUserIndex = i;
+      break;
+    }
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (i <= lastUserIndex) return -1;
       if (messages[i]?.role === "assistant") return i;
     }
     return -1;
@@ -385,6 +405,84 @@
     return `${messageStableKey(msg, messageIndex)}:thinking:${blockIndex}`;
   }
 
+  function processGroupForItemIndex(itemIndex: number): TranscriptProcessGroup | undefined {
+    return processGroups.find(group =>
+      itemIndex >= group.startItemIndex && itemIndex <= group.endItemIndex,
+    );
+  }
+
+  function processGroupForUserItemIndex(itemIndex: number): TranscriptProcessGroup | undefined {
+    return processGroups.find(group => group.startItemIndex === itemIndex);
+  }
+
+  function isProcessGroupExpanded(group: TranscriptProcessGroup | undefined): boolean {
+    return Boolean(group && blockState.isProcessGroupExpanded(group.key));
+  }
+
+  function shouldRenderDisplayItemAt(index: number): boolean {
+    const group = processGroupForItemIndex(index);
+    if (!group || isProcessGroupExpanded(group)) return true;
+    return index === group.startItemIndex || index >= group.finalAnswerItemIndex;
+  }
+
+  function visibleContentBlocks(
+    item: TranscriptDisplayItem,
+    itemIndex: number,
+  ): ContentBlock[] {
+    if (item.kind !== "message") return [];
+
+    const blocks = displayContentBlocks(item.message, item.messageIndex);
+    const group = processGroupForItemIndex(itemIndex);
+    if (
+      !group ||
+      isProcessGroupExpanded(group) ||
+      itemIndex !== group.finalAnswerItemIndex
+    ) return blocks;
+
+    return blocks.slice(group.finalAnswerBlockIndex);
+  }
+
+  function processSummaryLabel(group: TranscriptProcessGroup): string {
+    const duration = formatTranscriptDuration(group.durationMs);
+    return duration
+      ? t("chatTranscript.processCompleteWithDuration", { duration })
+      : t("chatTranscript.processComplete");
+  }
+
+  function processSummaryAriaLabel(group: TranscriptProcessGroup): string {
+    const duration = formatTranscriptDuration(group.durationMs);
+    const key = isProcessGroupExpanded(group)
+      ? duration
+        ? "chatTranscript.processCollapseLabel"
+        : "chatTranscript.processCollapseLabelNoDuration"
+      : duration
+        ? "chatTranscript.processExpandLabel"
+        : "chatTranscript.processExpandLabelNoDuration";
+    return duration
+      ? t(key, { duration })
+      : t(key);
+  }
+
+  function toggleProcessGroup(group: TranscriptProcessGroup) {
+    blockState.toggleProcessGroup(group.key);
+  }
+
+  function expandProcessGroupForEntry(entryId: string): boolean {
+    const group = processGroups.find(candidate =>
+      candidate.entryIds.includes(entryId),
+    );
+    if (!group || isProcessGroupExpanded(group)) return false;
+
+    blockState.expandProcessGroup(group.key);
+    tick().then(() => {
+      const target = transcriptEntryElement(entryId);
+      if (!target) return;
+      target.scrollIntoView({ block: "center" });
+      updateBottomLock();
+    });
+    return true;
+  }
+
   function displayItemKey(item: TranscriptDisplayItem, index: number): string {
     return item.kind === "message"
       ? messageStableKey(item.message, item.messageIndex)
@@ -411,10 +509,21 @@
     return shouldDeferMessageMarkdownErrors(msg, mi);
   }
 
-  function thinkingBlockLabel(msg: TranscriptEntry, mi: number): string {
-    return isMessageThinkingActive(msg, mi)
-      ? t("chatTranscript.thinkingActive")
-      : t("chatTranscript.thinkingComplete");
+  function isActiveThinkingBlock(
+    msg: TranscriptEntry,
+    mi: number,
+    blocks: readonly ContentBlock[],
+    blockIndex: number,
+  ): boolean {
+    return (
+      isMessageThinkingActive(msg, mi) &&
+      blocks[blockIndex]?.kind === "thinking" &&
+      blockIndex === blocks.length - 1
+    );
+  }
+
+  function canToggleThinkingBlock(msg: TranscriptEntry, mi: number): boolean {
+    return !isMessageThinkingActive(msg, mi);
   }
 
   function previewText(text: string, maxLines: number = 8): string {
@@ -760,13 +869,17 @@
     return value.replace(/["\\]/g, "\\$&");
   }
 
-  export function scrollToTranscriptEntry(entryId: string): boolean {
+  function transcriptEntryElement(entryId: string): HTMLElement | null {
     const el = container;
-    if (!el) return false;
+    if (!el) return null;
 
     const selector = `[data-tree-entry-id="${cssEscape(entryId)}"], [data-tree-entry-ids~="${cssEscape(entryId)}"]`;
-    const target = el.querySelector<HTMLElement>(selector);
-    if (!target) return false;
+    return el.querySelector<HTMLElement>(selector);
+  }
+
+  export function scrollToTranscriptEntry(entryId: string): boolean {
+    const target = transcriptEntryElement(entryId);
+    if (!target) return expandProcessGroupForEntry(entryId);
 
     target.scrollIntoView({ block: "center" });
     updateBottomLock();
@@ -959,11 +1072,12 @@
   {/if}
 
   {#each displayItems as item, index (displayItemKey(item, index))}
-    {#if isToolResultMessage(item.message)}
+    {#if shouldRenderDisplayItemAt(index) && isToolResultMessage(item.message)}
       <div
         class="message-row tool"
         data-message-id={item.message.id ?? undefined}
         data-tree-entry-id={item.message.id ?? undefined}
+        transition:slide={transcriptRevealTransition}
       >
         <div class="message-content tool">
           <div class="tool-inline" data-status={item.message.isError ? "error" : "success"}>
@@ -982,7 +1096,7 @@
             </button>
 
             {#if blockState.isToolBlockExpanded(`${messageStableKey(item.message, item.messageIndex)}:tool-result`)}
-              <div class="tool-inline-details">
+              <div class="tool-inline-details" transition:slide={transcriptRevealTransition}>
                 {#if showMessageIds}
                   <span class="message-debug-id">{t("chatTranscript.messageId", { id: messageIdLabel(item.message) })}</span>
                 {/if}
@@ -1027,11 +1141,12 @@
           </div>
         </div>
       </div>
-    {:else if isErrorMessage(item.message)}
+    {:else if shouldRenderDisplayItemAt(index) && isErrorMessage(item.message)}
       <div
         class="message-row {roleClass(item.message.role)}"
         data-message-id={item.message.id ?? undefined}
         data-tree-entry-id={item.message.id ?? undefined}
+        transition:slide={transcriptRevealTransition}
       >
         <div class="message-content {roleClass(item.message.role)}">
           <div class="tool-inline" data-status="error">
@@ -1050,7 +1165,7 @@
             </button>
 
             {#if blockState.isToolBlockExpanded(`${messageStableKey(item.message, item.messageIndex)}:error`)}
-              <div class="tool-inline-details">
+              <div class="tool-inline-details" transition:slide={transcriptRevealTransition}>
                 {#if showMessageIds}
                   <span class="message-debug-id">{t("chatTranscript.messageId", { id: messageIdLabel(item.message) })}</span>
                 {/if}
@@ -1066,11 +1181,13 @@
           </div>
         </div>
       </div>
-    {:else}
+    {:else if shouldRenderDisplayItemAt(index)}
+      {@const blocks = visibleContentBlocks(item, index)}
       <div
         class="message-row {roleClass(item.message.role)}"
         data-message-id={item.message.id ?? undefined}
         data-tree-entry-id={item.message.id ?? undefined}
+        transition:slide={transcriptRevealTransition}
       >
         <div class="message-stack {roleClass(item.message.role)}">
           <div
@@ -1081,7 +1198,7 @@
               <div class="message-debug-id">{t("chatTranscript.messageId", { id: messageIdLabel(item.message) })}</div>
             {/if}
 
-            {#each displayContentBlocks(item.message, item.messageIndex) as block, bIdx (contentBlockKey(item.message, item.messageIndex, block, bIdx))}
+            {#each blocks as block, bIdx (contentBlockKey(item.message, item.messageIndex, block, bIdx))}
               {#if block.kind === "system"}
                 <article class="system-block" data-system-type={block.systemType}>
                   <div class="system-block-header">
@@ -1103,21 +1220,33 @@
                 <div
                   class={`thinking-block ${blockState.isThinkingExpanded(thinkingBlockStateKey(item.message, item.messageIndex, bIdx)) ? "expanded" : ""}`}
                 >
-                  <button
-                    class="thinking-toggle"
-                    onclick={() => blockState.toggleThinking(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
-                  >
-                    <Sparkle class="toggle-icon" aria-hidden="true" size={14} />
-                    {thinkingBlockLabel(item.message, item.messageIndex)}
-                  </button>
-                  {#if blockState.isThinkingExpanded(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
-                    <MarkdownRenderer
-                      class="thinking-content"
-                      content={block.text}
-                      streaming={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
-                      deferMermaidErrors={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
-                      onOpenFileReference={onOpenFileReference}
-                    />
+                  {#if isActiveThinkingBlock(item.message, item.messageIndex, blocks, bIdx)}
+                    <div class="thinking-stream-line">
+                      {latestThinkingLine(block.text)}...
+                    </div>
+                  {:else if canToggleThinkingBlock(item.message, item.messageIndex)}
+                    <button
+                      type="button"
+                      class="thinking-toggle"
+                      onclick={() => blockState.toggleThinking(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
+                      aria-expanded={blockState.isThinkingExpanded(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
+                    >
+                      <Sparkle class="toggle-icon" aria-hidden="true" size={14} />
+                      {t("chatTranscript.thinkingComplete")}
+                    </button>
+                  {:else}
+                    <div class="thinking-complete-static">{t("chatTranscript.thinkingComplete")}</div>
+                  {/if}
+                  {#if canToggleThinkingBlock(item.message, item.messageIndex) && blockState.isThinkingExpanded(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
+                    <div class="thinking-content-panel" transition:slide={transcriptRevealTransition}>
+                      <MarkdownRenderer
+                        class="thinking-content"
+                        content={block.text}
+                        streaming={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
+                        deferMermaidErrors={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
+                        onOpenFileReference={onOpenFileReference}
+                      />
+                    </div>
                   {/if}
                 </div>
               {:else if block.kind === "tool"}
@@ -1170,7 +1299,7 @@
                       </button>
 
                     {#if blockState.isToolBlockExpanded(toolBlockStateKey(item.message, item.messageIndex, block, bIdx))}
-                      <div class="tool-inline-details">
+                      <div class="tool-inline-details" transition:slide={transcriptRevealTransition}>
                         {#if showMessageIds && block.resultSourceMessageId}
                           <span class="message-debug-id">{t("chatTranscript.messageId", { id: block.resultSourceMessageId })}</span>
                         {/if}
@@ -1320,6 +1449,26 @@
           {/if}
         </div>
       </div>
+    {/if}
+    {#if processGroupForUserItemIndex(index)}
+      {@const group = processGroupForUserItemIndex(index)}
+      {#if group}
+        <div class="message-row assistant process-summary-row" transition:slide={transcriptRevealTransition}>
+          <button
+            type="button"
+            class="process-summary-toggle"
+            class:expanded={isProcessGroupExpanded(group)}
+            aria-expanded={isProcessGroupExpanded(group)}
+            aria-label={processSummaryAriaLabel(group)}
+            onclick={() => toggleProcessGroup(group)}
+          >
+            <span>{processSummaryLabel(group)}</span>
+            <span class="process-summary-icon" aria-hidden="true">
+              <ChevronRight size={14} />
+            </span>
+          </button>
+        </div>
+      {/if}
     {/if}
   {/each}
 
@@ -1511,6 +1660,64 @@
   .message-row.tool {
     display: flex;
     overflow-anchor: none;
+  }
+
+  .process-summary-row {
+    justify-content: flex-start;
+  }
+
+  .process-summary-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 10px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 0.72rem;
+    line-height: 1.4;
+    cursor: pointer;
+  }
+
+  .process-summary-toggle:hover,
+  .process-summary-toggle:focus-visible {
+    color: var(--text);
+    outline: none;
+  }
+
+  .process-summary-toggle:focus-visible {
+    box-shadow: 0 2px 0 var(--focus-ring);
+  }
+
+  .process-summary-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 14px;
+    height: 14px;
+    color: var(--text-subtle);
+    line-height: 0;
+    opacity: 0;
+    transition:
+      opacity 0.16s ease,
+      transform 0.16s ease;
+  }
+
+  .process-summary-icon :global(svg) {
+    display: block;
+  }
+
+  .process-summary-toggle:hover .process-summary-icon,
+  .process-summary-toggle:focus-visible .process-summary-icon,
+  .process-summary-toggle.expanded .process-summary-icon {
+    opacity: 1;
+  }
+
+  .process-summary-toggle.expanded .process-summary-icon {
+    transform: rotate(90deg);
   }
 
   .message-stack {
@@ -1854,6 +2061,51 @@
   }
 
   .thinking-toggle:hover { color: var(--text); }
+
+  .thinking-complete-static,
+  .thinking-stream-line {
+    color: var(--text-muted);
+    font-size: 0.7rem;
+    line-height: 1.4;
+  }
+
+  .thinking-stream-line {
+    max-width: min(720px, 100%);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    background:
+      linear-gradient(
+        90deg,
+        var(--text-subtle) 0%,
+        var(--text-muted) 42%,
+        var(--text) 50%,
+        var(--text-muted) 58%,
+        var(--text-subtle) 100%
+      );
+    background-size: 240% 100%;
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+    animation: thinking-stream-shimmer 2.4s linear infinite;
+  }
+
+  @keyframes thinking-stream-shimmer {
+    from { background-position: 120% 0; }
+    to { background-position: -120% 0; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .thinking-stream-line {
+      animation: none;
+      background: none;
+      color: var(--text-muted);
+    }
+  }
+
+  .thinking-content-panel {
+    overflow: hidden;
+  }
 
   .thinking-block :global(.thinking-content) {
     margin: 0;
