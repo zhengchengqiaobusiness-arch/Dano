@@ -255,12 +255,29 @@ describe("deploy compose wrapper", () => {
     writeFileSync(
       join(sessionDir, "session.jsonl"),
       [
-        JSON.stringify({ type: "toolCall", name: "bash" }),
         JSON.stringify({
-          role: "toolResult",
-          toolName: "bash",
-          isError: false,
-          content: [{ type: "text", text: "DANO_BASH_OK" }],
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "tool-1",
+                name: "bash",
+                arguments: { command: "printf DANO_BASH_OK" },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "tool-1",
+            toolName: "bash",
+            isError: false,
+            content: [{ type: "text", text: "DANO_BASH_OK" }],
+          },
         }),
         "",
       ].join("\n"),
@@ -356,12 +373,29 @@ describe("deploy compose wrapper", () => {
     writeFileSync(
       join(runtimeDir, "session.jsonl"),
       [
-        JSON.stringify({ type: "toolCall", name: "bash" }),
         JSON.stringify({
-          role: "toolResult",
-          toolName: "bash",
-          isError: true,
-          content: "bwrap must be installed setuid",
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "tool-1",
+                name: "bash",
+                arguments: { command: "printf DANO_BASH_OK" },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "tool-1",
+            toolName: "bash",
+            isError: true,
+            content: [{ type: "text", text: "bwrap must be installed setuid" }],
+          },
         }),
         "",
       ].join("\n"),

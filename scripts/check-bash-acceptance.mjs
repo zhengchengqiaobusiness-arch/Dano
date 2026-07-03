@@ -38,6 +38,16 @@ function textOf(value) {
   return "";
 }
 
+function messageOf(entry) {
+  return entry?.type === "message" && entry.message ? entry.message : entry;
+}
+
+function bashToolCalls(message) {
+  if (message?.type === "toolCall" && message.name === "bash") return [message];
+  if (message?.role !== "assistant" || !Array.isArray(message.content)) return [];
+  return message.content.filter(block => block?.type === "toolCall" && block.name === "bash");
+}
+
 function jsonlFiles(path) {
   const stat = statSync(path);
   if (stat.isDirectory()) {
@@ -75,6 +85,7 @@ let sawBashCall = false;
 let sawSuccessfulResult = false;
 let sawBwrapError = false;
 let sawMarker = !marker;
+const bashToolCallIds = new Set();
 
 for (const file of jsonlFiles(root)) {
   if (since !== undefined && statSync(file).mtimeMs < since) continue;
@@ -94,10 +105,20 @@ for (const file of jsonlFiles(root)) {
     }
 
     if (marker && textOf(entry).includes(marker)) sawMarker = true;
-    if (entry.type === "toolCall" && entry.name === "bash") sawBashCall = true;
-    if (entry.role === "toolResult" && entry.toolName === "bash") {
-      const content = textOf(entry.content);
-      if (entry.isError === false && content.includes(expected)) {
+    const message = messageOf(entry);
+    const toolCalls = bashToolCalls(message);
+    if (toolCalls.length > 0) {
+      sawBashCall = true;
+      for (const toolCall of toolCalls) {
+        if (typeof toolCall.id === "string") bashToolCallIds.add(toolCall.id);
+      }
+    }
+    if (
+      message.role === "toolResult" &&
+      (message.toolName === "bash" || bashToolCallIds.has(message.toolCallId))
+    ) {
+      const content = textOf(message.content);
+      if (message.isError === false && content.includes(expected)) {
         sawSuccessfulResult = true;
       }
       if (bwrapError.test(content)) sawBwrapError = true;
