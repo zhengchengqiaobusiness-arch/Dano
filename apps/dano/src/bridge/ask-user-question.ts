@@ -46,7 +46,7 @@ const askUserQuestionAnswerSchema = Type.Union([
 });
 
 const groupedRetryError =
-  "You called ask_user_question more than once in the same response, so the previous question call was cancelled. Retry silently with exactly one native ask_user_question call using {\"questions\":[...]} so all fields render in one card with one submit button. When using questions, omit top-level question, options, multiple, default, and confirm. Do not explain this correction to the user.";
+  "You called ask_user_question more than once in the same response while another question is still pending. Retry silently with exactly one native ask_user_question call using {\"questions\":[...]} so all fields render in one card with one submit button. When using questions, omit top-level question, options, multiple, default, and confirm. Do not explain this correction to the user.";
 
 const mixedGroupedFieldsError =
   "Invalid ask_user_question call: when using questions, the top level may contain only questions. Move question, options, inputType, dateFormat, required, dataSource, multiple, and default into each questions[] item. Do not include top-level question, options, inputType, dateFormat, required, dataSource, multiple, default, or confirm with questions. Retry silently; do not explain this correction to the user.";
@@ -108,7 +108,8 @@ const askUserQuestionFields = {
   input_type: Type.Optional(Type.String({ minLength: 1 })),
   component: Type.Optional(Type.String({ minLength: 1 })),
   dateFormat: Type.Optional(
-    Type.Any({
+    Type.String({
+      minLength: 1,
       description:
         "Required when inputType is \"date\". A frontend date-control format such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\".",
     }),
@@ -124,7 +125,7 @@ const askUserQuestionFields = {
   multi: Type.Optional(Type.Boolean()),
   multipleSelect: Type.Optional(Type.Boolean()),
   required: Type.Optional(
-    Type.Any({
+    Type.Boolean({
       description:
         "Set true to require a non-empty answer. Defaults to false.",
     }),
@@ -248,9 +249,7 @@ class AskUserQuestionCoordinator {
       return Promise.reject(new Error("Question is required"));
     }
     if (this.pending.size > 0) {
-      const error = new Error(groupedRetryError);
-      this.rejectAll(error);
-      return Promise.reject(error);
+      return Promise.reject(new Error(groupedRetryError));
     }
     if (request.confirm && (request.options || request.multiple || request.questions || request.dataSource)) {
       return Promise.reject(
@@ -512,13 +511,13 @@ function normalizeRequestQuestions(
   if (request.questions !== undefined) {
     if (
       request.question ||
-      request.options ||
+      request.options !== undefined ||
       request.inputType ||
       request.dateFormat !== undefined ||
       request.dataSource ||
-      request.multiple ||
+      request.multiple !== undefined ||
       request.required !== undefined ||
-      request.default ||
+      request.default !== undefined ||
       request.confirm
     ) {
       return mixedGroupedFieldsError;

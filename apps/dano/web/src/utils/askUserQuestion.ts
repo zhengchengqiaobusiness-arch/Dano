@@ -159,6 +159,19 @@ export function askUserQuestionRequest(
   const toolArgs = normalizeCompatibleArgs(block.toolArgs);
   const rawQuestions = toolArgs.questions;
   if (rawQuestions !== undefined) {
+    if (
+      toolArgs.question ||
+      toolArgs.options !== undefined ||
+      toolArgs.inputType ||
+      toolArgs.dateFormat !== undefined ||
+      toolArgs.dataSource ||
+      toolArgs.multiple !== undefined ||
+      toolArgs.required !== undefined ||
+      toolArgs.default !== undefined ||
+      toolArgs.confirm
+    ) {
+      return null;
+    }
     if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) return null;
     const seenIds = new Set<string>();
     const questions: AskUserQuestionItem[] = [];

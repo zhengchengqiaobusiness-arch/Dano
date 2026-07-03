@@ -463,6 +463,26 @@ describe("ask_user_question tool", () => {
     ).rejects.toThrow("默认日期必须匹配 dateFormat: yyyy-MM-dd");
   });
 
+  it("rejects non-boolean required values", async () => {
+    await expect(
+      executeQuestion("required-string", {
+        question: "Start date?",
+        inputType: "date",
+        dateFormat: "yyyy-MM-dd",
+        required: "true",
+      }),
+    ).rejects.toThrow("required must be a boolean");
+  });
+
+  it("rejects dateFormat on non-date questions", async () => {
+    await expect(
+      executeQuestion("text-date-format", {
+        question: "Reason?",
+        dateFormat: "yyyy-MM-dd",
+      }),
+    ).rejects.toThrow("dateFormat is only allowed");
+  });
+
   it("returns multiple selected options", async () => {
     const execution = executeQuestion("multiple-1", {
       question: "Choose environments",
@@ -641,6 +661,38 @@ describe("ask_user_question tool", () => {
     });
   });
 
+  it("returns grouped date answers from one valid batch card", async () => {
+    const execution = askUserQuestionTool.execute(
+      "group-date",
+      {
+        questions: [
+          {
+            id: "start_at",
+            question: "Start date?",
+            inputType: "date",
+            dateFormat: "yyyy-MM-dd",
+            required: true,
+          },
+          { id: "reason", question: "Reason?", required: true },
+        ],
+      },
+      undefined,
+      undefined,
+      {} as never,
+    );
+
+    askUserQuestionCoordinator.answer("group-date", {
+      cancelled: false,
+      answer: { start_at: "2026-07-03", reason: "Annual leave" },
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: {
+        status: "answered",
+        answer: { start_at: "2026-07-03", reason: "Annual leave" },
+      },
+    });
+  });
+
   it("accepts compatible single-question object and alias fields", async () => {
     const execution = askUserQuestionTool.execute(
       "compat-single-object",
@@ -697,7 +749,7 @@ describe("ask_user_question tool", () => {
     });
   });
 
-  it("rejects simultaneous separate questions so the model retries as one grouped card", async () => {
+  it("rejects a retry question without cancelling the pending form", async () => {
     const first = executeQuestion("separate-1", {
       question: "Leave type?",
       options: ["Annual", "Sick"],
@@ -711,27 +763,37 @@ describe("ask_user_question tool", () => {
 
     await expect(second).rejects.toThrow("exactly one native ask_user_question call");
     await expect(second).rejects.not.toThrow("waiting");
-    await expect(first).rejects.toThrow("exactly one native ask_user_question call");
-    await expect(first).rejects.not.toThrow("waiting");
-    expect(() =>
-      askUserQuestionCoordinator.answer("separate-1", {
-        cancelled: false,
-        answer: "Annual",
-      }),
-    ).toThrow("Pending question not found");
+    askUserQuestionCoordinator.answer("separate-1", {
+      cancelled: false,
+      answer: "Annual",
+    });
+    await expect(first).resolves.toMatchObject({
+      details: { status: "answered", answer: "Annual" },
+    });
   });
 
-  it("explains how to fix grouped calls that mix top-level question fields", async () => {
+  it.each([
+    ["question", { question: "Leave details?" }],
+    ["options", { options: ["A", "B"] }],
+    ["inputType", { inputType: "date" }],
+    ["dateFormat", { dateFormat: "yyyy-MM-dd" }],
+    ["dataSource", { dataSource: { type: "api", endpoint: "/api/options" } }],
+    ["multiple false", { multiple: false }],
+    ["required false", { required: false }],
+    ["empty default", { default: "" }],
+    ["zero default", { default: 0 }],
+    ["false default", { default: false }],
+    ["confirm", { confirm: true }],
+  ])("explains how to fix grouped calls that mix top-level %s", async (_, mixed) => {
     await expect(
       askUserQuestionTool.execute(
         "group-mixed",
         {
-          question: "Leave details?",
-          default: "事假",
+          ...mixed,
           questions: [
             { id: "leave_type", question: "Leave type?", default: "事假" },
           ],
-        },
+        } as never,
         undefined,
         undefined,
         {} as never,
