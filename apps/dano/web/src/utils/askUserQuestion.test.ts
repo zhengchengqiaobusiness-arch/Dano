@@ -59,6 +59,45 @@ describe("ask user question transcript data", () => {
     });
   });
 
+  it("parses a date question with a required format", () => {
+    expect(
+      askUserQuestionRequest(
+        block({
+          question: "Start time?",
+          inputType: "date",
+          dateFormat: "yyyy-MM-dd HH:mm",
+          required: true,
+          default: "2026-07-03 09:30",
+        }),
+      ),
+    ).toEqual({
+      batch: false,
+      id: "answer",
+      kind: "date",
+      question: "Start time?",
+      dateFormat: "yyyy-MM-dd HH:mm",
+      required: true,
+      default: "2026-07-03 09:30",
+    });
+  });
+
+  it("parses custom dateFormat strings without forcing one display format", () => {
+    expect(
+      askUserQuestionRequest(
+        block({
+          question: "Start time?",
+          inputType: "date",
+          dateFormat: "yyyy/MM/dd HH:mm",
+          default: "2026/07/03 09:30",
+        }),
+      ),
+    ).toMatchObject({
+      kind: "date",
+      dateFormat: "yyyy/MM/dd HH:mm",
+      default: "2026/07/03 09:30",
+    });
+  });
+
   it("detects pending native question cards that can be cancelled on page unload", () => {
     expect(isPendingAskUserQuestionBlock(block({ question: "Name?" }))).toBe(true);
     expect(
@@ -164,6 +203,12 @@ describe("ask user question transcript data", () => {
               multiple: true,
               default: ["Chat"],
             },
+            {
+              id: "start_at",
+              question: "Start time?",
+              inputType: "date",
+              dateFormat: "yyyy-MM-dd",
+            },
           ],
         }),
       ),
@@ -190,6 +235,12 @@ describe("ask user question transcript data", () => {
             { id: "Deploy", label: "Deploy" },
           ],
           default: ["Chat"],
+        },
+        {
+          id: "start_at",
+          kind: "date",
+          question: "Start time?",
+          dateFormat: "yyyy-MM-dd",
         },
       ],
     });
@@ -352,6 +403,28 @@ describe("ask user question transcript data", () => {
     ).toBeNull();
     expect(
       askUserQuestionRequest(block({ question: "Choose?", multiple: true })),
+    ).toBeNull();
+    expect(
+      askUserQuestionRequest(block({ question: "When?", inputType: "date" })),
+    ).toBeNull();
+    expect(
+      askUserQuestionRequest(
+        block({
+          question: "When?",
+          inputType: "date",
+          dateFormat: "yyyy-MM-dd HH:mm:ss",
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      askUserQuestionRequest(
+        block({ question: "When?", inputType: "date", dateFormat: "yyyy-MM-dd", required: "yes" }),
+      ),
+    ).toBeNull();
+    expect(
+      askUserQuestionRequest(
+        block({ question: "Name?", dateFormat: "yyyy-MM-dd" }),
+      ),
     ).toBeNull();
     expect(
       askUserQuestionRequest(

@@ -17,7 +17,10 @@
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.80.2",
+    "@internationalized/date": "^3.12.2",
     "@josephyoung/pi-heimdall": "0.2.14",
+    "bits-ui": "^2.18.1",
+    "date-fns": "^4.4.0",
     "typebox": "1.2.7"
   },
   "devDependencies": {

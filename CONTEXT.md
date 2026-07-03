@@ -20,6 +20,14 @@ _Avoid_: detached session, user prompt, field workflow, preview candidate
 The single project folder Dano gives to Pi for one Dano session. Dano may know the owning user and session, but Pi only sees this folder as its current project.
 _Avoid_: chat workspace, user workspace, project folder
 
+**Browser Date Value**:
+The value submitted by an `ask_user_question` date control after the frontend date component applies its configured format. Dano returns this user answer to the model as submitted and does not normalize it in the Dano Bridge.
+_Avoid_: native date value, backend-normalized date, bridge date
+
+**Date Format**:
+A required model-provided argument on an `ask_user_question` date field that configures the frontend date control's display and output format.
+_Avoid_: model-only metadata, backend date parser, business date conversion
+
 **Uploaded Project File**:
 A user-selected file that Dano stores inside the current Runtime Workspace and presents to Pi as a project file path reference. The browser may show the user's original filename, but Pi consumes the workspace-relative path.
 _Avoid_: image attachment, temporary upload blob, base64 file payload
