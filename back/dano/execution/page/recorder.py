@@ -39,7 +39,7 @@ _RECORDER_JS = r"""() => {
   window.__danoRecorderInstalled = true;
   // 通用语义引擎(与框架/语言/公司无关):ARIA role + accessible name 优先,文本/属性兜底。
   // 不按标签/class 白名单,故 Element-UI / Ant Design / 原生 / 任意自定义控件一视同仁。
-  var SUBMIT = ['提交','保存','确定','确认','申请','发起','送出','申报','submit','save','ok','confirm','apply'];
+  var SUBMIT = ['提交','保存','确定','确认','申请','发起','送出','申报','通过','归档','完单','审核','立案','接单','发布','完成','结案','结算','新建','新增','编辑','更新','导入','导出','打印','submit','save','ok','confirm','apply','approve','finish','archive','review'];
   var TESTID = ['data-testid','data-test','data-test-id','data-cy','data-qa'];
   var INTERACTIVE = {button:1,link:1,menuitem:1,menuitemcheckbox:1,menuitemradio:1,tab:1,option:1,
                      checkbox:1,radio:1,switch:1,treeitem:1};
@@ -135,7 +135,7 @@ _RECORDER_JS = r"""() => {
       var nodes = pop.querySelectorAll(sel); var out = [], seen = {};
       for (var i = 0; i < nodes.length; i++) {
         var n = nodes[i];
-        if (n.offsetParent === null) continue;                      // 不可见(折叠的级联子层)跳过
+        if (n.offsetParent === null && (function () { try { return getComputedStyle(n).position !== 'fixed'; } catch (_) { return true; } })()) continue;  // 不可见(折叠的级联子层/隐藏)跳过;但 Ant Design v5 position:fixed 选项不漏(它脱离 normal flow)
         var t = clean(n.innerText || n.textContent || '');
         if (t && t.length <= 60 && !seen[t]) { seen[t] = 1; out.push(t); }
         if (out.length >= 500) break;
@@ -164,8 +164,15 @@ _RECORDER_JS = r"""() => {
   }
   document.addEventListener('input', function (e) {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
+    // 密码/支付敏感字段绝不录(M-A2):密码框、信用卡号、CVC、有效期、卡名、银行账号等
+    if (tag === 'input' && ty === 'password') return;
+    var ac = (el.getAttribute && (el.getAttribute('autocomplete') || '') + '').toLowerCase();
+    if (ac && /(cc-|card|cvv|cvc|exp|iban|account-number)/.test(ac)) return;     // 信用卡/银行账号属性
+    // 已知 sensitive class / id 模式
+    var sig = ((el.id || '') + ' ' + (el.name || '') + ' ' + (el.className || '')).toLowerCase();
+    if (/(credit.?card|card.?no|cvv|cvc|secret.?code|pay.?password|bank.?account)/.test(sig)) return;
     // 密码框绝不录(安全);非文本类型跳过
-    if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','password','hidden'].indexOf(ty) < 0)) {
+    if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) {
       var loc = locateField(el); emit('fill', loc, el.value, fieldOf(loc), requiredOf(el));
     }
   }, true);
@@ -197,13 +204,38 @@ _RECORDER_JS = r"""() => {
     if (!trig) return '';
     var inp = trig.querySelector ? trig.querySelector('input') : null;
     var v = inp ? clean(inp.value) : '';
-    return v || clean((trig.innerText || ''));
+    if (!v && inp) {                                       // H4+H10 修复:input.value 为空时,优先读 aria-valuetext / title(Element Plus/Ant Design 把选中值放这里)
+        v = clean(inp.getAttribute('aria-valuetext') || inp.getAttribute('title') || '');
+    }
+    if (!v) {                                              // 兜底:读 innerText,但过滤 placeholder 灰色文本(否则与 prevVal 永远相等,pollPick 超时放弃)
+        var txt = clean(trig.innerText || '');
+        // M-A1 修复:用真正常见的 placeholder 选择器 + opacity < 0.6 + Element Plus `el-select__placeholder` 类
+        // 框架透明色文本占位符在 Ant Design v5 是独立 span(opacity < 0.5);Element Plus 用 `.el-select__placeholder`(默认隐藏层)
+        var sels = '[class*="placeholder" i],[class*="el-select__placeholder"],[placeholder]';
+        var placeholders = trig.querySelectorAll ? trig.querySelectorAll(sels) : [];
+        for (var i = 0; i < placeholders.length; i++) {
+            try {
+                var ph_el = placeholders[i];
+                var op = getComputedStyle(ph_el).opacity;
+                var isPlaceholder = (op && parseFloat(op) < 0.6)
+                    || (ph_el.tagName === 'INPUT' && ph_el.value === '' && ph_el.getAttribute('placeholder'))
+                    || /el-select__placeholder/.test(ph_el.className || '');
+                if (isPlaceholder) {
+                    var ph = clean(ph_el.textContent || ph_el.getAttribute('placeholder') || '');
+                    if (ph && txt.indexOf(ph) >= 0) txt = txt.split(ph).join('');
+                }
+            } catch (_) { /* 跨域元素跳过 */ }
+        }
+        v = clean(txt);
+    }
+    return v;
   }
   // 选中值落定检测:**不靠固定延时**,轮询显示值直到变成「非空且与点击前不同」才记 pick
   // —— 异步/远程搜索/级联(值晚一点回填)也能稳抓,不会读太早拿空值而漏掉(框架无关)。
   function pollPick(trig) {
     if (pickTimer) { clearInterval(pickTimer); pickTimer = null; }
     if (!trig) return;
+    lastPickOptions = [];                                 // H9 修复:启动即清,避免快速切换两个下拉时旧 timer 用新值错位
     var tries = 0;
     pickTimer = setInterval(function () {
       tries++;
@@ -213,7 +245,6 @@ _RECORDER_JS = r"""() => {
         var inp = trig.querySelector ? trig.querySelector('input') : null;
         var loc = locateField(inp || trig);
         if (loc) emit('pick', loc, v, fieldOf(loc), requiredOf(trig) || (inp && requiredOf(inp)), lastPickOptions);
-        lastPickOptions = [];                           // 用过即清,下一个下拉重新抓
       } else if (tries >= 25) { clearInterval(pickTimer); pickTimer = null; }   // ~2.5s 仍没变 → 放弃
     }, 100);
   }
@@ -309,6 +340,8 @@ class RecordSession:
         # 新页面(target=_blank / window.open / 弹窗)→ **跟随它**:设为活动页 + 把截屏切过去(否则用户看不到=打不开)
         self._context.on("page", lambda p: asyncio.create_task(self._on_new_page(p)))
         self.page = await self._context.new_page()
+        # C1 修复:主 page 创建后**立刻**挂诊断(否则首屏 console/pageerror/requestfailed 全失)
+        self._attach_diag_handlers(self.page)
         # SPA 常不触发 "load"(长连接/轮询挂着)→ 用 domcontentloaded,否则 goto 卡到超时(与运行期 driver 一致)
         await self.page.goto(full, wait_until="domcontentloaded")
 
@@ -491,12 +524,19 @@ class RecordSession:
                 hd = dict(request.headers or {})
             except Exception:  # noqa: BLE001
                 pass
+            ct = hd.get("content-type", "")
             # P0-1:GET 也落 all_requests(全量捕获)。后续 P0-3 依赖闭包要靠它发现"业务 GET 前置接口"。
-            self._record_all(m, url, pd=pd, headers=hd, content_type=hd.get("content-type", ""))
+            self._record_all(m, url, pd=pd, headers=hd, content_type=ct)
+            # H7 修复:multipart/form-data 上传(文件/附件)必须真发,否则文件丢失但 UI 显示成功
+            # multipart body 不在 request.post_data,而在 post_data_buffer,pd 必为 None,自然走 continue_,但要
+            # 在此显式再判一次 content_type 兜底(部分框架 multipart 也会塞进 post_data)
+            if (ct or "").lower().startswith("multipart/"):
+                await route.continue_()
+                return
             # 业务写请求 → 抓下来,假装成功不真发;登录/鉴权/上传等基建写、以及 POST 形态的读/查询
             #(getXxxList/queryXxx:下拉/列表源)照常放行真发(否则录制时下拉/列表加载不出来,选不了值)
             if pd and not looks_like_auth_write(url, pd) and not looks_like_read_request(url):
-                self._capture(m, url, pd, hd.get("content-type", ""), hd)
+                self._capture(m, url, pd, ct, hd)
                 await route.fulfill(status=200, content_type="application/json",
                                     body=self._success_envelope())
                 return
@@ -650,6 +690,13 @@ class RecordSession:
     # ── 截屏流(跟随活动页:用户点开新标签/弹窗时切过去)──
     async def start_screencast(self, on_frame: Callable[[str], Awaitable[None]]) -> None:
         self._on_frame = on_frame
+        # H6 修复:重连 / 多次调用前先 detach 旧 CDP session,避免新 session 收帧 + 旧 session 句柄泄漏
+        if self._cdp is not None:
+            try:
+                await self._cdp.detach()
+            except Exception:  # noqa: BLE001
+                pass
+            self._cdp = None
         await self._open_screencast()
 
     async def _open_screencast(self) -> None:

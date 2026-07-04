@@ -167,8 +167,8 @@ class PageActionRuntime:
             ok = await driver.visible(loc) if loc else True
         else:
             return False, f"未知页面操作 op={op}"
-        # 逐步元素断言:执行后该元素须可见
-        if ok and action.assert_visible and loc:
+        # 逐步元素断言:执行后该元素须可见(H27 修复:wait/verify op 本身已做可见性检查,跳过避免重复 + Evidence 矛盾)
+        if ok and action.assert_visible and loc and op not in ("wait", "verify"):
             ok = await driver.visible(loc)
             if not ok:
                 return False, f"断言失败:{loc} 不可见"

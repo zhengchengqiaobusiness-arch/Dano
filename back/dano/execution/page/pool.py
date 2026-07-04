@@ -66,6 +66,9 @@ class BrowserPool:
 
 
 _POOL: BrowserPool | None = None
+# H28 修复:进程内单例销毁过程加锁。get_browser_pool 是同步入口,不能 await 锁;
+# shutdown 期间不提前清空 _POOL,避免并发 get 看到 None 后新建第二个池。
+_POOL_LOCK = asyncio.Lock()
 
 
 def get_browser_pool(*, headless: bool = True) -> BrowserPool:
@@ -77,8 +80,9 @@ def get_browser_pool(*, headless: bool = True) -> BrowserPool:
 
 
 async def shutdown_browser_pool() -> None:
-    """网关关停时调用,释放常驻浏览器。"""
+    """网关关停时调用,释放常驻浏览器。H28:关闭完成后再清空单例。"""
     global _POOL
-    if _POOL is not None:
-        await _POOL.shutdown()
-        _POOL = None
+    async with _POOL_LOCK:
+        if _POOL is not None:
+            await _POOL.shutdown()
+            _POOL = None

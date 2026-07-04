@@ -6,11 +6,13 @@
 
 本模块是纯函数(不碰浏览器),便于离线测试。
 """
-
 from __future__ import annotations
 
 import datetime as _dt
 import json
+import logging
+
+_log = logging.getLogger("dano.request_capture")
 import re as _re
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -235,22 +237,31 @@ def _tokens_to_str(toks) -> str:
     return out
 
 
-def _find_value_tokens(node, value, toks=None):
+def _find_value_tokens(node, value, toks=None, expected_type: str | None = None):
     """在 node 里找一个叶子值 == value 的 **tokens 路径**(深度优先,第一个)。无则 None。
 
-    与 _find_value_path 同义,但返回真实分段列表 → 读响应取值时键含点也无歧义。"""
+    与 _find_value_path 同义,但返回真实分段列表 → 读响应取值时键含点也无歧义。
+    H13 修复:expected_type 限定叶子值类型(int/str/bool/float),防 int/str 撞值(如 10 位时间戳 vs 字符串 hash)。
+    """
     toks = toks or []
     if isinstance(node, dict):
         for k, v in node.items():
-            r = _find_value_tokens(v, value, toks + [k])
+            r = _find_value_tokens(v, value, toks + [k], expected_type)
             if r is not None:
                 return r
     elif isinstance(node, list):
         for i, v in enumerate(node):
-            r = _find_value_tokens(v, value, toks + [i])
+            r = _find_value_tokens(v, value, toks + [i], expected_type)
             if r is not None:
                 return r
     elif node is not None and not isinstance(node, bool) and str(node) == str(value):
+        if expected_type:
+            actual = ("bool" if isinstance(node, bool)
+                      else "int" if isinstance(node, int) and not isinstance(node, bool)
+                      else "float" if isinstance(node, float)
+                      else "str")
+            if actual != expected_type:
+                return None                                    # 类型不匹配 → 不算命中(防撞值)
         return toks or None
     return None
 
@@ -259,7 +270,8 @@ def discover_step_links(writes: list[dict]) -> list[dict]:
     """有序写请求(含 response_json)→ 步间数据流(Q3):某步 body 的值 == 更早某步「响应」里的值 → step: 链。
 
     返回 [{target_step, target_path, source_step, source_path}]。如第2步 flowTask.taskId 来自第1步响应 data.taskId。
-    只认 ≥4 长的值,避免 0/1/短码误连。通用,不挑系统。
+    H13 修复:阈值保持 4(短 taskId 如 T-777/P-1/U-123 是常见长度,提到 6 会把真实工作流链路打掉);同时校验
+    value 类型匹配(int 不与字符串撞值,如 10 位时间戳 vs 字符串 hash),防误连。
     """
     bodies = [_parse_body(w.get("post_data")) for w in writes]
     links: list[dict] = []
@@ -267,19 +279,33 @@ def discover_step_links(writes: list[dict]) -> list[dict]:
         if body is None:
             continue
         for tpath, ttoks, tval, _raw in _leaf_paths(body):
-            if len(tval) < 4:
+            if len(tval) < 4:                              # 保持 4:短 taskId/uuid 前缀常见
                 continue
             for j in range(i):
                 resp = writes[j].get("response_json")
                 if resp is None:
                     continue
-                stoks = _find_value_tokens(resp, tval)
+                resp_unwrapped = _unwrap_json_strings(resp)   # H14 修复:stringified JSON 嵌套也要解开比对(Ruoyi 风格)
+                stoks = _find_value_tokens(resp_unwrapped, tval, expected_type=_raw_type(_raw))
                 if stoks is not None:
                     links.append({"target_step": i, "target_path": tpath, "target_tokens": ttoks,
                                   "source_step": j, "source_path": _tokens_to_str(stoks),
                                   "source_tokens": stoks})
                     break
     return links
+
+
+def _raw_type(raw) -> str:
+    """_leaf_paths 拆出的原始叶子类型(int/str/bool/float/other),用于 H13 防撞值。"""
+    if raw is None:
+        return "null"
+    if isinstance(raw, bool):
+        return "bool"
+    if isinstance(raw, int):
+        return "int"
+    if isinstance(raw, float):
+        return "float"
+    return "str"
 
 
 # 显示名(给人看的)字段提示;**登录名(username/account)排最后** —— 选人下拉里用户认的是"张三"而非"zhangsan",
@@ -696,7 +722,8 @@ _ASSIGNEE_CONTAINER_RE = _re.compile(
     r"(start_?user_?select_?assignees|assignees?|approvers?|candidate(?:users?|groups?)?)", _re.I)
 _BPMN_NODE_RE = _re.compile(r"^(activity|usertask|task|node|flow|gateway|sequenceflow|sid)[_-]", _re.I)
 # 流程定义读响应里"节点 ID"字段 / "节点名"字段的概念词(通用):
-_NODE_ID_RE = _re.compile(r"(^id$|node_?id|task_?id|act_?id|activity_?id|sid|element_?id)", _re.I)
+# H24 修复:收紧 "^id$" —— 之前全字匹配,会让普通 list 字段(下拉/选人列表的 id 列)值若凑巧是 Activity_xxx 被当 BPMN 节点名建索引,污染 node_names
+_NODE_ID_RE = _re.compile(r"(^node_?id$|^task_?id$|^act_?id$|^activity_?id$|^sid$|^element_?id$)", _re.I)
 _NODE_NAME_RE = _re.compile(r"(node_?name|task_?name|activity_?name|^name$|label|title|caption)", _re.I)
 
 
@@ -862,12 +889,19 @@ def list_read_requests(reads: list[dict]) -> list[dict]:
 
 def pick_submit_request(requests: list[dict], samples: dict) -> dict | None:
     """从抓到的请求里挑"提交请求"。**因果/值驱动,不挑系统**:提交 = 带最多用户填入值的那条业务写请求
-    (噪声如心跳/字典/自动存草稿都不含用户填的值)。登录/鉴权写请求按内容排除。都不含用户值则取最后一条业务写请求。"""
+    (噪声如心跳/字典/自动存草稿都不含用户填的值)。登录/鉴权写请求按内容排除。
+
+    H17 修复:全 auth 过滤时 last_write=None(无 fallback)→ 退化到第一个写请求(避免前端选不到 submit,只能用户手工指定);
+    若 requests 列表本身空,返回 None(由调用方处理空状态)。
+    """
     sample_vals = {str(v) for v in samples.values() if v not in ("", None)}
     best, best_score, last_write = None, -1, None
+    first_write = None                                # H17:兜底用 —— 全过滤时仍能返回一个候选
     for r in requests:
         if (r.get("method") or "").upper() not in _WRITE:
             continue
+        if first_write is None:
+            first_write = r
         body = _parse_body(r.get("post_data"))
         if body is None:
             continue
@@ -878,7 +912,12 @@ def pick_submit_request(requests: list[dict], samples: dict) -> dict | None:
         score = len(sample_vals & vals)               # body 里命中几个用户填的值
         if score > best_score:
             best, best_score = r, score
-    return best if (best is not None and best_score > 0) else last_write
+    # 优先级:① best 命中用户值(score>0) ② last_write(非 auth 业务写,可能无用户值) ③ first_write(全过滤兜底) ④ None
+    if best is not None and best_score > 0:
+        return best
+    if last_write is not None:
+        return last_write
+    return first_write                                 # H17:全 auth / 全过滤时退化到第一个写
 
 
 def suggest_workflow_steps(writes: list[dict], samples: dict) -> list[int]:
@@ -933,19 +972,25 @@ def parameterize_request(req: dict, samples: dict, base_url: str = "") -> dict |
     val2field = {str(v): k for k, v in samples.items() if v not in ("", None)}
     params: dict[str, str] = {}
 
-    def walk(node):
+    def walk(node, provenance: list | None = None, path: str = ""):
         if isinstance(node, dict):
-            return {k: walk(v) for k, v in node.items()}
+            return {k: walk(v, provenance, f"{path}.{k}" if path else k) for k, v in node.items()}
         if isinstance(node, list):
-            return [walk(x) for x in node]
+            return [walk(x, provenance, f"{path}[{i}]") for i, x in enumerate(node)]
         sv = str(node)
         if sv in val2field:                            # 这个值是用户填的 → 变参数
             f = val2field[sv]
             params[f] = sv
+            if provenance is not None:
+                provenance.append({"path": path, "field": f, "kind": "user_input", "source": "sample"})
             return "{{" + f + "}}"
+        # H15 修复:常量/内部 ID 也记入 provenance,审计可追溯"为什么这个字段没被参数化"
+        if provenance is not None and path:
+            provenance.append({"path": path, "field": None, "kind": "constant", "source": "raw_value"})
         return node                                    # 内部 ID/常量 → 原样保留
 
-    templ = walk(body)
+    provenance: list[dict] = []                       # H15:全字段溯源数组,前端/修复期可见
+    templ = walk(body, provenance)
     url = req.get("url") or ""
     path = url
     if base_url and url.startswith(base_url):
@@ -957,13 +1002,19 @@ def parameterize_request(req: dict, samples: dict, base_url: str = "") -> dict |
     return {"method": (req.get("method") or "POST").upper(), "path": path, "url": url,
             "content_type": req.get("content_type", "application/json"),
             "body_template": templ, "params": list(params.keys()),
-            "sample_inputs": params, "auth_headers": extract_auth_headers(req.get("headers"))}
+            "sample_inputs": params, "auth_headers": extract_auth_headers(req.get("headers")),
+            "provenance": provenance}                  # H15 修复:全字段溯源(用户值+常量都记),供接口图全追溯
 
 
 # key 像内部标识(默认不当参数):以 id/key/code/token/... 结尾
 _ID_KEY = _re.compile(r"(id|key|code|token|uuid|guid|seq|no|flag|status)$", _re.I)
 # key 像日期/时间(即便值是 13 位毫秒时间戳,也该当参数,不能被"长数字"规则误判成常量)
-_TIME_KEY = _re.compile(r"(time|date|day|start|end|begin|expire|deadline|datetime)", _re.I)
+# H11 修复:中文 OA 系统常用「创建时间/更新时间/申请时间」等,必须一并识别 —— 否则会按"长数字常量"漏判成系统常量,运行期写入录制时刻
+_TIME_KEY = _re.compile(
+    r"(time|date|day|start|end|begin|expire|deadline|datetime"
+    r"|创建时间|更新时间|修改时间|提交时间|申请时间|开始时间|结束时间|生效时间|失效时间|过期时间|操作时间|发起时间|审批时间|完成时间|截止时间)",
+    _re.I,
+)
 
 
 def _is_const_value(v) -> bool:
@@ -982,7 +1033,9 @@ def _is_const_value(v) -> bool:
 # **用户挑选的日期**(startTime/endTime/beginTime/applyDate/leaveDate…)绝不在此列,不能被 now 覆盖(否则改坏用户选的日期)。
 _SYS_TIME_KEY = _re.compile(
     r"(create|created|submit|submitted|update|updated|modif|gmt|insert|record|audit|oper|sync|"
-    r"add_?time|reg_?time|log_?time|last_?time)", _re.I)
+    r"add_?time|reg_?time|log_?time|last_?time"
+    # H12 修复:中文 OA 系统常把系统写入时间命名为「创建时间/更新时间」,若同时是 13 位时间戳,应判为系统时间(运行期填 now),不参数化
+    r"|创建时间|更新时间|修改时间|提交时间|操作时间|发起时间)", _re.I)
 
 
 def _is_system_timestamp(key: str, value) -> bool:
@@ -1588,21 +1641,31 @@ def _get_by_path(node, path: str):
         try:
             node = node[k]
         except Exception:  # noqa: BLE001
+            # H18 修复:路径不可达时记 debug 日志,便于排查"参数找不到 → 运行期 None 静默注入"
+            _log.debug("get_by_path miss path=%r k=%r", path, k)
             return None
     return node
 
 
-def _set_by_path(node, path: str, value) -> None:
-    ks = _split_path(path)
+def _set_by_path(node, path, value) -> bool:
+    """返回是否写入成功(C5 修复:不再静默吞所有异常,区分 KeyError(路径错)与 TypeError(节点非容器))。
+
+    path 可为 str('a.b.c')、list/tuple(['a','b','c'])。失败原因会作为 audit 项返回给 _identity_audit。
+    """
+    if isinstance(path, (list, tuple)):
+        ks = list(path)
+    else:
+        ks = _split_path(path)
     for k in ks[:-1]:
         try:
             node = node[k]
-        except Exception:  # noqa: BLE001
-            return
+        except (KeyError, IndexError, TypeError):
+            return False                                     # 路径不可达 / 中间节点不是容器
     try:
         node[ks[-1]] = value
-    except Exception:  # noqa: BLE001
-        pass
+        return True
+    except (KeyError, IndexError, TypeError):
+        return False
 
 
 def resolve_identity_value(source: str, storage_state: dict | None, auth_headers: dict | None = None):
@@ -1638,12 +1701,19 @@ def resolve_identity_value(source: str, storage_state: dict | None, auth_headers
     return None
 
 
-def _apply_identity(body, api_request: dict, storage_state: dict | None) -> None:
-    """把 identity 字段在运行期用会话里的当前用户值覆盖(不冻结成录制者)。"""
+def _apply_identity(body, api_request: dict, storage_state: dict | None) -> list[str]:
+    """把 identity 字段在运行期用会话里的当前用户值覆盖(不冻结成录制者)。
+
+    返回写入失败路径列表(C5 修复:不再完全静默,让 _identity_audit 能区分"路径不可达"与"值没解析到")。
+    """
+    failed: list[str] = []
     for idn in api_request.get("identity") or []:
         val = resolve_identity_value(idn.get("source", ""), storage_state, api_request.get("auth_headers"))
         if val is not None:
-            _set_by_path(body, idn.get("tokens") or idn.get("path", ""), val)   # tokens 优先(键含点也无歧义)
+            path = idn.get("tokens") or idn.get("path", "")   # tokens 优先(键含点也无歧义)
+            if not _set_by_path(body, path, val):
+                failed.append(path)                            # 路径不可达 → 入失败清单
+    return failed
 
 
 def _apply_system_values(body, api_request: dict) -> None:
@@ -2043,10 +2113,15 @@ def _auth_headers(storage_state: dict | None, host: str, token_key: str | None =
 
     for c in storage_state.get("cookies") or []:
         cd = (c.get("domain") or "").lstrip(".")
-        if host and cd and cd not in host and host not in cd:
+        # C4 修复:严格后缀匹配(避免 "evil.com" ⊂ "myevil.com" 的子串撞名 → 跨域带 cookie)
+        # 允许:host==cd(主域) 或 host 以 ".cd" 结尾(子域)。其余一律不带。
+        # 注意:合法的子域(如 amazon.cn.com 之于 .cn.com、a.b.example.com 之于 .example.com)依然正确放行。
+        if host and cd and host != cd and not host.endswith("." + cd):
             continue
         name, val = c.get("name", ""), c.get("value", "")
-        pairs.append(f"{name}={val}")
+        # H16 修复:cookie value 含 `=`/`,`/`;`/`"` 会破坏 Cookie 头(标准要求 semicolon 拆分),必须 quote
+        from urllib.parse import quote
+        pairs.append(f"{name}={quote(val, safe='')}")
         consider(name, val)
     if not tok_explicit:
         for o in storage_state.get("origins") or []:
@@ -2236,18 +2311,37 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     body_template = api_request.get("body_template")
     body = substitute(body_template, fields, api_request.get("sample_inputs") or {}) if isinstance(body_template, (dict, list)) else None
     query = _render_query_template(api_request.get("query_template"), fields, api_request.get("sample_inputs") or {})
+    id_guarded: set[tuple] = set()
+    id_write_failures: list[str] = []
     if body is not None:
-        _apply_identity(body, api_request, storage_state)        # 当前用户/会话值运行期重取覆盖(此刻 blob 仍是嵌套结构)
+        id_write_failures = _apply_identity(body, api_request, storage_state)   # C5:返回写入失败路径清单
         _apply_system_values(body, api_request)                  # 系统时间戳(submitTime/createTime)运行期填 now,不焊死录制时刻
+        # C6 修复:收集所有 identity 字段路径(tuple 化),后续 overrides/sel_overrides 命中即跳过——避免
+        # 跨步 link 覆盖运行期身份(以录制者身份写入)。路径统一为 tuple 便于和 overrides 的 tuple key 对比
+        for idn in api_request.get("identity") or []:
+            raw = idn.get("tokens") or idn.get("path", "")
+            if not raw:
+                continue
+            if isinstance(raw, (list, tuple)):
+                id_guarded.add(tuple(str(x) for x in raw))
+            else:
+                id_guarded.add(tuple(_split_path(raw)))
         for toks, v in sel_overrides.items():                    # 名/ID 配对:把解析出的内部 id 写回配对 id 字段(不冻结)
+            if tuple(str(x) for x in toks) in id_guarded:        # C6:守护字段不覆盖
+                continue
             _set_by_path(body, list(toks), v)
     for p, v in (overrides or {}).items():                       # Q3:上一步响应值注入(taskId/appCode 等)
+        # C6 修复:overrides 命中 identity 守护路径即跳过 → 运行期身份不会被跨步 link 覆盖回录制者
+        if isinstance(p, tuple) and tuple(str(x) for x in p) in id_guarded:
+            continue
         query_tokens = _query_path_tokens(p)
         if query_tokens is not None:
             _set_by_path(query, query_tokens, v)
         elif body is not None:
             _set_by_path(body, p, v)
     id_issues = _identity_audit(body, api_request, storage_state) if send and body is not None else []   # 换身后置审计(blob 仍嵌套,可达)
+    if send and id_write_failures:                              # C5:身份字段写入失败 → 必拒(避免以录制者身份写入)
+        id_issues = list(id_issues) + [f"identity 字段路径不可达: {p}" for p in id_write_failures]
     body = _finalize_jsonstr(body) if body is not None else None  # identity/串联注入后,再把内层 JSON 压回字符串
     url = _merge_query_into_url(url, query)
     if not send:

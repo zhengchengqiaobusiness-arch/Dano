@@ -100,6 +100,18 @@ class IdentityBinding(BaseModel):
     value: str | None = None
 
 
+# H19 修复:显式白名单(替代 hasattr 兜底,防止越权改关键字段)
+_PARAM_ALLOWED_FIELDS = frozenset({
+    "category", "source_kind", "source", "label",
+    "reason", "confidence", "name_source",
+})
+_STEP_ALLOWED_FIELDS = frozenset({
+    "selects", "identity", "params", "sample_inputs",
+    "source_meta", "semantic_role", "success_rule", "fact_check",
+    "response_json", "notes",
+})
+
+
 class SystemValue(BaseModel):
     path: str
     tokens: list[str | int] | None = None
@@ -718,16 +730,22 @@ def _response_referenced_later(req: dict, trace: list[dict]) -> dict | None:
     response_values = [(p, v) for p, v in _response_values(req) if _useful_link_value(v)]
     if not response_values:
         return None
+    # H23 修复:把后续 trace 的值提前合并到一个 map(保留每个 value 第一次出现的 target + value),
+    # 避免每 later 重算;O(N+M) 比原 O(N²) 快一个量级。**source_path 必须保留 response 那一端的字段路径**(消费方依赖),
+    # 所以 path 在命中时再从 response_values 里取。
+    pool_values: dict[str, dict] = {}      # value → {target_url, target_method}
     for later in trace[pos + 1:]:
-        later_values = {v for _p, v in _request_values(later) if _useful_link_value(v)}
-        for path, value in response_values:
-            if value in later_values:
-                return {
-                    "source_path": path,
-                    "value": value,
+        for _p, v in _request_values(later):
+            if _useful_link_value(v) and v not in pool_values:
+                pool_values[v] = {
                     "target_url": later.get("url") or "",
                     "target_method": (later.get("method") or "").upper(),
                 }
+    for path, value in response_values:
+        hit = pool_values.get(value)
+        if hit is not None:
+            return {"source_path": path, "value": value,
+                    "target_url": hit["target_url"], "target_method": hit["target_method"]}
     return None
 
 
@@ -1515,8 +1533,27 @@ def _flow_step_query_template(step: FlowStep) -> tuple[dict[str, Any], list[str]
             if p.value not in (None, ""):
                 samples[name] = p.value
             field_types[name] = p.type
+        elif p.category == "runtime_var":                # H21 修复:runtime_var/identity 也参与 query 占位,运行期按 source_kind 注入
+            name = (p.key or query_key).strip()
+            if not name:
+                continue
+            query_template[query_key] = "{{" + name + "}}"
+            if name not in params:
+                params.append(name)
+            field_types[name] = p.type
         else:
             query_template[query_key] = p.value
+    # H21 修复:GET 步骤的 identity 字段(当前用户)强制以 query 占位暴露 —— 否则运行期 current_user 注入不到 URL
+    for idn in step.identity or []:
+        id_path = idn.path or ""
+        if not id_path.startswith("query."):
+            continue
+        qk = id_path[len("query."):]
+        if qk and qk not in query_template:
+            name = "currentUser"
+            query_template[qk] = "{{" + name + "}}"
+            if name not in params:
+                params.append(name)
     return query_template, params, samples, field_types
 
 
@@ -1929,12 +1966,17 @@ def _client_redact_sensitive(node, key_hint: str = ""):
 
 
 def flow_spec_to_client(spec: FlowSpec) -> dict:
-    """给前端展示的 FlowSpec：保留编辑需要的信息，隐藏鉴权头和原始请求体。"""
+    """给前端展示的 FlowSpec：保留编辑需要的信息，隐藏鉴权头和原始请求体。
+
+    H20 修复:body_source 不再清空,而是备份到 backup_body_source;前端可见备份,
+    编辑时优先使用客户端编辑的 body_source(若有),否则用备份;避免 build_api_request 拿不到 body。
+    """
     data = refresh_review_items(spec.model_copy(deep=True)).model_dump()
     for st in data.get("steps") or []:
         st["headers"] = {k: "***" for k in (st.get("headers") or {})}
         if st.get("body_source"):
-            st["body_source"] = ""
+            st["backup_body_source"] = st["body_source"]   # H20:保留原始 body 备份
+            st["body_source"] = ""                         # 编辑面板默认空,用户/前端可显式填回
         if st.get("response_json") is not None:
             st["response_json"] = _client_redact_sensitive(st.get("response_json"))
         for idn in st.get("identity") or []:
@@ -2163,9 +2205,10 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     _validate_link_endpoint(new_spec, str(value), "target")
                     link.target_step_id = str(value)
                     link.target_tokens = None
-                elif hasattr(link, field):
-                    setattr(link, field, value)
+                elif field == "link_id":                   # H19 修复:显式禁改 link_id(会被唯一性校验破坏)
+                    raise ValueError("link_id is immutable")
                 else:
+                    # H19 修复:不再 hasattr 兜底(避免改 link_id/reason/internal 等关键字段)
                     raise ValueError(f"unknown link field: {field}")
                 continue
 
@@ -2222,9 +2265,16 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     param.type = str(value)
                 elif field == "required":
                     param.required = bool(value)
-                elif hasattr(param, field):
+                elif field == "exposed_to_user":           # H22 修复:bool 字段显式 bool() 转换
+                    param.exposed_to_user = bool(value)
+                elif field == "editable":
+                    param.editable = bool(value)
+                elif field == "need_human_confirm":
+                    param.need_human_confirm = bool(value)
+                elif field in _PARAM_ALLOWED_FIELDS:
                     setattr(param, field, value)
                 else:
+                    # H19 修复:不再 hasattr 兜底(避免改 path/source_kind/internal 等关键字段)
                     raise ValueError(f"unknown param field: {field}")
             else:
                 # 步骤级编辑
@@ -2242,9 +2292,19 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     role = str(value)
                     step.source_meta = {**(step.source_meta or {}), "role": role}
                     step.semantic_role = role
-                elif hasattr(step, field):
+                elif field == "risk_level":
+                    step.risk_level = str(value)
+                elif field == "body_source":
+                    step.body_source = str(value) if value is not None else ""
+                elif field == "path":
+                    step.path = str(value)
+                    step.url = str(value)
+                elif field == "step_id":                   # H19 修复:显式禁改 step_id
+                    raise ValueError("step_id is immutable")
+                elif field in _STEP_ALLOWED_FIELDS:
                     setattr(step, field, value)
                 else:
+                    # H19 修复:不再 hasattr 兜底
                     raise ValueError(f"unknown step field: {field}")
             continue
 

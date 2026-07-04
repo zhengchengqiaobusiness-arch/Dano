@@ -1,0 +1,67 @@
+
+> skillfrontend@0.1.0 dev
+> vite --host 127.0.0.1 --port 5173
+
+
+  [32m[1mVITE[22m v5.4.21[39m  [2mready in [0m[1m538[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://127.0.0.1:[1m5173[22m/[39m
+[2m[32m  ➜[39m[22m[2m  press [22m[1mh + enter[22m[2m to show help[22m
+[2m15:17:45[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /v1/skills[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1134:18)
+    at afterConnectMultiple (node:net:1715:7)
+[2m15:17:45[22m [31m[1m[vite][22m[39m [31mhttp proxy error: /v1/skills[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1134:18)
+    at afterConnectMultiple (node:net:1715:7)
+[2m15:31:43[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m15:39:34[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m15:40:46[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m15:40:54[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m15:41:59[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m15:42:08[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m15:47:31[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m15:47:44[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m15:48:18[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m15:48:30[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m15:49:21[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m15:49:32[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m15:49:55[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:12:47[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:13:01[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:13:10[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:13:46[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:19:48[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:19:57[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:20:09[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:20:23[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:20:34[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:20:45[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:21:07[22m [31m[1m[vite][22m[39m [31mws proxy error:[39m
+AggregateError [ECONNREFUSED]: 
+    at internalConnectMultiple (node:net:1134:18)
+    at afterConnectMultiple (node:net:1715:7)
+[2m16:33:06[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:33:16[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:33:33[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:34:00[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:34:07[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:34:15[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:34:33[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:34:43[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:47:30[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:47:41[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:48:04[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:48:12[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m16:51:08[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m17:39:04[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m17:39:04[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m17:39:27[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m17:39:38[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m17:40:00[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m17:40:00[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m17:40:40[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m17:41:11[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m17:41:11[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m
+[2m17:42:23[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/components/PageRecorder.tsx[22m

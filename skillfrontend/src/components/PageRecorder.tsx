@@ -335,8 +335,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const autoResolvedReviewKeyRef = useRef("");
   const autoDedupedStepKeyRef = useRef("");
   const autoLinkedRuntimeKeyRef = useRef("");
+  const wsAliveRef = useRef(false);                                // FC2 修复:跟踪 WS 存活,避免 send 失败时反复弹错
+  const isComposingRef = useRef(false);                           // FH2 修复:中文输入法拼写中标记,防 onKbInput 误发中间字符
 
   const [phase, setPhase] = useState<"idle" | "recording" | "publishing" | "done">("idle");
+  const phaseRef = useRef(phase);                                  // FC1 修复:同步最新 phase,ws.onclose 闭包不再 stale
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
   const [startUrl, setStartUrl] = useState("");
   const [frame, setFrame] = useState<string>("");
   const [steps, setSteps] = useState<RecStep[]>([]);
@@ -357,6 +361,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   const [flowSpec, setFlowSpec] = useState<FlowSpecData | null>(null);
   const [checkReport, setCheckReport] = useState<FlowCheckReport | null>(null);
+  const [titleDraft, setTitleDraft] = useState("");               // FC3 修复:标题本地草稿,WS 推送不再即时覆盖编辑
+  const [descDraft, setDescDraft] = useState("");                 // FC3 修复:说明本地草稿
+  useEffect(() => { setTitleDraft(flowSpec?.title || ""); }, [flowSpec?.title]);
+  useEffect(() => { setDescDraft(flowSpec?.business_description || ""); }, [flowSpec?.business_description]);
+  // FH6 修复:JSON 面板 — 仅在 jsonDraft 未被本地编辑时才跟随 flowSpec 同步;否则用户输入会被 WS 推送覆盖
+  const jsonDirtyRef = useRef(false);
+  useEffect(() => {
+    if (flowSpec && !jsonDirtyRef.current) {
+      setJsonDraft(JSON.stringify(flowSpec, null, 2));
+    }
+  }, [flowSpec]);
   const [addingStep, setAddingStep] = useState(false);
   const [newStep, setNewStep] = useState({ method: "POST", path: "/api/", name: "", risk_level: "L3", role: "business_write" });
   const [newParam, setNewParam] = useState({ step_id: "", path: "", key: "", type: "string", category: "user_param" });
@@ -370,7 +385,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [descBusy, setDescBusy] = useState(false);
   const [activeFlowTab, setActiveFlowTab] = useState("review");
 
-  useEffect(() => () => { wsRef.current?.close(); }, []);
+  useEffect(() => () => {
+    // FC4 修复:仅当 phase 处于 recording/publishing 时才关 WS(避免 StrictMode 双 mount 或组件复用时误关正在用的 WS)
+    // wsRef.current 在首次 mount 时为 null(start 才会建),所以首次 cleanup 一定是 noop,无副作用
+    if (phaseRef.current === "recording" || phaseRef.current === "publishing") {
+      wsRef.current?.close();
+    }
+  }, []);
 
   useEffect(() => {
     const onError = (event: ErrorEvent) => {
@@ -419,7 +440,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       ws.send(JSON.stringify(obj));
       return true;
     }
-    message.error("录制连接已断开，请重新抓取后再编辑");
+    // FC2 修复:不再每次 send 失败都弹 error(高频 click 触发会刷屏)
+    // 统一在 ws.onclose 里通过 wsAliveRef 标记后,首次发现时弹一次提示
+    if (wsAliveRef.current) {
+      wsAliveRef.current = false;
+      message.warning("录制连接已断开，正在停止后续操作");
+    }
     return false;
   }
 
@@ -442,6 +468,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!startUrl.trim()) { message.error("请填页面地址 start_url"); return; }
     setErr(""); setResult(null); setSteps([]); setReqs([]); setFrame(""); setFields([]); setPicked({});
     setCands([]); setSelects({}); setIdentity({}); setStepSel({}); resetEditorState();
+    wsAliveRef.current = true;                                     // FC2 修复:每次 start 重置存活标志
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/onboarding/page/record`);
     wsRef.current = ws;
@@ -458,7 +485,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       else if (m.type === "step") setSteps((s) => {
         const st = m.step;
         const last = s[s.length - 1];
-        if (last && last.locator === st.locator && (st.op === "fill" || st.op === "select" || st.op === "pick")) {
+        // FH1 修复:覆盖规则扩展 —— 同 locator + 同 op 时覆盖(避免连续 click 同一按钮记成多步);submit 后任意步骤都不再覆盖
+        if (
+          last &&
+          last.locator === st.locator &&
+          last.op === st.op &&
+          last.op !== "submit" &&
+          (st.op === "fill" || st.op === "select" || st.op === "pick" || st.op === "click")
+        ) {
           return [...s.slice(0, -1), st];
         }
         return [...s, st];
@@ -528,7 +562,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
     };
     ws.onerror = () => setErr("WebSocket 连接失败");
-    ws.onclose = () => { if (phase === "recording") setPhase("idle"); };
+    ws.onclose = () => {
+      wsAliveRef.current = false;                                 // FC2 修复:WS 关闭,send 会自动避免刷屏
+      if (phaseRef.current === "recording" || phaseRef.current === "publishing") setPhase("idle");
+    };
   }
 
   function onImgClick(e: React.MouseEvent<HTMLImageElement>) {
@@ -542,10 +579,19 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (v) { send({ type: "input", event: { kind: "text", text: v } }); el.value = ""; }
   }
   function onKbInput(e: React.FormEvent<HTMLInputElement>) {
-    if ((e.nativeEvent as { isComposing?: boolean }).isComposing) return;
+    const ne = e.nativeEvent as { isComposing?: boolean };
+    if (ne.isComposing || isComposingRef.current) return;         // FH2:原生 + ref 双保险
     relayKb(e.currentTarget);
   }
-  function onKbCompositionEnd(e: React.CompositionEvent<HTMLInputElement>) { relayKb(e.currentTarget); }
+  function onKbCompositionStart(_e: React.CompositionEvent<HTMLInputElement>) {
+    // FH2 修复:compositionStart 显式标记 isComposing=true;某些浏览器在 CompositionStart→Input 之间 isComposing
+    // 可能短暂为 false,导致 onKbInput 误发未拼写完的中间字符(显示"拼字"而不是中文)→ ref 守门
+    isComposingRef.current = true;
+  }
+  function onKbCompositionEnd(e: React.CompositionEvent<HTMLInputElement>) {
+    isComposingRef.current = false;
+    relayKb(e.currentTarget);
+  }
   function onKbKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if (KEYMAP[e.key]) { send({ type: "input", event: { kind: "key", key: KEYMAP[e.key] } }); e.preventDefault(); }
   }
@@ -658,7 +704,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const nonHigh = list.filter((item) => !item.resolved && item.severity !== "high");
     if (!nonHigh.length) return;
     const version = spec.meta?.current_version ?? 0;
-    const key = `${spec.flow_id}:${version}:${nonHigh.map((item) => item.id).sort().join("|")}`;
+    // FH4 修复:key 增加 report.review_items.length(spec 路径下)与 list 来源,避免后端增删 review 后 id 集合不变但内容变了仍被认为是同一 key
+    const source = report?.review_items?.length ? "report" : "spec";
+    const key = `${spec.flow_id}:${version}:${source}:${list.length}:${nonHigh.map((item) => item.id).sort().join("|")}`;
     if (autoResolvedReviewKeyRef.current === key) return;
     autoResolvedReviewKeyRef.current = key;
     send({ type: "flow_update", edits: [{ op: "resolve_reviews", exclude_severities: ["high"], resolved: true }] });
@@ -692,7 +740,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       const targetIdx = stepIndex.get(targetStep.step_id) ?? 0;
       for (const p of targetStep.params || []) {
         if (p.category !== "runtime_var" || p.source_kind !== "unknown") continue;
-        if (existingTargets.has(`${targetStep.step_id}:${p.path}`)) continue;
+        if (existingTargets.has(`${targetStep.step_id}:${stripBodyPrefix(p.path)}`)) continue;
         const value = String(p.value ?? "").trim();
         if (!value || boring.has(value.toLowerCase())) continue;
 
@@ -841,7 +889,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const draft = bindDraft[key] || {};
     if (!draft.source_step_id || !draft.source_path) { message.warning("请选择来源步骤和响应字段"); return; }
     const edits: any[] = flowSpec.links
-      .filter((l) => l.target_step_id === step.step_id && stripBodyPrefix(l.target_path) === p.path)
+      .filter((l) => l.target_step_id === step.step_id && stripBodyPrefix(l.target_path) === stripBodyPrefix(p.path))
       .map((l) => ({ op: "remove", link_id: l.link_id }));
     edits.push({
       op: "add",
@@ -876,14 +924,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!flowSpec) return;
     setJsonDraft(JSON.stringify(flowSpec, null, 2));
     setJsonErr("");
+    jsonDirtyRef.current = false;                          // FH6:显式载入后清 dirty,允许后续 WS 推送自动同步
   }
   function applyJsonDraft() {
-    try { setJsonErr(""); sendReplace(JSON.parse(jsonDraft)); }
+    try { setJsonErr(""); sendReplace(JSON.parse(jsonDraft)); jsonDirtyRef.current = false; }
     catch (e: any) { setJsonErr(e?.message || "JSON 解析失败"); }
   }
   function restoreServerJson() {
     if (!lastServerJson) { message.warning("没有最近的服务端版本"); return; }
     setJsonDraft(lastServerJson);
+    jsonDirtyRef.current = false;
     try { sendReplace(JSON.parse(lastServerJson)); } catch { /* ignore */ }
   }
 
@@ -905,7 +955,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return (st?.params || []).map((p) => ({ label: `${p.path} · ${p.key}`, value: p.path }));
   }
   function incomingLink(stepId: string, path: string) {
-    return (flowSpec?.links || []).find((l) => l.target_step_id === stepId && stripBodyPrefix(l.target_path) === path);
+    return (flowSpec?.links || []).find((l) => l.target_step_id === stepId && stripBodyPrefix(l.target_path) === stripBodyPrefix(path));
   }
   function paramSourceText(step: FlowStepData, p: FlowParam, link?: FlowLinkData) {
     const sourceStep = link ? stepById[link.source_step_id] : undefined;
@@ -1363,13 +1413,23 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
         <Space.Compact style={{ width: "100%" }}>
           <Button disabled>流程标题</Button>
-          <Input value={flowSpec.title || ""}
-            onChange={(e) => setFlowSpec({ ...flowSpec, title: e.target.value })}
-            onBlur={(e) => updateFlowField("title", e.target.value.trim())} />
+          <Input value={titleDraft}
+            onChange={(e) => setTitleDraft(e.target.value)}
+            onBlur={(e) => {
+              if (e.target.value.trim() !== (flowSpec?.title || "")) {
+                setFlowSpec((cur) => cur ? { ...cur, title: e.target.value.trim() } : cur);
+                updateFlowField("title", e.target.value.trim());
+              }
+            }} />
         </Space.Compact>
-        <Input.TextArea rows={12} value={flowSpec.business_description || ""}
-          onChange={(e) => setFlowSpec({ ...flowSpec, business_description: e.target.value })}
-          onBlur={(e) => updateFlowField("business_description", e.target.value)}
+        <Input.TextArea rows={12} value={descDraft}
+          onChange={(e) => setDescDraft(e.target.value)}
+          onBlur={(e) => {
+            if (e.target.value !== (flowSpec?.business_description || "")) {
+              setFlowSpec((cur) => cur ? { ...cur, business_description: e.target.value } : cur);
+              updateFlowField("business_description", e.target.value);
+            }
+          }}
           placeholder="生成或手写业务说明" />
       </Space>
     );
@@ -1384,7 +1444,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <Button onClick={restoreServerJson}>恢复服务端版本</Button>
           {jsonErr && <Typography.Text type="danger">{jsonErr}</Typography.Text>}
         </Space>
-        <Input.TextArea rows={14} value={jsonDraft} onChange={(e) => setJsonDraft(e.target.value)}
+        <Input.TextArea rows={14} value={jsonDraft}
+          onChange={(e) => { jsonDirtyRef.current = true; setJsonDraft(e.target.value); }}
           style={{ fontFamily: "monospace", fontSize: 12 }} placeholder="FlowSpec JSON" />
       </Space>
     );
@@ -1422,7 +1483,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   onWheel={(e) => send({ type: "input", event: { kind: "scroll", dy: e.deltaY } })}
                   style={{ width: "100%", display: "block", cursor: "crosshair" }} alt="录制画面" />
               : <div style={{ padding: 40, textAlign: "center", color: "#999", lineHeight: 1.6 }}>等待浏览器画面</div>}
-            <input ref={kbRef} onInput={onKbInput} onKeyDown={onKbKeyDown} onCompositionEnd={onKbCompositionEnd}
+            <input ref={kbRef} onInput={onKbInput} onKeyDown={onKbKeyDown}
+              onCompositionStart={onKbCompositionStart} onCompositionEnd={onKbCompositionEnd}
               autoComplete="off" aria-hidden="true"
               style={{ position: "absolute", left: 0, top: 0, width: 1, height: 1, opacity: 0, border: 0, padding: 0 }} />
           </div>
@@ -1577,8 +1639,15 @@ function HeadersEditor({ value, onChange }: { value: Record<string, string>; onC
           <Input size="small" placeholder="key" value={newKey} style={{ width: 160 }} onChange={(e) => setNewKey(e.target.value)} />
           <Input size="small" placeholder="value" value={newVal} style={{ width: 260 }} onChange={(e) => setNewVal(e.target.value)} />
           <Button size="small" onClick={() => {
-            if (!newKey.trim()) return;
-            onChange({ ...value, [newKey.trim()]: newVal });
+            const k = newKey.trim();
+            if (!k) return;
+            // FH7 修复:不允许重复 key(连续点添加会塞空 value 重复头,后端 401)—— 大小写不敏感判断(Header 名是大小写不敏感的)
+            const existingKey = Object.keys(value || {}).find((x) => x.toLowerCase() === k.toLowerCase());
+            if (existingKey) {
+              message.warning(`请求头 ${existingKey} 已存在,请直接编辑`);
+              return;
+            }
+            onChange({ ...value, [k]: newVal });
             setNewKey(""); setNewVal("");
           }}>添加</Button>
         </Space>
