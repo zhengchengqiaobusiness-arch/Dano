@@ -71,7 +71,7 @@ class ParamField(BaseModel):
     # system_const: 系统常量(流程定义 ID/表单类型/固定状态码,不能让 agent 改)
     # runtime_var: 运行期变量(录制时有值,但不能冻结,运行期自动填)
     category: str = "user_param"  # user_param / system_const / runtime_var
-    source_kind: str = "unknown"   # user_input / previous_response / current_user / storage / cookie / page_context / system_time / constant / form_option / unknown
+    source_kind: str = "unknown"   # user_input / previous_response / current_user / storage / cookie / page_context / system_time / constant / api_option / page_enum / static_enum / manual_enum / form_option / unknown
     source: dict[str, Any] = Field(default_factory=dict)
     editable: bool = True
     exposed_to_user: bool = True
@@ -259,8 +259,25 @@ def _looks_runtime_field(key: str, path: str) -> bool:
     return any(x in k for x in (
         "taskid", "draftid", "instanceid", "processinstanceid", "conversationid",
         "conversation_id", "sessionid", "nonce", "uuid", "token", "accesstoken",
-        "refreshtoken", "appcode",
+        "refreshtoken", "appcode", "wybs",
     ))
+
+
+_SESSION_LITERAL_RE = re.compile(r"^[A-Za-z]{2,}[-_]\d{4,}")
+_UUID_LITERAL_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-")
+
+
+def _looks_session_specific_value(value: Any) -> bool:
+    s = str(value if value is not None else "").strip()
+    if not s:
+        return False
+    if s.isdigit() and len(s) in (10, 13):
+        return True
+    if _UUID_LITERAL_RE.match(s):
+        return True
+    if _SESSION_LITERAL_RE.match(s) and re.search(r"\d{4,}", s):
+        return True
+    return False
 
 
 def _looks_token_field(key: str, path: str) -> bool:
@@ -316,6 +333,37 @@ def _looks_page_context_field(key: str, path: str) -> bool:
     ))
 
 
+_OPTION_SOURCE_KINDS = {"api_option", "page_enum", "static_enum", "manual_enum", "form_option"}
+
+
+def _select_source_kind(sel: SelectBinding | None) -> str:
+    if sel is None:
+        return "static_enum"
+    if sel.enum_source == "dom":
+        return "page_enum"
+    if sel.enum_source == "manual":
+        return "manual_enum"
+    if sel.source_url:
+        return "api_option"
+    if sel.options:
+        return "static_enum"
+    return "static_enum"
+
+
+def _select_source_reason(kind: str, *, id_field: bool = False) -> str:
+    if id_field:
+        return "该字段是选择项对应的内部 ID，运行期随用户选择自动写入，不暴露给用户手填"
+    if kind == "api_option":
+        return "该字段来自接口候选源，运行期从接口获取真实候选"
+    if kind == "page_enum":
+        return "该字段来自录制页面真实下拉快照，属于页面固定枚举"
+    if kind == "manual_enum":
+        return "该字段来自人工维护的枚举候选"
+    if kind == "static_enum":
+        return "该字段来自固定枚举候选"
+    return "该字段来自选择型字段"
+
+
 def _param_source_guess(
     *,
     field: dict,
@@ -326,6 +374,8 @@ def _param_source_guess(
     system_paths: set[str],
     select_paths: set[str],
     select_id_paths: set[str],
+    select_by_path: dict[str, SelectBinding] | None = None,
+    select_by_id_path: dict[str, SelectBinding] | None = None,
     samples: dict,
     request_headers: dict | None = None,
 ) -> dict[str, Any]:
@@ -366,24 +416,26 @@ def _param_source_guess(
         }
 
     if path in select_paths:
+        source_kind = _select_source_kind((select_by_path or {}).get(path))
         return {
             "category": "user_param",
-            "source_kind": "form_option",
-            "source": {"kind": "select", "path": path},
+            "source_kind": source_kind,
+            "source": {"kind": source_kind, "path": path},
             "editable": True,
             "exposed_to_user": True,
-            "reason": "该字段来自页面下拉/枚举/人员选择，调用时让用户用业务名称选择",
+            "reason": _select_source_reason(source_kind),
             "need_human_confirm": False,
         }
 
     if path in select_id_paths:
+        source_kind = _select_source_kind((select_by_id_path or {}).get(path))
         return {
             "category": "runtime_var",
-            "source_kind": "form_option",
-            "source": {"kind": "select_id", "path": path},
+            "source_kind": source_kind,
+            "source": {"kind": "select_id", "path": path, "option_kind": source_kind},
             "editable": False,
             "exposed_to_user": False,
-            "reason": "该字段是下拉/枚举显示名对应的内部 ID，运行期随用户选择自动写入，不暴露给用户手填",
+            "reason": _select_source_reason(source_kind, id_field=True),
             "need_human_confirm": False,
         }
 
@@ -431,6 +483,17 @@ def _param_source_guess(
             "need_human_confirm": True,
         }
 
+    if _looks_system_const_field(key, path):
+        return {
+            "category": "system_const",
+            "source_kind": "constant",
+            "source": {"kind": "heuristic", "path": path},
+            "editable": True,
+            "exposed_to_user": False,
+            "reason": "字段名像流程定义、表单类型、应用 ID 或固定状态，默认作为系统常量",
+            "need_human_confirm": True,
+        }
+
     if _looks_page_context_field(key, path) and value not in _sample_value_set(samples):
         return {
             "category": "system_const",
@@ -439,6 +502,17 @@ def _param_source_guess(
             "editable": True,
             "exposed_to_user": False,
             "reason": "字段名像部门/组织/租户等页面上下文，默认隐藏；跨部门复用时需绑定页面上下文或前置接口来源",
+            "need_human_confirm": True,
+        }
+
+    if _looks_session_specific_value(value) and value not in _sample_value_set(samples):
+        return {
+            "category": "runtime_var",
+            "source_kind": "unknown",
+            "source": {"kind": "session_literal", "path": path},
+            "editable": False,
+            "exposed_to_user": False,
+            "reason": "该值像一次性会话值/运行期 ID，不能直接固化录制值；需要绑定上游响应、页面上下文或改为用户参数",
             "need_human_confirm": True,
         }
 
@@ -461,17 +535,6 @@ def _param_source_guess(
             "editable": True,
             "exposed_to_user": False,
             "reason": "该字段未匹配到用户输入，且为空值或内部 ID/固定标识形态，默认作为系统常量隐藏",
-            "need_human_confirm": True,
-        }
-
-    if _looks_system_const_field(key, path):
-        return {
-            "category": "system_const",
-            "source_kind": "constant",
-            "source": {"kind": "heuristic", "path": path},
-            "editable": True,
-            "exposed_to_user": False,
-            "reason": "字段名像流程定义、表单类型、应用 ID 或固定状态，默认作为系统常量",
             "need_human_confirm": True,
         }
 
@@ -523,7 +586,7 @@ def _build_step_from_capture(
         flat_fields = flatten_body(pd, samples, required_labels, collapse_paths=list_paths)
 
         # select/选人
-        selects_raw = suggest_selects(pd, reads or [], samples, skip_paths=list_paths) + list_selects
+        selects_raw = suggest_selects(pd, reads or [], samples, skip_paths=list_paths, fields=flat_fields) + list_selects
         apply_page_enum_options(selects_raw, page_enum_options, post_data=pd, fields=flat_fields)
         selects_raw += page_enum_selects(pd, page_enum_options, {s.get("path", "") for s in selects_raw}, fields=flat_fields)
 
@@ -583,6 +646,7 @@ def _build_step_from_capture(
     select_paths = {s.path for s in selects_meta if s.path and has_real_enum_source(s)}
     select_id_paths = {s.id_path for s in selects_meta if s.id_path and has_real_enum_source(s)}
     select_by_path = {s.path: s for s in selects_meta if s.path and has_real_enum_source(s)}
+    select_by_id_path = {s.id_path: s for s in selects_meta if s.id_path and has_real_enum_source(s)}
 
     # success_rule
     sr = None
@@ -620,6 +684,8 @@ def _build_step_from_capture(
             system_paths=system_paths,
             select_paths=select_paths,
             select_id_paths=select_id_paths,
+            select_by_path=select_by_path,
+            select_by_id_path=select_by_id_path,
             samples=samples,
             request_headers=req.get("headers") or {},
         )
@@ -1842,6 +1908,33 @@ def _step_param_map(step: FlowStep) -> dict[str, str]:
     return out
 
 
+def _runtime_param_publish_error(param: ParamField) -> str | None:
+    if param.category != "runtime_var":
+        return None
+    if param.source_kind == "previous_response":
+        if param.source.get("step_id") and (param.source.get("response_path") or param.source.get("path")):
+            return None
+        return f"字段 `{param.path}` 是上游响应变量，但缺少来源步骤或响应字段"
+    if param.source_kind == "request_header":
+        return None if param.source.get("header") else f"字段 `{param.path}` 是请求头变量，但缺少请求头名称"
+    if param.source_kind == "system_time":
+        return None
+    if param.source_kind in {"api_option", "page_enum", "static_enum", "manual_enum", "form_option"}:
+        return None
+    if param.source_kind == "current_user":
+        return None
+    if param.source_kind == "page_context" and param.source:
+        return None
+    if param.source_kind == "unknown":
+        return (
+            f"字段 `{param.path}` 是运行期变量，当前来源 `{param.source_kind}` 还不能执行；"
+            "请在字段页绑定上游响应/请求头/接口候选，或改为用户参数"
+        )
+    if not param.source:
+        return f"字段 `{param.path}` 是运行期变量，但缺少可执行来源"
+    return None
+
+
 def _query_key_from_param(param: ParamField) -> str:
     if param.path.startswith("query."):
         return param.path[len("query."):]
@@ -2023,6 +2116,9 @@ def apply_flow_publish_selection(
 
 def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
     errors: list[str] = []
+    runtime_errors = [err for p in step.params if (err := _runtime_param_publish_error(p))]
+    if runtime_errors:
+        return None, runtime_errors
     if not step.body_source:
         if step.method.upper() == "GET":
             query_template, params, samples, field_types = _flow_step_query_template(step)
@@ -2075,7 +2171,7 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
     for p in step.params:
         if (
             p.category == "user_param"
-            and p.source_kind == "form_option"
+            and p.source_kind in {"page_enum", "static_enum", "manual_enum", "form_option"}
             and p.enum_options
             and p.path not in select_paths
         ):
@@ -2325,6 +2421,8 @@ def dry_run_flow_spec(spec: FlowSpec, fields: dict[str, Any] | None = None) -> d
 
 
 def validate_flow_spec(spec: FlowSpec) -> dict:
+    from dano.execution.page.repair_ops import collect_repair_findings
+
     errors: list[str] = []
     warnings: list[str] = []
     review_items = refresh_review_items(spec.model_copy(deep=True)).review_items
@@ -2347,6 +2445,9 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
     if api_request is not None:
         self_check_errors = self_check(api_request)
         errors.extend(self_check_errors)
+        repair_findings = collect_repair_findings(api_request)
+        session_errors = [f.get("detail", "") for f in repair_findings if f.get("kind") == "session_constant"]
+        errors.extend([x for x in session_errors if x])
     dry_run = dry_run_flow_spec(spec)
     return {
         "passed": not errors,
@@ -2983,8 +3084,16 @@ def _description_source_text(param: ParamField) -> str:
         return "运行期由系统时间生成"
     if kind == "page_context":
         return "运行期从页面/应用上下文读取"
+    if kind == "api_option":
+        return "来自接口候选源"
+    if kind == "page_enum":
+        return "来自录制页面固定下拉"
+    if kind == "manual_enum":
+        return "来自人工维护枚举"
+    if kind == "static_enum":
+        return "来自固定枚举候选"
     if kind == "form_option":
-        return "来自页面下拉、枚举或人员选择"
+        return "来自选择型字段"
     if kind == "constant":
         return "录制流程内固定值"
     if kind == "user_input":

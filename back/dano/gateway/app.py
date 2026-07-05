@@ -568,7 +568,7 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
     list_paths = [s["path"] for s in list_selects]
     fields = flatten_body(pd, samples, required_labels, collapse_paths=list_paths)
     # 传 samples:用录制选中的显示名消歧/确认(大字典里短码也能精确绑对那项);跳过已被列表多选接管的数组下逐元素叶子
-    selects = suggest_selects(pd, reads or [], samples, skip_paths=list_paths) + list_selects
+    selects = suggest_selects(pd, reads or [], samples, skip_paths=list_paths, fields=fields) + list_selects
     # 页面枚举地面真值:用录制时下拉里真实可见的选项覆盖候选快照(治"加班类型绑到 222 项全量字典");
     #   并为"只在 DOM 有选项、没绑上网络源"的纯枚举字段补一个无来源 enum(agent 传名字即原样提交)。
     apply_page_enum_options(selects, page_enum_options, post_data=pd, fields=fields)

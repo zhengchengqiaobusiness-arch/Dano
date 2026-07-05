@@ -148,12 +148,17 @@ const SOURCE_KIND_OPTIONS = [
   { label: "系统时间", value: "system_time" },
   { label: "页面上下文", value: "page_context" },
   { label: "固定值", value: "constant" },
-  { label: "下拉/枚举", value: "form_option" },
+  { label: "接口候选", value: "api_option" },
+  { label: "页面枚举", value: "page_enum" },
+  { label: "固定枚举", value: "static_enum" },
+  { label: "手工枚举", value: "manual_enum" },
   { label: "未知", value: "unknown" },
 ];
+const OPTION_SOURCE_KINDS = ["api_option", "page_enum", "static_enum", "manual_enum", "form_option"];
+const ENUM_SOURCE_KINDS = ["page_enum", "static_enum", "manual_enum", "form_option"];
 const SOURCE_OPTIONS_BY_CATEGORY: Record<string, Array<{ label: string; value: string }>> = {
-  user_param: SOURCE_KIND_OPTIONS.filter((x) => ["user_input", "form_option"].includes(x.value)),
-  runtime_var: SOURCE_KIND_OPTIONS.filter((x) => ["previous_response", "request_header", "current_user", "system_time", "page_context", "unknown"].includes(x.value)),
+  user_param: SOURCE_KIND_OPTIONS.filter((x) => ["user_input", ...OPTION_SOURCE_KINDS].includes(x.value)),
+  runtime_var: SOURCE_KIND_OPTIONS.filter((x) => ["previous_response", "request_header", "current_user", "system_time", "page_context", "api_option", "unknown"].includes(x.value)),
   system_const: SOURCE_KIND_OPTIONS.filter((x) => ["constant", "page_context"].includes(x.value)),
 };
 const PARAM_TYPE_OPTIONS = ["string", "number", "boolean", "datetime", "date", "enum", "array", "object", "list-enum"]
@@ -217,12 +222,16 @@ function popupContainer(node?: HTMLElement) {
 function optionLabel(options: Array<{ label: string; value: string }>, value: string) {
   return options.find((o) => o.value === value)?.label || value;
 }
+function normalizeSourceKindForUi(sourceKind?: string | null) {
+  return sourceKind === "form_option" ? "static_enum" : (sourceKind || "");
+}
 function sourceOptionsForCategory(category?: string) {
   return SOURCE_OPTIONS_BY_CATEGORY[category || "user_param"] || SOURCE_KIND_OPTIONS;
 }
 function defaultSourceForCategory(category: string, current?: string) {
   const options = sourceOptionsForCategory(category);
-  if (current && options.some((x) => x.value === current)) return current;
+  const normalized = normalizeSourceKindForUi(current);
+  if (normalized && options.some((x) => x.value === normalized)) return normalized;
   return options[0]?.value || "unknown";
 }
 function NativeSelect({
@@ -824,7 +833,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     ] });
   }
   function updateParamSourceKind(stepId: string, p: FlowParam, sourceKind: string) {
-    const category = sourceKind === "constant" ? "system_const" : sourceKind === "user_input" || sourceKind === "form_option" ? "user_param" : "runtime_var";
+    const category = sourceKind === "constant"
+      ? "system_const"
+      : sourceKind === "user_input" || (OPTION_SOURCE_KINDS.includes(sourceKind) && p.category !== "runtime_var")
+        ? "user_param"
+        : "runtime_var";
     send({ type: "flow_update", edits: [
       { op: "update", step_id: stepId, param_path: p.path, field: "category", value: category },
       { op: "update", step_id: stepId, param_path: p.path, field: "source_kind", value: sourceKind },
@@ -1091,7 +1104,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const key = newParam.key.trim();
     if (!stepId || !path || !key) { message.warning("请选择步骤并填写字段路径和参数名"); return; }
     const isEnum = newParam.type === "enum" || newParam.type === "list-enum";
-    const sourceKind = newParam.category === "user_param" && isEnum ? "form_option" : defaultSourceForCategory(newParam.category);
+    const sourceKind = defaultSourceForCategory(newParam.category);
     send({ type: "flow_update", edits: [{
       op: "add", step_id: stepId, param: {
         path, key, label: key, value: "", type: newParam.type, required: false,
@@ -1228,13 +1241,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (p.category !== "user_param") {
       edits.push({ op: "update", step_id: step.step_id, param_path: p.path, field: "category", value: "user_param" });
     }
-    if (p.source_kind !== "form_option") {
-      edits.push(
-        { op: "update", step_id: step.step_id, param_path: p.path, field: "source_kind", value: "form_option" },
-        { op: "update", step_id: step.step_id, param_path: p.path, field: "source", value: { kind: "form_option", path: p.path, manual: true } },
-      );
-    }
     return edits;
+  }
+  function enumSourceForKind(sourceKind?: string | null) {
+    if (sourceKind === "page_enum") return "dom";
+    if (sourceKind === "manual_enum") return "manual";
+    return null;
   }
   function upsertSelectBinding(step: FlowStepData, p: FlowParam, patch: Partial<FlowSelectBinding>, extraEdits: any[] = []) {
     const existing = selectBindingForParam(step, p);
@@ -1255,14 +1267,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       ? (step.selects || []).map((s) => (s.path === p.path || s.param === p.key ? nextBinding : s))
       : [...(step.selects || []), nextBinding];
     const edits: any[] = [{ op: "update", step_id: step.step_id, field: "selects", value: nextSelects }];
-    if (p.category !== "user_param") {
+    if (p.category !== "user_param" && p.category !== "runtime_var") {
       edits.push({ op: "update", step_id: step.step_id, param_path: p.path, field: "category", value: "user_param" });
-    }
-    if (p.source_kind !== "form_option") {
-      edits.push(
-        { op: "update", step_id: step.step_id, param_path: p.path, field: "source_kind", value: "form_option" },
-        { op: "update", step_id: step.step_id, param_path: p.path, field: "source", value: { kind: "form_option", path: p.path, manual: true } },
-      );
     }
     if (p.type !== "enum" && p.type !== "list-enum") {
       edits.push({ op: "update", step_id: step.step_id, param_path: p.path, field: "type", value: nextBinding.multi ? "list-enum" : "enum" });
@@ -1270,15 +1276,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     send({ type: "flow_update", edits: [...edits, ...extraEdits] });
   }
   function enumOptionsForParam(step: FlowStepData, p: FlowParam) {
+    if (!OPTION_SOURCE_KINDS.includes(p.source_kind || "")) return [];
     const sel = selectBindingForParam(step, p);
     const raw = p.enum_options?.length ? p.enum_options : sel?.options || [];
     return Array.from(new Set((raw || []).map((x) => String(x)).filter(Boolean)));
   }
   function enumSourceLabel(sel?: FlowSelectBinding) {
     if (!sel) return "未绑定";
-    if (sel.source_url) return "接口真实枚举";
     if (sel.enum_source === "dom") return "页面真实枚举";
-    if ((sel.options || []).length) return "手动枚举";
+    if (sel.enum_source === "manual") return "手工枚举";
+    if (sel.source_url) return "接口候选";
+    if ((sel.options || []).length) return "固定枚举";
     return "未绑定";
   }
   function paramSourceText(step: FlowStepData, p: FlowParam, link?: FlowLinkData) {
@@ -1292,8 +1300,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     }
     if (p.source_kind === "request_header") return `请求头来源：运行期从请求头 ${p.source?.header || ""} 获取；当前默认值只是录制样例`;
     if (p.source_kind === "user_input") return "用户输入：调用 Skill 时由用户填写；默认值来自录制样例";
-    if (p.source_kind === "form_option" && sel?.source_url) return `接口下拉：运行期从 ${sel.source_url} 获取候选；默认值是录制时选中的值`;
-    if (p.source_kind === "form_option") return "静态枚举：候选来自录制页面下拉快照；默认值是录制时选中的值";
+    if (p.source_kind === "api_option") return `接口候选：运行期从 ${sel?.source_url || "已绑定接口"} 获取候选；默认值是录制时选中的值`;
+    if (p.source_kind === "page_enum") return "页面枚举：候选来自录制页面真实下拉快照；默认值是录制时选中的值";
+    if (p.source_kind === "manual_enum") return "手工枚举：候选由人工维护；默认值是录制时选中的值";
+    if (p.source_kind === "static_enum" || p.source_kind === "form_option") return "固定枚举：候选来自固定快照；默认值是录制时选中的值";
     if (p.source_kind === "constant") return "固定默认值：发布后按当前值写入，通常不暴露给用户";
     if (p.source_kind === "current_user") return "当前用户：运行期从登录态/身份信息注入，不使用录制旧值";
     if (p.source_kind === "system_time") return "系统时间：运行期自动生成，不使用录制旧值";
@@ -1597,7 +1607,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   const selectBinding = selectBindingForParam(step, p);
                   const enumOptions = enumOptionsForParam(step, p);
                   const enumSelectOptions = enumOptions.map((x) => ({ label: x, value: x }));
-                  const hasBindingPanel = p.source_kind === "form_option" || p.type === "enum" || p.type === "list-enum" || !!selectBinding;
+                  const isApiOption = p.source_kind === "api_option";
+                  const isEnumOption = ENUM_SOURCE_KINDS.includes(p.source_kind || "");
+                  const hasBindingPanel = isApiOption || isEnumOption;
                   const hasRuntimePanel = !!linked || p.category === "runtime_var" || p.source_kind === "previous_response";
                   const sourceStepOptions = [
                     { label: "选择来源步骤", value: "" },
@@ -1618,10 +1630,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                             <Space wrap size={6}>
                               <Tag color={p.category === "runtime_var" ? "gold" : p.category === "system_const" ? "default" : "blue"}>{p.path}</Tag>
                               <Tag>{optionLabel(CATEGORY_OPTIONS, p.category || "user_param")}</Tag>
-                              <Tag>{optionLabel(SOURCE_KIND_OPTIONS, p.source_kind || "unknown")}</Tag>
+                              <Tag>{optionLabel(SOURCE_KIND_OPTIONS, normalizeSourceKindForUi(p.source_kind) || "unknown")}</Tag>
                               {linked && <Tag color="cyan">依赖字段</Tag>}
-                              {selectBinding?.source_url && <Tag color="geekblue">接口绑定</Tag>}
-                              {!selectBinding?.source_url && enumOptions.length > 0 && <Tag color="purple">静态枚举</Tag>}
+                              {isApiOption && <Tag color="geekblue">接口候选</Tag>}
+                              {p.source_kind === "page_enum" && <Tag color="purple">页面枚举</Tag>}
+                              {p.source_kind === "manual_enum" && <Tag color="purple">手工枚举</Tag>}
+                              {(p.source_kind === "static_enum" || p.source_kind === "form_option") && enumOptions.length > 0 && <Tag color="purple">固定枚举</Tag>}
                               {needsManualConfirm && <Tag color="warning">待确认</Tag>}
                               <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.reason}</Typography.Text>
                             </Space>
@@ -1662,7 +1676,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                               onChange={(v) => updateParamCategory(step.step_id, p, v)} />
                           </FieldControl>
                           <FieldControl label="来源">
-                            <NativeSelect value={p.source_kind || defaultSourceForCategory(p.category || "user_param")} width="100%" options={sourceOptionsForCategory(p.category)}
+                            <NativeSelect value={normalizeSourceKindForUi(p.source_kind) || defaultSourceForCategory(p.category || "user_param")} width="100%" options={sourceOptionsForCategory(p.category)}
                               onChange={(v) => updateParamSourceKind(step.step_id, p, v)} />
                           </FieldControl>
                           <FieldControl label="必填">
@@ -1680,75 +1694,88 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                           <div style={{ background: "#fafafa", border: "1px solid #f0f0f0", borderRadius: 6, padding: 10 }}>
                             <Space direction="vertical" size={8} style={{ width: "100%" }}>
                               <Space wrap size={6}>
-                                <Typography.Text strong style={{ fontSize: 12 }}>绑定配置</Typography.Text>
+                                <Typography.Text strong style={{ fontSize: 12 }}>{isApiOption ? "接口候选配置" : "枚举候选配置"}</Typography.Text>
                                 <Tag color={selectBinding?.source_url ? "geekblue" : "purple"}>{enumSourceLabel(selectBinding)}</Tag>
                                 {enumOptions.slice(0, 8).map((x) => <Tag key={x}>{x}</Tag>)}
                                 {enumOptions.length > 8 && <Tag>+{enumOptions.length - 8}</Tag>}
                               </Space>
-                              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
-                                <FieldControl label="来源接口">
-                                  <EditableComboInput
-                                    value={selectBinding?.source_url || ""}
-                                    options={readSourceOptions()}
-                                    placeholder="选择或输入接口地址；静态枚举可留空"
-                                    onSave={(v) => upsertSelectBinding(step, p, { source_url: v })}
-                                  />
-                                </FieldControl>
-                                <FieldControl label="接口参数">
+                              {isApiOption && (
+                                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
+                                  <FieldControl label="来源接口">
+                                    <EditableComboInput
+                                      value={selectBinding?.source_url || ""}
+                                      options={readSourceOptions()}
+                                      placeholder="选择或输入接口地址"
+                                      onSave={(v) => upsertSelectBinding(step, p, { source_url: v })}
+                                    />
+                                  </FieldControl>
+                                  <FieldControl label="接口参数">
+                                    <EditableTextArea
+                                      rows={2}
+                                      value={queryToLines(selectBinding?.source_url || "")}
+                                      placeholder="每行一个参数，如 pageNo=1"
+                                      onSave={(v) => upsertSelectBinding(step, p, { source_url: mergeUrlQuery(selectBinding?.source_url || "", v) })}
+                                    />
+                                  </FieldControl>
+                                  <FieldControl label="值字段">
+                                    <EditableComboInput
+                                      value={selectBinding?.value_key || ""}
+                                      options={responseKeyOptionsForSource(selectBinding?.source_url)}
+                                      placeholder="如 id/userId/dictValue"
+                                      onSave={(v) => upsertSelectBinding(step, p, { value_key: v })}
+                                    />
+                                  </FieldControl>
+                                  <FieldControl label="显示字段">
+                                    <EditableComboInput
+                                      value={selectBinding?.label_key || ""}
+                                      options={responseKeyOptionsForSource(selectBinding?.source_url)}
+                                      placeholder="如 name/label/dictLabel"
+                                      onSave={(v) => upsertSelectBinding(step, p, { label_key: v })}
+                                    />
+                                  </FieldControl>
+                                  <FieldControl label="配对 ID 字段">
+                                    <EditableComboInput
+                                      value={selectBinding?.id_path || ""}
+                                      options={(step.params || []).map((x) => ({ label: `${x.path} · ${x.key}`, value: x.path }))}
+                                      placeholder="可选，如 yyxtid"
+                                      onSave={(v) => upsertSelectBinding(step, p, { id_path: v || null })}
+                                    />
+                                  </FieldControl>
+                                  <FieldControl label="多选">
+                                    <Checkbox checked={!!selectBinding?.multi || p.type === "list-enum"}
+                                      onChange={(e) => upsertSelectBinding(step, p, { multi: e.target.checked })}>
+                                      列表多选
+                                    </Checkbox>
+                                  </FieldControl>
+                                </div>
+                              )}
+                              {isEnumOption && (
+                                <FieldControl label="枚举候选">
                                   <EditableTextArea
-                                    rows={2}
-                                    value={queryToLines(selectBinding?.source_url || "")}
-                                    placeholder="每行一个参数，如 pageNo=1"
-                                    onSave={(v) => upsertSelectBinding(step, p, { source_url: mergeUrlQuery(selectBinding?.source_url || "", v) })}
+                                    rows={3}
+                                    value={enumOptions.join("\n")}
+                                    placeholder="每行一个候选项，也支持逗号分隔"
+                                    onSave={(v) => {
+                                      const options = Array.from(new Set(v.split(/[\n,，]/).map((x) => x.trim()).filter(Boolean)));
+                                      upsertSelectBinding(
+                                        step,
+                                        p,
+                                        {
+                                          source_url: "",
+                                          value_key: "",
+                                          label_key: "",
+                                          options,
+                                          count: options.length,
+                                          option_map: null,
+                                          enum_source: enumSourceForKind(p.source_kind),
+                                          enum_confirmed: true,
+                                        },
+                                        enumOptionEdits(step, p, options),
+                                      );
+                                    }}
                                   />
                                 </FieldControl>
-                                <FieldControl label="值字段">
-                                  <EditableComboInput
-                                    value={selectBinding?.value_key || ""}
-                                    options={responseKeyOptionsForSource(selectBinding?.source_url)}
-                                    placeholder="如 id/userId/dictValue"
-                                    onSave={(v) => upsertSelectBinding(step, p, { value_key: v })}
-                                  />
-                                </FieldControl>
-                                <FieldControl label="显示字段">
-                                  <EditableComboInput
-                                    value={selectBinding?.label_key || ""}
-                                    options={responseKeyOptionsForSource(selectBinding?.source_url)}
-                                    placeholder="如 name/label/dictLabel"
-                                    onSave={(v) => upsertSelectBinding(step, p, { label_key: v })}
-                                  />
-                                </FieldControl>
-                                <FieldControl label="配对 ID 字段">
-                                  <EditableComboInput
-                                    value={selectBinding?.id_path || ""}
-                                    options={(step.params || []).map((x) => ({ label: `${x.path} · ${x.key}`, value: x.path }))}
-                                    placeholder="可选，如 yyxtid"
-                                    onSave={(v) => upsertSelectBinding(step, p, { id_path: v || null })}
-                                  />
-                                </FieldControl>
-                                <FieldControl label="多选">
-                                  <Checkbox checked={!!selectBinding?.multi || p.type === "list-enum"}
-                                    onChange={(e) => upsertSelectBinding(step, p, { multi: e.target.checked })}>
-                                    列表多选
-                                  </Checkbox>
-                                </FieldControl>
-                              </div>
-                              <FieldControl label="候选快照">
-                                <EditableTextArea
-                                  rows={2}
-                                  value={enumOptions.join("\n")}
-                                  placeholder="每行一个候选项，也支持逗号分隔；接口下拉可作为快照"
-                                  onSave={(v) => {
-                                    const options = Array.from(new Set(v.split(/[\n,，]/).map((x) => x.trim()).filter(Boolean)));
-                                    upsertSelectBinding(
-                                      step,
-                                      p,
-                                      { source_url: "", value_key: "", label_key: "", options, count: options.length, option_map: null, enum_source: "manual", enum_confirmed: true },
-                                      enumOptionEdits(step, p, options),
-                                    );
-                                  }}
-                                />
-                              </FieldControl>
+                              )}
                             </Space>
                           </div>
                             </Collapse.Panel>

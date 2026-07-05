@@ -66,8 +66,10 @@ def collect_repair_findings(api_request: dict) -> list[dict]:
             # 系统时间戳(submitTime/createTime)已标 system_values、运行期填 now → 不是"焊死会话值",免报(否则白拦发布)
             sys_paths = {s.get("path") for s in (tgt.get("system_values") or [])}
             sys_toks = {tuple(s.get("tokens") or []) for s in (tgt.get("system_values") or [])}
+            link_paths = {lk.get("target_path") for lk in (tgt.get("links") or []) if lk.get("target_path")}
+            link_toks = {tuple(_split_path(p)) for p in link_paths}
             for p, toks, sv, raw in _leaf_paths(templ):
-                if p in sys_paths or tuple(toks) in sys_toks:
+                if p in sys_paths or tuple(toks) in sys_toks or p in link_paths or tuple(toks) in link_toks:
                     continue
                 if not _is_placeholder(sv) and looks_session_specific(raw):
                     out.append({"kind": "session_constant", "step": si, "path": toks, "value": sv,

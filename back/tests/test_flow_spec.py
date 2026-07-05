@@ -187,6 +187,32 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertTrue(any(i["path"] == "token" and i["source"] == "requestHeader:token" for i in apir["identity"]))
 
+    def test_session_literals_are_runtime_unknown_not_constants(self):
+        captured = [_post(
+            "https://oa/api/chat",
+            {
+                "wybs": "bfb49e8-9c90-4315-9eaf-5c0e938b87bf",
+                "conversation_id": "26a5509d-4fbb-4241-8924-186ed6bdd3dc",
+                "question": "你好",
+            },
+            resp={"code": 200},
+        )]
+        spec = to_flow_spec(captured, samples={"question": "你好"})
+
+        by_path = {p.path: p for p in spec.steps[0].params}
+        self.assertEqual(by_path["wybs"].category, "runtime_var")
+        self.assertEqual(by_path["wybs"].source_kind, "unknown")
+        self.assertEqual(by_path["conversation_id"].category, "runtime_var")
+        self.assertEqual(by_path["conversation_id"].source_kind, "unknown")
+
+        apir, errors = flow_spec_to_api_request(spec)
+        self.assertIsNone(apir)
+        self.assertTrue(any("wybs" in e for e in errors))
+        self.assertTrue(any("conversation_id" in e for e in errors))
+        report = validate_flow_spec(spec)
+        self.assertFalse(report["passed"])
+        self.assertTrue(any("运行期变量" in e for e in report["errors"]))
+
     def test_summary_shape(self):
         captured = [_post("https://oa/api/submit", {"a": 1}, resp={"code": 200})]
         spec = to_flow_spec(captured, samples={"a": "1"}, tenant="acme", subsystem="HR")
@@ -491,12 +517,12 @@ class GetBusinessStepTest(unittest.TestCase):
         by_path = {p.path: p for p in step.params}
         self.assertEqual(by_path["ywsxList[0].ywsxmc"].category, "user_param")
         self.assertTrue(by_path["ywsxList[0].ywsxmc"].exposed_to_user)
-        self.assertEqual(by_path["ywsxList[0].yyxtmc"].source_kind, "form_option")
+        self.assertEqual(by_path["ywsxList[0].yyxtmc"].source_kind, "api_option")
         self.assertEqual(by_path["ywsxList[0].yyxtmc"].type, "enum")
         self.assertEqual(by_path["ywsxList[0].yyxtmc"].enum_options, [sys1, sys2])
         self.assertTrue(by_path["ywsxList[0].yyxtmc"].exposed_to_user)
         self.assertEqual(by_path["ywsxList[0].yyxtid"].category, "runtime_var")
-        self.assertEqual(by_path["ywsxList[0].yyxtid"].source_kind, "form_option")
+        self.assertEqual(by_path["ywsxList[0].yyxtid"].source_kind, "api_option")
         self.assertFalse(by_path["ywsxList[0].yyxtid"].exposed_to_user)
         self.assertEqual(by_path["ssbmId"].category, "system_const")
         self.assertFalse(by_path["ssbmId"].exposed_to_user)
@@ -517,7 +543,7 @@ class GetBusinessStepTest(unittest.TestCase):
 
         by_path = {p.path: p for p in spec.steps[0].params}
         self.assertEqual(by_path["type"].type, "enum")
-        self.assertEqual(by_path["type"].source_kind, "form_option")
+        self.assertEqual(by_path["type"].source_kind, "page_enum")
         self.assertEqual(by_path["type"].enum_options, ["事假", "病假", "年假"])
         self.assertEqual(spec.steps[0].selects[0].options, ["事假", "病假", "年假"])
 
@@ -532,7 +558,7 @@ class GetBusinessStepTest(unittest.TestCase):
         by_path = {p.path: p for p in spec.steps[0].params}
         self.assertEqual(by_path["type"].key, "类型")
         self.assertEqual(by_path["type"].type, "enum")
-        self.assertEqual(by_path["type"].source_kind, "form_option")
+        self.assertEqual(by_path["type"].source_kind, "page_enum")
         self.assertEqual(by_path["type"].enum_options, ["事假", "病假"])
         self.assertEqual(spec.steps[0].selects[0].option_map, {"事假": 2, "病假": 3})
 
@@ -545,7 +571,28 @@ class GetBusinessStepTest(unittest.TestCase):
 
         by_path = {p.path: p for p in spec.steps[0].params}
         self.assertNotEqual(by_path["type"].type, "enum")
-        self.assertNotEqual(by_path["type"].source_kind, "form_option")
+        self.assertNotIn(by_path["type"].source_kind, {"api_option", "page_enum", "static_enum", "manual_enum", "form_option"})
+
+    def test_flow_spec_does_not_bind_short_code_to_unrelated_api_option(self):
+        body = {"type": 1, "name": "测试"}
+        tenant_read = {
+            "url": "http://admin.example.com/system/tenant/simple-list",
+            "json": [
+                {"id": 1, "name": "点新信息"},
+                {"id": 2, "name": "小租户"},
+            ],
+        }
+
+        spec = to_flow_spec(
+            [_post("https://oa/api/submit", body, resp={"code": 200})],
+            reads=[tenant_read],
+            samples={"租户": "点新信息", "type": "1", "name": "测试"},
+        )
+
+        by_path = {p.path: p for p in spec.steps[0].params}
+        self.assertNotEqual(by_path["type"].type, "enum")
+        self.assertNotEqual(by_path["type"].source_kind, "api_option")
+        self.assertEqual(spec.steps[0].selects, [])
 
     def test_apply_llm_field_names_only_updates_machine_auto_names(self):
         spec = to_flow_spec([

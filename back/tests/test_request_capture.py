@@ -2847,6 +2847,24 @@ def test_collect_repair_findings():
     assert "session_constant" in kinds and "placeholder_name" in kinds
 
 
+def test_collect_repair_findings_ignores_linked_session_constant():
+    from dano.execution.page.repair_ops import collect_repair_findings
+    apir = {
+        "steps": [
+            {"method": "POST", "path": "/create", "body_template": {"name": "{{名称}}"}, "params": ["名称"]},
+            {
+                "method": "POST",
+                "path": "/submit",
+                "body_template": {"conversation_id": "26a5509d-4fbb-4241-8924-186ed6bdd3dc"},
+                "params": [],
+                "links": [{"source_step": 0, "source_path": "data.conversation_id", "target_path": "conversation_id"}],
+            },
+        ]
+    }
+
+    assert collect_repair_findings(apir) == []
+
+
 async def test_run_repair_loop_converges_with_fake_propose():
     """脏 skill(会话常量焊死 + 占位名参数)→ fake 修复器出 parameterize+rename → 循环后 findings 清零。"""
     from dano.execution.page.repair_ops import collect_repair_findings

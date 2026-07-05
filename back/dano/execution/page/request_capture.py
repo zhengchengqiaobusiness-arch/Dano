@@ -546,14 +546,31 @@ def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool):
     return best
 
 
+def _sample_values_for_leaf(path: str, sv: str, samples: dict | None, field: dict | None = None) -> set[str]:
+    """只取当前字段自己的录制佐证值，避免短码字段被其它字段的下拉样例误确认。"""
+    out = {str(sv)} if sv not in (None, "") else set()
+    leaf = path.split(".")[-1].split("[")[0]
+    keys = {path, leaf}
+    if field:
+        keys.update(str(field.get(k) or "") for k in ("key", "suggest_name", "path"))
+    for k, v in (samples or {}).items():
+        if v in (None, ""):
+            continue
+        sk = str(k)
+        if sk in keys or any(_name_match(sk, kk) for kk in keys if kk):
+            out.add(str(v))
+    return out
+
+
 def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | None = None,
-                    skip_paths: list[str] | None = None) -> list[dict]:
+                    skip_paths: list[str] | None = None,
+                    fields: list[dict] | None = None) -> list[dict]:
     """提交体里"对应某候选列表项"的字段 → 绑 select(Agent 传名字/文字→运行期查内部 ID)。
 
     两形态(通用,不挑系统):① **单码字段**(type=2↔字典 value=2、approverId=12↔user/list:字段存码,agent 传名)
     ② **名/ID 配对**(yyxtmc=显示名 + 兄弟 yyxtid=内部 id:两字段一次选定)→ 输出 id_path/id_tokens,运行期
     解析后**同时**写回显示名字段与配对 id 字段(换一个选项时 id 不再冻结成录制值)。
-    **录制样例(samples)= 消歧器**:候选显示名 == 用户录制选中值 →「确认命中」强证据(大列表/短码也照绑)。
+    **录制样例(samples)= 字段级消歧器**:候选显示名 == 当前字段自己的录制选中值 →「确认命中」强证据。
     无佐证时:短码(<2)只在小列表认、用户亲填值不当码、同源未确认命中 >3 个按通用字典整源丢弃。
     skip_paths:已被**列表多选**(suggest_list_selects)整体接管的对象数组路径 → 其下逐元素叶子不再单独绑
     (修"选了多个人却被拆成 participants[0].userId 冻死、只认最后一个"的根因)。
@@ -565,7 +582,9 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
     skip_pref = tuple((p + "[") for p in (skip_paths or []))   # 数组多选路径下的逐元素叶子(participants[0]…)整体跳过
     if skip_pref:
         leaves = [lf for lf in leaves if not lf[0].startswith(skip_pref)]
-    sample_vals = {str(v) for v in (samples or {}).values() if v not in (None, "")}
+    use_field_scope = fields is not None
+    field_by_path = {str(f.get("path") or ""): f for f in (fields or []) if f.get("path")}
+    all_sample_vals = {str(v) for v in (samples or {}).values() if v not in (None, "")}
     by_path: dict[str, list[dict]] = {}                   # path → 跨**所有** read 源的候选绑定(供择优)
     for r in reads:
         items = as_list_payload(r.get("json"))
@@ -576,6 +595,8 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
         for path, toks, sv, raw in leaves:
             if not sv or _is_const_value(raw):           # 系统常量(流程键/uuid/雪花)不作"按名字选"的下拉参数
                 continue
+            sample_vals = (_sample_values_for_leaf(path, sv, samples, field_by_path.get(path))
+                           if use_field_scope else all_sample_vals)
             m = _match_select(sv, items, sample_vals, small)
             if m is None:
                 continue
@@ -2104,7 +2125,7 @@ async def _get_json(url: str, base_url: str, storage_state, token_key: str | Non
         headers["Authorization"] = ck["Authorization"]
     import httpx
     try:
-        async with httpx.AsyncClient(timeout=30, verify=verify) as c:
+        async with httpx.AsyncClient(timeout=30, verify=verify, trust_env=False) as c:
             r = await c.get(full, headers=headers)
         return r.json()
     except Exception:  # noqa: BLE001
@@ -2592,7 +2613,7 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
         send_kw = ({"data": {k: ("" if v is None else v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
                                   if isinstance(v, (dict, list)) else str(v)) for k, v in (body or {}).items()}}
                    if is_form else {"json": body})
-    async with httpx.AsyncClient(timeout=30, verify=verify) as c:
+    async with httpx.AsyncClient(timeout=30, verify=verify, trust_env=False) as c:
         r = await c.request(method, url, headers=headers, **send_kw)
     try:
         data = r.json()
