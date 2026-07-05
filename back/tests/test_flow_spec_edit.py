@@ -3,8 +3,9 @@
 import pytest
 
 from dano.execution.page.flow_spec import (
-    FlowSpec, FlowStep, FlowLink, ParamField,
+    FlowSpec, FlowStep, FlowLink, ParamField, SelectBinding,
     apply_flow_edits, validate_flow_spec, _infer_type_from_value,
+    add_llm_review_recommendations, refresh_review_items, flow_spec_to_api_request,
 )
 
 
@@ -28,6 +29,193 @@ def test_edit_key():
     assert new.steps[0].params[0].name_source == "manual"
     assert new.meta["current_version"] == 1
     assert new.meta["versions"][0]["action"] == "flow_edit"
+
+
+def test_edit_key_syncs_label_select_and_exported_api_request():
+    param = ParamField(
+        path="form.systemName",
+        key="oldName",
+        label="oldName",
+        value="系统A",
+        type="string",
+        required=True,
+        category="user_param",
+        source_kind="form_option",
+    )
+    step = FlowStep(
+        step_id="step1",
+        method="POST",
+        url="/api/submit",
+        path="/api/submit",
+        body_source='{"form":{"systemName":"系统A","systemId":"id-a"}}',
+        params=[param],
+        selects=[SelectBinding(
+            param="staleAutoName",
+            path="form.systemName",
+            source_url="/api/options",
+            value_key="id",
+            label_key="name",
+            id_path="form.systemId",
+        )],
+        sample_inputs={"oldName": "系统A"},
+    )
+    spec = FlowSpec(flow_id="f", steps=[step])
+
+    new = apply_flow_edits(spec, [{
+        "op": "update",
+        "step_id": "step1",
+        "param_path": "form.systemName",
+        "field": "key",
+        "value": "应用系统名称",
+    }])
+    assert new.steps[0].params[0].label == "应用系统名称"
+    assert new.steps[0].selects[0].param == "应用系统名称"
+
+    apir, errors = flow_spec_to_api_request(new)
+
+    assert errors == []
+    assert apir["params"] == ["应用系统名称"]
+    assert apir["sample_inputs"] == {"应用系统名称": "系统A"}
+    assert apir["selects"][0]["param"] == "应用系统名称"
+
+
+def test_edit_param_path_syncs_select_and_target_link():
+    step1 = FlowStep(
+        step_id="read",
+        method="GET",
+        url="/api/read",
+        path="/api/read",
+        response_json={"data": {"id": "A-1"}},
+    )
+    step2 = FlowStep(
+        step_id="write",
+        method="POST",
+        url="/api/submit",
+        path="/api/submit",
+        body_source='{"form":{"oldPath":"系统A","systemId":"id-a"}}',
+        params=[ParamField(
+            path="form.oldPath",
+            key="系统名称",
+            value="系统A",
+            type="enum",
+            category="user_param",
+            source_kind="form_option",
+        )],
+        selects=[SelectBinding(
+            param="系统名称",
+            path="form.oldPath",
+            source_url="/api/options",
+            value_key="id",
+            label_key="name",
+            id_path="form.systemId",
+        )],
+    )
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[step1, step2],
+        links=[FlowLink(
+            link_id="l1",
+            source_step_id="read",
+            source_path="data.id",
+            target_step_id="write",
+            target_path="form.oldPath",
+        )],
+    )
+
+    new = apply_flow_edits(spec, [{
+        "op": "update",
+        "step_id": "write",
+        "param_path": "form.oldPath",
+        "field": "path",
+        "value": "form.systemName",
+    }])
+
+    assert new.steps[1].params[0].path == "form.systemName"
+    assert new.steps[1].selects[0].path == "form.systemName"
+    assert new.links[0].target_path == "form.systemName"
+
+
+def test_static_enum_options_on_param_are_exported_as_selects():
+    param = ParamField(
+        path="form.leaveType",
+        key="请假类型",
+        label="请假类型",
+        value="事假",
+        type="enum",
+        required=True,
+        category="user_param",
+        source_kind="form_option",
+        enum_options=["事假", "病假", "年假"],
+    )
+    step = FlowStep(
+        step_id="step1",
+        method="POST",
+        url="/api/submit",
+        path="/api/submit",
+        body_source='{"form":{"leaveType":"事假"}}',
+        params=[param],
+        sample_inputs={"请假类型": "事假"},
+    )
+    spec = FlowSpec(flow_id="f", steps=[step])
+
+    apir, errors = flow_spec_to_api_request(spec)
+
+    assert errors == []
+    assert apir["params"] == ["请假类型"]
+    assert apir["field_types"]["请假类型"] == "enum"
+    assert apir["selects"][0]["param"] == "请假类型"
+    assert apir["selects"][0]["options"] == ["事假", "病假", "年假"]
+    assert apir["selects"][0]["enum_source"] == "manual"
+    assert apir["selects"][0]["enum_confirmed"] is True
+
+
+def test_update_select_binding_from_frontend_dicts_is_validated_and_exported():
+    param = ParamField(
+        path="form.approverId",
+        key="审批人",
+        label="审批人",
+        value="张三",
+        type="enum",
+        required=True,
+        category="user_param",
+        source_kind="form_option",
+    )
+    step = FlowStep(
+        step_id="step1",
+        method="POST",
+        url="/api/submit",
+        path="/api/submit",
+        body_source='{"form":{"approverId":"115"}}',
+        params=[param],
+        sample_inputs={"审批人": "张三"},
+    )
+    spec = FlowSpec(flow_id="f", steps=[step])
+
+    new = apply_flow_edits(spec, [{
+        "op": "update",
+        "step_id": "step1",
+        "field": "selects",
+        "value": [{
+            "param": "审批人",
+            "path": "form.approverId",
+            "source_url": "/admin-api/system/user/page?pageNo=1&pageSize=10",
+            "value_key": "id",
+            "label_key": "nickname",
+            "options": ["张三", "李四"],
+            "count": 2,
+        }],
+    }])
+
+    assert isinstance(new.steps[0].selects[0], SelectBinding)
+    assert new.steps[0].selects[0].value_key == "id"
+
+    apir, errors = flow_spec_to_api_request(new)
+
+    assert errors == []
+    assert apir["selects"][0]["source_url"] == "/admin-api/system/user/page?pageNo=1&pageSize=10"
+    assert apir["selects"][0]["value_key"] == "id"
+    assert apir["selects"][0]["label_key"] == "nickname"
+    assert apir["field_types"]["审批人"] == "enum"
 
 
 def test_edit_required():
@@ -266,6 +454,75 @@ def test_runtime_unknown_review_is_not_duplicated_as_field_category():
 
     assert [i.type for i in target_items] == ["runtime_var_source"]
     assert target_items[0].severity == "high"
+
+
+class _FakeLlmClient:
+    def __init__(self, payload):
+        self.payload = payload
+        self.last_user = ""
+
+    async def complete_json(self, *, model: str, system: str, user: str, timeout_s: float):
+        self.last_user = user
+        return self.payload
+
+
+@pytest.mark.asyncio
+async def test_llm_recommendations_attach_to_review_without_mutating_flow():
+    source = FlowStep(
+        step_id="s1", method="GET", url="/api/detail", path="/api/detail",
+        response_json={"data": {"taskId": "T-100"}},
+    )
+    target_param = ParamField(
+        path="taskId", key="taskId", value="T-100", type="string",
+        category="runtime_var", source_kind="unknown",
+    )
+    target = FlowStep(
+        step_id="s2", method="POST", url="/api/submit", path="/api/submit",
+        params=[target_param], body_source='{"taskId":"T-100"}',
+    )
+    spec = refresh_review_items(FlowSpec(flow_id="llm", steps=[source, target]))
+    client = _FakeLlmClient({"suggestions": [{
+        "review_id": spec.review_items[0].id,
+        "action": "bind_previous_response",
+        "source_step_id": "s1",
+        "source_path": "data.taskId",
+        "confidence": 0.86,
+        "reason": "字段名与上游 taskId 一致",
+    }]})
+
+    out = await add_llm_review_recommendations(spec, llm_client=client, model="fake")
+
+    assert out.steps[1].params[0].source_kind == "unknown"
+    assert out.links == []
+    assert out.review_items[0].llm_suggestions[0]["action"] == "bind_previous_response"
+    assert out.review_items[0].llm_suggestions[0]["source_path"] == "data.taskId"
+    assert "T-100" not in client.last_user
+
+
+@pytest.mark.asyncio
+async def test_llm_recommendations_reject_ungrounded_source_path():
+    source = FlowStep(
+        step_id="s1", method="GET", url="/api/detail", path="/api/detail",
+        response_json={"data": {"taskId": "T-100"}},
+    )
+    target_param = ParamField(
+        path="taskId", key="taskId", value="T-100", type="string",
+        category="runtime_var", source_kind="unknown",
+    )
+    target = FlowStep(step_id="s2", method="POST", url="/api/submit", path="/api/submit", params=[target_param])
+    spec = refresh_review_items(FlowSpec(flow_id="llm", steps=[source, target]))
+    client = _FakeLlmClient({"suggestions": [{
+        "review_id": spec.review_items[0].id,
+        "action": "bind_previous_response",
+        "source_step_id": "s1",
+        "source_path": "data.notExist",
+        "confidence": 0.9,
+        "reason": "bad",
+    }]})
+
+    out = await add_llm_review_recommendations(spec, llm_client=client, model="fake")
+
+    assert out.review_items[0].llm_suggestions == []
 
 
 # ── Type inference ──

@@ -38,6 +38,22 @@ log = structlog.get_logger(__name__)
 _PROTOTYPE_SUBSYSTEMS = [Subsystem.OA, Subsystem.TICKET, Subsystem.REIMBURSE]
 
 
+def _page_semantic_client(*required_methods: str):
+    """复用发布评审的 LLM client；缺少对应能力时返回 None，让调用方走确定性兜底。"""
+    try:
+        from dano.agent_tools import tools as agent_tools
+        board = agent_tools._review_board
+        client = getattr(board, "client", None) if board is not None else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("page.semantic_client_unavailable", error=str(exc))
+        return None
+    if client is None:
+        return None
+    if any(not hasattr(client, method) for method in required_methods):
+        return None
+    return client
+
+
 async def _tenant_subsystems(tenant: str) -> list[Subsystem]:
     """该租户**实际拥有**的系统实例(发现式,支持任意系统);发现为空(尚无发布)才退回原型常量兜底。"""
     try:
@@ -533,9 +549,9 @@ async def onboarding_page_import(req: PageImportReq) -> dict:
 
 async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict,
                               reads: list[dict] | None = None, storage: dict | None = None,
-                              required_labels: set | None = None, dom_options: dict | None = None) -> dict:
+                              required_labels: set | None = None, page_enum_options: dict | None = None) -> dict:
     """构造 request_fields 消息:字段表(含 type/required)+ 候选请求 + select(Q2)+ identity(Q1)。"""
-    from dano.execution.page.request_capture import (apply_dom_options, dom_enum_selects, flatten_body,
+    from dano.execution.page.request_capture import (apply_page_enum_options, page_enum_selects, flatten_body,
                                                      looks_internal_param_name, suggest_assignee_names,
                                                      suggest_identity, suggest_list_selects,
                                                      suggest_select_names, suggest_selects,
@@ -555,8 +571,8 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
     selects = suggest_selects(pd, reads or [], samples, skip_paths=list_paths) + list_selects
     # 页面枚举地面真值:用录制时下拉里真实可见的选项覆盖候选快照(治"加班类型绑到 222 项全量字典");
     #   并为"只在 DOM 有选项、没绑上网络源"的纯枚举字段补一个无来源 enum(agent 传名字即原样提交)。
-    apply_dom_options(selects, dom_options)
-    selects += dom_enum_selects(pd, dom_options, {s["path"] for s in selects})
+    apply_page_enum_options(selects, page_enum_options, post_data=pd, fields=fields)
+    selects += page_enum_selects(pd, page_enum_options, {s["path"] for s in selects}, fields=fields)
     # select/选人字段:用录制选项标签当默认参数名(经候选列表桥接),避免漏内部 key(Activity_xxx/嵌套键)
     sel_names = suggest_select_names(selects, samples)
     for f in fields:
@@ -641,7 +657,7 @@ async def record_ws(ws: WebSocket) -> None:
         pending_reads: list[dict] = []         # 抓到的列表读响应(select 候选源)
         pending_storage: dict | None = None    # 登录态(认 identity 字段)
         pending_required: set = set()          # 录制时表单 * 必填的字段标签
-        pending_dom_options: dict = {}         # 录制时下拉里真实可见的选项 {选中显示值: [选项文字]}(枚举地面真值)
+        pending_page_enum_options: dict = {}         # 录制时下拉里真实可见的选项 {选中显示值: [选项文字]}(枚举地面真值)
         while True:
             msg = await ws.receive_json()
             t = msg.get("type")
@@ -664,19 +680,19 @@ async def record_ws(ws: WebSocket) -> None:
                     required_labels = {keymap[i] for i in fb_idx
                                        if raw[i].get("required") and raw[i].get("op") in ("fill", "select", "pick")}
                     # 下拉真实可见选项(枚举地面真值){选中显示值: [选项文字]}
-                    dom_options = {raw[i].get("value", ""): raw[i]["options"] for i in fb_idx
+                    page_enum_options = {raw[i].get("value", ""): raw[i]["options"] for i in fb_idx
                                    if raw[i].get("op") in ("pick", "select") and raw[i].get("options")
                                    and raw[i].get("value")}
                 else:
                     steps, samples = sess.recorded_steps()
                     required_labels = sess.recorded_required_labels()
-                    _dom = sess.recorded_dom_options()               # {字段key: [选项]} → 按选中显示值重键
-                    dom_options = {samples[k]: v for k, v in _dom.items() if k in samples and v}
+                    page_options_by_field = sess.recorded_page_enum_options()  # {字段key: [选项]} → 按选中显示值重键
+                    page_enum_options = {samples[k]: v for k, v in page_options_by_field.items() if k in samples and v}
                 sub = init.get("subsystem", "A-报销")
                 login_state = await sess.storage_state()   # 录制会话(已真人登录)的登录态快照
 
-                # ★ 抓请求路径优先:列出所有 JSON 写请求(候选),默认选最像提交的那个,把它请求体拍平给
-                #   前端勾字段。用户也可在候选里手选别的(应对噪声误判 / 多写请求)。勾完发 publish_request 才建 Skill。
+                # 抓请求路径优先:列出所有 JSON 写请求(候选),默认选最像提交的那个,生成 FlowSpec 工作台。
+                # 发布只从 FlowSpec 出口走,避免字段勾选表和工作台两套口径。
                 from dano.execution.page.request_capture import (flatten_body, json_write_requests,
                                                                  looks_like_auth_write, pick_submit_request)
                 all_caps = (sess.captured_all_requests()
@@ -688,7 +704,7 @@ async def record_ws(ws: WebSocket) -> None:
                          captured_urls=[((c.get("method") or ""), (c.get("url") or "")[:140]) for c in all_caps][:25])
                 if not cands and not all_caps:
                     # 一条写请求都没抓到 → 多半是**没点「提交」**或刚重连过会话(新浏览器没有旧请求)→ 明确引导重点提交,
-                    # **不落到脆弱的 DOM 回放**(那会报"pick 没找到元素",更迷惑)。现场还在,重点一次提交即可。
+                    # 不再发布页面回放脚本；现场还在，重新点击一次真实提交即可抓请求。
                     await ws.send_json({"type": "result", "parsed_steps": len(steps), "report": {"ok": False,
                         "reason": "没抓到任何提交接口请求 —— 拦截模式下**点一次「提交」**才会抓到那条请求。"
                                   "若刚重连过会话/浏览器,请在画面里**重新点一次「提交」**(现场还在),然后再发布。"}})
@@ -699,25 +715,44 @@ async def record_ws(ws: WebSocket) -> None:
                     pending_reads = sess.captured_reads()       # select 候选源(选领导)
                     pending_storage = login_state               # identity 字段识别
                     pending_required = required_labels          # 表单 * 必填
-                    pending_dom_options = dom_options           # 下拉枚举地面真值
+                    pending_page_enum_options = page_enum_options           # 下拉枚举地面真值
                     chosen = pick_submit_request(cands, samples) or cands[-1]
                     pending_req = chosen
                     await ws.send_json(await _request_fields_msg(chosen, cands, samples, pending_reads,
-                                                                 pending_storage, pending_required, dom_options))
+                                                                 pending_storage, pending_required, page_enum_options))
                     # Step A: 灰度附带下发 flow_spec 摘要 + 完整 spec;前端暂不消费,零回归。
                     # 同时把 spec 存到 pending_flow_spec 供后续 flow_update / step_naming / 业务说明编辑。
                     try:
-                        from dano.execution.page.flow_spec import to_flow_spec
+                        from dano.execution.page.flow_spec import (
+                            apply_llm_field_names,
+                            llm_field_name_candidates,
+                            to_flow_spec,
+                        )
                         pending_flow_spec = to_flow_spec(
                             captured_requests=all_caps,
                             reads=pending_reads,
                             samples=pending_samples,
                             storage_state=pending_storage,
                             required_labels=pending_required,
-                            dom_options=pending_dom_options,
+                            page_enum_options=pending_page_enum_options,
                             tenant=init.get("tenant", ""),
                             subsystem=init.get("subsystem", ""),
                         )
+                        try:
+                            from dano.agent_tools import tools as _T
+                            from dano.review.board import suggest_field_names_llm
+                            _board = _T._review_board
+                            _fields = llm_field_name_candidates(pending_flow_spec)
+                            if _board is not None and _fields:
+                                _names = await suggest_field_names_llm(
+                                    _board.client,
+                                    (getattr(_board, "models", None) or {}).get("acceptance"),
+                                    action=pending_flow_spec.title or (pending_flow_spec.steps[-1].path if pending_flow_spec.steps else ""),
+                                    fields=_fields,
+                                )
+                                pending_flow_spec = apply_llm_field_names(pending_flow_spec, _names)
+                        except Exception as _name_err:  # noqa: BLE001
+                            log.warning("flow_spec.field_naming_failed", error=str(_name_err))
                         from dano.execution.page.flow_spec import (
                             flow_spec_to_client,
                             flow_spec_to_summary,
@@ -729,38 +764,20 @@ async def record_ws(ws: WebSocket) -> None:
                             "full_spec": flow_spec_to_client(pending_flow_spec),
                             "check_report": validate_flow_spec(pending_flow_spec),
                         })
-                    except Exception as _fs_err:  # noqa: BLE001 —— 灰度不影响主路径
+                    except Exception as _fs_err:  # noqa: BLE001
                         log.warning("flow_spec.emit_failed", error=str(_fs_err))
+                        await ws.send_json({"type": "result",
+                                            "report": {"ok": False, "stage": "flow_spec_build",
+                                                       "reason": f"FlowSpec 生成失败:{_fs_err}"},
+                                            "parsed_steps": 0})
                     continue
 
-                # 兜底:没抓到 JSON 提交请求 → 老的 DOM 回放路径
-                if not steps:
-                    await ws.send_json({"type": "result",
-                                        "report": {"ok": False, "reason": "没抓到提交请求,也没录到可用步骤;"
-                                                   "请确认是否点了「提交」,或换「逐步确认」方式"}, "parsed_steps": 0})
-                    continue
-                from dano.onboarding.page_onboard import run_page_onboarding
-                deploy = init.get("deploy") or ({"base_url": init["base_url"]} if init.get("base_url") else {})
-                creds = dict(init.get("credentials") or {})
-                if init.get("token"):
-                    creds["token"] = init["token"]
-                if login_state:
-                    creds["storage_state"] = login_state   # 录制登录态 → 回放浏览器带着它,不再被挡登录
-                report = await run_page_onboarding(
-                    tenant=init["tenant"], subsystem=sub,
-                    start_url=init["start_url"], action=msg["action"], title=msg.get("title", ""),
-                    success_marker=msg.get("success_marker") or None, deploy=deploy,
-                    credentials=creds,
-                    sample_inputs={**samples, **(msg.get("sample_inputs") or {})},
-                    steps=[s.model_dump() for s in steps], dom_fingerprint="")
-                from dano.execution.page.sessions import save_session
-                saved = save_session(init["tenant"], sub, login_state)   # 存盘供运行期复用
-                if report.get("ok"):
-                    await _auto_export(init["tenant"])
                 await ws.send_json({"type": "result",
-                                    "report": {**report, **({"session_saved": saved} if saved else {})},
-                                    "parsed_steps": len(steps)})
-                # 不 break:发布后会话保留,用户可删步骤重发或继续录;由 stop / 断连结束
+                                    "report": {"ok": False,
+                                               "stage": "capture_request",
+                                               "reason": "没有抓到可发布的 JSON 提交请求。请在录制画面里重新点击一次真实提交按钮后再分析。"},
+                                    "parsed_steps": 0})
+                continue
             elif t == "choose_request":
                 # 用户在候选里手选用哪个写请求(噪声误判/多写请求时)→ 重发该请求的字段表
                 idx = msg.get("idx", 0)
@@ -768,7 +785,7 @@ async def record_ws(ws: WebSocket) -> None:
                     pending_req = pending_candidates[idx]
                     await ws.send_json(await _request_fields_msg(pending_req, pending_candidates, pending_samples,
                                                                  pending_reads, pending_storage, pending_required,
-                                                                 pending_dom_options))
+                                                                 pending_page_enum_options))
             # Step B: 前端编辑 FlowSpec → 应用编辑,返回新 spec
             elif t == "flow_update":
                 if pending_flow_spec is None:
@@ -850,6 +867,33 @@ async def record_ws(ws: WebSocket) -> None:
                     "full_spec": flow_spec_to_client(pending_flow_spec),
                     "check_report": validate_flow_spec(pending_flow_spec),
                 })
+            # 第二层:LLM 辅助推荐。只把建议挂到 review_items,不直接修改字段/依赖。
+            elif t == "llm_recommendations":
+                if pending_flow_spec is None:
+                    await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
+                    continue
+                try:
+                    from dano.config import get_settings
+                    from dano.execution.page.flow_spec import (
+                        add_llm_review_recommendations,
+                        flow_spec_to_client,
+                        flow_spec_to_summary,
+                        validate_flow_spec,
+                    )
+                    model = get_settings().pi_model
+                    pending_flow_spec = await add_llm_review_recommendations(
+                        pending_flow_spec,
+                        llm_client=_page_semantic_client("complete_json"),
+                        model=model,
+                    )
+                    await ws.send_json({
+                        "type": "flow_spec_updated",
+                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
+                        "full_spec": flow_spec_to_client(pending_flow_spec),
+                        "check_report": validate_flow_spec(pending_flow_spec),
+                    })
+                except Exception as e:  # noqa: BLE001
+                    await ws.send_json({"type": "error", "detail": f"llm_recommendations failed: {e}"})
             # Step D2: LLM 给每个 step 起业务名
             elif t == "step_naming":
                 if pending_flow_spec is None:
@@ -862,8 +906,10 @@ async def record_ws(ws: WebSocket) -> None:
                         rename_steps_with_llm,
                         validate_flow_spec,
                     )
-                    # TODO: 接入真实 LLM client;目前用 deterministic fallback
-                    pending_flow_spec = rename_steps_with_llm(pending_flow_spec, llm_client=None)
+                    pending_flow_spec = rename_steps_with_llm(
+                        pending_flow_spec,
+                        llm_client=_page_semantic_client("name_step"),
+                    )
                     await ws.send_json({
                         "type": "step_names",
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
@@ -885,7 +931,10 @@ async def record_ws(ws: WebSocket) -> None:
                         render_business_description,
                         validate_flow_spec,
                     )
-                    desc = render_business_description(pending_flow_spec, llm_client=None)
+                    desc = render_business_description(
+                        pending_flow_spec,
+                        llm_client=_page_semantic_client("summarize_flow"),
+                    )
                     pending_flow_spec.business_description = desc
                     pending_flow_spec = append_flow_version(
                         pending_flow_spec,
@@ -924,161 +973,74 @@ async def record_ws(ws: WebSocket) -> None:
                                  errors=summary["errors"],
                                  warnings=summary["warnings"])
             elif t == "publish_request":
-                # 用户在字段表里勾了哪些是参数、起了名 → 用真实提交请求建 Skill(任意 OA 通用)
-                use_flow_spec = bool(msg.get("use_flow_spec")) and pending_flow_spec is not None
-                if pending_req is None and not use_flow_spec:
+                # FlowSpec 工作台是录制发布唯一入口：步骤、字段、依赖、说明都以同一份可编辑 spec 为准。
+                if pending_flow_spec is None:
                     await ws.send_json({"type": "result",
-                                        "report": {"ok": False, "reason": "没有待发布的提交请求;先点「停止并发布」抓请求"}})
+                                        "report": {"ok": False, "stage": "flow_spec_missing",
+                                                   "reason": "没有可发布的 FlowSpec；请先停止并分析请求，生成 FlowSpec 后再发布。"}})
                     continue
-                param_map = {k: v.strip() for k, v in (msg.get("param_map") or {}).items() if v and v.strip()}
-                if use_flow_spec:
-                    try:
-                        from dano.execution.page.flow_spec import (
-                            apply_flow_publish_selection,
-                            flow_spec_required_params,
-                            flow_spec_to_api_request,
-                            flow_spec_to_summary,
-                            validate_flow_spec,
-                        )
-                        selected_scope_paths = None
-                        if pending_req is not None:
-                            from dano.execution.page.request_capture import flatten_body as _flatten_body
-                            selected_scope_paths = {
-                                f.get("path", "") for f in _flatten_body(
-                                    pending_req.get("post_data"),
-                                    pending_samples,
-                                    pending_required,
-                                )
-                                if f.get("path")
-                            }
-                        pending_flow_spec = apply_flow_publish_selection(
-                            pending_flow_spec,
-                            param_map,
-                            selected_scope_paths=selected_scope_paths,
-                        )
-                        check_report = validate_flow_spec(pending_flow_spec)
-                        if not check_report.get("passed"):
-                            await ws.send_json({
-                                "type": "result",
-                                "report": {
-                                    "ok": False,
-                                    "stage": "flow_spec_validate",
-                                    "reason": "FlowSpec 发布前校验未通过",
-                                    "clarifications": check_report.get("errors") or [],
-                                    "check_report": check_report,
-                                },
-                            })
-                            continue
-                        apir, build_errors = flow_spec_to_api_request(pending_flow_spec)
-                        if build_errors or not apir:
-                            await ws.send_json({
-                                "type": "result",
-                                "report": {
-                                    "ok": False,
-                                    "stage": "flow_spec_build",
-                                    "reason": "FlowSpec 无法转换成可执行请求",
-                                    "clarifications": build_errors,
-                                    "check_report": check_report,
-                                },
-                            })
-                            continue
-                        apir["_flow_spec"] = flow_spec_to_summary(pending_flow_spec)
-                        required = flow_spec_required_params(pending_flow_spec)
-                        last_params = apir.get("params") or ((apir.get("steps") or [{}])[-1].get("params") or [])
-                    except Exception as e:  # noqa: BLE001
-                        await ws.send_json({"type": "result",
-                                            "report": {"ok": False, "stage": "flow_spec_build",
-                                                       "reason": f"FlowSpec 发布构造失败:{e}"}})
+                try:
+                    from dano.execution.page.flow_spec import (
+                        flow_spec_required_params,
+                        flow_spec_to_api_request,
+                        flow_spec_to_summary,
+                        validate_flow_spec,
+                    )
+                    check_report = validate_flow_spec(pending_flow_spec)
+                    if not check_report.get("passed"):
+                        await ws.send_json({
+                            "type": "result",
+                            "report": {
+                                "ok": False,
+                                "stage": "flow_spec_validate",
+                                "reason": "FlowSpec 发布前校验未通过",
+                                "clarifications": check_report.get("errors") or [],
+                                "check_report": check_report,
+                            },
+                        })
                         continue
-
-                    sub = init.get("subsystem", "A-报销")
-                    login_state = await sess.storage_state()
-                    from dano.execution.page.sessions import save_session
-                    from dano.onboarding.page_onboard import run_request_onboarding
-                    save_session(init["tenant"], sub, login_state)
-                    from dano.infra.token_store import headers_from_api_request, save_token
-                    _tok_headers = headers_from_api_request(apir)
-                    if _tok_headers:
-                        await save_token(init["tenant"], sub, _tok_headers, source="recording")
-                    sample_in = apir.get("sample_inputs") or ((apir.get("steps") or [{}])[-1].get("sample_inputs") or {})
-                    rep = await run_request_onboarding(
-                        tenant=init["tenant"], subsystem=sub, action=msg["action"],
-                        title=msg.get("title", ""), api_request=apir, sample_inputs=sample_in,
-                        required=required,
-                        goal=msg.get("goal") or (pending_flow_spec.goal if pending_flow_spec else None),
-                        deploy=init.get("deploy"), storage_state=login_state)
-                    if rep.get("ok"):
-                        await _auto_export(init["tenant"])
-                    await ws.send_json({"type": "result", "report": {**rep, "check_report": check_report},
-                                        "parsed_steps": len(last_params), "via": "flow_spec",
-                                        "workflow_steps": len(apir.get("steps") or []) or None})
-                    continue
-                from dano.execution.page.request_capture import (apply_dom_options, auto_required_fields,
-                                                                 build_api_request, build_api_workflow,
-                                                                 infer_success_rule, looks_internal_param_name,
-                                                                 suggest_assignee_names, suggest_fact_check,
-                                                                 suggest_workflow_steps)
-                # 审批人字段名兜底:param_map 里仍是内部节点 ID(Activity_xxx)→ 换流程定义节点名/"审批人N"
-                #   (发布的 skill 不留机器名,即便前端没改/审核命名步没跑)。确定性,通用,不挑系统。
-                _assignee_names = suggest_assignee_names(pending_req.get("post_data"), pending_reads, pending_samples)
-                for _path, _nm in list(param_map.items()):
-                    if looks_internal_param_name(_nm) and _path in _assignee_names:
-                        param_map[_path] = _assignee_names[_path]
-                sels = msg.get("selects") or []         # Q2 选领导:名字→ID
-                apply_dom_options(sels, pending_dom_options)   # 页面枚举地面真值兜底:发布也用 DOM 选项盖掉网络字典快照
-                idens = msg.get("identity") or []        # Q1 当前用户:运行期重取
-                fc = suggest_fact_check(pending_samples, pending_reads)   # 回查源(录到"我的记录"列表才有)
-                sr = infer_success_rule(pending_reads)   # 学这套系统自己的"业务成功"约定(不挑系统,见 P0#2)
-                # 多步:用户勾了哪几条(step_idxs,有序);**没勾则自动判流程**(提交锚点+数据依赖,丢噪声)
-                step_idxs = [i for i in (msg.get("step_idxs") or []) if 0 <= i < len(pending_candidates)]
-                if not step_idxs:
-                    step_idxs = suggest_workflow_steps(pending_candidates, pending_samples)   # 自动建议流程步
-                if len(step_idxs) > 1:
-                    writes = [pending_candidates[i] for i in step_idxs]
-                    apir = build_api_workflow(writes, param_map=param_map, selects=sels, identity=idens,
-                                              typed=pending_samples)
-                    last_params = (apir.get("steps") or [{}])[-1].get("params") or []
-                else:
-                    apir = build_api_request(pending_req, param_map, selects=sels, identity=idens,
-                                             typed=pending_samples)
-                    last_params = (apir or {}).get("params") or []
-                if apir and fc:
-                    apir["fact_check"] = fc            # 提交后回查记录确认真生效(grounded)
-                if apir and sr:                        # 学到的成功约定:落到资产(工作流则落最后一步=提交那步)
-                    apir["success_rule"] = sr
-                    if apir.get("steps"):
-                        apir["steps"][-1]["success_rule"] = sr
-                if not apir or not last_params:
+                    apir, build_errors = flow_spec_to_api_request(pending_flow_spec)
+                    if build_errors or not apir:
+                        await ws.send_json({
+                            "type": "result",
+                            "report": {
+                                "ok": False,
+                                "stage": "flow_spec_build",
+                                "reason": "FlowSpec 无法转换成可执行请求",
+                                "clarifications": build_errors,
+                                "check_report": check_report,
+                            },
+                        })
+                        continue
+                    apir["_flow_spec"] = flow_spec_to_summary(pending_flow_spec)
+                    required = flow_spec_required_params(pending_flow_spec)
+                    last_params = apir.get("params") or ((apir.get("steps") or [{}])[-1].get("params") or [])
+                except Exception as e:  # noqa: BLE001
                     await ws.send_json({"type": "result",
-                                        "report": {"ok": False, "reason": "至少勾选一个字段作为参数(给它起个参数名)"}})
+                                        "report": {"ok": False, "stage": "flow_spec_build",
+                                                   "reason": f"FlowSpec 发布构造失败:{e}"}})
                     continue
-                # 必填**自动判定**(免手动勾选,默认全部必填;表单抓到 * 区分时据 * 降级可选)。
-                # 以提交那条请求体为锚(用户填值在此),经 param_map 桥到参数名;多步早期步的参数默认必填。
-                auto_required = auto_required_fields(
-                    pending_req.get("post_data"), pending_samples, param_map,
-                    form_required_labels=pending_required, params=last_params)
+
                 sub = init.get("subsystem", "A-报销")
                 login_state = await sess.storage_state()
                 from dano.execution.page.sessions import save_session
                 from dano.onboarding.page_onboard import run_request_onboarding
-                save_session(init["tenant"], sub, login_state)   # 运行期发请求带登录态
-                # 录制时抓到的鉴权头(Authorization/Tenant-Id/satoken…)单独存进 token_store(PG)→ 运行期覆盖旧 token、前端可查/可刷新
+                save_session(init["tenant"], sub, login_state)
                 from dano.infra.token_store import headers_from_api_request, save_token
                 _tok_headers = headers_from_api_request(apir)
                 if _tok_headers:
                     await save_token(init["tenant"], sub, _tok_headers, source="recording")
-                # 单请求取自身 sample_inputs;工作流取最后一步的(dry 校验用)
                 sample_in = apir.get("sample_inputs") or ((apir.get("steps") or [{}])[-1].get("sample_inputs") or {})
                 rep = await run_request_onboarding(
                     tenant=init["tenant"], subsystem=sub, action=msg["action"],
                     title=msg.get("title", ""), api_request=apir, sample_inputs=sample_in,
-                    required=auto_required,    # 自动判定:默认全部必填,表单 * 区分时降级可选(免手动勾选)
-                    goal=msg.get("goal"),            # 一般为 None → run_request_onboarding 内 _auto_goal 自动提炼(一键发布)
-                    deploy=init.get("deploy"), storage_state=login_state)  # 可逆沙箱+登录态 → 可活体真跑升 verified;P2
+                    required=required,
+                    goal=msg.get("goal") or pending_flow_spec.goal,
+                    deploy=init.get("deploy"), storage_state=login_state)
                 if rep.get("ok"):
                     await _auto_export(init["tenant"])
-                await ws.send_json({"type": "result", "report": rep,
-                                    "parsed_steps": len(last_params), "via": "request",
+                await ws.send_json({"type": "result", "report": {**rep, "check_report": check_report},
+                                    "parsed_steps": len(last_params), "via": "flow_spec",
                                     "workflow_steps": len(apir.get("steps") or []) or None})
             elif t == "stop":
                 break

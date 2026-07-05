@@ -40,7 +40,7 @@ import {
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 
-interface RecStep { op: string; locator?: string; field?: string; value?: string; required?: boolean; options?: string[] }
+interface RecStep { op: string; locator?: string; field?: string; value?: string; required?: boolean; options?: any[] }
 interface RecReq { method: string; url: string; has_body?: boolean; json?: boolean }
 interface RecField {
   path: string; key: string; value: string; suggest_param: boolean; suggest_name: string;
@@ -50,7 +50,8 @@ interface RecField {
 interface RecCand { idx: number; method: string; path: string }
 interface RecSelect {
   path: string; source_url: string; value_key: string; label_key: string; label: string;
-  count: number; multi?: boolean; dom_options?: boolean;
+  count: number; multi?: boolean; options?: string[]; option_map?: Record<string, any>;
+  enum_source?: string; enum_confirmed?: boolean;
 }
 interface RecIdentity { path: string; source: string }
 
@@ -58,10 +59,18 @@ interface FlowParam {
   path: string; key: string; label?: string; value: string; type: string; required: boolean; name_source?: string;
   category?: string; source_kind?: string; source?: any; reason?: string;
   exposed_to_user?: boolean; need_human_confirm?: boolean; editable?: boolean; confidence?: number;
+  enum_options?: string[] | null;
+}
+interface FlowSelectBinding {
+  param?: string; path?: string; source_url?: string; value_key?: string; label_key?: string;
+  options?: string[] | null; count?: number; multi?: boolean;
+  option_map?: Record<string, any> | null;
+  enum_source?: string | null; enum_confirmed?: boolean | null;
+  id_path?: string | null;
 }
 interface FlowStepData {
   step_id: string; name: string; method: string; url: string; path: string; risk_level: string;
-  params: FlowParam[]; selects?: any[]; identity?: any[];
+  params: FlowParam[]; selects?: FlowSelectBinding[]; identity?: any[];
   source_meta?: { role?: string; [k: string]: any }; semantic_role?: string;
   content_type?: string; body_source?: string; headers?: Record<string, string>;
   sample_inputs?: Record<string, string>; response_json?: any; success_rule?: any; fact_check?: any;
@@ -75,6 +84,12 @@ interface ReviewItemData {
   id: string; type: string; severity: string; title: string; reason: string;
   current_guess?: string; suggested_action?: string; resolved?: boolean; confidence?: number;
   target?: { kind?: string; step_id?: string; path?: string; link_id?: string; [k: string]: any };
+  llm_suggestions?: Array<{
+    action: "bind_previous_response" | "set_runtime_source" | "ask_human";
+    confidence?: number; reason?: string;
+    source_step_id?: string; source_path?: string;
+    target_step_id?: string; target_path?: string; source_kind?: string;
+  }>;
 }
 interface RequestRoleData {
   index?: number; method: string; path: string; role: string; keep: boolean;
@@ -141,7 +156,7 @@ const SOURCE_OPTIONS_BY_CATEGORY: Record<string, Array<{ label: string; value: s
   runtime_var: SOURCE_KIND_OPTIONS.filter((x) => ["previous_response", "request_header", "current_user", "system_time", "page_context", "unknown"].includes(x.value)),
   system_const: SOURCE_KIND_OPTIONS.filter((x) => ["constant", "page_context"].includes(x.value)),
 };
-const PARAM_TYPE_OPTIONS = ["string", "number", "boolean", "datetime", "date", "array", "object", "list-enum"]
+const PARAM_TYPE_OPTIONS = ["string", "number", "boolean", "datetime", "date", "enum", "array", "object", "list-enum"]
   .map((x) => ({ label: x, value: x }));
 const STEP_ROLE_OPTIONS = [
   "submit_anchor", "business_write", "business_get", "read_context", "read_option", "auth", "noise",
@@ -160,6 +175,38 @@ function stripHost(url: string) {
 function purePath(url: string) {
   const raw = stripHost(url || "");
   return raw.split("?", 1)[0] || raw || "/";
+}
+function splitUrlQuery(url?: string) {
+  const raw = url || "";
+  const idx = raw.indexOf("?");
+  return {
+    base: idx >= 0 ? raw.slice(0, idx) : raw,
+    query: idx >= 0 ? raw.slice(idx + 1) : "",
+  };
+}
+function queryToLines(url?: string) {
+  const query = splitUrlQuery(url).query;
+  if (!query) return "";
+  return query.split("&").filter(Boolean).map((part) => {
+    const [k, ...rest] = part.split("=");
+    const value = rest.join("=");
+    try {
+      return `${decodeURIComponent(k || "")}=${decodeURIComponent(value || "")}`;
+    } catch {
+      return part;
+    }
+  }).join("\n");
+}
+function mergeUrlQuery(url: string | undefined, lines: string) {
+  const { base } = splitUrlQuery(url);
+  const parts = lines.split(/[\n&]/).map((x) => x.trim()).filter(Boolean).map((line) => {
+    const [k, ...rest] = line.split("=");
+    const key = k.trim();
+    const val = rest.join("=").trim();
+    if (!key) return "";
+    return `${encodeURIComponent(key)}=${encodeURIComponent(val)}`;
+  }).filter(Boolean);
+  return parts.length ? `${base || ""}?${parts.join("&")}` : (base || "");
 }
 function stripBodyPrefix(path: string) {
   return path?.startsWith("body.") ? path.slice(5) : path;
@@ -285,12 +332,128 @@ function ComboInput({
     </>
   );
 }
+function EnumValueInput({
+  value,
+  options,
+  onSave,
+  width = "100%",
+}: {
+  value?: string;
+  options: Array<{ label: string; value: string }>;
+  onSave: (value: string) => void;
+  width?: number | string;
+}) {
+  const [local, setLocal] = useState(value || "");
+  const listIdRef = useRef(`enum_${Math.random().toString(36).slice(2, 10)}`);
+  useEffect(() => setLocal(value || ""), [value]);
+  function save() {
+    const next = local.trim();
+    if (next !== (value || "")) onSave(next);
+  }
+  return (
+    <>
+      <Input
+        value={local}
+        list={listIdRef.current}
+        placeholder="选择或输入枚举值"
+        style={{ width }}
+        onChange={(e) => setLocal(e.target.value)}
+        onBlur={save}
+        onPressEnter={(e) => e.currentTarget.blur()}
+      />
+      <datalist id={listIdRef.current}>
+        {options.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+      </datalist>
+    </>
+  );
+}
+function EditableComboInput({
+  value,
+  options,
+  onSave,
+  width = "100%",
+  placeholder = "",
+}: {
+  value?: string;
+  options: Array<{ label: string; value: string }>;
+  onSave: (value: string) => void;
+  width?: number | string;
+  placeholder?: string;
+}) {
+  const [local, setLocal] = useState(value || "");
+  const listIdRef = useRef(`edit_combo_${Math.random().toString(36).slice(2, 10)}`);
+  useEffect(() => setLocal(value || ""), [value]);
+  function save() {
+    const next = local.trim();
+    if (next !== (value || "")) onSave(next);
+  }
+  return (
+    <>
+      <Input
+        value={local}
+        list={listIdRef.current}
+        placeholder={placeholder}
+        style={{ width }}
+        onChange={(e) => setLocal(e.target.value)}
+        onBlur={save}
+        onPressEnter={(e) => e.currentTarget.blur()}
+      />
+      <datalist id={listIdRef.current}>
+        {options.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+      </datalist>
+    </>
+  );
+}
+function EditableTextArea({
+  value,
+  onSave,
+  rows = 3,
+  placeholder = "",
+}: {
+  value?: string;
+  onSave: (value: string) => void;
+  rows?: number;
+  placeholder?: string;
+}) {
+  const [local, setLocal] = useState(value || "");
+  useEffect(() => setLocal(value || ""), [value]);
+  function save() {
+    if (local !== (value || "")) onSave(local);
+  }
+  return (
+    <Input.TextArea
+      rows={rows}
+      value={local}
+      placeholder={placeholder}
+      onChange={(e) => setLocal(e.target.value)}
+      onBlur={save}
+    />
+  );
+}
 function FieldControl({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
       <Typography.Text type="secondary" style={{ fontSize: 12 }}>{label}</Typography.Text>
       {children}
     </div>
+  );
+}
+function PathText({ value, maxWidth = 520 }: { value?: string; maxWidth?: number | string }) {
+  return (
+    <Typography.Text
+      code
+      title={value || ""}
+      style={{
+        display: "inline-block",
+        maxWidth,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+        verticalAlign: "middle",
+      }}
+    >
+      {value || ""}
+    </Typography.Text>
   );
 }
 function leafPaths(node: any, prefix = ""): string[] {
@@ -335,6 +498,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const autoResolvedReviewKeyRef = useRef("");
   const autoDedupedStepKeyRef = useRef("");
   const autoLinkedRuntimeKeyRef = useRef("");
+  const autoLlmRecommendKeyRef = useRef("");
   const wsAliveRef = useRef(false);                                // FC2 修复:跟踪 WS 存活,避免 send 失败时反复弹错
   const isComposingRef = useRef(false);                           // FH2 修复:中文输入法拼写中标记,防 onKbInput 误发中间字符
 
@@ -383,6 +547,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [lastServerJson, setLastServerJson] = useState("");
   const [namingBusy, setNamingBusy] = useState(false);
   const [descBusy, setDescBusy] = useState(false);
+  const [llmBusy, setLlmBusy] = useState(false);
   const [activeFlowTab, setActiveFlowTab] = useState("review");
 
   useEffect(() => () => {
@@ -461,6 +626,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     autoResolvedReviewKeyRef.current = "";
     autoDedupedStepKeyRef.current = "";
     autoLinkedRuntimeKeyRef.current = "";
+    autoLlmRecommendKeyRef.current = "";
   }
 
   function start() {
@@ -519,6 +685,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         message.success("抓到提交请求，请核对字段和流程");
       }
       else if (m.type === "flow_spec" || m.type === "flow_spec_updated") {
+        setLlmBusy(false);
         const fs = m.full_spec || m.flow_spec;
         if (fs) {
           setFlowSpec(fs);
@@ -526,6 +693,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           autoDedupeReadSteps(fs);
           autoLinkUnmatchedRuntimeFields(fs);
           autoResolveNonHighReviews(fs, m.check_report);
+          autoRefreshLlmRecommendations(fs, m.check_report);
         }
         if (m.check_report) setCheckReport(m.check_report);
       }
@@ -551,7 +719,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
       else if (m.type === "error") {
         const detail = m.detail || "录制出错";
-        setNamingBusy(false); setDescBusy(false);
+        setNamingBusy(false); setDescBusy(false); setLlmBusy(false);
         if (detail.includes("step not found") || detail.includes("link not found")) {
           message.warning("流程已变更，正在同步最新版本");
           send({ type: "refresh_flow_spec" });
@@ -626,11 +794,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function publishRequest() {
     if (!action.trim() || badAction(action.trim())) return;
     const { param_map, selList, idList, step_idxs } = payload();
-    const useFlowSpec = !!flowSpec;
-    if (!useFlowSpec && !Object.keys(param_map).length) { message.error("至少勾选一个字段作为参数"); return; }
+    if (!flowSpec) { message.error("请先生成 FlowSpec 后再发布"); return; }
     setResult(null); setPhase("publishing");
     send({ type: "publish_request", action: action.trim(), title: title.trim(),
-      param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: useFlowSpec });
+      param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: true });
   }
   function stopAll() {
     send({ type: "stop" }); wsRef.current?.close();
@@ -774,6 +941,18 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     autoLinkedRuntimeKeyRef.current = key;
     send({ type: "flow_update", edits });
   }
+  function autoRefreshLlmRecommendations(spec: FlowSpecData, report?: FlowCheckReport) {
+    const list = (report?.review_items?.length ? report.review_items : spec.review_items) || [];
+    const high = list.filter((item) => !item.resolved && item.severity === "high");
+    if (!high.length) return;
+    if (high.some((item) => item.llm_suggestions?.length)) return;
+    const version = spec.meta?.current_version ?? 0;
+    const key = `${spec.flow_id}:${version}:${high.map((item) => item.id).sort().join("|")}`;
+    if (autoLlmRecommendKeyRef.current === key) return;
+    autoLlmRecommendKeyRef.current = key;
+    setLlmBusy(true);
+    send({ type: "llm_recommendations" });
+  }
   function reviewSuggestionEdits(item: ReviewItemData) {
     const action = item.suggested_action || "";
     const tgt = item.target || {};
@@ -810,6 +989,52 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!flowSpec) return;
     const edits = reviewSuggestionEdits(item);
     send({ type: "flow_update", edits });
+  }
+  function applyLlmSuggestion(item: ReviewItemData, suggestion: NonNullable<ReviewItemData["llm_suggestions"]>[number]) {
+    if (!flowSpec) return;
+    const tgt = item.target || {};
+    const targetStepId = suggestion.target_step_id || tgt.step_id;
+    const targetPath = suggestion.target_path || tgt.path;
+    if (!targetStepId || !targetPath) return;
+    const edits: any[] = [];
+    if (suggestion.action === "bind_previous_response" && suggestion.source_step_id && suggestion.source_path) {
+      edits.push({
+        op: "add",
+        step_id: suggestion.source_step_id,
+        link: {
+          source_step_id: suggestion.source_step_id,
+          source_path: suggestion.source_path,
+          target_step_id: targetStepId,
+          target_path: targetPath,
+          confirmed: true,
+          confidence: suggestion.confidence || 0,
+          reason: suggestion.reason || "LLM 推荐并由用户确认的上游响应依赖",
+        },
+      });
+    } else if (suggestion.action === "set_runtime_source" && suggestion.source_kind) {
+      if (suggestion.source_kind === "request_header" || suggestion.source_kind === "unknown") {
+        message.warning("该建议仍缺少可执行来源，请在字段页手动补充");
+        setActiveFlowTab("params");
+        return;
+      }
+      edits.push(
+        { op: "update", step_id: targetStepId, param_path: targetPath, field: "category", value: "runtime_var" },
+        { op: "update", step_id: targetStepId, param_path: targetPath, field: "source_kind", value: suggestion.source_kind },
+        { op: "update", step_id: targetStepId, param_path: targetPath, field: "source", value: { kind: suggestion.source_kind, path: targetPath } },
+        { op: "update", step_id: targetStepId, param_path: targetPath, field: "need_human_confirm", value: false },
+      );
+    } else {
+      message.info("该项仍需要人工判断，请在字段页手动确认");
+      setActiveFlowTab("params");
+      return;
+    }
+    edits.push({ op: "resolve_review", review_id: item.id, resolved: true });
+    send({ type: "flow_update", edits });
+  }
+  function refreshLlmRecommendations() {
+    if (!flowSpec) return;
+    setLlmBusy(true);
+    send({ type: "llm_recommendations" });
   }
   function requiresManualSourceBinding(item: ReviewItemData) {
     return item.suggested_action === "bind_runtime_source" && /\/unknown$/.test(item.current_guess || "");
@@ -865,12 +1090,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const path = newParam.path.trim();
     const key = newParam.key.trim();
     if (!stepId || !path || !key) { message.warning("请选择步骤并填写字段路径和参数名"); return; }
-    const sourceKind = defaultSourceForCategory(newParam.category);
+    const isEnum = newParam.type === "enum" || newParam.type === "list-enum";
+    const sourceKind = newParam.category === "user_param" && isEnum ? "form_option" : defaultSourceForCategory(newParam.category);
     send({ type: "flow_update", edits: [{
       op: "add", step_id: stepId, param: {
         path, key, label: key, value: "", type: newParam.type, required: false,
         category: newParam.category, source_kind: sourceKind,
         source: sourceKind === "unknown" ? {} : { kind: sourceKind, path, manual: true },
+        enum_options: isEnum ? [] : undefined,
         exposed_to_user: newParam.category === "user_param", editable: true,
         reason: "人工新增字段", need_human_confirm: false,
       },
@@ -954,11 +1181,109 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const st = stepId ? stepById[stepId] : undefined;
     return (st?.params || []).map((p) => ({ label: `${p.path} · ${p.key}`, value: p.path }));
   }
+  function readSourceOptions() {
+    const seen = new Set<string>();
+    const out: Array<{ label: string; value: string }> = [];
+    for (const st of flowSpec?.steps || []) {
+      if (st.response_json == null) continue;
+      const value = st.url || st.path;
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      out.push({ label: `${st.name || st.path} · ${st.method} ${st.path || stripHost(st.url)}`, value });
+    }
+    return out;
+  }
+  function sourceStepForUrl(sourceUrl?: string) {
+    const pure = purePath(sourceUrl || "");
+    return (flowSpec?.steps || []).find((st) => {
+      const candidates = [st.url, st.path, purePath(st.url), purePath(st.path)];
+      return candidates.some((x) => x && (x === sourceUrl || purePath(x) === pure));
+    });
+  }
+  function responseKeyOptionsForSource(sourceUrl?: string) {
+    const st = sourceStepForUrl(sourceUrl);
+    const seen = new Set<string>();
+    const out: Array<{ label: string; value: string }> = [];
+    for (const path of leafPaths(st?.response_json)) {
+      const last = path.split(".").pop()?.replace(/\[\d+\]/g, "") || path;
+      if (!last || seen.has(last)) continue;
+      seen.add(last);
+      out.push({ label: `${last} · ${path}`, value: last });
+    }
+    return out;
+  }
   function incomingLink(stepId: string, path: string) {
     return (flowSpec?.links || []).find((l) => l.target_step_id === stepId && stripBodyPrefix(l.target_path) === stripBodyPrefix(path));
   }
+  function selectBindingForParam(step: FlowStepData, p: FlowParam) {
+    return (step.selects || []).find((s) => s.path === p.path || s.param === p.key);
+  }
+  function enumOptionEdits(step: FlowStepData, p: FlowParam, options: string[]) {
+    const edits: any[] = [
+      { op: "update", step_id: step.step_id, param_path: p.path, field: "enum_options", value: options },
+    ];
+    if (p.type !== "enum" && p.type !== "list-enum" && options.length) {
+      edits.push({ op: "update", step_id: step.step_id, param_path: p.path, field: "type", value: "enum" });
+    }
+    if (p.category !== "user_param") {
+      edits.push({ op: "update", step_id: step.step_id, param_path: p.path, field: "category", value: "user_param" });
+    }
+    if (p.source_kind !== "form_option") {
+      edits.push(
+        { op: "update", step_id: step.step_id, param_path: p.path, field: "source_kind", value: "form_option" },
+        { op: "update", step_id: step.step_id, param_path: p.path, field: "source", value: { kind: "form_option", path: p.path, manual: true } },
+      );
+    }
+    return edits;
+  }
+  function upsertSelectBinding(step: FlowStepData, p: FlowParam, patch: Partial<FlowSelectBinding>, extraEdits: any[] = []) {
+    const existing = selectBindingForParam(step, p);
+    const nextBinding: FlowSelectBinding = {
+      param: p.key,
+      path: p.path,
+      source_url: "",
+      value_key: "",
+      label_key: "",
+      options: p.enum_options || [],
+      count: p.enum_options?.length || 0,
+      ...existing,
+      ...patch,
+    };
+    if (nextBinding.options) nextBinding.count = nextBinding.options.length;
+    const replaced = (step.selects || []).some((s) => s.path === p.path || s.param === p.key);
+    const nextSelects = replaced
+      ? (step.selects || []).map((s) => (s.path === p.path || s.param === p.key ? nextBinding : s))
+      : [...(step.selects || []), nextBinding];
+    const edits: any[] = [{ op: "update", step_id: step.step_id, field: "selects", value: nextSelects }];
+    if (p.category !== "user_param") {
+      edits.push({ op: "update", step_id: step.step_id, param_path: p.path, field: "category", value: "user_param" });
+    }
+    if (p.source_kind !== "form_option") {
+      edits.push(
+        { op: "update", step_id: step.step_id, param_path: p.path, field: "source_kind", value: "form_option" },
+        { op: "update", step_id: step.step_id, param_path: p.path, field: "source", value: { kind: "form_option", path: p.path, manual: true } },
+      );
+    }
+    if (p.type !== "enum" && p.type !== "list-enum") {
+      edits.push({ op: "update", step_id: step.step_id, param_path: p.path, field: "type", value: nextBinding.multi ? "list-enum" : "enum" });
+    }
+    send({ type: "flow_update", edits: [...edits, ...extraEdits] });
+  }
+  function enumOptionsForParam(step: FlowStepData, p: FlowParam) {
+    const sel = selectBindingForParam(step, p);
+    const raw = p.enum_options?.length ? p.enum_options : sel?.options || [];
+    return Array.from(new Set((raw || []).map((x) => String(x)).filter(Boolean)));
+  }
+  function enumSourceLabel(sel?: FlowSelectBinding) {
+    if (!sel) return "未绑定";
+    if (sel.source_url) return "接口真实枚举";
+    if (sel.enum_source === "dom") return "页面真实枚举";
+    if ((sel.options || []).length) return "手动枚举";
+    return "未绑定";
+  }
   function paramSourceText(step: FlowStepData, p: FlowParam, link?: FlowLinkData) {
     const sourceStep = link ? stepById[link.source_step_id] : undefined;
+    const sel = selectBindingForParam(step, p);
     if (link) {
       return `实际接口返回：${sourceStep?.name || sourceStep?.path || link.source_step_id} 的 ${link.source_path}；当前默认值只是录制样例`;
     }
@@ -967,7 +1292,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     }
     if (p.source_kind === "request_header") return `请求头来源：运行期从请求头 ${p.source?.header || ""} 获取；当前默认值只是录制样例`;
     if (p.source_kind === "user_input") return "用户输入：调用 Skill 时由用户填写；默认值来自录制样例";
-    if (p.source_kind === "form_option") return "页面下拉/枚举：用户从候选项选择；默认值是录制时选中的值";
+    if (p.source_kind === "form_option" && sel?.source_url) return `接口下拉：运行期从 ${sel.source_url} 获取候选；默认值是录制时选中的值`;
+    if (p.source_kind === "form_option") return "静态枚举：候选来自录制页面下拉快照；默认值是录制时选中的值";
     if (p.source_kind === "constant") return "固定默认值：发布后按当前值写入，通常不暴露给用户";
     if (p.source_kind === "current_user") return "当前用户：运行期从登录态/身份信息注入，不使用录制旧值";
     if (p.source_kind === "system_time") return "系统时间：运行期自动生成，不使用录制旧值";
@@ -1040,6 +1366,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!flowSpec) return null;
     if (!reviewItems.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有待确认项" />;
     const highCount = reviewItems.length;
+    const llmMeta = (flowSpec.meta as any)?.llm_recommendations || {};
+    const llmSuggestionCount = reviewItems.reduce((n, item) => n + (item.llm_suggestions?.length || 0), 0);
     return (
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
         <Card size="small" style={{ background: "#fafafa" }}>
@@ -1049,12 +1377,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 <Typography.Text strong>无法自动匹配字段 {reviewItems.length} 项</Typography.Text>
                 <Tag color="error">{highCount} 高风险</Tag>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  中低风险已自动确认；这里显示仍无法确定来源的字段，字段页配置好后会自动消失。
+                  第一层规则已自动处理可确定项；第二层可刷新 LLM 辅助推荐；第三层由你确认后才生效。
                 </Typography.Text>
+                {llmMeta.status && <Tag color={llmMeta.status === "ok" ? "blue" : "default"}>
+                  智能推荐 {llmMeta.status}{llmSuggestionCount ? ` ${llmSuggestionCount} 条` : ""}
+                </Tag>}
               </Space>
             </Col>
             <Col>
               <Space wrap>
+                <Button icon={<RobotOutlined />} loading={llmBusy} onClick={refreshLlmRecommendations}>刷新智能推荐</Button>
                 <Button type="primary" onClick={() => bulkReview("accept")}>全部采纳</Button>
                 <Button onClick={() => bulkReview("ignore")}>全部忽略</Button>
               </Space>
@@ -1083,6 +1415,26 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     {item.current_guess && <Tag>{item.current_guess}</Tag>}
                   </Space>
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>{item.reason}</Typography.Text>
+                  {!!item.llm_suggestions?.length && (
+                    <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                      {item.llm_suggestions.map((s, idx) => (
+                        <div key={`${item.id}-llm-${idx}`} style={{ border: "1px solid #e6f4ff", background: "#f6fbff", padding: 8, borderRadius: 6 }}>
+                          <Space wrap>
+                            <Tag color="blue">LLM 建议</Tag>
+                            <Tag>{s.action}</Tag>
+                            {typeof s.confidence === "number" && <Tag>{Math.round(s.confidence * 100)}%</Tag>}
+                            {s.source_step_id && <Typography.Text code>{s.source_step_id}</Typography.Text>}
+                            {s.source_path && <Typography.Text code>{s.source_path}</Typography.Text>}
+                            {s.source_kind && <Typography.Text code>{s.source_kind}</Typography.Text>}
+                            <Button size="small" type="primary" onClick={() => applyLlmSuggestion(item, s)}>采纳此建议</Button>
+                          </Space>
+                          {s.reason && <div style={{ marginTop: 4 }}>
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>{s.reason}</Typography.Text>
+                          </div>}
+                        </div>
+                      ))}
+                    </Space>
+                  )}
                 </Space>
               </List.Item>
             );
@@ -1122,11 +1474,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             <Collapse.Panel
               key={step.step_id}
               header={
-                <Space wrap>
+                <Space wrap style={{ minWidth: 0, maxWidth: "100%" }}>
                   <Tag color="purple">第 {idx + 1} 步</Tag>
                   <Tag color={step.method === "GET" ? "blue" : "green"}>{step.method}</Tag>
-                  <Typography.Text strong>{step.name || fallbackStepName(step.method, step.path)}</Typography.Text>
-                  <Typography.Text code>{step.path || stripHost(step.url)}</Typography.Text>
+                  <Typography.Text strong style={{ maxWidth: 220 }} ellipsis={{ tooltip: step.name || fallbackStepName(step.method, step.path) }}>
+                    {step.name || fallbackStepName(step.method, step.path)}
+                  </Typography.Text>
+                  <PathText value={step.path || stripHost(step.url)} maxWidth={420} />
                   <Tag>{step.params?.length || 0} 字段</Tag>
                 </Space>
               }
@@ -1139,42 +1493,48 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               }
             >
               <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                <Space wrap>
-                  <Space.Compact size="small">
-                    <Button size="small" disabled>名称</Button>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, alignItems: "end" }}>
+                  <FieldControl label="名称">
                     <EditableText value={step.name || ""} width={220}
                       onSave={(v) => updateStep(step.step_id, "name", v)} />
-                  </Space.Compact>
-                  <NativeSelect value={step.source_meta?.role || step.semantic_role || ""}
-                    width={170}
-                    options={[{ label: "未设置", value: "" }, ...STEP_ROLE_OPTIONS]}
-                    onChange={(v) => updateStep(step.step_id, "role", v)} />
-                  <NativeSelect value={step.risk_level} width={90} options={RISK_OPTIONS}
-                    onChange={(v) => updateStep(step.step_id, "risk_level", v)} />
-                </Space>
+                  </FieldControl>
+                  <FieldControl label="角色">
+                    <NativeSelect value={step.source_meta?.role || step.semantic_role || ""}
+                      width="100%"
+                      options={[{ label: "未设置", value: "" }, ...STEP_ROLE_OPTIONS]}
+                      onChange={(v) => updateStep(step.step_id, "role", v)} />
+                  </FieldControl>
+                  <FieldControl label="风险">
+                    <NativeSelect value={step.risk_level} width="100%" options={RISK_OPTIONS}
+                      onChange={(v) => updateStep(step.step_id, "risk_level", v)} />
+                  </FieldControl>
+                </div>
                 <Collapse ghost size="small">
                   <Collapse.Panel key="advanced" header="高级设置">
                     <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                      <Space wrap>
-                        <NativeSelect value={step.method} width={110}
-                          options={["GET", "POST", "PUT", "PATCH", "DELETE"].map((x) => ({ label: x, value: x }))}
-                          onChange={(v) => updateStep(step.step_id, "method", v)} />
-                        <Space.Compact size="small">
-                          <Button size="small" disabled>Path</Button>
-                          <EditableText value={step.path} width={300}
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, alignItems: "end" }}>
+                        <FieldControl label="方法">
+                          <NativeSelect value={step.method} width="100%"
+                            options={["GET", "POST", "PUT", "PATCH", "DELETE"].map((x) => ({ label: x, value: x }))}
+                            onChange={(v) => updateStep(step.step_id, "method", v)} />
+                        </FieldControl>
+                        <FieldControl label="Path / URL">
+                          <EditableText value={step.path} width="100%"
                             onSave={(v) => {
                               if (v) {
                                 updateStep(step.step_id, "path", v);
                                 updateStep(step.step_id, "url", v);
                               }
                             }} />
-                        </Space.Compact>
-                        <NativeSelect value={step.content_type || "application/json"} width={230}
-                          options={CT_OPTIONS} onChange={(v) => updateStep(step.step_id, "content_type", v)} />
-                      </Space>
-                      <Input.TextArea rows={3} defaultValue={step.body_source || ""}
+                        </FieldControl>
+                        <FieldControl label="内容类型">
+                          <NativeSelect value={step.content_type || "application/json"} width="100%"
+                            options={CT_OPTIONS} onChange={(v) => updateStep(step.step_id, "content_type", v)} />
+                        </FieldControl>
+                      </div>
+                      <EditableTextArea value={step.body_source || ""}
                         placeholder="请求体模板。通常不需要手改，只有录制体缺失或需要高级修复时再改。"
-                        onBlur={(e) => updateStep(step.step_id, "body_source", e.target.value)} />
+                        onSave={(v) => updateStep(step.step_id, "body_source", v)} />
                       <HeadersEditor value={step.headers || {}} onChange={(h) => updateStep(step.step_id, "headers", h)} />
                     </Space>
                   </Collapse.Panel>
@@ -1211,11 +1571,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             <Collapse.Panel
               key={step.step_id}
               header={
-                <Space wrap>
+                <Space wrap style={{ minWidth: 0, maxWidth: "100%" }}>
                   <ApiOutlined />
                   <Tag color={step.method === "GET" ? "blue" : "green"}>{step.method}</Tag>
-                  <Typography.Text strong>{step.name || step.path}</Typography.Text>
-                  <Typography.Text code>{step.path}</Typography.Text>
+                  <Typography.Text strong style={{ maxWidth: 220 }} ellipsis={{ tooltip: step.name || step.path }}>
+                    {step.name || step.path}
+                  </Typography.Text>
+                  <PathText value={step.path} maxWidth={420} />
                   <Tag>{step.params?.length || 0} 字段</Tag>
                 </Space>
               }
@@ -1232,6 +1594,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     source_path: p.source?.response_path || linked?.source_path,
                   };
                   const needsManualConfirm = !!p.need_human_confirm && p.category === "runtime_var" && p.source_kind === "unknown";
+                  const selectBinding = selectBindingForParam(step, p);
+                  const enumOptions = enumOptionsForParam(step, p);
+                  const enumSelectOptions = enumOptions.map((x) => ({ label: x, value: x }));
+                  const hasBindingPanel = p.source_kind === "form_option" || p.type === "enum" || p.type === "list-enum" || !!selectBinding;
+                  const hasRuntimePanel = !!linked || p.category === "runtime_var" || p.source_kind === "previous_response";
                   const sourceStepOptions = [
                     { label: "选择来源步骤", value: "" },
                     ...flowSpec.steps.filter((s) => s.step_id !== step.step_id).map((s) => ({
@@ -1253,6 +1620,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                               <Tag>{optionLabel(CATEGORY_OPTIONS, p.category || "user_param")}</Tag>
                               <Tag>{optionLabel(SOURCE_KIND_OPTIONS, p.source_kind || "unknown")}</Tag>
                               {linked && <Tag color="cyan">依赖字段</Tag>}
+                              {selectBinding?.source_url && <Tag color="geekblue">接口绑定</Tag>}
+                              {!selectBinding?.source_url && enumOptions.length > 0 && <Tag color="purple">静态枚举</Tag>}
                               {needsManualConfirm && <Tag color="warning">待确认</Tag>}
                               <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.reason}</Typography.Text>
                             </Space>
@@ -1264,7 +1633,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                         </Row>
                         <div style={{
                           display: "grid",
-                          gridTemplateColumns: "minmax(150px, 1.1fr) minmax(160px, 1.1fr) 120px 130px 140px 92px 120px",
+                          gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
                           gap: 10,
                           alignItems: "end",
                           marginTop: 10,
@@ -1272,8 +1641,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                           <FieldControl label="名称">
                             <EditableText value={p.key} width="100%" onSave={(v) => v && updateParam(step.step_id, p, "key", v)} />
                           </FieldControl>
+                          <FieldControl label="路径">
+                            <EditableText value={p.path} width="100%" onSave={(v) => v && updateParam(step.step_id, p, "path", v)} />
+                          </FieldControl>
                           <FieldControl label="默认值">
-                            <EditableText value={String(p.value ?? "")} width="100%" onSave={(v) => updateParam(step.step_id, p, "value", v)} />
+                            {enumOptions.length > 0 ? (
+                              <EnumValueInput value={String(p.value ?? "")} width="100%"
+                                options={enumSelectOptions}
+                                onSave={(v) => updateParam(step.step_id, p, "value", v)} />
+                            ) : (
+                              <EditableText value={String(p.value ?? "")} width="100%" onSave={(v) => updateParam(step.step_id, p, "value", v)} />
+                            )}
                           </FieldControl>
                           <FieldControl label="类型">
                             <NativeSelect value={p.type} width="100%" options={PARAM_TYPE_OPTIONS}
@@ -1295,8 +1673,89 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                           </FieldControl>
                         </div>
                         {needsManualConfirm && <Button size="small" style={{ marginTop: 8 }} onClick={() => updateParam(step.step_id, p, "need_human_confirm", false)}>已确认</Button>}
-                        {(linked || p.category === "runtime_var" || p.source_kind === "previous_response") && (
-                          <div style={{ marginTop: 10, background: "#fafafa", border: "1px solid #f0f0f0", borderRadius: 6, padding: 10 }}>
+                        {(hasBindingPanel || hasRuntimePanel) && <Collapse size="small" ghost style={{ marginTop: 10 }}
+                          defaultActiveKey={needsManualConfirm ? ["runtime"] : []}>
+                          {hasBindingPanel && (
+                            <Collapse.Panel key="binding" header={<Space><LinkOutlined />来源绑定</Space>}>
+                          <div style={{ background: "#fafafa", border: "1px solid #f0f0f0", borderRadius: 6, padding: 10 }}>
+                            <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                              <Space wrap size={6}>
+                                <Typography.Text strong style={{ fontSize: 12 }}>绑定配置</Typography.Text>
+                                <Tag color={selectBinding?.source_url ? "geekblue" : "purple"}>{enumSourceLabel(selectBinding)}</Tag>
+                                {enumOptions.slice(0, 8).map((x) => <Tag key={x}>{x}</Tag>)}
+                                {enumOptions.length > 8 && <Tag>+{enumOptions.length - 8}</Tag>}
+                              </Space>
+                              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
+                                <FieldControl label="来源接口">
+                                  <EditableComboInput
+                                    value={selectBinding?.source_url || ""}
+                                    options={readSourceOptions()}
+                                    placeholder="选择或输入接口地址；静态枚举可留空"
+                                    onSave={(v) => upsertSelectBinding(step, p, { source_url: v })}
+                                  />
+                                </FieldControl>
+                                <FieldControl label="接口参数">
+                                  <EditableTextArea
+                                    rows={2}
+                                    value={queryToLines(selectBinding?.source_url || "")}
+                                    placeholder="每行一个参数，如 pageNo=1"
+                                    onSave={(v) => upsertSelectBinding(step, p, { source_url: mergeUrlQuery(selectBinding?.source_url || "", v) })}
+                                  />
+                                </FieldControl>
+                                <FieldControl label="值字段">
+                                  <EditableComboInput
+                                    value={selectBinding?.value_key || ""}
+                                    options={responseKeyOptionsForSource(selectBinding?.source_url)}
+                                    placeholder="如 id/userId/dictValue"
+                                    onSave={(v) => upsertSelectBinding(step, p, { value_key: v })}
+                                  />
+                                </FieldControl>
+                                <FieldControl label="显示字段">
+                                  <EditableComboInput
+                                    value={selectBinding?.label_key || ""}
+                                    options={responseKeyOptionsForSource(selectBinding?.source_url)}
+                                    placeholder="如 name/label/dictLabel"
+                                    onSave={(v) => upsertSelectBinding(step, p, { label_key: v })}
+                                  />
+                                </FieldControl>
+                                <FieldControl label="配对 ID 字段">
+                                  <EditableComboInput
+                                    value={selectBinding?.id_path || ""}
+                                    options={(step.params || []).map((x) => ({ label: `${x.path} · ${x.key}`, value: x.path }))}
+                                    placeholder="可选，如 yyxtid"
+                                    onSave={(v) => upsertSelectBinding(step, p, { id_path: v || null })}
+                                  />
+                                </FieldControl>
+                                <FieldControl label="多选">
+                                  <Checkbox checked={!!selectBinding?.multi || p.type === "list-enum"}
+                                    onChange={(e) => upsertSelectBinding(step, p, { multi: e.target.checked })}>
+                                    列表多选
+                                  </Checkbox>
+                                </FieldControl>
+                              </div>
+                              <FieldControl label="候选快照">
+                                <EditableTextArea
+                                  rows={2}
+                                  value={enumOptions.join("\n")}
+                                  placeholder="每行一个候选项，也支持逗号分隔；接口下拉可作为快照"
+                                  onSave={(v) => {
+                                    const options = Array.from(new Set(v.split(/[\n,，]/).map((x) => x.trim()).filter(Boolean)));
+                                    upsertSelectBinding(
+                                      step,
+                                      p,
+                                      { source_url: "", value_key: "", label_key: "", options, count: options.length, option_map: null, enum_source: "manual", enum_confirmed: true },
+                                      enumOptionEdits(step, p, options),
+                                    );
+                                  }}
+                                />
+                              </FieldControl>
+                            </Space>
+                          </div>
+                            </Collapse.Panel>
+                          )}
+                        {hasRuntimePanel && (
+                            <Collapse.Panel key="runtime" header={<Space><BranchesOutlined />运行期来源</Space>}>
+                          <div style={{ background: "#fafafa", border: "1px solid #f0f0f0", borderRadius: 6, padding: 10 }}>
                             <Space wrap>
                               <Typography.Text strong style={{ fontSize: 12 }}>运行期来源</Typography.Text>
                               <NativeSelect value={currentBind.source_step_id || ""} width={300}
@@ -1310,7 +1769,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                               <Button size="small" type="primary" icon={<LinkOutlined />} onClick={() => bindParamToPreviousResponse(step, p)}>绑定上游响应</Button>
                             </Space>
                           </div>
+                            </Collapse.Panel>
                         )}
+                        </Collapse>}
                       </div>
                     </List.Item>
                   );
@@ -1411,8 +1872,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!flowSpec) return null;
     return (
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <Space.Compact style={{ width: "100%" }}>
-          <Button disabled>流程标题</Button>
+        <FieldControl label="流程标题">
           <Input value={titleDraft}
             onChange={(e) => setTitleDraft(e.target.value)}
             onBlur={(e) => {
@@ -1421,7 +1881,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 updateFlowField("title", e.target.value.trim());
               }
             }} />
-        </Space.Compact>
+        </FieldControl>
         <Input.TextArea rows={12} value={descDraft}
           onChange={(e) => setDescDraft(e.target.value)}
           onBlur={(e) => {
@@ -1513,60 +1973,19 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           )}
 
           {fields.length > 0 && !flowSpec && (
-            <Card type="inner" size="small" style={{ marginTop: 12, borderColor: "#52c41a" }}
-              title={<Space wrap><CheckCircleOutlined /><Typography.Text strong>抓到提交请求</Typography.Text>
-                {reqMeta && <Typography.Text code>{reqMeta.method} {stripHost(reqMeta.url)}</Typography.Text>}</Space>}>
-              {cands.length > 1 && (
-                <Card size="small" style={{ marginBottom: 10 }} title="请求选择">
-                  <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                    {cands.map((c) => (
-                      <Space key={c.idx} wrap>
-                        <Checkbox checked={!!stepSel[c.idx]} onChange={(e) => setStepSel((s) => ({ ...s, [c.idx]: e.target.checked }))}>流程步骤</Checkbox>
-                        <Tag color={c.idx === chosenIdx ? "blue" : "default"} style={{ cursor: "pointer" }} onClick={() => chooseRequest(c.idx)}>
-                          {c.method} {c.path}
-                        </Tag>
-                      </Space>
-                    ))}
-                  </Space>
-                </Card>
-              )}
-              <List
-                size="small"
-                style={{ maxHeight: 300, overflow: "auto" }}
-                dataSource={fields}
-                renderItem={(f) => {
-                  const p = picked[f.path] || { on: false, name: f.key };
-                  const sel = selects[f.path];
-                  const idn = identity[f.path];
-                  return (
-                    <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
-                      <Space size={8} wrap>
-                        <Checkbox checked={p.on} onChange={(e) => toggleField(f.path, e.target.checked)}>参数</Checkbox>
-                        <Typography.Text code>{f.path}</Typography.Text>
-                        {sel && <Tag color="purple">下拉 {sel.label_key}→{sel.value_key}</Tag>}
-                        {idn && <Tag color="gold">当前用户</Tag>}
-                        {!sel && !idn && (f.system_value ? <Tag color="gold">系统值</Tag> : <Tag>固定值</Tag>)}
-                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                          {f.value === "" ? "(空)" : f.value.length > 30 ? `${f.value.slice(0, 30)}...` : f.value}
-                        </Typography.Text>
-                        {p.on && !idn && <Input size="small" value={p.name} placeholder="参数名"
-                          onChange={(e) => renameField(f.path, e.target.value)} style={{ width: 150 }} />}
-                      </Space>
-                    </List.Item>
-                  );
-                }}
-              />
-              <Space style={{ marginTop: 10 }} wrap>
-                <Form.Item label="动作名" required style={{ marginBottom: 0 }}>
-                  <Input value={action} onChange={(e) => setAction(e.target.value)} placeholder="submit_leave" style={{ width: 180 }} />
-                </Form.Item>
-                <Form.Item label="标题" style={{ marginBottom: 0 }}>
-                  <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="提交请假" style={{ width: 160 }} />
-                </Form.Item>
-                <Button type="primary" loading={phase === "publishing"} onClick={publishRequest}>发布当前流程</Button>
-                <Button loading={phase === "publishing"} onClick={finalize}>重新抓取</Button>
-              </Space>
-            </Card>
+            <Alert
+              style={{ marginTop: 12 }}
+              type="warning"
+              showIcon
+              message="已抓到提交请求，但还没有生成 FlowSpec"
+              description={
+                <Space wrap>
+                  {reqMeta && <Typography.Text code>{reqMeta.method} {stripHost(reqMeta.url)}</Typography.Text>}
+                  <Typography.Text>请重新分析请求，发布只使用 FlowSpec 工作台中的步骤、字段、依赖和说明。</Typography.Text>
+                  <Button size="small" loading={phase === "publishing"} onClick={finalize}>重新分析</Button>
+                </Space>
+              }
+            />
           )}
 
           {!fields.length && (

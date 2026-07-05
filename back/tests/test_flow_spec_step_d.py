@@ -5,7 +5,7 @@ import pytest
 from dano.execution.page.flow_spec import (
     FlowSpec, FlowStep, FlowLink, ParamField,
     rename_steps_with_llm, render_business_description,
-    pick_manual, flow_spec_for_get_form, _derive_step_name,
+    pick_manual, flow_spec_for_get_form, _derive_step_name, _derive_title,
 )
 
 
@@ -118,6 +118,21 @@ def test_no_llm_multi_step():
     assert "2 个步骤" in desc
     assert "1. 启动" in desc and "2. 提交" in desc
     assert "L4" in desc
+
+
+def test_default_purpose_removes_stale_step_count_suffix():
+    s1, s2 = _step(name="GET_get", method="GET", path="/api/get"), _step(name="提交", path="/api/submit")
+    spec = FlowSpec(flow_id="f", title="get 流程(3 步)", steps=[s1, s2], risk_level="L3")
+    desc = render_business_description(spec)
+    assert "2 个步骤" in desc
+    assert "get 流程(3 步)" not in desc
+    assert "get 流程" in desc
+
+
+def test_derive_title_prefers_last_write_step_over_preread_get():
+    s1 = _step(name="GET_get", method="GET", path="/admin-api/bpm/process-definition/get")
+    s2 = _step(name="POST_submit-process", method="POST", path="/admin-api/oa/duty-leave/submit-process")
+    assert _derive_title([s1, s2]) == "submit-process 流程(2 步)"
 
 
 def test_no_llm_links_present():

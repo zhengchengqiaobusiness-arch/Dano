@@ -147,7 +147,10 @@ _RECORDER_JS = r"""() => {
   function nativeOptions(el) {
     try {
       var out = [];
-      for (var i = 0; i < el.options.length; i++) { var t = clean(el.options[i].text); if (t) out.push(t); }
+      for (var i = 0; i < el.options.length; i++) {
+        var t = clean(el.options[i].text);
+        if (t) out.push({ label: t, value: el.options[i].value });
+      }
       return out;
     } catch (e) { return []; }
   }
@@ -505,7 +508,14 @@ class RecordSession:
         import json as _json
 
         from dano.execution.page.request_capture import infer_success_rule
-        body: dict = {"msg": "录制已拦截:抓到请求,未真正提交", "success": True}
+        body: dict = {
+            "msg": "录制已拦截:抓到请求,未真正提交",
+            "message": "录制已拦截:抓到请求,未真正提交",
+            "success": True,
+            "ok": True,
+            "status": 200,
+            "data": {"recorded": True, "success": True},
+        }
         rule = infer_success_rule(self.reads)
         if rule and rule.get("field") and rule.get("ok_values"):
             body[rule["field"]] = rule["ok_values"][0]      # 用本系统的成功字段+成功值
@@ -535,7 +545,7 @@ class RecordSession:
                 return
             # 业务写请求 → 抓下来,假装成功不真发;登录/鉴权/上传等基建写、以及 POST 形态的读/查询
             #(getXxxList/queryXxx:下拉/列表源)照常放行真发(否则录制时下拉/列表加载不出来,选不了值)
-            if pd and not looks_like_auth_write(url, pd) and not looks_like_read_request(url):
+            if pd and not looks_like_auth_write(url, pd) and not looks_like_read_request(url, pd):
                 self._capture(m, url, pd, ct, hd)
                 await route.fulfill(status=200, content_type="application/json",
                                     body=self._success_envelope())
@@ -790,7 +800,7 @@ class RecordSession:
                 samples[keymap[i]] = s.get("value", "")
         return steps, samples
 
-    def recorded_dom_options(self) -> dict:
+    def recorded_page_enum_options(self) -> dict:
         """录制时下拉/级联里**真实可见的选项文字**(DOM 抓的枚举地面真值)→ {字段key: [选项文字]}。
         key 与 recorded_steps 同算法分配,保持一致 → 上层据此覆盖 select 的候选快照,治"绑到几百项全量字典"。"""
         from dano.agent_tools.page_builder import assign_field_keys

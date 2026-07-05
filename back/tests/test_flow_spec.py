@@ -9,11 +9,13 @@ from dano.execution.page.flow_spec import (
     FlowSpec, FlowStep, FlowLink, ParamField,
     apply_flow_edits,
     apply_flow_publish_selection,
+    apply_llm_field_names,
     classify_network_request,
     dry_run_flow_spec,
     flow_spec_to_api_request,
     flow_spec_to_client,
     flow_spec_to_summary,
+    llm_field_name_candidates,
     render_business_description,
     to_flow_spec,
     validate_flow_spec,
@@ -318,6 +320,60 @@ class GetBusinessStepTest(unittest.TestCase):
     def test_get_no_query_returns_empty(self):
         self.assertEqual(_params_from_get_query({"method": "GET", "url": "https://x/api/foo"}), [])
 
+    def test_runtime_query_field_is_not_exposed_as_user_param(self):
+        """GET query 中的运行期变量应由依赖/上下文处理，不应要求 Skill 调用者手填。"""
+        src = FlowStep(
+            step_id="s1",
+            name="GET_token",
+            method="GET",
+            url="https://oa/api/token",
+            path="/api/token",
+            response_json={"data": {"token": "T-1"}},
+            risk_level="L1",
+            semantic_role="business_get",
+        )
+        dst = FlowStep(
+            step_id="s2",
+            name="GET_detail",
+            method="GET",
+            url="https://oa/api/detail?token=T-OLD",
+            path="/api/detail",
+            params=[
+                ParamField(
+                    path="query.token",
+                    key="token",
+                    value="T-OLD",
+                    category="runtime_var",
+                    source_kind="previous_response",
+                    source={"step_id": "s1", "path": "data.token"},
+                    exposed_to_user=False,
+                )
+            ],
+            risk_level="L1",
+            semantic_role="business_get",
+        )
+        spec = FlowSpec(
+            title="query runtime",
+            steps=[src, dst],
+            links=[
+                FlowLink(
+                    source_step_id="s1",
+                    source_path="data.token",
+                    target_step_id="s2",
+                    target_path="query.token",
+                    confidence=0.95,
+                    confirmed=True,
+                )
+            ],
+        )
+
+        apir, errors = flow_spec_to_api_request(spec)
+        self.assertEqual(errors, [])
+        detail_step = next(s for s in apir["steps"] if s["path"] == "/api/detail")
+        self.assertEqual(detail_step["query_template"]["token"], "T-OLD")
+        self.assertNotIn("token", detail_step.get("params") or [])
+        self.assertTrue(any(l["target_path"] == "query.token" for l in detail_step["links"]))
+
     def test_list_response_not_business_get(self):
         """返回 list 的 GET 是下拉源,不入 spec。"""
         captured = [
@@ -387,6 +443,131 @@ class GetBusinessStepTest(unittest.TestCase):
         user_page_roles = [r for r in roles if "/system/user/page" in r["path"]]
         self.assertTrue(user_page_roles)
         self.assertTrue(all(r["role"] == "read_option" and not r["keep"] for r in user_page_roles))
+
+    def test_nested_detail_row_select_pair_uses_captured_read_options(self):
+        """captured_requests 里的候选读接口应能绑定明细行内 name/id 字段，且不折叠整行。"""
+        sys1 = "交通信息系统01"
+        sys2 = "交通信息系统02"
+        body = {
+            "ssbmId": "02021060111315890400000101001838",
+            "bmId": "02021060111315890400000101001838",
+            "ssbmmc": "徐州市交通运输局",
+            "csmc": "123123",
+            "ywsxList": [{
+                "ywsxmc": "123123qweqw",
+                "yyxtid": "02026031815271171200000101539137",
+                "ssxts": "",
+                "catalogStatus": "",
+                "yyxtmc": sys1,
+                "tableHcommentList": [],
+                "ywsxKbList": [],
+            }],
+        }
+        captured = [
+            {
+                "method": "GET",
+                "url": "https://oa/appgateway/dcensus/v1.0/qzqdsl/getXxxtListByBm",
+                "response_json": {
+                    "data": [
+                        {"yyxtid": "02026031815271171200000101539137", "yyxtmc": sys1},
+                        {"yyxtid": "02026031815271171200000101539138", "yyxtmc": sys2},
+                    ],
+                },
+            },
+            _post("https://oa/appgateway/dcensus/v1.0/qzqdsl/createQzqdSl", body, resp={"code": 200}),
+        ]
+
+        spec = to_flow_spec(captured, samples={"职能清单": "123123qweqw", "所属系统": sys1})
+        step = spec.steps[0]
+
+        self.assertEqual(len(step.selects), 1)
+        sel = step.selects[0]
+        self.assertEqual(sel.path, "ywsxList[0].yyxtmc")
+        self.assertEqual(sel.value_key, "yyxtid")
+        self.assertEqual(sel.label_key, "yyxtmc")
+        self.assertEqual(sel.id_path, "ywsxList[0].yyxtid")
+        self.assertEqual(sel.options, [sys1, sys2])
+
+        by_path = {p.path: p for p in step.params}
+        self.assertEqual(by_path["ywsxList[0].ywsxmc"].category, "user_param")
+        self.assertTrue(by_path["ywsxList[0].ywsxmc"].exposed_to_user)
+        self.assertEqual(by_path["ywsxList[0].yyxtmc"].source_kind, "form_option")
+        self.assertEqual(by_path["ywsxList[0].yyxtmc"].type, "enum")
+        self.assertEqual(by_path["ywsxList[0].yyxtmc"].enum_options, [sys1, sys2])
+        self.assertTrue(by_path["ywsxList[0].yyxtmc"].exposed_to_user)
+        self.assertEqual(by_path["ywsxList[0].yyxtid"].category, "runtime_var")
+        self.assertEqual(by_path["ywsxList[0].yyxtid"].source_kind, "form_option")
+        self.assertFalse(by_path["ywsxList[0].yyxtid"].exposed_to_user)
+        self.assertEqual(by_path["ssbmId"].category, "system_const")
+        self.assertFalse(by_path["ssbmId"].exposed_to_user)
+        self.assertEqual(by_path["bmId"].source_kind, "page_context")
+        self.assertFalse(by_path["bmId"].exposed_to_user)
+        self.assertEqual(by_path["ssbmmc"].source_kind, "page_context")
+        self.assertFalse(by_path["ssbmmc"].exposed_to_user)
+        self.assertEqual(by_path["ywsxList[0].ssxts"].category, "system_const")
+        self.assertFalse(by_path["ywsxList[0].ssxts"].exposed_to_user)
+
+    def test_flow_spec_uses_page_enum_options_for_sourceless_enum(self):
+        body = {"type": "事假", "reason": "回家"}
+        spec = to_flow_spec(
+            [_post("https://oa/api/leave/submit", body, resp={"code": 200})],
+            samples={"type": "事假", "reason": "回家"},
+            page_enum_options={"事假": ["事假", "病假", "年假"]},
+        )
+
+        by_path = {p.path: p for p in spec.steps[0].params}
+        self.assertEqual(by_path["type"].type, "enum")
+        self.assertEqual(by_path["type"].source_kind, "form_option")
+        self.assertEqual(by_path["type"].enum_options, ["事假", "病假", "年假"])
+        self.assertEqual(spec.steps[0].selects[0].options, ["事假", "病假", "年假"])
+
+    def test_flow_spec_uses_page_enum_options_when_enum_submits_code(self):
+        body = {"type": 2, "reason": "回家"}
+        spec = to_flow_spec(
+            [_post("https://oa/api/leave/submit", body, resp={"code": 200})],
+            samples={"类型": "2", "reason": "回家"},
+            page_enum_options={"类型": [{"label": "事假", "value": 2}, {"label": "病假", "value": 3}]},
+        )
+
+        by_path = {p.path: p for p in spec.steps[0].params}
+        self.assertEqual(by_path["type"].key, "类型")
+        self.assertEqual(by_path["type"].type, "enum")
+        self.assertEqual(by_path["type"].source_kind, "form_option")
+        self.assertEqual(by_path["type"].enum_options, ["事假", "病假"])
+        self.assertEqual(spec.steps[0].selects[0].option_map, {"事假": 2, "病假": 3})
+
+    def test_flow_spec_does_not_mark_enum_without_real_options(self):
+        spec = to_flow_spec(
+            [_post("https://oa/api/leave/submit", {"type": 2, "reason": "回家"}, resp={"code": 200})],
+            samples={"类型": "2", "reason": "回家"},
+            page_enum_options={"类型": []},
+        )
+
+        by_path = {p.path: p for p in spec.steps[0].params}
+        self.assertNotEqual(by_path["type"].type, "enum")
+        self.assertNotEqual(by_path["type"].source_kind, "form_option")
+
+    def test_apply_llm_field_names_only_updates_machine_auto_names(self):
+        spec = to_flow_spec([
+            _post("https://oa/api/leave/submit",
+                  {"type": "事假", "reason": "回家", "days": 1},
+                  resp={"code": 200})
+        ], samples={"type": "事假", "reason": "回家", "days": "1"})
+        spec.steps[0].params[2].key = "天数"
+        spec.steps[0].params[2].label = "天数"
+        spec.steps[0].params[2].name_source = "manual"
+
+        candidates = llm_field_name_candidates(spec)
+        self.assertEqual({c["key"] for c in candidates}, {"type", "reason"})
+
+        renamed = apply_llm_field_names(spec, {"type": "请假类型", "reason": "原因", "days": "请假天数"})
+        by_path = {p.path: p for p in renamed.steps[0].params}
+        self.assertEqual(by_path["type"].key, "请假类型")
+        self.assertEqual(by_path["reason"].key, "原因")
+        self.assertEqual(by_path["days"].key, "天数")
+        self.assertEqual(renamed.steps[0].sample_inputs["请假类型"], "事假")
+        self.assertEqual(renamed.steps[0].sample_inputs["原因"], "回家")
+        self.assertNotIn("type", renamed.steps[0].sample_inputs)
 
 
 class RequestRoleTest(unittest.TestCase):

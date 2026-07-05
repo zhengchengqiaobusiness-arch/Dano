@@ -21,14 +21,17 @@ from urllib.parse import urlparse, parse_qs
 
 # 复用 request_capture 的纯函数
 from dano.execution.page.request_capture import (
+    _is_const_value,
     _leaf_paths,
     _parse_body,
     _is_system_timestamp,
     auto_required_fields,
     as_list_payload,
+    apply_page_enum_options,
     build_api_request,
     classify_request_role,
     discover_step_links,
+    page_enum_selects,
     extract_auth_headers,
     flatten_body,
     infer_success_rule,
@@ -85,12 +88,16 @@ class SelectBinding(BaseModel):
     label_key: str = ""
     category_key: str | None = None
     category_value: str | None = None
-    dom_options: list[str] | None = None
     multi: bool = False
     element_template: dict[str, Any] | None = None
     label_subkey: str | None = None
     count: int = 0
     options: list[str] | None = None
+    option_map: dict[str, Any] | None = None
+    enum_source: str | None = None
+    enum_confirmed: bool | None = None
+    id_path: str | None = None
+    id_tokens: list[str | int] | None = None
 
 
 class IdentityBinding(BaseModel):
@@ -103,7 +110,7 @@ class IdentityBinding(BaseModel):
 # H19 修复:显式白名单(替代 hasattr 兜底,防止越权改关键字段)
 _PARAM_ALLOWED_FIELDS = frozenset({
     "category", "source_kind", "source", "label",
-    "reason", "confidence", "name_source",
+    "reason", "confidence", "name_source", "enum_options",
 })
 _STEP_ALLOWED_FIELDS = frozenset({
     "selects", "identity", "params", "sample_inputs",
@@ -167,6 +174,7 @@ class ReviewItem(BaseModel):
     reason: str = ""
     resolved: bool = False
     confidence: float = 0.0
+    llm_suggestions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class FlowSpec(BaseModel):
@@ -291,6 +299,23 @@ def _looks_system_const_field(key: str, path: str) -> bool:
     ))
 
 
+def _looks_page_context_field(key: str, path: str) -> bool:
+    k = _norm_field_name(key, path)
+    raw_key = re.sub(r"[^a-z0-9]+", "", str(key or "").lower())
+    raw_path = re.sub(r"[^a-z0-9]+", "", str(path or "").split(".")[-1].lower())
+    exact = {
+        "bmid", "bmmc", "ssbmid", "ssbmmc", "deptid", "deptname", "departmentid",
+        "departmentname", "orgid", "orgname", "organid", "organname", "unitid",
+        "unitname", "companyid", "companyname", "tenantid", "tenantname",
+    }
+    if raw_key in exact or raw_path in exact:
+        return True
+    return any(x in k for x in (
+        "department", "dept", "organization", "org", "tenant", "company",
+        "bumen", "jigou", "danwei", "deptcode", "orgcode", "unitcode",
+    ))
+
+
 def _param_source_guess(
     *,
     field: dict,
@@ -300,6 +325,7 @@ def _param_source_guess(
     identity_paths: set[str],
     system_paths: set[str],
     select_paths: set[str],
+    select_id_paths: set[str],
     samples: dict,
     request_headers: dict | None = None,
 ) -> dict[str, Any]:
@@ -350,6 +376,17 @@ def _param_source_guess(
             "need_human_confirm": False,
         }
 
+    if path in select_id_paths:
+        return {
+            "category": "runtime_var",
+            "source_kind": "form_option",
+            "source": {"kind": "select_id", "path": path},
+            "editable": False,
+            "exposed_to_user": False,
+            "reason": "该字段是下拉/枚举显示名对应的内部 ID，运行期随用户选择自动写入，不暴露给用户手填",
+            "need_human_confirm": False,
+        }
+
     if method == "GET" and path.startswith("query."):
         return {
             "category": "system_const",
@@ -359,6 +396,17 @@ def _param_source_guess(
             "exposed_to_user": False,
             "reason": "该字段来自 GET 查询参数，通常由当前页面/应用上下文提供，默认不暴露给普通调用者",
             "need_human_confirm": True,
+        }
+
+    if value == "" and value not in _sample_value_set(samples):
+        return {
+            "category": "system_const",
+            "source_kind": "constant",
+            "source": {"kind": "empty_field", "path": path},
+            "editable": True,
+            "exposed_to_user": False,
+            "reason": "该字段录制值为空且未匹配到用户输入，默认保留为空值结构，不暴露给用户手填",
+            "need_human_confirm": False,
         }
 
     if _looks_current_user_field(key, path):
@@ -383,6 +431,17 @@ def _param_source_guess(
             "need_human_confirm": True,
         }
 
+    if _looks_page_context_field(key, path) and value not in _sample_value_set(samples):
+        return {
+            "category": "system_const",
+            "source_kind": "page_context",
+            "source": {"kind": "page_context", "path": path},
+            "editable": True,
+            "exposed_to_user": False,
+            "reason": "字段名像部门/组织/租户等页面上下文，默认隐藏；跨部门复用时需绑定页面上下文或前置接口来源",
+            "need_human_confirm": True,
+        }
+
     if field.get("suggest_param") or value in _sample_value_set(samples):
         return {
             "category": "user_param",
@@ -392,6 +451,17 @@ def _param_source_guess(
             "exposed_to_user": True,
             "reason": "该值与用户录制时填写的表单值匹配，调用 Skill 时应作为用户参数",
             "need_human_confirm": False,
+        }
+
+    if not field.get("suggest_param") and (value == "" or _is_const_value(value)):
+        return {
+            "category": "system_const",
+            "source_kind": "constant",
+            "source": {"kind": "recorded_constant", "path": path},
+            "editable": True,
+            "exposed_to_user": False,
+            "reason": "该字段未匹配到用户输入，且为空值或内部 ID/固定标识形态，默认作为系统常量隐藏",
+            "need_human_confirm": True,
         }
 
     if _looks_system_const_field(key, path):
@@ -423,7 +493,7 @@ def _build_step_from_capture(
     samples: dict,
     storage_state: dict | None,
     required_labels: set,
-    dom_options: dict,
+    page_enum_options: dict,
     step_index: int,
 ) -> FlowStep:
     method = (req.get("method") or "POST").upper()
@@ -434,6 +504,9 @@ def _build_step_from_capture(
     role = classify_request_role(req)
     request_role = req.get("_request_role") or {}
     risk = request_role.get("risk_level") or role.get("riskLevel", "L3")
+
+    def has_real_enum_source(sb: SelectBinding) -> bool:
+        return bool(sb.options) or bool(sb.source_url and sb.value_key and sb.label_key)
 
     # GET 请求：从 URL query string 提参
     if method == "GET" or body is None:
@@ -451,6 +524,8 @@ def _build_step_from_capture(
 
         # select/选人
         selects_raw = suggest_selects(pd, reads or [], samples, skip_paths=list_paths) + list_selects
+        apply_page_enum_options(selects_raw, page_enum_options, post_data=pd, fields=flat_fields)
+        selects_raw += page_enum_selects(pd, page_enum_options, {s.get("path", "") for s in selects_raw}, fields=flat_fields)
 
         # identity(运行期重取)
         iden_raw = suggest_identity(pd, storage_state, samples)
@@ -472,12 +547,16 @@ def _build_step_from_capture(
             label_key=s.get("label_key", ""),
             category_key=s.get("category_key"),
             category_value=s.get("category_value"),
-            dom_options=s.get("dom_options") if s.get("dom_options") else None,
             multi=bool(s.get("multi")),
             element_template=s.get("element_template"),
             label_subkey=s.get("label_subkey"),
             count=int(s.get("count") or 0),
             options=list(s.get("options") or []),
+            option_map=dict(s.get("option_map") or {}) or None,
+            enum_source=s.get("enum_source"),
+            enum_confirmed=s.get("enum_confirmed"),
+            id_path=s.get("id_path"),
+            id_tokens=s.get("id_tokens"),
         ))
 
     # identity
@@ -501,7 +580,9 @@ def _build_step_from_capture(
                 kind = "now_ms" if len(str(raw)) == 13 else "now_s"
                 sys_values.append(SystemValue(path=path, tokens=tokens, kind=kind))
     system_paths = {sv.path for sv in sys_values}
-    select_paths = {s.path for s in selects_meta if s.path}
+    select_paths = {s.path for s in selects_meta if s.path and has_real_enum_source(s)}
+    select_id_paths = {s.id_path for s in selects_meta if s.id_path and has_real_enum_source(s)}
+    select_by_path = {s.path: s for s in selects_meta if s.path and has_real_enum_source(s)}
 
     # success_rule
     sr = None
@@ -515,6 +596,9 @@ def _build_step_from_capture(
         ptype = f.get("type") or "string"
         if path in list_paths:
             ptype = "list-enum"
+        elif path in select_paths:
+            ptype = "enum"
+        select_meta = select_by_path.get(path)
 
         # 字段中文名优先级
         nm = f.get("suggest_name") or f.get("key") or ""
@@ -535,6 +619,7 @@ def _build_step_from_capture(
             identity_paths=identity_paths,
             system_paths=system_paths,
             select_paths=select_paths,
+            select_id_paths=select_id_paths,
             samples=samples,
             request_headers=req.get("headers") or {},
         )
@@ -549,6 +634,7 @@ def _build_step_from_capture(
             confidence=float(f.get("confidence") or 0.0),
             confidence_tier=f.get("confidence_tier") or "auto",
             name_source=ns,
+            enum_options=list(select_meta.options or []) if select_meta and select_meta.options else None,
             category=source_guess["category"],
             source_kind=source_guess["source_kind"],
             source=source_guess["source"],
@@ -560,10 +646,7 @@ def _build_step_from_capture(
         ))
 
     # 补回 select 元数据的 param 字段
-    from dano.agent_tools.page_builder import assign_field_keys
-    fb_paths = [p.path for p in params]
-    param_keys = assign_field_keys(fb_paths)
-    path2key = dict(zip(fb_paths, param_keys))
+    path2key = {p.path: p.key for p in params}
     for sb, sraw in zip(selects_meta, selects_raw):
         sb.param = path2key.get(sraw.get("path", ""), "")
 
@@ -804,6 +887,12 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
                          reason="静态资源、心跳或埋点请求，不进入业务流程",
                          confidence=0.98, semantic=semantic)
 
+    ct = (req.get("content_type") or (req.get("headers") or {}).get("content-type") or "").lower()
+    if ct.startswith("multipart/") or _request_segments(req) & {"upload", "file", "files", "attachment", "attachments"}:
+        return _role_row(req, role="unsupported_upload", keep=False,
+                         reason="文件/附件上传请求已放行真发；当前 FlowSpec 暂不自动复用 multipart 文件内容",
+                         confidence=0.96, semantic=semantic)
+
     if looks_like_auth_write(url, req.get("post_data")):
         return _role_row(req, role="auth", keep=False,
                          reason="登录/鉴权/令牌刷新请求，只作为身份来源，不进入业务流程",
@@ -953,6 +1042,32 @@ def _sync_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
     _apply_link_sources(steps, links)
 
 
+def _merge_flow_read_sources(explicit_reads: list[dict], captured_requests: list[dict], request_roles: list[dict]) -> list[dict]:
+    """把录制全量请求里的读响应也作为字段候选源。
+
+    recorder 现在会把 GET/POST 查询放进 captured_requests；字段下拉/选人绑定不能只依赖旧 reads 通道。
+    """
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(url: str, payload: Any) -> None:
+        if payload is None:
+            return
+        key = (url or "", json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)[:500])
+        if key in seen:
+            return
+        seen.add(key)
+        out.append({"url": url or "", "json": payload})
+
+    for r in explicit_reads or []:
+        add(r.get("url") or "", r.get("json", r.get("response_json")))
+    for req, role in zip(captured_requests or [], request_roles or []):
+        if role.get("role") not in {"read_option", "read_context", "business_get"}:
+            continue
+        add(req.get("url") or "", req.get("response_json", req.get("json")))
+    return out
+
+
 def to_flow_spec(
     captured_requests: list[dict],
     *,
@@ -960,7 +1075,7 @@ def to_flow_spec(
     samples: dict | None = None,
     storage_state: dict | None = None,
     required_labels: set | None = None,
-    dom_options: dict | None = None,
+    page_enum_options: dict | None = None,
     tenant: str = "",
     subsystem: str = "",
 ) -> FlowSpec:
@@ -968,10 +1083,11 @@ def to_flow_spec(
     reads = reads or []
     samples = samples or {}
     required_labels = required_labels or set()
-    dom_options = dom_options or {}
+    page_enum_options = page_enum_options or {}
 
     request_roles = [classify_network_request(r, captured_requests, samples) for r in captured_requests]
     role_by_key = {_request_role_key(r): role for r, role in zip(captured_requests, request_roles)}
+    flow_reads = _merge_flow_read_sources(reads, captured_requests, request_roles)
 
     # 1) 业务写请求
     write_cands = [
@@ -997,7 +1113,7 @@ def to_flow_spec(
             meta={
                 "captured_total": len(captured_requests),
                 "captured_write_candidates": 0,
-                "reads_count": len(reads),
+                "reads_count": len(flow_reads),
                 "request_roles": request_roles,
                 "note": "录制未抓到任何业务写请求或业务 GET；用户可能未点提交，或页面是纯 GET 表单",
             },
@@ -1025,11 +1141,11 @@ def to_flow_spec(
         request_role = role_by_key.get(_request_role_key(req), {})
         st = _build_step_from_capture(
             _attach_request_role(req, request_role),
-            reads=reads,
+            reads=flow_reads,
             samples=samples,
             storage_state=storage_state,
             required_labels=required_labels,
-            dom_options=dom_options,
+            page_enum_options=page_enum_options,
             step_index=pos,
         )
         step_objs.append(st)
@@ -1077,7 +1193,7 @@ def to_flow_spec(
             overall = "L3"
 
     # 7) fact_check
-    fc = suggest_fact_check(samples, reads)
+    fc = suggest_fact_check(samples, flow_reads)
     if step_objs and fc:
         step_objs[-1].fact_check = fc
 
@@ -1100,7 +1216,7 @@ def to_flow_spec(
             "captured_preread_candidates_before_dedupe": preread_before_dedupe,
             "captured_preread_candidates": len(preread_cands),
             "captured_workflow_steps": len(step_objs),
-            "reads_count": len(reads),
+            "reads_count": len(flow_reads),
             "request_roles": request_roles,
             "schema_version": 1,
         },
@@ -1110,7 +1226,7 @@ def to_flow_spec(
 def _derive_title(steps: list[FlowStep]) -> str:
     if not steps:
         return ""
-    first = steps[0]
+    first = next((s for s in reversed(steps) if (s.method or "").upper() not in {"GET", "HEAD", "OPTIONS"}), steps[-1])
     try:
         url = first.url or first.path
         path = urlparse(url).path if url.startswith("http") else url
@@ -1123,6 +1239,12 @@ def _derive_title(steps: list[FlowStep]) -> str:
     if len(steps) > 1:
         return f"{last} 流程({len(steps)} 步)"
     return last
+
+
+def _title_without_step_suffix(title: str) -> str:
+    text = str(title or "").strip()
+    text = re.sub(r"\s*[\(（]\s*\d+\s*步\s*[\)）]\s*$", "", text)
+    return text.strip()
 
 
 def _review_id(item_type: str, target: dict[str, Any]) -> str:
@@ -1388,11 +1510,225 @@ def _severity_rank(severity: str) -> int:
 def refresh_review_items(spec: FlowSpec) -> FlowSpec:
     """重建 review_items，并保留同 id 项的已解决状态。"""
     old_resolved = {item.id: item.resolved for item in spec.review_items}
+    old_suggestions = {item.id: list(item.llm_suggestions or []) for item in spec.review_items}
     spec.review_items = build_review_items(spec)
     for item in spec.review_items:
         if item.id in old_resolved:
             item.resolved = old_resolved[item.id]
+        if item.id in old_suggestions:
+            item.llm_suggestions = old_suggestions[item.id]
     return spec
+
+
+def _response_candidate_paths(spec: FlowSpec, target_step: FlowStep, param: ParamField) -> list[dict[str, Any]]:
+    """给 LLM 的 grounded 候选:只给路径/字段名,不把录制值发给模型。"""
+    value = str(param.value or "").strip()
+    if not value:
+        return []
+    step_index = {s.step_id: i for i, s in enumerate(spec.steps)}
+    target_idx = step_index.get(target_step.step_id, 0)
+    out: list[dict[str, Any]] = []
+    for source_step in spec.steps:
+        if step_index.get(source_step.step_id, 0) >= target_idx:
+            continue
+        if source_step.response_json is None:
+            continue
+        for path, _tokens, leaf_value, _raw in _leaf_paths(source_step.response_json):
+            if str(leaf_value) == value:
+                out.append({
+                    "source_step_id": source_step.step_id,
+                    "source_step_name": source_step.name,
+                    "source_method": source_step.method,
+                    "source_path": path,
+                })
+    return out[:20]
+
+
+def _llm_review_targets(spec: FlowSpec) -> list[dict[str, Any]]:
+    steps_by_id = {s.step_id: s for s in spec.steps}
+    params_by_step_path = {(s.step_id, p.path): p for s in spec.steps for p in s.params}
+    targets: list[dict[str, Any]] = []
+    for item in spec.review_items:
+        if item.resolved:
+            continue
+        if item.type not in {"runtime_var_source", "runtime_var_missing_source", "field_category"}:
+            continue
+        tgt = item.target or {}
+        step_id = str(tgt.get("step_id") or "")
+        path = str(tgt.get("path") or "")
+        step = steps_by_id.get(step_id)
+        param = params_by_step_path.get((step_id, path))
+        if step is None or param is None:
+            continue
+        targets.append({
+            "review_id": item.id,
+            "review_type": item.type,
+            "severity": item.severity,
+            "title": item.title,
+            "reason": item.reason,
+            "target": {
+                "step_id": step.step_id,
+                "step_name": step.name,
+                "step_method": step.method,
+                "step_path": step.path,
+                "param_path": param.path,
+                "param_key": param.key,
+                "param_type": param.type,
+                "current_guess": f"{param.category}/{param.source_kind}",
+            },
+            "candidate_response_sources": _response_candidate_paths(spec, step, param),
+            "allowed_source_kinds": ["previous_response", "current_user", "system_time", "page_context", "request_header", "unknown"],
+        })
+    return targets
+
+
+_FLOW_RECOMMEND_SYSTEM = (
+    "你是 FlowSpec 字段来源推荐助手。系统已经先做了规则自动匹配;你只处理规则无法确定的 review item。"
+    "你只能基于输入里的步骤、字段名、路径、候选响应路径做推荐,禁止编造不存在的 source_step_id/source_path。"
+    "不要输出最终修改后的 FlowSpec,只输出建议。高风险或低置信度仍需人工确认。"
+    "输出 JSON 对象:{\"suggestions\":[{"
+    "\"review_id\":\"输入中的 review_id\","
+    "\"action\":\"bind_previous_response|set_runtime_source|ask_human\","
+    "\"confidence\":0到1,"
+    "\"reason\":\"简短中文原因\","
+    "\"source_step_id\":\"当 action=bind_previous_response 时必填且必须来自候选\","
+    "\"source_path\":\"当 action=bind_previous_response 时必填且必须来自候选\","
+    "\"source_kind\":\"当 action=set_runtime_source 时填 current_user/system_time/page_context/request_header/unknown\""
+    "}]}。"
+)
+
+
+def _valid_llm_suggestion(raw: dict, targets: dict[str, dict]) -> dict[str, Any] | None:
+    review_id = str(raw.get("review_id") or "")
+    target = targets.get(review_id)
+    if not target:
+        return None
+    action = str(raw.get("action") or "")
+    if action not in {"bind_previous_response", "set_runtime_source", "ask_human"}:
+        return None
+    try:
+        confidence = max(0.0, min(1.0, float(raw.get("confidence") or 0.0)))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    reason = str(raw.get("reason") or "").strip()[:300]
+    suggestion: dict[str, Any] = {
+        "action": action,
+        "confidence": confidence,
+        "reason": reason or "LLM 给出的辅助建议，需人工确认后生效",
+    }
+    if action == "bind_previous_response":
+        source_step_id = str(raw.get("source_step_id") or "")
+        source_path = str(raw.get("source_path") or "")
+        allowed = {
+            (str(c.get("source_step_id") or ""), str(c.get("source_path") or ""))
+            for c in (target.get("candidate_response_sources") or [])
+        }
+        if (source_step_id, source_path) not in allowed:
+            return None
+        suggestion.update({
+            "source_step_id": source_step_id,
+            "source_path": source_path,
+            "target_step_id": target["target"]["step_id"],
+            "target_path": target["target"]["param_path"],
+        })
+    elif action == "set_runtime_source":
+        source_kind = str(raw.get("source_kind") or "")
+        if source_kind not in {"current_user", "system_time", "page_context", "request_header", "unknown"}:
+            return None
+        suggestion.update({
+            "source_kind": source_kind,
+            "target_step_id": target["target"]["step_id"],
+            "target_path": target["target"]["param_path"],
+        })
+    else:
+        suggestion.update({
+            "target_step_id": target["target"]["step_id"],
+            "target_path": target["target"]["param_path"],
+        })
+    return suggestion
+
+
+async def add_llm_review_recommendations(
+    spec: FlowSpec,
+    *,
+    llm_client: Any | None = None,
+    model: str | None = None,
+    timeout_s: float = 45.0,
+) -> FlowSpec:
+    """第二层:LLM 只给 unresolved review item 增加建议,不直接修改字段/依赖。"""
+    current = refresh_review_items(spec.model_copy(deep=True))
+    targets = _llm_review_targets(current)
+    if not targets:
+        return current
+    target_by_id = {t["review_id"]: t for t in targets}
+
+    if llm_client is None or not model:
+        current.meta = {
+            **(current.meta or {}),
+            "llm_recommendations": {
+                "status": "unavailable",
+                "target_count": len(targets),
+                "reason": "LLM client/model 未配置",
+            },
+        }
+        return current
+
+    payload = {
+        "flow": {
+            "title": current.title,
+            "risk_level": current.risk_level,
+            "steps": [
+                {"step_id": s.step_id, "name": s.name, "method": s.method, "path": s.path}
+                for s in current.steps
+            ],
+        },
+        "review_targets": targets,
+    }
+    try:
+        out = await llm_client.complete_json(
+            model=model,
+            system=_FLOW_RECOMMEND_SYSTEM,
+            user="【FlowSpec 待推荐项】\n" + json.dumps(payload, ensure_ascii=False),
+            timeout_s=timeout_s,
+        )
+    except Exception as exc:  # noqa: BLE001 - 推荐层失败不能影响规则层和人工确认
+        current.meta = {
+            **(current.meta or {}),
+            "llm_recommendations": {
+                "status": "failed",
+                "target_count": len(targets),
+                "reason": str(exc)[:200],
+            },
+        }
+        return current
+
+    raw_suggestions = out.get("suggestions") if isinstance(out, dict) else None
+    if not isinstance(raw_suggestions, list):
+        raw_suggestions = []
+    suggestions_by_review: dict[str, list[dict[str, Any]]] = {}
+    for raw in raw_suggestions:
+        if not isinstance(raw, dict):
+            continue
+        valid = _valid_llm_suggestion(raw, target_by_id)
+        if valid is None:
+            continue
+        suggestions_by_review.setdefault(str(raw.get("review_id") or ""), []).append(valid)
+
+    for item in current.review_items:
+        if item.id in suggestions_by_review:
+            ranked = sorted(suggestions_by_review[item.id], key=lambda s: float(s.get("confidence") or 0.0), reverse=True)
+            item.llm_suggestions = ranked[:3]
+
+    current.meta = {
+        **(current.meta or {}),
+        "llm_recommendations": {
+            "status": "ok",
+            "target_count": len(targets),
+            "suggestion_count": sum(len(v) for v in suggestions_by_review.values()),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+    return append_flow_version(current, "llm_recommendations", reason="刷新 LLM 辅助推荐")
 
 
 def _flow_fingerprint(spec: FlowSpec) -> str:
@@ -1533,27 +1869,12 @@ def _flow_step_query_template(step: FlowStep) -> tuple[dict[str, Any], list[str]
             if p.value not in (None, ""):
                 samples[name] = p.value
             field_types[name] = p.type
-        elif p.category == "runtime_var":                # H21 修复:runtime_var/identity 也参与 query 占位,运行期按 source_kind 注入
-            name = (p.key or query_key).strip()
-            if not name:
-                continue
-            query_template[query_key] = "{{" + name + "}}"
-            if name not in params:
-                params.append(name)
-            field_types[name] = p.type
+        elif p.category == "runtime_var":
+            # 运行期变量不是最终用户参数。GET query 里先保留录制值，若有 FlowLink 指向 query.xxx，
+            # execute_api_workflow 会在运行期用上游响应覆盖；没有可靠来源时由 review_items 提醒人工确认。
+            query_template[query_key] = p.value
         else:
             query_template[query_key] = p.value
-    # H21 修复:GET 步骤的 identity 字段(当前用户)强制以 query 占位暴露 —— 否则运行期 current_user 注入不到 URL
-    for idn in step.identity or []:
-        id_path = idn.path or ""
-        if not id_path.startswith("query."):
-            continue
-        qk = id_path[len("query."):]
-        if qk and qk not in query_template:
-            name = "currentUser"
-            query_template[qk] = "{{" + name + "}}"
-            if name not in params:
-                params.append(name)
     return query_template, params, samples, field_types
 
 
@@ -1578,6 +1899,76 @@ def flow_spec_required_params(spec: FlowSpec) -> list[str]:
     return names
 
 
+def _needs_llm_field_name(param: ParamField) -> bool:
+    key = (param.key or "").strip()
+    if not key or param.category != "user_param" or not param.exposed_to_user:
+        return False
+    if (param.name_source or "auto") not in {"", "auto"}:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", key):
+        return False
+    if looks_internal_param_name(key):
+        return True
+    last = (param.path or "").split(".")[-1].split("[")[0]
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)) and key == last
+
+
+def llm_field_name_candidates(spec: FlowSpec) -> list[dict[str, str]]:
+    """LLM 字段命名输入：只给机器名、类型和路径，不带录制值。"""
+    out: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for st in spec.steps:
+        for p in st.params:
+            if not _needs_llm_field_name(p):
+                continue
+            item = {"key": p.key, "suggest_name": p.key, "type": p.type, "path": p.path}
+            sig = (item["key"], item["path"])
+            if sig not in seen:
+                seen.add(sig)
+                out.append(item)
+    return out
+
+
+def apply_llm_field_names(spec: FlowSpec, names: dict[str, str] | None) -> FlowSpec:
+    """把 LLM 推荐字段名应用到 FlowSpec。
+
+    只改仍是自动机器名的用户参数；手动名、页面标签名、审批人名和已确认来源不覆盖。
+    """
+    if not names:
+        return spec
+    new_spec = spec.model_copy(deep=True)
+    changed = False
+    for st in new_spec.steps:
+        used = {p.key for p in st.params}
+        for p in st.params:
+            if not _needs_llm_field_name(p):
+                continue
+            proposed = str(names.get(p.key) or names.get(p.path) or "").strip()
+            if not proposed or proposed == p.key or proposed in used:
+                continue
+            old_key = p.key
+            used.discard(old_key)
+            used.add(proposed)
+            p.key = proposed
+            p.label = proposed
+            p.name_source = "llm"
+            if old_key in st.sample_inputs:
+                st.sample_inputs[proposed] = st.sample_inputs.pop(old_key)
+            elif p.value not in (None, ""):
+                st.sample_inputs[proposed] = p.value
+            for sb in st.selects:
+                if sb.path == p.path or sb.param == old_key:
+                    sb.param = proposed
+            changed = True
+    if not changed:
+        return spec
+    return append_flow_version(
+        refresh_review_items(new_spec),
+        "field_naming",
+        reason="LLM 补充机器字段业务名",
+    )
+
+
 def apply_flow_publish_selection(
     spec: FlowSpec,
     param_map: dict[str, str] | None,
@@ -1598,7 +1989,7 @@ def apply_flow_publish_selection(
             if p.path in clean_map:
                 old_key = p.key
                 p.key = clean_map[p.path]
-                p.label = p.label or p.key
+                p.label = p.key
                 p.category = "user_param"
                 p.exposed_to_user = True
                 p.editable = True
@@ -1612,6 +2003,9 @@ def apply_flow_publish_selection(
                     st.sample_inputs[p.key] = st.sample_inputs.pop(old_key)
                 if p.value not in (None, ""):
                     st.sample_inputs[p.key] = p.value
+                for sb in st.selects:
+                    if sb.path == p.path or sb.param == old_key:
+                        sb.param = p.key
             elif selected_scope_paths is not None and p.path in selected_scope_paths:
                 if p.category == "user_param":
                     p.category = "system_const"
@@ -1668,10 +2062,39 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
     if step.response_json is not None:
         req["response_json"] = step.response_json
     param_map = _step_param_map(step)
+    current_key_by_path = {p.path: p.key for p in step.params}
+    selects = []
+    select_paths = set()
+    for s in step.selects:
+        item = s.model_dump(exclude_none=True)
+        if s.path in current_key_by_path:
+            item["param"] = current_key_by_path[s.path]
+        selects.append(item)
+        if s.path:
+            select_paths.add(s.path)
+    for p in step.params:
+        if (
+            p.category == "user_param"
+            and p.source_kind == "form_option"
+            and p.enum_options
+            and p.path not in select_paths
+        ):
+            selects.append({
+                "param": p.key,
+                "path": p.path,
+                "source_url": "",
+                "value_key": "",
+                "label_key": "",
+                "options": list(p.enum_options),
+                "count": len(p.enum_options),
+                "enum_source": "manual",
+                "enum_confirmed": True,
+            })
+            select_paths.add(p.path)
     apir = build_api_request(
         req,
         param_map,
-        selects=[s.model_dump(exclude_none=True) for s in step.selects],
+        selects=selects,
         identity=[
             *[i.model_dump(exclude_none=True) for i in step.identity],
             *[
@@ -2255,9 +2678,35 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 if field == "key":
                     old_key = param.key
                     param.key = str(value)
+                    param.label = param.key
                     param.name_source = "manual"
                     if old_key in step.sample_inputs:
                         step.sample_inputs[param.key] = step.sample_inputs.pop(old_key)
+                    for sb in step.selects:
+                        if sb.path == param.path or sb.param == old_key:
+                            sb.param = param.key
+                elif field == "path":
+                    old_path = param.path
+                    new_path = str(value or "").strip()
+                    if not new_path:
+                        raise ValueError("param path cannot be empty")
+                    if any(p is not param and p.path == new_path for p in step.params):
+                        raise ValueError(f"duplicate param path: {new_path}")
+                    param.path = new_path
+                    for sb in step.selects:
+                        if sb.path == old_path:
+                            sb.path = new_path
+                        if sb.id_path == old_path:
+                            sb.id_path = new_path
+                    for idn in step.identity:
+                        if idn.path == old_path:
+                            idn.path = new_path
+                    for sv in step.system_values:
+                        if sv.path == old_path:
+                            sv.path = new_path
+                    for lk in new_spec.links:
+                        if lk.target_step_id == step.step_id and _clean_path_prefix(lk.target_path, "body.") == old_path:
+                            lk.target_path = new_path
                 elif field == "value":
                     param.value = str(value)
                     step.sample_inputs[param.key] = param.value
@@ -2301,6 +2750,21 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     step.url = str(value)
                 elif field == "step_id":                   # H19 修复:显式禁改 step_id
                     raise ValueError("step_id is immutable")
+                elif field == "selects":
+                    try:
+                        step.selects = [SelectBinding.model_validate(x) for x in (value or [])]
+                    except ValidationError as e:
+                        raise ValueError(f"invalid selects data: {e}")
+                elif field == "identity":
+                    try:
+                        step.identity = [IdentityBinding.model_validate(x) for x in (value or [])]
+                    except ValidationError as e:
+                        raise ValueError(f"invalid identity data: {e}")
+                elif field == "params":
+                    try:
+                        step.params = [ParamField.model_validate(x) for x in (value or [])]
+                    except ValidationError as e:
+                        raise ValueError(f"invalid params data: {e}")
                 elif field in _STEP_ALLOWED_FIELDS:
                     setattr(step, field, value)
                 else:
@@ -2417,7 +2881,7 @@ def flow_spec_for_get_form(
         try:
             step = _build_step_from_capture(
                 r, reads=[], samples={}, storage_state=None,
-                required_labels=set(), dom_options={}, step_index=idx,
+                required_labels=set(), page_enum_options={}, step_index=idx,
             )
             step.name = f"读#{idx+1} {step.path or '(无路径)'}"
             steps.append(step)
@@ -2603,7 +3067,7 @@ def _llm_purpose(spec: FlowSpec, llm_client: Any | None) -> str:
 def _default_purpose(spec: FlowSpec) -> str:
     if not spec.steps:
         return "本流程未包含任何操作步骤，暂不能生成可执行 Skill。"
-    title = spec.title or (spec.steps[-1].name or _derive_step_name(spec.steps[-1]))
+    title = _title_without_step_suffix(spec.title) or (spec.steps[-1].name or _derive_step_name(spec.steps[-1]))
     return (
         f"该 Skill 用于按录制得到的 {len(spec.steps)} 个步骤执行「{title}」，"
         "并在运行期重新解析用户参数、系统常量和接口依赖。"

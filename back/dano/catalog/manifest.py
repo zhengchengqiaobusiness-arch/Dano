@@ -71,16 +71,17 @@ def _api_selects(skill: SkillSpec) -> dict:
 def _enum_facts(sel: dict | None) -> tuple[list, bool, bool]:
     """选择型字段的候选事实 → (opts, has_source, is_static_enum)。
 
-    **静态页面枚举**(DOM 抓的固定下拉,如 请假类型=病假/事假/婚假;或无来源的纯枚举)→ 完整且稳定 → 可烤进 schema;
+    **静态页面枚举**(enum_source=dom/manual,如 请假类型=病假/事假/婚假;或无来源的纯枚举)→ 完整且稳定 → 可烤进 schema;
     **活接口目录**(用户/部门/审批人等网络源:会变、常被截断)→ **绝不烤静态清单**(否则前端被陈旧/错误选项硬约束,
     选的值与实际不符 → 入库失败),只暴露来源让调用方运行期 `--list-options` 现拉。通用,不挑系统/字段。
     """
     opts = [o for o in ((sel or {}).get("options") or []) if str(o).strip()]
     cnt = int((sel or {}).get("count") or len(opts))
     has_source = bool((sel or {}).get("source_url"))
-    dom = bool((sel or {}).get("dom_options"))               # DOM 抓的固定下拉 = 静态枚举的强证据
+    enum_source = str((sel or {}).get("enum_source") or "")
+    static_source = enum_source in {"dom", "manual"}
     truncated = bool(opts) and cnt > len(opts)
-    static = bool(opts) and not truncated and (dom or not has_source)
+    static = bool(opts) and not truncated and (static_source or not has_source)
     return opts, has_source, static
 
 

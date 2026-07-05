@@ -14,7 +14,7 @@ import logging
 
 _log = logging.getLogger("dano.request_capture")
 import re as _re
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, unquote, urlparse, urlunparse
 
 _WRITE = {"POST", "PUT", "PATCH", "DELETE"}
 # 「读请求」噪声:只排静态资源/流/心跳(通用,无任何业务路径名);保留字典/列表接口(select 候选源)。
@@ -141,15 +141,50 @@ def looks_like_auth_write(url: str, body=None) -> bool:
 _READ_VERB_RE = _re.compile(
     r"^(get|query|list|search|find|load|page|count|tree|fetch|select|view|export|download|stat|statistic)",
     _re.I)
+_READ_PATH_HINTS = (
+    "查询", "列表", "分页", "搜索", "字典", "候选", "下拉", "详情",
+    "chaxun", "liebiao", "fenye", "sousuo", "zidian", "xiala",
+)
+_READ_BODY_KEY_HINTS = frozenset({
+    "pageno", "pageindex", "pageidx", "pagenum", "pagesize", "currentpage",
+    "offset", "limit", "keyword", "keywords", "searchkey",
+    "searchtext", "filter", "filters", "criteria", "condition", "conditions",
+    "sort", "sorter", "orderby", "ordertype",
+    "页码", "页数", "关键字", "关键词", "查询", "搜索",
+})
+
+
+def _normalized_key(key: str) -> str:
+    return _re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff]+", "", str(key or "").lower())
+
+
+def _body_has_read_shape(body) -> bool:
+    """POST 查询常靠 body 传分页/过滤条件；用结构信号识别，避免只靠路径名。"""
+    if isinstance(body, str):
+        body = _parse_body(body)
+    keys = {_normalized_key(k) for k in _all_keys(body)}
+    keys.discard("")
+    if keys & _READ_BODY_KEY_HINTS:
+        return True
+    # 常见组合: page + size / current + size。避免把单独 size 字段误判成查询。
+    has_page = bool(keys & {"page", "pageindex", "pagenum", "currentpage", "current"})
+    has_size = bool(keys & {"size", "pagesize", "limit"})
+    return has_page and has_size
 
 
 def looks_like_read_request(url: str, body=None) -> bool:
- 
-    segs = [s for s in urlparse(url or "").path.split("/") if s]
+    path = unquote(urlparse(url or "").path or "")
+    segs = [s for s in path.split("/") if s]
     if not segs:
-        return False
+        return _body_has_read_shape(body)
     last = segs[-1].split("?")[0]
-    return bool(_READ_VERB_RE.match(last))
+    last_norm = last.lower()
+    if _READ_VERB_RE.match(last_norm):
+        return True
+    path_norm = path.lower()
+    if any(h in path_norm for h in _READ_PATH_HINTS):
+        return True
+    return _body_has_read_shape(body)
 
 
 def json_write_requests(requests: list[dict]) -> list[dict]:
@@ -158,7 +193,7 @@ def json_write_requests(requests: list[dict]) -> list[dict]:
     out: list[dict] = []
     for r in requests:
         if ((r.get("method") or "").upper() in _WRITE and _parse_body(r.get("post_data")) is not None
-                and not looks_like_read_request(r.get("url") or "")):
+                and not looks_like_read_request(r.get("url") or "", r.get("post_data"))):
             out.append(r)
     return out
 
@@ -343,20 +378,80 @@ def _is_idlike(key: str) -> bool:
 
 _SMALL_LIST = 50    # "字典型下拉"是小列表(事假/病假…);城市/数据大字典是大列表 → 区分短码真假命中
 _OPTIONS_SNAPSHOT_MAX = 500    # 快照进 skill 的候选选项上限(再多就只存来源、运行期 --list-options 现拉)
+_LIST_ROW_CONST_OK_RE = _re.compile(r"(type|status|state|flag|sort|order|level|kind|class|role)$", _re.I)
 
 
-def _list_options(items: list[dict], label_key: str) -> list[str]:
-    """从候选列表抽出**显示名选项**(agent 该传的值),去重保序、限量。供 skill 内置枚举 / 选项参考。"""
-    out: list[str] = []
+def _enum_option_record(label, value=None) -> dict | None:
+    lab = str(label or "").strip()
+    if not lab:
+        return None
+    return {"label": lab, "value": lab if value is None else value}
+
+
+def _enum_records_from_items(items, label_key: str | None, value_key: str | None = None,
+                             *, limit: int = _OPTIONS_SNAPSHOT_MAX) -> list[dict]:
+    """接口候选项 → 标准枚举 [{label,value}]。
+
+    label 是用户/前端选择的真实业务枚举；value 是请求实际提交值。
+    """
+    if not label_key:
+        return []
+    out: list[dict] = []
     seen: set[str] = set()
-    for it in items:
-        lab = str(it.get(label_key, "")).strip() if isinstance(it, dict) else ""
-        if lab and lab not in seen:
-            seen.add(lab)
-            out.append(lab)
-        if len(out) >= _OPTIONS_SNAPSHOT_MAX:
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        rec = _enum_option_record(it.get(label_key), it.get(value_key) if value_key and value_key in it else None)
+        if not rec or rec["label"] in seen:
+            continue
+        seen.add(rec["label"])
+        out.append(rec)
+        if len(out) >= limit:
             break
     return out
+
+
+def _enum_records_from_page_options(opts: list | tuple | None) -> list[dict]:
+    """DOM 下拉快照 → 标准枚举 [{label,value}]。
+
+    原生 select 会提供 {label,value};弹窗类下拉通常只有文字,此时 value=label。
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for opt in opts or []:
+        if isinstance(opt, dict):
+            rec = _enum_option_record(
+                opt.get("label") or opt.get("text") or opt.get("name") or opt.get("value"),
+                opt.get("value", opt.get("label", opt.get("text", opt.get("name")))),
+            )
+        else:
+            rec = _enum_option_record(opt, opt)
+        if not rec or rec["label"] in seen:
+            continue
+        seen.add(rec["label"])
+        out.append(rec)
+    return out
+
+
+def _enum_labels(records: list[dict]) -> list[str]:
+    return [str(r["label"]) for r in records if str(r.get("label") or "").strip()]
+
+
+def _enum_option_map(records: list[dict]) -> dict:
+    return {str(r["label"]): r.get("value") for r in records if str(r.get("label") or "").strip()}
+
+
+def _attach_enum_binding(entry: dict, records: list[dict], *, source: str, confirmed: bool) -> dict:
+    """把真实枚举源挂到 select entry。没有候选时不伪装成 enum。"""
+    labels = _enum_labels(records)
+    if not labels:
+        return entry
+    entry["options"] = labels
+    entry["option_map"] = _enum_option_map(records)
+    entry["count"] = len(labels)
+    entry["enum_source"] = source
+    entry["enum_confirmed"] = bool(confirmed)
+    return entry
 
 
 def _is_scalar(v) -> bool:
@@ -501,8 +596,13 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
                                  if isinstance(it, dict) and str(it.get(cat_key)) == str(cat_val)]
             entry = {"path": path, "tokens": toks, "value": sv, "source_url": r.get("url"),
                      "value_key": vk, "label_key": lk, "label": label, "count": len(opt_items),
-                     "options": _list_options(opt_items, lk),   # 候选显示名快照(存进 skill 让 agent 从中选,问题1)
                      "_confirmed": confirmed}
+            _attach_enum_binding(
+                entry,
+                _enum_records_from_items(opt_items, lk, vk),
+                source="api",
+                confirmed=confirmed,
+            )
             if cat_key is not None and cat_val is not None:     # 分类过滤随 select 走(运行期 list-options / 名→ID 同样收窄)
                 entry["category_key"], entry["category_value"] = cat_key, str(cat_val)
             if mode == "name":                           # 名/ID 配对:找兄弟"内部 id"字段(同父 + 值==该项的 id)
@@ -614,58 +714,132 @@ def suggest_list_selects(post_data: str | None, reads: list[dict] | None,
                 template[sk] = {"const": e0.get(sk)}                 # 整列一致 → 常量(participantType=2)
             else:
                 template[sk] = {"const": e.get(sk)}                  # 兜底(罕见,无源可对又不一致)
+        # 可新增行的业务明细表常长得像 [{业务文本, 下拉名, 下拉ID}]。它不是“多选实体列表”；
+        # 若折叠整行，会把业务文本冻成录制值。只要行内存在用户填写的标量且不能从候选项推出，就不折叠。
+        has_user_scalar_not_from_item = any(
+            "from" not in (template.get(sk) or {})
+            and _is_scalar(e0.get(sk))
+            and str(e0.get(sk)) in sample_vals
+            for sk in e0
+        )
+        has_business_scalar_not_from_item = any(
+            "from" not in (template.get(sk) or {})
+            and _is_scalar(e0.get(sk))
+            and str(e0.get(sk)).strip()
+            and not _is_idlike(sk)
+            and not _LIST_ROW_CONST_OK_RE.search(str(sk))
+            for sk in e0
+        )
+        if has_user_scalar_not_from_item or has_business_scalar_not_from_item:
+            continue
         label_sub = next((sk for sk, m in template.items() if m.get("item_key") == lk), None) or name_subs[0]
         labels = [str(x.get(label_sub, "")).strip() for x in elems if str(x.get(label_sub, "")).strip()]
         confirmed = any(any(_name_match(lb, s) for s in sample_vals) for lb in labels)
-        out.append({"path": path, "tokens": list(toks), "multi": True, "source_url": src_url,
-                    "value_key": vk, "label_key": lk, "element_template": template,
-                    "label_subkey": label_sub, "options": _list_options(items, lk),
-                    "count": len(items), "label": labels[0] if labels else "",
-                    "values": labels, "_confirmed": confirmed})
+        entry = {"path": path, "tokens": list(toks), "multi": True, "source_url": src_url,
+                 "value_key": vk, "label_key": lk, "element_template": template,
+                 "label_subkey": label_sub,
+                 "count": len(items), "label": labels[0] if labels else "",
+                 "values": labels, "_confirmed": confirmed}
+        _attach_enum_binding(
+            entry,
+            _enum_records_from_items(items, lk, vk),
+            source="api",
+            confirmed=confirmed,
+        )
+        out.append(entry)
     return out
 
 
-def apply_dom_options(selects: list[dict], dom_options: dict | None) -> list[dict]:
-    """用**录制时下拉里真实可见的选项**(DOM 抓的枚举地面真值)覆盖 select 的候选快照 —— 这是地面真值,
+def _dom_key_matches_field(dom_key: str, field: dict | None) -> bool:
+    if not field:
+        return False
+    keys = [
+        field.get("suggest_name"),
+        field.get("key"),
+        field.get("path"),
+        str(field.get("path") or "").split(".")[-1].split("[")[0],
+    ]
+    return any(_name_match(dom_key, k) for k in keys if k not in (None, ""))
+
+
+def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
+                      post_data: str | None = None, fields: list[dict] | None = None) -> list[dict]:
+    """用**录制时下拉里真实可见的选项**覆盖 select 的候选快照 —— 这是枚举地面真值,
     胜过拿提交值去网络字典里猜命中(治"加班类型/请假类型绑到几百项含工作日/档案/银行…的全量字典")。
 
-    dom_options:{选中显示值: [选项文字]}。按"选中显示值 ⟺ 某 select 的 label/value(精确或子串)"把 DOM 选项
-    挂到该 select:options/count 换成 DOM 选项,标 dom_options=True,并撤掉按类目收窄(DOM 即权威)。通用,不挑系统。
+    page_enum_options:{选中显示值: [选项文字]}。按"选中显示值 ⟺ 某 select 的 label/value(精确或子串)"把 DOM 选项
+    挂到该 select:options/count/option_map,标 enum_source=dom,并撤掉按类目收窄。通用,不挑系统。
     """
-    if not dom_options:
+    if not page_enum_options:
         return selects
-    pairs = [(k, v) for k, v in dom_options.items() if v]
+    pairs = [(str(k), v) for k, v in page_enum_options.items() if v]
+    body = _parse_body(post_data) if post_data is not None else None
+    value_by_path = {p: sv for p, _t, sv, _raw in _leaf_paths(body)} if body is not None else {}
+    field_by_path = {str(f.get("path") or ""): f for f in (fields or []) if f.get("path")}
     for s in selects or []:
         lbl, val = str(s.get("label") or ""), str(s.get("value") or "")
-        opts = next((ov for kv, ov in pairs if _name_match(kv, lbl) or _name_match(kv, val)), None)
+        path = str(s.get("path") or "")
+        body_val = value_by_path.get(path, "")
+        field = field_by_path.get(path)
+        opts = next((ov for kv, ov in pairs
+                     if _name_match(kv, lbl)
+                     or _name_match(kv, val)
+                     or _name_match(kv, body_val)
+                     or _name_match(kv, path)
+                     or _dom_key_matches_field(kv, field)), None)
         if opts:
-            s["options"], s["count"], s["dom_options"] = list(opts), len(opts), True
+            _attach_enum_binding(
+                s,
+                _enum_records_from_page_options(opts),
+                source="dom",
+                confirmed=True,
+            )
             s.pop("category_key", None)
             s.pop("category_value", None)
     return selects
 
 
-def dom_enum_selects(post_data: str | None, dom_options: dict | None,
-                     existing_paths: set | None = None) -> list[dict]:
+def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
+                     existing_paths: set | None = None,
+                     fields: list[dict] | None = None) -> list[dict]:
     """录到了下拉选项、但提交体里这个字段**没绑上任何来源 select**(纯枚举:body 存的就是显示名)→
-    造一个**无来源**枚举 select(options=DOM 选项),agent 传名字即原样提交。治"页面明明只有 3 个选项,
-    却因为匹配不到网络字典而被当普通文本"。通用,不挑系统。dom_options:{选中显示值: [选项文字]}。"""
+    造一个**无来源**枚举 select(options + option_map),agent 传名字时按真实提交值回填。治"页面明明只有 3 个选项,
+    却因为匹配不到网络字典而被当普通文本"。通用,不挑系统。page_enum_options:{选中显示值: [选项文字]}。"""
     body = _parse_body(post_data)
-    if body is None or not dom_options:
+    if body is None or not page_enum_options:
         return []
     existing = existing_paths or set()
     out: list[dict] = []
-    for picked, opts in dom_options.items():
+    field_by_path = {str(f.get("path") or ""): f for f in (fields or []) if f.get("path")}
+    leaves = _leaf_paths(body)
+    for picked, opts in page_enum_options.items():
         if not opts:
             continue
         toks = _find_value_tokens(body, picked)          # body 里值==选中显示名的叶子(纯名枚举)
-        if toks is None:
-            continue
-        path = _tokens_to_str(toks)
+        if toks is not None:
+            path = _tokens_to_str(toks)
+        else:
+            hit = next((
+                (path, toks)
+                for path, toks, _sv, _raw in leaves
+                if _dom_key_matches_field(str(picked), field_by_path.get(path))
+                   or _name_match(str(picked), path)
+            ), None)
+            if hit is None:
+                continue
+            path, toks = hit
         if path in existing or any(o.get("path") == path for o in out):
             continue
-        out.append({"path": path, "tokens": toks, "source_url": "", "value_key": "", "label_key": "",
-                    "label": picked, "count": len(opts), "options": list(opts), "dom_options": True})
+        current = next((sv for p, _t, sv, _raw in leaves if p == path), "")
+        entry = {"path": path, "tokens": toks, "source_url": "", "value_key": "", "label_key": "",
+                 "label": picked, "value": current, "count": len(opts)}
+        _attach_enum_binding(
+            entry,
+            _enum_records_from_page_options(opts),
+            source="dom",
+            confirmed=True,
+        )
+        out.append(entry)
     return out
 
 
@@ -933,7 +1107,7 @@ def suggest_workflow_steps(writes: list[dict], samples: dict) -> list[int]:
         body = _parse_body(w.get("post_data"))
         if body is None or looks_like_auth_write(w.get("url") or "", body):   # 排除登录/鉴权/基建写
             continue
-        if looks_like_read_request(w.get("url") or ""):                       # 排除 POST 形态的读/查询(下拉/列表源)
+        if looks_like_read_request(w.get("url") or "", w.get("post_data")):    # 排除 POST 形态的读/查询(下拉/列表源)
             continue
         biz.append((i, w))
     if not biz:
@@ -969,7 +1143,11 @@ def parameterize_request(req: dict, samples: dict, base_url: str = "") -> dict |
     body = _parse_body(req.get("post_data"))
     if body is None:
         return None
-    val2field = {str(v): k for k, v in samples.items() if v not in ("", None)}
+    val2fields: dict[str, list[str]] = {}
+    for k, v in (samples or {}).items():
+        if v in ("", None):
+            continue
+        val2fields.setdefault(str(v), []).append(k)
     params: dict[str, str] = {}
 
     def walk(node, provenance: list | None = None, path: str = ""):
@@ -978,8 +1156,8 @@ def parameterize_request(req: dict, samples: dict, base_url: str = "") -> dict |
         if isinstance(node, list):
             return [walk(x, provenance, f"{path}[{i}]") for i, x in enumerate(node)]
         sv = str(node)
-        if sv in val2field:                            # 这个值是用户填的 → 变参数
-            f = val2field[sv]
+        if val2fields.get(sv):                         # 这个值是用户填的 → 变参数；同值字段按叶子顺序逐个消费
+            f = val2fields[sv].pop(0)
             params[f] = sv
             if provenance is not None:
                 provenance.append({"path": path, "field": f, "kind": "user_input", "source": "sample"})
@@ -1211,7 +1389,7 @@ def classify_network_request(req: dict) -> dict:
 
     输出:
         role ∈ {auth, noise, read_option, read_context, business_get, business_write,
-                 submit_anchor, post_submit_verify, destructive, unknown}
+                 submit_anchor, post_submit_verify, destructive, unsupported_upload, unknown}
         keep ∈ {True, False}: 是否进入主流程步骤(destructive / noise / auth / read_option 都不进)
         reason: 给人看的一句话解释
         confidence: 0~1,0.9+ 高置信,0.7~0.9 中等,<0.7 让人工确认
@@ -1229,6 +1407,13 @@ def classify_network_request(req: dict) -> dict:
     if any(n in ul for n in _READ_NOISE):
         return {"role": "noise", "keep": False,
                 "reason": "长连接/SSE/心跳,非业务接口", "confidence": 0.95}
+
+    ct = (req.get("content_type") or req.get("headers", {}).get("content-type") or "").lower()
+    path_segs = {s for s in _re.split(r"[^a-zA-Z0-9]+", (urlparse(url).path or "").lower()) if s}
+    if ct.startswith("multipart/") or path_segs & {"upload", "file", "files", "attachment", "attachments"}:
+        return {"role": "unsupported_upload", "keep": False,
+                "reason": "文件/附件上传请求已放行真发；当前 FlowSpec 暂不自动复用 multipart 文件内容",
+                "confidence": 0.96}
 
     # 2) 危险写:DELETE 或路径含 delete/remove/destroy/reject/terminate/revoke
     if looks_dangerous_write(req):
@@ -1527,10 +1712,14 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
                 "value_key": s.get("value_key"), "label_key": s.get("label_key"),
                 "options": list(s.get("options") or []),     # 候选选项快照(存进 skill 让 agent 从中选,问题1)
                 "count": s.get("count")}
+        if s.get("option_map"):
+            meta["option_map"] = dict(s.get("option_map") or {})
+        if s.get("enum_source"):
+            meta["enum_source"] = s.get("enum_source")
+        if s.get("enum_confirmed") is not None:
+            meta["enum_confirmed"] = bool(s.get("enum_confirmed"))
         if s.get("category_key"):                            # 聚合字典:分类过滤随 select 走 → 运行期同样按类目收窄
             meta["category_key"], meta["category_value"] = s["category_key"], s.get("category_value")
-        if s.get("dom_options"):                             # DOM 抓的固定下拉(静态枚举)→ 可烤进 schema;否则=活接口目录(只暴露来源)
-            meta["dom_options"] = True
         if s.get("multi"):                                   # 列表多选:整份元素模板随 select 走 → 运行期把名字列表展开成对象数组
             meta["multi"] = True
             meta["element_template"] = s.get("element_template") or {}
@@ -1953,9 +2142,17 @@ async def fetch_field_options(api_request: dict, field: str, *, base_url: str = 
     """**实时**拉某选择型字段的当前可选项(直接调它的来源接口,带登录态)→ {field, options:[{label,value}], count}。
     通用,不挑系统。该字段不是选择型/无来源 → options=[] 并说明。失败 → options=[] 不抛(让 agent 退回传名字)。"""
     sel = find_field_select(api_request, field)
-    if not sel or not sel.get("source_url"):
+    if not sel:
         return {"field": field, "options": [], "count": 0,
-                "note": "该字段不是选择型(或无来源接口);直接按字段说明传值即可"}
+                "note": "该字段不是选择型;直接按字段说明传值即可"}
+    if not sel.get("source_url") or (sel.get("enum_source") == "dom" and sel.get("options")):
+        opt_map = sel.get("option_map") or {}
+        opts = [
+            {"label": str(x), "value": opt_map.get(str(x), x) if isinstance(opt_map, dict) else x}
+            for x in (sel.get("options") or [])
+        ]
+        return {"field": field, "options": opts, "count": len(opts),
+                "note": "该字段候选来自录制页面真实下拉快照"}
     lk, vk = sel.get("label_key"), sel.get("value_key")
     items = await _fetch_list(sel["source_url"], base_url, storage_state, token_key, verify,
                               (api_request or {}).get("auth_headers"))
@@ -2012,6 +2209,16 @@ async def _resolve_selects(api_request: dict, fields: dict, *, base_url: str, st
         if param not in fields:
             continue
         name = fields[param]
+        opt_map = s.get("option_map") or {}
+        if isinstance(opt_map, dict) and str(name) in {str(k) for k in opt_map}:
+            match_key = next(k for k in opt_map if str(k) == str(name))
+            mapped = opt_map[match_key]
+            # DOM/native select 已给出真实提交值时,它比全量字典更可靠;若只是 label→label,继续尝试接口解析。
+            if str(mapped) != str(name) or not s.get("source_url"):
+                fields[param] = mapped
+                continue
+        if not s.get("source_url"):
+            continue
         items = await _fetch_list(s.get("source_url", ""), base_url, storage_state, token_key, verify,
                                   api_request.get("auth_headers"))
         items = _filter_category(items, s)        # 聚合字典 → 只在该字段所属类目里名→ID(同名跨类目不串)
@@ -2064,11 +2271,19 @@ async def _resolve_list_selects(api_request: dict, fields: dict, *, base_url: st
             continue
         if not names or all(not isinstance(x, str) for x in names):
             continue
+        lk = s.get("label_key")
+        tmpl, label_sub = s.get("element_template") or {}, s.get("label_subkey")
+        if not s.get("source_url"):
+            opt_map = s.get("option_map") or {}
+            if isinstance(opt_map, dict) and opt_map:
+                fields[param] = [opt_map.get(nm, nm) for nm in names]
+                continue
+            if tmpl:
+                fields[param] = [_build_element(None, tmpl, nm, label_sub) for nm in names]
+            continue
         items = await _fetch_list(s.get("source_url", ""), base_url, storage_state, token_key, verify,
                                   api_request.get("auth_headers"))
         items = _filter_category(items, s)
-        lk = s.get("label_key")
-        tmpl, label_sub = s.get("element_template") or {}, s.get("label_subkey")
         built = []
         for nm in names:
             it = next((x for x in items if isinstance(x, dict) and _name_match(str(x.get(lk)), nm)), None)

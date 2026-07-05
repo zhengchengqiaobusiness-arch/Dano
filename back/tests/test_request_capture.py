@@ -1,10 +1,15 @@
 """方式B 升级:抓提交请求 → 参数化(纯函数,离线)。"""
 from __future__ import annotations
 
+import json
+
 from dano.execution.page.request_capture import (
     _response_ok,
+    _resolve_list_selects,
+    _resolve_selects,
     as_list_payload,
     auto_required_fields,
+    classify_network_request as classify_capture_request,
     infer_success_rule,
     build_api_request,
     build_api_workflow,
@@ -12,10 +17,12 @@ from dano.execution.page.request_capture import (
     discover_step_links,
     execute_api,
     looks_like_auth_write,
+    looks_like_read_request,
     execute_api_request,
     execute_api_workflow,
     extract_auth_headers,
     flatten_body,
+    fetch_field_options,
     json_write_requests,
     list_read_requests,
     parameterize_request,
@@ -24,8 +31,8 @@ from dano.execution.page.request_capture import (
     self_check,
     substitute,
     suggest_fact_check,
-    apply_dom_options,
-    dom_enum_selects,
+    apply_page_enum_options,
+    page_enum_selects,
     suggest_assignee_names,
     suggest_identity,
     suggest_list_selects,
@@ -69,6 +76,155 @@ def test_as_list_payload_detects_common_shapes():
     assert as_list_payload({"code": 200, "msg": "ok"}) is None              # 无列表
     assert as_list_payload([]) is None                                      # 空列表无意义
     assert as_list_payload("x") is None
+
+
+def test_post_read_detection_uses_body_shape_for_custom_paths():
+    """泛化:POST 查询接口即使路径不是 get/list/query 开头，也能靠分页/搜索 body 识别为读请求。"""
+    assert looks_like_read_request("/api/customEndpoint", '{"pageNo":1,"pageSize":10,"keyword":"张"}')
+    assert looks_like_read_request("/api/customEndpoint", {"current": 1, "size": 20})
+
+
+def test_post_read_detection_does_not_swallow_plain_submit_body():
+    """普通业务提交没有分页/过滤结构时不能被误判为读请求。"""
+    assert not looks_like_read_request("/api/oa/duty-leave/submit-process", {
+        "type": 2,
+        "reason": "回家",
+        "startTime": 1783440000000,
+    })
+
+
+def test_json_write_requests_excludes_post_query_by_body_shape():
+    reads_and_submit = [
+        {
+            "method": "POST",
+            "url": "/api/customEndpoint",
+            "post_data": json.dumps({"pageNo": 1, "pageSize": 10, "keyword": "张"}),
+        },
+        {
+            "method": "POST",
+            "url": "/api/submit",
+            "post_data": json.dumps({"reason": "回家"}),
+        },
+    ]
+
+    assert [r["url"] for r in json_write_requests(reads_and_submit)] == ["/api/submit"]
+
+
+def test_multipart_upload_is_explicitly_marked_unsupported():
+    role = classify_capture_request({
+        "method": "POST",
+        "url": "https://oa/api/file/upload",
+        "post_data": None,
+        "content_type": "multipart/form-data; boundary=abc",
+    })
+    assert role["role"] == "unsupported_upload"
+    assert role["keep"] is False
+
+
+def test_parameterize_repeated_values_in_nested_business_list_independently():
+    """同一个录制值出现在多个字段时，必须按字段顺序生成不同参数，不能互相覆盖。"""
+    body = {
+        "ssbmId": "02021060111315890400000101001838",
+        "bmId": "02021060111315890400000101001838",
+        "csmc": "1",
+        "ercsmc": "1",
+        "qzms": "1123123123",
+        "lxr": "1",
+        "lxfs": "13243211234",
+        "ssbmmc": "dept-name",
+        "ywsxList": [{
+            "ywsxmc": "1",
+            "yyxtid": "02025092210431550900000101539125",
+            "ssxts": "",
+            "catalogStatus": "",
+            "yyxtmc": "system-name",
+            "tableHcommentList": [],
+            "ywsxKbList": [],
+        }],
+        "ywsxKbList": [],
+    }
+    samples = {
+        "level1": "1",
+        "level2": "1",
+        "desc": "1123123123",
+        "contact": "1",
+        "phone": "13243211234",
+        "businessItem": "1",
+        "system": "system-name",
+    }
+    out = parameterize_request({
+        "method": "POST",
+        "url": "https://oa/api/save",
+        "post_data": json.dumps(body, ensure_ascii=False),
+        "content_type": "application/json",
+    }, samples)
+
+    assert out["params"] == ["level1", "level2", "desc", "contact", "phone", "businessItem", "system"]
+    templ = out["body_template"]
+    assert templ["csmc"] == "{{level1}}"
+    assert templ["ercsmc"] == "{{level2}}"
+    assert templ["lxr"] == "{{contact}}"
+    assert templ["ywsxList"][0]["ywsxmc"] == "{{businessItem}}"
+    assert templ["ssbmId"] == body["ssbmId"]
+    assert templ["ywsxList"][0]["yyxtid"] == body["ywsxList"][0]["yyxtid"]
+
+
+def test_suggest_selects_binds_nested_name_id_pair_for_business_system():
+    """嵌套数组里的显示名/ID 配对：用户选系统名称，运行期必须同步写入对应系统 ID。"""
+    post = json.dumps({
+        "ywsxList": [{
+            "ywsxmc": "123123qweqw",
+            "yyxtid": "02026031815271171200000101539137",
+            "yyxtmc": "交通信息系统01",
+            "tableHcommentList": [],
+            "ywsxKbList": [],
+        }],
+    }, ensure_ascii=False)
+    reads = [{
+        "url": "/appgateway/dcensus/v1.0/qzqdsl/getXxxtListByBm",
+        "json": {
+            "data": [
+                {"yyxtid": "02026031815271171200000101539137", "yyxtmc": "交通信息系统01"},
+                {"yyxtid": "02026031815271171200000101539138", "yyxtmc": "交通信息系统02"},
+            ],
+        },
+    }]
+
+    selects = suggest_selects(post, reads, {"所属系统": "交通信息系统01"})
+
+    assert len(selects) == 1
+    sel = selects[0]
+    assert sel["path"] == "ywsxList[0].yyxtmc"
+    assert sel["value_key"] == "yyxtid"
+    assert sel["label_key"] == "yyxtmc"
+    assert sel["id_path"] == "ywsxList[0].yyxtid"
+    assert sel["options"] == ["交通信息系统01", "交通信息系统02"]
+
+
+def test_list_selects_does_not_collapse_editable_detail_rows():
+    """可新增行明细表含用户填写字段时不能折叠成多选，否则会冻结行内业务文本。"""
+    from dano.execution.page.request_capture import suggest_list_selects
+
+    post = json.dumps({
+        "ywsxList": [{
+            "ywsxmc": "123123qweqw",
+            "yyxtid": "02026031815271171200000101539137",
+            "yyxtmc": "交通信息系统01",
+            "tableHcommentList": [],
+            "ywsxKbList": [],
+        }],
+    }, ensure_ascii=False)
+    reads = [{
+        "url": "/appgateway/dcensus/v1.0/qzqdsl/getXxxtListByBm",
+        "json": {
+            "data": [
+                {"yyxtid": "02026031815271171200000101539137", "yyxtmc": "交通信息系统01"},
+                {"yyxtid": "02026031815271171200000101539138", "yyxtmc": "交通信息系统02"},
+            ],
+        },
+    }]
+
+    assert suggest_list_selects(post, reads, {"职能清单": "123123qweqw", "所属系统": "交通信息系统01"}) == []
 
 
 def test_list_read_requests_surfaces_select_candidates():
@@ -204,6 +360,21 @@ async def test_fetch_field_options_live(monkeypatch):
     # 非选择型字段 → 空 + 说明
     out2 = await rc.fetch_field_options(apir, "原因")
     assert out2["options"] == [] and "note" in out2
+
+
+async def test_fetch_field_options_returns_static_enum_snapshot():
+    from dano.execution.page import request_capture as rc
+    apir = {"selects": [{"param": "请假类型", "source_url": "",
+                         "options": ["事假", "病假", "年假"], "enum_source": "dom"}]}
+
+    out = await rc.fetch_field_options(apir, "请假类型")
+
+    assert out["count"] == 3
+    assert out["options"] == [
+        {"label": "事假", "value": "事假"},
+        {"label": "病假", "value": "病假"},
+        {"label": "年假", "value": "年假"},
+    ]
 
 
 def test_suggest_selects_prefers_confirmed_over_huge_generic_dict():
@@ -424,7 +595,7 @@ async def test_resolve_list_selects_expands_names_to_objects(monkeypatch):
 
 
 def test_manifest_static_dom_enum_inlines_small_options():
-    """**静态页面枚举**(DOM 抓的固定下拉,dom_options=True)且 ≤50 → manifest 内置 enum(约束 agent 只能选真实值)。"""
+    """**静态页面枚举**(enum_source=dom)且 ≤50 → manifest 内置 enum(约束 agent 只能选真实值)。"""
     from dano.catalog.manifest import to_manifest
     from dano.orchestrator.types import SkillSpec
     from dano.shared.enums import RiskLevel, Subsystem
@@ -433,7 +604,7 @@ def test_manifest_static_dom_enum_inlines_small_options():
                    api_request={"selects": [{"param": "请假类型", "source_url": "/d",
                                              "value_key": "dictValue", "label_key": "dictLabel",
                                              "options": ["事假", "病假", "年假"], "count": 3,
-                                             "dom_options": True}]})       # ← DOM 抓的固定下拉=静态枚举
+                                             "enum_source": "dom"}]})
     p = to_manifest(sk).parameters["properties"]["请假类型"]
     assert p["enum"] == ["事假", "病假", "年假"] and p["x-options"] == ["事假", "病假", "年假"]
 
@@ -454,39 +625,140 @@ def test_manifest_live_directory_enum_no_inline_enum():
     assert p["x-options-source"] is True and "--list-options" in p["description"]
 
 
-def test_apply_dom_options_overrides_garbage_dict():
+def test_apply_page_enum_options_overrides_garbage_dict():
     """根因(治"加班类型绑到 222 项含工作日/档案/银行…全量字典"):录制时下拉里真实可见的 3 个选项(DOM 抓的)
     覆盖网络匹配出的 222 项快照 —— 地面真值,胜过拿提交值去字典里猜命中。并撤掉按类目收窄。"""
     selects = [{"path": "type", "label": "周末加班", "value": "2", "source_url": "/dict",
                 "value_key": "dictValue", "label_key": "dictLabel",
                 "options": [f"x{i}" for i in range(222)], "count": 222,
                 "category_key": "dictType", "category_value": "misc"}]
-    apply_dom_options(selects, {"周末加班": ["工作日加班", "周末加班", "节假日加班"]})
+    apply_page_enum_options(selects, {"周末加班": ["工作日加班", "周末加班", "节假日加班"]})
     s = selects[0]
     assert s["options"] == ["工作日加班", "周末加班", "节假日加班"] and s["count"] == 3
-    assert s["dom_options"] is True and "category_key" not in s     # DOM 即权威,不再按类目收窄
+    assert s["enum_source"] == "dom" and "category_key" not in s     # DOM 即权威,不再按类目收窄
     assert s["source_url"] == "/dict"                               # 来源保留(运行期名→ID 仍用它)
 
 
-def test_dom_enum_selects_creates_sourceless_enum():
+def test_apply_page_enum_options_matches_submitted_code_and_keeps_option_map():
+    selects = [{"path": "type", "label": "", "value": "", "source_url": "",
+                "value_key": "", "label_key": "", "options": [], "count": 0}]
+    apply_page_enum_options(
+        selects,
+        {"2": [{"label": "事假", "value": 2}, {"label": "病假", "value": 3}]},
+        post_data='{"type":2}',
+        fields=[{"path": "type", "key": "type", "suggest_name": "类型", "value": "2"}],
+    )
+
+    assert selects[0]["options"] == ["事假", "病假"]
+    assert selects[0]["option_map"] == {"事假": 2, "病假": 3}
+    assert selects[0]["enum_source"] == "dom"
+
+
+def test_page_enum_selects_creates_sourceless_enum():
     """页面只有 3 个选项、提交体存的就是显示名、又没绑上任何网络源 → 造**无来源** enum(agent 传名字即原样提交)。"""
     sub = '{"overtimeType":"周末加班","reason":"x"}'
-    out = dom_enum_selects(sub, {"周末加班": ["工作日加班", "周末加班", "节假日加班"]}, set())
+    out = page_enum_selects(sub, {"周末加班": ["工作日加班", "周末加班", "节假日加班"]}, set())
     assert len(out) == 1
     s = out[0]
     assert s["path"] == "overtimeType" and s["options"] == ["工作日加班", "周末加班", "节假日加班"]
-    assert s["source_url"] == "" and s["dom_options"] is True
-    assert dom_enum_selects(sub, {"周末加班": ["a", "b"]}, {"overtimeType"}) == []   # 已被别的 select 接管 → 不重复造
+    assert s["source_url"] == "" and s["enum_source"] == "dom"
+    assert page_enum_selects(sub, {"周末加班": ["a", "b"]}, {"overtimeType"}) == []   # 已被别的 select 接管 → 不重复造
 
 
-def test_build_api_request_carries_dom_options():
+def test_page_enum_selects_matches_field_label_when_body_stores_code():
+    out = page_enum_selects(
+        '{"type":2,"reason":"x"}',
+        {"类型": [{"label": "事假", "value": 2}, {"label": "病假", "value": 3}]},
+        set(),
+        fields=[{"path": "type", "key": "type", "suggest_name": "类型", "value": "2"}],
+    )
+
+    assert len(out) == 1
+    assert out[0]["path"] == "type"
+    assert out[0]["value"] == "2"
+    assert out[0]["options"] == ["事假", "病假"]
+    assert out[0]["option_map"] == {"事假": 2, "病假": 3}
+
+
+def test_build_api_request_carries_page_enum_options():
     """发布构建:DOM 覆盖后的 3 项选项随 select 进资产(导出/manifest 就只见 3 项,不是 222)。"""
     selects = [{"path": "type", "label": "周末加班", "value": "2", "source_url": "/dict",
                 "value_key": "dictValue", "label_key": "dictLabel",
-                "options": ["工作日加班", "周末加班", "节假日加班"], "count": 3, "dom_options": True}]
+                "options": ["工作日加班", "周末加班", "节假日加班"],
+                "option_map": {"工作日加班": 1, "周末加班": 2, "节假日加班": 3},
+                "count": 3, "enum_source": "dom", "enum_confirmed": True}]
     apir = build_api_request({"url": "http://x/ot", "post_data": '{"type":"2"}'}, {"type": "加班类型"}, selects=selects)
     sm = next(s for s in apir["selects"] if s["param"] == "加班类型")
     assert sm["options"] == ["工作日加班", "周末加班", "节假日加班"] and apir["field_types"]["加班类型"] == "enum"
+    assert sm["option_map"] == {"工作日加班": 1, "周末加班": 2, "节假日加班": 3}
+    assert sm["enum_source"] == "dom"
+
+
+async def test_resolve_static_enum_uses_option_map_without_source_url():
+    api_request = {
+        "selects": [{
+            "param": "类型",
+            "source_url": "",
+            "options": ["事假", "病假"],
+            "option_map": {"事假": 2, "病假": 3},
+            "enum_source": "dom",
+        }]
+    }
+
+    fields, overrides = await _resolve_selects(
+        api_request,
+        {"类型": "事假"},
+        base_url="",
+        storage_state=None,
+        token_key=None,
+        verify=True,
+    )
+
+    assert fields["类型"] == 2
+    assert overrides == {}
+
+
+async def test_fetch_field_options_prefers_dom_enum_snapshot_over_source_url():
+    api_request = {
+        "selects": [{
+            "param": "类型",
+            "source_url": "/dict/all",
+            "value_key": "value",
+            "label_key": "label",
+            "options": ["事假", "病假"],
+            "option_map": {"事假": 2, "病假": 3},
+            "enum_source": "dom",
+        }]
+    }
+
+    res = await fetch_field_options(api_request, "类型")
+
+    assert res["options"] == [{"label": "事假", "value": 2}, {"label": "病假", "value": 3}]
+    assert "页面真实下拉快照" in res["note"]
+
+
+async def test_resolve_static_multi_enum_uses_option_map():
+    api_request = {
+        "selects": [{
+            "param": "标签",
+            "multi": True,
+            "source_url": "",
+            "options": ["紧急", "重要"],
+            "option_map": {"紧急": "A", "重要": "B"},
+            "enum_source": "dom",
+        }]
+    }
+
+    out = await _resolve_list_selects(
+        api_request,
+        {"标签": ["紧急", "重要"]},
+        base_url="",
+        storage_state=None,
+        token_key=None,
+        verify=True,
+    )
+
+    assert out["标签"] == ["A", "B"]
 
 
 def test_manifest_list_enum_live_directory_no_inline_enum():
@@ -507,7 +779,7 @@ def test_manifest_list_enum_live_directory_no_inline_enum():
 
 
 def test_manifest_list_enum_static_dom_inlines():
-    """列表多选但来自**固定下拉**(dom_options=True,如固定标签多选)→ 静态枚举 → items.enum 内置(≤50)。"""
+    """列表多选但来自**固定下拉**(enum_source=dom,如固定标签多选)→ 静态枚举 → items.enum 内置(≤50)。"""
     from dano.catalog.manifest import to_manifest
     from dano.orchestrator.types import SkillSpec
     from dano.shared.enums import RiskLevel, Subsystem
@@ -516,13 +788,13 @@ def test_manifest_list_enum_static_dom_inlines():
                    api_request={"selects": [{"param": "标签", "multi": True, "source_url": "",
                                              "value_key": "v", "label_key": "l",
                                              "options": ["紧急", "重要", "常规"], "count": 3,
-                                             "dom_options": True}]})
+                                             "enum_source": "dom"}]})
     p = to_manifest(sk).parameters["properties"]["标签"]
     assert p["items"]["enum"] == ["紧急", "重要", "常规"] and p["x-options"] == ["紧急", "重要", "常规"]
 
 
 def test_manifest_large_static_dom_enum_no_inline_but_snapshot():
-    """**静态**页面枚举 >50(dom_options=True 的大固定下拉)→ 不内置 enum(过大),但仍快照进 x-options。"""
+    """**静态**页面枚举 >50(enum_source=dom 的大固定下拉)→ 不内置 enum(过大),但仍快照进 x-options。"""
     from dano.catalog.manifest import to_manifest
     from dano.orchestrator.types import SkillSpec
     from dano.shared.enums import RiskLevel, Subsystem
@@ -531,7 +803,7 @@ def test_manifest_large_static_dom_enum_no_inline_but_snapshot():
                    field_types={"应用系统名称": "enum"}, required_fields=["应用系统名称"],
                    api_request={"selects": [{"param": "应用系统名称", "source_url": "/x",
                                              "value_key": "id", "label_key": "xtmc",
-                                             "options": opts, "count": 135, "dom_options": True}]})
+                                             "options": opts, "count": 135, "enum_source": "dom"}]})
     p = to_manifest(sk).parameters["properties"]["应用系统名称"]
     assert "enum" not in p and len(p["x-options"]) == 135      # 不内置 enum,但快照全在
     assert p.get("x-options-source") is True                   # 有来源接口 → 可 --list-options 实时拉
@@ -548,7 +820,7 @@ def test_export_options_md_lists_candidates():
                    field_types={"请假类型": "enum"}, required_fields=["请假类型"], title="请假",
                    api_request={"selects": [{"param": "请假类型", "source_url": "/d",
                                              "value_key": "dictValue", "label_key": "dictLabel",
-                                             "options": ["事假", "病假"], "count": 2, "dom_options": True}]})
+                                             "options": ["事假", "病假"], "count": 2, "enum_source": "dom"}]})
     md = _options_md(to_manifest(sk))
     assert md and "事假" in md and "病假" in md and "请假类型" in md
 
@@ -653,6 +925,65 @@ async def test_resolve_selects_single_code_field_unchanged():
         fields, overrides = await rc._resolve_selects(apir, {"审批人": "张经理"}, base_url="",
                                                       storage_state=None, token_key=None, verify=False)
     assert fields["审批人"] == 12 and overrides == {}   # 字段值换成 id;无配对 id 覆盖
+
+
+async def test_resolve_selects_static_enum_does_not_fetch(monkeypatch):
+    """静态枚举无 source_url:运行期按用户选择的显示值原样提交,不能请求空地址。"""
+    from dano.execution.page import request_capture as rc
+
+    async def fail_fetch(*args, **kwargs):
+        raise AssertionError("static enum should not call source api")
+
+    monkeypatch.setattr(rc, "_fetch_list", fail_fetch)
+    apir = {"selects": [{"param": "请假类型", "source_url": "",
+                         "options": ["事假", "病假"], "enum_source": "dom"}]}
+    fields, overrides = await rc._resolve_selects(apir, {"请假类型": "病假"}, base_url="",
+                                                  storage_state=None, token_key=None, verify=False)
+
+    assert fields == {"请假类型": "病假"}
+    assert overrides == {}
+
+
+async def test_resolve_list_selects_static_string_enum_keeps_names(monkeypatch):
+    """静态字符串多选无 source_url/模板:运行期保持名字列表,不能误构造成空对象数组。"""
+    from dano.execution.page import request_capture as rc
+
+    async def fail_fetch(*args, **kwargs):
+        raise AssertionError("static list enum should not call source api")
+
+    monkeypatch.setattr(rc, "_fetch_list", fail_fetch)
+    apir = {"selects": [{"param": "标签", "multi": True, "source_url": "",
+                         "options": ["紧急", "重要"], "enum_source": "dom"}]}
+    fields = await rc._resolve_list_selects(apir, {"标签": ["紧急", "重要"]}, base_url="",
+                                            storage_state=None, token_key=None, verify=False)
+
+    assert fields == {"标签": ["紧急", "重要"]}
+
+
+async def test_resolve_list_selects_static_template_enum_without_fetch(monkeypatch):
+    """静态对象多选无 source_url:按模板生成对象,不请求空接口。"""
+    from dano.execution.page import request_capture as rc
+
+    async def fail_fetch(*args, **kwargs):
+        raise AssertionError("static template enum should not call source api")
+
+    monkeypatch.setattr(rc, "_fetch_list", fail_fetch)
+    apir = {"selects": [{
+        "param": "参会人",
+        "multi": True,
+        "source_url": "",
+        "element_template": {"userName": {"item_key": "name"}, "participantType": {"const": "normal"}},
+        "label_subkey": "userName",
+        "options": ["张三", "李四"],
+        "enum_source": "dom",
+    }]}
+    fields = await rc._resolve_list_selects(apir, {"参会人": ["张三", "李四"]}, base_url="",
+                                            storage_state=None, token_key=None, verify=False)
+
+    assert fields == {"参会人": [
+        {"userName": "张三", "participantType": "normal"},
+        {"userName": "李四", "participantType": "normal"},
+    ]}
 
 
 def test_date_keys_handles_seconds_and_slash_formats():
