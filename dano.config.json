@@ -9,15 +9,15 @@
   "quickActions": [
     {
       "label": "请假",
-      "prompt": "我想申请请假。每次向我提问都必须原生调用 ask_user_question，禁止在普通文本或 <question> 标签中模拟工具调用。请尽量把多个相关问题合并到一次 ask_user_question 的 questions 数组里，并为每个问题设置合理 default 默认值。请引导我补充请假类型、开始和结束时间、请假原因，整理申请后再用单独一次 ask_user_question 的 question + confirm: true 让我最终确认；确认调用不要带 options、multiple 或 questions。"
+      "prompt": "请假"
     },
     {
       "label": "报销",
-      "prompt": "我想申请费用报销。每次向我提问都必须原生调用 ask_user_question，禁止在普通文本或 <question> 标签中模拟工具调用。请尽量把多个相关问题合并到一次 ask_user_question 的 questions 数组里，并为每个问题设置合理 default 默认值。请引导我补充费用类型、发生时间、金额和事由，整理申请后再用单独一次 ask_user_question 的 question + confirm: true 让我最终确认；确认调用不要带 options、multiple 或 questions。"
+      "prompt": "报销"
     },
     {
       "label": "出差申请",
-      "prompt": "我想提交出差申请。每次向我提问都必须原生调用 ask_user_question，禁止在普通文本或 <question> 标签中模拟工具调用。请尽量把多个相关问题合并到一次 ask_user_question 的 questions 数组里，并为每个问题设置合理 default 默认值。请引导我补充出差时间、目的地、出差事由和行程安排，整理申请后再用单独一次 ask_user_question 的 question + confirm: true 让我最终确认；确认调用不要带 options、multiple 或 questions。"
+      "prompt": "出差申请"
     }
   ]
 }

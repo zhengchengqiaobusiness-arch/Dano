@@ -56,6 +56,7 @@ describe("ask_user_question tool", () => {
       "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
       "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
       "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
+      "Give every non-confirmation question a context-based recommended default. Do not use placeholder defaults.",
       "Set required:true only when an answer is mandatory. required defaults to false.",
       "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
       "Dano returns the user's date answer as submitted; convert it yourself if a downstream interface needs another business format.",
@@ -749,6 +750,33 @@ describe("ask_user_question tool", () => {
     });
   });
 
+  it("folds compatible top-level fields into a single grouped question", async () => {
+    const execution = askUserQuestionTool.execute(
+      "compat-single-mixed",
+      {
+        question: "请假类型？",
+        options: ["事假", "病假"],
+        default: "事假",
+        required: true,
+        questions: [{ id: "leave_type" }],
+      } as never,
+      undefined,
+      undefined,
+      {} as never,
+    );
+
+    askUserQuestionCoordinator.answer("compat-single-mixed", {
+      cancelled: false,
+      answer: { leave_type: "病假" },
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: {
+        status: "answered",
+        answer: { leave_type: "病假" },
+      },
+    });
+  });
+
   it("rejects a retry question without cancelling the pending form", async () => {
     const first = executeQuestion("separate-1", {
       question: "Leave type?",
@@ -792,6 +820,7 @@ describe("ask_user_question tool", () => {
           ...mixed,
           questions: [
             { id: "leave_type", question: "Leave type?", default: "事假" },
+            { id: "reason", question: "Reason?", default: "个人事务" },
           ],
         } as never,
         undefined,

@@ -1,6 +1,6 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import { parseAskUserQuestionDateValue, validateAskUserQuestionDateFormat } from "@dano/types/ask-user-question-date";
 import { Type } from "typebox";
+import { parseAskUserQuestionDateValue, validateAskUserQuestionDateFormat } from "../../types/ask-user-question-date.js";
 import {
   ASK_USER_QUESTION_TOOL_NAME,
   type AskUserQuestionAnswer,
@@ -368,6 +368,7 @@ function normalizeCompatibleRequest(
   const rawQuestions = request.questions;
   if (rawQuestions !== undefined) {
     normalized.questions = normalizeCompatibleQuestions(rawQuestions);
+    return foldCompatibleGroupedFields(normalized);
   }
   return normalized;
 }
@@ -430,6 +431,31 @@ function normalizeCompatibleQuestion(
   if (isAnswerInput(defaultValue)) normalized.default = defaultValue;
 
   return normalized;
+}
+
+function foldCompatibleGroupedFields(
+  request: NormalizedAskUserQuestionRequest,
+): NormalizedAskUserQuestionRequest {
+  const questions = request.questions ?? [];
+  if (questions.length !== 1 || request.confirm) return request;
+
+  const [question] = questions;
+  return {
+    questions: [
+      {
+        ...request,
+        ...question,
+        question: question.question ?? request.question,
+        options: question.options ?? request.options,
+        inputType: question.inputType ?? request.inputType,
+        dateFormat: question.dateFormat ?? request.dateFormat,
+        dataSource: question.dataSource ?? request.dataSource,
+        multiple: question.multiple ?? request.multiple,
+        required: question.required ?? request.required,
+        default: question.default ?? request.default,
+      },
+    ],
+  };
 }
 
 function parseJsonString(value: unknown): unknown {
@@ -797,7 +823,7 @@ export const askUserQuestionTool = defineTool({
   label: "Ask User Question",
   description: `Ask the user for structured input during execution.
 
-When the user asks to fill in a form, complete a form, or provide form fields, use ask_user_question to collect the fields instead of asking in assistant text. Defaults are optional initial values; required:true controls whether the user may submit an empty answer.
+When the user asks to fill in a form, complete a form, or provide form fields, use ask_user_question to collect the fields instead of asking in assistant text. Every non-confirmation question must include a context-based recommended default so the user can usually submit directly. required:true controls whether the user may submit an empty answer.
 
 Use exactly one ask_user_question call per assistant response. If you need more than one answer, use only the questions array: {"questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假","required":true},{"id":"start_at","question":"开始时间？","inputType":"date","dateFormat":"yyyy-MM-dd HH:mm","required":true},{"id":"reason","question":"原因？","default":"个人事务","required":true}]}. Do not include top-level question, options, inputType, dateFormat, required, dataSource, multiple, default, or confirm when questions is present.
 
@@ -811,6 +837,7 @@ For a single question, use top-level question/options/inputType/dateFormat/requi
     "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
     "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
     "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
+    "Give every non-confirmation question a context-based recommended default. Do not use placeholder defaults.",
     "Set required:true only when an answer is mandatory. required defaults to false.",
     "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
     "Dano returns the user's date answer as submitted; convert it yourself if a downstream interface needs another business format.",
