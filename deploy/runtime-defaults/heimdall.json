@@ -2,6 +2,10 @@
   "sandbox": {
     "enabled": true,
     "userNamespace": false,
+    "paths": {
+      ".pi": { "mode": "deny" },
+      "~/.pi": { "mode": "deny" }
+    },
     "env": {
       "allow": [
         "PATH",

@@ -45,12 +45,13 @@ describe("Dano main", () => {
         enabled?: boolean;
         userNamespace?: boolean;
         env?: { allow?: string[]; deny?: string[] };
+        paths?: Record<string, { mode?: string }>;
       };
       commandPolicies?: Array<{ blocked?: string[] }>;
     };
 
     expect(appPackage.dependencies?.["@josephyoung/pi-heimdall"]).toBe(
-      "0.2.14",
+      "0.2.15",
     );
     expect(appPackage.dependencies?.["@earendil-works/pi-coding-agent"]).toBe(
       "0.80.2",
@@ -63,6 +64,8 @@ describe("Dano main", () => {
     });
     expect(heimdall.sandbox?.enabled).toBe(true);
     expect(heimdall.sandbox?.userNamespace).toBe(false);
+    expect(heimdall.sandbox?.paths?.[".pi"]).toEqual({ mode: "deny" });
+    expect(heimdall.sandbox?.paths?.["~/.pi"]).toEqual({ mode: "deny" });
     expect(heimdall.sandbox?.env?.allow).toEqual(
       expect.arrayContaining(["DANO_URL", "DANO_TENANT_KEY"]),
     );
@@ -74,6 +77,10 @@ describe("Dano main", () => {
     expect(sandboxGuard).toContain("HEIMDALL_BWRAP_BIND_ROOT");
     expect(sandboxGuard).toContain("function bwrapBindRoot()");
     expect(sandboxGuard).toContain("writeMounts.push(bindRoot");
+    expect(sandboxGuard).toContain("function protectedConfigBashBlockReason");
+    expect(sandboxGuard).toContain("protectHeimdallConfigPaths");
+    expect(sandboxGuard).toContain("Blocked: bash cannot run because Heimdall Protected Configuration cannot be hidden without an active sandbox");
+    expect(sandboxGuard).toContain("Blocked: ${event.toolName} attempted to ${operation} Heimdall Protected Configuration.");
     expect(sandboxGuard).toContain('args.push("--dev-bind", "/dev", "/dev");');
     expect(sandboxGuard).toContain('args.push("--ro-bind", "/proc", "/proc");');
     expect(heimdall.commandPolicies).toContainEqual(
