@@ -19,6 +19,7 @@
   import CommandPalette from "./CommandPalette.svelte";
   import FilePreviewDialog from "./FilePreviewDialog.svelte";
   import WorkspaceMentionPalette from "./WorkspaceMentionPalette.svelte";
+  import { shouldComposerBeMultiline } from "./composerLayout";
   import { createComposerBarState } from "./composerBarState.svelte";
 
   const COMPOSER_LAYOUT_ANIMATION_MS = 180;
@@ -287,51 +288,29 @@
       (Number.isFinite(lineHeight) ? lineHeight : el.clientHeight) +
       paddingTop +
       paddingBottom;
-    let measuredScrollHeight = el.scrollHeight;
-
-    if (isComposerMultiline && composerDockRef && !el.value.includes("\n")) {
-      const dockStyle = getComputedStyle(composerDockRef);
-      const leftActions = composerDockRef.querySelector<HTMLElement>(
-        ".composer-actions-left",
-      );
-      const rightActions = composerDockRef.querySelector<HTMLElement>(
-        ".composer-actions-right",
-      );
-      const gap =
-        Number.parseFloat(
-          dockStyle.getPropertyValue("--composer-single-line-gap"),
-        ) || 0;
-      const singleLineWidth =
-        composerDockRef.clientWidth -
-        (Number.parseFloat(dockStyle.paddingLeft) || 0) -
-        (Number.parseFloat(dockStyle.paddingRight) || 0) -
-        (leftActions?.offsetWidth ?? 0) -
-        (rightActions?.offsetWidth ?? 0) -
-        gap * 2;
-      const measurement = el.cloneNode() as HTMLTextAreaElement;
-
-      measurement.value = el.value;
-      measurement.style.position = "fixed";
-      measurement.style.inset = "0 auto auto -9999px";
-      measurement.style.visibility = "hidden";
-      measurement.style.width = `${Math.max(0, singleLineWidth)}px`;
-      measurement.style.height = "auto";
-      measurement.style.font = computedStyle.font;
-      measurement.style.lineHeight = computedStyle.lineHeight;
-      document.body.append(measurement);
-      measuredScrollHeight = measurement.scrollHeight;
-      measurement.remove();
-    }
-
-    const nextIsMultiline =
-      el.value.includes("\n") ||
-      measuredScrollHeight > Math.ceil(singleLineHeight * 1.5);
+    const hasText = el.value.length > 0;
+    const hasExplicitNewline = el.value.includes("\n");
+    const wrapsAtCurrentWidth =
+      el.scrollHeight > Math.ceil(singleLineHeight * 1.5);
+    const nextIsMultiline = shouldComposerBeMultiline({
+      hasText,
+      wasMultiline,
+      hasExplicitNewline,
+      wrapsAtCurrentWidth,
+    });
+    const switchedToMultilineBySoftWrap =
+      !wasMultiline &&
+      nextIsMultiline &&
+      !hasExplicitNewline &&
+      wrapsAtCurrentWidth;
     isComposerMultiline = nextIsMultiline;
 
     if (nextIsMultiline !== wasMultiline) {
       if (!nextIsMultiline) {
         el.style.height = `${Math.ceil(singleLineHeight)}px`;
         el.style.overflowY = "hidden";
+      } else if (switchedToMultilineBySoftWrap) {
+        void tick().then(() => composer.resizeTextarea(textareaRef));
       }
       animateComposerLayout(layoutBefore);
     }
@@ -949,7 +928,7 @@
   }
 
   .composer-dock.multiline .prompt-input {
-    min-height: calc(var(--composer-input-line-height) * 2);
+    min-height: var(--composer-input-line-height);
     padding: 0;
   }
 
