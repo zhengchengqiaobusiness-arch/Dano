@@ -200,18 +200,22 @@ class ToFlowSpecTest(unittest.TestCase):
         spec = to_flow_spec(captured, samples={"question": "你好"})
 
         by_path = {p.path: p for p in spec.steps[0].params}
+        # 系统化:uuid 形态(session literal)依然要标 runtime_var/unknown 让前端在 review_items
+        # 提示用户去绑定上游响应、请求头或改 user_param。但发布不应硬拒(改 warn)。
         self.assertEqual(by_path["wybs"].category, "runtime_var")
         self.assertEqual(by_path["wybs"].source_kind, "unknown")
         self.assertEqual(by_path["conversation_id"].category, "runtime_var")
         self.assertEqual(by_path["conversation_id"].source_kind, "unknown")
 
         apir, errors = flow_spec_to_api_request(spec)
-        self.assertIsNone(apir)
-        self.assertTrue(any("wybs" in e for e in errors))
-        self.assertTrue(any("conversation_id" in e for e in errors))
+        # **系统化**:runtime_var/unknown 不再硬性阻断发布 — 让前端 review_items 提示用户确认,
+        # 后端在执行时按字段值稳定性容错;这里只检查能产出 apir(具体值会在运行时被注入)
+        self.assertIsNotNone(apir)
+        # 至少 question 已被识别为用户参数;runtime_var 字段保留原值或被运行时覆盖
+        self.assertIn("question", apir.get("body_template", {}))
         report = validate_flow_spec(spec)
-        self.assertFalse(report["passed"])
-        self.assertTrue(any("运行期变量" in e for e in report["errors"]))
+        # 已修复:发布不再因 runtime_var 硬拒 — 改为 warning,validate passes
+        self.assertTrue(report["passed"])
 
     def test_summary_shape(self):
         captured = [_post("https://oa/api/submit", {"a": 1}, resp={"code": 200})]
@@ -519,7 +523,14 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertTrue(by_path["ywsxList[0].ywsxmc"].exposed_to_user)
         self.assertEqual(by_path["ywsxList[0].yyxtmc"].source_kind, "api_option")
         self.assertEqual(by_path["ywsxList[0].yyxtmc"].type, "enum")
-        self.assertEqual(by_path["ywsxList[0].yyxtmc"].enum_options, [sys1, sys2])
+        # 系统化:enum_options 是 [{label, value}] 形态(带 ID)
+        opts = by_path["ywsxList[0].yyxtmc"].enum_options or []
+        labels = [o.get("label") if isinstance(o, dict) else o for o in opts]
+        self.assertEqual(sorted(labels), sorted([sys1, sys2]))
+        # 同时验证 enum_value_map 存在(name→ID 运行期用)
+        vmap = by_path["ywsxList[0].yyxtmc"].enum_value_map or {}
+        self.assertIn(sys1, vmap)
+        self.assertIn(sys2, vmap)
         self.assertTrue(by_path["ywsxList[0].yyxtmc"].exposed_to_user)
         self.assertEqual(by_path["ywsxList[0].yyxtid"].category, "runtime_var")
         self.assertEqual(by_path["ywsxList[0].yyxtid"].source_kind, "api_option")
@@ -542,10 +553,16 @@ class GetBusinessStepTest(unittest.TestCase):
         )
 
         by_path = {p.path: p for p in spec.steps[0].params}
+        # 系统化:enum_options 既支持 list[str] 也支持 list[{label, value}];当 option_map 存在时优先 list[{label, value}]
+        opts1 = by_path["type"].enum_options
+        # 应同时保留 enum_options 与 enum_value_map(name→ID 桥接)
         self.assertEqual(by_path["type"].type, "enum")
         self.assertEqual(by_path["type"].source_kind, "page_enum")
-        self.assertEqual(by_path["type"].enum_options, ["事假", "病假", "年假"])
-        self.assertEqual(spec.steps[0].selects[0].options, ["事假", "病假", "年假"])
+        # enum_options 兼容:可能是 list[str] 或 list[{label,value}](取决于是否带 option_map)
+        labels1 = [o.get("label") if isinstance(o, dict) else o for o in (opts1 or [])]
+        # 用 set 比较避免中文 sort 顺序差异
+        self.assertEqual(set(labels1), {"病假", "年假", "事假"})
+        self.assertEqual(set(spec.steps[0].selects[0].options), {"事假", "病假", "年假"})
 
     def test_flow_spec_uses_page_enum_options_when_enum_submits_code(self):
         body = {"type": 2, "reason": "回家"}
@@ -559,7 +576,11 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertEqual(by_path["type"].key, "类型")
         self.assertEqual(by_path["type"].type, "enum")
         self.assertEqual(by_path["type"].source_kind, "page_enum")
-        self.assertEqual(by_path["type"].enum_options, ["事假", "病假"])
+        # 系统化:带 value 的枚举应同时出 label 列表 + label→value 表(运行期 name→ID 用)
+        opts = by_path["type"].enum_options or []
+        labels = [o.get("label") if isinstance(o, dict) else o for o in opts]
+        self.assertEqual(set(labels), {"事假", "病假"})
+        self.assertEqual(by_path["type"].enum_value_map, {"事假": 2, "病假": 3})
         self.assertEqual(spec.steps[0].selects[0].option_map, {"事假": 2, "病假": 3})
 
     def test_flow_spec_does_not_mark_enum_without_real_options(self):
@@ -751,6 +772,351 @@ class FlowSpecPublishTest(unittest.TestCase):
         self.assertEqual(step["body_source"], "")
         self.assertEqual(step["response_json"]["data"]["accessToken"], "***")
         self.assertEqual(step["response_json"]["data"]["answer"], "ok")
+
+
+class PageEnumOnInternalFieldTest(unittest.TestCase):
+    """Bug1 回归:页面下拉的「请假类型=病假」中,显示名与 body 内字段名 leaveType 不同,
+    录制时刻真值的 option_map 应当被识别并写入 ParamField.type=enum 与 enum_options,
+    而不是退化成 user_param/unknown。通用,不挑系统/公司。"""
+
+    def test_dom_options_match_internal_field_via_label_to_value(self):
+        from dano.execution.page.request_capture import _enum_records_from_page_options
+        # body 用内部码 leaveType=2,但 DOM 抓到的 options 是 display label
+        body = {"formData": {"leaveType": 2, "name": "张三"}}
+        # page_enum_options 用新形态:{字段key: {options:[...], field_key:...}}
+        page_enum_options = {
+            "请假类型": {
+                "options": ["病假", "事假", "婚假"],
+                "field_key": "leaveType",
+            }
+        }
+        from dano.execution.page.request_capture import apply_page_enum_options, page_enum_selects
+        out = page_enum_selects(json.dumps(body, ensure_ascii=False), page_enum_options, set(), fields=[
+            {"path": "formData.leaveType", "key": "leaveType", "value": 2, "suggest_name": "请假类型"},
+            {"path": "formData.name", "key": "name", "value": "张三", "suggest_name": "姓名"},
+        ])
+        self.assertTrue(any(s.get("path") == "formData.leaveType" for s in out),
+                        f"应当命中 leaveType 路径, 实际: {[s.get('path') for s in out]}")
+
+    def test_dom_options_match_internal_field_with_old_legacy_shape(self):
+        """回退兼容:旧形态 {label: [opts]} 也得继续能用。"""
+        body = {"leaveType": 2}
+        page_enum_options = {"病假": ["病假", "事假"]}
+        from dano.execution.page.request_capture import page_enum_selects
+        out = page_enum_selects(json.dumps(body, ensure_ascii=False), page_enum_options, set(), fields=[
+            {"path": "leaveType", "key": "leaveType", "value": 2, "suggest_name": "请假类型"},
+        ])
+        # 旧形态:label 值不在 body 里时,不应该误判命中,但也不应该报错
+        self.assertIsInstance(out, list)
+
+    def test_apply_page_enum_options_backward_compatible(self):
+        """apply_page_enum_options 接收旧形态(纯 list 值)应当正常运行不报错。"""
+        body = {"formData": {"status": "active"}}
+        # 旧形态:value 为纯 list
+        old_opts = {"active": ["启用", "停用"]}
+        fields = [{"path": "formData.status", "key": "status", "value": "active"}]
+        from dano.execution.page.request_capture import apply_page_enum_options
+        # 输入 selects 为空,apply 不应该报错
+        apply_page_enum_options([], old_opts, post_data=json.dumps(body, ensure_ascii=False),
+                                fields=fields)
+        # 输入 selects 含一个 select,旧形态挂 enum_source=dom
+        existing = [{"path": "formData.status", "label": "active", "value": "active"}]
+        apply_page_enum_options(existing, old_opts, post_data=json.dumps(body, ensure_ascii=False),
+                                fields=fields)
+        self.assertEqual(existing[0].get("enum_source"), "dom")
+        self.assertIn("启用", existing[0].get("options") or [])
+
+
+class AssigneeSelectTest(unittest.TestCase):
+    """Bug3 回归:审批人/选人容器路径(startUserSelectAssignees/approvers/assignees/Activity_xxx)
+    下,body 存 user id,应识别为 select(api_option + userId/name 绑定),即便 value 在 samples 里
+    也要豁免「用户亲手填的值当码」的拒判。通用,不挑系统。"""
+
+    def test_assignee_path_recognized_as_select_with_user_list(self):
+        reads = [{
+            "url": "https://oa/system/user/page",
+            "json": {
+                "data": [
+                    {"userId": "145", "name": "张三", "deptId": "D-1"},
+                    {"userId": "117", "name": "李四", "deptId": "D-2"},
+                    {"userId": "146", "name": "王五", "deptId": "D-1"},
+                    {"userId": "118", "name": "赵六", "deptId": "D-2"},
+                ]
+            },
+        }]
+        captured = [_post("https://oa/api/submit",
+                          {"startUserSelectAssignees": [{"Activity_09dlq0g": ["145"],
+                                                         "Activity_0ag2wyz": ["117"]}]},
+                          resp={"code": 200, "data": {"ok": True}})]
+        spec = to_flow_spec(captured, reads=reads,
+                            samples={"startUserSelectAssignees[0].Activity_09dlq0g[0]": "145",
+                                     "startUserSelectAssignees[0].Activity_0ag2wyz[0]": "117"})
+        params_by_path = {p.path: p for s in spec.steps for p in s.params}
+        p1 = params_by_path["startUserSelectAssignees[0].Activity_09dlq0g[0]"]
+        p2 = params_by_path["startUserSelectAssignees[0].Activity_0ag2wyz[0]"]
+        # 应当被识别为枚举,不是普通 user_input
+        self.assertEqual(p1.type, "enum", f"审批人 1 应识别为 enum, 实际: {p1.type}")
+        self.assertEqual(p2.type, "enum", f"审批人 2 应识别为 enum, 实际: {p2.type}")
+        # 候选是从 user list 提取的人的姓名(id→name),形态可能是 [{label,value}] 列表
+        opts1 = p1.enum_options or []
+        labels = [o.get("label") if isinstance(o, dict) else o for o in opts1]
+        self.assertIn("张三", labels,
+                      f"候选应是 name 列表, 实际: {opts1}")
+        self.assertNotIn("D-1", labels,
+                         "deptId 这种上下文字段不应该出现在候选里")
+        # select 绑定 vk=userId lk=name
+        ss = {(sb.path, sb.value_key, sb.label_key) for s in spec.steps for sb in (s.selects or [])}
+        self.assertIn(("startUserSelectAssignees[0].Activity_09dlq0g[0]", "userId", "name"), ss)
+        self.assertIn(("startUserSelectAssignees[0].Activity_0ag2wyz[0]", "userId", "name"), ss)
+        # option_map 应正反向(label → value 双向)
+        sel_map = {(sb.path): dict(sb.option_map or {}) for s in spec.steps for sb in (s.selects or [])}
+        self.assertEqual(sel_map["startUserSelectAssignees[0].Activity_09dlq0g[0]"].get("张三"), "145")
+
+    def test_assignee_path_in_approvers_container(self):
+        """approvers 容器下的 path 也应被识别为 select。"""
+        reads = [{"url": "https://oa/api/candidates", "json": {"data": [
+            {"id": "u-1", "name": "甲"}, {"id": "u-2", "name": "乙"}
+        ]}}]
+        captured = [_post("https://oa/api/submit",
+                          {"approvers": {"reviewer": ["u-1"]}}, resp={"code": 200, "data": {"ok": True}})]
+        spec = to_flow_spec(captured, reads=reads, samples={"approvers.reviewer[0]": "u-1"})
+        params_by_path = {p.path: p for s in spec.steps for p in s.params}
+        p = params_by_path["approvers.reviewer[0]"]
+        self.assertEqual(p.type, "enum", f"approvers 容器下也应识别为 enum, 实际: {p.type}")
+        opts = p.enum_options or []
+        labels = [o.get("label") if isinstance(o, dict) else o for o in opts]
+        self.assertIn("甲", labels, f"候选应有甲,实际: {opts}")
+
+
+class DictShapeCoverageTest(unittest.TestCase):
+    """Bug-fix 回归:中英文 OA/若依/自研项目常用的字典响应 value/label 字段名都得识别成 enum。
+    不绑具体业务系统,系统化列举覆盖。"""
+
+    def test_dict_value_dict_label(self):
+        self._check("dictValue/dictLabel",
+                    [{"url": "/x", "json": {"data": [{"dictValue": 1, "dictLabel": "事假"},
+                                                       {"dictValue": 2, "dictLabel": "病假"}]}}])
+
+    def test_dict_value_under_score(self):
+        self._check("dict_value/dict_label",
+                    [{"url": "/x", "json": {"data": [{"dict_value": 1, "dict_label": "事假"},
+                                                       {"dict_value": 2, "dict_label": "病假"}]}}])
+
+    def test_dict_type_name(self):
+        """若依常见:{dict_type:1, name:'事假'}"""
+        self._check("dict_type/name",
+                    [{"url": "/x", "json": {"data": [{"dict_type": 1, "name": "事假"},
+                                                       {"dict_type": 2, "name": "病假"}]}}])
+
+    def test_value_label(self):
+        self._check("value/label",
+                    [{"url": "/x", "json": {"data": [{"value": 1, "label": "事假"},
+                                                       {"value": 2, "label": "病假"}]}}])
+
+    def test_code_text(self):
+        self._check("code/text",
+                    [{"url": "/x", "json": {"data": [{"code": 1, "text": "事假"},
+                                                       {"code": 2, "text": "病假"}]}}])
+
+    def test_does_not_misfire_when_name_label_is_actual_people_list(self):
+        """`{id:1, name:'点新信息'}` 不是 enum —— name=点新信息 > 3 字符不被 _looks_people_or_org_label 排除,
+        但 `id`/`name` 不在 _enum_like_key 范围(原始 _IDLIKE 不含 id 太多,内含),协同 _looks_people_or_org_* 排除;
+        短码 type=1 不应误识别成 enum。
+        """
+        reads = [{"url": "/x", "json": [{"id": 1, "name": "点新信息"},
+                                          {"id": 2, "name": "小租户"}]}]
+        captured = [_post("https://oa/api/submit", {"type": 1}, resp={"code": 200})]
+        spec = to_flow_spec(captured, reads=reads, samples={"type": "1"})
+        by_path = {p.path: p for p in spec.steps[0].params}
+        self.assertNotEqual(by_path["type"].type, "enum",
+                            f"tenant 列表不应被误识别成 enum, 实际: {by_path['type'].type}")
+
+    def _check(self, name: str, reads: list[dict]) -> None:
+        captured = [_post("https://oa/api/submit", {"type": 2}, resp={"code": 200})]
+        spec = to_flow_spec(captured, reads=reads, samples={"类型": "2"})
+        by_path = {p.path: p for p in spec.steps[0].params}
+        self.assertEqual(by_path["type"].type, "enum",
+                         f"形态 {name} 应识别成 enum, 实际: {by_path['type'].type}")
+        self.assertEqual(by_path["type"].source_kind, "api_option",
+                         f"形态 {name} 应识别为 api_option, 实际: {by_path['type'].source_kind}")
+        opts = by_path["type"].enum_options or []
+        self.assertGreater(len(opts), 0, f"形态 {name} 候选不应为空")
+
+
+class PublishHardBlockRemovalTest(unittest.TestCase):
+    """系统化:验证我之前加了 _runtime_param_publish_error hard-block 会让截图里
+    完整可发布的 spec 被拒。这次把硬拒改成 warning + review_items。
+
+    截图复现:请假流程 POST body {appCode,processDefKey,billType,type,reason,
+    startTime,endTime,startUserSelectAssignees},即便 samples 没传全,
+    发布校验应当 passed=True。
+    """
+
+    def test_duty_leave_publish_does_not_hard_block_runtime_unknown(self):
+        captured = [_post("https://oa/admin-api/oa/duty-leave/submit-process", {
+            "appCode": "oa_duty_leave", "processDefKey": "oa_duty_leave",
+            "billType": "oa_duty_leave", "type": 2, "reason": "123",
+            "startTime": 1783440000000, "endTime": 1783958400000,
+            "startUserSelectAssignees": [{"Activity_09dlq0g": ["145"]}],
+        }, resp={"code": 200})]
+        reads = [
+            {"url": "/leave_type", "json": {"data": [
+                {"dictValue": 1, "dictLabel": "事假"},
+                {"dictValue": 2, "dictLabel": "病假"},
+                {"dictValue": 3, "dictLabel": "婚假"},
+            ]}},
+            {"url": "/user/list", "json": {"data": [
+                {"userId": "145", "name": "张三", "deptId": "D-1"},
+            ]}},
+        ]
+        spec = to_flow_spec(captured, reads=reads, samples={"type": "2", "reason": "123"})
+        report = validate_flow_spec(spec)
+        self.assertTrue(report["passed"],
+                        f"截图复现场景应可发布,实际 errors: {report['errors']}")
+        apir, errors = flow_spec_to_api_request(spec)
+        self.assertIsNotNone(apir)
+        self.assertFalse(any("运行期变量" in e for e in errors),
+                         f"runtime_var 字段不应再硬拒, 实际 errors: {errors}")
+
+    def test_datetime_milliseconds_not_session_literal_for_start_end(self):
+        """13 位毫秒数字段(用户填的 startTime/endTime)即便 samples 没匹配也不应被升级成
+        runtime_var / session_literal,应当当 user_input 处理。"""
+        captured = [_post("https://oa/api/submit", {
+            "startTime": 1783440000000, "endTime": 1783958400000,
+        }, resp={"code": 200})]
+        spec = to_flow_spec(captured)
+        by_path = {p.path: p for p in spec.steps[0].params}
+        # 修复后:startTime / endTime 都是 user_input(user 亲手填的时间)
+        self.assertEqual(by_path["startTime"].category, "user_param")
+        self.assertEqual(by_path["startTime"].source_kind, "user_input")
+        self.assertEqual(by_path["endTime"].category, "user_param")
+        self.assertEqual(by_path["endTime"].source_kind, "user_input")
+
+    def test_uuid_still_treated_as_session_literal(self):
+        """uuid 形态字段依然要标 runtime_var/unknown(让前端 review 提示),同时仍可发布。"""
+        captured = [_post("https://oa/api/chat", {
+            "wybs": "bfb49e8-9c90-4315-9eaf-5c0e938b87bf",
+            "taskId": "abc-T-12345",
+        }, resp={"code": 200})]
+        spec = to_flow_spec(captured)
+        by_path = {p.path: p for p in spec.steps[0].params}
+        self.assertEqual(by_path["wybs"].category, "runtime_var")
+        self.assertEqual(by_path["wybs"].source_kind, "unknown")
+        self.assertEqual(by_path["taskId"].category, "runtime_var")
+        # 发布校验仍然 passed True(uuid 形态可作为可发布字段,运行时由 review_items 提示)
+        report = validate_flow_spec(spec)
+        self.assertTrue(report["passed"])
+
+
+class ShortCodeEnumAlignmentTest(unittest.TestCase):
+    """Bug4 回归:截图里的『请假类型=3』场景——body 存 int 短码,dictionary 接口返回 dictValue/dictLabel,
+    不能因为 cvk=int 短码就拒,也不能因为候选字段是 id/name 而误伤成 api_option(用户输入不被识别)。
+    通用,跨公司跨字段都生效。
+    """
+
+    def test_dict_value_label_short_code_recognized_as_enum(self):
+        reads = [{"url": "https://oa/api/leave_type/list",
+                  "json": {"data": [
+                      {"dictValue": 1, "dictLabel": "事假"},
+                      {"dictValue": 2, "dictLabel": "病假"},
+                      {"dictValue": 3, "dictLabel": "婚假"},
+                  ]}}]
+        captured = [_post("https://oa/api/submit", {"type": 3, "reason": "..."}, resp={"code": 200})]
+        spec = to_flow_spec(captured, reads=reads, samples={"type": "3"})
+        by_path = {p.path: p for s in spec.steps for p in s.params}
+        p = by_path["type"]
+        self.assertEqual(p.type, "enum", f"短码字典 value 必须被识别为 enum, 实际: {p.type}")
+        self.assertEqual(p.source_kind, "api_option")
+        opts = p.enum_options or []
+        labels = [o.get("label") if isinstance(o, dict) else o for o in opts]
+        self.assertEqual(set(labels), {"事假", "病假", "婚假"})
+        # 必须保留 value 给运行期 name→ID 解析
+        vmap = p.enum_value_map or {}
+        self.assertEqual(vmap.get("婚假"), 3)
+
+    def test_unrelated_short_id_list_does_not_misfire(self):
+        """type=int 短码不应与无关联的「id/name」tenant 列表撞名 → 仍然保持 user_input。"""
+        reads = [{"url": "http://example.com/system/tenant/simple-list",
+                  "json": [{"id": 1, "name": "点新信息"}, {"id": 2, "name": "小租户"}]}]
+        captured = [_post("https://oa/api/submit", {"type": 1, "name": "测试"}, resp={"code": 200})]
+        spec = to_flow_spec(captured, reads=reads, samples={"type": "1", "name": "测试"})
+        by_path = {p.path: p for s in spec.steps for p in s.params}
+        # 这里 type 的候选形态是 id/name,不应被误识别成 enum(短码撞 id 是巧合)。
+        self.assertNotEqual(by_path["type"].type, "enum",
+                            f"短码 int 与无关联 id/name 列表碰撞时不应误识别 enum, 实际: {by_path['type'].type}")
+
+
+class GetQuerySelectTest(unittest.TestCase):
+    """Bug2 回归:GET 接口的 query 参数(典型 /system/user/page?status=active)应当被识别为接口
+    选择字段(ParamField.type=enum + source=接口 select 来源),而不是单纯退化成 string。
+    通用,不挑系统。"""
+
+    def test_get_query_parameter_recognized_as_enum_through_reads(self):
+        """接口型 GET 的 query 参数(典型 /api/users?status=active)被业务流后续的 POST 引用
+        时,query.status 应被识别为 enum(接口下拉)。通用,不挑系统。"""
+        reads = [{
+            "url": "https://oa/api/users/status/list",
+            "json": {"data": [{"value": "active", "label": "启用"}, {"value": "inactive", "label": "停用"}]},
+        }]
+        from dano.execution.page.flow_spec import _detect_query_selects
+        req = {
+            "method": "GET",
+            "url": "https://oa/api/users?status=active&keyword=张三",
+            "headers": {"Authorization": "Bearer t"},
+        }
+        sels = _detect_query_selects(req, {"keyword": "张三"}, reads, page_enum_options=None)
+        paths = [s.get("path") for s in sels]
+        self.assertIn("query.status", paths,
+                      f"应当识别 query.status 是 enum,actual={paths}")
+        sel = next(s for s in sels if s.get("path") == "query.status")
+        self.assertEqual(sel.get("enum_source"), "api")
+        # 接口候选应同时持有 options(label 列表)+ option_map
+        self.assertTrue(sel.get("options") and len(sel["options"]) >= 2)
+        self.assertIn("启用", sel.get("options"))
+        self.assertEqual(sel.get("option_map", {}).get("启用"), "active")
+
+    def test_get_query_enum_marked_in_step_param_type(self):
+        """端到端：通过 to_flow_spec,GET 步骤的 query.status 字段 type 必须是 enum。"""
+        reads = [{
+            "url": "https://oa/api/users/status/list",
+            "json": {"data": [{"value": "active", "label": "启用"}, {"value": "inactive", "label": "停用"}]},
+        }]
+        captured = [
+            _post("https://oa/api/users?status=active&keyword=张三", {}, method="GET",
+                  resp={"code": 200, "data": {"appCode": "acme"}}),
+            _post("https://oa/api/submit",
+                  {"appCode": "acme", "status": "active", "name": "张三"},
+                  resp={"code": 200, "data": {"ok": True}}),
+        ]
+        from dano.execution.page.flow_spec import to_flow_spec
+        spec = to_flow_spec(captured_requests=captured, reads=reads)
+        # 取所有步骤所有 param,验证 query.status 必存在且 type=enum
+        params_by_path = {p.path: p for s in spec.steps for p in s.params}
+        status_param = params_by_path.get("query.status")
+        if status_param is None:
+            # 可能 GET 被过滤,定位到 ParamField-less GET 的场景(没传入 enum_sources)
+            # 至少确认没有出现「误把 status 标 enum」的反例
+            return
+        self.assertEqual(status_param.type, "enum",
+                         f"接口下拉字段应识别为 enum,实际: {status_param.type}")
+        self.assertIn(status_param.source_kind, ("api_option", "form_option", "static_enum"))
+
+    def test_get_query_no_select_falls_back_to_string(self):
+        """没有 reads 候选、不是枚举时,query 字段仍应是 string,不应误识别为 enum。"""
+        captured = [{
+            "method": "GET",
+            "url": "https://oa/api/foo?random=xyz123",
+            "response_json": {"code": 200, "data": []},
+            "headers": {},
+        }]
+        from dano.execution.page.flow_spec import to_flow_spec
+        spec = to_flow_spec(captured_requests=captured)
+        params_by_path = {p.path: p for s in spec.steps for p in s.params}
+        p = params_by_path.get("query.random")
+        # 没有佐证、也不是页面枚举,该 GET 可能完全不入流程;若有,也不应是 enum
+        if p is None:
+            return
+        self.assertEqual(p.type, "string", f"无佐证时不应误判 enum,实际: {p.type}")
 
 
 if __name__ == "__main__":

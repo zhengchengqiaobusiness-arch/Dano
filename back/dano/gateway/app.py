@@ -686,8 +686,19 @@ async def record_ws(ws: WebSocket) -> None:
                 else:
                     steps, samples = sess.recorded_steps()
                     required_labels = sess.recorded_required_labels()
-                    page_options_by_field = sess.recorded_page_enum_options()  # {字段key: [选项]} → 按选中显示值重键
-                    page_enum_options = {samples[k]: v for k, v in page_options_by_field.items() if k in samples and v}
+                    page_options_by_field = sess.recorded_page_enum_options()  # {字段key: [选项]}
+                    # 枚举地面真值:既按「选中显示值」也对到「字段 key」,使 page_enum_selects 在 body leaf
+                    # 不出现 label 但出现内部英文名时也能命中(治"请假类型=病假 → body.leaveType=2"漏识别)。
+                    page_enum_options = {}
+                    for field_key, opts in (page_options_by_field or {}).items():
+                        if not opts:
+                            continue
+                        label = str(samples.get(field_key, "") or "").strip()
+                        entry = {"options": list(opts), "field_key": field_key}
+                        if label and label not in page_enum_options:
+                            page_enum_options[label] = entry
+                        if field_key and field_key not in page_enum_options:
+                            page_enum_options[field_key] = entry
                 sub = init.get("subsystem", "A-报销")
                 login_state = await sess.storage_state()   # 录制会话(已真人登录)的登录态快照
 

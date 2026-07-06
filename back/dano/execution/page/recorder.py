@@ -126,24 +126,52 @@ _RECORDER_JS = r"""() => {
     try { window.__danoRecord(JSON.stringify({ op: op, locator: loc, value: value || '', field: field || '', required: !!required, options: options || [] })); } catch (e) {}
   }
   // 下拉/级联弹层里**当前可见的选项文字**(地面真值枚举):工作日加班/周末加班/节假日加班 …
-  // —— 直接读 DOM,胜过拿提交值去网络字典里猜命中(治"加班类型/请假类型绑到几百项全量字典")。框架无关。
+  // —— 直接读 DOM,胜过拿提交值去网络字典里猜命中(治"加班类型/请假类型绑到几百项全量字典")。
+  // **通用 ARIA + 框架兜底**,不绑任何特定公司/项目:
+  //   ① 隐/显 role=option / menuitem / menuitemradio / menuitemcheckbox / treeitem
+  //   ② W3C aria-activedescendant / aria-selected 标识选中
+  //   ③ 主流框架特定 class 兜底(向后兼容);找不到时再用 li/span 兜底
+  // 框架无关,跨 Vant/Bootstrap/MUI/自研 div 也能命中。
   function popupOptions(pop) {
     if (!pop) return [];
     try {
-      var sel = '[role="option"],.el-select-dropdown__item,.ant-select-item-option,.el-cascader-node,' +
-                '.ant-cascader-menu-item,.el-autocomplete-suggestion li,li';
-      var nodes = pop.querySelectorAll(sel); var out = [], seen = {};
-      for (var i = 0; i < nodes.length; i++) {
-        var n = nodes[i];
-        if (n.offsetParent === null && (function () { try { return getComputedStyle(n).position !== 'fixed'; } catch (_) { return true; } })()) continue;  // 不可见(折叠的级联子层/隐藏)跳过;但 Ant Design v5 position:fixed 选项不漏(它脱离 normal flow)
-        var t = clean(n.innerText || n.textContent || '');
-        if (t && t.length <= 60 && !seen[t]) { seen[t] = 1; out.push(t); }
-        if (out.length >= 500) break;
+      var aria_sel = '[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="treeitem"]';
+      var frame_sel = '.el-select-dropdown__item,.ant-select-item-option,.ant-cascader-menu-item,' +
+                      '.el-cascader-node,.el-autocomplete-suggestion li,' +
+                      '.van-picker-column__item,.van-action-sheet__item,.van-dropdown-item,' +
+                      '.mat-mdc-option,.mat-mdc-menu-item,.cdk-overlay-pane [role="option"],' +
+                      '.bp5-menu-item,.bp5-popover-content li,' +
+                      '.v-list-item--active,.v-list-item,' +
+                      '.q-item,.q-menu .q-item';
+      var fallback_sel = 'li:not(:empty),span[role="option"],button[role="option"]';
+      // 三段优先级合并去重
+      var seen_labels = {};
+      var out = [];
+      function harvest(nodes) {
+        for (var i = 0; i < nodes.length; i++) {
+          var n = nodes[i];
+          // 隐藏/不可见 + 不是 fixed 定位的跳过(但 fixed-position 不漏,比如 Ant v5 弹层定位是 fixed)
+          try {
+            var cs = getComputedStyle(n);
+            if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+            if (cs.position !== 'fixed' && n.offsetParent === null) continue;
+          } catch (_) {}
+          var t = clean(n.innerText || n.textContent || '');
+          // 跳过空 / 纯标签符号(过滤 placeholder 灰文字 / *必填)
+          if (!t || t.length > 60 || /^\s*[\*\-•]\s*$/.test(t)) continue;
+          if (!seen_labels[t]) { seen_labels[t] = 1; out.push(t); }
+          if (out.length >= 500) break;
+        }
       }
-      return out;
+      harvest(pop.querySelectorAll(aria_sel));
+      if (out.length === 0) harvest(pop.querySelectorAll(frame_sel));
+      if (out.length === 0) harvest(pop.querySelectorAll(fallback_sel));
+      // 干掉弹层里的"搜索框 placeholder"、"清空"等按钮文本(只 trim,不暴力过滤):
+      return out.map(function (t) { return t.replace(/^[　\s]+|[　\s]+$/g, ''); })
+                .filter(function (t) { return t && t !== '清空' && t !== '清除' && t !== '搜索'; });
     } catch (e) { return []; }
   }
-  // 原生 <select> 的全部 <option> 文字(去掉占位空项)
+  // 原生 <select> 的全部 <option> 文字(去掉占位空项),返回 [{label, value}] 让标签与提交值都可追溯
   function nativeOptions(el) {
     try {
       var out = [];
@@ -186,11 +214,28 @@ _RECORDER_JS = r"""() => {
   }, true);
   // 选择型控件参数化(框架无关):日期/下拉/级联是"点"出来的,不该录成写死的点击,而该录成一个
   // pick 参数步(触发框 + 选中的最终值)。识别弹层 + 触发框,选完读触发框 input 的最终值。
-  var POPUP = '.el-picker-panel,.el-select-dropdown,.el-cascader__dropdown,.el-time-panel,.el-time-spinner,' +
-              '.el-date-table,.el-month-table,.el-year-table,.el-autocomplete-suggestion,' +
-              '.ant-picker-dropdown,.ant-select-dropdown,.ant-cascader-dropdown,[role="listbox"]';
-  var TRIGGER_CLS = '.el-date-editor,.el-select,.el-cascader,.el-time-select,.el-time-picker,' +
-                    '.ant-picker,.ant-select,.ant-cascader-picker';
+  // **ARIA 优先 + 框架兜底**:任何带 [role="listbox|menu|tree|grid"] 的容器(隐式或显式)都视为弹层。
+  var POPUP = '[role="listbox"],[role="menu"],[role="tree"],' +
+              '[aria-modal="true"],.el-picker-panel,.el-select-dropdown,.el-cascader__dropdown,' +
+              '.el-time-panel,.el-time-spinner,.el-date-table,.el-month-table,.el-year-table,' +
+              '.el-autocomplete-suggestion,.el-tooltip__popper,' +
+              '.ant-picker-dropdown,.ant-select-dropdown,.ant-cascader-dropdown,.ant-dropdown-menu,' +
+              '.van-popup,.van-action-sheet,.van-picker,.van-dropdown-item__wrapper,' +
+              '.mat-mdc-select-panel,.mat-mdc-menu-panel,.cdk-overlay-pane,' +
+              '.bp5-popover,.bp5-menu,.bp5-select-popover,.bp5-popover-content,' +
+              '.v-overlay-container,.v-list-internal,.v-overlay__content,' +
+              '.q-menu,.q-dialog__inner,.q-select__menu,.q-tooltip';
+  // 触发框:W3C aria-haspopup / readonly 优先 + Element/Ant/Vant 框架特定 class 兜底
+  // 触发框 = 用户点击会弹出选项面板的那个元素
+  var TRIGGER_CLS = '[aria-haspopup],[aria-expanded][aria-controls],[aria-autocomplete],' +
+                    'input[readonly][type="text"],input[readonly][type="search"],select,' +
+                    '.el-date-editor,.el-select,.el-cascader,.el-time-select,.el-time-picker,' +
+                    '.ant-picker,.ant-select,.ant-cascader-picker,' +
+                    '.van-field,.van-picker__wrapper,.van-dropdown-menu__item,.van-action-sheet-header,' +
+                    '.mat-mdc-select-trigger,.mat-select-trigger,' +
+                    '.bp5-html-select,.bp5-popover-target,.bp5-select,' +
+                    '.v-field,.v-input,' +
+                    '.q-field,.q-select,.q-input';
   var activeTrigger = null, prevVal = '', pickTimer = null, lastPickOptions = [];
   function triggerOf(t) {                               // 触发型字段:已知选择器类 / 含 readonly input / aria-haspopup
     var k = t.closest ? t.closest(TRIGGER_CLS + ',[aria-haspopup]') : null; if (k) return k;

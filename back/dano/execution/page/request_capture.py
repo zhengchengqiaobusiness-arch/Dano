@@ -346,8 +346,13 @@ def _raw_type(raw) -> str:
 # 显示名(给人看的)字段提示;**登录名(username/account)排最后** —— 选人下拉里用户认的是"张三"而非"zhangsan",
 # 用对显示名字段,name→ID 桥接与运行期解析才对得上。通用,不挑系统。
 _DISPLAY_HINTS = ("nickname", "realname", "fullname", "truename", "cnname", "displayname",
-                  "name", "label", "title", "caption", "text", "dept")
+                  "name", "label", "title", "caption", "text")
 _LOGIN_HINTS = ("username", "loginname", "account", "loginid", "useraccount")
+# dept/org/company 是"上下文"id-like 字段,不当显示名;它们结尾也是 "Id"/"id",
+# 容易在 _pick_label_key 里被错当 label
+_CONTEXT_ID_HINTS = ("deptid", "orgid", "companyid", "unitid", "tenantid", "teamid",
+                      "positionid", "roleid", "groupid", "postid", "deptname",
+                      "orgname", "companyname", "unitname")
 
 
 def _pick_label_key(item: dict, value_key: str) -> str:
@@ -359,6 +364,8 @@ def _pick_label_key(item: dict, value_key: str) -> str:
 
     def rank(k: str) -> int:
         kl = k.lower()
+        if any(h in kl for h in _CONTEXT_ID_HINTS):
+            return 3                                     # 部门/组织/租户等"上下文 id-like"字段不当 label(选人下拉里它们是噪音)
         if any(h in kl for h in _LOGIN_HINTS) and "nick" not in kl:
             return 2                                     # 登录名最后(username/account)
         if any(h in kl for h in _DISPLAY_HINTS):
@@ -368,7 +375,7 @@ def _pick_label_key(item: dict, value_key: str) -> str:
     return min(text, key=lambda k: (rank(k), -len(item[k])))
 
 
-_IDLIKE = _re.compile(r"(id|code|key|value|no|num|guid|uuid|oid|sn)$", _re.I)
+_IDLIKE = _re.compile(r"(id|code|key|value|no|num|guid|uuid|oid|sn|kind|status|state|level)$", _re.I)
 
 
 def _is_idlike(key: str) -> bool:
@@ -503,11 +510,13 @@ def _aggregate_category(items: list[dict], value_key: str, label_key: str) -> st
     return best[1] if best else None
 
 
-def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool):
+def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool, *,
+                  path_is_assignee: bool = False):
     """判提交值 sv 对应候选列表里哪种选项 → (mode, value_key, label_key, label, confirmed, item) 或 None。
     mode='name':字段存的是**显示名**(配对 id 字段另存,如 yyxtmc=名 / yyxtid=id);
     mode='code':字段存的是**码/ID**(单字段,如 type=2 / approverId=12,agent 传名运行期换码)。通用,不挑系统。
-    返回里带命中的**列表项 item**:聚合字典需读它的分类键(dictType…)把全量收窄成该字段的真实选项。"""
+    返回里带命中的**列表项 item**:聚合字典需读它的分类键(dictType…)把全量收窄成该字段的真实选项。
+    path_is_assignee: 路径在审批人/选人容器下时,豁免「亲手填的值当码」的拒判。"""
     name_cand = code_cand = None
     for it in items:
         id_vk = next((k for k, v in it.items() if _is_scalar(v) and _is_idlike(k)), None)
@@ -537,13 +546,107 @@ def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool):
     mode, _vk, _lk, _label, conf, _it = best
     if conf:                                             # 录制选项佐证 → 强证据,直接采纳
         return best
-    if not (len(sv) >= 2 or small):                      # 未确认 + 过短 + 大列表 → 巧合,拒
+    # 系统化:小列表 + 候选是「枚举形态」(value_key/labels 形如 dictValue/dictLabel/value/label/code 而不是 id/name/person) +
+    # value 恰好等于某候选的 cvk 值 → 视为可信命中,即使 unconfirmed(治「请假类型=1」短码撞状态字典而被「短串」拒)。
+    # 关键防误伤:必须 value_key 是 **enum 形**(dictValue/value/code),不是 `id`/`name` 等通用字段名。
+    # 系统化:小列表 + 候选**看起来是枚举形态**(value_key 是值态、label_key 是短文字标签)**且**
+    # candidate 列表整体形态像 person/org/tenant —— 才排除。
+    #   用以治「请假类型=1」短码撞状态字典而被「短串」规则误拒。
+    # 关键防误伤:候选**同时**满足 ① label_key 是「name/realname/deptname」类人员字段名
+    #                       ② label 值是「张三/研发中心」类具体人/部门词
+    #            才认为它**不是**枚举列表,而是 user/dept/org 列表;
+    # 仅满足其一不排除(否则会把字典里的「name」label 误伤)。
+    is_small_aligned = bool(small) and _vk and _lk \
+                       and _enum_like_key(_vk) and _enum_like_key(_lk) \
+                       and not (_looks_people_or_org_key(_lk) and _looks_people_or_org_label(_label)) \
+                       and any(str(it.get(_vk)) == sv for it in items if isinstance(it, dict))
+    if not (len(sv) >= 2 or small) and not is_small_aligned:
         return None
-    if mode == "code" and sv in sample_vals:             # 用户亲手填的值当码 → 自由文本,拒(治"1"撞状态字典)
+    if mode == "code" and sv in sample_vals and not path_is_assignee and not is_small_aligned:
+        # 用户亲手填的值当码 → 自由文本,拒(治"1"撞状态字典)
+        # 审批人/选人容器下豁免;小列表对齐(短码真在枚举里)也豁免
         return None
     if mode == "name" and not small:                     # 未确认的名选只在小列表认(大列表巧合多)
         return None
     return best
+
+
+# 系统化:value/label 字段名形如「枚举」(dictValue/dictLabel/value/code/dict_type/dict_type_id)。
+# 关键:**不**包含通用 `id`、`name`——这两太常见,在非枚举列表(用户/部门)里也出现,
+# 容易错认成 enum。不包 `code` 也容易撞通用字段名但**保留**(字典 status/code 是常见枚举)。
+# 字段形态用「判定字段名」做数据形态过滤,不绑具体业务。
+_ENUM_LIKE_VALUE_KEYS = ("value", "valuecode", "dictvalue", "dict_value",
+                        "dicttype", "dict_type",
+                        "type", "types", "kind", "category", "status",
+                        "state", "level", "code", "id",
+                        "no", "num", "number")
+# 系统化:`name` 也常作 enum label(若依/OA 系统常见 `name`/`labelName`/`text`/`title` 当 label),
+# 配合 `_looks_people_or_org_key`/`_looks_people_or_org_label` 兜底排除人/部门列表。
+_ENUM_LIKE_LABEL_KEYS = ("label", "labelname", "dictlabel", "dict_label",
+                         "text", "title", "caption", "typename",
+                         "name", "displayname", "showname", "description")
+
+
+def _enum_like_key(k: str) -> bool:
+    """候选里 value 或 label 字段名是否形如「枚举」(dictValue/dictLabel/value/code)—
+    不绑具体业务;通用字典响应里前端的约定俗成。
+    刻意**不**包含 `id`/`name`/`userId`/`deptId`——它们太常见,在无关 user/org/tenant 列表里也出现,
+    易把无关 user/dept 列表误当 enum 命中(系统化不误伤的保证)。
+    """
+    if not k:
+        return False
+    kl = k.lower()
+    if any(h in kl for h in _ENUM_LIKE_VALUE_KEYS):
+        return True
+    if any(h in kl for h in _ENUM_LIKE_LABEL_KEYS):
+        return True
+    return False
+
+
+# 系统化:人员/部门/组织/职位 字段名 —— 当作人员/实体列表,不当 enum。
+# 通用:对中英文 OA 通用,只要字段名命中这些形态词就不当 enum label。
+_PEOPLE_ORG_LABEL_KEYS = ("name", "username", "realname", "fullname", "nickname",
+                          "deptname", "orgname", "unitname", "companyname",
+                          "tenantname", "teamname", "rolename", "position",
+                          "title_label", "displayname", "showname")
+
+
+def _looks_people_or_org_key(k: str) -> bool:
+    """候选 label 字段名是否像「人/组织/职位」——不当 enum label 形态(避免 user/dept 列表误命中)。"""
+    if not k:
+        return False
+    kl = k.lower().replace("_", "")
+    return any(h.replace("_", "") in kl for h in _PEOPLE_ORG_LABEL_KEYS)
+
+
+def _looks_people_or_org_label(label: str) -> bool:
+    """label 值看着像「人/部门/组织/职位」——不当 enum label 形态(避免 user/dept/org 列表误命中)。
+    启发式:
+    - 含「状态/类型/性别/等级/审批/意见/启用/停用」等枚举语义词 → 不是人/组织
+    - 长度 3+ 且无数字 + 不是状态/类型语义 → 多半是描述(人名/部门/组织)3-8 字
+    通用,不绑具体业务系统,纯形态判定。
+    """
+    if not label:
+        return False
+    s = str(label).strip()
+    if not s:
+        return False
+    if len(s) > 30:
+        return False  # 长文本一定不是 enum label
+    if s[0].isdigit() or s.replace(" ", "").replace("-", "").replace("_", "").isdigit():
+        return False
+    # 含枚举语义词 — 直接不当 enum
+    enum_words = ("状态", "类型", "类别", "等级", "性别", "方式", "审批",
+                    "意见", "结果", "级别", "方向", "模式", "办法", "原因",
+                    "enabled", "disabled", "active", "inactive", "pending",
+                    "approved", "rejected", "open", "closed", "yes", "no")
+    s_norm = s.lower().replace(" ", "")
+    if any(w in s_norm for w in enum_words):
+        return False
+    # 长度 ≥ 3 且无数字特征 → 多半是描述性词(人名/部门/组织)
+    if len(s) >= 3 and not any(c in s for c in "0123456789"):
+        return True
+    return False
 
 
 def _sample_values_for_leaf(path: str, sv: str, samples: dict | None, field: dict | None = None) -> set[str]:
@@ -597,7 +700,8 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
                 continue
             sample_vals = (_sample_values_for_leaf(path, sv, samples, field_by_path.get(path))
                            if use_field_scope else all_sample_vals)
-            m = _match_select(sv, items, sample_vals, small)
+            m = _match_select(sv, items, sample_vals, small,
+                              path_is_assignee=_is_assignee_path(path))
             if m is None:
                 continue
             mode, vk, lk, label, confirmed, item = m
@@ -636,15 +740,20 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
                     if sib:
                         entry["id_path"], entry["id_tokens"] = sib[0], sib[1]
             hits.append(entry)
-        # 同源内防护(沿用):短值数字巧合去重 + 未确认命中 >3 = 通用字典误命中(整源只留确认的)。确认命中永远保留。
+        # 同源内防护(沿用):短值数字巧合去重 + 未确认命中 >3 = 通用字典误命中(整源只留确认的)。
+        # **审批人/选人容器下的未确认命中不计入**:body 存 user id,佐证清晰,不该被通用字典误命中规则误杀。
+        # 确认命中永远保留。
         vcount: dict[str, int] = {}
         for h in hits:
-            if not h["_confirmed"]:
-                vcount[h["value"]] = vcount.get(h["value"], 0) + 1
+            if h["_confirmed"] or _is_assignee_path(h["path"]):
+                continue
+            vcount[h["value"]] = vcount.get(h["value"], 0) + 1
         hits = [h for h in hits
-                if h["_confirmed"] or not (len(h["value"]) <= 2 and vcount.get(h["value"], 0) >= 2)]
-        if len([h for h in hits if not h["_confirmed"]]) > 3:
-            hits = [h for h in hits if h["_confirmed"]]
+                if h["_confirmed"]
+                   or _is_assignee_path(h["path"])
+                   or not (len(h["value"]) <= 2 and vcount.get(h["value"], 0) >= 2)]
+        if len([h for h in hits if not h["_confirmed"] and not _is_assignee_path(h["path"])]) > 3:
+            hits = [h for h in hits if h["_confirmed"] or _is_assignee_path(h["path"])]
         for h in hits:
             by_path.setdefault(h["path"], []).append(h)
     # **跨源择优(根治"请假类型绑到 1431 项通用大字典"):每条 leaf 在所有源里选最佳 ——
@@ -771,6 +880,21 @@ def suggest_list_selects(post_data: str | None, reads: list[dict] | None,
     return out
 
 
+def _page_enum_option_list(opts) -> list:
+    """统一 page_enum_options 的取值:旧形态(list)与新形态({options, field_key})都返回 options 列表。"""
+    if isinstance(opts, dict):
+        return list(opts.get("options") or [])
+    return list(opts or [])
+
+
+def _page_enum_field_key(opts, picked: str) -> str | None:
+    if isinstance(opts, dict):
+        fk = opts.get("field_key")
+        if fk:
+            return str(fk)
+    return None
+
+
 def _dom_key_matches_field(dom_key: str, field: dict | None) -> bool:
     if not field:
         return False
@@ -788,12 +912,19 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
     """用**录制时下拉里真实可见的选项**覆盖 select 的候选快照 —— 这是枚举地面真值,
     胜过拿提交值去网络字典里猜命中(治"加班类型/请假类型绑到几百项含工作日/档案/银行…的全量字典")。
 
-    page_enum_options:{选中显示值: [选项文字]}。按"选中显示值 ⟺ 某 select 的 label/value(精确或子串)"把 DOM 选项
-    挂到该 select:options/count/option_map,标 enum_source=dom,并撤掉按类目收窄。通用,不挑系统。
+    page_enum_options 形态向后兼容:
+      - 旧:{选中显示值: [选项文字]}
+      - 新:{键(显示值/字段 key): {"options": [...], "field_key": 内部字段名}}
+    按「选中显示值 ⟺ select 的 label/value/path/字段 key」把 DOM 选项挂上:options/count/option_map、
+    标 enum_source=dom,并撤掉按类目收窄。通用,不挑系统。
     """
     if not page_enum_options:
         return selects
-    pairs = [(str(k), v) for k, v in page_enum_options.items() if v]
+    pairs = []
+    for k, v in page_enum_options.items():
+        opts = _page_enum_option_list(v)
+        if opts:
+            pairs.append((str(k), opts, _page_enum_field_key(v, str(k))))
     body = _parse_body(post_data) if post_data is not None else None
     value_by_path = {p: sv for p, _t, sv, _raw in _leaf_paths(body)} if body is not None else {}
     field_by_path = {str(f.get("path") or ""): f for f in (fields or []) if f.get("path")}
@@ -802,11 +933,14 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
         path = str(s.get("path") or "")
         body_val = value_by_path.get(path, "")
         field = field_by_path.get(path)
-        opts = next((ov for kv, ov in pairs
+        leaf_key = str(path).split(".")[-1].split("[")[0]
+        opts = next((ov for kv, ov, fk in pairs
                      if _name_match(kv, lbl)
                      or _name_match(kv, val)
                      or _name_match(kv, body_val)
                      or _name_match(kv, path)
+                     or _name_match(kv, leaf_key)
+                     or (fk and _name_match(fk, leaf_key))
                      or _dom_key_matches_field(kv, field)), None)
         if opts:
             _attach_enum_binding(
@@ -825,7 +959,7 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
                      fields: list[dict] | None = None) -> list[dict]:
     """录到了下拉选项、但提交体里这个字段**没绑上任何来源 select**(纯枚举:body 存的就是显示名)→
     造一个**无来源**枚举 select(options + option_map),agent 传名字时按真实提交值回填。治"页面明明只有 3 个选项,
-    却因为匹配不到网络字典而被当普通文本"。通用,不挑系统。page_enum_options:{选中显示值: [选项文字]}。"""
+    却因为匹配不到网络字典而被当普通文本"。通用,不挑系统。page_enum_options 兼容新旧两种形态。"""
     body = _parse_body(post_data)
     if body is None or not page_enum_options:
         return []
@@ -833,18 +967,25 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
     out: list[dict] = []
     field_by_path = {str(f.get("path") or ""): f for f in (fields or []) if f.get("path")}
     leaves = _leaf_paths(body)
-    for picked, opts in page_enum_options.items():
+    for picked, opts_raw in page_enum_options.items():
+        opts = _page_enum_option_list(opts_raw)
+        fk = _page_enum_field_key(opts_raw, str(picked))
         if not opts:
             continue
-        toks = _find_value_tokens(body, picked)          # body 里值==选中显示名的叶子(纯名枚举)
+        # 1)精确匹配:body leaf 值等于显示值(label)
+        toks = _find_value_tokens(body, picked)
         if toks is not None:
             path = _tokens_to_str(toks)
         else:
+            # 2)field_key/path 子串/leaf key 反查:治"请假类型=病假,但 body 字段是 leaveType=2 的内部码"
             hit = next((
                 (path, toks)
                 for path, toks, _sv, _raw in leaves
-                if _dom_key_matches_field(str(picked), field_by_path.get(path))
+                if (fk and _name_match(fk, path))
+                   or (fk and _name_match(fk, str(path).split(".")[-1].split("[")[0]))
+                   or _dom_key_matches_field(str(picked), field_by_path.get(path))
                    or _name_match(str(picked), path)
+                   or _name_match(str(picked), str(path).split(".")[-1].split("[")[0])
             ), None)
             if hit is None:
                 continue
@@ -853,7 +994,7 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
             continue
         current = next((sv for p, _t, sv, _raw in leaves if p == path), "")
         entry = {"path": path, "tokens": toks, "source_url": "", "value_key": "", "label_key": "",
-                 "label": picked, "value": current, "count": len(opts)}
+                 "label": picked, "value": current, "count": len(opts), "field_key": fk or ""}
         _attach_enum_binding(
             entry,
             _enum_records_from_page_options(opts),
@@ -915,8 +1056,22 @@ def suggest_select_names(selects: list[dict], samples: dict | None) -> dict:
 #   提交体里审批人挂在 startUserSelectAssignees / approvers / candidate… 下,叶子键是节点 ID(Activity_xxx)。
 _ASSIGNEE_CONTAINER_RE = _re.compile(
     r"(start_?user_?select_?assignees|assignees?|approvers?|candidate(?:users?|groups?)?)", _re.I)
+
+
+def _is_assignee_path(path: str) -> bool:
+    """路径看起来是审批人选人字段(路径在 startUserSelectAssignees/approvers/assignees/Activity_xxx 等容器下)。
+    通用,不挑系统。"""
+    if not path:
+        return False
+    if _ASSIGNEE_CONTAINER_RE.search(path):
+        return True
+    leaf_key = path.split(".")[-1].split("[")[0]
+    return bool(_BPMN_NODE_RE.match(leaf_key)) if leaf_key else False
+
+
 _BPMN_NODE_RE = _re.compile(r"^(activity|usertask|task|node|flow|gateway|sequenceflow|sid)[_-]", _re.I)
-# 流程定义读响应里"节点 ID"字段 / "节点名"字段的概念词(通用):
+
+
 # H24 修复:收紧 "^id$" —— 之前全字匹配,会让普通 list 字段(下拉/选人列表的 id 列)值若凑巧是 Activity_xxx 被当 BPMN 节点名建索引,污染 node_names
 _NODE_ID_RE = _re.compile(r"(^node_?id$|^task_?id$|^act_?id$|^activity_?id$|^sid$|^element_?id$)", _re.I)
 _NODE_NAME_RE = _re.compile(r"(node_?name|task_?name|activity_?name|^name$|label|title|caption)", _re.I)

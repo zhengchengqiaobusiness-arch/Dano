@@ -59,7 +59,9 @@ interface FlowParam {
   path: string; key: string; label?: string; value: string; type: string; required: boolean; name_source?: string;
   category?: string; source_kind?: string; source?: any; reason?: string;
   exposed_to_user?: boolean; need_human_confirm?: boolean; editable?: boolean; confidence?: number;
-  enum_options?: string[] | null;
+  // 系统化:enum_options 兼容 list[string] 与 list[{label, value}];label→value 表由后端 enum_value_map 提供
+  enum_options?: Array<string | { label: string; value: any }> | null;
+  enum_value_map?: Record<string, any> | null;
 }
 interface FlowSelectBinding {
   param?: string; path?: string; source_url?: string; value_key?: string; label_key?: string;
@@ -1256,7 +1258,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       source_url: "",
       value_key: "",
       label_key: "",
-      options: p.enum_options || [],
+      options: (p.enum_options || []).map(normalizeEnumOption),
       count: p.enum_options?.length || 0,
       ...existing,
       ...patch,
@@ -1275,11 +1277,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     }
     send({ type: "flow_update", edits: [...edits, ...extraEdits] });
   }
+  function normalizeEnumOption(x: any): string {
+    if (x == null) return "";
+    if (typeof x === "string") return x;
+    if (typeof x === "object" && typeof x.label === "string") return x.label;
+    return String(x);
+  }
   function enumOptionsForParam(step: FlowStepData, p: FlowParam) {
     if (!OPTION_SOURCE_KINDS.includes(p.source_kind || "")) return [];
     const sel = selectBindingForParam(step, p);
     const raw = p.enum_options?.length ? p.enum_options : sel?.options || [];
-    return Array.from(new Set((raw || []).map((x) => String(x)).filter(Boolean)));
+    return Array.from(new Set((raw || []).map(normalizeEnumOption).filter(Boolean)));
   }
   function enumSourceLabel(sel?: FlowSelectBinding) {
     if (!sel) return "未绑定";

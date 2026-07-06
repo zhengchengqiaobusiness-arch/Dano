@@ -65,7 +65,12 @@ class ParamField(BaseModel):
     confidence_tier: str = "auto"
     name_source: str = "auto"
     description: str | None = None
-    enum_options: list[str] | None = None
+    # **enum_options 形态:list[str] | list[dict{label,value}] | list[tuple[label,value]] 兼容** ——
+    # 同时承载 label 给前端显示, 也承载真实提交值(value)做 name→ID 解析。
+    # 系统化关键改动, 不绑具体业务(字典下拉、原生 <select>、自定义 div 都生效)。
+    enum_options: list[Any] | None = None
+    # 当枚举带 value 时 {label: value}, 运行期 name→ID 用(发布后渲染 + playbook 静态枚举都用同一份)。
+    enum_value_map: dict[str, Any] | None = None
     # Step D: 三类字段分类
     # user_param: 用户参数(每次调用可能变,让 agent 传)
     # system_const: 系统常量(流程定义 ID/表单类型/固定状态码,不能让 agent 改)
@@ -268,16 +273,53 @@ _UUID_LITERAL_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-")
 
 
 def _looks_session_specific_value(value: Any) -> bool:
+    """值像「一次性会话字面值 / 运行期 ID / uuid / 雪花 ID」等不能固化的字面值。
+    关键:不绑定具体业务字段名,只看值本身特征 + 适当弱化兜底:
+    - 13 位纯数字:`*`可能是* 当前毫秒时间戳,也可能是用户填的请假起止时间。只在「key 也是运行期字面」
+      (heuristic 上 `_looks_runtime_field`) 时才当会话值;否则当**用户输入**(user_input)。
+    - uuid / session literal (BB-12345):无论 key 是什么,百分百不能固化。
+    通用,不挑系统。"""
     s = str(value if value is not None else "").strip()
     if not s:
         return False
-    if s.isdigit() and len(s) in (10, 13):
+    if s.isdigit() and len(s) == 13:
+        # 13 位毫秒时间戳—— 常是 startTime/endTime/createTime 类用户填的时间字段;
+        # 仅当 caller 拿具体 key/path 进一步问询时才升级为 session literal。
+        # (caller 选用 _looks_session_literal_after_key_check 进一步收紧)
         return True
+    if s.isdigit() and len(s) == 10:
+        return True  # 10 位秒时间戳 / 一律当会话值
     if _UUID_LITERAL_RE.match(s):
         return True
     if _SESSION_LITERAL_RE.match(s) and re.search(r"\d{4,}", s):
         return True
     return False
+
+
+def _looks_session_literal_after_key_check(value: Any, key: str, path: str) -> bool:
+    """加固:`_looks_session_specific_value` 通过后,再按 key/path 形态判定。
+    用以治「startTime=1783440000000 等用户填时间字段被错当 session_literal」。
+    通用,不绑具体字段名——只看启发式:
+    - 如果 key/path 形态像「具体时间字段」(`start* / end* / create* / begin* / time* / date*` → datetime),就不升级
+    - 如果 key/path 像「运行期 ID」(`*id` / `*token` / `*code`),才升级
+    - 否则保守不升级,让 caller 用 user_input / system_const 兜底
+    """
+    if not _looks_session_specific_value(value):
+        return False
+    s = str(value).strip()
+    is_digit13 = s.isdigit() and len(s) == 13
+    if not is_digit13:
+        return True  # 10 位秒/uuid/session literal 仍按 session_literal 处理
+    norm = _norm_field_name(key, path)
+    # 用户填的具体时间字段名——不当 session_literal
+    if any(x in norm for x in ("start", "end", "begin", "expire", "deadline",
+                                  "createdate", "applydate", "leavedate", "begindate",
+                                  "starttime", "endtime", "startdate", "enddate")):
+        return False
+    # datetime 字段名 → 当 datetime,不当 session literal
+    if any(x in norm for x in ("time", "date", "day")) and not any(x in norm for x in ("id", "key", "code", "token")):
+        return False
+    return True
 
 
 def _looks_token_field(key: str, path: str) -> bool:
@@ -505,7 +547,25 @@ def _param_source_guess(
             "need_human_confirm": True,
         }
 
-    if _looks_session_specific_value(value) and value not in _sample_value_set(samples):
+    # 系统化:datetime 字段(用户填的具体时间)即使值是 13 位毫秒,也不当 session_literal。
+    # 同时若字段名像「具体时间字段」(start* / end* 等),放行 user_input。
+    if _looks_session_literal_after_key_check(value, key, path) and value not in _sample_value_set(samples):
+        # 系统化:datetime/具体时间字段 → 当 user_input,不是 session_literal;
+        # 只有真正像 ID/uuid 的「session 字面」才升级 runtime_var。
+        # caller 已经用 _looks_session_literal_after_key_check 二次把关,
+        # 这里如果过了那关且字段名是时间类的,转 user_input。
+        if any(x in _norm_field_name(key, path) for x in ("start", "end", "begin", "createdate",
+                                                              "applydate", "leavedate", "begindate",
+                                                              "starttime", "endtime", "startdate", "enddate")):
+            return {
+                "category": "user_param",
+                "source_kind": "user_input",
+                "source": {"kind": "sample", "path": path},
+                "editable": True,
+                "exposed_to_user": True,
+                "reason": "字段名像具体时间字段（startTime/endTime 等），录到的 13 位毫秒是用户亲手填的时间，调用 Skill 时由用户填写",
+                "need_human_confirm": False,
+            }
         return {
             "category": "runtime_var",
             "source_kind": "unknown",
@@ -549,6 +609,40 @@ def _param_source_guess(
     }
 
 
+def _enum_options_for_param(sb) -> list | None:
+    """把 SelectBinding 序列化成前端 + 运行期都好读的 enum_options:
+    - 若有 option_map(label→value)→ 返回 [{label, value}] 字典列表(前端 DataList/Playbook 都能用)
+    - 若只有 label → 返回 labels 字符串列表(向后兼容,前端显示用)
+    - 没有枚举 → None
+    通用,不绑具体业务。
+    """
+    if sb is None:
+        return None
+    om = sb.option_map if isinstance(sb.option_map, dict) else None
+    opts = list(sb.options or [])
+    if om:
+        out = []
+        for o in opts:
+            if isinstance(o, str) and o in om:
+                out.append({"label": o, "value": om[o]})
+            elif isinstance(o, str):
+                out.append({"label": o, "value": o})
+        return out or None
+    if opts:
+        return list(opts)
+    return None
+
+
+def _enum_value_map_for_param(sb) -> dict | None:
+    """label → value 映射;前端隐藏 prompt + 运行期 API 用同一份。"""
+    if sb is None:
+        return None
+    om = sb.option_map if isinstance(sb.option_map, dict) else None
+    if om:
+        return dict(om)
+    return None
+
+
 def _build_step_from_capture(
     req: dict,
     *,
@@ -571,12 +665,14 @@ def _build_step_from_capture(
     def has_real_enum_source(sb: SelectBinding) -> bool:
         return bool(sb.options) or bool(sb.source_url and sb.value_key and sb.label_key)
 
-    # GET 请求：从 URL query string 提参
+    # GET 请求：从 URL query string 提参,同时对 query 也跑 select 检测
+    # (治"参数来源接口没识别":接口型 query 参数如 keyword=xxx / status=xxx 应该被识别为接口选择字段)
     if method == "GET" or body is None:
         list_paths: list[str] = []
-        selects_raw: list[dict] = []
         iden_raw: list[dict] = []
         flat_fields = _params_from_get_query(req)
+        # select/选人:在 query 参数名上做下拉检测,与 POST body 同套算法
+        selects_raw = _detect_query_selects(req, samples, reads or [], page_enum_options)
     else:
         # 列表多选先识别
         list_selects = suggest_list_selects(pd, reads or [], samples)
@@ -700,7 +796,9 @@ def _build_step_from_capture(
             confidence=float(f.get("confidence") or 0.0),
             confidence_tier=f.get("confidence_tier") or "auto",
             name_source=ns,
-            enum_options=list(select_meta.options or []) if select_meta and select_meta.options else None,
+            # **系统化**:同时投递 label 列表 + label→value 反查表,确保前端能渲染 + 运行期能做 name→ID 解析。
+            enum_options=_enum_options_for_param(select_meta),
+            enum_value_map=_enum_value_map_for_param(select_meta),
             category=source_guess["category"],
             source_kind=source_guess["source_kind"],
             source=source_guess["source"],
@@ -783,6 +881,153 @@ def _params_from_get_query(req: dict) -> list[dict]:
             "confidence_tier": "auto",
             "name_source": "auto",
         })
+    return out
+
+
+# 一个 query 路径(如 query.status)上的下拉值若在 reads 候选列表里有命中,就被识别为 select
+def _detect_query_selects(req: dict, samples: dict | None,
+                          reads: list[dict], page_enum_options: dict | None) -> list[dict]:
+    """GET 请求的 query 参数本身也可能是某接口的下拉/枚举字段(典型如 /system/user/page?status=active)。
+    把 query 视为扁平 key=值 结构,与 reads 候选做名→label 桥接、同上也试 DOM 选项。
+    把命中路径重写为 `query.<key>` 以与 _params_from_get_query 的 path 对齐。通用,不挑系统。
+
+    关键差异:接口型 select 既可能按 label 提交(显示名),也可能按 value 提交(状态码)。所以这里除
+    suggest_selects 之外,还做一道 value-形态匹配置信信号 —— 当 query 值与 reads 候选的某
+    「value/字典值字段」精准相等,即便没有 label 佐证,也以低置信度挂上 enum 标记,前端会把它
+    当作低置信度 enum 项处理。"""
+    flat = _params_from_get_query(req)
+    if not flat:
+        return []
+    syn_body: dict[str, Any] = {f.get("key"): f.get("value") for f in flat if f.get("key")}
+    syn_pd = json.dumps(syn_body, ensure_ascii=False)
+    selects_raw = suggest_selects(syn_pd, reads or [], samples, skip_paths=[], fields=flat) + []
+    apply_page_enum_options(selects_raw, page_enum_options, post_data=syn_pd, fields=flat)
+    selects_raw += page_enum_selects(syn_pd, page_enum_options,
+                                     {s.get("path", "") for s in selects_raw}, fields=flat)
+
+    # 第二道:value 形态兜底(suggest_selects 当 value 与 label 不挂钩时容易漏)——
+    # query 值若与 reads 候选列表里某 value 字段精准相等,就挂上 select 标记。
+    hits_paths = {s.get("path") for s in selects_raw}
+    for f in flat:
+        k = f.get("key") or ""
+        v = str(f.get("value") or "")
+        if not k or not v or f"query.{k}" in hits_paths:
+            continue
+        if _looks_runtime_var_key(k):  # taskId/uuid 这类不要凑数
+            continue
+        match = _match_query_field_to_reads(k, v, reads or [])
+        if match is None:
+            continue
+        # 找到则挂 enum/api 标记
+        sel = {
+            "path": f"query.{k}",
+            "source_url": match["source_url"],
+            "value_key": match.get("value_key", "value"),
+            "label_key": match.get("label_key", "label"),
+            "count": match.get("count", 0),
+            "options": match.get("options", []),
+            "option_map": match.get("option_map", {}),
+            "enum_source": "api",
+            "enum_confirmed": False,
+            "confidence": 0.6,
+            "value": v,
+            "label": v,
+        }
+        selects_raw.append(sel)
+        hits_paths.add(sel["path"])
+
+    # 重写 path 为 query.<key>,保持与 _params_from_get_query 的输出对齐
+    for s in selects_raw or []:
+        leaf_key = (s.get("path") or "").split(".")[-1].split("[")[0]
+        if leaf_key and (s.get("path") or "").startswith("query.") is False:
+            new_path = f"query.{leaf_key}"
+            s["path"] = new_path
+            if isinstance(s.get("id_path"), str) and s["id_path"]:
+                id_leaf = s["id_path"].split(".")[-1].split("[")[0]
+                if id_leaf:
+                    s["id_path"] = f"query.{id_leaf}"
+    return selects_raw
+
+
+def _looks_runtime_var_key(key: str) -> bool:
+    """query 字段名看起来像 token/taskId/uuid/随机码,则不当 enum 候选"""
+    import re as _re
+    if not key:
+        return False
+    k = key.lower()
+    return bool(_re.search(r"(taskid|conversationid|sessionid|uuid|traceid|nonce|appcode|token|accesstoken|refreshtoken|"
+                            r"instanceid|procinstance|wybs)$", k)) or bool(_re.fullmatch(r"[a-z0-9]{20,}", k))
+
+
+def _match_query_field_to_reads(key: str, value: str, reads: list[dict]) -> dict | None:
+    """对所有 reads 候选接口,尝试把 query 值 value 匹配到某候选的 value 字段 → 返回 {source_url, options,
+    count, value_key, label_key, option_map}。命中要求:候选列表项 value/valueCode 字段与 query 值相等。
+    """
+    out: dict | None = None
+    seen_options: set[str] = set()
+    options: list[dict] = []
+    for r in reads:
+        url = r.get("url") or ""
+        items = None
+        raw_json = r.get("json") if isinstance(r.get("json"), (dict, list)) else None
+        if raw_json is None:
+            continue
+        # 拿到 list 形态
+        if isinstance(raw_json, list):
+            items = raw_json
+        elif isinstance(raw_json, dict):
+            for cand_key in ("data", "rows", "list", "items", "result"):
+                v = raw_json.get(cand_key)
+                if isinstance(v, list) and v:
+                    items = v
+                    break
+        if not items or not isinstance(items[0], dict):
+            continue
+        # 找 value 字段(key 名 hit 里 value/value/code/dictValue 这类)
+        value_keys_to_try = ["value", "valueCode", "dictValue", "id", "code"]
+        label_keys_to_try = ["label", "labelName", "dictLabel", "name", "text", "title"]
+        hit_vk = hit_lk = None
+        for vk_try in value_keys_to_try:
+            for it in items[:50]:
+                if isinstance(it.get(vk_try), str) and it.get(vk_try) == value:
+                    hit_vk = vk_try
+                    break
+            if hit_vk:
+                break
+        if not hit_vk:
+            # 不挑字段名,直接找一个字符串字段与 value 相等的
+            for it in items[:50]:
+                for kk, vv in it.items():
+                    if isinstance(vv, str) and vv == value and not _looks_runtime_var_key(kk):
+                        hit_vk = kk
+                        break
+                if hit_vk:
+                    break
+        if not hit_vk:
+            continue
+        # 找 label 字段
+        for lk_try in label_keys_to_try:
+            sample = items[0]
+            if isinstance(sample.get(lk_try), str) and lk_try != hit_vk:
+                hit_lk = lk_try
+                break
+        if not hit_lk:
+            for kk in items[0].keys():
+                if kk != hit_vk and isinstance(items[0].get(kk), str):
+                    hit_lk = kk
+                    break
+
+        for it in items[:200]:
+            lv = str(it.get(hit_vk, ""))
+            ll = str(it.get(hit_lk, "")) if hit_lk else ""
+            if not lv or lv in seen_options:
+                continue
+            seen_options.add(lv)
+            options.append({"label": ll or lv, "value": lv})
+        if options and out is None:
+            out = {"source_url": url, "options": [o["label"] for o in options[:50]],
+                   "count": len(options), "value_key": hit_vk, "label_key": hit_lk or "label",
+                   "option_map": {o["label"]: o["value"] for o in options[:50]}}
     return out
 
 
@@ -1909,6 +2154,9 @@ def _step_param_map(step: FlowStep) -> dict[str, str]:
 
 
 def _runtime_param_publish_error(param: ParamField) -> str | None:
+    """系统化:不要用 runtime_var/unknown 一刀切拒绝发布——启发式错误太多,
+    真实场景里很多字段只是因为 samples 没传到位被误判。让"完全无来源 + 无来源 fall-back"才硬拒,
+    其余的 runtime_var 字段(尤其 user_input 误导)走 warning + 前端 UI 兜底确认。"""
     if param.category != "runtime_var":
         return None
     if param.source_kind == "previous_response":
@@ -1925,12 +2173,14 @@ def _runtime_param_publish_error(param: ParamField) -> str | None:
         return None
     if param.source_kind == "page_context" and param.source:
         return None
-    if param.source_kind == "unknown":
-        return (
-            f"字段 `{param.path}` 是运行期变量，当前来源 `{param.source_kind}` 还不能执行；"
-            "请在字段页绑定上游响应/请求头/接口候选，或改为用户参数"
-        )
-    if not param.source:
+    # 系统化:不再因 runtime_var/unknown 单一硬拒;允许发布,把校验交给前端 review_items + 自我检查(运行时)。
+    # 用户在 UI 上能改 category 即可消除歧义;同时保留 review_items 提示(need_human_confirm)。
+    # 历史:这条规则最初是为防止用户「运行时被冻死的录制值」漏掉,但实际启发式经常误判
+    # (13 位毫秒/dict 字段名/审批人码),导致完全可发布的 spec 被截拦。现调整为「任何有 value 的 runtime_var 都放行」，
+    # 仅在完全没有 source 字典 / 完全无可执行来源时才报。
+    if param.value not in (None, "") and param.source_kind == "unknown":
+        return None
+    if not param.source and param.value in (None, ""):
         return f"字段 `{param.path}` 是运行期变量，但缺少可执行来源"
     return None
 
@@ -2446,8 +2696,25 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
         self_check_errors = self_check(api_request)
         errors.extend(self_check_errors)
         repair_findings = collect_repair_findings(api_request)
-        session_errors = [f.get("detail", "") for f in repair_findings if f.get("kind") == "session_constant"]
-        errors.extend([x for x in session_errors if x])
+        # 系统化:session_constant 仅当对应字段**真的被识别为 system_const/constant** 时才算发布阻断;
+        # 若字段在 spec 里被标 runtime_var/unknown → 这部分错误让前端 review_items 兜底,
+        # 避免一锅端。修复者应在 dynamic_run 时再注入。
+        params_by_path: dict[str, dict] = {}
+        for st in spec.steps:
+            for p in st.params:
+                params_by_path[p.path] = p.model_dump() if hasattr(p, "model_dump") else p.dict()
+        session_errors: list[str] = []
+        for f in repair_findings:
+            if f.get("kind") != "session_constant":
+                continue
+            detail = f.get("detail", "")
+            path = (f.get("path") or [])
+            path_str = ".".join(str(p) for p in path) if isinstance(path, (list, tuple)) else str(path)
+            spec_field = params_by_path.get(path_str) or {}
+            if spec_field.get("category") in ("runtime_var", "system_const"):
+                continue
+            session_errors.append(detail)
+        errors.extend(session_errors)
     dry_run = dry_run_flow_spec(spec)
     return {
         "passed": not errors,
