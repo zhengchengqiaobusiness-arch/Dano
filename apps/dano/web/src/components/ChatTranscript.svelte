@@ -1676,7 +1676,6 @@
     background: transparent;
     color: var(--text-muted);
     font: inherit;
-    font-size: 0.72rem;
     line-height: 1.4;
     cursor: pointer;
   }
@@ -2055,7 +2054,7 @@
     background: none;
     border: none;
     color: var(--text-muted);
-    font-size: 0.7rem;
+    font: inherit;
     line-height: 1.3;
     cursor: pointer;
   }
@@ -2065,7 +2064,6 @@
   .thinking-complete-static,
   .thinking-stream-line {
     color: var(--text-muted);
-    font-size: 0.7rem;
     line-height: 1.4;
   }
 
@@ -2110,7 +2108,6 @@
   .thinking-block :global(.thinking-content) {
     margin: 0;
     padding: 0;
-    font-size: 0.74rem;
     line-height: 1.55;
     color: var(--text-muted);
     max-height: 400px;
