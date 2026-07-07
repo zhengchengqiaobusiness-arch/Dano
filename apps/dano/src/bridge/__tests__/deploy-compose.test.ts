@@ -562,20 +562,16 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     const runtimeDir = join(cwd, "runtime-data");
     const workspaceDir = join(cwd, "workspace");
     const agentDir = join(runtimeDir, ".pi/agent");
-    const legacyAgentDir = join(runtimeDir, "default-settings/.pi/agent");
     const agentDirOut = join(cwd, "agent-dir.txt");
     const tmpDirOut = join(cwd, "tmp-dir.txt");
     const overlayOut = join(cwd, "overlay.txt");
 
     mkdirSync(defaultsDir, { recursive: true });
     mkdirSync(agentDir, { recursive: true });
-    mkdirSync(legacyAgentDir, { recursive: true });
     writeFileSync(join(defaultsDir, "SYSTEM.md"), "default system\n");
     writeFileSync(join(defaultsDir, "settings.json"), "{\"default\":true}\n");
     writeFileSync(join(defaultsDir, "heimdall.json"), "{\"guard\":true}\n");
     writeFileSync(join(agentDir, "settings.json"), "{\"custom\":true}\n");
-    writeFileSync(join(legacyAgentDir, "SYSTEM.md"), "legacy system\n");
-    writeFileSync(join(legacyAgentDir, "heimdall.json"), "{\"legacy\":true}\n");
 
     execFileSync("sh", [
       entrypointFile,
@@ -599,13 +595,13 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     expect(readFileSync(tmpDirOut, "utf8")).toBe(join(runtimeDir, ".dano/tmp"));
     expect(readFileSync(overlayOut, "utf8")).toBe("0");
     expect(readFileSync(join(agentDir, "SYSTEM.md"), "utf8")).toBe(
-      "legacy system\n",
+      "default system\n",
     );
     expect(readFileSync(join(agentDir, "settings.json"), "utf8")).toBe(
       "{\"custom\":true}\n",
     );
     expect(readFileSync(join(agentDir, "heimdall.json"), "utf8")).toBe(
-      "{\"legacy\":true}\n",
+      "{\"guard\":true}\n",
     );
     expect(existsSync(join(workspaceDir, ".pi"))).toBe(false);
   });

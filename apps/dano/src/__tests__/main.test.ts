@@ -635,51 +635,6 @@ describe("Dano main", () => {
     }
   });
 
-  it("migrates legacy global agent settings without overwriting new files", () => {
-    const sourceRoot = mkdtempSync(join(tmpdir(), "dano-main-source-"));
-    const agentRoot = mkdtempSync(join(tmpdir(), "dano-main-agent-"));
-    const legacyAgentRoot = mkdtempSync(
-      join(tmpdir(), "dano-main-legacy-agent-"),
-    );
-
-    try {
-      mkdirSync(join(sourceRoot, "deploy", "runtime-defaults"), {
-        recursive: true,
-      });
-      writeFileSync(
-        join(sourceRoot, "deploy/runtime-defaults/SYSTEM.md"),
-        "source prompt",
-      );
-      writeFileSync(
-        join(sourceRoot, "deploy/runtime-defaults/settings.json"),
-        "{}",
-      );
-      writeFileSync(
-        join(sourceRoot, "deploy/runtime-defaults/heimdall.json"),
-        "{}",
-      );
-      writeFileSync(join(legacyAgentRoot, "SYSTEM.md"), "legacy prompt");
-      writeFileSync(join(legacyAgentRoot, "settings.json"), "{\"legacy\":true}");
-      writeFileSync(join(agentRoot, "SYSTEM.md"), "new prompt");
-
-      initializeDanoAgentSettings(agentRoot, sourceRoot, legacyAgentRoot);
-
-      expect(readFileSync(join(agentRoot, "SYSTEM.md"), "utf8")).toBe(
-        "new prompt",
-      );
-      expect(readFileSync(join(agentRoot, "settings.json"), "utf8")).toBe(
-        "{\"legacy\":true}",
-      );
-      expect(readFileSync(join(agentRoot, "heimdall.json"), "utf8")).toBe(
-        '{\n  "sandbox": {\n    "userNamespace": false,\n    "env": {\n      "allow": [\n        "PATH",\n        "HOME",\n        "SHELL",\n        "USER",\n        "LOGNAME",\n        "LANG",\n        "LC_*",\n        "TMPDIR",\n        "DANO_URL",\n        "DANO_TENANT_KEY"\n      ],\n      "deny": []\n    }\n  }\n}\n',
-      );
-    } finally {
-      rmSync(sourceRoot, { recursive: true, force: true });
-      rmSync(agentRoot, { recursive: true, force: true });
-      rmSync(legacyAgentRoot, { recursive: true, force: true });
-    }
-  });
-
   it("preserves Heimdall runtime settings while disabling user namespaces by default", () => {
     const sourceRoot = mkdtempSync(join(tmpdir(), "dano-main-source-"));
     const agentRoot = mkdtempSync(join(tmpdir(), "dano-main-agent-"));

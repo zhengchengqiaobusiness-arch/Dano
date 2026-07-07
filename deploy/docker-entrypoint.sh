@@ -2,13 +2,7 @@
 set -eu
 
 runtime_root="${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}"
-if [ -n "${PI_CODING_AGENT_DIR:-}" ]; then
-  agent_dir="$PI_CODING_AGENT_DIR"
-  legacy_agent_dir=""
-else
-  agent_dir="$runtime_root/.pi/agent"
-  legacy_agent_dir="$runtime_root/default-settings/.pi/agent"
-fi
+agent_dir="${PI_CODING_AGENT_DIR:-$runtime_root/.pi/agent}"
 export PI_CODING_AGENT_DIR="$agent_dir"
 runtime_defaults_dir="${DANO_RUNTIME_DEFAULTS_DIR:-/app/deploy/runtime-defaults}"
 runtime_tmp_dir="$runtime_root/.dano/tmp"
@@ -42,20 +36,6 @@ copy_default_if_missing() {
 
   cp "$source_path" "$target_path"
 }
-
-copy_legacy_if_missing() {
-  file_name="$1"
-  source_path="$legacy_agent_dir/$file_name"
-  target_path="$agent_dir/$file_name"
-
-  if [ -n "$legacy_agent_dir" ] && [ -f "$source_path" ] && [ ! -f "$target_path" ]; then
-    cp "$source_path" "$target_path"
-  fi
-}
-
-copy_legacy_if_missing "SYSTEM.md"
-copy_legacy_if_missing "settings.json"
-copy_legacy_if_missing "heimdall.json"
 
 copy_default_if_missing "SYSTEM.md"
 copy_default_if_missing "settings.json"

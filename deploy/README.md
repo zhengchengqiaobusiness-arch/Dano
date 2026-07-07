@@ -28,10 +28,8 @@ On container startup, `deploy/docker-entrypoint.sh` creates:
 /opt/dano/runtime-data/.dano/tmp/
 ```
 
-The entrypoint first migrates missing files from the legacy
-`/opt/dano/runtime-data/default-settings/.pi/agent/` directory, then copies
-remaining missing files from `deploy/runtime-defaults/`. It does not overwrite
-user-modified runtime files.
+The entrypoint copies those files from `deploy/runtime-defaults/` only when the
+runtime file is missing. It does not overwrite user-modified runtime files.
 It does not copy defaults into a Runtime Workspace `.pi` directory.
 It also sets `TMPDIR` to the runtime tmp directory so temporary runtime files do
 not land in the source checkout.

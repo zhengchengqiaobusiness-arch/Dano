@@ -57,6 +57,7 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 - Bump the root `package.json` patch version (`A.B.x`) when a PR changes shipped runtime behavior, deployment output, or user-visible functionality.
 - Do not bump the product version for docs-only, tests-only, comment-only, or `AGENTS.md`-only changes.
 - Do not rely on `AGENTS.md` for runtime model behavior; runtime-facing version behavior belongs in server code, runtime defaults, or tool prompt metadata.
+- Before Dano reaches `1.0`, do not add compatibility migrations for old runtime layouts unless the user explicitly asks for them; prefer updating the shipped default layout directly.
 
 ## Agent skills
 
