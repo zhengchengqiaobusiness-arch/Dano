@@ -2748,6 +2748,35 @@ def _diagnostic_publish_findings(spec: FlowSpec) -> tuple[list[str], list[str]]:
     return errors, warnings
 
 
+def _enum_map_covers_recorded_value(param: ParamField) -> bool:
+    """枚举字段当前提交值是否能由候选 label 映射出来。
+
+    body 存显示名时(label 本身等于 value)天然通过；body 存短码(type=2)时,必须有
+    enum_value_map 或 {label,value} 能把某个显示项映射到 2,否则导出的 skill 会让前端传名字、
+    运行时却提交不了真实短码。
+    """
+    current = str(param.value or "").strip()
+    if not current:
+        return True
+    labels: list[str] = []
+    option_values: list[Any] = []
+    for opt in param.enum_options or []:
+        if isinstance(opt, dict):
+            label = str(opt.get("label") or opt.get("text") or opt.get("name") or opt.get("value") or "").strip()
+            if label:
+                labels.append(label)
+            option_values.append(opt.get("value", label))
+        else:
+            label = str(opt or "").strip()
+            if label:
+                labels.append(label)
+                option_values.append(label)
+    if current in labels:
+        return True
+    mapped_values = list((param.enum_value_map or {}).values()) or option_values
+    return any(str(v) == current for v in mapped_values if v not in (None, ""))
+
+
 def validate_flow_spec(spec: FlowSpec) -> dict:
     from dano.execution.page.repair_ops import collect_repair_findings
 
@@ -2772,6 +2801,16 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
                 warnings.append(f"字段 `{p.path}` 被判为 runtime_var，但来源仍需确认")
             if p.category == "system_const" and p.exposed_to_user:
                 errors.append(f"字段 `{p.path}` 是 system_const，但仍暴露给用户")
+            if (
+                p.type in {"enum", "list-enum"}
+                and p.source_kind in {"page_enum", "static_enum", "manual_enum", "form_option"}
+                and p.enum_options
+                and not _enum_map_covers_recorded_value(p)
+            ):
+                errors.append(
+                    f"枚举字段 `{p.key or p.path}` 当前提交值 `{p.value}` 没有完整 label→value 映射，"
+                    "请补充真实选项值映射或重新录制到字典接口"
+                )
     for lk in spec.links:
         if not lk.confirmed:
             warnings.append(f"链接 `{lk.link_id}` 尚未人工确认")

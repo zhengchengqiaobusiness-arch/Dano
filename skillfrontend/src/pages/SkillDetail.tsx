@@ -5,6 +5,12 @@ import { useNavigate, useParams } from "react-router-dom";
 import { getSkill, listTools, SkillManifest, FunctionTool } from "../api/skills";
 import InvokeDrawer from "../components/InvokeDrawer";
 
+function fmtTime(s?: string) {
+  if (!s) return "—";
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? s : d.toLocaleString();
+}
+
 export default function SkillDetail() {
   const { skillId = "" } = useParams();
   const nav = useNavigate();
@@ -40,7 +46,7 @@ export default function SkillDetail() {
     <div>
       <Space style={{ marginBottom: 16 }}>
         <Button icon={<ArrowLeftOutlined />} onClick={() => nav("/skills")}>返回目录</Button>
-        <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => setInvoke(skill)}>测试调用</Button>
+        <Button type="primary" icon={<PlayCircleOutlined />} disabled={!!skill.frozen} onClick={() => setInvoke(skill)}>测试调用</Button>
       </Space>
 
       <Card title={skill.name} style={{ marginBottom: 16 }}>
@@ -49,6 +55,8 @@ export default function SkillDetail() {
           <Descriptions.Item label="类型">{skill.integration}</Descriptions.Item>
           <Descriptions.Item label="风险">{skill.risk_level}</Descriptions.Item>
           <Descriptions.Item label="需确认">{skill.requires_confirmation ? "是" : "否"}</Descriptions.Item>
+          <Descriptions.Item label="产出时间">{fmtTime(skill.created_at)}</Descriptions.Item>
+          <Descriptions.Item label="状态">{skill.frozen ? <Tag>已冻结</Tag> : (skill.lifecycle_state || "已发布")}</Descriptions.Item>
           <Descriptions.Item label="描述" span={2}>{skill.description}</Descriptions.Item>
         </Descriptions>
       </Card>

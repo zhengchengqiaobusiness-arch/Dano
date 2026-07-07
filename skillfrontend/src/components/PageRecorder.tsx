@@ -138,7 +138,29 @@ const STATUS_META: Record<string, { color: string; label: string }> = {
 const KEYMAP: Record<string, string> = {
   Enter: "Enter", Backspace: "Backspace", Tab: "Tab", Delete: "Delete",
   ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight", ArrowUp: "ArrowUp", ArrowDown: "ArrowDown",
+  Escape: "Escape", Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown",
 };
+const SAFE_COMBO_KEYS = new Set(["a", "z", "y", "Enter", "Backspace"]);
+const MOD_ORDER = ["Control", "Meta", "Alt", "Shift"];
+
+function recorderKeyName(e: React.KeyboardEvent<HTMLInputElement>): string | null {
+  if (e.key === "Control" || e.key === "Shift" || e.key === "Alt" || e.key === "Meta") return null;
+  if (e.altKey) return null;
+  if (!e.ctrlKey && !e.metaKey && !e.shiftKey) return KEYMAP[e.key] || null;
+  const base = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    if (base !== "Tab" && base !== "Enter") return null;
+    return `Shift+${base}`;
+  }
+  if (!SAFE_COMBO_KEYS.has(base)) return null;
+  const normalizedBase = base.length === 1 ? base.toUpperCase() : base;
+  const mods: string[] = [];
+  if (e.ctrlKey) mods.push("Control");
+  if (e.metaKey) mods.push("Meta");
+  const ordered = MOD_ORDER.filter((m) => mods.includes(m));
+  const key = [...ordered, normalizedBase].join("+");
+  return key;
+}
 const CATEGORY_OPTIONS = [
   { label: "用户参数", value: "user_param" },
   { label: "运行期变量", value: "runtime_var" },
@@ -508,6 +530,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const imgRef = useRef<HTMLImageElement | null>(null);
   const kbRef = useRef<HTMLInputElement | null>(null);
   const consoleBufRef = useRef<any[]>([]);
+  const latestFrameRef = useRef<{ seq: number; src: string } | null>(null);
+  const frameRafRef = useRef<number | null>(null);
+  const renderedFrameSeqRef = useRef(0);
   const autoResolvedReviewKeyRef = useRef("");
   const autoDedupedStepKeyRef = useRef("");
   const autoLinkedRuntimeKeyRef = useRef("");
@@ -519,7 +544,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const phaseRef = useRef(phase);                                  // FC1 修复:同步最新 phase,ws.onclose 闭包不再 stale
   useEffect(() => { phaseRef.current = phase; }, [phase]);
   const [startUrl, setStartUrl] = useState("");
-  const [frame, setFrame] = useState<string>("");
+  const [hasFrame, setHasFrame] = useState(false);
+  const hasFrameRef = useRef(false);
+  useEffect(() => { hasFrameRef.current = hasFrame; }, [hasFrame]);
   const [steps, setSteps] = useState<RecStep[]>([]);
   const [reqs, setReqs] = useState<RecReq[]>([]);
   const [fields, setFields] = useState<RecField[]>([]);
@@ -600,7 +627,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     window.addEventListener("unhandledrejection", onRej);
     const tick = window.setInterval(() => {
       if (!consoleBufRef.current.length) return;
-      const entries = consoleBufRef.current.splice(0, 200);
+      if (consoleBufRef.current.length > 500) {
+        const dropped = consoleBufRef.current.length - 500;
+        consoleBufRef.current.splice(0, dropped);
+        consoleBufRef.current.unshift({
+          type: "warning",
+          source: "recorder",
+          text: `console logs truncated: dropped ${dropped} old entries`,
+          ts: Date.now(),
+        });
+      }
+      const entries = consoleBufRef.current.splice(0, 50);
       send({ type: "console_log_upload", entries });
     }, 5000);
     return () => {
@@ -627,6 +664,31 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return false;
   }
 
+  function clearFrame() {
+    latestFrameRef.current = null;
+    renderedFrameSeqRef.current = 0;
+    if (frameRafRef.current != null) {
+      window.cancelAnimationFrame(frameRafRef.current);
+      frameRafRef.current = null;
+    }
+    if (imgRef.current) imgRef.current.removeAttribute("src");
+    setHasFrame(false);
+  }
+
+  function queueFrame(seq: number, data: string) {
+    if (!data) return;
+    latestFrameRef.current = { seq: Number(seq || 0), src: `data:image/jpeg;base64,${data}` };
+    if (frameRafRef.current != null) return;
+    frameRafRef.current = window.requestAnimationFrame(() => {
+      frameRafRef.current = null;
+      const latest = latestFrameRef.current;
+      if (!latest || latest.seq <= renderedFrameSeqRef.current) return;
+      renderedFrameSeqRef.current = latest.seq;
+      if (imgRef.current) imgRef.current.src = latest.src;
+      if (!hasFrameRef.current) setHasFrame(true);
+    });
+  }
+
   function resetEditorState() {
     setFlowSpec(null);
     setCheckReport(null);
@@ -646,7 +708,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!tenant) { message.error("请先到「创建 / 进入租户」"); return; }
     if (!startUrl.trim()) { message.error("请填页面地址 start_url"); return; }
     const intercept = recordingMode === "record_only";
-    setErr(""); setResult(null); setSteps([]); setReqs([]); setFrame(""); setFields([]); setPicked({});
+    setErr(""); setResult(null); setSteps([]); setReqs([]); clearFrame(); setFields([]); setPicked({});
     setCands([]); setSelects({}); setIdentity({}); setStepSel({}); resetEditorState();
     wsAliveRef.current = true;                                     // FC2 修复:每次 start 重置存活标志
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -661,7 +723,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     ws.onmessage = (ev) => {
       let m: any; try { m = JSON.parse(ev.data); } catch { return; }
       if (m.type === "started") setPhase("recording");
-      else if (m.type === "frame") setFrame(m.data);
+      else if (m.type === "frame") queueFrame(Number(m.seq || 0), m.data);
       else if (m.type === "step") setSteps((s) => {
         const st = m.step;
         const last = s[s.length - 1];
@@ -770,12 +832,24 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     // 可能短暂为 false,导致 onKbInput 误发未拼写完的中间字符(显示"拼字"而不是中文)→ ref 守门
     isComposingRef.current = true;
   }
+  function onKbCompositionUpdate(_e: React.CompositionEvent<HTMLInputElement>) {
+    isComposingRef.current = true;
+  }
   function onKbCompositionEnd(e: React.CompositionEvent<HTMLInputElement>) {
     isComposingRef.current = false;
     relayKb(e.currentTarget);
   }
   function onKbKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (KEYMAP[e.key]) { send({ type: "input", event: { kind: "key", key: KEYMAP[e.key] } }); e.preventDefault(); }
+    const key = recorderKeyName(e);
+    if (key) { send({ type: "input", event: { kind: "key", key } }); e.preventDefault(); }
+  }
+  function onKbPaste(e: React.ClipboardEvent<HTMLInputElement>) {
+    const text = e.clipboardData.getData("text");
+    if (text) {
+      send({ type: "input", event: { kind: "text", text } });
+      e.preventDefault();
+      e.currentTarget.value = "";
+    }
   }
 
   function resetFromHere() {
@@ -815,7 +889,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function stopAll() {
     send({ type: "stop" }); wsRef.current?.close();
-    setPhase("idle"); setResult(null); setSteps([]); setFrame(""); setFields([]); setPicked({});
+    setPhase("idle"); setResult(null); setSteps([]); clearFrame(); setFields([]); setPicked({});
     setCands([]); setSelects({}); setIdentity({}); setStepSel({}); resetEditorState();
   }
 
@@ -1984,13 +2058,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             <Button size="small" onClick={stopAll} disabled={phase === "publishing"}>结束录制</Button>
           </Space>
           <div style={{ border: "1px solid #d9d9d9", borderRadius: 6, overflow: "hidden", lineHeight: 0, position: "relative" }}>
-            {frame
-              ? <img ref={imgRef} src={`data:image/jpeg;base64,${frame}`} onClick={onImgClick} draggable={false}
-                  onWheel={(e) => send({ type: "input", event: { kind: "scroll", dy: e.deltaY } })}
-                  style={{ width: "100%", display: "block", cursor: "crosshair" }} alt="录制画面" />
-              : <div style={{ padding: 40, textAlign: "center", color: "#999", lineHeight: 1.6 }}>等待浏览器画面</div>}
-            <input ref={kbRef} onInput={onKbInput} onKeyDown={onKbKeyDown}
-              onCompositionStart={onKbCompositionStart} onCompositionEnd={onKbCompositionEnd}
+            <img ref={imgRef} onClick={onImgClick} draggable={false}
+              onWheel={(e) => send({ type: "input", event: { kind: "scroll", dy: e.deltaY } })}
+              style={{ width: "100%", display: hasFrame ? "block" : "none", cursor: "crosshair" }} alt="录制画面" />
+            {!hasFrame && <div style={{ padding: 40, textAlign: "center", color: "#999", lineHeight: 1.6 }}>等待浏览器画面</div>}
+            <input ref={kbRef} onInput={onKbInput} onKeyDown={onKbKeyDown} onPaste={onKbPaste}
+              onCompositionStart={onKbCompositionStart} onCompositionUpdate={onKbCompositionUpdate} onCompositionEnd={onKbCompositionEnd}
               autoComplete="off" aria-hidden="true"
               style={{ position: "absolute", left: 0, top: 0, width: 1, height: 1, opacity: 0, border: 0, padding: 0 }} />
           </div>

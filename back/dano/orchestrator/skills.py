@@ -73,6 +73,10 @@ def _call_metadata_from_body(body: dict, env=None) -> dict:
     return {k: v for k, v in meta.items() if v not in (None, "")}
 
 
+def _asset_created_at(env):
+    return getattr(env, "created_at", None)
+
+
 class SkillRegistry:
     def __init__(self, skills: list[SkillSpec]) -> None:
         self.skills = skills
@@ -103,6 +107,7 @@ class SkillRegistry:
                         field_docs=dict(body.field_docs),
                         field_types=dict(getattr(body, "field_types", {}) or {}),
                         call_metadata=call_meta,
+                        created_at=_asset_created_at(env),
                         verification_status=call_meta.get("verification_status", ""),
                         verification_basis=call_meta.get("verification_basis", ""),
                         recording_mode=call_meta.get("recording_mode", ""),
@@ -150,6 +155,7 @@ class SkillRegistry:
                         field_docs=dict(env.body.get("field_docs", {})),
                         field_types=dict(env.body.get("field_types", {}) or {}),
                         call_metadata=call_meta,
+                        created_at=_asset_created_at(env),
                         verification_status=call_meta.get("verification_status", ""),
                         verification_basis=call_meta.get("verification_basis", ""),
                         recording_mode=call_meta.get("recording_mode", ""),
@@ -181,6 +187,7 @@ class SkillRegistry:
                         field_docs=dict(b.get("field_docs", {})),
                         field_types=dict(b.get("field_types", {}) or {}),
                         call_metadata=call_meta,
+                        created_at=_asset_created_at(env),
                         verification_status=call_meta.get("verification_status", ""),
                         verification_basis=call_meta.get("verification_basis", ""),
                         recording_mode=call_meta.get("recording_mode", ""),
@@ -219,6 +226,7 @@ class SkillRegistry:
                             field_docs=dict(body.get("field_docs", {})),
                             field_types=dict(body.get("field_types", {}) or {}),
                             call_metadata=call_meta,
+                            created_at=_asset_created_at(env),
                             verification_status=call_meta.get("verification_status", ""),
                             verification_basis=call_meta.get("verification_basis", ""),
                             recording_mode=call_meta.get("recording_mode", ""),
@@ -246,6 +254,7 @@ class SkillRegistry:
                             risk_level=RiskLevel.L2,   # 报销草稿 L2
                             has_api=False,
                             page_asset_id=env.asset_id,
+                            created_at=_asset_created_at(env),
                             required_fields=meta.required_fields,
                             keywords=meta.keywords,
                             fact_check_expr=meta.fact_check_expr,

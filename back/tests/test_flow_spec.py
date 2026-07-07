@@ -1098,6 +1098,49 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         vmap = p.enum_value_map or {}
         self.assertEqual(vmap.get("婚假"), 3)
 
+    def test_dom_label_options_keep_api_short_code_map(self):
+        """请假类型真实场景:DOM 只有中文选项,提交体是 type=2,API 字典映射不能丢。"""
+        reads = [{"url": "https://oa/api/leave_type/list",
+                  "json": {"data": [
+                      {"dictValue": 1, "dictLabel": "事假"},
+                      {"dictValue": 2, "dictLabel": "病假"},
+                      {"dictValue": 3, "dictLabel": "婚假"},
+                  ]}}]
+        captured = [_post("https://oa/api/submit", {"type": 2, "reason": "回家"}, resp={"code": 200})]
+        spec = to_flow_spec(
+            captured,
+            reads=reads,
+            samples={"类型": "病假", "reason": "回家"},
+            page_enum_options={"病假": {"options": ["病假", "事假", "婚假"], "field_key": "类型", "selected": "病假"}},
+        )
+
+        by_path = {p.path: p for s in spec.steps for p in s.params}
+        p = by_path["type"]
+        self.assertEqual(p.type, "enum")
+        self.assertEqual(p.source_kind, "page_enum")
+        self.assertEqual(p.key, "类型")
+        self.assertEqual(p.enum_value_map, {"病假": 2, "事假": 1, "婚假": 3})
+
+        api_req, errors = flow_spec_to_api_request(spec)
+        self.assertEqual(errors, [])
+        self.assertEqual(api_req["field_types"]["类型"], "enum")
+        self.assertEqual(api_req["selects"][0]["option_map"], {"病假": 2, "事假": 1, "婚假": 3})
+
+    def test_dom_label_options_without_short_code_map_blocks_publish(self):
+        """只有 DOM label、没有任何 label→短码映射时,不能导出会提交错值的 skill。"""
+        captured = [_post("https://oa/api/submit", {"type": 2, "reason": "回家"}, resp={"code": 200})]
+        spec = to_flow_spec(
+            captured,
+            samples={"type": "2", "reason": "回家"},
+            page_enum_options={"type": {"options": ["病假", "事假", "婚假"], "field_key": "type", "selected": "病假"}},
+        )
+
+        by_path = {p.path: p for s in spec.steps for p in s.params}
+        self.assertEqual(by_path["type"].type, "enum")
+        report = validate_flow_spec(spec)
+        self.assertFalse(report["passed"])
+        self.assertTrue(any("label→value" in e and "type" in e for e in report["errors"]))
+
     def test_unrelated_short_id_list_does_not_misfire(self):
         """type=int 短码不应与无关联的「id/name」tenant 列表撞名 → 仍然保持 user_input。"""
         reads = [{"url": "http://example.com/system/tenant/simple-list",

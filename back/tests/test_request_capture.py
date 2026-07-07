@@ -665,6 +665,24 @@ def test_apply_page_enum_options_matches_submitted_code_and_keeps_option_map():
     assert selects[0]["enum_source"] == "dom"
 
 
+def test_apply_page_enum_options_preserves_api_map_when_dom_only_has_labels():
+    """DOM 自定义下拉只抓到 label,不能覆盖掉 API 字典已识别的 label→短码映射。"""
+    selects = [{"path": "type", "label": "病假", "value": "2", "source_url": "/dict/leave-type",
+                "value_key": "dictValue", "label_key": "dictLabel",
+                "options": ["其它类型", "病假"], "count": 2,
+                "option_map": {"事假": 1, "病假": 2, "婚假": 3}, "enum_source": "api"}]
+    apply_page_enum_options(
+        selects,
+        {"病假": {"options": ["病假", "事假", "婚假"], "field_key": "类型", "selected": "病假"}},
+        post_data='{"type":2,"reason":"x"}',
+        fields=[{"path": "type", "key": "type", "suggest_name": "类型", "value": "2"}],
+    )
+
+    assert selects[0]["options"] == ["病假", "事假", "婚假"]
+    assert selects[0]["option_map"] == {"病假": 2, "事假": 1, "婚假": 3}
+    assert selects[0]["enum_source"] == "dom"
+
+
 def test_page_enum_selects_creates_sourceless_enum():
     """页面只有 3 个选项、提交体存的就是显示名、又没绑上任何网络源 → 造**无来源** enum(agent 传名字即原样提交)。"""
     sub = '{"overtimeType":"周末加班","reason":"x"}'
@@ -729,7 +747,8 @@ async def test_resolve_static_enum_uses_option_map_without_source_url():
     assert overrides == {}
 
 
-async def test_fetch_field_options_prefers_dom_enum_snapshot_over_source_url():
+async def test_fetch_field_options_prefers_live_source_over_dom_snapshot(monkeypatch):
+    from dano.execution.page import request_capture as rc
     api_request = {
         "selects": [{
             "param": "类型",
@@ -742,10 +761,35 @@ async def test_fetch_field_options_prefers_dom_enum_snapshot_over_source_url():
         }]
     }
 
+    async def fake_fetch(url, base_url, storage_state, token_key, verify, auth_headers):
+        return [{"value": 4, "label": "调休"}, {"value": 5, "label": "年假"}]
+    monkeypatch.setattr(rc, "_fetch_list", fake_fetch)
     res = await fetch_field_options(api_request, "类型")
 
+    assert res["options"] == [{"label": "调休", "value": 4}, {"label": "年假", "value": 5}]
+    assert "实时接口" in res["note"]
+
+
+async def test_fetch_field_options_falls_back_to_dom_snapshot_when_live_empty(monkeypatch):
+    from dano.execution.page import request_capture as rc
+    api_request = {
+        "selects": [{
+            "param": "类型",
+            "source_url": "/dict/all",
+            "value_key": "value",
+            "label_key": "label",
+            "options": ["事假", "病假"],
+            "option_map": {"事假": 2, "病假": 3},
+            "enum_source": "dom",
+        }]
+    }
+
+    async def fake_fetch(url, base_url, storage_state, token_key, verify, auth_headers):
+        return []
+    monkeypatch.setattr(rc, "_fetch_list", fake_fetch)
+    res = await fetch_field_options(api_request, "类型")
     assert res["options"] == [{"label": "事假", "value": 2}, {"label": "病假", "value": 3}]
-    assert "页面真实下拉快照" in res["note"]
+    assert "回退录制页面下拉快照" in res["note"]
 
 
 async def test_resolve_static_multi_enum_uses_option_map():

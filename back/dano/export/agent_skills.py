@@ -847,7 +847,8 @@ def _write_index(out_dir: Path, entries: list[dict]) -> str:
     return slug
 
 
-async def write_skills(tenant: str, out_dir: str, *, rich: bool = True) -> list[str]:
+async def write_skills(tenant: str, out_dir: str, *, rich: bool = True,
+                       exclude_skill_ids: set[str] | None = None) -> list[str]:
     """核心:读该租户已上架 Skill 写成官方格式 skill;**不管连接池**(供已持有池的网关复用)。
 
     带 business 标签的 adapter **按业务归组成一本自包含剧本 skill**(多操作);其余各自一个单动作 skill。
@@ -862,7 +863,8 @@ async def write_skills(tenant: str, out_dir: str, *, rich: bool = True) -> list[
     repo = AssetRepository()
     subs = await _tenant_subsystems(repo, tenant)   # 发现该租户真实系统(任意系统),与网关一致
     reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=subs)
-    manifests = build_manifests(reg.skills)
+    excluded = set(exclude_skill_ids or set())
+    manifests = [m for m in build_manifests(reg.skills) if m.name not in excluded]
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     log.info("export.target", out_abs=str(out.resolve()), tenant=tenant)   # 落盘绝对路径(排查"看不到文件")

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
@@ -21,6 +22,39 @@ import structlog
 log = structlog.get_logger(__name__)
 
 _VIEW_W, _VIEW_H = 1280, 800
+_CAST_W, _CAST_H = 1024, 640
+_CAST_QUALITY = 35
+_CAST_ACTIVE_FPS = 12
+_CAST_IDLE_FPS = 2
+_CAST_ACTIVE_WINDOW_S = 2.0
+_SAFE_KEY_RE = re.compile(
+    r"^(?:(?:Control|Shift|Alt|Meta)\+){0,3}"
+    r"(?:Enter|Tab|Backspace|Delete|Escape|Home|End|PageUp|PageDown|"
+    r"ArrowUp|ArrowDown|ArrowLeft|ArrowRight|A|Z|Y)$"
+)
+_PLAIN_KEYS = {
+    "Enter", "Tab", "Backspace", "Delete", "Escape", "Home", "End",
+    "PageUp", "PageDown", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+}
+_CTRL_META_KEYS = {"A", "Z", "Y", "Enter", "Backspace"}
+_SHIFT_KEYS = {"Tab", "Enter"}
+
+
+def _safe_recorder_key(key: str) -> bool:
+    if not key or not _SAFE_KEY_RE.match(key):
+        return False
+    parts = key.split("+")
+    base = parts[-1]
+    mods = set(parts[:-1])
+    if not mods:
+        return base in _PLAIN_KEYS
+    if "Alt" in mods:
+        return False
+    if mods == {"Shift"}:
+        return base in _SHIFT_KEYS
+    if mods <= {"Control", "Meta"}:
+        return base in _CTRL_META_KEYS
+    return False
 
 # 诊断消息截断上限(防爆,统一:console/pageerror/requestfailed 一致)
 _DIAG_MSG_MAX = 2000
@@ -125,6 +159,37 @@ _RECORDER_JS = r"""() => {
     if (!loc || onLoginPage()) return;            // 登录页上的任何操作一律不录(自动跳过登录,免手点「从这里开始录」)
     try { window.__danoRecord(JSON.stringify({ op: op, locator: loc, value: value || '', field: field || '', required: !!required, options: options || [] })); } catch (e) {}
   }
+  var pendingFill = {};
+  var fillTimers = {};
+  function scheduleFill(el) {
+    try {
+      var loc = locateField(el);
+      if (!loc) return;
+      pendingFill[loc] = { el: el, value: el.value, field: fieldOf(loc), required: requiredOf(el) };
+      if (fillTimers[loc]) clearTimeout(fillTimers[loc]);
+      fillTimers[loc] = setTimeout(function () { flushFill(loc); }, 300);
+    } catch (e) {}
+  }
+  function flushFill(loc) {
+    try {
+      var p = pendingFill[loc];
+      if (!p) return;
+      delete pendingFill[loc];
+      if (fillTimers[loc]) { clearTimeout(fillTimers[loc]); delete fillTimers[loc]; }
+      emit('fill', loc, p.value, p.field, p.required);
+    } catch (e) {}
+  }
+  function flushElementFill(el) {
+    try {
+      var loc = locateField(el);
+      if (loc) {
+        var pending = pendingFill[loc];
+        if (pending) pending.value = el.value;
+        else pendingFill[loc] = { el: el, value: el.value, field: fieldOf(loc), required: requiredOf(el) };
+        flushFill(loc);
+      }
+    } catch (e) {}
+  }
   // 下拉/级联弹层里**当前可见的选项文字**(地面真值枚举):工作日加班/周末加班/节假日加班 …
   // —— 直接读 DOM,胜过拿提交值去网络字典里猜命中(治"加班类型/请假类型绑到几百项全量字典")。
   // **通用 ARIA + 框架兜底**,不绑任何特定公司/项目:
@@ -204,13 +269,18 @@ _RECORDER_JS = r"""() => {
     if (/(credit.?card|card.?no|cvv|cvc|secret.?code|pay.?password|bank.?account)/.test(sig)) return;
     // 密码框绝不录(安全);非文本类型跳过
     if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) {
-      var loc = locateField(el); emit('fill', loc, el.value, fieldOf(loc), requiredOf(el));
+      scheduleFill(el);
     }
   }, true);
   document.addEventListener('change', function (e) {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
+    if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) flushElementFill(el);
     if (tag === 'select') { var l1 = locateField(el); emit('select', l1, el.value, fieldOf(l1), requiredOf(el), nativeOptions(el)); }
     else if (tag === 'input' && ty === 'file') { var l2 = locateField(el); emit('upload', l2, el.value || '', fieldOf(l2), requiredOf(el)); }
+  }, true);
+  document.addEventListener('blur', function (e) {
+    var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
+    if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) flushElementFill(el);
   }, true);
   // 选择型控件参数化(框架无关):日期/下拉/级联是"点"出来的,不该录成写死的点击,而该录成一个
   // pick 参数步(触发框 + 选中的最终值)。识别弹层 + 触发框,选完读触发框 input 的最终值。
@@ -348,7 +418,10 @@ class RecordSession:
         self._browser = None
         self._context = None
         self._cdp = None
-        self._on_frame: Callable[[str], Awaitable[None]] | None = None   # 截屏回调(切活动页时复用)
+        self._on_frame: Callable[[dict], Awaitable[None]] | None = None  # 截屏回调(切活动页时复用)
+        self._frame_seq = 0
+        self._last_frame_sent_at = 0.0
+        self._last_input_at = time.monotonic()
         self._closing = False        # stop()/断连中:页面 close 事件不再重开截屏(避免在已关 context 上 new_cdp_session 抛错)
         self.page = None
 
@@ -743,7 +816,7 @@ class RecordSession:
             pass
 
     # ── 截屏流(跟随活动页:用户点开新标签/弹窗时切过去)──
-    async def start_screencast(self, on_frame: Callable[[str], Awaitable[None]]) -> None:
+    async def start_screencast(self, on_frame: Callable[[dict], Awaitable[None]]) -> None:
         self._on_frame = on_frame
         # H6 修复:重连 / 多次调用前先 detach 旧 CDP session,避免新 session 收帧 + 旧 session 句柄泄漏
         if self._cdp is not None:
@@ -769,14 +842,22 @@ class RecordSession:
             try:
                 await cdp.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
                 if self._on_frame is not None and cdp is self._cdp:   # 只发**活动页**的帧(切页后旧帧丢弃)
-                    await self._on_frame(params["data"])              # base64 jpeg
+                    now = time.monotonic()
+                    active = (now - self._last_input_at) <= _CAST_ACTIVE_WINDOW_S
+                    min_gap = 1.0 / (_CAST_ACTIVE_FPS if active else _CAST_IDLE_FPS)
+                    if now - self._last_frame_sent_at < min_gap:
+                        return
+                    self._last_frame_sent_at = now
+                    self._frame_seq += 1
+                    await self._on_frame({"seq": self._frame_seq, "data": params["data"]})  # base64 jpeg
             except Exception:  # noqa: BLE001
                 pass
 
         cdp.on("Page.screencastFrame", lambda p: asyncio.create_task(_emit(p)))
         try:
             await cdp.send("Page.startScreencast",
-                           {"format": "jpeg", "quality": 50, "maxWidth": _VIEW_W, "maxHeight": _VIEW_H})
+                           {"format": "jpeg", "quality": _CAST_QUALITY,
+                            "maxWidth": _CAST_W, "maxHeight": _CAST_H})
         except Exception:  # noqa: BLE001
             pass
 
@@ -796,6 +877,7 @@ class RecordSession:
     async def dispatch_input(self, ev: dict) -> None:
         if self.page is None or self.page.is_closed():    # 切页瞬间 / 活动页已关 → 丢弃,避免抛错
             return
+        self._last_input_at = time.monotonic()
         k = ev.get("kind")
         if k == "click":
             await self.page.mouse.click(ev.get("nx", 0) * _VIEW_W, ev.get("ny", 0) * _VIEW_H)
@@ -805,7 +887,9 @@ class RecordSession:
             # insert_text 直接插入文本(含中文 CJK)并触发 input 事件;type 模拟物理键对 CJK 不可靠
             await self.page.keyboard.insert_text(ev.get("text", ""))
         elif k == "key":
-            await self.page.keyboard.press(ev.get("key", ""))
+            key = str(ev.get("key") or "")
+            if _safe_recorder_key(key):
+                await self.page.keyboard.press(key)
         elif k == "scroll":
             await self.page.mouse.wheel(0, ev.get("dy", 0))
 
@@ -848,16 +932,33 @@ class RecordSession:
         return steps, samples
 
     def recorded_page_enum_options(self) -> dict:
-        """录制时下拉/级联里**真实可见的选项文字**(DOM 抓的枚举地面真值)→ {字段key: [选项文字]}。
-        key 与 recorded_steps 同算法分配,保持一致 → 上层据此覆盖 select 的候选快照,治"绑到几百项全量字典"。"""
+        """录制时下拉/级联里真实可见的选项 + 当前选中值。
+
+        返回 {字段key: {options, field_key, selected}}。保留 selected 是为了把 DOM 显示项
+        与提交体短码(type=2)连起来,避免发布 skill 时把下拉退化成 number。
+        """
         from dano.agent_tools.page_builder import assign_field_keys
         fb_idx = [i for i, s in enumerate(self.steps) if s.get("field")]
         keys = assign_field_keys([self.steps[i]["field"] for i in fb_idx])
         keymap = dict(zip(fb_idx, keys))
-        out: dict[str, list] = {}
+        out: dict[str, dict] = {}
+        last_field_idx: int | None = None
         for i, s in enumerate(self.steps):
-            if s.get("op") in ("pick", "select") and s.get("options") and i in keymap:
-                out[keymap[i]] = list(s["options"])
+            if i in keymap:
+                last_field_idx = i
+            if s.get("op") in ("pick", "select") and s.get("options"):
+                # 自定义下拉常见事件序列是「点开输入框/选择器」→「点弹层选项」。
+                # 后一个 pick 事件有 options/selected,但 DOM 目标已经是弹层项,拿不到字段 label。
+                # 因此优先用本步字段,否则回溯最近一个可填写字段,把弹层选项归回正确业务字段。
+                owner_idx = i if i in keymap else last_field_idx
+                if owner_idx not in keymap:
+                    continue
+                field_key = keymap[owner_idx]
+                out[field_key] = {
+                    "options": list(s["options"]),
+                    "field_key": field_key,
+                    "selected": s.get("value", ""),
+                }
         return out
 
     def recorded_required_labels(self) -> set:

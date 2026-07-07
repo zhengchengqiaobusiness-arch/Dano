@@ -440,6 +440,36 @@ def _enum_records_from_page_options(opts: list | tuple | None) -> list[dict]:
     return out
 
 
+def _page_enum_selected_label(opts, picked: str) -> str:
+    """page_enum_options 里的选中显示值。兼容旧形态 key=选中值,新形态 {selected/value}。"""
+    if isinstance(opts, dict):
+        for k in ("selected", "selected_label", "value", "label"):
+            v = opts.get(k)
+            if v not in (None, ""):
+                return str(v)
+    return str(picked or "")
+
+
+def _records_with_existing_option_map(records: list[dict], option_map: dict | None) -> list[dict]:
+    """DOM 只给 label 时,保留之前从 API 字典学到的 label→提交值映射。
+
+    典型场景:页面下拉显示「病假/事假/婚假」,提交体是 type=2;API 字典已识别
+    「病假→2」。DOM 选项是地面真值,但不能把已有映射洗成 label→label。
+    """
+    if not isinstance(option_map, dict) or not option_map:
+        return records
+    out: list[dict] = []
+    for rec in records:
+        label = str(rec.get("label") or "").strip()
+        if label and label in option_map:
+            nr = dict(rec)
+            nr["value"] = option_map[label]
+            out.append(nr)
+        else:
+            out.append(rec)
+    return out
+
+
 def _enum_labels(records: list[dict]) -> list[str]:
     return [str(r["label"]) for r in records if str(r.get("label") or "").strip()]
 
@@ -924,7 +954,7 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
     for k, v in page_enum_options.items():
         opts = _page_enum_option_list(v)
         if opts:
-            pairs.append((str(k), opts, _page_enum_field_key(v, str(k))))
+            pairs.append((str(k), opts, _page_enum_field_key(v, str(k)), _page_enum_selected_label(v, str(k))))
     body = _parse_body(post_data) if post_data is not None else None
     value_by_path = {p: sv for p, _t, sv, _raw in _leaf_paths(body)} if body is not None else {}
     field_by_path = {str(f.get("path") or ""): f for f in (fields or []) if f.get("path")}
@@ -934,18 +964,27 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
         body_val = value_by_path.get(path, "")
         field = field_by_path.get(path)
         leaf_key = str(path).split(".")[-1].split("[")[0]
-        opts = next((ov for kv, ov, fk in pairs
+        matched = next(((ov, selected) for kv, ov, fk, selected in pairs
                      if _name_match(kv, lbl)
                      or _name_match(kv, val)
                      or _name_match(kv, body_val)
+                     or _name_match(selected, lbl)
+                     or _name_match(selected, val)
+                     or _name_match(selected, body_val)
                      or _name_match(kv, path)
                      or _name_match(kv, leaf_key)
                      or (fk and _name_match(fk, leaf_key))
-                     or _dom_key_matches_field(kv, field)), None)
-        if opts:
+                     or _dom_key_matches_field(kv, field)
+                     or _dom_key_matches_field(selected, field)), None)
+        if matched:
+            opts, _selected = matched
+            records = _records_with_existing_option_map(
+                _enum_records_from_page_options(opts),
+                s.get("option_map") if isinstance(s, dict) else None,
+            )
             _attach_enum_binding(
                 s,
-                _enum_records_from_page_options(opts),
+                records,
                 source="dom",
                 confirmed=True,
             )
@@ -970,10 +1009,11 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
     for picked, opts_raw in page_enum_options.items():
         opts = _page_enum_option_list(opts_raw)
         fk = _page_enum_field_key(opts_raw, str(picked))
+        selected = _page_enum_selected_label(opts_raw, str(picked))
         if not opts:
             continue
         # 1)精确匹配:body leaf 值等于显示值(label)
-        toks = _find_value_tokens(body, picked)
+        toks = _find_value_tokens(body, selected)
         if toks is not None:
             path = _tokens_to_str(toks)
         else:
@@ -984,8 +1024,11 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
                 if (fk and _name_match(fk, path))
                    or (fk and _name_match(fk, str(path).split(".")[-1].split("[")[0]))
                    or _dom_key_matches_field(str(picked), field_by_path.get(path))
+                   or _dom_key_matches_field(selected, field_by_path.get(path))
                    or _name_match(str(picked), path)
+                   or _name_match(selected, path)
                    or _name_match(str(picked), str(path).split(".")[-1].split("[")[0])
+                   or _name_match(selected, str(path).split(".")[-1].split("[")[0])
             ), None)
             if hit is None:
                 continue
@@ -994,7 +1037,7 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
             continue
         current = next((sv for p, _t, sv, _raw in leaves if p == path), "")
         entry = {"path": path, "tokens": toks, "source_url": "", "value_key": "", "label_key": "",
-                 "label": picked, "value": current, "count": len(opts), "field_key": fk or ""}
+                 "label": selected or picked, "value": current, "count": len(opts), "field_key": fk or ""}
         _attach_enum_binding(
             entry,
             _enum_records_from_page_options(opts),
@@ -2341,14 +2384,17 @@ async def fetch_field_options(api_request: dict, field: str, *, base_url: str = 
     if not sel:
         return {"field": field, "options": [], "count": 0,
                 "note": "该字段不是选择型;直接按字段说明传值即可"}
-    if not sel.get("source_url") or (sel.get("enum_source") == "dom" and sel.get("options")):
-        opt_map = sel.get("option_map") or {}
-        opts = [
-            {"label": str(x), "value": opt_map.get(str(x), x) if isinstance(opt_map, dict) else x}
-            for x in (sel.get("options") or [])
-        ]
-        return {"field": field, "options": opts, "count": len(opts),
-                "note": "该字段候选来自录制页面真实下拉快照"}
+    snapshot = [
+        {"label": str(x), "value": (sel.get("option_map") or {}).get(str(x), x)
+         if isinstance(sel.get("option_map"), dict) else x}
+        for x in (sel.get("options") or [])
+    ]
+    if not sel.get("source_url"):
+        if snapshot:
+            return {"field": field, "options": snapshot, "count": len(snapshot),
+                    "note": "该字段候选来自录制页面真实下拉快照"}
+        return {"field": field, "options": [], "count": 0,
+                "note": "该字段没有实时选项来源;请按字段说明传值"}
     lk, vk = sel.get("label_key"), sel.get("value_key")
     items = await _fetch_list(sel["source_url"], base_url, storage_state, token_key, verify,
                               (api_request or {}).get("auth_headers"))
@@ -2362,7 +2408,13 @@ async def fetch_field_options(api_request: dict, field: str, *, base_url: str = 
             opts.append({"label": lab, "value": it.get(vk)})
         if len(opts) >= limit:
             break
-    return {"field": field, "options": opts, "count": len(items)}
+    if opts:
+        return {"field": field, "options": opts, "count": len(items), "note": "选项来自实时接口"}
+    if snapshot:
+        return {"field": field, "options": snapshot, "count": len(snapshot),
+                "note": "实时接口暂未返回选项,已回退录制页面下拉快照"}
+    return {"field": field, "options": [], "count": 0,
+            "note": "实时接口未返回可用选项"}
 
 
 # 分页响应里"总记录数"字段(通用,不挑系统):total/totalCount/totalElements/recordsTotal…

@@ -39,6 +39,9 @@ class SkillManifest(BaseModel):
     goal: dict = Field(default_factory=dict)           # 结构化业务目标(意图/成功判据/禁止步)→ 导出剧本"目标"段
     field_mappings: list = Field(default_factory=list)  # 可追溯字段映射 → 导出剧本"字段映射"段
     call_metadata: dict = Field(default_factory=dict)   # 调用侧元数据(字段类型/枚举快照/录制验证状态),不属于 JSON Schema
+    created_at: str = ""                # 最新 published 资产产出时间(目录展示/排序)
+    lifecycle_state: str = ""           # 生命周期状态(异常暂停=冻结)
+    frozen: bool = False                # 冻结后保留资产库,但不导出/不调用
     integration: str                  # 调用方式:adapter / workflow / api / page
     risk_level: str
     requires_confirmation: bool       # L3+ 调用需带 confirm=true
@@ -107,6 +110,23 @@ def _enum_facts(sel: dict | None) -> tuple[list[str], dict[str, object], bool, b
     return opts, option_map, has_source, static
 
 
+def _select_semantic_type(declared: str | None, sel: dict | None) -> str | None:
+    """select 元数据是比 body 叶子值更强的语义证据。
+
+    真实页面里固定下拉经常提交短码(type=2),body 值推断会得到 number；但只要录制链路已经确认
+    这是 select/page_enum/api_option,对外调用契约就必须让用户选/传显示名,再由运行期映射成真实 value。
+    """
+    if declared in {"enum", "list-enum"}:
+        return declared
+    if not sel:
+        return declared
+    if sel.get("multi"):
+        return "list-enum"
+    if sel.get("source_url") or sel.get("options") or sel.get("option_map") or sel.get("enum_source"):
+        return "enum"
+    return declared
+
+
 def _schema_prop(skill: SkillSpec, field: str, desc: str, sel: dict | None = None) -> dict:
     """字段 → JSON Schema 属性。**type 保持合法**(function-calling 可直接用),但**语义不丢**:
 
@@ -116,7 +136,7 @@ def _schema_prop(skill: SkillSpec, field: str, desc: str, sel: dict | None = Non
     - `datetime`/`date`:type=string + 标准 format,告诉 agent 这是日期时间字段;
     - 其余按信源声明 / 数值语义判定。format 为 JSON Schema 扩展位,校验器忽略未知值,安全。
     """
-    declared = (getattr(skill, "field_types", {}) or {}).get(field)
+    declared = _select_semantic_type((getattr(skill, "field_types", {}) or {}).get(field), sel)
     # label=字段纯语义(给 SOP/复述用,简洁);description=语义 + 调用约定(给参数表/function-calling 用)。
     # 约定不写死示例值(『张三』只适合选人,不适合选值如请假类型);示例由前端/样例值提供,不在此臆造。
     if declared == "enum":
@@ -200,7 +220,8 @@ def _field_call_metadata(skill: SkillSpec, props: dict, sels: dict) -> dict:
     declared_types = getattr(skill, "field_types", {}) or {}
     fields = {}
     for name, prop in props.items():
-        info = {"type": declared_types.get(name) or prop.get("type") or "string"}
+        info_type = _select_semantic_type(declared_types.get(name) or prop.get("type") or "string", sels.get(name))
+        info = {"type": info_type or "string"}
         if prop.get("format"):
             info["format"] = prop["format"]
         sel = sels.get(name) or {}
@@ -322,6 +343,9 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         goal=getattr(skill, "goal", {}) or {},
         field_mappings=getattr(skill, "field_mappings", []) or [],
         call_metadata=call_metadata,
+        created_at=(skill.created_at.isoformat() if getattr(skill, "created_at", None) else ""),
+        lifecycle_state=getattr(skill, "lifecycle_state", "") or "",
+        frozen=bool(getattr(skill, "frozen", False)),
         integration=integration,
         risk_level=risk.value,
         requires_confirmation=risk in _CONFIRM_FROM,

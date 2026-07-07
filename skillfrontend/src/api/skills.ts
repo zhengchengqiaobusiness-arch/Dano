@@ -14,6 +14,9 @@ export interface SkillManifest {
   verification_status?: string;
   verification_basis?: string;
   recording_mode?: string;
+  created_at?: string;
+  lifecycle_state?: string;
+  frozen?: boolean;
   call_metadata?: SkillCallMetadata;
   parameters: JSONSchema;  // 输入 JSON Schema
   output_schema?: Record<string, unknown>;
@@ -117,14 +120,29 @@ export async function listTools(): Promise<FunctionTool[]> {
   return data;
 }
 
-export async function deleteSkill(skillId: string): Promise<{ deleted: number }> {
+export async function deleteSkill(skillId: string): Promise<{ deleted: number; removed_folders?: string[] }> {
   const { data } = await api.delete(`/v1/skills/${encodeURIComponent(skillId)}`);
   return data;
 }
 
+export async function freezeSkill(skillId: string): Promise<{ skill_id: string; state: string; removed_folders?: string[] }> {
+  const { data } = await api.post(`/v1/skills/${encodeURIComponent(skillId)}/freeze`);
+  return data;
+}
+
+export async function resumeSkill(skillId: string): Promise<{ skill_id: string; state: string }> {
+  const { data } = await api.post(`/v1/skills/${encodeURIComponent(skillId)}/resume`);
+  return data;
+}
+
 // 导出本租户已上架 Skill 为 pi 文件式 skill(.agents/skills/),后端就地写入 out_dir
-export async function exportAgentSkills(out_dir: string): Promise<{ out_dir: string; count: number; written: string[] }> {
+export async function exportAgentSkills(out_dir: string): Promise<{ out_dir: string; count: number; written: string[]; removed_frozen_folders?: string[] }> {
   const { data } = await api.post("/export/agent-skills", { out_dir });
+  return data;
+}
+
+export async function listFieldOptions(toolName: string, field: string): Promise<{ field: string; options: Array<JSONSchemaValue | JSONSchemaEnumOption>; count: number; note?: string }> {
+  const { data } = await api.post("/v1/tools/options", { name: toolName, field });
   return data;
 }
 

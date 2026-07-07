@@ -61,6 +61,14 @@ class PgSkillStore:
                 json.dumps(record.history, ensure_ascii=False),
             )
 
+    async def delete(self, skill_id: str) -> int:
+        pool = get_pool()
+        async with pool.acquire() as conn:
+            res = await conn.execute("DELETE FROM skill_lifecycle WHERE skill_id = $1", skill_id)
+        rows = int(res.split()[-1]) if res and res.split()[-1].isdigit() else 0
+        log.info("lifecycle.deleted", skill_id=skill_id, rows=rows)
+        return rows
+
     async def all(self) -> list[SkillRecord]:
         pool = get_pool()
         async with pool.acquire() as conn:

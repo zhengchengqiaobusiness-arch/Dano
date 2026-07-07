@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
+import shutil
 
 import structlog
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
@@ -573,6 +575,17 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
     #   并为"只在 DOM 有选项、没绑上网络源"的纯枚举字段补一个无来源 enum(agent 传名字即原样提交)。
     apply_page_enum_options(selects, page_enum_options, post_data=pd, fields=fields)
     selects += page_enum_selects(pd, page_enum_options, {s["path"] for s in selects}, fields=fields)
+    select_by_path = {s.get("path"): s for s in selects if s.get("path")}
+    for f in fields:
+        sel = select_by_path.get(f.get("path"))
+        if not sel:
+            continue
+        f["type"] = "list-enum" if sel.get("multi") else "enum"
+        if sel.get("options"):
+            f["enum_options"] = list(sel.get("options") or [])
+        if sel.get("option_map"):
+            f["enum_value_map"] = dict(sel.get("option_map") or {})
+        f["source_kind"] = "page_enum" if sel.get("enum_source") == "dom" else "api_option"
     # select/选人字段:用录制选项标签当默认参数名(经候选列表桥接),避免漏内部 key(Activity_xxx/嵌套键)
     sel_names = suggest_select_names(selects, samples)
     for f in fields:
@@ -641,9 +654,9 @@ async def record_ws(ws: WebSocket) -> None:
                          storage_state=init.get("storage_state") or None,
                          token=init.get("token") or None)   # 贴 token → 预置登录态,免在画面里登录
 
-        async def on_frame(data: str) -> None:
+        async def on_frame(frame: dict) -> None:
             try:
-                await ws.send_json({"type": "frame", "data": data})
+                await ws.send_json({"type": "frame", **frame})
             except Exception:  # noqa: BLE001
                 pass
 
@@ -680,22 +693,41 @@ async def record_ws(ws: WebSocket) -> None:
                                if raw[i].get("op") in ("fill", "select", "pick") and raw[i].get("value")}
                     required_labels = {keymap[i] for i in fb_idx
                                        if raw[i].get("required") and raw[i].get("op") in ("fill", "select", "pick")}
-                    # 下拉真实可见选项(枚举地面真值){选中显示值: [选项文字]}
-                    page_enum_options = {raw[i].get("value", ""): raw[i]["options"] for i in fb_idx
-                                   if raw[i].get("op") in ("pick", "select") and raw[i].get("options")
-                                   and raw[i].get("value")}
+                    # 下拉真实可见选项(枚举地面真值):同时按「选中显示值」和「字段 key」建索引。
+                    # selected 用于把页面显示项(病假)与提交短码(type=2)连起来。
+                    page_enum_options = {}
+                    last_field_idx = None
+                    for i, step in enumerate(raw):
+                        if i in keymap:
+                            last_field_idx = i
+                        if step.get("op") not in ("pick", "select") or not step.get("options"):
+                            continue
+                        owner_idx = i if i in keymap else last_field_idx
+                        field_key = keymap.get(owner_idx, "") if owner_idx is not None else ""
+                        if not field_key:
+                            continue
+                        selected = str(step.get("value", "") or "").strip()
+                        if selected and not samples.get(field_key):
+                            samples[field_key] = selected
+                        entry = {"options": list(step["options"]), "field_key": field_key, "selected": selected}
+                        if selected and selected not in page_enum_options:
+                            page_enum_options[selected] = entry
+                        if field_key and field_key not in page_enum_options:
+                            page_enum_options[field_key] = entry
                 else:
                     steps, samples = sess.recorded_steps()
                     required_labels = sess.recorded_required_labels()
-                    page_options_by_field = sess.recorded_page_enum_options()  # {字段key: [选项]}
+                    page_options_by_field = sess.recorded_page_enum_options()  # {字段key: {options, field_key, selected}}
                     # 枚举地面真值:既按「选中显示值」也对到「字段 key」,使 page_enum_selects 在 body leaf
                     # 不出现 label 但出现内部英文名时也能命中(治"请假类型=病假 → body.leaveType=2"漏识别)。
                     page_enum_options = {}
-                    for field_key, opts in (page_options_by_field or {}).items():
+                    for field_key, raw_entry in (page_options_by_field or {}).items():
+                        opts = raw_entry.get("options") if isinstance(raw_entry, dict) else raw_entry
                         if not opts:
                             continue
-                        label = str(samples.get(field_key, "") or "").strip()
-                        entry = {"options": list(opts), "field_key": field_key}
+                        label = str((raw_entry.get("selected") if isinstance(raw_entry, dict) else None)
+                                    or samples.get(field_key, "") or "").strip()
+                        entry = {"options": list(opts), "field_key": field_key, "selected": label}
                         if label and label not in page_enum_options:
                             page_enum_options[label] = entry
                         if field_key and field_key not in page_enum_options:
@@ -1107,12 +1139,9 @@ async def _auto_export(tenant: str) -> None:
     best-effort:导出失败不影响接入结果。
     """
     try:
-        from pathlib import Path
-
-        from dano.execution.page.sessions import get_export_dir
         from dano.export.agent_skills import write_skills
-        out = get_export_dir(str(Path(__file__).resolve().parents[3] / "export" / "agent-skills"))
-        written = await write_skills(tenant, out)
+        out = _current_export_dir()
+        written = await write_skills(tenant, out, exclude_skill_ids=await _frozen_skill_ids())
         log.info("onboard.auto_export", tenant=tenant, out=out, count=len(written))
     except Exception as e:  # noqa: BLE001
         log.warning("onboard.auto_export_failed", error=str(e))
@@ -1164,36 +1193,141 @@ async def onboarding_job(job_id: str) -> dict:
     return job
 
 
+def _default_export_dir() -> str:
+    return str(Path(__file__).resolve().parents[3] / "export" / "agent-skills")
+
+
+def _current_export_dir() -> str:
+    from dano.execution.page.sessions import get_export_dir
+    return get_export_dir(_default_export_dir())
+
+
+def _export_slugs_for_manifest(m: dict) -> set[str]:
+    from dano.export.agent_skills import _slug
+    slugs = {_slug(str(m.get("name") or ""))}
+    business = str(m.get("business") or "").strip()
+    subsystem = str(m.get("subsystem") or "").strip()
+    if business and subsystem:
+        slugs.add(_slug(f"{subsystem}.{business}"))
+        slugs.add("dano-oa-index")
+    return {s for s in slugs if s}
+
+
+def _cleanup_export_folders(out_dir: str, slugs: set[str]) -> list[str]:
+    """清理已导出的 skill 文件夹。只删 out_dir 下的精确 slug 目录。"""
+    base = Path(out_dir).expanduser().resolve()
+    removed: list[str] = []
+    for slug in sorted(slugs):
+        target = (base / slug).resolve()
+        try:
+            target.relative_to(base)
+        except ValueError:
+            log.warning("export.cleanup_refused", base=str(base), target=str(target))
+            continue
+        if target.is_dir():
+            shutil.rmtree(target)
+            removed.append(str(target))
+            log.info("export.folder_removed", folder=str(target))
+    return removed
+
+
+async def _apply_lifecycle_state(skills: list) -> list:
+    rows = {r.skill_id: r for r in await _lifecycle.store.all()}
+    for s in skills:
+        rec = rows.get(s.skill_id)
+        if rec:
+            s.lifecycle_state = rec.state.value
+            s.frozen = rec.state == SkillState.SUSPENDED
+    return skills
+
+
+async def _frozen_skill_ids() -> set[str]:
+    return {r.skill_id for r in await _lifecycle.store.all() if r.state == SkillState.SUSPENDED}
+
+
+async def _manifests_for_tenant(tenant: str) -> list[dict]:
+    reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=await _tenant_subsystems(tenant))
+    await _apply_lifecycle_state(reg.skills)
+    return [m.model_dump() for m in build_manifests(reg.skills)]
+
+
 # ── 契约目录(租户隔离)──
 @app.get("/v1/skills")
 async def list_skills(x_tenant_key: str | None = Header(default=None)) -> list[dict]:
     tenant = await _auth_tenant(x_tenant_key)
-    reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=await _tenant_subsystems(tenant))
-    return [m.model_dump() for m in build_manifests(reg.skills)]
+    return await _manifests_for_tenant(tenant)
 
 
 @app.get("/v1/skills/{skill_id}")
 async def get_skill(skill_id: str, x_tenant_key: str | None = Header(default=None)) -> dict:
     tenant = await _auth_tenant(x_tenant_key)
-    reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=await _tenant_subsystems(tenant))
-    m = next((x for x in build_manifests(reg.skills) if x.name == skill_id), None)
+    m = next((x for x in await _manifests_for_tenant(tenant) if x["name"] == skill_id), None)
     if m is None:
         raise HTTPException(status_code=404, detail=f"本公司无此 Skill: {skill_id}")
-    return m.model_dump()
+    return m
 
 
 @app.delete("/v1/skills/{skill_id}")
 async def delete_skill(skill_id: str, x_tenant_key: str | None = Header(default=None)) -> dict:
-    """删除本租户的某个 skill(删 PG 资产各版本)。便于测试重来;按租户隔离,不碰别家。"""
+    """删除本租户的某个 skill:删 PG 资产各版本 + 生命周期记录 + 已导出文件夹。"""
     tenant = await _auth_tenant(x_tenant_key)
     sub_str, _, action = skill_id.partition(".")
     if not action:
         raise HTTPException(status_code=400, detail="skill_id 应为 {subsystem}.{action}")
+    manifests = await _manifests_for_tenant(tenant)
+    manifest = next((m for m in manifests if m["name"] == skill_id), None)
     subsystem = Subsystem(sub_str)            # 系统标识开放:任意系统皆合法(不存在则下面按 0 行返回 404)
+    removed = _cleanup_export_folders(_current_export_dir(), _export_slugs_for_manifest(manifest or {"name": skill_id}))
     rows = await repo.delete_by_action(Scope(tenant=tenant, subsystem=subsystem), action)
+    lifecycle_rows = await _lifecycle.store.delete(skill_id)
     if rows == 0:
         raise HTTPException(status_code=404, detail=f"本公司无此 Skill: {skill_id}")
-    return {"deleted": rows, "skill_id": skill_id}
+    return {"deleted": rows, "lifecycle_deleted": lifecycle_rows, "skill_id": skill_id, "removed_folders": removed}
+
+
+@app.post("/v1/skills/{skill_id}/freeze")
+async def freeze_skill(skill_id: str, x_tenant_key: str | None = Header(default=None)) -> dict:
+    """冻结本租户 skill:只清理导出文件夹,保留资产库;后续导出/工具列表跳过该 skill。"""
+    tenant = await _auth_tenant(x_tenant_key)
+    sub_str, _, action = skill_id.partition(".")
+    if not action:
+        raise HTTPException(status_code=400, detail="skill_id 应为 {subsystem}.{action}")
+    manifests = await _manifests_for_tenant(tenant)
+    manifest = next((m for m in manifests if m["name"] == skill_id), None)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail=f"本公司无此 Skill: {skill_id}")
+    subsystem = Subsystem(sub_str)
+    rec = await _lifecycle.store.get(skill_id)
+    if rec is None:
+        versions = await repo.list_versions(AssetType.PAGE_SCRIPT, Scope(tenant=tenant, subsystem=subsystem), action)
+        version = versions[0].version if versions else 1
+        rec = await _lifecycle.register_published(skill_id, subsystem, action, version)
+    if rec.state != SkillState.SUSPENDED:
+        rec = await _lifecycle.suspend(skill_id)
+    removed = _cleanup_export_folders(_current_export_dir(), _export_slugs_for_manifest(manifest))
+    return {"skill_id": skill_id, "state": rec.state.value if rec else SkillState.SUSPENDED.value,
+            "removed_folders": removed}
+
+
+@app.post("/v1/skills/{skill_id}/resume")
+async def resume_skill(skill_id: str, x_tenant_key: str | None = Header(default=None)) -> dict:
+    """恢复冻结的 skill:只恢复生命周期状态;不自动重建导出文件夹,下次导出时会重新写出。"""
+    tenant = await _auth_tenant(x_tenant_key)
+    sub_str, _, action = skill_id.partition(".")
+    if not action:
+        raise HTTPException(status_code=400, detail="skill_id 应为 {subsystem}.{action}")
+    manifests = await _manifests_for_tenant(tenant)
+    if not any(m["name"] == skill_id for m in manifests):
+        raise HTTPException(status_code=404, detail=f"本公司无此 Skill: {skill_id}")
+    subsystem = Subsystem(sub_str)
+    rec = await _lifecycle.store.get(skill_id)
+    if rec is None:
+        versions = await repo.list_versions(AssetType.PAGE_SCRIPT, Scope(tenant=tenant, subsystem=subsystem), action)
+        version = versions[0].version if versions else 1
+        rec = await _lifecycle.register_published(skill_id, subsystem, action, version)
+    elif rec.state == SkillState.SUSPENDED:
+        rec = await _lifecycle.resume_no_change(skill_id)
+    return {"skill_id": skill_id, "state": rec.state.value}
 
 
 # ── 瘦执行(前端只给 skill_id + input;endpoint/凭证/断言后端取)──
@@ -1231,7 +1365,8 @@ async def list_tools(x_tenant_key: str | None = Header(default=None)) -> list[di
     """导出本租户 Skill 为 OpenAI function-calling tools 数组,聊天端直接喂给 LLM。"""
     tenant = await _auth_tenant(x_tenant_key)
     reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=await _tenant_subsystems(tenant))
-    return build_function_tools(reg.skills)
+    await _apply_lifecycle_state(reg.skills)
+    return build_function_tools([s for s in reg.skills if not s.frozen])
 
 
 class ToolCallReq(BaseModel):
@@ -1287,12 +1422,17 @@ async def export_agent_skills_ep(req: ExportSkillsReq,
     from dano.execution.page.sessions import save_export_dir
     from dano.export.agent_skills import write_skills
     out = req.out_dir
+    frozen = await _frozen_skill_ids()
+    frozen_manifests = [m for m in await _manifests_for_tenant(tenant) if m["name"] in frozen]
     try:
-        written = await write_skills(tenant, out)
+        removed = []
+        for m in frozen_manifests:
+            removed.extend(_cleanup_export_folders(out, _export_slugs_for_manifest(m)))
+        written = await write_skills(tenant, out, exclude_skill_ids=frozen)
     except OSError as e:
         raise HTTPException(status_code=400, detail=f"写入目录失败:{e}") from e
     save_export_dir(out)                                 # 记住此目录 → 录完自动发布落同一处
-    return {"out_dir": out, "count": len(written), "written": written}
+    return {"out_dir": out, "count": len(written), "written": written, "removed_frozen_folders": removed}
 
 
 @app.get("/assets/published")

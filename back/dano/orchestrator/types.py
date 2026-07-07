@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -30,6 +31,9 @@ class SkillSpec(BaseModel):
     field_docs: dict[str, str] = Field(default_factory=dict)    # 字段→语义描述(阶段4)
     field_types: dict[str, str] = Field(default_factory=dict)   # 字段→JSON 类型(信源 schema;缺则按语义判定)
     call_metadata: dict[str, Any] = Field(default_factory=dict)  # 调用侧元数据(录制/验证状态等,不进 JSON Schema)
+    created_at: datetime | None = None                           # 资产产出时间(最新 published 版本)
+    lifecycle_state: str = ""                                     # 生命周期状态(异常暂停=冻结)
+    frozen: bool = False                                          # 冻结后保留库、不导出/不调用
     field_mappings: list[dict] = Field(default_factory=list)    # 可追溯字段映射(§16:目标点路径+来源 schema_ref)
     goal: dict = Field(default_factory=dict)                    # 结构化业务目标(意图/成功判据/禁止步,§2)
     has_api: bool = True

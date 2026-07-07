@@ -12,6 +12,29 @@ pytest.importorskip("playwright")
 from dano.execution.page.driver import PlaywrightPageDriver
 from dano.execution.page.recorder import RecordSession
 
+
+def test_recorder_key_safety_policy() -> None:
+    from dano.execution.page.recorder import _safe_recorder_key
+
+    for key in ["Escape", "Delete", "Shift+Tab", "Control+A", "Meta+Z", "Control+Enter", "Control+Backspace"]:
+        assert _safe_recorder_key(key)
+    for key in ["Alt+F4", "F5", "F12", "Control+R", "Control+W", "Alt+Delete", "Control+Shift+I"]:
+        assert not _safe_recorder_key(key)
+
+
+def test_recorded_page_enum_options_attach_popup_pick_to_previous_field() -> None:
+    sess = RecordSession()
+    sess.steps = [
+        {"op": "click", "locator": "label=类型", "field": "类型", "value": ""},
+        {"op": "pick", "locator": "text=病假", "value": "病假", "options": ["病假", "事假", "婚假"]},
+    ]
+
+    enums = sess.recorded_page_enum_options()
+
+    assert enums["类型"]["selected"] == "病假"
+    assert enums["类型"]["options"] == ["病假", "事假", "婚假"]
+
+
 _HTML = """<!doctype html><html><head><meta charset="utf-8"></head><body>
 <form>
   <label for="amt">金额</label><input id="amt" name="amount" type="text">

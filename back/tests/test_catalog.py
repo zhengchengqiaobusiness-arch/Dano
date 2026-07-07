@@ -146,6 +146,7 @@ def test_manifest_preserves_select_and_datetime_semantics():
 
 def test_manifest_exposes_call_metadata_without_polluting_function_schema():
     from dano.catalog.manifest import to_function_tool, to_manifest
+    from dano.export.agent_skills import _dano_call_py
     from dano.orchestrator.types import SkillSpec
     from dano.shared.enums import RiskLevel
 
@@ -172,6 +173,38 @@ def test_manifest_exposes_call_metadata_without_polluting_function_schema():
     assert meta["fields"]["请假类型"]["enum_value_map"] == {"事假": 1, "病假": 2}
     assert meta["fields"]["startTime"]["type"] == "datetime"
     assert "call_metadata" not in to_function_tool(m)["function"]["parameters"]
+    assert 'NUMERIC = []' in _dano_call_py(m)
+    assert '"请假类型"' not in _dano_call_py(m).split("NUMERIC =", 1)[1].splitlines()[0]
+
+
+def test_manifest_select_metadata_overrides_numeric_body_type():
+    """页面下拉提交短码(type=2)时,body 推断可能是 number；select 元数据才是调用契约的权威。"""
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    sk = SkillSpec(
+        skill_id="A-OA.submit_form", subsystem=Subsystem.OA, action="submit_form",
+        risk_level=RiskLevel.L3,
+        field_types={"类型": "number"},
+        required_fields=["类型"], optional_fields=[],
+        api_request={"selects": [{
+            "param": "类型", "source_url": "", "value_key": "", "label_key": "",
+            "options": ["病假", "事假", "婚假"],
+            "option_map": {"病假": 2, "事假": 1, "婚假": 3},
+            "enum_source": "dom", "enum_confirmed": True,
+        }]},
+    )
+
+    m = to_manifest(sk)
+    prop = m.parameters["properties"]["类型"]
+
+    assert prop["type"] == "string"
+    assert prop["format"] == "name-ref"
+    assert prop["enum"] == ["病假", "事假", "婚假"]
+    assert prop["x-enum-value-map"] == {"病假": 2, "事假": 1, "婚假": 3}
+    assert m.call_metadata["fields"]["类型"]["type"] == "enum"
+    assert m.call_metadata["fields"]["类型"]["enum_value_map"] == {"病假": 2, "事假": 1, "婚假": 3}
 
 
 async def test_page_skill_reads_recording_metadata_from_asset_body():

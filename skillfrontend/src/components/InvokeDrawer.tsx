@@ -4,7 +4,7 @@ import {
   Alert, Descriptions, Space, message, Image,
   Select, Switch,
 } from "antd";
-import { invokeSkill, SkillManifest, TaskOutcome, JSONSchema, SkillFieldCallMetadata } from "../api/skills";
+import { invokeSkill, listFieldOptions, SkillManifest, TaskOutcome, JSONSchema, SkillFieldCallMetadata } from "../api/skills";
 
 const STATE_COLOR: Record<string, string> = {
   completed: "success", failed: "error", rejected: "error",
@@ -89,7 +89,19 @@ function enumOptions(p: JSONSchema): EnumSelectOption[] {
 function schemaWithCallMetadata(p: JSONSchema, meta?: SkillFieldCallMetadata): JSONSchema {
   if (!meta) return p;
   const out: JSONSchema = { ...p };
-  if (!out.type && meta.type) out.type = meta.type;
+  const hasEnumMeta = !!(
+    meta.type === "enum" ||
+    meta.type === "list-enum" ||
+    meta.enum_options?.length ||
+    meta.enum_value_map ||
+    meta.options_source
+  );
+  if (hasEnumMeta) {
+    out.type = meta.type === "list-enum" ? "array" : "string";
+    if (!out.format) out.format = "name-ref";
+  } else if (!out.type && meta.type) {
+    out.type = meta.type;
+  }
   if (!out.format && meta.format) out.format = meta.format;
   if (!out["x-enum-options"] && meta.enum_options) out["x-enum-options"] = meta.enum_options;
   if (!out["x-enum-value-map"] && meta.enum_value_map) out["x-enum-value-map"] = meta.enum_value_map;
@@ -105,6 +117,8 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
   const [running, setRunning] = useState(false);
   const [out, setOut] = useState<TaskOutcome | null>(null);
   const [lastInput, setLastInput] = useState<Record<string, unknown>>({});  // 供消歧选中后带同一组输入重调
+  const [liveOptions, setLiveOptions] = useState<Record<string, EnumSelectOption[]>>({});
+  const [loadingOptions, setLoadingOptions] = useState<Record<string, boolean>>({});
 
   const props = useMemo(() => skill?.parameters?.properties || {}, [skill]);
   const required = useMemo(() => new Set(skill?.parameters?.required || []), [skill]);
@@ -116,6 +130,8 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
       setConfirm(skill.requires_confirmation);
       setMode("form");
       setOut(null);
+      setLiveOptions({});
+      setLoadingOptions({});
     }
   }, [skill]);
 
@@ -157,36 +173,72 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
     await doInvoke(input);
   }
 
+  async function loadLiveOptions(field: string) {
+    if (!skill || liveOptions[field]?.length || loadingOptions[field]) return;
+    setLoadingOptions((p) => ({ ...p, [field]: true }));
+    try {
+      const r = await listFieldOptions(skill.name.replace(/\./g, "__"), field);
+      const opts: EnumSelectOption[] = (r.options || []).map((opt) => {
+        if (opt && typeof opt === "object") {
+          const label = String(opt.label ?? opt.name ?? opt.value ?? "");
+          const value = opt.value ?? label;
+          return { label, value, selectValue: selectKey(value), disabled: !!opt.disabled };
+        }
+        return { label: String(opt), value: opt, selectValue: selectKey(opt) };
+      }).filter((opt) => opt.label);
+      setLiveOptions((p) => ({ ...p, [field]: opts }));
+      if (!opts.length) message.warning(`${field} 当前没有可选项${r.note ? `:${r.note}` : ""}`);
+    } catch (e: any) {
+      message.error(`拉取 ${field} 可选项失败:` + (e?.response?.data?.detail || e.message));
+    } finally {
+      setLoadingOptions((p) => ({ ...p, [field]: false }));
+    }
+  }
+
   const fieldRow = (key: string, rawProp: JSONSchema) => {
     const p = schemaWithCallMetadata(rawProp, skill?.call_metadata?.fields?.[key]);
     const label = p.description || key;
     const hint = `${key} ${label}`;
     const reqMark = required.has(key) ? <span style={{ color: "#cf1322" }}> *</span> : null;
     const type = (p.type || "").toLowerCase();
-    const options = enumOptions(p);
+    const staticOptions = enumOptions(p);
+    const hasLiveSource = !!p["x-options-source"];
+    const options = liveOptions[key]?.length ? liveOptions[key] : staticOptions;
     const bySelectValue = new Map(options.map((opt) => [opt.selectValue, opt.value]));
     let widget;
-    if (options.length) {
+    if (options.length || hasLiveSource) {
       const isMulti = type === "array" || type === "list-enum" || !!p.items?.enum?.length || !!p.items?.["x-enum-options"]?.length;
       if (isMulti) {
         const current = Array.isArray(values[key]) ? values[key] as unknown[] : [];
         widget = (
           <Select
             mode="multiple"
+            style={{ width: "100%" }}
             allowClear
+            showSearch
+            loading={!!loadingOptions[key]}
             value={current.map(selectKey)}
             options={options.map((opt) => ({ label: opt.label, value: opt.selectValue, disabled: opt.disabled }))}
-            placeholder={key}
+            placeholder={hasLiveSource && !options.length ? "打开下拉拉取真实选项" : key}
+            notFoundContent={loadingOptions[key] ? "正在拉取真实选项..." : "暂无选项"}
+            onDropdownVisibleChange={(open) => { if (open && hasLiveSource) loadLiveOptions(key); }}
+            onFocus={() => { if (hasLiveSource) loadLiveOptions(key); }}
             onChange={(selected) => setVal(key, selected.map((v) => bySelectValue.get(v)))}
           />
         );
       } else {
         widget = (
           <Select
+            style={{ width: "100%" }}
             allowClear={!required.has(key)}
+            showSearch
+            loading={!!loadingOptions[key]}
             value={!isEmptyValue(values[key]) ? selectKey(values[key]) : undefined}
             options={options.map((opt) => ({ label: opt.label, value: opt.selectValue, disabled: opt.disabled }))}
-            placeholder={key}
+            placeholder={hasLiveSource && !options.length ? "打开下拉拉取真实选项" : key}
+            notFoundContent={loadingOptions[key] ? "正在拉取真实选项..." : "暂无选项"}
+            onDropdownVisibleChange={(open) => { if (open && hasLiveSource) loadLiveOptions(key); }}
+            onFocus={() => { if (hasLiveSource) loadLiveOptions(key); }}
             onChange={(selected) => setVal(key, selected == null ? undefined : bySelectValue.get(selected))}
           />
         );
@@ -260,7 +312,7 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
             <>
               <Typography.Text type="secondary">input(业务字段 JSON)</Typography.Text>
               <Input.TextArea value={text} onChange={(e) => setText(e.target.value)} autoSize={{ minRows: 8, maxRows: 18 }}
-                              style={{ fontFamily: "monospace", marginTop: 6 }} />
+                              style={{ fontFamily: "monospace", marginTop: 60 }} />
             </>
           )}
 

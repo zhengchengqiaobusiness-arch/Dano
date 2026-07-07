@@ -52,6 +52,7 @@ class IllegalTransition(RuntimeError):
 class SkillStore(Protocol):
     async def get(self, skill_id: str) -> SkillRecord | None: ...
     async def put(self, record: SkillRecord) -> None: ...
+    async def delete(self, skill_id: str) -> int: ...
     async def all(self) -> list[SkillRecord]: ...
 
 
@@ -64,6 +65,9 @@ class InMemorySkillStore:
 
     async def put(self, record: SkillRecord) -> None:
         self._rows[record.skill_id] = record
+
+    async def delete(self, skill_id: str) -> int:
+        return 1 if self._rows.pop(skill_id, None) is not None else 0
 
     async def all(self) -> list[SkillRecord]:
         return list(self._rows.values())
