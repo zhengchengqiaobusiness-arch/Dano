@@ -2379,6 +2379,19 @@ function streamTextForContentItem(
   }
 }
 
+function hasUnstreamableTranscriptChange(
+  previous: RpcTranscriptMessage | undefined,
+  next: RpcTranscriptMessage,
+): boolean {
+  const previousItems = previous ? transcriptContentItems(previous) : [];
+  const nextItems = transcriptContentItems(next);
+
+  return nextItems.some((item, index) => {
+    if (streamTextForContentItem(item)) return false;
+    return JSON.stringify(previousItems[index]) !== JSON.stringify(item);
+  });
+}
+
 function synthesizeTranscriptDelta(
   previous: RpcTranscriptMessage | undefined,
   next: RpcTranscriptMessage,
@@ -2473,6 +2486,13 @@ function applyTranscriptDeltaToMessage(
   }
 
   return { ...base, content };
+}
+
+function sameTranscriptMessage(
+  left: RpcTranscriptMessage | undefined,
+  right: RpcTranscriptMessage,
+): boolean {
+  return Boolean(left) && JSON.stringify(left) === JSON.stringify(right);
 }
 
 function isDifferentToolCall(
@@ -3939,7 +3959,7 @@ class TranscriptProjector {
   projectDeltaEvent(
     event: object,
     sessionPath: string | null,
-  ): RpcTranscriptDeltaEvent | null {
+  ): RpcTranscriptDeltaEvent | RpcTranscriptUpsertEvent | null {
     const message = extractEventMessage(event);
     if (!message) return null;
 
@@ -3964,6 +3984,15 @@ class TranscriptProjector {
     );
 
     const previousMessage = this.state.lastMessagesByKey.get(transcriptKey);
+    if (hasUnstreamableTranscriptChange(previousMessage, transcriptMessage)) {
+      this.rememberTranscriptMessage(transcriptMessage);
+      return {
+        type: "transcript_upsert",
+        sessionPath: sessionPath ?? undefined,
+        message: transcriptMessage,
+      };
+    }
+
     const deltaEvent =
       extractAssistantMessageDeltaEvent(event, transcriptMessage) ??
       synthesizeTranscriptDelta(
@@ -3971,6 +4000,14 @@ class TranscriptProjector {
         transcriptMessage,
       );
     if (!deltaEvent) {
+      if (!sameTranscriptMessage(previousMessage, transcriptMessage)) {
+        this.rememberTranscriptMessage(transcriptMessage);
+        return {
+          type: "transcript_upsert",
+          sessionPath: sessionPath ?? undefined,
+          message: transcriptMessage,
+        };
+      }
       this.rememberTranscriptMessage(transcriptMessage);
       return null;
     }
