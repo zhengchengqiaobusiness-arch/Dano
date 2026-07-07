@@ -457,14 +457,6 @@ function globPatternMatches(pattern: string, value: string): boolean {
   return new RegExp(`^${escaped}$`).test(value);
 }
 
-function blocksDanoEnv(pattern: string): boolean {
-  return (DANO_HEIMDALL_SANDBOX_ENV_ALLOW as readonly string[]).some(
-    value =>
-      (value === "DANO_URL" || value === "DANO_TENANT_KEY") &&
-      globPatternMatches(pattern, value),
-  );
-}
-
 function migrateHeimdallRuntimeSettings(path: string): void {
   if (!existsSync(path)) return;
 
@@ -490,12 +482,13 @@ function migrateHeimdallRuntimeSettings(path: string): void {
     sandbox.env = {};
   }
   const env = sandbox.env as { allow?: unknown; deny?: unknown };
-  const allow = mergeStringArray(env.allow, DANO_HEIMDALL_SANDBOX_ENV_ALLOW);
-  env.allow = allow;
+  env.allow = mergeStringArray(env.allow, DANO_HEIMDALL_SANDBOX_ENV_ALLOW);
   env.deny = Array.isArray(env.deny)
     ? env.deny.filter(
         (item): item is string =>
-          typeof item === "string" && !blocksDanoEnv(item),
+          typeof item === "string" &&
+          !globPatternMatches(item, "DANO_URL") &&
+          !globPatternMatches(item, "DANO_TENANT_KEY"),
       )
     : [];
   writeFileSync(path, `${JSON.stringify(root, null, 2)}\n`);

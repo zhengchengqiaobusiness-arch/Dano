@@ -1,5 +1,4 @@
 node_modules
-apps/dano/lib/node_modules
 .pnpm-store
 dist
 web-dist

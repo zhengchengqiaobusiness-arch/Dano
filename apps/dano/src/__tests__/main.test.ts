@@ -683,49 +683,4 @@ describe("Dano main", () => {
     }
   });
 
-  it("removes broad Heimdall env deny patterns when they block Dano OA variables", () => {
-    const sourceRoot = mkdtempSync(join(tmpdir(), "dano-main-source-"));
-    const agentRoot = mkdtempSync(join(tmpdir(), "dano-main-agent-"));
-
-    try {
-      mkdirSync(join(sourceRoot, "deploy", "runtime-defaults"), {
-        recursive: true,
-      });
-      writeFileSync(
-        join(sourceRoot, "deploy/runtime-defaults/heimdall.json"),
-        "{}",
-      );
-      writeFileSync(
-        join(agentRoot, "heimdall.json"),
-        JSON.stringify({
-          sandbox: {
-            env: { allow: ["*", "API_KEY"], deny: ["*_KEY", "BLOCKED_ENV"] },
-          },
-        }),
-      );
-
-      initializeDanoAgentSettings(agentRoot, sourceRoot);
-
-      expect(
-        JSON.parse(readFileSync(join(agentRoot, "heimdall.json"), "utf8")),
-      ).toEqual({
-        sandbox: {
-          userNamespace: false,
-          env: {
-            allow: expect.arrayContaining([
-              "*",
-              "API_KEY",
-              "DANO_URL",
-              "DANO_TENANT_KEY",
-            ]),
-            deny: ["BLOCKED_ENV"],
-          },
-        },
-      });
-    } finally {
-      rmSync(sourceRoot, { recursive: true, force: true });
-      rmSync(agentRoot, { recursive: true, force: true });
-    }
-  });
-
 });

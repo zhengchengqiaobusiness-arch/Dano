@@ -42,6 +42,7 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 - For UI changes, verify the rendered app in a browser against the relevant flow and capture a screenshot as validation evidence.
 - For browser validation, use `agent-browser tab new <url>` directly. Do not pass `--auto-connect` or `--cdp 9222`; this repo's agent-browser setup already auto-connects to the persistent Chrome for Testing instance.
 - For Podman/deploy/runtime/Heimdall/bash/upload validation, `smoke:deploy` alone is not enough. Also verify in a browser: plain text chat, image upload with model read/description, and a model-triggered `bash ls` tool call.
+- If `podman ps` works but `podman compose` or `podman machine list` fails with `podman-machine-default.lock: operation not permitted` or `could not find a matching machine`, treat it as local Podman machine metadata being blocked by the sandbox, not a Dano bug. Re-run the same Compose command outside the sandbox/escalated instead of changing Dano code.
 - After Podman-based deployment or smoke tests, stop and remove the test containers and pods, then remove Dano temporary images/tags and dangling build layers after confirming no containers reference them; keep reusable base images unless explicitly asked.
 
 ## GitHub Workflow

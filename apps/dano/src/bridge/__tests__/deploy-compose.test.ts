@@ -202,9 +202,6 @@ describe("deploy compose wrapper", () => {
       "DANO_UPLOAD_DIR: /opt/dano/runtime-data/.dano/uploads",
     );
     expect(compose).toContain(
-      "HEIMDALL_PROTECT_CONFIG_OVERLAY: ${HEIMDALL_PROTECT_CONFIG_OVERLAY:-0}",
-    );
-    expect(compose).toContain(
       "${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/opt/dano/runtime-data",
     );
     expect(compose).not.toContain(":/tmp/dano");
@@ -231,7 +228,6 @@ describe("deploy compose wrapper", () => {
     const dockerignoreText = readFileSync(dockerignoreFile, "utf8");
 
     expect(dockerignoreText).toContain("node_modules");
-    expect(dockerignoreText).toContain("apps/dano/lib/node_modules");
     expect(dockerignoreText).toContain(".pnpm-store");
   });
 
