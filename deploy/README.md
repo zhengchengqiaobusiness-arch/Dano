@@ -128,7 +128,13 @@ minimum acceptance sequence against the Podman Compose deployment:
    App container shell check:
 
    ```bash
-   podman compose --env-file .env exec app sh -lc 'test -n "${DANO_URL:-}" && echo APP_URL_PRESENT || echo APP_URL_MISSING; test -n "${DANO_TENANT_KEY:-}" && echo APP_TENANT_PRESENT || echo APP_TENANT_MISSING; /opt/dano/runtime-data/.agents/skills/dano-a-oa-qingjia/scripts/submit.sh --list-options 请假类型'
+   podman compose --env-file .env exec app sh -lc '
+   test -n "${DANO_URL:-}" && echo APP_URL_PRESENT || echo APP_URL_MISSING
+   test -n "${DANO_TENANT_KEY:-}" && echo APP_TENANT_PRESENT || echo APP_TENANT_MISSING
+   leave_skill_dir="$(find /opt/dano/runtime-data/.agents/skills -maxdepth 1 -type d -name "dano-a-oa-*qingjia" | sort | head -n 1)"
+   test -n "$leave_skill_dir" && test -x "$leave_skill_dir/scripts/submit.sh" || { echo OA_LEAVE_SKILL_MISSING; exit 1; }
+   "$leave_skill_dir/scripts/submit.sh" --list-options 类型
+   '
    ```
 
    The direct app-container command proves Compose injected the variables and
@@ -142,7 +148,9 @@ minimum acceptance sequence against the Podman Compose deployment:
    printf '%s\n' OA_ENV_CHECK
    test -n "${DANO_URL:-}" && echo URL_PRESENT || echo URL_MISSING
    test -n "${DANO_TENANT_KEY:-}" && echo TENANT_PRESENT || echo TENANT_MISSING
-   /opt/dano/runtime-data/.agents/skills/dano-a-oa-qingjia/scripts/submit.sh --list-options 请假类型
+   leave_skill_dir="$(find /opt/dano/runtime-data/.agents/skills -maxdepth 1 -type d -name "dano-a-oa-*qingjia" | sort | head -n 1)"
+   test -n "$leave_skill_dir" && test -x "$leave_skill_dir/scripts/submit.sh" || { echo OA_LEAVE_SKILL_MISSING; exit 1; }
+   "$leave_skill_dir/scripts/submit.sh" --list-options 类型
    ```
 
    Then check the model-triggered bash session:
