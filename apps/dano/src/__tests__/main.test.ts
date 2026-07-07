@@ -51,7 +51,7 @@ describe("Dano main", () => {
     };
 
     expect(appPackage.dependencies?.["@josephyoung/pi-heimdall"]).toBe(
-      "0.2.15",
+      "0.2.16",
     );
     expect(appPackage.dependencies?.["@earendil-works/pi-coding-agent"]).toBe(
       "0.80.2",
