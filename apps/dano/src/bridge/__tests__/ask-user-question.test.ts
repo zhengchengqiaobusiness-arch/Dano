@@ -777,6 +777,47 @@ describe("ask_user_question tool", () => {
     });
   });
 
+  it.each([
+    ["question", { question: "请一次补充请假信息" }],
+    ["title", { title: "请一次补充请假信息" }],
+    ["label", { label: "请一次补充请假信息" }],
+    ["prompt", { prompt: "请一次补充请假信息" }],
+  ])("ignores top-level %s text on compatible multi-question forms", async (_, mixed) => {
+    const execution = askUserQuestionTool.execute(
+      "compat-multi-text-mixed",
+      {
+        ...mixed,
+        questions: [
+          {
+            id: "leave_type",
+            question: "请假类型？",
+            options: ["事假", "病假"],
+            default: "事假",
+          },
+          {
+            id: "reason",
+            question: "请假原因？",
+            default: "个人事务",
+          },
+        ],
+      } as never,
+      undefined,
+      undefined,
+      {} as never,
+    );
+
+    askUserQuestionCoordinator.answer("compat-multi-text-mixed", {
+      cancelled: false,
+      answer: { leave_type: "病假", reason: "发烧" },
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: {
+        status: "answered",
+        answer: { leave_type: "病假", reason: "发烧" },
+      },
+    });
+  });
+
   it("rejects a retry question without cancelling the pending form", async () => {
     const first = executeQuestion("separate-1", {
       question: "Leave type?",
@@ -801,7 +842,6 @@ describe("ask_user_question tool", () => {
   });
 
   it.each([
-    ["question", { question: "Leave details?" }],
     ["options", { options: ["A", "B"] }],
     ["inputType", { inputType: "date" }],
     ["dateFormat", { dateFormat: "yyyy-MM-dd" }],
