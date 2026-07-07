@@ -683,7 +683,7 @@ describe("Dano main", () => {
     }
   });
 
-  it("keeps broad Heimdall env deny patterns when removing them would expose unrelated secrets", () => {
+  it("removes broad Heimdall env deny patterns when they block Dano OA variables", () => {
     const sourceRoot = mkdtempSync(join(tmpdir(), "dano-main-source-"));
     const agentRoot = mkdtempSync(join(tmpdir(), "dano-main-agent-"));
 
@@ -718,7 +718,7 @@ describe("Dano main", () => {
               "DANO_URL",
               "DANO_TENANT_KEY",
             ]),
-            deny: ["*_KEY", "BLOCKED_ENV"],
+            deny: ["BLOCKED_ENV"],
           },
         },
       });
