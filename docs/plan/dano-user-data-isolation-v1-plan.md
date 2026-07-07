@@ -20,7 +20,7 @@
 - 默认 Pi/Dano runtime 配置写入全局 agent dir：
 
 ```text
-/opt/dano/runtime-data/default-settings/.pi/agent/
+/opt/dano/runtime-data/.pi/agent/
   SYSTEM.md
   settings.json
   heimdall.json
@@ -58,12 +58,11 @@ sessionId -> workspaceId -> workspacePath
 
 ```text
 /opt/dano/runtime-data/
-  default-settings/
-    .pi/
-      agent/
-        SYSTEM.md
-        settings.json
-        heimdall.json
+  .pi/
+    agent/
+      SYSTEM.md
+      settings.json
+      heimdall.json
 
   users/
     <user_id>/
@@ -114,7 +113,7 @@ DANO_RUNTIME_DIR=/opt/dano/runtime-data
 
 ```sh
 runtime_root="${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}"
-agent_dir="${PI_CODING_AGENT_DIR:-$runtime_root/default-settings/.pi/agent}"
+agent_dir="${PI_CODING_AGENT_DIR:-$runtime_root/.pi/agent}"
 export PI_CODING_AGENT_DIR="$agent_dir"
 ```
 
@@ -183,13 +182,13 @@ assertInsideWorkspace(targetPath, workspacePath)
 1. 全新 runtime-data 启动后生成：
 
 ```text
-/opt/dano/runtime-data/default-settings/.pi/agent/SYSTEM.md
-/opt/dano/runtime-data/default-settings/.pi/agent/settings.json
-/opt/dano/runtime-data/default-settings/.pi/agent/heimdall.json
+/opt/dano/runtime-data/.pi/agent/SYSTEM.md
+/opt/dano/runtime-data/.pi/agent/settings.json
+/opt/dano/runtime-data/.pi/agent/heimdall.json
 ```
 
 2. 重启不覆盖手改过的 `SYSTEM.md/settings.json/heimdall.json`。
-3. Dano 进程内 `PI_CODING_AGENT_DIR` 指向 `default-settings/.pi/agent`。
+3. Dano 进程内 `PI_CODING_AGENT_DIR` 指向 `.pi/agent`。
 4. 新会话 Runtime Workspace 在 `runtime-data/workspaces/ws_<random>`，不在运行根本身。
 5. 新 Runtime Workspace 不包含默认 `.pi` 配置文件。
 6. 上传仍写入当前 workspace 的 `uploads/`，prompt 中仍以项目文件引用传给 Pi。

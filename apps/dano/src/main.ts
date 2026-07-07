@@ -62,6 +62,7 @@ export interface DanoServerOptions {
   port: number;
   defaultWorkspacePath: string;
   agentConfigDir: string;
+  legacyAgentConfigDir?: string;
   sessionsRootPath: string;
   productName: string;
   emptyState: BridgeEmptyStateConfig;
@@ -130,8 +131,12 @@ function readAgentConfigDir(
 ): string {
   return (
     env.PI_CODING_AGENT_DIR?.trim() ||
-    join(runtimeRootPath, "default-settings", ".pi", "agent")
+    join(runtimeRootPath, ".pi", "agent")
   );
+}
+
+function readLegacyAgentConfigDir(runtimeRootPath: string): string {
+  return join(runtimeRootPath, "default-settings", ".pi", "agent");
 }
 
 function readSessionsRootPath(
@@ -399,6 +404,9 @@ export function parseDanoServerOptions(
       cwd,
       readAgentConfigDir(env, resolvedRuntimeRootPath),
     ),
+    legacyAgentConfigDir: env.PI_CODING_AGENT_DIR?.trim()
+      ? undefined
+      : resolve(cwd, readLegacyAgentConfigDir(resolvedRuntimeRootPath)),
     sessionsRootPath: resolve(
       cwd,
       sessionsRootPath ??
@@ -425,9 +433,10 @@ function ensureDefaultWorkspace(path: string): string {
 export function initializeDanoAgentSettings(
   agentDir: string,
   sourceCwd: string,
+  legacyAgentDir?: string,
 ): void {
   const runtimeDefaultsDir = findNearestRuntimeDefaultsDir(sourceCwd);
-  if (!runtimeDefaultsDir) {
+  if (!runtimeDefaultsDir && !legacyAgentDir) {
     return;
   }
 
@@ -435,8 +444,14 @@ export function initializeDanoAgentSettings(
   mkdirSync(targetSettingsDir, { recursive: true });
 
   for (const fileName of DEFAULT_RUNTIME_SETTINGS_FILES) {
-    const sourcePath = join(runtimeDefaultsDir, fileName);
+    const legacyPath = legacyAgentDir ? join(legacyAgentDir, fileName) : "";
+    const sourcePath = runtimeDefaultsDir
+      ? join(runtimeDefaultsDir, fileName)
+      : "";
     const targetPath = join(targetSettingsDir, fileName);
+    if (legacyPath && existsSync(legacyPath) && !existsSync(targetPath)) {
+      copyFileSync(legacyPath, targetPath);
+    }
     if (existsSync(sourcePath) && !existsSync(targetPath)) {
       copyFileSync(sourcePath, targetPath);
     }
@@ -592,7 +607,11 @@ async function runDanoMain(): Promise<number> {
   if (!process.env.PI_CODING_AGENT_DIR?.trim()) {
     process.env.PI_CODING_AGENT_DIR = options.agentConfigDir;
   }
-  initializeDanoAgentSettings(options.agentConfigDir, options.cwd);
+  initializeDanoAgentSettings(
+    options.agentConfigDir,
+    options.cwd,
+    options.legacyAgentConfigDir,
+  );
   mkdirSync(options.sessionsRootPath, { recursive: true });
   process.env.DANO_SESSIONS_ROOT = options.sessionsRootPath;
   process.env.PI_WEB_SESSIONS_ROOT = options.sessionsRootPath;
