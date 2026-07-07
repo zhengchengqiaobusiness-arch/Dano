@@ -207,9 +207,7 @@ describe("deploy compose wrapper", () => {
     expect(compose).toContain(
       "${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/opt/dano/runtime-data",
     );
-    expect(compose).toContain(
-      "agent-config:/opt/dano/runtime-data/.pi/agent",
-    );
+    expect(compose).toContain("agent-config:/opt/dano/runtime-data/.pi");
     expect(compose).toContain(
       "workspaces:/opt/dano/runtime-data/workspaces",
     );

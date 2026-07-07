@@ -43,7 +43,7 @@ services:
       - "8080"
     volumes:
       - ${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/opt/dano/runtime-data
-      - agent-config:/opt/dano/runtime-data/.pi/agent
+      - agent-config:/opt/dano/runtime-data/.pi
       - workspaces:/opt/dano/runtime-data/workspaces
       - ${DANO_SECRETS_DIR:-/opt/dano/deploy/.secrets}:/run/secrets:ro
     networks:

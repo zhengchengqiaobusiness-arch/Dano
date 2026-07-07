@@ -15,11 +15,12 @@ This directory contains deployment-specific defaults and proxy config.
   - `/opt/dano/runtime-data` is mounted at `/opt/dano/runtime-data` for runtime state.
 - Docker Compose mounts
   `${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/opt/dano/runtime-data` for
-  host-visible runtime state such as sessions and skills. The `.pi/agent` and
+  host-visible runtime state such as sessions and skills. The `.pi` and
   `workspaces` subtrees are Compose named volumes, mounted at
-  `/opt/dano/runtime-data/.pi/agent` and `/opt/dano/runtime-data/workspaces`, so
-  Heimdall can overlay-hide protected config files in Bubblewrap while agent
-  config, Runtime Workspaces, and uploads still survive container recreation.
+  `/opt/dano/runtime-data/.pi` and `/opt/dano/runtime-data/workspaces`, so
+  Heimdall can overlay-hide protected config files in Bubblewrap while protecting
+  runtime `.pi` files as read-only via `sandbox.paths`. Agent config, Runtime
+  Workspaces, and uploads still survive container recreation.
   Do not run Compose with `-v` unless you intend to remove those volumes.
 
 On container startup, `deploy/docker-entrypoint.sh` creates:
