@@ -1392,6 +1392,8 @@ async def list_tools(x_tenant_key: str | None = Header(default=None)) -> list[di
 
 class ToolCallReq(BaseModel):
     name: str                       # 工具名(= skill_id 的点转 __,如 A-OA__submit_leave)
+    capability: str | None = None   # 新调用协议:一个 Skill 内的业务能力键(query_status/submit_batch...)
+    input: dict | None = None       # 新调用协议:input 优先,arguments 兼容
     arguments: dict | str = {}      # LLM 产出的参数(对象或 JSON 字符串都行)
     confirm: bool = False
 
@@ -1400,13 +1402,16 @@ class ToolCallReq(BaseModel):
 async def call_tool(req: ToolCallReq, x_tenant_key: str | None = Header(default=None)) -> dict:
     """执行一次 LLM 工具调用:name→skill_id、arguments→input,走与 /invoke 同一受控链路。"""
     tenant = await _auth_tenant(x_tenant_key)
-    args = req.arguments
+    args = req.input if req.input is not None else req.arguments
     if isinstance(args, str):
         import json as _json
         try:
             args = _json.loads(args or "{}")
         except _json.JSONDecodeError as e:
             raise HTTPException(status_code=400, detail=f"arguments 非合法 JSON: {e}") from e
+    args = dict(args or {})
+    if req.capability:
+        args["__capability"] = req.capability
     return await _invoke(tenant, skill_id_of(req.name), args, req.confirm)
 
 

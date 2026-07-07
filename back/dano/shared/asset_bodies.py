@@ -250,6 +250,8 @@ class PageScriptBody(BaseModel):
     # 抓提交请求路径(SPA 内部接口):有它则运行期直接发该请求(不走 DOM 回放),body_template 的 {{字段}} 用参数填回
     api_request: dict | None = Field(
         default=None, description="{method, path, body_template, content_type, params}:录制抓到的提交请求,参数化后直接调")
+    capabilities: list[dict] = Field(
+        default_factory=list, description="对外调用方可见的业务能力列表(query_status/list_options/submit_batch 等)")
     # P1 标注(新增,默认空,旧资产兼容):把页面 Skill 升级为带语义的声明式业务能力
     goal: dict = Field(default_factory=dict, description="结构化业务目标(GoalBody 形态:intent/success_criteria/forbidden_steps)")
     page_model: list[PageNode] = Field(default_factory=list, description="页面角色模型(pageId/role/entry/exit),不止 URL")

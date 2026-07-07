@@ -243,7 +243,8 @@ def _build_page_body(api_request: dict, action: str, title: str, required):
                           field_types=ftypes, risk_level=RiskLevel.L3,
                           recording_mode=recording_mode,
                           verification_status=IngestionStatus.PARTIALLY_VERIFIED.value,
-                          verification_basis=verification_basis).model_dump()
+                          verification_basis=verification_basis,
+                          capabilities=list(api_request.get("capabilities") or [])).model_dump()
     return body, params, req_fields, opt_fields
 
 

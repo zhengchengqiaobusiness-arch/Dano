@@ -73,6 +73,10 @@ def _flags(m: SkillManifest) -> str:
     return " ".join(f"--{k} <{k}>" for k in keys)
 
 
+def _capability(m: SkillManifest) -> str:
+    return (getattr(m, "capability", "") or m.name).strip()
+
+
 # ─────────────────────────── 语义抽取(供丰富 SKILL.md)───────────────────────────
 def _numeric_fields(props: dict) -> list[str]:
     """数值字段:manifest 的 type 优先(已按信源/语义判定),再退按名字/描述。与契约层同一判据。
@@ -384,6 +388,11 @@ _SECURITY_MD = """## 安全
 # ─────────────────────────── SKILL.md ───────────────────────────
 def _skill_md(m: SkillManifest, slug: str) -> str:
     tool = tool_name_of(m.name)
+    capability = _capability(m)
+    capabilities = [str((c or {}).get("name") or (c or {}).get("kind") or "").strip()
+                    for c in (getattr(m, "capabilities", []) or [])]
+    capabilities = [c for c in capabilities if c]
+    cap_line = ", ".join(dict.fromkeys(capabilities)) or capability
     confirm = m.requires_confirmation
     keys, required, props = _fields(m)
     numset = set(_numeric_fields(props))
@@ -419,6 +428,7 @@ description: {desc}
 compatibility: 需 python3 + 能访问 Dano 网关;通过 Dano 执行真实动作(写操作经确认 + 事实核查)
 metadata:
   source: dano:{m.name}
+  capability: {capability}
   tool: {tool}
   risk_level: {m.risk_level}
   requires_confirmation: {str(confirm).lower()}
@@ -482,6 +492,13 @@ metadata:
 - `DANO_URL`:Dano 网关地址,如 `http://localhost:8077`
 - `DANO_TENANT_KEY`:本租户 api_key(作 `X-Tenant-Key`)
 
+## 调用协议草案
+可用 capability:`{cap_line}`。
+脚本默认按旧工具名 `{tool}` 调用,同时在请求里携带 `capability="{capability}"`。需要显式指定能力键时可加 `--capability <capability>`;`--json` 兼容旧参数对象,也支持 envelope:
+```json
+{{"capability": "{capability}", "input": {ex_args}, "confirm": {str(confirm).lower()}}}
+```
+
 速查见 `references/QUICKREF.md`,详细说明见 `references/README.md`。
 """
 
@@ -490,9 +507,11 @@ metadata:
 def _quickref(m: SkillManifest) -> str:
     flags = _flags(m)
     cflag = " --confirm" if m.requires_confirmation else ""
+    capability = _capability(m)
     return f"""# {m.title} · 速查
 
 正常用脚本入口,不要手拼 curl。
+默认 capability:`{capability}`;需要覆盖时加 `--capability <capability>`。
 
 ## 自检
 ```bash
@@ -554,7 +573,7 @@ def _readme(m: SkillManifest) -> str:
                 + " 才算成功;`failed` 据 `reason` 处置,**勿谎报成功**。"))
     return f"""# {m.title} — 详细说明
 
-`source: dano:{m.name}` · 风险 {m.risk_level} · {'写操作需确认' if m.requires_confirmation else '读操作'}
+`source: dano:{m.name}` · `capability: {_capability(m)}` · 风险 {m.risk_level} · {'写操作需确认' if m.requires_confirmation else '读操作'}
 
 ## 字段
 {field_lines}
@@ -590,6 +609,8 @@ import urllib.error
 import urllib.request
 
 TOOL = "__TOOL__"
+CAPABILITY = __CAPABILITY__
+PROTOCOL = "dano.capability_call.draft"
 FIELDS = __FIELDS__
 REQUIRED = __REQUIRED__
 NUMERIC = __NUMERIC__          # 数值字段:提交前 str->number,避免审批分支按字符串误判
@@ -599,11 +620,30 @@ def _emit(obj):
     print(json.dumps(obj, ensure_ascii=False))
 
 
+def _coerce_arguments(obj):
+    if isinstance(obj, str):
+        obj = json.loads(obj or "{}")
+    if not isinstance(obj, dict):
+        raise ValueError("arguments/input 必须是 JSON 对象")
+    return obj
+
+
+def _is_envelope(obj):
+    if not isinstance(obj, dict):
+        return False
+    if not any(k in obj for k in ("input", "arguments")):
+        return False
+    return any(k in obj for k in ("protocol", "capability", "name", "confirm"))
+
+
 def main():
     ap = argparse.ArgumentParser(description="调用 Dano skill " + TOOL)
     for f in FIELDS:
         ap.add_argument("--" + f, default=None)
-    ap.add_argument("--json", dest="raw", default=None, help="直接给 arguments JSON(覆盖逐字段)")
+    ap.add_argument("--json", dest="raw", default=None,
+                    help="旧格式:arguments JSON;新格式:调用 envelope,如 {\"capability\":\"...\",\"input\":{...}}")
+    ap.add_argument("--capability", default=None,
+                    help="覆盖调用协议里的 capability;不传则使用导出时的默认 capability")
     # 写操作默认**未确认**:不带 --confirm 调用会被 Dano 拦成 need_confirm(确认闸门不被绕过)。
     ap.add_argument("--confirm", action="store_true", default=False)
     ap.add_argument("--diagnose", action="store_true")
@@ -618,9 +658,12 @@ def main():
         _emit({"status": "failed", "reason": "DANO_URL/DANO_TENANT_KEY 未设置(部署方配置,勿写进文件)"})
         sys.exit(2)
     url = url.rstrip("/")
+    capability = args.capability or CAPABILITY or TOOL
+    confirm = bool(args.confirm)
 
     if args.list_options:                       # 实时拉某字段可选项(选择型)→ agent 从中选准确名字
-        payload = json.dumps({"name": TOOL, "field": args.list_options}).encode("utf-8")
+        payload = json.dumps({"protocol": PROTOCOL, "name": TOOL, "capability": capability,
+                              "field": args.list_options}).encode("utf-8")
         req = urllib.request.Request(
             url + "/v1/tools/options", data=payload, method="POST",
             headers={"Content-Type": "application/json", "X-Tenant-Key": key})
@@ -646,7 +689,16 @@ def main():
 
     if args.raw:
         try:
-            arguments = json.loads(args.raw)
+            raw_obj = json.loads(args.raw)
+            if _is_envelope(raw_obj):
+                capability = raw_obj.get("capability") or capability
+                confirm = bool(confirm or raw_obj.get("confirm"))
+                if "input" in raw_obj:
+                    arguments = _coerce_arguments(raw_obj.get("input") or {})
+                else:
+                    arguments = _coerce_arguments(raw_obj.get("arguments") or {})
+            else:
+                arguments = _coerce_arguments(raw_obj)
         except Exception as e:
             _emit({"status": "failed", "reason": "--json 不是合法 JSON: %s" % e})
             sys.exit(2)
@@ -667,7 +719,8 @@ def main():
                 _emit({"status": "failed", "reason": "字段 %s 需为数字,得到: %r" % (f, v)})
                 sys.exit(1)
 
-    payload = json.dumps({"name": TOOL, "arguments": arguments, "confirm": bool(args.confirm)}).encode("utf-8")
+    payload = json.dumps({"protocol": PROTOCOL, "name": TOOL, "capability": capability,
+                          "arguments": arguments, "input": arguments, "confirm": confirm}).encode("utf-8")
     req = urllib.request.Request(
         url + "/v1/tools/call", data=payload, method="POST",
         headers={"Content-Type": "application/json", "X-Tenant-Key": key})
@@ -708,6 +761,7 @@ def _dano_call_py(m: SkillManifest) -> str:
     return (_PY_TEMPLATE
             .replace("__TITLE__", m.title)
             .replace("__TOOL__", tool_name_of(m.name))
+            .replace("__CAPABILITY__", json.dumps(_capability(m), ensure_ascii=False))
             .replace("__FIELDS__", json.dumps(keys, ensure_ascii=False))
             .replace("__REQUIRED__", json.dumps([k for k in keys if k in required], ensure_ascii=False))
             .replace("__NUMERIC__", json.dumps(numeric, ensure_ascii=False)))

@@ -6,7 +6,7 @@ import json
 import unittest
 
 from dano.execution.page.flow_spec import (
-    FlowSpec, FlowStep, FlowLink, ParamField,
+    FlowSpec, FlowStep, FlowLink, ParamField, FlowCapability,
     apply_flow_edits,
     apply_flow_publish_selection,
     apply_llm_field_names,
@@ -269,8 +269,10 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertEqual(s["flow_id"], spec.flow_id)
         self.assertEqual(s["step_count"], 1)
         self.assertEqual(s["link_count"], 0)
+        self.assertEqual(s["capability_count"], len(spec.capabilities))
         self.assertEqual(s["risk_level"], "L3")
         self.assertEqual(s["schema_version"], 1)
+        self.assertIn("submit_batch", {c["kind"] for c in s["capabilities"]})
         st_sum = s["steps"][0]
         self.assertIn("step_id", st_sum)
         self.assertNotIn("params", st_sum)  # 轻量摘要不含 params
@@ -463,6 +465,9 @@ class GetBusinessStepTest(unittest.TestCase):
         users_role = next(r for r in roles if "/api/users" in r["path"])
         self.assertEqual(users_role["role"], "read_option")
         self.assertFalse(users_role["keep"])
+        graph = spec.meta.get("request_graph") or {}
+        cand_paths = [r.get("path") for r in graph.get("candidate_reads") or []]
+        self.assertIn("/api/users", cand_paths)
 
     def test_repeated_preread_gets_are_deduped_and_option_reads_stay_out(self):
         """录制中反复触发的审批详情 GET 只保留最后一次；选人列表不进入主流程。"""
@@ -518,6 +523,45 @@ class GetBusinessStepTest(unittest.TestCase):
         user_page_roles = [r for r in roles if "/system/user/page" in r["path"]]
         self.assertTrue(user_page_roles)
         self.assertTrue(all(r["role"] == "read_option" and not r["keep"] for r in user_page_roles))
+        graph = spec.meta.get("request_graph") or {}
+        self.assertGreaterEqual(len(graph.get("selected_steps") or []), 2)
+        self.assertTrue(any("/system/user/page" in (r.get("path") or "") for r in graph.get("candidate_reads") or []))
+
+        cap_kinds = {c.kind for c in spec.capabilities}
+        self.assertIn("submit_batch", cap_kinds)
+        self.assertIn("query_status", cap_kinds)
+        self.assertIn("list_options", cap_kinds)
+        list_cap = next(c for c in spec.capabilities if c.kind == "list_options")
+        self.assertTrue(any(e.get("role") == "read_option" for e in list_cap.evidence))
+        self.assertTrue(list_cap.requires_human_confirm)
+
+        client = flow_spec_to_client(spec)
+        self.assertIn("capabilities", client)
+        self.assertIn("list_options", {c["kind"] for c in client["capabilities"]})
+        apir, errors = flow_spec_to_api_request(spec)
+        self.assertEqual(errors, [])
+        self.assertIn("capabilities", apir)
+        self.assertTrue(all(s.get("step_id") for s in apir["steps"]))
+        self.assertIn("submit_batch", {c["kind"] for c in apir["capabilities"]})
+
+    def test_capability_validate_gate_blocks_confirmed_missing_step(self):
+        spec = FlowSpec(
+            flow_id="cap-gate",
+            steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
+            capabilities=[FlowCapability(
+                name="submit_batch",
+                kind="submit_batch",
+                step_ids=["missing"],
+                confirmed=True,
+                requires_human_confirm=False,
+            )],
+        )
+
+        report = validate_flow_spec(spec)
+
+        self.assertFalse(report["passed"])
+        self.assertTrue(any("Capability `submit_batch` 指向不存在的步骤" in e for e in report["errors"]))
+        self.assertIn("capability_preview", report)
 
     def test_nested_detail_row_select_pair_uses_captured_read_options(self):
         """captured_requests 里的候选读接口应能绑定明细行内 name/id 字段，且不折叠整行。"""
@@ -1141,6 +1185,24 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertTrue(any("label→value" in e and "type" in e for e in report["errors"]))
 
+    def test_dom_label_options_infer_numeric_code_by_selected_order(self):
+        """无字典接口时,DOM 下拉选中第 N 项且 body 提交 N,应产出 label→N 的可调用枚举。"""
+        captured = [_post("https://oa/api/submit", {"type": 3, "reason": "回家"}, resp={"code": 200})]
+        spec = to_flow_spec(
+            captured,
+            samples={"类型": "婚假", "reason": "回家"},
+            page_enum_options={"类型": {"options": ["病假", "事假", "婚假"], "field_key": "类型", "selected": "婚假"}},
+        )
+
+        by_path = {p.path: p for s in spec.steps for p in s.params}
+        p = by_path["type"]
+        self.assertEqual(p.key, "类型")
+        self.assertEqual(p.type, "enum")
+        self.assertEqual(p.source_kind, "page_enum")
+        self.assertEqual(p.enum_value_map, {"病假": 1, "事假": 2, "婚假": 3})
+        report = validate_flow_spec(spec)
+        self.assertTrue(report["passed"], report["errors"])
+
     def test_manual_enum_value_only_options_block_publish_until_label_map(self):
         """人工把 number 改 enum 后只填 1/2/3 时必须阻断;补成 病假=2 后才能产出可调用 Skill。"""
         captured = [_post("https://oa/api/submit", {"type": 2, "reason": "回家"}, resp={"code": 200})]
@@ -1169,6 +1231,34 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         api_req, errors = flow_spec_to_api_request(spec)
         self.assertEqual(errors, [])
         self.assertEqual(api_req["selects"][0]["option_map"], {"事假": 1, "病假": 2, "婚假": 3})
+
+    def test_api_option_without_source_or_options_blocks_publish(self):
+        step = FlowStep(
+            step_id="s", name="提交", method="POST", url="/submit", path="/submit",
+            content_type="application/json", body_source='{"xmId":"YF202412060001"}',
+            params=[ParamField(
+                path="xmId", key="项目ID", value="YF202412060001", type="enum",
+                category="user_param", source_kind="api_option", exposed_to_user=True,
+            )],
+        )
+        spec = FlowSpec(flow_id="apiopt", steps=[step])
+        report = validate_flow_spec(spec)
+        self.assertFalse(report["passed"])
+        self.assertTrue(any("接口选项" in e and "source_url/options/option_map" in e for e in report["errors"]))
+
+    def test_internal_short_code_user_input_blocks_publish(self):
+        step = FlowStep(
+            step_id="s", name="提交", method="POST", url="/submit", path="/submit",
+            content_type="application/json", body_source='{"gslx":"GG"}',
+            params=[ParamField(
+                path="gslx", key="公示类型", value="GG", type="string",
+                category="user_param", source_kind="user_input", exposed_to_user=True,
+            )],
+        )
+        spec = FlowSpec(flow_id="shortcode", steps=[step])
+        report = validate_flow_spec(spec)
+        self.assertFalse(report["passed"])
+        self.assertTrue(any("内部 ID/短码" in e for e in report["errors"]))
 
     def test_unrelated_short_id_list_does_not_misfire(self):
         """type=int 短码不应与无关联的「id/name」tenant 列表撞名 → 仍然保持 user_input。"""

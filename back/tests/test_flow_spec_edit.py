@@ -403,6 +403,104 @@ def test_remove_link():
     assert len(new.links) == 0
 
 
+def test_remove_link_resets_target_param_source():
+    spec = _two_step_spec_with_link()
+    synced = apply_flow_edits(spec, [{"op": "update", "link_id": "l1", "field": "confirmed", "value": True}])
+    before = {p.path: p for p in synced.steps[1].params}["y"]
+    assert before.category == "runtime_var"
+    assert before.source_kind == "previous_response"
+    assert before.editable is False
+
+    new = apply_flow_edits(synced, [{"op": "remove", "link_id": "l1", "reset_target": True}])
+    after = {p.path: p for p in new.steps[1].params}["y"]
+    assert len(new.links) == 0
+    assert after.category == "user_param"
+    assert after.source_kind == "user_input"
+    assert after.editable is True
+    assert after.exposed_to_user is True
+
+
+def test_reset_param_source_removes_incoming_link():
+    spec = _two_step_spec_with_link()
+    synced = apply_flow_edits(spec, [{"op": "update", "link_id": "l1", "field": "confirmed", "value": True}])
+    new = apply_flow_edits(synced, [{"op": "reset_param_source", "step_id": "B", "param_path": "y", "to": "user_input"}])
+    assert new.links == []
+    param = {p.path: p for p in new.steps[1].params}["y"]
+    assert param.category == "user_param"
+    assert param.source_kind == "user_input"
+
+
+def test_add_candidate_step_promotes_request_graph_entry():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(step_id="write", method="POST", url="/api/save", path="/api/save")],
+        meta={
+            "request_graph": {
+                "selected_steps": [],
+                "candidate_reads": [{
+                    "request_index": 7,
+                    "method": "GET",
+                    "url": "https://oa.example.com/gsgl/xm/getProjectInfosByBt?keyword=abc",
+                    "path": "/gsgl/xm/getProjectInfosByBt",
+                    "role": "read_option",
+                    "confidence": 0.88,
+                    "response_status": 200,
+                    "response_json": {"data": [{"xmId": "YF001", "xmName": "项目A"}]},
+                }],
+                "filtered_requests": [],
+            }
+        },
+    )
+
+    new = apply_flow_edits(spec, [{"op": "add_candidate_step", "request_index": 7}])
+
+    assert len(new.steps) == 2
+    promoted = new.steps[1]
+    assert promoted.method == "GET"
+    assert promoted.path == "/gsgl/xm/getProjectInfosByBt?keyword=abc"
+    assert [p.path for p in promoted.params] == ["query.keyword"]
+    assert promoted.source_meta["manual_added"] is True
+    graph = new.meta["request_graph"]
+    assert graph["candidate_reads"] == []
+    assert graph["selected_steps"][0]["request_index"] == 7
+
+
+def test_add_candidate_step_is_idempotent_when_request_already_exists():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(
+            step_id="read",
+            method="GET",
+            url="https://oa.example.com/gsgl/xm/getProjectInfosByBt?keyword=abc",
+            path="/gsgl/xm/getProjectInfosByBt?keyword=abc",
+            source_meta={"request_index": 7},
+        )],
+        meta={
+            "request_graph": {
+                "selected_steps": [],
+                "candidate_reads": [{
+                    "request_index": 7,
+                    "method": "GET",
+                    "url": "https://oa.example.com/gsgl/xm/getProjectInfosByBt?keyword=abc",
+                    "path": "/gsgl/xm/getProjectInfosByBt",
+                    "role": "read_option",
+                    "confidence": 0.95,
+                    "response_status": 200,
+                    "response_json": {"data": [{"xmId": "YF001", "xmName": "项目A"}]},
+                }],
+                "filtered_requests": [],
+            }
+        },
+    )
+
+    new = apply_flow_edits(spec, [{"op": "add_candidate_step", "request_index": 7}])
+
+    assert len(new.steps) == 1
+    graph = new.meta["request_graph"]
+    assert graph["candidate_reads"] == []
+    assert graph["selected_steps"][0]["request_index"] == 7
+
+
 def test_nonexistent_link_lists_available():
     spec = _two_step_spec_with_link()
     with pytest.raises(ValueError) as exc:

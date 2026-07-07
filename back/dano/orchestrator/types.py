@@ -24,6 +24,9 @@ class SkillSpec(BaseModel):
     """动作 Skill(1 Skill = 1 action)。从已发布连接器(有 API)或页面脚本(无 API)派生。"""
 
     skill_id: str
+    capability: str = ""                                       # 对外能力键;空则兼容退回 skill_id
+    capability_meta: dict[str, Any] = Field(default_factory=dict)  # 能力分组/别名/协议草案等扩展元数据
+    capabilities: list[dict[str, Any]] = Field(default_factory=list)  # 一个 Skill 内可调用的能力列表
     subsystem: Subsystem
     action: str
     risk_level: RiskLevel
@@ -71,6 +74,32 @@ class SkillSpec(BaseModel):
     adapter_success_rule: str | None = None
     adapter_fact_check: dict | None = None
     adapter_consts: dict = Field(default_factory=dict)   # 运行期注入的内部常量(如 __templateId__)
+
+
+class CapabilityCallEnvelope(BaseModel):
+    """导出脚本/Agent 调用 Dano 的 JSON 调用协议草案。
+
+    兼容旧 function-calling 载荷:旧侧只传 name+arguments;新侧可传 capability+input。
+    """
+
+    protocol: str = "dano.capability_call.draft"
+    name: str | None = None                # 旧工具名,如 A-OA__submit_leave
+    capability: str | None = None          # 新能力键;服务端未支持时仍可按 name 兼容执行
+    arguments: dict[str, Any] | str | None = None
+    input: dict[str, Any] | None = None
+    confirm: bool = False
+    idempotency_key: str | None = None
+
+    def effective_arguments(self) -> dict[str, Any]:
+        """返回对编排器实际可执行的参数对象,input 优先,arguments 兼容。"""
+        if self.input is not None:
+            return dict(self.input)
+        if self.arguments is None:
+            return {}
+        if isinstance(self.arguments, dict):
+            return dict(self.arguments)
+        import json as _json
+        return _json.loads(self.arguments or "{}")
 
 
 class TaskOutcome(BaseModel):

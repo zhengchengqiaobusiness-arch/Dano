@@ -1492,6 +1492,46 @@ async def test_execute_api_dispatches_single_and_workflow():
     assert out2["ok"] and out2["steps"] == 1
 
 
+async def test_execute_api_routes_by_capability_without_running_full_workflow():
+    """一个 Skill 多能力:query_status 只跑读步骤,submit_batch 跑完整提交链。"""
+    wf = {
+        "steps": [
+            {
+                "step_id": "query",
+                "method": "GET",
+                "url": "http://x/api/status",
+                "path": "/api/status",
+                "query_template": {},
+                "params": [],
+                "response_json": {"code": 200, "data": {"missing": ["2026-06-11"]}},
+            },
+            {
+                "step_id": "submit",
+                "method": "POST",
+                "url": "http://x/api/submit",
+                "path": "/api/submit",
+                "body_template": {"reason": "{{reason}}"},
+                "params": ["reason"],
+                "sample_inputs": {"reason": "日报"},
+            },
+        ],
+        "capabilities": [
+            {"name": "query_status", "kind": "query_status", "step_ids": ["query"]},
+            {"name": "submit_batch", "kind": "submit_batch", "step_ids": ["query", "submit"]},
+        ],
+    }
+
+    status = await execute_api(wf, {"__capability": "query_status", "reason": "日报"}, send=False)
+    assert status["ok"] is True
+    assert status["steps"] == 1
+    assert status["final"]["url"].endswith("/api/status")
+
+    submitted = await execute_api(wf, {"__capability": "submit_batch", "reason": "日报"}, send=False)
+    assert submitted["ok"] is True
+    assert submitted["steps"] == 2
+    assert submitted["final"]["body"] == {"reason": "日报"}
+
+
 async def test_execute_get_query_template_dry_run():
     """GET 前置接口无 body 也可发布:query_template 负责把参数和页面常量构造成 URL。"""
     apir = {

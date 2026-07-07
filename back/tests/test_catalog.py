@@ -243,6 +243,10 @@ async def test_page_skill_reads_recording_metadata_from_asset_body():
         "user_fields": ["请假类型"], "required_fields": ["请假类型"],
         "field_types": {"请假类型": "enum"},
         "verification_status": "verified",
+        "capabilities": [
+            {"name": "query_status", "kind": "query_status", "step_ids": ["q"], "confirmed": True},
+            {"name": "submit_batch", "kind": "submit_batch", "step_ids": ["q", "s"], "confirmed": True},
+        ],
         "api_request": {
             "params": ["请假类型"], "recording_mode": "real_submit",
             "selects": [{"param": "请假类型", "options": ["事假", "病假"], "enum_source": "dom"}],
@@ -254,6 +258,8 @@ async def test_page_skill_reads_recording_metadata_from_asset_body():
 
     assert m.verification_status == "verified"
     assert m.recording_mode == "real_submit"
+    assert {c["name"] for c in m.capabilities} == {"query_status", "submit_batch"}
+    assert m.capability == "submit_batch"
     assert m.call_metadata["fields"]["请假类型"]["enum_options"] == [{"label": "事假", "value": "事假"},
                                                                  {"label": "病假", "value": "病假"}]
 

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import copy
 import json
 import logging
 
@@ -468,6 +469,62 @@ def _records_with_existing_option_map(records: list[dict], option_map: dict | No
         else:
             out.append(rec)
     return out
+
+
+_CN_FIELD_ALIASES = {
+    "类型": {"type", "kind", "category", "class", "leaveType", "gslx"},
+    "类别": {"type", "kind", "category", "class"},
+    "状态": {"status", "state"},
+    "项目": {"project", "xm", "xmId", "projectId"},
+    "审批": {"approver", "assignee", "user", "userId"},
+}
+
+
+def _norm_field_token(v) -> str:
+    return _re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(v or "")).lower()
+
+
+def _label_matches_internal_field(label: str, path: str, field: dict | None = None) -> bool:
+    """把 DOM 字段名(如「请假类型」)和提交体内部字段(type/leaveType/gslx)连起来。"""
+    label_s = str(label or "")
+    path_s = str(path or "")
+    leaf = path_s.split(".")[-1].split("[")[0]
+    candidates = [path_s, leaf]
+    if field:
+        candidates.extend([field.get("key"), field.get("path"), field.get("suggest_name")])
+    cand_norm = {_norm_field_token(c) for c in candidates if c not in (None, "")}
+    label_norm = _norm_field_token(label_s)
+    if label_norm and any(label_norm == c or label_norm in c or c in label_norm for c in cand_norm if c):
+        return True
+    for cn, aliases in _CN_FIELD_ALIASES.items():
+        if cn in label_s and any(_norm_field_token(a) in cand_norm for a in aliases):
+            return True
+    return False
+
+
+def _records_with_recorded_value(records: list[dict], selected: str, current) -> list[dict]:
+    """DOM 只有显示名时,用录制时提交值推导 label→value。
+
+    常见 Element/Ant 下拉:第 1/2/3 个选项提交 1/2/3；若选中「婚假」且 body 为 3,
+    就可安全推导 事假→1、病假→2、婚假→3。无法证明时保留原记录,交给发布闸门阻断。
+    """
+    labels = [str(r.get("label") or "").strip() for r in records]
+    if not labels:
+        return records
+    selected_s = str(selected or "").strip()
+    try:
+        idx = next(i for i, label in enumerate(labels) if _name_match(label, selected_s))
+    except StopIteration:
+        return records
+    cur = str(current if current is not None else "").strip()
+    if not _re.fullmatch(r"-?\d+", cur):
+        return records
+    n = int(cur)
+    if n == idx + 1:
+        return [{**r, "value": i + 1} for i, r in enumerate(records)]
+    if n == idx:
+        return [{**r, "value": i} for i, r in enumerate(records)]
+    return records
 
 
 def _enum_labels(records: list[dict]) -> list[str]:
@@ -1018,29 +1075,40 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
             path = _tokens_to_str(toks)
         else:
             # 2)field_key/path 子串/leaf key 反查:治"请假类型=病假,但 body 字段是 leaveType=2 的内部码"
-            hit = next((
-                (path, toks)
-                for path, toks, _sv, _raw in leaves
-                if (fk and _name_match(fk, path))
-                   or (fk and _name_match(fk, str(path).split(".")[-1].split("[")[0]))
-                   or _dom_key_matches_field(str(picked), field_by_path.get(path))
-                   or _dom_key_matches_field(selected, field_by_path.get(path))
-                   or _name_match(str(picked), path)
-                   or _name_match(selected, path)
-                   or _name_match(str(picked), str(path).split(".")[-1].split("[")[0])
-                   or _name_match(selected, str(path).split(".")[-1].split("[")[0])
-            ), None)
+            scored = []
+            for path, toks, sv, _raw in leaves:
+                field = field_by_path.get(path)
+                leaf = str(path).split(".")[-1].split("[")[0]
+                score = 0
+                if fk and (_name_match(fk, path) or _name_match(fk, leaf) or _label_matches_internal_field(fk, path, field)):
+                    score += 6
+                if _dom_key_matches_field(str(picked), field) or _dom_key_matches_field(selected, field):
+                    score += 5
+                if _label_matches_internal_field(str(picked), path, field) or _label_matches_internal_field(selected, path, field):
+                    score += 4
+                if _name_match(str(picked), path) or _name_match(selected, path):
+                    score += 2
+                if _name_match(str(picked), leaf) or _name_match(selected, leaf):
+                    score += 2
+                if str(sv).strip() and not any(_name_match(str(sv), o.get("label")) for o in _enum_records_from_page_options(opts)):
+                    # 下拉显示名不在 body,body 大概率是内部值;短数字/短码更像枚举值,长文本更像普通输入。
+                    score += 2 if _re.fullmatch(r"[A-Za-z0-9_-]{1,8}", str(sv).strip()) else -2
+                if score > 0:
+                    scored.append((score, path, toks))
+            hit = max(scored, default=None, key=lambda x: x[0])
             if hit is None:
                 continue
-            path, toks = hit
+            _score, path, toks = hit
         if path in existing or any(o.get("path") == path for o in out):
             continue
         current = next((sv for p, _t, sv, _raw in leaves if p == path), "")
         entry = {"path": path, "tokens": toks, "source_url": "", "value_key": "", "label_key": "",
                  "label": selected or picked, "value": current, "count": len(opts), "field_key": fk or ""}
+        records = _enum_records_from_page_options(opts)
+        records = _records_with_recorded_value(records, selected or picked, current)
         _attach_enum_binding(
             entry,
-            _enum_records_from_page_options(opts),
+            records,
             source="dom",
             confirmed=True,
         )
@@ -2893,6 +2961,100 @@ async def execute_api_workflow(workflow: dict, fields: dict, *, base_url: str = 
             "status": last.get("status"), "response": last.get("response"), "final": last}
 
 
+def _find_capability(api_request: dict, name: str | None) -> dict | None:
+    if not name:
+        return None
+    target = str(name).strip()
+    for cap in api_request.get("capabilities") or []:
+        if not isinstance(cap, dict):
+            continue
+        if str(cap.get("name") or "").strip() == target or str(cap.get("kind") or "").strip() == target:
+            return cap
+    return None
+
+
+def _workflow_with_steps(api_request: dict, steps: list[dict], cap: dict) -> dict:
+    out = copy.deepcopy(api_request)
+    out["steps"] = steps
+    out["capability"] = cap.get("name") or cap.get("kind") or ""
+    out["capability_kind"] = cap.get("kind") or ""
+    out["capabilities"] = [cap]
+    params: list[str] = []
+    samples: dict = {}
+    field_types: dict = {}
+    for st in steps:
+        for p in st.get("params") or []:
+            if p not in params:
+                params.append(p)
+        samples.update(st.get("sample_inputs") or {})
+        field_types.update(st.get("field_types") or {})
+    out["params"] = params
+    out["sample_inputs"] = samples
+    out["field_types"] = field_types
+    if (cap.get("kind") or "") in {"query_status", "list_options", "validate_batch"}:
+        out.pop("fact_check", None)
+    return out
+
+
+def _select_api_request_for_capability(api_request: dict, name: str | None) -> tuple[dict | None, dict | None, str]:
+    """按 capability 裁剪运行工作流；旧调用不传 capability 时保持完整执行。"""
+    cap = _find_capability(api_request, name)
+    if not name:
+        return api_request, None, ""
+    if cap is None:
+        return None, None, f"未知 capability: {name}"
+    kind = str(cap.get("kind") or cap.get("name") or "")
+    if kind == "list_options":
+        return api_request, cap, ""
+
+    wanted = [str(x) for x in (cap.get("step_ids") or []) if str(x or "").strip()]
+    full_steps = list(api_request.get("steps") or [])
+    if not full_steps:
+        single_id = str(api_request.get("step_id") or "")
+        if wanted and single_id and single_id not in wanted:
+            return None, cap, f"Capability `{cap.get('name') or kind}` 未绑定当前请求步骤"
+        out = copy.deepcopy(api_request)
+        out["capability"] = cap.get("name") or kind
+        out["capability_kind"] = kind
+        out["capabilities"] = [cap]
+        if kind in {"query_status", "list_options", "validate_batch"}:
+            out.pop("fact_check", None)
+        return out, cap, ""
+
+    if not wanted:
+        if kind in {"submit", "submit_batch"}:
+            return api_request, cap, ""
+        return None, cap, f"Capability `{cap.get('name') or kind}` 缺少 step_ids，无法确定要执行哪些接口"
+
+    wanted_set = set(wanted)
+    old_to_new: dict[int, int] = {}
+    selected: list[dict] = []
+    for old_idx, st in enumerate(full_steps):
+        if str(st.get("step_id") or "") in wanted_set:
+            old_to_new[old_idx] = len(selected)
+            selected.append(copy.deepcopy(st))
+    if not selected:
+        return None, cap, f"Capability `{cap.get('name') or kind}` 没有命中任何可执行步骤"
+
+    for new_idx, st in enumerate(selected):
+        remapped_links = []
+        for lk in st.get("links") or []:
+            old_src = lk.get("source_step")
+            if old_src not in old_to_new:
+                continue
+            new_src = old_to_new[old_src]
+            if new_src >= new_idx:
+                continue
+            item = dict(lk)
+            item["source_step"] = new_src
+            remapped_links.append(item)
+        if remapped_links:
+            st["links"] = remapped_links
+        else:
+            st.pop("links", None)
+    return _workflow_with_steps(api_request, selected, cap), cap, ""
+
+
 async def _grounded_recheck(fc: dict, fields: dict, *, base_url: str, storage_state, token_key: str | None,
                             verify: bool, auth_headers: dict | None,
                             retries: int = 4, backoff: float = 0.6) -> tuple[bool, str]:
@@ -2926,6 +3088,26 @@ async def _grounded_recheck(fc: dict, fields: dict, *, base_url: str, storage_st
 
 async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
     """统一入口:api_request 有 steps → 多步工作流(Q3),否则单请求;成功后若配了 fact_check → grounded 回查。"""
+    fields = dict(fields or {})
+    capability = fields.pop("__capability", None)
+    if capability:
+        selected, cap, error = _select_api_request_for_capability(api_request, capability)
+        if error:
+            return {"ok": False, "blocked": True, "detail": error, "capability": capability}
+        if cap and (cap.get("kind") or cap.get("name")) == "list_options":
+            field = fields.get("field") or fields.get("param") or fields.get("name")
+            if not field:
+                return {"ok": False, "blocked": True, "detail": "list_options capability 需要传 field"}
+            options = await fetch_field_options(
+                api_request,
+                str(field),
+                base_url=kw.get("base_url", ""),
+                storage_state=kw.get("storage_state"),
+                token_key=kw.get("token_key"),
+                verify=kw.get("verify", True),
+            )
+            return {"ok": True, "capability": capability, **options}
+        api_request = selected or api_request
     runner = execute_api_workflow if api_request.get("steps") else execute_api_request
     out = await runner(api_request, fields, **kw)
     fc = api_request.get("fact_check")

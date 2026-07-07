@@ -82,6 +82,17 @@ interface FlowLinkData {
   target_step_id: string; target_path: string;
   confirmed?: boolean; confidence?: number; param_name?: string | null; reason?: string;
 }
+interface FlowCapabilityData {
+  name?: string; title?: string; intent?: string; kind?: string;
+  step_ids?: string[];
+  input_schema?: Record<string, any>;
+  output_schema?: Record<string, any>;
+  output_mapping?: Array<Record<string, any>>;
+  preconditions?: Array<Record<string, any>>;
+  confirmed?: boolean; confidence?: number; requires_human_confirm?: boolean;
+  evidence?: Array<Record<string, any>>;
+  caller_responsibilities?: string[]; skill_responsibilities?: string[];
+}
 interface ReviewItemData {
   id: string; type: string; severity: string; title: string; reason: string;
   current_guess?: string; suggested_action?: string; resolved?: boolean; confidence?: number;
@@ -97,12 +108,22 @@ interface RequestRoleData {
   index?: number; method: string; path: string; role: string; keep: boolean;
   reason: string; confidence?: number;
 }
+interface RequestGraphEntry {
+  request_index?: number | null; method?: string; url?: string; path?: string; role?: string;
+  keep?: boolean; reason?: string; confidence?: number; response_status?: number | null;
+  response_json?: any; evidence?: any;
+}
 interface FlowSpecData {
   flow_id: string; title: string; business_description?: string;
-  steps: FlowStepData[]; links: FlowLinkData[];
+  steps: FlowStepData[]; links: FlowLinkData[]; capabilities?: FlowCapabilityData[];
   risk_level: string; review_items?: ReviewItemData[];
   meta?: {
     request_roles?: RequestRoleData[];
+    request_graph?: {
+      selected_steps?: RequestGraphEntry[];
+      candidate_reads?: RequestGraphEntry[];
+      filtered_requests?: RequestGraphEntry[];
+    };
     versions?: Array<{ version: number; action: string; reason?: string; created_at?: string; summary?: any }>;
     current_version?: number;
   };
@@ -521,6 +542,49 @@ function leafPathValues(node: any, prefix = ""): Array<{ path: string; value: st
 function severityColor(sev?: string) {
   return sev === "high" ? "error" : sev === "medium" ? "warning" : "default";
 }
+function requestGraphPath(req: RequestGraphEntry) {
+  return (req.path || stripHost(req.url || "") || "").split("?", 1)[0];
+}
+function requestGraphSignature(req: RequestGraphEntry) {
+  return `${(req.method || "GET").toUpperCase()} ${requestGraphPath(req)}`;
+}
+function visibleCandidateReads(spec?: FlowSpecData | null) {
+  const graph = spec?.meta?.request_graph || {};
+  const selectedSigs = new Set((graph.selected_steps || []).map(requestGraphSignature));
+  return [...(graph.candidate_reads || [])]
+    .filter((req) => (req.confidence ?? 0) >= 0.9)
+    .filter((req) => !selectedSigs.has(requestGraphSignature(req)))
+    .sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+}
+function confidencePercent(value?: number) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "";
+  return `${Math.round(value * 100)}%`;
+}
+function confidenceColor(value?: number) {
+  if (typeof value !== "number") return "default";
+  if (value >= 0.9) return "success";
+  if (value >= 0.7) return "warning";
+  return "error";
+}
+function schemaFieldRows(schema?: Record<string, any>) {
+  if (!schema || typeof schema !== "object") return [];
+  const props = schema.properties && typeof schema.properties === "object" ? schema.properties : schema;
+  const required = new Set(Array.isArray(schema.required) ? schema.required.map(String) : []);
+  return Object.entries(props || {})
+    .filter(([, spec]) => spec && typeof spec === "object")
+    .map(([name, spec]) => ({
+      name,
+      type: String((spec as any).type || (spec as any).format || "any"),
+      description: String((spec as any).description || (spec as any).title || ""),
+      required: required.has(name),
+    }));
+}
+function compactJson(value: any, maxLen = 160) {
+  if (value == null) return "";
+  const rawValue = typeof value === "string" ? value : JSON.stringify(value);
+  const raw = rawValue == null ? "" : rawValue;
+  return raw.length > maxLen ? `${raw.slice(0, maxLen)}...` : raw;
+}
 
 export default function PageRecorder({ tenant, subsystem, baseUrl, storageState }: {
   tenant: string; subsystem: string; baseUrl: string; storageState: string;
@@ -588,7 +652,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [namingBusy, setNamingBusy] = useState(false);
   const [descBusy, setDescBusy] = useState(false);
   const [llmBusy, setLlmBusy] = useState(false);
-  const [activeFlowTab, setActiveFlowTab] = useState("review");
+  const [activeFlowTab, setActiveFlowTab] = useState("steps");
 
   useEffect(() => () => {
     // FC4 修复:仅当 phase 处于 recording/publishing 时才关 WS(避免 StrictMode 双 mount 或组件复用时误关正在用的 WS)
@@ -697,7 +761,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setJsonDraft("");
     setJsonErr("");
     setLastServerJson("");
-    setActiveFlowTab("review");
+    setActiveFlowTab("steps");
     autoResolvedReviewKeyRef.current = "";
     autoDedupedStepKeyRef.current = "";
     autoLinkedRuntimeKeyRef.current = "";
@@ -912,18 +976,32 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     ] });
   }
   function updateParamSourceKind(stepId: string, p: FlowParam, sourceKind: string) {
+    if (sourceKind === "previous_response") {
+      setBindDraft((d) => ({
+        ...d,
+        [`${stepId}:${p.path}`]: d[`${stepId}:${p.path}`] || { source_step_id: p.source?.step_id || "", source_path: p.source?.response_path || "" },
+      }));
+      setActiveFlowTab("params");
+      message.info("请选择来源步骤和响应字段后点击“绑定上游响应”");
+      return;
+    }
     const category = sourceKind === "constant"
       ? "system_const"
       : sourceKind === "user_input" || (OPTION_SOURCE_KINDS.includes(sourceKind) && p.category !== "runtime_var")
         ? "user_param"
         : "runtime_var";
-    send({ type: "flow_update", edits: [
+    const edits: any[] = (flowSpec?.links || [])
+      .filter((l) => l.target_step_id === stepId && stripBodyPrefix(l.target_path) === stripBodyPrefix(p.path))
+      .map((l) => ({ op: "remove", link_id: l.link_id, reset_target: false }));
+    edits.push(
       { op: "update", step_id: stepId, param_path: p.path, field: "category", value: category },
       { op: "update", step_id: stepId, param_path: p.path, field: "source_kind", value: sourceKind },
-      { op: "update", step_id: stepId, param_path: p.path, field: "source", value: sourceKind === "unknown" ? {} : { kind: sourceKind, path: p.path, manual: true } },
+      { op: "update", step_id: stepId, param_path: p.path, field: "source", value: sourceKind === "unknown" ? {} : sourceKind === "user_input" ? { kind: "sample", path: p.path } : { kind: sourceKind, path: p.path, manual: true } },
       { op: "update", step_id: stepId, param_path: p.path, field: "exposed_to_user", value: category === "user_param" },
       { op: "update", step_id: stepId, param_path: p.path, field: "need_human_confirm", value: sourceKind === "unknown" },
-    ] });
+      { op: "update", step_id: stepId, param_path: p.path, field: "editable", value: true },
+    );
+    send({ type: "flow_update", edits });
   }
   function moveStep(idx: number, dir: -1 | 1) {
     if (!flowSpec) return;
@@ -1199,7 +1277,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function addLink() {
     const { source_step_id, source_path, target_step_id, target_path } = newLink;
     if (!source_step_id || !target_step_id || !source_path || !target_path) { message.warning("请填写完整的来源和目标"); return; }
-    send({ type: "flow_update", edits: [{ op: "add", step_id: source_step_id, link: { source_step_id, source_path, target_step_id, target_path } }] });
+    send({ type: "flow_update", edits: [{ op: "add", step_id: source_step_id, link: { source_step_id, source_path, target_step_id, target_path, confirmed: false, reason: "人工新增依赖，需确认后才可发布" } }] });
     setNewLink({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
   }
   function bindParamToPreviousResponse(step: FlowStepData, p: FlowParam) {
@@ -1209,7 +1287,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!draft.source_step_id || !draft.source_path) { message.warning("请选择来源步骤和响应字段"); return; }
     const edits: any[] = flowSpec.links
       .filter((l) => l.target_step_id === step.step_id && stripBodyPrefix(l.target_path) === stripBodyPrefix(p.path))
-      .map((l) => ({ op: "remove", link_id: l.link_id }));
+      .map((l) => ({ op: "remove", link_id: l.link_id, reset_target: false }));
     edits.push({
       op: "add",
       step_id: draft.source_step_id,
@@ -1238,6 +1316,24 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     ];
     send({ type: "flow_update", edits });
     cancelEditLink(linkId);
+  }
+  function promoteCandidateRead(req: RequestGraphEntry) {
+    if (req.request_index == null) { message.warning("候选请求缺少 request_index，无法加入"); return; }
+    send({ type: "flow_update", edits: [{ op: "add_candidate_step", request_index: req.request_index }] });
+  }
+  function updateCapabilityConfirmed(idx: number, confirmed: boolean) {
+    if (!flowSpec) return;
+    const capabilities = [...(flowSpec.capabilities || [])];
+    const current = capabilities[idx];
+    if (!current) return;
+    capabilities[idx] = {
+      ...current,
+      confirmed,
+      requires_human_confirm: confirmed ? false : current.requires_human_confirm,
+    };
+    const next = { ...flowSpec, capabilities };
+    setFlowSpec(next);
+    sendReplace(next);
   }
   function loadJsonDraft() {
     if (!flowSpec) return;
@@ -1450,6 +1546,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function renderFlowWorkbench() {
     if (!flowSpec) return null;
     const totalParams = flowSpec.steps.reduce((n, s) => n + (s.params?.length || 0), 0);
+    const capabilities = flowSpec.capabilities || [];
+    const unconfirmedCapabilities = capabilities.filter((cap) => !cap.confirmed || cap.requires_human_confirm).length;
     return (
       <Card
         style={{ marginTop: 16 }}
@@ -1458,6 +1556,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             <Typography.Text strong>FlowSpec 工作台</Typography.Text>
             <Tag color="blue">{flowSpec.steps.length} 步</Tag>
             <Tag>{totalParams} 字段</Tag>
+            {capabilities.length > 0 && <Tag color="geekblue">{capabilities.length} 能力</Tag>}
+            {unconfirmedCapabilities > 0 && <Tag color="warning">{unconfirmedCapabilities} 能力待确认</Tag>}
             <Tag color={flowSpec.risk_level === "L4" ? "error" : "orange"}>风险 {flowSpec.risk_level}</Tag>
             {reviewItems.length > 0 && <Tag color="error">{reviewItems.length} 高风险待确认</Tag>}
           </Space>
@@ -1499,7 +1599,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           destroyOnHidden={false}
           items={[
             { key: "review", label: `待确认 ${reviewItems.length || ""}`, children: renderReviewPanel() },
+            { key: "capabilities", label: `业务能力 ${capabilities.length || ""}`, children: renderCapabilitiesPanel() },
             { key: "steps", label: "步骤", children: renderStepsPanel() },
+            { key: "requests", label: `候选请求 ${visibleCandidateReads(flowSpec).length || ""}`, children: renderRequestGraphPanel() },
             { key: "params", label: "字段", children: renderParamsPanel() },
             { key: "links", label: "依赖", children: renderLinksPanel() },
             { key: "desc", label: "说明", children: renderDescriptionPanel() },
@@ -1507,6 +1609,125 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           ]}
         />
       </Card>
+    );
+  }
+  function renderCapabilitiesPanel() {
+    if (!flowSpec) return null;
+    const capabilities = flowSpec.capabilities || [];
+    if (!capabilities.length) {
+      return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有业务能力草案" />;
+    }
+    const schemaBlock = (title: string, schema?: Record<string, any>, emptyText = "未声明") => {
+      const rows = schemaFieldRows(schema);
+      const fallback = rows.length ? "" : compactJson(schema);
+      return (
+        <div style={{ minWidth: 220 }}>
+          <Typography.Text strong style={{ fontSize: 12 }}>{title}</Typography.Text>
+          <Space direction="vertical" size={4} style={{ width: "100%", marginTop: 6 }}>
+            {rows.slice(0, 8).map((row) => (
+              <Space key={`${title}-${row.name}`} size={4} wrap>
+                <Typography.Text code style={{ fontSize: 12 }}>{row.name}</Typography.Text>
+                <Tag>{row.type}</Tag>
+                {row.required && <Tag color="red">必填</Tag>}
+                {row.description && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{row.description}</Typography.Text>}
+              </Space>
+            ))}
+            {rows.length > 8 && <Typography.Text type="secondary" style={{ fontSize: 12 }}>+{rows.length - 8} 个字段</Typography.Text>}
+            {!rows.length && fallback && <Typography.Text code style={{ fontSize: 12 }}>{fallback}</Typography.Text>}
+            {!rows.length && !fallback && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{emptyText}</Typography.Text>}
+          </Space>
+        </div>
+      );
+    };
+    return (
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <Alert
+          type="info"
+          showIcon
+          message="业务能力草案"
+          description="这里展示外部调用方看到的能力层；步骤、字段、依赖和候选请求仍在各自面板维护。"
+        />
+        <List
+          dataSource={capabilities}
+          renderItem={(cap, idx) => {
+            const stepIds = cap.step_ids || [];
+            const mappings = cap.output_mapping || [];
+            const preconditions = cap.preconditions || [];
+            return (
+              <List.Item
+                style={{ paddingLeft: 0, paddingRight: 0 }}
+                actions={[
+                  <Checkbox
+                    key="confirmed"
+                    checked={!!cap.confirmed}
+                    onChange={(e) => updateCapabilityConfirmed(idx, e.target.checked)}
+                  >
+                    已确认
+                  </Checkbox>,
+                ]}
+              >
+                <div style={{ width: "100%", border: "1px solid #f0f0f0", borderRadius: 6, padding: 12, background: "#fff" }}>
+                  <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                    <Row gutter={[12, 8]} align="top">
+                      <Col flex="auto">
+                        <Space wrap size={6}>
+                          <Tag color={cap.confirmed ? "success" : "warning"}>{cap.confirmed ? "已确认" : "待确认"}</Tag>
+                          {cap.requires_human_confirm && <Tag color="orange">需要人工确认</Tag>}
+                          {cap.kind && <Tag color="blue">{cap.kind}</Tag>}
+                          {typeof cap.confidence === "number" && <Tag color={confidenceColor(cap.confidence)}>置信度 {confidencePercent(cap.confidence)}</Tag>}
+                          <Typography.Text strong>{cap.title || cap.name || `能力 ${idx + 1}`}</Typography.Text>
+                          {cap.name && <Typography.Text code>{cap.name}</Typography.Text>}
+                        </Space>
+                        {cap.intent && <Typography.Text type="secondary" style={{ display: "block", marginTop: 6, fontSize: 12 }}>{cap.intent}</Typography.Text>}
+                      </Col>
+                    </Row>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
+                      {schemaBlock("输入", cap.input_schema, "未声明输入")}
+                      {schemaBlock("输出", cap.output_schema, "未声明输出")}
+                      <div>
+                        <Typography.Text strong style={{ fontSize: 12 }}>步骤</Typography.Text>
+                        <Space direction="vertical" size={4} style={{ width: "100%", marginTop: 6 }}>
+                          {stepIds.length ? stepIds.map((stepId) => {
+                            const st = stepById[stepId];
+                            return (
+                              <Space key={stepId} size={4} wrap>
+                                <Tag>{st?.name || st?.path || stepId}</Tag>
+                                {st && <PathText value={st.path || stripHost(st.url)} maxWidth={260} />}
+                              </Space>
+                            );
+                          }) : <Typography.Text type="secondary" style={{ fontSize: 12 }}>未绑定步骤</Typography.Text>}
+                        </Space>
+                      </div>
+                    </div>
+                    {(mappings.length > 0 || preconditions.length > 0) && (
+                      <Collapse ghost size="small">
+                        {mappings.length > 0 && (
+                          <Collapse.Panel key="mapping" header={`输出映射 ${mappings.length}`}>
+                            <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                              {mappings.map((item, mapIdx) => (
+                                <Typography.Text key={mapIdx} code style={{ fontSize: 12 }}>{compactJson(item, 240)}</Typography.Text>
+                              ))}
+                            </Space>
+                          </Collapse.Panel>
+                        )}
+                        {preconditions.length > 0 && (
+                          <Collapse.Panel key="preconditions" header={`前置条件 ${preconditions.length}`}>
+                            <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                              {preconditions.map((item, preIdx) => (
+                                <Typography.Text key={preIdx} code style={{ fontSize: 12 }}>{compactJson(item, 240)}</Typography.Text>
+                              ))}
+                            </Space>
+                          </Collapse.Panel>
+                        )}
+                      </Collapse>
+                    )}
+                  </Space>
+                </div>
+              </List.Item>
+            );
+          }}
+        />
+      </Space>
     );
   }
   function renderReviewPanel() {
@@ -1781,7 +2002,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                               {paramSourceText(step, p, linked)}
                             </Typography.Text>
                           </Col>
-                          <Col><Button size="small" danger onClick={() => send({ type: "flow_update", edits: [{ op: "remove", step_id: step.step_id, param_path: p.path }] })}>删除</Button></Col>
+                          <Col>
+                            <Space size={6} wrap>
+                              <Button size="small" danger onClick={() => send({ type: "flow_update", edits: [{ op: "remove", step_id: step.step_id, param_path: p.path }] })}>删除</Button>
+                            </Space>
+                          </Col>
                         </Row>
                         <div style={{
                           display: "grid",
@@ -1949,6 +2174,57 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       </Space>
     );
   }
+  function renderRequestGraphPanel() {
+    if (!flowSpec) return null;
+    const graph = flowSpec.meta?.request_graph || {};
+    const candidates = visibleCandidateReads(flowSpec);
+    const selected = graph.selected_steps || [];
+    const requestRow = (req: RequestGraphEntry, actions?: ReactNode[]) => (
+      <List.Item actions={actions} style={{ paddingLeft: 0, paddingRight: 0 }}>
+        <Space direction="vertical" size={4} style={{ width: "100%" }}>
+          <Space wrap>
+            <Tag color={(req.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{req.method || "GET"}</Tag>
+            <PathText value={req.path || stripHost(req.url || "")} maxWidth={520} />
+            {req.role && <Tag>{req.role}</Tag>}
+            {typeof req.confidence === "number" && <Tag>{Math.round(req.confidence * 100)}%</Tag>}
+            {req.response_status != null && <Tag>{req.response_status}</Tag>}
+          </Space>
+          {req.reason && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{req.reason}</Typography.Text>}
+          {req.response_json != null && (
+            <Space wrap size={4}>
+              {leafPathValues(req.response_json).slice(0, 8).map((leaf) => (
+                <Typography.Text key={`${req.request_index}-${leaf.path}`} code style={{ fontSize: 12 }}>
+                  {leaf.path}
+                </Typography.Text>
+              ))}
+            </Space>
+          )}
+        </Space>
+      </List.Item>
+    );
+    return (
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <Card size="small" title={`已纳入步骤 ${selected.length}`}>
+          {!selected.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有已纳入请求" /> : (
+            <List size="small" dataSource={selected} renderItem={(req) => requestRow(req)} />
+          )}
+        </Card>
+        <Collapse bordered={false} defaultActiveKey={[]}>
+          <Collapse.Panel header={`可加入的候选读接口 ${candidates.length}`} key="candidates">
+            {!candidates.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有候选读接口" /> : (
+              <List
+                size="small"
+                dataSource={candidates}
+                renderItem={(req) => requestRow(req, [
+                  <Button key="add" size="small" type="primary" onClick={() => promoteCandidateRead(req)}>加入步骤</Button>,
+                ])}
+              />
+            )}
+          </Collapse.Panel>
+        </Collapse>
+      </Space>
+    );
+  }
   function renderLinksPanel() {
     if (!flowSpec) return null;
     return (
@@ -1990,7 +2266,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     <Button key="edit" size="small" icon={<SettingOutlined />} onClick={() => startEditLink(link)}>编辑</Button>,
                     <Checkbox key="cf" checked={!!link.confirmed}
                       onChange={(e) => send({ type: "flow_update", edits: [{ op: "update", link_id: link.link_id, field: "confirmed", value: e.target.checked }] })}>已确认</Checkbox>,
-                    <Button key="rm" size="small" danger onClick={() => send({ type: "flow_update", edits: [{ op: "remove", link_id: link.link_id }] })}>删除</Button>,
+                    <Button key="rm" size="small" danger onClick={() => send({ type: "flow_update", edits: [{ op: "remove", link_id: link.link_id, reset_target: true }] })}>删除</Button>,
                   ]}
                 >
                   {editing ? (

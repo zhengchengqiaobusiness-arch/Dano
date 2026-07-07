@@ -62,6 +62,12 @@ def _call_metadata_from_body(body: dict, env=None) -> dict:
     meta = dict((body or {}).get("call_metadata") or {})
     apir = (body or {}).get("api_request") or {}
     flow_meta = ((apir.get("_flow_spec") or {}).get("meta") or {}) if isinstance(apir, dict) else {}
+    for key in ("capability", "capability_meta", "capabilities"):
+        val = (body or {}).get(key)
+        if val in (None, "") and isinstance(apir, dict):
+            val = apir.get(key)
+        if val not in (None, ""):
+            meta[key] = val
     for src in (body or {}, apir if isinstance(apir, dict) else {}, flow_meta):
         for key in ("verification_status", "verification_basis", "recording_mode"):
             val = src.get(key)
@@ -226,6 +232,9 @@ class SkillRegistry:
                             field_docs=dict(body.get("field_docs", {})),
                             field_types=dict(body.get("field_types", {}) or {}),
                             call_metadata=call_meta,
+                            capability=call_meta.get("capability", ""),
+                            capability_meta=dict(call_meta.get("capability_meta") or {}),
+                            capabilities=list(call_meta.get("capabilities") or body.get("capabilities") or (body.get("api_request") or {}).get("capabilities") or []),
                             created_at=_asset_created_at(env),
                             verification_status=call_meta.get("verification_status", ""),
                             verification_basis=call_meta.get("verification_basis", ""),

@@ -32,6 +32,9 @@ class SkillManifest(BaseModel):
     """一个 Skill 的标准工具契约。"""
 
     name: str                         # skill_id,如 "A-OA.create_leave"(调用入口)
+    capability: str = ""              # 对外能力键;旧资产为空时等于 name,保持 skill_id 兼容
+    capability_meta: dict = Field(default_factory=dict)  # 能力别名/来源/迁移信息,不进入 JSON Schema
+    capabilities: list[dict] = Field(default_factory=list)  # 一个 Skill 内可调用的业务能力列表
     subsystem: str
     action: str
     title: str
@@ -52,6 +55,7 @@ class SkillManifest(BaseModel):
     verification_basis: str = ""      # 验证证据来源:fact_check_configured/success_rule_configured/structure_only
     parameters: dict = Field(default_factory=dict)   # 输入 JSON Schema(function-calling 风格)
     output_schema: dict = Field(default_factory=lambda: {"type": "object"})  # 输出 schema(通用对象)
+    call_protocol: dict = Field(default_factory=dict)  # 导出脚本/Agent JSON 调用协议草案
     page: dict | None = None          # 页面型 Skill 专属:{start_url, success_marker, steps[]}(供详情可视化)
     flow: dict = Field(default_factory=dict)   # 执行画像(供导出 SOP):步数/前置/计算/回查/成败约定;全部 grounded、零框架字面量
 
@@ -285,6 +289,66 @@ def _call_metadata(skill: SkillSpec, parameters: dict) -> dict:
     return meta
 
 
+def _capability_of(skill: SkillSpec) -> str:
+    """能力键优先使用显式 capability;旧 Skill 没有时退回 skill_id。"""
+    meta = getattr(skill, "call_metadata", {}) or {}
+    goal = getattr(skill, "goal", {}) or {}
+    caps = list(getattr(skill, "capabilities", []) or meta.get("capabilities") or [])
+    default_cap = ""
+    for preferred in ("submit_batch", "submit", "query_status", "list_options"):
+        hit = next((c for c in caps if isinstance(c, dict) and (c.get("name") == preferred or c.get("kind") == preferred)), None)
+        if hit:
+            default_cap = str(hit.get("name") or hit.get("kind") or "").strip()
+            break
+    candidates = [
+        getattr(skill, "capability", ""),
+        meta.get("capability"),
+        goal.get("capability") if isinstance(goal, dict) else "",
+        default_cap,
+        skill.skill_id,
+    ]
+    for val in candidates:
+        cap = str(val or "").strip()
+        if cap:
+            return cap
+    return skill.skill_id
+
+
+def _capability_meta(skill: SkillSpec, capability: str) -> dict:
+    """收集能力元数据,并显式记录 legacy skill/tool 名,方便调用协议迁移。"""
+    meta: dict = {}
+    raw = getattr(skill, "capability_meta", {}) or {}
+    if isinstance(raw, dict):
+        meta.update(raw)
+    call_meta = getattr(skill, "call_metadata", {}) or {}
+    raw = call_meta.get("capability_meta") if isinstance(call_meta, dict) else None
+    if isinstance(raw, dict):
+        meta.update(raw)
+    meta.setdefault("legacy_skill_id", skill.skill_id)
+    meta.setdefault("legacy_tool_name", skill.skill_id.replace(".", "__"))
+    if capability != skill.skill_id:
+        aliases = list(meta.get("aliases") or [])
+        for val in (skill.skill_id, skill.skill_id.replace(".", "__")):
+            if val not in aliases:
+                aliases.append(val)
+        meta["aliases"] = aliases
+    return meta
+
+
+def _call_protocol(capability: str, skill_id: str) -> dict:
+    """导出给 Agent 的调用协议草案;同时声明旧 name 兼容通道。"""
+    return {
+        "protocol": "dano.capability_call.draft",
+        "transport": "POST /v1/tools/call",
+        "capability": capability,
+        "capability_key": "capability",
+        "legacy_name": skill_id.replace(".", "__"),
+        "arguments_keys": ["input", "arguments"],
+        "confirm_key": "confirm",
+        "compatibility": "payload always includes legacy name for existing Dano gateways",
+    }
+
+
 def _req_path(req: dict) -> str:
     """从一步请求里取干净的 path(去协议+域名,留 path,丢 query/敏感参数),供 SOP 展示编排。"""
     u = str(req.get("path") or req.get("url") or "")
@@ -363,8 +427,13 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
                 "steps": getattr(skill, "page_steps", []) or []}
     parameters = _parameters_schema(skill)
     call_metadata = _call_metadata(skill, parameters)
+    capability = _capability_of(skill)
+    capabilities = list(getattr(skill, "capabilities", []) or call_metadata.get("capabilities") or [])
     return SkillManifest(
         name=skill.skill_id,
+        capability=capability,
+        capability_meta=_capability_meta(skill, capability),
+        capabilities=capabilities,
         subsystem=skill.subsystem.value,
         action=skill.action,
         title=title,
@@ -384,6 +453,7 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         verification_status=call_metadata.get("verification_status", ""),
         verification_basis=call_metadata.get("verification_basis", ""),
         parameters=parameters,
+        call_protocol=_call_protocol(capability, skill.skill_id),
         page=page,
         flow=_flow_meta(skill),
     )
