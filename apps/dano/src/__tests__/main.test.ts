@@ -75,6 +75,7 @@ describe("Dano main", () => {
     );
     expect(sandboxGuard).toContain("HEIMDALL_BWRAP_BIND_KERNEL_FS");
     expect(sandboxGuard).toContain("HEIMDALL_BWRAP_BIND_ROOT");
+    expect(sandboxGuard).toContain("HEIMDALL_PROTECT_CONFIG_OVERLAY");
     expect(sandboxGuard).toContain("function bwrapBindRoot()");
     expect(sandboxGuard).toContain("writeMounts.push(bindRoot");
     expect(sandboxGuard).toContain("function protectedConfigBashBlockReason");
