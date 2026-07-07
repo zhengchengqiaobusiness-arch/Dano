@@ -79,7 +79,7 @@ describe("field assist", () => {
     const ai = {
       generateText: vi.fn()
         .mockResolvedValueOnce("请问您需要请假的具体原因是什么？")
-        .mockResolvedValueOnce("因个人事务需要请假处理。"),
+        .mockResolvedValueOnce("个人事务需要处理。"),
     };
     const service = createFieldAssistService({
       ai,
@@ -96,12 +96,90 @@ describe("field assist", () => {
         currentValue: "个人事务",
       }),
     ).resolves.toMatchObject({
-      value: "因个人事务需要请假处理。",
+      value: "个人事务需要处理。",
     });
     expect(ai.generateText).toHaveBeenCalledTimes(2);
     expect(ai.generateText.mock.calls[1]?.[0].messages.at(-1).content).toContain(
       "不要追问用户",
     );
+  });
+
+  it("rejects punctuation-only polish for short input", async () => {
+    const ai = {
+      generateText: vi.fn()
+        .mockResolvedValueOnce("有事。")
+        .mockResolvedValueOnce("有事需要处理"),
+    };
+    const service = createFieldAssistService({
+      ai,
+      getCurrentModel: () => ({ id: "gpt-4", provider: "openai" }),
+    });
+
+    await expect(
+      service.assist({
+        requestId: "req-156",
+        action: "polish",
+        fieldType: "input",
+        requestMethod: "input",
+        title: "事由",
+        currentValue: "有事",
+      }),
+    ).resolves.toMatchObject({
+      value: "有事需要处理",
+    });
+    expect(ai.generateText).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects over-specified polish for vague short input", async () => {
+    const ai = {
+      generateText: vi.fn()
+        .mockResolvedValueOnce("因个人事务需要请假处理。")
+        .mockResolvedValueOnce("有事需要处理"),
+    };
+    const service = createFieldAssistService({
+      ai,
+      getCurrentModel: () => ({ id: "gpt-4", provider: "openai" }),
+    });
+
+    await expect(
+      service.assist({
+        requestId: "req-156",
+        action: "polish",
+        fieldType: "input",
+        requestMethod: "input",
+        title: "请假原因",
+        currentValue: "有事",
+      }),
+    ).resolves.toMatchObject({
+      value: "有事需要处理",
+    });
+    expect(ai.generateText).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses polish-specific retry prompt", async () => {
+    const ai = {
+      generateText: vi.fn()
+        .mockResolvedValueOnce("有事。")
+        .mockResolvedValueOnce("有事需要处理"),
+    };
+    const service = createFieldAssistService({
+      ai,
+      getCurrentModel: () => ({ id: "gpt-4", provider: "openai" }),
+      maxRetries: 1,
+    });
+
+    await service.assist({
+      requestId: "req-156",
+      action: "polish",
+      fieldType: "input",
+      requestMethod: "input",
+      title: "事由",
+      currentValue: "有事",
+    });
+
+    const retryPrompt = ai.generateText.mock.calls[1]?.[0].messages.at(-1).content;
+    expect(retryPrompt).toContain("不要只补句末标点");
+    expect(retryPrompt).not.toContain("不同于 currentValue 和 prefill");
   });
 
   it("defaults to ten field assist retries", async () => {

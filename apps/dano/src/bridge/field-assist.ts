@@ -7,6 +7,7 @@ import {
   type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import type {
+  FieldAssistAction,
   FieldAssistCommandPayload,
   FieldAssistFieldType,
   FieldAssistMetadata,
@@ -100,12 +101,14 @@ export function createFieldAssistService(options: {
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         const raw = await options.ai.generateText({
           model,
-          messages: attempt === 0 ? messages : buildRetryMessages(messages),
+          messages:
+            attempt === 0 ? messages : buildRetryMessages(messages, input.action),
           timeoutMs: options.timeoutMs ?? 60_000,
         });
         value = normalizeFieldAssistOutput(raw, input.fieldType);
         try {
           assertFieldAssistOutput(value);
+          assertPolishOutput(input, value);
           assertFieldAssistChangedOutput(input, value);
           break;
         } catch (cause) {
@@ -222,12 +225,17 @@ export function buildPolishMessages(
     {
       role: "system",
       content: [
-        "你是文本润色助手。",
-        "只优化表达，不新增事实。",
+        "你是字段文本润色助手。",
+        "目标是在不新增具体事实的前提下，让原文更自然、更完整、更适合填写。",
+        "原文是唯一事实来源；字段标题、placeholder 只能用于判断语气和表达形式，不能用于补写事实。",
+        "允许修正错别字、病句、语序、空白、口语化表达，并可补充通用连接词或谓语使句子完整。",
         "不改变金额、时间、数量、人名、部门、审批事项、编号、专有名词。",
-        "如果信息不足，保留原意做最小润色，不要追问用户，不要请求补充信息。",
+        "不要新增原文没有的具体原因、时间、地点、人物、金额、数量、部门、审批事项、编号或专有名词。",
+        "不要只补一个句末标点或只做空白调整。",
+        "短文本也要尽量做有意义的安全润色；例如“有事”可润色为“有事需要处理”，不要润色为“有事。”。",
+        "不要追问用户，不要请求补充信息。",
         "保持原文语种。",
-        "只输出润色后的正文。",
+        "只输出润色后的字段值。",
         "不要解释，不要加标题，不要用 Markdown 包裹。",
       ].join("\n"),
     },
@@ -265,13 +273,31 @@ export function buildRegenerateMessages(
   ];
 }
 
-function buildRetryMessages(messages: FieldAssistMessage[]): FieldAssistMessage[] {
+function buildRetryMessages(
+  messages: FieldAssistMessage[],
+  action: FieldAssistAction,
+): FieldAssistMessage[] {
   return [
     ...messages,
     {
       role: "system",
       content:
-        "上一次输出不是可直接填入字段的正文，或只是复读了已有内容。请返回一个不同于 currentValue 和 prefill 的字段值，不要追问用户，不要请求补充信息，不要调用工具。",
+        action === "polish"
+          ? [
+              "上一次输出不是合格润色，可能只是补标点、追问用户，或新增了原文没有的具体事实。",
+              "请重新输出一个有意义的安全润色结果。",
+              "不要只补句末标点，不要只调整空白。",
+              "不要新增具体原因、时间、地点、人物、金额、数量、部门或审批事项。",
+              "短文本可补充通用谓语或连接词使表达完整，例如“有事”可改为“有事需要处理”。",
+              "不要追问用户，不要请求补充信息，不要调用工具。",
+              "只输出字段值，不要解释。",
+            ].join("\n")
+          : [
+              "上一次输出不是可直接填入字段的正文，或只是复读了已有内容。",
+              "请返回一个不同于 currentValue 和 prefill 的字段值。",
+              "不要追问用户，不要请求补充信息，不要调用工具。",
+              "只输出字段值，不要解释。",
+            ].join("\n"),
     },
   ];
 }
@@ -339,6 +365,47 @@ export function assertFieldAssistOutput(value: string): void {
     throw new FieldAssistError(
       "INVALID_MODEL_OUTPUT",
       "AI 辅助返回了追问内容，请重试",
+    );
+  }
+}
+
+function assertPolishOutput(
+  input: FieldAssistCommandPayload,
+  value: string,
+): void {
+  if (input.action !== "polish") return;
+
+  const source = comparableFieldAssistValue(input.currentValue);
+  const output = comparableFieldAssistValue(value);
+  if (!output) {
+    throw new FieldAssistError("INVALID_MODEL_OUTPUT", "AI 润色返回了空内容，请重试");
+  }
+  if (source && source === output) {
+    throw new FieldAssistError(
+      "INVALID_MODEL_OUTPUT",
+      "AI 润色只做了标点或空白调整，请重试",
+    );
+  }
+
+  if (Array.from(input.currentValue.trim()).length > 4) return;
+  const addedSpecificTerms = [
+    "个人事务",
+    "私事",
+    "家中",
+    "家庭",
+    "临时",
+    "突发",
+    "请假",
+    "无法参加",
+    "无法出席",
+    "会议",
+    "项目",
+    "工作安排",
+  ].filter(term => value.includes(term) && !input.currentValue.includes(term));
+  if (addedSpecificTerms.length) {
+    throw new FieldAssistError(
+      "INVALID_MODEL_OUTPUT",
+      "AI 润色新增了原文没有的具体信息，请重试",
     );
   }
 }
