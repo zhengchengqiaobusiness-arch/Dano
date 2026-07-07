@@ -15,8 +15,8 @@ import {
   Modal,
   Row,
   Select,
+  Segmented,
   Space,
-  Switch,
   Tabs,
   Tag,
   Tooltip,
@@ -121,9 +121,11 @@ interface FlowCheckReport {
 interface RecResult {
   ok?: boolean; action?: string; risk_level?: string; mode?: string; reason?: string;
   status?: string; warnings?: string[]; review_notes?: string[]; clarifications?: string[];
+  recording_mode?: string; verification_status?: string; verification_basis?: string; skill_id?: string; asset_id?: string;
   api?: { method?: string; path?: string; params?: string[] };
   check_report?: FlowCheckReport;
 }
+type RecordingMode = "real_submit" | "record_only";
 
 const STATUS_META: Record<string, { color: string; label: string }> = {
   verified: { color: "success", label: "已验证" },
@@ -531,7 +533,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [action, setAction] = useState("submit_form");
   const [title, setTitle] = useState("");
   const [result, setResult] = useState<RecResult | null>(null);
-  const [intercept, setIntercept] = useState(false);
+  const [recordingMode, setRecordingMode] = useState<RecordingMode>("real_submit");
   const [err, setErr] = useState("");
 
   const [flowSpec, setFlowSpec] = useState<FlowSpecData | null>(null);
@@ -643,6 +645,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function start() {
     if (!tenant) { message.error("请先到「创建 / 进入租户」"); return; }
     if (!startUrl.trim()) { message.error("请填页面地址 start_url"); return; }
+    const intercept = recordingMode === "record_only";
     setErr(""); setResult(null); setSteps([]); setReqs([]); setFrame(""); setFields([]); setPicked({});
     setCands([]); setSelects({}); setIdentity({}); setStepSel({}); resetEditorState();
     wsAliveRef.current = true;                                     // FC2 修复:每次 start 重置存活标志
@@ -1957,9 +1960,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           </Form.Item>
           <Space align="center" wrap>
             <Button type="primary" onClick={start}>开始录制</Button>
-            <Switch checked={intercept} onChange={setIntercept} />
-            <Typography.Text>拦截提交</Typography.Text>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>开启后，点提交只抓请求，不产生真实记录。</Typography.Text>
+            <Segmented
+              value={recordingMode}
+              onChange={(v) => setRecordingMode(v as RecordingMode)}
+              options={[
+                { label: "真实提交", value: "real_submit" },
+                { label: "只录制不提交", value: "record_only" },
+              ]}
+            />
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {recordingMode === "record_only" ? "点提交只抓请求，不产生真实记录。" : "点提交会按页面原逻辑真实提交。"}
+            </Typography.Text>
           </Space>
           {err && <Alert style={{ marginTop: 12 }} type="error" showIcon message={err} />}
         </>
@@ -2057,8 +2068,24 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   {result.ok && result.api
                     ? <Typography.Text>接口 <Typography.Text code>{result.api.method} {result.api.path}</Typography.Text> · 参数 [{(result.api.params || []).join(", ")}]</Typography.Text>
                     : !result.ok ? <Typography.Text>请根据上方校验和待确认项调整后再发布。</Typography.Text> : null}
+                  {result.recording_mode && (
+                    <Typography.Text type="secondary">
+                      录制模式：{result.recording_mode === "real_submit" ? "真实提交" : result.recording_mode === "intercepted_submit" ? "只录制不提交" : result.recording_mode}
+                    </Typography.Text>
+                  )}
                   {(result.clarifications || []).map((c, i) => <Typography.Text key={i} type="warning">{c}</Typography.Text>)}
-                  {result.ok && <Button type="primary" size="small" onClick={() => nav("/skills")}>去 Skill 目录调用</Button>}
+                  {result.verification_basis && (
+                    <Typography.Text type="secondary">验证依据：{result.verification_basis}</Typography.Text>
+                  )}
+                  {result.ok && (
+                    <Button
+                      type="primary"
+                      size="small"
+                      onClick={() => nav(`/skills?invoke=${encodeURIComponent(result.skill_id || `${subsystem}.${result.action || action}`)}`)}
+                    >
+                      直接调用
+                    </Button>
+                  )}
                 </Space>
               }
             />

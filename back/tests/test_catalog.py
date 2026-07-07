@@ -144,6 +144,59 @@ def test_manifest_preserves_select_and_datetime_semantics():
     assert props["领导"]["label"] == "领导" and "传名字" not in props["领导"]["label"]
 
 
+def test_manifest_exposes_call_metadata_without_polluting_function_schema():
+    from dano.catalog.manifest import to_function_tool, to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    sk = SkillSpec(
+        skill_id="A-OA.submit_form", subsystem=Subsystem.OA, action="submit_form",
+        risk_level=RiskLevel.L3,
+        field_types={"请假类型": "enum", "startTime": "datetime"},
+        required_fields=["请假类型", "startTime"], optional_fields=[],
+        call_metadata={"verification_status": "partially_verified", "recording_mode": "intercepted_submit"},
+        api_request={"selects": [{
+            "param": "请假类型", "source_url": "", "value_key": "value", "label_key": "label",
+            "options": [{"label": "事假", "value": 1}, {"label": "病假", "value": 2}],
+            "option_map": {"事假": 1, "病假": 2}, "enum_source": "dom", "enum_confirmed": True,
+        }]},
+    )
+
+    m = to_manifest(sk)
+    meta = m.call_metadata
+
+    assert m.verification_status == "partially_verified"
+    assert m.recording_mode == "intercepted_submit"
+    assert meta["fields"]["请假类型"]["type"] == "enum"
+    assert meta["fields"]["请假类型"]["enum_options"] == [{"label": "事假", "value": 1}, {"label": "病假", "value": 2}]
+    assert meta["fields"]["请假类型"]["enum_value_map"] == {"事假": 1, "病假": 2}
+    assert meta["fields"]["startTime"]["type"] == "datetime"
+    assert "call_metadata" not in to_function_tool(m)["function"]["parameters"]
+
+
+async def test_page_skill_reads_recording_metadata_from_asset_body():
+    from dano.catalog.manifest import to_manifest
+
+    store = _Store({AssetType.PAGE_SCRIPT: [_Env({
+        "action": "submit_leave", "title": "提交请假", "actions": [], "dom_fingerprint": "",
+        "user_fields": ["请假类型"], "required_fields": ["请假类型"],
+        "field_types": {"请假类型": "enum"},
+        "verification_status": "verified",
+        "api_request": {
+            "params": ["请假类型"], "recording_mode": "real_submit",
+            "selects": [{"param": "请假类型", "options": ["事假", "病假"], "enum_source": "dom"}],
+        },
+    }, "submit_leave")]})
+
+    reg = await SkillRegistry.from_store(store, tenant="t", subsystems=[Subsystem.OA])
+    m = to_manifest(next(s for s in reg.skills if s.action == "submit_leave"))
+
+    assert m.verification_status == "verified"
+    assert m.recording_mode == "real_submit"
+    assert m.call_metadata["fields"]["请假类型"]["enum_options"] == [{"label": "事假", "value": "事假"},
+                                                                 {"label": "病假", "value": "病假"}]
+
+
 def test_ruoyi_parses_approval_chain_from_prose():
     from dano.capabilities.oa_templates import match_template
     spec = {

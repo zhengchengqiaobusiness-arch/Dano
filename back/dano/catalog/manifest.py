@@ -38,9 +38,13 @@ class SkillManifest(BaseModel):
     business_meta: dict = Field(default_factory=dict)  # 业务规则(x-flow)→ 导出剧本的前置/错误/确认段
     goal: dict = Field(default_factory=dict)           # 结构化业务目标(意图/成功判据/禁止步)→ 导出剧本"目标"段
     field_mappings: list = Field(default_factory=list)  # 可追溯字段映射 → 导出剧本"字段映射"段
+    call_metadata: dict = Field(default_factory=dict)   # 调用侧元数据(字段类型/枚举快照/录制验证状态),不属于 JSON Schema
     integration: str                  # 调用方式:adapter / workflow / api / page
     risk_level: str
     requires_confirmation: bool       # L3+ 调用需带 confirm=true
+    recording_mode: str = ""          # 录制型 Skill 的提交模式:real_submit/intercepted_submit/unknown
+    verification_status: str = ""     # 调用契约证据等级
+    verification_basis: str = ""      # 验证证据来源:fact_check_configured/success_rule_configured/structure_only
     parameters: dict = Field(default_factory=dict)   # 输入 JSON Schema(function-calling 风格)
     output_schema: dict = Field(default_factory=lambda: {"type": "object"})  # 输出 schema(通用对象)
     page: dict | None = None          # 页面型 Skill 专属:{start_url, success_marker, steps[]}(供详情可视化)
@@ -68,21 +72,39 @@ def _api_selects(skill: SkillSpec) -> dict:
     return {s.get("param"): s for s in sels if s.get("param")}
 
 
-def _enum_facts(sel: dict | None) -> tuple[list, bool, bool]:
+def _enum_label_value(opt) -> tuple[str, object] | None:
+    """兼容 options 为 string 或 {label,value} 的形态,给 schema/前端提供稳定枚举事实。"""
+    if isinstance(opt, dict):
+        label = str(opt.get("label") or opt.get("text") or opt.get("name") or opt.get("value") or "").strip()
+        if not label:
+            return None
+        return label, opt.get("value", label)
+    label = str(opt or "").strip()
+    if not label:
+        return None
+    return label, label
+
+
+def _enum_facts(sel: dict | None) -> tuple[list[str], dict[str, object], bool, bool]:
     """选择型字段的候选事实 → (opts, has_source, is_static_enum)。
 
     **静态页面枚举**(enum_source=dom/manual,如 请假类型=病假/事假/婚假;或无来源的纯枚举)→ 完整且稳定 → 可烤进 schema;
     **活接口目录**(用户/部门/审批人等网络源:会变、常被截断)→ **绝不烤静态清单**(否则前端被陈旧/错误选项硬约束,
     选的值与实际不符 → 入库失败),只暴露来源让调用方运行期 `--list-options` 现拉。通用,不挑系统/字段。
     """
-    opts = [o for o in ((sel or {}).get("options") or []) if str(o).strip()]
+    records = [_enum_label_value(o) for o in ((sel or {}).get("options") or [])]
+    pairs = [p for p in records if p is not None]
+    opts = [p[0] for p in pairs]
+    option_map = dict((sel or {}).get("option_map") or {})
+    for label, value in pairs:
+        option_map.setdefault(label, value)
     cnt = int((sel or {}).get("count") or len(opts))
     has_source = bool((sel or {}).get("source_url"))
     enum_source = str((sel or {}).get("enum_source") or "")
     static_source = enum_source in {"dom", "manual"}
     truncated = bool(opts) and cnt > len(opts)
     static = bool(opts) and not truncated and (static_source or not has_source)
-    return opts, has_source, static
+    return opts, option_map, has_source, static
 
 
 def _schema_prop(skill: SkillSpec, field: str, desc: str, sel: dict | None = None) -> dict:
@@ -98,7 +120,7 @@ def _schema_prop(skill: SkillSpec, field: str, desc: str, sel: dict | None = Non
     # label=字段纯语义(给 SOP/复述用,简洁);description=语义 + 调用约定(给参数表/function-calling 用)。
     # 约定不写死示例值(『张三』只适合选人,不适合选值如请假类型);示例由前端/样例值提供,不在此臆造。
     if declared == "enum":
-        opts, has_source, static = _enum_facts(sel)
+        opts, option_map, has_source, static = _enum_facts(sel)
         prop = {"type": "string", "format": "name-ref", "label": desc}
         if static:                                           # 静态页面枚举(固定下拉)→ 烤清单
             prop["description"] = desc + ("(传名字/选项文字,Dano 提交时按名字现查内部 ID,**勿直接传 ID/编号**;"
@@ -106,6 +128,8 @@ def _schema_prop(skill: SkillSpec, field: str, desc: str, sel: dict | None = Non
             if has_source:
                 prop["x-options-source"] = True
             prop["x-options"] = opts
+            prop["x-enum-options"] = [{"label": o, "value": option_map.get(o, o)} for o in opts]
+            prop["x-enum-value-map"] = option_map
             if len(opts) <= _OPTIONS_INLINE_MAX:
                 prop["enum"] = opts                          # 静态枚举 ≤50:烤进 enum,function-calling 层约束只能选真实值
         elif has_source:                                     # 活接口目录(选人/部门/审批人:会变)→ 不烤清单,只暴露实时接口
@@ -118,7 +142,7 @@ def _schema_prop(skill: SkillSpec, field: str, desc: str, sel: dict | None = Non
         return prop
     if declared == "list-enum":
         # 列表多选(参会人/抄送人…):agent 传**名字数组**,运行期每个名字经来源接口拼成整条记录。
-        opts, has_source, static = _enum_facts(sel)
+        opts, option_map, has_source, static = _enum_facts(sel)
         item = {"type": "string", "format": "name-ref"}
         prop = {"type": "array", "items": item, "label": desc}
         if static:
@@ -127,6 +151,8 @@ def _schema_prop(skill: SkillSpec, field: str, desc: str, sel: dict | None = Non
             if has_source:
                 prop["x-options-source"] = True
             prop["x-options"] = opts
+            prop["x-enum-options"] = [{"label": o, "value": option_map.get(o, o)} for o in opts]
+            prop["x-enum-value-map"] = option_map
             if len(opts) <= _OPTIONS_INLINE_MAX:
                 item["enum"] = opts                          # 静态枚举 ≤50:内置 items.enum
         else:                                                # 活接口目录(选人多选):不烤清单,暴露实时接口
@@ -167,6 +193,44 @@ def _parameters_schema(skill: SkillSpec) -> dict:
         "required": [f for f in skill.required_fields if not _is_reserved(f)],
         "additionalProperties": False,
     }
+
+
+def _field_call_metadata(skill: SkillSpec, props: dict, sels: dict) -> dict:
+    """字段调用元数据:给目录/前端/导出读,避免污染 OpenAI function-calling JSON Schema。"""
+    declared_types = getattr(skill, "field_types", {}) or {}
+    fields = {}
+    for name, prop in props.items():
+        info = {"type": declared_types.get(name) or prop.get("type") or "string"}
+        if prop.get("format"):
+            info["format"] = prop["format"]
+        sel = sels.get(name) or {}
+        enum_options = prop.get("x-enum-options") or prop.get("x-options") or list(sel.get("options") or [])
+        if enum_options:
+            info["enum_options"] = enum_options
+        enum_value_map = prop.get("x-enum-value-map") or sel.get("enum_value_map") or sel.get("option_map") or {}
+        if enum_value_map:
+            info["enum_value_map"] = dict(enum_value_map)
+        if sel.get("source_url"):
+            info["options_source"] = sel.get("source_url")
+        if sel.get("enum_source"):
+            info["enum_source"] = sel.get("enum_source")
+        if sel.get("enum_confirmed") is not None:
+            info["enum_confirmed"] = bool(sel.get("enum_confirmed"))
+        fields[name] = info
+    return fields
+
+
+def _call_metadata(skill: SkillSpec, parameters: dict) -> dict:
+    meta = dict(getattr(skill, "call_metadata", {}) or {})
+    for key in ("recording_mode", "verification_status", "verification_basis"):
+        val = getattr(skill, key, "")
+        if val not in (None, "") and key not in meta:
+            meta[key] = val
+    props = (parameters or {}).get("properties", {}) or {}
+    fields = _field_call_metadata(skill, props, _api_selects(skill))
+    if fields:
+        meta["fields"] = fields
+    return meta
 
 
 def _req_path(req: dict) -> str:
@@ -245,6 +309,8 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         page = {"start_url": getattr(skill, "page_start_url", ""),
                 "success_marker": getattr(skill, "page_success_marker", None),
                 "steps": getattr(skill, "page_steps", []) or []}
+    parameters = _parameters_schema(skill)
+    call_metadata = _call_metadata(skill, parameters)
     return SkillManifest(
         name=skill.skill_id,
         subsystem=skill.subsystem.value,
@@ -255,10 +321,14 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         business_meta=getattr(skill, "business_meta", {}) or {},
         goal=getattr(skill, "goal", {}) or {},
         field_mappings=getattr(skill, "field_mappings", []) or [],
+        call_metadata=call_metadata,
         integration=integration,
         risk_level=risk.value,
         requires_confirmation=risk in _CONFIRM_FROM,
-        parameters=_parameters_schema(skill),
+        recording_mode=call_metadata.get("recording_mode", ""),
+        verification_status=call_metadata.get("verification_status", ""),
+        verification_basis=call_metadata.get("verification_basis", ""),
+        parameters=parameters,
         page=page,
         flow=_flow_meta(skill),
     )

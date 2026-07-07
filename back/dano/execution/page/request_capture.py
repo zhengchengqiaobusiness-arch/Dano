@@ -1556,6 +1556,22 @@ _NOISE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".js", ".woff", 
 _OBJECT_VALUE_KEYS = ("code", "value", "data", "appcode", "config", "result", "id")
 
 
+def _looks_graphql_request(req: dict) -> bool:
+    url = str(req.get("url") or req.get("path") or "").lower()
+    if "graphql" in url:
+        return True
+    payload = req.get("post_data")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:  # noqa: BLE001
+            payload = {}
+    if not isinstance(payload, dict):
+        return False
+    query = str(payload.get("query") or "").lstrip()
+    return query.startswith(("query", "mutation", "subscription")) or query.startswith("{")
+
+
 def classify_network_request(req: dict) -> dict:
     """P0-2:把每条网络请求翻译成 {role, keep, reason, confidence},供前端 + 后续 P0-3 依赖闭包使用。
 
@@ -1590,6 +1606,10 @@ def classify_network_request(req: dict) -> dict:
         return {"role": "unsupported_upload", "keep": False,
                 "reason": "文件/附件上传请求已放行真发；当前 FlowSpec 暂不自动复用 multipart 文件内容",
                 "confidence": 0.96}
+    if _looks_graphql_request(req):
+        return {"role": "unsupported_graphql", "keep": False,
+                "reason": "GraphQL 请求可能包含多操作与动态 selection set；当前 FlowSpec 暂不自动复用",
+                "confidence": 0.92}
 
     # 2) 危险写:DELETE 或路径含 delete/remove/destroy/reject/terminate/revoke
     if looks_dangerous_write(req):

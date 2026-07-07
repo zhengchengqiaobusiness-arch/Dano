@@ -140,6 +140,14 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertEqual(len(spec.steps), 1)
         self.assertIn("/api/submit", spec.steps[0].path)
 
+    def test_graphql_request_marked_unsupported(self):
+        role = classify_network_request(_post(
+            "https://oa/api/graphql",
+            {"query": "mutation Submit($input: Input!) { submit(input: $input) { id } }"},
+        ))
+        self.assertEqual(role["role"], "unsupported_graphql")
+        self.assertFalse(role["keep"])
+
     def test_dangerous_write_marked_l4(self):
         captured = [_post("https://oa/api/leave/delete/123", {"id": 123}, method="DELETE",
                           resp={"code": 200})]
@@ -147,6 +155,9 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertEqual(len(spec.steps), 1)
         self.assertEqual(spec.steps[0].risk_level, "L4")
         self.assertEqual(spec.risk_level, "L4")
+        report = validate_flow_spec(spec)
+        self.assertFalse(report["passed"])
+        self.assertTrue(any("发布阻断项未处理" in e for e in report["errors"]))
 
     def test_system_values_detected(self):
         captured = [_post("https://oa/api/submit",
@@ -200,8 +211,8 @@ class ToFlowSpecTest(unittest.TestCase):
         spec = to_flow_spec(captured, samples={"question": "你好"})
 
         by_path = {p.path: p for p in spec.steps[0].params}
-        # 系统化:uuid 形态(session literal)依然要标 runtime_var/unknown 让前端在 review_items
-        # 提示用户去绑定上游响应、请求头或改 user_param。但发布不应硬拒(改 warn)。
+        # 系统化:uuid 形态(session literal)依然要标 runtime_var/unknown，让前端在 review_items
+        # 提示用户去绑定上游响应、请求头或改 user_param；它本身不恢复成发布硬阻断。
         self.assertEqual(by_path["wybs"].category, "runtime_var")
         self.assertEqual(by_path["wybs"].source_kind, "unknown")
         self.assertEqual(by_path["conversation_id"].category, "runtime_var")
@@ -214,8 +225,42 @@ class ToFlowSpecTest(unittest.TestCase):
         # 至少 question 已被识别为用户参数;runtime_var 字段保留原值或被运行时覆盖
         self.assertIn("question", apir.get("body_template", {}))
         report = validate_flow_spec(spec)
-        # 已修复:发布不再因 runtime_var 硬拒 — 改为 warning,validate passes
         self.assertTrue(report["passed"])
+        self.assertTrue(any("runtime_var" in w for w in report["warnings"]))
+
+    def test_flow_spec_records_recording_mode_and_diagnostics(self):
+        diagnostics = [{"type": "console", "level": "error", "message": "x"}]
+        spec = to_flow_spec(
+            [_post("https://oa/api/submit", {"a": 1}, resp={"code": 200})],
+            samples={"a": "1"},
+            recording_mode="intercepted_submit",
+            diagnostics=diagnostics,
+        )
+        summary = flow_spec_to_summary(spec)
+        client = flow_spec_to_client(spec)
+
+        self.assertEqual(spec.recording_mode, "intercepted_submit")
+        self.assertEqual(spec.diagnostics, diagnostics)
+        self.assertEqual(summary["recording_mode"], "intercepted_submit")
+        self.assertEqual(summary["diagnostic_count"], 1)
+        self.assertEqual(client["recording_mode"], "intercepted_submit")
+        self.assertEqual(client["diagnostics"], diagnostics)
+
+    def test_validate_blocks_key_requestfailed_diagnostic(self):
+        spec = to_flow_spec(
+            [_post("https://oa/api/submit", {"a": 1}, resp={"code": 200})],
+            samples={"a": "1"},
+            diagnostics=[{
+                "type": "requestfailed",
+                "level": "error",
+                "message": "net::ERR_FAILED",
+                "url": "https://oa/api/submit",
+            }],
+        )
+        report = validate_flow_spec(spec)
+
+        self.assertFalse(report["passed"])
+        self.assertTrue(any("录制期业务请求失败" in e for e in report["errors"]))
 
     def test_summary_shape(self):
         captured = [_post("https://oa/api/submit", {"a": 1}, resp={"code": 200})]
@@ -944,15 +989,13 @@ class DictShapeCoverageTest(unittest.TestCase):
 
 
 class PublishHardBlockRemovalTest(unittest.TestCase):
-    """系统化:验证我之前加了 _runtime_param_publish_error hard-block 会让截图里
-    完整可发布的 spec 被拒。这次把硬拒改成 warning + review_items。
+    """系统化:runtime_var 本身不由转换器硬拒；只阻断真正不可安全发布的 high review。
 
     截图复现:请假流程 POST body {appCode,processDefKey,billType,type,reason,
-    startTime,endTime,startUserSelectAssignees},即便 samples 没传全,
-    发布校验应当 passed=True。
+    startTime,endTime,startUserSelectAssignees}。
     """
 
-    def test_duty_leave_publish_does_not_hard_block_runtime_unknown(self):
+    def test_duty_leave_publish_allows_runtime_unknown_without_restoring_hardblock(self):
         captured = [_post("https://oa/admin-api/oa/duty-leave/submit-process", {
             "appCode": "oa_duty_leave", "processDefKey": "oa_duty_leave",
             "billType": "oa_duty_leave", "type": 2, "reason": "123",
@@ -971,8 +1014,17 @@ class PublishHardBlockRemovalTest(unittest.TestCase):
         ]
         spec = to_flow_spec(captured, reads=reads, samples={"type": "2", "reason": "123"})
         report = validate_flow_spec(spec)
+        self.assertTrue(report["passed"])
+        self.assertTrue(any("runtime_var" in w for w in report["warnings"]))
+
+        spec = apply_flow_edits(spec, [{
+            "op": "resolve_reviews",
+            "severities": ["high"],
+            "resolved": True,
+        }])
+        report = validate_flow_spec(spec)
         self.assertTrue(report["passed"],
-                        f"截图复现场景应可发布,实际 errors: {report['errors']}")
+                        f"high review 已解决后应可发布,实际 errors: {report['errors']}")
         apir, errors = flow_spec_to_api_request(spec)
         self.assertIsNotNone(apir)
         self.assertFalse(any("运行期变量" in e for e in errors),
@@ -993,7 +1045,7 @@ class PublishHardBlockRemovalTest(unittest.TestCase):
         self.assertEqual(by_path["endTime"].source_kind, "user_input")
 
     def test_uuid_still_treated_as_session_literal(self):
-        """uuid 形态字段依然要标 runtime_var/unknown(让前端 review 提示),同时仍可发布。"""
+        """uuid 形态字段依然要标 runtime_var/unknown，但不由 broad high review 阻断发布。"""
         captured = [_post("https://oa/api/chat", {
             "wybs": "bfb49e8-9c90-4315-9eaf-5c0e938b87bf",
             "taskId": "abc-T-12345",
@@ -1003,9 +1055,21 @@ class PublishHardBlockRemovalTest(unittest.TestCase):
         self.assertEqual(by_path["wybs"].category, "runtime_var")
         self.assertEqual(by_path["wybs"].source_kind, "unknown")
         self.assertEqual(by_path["taskId"].category, "runtime_var")
-        # 发布校验仍然 passed True(uuid 形态可作为可发布字段,运行时由 review_items 提示)
         report = validate_flow_spec(spec)
         self.assertTrue(report["passed"])
+        self.assertTrue(any("runtime_var" in w for w in report["warnings"]))
+
+    def test_system_const_exposed_is_publish_error(self):
+        captured = [_post("https://oa/api/submit", {
+            "billType": "oa_duty_leave",
+            "reason": "123",
+        }, resp={"code": 200})]
+        spec = to_flow_spec(captured, samples={"reason": "123"})
+        param = {p.path: p for p in spec.steps[0].params}["billType"]
+        param.exposed_to_user = True
+        report = validate_flow_spec(spec)
+        self.assertFalse(report["passed"])
+        self.assertTrue(any("system_const" in e and "暴露给用户" in e for e in report["errors"]))
 
 
 class ShortCodeEnumAlignmentTest(unittest.TestCase):

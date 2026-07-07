@@ -813,6 +813,8 @@ class RecordSession:
         """清空已录步骤(用户登录完后点「从这里开始录」,丢弃登录步骤,只留业务流程)。
         同时清 all_requests/diagnostics 与请求计数——后续诊断基于录制期抓的事实,登录噪声不计。"""
         self.steps.clear()
+        self.requests.clear()
+        self.reads.clear()
         self.all_requests.clear()
         self.diagnostics.clear()
         self._req_counter = 0

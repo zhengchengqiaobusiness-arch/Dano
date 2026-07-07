@@ -121,6 +121,17 @@ def test_multipart_upload_is_explicitly_marked_unsupported():
     assert role["keep"] is False
 
 
+def test_graphql_request_is_explicitly_marked_unsupported():
+    role = classify_capture_request({
+        "method": "POST",
+        "url": "https://oa/api/graphql",
+        "post_data": json.dumps({"query": "mutation Submit($input: Input!) { submit(input: $input) { id } }"}),
+        "content_type": "application/json",
+    })
+    assert role["role"] == "unsupported_graphql"
+    assert role["keep"] is False
+
+
 def test_parameterize_repeated_values_in_nested_business_list_independently():
     """同一个录制值出现在多个字段时，必须按字段顺序生成不同参数，不能互相覆盖。"""
     body = {

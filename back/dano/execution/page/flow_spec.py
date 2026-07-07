@@ -123,6 +123,15 @@ _STEP_ALLOWED_FIELDS = frozenset({
     "response_json", "notes",
 })
 
+_PUBLISH_BLOCKING_REVIEW_TYPES = frozenset({
+    "dangerous_step",
+    "runtime_var_missing_source",
+    "system_const_exposed",
+    "broken_link",
+    "link_source_missing",
+    "link_target_missing",
+})
+
 
 class SystemValue(BaseModel):
     path: str
@@ -188,6 +197,8 @@ class FlowSpec(BaseModel):
     subsystem: str = ""
     title: str = ""
     business_description: str = ""
+    recording_mode: str = "unknown"
+    diagnostics: list[dict[str, Any]] = Field(default_factory=list)
     steps: list[FlowStep] = Field(default_factory=list)
     links: list[FlowLink] = Field(default_factory=list)
     review_items: list[ReviewItem] = Field(default_factory=list)
@@ -1155,6 +1166,22 @@ def _is_noise_request(req: dict) -> bool:
     return bool(_request_segments(req) & _NOISE_SEGS)
 
 
+def _looks_graphql_request(req: dict) -> bool:
+    url = str(req.get("url") or req.get("path") or "").lower()
+    if "graphql" in url:
+        return True
+    payload = req.get("post_data")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:  # noqa: BLE001
+            payload = {}
+    if not isinstance(payload, dict):
+        return False
+    query = str(payload.get("query") or "").lstrip()
+    return query.startswith(("query", "mutation", "subscription")) or query.startswith("{")
+
+
 def _role_row(req: dict, *, role: str, keep: bool, reason: str, confidence: float,
               semantic: dict | None = None, evidence: dict | None = None) -> dict:
     url = req.get("url") or ""
@@ -1203,6 +1230,11 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
         return _role_row(req, role="unsupported_upload", keep=False,
                          reason="文件/附件上传请求已放行真发；当前 FlowSpec 暂不自动复用 multipart 文件内容",
                          confidence=0.96, semantic=semantic)
+
+    if _looks_graphql_request(req):
+        return _role_row(req, role="unsupported_graphql", keep=False,
+                         reason="GraphQL 请求可能包含多操作与动态 selection set；当前 FlowSpec 暂不自动复用",
+                         confidence=0.92, semantic=semantic)
 
     if looks_like_auth_write(url, req.get("post_data")):
         return _role_row(req, role="auth", keep=False,
@@ -1387,6 +1419,8 @@ def to_flow_spec(
     storage_state: dict | None = None,
     required_labels: set | None = None,
     page_enum_options: dict | None = None,
+    recording_mode: str = "",
+    diagnostics: list[dict] | None = None,
     tenant: str = "",
     subsystem: str = "",
 ) -> FlowSpec:
@@ -1395,6 +1429,8 @@ def to_flow_spec(
     samples = samples or {}
     required_labels = required_labels or set()
     page_enum_options = page_enum_options or {}
+    diagnostics = diagnostics or []
+    recording_mode = recording_mode or "unknown"
 
     request_roles = [classify_network_request(r, captured_requests, samples) for r in captured_requests]
     role_by_key = {_request_role_key(r): role for r, role in zip(captured_requests, request_roles)}
@@ -1421,11 +1457,15 @@ def to_flow_spec(
             tenant=tenant,
             subsystem=subsystem,
             title="(未捕获到业务请求)",
+            recording_mode=recording_mode,
+            diagnostics=diagnostics,
             meta={
                 "captured_total": len(captured_requests),
                 "captured_write_candidates": 0,
                 "reads_count": len(flow_reads),
                 "request_roles": request_roles,
+                "recording_mode": recording_mode,
+                "diagnostics": diagnostics,
                 "note": "录制未抓到任何业务写请求或业务 GET；用户可能未点提交，或页面是纯 GET 表单",
             },
         )), "recorded", reason="录制生成空 FlowSpec")
@@ -1516,6 +1556,8 @@ def to_flow_spec(
         subsystem=subsystem,
         title=title,
         business_description="",
+        recording_mode=recording_mode,
+        diagnostics=diagnostics,
         steps=step_objs,
         links=link_objs,
         goal={},
@@ -1529,6 +1571,8 @@ def to_flow_spec(
             "captured_workflow_steps": len(step_objs),
             "reads_count": len(flow_reads),
             "request_roles": request_roles,
+            "recording_mode": recording_mode,
+            "diagnostics": diagnostics,
             "schema_version": 1,
         },
     )), "recorded", reason="录制生成 FlowSpec 初版")
@@ -2091,6 +2135,8 @@ def flow_spec_to_summary(spec: FlowSpec) -> dict:
     return {
         "flow_id": spec.flow_id,
         "title": spec.title,
+        "recording_mode": spec.recording_mode,
+        "diagnostic_count": len(spec.diagnostics),
         "step_count": len(spec.steps),
         "link_count": len(spec.links),
         "review_count": len(spec.review_items),
@@ -2670,12 +2716,52 @@ def dry_run_flow_spec(spec: FlowSpec, fields: dict[str, Any] | None = None) -> d
     }
 
 
+def _diagnostic_publish_findings(spec: FlowSpec) -> tuple[list[str], list[str]]:
+    """录制期诊断事实进入发布校验。
+
+    只把能关联到已选业务步骤的 requestfailed 升级为 error；pageerror/console error
+    先作为 warning，避免第三方脚本噪声误拦发布。
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    diagnostics = list(spec.diagnostics or (spec.meta or {}).get("diagnostics") or [])
+    if not diagnostics:
+        return errors, warnings
+    kept_request_indices = {
+        st.source_meta.get("request_index")
+        for st in spec.steps
+        if st.source_meta.get("request_index") is not None
+    }
+    kept_urls = {str(st.url or "") for st in spec.steps if st.url}
+    for d in diagnostics:
+        kind = str(d.get("type") or "")
+        msg = str(d.get("message") or "").strip()
+        url = str(d.get("url") or "")
+        req_idx = d.get("request_index")
+        detail = msg or url or kind
+        if kind == "requestfailed" and (req_idx in kept_request_indices or url in kept_urls):
+            errors.append(f"录制期业务请求失败: {detail[:200]}")
+        elif kind == "pageerror":
+            warnings.append(f"录制期页面异常: {detail[:200]}")
+        elif kind == "console" and str(d.get("level") or "").lower() == "error":
+            warnings.append(f"录制期控制台错误: {detail[:200]}")
+    return errors, warnings
+
+
 def validate_flow_spec(spec: FlowSpec) -> dict:
     from dano.execution.page.repair_ops import collect_repair_findings
 
     errors: list[str] = []
     warnings: list[str] = []
     review_items = refresh_review_items(spec.model_copy(deep=True)).review_items
+    blocking_reviews = [
+        item for item in review_items
+        if item.severity == "high" and not item.resolved and item.type in _PUBLISH_BLOCKING_REVIEW_TYPES
+    ]
+    errors.extend([f"发布阻断项未处理: {item.title}" for item in blocking_reviews])
+    diag_errors, diag_warnings = _diagnostic_publish_findings(spec)
+    errors.extend(diag_errors)
+    warnings.extend(diag_warnings)
     api_request, build_errors = flow_spec_to_api_request(spec)
     errors.extend(build_errors)
     if not flow_spec_user_params(spec):
@@ -2685,7 +2771,7 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
             if p.category == "runtime_var" and p.source_kind == "unknown":
                 warnings.append(f"字段 `{p.path}` 被判为 runtime_var，但来源仍需确认")
             if p.category == "system_const" and p.exposed_to_user:
-                warnings.append(f"字段 `{p.path}` 是 system_const，但仍暴露给用户")
+                errors.append(f"字段 `{p.path}` 是 system_const，但仍暴露给用户")
     for lk in spec.links:
         if not lk.confirmed:
             warnings.append(f"链接 `{lk.link_id}` 尚未人工确认")

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Table, Tag, Button, Space, Typography, message, Empty, Modal, Input, Alert, Popconfirm } from "antd";
 import { PlayCircleOutlined, ReloadOutlined, ExportOutlined, DeleteOutlined, KeyOutlined } from "@ant-design/icons";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { listSkills, exportAgentSkills, deleteSkill, SkillManifest } from "../api/skills";
 import InvokeDrawer from "../components/InvokeDrawer";
 import TokenModal from "../components/TokenModal";
@@ -41,6 +41,7 @@ function groupByBusiness(skills: SkillManifest[]): Row[] {
 
 export default function Skills() {
   const nav = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [data, setData] = useState<SkillManifest[]>([]);
   const [loading, setLoading] = useState(false);
   const [invoke, setInvoke] = useState<SkillManifest | null>(null);
@@ -49,6 +50,7 @@ export default function Skills() {
   const [exporting, setExporting] = useState(false);
   const [tokenSub, setTokenSub] = useState<string | null>(null);   // 打开运行期 token 弹窗的子系统
   const tenant = localStorage.getItem(TENANT_NAME) || "";
+  const invokeSkillId = searchParams.get("invoke") || "";
 
   async function doExport() {
     if (!exportDir.trim()) { message.error("请填目标目录"); return; }
@@ -78,14 +80,24 @@ export default function Skills() {
   async function load() {
     setLoading(true);
     try {
-      setData(await listSkills());
+      const skills = await listSkills();
+      setData(skills);
+      if (invokeSkillId) {
+        const target = skills.find((s) => s.name === invokeSkillId);
+        if (target) {
+          setInvoke(target);
+          const next = new URLSearchParams(searchParams);
+          next.delete("invoke");
+          setSearchParams(next, { replace: true });
+        }
+      }
     } catch (e: any) {
       message.error("加载失败:" + (e?.response?.data?.detail || e.message));
     } finally {
       setLoading(false);
     }
   }
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [invokeSkillId]);
 
   return (
     <div>

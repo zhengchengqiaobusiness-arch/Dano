@@ -221,7 +221,7 @@ def _focus_question(action: str, findings: list) -> str:
 def _build_page_body(api_request: dict, action: str, title: str, required):
     """从 api_request 算 params/必填/类型并建 PageScriptBody(修复后参数会变,故抽出可重算重建)。"""
     from dano.shared.asset_bodies import PageScriptBody
-    from dano.shared.enums import RiskLevel
+    from dano.shared.enums import IngestionStatus, RiskLevel
     params = list(api_request.get("params") or [])
     if not params and api_request.get("steps"):
         params = list((api_request["steps"][-1] or {}).get("params") or [])
@@ -230,9 +230,20 @@ def _build_page_body(api_request: dict, action: str, title: str, required):
     ftypes = dict(api_request.get("field_types") or {})
     if not ftypes and api_request.get("steps"):
         ftypes = dict((api_request["steps"][-1] or {}).get("field_types") or {})
+    recording_mode = str(api_request.get("recording_mode") or "unknown")
+    has_fact_check = bool(api_request.get("fact_check") or any((s or {}).get("fact_check") for s in api_request.get("steps") or []))
+    has_success_rule = bool(api_request.get("success_rule") or any((s or {}).get("success_rule") for s in api_request.get("steps") or []))
+    verification_basis = (
+        "fact_check_configured" if has_fact_check else
+        "success_rule_configured" if has_success_rule else
+        "structure_only"
+    )
     body = PageScriptBody(actions=[], dom_fingerprint="", action=action, title=title, api_request=api_request,
                           user_fields=params, required_fields=req_fields, optional_fields=opt_fields,
-                          field_types=ftypes, risk_level=RiskLevel.L3).model_dump()
+                          field_types=ftypes, risk_level=RiskLevel.L3,
+                          recording_mode=recording_mode,
+                          verification_status=IngestionStatus.PARTIALLY_VERIFIED.value,
+                          verification_basis=verification_basis).model_dump()
     return body, params, req_fields, opt_fields
 
 
@@ -433,7 +444,10 @@ async def run_request_onboarding(
                 "action": action, "verification_plan": plan, "review_notes": review_notes,
                 "request_role": role,
                 "goal": goal, "goal_issues": goal_issues,   # 自动提炼 Goal 的完整性问题(建议性,不阻断)
-                "asset_id": pub.get("asset_id"), "mode": "request", "reason": pub.get("reason", ""),
+                "asset_id": pub.get("asset_id"), "skill_id": f"{sid}.{action}",
+                "verification_status": status.value,
+                "verification_basis": body.get("verification_basis", ""),
+                "mode": "request", "reason": pub.get("reason", ""),
                 "warnings": warnings,
                 "api": {"method": api_request.get("method"), "path": api_request.get("path"),
                         "params": params}}

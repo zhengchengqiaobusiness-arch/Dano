@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Drawer, Button, Checkbox, Input, InputNumber, DatePicker, Radio, Typography, Tag,
   Alert, Descriptions, Space, message, Image,
+  Select, Switch,
 } from "antd";
-import { invokeSkill, SkillManifest, TaskOutcome, JSONSchema } from "../api/skills";
+import { invokeSkill, SkillManifest, TaskOutcome, JSONSchema, SkillFieldCallMetadata } from "../api/skills";
 
 const STATE_COLOR: Record<string, string> = {
   completed: "success", failed: "error", rejected: "error",
@@ -19,14 +20,81 @@ function candidateLabel(c: Record<string, unknown>, tmpl?: string): string {
   return JSON.stringify(c);
 }
 
-// 按字段名/描述猜控件类型(manifest 目前统一 type=string,故靠语义猜:日期/数字/文本)
+type EnumSelectOption = { label: string; selectValue: string; value: unknown; disabled?: boolean };
+
+// schema 不完整时保留语义兜底:日期/数字/文本
 const isDate = (s: string) => /date|time|日期|时间|起止|开始|结束|起|止/i.test(s);
 const isNum = (s: string) => /days|num|count|amount|qty|天数|数量|金额|时长|个数/i.test(s);
 
+function isEmptyValue(v: unknown): boolean {
+  return v === "" || v == null || (Array.isArray(v) && v.length === 0);
+}
+
+function initialFormValues(p: JSONSchema): Record<string, unknown> {
+  const values: Record<string, unknown> = {};
+  Object.entries(p?.properties || {}).forEach(([key, prop]) => {
+    if (prop.type === "boolean") values[key] = false;
+    else if (prop.type === "array" || prop.type === "list-enum") values[key] = [];
+  });
+  return values;
+}
+
 function jsonSkeleton(p: JSONSchema): string {
   const o: Record<string, unknown> = {};
-  for (const k of Object.keys(p?.properties || {})) o[k] = "";
+  for (const [k, prop] of Object.entries(p?.properties || {})) {
+    if (prop.type === "boolean") o[k] = false;
+    else if (prop.type === "array" || prop.type === "list-enum") o[k] = [];
+    else o[k] = "";
+  }
   return JSON.stringify(o, null, 2);
+}
+
+function hasOwn(obj: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function selectKey(v: unknown): string {
+  return `${typeof v}:${JSON.stringify(v)}`;
+}
+
+function enumOptions(p: JSONSchema): EnumSelectOption[] {
+  const item = p.items || {};
+  const valueMap = { ...(item["x-enum-value-map"] || {}), ...(p["x-enum-value-map"] || {}) };
+  const rawOptions = [...(item["x-enum-options"] || []), ...(p["x-enum-options"] || [])];
+  const enumValues = [...(item.enum || []), ...(p.enum || [])];
+  const out: EnumSelectOption[] = [];
+  const seen = new Set<string>();
+  const push = (label: string, value: unknown, disabled?: boolean) => {
+    const key = selectKey(value);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ label, selectValue: key, value, disabled });
+  };
+
+  rawOptions.forEach((opt) => {
+    if (opt && typeof opt === "object") {
+      const label = String(opt.label ?? opt.name ?? opt.value ?? "");
+      if (!label) return;
+      const mapped = hasOwn(valueMap, label) ? valueMap[label] : opt.value;
+      push(label, mapped ?? label, !!opt.disabled);
+      return;
+    }
+    const label = String(opt);
+    push(label, hasOwn(valueMap, label) ? valueMap[label] : opt);
+  });
+  enumValues.forEach((v) => push(String(v), v));
+  return out;
+}
+
+function schemaWithCallMetadata(p: JSONSchema, meta?: SkillFieldCallMetadata): JSONSchema {
+  if (!meta) return p;
+  const out: JSONSchema = { ...p };
+  if (!out.type && meta.type) out.type = meta.type;
+  if (!out.format && meta.format) out.format = meta.format;
+  if (!out["x-enum-options"] && meta.enum_options) out["x-enum-options"] = meta.enum_options;
+  if (!out["x-enum-value-map"] && meta.enum_value_map) out["x-enum-value-map"] = meta.enum_value_map;
+  if (!out["x-options-source"] && meta.options_source) out["x-options-source"] = true;
+  return out;
 }
 
 export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest | null; onClose: () => void }) {
@@ -43,7 +111,7 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
 
   useEffect(() => {
     if (skill) {
-      setValues({});
+      setValues(initialFormValues(skill.parameters));
       setText(jsonSkeleton(skill.parameters));
       setConfirm(skill.requires_confirmation);
       setMode("form");
@@ -78,27 +146,65 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
         return;
       }
     } else {
-      const missing = [...required].filter((k) => values[k] === "" || values[k] == null);
+      const missing = [...required].filter((k) => isEmptyValue(values[k]));
       if (missing.length) {
         message.error("缺必填:" + missing.join(", "));
         return;
       }
-      // 丢掉空的可选字段;数字/日期已是正确类型
-      input = Object.fromEntries(Object.entries(values).filter(([, v]) => v !== "" && v != null));
+      // 丢掉空的可选字段;选择/数字/日期/布尔已是调用所需类型
+      input = Object.fromEntries(Object.entries(values).filter(([, v]) => !isEmptyValue(v)));
     }
     await doInvoke(input);
   }
 
-  const fieldRow = (key: string, p: { description?: string }) => {
+  const fieldRow = (key: string, rawProp: JSONSchema) => {
+    const p = schemaWithCallMetadata(rawProp, skill?.call_metadata?.fields?.[key]);
     const label = p.description || key;
     const hint = `${key} ${label}`;
     const reqMark = required.has(key) ? <span style={{ color: "#cf1322" }}> *</span> : null;
+    const type = (p.type || "").toLowerCase();
+    const options = enumOptions(p);
+    const bySelectValue = new Map(options.map((opt) => [opt.selectValue, opt.value]));
     let widget;
-    if (isDate(hint)) {
-      widget = <DatePicker style={{ width: "100%" }} onChange={(_, ds) => setVal(key, ds)} />;
-    } else if (isNum(hint)) {
+    if (options.length) {
+      const isMulti = type === "array" || type === "list-enum" || !!p.items?.enum?.length || !!p.items?.["x-enum-options"]?.length;
+      if (isMulti) {
+        const current = Array.isArray(values[key]) ? values[key] as unknown[] : [];
+        widget = (
+          <Select
+            mode="multiple"
+            allowClear
+            value={current.map(selectKey)}
+            options={options.map((opt) => ({ label: opt.label, value: opt.selectValue, disabled: opt.disabled }))}
+            placeholder={key}
+            onChange={(selected) => setVal(key, selected.map((v) => bySelectValue.get(v)))}
+          />
+        );
+      } else {
+        widget = (
+          <Select
+            allowClear={!required.has(key)}
+            value={!isEmptyValue(values[key]) ? selectKey(values[key]) : undefined}
+            options={options.map((opt) => ({ label: opt.label, value: opt.selectValue, disabled: opt.disabled }))}
+            placeholder={key}
+            onChange={(selected) => setVal(key, selected == null ? undefined : bySelectValue.get(selected))}
+          />
+        );
+      }
+    } else if (type === "boolean") {
+      widget = (
+        <Switch
+          checked={!!values[key]}
+          checkedChildren="是"
+          unCheckedChildren="否"
+          onChange={(v) => setVal(key, v)}
+        />
+      );
+    } else if (type === "number" || type === "integer" || ((!type || type === "string") && isNum(hint))) {
       widget = <InputNumber style={{ width: "100%" }} value={values[key] as number}
                             onChange={(v) => setVal(key, v)} />;
+    } else if (type === "date" || type === "datetime" || ((type === "string" || !type) && (p.format === "date" || p.format === "date-time" || isDate(hint)))) {
+      widget = <DatePicker showTime={type === "datetime" || p.format === "date-time"} style={{ width: "100%" }} onChange={(_, ds) => setVal(key, ds)} />;
     } else {
       widget = <Input value={(values[key] as string) ?? ""} onChange={(e) => setVal(key, e.target.value)}
                       placeholder={key} />;
@@ -124,6 +230,17 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
               <Tag color={skill.risk_level >= "L3" ? "orange" : "default"}>{skill.risk_level}</Tag>
               {skill.requires_confirmation && <Tag color="orange">写操作需确认</Tag>}
             </Descriptions.Item>
+            {(skill.recording_mode || skill.verification_status || skill.verification_basis) && (
+              <Descriptions.Item label="录制验证">
+                {skill.recording_mode && (
+                  <Tag color={skill.recording_mode === "real_submit" ? "green" : "blue"}>
+                    {skill.recording_mode === "real_submit" ? "真实提交录制" : skill.recording_mode === "intercepted_submit" ? "只录制不提交" : skill.recording_mode}
+                  </Tag>
+                )}
+                {skill.verification_status && <Tag>{skill.verification_status}</Tag>}
+                {skill.verification_basis && <Tag color="default">{skill.verification_basis}</Tag>}
+              </Descriptions.Item>
+            )}
             <Descriptions.Item label="必填字段">{[...required].length ? [...required].join(", ") : "无"}</Descriptions.Item>
           </Descriptions>
 

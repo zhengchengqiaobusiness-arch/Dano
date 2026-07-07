@@ -29,6 +29,7 @@ class SkillSpec(BaseModel):
     title: str = ""                                             # 人类可读标题(阶段4)
     field_docs: dict[str, str] = Field(default_factory=dict)    # 字段→语义描述(阶段4)
     field_types: dict[str, str] = Field(default_factory=dict)   # 字段→JSON 类型(信源 schema;缺则按语义判定)
+    call_metadata: dict[str, Any] = Field(default_factory=dict)  # 调用侧元数据(录制/验证状态等,不进 JSON Schema)
     field_mappings: list[dict] = Field(default_factory=list)    # 可追溯字段映射(§16:目标点路径+来源 schema_ref)
     goal: dict = Field(default_factory=dict)                    # 结构化业务目标(意图/成功判据/禁止步,§2)
     has_api: bool = True
@@ -38,6 +39,9 @@ class SkillSpec(BaseModel):
     page_success_marker: str | None = None     # 页面脚本:成功标志
     page_steps: list[dict] = Field(default_factory=list)   # 页面脚本:动作步骤(PageAction 字典,详情时间线)
     api_request: dict = Field(default_factory=dict)        # 抓请求型页面脚本:参数化后的提交请求/多步工作流(steps/success_rule/fact_check)
+    recording_mode: str = ""                               # 录制提交模式:real_submit/intercepted_submit/unknown
+    verification_status: str = ""                          # 调用契约验证等级
+    verification_basis: str = ""                            # 验证证据来源:fact_check_configured/success_rule_configured/structure_only
     required_fields: list[str] = Field(default_factory=list)   # 必填(缺则拦截)
     optional_fields: list[str] = Field(default_factory=list)   # 可选(契约暴露但不强制)
     keywords: list[str] = Field(default_factory=list)

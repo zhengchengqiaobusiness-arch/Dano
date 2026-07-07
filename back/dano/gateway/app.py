@@ -658,6 +658,7 @@ async def record_ws(ws: WebSocket) -> None:
         pending_storage: dict | None = None    # 登录态(认 identity 字段)
         pending_required: set = set()          # 录制时表单 * 必填的字段标签
         pending_page_enum_options: dict = {}         # 录制时下拉里真实可见的选项 {选中显示值: [选项文字]}(枚举地面真值)
+        recording_mode = "intercepted_submit" if init.get("intercept", True) else "real_submit"
         while True:
             msg = await ws.receive_json()
             t = msg.get("type")
@@ -746,6 +747,8 @@ async def record_ws(ws: WebSocket) -> None:
                             storage_state=pending_storage,
                             required_labels=pending_required,
                             page_enum_options=pending_page_enum_options,
+                            recording_mode=recording_mode,
+                            diagnostics=sess.captured_diagnostics(),
                             tenant=init.get("tenant", ""),
                             subsystem=init.get("subsystem", ""),
                         )
@@ -1024,6 +1027,7 @@ async def record_ws(ws: WebSocket) -> None:
                         })
                         continue
                     apir["_flow_spec"] = flow_spec_to_summary(pending_flow_spec)
+                    apir["recording_mode"] = recording_mode
                     required = flow_spec_required_params(pending_flow_spec)
                     last_params = apir.get("params") or ((apir.get("steps") or [{}])[-1].get("params") or [])
                 except Exception as e:  # noqa: BLE001
@@ -1050,8 +1054,10 @@ async def record_ws(ws: WebSocket) -> None:
                     deploy=init.get("deploy"), storage_state=login_state)
                 if rep.get("ok"):
                     await _auto_export(init["tenant"])
-                await ws.send_json({"type": "result", "report": {**rep, "check_report": check_report},
+                await ws.send_json({"type": "result", "report": {**rep, "check_report": check_report,
+                                                                  "recording_mode": recording_mode},
                                     "parsed_steps": len(last_params), "via": "flow_spec",
+                                    "recording_mode": recording_mode,
                                     "workflow_steps": len(apir.get("steps") or []) or None})
             elif t == "stop":
                 break

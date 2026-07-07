@@ -57,6 +57,22 @@ _PAGE_ACTION_BY_SUBSYSTEM: dict[Subsystem, str] = {
 }
 
 
+def _call_metadata_from_body(body: dict, env=None) -> dict:
+    """从已发布资产体/信封提取调用侧元数据;仅供目录展示,不混入 function schema。"""
+    meta = dict((body or {}).get("call_metadata") or {})
+    apir = (body or {}).get("api_request") or {}
+    flow_meta = ((apir.get("_flow_spec") or {}).get("meta") or {}) if isinstance(apir, dict) else {}
+    for src in (body or {}, apir if isinstance(apir, dict) else {}, flow_meta):
+        for key in ("verification_status", "verification_basis", "recording_mode"):
+            val = src.get(key)
+            if val not in (None, ""):
+                meta[key] = val
+    status = getattr(env, "verification_status", None) or getattr(env, "validation_status", None)
+    if status is not None and "verification_status" not in meta:
+        meta["verification_status"] = getattr(status, "value", status)
+    return {k: v for k, v in meta.items() if v not in (None, "")}
+
+
 class SkillRegistry:
     def __init__(self, skills: list[SkillSpec]) -> None:
         self.skills = skills
@@ -76,6 +92,7 @@ class SkillRegistry:
                 body = WorkflowSkillBody.model_validate(env.body)
                 req = list(body.required_fields)
                 opt = [f for f in body.user_fields if f not in req]
+                call_meta = _call_metadata_from_body(env.body, env)
                 skills.append(
                     SkillSpec(
                         skill_id=f"{sub.value}.{body.action}",
@@ -85,6 +102,10 @@ class SkillRegistry:
                         title=body.title,
                         field_docs=dict(body.field_docs),
                         field_types=dict(getattr(body, "field_types", {}) or {}),
+                        call_metadata=call_meta,
+                        verification_status=call_meta.get("verification_status", ""),
+                        verification_basis=call_meta.get("verification_basis", ""),
+                        recording_mode=call_meta.get("recording_mode", ""),
                         field_mappings=list(getattr(body, "field_mappings", []) or []),
                         goal=dict(getattr(body, "goal", {}) or {}),
                         business=getattr(body, "business", "") or "",
@@ -117,6 +138,7 @@ class SkillRegistry:
                 # 必填/可选按连接器绑定的 required 拆分(缺省 True,兼容旧资产)
                 req = [b["platform_std"] for b in bindings if b.get("required", True)]
                 opt = [b["platform_std"] for b in bindings if not b.get("required", True)]
+                call_meta = _call_metadata_from_body(env.body, env)
                 skills.append(
                     SkillSpec(
                         skill_id=f"{sub.value}.{action}",
@@ -127,6 +149,10 @@ class SkillRegistry:
                         business=env.body.get("business", "") or "",
                         field_docs=dict(env.body.get("field_docs", {})),
                         field_types=dict(env.body.get("field_types", {}) or {}),
+                        call_metadata=call_meta,
+                        verification_status=call_meta.get("verification_status", ""),
+                        verification_basis=call_meta.get("verification_basis", ""),
+                        recording_mode=call_meta.get("recording_mode", ""),
                         has_api=True,
                         connector_asset_id=env.asset_id,
                         required_fields=req,
@@ -142,6 +168,7 @@ class SkillRegistry:
                 action = b.get("action", env.asset_key)
                 req = list(b.get("required_fields", []))
                 opt = [f for f in b.get("user_fields", []) if f not in req]
+                call_meta = _call_metadata_from_body(b, env)
                 skills.append(
                     SkillSpec(
                         skill_id=f"{sub.value}.{action}",
@@ -153,6 +180,10 @@ class SkillRegistry:
                         business_meta=dict(b.get("business_meta", {})),
                         field_docs=dict(b.get("field_docs", {})),
                         field_types=dict(b.get("field_types", {}) or {}),
+                        call_metadata=call_meta,
+                        verification_status=call_meta.get("verification_status", ""),
+                        verification_basis=call_meta.get("verification_basis", ""),
+                        recording_mode=call_meta.get("recording_mode", ""),
                         has_api=True,
                         is_adapter=True,
                         adapter_asset_id=env.asset_id,
@@ -177,6 +208,7 @@ class SkillRegistry:
                     opt = [f for f in (user + list(body.get("optional_fields") or []))
                            if f not in req]
                     opt = list(dict.fromkeys(opt))
+                    call_meta = _call_metadata_from_body(body, env)
                     skills.append(
                         SkillSpec(
                             skill_id=f"{sub.value}.{body_action}",
@@ -186,6 +218,10 @@ class SkillRegistry:
                             title=body.get("title", ""),
                             field_docs=dict(body.get("field_docs", {})),
                             field_types=dict(body.get("field_types", {}) or {}),
+                            call_metadata=call_meta,
+                            verification_status=call_meta.get("verification_status", ""),
+                            verification_basis=call_meta.get("verification_basis", ""),
+                            recording_mode=call_meta.get("recording_mode", ""),
                             has_api=False,
                             page_asset_id=env.asset_id,
                             page_start_url=body.get("start_url", ""),

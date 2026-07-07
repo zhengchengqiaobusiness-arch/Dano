@@ -320,10 +320,16 @@ def test_captured_diagnostics_returns_copy():
 # ── 6. reset() 一并清空 ──
 def test_reset_clears_all_requests_and_diagnostics():
     s = _new_sess()
+    s.steps.append({"op": "click", "locator": "role=button[name=登录]"})
+    s.requests.append({"method": "POST", "url": "https://x/api/b"})
+    s.reads.append({"method": "GET", "url": "https://x/api/options"})
     s._record_all("GET", "https://x/api/a")
     s._record_all("POST", "https://x/api/b", pd='{"x":1}')
     s._record_diag("console", {"level": "error", "message": "y"})
     s.reset()
+    assert s.steps == []
+    assert s.captured_requests() == []
+    assert s.captured_reads() == []
     assert s.captured_all_requests() == []
     assert s.captured_diagnostics() == []
     assert s._req_counter == 0

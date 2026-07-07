@@ -11,6 +11,10 @@ export interface SkillManifest {
   integration: string;     // adapter / workflow / api / page
   risk_level: string;      // L1..L5
   requires_confirmation: boolean;
+  verification_status?: string;
+  verification_basis?: string;
+  recording_mode?: string;
+  call_metadata?: SkillCallMetadata;
   parameters: JSONSchema;  // 输入 JSON Schema
   output_schema?: Record<string, unknown>;
   page?: PageSkillView | null;   // 页面型 Skill 专属(详情可视化)
@@ -24,11 +28,46 @@ export interface PageSkillView {
   start_url?: string; success_marker?: string | null; steps?: PageStepView[];
 }
 
+export type JSONSchemaValue = string | number | boolean | null;
+export interface JSONSchemaEnumOption {
+  label?: string;
+  value?: JSONSchemaValue;
+  disabled?: boolean;
+  [key: string]: unknown;
+}
+
+export interface SkillFieldCallMetadata {
+  type?: string;
+  format?: string;
+  enum_options?: Array<JSONSchemaValue | JSONSchemaEnumOption>;
+  enum_value_map?: Record<string, JSONSchemaValue>;
+  options_source?: string;
+  enum_source?: string;
+  enum_confirmed?: boolean;
+  [key: string]: unknown;
+}
+
+export interface SkillCallMetadata {
+  recording_mode?: string;
+  verification_status?: string;
+  verification_basis?: string;
+  fields?: Record<string, SkillFieldCallMetadata>;
+  [key: string]: unknown;
+}
+
 export interface JSONSchema {
   type?: string;
-  properties?: Record<string, { type?: string; description?: string }>;
+  description?: string;
+  format?: string;
+  enum?: JSONSchemaValue[];
+  "x-options"?: JSONSchemaValue[];
+  "x-enum-options"?: Array<JSONSchemaValue | JSONSchemaEnumOption>;
+  "x-enum-value-map"?: Record<string, JSONSchemaValue>;
+  "x-options-source"?: boolean;
+  properties?: Record<string, JSONSchema>;
+  items?: JSONSchema;
   required?: string[];
-  additionalProperties?: boolean;
+  additionalProperties?: boolean | JSONSchema;
 }
 
 // 与后端 TaskOutcome 对齐(部分字段)

@@ -244,6 +244,9 @@ class PageScriptBody(BaseModel):
     field_docs: dict[str, str] = Field(default_factory=dict, description="字段→语义描述")
     field_types: dict[str, str] = Field(default_factory=dict, description="字段→类型(number/date/enum/string…,给 agent/契约)")
     risk_level: RiskLevel = Field(default=RiskLevel.L3, description="写页面默认 L3 → 运行期提交前确认")
+    recording_mode: str = Field(default="", description="录制提交模式:real_submit/intercepted_submit/unknown")
+    verification_status: str = Field(default="", description="录入结果状态:verified/partially_verified/needs_clarification/rejected/unsupported")
+    verification_basis: str = Field(default="", description="验证证据来源:fact_check_configured/success_rule_configured/structure_only/unknown")
     # 抓提交请求路径(SPA 内部接口):有它则运行期直接发该请求(不走 DOM 回放),body_template 的 {{字段}} 用参数填回
     api_request: dict | None = Field(
         default=None, description="{method, path, body_template, content_type, params}:录制抓到的提交请求,参数化后直接调")
