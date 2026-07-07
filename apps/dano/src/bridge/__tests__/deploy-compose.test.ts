@@ -199,11 +199,22 @@ describe("deploy compose wrapper", () => {
       "DANO_RUNTIME_DIR: /opt/dano/runtime-data",
     );
     expect(compose).toContain(
+      "DANO_SESSIONS_ROOT: /opt/dano/runtime-data/.dano/sessions",
+    );
+    expect(compose).toContain(
       "DANO_UPLOAD_DIR: /opt/dano/runtime-data/.dano/uploads",
     );
     expect(compose).toContain(
       "${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/opt/dano/runtime-data",
     );
+    expect(compose).toContain(
+      "agent-config:/opt/dano/runtime-data/.pi/agent",
+    );
+    expect(compose).toContain(
+      "workspaces:/opt/dano/runtime-data/workspaces",
+    );
+    expect(compose).toContain("agent-config:");
+    expect(compose).toContain("workspaces:");
     expect(compose).not.toContain(":/tmp/dano");
     expect(compose).toContain(
       "${DANO_NGINX_CONF:-/opt/dano/deploy/nginx/default.conf}",
