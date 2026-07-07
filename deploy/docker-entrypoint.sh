@@ -5,12 +5,9 @@ runtime_root="${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}"
 agent_dir="${PI_CODING_AGENT_DIR:-$runtime_root/.pi/agent}"
 export PI_CODING_AGENT_DIR="$agent_dir"
 runtime_defaults_dir="${DANO_RUNTIME_DEFAULTS_DIR:-/app/deploy/runtime-defaults}"
-runtime_tmp_dir="$runtime_root/.dano/tmp"
-export TMPDIR="$runtime_tmp_dir"
-export HEIMDALL_PROTECT_CONFIG_OVERLAY="${HEIMDALL_PROTECT_CONFIG_OVERLAY:-0}"
 npm_registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-${DANO_DEFAULT_NPM_REGISTRY:-https://mirrors.cloud.tencent.com/npm/}}}"
 
-mkdir -p "$agent_dir" "$runtime_tmp_dir"
+mkdir -p "$agent_dir"
 
 if command -v npm >/dev/null 2>&1; then
   npm config set registry "$npm_registry" >/dev/null

@@ -25,18 +25,11 @@ On container startup, `deploy/docker-entrypoint.sh` creates:
 /opt/dano/runtime-data/.pi/agent/SYSTEM.md
 /opt/dano/runtime-data/.pi/agent/settings.json
 /opt/dano/runtime-data/.pi/agent/heimdall.json
-/opt/dano/runtime-data/.dano/tmp/
 ```
 
 The entrypoint copies those files from `deploy/runtime-defaults/` only when the
 runtime file is missing. It does not overwrite user-modified runtime files.
 It does not copy defaults into a Runtime Workspace `.pi` directory.
-It also sets `TMPDIR` to the runtime tmp directory so temporary runtime files do
-not land in the source checkout.
-The container entrypoint defaults `HEIMDALL_PROTECT_CONFIG_OVERLAY=0` because
-Bubblewrap cannot overlay-hide files inside the bind-mounted runtime volume on
-the verified Podman path; Heimdall still blocks direct tool reads/writes of
-protected config.
 
 The app container runs as the non-root `node` user (`1000:1000`) with
 `HOME=/home/node`. The image installs `/usr/bin/bwrap` setuid (`4755`) because

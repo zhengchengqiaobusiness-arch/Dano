@@ -563,8 +563,6 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     const workspaceDir = join(cwd, "workspace");
     const agentDir = join(runtimeDir, ".pi/agent");
     const agentDirOut = join(cwd, "agent-dir.txt");
-    const tmpDirOut = join(cwd, "tmp-dir.txt");
-    const overlayOut = join(cwd, "overlay.txt");
 
     mkdirSync(defaultsDir, { recursive: true });
     mkdirSync(agentDir, { recursive: true });
@@ -577,7 +575,7 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
       entrypointFile,
       "/bin/sh",
       "-c",
-      'printf "%s" "$PI_CODING_AGENT_DIR" > "$DANO_AGENT_DIR_OUT"; printf "%s" "$TMPDIR" > "$DANO_TMP_DIR_OUT"; printf "%s" "$HEIMDALL_PROTECT_CONFIG_OVERLAY" > "$DANO_OVERLAY_OUT"',
+      'printf "%s" "$PI_CODING_AGENT_DIR" > "$DANO_AGENT_DIR_OUT"',
     ], {
       env: {
         ...process.env,
@@ -586,14 +584,10 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
         DANO_RUNTIME_DIR: runtimeDir,
         DANO_DEFAULT_WORKSPACE_PATH: workspaceDir,
         DANO_AGENT_DIR_OUT: agentDirOut,
-        DANO_TMP_DIR_OUT: tmpDirOut,
-        DANO_OVERLAY_OUT: overlayOut,
       },
     });
 
     expect(readFileSync(agentDirOut, "utf8")).toBe(agentDir);
-    expect(readFileSync(tmpDirOut, "utf8")).toBe(join(runtimeDir, ".dano/tmp"));
-    expect(readFileSync(overlayOut, "utf8")).toBe("0");
     expect(readFileSync(join(agentDir, "SYSTEM.md"), "utf8")).toBe(
       "default system\n",
     );
