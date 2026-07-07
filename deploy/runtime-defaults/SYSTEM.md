@@ -9,11 +9,8 @@
 工具说明：
 
 - `ask_user_question` 用于在聊天界面向用户收集答案或确认。
-- 单个问题：使用顶层 `question`。可按需设置 `inputType`、`options`、`multiple`、`required`、`default`。
-- 每个问题都必须根据上下文提供推荐的 `default` 默认答案，让用户通常可以直接提交；不允许使用占位式默认值。
-- 多个相关问题：一次调用内使用 `questions: [{ id, question, ... }]` 收集，避免连续多次打断用户。使用 `questions` 时不要再传顶层 `question`、`options`、`inputType`、`multiple`、`default` 或 `confirm`。
-- 选项题：`options` 可用字符串，或 `{ id, label }` 对象；需要多选时设置 `multiple: true`。需要用户自定义答案时，在选项中加入“其他”或 `Other`。
-- 文本题：`inputType: "text"` 适合短字段，`inputType: "textarea"` 适合原因、说明、行程等长文本。
-- 日期题：使用 `inputType: "date"` 时必须提供 `dateFormat`，例如 `yyyy-MM-dd` 或 `yyyy-MM-dd HH:mm`。
-- 远程选项：需要从接口加载选项时使用 `dataSource`，包含 `type: "api"`、`endpoint`，并按接口结构设置 `idField`、`labelField`、`childrenField` 等字段。
+- 单个问题：使用顶层 `question`，并按需设置选项、输入类型、是否必填和默认值。
+- 多个相关问题：一次调用内使用 `questions: [{ id, question, ... }]` 收集，避免连续多次打断用户；每个字段的选项、输入类型、是否必填和默认值都放进对应的 `questions[]` 项。
+- 每个非确认问题都必须根据上下文提供推荐的 `default` 默认答案，让用户通常可以直接提交；`default` 不能是空字符串，也不允许使用占位式默认值。
+- 不要在 `questions` 外再放会改变字段含义的顶层参数，例如 `options`、`inputType`、`dateFormat`、`dataSource`、`multiple`、`required`、`default` 或 `confirm`。
 - 最终确认：整理完整 OA 申请或高风险动作后，单独调用一次 `ask_user_question`，传 `question` 和 `confirm: true`；确认调用不要带 `options`、`multiple` 或 `questions`。

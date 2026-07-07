@@ -38,11 +38,55 @@ function executeQuestion(
 ) {
   return askUserQuestionTool.execute(
     toolCallId,
-    params,
+    withRequiredDefault(params),
     signal,
     undefined,
     {} as never,
   );
+}
+
+function withRequiredDefault<T extends {
+  options?: (string | AskUserQuestionOption)[];
+  inputType?: AskUserQuestionInputType;
+  multiple?: boolean;
+  confirm?: true;
+  default?: AskUserQuestionAnswerInput;
+  questions?: {
+    options?: (string | AskUserQuestionOption)[];
+    inputType?: AskUserQuestionInputType;
+    multiple?: boolean;
+    confirm?: true;
+    default?: AskUserQuestionAnswerInput;
+  }[];
+}>(params: T): T {
+  if (params.confirm) return params;
+  if (params.questions) {
+    return {
+      ...params,
+      questions: params.questions.map(question => question.confirm || question.default !== undefined
+        ? question
+        : { ...question, default: defaultForQuestion(question) }),
+    };
+  }
+  return params.default !== undefined
+    ? params
+    : { ...params, default: defaultForQuestion(params) };
+}
+
+function defaultForQuestion(question: {
+  options?: (string | AskUserQuestionOption)[];
+  inputType?: AskUserQuestionInputType;
+  multiple?: boolean;
+}): AskUserQuestionAnswerInput {
+  const firstOption = question.options?.[0];
+  const firstOptionValue =
+    typeof firstOption === "object" ? firstOption.id : firstOption;
+  if (question.multiple || question.inputType === "checkbox") {
+    return firstOptionValue === undefined ? ["Default"] : [firstOptionValue];
+  }
+  if (firstOptionValue !== undefined) return firstOptionValue;
+  if (question.inputType === "date") return "2026-07-07";
+  return "Default answer";
 }
 
 describe("ask_user_question tool", () => {
@@ -56,11 +100,11 @@ describe("ask_user_question tool", () => {
       "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
       "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
       "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
-      "Give every non-confirmation question a context-based recommended default. Do not use placeholder defaults.",
+      "Give every non-confirmation question a context-based recommended non-empty default. Do not use empty string or placeholder defaults.",
       "Set required:true only when an answer is mandatory. required defaults to false.",
       "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
       "Dano returns the user's date answer as submitted; convert it yourself if a downstream interface needs another business format.",
-      "When using questions, the top level must contain only questions. Put id, question, options, inputType, dateFormat, required, dataSource, multiple, and default inside each questions item.",
+      "When using questions, put each field's id, question, options, inputType, dateFormat, required, dataSource, multiple, and default inside its questions item. Do not put top-level field configuration beside questions.",
       "For forms, applications, or other user-reviewed summaries, call ask_user_question with confirm: true after presenting the final summary and before treating it as confirmed, ready to submit, or complete.",
     ]);
   });
@@ -317,19 +361,23 @@ describe("ask_user_question tool", () => {
     });
   });
 
-  it("accepts empty optional text defaults without requiring user correction", async () => {
-    const execution = executeQuestion("empty-default", {
+  it("rejects empty string defaults", async () => {
+    await expect(executeQuestion("empty-default", {
       question: "Reason?",
       default: "",
-    });
+    })).rejects.toThrow("default 必须是非空推荐值");
+  });
 
-    askUserQuestionCoordinator.answer("empty-default", {
-      cancelled: false,
-      answer: "",
-    });
-    await expect(execution).resolves.toMatchObject({
-      details: { status: "answered", answer: "" },
-    });
+  it("rejects non-confirmation questions without defaults", async () => {
+    await expect(
+      askUserQuestionTool.execute(
+        "missing-default",
+        { question: "Reason?" },
+        undefined,
+        undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow("默认答案缺失");
   });
 
   it("returns date answers exactly as submitted", async () => {
@@ -672,9 +720,10 @@ describe("ask_user_question tool", () => {
             question: "Start date?",
             inputType: "date",
             dateFormat: "yyyy-MM-dd",
+            default: "2026-07-03",
             required: true,
           },
-          { id: "reason", question: "Reason?", required: true },
+          { id: "reason", question: "Reason?", default: "Annual leave", required: true },
         ],
       },
       undefined,
@@ -819,16 +868,17 @@ describe("ask_user_question tool", () => {
   });
 
   it("rejects a retry question without cancelling the pending form", async () => {
+    const controller = new AbortController();
     const first = executeQuestion("separate-1", {
       question: "Leave type?",
       options: ["Annual", "Sick"],
       default: "Annual",
-    });
+    }, controller.signal);
     const second = executeQuestion("separate-2", {
       question: "Start date?",
       options: ["Today", "Tomorrow"],
       default: "Today",
-    });
+    }, controller.signal);
 
     await expect(second).rejects.toThrow("exactly one native ask_user_question call");
     await expect(second).rejects.not.toThrow("waiting");
@@ -838,6 +888,34 @@ describe("ask_user_question tool", () => {
     });
     await expect(first).resolves.toMatchObject({
       details: { status: "answered", answer: "Annual" },
+    });
+  });
+
+  it("allows pending questions from different agent turns", async () => {
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const first = executeQuestion("turn-1", {
+      question: "First turn?",
+      default: "Yes",
+    }, firstController.signal);
+    const second = executeQuestion("turn-2", {
+      question: "Second turn?",
+      default: "No",
+    }, secondController.signal);
+
+    askUserQuestionCoordinator.answer("turn-2", {
+      cancelled: false,
+      answer: "No",
+    });
+    askUserQuestionCoordinator.answer("turn-1", {
+      cancelled: false,
+      answer: "Yes",
+    });
+    await expect(second).resolves.toMatchObject({
+      details: { status: "answered", answer: "No" },
+    });
+    await expect(first).resolves.toMatchObject({
+      details: { status: "answered", answer: "Yes" },
     });
   });
 
@@ -867,7 +945,7 @@ describe("ask_user_question tool", () => {
         undefined,
         {} as never,
       ),
-    ).rejects.toThrow("top level may contain only questions");
+    ).rejects.toThrow("field configuration belongs inside each questions[] item");
   });
 
   it("omits optional grouped answers that are not submitted", async () => {
@@ -875,8 +953,8 @@ describe("ask_user_question tool", () => {
       "group-missing",
       {
         questions: [
-          { id: "name", question: "Name?" },
-          { id: "env", question: "Environment?", options: ["Test", "Prod"] },
+          { id: "name", question: "Name?", default: "Dano" },
+          { id: "env", question: "Environment?", options: ["Test", "Prod"], default: "Test" },
         ],
       },
       undefined,
@@ -898,8 +976,8 @@ describe("ask_user_question tool", () => {
       "group-missing-required",
       {
         questions: [
-          { id: "name", question: "Name?" },
-          { id: "env", question: "Environment?", options: ["Test", "Prod"], required: true },
+          { id: "name", question: "Name?", default: "Dano" },
+          { id: "env", question: "Environment?", options: ["Test", "Prod"], default: "Test", required: true },
         ],
       },
       undefined,
@@ -1047,5 +1125,31 @@ describe("ask_user_question tool", () => {
     expect(() =>
       askUserQuestionCoordinator.answer("abort-1", { cancelled: true }),
     ).toThrow("Pending question not found");
+  });
+
+  it("releases the turn question lock when a pending question aborts", async () => {
+    const controller = new AbortController();
+    const first = executeQuestion(
+      "abort-lock-1",
+      { question: "Wait?", default: "Yes" },
+      controller.signal,
+    );
+
+    controller.abort();
+    await expect(first).rejects.toThrow("Question was aborted");
+
+    const nextController = new AbortController();
+    const second = executeQuestion(
+      "abort-lock-2",
+      { question: "Continue?", default: "Yes" },
+      nextController.signal,
+    );
+    askUserQuestionCoordinator.answer("abort-lock-2", {
+      cancelled: false,
+      answer: "Yes",
+    });
+    await expect(second).resolves.toMatchObject({
+      details: { status: "answered", answer: "Yes" },
+    });
   });
 });

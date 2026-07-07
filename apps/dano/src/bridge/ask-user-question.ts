@@ -35,6 +35,23 @@ const askUserQuestionAnswerInputSchema = Type.Union([
     "Default or answer value: string for text/single-choice labels, string or number option ids, option item objects, arrays for multiple-choice, boolean for confirmation.",
 });
 
+const askUserQuestionDefaultSchema = Type.Union([
+  Type.String(),
+  Type.Number(),
+  askUserQuestionOptionItemSchema,
+  Type.Array(
+    Type.Union([
+      Type.String(),
+      Type.Number(),
+      askUserQuestionOptionItemSchema,
+    ]),
+  ),
+  Type.Boolean(),
+], {
+  description:
+    "Required for every non-confirmation question. Provide a context-based recommended default value. String defaults must be non-empty and must not be placeholders such as \"\".",
+});
+
 const askUserQuestionAnswerSchema = Type.Union([
   Type.String(),
   Type.Number(),
@@ -46,10 +63,10 @@ const askUserQuestionAnswerSchema = Type.Union([
 });
 
 const groupedRetryError =
-  "You called ask_user_question more than once in the same response while another question is still pending. Retry silently with exactly one native ask_user_question call using {\"questions\":[...]} so all fields render in one card with one submit button. When using questions, omit top-level question, options, multiple, default, and confirm. Do not explain this correction to the user.";
+  "You called ask_user_question more than once in the same response while another question is still pending. Retry silently with exactly one native ask_user_question call using {\"questions\":[...]} so all fields render in one card with one submit button. Put every field's options, inputType, dateFormat, dataSource, multiple, required, and default inside its questions[] item. Do not explain this correction to the user.";
 
 const mixedGroupedFieldsError =
-  "Invalid ask_user_question call: when using questions, the top level may contain only questions. Move question, options, inputType, dateFormat, required, dataSource, multiple, and default into each questions[] item. Do not include top-level question, options, inputType, dateFormat, required, dataSource, multiple, default, or confirm with questions. Retry silently; do not explain this correction to the user.";
+  "Invalid ask_user_question call: when using questions, field configuration belongs inside each questions[] item. Move options, inputType, dateFormat, required, dataSource, multiple, default, and confirm out of the top level. Top-level question/title/label/prompt text is treated only as form instruction text and is ignored. Retry silently; do not explain this correction to the user.";
 
 const askUserQuestionOptionSchema = Type.Union([
   Type.String({ minLength: 1 }),
@@ -89,7 +106,7 @@ const askUserQuestionFields = {
     Type.String({
       minLength: 1,
       description:
-        "Single-question call only: the clear, specific question to ask the user. If collecting more than one answer, omit this top-level field and put every question inside questions[].",
+        "Single-question call: the clear, specific question to ask the user. With questions[], top-level question/title/label/prompt is treated only as optional form instruction text; each actual field question must be inside questions[].",
     }),
   ),
   title: Type.Optional(Type.String({ minLength: 1 })),
@@ -130,10 +147,10 @@ const askUserQuestionFields = {
         "Set true to require a non-empty answer. Defaults to false.",
     }),
   ),
-  default: Type.Optional(askUserQuestionAnswerInputSchema),
-  defaultValue: Type.Optional(askUserQuestionAnswerInputSchema),
-  prefill: Type.Optional(askUserQuestionAnswerInputSchema),
-  value: Type.Optional(askUserQuestionAnswerInputSchema),
+  default: Type.Optional(askUserQuestionDefaultSchema),
+  defaultValue: Type.Optional(askUserQuestionDefaultSchema),
+  prefill: Type.Optional(askUserQuestionDefaultSchema),
+  value: Type.Optional(askUserQuestionDefaultSchema),
 };
 
 export const askUserQuestionParameters = Type.Object({
@@ -146,7 +163,7 @@ export const askUserQuestionParameters = Type.Object({
   questions: Type.Optional(
     Type.Any({
       description:
-        "Preferred for collecting more than one answer. Make exactly one ask_user_question call with questions: [{ id, question, default, options?, multiple?, inputType?, dateFormat?, required? }, ...]. A single question object is also accepted and normalized to an array. Do not include top-level question, options, inputType, dateFormat, required, multiple, default, or confirm when questions is present.",
+        "Preferred for collecting more than one answer. Make exactly one ask_user_question call with questions: [{ id, question, default, options?, multiple?, inputType?, dateFormat?, required?, dataSource? }, ...]. Every non-confirmation questions[] item must include a context-based, non-empty default. A single question object is also accepted and normalized to an array. When questions is present, put each field's options, inputType, dateFormat, required, dataSource, multiple, and default inside its questions[] item. Do not include top-level confirm or top-level field configuration with questions.",
     }),
   ),
 });
@@ -216,7 +233,7 @@ interface PendingQuestion {
   questions: readonly PendingQuestionItem[];
   resolve(result: AskUserQuestionResult): void;
   reject(error: Error): void;
-  removeAbortListener(): void;
+  cleanup(): void;
 }
 
 function isOtherOption(value: string | PendingQuestionOption): boolean {
@@ -228,6 +245,7 @@ function isOtherOption(value: string | PendingQuestionOption): boolean {
 
 class AskUserQuestionCoordinator {
   private readonly pending = new Map<string, PendingQuestion>();
+  private readonly pendingToolCallBySignal = new WeakMap<AbortSignal, string>();
 
   wait(
     toolCallId: string,
@@ -248,7 +266,13 @@ class AskUserQuestionCoordinator {
     if (questions.length === 0) {
       return Promise.reject(new Error("Question is required"));
     }
-    if (this.pending.size > 0) {
+    const pendingInCurrentTurn = signal
+      ? this.pendingToolCallBySignal.get(signal)
+      : undefined;
+    if (
+      pendingInCurrentTurn !== undefined &&
+      this.pending.has(pendingInCurrentTurn)
+    ) {
       return Promise.reject(new Error(groupedRetryError));
     }
     if (request.confirm && (request.options || request.multiple || request.questions || request.dataSource)) {
@@ -258,18 +282,26 @@ class AskUserQuestionCoordinator {
     }
 
     return new Promise((resolve, reject) => {
-      const abort = () => {
+      const cleanup = () => {
         this.pending.delete(toolCallId);
+        signal?.removeEventListener("abort", abort);
+        if (signal && this.pendingToolCallBySignal.get(signal) === toolCallId) {
+          this.pendingToolCallBySignal.delete(signal);
+        }
+      };
+      const abort = () => {
+        cleanup();
         reject(new Error("Question was aborted"));
       };
       signal?.addEventListener("abort", abort, { once: true });
+      if (signal) this.pendingToolCallBySignal.set(signal, toolCallId);
 
       this.pending.set(toolCallId, {
         grouped: request.questions !== undefined,
         questions,
         resolve,
         reject,
-        removeAbortListener: () => signal?.removeEventListener("abort", abort),
+        cleanup,
       });
 
       if (signal?.aborted) abort();
@@ -324,8 +356,7 @@ class AskUserQuestionCoordinator {
       }
     }
 
-    this.pending.delete(toolCallId);
-    pending.removeAbortListener();
+    pending.cleanup();
     pending.resolve(result);
     return result;
   }
@@ -336,8 +367,7 @@ class AskUserQuestionCoordinator {
 
   private rejectAll(error: Error): void {
     for (const [toolCallId, pending] of this.pending) {
-      this.pending.delete(toolCallId);
-      pending.removeAbortListener();
+      pending.cleanup();
       pending.reject(error);
     }
   }
@@ -680,7 +710,13 @@ function normalizeQuestion(
     ...(request.dataSource ? { dataSource: request.dataSource } : {}),
     ...(dateFormat ? { dateFormat } : {}),
   };
+  if (kind !== "confirm" && request.default === undefined) {
+    return "默认答案缺失：每个非确认问题都必须提供非空 default 推荐值";
+  }
   if (request.default !== undefined) {
+    if (typeof request.default === "string" && !request.default.trim()) {
+      return "默认答案无效：default 必须是非空推荐值，不能是空字符串";
+    }
     try {
       normalizeAnswer(question, request.default);
     } catch (cause) {
@@ -838,11 +874,11 @@ export const askUserQuestionTool = defineTool({
   label: "Ask User Question",
   description: `Ask the user for structured input during execution.
 
-When the user asks to fill in a form, complete a form, or provide form fields, use ask_user_question to collect the fields instead of asking in assistant text. Every non-confirmation question must include a context-based recommended default so the user can usually submit directly. required:true controls whether the user may submit an empty answer.
+When the user asks to fill in a form, complete a form, or provide form fields, use ask_user_question to collect the fields instead of asking in assistant text. Every non-confirmation question must include a context-based recommended default so the user can usually submit directly. String defaults must be non-empty; never use default:"". required:true controls whether the user may submit an empty answer.
 
-Use exactly one ask_user_question call per assistant response. If you need more than one answer, use only the questions array: {"questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假","required":true},{"id":"start_at","question":"开始时间？","inputType":"date","dateFormat":"yyyy-MM-dd HH:mm","required":true},{"id":"reason","question":"原因？","default":"个人事务","required":true}]}. Do not include top-level question, options, inputType, dateFormat, required, dataSource, multiple, default, or confirm when questions is present.
+Use exactly one ask_user_question call per assistant response. If you need more than one answer, use only the questions array: {"questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假","required":true},{"id":"start_at","question":"开始时间？","inputType":"date","dateFormat":"yyyy-MM-dd HH:mm","default":"2026-07-08 09:00","required":true},{"id":"reason","question":"原因？","default":"个人事务","required":true}]}. When questions is present, put every field's options, inputType, dateFormat, required, dataSource, multiple, and default inside the matching questions[] item; do not include top-level confirm or top-level field configuration.
 
-For a single question, use top-level question/options/inputType/dateFormat/required/dataSource/multiple/default/confirm. For multiple questions, use questions[]. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. Confirmation is a separate single-question call with question + confirm: true and no options/multiple/questions. The answer is returned as a tool result and execution then continues.`,
+For a single question, use top-level question/options/inputType/dateFormat/required/dataSource/multiple/default/confirm. For multiple questions, use questions[]. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. default is still required for non-confirmation questions whether required is true or false, and string defaults must be non-empty. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. Confirmation is a separate single-question call with question + confirm: true and no options/multiple/questions. The answer is returned as a tool result and execution then continues.`,
   promptSnippet:
     "Ask the user one native question card; for several fields use one questions array with one submit button",
   promptGuidelines: [
@@ -852,11 +888,11 @@ For a single question, use top-level question/options/inputType/dateFormat/requi
     "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
     "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
     "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
-    "Give every non-confirmation question a context-based recommended default. Do not use placeholder defaults.",
+    "Give every non-confirmation question a context-based recommended non-empty default. Do not use empty string or placeholder defaults.",
     "Set required:true only when an answer is mandatory. required defaults to false.",
     "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
     "Dano returns the user's date answer as submitted; convert it yourself if a downstream interface needs another business format.",
-    "When using questions, the top level must contain only questions. Put id, question, options, inputType, dateFormat, required, dataSource, multiple, and default inside each questions item.",
+    "When using questions, put each field's id, question, options, inputType, dateFormat, required, dataSource, multiple, and default inside its questions item. Do not put top-level field configuration beside questions.",
     "For forms, applications, or other user-reviewed summaries, call ask_user_question with confirm: true after presenting the final summary and before treating it as confirmed, ready to submit, or complete.",
   ],
   parameters: askUserQuestionParameters,
