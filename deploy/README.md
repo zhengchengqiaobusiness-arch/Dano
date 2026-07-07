@@ -128,17 +128,7 @@ minimum acceptance sequence against the Podman Compose deployment:
    App container shell check:
 
    ```bash
-   podman compose --env-file .env exec app sh -lc '
-   test -n "${DANO_URL:-}" && echo APP_URL_PRESENT || echo APP_URL_MISSING
-   test -n "${DANO_TENANT_KEY:-}" && echo APP_TENANT_PRESENT || echo APP_TENANT_MISSING
-   leave_skill_md="$(for file in /opt/dano/runtime-data/.agents/skills/*/SKILL.md; do [ -f "$file" ] && grep -Eq "请假|休假" "$file" && { echo "$file"; break; }; done)"
-   test -n "$leave_skill_md" || { echo OA_LEAVE_SKILL_MISSING; exit 1; }
-   leave_skill_dir="$(dirname "$leave_skill_md")"
-   option_field="$(sed -n "s/.*--list-options \([^ \`)]*\).*/\1/p" "$leave_skill_md" | head -n 1)"
-   test -n "$option_field" || { echo OA_LEAVE_OPTION_FIELD_MISSING; exit 1; }
-   test -x "$leave_skill_dir/scripts/submit.sh" || { echo OA_LEAVE_SUBMIT_MISSING; exit 1; }
-   "$leave_skill_dir/scripts/submit.sh" --list-options "$option_field"
-   '
+   podman compose --env-file .env exec app sh -lc 'test -n "${DANO_URL:-}" && echo APP_URL_PRESENT || echo APP_URL_MISSING; test -n "${DANO_TENANT_KEY:-}" && echo APP_TENANT_PRESENT || echo APP_TENANT_MISSING; /opt/dano/runtime-data/.agents/skills/dano-a-oa-qingjia/scripts/submit.sh --list-options 请假类型'
    ```
 
    The direct app-container command proves Compose injected the variables and
@@ -152,13 +142,7 @@ minimum acceptance sequence against the Podman Compose deployment:
    printf '%s\n' OA_ENV_CHECK
    test -n "${DANO_URL:-}" && echo URL_PRESENT || echo URL_MISSING
    test -n "${DANO_TENANT_KEY:-}" && echo TENANT_PRESENT || echo TENANT_MISSING
-   leave_skill_md="$(for file in /opt/dano/runtime-data/.agents/skills/*/SKILL.md; do [ -f "$file" ] && grep -Eq "请假|休假" "$file" && { echo "$file"; break; }; done)"
-   test -n "$leave_skill_md" || { echo OA_LEAVE_SKILL_MISSING; exit 1; }
-   leave_skill_dir="$(dirname "$leave_skill_md")"
-   option_field="$(sed -n "s/.*--list-options \([^ \`)]*\).*/\1/p" "$leave_skill_md" | head -n 1)"
-   test -n "$option_field" || { echo OA_LEAVE_OPTION_FIELD_MISSING; exit 1; }
-   test -x "$leave_skill_dir/scripts/submit.sh" || { echo OA_LEAVE_SUBMIT_MISSING; exit 1; }
-   "$leave_skill_dir/scripts/submit.sh" --list-options "$option_field"
+   /opt/dano/runtime-data/.agents/skills/dano-a-oa-qingjia/scripts/submit.sh --list-options 请假类型
    ```
 
    Then check the model-triggered bash session:
