@@ -977,7 +977,11 @@ describe("BridgeRpcAdapter", () => {
     it("resolves a pending question through the command channel", async () => {
       const pending = askUserQuestionCoordinator.wait(
         "question-call-1",
-        { question: "Keep or replace?", options: ["Keep", "Replace"] },
+        {
+          question: "Keep or replace?",
+          options: ["Keep", "Replace"],
+          default: "Keep",
+        },
         undefined,
       );
       const command: RpcCommand = {
@@ -2560,6 +2564,137 @@ describe("BridgeRpcAdapter", () => {
         toolCallId: "tool-1",
         toolName: "read",
       });
+    });
+
+    it("upserts message updates that only add tool results and follow-up questions", async () => {
+      (ws.send as ReturnType<typeof vi.fn>).mockClear();
+
+      const handler = (context.events.subscribe as ReturnType<typeof vi.fn>)
+        .mock.calls[0]?.[0] as
+        | ((event: Record<string, unknown>) => void)
+        | undefined;
+
+      handler?.({
+        type: "message_start",
+        message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "approvers-1",
+              name: "ask_user_question",
+              arguments: {
+                questions: [
+                  {
+                    id: "approver1",
+                    question: "审批人 1",
+                    default: "张三",
+                  },
+                  {
+                    id: "approver2",
+                    question: "审批人 2",
+                    default: "李四",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      });
+      handler?.({
+        type: "message_update",
+        message: {
+          id: "assistant-1",
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "approvers-1",
+              name: "ask_user_question",
+              arguments: {
+                questions: [
+                  {
+                    id: "approver1",
+                    question: "审批人 1",
+                    default: "张三",
+                  },
+                  {
+                    id: "approver2",
+                    question: "审批人 2",
+                    default: "李四",
+                  },
+                ],
+              },
+            },
+            {
+              type: "toolResult",
+              text: "",
+              details: {
+                status: "answered",
+                answer: { approver1: "张三", approver2: "李四" },
+              },
+              isError: false,
+            },
+            {
+              type: "toolCall",
+              id: "confirm-1",
+              name: "ask_user_question",
+              arguments: {
+                question: "确认提交请假申请吗？",
+                confirm: true,
+              },
+            },
+          ],
+        },
+      });
+
+      await new Promise(r => setTimeout(r, 250));
+
+      const sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string),
+      );
+      const finalUpsert = lastTranscriptUpsert(sendCalls);
+
+      expect(finalUpsert?.payload.message.content).toEqual([
+        {
+          type: "toolCall",
+          id: "approvers-1",
+          name: "ask_user_question",
+          arguments: {
+            questions: [
+              {
+                id: "approver1",
+                question: "审批人 1",
+                default: "张三",
+              },
+              {
+                id: "approver2",
+                question: "审批人 2",
+                default: "李四",
+              },
+            ],
+          },
+        },
+        {
+          type: "toolResult",
+          text: "",
+          details: {
+            status: "answered",
+            answer: { approver1: "张三", approver2: "李四" },
+          },
+          isError: false,
+        },
+        {
+          type: "toolCall",
+          id: "confirm-1",
+          name: "ask_user_question",
+          arguments: {
+            question: "确认提交请假申请吗？",
+            confirm: true,
+          },
+        },
+      ]);
     });
 
     it("coalesces consecutive transcript deltas for the same block", async () => {
