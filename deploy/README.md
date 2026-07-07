@@ -131,9 +131,13 @@ minimum acceptance sequence against the Podman Compose deployment:
    podman compose --env-file .env exec app sh -lc '
    test -n "${DANO_URL:-}" && echo APP_URL_PRESENT || echo APP_URL_MISSING
    test -n "${DANO_TENANT_KEY:-}" && echo APP_TENANT_PRESENT || echo APP_TENANT_MISSING
-   leave_skill_dir="$(find /opt/dano/runtime-data/.agents/skills -maxdepth 1 -type d -name "dano-a-oa-*qingjia" | sort | head -n 1)"
-   test -n "$leave_skill_dir" && test -x "$leave_skill_dir/scripts/submit.sh" || { echo OA_LEAVE_SKILL_MISSING; exit 1; }
-   "$leave_skill_dir/scripts/submit.sh" --list-options 类型
+   leave_skill_md="$(for file in /opt/dano/runtime-data/.agents/skills/*/SKILL.md; do [ -f "$file" ] && grep -Eq "请假|休假" "$file" && { echo "$file"; break; }; done)"
+   test -n "$leave_skill_md" || { echo OA_LEAVE_SKILL_MISSING; exit 1; }
+   leave_skill_dir="$(dirname "$leave_skill_md")"
+   option_field="$(sed -n "s/.*--list-options \([^ \`)]*\).*/\1/p" "$leave_skill_md" | head -n 1)"
+   test -n "$option_field" || { echo OA_LEAVE_OPTION_FIELD_MISSING; exit 1; }
+   test -x "$leave_skill_dir/scripts/submit.sh" || { echo OA_LEAVE_SUBMIT_MISSING; exit 1; }
+   "$leave_skill_dir/scripts/submit.sh" --list-options "$option_field"
    '
    ```
 
@@ -148,9 +152,13 @@ minimum acceptance sequence against the Podman Compose deployment:
    printf '%s\n' OA_ENV_CHECK
    test -n "${DANO_URL:-}" && echo URL_PRESENT || echo URL_MISSING
    test -n "${DANO_TENANT_KEY:-}" && echo TENANT_PRESENT || echo TENANT_MISSING
-   leave_skill_dir="$(find /opt/dano/runtime-data/.agents/skills -maxdepth 1 -type d -name "dano-a-oa-*qingjia" | sort | head -n 1)"
-   test -n "$leave_skill_dir" && test -x "$leave_skill_dir/scripts/submit.sh" || { echo OA_LEAVE_SKILL_MISSING; exit 1; }
-   "$leave_skill_dir/scripts/submit.sh" --list-options 类型
+   leave_skill_md="$(for file in /opt/dano/runtime-data/.agents/skills/*/SKILL.md; do [ -f "$file" ] && grep -Eq "请假|休假" "$file" && { echo "$file"; break; }; done)"
+   test -n "$leave_skill_md" || { echo OA_LEAVE_SKILL_MISSING; exit 1; }
+   leave_skill_dir="$(dirname "$leave_skill_md")"
+   option_field="$(sed -n "s/.*--list-options \([^ \`)]*\).*/\1/p" "$leave_skill_md" | head -n 1)"
+   test -n "$option_field" || { echo OA_LEAVE_OPTION_FIELD_MISSING; exit 1; }
+   test -x "$leave_skill_dir/scripts/submit.sh" || { echo OA_LEAVE_SUBMIT_MISSING; exit 1; }
+   "$leave_skill_dir/scripts/submit.sh" --list-options "$option_field"
    ```
 
    Then check the model-triggered bash session:
