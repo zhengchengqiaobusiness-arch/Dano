@@ -11,5 +11,3 @@ onlyBuiltDependencies:
   - esbuild
   - koffi
   - protobufjs
-patchedDependencies:
-  '@josephyoung/pi-heimdall@0.2.15': patches/@josephyoung__pi-heimdall@0.2.15.patch

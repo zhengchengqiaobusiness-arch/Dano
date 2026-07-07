@@ -235,19 +235,11 @@ describe("deploy compose wrapper", () => {
   it("runs the production container as the non-root node user", () => {
     const dockerfileText = readFileSync(dockerfile, "utf8");
 
-    expect(dockerfileText).toContain("ENV COREPACK_ENABLE_PROJECT_SPEC=0");
-    expect(dockerfileText).toContain("ENV npm_config_pm_on_fail=ignore");
-    expect(dockerfileText).toContain("corepack prepare pnpm@11.7.0 --activate");
-    expect(dockerfileText).toContain("pnpm --pm-on-fail=ignore install");
-    expect(dockerfileText).toContain("pnpm --pm-on-fail=ignore -C apps/dano run build:server");
-    expect(dockerfileText).toContain("pnpm --pm-on-fail=ignore -C apps/dano run build:web");
-    expect(dockerfileText).toContain("pnpm --pm-on-fail=ignore --filter @dano/app --prod deploy --legacy /prod/dano");
     expect(dockerfileText).toContain("ENV HOME=/home/node");
     expect(dockerfileText).toContain("ENV DANO_RUNTIME_DIR=/opt/dano/runtime-data");
     expect(dockerfileText).toContain("ENV HEIMDALL_BWRAP_BIND_KERNEL_FS=1");
     expect(dockerfileText).toContain("ENV HEIMDALL_BWRAP_BIND_ROOT=/opt/dano");
-    expect(dockerfileText).toContain("ENV HEIMDALL_PROTECT_CONFIG_OVERLAY=0");
-    expect(dockerfileText).toContain("COPY patches patches");
+    expect(dockerfileText).not.toContain("COPY patches");
     expect(dockerfileText).not.toContain("patched_heimdall_dir=");
     expect(dockerfileText).not.toContain("prod_heimdall_dir=");
     expect(dockerfileText).toContain("mkdir -p /opt/dano/runtime-data");

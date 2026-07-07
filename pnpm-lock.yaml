@@ -4,9 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-patchedDependencies:
-  '@josephyoung/pi-heimdall@0.2.15': 8a9120aad607f9dccb7e3484eeeab5b24520598577fe9128cd7fdee971e4b4ae
-
 importers:
 
   .:
@@ -49,7 +46,7 @@ importers:
         version: 3.12.2
       '@josephyoung/pi-heimdall':
         specifier: 0.2.15
-        version: 0.2.15(patch_hash=8a9120aad607f9dccb7e3484eeeab5b24520598577fe9128cd7fdee971e4b4ae)(@earendil-works/pi-coding-agent@0.80.2(ws@8.21.0)(zod@4.4.3))
+        version: 0.2.15(@earendil-works/pi-coding-agent@0.80.2(ws@8.21.0)(zod@4.4.3))
       bits-ui:
         specifier: ^2.18.1
         version: 2.18.1(@internationalized/date@3.12.2)(svelte@5.56.3)
@@ -2260,7 +2257,7 @@ snapshots:
     dependencies:
       '@swc/helpers': 0.5.23
 
-  '@josephyoung/pi-heimdall@0.2.15(patch_hash=8a9120aad607f9dccb7e3484eeeab5b24520598577fe9128cd7fdee971e4b4ae)(@earendil-works/pi-coding-agent@0.80.2(ws@8.21.0)(zod@4.4.3))':
+  '@josephyoung/pi-heimdall@0.2.15(@earendil-works/pi-coding-agent@0.80.2(ws@8.21.0)(zod@4.4.3))':
     dependencies:
       '@earendil-works/pi-coding-agent': 0.80.2(ws@8.21.0)(zod@4.4.3)
       shell-quote: 1.8.4
