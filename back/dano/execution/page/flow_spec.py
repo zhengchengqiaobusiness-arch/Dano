@@ -97,7 +97,7 @@ class SelectBinding(BaseModel):
     element_template: dict[str, Any] | None = None
     label_subkey: str | None = None
     count: int = 0
-    options: list[str] | None = None
+    options: list[Any] | None = None
     option_map: dict[str, Any] | None = None
     enum_source: str | None = None
     enum_confirmed: bool | None = None
@@ -116,6 +116,7 @@ class IdentityBinding(BaseModel):
 _PARAM_ALLOWED_FIELDS = frozenset({
     "category", "source_kind", "source", "label",
     "reason", "confidence", "name_source", "enum_options",
+    "enum_value_map",
 })
 _STEP_ALLOWED_FIELDS = frozenset({
     "selects", "identity", "params", "sample_inputs",
@@ -631,16 +632,20 @@ def _enum_options_for_param(sb) -> list | None:
         return None
     om = sb.option_map if isinstance(sb.option_map, dict) else None
     opts = list(sb.options or [])
+    out = []
+    for o in opts:
+        if isinstance(o, dict):
+            label = str(o.get("label") or o.get("text") or o.get("name") or o.get("value") or "").strip()
+            if label:
+                out.append({"label": label, "value": (om or {}).get(label, o.get("value", label))})
+        else:
+            label = str(o or "").strip()
+            if label:
+                out.append({"label": label, "value": (om or {}).get(label, label)} if om else label)
     if om:
-        out = []
-        for o in opts:
-            if isinstance(o, str) and o in om:
-                out.append({"label": o, "value": om[o]})
-            elif isinstance(o, str):
-                out.append({"label": o, "value": o})
         return out or None
     if opts:
-        return list(opts)
+        return out or None
     return None
 
 
@@ -651,7 +656,32 @@ def _enum_value_map_for_param(sb) -> dict | None:
     om = sb.option_map if isinstance(sb.option_map, dict) else None
     if om:
         return dict(om)
+    derived = _enum_option_map_from_options(list(sb.options or []))
+    if derived and any(str(k) != str(v) for k, v in derived.items()):
+        return derived
     return None
+
+
+def _enum_label_value(opt) -> tuple[str, Any] | None:
+    """兼容 list[str] 与 list[{label,value}],统一抽取调用侧显示名和真实提交值。"""
+    if isinstance(opt, dict):
+        label = str(opt.get("label") or opt.get("text") or opt.get("name") or opt.get("value") or "").strip()
+        if not label:
+            return None
+        return label, opt.get("value", label)
+    label = str(opt or "").strip()
+    if not label:
+        return None
+    return label, label
+
+
+def _enum_option_map_from_options(options: list[Any] | None) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for opt in options or []:
+        pair = _enum_label_value(opt)
+        if pair:
+            out[pair[0]] = pair[1]
+    return out
 
 
 def _build_step_from_capture(
@@ -2479,6 +2509,7 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
                 "label_key": "",
                 "options": list(p.enum_options),
                 "count": len(p.enum_options),
+                "option_map": dict(p.enum_value_map or _enum_option_map_from_options(p.enum_options)),
                 "enum_source": "manual",
                 "enum_confirmed": True,
             })
@@ -2761,20 +2792,40 @@ def _enum_map_covers_recorded_value(param: ParamField) -> bool:
     labels: list[str] = []
     option_values: list[Any] = []
     for opt in param.enum_options or []:
-        if isinstance(opt, dict):
-            label = str(opt.get("label") or opt.get("text") or opt.get("name") or opt.get("value") or "").strip()
-            if label:
-                labels.append(label)
-            option_values.append(opt.get("value", label))
-        else:
-            label = str(opt or "").strip()
-            if label:
-                labels.append(label)
-                option_values.append(label)
+        pair = _enum_label_value(opt)
+        if not pair:
+            continue
+        label, value = pair
+        labels.append(label)
+        option_values.append(value)
     if current in labels:
         return True
     mapped_values = list((param.enum_value_map or {}).values()) or option_values
     return any(str(v) == current for v in mapped_values if v not in (None, ""))
+
+
+_VALUE_ONLY_LABEL_RE = re.compile(
+    r"^\s*(?:[-+]?\d+(?:\.\d+)?|[0-9a-f]{8,}|[A-Za-z]{0,4}[-_]?\d{3,}|[A-Za-z0-9_-]{12,})\s*$",
+    re.I,
+)
+
+
+def _enum_options_look_value_only(param: ParamField) -> bool:
+    """候选全是 1/2/3、长 ID、短码且没有非等值映射时,说明把内部值当成了显示名。"""
+    pairs = [p for p in (_enum_label_value(o) for o in (param.enum_options or [])) if p]
+    if not pairs:
+        return False
+    labels = [label for label, _value in pairs]
+    if not all(_VALUE_ONLY_LABEL_RE.match(label) for label in labels):
+        return False
+    value_map = dict(param.enum_value_map or _enum_option_map_from_options(param.enum_options))
+    if not value_map:
+        return True
+    # 如果至少有一个「人类显示名 -> 内部值」的非等值映射,就不是坏枚举。
+    return not any(
+        label and not _VALUE_ONLY_LABEL_RE.match(label) and str(value) != str(label)
+        for label, value in value_map.items()
+    )
 
 
 def validate_flow_spec(spec: FlowSpec) -> dict:
@@ -2810,6 +2861,16 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
                 errors.append(
                     f"枚举字段 `{p.key or p.path}` 当前提交值 `{p.value}` 没有完整 label→value 映射，"
                     "请补充真实选项值映射或重新录制到字典接口"
+                )
+            if (
+                p.type in {"enum", "list-enum"}
+                and p.source_kind in {"page_enum", "static_enum", "manual_enum", "form_option"}
+                and p.enum_options
+                and _enum_options_look_value_only(p)
+            ):
+                errors.append(
+                    f"枚举字段 `{p.key or p.path}` 的候选看起来全是内部值/短码，"
+                    "不能作为用户可选项导出；请填写 `显示名=真实值`（如 `病假=2`）或重新录制真实下拉"
                 )
     for lk in spec.links:
         if not lk.confirmed:

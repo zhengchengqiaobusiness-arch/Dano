@@ -117,12 +117,31 @@ def _select_fields(props: dict) -> list[str]:
 def _opts_hint(prop: dict, cap: int = 12) -> str:
     """枚举字段在参数表/SOP 里的"可选值"提示:静态枚举列前 cap 个候选(超出指向 OPTIONS.md);
     **活接口目录**(选人/部门/审批人:有来源、无内置清单)→ 提示运行期实时拉,**不列陈旧快照**。"""
-    opts = (prop or {}).get("x-options") or (prop or {}).get("enum") or []
+    opts = _option_labels(prop)
     if not opts:
         return "选项来自实时接口:先 `--list-options` 拉当前可选项再传名字" if (prop or {}).get("x-options-source") else ""
     shown = " / ".join(str(o) for o in opts[:cap])
     more = f" …(共 {len(opts)} 项,见 references/OPTIONS.md)" if len(opts) > cap else ""
     return f"可选:{shown}{more}"
+
+
+def _option_labels(prop: dict) -> list[str]:
+    prop = prop or {}
+    raw = prop.get("x-options") or prop.get("enum") or []
+    if not raw and prop.get("x-enum-options"):
+        raw = prop.get("x-enum-options") or []
+    out: list[str] = []
+    seen: set[str] = set()
+    for opt in raw:
+        if isinstance(opt, dict):
+            label = str(opt.get("label") or opt.get("text") or opt.get("name") or opt.get("value") or "").strip()
+        else:
+            label = str(opt or "").strip()
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        out.append(label)
+    return out
 
 
 def _label(props: dict, k: str) -> str:
@@ -321,6 +340,35 @@ def _quality_section(m: SkillManifest) -> str:
     return "\n".join(L)
 
 
+def _interaction_section(m: SkillManifest) -> str:
+    """调用方交互约束:约束上层 Agent 如何追问/确认,不写死具体业务字段。"""
+    keys, required, props = _fields(m)
+    reqs = [k for k in keys if k in required]
+    write = m.requires_confirmation
+    lines = [
+        "## 调用方交互约束",
+        "",
+        "- 需要向用户补充信息时,必须原生调用 `ask_user_question`;禁止在普通文本、Markdown 或 `<question>` 标签中模拟提问。",
+        "- 多个相关缺失字段要合并到同一次 `ask_user_question` 的 `questions` 数组里;不要逐字段拆成多轮打扰用户。",
+        "- `questions` 数组中的每个问题都要设置合理 `default`:优先使用用户已说出的值,其次使用录制样例/业务常用默认值;确实无法推断时用空字符串或安全默认值,并让用户确认。",
+        "- 选择型字段先按参数说明或 `--list-options <字段名>` 取得真实候选;问题里展示显示名/选项文字,不要要求用户填写内部 ID/编号。",
+    ]
+    if reqs:
+        lines.append(f"- 本 Skill 必填字段为:{'、'.join('`' + k + '`' for k in reqs)};缺任一项时先追问补齐,不得臆造。")
+    else:
+        lines.append("- 本 Skill 没有必填业务字段;仍需核对用户意图是否匹配本动作。")
+    if write:
+        recap = "、".join(f"`{k}`" for k in keys) if keys else "本次动作"
+        lines += [
+            "- 整理好申请/提交内容后,必须再用**单独一次** `ask_user_question` 做最终确认;这次调用只能包含 `question` 与 `confirm: true`,不要带 `options`、`multiple` 或 `questions`。",
+            f"- 最终确认的 `question` 要逐项复述将提交的内容({recap})以及风险提示;只有用户确认后才允许带 `--confirm` 调用脚本。",
+            "- 用户没有明确确认、只是询问/预览/修改草稿时,不得调用写操作。",
+        ]
+    else:
+        lines.append("- 只读查询不需要最终 `confirm: true`,但仍要用 `ask_user_question` 补齐必要查询条件。")
+    return "\n".join(lines)
+
+
 _ERRORS_MD = """## 错误处理(据末行 status)
 - `failed` 且 reason 涉及凭证 / 401:目标系统登录态失效,让部署方在 Dano 重配 token,**不要重试**。
 - `failed` 且 `事实核查未过`:疑似空操作(接口 200 但没真生效),把原始返回给用户,**勿报成功**。
@@ -363,6 +411,7 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
     approval = _approval_section(getattr(m, "business_meta", {}) or {})
     approval_md = (approval + "\n\n") if approval else ""
     sop = _sop_section(m, flags, cflag)            # 操作步骤(SOP):纯函数渲染,零业务/框架字面量
+    interaction = _interaction_section(m)           # 上层 Agent 调用约束:追问/确认必须走原生工具
     quality = _quality_section(m)                   # 质量标准(怎样算做好):grounded 验收清单
     return f"""---
 name: {slug}
@@ -388,6 +437,8 @@ metadata:
 {table}
 
 > 流程句柄/模板、调用者身份(取自登录凭证)、调用凭证等由 Dano 运行期注入,**不需要也不应**由你提供。
+
+{interaction}
 
 {approval_md}{sop}
 
@@ -469,7 +520,7 @@ def _options_md(m: SkillManifest) -> str | None:
     blocks: list[str] = []
     for k in keys:
         p = props.get(k) or {}
-        opts = p.get("x-options")
+        opts = _option_labels(p)
         if not opts:
             if p.get("x-options-source"):                    # 活接口目录:无内置快照,只指向实时拉取(不列陈旧/错误清单)
                 blocks.append(f"## {_label(props, k)}(`{k}`)— **实时接口**\n\n"
@@ -480,7 +531,10 @@ def _options_md(m: SkillManifest) -> str | None:
         if p.get("x-options-truncated"):
             head += "(快照截断,完整以运行期现查为准)"
         lst = "\n".join(f"- {o}" for o in opts)
-        blocks.append(f"{head}\n\n传**名字/选项文字**(勿传 ID/编号):\n{lst}")
+        map_note = ""
+        if p.get("x-enum-value-map"):
+            map_note = "\n\n这些显示名会由 Dano 在提交时映射为目标系统内部值;调用者仍只传显示名。"
+        blocks.append(f"{head}\n\n传**名字/选项文字**(勿传 ID/编号):\n{lst}{map_note}")
     if not blocks:
         return None
     return ("# 可选值参考\n\n选择型字段的候选值。**首选实时拉取**(最准):"

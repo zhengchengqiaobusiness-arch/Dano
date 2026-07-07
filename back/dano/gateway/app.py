@@ -678,12 +678,32 @@ async def record_ws(ws: WebSocket) -> None:
             if t == "input":
                 await sess.dispatch_input(msg.get("event") or {})
             elif t == "reset":
+                await sess.flush_recording()
                 sess.reset()                          # 登录后:丢弃登录步骤,只录业务流程
                 await ws.send_json({"type": "reset_ok"})
             elif t == "finalize":
+                before_flush_steps = sess.recorded_raw_steps()
+                await sess.flush_recording()
+                after_flush_steps = sess.recorded_raw_steps()
+                flushed_tail: list[dict] = []
+                if len(after_flush_steps) > len(before_flush_steps):
+                    flushed_tail = after_flush_steps[len(before_flush_steps):]
+                elif before_flush_steps and after_flush_steps and before_flush_steps[-1] != after_flush_steps[-1]:
+                    flushed_tail = [after_flush_steps[-1]]
                 raw = msg.get("steps")
                 if raw is not None:           # 前端编辑后的步骤(删了噪声/重复/调序)→ 以它为准
                     from dano.agent_tools.page_builder import RecordedStep, assign_field_keys
+                    for s in flushed_tail:
+                        if s.get("op") not in ("fill", "select", "pick"):
+                            continue
+                        replaced = False
+                        for idx, cur in enumerate(raw):
+                            if cur.get("op") == s.get("op") and cur.get("locator") == s.get("locator"):
+                                raw[idx] = s
+                                replaced = True
+                                break
+                        if not replaced:
+                            raw.append(s)
                     steps = [RecordedStep(op=s["op"], locator=s.get("locator"),
                                           field=(s.get("field") or None)) for s in raw]
                     # 字段 key 与 build_page_script 同算法分配(同序),samples/required 与脚本参数一致(P1#6)
@@ -1092,6 +1112,7 @@ async def record_ws(ws: WebSocket) -> None:
                                     "recording_mode": recording_mode,
                                     "workflow_steps": len(apir.get("steps") or []) or None})
             elif t == "stop":
+                await sess.flush_recording()
                 break
     except WebSocketDisconnect:
         pass

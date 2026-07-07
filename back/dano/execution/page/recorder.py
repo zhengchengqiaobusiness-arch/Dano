@@ -23,10 +23,10 @@ log = structlog.get_logger(__name__)
 
 _VIEW_W, _VIEW_H = 1280, 800
 _CAST_W, _CAST_H = 1024, 640
-_CAST_QUALITY = 35
-_CAST_ACTIVE_FPS = 12
-_CAST_IDLE_FPS = 2
-_CAST_ACTIVE_WINDOW_S = 2.0
+_CAST_QUALITY = 50
+_CAST_ACTIVE_FPS = 20
+_CAST_IDLE_FPS = 6
+_CAST_ACTIVE_WINDOW_S = 6.0
 _SAFE_KEY_RE = re.compile(
     r"^(?:(?:Control|Shift|Alt|Meta)\+){0,3}"
     r"(?:Enter|Tab|Backspace|Delete|Escape|Home|End|PageUp|PageDown|"
@@ -190,6 +190,11 @@ _RECORDER_JS = r"""() => {
       }
     } catch (e) {}
   }
+  window.__danoFlushRecorder = function () {
+    try {
+      Object.keys(pendingFill).forEach(function (loc) { flushFill(loc); });
+    } catch (e) {}
+  };
   // 下拉/级联弹层里**当前可见的选项文字**(地面真值枚举):工作日加班/周末加班/节假日加班 …
   // —— 直接读 DOM,胜过拿提交值去网络字典里猜命中(治"加班类型/请假类型绑到几百项全量字典")。
   // **通用 ARIA + 框架兜底**,不绑任何特定公司/项目:
@@ -421,9 +426,13 @@ class RecordSession:
         self._on_frame: Callable[[dict], Awaitable[None]] | None = None  # 截屏回调(切活动页时复用)
         self._frame_seq = 0
         self._last_frame_sent_at = 0.0
-        self._last_input_at = time.monotonic()
+        self._last_activity_at = time.monotonic()
         self._closing = False        # stop()/断连中:页面 close 事件不再重开截屏(避免在已关 context 上 new_cdp_session 抛错)
         self.page = None
+
+    def _mark_active(self) -> None:
+        """页面近期有用户输入、导航、网络或录制事件时保持较高帧率,避免画面看起来卡住。"""
+        self._last_activity_at = time.monotonic()
 
     async def start(self, start_url: str, *, base_url: str = "", headless: bool = True,
                     storage_state: str | None = None, token: str | None = None,
@@ -483,6 +492,7 @@ class RecordSession:
             pass
         if self._closing or page.is_closed():     # 等待期间会话已在拆 / 新页已关 → 不切、不重开截屏
             return
+        self._mark_active()
         self.page = page
         self._attach_diag_handlers(page)         # P0-1:新页挂诊断(浏览器无 context 级 pageerror)
         if self._on_frame is not None:        # 截屏已开 → 切到新页;未开则等 start_screencast 自然开在最新页
@@ -494,6 +504,9 @@ class RecordSession:
             page.on("console", self._on_console)
             page.on("pageerror", self._on_pageerror)
             page.on("requestfailed", self._on_requestfailed)
+            page.on("framenavigated", lambda _frame: self._mark_active())
+            page.on("domcontentloaded", lambda: self._mark_active())
+            page.on("load", lambda: self._mark_active())
         except Exception:  # noqa: BLE001
             pass
 
@@ -508,6 +521,7 @@ class RecordSession:
             return
         if not rest:
             return
+        self._mark_active()
         self.page = rest[-1]
         if self._on_frame is not None:
             await self._restart_screencast()
@@ -601,6 +615,7 @@ class RecordSession:
 
     def _on_request(self, request) -> None:  # noqa: ANN001 —— playwright Request(直录模式旁观)
         try:
+            self._mark_active()
             m = (request.method or "").upper()
             url = request.url
             pd = request.post_data if m in ("POST", "PUT", "PATCH", "DELETE") else None
@@ -644,6 +659,7 @@ class RecordSession:
     async def _route(self, route, request) -> None:  # noqa: ANN001 —— 拦截模式
         from dano.execution.page.request_capture import looks_like_auth_write, looks_like_read_request
         try:
+            self._mark_active()
             m = (request.method or "").upper()
             url = request.url
             pd = request.post_data if m in ("POST", "PUT", "PATCH", "DELETE") else None
@@ -701,6 +717,10 @@ class RecordSession:
         每条字段:type/level?(console 用)/message/url?/timestamp/request_index?(requestfailed 用)。"""
         return [dict(d) for d in self.diagnostics]
 
+    def recorded_raw_steps(self) -> list[dict]:
+        """返回原始录制步骤副本。用于 finalize 前 flush 后补齐前端尚未收到的最后输入。"""
+        return [dict(s) for s in self.steps]
+
     def _resp_dispatch(self, response) -> None:  # noqa: ANN001 —— 同步快筛后再异步读 body
         try:
             m = (response.request.method or "").upper()
@@ -712,6 +732,7 @@ class RecordSession:
     async def _on_response(self, response) -> None:  # noqa: ANN001 —— GET=读候选源;写=把响应贴回对应请求
         from dano.execution.page.request_capture import _READ_NOISE, as_list_payload
         try:
+            self._mark_active()
             m = (response.request.method or "").upper()
             url = response.url
             ct = ""
@@ -760,6 +781,7 @@ class RecordSession:
             step = json.loads(payload)
         except Exception:  # noqa: BLE001
             return
+        self._mark_active()
         # 同一 locator 连续 fill/select/pick(用户改了又改/逐字符)→ 覆盖,只留最后一次
         if (self.steps and self.steps[-1].get("locator") == step.get("locator")
                 and step.get("op") in ("fill", "select", "pick")):
@@ -843,7 +865,7 @@ class RecordSession:
                 await cdp.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
                 if self._on_frame is not None and cdp is self._cdp:   # 只发**活动页**的帧(切页后旧帧丢弃)
                     now = time.monotonic()
-                    active = (now - self._last_input_at) <= _CAST_ACTIVE_WINDOW_S
+                    active = (now - self._last_activity_at) <= _CAST_ACTIVE_WINDOW_S
                     min_gap = 1.0 / (_CAST_ACTIVE_FPS if active else _CAST_IDLE_FPS)
                     if now - self._last_frame_sent_at < min_gap:
                         return
@@ -877,7 +899,7 @@ class RecordSession:
     async def dispatch_input(self, ev: dict) -> None:
         if self.page is None or self.page.is_closed():    # 切页瞬间 / 活动页已关 → 丢弃,避免抛错
             return
-        self._last_input_at = time.monotonic()
+        self._mark_active()
         k = ev.get("kind")
         if k == "click":
             await self.page.mouse.click(ev.get("nx", 0) * _VIEW_W, ev.get("ny", 0) * _VIEW_H)
@@ -892,6 +914,16 @@ class RecordSession:
                 await self.page.keyboard.press(key)
         elif k == "scroll":
             await self.page.mouse.wheel(0, ev.get("dy", 0))
+
+    async def flush_recording(self) -> None:
+        """把页面端防抖中的 fill 立即推回 Python,用于 finalize/reset/stop 前收口。"""
+        if self.page is None or self.page.is_closed():
+            return
+        try:
+            await self.page.evaluate("window.__danoFlushRecorder && window.__danoFlushRecorder()")
+            await self.page.wait_for_timeout(80)
+        except Exception:  # noqa: BLE001
+            pass
 
     def reset(self) -> None:
         """清空已录步骤(用户登录完后点「从这里开始录」,丢弃登录步骤,只留业务流程)。

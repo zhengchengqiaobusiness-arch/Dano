@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dano.catalog.manifest import to_manifest
-from dano.export.agent_skills import _quality_section, _skill_md, _slug, _sop_section
+from dano.export.agent_skills import _interaction_section, _quality_section, _skill_md, _slug, _sop_section
 from dano.orchestrator.types import SkillSpec
 from dano.shared.enums import RiskLevel, Subsystem
 
@@ -58,6 +58,29 @@ def test_unknown_framework_degrades_no_fabrication():
     assert "审批路径" not in md and "审批走向" not in md   # 无 business_meta → 不臆造审批流
     for w in ("采购", "请假", "报销"):     # 不冒出他业务的词
         assert w not in md
+
+
+def test_skill_md_requires_native_ask_user_question_for_callers():
+    md = _skill_md(to_manifest(_conn()), _slug("B-CRM.create_c"))
+    assert "## 调用方交互约束" in md
+    assert "原生调用 `ask_user_question`" in md
+    assert "`questions` 数组" in md
+    assert "`default`" in md
+    assert "`question` 与 `confirm: true`" in md
+    assert "不要带 `options`、`multiple` 或 `questions`" in md
+    assert "`name`" in md
+
+
+def test_read_skill_interaction_does_not_require_final_confirm():
+    sk = SkillSpec(
+        skill_id="B-CRM.query_c", subsystem=Subsystem("B-CRM"), action="query_c",
+        risk_level=RiskLevel.L1, has_api=True, title="查询C",
+        field_docs={"keyword": "关键词"}, required_fields=["keyword"], optional_fields=[],
+    )
+    section = _interaction_section(to_manifest(sk))
+    assert "ask_user_question" in section
+    assert "只读查询不需要最终 `confirm: true`" in section
+    assert "单独一次" not in section
 
 
 def test_renderer_emits_no_framework_blacktalk():

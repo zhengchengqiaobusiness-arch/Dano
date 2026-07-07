@@ -65,7 +65,7 @@ interface FlowParam {
 }
 interface FlowSelectBinding {
   param?: string; path?: string; source_url?: string; value_key?: string; label_key?: string;
-  options?: string[] | null; count?: number; multi?: boolean;
+  options?: Array<string | { label: string; value: any }> | null; count?: number; multi?: boolean;
   option_map?: Record<string, any> | null;
   enum_source?: string | null; enum_confirmed?: boolean | null;
   id_path?: string | null;
@@ -1310,9 +1310,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function selectBindingForParam(step: FlowStepData, p: FlowParam) {
     return (step.selects || []).find((s) => s.path === p.path || s.param === p.key);
   }
-  function enumOptionEdits(step: FlowStepData, p: FlowParam, options: string[]) {
+  function enumOptionEdits(step: FlowStepData, p: FlowParam, options: Array<string | { label: string; value: any }>, optionMap?: Record<string, any>) {
     const edits: any[] = [
       { op: "update", step_id: step.step_id, param_path: p.path, field: "enum_options", value: options },
+      { op: "update", step_id: step.step_id, param_path: p.path, field: "enum_value_map", value: optionMap || null },
     ];
     if (p.type !== "enum" && p.type !== "list-enum" && options.length) {
       edits.push({ op: "update", step_id: step.step_id, param_path: p.path, field: "type", value: "enum" });
@@ -1320,12 +1321,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (p.category !== "user_param") {
       edits.push({ op: "update", step_id: step.step_id, param_path: p.path, field: "category", value: "user_param" });
     }
+    if (!OPTION_SOURCE_KINDS.includes(p.source_kind || "")) {
+      edits.push({ op: "update", step_id: step.step_id, param_path: p.path, field: "source_kind", value: "manual_enum" });
+    }
     return edits;
   }
   function enumSourceForKind(sourceKind?: string | null) {
     if (sourceKind === "page_enum") return "dom";
     if (sourceKind === "manual_enum") return "manual";
-    return null;
+    return "manual";
   }
   function upsertSelectBinding(step: FlowStepData, p: FlowParam, patch: Partial<FlowSelectBinding>, extraEdits: any[] = []) {
     const existing = selectBindingForParam(step, p);
@@ -1335,7 +1339,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       source_url: "",
       value_key: "",
       label_key: "",
-      options: (p.enum_options || []).map(normalizeEnumOption),
+      options: enumOptionRecordsForParam(step, p),
       count: p.enum_options?.length || 0,
       ...existing,
       ...patch,
@@ -1360,11 +1364,59 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (typeof x === "object" && typeof x.label === "string") return x.label;
     return String(x);
   }
-  function enumOptionsForParam(step: FlowStepData, p: FlowParam) {
-    if (!OPTION_SOURCE_KINDS.includes(p.source_kind || "")) return [];
+  function enumOptionRecord(x: any): { label: string; value: any } | null {
+    if (x == null) return null;
+    if (typeof x === "object") {
+      const label = String(x.label ?? x.text ?? x.name ?? x.value ?? "").trim();
+      if (!label) return null;
+      return { label, value: x.value ?? label };
+    }
+    const label = String(x).trim();
+    return label ? { label, value: label } : null;
+  }
+  function enumOptionRecordsForParam(step: FlowStepData, p: FlowParam) {
     const sel = selectBindingForParam(step, p);
     const raw = p.enum_options?.length ? p.enum_options : sel?.options || [];
-    return Array.from(new Set((raw || []).map(normalizeEnumOption).filter(Boolean)));
+    const map = p.enum_value_map || sel?.option_map || {};
+    const seen = new Set<string>();
+    const out: Array<{ label: string; value: any }> = [];
+    for (const item of raw || []) {
+      const rec = enumOptionRecord(item);
+      if (!rec || seen.has(rec.label)) continue;
+      seen.add(rec.label);
+      out.push({ label: rec.label, value: Object.prototype.hasOwnProperty.call(map, rec.label) ? map[rec.label] : rec.value });
+    }
+    return out;
+  }
+  function enumOptionsForParam(step: FlowStepData, p: FlowParam) {
+    if (!OPTION_SOURCE_KINDS.includes(p.source_kind || "") && p.type !== "enum" && p.type !== "list-enum") return [];
+    return enumOptionRecordsForParam(step, p).map((x) => x.label);
+  }
+  function enumOptionsTextForParam(step: FlowStepData, p: FlowParam) {
+    return enumOptionRecordsForParam(step, p)
+      .map((x) => String(x.value) !== String(x.label) ? `${x.label}=${String(x.value)}` : x.label)
+      .join("\n");
+  }
+  function parseEnumOptionsText(text: string): { options: Array<{ label: string; value: any }>; optionMap: Record<string, any> | null } {
+    const chunks = text.includes("\n") ? text.split(/\n/) : text.split(/[,，]/);
+    const seen = new Set<string>();
+    const options: Array<{ label: string; value: any }> = [];
+    const optionMap: Record<string, any> = {};
+    let hasMapped = false;
+    for (const raw of chunks) {
+      const line = raw.trim();
+      if (!line) continue;
+      const m = line.match(/^(.+?)(?:\s*(?:=>|=|:|：|\t)\s*)(.+)$/);
+      const label = (m ? m[1] : line).trim();
+      const valueRaw = (m ? m[2] : label).trim();
+      if (!label || seen.has(label)) continue;
+      seen.add(label);
+      const value = /^-?\d+(?:\.\d+)?$/.test(valueRaw) ? Number(valueRaw) : valueRaw;
+      options.push({ label, value });
+      optionMap[label] = value;
+      if (String(value) !== label) hasMapped = true;
+    }
+    return { options, optionMap: hasMapped ? optionMap : null };
   }
   function enumSourceLabel(sel?: FlowSelectBinding) {
     if (!sel) return "未绑定";
@@ -1693,7 +1745,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   const enumOptions = enumOptionsForParam(step, p);
                   const enumSelectOptions = enumOptions.map((x) => ({ label: x, value: x }));
                   const isApiOption = p.source_kind === "api_option";
-                  const isEnumOption = ENUM_SOURCE_KINDS.includes(p.source_kind || "");
+                  const isTypedEnum = p.type === "enum" || p.type === "list-enum";
+                  const isEnumOption = ENUM_SOURCE_KINDS.includes(p.source_kind || "") || isTypedEnum;
                   const hasBindingPanel = isApiOption || isEnumOption;
                   const hasRuntimePanel = !!linked || p.category === "runtime_var" || p.source_kind === "previous_response";
                   const sourceStepOptions = [
@@ -1838,10 +1891,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                                 <FieldControl label="枚举候选">
                                   <EditableTextArea
                                     rows={3}
-                                    value={enumOptions.join("\n")}
-                                    placeholder="每行一个候选项，也支持逗号分隔"
+                                    value={enumOptionsTextForParam(step, p)}
+                                    placeholder="每行一个候选项；提交短码时写成 病假=2"
                                     onSave={(v) => {
-                                      const options = Array.from(new Set(v.split(/[\n,，]/).map((x) => x.trim()).filter(Boolean)));
+                                      const { options, optionMap } = parseEnumOptionsText(v);
                                       upsertSelectBinding(
                                         step,
                                         p,
@@ -1851,11 +1904,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                                           label_key: "",
                                           options,
                                           count: options.length,
-                                          option_map: null,
+                                          option_map: optionMap,
                                           enum_source: enumSourceForKind(p.source_kind),
                                           enum_confirmed: true,
                                         },
-                                        enumOptionEdits(step, p, options),
+                                        enumOptionEdits(step, p, options, optionMap || undefined),
                                       );
                                     }}
                                   />

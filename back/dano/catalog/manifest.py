@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field
 
 from dano.orchestrator.types import SkillSpec
@@ -101,6 +103,9 @@ def _enum_facts(sel: dict | None) -> tuple[list[str], dict[str, object], bool, b
     option_map = dict((sel or {}).get("option_map") or {})
     for label, value in pairs:
         option_map.setdefault(label, value)
+    if _options_look_value_only(opts, option_map):
+        opts = []
+        option_map = {}
     cnt = int((sel or {}).get("count") or len(opts))
     has_source = bool((sel or {}).get("source_url"))
     enum_source = str((sel or {}).get("enum_source") or "")
@@ -108,6 +113,21 @@ def _enum_facts(sel: dict | None) -> tuple[list[str], dict[str, object], bool, b
     truncated = bool(opts) and cnt > len(opts)
     static = bool(opts) and not truncated and (static_source or not has_source)
     return opts, option_map, has_source, static
+
+
+_VALUE_ONLY_LABEL_RE = re.compile(
+    r"^\s*(?:[-+]?\d+(?:\.\d+)?|[0-9a-f]{8,}|[A-Za-z]{0,4}[-_]?\d{3,}|[A-Za-z0-9_-]{12,})\s*$",
+    re.I,
+)
+
+
+def _options_look_value_only(opts: list[str], option_map: dict[str, object]) -> bool:
+    if not opts or not all(_VALUE_ONLY_LABEL_RE.match(str(o)) for o in opts):
+        return False
+    return not any(
+        label and not _VALUE_ONLY_LABEL_RE.match(str(label)) and str(value) != str(label)
+        for label, value in (option_map or {}).items()
+    )
 
 
 def _select_semantic_type(declared: str | None, sel: dict | None) -> str | None:
@@ -225,10 +245,21 @@ def _field_call_metadata(skill: SkillSpec, props: dict, sels: dict) -> dict:
         if prop.get("format"):
             info["format"] = prop["format"]
         sel = sels.get(name) or {}
-        enum_options = prop.get("x-enum-options") or prop.get("x-options") or list(sel.get("options") or [])
+        enum_options = prop.get("x-enum-options") or prop.get("x-options")
+        if not enum_options:
+            fallback = list(sel.get("options") or [])
+            fallback_pairs = [p for p in (_enum_label_value(o) for o in fallback) if p]
+            fallback_labels = [label for label, _value in fallback_pairs]
+            fallback_map = dict(sel.get("option_map") or {})
+            for label, value in fallback_pairs:
+                fallback_map.setdefault(label, value)
+            if not _options_look_value_only(fallback_labels, fallback_map):
+                enum_options = fallback
         if enum_options:
             info["enum_options"] = enum_options
         enum_value_map = prop.get("x-enum-value-map") or sel.get("enum_value_map") or sel.get("option_map") or {}
+        if enum_value_map and _options_look_value_only(list(map(str, enum_value_map.keys())), dict(enum_value_map)):
+            enum_value_map = {}
         if enum_value_map:
             info["enum_value_map"] = dict(enum_value_map)
         if sel.get("source_url"):

@@ -57,7 +57,7 @@ function selectKey(v: unknown): string {
   return `${typeof v}:${JSON.stringify(v)}`;
 }
 
-function enumOptions(p: JSONSchema): EnumSelectOption[] {
+function enumOptions(p: JSONSchema, submitLabel: boolean): EnumSelectOption[] {
   const item = p.items || {};
   const valueMap = { ...(item["x-enum-value-map"] || {}), ...(p["x-enum-value-map"] || {}) };
   const rawOptions = [...(item["x-enum-options"] || []), ...(p["x-enum-options"] || [])];
@@ -76,11 +76,11 @@ function enumOptions(p: JSONSchema): EnumSelectOption[] {
       const label = String(opt.label ?? opt.name ?? opt.value ?? "");
       if (!label) return;
       const mapped = hasOwn(valueMap, label) ? valueMap[label] : opt.value;
-      push(label, mapped ?? label, !!opt.disabled);
+      push(label, submitLabel ? label : (mapped ?? label), !!opt.disabled);
       return;
     }
     const label = String(opt);
-    push(label, hasOwn(valueMap, label) ? valueMap[label] : opt);
+    push(label, submitLabel ? label : (hasOwn(valueMap, label) ? valueMap[label] : opt));
   });
   enumValues.forEach((v) => push(String(v), v));
   return out;
@@ -181,10 +181,11 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
       const opts: EnumSelectOption[] = (r.options || []).map((opt) => {
         if (opt && typeof opt === "object") {
           const label = String(opt.label ?? opt.name ?? opt.value ?? "");
-          const value = opt.value ?? label;
+          const value = label;
           return { label, value, selectValue: selectKey(value), disabled: !!opt.disabled };
         }
-        return { label: String(opt), value: opt, selectValue: selectKey(opt) };
+        const label = String(opt);
+        return { label, value: label, selectValue: selectKey(label) };
       }).filter((opt) => opt.label);
       setLiveOptions((p) => ({ ...p, [field]: opts }));
       if (!opts.length) message.warning(`${field} 当前没有可选项${r.note ? `:${r.note}` : ""}`);
@@ -201,7 +202,8 @@ export default function InvokeDrawer({ skill, onClose }: { skill: SkillManifest 
     const hint = `${key} ${label}`;
     const reqMark = required.has(key) ? <span style={{ color: "#cf1322" }}> *</span> : null;
     const type = (p.type || "").toLowerCase();
-    const staticOptions = enumOptions(p);
+    const submitLabel = p.format === "name-ref" || p.items?.format === "name-ref";
+    const staticOptions = enumOptions(p, submitLabel);
     const hasLiveSource = !!p["x-options-source"];
     const options = liveOptions[key]?.length ? liveOptions[key] : staticOptions;
     const bySelectValue = new Map(options.map((opt) => [opt.selectValue, opt.value]));

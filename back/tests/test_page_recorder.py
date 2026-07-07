@@ -271,7 +271,7 @@ async def test_follows_new_tab_and_records_on_it(tmp_path) -> None:  # noqa: ANN
         await sess.page.wait_for_timeout(600)              # 等新页打开 + 跟随切换
         assert sess.page is not first                       # 活动页已切到新标签页
         await sess.page.get_by_label("金额").fill("100")    # 新页上的输入也要被录到
-        await sess.page.wait_for_timeout(300)
+        await sess.flush_recording()
         steps, samples = sess.recorded_steps()
     finally:
         await sess.stop()

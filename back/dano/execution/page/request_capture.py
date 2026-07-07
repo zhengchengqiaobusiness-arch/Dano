@@ -2384,11 +2384,17 @@ async def fetch_field_options(api_request: dict, field: str, *, base_url: str = 
     if not sel:
         return {"field": field, "options": [], "count": 0,
                 "note": "该字段不是选择型;直接按字段说明传值即可"}
-    snapshot = [
-        {"label": str(x), "value": (sel.get("option_map") or {}).get(str(x), x)
-         if isinstance(sel.get("option_map"), dict) else x}
-        for x in (sel.get("options") or [])
-    ]
+    snapshot = []
+    opt_map = sel.get("option_map") if isinstance(sel.get("option_map"), dict) else {}
+    for x in (sel.get("options") or []):
+        if isinstance(x, dict):
+            lab = str(x.get("label") or x.get("text") or x.get("name") or x.get("value") or "").strip()
+            if lab:
+                snapshot.append({"label": lab, "value": opt_map.get(lab, x.get("value", lab))})
+        else:
+            lab = str(x).strip()
+            if lab:
+                snapshot.append({"label": lab, "value": opt_map.get(lab, x)})
     if not sel.get("source_url"):
         if snapshot:
             return {"field": field, "options": snapshot, "count": len(snapshot),

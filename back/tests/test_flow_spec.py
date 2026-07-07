@@ -1141,6 +1141,35 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertTrue(any("label→value" in e and "type" in e for e in report["errors"]))
 
+    def test_manual_enum_value_only_options_block_publish_until_label_map(self):
+        """人工把 number 改 enum 后只填 1/2/3 时必须阻断;补成 病假=2 后才能产出可调用 Skill。"""
+        captured = [_post("https://oa/api/submit", {"type": 2, "reason": "回家"}, resp={"code": 200})]
+        spec = to_flow_spec(captured, samples={"type": "2", "reason": "回家"})
+        p = {p.path: p for s in spec.steps for p in s.params}["type"]
+        p.key = "类型"
+        p.label = "类型"
+        p.type = "enum"
+        p.category = "user_param"
+        p.source_kind = "manual_enum"
+        p.enum_options = ["1", "2", "3"]
+        p.enum_value_map = None
+
+        report = validate_flow_spec(spec)
+        self.assertFalse(report["passed"])
+        self.assertTrue(any("内部值/短码" in e and "类型" in e for e in report["errors"]))
+
+        p.enum_options = [
+            {"label": "事假", "value": 1},
+            {"label": "病假", "value": 2},
+            {"label": "婚假", "value": 3},
+        ]
+        p.enum_value_map = {"事假": 1, "病假": 2, "婚假": 3}
+        report = validate_flow_spec(spec)
+        self.assertTrue(report["passed"], report["errors"])
+        api_req, errors = flow_spec_to_api_request(spec)
+        self.assertEqual(errors, [])
+        self.assertEqual(api_req["selects"][0]["option_map"], {"事假": 1, "病假": 2, "婚假": 3})
+
     def test_unrelated_short_id_list_does_not_misfire(self):
         """type=int 短码不应与无关联的「id/name」tenant 列表撞名 → 仍然保持 user_input。"""
         reads = [{"url": "http://example.com/system/tenant/simple-list",

@@ -207,6 +207,34 @@ def test_manifest_select_metadata_overrides_numeric_body_type():
     assert m.call_metadata["fields"]["类型"]["enum_value_map"] == {"病假": 2, "事假": 1, "婚假": 3}
 
 
+def test_manifest_does_not_inline_value_only_enum_options():
+    """老资产若只存了 1/2/3 这类内部值,manifest 不再把它们当用户可选显示名。"""
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    sk = SkillSpec(
+        skill_id="A-OA.submit_form", subsystem=Subsystem.OA, action="submit_form",
+        risk_level=RiskLevel.L3,
+        field_types={"类型": "enum"},
+        required_fields=["类型"], optional_fields=[],
+        api_request={"selects": [{
+            "param": "类型", "source_url": "", "value_key": "", "label_key": "",
+            "options": ["1", "2", "3"],
+            "enum_source": "manual", "enum_confirmed": True,
+        }]},
+    )
+
+    m = to_manifest(sk)
+    prop = m.parameters["properties"]["类型"]
+
+    assert prop["type"] == "string"
+    assert prop["format"] == "name-ref"
+    assert "enum" not in prop
+    assert "x-options" not in prop
+    assert "enum_options" not in m.call_metadata["fields"]["类型"]
+
+
 async def test_page_skill_reads_recording_metadata_from_asset_body():
     from dano.catalog.manifest import to_manifest
 
