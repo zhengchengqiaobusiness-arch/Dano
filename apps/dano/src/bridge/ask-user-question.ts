@@ -437,7 +437,22 @@ function foldCompatibleGroupedFields(
   request: NormalizedAskUserQuestionRequest,
 ): NormalizedAskUserQuestionRequest {
   const questions = request.questions ?? [];
-  if (questions.length !== 1 || request.confirm) return request;
+  if (request.confirm) return request;
+  if (questions.length !== 1) {
+    if (
+      request.question &&
+      request.options === undefined &&
+      request.inputType === undefined &&
+      request.dateFormat === undefined &&
+      request.dataSource === undefined &&
+      request.multiple === undefined &&
+      request.required === undefined &&
+      request.default === undefined
+    ) {
+      return { questions };
+    }
+    return request;
+  }
 
   const [question] = questions;
   return {
