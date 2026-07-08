@@ -19,6 +19,7 @@ import {
 
 interface SseProbe {
   close(): void;
+  waitForClose(timeoutMs?: number): Promise<void>;
   waitForMessages(count: number): Promise<ServerMessage[]>;
 }
 
@@ -102,10 +103,16 @@ function openSse(url: string): SseProbe {
     count: number;
     resolve: (messages: ServerMessage[]) => void;
   }> = [];
+  const closeWaiters: Array<() => void> = [];
+  let closed = false;
   let buffer = "";
 
   const req = http.get(url, res => {
     res.setEncoding("utf8");
+    res.on("close", () => {
+      closed = true;
+      for (const resolve of closeWaiters.splice(0)) resolve();
+    });
     res.on("data", chunk => {
       buffer += chunk;
       let boundary = buffer.indexOf("\n\n");
@@ -134,6 +141,21 @@ function openSse(url: string): SseProbe {
   return {
     close() {
       req.destroy();
+    },
+    waitForClose(timeoutMs = 500) {
+      if (closed) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          const idx = closeWaiters.indexOf(done);
+          if (idx !== -1) closeWaiters.splice(idx, 1);
+          reject(new Error("SSE stream did not close"));
+        }, timeoutMs);
+        const done = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        closeWaiters.push(done);
+      });
     },
     waitForMessages(count: number) {
       if (messages.length >= count) {
@@ -271,6 +293,47 @@ describe("BridgeServer HTTP/SSE transport", () => {
         serverStartTime: expect.any(String),
       },
     });
+  });
+
+  it("keeps POST delivery valid after a heartbeat for the same client", async () => {
+    const commandSpy = vi.fn();
+    const { server } = createServer(() => ({
+      handleClientMessage: commandSpy,
+      dispose: vi.fn(),
+    }), { heartbeatInterval: 10 });
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const created = await postJson<{ eventsUrl: string; messagesUrl: string }>(
+      `${origin}/api/clients`,
+    );
+    const sse = openSse(`${origin}${created.eventsUrl}`);
+
+    await sse.waitForMessages(1);
+    await postJson(`${origin}${created.messagesUrl}`, {
+      type: "command",
+      payload: { id: "cmd-after-heartbeat", type: "get_state" },
+    });
+
+    sse.close();
+    expect(commandSpy).toHaveBeenCalledWith({
+      type: "command",
+      payload: { id: "cmd-after-heartbeat", type: "get_state" },
+    });
+  });
+
+  it("closes the SSE stream when the logical client is unregistered", async () => {
+    const { server } = createServer(undefined, { heartbeatInterval: 10 });
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const created = await postJson<{ client: { id: string }; eventsUrl: string }>(
+      `${origin}/api/clients`,
+    );
+    const sse = openSse(`${origin}${created.eventsUrl}`);
+
+    await sse.waitForMessages(1);
+    await postJson(`${origin}/api/clients/${created.client.id}/disconnect`);
+
+    await expect(sse.waitForClose()).resolves.toBeUndefined();
   });
 
   it("buffers server messages until the SSE stream connects", async () => {
