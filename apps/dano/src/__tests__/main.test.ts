@@ -45,7 +45,10 @@ describe("Dano main", () => {
         enabled?: boolean;
         userNamespace?: boolean;
         env?: { allow?: string[]; deny?: string[] };
-        paths?: Record<string, { mode?: string }>;
+        paths?: Record<
+          string,
+          { mode?: string; path?: string } | Array<{ mode?: string; path?: string }>
+        >;
       };
       commandPolicies?: Array<{ blocked?: string[] }>;
     };
@@ -64,8 +67,13 @@ describe("Dano main", () => {
     });
     expect(heimdall.sandbox?.enabled).toBe(true);
     expect(heimdall.sandbox?.userNamespace).toBe(false);
-    expect(heimdall.sandbox?.paths?.[".pi"]).toEqual({ mode: "deny" });
-    expect(heimdall.sandbox?.paths?.["~/.pi"]).toEqual({ mode: "deny" });
+    expect(heimdall.sandbox?.paths?.["."]).toEqual([
+      { mode: "write" },
+      { path: ".pi" },
+    ]);
+    expect(heimdall.sandbox?.paths?.["$DANO_RUNTIME_DIR/.pi"]).toEqual({});
+    expect(heimdall.sandbox?.paths?.["$PI_CODING_AGENT_DIR"]).toEqual({});
+    expect(heimdall.sandbox?.paths?.["~/.pi"]).toEqual({});
     expect(heimdall.sandbox?.env?.allow).toEqual(
       expect.arrayContaining(["DANO_URL", "DANO_TENANT_KEY"]),
     );
@@ -77,6 +85,15 @@ describe("Dano main", () => {
     expect(sandboxGuard).toContain("HEIMDALL_BWRAP_BIND_ROOT");
     expect(sandboxGuard).toContain("function bwrapBindRoot()");
     expect(sandboxGuard).toContain("writeMounts.push(bindRoot");
+    expect(sandboxGuard).toContain("function expandPath(path: string)");
+    expect(sandboxGuard).toContain("process.env[name] ?? \"\"");
+    expect(sandboxGuard).toContain(
+      "const matches = entry.path ? target === entryTarget : pathMatchesPrefix",
+    );
+    expect(sandboxGuard).toContain(
+      "overlayReadMounts.push({ source: target, target });",
+    );
+    expect(sandboxGuard).toContain('entry.mode === "write" ? "write"');
     expect(sandboxGuard).toContain("function protectedConfigBashBlockReason");
     expect(sandboxGuard).toContain("protectHeimdallConfigPaths");
     expect(sandboxGuard).toContain("Blocked: bash cannot run because Heimdall Protected Configuration cannot be hidden without an active sandbox");
@@ -309,7 +326,7 @@ describe("Dano main", () => {
       parseDanoServerOptions([], {
         DANO_RUNTIME_DIR: "/tmp/dano-runtime",
       }).agentConfigDir,
-    ).toBe("/tmp/dano-runtime/default-settings/.pi/agent");
+    ).toBe("/tmp/dano-runtime/.pi/agent");
   });
 
   it("uses upload configuration from environment", () => {

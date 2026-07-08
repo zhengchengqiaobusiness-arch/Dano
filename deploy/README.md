@@ -7,23 +7,28 @@ This directory contains deployment-specific defaults and proxy config.
 - Source runtime defaults live in `deploy/runtime-defaults/`.
 - The runtime root is `${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}`.
 - The Pi agent config directory is
-  `${PI_CODING_AGENT_DIR:-$DANO_RUNTIME_DIR/default-settings/.pi/agent}`.
+  `${PI_CODING_AGENT_DIR:-$DANO_RUNTIME_DIR/.pi/agent}`.
+- Runtime skills stay under `/opt/dano/runtime-data/.agents/skills`.
 - Production deployment keeps three directories separate:
   - `/tmp/dano-build-*` is the disposable source checkout and image build dir.
   - `/opt/dano/deploy` stores Compose, `.env`, secrets, and nginx config.
   - `/opt/dano/runtime-data` is mounted at `/opt/dano/runtime-data` for runtime state.
 - Docker Compose mounts
-  `${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/opt/dano/runtime-data`.
-  That host directory must be writable by UID/GID `1000:1000`, so runtime
-  sessions and user-modified agent config files survive container recreation
-  without writing into a source checkout.
+  `${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/opt/dano/runtime-data` for
+  host-visible runtime state such as sessions and skills. The `.pi` and
+  `workspaces` subtrees are Compose named volumes, mounted at
+  `/opt/dano/runtime-data/.pi` and `/opt/dano/runtime-data/workspaces`, so
+  Heimdall can overlay-hide protected config files in Bubblewrap while protecting
+  runtime `.pi` files as read-only via `sandbox.paths`. Agent config, Runtime
+  Workspaces, and uploads still survive container recreation.
+  Do not run Compose with `-v` unless you intend to remove those volumes.
 
 On container startup, `deploy/docker-entrypoint.sh` creates:
 
 ```text
-/opt/dano/runtime-data/default-settings/.pi/agent/SYSTEM.md
-/opt/dano/runtime-data/default-settings/.pi/agent/settings.json
-/opt/dano/runtime-data/default-settings/.pi/agent/heimdall.json
+/opt/dano/runtime-data/.pi/agent/SYSTEM.md
+/opt/dano/runtime-data/.pi/agent/settings.json
+/opt/dano/runtime-data/.pi/agent/heimdall.json
 ```
 
 The entrypoint copies those files from `deploy/runtime-defaults/` only when the
@@ -89,7 +94,7 @@ minimum acceptance sequence against the Podman Compose deployment:
    created by this browser run:
 
    ```bash
-   pnpm run deploy:check-bash -- /path/to/runtime-data/workspaces/<workspace>/.dano/sessions/<session>.jsonl
+   pnpm run deploy:check-bash -- /path/to/runtime-data/.dano/sessions/<workspace-session>/<session>.jsonl
    ```
 
    If the server host does not have Node or pnpm, run the same checker through
@@ -97,7 +102,7 @@ minimum acceptance sequence against the Podman Compose deployment:
 
    ```bash
    DANO_RUNTIME_DIR=/path/to/runtime-data \
-   sh scripts/check-bash-acceptance-container.sh /path/to/runtime-data/workspaces/<workspace>/.dano/sessions/<session>.jsonl
+   sh scripts/check-bash-acceptance-container.sh /path/to/runtime-data/.dano/sessions/<workspace-session>/<session>.jsonl
    ```
 
    It reports whether a `bash` tool call occurred, whether a successful
@@ -151,7 +156,7 @@ minimum acceptance sequence against the Podman Compose deployment:
    DANO_BASH_ACCEPTANCE_MARKER=OA_ENV_CHECK \
    DANO_BASH_ACCEPTANCE_REQUIRED_MARKERS=URL_PRESENT,TENANT_PRESENT \
    DANO_BASH_ACCEPTANCE_FORBIDDEN_MARKERS='URL_MISSING,TENANT_MISSING,DANO_URL/DANO_TENANT_KEY 未设置' \
-   pnpm run deploy:check-bash -- /path/to/runtime-data/workspaces/<workspace>/.dano/sessions/<session>.jsonl
+   pnpm run deploy:check-bash -- /path/to/runtime-data/.dano/sessions/<workspace-session>/<session>.jsonl
    ```
 
    Without host Node or pnpm:
@@ -161,7 +166,7 @@ minimum acceptance sequence against the Podman Compose deployment:
    DANO_BASH_ACCEPTANCE_MARKER=OA_ENV_CHECK \
    DANO_BASH_ACCEPTANCE_REQUIRED_MARKERS=URL_PRESENT,TENANT_PRESENT \
    DANO_BASH_ACCEPTANCE_FORBIDDEN_MARKERS='URL_MISSING,TENANT_MISSING,DANO_URL/DANO_TENANT_KEY 未设置' \
-   sh scripts/check-bash-acceptance-container.sh /path/to/runtime-data/workspaces/<workspace>/.dano/sessions/<session>.jsonl
+   sh scripts/check-bash-acceptance-container.sh /path/to/runtime-data/.dano/sessions/<workspace-session>/<session>.jsonl
    ```
 
    This OA check is required because `smoke:deploy`, upload checks, host shell

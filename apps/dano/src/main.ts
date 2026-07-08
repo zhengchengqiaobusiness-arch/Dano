@@ -130,7 +130,7 @@ function readAgentConfigDir(
 ): string {
   return (
     env.PI_CODING_AGENT_DIR?.trim() ||
-    join(runtimeRootPath, "default-settings", ".pi", "agent")
+    join(runtimeRootPath, ".pi", "agent")
   );
 }
 

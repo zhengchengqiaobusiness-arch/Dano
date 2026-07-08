@@ -3,8 +3,13 @@
     "enabled": true,
     "userNamespace": false,
     "paths": {
-      ".pi": { "mode": "deny" },
-      "~/.pi": { "mode": "deny" }
+      ".": [
+        { "mode": "write" },
+        { "path": ".pi" }
+      ],
+      "$DANO_RUNTIME_DIR/.pi": {},
+      "$PI_CODING_AGENT_DIR": {},
+      "~/.pi": {}
     },
     "env": {
       "allow": [

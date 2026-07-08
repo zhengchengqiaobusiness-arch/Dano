@@ -2,7 +2,7 @@
 set -eu
 
 runtime_root="${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}"
-agent_dir="${PI_CODING_AGENT_DIR:-$runtime_root/default-settings/.pi/agent}"
+agent_dir="${PI_CODING_AGENT_DIR:-$runtime_root/.pi/agent}"
 export PI_CODING_AGENT_DIR="$agent_dir"
 runtime_defaults_dir="${DANO_RUNTIME_DEFAULTS_DIR:-/app/deploy/runtime-defaults}"
 npm_registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-${DANO_DEFAULT_NPM_REGISTRY:-https://mirrors.cloud.tencent.com/npm/}}}"

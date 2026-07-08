@@ -12,6 +12,7 @@ services:
       DANO_HOST: 0.0.0.0
       DANO_PORT: 8080
       DANO_RUNTIME_DIR: /opt/dano/runtime-data
+      DANO_SESSIONS_ROOT: /opt/dano/runtime-data/.dano/sessions
       DANO_UPLOAD_DIR: /opt/dano/runtime-data/.dano/uploads
       DANO_UPLOAD_MAX_TOTAL_BYTES: ${DANO_UPLOAD_MAX_TOTAL_BYTES:-10737418240}
       DANO_UPLOAD_DRAFT_TTL_MS: ${DANO_UPLOAD_DRAFT_TTL_MS:-7200000}
@@ -42,6 +43,8 @@ services:
       - "8080"
     volumes:
       - ${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/opt/dano/runtime-data
+      - agent-config:/opt/dano/runtime-data/.pi
+      - workspaces:/opt/dano/runtime-data/workspaces
       - ${DANO_SECRETS_DIR:-/opt/dano/deploy/.secrets}:/run/secrets:ro
     networks:
       - default
@@ -81,3 +84,7 @@ networks:
   skillmanner:
     external: true
     name: skillmanner_default
+
+volumes:
+  agent-config:
+  workspaces:
