@@ -960,6 +960,32 @@ async def record_ws(ws: WebSocket) -> None:
                     })
                 except Exception as e:  # noqa: BLE001
                     await ws.send_json({"type": "error", "detail": f"llm_recommendations failed: {e}"})
+            # 能力编排:LLM 生成对外可调用能力草案；失败则由 flow_spec 确定性规则兜底。
+            elif t == "orchestrate_flow":
+                if pending_flow_spec is None:
+                    await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
+                    continue
+                try:
+                    from dano.config import get_settings
+                    from dano.execution.page.flow_spec import (
+                        flow_spec_to_client,
+                        flow_spec_to_summary,
+                        orchestrate_flow_capabilities,
+                        validate_flow_spec,
+                    )
+                    pending_flow_spec = await orchestrate_flow_capabilities(
+                        pending_flow_spec,
+                        llm_client=_page_semantic_client("complete_json"),
+                        model=get_settings().pi_model,
+                    )
+                    await ws.send_json({
+                        "type": "flow_spec_updated",
+                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
+                        "full_spec": flow_spec_to_client(pending_flow_spec),
+                        "check_report": validate_flow_spec(pending_flow_spec),
+                    })
+                except Exception as e:  # noqa: BLE001
+                    await ws.send_json({"type": "error", "detail": f"orchestrate_flow failed: {e}"})
             # Step D2: LLM 给每个 step 起业务名
             elif t == "step_naming":
                 if pending_flow_spec is None:

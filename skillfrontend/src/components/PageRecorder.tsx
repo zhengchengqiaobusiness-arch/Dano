@@ -26,7 +26,6 @@ import {
 import {
   ApiOutlined,
   BranchesOutlined,
-  CheckCircleOutlined,
   DeleteOutlined,
   FileTextOutlined,
   LinkOutlined,
@@ -109,7 +108,7 @@ interface RequestRoleData {
   reason: string; confidence?: number;
 }
 interface RequestGraphEntry {
-  request_index?: number | null; method?: string; url?: string; path?: string; role?: string;
+  request_index?: number | string | null; request_id?: string; method?: string; url?: string; path?: string; role?: string;
   keep?: boolean; reason?: string; confidence?: number; response_status?: number | null;
   response_json?: any; evidence?: any;
 }
@@ -120,6 +119,7 @@ interface FlowSpecData {
   meta?: {
     request_roles?: RequestRoleData[];
     request_graph?: {
+      all_requests?: RequestGraphEntry[];
       selected_steps?: RequestGraphEntry[];
       candidate_reads?: RequestGraphEntry[];
       filtered_requests?: RequestGraphEntry[];
@@ -196,9 +196,7 @@ const SOURCE_KIND_OPTIONS = [
   { label: "页面上下文", value: "page_context" },
   { label: "固定值", value: "constant" },
   { label: "接口候选", value: "api_option" },
-  { label: "页面枚举", value: "page_enum" },
-  { label: "固定枚举", value: "static_enum" },
-  { label: "手工枚举", value: "manual_enum" },
+  { label: "枚举", value: "manual_enum" },
   { label: "未知", value: "unknown" },
 ];
 const OPTION_SOURCE_KINDS = ["api_option", "page_enum", "static_enum", "manual_enum", "form_option"];
@@ -208,8 +206,26 @@ const SOURCE_OPTIONS_BY_CATEGORY: Record<string, Array<{ label: string; value: s
   runtime_var: SOURCE_KIND_OPTIONS.filter((x) => ["previous_response", "request_header", "current_user", "system_time", "page_context", "api_option", "unknown"].includes(x.value)),
   system_const: SOURCE_KIND_OPTIONS.filter((x) => ["constant", "page_context"].includes(x.value)),
 };
+const PARAM_TYPE_LABELS: Record<string, string> = {
+  string: "文本",
+  number: "数字",
+  boolean: "布尔",
+  datetime: "日期时间",
+  date: "日期",
+  enum: "单选枚举",
+  array: "数组",
+  object: "对象",
+  "list-enum": "多选枚举",
+};
 const PARAM_TYPE_OPTIONS = ["string", "number", "boolean", "datetime", "date", "enum", "array", "object", "list-enum"]
-  .map((x) => ({ label: x, value: x }));
+  .map((x) => ({ label: PARAM_TYPE_LABELS[x] || x, value: x }));
+const CAPABILITY_KIND_OPTIONS = [
+  { label: "状态查询", value: "query_status" },
+  { label: "选项列表", value: "list_options" },
+  { label: "批量校验", value: "validate_batch" },
+  { label: "批量提交", value: "submit_batch" },
+  { label: "提交", value: "submit" },
+];
 const STEP_ROLE_OPTIONS = [
   "submit_anchor", "business_write", "business_get", "read_context", "read_option", "auth", "noise",
 ].map((x) => ({ label: x, value: x }));
@@ -270,7 +286,7 @@ function optionLabel(options: Array<{ label: string; value: string }>, value: st
   return options.find((o) => o.value === value)?.label || value;
 }
 function normalizeSourceKindForUi(sourceKind?: string | null) {
-  return sourceKind === "form_option" ? "static_enum" : (sourceKind || "");
+  return ENUM_SOURCE_KINDS.includes(sourceKind || "") ? "manual_enum" : (sourceKind || "");
 }
 function sourceOptionsForCategory(category?: string) {
   return SOURCE_OPTIONS_BY_CATEGORY[category || "user_param"] || SOURCE_KIND_OPTIONS;
@@ -548,13 +564,87 @@ function requestGraphPath(req: RequestGraphEntry) {
 function requestGraphSignature(req: RequestGraphEntry) {
   return `${(req.method || "GET").toUpperCase()} ${requestGraphPath(req)}`;
 }
-function visibleCandidateReads(spec?: FlowSpecData | null) {
+function requestGraphKey(req: RequestGraphEntry) {
+  if (req.request_id) return `id:${req.request_id}`;
+  if (req.request_index != null) return `idx:${String(req.request_index)}`;
+  return `sig:${requestGraphSignature(req)}`;
+}
+function isApiLikeRequest(req: RequestGraphEntry) {
+  const path = (req.path || stripHost(req.url || "") || "").split("?", 1)[0].toLowerCase();
+  if (!path) return false;
+  if (/\.(?:css|js|mjs|map|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|html?|txt|xml)$/i.test(path)) return false;
+  if (["noise", "auth"].includes(req.role || "")) return false;
+  const role = req.role || "";
+  if (["submit_anchor", "business_write", "business_get", "read_context", "read_option"].includes(role)) return true;
+  if (req.response_json != null) return true;
+  return /^\/?(?:api|admin-api|appgateway|gsgl|oa|bpm|system|workflow|process|v1|v2)\b/i.test(path);
+}
+function allCapturedRequests(spec?: FlowSpecData | null) {
   const graph = spec?.meta?.request_graph || {};
+  const source = graph.all_requests?.length ? graph.all_requests : [
+    ...(graph.selected_steps || []),
+    ...(graph.candidate_reads || []),
+  ];
+  const seen = new Set<string>();
   const selectedSigs = new Set((graph.selected_steps || []).map(requestGraphSignature));
-  return [...(graph.candidate_reads || [])]
-    .filter((req) => (req.confidence ?? 0) >= 0.9)
-    .filter((req) => !selectedSigs.has(requestGraphSignature(req)))
-    .sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+  const stepSigs = new Set((spec?.steps || []).map((s) => `${(s.method || "").toUpperCase()} ${purePath(s.path || s.url)}`));
+  const stepReqKeys = new Set((spec?.steps || []).flatMap((s) => {
+    const meta = s.source_meta || {};
+    const out: string[] = [];
+    if (meta.request_id) out.push(`id:${meta.request_id}`);
+    if (meta.request_index != null) out.push(`idx:${String(meta.request_index)}`);
+    return out;
+  }));
+  const selectedRank = (req: RequestGraphEntry) => (
+    selectedSigs.has(requestGraphSignature(req)) ||
+    stepSigs.has(`${(req.method || "").toUpperCase()} ${purePath(req.path || req.url)}`) ||
+    stepReqKeys.has(requestGraphKey(req))
+  ) ? 0 : 1;
+  return source
+    .filter(isApiLikeRequest)
+    .filter((req) => {
+      const key = requestGraphSignature(req);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => selectedRank(a) - selectedRank(b) || requestRoleRank(a) - requestRoleRank(b) || (b.confidence ?? 0) - (a.confidence ?? 0) || Number(a.request_index ?? 0) - Number(b.request_index ?? 0));
+}
+function requestRoleRank(req: RequestGraphEntry) {
+  const role = req.role || "";
+  if (["submit_anchor", "business_write"].includes(role)) return 0;
+  if (role === "business_get") return 1;
+  if (role === "read_context") return 2;
+  if (role === "read_option") return 3;
+  return 9;
+}
+function requestOptionValue(req: RequestGraphEntry) {
+  return requestGraphKey(req);
+}
+function findCapturedRequest(spec: FlowSpecData | null | undefined, key?: string) {
+  if (!key) return undefined;
+  return allCapturedRequests(spec).find((req) => requestOptionValue(req) === key);
+}
+function stepRequestSignature(step: FlowStepData) {
+  return `${(step.method || "").toUpperCase()} ${purePath(step.path || step.url)}`;
+}
+function isRequestInSteps(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
+  const sig = requestGraphSignature(req);
+  return (spec?.steps || []).some((st) => {
+    const meta = st.source_meta || {};
+    return (req.request_id && String(meta.request_id || "") === String(req.request_id)) ||
+      (req.request_index != null && String(meta.request_index ?? "") === String(req.request_index)) ||
+      stepRequestSignature(st) === sig;
+  });
+}
+function capturedRequestOptions(spec: FlowSpecData | null | undefined, opts: { includeIncluded?: boolean } = {}) {
+  return allCapturedRequests(spec)
+    .filter((req) => opts.includeIncluded || !isRequestInSteps(spec, req))
+    .map((req) => ({
+      label: `${req.method || "GET"} ${req.path || stripHost(req.url || "")}`,
+      value: requestOptionValue(req),
+    }))
+    .filter((x) => x.value);
 }
 function confidencePercent(value?: number) {
   if (typeof value !== "number" || Number.isNaN(value)) return "";
@@ -578,6 +668,48 @@ function schemaFieldRows(schema?: Record<string, any>) {
       description: String((spec as any).description || (spec as any).title || ""),
       required: required.has(name),
     }));
+}
+function jsonSchemaForParam(p: FlowParam) {
+  const t = (p.type || "string").toLowerCase();
+  const schema: Record<string, any> =
+    t === "number" ? { type: "number" } :
+    t === "boolean" ? { type: "boolean" } :
+    t === "date" ? { type: "string", format: "date" } :
+    t === "datetime" ? { type: "string", format: "date-time" } :
+    t === "array" || t === "list-enum" ? { type: "array", items: { type: "string" } } :
+    t === "object" ? { type: "object" } :
+    { type: "string" };
+  if (p.label || p.key) schema.description = p.label || p.key;
+  const opts = enumOptionRecordList(p.enum_options || []);
+  if (t === "enum" && opts.length) schema.enum = opts.map((x) => x.value);
+  if (t === "list-enum" && opts.length) schema.items = { type: "string", enum: opts.map((x) => x.value) };
+  return schema;
+}
+function enumOptionRecordList(raw: any[]) {
+  const out: Array<{ label: string; value: any }> = [];
+  for (const x of raw || []) {
+    if (x == null) continue;
+    if (typeof x === "object") {
+      const label = String(x.label ?? x.text ?? x.name ?? x.value ?? "").trim();
+      if (label) out.push({ label, value: x.value ?? label });
+    } else {
+      const label = String(x).trim();
+      if (label) out.push({ label, value: label });
+    }
+  }
+  return out;
+}
+function inferJsonSchema(value: any): Record<string, any> {
+  if (Array.isArray(value)) return { type: "array", items: value.length ? inferJsonSchema(value[0]) : {} };
+  if (value && typeof value === "object") {
+    return {
+      type: "object",
+      properties: Object.fromEntries(Object.entries(value).slice(0, 80).map(([k, v]) => [k, inferJsonSchema(v)])),
+    };
+  }
+  if (typeof value === "number") return { type: "number" };
+  if (typeof value === "boolean") return { type: "boolean" };
+  return { type: "string" };
 }
 function compactJson(value: any, maxLen = 160) {
   if (value == null) return "";
@@ -642,6 +774,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }, [flowSpec]);
   const [addingStep, setAddingStep] = useState(false);
   const [newStep, setNewStep] = useState({ method: "POST", path: "/api/", name: "", risk_level: "L3", role: "business_write" });
+  const [newStepRequestKey, setNewStepRequestKey] = useState("");
+  const [newParamRequestKey, setNewParamRequestKey] = useState("");
+  const [capabilityAddValue, setCapabilityAddValue] = useState<Record<number, string>>({});
   const [newParam, setNewParam] = useState({ step_id: "", path: "", key: "", type: "string", category: "user_param" });
   const [newLink, setNewLink] = useState({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
   const [editingLink, setEditingLink] = useState<Record<string, FlowLinkData>>({});
@@ -652,7 +787,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [namingBusy, setNamingBusy] = useState(false);
   const [descBusy, setDescBusy] = useState(false);
   const [llmBusy, setLlmBusy] = useState(false);
-  const [activeFlowTab, setActiveFlowTab] = useState("steps");
+  const [orchestrateBusy, setOrchestrateBusy] = useState(false);
+  const [activeFlowTab, setActiveFlowTab] = useState("abilities");
 
   useEffect(() => () => {
     // FC4 修复:仅当 phase 处于 recording/publishing 时才关 WS(避免 StrictMode 双 mount 或组件复用时误关正在用的 WS)
@@ -761,7 +897,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setJsonDraft("");
     setJsonErr("");
     setLastServerJson("");
-    setActiveFlowTab("steps");
+    setActiveFlowTab("abilities");
     autoResolvedReviewKeyRef.current = "";
     autoDedupedStepKeyRef.current = "";
     autoLinkedRuntimeKeyRef.current = "";
@@ -825,7 +961,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         message.success("抓到提交请求，请核对字段和流程");
       }
       else if (m.type === "flow_spec" || m.type === "flow_spec_updated") {
-        setLlmBusy(false);
+        setLlmBusy(false); setOrchestrateBusy(false);
         const fs = m.full_spec || m.flow_spec;
         if (fs) {
           setFlowSpec(fs);
@@ -859,7 +995,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
       else if (m.type === "error") {
         const detail = m.detail || "录制出错";
-        setNamingBusy(false); setDescBusy(false); setLlmBusy(false);
+        setNamingBusy(false); setDescBusy(false); setLlmBusy(false); setOrchestrateBusy(false);
         if (detail.includes("step not found") || detail.includes("link not found")) {
           message.warning("流程已变更，正在同步最新版本");
           send({ type: "refresh_flow_spec" });
@@ -1242,6 +1378,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function addStep() {
     if (!flowSpec) return;
+    if (newStepRequestKey) {
+      const req = findCapturedRequest(flowSpec, newStepRequestKey);
+      if (!req) { message.warning("没有找到选中的捕获接口"); return; }
+      send({ type: "flow_update", edits: [{ op: "add_request_step", request_index: req.request_index, request_id: req.request_id }] });
+      setAddingStep(false);
+      setNewStepRequestKey("");
+      return;
+    }
     const draft = { ...newStep, path: newStep.path.trim(), name: newStep.name.trim() };
     if (!draft.path || !draft.path.startsWith("/")) { message.warning("接口 path 需要以 / 开头"); return; }
     const step: FlowStepData = {
@@ -1254,6 +1398,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     sendReplace({ ...flowSpec, steps: [...flowSpec.steps, step] });
     setAddingStep(false);
     setNewStep({ method: "POST", path: "/api/", name: "", risk_level: "L3", role: "business_write" });
+    setNewStepRequestKey("");
+  }
+  function addCapturedRequestToFields(req?: RequestGraphEntry) {
+    if (!req) { message.warning("请选择捕获接口"); return; }
+    send({ type: "flow_update", edits: [{ op: "add_request_step", request_index: req.request_index, request_id: req.request_id }] });
+    setNewParamRequestKey("");
+    setNewStepRequestKey("");
+    setActiveFlowTab("params");
   }
   function addParam() {
     const stepId = newParam.step_id || flowSpec?.steps?.[0]?.step_id || "";
@@ -1317,23 +1469,67 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     send({ type: "flow_update", edits });
     cancelEditLink(linkId);
   }
-  function promoteCandidateRead(req: RequestGraphEntry) {
-    if (req.request_index == null) { message.warning("候选请求缺少 request_index，无法加入"); return; }
-    send({ type: "flow_update", edits: [{ op: "add_candidate_step", request_index: req.request_index }] });
+  function orchestrateFlow() {
+    if (!flowSpec) return;
+    setOrchestrateBusy(true);
+    send({ type: "orchestrate_flow" });
+  }
+  function addCapability() {
+    const idx = (flowSpec?.capabilities?.length || 0) + 1;
+    send({ type: "flow_update", edits: [{
+      op: "add_capability",
+      capability: {
+        name: `capability_${idx}`,
+        title: `能力 ${idx}`,
+        intent: "",
+        kind: "submit",
+        step_ids: [],
+        input_schema: { type: "object", properties: {}, required: [] },
+        output_schema: { type: "object", properties: { raw: { type: "object" } } },
+        output_mapping: [{ kind: "final_response", response_path: "response" }],
+        confirmed: false,
+        requires_human_confirm: true,
+        confidence: 0.5,
+      },
+    }] });
   }
   function updateCapabilityConfirmed(idx: number, confirmed: boolean) {
-    if (!flowSpec) return;
-    const capabilities = [...(flowSpec.capabilities || [])];
-    const current = capabilities[idx];
-    if (!current) return;
-    capabilities[idx] = {
-      ...current,
-      confirmed,
-      requires_human_confirm: confirmed ? false : current.requires_human_confirm,
-    };
-    const next = { ...flowSpec, capabilities };
-    setFlowSpec(next);
-    sendReplace(next);
+    send({ type: "flow_update", edits: [{ op: "update_capability", capability_index: idx, field: "confirmed", value: confirmed }] });
+  }
+  function updateCapabilityField(idx: number, field: string, value: any) {
+    send({ type: "flow_update", edits: [{ op: "update_capability", capability_index: idx, field, value }] });
+  }
+  function removeCapability(idx: number) {
+    Modal.confirm({
+      title: "删除这个能力？",
+      content: "只删除对外能力编排，不删除底层捕获接口和流程步骤。",
+      okText: "删除", okType: "danger", cancelText: "取消",
+      onOk: () => send({ type: "flow_update", edits: [{ op: "remove_capability", capability_index: idx }] }),
+    });
+  }
+  function addStepToCapability(idx: number, value?: string) {
+    if (!value) return;
+    if (value.startsWith("step:")) {
+      send({ type: "flow_update", edits: [{ op: "add_capability_step", capability_index: idx, step_id: value.slice(5) }] });
+      return;
+    }
+    if (value.startsWith("req:")) {
+      const requestKey = value.slice(4);
+      const req = findCapturedRequest(flowSpec, requestKey);
+      if (!req) { message.warning("没有找到选中的捕获接口"); return; }
+      send({ type: "flow_update", edits: [{ op: "add_capability_step", capability_index: idx, request_index: req?.request_index, request_id: req?.request_id }] });
+    }
+  }
+  function removeStepFromCapability(idx: number, stepId: string) {
+    send({ type: "flow_update", edits: [{ op: "remove_capability_step", capability_index: idx, step_id: stepId }] });
+  }
+  function moveStepInCapability(idx: number, stepIds: string[], from: number, delta: number) {
+    const to = from + delta;
+    if (to < 0 || to >= stepIds.length) return;
+    const next = [...stepIds];
+    const [item] = next.splice(from, 1);
+    next.splice(to, 0, item);
+    updateCapabilityField(idx, "step_ids", next);
   }
   function loadJsonDraft() {
     if (!flowSpec) return;
@@ -1429,6 +1625,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function upsertSelectBinding(step: FlowStepData, p: FlowParam, patch: Partial<FlowSelectBinding>, extraEdits: any[] = []) {
     const existing = selectBindingForParam(step, p);
+    const hasExplicitIdPath = Object.prototype.hasOwnProperty.call(patch, "id_path");
     const nextBinding: FlowSelectBinding = {
       param: p.key,
       path: p.path,
@@ -1440,6 +1637,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       ...existing,
       ...patch,
     };
+    if (!hasExplicitIdPath && !nextBinding.id_path && (nextBinding.source_url || p.source_kind === "api_option")) {
+      nextBinding.id_path = p.path;
+    }
     if (nextBinding.options) nextBinding.count = nextBinding.options.length;
     const replaced = (step.selects || []).some((s) => s.path === p.path || s.param === p.key);
     const nextSelects = replaced
@@ -1516,10 +1716,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function enumSourceLabel(sel?: FlowSelectBinding) {
     if (!sel) return "未绑定";
-    if (sel.enum_source === "dom") return "页面真实枚举";
-    if (sel.enum_source === "manual") return "手工枚举";
     if (sel.source_url) return "接口候选";
-    if ((sel.options || []).length) return "固定枚举";
+    if ((sel.options || []).length || sel.enum_source) return "枚举";
     return "未绑定";
   }
   function paramSourceText(step: FlowStepData, p: FlowParam, link?: FlowLinkData) {
@@ -1534,9 +1732,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (p.source_kind === "request_header") return `请求头来源：运行期从请求头 ${p.source?.header || ""} 获取；当前默认值只是录制样例`;
     if (p.source_kind === "user_input") return "用户输入：调用 Skill 时由用户填写；默认值来自录制样例";
     if (p.source_kind === "api_option") return `接口候选：运行期从 ${sel?.source_url || "已绑定接口"} 获取候选；默认值是录制时选中的值`;
-    if (p.source_kind === "page_enum") return "页面枚举：候选来自录制页面真实下拉快照；默认值是录制时选中的值";
-    if (p.source_kind === "manual_enum") return "手工枚举：候选由人工维护；默认值是录制时选中的值";
-    if (p.source_kind === "static_enum" || p.source_kind === "form_option") return "固定枚举：候选来自固定快照；默认值是录制时选中的值";
+    if (ENUM_SOURCE_KINDS.includes(p.source_kind || "")) return "枚举：候选来自录制页面、接口快照或人工维护；默认值是录制时选中的值";
     if (p.source_kind === "constant") return "固定默认值：发布后按当前值写入，通常不暴露给用户";
     if (p.source_kind === "current_user") return "当前用户：运行期从登录态/身份信息注入，不使用录制旧值";
     if (p.source_kind === "system_time") return "系统时间：运行期自动生成，不使用录制旧值";
@@ -1547,14 +1743,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!flowSpec) return null;
     const totalParams = flowSpec.steps.reduce((n, s) => n + (s.params?.length || 0), 0);
     const capabilities = flowSpec.capabilities || [];
+    const capturedTotal = allCapturedRequests(flowSpec).length;
     const unconfirmedCapabilities = capabilities.filter((cap) => !cap.confirmed || cap.requires_human_confirm).length;
     return (
       <Card
         style={{ marginTop: 16 }}
         title={
           <Space wrap>
-            <Typography.Text strong>FlowSpec 工作台</Typography.Text>
-            <Tag color="blue">{flowSpec.steps.length} 步</Tag>
+            <Typography.Text strong>编排工作台</Typography.Text>
+            <Tag color="cyan">{capturedTotal} 接口</Tag>
             <Tag>{totalParams} 字段</Tag>
             {capabilities.length > 0 && <Tag color="geekblue">{capabilities.length} 能力</Tag>}
             {unconfirmedCapabilities > 0 && <Tag color="warning">{unconfirmedCapabilities} 能力待确认</Tag>}
@@ -1564,12 +1761,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         extra={
           <Space wrap>
-            <Button size="small" icon={<RobotOutlined />} loading={namingBusy}
-              onClick={() => { setNamingBusy(true); send({ type: "step_naming" }); }}>命名步骤</Button>
-            <Button size="small" icon={<FileTextOutlined />} loading={descBusy}
-              onClick={() => { setDescBusy(true); send({ type: "business_description" }); }}>
-              {flowSpec.business_description ? "重新生成说明" : "生成说明"}
-            </Button>
+            <Button size="small" loading={phase === "publishing"} onClick={finalize}>重新抓取</Button>
             <Button size="small" type="primary" loading={phase === "publishing"} onClick={publishRequest}>发布当前流程</Button>
           </Space>
         }
@@ -1598,24 +1790,235 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           onChange={setActiveFlowTab}
           destroyOnHidden={false}
           items={[
-            { key: "review", label: `待确认 ${reviewItems.length || ""}`, children: renderReviewPanel() },
-            { key: "capabilities", label: `业务能力 ${capabilities.length || ""}`, children: renderCapabilitiesPanel() },
-            { key: "steps", label: "步骤", children: renderStepsPanel() },
-            { key: "requests", label: `候选请求 ${visibleCandidateReads(flowSpec).length || ""}`, children: renderRequestGraphPanel() },
-            { key: "params", label: "字段", children: renderParamsPanel() },
-            { key: "links", label: "依赖", children: renderLinksPanel() },
-            { key: "desc", label: "说明", children: renderDescriptionPanel() },
-            { key: "json", label: "JSON", children: renderJsonPanel() },
+            ...(reviewItems.length > 0 ? [{ key: "review", label: `待确认 ${reviewItems.length}`, children: renderReviewPanel() }] : []),
+            { key: "abilities", label: `能力 ${capabilities.length || ""}`, children: renderCapabilityComposerPanel() },
+            { key: "requests", label: `接口 ${capturedTotal || ""}`, children: renderRequestsPanel() },
+            { key: "params", label: `字段 ${totalParams || ""}`, children: renderParamsPanel() },
+            { key: "links", label: `依赖 ${flowSpec.links?.length || ""}`, children: renderLinksPanel() },
+            { key: "desc", label: "整体说明", children: renderDescriptionPanel() },
+            { key: "json", label: "高级 JSON", children: renderJsonPanel() },
           ]}
         />
       </Card>
+    );
+  }
+  function renderRequestsPanel() {
+    const capturedTotal = allCapturedRequests(flowSpec).length;
+    return (
+      <Collapse defaultActiveKey={[]} bordered={false}>
+        <Collapse.Panel header={`捕获接口 ${capturedTotal}`} key="captured">
+          {renderCapturedRequestsPanel()}
+        </Collapse.Panel>
+      </Collapse>
+    );
+  }
+  function renderCapturedRequestsPanel() {
+    if (!flowSpec) return null;
+    const rows = allCapturedRequests(flowSpec);
+    if (!rows.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有捕获接口" />;
+    const includedStep = (req: RequestGraphEntry) => (flowSpec.steps || []).find((st) => isRequestInSteps(flowSpec, req) && stepRequestSignature(st) === requestGraphSignature(req));
+    return (
+      <List
+        size="small"
+        dataSource={rows}
+        renderItem={(req, idx) => (
+          <List.Item
+            style={{ paddingLeft: 0, paddingRight: 0 }}
+            actions={[
+              includedStep(req)
+                ? <Button key="goto" size="small" onClick={() => setActiveFlowTab("params")}>去字段</Button>
+                : <Button key="add" size="small" type="primary" onClick={() => addCapturedRequestToFields(req)}>加入字段</Button>,
+            ]}
+          >
+            <Space direction="vertical" size={4} style={{ width: "100%" }}>
+              <Space wrap>
+                <Tag>{idx + 1}</Tag>
+                <Tag color={(req.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{req.method || "GET"}</Tag>
+                <PathText value={req.path || stripHost(req.url || "")} maxWidth={620} />
+                {includedStep(req) && <Tag color="success">已纳入字段</Tag>}
+                {req.role && <Tag>{req.role}</Tag>}
+                {typeof req.confidence === "number" && <Tag color={confidenceColor(req.confidence)}>{confidencePercent(req.confidence)}</Tag>}
+                {req.response_status != null && <Tag>{req.response_status}</Tag>}
+              </Space>
+              {req.reason && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{req.reason}</Typography.Text>}
+            </Space>
+          </List.Item>
+        )}
+      />
+    );
+  }
+  function capabilityStepSelectOptions(cap: FlowCapabilityData) {
+    const existing = new Set(cap.step_ids || []);
+    const existingReqSigs = new Set((flowSpec?.steps || [])
+      .filter((s) => existing.has(s.step_id))
+      .map((s) => `${(s.method || "").toUpperCase()} ${purePath(s.path || s.url)}`));
+    const stepItems = (flowSpec?.steps || [])
+      .filter((s) => !existing.has(s.step_id))
+      .map((s) => ({
+        label: `${s.name || fallbackStepName(s.method, s.path)} · ${s.method} ${s.path || stripHost(s.url)}`,
+        value: `step:${s.step_id}`,
+      }));
+    const reqItems = allCapturedRequests(flowSpec)
+      .filter((req) => !existingReqSigs.has(`${(req.method || "").toUpperCase()} ${purePath(req.path || req.url)}`))
+      .map((req) => ({
+        label: `${req.method || "GET"} ${req.path || stripHost(req.url || "")}`,
+        value: `req:${requestOptionValue(req)}`,
+      }));
+    return [...stepItems, ...reqItems];
+  }
+  function renderCapabilityComposerPanel() {
+    if (!flowSpec) return null;
+    const capabilities = flowSpec.capabilities || [];
+    const kindOptions = CAPABILITY_KIND_OPTIONS;
+    return (
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <Space wrap>
+          <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy} onClick={orchestrateFlow}>生成/优化编排</Button>
+          <Button icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
+          <Button icon={<RobotOutlined />} loading={namingBusy} onClick={() => { setNamingBusy(true); send({ type: "step_naming" }); }}>命名步骤</Button>
+        </Space>
+        {!capabilities.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有能力编排" /> : (
+          <Collapse size="small">
+            {capabilities.map((cap, idx) => {
+              const stepIds = cap.step_ids || [];
+              const addOptions = capabilityStepSelectOptions(cap);
+              const capSteps = stepIds.map((sid) => stepById[sid]).filter(Boolean);
+              const capParams = capSteps.flatMap((st) => st.params || []);
+              const derivedInputSchema = {
+                type: "object",
+                properties: Object.fromEntries(capParams
+                  .filter((p) => p.category === "user_param" && p.exposed_to_user !== false)
+                  .map((p) => [p.key || p.path, jsonSchemaForParam(p)])),
+                required: capParams
+                  .filter((p) => p.category === "user_param" && p.exposed_to_user !== false && p.required)
+                  .map((p) => p.key || p.path),
+              };
+              const lastResponse = [...capSteps].reverse().find((st) => st.response_json != null)?.response_json;
+              const derivedOutputSchema = lastResponse != null ? inferJsonSchema(lastResponse) : (cap.output_schema || {});
+              return (
+                <Collapse.Panel
+                  key={`${cap.name || idx}-${idx}`}
+                  header={
+                    <Space wrap>
+                      <Tag color={cap.confirmed ? "success" : "warning"}>{cap.confirmed ? "已确认" : "未确认"}</Tag>
+                      <Tag color="blue">{optionLabel(kindOptions, cap.kind || "submit")}</Tag>
+                      {typeof cap.confidence === "number" && <Tag color={confidenceColor(cap.confidence)}>置信度 {confidencePercent(cap.confidence)}</Tag>}
+                      <Typography.Text strong>{cap.title || cap.name || `能力 ${idx + 1}`}</Typography.Text>
+                      {cap.name && <Typography.Text code>{cap.name}</Typography.Text>}
+                    </Space>
+                  }
+                  extra={
+                    <Space onClick={(e) => e.stopPropagation()}>
+                      <Checkbox checked={!!cap.confirmed} onChange={(e) => updateCapabilityConfirmed(idx, e.target.checked)}>确认</Checkbox>
+                      <Tooltip title="删除"><Button size="small" danger icon={<DeleteOutlined />} onClick={() => removeCapability(idx)} /></Tooltip>
+                    </Space>
+                  }
+                >
+                  <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
+                      <FieldControl label="能力名">
+                        <EditableText value={cap.name || ""} width="100%" onSave={(v) => updateCapabilityField(idx, "name", v)} />
+                      </FieldControl>
+                      <FieldControl label="标题">
+                        <EditableText value={cap.title || ""} width="100%" onSave={(v) => updateCapabilityField(idx, "title", v)} />
+                      </FieldControl>
+                      <FieldControl label="类型">
+                        <NativeSelect value={cap.kind || "submit"} width="100%" options={kindOptions} onChange={(v) => updateCapabilityField(idx, "kind", v)} />
+                      </FieldControl>
+                    </div>
+                    <FieldControl label="说明">
+                      <EditableTextArea rows={3} value={cap.intent || ""} onSave={(v) => updateCapabilityField(idx, "intent", v)} />
+                    </FieldControl>
+                    <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                      <Space wrap>
+                        <Typography.Text strong>能力接口</Typography.Text>
+                        <Tag>{stepIds.length}</Tag>
+                        <NativeSelect
+                          value={capabilityAddValue[idx] || ""}
+                          width={360}
+                          options={[{ label: addOptions.length ? "选择要加入能力的接口" : "没有可添加的接口", value: "" }, ...addOptions]}
+                          onChange={(v) => setCapabilityAddValue((s) => ({ ...s, [idx]: v }))}
+                        />
+                        <Button
+                          size="small"
+                          type="primary"
+                          disabled={!capabilityAddValue[idx]}
+                          onClick={() => {
+                            addStepToCapability(idx, capabilityAddValue[idx]);
+                            setCapabilityAddValue((s) => ({ ...s, [idx]: "" }));
+                          }}
+                        >
+                          添加接口
+                        </Button>
+                      </Space>
+                      {!stepIds.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未绑定接口" /> : (
+                        <List
+                          size="small"
+                          dataSource={stepIds}
+                          renderItem={(stepId, stepIdx) => {
+                            const st = stepById[stepId];
+                            return (
+                              <List.Item
+                                style={{ paddingLeft: 0, paddingRight: 0 }}
+                                actions={[
+                                  <Tooltip key="up" title="上移"><Button size="small" icon={<UpOutlined />} disabled={stepIdx === 0} onClick={() => moveStepInCapability(idx, stepIds, stepIdx, -1)} /></Tooltip>,
+                                  <Tooltip key="down" title="下移"><Button size="small" icon={<DownOutlined />} disabled={stepIdx === stepIds.length - 1} onClick={() => moveStepInCapability(idx, stepIds, stepIdx, 1)} /></Tooltip>,
+                                  <Button key="rm" size="small" danger onClick={() => removeStepFromCapability(idx, stepId)}>移除</Button>,
+                                ]}
+                              >
+                                <Space wrap>
+                                  <Tag color="purple">接口 {stepIdx + 1}</Tag>
+                                  {st ? (
+                                    <>
+                                      <Tag color={(st.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{st.method}</Tag>
+                                      <Typography.Text strong>{st.name || fallbackStepName(st.method, st.path)}</Typography.Text>
+                                      <PathText value={st.path || stripHost(st.url)} maxWidth={420} />
+                                      <Tag>{st.params?.length || 0} 字段</Tag>
+                                    </>
+                                  ) : (
+                                    <Typography.Text type="danger">接口不存在：{stepId}</Typography.Text>
+                                  )}
+                                </Space>
+                              </List.Item>
+                            );
+                          }}
+                        />
+                      )}
+                    </Space>
+                    <Collapse ghost size="small">
+                      <Collapse.Panel key="io" header="输入输出">
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 }}>
+                          <FieldControl label="输入 JSON Schema">
+                            <EditableTextArea rows={7} value={JSON.stringify(derivedInputSchema, null, 2)}
+                              onSave={(v) => {
+                                try { updateCapabilityField(idx, "input_schema", JSON.parse(v || "{}")); }
+                                catch (e: any) { message.error(e?.message || "输入 Schema 不是合法 JSON"); }
+                              }} />
+                          </FieldControl>
+                          <FieldControl label="输出 JSON Schema">
+                            <EditableTextArea rows={7} value={JSON.stringify(derivedOutputSchema, null, 2)}
+                              onSave={(v) => {
+                                try { updateCapabilityField(idx, "output_schema", JSON.parse(v || "{}")); }
+                                catch (e: any) { message.error(e?.message || "输出 Schema 不是合法 JSON"); }
+                              }} />
+                          </FieldControl>
+                        </div>
+                      </Collapse.Panel>
+                    </Collapse>
+                  </Space>
+                </Collapse.Panel>
+              );
+            })}
+          </Collapse>
+        )}
+      </Space>
     );
   }
   function renderCapabilitiesPanel() {
     if (!flowSpec) return null;
     const capabilities = flowSpec.capabilities || [];
     if (!capabilities.length) {
-      return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有业务能力草案" />;
+      return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有业务能力编排" />;
     }
     const schemaBlock = (title: string, schema?: Record<string, any>, emptyText = "未声明") => {
       const rows = schemaFieldRows(schema);
@@ -1644,7 +2047,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         <Alert
           type="info"
           showIcon
-          message="业务能力草案"
+          message="业务能力编排"
           description="这里展示外部调用方看到的能力层；步骤、字段、依赖和候选请求仍在各自面板维护。"
         />
         <List
@@ -1821,19 +2224,42 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         </Space>
         {addingStep && (
           <Card size="small" title="新增步骤">
-            <Space wrap>
-              <NativeSelect value={newStep.method} width={110} options={["GET", "POST", "PUT", "PATCH", "DELETE"].map((x) => ({ label: x, value: x }))}
-                onChange={(v) => setNewStep((s) => ({ ...s, method: v }))} />
-              <Input placeholder="/api/path" value={newStep.path} style={{ width: 260 }}
-                onChange={(e) => setNewStep((s) => ({ ...s, path: e.target.value }))} />
-              <Input placeholder="步骤名" value={newStep.name} style={{ width: 180 }}
-                onChange={(e) => setNewStep((s) => ({ ...s, name: e.target.value }))} />
-              <NativeSelect value={newStep.role} width={160} options={STEP_ROLE_OPTIONS}
-                onChange={(v) => setNewStep((s) => ({ ...s, role: v }))} />
-              <NativeSelect value={newStep.risk_level} width={90} options={RISK_OPTIONS}
-                onChange={(v) => setNewStep((s) => ({ ...s, risk_level: v }))} />
-              <Button type="primary" onClick={addStep}>保存</Button>
-              <Button onClick={() => setAddingStep(false)}>取消</Button>
+            <Space direction="vertical" size={10} style={{ width: "100%" }}>
+              <Space wrap>
+                <Typography.Text strong style={{ fontSize: 12 }}>从捕获接口选择</Typography.Text>
+                <Select
+                  allowClear
+                  showSearch
+                  placeholder="选择已捕获的接口"
+                  notFoundContent="没有可添加的捕获接口"
+                  style={{ minWidth: 520 }}
+                  value={newStepRequestKey || undefined}
+                  optionFilterProp="label"
+                  options={allCapturedRequests(flowSpec).map((req) => ({
+                    label: `${req.method || "GET"} ${req.path || stripHost(req.url || "")}`,
+                    value: requestOptionValue(req),
+                  })).filter((x) => x.value)}
+                  onChange={(v) => setNewStepRequestKey(v || "")}
+                />
+                <Button type="primary" onClick={addStep} disabled={!newStepRequestKey && !newStep.path.trim()}>添加</Button>
+                <Button onClick={() => { setAddingStep(false); setNewStepRequestKey(""); }}>取消</Button>
+              </Space>
+              <Collapse ghost size="small">
+                <Collapse.Panel key="manual" header="手工新增接口">
+                  <Space wrap>
+                    <NativeSelect value={newStep.method} width={110} options={["GET", "POST", "PUT", "PATCH", "DELETE"].map((x) => ({ label: x, value: x }))}
+                      onChange={(v) => setNewStep((s) => ({ ...s, method: v }))} />
+                    <Input placeholder="/api/path" value={newStep.path} style={{ width: 260 }}
+                      onChange={(e) => setNewStep((s) => ({ ...s, path: e.target.value }))} />
+                    <Input placeholder="步骤名" value={newStep.name} style={{ width: 180 }}
+                      onChange={(e) => setNewStep((s) => ({ ...s, name: e.target.value }))} />
+                    <NativeSelect value={newStep.role} width={160} options={STEP_ROLE_OPTIONS}
+                      onChange={(v) => setNewStep((s) => ({ ...s, role: v }))} />
+                    <NativeSelect value={newStep.risk_level} width={90} options={RISK_OPTIONS}
+                      onChange={(v) => setNewStep((s) => ({ ...s, risk_level: v }))} />
+                  </Space>
+                </Collapse.Panel>
+              </Collapse>
             </Space>
           </Card>
         )}
@@ -1916,8 +2342,26 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function renderParamsPanel() {
     if (!flowSpec) return null;
+    const fieldRequestOptions = capturedRequestOptions(flowSpec);
     return (
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <Card size="small" title="从捕获接口添加字段">
+          <Space wrap>
+            <NativeSelect
+              value={newParamRequestKey || ""}
+              width={520}
+              options={[{ label: fieldRequestOptions.length ? "选择未纳入字段页的接口" : "没有可添加的捕获接口", value: "" }, ...fieldRequestOptions]}
+              onChange={(v) => setNewParamRequestKey(v || "")}
+            />
+            <Button
+              type="primary"
+              disabled={!newParamRequestKey}
+              onClick={() => addCapturedRequestToFields(findCapturedRequest(flowSpec, newParamRequestKey))}
+            >
+              加入字段页
+            </Button>
+          </Space>
+        </Card>
         <Card size="small" title="新增字段">
           <Space wrap>
             <NativeSelect value={newParam.step_id || ""} width={320}
@@ -1949,8 +2393,36 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   <Tag>{step.params?.length || 0} 字段</Tag>
                 </Space>
               }
+              extra={
+                <Button
+                  size="small"
+                  danger
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    send({ type: "flow_update", edits: [{ op: "remove_step", step_id: step.step_id }] });
+                  }}
+                >
+                  删除接口
+                </Button>
+              }
             >
-            {(step.params || []).length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="这个步骤还没有字段" /> : (
+            {(step.params || []).length === 0 ? (
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="这个接口没有请求入参" />
+                {step.response_json != null && (
+                  <Card size="small" title="响应字段">
+                    <Space wrap size={4}>
+                      {leafPathValues(step.response_json).slice(0, 40).map((leaf) => (
+                        <Tooltip key={leaf.path} title={leaf.value}>
+                          <Typography.Text code style={{ fontSize: 12 }}>{leaf.path}</Typography.Text>
+                        </Tooltip>
+                      ))}
+                      {leafPathValues(step.response_json).length > 40 && <Tag>+{leafPathValues(step.response_json).length - 40}</Tag>}
+                    </Space>
+                  </Card>
+                )}
+              </Space>
+            ) : (
               <List
                 size="small"
                 dataSource={step.params}
@@ -1992,9 +2464,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                               <Tag>{optionLabel(SOURCE_KIND_OPTIONS, normalizeSourceKindForUi(p.source_kind) || "unknown")}</Tag>
                               {linked && <Tag color="cyan">依赖字段</Tag>}
                               {isApiOption && <Tag color="geekblue">接口候选</Tag>}
-                              {p.source_kind === "page_enum" && <Tag color="purple">页面枚举</Tag>}
-                              {p.source_kind === "manual_enum" && <Tag color="purple">手工枚举</Tag>}
-                              {(p.source_kind === "static_enum" || p.source_kind === "form_option") && enumOptions.length > 0 && <Tag color="purple">固定枚举</Tag>}
+                              {isEnumOption && enumOptions.length > 0 && <Tag color="purple">枚举</Tag>}
                               {needsManualConfirm && <Tag color="warning">待确认</Tag>}
                               <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.reason}</Typography.Text>
                             </Space>
@@ -2098,9 +2568,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                                   </FieldControl>
                                   <FieldControl label="配对 ID 字段">
                                     <EditableComboInput
-                                      value={selectBinding?.id_path || ""}
+                                      value={selectBinding?.id_path || p.path}
                                       options={(step.params || []).map((x) => ({ label: `${x.path} · ${x.key}`, value: x.path }))}
-                                      placeholder="可选，如 yyxtid"
+                                      placeholder="默认当前字段路径，可改为隐藏 ID 字段"
                                       onSave={(v) => upsertSelectBinding(step, p, { id_path: v || null })}
                                     />
                                   </FieldControl>
@@ -2170,57 +2640,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             )}
             </Collapse.Panel>
           ))}
-        </Collapse>
-      </Space>
-    );
-  }
-  function renderRequestGraphPanel() {
-    if (!flowSpec) return null;
-    const graph = flowSpec.meta?.request_graph || {};
-    const candidates = visibleCandidateReads(flowSpec);
-    const selected = graph.selected_steps || [];
-    const requestRow = (req: RequestGraphEntry, actions?: ReactNode[]) => (
-      <List.Item actions={actions} style={{ paddingLeft: 0, paddingRight: 0 }}>
-        <Space direction="vertical" size={4} style={{ width: "100%" }}>
-          <Space wrap>
-            <Tag color={(req.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{req.method || "GET"}</Tag>
-            <PathText value={req.path || stripHost(req.url || "")} maxWidth={520} />
-            {req.role && <Tag>{req.role}</Tag>}
-            {typeof req.confidence === "number" && <Tag>{Math.round(req.confidence * 100)}%</Tag>}
-            {req.response_status != null && <Tag>{req.response_status}</Tag>}
-          </Space>
-          {req.reason && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{req.reason}</Typography.Text>}
-          {req.response_json != null && (
-            <Space wrap size={4}>
-              {leafPathValues(req.response_json).slice(0, 8).map((leaf) => (
-                <Typography.Text key={`${req.request_index}-${leaf.path}`} code style={{ fontSize: 12 }}>
-                  {leaf.path}
-                </Typography.Text>
-              ))}
-            </Space>
-          )}
-        </Space>
-      </List.Item>
-    );
-    return (
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <Card size="small" title={`已纳入步骤 ${selected.length}`}>
-          {!selected.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有已纳入请求" /> : (
-            <List size="small" dataSource={selected} renderItem={(req) => requestRow(req)} />
-          )}
-        </Card>
-        <Collapse bordered={false} defaultActiveKey={[]}>
-          <Collapse.Panel header={`可加入的候选读接口 ${candidates.length}`} key="candidates">
-            {!candidates.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有候选读接口" /> : (
-              <List
-                size="small"
-                dataSource={candidates}
-                renderItem={(req) => requestRow(req, [
-                  <Button key="add" size="small" type="primary" onClick={() => promoteCandidateRead(req)}>加入步骤</Button>,
-                ])}
-              />
-            )}
-          </Collapse.Panel>
         </Collapse>
       </Space>
     );
@@ -2313,7 +2732,18 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!flowSpec) return null;
     return (
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <FieldControl label="流程标题">
+        <Alert
+          type="info"
+          showIcon
+          message="最终整体说明"
+          description="这里维护发布 Skill 时给调用方理解整体能力、输入输出和执行边界的说明，不是单个步骤说明。"
+        />
+        <Space wrap>
+          <Button icon={<FileTextOutlined />} type="primary" loading={descBusy} onClick={() => { setDescBusy(true); send({ type: "business_description" }); }}>
+            {flowSpec.business_description ? "重新生成整体说明" : "生成整体说明"}
+          </Button>
+        </Space>
+        <FieldControl label="最终标题">
           <Input value={titleDraft}
             onChange={(e) => setTitleDraft(e.target.value)}
             onBlur={(e) => {
@@ -2331,7 +2761,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               updateFlowField("business_description", e.target.value);
             }
           }}
-          placeholder="生成或手写业务说明" />
+          placeholder="生成或手写最终整体说明：包含这个 Skill 能做什么、调用方需要传什么、Skill 会执行哪些查询/提交、最终返回什么。" />
       </Space>
     );
   }
@@ -2396,29 +2826,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               autoComplete="off" aria-hidden="true"
               style={{ position: "absolute", left: 0, top: 0, width: 1, height: 1, opacity: 0, border: 0, padding: 0 }} />
           </div>
-
-          {fields.length > 0 && flowSpec && (
-            <Card type="inner" size="small" style={{ marginTop: 12, borderColor: "#52c41a" }}>
-              <Row gutter={[12, 8]} align="middle">
-                <Col flex="auto">
-                  <Space wrap>
-                    <CheckCircleOutlined />
-                    <Typography.Text strong>已抓到提交请求</Typography.Text>
-                    {reqMeta && <Typography.Text code>{reqMeta.method} {stripHost(reqMeta.url)}</Typography.Text>}
-                    <Tag color="blue">已生成 FlowSpec</Tag>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      字段、依赖和确认项请在下方工作台编辑。
-                    </Typography.Text>
-                  </Space>
-                </Col>
-                <Col>
-                  <Space wrap>
-                    <Button loading={phase === "publishing"} onClick={finalize}>重新抓取</Button>
-                  </Space>
-                </Col>
-              </Row>
-            </Card>
-          )}
 
           {fields.length > 0 && !flowSpec && (
             <Alert

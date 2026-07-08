@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import unittest
 
 from dano.execution.page.flow_spec import (
@@ -16,6 +17,7 @@ from dano.execution.page.flow_spec import (
     flow_spec_to_client,
     flow_spec_to_summary,
     llm_field_name_candidates,
+    orchestrate_flow_capabilities,
     render_business_description,
     to_flow_spec,
     validate_flow_spec,
@@ -272,7 +274,10 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertEqual(s["capability_count"], len(spec.capabilities))
         self.assertEqual(s["risk_level"], "L3")
         self.assertEqual(s["schema_version"], 1)
-        self.assertIn("submit_batch", {c["kind"] for c in s["capabilities"]})
+        self.assertEqual(s["capabilities"], [])
+
+        orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=None, model=None))
+        self.assertIn("submit_batch", {c.kind for c in orchestrated.capabilities})
         st_sum = s["steps"][0]
         self.assertIn("step_id", st_sum)
         self.assertNotIn("params", st_sum)  # 轻量摘要不含 params
@@ -527,18 +532,18 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertGreaterEqual(len(graph.get("selected_steps") or []), 2)
         self.assertTrue(any("/system/user/page" in (r.get("path") or "") for r in graph.get("candidate_reads") or []))
 
-        cap_kinds = {c.kind for c in spec.capabilities}
-        self.assertIn("submit_batch", cap_kinds)
-        self.assertIn("query_status", cap_kinds)
-        self.assertIn("list_options", cap_kinds)
-        list_cap = next(c for c in spec.capabilities if c.kind == "list_options")
-        self.assertTrue(any(e.get("role") == "read_option" for e in list_cap.evidence))
-        self.assertTrue(list_cap.requires_human_confirm)
+        self.assertEqual(spec.capabilities, [])
+        orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=None, model=None))
+        cap_kinds = {c.kind for c in orchestrated.capabilities}
+        self.assertEqual(cap_kinds, {"submit_batch"})
+        submit_cap = orchestrated.capabilities[0]
+        self.assertTrue(any("/get-approval-detail" in s.path for s in orchestrated.steps if s.step_id in submit_cap.step_ids))
+        self.assertTrue(any("/submit-process" in s.path for s in orchestrated.steps if s.step_id in submit_cap.step_ids))
 
-        client = flow_spec_to_client(spec)
+        client = flow_spec_to_client(orchestrated)
         self.assertIn("capabilities", client)
-        self.assertIn("list_options", {c["kind"] for c in client["capabilities"]})
-        apir, errors = flow_spec_to_api_request(spec)
+        self.assertEqual({c["kind"] for c in client["capabilities"]}, {"submit_batch"})
+        apir, errors = flow_spec_to_api_request(orchestrated)
         self.assertEqual(errors, [])
         self.assertIn("capabilities", apir)
         self.assertTrue(all(s.get("step_id") for s in apir["steps"]))
@@ -562,6 +567,64 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertTrue(any("Capability `submit_batch` 指向不存在的步骤" in e for e in report["errors"]))
         self.assertIn("capability_preview", report)
+
+    def test_capability_step_can_reference_captured_request_without_duplicates(self):
+        spec = FlowSpec(
+            flow_id="cap-add-request",
+            capabilities=[FlowCapability(name="query_status", kind="query_status", confirmed=False)],
+            meta={"request_graph": {"all_requests": [{
+                "request_index": 89,
+                "request_id": "req-89",
+                "method": "GET",
+                "url": "https://oa.example.com/api/work-days?start=2026-05-01",
+                "path": "/api/work-days?start=2026-05-01",
+                "role": "business_get",
+                "keep": True,
+                "confidence": 0.96,
+                "response_status": 200,
+                "response_json": {"code": 0, "data": {"missing_dates": ["2026-05-12"]}},
+            }]}},
+        )
+
+        edited = apply_flow_edits(spec, [{
+            "op": "add_capability_step",
+            "capability_name": "query_status",
+            "request_index": 89,
+        }])
+        edited_again = apply_flow_edits(edited, [{
+            "op": "add_capability_step",
+            "capability_name": "query_status",
+            "request_index": 89,
+        }])
+
+        self.assertEqual(len(edited_again.steps), 1)
+        self.assertEqual(edited_again.capabilities[0].step_ids, [edited_again.steps[0].step_id])
+        graph = edited_again.meta.get("request_graph") or {}
+        self.assertEqual(len(graph.get("selected_steps") or []), 1)
+
+    def test_orchestrate_flow_merges_existing_capabilities(self):
+        spec = FlowSpec(
+            flow_id="cap-merge",
+            steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
+            capabilities=[FlowCapability(
+                name="submit_batch",
+                title="人工改过的标题",
+                kind="submit_batch",
+                step_ids=[],
+                input_schema={"type": "object"},
+                confirmed=True,
+                requires_human_confirm=False,
+                confidence=0.3,
+            )],
+        )
+
+        out = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=None, model=None))
+
+        cap = next(c for c in out.capabilities if c.name == "submit_batch")
+        self.assertEqual(cap.title, "人工改过的标题")
+        self.assertTrue(cap.confirmed)
+        self.assertIn("submit", cap.step_ids)
+        self.assertGreaterEqual(cap.confidence, 0.3)
 
     def test_nested_detail_row_select_pair_uses_captured_read_options(self):
         """captured_requests 里的候选读接口应能绑定明细行内 name/id 字段，且不折叠整行。"""
