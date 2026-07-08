@@ -291,17 +291,27 @@
   }
 
   .center-column.empty-conversation {
-    justify-content: center;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr);
   }
 
   .empty-conversation :global(.chat-transcript) {
+    grid-row: 1;
+    align-self: end;
     flex: 0 0 auto;
+    margin-bottom: 1.5rem;
     overflow: visible;
     padding: 0;
   }
 
   .empty-conversation :global(.chat-transcript .empty-state) {
     flex: 0 0 auto;
+  }
+
+  .center-column.empty-conversation :global(.composer-bar) {
+    grid-row: 2;
+    padding-top: 0;
+    padding-bottom: 0;
   }
 
   .queued-messages-strip {
