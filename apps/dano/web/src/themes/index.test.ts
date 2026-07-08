@@ -36,6 +36,14 @@ describe("resolveAppThemeVars", () => {
     expect(lightVars["--accent"]).toBe("#53b559");
   });
 
+  it("uses one white send-button icon token across theme modes", () => {
+    const darkVars = resolveAppThemeVars(PI_BASE46_DARK_THEME);
+    const lightVars = resolveAppThemeVars(PI_BASE46_LIGHT_THEME);
+
+    expect(darkVars["--send-button-icon"]).toBe("#ffffff");
+    expect(lightVars["--send-button-icon"]).toBe("#ffffff");
+  });
+
   it("derives hover and dock colors from base theme tokens", () => {
     const darkVars = resolveAppThemeVars(PI_BASE46_DARK_THEME);
     const lightVars = resolveAppThemeVars(PI_BASE46_LIGHT_THEME);

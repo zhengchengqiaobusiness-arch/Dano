@@ -204,6 +204,7 @@ export function resolveAppThemeVars(
     "--text-subtle": base30.grey_fg2,
     "--accent": base16.base0D,
     "--accent-hover": base16.base0D,
+    "--send-button-icon": "#ffffff",
     "--success": base16.base0B,
     "--warning": base16.base0A,
     "--danger": base16.base08,
