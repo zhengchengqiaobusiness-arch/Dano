@@ -84,6 +84,7 @@ interface FlowLinkData {
 interface FlowCapabilityData {
   name?: string; title?: string; intent?: string; kind?: string;
   step_ids?: string[];
+  nodes?: Array<Record<string, any>>;
   input_schema?: Record<string, any>;
   output_schema?: Record<string, any>;
   output_mapping?: Array<Record<string, any>>;
@@ -91,6 +92,7 @@ interface FlowCapabilityData {
   confirmed?: boolean; confidence?: number; requires_human_confirm?: boolean;
   evidence?: Array<Record<string, any>>;
   caller_responsibilities?: string[]; skill_responsibilities?: string[];
+  status?: string; locked?: boolean; updated_by?: string;
 }
 interface ReviewItemData {
   id: string; type: string; severity: string; title: string; reason: string;
@@ -110,7 +112,9 @@ interface RequestRoleData {
 interface RequestGraphEntry {
   request_index?: number | string | null; request_id?: string; method?: string; url?: string; path?: string; role?: string;
   keep?: boolean; reason?: string; confidence?: number; response_status?: number | null;
-  response_json?: any; evidence?: any;
+  response_json?: any; response_schema?: any; evidence?: any;
+  page_id?: string | null; frame_id?: string | null; sequence?: number | string | null;
+  state?: string; materialized_step_id?: string;
 }
 interface FlowSpecData {
   flow_id: string; title: string; business_description?: string;
@@ -138,6 +142,14 @@ interface FlowCheckReport {
   review_items?: ReviewItemData[];
   review_summary?: { total?: number; high?: number; medium?: number; low?: number };
   api_preview?: { workflow_steps?: number; method?: string; path?: string; params?: string[]; required?: string[] };
+  capability_preview?: Array<Record<string, any>>;
+  capability_validation?: {
+    passed?: boolean; errors?: string[]; warnings?: string[];
+    capabilities?: Array<Record<string, any>>;
+    checked_requests?: Array<Record<string, any>>;
+    checked_manual_requests?: Array<Record<string, any>>;
+    unused_high_confidence_requests?: Array<Record<string, any>>;
+  };
 }
 interface RecResult {
   ok?: boolean; action?: string; risk_level?: string; mode?: string; reason?: string;
@@ -603,7 +615,7 @@ function allCapturedRequests(spec?: FlowSpecData | null) {
   return source
     .filter(isApiLikeRequest)
     .filter((req) => {
-      const key = requestGraphSignature(req);
+      const key = requestGraphKey(req);
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -788,6 +800,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [descBusy, setDescBusy] = useState(false);
   const [llmBusy, setLlmBusy] = useState(false);
   const [orchestrateBusy, setOrchestrateBusy] = useState(false);
+  const [autoFixBusy, setAutoFixBusy] = useState(false);
   const [activeFlowTab, setActiveFlowTab] = useState("abilities");
 
   useEffect(() => () => {
@@ -961,7 +974,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         message.success("抓到提交请求，请核对字段和流程");
       }
       else if (m.type === "flow_spec" || m.type === "flow_spec_updated") {
-        setLlmBusy(false); setOrchestrateBusy(false);
+        setLlmBusy(false); setOrchestrateBusy(false); setAutoFixBusy(false);
         const fs = m.full_spec || m.flow_spec;
         if (fs) {
           setFlowSpec(fs);
@@ -995,7 +1008,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
       else if (m.type === "error") {
         const detail = m.detail || "录制出错";
-        setNamingBusy(false); setDescBusy(false); setLlmBusy(false); setOrchestrateBusy(false);
+        setNamingBusy(false); setDescBusy(false); setLlmBusy(false); setOrchestrateBusy(false); setAutoFixBusy(false);
         if (detail.includes("step not found") || detail.includes("link not found")) {
           message.warning("流程已变更，正在同步最新版本");
           send({ type: "refresh_flow_spec" });
@@ -1474,6 +1487,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setOrchestrateBusy(true);
     send({ type: "orchestrate_flow" });
   }
+  function autoFixFlow() {
+    if (!flowSpec) return;
+    setAutoFixBusy(true);
+    send({ type: "auto_fix_flow" });
+  }
   function addCapability() {
     const idx = (flowSpec?.capabilities?.length || 0) + 1;
     send({ type: "flow_update", edits: [{
@@ -1761,6 +1779,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         extra={
           <Space wrap>
+            <Button size="small" loading={autoFixBusy} onClick={autoFixFlow}>一键修正</Button>
             <Button size="small" loading={phase === "publishing"} onClick={finalize}>重新抓取</Button>
             <Button size="small" type="primary" loading={phase === "publishing"} onClick={publishRequest}>发布当前流程</Button>
           </Space>
@@ -1877,6 +1896,22 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <Button icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
           <Button icon={<RobotOutlined />} loading={namingBusy} onClick={() => { setNamingBusy(true); send({ type: "step_naming" }); }}>命名步骤</Button>
         </Space>
+        {checkReport && !checkReport.passed && (
+          <Alert
+            showIcon
+            type="warning"
+            message="当前流程发布前需要处理"
+            description={
+              <Space direction="vertical" size={4}>
+                {(checkReport.errors || []).slice(0, 6).map((x, i) =>
+                  <Typography.Text key={i} type="danger" style={{ fontSize: 12 }}>{x}</Typography.Text>)}
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  生成/优化编排只负责规划能力结构；一键修正请使用右上角统一入口，它会按当前问题自动补齐字段、依赖和接口闭包。
+                </Typography.Text>
+              </Space>
+            }
+          />
+        )}
         {!capabilities.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有能力编排" /> : (
           <Collapse size="small">
             {capabilities.map((cap, idx) => {

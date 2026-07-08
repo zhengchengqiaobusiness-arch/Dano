@@ -1,11 +1,14 @@
 """Step B · FlowSpec 字段/link/step 编辑测试。"""
 
+import asyncio
+
 import pytest
 
 from dano.execution.page.flow_spec import (
-    FlowSpec, FlowStep, FlowLink, ParamField, SelectBinding,
+    FlowSpec, FlowStep, FlowLink, ParamField, SelectBinding, FlowCapability,
     apply_flow_edits, validate_flow_spec, _infer_type_from_value,
     add_llm_review_recommendations, refresh_review_items, flow_spec_to_api_request,
+    auto_fix_flow_spec,
 )
 
 
@@ -27,6 +30,7 @@ def test_edit_key():
     assert spec.steps[0].params[0].key == "userId"
     assert new.steps[0].params[0].key == "newUserId"
     assert new.steps[0].params[0].name_source == "manual"
+    assert new.steps[0].params[0].locked is True
     assert new.meta["current_version"] == 1
     assert new.meta["versions"][0]["action"] == "flow_edit"
 
@@ -455,14 +459,239 @@ def test_add_candidate_step_promotes_request_graph_entry():
     new = apply_flow_edits(spec, [{"op": "add_candidate_step", "request_index": 7}])
 
     assert len(new.steps) == 2
-    promoted = new.steps[1]
+    promoted = new.steps[0]
     assert promoted.method == "GET"
     assert promoted.path == "/gsgl/xm/getProjectInfosByBt?keyword=abc"
     assert [p.path for p in promoted.params] == ["query.keyword"]
     assert promoted.source_meta["manual_added"] is True
+    assert new.steps[1].step_id == "write"
     graph = new.meta["request_graph"]
     assert graph["candidate_reads"] == []
     assert graph["selected_steps"][0]["request_index"] == 7
+    assert graph["selected_steps"][0]["state"] == "materialized"
+    assert graph["selected_steps"][0]["materialized_step_id"] == promoted.step_id
+
+
+def test_promoted_read_is_ordered_before_write_and_rebuilds_dependency():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(
+            step_id="write",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            content_type="application/json",
+            body_source='[{"sbrq":"2026-05-12"}]',
+            source_meta={"request_index": 20, "sequence": 20},
+            params=[ParamField(
+                path="[0].sbrq",
+                key="startDate",
+                value="2026-05-12",
+                type="date",
+                required=True,
+                category="user_param",
+                source_kind="user_input",
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            kind="submit_batch",
+            step_ids=["write"],
+            nodes=[{"id": "call_1", "type": "call", "step_id": "write"}],
+            confirmed=True,
+            requires_human_confirm=False,
+        )],
+        meta={"request_graph": {"all_requests": [{
+            "request_index": 10,
+            "request_id": "req-date",
+            "sequence": 10,
+            "method": "GET",
+            "url": "https://oa.example.com/api/missing-days?start=2026-05-01",
+            "path": "/api/missing-days?start=2026-05-01",
+            "role": "business_get",
+            "confidence": 0.96,
+            "response_status": 200,
+            "response_json": {"code": 0, "data": {"startDate": "2026-05-12", "missingDates": ["2026-05-12"]}},
+        }]}}
+    )
+
+    new = apply_flow_edits(spec, [{
+        "op": "add_capability_step",
+        "capability_name": "submit_batch",
+        "request_id": "req-date",
+    }])
+
+    assert [s.method for s in new.steps] == ["GET", "POST"]
+    assert new.capabilities[0].step_ids == [new.steps[0].step_id, "write"]
+    assert [n["step_id"] for n in new.capabilities[0].nodes if n.get("type") == "call"] == [new.steps[0].step_id, "write"]
+    assert len(new.links) == 1
+    link = new.links[0]
+    assert link.source_step_id == new.steps[0].step_id
+    assert link.target_step_id == "write"
+    assert link.source_path == "data.startDate"
+    assert link.target_path == "[0].sbrq"
+    param = new.steps[1].params[0]
+    assert param.source_kind == "previous_response"
+    assert param.source["step_id"] == new.steps[0].step_id
+
+    cap_report = validate_flow_spec(new)["capability_validation"]
+    assert cap_report["checked_manual_requests"]
+    assert cap_report["checked_manual_requests"][0]["step_id"] == new.steps[0].step_id
+
+
+def test_auto_fix_promotes_high_confidence_request_into_capability_closure():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(
+            step_id="write",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            content_type="application/json",
+            body_source='{"date":"2026-05-12"}',
+            source_meta={"request_index": 20, "sequence": 20},
+            params=[ParamField(path="date", key="date", value="2026-05-12", type="date", required=True)],
+        )],
+        meta={"request_graph": {"all_requests": [{
+            "request_index": 10,
+            "request_id": "req-date",
+            "sequence": 10,
+            "method": "GET",
+            "url": "https://oa.example.com/api/missing-days?start=2026-05-01",
+            "path": "/api/missing-days?start=2026-05-01",
+            "role": "business_get",
+            "confidence": 0.96,
+            "response_status": 200,
+            "response_json": {"code": 0, "data": {"startDate": "2026-05-12"}},
+        }]}}
+    )
+
+    fixed = asyncio.run(auto_fix_flow_spec(spec, llm_client=None, max_rounds=2))
+
+    assert len(fixed.steps) == 2
+    assert fixed.steps[0].source_meta["request_id"] == "req-date"
+    assert fixed.capabilities
+    assert fixed.steps[0].step_id in fixed.capabilities[0].step_ids
+    assert "auto_fix_history" in fixed.meta
+
+
+def test_high_confidence_duplicate_path_is_treated_as_already_covered():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(
+            step_id="read1",
+            method="GET",
+            url="/api/detail?id=1",
+            path="/api/detail",
+            source_meta={"request_id": "req-1"},
+        )],
+        meta={"request_graph": {"all_requests": [
+            {
+                "request_index": 1,
+                "request_id": "req-1",
+                "method": "GET",
+                "url": "https://oa.example.com/api/detail?id=1",
+                "path": "/api/detail",
+                "role": "business_get",
+                "confidence": 0.96,
+            },
+            {
+                "request_index": 2,
+                "request_id": "req-2",
+                "method": "GET",
+                "url": "https://oa.example.com/api/detail?id=2",
+                "path": "/api/detail",
+                "role": "business_get",
+                "confidence": 0.96,
+            },
+        ]}},
+    )
+
+    cap_report = validate_flow_spec(spec)["capability_validation"]
+
+    assert cap_report["unused_high_confidence_requests"] == []
+
+
+def test_capability_validation_drops_stale_missing_node_step():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(step_id="query", method="GET", url="/api/query", path="/api/query")],
+        capabilities=[FlowCapability(
+            name="query_status",
+            kind="query_status",
+            step_ids=["query", "stale-request-id"],
+            nodes=[{"id": "bad_call", "type": "call", "step_id": "missing"}],
+            confirmed=True,
+            requires_human_confirm=False,
+        )],
+    )
+
+    report = validate_flow_spec(spec)
+
+    assert not any("missing" in x or "stale-request-id" in x for x in report["errors"])
+    assert not any("未绑定有效接口步骤" in x for x in report["errors"])
+
+
+def test_generate_capabilities_edit_is_incremental():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            title="人工确认标题",
+            kind="submit_batch",
+            step_ids=[],
+            nodes=[],
+            confirmed=True,
+            requires_human_confirm=False,
+            locked=True,
+            status="confirmed",
+            updated_by="user",
+            confidence=0.2,
+        )],
+    )
+
+    new = apply_flow_edits(spec, [{"op": "generate_capabilities"}])
+
+    cap = new.capabilities[0]
+    assert cap.title == "人工确认标题"
+    assert cap.confirmed is True
+    assert cap.locked is True
+    assert cap.status == "confirmed"
+    assert cap.updated_by == "user"
+    assert cap.step_ids == ["submit"]
+    assert any(n.get("type") == "call" and n.get("step_id") == "submit" for n in cap.nodes)
+
+
+def test_batch_capability_exports_execution_contract_and_entries_schema():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            content_type="application/json",
+            body_source='[{"date":"2026-05-12","content":"x"}]',
+            params=[
+                ParamField(path="[0].date", key="date", value="2026-05-12", type="date", required=True),
+                ParamField(path="[0].content", key="content", value="x", type="string", required=True),
+            ],
+        )],
+    )
+    spec = apply_flow_edits(spec, [{"op": "generate_capabilities"}])
+
+    api_request, errors = flow_spec_to_api_request(spec)
+
+    assert errors == []
+    cap = api_request["capabilities"][0]
+    assert cap["kind"] == "submit_batch"
+    assert cap["execution_contract"]["protocol"] == "dano.capability_plan.v1"
+    assert cap["execution_contract"]["batch"]["enabled"] is True
+    assert cap["execution_contract"]["batch"]["items_field"] == "entries"
+    assert "entries" in cap["input_schema"]["properties"]
+    assert any(n.get("type") == "foreach" for n in cap["workflow_nodes"])
+    assert api_request["capability_protocol"] == "dano.capability_plan.v1"
 
 
 def test_add_candidate_step_is_idempotent_when_request_already_exists():

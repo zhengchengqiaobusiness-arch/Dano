@@ -282,6 +282,16 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertIn("step_id", st_sum)
         self.assertNotIn("params", st_sum)  # 轻量摘要不含 params
 
+    def test_recorded_goal_is_generated_from_recording(self):
+        captured = [_post("https://oa/api/submit", {"date": "2026-05-12", "content": "日报"}, resp={"code": 200})]
+        spec = to_flow_spec(captured, samples={"date": "2026-05-12", "content": "日报"})
+
+        self.assertTrue(spec.goal)
+        self.assertIn("intent", spec.goal)
+        self.assertIn("success_criteria", spec.goal)
+        self.assertIn("forbidden_actions", spec.goal)
+        self.assertIn("submit", spec.goal.get("capabilities") or [])
+
     def test_summary_json_serializable(self):
         spec = to_flow_spec([_post("https://oa/api/submit", {"a": 1}, resp={"code": 200})])
         s = json.dumps(flow_spec_to_summary(spec), ensure_ascii=False)
@@ -549,14 +559,15 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertTrue(all(s.get("step_id") for s in apir["steps"]))
         self.assertIn("submit_batch", {c["kind"] for c in apir["capabilities"]})
 
-    def test_capability_validate_gate_blocks_confirmed_missing_step(self):
+    def test_capability_validate_gate_sanitizes_stale_missing_step(self):
         spec = FlowSpec(
             flow_id="cap-gate",
             steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
             capabilities=[FlowCapability(
                 name="submit_batch",
                 kind="submit_batch",
-                step_ids=["missing"],
+                step_ids=["submit", "missing"],
+                nodes=[{"id": "call_missing", "type": "call", "step_id": "missing"}],
                 confirmed=True,
                 requires_human_confirm=False,
             )],
@@ -564,8 +575,7 @@ class GetBusinessStepTest(unittest.TestCase):
 
         report = validate_flow_spec(spec)
 
-        self.assertFalse(report["passed"])
-        self.assertTrue(any("Capability `submit_batch` 指向不存在的步骤" in e for e in report["errors"]))
+        self.assertFalse(any("missing" in e for e in report["errors"]))
         self.assertIn("capability_preview", report)
 
     def test_capability_step_can_reference_captured_request_without_duplicates(self):

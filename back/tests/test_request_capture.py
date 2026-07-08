@@ -1532,6 +1532,43 @@ async def test_execute_api_routes_by_capability_without_running_full_workflow():
     assert submitted["final"]["body"] == {"reason": "日报"}
 
 
+async def test_execute_submit_batch_capability_repeats_entries():
+    wf = {
+        "steps": [{
+            "step_id": "submit",
+            "method": "POST",
+            "url": "http://x/api/submit",
+            "path": "/api/submit",
+            "body_template": {"date": "{{date}}", "content": "{{content}}", "project": "{{project}}"},
+            "params": ["date", "content", "project"],
+        }],
+        "capabilities": [{
+            "name": "submit_batch",
+            "kind": "submit_batch",
+            "step_ids": ["submit"],
+            "execution_contract": {
+                "batch": {"enabled": True, "items_field": "entries", "mode": "repeat_selected_workflow"},
+            },
+        }],
+    }
+
+    out = await execute_api(wf, {
+        "__capability": "submit_batch",
+        "project": "P1",
+        "entries": [
+            {"date": "2026-05-12", "content": "a"},
+            {"date": "2026-05-13", "content": "b"},
+        ],
+    }, send=False)
+
+    assert out["ok"] is True
+    assert out["batch"] is True
+    assert out["total"] == 2
+    assert out["success_count"] == 2
+    assert out["results"][0]["final"]["body"] == {"date": "2026-05-12", "content": "a", "project": "P1"}
+    assert out["results"][1]["final"]["body"] == {"date": "2026-05-13", "content": "b", "project": "P1"}
+
+
 async def test_execute_get_query_template_dry_run():
     """GET 前置接口无 body 也可发布:query_template 负责把参数和页面常量构造成 URL。"""
     apir = {

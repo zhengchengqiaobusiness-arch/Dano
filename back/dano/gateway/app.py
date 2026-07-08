@@ -267,9 +267,7 @@ class OnboardReq(BaseModel):
     business_rules: list[dict] = []   # 人工业务规则(阈值/审批链)→ pi grounding 分支/前置
     holidays: list[str] = []          # 日历源(法定节假日)→ env_profile,运行期注入 business_days
     include_tags: list[str] = []   # 类别白名单(空=全部业务动作;超大 swagger 先圈范围)
-    flows: list[dict] = []         # 写/复合流程声明 [{flow, actions?, test_input}](codegen 主路径用)
-    use_codegen: bool = False      # 默认单一 pi 路径(产声明式 DSL v2);True=已退役 codegen 逃生舱
-    max_read_flows: int | None = None   # 自动生成的只读 adapter 上限(None=全部;大 swagger 建议设小)
+    flows: list[dict] = []         # 写/复合流程声明 [{flow, actions?, test_input}]
 
 
 class PreviewReq(BaseModel):
@@ -457,96 +455,9 @@ async def onboarding(req: OnboardReq) -> dict:
                            deploy=req.deploy, credentials=req.credentials,
                            policy_text=req.policy_text, include_tags=req.include_tags,
                            business_rules=req.business_rules, holidays=req.holidays,
-                           flows=req.flows, use_codegen=req.use_codegen,
-                           max_read_flows=req.max_read_flows, lifecycle=_lifecycle)
+                           flows=req.flows, lifecycle=_lifecycle)
     await _auto_export(req.tenant)
     return report.model_dump()
-
-
-# ── 页面型系统接入(流程8,无 API):确定性侦察→建体→回放→发布,不走 pi/LLM ──
-class PageScoutReq(BaseModel):
-    tenant: str
-    subsystem: str = "A-报销"
-    start_url: str
-    deploy: dict = {}
-    credentials: dict[str, str] = {}
-    headless: bool = True
-
-
-@app.post("/onboarding/page/scout")
-async def onboarding_page_scout(req: PageScoutReq) -> dict:
-    """仅侦察页面:返回候选字段 / 提交按钮 / 建议步骤 / 结构指纹(供向导预览,无副作用)。"""
-    from dano.onboarding.page_onboard import scout_page_only
-    try:
-        return await scout_page_only(
-            tenant=req.tenant, subsystem=req.subsystem, start_url=req.start_url,
-            deploy=req.deploy, credentials=req.credentials, headless=req.headless)
-    except Exception as e:  # noqa: BLE001 —— 浏览器/页面打不开 → 友好报错
-        raise HTTPException(status_code=502, detail=f"侦察页面失败: {e}") from e
-
-
-class PageOnboardReq(BaseModel):
-    tenant: str
-    subsystem: str = "A-报销"
-    start_url: str                       # 表单页地址(绝对 URL,或相对 deploy.base_url)
-    action: str                          # 派生 Skill 名,如 submit_reimburse
-    title: str = ""
-    success_marker: str | None = None    # 成功标志元素/文本(语义定位),如 "text=保存成功"
-    deploy: dict = {}                    # {base_url} 等
-    credentials: dict[str, str] = {}     # 测试登录态(如 {storage_state: <path>})
-    sample_inputs: dict = {}             # 回放用字段测试值
-    headless: bool = True
-    steps: list[dict] = []               # 前端改过字段映射的步骤(空=后端自动侦察)
-    dom_fingerprint: str = ""            # 与 steps 配套的结构指纹(向导从 scout 取)
-
-
-@app.post("/onboarding/page")
-async def onboarding_page(req: PageOnboardReq) -> dict:
-    """页面型系统接入:真实浏览器侦察 + 确定性建体 + 沙箱回放 + 发布闸门。写页面默认 dry 回放 + 需评审。"""
-    from dano.onboarding.page_onboard import run_page_onboarding
-    report = await run_page_onboarding(
-        tenant=req.tenant, subsystem=req.subsystem, start_url=req.start_url, action=req.action,
-        title=req.title, success_marker=req.success_marker, deploy=req.deploy,
-        credentials=req.credentials, sample_inputs=req.sample_inputs, headless=req.headless,
-        steps=req.steps or None, dom_fingerprint=req.dom_fingerprint or None)
-    if report.get("ok"):
-        await _auto_export(req.tenant)
-    return report
-
-
-class PageImportReq(BaseModel):
-    tenant: str
-    subsystem: str = "A-报销"
-    codegen: str                         # Playwright codegen 脚本(Python/JS)
-    action: str
-    title: str = ""
-    success_marker: str | None = None
-    start_url: str = ""                  # 覆盖脚本里的 page.goto(可选)
-    deploy: dict = {}
-    credentials: dict[str, str] = {}
-    sample_inputs: dict = {}             # 覆盖/补充录制里的样例值
-
-
-@app.post("/onboarding/page/import")
-async def onboarding_page_import(req: PageImportReq) -> dict:
-    """方式A:导入 Playwright codegen 录制 → 解析步骤 → 建体 → 回放 → 发布(录制无指纹基线,跳过漂移)。"""
-    from dano.execution.page.codegen_import import parse_playwright_codegen
-    from dano.onboarding.page_onboard import run_page_onboarding
-    steps, parsed_url, samples = parse_playwright_codegen(req.codegen)
-    if not steps:
-        raise HTTPException(status_code=400, detail="未能从录制脚本解析出步骤(请贴 Playwright codegen 的 Python/JS 输出)")
-    start_url = req.start_url or parsed_url
-    if not start_url:
-        raise HTTPException(status_code=400, detail="录制脚本无 page.goto,请填 start_url")
-    sample_inputs = {**samples, **(req.sample_inputs or {})}
-    report = await run_page_onboarding(
-        tenant=req.tenant, subsystem=req.subsystem, start_url=start_url, action=req.action,
-        title=req.title, success_marker=req.success_marker, deploy=req.deploy,
-        credentials=req.credentials, sample_inputs=sample_inputs,
-        steps=[s.model_dump() for s in steps], dom_fingerprint="")
-    if report.get("ok"):
-        await _auto_export(req.tenant)
-    return {**report, "parsed_steps": len(steps), "sample_inputs": sample_inputs}
 
 
 async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict,
@@ -665,6 +576,7 @@ async def record_ws(ws: WebSocket) -> None:
 
         pending_req: dict | None = None       # 抓到的提交请求,等用户勾完字段再发布
         pending_candidates: list[dict] = []    # 所有 JSON 写请求(候选),供用户手选用哪个
+        pending_all_caps: list[dict] = []      # RequestGraph 全量事实,用于无写请求/手选请求重建 FlowSpec
         pending_flow_spec = None               # Step A/B/C/D:可编辑的完整 FlowSpec
         pending_samples: dict = {}             # 录制时填的样例值(选别的请求时重算参数建议)
         pending_reads: list[dict] = []         # 抓到的列表读响应(select 候选源)
@@ -764,6 +676,13 @@ async def record_ws(ws: WebSocket) -> None:
                 cands = [c for c in json_write_requests(all_caps)
                          if flatten_body(c.get("post_data"))                       # 有可勾字段的
                          and not looks_like_auth_write(c.get("url") or "", c.get("post_data"))]  # 排除登录/鉴权写
+                pending_all_caps = list(all_caps or [])
+                pending_candidates = cands
+                pending_samples = samples
+                pending_reads = sess.captured_reads()       # select 候选源(选领导)
+                pending_storage = login_state               # identity 字段识别
+                pending_required = required_labels          # 表单 * 必填
+                pending_page_enum_options = page_enum_options           # 下拉枚举地面真值
                 log.info("record.finalize", captured=len(all_caps), cands=len(cands), steps=len(steps),
                          captured_urls=[((c.get("method") or ""), (c.get("url") or "")[:140]) for c in all_caps][:25])
                 if not cands and not all_caps:
@@ -774,12 +693,6 @@ async def record_ws(ws: WebSocket) -> None:
                                   "若刚重连过会话/浏览器,请在画面里**重新点一次「提交」**(现场还在),然后再发布。"}})
                     continue
                 if cands:
-                    pending_candidates = cands
-                    pending_samples = samples
-                    pending_reads = sess.captured_reads()       # select 候选源(选领导)
-                    pending_storage = login_state               # identity 字段识别
-                    pending_required = required_labels          # 表单 * 必填
-                    pending_page_enum_options = page_enum_options           # 下拉枚举地面真值
                     chosen = pick_submit_request(cands, samples) or cands[-1]
                     pending_req = chosen
                     await ws.send_json(await _request_fields_msg(chosen, cands, samples, pending_reads,
@@ -838,11 +751,41 @@ async def record_ws(ws: WebSocket) -> None:
                                             "parsed_steps": 0})
                     continue
 
-                await ws.send_json({"type": "result",
-                                    "report": {"ok": False,
-                                               "stage": "capture_request",
-                                               "reason": "没有抓到可发布的 JSON 提交请求。请在录制画面里重新点击一次真实提交按钮后再分析。"},
-                                    "parsed_steps": 0})
+                # 录制 V2:没有 JSON 写请求时仍然下发 RequestGraph/GET FlowSpec 工作台，
+                # 让用户可以从已捕获读接口编排 query/list_options 能力。
+                try:
+                    from dano.execution.page.flow_spec import (
+                        flow_spec_to_client,
+                        flow_spec_to_summary,
+                        to_flow_spec,
+                        validate_flow_spec,
+                    )
+                    pending_flow_spec = to_flow_spec(
+                        captured_requests=all_caps,
+                        reads=pending_reads,
+                        samples=pending_samples,
+                        storage_state=pending_storage,
+                        required_labels=pending_required,
+                        page_enum_options=pending_page_enum_options,
+                        recording_mode=recording_mode,
+                        diagnostics=sess.captured_diagnostics(),
+                        tenant=init.get("tenant", ""),
+                        subsystem=init.get("subsystem", ""),
+                    )
+                    await ws.send_json({
+                        "type": "flow_spec",
+                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
+                        "full_spec": flow_spec_to_client(pending_flow_spec),
+                        "check_report": validate_flow_spec(pending_flow_spec),
+                    })
+                except Exception as _fs_err:  # noqa: BLE001
+                    log.warning("flow_spec.read_only_emit_failed", error=str(_fs_err))
+                    await ws.send_json({"type": "result",
+                                        "report": {"ok": False,
+                                                   "stage": "capture_request",
+                                                   "reason": "没有抓到可发布的 JSON 提交请求，且 GET/读请求 FlowSpec 生成失败:"
+                                                             f"{_fs_err}"},
+                                        "parsed_steps": 0})
                 continue
             elif t == "choose_request":
                 # 用户在候选里手选用哪个写请求(噪声误判/多写请求时)→ 重发该请求的字段表
@@ -852,6 +795,40 @@ async def record_ws(ws: WebSocket) -> None:
                     await ws.send_json(await _request_fields_msg(pending_req, pending_candidates, pending_samples,
                                                                  pending_reads, pending_storage, pending_required,
                                                                  pending_page_enum_options))
+                    try:
+                        from dano.execution.page.flow_spec import (
+                            flow_spec_to_client,
+                            flow_spec_to_summary,
+                            to_flow_spec,
+                            validate_flow_spec,
+                        )
+                        # 录制 V2:手选写请求必须同步到 FlowSpec。保留所有非写请求事实，
+                        # 只把写请求候选收敛为当前 chosen，避免发布仍用自动候选。
+                        chosen = pending_req
+                        selected_caps = [
+                            r for r in (pending_all_caps or [])
+                            if r == chosen or r not in pending_candidates
+                        ]
+                        pending_flow_spec = to_flow_spec(
+                            captured_requests=selected_caps,
+                            reads=pending_reads,
+                            samples=pending_samples,
+                            storage_state=pending_storage,
+                            required_labels=pending_required,
+                            page_enum_options=pending_page_enum_options,
+                            recording_mode=recording_mode,
+                            diagnostics=sess.captured_diagnostics(),
+                            tenant=init.get("tenant", ""),
+                            subsystem=init.get("subsystem", ""),
+                        )
+                        await ws.send_json({
+                            "type": "flow_spec_updated",
+                            "flow_spec": flow_spec_to_summary(pending_flow_spec),
+                            "full_spec": flow_spec_to_client(pending_flow_spec),
+                            "check_report": validate_flow_spec(pending_flow_spec),
+                        })
+                    except Exception as e:  # noqa: BLE001
+                        await ws.send_json({"type": "error", "detail": f"choose_request flow_spec failed: {e}"})
             # Step B: 前端编辑 FlowSpec → 应用编辑,返回新 spec
             elif t == "flow_update":
                 if pending_flow_spec is None:
@@ -986,6 +963,32 @@ async def record_ws(ws: WebSocket) -> None:
                     })
                 except Exception as e:  # noqa: BLE001
                     await ws.send_json({"type": "error", "detail": f"orchestrate_flow failed: {e}"})
+            # 一键修正:确定性补齐 + LLM 受限 patch；后端应用后重跑校验。
+            elif t == "auto_fix_flow":
+                if pending_flow_spec is None:
+                    await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
+                    continue
+                try:
+                    from dano.config import get_settings
+                    from dano.execution.page.flow_spec import (
+                        auto_fix_flow_spec,
+                        flow_spec_to_client,
+                        flow_spec_to_summary,
+                        validate_flow_spec,
+                    )
+                    pending_flow_spec = await auto_fix_flow_spec(
+                        pending_flow_spec,
+                        llm_client=_page_semantic_client("complete_json"),
+                        model=get_settings().pi_model,
+                    )
+                    await ws.send_json({
+                        "type": "flow_spec_updated",
+                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
+                        "full_spec": flow_spec_to_client(pending_flow_spec),
+                        "check_report": validate_flow_spec(pending_flow_spec),
+                    })
+                except Exception as e:  # noqa: BLE001
+                    await ws.send_json({"type": "error", "detail": f"auto_fix_flow failed: {e}"})
             # Step D2: LLM 给每个 step 起业务名
             elif t == "step_naming":
                 if pending_flow_spec is None:
@@ -1156,29 +1159,6 @@ async def record_ws(ws: WebSocket) -> None:
             pass
 
 
-class PagePiReq(BaseModel):
-    tenant: str
-    subsystem: str = "A-报销"
-    start_url: str
-    action_hint: str = ""
-    deploy: dict = {}
-    credentials: dict[str, str] = {}
-    timeout_s: float = 600.0
-
-
-@app.post("/onboarding/page/pi")
-async def onboarding_page_pi(req: PagePiReq) -> dict:
-    """pi 自主驱动的页面接入:spawn Node sidecar,pi 按 onboard-page 技能自己侦察→建体→回放→评审→发布。"""
-    from dano.onboarding.page_onboard import run_page_onboarding_pi
-    report = await run_page_onboarding_pi(
-        tenant=req.tenant, subsystem=req.subsystem, start_url=req.start_url,
-        action_hint=req.action_hint, deploy=req.deploy, credentials=req.credentials,
-        timeout_s=req.timeout_s)
-    if report.get("published_skills"):
-        await _auto_export(req.tenant)
-    return report
-
-
 async def _auto_export(tenant: str) -> None:
     """接入后自动导出该租户已上架 skill(无需手动点)。
 
@@ -1217,8 +1197,7 @@ async def onboarding_start(req: OnboardReq) -> dict:
                 tenant=req.tenant, subsystem=req.subsystem, openapi=req.openapi,
                 deploy=req.deploy, credentials=req.credentials, policy_text=req.policy_text,
                 include_tags=req.include_tags, business_rules=req.business_rules, holidays=req.holidays,
-                flows=req.flows, use_codegen=req.use_codegen,
-                max_read_flows=req.max_read_flows, progress=_progress, lifecycle=_lifecycle)
+                flows=req.flows, progress=_progress, lifecycle=_lifecycle)
             job["report"] = rep.model_dump()
             job["status"] = "completed"
             await _auto_export(req.tenant)             # 接入完成即自动导出 skill-creator 包

@@ -2973,6 +2973,25 @@ def _find_capability(api_request: dict, name: str | None) -> dict | None:
     return None
 
 
+def _capability_node_step_ids(cap: dict) -> list[str]:
+    ids: list[str] = []
+
+    def walk(nodes):  # noqa: ANN001
+        for node in nodes or []:
+            if not isinstance(node, dict):
+                continue
+            sid = str(node.get("step_id") or "")
+            if sid and sid not in ids:
+                ids.append(sid)
+            for key in ("steps", "then", "otherwise"):
+                child = node.get(key)
+                if isinstance(child, list):
+                    walk(child)
+
+    walk(cap.get("nodes") or cap.get("workflow_nodes") or [])
+    return ids
+
+
 def _workflow_with_steps(api_request: dict, steps: list[dict], cap: dict) -> dict:
     out = copy.deepcopy(api_request)
     out["steps"] = steps
@@ -2996,6 +3015,53 @@ def _workflow_with_steps(api_request: dict, steps: list[dict], cap: dict) -> dic
     return out
 
 
+def _capability_batch_enabled(cap: dict | None) -> bool:
+    if not cap:
+        return False
+    if (cap.get("kind") or "") != "submit_batch":
+        return False
+    contract = cap.get("execution_contract") if isinstance(cap.get("execution_contract"), dict) else {}
+    batch = contract.get("batch") if isinstance(contract.get("batch"), dict) else {}
+    return bool(batch.get("enabled", True))
+
+
+async def _execute_capability_batch(api_request: dict, fields: dict, *, cap: dict, runner, kw: dict) -> dict:
+    contract = cap.get("execution_contract") if isinstance(cap.get("execution_contract"), dict) else {}
+    batch = contract.get("batch") if isinstance(contract.get("batch"), dict) else {}
+    items_field = str(batch.get("items_field") or "entries")
+    entries = fields.get(items_field)
+    if entries is None and items_field != "items":
+        entries = fields.get("items")
+    if not isinstance(entries, list):
+        return await runner(api_request, fields, **kw)
+
+    base_fields = {k: v for k, v in fields.items() if k not in {items_field, "items", "entries"}}
+    results: list[dict] = []
+    failed_items: list[dict] = []
+    for idx, item in enumerate(entries):
+        if not isinstance(item, dict):
+            failed_items.append({"index": idx, "item": item, "detail": "批量条目必须是对象"})
+            results.append({"ok": False, "index": idx, "detail": "批量条目必须是对象"})
+            continue
+        item_fields = {**base_fields, **item}
+        out = await runner(api_request, item_fields, **kw)
+        out = {**out, "index": idx}
+        results.append(out)
+        if not out.get("ok"):
+            failed_items.append({"index": idx, "item": item, "detail": out.get("detail") or "执行失败", "result": out})
+    return {
+        "ok": not failed_items,
+        "capability": cap.get("name") or cap.get("kind") or "",
+        "batch": True,
+        "total": len(entries),
+        "success_count": len(entries) - len(failed_items),
+        "failed_count": len(failed_items),
+        "failed_items": failed_items,
+        "results": results,
+        "final": results[-1] if results else {},
+    }
+
+
 def _select_api_request_for_capability(api_request: dict, name: str | None) -> tuple[dict | None, dict | None, str]:
     """按 capability 裁剪运行工作流；旧调用不传 capability 时保持完整执行。"""
     cap = _find_capability(api_request, name)
@@ -3008,6 +3074,8 @@ def _select_api_request_for_capability(api_request: dict, name: str | None) -> t
         return api_request, cap, ""
 
     wanted = [str(x) for x in (cap.get("step_ids") or []) if str(x or "").strip()]
+    if not wanted:
+        wanted = _capability_node_step_ids(cap)
     full_steps = list(api_request.get("steps") or [])
     if not full_steps:
         single_id = str(api_request.get("step_id") or "")
@@ -3090,6 +3158,7 @@ async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
     """统一入口:api_request 有 steps → 多步工作流(Q3),否则单请求;成功后若配了 fact_check → grounded 回查。"""
     fields = dict(fields or {})
     capability = fields.pop("__capability", None)
+    cap = None
     if capability:
         selected, cap, error = _select_api_request_for_capability(api_request, capability)
         if error:
@@ -3109,6 +3178,8 @@ async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
             return {"ok": True, "capability": capability, **options}
         api_request = selected or api_request
     runner = execute_api_workflow if api_request.get("steps") else execute_api_request
+    if cap and _capability_batch_enabled(cap) and isinstance(fields.get("entries") or fields.get("items"), list):
+        return await _execute_capability_batch(api_request, fields, cap=cap, runner=runner, kw=kw)
     out = await runner(api_request, fields, **kw)
     fc = api_request.get("fact_check")
     if kw.get("send", True) and out.get("ok") and fc:
