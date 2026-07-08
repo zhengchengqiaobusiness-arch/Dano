@@ -11,7 +11,7 @@
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import type { BridgeEventBus } from "./bridge-event-bus.js";
 import { getLanIps, isTailscaleIp } from "./network.js";
@@ -72,6 +72,8 @@ export class BridgeServer {
   private clients = new Map<string, BridgeClient>();
   private uploadRegistry: UploadRegistry;
   private cleanupInterval: ReturnType<typeof setInterval> | undefined;
+  private readonly serverInstanceId = randomUUID();
+  private readonly serverStartTime = new Date().toISOString();
 
   private isRunning = false;
   private host: string = "localhost";
@@ -636,9 +638,19 @@ export class BridgeServer {
       res.write(formatSseMessage(message));
     };
     const unregister = this.eventBus.connectClient(clientId, send);
-    const heartbeat = setInterval(() => {
-      res.write(": heartbeat\n\n");
-    }, this.config.heartbeatInterval);
+    const writeHeartbeat = () => {
+      res.write(
+        formatSseMessage({
+          type: "event",
+          payload: {
+            type: "heartbeat",
+            serverInstanceId: this.serverInstanceId,
+            serverStartTime: this.serverStartTime,
+          },
+        }),
+      );
+    };
+    const heartbeat = setInterval(writeHeartbeat, this.config.heartbeatInterval);
 
     req.on("close", () => {
       clearInterval(heartbeat);
@@ -660,6 +672,11 @@ export class BridgeServer {
 
     if (!isClientMessage(body)) {
       writeJson(res, 400, { error: "Request body must be a client message" });
+      return;
+    }
+
+    if (!this.eventBus.hasActiveClientConnection(clientId)) {
+      writeJson(res, 409, { error: "RECONNECT_REQUIRED" });
       return;
     }
 

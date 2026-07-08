@@ -12,6 +12,7 @@ import {
 } from "../server.js";
 import {
   DEFAULT_BRIDGE_CONFIG,
+  type BridgeConfig,
   type ClientMessage,
   type ServerMessage,
 } from "../types.js";
@@ -37,6 +38,7 @@ afterEach(async () => {
 
 function createServer(
   factory?: (ctx: Parameters<RpcConnectionHandlerFactory>[0]) => RpcConnectionHandler,
+  config: Partial<BridgeConfig> = {},
 ) {
   const uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-server-upload-"));
   const workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-workspace-"));
@@ -53,9 +55,10 @@ function createServer(
   const server = new BridgeServer(
     {
       ...DEFAULT_BRIDGE_CONFIG,
+      ...config,
       host: "127.0.0.1",
       port: 0,
-      upload: { ...DEFAULT_BRIDGE_CONFIG.upload, uploadDir },
+      upload: { ...DEFAULT_BRIDGE_CONFIG.upload, ...config.upload, uploadDir },
     },
     handlerFactory,
     eventBus,
@@ -224,6 +227,49 @@ describe("BridgeServer HTTP/SSE transport", () => {
     expect(message).toMatchObject({
       type: "response",
       payload: { id: "cmd-1", success: true },
+    });
+  });
+
+  it("rejects client messages when no SSE stream is active", async () => {
+    const commandSpy = vi.fn();
+    const { server } = createServer(() => ({
+      handleClientMessage: commandSpy,
+      dispose: vi.fn(),
+    }));
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const created = await postJson<{ messagesUrl: string }>(`${origin}/api/clients`);
+
+    const response = await fetch(`${origin}${created.messagesUrl}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "command",
+        payload: { id: "cmd-1", type: "get_state" },
+      } satisfies ClientMessage),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ error: "RECONNECT_REQUIRED" });
+    expect(commandSpy).not.toHaveBeenCalled();
+  });
+
+  it("sends observable heartbeat events over SSE", async () => {
+    const { server } = createServer(undefined, { heartbeatInterval: 10 });
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const created = await postJson<{ eventsUrl: string }>(`${origin}/api/clients`);
+    const sse = openSse(`${origin}${created.eventsUrl}`);
+
+    const [message] = await sse.waitForMessages(1);
+    sse.close();
+    expect(message).toMatchObject({
+      type: "event",
+      payload: {
+        type: "heartbeat",
+        serverInstanceId: expect.any(String),
+        serverStartTime: expect.any(String),
+      },
     });
   });
 

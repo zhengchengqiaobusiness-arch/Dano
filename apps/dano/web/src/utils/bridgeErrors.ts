@@ -1,5 +1,6 @@
 export function isStaleBridgeClientError(message: string): boolean {
-  return message.trim() === "Client was not found";
+  const normalized = message.trim();
+  return normalized === "Client was not found" || normalized === "RECONNECT_REQUIRED";
 }
 
 export function bridgeServerErrorMessage(

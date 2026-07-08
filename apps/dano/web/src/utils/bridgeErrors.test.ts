@@ -8,6 +8,7 @@ import {
 describe("bridge error helpers", () => {
   it("maps stale client server errors to user-facing text", () => {
     expect(isStaleBridgeClientError("Client was not found")).toBe(true);
+    expect(isStaleBridgeClientError("RECONNECT_REQUIRED")).toBe(true);
     expect(
       bridgeServerErrorMessage("Client was not found", {
         staleClient: "连接已过期，请刷新页面后重试",
