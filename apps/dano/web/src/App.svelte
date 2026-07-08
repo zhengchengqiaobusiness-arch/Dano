@@ -1231,7 +1231,11 @@
   style={allStyle}
 >
   <div class="app-main-column">
-    <AppHeader connectionStatus={bridge.connectionStatus} />
+    <AppHeader
+      connectionStatus={bridge.connectionStatus}
+      disconnectReason={bridge.lastDisconnectReason}
+      onReconnect={bridge.reconnect}
+    />
 
     <ReconnectBanner
       visible={bridge.isReconnecting}

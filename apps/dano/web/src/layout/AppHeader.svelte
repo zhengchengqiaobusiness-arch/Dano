@@ -4,8 +4,12 @@
 
   let {
     connectionStatus,
+    disconnectReason = "",
+    onReconnect,
   }: {
     connectionStatus: ConnectionStatus;
+    disconnectReason?: string;
+    onReconnect?: () => void;
   } = $props();
 
   const statusMeta = $derived.by(() => {
@@ -19,14 +23,27 @@
         return { className: "disconnected", label: t("appHeader.connection.disconnected") };
     }
   });
+
+  const title = $derived(
+    connectionStatus === "disconnected" && disconnectReason
+      ? disconnectReason
+      : statusMeta.label,
+  );
 </script>
 
 <header class="app-header">
   <div class="header-leading">
-    <div class={`connection-status ${statusMeta.className}`}>
+    <button
+      class={`connection-status ${statusMeta.className}`}
+      type="button"
+      title={title}
+      onclick={() => {
+        if (connectionStatus === "disconnected") onReconnect?.();
+      }}
+    >
       <span class="status-dot" aria-hidden="true"></span>
       <span>{statusMeta.label}</span>
-    </div>
+    </button>
   </div>
 </header>
 
@@ -75,6 +92,7 @@
       rgba(0, 0, 0, 0) 0px 0px 0px 0px,
       rgba(0, 0, 0, 0.04) 0px 0px 0px 1px,
       rgba(0, 0, 0, 0.04) 0px 2px 8px 0px;
+    cursor: pointer;
   }
 
   .status-dot {

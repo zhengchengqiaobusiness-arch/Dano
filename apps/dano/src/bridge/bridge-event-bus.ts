@@ -170,6 +170,11 @@ export class BridgeEventBus {
     this.sendToState(state, message);
   }
 
+  hasActiveClientConnection(clientId: string): boolean {
+    const state = this.clients.get(clientId);
+    return Boolean(state && !state.closed && state.send);
+  }
+
   /**
    * Get the current send queue depth for a client.
    */

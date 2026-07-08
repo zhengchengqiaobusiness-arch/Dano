@@ -224,6 +224,8 @@ function normalizeBridgePath(value: unknown): string | null {
 
 const WORKSPACE_ENTRIES_REFRESH_MS = 10_000;
 const MAX_RECONNECT_DELAY = 30_000;
+const HEARTBEAT_TIMEOUT_MS = 45_000;
+const HEARTBEAT_WATCHDOG_MS = 5_000;
 
 // ---------------------------------------------------------------------------
 // Bridge state (module-level singletons)
@@ -233,6 +235,9 @@ let eventSource: EventSource | null = null;
 let clientId: string | null = null;
 let clientMessagesUrl: string | null = null;
 let defaultWorkspacePath: string | null = null;
+let heartbeatWatchdog: ReturnType<typeof setInterval> | null = null;
+let lastHeartbeatAt = 0;
+let lastServerInstanceId: string | null = null;
 let defaultSessionStartedForPage = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectDelay = 1000;
@@ -436,6 +441,39 @@ function scheduleReconnect() {
     if (!disposed) connect();
   }, reconnectDelay);
   reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+}
+
+function stopHeartbeatWatchdog() {
+  if (!heartbeatWatchdog) return;
+  clearInterval(heartbeatWatchdog);
+  heartbeatWatchdog = null;
+}
+
+function handleHeartbeat(payload: Extract<RpcBridgeEvent, { type: "heartbeat" }>) {
+  lastHeartbeatAt = Date.now();
+  if (lastServerInstanceId && lastServerInstanceId !== payload.serverInstanceId) {
+    lastServerInstanceId = payload.serverInstanceId;
+    resetTransportState();
+    markDisconnected(t("store.error.staleClient"));
+    scheduleReconnect();
+    return;
+  }
+  lastServerInstanceId = payload.serverInstanceId;
+}
+
+function startHeartbeatWatchdog() {
+  stopHeartbeatWatchdog();
+  heartbeatWatchdog = setInterval(() => {
+    if (
+      _connectionStatus === "connected" &&
+      lastHeartbeatAt > 0 &&
+      Date.now() - lastHeartbeatAt > HEARTBEAT_TIMEOUT_MS
+    ) {
+      resetTransportState();
+      markDisconnected(t("appHeader.connection.disconnected"));
+      scheduleReconnect();
+    }
+  }, HEARTBEAT_WATCHDOG_MS);
 }
 
 function updateCurrentModel(value: unknown) {
@@ -2281,6 +2319,10 @@ function handleResponse(payload: RpcResponse) {
 
 function handleEvent(payload: RpcBridgeEvent) {
   switch (payload.type) {
+    case "heartbeat": {
+      handleHeartbeat(payload);
+      break;
+    }
     case "command_error": {
       const message = bridgeCommandErrorNotificationMessage(
         payload,
@@ -2524,6 +2566,8 @@ async function fetchInitialState() {
 function resetTransportState() {
   clientId = null;
   clientMessagesUrl = null;
+  stopHeartbeatWatchdog();
+  lastHeartbeatAt = 0;
   if (eventSource) {
     eventSource.close();
     eventSource = null;
@@ -2653,6 +2697,8 @@ async function connect() {
     _connectionStatus = "connected";
     _connectionError = "";
     _lastDisconnectReason = "";
+    lastHeartbeatAt = Date.now();
+    startHeartbeatWatchdog();
     resetReconnectDelay();
     void fetchInitialState();
   });
@@ -2864,6 +2910,7 @@ export function initBridge() {
     answerQuestion,
     fieldAssist,
     dismissNotification,
+    reconnect: connect,
     disconnect,
   };
 }

@@ -960,6 +960,11 @@ export type RpcBridgeEvent =
   | RpcCompactionStartEvent
   | RpcCompactionEndEvent
   | RpcCommandErrorEvent
+  | {
+      type: "heartbeat";
+      serverInstanceId: string;
+      serverStartTime: string;
+    }
   | { type: "session_compact" };
 
 export type ServerMessage =
