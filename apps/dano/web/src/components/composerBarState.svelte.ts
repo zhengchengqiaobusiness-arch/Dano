@@ -33,6 +33,10 @@ import {
   getWorkspaceMentionSuggestions,
   type WorkspaceMentionSuggestion,
 } from "../utils/workspaceMentions";
+import {
+  shouldEnterInsertNewline,
+  shouldSubmitComposerEnter,
+} from "./composerKeyboard";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -753,6 +757,9 @@ export function createComposerBarState(
     steer: boolean | (() => boolean),
   ) {
     const composing = isInputComposing(e);
+    const enterInsertsNewline = shouldEnterInsertNewline();
+    const plainEnterSelectsPalette =
+      !enterInsertsNewline && !e.shiftKey && e.key === "Enter";
 
     // Shift+Tab → cycle thinking
     if (
@@ -777,7 +784,7 @@ export function createComposerBarState(
         e.key === "Escape" ||
         (filteredSlashCommands.length > 0 &&
           !composing &&
-          ((!e.shiftKey && e.key === "Enter") || e.key === "Tab")))
+          (plainEnterSelectsPalette || e.key === "Tab")))
     ) {
       refs.commandPaletteEl.handleKeydown(e);
       return;
@@ -791,7 +798,7 @@ export function createComposerBarState(
         e.key === "Escape" ||
         ((props.workspaceEntriesLoading || mentionSuggestions.length > 0) &&
           !composing &&
-          ((!e.shiftKey && e.key === "Enter") || e.key === "Tab")))
+          (plainEnterSelectsPalette || e.key === "Tab")))
     ) {
       refs.mentionPaletteEl.handleKeydown(e);
       return;
@@ -806,7 +813,7 @@ export function createComposerBarState(
 
     // Enter → submit / steer
     if (e.key === "Enter") {
-      if (composing || e.shiftKey) return;
+      if (!shouldSubmitComposerEnter(e, composing, enterInsertsNewline)) return;
       e.preventDefault();
       const isSteer = typeof steer === "function" ? steer() : steer;
       handleSubmit(isSteer);
