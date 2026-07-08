@@ -2302,6 +2302,7 @@ _FLOW_ORCHESTRATE_SYSTEM = """你是企业 OA/API 录制结果的 Skill 编排�
 - 每个能力必须引用已存在 step_id，不能编造接口。
 - 不要把候选接口当成稳定步骤，除非它已经在 steps 中。
 - 如果已有能力编排，请在已有能力基础上补充/优化，不要重新设计一套无关能力。
+- 如果上下文包含 removed_capabilities 或 removed_capability_steps，必须尊重用户删除记录，不要自动恢复。
 - 如果流程包含写接口，默认只输出一个 submit 或 submit_batch 主能力；前置 GET 应作为该能力步骤链的一部分，不要单独拆 query_status/list_options。
 - 读能力只查询并返回结果；写能力可以包含前置查询 + 写入步骤。
 - 批量填报/日报/明细数组场景优先生成 submit_batch。
@@ -2379,6 +2380,8 @@ def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
     return {
         "title": spec.title,
         "business_description": spec.business_description,
+        "removed_capabilities": list((spec.meta or {}).get("removed_capabilities") or []),
+        "removed_capability_steps": dict((spec.meta or {}).get("capability_removed_steps") or {}),
         "existing_capabilities": [
             {
                 "name": cap.name,
@@ -2428,13 +2431,89 @@ def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
     }
 
 
-def _merge_capability_lists(existing: list[FlowCapability], generated: list[FlowCapability]) -> list[FlowCapability]:
+def _capability_step_ref_keys(spec: FlowSpec | None, step_id: str) -> set[str]:
+    refs = {f"step:{step_id}"}
+    if spec is not None:
+        step = next((s for s in spec.steps if s.step_id == step_id), None)
+        if step is not None:
+            refs.add(f"sig:{_step_request_signature_key(step)}")
+    return refs
+
+
+def _capability_removed_step_refs(spec: FlowSpec | None, cap_name: str) -> set[str]:
+    if spec is None:
+        return set()
+    removed = ((spec.meta or {}).get("capability_removed_steps") or {}).get(cap_name) or []
+    return {str(x) for x in removed if str(x)}
+
+
+def _removed_capability_names(spec: FlowSpec | None) -> set[str]:
+    if spec is None:
+        return set()
+    return {str(x) for x in ((spec.meta or {}).get("removed_capabilities") or []) if str(x)}
+
+
+def _remember_removed_capability(spec: FlowSpec, cap_name: str) -> None:
+    if not cap_name:
+        return
+    meta = dict(spec.meta or {})
+    removed = set(str(x) for x in (meta.get("removed_capabilities") or []))
+    removed.add(cap_name)
+    meta["removed_capabilities"] = sorted(removed)
+    spec.meta = meta
+
+
+def _forget_removed_capability(spec: FlowSpec, cap_name: str) -> None:
+    meta = dict(spec.meta or {})
+    removed = [x for x in (meta.get("removed_capabilities") or []) if str(x) != cap_name]
+    meta["removed_capabilities"] = removed
+    spec.meta = meta
+
+
+def _capability_step_was_removed(spec: FlowSpec | None, cap_name: str, step_id: str) -> bool:
+    removed = _capability_removed_step_refs(spec, cap_name)
+    if not removed:
+        return False
+    return bool(_capability_step_ref_keys(spec, step_id) & removed)
+
+
+def _remember_removed_capability_step(spec: FlowSpec, cap_name: str, step_id: str) -> None:
+    refs = sorted(_capability_step_ref_keys(spec, step_id))
+    if not refs:
+        return
+    meta = dict(spec.meta or {})
+    removed = {k: list(v or []) for k, v in (meta.get("capability_removed_steps") or {}).items()}
+    cur = set(str(x) for x in removed.get(cap_name, []))
+    cur.update(refs)
+    removed[cap_name] = sorted(cur)
+    meta["capability_removed_steps"] = removed
+    spec.meta = meta
+
+
+def _forget_removed_capability_step(spec: FlowSpec, cap_name: str, step_id: str) -> None:
+    meta = dict(spec.meta or {})
+    removed = {k: list(v or []) for k, v in (meta.get("capability_removed_steps") or {}).items()}
+    if cap_name not in removed:
+        return
+    refs = _capability_step_ref_keys(spec, step_id)
+    removed[cap_name] = [x for x in removed[cap_name] if x not in refs]
+    if not removed[cap_name]:
+        removed.pop(cap_name, None)
+    meta["capability_removed_steps"] = removed
+    spec.meta = meta
+
+
+def _merge_capability_lists(existing: list[FlowCapability], generated: list[FlowCapability], *, spec: FlowSpec | None = None) -> list[FlowCapability]:
     """把新生成能力合并到已有能力上，避免每次“生成编排”覆盖人工编辑。"""
     if not existing:
-        return generated
+        removed_capabilities = _removed_capability_names(spec)
+        return [cap for cap in generated if cap.name not in removed_capabilities]
     out = [cap.model_copy(deep=True) for cap in existing]
     by_name = {cap.name: cap for cap in out if cap.name}
+    removed_capabilities = _removed_capability_names(spec)
     for cap in generated:
+        if cap.name in removed_capabilities:
+            continue
         cur = by_name.get(cap.name)
         if cur is None:
             out.append(cap)
@@ -2442,6 +2521,8 @@ def _merge_capability_lists(existing: list[FlowCapability], generated: list[Flow
                 by_name[cap.name] = cap
             continue
         for sid in cap.step_ids:
+            if _capability_step_was_removed(spec, cur.name, sid):
+                continue
             if sid not in cur.step_ids:
                 cur.step_ids.append(sid)
         existing_node_keys = {
@@ -2451,6 +2532,9 @@ def _merge_capability_lists(existing: list[FlowCapability], generated: list[Flow
         }
         for node in cap.nodes or []:
             if not isinstance(node, dict):
+                continue
+            sid = str(node.get("step_id") or "")
+            if sid and _capability_step_was_removed(spec, cur.name, sid):
                 continue
             key = (node.get("type"), node.get("step_id"), node.get("id"))
             if key not in existing_node_keys:
@@ -2657,7 +2741,7 @@ async def orchestrate_flow_capabilities(
     """
     current = spec.model_copy(deep=True)
     existing = list(current.capabilities or [])
-    fallback = _merge_capability_lists(existing, build_default_flow_capabilities(current))
+    fallback = _merge_capability_lists(existing, build_default_flow_capabilities(current), spec=current)
     caps: list[FlowCapability] = []
     source = "deterministic"
     reason = ""
@@ -2695,7 +2779,7 @@ async def orchestrate_flow_capabilities(
                 if not primary.step_ids:
                     primary.step_ids = _capability_step_ids(current.steps)
                 caps = [primary]
-        caps = _merge_capability_lists(existing, caps)
+        caps = _merge_capability_lists(existing, caps, spec=current)
 
     current.capabilities = caps
     _normalize_capability_references(current)
@@ -3085,6 +3169,11 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
                 ))
 
     for lk in spec.links:
+        source_step = steps_by_id.get(lk.source_step_id)
+        target_step = steps_by_id.get(lk.target_step_id)
+        source_label = f"{source_step.name or source_step.path or source_step.url}" if source_step else lk.source_step_id
+        target_label = f"{target_step.name or target_step.path or target_step.url}" if target_step else lk.target_step_id
+        link_label = f"{source_label}.{lk.source_path} -> {target_label}.{lk.target_path}"
         target = {
             "kind": "link",
             "link_id": lk.link_id,
@@ -3097,7 +3186,7 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
             items.append(_review_item(
                 "broken_link",
                 severity="high",
-                title=f"修复断开的接口依赖 {lk.link_id}",
+                title=f"修复断开的接口依赖 {link_label}",
                 target=target,
                 current_guess="invalid_link",
                 suggested_action="fix_or_remove_link",
@@ -3106,14 +3195,12 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
             ))
             continue
 
-        source_step = steps_by_id.get(lk.source_step_id)
-        target_step = steps_by_id.get(lk.target_step_id)
         source_path = lk.source_tokens or lk.source_path
         if source_step and source_step.response_json is not None and _flow_path_lookup(source_step.response_json, source_path) is _FLOW_PATH_MISSING:
             items.append(_review_item(
                 "link_source_missing",
                 severity="high",
-                title=f"修复接口依赖来源 {lk.source_path}",
+                title=f"修复接口依赖来源 {source_label}.{lk.source_path}",
                 target=target,
                 current_guess="missing_source_path",
                 suggested_action="fix_link_source",
@@ -3126,7 +3213,7 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
             items.append(_review_item(
                 "link_target_missing",
                 severity="high",
-                title=f"修复接口依赖目标 {lk.target_path}",
+                title=f"修复接口依赖目标 {target_label}.{lk.target_path}",
                 target=target,
                 current_guess="missing_target_path",
                 suggested_action="fix_link_target",
@@ -3138,7 +3225,7 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
             items.append(_review_item(
                 "link_confirmation",
                 severity="high",
-                title=f"确认接口依赖 {lk.source_path} -> {lk.target_path}",
+                title=f"确认接口依赖 {link_label}",
                 target=target,
                 current_guess="previous_response",
                 suggested_action="confirm_link",
@@ -4386,11 +4473,27 @@ def _find_step(spec: FlowSpec, step_id: str) -> FlowStep:
     raise ValueError(f"step not found: {step_id} (available: {available})")
 
 
-def _find_param(step: FlowStep, param_path: str) -> ParamField:
+def _find_param(step: FlowStep, param_path: str, *, param_key: str = "", param_label: str = "") -> ParamField:
+    needle = str(param_path or "")
     for param in step.params:
-        if param.path == param_path:
+        if param.path == needle:
             return param
-    raise ValueError(f"param not found: {param_path} in step {step.step_id}")
+    stripped = _strip_body_prefix(needle)
+    if stripped and stripped != needle:
+        for param in step.params:
+            if _strip_body_prefix(param.path) == stripped:
+                return param
+    hints = [str(x or "").strip() for x in (param_key, param_label)]
+    hints = [x for x in hints if x]
+    for hint in hints:
+        for param in step.params:
+            if param.key == hint or param.label == hint:
+                return param
+    for param in step.params:
+        if param.path and (param.path.endswith(f".{needle}") or param.path.endswith(f"[{needle}]")):
+            return param
+    available = [f"{p.path}({p.key})" for p in step.params]
+    raise ValueError(f"param not found: {param_path} in step {step.step_id}; available={available}")
 
 
 def _find_link(spec: FlowSpec, link_id: str) -> FlowLink:
@@ -4949,7 +5052,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
 
         if op == "generate_capabilities":
             existing = list(new_spec.capabilities or [])
-            new_spec.capabilities = _merge_capability_lists(existing, build_default_flow_capabilities(new_spec))
+            new_spec.capabilities = _merge_capability_lists(existing, build_default_flow_capabilities(new_spec), spec=new_spec)
             new_spec.meta = {
                 **(new_spec.meta or {}),
                 "capability_model": {
@@ -4972,12 +5075,14 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 raise ValueError(f"invalid capability data: {e}")
             if any(c.name == cap.name for c in new_spec.capabilities):
                 raise ValueError(f"duplicate capability name: {cap.name}")
+            _forget_removed_capability(new_spec, cap.name)
             new_spec.capabilities.append(cap)
             continue
 
         if op == "remove_capability":
             idx = _find_capability_index(new_spec, edit)
-            new_spec.capabilities.pop(idx)
+            cap = new_spec.capabilities.pop(idx)
+            _remember_removed_capability(new_spec, cap.name)
             continue
 
         if op == "update_capability":
@@ -5019,6 +5124,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 ).step_id
                 needs_dependency_rebuild = True
             _find_step(new_spec, step_id)
+            _forget_removed_capability_step(new_spec, cap.name, step_id)
             if step_id not in cap.step_ids:
                 cap.step_ids.append(step_id)
             if not any(n.get("type") == "call" and n.get("step_id") == step_id for n in (cap.nodes or [])):
@@ -5029,6 +5135,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
         if op == "remove_capability_step":
             idx = _find_capability_index(new_spec, edit)
             step_id = str(edit.get("step_id") or "")
+            _remember_removed_capability_step(new_spec, new_spec.capabilities[idx].name, step_id)
             new_spec.capabilities[idx].step_ids = [sid for sid in new_spec.capabilities[idx].step_ids if sid != step_id]
             new_spec.capabilities[idx].nodes = [
                 n for n in (new_spec.capabilities[idx].nodes or [])
@@ -5113,7 +5220,12 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
 
             if param_path:
                 # 参数级编辑
-                param = _find_param(step, param_path)
+                param = _find_param(
+                    step,
+                    param_path,
+                    param_key=str(edit.get("param_key") or ""),
+                    param_label=str(edit.get("param_label") or ""),
+                )
                 if field == "key":
                     old_key = param.key
                     param.key = str(value)
@@ -5229,7 +5341,12 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             param_path = edit.get("param_path")
             if not param_path:
                 raise ValueError("reset_param_source missing param_path")
-            param = _find_param(step, param_path)
+            param = _find_param(
+                step,
+                param_path,
+                param_key=str(edit.get("param_key") or ""),
+                param_label=str(edit.get("param_label") or ""),
+            )
             target = str(edit.get("to") or "user_input")
             new_spec.links = [
                 lk for lk in new_spec.links
@@ -5267,7 +5384,12 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             param_path = edit.get("param_path")
             if not param_path:
                 raise ValueError("remove edit missing param_path")
-            param = _find_param(step, param_path)
+            param = _find_param(
+                step,
+                param_path,
+                param_key=str(edit.get("param_key") or ""),
+                param_label=str(edit.get("param_label") or ""),
+            )
             step.params.remove(param)
             if param.key in step.sample_inputs:
                 del step.sample_inputs[param.key]
@@ -5530,6 +5652,82 @@ async def auto_fix_flow_spec(
             break
     current.meta = {**(current.meta or {}), "auto_fix_history": history}
     return append_flow_version(refresh_review_items(_sync_capability_io_schemas(current)), "auto_fix", reason="一键自动修正")
+
+
+async def run_recording_pi_loop(
+    spec: FlowSpec,
+    *,
+    llm_client: Any | None = None,
+    model: str | None = None,
+    mode: str = "plan",
+    timeout_s: float = 60.0,
+    max_rounds: int = 4,
+) -> FlowSpec:
+    """录制路径 PI 闭环：Goal → Planner → Validator → Repair → 再验证。
+
+    这不是单次“生成编排”。它会基于 RecordedGoal、RequestGraph 和当前人工编辑，
+    在有限轮次内规划、校验、修复并重新校验，直到通过或无法继续收敛。
+    """
+    current = ensure_recorded_goal(spec.model_copy(deep=True))
+    _normalize_capability_references(current)
+    history: list[dict[str, Any]] = []
+    run_planner = mode in {"plan", "publish"} or not current.capabilities
+
+    for round_idx in range(max_rounds):
+        before = _flow_fingerprint(current)
+        if run_planner:
+            current = await orchestrate_flow_capabilities(
+                current,
+                llm_client=llm_client,
+                model=model,
+                timeout_s=timeout_s,
+            )
+
+        report = validate_flow_spec(current)
+        history.append({
+            "round": round_idx + 1,
+            "stage": "planner" if run_planner else "validator",
+            "passed": bool(report.get("passed")),
+            "errors": len(report.get("errors") or []),
+            "warnings": len(report.get("warnings") or []),
+        })
+        if report.get("passed"):
+            break
+
+        current = await auto_fix_flow_spec(
+            current,
+            llm_client=llm_client,
+            model=model,
+            timeout_s=timeout_s,
+            max_rounds=1,
+        )
+        fixed_report = validate_flow_spec(current)
+        history.append({
+            "round": round_idx + 1,
+            "stage": "repair",
+            "passed": bool(fixed_report.get("passed")),
+            "errors": len(fixed_report.get("errors") or []),
+            "warnings": len(fixed_report.get("warnings") or []),
+        })
+        after = _flow_fingerprint(current)
+        if fixed_report.get("passed") or before == after:
+            break
+        run_planner = True
+
+    current.meta = {
+        **(current.meta or {}),
+        "recording_pi_loop": {
+            "mode": mode,
+            "rounds": history,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+    return append_flow_version(
+        refresh_review_items(_sync_capability_io_schemas(current)),
+        "recording_pi_loop",
+        reason=f"录制 PI 闭环: {mode}",
+        actor="planner",
+    )
 
 
 def _looks_internal(name: str) -> bool:

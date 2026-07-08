@@ -8,7 +8,7 @@ from dano.execution.page.flow_spec import (
     FlowSpec, FlowStep, FlowLink, ParamField, SelectBinding, FlowCapability,
     apply_flow_edits, validate_flow_spec, _infer_type_from_value,
     add_llm_review_recommendations, refresh_review_items, flow_spec_to_api_request,
-    auto_fix_flow_spec,
+    auto_fix_flow_spec, run_recording_pi_loop,
 )
 
 
@@ -33,6 +33,31 @@ def test_edit_key():
     assert new.steps[0].params[0].locked is True
     assert new.meta["current_version"] == 1
     assert new.meta["versions"][0]["action"] == "flow_edit"
+
+
+def test_update_param_falls_back_to_key_when_path_is_stale():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(
+            step_id="step1",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            params=[ParamField(path="body.type", key="type", label="请假类型", value="2", type="number")],
+        )],
+    )
+
+    new = apply_flow_edits(spec, [{
+        "op": "update",
+        "step_id": "step1",
+        "param_path": "type",
+        "param_key": "type",
+        "param_label": "请假类型",
+        "field": "type",
+        "value": "enum",
+    }])
+
+    assert new.steps[0].params[0].type == "enum"
 
 
 def test_edit_key_syncs_label_select_and_exported_api_request():
@@ -575,6 +600,27 @@ def test_auto_fix_promotes_high_confidence_request_into_capability_closure():
     assert "auto_fix_history" in fixed.meta
 
 
+def test_recording_pi_loop_records_planner_and_repair_history():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            content_type="application/json",
+            body_source='{"date":"2026-05-12"}',
+            params=[ParamField(path="date", key="date", value="2026-05-12", type="date", required=True)],
+        )],
+    )
+
+    out = asyncio.run(run_recording_pi_loop(spec, llm_client=None, model=None, mode="plan", max_rounds=2))
+
+    assert out.capabilities
+    assert out.meta["recording_pi_loop"]["mode"] == "plan"
+    assert out.meta["recording_pi_loop"]["rounds"]
+
+
 def test_high_confidence_duplicate_path_is_treated_as_already_covered():
     spec = FlowSpec(
         flow_id="f",
@@ -661,6 +707,44 @@ def test_generate_capabilities_edit_is_incremental():
     assert cap.updated_by == "user"
     assert cap.step_ids == ["submit"]
     assert any(n.get("type") == "call" and n.get("step_id") == "submit" for n in cap.nodes)
+
+
+def test_generate_capabilities_respects_removed_capability_step():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[
+            FlowStep(step_id="read", method="GET", url="/api/read", path="/api/read"),
+            FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit"),
+        ],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            kind="submit_batch",
+            step_ids=["read", "submit"],
+            nodes=[
+                {"id": "call_1", "type": "call", "step_id": "read"},
+                {"id": "call_2", "type": "call", "step_id": "submit"},
+            ],
+        )],
+    )
+
+    edited = apply_flow_edits(spec, [{"op": "remove_capability_step", "capability_index": 0, "step_id": "read"}])
+    regenerated = apply_flow_edits(edited, [{"op": "generate_capabilities"}])
+
+    assert "read" not in regenerated.capabilities[0].step_ids
+    assert all(n.get("step_id") != "read" for n in regenerated.capabilities[0].nodes if n.get("type") == "call")
+
+
+def test_generate_capabilities_respects_removed_capability():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
+        capabilities=[FlowCapability(name="submit_batch", kind="submit_batch", step_ids=["submit"])],
+    )
+
+    edited = apply_flow_edits(spec, [{"op": "remove_capability", "capability_index": 0}])
+    regenerated = apply_flow_edits(edited, [{"op": "generate_capabilities"}])
+
+    assert regenerated.capabilities == []
 
 
 def test_batch_capability_exports_execution_contract_and_entries_schema():

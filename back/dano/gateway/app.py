@@ -95,8 +95,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         log.warning("gateway.review_board_unavailable", error=str(e))
     yield
-    from dano.execution.page.pool import shutdown_browser_pool
-    await shutdown_browser_pool()      # 释放常驻浏览器(页面运行时池)
     await close_pool()
 
 
@@ -136,8 +134,6 @@ async def _load_holidays(tenant: str, subs: list[Subsystem]) -> list[str]:
 
 
 async def _orchestrator(tenant: str) -> Orchestrator:
-    from dano.execution.page import build_page_runtime
-
     subs = await _tenant_subsystems(tenant)            # 发现该租户的真实系统(任意系统,不写死)
     endpoints = await _load_endpoints(tenant, subs)
     executor = RealActionExecutor(endpoints=endpoints, auth_manager=AuthManager())
@@ -145,7 +141,6 @@ async def _orchestrator(tenant: str) -> Orchestrator:
     harness = Harness(action_executor=executor, resolve_credentials=_resolve_creds)
     return Orchestrator(registry=registry, store=repo, harness=harness,
                         action_executor=executor, resolve_credentials=_resolve_creds,
-                        page_runtime=build_page_runtime(),
                         holidays=await _load_holidays(tenant, subs))
 
 
@@ -604,7 +599,7 @@ async def record_ws(ws: WebSocket) -> None:
                     flushed_tail = [after_flush_steps[-1]]
                 raw = msg.get("steps")
                 if raw is not None:           # 前端编辑后的步骤(删了噪声/重复/调序)→ 以它为准
-                    from dano.agent_tools.page_builder import RecordedStep, assign_field_keys
+                    from dano.execution.page.recorder import assign_field_keys
                     for s in flushed_tail:
                         if s.get("op") not in ("fill", "select", "pick"):
                             continue
@@ -616,9 +611,9 @@ async def record_ws(ws: WebSocket) -> None:
                                 break
                         if not replaced:
                             raw.append(s)
-                    steps = [RecordedStep(op=s["op"], locator=s.get("locator"),
-                                          field=(s.get("field") or None)) for s in raw]
-                    # 字段 key 与 build_page_script 同算法分配(同序),samples/required 与脚本参数一致(P1#6)
+                    steps = [{"op": s["op"], "locator": s.get("locator"), "field": (s.get("field") or None)}
+                             for s in raw]
+                    # 字段 key 保持与录制样例、必填标记一致。
                     fb_idx = [i for i, s in enumerate(raw) if s.get("field")]
                     keymap = dict(zip(fb_idx, assign_field_keys([raw[i]["field"] for i in fb_idx])))
                     samples = {keymap[i]: raw[i].get("value", "") for i in fb_idx
@@ -947,13 +942,14 @@ async def record_ws(ws: WebSocket) -> None:
                     from dano.execution.page.flow_spec import (
                         flow_spec_to_client,
                         flow_spec_to_summary,
-                        orchestrate_flow_capabilities,
+                        run_recording_pi_loop,
                         validate_flow_spec,
                     )
-                    pending_flow_spec = await orchestrate_flow_capabilities(
+                    pending_flow_spec = await run_recording_pi_loop(
                         pending_flow_spec,
                         llm_client=_page_semantic_client("complete_json"),
                         model=get_settings().pi_model,
+                        mode="plan",
                     )
                     await ws.send_json({
                         "type": "flow_spec_updated",
@@ -971,15 +967,16 @@ async def record_ws(ws: WebSocket) -> None:
                 try:
                     from dano.config import get_settings
                     from dano.execution.page.flow_spec import (
-                        auto_fix_flow_spec,
                         flow_spec_to_client,
                         flow_spec_to_summary,
+                        run_recording_pi_loop,
                         validate_flow_spec,
                     )
-                    pending_flow_spec = await auto_fix_flow_spec(
+                    pending_flow_spec = await run_recording_pi_loop(
                         pending_flow_spec,
                         llm_client=_page_semantic_client("complete_json"),
                         model=get_settings().pi_model,
+                        mode="repair",
                     )
                     await ws.send_json({
                         "type": "flow_spec_updated",
@@ -1079,7 +1076,16 @@ async def record_ws(ws: WebSocket) -> None:
                         flow_spec_required_params,
                         flow_spec_to_api_request,
                         flow_spec_to_summary,
+                        run_recording_pi_loop,
                         validate_flow_spec,
+                    )
+                    from dano.config import get_settings
+                    pending_flow_spec = await run_recording_pi_loop(
+                        pending_flow_spec,
+                        llm_client=_page_semantic_client("complete_json"),
+                        model=get_settings().pi_model,
+                        mode="publish",
+                        max_rounds=3,
                     )
                     check_report = validate_flow_spec(pending_flow_spec)
                     if not check_report.get("passed"):

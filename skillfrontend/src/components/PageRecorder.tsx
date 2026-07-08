@@ -1111,24 +1111,61 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function updateStep(stepId: string, field: string, value: any) {
     send({ type: "flow_update", edits: [{ op: "update", step_id: stepId, field, value }] });
   }
+  function paramDraftKey(stepId: string, p: FlowParam) {
+    return `${stepId}:${p.path || ""}:${p.key || ""}:${p.label || ""}`;
+  }
+  function paramEdit(stepId: string, p: FlowParam, field: string, value: any) {
+    return {
+      op: "update",
+      step_id: stepId,
+      param_path: p.path || p.key || p.label,
+      param_key: p.key,
+      param_label: p.label || p.key,
+      field,
+      value,
+    };
+  }
+  function paramRemoveEdit(stepId: string, p: FlowParam) {
+    return {
+      op: "remove",
+      step_id: stepId,
+      param_path: p.path || p.key || p.label,
+      param_key: p.key,
+      param_label: p.label || p.key,
+    };
+  }
+  function targetParamEdit(stepId: string, target: Record<string, any>, field: string, value: any) {
+    const path = target.path || target.target_path || target.param_path || "";
+    const key = target.key || target.param_name || target.current_guess || "";
+    return {
+      op: "update",
+      step_id: stepId,
+      param_path: path || key,
+      param_key: key,
+      param_label: target.label || key,
+      field,
+      value,
+    };
+  }
   function updateParam(stepId: string, p: FlowParam, field: string, value: any) {
-    send({ type: "flow_update", edits: [{ op: "update", step_id: stepId, param_path: p.path, field, value }] });
+    send({ type: "flow_update", edits: [paramEdit(stepId, p, field, value)] });
   }
   function updateParamCategory(stepId: string, p: FlowParam, category: string) {
     const sourceKind = defaultSourceForCategory(category, p.source_kind);
     send({ type: "flow_update", edits: [
-      { op: "update", step_id: stepId, param_path: p.path, field: "category", value: category },
-      { op: "update", step_id: stepId, param_path: p.path, field: "source_kind", value: sourceKind },
-      { op: "update", step_id: stepId, param_path: p.path, field: "source", value: sourceKind === "unknown" ? {} : { kind: sourceKind, path: p.path, manual: true } },
-      { op: "update", step_id: stepId, param_path: p.path, field: "exposed_to_user", value: category === "user_param" },
-      { op: "update", step_id: stepId, param_path: p.path, field: "need_human_confirm", value: false },
+      paramEdit(stepId, p, "category", category),
+      paramEdit(stepId, p, "source_kind", sourceKind),
+      paramEdit(stepId, p, "source", sourceKind === "unknown" ? {} : { kind: sourceKind, path: p.path, manual: true }),
+      paramEdit(stepId, p, "exposed_to_user", category === "user_param"),
+      paramEdit(stepId, p, "need_human_confirm", false),
     ] });
   }
   function updateParamSourceKind(stepId: string, p: FlowParam, sourceKind: string) {
     if (sourceKind === "previous_response") {
+      const key = paramDraftKey(stepId, p);
       setBindDraft((d) => ({
         ...d,
-        [`${stepId}:${p.path}`]: d[`${stepId}:${p.path}`] || { source_step_id: p.source?.step_id || "", source_path: p.source?.response_path || "" },
+        [key]: d[key] || { source_step_id: p.source?.step_id || "", source_path: p.source?.response_path || "" },
       }));
       setActiveFlowTab("params");
       message.info("请选择来源步骤和响应字段后点击“绑定上游响应”");
@@ -1143,12 +1180,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       .filter((l) => l.target_step_id === stepId && stripBodyPrefix(l.target_path) === stripBodyPrefix(p.path))
       .map((l) => ({ op: "remove", link_id: l.link_id, reset_target: false }));
     edits.push(
-      { op: "update", step_id: stepId, param_path: p.path, field: "category", value: category },
-      { op: "update", step_id: stepId, param_path: p.path, field: "source_kind", value: sourceKind },
-      { op: "update", step_id: stepId, param_path: p.path, field: "source", value: sourceKind === "unknown" ? {} : sourceKind === "user_input" ? { kind: "sample", path: p.path } : { kind: sourceKind, path: p.path, manual: true } },
-      { op: "update", step_id: stepId, param_path: p.path, field: "exposed_to_user", value: category === "user_param" },
-      { op: "update", step_id: stepId, param_path: p.path, field: "need_human_confirm", value: sourceKind === "unknown" },
-      { op: "update", step_id: stepId, param_path: p.path, field: "editable", value: true },
+      paramEdit(stepId, p, "category", category),
+      paramEdit(stepId, p, "source_kind", sourceKind),
+      paramEdit(stepId, p, "source", sourceKind === "unknown" ? {} : sourceKind === "user_input" ? { kind: "sample", path: p.path } : { kind: sourceKind, path: p.path, manual: true }),
+      paramEdit(stepId, p, "exposed_to_user", category === "user_param"),
+      paramEdit(stepId, p, "need_human_confirm", sourceKind === "unknown"),
+      paramEdit(stepId, p, "editable", true),
     );
     send({ type: "flow_update", edits });
   }
@@ -1285,16 +1322,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       edits.push({ op: "update", step_id: tgt.step_id, field: "role", value: guess || "business_write" });
     } else if (action === "hide_system_const" && tgt.step_id && tgt.path) {
       edits.push(
-        { op: "update", step_id: tgt.step_id, param_path: tgt.path, field: "category", value: "system_const" },
-        { op: "update", step_id: tgt.step_id, param_path: tgt.path, field: "exposed_to_user", value: false },
+        targetParamEdit(tgt.step_id, tgt, "category", "system_const"),
+        targetParamEdit(tgt.step_id, tgt, "exposed_to_user", false),
         { op: "resolve_review", review_id: item.id, resolved: true },
       );
     } else if (tgt.step_id && tgt.path && (action === "confirm_field_source" || action === "bind_runtime_source")) {
       const [cat, sourceKind] = guess.split("/");
       edits.push(
-        { op: "update", step_id: tgt.step_id, param_path: tgt.path, field: "category", value: cat || "runtime_var" },
-        ...(sourceKind ? [{ op: "update", step_id: tgt.step_id, param_path: tgt.path, field: "source_kind", value: sourceKind }] : []),
-        { op: "update", step_id: tgt.step_id, param_path: tgt.path, field: "need_human_confirm", value: false },
+        targetParamEdit(tgt.step_id, tgt, "category", cat || "runtime_var"),
+        ...(sourceKind ? [targetParamEdit(tgt.step_id, tgt, "source_kind", sourceKind)] : []),
+        targetParamEdit(tgt.step_id, tgt, "need_human_confirm", false),
       );
     } else {
       edits.push({ op: "resolve_review", review_id: item.id, resolved: true });
@@ -1336,11 +1373,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         setActiveFlowTab("params");
         return;
       }
+      const target = { ...tgt, path: targetPath };
       edits.push(
-        { op: "update", step_id: targetStepId, param_path: targetPath, field: "category", value: "runtime_var" },
-        { op: "update", step_id: targetStepId, param_path: targetPath, field: "source_kind", value: suggestion.source_kind },
-        { op: "update", step_id: targetStepId, param_path: targetPath, field: "source", value: { kind: suggestion.source_kind, path: targetPath } },
-        { op: "update", step_id: targetStepId, param_path: targetPath, field: "need_human_confirm", value: false },
+        targetParamEdit(targetStepId, target, "category", "runtime_var"),
+        targetParamEdit(targetStepId, target, "source_kind", suggestion.source_kind),
+        targetParamEdit(targetStepId, target, "source", { kind: suggestion.source_kind, path: targetPath }),
+        targetParamEdit(targetStepId, target, "need_human_confirm", false),
       );
     } else {
       message.info("该项仍需要人工判断，请在字段页手动确认");
@@ -1447,7 +1485,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function bindParamToPreviousResponse(step: FlowStepData, p: FlowParam) {
     if (!flowSpec) return;
-    const key = `${step.step_id}:${p.path}`;
+    const key = paramDraftKey(step.step_id, p);
     const draft = bindDraft[key] || {};
     if (!draft.source_step_id || !draft.source_path) { message.warning("请选择来源步骤和响应字段"); return; }
     const edits: any[] = flowSpec.links
@@ -1575,6 +1613,26 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     value: s.step_id,
   })), [flowSpec]);
   const stepById = useMemo(() => Object.fromEntries((flowSpec?.steps || []).map((s) => [s.step_id, s])), [flowSpec]);
+  function stepBrief(stepId?: string) {
+    const st = stepId ? stepById[stepId] : undefined;
+    if (!st) return stepId || "";
+    return `${st.name || fallbackStepName(st.method, st.path)} · ${st.method} ${st.path || stripHost(st.url)}`;
+  }
+  function renderPublishIssue(item: ReviewItemData) {
+    const tgt = item.target || {};
+    const sourceStep = tgt.source_step_id ? stepBrief(tgt.source_step_id) : "";
+    const targetStep = tgt.target_step_id || tgt.step_id ? stepBrief(tgt.target_step_id || tgt.step_id) : "";
+    const fieldPath = tgt.target_path || tgt.path || "";
+    return (
+      <Space key={item.id} wrap size={4}>
+        <Tag color={severityColor(item.severity)}>{item.type}</Tag>
+        {targetStep && <Tag>接口 {targetStep}</Tag>}
+        {fieldPath && <Tag>字段 {fieldPath}</Tag>}
+        {sourceStep && <Tag>来源 {sourceStep}{tgt.source_path ? ` / ${tgt.source_path}` : ""}</Tag>}
+        <Typography.Text type="danger" style={{ fontSize: 12 }}>{item.title}</Typography.Text>
+      </Space>
+    );
+  }
   function sourcePathOptions(stepId?: string) {
     const st = stepId ? stepById[stepId] : undefined;
     return leafPaths(st?.response_json).map((p) => ({ label: p, value: p }));
@@ -1618,21 +1676,24 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return (flowSpec?.links || []).find((l) => l.target_step_id === stepId && stripBodyPrefix(l.target_path) === stripBodyPrefix(path));
   }
   function selectBindingForParam(step: FlowStepData, p: FlowParam) {
-    return (step.selects || []).find((s) => s.path === p.path || s.param === p.key);
+    const selects = step.selects || [];
+    return selects.find((s) => s.path === p.path) ||
+      selects.find((s) => !s.path && s.param === p.key) ||
+      selects.find((s) => s.param === p.key);
   }
   function enumOptionEdits(step: FlowStepData, p: FlowParam, options: Array<string | { label: string; value: any }>, optionMap?: Record<string, any>) {
     const edits: any[] = [
-      { op: "update", step_id: step.step_id, param_path: p.path, field: "enum_options", value: options },
-      { op: "update", step_id: step.step_id, param_path: p.path, field: "enum_value_map", value: optionMap || null },
+      paramEdit(step.step_id, p, "enum_options", options),
+      paramEdit(step.step_id, p, "enum_value_map", optionMap || null),
     ];
     if (p.type !== "enum" && p.type !== "list-enum" && options.length) {
-      edits.push({ op: "update", step_id: step.step_id, param_path: p.path, field: "type", value: "enum" });
+      edits.push(paramEdit(step.step_id, p, "type", "enum"));
     }
     if (p.category !== "user_param") {
-      edits.push({ op: "update", step_id: step.step_id, param_path: p.path, field: "category", value: "user_param" });
+      edits.push(paramEdit(step.step_id, p, "category", "user_param"));
     }
     if (!OPTION_SOURCE_KINDS.includes(p.source_kind || "")) {
-      edits.push({ op: "update", step_id: step.step_id, param_path: p.path, field: "source_kind", value: "manual_enum" });
+      edits.push(paramEdit(step.step_id, p, "source_kind", "manual_enum"));
     }
     return edits;
   }
@@ -1644,9 +1705,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function upsertSelectBinding(step: FlowStepData, p: FlowParam, patch: Partial<FlowSelectBinding>, extraEdits: any[] = []) {
     const existing = selectBindingForParam(step, p);
     const hasExplicitIdPath = Object.prototype.hasOwnProperty.call(patch, "id_path");
+    const currentPath = p.path || existing?.path || p.key || "";
     const nextBinding: FlowSelectBinding = {
-      param: p.key,
-      path: p.path,
       source_url: "",
       value_key: "",
       label_key: "",
@@ -1654,21 +1714,23 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       count: p.enum_options?.length || 0,
       ...existing,
       ...patch,
+      param: p.key,
+      path: currentPath,
     };
     if (!hasExplicitIdPath && !nextBinding.id_path && (nextBinding.source_url || p.source_kind === "api_option")) {
-      nextBinding.id_path = p.path;
+      nextBinding.id_path = currentPath;
     }
     if (nextBinding.options) nextBinding.count = nextBinding.options.length;
-    const replaced = (step.selects || []).some((s) => s.path === p.path || s.param === p.key);
+    const replaced = (step.selects || []).some((s) => s.path === p.path || (!s.path && s.param === p.key) || s === existing);
     const nextSelects = replaced
-      ? (step.selects || []).map((s) => (s.path === p.path || s.param === p.key ? nextBinding : s))
+      ? (step.selects || []).map((s) => (s.path === p.path || (!s.path && s.param === p.key) || s === existing ? nextBinding : s))
       : [...(step.selects || []), nextBinding];
     const edits: any[] = [{ op: "update", step_id: step.step_id, field: "selects", value: nextSelects }];
     if (p.category !== "user_param" && p.category !== "runtime_var") {
-      edits.push({ op: "update", step_id: step.step_id, param_path: p.path, field: "category", value: "user_param" });
+      edits.push(paramEdit(step.step_id, p, "category", "user_param"));
     }
     if (p.type !== "enum" && p.type !== "list-enum") {
-      edits.push({ op: "update", step_id: step.step_id, param_path: p.path, field: "type", value: nextBinding.multi ? "list-enum" : "enum" });
+      edits.push(paramEdit(step.step_id, p, "type", nextBinding.multi ? "list-enum" : "enum"));
     }
     send({ type: "flow_update", edits: [...edits, ...extraEdits] });
   }
@@ -1779,7 +1841,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         extra={
           <Space wrap>
-            <Button size="small" loading={autoFixBusy} onClick={autoFixFlow}>一键修正</Button>
             <Button size="small" loading={phase === "publishing"} onClick={finalize}>重新抓取</Button>
             <Button size="small" type="primary" loading={phase === "publishing"} onClick={publishRequest}>发布当前流程</Button>
           </Space>
@@ -1798,8 +1859,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   {checkReport.dry_run ? ` · Dry-run ${checkReport.dry_run.ok ? "OK" : "需要处理"}` : ""}
                   {checkReport.dry_run?.request_count != null ? ` · ${checkReport.dry_run.request_count} 步` : ""}
                 </Typography.Text>
-                {(checkReport.errors || []).slice(0, 4).map((x, i) =>
+                {reviewItems.slice(0, 5).map(renderPublishIssue)}
+                {reviewItems.length === 0 && (checkReport.errors || []).slice(0, 5).map((x, i) =>
                   <Typography.Text key={i} type="danger" style={{ fontSize: 12 }}>{x}</Typography.Text>)}
+                {(checkReport.errors || []).length > 5 && <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  还有 {(checkReport.errors || []).length - 5} 条问题，请在待确认/字段/依赖页处理。
+                </Typography.Text>}
               </Space>
             }
           />
@@ -1892,26 +1957,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return (
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
         <Space wrap>
-          <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy} onClick={orchestrateFlow}>生成/优化编排</Button>
+          <Tooltip title="基于当前已保留的能力、接口和人工修改继续规划，不恢复已删除项">
+            <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy} onClick={orchestrateFlow}>生成/优化能力</Button>
+          </Tooltip>
           <Button icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
           <Button icon={<RobotOutlined />} loading={namingBusy} onClick={() => { setNamingBusy(true); send({ type: "step_naming" }); }}>命名步骤</Button>
+          <Tooltip title="修正字段绑定、枚举来源、依赖和接口闭包">
+            <Button loading={autoFixBusy} onClick={autoFixFlow}>一键修正字段/依赖</Button>
+          </Tooltip>
         </Space>
-        {checkReport && !checkReport.passed && (
-          <Alert
-            showIcon
-            type="warning"
-            message="当前流程发布前需要处理"
-            description={
-              <Space direction="vertical" size={4}>
-                {(checkReport.errors || []).slice(0, 6).map((x, i) =>
-                  <Typography.Text key={i} type="danger" style={{ fontSize: 12 }}>{x}</Typography.Text>)}
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  生成/优化编排只负责规划能力结构；一键修正请使用右上角统一入口，它会按当前问题自动补齐字段、依赖和接口闭包。
-                </Typography.Text>
-              </Space>
-            }
-          />
-        )}
         {!capabilities.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有能力编排" /> : (
           <Collapse size="small">
             {capabilities.map((cap, idx) => {
@@ -1965,12 +2019,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                       <EditableTextArea rows={3} value={cap.intent || ""} onSave={(v) => updateCapabilityField(idx, "intent", v)} />
                     </FieldControl>
                     <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                      <Space wrap>
+                      <Space wrap align="center">
                         <Typography.Text strong>能力接口</Typography.Text>
                         <Tag>{stepIds.length}</Tag>
                         <NativeSelect
                           value={capabilityAddValue[idx] || ""}
-                          width={360}
+                          width={420}
                           options={[{ label: addOptions.length ? "选择要加入能力的接口" : "没有可添加的接口", value: "" }, ...addOptions]}
                           onChange={(v) => setCapabilityAddValue((s) => ({ ...s, [idx]: v }))}
                         />
@@ -2380,11 +2434,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const fieldRequestOptions = capturedRequestOptions(flowSpec);
     return (
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <Card size="small" title="从捕获接口添加字段">
-          <Space wrap>
+        <Card size="small" styles={{ body: { padding: 10 } }}>
+          <Space wrap align="center" size={8}>
+            <Typography.Text strong>从捕获接口添加字段</Typography.Text>
             <NativeSelect
               value={newParamRequestKey || ""}
-              width={520}
+              width={460}
               options={[{ label: fieldRequestOptions.length ? "选择未纳入字段页的接口" : "没有可添加的捕获接口", value: "" }, ...fieldRequestOptions]}
               onChange={(v) => setNewParamRequestKey(v || "")}
             />
@@ -2397,7 +2452,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             </Button>
           </Space>
         </Card>
-        <Card size="small" title="新增字段">
+        <Card size="small">
           <Space wrap>
             <NativeSelect value={newParam.step_id || ""} width={320}
               options={[{ label: "选择步骤", value: "" }, ...stepOptions]}
@@ -2462,7 +2517,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 size="small"
                 dataSource={step.params}
                 renderItem={(p) => {
-                  const bindKey = `${step.step_id}:${p.path}`;
+                  const bindKey = paramDraftKey(step.step_id, p);
                   const linked = incomingLink(step.step_id, p.path);
                   const currentBind = bindDraft[bindKey] || {
                     source_step_id: p.source?.step_id || linked?.source_step_id,
@@ -2509,7 +2564,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                           </Col>
                           <Col>
                             <Space size={6} wrap>
-                              <Button size="small" danger onClick={() => send({ type: "flow_update", edits: [{ op: "remove", step_id: step.step_id, param_path: p.path }] })}>删除</Button>
+                              <Button size="small" danger onClick={() => send({ type: "flow_update", edits: [paramRemoveEdit(step.step_id, p)] })}>删除</Button>
                             </Space>
                           </Col>
                         </Row>
@@ -2559,7 +2614,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                           defaultActiveKey={needsManualConfirm ? ["runtime"] : []}>
                           {hasBindingPanel && (
                             <Collapse.Panel key="binding" header={<Space><LinkOutlined />来源绑定</Space>}>
-                          <div style={{ background: "#fafafa", border: "1px solid #f0f0f0", borderRadius: 6, padding: 10 }}>
+                          <div style={{ background: "#fafafa", border: "1px solid #f0f0f0", borderRadius: 6, padding: 8 }}>
                             <Space direction="vertical" size={8} style={{ width: "100%" }}>
                               <Space wrap size={6}>
                                 <Typography.Text strong style={{ fontSize: 12 }}>{isApiOption ? "接口候选配置" : "枚举候选配置"}</Typography.Text>
@@ -2568,7 +2623,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                                 {enumOptions.length > 8 && <Tag>+{enumOptions.length - 8}</Tag>}
                               </Space>
                               {isApiOption && (
-                                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
+                                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8, alignItems: "end" }}>
                                   <FieldControl label="来源接口">
                                     <EditableComboInput
                                       value={selectBinding?.source_url || ""}
@@ -2579,7 +2634,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                                   </FieldControl>
                                   <FieldControl label="接口参数">
                                     <EditableTextArea
-                                      rows={2}
+                                      rows={1}
                                       value={queryToLines(selectBinding?.source_url || "")}
                                       placeholder="每行一个参数，如 pageNo=1"
                                       onSave={(v) => upsertSelectBinding(step, p, { source_url: mergeUrlQuery(selectBinding?.source_url || "", v) })}
@@ -2603,7 +2658,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                                   </FieldControl>
                                   <FieldControl label="配对 ID 字段">
                                     <EditableComboInput
-                                      value={selectBinding?.id_path || p.path}
+                                      value={selectBinding?.id_path || selectBinding?.path || p.path || p.key || ""}
                                       options={(step.params || []).map((x) => ({ label: `${x.path} · ${x.key}`, value: x.path }))}
                                       placeholder="默认当前字段路径，可改为隐藏 ID 字段"
                                       onSave={(v) => upsertSelectBinding(step, p, { id_path: v || null })}
@@ -2767,13 +2822,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!flowSpec) return null;
     return (
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <Alert
-          type="info"
-          showIcon
-          message="最终整体说明"
-          description="这里维护发布 Skill 时给调用方理解整体能力、输入输出和执行边界的说明，不是单个步骤说明。"
-        />
-        <Space wrap>
+        <Space wrap align="center">
+          <Typography.Text strong>最终整体说明</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            面向调用方描述整体能力、输入输出和执行边界。
+          </Typography.Text>
           <Button icon={<FileTextOutlined />} type="primary" loading={descBusy} onClick={() => { setDescBusy(true); send({ type: "business_description" }); }}>
             {flowSpec.business_description ? "重新生成整体说明" : "生成整体说明"}
           </Button>
