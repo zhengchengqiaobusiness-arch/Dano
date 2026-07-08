@@ -14,6 +14,7 @@
     fallbackText = "",
     streaming = false,
     deferMermaidErrors = false,
+    linkInlineFileReferences = false,
     onOpenFileReference = (_: { path: string; lineNumber: number }) => {},
   }: {
     class?: string;
@@ -21,6 +22,7 @@
     fallbackText?: string;
     streaming?: boolean;
     deferMermaidErrors?: boolean;
+    linkInlineFileReferences?: boolean;
     onOpenFileReference?: (payload: { path: string; lineNumber: number }) => void;
   } = $props();
 
@@ -501,7 +503,7 @@
       forceCodeRender = false;
       forceMermaidRender = false;
       await tick();
-      enhanceInlineFileReferences();
+      if (linkInlineFileReferences) enhanceInlineFileReferences();
       await renderCodeBlocks(shouldForceCode);
       await renderMermaidBlocks(shouldForceMermaid);
       enhanceCopyableBlocks();
@@ -636,7 +638,7 @@
   });
 
   $effect(() => {
-    void [content, fallbackText, streaming, deferMermaidErrors];
+    void [content, fallbackText, streaming, deferMermaidErrors, linkInlineFileReferences];
     showFallback = false;
     schedulePostProcess();
   });
