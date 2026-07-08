@@ -70,6 +70,7 @@ export class BridgeServer {
   private httpServer: http.Server | undefined;
   private handlers = new Map<string, RpcConnectionHandler>();
   private clients = new Map<string, BridgeClient>();
+  private sseStreams = new Map<string, Set<() => void>>();
   private uploadRegistry: UploadRegistry;
   private cleanupInterval: ReturnType<typeof setInterval> | undefined;
   private readonly serverInstanceId = randomUUID();
@@ -194,6 +195,9 @@ export class BridgeServer {
     for (const [clientId, handler] of this.handlers) {
       handler.dispose();
       this.eventBus.unregisterClient(clientId);
+    }
+    for (const clientId of [...this.sseStreams.keys()]) {
+      this.closeSseStreams(clientId);
     }
     this.handlers.clear();
     this.clients.clear();
@@ -638,7 +642,23 @@ export class BridgeServer {
       res.write(formatSseMessage(message));
     };
     const unregister = this.eventBus.connectClient(clientId, send);
+    let closed = false;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let removeStream = () => {};
+    const closeStream = () => {
+      if (closed) return;
+      closed = true;
+      if (heartbeat) clearInterval(heartbeat);
+      unregister();
+      removeStream();
+      res.end();
+    };
+    removeStream = this.registerSseStream(clientId, closeStream);
     const writeHeartbeat = () => {
+      if (!this.isClientRoutable(clientId)) {
+        closeStream();
+        return;
+      }
       res.write(
         formatSseMessage({
           type: "event",
@@ -650,12 +670,10 @@ export class BridgeServer {
         }),
       );
     };
-    const heartbeat = setInterval(writeHeartbeat, this.config.heartbeatInterval);
+    heartbeat = setInterval(writeHeartbeat, this.config.heartbeatInterval);
 
     req.on("close", () => {
-      clearInterval(heartbeat);
-      unregister();
-      res.end();
+      closeStream();
     });
   }
 
@@ -694,6 +712,33 @@ export class BridgeServer {
     this.handlers.delete(clientId);
     this.clients.delete(clientId);
     this.eventBus.unregisterClient(clientId);
+    this.closeSseStreams(clientId);
+  }
+
+  private isClientRoutable(clientId: string): boolean {
+    return (
+      this.clients.has(clientId) &&
+      this.handlers.has(clientId) &&
+      this.eventBus.hasActiveClientConnection(clientId)
+    );
+  }
+
+  private registerSseStream(clientId: string, close: () => void): () => void {
+    const streams = this.sseStreams.get(clientId) ?? new Set<() => void>();
+    streams.add(close);
+    this.sseStreams.set(clientId, streams);
+    return () => {
+      streams.delete(close);
+      if (streams.size === 0) this.sseStreams.delete(clientId);
+    };
+  }
+
+  private closeSseStreams(clientId: string): void {
+    const streams = this.sseStreams.get(clientId);
+    if (!streams) return;
+    for (const close of [...streams]) {
+      close();
+    }
   }
 
   private handleStaticRequest(
