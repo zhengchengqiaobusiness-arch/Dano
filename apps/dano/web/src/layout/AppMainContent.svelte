@@ -78,7 +78,7 @@
       steer?: boolean;
     }) => true,
     onAbort = () => {},
-    onLoadOlderTranscript = () => {},
+    onLoadOlderTranscript = () => false,
     onSelectModel = (_: RpcModelInfo) => {},
     onSelectThinkingLevel = (_: RpcThinkingLevel) => {},
     onToggleAutoCompaction = (_: boolean) => {},
@@ -151,7 +151,7 @@
       steer?: boolean;
     }) => boolean | Promise<boolean>;
     onAbort?: () => void;
-    onLoadOlderTranscript?: () => void;
+    onLoadOlderTranscript?: () => boolean | Promise<boolean>;
     onSelectModel?: (model: RpcModelInfo) => void;
     onSelectThinkingLevel?: (level: RpcThinkingLevel) => void;
     onToggleAutoCompaction?: (enabled: boolean) => void;

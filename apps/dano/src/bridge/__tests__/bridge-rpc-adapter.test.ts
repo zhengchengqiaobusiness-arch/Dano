@@ -1497,6 +1497,39 @@ describe("BridgeRpcAdapter", () => {
       expect(response.payload.data.hasOlder).toBe(false);
     });
 
+    it("defaults transcript pages to the latest 80 messages", async () => {
+      const messages = Array.from({ length: 95 }, (_, index) => ({
+        role: "user",
+        content: `message ${index + 1}`,
+      }));
+      (
+        context.state.sessionManager.getBranch as ReturnType<typeof vi.fn>
+      ).mockReturnValue(messages);
+      (
+        context.state.sessionManager.getEntries as ReturnType<typeof vi.fn>
+      ).mockReturnValue(messages);
+
+      const command: RpcCommand = { id: "cmd-default-page", type: "get_messages" };
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(JSON.stringify({ type: "command", payload: command })),
+      );
+
+      await new Promise(r => setTimeout(r, 10));
+
+      const sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls;
+      const lastCall = sendCalls[sendCalls.length - 1][0] as string;
+      const response = JSON.parse(lastCall);
+
+      expect(response.payload.success).toBe(true);
+      expect(response.payload.data.messages).toHaveLength(80);
+      expect(response.payload.data.messages[0].content).toBe("message 16");
+      expect(response.payload.data.messages.at(-1).content).toBe("message 95");
+      expect(response.payload.data.hasOlder).toBe(true);
+    });
+
     it("includes compaction and model changes in transcript pages", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-compact-"));
       const sessionManager = SessionManager.create(tmpDir, tmpDir);
