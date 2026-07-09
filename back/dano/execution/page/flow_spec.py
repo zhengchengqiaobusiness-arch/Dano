@@ -4074,6 +4074,47 @@ def _capability_warning(
     warnings.append(message)
 
 
+def _capability_error(
+    section: dict[str, Any],
+    *,
+    code: str,
+    message: str,
+    target: dict[str, Any],
+) -> None:
+    section.setdefault("errors", []).append({"code": code, "message": message, "target": target})
+
+
+def _capability_field_has_valid_source(
+    field: CapabilityField,
+    dependency_targets: set[tuple[str, str]],
+) -> bool:
+    if field.exposed_to_caller:
+        return True
+    if field.source:
+        return True
+    if field.source_kind and field.source_kind not in {"unknown", "user_input"}:
+        return True
+    return (field.step_id, _strip_body_prefix(field.path or field.key)) in dependency_targets
+
+
+def _capability_param_enum_issue(param: ParamField) -> str:
+    if param.type not in {"enum", "list-enum"} and param.source_kind not in _OPTION_SOURCE_KINDS:
+        return ""
+    if param.source_kind == "api_option" and (
+        (param.source or {}).get("source_step_id")
+        or (param.source or {}).get("source_url")
+        or (param.source or {}).get("url")
+    ):
+        return ""
+    if not param.enum_options:
+        return "缺少可执行枚举选项 label/value"
+    if not _enum_map_covers_recorded_value(param):
+        return "枚举 label/value 不能映射录制提交值"
+    if _enum_options_look_value_only(param):
+        return "枚举候选看起来只有内部值，缺少可展示 label"
+    return ""
+
+
 def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
     spec = ensure_recorded_goal(_sync_capability_io_schemas(spec.model_copy(deep=True)))
     _normalize_capability_references(spec)
@@ -4208,6 +4249,28 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                 checked_requests.append(req_item)
                 if req_item["manual_added"]:
                     checked_manual_requests.append(req_item)
+            for param in st.params or []:
+                enum_issue = _capability_param_enum_issue(param)
+                if not enum_issue:
+                    continue
+                msg = f"Capability `{label}` 枚举字段 `{param.key or param.path}` {enum_issue}"
+                target = {
+                    "kind": "capability_enum",
+                    "capability": label,
+                    "step_id": st.step_id,
+                    "path": param.path,
+                }
+                if cap.confirmed:
+                    cap_errors.append(msg)
+                    _capability_error(internal_section, code="capability_enum_mapping_missing", message=msg, target=target)
+                else:
+                    _capability_warning(
+                        internal_section,
+                        warnings,
+                        code="capability_enum_mapping_missing",
+                        message=msg,
+                        target=target,
+                    )
 
         for ref in cap.request_refs or []:
             ref_id = _capability_ref_key(ref.request_id)
@@ -4296,27 +4359,35 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                 )
             if (
                 field.scope in {"request_field", "internal"}
-                and not field.exposed_to_caller
-                and field.source_kind in {"unknown", "", "user_input"}
-                and (field.step_id, _strip_body_prefix(field.path or field.key)) not in dependency_targets
-                and not field.source
+                and not _capability_field_has_valid_source(field, dependency_targets)
             ):
-                _capability_warning(
-                    internal_section,
-                    warnings,
-                    code="capability_field_source_missing",
-                    message=f"Capability `{label}` 内部字段 `{field_name}` 缺少上游响应、系统值或固定来源",
-                    target={"kind": "capability_field", "capability": label, "field_id": field.field_id, "path": field.path},
-                )
+                msg = f"Capability `{label}` 内部字段 `{field_name}` 缺少上游响应、系统值或固定来源"
+                target = {"kind": "capability_field", "capability": label, "field_id": field.field_id, "path": field.path}
+                if cap.confirmed and field.required:
+                    cap_errors.append(msg)
+                    _capability_error(internal_section, code="capability_field_source_missing", message=msg, target=target)
+                else:
+                    _capability_warning(
+                        internal_section,
+                        warnings,
+                        code="capability_field_source_missing",
+                        message=msg,
+                        target=target,
+                    )
             if field.exposed_to_caller and _capability_field_looks_internal(field):
                 msg = f"Capability `{label}` 字段 `{field_name}` 看起来是内部 ID/短码/状态码，不能直接暴露给调用方"
-                _capability_warning(
-                    internal_section,
-                    warnings,
-                    code="capability_internal_field_exposed",
-                    message=msg,
-                    target={"kind": "capability_field", "capability": label, "field_id": field.field_id, "path": field.path},
-                )
+                target = {"kind": "capability_field", "capability": label, "field_id": field.field_id, "path": field.path}
+                if cap.confirmed:
+                    cap_errors.append(msg)
+                    _capability_error(internal_section, code="capability_internal_field_exposed", message=msg, target=target)
+                else:
+                    _capability_warning(
+                        internal_section,
+                        warnings,
+                        code="capability_internal_field_exposed",
+                        message=msg,
+                        target=target,
+                    )
 
         for dep in cap.dependencies or []:
             source = dep.source or {}
@@ -4362,13 +4433,19 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
             if not isinstance(mapping, dict):
                 output_entry.update({"interpretable": False, "reason": "not_object"})
                 internal_section["outputs"].append(output_entry)
-                _capability_warning(
-                    internal_section,
-                    warnings,
-                    code="capability_output_mapping_invalid",
-                    message=f"Capability `{label}` output_mapping[{idx}] 不是对象，无法解释输出",
-                    target={"kind": "capability_output", "capability": label, "index": idx},
-                )
+                msg = f"Capability `{label}` output_mapping[{idx}] 不是对象，无法解释输出"
+                target = {"kind": "capability_output", "capability": label, "index": idx}
+                if cap.confirmed:
+                    cap_errors.append(msg)
+                    _capability_error(internal_section, code="capability_output_mapping_invalid", message=msg, target=target)
+                else:
+                    _capability_warning(
+                        internal_section,
+                        warnings,
+                        code="capability_output_mapping_invalid",
+                        message=msg,
+                        target=target,
+                    )
                 continue
             out_step_id = str(mapping.get("step_id") or mapping.get("from") or "")
             out_path = str(mapping.get("response_path") or mapping.get("path") or mapping.get("field") or "")
@@ -4403,13 +4480,19 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
         if not cap.output_mapping and not cap.output_schema and not any(
             isinstance(n, dict) and n.get("type") == "return" for n in _iter_capability_nodes(cap.nodes or [])
         ):
-            _capability_warning(
-                internal_section,
-                warnings,
-                code="capability_output_missing",
-                message=f"Capability `{label}` 缺少 output_schema/output_mapping/return 输出说明",
-                target={"kind": "capability", "capability": label},
-            )
+            msg = f"Capability `{label}` 缺少 output_schema/output_mapping/return 输出说明"
+            target = {"kind": "capability", "capability": label}
+            if cap.confirmed:
+                cap_errors.append(msg)
+                _capability_error(internal_section, code="capability_output_missing", message=msg, target=target)
+            else:
+                _capability_warning(
+                    internal_section,
+                    warnings,
+                    code="capability_output_missing",
+                    message=msg,
+                    target=target,
+                )
 
         input_props = ((cap.input_schema or {}).get("properties") or {})
         flat_nodes = _iter_capability_nodes(cap.nodes or [])
@@ -4538,6 +4621,9 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
         if cap.confirmed and cap.nodes and not has_return_node:
             cap_warnings.append(f"Capability `{label}` 已确认但没有 return 节点，外部调用只能拿到底层原始响应")
 
+        if internal_section.get("errors"):
+            capability_internal.setdefault("errors", []).extend(internal_section.get("errors") or [])
+
         if not cap.confirmed:
             errors.extend(cap_errors)
             warnings.extend(cap_warnings)
@@ -4663,6 +4749,30 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
             message="Skill 层还没有 confirmed capability，P1 仅作为发布风险提示",
             target={"kind": "flow", "flow_id": spec.flow_id},
         )
+    confirmed_caps = [c for c in caps if c.confirmed]
+    strict_skill_level = bool((spec.meta or {}).get("publish_gate") or (spec.meta or {}).get("strict_skill_level"))
+    if confirmed_caps:
+        skill_issues: list[tuple[str, str]] = []
+        if not str(spec.business_description or "").strip():
+            skill_issues.append(("skill_description_missing", "Skill 缺少面向调用方的整体说明"))
+        if len(confirmed_caps) > 1 and not (spec.capability_relations or (spec.meta or {}).get("default_capability_order")):
+            skill_issues.append(("skill_default_call_order_missing", "Skill 有多个 confirmed capability，但缺少默认调用顺序或能力关系"))
+        failure_text = " ".join([
+            str((spec.meta or {}).get("failure_handling") or ""),
+            str(spec.business_description or ""),
+            *[str(x) for cap in confirmed_caps for x in (cap.skill_responsibilities or [])],
+            *[str(x) for cap in confirmed_caps for x in (cap.preconditions or [])],
+        ])
+        if not re.search(r"失败|错误|异常|重试|failed|error|exception", failure_text, re.I):
+            skill_issues.append(("skill_failure_handling_missing", "Skill 缺少失败处理或异常边界说明"))
+        for code, message in skill_issues:
+            target = {"kind": "flow", "flow_id": spec.flow_id}
+            if strict_skill_level:
+                entry = {"code": code, "message": message, "target": target}
+                skill_level.setdefault("errors", []).append(entry)
+                errors.append(message)
+            else:
+                _capability_warning(skill_level, warnings, code=code, message=message, target=target)
     capability_internal["passed"] = not capability_internal["errors"]
     capability_relations["passed"] = not capability_relations["errors"]
     skill_level["passed"] = not skill_level["errors"]

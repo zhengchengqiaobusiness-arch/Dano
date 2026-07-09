@@ -1696,6 +1696,117 @@ def test_capability_validator_reports_deep_p1_field_and_loop_findings():
     assert cap_report["capability_internal"]["passed"] is True
 
 
+def test_confirmed_capability_blocks_enum_without_label_value_mapping():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            params=[ParamField(
+                path="type",
+                key="类型",
+                value="2",
+                type="enum",
+                required=True,
+                source_kind="manual_enum",
+                enum_options=["1", "2", "3"],
+            )],
+            response_json={"code": 0},
+        )],
+        capabilities=[FlowCapability(
+            name="submit_leave",
+            kind="submit",
+            step_ids=["submit"],
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+            output_mapping=[{"kind": "final_response", "step_id": "submit", "response_path": "response"}],
+            confirmed=True,
+            requires_human_confirm=False,
+        )],
+    )
+
+    report = validate_flow_spec(spec)
+    text = _report_text(report)
+
+    assert report["passed"] is False
+    assert "capability_enum_mapping_missing" in text
+
+
+def test_confirmed_capability_blocks_required_internal_request_field_without_source():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            params=[ParamField(path="processDefinitionId", key="processDefinitionId", value="p1", type="string", required=True)],
+            response_json={"code": 0},
+        )],
+        capabilities=[FlowCapability(
+            name="submit_leave",
+            kind="submit",
+            step_ids=["submit"],
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+            request_fields=[CapabilityField(
+                field_id="proc",
+                scope="request_field",
+                step_id="submit",
+                path="processDefinitionId",
+                key="processDefinitionId",
+                type="string",
+                required=True,
+                exposed_to_caller=False,
+                source_kind="unknown",
+                locked=True,
+            )],
+            output_mapping=[{"kind": "final_response", "step_id": "submit", "response_path": "response"}],
+            confirmed=True,
+            requires_human_confirm=False,
+        )],
+    )
+
+    report = validate_flow_spec(spec)
+    text = _report_text(report)
+
+    assert report["passed"] is False
+    assert "capability_field_source_missing" in text
+
+
+def test_strict_skill_level_blocks_missing_description_and_failure_handling():
+    spec = FlowSpec(
+        flow_id="f",
+        meta={"publish_gate": True},
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            response_json={"code": 0},
+        )],
+        capabilities=[FlowCapability(
+            name="submit_form",
+            kind="submit",
+            step_ids=["submit"],
+            nodes=[
+                {"id": "call_submit", "type": "call", "step_id": "submit"},
+                {"id": "return_result", "type": "return", "from": "submit", "path": "response"},
+            ],
+            output_mapping=[{"kind": "final_response", "step_id": "submit", "response_path": "response"}],
+            confirmed=True,
+            requires_human_confirm=False,
+        )],
+    )
+
+    report = validate_flow_spec(spec)
+    skill_level = report["capability_validation"]["skill_level"]
+    codes = {item["code"] for item in skill_level["errors"]}
+
+    assert report["passed"] is False
+    assert {"skill_description_missing", "skill_failure_handling_missing"} <= codes
+
+
 def test_unconfirmed_capability_relation_type_mismatch_is_p1_warning_not_publish_gate():
     spec = FlowSpec(
         flow_id="f",
