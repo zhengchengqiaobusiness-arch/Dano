@@ -2088,6 +2088,80 @@ def _capability_views_locked(cap: FlowCapability) -> bool:
     return any(getattr(f, "locked", False) for f in fields) or any(getattr(d, "locked", False) for d in deps)
 
 
+def _capability_field_merge_key(field: CapabilityField) -> tuple[str, str, str, str]:
+    return (
+        field.scope or "",
+        field.step_id or "",
+        _strip_body_prefix(field.path or ""),
+        field.key or field.display_name or field.field_id or "",
+    )
+
+
+def _merge_capability_scoped_fields(
+    derived: list[CapabilityField],
+    existing: list[CapabilityField],
+) -> list[CapabilityField]:
+    """Merge derived fields with user-locked capability scoped edits.
+
+    P2 keeps steps/links as executable truth, but capability scoped fields must not
+    lose user/LLM corrections. Locked existing fields override matching derived
+    entries; custom locked fields that no longer match a step remain visible.
+    """
+    out = [item.model_copy(deep=True) for item in derived]
+    by_key = {_capability_field_merge_key(item): idx for idx, item in enumerate(out)}
+    by_id = {item.field_id: idx for idx, item in enumerate(out) if item.field_id}
+    for item in existing or []:
+        if not item.locked:
+            continue
+        copied = item.model_copy(deep=True)
+        idx = by_id.get(copied.field_id)
+        if idx is None:
+            idx = by_key.get(_capability_field_merge_key(copied))
+        if idx is None:
+            out.append(copied)
+            by_key[_capability_field_merge_key(copied)] = len(out) - 1
+            if copied.field_id:
+                by_id[copied.field_id] = len(out) - 1
+        else:
+            out[idx] = copied
+    return out
+
+
+def _capability_dependency_merge_key(dep: CapabilityDependency) -> tuple[str, str, str, str]:
+    source = dep.source or {}
+    target = dep.target or {}
+    return (
+        str(source.get("step_id") or ""),
+        _strip_body_prefix(str(source.get("path") or "")),
+        str(target.get("step_id") or ""),
+        _strip_body_prefix(str(target.get("path") or "")),
+    )
+
+
+def _merge_capability_scoped_dependencies(
+    derived: list[CapabilityDependency],
+    existing: list[CapabilityDependency],
+) -> list[CapabilityDependency]:
+    out = [item.model_copy(deep=True) for item in derived]
+    by_key = {_capability_dependency_merge_key(item): idx for idx, item in enumerate(out)}
+    by_id = {item.dependency_id: idx for idx, item in enumerate(out) if item.dependency_id}
+    for item in existing or []:
+        if not item.locked:
+            continue
+        copied = item.model_copy(deep=True)
+        idx = by_id.get(copied.dependency_id)
+        if idx is None:
+            idx = by_key.get(_capability_dependency_merge_key(copied))
+        if idx is None:
+            out.append(copied)
+            by_key[_capability_dependency_merge_key(copied)] = len(out) - 1
+            if copied.dependency_id:
+                by_id[copied.dependency_id] = len(out) - 1
+        else:
+            out[idx] = copied
+    return out
+
+
 def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
     """从旧 steps/links/step_ids 派生能力内字段/依赖视图。"""
     ensure_request_facts(spec)
@@ -2109,11 +2183,27 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
                     used_by_request[ref.request_id].append(cap_name)
                 if ref.step_id:
                     materialized_by_request[ref.request_id] = ref.step_id
-        if _capability_views_locked(cap):
-            continue
         inputs: dict[str, CapabilityField] = {}
         request_fields: list[CapabilityField] = []
         internal_fields: list[CapabilityField] = []
+        old_all_fields = list(cap.fields or [])
+        old_inputs = list(cap.inputs or [])
+        old_request_fields = list(cap.request_fields or [])
+        old_internal_fields = list(cap.internal_fields or [])
+        old_computed_fields = list(cap.computed_fields or [])
+        old_outputs = list(cap.outputs or [])
+        old_dependencies = list(cap.dependencies or [])
+        for old_field in old_all_fields:
+            if old_field.scope == "input":
+                old_inputs.append(old_field)
+            elif old_field.scope == "request_field":
+                old_request_fields.append(old_field)
+            elif old_field.scope == "internal":
+                old_internal_fields.append(old_field)
+            elif old_field.scope == "output":
+                old_outputs.append(old_field)
+            else:
+                old_computed_fields.append(old_field)
         request_id_by_step = {ref.step_id: ref.request_id for ref in cap.request_refs}
         for st in step_objs:
             request_id = request_id_by_step.get(st.step_id, "")
@@ -2124,15 +2214,17 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
                     inputs.setdefault(key, _capability_field_from_param(st, param, scope="input", request_id=request_id))
                 else:
                     internal_fields.append(_capability_field_from_param(st, param, scope="internal", request_id=request_id))
-        cap.inputs = list(inputs.values())
-        cap.request_fields = request_fields
-        cap.internal_fields = internal_fields
-        cap.dependencies = [
+        cap.inputs = _merge_capability_scoped_fields(list(inputs.values()), old_inputs)
+        cap.request_fields = _merge_capability_scoped_fields(request_fields, old_request_fields)
+        cap.internal_fields = _merge_capability_scoped_fields(internal_fields, old_internal_fields)
+        cap.computed_fields = _merge_capability_scoped_fields(list(cap.computed_fields or []), old_computed_fields)
+        derived_dependencies = [
             _capability_dependency_from_link(link)
             for link in spec.links
             if link.source_step_id in cap_step_ids and link.target_step_id in cap_step_ids
         ]
-        cap.outputs = _capability_output_fields(cap)
+        cap.dependencies = _merge_capability_scoped_dependencies(derived_dependencies, old_dependencies)
+        cap.outputs = _merge_capability_scoped_fields(_capability_output_fields(cap), old_outputs)
         cap.fields = [
             *(cap.inputs or []),
             *(cap.request_fields or []),
@@ -7374,6 +7466,70 @@ def _auto_fix_target_capability_name(spec: FlowSpec) -> str:
     return caps[0].name if caps else "submit_batch"
 
 
+def _capability_sequence_window(spec: FlowSpec, cap: FlowCapability) -> tuple[float | None, float | None]:
+    by_id = {s.step_id: s for s in spec.steps}
+    values = [
+        seq for seq in (
+            _step_sequence(by_id[sid])
+            for sid in _capability_node_step_ids(cap)
+            if sid in by_id
+        )
+        if seq is not None
+    ]
+    if not values:
+        return None, None
+    return min(values), max(values)
+
+
+def _auto_fix_target_capability_for_request(spec: FlowSpec, item: dict[str, Any]) -> str:
+    """Choose the capability that should own a newly promoted captured request."""
+    caps = list(spec.capabilities or build_default_flow_capabilities(spec))
+    if not caps:
+        return "submit_batch"
+    role = str(item.get("role") or "")
+    method = str(item.get("method") or "").upper()
+    seq = _entry_sequence(item)
+
+    def cap_score(cap: FlowCapability) -> float:
+        score = 0.0
+        if cap.kind in {"submit_batch", "submit"}:
+            if role in {"submit_anchor", "business_write"} or method in _WRITE_METHODS:
+                score += 90
+            elif role in {"business_get", "read_context"}:
+                score += 45
+            elif role == "read_option":
+                score += 20
+        elif cap.kind == "query_status":
+            if role in {"business_get", "read_context"} and method not in _WRITE_METHODS:
+                score += 75
+        elif cap.kind == "list_options":
+            if role == "read_option":
+                score += 85
+        elif cap.kind == "validate_batch":
+            if role in {"business_get", "read_context"}:
+                score += 55
+
+        start, end = _capability_sequence_window(spec, cap)
+        if seq is not None and start is not None and end is not None:
+            if start <= seq <= end:
+                score += 35
+            elif seq < start:
+                distance = start - seq
+                score += max(0, 24 - min(distance, 24))
+            else:
+                distance = seq - end
+                score += max(0, 16 - min(distance, 16))
+        if cap.confirmed:
+            score += 3
+        score += float(cap.confidence or 0)
+        return score
+
+    best = max(caps, key=cap_score)
+    if best.name:
+        return best.name
+    return _auto_fix_target_capability_name(spec)
+
+
 async def auto_fix_flow_spec(
     spec: FlowSpec,
     *,
@@ -7394,7 +7550,7 @@ async def auto_fix_flow_spec(
         cap_report = report.get("capability_validation") or {}
         for item in cap_report.get("unused_high_confidence_requests") or []:
             role = item.get("role") or ""
-            if role not in {"submit_anchor", "business_write", "business_get", "read_context"}:
+            if role not in {"submit_anchor", "business_write", "business_get", "read_context", "read_option"}:
                 continue
             if not current.capabilities and not current.steps:
                 edits.append({
@@ -7405,7 +7561,7 @@ async def auto_fix_flow_spec(
                 continue
             edits.append({
                 "op": "add_capability_step",
-                "capability_name": _auto_fix_target_capability_name(current),
+                "capability_name": _auto_fix_target_capability_for_request(current, item),
                 "request_id": item.get("request_id") or "",
                 "request_index": item.get("request_index"),
             })

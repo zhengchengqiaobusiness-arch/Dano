@@ -81,6 +81,16 @@ interface FlowLinkData {
   target_step_id: string; target_path: string;
   confirmed?: boolean; confidence?: number; param_name?: string | null; reason?: string;
 }
+interface FlowCapabilityFieldData {
+  field_id?: string; scope?: string; display_name?: string; path?: string; key?: string; type?: string;
+  required?: boolean; request_id?: string; request_index?: number | string | null; step_id?: string;
+  source_kind?: string; source?: any; exposed_to_caller?: boolean; confidence?: number;
+  confirmed?: boolean; locked?: boolean; evidence?: any[];
+}
+interface FlowCapabilityDependencyData {
+  dependency_id?: string; type?: string; source?: Record<string, any>; target?: Record<string, any>;
+  confidence?: number; confirmed?: boolean; locked?: boolean; reason?: string; evidence?: Record<string, any>;
+}
 interface FlowCapabilityData {
   name?: string; title?: string; intent?: string; kind?: string;
   step_ids?: string[];
@@ -89,6 +99,14 @@ interface FlowCapabilityData {
   output_schema?: Record<string, any>;
   output_mapping?: Array<Record<string, any>>;
   preconditions?: Array<Record<string, any>>;
+  fields?: FlowCapabilityFieldData[];
+  inputs?: FlowCapabilityFieldData[];
+  request_fields?: FlowCapabilityFieldData[];
+  internal_fields?: FlowCapabilityFieldData[];
+  computed_fields?: FlowCapabilityFieldData[];
+  outputs?: FlowCapabilityFieldData[];
+  dependencies?: FlowCapabilityDependencyData[];
+  request_refs?: Array<Record<string, any>>;
   confirmed?: boolean; confidence?: number; requires_human_confirm?: boolean;
   evidence?: Array<Record<string, any>>;
   caller_responsibilities?: string[]; skill_responsibilities?: string[];
@@ -2114,6 +2132,197 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }));
     return [...stepItems, ...reqItems];
   }
+
+  function capabilityParamRows(cap: FlowCapabilityData) {
+    const stepSet = new Set(cap.step_ids || []);
+    const scoped = cap.request_fields || [];
+    const rows: Array<{ step: FlowStepData; param: FlowParam; field?: FlowCapabilityFieldData }> = [];
+    const seen = new Set<string>();
+    for (const field of scoped) {
+      const step = field.step_id ? stepById[field.step_id] : undefined;
+      if (!step) continue;
+      const param = (step.params || []).find((p) => {
+        const samePath = stripBodyPrefix(p.path || "") === stripBodyPrefix(field.path || "");
+        const sameKey = !!field.key && p.key === field.key;
+        return samePath || sameKey;
+      });
+      if (!param) continue;
+      const key = `${step.step_id}:${param.path}:${param.key}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({ step, param, field });
+    }
+    for (const step of flowSpec?.steps || []) {
+      if (!stepSet.has(step.step_id)) continue;
+      for (const param of step.params || []) {
+        const key = `${step.step_id}:${param.path}:${param.key}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rows.push({ step, param });
+      }
+    }
+    return rows;
+  }
+
+  function capabilityLinks(cap: FlowCapabilityData) {
+    const stepSet = new Set(cap.step_ids || []);
+    return (flowSpec?.links || []).filter((link) => stepSet.has(link.source_step_id) && stepSet.has(link.target_step_id));
+  }
+
+  function capabilityFieldCounts(cap: FlowCapabilityData) {
+    const rows = capabilityParamRows(cap);
+    const callerInputs = rows.filter(({ param }) => param.category === "user_param" && param.exposed_to_user !== false).length;
+    const runtime = rows.filter(({ param }) => param.category === "runtime_var").length;
+    const enums = rows.filter(({ param }) => param.type === "enum" || param.type === "list-enum" || OPTION_SOURCE_KINDS.includes(param.source_kind || "")).length;
+    return { total: rows.length, callerInputs, runtime, enums };
+  }
+
+  function renderCapabilityFieldEditor(cap: FlowCapabilityData) {
+    const rows = capabilityParamRows(cap);
+    if (!rows.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="该能力还没有字段" />;
+    return (
+      <List
+        size="small"
+        dataSource={rows}
+        rowKey={({ step, param }) => `${step.step_id}:${param.path}:${param.key}`}
+        renderItem={({ step, param }) => {
+          const linked = incomingLink(step.step_id, param.path);
+          const enumOptions = enumOptionsForParam(step, param);
+          const enumSelectOptions = enumOptions.map((x) => ({ label: x, value: x }));
+          return (
+            <List.Item style={{ padding: "10px 0" }}>
+              <div style={{ width: "100%", border: "1px solid #f0f0f0", borderRadius: 6, padding: 10, background: "#fff" }}>
+                <Space wrap size={6}>
+                  <Tag>{step.name || fallbackStepName(step.method, step.path)}</Tag>
+                  <Tag color={param.category === "runtime_var" ? "gold" : param.category === "system_const" ? "default" : "blue"}>
+                    {param.path}
+                  </Tag>
+                  <Tag>{optionLabel(CATEGORY_OPTIONS, param.category || "user_param")}</Tag>
+                  <Tag>{optionLabel(SOURCE_KIND_OPTIONS, normalizeSourceKindForUi(param.source_kind) || "unknown")}</Tag>
+                  {linked && <Tag color="cyan">依赖字段</Tag>}
+                  {enumOptions.length > 0 && <Tag color="purple">枚举 {enumOptions.length}</Tag>}
+                  {param.need_human_confirm && <Tag color="warning">待确认</Tag>}
+                </Space>
+                <Typography.Text type="secondary" style={{ display: "block", marginTop: 6, fontSize: 12 }}>
+                  {paramSourceText(step, param, linked)}
+                </Typography.Text>
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))",
+                  gap: 10,
+                  alignItems: "end",
+                  marginTop: 10,
+                }}>
+                  <FieldControl label="名称">
+                    <EditableText value={param.key} width="100%" onSave={(v) => v && updateParam(step.step_id, param, "key", v)} />
+                  </FieldControl>
+                  <FieldControl label="路径">
+                    <EditableText value={param.path} width="100%" onSave={(v) => v && updateParam(step.step_id, param, "path", v)} />
+                  </FieldControl>
+                  <FieldControl label="默认值">
+                    {enumOptions.length > 0 ? (
+                      <EnumValueInput value={String(param.value ?? "")} width="100%"
+                        options={enumSelectOptions}
+                        onSave={(v) => updateParam(step.step_id, param, "value", v)} />
+                    ) : (
+                      <EditableText value={String(param.value ?? "")} width="100%" onSave={(v) => updateParam(step.step_id, param, "value", v)} />
+                    )}
+                  </FieldControl>
+                  <FieldControl label="类型">
+                    <NativeSelect value={param.type} width="100%" options={PARAM_TYPE_OPTIONS}
+                      onChange={(v) => updateParamType(step, param, v)} />
+                  </FieldControl>
+                  <FieldControl label="分类">
+                    <NativeSelect value={param.category || "user_param"} width="100%" options={CATEGORY_OPTIONS}
+                      onChange={(v) => updateParamCategory(step.step_id, param, v)} />
+                  </FieldControl>
+                  <FieldControl label="来源">
+                    <NativeSelect
+                      value={normalizeSourceKindForUi(param.source_kind) || defaultSourceForCategory(param.category || "user_param")}
+                      width="100%"
+                      options={sourceOptionsForCategory(param.category)}
+                      onChange={(v) => updateParamSourceKind(step.step_id, param, v)}
+                    />
+                  </FieldControl>
+                  <FieldControl label="必填">
+                    <Checkbox checked={!!param.required} onChange={(e) => updateParam(step.step_id, param, "required", e.target.checked)}>必填</Checkbox>
+                  </FieldControl>
+                  <FieldControl label="暴露">
+                    <Checkbox checked={!!param.exposed_to_user} onChange={(e) => updateParam(step.step_id, param, "exposed_to_user", e.target.checked)}>给调用方</Checkbox>
+                  </FieldControl>
+                </div>
+              </div>
+            </List.Item>
+          );
+        }}
+      />
+    );
+  }
+
+  function renderCapabilityDependencyEditor(cap: FlowCapabilityData) {
+    const links = capabilityLinks(cap);
+    if (!links.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="该能力还没有内部依赖" />;
+    return (
+      <List
+        size="small"
+        dataSource={links}
+        rowKey={(link) => link.link_id}
+        renderItem={(link) => {
+          const editing = editingLink[link.link_id];
+          const sourceStep = stepById[link.source_step_id];
+          const targetStep = stepById[link.target_step_id];
+          return (
+            <List.Item
+              style={{ paddingLeft: 0, paddingRight: 0 }}
+              actions={editing ? [
+                <Button key="save" size="small" type="primary" icon={<SaveOutlined />} onClick={() => saveLinkEdits(link.link_id)}>保存</Button>,
+                <Button key="cancel" size="small" onClick={() => cancelEditLink(link.link_id)}>取消</Button>,
+              ] : [
+                <Button key="edit" size="small" icon={<SettingOutlined />} onClick={() => startEditLink(link)}>编辑</Button>,
+                <Checkbox key="cf" checked={!!link.confirmed}
+                  onChange={(e) => send({ type: "flow_update", edits: [{ op: "update", link_id: link.link_id, field: "confirmed", value: e.target.checked }] })}>已确认</Checkbox>,
+                <Button key="rm" size="small" danger onClick={() => send({ type: "flow_update", edits: [{ op: "remove", link_id: link.link_id, reset_target: true }] })}>删除</Button>,
+              ]}
+            >
+              {editing ? (
+                <Row gutter={[8, 8]} style={{ width: "100%" }} align="middle">
+                  <Col span={6}><NativeSelect value={editing.source_step_id || ""} width="100%"
+                    options={[{ label: "选择来源步骤", value: "" }, ...stepOptions]}
+                    onChange={(v) => setEditingLink((d) => ({ ...d, [link.link_id]: { ...editing, source_step_id: v, source_path: "" } }))} /></Col>
+                  <Col span={6}><ComboInput value={editing.source_path || ""} width="100%"
+                    options={[{ label: "选择来源响应字段", value: "" }, ...sourcePathOptions(editing.source_step_id)]}
+                    placeholder="选择或输入来源响应字段"
+                    onChange={(v) => setEditingLink((d) => ({ ...d, [link.link_id]: { ...editing, source_path: v } }))} /></Col>
+                  <Col span={5}><NativeSelect value={editing.target_step_id || ""} width="100%"
+                    options={[{ label: "选择目标步骤", value: "" }, ...stepOptions]}
+                    onChange={(v) => setEditingLink((d) => ({ ...d, [link.link_id]: { ...editing, target_step_id: v, target_path: "" } }))} /></Col>
+                  <Col span={5}><ComboInput value={stripBodyPrefix(editing.target_path) || ""} width="100%"
+                    options={[{ label: "选择目标字段", value: "" }, ...targetPathOptions(editing.target_step_id)]}
+                    placeholder="选择或输入目标字段"
+                    onChange={(v) => setEditingLink((d) => ({ ...d, [link.link_id]: { ...editing, target_path: v } }))} /></Col>
+                  <Col span={2}><Checkbox checked={!!editing.confirmed}
+                    onChange={(e) => setEditingLink((d) => ({ ...d, [link.link_id]: { ...editing, confirmed: e.target.checked } }))}>确认</Checkbox></Col>
+                </Row>
+              ) : (
+                <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                  <Space wrap>
+                    <Tag color="blue">{sourceStep?.name || sourceStep?.path || link.source_step_id}</Tag>
+                    <Typography.Text code>{link.source_path}</Typography.Text>
+                    <BranchesOutlined />
+                    <Tag color="green">{targetStep?.name || targetStep?.path || link.target_step_id}</Tag>
+                    <Typography.Text code>{stripBodyPrefix(link.target_path)}</Typography.Text>
+                    {link.confirmed ? <Tag color="success">已确认</Tag> : <Tag color="warning">待确认</Tag>}
+                  </Space>
+                  {link.reason && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{link.reason}</Typography.Text>}
+                </Space>
+              )}
+            </List.Item>
+          );
+        }}
+      />
+    );
+  }
+
   function renderCapabilityComposerPanel() {
     if (!flowSpec) return null;
     const capabilities = flowSpec.capabilities || [];
@@ -2123,6 +2332,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         <Space wrap>
           <Tooltip title="基于当前能力、接口和人工修改继续规划，并同步修正字段绑定、枚举来源、依赖和接口闭包">
             <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy || autoFixBusy} onClick={orchestrateFlow}>生成/优化能力</Button>
+          </Tooltip>
+          <Tooltip title="按校验报告自动补齐接口闭包、字段来源、枚举绑定和依赖关系；不覆盖已确认人工编辑">
+            <Button icon={<ReloadOutlined />} loading={autoFixBusy} onClick={autoFixFlow}>一键自动修正</Button>
           </Tooltip>
           <Button icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
           <Button icon={<RobotOutlined />} loading={namingBusy} onClick={() => { setNamingBusy(true); send({ type: "step_naming" }); }}>命名步骤</Button>
@@ -2134,6 +2346,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               const addOptions = capabilityStepSelectOptions(cap);
               const capSteps = stepIds.map((sid) => stepById[sid]).filter(Boolean);
               const capParams = capSteps.flatMap((st) => st.params || []);
+              const counts = capabilityFieldCounts(cap);
+              const depCount = capabilityLinks(cap).length;
               const derivedInputSchema = {
                 type: "object",
                 properties: Object.fromEntries(capParams
@@ -2152,6 +2366,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     <Space wrap>
                       <Tag color={cap.confirmed ? "success" : "warning"}>{cap.confirmed ? "已确认" : "未确认"}</Tag>
                       <Tag color="blue">{optionLabel(kindOptions, cap.kind || "submit")}</Tag>
+                      <Tag>{stepIds.length} 接口</Tag>
+                      <Tag>{counts.total} 字段</Tag>
+                      {counts.callerInputs > 0 && <Tag color="cyan">{counts.callerInputs} 调用方输入</Tag>}
+                      {counts.enums > 0 && <Tag color="purple">{counts.enums} 枚举</Tag>}
+                      {depCount > 0 && <Tag color="geekblue">{depCount} 依赖</Tag>}
                       {typeof cap.confidence === "number" && <Tag color={confidenceColor(cap.confidence)}>置信度 {confidencePercent(cap.confidence)}</Tag>}
                       <Typography.Text strong>{cap.title || cap.name || `能力 ${idx + 1}`}</Typography.Text>
                       {cap.name && <Typography.Text code>{cap.name}</Typography.Text>}
@@ -2236,6 +2455,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                       )}
                     </Space>
                     <Collapse ghost size="small">
+                      <Collapse.Panel key="fields" header={`能力字段 ${counts.total}`}>
+                        {renderCapabilityFieldEditor(cap)}
+                      </Collapse.Panel>
+                      <Collapse.Panel key="deps" header={`能力依赖 ${depCount}`}>
+                        {renderCapabilityDependencyEditor(cap)}
+                      </Collapse.Panel>
                       <Collapse.Panel key="io" header="输入输出">
                         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 }}>
                           <FieldControl label="输入 JSON Schema">
@@ -2298,7 +2523,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           type="info"
           showIcon
           message="业务能力编排"
-          description="这里展示外部调用方看到的能力层；步骤、字段、依赖和候选请求仍在各自面板维护。"
+          description="这里展示外部调用方看到的能力层；每个能力内部拥有自己的接口、字段、依赖、输入输出和返回约定。"
         />
         <List
           dataSource={capabilities}

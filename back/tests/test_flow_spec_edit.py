@@ -11,7 +11,7 @@ from dano.execution.page.flow_spec import (
     add_llm_review_recommendations, refresh_review_items, flow_spec_to_api_request,
     capability_to_flow_spec_view, compile_capability_to_api_request, flow_spec_capability_contracts,
     flow_spec_to_client,
-    auto_fix_flow_spec, run_recording_pi_loop,
+    auto_fix_flow_spec, run_recording_pi_loop, sync_flow_spec_models,
 )
 
 
@@ -1048,6 +1048,131 @@ def test_auto_fix_promotes_high_confidence_request_into_capability_closure():
     assert fixed.capabilities
     assert fixed.steps[0].step_id in fixed.capabilities[0].step_ids
     assert "auto_fix_history" in fixed.meta
+
+
+def test_capability_scoped_view_preserves_locked_field_while_deriving_new_fields():
+    spec = FlowSpec(
+        flow_id="cap-locked-field",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            params=[
+                ParamField(path="type", key="type", label="type", value="2", type="number", required=True),
+                ParamField(path="reason", key="reason", label="reason", value="事由", type="string", required=True),
+            ],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            kind="submit_batch",
+            step_ids=["submit"],
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+            request_fields=[CapabilityField(
+                field_id="request_field:submit:type",
+                scope="request_field",
+                display_name="请假类型",
+                path="type",
+                key="leave_type",
+                type="enum",
+                step_id="submit",
+                locked=True,
+                confirmed=True,
+            )],
+        )],
+    )
+
+    synced = sync_flow_spec_models(spec, prefer_request_facts=False)
+    fields = synced.capabilities[0].request_fields
+
+    locked = next(f for f in fields if f.path == "type")
+    assert locked.key == "leave_type"
+    assert locked.display_name == "请假类型"
+    assert locked.type == "enum"
+    assert locked.locked is True
+    assert any(f.path == "reason" and f.key == "reason" for f in fields)
+
+
+def test_auto_fix_routes_option_and_status_requests_to_matching_capabilities():
+    spec = FlowSpec(
+        flow_id="cap-route-requests",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            content_type="application/json",
+            body_source='{"type":"2"}',
+            source_meta={"request_index": 30, "sequence": 30},
+            params=[ParamField(path="type", key="type", value="2", type="enum", required=True)],
+        )],
+        capabilities=[
+            FlowCapability(
+                name="list_options",
+                kind="list_options",
+                step_ids=[],
+                nodes=[],
+                confirmed=False,
+            ),
+            FlowCapability(
+                name="query_status",
+                kind="query_status",
+                step_ids=[],
+                nodes=[],
+                confirmed=False,
+            ),
+            FlowCapability(
+                name="submit_batch",
+                kind="submit_batch",
+                step_ids=["submit"],
+                nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+                confirmed=False,
+            ),
+        ],
+        meta={"request_graph": {"all_requests": [
+            {
+                "request_index": 10,
+                "request_id": "req-options",
+                "sequence": 10,
+                "method": "GET",
+                "url": "https://oa.example.com/api/options",
+                "path": "/api/options",
+                "role": "read_option",
+                "confidence": 0.96,
+                "response_status": 200,
+                "response_json": {"data": [{"label": "病假", "value": "2"}]},
+            },
+            {
+                "request_index": 20,
+                "request_id": "req-status",
+                "sequence": 20,
+                "method": "GET",
+                "url": "https://oa.example.com/api/status",
+                "path": "/api/status",
+                "role": "business_get",
+                "confidence": 0.96,
+                "response_status": 200,
+                "response_json": {"data": {"status": "draft"}},
+            },
+        ]}},
+    )
+
+    fixed = asyncio.run(auto_fix_flow_spec(spec, llm_client=None, max_rounds=2))
+    by_name = {cap.name: cap for cap in fixed.capabilities}
+
+    assert any((step.source_meta or {}).get("request_id") == "req-options" for step in fixed.steps)
+    assert any((step.source_meta or {}).get("request_id") == "req-status" for step in fixed.steps)
+    assert any(
+        fixed_step.source_meta.get("request_id") == "req-options"
+        for fixed_step in fixed.steps
+        if fixed_step.step_id in by_name["list_options"].step_ids
+    )
+    assert any(
+        fixed_step.source_meta.get("request_id") == "req-status"
+        for fixed_step in fixed.steps
+        if fixed_step.step_id in by_name["query_status"].step_ids
+    )
+    assert "submit" in by_name["submit_batch"].step_ids
 
 
 def test_recording_pi_loop_records_planner_and_repair_history():
