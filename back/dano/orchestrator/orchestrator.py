@@ -15,6 +15,7 @@ from dano.execution.connectors.executor import ActionExecutor
 from dano.execution.harness.harness import Harness, tool_name_for
 from dano.assets.store import AssetStore
 from dano.orchestrator.gate import GateAction, PolicyGate
+from dano.orchestrator.capability_runtime import CapabilityInvokePayload, invoke_skill_capability
 from dano.orchestrator.skills import SkillRegistry
 from dano.orchestrator.types import SkillSpec, TaskOutcome
 from dano.shared.asset_bodies import (
@@ -35,6 +36,22 @@ from dano.shared.models import AssertionResult, Evidence, ExecResult, Scope, Tas
 from dano.verification.closure import VerificationClosure
 
 log = structlog.get_logger(__name__)
+
+
+def _requested_capability(fields: dict) -> str:
+    return str(
+        (fields or {}).get("__capability")
+        or (fields or {}).get("_capability")
+        or (fields or {}).get("capability")
+        or ""
+    ).strip()
+
+
+def _without_capability_markers(fields: dict) -> dict:
+    out = dict(fields or {})
+    for key in ("__capability", "_capability", "capability", "__dry_run"):
+        out.pop(key, None)
+    return out
 
 
 # ─────────────────────── 复合流程入参解析(阶段2)───────────────────────
@@ -220,6 +237,20 @@ class Orchestrator:
                                message=f"未知动作 Skill: {subsystem.value}.{action}")
 
         intent = Intent(kind="action", action_hint=action, fields=dict(fields))
+        capability = _requested_capability(intent.fields)
+        if capability:
+            if skill.has_api or skill.is_workflow:
+                return TaskOutcome(
+                    task_id=task_id,
+                    state=TaskState.CAPABILITY_GAP,
+                    skill_id=skill.skill_id,
+                    message="该 Skill 暂不支持按 capability 分能力调用",
+                    audit={"capability": capability, "integration": "workflow" if skill.is_workflow else "api"},
+                )
+            return await self._run_recording_capability(
+                task_id, skill, capability, intent, confirm=confirm, tenant=tenant
+            )
+
         missing = [k for k in skill.required_fields if k not in fields]
         if missing:
             return TaskOutcome(task_id=task_id, state=TaskState.NEEDS_INPUT, skill_id=skill.skill_id,
@@ -465,6 +496,92 @@ class Orchestrator:
             task_id=task_id, state=closure.state, skill_id=skill.skill_id,
             exec_result=exec_result, message=closure.detail,
             audit={"before": before, "after": after, "intent": intent.action_hint},
+        )
+
+    async def _run_recording_capability(
+        self,
+        task_id,
+        skill,
+        capability: str,
+        intent,
+        *,
+        confirm: bool,
+        tenant: str = "",
+    ) -> TaskOutcome:  # noqa: ANN001
+        """Invoke a single recorded capability without applying whole-skill required fields."""
+
+        import json as _json
+
+        from dano.execution.page.sessions import session_path_if_exists
+        from dano.infra.http import tls_verify
+        from dano.infra.token_store import get_token_headers, merge_auth_headers
+
+        env = await self.store.get(skill.recording_asset_id)
+        if env is None:
+            return TaskOutcome(
+                task_id=task_id,
+                state=TaskState.CAPABILITY_GAP,
+                skill_id=skill.skill_id,
+                message="录制资产不存在,无法按 capability 调用",
+                audit={"capability": capability},
+            )
+        api_request = dict((env.body or {}).get("api_request") or {})
+        scope = Scope(tenant=tenant, subsystem=skill.subsystem)
+        ep = await self.store.get_published(AssetType.ENV_PROFILE, scope, asset_key="env_profile")
+        base_url = ((ep.body.get("base_url") if ep else "") or "")
+        storage = None
+        sp = session_path_if_exists(tenant, skill.subsystem.value)
+        if sp:
+            try:
+                storage = _json.loads(open(sp, encoding="utf-8").read())
+            except Exception:  # noqa: BLE001
+                pass
+        override = await get_token_headers(tenant, skill.subsystem.value)
+        if override:
+            api_request = merge_auth_headers(api_request, override)
+
+        payload = CapabilityInvokePayload(
+            input=_without_capability_markers(intent.fields),
+            confirm=confirm,
+            dry_run=bool(intent.fields.get("__dry_run")),
+        )
+        out = await invoke_skill_capability(
+            skill=skill,
+            capability=capability,
+            payload=payload,
+            api_request=api_request,
+            base_url=base_url,
+            storage_state=storage,
+            verify=tls_verify(),
+        )
+        ok = bool(out.get("ok"))
+        stage = str(out.get("stage") or "")
+        if ok:
+            state = TaskState.COMPLETED
+        elif stage == "missing_input":
+            state = TaskState.NEEDS_INPUT
+        elif stage == "confirmation_required":
+            state = TaskState.CANCELLED
+        elif stage in {"capability_not_found", "missing_api_request"}:
+            state = TaskState.CAPABILITY_GAP
+        else:
+            state = TaskState.FAILED
+        er = ExecResult(
+            task_id=task_id,
+            outcome=Outcome.PASSED if ok else Outcome.FAILED,
+            evidence=Evidence(
+                request_body=_without_capability_markers(intent.fields),
+                response_body=out.get("response") if isinstance(out.get("response"), dict) else out,
+            ),
+            structured_output=out,
+        )
+        return TaskOutcome(
+            task_id=task_id,
+            state=state,
+            skill_id=skill.skill_id,
+            exec_result=er,
+            message=out.get("detail") or ("capability 调用完成" if ok else "capability 调用未完成"),
+            audit={"capability": capability, "api": out},
         )
 
     async def list_field_options(self, subsystem: Subsystem, action: str, field: str,

@@ -1680,6 +1680,22 @@ async def test_execute_capability_output_mapping_for_query_status():
     assert out["final"]["url"].endswith("/api/status")
 
 
+async def test_execute_api_accepts_capability_alias_fields():
+    wf = {
+        "steps": [
+            {"step_id": "query", "method": "GET", "url": "http://x/api/status", "path": "/api/status"},
+            {"step_id": "submit", "method": "POST", "url": "http://x/api/submit", "path": "/api/submit"},
+        ],
+        "capabilities": [{"name": "query_status", "kind": "query_status", "step_ids": ["query"]}],
+    }
+
+    for key in ("__capability", "_capability", "capability"):
+        out = await execute_api(wf, {key: "query_status"}, send=False)
+        assert out["ok"] is True
+        assert out["steps"] == 1
+        assert out["final"]["url"].endswith("/api/status")
+
+
 async def test_execute_capability_plan_condition_can_skip_call():
     wf = {
         "steps": [{

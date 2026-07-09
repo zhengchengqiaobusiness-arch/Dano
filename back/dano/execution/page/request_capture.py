@@ -3566,7 +3566,11 @@ async def _grounded_recheck(fc: dict, fields: dict, *, base_url: str, storage_st
 async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
     """统一入口:api_request 有 steps → 多步工作流(Q3),否则单请求;成功后若配了 fact_check → grounded 回查。"""
     fields = dict(fields or {})
-    capability = fields.pop("__capability", None)
+    capability = (
+        fields.pop("__capability", None)
+        or fields.pop("_capability", None)
+        or fields.pop("capability", None)
+    )
     cap = None
     if capability:
         selected, cap, error = _select_api_request_for_capability(api_request, capability)

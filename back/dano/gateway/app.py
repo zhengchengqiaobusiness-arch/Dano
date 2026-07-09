@@ -17,7 +17,7 @@ import shutil
 import structlog
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from dano.assets.repository import AssetRepository
 from dano.catalog.manifest import build_function_tools, build_manifests, skill_id_of
@@ -1400,10 +1400,14 @@ async def resume_skill(skill_id: str, x_tenant_key: str | None = Header(default=
 
 # ── 瘦执行(前端只给 skill_id + input;endpoint/凭证/断言后端取)──
 class InvokeReq(BaseModel):
-    input: dict = {}
+    input: dict | None = Field(default_factory=dict)
+    arguments: dict | str | None = Field(default_factory=dict)
     idempotency_key: str | None = None
     confirm: bool = False
     capability: str | None = None
+    dry_run: bool = False
+    metadata: dict = Field(default_factory=dict)
+    protocol: str = "dano.capability_call.v1"
 
 
 async def _invoke(tenant: str, skill_id: str, input_: dict, confirm: bool) -> dict:
@@ -1421,13 +1425,41 @@ async def _invoke(tenant: str, skill_id: str, input_: dict, confirm: bool) -> di
     return outcome.model_dump(mode="json")
 
 
+def _payload_dict(value) -> dict:  # noqa: ANN001
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        import json as _json
+        try:
+            loaded = _json.loads(value or "{}")
+        except _json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"arguments 非合法 JSON: {e}") from e
+        if not isinstance(loaded, dict):
+            raise HTTPException(status_code=400, detail="arguments 必须是 JSON object")
+        return loaded
+    raise HTTPException(status_code=400, detail="payload 必须是 object")
+
+
+def _normalize_skill_call(req, *, capability: str | None = None) -> dict:  # noqa: ANN001
+    args = _payload_dict(getattr(req, "arguments", None))
+    input_obj = getattr(req, "input", None)
+    if input_obj is not None:
+        args.update(_payload_dict(input_obj))
+    cap = capability or getattr(req, "capability", None)
+    if cap:
+        args["__capability"] = cap
+    if getattr(req, "dry_run", False):
+        args["__dry_run"] = True
+    return args
+
+
 @app.post("/v1/skills/{skill_id}/invoke")
 async def invoke_skill(skill_id: str, req: InvokeReq,
                        x_tenant_key: str | None = Header(default=None)) -> dict:
     tenant = await _auth_tenant(x_tenant_key)
-    args = dict(req.input or {})
-    if req.capability:
-        args["__capability"] = req.capability
+    args = _normalize_skill_call(req)
     return await _invoke(tenant, skill_id, args, req.confirm)
 
 
@@ -1439,8 +1471,7 @@ async def invoke_skill_capability(skill_id: str, capability: str, req: InvokeReq
     这是 P3 的显式能力调用入口；旧 `/invoke` + body.capability 继续兼容。
     """
     tenant = await _auth_tenant(x_tenant_key)
-    args = dict(req.input or {})
-    args["__capability"] = capability
+    args = _normalize_skill_call(req, capability=capability)
     return await _invoke(tenant, skill_id, args, req.confirm)
 
 
@@ -1458,24 +1489,16 @@ class ToolCallReq(BaseModel):
     name: str                       # 工具名(= skill_id 的点转 __,如 A-OA__submit_leave)
     capability: str | None = None   # 新调用协议:一个 Skill 内的业务能力键(query_status/submit_batch...)
     input: dict | None = None       # 新调用协议:input 优先,arguments 兼容
-    arguments: dict | str = {}      # LLM 产出的参数(对象或 JSON 字符串都行)
+    arguments: dict | str = Field(default_factory=dict)  # LLM 产出的参数(对象或 JSON 字符串都行)
     confirm: bool = False
+    dry_run: bool = False
 
 
 @app.post("/v1/tools/call")
 async def call_tool(req: ToolCallReq, x_tenant_key: str | None = Header(default=None)) -> dict:
     """执行一次 LLM 工具调用:name→skill_id、arguments→input,走与 /invoke 同一受控链路。"""
     tenant = await _auth_tenant(x_tenant_key)
-    args = req.input if req.input is not None else req.arguments
-    if isinstance(args, str):
-        import json as _json
-        try:
-            args = _json.loads(args or "{}")
-        except _json.JSONDecodeError as e:
-            raise HTTPException(status_code=400, detail=f"arguments 非合法 JSON: {e}") from e
-    args = dict(args or {})
-    if req.capability:
-        args["__capability"] = req.capability
+    args = _normalize_skill_call(req)
     return await _invoke(tenant, skill_id_of(req.name), args, req.confirm)
 
 

@@ -69,6 +69,7 @@ def _is_reserved(field: str) -> bool:
 
 
 _OPTIONS_INLINE_MAX = 50    # 候选 ≤ 此数 → 内置 enum 进 schema(agent 直接选);更多 → 只留来源,运行期 --list-options 现拉
+_READ_ONLY_CAPABILITY_KINDS = {"query", "query_status", "list_options", "validate", "validate_batch", "preview", "inspect"}
 
 
 def _api_selects(skill: SkillSpec) -> dict:
@@ -388,7 +389,13 @@ def _capability_manifest(skill: SkillSpec, cap: dict) -> dict:
     out["input_schema"] = out.get("input_schema") or out["parameters"]
     out["output_schema"] = out.get("output_schema") or {"type": "object"}
     out["call_protocol"] = _capability_call_protocol(skill.skill_id, name)
-    out["requires_confirmation"] = bool(cap.get("requires_human_confirm")) or RiskLevel(skill.risk_level) in _CONFIRM_FROM
+    kind = str(out.get("kind") or out.get("name") or "").strip()
+    if bool(cap.get("requires_confirmation")) or bool(cap.get("requires_human_confirm")):
+        out["requires_confirmation"] = True
+    elif bool(cap.get("readonly")) or bool(cap.get("read_only")) or kind in _READ_ONLY_CAPABILITY_KINDS:
+        out["requires_confirmation"] = False
+    else:
+        out["requires_confirmation"] = RiskLevel(skill.risk_level) in _CONFIRM_FROM
     return out
 
 

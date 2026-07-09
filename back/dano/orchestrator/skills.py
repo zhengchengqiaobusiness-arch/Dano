@@ -101,6 +101,9 @@ class SkillRegistry:
                         field_docs=dict(body.field_docs),
                         field_types=dict(getattr(body, "field_types", {}) or {}),
                         call_metadata=call_meta,
+                        capability=call_meta.get("capability", ""),
+                        capability_meta=dict(call_meta.get("capability_meta") or {}),
+                        capabilities=list(call_meta.get("capabilities") or []),
                         created_at=_asset_created_at(env),
                         verification_status=call_meta.get("verification_status", ""),
                         verification_basis=call_meta.get("verification_basis", ""),
@@ -149,6 +152,9 @@ class SkillRegistry:
                         field_docs=dict(env.body.get("field_docs", {})),
                         field_types=dict(env.body.get("field_types", {}) or {}),
                         call_metadata=call_meta,
+                        capability=call_meta.get("capability", ""),
+                        capability_meta=dict(call_meta.get("capability_meta") or {}),
+                        capabilities=list(call_meta.get("capabilities") or env.body.get("capabilities") or []),
                         created_at=_asset_created_at(env),
                         verification_status=call_meta.get("verification_status", ""),
                         verification_basis=call_meta.get("verification_basis", ""),
@@ -217,3 +223,23 @@ class SkillRegistry:
         return next(
             (s for s in self.skills if s.subsystem == subsystem and s.action == action), None
         )
+
+    def get_by_skill_id(self, skill_id: str) -> SkillSpec | None:
+        return next((s for s in self.skills if s.skill_id == skill_id), None)
+
+    def get_capability(self, skill_id: str, capability: str) -> dict | None:
+        skill = self.get_by_skill_id(skill_id)
+        if skill is None:
+            return None
+        target = str(capability or "").strip()
+        for cap in getattr(skill, "capabilities", []) or []:
+            if not isinstance(cap, dict):
+                continue
+            names = {
+                str(cap.get("name") or "").strip(),
+                str(cap.get("kind") or "").strip(),
+                str(cap.get("capability_id") or "").strip(),
+            }
+            if target in names:
+                return cap
+        return None

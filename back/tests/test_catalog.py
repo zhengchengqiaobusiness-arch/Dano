@@ -73,6 +73,24 @@ async def test_connector_fact_check_from_body_not_gated_by_action_name():
     assert by["create_leave"].fact_check_query == "query_balance"
 
 
+async def test_registry_exposes_capability_lookup_for_published_assets():
+    store = _Store({AssetType.CONNECTOR: [
+        _Env({
+            "action": "query_daily",
+            "field_bindings": [],
+            "risk_level": "L1",
+            "capabilities": [{"name": "query_status", "kind": "query_status"}],
+        }, "query_daily"),
+    ]})
+    reg = await SkillRegistry.from_store(store, tenant="t", subsystems=[Subsystem.OA])
+
+    assert reg.get_by_skill_id("A-OA.query_daily") is not None
+    assert reg.get_capability("A-OA.query_daily", "query_status") == {
+        "name": "query_status",
+        "kind": "query_status",
+    }
+
+
 async def test_workflow_step_connector_never_exposed():
     # 即便某 workflow_step 连接器没有任何复合流程引用(孤儿),也绝不单独露出,不污染目录
     store = _Store({AssetType.CONNECTOR: [_conn_env("query_balance"),
@@ -113,6 +131,28 @@ def test_field_types_override_wins_over_heuristic():
     props = to_manifest(sk).parameters["properties"]
     assert props["code"]["type"] == "string"     # 信源声明 string,压过名字启发式
     assert props["qty"]["type"] == "integer"
+
+
+def test_manifest_capability_confirmation_is_capability_scoped():
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    sk = SkillSpec(
+        skill_id="A-OA.submit_form",
+        subsystem=Subsystem.OA,
+        action="submit_form",
+        risk_level=RiskLevel.L3,
+        has_api=False,
+        capabilities=[
+            {"name": "query_status", "kind": "query_status"},
+            {"name": "submit_batch", "kind": "submit_batch"},
+        ],
+    )
+    caps = {c["name"]: c for c in to_manifest(sk).capabilities}
+
+    assert caps["query_status"]["requires_confirmation"] is False
+    assert caps["submit_batch"]["requires_confirmation"] is True
 
 
 def test_manifest_preserves_select_and_datetime_semantics():
