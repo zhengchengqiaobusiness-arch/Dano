@@ -92,7 +92,7 @@ interface FlowCapabilityDependencyData {
   confidence?: number; confirmed?: boolean; locked?: boolean; reason?: string; evidence?: Record<string, any>;
 }
 interface FlowCapabilityData {
-  name?: string; title?: string; intent?: string; kind?: string;
+  name?: string; title?: string; intent?: string; kind?: string; capability_id?: string;
   step_ids?: string[];
   nodes?: Array<Record<string, any>>;
   input_schema?: Record<string, any>;
@@ -138,6 +138,21 @@ interface FlowSpecData {
   flow_id: string; title: string; business_description?: string;
   steps: FlowStepData[]; links: FlowLinkData[]; capabilities?: FlowCapabilityData[];
   risk_level: string; review_items?: ReviewItemData[];
+  request_facts?: {
+    requests?: RequestGraphEntry[];
+    diagnostics?: any[];
+    page_events?: any[];
+    option_sources?: any[];
+  };
+  request_analysis?: {
+    roles?: Record<string, any>;
+    confidence?: Record<string, number>;
+    reasons?: Record<string, string>;
+    filter_reasons?: Record<string, string>;
+  };
+  request_usage?: {
+    used_by_capabilities?: Record<string, string[]>;
+  };
   meta?: {
     request_roles?: RequestRoleData[];
     request_graph?: {
@@ -616,6 +631,7 @@ function isApiLikeRequest(req: RequestGraphEntry) {
   if (!path) return false;
   if (/\.(?:css|js|mjs|map|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|html?|txt|xml)$/i.test(path)) return false;
   if (["noise", "auth"].includes(req.role || "")) return false;
+  if (req.keep === false && !["read_option", "read_context"].includes(req.role || "")) return false;
   const role = req.role || "";
   if (["submit_anchor", "business_write", "business_get", "read_context", "read_option"].includes(role)) return true;
   if (req.response_json != null) return true;
@@ -623,7 +639,7 @@ function isApiLikeRequest(req: RequestGraphEntry) {
 }
 function allCapturedRequests(spec?: FlowSpecData | null) {
   const graph = spec?.meta?.request_graph || {};
-  const source = graph.all_requests?.length ? graph.all_requests : [
+  const source = spec?.request_facts?.requests?.length ? spec.request_facts.requests : graph.all_requests?.length ? graph.all_requests : [
     ...(graph.selected_steps || []),
     ...(graph.candidate_reads || []),
   ];
@@ -821,6 +837,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [newStepRequestKey, setNewStepRequestKey] = useState("");
   const [newParamRequestKey, setNewParamRequestKey] = useState("");
   const [capabilityAddValue, setCapabilityAddValue] = useState<Record<number, string>>({});
+  const [requestCapabilityTarget, setRequestCapabilityTarget] = useState<Record<string, string>>({});
   const [newParam, setNewParam] = useState({ step_id: "", path: "", key: "", type: "string", category: "user_param" });
   const [newLink, setNewLink] = useState({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
   const [editingLink, setEditingLink] = useState<Record<string, FlowLinkData>>({});
@@ -833,7 +850,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [llmBusy, setLlmBusy] = useState(false);
   const [orchestrateBusy, setOrchestrateBusy] = useState(false);
   const [autoFixBusy, setAutoFixBusy] = useState(false);
-  const [activeFlowTab, setActiveFlowTab] = useState("abilities");
+  const [activeFlowTab, setActiveFlowTab] = useState("requests");
 
   function acceptFlowSpec(fs: FlowSpecData) {
     flowSpecRef.current = fs;
@@ -1530,8 +1547,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       });
     } else if (suggestion.action === "set_runtime_source" && suggestion.source_kind) {
       if (suggestion.source_kind === "request_header" || suggestion.source_kind === "unknown") {
-        message.warning("该建议仍缺少可执行来源，请在字段页手动补充");
-        setActiveFlowTab("params");
+        message.warning("该建议仍缺少可执行来源，请在能力内字段里手动补充");
+        setActiveFlowTab("abilities");
         return;
       }
       const target = { ...tgt, path: targetPath };
@@ -1542,8 +1559,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         targetParamEdit(targetStepId, target, "need_human_confirm", false),
       );
     } else {
-      message.info("该项仍需要人工判断，请在字段页手动确认");
-      setActiveFlowTab("params");
+      message.info("该项仍需要人工判断，请在能力内字段里手动确认");
+      setActiveFlowTab("abilities");
       return;
     }
     edits.push({ op: "resolve_review", review_id: item.id, resolved: true });
@@ -1573,8 +1590,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           ? reviewItems.filter((item) => !requiresManualSourceBinding(item)).flatMap((item) => reviewSuggestionEdits(item))
           : reviewItems.map((item) => ({ op: "resolve_review", review_id: item.id, resolved: true }));
         if (mode === "accept" && !rawEdits.length) {
-          message.warning("当前高风险项需要先到字段页手动绑定来源");
-          setActiveFlowTab("params");
+          message.warning("当前高风险项需要先在能力内手动绑定字段来源");
+          setActiveFlowTab("abilities");
           return;
         }
         const seen = new Set<string>();
@@ -1617,7 +1634,33 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     send({ type: "flow_update", edits: [{ op: "add_request_step", request_index: req.request_index, request_id: req.request_id }] });
     setNewParamRequestKey("");
     setNewStepRequestKey("");
-    setActiveFlowTab("params");
+    setActiveFlowTab("abilities");
+  }
+  function addCapturedRequestToCapability(req?: RequestGraphEntry, capabilityName?: string) {
+    if (!req) { message.warning("请选择捕获接口"); return; }
+    const capabilities = flowSpec?.capabilities || [];
+    if (!capabilities.length) {
+      message.warning("请先新增或生成能力，再把接口加入对应能力");
+      setActiveFlowTab("abilities");
+      return;
+    }
+    const capIdx = capabilities.findIndex((cap, idx) => cap.name === capabilityName || cap.capability_id === capabilityName || String(idx) === capabilityName);
+    if (capIdx < 0) { message.warning("请选择要加入的能力"); return; }
+    send({
+      type: "flow_update",
+      edits: [{
+        op: "add_capability_step",
+        capability_index: capIdx,
+        request_index: req.request_index,
+        request_id: req.request_id,
+      }],
+    });
+    setRequestCapabilityTarget((s) => {
+      const next = { ...s };
+      delete next[requestOptionValue(req)];
+      return next;
+    });
+    setActiveFlowTab("abilities");
   }
   function addParam() {
     const stepId = newParam.step_id || flowSpec?.steps?.[0]?.step_id || "";
@@ -1819,6 +1862,32 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const st = stepId ? stepById[stepId] : undefined;
     if (!st) return stepId || "";
     return `${st.name || fallbackStepName(st.method, st.path)} · ${st.method} ${st.path || stripHost(st.url)}`;
+  }
+  function capabilitySelectOptions() {
+    return (flowSpec?.capabilities || []).map((cap, idx) => ({
+      label: `${cap.title || cap.name || `能力 ${idx + 1}`} · ${optionLabel(CAPABILITY_KIND_OPTIONS, cap.kind || "submit")}`,
+      value: cap.name || cap.capability_id || String(idx),
+    }));
+  }
+  function stepForRequest(req: RequestGraphEntry) {
+    const sig = requestGraphSignature(req);
+    return (flowSpec?.steps || []).find((st) => {
+      const meta = st.source_meta || {};
+      return (req.request_id && String(meta.request_id || "") === String(req.request_id)) ||
+        (req.request_index != null && String(meta.request_index ?? "") === String(req.request_index)) ||
+        stepRequestSignature(st) === sig;
+    });
+  }
+  function requestUsageLabels(req: RequestGraphEntry) {
+    const explicit = flowSpec?.request_usage?.used_by_capabilities || {};
+    const keys = [requestGraphKey(req), requestOptionValue(req), req.request_id ? `id:${req.request_id}` : "", req.request_index != null ? `idx:${req.request_index}` : ""].filter(Boolean);
+    const explicitNames = keys.flatMap((key) => explicit[key] || []);
+    if (explicitNames.length) return Array.from(new Set(explicitNames));
+    const st = stepForRequest(req);
+    if (!st) return [];
+    return (flowSpec?.capabilities || [])
+      .filter((cap) => (cap.step_ids || []).includes(st.step_id))
+      .map((cap, idx) => cap.title || cap.name || `能力 ${idx + 1}`);
   }
   function renderPublishIssue(item: ReviewItemData) {
     const tgt = item.target || {};
@@ -2076,22 +2145,26 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 {reviewItems.length === 0 && (checkReport.errors || []).slice(0, 5).map((x, i) =>
                   <Typography.Text key={i} type="danger" style={{ fontSize: 12 }}>{x}</Typography.Text>)}
                 {(checkReport.errors || []).length > 5 && <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  还有 {(checkReport.errors || []).length - 5} 条问题，请在待确认/字段/依赖页处理。
+                  还有 {(checkReport.errors || []).length - 5} 条问题，请在能力编排中处理。
                 </Typography.Text>}
               </Space>
             }
           />
+        )}
+        {reviewItems.length > 0 && (
+          <Collapse size="small" style={{ marginBottom: 12 }}>
+            <Collapse.Panel key="review" header={`待确认 ${reviewItems.length}`}>
+              {renderReviewPanel()}
+            </Collapse.Panel>
+          </Collapse>
         )}
         <Tabs
           activeKey={activeFlowTab}
           onChange={setActiveFlowTab}
           destroyOnHidden={false}
           items={[
-            ...(reviewItems.length > 0 ? [{ key: "review", label: `待确认 ${reviewItems.length}`, children: renderReviewPanel() }] : []),
-            { key: "abilities", label: `能力 ${capabilities.length || ""}`, children: renderCapabilityComposerPanel() },
-            { key: "requests", label: `接口 ${capturedTotal || ""}`, children: renderRequestsPanel() },
-            { key: "params", label: `字段 ${totalParams || ""}`, children: renderParamsPanel() },
-            { key: "links", label: `依赖 ${flowSpec.links?.length || ""}`, children: renderLinksPanel() },
+            { key: "requests", label: `捕获接口 ${capturedTotal || ""}`, children: renderRequestsPanel() },
+            { key: "abilities", label: `能力编排 ${capabilities.length || ""}`, children: renderCapabilityComposerPanel() },
             { key: "desc", label: "整体说明", children: renderDescriptionPanel() },
             { key: "json", label: "高级 JSON", children: renderJsonPanel() },
           ]}
@@ -2113,35 +2186,63 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!flowSpec) return null;
     const rows = allCapturedRequests(flowSpec);
     if (!rows.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有捕获接口" />;
-    const includedStep = (req: RequestGraphEntry) => (flowSpec.steps || []).find((st) => isRequestInSteps(flowSpec, req) && stepRequestSignature(st) === requestGraphSignature(req));
+    const capOptions = capabilitySelectOptions();
+    const includedStep = (req: RequestGraphEntry) => stepForRequest(req);
     return (
       <List
         size="small"
         rowKey={(req) => requestOptionValue(req)}
         dataSource={rows}
-        renderItem={(req, idx) => (
-          <List.Item
-            style={{ paddingLeft: 0, paddingRight: 0 }}
-            actions={[
-              includedStep(req)
-                ? <Button key="goto" size="small" onClick={() => setActiveFlowTab("params")}>去字段</Button>
-                : <Button key="add" size="small" type="primary" onClick={() => addCapturedRequestToFields(req)}>加入字段</Button>,
-            ]}
-          >
-            <Space direction="vertical" size={4} style={{ width: "100%" }}>
-              <Space wrap>
-                <Tag>{idx + 1}</Tag>
-                <Tag color={(req.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{req.method || "GET"}</Tag>
-                <PathText value={req.path || stripHost(req.url || "")} maxWidth={620} />
-                {includedStep(req) && <Tag color="success">已纳入字段</Tag>}
-                {req.role && <Tag>{req.role}</Tag>}
-                {typeof req.confidence === "number" && <Tag color={confidenceColor(req.confidence)}>{confidencePercent(req.confidence)}</Tag>}
-                {req.response_status != null && <Tag>{req.response_status}</Tag>}
+        renderItem={(req, idx) => {
+          const step = includedStep(req);
+          const usage = requestUsageLabels(req);
+          const key = requestOptionValue(req);
+          const selectedCap = requestCapabilityTarget[key] || capOptions[0]?.value || "";
+          return (
+            <List.Item
+              style={{ paddingLeft: 0, paddingRight: 0 }}
+              actions={[
+                <NativeSelect
+                  key="cap"
+                  value={selectedCap}
+                  width={220}
+                  disabled={!capOptions.length}
+                  options={[{ label: capOptions.length ? "选择能力" : "暂无能力", value: "" }, ...capOptions]}
+                  onChange={(v) => setRequestCapabilityTarget((s) => ({ ...s, [key]: v }))}
+                />,
+                <Button
+                  key="add"
+                  size="small"
+                  type="primary"
+                  disabled={!capOptions.length}
+                  onClick={() => addCapturedRequestToCapability(req, selectedCap)}
+                >
+                  加入能力
+                </Button>,
+              ]}
+            >
+              <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                <Space wrap>
+                  <Tag>{idx + 1}</Tag>
+                  <Tag color={(req.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{req.method || "GET"}</Tag>
+                  <PathText value={req.path || stripHost(req.url || "")} maxWidth={620} />
+                  {step && <Tag color="success">已成接口步骤</Tag>}
+                  {usage.map((name) => <Tag key={name} color="geekblue">用于 {name}</Tag>)}
+                  {req.role && <Tag>{req.role}</Tag>}
+                  {typeof req.confidence === "number" && <Tag color={confidenceColor(req.confidence)}>{confidencePercent(req.confidence)}</Tag>}
+                  {req.response_status != null && <Tag>{req.response_status}</Tag>}
+                </Space>
+                {req.reason ? (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>{req.reason}</Typography.Text>
+                ) : (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {capOptions.length ? "可加入某个能力后参与能力内字段、依赖和执行计划。" : "暂无能力，先在能力编排中新增或生成能力。"}
+                  </Typography.Text>
+                )}
               </Space>
-              {req.reason && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{req.reason}</Typography.Text>}
-            </Space>
-          </List.Item>
-        )}
+            </List.Item>
+          );
+        }}
       />
     );
   }
@@ -2784,7 +2885,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <List.Item
                 actions={[
                   manualBind
-                    ? <Button key="bind" size="small" type="primary" onClick={() => setActiveFlowTab("params")}>去字段页绑定</Button>
+                    ? <Button key="bind" size="small" type="primary" onClick={() => setActiveFlowTab("abilities")}>去能力字段绑定</Button>
                     : <Button key="apply" size="small" type="primary" onClick={() => applyReviewSuggestion(item)}>采纳</Button>,
                   <Button key="skip" size="small" onClick={() => resolveReview(item.id, true)}>忽略</Button>,
                 ]}
@@ -2962,7 +3063,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             <NativeSelect
               value={newParamRequestKey || ""}
               width={460}
-              options={[{ label: fieldRequestOptions.length ? "选择未纳入字段页的接口" : "没有可添加的捕获接口", value: "" }, ...fieldRequestOptions]}
+              options={[{ label: fieldRequestOptions.length ? "选择未纳入能力的接口" : "没有可添加的捕获接口", value: "" }, ...fieldRequestOptions]}
               onChange={(v) => setNewParamRequestKey(v || "")}
             />
             <Button
@@ -2970,7 +3071,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               disabled={!newParamRequestKey}
               onClick={() => addCapturedRequestToFields(findCapturedRequest(flowSpec, newParamRequestKey))}
             >
-              加入字段页
+              加入能力字段
             </Button>
           </Space>
         </Card>
@@ -3389,7 +3490,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function renderJsonPanel() {
     return (
       <Space direction="vertical" size={8} style={{ width: "100%" }}>
-        <Alert type="info" showIcon message="高级模式：只在需要批量修复或复制排查时使用。常规编辑请优先用前面的步骤、字段和依赖面板。" />
+        <Alert type="info" showIcon message="高级模式：只在需要批量修复、手工新增接口或复制排查时使用。常规编辑请优先用捕获接口和能力编排。" />
         <Space wrap>
           <Button icon={<ReloadOutlined />} onClick={loadJsonDraft}>载入当前 JSON</Button>
           <Button type="primary" icon={<SaveOutlined />} onClick={applyJsonDraft} disabled={!jsonDraft.trim()}>应用</Button>
@@ -3478,7 +3579,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               description={
                 <Space wrap>
                   {reqMeta && <Typography.Text code>{reqMeta.method} {stripHost(reqMeta.url)}</Typography.Text>}
-                  <Typography.Text>请重新分析请求，发布只使用 FlowSpec 工作台中的步骤、字段、依赖和说明。</Typography.Text>
+                  <Typography.Text>请重新分析请求，发布只使用工作台中的捕获接口、能力编排和整体说明。</Typography.Text>
                   <Button size="small" loading={phase === "publishing"} onClick={finalize}>重新分析</Button>
                 </Space>
               }
