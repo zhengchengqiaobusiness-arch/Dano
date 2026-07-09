@@ -638,6 +638,8 @@ export class BridgeServer {
     });
     res.flushHeaders?.();
 
+    this.closeSseStreams(clientId);
+
     const send = (message: ServerMessage) => {
       res.write(formatSseMessage(message));
     };
