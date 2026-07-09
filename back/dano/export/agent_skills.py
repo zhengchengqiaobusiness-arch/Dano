@@ -1,7 +1,7 @@
 """把已上架 Skill 导出为**官方 skill-creator 格式**的 Agent Skill(.agents/skills/<name>/)。
 
 用法:
-  python -m dano.export.agent_skills --tenant codegen-oa --out <pi仓库>/.agents/skills
+  python -m dano.export.agent_skills --tenant demo-oa --out <pi仓库>/.agents/skills
 
 每个 skill = 一个文件夹(skill-creator 规范:渐进式披露 + 脚本 + references):
   SKILL.md           —— frontmatter(pushy description/触发场景)+ 逐字段参数表 + 输出契约 + 确认工作流 + 示例 + 故障排除
@@ -9,7 +9,7 @@
   scripts/dano_call.py  —— 真逻辑:逐字段 flags + --confirm + --diagnose,POST Dano /v1/tools/call,末行打印稳定 JSON 状态
   scripts/submit.sh / submit.ps1     —— 转发到 dano_call.py 的薄壳
 
-真执行(适配器→目标系统 + 三模型闸门 + 事实核查)都在 Dano 侧;本端无业务逻辑、不碰 OA 凭证,
+真执行(Dano→目标系统 + 三模型闸门 + 事实核查)都在 Dano 侧;本端无业务逻辑、不碰 OA 凭证,
 只带 X-Tenant-Key 调 Dano。密钥经环境变量(DANO_URL / DANO_TENANT_KEY),不写进文件。
 打包成 .skill:用 skill-creator 的 `python -m scripts.package_skill <此文件夹>`。
 """
@@ -885,21 +885,67 @@ def _biz_readme(subsystem: str, business: str, manifests: list[SkillManifest]) -
 """
 
 
+def _business_skill_md(subsystem: str, business: str, manifests: list[SkillManifest], slug: str) -> str:
+    """确定性渲染业务剧本 SKILL.md,不依赖已删除的 generation/playbook 包。"""
+    label = _biz_label(business, manifests)
+    ops = "\n".join(
+        f"- `{m.action}`: {m.title or m.action}"
+        f"({'写操作,需 --confirm' if m.requires_confirmation else '查询/只读'})"
+        for m in manifests
+    ) or "- 暂无操作"
+    scripts = "\n".join(
+        f"bash scripts/{m.action}.sh {_flags(m)}"
+        f"{' --confirm' if m.requires_confirmation else ''}"
+        for m in manifests
+    )
+    fields = "\n\n".join(
+        f"### {m.title or m.action}\n{_quality_section(m)}\n\n{_interaction_section(m)}"
+        for m in manifests
+    )
+    return f"""---
+name: {slug}
+description: {label}: Dano 导出的业务剧本,包含 {len(manifests)} 个已上架操作。用于办理或查询该业务时按脚本调用 Dano。
+metadata:
+  source: dano
+  subsystem: {subsystem}
+  business: {business}
+---
+
+# {label}
+
+这是 Dano 导出的业务剧本。所有真实执行都在 Dano 服务端完成;本 skill 只负责收集参数、确认风险、调用脚本。
+
+## 操作清单
+{ops}
+
+## 快速调用
+```bash
+{scripts}
+```
+
+## 通用规则
+- 缺必填字段先追问,不要臆造。
+- 写操作必须取得用户明确确认并带 `--confirm`。
+- 结果只认脚本末行 JSON 的 `status`;失败或回查未通过时不要报成功。
+- `DANO_URL` 和 `DANO_TENANT_KEY` 由部署环境提供,不要写进文件。
+
+## 操作细则
+{fields}
+"""
+
+
 def _write_business_skill(out_dir: Path, subsystem: str, business: str,
                           manifests: list[SkillManifest], *, md_text: str | None = None) -> Path:
-    """同业务多 adapter → 一本剧本 skill(多操作脚本 + 六段式剧本 SKILL.md)。
+    """同业务多操作 → 一本剧本 skill(多操作脚本 + 六段式剧本 SKILL.md)。
 
-    md_text 给定则用它(LLM 动态撰写的);否则用 PlaybookSpec 确定性渲染(grounded 兜底)。
+    md_text 给定则用它;否则用本模块的确定性渲染。
     """
-    from dano.generation.playbook import build_playbook
-    from dano.generation.playbook_writer import render_playbook_md
     slug = _slug(f"{subsystem}.{business}")
     folder = out_dir / slug
     (folder / "scripts").mkdir(parents=True, exist_ok=True)
     (folder / "references").mkdir(parents=True, exist_ok=True)
     if md_text is None:
-        spec = build_playbook(subsystem, business, manifests)
-        md_text = render_playbook_md(spec, slug)
+        md_text = _business_skill_md(subsystem, business, manifests, slug)
     (folder / "SKILL.md").write_text(md_text, encoding="utf-8")
     (folder / "references" / "QUICKREF.md").write_text(_biz_quickref(business, manifests), encoding="utf-8")
     (folder / "references" / "README.md").write_text(_biz_readme(subsystem, business, manifests), encoding="utf-8")
@@ -959,15 +1005,11 @@ async def write_skills(tenant: str, out_dir: str, *, rich: bool = True,
                        exclude_skill_ids: set[str] | None = None) -> list[str]:
     """核心:读该租户已上架 Skill 写成官方格式 skill;**不管连接池**(供已持有池的网关复用)。
 
-    带 business 标签的 adapter **按业务归组成一本自包含剧本 skill**(多操作);其余各自一个单动作 skill。
-    rich=True:每本剧本的 SKILL.md 用 LLM 据 PlaybookSpec **动态撰写**(失败回退确定性渲染);
-    rich=False:直接确定性渲染(测试/离线用,不调 LLM)。每业务独立 try/except,一个失败不连累其它。
+    带 business 标签的操作**按业务归组成一本自包含剧本 skill**(多操作);其余各自一个单动作 skill。
+    rich 参数保留兼容旧调用;当前导出只做确定性渲染。每业务独立 try/except,一个失败不连累其它。
     最后自动生成 index 路由总台。
     """
     from collections import defaultdict
-
-    from dano.generation.playbook import build_playbook
-    from dano.generation.playbook_writer import render_playbook_md, write_playbook_md
     repo = AssetRepository()
     subs = await _tenant_subsystems(repo, tenant)   # 发现该租户真实系统(任意系统),与网关一致
     reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=subs)
@@ -986,13 +1028,12 @@ async def write_skills(tenant: str, out_dir: str, *, rich: bool = True,
     for (sub, biz), ms in groups.items():
         try:                                                 # 每业务独立:一个崩不连累其它
             slug = _slug(f"{sub}.{biz}")
-            spec = build_playbook(sub, biz, ms)
-            md = (await write_playbook_md(spec, slug)) if rich else render_playbook_md(spec, slug)
+            md = _business_skill_md(sub, biz, ms, slug)
             folder = _write_business_skill(out, sub, biz, ms, md_text=md)
             log.info("export.business_skill", business=biz, subsystem=sub,
                      ops=[m.action for m in ms], folder=folder.name)
             written.append(folder.name)
-            index_entries.append({"label": spec.label, "folder": folder.name, "ops": len(ms)})
+            index_entries.append({"label": _biz_label(biz, ms), "folder": folder.name, "ops": len(ms)})
         except Exception as e:  # noqa: BLE001
             log.warning("export.business_skill_failed", business=biz, subsystem=sub, error=str(e))
     for m in standalone:
@@ -1019,7 +1060,7 @@ async def export(tenant: str, out_dir: str) -> list[str]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="导出已上架 Skill 为官方 skill-creator 格式 skill(.agents/skills/)")
-    ap.add_argument("--tenant", required=True, help="租户名,如 codegen-oa")
+    ap.add_argument("--tenant", required=True, help="租户名,如 demo-oa")
     ap.add_argument("--out", required=True, help="输出目录,通常是 <pi仓库>/.agents/skills")
     args = ap.parse_args()
     written = asyncio.run(export(args.tenant, args.out))

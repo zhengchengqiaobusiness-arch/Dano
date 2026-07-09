@@ -209,7 +209,7 @@ class Orchestrator:
 
         跳过自然语言意图分析(动作+字段已给定),但**保留全部受控管道**:
         完整性校验 → 制度+风险闸门 → harness 四重隔离+断言 → 事实核查。
-        与 handle() 共用 _run_api/_run_page,确保直调与编排同一条安全链路。
+        与 handle() 共用 _run_api/_run_recording,确保直调与编排同一条安全链路。
         """
         from dano.orchestrator.types import Intent
 
@@ -242,7 +242,7 @@ class Orchestrator:
             return await self._run_workflow(task_id, tenant, skill, intent)
         if skill.has_api:
             return await self._run_api(task_id, tenant, skill, intent, confirm=confirm_fn)
-        return await self._run_page(task_id, skill, intent, confirm=confirm_fn, tenant=tenant)
+        return await self._run_recording(task_id, skill, intent, confirm=confirm_fn, tenant=tenant)
 
     async def _run_workflow(self, task_id, tenant, skill, intent) -> TaskOutcome:  # noqa: ANN001
         """复合流程 Skill(DSL v2):前置不变量 → 解释器执行 steps(call/compute/branch/foreach/select)
@@ -478,9 +478,9 @@ class Orchestrator:
         from dano.infra.http import tls_verify
         from dano.infra.token_store import get_token_headers, merge_auth_headers
         skill = self.registry.by_action(subsystem, action)
-        if skill is None or not getattr(skill, "page_asset_id", None):
+        if skill is None or not getattr(skill, "recording_asset_id", None):
             return {"field": field, "options": [], "count": 0, "note": "未知动作 / 非录制型 skill"}
-        env = await self.store.get(skill.page_asset_id)
+        env = await self.store.get(skill.recording_asset_id)
         apir = (env.body or {}).get("api_request") if env else None
         if not apir:
             return {"field": field, "options": [], "count": 0, "note": "该 skill 无接口请求"}
@@ -500,9 +500,9 @@ class Orchestrator:
         return await fetch_field_options(apir, field, base_url=base_url, storage_state=storage,
                                          verify=tls_verify())
 
-    async def _run_page(self, task_id, skill, intent, *, confirm, tenant="") -> TaskOutcome:  # noqa: ANN001
+    async def _run_recording(self, task_id, skill, intent, *, confirm, tenant="") -> TaskOutcome:  # noqa: ANN001
         """录制 V2 能力执行。api_request 直接发请求,不开浏览器。"""
-        env = await self.store.get(skill.page_asset_id)
+        env = await self.store.get(skill.recording_asset_id)
         assert env is not None, "页面脚本资产不存在"
 
         # 带登录态直接发 SPA 内部接口(参数填回 body_template)。已过 L3 确认闸门。

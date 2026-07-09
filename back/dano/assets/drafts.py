@@ -38,7 +38,7 @@ REQUIRED_KINDS: dict[AssetType, set[ValidationKind]] = {
 }
 
 # 须过三模型评审委员会才可发布的资产类型(业务 Skill);其余(如确定性发布的 env_profile)免评审。
-# PAGE_SCRIPT 纳入,但仅**写页面**(有提交步/风险 L3+)真过评审;纯查询页面经 page_is_write 豁免。
+# 录制 V2 资产纳入,但仅写能力(有提交步/风险 L3+)真过评审;纯查询经 page_is_write 豁免。
 REVIEW_REQUIRED_TYPES: set[AssetType] = {
     AssetType.CONNECTOR, AssetType.WORKFLOW, AssetType.PAGE_SCRIPT}
 REQUIRED_ROLES: set[str] = {"acceptance", "security", "compliance"}

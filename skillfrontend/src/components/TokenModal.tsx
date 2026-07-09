@@ -3,7 +3,7 @@ import { Modal, Input, Button, Space, Typography, Switch, Tag, message, Empty, A
 import { ReloadOutlined, SaveOutlined } from "@ant-design/icons";
 import { getRuntimeToken, putRuntimeToken, RuntimeToken } from "../api/skills";
 
-// 页面型 skill 运行期鉴权 token 的查看 / 刷新。token 按 (tenant, subsystem) 存在后端 PG。
+// 录制型 skill 运行期鉴权 token 的查看 / 刷新。token 按 (tenant, subsystem) 存在后端 PG。
 // 过期(401 账号未登录)时,粘贴一份新 token 保存即可恢复,无需重录整条流程。
 export default function TokenModal({
   tenant, subsystem, open, onClose,
@@ -70,7 +70,7 @@ export default function TokenModal({
     >
       <Alert
         type="info" showIcon style={{ marginBottom: 14 }}
-        message="页面型 skill 运行期靠这组鉴权头调用目标系统。token 过期会报「账号未登录(401)」——这里粘贴一份新 token 保存即可恢复,不用重录。"
+        message="录制型 skill 运行期靠这组鉴权头调用目标系统。token 过期会报「账号未登录(401)」——这里粘贴一份新 token 保存即可恢复,不用重录。"
       />
 
       <Space style={{ marginBottom: 8, justifyContent: "space-between", width: "100%" }}>

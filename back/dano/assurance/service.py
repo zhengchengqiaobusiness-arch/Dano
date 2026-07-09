@@ -94,7 +94,7 @@ async def self_heal(*, tenant: str, subsystem: str, openapi: dict, deploy: dict,
         recovered, failed = [], []
         for action in targets:
             try:
-                # 页面型(有已发布 PAGE_SCRIPT)→ 重新侦察补丁;否则连接器重生成
+                # 录制型资产不再走侦察补丁;否则连接器重生成
                 if await _is_page_action(tenant, subsystem, action):
                     ok = await _reheal_page(run_id, sid, subsystem, action, tenant, lifecycle)
                 else:
@@ -134,7 +134,7 @@ async def _reheal_connector(run_id: str, sid: str, subsystem: str, action: str,
 
 
 async def _is_page_action(tenant: str, subsystem: str, action: str) -> bool:
-    """该动作是否页面型(有已发布 PAGE_SCRIPT 资产)。决定走页面自愈还是连接器自愈。"""
+    """该动作是否录制型资产。决定是否跳过旧页面自愈。"""
     from dano.assets.repository import AssetRepository
     from dano.shared.enums import AssetType
     from dano.shared.models import Scope
@@ -145,7 +145,7 @@ async def _is_page_action(tenant: str, subsystem: str, action: str) -> bool:
 
 async def _reheal_page(run_id: str, sid: str, subsystem: str, action: str,
                        tenant: str, lifecycle: SkillLifecycle) -> bool:
-    """录制 V2 不走页面重新侦察。"""
+    """录制 V2 不走侦察补丁。"""
     return False
 
 

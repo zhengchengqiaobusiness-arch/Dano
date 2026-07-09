@@ -41,7 +41,7 @@ class SkillSpec(BaseModel):
     goal: dict = Field(default_factory=dict)                    # 结构化业务目标(意图/成功判据/禁止步,§2)
     has_api: bool = True
     connector_asset_id: UUID | None = None   # 有 API
-    page_asset_id: UUID | None = None         # 录制 V2 资产
+    recording_asset_id: UUID | None = None    # 录制 V2 资产
     api_request: dict = Field(default_factory=dict)        # 参数化后的提交请求/多步工作流(steps/success_rule/fact_check)
     recording_mode: str = ""                               # 录制提交模式:real_submit/intercepted_submit/unknown
     verification_status: str = ""                          # 调用契约验证等级

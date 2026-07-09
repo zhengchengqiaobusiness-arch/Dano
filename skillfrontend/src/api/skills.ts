@@ -137,7 +137,7 @@ export async function listFieldOptions(toolName: string, field: string): Promise
   return data;
 }
 
-// ── 运行期 token(页面型 skill 抓请求路径鉴权):录制自动抓 → 存 PG;过期前端换一份即可,免重录 ──
+// ── 运行期 token(录制型 skill 请求鉴权):录制自动抓 → 存 PG;过期前端换一份即可,免重录 ──
 export interface RuntimeToken {
   tenant: string;
   subsystem: string;

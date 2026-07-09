@@ -192,7 +192,7 @@ class SkillRegistry:
                             verification_basis=call_meta.get("verification_basis", ""),
                             recording_mode=call_meta.get("recording_mode", ""),
                             has_api=False,
-                            page_asset_id=env.asset_id,
+                            recording_asset_id=env.asset_id,
                             api_request=api_request,
                             required_fields=req,
                             optional_fields=opt,

@@ -614,7 +614,7 @@ function allCapturedRequests(spec?: FlowSpecData | null) {
   ];
   const seen = new Set<string>();
   const selectedSigs = new Set((graph.selected_steps || []).map(requestGraphSignature));
-  const stepSigs = new Set((spec?.steps || []).map((s) => `${(s.method || "").toUpperCase()} ${purePath(s.path || s.url)}`));
+  const stepSigs = new Set((spec?.steps || []).map((s) => `${(s.method || "").toUpperCase()} ${purePath(s.path || s.url || "")}`));
   const stepReqKeys = new Set((spec?.steps || []).flatMap((s) => {
     const meta = s.source_meta || {};
     const out: string[] = [];
@@ -624,7 +624,7 @@ function allCapturedRequests(spec?: FlowSpecData | null) {
   }));
   const selectedRank = (req: RequestGraphEntry) => (
     selectedSigs.has(requestGraphSignature(req)) ||
-    stepSigs.has(`${(req.method || "").toUpperCase()} ${purePath(req.path || req.url)}`) ||
+    stepSigs.has(`${(req.method || "").toUpperCase()} ${purePath(req.path || req.url || "")}`) ||
     stepReqKeys.has(requestGraphKey(req))
   ) ? 0 : 1;
   const bestByDisplayKey = new Map<string, RequestGraphEntry>();
@@ -1970,7 +1970,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const existing = new Set(cap.step_ids || []);
     const existingReqSigs = new Set((flowSpec?.steps || [])
       .filter((s) => existing.has(s.step_id))
-      .map((s) => `${(s.method || "").toUpperCase()} ${purePath(s.path || s.url)}`));
+      .map((s) => `${(s.method || "").toUpperCase()} ${purePath(s.path || s.url || "")}`));
     const stepItems = (flowSpec?.steps || [])
       .filter((s) => !existing.has(s.step_id))
       .map((s) => ({
@@ -1978,7 +1978,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         value: `step:${s.step_id}`,
       }));
     const reqItems = allCapturedRequests(flowSpec)
-      .filter((req) => !existingReqSigs.has(`${(req.method || "").toUpperCase()} ${purePath(req.path || req.url)}`))
+      .filter((req) => !existingReqSigs.has(`${(req.method || "").toUpperCase()} ${purePath(req.path || req.url || "")}`))
       .map((req) => ({
         label: `${req.method || "GET"} ${req.path || stripHost(req.url || "")}`,
         value: `req:${requestOptionValue(req)}`,

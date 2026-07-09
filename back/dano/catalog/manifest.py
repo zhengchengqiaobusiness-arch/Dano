@@ -381,7 +381,7 @@ def _flow_meta(skill: SkillSpec) -> dict:
                      for i in (getattr(skill, "workflow_invariants", []) or []))
         return {"step_count": max(n, 1), "preconditions": pre, "computes": comp,
                 "verify": verify, "judged_by_code": bool(getattr(skill, "workflow_success_rule", None))}
-    if not skill.has_api:        # 页面型
+    if not skill.has_api:        # 录制型
         apir = getattr(skill, "api_request", None) or {}
         if apir:                 # 抓请求型:编排/成功约定/事实核查随 api_request 走(不再恒报"一步")
             steps = list(apir.get("steps") or [])
