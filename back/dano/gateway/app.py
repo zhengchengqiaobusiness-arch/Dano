@@ -1431,6 +1431,19 @@ async def invoke_skill(skill_id: str, req: InvokeReq,
     return await _invoke(tenant, skill_id, args, req.confirm)
 
 
+@app.post("/v1/skills/{skill_id}/capabilities/{capability}/invoke")
+async def invoke_skill_capability(skill_id: str, capability: str, req: InvokeReq,
+                                  x_tenant_key: str | None = Header(default=None)) -> dict:
+    """按 Skill 内的指定 capability 调用。
+
+    这是 P3 的显式能力调用入口；旧 `/invoke` + body.capability 继续兼容。
+    """
+    tenant = await _auth_tenant(x_tenant_key)
+    args = dict(req.input or {})
+    args["__capability"] = capability
+    return await _invoke(tenant, skill_id, args, req.confirm)
+
+
 # ── function-calling 工具(给聊天端 LLM:① 列工具喂给 LLM ② 执行 LLM 的工具调用)──
 @app.get("/v1/tools")
 async def list_tools(x_tenant_key: str | None = Header(default=None)) -> list[dict]:

@@ -3101,15 +3101,15 @@ def _cap_get_context_value(expr, ctx: dict):
     if text.startswith(("'", '"')) or _re.fullmatch(r"-?\d+(?:\.\d+)?", text) or text.lower() in {"true", "false", "null", "none"}:
         return _cap_parse_literal(text)
     if text.startswith("input."):
-        return _get_by_path(ctx.get("fields") or {}, text.split(".", 1)[1])
+        return _cap_project_path(ctx.get("fields") or {}, text.split(".", 1)[1])
     if text.startswith("item."):
-        return _get_by_path(ctx.get("item") or {}, text.split(".", 1)[1])
+        return _cap_project_path(ctx.get("item") or {}, text.split(".", 1)[1])
     if text.startswith("var."):
-        return _get_by_path(ctx.get("vars") or {}, text.split(".", 1)[1])
+        return _cap_project_path(ctx.get("vars") or {}, text.split(".", 1)[1])
     if text.startswith("node."):
-        return _get_by_path(ctx.get("node_results") or {}, text.split(".", 1)[1])
+        return _cap_project_path(ctx.get("node_results") or {}, text.split(".", 1)[1])
     if text.startswith("response."):
-        return _get_by_path(ctx.get("last_response"), text.split(".", 1)[1])
+        return _cap_project_path(ctx.get("last_response"), text.split(".", 1)[1])
     if text in (ctx.get("responses_by_step") or {}):
         return (ctx.get("responses_by_step") or {}).get(text)
     if text in (ctx.get("vars") or {}):
@@ -3119,13 +3119,101 @@ def _cap_get_context_value(expr, ctx: dict):
     if "." in text:
         head, tail = text.split(".", 1)
         if head in (ctx.get("responses_by_step") or {}):
-            return _get_by_path((ctx.get("responses_by_step") or {}).get(head), tail)
+            return _cap_project_path((ctx.get("responses_by_step") or {}).get(head), tail)
         if head in (ctx.get("node_results") or {}):
-            return _get_by_path((ctx.get("node_results") or {}).get(head), tail)
+            return _cap_project_path((ctx.get("node_results") or {}).get(head), tail)
     fields = ctx.get("fields") or {}
     if text in fields:
         return fields.get(text)
     return _cap_parse_literal(text)
+
+
+def _cap_project_path(node, path: str):
+    """Capability output path reader with simple list projection support.
+
+    Supports normal paths like ``data.id`` and projection paths like
+    ``results[].item.date``. The projection form is intentionally small but
+    enough for batch outputs such as success_dates / failed_dates.
+    """
+    if path in (None, "", "$", "."):
+        return node
+    if isinstance(path, (list, tuple)):
+        path = ".".join(str(p) for p in path)
+    text = str(path or "").strip()
+    if not text:
+        return node
+    if "[]" not in text:
+        return _get_by_path(node, text)
+    head, _, tail = text.partition("[]")
+    head = head.rstrip(".")
+    tail = tail.lstrip(".")
+    base = _get_by_path(node, head) if head else node
+    if not isinstance(base, list):
+        return None
+    out = []
+    for item in base:
+        value = _cap_project_path(item, tail) if tail else item
+        if isinstance(value, list):
+            out.extend(value)
+        elif value is not None:
+            out.append(value)
+    return out
+
+
+def _cap_output_name(mapping: dict, idx: int) -> str:
+    for key in ("field", "name", "output", "target", "key"):
+        value = str(mapping.get(key) or "").strip()
+        if value:
+            return value.split(".")[-1]
+    path = str(mapping.get("response_path") or mapping.get("path") or "").strip()
+    if path and path not in {"response", "$", "."}:
+        return path.replace("[]", "").split(".")[-1] or f"output_{idx + 1}"
+    return f"output_{idx + 1}"
+
+
+def _cap_resolve_output_mapping(mapping: dict, ctx: dict):
+    kind = str(mapping.get("kind") or "").strip()
+    if "value" in mapping:
+        return _cap_get_context_value(mapping.get("value"), ctx)
+    if mapping.get("source"):
+        return _cap_get_context_value(mapping.get("source"), ctx)
+
+    step_id = str(mapping.get("step_id") or "").strip()
+    response_path = str(mapping.get("response_path") or mapping.get("path") or "").strip()
+    if response_path.startswith("response."):
+        response_path = response_path.split(".", 1)[1]
+
+    if kind in {"response_path", "step_response"} or step_id:
+        base = (ctx.get("responses_by_step") or {}).get(step_id) if step_id else ctx.get("last_response")
+        return _cap_project_path(base, response_path) if response_path and response_path not in {"response", "$", "."} else base
+    if kind in {"node_result", "node"}:
+        node_id = str(mapping.get("node_id") or mapping.get("node") or "").strip()
+        base = (ctx.get("node_results") or {}).get(node_id) if node_id else ctx.get("last_result")
+        return _cap_project_path(base, response_path) if response_path else base
+    if kind in {"var", "variable"}:
+        var_name = str(mapping.get("var") or mapping.get("variable") or "").strip()
+        base = (ctx.get("vars") or {}).get(var_name) if var_name else ctx.get("vars")
+        return _cap_project_path(base, response_path) if response_path else base
+    if kind in {"batch_result", "batch"}:
+        base = (ctx.get("vars") or {}).get("batch_result") or ctx.get("last_result")
+        return _cap_project_path(base, response_path) if response_path else base
+
+    base = ctx.get("last_response")
+    if base is None:
+        base = ctx.get("last_result")
+    return _cap_project_path(base, response_path) if response_path and response_path not in {"response", "$", "."} else base
+
+
+def _cap_apply_output_mapping(cap: dict | None, ctx: dict, fallback):
+    mappings = list((cap or {}).get("output_mapping") or [])
+    mappings = [m for m in mappings if isinstance(m, dict)]
+    if not mappings:
+        return fallback
+    structured: dict = {}
+    for idx, mapping in enumerate(mappings):
+        name = _cap_output_name(mapping, idx)
+        structured[name] = _cap_resolve_output_mapping(mapping, ctx)
+    return structured
 
 
 def _cap_truthy(value) -> bool:
@@ -3204,7 +3292,7 @@ async def _execute_capability_batch(api_request: dict, fields: dict, *, cap: dic
         results.append(out)
         if not out.get("ok"):
             failed_items.append({"index": idx, "item": item, "detail": out.get("detail") or "执行失败", "result": out})
-    return {
+    out = {
         "ok": not failed_items,
         "capability": cap.get("name") or cap.get("kind") or "",
         "batch": True,
@@ -3215,6 +3303,18 @@ async def _execute_capability_batch(api_request: dict, fields: dict, *, cap: dic
         "results": results,
         "final": results[-1] if results else {},
     }
+    if cap.get("output_mapping"):
+        ctx = {
+            "fields": fields,
+            "vars": {"batch_result": out},
+            "node_results": {"batch_result": out},
+            "responses_by_step": {},
+            "last_response": None,
+            "last_result": out,
+        }
+        mapped = _cap_apply_output_mapping(cap, ctx, out)
+        out = {**out, "response": mapped, "output": mapped, "structured_output": mapped}
+    return out
 
 
 async def _execute_capability_plan(api_request: dict, fields: dict, *, cap: dict, kw: dict) -> dict:
@@ -3350,6 +3450,7 @@ async def _execute_capability_plan(api_request: dict, fields: dict, *, cap: dict
                         value = _get_by_path(base, path) if path and path not in {"response", "$", "."} else base
                     last = {"ok": True, "return": value, "response": value, "final": ctx.get("last_result") or {}}
                     ctx["node_results"][node_id] = last
+                    ctx["last_result"] = last
                     return last
                 else:
                     return {"ok": False, "blocked": True, "detail": f"不支持的能力节点类型: {node_type}", "node": node_id}
@@ -3358,6 +3459,9 @@ async def _execute_capability_plan(api_request: dict, fields: dict, *, cap: dict
             ctx["item"] = old_item
 
     out = await run_nodes(nodes, dict(fields or {}))
+    mapped = _cap_apply_output_mapping(cap, ctx, out.get("response") if "response" in out else out)
+    if mapped is not out:
+        out = {**out, "response": mapped, "output": mapped, "structured_output": mapped}
     return {
         **out,
         "capability": cap.get("name") or cap.get("kind") or "",
@@ -3491,6 +3595,28 @@ async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
     if cap and _capability_batch_enabled(cap) and isinstance(fields.get("entries") or fields.get("items"), list):
         return await _execute_capability_batch(api_request, fields, cap=cap, runner=runner, kw=kw)
     out = await runner(api_request, fields, **kw)
+    if cap and cap.get("output_mapping"):
+        steps = list(api_request.get("steps") or [])
+        responses_by_step: dict = {}
+        if steps and out.get("steps"):
+            for st in steps:
+                sid = str(st.get("step_id") or "")
+                if sid and st.get("response_json") is not None:
+                    responses_by_step[sid] = st.get("response_json")
+        if not responses_by_step:
+            sid = str(api_request.get("step_id") or "")
+            if sid:
+                responses_by_step[sid] = out.get("response")
+        ctx = {
+            "fields": fields,
+            "vars": {},
+            "node_results": {},
+            "responses_by_step": responses_by_step,
+            "last_response": out.get("response"),
+            "last_result": out,
+        }
+        mapped = _cap_apply_output_mapping(cap, ctx, out.get("response") if "response" in out else out)
+        out = {**out, "response": mapped, "output": mapped, "structured_output": mapped}
     fc = api_request.get("fact_check")
     if kw.get("send", True) and out.get("ok") and fc:
         auth = api_request.get("auth_headers") or ((api_request.get("steps") or [{}])[-1].get("auth_headers"))

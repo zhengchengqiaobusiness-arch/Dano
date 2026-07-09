@@ -244,8 +244,22 @@ async def test_page_skill_reads_recording_metadata_from_asset_body():
         "field_types": {"请假类型": "enum"},
         "verification_status": "verified",
         "capabilities": [
-            {"name": "query_status", "kind": "query_status", "step_ids": ["q"], "confirmed": True},
-            {"name": "submit_batch", "kind": "submit_batch", "step_ids": ["q", "s"], "confirmed": True},
+            {
+                "name": "query_status",
+                "kind": "query_status",
+                "step_ids": ["q"],
+                "confirmed": True,
+                "input_schema": {"type": "object", "properties": {"month": {"type": "string"}}},
+                "output_schema": {"type": "object", "properties": {"missing_dates": {"type": "array"}}},
+            },
+            {
+                "name": "submit_batch",
+                "kind": "submit_batch",
+                "step_ids": ["q", "s"],
+                "confirmed": True,
+                "input_schema": {"type": "object", "properties": {"entries": {"type": "array"}}},
+                "output_schema": {"type": "object", "properties": {"success_dates": {"type": "array"}}},
+            },
         ],
         "api_request": {
             "params": ["请假类型"], "recording_mode": "real_submit",
@@ -260,6 +274,13 @@ async def test_page_skill_reads_recording_metadata_from_asset_body():
     assert m.recording_mode == "real_submit"
     assert {c["name"] for c in m.capabilities} == {"query_status", "submit_batch"}
     assert m.capability == "submit_batch"
+    by_cap = {c["name"]: c for c in m.capabilities}
+    assert by_cap["query_status"]["parameters"]["properties"]["month"]["type"] == "string"
+    assert by_cap["query_status"]["output_schema"]["properties"]["missing_dates"]["type"] == "array"
+    assert by_cap["query_status"]["call_protocol"]["invoke_path"].endswith(
+        "/v1/skills/A-OA.submit_leave/capabilities/query_status/invoke"
+    )
+    assert m.output_schema["properties"]["success_dates"]["type"] == "array"
     assert m.call_metadata["fields"]["请假类型"]["enum_options"] == [{"label": "事假", "value": "事假"},
                                                                  {"label": "病假", "value": "病假"}]
 

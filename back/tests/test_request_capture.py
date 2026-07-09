@@ -1605,6 +1605,11 @@ async def test_execute_capability_plan_foreach_and_return_batch_result():
                 ],
                 "batch": {"enabled": True, "items_field": "entries"},
             },
+            "output_mapping": [
+                {"field": "success_dates", "source": "var.batch_result.results[].item.date"},
+                {"field": "failed_dates", "source": "var.batch_result.failed_items[].item.date"},
+                {"field": "failed_count", "source": "var.batch_result.failed_count"},
+            ],
         }],
     }
 
@@ -1625,10 +1630,54 @@ async def test_execute_capability_plan_foreach_and_return_batch_result():
 
     assert out["ok"] is True
     assert out["plan"] is True
-    assert out["response"]["batch"] is True
-    assert out["response"]["total"] == 2
-    assert out["response"]["results"][0]["final"]["body"] == {"date": "2026-05-12", "content": "a", "project": "P1"}
-    assert out["response"]["results"][1]["final"]["body"] == {"date": "2026-05-13", "content": "b", "project": "P1"}
+    assert out["response"] == {
+        "success_dates": ["2026-05-12", "2026-05-13"],
+        "failed_dates": [],
+        "failed_count": 0,
+    }
+    assert out["structured_output"] == out["response"]
+
+
+async def test_execute_capability_output_mapping_for_query_status():
+    wf = {
+        "steps": [
+            {
+                "step_id": "query",
+                "method": "GET",
+                "url": "http://x/api/status",
+                "path": "/api/status",
+                "response_json": {"code": 0, "data": {"filled": ["1", "2"], "missing": ["3"]}},
+            },
+            {
+                "step_id": "submit",
+                "method": "POST",
+                "url": "http://x/api/submit",
+                "path": "/api/submit",
+                "body_template": {"date": "{{date}}"},
+                "params": ["date"],
+            },
+        ],
+        "capabilities": [
+            {
+                "name": "query_status",
+                "kind": "query_status",
+                "step_ids": ["query"],
+                "output_mapping": [
+                    {"field": "filled_dates", "step_id": "query", "response_path": "data.filled"},
+                    {"field": "missing_dates", "step_id": "query", "response_path": "data.missing"},
+                ],
+            },
+            {"name": "submit_batch", "kind": "submit_batch", "step_ids": ["query", "submit"]},
+        ],
+    }
+
+    out = await execute_api(wf, {"__capability": "query_status"}, send=False)
+
+    assert out["ok"] is True
+    assert out["steps"] == 1
+    assert out["response"] == {"filled_dates": ["1", "2"], "missing_dates": ["3"]}
+    assert out["structured_output"] == out["response"]
+    assert out["final"]["url"].endswith("/api/status")
 
 
 async def test_execute_capability_plan_condition_can_skip_call():

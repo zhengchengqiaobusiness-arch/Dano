@@ -348,6 +348,55 @@ def _call_protocol(capability: str, skill_id: str) -> dict:
     }
 
 
+def _capability_call_protocol(skill_id: str, capability: str) -> dict:
+    tool_name = skill_id.replace(".", "__")
+    return {
+        "protocol": "dano.capability_call.v1",
+        "transport": "POST /v1/skills/{skill_id}/capabilities/{capability}/invoke",
+        "skill_id": skill_id,
+        "capability": capability,
+        "tool_name": tool_name,
+        "tool_payload": {"name": tool_name, "capability": capability, "input": {}, "confirm": False},
+        "invoke_path": f"/v1/skills/{skill_id}/capabilities/{capability}/invoke",
+        "legacy_invoke_path": f"/v1/skills/{skill_id}/invoke",
+    }
+
+
+def _capability_manifest(skill: SkillSpec, cap: dict) -> dict:
+    name = str(cap.get("name") or cap.get("kind") or cap.get("capability_id") or "").strip()
+    out = dict(cap)
+    out.setdefault("name", name)
+    out.setdefault("kind", cap.get("kind") or name)
+    out.setdefault("title", cap.get("title") or name)
+    if cap.get("input_schema"):
+        out["parameters"] = cap.get("input_schema")
+    elif cap.get("inputs"):
+        props = {}
+        required = []
+        for field in cap.get("inputs") or []:
+            if not isinstance(field, dict):
+                continue
+            key = str(field.get("key") or field.get("path") or field.get("display_name") or "").strip()
+            if not key:
+                continue
+            props[key] = {"type": field.get("type") or "string", "description": field.get("display_name") or key}
+            if field.get("required"):
+                required.append(key)
+        out["parameters"] = {"type": "object", "properties": props, "required": required}
+    else:
+        out["parameters"] = {"type": "object", "properties": {}, "required": []}
+    out["input_schema"] = out.get("input_schema") or out["parameters"]
+    out["output_schema"] = out.get("output_schema") or {"type": "object"}
+    out["call_protocol"] = _capability_call_protocol(skill.skill_id, name)
+    out["requires_confirmation"] = bool(cap.get("requires_human_confirm")) or RiskLevel(skill.risk_level) in _CONFIRM_FROM
+    return out
+
+
+def _capability_manifests(skill: SkillSpec) -> list[dict]:
+    caps = list(getattr(skill, "capabilities", []) or [])
+    return [_capability_manifest(skill, c) for c in caps if isinstance(c, dict)]
+
+
 def _req_path(req: dict) -> str:
     """从一步请求里取干净的 path(去协议+域名,留 path,丢 query/敏感参数),供 SOP 展示编排。"""
     u = str(req.get("path") or req.get("url") or "")
@@ -414,7 +463,17 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
     parameters = _parameters_schema(skill)
     call_metadata = _call_metadata(skill, parameters)
     capability = _capability_of(skill)
-    capabilities = list(getattr(skill, "capabilities", []) or call_metadata.get("capabilities") or [])
+    capabilities = _capability_manifests(skill)
+    if not capabilities:
+        capabilities = [
+            _capability_manifest(skill, c)
+            for c in list(call_metadata.get("capabilities") or [])
+            if isinstance(c, dict)
+        ]
+    output_schema = {"type": "object"}
+    default_cap = next((c for c in capabilities if c.get("name") == capability), None)
+    if default_cap and isinstance(default_cap.get("output_schema"), dict):
+        output_schema = default_cap["output_schema"]
     return SkillManifest(
         name=skill.skill_id,
         capability=capability,
@@ -439,6 +498,7 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         verification_status=call_metadata.get("verification_status", ""),
         verification_basis=call_metadata.get("verification_basis", ""),
         parameters=parameters,
+        output_schema=output_schema,
         call_protocol=_call_protocol(capability, skill.skill_id),
         flow=_flow_meta(skill),
     )
