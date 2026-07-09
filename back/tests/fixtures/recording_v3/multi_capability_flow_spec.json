@@ -1,0 +1,15 @@
+{
+  "flow_id": "golden_multi_capability",
+  "title": "查询后提交",
+  "steps": [
+    {"step_id": "query_status", "method": "GET", "url": "/api/status?id=1", "path": "/api/status", "response_json": {"data": {"missing_dates": ["2026-06-11"]}}},
+    {"step_id": "submit_batch", "method": "POST", "url": "/api/report/batch", "path": "/api/report/batch", "params": [{"path": "[0].date", "key": "date", "value": "2026-06-11", "type": "date", "required": true}], "response_json": {"code": 0}}
+  ],
+  "capabilities": [
+    {"name": "query_daily_status", "kind": "query_status", "step_ids": ["query_status"], "nodes": [{"id": "call_query", "type": "call", "step_id": "query_status"}], "outputs": [{"scope": "output", "key": "missing_dates", "path": "missing_dates", "type": "array"}], "output_schema": {"type": "object", "properties": {"missing_dates": {"type": "array"}}}, "output_mapping": [{"kind": "response_path", "step_id": "query_status", "response_path": "data.missing_dates", "name": "missing_dates"}]},
+    {"name": "submit_daily_batch", "kind": "submit_batch", "step_ids": ["submit_batch"], "nodes": [{"id": "foreach_entries", "type": "foreach", "items": "input.entries", "steps": [{"id": "call_submit", "type": "call", "step_id": "submit_batch"}]}], "inputs": [{"scope": "input", "key": "entries", "path": "entries", "type": "array"}], "input_schema": {"type": "object", "properties": {"entries": {"type": "array"}}}, "output_mapping": [{"kind": "final_response", "step_id": "submit_batch", "response_path": "response"}]}
+  ],
+  "capability_relations": [
+    {"type": "suggested_call_chain", "from_capability": "query_daily_status", "from_output": "missing_dates", "to_capability": "submit_daily_batch", "to_input": "entries", "confidence": 0.8}
+  ]
+}

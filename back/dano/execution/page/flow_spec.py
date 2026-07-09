@@ -3134,10 +3134,10 @@ def _with_default_capabilities(spec: FlowSpec) -> FlowSpec:
 
 _FLOW_ORCHESTRATE_SYSTEM = """你是企业 OA/API 录制结果的 Skill 编排器。
 只输出 JSON，不要输出解释。
-目标：根据真实捕获请求生成外部前端可调用的业务能力列表。
+目标：根据真实捕获请求和当前能力编排，输出能力级增量 patch ops。
 要求：
-- 每个能力必须引用已存在 step_id，不能编造接口。
-- 不要把候选接口当成稳定步骤，除非它已经在 steps 中。
+- 优先输出 {"ops":[...]}，不要整份覆盖 capabilities。
+- 每个 op 必须指向已有 capability/step/request/path，不能编造接口。
 - 如果已有能力编排，请在已有能力基础上补充/优化，不要重新设计一套无关能力。
 - 如果上下文包含 removed_capabilities 或 removed_capability_steps，必须尊重用户删除记录，不要自动恢复。
 - 如果流程包含写接口，默认只输出一个 submit 或 submit_batch 主能力；前置 GET 应作为该能力步骤链的一部分，不要单独拆 query_status/list_options。
@@ -3147,8 +3147,21 @@ _FLOW_ORCHESTRATE_SYSTEM = """你是企业 OA/API 录制结果的 Skill 编排�
 - 条件分支必须用 condition 节点表达，condition/check 只能引用 input.*、var.*、已执行 step_id 响应或 node.*。
 - 字段转换/响应取值必须用 map 节点表达 source/target，不要靠文字说明隐藏。
 - output_mapping 默认指向最后一个步骤 response。
-JSON 形态：
-{"abilities":[{"name":"","title":"","intent":"","kind":"query_status|list_options|validate_batch|submit_batch|submit","step_ids":[],"nodes":[{"id":"","type":"call|map|filter|condition|foreach|select|return","step_id":""}],"input_schema":{},"output_schema":{},"output_mapping":[],"preconditions":[],"caller_responsibilities":[],"skill_responsibilities":[],"confidence":0.0,"requires_human_confirm":true}]}
+允许 ops：
+- {"op":"upsert_capability","capability":{"name":"...","title":"...","kind":"query_status|list_options|validate_batch|submit_batch|submit","intent":"..."}}
+- {"op":"add_request_to_capability","capability":"...","step_id":"..."} 或 {"op":"add_request_to_capability","capability":"...","request_id":"...","request_index":1}
+- {"op":"remove_request_from_capability","capability":"...","step_id":"..."}
+- {"op":"upsert_input_field","capability":"...","field":{"key":"entries","type":"array","required":true}}
+- {"op":"upsert_request_field","capability":"...","field":{"step_id":"...","path":"[0].date","key":"date","type":"date","source_kind":"loop_item"}}
+- {"op":"bind_dependency","capability":"...","source":{"step_id":"...","path":"data.id"},"target":{"step_id":"...","path":"body.id"},"confidence":0.9}
+- {"op":"set_loop_source","capability":"...","items":"input.entries"}
+- {"op":"set_map","capability":"...","node":{"id":"map_date","source":"item.date","target":"submit.[0].date"}}
+- {"op":"set_condition","capability":"...","node":{"id":"has_entries","condition":"input.entries.length > 0","then":[]}}
+- {"op":"set_output_mapping","capability":"...","mapping":[{"kind":"final_response","step_id":"...","response_path":"response"}]}
+- {"op":"set_capability_relation","from_capability":"query_status","from_output":"missing_dates","to_capability":"submit_batch","to_input":"entries","confidence":0.8}
+兼容旧格式：如果你只能输出 abilities，也必须保证不覆盖已确认内容。
+JSON 形态优先：
+{"ops":[...]}
 """
 
 
@@ -3217,9 +3230,24 @@ def _capability_from_llm(raw: dict[str, Any], step_ids: set[str], used_names: se
 
 def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
     graph = _request_graph_for_spec(spec)
+    validation_findings: dict[str, Any] = {}
+    try:
+        validation = validate_flow_spec(spec)
+        cap_validation = validation.get("capability_validation") or {}
+        validation_findings = {
+            "errors": list(validation.get("errors") or [])[:40],
+            "warnings": list(validation.get("warnings") or [])[:40],
+            "unused_high_confidence_requests": list(cap_validation.get("unused_high_confidence_requests") or [])[:80],
+            "capability_internal": cap_validation.get("capability_internal") or {},
+            "capability_relations": cap_validation.get("capability_relations") or {},
+            "skill_level": cap_validation.get("skill_level") or {},
+        }
+    except Exception as exc:  # noqa: BLE001
+        validation_findings = {"error": str(exc)[:240]}
     return {
         "title": spec.title,
         "business_description": spec.business_description,
+        "validation_findings": validation_findings,
         "removed_capabilities": list((spec.meta or {}).get("removed_capabilities") or []),
         "removed_capability_steps": dict((spec.meta or {}).get("capability_removed_steps") or {}),
         "existing_capabilities": [
@@ -3229,6 +3257,22 @@ def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
                 "intent": cap.intent,
                 "kind": cap.kind,
                 "step_ids": list(cap.step_ids or []),
+                "nodes": list(cap.nodes or []),
+                "input_schema": cap.input_schema or {},
+                "output_schema": cap.output_schema or {},
+                "output_mapping": list(cap.output_mapping or []),
+                "fields": [
+                    _capability_field_summary(field)
+                    for field in [
+                        *(cap.fields or []),
+                        *(cap.inputs or []),
+                        *(cap.request_fields or []),
+                        *(cap.internal_fields or []),
+                        *(cap.computed_fields or []),
+                        *(cap.outputs or []),
+                    ]
+                ][:80],
+                "dependencies": [dep.model_dump(exclude_none=True) for dep in (cap.dependencies or [])[:80]],
                 "confirmed": cap.confirmed,
                 "requires_human_confirm": cap.requires_human_confirm,
             }
@@ -3748,7 +3792,8 @@ async def orchestrate_flow_capabilities(
 ) -> FlowSpec:
     """生成能力编排。
 
-    LLM 只负责产出 ability 编排；所有 step 引用和 schema 都由确定性校验兜底。
+    P2 后 Planner 以 capability-scoped patch ops 为主；旧 abilities 输出仅保留兼容兜底。
+    所有 step/request/path 引用都会通过 apply_flow_edits 的受限入口校验。
     重复点击时按已有 capabilities 增量合并，保留人工编辑和确认状态。
     """
     current = spec.model_copy(deep=True)
@@ -3766,8 +3811,17 @@ async def orchestrate_flow_capabilities(
                 user="【FlowSpec 编排上下文】\n" + json.dumps(_orchestration_context(current), ensure_ascii=False),
                 timeout_s=timeout_s,
             )
+            raw_ops = out.get("ops") if isinstance(out, dict) else None
+            if isinstance(raw_ops, list):
+                edits = _autofix_ops_to_edits(current, raw_ops)
+                if edits:
+                    current = apply_flow_edits(current, edits)
+                    existing = list(current.capabilities or [])
+                    fallback = _merge_capability_lists(existing, build_default_flow_capabilities(current), spec=current)
+                    caps = list(current.capabilities or [])
+                    source = "llm_patch"
             raw_abilities = out.get("abilities") if isinstance(out, dict) else None
-            if isinstance(raw_abilities, list):
+            if not caps and isinstance(raw_abilities, list):
                 step_ids = {s.step_id for s in current.steps}
                 used: set[str] = set()
                 for raw in raw_abilities:
@@ -3775,7 +3829,8 @@ async def orchestrate_flow_capabilities(
                     if cap is not None:
                         caps.append(cap)
             if caps:
-                source = "llm"
+                if source != "llm_patch":
+                    source = "llm"
         except Exception as exc:  # noqa: BLE001 - 编排失败降级为确定性生成
             reason = str(exc)[:240]
 
@@ -7909,12 +7964,19 @@ _FLOW_AUTOFIX_SYSTEM = """你是录制型 Skill 的自动修正器。
 
 def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, Any]:
     graph = _request_graph_for_spec(spec)
+    cap_validation = report.get("capability_validation") or {}
     return {
         "title": spec.title,
         "goal": spec.goal,
         "errors": list(report.get("errors") or [])[:40],
         "warnings": list(report.get("warnings") or [])[:40],
         "capability_validation": report.get("capability_validation") or {},
+        "capability_findings": {
+            "unused_high_confidence_requests": list(cap_validation.get("unused_high_confidence_requests") or [])[:80],
+            "capability_internal": cap_validation.get("capability_internal") or {},
+            "capability_relations": cap_validation.get("capability_relations") or {},
+            "skill_level": cap_validation.get("skill_level") or {},
+        },
         "steps": [
             {
                 "step_id": st.step_id,
@@ -7938,7 +8000,13 @@ def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, A
             }
             for st in spec.steps
         ],
-        "capabilities": [cap.model_dump(exclude_none=True) for cap in spec.capabilities],
+        "capabilities": [
+            {
+                **cap.model_dump(exclude_none=True),
+                "contract": _capability_execution_contract(spec, cap),
+            }
+            for cap in spec.capabilities
+        ],
         "request_graph": [
             {
                 "request_id": r.get("request_id"),
@@ -8191,7 +8259,9 @@ def _autofix_ops_to_edits(spec: FlowSpec, ops: list[dict[str, Any]]) -> list[dic
             if cap_name in cap_by_name:
                 edit["capability_index"] = cap_by_name[cap_name]
             elif kind not in {"set_capability_relation", "upsert_capability"}:
-                continue
+                if not cap_name:
+                    continue
+                edit["capability_name"] = cap_name
             if "field" in op and isinstance(op.get("field"), dict):
                 edit["field_data"] = op.get("field")
                 edit.pop("field", None)
@@ -8287,6 +8357,73 @@ def _auto_fix_target_capability_for_request(spec: FlowSpec, item: dict[str, Any]
     return _auto_fix_target_capability_name(spec)
 
 
+def _deterministic_capability_repair_edits(spec: FlowSpec, report: dict[str, Any]) -> list[dict[str, Any]]:
+    """P2 能力级确定性修复。
+
+    这层只补“结构必需但可确定”的编排内容，语义判断仍交给 LLM/人工：
+    - submit_batch 缺 foreach 时补 input.entries 循环；
+    - 批量写接口必填字段缺 map 时补 item.<key> -> step.path；
+    - 缺 output_mapping 时补最后一个 call 的 response。
+    """
+    edits: list[dict[str, Any]] = []
+    step_by_id = {s.step_id: s for s in spec.steps}
+    for cap in spec.capabilities or []:
+        if not cap.name or (cap.confirmed and cap.locked):
+            continue
+        cap_step_ids = _capability_node_step_ids(cap)
+        cap_steps = [step_by_id[sid] for sid in cap_step_ids if sid in step_by_id]
+        if not cap_steps:
+            continue
+        flat_nodes = _iter_capability_nodes(cap.nodes or [])
+        has_foreach = any(n.get("type") == "foreach" for n in flat_nodes if isinstance(n, dict))
+        is_batch = _capability_is_batch(spec, cap)
+        if is_batch and not has_foreach:
+            edits.append({"op": "set_loop_source", "capability_name": cap.name, "items": "input.entries"})
+
+        existing_map_targets = {
+            str(n.get("target") or "")
+            for n in flat_nodes
+            if isinstance(n, dict) and n.get("type") == "map"
+        }
+        if is_batch:
+            for st in cap_steps:
+                if (st.method or "").upper() not in _WRITE_METHODS and not _looks_batch_step(st):
+                    continue
+                for param in st.params or []:
+                    if not param.required:
+                        continue
+                    target = f"{st.step_id}.{param.path}"
+                    if target in existing_map_targets:
+                        continue
+                    key = param.key or _strip_body_prefix(param.path).split(".")[-1].strip("[]") or "value"
+                    if param.category == "runtime_var" and param.source_kind == "previous_response":
+                        continue
+                    edits.append({
+                        "op": "set_map",
+                        "capability_name": cap.name,
+                        "node": {
+                            "id": f"map_{re.sub(r'[^a-zA-Z0-9_]+', '_', key).strip('_') or 'field'}",
+                            "source": f"item.{key}",
+                            "target": target,
+                        },
+                    })
+                    existing_map_targets.add(target)
+
+        if not cap.output_mapping:
+            final = next((st for st in reversed(cap_steps) if (st.method or "").upper() in _WRITE_METHODS), cap_steps[-1])
+            edits.append({
+                "op": "set_output_mapping",
+                "capability_name": cap.name,
+                "mapping": [{
+                    "kind": "final_response",
+                    "step_id": final.step_id,
+                    "response_path": "response",
+                    "name": "result",
+                }],
+            })
+    return edits
+
+
 async def auto_fix_flow_spec(
     spec: FlowSpec,
     *,
@@ -8305,6 +8442,7 @@ async def auto_fix_flow_spec(
         if not current.capabilities and current.steps:
             edits.append({"op": "generate_capabilities"})
         cap_report = report.get("capability_validation") or {}
+        edits.extend(_deterministic_capability_repair_edits(current, report))
         for item in cap_report.get("unused_high_confidence_requests") or []:
             role = item.get("role") or ""
             if role not in {"submit_anchor", "business_write", "business_get", "read_context", "read_option"}:

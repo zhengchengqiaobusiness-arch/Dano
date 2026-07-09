@@ -1,0 +1,23 @@
+{
+  "flow_id": "golden_multi_enum",
+  "title": "多枚举表单",
+  "steps": [
+    {"step_id": "dict_leave", "method": "GET", "url": "/api/dict/leave", "path": "/api/dict/leave", "response_json": {"data": [{"label": "事假", "value": "2"}]}},
+    {"step_id": "dict_project", "method": "GET", "url": "/api/project/options", "path": "/api/project/options", "response_json": {"data": [{"name": "项目A", "id": "P1"}]}},
+    {
+      "step_id": "submit_form",
+      "method": "POST",
+      "url": "/api/form/submit",
+      "path": "/api/form/submit",
+      "params": [
+        {"path": "leaveType", "key": "请假类型", "value": "2", "type": "enum", "required": true, "source_kind": "api_option", "enum_options": [{"label": "事假", "value": "2"}], "enum_value_map": {"事假": "2"}},
+        {"path": "projectId", "key": "项目", "value": "P1", "type": "enum", "required": true, "source_kind": "api_option", "enum_options": [{"label": "项目A", "value": "P1"}], "enum_value_map": {"项目A": "P1"}}
+      ],
+      "response_json": {"code": 0}
+    }
+  ],
+  "capabilities": [
+    {"name": "list_options", "title": "查询字段候选项", "kind": "list_options", "step_ids": ["dict_leave", "dict_project"], "nodes": [{"id": "call_leave", "type": "call", "step_id": "dict_leave"}, {"id": "call_project", "type": "call", "step_id": "dict_project"}], "output_mapping": [{"kind": "final_response", "step_id": "dict_project", "response_path": "response"}]},
+    {"name": "submit_form", "title": "提交表单", "kind": "submit", "step_ids": ["submit_form"], "nodes": [{"id": "call_submit", "type": "call", "step_id": "submit_form"}], "output_mapping": [{"kind": "final_response", "step_id": "submit_form", "response_path": "response"}]}
+  ]
+}

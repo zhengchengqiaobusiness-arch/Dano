@@ -1,0 +1,18 @@
+{
+  "flow_id": "golden_promoted_request",
+  "title": "后加入接口",
+  "steps": [
+    {"step_id": "submit", "method": "POST", "url": "/api/submit", "path": "/api/submit", "params": [{"path": "projectId", "key": "projectId", "value": "P1", "type": "string", "required": true}], "response_json": {"code": 0}}
+  ],
+  "request_facts": {
+    "requests": [
+      {"request_id": "req-project-options", "request_index": 7, "sequence": 7, "method": "GET", "url": "/api/project/options?keyword=a", "path": "/api/project/options", "response_json": {"data": [{"id": "P1", "name": "项目A"}]}}
+    ],
+    "analysis": {
+      "req-project-options": {"request_id": "req-project-options", "role": "read_option", "keep": true, "confidence": 0.95, "reason": "项目字段候选项"}
+    }
+  },
+  "capabilities": [
+    {"name": "submit_with_project", "kind": "submit", "step_ids": ["submit"], "nodes": [{"id": "call_submit", "type": "call", "step_id": "submit"}], "output_mapping": [{"kind": "final_response", "step_id": "submit", "response_path": "response"}]}
+  ]
+}

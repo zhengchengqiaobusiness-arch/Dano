@@ -14,7 +14,7 @@ from dano.execution.page.flow_spec import (
     add_llm_review_recommendations, refresh_review_items, flow_spec_to_api_request,
     capability_to_flow_spec_view, compile_capability_to_api_request, flow_spec_capability_contracts,
     flow_spec_to_client,
-    auto_fix_flow_spec, run_recording_pi_loop, sync_flow_spec_models,
+    auto_fix_flow_spec, orchestrate_flow_capabilities, run_recording_pi_loop, sync_flow_spec_models,
     flow_spec_canonical_summary, flow_spec_shadow_diff, migrate_v1_flow_spec_to_capability_spec,
     migrate_v2_flow_spec_to_capability_spec, capability_spec_to_legacy_flow_spec,
     capability_spec_to_api_request,
@@ -281,6 +281,96 @@ def test_auto_fix_accepts_capability_scoped_patch_ops_from_llm():
     assert cap.inputs[0].key == "entries"
     assert any(n.get("id") == "map_entries" for n in cap.nodes)
     assert cap.output_mapping[0]["step_id"] == "submit"
+
+
+class _FakePlannerPatchClient:
+    async def complete_json(self, **_kwargs):
+        return {"ops": [
+            {"op": "upsert_capability", "capability": {
+                "name": "submit_batch",
+                "title": "批量提交日报",
+                "kind": "submit_batch",
+                "intent": "按调用方传入的 entries 批量提交日报",
+            }},
+            {"op": "add_request_to_capability", "capability": "submit_batch", "step_id": "submit"},
+            {"op": "upsert_input_field", "capability": "submit_batch", "field": {
+                "key": "entries", "type": "array", "required": True,
+            }},
+            {"op": "set_output_mapping", "capability": "submit_batch", "mapping": [{
+                "kind": "final_response", "step_id": "submit", "response_path": "response",
+            }]},
+        ]}
+
+
+def test_orchestrate_flow_capabilities_prefers_patch_ops_and_keeps_same_batch_ops():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(step_id="submit", method="POST", url="/api/report", path="/api/report")],
+    )
+
+    out = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=_FakePlannerPatchClient(), model="fake"))
+
+    assert out.meta["capability_model"]["source"] == "llm_patch"
+    assert len(out.capabilities) == 1
+    cap = out.capabilities[0]
+    assert cap.name == "submit_batch"
+    assert cap.step_ids == ["submit"]
+    assert cap.inputs[0].key == "entries"
+    assert cap.output_mapping[0]["step_id"] == "submit"
+
+
+def test_auto_fix_deterministically_adds_batch_loop_maps_and_output():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/api/report/batch",
+            path="/api/report/batch",
+            body_source='[{"date":"2026-06-11","content":"日报"}]',
+            params=[
+                ParamField(path="[0].date", key="date", value="2026-06-11", type="date", required=True),
+                ParamField(path="[0].content", key="content", value="日报", type="string", required=True),
+            ],
+            response_json={"code": 0},
+        )],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            kind="submit_batch",
+            step_ids=["submit"],
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+        )],
+    )
+
+    fixed = asyncio.run(auto_fix_flow_spec(spec, max_rounds=1))
+    cap = fixed.capabilities[0]
+
+    assert any(n.get("type") == "foreach" for n in cap.nodes)
+    assert any(n.get("type") == "map" and n.get("target") == "submit.[0].date" for n in cap.nodes)
+    assert any(n.get("type") == "map" and n.get("target") == "submit.[0].content" for n in cap.nodes)
+    assert cap.output_mapping and cap.output_mapping[0]["step_id"] == "submit"
+
+
+def test_recording_v3_golden_matrix_fixtures_are_parseable():
+    fixture_dir = Path(__file__).parent / "fixtures" / "recording_v3"
+    expected = {
+        "daily_report_flow_spec.json",
+        "leave_flow_spec.json",
+        "work_hours_flow_spec.json",
+        "multi_enum_flow_spec.json",
+        "multi_capability_flow_spec.json",
+        "promoted_request_flow_spec.json",
+    }
+    names = {p.name for p in fixture_dir.glob("*.json")}
+
+    assert expected <= names
+    for name in expected:
+        raw = json.loads((fixture_dir / name).read_text(encoding="utf-8"))
+        spec = FlowSpec.model_validate(raw)
+        assert spec.request_facts.requests or spec.steps
+        assert spec.capabilities
+        summary = flow_spec_canonical_summary(spec)
+        assert summary["capabilities"]
 
 
 def test_reject_dependency_records_lock_and_removes_link():

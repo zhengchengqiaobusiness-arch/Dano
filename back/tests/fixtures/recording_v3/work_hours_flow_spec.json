@@ -1,0 +1,52 @@
+{
+  "flow_id": "golden_work_hours",
+  "title": "工时补填",
+  "steps": [
+    {
+      "step_id": "query_missing_days",
+      "name": "查询未填工时日期",
+      "method": "GET",
+      "url": "/gsgl/workHoursApply/getAddTimeList?start=2026-05-01&end=2026-06-01",
+      "path": "/gsgl/workHoursApply/getAddTimeList",
+      "params": [
+        {"path": "query.start", "key": "start", "value": "2026-05-01", "type": "date", "required": true},
+        {"path": "query.end", "key": "end", "value": "2026-06-01", "type": "date", "required": true}
+      ],
+      "response_json": {"code": 0, "data": {"filled": ["2026-05-01"], "missing": ["2026-05-12", "2026-05-13"]}}
+    },
+    {
+      "step_id": "submit_work_hours",
+      "name": "批量提交工时",
+      "method": "POST",
+      "url": "/gsgl/gsApply/insertGsPCList",
+      "path": "/gsgl/gsApply/insertGsPCList",
+      "body_source": "[{\"sbrq\":\"2026-05-12\",\"gznr\":\"开发\",\"sbgs\":8}]",
+      "params": [
+        {"path": "[0].sbrq", "key": "date", "value": "2026-05-12", "type": "date", "required": true},
+        {"path": "[0].gznr", "key": "content", "value": "开发", "type": "string", "required": true},
+        {"path": "[0].sbgs", "key": "hours", "value": 8, "type": "number", "required": true}
+      ],
+      "response_json": {"code": 0, "data": {"success": true}}
+    }
+  ],
+  "capabilities": [
+    {
+      "name": "query_missing_work_hours",
+      "title": "查询未填工时",
+      "kind": "query_status",
+      "step_ids": ["query_missing_days"],
+      "nodes": [{"id": "call_query", "type": "call", "step_id": "query_missing_days"}, {"id": "return_missing", "type": "return", "from": "query_missing_days", "path": "response.data.missing"}],
+      "output_schema": {"type": "object", "properties": {"missing": {"type": "array"}}},
+      "output_mapping": [{"kind": "response_path", "step_id": "query_missing_days", "response_path": "data.missing", "name": "missing"}]
+    },
+    {
+      "name": "submit_work_hours_batch",
+      "title": "批量补填工时",
+      "kind": "submit_batch",
+      "step_ids": ["submit_work_hours"],
+      "nodes": [{"id": "foreach_entries", "type": "foreach", "items": "input.entries", "steps": [{"id": "call_submit", "type": "call", "step_id": "submit_work_hours"}]}, {"id": "return_result", "type": "return", "from": "submit_work_hours", "path": "response"}],
+      "input_schema": {"type": "object", "properties": {"entries": {"type": "array", "items": {"type": "object", "properties": {"date": {"type": "string"}, "content": {"type": "string"}, "hours": {"type": "number"}}}}}},
+      "output_mapping": [{"kind": "final_response", "step_id": "submit_work_hours", "response_path": "response"}]
+    }
+  ]
+}

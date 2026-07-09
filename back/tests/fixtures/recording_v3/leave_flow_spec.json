@@ -1,0 +1,55 @@
+{
+  "flow_id": "golden_leave",
+  "tenant": "aaa",
+  "subsystem": "A-OA",
+  "title": "请假申请",
+  "steps": [
+    {
+      "step_id": "get_leave_def",
+      "name": "获取请假流程定义",
+      "method": "GET",
+      "url": "/admin-api/bpm/process-definition/get?key=oa_duty_leave",
+      "path": "/admin-api/bpm/process-definition/get",
+      "response_json": {"code": 0, "data": {"id": "proc-leave"}}
+    },
+    {
+      "step_id": "submit_leave",
+      "name": "提交请假申请",
+      "method": "POST",
+      "url": "/admin-api/oa/duty-leave/submit-process",
+      "path": "/admin-api/oa/duty-leave/submit-process",
+      "body_source": "{\"type\":\"2\",\"reason\":\"家中有事\",\"processDefinitionId\":\"proc-leave\"}",
+      "params": [
+        {"path": "type", "key": "请假类型", "value": "2", "type": "enum", "required": true, "category": "user_param", "source_kind": "page_enum", "enum_options": [{"label": "病假", "value": "1"}, {"label": "事假", "value": "2"}], "enum_value_map": {"病假": "1", "事假": "2"}},
+        {"path": "reason", "key": "原因", "value": "家中有事", "type": "string", "required": true, "category": "user_param", "source_kind": "user_input"},
+        {"path": "processDefinitionId", "key": "processDefinitionId", "value": "proc-leave", "type": "string", "required": true, "category": "runtime_var", "source_kind": "previous_response", "exposed_to_user": false, "source": {"step_id": "get_leave_def", "path": "data.id"}}
+      ],
+      "response_json": {"code": 0, "data": {"processInstanceId": "pi-1"}}
+    }
+  ],
+  "links": [
+    {"source_step_id": "get_leave_def", "source_path": "data.id", "target_step_id": "submit_leave", "target_path": "processDefinitionId", "confirmed": true, "confidence": 0.95}
+  ],
+  "capabilities": [
+    {
+      "name": "submit_leave",
+      "title": "提交请假申请",
+      "kind": "submit",
+      "step_ids": ["get_leave_def", "submit_leave"],
+      "nodes": [
+        {"id": "call_def", "type": "call", "step_id": "get_leave_def"},
+        {"id": "call_submit", "type": "call", "step_id": "submit_leave"},
+        {"id": "return_result", "type": "return", "from": "submit_leave", "path": "response"}
+      ],
+      "output_mapping": [{"kind": "final_response", "step_id": "submit_leave", "response_path": "response"}],
+      "confirmed": true,
+      "requires_human_confirm": false
+    }
+  ],
+  "request_facts": {
+    "requests": [
+      {"request_id": "req-leave-def", "request_index": 1, "sequence": 1, "method": "GET", "url": "/admin-api/bpm/process-definition/get?key=oa_duty_leave", "path": "/admin-api/bpm/process-definition/get", "response_json": {"code": 0, "data": {"id": "proc-leave"}}},
+      {"request_id": "req-leave-submit", "request_index": 2, "sequence": 2, "method": "POST", "url": "/admin-api/oa/duty-leave/submit-process", "path": "/admin-api/oa/duty-leave/submit-process", "response_json": {"code": 0, "data": {"processInstanceId": "pi-1"}}}
+    ]
+  }
+}
