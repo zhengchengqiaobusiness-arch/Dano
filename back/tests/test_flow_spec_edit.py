@@ -153,6 +153,135 @@ def test_capability_loop_and_return_edits():
     assert cap.output_mapping[0]["step_id"] == "submit"
 
 
+def test_capability_scoped_patch_ops_update_fields_dependencies_nodes_and_relations():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[
+            FlowStep(
+                step_id="query",
+                method="GET",
+                url="/api/query",
+                path="/api/query",
+                response_json={"data": {"missing_dates": ["2026-06-11"]}},
+            ),
+            FlowStep(
+                step_id="submit",
+                method="POST",
+                url="/api/submit",
+                path="/api/submit",
+                params=[ParamField(path="[0].date", key="date", value="2026-06-11", type="date", required=True)],
+                response_json={"code": 0},
+            ),
+        ],
+        capabilities=[
+            FlowCapability(
+                name="query_status",
+                kind="query_status",
+                step_ids=["query"],
+                output_schema={"type": "object", "properties": {"missing_dates": {"type": "array"}}},
+            ),
+            FlowCapability(name="submit_batch", kind="submit_batch", step_ids=["submit"]),
+        ],
+    )
+
+    new = apply_flow_edits(spec, [
+        {"op": "upsert_input_field", "capability_name": "submit_batch", "field": {
+            "key": "entries", "type": "array", "required": True, "confirmed": True,
+        }},
+        {"op": "upsert_request_field", "capability_name": "submit_batch", "field": {
+            "step_id": "submit", "path": "[0].date", "key": "date", "type": "date",
+            "source_kind": "loop_item", "exposed_to_caller": False, "confirmed": True,
+        }},
+        {"op": "bind_dependency", "capability_name": "submit_batch", "source": {
+            "step_id": "query", "path": "data.missing_dates",
+        }, "target": {
+            "step_id": "submit", "path": "[0].date",
+        }, "confidence": 0.91, "confirmed": True, "locked": True},
+        {"op": "set_map", "capability_name": "submit_batch", "node": {
+            "id": "map_entries", "source": "input.entries", "target": "var.entries",
+        }},
+        {"op": "set_condition", "capability_name": "submit_batch", "node": {
+            "id": "has_entries", "condition": "input.entries.length > 0", "then": [],
+        }},
+        {"op": "set_output_mapping", "capability_name": "submit_batch", "mapping": [{
+            "kind": "final_response", "step_id": "submit", "response_path": "response",
+        }]},
+        {"op": "set_capability_relation", "from_capability": "query_status", "from_output": "missing_dates",
+         "to_capability": "submit_batch", "to_input": "entries", "confidence": 0.86},
+    ])
+
+    cap = next(c for c in new.capabilities if c.name == "submit_batch")
+    assert cap.inputs[0].key == "entries"
+    assert cap.request_fields[0].path == "[0].date"
+    assert cap.dependencies[0].locked is True
+    assert any(n.get("id") == "map_entries" for n in cap.nodes)
+    assert any(n.get("id") == "has_entries" for n in cap.nodes)
+    assert cap.output_mapping[0]["step_id"] == "submit"
+    assert len(new.links) == 1
+    assert new.links[0].confirmed is True
+    assert new.capability_relations[0].from_capability == "query_status"
+
+
+def test_capability_validator_checks_condition_and_map_refs():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            params=[ParamField(path="body.date", key="date", value="2026-06-11", type="date", required=True)],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            kind="submit_batch",
+            step_ids=["submit"],
+            input_schema={"type": "object", "properties": {"entries": {"type": "array"}}},
+            nodes=[
+                {"id": "bad_condition", "type": "condition", "condition": "input.missing.length > 0", "then": []},
+                {"id": "bad_map", "type": "map", "source": "input.unknown", "target": "submit.nope"},
+            ],
+            output_mapping=[{"kind": "final_response", "step_id": "submit", "response_path": "response"}],
+        )],
+    )
+
+    report = validate_flow_spec(spec)
+
+    text = "\n".join(report["errors"] + report["warnings"])
+    assert "引用的输入 `missing` 不存在" in text
+    assert "来源 `input.unknown` 不存在" in text
+
+
+class _FakeFixClient:
+    async def complete_json(self, **_kwargs):
+        return {"ops": [
+            {"op": "upsert_input_field", "capability": "submit_batch", "field": {
+                "key": "entries", "type": "array", "required": True,
+            }},
+            {"op": "set_map", "capability": "submit_batch", "node": {
+                "id": "map_entries", "source": "input.entries", "target": "var.entries",
+            }},
+            {"op": "set_output_mapping", "capability": "submit_batch", "mapping": [{
+                "kind": "final_response", "step_id": "submit", "response_path": "response",
+            }]},
+        ]}
+
+
+def test_auto_fix_accepts_capability_scoped_patch_ops_from_llm():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
+        capabilities=[FlowCapability(name="submit_batch", kind="submit_batch", step_ids=["submit"])],
+    )
+
+    fixed = asyncio.run(auto_fix_flow_spec(spec, llm_client=_FakeFixClient(), model="fake", max_rounds=1))
+
+    cap = fixed.capabilities[0]
+    assert cap.inputs[0].key == "entries"
+    assert any(n.get("id") == "map_entries" for n in cap.nodes)
+    assert cap.output_mapping[0]["step_id"] == "submit"
+
+
 def test_reject_dependency_records_lock_and_removes_link():
     link = FlowLink(
         link_id="l1",

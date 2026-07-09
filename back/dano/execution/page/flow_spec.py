@@ -3971,6 +3971,41 @@ def _capability_response_path_exists(step: FlowStep | None, path: str) -> bool:
     return _flow_path_lookup(step.response_json, normalized) is not _FLOW_PATH_MISSING
 
 
+def _capability_input_refs(expr: str) -> set[str]:
+    refs = set(re.findall(r"\binput\.([a-zA-Z_][\w]*)", expr or ""))
+    if re.fullmatch(r"[a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)?\s*(?:==|!=|>=|<=|>|<|in\b).+", expr or ""):
+        head = re.split(r"==|!=|>=|<=|>|<|\bin\b", expr, 1)[0].strip()
+        if head and not head.startswith(("var.", "node.", "response.")):
+            refs.add(head.split(".", 1)[0].removeprefix("input."))
+    return {ref for ref in refs if ref}
+
+
+def _capability_value_ref_exists(
+    ref: str,
+    *,
+    input_props: dict[str, Any],
+    cap_node_ids: set[str],
+    step_by_id: dict[str, FlowStep],
+    cap_step_id_set: set[str],
+) -> bool:
+    value = str(ref or "").strip()
+    if not value:
+        return False
+    if value.startswith("input."):
+        return value.split(".", 1)[1].split(".", 1)[0] in input_props
+    if value.startswith(("var.", "computed.", "loop.", "item.", "const.")):
+        return True
+    if value.startswith("node."):
+        return value.split(".", 1)[1].split(".", 1)[0] in cap_node_ids
+    if "." in value:
+        head, tail = value.split(".", 1)
+        if head in cap_node_ids:
+            return True
+        if head in cap_step_id_set:
+            return _capability_response_path_exists(step_by_id.get(head), tail)
+    return value in input_props or value in cap_node_ids or value in cap_step_id_set
+
+
 def _capability_warning(
     section: dict[str, Any],
     warnings: list[str],
@@ -4335,6 +4370,10 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                 expr = str(node.get("condition") or node.get("check") or node.get("expr") or "")
                 if not expr:
                     cap_errors.append(f"Capability `{label}` condition 节点 `{node_id}` 缺少 condition/check 表达式")
+                else:
+                    for ref in _capability_input_refs(expr):
+                        if ref not in input_props:
+                            cap_errors.append(f"Capability `{label}` condition 节点 `{node_id}` 引用的输入 `{ref}` 不存在")
                 if not any(isinstance(node.get(k), list) and node.get(k) for k in ("then", "steps", "children", "otherwise", "else")):
                     cap_warnings.append(f"Capability `{label}` condition 节点 `{node_id}` 没有任何分支步骤")
             if node_type == "foreach":
@@ -4375,14 +4414,31 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                     isinstance(n, dict) and n.get("type") == "call" for n in _iter_capability_nodes([node])
                 ):
                     cap_warnings.append(f"Capability `{label}` foreach 节点 `{node_id}` 没有子步骤，运行期将退化为重复执行能力闭包")
-            if node_type == "map" and (not node.get("source") or not node.get("target")):
-                cap_errors.append(f"Capability `{label}` map 节点 `{node_id}` 缺少 source 或 target")
             if node_type == "map":
                 source = str(node.get("source") or "")
-                if source.startswith("input."):
-                    field = source.split(".", 1)[1].split(".", 1)[0]
+                target = str(node.get("target") or "")
+                if not source or not target:
+                    cap_errors.append(f"Capability `{label}` map 节点 `{node_id}` 缺少 source 或 target")
+                elif not _capability_value_ref_exists(
+                    source,
+                    input_props=input_props,
+                    cap_node_ids=cap_node_ids,
+                    step_by_id=step_by_id,
+                    cap_step_id_set=cap_step_id_set,
+                ):
+                    cap_errors.append(f"Capability `{label}` map 节点 `{node_id}` 来源 `{source}` 不存在")
+                elif target.startswith("input."):
+                    field = target.split(".", 1)[1].split(".", 1)[0]
                     if field not in input_props:
-                        cap_errors.append(f"Capability `{label}` map 节点 `{node_id}` 引用的输入 `{field}` 不存在")
+                        cap_errors.append(f"Capability `{label}` map 节点 `{node_id}` 目标输入 `{field}` 不存在")
+                elif not target.startswith(("var.", "computed.", "loop.", "item.", "node.")):
+                    head = target.split(".", 1)[0]
+                    if head in cap_step_id_set:
+                        tail = target.split(".", 1)[1] if "." in target else ""
+                        if not _capability_step_param_exists(step_by_id.get(head), tail):
+                            cap_errors.append(f"Capability `{label}` map 节点 `{node_id}` 目标 `{target}` 找不到接口字段")
+                    else:
+                        cap_warnings.append(f"Capability `{label}` map 节点 `{node_id}` 目标 `{target}` 无法静态确认，将按计算变量处理")
             if node_type == "return" and not (node.get("value") or node.get("from") or node.get("path")):
                 hint = f"，可选来源: {return_sources[-1]}" if return_sources else "，当前能力没有有效 call 步骤可返回"
                 cap_errors.append(f"Capability `{label}` return 节点 `{node_id}` 缺少返回来源{hint}")
@@ -6930,6 +6986,160 @@ def _set_capability_return(cap: FlowCapability, mapping: list[dict[str, Any]]) -
     cap.updated_by = "repair"
 
 
+def _capability_bucket_for_scope(cap: FlowCapability, scope: str) -> list[CapabilityField]:
+    if scope == "input":
+        return cap.inputs
+    if scope == "request_field":
+        return cap.request_fields
+    if scope == "internal":
+        return cap.internal_fields
+    if scope == "computed":
+        return cap.computed_fields
+    if scope == "output":
+        return cap.outputs
+    return cap.fields
+
+
+def _field_match(a: CapabilityField, b: CapabilityField) -> bool:
+    if a.field_id and b.field_id and a.field_id == b.field_id:
+        return True
+    if a.scope != b.scope:
+        return False
+    if a.step_id and b.step_id and a.step_id == b.step_id:
+        if _strip_body_prefix(a.path or a.key) == _strip_body_prefix(b.path or b.key):
+            return True
+    if not a.step_id and not b.step_id and (a.key or a.path) and (b.key or b.path):
+        return (a.key or a.path) == (b.key or b.path)
+    return False
+
+
+def _upsert_capability_field(cap: FlowCapability, data: dict[str, Any], *, default_scope: str) -> CapabilityField:
+    raw = dict(data or {})
+    raw.setdefault("scope", default_scope)
+    raw.setdefault("locked", True)
+    raw.setdefault("confirmed", True)
+    field = CapabilityField.model_validate(raw)
+    bucket = _capability_bucket_for_scope(cap, field.scope)
+    for idx, existing in enumerate(bucket):
+        if not _field_match(existing, field):
+            continue
+        merged = existing.model_dump()
+        merged.update(field.model_dump(exclude_unset=True))
+        bucket[idx] = CapabilityField.model_validate(merged)
+        cap.updated_by = "repair"
+        return bucket[idx]
+    bucket.append(field)
+    cap.updated_by = "repair"
+    return field
+
+
+def _upsert_capability_dependency(cap: FlowCapability, data: dict[str, Any]) -> CapabilityDependency:
+    dep = CapabilityDependency.model_validate(dict(data or {}))
+    dep_sig = (
+        dep.dependency_id,
+        str((dep.source or {}).get("step_id") or ""),
+        str((dep.source or {}).get("path") or ""),
+        str((dep.target or {}).get("step_id") or ""),
+        str((dep.target or {}).get("path") or ""),
+    )
+    for idx, existing in enumerate(cap.dependencies or []):
+        existing_sig = (
+            existing.dependency_id,
+            str((existing.source or {}).get("step_id") or ""),
+            str((existing.source or {}).get("path") or ""),
+            str((existing.target or {}).get("step_id") or ""),
+            str((existing.target or {}).get("path") or ""),
+        )
+        if existing_sig[0] == dep_sig[0] or existing_sig[1:] == dep_sig[1:]:
+            merged = existing.model_dump()
+            merged.update(dep.model_dump(exclude_unset=True))
+            cap.dependencies[idx] = CapabilityDependency.model_validate(merged)
+            cap.updated_by = "repair"
+            return cap.dependencies[idx]
+    cap.dependencies.append(dep)
+    cap.updated_by = "repair"
+    return dep
+
+
+def _upsert_global_link_from_capability_dependency(spec: FlowSpec, dep: CapabilityDependency) -> None:
+    source = dep.source or {}
+    target = dep.target or {}
+    source_step_id = str(source.get("step_id") or "")
+    target_step_id = str(target.get("step_id") or "")
+    source_path = str(source.get("path") or "")
+    target_path = str(target.get("path") or "")
+    if not all([source_step_id, target_step_id, source_path, target_path]):
+        return
+    _find_step(spec, source_step_id)
+    _find_step(spec, target_step_id)
+    for link in spec.links:
+        if (
+            link.source_step_id == source_step_id
+            and _strip_body_prefix(link.source_path) == _strip_body_prefix(source_path)
+            and link.target_step_id == target_step_id
+            and _strip_body_prefix(link.target_path) == _strip_body_prefix(target_path)
+        ):
+            link.confirmed = bool(dep.confirmed or link.confirmed)
+            link.confidence = max(float(link.confidence or 0), float(dep.confidence or 0))
+            link.reason = dep.reason or link.reason
+            link.locked = bool(dep.locked or link.locked)
+            return
+    spec.links.append(FlowLink(
+        source_step_id=source_step_id,
+        source_path=source_path,
+        target_step_id=target_step_id,
+        target_path=target_path,
+        confirmed=bool(dep.confirmed),
+        confidence=float(dep.confidence or 0.75),
+        reason=dep.reason or "能力级修复绑定的上游响应依赖",
+        evidence=dep.evidence or {"source": "capability_dependency"},
+        locked=bool(dep.locked),
+    ))
+
+
+def _upsert_capability_node(cap: FlowCapability, node_type: str, data: dict[str, Any]) -> dict[str, Any]:
+    raw = dict(data or {})
+    raw["type"] = node_type
+    node_id = str(raw.get("id") or f"{node_type}_{len(cap.nodes or []) + 1}")
+    raw["id"] = node_id
+    for idx, node in enumerate(cap.nodes or []):
+        if str(node.get("id") or "") == node_id:
+            next_node = dict(node)
+            next_node.update(raw)
+            cap.nodes[idx] = next_node
+            cap.updated_by = "repair"
+            return next_node
+    cap.nodes.append(raw)
+    cap.updated_by = "repair"
+    return raw
+
+
+def _upsert_capability_relation(spec: FlowSpec, data: dict[str, Any]) -> CapabilityRelation:
+    rel = CapabilityRelation.model_validate(dict(data or {}))
+    rel_sig = (
+        rel.relation_id,
+        rel.from_capability,
+        rel.from_output,
+        rel.to_capability,
+        rel.to_input,
+    )
+    for idx, existing in enumerate(spec.capability_relations or []):
+        existing_sig = (
+            existing.relation_id,
+            existing.from_capability,
+            existing.from_output,
+            existing.to_capability,
+            existing.to_input,
+        )
+        if existing_sig[0] == rel_sig[0] or existing_sig[1:] == rel_sig[1:]:
+            merged = existing.model_dump()
+            merged.update(rel.model_dump(exclude_unset=True))
+            spec.capability_relations[idx] = CapabilityRelation.model_validate(merged)
+            return spec.capability_relations[idx]
+    spec.capability_relations.append(rel)
+    return rel
+
+
 _CAPABILITY_ALLOWED_FIELDS = frozenset({
     "name", "title", "intent", "kind", "capability_id", "request_refs", "step_ids", "fields",
     "inputs", "request_fields", "internal_fields", "computed_fields", "outputs", "dependencies",
@@ -7104,7 +7314,58 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 _sync_capability_order(new_spec, cap)
             continue
 
-        if op == "add_capability_step":
+        if op == "upsert_capability":
+            raw = dict(edit.get("capability") or {})
+            name = str(raw.get("name") or edit.get("capability_name") or edit.get("name") or "")
+            if not name:
+                raise ValueError("upsert_capability missing name")
+            idx = next((i for i, c in enumerate(new_spec.capabilities) if c.name == name), -1)
+            if idx < 0:
+                raw.setdefault("name", name)
+                raw.setdefault("title", raw["name"])
+                raw.setdefault("kind", "submit")
+                new_spec.capabilities.append(FlowCapability.model_validate(raw))
+            else:
+                cap = new_spec.capabilities[idx]
+                for key, value in raw.items():
+                    if key not in _CAPABILITY_ALLOWED_FIELDS:
+                        continue
+                    if key in {"fields", "inputs", "request_fields", "internal_fields", "computed_fields", "outputs"}:
+                        value = [CapabilityField.model_validate(x) for x in (value or [])]
+                    elif key == "dependencies":
+                        value = [CapabilityDependency.model_validate(x) for x in (value or [])]
+                    elif key == "request_refs":
+                        value = [CapabilityRequestRef.model_validate(x) for x in (value or [])]
+                    setattr(cap, key, value)
+                cap.updated_by = "repair"
+            continue
+
+        if op in {
+            "upsert_capability_field",
+            "upsert_input_field",
+            "upsert_request_field",
+            "upsert_internal_field",
+            "upsert_computed_field",
+            "upsert_output_field",
+        }:
+            idx = _find_capability_index(new_spec, edit)
+            default_scope = {
+                "upsert_input_field": "input",
+                "upsert_request_field": "request_field",
+                "upsert_internal_field": "internal",
+                "upsert_computed_field": "computed",
+                "upsert_output_field": "output",
+            }.get(op, str(edit.get("scope") or "request_field"))
+            raw = dict(edit.get("field_data") or edit.get("field") or {})
+            if "field" in edit and not isinstance(edit.get("field"), dict):
+                raw["key"] = str(edit.get("field") or "")
+            for alias in ("field_id", "key", "path", "step_id", "request_id", "request_index", "type", "source_kind"):
+                if alias in edit and alias not in raw:
+                    raw[alias] = edit.get(alias)
+            _upsert_capability_field(new_spec.capabilities[idx], raw, default_scope=default_scope)
+            continue
+
+        if op in {"add_request_to_capability", "add_capability_step"}:
             idx = _find_capability_index(new_spec, edit)
             cap = new_spec.capabilities[idx]
             step_id = str(edit.get("step_id") or "")
@@ -7122,6 +7383,79 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             if not any(n.get("type") == "call" and n.get("step_id") == step_id for n in (cap.nodes or [])):
                 cap.nodes.append({"id": f"call_{len(cap.nodes or []) + 1}", "type": "call", "step_id": step_id})
             _sync_capability_order(new_spec, cap)
+            continue
+
+        if op in {"remove_request_from_capability", "remove_capability_step"}:
+            idx = _find_capability_index(new_spec, edit)
+            step_id = str(edit.get("step_id") or "")
+            _remember_removed_capability_step(new_spec, new_spec.capabilities[idx].name, step_id)
+            new_spec.capabilities[idx].step_ids = [sid for sid in new_spec.capabilities[idx].step_ids if sid != step_id]
+            new_spec.capabilities[idx].nodes = [
+                n for n in (new_spec.capabilities[idx].nodes or [])
+                if not (n.get("type") == "call" and n.get("step_id") == step_id)
+            ]
+            _sync_capability_order(new_spec, new_spec.capabilities[idx])
+            continue
+
+        if op == "bind_dependency":
+            idx = _find_capability_index(new_spec, edit)
+            raw = dict(edit.get("dependency") or {})
+            raw.setdefault("type", edit.get("type") or "response_to_request")
+            raw.setdefault("source", edit.get("source") or {
+                "step_id": edit.get("source_step") or edit.get("source_step_id") or "",
+                "path": edit.get("source_path") or "",
+            })
+            raw.setdefault("target", edit.get("target") or {
+                "step_id": edit.get("target_step") or edit.get("target_step_id") or "",
+                "path": edit.get("target_path") or "",
+            })
+            raw.setdefault("confirmed", bool(edit.get("confirmed", False)))
+            raw.setdefault("locked", bool(edit.get("locked", False)))
+            raw.setdefault("confidence", float(edit.get("confidence") or 0.75))
+            raw.setdefault("reason", edit.get("reason") or "能力级修复绑定的依赖")
+            dep = _upsert_capability_dependency(new_spec.capabilities[idx], raw)
+            _upsert_global_link_from_capability_dependency(new_spec, dep)
+            continue
+
+        if op in {"set_map", "set_condition"}:
+            idx = _find_capability_index(new_spec, edit)
+            node_type = "map" if op == "set_map" else "condition"
+            raw = dict(edit.get("node") or {})
+            if node_type == "map":
+                raw.setdefault("source", edit.get("source") or "")
+                raw.setdefault("target", edit.get("target") or "")
+            else:
+                raw.setdefault("condition", edit.get("condition") or edit.get("check") or "")
+                for branch_key in ("then", "else", "steps", "children", "otherwise"):
+                    if branch_key in edit and branch_key not in raw:
+                        raw[branch_key] = edit[branch_key]
+            if edit.get("node_id"):
+                raw.setdefault("id", edit.get("node_id"))
+            _upsert_capability_node(new_spec.capabilities[idx], node_type, raw)
+            continue
+
+        if op == "set_output_mapping":
+            idx = _find_capability_index(new_spec, edit)
+            mapping = edit.get("mapping")
+            if isinstance(mapping, dict):
+                mapping = [mapping]
+            if not isinstance(mapping, list):
+                mapping = [{
+                    "kind": edit.get("kind") or "final_response",
+                    "step_id": edit.get("step_id") or edit.get("from") or "",
+                    "response_path": edit.get("response_path") or edit.get("path") or "response",
+                    "name": edit.get("name") or edit.get("field") or "",
+                }]
+            _set_capability_return(new_spec.capabilities[idx], mapping)
+            continue
+
+        if op == "set_capability_relation":
+            raw = dict(edit.get("relation") or {})
+            for alias in ("type", "from_capability", "from_output", "to_capability", "to_input", "confidence", "confirmed", "reason"):
+                if alias in edit and alias not in raw:
+                    raw[alias] = edit.get(alias)
+            raw.setdefault("requires_user_confirmation", bool(edit.get("requires_user_confirmation", True)))
+            _upsert_capability_relation(new_spec, raw)
             continue
 
         if op == "bind_option_source":
@@ -7160,18 +7494,6 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     "response_path": edit.get("response_path") or edit.get("path") or "response",
                 }]
             _set_capability_return(new_spec.capabilities[idx], mapping)
-            continue
-
-        if op == "remove_capability_step":
-            idx = _find_capability_index(new_spec, edit)
-            step_id = str(edit.get("step_id") or "")
-            _remember_removed_capability_step(new_spec, new_spec.capabilities[idx].name, step_id)
-            new_spec.capabilities[idx].step_ids = [sid for sid in new_spec.capabilities[idx].step_ids if sid != step_id]
-            new_spec.capabilities[idx].nodes = [
-                n for n in (new_spec.capabilities[idx].nodes or [])
-                if not (n.get("type") == "call" and n.get("step_id") == step_id)
-            ]
-            _sync_capability_order(new_spec, new_spec.capabilities[idx])
             continue
 
         if op == "reject_dependency":
@@ -7521,6 +7843,14 @@ _FLOW_AUTOFIX_SYSTEM = """你是录制型 Skill 的自动修正器。
 - {"op":"mark_field_as_identity","step_id":"...","path":"...","source":"current_user"}
 - {"op":"create_capability","name":"...","title":"...","kind":"query_status|list_options|validate_batch|submit_batch|submit","step_ids":[...],"nodes":[...]}
 - {"op":"reorder_capability_steps","capability":"...","step_ids":[...]}
+- {"op":"upsert_input_field","capability":"...","field":{"key":"...","type":"string|number|array|object","required":true}}
+- {"op":"upsert_request_field","capability":"...","field":{"step_id":"...","path":"...","key":"...","type":"...","source_kind":"user_input|previous_response|api_option|constant"}}
+- {"op":"upsert_output_field","capability":"...","field":{"key":"...","path":"...","type":"..."}}
+- {"op":"bind_dependency","capability":"...","source":{"step_id":"...","path":"data.id"},"target":{"step_id":"...","path":"body.id"},"confidence":0.9}
+- {"op":"set_map","capability":"...","node":{"id":"map_entries","source":"input.entries","target":"var.entries"}}
+- {"op":"set_condition","capability":"...","node":{"id":"need_submit","condition":"input.entries.length > 0","then":[...]}}
+- {"op":"set_output_mapping","capability":"...","mapping":[{"kind":"final_response","step_id":"...","response_path":"response"}]}
+- {"op":"set_capability_relation","from_capability":"query_status","from_output":"missing_dates","to_capability":"submit_batch","to_input":"entries","confidence":0.8}
 - {"op":"reject_dependency","link_id":"..."} 或 {"op":"reject_dependency","source_step":"...","source_path":"...","target_step":"...","target_path":"..."}
 拿不准就不要改。"""
 
@@ -7787,6 +8117,33 @@ def _autofix_ops_to_edits(spec: FlowSpec, ops: list[dict[str, Any]]) -> list[dic
                     "field": "step_ids",
                     "value": [str(x) for x in step_ids],
                 })
+        elif kind in {
+            "upsert_capability",
+            "upsert_capability_field",
+            "upsert_input_field",
+            "upsert_request_field",
+            "upsert_internal_field",
+            "upsert_computed_field",
+            "upsert_output_field",
+            "bind_dependency",
+            "set_map",
+            "set_condition",
+            "set_output_mapping",
+            "set_capability_relation",
+            "add_request_to_capability",
+            "remove_request_from_capability",
+        }:
+            cap_name = str(op.get("capability") or op.get("capability_name") or op.get("name") or "")
+            edit = {k: v for k, v in op.items() if k != "op"}
+            edit["op"] = kind
+            if cap_name in cap_by_name:
+                edit["capability_index"] = cap_by_name[cap_name]
+            elif kind not in {"set_capability_relation", "upsert_capability"}:
+                continue
+            if "field" in op and isinstance(op.get("field"), dict):
+                edit["field_data"] = op.get("field")
+                edit.pop("field", None)
+            edits.append(edit)
         elif kind == "reject_dependency":
             link_id = str(op.get("link_id") or "")
             source_step = str(op.get("source_step") or op.get("source_step_id") or "")
