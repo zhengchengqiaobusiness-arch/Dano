@@ -588,9 +588,6 @@ function requestGraphPath(req: RequestGraphEntry) {
 function requestGraphSignature(req: RequestGraphEntry) {
   return `${(req.method || "GET").toUpperCase()} ${requestGraphPath(req)}`;
 }
-function requestGraphDisplayKey(req: RequestGraphEntry) {
-  return requestGraphSignature(req);
-}
 function requestGraphKey(req: RequestGraphEntry) {
   if (req.request_id) return `id:${req.request_id}`;
   if (req.request_index != null) return `idx:${String(req.request_index)}`;
@@ -612,7 +609,6 @@ function allCapturedRequests(spec?: FlowSpecData | null) {
     ...(graph.selected_steps || []),
     ...(graph.candidate_reads || []),
   ];
-  const seen = new Set<string>();
   const selectedSigs = new Set((graph.selected_steps || []).map(requestGraphSignature));
   const stepSigs = new Set((spec?.steps || []).map((s) => `${(s.method || "").toUpperCase()} ${purePath(s.path || s.url || "")}`));
   const stepReqKeys = new Set((spec?.steps || []).flatMap((s) => {
@@ -627,33 +623,9 @@ function allCapturedRequests(spec?: FlowSpecData | null) {
     stepSigs.has(`${(req.method || "").toUpperCase()} ${purePath(req.path || req.url || "")}`) ||
     stepReqKeys.has(requestGraphKey(req))
   ) ? 0 : 1;
-  const bestByDisplayKey = new Map<string, RequestGraphEntry>();
-  const rankTuple = (req: RequestGraphEntry) => [
-    selectedRank(req),
-    requestRoleRank(req),
-    -(req.confidence ?? 0),
-    req.response_json == null ? 1 : 0,
-    -Number(req.request_index ?? 0),
-  ];
-  const better = (a: RequestGraphEntry, b: RequestGraphEntry) => {
-    const ar = rankTuple(a);
-    const br = rankTuple(b);
-    for (let i = 0; i < ar.length; i += 1) {
-      if (ar[i] !== br[i]) return ar[i] < br[i];
-    }
-    return false;
-  };
-  source
+  return source
     .filter(isApiLikeRequest)
-    .forEach((req) => {
-      const exactKey = requestGraphKey(req);
-      if (seen.has(exactKey)) return;
-      seen.add(exactKey);
-      const displayKey = requestGraphDisplayKey(req);
-      const existing = bestByDisplayKey.get(displayKey);
-      if (!existing || better(req, existing)) bestByDisplayKey.set(displayKey, req);
-    });
-  return Array.from(bestByDisplayKey.values())
+    .filter((req, idx, arr) => arr.findIndex((x) => requestGraphKey(x) === requestGraphKey(req)) === idx)
     .sort((a, b) => selectedRank(a) - selectedRank(b) || requestRoleRank(a) - requestRoleRank(b) || (b.confidence ?? 0) - (a.confidence ?? 0) || Number(a.request_index ?? 0) - Number(b.request_index ?? 0));
 }
 function requestRoleRank(req: RequestGraphEntry) {
@@ -687,7 +659,7 @@ function capturedRequestOptions(spec: FlowSpecData | null | undefined, opts: { i
   return allCapturedRequests(spec)
     .filter((req) => opts.includeIncluded || !isRequestInSteps(spec, req))
     .map((req) => ({
-      label: `${req.method || "GET"} ${req.path || stripHost(req.url || "")}`,
+      label: `#${req.sequence ?? req.request_index ?? ""} ${req.method || "GET"} ${req.path || stripHost(req.url || "")}`,
       value: requestOptionValue(req),
     }))
     .filter((x) => x.value);
@@ -714,6 +686,12 @@ function schemaFieldRows(schema?: Record<string, any>) {
       description: String((spec as any).description || (spec as any).title || ""),
       required: required.has(name),
     }));
+}
+function preferredSkillTitle(spec?: FlowSpecData | null) {
+  if (!spec) return "";
+  const caps = spec.capabilities || [];
+  if (caps.length === 1) return (caps[0].title || spec.title || caps[0].name || "").trim();
+  return (spec.title || caps.map((c) => c.title || c.name).filter(Boolean).join(" / ")).trim();
 }
 function jsonSchemaForParam(p: FlowParam) {
   const t = (p.type || "string").toLowerCase();
@@ -806,6 +784,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [err, setErr] = useState("");
 
   const [flowSpec, setFlowSpec] = useState<FlowSpecData | null>(null);
+  const flowSpecRef = useRef<FlowSpecData | null>(null);
+  useEffect(() => { flowSpecRef.current = flowSpec; }, [flowSpec]);
   const [checkReport, setCheckReport] = useState<FlowCheckReport | null>(null);
   const [titleDraft, setTitleDraft] = useState("");               // FC3 修复:标题本地草稿,WS 推送不再即时覆盖编辑
   const [descDraft, setDescDraft] = useState("");                 // FC3 修复:说明本地草稿
@@ -836,6 +816,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [orchestrateBusy, setOrchestrateBusy] = useState(false);
   const [autoFixBusy, setAutoFixBusy] = useState(false);
   const [activeFlowTab, setActiveFlowTab] = useState("abilities");
+
+  function acceptFlowSpec(fs: FlowSpecData) {
+    flowSpecRef.current = fs;
+    setFlowSpec(fs);
+    const nextTitle = preferredSkillTitle(fs);
+    if (nextTitle && !title.trim()) setTitle(nextTitle);
+  }
 
   useEffect(() => () => {
     // FC4 修复:仅当 phase 处于 recording/publishing 时才关 WS(避免 StrictMode 双 mount 或组件复用时误关正在用的 WS)
@@ -937,6 +924,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
 
   function resetEditorState() {
+    flowSpecRef.current = null;
     setFlowSpec(null);
     setCheckReport(null);
     setBindDraft({});
@@ -1011,7 +999,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         setLlmBusy(false); setOrchestrateBusy(false); setAutoFixBusy(false);
         const fs = m.full_spec || m.flow_spec;
         if (fs) {
-          setFlowSpec(fs);
+          acceptFlowSpec(fs);
           setLastServerJson(JSON.stringify(fs));
           autoDedupeReadSteps(fs);
           autoLinkUnmatchedRuntimeFields(fs);
@@ -1022,14 +1010,18 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
       else if (m.type === "step_names") {
         setNamingBusy(false);
-        if (m.full_spec) { setFlowSpec(m.full_spec); setLastServerJson(JSON.stringify(m.full_spec)); }
+        if (m.full_spec) { acceptFlowSpec(m.full_spec); setLastServerJson(JSON.stringify(m.full_spec)); }
         if (m.check_report) setCheckReport(m.check_report);
         message.success("步骤名称已刷新");
       }
       else if (m.type === "business_description") {
         setDescBusy(false);
-        if (m.full_spec) { setFlowSpec(m.full_spec); setLastServerJson(JSON.stringify(m.full_spec)); }
-        else if (m.description && flowSpec) setFlowSpec({ ...flowSpec, business_description: m.description });
+        if (m.full_spec) { acceptFlowSpec(m.full_spec); setLastServerJson(JSON.stringify(m.full_spec)); }
+        else if (m.description && flowSpec) {
+          const next = { ...flowSpec, business_description: m.description };
+          flowSpecRef.current = next;
+          setFlowSpec(next);
+        }
         if (m.check_report) setCheckReport(m.check_report);
         message.success("业务说明已生成");
       }
@@ -1127,12 +1119,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return { param_map, selList, idList, step_idxs };
   }
   function publishRequest() {
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     if (!action.trim() || badAction(action.trim())) return;
     const { param_map, selList, idList, step_idxs } = payload();
-    if (!flowSpec) { message.error("请先生成 FlowSpec 后再发布"); return; }
+    const currentSpec = flowSpecRef.current || flowSpec;
+    if (!currentSpec) { message.error("请先生成 FlowSpec 后再发布"); return; }
+    const publishTitle = title.trim() || preferredSkillTitle(currentSpec);
     setResult(null); setPhase("publishing");
-    send({ type: "publish_request", action: action.trim(), title: title.trim(),
-      param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: true, flow_spec: flowSpec });
+    send({ type: "publish_request", action: action.trim(), title: publishTitle,
+      param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: true, flow_spec: currentSpec });
   }
   function stopAll() {
     send({ type: "stop" }); wsRef.current?.close();
@@ -1181,11 +1176,115 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       value,
     };
   }
+  function paramMatches(a: FlowParam, b: FlowParam) {
+    const ap = stripBodyPrefix(a.path || "");
+    const bp = stripBodyPrefix(b.path || "");
+    if (ap && bp && ap === bp) return true;
+    if (a.key && b.key && a.key === b.key) return true;
+    if (a.label && b.label && a.label === b.label) return true;
+    return false;
+  }
+  function patchLocalParam(stepId: string, p: FlowParam, updates: Record<string, any>) {
+    const base = flowSpecRef.current;
+    if (!base) return;
+    const next: FlowSpecData = {
+      ...base,
+      steps: (base.steps || []).map((step) => {
+        if (step.step_id !== stepId) return step;
+        const oldKey = p.key;
+        const newParams = (step.params || []).map((param) => {
+          if (!paramMatches(param, p)) return param;
+          const nextParam = { ...param, ...updates };
+          if (updates.key != null && (!updates.label || nextParam.label === oldKey || !nextParam.label)) {
+            nextParam.label = updates.key;
+          }
+          return nextParam;
+        });
+        const newSelects = (step.selects || []).map((sel) => {
+          const sameParam = (sel.param && oldKey && sel.param === oldKey) || stripBodyPrefix(sel.path || "") === stripBodyPrefix(p.path || "");
+          if (!sameParam) return sel;
+          return {
+            ...sel,
+            ...(updates.key != null ? { param: updates.key } : {}),
+            ...(updates.path != null ? { path: updates.path, id_path: sel.id_path === p.path ? updates.path : sel.id_path } : {}),
+          };
+        });
+        const newSampleInputs = { ...(step.sample_inputs || {}) };
+        if (updates.key != null && oldKey && oldKey in newSampleInputs) {
+          newSampleInputs[updates.key] = newSampleInputs[oldKey];
+          delete newSampleInputs[oldKey];
+        }
+        return { ...step, params: newParams, selects: newSelects, sample_inputs: newSampleInputs };
+      }),
+    };
+    flowSpecRef.current = next;
+    setFlowSpec(next);
+  }
+  function patchLocalParams(stepId: string, p: FlowParam, updates: Record<string, any>) {
+    patchLocalParam(stepId, p, updates);
+  }
+  function patchLocalStep(stepId: string, updates: Partial<FlowStepData>) {
+    const base = flowSpecRef.current;
+    if (!base) return;
+    const next: FlowSpecData = {
+      ...base,
+      steps: (base.steps || []).map((step) => step.step_id === stepId ? { ...step, ...updates } : step),
+    };
+    flowSpecRef.current = next;
+    setFlowSpec(next);
+  }
   function updateParam(stepId: string, p: FlowParam, field: string, value: any) {
+    patchLocalParam(stepId, p, { [field]: value });
     send({ type: "flow_update", edits: [paramEdit(stepId, p, field, value)] });
+  }
+  function updateParamType(step: FlowStepData, p: FlowParam, value: string) {
+    const isEnumType = value === "enum" || value === "list-enum";
+    const edits: any[] = [paramEdit(step.step_id, p, "type", value)];
+    const updates: Record<string, any> = { type: value };
+    if (isEnumType) {
+      if (!OPTION_SOURCE_KINDS.includes(p.source_kind || "")) {
+        edits.push(paramEdit(step.step_id, p, "category", "user_param"));
+        edits.push(paramEdit(step.step_id, p, "source_kind", "manual_enum"));
+        edits.push(paramEdit(step.step_id, p, "source", { kind: "manual_enum", path: p.path, manual: true }));
+        edits.push(paramEdit(step.step_id, p, "exposed_to_user", true));
+        updates.category = "user_param";
+        updates.source_kind = "manual_enum";
+        updates.source = { kind: "manual_enum", path: p.path, manual: true };
+        updates.exposed_to_user = true;
+      }
+    } else if (OPTION_SOURCE_KINDS.includes(p.source_kind || "") || (p.enum_options || []).length) {
+      const nextSelects = (step.selects || []).filter((s) => {
+        const samePath = stripBodyPrefix(s.path || "") === stripBodyPrefix(p.path || "");
+        const sameParam = !!s.param && !!p.key && s.param === p.key;
+        return !(samePath || sameParam);
+      });
+      edits.push(paramEdit(step.step_id, p, "enum_options", null));
+      edits.push(paramEdit(step.step_id, p, "enum_value_map", null));
+      edits.push(paramEdit(step.step_id, p, "source_kind", "user_input"));
+      edits.push(paramEdit(step.step_id, p, "source", { kind: "sample", path: p.path }));
+      edits.push(paramEdit(step.step_id, p, "category", "user_param"));
+      edits.push(paramEdit(step.step_id, p, "exposed_to_user", true));
+      edits.push({ op: "update", step_id: step.step_id, field: "selects", value: nextSelects });
+      updates.enum_options = null;
+      updates.enum_value_map = null;
+      updates.source_kind = "user_input";
+      updates.source = { kind: "sample", path: p.path };
+      updates.category = "user_param";
+      updates.exposed_to_user = true;
+      patchLocalStep(step.step_id, { selects: nextSelects });
+    }
+    patchLocalParam(step.step_id, p, updates);
+    send({ type: "flow_update", edits });
   }
   function updateParamCategory(stepId: string, p: FlowParam, category: string) {
     const sourceKind = defaultSourceForCategory(category, p.source_kind);
+    patchLocalParams(stepId, p, {
+      category,
+      source_kind: sourceKind,
+      source: sourceKind === "unknown" ? {} : { kind: sourceKind, path: p.path, manual: true },
+      exposed_to_user: category === "user_param",
+      need_human_confirm: false,
+    });
     send({ type: "flow_update", edits: [
       paramEdit(stepId, p, "category", category),
       paramEdit(stepId, p, "source_kind", sourceKind),
@@ -1221,6 +1320,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       paramEdit(stepId, p, "need_human_confirm", sourceKind === "unknown"),
       paramEdit(stepId, p, "editable", true),
     );
+    patchLocalParams(stepId, p, {
+      category,
+      source_kind: sourceKind,
+      source: sourceKind === "unknown" ? {} : sourceKind === "user_input" ? { kind: "sample", path: p.path } : { kind: sourceKind, path: p.path, manual: true },
+      exposed_to_user: category === "user_param",
+      need_human_confirm: sourceKind === "unknown",
+      editable: true,
+    });
     send({ type: "flow_update", edits });
   }
   function moveStep(idx: number, dir: -1 | 1) {
@@ -1241,14 +1348,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       onOk: () => {
         const ok = send({ type: "flow_update", edits: [{ op: "remove_step", step_id: step.step_id }] });
         if (!ok) return;
-        setFlowSpec((cur) => {
-          if (!cur) return cur;
-          return {
+        const cur = flowSpecRef.current;
+        if (cur) {
+          const next = {
             ...cur,
             steps: cur.steps.filter((s) => s.step_id !== step.step_id),
             links: cur.links.filter((l) => l.source_step_id !== step.step_id && l.target_step_id !== step.step_id),
           };
-        });
+          flowSpecRef.current = next;
+          setFlowSpec(next);
+        }
         message.success("已删除步骤，正在同步校验");
       },
     });
@@ -1555,9 +1664,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     cancelEditLink(linkId);
   }
   function orchestrateFlow() {
-    if (!flowSpec) return;
+    const currentSpec = flowSpecRef.current || flowSpec;
+    if (!currentSpec) return;
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     setOrchestrateBusy(true);
-    send({ type: "orchestrate_flow" });
+    setAutoFixBusy(true);
+    send({ type: "orchestrate_flow", flow_spec: currentSpec });
   }
   function autoFixFlow() {
     if (!flowSpec) return;
@@ -1760,12 +1872,23 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       ? (step.selects || []).map((s) => (s.path === p.path || (!s.path && s.param === p.key) || s === existing ? nextBinding : s))
       : [...(step.selects || []), nextBinding];
     const edits: any[] = [{ op: "update", step_id: step.step_id, field: "selects", value: nextSelects }];
+    const paramUpdates: Record<string, any> = {};
     if (p.category !== "user_param" && p.category !== "runtime_var") {
       edits.push(paramEdit(step.step_id, p, "category", "user_param"));
+      paramUpdates.category = "user_param";
     }
     if (p.type !== "enum" && p.type !== "list-enum") {
-      edits.push(paramEdit(step.step_id, p, "type", nextBinding.multi ? "list-enum" : "enum"));
+      const nextType = nextBinding.multi ? "list-enum" : "enum";
+      edits.push(paramEdit(step.step_id, p, "type", nextType));
+      paramUpdates.type = nextType;
     }
+    for (const edit of extraEdits) {
+      if (edit?.op === "update" && edit.step_id === step.step_id && (edit.param_path || edit.param_key || edit.param_label)) {
+        paramUpdates[edit.field] = edit.value;
+      }
+    }
+    patchLocalStep(step.step_id, { selects: nextSelects });
+    if (Object.keys(paramUpdates).length) patchLocalParam(step.step_id, p, paramUpdates);
     send({ type: "flow_update", edits: [...edits, ...extraEdits] });
   }
   function normalizeEnumOption(x: any): string {
@@ -1968,9 +2091,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function capabilityStepSelectOptions(cap: FlowCapabilityData) {
     const existing = new Set(cap.step_ids || []);
-    const existingReqSigs = new Set((flowSpec?.steps || [])
+    const existingReqKeys = new Set((flowSpec?.steps || [])
       .filter((s) => existing.has(s.step_id))
-      .map((s) => `${(s.method || "").toUpperCase()} ${purePath(s.path || s.url || "")}`));
+      .flatMap((s) => {
+        const meta = s.source_meta || {};
+        const keys: string[] = [];
+        if (meta.request_id) keys.push(`id:${meta.request_id}`);
+        if (meta.request_index != null) keys.push(`idx:${String(meta.request_index)}`);
+        return keys.length ? keys : [`step:${s.step_id}`];
+      }));
     const stepItems = (flowSpec?.steps || [])
       .filter((s) => !existing.has(s.step_id))
       .map((s) => ({
@@ -1978,9 +2107,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         value: `step:${s.step_id}`,
       }));
     const reqItems = allCapturedRequests(flowSpec)
-      .filter((req) => !existingReqSigs.has(`${(req.method || "").toUpperCase()} ${purePath(req.path || req.url || "")}`))
+      .filter((req) => !existingReqKeys.has(requestGraphKey(req)))
       .map((req) => ({
-        label: `${req.method || "GET"} ${req.path || stripHost(req.url || "")}`,
+        label: `#${req.sequence ?? req.request_index ?? ""} ${req.method || "GET"} ${req.path || stripHost(req.url || "")}`,
         value: `req:${requestOptionValue(req)}`,
       }));
     return [...stepItems, ...reqItems];
@@ -1992,14 +2121,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return (
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
         <Space wrap>
-          <Tooltip title="基于当前已保留的能力、接口和人工修改继续规划，不恢复已删除项">
-            <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy} onClick={orchestrateFlow}>生成/优化能力</Button>
+          <Tooltip title="基于当前能力、接口和人工修改继续规划，并同步修正字段绑定、枚举来源、依赖和接口闭包">
+            <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy || autoFixBusy} onClick={orchestrateFlow}>生成/优化能力</Button>
           </Tooltip>
           <Button icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
           <Button icon={<RobotOutlined />} loading={namingBusy} onClick={() => { setNamingBusy(true); send({ type: "step_naming" }); }}>命名步骤</Button>
-          <Tooltip title="修正字段绑定、枚举来源、依赖和接口闭包">
-            <Button loading={autoFixBusy} onClick={autoFixFlow}>一键修正字段/依赖</Button>
-          </Tooltip>
         </Space>
         {!capabilities.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有能力编排" /> : (
           <Collapse size="small">
@@ -2628,7 +2754,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                           </FieldControl>
                           <FieldControl label="类型">
                             <NativeSelect value={p.type} width="100%" options={PARAM_TYPE_OPTIONS}
-                              onChange={(v) => updateParam(step.step_id, p, "type", v)} />
+                              onChange={(v) => updateParamType(step, p, v)} />
                           </FieldControl>
                           <FieldControl label="分类">
                             <NativeSelect value={p.category || "user_param"} width="100%" options={CATEGORY_OPTIONS}
@@ -2872,7 +2998,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             onChange={(e) => setTitleDraft(e.target.value)}
             onBlur={(e) => {
               if (e.target.value.trim() !== (flowSpec?.title || "")) {
-                setFlowSpec((cur) => cur ? { ...cur, title: e.target.value.trim() } : cur);
+                const cur = flowSpecRef.current;
+                if (cur) {
+                  const next = { ...cur, title: e.target.value.trim() };
+                  flowSpecRef.current = next;
+                  setFlowSpec(next);
+                }
                 updateFlowField("title", e.target.value.trim());
               }
             }} />
@@ -2881,7 +3012,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           onChange={(e) => setDescDraft(e.target.value)}
           onBlur={(e) => {
             if (e.target.value !== (flowSpec?.business_description || "")) {
-              setFlowSpec((cur) => cur ? { ...cur, business_description: e.target.value } : cur);
+              const cur = flowSpecRef.current;
+              if (cur) {
+                const next = { ...cur, business_description: e.target.value };
+                flowSpecRef.current = next;
+                setFlowSpec(next);
+              }
               updateFlowField("business_description", e.target.value);
             }
           }}
@@ -2935,11 +3071,32 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
       {(phase === "recording" || phase === "publishing") && (
         <div>
-          <Space style={{ marginBottom: 8 }} wrap>
-            <Tag color="processing">{phase === "publishing" ? "发布中" : "录制中"}</Tag>
-            <Button size="small" disabled={phase === "publishing"} onClick={resetFromHere}>从这里开始录</Button>
-            <Button size="small" onClick={stopAll} disabled={phase === "publishing"}>结束录制</Button>
-          </Space>
+          <div style={{
+            position: "sticky",
+            top: 0,
+            zIndex: 20,
+            background: "#fff",
+            border: "1px solid #f0f0f0",
+            borderRadius: 6,
+            padding: "8px 10px",
+            marginBottom: 8,
+            boxShadow: "0 2px 8px rgba(0,0,0,0.04)",
+          }}>
+            <Space align="center" wrap size={12}>
+              <Tag color="processing">{phase === "publishing" ? "发布中" : "录制中"}</Tag>
+              <Button size="small" disabled={phase === "publishing"} onClick={resetFromHere}>从这里开始录</Button>
+              <Button size="small" onClick={stopAll} disabled={phase === "publishing"}>结束录制</Button>
+              <Form.Item label="动作名" required style={{ marginBottom: 0 }}>
+                <Input value={action} onChange={(e) => setAction(e.target.value)} style={{ width: 190 }} />
+              </Form.Item>
+              <Form.Item label="标题" style={{ marginBottom: 0 }}>
+                <Input value={title} onChange={(e) => setTitle(e.target.value)} style={{ width: 180 }} />
+              </Form.Item>
+              <Button type="primary" loading={phase === "publishing"} disabled={!steps.length && !reqs.length} onClick={finalize}>
+                停止并分析请求
+              </Button>
+            </Space>
+          </div>
           <div style={{ border: "1px solid #d9d9d9", borderRadius: 6, overflow: "hidden", lineHeight: 0, position: "relative" }}>
             <img ref={imgRef} onClick={onImgClick} draggable={false}
               onWheel={(e) => send({ type: "input", event: { kind: "scroll", dy: e.deltaY } })}
@@ -2965,22 +3122,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 </Space>
               }
             />
-          )}
-
-          {!fields.length && (
-            <Card size="small" style={{ marginTop: 12 }}>
-              <Space size="large" wrap>
-                <Form.Item label="动作名" required style={{ marginBottom: 0 }}>
-                  <Input value={action} onChange={(e) => setAction(e.target.value)} style={{ width: 200 }} />
-                </Form.Item>
-                <Form.Item label="标题" style={{ marginBottom: 0 }}>
-                  <Input value={title} onChange={(e) => setTitle(e.target.value)} style={{ width: 180 }} />
-                </Form.Item>
-                <Button type="primary" loading={phase === "publishing"} disabled={!steps.length && !reqs.length} onClick={finalize}>
-                  停止并分析请求
-                </Button>
-              </Space>
-            </Card>
           )}
 
           {renderFlowWorkbench()}

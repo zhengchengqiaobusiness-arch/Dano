@@ -297,7 +297,16 @@ def _path_from_url(url: str, base_url: str = "") -> str:
 
 
 def _select_name_for_step(selects: list[dict], samples: dict) -> dict[str, str]:
-    return suggest_select_names(selects, samples)
+    out = suggest_select_names(selects, samples)
+    for s in selects or []:
+        path = str(s.get("path") or "")
+        field_key = str(s.get("field_key") or "").strip()
+        if not path or not field_key:
+            continue
+        if looks_internal_param_name(field_key):
+            continue
+        out[path] = field_key
+    return out
 
 
 def _norm_field_name(key: str, path: str = "") -> str:
@@ -720,6 +729,46 @@ def _enum_label_value(opt) -> tuple[str, Any] | None:
     return label, label
 
 
+def _enum_options_description(kind: str, options: list[Any] | None, value_map: dict[str, Any] | None = None) -> str | None:
+    if not options:
+        return None
+    title = "页面枚举选项" if kind == "page_enum" else "枚举选项"
+    if kind == "api_option":
+        title = "接口候选选项"
+    elif kind == "manual_enum":
+        title = "手工枚举选项"
+    elif kind == "static_enum":
+        title = "固定枚举选项"
+    elif kind == "form_option":
+        title = "表单枚举选项"
+    parts: list[str] = []
+    seen: set[str] = set()
+    for opt in options:
+        pair = _enum_label_value(opt)
+        if pair is None:
+            continue
+        label, value = pair
+        if value_map and label in value_map:
+            value = value_map[label]
+        text = label if str(label) == str(value) else f"{label}={value}"
+        if text in seen:
+            continue
+        seen.add(text)
+        parts.append(text)
+    if not parts:
+        return None
+    return f"{title}：{'、'.join(parts)}"
+
+
+def _append_reason_detail(reason: str, detail: str | None) -> str:
+    reason = str(reason or "")
+    if not detail:
+        return reason
+    if detail in reason:
+        return reason
+    return f"{reason}；{detail}" if reason else detail
+
+
 def _enum_option_map_from_options(options: list[Any] | None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for opt in options or []:
@@ -871,6 +920,18 @@ def _build_step_from_capture(
             samples=samples,
             request_headers=req.get("headers") or {},
         )
+        enum_options = _enum_options_for_param(select_meta)
+        enum_value_map = _enum_value_map_for_param(select_meta)
+        enum_description = _enum_options_description(source_guess["source_kind"], enum_options, enum_value_map)
+        evidence = []
+        if enum_description and source_guess["source_kind"] in _OPTION_SOURCE_KINDS:
+            evidence.append({
+                "kind": "enum_options",
+                "source_kind": source_guess["source_kind"],
+                "option_count": len(enum_options or []),
+                "options": enum_options or [],
+                "option_map": enum_value_map or {},
+            })
 
         params.append(ParamField(
             path=path,
@@ -883,16 +944,18 @@ def _build_step_from_capture(
             confidence_tier=f.get("confidence_tier") or "auto",
             name_source=ns,
             # **系统化**:同时投递 label 列表 + label→value 反查表,确保前端能渲染 + 运行期能做 name→ID 解析。
-            enum_options=_enum_options_for_param(select_meta),
-            enum_value_map=_enum_value_map_for_param(select_meta),
+            enum_options=enum_options,
+            enum_value_map=enum_value_map,
             category=source_guess["category"],
             source_kind=source_guess["source_kind"],
             source=source_guess["source"],
             editable=bool(source_guess["editable"]),
             exposed_to_user=bool(source_guess["exposed_to_user"]),
             default_value=f.get("value"),
-            reason=source_guess["reason"],
+            reason=_append_reason_detail(source_guess["reason"], enum_description),
+            description=enum_description,
             need_human_confirm=bool(source_guess["need_human_confirm"]),
+            evidence=evidence,
         ))
 
     # 补回 select 元数据的 param 字段
@@ -1677,6 +1740,11 @@ def to_flow_spec(
                 src_pos, tgt_pos = lk.get("source_step"), lk.get("target_step")
                 if src_pos not in idx_to_step_id or tgt_pos not in idx_to_step_id:
                     continue
+                target_step = step_objs[tgt_pos]
+                target_path = _strip_body_prefix(str(lk.get("target_path", "")))
+                target_param = next((p for p in target_step.params if p.path == target_path), None)
+                if _skip_auto_dependency_target(target_param):
+                    continue
                 link_objs.append(FlowLink(
                     source_step_id=idx_to_step_id[src_pos],
                     source_path=lk.get("source_path", ""),
@@ -1850,10 +1918,33 @@ def _recorded_goal_from_parts(title: str, steps: list[FlowStep], risk_level: str
     return goal.model_dump(exclude_none=True)
 
 
+def _recorded_user_param_names(steps: list[FlowStep]) -> list[str]:
+    params: list[str] = []
+    for st in steps:
+        for p in st.params:
+            if p.category == "user_param" and p.exposed_to_user and p.key and p.key not in params:
+                params.append(p.key)
+    return params
+
+
 def ensure_recorded_goal(spec: FlowSpec) -> FlowSpec:
-    if spec.goal:
+    fresh = _recorded_goal_from_parts(spec.title, spec.steps, spec.risk_level)
+    if not spec.goal:
+        spec.goal = fresh
         return spec
-    spec.goal = _recorded_goal_from_parts(spec.title, spec.steps, spec.risk_level)
+    goal = dict(spec.goal or {})
+    # 字段改名/分类/暴露状态会改变最终 Skill 参数。Goal 的 required_inputs 必须跟当前
+    # FlowSpec 保持一致，否则发布层会把旧字段名误判成“LLM 臆造字段”并阻断。
+    current_inputs = _recorded_user_param_names(spec.steps)
+    goal["required_inputs"] = current_inputs
+    goal.setdefault("intent", fresh.get("intent") or spec.title)
+    goal.setdefault("success_criteria", fresh.get("success_criteria") or [])
+    goal.setdefault("output_expectation", fresh.get("output_expectation") or [])
+    goal.setdefault("forbidden_actions", fresh.get("forbidden_actions") or [])
+    goal.setdefault("risk_level", fresh.get("risk_level") or spec.risk_level or "L3")
+    goal["capabilities"] = fresh.get("capabilities") or goal.get("capabilities") or []
+    goal["evidence"] = fresh.get("evidence") or goal.get("evidence") or []
+    spec.goal = goal
     return spec
 
 
@@ -2576,6 +2667,7 @@ def _normalize_capability_references(spec: FlowSpec) -> FlowSpec:
     def clean_nodes(nodes: list[dict[str, Any]], fallback_step_ids: list[str]) -> list[dict[str, Any]]:
         cleaned: list[dict[str, Any]] = []
         node_ids: set[str] = set()
+        local_call_step_ids: list[str] = []
         for node in nodes or []:
             if not isinstance(node, dict):
                 continue
@@ -2586,15 +2678,25 @@ def _normalize_capability_references(spec: FlowSpec) -> FlowSpec:
                 if not sid:
                     continue
                 copied["step_id"] = sid
+                if sid not in local_call_step_ids:
+                    local_call_step_ids.append(sid)
             elif node_type in {"foreach", "condition", "filter", "select", "map"}:
-                for child_key in ("children", "then", "else"):
+                for child_key in ("children", "steps", "then", "else", "otherwise"):
                     if isinstance(copied.get(child_key), list):
-                        copied[child_key] = clean_nodes(copied[child_key], fallback_step_ids)
+                        copied[child_key] = clean_nodes(copied[child_key], fallback_step_ids + local_call_step_ids)
             elif node_type == "return":
                 ref = str(copied.get("from") or copied.get("source") or "")
+                fallback = (fallback_step_ids + local_call_step_ids)
+                if not (copied.get("value") or copied.get("from") or copied.get("source") or copied.get("path")):
+                    if fallback:
+                        copied["from"] = fallback[-1]
+                        copied.setdefault("path", "response")
+                    else:
+                        continue
                 if ref and ref not in step_ids and ref not in node_ids:
-                    if fallback_step_ids:
-                        copied["from"] = fallback_step_ids[-1]
+                    if fallback:
+                        copied["from"] = fallback[-1]
+                        copied.setdefault("path", "response")
                     else:
                         continue
             if not copied.get("id"):
@@ -2840,7 +2942,7 @@ def _request_graph_key_from_entry(entry: dict[str, Any]) -> str:
 
 
 def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
-    spec = _sync_capability_io_schemas(spec.model_copy(deep=True))
+    spec = ensure_recorded_goal(_sync_capability_io_schemas(spec.model_copy(deep=True)))
     _normalize_capability_references(spec)
     errors: list[str] = []
     warnings: list[str] = []
@@ -2926,8 +3028,15 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                     checked_manual_requests.append(req_item)
 
         input_props = ((cap.input_schema or {}).get("properties") or {})
-        has_return_node = any(isinstance(n, dict) and n.get("type") == "return" for n in _iter_capability_nodes(cap.nodes or []))
-        for node in _iter_capability_nodes(cap.nodes or []):
+        flat_nodes = _iter_capability_nodes(cap.nodes or [])
+        cap_node_ids = {str(n.get("id") or "") for n in flat_nodes if isinstance(n, dict) and n.get("id")}
+        return_sources = [
+            f"{sid}({step_by_id[sid].method} {step_by_id[sid].path or step_by_id[sid].url})"
+            for sid in node_step_ids
+            if sid in step_by_id
+        ]
+        has_return_node = any(isinstance(n, dict) and n.get("type") == "return" for n in flat_nodes)
+        for node in flat_nodes:
             if not isinstance(node, dict):
                 cap_errors.append(f"Capability `{label}` 包含非法节点")
                 continue
@@ -2961,11 +3070,16 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                     if field not in input_props:
                         cap_errors.append(f"Capability `{label}` map 节点 `{node_id}` 引用的输入 `{field}` 不存在")
             if node_type == "return" and not (node.get("value") or node.get("from") or node.get("path")):
-                cap_errors.append(f"Capability `{label}` return 节点 `{node_id}` 缺少返回来源")
+                hint = f"，可选来源: {return_sources[-1]}" if return_sources else "，当前能力没有有效 call 步骤可返回"
+                cap_errors.append(f"Capability `{label}` return 节点 `{node_id}` 缺少返回来源{hint}")
             if node_type == "return" and node.get("from"):
                 ref = str(node.get("from") or "")
-                if ref and ref not in step_by_id and not ref.startswith(("input.", "var.", "node.")):
-                    cap_errors.append(f"Capability `{label}` return 节点 `{node_id}` 引用的来源 `{ref}` 不存在")
+                if ref and ref not in step_by_id and ref not in cap_node_ids and not ref.startswith(("input.", "var.", "node.")):
+                    hint = f"；可选来源: {', '.join(return_sources[-3:])}" if return_sources else "；当前能力没有有效 call 步骤"
+                    cap_errors.append(f"Capability `{label}` return 节点 `{node_id}` 引用的来源 `{ref}` 不存在{hint}")
+                if ref == node_id:
+                    hint = f"；可选来源: {return_sources[-1]}" if return_sources else ""
+                    cap_errors.append(f"Capability `{label}` return 节点 `{node_id}` 不能引用自身作为返回来源{hint}")
         if cap.confirmed and cap.nodes and not has_return_node:
             cap_warnings.append(f"Capability `{label}` 已确认但没有 return 节点，外部调用只能拿到底层原始响应")
 
@@ -4008,7 +4122,7 @@ def flow_spec_to_api_request(spec: FlowSpec) -> tuple[dict | None, list[str]]:
     """
     if not spec.steps:
         return None, ["FlowSpec 没有任何步骤，不能发布"]
-    spec = _sync_capability_io_schemas(spec.model_copy(deep=True))
+    spec = ensure_recorded_goal(_sync_capability_io_schemas(spec.model_copy(deep=True)))
 
     built_steps: list[dict] = []
     step_id_to_index: dict[str, int] = {}
@@ -4665,8 +4779,6 @@ def _find_request_graph_item(spec: FlowSpec, *, request_index: Any = None, reque
 
 
 def _same_request_graph_item(item: dict[str, Any], entry: dict[str, Any]) -> bool:
-    if _request_graph_signature(item) == _request_graph_signature(entry):
-        return True
     item_id = str(item.get("request_id") or "")
     entry_id = str(entry.get("request_id") or "")
     if item_id and entry_id:
@@ -4679,7 +4791,6 @@ def _same_request_graph_item(item: dict[str, Any], entry: dict[str, Any]) -> boo
 def _mark_request_selected(spec: FlowSpec, entry: dict[str, Any], *, materialized_step_id: str = "") -> None:
     rg = dict((spec.meta or {}).get("request_graph") or {})
     selected = list(rg.get("selected_steps") or [])
-    sig = _request_graph_signature(entry)
     if not any(_same_request_graph_item(item, entry) for item in selected):
         selected.append({
             k: entry.get(k)
@@ -4783,21 +4894,50 @@ def _dependency_match_score(param: ParamField, source_path: str) -> int:
     return score
 
 
+def _skip_auto_dependency_target(param: ParamField | None) -> bool:
+    if param is None:
+        return False
+    if param.source_kind in _OPTION_SOURCE_KINDS:
+        return True
+    if param.type in {"enum", "list-enum"}:
+        return True
+    if param.enum_options:
+        return True
+    return False
+
+
 def _rejected_dependency_sigs(spec: FlowSpec) -> set[str]:
     meta = spec.meta or {}
-    return {str(x.get("sig") or x) for x in (meta.get("rejected_dependencies") or [])}
+    return {str((x.get("sig") if isinstance(x, dict) else x) or x) for x in (meta.get("rejected_dependencies") or [])}
 
 
 def _record_rejected_dependency(spec: FlowSpec, link: FlowLink) -> None:
-    sig = _dependency_sig(link.source_step_id, link.source_path, link.target_step_id, link.target_path)
+    _record_rejected_dependency_raw(
+        spec,
+        source_step_id=link.source_step_id,
+        source_path=link.source_path,
+        target_step_id=link.target_step_id,
+        target_path=link.target_path,
+    )
+
+
+def _record_rejected_dependency_raw(
+    spec: FlowSpec,
+    *,
+    source_step_id: str,
+    source_path: str,
+    target_step_id: str,
+    target_path: str,
+) -> None:
+    sig = _dependency_sig(source_step_id, source_path, target_step_id, target_path)
     rejected = list((spec.meta or {}).get("rejected_dependencies") or [])
-    if not any(str(x.get("sig") or x) == sig for x in rejected):
+    if not any(str((x.get("sig") if isinstance(x, dict) else x) or x) == sig for x in rejected):
         rejected.append({
             "sig": sig,
-            "source_step_id": link.source_step_id,
-            "source_path": link.source_path,
-            "target_step_id": link.target_step_id,
-            "target_path": link.target_path,
+            "source_step_id": source_step_id,
+            "source_path": source_path,
+            "target_step_id": target_step_id,
+            "target_path": target_path,
             "rejected_at": datetime.now(timezone.utc).isoformat(),
         })
     spec.meta = {**(spec.meta or {}), "rejected_dependencies": rejected}
@@ -4818,6 +4958,8 @@ def rebuild_flow_dependencies(spec: FlowSpec) -> int:
         if not target.params:
             continue
         for param in target.params:
+            if _skip_auto_dependency_target(param):
+                continue
             if param.source_kind == "previous_response" and param.source.get("step_id"):
                 continue
             value = str(param.value if param.value is not None else "").strip()
@@ -4916,7 +5058,7 @@ def _add_request_step_from_graph(spec: FlowSpec, entry: dict[str, Any]) -> FlowS
         if request_index is not None and meta.get("request_index") == request_index:
             existing = step
             break
-        if ((step.method or "").upper(), _request_path({"url": step.path or step.url})) == entry_sig:
+        if not request_id and request_index is None and ((step.method or "").upper(), _request_path({"url": step.path or step.url})) == entry_sig:
             existing = step
             break
     if existing is None and not request_id and request_index is None:
@@ -5003,6 +5145,119 @@ def _find_capability_index(spec: FlowSpec, edit: dict[str, Any]) -> int:
             if cap.name == name:
                 return idx
     raise ValueError("capability not found")
+
+
+def _find_select_binding(step: FlowStep, param: ParamField) -> SelectBinding | None:
+    for sel in step.selects:
+        if sel.path == param.path or sel.param == param.key or (sel.id_path and sel.id_path == param.path):
+            return sel
+    return None
+
+
+def _bind_option_source(
+    spec: FlowSpec,
+    *,
+    target_step_id: str,
+    target_path: str,
+    source_step_id: str = "",
+    source_url: str = "",
+    value_key: str = "",
+    label_key: str = "",
+    id_path: str = "",
+    options: list[Any] | None = None,
+    option_map: dict[str, Any] | None = None,
+    multi: bool = False,
+) -> None:
+    step = _find_step(spec, target_step_id)
+    param = _find_param(step, target_path)
+    source_step = _find_step(spec, source_step_id) if source_step_id else None
+    src_url = source_url or (source_step.path or source_step.url if source_step else "")
+    if not src_url:
+        raise ValueError("bind_option_source missing source_url/source_step")
+
+    param.category = "user_param"
+    param.source_kind = "api_option"
+    param.type = "list-enum" if multi else "enum"
+    param.exposed_to_user = True
+    param.editable = True
+    param.need_human_confirm = False
+    param.source = {
+        "kind": "api_option",
+        "source_step_id": source_step_id,
+        "source_url": src_url,
+        "value_key": value_key,
+        "label_key": label_key,
+        "id_path": id_path or param.path,
+    }
+    param.reason = "字段候选来自接口选项源，调用方传显示值，运行期按 label/value 映射提交真实值"
+    if options:
+        param.enum_options = list(options)
+    if option_map:
+        param.enum_value_map = dict(option_map)
+    param.evidence.append({
+        "source": "option_source",
+        "source_step_id": source_step_id,
+        "source_url": src_url,
+        "value_key": value_key,
+        "label_key": label_key,
+    })
+
+    sel = _find_select_binding(step, param)
+    if sel is None:
+        sel = SelectBinding(param=param.key, path=param.path)
+        step.selects.append(sel)
+    sel.param = param.key
+    sel.path = param.path
+    sel.source_url = src_url
+    sel.value_key = value_key or sel.value_key
+    sel.label_key = label_key or sel.label_key
+    sel.id_path = id_path or sel.id_path or param.path
+    sel.multi = bool(multi)
+    if options:
+        sel.options = list(options)
+        sel.count = len(options)
+    if option_map:
+        sel.option_map = dict(option_map)
+    sel.enum_source = "api"
+    sel.enum_confirmed = True
+
+
+def _set_capability_loop_source(cap: FlowCapability, items: str = "input.entries") -> None:
+    items = str(items or "input.entries")
+    existing_calls = (
+        [n for n in cap.nodes if isinstance(n, dict)]
+        if cap.nodes else
+        [{"id": f"call_{idx}", "type": "call", "step_id": sid} for idx, sid in enumerate(cap.step_ids, 1)]
+    )
+    if not any(n.get("type") == "foreach" for n in existing_calls):
+        call_nodes = [n for n in existing_calls if n.get("type") == "call"]
+        cap.nodes = [{
+            "id": "foreach_entries",
+            "type": "foreach",
+            "items": items,
+            "steps": call_nodes,
+        }]
+    else:
+        for node in _iter_capability_nodes(existing_calls):
+            if node.get("type") == "foreach":
+                node["items"] = items
+                break
+        cap.nodes = existing_calls
+    cap.kind = "submit_batch" if cap.kind == "submit" else cap.kind
+    cap.updated_by = "repair"
+
+
+def _set_capability_return(cap: FlowCapability, mapping: list[dict[str, Any]]) -> None:
+    cap.output_mapping = [dict(x) for x in mapping if isinstance(x, dict)]
+    if cap.output_mapping and not any(n.get("type") == "return" for n in _iter_capability_nodes(cap.nodes or [])):
+        first = cap.output_mapping[0]
+        cap.nodes.append({
+            "id": "return_result",
+            "type": "return",
+            "from": first.get("step_id") or first.get("from") or "",
+            "path": first.get("response_path") or first.get("path") or "response",
+        })
+    cap.updated_by = "repair"
 
 
 _CAPABILITY_ALLOWED_FIELDS = frozenset({
@@ -5191,6 +5446,44 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             _sync_capability_order(new_spec, cap)
             continue
 
+        if op == "bind_option_source":
+            _bind_option_source(
+                new_spec,
+                target_step_id=str(edit.get("target_step") or edit.get("target_step_id") or edit.get("step_id") or ""),
+                target_path=str(edit.get("target_path") or edit.get("param_path") or ""),
+                source_step_id=str(edit.get("source_step") or edit.get("source_step_id") or ""),
+                source_url=str(edit.get("source_url") or ""),
+                value_key=str(edit.get("value_key") or ""),
+                label_key=str(edit.get("label_key") or ""),
+                id_path=str(edit.get("id_path") or ""),
+                options=edit.get("options") if isinstance(edit.get("options"), list) else None,
+                option_map=edit.get("option_map") if isinstance(edit.get("option_map"), dict) else None,
+                multi=bool(edit.get("multi")),
+            )
+            continue
+
+        if op == "set_loop_source":
+            idx = _find_capability_index(new_spec, edit)
+            cap = new_spec.capabilities[idx]
+            items = str(edit.get("items") or edit.get("source") or "input.entries")
+            _set_capability_loop_source(cap, items)
+            _sync_capability_order(new_spec, cap)
+            continue
+
+        if op == "set_return_mapping":
+            idx = _find_capability_index(new_spec, edit)
+            mapping = edit.get("mapping")
+            if isinstance(mapping, dict):
+                mapping = [mapping]
+            if not isinstance(mapping, list):
+                mapping = [{
+                    "kind": edit.get("kind") or "final_response",
+                    "step_id": edit.get("step_id") or edit.get("from") or "",
+                    "response_path": edit.get("response_path") or edit.get("path") or "response",
+                }]
+            _set_capability_return(new_spec.capabilities[idx], mapping)
+            continue
+
         if op == "remove_capability_step":
             idx = _find_capability_index(new_spec, edit)
             step_id = str(edit.get("step_id") or "")
@@ -5201,6 +5494,34 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 if not (n.get("type") == "call" and n.get("step_id") == step_id)
             ]
             _sync_capability_order(new_spec, new_spec.capabilities[idx])
+            continue
+
+        if op == "reject_dependency":
+            link_id = str(edit.get("link_id") or "")
+            if link_id:
+                link = _find_link(new_spec, link_id)
+                _record_rejected_dependency(new_spec, link)
+                if link in new_spec.links:
+                    new_spec.links.remove(link)
+                continue
+            source_step_id = str(edit.get("source_step_id") or edit.get("source_step") or "")
+            source_path = str(edit.get("source_path") or "")
+            target_step_id = str(edit.get("target_step_id") or edit.get("target_step") or "")
+            target_path = str(edit.get("target_path") or "")
+            if not all([source_step_id, source_path, target_step_id, target_path]):
+                raise ValueError("reject_dependency missing link_id or source/target tuple")
+            _record_rejected_dependency_raw(
+                new_spec,
+                source_step_id=source_step_id,
+                source_path=source_path,
+                target_step_id=target_step_id,
+                target_path=target_path,
+            )
+            new_spec.links = [
+                lk for lk in new_spec.links
+                if _dependency_sig(lk.source_step_id, lk.source_path, lk.target_step_id, lk.target_path)
+                not in _rejected_dependency_sigs(new_spec)
+            ]
             continue
 
         # 链接编辑
@@ -5327,7 +5648,25 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     param.value = str(value)
                     step.sample_inputs[param.key] = param.value
                 elif field == "type":
-                    param.type = str(value)
+                    next_type = str(value)
+                    param.type = next_type
+                    if next_type not in {"enum", "list-enum"}:
+                        if param.source_kind in _OPTION_SOURCE_KINDS or param.enum_options:
+                            param.enum_options = None
+                            param.enum_value_map = None
+                            param.source_kind = "user_input"
+                            param.source = {"kind": "sample", "path": param.path}
+                            param.category = "user_param"
+                            param.exposed_to_user = True
+                            step.selects = [
+                                sb for sb in step.selects
+                                if not (sb.path == param.path or sb.param == param.key)
+                            ]
+                    elif param.source_kind not in _OPTION_SOURCE_KINDS:
+                        param.source_kind = "manual_enum"
+                        param.source = {"kind": "manual_enum", "path": param.path, "manual": True}
+                        param.category = "user_param"
+                        param.exposed_to_user = True
                 elif field == "required":
                     param.required = bool(value)
                 elif field == "exposed_to_user":           # H22 修复:bool 字段显式 bool() 转换
@@ -5497,10 +5836,14 @@ _FLOW_AUTOFIX_SYSTEM = """你是录制型 Skill 的自动修正器。
 - {"op":"promote_request","request_id":"...","request_index":1}
 - {"op":"rename_field","step_id":"...","path":"...","label":"请假类型"}
 - {"op":"bind_response_source","target_step":"...","target_path":"...","source_step":"...","source_path":"..."}
+- {"op":"bind_option_source","target_step":"...","target_path":"...","source_step":"...","source_url":"...","value_key":"id","label_key":"name","id_path":"..."}
+- {"op":"set_loop_source","capability":"...","items":"input.entries"}
+- {"op":"set_return_mapping","capability":"...","mapping":[{"kind":"final_response","step_id":"...","response_path":"response"}]}
 - {"op":"mark_field_as_system_var","step_id":"...","path":"..."}
 - {"op":"mark_field_as_identity","step_id":"...","path":"...","source":"current_user"}
 - {"op":"create_capability","name":"...","title":"...","kind":"query_status|list_options|validate_batch|submit_batch|submit","step_ids":[...],"nodes":[...]}
 - {"op":"reorder_capability_steps","capability":"...","step_ids":[...]}
+- {"op":"reject_dependency","link_id":"..."} 或 {"op":"reject_dependency","source_step":"...","source_path":"...","target_step":"...","target_path":"..."}
 拿不准就不要改。"""
 
 
@@ -5588,6 +5931,43 @@ def _autofix_ops_to_edits(spec: FlowSpec, ops: list[dict[str, Any]]) -> list[dic
                         "reason": str(op.get("reason") or "一键修正建议的上游响应绑定"),
                     },
                 })
+        elif kind == "bind_option_source":
+            target_step = str(op.get("target_step") or op.get("target_step_id") or "")
+            target_path = str(op.get("target_path") or op.get("path") or "")
+            source_step = str(op.get("source_step") or op.get("source_step_id") or "")
+            source_url = str(op.get("source_url") or "")
+            if target_step and target_path and (source_step or source_url):
+                edits.append({
+                    "op": "bind_option_source",
+                    "target_step": target_step,
+                    "target_path": target_path,
+                    "source_step": source_step,
+                    "source_url": source_url,
+                    "value_key": str(op.get("value_key") or ""),
+                    "label_key": str(op.get("label_key") or ""),
+                    "id_path": str(op.get("id_path") or ""),
+                    "options": op.get("options") if isinstance(op.get("options"), list) else None,
+                    "option_map": op.get("option_map") if isinstance(op.get("option_map"), dict) else None,
+                    "multi": bool(op.get("multi")),
+                })
+        elif kind == "set_loop_source":
+            cap_name = str(op.get("capability") or op.get("name") or "")
+            if cap_name in cap_by_name:
+                edits.append({
+                    "op": "set_loop_source",
+                    "capability_index": cap_by_name[cap_name],
+                    "items": str(op.get("items") or op.get("source") or "input.entries"),
+                })
+        elif kind == "set_return_mapping":
+            cap_name = str(op.get("capability") or op.get("name") or "")
+            if cap_name in cap_by_name:
+                edits.append({
+                    "op": "set_return_mapping",
+                    "capability_index": cap_by_name[cap_name],
+                    "mapping": op.get("mapping") if isinstance(op.get("mapping"), list) else op.get("mapping"),
+                    "step_id": op.get("step_id"),
+                    "response_path": op.get("response_path") or op.get("path"),
+                })
         elif kind == "mark_field_as_system_var":
             step_id = str(op.get("step_id") or "")
             path = str(op.get("path") or "")
@@ -5629,6 +6009,21 @@ def _autofix_ops_to_edits(spec: FlowSpec, ops: list[dict[str, Any]]) -> list[dic
                     "capability_index": cap_by_name[cap_name],
                     "field": "step_ids",
                     "value": [str(x) for x in step_ids],
+                })
+        elif kind == "reject_dependency":
+            link_id = str(op.get("link_id") or "")
+            source_step = str(op.get("source_step") or op.get("source_step_id") or "")
+            source_path = str(op.get("source_path") or "")
+            target_step = str(op.get("target_step") or op.get("target_step_id") or "")
+            target_path = str(op.get("target_path") or "")
+            if link_id or all([source_step, source_path, target_step, target_path]):
+                edits.append({
+                    "op": "reject_dependency",
+                    "link_id": link_id,
+                    "source_step": source_step,
+                    "source_path": source_path,
+                    "target_step": target_step,
+                    "target_path": target_path,
                 })
     return edits
 

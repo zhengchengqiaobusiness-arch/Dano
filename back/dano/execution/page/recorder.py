@@ -439,6 +439,10 @@ class RecordSession:
         # P0-1:诊断事件(console/pageerror/requestfailed)→ 排查"接口成功但页面报错"等隐蔽故障。
         self.diagnostics: list[dict] = []
         self._req_counter: int = 0          # 顺序号,作为 all_requests[i]["index"] 与 diagnostics 关联锚点
+        self._page_counter: int = 0
+        self._frame_counter: int = 0
+        self._page_ids: dict[int, str] = {}
+        self._frame_ids: dict[int, str] = {}
         self._on_step = on_step
         self._on_request_cb = on_request    # 实时把抓到的请求推给前端(诊断可见)
         # 拦截提交:点提交时抓到业务写请求后,假装成功、不真发给服务器 → 录制不产生真实记录
@@ -454,6 +458,39 @@ class RecordSession:
         self._last_activity_at = time.monotonic()
         self._closing = False        # stop()/断连中:页面 close 事件不再重开截屏(避免在已关 context 上 new_cdp_session 抛错)
         self.page = None
+
+    def _page_id(self, page) -> str:  # noqa: ANN001
+        if page is None:
+            return ""
+        key = id(page)
+        if key not in self._page_ids:
+            self._page_counter += 1
+            self._page_ids[key] = f"page_{self._page_counter}"
+        return self._page_ids[key]
+
+    def _frame_id(self, frame) -> str:  # noqa: ANN001
+        if frame is None:
+            return ""
+        key = id(frame)
+        if key not in self._frame_ids:
+            self._frame_counter += 1
+            self._frame_ids[key] = f"frame_{self._frame_counter}"
+        return self._frame_ids[key]
+
+    def _request_scope(self, request) -> dict[str, str]:  # noqa: ANN001
+        """Best-effort page/frame anchors for RequestGraph facts."""
+        frame = None
+        page = None
+        try:
+            frame = request.frame
+        except Exception:  # noqa: BLE001
+            frame = None
+        if frame is not None:
+            try:
+                page = frame.page
+            except Exception:  # noqa: BLE001
+                page = None
+        return {"page_id": self._page_id(page), "frame_id": self._frame_id(frame)}
 
     def _mark_active(self) -> None:
         """页面近期有用户输入、导航、网络或录制事件时保持较高帧率,避免画面看起来卡住。"""
@@ -495,6 +532,7 @@ class RecordSession:
         # 新页面(target=_blank / window.open / 弹窗)→ **跟随它**:设为活动页 + 把截屏切过去(否则用户看不到=打不开)
         self._context.on("page", lambda p: asyncio.create_task(self._on_new_page(p)))
         self.page = await self._context.new_page()
+        self._page_id(self.page)
         # C1 修复:主 page 创建后**立刻**挂诊断(否则首屏 console/pageerror/requestfailed 全失)
         self._attach_diag_handlers(self.page)
         # SPA 常不触发 "load"(长连接/轮询挂着)→ 用 domcontentloaded,否则 goto 卡到超时(与运行期 driver 一致)
@@ -553,7 +591,8 @@ class RecordSession:
 
     def _record_all(self, m: str, url: str, *, pd: str | None = None, query: dict | None = None,
                     headers: dict | None = None, status: int | None = None,
-                    response_json=None, content_type: str = "") -> int:
+                    response_json=None, content_type: str = "", page_id: str = "",
+                    frame_id: str = "") -> int:
         """全量捕获一条网络请求(GET/POST/PUT/PATCH/DELETE 都记)。返回 index。
 
         - 不做任何 method / 角色过滤:先抓全,后续 P0-2 角色分类 + P0-3 依赖闭包基于这份原数据工作。
@@ -562,8 +601,13 @@ class RecordSession:
         """
         idx = self._req_counter
         self._req_counter += 1
+        request_id = f"req_{idx}"
         entry: dict = {
             "index": idx,
+            "request_id": request_id,
+            "sequence": idx,
+            "page_id": page_id,
+            "frame_id": frame_id,
             "method": (m or "").upper(),
             "url": url or "",
             "headers": dict(headers or {}),
@@ -651,7 +695,8 @@ class RecordSession:
                 pass
             # P0-1:GET 也落 all_requests(全量捕获,治"业务 GET 前置接口被早筛丢")。
             # _record_all 是 all_requests 的唯一写入点;_capture 只负责写 requests(写请求才走)。
-            self._record_all(m, url, pd=pd, headers=hd, content_type=hd.get("content-type", ""))
+            self._record_all(m, url, pd=pd, headers=hd, content_type=hd.get("content-type", ""),
+                             **self._request_scope(request))
             if m in ("POST", "PUT", "PATCH", "DELETE"):
                 self._capture(m, url, pd, hd.get("content-type", ""), hd)
         except Exception:  # noqa: BLE001
@@ -695,7 +740,7 @@ class RecordSession:
                 pass
             ct = hd.get("content-type", "")
             # P0-1:GET 也落 all_requests(全量捕获)。后续 P0-3 依赖闭包要靠它发现"业务 GET 前置接口"。
-            self._record_all(m, url, pd=pd, headers=hd, content_type=ct)
+            self._record_all(m, url, pd=pd, headers=hd, content_type=ct, **self._request_scope(request))
             # H7 修复:multipart/form-data 上传(文件/附件)必须真发,否则文件丢失但 UI 显示成功
             # multipart body 不在 request.post_data,而在 post_data_buffer,pd 必为 None,自然走 continue_,但要
             # 在此显式再判一次 content_type 兜底(部分框架 multipart 也会塞进 post_data)
@@ -959,6 +1004,11 @@ class RecordSession:
         self.all_requests.clear()
         self.diagnostics.clear()
         self._req_counter = 0
+        self._page_counter = 0
+        self._frame_counter = 0
+        self._page_ids.clear()
+        self._frame_ids.clear()
+        self._page_id(self.page)
 
     async def storage_state(self) -> dict | None:
         """抓当前会话登录态快照(所有 cookie + localStorage),不管系统把 token 存哪。

@@ -579,6 +579,30 @@ async def record_ws(ws: WebSocket) -> None:
         pending_required: set = set()          # 录制时表单 * 必填的字段标签
         pending_page_enum_options: dict = {}         # 录制时下拉里真实可见的选项 {选中显示值: [选项文字]}(枚举地面真值)
         recording_mode = "intercepted_submit" if init.get("intercept", True) else "real_submit"
+
+        def _restore_hidden_flow_spec_fields(raw_spec: dict) -> dict:
+            if pending_flow_spec is None:
+                return raw_spec
+            old_by_id = {s.step_id: s for s in pending_flow_spec.steps}
+            for step in raw_spec.get("steps") or []:
+                if not isinstance(step, dict):
+                    continue
+                old = old_by_id.get(str(step.get("step_id") or ""))
+                if old is None:
+                    continue
+                if not step.get("body_source"):
+                    step["body_source"] = old.body_source
+                headers = step.get("headers")
+                if (not headers) or all(v == "***" for v in (headers or {}).values()):
+                    step["headers"] = old.headers
+                old_identity = {i.path: i for i in old.identity}
+                for idn in step.get("identity") or []:
+                    if isinstance(idn, dict) and idn.get("value") == "***":
+                        old_idn = old_identity.get(str(idn.get("path") or ""))
+                        if old_idn is not None:
+                            idn["value"] = old_idn.value
+            return raw_spec
+
         while True:
             msg = await ws.receive_json()
             t = msg.get("type")
@@ -940,11 +964,17 @@ async def record_ws(ws: WebSocket) -> None:
                 try:
                     from dano.config import get_settings
                     from dano.execution.page.flow_spec import (
+                        FlowSpec,
                         flow_spec_to_client,
                         flow_spec_to_summary,
+                        refresh_review_items,
                         run_recording_pi_loop,
                         validate_flow_spec,
                     )
+                    raw_spec = msg.get("flow_spec")
+                    if isinstance(raw_spec, dict):
+                        raw_spec = _restore_hidden_flow_spec_fields(raw_spec)
+                        pending_flow_spec = refresh_review_items(FlowSpec.model_validate(raw_spec))
                     pending_flow_spec = await run_recording_pi_loop(
                         pending_flow_spec,
                         llm_client=_page_semantic_client("complete_json"),
@@ -1084,25 +1114,7 @@ async def record_ws(ws: WebSocket) -> None:
                     from dano.config import get_settings
                     raw_spec = msg.get("flow_spec")
                     if isinstance(raw_spec, dict):
-                        if pending_flow_spec is not None:
-                            old_by_id = {s.step_id: s for s in pending_flow_spec.steps}
-                            for step in raw_spec.get("steps") or []:
-                                if not isinstance(step, dict):
-                                    continue
-                                old = old_by_id.get(str(step.get("step_id") or ""))
-                                if old is None:
-                                    continue
-                                if not step.get("body_source"):
-                                    step["body_source"] = old.body_source
-                                headers = step.get("headers")
-                                if (not headers) or all(v == "***" for v in (headers or {}).values()):
-                                    step["headers"] = old.headers
-                                old_identity = {i.path: i for i in old.identity}
-                                for idn in step.get("identity") or []:
-                                    if isinstance(idn, dict) and idn.get("value") == "***":
-                                        old_idn = old_identity.get(str(idn.get("path") or ""))
-                                        if old_idn is not None:
-                                            idn["value"] = old_idn.value
+                        raw_spec = _restore_hidden_flow_spec_fields(raw_spec)
                         pending_flow_spec = refresh_review_items(FlowSpec.model_validate(raw_spec))
                     pending_flow_spec = await run_recording_pi_loop(
                         pending_flow_spec,
@@ -1225,7 +1237,7 @@ async def onboarding_start(req: OnboardReq) -> dict:
         try:
             rep = await onboard(
                 tenant=req.tenant, subsystem=req.subsystem, openapi=req.openapi,
-                deploy=req.deploy, credentials=req.credentials, policy_text=req.policy_text,
+                deploy=req.deploy, credentials=req.credentials,
                 include_tags=req.include_tags, business_rules=req.business_rules, holidays=req.holidays,
                 flows=req.flows, progress=_progress, lifecycle=_lifecycle)
             job["report"] = rep.model_dump()
@@ -1391,6 +1403,7 @@ class InvokeReq(BaseModel):
     input: dict = {}
     idempotency_key: str | None = None
     confirm: bool = False
+    capability: str | None = None
 
 
 async def _invoke(tenant: str, skill_id: str, input_: dict, confirm: bool) -> dict:
@@ -1412,7 +1425,10 @@ async def _invoke(tenant: str, skill_id: str, input_: dict, confirm: bool) -> di
 async def invoke_skill(skill_id: str, req: InvokeReq,
                        x_tenant_key: str | None = Header(default=None)) -> dict:
     tenant = await _auth_tenant(x_tenant_key)
-    return await _invoke(tenant, skill_id, req.input, req.confirm)
+    args = dict(req.input or {})
+    if req.capability:
+        args["__capability"] = req.capability
+    return await _invoke(tenant, skill_id, args, req.confirm)
 
 
 # ── function-calling 工具(给聊天端 LLM:① 列工具喂给 LLM ② 执行 LLM 的工具调用)──

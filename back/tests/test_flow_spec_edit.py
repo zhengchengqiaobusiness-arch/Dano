@@ -60,7 +60,95 @@ def test_update_param_falls_back_to_key_when_path_is_stale():
     assert new.steps[0].params[0].type == "enum"
 
 
-def test_add_request_step_dedupes_same_captured_endpoint():
+def test_bind_option_source_updates_param_and_select_binding():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[
+            FlowStep(
+                step_id="dict",
+                method="GET",
+                url="/api/dict/type",
+                path="/api/dict/type",
+                response_json={"data": [{"label": "病假", "value": "1"}]},
+            ),
+            FlowStep(
+                step_id="submit",
+                method="POST",
+                url="/api/leave",
+                path="/api/leave",
+                params=[ParamField(path="type", key="类型", value="1", type="number")],
+            ),
+        ],
+    )
+
+    new = apply_flow_edits(spec, [{
+        "op": "bind_option_source",
+        "target_step": "submit",
+        "target_path": "type",
+        "source_step": "dict",
+        "value_key": "value",
+        "label_key": "label",
+        "id_path": "type",
+        "options": ["病假"],
+        "option_map": {"病假": "1"},
+    }])
+
+    param = new.steps[1].params[0]
+    assert param.type == "enum"
+    assert param.source_kind == "api_option"
+    assert param.enum_value_map == {"病假": "1"}
+    assert new.steps[1].selects[0].source_url == "/api/dict/type"
+    assert new.steps[1].selects[0].value_key == "value"
+    assert new.steps[1].selects[0].label_key == "label"
+
+
+def test_capability_loop_and_return_edits():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
+        capabilities=[FlowCapability(name="submit_batch", kind="submit", step_ids=["submit"])],
+    )
+
+    new = apply_flow_edits(spec, [
+        {"op": "set_loop_source", "capability_name": "submit_batch", "items": "input.entries"},
+        {"op": "set_return_mapping", "capability_name": "submit_batch", "mapping": [{
+            "kind": "final_response",
+            "step_id": "submit",
+            "response_path": "response",
+        }]},
+    ])
+
+    cap = new.capabilities[0]
+    assert cap.kind == "submit_batch"
+    assert any(n.get("type") == "foreach" and n.get("items") == "input.entries" for n in cap.nodes)
+    assert cap.output_mapping[0]["step_id"] == "submit"
+
+
+def test_reject_dependency_records_lock_and_removes_link():
+    link = FlowLink(
+        link_id="l1",
+        source_step_id="read",
+        source_path="data.id",
+        target_step_id="write",
+        target_path="body.id",
+    )
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[
+            FlowStep(step_id="read", method="GET", url="/api/read", path="/api/read"),
+            FlowStep(step_id="write", method="POST", url="/api/write", path="/api/write"),
+        ],
+        links=[link],
+    )
+
+    new = apply_flow_edits(spec, [{"op": "reject_dependency", "link_id": "l1"}])
+
+    assert new.links == []
+    rejected = new.meta.get("rejected_dependencies") or []
+    assert rejected and rejected[0]["source_step_id"] == "read"
+
+
+def test_add_request_step_is_idempotent_for_same_request_id():
     spec = FlowSpec(
         flow_id="f",
         meta={"request_graph": {"all_requests": [
@@ -75,9 +163,9 @@ def test_add_request_step_dedupes_same_captured_endpoint():
                 "response_status": 200,
                 "response_json": {"data": {"id": "p1"}},
             },
-            {
-                "request_index": 2,
-                "request_id": "r2",
+                {
+                    "request_index": 2,
+                    "request_id": "r1",
                 "method": "GET",
                 "url": "/admin-api/bpm/process-definition/get?key=oa_duty_leave",
                 "path": "/admin-api/bpm/process-definition/get",
@@ -90,7 +178,7 @@ def test_add_request_step_dedupes_same_captured_endpoint():
     )
 
     one = apply_flow_edits(spec, [{"op": "add_request_step", "request_index": 1, "request_id": "r1"}])
-    two = apply_flow_edits(one, [{"op": "add_request_step", "request_index": 2, "request_id": "r2"}])
+    two = apply_flow_edits(one, [{"op": "add_request_step", "request_index": 2, "request_id": "r1"}])
 
     assert len(two.steps) == 1
     assert two.steps[0].path == "/admin-api/bpm/process-definition/get"
@@ -333,6 +421,64 @@ def test_edit_type():
     assert new.steps[0].params[0].type == "number"
 
 
+def test_edit_type_to_string_clears_wrong_enum_binding():
+    step = FlowStep(
+        step_id="step1",
+        method="POST",
+        url="/api/submit",
+        path="/api/submit",
+        params=[ParamField(
+            path="form.type",
+            key="类型",
+            value="A",
+            type="enum",
+            category="user_param",
+            source_kind="page_enum",
+            enum_options=[{"label": "类型A", "value": "A"}, {"label": "类型B", "value": "B"}],
+            enum_value_map={"类型A": "A", "类型B": "B"},
+        )],
+        selects=[SelectBinding(
+            param="类型",
+            path="form.type",
+            options=[{"label": "类型A", "value": "A"}],
+            option_map={"类型A": "A"},
+            enum_source="dom",
+        )],
+    )
+    spec = FlowSpec(flow_id="f", steps=[step])
+
+    new = apply_flow_edits(spec, [{
+        "op": "update",
+        "step_id": "step1",
+        "param_path": "form.type",
+        "field": "type",
+        "value": "string",
+    }])
+
+    param = new.steps[0].params[0]
+    assert param.type == "string"
+    assert param.source_kind == "user_input"
+    assert param.enum_options is None
+    assert param.enum_value_map is None
+    assert new.steps[0].selects == []
+
+
+def test_edit_type_to_enum_sets_editable_manual_enum_source():
+    new = apply_flow_edits(_make_spec(), [{
+        "op": "update",
+        "step_id": "step1",
+        "param_path": "form.userId",
+        "field": "type",
+        "value": "enum",
+    }])
+
+    param = new.steps[0].params[0]
+    assert param.type == "enum"
+    assert param.source_kind == "manual_enum"
+    assert param.category == "user_param"
+    assert param.exposed_to_user is True
+
+
 def test_add_param():
     new = apply_flow_edits(_make_spec(), [{"op": "add", "step_id": "step1", "param": {
         "path": "form.email", "key": "email", "value": "test@example.com",
@@ -563,6 +709,42 @@ def test_add_candidate_step_promotes_request_graph_entry():
     assert graph["selected_steps"][0]["request_index"] == 7
     assert graph["selected_steps"][0]["state"] == "materialized"
     assert graph["selected_steps"][0]["materialized_step_id"] == promoted.step_id
+
+
+def test_add_request_step_keeps_same_path_distinct_request_ids():
+    spec = FlowSpec(
+        flow_id="f",
+        meta={"request_graph": {"all_requests": [
+            {
+                "request_index": 1,
+                "request_id": "req-a",
+                "method": "GET",
+                "url": "/api/detail?id=1",
+                "path": "/api/detail",
+                "role": "business_get",
+                "confidence": 0.96,
+                "response_json": {"data": {"id": 1}},
+            },
+            {
+                "request_index": 2,
+                "request_id": "req-b",
+                "method": "GET",
+                "url": "/api/detail?id=2",
+                "path": "/api/detail",
+                "role": "business_get",
+                "confidence": 0.96,
+                "response_json": {"data": {"id": 2}},
+            },
+        ]}},
+    )
+
+    new = apply_flow_edits(spec, [
+        {"op": "add_request_step", "request_id": "req-a"},
+        {"op": "add_request_step", "request_id": "req-b"},
+    ])
+
+    assert len(new.steps) == 2
+    assert {s.source_meta.get("request_id") for s in new.steps} == {"req-a", "req-b"}
 
 
 def test_promoted_read_is_ordered_before_write_and_rebuilds_dependency():
@@ -844,6 +1026,62 @@ def test_batch_capability_exports_execution_contract_and_entries_schema():
     assert "entries" in cap["input_schema"]["properties"]
     assert any(n.get("type") == "foreach" for n in cap["workflow_nodes"])
     assert api_request["capability_protocol"] == "dano.capability_plan.v1"
+
+
+def test_flow_spec_to_api_request_syncs_goal_required_inputs_after_param_rename():
+    spec = FlowSpec(
+        flow_id="f",
+        title="提交请假申请",
+        goal={
+            "intent": "submit-process 流程(3 步)",
+            "required_inputs": ["type"],
+            "success_criteria": ["提交接口返回成功规则通过"],
+            "forbidden_actions": ["删除"],
+            "risk_level": "L3",
+        },
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/admin-api/oa/duty-leave/submit-process",
+            path="/admin-api/oa/duty-leave/submit-process",
+            content_type="application/json",
+            body_source='{"type":"2"}',
+            params=[ParamField(path="type", key="类型", label="类型", value="2", type="enum", required=True)],
+        )],
+    )
+
+    api_request, errors = flow_spec_to_api_request(spec)
+
+    assert errors == []
+    assert api_request["params"] == ["类型"]
+    assert api_request["goal"]["required_inputs"] == ["类型"]
+    assert "type" not in api_request["goal"]["required_inputs"]
+
+
+def test_capability_return_node_without_source_is_normalized_to_last_call():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[
+            FlowStep(step_id="read", method="GET", url="/api/read", path="/api/read"),
+            FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit"),
+        ],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            title="提交业务申请",
+            kind="submit_batch",
+            step_ids=["read", "submit"],
+            nodes=[
+                {"id": "node_1", "type": "call", "step_id": "read"},
+                {"id": "node_2", "type": "call", "step_id": "submit"},
+                {"id": "node_4", "type": "return"},
+            ],
+        )],
+    )
+
+    report = validate_flow_spec(spec)
+
+    assert not any("return 节点 `node_4` 缺少返回来源" in e for e in report["errors"])
+    assert not any("return 节点 `node_4` 缺少返回来源" in w for w in report["warnings"])
 
 
 def test_add_candidate_step_is_idempotent_when_request_already_exists():

@@ -745,6 +745,61 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertEqual(by_path["type"].enum_value_map, {"事假": 2, "病假": 3})
         self.assertEqual(spec.steps[0].selects[0].option_map, {"事假": 2, "病假": 3})
 
+    def test_page_enum_field_key_and_options_are_visible_in_description(self):
+        body = {"type": "SICK", "reason": "回家"}
+        spec = to_flow_spec(
+            [_post("https://oa/api/leave/submit", body, resp={"code": 200})],
+            samples={"请假类型": "病假", "reason": "回家"},
+            page_enum_options={
+                "type": {
+                    "field_key": "请假类型",
+                    "selected": "病假",
+                    "options": [
+                        {"label": "病假", "value": "SICK"},
+                        {"label": "事假", "value": "PERSONAL"},
+                        {"label": "婚假", "value": "MARRIAGE"},
+                    ],
+                }
+            },
+        )
+
+        by_path = {p.path: p for p in spec.steps[0].params}
+        self.assertEqual(by_path["type"].key, "请假类型")
+        self.assertEqual(by_path["type"].source_kind, "page_enum")
+        self.assertIn("页面枚举选项", by_path["type"].description or "")
+        self.assertIn("病假=SICK", by_path["type"].description or "")
+        self.assertIn("婚假=MARRIAGE", by_path["type"].reason)
+        self.assertEqual(by_path["type"].enum_value_map["事假"], "PERSONAL")
+
+    def test_page_enum_target_is_not_auto_linked_to_previous_response(self):
+        captured = [
+            _post("https://oa/api/leave/start", {"flowType": "leave"},
+                  resp={"code": 200, "data": {"type": "SICK", "taskId": "T-777"}}),
+            _post("https://oa/api/leave/submit",
+                  {"type": "SICK", "taskId": "T-777", "reason": "回家"},
+                  resp={"code": 200}),
+        ]
+        spec = to_flow_spec(
+            captured,
+            samples={"请假类型": "病假", "reason": "回家"},
+            page_enum_options={
+                "type": {
+                    "field_key": "请假类型",
+                    "selected": "病假",
+                    "options": [
+                        {"label": "病假", "value": "SICK"},
+                        {"label": "事假", "value": "PERSONAL"},
+                    ],
+                }
+            },
+        )
+
+        submit = spec.steps[1]
+        by_path = {p.path: p for p in submit.params}
+        self.assertEqual(by_path["type"].source_kind, "page_enum")
+        self.assertFalse(any(l.target_path == "type" for l in spec.links))
+        self.assertTrue(any(l.target_path == "taskId" for l in spec.links))
+
     def test_flow_spec_does_not_mark_enum_without_real_options(self):
         spec = to_flow_spec(
             [_post("https://oa/api/leave/submit", {"type": 2, "reason": "回家"}, resp={"code": 200})],

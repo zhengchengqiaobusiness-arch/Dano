@@ -80,6 +80,30 @@ def _build_page_body(api_request: dict, action: str, title: str, required):
     return body, params, req_fields, opt_fields
 
 
+def _sync_goal_required_inputs(goal: dict | None, api_request: dict) -> dict | None:
+    """让发布闸门看到的 Goal.required_inputs 与实际 api_request 参数一致。
+
+    录制工作台允许用户把 `type` 改成 `类型`。如果 goal 仍保留旧 key，validate_goal 会
+    把它当成“无来源项/LLM 臆造”阻断发布。这里以 api_request 为事实源同步一次。
+    """
+    if not goal:
+        return goal
+    params = list(api_request.get("params") or [])
+    for step in api_request.get("steps") or []:
+        for name in step.get("params") or []:
+            if name not in params:
+                params.append(name)
+    if not params:
+        return goal
+    out = dict(goal)
+    required_inputs = [name for name in (out.get("required_inputs") or []) if name in params]
+    for name in params:
+        if name not in required_inputs:
+            required_inputs.append(name)
+    out["required_inputs"] = required_inputs
+    return out
+
+
 async def run_request_onboarding(
     *, tenant: str, subsystem: str, action: str, title: str = "",
     api_request: dict, sample_inputs: dict | None = None, required: list[str] | None = None,
@@ -131,6 +155,7 @@ async def run_request_onboarding(
         user_confirmed = bool(goal)
         if not goal:
             goal = await _auto_goal(action, api_request)
+        goal = _sync_goal_required_inputs(goal, api_request)
         goal_issues: list[str] = validate_goal(goal, api_request) if goal else []
         if goal:
             api_request = {**api_request, "goal": goal}

@@ -1021,7 +1021,7 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
         body_val = value_by_path.get(path, "")
         field = field_by_path.get(path)
         leaf_key = str(path).split(".")[-1].split("[")[0]
-        matched = next(((ov, selected) for kv, ov, fk, selected in pairs
+        matched = next(((ov, fk, selected) for kv, ov, fk, selected in pairs
                      if _name_match(kv, lbl)
                      or _name_match(kv, val)
                      or _name_match(kv, body_val)
@@ -1034,7 +1034,7 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
                      or _dom_key_matches_field(kv, field)
                      or _dom_key_matches_field(selected, field)), None)
         if matched:
-            opts, _selected = matched
+            opts, fk, _selected = matched
             records = _records_with_existing_option_map(
                 _enum_records_from_page_options(opts),
                 s.get("option_map") if isinstance(s, dict) else None,
@@ -1045,6 +1045,8 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
                 source="dom",
                 confirmed=True,
             )
+            if fk:
+                s["field_key"] = fk
             s.pop("category_key", None)
             s.pop("category_value", None)
     return selects
