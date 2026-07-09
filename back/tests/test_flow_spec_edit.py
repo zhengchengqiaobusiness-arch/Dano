@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+import dano.execution.page.flow_spec as flow_spec_module
 
 from dano.execution.page.flow_spec import (
     FlowSpec, FlowStep, FlowLink, ParamField, SelectBinding, FlowCapability,
@@ -1510,14 +1511,14 @@ def test_capability_validation_reports_p1_internal_layers_as_warnings():
     report = validate_flow_spec(spec)
     cap_report = report["capability_validation"]
 
-    assert report["passed"] is True
+    assert report["passed"] is False
     assert "capability_internal" in cap_report
     assert "capability_relations" in cap_report
     assert "skill_level" in cap_report
     internal_codes = {
         item["code"]
         for cap in cap_report["capability_internal"]["capabilities"]
-        for item in cap["warnings"]
+        for item in [*(cap.get("warnings") or []), *(cap.get("errors") or [])]
     }
     assert "capability_field_path_missing" in internal_codes
     assert "capability_dependency_endpoint_missing" in internal_codes
@@ -1605,7 +1606,7 @@ def test_capability_validator_reports_deep_p1_field_and_loop_findings():
     assert cap_report["capability_internal"]["passed"] is True
 
 
-def test_capability_relation_type_mismatch_is_p1_warning_not_publish_gate():
+def test_unconfirmed_capability_relation_type_mismatch_is_p1_warning_not_publish_gate():
     spec = FlowSpec(
         flow_id="f",
         steps=[FlowStep(
@@ -1651,6 +1652,7 @@ def test_capability_relation_type_mismatch_is_p1_warning_not_publish_gate():
             from_output="count",
             to_capability="submit_items",
             to_input="items",
+            confirmed=False,
         )],
     )
 
@@ -1660,6 +1662,56 @@ def test_capability_relation_type_mismatch_is_p1_warning_not_publish_gate():
     assert report["passed"] is True
     assert relation_report["relations"][0]["type_compatible"] is False
     assert relation_report["warnings"][0]["code"] == "capability_relation_type_mismatch"
+
+
+def test_confirmed_capability_relation_type_mismatch_blocks_publish_gate():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(
+            step_id="write",
+            method="POST",
+            url="/api/write",
+            path="/api/write",
+            body_source='{"items":[]}',
+            params=[ParamField(path="items", key="items", value="", type="array", required=True)],
+            success_rule={"path": "code", "equals": 0},
+        )],
+        capabilities=[
+            FlowCapability(
+                name="read_count",
+                kind="submit",
+                step_ids=["write"],
+                nodes=[{"id": "call_write", "type": "call", "step_id": "write"}],
+                output_schema={"type": "object", "properties": {"count": {"type": "number"}}},
+                confirmed=True,
+                requires_human_confirm=False,
+            ),
+            FlowCapability(
+                name="submit_items",
+                kind="submit",
+                step_ids=["write"],
+                nodes=[{"id": "call_write", "type": "call", "step_id": "write"}],
+                input_schema={"type": "object", "properties": {"items": {"type": "array"}}},
+                confirmed=True,
+                requires_human_confirm=False,
+            ),
+        ],
+        capability_relations=[CapabilityRelation(
+            relation_id="rel_confirmed_bad_type",
+            from_capability="read_count",
+            from_output="count",
+            to_capability="submit_items",
+            to_input="items",
+            confirmed=True,
+        )],
+    )
+
+    report = validate_flow_spec(spec)
+    relation_report = report["capability_validation"]["capability_relations"]
+
+    assert report["passed"] is False
+    assert relation_report["passed"] is False
+    assert relation_report["errors"][0]["code"] == "capability_relation_type_mismatch"
 
 
 def test_generate_capabilities_edit_is_incremental():
@@ -1904,6 +1956,29 @@ def test_flow_spec_to_api_request_can_compile_single_capability_without_changing
     assert list(scoped["workflow_nodes"]) == ["query_status"]
     assert scoped["capabilities"][0]["compiled_step_ids"] == ["status"]
     assert direct["selected_capability"]["name"] == "query_status"
+
+
+def test_shadow_diff_detects_existing_step_missing_from_scoped_compile(monkeypatch):
+    spec = _two_capability_compile_spec()
+    real_compile = flow_spec_module.capability_spec_to_api_request
+
+    def fake_compile(flow_spec, *args, **kwargs):
+        api, errors = real_compile(flow_spec, *args, **kwargs)
+        if kwargs.get("capability_id") and api:
+            api = json.loads(json.dumps(api, ensure_ascii=False))
+            api["steps"] = []
+            api.pop("step_id", None)
+            for cap in api.get("capabilities") or []:
+                cap["compiled_step_ids"] = []
+        return api, errors
+
+    monkeypatch.setitem(flow_spec_shadow_diff.__globals__, "capability_spec_to_api_request", fake_compile)
+
+    shadow = flow_spec_shadow_diff(spec)
+    submit_report = next(x for x in shadow["capabilities"] if x["capability_id"] == "cap-submit")
+
+    assert shadow["passed"] is False
+    assert submit_report["missing_steps"] == ["submit"]
 
 
 def test_capability_validation_reports_three_layers_and_bad_dependency_output_relation():

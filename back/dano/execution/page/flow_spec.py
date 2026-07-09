@@ -4329,13 +4329,22 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                 output_entry["reason"] = "missing_source"
             internal_section["outputs"].append(output_entry)
             if not output_entry["interpretable"]:
-                _capability_warning(
-                    internal_section,
-                    warnings,
-                    code="capability_output_mapping_uninterpretable",
-                    message=f"Capability `{label}` output_mapping[{idx}] 无法解释为能力输出",
-                    target={"kind": "capability_output", "capability": label, "index": idx},
-                )
+                msg = f"Capability `{label}` output_mapping[{idx}] 无法解释为能力输出"
+                if cap.confirmed:
+                    cap_errors.append(msg)
+                    internal_section.setdefault("errors", []).append({
+                        "code": "capability_output_mapping_uninterpretable",
+                        "message": msg,
+                        "target": {"kind": "capability_output", "capability": label, "index": idx},
+                    })
+                else:
+                    _capability_warning(
+                        internal_section,
+                        warnings,
+                        code="capability_output_mapping_uninterpretable",
+                        message=msg,
+                        target={"kind": "capability_output", "capability": label, "index": idx},
+                    )
         if not cap.output_mapping and not cap.output_schema and not any(
             isinstance(n, dict) and n.get("type") == "return" for n in _iter_capability_nodes(cap.nodes or [])
         ):
@@ -4541,29 +4550,56 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
         }
         capability_relations["relations"].append(relation_entry)
         if from_cap is None or to_cap is None:
-            _capability_warning(
-                capability_relations,
-                warnings,
-                code="capability_relation_endpoint_missing",
-                message=f"Capability relation `{relation.relation_id}` 指向不存在的 from/to capability",
-                target={"kind": "capability_relation", "relation_id": relation.relation_id},
-            )
+            msg = f"Capability relation `{relation.relation_id}` 指向不存在的 from/to capability"
+            if relation.confirmed:
+                capability_relations.setdefault("errors", []).append({
+                    "code": "capability_relation_endpoint_missing",
+                    "message": msg,
+                    "target": {"kind": "capability_relation", "relation_id": relation.relation_id},
+                })
+                errors.append(msg)
+            else:
+                _capability_warning(
+                    capability_relations,
+                    warnings,
+                    code="capability_relation_endpoint_missing",
+                    message=msg,
+                    target={"kind": "capability_relation", "relation_id": relation.relation_id},
+                )
         elif not from_type or not to_type:
-            _capability_warning(
-                capability_relations,
-                warnings,
-                code="capability_relation_field_missing",
-                message=f"Capability relation `{relation.relation_id}` 的 output/input 字段缺少可解析类型",
-                target={"kind": "capability_relation", "relation_id": relation.relation_id},
-            )
+            msg = f"Capability relation `{relation.relation_id}` 的 output/input 字段缺少可解析类型"
+            if relation.confirmed:
+                capability_relations.setdefault("errors", []).append({
+                    "code": "capability_relation_field_missing",
+                    "message": msg,
+                    "target": {"kind": "capability_relation", "relation_id": relation.relation_id},
+                })
+                errors.append(msg)
+            else:
+                _capability_warning(
+                    capability_relations,
+                    warnings,
+                    code="capability_relation_field_missing",
+                    message=msg,
+                    target={"kind": "capability_relation", "relation_id": relation.relation_id},
+                )
         elif not compatible:
-            _capability_warning(
-                capability_relations,
-                warnings,
-                code="capability_relation_type_mismatch",
-                message=f"Capability relation `{relation.relation_id}` output/input 类型不兼容: {from_type} -> {to_type}",
-                target={"kind": "capability_relation", "relation_id": relation.relation_id},
-            )
+            msg = f"Capability relation `{relation.relation_id}` output/input 类型不兼容: {from_type} -> {to_type}"
+            if relation.confirmed:
+                capability_relations.setdefault("errors", []).append({
+                    "code": "capability_relation_type_mismatch",
+                    "message": msg,
+                    "target": {"kind": "capability_relation", "relation_id": relation.relation_id},
+                })
+                errors.append(msg)
+            else:
+                _capability_warning(
+                    capability_relations,
+                    warnings,
+                    code="capability_relation_type_mismatch",
+                    message=msg,
+                    target={"kind": "capability_relation", "relation_id": relation.relation_id},
+                )
     if caps and not any(c.confirmed for c in caps):
         _capability_warning(
             skill_level,
@@ -5849,16 +5885,26 @@ def _canonical_api_shape(api_request: dict | None) -> dict[str, Any]:
     if not api_request:
         return {}
     steps = api_request.get("steps") or [api_request]
+    compiled_ids = [
+        str(st.get("step_id") or "")
+        for st in steps
+        if isinstance(st, dict) and st.get("step_id")
+    ]
     return {
         "step_count": len(steps),
         "params": sorted(_api_params(api_request)),
         "methods": [(st.get("method") or "").upper() for st in steps],
         "paths": [st.get("path") or _request_path({"url": st.get("url") or ""}) for st in steps],
+        "compiled_step_ids": compiled_ids,
         "capabilities": [
             {
                 "name": cap.get("name"),
                 "kind": cap.get("kind"),
-                "compiled_step_ids": cap.get("compiled_step_ids") or cap.get("step_ids") or [],
+                "compiled_step_ids": (
+                    cap.get("compiled_step_ids")
+                    if "compiled_step_ids" in cap
+                    else cap.get("step_ids") or []
+                ),
             }
             for cap in api_request.get("capabilities") or []
             if isinstance(cap, dict)
@@ -5875,9 +5921,15 @@ def flow_spec_shadow_diff(spec: FlowSpec | dict[str, Any]) -> dict[str, Any]:
     for cap in capability_spec.capabilities or []:
         scoped_api, scoped_errors = capability_spec_to_api_request(capability_spec, capability_id=cap.capability_id)
         scoped_shape = _canonical_api_shape(scoped_api)
+        scoped_cap_ids = {
+            str(sid)
+            for compiled_cap in scoped_shape.get("capabilities") or []
+            for sid in (compiled_cap.get("compiled_step_ids") or [])
+        }
+        actual_step_ids = set(scoped_shape.get("compiled_step_ids") or []) | scoped_cap_ids
         missing_steps = [
             sid for sid in _capability_node_step_ids(cap)
-            if sid not in set(scoped_shape.get("paths") or []) and sid not in {s.step_id for s in capability_spec.steps}
+            if sid not in actual_step_ids
         ]
         capability_reports.append({
             "name": cap.name,
