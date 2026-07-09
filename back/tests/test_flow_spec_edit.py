@@ -17,7 +17,7 @@ from dano.execution.page.flow_spec import (
     auto_fix_flow_spec, orchestrate_flow_capabilities, run_recording_pi_loop, sync_flow_spec_models,
     flow_spec_canonical_summary, flow_spec_shadow_diff, migrate_v1_flow_spec_to_capability_spec,
     migrate_v2_flow_spec_to_capability_spec, capability_spec_to_legacy_flow_spec,
-    capability_spec_to_api_request,
+    capability_spec_to_api_request, to_flow_spec,
 )
 
 
@@ -469,6 +469,34 @@ def test_request_facts_are_first_class_and_sync_with_legacy_request_graph():
     graph = modern.meta["request_graph"]
     assert graph["all_requests"][0]["request_id"] == "req-options"
     assert graph["candidate_reads"][0]["request_id"] == "req-options"
+
+
+def test_to_flow_spec_request_facts_filter_static_assets_and_keep_page_enums():
+    captured = [
+        {"index": 1, "request_id": "css-1", "method": "GET", "url": "/assets/app.css", "path": "/assets/app.css", "response_status": 200},
+        {"index": 2, "request_id": "js-1", "method": "GET", "url": "/assets/app.js", "path": "/assets/app.js", "response_status": 200},
+        {
+            "index": 3,
+            "request_id": "post-1",
+            "method": "POST",
+            "url": "/admin-api/oa/duty-leave/submit-process",
+            "path": "/admin-api/oa/duty-leave/submit-process",
+            "headers": {"content-type": "application/json"},
+            "post_data": '{"type":"2","reason":"test"}',
+            "response_status": 200,
+            "response_json": {"code": 0},
+        },
+    ]
+    page_enums = {"type": {"options": [{"label": "病假", "value": "2"}], "option_map": {"病假": "2"}}}
+
+    spec = to_flow_spec(captured, page_enum_options=page_enums)
+
+    ids = {fact.request_id for fact in spec.request_facts.requests}
+    assert "post-1" in ids
+    assert "css-1" not in ids
+    assert "js-1" not in ids
+    assert spec.request_facts.option_sources
+    assert spec.request_facts.option_sources[0]["options"] == page_enums
 
 
 def test_capability_scoped_fields_and_dependencies_survive_without_changing_step_ids():
@@ -1001,6 +1029,112 @@ def test_add_duplicate_link_merges_existing_link_instead_of_raising():
     assert new.links[0].reason == "new"
 
 
+def test_update_link_to_duplicate_merges_existing_link_instead_of_raising():
+    spec = _three_step_spec()
+    spec.links = [
+        FlowLink(link_id="keep", source_step_id="A", source_path="data.key",
+                 target_step_id="B", target_path="x", confirmed=False, confidence=0.2),
+        FlowLink(link_id="edit", source_step_id="A", source_path="data.other",
+                 target_step_id="B", target_path="x", confirmed=True, confidence=0.8),
+    ]
+
+    new = apply_flow_edits(spec, [{"op": "update", "link_id": "edit", "field": "source_path", "value": "data.key"}])
+
+    assert len(new.links) == 1
+    assert new.links[0].link_id == "keep"
+    assert new.links[0].confirmed is True
+    assert new.links[0].confidence == 0.8
+
+
+def test_default_submit_capability_uses_dependency_closure_not_all_reads():
+    option = FlowStep(
+        step_id="opt", name="GET_simple-list", method="GET", url="/system/dict-data/simple-list", path="/system/dict-data/simple-list",
+        source_meta={"role": "read_option"},
+    )
+    query = FlowStep(
+        step_id="query", name="GET_process", method="GET", url="/bpm/process-definition/get", path="/bpm/process-definition/get",
+        source_meta={"role": "business_get"}, response_json={"data": {"key": "oa_seal_apply"}},
+    )
+    submit = FlowStep(
+        step_id="submit", name="POST_submit-process", method="POST", url="/oa/seal-apply/submit-process", path="/oa/seal-apply/submit-process",
+        params=[ParamField(path="processDefKey", key="processDefKey", value="oa_seal_apply", type="string", category="runtime_var")],
+    )
+    spec = FlowSpec(flow_id="cap-prune", steps=[option, query, submit], links=[
+        FlowLink(source_step_id="query", source_path="data.key", target_step_id="submit", target_path="processDefKey")
+    ])
+
+    caps = flow_spec_module.build_default_flow_capabilities(spec)
+    submit_cap = next(c for c in caps if c.kind == "submit_batch")
+
+    assert submit_cap.step_ids == ["query", "submit"]
+    assert "opt" not in submit_cap.step_ids
+
+
+def test_default_capabilities_keep_independent_query_and_submit_separate():
+    query_status = FlowStep(
+        step_id="status",
+        name="GET_page",
+        method="GET",
+        url="/admin-api/oa/daily-report/page",
+        path="/admin-api/oa/daily-report/page",
+        source_meta={"role": "business_get"},
+        response_json={"data": {"list": [{"date": "2026-05-01"}]}},
+    )
+    preread = FlowStep(
+        step_id="definition",
+        name="GET_process",
+        method="GET",
+        url="/admin-api/bpm/process-definition/get",
+        path="/admin-api/bpm/process-definition/get",
+        source_meta={"role": "business_get"},
+        response_json={"data": {"taskId": "T-1"}},
+    )
+    submit = FlowStep(
+        step_id="submit",
+        name="POST_submit",
+        method="POST",
+        url="/admin-api/oa/daily-report/submit",
+        path="/admin-api/oa/daily-report/submit",
+        params=[ParamField(path="taskId", key="taskId", value="T-1", type="string", category="runtime_var")],
+    )
+    spec = FlowSpec(flow_id="multi-cap", steps=[query_status, preread, submit], links=[
+        FlowLink(source_step_id="definition", source_path="data.taskId", target_step_id="submit", target_path="taskId")
+    ])
+
+    caps = flow_spec_module.build_default_flow_capabilities(spec)
+    by_kind = {c.kind: c for c in caps}
+
+    assert "query_status" in by_kind
+    assert "submit_batch" in by_kind
+    assert by_kind["query_status"].step_ids == ["status"]
+    assert by_kind["submit_batch"].step_ids == ["definition", "submit"]
+
+
+def test_sync_capability_scoped_views_prunes_noisy_submit_steps():
+    option = FlowStep(
+        step_id="opt", name="GET_online-status", method="GET", url="/im/user/online-status", path="/im/user/online-status",
+        source_meta={"role": "read_option"}, params=[ParamField(path="id", key="id", value="1")],
+    )
+    query = FlowStep(
+        step_id="query", name="GET_process", method="GET", url="/bpm/process-definition/get", path="/bpm/process-definition/get",
+        source_meta={"role": "business_get"}, response_json={"data": {"key": "oa_seal_apply"}},
+    )
+    submit = FlowStep(
+        step_id="submit", name="POST_submit-process", method="POST", url="/oa/seal-apply/submit-process", path="/oa/seal-apply/submit-process",
+        params=[ParamField(path="processDefKey", key="processDefKey", value="oa_seal_apply")],
+    )
+    spec = FlowSpec(
+        flow_id="cap-sync-prune",
+        steps=[option, query, submit],
+        links=[FlowLink(source_step_id="query", source_path="data.key", target_step_id="submit", target_path="processDefKey")],
+        capabilities=[FlowCapability(name="submit_batch", kind="submit_batch", step_ids=["opt", "query", "submit"])],
+    )
+
+    synced = sync_flow_spec_models(spec)
+
+    assert synced.capabilities[0].step_ids == ["query", "submit"]
+
+
 def test_dedupe_steps_keeps_latest_repeated_read_step():
     def _get(sid, url):
         return FlowStep(
@@ -1067,10 +1201,36 @@ def test_update_link_confirmed():
     assert new.links[0].confirmed is True
 
 
+def test_update_param_path_updates_link_target_and_source_target_path():
+    spec = _two_step_spec_with_link()
+    spec.links[0].target_path = "body.y"
+    spec.steps[1].params[0].source = {
+        "kind": "previous_response",
+        "step_id": "A",
+        "response_path": "data.x",
+        "target_path": "body.y",
+    }
+
+    new = apply_flow_edits(spec, [{"op": "update", "step_id": "B", "param_path": "y", "field": "path", "value": "z"}])
+
+    assert new.steps[1].params[0].path == "z"
+    assert new.links[0].target_path == "z"
+    assert new.steps[1].params[0].source["target_path"] == "z"
+
+
 def test_remove_link():
     spec = _two_step_spec_with_link()
     new = apply_flow_edits(spec, [{"op": "remove", "link_id": "l1"}])
     assert len(new.links) == 0
+    assert new.meta.get("rejected_dependencies")
+
+
+def test_remove_link_without_record_rejection_keeps_dependency_rebindable():
+    spec = _two_step_spec_with_link()
+    new = apply_flow_edits(spec, [{"op": "remove", "link_id": "l1", "record_rejection": False}])
+
+    assert len(new.links) == 0
+    assert not new.meta.get("rejected_dependencies")
 
 
 def test_remove_link_resets_target_param_source():
@@ -1298,6 +1458,45 @@ def test_add_capability_step_from_request_fact_updates_usage_index_and_refs():
     assert usage.state == "materialized"
     assert usage.materialized_step_id == promoted.step_id
     assert "submit_batch" in usage.used_by_capabilities
+
+
+def test_remove_capability_step_clears_request_usage_without_deleting_step():
+    request_fact = _request_fact_entry(request_id="req-date", request_index=10)
+    spec = FlowSpec(
+        flow_id="cap-request-fact-remove",
+        steps=[FlowStep(
+            step_id="read",
+            method="GET",
+            url="/api/status",
+            path="/api/status",
+            source_meta={"request_id": "req-date", "request_index": 10},
+            response_json={"code": 0, "data": {"status": "pending"}},
+        )],
+        capabilities=[FlowCapability(
+            name="query_status",
+            kind="query_status",
+            step_ids=["read"],
+            nodes=[{"id": "call_read", "type": "call", "step_id": "read"}],
+        )],
+        request_facts={
+            "requests": [request_fact],
+            "analysis": {"req-date": {"request_id": "req-date", "role": "business_get", "keep": True}},
+        },
+    )
+
+    synced = sync_flow_spec_models(spec)
+    assert "query_status" in synced.request_facts.usage["req-date"].used_by_capabilities
+
+    edited = apply_flow_edits(synced, [{
+        "op": "remove_capability_step",
+        "capability_name": "query_status",
+        "step_id": "read",
+    }])
+
+    assert any(step.step_id == "read" for step in edited.steps)
+    assert edited.capabilities[0].step_ids == []
+    assert edited.request_facts.usage["req-date"].used_by_capabilities == []
+    assert edited.request_facts.usage["req-date"].materialized_step_id == "read"
 
 
 def test_recording_v3_golden_shadow_and_adapters():
@@ -2030,6 +2229,35 @@ def test_generate_capabilities_respects_removed_capability_step():
 
     assert "read" not in regenerated.capabilities[0].step_ids
     assert all(n.get("step_id") != "read" for n in regenerated.capabilities[0].nodes if n.get("type") == "call")
+
+
+def test_update_capability_step_order_preserves_user_order_independent_of_global_steps():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[
+            FlowStep(step_id="read", method="GET", url="/api/read", path="/api/read"),
+            FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit"),
+        ],
+        capabilities=[FlowCapability(
+            name="custom_order",
+            kind="submit",
+            step_ids=["read", "submit"],
+            nodes=[
+                {"id": "call_1", "type": "call", "step_id": "read"},
+                {"id": "call_2", "type": "call", "step_id": "submit"},
+            ],
+        )],
+    )
+
+    edited = apply_flow_edits(spec, [{
+        "op": "update_capability",
+        "capability_name": "custom_order",
+        "field": "step_ids",
+        "value": ["submit", "read"],
+    }])
+
+    assert edited.capabilities[0].step_ids == ["submit", "read"]
+    assert [n["step_id"] for n in edited.capabilities[0].nodes if n.get("type") == "call"] == ["submit", "read"]
 
 
 def test_generate_capabilities_respects_removed_capability():

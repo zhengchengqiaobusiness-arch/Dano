@@ -6,6 +6,7 @@ import json
 import asyncio
 import unittest
 
+import dano.execution.page.flow_spec as flow_spec_module
 from dano.execution.page.flow_spec import (
     FlowSpec, FlowStep, FlowLink, ParamField, FlowCapability,
     apply_flow_edits,
@@ -32,6 +33,15 @@ def _post(url, body, method="POST", resp=None, headers=None):
         "post_data": json.dumps(body, ensure_ascii=False) if isinstance(body, (dict, list)) else body,
         "content_type": "application/json",
         "headers": headers or {"Authorization": "Bearer test", "Content-Type": "application/json"},
+        "response_json": resp,
+    }
+
+
+def _get(url, resp=None):
+    return {
+        "method": "GET", "url": url,
+        "content_type": "application/json",
+        "headers": {"Authorization": "Bearer test"},
         "response_json": resp,
     }
 
@@ -127,6 +137,73 @@ class ToFlowSpecTest(unittest.TestCase):
         confirmed_param = {p.path: p for p in confirmed.steps[1].params}["flowTask.taskId"]
         self.assertEqual(confirmed_param.source_kind, "previous_response")
         self.assertFalse(confirmed_param.need_human_confirm)
+
+    def test_business_page_list_does_not_pollute_submit_fields_as_options_or_links(self):
+        captured = [
+            _get("https://oa/admin-api/oa/seal-apply/page?pageNo=1&pageSize=10", {
+                "code": 0,
+                "data": {
+                    "list": [{
+                        "id": "old-id-1",
+                        "applyTitle": "adasd",
+                        "useInfo": "旧记录用途",
+                        "remark": "旧备注",
+                        "backTime": 1783353600000,
+                    }],
+                    "total": 1,
+                },
+            }),
+            _post("https://oa/admin-api/oa/seal-apply/submit-process", {
+                "applyTitle": "adasd",
+                "useInfo": "旧记录用途",
+                "remark": "旧备注",
+                "backTime": 1783353600000,
+            }, resp={"code": 0, "data": True}),
+        ]
+
+        spec = to_flow_spec(
+            captured,
+            samples={"applyTitle": "adasd", "useInfo": "旧记录用途", "remark": "旧备注"},
+        )
+        submit = next(s for s in spec.steps if s.method == "POST")
+        by_path = {p.path: p for p in submit.params}
+
+        self.assertEqual(by_path["applyTitle"].source_kind, "user_input")
+        self.assertEqual(by_path["useInfo"].source_kind, "user_input")
+        self.assertNotEqual(by_path["applyTitle"].source_kind, "api_option")
+        self.assertFalse(any(l.target_path in {"applyTitle", "useInfo", "remark", "backTime"} for l in spec.links))
+
+    def test_get_pagination_fields_are_not_enum_options(self):
+        captured = [
+            _get("https://oa/admin-api/bpm/process-instance/get-approval-detail?pageNo=1&pageSize=10", {
+                "code": 0,
+                "data": {"token": "PAGE-TOKEN", "list": [{"id": "1", "applyTitle": "a"}], "total": 1},
+            }),
+            _post("https://oa/admin-api/oa/seal-apply/submit-process", {
+                "token": "PAGE-TOKEN",
+                "applyTitle": "a",
+            }, resp={"code": 0}),
+        ]
+        reads = [
+            {"url": "https://oa/admin-api/system/dict-data/simple-list",
+             "json": {"data": [{"label": "第一页", "value": "1"}, {"label": "十条", "value": "10"}]}}
+        ]
+
+        step = flow_spec_module._build_step_from_capture(
+            captured[0],
+            reads=reads,
+            samples={},
+            storage_state=None,
+            required_labels=set(),
+            page_enum_options={},
+            step_index=0,
+        )
+        by_path = {p.path: p for p in step.params}
+
+        self.assertEqual(by_path["query.pageNo"].category, "system_const")
+        self.assertEqual(by_path["query.pageNo"].source_kind, "constant")
+        self.assertEqual(by_path["query.pageSize"].category, "system_const")
+        self.assertNotEqual(by_path["query.pageNo"].source_kind, "api_option")
 
     def test_no_business_writes_returns_empty_spec(self):
         spec = to_flow_spec(captured_requests=[_post("https://oa/api/login", {"u": "x", "p": "y"})], reads=[])
@@ -650,14 +727,15 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertEqual(spec.capabilities, [])
         orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=None, model=None))
         cap_kinds = {c.kind for c in orchestrated.capabilities}
-        self.assertEqual(cap_kinds, {"submit_batch"})
-        submit_cap = orchestrated.capabilities[0]
-        self.assertTrue(any("/get-approval-detail" in s.path for s in orchestrated.steps if s.step_id in submit_cap.step_ids))
+        self.assertEqual(cap_kinds, {"query_status", "submit_batch"})
+        query_cap = next(c for c in orchestrated.capabilities if c.kind == "query_status")
+        submit_cap = next(c for c in orchestrated.capabilities if c.kind == "submit_batch")
+        self.assertTrue(any("/get-approval-detail" in s.path for s in orchestrated.steps if s.step_id in query_cap.step_ids))
         self.assertTrue(any("/submit-process" in s.path for s in orchestrated.steps if s.step_id in submit_cap.step_ids))
 
         client = flow_spec_to_client(orchestrated)
         self.assertIn("capabilities", client)
-        self.assertEqual({c["kind"] for c in client["capabilities"]}, {"submit_batch"})
+        self.assertEqual({c["kind"] for c in client["capabilities"]}, {"query_status", "submit_batch"})
         apir, errors = flow_spec_to_api_request(orchestrated)
         self.assertEqual(errors, [])
         self.assertIn("capabilities", apir)

@@ -615,6 +615,70 @@ def _looks_page_context_field(key: str, path: str) -> bool:
 _OPTION_SOURCE_KINDS = {"api_option", "page_enum", "static_enum", "manual_enum", "form_option"}
 
 
+def _looks_pagination_field(key: str, path: str) -> bool:
+    raw = re.sub(r"[^a-z0-9]+", "", f"{key}.{path}".lower())
+    return raw.endswith(("pageno", "pagenum", "pagesize", "pageindex", "currentpage", "limit", "offset"))
+
+
+def _looks_user_entered_business_field(key: str, path: str) -> bool:
+    """字段名像调用方/最终用户填写的业务内容时，不允许值驱动自动改成上游响应。
+
+    这类字段经常与列表查询响应中的旧记录值相同，例如申请标题、备注、使用说明、日期。
+    如果仅靠 value match 自动绑定，会把“查询已有记录”误当成“提交字段来源”。
+    """
+    norm = _norm_field_name(key, path)
+    if not norm:
+        return False
+    if any(x in norm for x in (
+        "title", "name", "reason", "remark", "memo", "note", "desc", "description",
+        "content", "info", "message", "comment", "summary", "subject", "purpose",
+        "date", "time", "day", "start", "end", "begin", "back", "return",
+        "applytitle", "useinfo", "gznr", "sbyy", "qjyy",
+    )):
+        if not any(x in norm for x in ("id", "key", "code", "token", "instance", "task", "process")):
+            return True
+    return False
+
+
+def _is_option_source_url(url: str) -> bool:
+    path = _request_path({"url": url}).lower()
+    segs = {s for s in re.split(r"[^a-z0-9]+", path) if s}
+    if segs & {"dict", "dictionary", "option", "options", "select", "simple", "simplelist", "tree", "candidate", "candidates"}:
+        return True
+    if path.endswith(("/list", "/simple-list", "/tree", "/select", "/options", "/candidates")):
+        return True
+    last = path.rsplit("/", 1)[-1]
+    if re.search(r"(?:^|[-_])(?:get|query|select)?[a-z0-9]*(?:list|tree|options?|candidates?)(?:by|$|[-_])", last):
+        return True
+    return False
+
+
+def _read_is_option_source(read: dict) -> bool:
+    role = str(read.get("role") or read.get("request_role") or "")
+    url = str(read.get("url") or read.get("path") or "")
+    path = _request_path({"url": url}).lower()
+    is_known_option_path = _is_option_source_url(url) or any(
+        seg in path for seg in ("/user/", "/dept/", "/department/", "/role/", "/post/", "/employee/", "/person/")
+    )
+    if path.endswith("/page") or "/page?" in str(url).lower():
+        if not is_known_option_path:
+            return False
+    if role == "explicit_read_option":
+        return True
+    if role == "read_option":
+        return is_known_option_path
+    if role in {"business_get", "read_context"}:
+        return False
+    if not _is_option_source_url(url):
+        return False
+    payload = read.get("json", read.get("response_json"))
+    return bool(as_list_payload(payload))
+
+
+def _option_candidate_reads(reads: list[dict] | None) -> list[dict]:
+    return [r for r in (reads or []) if isinstance(r, dict) and _read_is_option_source(r)]
+
+
 def _select_source_kind(sel: SelectBinding | None) -> str:
     if sel is None:
         return "static_enum"
@@ -691,6 +755,17 @@ def _param_source_guess(
             "editable": False,
             "exposed_to_user": False,
             "reason": "该字段是系统时间戳，运行期使用当前时间生成",
+            "need_human_confirm": False,
+        }
+
+    if _looks_pagination_field(key, path):
+        return {
+            "category": "system_const",
+            "source_kind": "constant",
+            "source": {"kind": "pagination", "path": path},
+            "editable": True,
+            "exposed_to_user": False,
+            "reason": "分页参数由 Skill 内部按默认分页提交，不作为普通业务字段暴露",
             "need_human_confirm": False,
         }
 
@@ -971,6 +1046,8 @@ def _build_step_from_capture(
     def has_real_enum_source(sb: SelectBinding) -> bool:
         return bool(sb.options) or bool(sb.source_url and sb.value_key and sb.label_key)
 
+    option_reads = _option_candidate_reads(reads or [])
+
     # GET 请求：从 URL query string 提参,同时对 query 也跑 select 检测
     # (治"参数来源接口没识别":接口型 query 参数如 keyword=xxx / status=xxx 应该被识别为接口选择字段)
     if method == "GET" or body is None:
@@ -978,17 +1055,17 @@ def _build_step_from_capture(
         iden_raw: list[dict] = []
         flat_fields = _params_from_get_query(req)
         # select/选人:在 query 参数名上做下拉检测,与 POST body 同套算法
-        selects_raw = _detect_query_selects(req, samples, reads or [], page_enum_options)
+        selects_raw = _detect_query_selects(req, samples, option_reads, page_enum_options)
     else:
         # 列表多选先识别
-        list_selects = suggest_list_selects(pd, reads or [], samples)
+        list_selects = suggest_list_selects(pd, option_reads, samples)
         list_paths = [s["path"] for s in list_selects]
 
         # 字段拍平
         flat_fields = flatten_body(pd, samples, required_labels, collapse_paths=list_paths)
 
         # select/选人
-        selects_raw = suggest_selects(pd, reads or [], samples, skip_paths=list_paths, fields=flat_fields) + list_selects
+        selects_raw = suggest_selects(pd, option_reads, samples, skip_paths=list_paths, fields=flat_fields) + list_selects
         apply_page_enum_options(selects_raw, page_enum_options, post_data=pd, fields=flat_fields)
         selects_raw += page_enum_selects(pd, page_enum_options, {s.get("path", "") for s in selects_raw}, fields=flat_fields)
 
@@ -999,7 +1076,7 @@ def _build_step_from_capture(
     sel_names = _select_name_for_step(selects_raw, samples)
 
     # BPMN 审批人命名兜底
-    assignee_names = suggest_assignee_names(pd, reads or [], samples)
+    assignee_names = suggest_assignee_names(pd, option_reads, samples)
 
     # select 元数据
     selects_meta: list[SelectBinding] = []
@@ -1760,7 +1837,44 @@ def _request_analysis_from_graph_entry(entry: dict[str, Any], bucket: str) -> Re
     return RequestAnalysis.model_validate(payload)
 
 
-def _request_facts_from_graph(graph: dict[str, Any], *, diagnostics: list[dict[str, Any]] | None = None) -> RequestFacts:
+def _is_api_like_graph_entry(entry: dict[str, Any]) -> bool:
+    path = _request_path(entry).lower()
+    if not path:
+        return False
+    if re.search(r"\.(?:css|js|mjs|map|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|html?|txt|xml)$", path):
+        return False
+    role = str(entry.get("role") or "")
+    if role in {"noise", "auth"}:
+        return False
+    if role in {"submit_anchor", "business_write", "business_get", "read_context", "read_option"}:
+        return True
+    if entry.get("response_json") is not None:
+        return True
+    return bool(re.search(r"^/?(?:api|admin-api|appgateway|gsgl|oa|bpm|system|workflow|process|v1|v2)\b", path))
+
+
+def _option_sources_from_page_enum_options(page_enum_options: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not page_enum_options:
+        return []
+    return [{"kind": "page_enum_options", "options": page_enum_options}]
+
+
+def _page_enum_options_from_request_facts(request_facts: RequestFacts | None) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for source in (request_facts.option_sources if request_facts else []) or []:
+        if not isinstance(source, dict):
+            continue
+        if source.get("kind") == "page_enum_options" and isinstance(source.get("options"), dict):
+            out.update(source.get("options") or {})
+    return out
+
+
+def _request_facts_from_graph(
+    graph: dict[str, Any],
+    *,
+    diagnostics: list[dict[str, Any]] | None = None,
+    page_enum_options: dict[str, Any] | None = None,
+) -> RequestFacts:
     facts_by_id: dict[str, RequestFact] = {}
     analysis: dict[str, RequestAnalysis] = {}
     usage: dict[str, RequestUsage] = {}
@@ -1773,6 +1887,8 @@ def _request_facts_from_graph(graph: dict[str, Any], *, diagnostics: list[dict[s
     for bucket in ("all_requests", "filtered_requests", "candidate_reads", "selected_steps"):
         for entry in graph.get(bucket) or []:
             if not isinstance(entry, dict):
+                continue
+            if not _is_api_like_graph_entry(entry):
                 continue
             rid = _request_fact_key(entry)
             fact = _request_fact_from_graph_entry(entry)
@@ -1803,6 +1919,7 @@ def _request_facts_from_graph(graph: dict[str, Any], *, diagnostics: list[dict[s
     return RequestFacts(
         requests=requests,
         diagnostics=list(diagnostics or []),
+        option_sources=_option_sources_from_page_enum_options(page_enum_options),
         analysis=analysis,
         usage=usage,
     )
@@ -1892,9 +2009,12 @@ def ensure_request_facts(spec: FlowSpec, *, prefer: str = "request_facts") -> Fl
     graph = meta.get("request_graph") or {}
     has_graph = _request_graph_has_entries(graph)
     has_facts = bool(spec.request_facts.requests)
+    old_option_sources = list(spec.request_facts.option_sources or [])
     if prefer == "meta":
         if has_graph:
             spec.request_facts = _request_facts_from_graph(graph, diagnostics=spec.diagnostics)
+            if old_option_sources and not spec.request_facts.option_sources:
+                spec.request_facts.option_sources = old_option_sources
         elif has_facts:
             meta["request_graph"] = _request_graph_from_request_facts(spec.request_facts)
             spec.meta = meta
@@ -1905,6 +2025,8 @@ def ensure_request_facts(spec: FlowSpec, *, prefer: str = "request_facts") -> Fl
         spec.meta = meta
     elif has_graph:
         spec.request_facts = _request_facts_from_graph(graph, diagnostics=spec.diagnostics)
+        if old_option_sources and not spec.request_facts.option_sources:
+            spec.request_facts.option_sources = old_option_sources
     return spec
 
 
@@ -2170,7 +2292,10 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
     used_by_request: dict[str, list[str]] = {}
     materialized_by_request: dict[str, str] = {}
     for cap in spec.capabilities:
-        cap_step_ids = [sid for sid in _capability_scoped_step_ids(cap) if sid in by_step]
+        cap_step_ids = [
+            sid for sid in _capability_scoped_step_ids(cap)
+            if sid in by_step and _capability_step_allowed(spec, cap, by_step[sid])
+        ]
         cap.step_ids = cap_step_ids
         step_objs = [by_step[sid] for sid in cap_step_ids]
         cap.request_refs = [_capability_request_ref_from_step(spec, st) for st in step_objs]
@@ -2231,14 +2356,20 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
             *(cap.computed_fields or []),
             *(cap.outputs or []),
         ]
-    for request_id, cap_names in used_by_request.items():
+    for fact in spec.request_facts.requests or []:
+        request_id = fact.request_id or ""
+        if not request_id:
+            continue
         usage = spec.request_facts.usage.get(request_id) or RequestUsage(request_id=request_id)
-        for cap_name in cap_names:
-            if cap_name not in usage.used_by_capabilities:
-                usage.used_by_capabilities.append(cap_name)
+        usage.used_by_capabilities = list(used_by_request.get(request_id) or [])
         if materialized_by_request.get(request_id):
             usage.materialized_step_id = materialized_by_request[request_id]
             usage.state = "materialized"
+        elif usage.materialized_step_id and any(s.step_id == usage.materialized_step_id for s in spec.steps):
+            usage.state = "materialized"
+        else:
+            usage.materialized_step_id = ""
+            usage.state = "captured"
         spec.request_facts.usage[request_id] = usage
     spec.meta = {
         **(spec.meta or {}),
@@ -2283,6 +2414,8 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
         for p in target.params:
             if p.path != target_path:
                 continue
+            if not _auto_dependency_link_allowed(p, lk.source_path, lk):
+                continue
             p.category = "runtime_var"
             p.source_kind = "previous_response"
             p.source = {
@@ -2307,7 +2440,72 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
             break
 
 
+def _link_is_auto_generated(lk: FlowLink) -> bool:
+    reason = str(lk.reason or "")
+    evidence = lk.evidence if isinstance(lk.evidence, dict) else {}
+    return (
+        not getattr(lk, "locked", False)
+        and (
+            "自动" in reason
+            or "值" in reason
+            or "匹配" in reason
+            or evidence.get("kind") == "value_match"
+            or evidence.get("auto_rebuilt") is True
+        )
+    )
+
+
+def _auto_dependency_target_allowed(param: ParamField | None) -> bool:
+    if param is None:
+        return False
+    if param.source_kind in _OPTION_SOURCE_KINDS:
+        return False
+    if param.type in {"enum", "list-enum"}:
+        return False
+    if param.enum_options:
+        return False
+    if _looks_pagination_field(param.key, param.path):
+        return False
+    if _looks_system_const_field(param.key, param.path):
+        return False
+    if param.category in {"system_const"}:
+        return False
+    if param.source_kind in {"constant", "page_context", "system_time", "current_user"}:
+        return False
+    return True
+
+
+def _auto_dependency_link_allowed(param: ParamField | None, source_path: str, lk: FlowLink | None = None) -> bool:
+    if lk is not None and not _link_is_auto_generated(lk):
+        return True
+    if not _auto_dependency_target_allowed(param):
+        return False
+    if param is None:
+        return False
+    if param.category == "user_param" or param.source_kind == "user_input" or _looks_user_entered_business_field(param.key, param.path):
+        if "[" in str(source_path or ""):
+            return False
+        return _dependency_match_score(param, source_path) >= 12
+    return True
+
+
+def _prune_unsafe_auto_links(steps: list[FlowStep], links: list[FlowLink]) -> None:
+    by_id = {s.step_id: s for s in steps}
+    kept: list[FlowLink] = []
+    for lk in links:
+        if not _link_is_auto_generated(lk):
+            kept.append(lk)
+            continue
+        target = by_id.get(lk.target_step_id)
+        target_path = _strip_body_prefix(lk.target_path)
+        param = next((p for p in (target.params if target else []) if p.path == target_path), None)
+        if _auto_dependency_link_allowed(param, lk.source_path, lk):
+            kept.append(lk)
+    links[:] = kept
+
+
 def _sync_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
+    _prune_unsafe_auto_links(steps, links)
     valid_targets = {
         (lk.link_id, lk.target_step_id, _strip_body_prefix(lk.target_path))
         for lk in links
@@ -2331,21 +2529,29 @@ def _merge_flow_read_sources(explicit_reads: list[dict], captured_requests: list
     out: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
-    def add(url: str, payload: Any) -> None:
+    def add(url: str, payload: Any, *, role: str = "") -> None:
         if payload is None:
             return
         key = (url or "", json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)[:500])
         if key in seen:
             return
         seen.add(key)
-        out.append({"url": url or "", "json": payload})
+        out.append({"url": url or "", "json": payload, "role": role or ""})
 
     for r in explicit_reads or []:
-        add(r.get("url") or "", r.get("json", r.get("response_json")))
+        add(
+            r.get("url") or "",
+            r.get("json", r.get("response_json")),
+        role=str(r.get("role") or r.get("request_role") or "explicit_read_option"),
+        )
     for req, role in zip(captured_requests or [], request_roles or []):
         if role.get("role") not in {"read_option", "read_context", "business_get"}:
             continue
-        add(req.get("url") or "", req.get("response_json", req.get("json")))
+        add(
+            req.get("url") or "",
+            req.get("response_json", req.get("json")),
+            role=str(role.get("role") or ""),
+        )
     return out
 
 
@@ -2398,7 +2604,11 @@ def to_flow_spec(
             title="(未捕获到业务请求)",
             recording_mode=recording_mode,
             diagnostics=diagnostics,
-            request_facts=_request_facts_from_graph(request_graph, diagnostics=diagnostics),
+            request_facts=_request_facts_from_graph(
+                request_graph,
+                diagnostics=diagnostics,
+                page_enum_options=page_enum_options,
+            ),
             goal=RecordedGoal(
                 intent="录制业务请求",
                 required_inputs=[],
@@ -2466,7 +2676,7 @@ def to_flow_spec(
                 target_step = step_objs[tgt_pos]
                 target_path = _strip_body_prefix(str(lk.get("target_path", "")))
                 target_param = next((p for p in target_step.params if p.path == target_path), None)
-                if _skip_auto_dependency_target(target_param):
+                if not _auto_dependency_link_allowed(target_param, str(lk.get("source_path") or "")):
                     continue
                 link_objs.append(FlowLink(
                     source_step_id=idx_to_step_id[src_pos],
@@ -2519,7 +2729,11 @@ def to_flow_spec(
         links=link_objs,
         goal={},
         risk_level=overall,
-        request_facts=_request_facts_from_graph(request_graph, diagnostics=diagnostics),
+        request_facts=_request_facts_from_graph(
+            request_graph,
+            diagnostics=diagnostics,
+            page_enum_options=page_enum_options,
+        ),
         meta={
             "captured_total": len(captured_requests),
             "captured_write_candidates": len(write_cands),
@@ -2789,7 +3003,6 @@ def suggest_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
     caps: list[FlowCapability] = []
     read_steps = [s for s in spec.steps if not _is_write_step(s)]
     write_steps = [s for s in spec.steps if _is_write_step(s)]
-    all_params = [p for s in spec.steps for p in s.params]
 
     if read_steps:
         caps.append(FlowCapability(
@@ -2845,7 +3058,9 @@ def suggest_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
     if write_steps:
         batch = any(_looks_batch_step(s) for s in write_steps)
         kind = "submit_batch" if batch else "submit"
-        input_schema = _capability_input_schema(all_params)
+        submit_steps = _submit_capability_steps(spec)
+        submit_params = [p for s in submit_steps for p in s.params]
+        input_schema = _capability_input_schema(submit_params)
         if batch:
             input_schema = dict(input_schema)
             input_schema.setdefault("properties", {})["items"] = {
@@ -2858,8 +3073,8 @@ def suggest_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
             title="批量提交" if batch else "提交",
             intent="按已确认字段映射执行真实写入接口。",
             kind=kind,
-            step_ids=[s.step_id for s in spec.steps],
-            nodes=_default_capability_nodes(spec.steps, kind=kind),
+            step_ids=[s.step_id for s in submit_steps],
+            nodes=_default_capability_nodes(submit_steps, kind=kind),
             input_schema=input_schema,
             output_schema={
                 "type": "object",
@@ -2981,9 +3196,65 @@ def _read_status_steps(spec: FlowSpec) -> list[FlowStep]:
             continue
         role = (st.source_meta or {}).get("role") or st.semantic_role or ""
         path = st.path or st.url or st.name
-        if role in {"business_get", "read_context"} or status_hint.search(path or ""):
+        if role == "read_option":
+            continue
+        if role == "business_get" or status_hint.search(path or ""):
             out.append(st)
     return out
+
+
+def _ordered_steps_by_ids(spec: FlowSpec, ids: set[str]) -> list[FlowStep]:
+    return [st for st in spec.steps if st.step_id in ids]
+
+
+def _dependency_closure_step_ids(spec: FlowSpec, target_ids: set[str]) -> set[str]:
+    keep = set(target_ids)
+    changed = True
+    while changed:
+        changed = False
+        for link in spec.links or []:
+            if link.target_step_id in keep and link.source_step_id and link.source_step_id not in keep:
+                keep.add(link.source_step_id)
+                changed = True
+    return keep
+
+
+def _submit_capability_steps(spec: FlowSpec) -> list[FlowStep]:
+    write_ids = {st.step_id for st in _write_steps(spec) if st.step_id}
+    if not write_ids:
+        return []
+    return _ordered_steps_by_ids(spec, _dependency_closure_step_ids(spec, write_ids))
+
+
+def _capability_step_allowed(spec: FlowSpec, cap: FlowCapability, step: FlowStep) -> bool:
+    if step.step_id in set(cap.step_ids or []) and (cap.updated_by == "user" or cap.locked or cap.confirmed):
+        return True
+    kind = (cap.kind or "").strip()
+    role = (step.source_meta or {}).get("role") or step.semantic_role or ""
+    method = (step.method or "GET").upper()
+    if method in _WRITE_METHODS:
+        return True
+    if kind in {"submit", "submit_batch", "validate_batch"}:
+        closure_ids = {st.step_id for st in _submit_capability_steps(spec)}
+        return step.step_id in closure_ids
+    if kind == "query_status":
+        status_ids = {st.step_id for st in _read_status_steps(spec)}
+        return role != "read_option" and step.step_id in status_ids
+    if kind == "list_options":
+        return role == "read_option" or bool(step.selects)
+    return role not in {"read_option", "read_context"}
+
+
+def _add_step_id_to_capability(spec: FlowSpec, cap: FlowCapability, step_id: str) -> None:
+    if not step_id or step_id in cap.step_ids:
+        return
+    order = {s.step_id: i for i, s in enumerate(spec.steps)}
+    new_order = order.get(step_id, 10_000)
+    for idx, sid in enumerate(cap.step_ids or []):
+        if order.get(sid, 10_000) > new_order:
+            cap.step_ids.insert(idx, step_id)
+            return
+    cap.step_ids.append(step_id)
 
 
 def _request_graph_entries(spec: FlowSpec, roles: set[str]) -> list[dict[str, Any]]:
@@ -3024,8 +3295,45 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
     这些能力只是对外调用层的候选描述，不改变真实执行计划；发布执行仍以 steps/links 为准。
     """
     caps: list[FlowCapability] = []
-    all_params = [p for st in spec.steps for p in st.params]
+    status_steps = _read_status_steps(spec)
     write_steps = _write_steps(spec)
+    submit_steps = _submit_capability_steps(spec) if write_steps else []
+    submit_step_ids = {s.step_id for s in submit_steps}
+    independent_status_steps = [s for s in status_steps if s.step_id not in submit_step_ids]
+    if independent_status_steps:
+        caps.append(FlowCapability(
+            name="query_status",
+            title="查询流程状态",
+            intent="查询流程、审批或上下文详情，用于判断业务当前状态，并把结果返回给调用方决定下一步。",
+            kind="query_status",
+            step_ids=_capability_step_ids(independent_status_steps),
+            nodes=_default_capability_nodes(independent_status_steps, kind="query_status"),
+            input_schema=_json_schema_for_params([p for st in independent_status_steps for p in st.params]),
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string"},
+                    "detail": {"type": "object"},
+                    "raw": {"type": "object"},
+                },
+            },
+            output_mapping=[{
+                "kind": "final_response",
+                "step_id": independent_status_steps[-1].step_id,
+                "response_path": "response",
+            }],
+            confirmed=False,
+            confidence=0.68,
+            requires_human_confirm=True,
+            status="draft",
+            evidence=[
+                {"kind": "read_step", "step_id": s.step_id, "method": s.method, "path": s.path or s.url}
+                for s in independent_status_steps
+            ],
+            caller_responsibilities=["根据查询结果与最终用户确认是否继续提交或批量填报"],
+            skill_responsibilities=["执行真实查询接口并返回原始响应/结构化摘要"],
+        ))
+
     if write_steps:
         kind = "submit_batch"
         caps.append(FlowCapability(
@@ -3033,9 +3341,9 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
             title="批量提交业务申请",
             intent="调用方提供业务字段；Skill 按已纳入接口顺序执行前置查询、依赖注入和最终提交，并返回最后写接口结果。",
             kind=kind,
-            step_ids=_capability_step_ids(spec.steps),
-            nodes=_default_capability_nodes(spec.steps, kind=kind),
-            input_schema=_json_schema_for_params(all_params),
+            step_ids=_capability_step_ids(submit_steps),
+            nodes=_default_capability_nodes(submit_steps, kind=kind),
+            input_schema=_json_schema_for_params([p for st in submit_steps for p in st.params]),
             output_schema={
                 "type": "object",
                 "properties": {
@@ -3062,7 +3370,6 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
         ))
         return caps
 
-    status_steps = _read_status_steps(spec)
     status_graph = _request_graph_entries(spec, {"business_get", "read_context"})
     if status_steps or status_graph:
         status_params = [p for st in status_steps for p in st.params]
@@ -3139,8 +3446,9 @@ _FLOW_ORCHESTRATE_SYSTEM = """你是企业 OA/API 录制结果的 Skill 编排�
 - 每个 op 必须指向已有 capability/step/request/path，不能编造接口。
 - 如果已有能力编排，请在已有能力基础上补充/优化，不要重新设计一套无关能力。
 - 如果上下文包含 removed_capabilities 或 removed_capability_steps，必须尊重用户删除记录，不要自动恢复。
-- 如果流程包含写接口，默认只输出一个 submit 或 submit_batch 主能力；前置 GET 应作为该能力步骤链的一部分，不要单独拆 query_status/list_options。
-- 读能力只查询并返回结果；写能力可以包含前置查询 + 写入步骤。
+- 如果流程包含独立查询阶段和写入阶段，可以拆成 query_status/validate_batch + submit 或 submit_batch 多个能力；真正只服务于写入的前置 GET 才放进写能力步骤链。
+- 不要把纯选项/字典接口单独拆成能力，它们应作为字段候选来源或写能力的内部步骤。
+- 读能力只查询并返回结果；写能力可以包含必要前置查询 + 写入步骤。
 - 批量填报/日报/明细数组场景优先生成 submit_batch。
 - 批量场景必须用 foreach 节点表达循环，items 推荐 input.entries；foreach.steps 内放每条明细要执行的 call。
 - 条件分支必须用 condition 节点表达，condition/check 只能引用 input.*、var.*、已执行 step_id 响应或 node.*。
@@ -3513,12 +3821,8 @@ def _normalize_capability_references(spec: FlowSpec) -> FlowSpec:
 
 
 def _sync_capability_order(spec: FlowSpec, cap: FlowCapability) -> None:
-    order = {s.step_id: i for i, s in enumerate(spec.steps)}
     seen: set[str] = set()
-    cap.step_ids = sorted(
-        [sid for sid in cap.step_ids if not (sid in seen or seen.add(sid))],
-        key=lambda sid: order.get(sid, 10_000),
-    )
+    cap.step_ids = [sid for sid in cap.step_ids if not (sid in seen or seen.add(sid))]
     if any(isinstance(n, dict) and n.get("type") != "call" for n in (cap.nodes or [])):
         existing_call_steps = set(_capability_call_step_ids_from_nodes(cap.nodes or []))
         missing = [sid for sid in cap.step_ids if sid not in existing_call_steps]
@@ -3837,14 +4141,6 @@ async def orchestrate_flow_capabilities(
         caps = fallback
         source = "deterministic"
     else:
-        if not existing and _write_steps(current):
-            primary = next((cap for cap in caps if cap.kind in {"submit_batch", "submit"}), None)
-            if primary is not None:
-                primary.kind = "submit_batch"
-                primary.name = "submit_batch"
-                if not primary.step_ids:
-                    primary.step_ids = _capability_step_ids(current.steps)
-                caps = [primary]
         caps = _merge_capability_lists(existing, caps, spec=current)
 
     current.capabilities = caps
@@ -6645,15 +6941,7 @@ def _dependency_match_score(param: ParamField, source_path: str) -> int:
 
 
 def _skip_auto_dependency_target(param: ParamField | None) -> bool:
-    if param is None:
-        return False
-    if param.source_kind in _OPTION_SOURCE_KINDS:
-        return True
-    if param.type in {"enum", "list-enum"}:
-        return True
-    if param.enum_options:
-        return True
-    return False
+    return not _auto_dependency_target_allowed(param)
 
 
 def _rejected_dependency_sigs(spec: FlowSpec) -> set[str]:
@@ -6735,6 +7023,8 @@ def rebuild_flow_dependencies(spec: FlowSpec) -> int:
                 if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
                     continue
                 _score, source, source_path = ranked[0]
+            if not _auto_dependency_link_allowed(param, source_path):
+                continue
             sig = _dependency_sig(source.step_id, source_path, target.step_id, param.path)
             if sig in existing or sig in rejected:
                 continue
@@ -6852,7 +7142,7 @@ def _add_request_step_from_graph(spec: FlowSpec, entry: dict[str, Any]) -> FlowS
         samples={},
         storage_state=None,
         required_labels=set(),
-        page_enum_options={},
+        page_enum_options=_page_enum_options_from_request_facts(spec.request_facts),
         step_index=len(spec.steps),
     )
     st.path = _request_path(entry)
@@ -7423,8 +7713,8 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 needs_dependency_rebuild = True
             _find_step(new_spec, step_id)
             _forget_removed_capability_step(new_spec, cap.name, step_id)
-            if step_id not in cap.step_ids:
-                cap.step_ids.append(step_id)
+            _add_step_id_to_capability(new_spec, cap, step_id)
+            cap.updated_by = "user"
             if not any(n.get("type") == "call" and n.get("step_id") == step_id for n in (cap.nodes or [])):
                 cap.nodes.append({"id": f"call_{len(cap.nodes or []) + 1}", "type": "call", "step_id": step_id})
             _sync_capability_order(new_spec, cap)
@@ -7439,6 +7729,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 n for n in (new_spec.capabilities[idx].nodes or [])
                 if not (n.get("type") == "call" and n.get("step_id") == step_id)
             ]
+            new_spec.capabilities[idx].updated_by = "user"
             _sync_capability_order(new_spec, new_spec.capabilities[idx])
             continue
 
@@ -7603,11 +7894,17 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 else:
                     # H19 修复:不再 hasattr 兜底(避免改 link_id/reason/internal 等关键字段)
                     raise ValueError(f"unknown link field: {field}")
+                duplicate = _matching_link(new_spec, link)
+                if duplicate is not None:
+                    _merge_link(duplicate, link)
+                    if link in new_spec.links:
+                        new_spec.links.remove(link)
                 continue
 
             if op == "remove":
                 link = _find_link(new_spec, link_id)
-                _record_rejected_dependency(new_spec, link)
+                if edit.get("record_rejection", True):
+                    _record_rejected_dependency(new_spec, link)
                 new_spec.links.remove(link)
                 continue
 
@@ -7691,8 +7988,10 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                         if sv.path == old_path:
                             sv.path = new_path
                     for lk in new_spec.links:
-                        if lk.target_step_id == step.step_id and _clean_path_prefix(lk.target_path, "body.") == old_path:
+                        if lk.target_step_id == step.step_id and _strip_body_prefix(lk.target_path) == _strip_body_prefix(old_path):
                             lk.target_path = new_path
+                    if isinstance(param.source, dict) and _strip_body_prefix(str(param.source.get("target_path") or "")) == _strip_body_prefix(old_path):
+                        param.source["target_path"] = new_path
                 elif field == "value":
                     param.value = str(value)
                     step.sample_inputs[param.key] = param.value

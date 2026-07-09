@@ -1149,6 +1149,12 @@ async def record_ws(ws: WebSocket) -> None:
                     goal=msg.get("goal") or pending_flow_spec.goal,
                     deploy=init.get("deploy"), storage_state=login_state)
                 if rep.get("ok"):
+                    try:
+                        skill_id = rep.get("skill_id") or f"{sub}.{msg['action']}"
+                        version = await _latest_skill_version(init["tenant"], Subsystem(sub), msg["action"], {"integration": "page"})
+                        await _lifecycle.register_published(skill_id, Subsystem(sub), msg["action"], version)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("recording.lifecycle_register_failed", error=str(e), subsystem=sub, action=msg.get("action"))
                     await _auto_export(init["tenant"])
                 await ws.send_json({"type": "result", "report": {**rep, "check_report": check_report,
                                                                   "recording_mode": recording_mode},
@@ -1243,6 +1249,11 @@ def _current_export_dir() -> str:
     return get_export_dir(_default_export_dir())
 
 
+def _known_export_dirs() -> list[str]:
+    from dano.execution.page.sessions import get_export_dirs
+    return get_export_dirs(_default_export_dir())
+
+
 def _export_slugs_for_manifest(m: dict) -> set[str]:
     from dano.export.agent_skills import _slug
     slugs = {_slug(str(m.get("name") or ""))}
@@ -1270,6 +1281,31 @@ def _cleanup_export_folders(out_dir: str, slugs: set[str]) -> list[str]:
             removed.append(str(target))
             log.info("export.folder_removed", folder=str(target))
     return removed
+
+
+def _cleanup_known_export_folders(slugs: set[str]) -> list[str]:
+    removed: list[str] = []
+    seen: set[str] = set()
+    for out_dir in _known_export_dirs():
+        for folder in _cleanup_export_folders(out_dir, slugs):
+            if folder not in seen:
+                removed.append(folder)
+                seen.add(folder)
+    return removed
+
+
+def _asset_type_for_manifest(manifest: dict | None) -> AssetType:
+    integration = str((manifest or {}).get("integration") or "").lower()
+    if integration == "workflow":
+        return AssetType.WORKFLOW
+    if integration == "api":
+        return AssetType.CONNECTOR
+    return AssetType.PAGE_SCRIPT
+
+
+async def _latest_skill_version(tenant: str, subsystem: Subsystem, action: str, manifest: dict | None = None) -> int:
+    versions = await repo.list_versions(_asset_type_for_manifest(manifest), Scope(tenant=tenant, subsystem=subsystem), action)
+    return versions[0].version if versions else 1
 
 
 async def _apply_lifecycle_state(skills: list) -> list:
@@ -1318,7 +1354,7 @@ async def delete_skill(skill_id: str, x_tenant_key: str | None = Header(default=
     manifests = await _manifests_for_tenant(tenant)
     manifest = next((m for m in manifests if m["name"] == skill_id), None)
     subsystem = Subsystem(sub_str)            # 系统标识开放:任意系统皆合法(不存在则下面按 0 行返回 404)
-    removed = _cleanup_export_folders(_current_export_dir(), _export_slugs_for_manifest(manifest or {"name": skill_id}))
+    removed = _cleanup_known_export_folders(_export_slugs_for_manifest(manifest or {"name": skill_id}))
     rows = await repo.delete_by_action(Scope(tenant=tenant, subsystem=subsystem), action)
     lifecycle_rows = await _lifecycle.store.delete(skill_id)
     if rows == 0:
@@ -1340,12 +1376,11 @@ async def freeze_skill(skill_id: str, x_tenant_key: str | None = Header(default=
     subsystem = Subsystem(sub_str)
     rec = await _lifecycle.store.get(skill_id)
     if rec is None:
-        versions = await repo.list_versions(AssetType.PAGE_SCRIPT, Scope(tenant=tenant, subsystem=subsystem), action)
-        version = versions[0].version if versions else 1
+        version = await _latest_skill_version(tenant, subsystem, action, manifest)
         rec = await _lifecycle.register_published(skill_id, subsystem, action, version)
     if rec.state != SkillState.SUSPENDED:
         rec = await _lifecycle.suspend(skill_id)
-    removed = _cleanup_export_folders(_current_export_dir(), _export_slugs_for_manifest(manifest))
+    removed = _cleanup_known_export_folders(_export_slugs_for_manifest(manifest))
     return {"skill_id": skill_id, "state": rec.state.value if rec else SkillState.SUSPENDED.value,
             "removed_folders": removed}
 
@@ -1363,8 +1398,8 @@ async def resume_skill(skill_id: str, x_tenant_key: str | None = Header(default=
     subsystem = Subsystem(sub_str)
     rec = await _lifecycle.store.get(skill_id)
     if rec is None:
-        versions = await repo.list_versions(AssetType.PAGE_SCRIPT, Scope(tenant=tenant, subsystem=subsystem), action)
-        version = versions[0].version if versions else 1
+        manifest = next((m for m in manifests if m["name"] == skill_id), None)
+        version = await _latest_skill_version(tenant, subsystem, action, manifest)
         rec = await _lifecycle.register_published(skill_id, subsystem, action, version)
     elif rec.state == SkillState.SUSPENDED:
         rec = await _lifecycle.resume_no_change(skill_id)

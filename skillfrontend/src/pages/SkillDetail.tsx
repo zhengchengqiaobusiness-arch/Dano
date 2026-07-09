@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { Card, Descriptions, Tag, Button, Space, Typography, message, Spin, Table, Input } from "antd";
-import { ArrowLeftOutlined, PlayCircleOutlined } from "@ant-design/icons";
+import { Card, Descriptions, Tag, Button, Space, Typography, message, Spin, Table, Input, Popconfirm } from "antd";
+import { ArrowLeftOutlined, PlayCircleOutlined, PauseCircleOutlined, CheckCircleOutlined, DeleteOutlined } from "@ant-design/icons";
 import { useNavigate, useParams } from "react-router-dom";
-import { getSkill, listTools, SkillManifest, FunctionTool } from "../api/skills";
+import { deleteSkill, freezeSkill, getSkill, listTools, resumeSkill, SkillManifest, FunctionTool } from "../api/skills";
 import InvokeDrawer from "../components/InvokeDrawer";
 
 function fmtTime(s?: string) {
@@ -19,8 +19,7 @@ export default function SkillDetail() {
   const [loading, setLoading] = useState(true);
   const [invoke, setInvoke] = useState<SkillManifest | null>(null);
 
-  useEffect(() => {
-    (async () => {
+  async function load() {
       setLoading(true);
       try {
         const s = await getSkill(skillId);
@@ -32,8 +31,40 @@ export default function SkillDetail() {
       } finally {
         setLoading(false);
       }
-    })();
+  }
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [skillId]);
+
+  async function doFreeze() {
+    try {
+      const r = await freezeSkill(skill.name);
+      message.success(`已冻结 ${skill.name}，清理 ${r.removed_folders?.length || 0} 个文件夹`);
+      await load();
+    } catch (e: any) {
+      message.error("冻结失败:" + (e?.response?.data?.detail || e.message));
+    }
+  }
+  async function doResume() {
+    try {
+      await resumeSkill(skill.name);
+      message.success(`已恢复 ${skill.name}`);
+      await load();
+    } catch (e: any) {
+      message.error("恢复失败:" + (e?.response?.data?.detail || e.message));
+    }
+  }
+  async function doDelete() {
+    try {
+      const r = await deleteSkill(skill.name);
+      message.success(`已删除 ${skill.name}(${r.deleted} 条资产,清理 ${r.removed_folders?.length || 0} 个文件夹)`);
+      nav("/skills");
+    } catch (e: any) {
+      message.error("删除失败:" + (e?.response?.data?.detail || e.message));
+    }
+  }
 
   if (loading) return <Spin style={{ marginTop: 80, display: "block" }} />;
   if (!skill) return <Typography.Text>未找到 {skillId}</Typography.Text>;
@@ -47,6 +78,18 @@ export default function SkillDetail() {
       <Space style={{ marginBottom: 16 }}>
         <Button icon={<ArrowLeftOutlined />} onClick={() => nav("/skills")}>返回目录</Button>
         <Button type="primary" icon={<PlayCircleOutlined />} disabled={!!skill.frozen} onClick={() => setInvoke(skill)}>测试调用</Button>
+        {!skill.frozen ? (
+          <Popconfirm title={`冻结 ${skill.name}?`} description="只清理已导出的文件夹,保留数据库资产;冻结后不会再导出。" okText="冻结" cancelText="取消" onConfirm={doFreeze}>
+            <Button icon={<PauseCircleOutlined />}>冻结</Button>
+          </Popconfirm>
+        ) : (
+          <Popconfirm title={`恢复 ${skill.name}?`} description="恢复后可测试调用,并会在下次导出时重新写出文件夹。" okText="恢复" cancelText="取消" onConfirm={doResume}>
+            <Button icon={<CheckCircleOutlined />}>恢复</Button>
+          </Popconfirm>
+        )}
+        <Popconfirm title={`删除 ${skill.name}?`} description="删本租户该 skill 的全部资产版本,并清理原始导出文件夹。" okText="删除" okButtonProps={{ danger: true }} cancelText="取消" onConfirm={doDelete}>
+          <Button danger icon={<DeleteOutlined />}>删除</Button>
+        </Popconfirm>
       </Space>
 
       <Card title={skill.name} style={{ marginBottom: 16 }}>

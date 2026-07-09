@@ -43,13 +43,25 @@ def session_path_if_exists(tenant: str, subsystem: str) -> str | None:
 
 # ── 导出目录:页面配一次 → 持久化 → 自动发布(录完)复用同一目录,二者一致 ──
 _EXPORT_CONF = _DIR / ".export-dir"
+_EXPORT_HISTORY_CONF = _DIR / ".export-dirs"
 
 
 def save_export_dir(path: str) -> None:
     """记住页面配置的导出目录,供自动发布复用(与手动导出落同一处)。"""
     try:
         _DIR.mkdir(exist_ok=True)
-        _EXPORT_CONF.write_text(path.strip(), encoding="utf-8")
+        cleaned = path.strip()
+        if not cleaned:
+            return
+        _EXPORT_CONF.write_text(cleaned, encoding="utf-8")
+        old = []
+        if _EXPORT_HISTORY_CONF.exists():
+            old = [x.strip() for x in _EXPORT_HISTORY_CONF.read_text(encoding="utf-8").splitlines() if x.strip()]
+        merged = []
+        for item in [cleaned, *old]:
+            if item not in merged:
+                merged.append(item)
+        _EXPORT_HISTORY_CONF.write_text("\n".join(merged[:20]), encoding="utf-8")
     except Exception as e:  # noqa: BLE001
         log.warning("export_dir.save_failed", error=str(e))
 
@@ -65,3 +77,21 @@ def get_export_dir(default: str) -> str:
     except Exception:  # noqa: BLE001
         pass
     return os.environ.get("DANO_EXPORT_DIR") or default
+
+
+def get_export_dirs(default: str) -> list[str]:
+    """返回需要清理的所有已知导出目录:当前目录、历史目录、环境变量、默认目录。"""
+    import os
+    out: list[str] = []
+    for item in [get_export_dir(default), os.environ.get("DANO_EXPORT_DIR"), default]:
+        if item and item not in out:
+            out.append(item)
+    try:
+        if _EXPORT_HISTORY_CONF.exists():
+            for item in _EXPORT_HISTORY_CONF.read_text(encoding="utf-8").splitlines():
+                item = item.strip()
+                if item and item not in out:
+                    out.append(item)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
