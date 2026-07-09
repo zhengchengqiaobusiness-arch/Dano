@@ -929,33 +929,6 @@ async def record_ws(ws: WebSocket) -> None:
                     "full_spec": flow_spec_to_client(pending_flow_spec),
                     "check_report": validate_flow_spec(pending_flow_spec),
                 })
-            # 第二层:LLM 辅助推荐。只把建议挂到 review_items,不直接修改字段/依赖。
-            elif t == "llm_recommendations":
-                if pending_flow_spec is None:
-                    await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
-                    continue
-                try:
-                    from dano.config import get_settings
-                    from dano.execution.page.flow_spec import (
-                        add_llm_review_recommendations,
-                        flow_spec_to_client,
-                        flow_spec_to_summary,
-                        validate_flow_spec,
-                    )
-                    model = get_settings().pi_model
-                    pending_flow_spec = await add_llm_review_recommendations(
-                        pending_flow_spec,
-                        llm_client=_page_semantic_client("complete_json"),
-                        model=model,
-                    )
-                    await ws.send_json({
-                        "type": "flow_spec_updated",
-                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
-                        "full_spec": flow_spec_to_client(pending_flow_spec),
-                        "check_report": validate_flow_spec(pending_flow_spec),
-                    })
-                except Exception as e:  # noqa: BLE001
-                    await ws.send_json({"type": "error", "detail": f"llm_recommendations failed: {e}"})
             # 能力编排:LLM 生成对外可调用能力草案；失败则由 flow_spec 确定性规则兜底。
             elif t == "orchestrate_flow":
                 if pending_flow_spec is None:

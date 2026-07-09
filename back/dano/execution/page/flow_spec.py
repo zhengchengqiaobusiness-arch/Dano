@@ -328,7 +328,6 @@ class ReviewItem(BaseModel):
     reason: str = ""
     resolved: bool = False
     confidence: float = 0.0
-    llm_suggestions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class FlowCapability(BaseModel):
@@ -5113,225 +5112,11 @@ def refresh_review_items(spec: FlowSpec) -> FlowSpec:
     for step in spec.steps:
         _dedupe_step_params(step)
     old_resolved = {item.id: item.resolved for item in spec.review_items}
-    old_suggestions = {item.id: list(item.llm_suggestions or []) for item in spec.review_items}
     spec.review_items = build_review_items(spec)
     for item in spec.review_items:
         if item.id in old_resolved:
             item.resolved = old_resolved[item.id]
-        if item.id in old_suggestions:
-            item.llm_suggestions = old_suggestions[item.id]
     return spec
-
-
-def _response_candidate_paths(spec: FlowSpec, target_step: FlowStep, param: ParamField) -> list[dict[str, Any]]:
-    """给 LLM 的 grounded 候选:只给路径/字段名,不把录制值发给模型。"""
-    value = str(param.value or "").strip()
-    if not value:
-        return []
-    step_index = {s.step_id: i for i, s in enumerate(spec.steps)}
-    target_idx = step_index.get(target_step.step_id, 0)
-    out: list[dict[str, Any]] = []
-    for source_step in spec.steps:
-        if step_index.get(source_step.step_id, 0) >= target_idx:
-            continue
-        if source_step.response_json is None:
-            continue
-        for path, _tokens, leaf_value, _raw in _leaf_paths(source_step.response_json):
-            if str(leaf_value) == value:
-                out.append({
-                    "source_step_id": source_step.step_id,
-                    "source_step_name": source_step.name,
-                    "source_method": source_step.method,
-                    "source_path": path,
-                })
-    return out[:20]
-
-
-def _llm_review_targets(spec: FlowSpec) -> list[dict[str, Any]]:
-    steps_by_id = {s.step_id: s for s in spec.steps}
-    params_by_step_path = {(s.step_id, p.path): p for s in spec.steps for p in s.params}
-    targets: list[dict[str, Any]] = []
-    for item in spec.review_items:
-        if item.resolved:
-            continue
-        if item.type not in {"runtime_var_source", "runtime_var_missing_source", "field_category"}:
-            continue
-        tgt = item.target or {}
-        step_id = str(tgt.get("step_id") or "")
-        path = str(tgt.get("path") or "")
-        step = steps_by_id.get(step_id)
-        param = params_by_step_path.get((step_id, path))
-        if step is None or param is None:
-            continue
-        targets.append({
-            "review_id": item.id,
-            "review_type": item.type,
-            "severity": item.severity,
-            "title": item.title,
-            "reason": item.reason,
-            "target": {
-                "step_id": step.step_id,
-                "step_name": step.name,
-                "step_method": step.method,
-                "step_path": step.path,
-                "param_path": param.path,
-                "param_key": param.key,
-                "param_type": param.type,
-                "current_guess": f"{param.category}/{param.source_kind}",
-            },
-            "candidate_response_sources": _response_candidate_paths(spec, step, param),
-            "allowed_source_kinds": ["previous_response", "current_user", "system_time", "page_context", "request_header", "unknown"],
-        })
-    return targets
-
-
-_FLOW_RECOMMEND_SYSTEM = (
-    "你是 FlowSpec 字段来源推荐助手。系统已经先做了规则自动匹配;你只处理规则无法确定的 review item。"
-    "你只能基于输入里的步骤、字段名、路径、候选响应路径做推荐,禁止编造不存在的 source_step_id/source_path。"
-    "不要输出最终修改后的 FlowSpec,只输出建议。高风险或低置信度仍需人工确认。"
-    "输出 JSON 对象:{\"suggestions\":[{"
-    "\"review_id\":\"输入中的 review_id\","
-    "\"action\":\"bind_previous_response|set_runtime_source|ask_human\","
-    "\"confidence\":0到1,"
-    "\"reason\":\"简短中文原因\","
-    "\"source_step_id\":\"当 action=bind_previous_response 时必填且必须来自候选\","
-    "\"source_path\":\"当 action=bind_previous_response 时必填且必须来自候选\","
-    "\"source_kind\":\"当 action=set_runtime_source 时填 current_user/system_time/page_context/request_header/unknown\""
-    "}]}。"
-)
-
-
-def _valid_llm_suggestion(raw: dict, targets: dict[str, dict]) -> dict[str, Any] | None:
-    review_id = str(raw.get("review_id") or "")
-    target = targets.get(review_id)
-    if not target:
-        return None
-    action = str(raw.get("action") or "")
-    if action not in {"bind_previous_response", "set_runtime_source", "ask_human"}:
-        return None
-    try:
-        confidence = max(0.0, min(1.0, float(raw.get("confidence") or 0.0)))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    reason = str(raw.get("reason") or "").strip()[:300]
-    suggestion: dict[str, Any] = {
-        "action": action,
-        "confidence": confidence,
-        "reason": reason or "LLM 给出的辅助建议，需人工确认后生效",
-    }
-    if action == "bind_previous_response":
-        source_step_id = str(raw.get("source_step_id") or "")
-        source_path = str(raw.get("source_path") or "")
-        allowed = {
-            (str(c.get("source_step_id") or ""), str(c.get("source_path") or ""))
-            for c in (target.get("candidate_response_sources") or [])
-        }
-        if (source_step_id, source_path) not in allowed:
-            return None
-        suggestion.update({
-            "source_step_id": source_step_id,
-            "source_path": source_path,
-            "target_step_id": target["target"]["step_id"],
-            "target_path": target["target"]["param_path"],
-        })
-    elif action == "set_runtime_source":
-        source_kind = str(raw.get("source_kind") or "")
-        if source_kind not in {"current_user", "system_time", "page_context", "request_header", "unknown"}:
-            return None
-        suggestion.update({
-            "source_kind": source_kind,
-            "target_step_id": target["target"]["step_id"],
-            "target_path": target["target"]["param_path"],
-        })
-    else:
-        suggestion.update({
-            "target_step_id": target["target"]["step_id"],
-            "target_path": target["target"]["param_path"],
-        })
-    return suggestion
-
-
-async def add_llm_review_recommendations(
-    spec: FlowSpec,
-    *,
-    llm_client: Any | None = None,
-    model: str | None = None,
-    timeout_s: float = 45.0,
-) -> FlowSpec:
-    """第二层:LLM 只给 unresolved review item 增加建议,不直接修改字段/依赖。"""
-    current = refresh_review_items(spec.model_copy(deep=True))
-    targets = _llm_review_targets(current)
-    if not targets:
-        return current
-    target_by_id = {t["review_id"]: t for t in targets}
-
-    if llm_client is None or not model:
-        current.meta = {
-            **(current.meta or {}),
-            "llm_recommendations": {
-                "status": "unavailable",
-                "target_count": len(targets),
-                "reason": "LLM client/model 未配置",
-            },
-        }
-        return current
-
-    payload = {
-        "flow": {
-            "title": current.title,
-            "risk_level": current.risk_level,
-            "steps": [
-                {"step_id": s.step_id, "name": s.name, "method": s.method, "path": s.path}
-                for s in current.steps
-            ],
-        },
-        "review_targets": targets,
-    }
-    try:
-        out = await llm_client.complete_json(
-            model=model,
-            system=_FLOW_RECOMMEND_SYSTEM,
-            user="【FlowSpec 待推荐项】\n" + json.dumps(payload, ensure_ascii=False),
-            timeout_s=timeout_s,
-        )
-    except Exception as exc:  # noqa: BLE001 - 推荐层失败不能影响规则层和人工确认
-        current.meta = {
-            **(current.meta or {}),
-            "llm_recommendations": {
-                "status": "failed",
-                "target_count": len(targets),
-                "reason": str(exc)[:200],
-            },
-        }
-        return current
-
-    raw_suggestions = out.get("suggestions") if isinstance(out, dict) else None
-    if not isinstance(raw_suggestions, list):
-        raw_suggestions = []
-    suggestions_by_review: dict[str, list[dict[str, Any]]] = {}
-    for raw in raw_suggestions:
-        if not isinstance(raw, dict):
-            continue
-        valid = _valid_llm_suggestion(raw, target_by_id)
-        if valid is None:
-            continue
-        suggestions_by_review.setdefault(str(raw.get("review_id") or ""), []).append(valid)
-
-    for item in current.review_items:
-        if item.id in suggestions_by_review:
-            ranked = sorted(suggestions_by_review[item.id], key=lambda s: float(s.get("confidence") or 0.0), reverse=True)
-            item.llm_suggestions = ranked[:3]
-
-    current.meta = {
-        **(current.meta or {}),
-        "llm_recommendations": {
-            "status": "ok",
-            "target_count": len(targets),
-            "suggestion_count": sum(len(v) for v in suggestions_by_review.values()),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        },
-    }
-    return append_flow_version(current, "llm_recommendations", reason="刷新 LLM 辅助推荐")
 
 
 def _flow_fingerprint(spec: FlowSpec) -> str:
@@ -6630,6 +6415,28 @@ def _ensure_unique_link(spec: FlowSpec, link: FlowLink) -> None:
         raise ValueError("duplicate link (same source/target/path exists)")
 
 
+def _matching_link(spec: FlowSpec, link: FlowLink) -> FlowLink | None:
+    for existing in spec.links:
+        if (
+            existing.source_step_id == link.source_step_id
+            and existing.target_step_id == link.target_step_id
+            and _strip_body_prefix(existing.source_path) == _strip_body_prefix(link.source_path)
+            and _strip_body_prefix(existing.target_path) == _strip_body_prefix(link.target_path)
+            and existing.link_id != link.link_id
+        ):
+            return existing
+    return None
+
+
+def _merge_link(existing: FlowLink, incoming: FlowLink) -> None:
+    existing.confirmed = bool(existing.confirmed or incoming.confirmed)
+    existing.confidence = max(float(existing.confidence or 0), float(incoming.confidence or 0))
+    existing.reason = incoming.reason or existing.reason
+    existing.locked = bool(getattr(existing, "locked", False) or getattr(incoming, "locked", False))
+    if incoming.param_name:
+        existing.param_name = incoming.param_name
+
+
 def _remove_step(spec: FlowSpec, step_id: str) -> None:
     step = _find_step(spec, step_id)
     spec.steps.remove(step)
@@ -7499,18 +7306,24 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             continue
 
         if op == "reorder_capabilities":
-            names = edit.get("capability_names")
-            if not isinstance(names, list):
-                raise ValueError("reorder_capabilities missing capability_names list")
-            by_name = {c.name: c for c in new_spec.capabilities}
-            current = set(by_name)
-            requested = {str(x) for x in names}
-            if current != requested or len(names) != len(new_spec.capabilities):
+            refs = edit.get("capability_refs")
+            if refs is None:
+                refs = edit.get("capability_names")
+            if not isinstance(refs, list):
+                raise ValueError("reorder_capabilities missing capability_refs list")
+
+            def cap_ref(cap: FlowCapability, idx: int) -> str:
+                return str(cap.name or cap.capability_id or f"idx:{idx}")
+
+            by_ref = {cap_ref(c, i): c for i, c in enumerate(new_spec.capabilities)}
+            current = set(by_ref)
+            requested = {str(x) for x in refs}
+            if current != requested or len(refs) != len(new_spec.capabilities):
                 raise ValueError(
-                    f"reorder_capabilities must include exactly all capability names; "
+                    f"reorder_capabilities must include exactly all capability refs; "
                     f"got {sorted(requested)}, expected {sorted(current)}"
                 )
-            new_spec.capabilities = [by_name[str(name)] for name in names]
+            new_spec.capabilities = [by_ref[str(ref)] for ref in refs]
             continue
 
         if op == "update_capability":
@@ -7811,6 +7624,10 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 new_link = FlowLink(**link_data)
             except ValidationError as e:
                 raise ValueError(f"invalid link data: {e}")
+            existing = _matching_link(new_spec, new_link)
+            if existing is not None:
+                _merge_link(existing, new_link)
+                continue
             _ensure_unique_link(new_spec, new_link)
             new_spec.links.append(new_link)
             continue

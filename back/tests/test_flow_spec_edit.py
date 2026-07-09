@@ -11,7 +11,7 @@ from dano.execution.page.flow_spec import (
     FlowSpec, FlowStep, FlowLink, ParamField, SelectBinding, FlowCapability,
     CapabilityDependency, CapabilityField, CapabilityRelation,
     apply_flow_edits, validate_flow_spec, _infer_type_from_value,
-    add_llm_review_recommendations, refresh_review_items, flow_spec_to_api_request,
+    refresh_review_items, flow_spec_to_api_request,
     capability_to_flow_spec_view, compile_capability_to_api_request, flow_spec_capability_contracts,
     flow_spec_to_client,
     auto_fix_flow_spec, orchestrate_flow_capabilities, run_recording_pi_loop, sync_flow_spec_models,
@@ -950,6 +950,18 @@ def test_reorder_capabilities_missing_raises():
         apply_flow_edits(spec, [{"op": "reorder_capabilities", "capability_names": ["query_status"]}])
 
 
+def test_reorder_capabilities_by_capability_id_when_name_empty():
+    spec = _three_step_spec()
+    spec.capabilities = [
+        FlowCapability(name="", capability_id="cap_a", kind="query_status", step_ids=["A"]),
+        FlowCapability(name="", capability_id="cap_b", kind="submit_batch", step_ids=["B"]),
+    ]
+
+    new = apply_flow_edits(spec, [{"op": "reorder_capabilities", "capability_refs": ["cap_b", "cap_a"]}])
+
+    assert [c.capability_id for c in new.capabilities] == ["cap_b", "cap_a"]
+
+
 def test_remove_step_removes_related_links():
     spec = _three_step_spec()
     spec.links = [
@@ -962,6 +974,31 @@ def test_remove_step_removes_related_links():
     assert [s.step_id for s in new.steps] == ["A", "C"]
     assert new.links == []
     assert [s.step_id for s in spec.steps] == ["A", "B", "C"]
+
+
+def test_add_duplicate_link_merges_existing_link_instead_of_raising():
+    spec = _three_step_spec()
+    spec.links = [
+        FlowLink(link_id="ab", source_step_id="A", source_path="data.key",
+                 target_step_id="B", target_path="x", confirmed=False, confidence=0.3,
+                 reason="old")
+    ]
+
+    new = apply_flow_edits(spec, [{"op": "add", "step_id": "A", "link": {
+        "source_step_id": "A",
+        "source_path": "data.key",
+        "target_step_id": "B",
+        "target_path": "x",
+        "confirmed": True,
+        "confidence": 0.9,
+        "reason": "new",
+    }}])
+
+    assert len(new.links) == 1
+    assert new.links[0].link_id == "ab"
+    assert new.links[0].confirmed is True
+    assert new.links[0].confidence == 0.9
+    assert new.links[0].reason == "new"
 
 
 def test_dedupe_steps_keeps_latest_repeated_read_step():
@@ -2420,75 +2457,6 @@ def test_runtime_unknown_review_is_not_duplicated_as_field_category():
 
     assert [i.type for i in target_items] == ["runtime_var_source"]
     assert target_items[0].severity == "high"
-
-
-class _FakeLlmClient:
-    def __init__(self, payload):
-        self.payload = payload
-        self.last_user = ""
-
-    async def complete_json(self, *, model: str, system: str, user: str, timeout_s: float):
-        self.last_user = user
-        return self.payload
-
-
-@pytest.mark.asyncio
-async def test_llm_recommendations_attach_to_review_without_mutating_flow():
-    source = FlowStep(
-        step_id="s1", method="GET", url="/api/detail", path="/api/detail",
-        response_json={"data": {"taskId": "T-100"}},
-    )
-    target_param = ParamField(
-        path="taskId", key="taskId", value="T-100", type="string",
-        category="runtime_var", source_kind="unknown",
-    )
-    target = FlowStep(
-        step_id="s2", method="POST", url="/api/submit", path="/api/submit",
-        params=[target_param], body_source='{"taskId":"T-100"}',
-    )
-    spec = refresh_review_items(FlowSpec(flow_id="llm", steps=[source, target]))
-    client = _FakeLlmClient({"suggestions": [{
-        "review_id": spec.review_items[0].id,
-        "action": "bind_previous_response",
-        "source_step_id": "s1",
-        "source_path": "data.taskId",
-        "confidence": 0.86,
-        "reason": "字段名与上游 taskId 一致",
-    }]})
-
-    out = await add_llm_review_recommendations(spec, llm_client=client, model="fake")
-
-    assert out.steps[1].params[0].source_kind == "unknown"
-    assert out.links == []
-    assert out.review_items[0].llm_suggestions[0]["action"] == "bind_previous_response"
-    assert out.review_items[0].llm_suggestions[0]["source_path"] == "data.taskId"
-    assert "T-100" not in client.last_user
-
-
-@pytest.mark.asyncio
-async def test_llm_recommendations_reject_ungrounded_source_path():
-    source = FlowStep(
-        step_id="s1", method="GET", url="/api/detail", path="/api/detail",
-        response_json={"data": {"taskId": "T-100"}},
-    )
-    target_param = ParamField(
-        path="taskId", key="taskId", value="T-100", type="string",
-        category="runtime_var", source_kind="unknown",
-    )
-    target = FlowStep(step_id="s2", method="POST", url="/api/submit", path="/api/submit", params=[target_param])
-    spec = refresh_review_items(FlowSpec(flow_id="llm", steps=[source, target]))
-    client = _FakeLlmClient({"suggestions": [{
-        "review_id": spec.review_items[0].id,
-        "action": "bind_previous_response",
-        "source_step_id": "s1",
-        "source_path": "data.notExist",
-        "confidence": 0.9,
-        "reason": "bad",
-    }]})
-
-    out = await add_llm_review_recommendations(spec, llm_client=client, model="fake")
-
-    assert out.review_items[0].llm_suggestions == []
 
 
 # ── Type inference ──
