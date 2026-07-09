@@ -1751,6 +1751,44 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     next.splice(to, 0, item);
     updateCapabilityField(idx, "step_ids", next);
   }
+  function updateCapabilityNodes(idx: number, nodes: Array<Record<string, any>>) {
+    updateCapabilityField(idx, "nodes", nodes);
+  }
+  function patchCapabilityNode(idx: number, nodeIdx: number, patch: Record<string, any>) {
+    const cap = flowSpec?.capabilities?.[idx];
+    if (!cap) return;
+    const nodes = [...(cap.nodes || [])];
+    nodes[nodeIdx] = { ...(nodes[nodeIdx] || {}), ...patch };
+    updateCapabilityNodes(idx, nodes);
+  }
+  function addCapabilityNode(idx: number, type = "call") {
+    const cap = flowSpec?.capabilities?.[idx];
+    if (!cap) return;
+    const nodes = [...(cap.nodes || [])];
+    const firstStep = (cap.step_ids || [])[0] || flowSpec?.steps?.[0]?.step_id || "";
+    const node: Record<string, any> = { id: `${type}_${nodes.length + 1}`, type };
+    if (type === "call") node.step_id = firstStep;
+    if (type === "foreach") { node.items = "input.entries"; node.steps = firstStep ? [{ id: "call_each", type: "call", step_id: firstStep }] : []; }
+    if (type === "condition") { node.condition = "input.confirm == true"; node.then = firstStep ? [{ id: "call_when_true", type: "call", step_id: firstStep }] : []; }
+    if (type === "map") { node.source = "response.data"; node.target = "var.value"; }
+    if (type === "return") { node.from = firstStep; node.path = "response"; }
+    updateCapabilityNodes(idx, [...nodes, node]);
+  }
+  function removeCapabilityNode(idx: number, nodeIdx: number) {
+    const cap = flowSpec?.capabilities?.[idx];
+    if (!cap) return;
+    updateCapabilityNodes(idx, (cap.nodes || []).filter((_, i) => i !== nodeIdx));
+  }
+  function moveCapabilityNode(idx: number, nodeIdx: number, delta: number) {
+    const cap = flowSpec?.capabilities?.[idx];
+    if (!cap) return;
+    const nodes = [...(cap.nodes || [])];
+    const to = nodeIdx + delta;
+    if (to < 0 || to >= nodes.length) return;
+    const [item] = nodes.splice(nodeIdx, 1);
+    nodes.splice(to, 0, item);
+    updateCapabilityNodes(idx, nodes);
+  }
   function loadJsonDraft() {
     if (!flowSpec) return;
     setJsonDraft(JSON.stringify(flowSpec, null, 2));
@@ -2323,6 +2361,101 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     );
   }
 
+  function renderCapabilityPlanEditor(cap: FlowCapabilityData, capIdx: number) {
+    const nodes = cap.nodes || [];
+    const stepOptions = (cap.step_ids || []).map((sid, i) => {
+      const st = stepById[sid];
+      return { label: `${i + 1}. ${st?.name || fallbackStepName(st?.method, st?.path) || sid}`, value: sid };
+    });
+    const nodeTypeOptions = [
+      { label: "调用接口", value: "call" },
+      { label: "批量循环", value: "foreach" },
+      { label: "条件分支", value: "condition" },
+      { label: "字段映射", value: "map" },
+      { label: "返回结果", value: "return" },
+    ];
+    return (
+      <Space direction="vertical" size={10} style={{ width: "100%" }}>
+        <Alert type="info" showIcon message="能力执行计划" description="调用方只选择能力并传入输入；Skill 按这里的节点执行接口、循环、条件和返回映射。" />
+        <Space wrap>
+          <Button size="small" icon={<PlusOutlined />} onClick={() => addCapabilityNode(capIdx, "call")}>调用接口</Button>
+          <Button size="small" icon={<PlusOutlined />} onClick={() => addCapabilityNode(capIdx, "foreach")}>批量循环</Button>
+          <Button size="small" icon={<PlusOutlined />} onClick={() => addCapabilityNode(capIdx, "condition")}>条件分支</Button>
+          <Button size="small" icon={<PlusOutlined />} onClick={() => addCapabilityNode(capIdx, "map")}>字段映射</Button>
+          <Button size="small" icon={<PlusOutlined />} onClick={() => addCapabilityNode(capIdx, "return")}>返回结果</Button>
+        </Space>
+        {!nodes.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有执行节点" /> : (
+          <List size="small" dataSource={nodes} renderItem={(node, nodeIdx) => {
+            const type = String(node.type || "call");
+            return (
+              <List.Item
+                style={{ paddingLeft: 0, paddingRight: 0 }}
+                actions={[
+                  <Tooltip key="up" title="上移"><Button size="small" icon={<UpOutlined />} disabled={nodeIdx === 0} onClick={() => moveCapabilityNode(capIdx, nodeIdx, -1)} /></Tooltip>,
+                  <Tooltip key="down" title="下移"><Button size="small" icon={<DownOutlined />} disabled={nodeIdx === nodes.length - 1} onClick={() => moveCapabilityNode(capIdx, nodeIdx, 1)} /></Tooltip>,
+                  <Button key="rm" size="small" danger onClick={() => removeCapabilityNode(capIdx, nodeIdx)}>删除</Button>,
+                ]}
+              >
+                <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                  <Space wrap align="center">
+                    <Tag color="purple">节点 {nodeIdx + 1}</Tag>
+                    <NativeSelect value={type} width={120} options={nodeTypeOptions} onChange={(v) => patchCapabilityNode(capIdx, nodeIdx, { type: v })} />
+                    <EditableText value={String(node.id || "")} width={150} onSave={(v) => patchCapabilityNode(capIdx, nodeIdx, { id: v })} />
+                    {type === "call" && (
+                      <NativeSelect value={String(node.step_id || "")} width={360}
+                        options={[{ label: stepOptions.length ? "选择接口步骤" : "该能力未绑定接口", value: "" }, ...stepOptions]}
+                        onChange={(v) => patchCapabilityNode(capIdx, nodeIdx, { step_id: v })} />
+                    )}
+                    {type === "foreach" && <FieldControl label="循环来源"><EditableText value={String(node.items || "input.entries")} width={260} onSave={(v) => patchCapabilityNode(capIdx, nodeIdx, { items: v })} /></FieldControl>}
+                    {type === "condition" && <FieldControl label="条件"><EditableText value={String(node.condition || node.check || "")} width={320} onSave={(v) => patchCapabilityNode(capIdx, nodeIdx, { condition: v })} /></FieldControl>}
+                    {type === "map" && (
+                      <>
+                        <FieldControl label="来源"><EditableText value={String(node.source || "")} width={220} onSave={(v) => patchCapabilityNode(capIdx, nodeIdx, { source: v })} /></FieldControl>
+                        <FieldControl label="目标"><EditableText value={String(node.target || "")} width={220} onSave={(v) => patchCapabilityNode(capIdx, nodeIdx, { target: v })} /></FieldControl>
+                      </>
+                    )}
+                    {type === "return" && (
+                      <>
+                        <FieldControl label="来源"><EditableText value={String(node.from || node.source || "")} width={220} onSave={(v) => patchCapabilityNode(capIdx, nodeIdx, { from: v })} /></FieldControl>
+                        <FieldControl label="路径"><EditableText value={String(node.path || node.value || "response")} width={220} onSave={(v) => patchCapabilityNode(capIdx, nodeIdx, { path: v })} /></FieldControl>
+                      </>
+                    )}
+                  </Space>
+                  {(type === "foreach" || type === "condition") && (
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>子节点可在下方 JSON 中精确调整；发布校验会检查子节点引用的接口、循环来源和返回路径。</Typography.Text>
+                  )}
+                </Space>
+              </List.Item>
+            );
+          }} />
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
+          <FieldControl label="前置条件">
+            <EditableTextArea rows={5} value={JSON.stringify(cap.preconditions || [], null, 2)}
+              onSave={(v) => {
+                try { updateCapabilityField(capIdx, "preconditions", JSON.parse(v || "[]")); }
+                catch (e: any) { message.error(e?.message || "前置条件不是合法 JSON"); }
+              }} />
+          </FieldControl>
+          <FieldControl label="返回映射">
+            <EditableTextArea rows={5} value={JSON.stringify(cap.output_mapping || [], null, 2)}
+              onSave={(v) => {
+                try { updateCapabilityField(capIdx, "output_mapping", JSON.parse(v || "[]")); }
+                catch (e: any) { message.error(e?.message || "返回映射不是合法 JSON"); }
+              }} />
+          </FieldControl>
+        </div>
+        <FieldControl label="执行节点 JSON">
+          <EditableTextArea rows={7} value={JSON.stringify(nodes, null, 2)}
+            onSave={(v) => {
+              try { updateCapabilityNodes(capIdx, JSON.parse(v || "[]")); }
+              catch (e: any) { message.error(e?.message || "执行节点不是合法 JSON"); }
+            }} />
+        </FieldControl>
+      </Space>
+    );
+  }
+
   function renderCapabilityComposerPanel() {
     if (!flowSpec) return null;
     const capabilities = flowSpec.capabilities || [];
@@ -2455,6 +2588,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                       )}
                     </Space>
                     <Collapse ghost size="small">
+                      <Collapse.Panel key="plan" header={`执行计划 ${cap.nodes?.length || 0}`}>
+                        {renderCapabilityPlanEditor(cap, idx)}
+                      </Collapse.Panel>
                       <Collapse.Panel key="fields" header={`能力字段 ${counts.total}`}>
                         {renderCapabilityFieldEditor(cap)}
                       </Collapse.Panel>

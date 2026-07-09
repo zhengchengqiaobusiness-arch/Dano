@@ -3027,6 +3027,159 @@ def _capability_batch_enabled(cap: dict | None) -> bool:
     return bool(batch.get("enabled", True))
 
 
+def _capability_nodes(cap: dict | None) -> list[dict]:
+    if not cap:
+        return []
+    contract = cap.get("execution_contract") if isinstance(cap.get("execution_contract"), dict) else {}
+    nodes = contract.get("nodes") if isinstance(contract.get("nodes"), list) else None
+    if nodes is None:
+        nodes = cap.get("workflow_nodes") if isinstance(cap.get("workflow_nodes"), list) else None
+    if nodes is None:
+        nodes = cap.get("nodes") if isinstance(cap.get("nodes"), list) else []
+    return [n for n in nodes if isinstance(n, dict)]
+
+
+def _capability_has_structured_plan(cap: dict | None) -> bool:
+    nodes = _capability_nodes(cap)
+    if not nodes:
+        return False
+    return any(str(n.get("type") or "") not in {"call"} for n in _iter_capability_plan_nodes(nodes))
+
+
+def _iter_capability_plan_nodes(nodes: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        out.append(node)
+        for key in ("steps", "then", "otherwise", "else", "children"):
+            child = node.get(key)
+            if isinstance(child, list):
+                out.extend(_iter_capability_plan_nodes([x for x in child if isinstance(x, dict)]))
+    return out
+
+
+def _capability_child_nodes(node: dict, *keys: str) -> list[dict]:
+    for key in keys:
+        value = node.get(key)
+        if isinstance(value, list):
+            return [x for x in value if isinstance(x, dict)]
+    return []
+
+
+def _cap_parse_literal(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float, bool, list, dict)):
+        return value
+    text = str(value).strip()
+    if not text:
+        return ""
+    low = text.lower()
+    if low in {"true", "yes", "y"}:
+        return True
+    if low in {"false", "no", "n"}:
+        return False
+    if low in {"null", "none"}:
+        return None
+    if (text.startswith("'") and text.endswith("'")) or (text.startswith('"') and text.endswith('"')):
+        return text[1:-1]
+    try:
+        return int(text) if _re.fullmatch(r"-?\d+", text) else float(text)
+    except Exception:  # noqa: BLE001
+        return text
+
+
+def _cap_get_context_value(expr, ctx: dict):
+    if expr is None:
+        return None
+    if isinstance(expr, (int, float, bool, list, dict)):
+        return expr
+    text = str(expr).strip()
+    if not text:
+        return None
+    if text.startswith(("'", '"')) or _re.fullmatch(r"-?\d+(?:\.\d+)?", text) or text.lower() in {"true", "false", "null", "none"}:
+        return _cap_parse_literal(text)
+    if text.startswith("input."):
+        return _get_by_path(ctx.get("fields") or {}, text.split(".", 1)[1])
+    if text.startswith("item."):
+        return _get_by_path(ctx.get("item") or {}, text.split(".", 1)[1])
+    if text.startswith("var."):
+        return _get_by_path(ctx.get("vars") or {}, text.split(".", 1)[1])
+    if text.startswith("node."):
+        return _get_by_path(ctx.get("node_results") or {}, text.split(".", 1)[1])
+    if text.startswith("response."):
+        return _get_by_path(ctx.get("last_response"), text.split(".", 1)[1])
+    if text in (ctx.get("responses_by_step") or {}):
+        return (ctx.get("responses_by_step") or {}).get(text)
+    if text in (ctx.get("vars") or {}):
+        return (ctx.get("vars") or {}).get(text)
+    if text in (ctx.get("node_results") or {}):
+        return (ctx.get("node_results") or {}).get(text)
+    if "." in text:
+        head, tail = text.split(".", 1)
+        if head in (ctx.get("responses_by_step") or {}):
+            return _get_by_path((ctx.get("responses_by_step") or {}).get(head), tail)
+        if head in (ctx.get("node_results") or {}):
+            return _get_by_path((ctx.get("node_results") or {}).get(head), tail)
+    fields = ctx.get("fields") or {}
+    if text in fields:
+        return fields.get(text)
+    return _cap_parse_literal(text)
+
+
+def _cap_truthy(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "false", "0", "no", "n", "null", "none"}
+    return bool(value)
+
+
+def _cap_eval_condition(expr, ctx: dict) -> bool:
+    if expr is None or expr == "":
+        return True
+    if isinstance(expr, bool):
+        return expr
+    text = str(expr).strip()
+    for op in ("==", "!=", ">=", "<=", ">", "<"):
+        if op not in text:
+            continue
+        left, right = text.split(op, 1)
+        lv = _cap_get_context_value(left.strip(), ctx)
+        rv = _cap_get_context_value(right.strip(), ctx)
+        if op == "==":
+            return str(lv) == str(rv) if isinstance(lv, str) or isinstance(rv, str) else lv == rv
+        if op == "!=":
+            return str(lv) != str(rv) if isinstance(lv, str) or isinstance(rv, str) else lv != rv
+        try:
+            lf = float(lv)
+            rf = float(rv)
+        except Exception:  # noqa: BLE001
+            return False
+        if op == ">=":
+            return lf >= rf
+        if op == "<=":
+            return lf <= rf
+        if op == ">":
+            return lf > rf
+        if op == "<":
+            return lf < rf
+    return _cap_truthy(_cap_get_context_value(text, ctx))
+
+
+def _capability_precondition_failures(cap: dict | None, fields: dict) -> list[str]:
+    if not cap:
+        return []
+    ctx = {"fields": fields, "vars": {}, "node_results": {}, "responses_by_step": {}}
+    failures: list[str] = []
+    for idx, pre in enumerate(cap.get("preconditions") or []):
+        if not isinstance(pre, dict):
+            continue
+        expr = pre.get("check") or pre.get("condition") or pre.get("expr")
+        if expr and not _cap_eval_condition(expr, ctx):
+            failures.append(str(pre.get("message") or f"前置条件 {idx + 1} 未满足: {expr}"))
+    return failures
+
+
 async def _execute_capability_batch(api_request: dict, fields: dict, *, cap: dict, runner, kw: dict) -> dict:
     contract = cap.get("execution_contract") if isinstance(cap.get("execution_contract"), dict) else {}
     batch = contract.get("batch") if isinstance(contract.get("batch"), dict) else {}
@@ -3061,6 +3214,156 @@ async def _execute_capability_batch(api_request: dict, fields: dict, *, cap: dic
         "failed_items": failed_items,
         "results": results,
         "final": results[-1] if results else {},
+    }
+
+
+async def _execute_capability_plan(api_request: dict, fields: dict, *, cap: dict, kw: dict) -> dict:
+    steps = list(api_request.get("steps") or [])
+    if not steps:
+        return await execute_api_request(api_request, fields, **kw)
+    step_by_id = {str(st.get("step_id") or ""): st for st in steps}
+    step_index = {str(st.get("step_id") or ""): idx for idx, st in enumerate(steps)}
+    nodes = _capability_nodes(cap)
+    if not nodes:
+        return await execute_api_workflow(api_request, fields, **kw)
+
+    ctx = {
+        "fields": dict(fields or {}),
+        "vars": {},
+        "responses": [],
+        "responses_by_step": {},
+        "results_by_step": {},
+        "node_results": {},
+        "last_response": None,
+        "last_result": None,
+        "item": None,
+    }
+
+    async def run_call(node: dict, local_fields: dict, local_item=None) -> dict:
+        step_id = str(node.get("step_id") or "")
+        step = step_by_id.get(step_id)
+        if step is None:
+            return {"ok": False, "blocked": True, "detail": f"能力节点缺少有效接口步骤: {step_id}", "node": node.get("id")}
+        overrides: dict = {}
+        for lk in step.get("links") or []:
+            old_src = lk.get("source_step")
+            source_step_id = ""
+            if isinstance(old_src, int) and 0 <= old_src < len(steps):
+                source_step_id = str(steps[old_src].get("step_id") or "")
+            src = ctx["responses_by_step"].get(source_step_id)
+            if src is not None:
+                val = _get_by_path(src, lk.get("source_tokens") or lk.get("source_path", ""))
+                if val is not None:
+                    overrides[tuple(_split_path(lk.get("target_tokens") or lk.get("target_path", "")))] = val
+        out = await execute_api_request(step, local_fields, **kw, overrides=overrides)
+        out = {**out, "final": out}
+        idx = step_index.get(step_id, len(ctx["responses"]))
+        response = out.get("response")
+        if response is None:
+            response = step.get("response_json")
+        if response is None:
+            response = out.get("body") if out.get("body") is not None else {"query": out.get("query")}
+        while len(ctx["responses"]) <= idx:
+            ctx["responses"].append(None)
+        ctx["responses"][idx] = response
+        ctx["responses_by_step"][step_id] = response
+        ctx["results_by_step"][step_id] = out
+        ctx["last_response"] = response
+        ctx["last_result"] = out
+        node_id = str(node.get("id") or step_id)
+        ctx["node_results"][node_id] = out
+        if local_item is not None:
+            out = {**out, "item": local_item}
+        return out
+
+    async def run_nodes(plan_nodes: list[dict], local_fields: dict, local_item=None) -> dict:
+        last: dict = {"ok": True}
+        old_item = ctx.get("item")
+        ctx["item"] = local_item
+        try:
+            for node in plan_nodes:
+                node_type = str(node.get("type") or "call")
+                node_id = str(node.get("id") or node_type)
+                if node_type == "call":
+                    last = await run_call(node, local_fields, local_item)
+                    if not last.get("ok"):
+                        return last
+                elif node_type in {"condition", "filter"}:
+                    expr = node.get("condition") or node.get("check") or node.get("expr")
+                    branch = _capability_child_nodes(node, "then", "steps", "children") if _cap_eval_condition(expr, ctx) else _capability_child_nodes(node, "otherwise", "else")
+                    if branch:
+                        last = await run_nodes(branch, local_fields, local_item)
+                        if not last.get("ok"):
+                            return last
+                elif node_type == "foreach":
+                    source = node.get("items") or node.get("source") or "input.entries"
+                    items = _cap_get_context_value(source, ctx)
+                    if not isinstance(items, list):
+                        return {"ok": False, "blocked": True, "detail": f"foreach 节点 `{node_id}` 的 items 不是数组: {source}"}
+                    child_nodes = _capability_child_nodes(node, "steps", "children")
+                    if not child_nodes:
+                        child_nodes = [n for n in nodes if n.get("type") == "call"]
+                    results: list[dict] = []
+                    failed: list[dict] = []
+                    for item_idx, item in enumerate(items):
+                        if not isinstance(item, dict):
+                            failed.append({"index": item_idx, "item": item, "detail": "批量条目必须是对象"})
+                            results.append({"ok": False, "index": item_idx, "detail": "批量条目必须是对象"})
+                            continue
+                        item_fields = {**local_fields, **item}
+                        item_out = await run_nodes(child_nodes, item_fields, item)
+                        item_out = {**item_out, "index": item_idx}
+                        results.append(item_out)
+                        if not item_out.get("ok"):
+                            failed.append({"index": item_idx, "item": item, "detail": item_out.get("detail") or "执行失败", "result": item_out})
+                    last = {
+                        "ok": not failed,
+                        "batch": True,
+                        "total": len(items),
+                        "success_count": len(items) - len(failed),
+                        "failed_count": len(failed),
+                        "failed_items": failed,
+                        "results": results,
+                        "final": results[-1] if results else {},
+                    }
+                    ctx["vars"]["batch_result"] = last
+                    ctx["node_results"][node_id] = last
+                    ctx["last_result"] = last
+                elif node_type == "map":
+                    target = str(node.get("target") or "")
+                    value = _cap_get_context_value(node.get("source"), ctx)
+                    if target.startswith("var."):
+                        _set_by_path(ctx["vars"], target.split(".", 1)[1], value)
+                    elif target.startswith("input."):
+                        _set_by_path(local_fields, target.split(".", 1)[1], value)
+                    last = {"ok": True, "mapped": target, "value": value}
+                    ctx["node_results"][node_id] = last
+                elif node_type == "return":
+                    if "value" in node:
+                        value = _cap_get_context_value(node.get("value"), ctx)
+                    else:
+                        source = node.get("from") or node.get("source") or ""
+                        base = _cap_get_context_value(source, ctx) if source else (ctx.get("last_response") or ctx.get("last_result"))
+                        path = str(node.get("path") or "")
+                        if path.startswith("response."):
+                            path = path.split(".", 1)[1]
+                        value = _get_by_path(base, path) if path and path not in {"response", "$", "."} else base
+                    last = {"ok": True, "return": value, "response": value, "final": ctx.get("last_result") or {}}
+                    ctx["node_results"][node_id] = last
+                    return last
+                else:
+                    return {"ok": False, "blocked": True, "detail": f"不支持的能力节点类型: {node_type}", "node": node_id}
+            return last
+        finally:
+            ctx["item"] = old_item
+
+    out = await run_nodes(nodes, dict(fields or {}))
+    return {
+        **out,
+        "capability": cap.get("name") or cap.get("kind") or "",
+        "capability_kind": cap.get("kind") or "",
+        "plan": True,
+        "steps": len([n for n in _iter_capability_plan_nodes(nodes) if n.get("type") == "call"]),
     }
 
 
@@ -3165,6 +3468,9 @@ async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
         selected, cap, error = _select_api_request_for_capability(api_request, capability)
         if error:
             return {"ok": False, "blocked": True, "detail": error, "capability": capability}
+        failures = _capability_precondition_failures(cap, fields)
+        if failures:
+            return {"ok": False, "blocked": True, "detail": "；".join(failures), "capability": capability}
         if cap and (cap.get("kind") or cap.get("name")) == "list_options":
             field = fields.get("field") or fields.get("param") or fields.get("name")
             if not field:
@@ -3180,6 +3486,8 @@ async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
             return {"ok": True, "capability": capability, **options}
         api_request = selected or api_request
     runner = execute_api_workflow if api_request.get("steps") else execute_api_request
+    if cap and _capability_has_structured_plan(cap):
+        return await _execute_capability_plan(api_request, fields, cap=cap, kw=kw)
     if cap and _capability_batch_enabled(cap) and isinstance(fields.get("entries") or fields.get("items"), list):
         return await _execute_capability_batch(api_request, fields, cap=cap, runner=runner, kw=kw)
     out = await runner(api_request, fields, **kw)

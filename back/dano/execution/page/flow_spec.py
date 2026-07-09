@@ -3143,6 +3143,9 @@ _FLOW_ORCHESTRATE_SYSTEM = """你是企业 OA/API 录制结果的 Skill 编排�
 - 如果流程包含写接口，默认只输出一个 submit 或 submit_batch 主能力；前置 GET 应作为该能力步骤链的一部分，不要单独拆 query_status/list_options。
 - 读能力只查询并返回结果；写能力可以包含前置查询 + 写入步骤。
 - 批量填报/日报/明细数组场景优先生成 submit_batch。
+- 批量场景必须用 foreach 节点表达循环，items 推荐 input.entries；foreach.steps 内放每条明细要执行的 call。
+- 条件分支必须用 condition 节点表达，condition/check 只能引用 input.*、var.*、已执行 step_id 响应或 node.*。
+- 字段转换/响应取值必须用 map 节点表达 source/target，不要靠文字说明隐藏。
 - output_mapping 默认指向最后一个步骤 response。
 JSON 形态：
 {"abilities":[{"name":"","title":"","intent":"","kind":"query_status|list_options|validate_batch|submit_batch|submit","step_ids":[],"nodes":[{"id":"","type":"call|map|filter|condition|foreach|select|return","step_id":""}],"input_schema":{},"output_schema":{},"output_mapping":[],"preconditions":[],"caller_responsibilities":[],"skill_responsibilities":[],"confidence":0.0,"requires_human_confirm":true}]}
@@ -3508,7 +3511,7 @@ def _iter_capability_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not isinstance(node, dict):
             continue
         out.append(node)
-        for key in ("steps", "then", "otherwise"):
+        for key in ("steps", "then", "otherwise", "else", "children"):
             child = node.get(key)
             if isinstance(child, list):
                 out.extend(_iter_capability_nodes([n for n in child if isinstance(n, dict)]))
@@ -3546,15 +3549,25 @@ def _capability_execution_contract(spec: FlowSpec, cap: FlowCapability) -> dict[
         if sid in by_id
     ]
     final_step = calls[-1]["step_id"] if calls else ""
+    foreach_nodes = [
+        n for n in _iter_capability_nodes(cap.nodes or [])
+        if isinstance(n, dict) and n.get("type") == "foreach"
+    ]
+    items_field = "entries"
+    if foreach_nodes:
+        raw_items = str(foreach_nodes[0].get("items") or "input.entries")
+        if raw_items.startswith("input."):
+            items_field = raw_items.split(".", 1)[1].split(".", 1)[0] or "entries"
     return {
         "protocol": "dano.capability_plan.v1",
         "name": cap.name,
         "kind": cap.kind,
         "nodes": [dict(n) for n in (cap.nodes or [])],
         "call_order": calls,
+        "preconditions": [dict(p) for p in (cap.preconditions or []) if isinstance(p, dict)],
         "batch": {
             "enabled": _capability_is_batch(spec, cap),
-            "items_field": "entries",
+            "items_field": items_field,
             "mode": "repeat_selected_workflow",
             "merge_base_input": True,
         },
@@ -4255,6 +4268,12 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                 cap_errors.append(f"Capability `{label}` 节点 `{node_id}` 类型 `{node_type}` 不支持")
             if node_type == "call" and str(node.get("step_id") or "") not in step_by_id:
                 cap_errors.append(f"Capability `{label}` call 节点 `{node_id}` 未绑定有效接口步骤")
+            if node_type == "condition":
+                expr = str(node.get("condition") or node.get("check") or node.get("expr") or "")
+                if not expr:
+                    cap_errors.append(f"Capability `{label}` condition 节点 `{node_id}` 缺少 condition/check 表达式")
+                if not any(isinstance(node.get(k), list) and node.get(k) for k in ("then", "steps", "children", "otherwise", "else")):
+                    cap_warnings.append(f"Capability `{label}` condition 节点 `{node_id}` 没有任何分支步骤")
             if node_type == "foreach":
                 items = str(node.get("items") or "")
                 if not items:
@@ -4289,6 +4308,27 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                 if ref == node_id:
                     hint = f"；可选来源: {return_sources[-1]}" if return_sources else ""
                     cap_errors.append(f"Capability `{label}` return 节点 `{node_id}` 不能引用自身作为返回来源{hint}")
+        for idx, pre in enumerate(cap.preconditions or []):
+            if not isinstance(pre, dict):
+                cap_errors.append(f"Capability `{label}` preconditions[{idx}] 不是对象")
+                continue
+            expr = str(pre.get("check") or pre.get("condition") or pre.get("expr") or "")
+            if not expr:
+                cap_errors.append(f"Capability `{label}` preconditions[{idx}] 缺少 check/condition 表达式")
+                continue
+            input_refs = re.findall(r"\binput\.([a-zA-Z_][\w]*)", expr)
+            bare_refs = []
+            if re.fullmatch(r"[a-zA-Z_][\w]*\s*(?:==|!=|>=|<=|>|<).+", expr):
+                bare_refs.append(re.split(r"==|!=|>=|<=|>|<", expr, 1)[0].strip())
+            for ref in [*input_refs, *bare_refs]:
+                if ref and ref not in input_props:
+                    _capability_warning(
+                        internal_section,
+                        warnings,
+                        code="capability_precondition_input_missing",
+                        message=f"Capability `{label}` 前置条件引用的输入 `{ref}` 不在 input_schema 中",
+                        target={"kind": "capability_precondition", "capability": label, "index": idx, "input": ref},
+                    )
         if cap.confirmed and cap.nodes and not has_return_node:
             cap_warnings.append(f"Capability `{label}` 已确认但没有 return 节点，外部调用只能拿到底层原始响应")
 

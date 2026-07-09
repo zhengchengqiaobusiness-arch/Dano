@@ -1569,6 +1569,103 @@ async def test_execute_submit_batch_capability_repeats_entries():
     assert out["results"][1]["final"]["body"] == {"date": "2026-05-13", "content": "b", "project": "P1"}
 
 
+async def test_execute_capability_plan_foreach_and_return_batch_result():
+    wf = {
+        "steps": [
+            {
+                "step_id": "query",
+                "method": "GET",
+                "url": "http://x/api/missing",
+                "path": "/api/missing",
+                "query_template": {"month": "{{month}}"},
+                "params": ["month"],
+                "response_json": {"code": 0, "data": {"missing": ["2026-05-12", "2026-05-13"]}},
+            },
+            {
+                "step_id": "submit",
+                "method": "POST",
+                "url": "http://x/api/submit",
+                "path": "/api/submit",
+                "body_template": {"date": "{{date}}", "content": "{{content}}", "project": "{{project}}"},
+                "params": ["date", "content", "project"],
+            },
+        ],
+        "capabilities": [{
+            "name": "submit_batch",
+            "kind": "submit_batch",
+            "step_ids": ["query", "submit"],
+            "preconditions": [{"check": "confirm == true", "message": "提交前必须确认"}],
+            "execution_contract": {
+                "nodes": [
+                    {"id": "call_query", "type": "call", "step_id": "query"},
+                    {"id": "foreach_entries", "type": "foreach", "items": "input.entries", "steps": [
+                        {"id": "call_submit_each", "type": "call", "step_id": "submit"},
+                    ]},
+                    {"id": "return_batch_result", "type": "return", "value": "batch_result"},
+                ],
+                "batch": {"enabled": True, "items_field": "entries"},
+            },
+        }],
+    }
+
+    blocked = await execute_api(wf, {"__capability": "submit_batch", "month": "2026-05", "entries": []}, send=False)
+    assert blocked["blocked"] is True
+    assert "必须确认" in blocked["detail"]
+
+    out = await execute_api(wf, {
+        "__capability": "submit_batch",
+        "confirm": True,
+        "month": "2026-05",
+        "project": "P1",
+        "entries": [
+            {"date": "2026-05-12", "content": "a"},
+            {"date": "2026-05-13", "content": "b"},
+        ],
+    }, send=False)
+
+    assert out["ok"] is True
+    assert out["plan"] is True
+    assert out["response"]["batch"] is True
+    assert out["response"]["total"] == 2
+    assert out["response"]["results"][0]["final"]["body"] == {"date": "2026-05-12", "content": "a", "project": "P1"}
+    assert out["response"]["results"][1]["final"]["body"] == {"date": "2026-05-13", "content": "b", "project": "P1"}
+
+
+async def test_execute_capability_plan_condition_can_skip_call():
+    wf = {
+        "steps": [{
+            "step_id": "status",
+            "method": "GET",
+            "url": "http://x/api/status",
+            "path": "/api/status",
+            "response_json": {"code": 0, "data": {"status": "ready"}},
+        }],
+        "capabilities": [{
+            "name": "query_status",
+            "kind": "query_status",
+            "step_ids": ["status"],
+            "execution_contract": {
+                "nodes": [
+                    {"id": "maybe_query", "type": "condition", "condition": "input.should_query == true", "then": [
+                        {"id": "call_status", "type": "call", "step_id": "status"},
+                    ], "otherwise": [
+                        {"id": "return_skip", "type": "return", "value": "'skipped'"},
+                    ]},
+                ],
+            },
+        }],
+    }
+
+    skipped = await execute_api(wf, {"__capability": "query_status", "should_query": False}, send=False)
+    assert skipped["ok"] is True
+    assert skipped["response"] == "skipped"
+    assert "url" not in (skipped.get("final") or {})
+
+    queried = await execute_api(wf, {"__capability": "query_status", "should_query": True}, send=False)
+    assert queried["ok"] is True
+    assert queried["final"]["url"].endswith("/api/status")
+
+
 async def test_execute_get_query_template_dry_run():
     """GET 前置接口无 body 也可发布:query_template 负责把参数和页面常量构造成 URL。"""
     apir = {
