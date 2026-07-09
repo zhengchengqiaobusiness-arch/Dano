@@ -321,6 +321,36 @@ describe("BridgeServer HTTP/SSE transport", () => {
     });
   });
 
+  it("replaces an existing SSE stream for the same logical client", async () => {
+    const commandSpy = vi.fn();
+    const { server } = createServer(() => ({
+      handleClientMessage: commandSpy,
+      dispose: vi.fn(),
+    }), { heartbeatInterval: 10 });
+    const address = await server.start();
+    const origin = `http://127.0.0.1:${address.port}`;
+    const created = await postJson<{ eventsUrl: string; messagesUrl: string }>(
+      `${origin}/api/clients`,
+    );
+    const firstSse = openSse(`${origin}${created.eventsUrl}`);
+
+    await firstSse.waitForMessages(1);
+    const secondSse = openSse(`${origin}${created.eventsUrl}`);
+
+    await expect(firstSse.waitForClose()).resolves.toBeUndefined();
+    await secondSse.waitForMessages(1);
+    await postJson(`${origin}${created.messagesUrl}`, {
+      type: "command",
+      payload: { id: "cmd-after-replace", type: "get_state" },
+    });
+
+    secondSse.close();
+    expect(commandSpy).toHaveBeenCalledWith({
+      type: "command",
+      payload: { id: "cmd-after-replace", type: "get_state" },
+    });
+  });
+
   it("closes the SSE stream when the logical client is unregistered", async () => {
     const { server } = createServer(undefined, { heartbeatInterval: 10 });
     const address = await server.start();
