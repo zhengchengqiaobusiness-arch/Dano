@@ -10,7 +10,10 @@
   import ExtensionDialog from "./components/ExtensionDialog.svelte";
   import ReconnectBanner from "./components/ReconnectBanner.svelte";
   import ThemeSettingsDialog from "./components/ThemeSettingsDialog.svelte";
-  import { initBridge } from "./composables/bridgeStore.svelte";
+  import {
+    initBridge,
+    TRANSCRIPT_PAGE_LIMIT,
+  } from "./composables/bridgeStore.svelte";
   import AppHeader from "./layout/AppHeader.svelte";
   import AppMainContent from "./layout/AppMainContent.svelte";
   import AppNotifications from "./layout/AppNotifications.svelte";
@@ -873,7 +876,7 @@
       await bridge.sendCommand({
         type: "get_messages",
         direction: "latest",
-        limit: 40,
+        limit: TRANSCRIPT_PAGE_LIMIT,
       });
       await tick();
       if (mainContentRef?.scrollToTranscriptEntry(entryId)) return true;

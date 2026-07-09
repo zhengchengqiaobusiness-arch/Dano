@@ -227,6 +227,7 @@ const MAX_RECONNECT_DELAY = 30_000;
 const CONNECT_OPEN_TIMEOUT_MS = 10_000;
 const HEARTBEAT_TIMEOUT_MS = 45_000;
 const HEARTBEAT_WATCHDOG_MS = 5_000;
+export const TRANSCRIPT_PAGE_LIMIT = 80;
 
 // ---------------------------------------------------------------------------
 // Bridge state (module-level singletons)
@@ -557,7 +558,11 @@ async function restoreLiveSessionState() {
   _sessionStats = null;
 
   await Promise.all([
-    sendCommand({ type: "get_messages", direction: "latest", limit: 40 }),
+    sendCommand({
+      type: "get_messages",
+      direction: "latest",
+      limit: TRANSCRIPT_PAGE_LIMIT,
+    }),
     sendCommand({ type: "get_state" }),
   ]);
 }
@@ -1526,7 +1531,7 @@ async function loadOlderTranscriptPage() {
       type: "get_messages",
       direction: "older",
       cursor: _transcriptOldestCursor,
-      limit: 40,
+      limit: TRANSCRIPT_PAGE_LIMIT,
     });
     if (!resp.success) _transcriptPageLoading = false;
   } catch {

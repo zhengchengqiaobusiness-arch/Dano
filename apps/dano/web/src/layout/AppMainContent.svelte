@@ -151,7 +151,7 @@
       steer?: boolean;
     }) => boolean | Promise<boolean>;
     onAbort?: () => void;
-    onLoadOlderTranscript?: () => void;
+    onLoadOlderTranscript?: () => void | Promise<void>;
     onSelectModel?: (model: RpcModelInfo) => void;
     onSelectThinkingLevel?: (level: RpcThinkingLevel) => void;
     onToggleAutoCompaction?: (enabled: boolean) => void;

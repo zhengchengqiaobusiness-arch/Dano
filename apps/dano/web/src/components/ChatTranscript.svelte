@@ -98,7 +98,7 @@
     isCompacting?: boolean;
     showMessageIds?: boolean;
     allowRevision?: boolean;
-    onLoadOlder?: () => void;
+    onLoadOlder?: () => void | Promise<void>;
     onRevise?: (payload: { entryId: string; text: string; preview: string; hasImages: boolean; images: RpcImageContent[] }) => void;
     onOpenFileReference?: (payload: { path: string; lineNumber: number }) => void;
     readWorkspaceFile?: (path: string) => Promise<{ content: string }>;
@@ -117,7 +117,10 @@
   let container = $state<HTMLDivElement | null>(null);
 
   const BOTTOM_LOCK_THRESHOLD = 24;
+  const TOP_LOAD_THRESHOLD = 80;
   let shouldStickToBottom = $state(true);
+  let showTranscriptEndNotice = $state(false);
+  let olderLoadRequestPending = $state(false);
   let stickToBottomFrame = 0;
   let lastSessionPath: string | null | undefined = undefined;
 
@@ -804,9 +807,39 @@
     });
   }
 
-  function requestOlderTranscript() {
-    if (!hasOlder || initialLoading || pageLoading) return;
-    onLoadOlder();
+  function isNearTop(el: HTMLElement): boolean {
+    return el.scrollTop <= TOP_LOAD_THRESHOLD;
+  }
+
+  function updateHistoryNotice() {
+    if (!container) return;
+    showTranscriptEndNotice =
+      !initialLoading && messages.length > 0 && !hasOlder && isNearTop(container);
+  }
+
+  async function requestOlderTranscript() {
+    if (!container || !hasOlder || initialLoading || pageLoading || olderLoadRequestPending) {
+      updateHistoryNotice();
+      return;
+    }
+
+    const target = container;
+    const previousScrollHeight = target.scrollHeight;
+    const previousScrollTop = target.scrollTop;
+
+    olderLoadRequestPending = true;
+    try {
+      await onLoadOlder();
+      await tick();
+      if (container === target) {
+        const heightDelta = target.scrollHeight - previousScrollHeight;
+        target.scrollTop = previousScrollTop + heightDelta;
+      }
+    } finally {
+      olderLoadRequestPending = false;
+      updateBottomLock();
+      updateHistoryNotice();
+    }
   }
 
   function distanceFromBottom(el: HTMLElement): number {
@@ -841,6 +874,9 @@
 
   function handleTranscriptScroll() {
     updateBottomLock();
+    updateHistoryNotice();
+    if (!container || !isNearTop(container)) return;
+    void requestOlderTranscript();
   }
 
   function shouldShowScrollToBottom(): boolean {
@@ -1056,18 +1092,14 @@
     </div>
   {/if}
 
-  {#if !initialLoading && hasOlder}
-    <div class="history-loader">
-      <button
-        type="button"
-        class="history-loader-button"
-        disabled={pageLoading}
-        onclick={requestOlderTranscript}
-      >
-        {pageLoading
-          ? t("chatTranscript.loadingEarlierMessages")
-          : t("chatTranscript.loadEarlierMessages")}
-      </button>
+  {#if !initialLoading && (pageLoading || olderLoadRequestPending || showTranscriptEndNotice)}
+    <div class="history-loader" role="status" aria-live="polite">
+      {#if pageLoading || olderLoadRequestPending}
+        <span class="history-loader-spinner" aria-hidden="true"></span>
+        <span>{t("chatTranscript.loadingEarlierMessages")}</span>
+      {:else}
+        <span>{t("chatTranscript.noEarlierMessages")}</span>
+      {/if}
     </div>
   {/if}
 
@@ -1619,28 +1651,28 @@
 
   .history-loader {
     display: flex;
+    align-items: center;
     justify-content: center;
+    gap: 8px;
     width: 100%;
+    min-height: 32px;
+    color: var(--text-subtle);
+    font-size: 0.74rem;
   }
 
-  .history-loader-button {
+  .history-loader-spinner {
+    width: 14px;
+    height: 14px;
     border: 1px solid var(--border);
     border-radius: 999px;
-    background: var(--panel);
-    color: var(--text-subtle);
-    padding: 8px 14px;
-    font-size: 0.74rem;
-    cursor: pointer;
+    border-top-color: var(--text-subtle);
+    animation: history-loader-spin 0.8s linear infinite;
   }
 
-  .history-loader-button:hover:not(:disabled) {
-    border-color: var(--border-strong);
-    color: var(--text);
-  }
-
-  .history-loader-button:disabled {
-    opacity: 0.7;
-    cursor: progress;
+  @keyframes history-loader-spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .message-row {

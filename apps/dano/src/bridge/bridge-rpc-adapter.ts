@@ -2151,7 +2151,7 @@ function isBootstrapTranscriptMessage(message: RpcTranscriptMessage): boolean {
 }
 
 function normalizeTranscriptPageLimit(limit: unknown): number {
-  if (typeof limit !== "number" || !Number.isFinite(limit)) return 40;
+  if (typeof limit !== "number" || !Number.isFinite(limit)) return 80;
   return Math.min(100, Math.max(1, Math.trunc(limit)));
 }
 
