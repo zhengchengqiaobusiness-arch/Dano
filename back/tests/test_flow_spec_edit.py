@@ -6,8 +6,10 @@ import pytest
 
 from dano.execution.page.flow_spec import (
     FlowSpec, FlowStep, FlowLink, ParamField, SelectBinding, FlowCapability,
+    CapabilityDependency, CapabilityField, CapabilityRelation,
     apply_flow_edits, validate_flow_spec, _infer_type_from_value,
     add_llm_review_recommendations, refresh_review_items, flow_spec_to_api_request,
+    capability_to_flow_spec_view, compile_capability_to_api_request, flow_spec_capability_contracts,
     flow_spec_to_client,
     auto_fix_flow_spec, run_recording_pi_loop,
 )
@@ -1126,6 +1128,150 @@ def test_capability_validation_drops_stale_missing_node_step():
     assert not any("未绑定有效接口步骤" in x for x in report["errors"])
 
 
+def test_capability_validation_reports_p1_internal_layers_as_warnings():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[
+            FlowStep(
+                step_id="read",
+                method="GET",
+                url="/api/read",
+                path="/api/read",
+                response_json={"data": {"id": "u-1"}},
+            ),
+            FlowStep(
+                step_id="write",
+                method="POST",
+                url="/api/write",
+                path="/api/write",
+                body_source='{"name":"alice","userId":"u-1"}',
+                params=[
+                    ParamField(path="name", key="name", value="alice", type="string", required=True),
+                    ParamField(
+                        path="userId",
+                        key="userId",
+                        value="u-1",
+                        type="string",
+                        required=True,
+                        category="runtime_var",
+                        source_kind="previous_response",
+                        source={"step_id": "read", "path": "data.id"},
+                    ),
+                ],
+                success_rule={"path": "code", "equals": 0},
+            ),
+        ],
+        capabilities=[FlowCapability(
+            name="submit_user",
+            kind="submit",
+            step_ids=["read", "write"],
+            nodes=[
+                {"id": "call_read", "type": "call", "step_id": "read"},
+                {"id": "call_write", "type": "call", "step_id": "write"},
+                {"id": "return_result", "type": "return", "from": "write", "path": "response"},
+            ],
+            fields=[
+                CapabilityField(
+                    field_id="request_field:write:missing",
+                    scope="request_field",
+                    path="missing",
+                    key="missing",
+                    step_id="write",
+                    locked=True,
+                )
+            ],
+            dependencies=[
+                CapabilityDependency(
+                    dependency_id="dep_bad_target",
+                    source={"step_id": "read", "path": "data.id"},
+                    target={"step_id": "write", "path": "missing"},
+                    locked=True,
+                )
+            ],
+            output_mapping=[{
+                "kind": "final_response",
+                "step_id": "outside",
+                "response_path": "response",
+            }],
+            confirmed=True,
+            requires_human_confirm=False,
+        )],
+    )
+
+    report = validate_flow_spec(spec)
+    cap_report = report["capability_validation"]
+
+    assert report["passed"] is True
+    assert "capability_internal" in cap_report
+    assert "capability_relations" in cap_report
+    assert "skill_level" in cap_report
+    internal_codes = {
+        item["code"]
+        for cap in cap_report["capability_internal"]["capabilities"]
+        for item in cap["warnings"]
+    }
+    assert "capability_field_path_missing" in internal_codes
+    assert "capability_dependency_endpoint_missing" in internal_codes
+    assert "capability_output_mapping_uninterpretable" in internal_codes
+
+
+def test_capability_relation_type_mismatch_is_p1_warning_not_publish_gate():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(
+            step_id="write",
+            method="POST",
+            url="/api/write",
+            path="/api/write",
+            body_source='{"items":[]}',
+            params=[ParamField(path="items", key="items", value="", type="array", required=True)],
+            success_rule={"path": "code", "equals": 0},
+        )],
+        capabilities=[
+            FlowCapability(
+                name="read_count",
+                kind="submit",
+                step_ids=["write"],
+                nodes=[
+                    {"id": "call_write", "type": "call", "step_id": "write"},
+                    {"id": "return_result", "type": "return", "from": "write", "path": "response"},
+                ],
+                output_schema={"type": "object", "properties": {"count": {"type": "number"}}},
+                confirmed=True,
+                requires_human_confirm=False,
+            ),
+            FlowCapability(
+                name="submit_items",
+                kind="submit",
+                step_ids=["write"],
+                nodes=[
+                    {"id": "call_write", "type": "call", "step_id": "write"},
+                    {"id": "return_result", "type": "return", "from": "write", "path": "response"},
+                ],
+                inputs=[{"field_id": "in-items", "scope": "input", "path": "items", "key": "items", "type": "array"}],
+                input_schema={"type": "object", "properties": {"items": {"type": "array"}}},
+                output_schema={"type": "object", "properties": {"ok": {"type": "boolean"}}},
+                confirmed=True,
+                requires_human_confirm=False,
+            ),
+        ],
+        capability_relations=[CapabilityRelation(
+            relation_id="rel_bad_type",
+            from_capability="read_count",
+            from_output="count",
+            to_capability="submit_items",
+            to_input="items",
+        )],
+    )
+
+    report = validate_flow_spec(spec)
+    relation_report = report["capability_validation"]["capability_relations"]
+
+    assert report["passed"] is True
+    assert relation_report["relations"][0]["type_compatible"] is False
+    assert relation_report["warnings"][0]["code"] == "capability_relation_type_mismatch"
+
+
 def test_generate_capabilities_edit_is_incremental():
     spec = FlowSpec(
         flow_id="f",
@@ -1224,6 +1370,221 @@ def test_batch_capability_exports_execution_contract_and_entries_schema():
     assert "entries" in cap["input_schema"]["properties"]
     assert any(n.get("type") == "foreach" for n in cap["workflow_nodes"])
     assert api_request["capability_protocol"] == "dano.capability_plan.v1"
+
+
+def _two_capability_compile_spec():
+    status = FlowStep(
+        step_id="status",
+        method="GET",
+        url="/api/status?caseId=C-1",
+        path="/api/status",
+        params=[ParamField(
+            path="query.caseId",
+            key="caseId",
+            value="C-1",
+            type="string",
+            required=True,
+            category="user_param",
+            source_kind="user_input",
+            exposed_to_user=True,
+        )],
+        sample_inputs={"caseId": "C-1"},
+        response_json={"code": 0, "data": {"status": "pending"}},
+    )
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        url="/api/submit",
+        path="/api/submit",
+        body_source='{"caseId":"C-1","reason":"补充材料"}',
+        params=[
+            ParamField(
+                path="caseId",
+                key="caseId",
+                value="C-1",
+                type="string",
+                required=True,
+                category="user_param",
+                source_kind="user_input",
+                exposed_to_user=True,
+            ),
+            ParamField(
+                path="reason",
+                key="reason",
+                value="补充材料",
+                type="string",
+                required=True,
+                category="user_param",
+                source_kind="user_input",
+                exposed_to_user=True,
+            ),
+        ],
+        sample_inputs={"caseId": "C-1", "reason": "补充材料"},
+        response_json={"code": 0, "data": {"processId": "P-1"}},
+    )
+    return FlowSpec(
+        flow_id="cap-compile",
+        steps=[status, submit],
+        capabilities=[
+            FlowCapability(
+                name="query_status",
+                capability_id="cap-query",
+                kind="query_status",
+                step_ids=["status"],
+                nodes=[
+                    {"id": "call_status", "type": "call", "step_id": "status"},
+                    {"id": "return_status", "type": "return", "from": "status", "path": "response.data.status"},
+                ],
+                input_schema={"type": "object", "properties": {"caseId": {"type": "string"}}},
+                output_schema={"type": "object", "properties": {"status": {"type": "string"}}},
+                outputs=[{"field_id": "out-status", "scope": "output", "path": "status", "key": "status"}],
+                output_mapping=[{"kind": "response_path", "step_id": "status", "response_path": "data.status"}],
+                confirmed=True,
+                requires_human_confirm=False,
+            ),
+            FlowCapability(
+                name="submit_batch",
+                capability_id="cap-submit",
+                kind="submit_batch",
+                step_ids=["submit"],
+                nodes=[
+                    {"id": "call_submit", "type": "call", "step_id": "submit"},
+                    {"id": "return_submit", "type": "return", "from": "submit", "path": "response.data.processId"},
+                ],
+                input_schema={
+                    "type": "object",
+                    "properties": {"caseId": {"type": "string"}, "reason": {"type": "string"}},
+                    "required": ["caseId", "reason"],
+                },
+                output_schema={"type": "object", "properties": {"processId": {"type": "string"}}},
+                outputs=[{"field_id": "out-process", "scope": "output", "path": "processId", "key": "processId"}],
+                output_mapping=[{"kind": "response_path", "step_id": "submit", "response_path": "data.processId"}],
+                confirmed=True,
+                requires_human_confirm=False,
+            ),
+        ],
+    )
+
+
+def _compiled_step_ids(api_request):
+    return [s["step_id"] for s in api_request.get("steps") or [api_request]]
+
+
+def _report_text(report):
+    chunks = list(report.get("errors") or [])
+    chunks.extend(report.get("warnings") or [])
+    cap_report = report.get("capability_validation") or {}
+    chunks.extend(cap_report.get("errors") or [])
+    chunks.extend(cap_report.get("warnings") or [])
+    for layer in (cap_report.get("layers") or {}).values():
+        chunks.extend(layer.get("errors") or [])
+        chunks.extend(layer.get("warnings") or [])
+    for key in ("capability_internal", "capability_relations", "skill_level"):
+        layer = cap_report.get(key) or {}
+        chunks.append(layer)
+        chunks.extend(layer.get("errors") or [])
+        chunks.extend(layer.get("warnings") or [])
+    for cap in cap_report.get("capabilities") or []:
+        chunks.extend(cap.get("errors") or [])
+        chunks.extend(cap.get("warnings") or [])
+    for rel in cap_report.get("relations") or []:
+        chunks.extend(rel.get("errors") or [])
+        chunks.extend(rel.get("warnings") or [])
+    return "\n".join(str(x) for x in chunks)
+
+
+def test_flow_spec_to_api_request_can_compile_single_capability_without_changing_full_export():
+    spec = _two_capability_compile_spec()
+
+    full, full_errors = flow_spec_to_api_request(spec)
+    scoped, scoped_errors = flow_spec_to_api_request(spec, capability_name="query_status")
+    direct, direct_errors = compile_capability_to_api_request(spec, capability_id="cap-query")
+    full_again, full_again_errors = flow_spec_to_api_request(spec)
+
+    assert full_errors == []
+    assert full_again_errors == []
+    assert scoped_errors == []
+    assert direct_errors == []
+    assert _compiled_step_ids(full) == ["status", "submit"]
+    assert [c["name"] for c in full["capabilities"]] == ["query_status", "submit_batch"]
+    assert full_again == full
+
+    assert _compiled_step_ids(scoped) == ["status"]
+    assert [c["name"] for c in scoped["capabilities"]] == ["query_status"]
+    assert list(scoped["workflow_nodes"]) == ["query_status"]
+    assert scoped["capabilities"][0]["compiled_step_ids"] == ["status"]
+    assert direct["selected_capability"]["name"] == "query_status"
+
+
+def test_capability_validation_reports_three_layers_and_bad_dependency_output_relation():
+    spec = _two_capability_compile_spec()
+    spec.capabilities[1].dependencies = [CapabilityDependency(
+        dependency_id="bad-dep",
+        type="response_to_request",
+        source={"step_id": "missing_status", "path": "data.status"},
+        target={"step_id": "submit", "path": "caseId"},
+        confirmed=True,
+        locked=True,
+    )]
+    spec.capabilities[1].output_mapping = [{
+        "kind": "response_path",
+        "step_id": "missing_submit",
+        "response_path": "data.processId",
+    }]
+    spec.capability_relations = [CapabilityRelation(
+        relation_id="bad-rel",
+        type="suggested_call_chain",
+        from_capability="query_status",
+        from_output="missingStatus",
+        to_capability="submit_batch",
+        to_input="missingInput",
+        confirmed=True,
+    )]
+
+    report = validate_flow_spec(spec)
+    cap_report = report["capability_validation"]
+    text = _report_text(report)
+
+    assert {"capability_internal", "capability_relations", "skill_level"} <= set(cap_report)
+    assert "bad-dep" in text and "missing_status" in text
+    assert "missing_submit" in text and "output" in text
+    assert "bad-rel" in text and "missingStatus" in text and "missingInput" in text
+
+
+def test_legacy_flow_spec_without_capabilities_keeps_single_request_api_shape():
+    spec = FlowSpec(
+        flow_id="legacy-single",
+        steps=[FlowStep(
+            step_id="legacy_submit",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            body_source='{"reason":"old"}',
+            params=[ParamField(
+                path="reason",
+                key="reason",
+                value="old",
+                type="string",
+                required=True,
+                category="user_param",
+                source_kind="user_input",
+                exposed_to_user=True,
+            )],
+            sample_inputs={"reason": "old"},
+        )],
+    )
+
+    api_request, errors = flow_spec_to_api_request(spec)
+
+    assert errors == []
+    assert "steps" not in api_request
+    assert "capabilities" not in api_request
+    assert "capability_protocol" not in api_request
+    assert api_request["method"] == "POST"
+    assert api_request["path"] == "/api/submit"
+    assert api_request["body_template"] == {"reason": "{{reason}}"}
+    assert api_request["params"] == ["reason"]
+    assert api_request["sample_inputs"] == {"reason": "old"}
 
 
 def test_flow_spec_to_api_request_syncs_goal_required_inputs_after_param_rename():

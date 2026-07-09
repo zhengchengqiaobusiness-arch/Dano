@@ -58,7 +58,7 @@ class ParamField(BaseModel):
     path: str
     key: str
     label: str = ""
-    value: str = ""
+    value: Any = ""
     type: str = "string"  # string/number/boolean/datetime/date/array/object/list-enum
     required: bool = True
     confidence: float = 0.0
@@ -2585,13 +2585,34 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
     """让 capability 的输入输出 schema 始终跟当前字段/响应保持一致。"""
     if not spec.capabilities:
         return spec
+
+    def merge_schema(base: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+        if not current:
+            return base
+        if not base:
+            return current
+        merged = dict(base)
+        props = dict(base.get("properties") or {})
+        props.update(current.get("properties") or {})
+        merged["properties"] = props
+        required: list[str] = []
+        for name in list(base.get("required") or []) + list(current.get("required") or []):
+            if name not in required:
+                required.append(name)
+        if required:
+            merged["required"] = required
+        for key, value in current.items():
+            if key not in {"properties", "required"}:
+                merged[key] = value
+        return merged
+
     by_id = {s.step_id: s for s in spec.steps}
     for cap in spec.capabilities:
         cap_steps = [by_id[sid] for sid in (cap.step_ids or []) if sid in by_id]
         if not cap_steps:
             continue
         params = [p for st in cap_steps for p in (st.params or [])]
-        cap.input_schema = _capability_input_schema(params)
+        cap.input_schema = merge_schema(_capability_input_schema(params), cap.input_schema or {})
         if _capability_is_batch(spec, cap):
             item_schema = _capability_input_schema(params)
             props = dict(cap.input_schema.get("properties") or {})
@@ -2607,7 +2628,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
             }
         last_response = next((st.response_json for st in reversed(cap_steps) if st.response_json is not None), None)
         if last_response is not None:
-            cap.output_schema = _schema_from_response_value(last_response)
+            cap.output_schema = merge_schema(_schema_from_response_value(last_response), cap.output_schema or {})
     return sync_capability_scoped_views(spec)
 
 
@@ -3453,6 +3474,149 @@ def _capability_execution_contract(spec: FlowSpec, cap: FlowCapability) -> dict[
     }
 
 
+def _capability_field_summary(field: CapabilityField) -> dict[str, Any]:
+    return {
+        "field_id": field.field_id,
+        "scope": field.scope,
+        "display_name": field.display_name,
+        "key": field.key,
+        "path": field.path,
+        "type": field.type,
+        "required": bool(field.required),
+        "step_id": field.step_id,
+        "request_id": field.request_id,
+        "request_index": field.request_index,
+        "source_kind": field.source_kind,
+        "exposed_to_caller": bool(field.exposed_to_caller),
+        "confidence": float(field.confidence or 0.0),
+        "confirmed": bool(field.confirmed),
+        "locked": bool(field.locked),
+    }
+
+
+def _capability_dependency_summary(dep: CapabilityDependency) -> dict[str, Any]:
+    return {
+        "dependency_id": dep.dependency_id,
+        "type": dep.type,
+        "source": dict(dep.source or {}),
+        "target": dict(dep.target or {}),
+        "confidence": float(dep.confidence or 0.0),
+        "confirmed": bool(dep.confirmed),
+        "locked": bool(dep.locked),
+        "reason": dep.reason,
+    }
+
+
+def _capability_step_summary(step: FlowStep) -> dict[str, Any]:
+    return {
+        "step_id": step.step_id,
+        "name": step.name,
+        "method": (step.method or "").upper(),
+        "path": step.path or step.url,
+        "role": (step.source_meta or {}).get("role") or step.semantic_role,
+        "request_id": (step.source_meta or {}).get("request_id"),
+        "request_index": (step.source_meta or {}).get("request_index"),
+    }
+
+
+def _select_flow_capability(
+    spec: FlowSpec,
+    *,
+    capability_id: str | None = None,
+    capability_name: str | None = None,
+) -> FlowCapability | None:
+    cap_id = str(capability_id or "").strip()
+    cap_name = str(capability_name or "").strip()
+    if not cap_id and not cap_name:
+        return None
+    for cap in spec.capabilities or []:
+        if cap_id and cap.capability_id == cap_id:
+            return cap
+        if cap_name and cap.name == cap_name:
+            return cap
+    return None
+
+
+def _capability_contract_view(
+    spec: FlowSpec,
+    capability: FlowCapability | None = None,
+    *,
+    capability_id: str | None = None,
+    capability_name: str | None = None,
+) -> dict[str, Any]:
+    """Build a capability-centric contract view for manifest/runtime consumers."""
+    current = ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(
+        spec.model_copy(deep=True),
+        prefer_request_facts=False,
+    )))
+    _normalize_capability_references(current)
+    cap = capability.model_copy(deep=True) if capability is not None else _select_flow_capability(
+        current,
+        capability_id=capability_id,
+        capability_name=capability_name,
+    )
+    if cap is None:
+        raise ValueError("capability not found")
+    step_by_id = {s.step_id: s for s in current.steps}
+    step_ids = [sid for sid in _capability_node_step_ids(cap) if sid in step_by_id]
+    steps = [step_by_id[sid] for sid in step_ids]
+    return {
+        "protocol": "dano.capability_contract.v1",
+        "capability_id": cap.capability_id,
+        "name": cap.name,
+        "title": cap.title,
+        "intent": cap.intent,
+        "kind": cap.kind,
+        "status": cap.status,
+        "confirmed": bool(cap.confirmed),
+        "confidence": float(cap.confidence or 0.0),
+        "requires_human_confirm": bool(cap.requires_human_confirm),
+        "step_ids": step_ids,
+        "steps": [_capability_step_summary(st) for st in steps],
+        "request_refs": [ref.model_dump(exclude_none=True) for ref in (cap.request_refs or [])],
+        "input": {
+            "schema": dict(cap.input_schema or {}),
+            "fields": [_capability_field_summary(f) for f in (cap.inputs or [])],
+        },
+        "output": {
+            "schema": dict(cap.output_schema or {}),
+            "fields": [_capability_field_summary(f) for f in (cap.outputs or [])],
+            "mapping": [dict(m) for m in (cap.output_mapping or []) if isinstance(m, dict)],
+        },
+        "fields": {
+            "all": [_capability_field_summary(f) for f in (cap.fields or [])],
+            "request": [_capability_field_summary(f) for f in (cap.request_fields or [])],
+            "internal": [_capability_field_summary(f) for f in (cap.internal_fields or [])],
+            "computed": [_capability_field_summary(f) for f in (cap.computed_fields or [])],
+        },
+        "dependencies": [_capability_dependency_summary(dep) for dep in (cap.dependencies or [])],
+        "execution_contract": _capability_execution_contract(current, cap),
+        "preconditions": [dict(p) for p in (cap.preconditions or []) if isinstance(p, dict)],
+        "caller_responsibilities": list(cap.caller_responsibilities or []),
+        "skill_responsibilities": list(cap.skill_responsibilities or []),
+    }
+
+
+def _capability_contract_views(
+    spec: FlowSpec,
+    *,
+    capability_id: str | None = None,
+    capability_name: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return capability contract summaries, optionally scoped to one capability."""
+    current = ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(
+        spec.model_copy(deep=True),
+        prefer_request_facts=False,
+    )))
+    _normalize_capability_references(current)
+    if capability_id or capability_name:
+        cap = _select_flow_capability(current, capability_id=capability_id, capability_name=capability_name)
+        if cap is None:
+            return []
+        return [_capability_contract_view(current, cap)]
+    return [_capability_contract_view(current, cap) for cap in (current.capabilities or [])]
+
+
 def _capability_to_api_dict(spec: FlowSpec, cap: FlowCapability) -> dict[str, Any]:
     out = cap.model_dump(exclude_none=True)
     contract = _capability_execution_contract(spec, cap)
@@ -3574,6 +3738,114 @@ def _request_graph_key_from_entry(entry: dict[str, Any]) -> str:
     return f"sig:{(entry.get('method') or '').upper()} {_request_path(entry)}"
 
 
+def _capability_ref_key(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _capability_request_indexes(spec: FlowSpec) -> tuple[set[str], set[str]]:
+    request_ids: set[str] = set()
+    request_indexes: set[str] = set()
+    for fact in (spec.request_facts.requests or []):
+        if fact.request_id:
+            request_ids.add(str(fact.request_id))
+        if fact.request_index is not None:
+            request_indexes.add(str(fact.request_index))
+    for item in _request_graph_items(spec):
+        if item.get("request_id"):
+            request_ids.add(str(item.get("request_id")))
+        if item.get("request_index") is not None:
+            request_indexes.add(str(item.get("request_index")))
+    return request_ids, request_indexes
+
+
+def _capability_schema_field_type(schema: dict[str, Any], field: str) -> str:
+    props = (schema or {}).get("properties") or {}
+    item = props.get(field) if isinstance(props, dict) else None
+    if isinstance(item, dict):
+        return str(item.get("type") or "")
+    return ""
+
+
+def _capability_field_type(cap: FlowCapability, field_name: str, *, direction: str) -> str:
+    field_name = _capability_ref_key(field_name)
+    fields = cap.outputs if direction == "output" else cap.inputs
+    for field in fields or []:
+        if field_name in {field.path, field.key, field.display_name, field.field_id}:
+            return str(field.type or "")
+    schema = cap.output_schema if direction == "output" else cap.input_schema
+    schema_type = _capability_schema_field_type(schema, field_name)
+    if schema_type:
+        return schema_type
+    if direction == "output":
+        for mapping in cap.output_mapping or []:
+            if not isinstance(mapping, dict):
+                continue
+            names = {
+                str(mapping.get("name") or ""),
+                str(mapping.get("field") or ""),
+                str(mapping.get("response_path") or ""),
+                str(mapping.get("path") or ""),
+            }
+            if field_name and field_name in names:
+                return "object" if field_name in {"response", "raw", "detail"} else "string"
+    return ""
+
+
+def _capability_types_compatible(source_type: str, target_type: str) -> bool:
+    source = (source_type or "unknown").lower()
+    target = (target_type or "unknown").lower()
+    if not source or not target or "unknown" in {source, target}:
+        return True
+    aliases = {
+        "integer": "number",
+        "float": "number",
+        "double": "number",
+        "enum": "string",
+        "list-enum": "array",
+    }
+    source = aliases.get(source, source)
+    target = aliases.get(target, target)
+    if source == target:
+        return True
+    if target == "string":
+        return source in {"number", "boolean", "date", "datetime"}
+    if target == "object":
+        return True
+    return False
+
+
+def _capability_step_param_exists(step: FlowStep | None, path: str) -> bool:
+    if step is None:
+        return False
+    normalized = _strip_body_prefix(path)
+    for param in step.params or []:
+        if path in {param.path, param.key, param.label} or normalized in {param.path, param.key, param.label}:
+            return True
+    return False
+
+
+def _capability_response_path_exists(step: FlowStep | None, path: str) -> bool:
+    if step is None or step.response_json is None:
+        return True
+    normalized = _strip_body_prefix(path)
+    if normalized in {"", "response", "$", "."}:
+        return True
+    return _flow_path_lookup(step.response_json, normalized) is not _FLOW_PATH_MISSING
+
+
+def _capability_warning(
+    section: dict[str, Any],
+    warnings: list[str],
+    *,
+    code: str,
+    message: str,
+    target: dict[str, Any],
+) -> None:
+    entry = {"code": code, "message": message, "target": target}
+    section.setdefault("warnings", []).append(entry)
+    warnings.append(message)
+
+
 def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
     spec = ensure_recorded_goal(_sync_capability_io_schemas(spec.model_copy(deep=True)))
     _normalize_capability_references(spec)
@@ -3603,8 +3875,37 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
     checked_requests: list[dict[str, Any]] = []
     checked_manual_requests: list[dict[str, Any]] = []
     capability_reports: list[dict[str, Any]] = []
+    capability_internal = {
+        "passed": True,
+        "errors": [],
+        "warnings": [],
+        "capabilities": [],
+    }
+    capability_relations = {
+        "passed": True,
+        "errors": [],
+        "warnings": [],
+        "relations": [],
+    }
+    skill_level = {
+        "passed": True,
+        "errors": [],
+        "warnings": [],
+        "summary": {
+            "capabilities": len(caps),
+            "confirmed_capabilities": len([c for c in caps if c.confirmed]),
+            "relations": len(spec.capability_relations or []),
+        },
+    }
     if spec.steps and not caps:
         warnings.append("FlowSpec 未生成业务能力编排，前端只能按底层接口展示")
+        _capability_warning(
+            skill_level,
+            warnings,
+            code="missing_capabilities",
+            message="Skill 层未生成 capability，P1 仅记录为能力编排缺口",
+            target={"kind": "flow", "flow_id": spec.flow_id},
+        )
         return {
             "passed": False,
             "errors": errors,
@@ -3613,15 +3914,30 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
             "checked_requests": checked_requests,
             "checked_manual_requests": checked_manual_requests,
             "unused_high_confidence_requests": high_conf_unused,
+            "capability_internal": capability_internal,
+            "capability_relations": capability_relations,
+            "skill_level": skill_level,
         }
 
     allowed_kinds = {"query_status", "list_options", "validate_batch", "submit_batch", "submit"}
     allowed_nodes = {"call", "map", "filter", "condition", "foreach", "select", "return"}
     seen_names: set[str] = set()
+    request_ids, request_indexes = _capability_request_indexes(spec)
     for cap in caps:
         label = cap.name or cap.kind or "<unnamed>"
         cap_errors: list[str] = []
         cap_warnings: list[str] = []
+        internal_section = {
+            "name": cap.name,
+            "capability_id": cap.capability_id,
+            "step_ids": [],
+            "request_refs": [],
+            "fields": [],
+            "dependencies": [],
+            "outputs": [],
+            "warnings": [],
+            "errors": [],
+        }
         if not cap.name:
             cap_errors.append("Capability 缺少 name")
         elif cap.name in seen_names:
@@ -3644,6 +3960,11 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
             cap_warnings.append(f"Capability `{label}` 尚未确认，需要人工确认后再作为稳定业务能力暴露")
 
         cap_steps = [step_by_id[sid] for sid in node_step_ids if sid in step_by_id]
+        cap_step_id_set = {s.step_id for s in cap_steps}
+        internal_section["step_ids"] = [
+            {"step_id": sid, "exists": sid in step_by_id}
+            for sid in node_step_ids
+        ]
         cap_request_keys: list[str] = []
         for st in cap_steps:
             key = _step_request_key(st)
@@ -3659,6 +3980,169 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                 checked_requests.append(req_item)
                 if req_item["manual_added"]:
                     checked_manual_requests.append(req_item)
+
+        for ref in cap.request_refs or []:
+            ref_id = _capability_ref_key(ref.request_id)
+            ref_index = _capability_ref_key(ref.request_index)
+            step_exists = not ref.step_id or ref.step_id in cap_step_id_set
+            request_exists = (
+                (not ref_id and not ref_index)
+                or (ref_id and ref_id in request_ids)
+                or (ref_index and ref_index in request_indexes)
+            )
+            internal_section["request_refs"].append({
+                "request_id": ref.request_id,
+                "request_index": ref.request_index,
+                "step_id": ref.step_id,
+                "step_exists": step_exists,
+                "request_exists": request_exists,
+            })
+            if not step_exists:
+                _capability_warning(
+                    internal_section,
+                    warnings,
+                    code="capability_request_ref_step_missing",
+                    message=f"Capability `{label}` request_ref 指向能力闭包外步骤 `{ref.step_id}`",
+                    target={"kind": "capability_request_ref", "capability": label, "step_id": ref.step_id},
+                )
+            if not request_exists:
+                _capability_warning(
+                    internal_section,
+                    warnings,
+                    code="capability_request_ref_missing",
+                    message=f"Capability `{label}` request_ref `{ref_id or ref_index}` 找不到对应请求事实",
+                    target={"kind": "capability_request_ref", "capability": label, "request_id": ref_id, "request_index": ref_index},
+                )
+
+        input_props = ((cap.input_schema or {}).get("properties") or {})
+        seen_field_entries: set[tuple[str, str, str, str]] = set()
+        for field in [
+            *(cap.fields or []),
+            *(cap.inputs or []),
+            *(cap.request_fields or []),
+            *(cap.internal_fields or []),
+            *(cap.computed_fields or []),
+            *(cap.outputs or []),
+        ]:
+            field_key = (field.field_id, field.scope, field.step_id, field.path or field.key)
+            if field_key in seen_field_entries:
+                continue
+            seen_field_entries.add(field_key)
+            field_name = field.key or field.path or field.display_name or field.field_id
+            field_step = step_by_id.get(field.step_id or "")
+            if field.step_id and field.step_id not in cap_step_id_set:
+                _capability_warning(
+                    internal_section,
+                    warnings,
+                    code="capability_field_step_outside_closure",
+                    message=f"Capability `{label}` 字段 `{field_name}` 绑定到能力闭包外步骤 `{field.step_id}`",
+                    target={"kind": "capability_field", "capability": label, "field_id": field.field_id, "step_id": field.step_id},
+                )
+            field_path_exists = True
+            if field.scope in {"request_field", "internal"} and field.step_id:
+                field_path_exists = _capability_step_param_exists(field_step, field.path or field.key)
+            elif field.scope == "input" and field_name:
+                field_path_exists = field_name in input_props or _capability_step_param_exists(field_step, field.path or field.key)
+            internal_section["fields"].append({
+                "field_id": field.field_id,
+                "scope": field.scope,
+                "path": field.path,
+                "key": field.key,
+                "step_id": field.step_id,
+                "path_exists": field_path_exists,
+            })
+            if not field_path_exists:
+                _capability_warning(
+                    internal_section,
+                    warnings,
+                    code="capability_field_path_missing",
+                    message=f"Capability `{label}` 字段 `{field_name}` 找不到对应字段路径",
+                    target={"kind": "capability_field", "capability": label, "field_id": field.field_id, "path": field.path},
+                )
+
+        for dep in cap.dependencies or []:
+            source = dep.source or {}
+            target = dep.target or {}
+            source_step_id = str(source.get("step_id") or "")
+            target_step_id = str(target.get("step_id") or "")
+            source_step = step_by_id.get(source_step_id)
+            target_step = step_by_id.get(target_step_id)
+            source_in_closure = bool(source_step_id and source_step_id in cap_step_id_set)
+            target_in_closure = bool(target_step_id and target_step_id in cap_step_id_set)
+            source_path = str(source.get("path") or "")
+            target_path = str(target.get("path") or "")
+            source_exists = _capability_response_path_exists(source_step, source_path)
+            target_exists = _capability_step_param_exists(target_step, target_path)
+            internal_section["dependencies"].append({
+                "dependency_id": dep.dependency_id,
+                "source_step_id": source_step_id,
+                "target_step_id": target_step_id,
+                "source_in_closure": source_in_closure,
+                "target_in_closure": target_in_closure,
+                "source_path_exists": source_exists,
+                "target_path_exists": target_exists,
+            })
+            if not source_in_closure or not target_in_closure:
+                _capability_warning(
+                    internal_section,
+                    warnings,
+                    code="capability_dependency_outside_closure",
+                    message=f"Capability `{label}` 依赖 `{dep.dependency_id}` 端点不都在能力闭包内",
+                    target={"kind": "capability_dependency", "capability": label, "dependency_id": dep.dependency_id},
+                )
+            if not source_exists or not target_exists:
+                _capability_warning(
+                    internal_section,
+                    warnings,
+                    code="capability_dependency_endpoint_missing",
+                    message=f"Capability `{label}` 依赖 `{dep.dependency_id}` 的 source/target 路径无法确认存在",
+                    target={"kind": "capability_dependency", "capability": label, "dependency_id": dep.dependency_id},
+                )
+
+        for idx, mapping in enumerate(cap.output_mapping or []):
+            output_entry = {"index": idx, "interpretable": True}
+            if not isinstance(mapping, dict):
+                output_entry.update({"interpretable": False, "reason": "not_object"})
+                internal_section["outputs"].append(output_entry)
+                _capability_warning(
+                    internal_section,
+                    warnings,
+                    code="capability_output_mapping_invalid",
+                    message=f"Capability `{label}` output_mapping[{idx}] 不是对象，无法解释输出",
+                    target={"kind": "capability_output", "capability": label, "index": idx},
+                )
+                continue
+            out_step_id = str(mapping.get("step_id") or mapping.get("from") or "")
+            out_path = str(mapping.get("response_path") or mapping.get("path") or mapping.get("field") or "")
+            output_entry.update({"step_id": out_step_id, "path": out_path})
+            if out_step_id and out_step_id not in cap_step_id_set:
+                output_entry["interpretable"] = False
+                output_entry["reason"] = "step_outside_closure"
+            elif out_step_id and not _capability_response_path_exists(step_by_id.get(out_step_id), out_path):
+                output_entry["interpretable"] = False
+                output_entry["reason"] = "response_path_missing"
+            elif not (mapping.get("kind") or out_step_id or out_path or mapping.get("name") or mapping.get("field")):
+                output_entry["interpretable"] = False
+                output_entry["reason"] = "missing_source"
+            internal_section["outputs"].append(output_entry)
+            if not output_entry["interpretable"]:
+                _capability_warning(
+                    internal_section,
+                    warnings,
+                    code="capability_output_mapping_uninterpretable",
+                    message=f"Capability `{label}` output_mapping[{idx}] 无法解释为能力输出",
+                    target={"kind": "capability_output", "capability": label, "index": idx},
+                )
+        if not cap.output_mapping and not cap.output_schema and not any(
+            isinstance(n, dict) and n.get("type") == "return" for n in _iter_capability_nodes(cap.nodes or [])
+        ):
+            _capability_warning(
+                internal_section,
+                warnings,
+                code="capability_output_missing",
+                message=f"Capability `{label}` 缺少 output_schema/output_mapping/return 输出说明",
+                target={"kind": "capability", "capability": label},
+            )
 
         input_props = ((cap.input_schema or {}).get("properties") or {})
         flat_nodes = _iter_capability_nodes(cap.nodes or [])
@@ -3729,6 +4213,7 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                 "errors": cap_errors,
                 "warnings": cap_warnings,
             })
+            capability_internal["capabilities"].append(internal_section)
             continue
 
         if cap.kind in {"submit", "submit_batch"} and not any((s.method or "").upper() in _WRITE_METHODS for s in cap_steps):
@@ -3751,8 +4236,71 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
             "errors": cap_errors,
             "warnings": cap_warnings,
         })
+        capability_internal["capabilities"].append(internal_section)
     dedup_checked = list({r["request_key"]: r for r in checked_requests}.values())
     dedup_manual = list({r["request_key"]: r for r in checked_manual_requests}.values())
+    cap_by_ref: dict[str, FlowCapability] = {}
+    for cap in caps:
+        for key in {cap.name, cap.capability_id}:
+            if key:
+                cap_by_ref[str(key)] = cap
+    for relation in spec.capability_relations or []:
+        from_key = str(relation.from_capability or "")
+        to_key = str(relation.to_capability or "")
+        from_cap = cap_by_ref.get(from_key)
+        to_cap = cap_by_ref.get(to_key)
+        from_type = _capability_field_type(from_cap, relation.from_output, direction="output") if from_cap else ""
+        to_type = _capability_field_type(to_cap, relation.to_input, direction="input") if to_cap else ""
+        compatible = _capability_types_compatible(from_type, to_type)
+        relation_entry = {
+            "relation_id": relation.relation_id,
+            "type": relation.type,
+            "from_capability": relation.from_capability,
+            "from_output": relation.from_output,
+            "from_exists": from_cap is not None,
+            "from_output_type": from_type,
+            "to_capability": relation.to_capability,
+            "to_input": relation.to_input,
+            "to_exists": to_cap is not None,
+            "to_input_type": to_type,
+            "type_compatible": compatible,
+        }
+        capability_relations["relations"].append(relation_entry)
+        if from_cap is None or to_cap is None:
+            _capability_warning(
+                capability_relations,
+                warnings,
+                code="capability_relation_endpoint_missing",
+                message=f"Capability relation `{relation.relation_id}` 指向不存在的 from/to capability",
+                target={"kind": "capability_relation", "relation_id": relation.relation_id},
+            )
+        elif not from_type or not to_type:
+            _capability_warning(
+                capability_relations,
+                warnings,
+                code="capability_relation_field_missing",
+                message=f"Capability relation `{relation.relation_id}` 的 output/input 字段缺少可解析类型",
+                target={"kind": "capability_relation", "relation_id": relation.relation_id},
+            )
+        elif not compatible:
+            _capability_warning(
+                capability_relations,
+                warnings,
+                code="capability_relation_type_mismatch",
+                message=f"Capability relation `{relation.relation_id}` output/input 类型不兼容: {from_type} -> {to_type}",
+                target={"kind": "capability_relation", "relation_id": relation.relation_id},
+            )
+    if caps and not any(c.confirmed for c in caps):
+        _capability_warning(
+            skill_level,
+            warnings,
+            code="no_confirmed_capability",
+            message="Skill 层还没有 confirmed capability，P1 仅作为发布风险提示",
+            target={"kind": "flow", "flow_id": spec.flow_id},
+        )
+    capability_internal["passed"] = not capability_internal["errors"]
+    capability_relations["passed"] = not capability_relations["errors"]
+    skill_level["passed"] = not skill_level["errors"]
     return {
         "passed": not errors,
         "errors": errors,
@@ -3761,6 +4309,9 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
         "checked_requests": dedup_checked,
         "checked_manual_requests": dedup_manual,
         "unused_high_confidence_requests": high_conf_unused,
+        "capability_internal": capability_internal,
+        "capability_relations": capability_relations,
+        "skill_level": skill_level,
     }
 
 
@@ -4750,11 +5301,141 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
     return apir, errors
 
 
-def flow_spec_to_api_request(spec: FlowSpec) -> tuple[dict | None, list[str]]:
+def _find_capability_by_ref(spec: FlowSpec, capability: str | FlowCapability) -> FlowCapability | None:
+    if isinstance(capability, FlowCapability):
+        return capability
+    ref = str(capability or "").strip()
+    if not ref:
+        return None
+    for cap in spec.capabilities or []:
+        if ref in {cap.name, cap.capability_id, cap.title}:
+            return cap
+    return None
+
+
+def capability_to_flow_spec_view(
+    spec: FlowSpec,
+    capability: str | FlowCapability | None = None,
+    *,
+    capability_id: str | None = None,
+    capability_name: str | None = None,
+) -> FlowSpec:
+    """把单个 capability 编译视图投影成旧 FlowSpec 形态。
+
+    P1 阶段不改变旧全量发布路径；这个视图只用于按能力编译/校验。
+    """
+    current = ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(
+        spec.model_copy(deep=True),
+        prefer_request_facts=False,
+    )))
+    ref = capability
+    if ref is None:
+        ref = capability_id or capability_name or ""
+    cap = _find_capability_by_ref(current, ref)
+    if cap is None:
+        raise ValueError(f"capability not found: {ref}")
+    by_step = {s.step_id: s for s in current.steps}
+    step_ids = [sid for sid in _capability_node_step_ids(cap) if sid in by_step]
+    if not step_ids:
+        step_ids = [sid for sid in (cap.step_ids or []) if sid in by_step]
+    keep = set(step_ids)
+    view = current.model_copy(deep=True)
+    view.steps = [s for s in view.steps if s.step_id in keep]
+    view.links = [
+        lk for lk in view.links
+        if lk.source_step_id in keep and lk.target_step_id in keep
+    ]
+    selected_cap = _find_capability_by_ref(view, cap.capability_id) or _find_capability_by_ref(view, cap.name)
+    if selected_cap is None:
+        selected_cap = cap.model_copy(deep=True)
+    selected_cap.step_ids = [sid for sid in step_ids if sid in keep]
+    selected_cap.nodes = [
+        n for n in (selected_cap.nodes or [])
+        if not isinstance(n, dict)
+        or n.get("type") != "call"
+        or str(n.get("step_id") or "") in keep
+    ]
+    view.capabilities = [selected_cap]
+    view.capability_relations = [
+        rel for rel in (view.capability_relations or [])
+        if rel.from_capability in {selected_cap.name, selected_cap.capability_id}
+        or rel.to_capability in {selected_cap.name, selected_cap.capability_id}
+    ]
+    view.meta = {
+        **(view.meta or {}),
+        "compiled_capability": {
+            "name": selected_cap.name,
+            "capability_id": selected_cap.capability_id,
+            "step_ids": selected_cap.step_ids,
+        },
+    }
+    return sync_flow_spec_models(view, prefer_request_facts=False)
+
+
+def flow_spec_capability_contracts(
+    spec: FlowSpec,
+    *,
+    capability_id: str | None = None,
+    capability_name: str | None = None,
+) -> list[dict[str, Any]]:
+    return _capability_contract_views(
+        spec,
+        capability_id=capability_id,
+        capability_name=capability_name,
+    )
+
+
+def compile_capability_to_api_request(
+    spec: FlowSpec,
+    capability: str | FlowCapability | None = None,
+    *,
+    capability_id: str | None = None,
+    capability_name: str | None = None,
+) -> tuple[dict | None, list[str]]:
+    if capability is None and not capability_id and not capability_name:
+        return flow_spec_to_api_request(spec)
+    try:
+        view = capability_to_flow_spec_view(
+            spec,
+            capability,
+            capability_id=capability_id,
+            capability_name=capability_name,
+        )
+    except ValueError as exc:
+        return None, [str(exc)]
+    api_request, errors = flow_spec_to_api_request(view)
+    if api_request is not None:
+        cap = view.capabilities[0] if view.capabilities else None
+        if cap is not None:
+            api_request["selected_capability"] = {
+                "name": cap.name,
+                "capability_id": cap.capability_id,
+                "kind": cap.kind,
+            }
+            contracts = flow_spec_capability_contracts(view, capability_id=cap.capability_id)
+            if contracts:
+                api_request["compiled_capability"] = contracts[0]
+    return api_request, errors
+
+
+def flow_spec_to_api_request(
+    spec: FlowSpec,
+    *,
+    capability: str | FlowCapability | None = None,
+    capability_id: str | None = None,
+    capability_name: str | None = None,
+) -> tuple[dict | None, list[str]]:
     """把编辑后的 FlowSpec 转成 run_request_onboarding 可消费的 api_request。
 
     支持有 body 的写请求，也支持无 body 的 GET 前置步骤(query_template)。
     """
+    if capability is not None or capability_id or capability_name:
+        return compile_capability_to_api_request(
+            spec,
+            capability,
+            capability_id=capability_id,
+            capability_name=capability_name,
+        )
     if not spec.steps:
         return None, ["FlowSpec 没有任何步骤，不能发布"]
     spec = ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(
@@ -4819,6 +5500,7 @@ def flow_spec_to_api_request(spec: FlowSpec) -> tuple[dict | None, list[str]]:
     caps = list(spec.capabilities or [])
     if caps:
         out["capabilities"] = [_capability_to_api_dict(spec, c) for c in caps]
+        out["capability_contracts"] = flow_spec_capability_contracts(spec)
         out["capability_protocol"] = "dano.capability_plan.v1"
         out["workflow_nodes"] = {
             c.name: _capability_execution_contract(spec, c)
