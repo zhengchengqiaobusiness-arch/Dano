@@ -924,7 +924,7 @@
     files: RpcUploadedFileRef[];
     revisionEntryId?: string;
     steer?: boolean;
-  }) {
+  }): Promise<boolean> {
     if (activeDebugSessionPath) {
       pendingRevision = null;
       editQueuedPayload = null;
@@ -936,14 +936,14 @@
         return result.session;
       });
       scheduleDebugStream(activeDebugSessionPath, stream);
-      return;
+      return true;
     }
 
     const compactCommand = parseCompactSlashCommand(payload.message);
     if (compactCommand) {
       pendingRevision = null;
       bridge.compactSession(compactCommand.customInstructions).catch(() => {});
-      return;
+      return true;
     }
 
     if (payload.revisionEntryId) {
@@ -952,16 +952,16 @@
           type: "navigate_tree",
           entryId: payload.revisionEntryId,
         });
-        if (!response.success) return;
+        if (!response.success) return false;
         const result = response.data as { cancelled?: boolean } | undefined;
-        if (result?.cancelled) return;
+        if (result?.cancelled) return false;
       } catch {
-        return;
+        return false;
       }
     }
 
     pendingRevision = null;
-    bridge.sendPrompt(
+    return bridge.sendPrompt(
       payload.message,
       payload.images,
       payload.files,
