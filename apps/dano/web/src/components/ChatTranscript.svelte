@@ -54,6 +54,12 @@
     createChatTranscriptBlockState,
     createChatTranscriptLightboxState,
   } from "./chatTranscriptBlockState.svelte";
+  import {
+    nextTopLoadArmed,
+    restoredScrollTop,
+    shouldAutoLoadOlderTranscript,
+    shouldShowTranscriptStartNotice,
+  } from "./chatTranscriptPagination";
   import { classifyReadToolBlock } from "../utils/toolBlock";
   import DiffView from "./DiffView.svelte";
   import HighlightedCode from "./HighlightedCode.svelte";
@@ -78,7 +84,7 @@
     isCompacting = false,
     showMessageIds = false,
     allowRevision = false,
-    onLoadOlder = () => {},
+    onLoadOlder = () => false,
     onRevise = (_: { entryId: string; text: string; preview: string; hasImages: boolean; images: RpcImageContent[] }) => {},
     onOpenFileReference = (_: { path: string; lineNumber: number }) => {},
     readWorkspaceFile,
@@ -98,7 +104,7 @@
     isCompacting?: boolean;
     showMessageIds?: boolean;
     allowRevision?: boolean;
-    onLoadOlder?: () => void | Promise<void>;
+    onLoadOlder?: () => boolean | Promise<boolean>;
     onRevise?: (payload: { entryId: string; text: string; preview: string; hasImages: boolean; images: RpcImageContent[] }) => void;
     onOpenFileReference?: (payload: { path: string; lineNumber: number }) => void;
     readWorkspaceFile?: (path: string) => Promise<{ content: string }>;
@@ -121,6 +127,8 @@
   let shouldStickToBottom = $state(true);
   let showTranscriptEndNotice = $state(false);
   let olderLoadRequestPending = $state(false);
+  let topLoadArmed = $state(true);
+  let hasReachedTranscriptStart = $state(false);
   let stickToBottomFrame = 0;
   let lastSessionPath: string | null | undefined = undefined;
 
@@ -813,12 +821,31 @@
 
   function updateHistoryNotice() {
     if (!container) return;
-    showTranscriptEndNotice =
-      !initialLoading && messages.length > 0 && !hasOlder && isNearTop(container);
+    showTranscriptEndNotice = shouldShowTranscriptStartNotice({
+      hasReachedTranscriptStart,
+      isNearTop: isNearTop(container),
+      messagesLength: messages.length,
+      initialLoading,
+    });
   }
 
   async function requestOlderTranscript() {
-    if (!container || !hasOlder || initialLoading || pageLoading || olderLoadRequestPending) {
+    if (!container) {
+      updateHistoryNotice();
+      return;
+    }
+
+    const nearTop = isNearTop(container);
+    if (
+      !shouldAutoLoadOlderTranscript({
+        isNearTop: nearTop,
+        topLoadArmed,
+        hasOlder,
+        initialLoading,
+        pageLoading,
+        requestPending: olderLoadRequestPending,
+      })
+    ) {
       updateHistoryNotice();
       return;
     }
@@ -827,13 +854,25 @@
     const previousScrollHeight = target.scrollHeight;
     const previousScrollTop = target.scrollTop;
 
+    topLoadArmed = false;
     olderLoadRequestPending = true;
     try {
-      await onLoadOlder();
+      const loaded = await onLoadOlder();
+      if (!loaded) {
+        await tick();
+        if (!hasOlder) hasReachedTranscriptStart = true;
+        return;
+      }
+      hasReachedTranscriptStart = false;
       await tick();
       if (container === target) {
-        const heightDelta = target.scrollHeight - previousScrollHeight;
-        target.scrollTop = previousScrollTop + heightDelta;
+        const nextScrollTop = restoredScrollTop({
+          loaded,
+          previousScrollTop,
+          previousScrollHeight,
+          nextScrollHeight: target.scrollHeight,
+        });
+        if (nextScrollTop !== null) target.scrollTop = nextScrollTop;
       }
     } finally {
       olderLoadRequestPending = false;
@@ -874,6 +913,14 @@
 
   function handleTranscriptScroll() {
     updateBottomLock();
+    if (container) {
+      const nearTop = isNearTop(container);
+      topLoadArmed = nextTopLoadArmed({
+        isNearTop: nearTop,
+        current: topLoadArmed,
+      });
+      if (nearTop && !hasOlder) hasReachedTranscriptStart = true;
+    }
     updateHistoryNotice();
     if (!container || !isNearTop(container)) return;
     void requestOlderTranscript();
@@ -988,6 +1035,9 @@
 
     lastSessionPath = path;
     shouldStickToBottom = true;
+    topLoadArmed = true;
+    hasReachedTranscriptStart = false;
+    showTranscriptEndNotice = false;
     tick().then(() => {
       if (container !== el || sessionPath !== path) return;
       scheduleStickToBottom();

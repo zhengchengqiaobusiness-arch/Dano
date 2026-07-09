@@ -1518,14 +1518,15 @@ function applySessionSnapshotResponse(
   return true;
 }
 
-async function loadOlderTranscriptPage() {
+async function loadOlderTranscriptPage(): Promise<boolean> {
   if (
     _transcriptPageLoading ||
     !_transcriptHasOlder ||
     !_transcriptOldestCursor
   )
-    return;
+    return false;
   _transcriptPageLoading = true;
+  const previousLength = currentRawTranscriptEntries().length;
   try {
     const resp = await sendCommand({
       type: "get_messages",
@@ -1533,9 +1534,14 @@ async function loadOlderTranscriptPage() {
       cursor: _transcriptOldestCursor,
       limit: TRANSCRIPT_PAGE_LIMIT,
     });
-    if (!resp.success) _transcriptPageLoading = false;
+    if (!resp.success) {
+      _transcriptPageLoading = false;
+      return false;
+    }
+    return currentRawTranscriptEntries().length > previousLength;
   } catch {
     _transcriptPageLoading = false;
+    return false;
   }
 }
 
