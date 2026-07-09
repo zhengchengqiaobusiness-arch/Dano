@@ -2,7 +2,7 @@
 satoken…)单独存一份,运行期 invoke 时覆盖焊进资产里的旧 token → token 过期只需前端 PUT 换一份,免重录。
 
 与 sessions.py(storage_state 整登录态,落文件)互补、解耦:
-- storage_state:浏览器整登录态(cookie+localStorage),DOM 回放路径用;过期只能重录。
+- storage_state:浏览器整登录态(cookie+localStorage),录制/请求验证路径用;过期只能重录。
 - token_store:**单独可查、可更新**的一组鉴权头,抓请求路径(api_request)运行期用;落库 → 重启不丢,过期换一下即可。
 
 DB 不可用(连接池未初始化,如离线/直调)时:save 跳过、get 返回空(不抛),不阻断主流程。

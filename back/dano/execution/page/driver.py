@@ -310,11 +310,6 @@ class PlaywrightPageDriver:
     def captured(self) -> dict:
         return dict(self._captured)
 
-    async def scout(self) -> dict:
-        """抽取当前页表单语义结构(供接入期侦察)。需先 open。"""
-        from dano.execution.page.scout import scout_dom
-        return await scout_dom(self._page)
-
     async def close(self) -> None:
         if not self._owns_browser:                 # 池化:只关 context,共享浏览器常驻
             if self._context is not None:

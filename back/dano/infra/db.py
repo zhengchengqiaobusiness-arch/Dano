@@ -50,8 +50,8 @@ async def close_pool() -> None:
 async def run_migrations(sql_dir: str = "migrations") -> None:
     """按序执行 migrations 目录下的 .sql 文件,每个**最多执行一次**(schema_migrations 记账)。
 
-    run-once 而非每次重放:重放会让"重建 CHECK 约束"类迁移在已有新类型数据时校验失败
-    (如启用 adapter 后重启,旧约束不含 adapter → ADD CONSTRAINT 报错)。M0 简易迁移,后续可换 alembic/atlas。
+    run-once 而非每次重放:重放会让"重建 CHECK 约束"类迁移在已有新类型数据时校验失败。
+    M0 简易迁移,后续可换 alembic/atlas。
     """
     import pathlib
 

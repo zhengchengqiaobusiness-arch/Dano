@@ -60,6 +60,73 @@ def test_update_param_falls_back_to_key_when_path_is_stale():
     assert new.steps[0].params[0].type == "enum"
 
 
+def test_add_request_step_dedupes_same_captured_endpoint():
+    spec = FlowSpec(
+        flow_id="f",
+        meta={"request_graph": {"all_requests": [
+            {
+                "request_index": 1,
+                "request_id": "r1",
+                "method": "GET",
+                "url": "/admin-api/bpm/process-definition/get?key=oa_duty_leave",
+                "path": "/admin-api/bpm/process-definition/get",
+                "role": "business_get",
+                "confidence": 0.96,
+                "response_status": 200,
+                "response_json": {"data": {"id": "p1"}},
+            },
+            {
+                "request_index": 2,
+                "request_id": "r2",
+                "method": "GET",
+                "url": "/admin-api/bpm/process-definition/get?key=oa_duty_leave",
+                "path": "/admin-api/bpm/process-definition/get",
+                "role": "business_get",
+                "confidence": 0.96,
+                "response_status": 200,
+                "response_json": {"data": {"id": "p1"}},
+            },
+        ]}},
+    )
+
+    one = apply_flow_edits(spec, [{"op": "add_request_step", "request_index": 1, "request_id": "r1"}])
+    two = apply_flow_edits(one, [{"op": "add_request_step", "request_index": 2, "request_id": "r2"}])
+
+    assert len(two.steps) == 1
+    assert two.steps[0].path == "/admin-api/bpm/process-definition/get"
+
+
+def test_refresh_review_items_dedupes_duplicate_params_and_keeps_enum_options():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(
+            step_id="s1",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            params=[
+                ParamField(path="type", key="请假类型", value="2", type="number", source_kind="unknown"),
+                ParamField(
+                    path="body.type",
+                    key="请假类型",
+                    value="2",
+                    type="enum",
+                    source_kind="api_option",
+                    enum_options=["病假", "事假"],
+                    enum_value_map={"病假": "1", "事假": "2"},
+                    confidence=0.9,
+                ),
+            ],
+        )],
+    )
+
+    new = refresh_review_items(spec)
+
+    assert len(new.steps[0].params) == 1
+    assert new.steps[0].params[0].type == "enum"
+    assert new.steps[0].params[0].enum_options == ["病假", "事假"]
+
+
 def test_edit_key_syncs_label_select_and_exported_api_request():
     param = ParamField(
         path="form.systemName",
@@ -486,7 +553,8 @@ def test_add_candidate_step_promotes_request_graph_entry():
     assert len(new.steps) == 2
     promoted = new.steps[0]
     assert promoted.method == "GET"
-    assert promoted.path == "/gsgl/xm/getProjectInfosByBt?keyword=abc"
+    assert promoted.path == "/gsgl/xm/getProjectInfosByBt"
+    assert any(p.path == "query.keyword" and p.value == "abc" for p in promoted.params)
     assert [p.path for p in promoted.params] == ["query.keyword"]
     assert promoted.source_meta["manual_added"] is True
     assert new.steps[1].step_id == "write"

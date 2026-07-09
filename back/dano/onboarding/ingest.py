@@ -75,7 +75,7 @@ async def normalize_to_spec(source: Any, *, spawn=None) -> dict:  # noqa: ANN001
     # 非结构化 / 不认识的 JSON → LLM 抽成动作清单 → 合成 OpenAPI
     text = source if isinstance(source, str) else json.dumps(source, ensure_ascii=False)
     if spawn is None:
-        from dano.generation.coder import openai_text_spawn
+        from dano.infra.llm import openai_text_spawn
         spawn = partial(openai_text_spawn, tag="docparse", json_mode=True)
     actions = await _llm_doc_to_actions(text[:_LLM_DOC_BUDGET], spawn)
     spec = _actions_to_openapi(actions)

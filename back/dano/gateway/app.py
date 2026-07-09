@@ -1073,18 +1073,42 @@ async def record_ws(ws: WebSocket) -> None:
                     continue
                 try:
                     from dano.execution.page.flow_spec import (
+                        FlowSpec,
                         flow_spec_required_params,
                         flow_spec_to_api_request,
                         flow_spec_to_summary,
+                        refresh_review_items,
                         run_recording_pi_loop,
                         validate_flow_spec,
                     )
                     from dano.config import get_settings
+                    raw_spec = msg.get("flow_spec")
+                    if isinstance(raw_spec, dict):
+                        if pending_flow_spec is not None:
+                            old_by_id = {s.step_id: s for s in pending_flow_spec.steps}
+                            for step in raw_spec.get("steps") or []:
+                                if not isinstance(step, dict):
+                                    continue
+                                old = old_by_id.get(str(step.get("step_id") or ""))
+                                if old is None:
+                                    continue
+                                if not step.get("body_source"):
+                                    step["body_source"] = old.body_source
+                                headers = step.get("headers")
+                                if (not headers) or all(v == "***" for v in (headers or {}).values()):
+                                    step["headers"] = old.headers
+                                old_identity = {i.path: i for i in old.identity}
+                                for idn in step.get("identity") or []:
+                                    if isinstance(idn, dict) and idn.get("value") == "***":
+                                        old_idn = old_identity.get(str(idn.get("path") or ""))
+                                        if old_idn is not None:
+                                            idn["value"] = old_idn.value
+                        pending_flow_spec = refresh_review_items(FlowSpec.model_validate(raw_spec))
                     pending_flow_spec = await run_recording_pi_loop(
                         pending_flow_spec,
                         llm_client=_page_semantic_client("complete_json"),
                         model=get_settings().pi_model,
-                        mode="publish",
+                        mode="repair",
                         max_rounds=3,
                     )
                     check_report = validate_flow_spec(pending_flow_spec)

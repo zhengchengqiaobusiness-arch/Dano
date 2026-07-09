@@ -427,28 +427,6 @@ def test_forbidden_actions_excludes_normal_submit():
     assert any("terminate" in f for f in forb)
 
 
-def test_playbook_surfaces_goal_and_field_mappings():
-    from dano.catalog.manifest import SkillManifest
-    from dano.generation.playbook import build_playbook
-    from dano.generation.playbook_writer import render_playbook_md
-    m = SkillManifest(
-        name="A-OA.submit_purchase", subsystem="A-OA", action="submit_purchase",
-        title="采购申请提交", description="采购申请提交(A-OA)", integration="workflow",
-        risk_level="L3", requires_confirmation=True, business="采购申请",
-        goal={"intent": "创建并提交采购申请", "success_criteria": ["业务单据已创建", "审批流程已发起"],
-              "forbidden_steps": ["post_workflow_handle_reject"]},
-        field_mappings=[{"standard_field": "amount", "target_field": "amount",
-                         "target_location": "flowTask.variables.amount", "target_type": "number",
-                         "source": {"type": "openapi", "path": "/biz/flow/submit",
-                                    "schema_ref": "Submit_purchase_template.flowTask.variables.amount"}}],
-        parameters={"type": "object", "properties": {"amount": {"type": "number"}}, "required": ["amount"]})
-    md = render_playbook_md(build_playbook("A-OA", "采购申请", [m]), "dano-a-oa")
-    assert "## 目标(Goal)" in md and "创建并提交采购申请" in md and "业务单据已创建" in md
-    assert "## 字段映射(可追溯)" in md
-    assert "flowTask.variables.amount" in md                                  # 目标点路径
-    assert "Submit_purchase_template.flowTask.variables.amount" in md         # 来源 schema_ref
-
-
 async def test_workflow_skill_carries_business_meta_to_manifest():
     from dano.catalog.manifest import to_manifest
     wf = WorkflowSkillBody(

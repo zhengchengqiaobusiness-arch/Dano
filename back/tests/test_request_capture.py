@@ -2298,7 +2298,7 @@ def test_self_check_step_link_reachable_passes():
     assert self_check(wf) == []
 
 
-async def test_dry_replay_fails_on_self_check():
+async def test_dry_self_check_fails_on_validation():
     """坏 skill 走 dry(send=False)→ ok=False 且带 self_check 违规清单(发布前被拦)。"""
     apir = {"method": "POST", "url": "http://x/submit",
             "body_template": {"reason": "{{reason}}"}, "params": ["reason"],

@@ -324,6 +324,7 @@ function NativeSelect({
 }) {
   const [local, setLocal] = useState(value || "");
   useEffect(() => setLocal(value || ""), [value]);
+  const safeOptions = uniqueOptions(options);
   return (
     <select
       value={local}
@@ -343,9 +344,20 @@ function NativeSelect({
         fontSize: 14,
       }}
     >
-      {options.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+      {safeOptions.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
     </select>
   );
+}
+function uniqueOptions(options: Array<{ label: string; value: string }>) {
+  const seen = new Set<string>();
+  const out: Array<{ label: string; value: string }> = [];
+  for (const opt of options || []) {
+    const value = String(opt.value ?? "");
+    if (seen.has(value)) continue;
+    seen.add(value);
+    out.push({ label: opt.label, value });
+  }
+  return out;
 }
 function EditableText({
   value,
@@ -409,7 +421,7 @@ function ComboInput({
         onPressEnter={(e) => e.currentTarget.blur()}
       />
       <datalist id={listIdRef.current}>
-        {options.filter((opt) => opt.value).map((opt) => (
+        {uniqueOptions(options).filter((opt) => opt.value).map((opt) => (
           <option key={opt.value} value={opt.value}>{opt.label}</option>
         ))}
       </datalist>
@@ -446,7 +458,7 @@ function EnumValueInput({
         onPressEnter={(e) => e.currentTarget.blur()}
       />
       <datalist id={listIdRef.current}>
-        {options.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+        {uniqueOptions(options).map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
       </datalist>
     </>
   );
@@ -483,7 +495,7 @@ function EditableComboInput({
         onPressEnter={(e) => e.currentTarget.blur()}
       />
       <datalist id={listIdRef.current}>
-        {options.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+        {uniqueOptions(options).map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
       </datalist>
     </>
   );
@@ -576,6 +588,9 @@ function requestGraphPath(req: RequestGraphEntry) {
 function requestGraphSignature(req: RequestGraphEntry) {
   return `${(req.method || "GET").toUpperCase()} ${requestGraphPath(req)}`;
 }
+function requestGraphDisplayKey(req: RequestGraphEntry) {
+  return requestGraphSignature(req);
+}
 function requestGraphKey(req: RequestGraphEntry) {
   if (req.request_id) return `id:${req.request_id}`;
   if (req.request_index != null) return `idx:${String(req.request_index)}`;
@@ -612,14 +627,33 @@ function allCapturedRequests(spec?: FlowSpecData | null) {
     stepSigs.has(`${(req.method || "").toUpperCase()} ${purePath(req.path || req.url)}`) ||
     stepReqKeys.has(requestGraphKey(req))
   ) ? 0 : 1;
-  return source
+  const bestByDisplayKey = new Map<string, RequestGraphEntry>();
+  const rankTuple = (req: RequestGraphEntry) => [
+    selectedRank(req),
+    requestRoleRank(req),
+    -(req.confidence ?? 0),
+    req.response_json == null ? 1 : 0,
+    -Number(req.request_index ?? 0),
+  ];
+  const better = (a: RequestGraphEntry, b: RequestGraphEntry) => {
+    const ar = rankTuple(a);
+    const br = rankTuple(b);
+    for (let i = 0; i < ar.length; i += 1) {
+      if (ar[i] !== br[i]) return ar[i] < br[i];
+    }
+    return false;
+  };
+  source
     .filter(isApiLikeRequest)
-    .filter((req) => {
-      const key = requestGraphKey(req);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
+    .forEach((req) => {
+      const exactKey = requestGraphKey(req);
+      if (seen.has(exactKey)) return;
+      seen.add(exactKey);
+      const displayKey = requestGraphDisplayKey(req);
+      const existing = bestByDisplayKey.get(displayKey);
+      if (!existing || better(req, existing)) bestByDisplayKey.set(displayKey, req);
+    });
+  return Array.from(bestByDisplayKey.values())
     .sort((a, b) => selectedRank(a) - selectedRank(b) || requestRoleRank(a) - requestRoleRank(b) || (b.confidence ?? 0) - (a.confidence ?? 0) || Number(a.request_index ?? 0) - Number(b.request_index ?? 0));
 }
 function requestRoleRank(req: RequestGraphEntry) {
@@ -1098,7 +1132,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!flowSpec) { message.error("请先生成 FlowSpec 后再发布"); return; }
     setResult(null); setPhase("publishing");
     send({ type: "publish_request", action: action.trim(), title: title.trim(),
-      param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: true });
+      param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: true, flow_spec: flowSpec });
   }
   function stopAll() {
     send({ type: "stop" }); wsRef.current?.close();
@@ -1904,6 +1938,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return (
       <List
         size="small"
+        rowKey={(req) => requestOptionValue(req)}
         dataSource={rows}
         renderItem={(req, idx) => (
           <List.Item
@@ -2502,8 +2537,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 {step.response_json != null && (
                   <Card size="small" title="响应字段">
                     <Space wrap size={4}>
-                      {leafPathValues(step.response_json).slice(0, 40).map((leaf) => (
-                        <Tooltip key={leaf.path} title={leaf.value}>
+                      {leafPathValues(step.response_json).slice(0, 40).map((leaf, leafIdx) => (
+                        <Tooltip key={`${leaf.path}-${leafIdx}`} title={leaf.value}>
                           <Typography.Text code style={{ fontSize: 12 }}>{leaf.path}</Typography.Text>
                         </Tooltip>
                       ))}
@@ -2515,6 +2550,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             ) : (
               <List
                 size="small"
+                rowKey={(p) => paramDraftKey(step.step_id, p)}
                 dataSource={step.params}
                 renderItem={(p) => {
                   const bindKey = paramDraftKey(step.step_id, p);
@@ -2619,7 +2655,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                               <Space wrap size={6}>
                                 <Typography.Text strong style={{ fontSize: 12 }}>{isApiOption ? "接口候选配置" : "枚举候选配置"}</Typography.Text>
                                 <Tag color={selectBinding?.source_url ? "geekblue" : "purple"}>{enumSourceLabel(selectBinding)}</Tag>
-                                {enumOptions.slice(0, 8).map((x) => <Tag key={x}>{x}</Tag>)}
+                                {enumOptions.slice(0, 8).map((x, enumIdx) => <Tag key={`${x}-${enumIdx}`}>{x}</Tag>)}
                                 {enumOptions.length > 8 && <Tag>+{enumOptions.length - 8}</Tag>}
                               </Space>
                               {isApiOption && (

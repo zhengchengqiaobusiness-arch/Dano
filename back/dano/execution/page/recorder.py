@@ -2,7 +2,7 @@
 
 客户在前端网页里操作我们托管的浏览器(截屏流投到网页 + 点击/键盘回传),注入页面的录制器
 把真实 DOM 事件转成**语义步骤**(label/role/placeholder/name/text 定位,绝不用坐标)推回后端。
-客户全程**免安装、免命令行**。录完 → 复用 page_builder→回放→评审→发布 管道出页面 Skill。
+客户全程**免安装、免命令行**。录完 → 抓请求 → FlowSpec 工作台 → 发布页面 Skill。
 
 三层:① 截屏(CDP Page.startScreencast → base64 jpeg 帧)② 输入回传(归一坐标 → page.mouse/keyboard)
 ③ 动作捕获(注入 _RECORDER_JS,事件→语义步骤→expose_binding 回 Python)。
@@ -19,7 +19,32 @@ from urllib.parse import parse_qs, urlparse
 
 import structlog
 
+from dano.shared.std_fields import ALL_STD_FIELDS
+
 log = structlog.get_logger(__name__)
+
+
+def _std_key(field: str) -> str:
+    fl = (field or "").strip().lower()
+    for std in ALL_STD_FIELDS:
+        if fl == std.key.lower() or fl == std.label.lower() or fl in {a.lower() for a in std.aliases}:
+            return std.key
+    return (field or "").strip()
+
+
+def assign_field_keys(raw_fields: list[str | None]) -> list[str]:
+    used: set[str] = set()
+    out: list[str] = []
+    for f in raw_fields:
+        std = _std_key(f or "")
+        cand = std if (std and std not in used) else ((f or "").strip() or std or "field")
+        key, n = cand, 2
+        while key in used:
+            key = f"{cand}#{n}"
+            n += 1
+        used.add(key)
+        out.append(key)
+    return out
 
 _VIEW_W, _VIEW_H = 1280, 800
 _CAST_W, _CAST_H = 1024, 640
@@ -948,17 +973,15 @@ class RecordSession:
             return None
 
     def recorded_steps(self):
-        """已捕获步骤 → (RecordedStep 列表, sample_inputs)。字段 key 用 assign_field_keys 统一分配
-        (与 build_page_script 同序同算法 → samples key 与脚本参数 key 一致;多字段塌缩同一 std_key 也不丢,P1#6)。"""
-        from dano.agent_tools.page_builder import RecordedStep, assign_field_keys
+        """已捕获步骤 → (普通 dict 步骤列表, sample_inputs)。字段 key 用 assign_field_keys 统一分配。"""
         fb_idx = [i for i, s in enumerate(self.steps) if s.get("field")]
         keys = assign_field_keys([self.steps[i]["field"] for i in fb_idx])
         keymap = dict(zip(fb_idx, keys))
-        steps: list[RecordedStep] = []
+        steps: list[dict] = []
         samples: dict[str, str] = {}
         for i, s in enumerate(self.steps):
             field = s.get("field") or None
-            steps.append(RecordedStep(op=s["op"], locator=s.get("locator"), field=field))
+            steps.append({"op": s["op"], "locator": s.get("locator"), "field": field})
             if field and s.get("op") in ("fill", "select", "pick") and s.get("value") != "":
                 samples[keymap[i]] = s.get("value", "")
         return steps, samples
@@ -969,7 +992,6 @@ class RecordSession:
         返回 {字段key: {options, field_key, selected}}。保留 selected 是为了把 DOM 显示项
         与提交体短码(type=2)连起来,避免发布 skill 时把下拉退化成 number。
         """
-        from dano.agent_tools.page_builder import assign_field_keys
         fb_idx = [i for i, s in enumerate(self.steps) if s.get("field")]
         keys = assign_field_keys([self.steps[i]["field"] for i in fb_idx])
         keymap = dict(zip(fb_idx, keys))
@@ -995,7 +1017,6 @@ class RecordSession:
 
     def recorded_required_labels(self) -> set:
         """录制中标了表单 * 必填的字段(供 flatten 标 required)。key 与 recorded_steps 同算法分配,保持一致。"""
-        from dano.agent_tools.page_builder import assign_field_keys
         fb_idx = [i for i, s in enumerate(self.steps) if s.get("field")]
         keys = assign_field_keys([self.steps[i]["field"] for i in fb_idx])
         return {k for i, k in zip(fb_idx, keys)

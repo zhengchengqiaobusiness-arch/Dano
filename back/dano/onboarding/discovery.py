@@ -13,8 +13,6 @@ import re
 from typing import Any
 
 from dano.capabilities import doc_parser, endpoint_classifier, oa_templates
-from dano.generation.strategies.workflow_bpmn import WorkflowBpmnStrategy
-
 
 def discover_flows(spec: dict, include_tags: list[str] | None = None) -> list[dict[str, Any]]:
     """从 swagger 发现「合适的流程」提案(复合 + 连接器),供前端确认后生成。"""
@@ -30,7 +28,7 @@ def discover_flows(spec: dict, include_tags: list[str] | None = None) -> list[di
 
     # 1) 复合流程:匹配到 OA 模板且 spec 含该框架工作流信号 → 按 spec 的 templateId **动态**提案
     #    (每个真实模板 = 一个复合业务;审批链从文档解析)。零硬编码业务:没有模板就不提复合流程。
-    if template and action_dicts and WorkflowBpmnStrategy().matches(action_dicts):
+    if template and action_dicts and _matches_workflow_bpmn(action_dicts):
         for tid in template.template_ids(spec):
             meta = template.parse_approval_chain(spec, tid)
             base = re.sub(r"_template$", "", tid)
@@ -68,3 +66,9 @@ def discover_flows(spec: dict, include_tags: list[str] | None = None) -> list[di
             "selected": not is_write,                       # 读默认选中;写需用户填测试输入后选
         })
     return proposed
+
+
+def _matches_workflow_bpmn(actions: list[dict]) -> bool:
+    blob = " ".join((a.get("endpoint", "") + " " + a.get("name", "")) for a in actions).lower()
+    return (("/biz/" + "flow/submit") in blob or ("start" + "flow") in blob.replace("/", "")
+            or ("start" in blob and "submit" in blob) or "flowtask" in blob)

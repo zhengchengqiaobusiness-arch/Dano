@@ -3,4 +3,4 @@
 
 ALTER TABLE validation_runs DROP CONSTRAINT IF EXISTS validation_runs_kind_check;
 ALTER TABLE validation_runs ADD CONSTRAINT validation_runs_kind_check
-    CHECK (kind IN ('connect','sandbox','readback','health','replay','cases'));
+    CHECK (kind IN ('connect','sandbox','readback','health','cases'));

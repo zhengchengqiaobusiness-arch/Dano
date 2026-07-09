@@ -9,8 +9,8 @@ export default function AppLayout() {
   const nav = useNavigate();
   const loc = useLocation();
   const tenant = localStorage.getItem(TENANT_NAME) || "—";
-  const selected = loc.pathname.startsWith("/onboard-page")
-    ? "onboard-page"
+  const selected = loc.pathname.startsWith("/recording")
+    ? "recording"
     : loc.pathname.startsWith("/onboard") ? "onboard" : "skills";
 
   return (
@@ -23,12 +23,12 @@ export default function AppLayout() {
           onClick={(e) => {
             if (e.key === "skills") nav("/skills");
             if (e.key === "onboard") nav("/onboard");
-            if (e.key === "onboard-page") nav("/onboard-page");
+            if (e.key === "recording") nav("/recording");
           }}
           items={[
             { key: "skills", icon: <AppstoreOutlined />, label: "Skill 目录" },
             { key: "onboard", icon: <ImportOutlined />, label: "接入系统(API)" },
-            { key: "onboard-page", icon: <GlobalOutlined />, label: "接入页面(无 API)" },
+            { key: "recording", icon: <GlobalOutlined />, label: "录制 V2" },
             { key: "ops", icon: <SafetyOutlined />, label: "运维保障(P2)", disabled: true },
           ]}
         />

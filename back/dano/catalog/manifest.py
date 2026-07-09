@@ -47,7 +47,7 @@ class SkillManifest(BaseModel):
     created_at: str = ""                # 最新 published 资产产出时间(目录展示/排序)
     lifecycle_state: str = ""           # 生命周期状态(异常暂停=冻结)
     frozen: bool = False                # 冻结后保留资产库,但不导出/不调用
-    integration: str                  # 调用方式:adapter / workflow / api / page
+    integration: str                  # 调用方式:workflow / api / page
     risk_level: str
     requires_confirmation: bool       # L3+ 调用需带 confirm=true
     recording_mode: str = ""          # 录制型 Skill 的提交模式:real_submit/intercepted_submit/unknown
@@ -56,7 +56,6 @@ class SkillManifest(BaseModel):
     parameters: dict = Field(default_factory=dict)   # 输入 JSON Schema(function-calling 风格)
     output_schema: dict = Field(default_factory=lambda: {"type": "object"})  # 输出 schema(通用对象)
     call_protocol: dict = Field(default_factory=dict)  # 导出脚本/Agent JSON 调用协议草案
-    page: dict | None = None          # 页面型 Skill 专属:{start_url, success_marker, steps[]}(供详情可视化)
     flow: dict = Field(default_factory=dict)   # 执行画像(供导出 SOP):步数/前置/计算/回查/成败约定;全部 grounded、零框架字面量
 
 
@@ -393,13 +392,8 @@ def _flow_meta(skill: SkillSpec) -> dict:
             return {"step_count": max(len(wf), 1), "preconditions": [], "computes": [],
                     "verify": verify, "judged_by_code": judged,
                     "step_paths": _step_paths(wf or [apir])}   # 各步 接口(method+path),供 SOP 展示编排
-        return {"step_count": len(getattr(skill, "page_steps", []) or []) or 1,
-                "preconditions": [], "computes": [],
-                "verify": bool(getattr(skill, "page_success_marker", None)), "judged_by_code": False}
-    if getattr(skill, "is_adapter", False):
         return {"step_count": 1, "preconditions": [], "computes": [],
-                "verify": bool(getattr(skill, "adapter_fact_check", None)),
-                "judged_by_code": bool(getattr(skill, "adapter_success_rule", None))}
+                "verify": bool(getattr(skill, "api_request", None)), "judged_by_code": False}
     # 普通连接器
     return {"step_count": 1, "preconditions": [], "computes": [],
             "verify": bool(getattr(skill, "fact_check_query", None) or getattr(skill, "fact_check_expr", None)),
@@ -410,21 +404,13 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
     risk = RiskLevel(skill.risk_level)
     # 阶段4:标题优先用接口 summary(skill.title),退而用内置词典,再退动作名
     title = skill.title or _ACTION_TITLES.get(skill.action, skill.action)
-    if getattr(skill, "is_adapter", False):
-        integration, kind = "adapter", "流程"      # goal 模式生成的代码 Skill
-    elif skill.is_workflow:
+    if skill.is_workflow:
         integration, kind = "workflow", "流程"
     elif skill.has_api:
         integration = "api"
         kind = "查询" if skill.fact_check_query is None and skill.action.startswith("query") else "操作"
     else:
         integration, kind = "page", "操作"
-    # 页面型 Skill:带上步骤/起始页/成功标志,供前端详情可视化(非 function-calling 参数)
-    page = None
-    if not skill.has_api and (getattr(skill, "page_steps", None) or getattr(skill, "page_start_url", "")):
-        page = {"start_url": getattr(skill, "page_start_url", ""),
-                "success_marker": getattr(skill, "page_success_marker", None),
-                "steps": getattr(skill, "page_steps", []) or []}
     parameters = _parameters_schema(skill)
     call_metadata = _call_metadata(skill, parameters)
     capability = _capability_of(skill)
@@ -454,7 +440,6 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         verification_basis=call_metadata.get("verification_basis", ""),
         parameters=parameters,
         call_protocol=_call_protocol(capability, skill.skill_id),
-        page=page,
         flow=_flow_meta(skill),
     )
 

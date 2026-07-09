@@ -1,11 +1,4 @@
-"""确定性页面接入(流程8,无 API,无 LLM)。
-
-复用已验证的页面工具链:scout_page(真侦察)→ draft_page_script(确定性建体)→
-sandbox_replay(写页面 dry 回放)→ request_review(写页面三模型评审)→ publish_asset(发布硬闸门)。
-
-与 pi 驱动的 onboard() 物理隔离:本函数不 spawn pi、不碰 LLM,可独立运行/测试。pi 路径(给未知复杂
-页面用)走 agent/skills/onboard-page.md + 同一组工具;两者复用同一确定性建体与发布闸门。
-"""
+"""录制模式 V2 的抓请求发布入口。"""
 
 from __future__ import annotations
 
@@ -13,170 +6,9 @@ from uuid import uuid4
 
 import structlog
 
-from dano.agent_tools import materials, tools
+from dano.agent_tools import materials
 
 log = structlog.get_logger(__name__)
-
-
-async def scout_page_only(
-    *, tenant: str, subsystem: str, start_url: str,
-    deploy: dict | None = None, credentials: dict | None = None, headless: bool = True,
-) -> dict:
-    """仅侦察一个页面(不建体/不发布):返回候选字段 / 提交按钮 / 建议步骤 / 结构指纹。
-
-    供前端向导"先预览发现的字段、再确认字段映射"用。无副作用、不落库。
-    """
-    run_id = f"page-scout-{uuid4().hex[:8]}"
-    sid = subsystem
-    materials.register(materials.MaterialContext(
-        run_id=run_id, tenant=tenant, system_instance_id=sid, subsystem=sid,
-        deploy=deploy or {}, credentials=credentials or {}))
-    try:
-        return await tools.scout_page(run_id, {"system_instance_id": sid, "start_url": start_url,
-                                               "headless": headless})
-    finally:
-        materials.clear_run(run_id)
-
-
-async def run_page_onboarding(
-    *,
-    tenant: str,
-    subsystem: str,
-    start_url: str,
-    action: str,
-    title: str = "",
-    success_marker: str | None = None,
-    deploy: dict | None = None,
-    credentials: dict | None = None,
-    sample_inputs: dict | None = None,
-    headless: bool = True,
-    run_id: str | None = None,
-    steps: list[dict] | None = None,
-    dom_fingerprint: str | None = None,
-) -> dict:
-    """侦察→建体→回放→(写页面评审)→发布。返回报告 dict({ok, action, risk_level, asset_id, mode, reason})。
-
-    诚实失败:任一步不过即停并如实返回 reason/stage,绝不发布未通过的脚本。
-    传入 steps + dom_fingerprint(前端向导改过字段映射后)则跳过侦察、直接用它们建体。
-    """
-    run_id = run_id or f"page-{uuid4().hex[:8]}"
-    sid = subsystem   # sandbox_replay 按 draft.subsystem.value 反查材料,故 system_instance_id 取 subsystem
-    materials.register(materials.MaterialContext(
-        run_id=run_id, tenant=tenant, system_instance_id=sid, subsystem=sid,
-        deploy=deploy or {}, credentials=credentials or {}))
-    try:
-        if steps is not None and dom_fingerprint is not None:
-            use_steps, fp = steps, dom_fingerprint        # 前端已编辑:不再侦察
-        else:
-            sc = await tools.scout_page(run_id, {"system_instance_id": sid, "start_url": start_url,
-                                                 "headless": headless})
-            use_steps, fp = sc.get("suggested_steps") or [], sc.get("dom_fingerprint") or ""
-        if not use_steps:
-            return {"ok": False, "stage": "scout", "reason": "页面未发现可填字段/可操作元素"}
-
-        dr = await tools.draft_page_script(run_id, {
-            "system_instance_id": sid, "action": action, "steps": use_steps,
-            "dom_fingerprint": fp, "start_url": start_url,
-            "success_marker": success_marker, "title": title})
-
-        rp = await tools.sandbox_replay(run_id, {
-            "asset_draft_id": dr["asset_draft_id"], "sample_inputs": sample_inputs or {},
-            "headless": headless})
-        if not rp["passed"]:
-            so = rp.get("structured_output") or {}
-            if so.get("at_login"):
-                why = " —— 停在登录页(登录态无效/过期);用网页录制手动登录后再录,回放会复用该登录态"
-            elif so.get("failed_step") is not None:
-                why = f":第 {so['failed_step'] + 1} 步【{so.get('op')}】没找到元素 {so.get('locator')}(删掉这步或换页面再试)"
-            elif so.get("success_marker") is False:
-                why = ":回放后没出现成功标志(提交可能没生效,或成功标志填得不对)"
-            else:
-                why = ""
-            return {"ok": False, "stage": "replay", "action": dr["action"],
-                    "reason": f"沙箱回放未通过(mode={rp['mode']}){why}", "detail": so}
-
-        review_ids: list[str] = []
-        if dr["needs_review"]:
-            rv = await tools.request_review(run_id, {"asset_draft_id": dr["asset_draft_id"]})
-            if not rv["all_passed"]:
-                return {"ok": False, "stage": "review", "action": dr["action"],
-                        "reason": "三模型评审未通过", "verdicts": rv.get("verdicts")}
-            review_ids = rv["review_run_ids"]
-
-        pub = await tools.publish_asset(run_id, {
-            "asset_draft_id": dr["asset_draft_id"],
-            "validation_run_ids": rp["validation_run_ids"], "review_run_ids": review_ids})
-        log.info("page_onboard.done", action=dr["action"], published=pub["published"], mode=rp["mode"])
-        return {"ok": pub["published"], "stage": "publish", "action": dr["action"],
-                "risk_level": dr["risk_level"], "mode": rp["mode"],
-                "asset_id": pub.get("asset_id"), "reason": pub.get("reason", "")}
-    finally:
-        materials.clear_run(run_id)
-
-
-async def run_page_onboarding_pi(
-    *, tenant: str, subsystem: str, start_url: str, action_hint: str = "",
-    deploy: dict | None = None, credentials: dict | None = None, timeout_s: float = 600.0,
-) -> dict:
-    """pi **自主驱动**的页面接入:spawn Node sidecar,pi 按 onboard-page 技能自己
-    scout_page→draft_page_script→sandbox_replay→(写页面)request_review→publish_asset。
-
-    与确定性 run_page_onboarding 的区别:由 LLM 决策字段映射/成功标志/动作命名(适合未知复杂页面);
-    Python 仍只确定性建体 + 控发布闸门。权威结果 = PG 已发布的 PAGE_SCRIPT(不信 pi 口述)。
-    需:Node + 可用的 pi LLM provider(DANO_PI_*)+ 浏览器 + PG。
-    """
-    import secrets
-
-    from dano.agent_tools import runs
-    from dano.assets.repository import AssetRepository
-    from dano.onboarding.service import _spawn_pi, _start_tool_server
-    from dano.shared.enums import AssetType, Subsystem
-    from dano.shared.models import Scope
-
-    run_id = f"page-pi-{uuid4().hex[:8]}"
-    sid = subsystem
-    materials.register(materials.MaterialContext(
-        run_id=run_id, tenant=tenant, system_instance_id=sid, subsystem=sid,
-        deploy=deploy or {}, credentials=credentials or {}))
-    token = secrets.token_hex(16)
-    runs.register(run_id, token)
-    server, task, port = await _start_tool_server()
-    prompt = (
-        f"接入一个**无 API 的页面型系统**(系统实例 {sid})。页面地址 start_url = {start_url}\n"
-        f"严格按 onboard-page 技能纪律(只用测试账号、语义定位、绝不坐标、不自报通过):\n"
-        f"1) scout_page(system_instance_id={sid}, start_url={start_url}) 侦察,拿 fields / submit_locator / "
-        f"dom_fingerprint / suggested_steps。\n"
-        f"2) 据 fields 的 label/name 决定字段映射与成功标志,draft_page_script(system_instance_id={sid}, "
-        f"action=<英文动作名{(',建议 '+action_hint) if action_hint else ''}>, steps=suggested_steps(按需改 field), "
-        f"dom_fingerprint=上一步返回的, start_url={start_url}, success_marker=<提交成功后出现的文本/元素如 "
-        f"text=保存成功,不确定可留空>, title=<中文标题>)。\n"
-        f"3) sandbox_replay(asset_draft_id, sample_inputs={{字段:测试值}}) 回放,拿 validation_run_ids 与 passed"
-        f"(写页面默认 dry 回放、mode=dry 属正常)。\n"
-        f"4) 若返回 needs_review 为真(写页面)→ request_review(asset_draft_id) 拿 review_run_ids 与 all_passed;"
-        f"查询页面跳过此步、review_run_ids 传空。\n"
-        f"5) 回放通过(写页面还需三审通过)→ publish_asset(asset_draft_id, validation_run_ids=回放返回的, "
-        f"review_run_ids=评审返回的或[])。\n"
-        f"6) 一句话总结发布了哪个页面 Skill;过不了按返回 reasons 修正后重试。"
-    )
-    try:
-        completed = await _spawn_pi(run_id=run_id, token=token, port=port, prompt=prompt,
-                                    context={"system_instance_id": sid, "start_url": start_url},
-                                    timeout_s=timeout_s)
-    finally:
-        server.should_exit = True
-        await task
-        runs.unregister(run_id)
-        materials.clear_run(run_id)
-
-    repo = AssetRepository()
-    scope = Scope(tenant=tenant, subsystem=Subsystem(sid))
-    published = [e.body.get("action", e.asset_key)
-                 for e in await repo.list_published(AssetType.PAGE_SCRIPT, scope)]
-    log.info("page_onboard.pi.done", run_id=run_id, status=completed.get("status"),
-             published=published, tool_events=completed.get("tool_events"))
-    return {"pi_status": completed.get("status"), "published_skills": published,
-            "tool_events": completed.get("tool_events"), "final_text": completed.get("final_text", ""),
-            "error": completed.get("error")}
 
 
 async def _advisory_notes(action: str, api_request: dict) -> list[str]:
@@ -256,7 +88,7 @@ async def run_request_onboarding(
 ) -> dict:
     """抓请求路径:把录制抓到的提交请求(已参数化)落成可执行 Skill → dry 自检 → 三模型评审+自动修复 → 发布。
 
-    不走 DOM 回放、不真发(写安全);运行期 invoke 时才带登录态真发。
+    self_check 不真发(写安全);运行期 invoke 时才带登录态真发。
     写抓请求页面**须过三模型评审**(发布层硬闸门,见 verify_reviewed):评审 client(_review_board)由网关启动注入;
     审核出 findings → LLM 自动修复循环 → 改不动才回一个精准问题(非重录)。LLM 不可用时按 review_enabled 急停降级。
     """
@@ -332,10 +164,10 @@ async def run_request_onboarding(
         do_live = plan.get("mode") == "live" and storage_state is not None
         log.info("ingest.verification_plan", mode=plan.get("mode"),
                  controllability=plan.get("controllability"), do_live=do_live)
-        rp = await T.sandbox_replay(run_id, {"asset_draft_id": d["asset_draft_id"],
-                                             "sample_inputs": sample_inputs or {},
-                                             "live": do_live, "storage_state": storage_state, "verify": False})
-        log.info("ingest.replay", passed=rp.get("passed"), mode=rp.get("mode"))
+        rp = await T.self_check_recording(run_id, {"asset_draft_id": d["asset_draft_id"],
+                                                   "sample_inputs": sample_inputs or {},
+                                                   "live": do_live, "storage_state": storage_state, "verify": False})
+        log.info("ingest.self_check", passed=rp.get("passed"), mode=rp.get("mode"))
         if not rp["passed"]:
             sc = (rp.get("structured_output") or {}).get("self_check") or []
             live = rp.get("live") or {}
@@ -394,8 +226,8 @@ async def run_request_onboarding(
                     body, params, req_fields, opt_fields = _build_page_body(api_request, action, title, required)
                     d = await T.save_draft(run_id, {"system_instance_id": sid, "asset_type": "page_script",
                                                     "asset_key": action, "body": body})
-                    rp = await T.sandbox_replay(run_id, {"asset_draft_id": d["asset_draft_id"],
-                                                         "sample_inputs": sample_inputs or {}})
+                    rp = await T.self_check_recording(run_id, {"asset_draft_id": d["asset_draft_id"],
+                                                               "sample_inputs": sample_inputs or {}})
                     rev = await T.request_review(run_id, {"asset_draft_id": d["asset_draft_id"]})
                     review_run_ids = rev.get("review_run_ids", []) or []
                     log.info("ingest.repair.revalidated", self_check=rp.get("passed"),

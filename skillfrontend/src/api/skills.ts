@@ -8,7 +8,7 @@ export interface SkillManifest {
   title: string;
   business?: string;       // 所属业务(同业务多操作 → 目录里归为一组)
   description: string;
-  integration: string;     // adapter / workflow / api / page
+  integration: string;     // workflow / api / page
   risk_level: string;      // L1..L5
   requires_confirmation: boolean;
   verification_status?: string;
@@ -20,15 +20,6 @@ export interface SkillManifest {
   call_metadata?: SkillCallMetadata;
   parameters: JSONSchema;  // 输入 JSON Schema
   output_schema?: Record<string, unknown>;
-  page?: PageSkillView | null;   // 页面型 Skill 专属(详情可视化)
-}
-
-export interface PageStepView {
-  op: string; locator?: string | null; value_from?: string | null;
-  assert_visible?: boolean; optional?: boolean;
-}
-export interface PageSkillView {
-  start_url?: string; success_marker?: string | null; steps?: PageStepView[];
 }
 
 export type JSONSchemaValue = string | number | boolean | null;

@@ -1,7 +1,7 @@
 """Phase 3 · DSL v2 grounding 校验(纯离线):臆造的动作/字段/变量/函数必须被挡下。"""
 from __future__ import annotations
 
-from dano.generation.dsl_grounding import (
+from dano.onboarding.dsl_grounding import (
     branch_ids,
     check_grounding,
     collect_field_refs,

@@ -6,15 +6,14 @@ from enum import StrEnum
 
 
 class AssetType(StrEnum):
-    """五类企业资产(对应流程 2/3/4/5/8)。"""
+    """企业资产类型。"""
 
     FIELD_MAPPING = "field_mapping"   # 字段映射(流程2)
     CONNECTOR = "connector"           # API 连接器(流程3)
     POLICY_RULE = "policy_rule"       # 制度规则(流程4)
     ENV_PROFILE = "env_profile"       # 环境画像(流程5)
-    PAGE_SCRIPT = "page_script"       # 页面脚本,无 API(流程8)
+    PAGE_SCRIPT = "page_script"       # 录制 V2 资产容器
     WORKFLOW = "workflow"             # 复合流程 Skill:多步连接器编排成一个业务能力(阶段2)
-    ADAPTER = "adapter"               # 代码适配器:goal 模式自动生成的可执行 Skill(隔离 runner 执行)
 
 
 class ValidationStatus(StrEnum):

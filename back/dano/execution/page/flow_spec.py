@@ -3285,8 +3285,60 @@ def _severity_rank(severity: str) -> int:
     return {"low": 1, "medium": 2, "high": 3}.get(severity, 0)
 
 
+def _param_dedupe_key(param: ParamField) -> tuple[str, str]:
+    path = _strip_body_prefix(str(param.path or "")).strip()
+    key = str(param.key or param.label or "").strip()
+    return (path, key if not path else "")
+
+
+def _merge_enum_values(dst: ParamField, src: ParamField) -> None:
+    if not dst.enum_options and src.enum_options:
+        dst.enum_options = list(src.enum_options)
+    elif dst.enum_options and src.enum_options:
+        seen = {json.dumps(x, ensure_ascii=False, sort_keys=True, default=str) for x in dst.enum_options}
+        for opt in src.enum_options:
+            marker = json.dumps(opt, ensure_ascii=False, sort_keys=True, default=str)
+            if marker not in seen:
+                dst.enum_options.append(opt)
+                seen.add(marker)
+    if not dst.enum_value_map and src.enum_value_map:
+        dst.enum_value_map = dict(src.enum_value_map)
+    elif dst.enum_value_map and src.enum_value_map:
+        dst.enum_value_map = {**src.enum_value_map, **dst.enum_value_map}
+
+
+def _param_quality(param: ParamField) -> tuple[int, int, float]:
+    source_score = 2 if param.source_kind not in {"", "unknown"} else 0
+    if param.source_kind in {"api_option", "page_enum", "static_enum", "manual_enum", "form_option"}:
+        source_score += 2
+    manual_score = 1 if param.name_source in {"manual", "llm", "assignee", "sample"} else 0
+    return (source_score, manual_score, float(param.confidence or 0.0))
+
+
+def _dedupe_step_params(step: FlowStep) -> None:
+    if not step.params:
+        return
+    by_key: dict[tuple[str, str], ParamField] = {}
+    order: list[tuple[str, str]] = []
+    for param in step.params:
+        key = _param_dedupe_key(param)
+        if not key[0] and not key[1]:
+            key = (param.path, param.key)
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = param
+            order.append(key)
+            continue
+        keep, drop = (param, existing) if _param_quality(param) > _param_quality(existing) else (existing, param)
+        _merge_enum_values(keep, drop)
+        by_key[key] = keep
+    step.params = [by_key[key] for key in order if key in by_key]
+
+
 def refresh_review_items(spec: FlowSpec) -> FlowSpec:
     """重建 review_items，并保留同 id 项的已解决状态。"""
+    for step in spec.steps:
+        _dedupe_step_params(step)
     old_resolved = {item.id: item.resolved for item in spec.review_items}
     old_suggestions = {item.id: list(item.llm_suggestions or []) for item in spec.review_items}
     spec.review_items = build_review_items(spec)
@@ -4613,6 +4665,8 @@ def _find_request_graph_item(spec: FlowSpec, *, request_index: Any = None, reque
 
 
 def _same_request_graph_item(item: dict[str, Any], entry: dict[str, Any]) -> bool:
+    if _request_graph_signature(item) == _request_graph_signature(entry):
+        return True
     item_id = str(item.get("request_id") or "")
     entry_id = str(entry.get("request_id") or "")
     if item_id and entry_id:
@@ -4853,6 +4907,7 @@ def _add_request_step_from_graph(spec: FlowSpec, entry: dict[str, Any]) -> FlowS
     request_id = str(entry.get("request_id") or "")
     request_index = entry.get("request_index")
     existing = None
+    entry_sig = _request_graph_signature(entry)
     for step in spec.steps:
         meta = step.source_meta or {}
         if request_id and str(meta.get("request_id") or "") == request_id:
@@ -4861,10 +4916,13 @@ def _add_request_step_from_graph(spec: FlowSpec, entry: dict[str, Any]) -> FlowS
         if request_index is not None and meta.get("request_index") == request_index:
             existing = step
             break
+        if ((step.method or "").upper(), _request_path({"url": step.path or step.url})) == entry_sig:
+            existing = step
+            break
     if existing is None and not request_id and request_index is None:
         existing = next((
             s for s in spec.steps
-            if ((s.method or "").upper(), _request_path({"url": s.path or s.url})) == _request_graph_signature(entry)
+            if ((s.method or "").upper(), _request_path({"url": s.path or s.url})) == entry_sig
         ), None)
     if existing is not None:
         _mark_request_selected(spec, entry, materialized_step_id=existing.step_id)
@@ -4905,6 +4963,7 @@ def _add_request_step_from_graph(spec: FlowSpec, entry: dict[str, Any]) -> FlowS
         page_enum_options={},
         step_index=len(spec.steps),
     )
+    st.path = _request_path(entry)
     _append_query_params_to_step(st, entry.get("url") or entry.get("path") or "")
     st.source_meta = {
         **(st.source_meta or {}),

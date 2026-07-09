@@ -1,4 +1,4 @@
-"""草案 + 验证证据存储(REWRITE_PLAN §4 发布硬关卡的底座)。
+"""草案 + 验证证据存储。
 
 纪律:pi 起草资产 → 后端真验证生成 validation_run(带 content_hash 绑定)→ 发布时只认
 后端生成的 validation_run_id,重读校验。**绝不接受 agent 自报的 sandbox_passed 布尔值。**
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-ValidationKind = Literal["connect", "sandbox", "readback", "health", "replay", "cases", "vuln", "self_check"]
+ValidationKind = Literal["connect", "sandbox", "readback", "health", "cases", "self_check"]
 ReviewRole = Literal["acceptance", "security", "compliance"]
 
 # 各资产类型发布所需的验证种类(硬关卡:全覆盖才可发布)
@@ -32,16 +32,15 @@ REQUIRED_KINDS: dict[AssetType, set[ValidationKind]] = {
     AssetType.CONNECTOR: {"connect", "sandbox"},
     AssetType.FIELD_MAPPING: {"readback"},
     AssetType.ENV_PROFILE: {"health"},
-    AssetType.PAGE_SCRIPT: {"replay"},
+    AssetType.PAGE_SCRIPT: {"self_check"},
     AssetType.POLICY_RULE: {"cases"},   # 制度规则须用例全通过(放行/拦截/转审批,生成期离线跑)
     AssetType.WORKFLOW: {"cases"},      # 复合流程须多用例 dry-run + 分支覆盖通过(sandbox_test_workflow 记 cases)
-    AssetType.ADAPTER: {"sandbox", "vuln"},  # 代码适配器:隔离 runner 跑通 + 漏洞校验静态扫描
 }
 
 # 须过三模型评审委员会才可发布的资产类型(业务 Skill);其余(如确定性发布的 env_profile)免评审。
 # PAGE_SCRIPT 纳入,但仅**写页面**(有提交步/风险 L3+)真过评审;纯查询页面经 page_is_write 豁免。
 REVIEW_REQUIRED_TYPES: set[AssetType] = {
-    AssetType.CONNECTOR, AssetType.WORKFLOW, AssetType.ADAPTER, AssetType.PAGE_SCRIPT}
+    AssetType.CONNECTOR, AssetType.WORKFLOW, AssetType.PAGE_SCRIPT}
 REQUIRED_ROLES: set[str] = {"acceptance", "security", "compliance"}
 
 
@@ -55,12 +54,11 @@ def page_is_write(body: dict | None) -> bool:
 
 def page_is_capture(body: dict | None) -> bool:
     """录制抓请求型页面脚本:用户真人在页面上**亲手提交过**、被抓下来参数化的那条写请求
-    (api_request 非空、无 DOM 回放步 actions)。这类免三模型评审 —— 评审对录制资产易抖动误判
+    (api_request 非空、无旧页面动作 actions)。这类免三模型评审 —— 评审对录制资产易抖动误判
     (把用户没改的固定字段当漏配、把脱敏的会话登录态当缺鉴权),时过时不过;且并未提升安全
-    (请求本就是用户真发过的)。DOM 回放型写页面(actions 非空、合成新自动化)仍须评审。
+    (请求本就是用户真发过的)。不符合录制 V2 请求资产形态的页面草案仍须评审。
 
-    安全边界:capture 体只能由可信的服务端录制流(run_request_onboarding 直调 save_draft)产生;
-    pi/LLM agent 的工具面只有 draft_page_script(必出 actions、api_request=None),无法伪造此形态。"""
+    安全边界:capture 体只能由可信的服务端录制流(run_request_onboarding 直调 save_draft)产生。"""
     b = body or {}
     return bool(b.get("api_request")) and not (b.get("actions") or [])
 
@@ -271,7 +269,7 @@ class DraftStore:
         # 工作流步骤连接器(不能独立跑)放宽到"连得通即可";业务沙箱由复合 sandbox_test_workflow 整链验证
         if draft.asset_type == AssetType.CONNECTOR and draft.body.get("workflow_step"):
             required = {"connect"}
-        # 录制抓请求页面:承重闸门是**确定性 self_check**(不做 DOM 回放)→ 必须有 self_check 证据覆盖
+        # 录制抓请求页面:承重闸门是**确定性 self_check** → 必须有 self_check 证据覆盖
         elif draft.asset_type == AssetType.PAGE_SCRIPT and page_is_capture(draft.body):
             required = {"self_check"}
         missing = required - covered

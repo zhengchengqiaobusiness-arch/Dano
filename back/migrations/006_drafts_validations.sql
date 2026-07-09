@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS validation_runs (
     asset_draft_id    UUID        NOT NULL REFERENCES asset_drafts(asset_draft_id) ON DELETE CASCADE,
     content_hash      TEXT        NOT NULL,                -- = 草案 content_hash,防"换草案"
     kind              TEXT        NOT NULL
-        CHECK (kind IN ('connect','sandbox','readback','health','replay')),
+        CHECK (kind IN ('connect','sandbox','readback','health')),
     environment       TEXT        NOT NULL DEFAULT 'sandbox',     -- 红线:只准 sandbox
     credential_type   TEXT        NOT NULL DEFAULT 'test',        -- 红线:只准 test 凭证
     request           JSONB,

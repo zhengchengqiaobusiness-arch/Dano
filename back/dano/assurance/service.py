@@ -145,46 +145,8 @@ async def _is_page_action(tenant: str, subsystem: str, action: str) -> bool:
 
 async def _reheal_page(run_id: str, sid: str, subsystem: str, action: str,
                        tenant: str, lifecycle: SkillLifecycle) -> bool:
-    """页面漂移自愈(流程11 页面版):**重新侦察**当前页面 → 用最新指纹/字段重建脚本 →
-    沙箱回放 → 写页面过三模型评审 → 发布新版本(旧版保留)→ 恢复 Skill 到「已发布」。
-
-    start_url / success_marker / title 取自当前已发布的页面脚本资产(不需调用方再传)。
-    """
-    from dano.agent_tools import tools as T
-    from dano.assets.repository import AssetRepository
-    from dano.shared.enums import AssetType
-    from dano.shared.models import Scope
-    env = await AssetRepository().get_published(
-        AssetType.PAGE_SCRIPT, Scope(tenant=tenant, subsystem=Subsystem(subsystem)), asset_key=action)
-    if env is None:
-        return False
-    body = env.body
-    start_url = body.get("start_url", "")
-    sc = await T.scout_page(run_id, {"system_instance_id": sid, "start_url": start_url})
-    if not sc.get("suggested_steps"):
-        return False
-    d = await T.draft_page_script(run_id, {
-        "system_instance_id": sid, "action": action, "steps": sc["suggested_steps"],
-        "dom_fingerprint": sc["dom_fingerprint"], "start_url": start_url,
-        "success_marker": body.get("success_marker"), "title": body.get("title", "")})
-    rp = await T.sandbox_replay(run_id, {"asset_draft_id": d["asset_draft_id"]})
-    if not rp.get("passed"):
-        return False
-    review_ids: list[str] = []
-    if d.get("needs_review"):
-        rev = await T.request_review(run_id, {"asset_draft_id": d["asset_draft_id"]})
-        if not rev.get("all_passed"):
-            return False
-        review_ids = rev["review_run_ids"]
-    pub = await T.publish_asset(run_id, {"asset_draft_id": d["asset_draft_id"],
-        "validation_run_ids": rp["validation_run_ids"], "review_run_ids": review_ids})
-    if not pub.get("published"):
-        return False
-    skill_id = f"{subsystem}.{action}"
-    rec = await lifecycle.store.get(skill_id)
-    if rec and rec.state == SkillState.SUSPENDED:
-        await lifecycle.recover_to_published(skill_id, (rec.asset_version or 1) + 1)
-    return True
+    """录制 V2 不走页面重新侦察。"""
+    return False
 
 
 async def _full_reheal(*, tenant: str, subsystem: str, openapi: dict, deploy: dict,

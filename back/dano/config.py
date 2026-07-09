@@ -61,14 +61,9 @@ class Settings(BaseSettings):
     review_max_retries: int = 2
     review_retry_backoff_s: float = 1.0
 
-    # ── 页面型 Skill(流程8,无 API · Playwright);env 名保持 DANO_ 前缀直读不变 ──
-    page_runtime: bool = False           # = DANO_PAGE_RUNTIME:运行期 invoke 页面 Skill 需开(否则「页面运行时未装配」);接入侦察/回放不依赖它
+    # ── 录制 V2 浏览器设置 ──
     browser_headless: bool = True        # = DANO_BROWSER_HEADLESS:浏览器无头(调试可设 False 看界面)
-    browser_pool_size: int = 2           # = DANO_BROWSER_POOL_SIZE:运行期并发浏览器上限(信号量)
     page_timeout_s: float = 120.0        # = DANO_PAGE_TIMEOUT_S:单次页面运行总超时(防卡死)
-    page_write_probe: bool = False       # = DANO_PAGE_WRITE_PROBE:写页面沙箱回放是否真点提交(默认 dry,不真建单)
-    page_base_url: str = ""              # = DANO_PAGE_BASE_URL:运行期相对 start_url 的拼接基址
-    page_storage_state: str = ""         # = DANO_PAGE_STORAGE_STATE:登录态(Playwright storageState JSON 路径)
 
 
 @lru_cache

@@ -101,7 +101,7 @@ export default function Onboard() {
       if (fields.length) {
         setValMap((p) => {
           const cur = (p[t.templateId] || "").trim();
-          if (cur && cur !== "{}") return p;            // 已有内容(如请假样例)不覆盖
+          if (cur && cur !== "{}") return p;
           const skel: Record<string, string> = {};
           fields.forEach((f) => { skel[f.key] = ""; });
           return { ...p, [t.templateId]: JSON.stringify(skel, null, 2) };
@@ -156,7 +156,7 @@ export default function Onboard() {
       if (!token.trim()) { message.error("请填 OA token(查业务模板要用)"); return; }
       const tpls = await listTemplates(baseUrl.trim(), token.trim());
       const s: Record<string, boolean> = {}, v: Record<string, string> = {};
-      tpls.forEach((t) => { s[t.templateId] = false; v[t.templateId] = "{}"; });  // 勾选时按真实表单字段生成骨架
+      tpls.forEach((t) => { s[t.templateId] = false; v[t.templateId] = "{}"; });
       setTemplates(tpls); setSelT(s); setValMap(v);
       setStep(1);
     } catch (e: any) {
@@ -183,7 +183,7 @@ export default function Onboard() {
         tenant, subsystem, openapi: swagger,
         deploy: { base_url: baseUrl.trim(), auth: { kind: "token" } },
         credentials: { token: token.trim() },
-        include_tags: [], flows, max_read_flows: 0,
+        include_tags: [], flows,
       });
       setJobId(job_id); setJob(null); setStep(2);
     } catch (e: any) {

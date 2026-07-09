@@ -111,7 +111,7 @@ async function realRun(start) {
         "(skills_loaded=" + skillsLoaded + ", final_chars=" + finalText.length + ")");
   }
   return { status: "completed", skills_loaded: skillsLoaded, tool_events: toolEvents,
-           final_text: finalText.slice(0, 100000) };   // 足够容纳生成的代码(原 600 会截断 codegen)
+           final_text: finalText.slice(0, 100000) };
 }
 
 async function stubRun(start) {

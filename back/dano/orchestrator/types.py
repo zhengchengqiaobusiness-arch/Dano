@@ -21,7 +21,7 @@ class Intent(BaseModel):
 
 
 class SkillSpec(BaseModel):
-    """动作 Skill(1 Skill = 1 action)。从已发布连接器(有 API)或页面脚本(无 API)派生。"""
+    """动作 Skill(1 Skill = 1 action)。从已发布连接器或录制 V2 资产派生。"""
 
     skill_id: str
     capability: str = ""                                       # 对外能力键;空则兼容退回 skill_id
@@ -41,11 +41,8 @@ class SkillSpec(BaseModel):
     goal: dict = Field(default_factory=dict)                    # 结构化业务目标(意图/成功判据/禁止步,§2)
     has_api: bool = True
     connector_asset_id: UUID | None = None   # 有 API
-    page_asset_id: UUID | None = None         # 无 API(页面脚本)
-    page_start_url: str = ""                   # 页面脚本:入口页(详情展示)
-    page_success_marker: str | None = None     # 页面脚本:成功标志
-    page_steps: list[dict] = Field(default_factory=list)   # 页面脚本:动作步骤(PageAction 字典,详情时间线)
-    api_request: dict = Field(default_factory=dict)        # 抓请求型页面脚本:参数化后的提交请求/多步工作流(steps/success_rule/fact_check)
+    page_asset_id: UUID | None = None         # 录制 V2 资产
+    api_request: dict = Field(default_factory=dict)        # 参数化后的提交请求/多步工作流(steps/success_rule/fact_check)
     recording_mode: str = ""                               # 录制提交模式:real_submit/intercepted_submit/unknown
     verification_status: str = ""                          # 调用契约验证等级
     verification_basis: str = ""                            # 验证证据来源:fact_check_configured/success_rule_configured/structure_only
@@ -63,17 +60,8 @@ class SkillSpec(BaseModel):
     workflow_invariants: list[dict] = Field(default_factory=list)      # DSL v2:办理后业务正确性不变量
     workflow_preview: bool = False                                     # DSL v2:写前预览待确认(Phase 5 接)
 
-    business: str = ""                                          # 所属业务(同业务多操作 adapter 导出归组)
+    business: str = ""
     business_meta: dict = Field(default_factory=dict)           # 业务规则(x-flow)→ 导出剧本的前置/错误/确认段
-
-    # 代码适配器(goal 模式生成):调用时由隔离 runner 执行 source
-    is_adapter: bool = False
-    adapter_asset_id: UUID | None = None
-    adapter_source: str = ""
-    adapter_entry: str = "run"
-    adapter_success_rule: str | None = None
-    adapter_fact_check: dict | None = None
-    adapter_consts: dict = Field(default_factory=dict)   # 运行期注入的内部常量(如 __templateId__)
 
 
 class CapabilityCallEnvelope(BaseModel):

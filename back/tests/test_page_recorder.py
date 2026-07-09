@@ -1,4 +1,4 @@
-"""方式B 录制核心:注入式语义动作捕获(真浏览器,缺浏览器自动 skip)。
+﻿"""方式B 录制核心:注入式语义动作捕获(真浏览器,缺浏览器自动 skip)。
 
 不测 WebSocket/截屏(实时管线,手动/前端验);测最有价值、可自动化的部分——
 用户操作(经真实 DOM 事件)是否被转成正确的语义步骤 + 样例值。
@@ -69,7 +69,7 @@ async def test_record_session_captures_semantic_steps(tmp_path) -> None:  # noqa
         await sess.page.wait_for_timeout(300)          # 等 expose_binding 回传完成
 
         steps, samples = sess.recorded_steps()
-        ops = [(s.op, s.locator) for s in steps]
+        ops = [(s["op"], s["locator"]) for s in steps]
         assert ("fill", "label=金额") in ops
         assert ("select", "label=类别") in ops
         assert ("submit", "role=button[name=提交]") in ops
@@ -101,7 +101,7 @@ async def test_dispatch_input_relays_and_captures(tmp_path) -> None:  # noqa: AN
         steps, samples = sess.recorded_steps()
     finally:
         await sess.stop()
-    ops = [s.op for s in steps]
+    ops = [s["op"] for s in steps]
     assert "fill" in ops and "submit" in ops
     assert samples.get("amount") == "差旅费100"          # 中文经回传被正确填入并捕获
 
@@ -128,8 +128,8 @@ async def test_password_never_recorded_and_reset(tmp_path) -> None:  # noqa: ANN
         await sess.page.wait_for_timeout(300)
         steps, samples = sess.recorded_steps()
         # 账号被录,密码与其值绝不出现
-        assert any((s.field or "") == "账号" for s in steps)
-        assert not any("password" in (s.locator or "") or (s.field or "") == "password" for s in steps)
+        assert any((s.get("field") or "") == "账号" for s in steps)
+        assert not any("password" in (s["locator"] or "") or (s.get("field") or "") == "password" for s in steps)
         assert "secret123" not in str(samples)
         # reset 清空(登录后只录业务)
         sess.reset()
@@ -159,7 +159,7 @@ async def test_captures_card_and_menu_clicks(tmp_path) -> None:  # noqa: ANN001
         steps, _ = sess.recorded_steps()
     finally:
         await sess.stop()
-    locs = [s.locator for s in steps]
+    locs = [s["locator"] for s in steps]
     assert "text=出差申请" in locs
     assert "text=我的" in locs
 
@@ -190,7 +190,7 @@ async def test_general_semantics_framework_agnostic(tmp_path) -> None:  # noqa: 
         steps, samples = sess.recorded_steps()
     finally:
         await sess.stop()
-    pairs = [(s.op, s.locator) for s in steps]
+    pairs = [(s["op"], s["locator"]) for s in steps]
     assert ("submit", "role=button[name=发起出差]") in pairs       # 自定义 ARIA 按钮 + 提交语义
     assert ("click", "role=link[name=详情]") in pairs               # 隐式 link role
     assert ("click", 'css=[data-testid="reimburse-card"]') in pairs  # testid 最高优先
@@ -239,7 +239,7 @@ async def test_picker_recorded_as_pick_param_not_clicks(tmp_path) -> None:  # no
         steps, samples = sess.recorded_steps()
     finally:
         await sess.stop()
-    ops = [(s.op, s.locator) for s in steps]
+    ops = [(s["op"], s["locator"]) for s in steps]
     assert ("pick", "label=请假类型") in ops            # 录成 pick 参数步
     assert not any(o == "click" and "事假" in (loc or "") for o, loc in ops)   # 没把「事假」录成写死点击
     assert samples.get("请假类型") == "事假"             # 选中值作样例
@@ -275,7 +275,7 @@ async def test_follows_new_tab_and_records_on_it(tmp_path) -> None:  # noqa: ANN
         steps, samples = sess.recorded_steps()
     finally:
         await sess.stop()
-    assert ("fill", "label=金额") in [(s.op, s.locator) for s in steps]
+    assert ("fill", "label=金额") in [(s["op"], s["locator"]) for s in steps]
     assert samples.get("amount") == "100"
 
 
@@ -310,27 +310,6 @@ async def test_token_auth_sets_login_cookie() -> None:
         assert hit and hit[0]["domain"].endswith("oa.example.com")
     finally:
         await ctx.close(); await b.close(); await pw.stop()
-
-
-async def test_recorded_steps_build_and_publishable_shape(tmp_path) -> None:  # noqa: ANN001
-    """录制产物 → page_builder 建体 → 写页面 L3(可进发布管道)。"""
-    if not await _chromium_available():
-        pytest.skip("chromium 未安装")
-    from dano.agent_tools.page_builder import build_page_script
-    page = tmp_path / "form.html"
-    page.write_text(_HTML, encoding="utf-8")
-    sess = RecordSession()
-    try:
-        await sess.start(page.as_uri())
-        await sess.page.get_by_label("金额").fill("88")
-        await sess.page.get_by_role("button", name="提交").click()
-        await sess.page.wait_for_timeout(300)
-        steps, _ = sess.recorded_steps()
-    finally:
-        await sess.stop()
-    body = build_page_script(steps, action="submit_reimburse", dom_fingerprint="",
-                             start_url=page.as_uri(), success_marker="text=保存成功")
-    assert body.risk_level.value == "L3" and any(a.op == "submit" for a in body.actions)
 
 
 # ── P0-1 真实浏览器集成:验证 all_requests / diagnostics 在真浏览器链路里真能抓到 ──
@@ -421,3 +400,4 @@ async def test_real_browser_diagnostics_captures_console_and_pageerror(tmp_path)
     # pageerror.message 含原异常文案
     page_errors = [d for d in sess.captured_diagnostics() if d["type"] == "pageerror"]
     assert any("boom-from-page" in d["message"] for d in page_errors), page_errors
+

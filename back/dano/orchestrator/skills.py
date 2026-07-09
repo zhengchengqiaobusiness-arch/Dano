@@ -12,7 +12,6 @@ import structlog
 from pydantic import BaseModel, Field
 
 from dano.assets.store import AssetStore
-from dano.execution.connectors.executor import system_key_for
 from dano.orchestrator.types import Intent, SkillSpec
 from dano.shared.enums import AssetType, RiskLevel, Subsystem
 from dano.shared.models import Scope
@@ -27,7 +26,7 @@ class ActionMeta(BaseModel):
     required_fields: list[str] = Field(default_factory=list)
 
 
-# 动作元数据(关键词用于意图匹配,事实核查用于流程9 重查比对)
+# 动作元数据(关键词用于意图匹配,事实核查用于重查比对)
 ACTION_META: dict[str, ActionMeta] = {
     "query_balance": ActionMeta(keywords=["余额", "假期余额", "还有几天假", "balance"]),
     "create_leave": ActionMeta(
@@ -43,17 +42,6 @@ ACTION_META: dict[str, ActionMeta] = {
         fact_check_expr="response.ticket_id != null",
     ),
     "query_ticket": ActionMeta(keywords=["工单进度", "工单状态", "ticket status"]),
-    # 无 API 报销(页面辅助,流程8)
-    "create_reimburse_draft": ActionMeta(
-        keywords=["报销", "报销草稿", "贴发票", "reimburse"],
-        fact_check_expr="response.draft_id != null and response.amount == fields.amount",
-        required_fields=["amount", "category"],
-    ),
-}
-
-# 无 API 子系统的页面动作(一个无 API 系统当前一个页面动作)
-_PAGE_ACTION_BY_SUBSYSTEM: dict[Subsystem, str] = {
-    Subsystem.REIMBURSE: "create_reimburse_draft",
 }
 
 
@@ -174,48 +162,12 @@ class SkillRegistry:
                         fact_check_expr=fc_expr,
                     )
                 )
-            # 代码适配器(goal 模式生成):从已发布 ADAPTER 资产派生;调用时隔离 runner 执行 source
-            for env in await store.list_published(AssetType.ADAPTER, scope):
-                b = env.body
-                action = b.get("action", env.asset_key)
-                req = list(b.get("required_fields", []))
-                opt = [f for f in b.get("user_fields", []) if f not in req]
-                call_meta = _call_metadata_from_body(b, env)
-                skills.append(
-                    SkillSpec(
-                        skill_id=f"{sub.value}.{action}",
-                        subsystem=sub,
-                        action=action,
-                        risk_level=RiskLevel(b.get("risk_level", "L3")),
-                        title=b.get("title", ""),
-                        business=b.get("business", ""),
-                        business_meta=dict(b.get("business_meta", {})),
-                        field_docs=dict(b.get("field_docs", {})),
-                        field_types=dict(b.get("field_types", {}) or {}),
-                        call_metadata=call_meta,
-                        created_at=_asset_created_at(env),
-                        verification_status=call_meta.get("verification_status", ""),
-                        verification_basis=call_meta.get("verification_basis", ""),
-                        recording_mode=call_meta.get("recording_mode", ""),
-                        has_api=True,
-                        is_adapter=True,
-                        adapter_asset_id=env.asset_id,
-                        adapter_source=b.get("source", ""),
-                        adapter_entry=b.get("entry", "run"),
-                        adapter_success_rule=b.get("success_rule"),
-                        adapter_fact_check=b.get("fact_check"),
-                        adapter_consts=dict(b.get("consts", {})),
-                        required_fields=req,
-                        optional_fields=opt,
-                        keywords=[w for w in (action, b.get("title", "")) if w],
-                    )
-                )
-            # 无 API:从已发布页面脚本派生(流程8)
+            # 录制 V2:仅从带 api_request 的已发布录制资产派生能力。
             for env in await store.list_published(AssetType.PAGE_SCRIPT, scope):
                 body = env.body or {}
                 body_action = (body.get("action") or "").strip()
-                if body_action:
-                    # 加厚后的页面脚本:动作/字段/风险/标题来自资产体本身
+                api_request = dict(body.get("api_request") or {})
+                if body_action and api_request:
                     req = list(body.get("required_fields") or [])
                     user = list(body.get("user_fields") or [])
                     opt = [f for f in (user + list(body.get("optional_fields") or []))
@@ -234,39 +186,17 @@ class SkillRegistry:
                             call_metadata=call_meta,
                             capability=call_meta.get("capability", ""),
                             capability_meta=dict(call_meta.get("capability_meta") or {}),
-                            capabilities=list(call_meta.get("capabilities") or body.get("capabilities") or (body.get("api_request") or {}).get("capabilities") or []),
+                            capabilities=list(call_meta.get("capabilities") or body.get("capabilities") or api_request.get("capabilities") or []),
                             created_at=_asset_created_at(env),
                             verification_status=call_meta.get("verification_status", ""),
                             verification_basis=call_meta.get("verification_basis", ""),
                             recording_mode=call_meta.get("recording_mode", ""),
                             has_api=False,
                             page_asset_id=env.asset_id,
-                            page_start_url=body.get("start_url", ""),
-                            page_success_marker=body.get("success_marker"),
-                            page_steps=list(body.get("actions") or []),
-                            api_request=dict(body.get("api_request") or {}),   # 抓请求型:多步工作流/成功约定/事实核查随资产走(供导出还原编排)
+                            api_request=api_request,
                             required_fields=req,
                             optional_fields=opt,
                             keywords=[w for w in (body_action, body.get("title", "")) if w],
-                        )
-                    )
-                else:
-                    # 旧页面脚本(仅 actions+dom_fingerprint,无 action 字段):原型子系统沿用已知映射;
-                    # 任意其它系统派生中性动作名 `submit_<系统key>`,**不臆造**成报销动作。
-                    action = _PAGE_ACTION_BY_SUBSYSTEM.get(sub) or f"submit_{system_key_for(sub)}"
-                    meta = ACTION_META.get(action, ActionMeta(keywords=[action]))
-                    skills.append(
-                        SkillSpec(
-                            skill_id=f"{sub.value}.{action}",
-                            subsystem=sub,
-                            action=action,
-                            risk_level=RiskLevel.L2,   # 报销草稿 L2
-                            has_api=False,
-                            page_asset_id=env.asset_id,
-                            created_at=_asset_created_at(env),
-                            required_fields=meta.required_fields,
-                            keywords=meta.keywords,
-                            fact_check_expr=meta.fact_check_expr,
                         )
                     )
         log.info("skills.registered", count=len(skills), skills=[s.skill_id for s in skills])

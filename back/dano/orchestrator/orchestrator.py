@@ -1,4 +1,4 @@
-"""主智能体编排(流程6 状态机)—— 纯逻辑,依赖可注入。
+﻿"""主智能体编排(流程6 状态机)—— 纯逻辑,依赖可注入。
 
 主智能体只编排、不直接执行;任一闸门/断言不过即停;终态只有确定的几种。
 与 Temporal 解耦:本类是可离线测试的业务逻辑,workflow.py 只做持久化薄包装。
@@ -20,7 +20,6 @@ from dano.orchestrator.types import SkillSpec, TaskOutcome
 from dano.shared.asset_bodies import (
     Assertions,
     ConnectorBody,
-    PageScriptBody,
     PolicyRuleBody,
 )
 from dano.shared.enums import (
@@ -147,7 +146,6 @@ class Orchestrator:
         closure: VerificationClosure | None = None,
         gate: PolicyGate | None = None,
         resolve_credentials: CredentialResolver = _noop_resolver,
-        page_runtime=None,     # PageActionRuntime(可选,无 API 页面执行)
         failure_handler=None,  # FailureHandler(可选,流程10;Phase 4 接)
         heal_queue=None,       # 漂移自愈触发队列(流程11;Phase 4 接)
         holidays: list[str] | None = None,   # 日历源:注入复合流程 compute 的 business_days(节假日)
@@ -159,7 +157,6 @@ class Orchestrator:
         self.closure = closure or VerificationClosure()
         self.gate = gate or PolicyGate()
         self.resolve = resolve_credentials
-        self.page_runtime = page_runtime
         self.failure_handler = failure_handler
         self.heal_queue = heal_queue
         self.holidays = list(holidays or [])
@@ -241,81 +238,11 @@ class Orchestrator:
             return TaskOutcome(task_id=task_id, state=TaskState.CANCELLED, skill_id=skill.skill_id,
                                message="需用户确认(confirm=true)")
 
-        if skill.is_adapter:
-            return await self._run_adapter(task_id, tenant, skill, intent)
         if skill.is_workflow:
             return await self._run_workflow(task_id, tenant, skill, intent)
         if skill.has_api:
             return await self._run_api(task_id, tenant, skill, intent, confirm=confirm_fn)
         return await self._run_page(task_id, skill, intent, confirm=confirm_fn, tenant=tenant)
-
-    async def _run_adapter(self, task_id, tenant, skill, intent) -> TaskOutcome:  # noqa: ANN001
-        """代码适配器 Skill(goal 模式生成):隔离 runner 执行 source,过成败规则 + 事实核查。
-
-        凭证运行期注入(不进源码);base_url 取自已发布环境画像;事实核查回查确认真生效。
-        """
-        from dano.execution.adapter import AdapterRunner
-        from dano.execution.connectors.executor import system_key_for
-        scope = Scope(tenant=tenant, subsystem=skill.subsystem)
-        ep = await self.store.get_published(AssetType.ENV_PROFILE, scope, asset_key="env_profile")
-        base_url = ((ep.body.get("base_url") if ep else "") or "")
-        resolved = self.resolve({"token": f"vault://{tenant}/{system_key_for(skill.subsystem)}"})
-        creds = {"token": resolved.get("token") or next(iter(resolved.values()), "")}
-        # 注入运行期内部量:base_url + 发布时常量(如 __templateId__);用户只传业务字段
-        inputs = {**intent.fields, "__base_url__": base_url, **(skill.adapter_consts or {})}
-
-        res = await AdapterRunner().run(source=skill.adapter_source, inputs=inputs,
-                                        credentials=creds, entry=skill.adapter_entry)
-        ok, detail = res.ok, (res.error or "")
-        if ok and skill.adapter_success_rule:
-            try:
-                ok = bool(safe_eval(skill.adapter_success_rule, {"response": res.output, "http": 200}))
-            except Exception:  # noqa: BLE001
-                ok = False
-            if not ok:
-                detail = f"未满足 success_rule={skill.adapter_success_rule!r}"
-        fc_ev = None
-        if ok and skill.adapter_fact_check:
-            from dano.execution.fact_check import run_fact_check
-            from dano.shared.asset_bodies import FactCheckSpec
-            spec = FactCheckSpec.model_validate(skill.adapter_fact_check)
-            ctx = {**intent.fields, **(res.output if isinstance(res.output, dict) else {})}
-            ok, fc_ev = await run_fact_check(spec, context=ctx,
-                                             call=self._http_caller(base_url, creds))
-            if not ok:
-                detail = f"事实核查未过(疑似空操作): {spec.assert_expr}"
-        out = res.output if isinstance(res.output, dict) else {"value": res.output}
-        er = ExecResult(task_id=task_id, outcome=Outcome.PASSED if ok else Outcome.FAILED,
-                        evidence=Evidence(request_body=inputs, response_body=out),
-                        structured_output=out)
-        log.info("adapter.invoke", skill=skill.skill_id, ok=ok)
-        return TaskOutcome(
-            task_id=task_id, state=TaskState.COMPLETED if ok else TaskState.FAILED,
-            skill_id=skill.skill_id, exec_result=er,
-            message="adapter 完成 + 事实核查通过" if ok else f"adapter 跑不通 → 流程10:{detail}",
-            audit={"output": res.output, "fact_check": fc_ev, "intent": intent.action_hint})
-
-    @staticmethod
-    def _http_caller(base_url: str, creds: dict):  # noqa: ANN205
-        """事实核查回查用的 call(method, path, body)->(http, json)。"""
-        base = base_url.rstrip("/")
-
-        async def call(method: str, path: str, body=None):  # noqa: ANN001
-            import httpx
-            from dano.infra.http import tls_verify
-            tok = (creds.get("token") or "").strip()
-            async with httpx.AsyncClient(timeout=30, verify=tls_verify()) as c:
-                h = {"Authorization": f"Bearer {tok}"} if tok else {}
-                if method.upper() == "GET":
-                    r = await c.get(base + path, headers=h)
-                else:
-                    r = await c.request(method, base + path, json=body, headers=h)
-            try:
-                return r.status_code, r.json()
-            except Exception:  # noqa: BLE001
-                return r.status_code, {"raw": r.text}
-
-        return call
 
     async def _run_workflow(self, task_id, tenant, skill, intent) -> TaskOutcome:  # noqa: ANN001
         """复合流程 Skill(DSL v2):前置不变量 → 解释器执行 steps(call/compute/branch/foreach/select)
@@ -375,7 +302,7 @@ class Orchestrator:
     async def _exec_steps(self, steps: list, ctx: dict, state: dict, prefix: str = "") -> None:  # noqa: ANN001
         """递归解释器:按序执行 DSL v2 节点。失败/缺连接器/需选择 → 抛异常,由 _run_workflow 转终态。
 
-        prefix:节点在树中的稳定路径(供分支覆盖统计;与 dsl_grounding.branch_ids 同一编号约定)。
+        prefix:节点在树中的稳定路径(供分支覆盖统计;与 onboarding.dsl_grounding.branch_ids 同一编号约定)。
         """
         for i, step in enumerate(steps):
             sid = f"{prefix}{i}"
@@ -552,7 +479,7 @@ class Orchestrator:
         from dano.infra.token_store import get_token_headers, merge_auth_headers
         skill = self.registry.by_action(subsystem, action)
         if skill is None or not getattr(skill, "page_asset_id", None):
-            return {"field": field, "options": [], "count": 0, "note": "未知动作 / 非页面型 skill"}
+            return {"field": field, "options": [], "count": 0, "note": "未知动作 / 非录制型 skill"}
         env = await self.store.get(skill.page_asset_id)
         apir = (env.body or {}).get("api_request") if env else None
         if not apir:
@@ -574,11 +501,11 @@ class Orchestrator:
                                          verify=tls_verify())
 
     async def _run_page(self, task_id, skill, intent, *, confirm, tenant="") -> TaskOutcome:  # noqa: ANN001
-        """无 API 页面辅助执行(流程8)。有 api_request(抓请求路径)则直接发请求,不开浏览器。"""
+        """录制 V2 能力执行。api_request 直接发请求,不开浏览器。"""
         env = await self.store.get(skill.page_asset_id)
         assert env is not None, "页面脚本资产不存在"
 
-        # 抓请求路径:带登录态直接发 SPA 内部接口(参数填回 body_template)。已过 L3 确认闸门。
+        # 带登录态直接发 SPA 内部接口(参数填回 body_template)。已过 L3 确认闸门。
         if (env.body or {}).get("api_request"):
             import json as _json
 
@@ -619,38 +546,5 @@ class Orchestrator:
                          else f"提交未生效(HTTP {out.get('status')}):{fail_reason}"),
                 audit={"api": out})
 
-        if self.page_runtime is None:
-            return TaskOutcome(task_id=task_id, state=TaskState.TRANSFER_HUMAN,
-                               skill_id=skill.skill_id, message="页面运行时未装配")
-        script = PageScriptBody.model_validate(env.body)
-
-        # 复用录制时保存的登录态(该子系统有则带上,免运行期被挡登录)
-        from dano.execution.page.sessions import session_path_if_exists
-        storage = session_path_if_exists(tenant, skill.subsystem.value)
-        exec_result = await self.page_runtime.run(
-            task_id, script, intent.fields, confirm=lambda f: confirm(skill, f), storage_state=storage
-        )
-        # 漂移 → 转流程11;取消 → CANCELLED
-        if exec_result.structured_output.get("drift"):
-            if self.heal_queue is not None:
-                await self._enqueue_heal(skill, "页面指纹漂移")  # 自动触发流程11
-            return TaskOutcome(task_id=task_id, state=TaskState.DRIFT, skill_id=skill.skill_id,
-                               exec_result=exec_result, message="页面指纹漂移 → 流程11 自愈,本次中止")
-        if exec_result.structured_output.get("cancelled"):
-            return TaskOutcome(task_id=task_id, state=TaskState.CANCELLED, skill_id=skill.skill_id,
-                               message="用户取消(提交前预览)")
-        if exec_result.outcome == Outcome.FAILED:
-            return TaskOutcome(task_id=task_id, state=TaskState.FAILED, skill_id=skill.skill_id,
-                               exec_result=exec_result, message="页面执行跑不通 → 流程10")
-
-        closure = await self.closure.verify(
-            exec_result, fact_expr=skill.fact_check_expr,
-            before={}, after={}, fields=intent.fields,
-            intent=intent.action_hint, action=skill.action,
-            risk_level=RiskLevel(skill.risk_level),
-        )
-        return TaskOutcome(
-            task_id=task_id, state=closure.state, skill_id=skill.skill_id,
-            exec_result=exec_result, message=closure.detail,
-            audit={"draft": exec_result.structured_output, "intent": intent.action_hint},
-        )
+        return TaskOutcome(task_id=task_id, state=TaskState.TRANSFER_HUMAN,
+                           skill_id=skill.skill_id, message="录制资产缺少 api_request,无法执行")

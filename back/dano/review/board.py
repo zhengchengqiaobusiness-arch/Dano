@@ -1,4 +1,4 @@
-"""三模型评审委员会:成果验收 / 漏洞检测 / 合规审核,各用一个独立模型(OpenAI 兼容)。
+﻿"""三模型评审委员会:成果验收 / 漏洞检测 / 合规审核,各用一个独立模型(OpenAI 兼容)。
 
 纪律:
 - 只喂声明式 body + 沙箱证据 trace,**绝不带凭证**(materials 不进此处)。
@@ -52,13 +52,13 @@ _DISCIPLINE = ("判定纪律:**通过 = 你逐项核对过清单且证据支持*
 _ROLE_SYSTEM: dict[str, str] = {
     "acceptance": (
         "你是『成果验收』评审员,只判:这份自动生成的 API 接入资产是否**真满足业务意图**。逐项核对:\n"
-        "1) 动作语义与字段映射是否对得上业务(看 asset_key、参数/field_bindings、adapter 看 source);\n"
+        "1) 动作语义与字段映射是否对得上业务(看 asset_key、参数/field_bindings);\n"
         "2) 成败判定是否**有意义**:success_rule/断言能否真区分业务成功与失败,而非只校验 HTTP 200;\n"
         "3) 沙箱证据(sandbox_evidence)是否自洽、确实跑通了本业务动作;\n"
         "4) 必填项是否齐全。\n" + _DISCIPLINE + _OUT
     ),
     "security": (
-        "你是『漏洞检测』评审员,只从安全维度逐行审(adapter 必须逐行审 source)。逐项核对:\n"
+        "你是『漏洞检测』评审员,只从安全维度核对资产。逐项核对:\n"
         "1) 危险调用:eval/exec/os.system/subprocess shell;\n"
         "2) 注入:外部输入是否未经处理拼进 URL/SQL/shell;\n"
         "3) 鉴权是否缺失或过宽、写操作是否缺幂等键;\n"
@@ -68,18 +68,18 @@ _ROLE_SYSTEM: dict[str, str] = {
         "fail-closed:对你**发现的可疑高危项**,若证据不足以排除,按不通过处理并说明缺什么证据"
         "(注意:这只针对你看出的可疑点,不是没问题也拒)。\n"
         "**设计如此、切勿误判为漏洞**:body 不含明文 token、base_url 为平台注入的可信地址、"
-        "企业内网自签证书下 verify=False、fact_check 的 method=GET——详见用户消息【运行架构】/【代码评审要求】。\n"
+        "企业内网自签证书下 verify=False、fact_check 的 method=GET——详见用户消息【运行架构】。\n"
         + _DISCIPLINE + _OUT
     ),
     "compliance": (
         "你是『合规审核』评审员,只审合规与发布纪律。逐项核对:\n"
-        "1) **真跑**验证证据(kind=replay/live)是否全部 environment=sandbox 且 credential_type=test(严禁生产/真凭证);"
+        "1) **真跑**验证证据(kind=health, evidence.mode=live)是否全部 environment=sandbox 且 credential_type=test(严禁生产/真凭证);"
         "**若验证模式是 self_check(dry,未发任何请求、未用任何凭证)→ 零凭证零副作用,属写安全默认,视为合规**,"
         "**不要因『未真跑/dry=true/缺真跑证据』判不通过**;\n"
         "2) 风险分级 risk_level 是否与动作匹配(GET 只读=L1;写=L3 需确认);\n"
         "3) 写/删操作是否要求确认(confirm,由 risk_level 运行期强制);\n"
         "4) 是否指向生产端点、是否违反最小权限。\n"
-        "fail-closed(发布红线):**仅针对真跑(live/replay)证据**——其若未能确认全为 sandbox+test 才判不通过;"
+        "fail-closed(发布红线):**仅针对真跑 health/live 证据**——其若未能确认全为 sandbox+test 才判不通过;"
         "**dry/self_check 不触发本红线**(它根本没执行,谈不上用错环境/凭证)。\n"
         "**设计如此、不要误判**:dry/self_check 未真跑、confirm 不在 body 字段、单步 field_bindings 为空、"
         "fact_check 的 method=GET——详见用户消息【运行架构】。\n" + _DISCIPLINE + _OUT
@@ -230,45 +230,23 @@ _SYSTEM_CONTEXT = (
     "带 success_rule 即视为已检验业务成功,不必再要求额外业务断言。\n"
     "6. sandbox_evidence 有两种验证模式,**都合规、都按设计**:① **self_check**(确定性 dry 构造验证——"
     "只构造请求、**绝不真发**,故未使用任何凭证、未触碰任何环境;这是录制/写操作的**默认安全模式**,"
-    "资产据此发布为 partially_verified)② **replay/live**(可逆沙箱 + credential_type=test 真跑)。"
+    "资产据此发布为 partially_verified)② **health/live**(可逆沙箱 + credential_type=test 真跑)。"
     "**切勿因 evidence.request.dry=true / kind=self_check / 『未真实跑通』判不通过**——dry 不执行 = 零凭证零副作用,"
-    "是最安全的模式、不是缺陷;只有能真跑的环境才会另有 live 证据,真跑证据才需全 sandbox+test。\n"
+    "是最安全的模式、不是缺陷;只有能真跑的环境才会另有 health/live 证据,真跑证据才需全 sandbox+test。\n"
     "仅当存在**实质**问题(真实安全漏洞、risk_level 确与 method 不符、断言完全缺失、字段语义明显错配)"
     "时才判不通过;按设计如此的项不要判不通过。"
 )
 
 
-_ADAPTER_REVIEW_NOTE = (
-    "\n\n【代码评审要求】本资产是 adapter:declarative_body.source 为自动生成的**可执行代码**。"
-    "请在各自维度上**逐行审源码**——成果验收:代码是否真实现业务意图、成败判定是否有意义;"
-    "漏洞检测:危险调用(eval/exec/os.system/subprocess shell)、命令/请求注入、SSRF、"
-    "硬编码密钥/令牌(源码必须零凭证,凭证应从 creds 运行期注入)、越权;"
-    "合规审核:是否仅用测试凭证与沙箱、风险分级与读/写匹配、写操作是否需确认。"
-    "\n【adapter 的 risk_level 与 fact_check 判定要点(避免误判)】"
-    "adapter 会发多次 HTTP;risk_level 反映其**实际执行的操作**——源码里有 POST/PUT/PATCH/DELETE 写操作即应为 L3(运行期需确认),L3 正确不要驳回。"
-    "declarative_body.fact_check 是发布/执行后的**只读回查(流程9 事实核查)**,其 method=GET 是设计如此、用于确认副作用真生效,"
-    "**与动作风险无关**;**切勿因 fact_check 的 method=GET 就要求把 risk_level 降为 L1**——判 risk_level 只看源码里有没有写操作,不看 fact_check 的 method。"
-    "\n【TLS 与 base_url —— 不要误判 SSRF / 中间人(平台既定行为)】"
-    "base_url 取自 inputs['__base_url__'],是**平台运行期注入的可信地址**(发布的环境画像,非用户任意输入),"
-    "不构成 SSRF;对接的企业内网系统常为**自签证书**、平台已配置 insecure_tls,源码用 `verify=False` 是"
-    "**平台既定的对接方式**,属正常配置——**切勿据此判中间人攻击/SSRF 而驳回**。这两点是设计如此,不是漏洞。"
-)
-
-
-# 凭证脱敏:评审输入绝不带明文凭证(也绝不把令牌发给外部 LLM provider)。按 key 名脱敏,
-# 不按值猜(避免误删 acceptance 需要看的业务字段)。命中 key 的整段值替换为说明串。
 _SECRET_KEY_HINTS = ("authorization", "auth_headers", "auth_header", "cookie", "token", "password",
                      "passwd", "secret", "credential", "apikey", "api_key", "satoken", "session",
                      "x-tenant-key", "set-cookie")
-_SECRET_MASK = "***[运行期注入的会话登录态/凭证,模板不存明文,已脱敏]***"
-# **绝不脱敏**:这些是评审需要看的非密元数据(尤其 credential_type 含 "credential" 会被误命中 →
-# compliance 看不到 'test' → fail-closed 误判不通过)。
+_SECRET_MASK = "***[已脱敏鉴权/会话,保留结构,供评审判断]***"
 _NEVER_MASK = {"credential_type", "environment", "kind", "passed", "method"}
 
 
 def _redact_secrets(node):
-    """深拷贝并按 key 名脱敏凭证(auth_headers/Authorization/Cookie/token…)。结构保留,值打码;
-    但 _NEVER_MASK 里的评审元数据(credential_type/environment 等)绝不脱敏(否则 compliance 误判)。"""
+    """递归脱敏鉴权/会话字段,但保留评审元数据。"""
     if isinstance(node, dict):
         out: dict = {}
         for k, v in node.items():
@@ -285,8 +263,6 @@ def _redact_secrets(node):
     return node
 
 
-# 录制抓请求页面的审核要求:结构已被 self_check 确定性验过 → 三模型**只判语义**,**拿 Goal 当业务方案对照**,
-# 不重判结构/必填/鉴权脱敏(这正是当年评审对录制资产抖动误判的根因)。
 _CAPTURE_REVIEW_NOTE = (
     "\n\n【录制抓请求审核要求(本资产=用户真人在页面上**亲手提交过**的写请求,已参数化)】\n"
     "**结构正确性(参数能否替换 / 身份能否覆盖 / 多步串联)已由确定性 self_check 验过**"
@@ -306,7 +282,7 @@ _CAPTURE_REVIEW_NOTE = (
 def _build_user(asset_type: str, asset_key: str, body: dict, evidence: list[dict]) -> str:
     """拼评审输入(运行架构上下文 + 声明式信息 + 沙箱证据,**凭证已脱敏**)。
 
-    adapter:把生成源码单列一节并附代码评审要求;录制抓请求页面:附 capture 审核要求(结构已验、只判语义)。
+    录制抓请求页面:附 capture 审核要求(结构已验、只判语义)。
     """
     payload = json.dumps({
         "asset_type": asset_type,
@@ -315,12 +291,7 @@ def _build_user(asset_type: str, asset_key: str, body: dict, evidence: list[dict
         "sandbox_evidence": _redact_secrets(evidence),
     }, ensure_ascii=False, indent=2)
     user = _SYSTEM_CONTEXT + "\n\n【待评审资产】\n" + payload
-    if asset_type == "adapter":
-        src = (body or {}).get("source")
-        if src:
-            user += "\n\n【生成代码 source】\n```python\n" + str(src) + "\n```"
-        user += _ADAPTER_REVIEW_NOTE
-    elif asset_type == "page_script" and (body or {}).get("api_request") and not (body or {}).get("actions"):
+    if asset_type == "page_script" and (body or {}).get("api_request") and not (body or {}).get("actions"):
         user += _CAPTURE_REVIEW_NOTE   # 录制抓请求:三模型只判语义、拿 Goal 当业务方案对照
     return user
 

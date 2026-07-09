@@ -10,7 +10,6 @@ from typing import Any
 from pydantic import ValidationError
 
 from dano.shared.asset_bodies import (
-    AdapterBody,
     ConnectorBody,
     EnvProfileBody,
     FieldMappingBody,
@@ -28,7 +27,6 @@ _BODY_MODEL = {
     AssetType.ENV_PROFILE: EnvProfileBody,
     AssetType.PAGE_SCRIPT: PageScriptBody,
     AssetType.WORKFLOW: WorkflowSkillBody,
-    AssetType.ADAPTER: AdapterBody,
 }
 
 # 方案(PlanBody)是 goal 模式中间产物,不作为独立资产类型入库,但提供校验入口供控制器使用。

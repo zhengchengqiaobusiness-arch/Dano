@@ -1,4 +1,4 @@
-"""五类资产体的声明式 schema(对应文档第四节表)。
+﻿"""五类资产体的声明式 schema(对应文档第四节表)。
 
 关键纪律:资产是**数据,不是写死的代码分支**。执行层是通用解释器,消费这些声明式
 规格跑业务,绝不为某公司写 if/else。
@@ -201,43 +201,16 @@ class SuccessEvidence(BaseModel):
     business: FactCheckSpec | None = Field(default=None, description="业务证据:回查真实记录(grounded)")
 
 
-# ─────────────────────── ⑤ 页面脚本(无 API,流程8)───────────────────────
-class PageAction(BaseModel):
-    """页面动作。仅元素/文本/DOM 定位,绝不用坐标。
-
-    向后兼容:旧脚本只有 op/locator/value 仍合法;新增字段均有默认值。
-    P1 标注:semantic_role/field/reversible/risk/locators 让 Agent 看懂「这步在做什么业务、可不可逆」。
-    """
-
-    op: str = Field(description="goto/fill/select/upload/click/wait/verify/submit")
-    locator: str | None = Field(default=None, description="语义定位:role=button[name=提交]/label=/placeholder=/text=/css=")
-    value: str | None = Field(default=None, description="字面值(向后兼容);新脚本优先用 value_from 做字段绑定")
-    value_from: str | None = Field(
-        default=None, description="字段绑定来源:'const:<字面量>' 或 'field:<用户字段>'(优先于 value)")
-    assert_visible: bool = Field(default=False, description="逐步元素断言:该步执行后 locator 须可见")
-    optional: bool = Field(default=False, description="容错步:找不到元素可跳过,不判失败")
-    # P1 语义标注(新增,默认空,旧脚本兼容)
-    step_id: str = Field(default="", description="步骤稳定 id(供引用/审计)")
-    semantic_role: str = Field(default="", description="业务语义:navigate/fill/select/upload/save_draft/submit/approve/reject/delete/cancel/verify")
-    field: str = Field(default="", description="绑定的标准业务字段名(fill/select 时)")
-    reversible: bool = Field(default=True, description="是否可逆;submit/delete/approve/reject=False")
-    requires_confirmation: bool = Field(default=False, description="执行前需用户确认(不可逆写操作)")
-    risk: RiskLevel = Field(default=RiskLevel.L1, description="该步风险等级")
-    locators: list[LocatorStrategy] = Field(default_factory=list, description="多级定位策略(非空则优先于单 locator)")
-
-
+# ─────────────────────── ⑤ 录制 V2 资产容器───────────────────────
 class PageScriptBody(BaseModel):
-    """页面脚本资产(流程8)。声明式步骤序列 + 结构指纹 + 成功标志,运行期由通用解释器执行。
+    """录制 V2 页面资产容器。api_request 承载最终执行请求。"""
 
-    仅 actions/dom_fingerprint 为旧字段(必填);其余为加厚字段,均有默认值,旧资产可直接校验通过。
-    """
-
-    actions: list[PageAction]
-    dom_fingerprint: str = Field(description="结构指纹,执行前校验改版的基线")
+    actions: list[dict] = Field(default_factory=list)
+    dom_fingerprint: str = Field(default="")
     action: str = Field(default="", description="派生 Skill 名,如 submit_reimburse;空则按子系统兜底")
     title: str = Field(default="", description="人类可读标题")
     start_url: str = Field(default="", description="入口页:绝对 URL 或相对 env_profile.base_url")
-    success_marker: str | None = Field(default=None, description="成功标志元素/文本的语义定位,回放与运行期判二态")
+    success_marker: str | None = Field(default=None, description="成功标志元素/文本的语义定位")
     user_fields: list[str] = Field(default_factory=list, description="暴露给前端/调用方的参数")
     required_fields: list[str] = Field(default_factory=list, description="必填(缺则拦截)")
     optional_fields: list[str] = Field(default_factory=list, description="可选(契约暴露但不强制)")
@@ -247,7 +220,7 @@ class PageScriptBody(BaseModel):
     recording_mode: str = Field(default="", description="录制提交模式:real_submit/intercepted_submit/unknown")
     verification_status: str = Field(default="", description="录入结果状态:verified/partially_verified/needs_clarification/rejected/unsupported")
     verification_basis: str = Field(default="", description="验证证据来源:fact_check_configured/success_rule_configured/structure_only/unknown")
-    # 抓提交请求路径(SPA 内部接口):有它则运行期直接发该请求(不走 DOM 回放),body_template 的 {{字段}} 用参数填回
+    # 抓提交请求路径(SPA 内部接口):有它则运行期直接发该请求,body_template 的 {{字段}} 用参数填回
     api_request: dict | None = Field(
         default=None, description="{method, path, body_template, content_type, params}:录制抓到的提交请求,参数化后直接调")
     capabilities: list[dict] = Field(
@@ -379,31 +352,3 @@ class PlanBody(BaseModel):
     evidence: dict = Field(default_factory=dict, description="v3:裁剪后的证据(端点/表单字段/样例返回),供编码器据实写码")
     success_rule: str | None = Field(default=None, description="成败判定表达式")
     fact_check: FactCheckSpec | None = Field(default=None, description="事实核查规格")
-
-
-# ─────────────────────── 代码适配器(goal 模式·编码产物)───────────────────────
-class AdapterBody(BaseModel):
-    """goal 模式「编码」阶段产物:自动生成的可执行适配器,经隔离 runner 执行。
-
-    约束:源码内**零凭证**(运行期注入);入口签名固定 run(inputs: dict, creds: dict) -> dict;
-    成败以 success_rule + fact_check 为准,不信接口字面成功。
-    """
-
-    action: str = Field(description="Skill 名,如 submit_leave")
-    title: str = Field(default="", description="人类可读标题")
-    business: str = Field(default="", description="所属业务(同业务多操作 adapter 导出时归为一个 skill)")
-    business_meta: dict = Field(default_factory=dict, description="业务规则(来自 x-flow:审批链/校验/驳回/记账),供导出剧本的前置/错误/事后确认段")
-    strategy: str = Field(description="生成该适配器的策略名")
-    language: str = Field(default="python", description="实现语言(M0 仅 python)")
-    source: str = Field(description="适配器源码;入口为 entry 指定的函数")
-    entry: str = Field(default="run", description="入口函数名,签名 run(inputs, creds)->dict")
-    input_schema: dict = Field(default_factory=dict, description="入参 JSON Schema(供前端/校验)")
-    user_fields: list[str] = Field(default_factory=list, description="用户需提供的业务字段")
-    required_fields: list[str] = Field(default_factory=list, description="必填业务字段")
-    field_docs: dict[str, str] = Field(default_factory=dict, description="字段→语义描述(供前端/LLM/导出)")
-    field_types: dict[str, str] = Field(default_factory=dict, description="字段→类型(信源 schema/表单);契约层据此判数值,空才退关键词启发")
-    consts: dict = Field(default_factory=dict, description="运行期注入的内部常量(如 __templateId__),非用户字段")
-    risk_level: RiskLevel = RiskLevel.L3
-    success_rule: str | None = Field(default=None, description="成败判定表达式;None=HTTP 2xx")
-    fact_check: FactCheckSpec | None = Field(default=None, description="事实核查规格")
-    plan_ref: str | None = Field(default=None, description="对应方案 PlanBody 的 asset_draft_id")

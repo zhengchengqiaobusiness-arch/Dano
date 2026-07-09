@@ -11,7 +11,7 @@ const EXPORT_DIR_LS = "dano.exportDir";
 const DEFAULT_EXPORT_DIR = "/opt/dano/runtime-data/.agents/skills";
 
 const RISK_COLOR: Record<string, string> = { L1: "default", L2: "default", L3: "orange", L4: "red", L5: "red" };
-const INTEG_LABEL: Record<string, string> = { adapter: "代码", workflow: "复合流程", api: "接口", page: "页面" };
+const INTEG_LABEL: Record<string, string> = { workflow: "复合流程", api: "接口", page: "页面" };
 
 function fmtTime(s?: string) {
   if (!s) return "-";

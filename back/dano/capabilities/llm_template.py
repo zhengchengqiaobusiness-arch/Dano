@@ -15,7 +15,7 @@ from __future__ import annotations
 import structlog
 
 from dano.capabilities.doc_parser import _resolve_ref
-from dano.generation.planner import EXPR_RULE_TEXT, _expr_problem
+from dano.shared.expr_rules import EXPR_RULE_TEXT, expr_problem
 from dano.shared.prompt_utils import extract_json_obj
 
 log = structlog.get_logger(__name__)
@@ -38,7 +38,7 @@ async def detect_convention(spec: dict, *, spawn) -> dict | None:  # noqa: ANN00
         return None
     name = str(data.get("name") or "").strip() or None
     rule = str(data.get("success_rule") or "").strip() or None
-    if rule and _expr_problem(rule, "success_rule"):         # 不能被 safe_eval 求值 → 丢弃规则
+    if rule and expr_problem(rule, "success_rule"):         # 不能被 safe_eval 求值 → 丢弃规则
         log.warning("llm_convention.bad_rule", rule=rule)
         rule = None
     if not name and not rule:

@@ -16,7 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "ruff>=0.7"]
-page = ["playwright>=1.48"]   # 流程8 页面型 Skill(无 API):装后 `python -m playwright install chromium`
+page = ["playwright>=1.48"]   # 录制 V2 浏览器依赖:装后 `python -m playwright install chromium`
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
