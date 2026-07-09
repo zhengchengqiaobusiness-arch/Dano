@@ -926,6 +926,30 @@ def test_reorder_missing_raises():
         apply_flow_edits(spec, [{"op": "reorder_steps", "step_ids": ["A", "B"]}])
 
 
+def test_reorder_capabilities_basic():
+    spec = _three_step_spec()
+    spec.capabilities = [
+        FlowCapability(name="query_status", kind="query_status", step_ids=["A"]),
+        FlowCapability(name="submit_batch", kind="submit_batch", step_ids=["B"]),
+    ]
+
+    new = apply_flow_edits(spec, [{"op": "reorder_capabilities", "capability_names": ["submit_batch", "query_status"]}])
+
+    assert [c.name for c in new.capabilities] == ["submit_batch", "query_status"]
+    assert [c.name for c in spec.capabilities] == ["query_status", "submit_batch"]
+
+
+def test_reorder_capabilities_missing_raises():
+    spec = _three_step_spec()
+    spec.capabilities = [
+        FlowCapability(name="query_status", kind="query_status", step_ids=["A"]),
+        FlowCapability(name="submit_batch", kind="submit_batch", step_ids=["B"]),
+    ]
+
+    with pytest.raises(ValueError, match="reorder_capabilities"):
+        apply_flow_edits(spec, [{"op": "reorder_capabilities", "capability_names": ["query_status"]}])
+
+
 def test_remove_step_removes_related_links():
     spec = _three_step_spec()
     spec.links = [

@@ -7498,6 +7498,21 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             _remember_removed_capability(new_spec, cap.name)
             continue
 
+        if op == "reorder_capabilities":
+            names = edit.get("capability_names")
+            if not isinstance(names, list):
+                raise ValueError("reorder_capabilities missing capability_names list")
+            by_name = {c.name: c for c in new_spec.capabilities}
+            current = set(by_name)
+            requested = {str(x) for x in names}
+            if current != requested or len(names) != len(new_spec.capabilities):
+                raise ValueError(
+                    f"reorder_capabilities must include exactly all capability names; "
+                    f"got {sorted(requested)}, expected {sorted(current)}"
+                )
+            new_spec.capabilities = [by_name[str(name)] for name in names]
+            continue
+
         if op == "update_capability":
             idx = _find_capability_index(new_spec, edit)
             field = str(edit.get("field") or "")
