@@ -8,6 +8,7 @@ from dano.execution.page.flow_spec import (
     FlowSpec, FlowStep, FlowLink, ParamField, SelectBinding, FlowCapability,
     apply_flow_edits, validate_flow_spec, _infer_type_from_value,
     add_llm_review_recommendations, refresh_review_items, flow_spec_to_api_request,
+    flow_spec_to_client,
     auto_fix_flow_spec, run_recording_pi_loop,
 )
 
@@ -20,6 +21,27 @@ def _make_spec():
         params=[param1, param2], risk_level="L3", sample_inputs={"userId": "123", "name": "test"},
     )
     return FlowSpec(flow_id="test", steps=[step1])
+
+
+def _request_fact_entry(**overrides):
+    entry = {
+        "request_index": 7,
+        "request_id": "req-7",
+        "sequence": 7,
+        "method": "GET",
+        "url": "https://oa.example.com/api/status?id=PO-1",
+        "path": "/api/status",
+        "role": "business_get",
+        "keep": True,
+        "reason": "状态查询会被能力引用",
+        "confidence": 0.96,
+        "state": "captured",
+        "response_status": 200,
+        "response_json": {"code": 0, "data": {"status": "pending", "date": "2026-05-12"}},
+        "response_schema": {"type": "object"},
+    }
+    entry.update(overrides)
+    return entry
 
 
 # ── Param 编辑 ──
@@ -182,6 +204,124 @@ def test_add_request_step_is_idempotent_for_same_request_id():
 
     assert len(two.steps) == 1
     assert two.steps[0].path == "/admin-api/bpm/process-definition/get"
+
+
+def test_request_facts_are_first_class_and_sync_with_legacy_request_graph():
+    legacy_entry = _request_fact_entry(request_id="req-status", request_index=11, sequence=11)
+    legacy = FlowSpec(
+        flow_id="legacy-request-graph",
+        meta={"request_graph": {"all_requests": [legacy_entry], "candidate_reads": [legacy_entry]}},
+    )
+
+    assert legacy.request_facts.protocol == "dano.request_facts.v1"
+    assert [r.request_id for r in legacy.request_facts.requests] == ["req-status"]
+    assert legacy.request_facts.analysis["req-status"].bucket == "candidate_reads"
+
+    client = flow_spec_to_client(legacy)
+    assert client["request_facts"]["requests"][0]["request_id"] == "req-status"
+    assert client["meta"]["request_graph"]["candidate_reads"][0]["request_id"] == "req-status"
+
+    modern_entry = _request_fact_entry(request_id="req-options", request_index=12, sequence=12, role="read_option")
+    modern = FlowSpec(
+        flow_id="modern-request-facts",
+        request_facts={
+            "requests": [modern_entry],
+            "analysis": {
+                "req-options": {
+                    "request_id": "req-options",
+                    "role": "read_option",
+                    "keep": True,
+                    "bucket": "candidate_reads",
+                    "confidence": 0.91,
+                    "reason": "候选项读取",
+                }
+            },
+        },
+    )
+
+    graph = modern.meta["request_graph"]
+    assert graph["all_requests"][0]["request_id"] == "req-options"
+    assert graph["candidate_reads"][0]["request_id"] == "req-options"
+
+
+def test_capability_scoped_fields_and_dependencies_survive_without_changing_step_ids():
+    spec = FlowSpec(
+        flow_id="cap-scoped",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            body_source='{"reason":"补充材料"}',
+            params=[ParamField(
+                path="reason",
+                key="reason",
+                value="补充材料",
+                type="string",
+                required=True,
+                category="user_param",
+                source_kind="user_input",
+                exposed_to_user=True,
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            kind="submit_batch",
+            step_ids=["submit"],
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+        )],
+    )
+    scoped_fields = [{
+        "field_id": "manual-field-reason",
+        "scope": "request_field",
+        "display_name": "提交原因",
+        "path": "reason",
+        "key": "reason",
+        "type": "string",
+        "required": True,
+        "step_id": "submit",
+        "source_kind": "user_input",
+        "locked": True,
+    }]
+    scoped_dependencies = [{
+        "dependency_id": "manual-dep-status-to-submit",
+        "type": "request_fact_to_field",
+        "source": {"request_id": "req-status", "path": "data.status"},
+        "target": {"step_id": "submit", "path": "reason"},
+        "confidence": 0.88,
+        "confirmed": True,
+        "locked": True,
+        "reason": "人工确认的能力内依赖",
+    }]
+
+    edited = apply_flow_edits(spec, [
+        {
+            "op": "update_capability",
+            "capability_name": "submit_batch",
+            "field": "request_fields",
+            "value": scoped_fields,
+        },
+        {
+            "op": "update_capability",
+            "capability_name": "submit_batch",
+            "field": "dependencies",
+            "value": scoped_dependencies,
+        },
+    ])
+
+    cap = edited.capabilities[0]
+    assert cap.step_ids == ["submit"]
+    assert cap.request_fields[0].field_id == "manual-field-reason"
+    assert cap.dependencies[0].dependency_id == "manual-dep-status-to-submit"
+
+    api_request, errors = flow_spec_to_api_request(edited)
+
+    assert errors == []
+    exported = api_request["capabilities"][0]
+    assert exported["step_ids"] == ["submit"]
+    assert exported["compiled_step_ids"] == ["submit"]
+    assert exported["request_fields"][0]["field_id"] == "manual-field-reason"
+    assert exported["dependencies"][0]["dependency_id"] == "manual-dep-status-to-submit"
 
 
 def test_refresh_review_items_dedupes_duplicate_params_and_keeps_enum_options():
@@ -812,6 +952,64 @@ def test_promoted_read_is_ordered_before_write_and_rebuilds_dependency():
     cap_report = validate_flow_spec(new)["capability_validation"]
     assert cap_report["checked_manual_requests"]
     assert cap_report["checked_manual_requests"][0]["step_id"] == new.steps[0].step_id
+
+
+def test_add_capability_step_from_request_fact_updates_usage_index_and_refs():
+    request_fact = _request_fact_entry(
+        request_id="req-date",
+        request_index=10,
+        sequence=10,
+        url="https://oa.example.com/api/missing-days?start=2026-05-01",
+        path="/api/missing-days",
+        response_json={"code": 0, "data": {"startDate": "2026-05-12"}},
+    )
+    spec = FlowSpec(
+        flow_id="cap-request-fact-usage",
+        steps=[FlowStep(
+            step_id="write",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            source_meta={"request_index": 20, "sequence": 20},
+            params=[ParamField(path="date", key="date", value="2026-05-12", type="date", required=True)],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            kind="submit_batch",
+            step_ids=["write"],
+            nodes=[{"id": "call_write", "type": "call", "step_id": "write"}],
+        )],
+        request_facts={
+            "requests": [request_fact],
+            "analysis": {
+                "req-date": {
+                    "request_id": "req-date",
+                    "role": "business_get",
+                    "keep": True,
+                    "bucket": "candidate_reads",
+                    "confidence": 0.96,
+                    "reason": "补充缺失日期事实",
+                }
+            },
+        },
+    )
+
+    new = apply_flow_edits(spec, [{
+        "op": "add_capability_step",
+        "capability_name": "submit_batch",
+        "request_index": 10,
+    }])
+
+    promoted = next(s for s in new.steps if (s.source_meta or {}).get("request_id") == "req-date")
+    cap = new.capabilities[0]
+    assert promoted.step_id in cap.step_ids
+    assert any(n.get("type") == "call" and n.get("step_id") == promoted.step_id for n in cap.nodes)
+    assert any(ref.request_id == "req-date" and ref.step_id == promoted.step_id for ref in cap.request_refs)
+
+    usage = new.request_facts.usage["req-date"]
+    assert usage.state == "materialized"
+    assert usage.materialized_step_id == promoted.step_id
+    assert "submit_batch" in usage.used_by_capabilities
 
 
 def test_auto_fix_promotes_high_confidence_request_into_capability_closure():

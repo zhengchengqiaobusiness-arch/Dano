@@ -304,8 +304,113 @@ class ToFlowSpecTest(unittest.TestCase):
         d = spec.model_dump()
         self.assertIn("steps", d)
         self.assertIn("links", d)
+        self.assertIn("request_facts", d)
         s = json.dumps(d, ensure_ascii=False, default=str)
         self.assertIsInstance(s, str)
+
+    def test_request_facts_migrate_from_legacy_request_graph(self):
+        spec = FlowSpec.model_validate({
+            "flow_id": "rf",
+            "meta": {
+                "request_graph": {
+                    "all_requests": [{
+                        "request_index": 7,
+                        "method": "GET",
+                        "url": "https://oa/api/detail?id=1",
+                        "path": "/api/detail?id=1",
+                        "role": "business_get",
+                        "keep": True,
+                        "confidence": 0.93,
+                        "response_json": {"code": 0, "data": {"id": 1}},
+                    }],
+                    "selected_steps": [],
+                    "candidate_reads": [],
+                    "filtered_requests": [],
+                }
+            },
+        })
+
+        self.assertEqual(len(spec.request_facts.requests), 1)
+        self.assertEqual(spec.request_facts.requests[0].request_index, 7)
+        self.assertEqual(spec.request_facts.analysis["idx:7"].role, "business_get")
+        self.assertEqual(spec.meta["request_graph"]["all_requests"][0]["request_index"], 7)
+
+    def test_request_facts_backfills_legacy_request_graph(self):
+        spec = FlowSpec.model_validate({
+            "flow_id": "rf-new",
+            "request_facts": {
+                "requests": [{
+                    "request_id": "req-1",
+                    "request_index": 1,
+                    "method": "GET",
+                    "url": "https://oa/api/status",
+                    "path": "/api/status",
+                    "response_json": {"ok": True},
+                }],
+                "analysis": {
+                    "req-1": {
+                        "request_id": "req-1",
+                        "role": "business_get",
+                        "keep": True,
+                        "bucket": "candidate_reads",
+                        "confidence": 0.91,
+                    }
+                },
+            },
+        })
+
+        graph = spec.meta["request_graph"]
+        self.assertEqual(graph["all_requests"][0]["request_id"], "req-1")
+        self.assertEqual(graph["candidate_reads"][0]["role"], "business_get")
+
+    def test_capability_scoped_fields_and_dependencies_sync_from_legacy_steps_links(self):
+        start = FlowStep(
+            step_id="start",
+            method="POST",
+            url="/api/start",
+            path="/api/start",
+            response_json={"data": {"taskId": "T-1"}},
+        )
+        submit = FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            params=[
+                ParamField(path="reason", key="reason", value="x", category="user_param", source_kind="user_input"),
+                ParamField(
+                    path="flowTask.taskId",
+                    key="taskId",
+                    value="T-1",
+                    category="runtime_var",
+                    source_kind="previous_response",
+                    exposed_to_user=False,
+                ),
+            ],
+        )
+        link = FlowLink(
+            link_id="l-task",
+            source_step_id="start",
+            source_path="data.taskId",
+            target_step_id="submit",
+            target_path="flowTask.taskId",
+            confirmed=True,
+            confidence=0.95,
+        )
+
+        spec = FlowSpec(
+            flow_id="cap-fields",
+            steps=[start, submit],
+            links=[link],
+            capabilities=[FlowCapability(name="submit_batch", kind="submit_batch", step_ids=["start", "submit"])],
+        )
+
+        cap = spec.capabilities[0]
+        self.assertTrue(any(f.path == "reason" and f.scope == "input" for f in cap.inputs))
+        self.assertTrue(any(f.path == "flowTask.taskId" and f.scope == "internal" for f in cap.internal_fields))
+        self.assertEqual(cap.dependencies[0].dependency_id, "l-task")
+        self.assertEqual(cap.dependencies[0].source["step_id"], "start")
+        self.assertEqual([r.step_id for r in cap.request_refs], ["start", "submit"])
 
     def test_default_step_name(self):
         self.assertEqual(_default_step_name({"method": "POST", "url": "https://oa/api/submit"}), "POST_submit")

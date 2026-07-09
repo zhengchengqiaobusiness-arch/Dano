@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from urllib.parse import urlparse, parse_qs
 
 # 复用 request_capture 的纯函数
@@ -182,6 +182,141 @@ class FlowLink(BaseModel):
     locked: bool = False
 
 
+class RequestFact(BaseModel):
+    """一次真实捕获请求的不可变事实。
+
+    role/confidence/usage 会随着规则和人工编辑变化，拆到 RequestAnalysis/
+    RequestUsage；这里尽量只放录制时看到的证据。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    request_id: str = ""
+    request_index: Any = None
+    page_id: str | None = None
+    frame_id: str | None = None
+    sequence: Any = None
+    method: str = ""
+    url: str = ""
+    path: str = ""
+    headers: dict[str, Any] = Field(default_factory=dict)
+    content_type: str = ""
+    post_data: Any = None
+    response_status: Any = None
+    response_json: Any = None
+    response_schema: dict[str, Any] = Field(default_factory=dict)
+    timestamp: Any = None
+
+
+class RequestAnalysis(BaseModel):
+    """可重算的请求分析结果。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    request_id: str = ""
+    role: str = ""
+    keep: bool = False
+    reason: str = ""
+    confidence: float = 0.0
+    evidence: dict[str, Any] = Field(default_factory=dict)
+    bucket: str = ""
+    filter_reason: str = ""
+
+
+class RequestUsage(BaseModel):
+    """请求被能力/步骤使用的派生索引。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    request_id: str = ""
+    materialized_step_id: str = ""
+    state: str = "captured"
+    used_by_capabilities: list[str] = Field(default_factory=list)
+
+
+class RequestFacts(BaseModel):
+    """录制请求事实库。
+
+    P0 阶段仍会同步旧 meta.request_graph，避免打断旧前端和发布链路。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    protocol: str = "dano.request_facts.v1"
+    requests: list[RequestFact] = Field(default_factory=list)
+    diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+    page_events: list[dict[str, Any]] = Field(default_factory=list)
+    option_sources: list[dict[str, Any]] = Field(default_factory=list)
+    analysis: dict[str, RequestAnalysis] = Field(default_factory=dict)
+    usage: dict[str, RequestUsage] = Field(default_factory=dict)
+
+
+class CapabilityRequestRef(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    request_id: str = ""
+    request_index: Any = None
+    step_id: str = ""
+    role: str = ""
+    method: str = ""
+    path: str = ""
+    sequence: Any = None
+    confidence: float = 0.0
+    reason: str = ""
+
+
+class CapabilityField(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    field_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
+    scope: str = "input"  # input / request_field / internal / computed / output
+    display_name: str = ""
+    path: str = ""
+    key: str = ""
+    type: str = "string"
+    required: bool = False
+    request_id: str = ""
+    request_index: Any = None
+    step_id: str = ""
+    source_kind: str = "unknown"
+    source: dict[str, Any] = Field(default_factory=dict)
+    exposed_to_caller: bool = True
+    confidence: float = 0.0
+    confirmed: bool = False
+    locked: bool = False
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CapabilityDependency(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    dependency_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
+    type: str = "response_to_request"
+    source: dict[str, Any] = Field(default_factory=dict)
+    target: dict[str, Any] = Field(default_factory=dict)
+    confidence: float = 0.0
+    confirmed: bool = False
+    locked: bool = False
+    reason: str = ""
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class CapabilityRelation(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    relation_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
+    type: str = "suggested_call_chain"
+    from_capability: str = ""
+    from_output: str = ""
+    to_capability: str = ""
+    to_input: str = ""
+    requires_user_confirmation: bool = True
+    confidence: float = 0.0
+    confirmed: bool = False
+    reason: str = ""
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
 class ReviewItem(BaseModel):
     id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
     type: str = ""
@@ -206,7 +341,16 @@ class FlowCapability(BaseModel):
     title: str = ""
     intent: str = ""
     kind: str = "submit"  # query_status / list_options / validate_batch / submit_batch / submit
+    capability_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
+    request_refs: list[CapabilityRequestRef] = Field(default_factory=list)
     step_ids: list[str] = Field(default_factory=list)
+    fields: list[CapabilityField] = Field(default_factory=list)
+    inputs: list[CapabilityField] = Field(default_factory=list)
+    request_fields: list[CapabilityField] = Field(default_factory=list)
+    internal_fields: list[CapabilityField] = Field(default_factory=list)
+    computed_fields: list[CapabilityField] = Field(default_factory=list)
+    outputs: list[CapabilityField] = Field(default_factory=list)
+    dependencies: list[CapabilityDependency] = Field(default_factory=list)
     nodes: list[dict[str, Any]] = Field(default_factory=list)
     input_schema: dict[str, Any] = Field(default_factory=dict)
     output_schema: dict[str, Any] = Field(default_factory=dict)
@@ -247,11 +391,39 @@ class FlowSpec(BaseModel):
     steps: list[FlowStep] = Field(default_factory=list)
     links: list[FlowLink] = Field(default_factory=list)
     capabilities: list[FlowCapability] = Field(default_factory=list)
+    request_facts: RequestFacts = Field(default_factory=RequestFacts)
+    capability_relations: list[CapabilityRelation] = Field(default_factory=list)
     review_items: list[ReviewItem] = Field(default_factory=list)
     goal: dict[str, Any] = Field(default_factory=dict)
     risk_level: str = "L3"
     meta: dict[str, Any] = Field(default_factory=dict)
     schema_version: int = 1
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_request_facts_input(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        payload = dict(data)
+        meta = dict(payload.get("meta") or {})
+        graph = meta.get("request_graph") or {}
+        raw_facts = payload.get("request_facts")
+        if graph and not _raw_request_facts_has_requests(raw_facts):
+            payload["request_facts"] = _request_facts_from_graph(
+                graph,
+                diagnostics=list(payload.get("diagnostics") or meta.get("diagnostics") or []),
+            ).model_dump()
+        elif raw_facts is not None and _raw_request_facts_has_requests(raw_facts) and not graph:
+            try:
+                meta["request_graph"] = _request_graph_from_request_facts(RequestFacts.model_validate(raw_facts))
+                payload["meta"] = meta
+            except Exception:
+                pass
+        return payload
+
+    @model_validator(mode="after")
+    def _sync_derived_models(self) -> "FlowSpec":
+        return sync_flow_spec_models(self, prefer_request_facts=True)
 
 
 # ─────────── Step A: 收敛函数 ───────────
@@ -974,6 +1146,7 @@ def _build_step_from_capture(
         "captured_at": req.get("captured_at"),
         "response_status": req.get("response_status"),
         "request_index": req.get("index"),
+        "request_id": str(req.get("request_id") or req.get("id") or req.get("index") or ""),
         "role": request_role.get("role", ""),
         "keep": request_role.get("keep"),
         "keep_reason": request_role.get("keep_reason") or request_role.get("reason", ""),
@@ -1535,6 +1708,463 @@ def _build_request_graph(
     }
 
 
+def _request_fact_key(entry: dict[str, Any]) -> str:
+    request_id = str(entry.get("request_id") or "").strip()
+    if request_id:
+        return request_id
+    request_index = entry.get("request_index")
+    if request_index is not None:
+        return f"idx:{request_index}"
+    raw = json.dumps({
+        "method": (entry.get("method") or "").upper(),
+        "path": entry.get("path") or entry.get("url") or "",
+        "sequence": entry.get("sequence"),
+    }, ensure_ascii=False, sort_keys=True, default=str)
+    return "sig:" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _request_fact_from_graph_entry(entry: dict[str, Any]) -> RequestFact:
+    rid = _request_fact_key(entry)
+    payload = dict(entry)
+    payload.update({
+        "request_id": rid,
+        "request_index": entry.get("request_index"),
+        "page_id": entry.get("page_id"),
+        "frame_id": entry.get("frame_id"),
+        "sequence": entry.get("sequence", entry.get("request_index")),
+        "method": (entry.get("method") or "").upper(),
+        "url": entry.get("url") or "",
+        "path": entry.get("path") or entry.get("url") or "",
+        "headers": dict(entry.get("headers") or {}),
+        "content_type": entry.get("content_type") or "",
+        "post_data": entry.get("post_data"),
+        "response_status": entry.get("response_status"),
+        "response_json": entry.get("response_json"),
+        "response_schema": dict(entry.get("response_schema") or {}),
+        "timestamp": entry.get("timestamp") or entry.get("captured_at"),
+    })
+    return RequestFact.model_validate(payload)
+
+
+def _request_analysis_from_graph_entry(entry: dict[str, Any], bucket: str) -> RequestAnalysis:
+    payload = dict(entry)
+    payload.update({
+        "request_id": _request_fact_key(entry),
+        "role": entry.get("role") or "",
+        "keep": bool(entry.get("keep")),
+        "reason": entry.get("reason") or "",
+        "confidence": float(entry.get("confidence") or 0.0),
+        "evidence": dict(entry.get("evidence") or {}),
+        "bucket": bucket,
+        "filter_reason": entry.get("filter_reason") or "",
+    })
+    return RequestAnalysis.model_validate(payload)
+
+
+def _request_facts_from_graph(graph: dict[str, Any], *, diagnostics: list[dict[str, Any]] | None = None) -> RequestFacts:
+    facts_by_id: dict[str, RequestFact] = {}
+    analysis: dict[str, RequestAnalysis] = {}
+    usage: dict[str, RequestUsage] = {}
+    bucket_rank = {
+        "all_requests": 0,
+        "filtered_requests": 1,
+        "candidate_reads": 2,
+        "selected_steps": 3,
+    }
+    for bucket in ("all_requests", "filtered_requests", "candidate_reads", "selected_steps"):
+        for entry in graph.get(bucket) or []:
+            if not isinstance(entry, dict):
+                continue
+            rid = _request_fact_key(entry)
+            fact = _request_fact_from_graph_entry(entry)
+            prev = facts_by_id.get(rid)
+            # 优先保留带 payload/schema 的事实；没有则用后出现的更具体条目补齐。
+            if prev is None or (fact.response_json is not None and prev.response_json is None):
+                facts_by_id[rid] = fact
+            ana = _request_analysis_from_graph_entry(entry, bucket)
+            prev_ana = analysis.get(rid)
+            if prev_ana is None or bucket_rank.get(bucket, 0) >= bucket_rank.get(prev_ana.bucket, 0):
+                analysis[rid] = ana
+            materialized_step_id = str(entry.get("materialized_step_id") or "")
+            state = entry.get("state") or ("materialized" if materialized_step_id else "captured")
+            prev_usage = usage.get(rid) or RequestUsage(request_id=rid)
+            if materialized_step_id:
+                prev_usage.materialized_step_id = materialized_step_id
+                prev_usage.state = "materialized"
+            elif bucket == "selected_steps" and prev_usage.state == "captured":
+                prev_usage.state = state
+            usage[rid] = prev_usage
+    requests = sorted(
+        facts_by_id.values(),
+        key=lambda f: (
+            _request_sequence_value(f.sequence if f.sequence is not None else f.request_index) is None,
+            _request_sequence_value(f.sequence if f.sequence is not None else f.request_index) or 0,
+        ),
+    )
+    return RequestFacts(
+        requests=requests,
+        diagnostics=list(diagnostics or []),
+        analysis=analysis,
+        usage=usage,
+    )
+
+
+def _graph_entry_from_request_fact(
+    fact: RequestFact,
+    analysis: RequestAnalysis | None = None,
+    usage: RequestUsage | None = None,
+) -> dict[str, Any]:
+    out = {
+        "request_index": fact.request_index,
+        "request_id": fact.request_id,
+        "page_id": fact.page_id,
+        "frame_id": fact.frame_id,
+        "sequence": fact.sequence,
+        "method": fact.method,
+        "url": fact.url,
+        "path": fact.path,
+        "role": analysis.role if analysis else "",
+        "keep": bool(analysis.keep) if analysis else False,
+        "reason": analysis.reason if analysis else "",
+        "confidence": float(analysis.confidence) if analysis else 0.0,
+        "evidence": dict(analysis.evidence or {}) if analysis else {},
+        "state": usage.state if usage else "captured",
+        "materialized_step_id": usage.materialized_step_id if usage else "",
+        "headers": dict(fact.headers or {}),
+        "content_type": fact.content_type,
+        "post_data": fact.post_data,
+        "response_status": fact.response_status,
+        "response_json": fact.response_json,
+        "response_schema": dict(fact.response_schema or {}),
+    }
+    return out
+
+
+def _request_graph_from_request_facts(request_facts: RequestFacts) -> dict[str, list[dict[str, Any]]]:
+    graph = {
+        "all_requests": [],
+        "selected_steps": [],
+        "candidate_reads": [],
+        "filtered_requests": [],
+    }
+    for fact in request_facts.requests or []:
+        rid = fact.request_id or _request_fact_key(fact.model_dump())
+        analysis = request_facts.analysis.get(rid)
+        usage = request_facts.usage.get(rid)
+        entry = _graph_entry_from_request_fact(fact, analysis, usage)
+        graph["all_requests"].append(entry)
+        bucket = (analysis.bucket if analysis else "") or ""
+        if usage and (usage.materialized_step_id or usage.state == "materialized"):
+            graph["selected_steps"].append(entry)
+        elif bucket == "selected_steps":
+            graph["selected_steps"].append(entry)
+        elif bucket == "candidate_reads":
+            graph["candidate_reads"].append(entry)
+        elif bucket == "filtered_requests":
+            graph["filtered_requests"].append(entry)
+        elif (analysis and analysis.role in {"read_option", "read_context", "business_get"} and analysis.keep):
+            graph["candidate_reads"].append(entry)
+        else:
+            graph["filtered_requests"].append(entry)
+    return graph
+
+
+def _raw_request_facts_has_requests(raw_facts: Any) -> bool:
+    if isinstance(raw_facts, RequestFacts):
+        return bool(raw_facts.requests)
+    if isinstance(raw_facts, dict):
+        return bool(raw_facts.get("requests"))
+    return False
+
+
+def _request_graph_has_entries(graph: Any) -> bool:
+    if not isinstance(graph, dict):
+        return False
+    return any(graph.get(bucket) for bucket in ("all_requests", "selected_steps", "candidate_reads", "filtered_requests"))
+
+
+def ensure_request_facts(spec: FlowSpec, *, prefer: str = "request_facts") -> FlowSpec:
+    """同步 P0 request_facts 与旧 meta.request_graph，保持双轨兼容。
+
+    prefer="meta" 用于旧编辑路径刚更新 meta.request_graph 后的反向同步；
+    默认让一等 request_facts 回写 legacy graph。
+    """
+    meta = dict(spec.meta or {})
+    graph = meta.get("request_graph") or {}
+    has_graph = _request_graph_has_entries(graph)
+    has_facts = bool(spec.request_facts.requests)
+    if prefer == "meta":
+        if has_graph:
+            spec.request_facts = _request_facts_from_graph(graph, diagnostics=spec.diagnostics)
+        elif has_facts:
+            meta["request_graph"] = _request_graph_from_request_facts(spec.request_facts)
+            spec.meta = meta
+        return spec
+
+    if has_facts:
+        meta["request_graph"] = _request_graph_from_request_facts(spec.request_facts)
+        spec.meta = meta
+    elif has_graph:
+        spec.request_facts = _request_facts_from_graph(graph, diagnostics=spec.diagnostics)
+    return spec
+
+
+def _request_graph_for_spec(spec: FlowSpec) -> dict[str, Any]:
+    ensure_request_facts(spec, prefer="meta")
+    return (spec.meta or {}).get("request_graph") or {}
+
+
+def _capability_scoped_node_step_ids(nodes: list[dict[str, Any]]) -> list[str]:
+    ids: list[str] = []
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        sid = str(node.get("step_id") or "").strip()
+        if sid and sid not in ids:
+            ids.append(sid)
+        for child_key in ("children", "steps", "then", "else", "otherwise"):
+            child = node.get(child_key)
+            if isinstance(child, list):
+                for child_sid in _capability_scoped_node_step_ids([n for n in child if isinstance(n, dict)]):
+                    if child_sid not in ids:
+                        ids.append(child_sid)
+    return ids
+
+
+def _capability_scoped_step_ids(cap: FlowCapability) -> list[str]:
+    ids: list[str] = []
+    for sid in list(cap.step_ids or []) + _capability_scoped_node_step_ids(cap.nodes or []):
+        sid = str(sid or "").strip()
+        if sid and sid not in ids:
+            ids.append(sid)
+    return ids
+
+
+def _step_request_fact_for_capability(spec: FlowSpec, step: FlowStep) -> RequestFact | None:
+    rid = str((step.source_meta or {}).get("request_id") or "").strip()
+    if rid:
+        found = next((f for f in spec.request_facts.requests if f.request_id == rid), None)
+        if found is not None:
+            return found
+    request_index = (step.source_meta or {}).get("request_index")
+    if request_index is not None:
+        found = next((f for f in spec.request_facts.requests if f.request_index == request_index), None)
+        if found is not None:
+            return found
+    method = (step.method or "").upper()
+    path = _request_path({"url": step.path or step.url})
+    return next(
+        (
+            f for f in spec.request_facts.requests
+            if (f.method or "").upper() == method and _request_path({"url": f.path or f.url}) == path
+        ),
+        None,
+    )
+
+
+def _capability_request_ref_from_step(spec: FlowSpec, step: FlowStep) -> CapabilityRequestRef:
+    fact = _step_request_fact_for_capability(spec, step)
+    rid = fact.request_id if fact else str((step.source_meta or {}).get("request_id") or "")
+    analysis = spec.request_facts.analysis.get(rid) if rid else None
+    return CapabilityRequestRef(
+        request_id=rid,
+        request_index=fact.request_index if fact else (step.source_meta or {}).get("request_index"),
+        step_id=step.step_id,
+        role=(analysis.role if analysis else "") or (step.source_meta or {}).get("role") or step.semantic_role or "",
+        method=(step.method or "").upper(),
+        path=step.path or step.url,
+        sequence=fact.sequence if fact else (step.source_meta or {}).get("sequence", (step.source_meta or {}).get("request_index")),
+        confidence=float((analysis.confidence if analysis else None) or (step.source_meta or {}).get("confidence") or 0.0),
+        reason=(analysis.reason if analysis else "") or (step.source_meta or {}).get("keep_reason") or "",
+    )
+
+
+def _capability_field_from_param(
+    step: FlowStep,
+    param: ParamField,
+    *,
+    scope: str,
+    request_id: str = "",
+) -> CapabilityField:
+    exposed = bool(param.exposed_to_user and param.category == "user_param")
+    return CapabilityField(
+        field_id=f"{scope}:{step.step_id}:{param.path}",
+        scope=scope,
+        display_name=param.label or param.key or param.path,
+        path=param.path,
+        key=param.key,
+        type=param.type,
+        required=bool(param.required),
+        request_id=request_id,
+        request_index=(step.source_meta or {}).get("request_index"),
+        step_id=step.step_id,
+        source_kind=param.source_kind,
+        source=dict(param.source or {}),
+        exposed_to_caller=exposed if scope != "request_field" else bool(param.exposed_to_user),
+        confidence=float(param.confidence or 0.0),
+        confirmed=bool(param.locked or not param.need_human_confirm),
+        locked=bool(param.locked),
+        evidence=list(param.evidence or []),
+    )
+
+
+def _capability_dependency_from_link(link: FlowLink) -> CapabilityDependency:
+    dependency_id = link.link_id or hashlib.sha1(
+        "|".join([link.source_step_id, link.source_path, link.target_step_id, link.target_path]).encode("utf-8")
+    ).hexdigest()[:12]
+    return CapabilityDependency(
+        dependency_id=dependency_id,
+        type="response_to_request",
+        source={
+            "step_id": link.source_step_id,
+            "path": link.source_path,
+            "tokens": link.source_tokens,
+        },
+        target={
+            "step_id": link.target_step_id,
+            "path": link.target_path,
+            "tokens": link.target_tokens,
+            "param_name": link.param_name,
+        },
+        confidence=float(link.confidence or 0.0),
+        confirmed=bool(link.confirmed),
+        locked=bool(link.locked),
+        reason=link.reason,
+        evidence=dict(link.evidence or {}),
+    )
+
+
+def _capability_output_fields(cap: FlowCapability) -> list[CapabilityField]:
+    fields: list[CapabilityField] = []
+    for idx, mapping in enumerate(cap.output_mapping or []):
+        if not isinstance(mapping, dict):
+            continue
+        name = str(mapping.get("name") or mapping.get("field") or mapping.get("response_path") or f"output_{idx + 1}")
+        fields.append(CapabilityField(
+            field_id=f"output:{cap.name or cap.capability_id}:{idx}:{name}",
+            scope="output",
+            display_name=name,
+            path=name,
+            key=name,
+            type="object" if name in {"response", "raw", "detail"} else "string",
+            required=False,
+            step_id=str(mapping.get("step_id") or ""),
+            source_kind=str(mapping.get("kind") or "final_response"),
+            source=dict(mapping),
+            exposed_to_caller=True,
+            confidence=float(cap.confidence or 0.0),
+            confirmed=bool(cap.confirmed),
+        ))
+    if fields:
+        return fields
+    props = (cap.output_schema or {}).get("properties") or {}
+    required = set((cap.output_schema or {}).get("required") or [])
+    for name, schema in props.items():
+        schema = schema if isinstance(schema, dict) else {}
+        fields.append(CapabilityField(
+            field_id=f"output:{cap.name or cap.capability_id}:{name}",
+            scope="output",
+            display_name=str(schema.get("title") or name),
+            path=str(name),
+            key=str(name),
+            type=str(schema.get("type") or "string"),
+            required=name in required,
+            exposed_to_caller=True,
+            confidence=float(cap.confidence or 0.0),
+            confirmed=bool(cap.confirmed),
+        ))
+    return fields
+
+
+def _capability_views_locked(cap: FlowCapability) -> bool:
+    fields = [
+        *(cap.inputs or []),
+        *(cap.request_fields or []),
+        *(cap.internal_fields or []),
+        *(cap.computed_fields or []),
+        *(cap.outputs or []),
+    ]
+    deps = list(cap.dependencies or [])
+    return any(getattr(f, "locked", False) for f in fields) or any(getattr(d, "locked", False) for d in deps)
+
+
+def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
+    """从旧 steps/links/step_ids 派生能力内字段/依赖视图。"""
+    ensure_request_facts(spec)
+    if not spec.capabilities:
+        return spec
+    by_step = {s.step_id: s for s in spec.steps}
+    used_by_request: dict[str, list[str]] = {}
+    materialized_by_request: dict[str, str] = {}
+    for cap in spec.capabilities:
+        cap_step_ids = [sid for sid in _capability_scoped_step_ids(cap) if sid in by_step]
+        cap.step_ids = cap_step_ids
+        step_objs = [by_step[sid] for sid in cap_step_ids]
+        cap.request_refs = [_capability_request_ref_from_step(spec, st) for st in step_objs]
+        cap_name = cap.name or cap.capability_id
+        for ref in cap.request_refs:
+            if ref.request_id and cap_name:
+                used_by_request.setdefault(ref.request_id, [])
+                if cap_name not in used_by_request[ref.request_id]:
+                    used_by_request[ref.request_id].append(cap_name)
+                if ref.step_id:
+                    materialized_by_request[ref.request_id] = ref.step_id
+        if _capability_views_locked(cap):
+            continue
+        inputs: dict[str, CapabilityField] = {}
+        request_fields: list[CapabilityField] = []
+        internal_fields: list[CapabilityField] = []
+        request_id_by_step = {ref.step_id: ref.request_id for ref in cap.request_refs}
+        for st in step_objs:
+            request_id = request_id_by_step.get(st.step_id, "")
+            for param in st.params:
+                request_fields.append(_capability_field_from_param(st, param, scope="request_field", request_id=request_id))
+                if param.category == "user_param" and param.exposed_to_user:
+                    key = param.key or param.label or param.path
+                    inputs.setdefault(key, _capability_field_from_param(st, param, scope="input", request_id=request_id))
+                else:
+                    internal_fields.append(_capability_field_from_param(st, param, scope="internal", request_id=request_id))
+        cap.inputs = list(inputs.values())
+        cap.request_fields = request_fields
+        cap.internal_fields = internal_fields
+        cap.dependencies = [
+            _capability_dependency_from_link(link)
+            for link in spec.links
+            if link.source_step_id in cap_step_ids and link.target_step_id in cap_step_ids
+        ]
+        cap.outputs = _capability_output_fields(cap)
+        cap.fields = [
+            *(cap.inputs or []),
+            *(cap.request_fields or []),
+            *(cap.internal_fields or []),
+            *(cap.computed_fields or []),
+            *(cap.outputs or []),
+        ]
+    for request_id, cap_names in used_by_request.items():
+        usage = spec.request_facts.usage.get(request_id) or RequestUsage(request_id=request_id)
+        for cap_name in cap_names:
+            if cap_name not in usage.used_by_capabilities:
+                usage.used_by_capabilities.append(cap_name)
+        if materialized_by_request.get(request_id):
+            usage.materialized_step_id = materialized_by_request[request_id]
+            usage.state = "materialized"
+        spec.request_facts.usage[request_id] = usage
+    spec.meta = {
+        **(spec.meta or {}),
+        "capability_scoped_view": {
+            "status": "derived",
+            "source": "steps+links+request_facts",
+            "capability_count": len(spec.capabilities),
+        },
+    }
+    return spec
+
+
+def sync_flow_spec_models(spec: FlowSpec, *, prefer_request_facts: bool = True) -> FlowSpec:
+    ensure_request_facts(spec, prefer="request_facts" if prefer_request_facts else "meta")
+    return sync_capability_scoped_views(spec)
+
+
 def _strip_body_prefix(path: str) -> str:
     return path[len("body."):] if path.startswith("body.") else path
 
@@ -1670,12 +2300,14 @@ def to_flow_spec(
     preread_cands = _dedupe_preread_candidates(preread_cands)
 
     if not write_cands and not preread_cands:
+        request_graph = _build_request_graph(captured_requests, request_roles, set())
         empty_spec = FlowSpec(
             tenant=tenant,
             subsystem=subsystem,
             title="(未捕获到业务请求)",
             recording_mode=recording_mode,
             diagnostics=diagnostics,
+            request_facts=_request_facts_from_graph(request_graph, diagnostics=diagnostics),
             goal=RecordedGoal(
                 intent="录制业务请求",
                 required_inputs=[],
@@ -1690,7 +2322,7 @@ def to_flow_spec(
                 "captured_write_candidates": 0,
                 "reads_count": len(flow_reads),
                 "request_roles": request_roles,
-                "request_graph": _build_request_graph(captured_requests, request_roles, set()),
+                "request_graph": request_graph,
                 "recording_mode": recording_mode,
                 "diagnostics": diagnostics,
                 "note": "录制未抓到任何业务写请求或业务 GET；用户可能未点提交，或页面是纯 GET 表单",
@@ -1796,6 +2428,7 @@ def to_flow_spec(
         links=link_objs,
         goal={},
         risk_level=overall,
+        request_facts=_request_facts_from_graph(request_graph, diagnostics=diagnostics),
         meta={
             "captured_total": len(captured_requests),
             "captured_write_candidates": len(write_cands),
@@ -1975,7 +2608,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
         last_response = next((st.response_json for st in reversed(cap_steps) if st.response_json is not None), None)
         if last_response is not None:
             cap.output_schema = _schema_from_response_value(last_response)
-    return spec
+    return sync_capability_scoped_views(spec)
 
 
 def _step_evidence(step: FlowStep) -> dict[str, Any]:
@@ -2242,7 +2875,7 @@ def _read_status_steps(spec: FlowSpec) -> list[FlowStep]:
 
 
 def _request_graph_entries(spec: FlowSpec, roles: set[str]) -> list[dict[str, Any]]:
-    graph = (spec.meta or {}).get("request_graph") or {}
+    graph = _request_graph_for_spec(spec)
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str, Any]] = set()
     for bucket in ("selected_steps", "candidate_reads", "all_requests"):
@@ -2372,7 +3005,7 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
 
 def _with_default_capabilities(spec: FlowSpec) -> FlowSpec:
     if spec.capabilities:
-        return spec
+        return sync_flow_spec_models(spec, prefer_request_facts=False)
     spec.capabilities = build_default_flow_capabilities(spec)
     if spec.capabilities:
         spec.meta = {
@@ -2383,7 +3016,7 @@ def _with_default_capabilities(spec: FlowSpec) -> FlowSpec:
                 "generated_count": len(spec.capabilities),
             },
         }
-    return spec
+    return sync_flow_spec_models(spec, prefer_request_facts=False)
 
 
 _FLOW_ORCHESTRATE_SYSTEM = """你是企业 OA/API 录制结果的 Skill 编排器。
@@ -2467,7 +3100,7 @@ def _capability_from_llm(raw: dict[str, Any], step_ids: set[str], used_names: se
 
 
 def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
-    graph = (spec.meta or {}).get("request_graph") or {}
+    graph = _request_graph_for_spec(spec)
     return {
         "title": spec.title,
         "business_description": spec.business_description,
@@ -3689,6 +4322,7 @@ def append_flow_version(
     actor: str = "system",
 ) -> FlowSpec:
     """在 FlowSpec.meta 中追加轻量版本记录。"""
+    sync_flow_spec_models(spec, prefer_request_facts=False)
     meta = dict(spec.meta or {})
     versions = list(meta.get("versions") or [])
     current = max([int(v.get("version") or 0) for v in versions] or [0])
@@ -3722,6 +4356,7 @@ def ensure_flow_version(spec: FlowSpec, action: str, *, reason: str = "") -> Flo
 
 
 def flow_spec_to_summary(spec: FlowSpec) -> dict:
+    spec = sync_flow_spec_models(spec.model_copy(deep=True), prefer_request_facts=False)
     return {
         "flow_id": spec.flow_id,
         "title": spec.title,
@@ -4122,7 +4757,10 @@ def flow_spec_to_api_request(spec: FlowSpec) -> tuple[dict | None, list[str]]:
     """
     if not spec.steps:
         return None, ["FlowSpec 没有任何步骤，不能发布"]
-    spec = ensure_recorded_goal(_sync_capability_io_schemas(spec.model_copy(deep=True)))
+    spec = ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(
+        spec.model_copy(deep=True),
+        prefer_request_facts=False,
+    )))
 
     built_steps: list[dict] = []
     step_id_to_index: dict[str, int] = {}
@@ -4605,7 +5243,7 @@ def flow_spec_to_client(spec: FlowSpec) -> dict:
     H20 修复:body_source 不再清空,而是备份到 backup_body_source;前端可见备份,
     编辑时优先使用客户端编辑的 body_source(若有),否则用备份;避免 build_api_request 拿不到 body。
     """
-    client_spec = spec.model_copy(deep=True)
+    client_spec = sync_flow_spec_models(spec.model_copy(deep=True), prefer_request_facts=False)
     _normalize_capability_references(client_spec)
     data = refresh_review_items(_sync_capability_io_schemas(client_spec)).model_dump()
     request_graph = ((data.get("meta") or {}).get("request_graph") or {})
@@ -4617,6 +5255,14 @@ def flow_spec_to_client(spec: FlowSpec) -> dict:
                 req["post_data"] = ""
             if req.get("response_json") is not None:
                 req["response_json"] = _client_redact_sensitive(req.get("response_json"))
+    request_facts = data.get("request_facts") or {}
+    for req in request_facts.get("requests") or []:
+        if req.get("headers"):
+            req["headers"] = {k: "***" for k in (req.get("headers") or {})}
+        if req.get("post_data") is not None:
+            req["post_data"] = ""
+        if req.get("response_json") is not None:
+            req["response_json"] = _client_redact_sensitive(req.get("response_json"))
     for st in data.get("steps") or []:
         st["headers"] = {k: "***" for k in (st.get("headers") or {})}
         if st.get("body_source"):
@@ -4750,7 +5396,7 @@ def _dedupe_flow_steps(spec: FlowSpec) -> int:
 
 
 def _request_graph_items(spec: FlowSpec) -> list[dict[str, Any]]:
-    graph = (spec.meta or {}).get("request_graph") or {}
+    graph = _request_graph_for_spec(spec)
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, Any, str, str]] = set()
     for bucket in ("all_requests", "selected_steps", "candidate_reads", "filtered_requests"):
@@ -4789,7 +5435,7 @@ def _same_request_graph_item(item: dict[str, Any], entry: dict[str, Any]) -> boo
 
 
 def _mark_request_selected(spec: FlowSpec, entry: dict[str, Any], *, materialized_step_id: str = "") -> None:
-    rg = dict((spec.meta or {}).get("request_graph") or {})
+    rg = dict(_request_graph_for_spec(spec))
     selected = list(rg.get("selected_steps") or [])
     if not any(_same_request_graph_item(item, entry) for item in selected):
         selected.append({
@@ -4822,6 +5468,7 @@ def _mark_request_selected(spec: FlowSpec, entry: dict[str, Any], *, materialize
         if not _same_request_graph_item(item, entry)
     ]
     spec.meta = {**(spec.meta or {}), "request_graph": rg}
+    ensure_request_facts(spec, prefer="meta")
 
 
 def _param_type_from_value(value: Any) -> str:
@@ -5261,7 +5908,9 @@ def _set_capability_return(cap: FlowCapability, mapping: list[dict[str, Any]]) -
 
 
 _CAPABILITY_ALLOWED_FIELDS = frozenset({
-    "name", "title", "intent", "kind", "step_ids", "input_schema", "output_schema",
+    "name", "title", "intent", "kind", "capability_id", "request_refs", "step_ids", "fields",
+    "inputs", "request_fields", "internal_fields", "computed_fields", "outputs", "dependencies",
+    "input_schema", "output_schema",
     "output_mapping", "preconditions", "confirmed", "confidence",
     "requires_human_confirm", "evidence", "caller_responsibilities", "skill_responsibilities",
     "nodes", "status", "locked", "updated_by",
@@ -5416,6 +6065,12 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 value = bool(value)
             if field == "confidence":
                 value = max(0.0, min(1.0, float(value or 0)))
+            if field == "request_refs":
+                value = [CapabilityRequestRef.model_validate(x) for x in (value or [])]
+            if field in {"fields", "inputs", "request_fields", "internal_fields", "computed_fields", "outputs"}:
+                value = [CapabilityField.model_validate(x) for x in (value or [])]
+            if field == "dependencies":
+                value = [CapabilityDependency.model_validate(x) for x in (value or [])]
             setattr(cap, field, value)
             if field == "confirmed" and value:
                 cap.requires_human_confirm = False
@@ -5848,7 +6503,7 @@ _FLOW_AUTOFIX_SYSTEM = """你是录制型 Skill 的自动修正器。
 
 
 def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, Any]:
-    graph = (spec.meta or {}).get("request_graph") or {}
+    graph = _request_graph_for_spec(spec)
     return {
         "title": spec.title,
         "goal": spec.goal,
