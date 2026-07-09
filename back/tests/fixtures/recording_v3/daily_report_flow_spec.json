@@ -1,0 +1,263 @@
+{
+  "flow_id": "golden-daily-report",
+  "tenant": "aaa",
+  "subsystem": "A-OA",
+  "title": "日报补填",
+  "risk_level": "L3",
+  "schema_version": 1,
+  "steps": [
+    {
+      "step_id": "query_missing",
+      "name": "查询未填日报",
+      "method": "GET",
+      "url": "https://oa.example.com/api/daily/missing?month=2026-05",
+      "path": "/api/daily/missing",
+      "params": [
+        {
+          "path": "query.month",
+          "key": "month",
+          "label": "月份",
+          "value": "2026-05",
+          "type": "string",
+          "required": true,
+          "category": "user_param",
+          "source_kind": "user_input",
+          "exposed_to_user": true
+        }
+      ],
+      "sample_inputs": {
+        "month": "2026-05"
+      },
+      "response_json": {
+        "code": 0,
+        "data": {
+          "filled": ["2026-05-01"],
+          "missing": ["2026-05-02", "2026-05-03"]
+        }
+      },
+      "source_meta": {
+        "request_id": "req-query",
+        "request_index": 1,
+        "sequence": 1,
+        "role": "business_get"
+      }
+    },
+    {
+      "step_id": "submit_report",
+      "name": "提交日报",
+      "method": "POST",
+      "url": "https://oa.example.com/api/daily/submit",
+      "path": "/api/daily/submit",
+      "content_type": "application/json",
+      "body_source": "{\"date\":\"2026-05-02\",\"content\":\"开发\",\"project\":\"P1\"}",
+      "body_template": {
+        "date": "{{date}}",
+        "content": "{{content}}",
+        "project": "{{project}}"
+      },
+      "params": [
+        {
+          "path": "date",
+          "key": "date",
+          "label": "日期",
+          "value": "2026-05-02",
+          "type": "date",
+          "required": true,
+          "category": "user_param",
+          "source_kind": "user_input",
+          "exposed_to_user": true
+        },
+        {
+          "path": "content",
+          "key": "content",
+          "label": "工作内容",
+          "value": "开发",
+          "type": "string",
+          "required": true,
+          "category": "user_param",
+          "source_kind": "user_input",
+          "exposed_to_user": true
+        },
+        {
+          "path": "project",
+          "key": "project",
+          "label": "项目",
+          "value": "P1",
+          "type": "string",
+          "required": true,
+          "category": "user_param",
+          "source_kind": "user_input",
+          "exposed_to_user": true
+        }
+      ],
+      "sample_inputs": {
+        "date": "2026-05-02",
+        "content": "开发",
+        "project": "P1"
+      },
+      "response_json": {
+        "code": 0,
+        "data": {
+          "id": "R-1"
+        }
+      },
+      "source_meta": {
+        "request_id": "req-submit",
+        "request_index": 2,
+        "sequence": 2,
+        "role": "submit_anchor"
+      }
+    }
+  ],
+  "capabilities": [
+    {
+      "capability_id": "cap-submit-daily",
+      "name": "submit_batch",
+      "title": "批量提交日报",
+      "intent": "调用方确认缺失日期后传入 entries，Skill 按每条明细提交日报。",
+      "kind": "submit_batch",
+      "step_ids": ["query_missing", "submit_report"],
+      "nodes": [
+        {
+          "id": "call_query",
+          "type": "call",
+          "step_id": "query_missing"
+        },
+        {
+          "id": "foreach_entries",
+          "type": "foreach",
+          "items": "input.entries",
+          "steps": [
+            {
+              "id": "call_submit_each",
+              "type": "call",
+              "step_id": "submit_report"
+            }
+          ]
+        },
+        {
+          "id": "return_batch_result",
+          "type": "return",
+          "value": "batch_result"
+        }
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "month": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "date": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                },
+                "project": {
+                  "type": "string"
+                }
+              },
+              "required": ["date", "content"]
+            }
+          },
+          "confirm": {
+            "type": "boolean"
+          }
+        },
+        "required": ["month", "entries", "confirm"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array"
+          },
+          "failed_items": {
+            "type": "array"
+          }
+        }
+      },
+      "output_mapping": [
+        {
+          "kind": "final_response",
+          "response_path": "response"
+        }
+      ],
+      "preconditions": [
+        {
+          "check": "confirm == true",
+          "message": "批量写入前必须由调用方确认"
+        }
+      ],
+      "confirmed": true,
+      "requires_human_confirm": false,
+      "confidence": 0.96
+    }
+  ],
+  "request_facts": {
+    "requests": [
+      {
+        "request_id": "req-query",
+        "request_index": 1,
+        "sequence": 1,
+        "method": "GET",
+        "url": "https://oa.example.com/api/daily/missing?month=2026-05",
+        "path": "/api/daily/missing",
+        "response_status": 200,
+        "response_json": {
+          "code": 0,
+          "data": {
+            "filled": ["2026-05-01"],
+            "missing": ["2026-05-02", "2026-05-03"]
+          }
+        }
+      },
+      {
+        "request_id": "req-submit",
+        "request_index": 2,
+        "sequence": 2,
+        "method": "POST",
+        "url": "https://oa.example.com/api/daily/submit",
+        "path": "/api/daily/submit",
+        "post_data": {
+          "date": "2026-05-02",
+          "content": "开发",
+          "project": "P1"
+        },
+        "response_status": 200,
+        "response_json": {
+          "code": 0,
+          "data": {
+            "id": "R-1"
+          }
+        }
+      }
+    ],
+    "analysis": {
+      "req-query": {
+        "request_id": "req-query",
+        "role": "business_get",
+        "keep": true,
+        "reason": "查询未填日报",
+        "confidence": 0.96,
+        "bucket": "selected_steps"
+      },
+      "req-submit": {
+        "request_id": "req-submit",
+        "role": "submit_anchor",
+        "keep": true,
+        "reason": "提交日报",
+        "confidence": 0.98,
+        "bucket": "selected_steps"
+      }
+    }
+  }
+}

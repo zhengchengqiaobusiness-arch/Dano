@@ -1,6 +1,8 @@
 """Step B · FlowSpec 字段/link/step 编辑测试。"""
 
 import asyncio
+import json
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +14,9 @@ from dano.execution.page.flow_spec import (
     capability_to_flow_spec_view, compile_capability_to_api_request, flow_spec_capability_contracts,
     flow_spec_to_client,
     auto_fix_flow_spec, run_recording_pi_loop, sync_flow_spec_models,
+    flow_spec_canonical_summary, flow_spec_shadow_diff, migrate_v1_flow_spec_to_capability_spec,
+    migrate_v2_flow_spec_to_capability_spec, capability_spec_to_legacy_flow_spec,
+    capability_spec_to_api_request,
 )
 
 
@@ -1014,6 +1019,56 @@ def test_add_capability_step_from_request_fact_updates_usage_index_and_refs():
     assert "submit_batch" in usage.used_by_capabilities
 
 
+def test_recording_v3_golden_shadow_and_adapters():
+    fixture = Path(__file__).parent / "fixtures" / "recording_v3" / "daily_report_flow_spec.json"
+    spec = FlowSpec.model_validate(json.loads(fixture.read_text(encoding="utf-8")))
+
+    migrated = migrate_v2_flow_spec_to_capability_spec(spec)
+    canonical = flow_spec_canonical_summary(migrated)
+    shadow = flow_spec_shadow_diff(migrated)
+    legacy_view = capability_spec_to_legacy_flow_spec(migrated, capability_name="submit_batch")
+    scoped_api, scoped_errors = capability_spec_to_api_request(migrated, capability_name="submit_batch")
+
+    assert canonical["protocol"] == "dano.recording_shadow.v1"
+    assert canonical["request_facts"]["request_count"] == 2
+    assert canonical["capabilities"][0]["name"] == "submit_batch"
+    assert canonical["capabilities"][0]["node_types"] == ["call", "foreach", "call", "return"]
+    assert canonical["summary_hash"]
+
+    assert shadow["passed"] is True
+    assert shadow["legacy"]["shape"]["capability_protocol"] == "dano.capability_plan.v1"
+    assert shadow["capabilities"][0]["passed"] is True
+
+    assert [s.step_id for s in legacy_view.steps] == ["query_missing", "submit_report"]
+    assert scoped_errors == []
+    assert scoped_api["selected_capability"]["name"] == "submit_batch"
+    assert scoped_api["capability_contracts"][0]["execution_contract"]["batch"]["items_field"] == "entries"
+
+
+def test_v1_adapter_generates_default_capability_without_request_facts():
+    spec = FlowSpec(
+        flow_id="legacy-v1",
+        title="提交旧表单",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            body_source='{"reason":"old"}',
+            params=[ParamField(path="reason", key="reason", value="old", type="string", required=True)],
+            sample_inputs={"reason": "old"},
+        )],
+    )
+
+    migrated = migrate_v1_flow_spec_to_capability_spec(spec)
+    api_request, errors = capability_spec_to_api_request(migrated)
+
+    assert errors == []
+    assert migrated.capabilities
+    assert migrated.request_facts.protocol == "dano.request_facts.v1"
+    assert api_request["capability_protocol"] == "dano.capability_plan.v1"
+
+
 def test_auto_fix_promotes_high_confidence_request_into_capability_closure():
     spec = FlowSpec(
         flow_id="f",
@@ -1338,6 +1393,87 @@ def test_capability_validation_reports_p1_internal_layers_as_warnings():
     assert "capability_field_path_missing" in internal_codes
     assert "capability_dependency_endpoint_missing" in internal_codes
     assert "capability_output_mapping_uninterpretable" in internal_codes
+
+
+def test_capability_validator_reports_deep_p1_field_and_loop_findings():
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        url="/api/submit",
+        path="/api/submit",
+        body_source='[{"type":"2","date":"2026-05-12","content":"x"}]',
+        params=[
+            ParamField(path="[0].type", key="type", value="2", type="number", required=True),
+            ParamField(path="[0].date", key="date", value="2026-05-12", type="date", required=True),
+            ParamField(path="[0].content", key="content", value="x", type="string", required=True),
+        ],
+    )
+    spec = FlowSpec(
+        flow_id="deep-validator",
+        steps=[submit],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            kind="submit_batch",
+            step_ids=["submit"],
+            nodes=[{
+                "id": "foreach_entries",
+                "type": "foreach",
+                "items": "input.entries",
+                "steps": [{"id": "call_submit", "type": "call", "step_id": "submit"}],
+            }],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "entries": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"date": {"type": "string"}},
+                            "required": ["date"],
+                        },
+                    }
+                },
+                "required": ["entries"],
+            },
+            request_fields=[
+                CapabilityField(
+                    field_id="internal-type",
+                    scope="request_field",
+                    path="[0].type",
+                    key="type",
+                    type="number",
+                    required=True,
+                    step_id="submit",
+                    source_kind="unknown",
+                    exposed_to_caller=True,
+                    locked=True,
+                ),
+                CapabilityField(
+                    field_id="hidden-content",
+                    scope="internal",
+                    path="[0].content",
+                    key="content",
+                    type="string",
+                    required=True,
+                    step_id="submit",
+                    source_kind="unknown",
+                    exposed_to_caller=False,
+                    locked=True,
+                ),
+            ],
+            output_mapping=[{"kind": "final_response", "step_id": "submit", "response_path": "response"}],
+            confirmed=False,
+        )],
+    )
+
+    report = validate_flow_spec(spec)
+    cap_report = report["capability_validation"]
+    text = _report_text(report)
+
+    assert "capability_internal_field_exposed" in text
+    assert "capability_field_source_missing" in text
+    assert "capability_loop_item_field_missing" in text
+    assert cap_report["capability_internal"]["passed"] is True
 
 
 def test_capability_relation_type_mismatch_is_p1_warning_not_publish_gate():

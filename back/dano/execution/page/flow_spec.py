@@ -3518,6 +3518,14 @@ def _iter_capability_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _capability_child_nodes(node: dict[str, Any], *keys: str) -> list[dict[str, Any]]:
+    for key in keys:
+        child = node.get(key)
+        if isinstance(child, list):
+            return [n for n in child if isinstance(n, dict)]
+    return []
+
+
 def _capability_call_step_ids_from_nodes(nodes: list[dict[str, Any]]) -> list[str]:
     ids: list[str] = []
     for node in _iter_capability_nodes(nodes):
@@ -3929,6 +3937,31 @@ def _capability_step_param_exists(step: FlowStep | None, path: str) -> bool:
     return False
 
 
+def _capability_field_ref(field: CapabilityField) -> str:
+    return field.key or field.path or field.display_name or field.field_id
+
+
+def _capability_field_looks_internal(field: CapabilityField) -> bool:
+    text = f"{field.path}.{field.key}.{field.display_name}"
+    if not _INTERNAL_EXPOSED_PATH_RE.search(text):
+        return False
+    source_kind = str(field.source_kind or "")
+    if source_kind in _OPTION_SOURCE_KINDS or source_kind in {"page_enum", "static_enum", "manual_enum", "form_option"}:
+        return False
+    return True
+
+
+def _capability_schema_array_item_props(schema: dict[str, Any], field_name: str) -> tuple[set[str], set[str]]:
+    props = (schema or {}).get("properties") or {}
+    item = props.get(field_name) if isinstance(props, dict) else None
+    if not isinstance(item, dict):
+        return set(), set()
+    items = item.get("items") if isinstance(item.get("items"), dict) else {}
+    item_props = (items or {}).get("properties") or {}
+    required = (items or {}).get("required") or []
+    return set(item_props.keys()) if isinstance(item_props, dict) else set(), set(str(x) for x in required)
+
+
 def _capability_response_path_exists(step: FlowStep | None, path: str) -> bool:
     if step is None or step.response_json is None:
         return True
@@ -4120,6 +4153,13 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                 )
 
         input_props = ((cap.input_schema or {}).get("properties") or {})
+        dependency_targets = {
+            (
+                str((dep.target or {}).get("step_id") or ""),
+                _strip_body_prefix(str((dep.target or {}).get("path") or "")),
+            )
+            for dep in cap.dependencies or []
+        }
         seen_field_entries: set[tuple[str, str, str, str]] = set()
         for field in [
             *(cap.fields or []),
@@ -4162,6 +4202,29 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                     warnings,
                     code="capability_field_path_missing",
                     message=f"Capability `{label}` 字段 `{field_name}` 找不到对应字段路径",
+                    target={"kind": "capability_field", "capability": label, "field_id": field.field_id, "path": field.path},
+                )
+            if (
+                field.scope in {"request_field", "internal"}
+                and not field.exposed_to_caller
+                and field.source_kind in {"unknown", "", "user_input"}
+                and (field.step_id, _strip_body_prefix(field.path or field.key)) not in dependency_targets
+                and not field.source
+            ):
+                _capability_warning(
+                    internal_section,
+                    warnings,
+                    code="capability_field_source_missing",
+                    message=f"Capability `{label}` 内部字段 `{field_name}` 缺少上游响应、系统值或固定来源",
+                    target={"kind": "capability_field", "capability": label, "field_id": field.field_id, "path": field.path},
+                )
+            if field.exposed_to_caller and _capability_field_looks_internal(field):
+                msg = f"Capability `{label}` 字段 `{field_name}` 看起来是内部 ID/短码/状态码，不能直接暴露给调用方"
+                _capability_warning(
+                    internal_section,
+                    warnings,
+                    code="capability_internal_field_exposed",
+                    message=msg,
                     target={"kind": "capability_field", "capability": label, "field_id": field.field_id, "path": field.path},
                 )
 
@@ -4279,12 +4342,35 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                 if not items:
                     cap_errors.append(f"Capability `{label}` foreach 节点 `{node_id}` 缺少 items 数组来源")
                 elif items.startswith("input."):
-                    field = items.split(".", 1)[1]
+                    field = items.split(".", 1)[1].split(".", 1)[0]
                     schema = input_props.get(field) or {}
                     if field not in input_props:
                         cap_errors.append(f"Capability `{label}` foreach 节点 `{node_id}` 引用的输入 `{field}` 不存在")
                     elif schema.get("type") != "array":
                         cap_errors.append(f"Capability `{label}` foreach 节点 `{node_id}` 的输入 `{field}` 不是数组")
+                    item_props, _item_required = _capability_schema_array_item_props(cap.input_schema or {}, field)
+                    child_step_ids = {
+                        str(n.get("step_id") or "")
+                        for n in _iter_capability_nodes(_capability_child_nodes(node, "steps", "children"))
+                        if isinstance(n, dict) and n.get("type") == "call"
+                    }
+                    if child_step_ids:
+                        root_inputs = set(input_props.keys())
+                        for child_sid in child_step_ids:
+                            child_step = step_by_id.get(child_sid)
+                            for param in (child_step.params if child_step else []):
+                                if not param.required or param.category != "user_param" or not param.exposed_to_user:
+                                    continue
+                                pname = param.key or param.path
+                                item_shaped = str(param.path or "").startswith("[") or bool(child_step and _looks_batch_step(child_step))
+                                if pname not in item_props and (pname not in root_inputs or item_shaped):
+                                    _capability_warning(
+                                        internal_section,
+                                        warnings,
+                                        code="capability_loop_item_field_missing",
+                                        message=f"Capability `{label}` foreach `{node_id}` 的条目 schema 未覆盖必填字段 `{pname}`",
+                                        target={"kind": "capability_node", "capability": label, "node_id": node_id, "field": pname},
+                                    )
                 if not isinstance(node.get("steps"), list) and not any(
                     isinstance(n, dict) and n.get("type") == "call" for n in _iter_capability_nodes([node])
                 ):
@@ -5641,6 +5727,129 @@ def flow_spec_to_api_request(
         }
     out["_flow_spec"] = flow_spec_to_summary(spec)
     return out, []
+
+
+def migrate_v1_flow_spec_to_capability_spec(spec: FlowSpec | dict[str, Any]) -> FlowSpec:
+    """Explicit adapter: legacy/single-step FlowSpec -> capability-centric FlowSpec.
+
+    V1 输入通常没有 request_facts/capabilities；这里只做确定性迁移，不调用 LLM。
+    """
+    current = FlowSpec.model_validate(spec) if isinstance(spec, dict) else spec.model_copy(deep=True)
+    ensure_request_facts(current, prefer="request_facts")
+    if not current.capabilities:
+        current.capabilities = build_default_flow_capabilities(current)
+    _normalize_capability_references(current)
+    return ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(current, prefer_request_facts=False)))
+
+
+def migrate_v2_flow_spec_to_capability_spec(spec: FlowSpec | dict[str, Any]) -> FlowSpec:
+    """Explicit adapter: FlowSpec-centric V2 -> capability-centric V3 shape."""
+    current = FlowSpec.model_validate(spec) if isinstance(spec, dict) else spec.model_copy(deep=True)
+    ensure_request_facts(current, prefer="request_facts")
+    if not current.capabilities:
+        current.capabilities = build_default_flow_capabilities(current)
+    _normalize_capability_references(current)
+    for cap in current.capabilities or []:
+        _sync_capability_order(current, cap)
+    return ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(current, prefer_request_facts=False)))
+
+
+def capability_spec_to_legacy_flow_spec(
+    spec: FlowSpec | dict[str, Any],
+    *,
+    capability: str | FlowCapability | None = None,
+    capability_id: str | None = None,
+    capability_name: str | None = None,
+) -> FlowSpec:
+    """Adapter for old consumers that still expect FlowSpec.steps/links."""
+    current = migrate_v2_flow_spec_to_capability_spec(spec)
+    if capability is not None or capability_id or capability_name:
+        return capability_to_flow_spec_view(
+            current,
+            capability,
+            capability_id=capability_id,
+            capability_name=capability_name,
+        )
+    return current
+
+
+def capability_spec_to_api_request(
+    spec: FlowSpec | dict[str, Any],
+    *,
+    capability: str | FlowCapability | None = None,
+    capability_id: str | None = None,
+    capability_name: str | None = None,
+) -> tuple[dict | None, list[str]]:
+    current = migrate_v2_flow_spec_to_capability_spec(spec)
+    return flow_spec_to_api_request(
+        current,
+        capability=capability,
+        capability_id=capability_id,
+        capability_name=capability_name,
+    )
+
+
+def _canonical_api_shape(api_request: dict | None) -> dict[str, Any]:
+    if not api_request:
+        return {}
+    steps = api_request.get("steps") or [api_request]
+    return {
+        "step_count": len(steps),
+        "params": sorted(_api_params(api_request)),
+        "methods": [(st.get("method") or "").upper() for st in steps],
+        "paths": [st.get("path") or _request_path({"url": st.get("url") or ""}) for st in steps],
+        "capabilities": [
+            {
+                "name": cap.get("name"),
+                "kind": cap.get("kind"),
+                "compiled_step_ids": cap.get("compiled_step_ids") or cap.get("step_ids") or [],
+            }
+            for cap in api_request.get("capabilities") or []
+            if isinstance(cap, dict)
+        ],
+        "capability_protocol": api_request.get("capability_protocol") or "",
+    }
+
+
+def flow_spec_shadow_diff(spec: FlowSpec | dict[str, Any]) -> dict[str, Any]:
+    """P0 shadow report comparing legacy full export and capability-centric exports."""
+    capability_spec = migrate_v2_flow_spec_to_capability_spec(spec)
+    legacy_api, legacy_errors = flow_spec_to_api_request(capability_spec)
+    capability_reports: list[dict[str, Any]] = []
+    for cap in capability_spec.capabilities or []:
+        scoped_api, scoped_errors = capability_spec_to_api_request(capability_spec, capability_id=cap.capability_id)
+        scoped_shape = _canonical_api_shape(scoped_api)
+        missing_steps = [
+            sid for sid in _capability_node_step_ids(cap)
+            if sid not in set(scoped_shape.get("paths") or []) and sid not in {s.step_id for s in capability_spec.steps}
+        ]
+        capability_reports.append({
+            "name": cap.name,
+            "capability_id": cap.capability_id,
+            "kind": cap.kind,
+            "errors": scoped_errors,
+            "shape": scoped_shape,
+            "missing_steps": missing_steps,
+            "passed": not scoped_errors and not missing_steps,
+        })
+    canonical = flow_spec_canonical_summary(capability_spec)
+    diffs: list[str] = []
+    if legacy_errors:
+        diffs.extend([f"legacy_export: {e}" for e in legacy_errors])
+    for cap_report in capability_reports:
+        if not cap_report["passed"]:
+            diffs.append(f"capability `{cap_report['name']}` shadow failed")
+    return {
+        "protocol": "dano.recording_shadow_diff.v1",
+        "passed": not diffs,
+        "diffs": diffs,
+        "legacy": {
+            "errors": legacy_errors,
+            "shape": _canonical_api_shape(legacy_api),
+        },
+        "capabilities": capability_reports,
+        "canonical": canonical,
+    }
 
 
 def _api_params(api_request: dict) -> list[str]:
@@ -7360,6 +7569,105 @@ def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, A
             }
             for r in (graph.get("all_requests") or [])[:120]
         ],
+    }
+
+
+def _stable_json_hash(value: Any) -> str:
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _canonical_step_summary(step: FlowStep) -> dict[str, Any]:
+    return {
+        "step_id": step.step_id,
+        "name": step.name,
+        "method": (step.method or "").upper(),
+        "path": step.path or _request_path({"url": step.url}),
+        "param_keys": [p.key or p.path for p in step.params],
+        "param_types": {p.key or p.path: p.type for p in step.params},
+        "select_count": len(step.selects or []),
+        "response_hash": _stable_json_hash(step.response_json) if step.response_json is not None else "",
+        "request_id": (step.source_meta or {}).get("request_id") or "",
+        "request_index": (step.source_meta or {}).get("request_index"),
+    }
+
+
+def flow_spec_canonical_summary(spec: FlowSpec) -> dict[str, Any]:
+    """Stable golden/shadow summary for recording V3 regression tests."""
+    current = ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(
+        spec.model_copy(deep=True),
+        prefer_request_facts=False,
+    )))
+    request_facts = current.request_facts
+    return {
+        "protocol": "dano.recording_shadow.v1",
+        "flow_id": current.flow_id,
+        "title": current.title,
+        "schema_version": current.schema_version,
+        "risk_level": current.risk_level,
+        "steps": [_canonical_step_summary(st) for st in current.steps],
+        "links": [
+            {
+                "source_step_id": lk.source_step_id,
+                "source_path": lk.source_path,
+                "target_step_id": lk.target_step_id,
+                "target_path": lk.target_path,
+                "confirmed": bool(lk.confirmed),
+            }
+            for lk in current.links
+        ],
+        "request_facts": {
+            "protocol": request_facts.protocol,
+            "request_count": len(request_facts.requests or []),
+            "analysis_count": len(request_facts.analysis or {}),
+            "usage_count": len(request_facts.usage or {}),
+            "requests": [
+                {
+                    "request_id": f.request_id,
+                    "request_index": f.request_index,
+                    "method": (f.method or "").upper(),
+                    "path": f.path or _request_path({"url": f.url}),
+                    "sequence": f.sequence,
+                    "response_hash": _stable_json_hash(f.response_json) if f.response_json is not None else "",
+                    "role": (request_facts.analysis.get(f.request_id or f"idx:{f.request_index}") or RequestAnalysis()).role,
+                    "state": (request_facts.usage.get(f.request_id or f"idx:{f.request_index}") or RequestUsage()).state,
+                }
+                for f in sorted(
+                    request_facts.requests or [],
+                    key=lambda x: (str(x.sequence or ""), str(x.request_index or ""), x.request_id),
+                )
+            ],
+        },
+        "capabilities": [
+            {
+                "capability_id": cap.capability_id,
+                "name": cap.name,
+                "kind": cap.kind,
+                "step_ids": list(cap.step_ids or []),
+                "request_refs": [
+                    {
+                        "request_id": ref.request_id,
+                        "request_index": ref.request_index,
+                        "step_id": ref.step_id,
+                        "role": ref.role,
+                    }
+                    for ref in cap.request_refs or []
+                ],
+                "input_keys": sorted(((cap.input_schema or {}).get("properties") or {}).keys()),
+                "output_keys": sorted(((cap.output_schema or {}).get("properties") or {}).keys()),
+                "field_count": len(cap.fields or []),
+                "dependency_count": len(cap.dependencies or []),
+                "node_types": [str(n.get("type") or "") for n in _iter_capability_nodes(cap.nodes or [])],
+                "confirmed": bool(cap.confirmed),
+            }
+            for cap in current.capabilities or []
+        ],
+        "summary_hash": _stable_json_hash({
+            "steps": [_canonical_step_summary(st) for st in current.steps],
+            "links": [(lk.source_step_id, lk.source_path, lk.target_step_id, lk.target_path) for lk in current.links],
+            "capabilities": [(cap.name, cap.kind, tuple(cap.step_ids or [])) for cap in current.capabilities or []],
+            "request_ids": [f.request_id for f in request_facts.requests or []],
+        }),
     }
 
 
