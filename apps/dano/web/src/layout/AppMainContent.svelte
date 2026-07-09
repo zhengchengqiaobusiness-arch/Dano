@@ -76,7 +76,7 @@
       files: RpcUploadedFileRef[];
       revisionEntryId?: string;
       steer?: boolean;
-    }) => {},
+    }) => true,
     onAbort = () => {},
     onLoadOlderTranscript = () => {},
     onSelectModel = (_: RpcModelInfo) => {},
@@ -149,7 +149,7 @@
       files: RpcUploadedFileRef[];
       revisionEntryId?: string;
       steer?: boolean;
-    }) => void;
+    }) => boolean | Promise<boolean>;
     onAbort?: () => void;
     onLoadOlderTranscript?: () => void;
     onSelectModel?: (model: RpcModelInfo) => void;

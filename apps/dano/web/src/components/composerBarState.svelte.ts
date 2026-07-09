@@ -37,6 +37,7 @@ import {
   shouldEnterInsertNewline,
   shouldSubmitComposerEnter,
 } from "./composerKeyboard";
+import { canSubmitComposerMessage } from "./composerSubmit";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,7 +71,7 @@ export interface ComposerBarCallbacks {
     files: RpcUploadedFileRef[];
     revisionEntryId?: string;
     steer?: boolean;
-  }) => void;
+  }) => boolean | Promise<boolean>;
   readonly onAbort: () => void;
   readonly onCancelRevision: () => void;
   readonly onSelectModel: (model: RpcModelInfo) => void;
@@ -216,6 +217,7 @@ export function createComposerBarState(
   // ---- derived state (uses $rx for inputText/cursorOffset) ----
 
   let isDisabled = $derived(props.connectionStatus !== "connected");
+  let canEditPrompt = $derived(props.connectionStatus !== "connecting");
   let availableSlashCommands = $derived.by(() => {
     const baseCommands = props.isDebugMode
       ? debugSlashCommandOptions()
@@ -291,10 +293,13 @@ export function createComposerBarState(
     !isDisabled && attachments.length < MAX_COMPOSER_ATTACHMENTS,
   );
   let canSubmit = $derived(
-    !isDisabled &&
-      !hasUploadingAttachments &&
-      !hasFailedAttachments &&
-      (normalizedInputText.length > 0 || hasSubmittableAttachments),
+    canSubmitComposerMessage({
+      connectionStatus: props.connectionStatus,
+      hasUploadingAttachments,
+      hasFailedAttachments,
+      hasText: normalizedInputText.length > 0,
+      hasSubmittableAttachments,
+    }),
   );
   let canAbort = $derived(!isDisabled && props.isStreaming);
   let showStopButton = $derived(props.isStreaming && !canSubmit);
@@ -532,36 +537,37 @@ export function createComposerBarState(
     clearAttachmentNotice();
   }
 
-  function submitMessage(
+  async function submitMessage(
     message: string,
     steer: boolean,
     fileInputEl?: HTMLInputElement | null,
     textareaEl?: HTMLTextAreaElement | null,
-  ) {
-    callbacks.onSubmit({
+  ): Promise<boolean> {
+    const accepted = await callbacks.onSubmit({
       message,
       images: toRpcImageContent(attachments),
       files: toRpcUploadedFileRefs(attachments),
       revisionEntryId: props.revision?.entryId,
       steer,
     });
+    if (!accepted) return false;
     resetComposerState(fileInputEl);
     resizeTextarea(textareaEl);
+    return true;
   }
 
-  function handleSubmit(
+  async function handleSubmit(
     steer: boolean,
     fileInputEl?: HTMLInputElement | null,
     textareaEl?: HTMLTextAreaElement | null,
-  ): boolean {
+  ): Promise<boolean> {
     const text = normalizedInputText;
     if (!canSubmit) return false;
     if (parseCompactSlashCommand(text) && hasAttachments) {
       setAttachmentNotice(t("composer.warning.compactNoImages"));
       return false;
     }
-    submitMessage(text, steer, fileInputEl, textareaEl);
-    return true;
+    return submitMessage(text, steer, fileInputEl, textareaEl);
   }
 
   function handleAbortAction(): boolean {
@@ -816,7 +822,7 @@ export function createComposerBarState(
       if (!shouldSubmitComposerEnter(e, composing, enterInsertsNewline)) return;
       e.preventDefault();
       const isSteer = typeof steer === "function" ? steer() : steer;
-      handleSubmit(isSteer);
+      void handleSubmit(isSteer);
     }
   }
 
@@ -893,6 +899,9 @@ export function createComposerBarState(
     // derived
     get isDisabled() {
       return isDisabled;
+    },
+    get canEditPrompt() {
+      return canEditPrompt;
     },
     get availableSlashCommands() {
       return availableSlashCommands;

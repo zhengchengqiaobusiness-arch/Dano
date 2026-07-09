@@ -224,6 +224,7 @@ function normalizeBridgePath(value: unknown): string | null {
 
 const WORKSPACE_ENTRIES_REFRESH_MS = 10_000;
 const MAX_RECONNECT_DELAY = 30_000;
+const CONNECT_OPEN_TIMEOUT_MS = 10_000;
 const HEARTBEAT_TIMEOUT_MS = 45_000;
 const HEARTBEAT_WATCHDOG_MS = 5_000;
 
@@ -240,6 +241,7 @@ let lastHeartbeatAt = 0;
 let lastServerInstanceId: string | null = null;
 let defaultSessionStartedForPage = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let connectRequest: Promise<boolean> | null = null;
 let reconnectDelay = 1000;
 let disposed = false;
 let requestIdCounter = 0;
@@ -441,6 +443,32 @@ function scheduleReconnect() {
     if (!disposed) connect();
   }, reconnectDelay);
   reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+}
+
+function waitForEventSourceOpen(source: EventSource): Promise<boolean> {
+  if (source.readyState === EventSource.OPEN) return Promise.resolve(true);
+
+  return new Promise(resolve => {
+    const finish = (connected: boolean) => {
+      clearTimeout(timer);
+      source.removeEventListener("open", handleOpen);
+      source.removeEventListener("error", handleError);
+      resolve(connected);
+    };
+    const handleOpen = () => finish(true);
+    const handleError = () => {
+      if (source.readyState === EventSource.CLOSED) finish(false);
+    };
+    const timer = setTimeout(() => {
+      resetTransportState();
+      markDisconnected(t("appHeader.connection.disconnected"));
+      scheduleReconnect();
+      finish(false);
+    }, CONNECT_OPEN_TIMEOUT_MS);
+
+    source.addEventListener("open", handleOpen);
+    source.addEventListener("error", handleError);
+  });
 }
 
 function stopHeartbeatWatchdog() {
@@ -1634,12 +1662,25 @@ function setCompactionState(compacting: boolean) {
   _sessionState = { ..._sessionState, isCompacting: compacting };
 }
 
-function sendPrompt(
+async function ensureConnectedForPrompt(): Promise<boolean> {
+  if (_connectionStatus === "connected" && clientMessagesUrl) return true;
+  if (_connectionStatus !== "disconnected") return false;
+
+  const connected = await connect();
+  if (connected) return true;
+
+  pushNotification(t("store.error.reconnectBeforeSendFailed"), "error");
+  return false;
+}
+
+async function sendPrompt(
   message: string,
   images?: RpcImageContent[],
   files?: RpcUploadedFileRef[],
   streamingBehavior: "steer" | "followUp" = "followUp",
-) {
+): Promise<boolean> {
+  if (!(await ensureConnectedForPrompt())) return false;
+
   if (_isStreaming) {
     _queuedUserMessages = [
       ..._queuedUserMessages,
@@ -1655,6 +1696,7 @@ function sendPrompt(
     type: "command",
     payload: { type: "prompt", message, images, files, streamingBehavior },
   });
+  return true;
 }
 
 async function dequeueQueuedMessage(
@@ -2645,8 +2687,21 @@ function cancelPendingQuestionsOnDisconnect() {
   }
 }
 
-async function connect() {
-  if (disposed) return;
+async function connect(): Promise<boolean> {
+  if (disposed) return false;
+  if (connectRequest) return connectRequest;
+
+  connectRequest = connectOnce().finally(() => {
+    connectRequest = null;
+  });
+  return connectRequest;
+}
+
+async function connectOnce(): Promise<boolean> {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
 
   _connectionError = "";
   _connectionStatus = "connecting";
@@ -2690,10 +2745,11 @@ async function connect() {
       ),
     );
     scheduleReconnect();
-    return;
+    return false;
   }
 
-  eventSource.addEventListener("open", () => {
+  const source = eventSource;
+  source.addEventListener("open", () => {
     _connectionStatus = "connected";
     _connectionError = "";
     _lastDisconnectReason = "";
@@ -2703,7 +2759,7 @@ async function connect() {
     void fetchInitialState();
   });
 
-  eventSource.addEventListener("error", () => {
+  source.addEventListener("error", () => {
     if (!eventSource || eventSource.readyState !== EventSource.CLOSED) {
       return;
     }
@@ -2712,7 +2768,8 @@ async function connect() {
     scheduleReconnect();
   });
 
-  eventSource.addEventListener("message", handleServerMessage);
+  source.addEventListener("message", handleServerMessage);
+  return waitForEventSourceOpen(source);
 }
 
 function disconnect() {

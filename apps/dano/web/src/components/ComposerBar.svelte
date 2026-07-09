@@ -43,7 +43,7 @@
     pendingMessageCount = 0,
     editQueuedPayload = null as { text: string; images: RpcImageContent[] } | null,
     onInteraction = (() => {}) as () => void,
-    onSubmit = ((_: { message: string; images: RpcImageContent[]; files: RpcUploadedFileRef[]; revisionEntryId?: string; steer?: boolean }) => {}) as (payload: { message: string; images: RpcImageContent[]; files: RpcUploadedFileRef[]; revisionEntryId?: string; steer?: boolean }) => void,
+    onSubmit = ((_: { message: string; images: RpcImageContent[]; files: RpcUploadedFileRef[]; revisionEntryId?: string; steer?: boolean }) => true) as (payload: { message: string; images: RpcImageContent[]; files: RpcUploadedFileRef[]; revisionEntryId?: string; steer?: boolean }) => boolean | Promise<boolean>,
     onAbort = (() => {}) as () => void,
     onCancelRevision = (() => {}) as () => void,
     onSelectModel = ((_: RpcModelInfo) => {}) as (model: RpcModelInfo) => void,
@@ -176,13 +176,13 @@
       composer.handleAbortAction();
       return;
     }
-    composer.handleSubmit(false, fileInputRef, textareaRef);
+    void composer.handleSubmit(false, fileInputRef, textareaRef);
   }
 
   function handleQuickAction(prompt: string) {
     if (composer.isDisabled) return;
     inputText = prompt;
-    composer.handleSubmit(false, fileInputRef, textareaRef);
+    void composer.handleSubmit(false, fileInputRef, textareaRef);
   }
 
   function openAttachmentPreview(attachment: ComposerAttachment) {
@@ -399,7 +399,7 @@
       class="composer-dock composer"
       class:multiline={isComposerMultiline}
       class:has-attachments={composer.hasAttachments}
-      class:disabled={composer.isDisabled}
+      class:disabled={!composer.canEditPrompt}
       class:drag-active={composer.isDragActive}
       role="region"
       aria-label={t("composer.regionLabel")}
@@ -495,7 +495,7 @@
         bind:value={inputText}
         class="prompt-input composer-input"
         rows="1"
-        disabled={composer.isDisabled}
+        disabled={!composer.canEditPrompt}
         placeholder={composerPlaceholder}
         onkeydown={handleInputKeydown}
         oninput={handleInputInteraction}
