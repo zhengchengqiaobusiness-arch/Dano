@@ -72,9 +72,3 @@ Use the default five-label triage vocabulary. See `docs/agents/triage-labels.md`
 ### Domain docs
 
 Use the repo's multi-context domain docs. See `docs/agents/domain.md`.
-
-<!-- SPECKIT START -->
-For additional context about technologies to be used, project structure,
-shell commands, and other important information, read the current plan
-at specs/001-llm-chat/plan.md
-<!-- SPECKIT END -->
