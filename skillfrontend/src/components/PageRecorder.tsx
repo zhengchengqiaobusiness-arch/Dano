@@ -64,6 +64,8 @@ interface FlowParam {
 }
 interface FlowSelectBinding {
   param?: string; path?: string; source_url?: string; value_key?: string; label_key?: string;
+  source_method?: string; source_headers?: Record<string, string>; source_body?: any;
+  source_content_type?: string; source_role?: string; source_request_id?: string;
   options?: Array<string | { label: string; value: any }> | null; count?: number; multi?: boolean;
   option_map?: Record<string, any> | null;
   enum_source?: string | null; enum_confirmed?: boolean | null;
@@ -133,6 +135,8 @@ interface RequestGraphEntry {
   response_json?: any; response_schema?: any; evidence?: any;
   page_id?: string | null; frame_id?: string | null; sequence?: number | string | null;
   state?: string; materialized_step_id?: string;
+  headers?: Record<string, string>; post_data?: any; content_type?: string;
+  occurrence_count?: number;
 }
 interface FlowSpecData {
   flow_id: string; title: string; business_description?: string;
@@ -177,6 +181,9 @@ interface FlowCheckReport {
     checked_manual_requests?: Array<Record<string, any>>;
     unused_high_confidence_requests?: Array<Record<string, any>>;
   };
+  issue_groups?: Record<string, Array<{
+    severity?: string; message?: string; source?: string; target?: Record<string, any>;
+  }>>;
 }
 interface RecResult {
   ok?: boolean; action?: string; risk_level?: string; mode?: string; reason?: string;
@@ -226,24 +233,41 @@ const CATEGORY_OPTIONS = [
   { label: "运行期变量", value: "runtime_var" },
   { label: "系统常量", value: "system_const" },
 ];
+// 来源按"由谁/什么注入"归类：
+//   用户侧: 用户输入
+//   活接口侧: api_option / page_enum / form_option(运行期拉接口取)
+//   静态枚举侧: manual_enum / static_enum(已固化在表单上)
+//   上游链侧: previous_response(本能力内 step 响应)
+//   系统侧: current_user / system_time / request_header / page_context / constant
 const SOURCE_KIND_OPTIONS = [
+  { label: "待配置", value: "unknown" },
   { label: "用户输入", value: "user_input" },
+  { label: "接口候选", value: "api_option" },
+  // { label: "枚举(页面)", value:  },
+  // { label: "枚举(表单)", value:  },
+  { label: "枚举(手动)", value: "manual_enum" },
+  // { label: "枚举(静态)", value:  },
   { label: "上游响应", value: "previous_response" },
   { label: "请求头", value: "request_header" },
   { label: "当前用户", value: "current_user" },
   { label: "系统时间", value: "system_time" },
   { label: "页面上下文", value: "page_context" },
   { label: "固定值", value: "constant" },
-  { label: "接口候选", value: "api_option" },
-  { label: "枚举", value: "manual_enum" },
-  { label: "未知", value: "unknown" },
 ];
-const OPTION_SOURCE_KINDS = ["api_option", "page_enum", "static_enum", "manual_enum", "form_option"];
-const ENUM_SOURCE_KINDS = ["page_enum", "static_enum", "manual_enum", "form_option"];
+const OPTION_SOURCE_KINDS = ["api_option", "manual_enum" ];
+const ENUM_SOURCE_KINDS = [ "manual_enum"];
+// 三类分类 × 各自允许的来源，避免出现"用户参数 + 固定值"这种语义不一致组合。
 const SOURCE_OPTIONS_BY_CATEGORY: Record<string, Array<{ label: string; value: string }>> = {
-  user_param: SOURCE_KIND_OPTIONS.filter((x) => ["user_input", ...OPTION_SOURCE_KINDS].includes(x.value)),
-  runtime_var: SOURCE_KIND_OPTIONS.filter((x) => ["previous_response", "request_header", "current_user", "system_time", "page_context", "api_option", "unknown"].includes(x.value)),
-  system_const: SOURCE_KIND_OPTIONS.filter((x) => ["constant", "page_context"].includes(x.value)),
+  user_param: SOURCE_KIND_OPTIONS.filter((x) =>
+    ["user_input", "api_option" , "manual_enum", ].includes(x.value)
+  ),
+  // 运行期变量由执行环境注入；先允许保持“待配置”，不能静默写死成上游响应。
+  runtime_var: SOURCE_KIND_OPTIONS.filter((x) =>
+    ["unknown", "previous_response", "page_context", "current_user", "system_time", "request_header"].includes(x.value)
+  ),
+  system_const: SOURCE_KIND_OPTIONS.filter((x) =>
+    ["constant"].includes(x.value)
+  ),
 };
 const PARAM_TYPE_LABELS: Record<string, string> = {
   string: "文本",
@@ -334,7 +358,18 @@ function defaultSourceForCategory(category: string, current?: string) {
   const options = sourceOptionsForCategory(category);
   const normalized = normalizeSourceKindForUi(current);
   if (normalized && options.some((x) => x.value === normalized)) return normalized;
-  return options[0]?.value || "unknown";
+  if (category === "runtime_var") return "unknown";
+  if (category === "system_const") return "constant";
+  return "user_input";
+}
+function sourceSelectOptionsForParam(p: FlowParam) {
+  const options = sourceOptionsForCategory(p.category);
+  const current = normalizeSourceKindForUi(p.source_kind);
+  if (!current || options.some((item) => item.value === current)) return options;
+  return [
+    { label: `${optionLabel(SOURCE_KIND_OPTIONS, current)}（与当前分类不一致）`, value: current },
+    ...options,
+  ];
 }
 function NativeSelect({
   value,
@@ -665,10 +700,24 @@ function allCapturedRequests(spec?: FlowSpecData | null) {
     stepSigs.has(`${(req.method || "").toUpperCase()} ${purePath(req.path || req.url || "")}`) ||
     stepReqKeys.has(requestGraphKey(req))
   ) ? 0 : 1;
-  return source
+  const sorted = source
     .filter(isApiLikeRequest)
     .filter((req, idx, arr) => arr.findIndex((x) => requestGraphKey(x) === requestGraphKey(req)) === idx)
     .sort((a, b) => selectedRank(a) - selectedRank(b) || requestRoleRank(a) - requestRoleRank(b) || (b.confidence ?? 0) - (a.confidence ?? 0) || Number(a.request_index ?? 0) - Number(b.request_index ?? 0));
+  const grouped = new Map<string, RequestGraphEntry>();
+  for (const req of sorted) {
+    const signature = requestGraphSignature(req);
+    const current = grouped.get(signature);
+    if (!current) {
+      grouped.set(signature, { ...req, occurrence_count: 1 });
+      continue;
+    }
+    current.occurrence_count = (current.occurrence_count || 1) + 1;
+    if (current.response_json == null && req.response_json != null) {
+      grouped.set(signature, { ...req, occurrence_count: current.occurrence_count });
+    }
+  }
+  return Array.from(grouped.values());
 }
 function requestRoleRank(req: RequestGraphEntry) {
   const role = req.role || "";
@@ -701,7 +750,7 @@ function capturedRequestOptions(spec: FlowSpecData | null | undefined, opts: { i
   return allCapturedRequests(spec)
     .filter((req) => opts.includeIncluded || !isRequestInSteps(spec, req))
     .map((req) => ({
-      label: `#${req.sequence ?? req.request_index ?? ""} ${req.method || "GET"} ${req.path || stripHost(req.url || "")}`,
+      label: `#${req.sequence ?? req.request_index ?? ""} ${req.method || "GET"} ${req.path || stripHost(req.url || "")}${(req.occurrence_count || 1) > 1 ? ` · ${req.occurrence_count} 次` : ""}`,
       value: requestOptionValue(req),
     }))
     .filter((x) => x.value);
@@ -795,10 +844,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const latestFrameRef = useRef<{ seq: number; src: string } | null>(null);
   const frameRafRef = useRef<number | null>(null);
   const renderedFrameSeqRef = useRef(0);
-  const autoResolvedReviewKeyRef = useRef("");
-  const autoDedupedStepKeyRef = useRef("");
-  const autoLinkedRuntimeKeyRef = useRef("");
-  const autoLlmRecommendKeyRef = useRef("");
   const wsAliveRef = useRef(false);                                // FC2 修复:跟踪 WS 存活,避免 send 失败时反复弹错
   const isComposingRef = useRef(false);                           // FH2 修复:中文输入法拼写中标记,防 onKbInput 误发中间字符
 
@@ -975,10 +1020,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setJsonErr("");
     setLastServerJson("");
     setActiveFlowTab("abilities");
-    autoResolvedReviewKeyRef.current = "";
-    autoDedupedStepKeyRef.current = "";
-    autoLinkedRuntimeKeyRef.current = "";
-    autoLlmRecommendKeyRef.current = "";
   }
 
   function start() {
@@ -1039,14 +1080,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
       else if (m.type === "flow_spec" || m.type === "flow_spec_updated") {
         setLlmBusy(false); setOrchestrateBusy(false); setAutoFixBusy(false);
+        setPhase("recording");
         const fs = m.full_spec || m.flow_spec;
         if (fs) {
           acceptFlowSpec(fs);
           setLastServerJson(JSON.stringify(fs));
-          autoDedupeReadSteps(fs);
-          autoLinkUnmatchedRuntimeFields(fs);
-          autoResolveNonHighReviews(fs, m.check_report);
-          autoRefreshLlmRecommendations(fs, m.check_report);
         }
         if (m.check_report) setCheckReport(m.check_report);
       }
@@ -1280,97 +1318,79 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     send({ type: "flow_update", edits: [paramEdit(stepId, p, field, value)] });
   }
   function updateParamType(step: FlowStepData, p: FlowParam, value: string) {
-    const isEnumType = value === "enum" || value === "list-enum";
-    const edits: any[] = [paramEdit(step.step_id, p, "type", value)];
-    const updates: Record<string, any> = { type: value };
-    if (isEnumType) {
-      if (!OPTION_SOURCE_KINDS.includes(p.source_kind || "")) {
-        edits.push(paramEdit(step.step_id, p, "category", "user_param"));
-        edits.push(paramEdit(step.step_id, p, "source_kind", "manual_enum"));
-        edits.push(paramEdit(step.step_id, p, "source", { kind: "manual_enum", path: p.path, manual: true }));
-        edits.push(paramEdit(step.step_id, p, "exposed_to_user", true));
-        updates.category = "user_param";
-        updates.source_kind = "manual_enum";
-        updates.source = { kind: "manual_enum", path: p.path, manual: true };
-        updates.exposed_to_user = true;
-      }
-    } else if (OPTION_SOURCE_KINDS.includes(p.source_kind || "") || (p.enum_options || []).length) {
-      const nextSelects = (step.selects || []).filter((s) => {
-        const samePath = stripBodyPrefix(s.path || "") === stripBodyPrefix(p.path || "");
-        const sameParam = !!s.param && !!p.key && s.param === p.key;
-        return !(samePath || sameParam);
-      });
-      edits.push(paramEdit(step.step_id, p, "enum_options", null));
-      edits.push(paramEdit(step.step_id, p, "enum_value_map", null));
-      edits.push(paramEdit(step.step_id, p, "source_kind", "user_input"));
-      edits.push(paramEdit(step.step_id, p, "source", { kind: "sample", path: p.path }));
-      edits.push(paramEdit(step.step_id, p, "category", "user_param"));
-      edits.push(paramEdit(step.step_id, p, "exposed_to_user", true));
-      edits.push({ op: "update", step_id: step.step_id, field: "selects", value: nextSelects });
-      updates.enum_options = null;
-      updates.enum_value_map = null;
-      updates.source_kind = "user_input";
-      updates.source = { kind: "sample", path: p.path };
-      updates.category = "user_param";
-      updates.exposed_to_user = true;
-      patchLocalStep(step.step_id, { selects: nextSelects });
-    }
-    patchLocalParam(step.step_id, p, updates);
-    send({ type: "flow_update", edits });
+    // 类型只描述数据形态，不拥有分类和来源。用户把文本改成枚举、或把枚举改回文本时，
+    // 不能顺带把 runtime_var/previous_response 等人工配置改掉。
+    patchLocalParam(step.step_id, p, { type: value });
+    send({ type: "flow_update", edits: [paramEdit(step.step_id, p, "type", value)] });
   }
   function updateParamCategory(stepId: string, p: FlowParam, category: string) {
-    const sourceKind = defaultSourceForCategory(category, p.source_kind);
-    patchLocalParams(stepId, p, {
+    const currentSourceKind = normalizeSourceKindForUi(p.source_kind);
+    const allowed = sourceOptionsForCategory(category).some((o) => o.value === currentSourceKind);
+    const sourceKind = allowed ? currentSourceKind : defaultSourceForCategory(category);
+    const keepExistingSource = allowed && !!p.source && (
+      sourceKind !== "previous_response"
+      || !!((p.source as any)?.step_id || (p.source as any)?.response_path)
+    );
+    const source = keepExistingSource
+      ? p.source
+      : sourceKind === "unknown" ? {}
+        : sourceKind === "user_input" ? { kind: "sample", path: p.path }
+          : { kind: sourceKind, path: p.path, manual: true };
+    const patch: Record<string, any> = {
       category,
       source_kind: sourceKind,
-      source: sourceKind === "unknown" ? {} : { kind: sourceKind, path: p.path, manual: true },
+      source,
       exposed_to_user: category === "user_param",
-      need_human_confirm: false,
-    });
-    send({ type: "flow_update", edits: [
-      paramEdit(stepId, p, "category", category),
-      paramEdit(stepId, p, "source_kind", sourceKind),
-      paramEdit(stepId, p, "source", sourceKind === "unknown" ? {} : { kind: sourceKind, path: p.path, manual: true }),
-      paramEdit(stepId, p, "exposed_to_user", category === "user_param"),
-      paramEdit(stepId, p, "need_human_confirm", false),
-    ] });
-  }
-  function updateParamSourceKind(stepId: string, p: FlowParam, sourceKind: string) {
-    if (sourceKind === "previous_response") {
-      const key = paramDraftKey(stepId, p);
-      setBindDraft((d) => ({
-        ...d,
-        [key]: d[key] || { source_step_id: p.source?.step_id || "", source_path: p.source?.response_path || "" },
-      }));
-      setActiveFlowTab("abilities");
-      message.info("请选择来源步骤和响应字段后点击“绑定上游响应”");
-      return;
-    }
-    const category = sourceKind === "constant"
-      ? "system_const"
-      : sourceKind === "user_input" || (OPTION_SOURCE_KINDS.includes(sourceKind) && p.category !== "runtime_var")
-        ? "user_param"
-        : "runtime_var";
-    const edits: any[] = (flowSpec?.links || [])
+      need_human_confirm: sourceKind === "unknown",
+    };
+    patchLocalParams(stepId, p, patch);
+    const edits: any[] = (category === "runtime_var" ? [] : ((flowSpecRef.current || flowSpec)?.links || []))
       .filter((l) => l.target_step_id === stepId && stripBodyPrefix(l.target_path) === stripBodyPrefix(p.path))
-      .map((l) => ({ op: "remove", link_id: l.link_id, reset_target: false }));
+      .map((l) => ({ op: "remove", link_id: l.link_id, record_rejection: true }));
     edits.push(
       paramEdit(stepId, p, "category", category),
       paramEdit(stepId, p, "source_kind", sourceKind),
-      paramEdit(stepId, p, "source", sourceKind === "unknown" ? {} : sourceKind === "user_input" ? { kind: "sample", path: p.path } : { kind: sourceKind, path: p.path, manual: true }),
+      paramEdit(stepId, p, "source", source),
+      paramEdit(stepId, p, "exposed_to_user", category === "user_param"),
+      paramEdit(stepId, p, "need_human_confirm", sourceKind === "unknown"),
+    );
+    send({ type: "flow_update", edits });
+  }
+  function updateParamSourceKind(stepId: string, p: FlowParam, sourceKind: string) {
+    const category = p.category || "user_param";
+    const currentSource = p.source as any;
+    const nextSource = sourceKind === "unknown" ? {}
+      : sourceKind === "user_input" ? { kind: "sample", path: p.path }
+        : sourceKind === "previous_response" && (currentSource?.step_id || currentSource?.response_path)
+          ? { ...currentSource, kind: "previous_response" }
+          : { kind: sourceKind, path: p.path, manual: true };
+    // 只有离开“上游响应”时才移除原依赖；重新选择上游响应不能先把现有绑定删掉。
+    const edits: any[] = sourceKind === "previous_response" ? [] : (flowSpec?.links || [])
+      .filter((l) => l.target_step_id === stepId && stripBodyPrefix(l.target_path) === stripBodyPrefix(p.path))
+      .map((l) => ({ op: "remove", link_id: l.link_id, reset_target: false }));
+    edits.push(
+      paramEdit(stepId, p, "source_kind", sourceKind),
+      paramEdit(stepId, p, "source", nextSource),
       paramEdit(stepId, p, "exposed_to_user", category === "user_param"),
       paramEdit(stepId, p, "need_human_confirm", sourceKind === "unknown"),
       paramEdit(stepId, p, "editable", true),
     );
     patchLocalParams(stepId, p, {
-      category,
       source_kind: sourceKind,
-      source: sourceKind === "unknown" ? {} : sourceKind === "user_input" ? { kind: "sample", path: p.path } : { kind: sourceKind, path: p.path, manual: true },
+      source: nextSource,
       exposed_to_user: category === "user_param",
       need_human_confirm: sourceKind === "unknown",
       editable: true,
     });
     send({ type: "flow_update", edits });
+    if (sourceKind === "previous_response") {
+      const key = paramDraftKey(stepId, p);
+      setBindDraft((d) => ({
+        ...d,
+        [key]: d[key] || { source_step_id: (p.source as any)?.step_id || "", source_path: (p.source as any)?.response_path || "" },
+      }));
+      message.info("已在下方“绑定上游响应”里指定来源步骤和响应字段");
+    }
   }
   function moveStep(idx: number, dir: -1 | 1) {
     if (!flowSpec) return;
@@ -1406,93 +1426,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function resolveReview(reviewId: string, resolved = true) {
     send({ type: "flow_update", edits: [{ op: "resolve_review", review_id: reviewId, resolved }] });
-  }
-  function autoResolveNonHighReviews(spec: FlowSpecData, report?: FlowCheckReport) {
-    const list = (report?.review_items?.length ? report.review_items : spec.review_items) || [];
-    const nonHigh = list.filter((item) => !item.resolved && item.severity !== "high");
-    if (!nonHigh.length) return;
-    const version = spec.meta?.current_version ?? 0;
-    // FH4 修复:key 增加 report.review_items.length(spec 路径下)与 list 来源,避免后端增删 review 后 id 集合不变但内容变了仍被认为是同一 key
-    const source = report?.review_items?.length ? "report" : "spec";
-    const key = `${spec.flow_id}:${version}:${source}:${list.length}:${nonHigh.map((item) => item.id).sort().join("|")}`;
-    if (autoResolvedReviewKeyRef.current === key) return;
-    autoResolvedReviewKeyRef.current = key;
-    send({ type: "flow_update", edits: [{ op: "resolve_reviews", exclude_severities: ["high"], resolved: true }] });
-  }
-  function autoDedupeReadSteps(spec: FlowSpecData) {
-    const seen = new Set<string>();
-    const duplicates: string[] = [];
-    for (const step of spec.steps || []) {
-      const method = (step.method || "GET").toUpperCase();
-      const role = step.source_meta?.role || step.semantic_role || "";
-      if (["POST", "PUT", "PATCH", "DELETE"].includes(method)) continue;
-      if (role && !["business_get", "read_context", "read_option"].includes(role)) continue;
-      const key = `${method}:${purePath(step.path || step.url)}`;
-      if (seen.has(key)) duplicates.push(step.step_id);
-      seen.add(key);
-    }
-    if (!duplicates.length) return;
-    const version = spec.meta?.current_version ?? 0;
-    const key = `${spec.flow_id}:${version}:${duplicates.join("|")}`;
-    if (autoDedupedStepKeyRef.current === key) return;
-    autoDedupedStepKeyRef.current = key;
-    send({ type: "flow_update", edits: [{ op: "dedupe_steps" }] });
-  }
-  function autoLinkUnmatchedRuntimeFields(spec: FlowSpecData) {
-    const boring = new Set(["", "0", "1", "true", "false", "200", "ok", "success", "null", "none"]);
-    const edits: any[] = [];
-    const existingTargets = new Set((spec.links || []).map((l) => `${l.target_step_id}:${stripBodyPrefix(l.target_path)}`));
-    const stepIndex = new Map((spec.steps || []).map((s, i) => [s.step_id, i]));
-
-    for (const targetStep of spec.steps || []) {
-      const targetIdx = stepIndex.get(targetStep.step_id) ?? 0;
-      for (const p of targetStep.params || []) {
-        if (p.category !== "runtime_var" || p.source_kind !== "unknown") continue;
-        if (existingTargets.has(`${targetStep.step_id}:${stripBodyPrefix(p.path)}`)) continue;
-        const value = String(p.value ?? "").trim();
-        if (!value || boring.has(value.toLowerCase())) continue;
-
-        const matches: Array<{ step: FlowStepData; path: string }> = [];
-        for (const sourceStep of spec.steps || []) {
-          const sourceIdx = stepIndex.get(sourceStep.step_id) ?? 0;
-          if (sourceIdx >= targetIdx) continue;
-          for (const leaf of leafPathValues(sourceStep.response_json)) {
-            if (leaf.value === value) matches.push({ step: sourceStep, path: leaf.path });
-          }
-        }
-        if (matches.length !== 1) continue;
-        edits.push({
-          op: "add",
-          step_id: matches[0].step.step_id,
-          link: {
-            source_step_id: matches[0].step.step_id,
-            source_path: matches[0].path,
-            target_step_id: targetStep.step_id,
-            target_path: p.path,
-            confirmed: true,
-            reason: "加载 FlowSpec 时按录制值唯一匹配到上游响应，自动建立运行期依赖",
-          },
-        });
-      }
-    }
-    if (!edits.length) return;
-    const version = spec.meta?.current_version ?? 0;
-    const key = `${spec.flow_id}:${version}:${edits.map((e) => `${e.link.source_step_id}:${e.link.source_path}->${e.link.target_step_id}:${e.link.target_path}`).join("|")}`;
-    if (autoLinkedRuntimeKeyRef.current === key) return;
-    autoLinkedRuntimeKeyRef.current = key;
-    send({ type: "flow_update", edits });
-  }
-  function autoRefreshLlmRecommendations(spec: FlowSpecData, report?: FlowCheckReport) {
-    const list = (report?.review_items?.length ? report.review_items : spec.review_items) || [];
-    const high = list.filter((item) => !item.resolved && item.severity === "high");
-    if (!high.length) return;
-    if (high.some((item) => item.llm_suggestions?.length)) return;
-    const version = spec.meta?.current_version ?? 0;
-    const key = `${spec.flow_id}:${version}:${high.map((item) => item.id).sort().join("|")}`;
-    if (autoLlmRecommendKeyRef.current === key) return;
-    autoLlmRecommendKeyRef.current = key;
-    setLlmBusy(true);
-    send({ type: "llm_recommendations" });
   }
   function reviewSuggestionEdits(item: ReviewItemData) {
     const action = item.suggested_action || "";
@@ -1748,7 +1681,18 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       title: "删除这个能力？",
       content: "只删除对外能力编排，不删除底层捕获接口和流程步骤。",
       okText: "删除", okType: "danger", cancelText: "取消",
-      onOk: () => send({ type: "flow_update", edits: [{ op: "remove_capability", capability_index: idx }] }),
+      onOk: () => {
+        const ok = send({ type: "flow_update", edits: [{ op: "remove_capability", capability_index: idx }] });
+        if (!ok) return;
+        const current = flowSpecRef.current;
+        if (current) {
+          const next = { ...current, capabilities: (current.capabilities || []).filter((_, capIdx) => capIdx !== idx) };
+          flowSpecRef.current = next;
+          setFlowSpec(next);
+        }
+        // 旧 checkReport 属于删除前的能力作用域，等待服务端按新能力重新校验。
+        setCheckReport(null);
+      },
     });
   }
   function addStepToCapability(idx: number, value?: string) {
@@ -1807,7 +1751,20 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   const reviewItems = useMemo(() => {
     const list = (checkReport?.review_items?.length ? checkReport.review_items : flowSpec?.review_items) || [];
-    return list.filter((i) => !i.resolved && i.severity === "high");
+    const capStepIds = new Set<string>();
+    for (const cap of (flowSpec?.capabilities || [])) {
+      for (const sid of (cap.step_ids || [])) capStepIds.add(sid);
+    }
+    return list
+      .filter((i) => !i.resolved && i.severity === "high")
+      .filter((i) => {
+        const t = i.target || {};
+        const k = t.kind;
+        if (k === "flow" || k === "capability" || k === "request_role" || k === undefined) return true;
+        const sid = t.step_id || t.target_step_id || t.source_step_id;
+        if (!sid) return true;
+        return capStepIds.has(sid);
+      });
   }, [checkReport, flowSpec]);
   const stepOptions = useMemo(() => (flowSpec?.steps || []).map((s) => ({
     label: `${s.name || fallbackStepName(s.method, s.path)} · ${s.method} ${s.path || stripHost(s.url)}`,
@@ -1818,6 +1775,48 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const st = stepId ? stepById[stepId] : undefined;
     if (!st) return stepId || "";
     return `${st.name || fallbackStepName(st.method, st.path)} · ${st.method} ${st.path || stripHost(st.url)}`;
+  }
+  function groupedPublishIssues(report: FlowCheckReport | null, reviews: ReviewItemData[]) {
+    const order = [
+      { key: "capability", label: "能力编排", color: "geekblue" },
+      { key: "interface", label: "接口步骤", color: "purple" },
+      { key: "field", label: "字段配置", color: "gold" },
+      { key: "dependency", label: "依赖关系", color: "cyan" },
+      { key: "execution", label: "执行校验", color: "blue" },
+      { key: "diagnostic", label: "页面诊断", color: "volcano" },
+      { key: "flow", label: "整体流程", color: "default" },
+    ];
+    const by: Record<string, Array<{ message: string; severity: string; target?: Record<string, any> }>> = {};
+    for (const [key, items] of Object.entries(report?.issue_groups || {})) {
+      by[key] = (items || []).map((item) => ({
+        message: item.message || "待处理问题",
+        severity: item.severity || "warning",
+        target: item.target,
+      }));
+    }
+    if (!Object.keys(by).length) {
+      for (const item of reviews) {
+        const kind = item.target?.kind || "flow";
+        const key = kind === "param" || kind === "capability_enum" ? "field"
+          : kind === "link" ? "dependency"
+            : kind === "step" || kind === "request_role" ? "interface"
+              : kind === "capability" ? "capability" : "flow";
+        by[key] = by[key] || [];
+        by[key].push({ message: item.title, severity: item.severity, target: item.target });
+      }
+      for (const messageText of report?.errors || []) {
+        by.flow = by.flow || [];
+        by.flow.push({ message: messageText, severity: "error" });
+      }
+    }
+    const out: Array<{ key: string; label: string; color: string; items: Array<{ message: string; severity: string; target?: Record<string, any> }> }> = [];
+    for (const item of order) {
+      if (by[item.key]?.length) out.push({ ...item, items: by[item.key] });
+    }
+    for (const key of Object.keys(by)) {
+      if (!order.some((item) => item.key === key)) out.push({ key, label: key, color: "default", items: by[key] });
+    }
+    return out;
   }
   function renderPublishIssue(item: ReviewItemData) {
     const tgt = item.target || {};
@@ -1845,12 +1844,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function readSourceOptions() {
     const seen = new Set<string>();
     const out: Array<{ label: string; value: string }> = [];
-    for (const st of flowSpec?.steps || []) {
-      if (st.response_json == null) continue;
-      const value = st.url || st.path;
+    for (const req of allCapturedRequests(flowSpec)) {
+      const value = req.url || req.path;
       if (!value || seen.has(value)) continue;
       seen.add(value);
-      out.push({ label: `${st.name || st.path} · ${st.method} ${st.path || stripHost(st.url)}`, value });
+      const state = isRequestInSteps(flowSpec, req) ? "已纳入" : "已捕获";
+      out.push({
+        label: `${state} · ${req.method || "GET"} ${req.path || stripHost(req.url || "")}`,
+        value,
+      });
     }
     return out;
   }
@@ -1863,9 +1865,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function responseKeyOptionsForSource(sourceUrl?: string) {
     const st = sourceStepForUrl(sourceUrl);
+    const sourcePath = purePath(sourceUrl || "");
+    const captured = allCapturedRequests(flowSpec).find((req) => {
+      const candidates = [req.url, req.path, purePath(req.url || ""), purePath(req.path || "")];
+      return candidates.some((value) => value && (value === sourceUrl || purePath(value) === sourcePath));
+    });
+    const response = st?.response_json ?? captured?.response_json;
     const seen = new Set<string>();
     const out: Array<{ label: string; value: string }> = [];
-    for (const path of leafPaths(st?.response_json)) {
+    for (const path of leafPaths(response)) {
       const last = path.split(".").pop()?.replace(/\[\d+\]/g, "") || path;
       if (!last || seen.has(last)) continue;
       seen.add(last);
@@ -2039,6 +2047,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const capabilityGenerated = capabilities.length > 0 && !!flowSpec.meta?.capability_model?.status;
     const visibleReviewItems = capabilityGenerated ? reviewItems : [];
     const unconfirmedCapabilities = capabilities.filter((cap) => !cap.confirmed || cap.requires_human_confirm).length;
+    const publishIssueGroups = groupedPublishIssues(checkReport, visibleReviewItems);
+    const hasPublishAdvice = publishIssueGroups.some((group) => group.items.length > 0);
     return (
       <Card
         style={{ marginTop: 16 }}
@@ -2062,10 +2072,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       >
         {checkReport && capabilityGenerated && (
           <Alert
-            type={checkReport.passed ? "success" : "warning"}
+            type={checkReport.passed && !hasPublishAdvice ? "success" : "warning"}
             showIcon
             style={{ marginBottom: 12 }}
-            message={checkReport.passed ? "发布校验通过" : "发布校验需要处理"}
+            message={checkReport.passed
+              ? (hasPublishAdvice ? "基础校验通过，仍有建议项" : "发布校验通过")
+              : "发布校验需要处理"}
             description={
               <Space direction="vertical" size={2}>
                 <Typography.Text style={{ fontSize: 12 }}>
@@ -2073,12 +2085,21 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   {checkReport.dry_run ? ` · Dry-run ${checkReport.dry_run.ok ? "OK" : "需要处理"}` : ""}
                   {checkReport.dry_run?.request_count != null ? ` · ${checkReport.dry_run.request_count} 步` : ""}
                 </Typography.Text>
-                {visibleReviewItems.slice(0, 5).map(renderPublishIssue)}
-                {visibleReviewItems.length === 0 && (checkReport.errors || []).slice(0, 5).map((x, i) =>
-                  <Typography.Text key={i} type="danger" style={{ fontSize: 12 }}>{x}</Typography.Text>)}
-                {(checkReport.errors || []).length > 5 && <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  还有 {(checkReport.errors || []).length - 5} 条问题，请在能力卡片内处理。
-                </Typography.Text>}
+                <Space direction="vertical" size={4}>
+                  {publishIssueGroups.map((group) => (
+                    <div key={group.key} style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: 8, alignItems: "start" }}>
+                      <Tag color={group.color} style={{ margin: 0, textAlign: "center" }}>{group.label} {group.items.length}</Tag>
+                      <Space direction="vertical" size={2}>
+                        {group.items.slice(0, 4).map((item, issueIdx) => (
+                          <Typography.Text key={`${group.key}-${issueIdx}`} type={item.severity === "warning" ? "secondary" : "danger"} style={{ fontSize: 12 }}>
+                            {item.message}
+                          </Typography.Text>
+                        ))}
+                        {group.items.length > 4 && <Typography.Text type="secondary" style={{ fontSize: 12 }}>另有 {group.items.length - 4} 项</Typography.Text>}
+                      </Space>
+                    </div>
+                  ))}
+                </Space>
               </Space>
             }
           />
@@ -2129,6 +2150,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 <Tag>{idx + 1}</Tag>
                 <Tag color={(req.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{req.method || "GET"}</Tag>
                 <PathText value={req.path || stripHost(req.url || "")} maxWidth={620} />
+                {(req.occurrence_count || 1) > 1 && <Tag>{req.occurrence_count} 次</Tag>}
                 {includedStep(req) && <Tag color="success">已纳入能力/字段</Tag>}
                 {req.role && <Tag>{req.role}</Tag>}
                 {typeof req.confidence === "number" && <Tag color={confidenceColor(req.confidence)}>{confidencePercent(req.confidence)}</Tag>}
@@ -2189,7 +2211,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const isEnumOption = ENUM_SOURCE_KINDS.includes(p.source_kind || "") || isTypedEnum;
     const hasBindingPanel = isApiOption || isEnumOption;
     const hasRuntimePanel = !!linked || p.category === "runtime_var" || p.source_kind === "previous_response";
-    const sourceSteps = (flowSpec?.steps || []).filter((s) => s.step_id !== step.step_id && (!scopedStepIds.size || scopedStepIds.has(s.step_id)));
+    const sourceSteps = (flowSpec?.steps || []).filter((s) => s.step_id !== step.step_id);
     const sourceStepOptions = [
       { label: "选择来源接口", value: "" },
       ...sourceSteps.map((s) => ({
@@ -2255,14 +2277,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 onChange={(v) => updateParamCategory(step.step_id, p, v)} />
             </FieldControl>
             <FieldControl label="来源">
-              <NativeSelect value={normalizeSourceKindForUi(p.source_kind) || defaultSourceForCategory(p.category || "user_param")} width="100%" options={sourceOptionsForCategory(p.category)}
+              <NativeSelect value={normalizeSourceKindForUi(p.source_kind) || defaultSourceForCategory(p.category || "user_param")} width="100%" options={sourceSelectOptionsForParam(p)}
                 onChange={(v) => updateParamSourceKind(step.step_id, p, v)} />
             </FieldControl>
             <FieldControl label="必填">
               <Checkbox checked={!!p.required} onChange={(e) => updateParam(step.step_id, p, "required", e.target.checked)}>必填</Checkbox>
             </FieldControl>
             <FieldControl label="展示">
-              <Checkbox checked={p.exposed_to_user !== false} onChange={(e) => updateParam(step.step_id, p, "exposed_to_user", e.target.checked)}>暴露给调用方</Checkbox>
+              {p.category === "user_param" ? (
+                <Checkbox checked={p.exposed_to_user !== false} onChange={(e) => updateParam(step.step_id, p, "exposed_to_user", e.target.checked)}>暴露给调用方</Checkbox>
+              ) : <Typography.Text type="secondary">不对调用方展示</Typography.Text>}
             </FieldControl>
           </div>
           {needsManualConfirm && <Button size="small" style={{ marginTop: 8 }} onClick={() => updateParam(step.step_id, p, "need_human_confirm", false)}>已确认</Button>}
@@ -2644,33 +2668,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       </Space>
     );
   }
-  function renderCapabilityDebugPanel(cap: FlowCapabilityData, capIdx: number) {
-    return (
-      <Space direction="vertical" size={10} style={{ width: "100%" }}>
-        <FieldControl label="执行节点 JSON">
-          <EditableTextArea rows={6} value={JSON.stringify(cap.nodes || [], null, 2)}
-            onSave={(v) => {
-              try { updateCapabilityField(capIdx, "nodes", JSON.parse(v || "[]")); }
-              catch (e: any) { message.error(e?.message || "执行节点不是合法 JSON"); }
-            }} />
-        </FieldControl>
-        <FieldControl label="返回映射 JSON">
-          <EditableTextArea rows={5} value={JSON.stringify(cap.output_mapping || [], null, 2)}
-            onSave={(v) => {
-              try { updateCapabilityField(capIdx, "output_mapping", JSON.parse(v || "[]")); }
-              catch (e: any) { message.error(e?.message || "返回映射不是合法 JSON"); }
-            }} />
-        </FieldControl>
-        <FieldControl label="执行条件 JSON">
-          <EditableTextArea rows={4} value={JSON.stringify(cap.preconditions || [], null, 2)}
-            onSave={(v) => {
-              try { updateCapabilityField(capIdx, "preconditions", JSON.parse(v || "[]")); }
-              catch (e: any) { message.error(e?.message || "执行条件不是合法 JSON"); }
-            }} />
-        </FieldControl>
-      </Space>
-    );
-  }
   function renderCapabilityComposerPanel() {
     if (!flowSpec) return null;
     const capabilities = flowSpec.capabilities || [];
@@ -2749,9 +2746,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                       </Collapse.Panel>
                       <Collapse.Panel key="io" header="调用参数 / 返回结果">
                         {renderCapabilityIOBusinessView(idx, derivedInputSchema, derivedOutputSchema)}
-                      </Collapse.Panel>
-                      <Collapse.Panel key="debug" header="调试详情">
-                        {renderCapabilityDebugPanel(cap, idx)}
                       </Collapse.Panel>
                     </Collapse>
                   </Space>
@@ -3260,14 +3254,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                               onChange={(v) => updateParamCategory(step.step_id, p, v)} />
                           </FieldControl>
                           <FieldControl label="来源">
-                            <NativeSelect value={normalizeSourceKindForUi(p.source_kind) || defaultSourceForCategory(p.category || "user_param")} width="100%" options={sourceOptionsForCategory(p.category)}
+                            <NativeSelect value={normalizeSourceKindForUi(p.source_kind) || defaultSourceForCategory(p.category || "user_param")} width="100%" options={sourceSelectOptionsForParam(p)}
                               onChange={(v) => updateParamSourceKind(step.step_id, p, v)} />
                           </FieldControl>
                           <FieldControl label="必填">
                             <Checkbox checked={!!p.required} onChange={(e) => updateParam(step.step_id, p, "required", e.target.checked)}>必填</Checkbox>
                           </FieldControl>
                           <FieldControl label="展示">
-                            <Checkbox checked={p.exposed_to_user !== false} onChange={(e) => updateParam(step.step_id, p, "exposed_to_user", e.target.checked)}>暴露给用户</Checkbox>
+                            {p.category === "user_param" ? (
+                              <Checkbox checked={p.exposed_to_user !== false} onChange={(e) => updateParam(step.step_id, p, "exposed_to_user", e.target.checked)}>暴露给用户</Checkbox>
+                            ) : <Typography.Text type="secondary">不对调用方展示</Typography.Text>}
                           </FieldControl>
                         </div>
                         {needsManualConfirm && <Button size="small" style={{ marginTop: 8 }} onClick={() => updateParam(step.step_id, p, "need_human_confirm", false)}>已确认</Button>}

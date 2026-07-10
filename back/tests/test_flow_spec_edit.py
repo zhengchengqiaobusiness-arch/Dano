@@ -31,6 +31,117 @@ def _make_spec():
     return FlowSpec(flow_id="test", steps=[step1])
 
 
+def test_manual_category_change_removes_conflicting_incoming_link():
+    source = FlowStep(
+        step_id="source", method="GET", url="/api/source", path="/api/source",
+        response_json={"data": {"id": "LIVE"}},
+    )
+    target = FlowStep(
+        step_id="target", method="POST", url="/api/submit", path="/api/submit",
+        body_source='{"businessId":"OLD"}',
+        params=[ParamField(
+            path="businessId", key="业务编号", value="OLD", type="string",
+            category="runtime_var", source_kind="previous_response",
+            source={"kind": "previous_response", "link_id": "link-1"},
+        )],
+    )
+    spec = FlowSpec(
+        flow_id="unlink-on-manual-edit",
+        steps=[source, target],
+        links=[FlowLink(
+            link_id="link-1", source_step_id="source", source_path="data.id",
+            target_step_id="target", target_path="businessId", confirmed=True,
+        )],
+    )
+
+    edited = apply_flow_edits(spec, [{
+        "op": "update", "step_id": "target", "param_path": "businessId",
+        "field": "category", "value": "user_param",
+    }, {
+        "op": "update", "step_id": "target", "param_path": "businessId",
+        "field": "source_kind", "value": "user_input",
+    }])
+
+    param = edited.steps[1].params[0]
+    assert edited.links == []
+    assert param.category == "user_param"
+    assert param.source_kind == "user_input"
+    assert param.editable is True
+
+
+def test_capability_input_schema_drops_deleted_fields():
+    spec = _make_spec()
+    spec.capabilities = [FlowCapability(
+        name="submit", title="提交", kind="submit", step_ids=["step1"], confirmed=True,
+        input_schema={
+            "type": "object",
+            "properties": {"old": {"type": "string"}, "name": {"type": "number", "description": "旧说明"}},
+            "required": ["old"],
+        },
+    )]
+
+    edited = apply_flow_edits(spec, [{
+        "op": "update", "step_id": "step1", "param_path": "form.name",
+        "field": "required", "value": True,
+    }])
+
+    schema = edited.capabilities[0].input_schema
+    assert set(schema["properties"]) == {"userId", "name"}
+    assert "old" not in schema["required"]
+    assert schema["properties"]["name"]["type"] == "string"
+
+
+def test_unconfirmed_capabilities_block_publish_validation():
+    spec = _make_spec()
+    spec.capabilities = [FlowCapability(
+        name="submit", title="提交", kind="submit", step_ids=["step1"], confirmed=False,
+    )]
+
+    report = validate_flow_spec(spec)
+
+    assert report["passed"] is False
+    assert any("已确认能力" in message for message in report["errors"])
+
+
+def test_select_source_is_hydrated_from_captured_post_read_contract():
+    spec = _make_spec()
+    spec.request_facts = flow_spec_module.RequestFacts.model_validate({
+        "requests": [{
+            "request_id": "options-1",
+            "request_index": 4,
+            "method": "POST",
+            "url": "https://oa.example.test/api/options/query",
+            "path": "/api/options/query",
+            "content_type": "application/json",
+            "post_data": '{"pageNo":1}',
+            "response_json": {"data": [{"id": "A", "name": "选项A"}]},
+        }],
+        "analysis": {
+            "options-1": {
+                "request_id": "options-1", "role": "read_option", "keep": True,
+                "reason": "列表查询", "confidence": 0.95,
+            },
+        },
+    })
+
+    edited = apply_flow_edits(spec, [{
+        "op": "update",
+        "step_id": "step1",
+        "field": "selects",
+        "value": [{
+            "param": "userId", "path": "form.userId",
+            "source_url": "https://oa.example.test/api/options/query",
+            "value_key": "id", "label_key": "name",
+        }],
+    }])
+
+    binding = edited.steps[0].selects[0]
+    assert binding.source_method == "POST"
+    assert binding.source_role == "read_option"
+    assert binding.source_request_id == "options-1"
+    assert binding.source_body == '{"pageNo":1}'
+
+
 def _request_fact_entry(**overrides):
     entry = {
         "request_index": 7,
@@ -816,7 +927,7 @@ def test_edit_type():
     assert new.steps[0].params[0].type == "number"
 
 
-def test_edit_type_to_string_clears_wrong_enum_binding():
+def test_edit_type_to_string_preserves_independent_source_configuration():
     step = FlowStep(
         step_id="step1",
         method="POST",
@@ -852,13 +963,13 @@ def test_edit_type_to_string_clears_wrong_enum_binding():
 
     param = new.steps[0].params[0]
     assert param.type == "string"
-    assert param.source_kind == "user_input"
-    assert param.enum_options is None
-    assert param.enum_value_map is None
-    assert new.steps[0].selects == []
+    assert param.source_kind == "page_enum"
+    assert param.enum_options
+    assert param.enum_value_map
+    assert new.steps[0].selects
 
 
-def test_edit_type_to_enum_sets_editable_manual_enum_source():
+def test_edit_type_to_enum_does_not_overwrite_category_or_source():
     new = apply_flow_edits(_make_spec(), [{
         "op": "update",
         "step_id": "step1",
@@ -869,9 +980,7 @@ def test_edit_type_to_enum_sets_editable_manual_enum_source():
 
     param = new.steps[0].params[0]
     assert param.type == "enum"
-    assert param.source_kind == "manual_enum"
-    assert param.category == "user_param"
-    assert param.exposed_to_user is True
+    assert param.source_kind == "unknown"
 
 
 def test_add_param():
@@ -1239,7 +1348,7 @@ def test_remove_link_resets_target_param_source():
     before = {p.path: p for p in synced.steps[1].params}["y"]
     assert before.category == "runtime_var"
     assert before.source_kind == "previous_response"
-    assert before.editable is False
+    assert before.editable is True
 
     new = apply_flow_edits(synced, [{"op": "remove", "link_id": "l1", "reset_target": True}])
     after = {p.path: p for p in new.steps[1].params}["y"]
@@ -1952,7 +2061,7 @@ def test_capability_validator_reports_deep_p1_field_and_loop_findings():
 
     assert "capability_internal_field_exposed" in text
     assert "capability_field_source_missing" in text
-    assert "capability_loop_item_field_missing" in text
+    assert "capability_loop_item_field_missing" not in text
     assert cap_report["capability_internal"]["passed"] is True
 
 
@@ -2685,6 +2794,129 @@ def test_runtime_unknown_review_is_not_duplicated_as_field_category():
 
     assert [i.type for i in target_items] == ["runtime_var_source"]
     assert target_items[0].severity == "high"
+
+
+def test_orchestrate_existing_nonempty_capability_does_not_expand_from_defaults():
+    spec = FlowSpec(
+        flow_id="incremental-only",
+        steps=[
+            FlowStep(step_id="status", method="GET", url="/api/status", path="/api/status"),
+            FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit"),
+        ],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            kind="submit_batch",
+            step_ids=["submit"],
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+            title="用户已经编辑的能力",
+            updated_by="user",
+        )],
+        meta={"capability_model": {"status": "ready"}},
+    )
+
+    out = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=None, model=None))
+
+    assert len(out.capabilities) == 1
+    assert out.capabilities[0].title == "用户已经编辑的能力"
+    assert out.capabilities[0].step_ids == ["submit"]
+
+
+def test_remove_capability_cleans_relations_and_scopes_publish_findings():
+    keep_step = FlowStep(
+        step_id="keep",
+        method="GET",
+        url="/api/keep",
+        path="/api/keep",
+        params=[ParamField(
+            path="query.keep",
+            key="keep",
+            value="yes",
+            category="user_param",
+            source_kind="user_input",
+            required=True,
+        )],
+    )
+    removed_step = FlowStep(
+        step_id="removed",
+        method="GET",
+        url="/api/removed",
+        path="/api/removed",
+        params=[ParamField(
+            path="query.runtimeId",
+            key="runtimeId",
+            value="old-id",
+            category="runtime_var",
+            source_kind="unknown",
+            required=True,
+            need_human_confirm=True,
+        )],
+    )
+    spec = FlowSpec(
+        flow_id="remove-scope",
+        steps=[keep_step, removed_step],
+        capabilities=[
+            FlowCapability(
+                name="keep_cap",
+                kind="query_status",
+                step_ids=["keep"],
+                nodes=[{"id": "call_keep", "type": "call", "step_id": "keep"}],
+            ),
+            FlowCapability(
+                name="removed_cap",
+                kind="query_status",
+                step_ids=["removed"],
+                nodes=[{"id": "call_removed", "type": "call", "step_id": "removed"}],
+            ),
+        ],
+        capability_relations=[CapabilityRelation(
+            relation_id="rel-1",
+            type="output_to_input",
+            from_capability="removed_cap",
+            from_output="runtimeId",
+            to_capability="keep_cap",
+            to_input="keep",
+        )],
+        meta={"capability_model": {"status": "ready"}},
+    )
+
+    edited = apply_flow_edits(spec, [{"op": "remove_capability", "capability_name": "removed_cap"}])
+    report = validate_flow_spec(edited)
+
+    assert [cap.name for cap in edited.capabilities] == ["keep_cap"]
+    assert edited.capability_relations == []
+    assert "keep" in (report["api_preview"]["params"] or [])
+    assert "runtimeId" not in (report["api_preview"]["params"] or [])
+    assert all((item.get("target") or {}).get("step_id") != "removed" for item in report["review_items"])
+    assert "runtimeId" not in "\n".join(report["errors"] + report["warnings"])
+
+
+def test_publish_validation_exposes_structured_issue_groups():
+    spec = FlowSpec(
+        flow_id="issue-groups",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            params=[ParamField(
+                path="body.type",
+                key="type",
+                value="2",
+                type="enum",
+                category="user_param",
+                source_kind="manual_enum",
+                enum_options=["1", "2"],
+                required=True,
+            )],
+        )],
+        capabilities=[FlowCapability(name="submit", kind="submit", step_ids=["submit"], confirmed=True)],
+        meta={"capability_model": {"status": "ready"}},
+    )
+
+    report = validate_flow_spec(spec)
+
+    assert "field" in report["issue_groups"]
+    assert all(item.get("message") for item in report["issue_groups"]["field"])
 
 
 # ── Type inference ──

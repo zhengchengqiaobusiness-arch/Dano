@@ -2427,6 +2427,48 @@ async def _fetch_list(url: str, base_url: str, storage_state, token_key: str | N
     return as_list_payload(data) or []
 
 
+async def _fetch_select_list(sel: dict, base_url: str, storage_state, token_key: str | None,
+                             verify: bool, auth_headers: dict | None) -> list:
+    """按录制事实执行选项源；POST 仅允许已识别为读接口的请求。"""
+    url = str(sel.get("source_url") or "")
+    method = str(sel.get("source_method") or "GET").upper()
+    role = str(sel.get("source_role") or "")
+    if method in {"GET", "HEAD"} and not sel.get("source_body"):
+        return await _fetch_list(url, base_url, storage_state, token_key, verify, auth_headers)
+    if method not in {"GET", "HEAD", "POST"} or role not in {"business_get", "read_context", "read_option"}:
+        return []
+    full = url if url.startswith("http") else (base_url or "").rstrip("/") + url
+    host = urlparse(full).hostname or ""
+    headers = dict(sel.get("source_headers") or {})
+    headers.update(dict(auth_headers or {}))
+    credentials = _auth_headers(storage_state, host, token_key)
+    if credentials.get("Cookie"):
+        headers["Cookie"] = credentials["Cookie"]
+    if "Authorization" not in headers and credentials.get("Authorization"):
+        headers["Authorization"] = credentials["Authorization"]
+    body = sel.get("source_body")
+    content_type = str(sel.get("source_content_type") or headers.get("content-type") or "")
+    import httpx
+    try:
+        request_kw = {"headers": headers}
+        if body not in (None, ""):
+            parsed = body
+            if isinstance(body, str) and "json" in content_type.lower():
+                try:
+                    parsed = json.loads(body)
+                except Exception:  # noqa: BLE001
+                    parsed = body
+            if isinstance(parsed, (dict, list)):
+                request_kw["json"] = parsed
+            else:
+                request_kw["content"] = parsed
+        async with httpx.AsyncClient(timeout=30, verify=verify, trust_env=False) as client:
+            response = await client.request(method, full, **request_kw)
+        return as_list_payload(response.json()) or []
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _filter_category(items: list, sel: dict) -> list:
     """聚合字典的 select 带分类过滤(category_key/value)→ 运行期把全量收窄到该字段所属类目;无过滤则原样。
     与录制期快照 _aggregate_category 收窄**完全一致**——快照里是哪几项,现拉/名→ID 也只在那几项里。"""
@@ -2472,8 +2514,10 @@ async def fetch_field_options(api_request: dict, field: str, *, base_url: str = 
         return {"field": field, "options": [], "count": 0,
                 "note": "该字段没有实时选项来源;请按字段说明传值"}
     lk, vk = sel.get("label_key"), sel.get("value_key")
-    items = await _fetch_list(sel["source_url"], base_url, storage_state, token_key, verify,
-                              (api_request or {}).get("auth_headers"))
+    items = await _fetch_select_list(
+        sel, base_url, storage_state, token_key, verify,
+        (api_request or {}).get("auth_headers"),
+    )
     items = _filter_category(items, sel)        # 聚合字典 → 只列该字段所属类目(与录制快照一致)
     opts = []
     for it in items:
@@ -2543,8 +2587,9 @@ async def _resolve_selects(api_request: dict, fields: dict, *, base_url: str, st
                 continue
         if not s.get("source_url"):
             continue
-        items = await _fetch_list(s.get("source_url", ""), base_url, storage_state, token_key, verify,
-                                  api_request.get("auth_headers"))
+        items = await _fetch_select_list(
+            s, base_url, storage_state, token_key, verify, api_request.get("auth_headers"),
+        )
         items = _filter_category(items, s)        # 聚合字典 → 只在该字段所属类目里名→ID(同名跨类目不串)
         lk, vk = s.get("label_key"), s.get("value_key")
         match = next((it for it in items if isinstance(it, dict) and str(it.get(lk)) == str(name)), None)
@@ -2605,8 +2650,9 @@ async def _resolve_list_selects(api_request: dict, fields: dict, *, base_url: st
             if tmpl:
                 fields[param] = [_build_element(None, tmpl, nm, label_sub) for nm in names]
             continue
-        items = await _fetch_list(s.get("source_url", ""), base_url, storage_state, token_key, verify,
-                                  api_request.get("auth_headers"))
+        items = await _fetch_select_list(
+            s, base_url, storage_state, token_key, verify, api_request.get("auth_headers"),
+        )
         items = _filter_category(items, s)
         built = []
         for nm in names:
@@ -2939,6 +2985,8 @@ async def execute_api_workflow(workflow: dict, fields: dict, *, base_url: str = 
     """
     steps = workflow.get("steps") or []
     responses: list = []
+    responses_by_step: dict[str, object] = {}
+    step_results: list[dict] = []
     last: dict = {}
     for i, step in enumerate(steps):
         overrides: dict = {}
@@ -2951,16 +2999,27 @@ async def execute_api_workflow(workflow: dict, fields: dict, *, base_url: str = 
         out = await execute_api_request(step, fields, base_url=base_url, storage_state=storage_state,
                                         send=send, verify=verify, token_key=token_key, overrides=overrides)
         last = out
+        step_results.append(out)
         if send:
             responses.append(out.get("response"))
         elif step.get("response_json") is not None:
             responses.append(step.get("response_json"))
         else:
             responses.append(out.get("body") if out.get("body") is not None else {"query": out.get("query")})
+        step_id = str(step.get("step_id") or f"step_{i}")
+        responses_by_step[step_id] = responses[-1]
         if not out.get("ok"):
-            return {"ok": False, "failed_step": i, "detail": f"第{i + 1}步失败", "step_result": out}
+            return {
+                "ok": False,
+                "failed_step": i,
+                "detail": f"第{i + 1}步失败",
+                "step_result": out,
+                "step_results": step_results,
+                "_responses_by_step": responses_by_step,
+            }
     return {"ok": bool(last.get("ok", True)), "steps": len(steps),
-            "status": last.get("status"), "response": last.get("response"), "final": last}
+            "status": last.get("status"), "response": last.get("response"), "final": last,
+            "step_results": step_results, "_responses_by_step": responses_by_step}
 
 
 def _find_capability(api_request: dict, name: str | None) -> dict | None:
@@ -3601,12 +3660,7 @@ async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
     out = await runner(api_request, fields, **kw)
     if cap and cap.get("output_mapping"):
         steps = list(api_request.get("steps") or [])
-        responses_by_step: dict = {}
-        if steps and out.get("steps"):
-            for st in steps:
-                sid = str(st.get("step_id") or "")
-                if sid and st.get("response_json") is not None:
-                    responses_by_step[sid] = st.get("response_json")
+        responses_by_step: dict = dict(out.get("_responses_by_step") or {})
         if not responses_by_step:
             sid = str(api_request.get("step_id") or "")
             if sid:
@@ -3621,6 +3675,7 @@ async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
         }
         mapped = _cap_apply_output_mapping(cap, ctx, out.get("response") if "response" in out else out)
         out = {**out, "response": mapped, "output": mapped, "structured_output": mapped}
+    out.pop("_responses_by_step", None)
     fc = api_request.get("fact_check")
     if kw.get("send", True) and out.get("ok") and fc:
         auth = api_request.get("auth_headers") or ((api_request.get("steps") or [{}])[-1].get("auth_headers"))

@@ -109,12 +109,14 @@ async def run_request_onboarding(
     api_request: dict, sample_inputs: dict | None = None, required: list[str] | None = None,
     deploy: dict | None = None, credentials: dict | None = None, run_id: str | None = None,
     goal: dict | None = None, storage_state: dict | None = None,
+    allow_repair: bool = True,
 ) -> dict:
     """抓请求路径:把录制抓到的提交请求(已参数化)落成可执行 Skill → dry 自检 → 三模型评审+自动修复 → 发布。
 
     self_check 不真发(写安全);运行期 invoke 时才带登录态真发。
     写抓请求页面**须过三模型评审**(发布层硬闸门,见 verify_reviewed):评审 client(_review_board)由网关启动注入;
-    审核出 findings → LLM 自动修复循环 → 改不动才回一个精准问题(非重录)。LLM 不可用时按 review_enabled 急停降级。
+    审核出 findings → 可选 LLM 自动修复循环。录制工作台发布传 allow_repair=False，
+    保证发布产物与用户确认版本一致；问题会原样返回工作台处理。
     """
     from dano.agent_tools import tools as T
     from dano.shared.asset_bodies import PageScriptBody
@@ -241,6 +243,16 @@ async def run_request_onboarding(
             if proposer is None and client is not None and model:
                 async def proposer(a, f, g, _c=client, _m=model):     # noqa: E306
                     return await generate_fix_ops(_c, _m, goal=g, api_request=a, findings=f)
+            if findings and not allow_repair:
+                details = [str(f.get("detail") or f.get("message") or f) for f in findings]
+                return {
+                    "ok": False,
+                    "stage": "review",
+                    "status": IngestionStatus.NEEDS_CLARIFICATION.value,
+                    "action": action,
+                    "clarifications": details,
+                    "reason": "当前工作台版本未通过发布评审；发布阶段未自动改写，请返回工作台修正",
+                }
             if findings and proposer is not None:                     # 有问题 + 有修复器 → 自动修复
                 repaired, rounds, _h, remaining = await run_repair_loop(
                     api_request, proposer, goal=goal, seed_findings=rev_find)

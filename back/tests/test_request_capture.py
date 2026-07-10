@@ -388,6 +388,51 @@ async def test_fetch_field_options_returns_static_enum_snapshot():
     ]
 
 
+async def test_fetch_field_options_executes_captured_post_read_contract():
+    import http.server as _h
+    import json as _j
+    import socketserver as _s
+    import threading as _t
+
+    seen = {"body": None}
+
+    class Handler(_h.BaseHTTPRequestHandler):
+        def log_message(self, *args):  # noqa: ANN001
+            pass
+
+        def do_POST(self):
+            size = int(self.headers.get("Content-Length", 0))
+            seen["body"] = _j.loads(self.rfile.read(size) or b"{}")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(_j.dumps({"data": [{"id": "2", "name": "病假"}]}).encode())
+
+    server = _s.TCPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    _t.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        api_request = {
+            "selects": [{
+                "param": "请假类型",
+                "source_url": f"http://127.0.0.1:{port}/api/options/query",
+                "source_method": "POST",
+                "source_role": "read_option",
+                "source_content_type": "application/json",
+                "source_body": '{"category":"leave"}',
+                "value_key": "id",
+                "label_key": "name",
+            }],
+        }
+
+        out = await fetch_field_options(api_request, "请假类型", verify=False)
+
+        assert seen["body"] == {"category": "leave"}
+        assert out["options"] == [{"label": "病假", "value": "2"}]
+    finally:
+        server.shutdown()
+
+
 def test_suggest_selects_prefers_confirmed_over_huge_generic_dict():
     """根因:type=2 同时撞**1431 项通用大字典**(未确认,垃圾标签)和**小请假类型字典**(确认命中 事假)→
     必须绑确认的小字典(事假/病假/年假),不能绑通用大字典(治"请假类型绑到歌词模式/OpenAI…")。"""
@@ -1678,6 +1723,43 @@ async def test_execute_capability_output_mapping_for_query_status():
     assert out["response"] == {"filled_dates": ["1", "2"], "missing_dates": ["3"]}
     assert out["structured_output"] == out["response"]
     assert out["final"]["url"].endswith("/api/status")
+
+
+async def test_capability_output_mapping_uses_current_live_step_response(monkeypatch):
+    import dano.execution.page.request_capture as rc
+
+    async def fake_execute(step, fields, **kwargs):
+        return {
+            "ok": True,
+            "status": 200,
+            "response": {"data": {"value": "LIVE"}},
+            "url": step["url"],
+        }
+
+    monkeypatch.setattr(rc, "execute_api_request", fake_execute)
+    workflow = {
+        "steps": [{
+            "step_id": "query",
+            "method": "GET",
+            "url": "https://example.invalid/api/query",
+            "response_json": {"data": {"value": "RECORDED"}},
+        }],
+        "capabilities": [{
+            "name": "query_status",
+            "kind": "query_status",
+            "step_ids": ["query"],
+            "output_mapping": [{
+                "field": "value",
+                "step_id": "query",
+                "response_path": "data.value",
+            }],
+        }],
+    }
+
+    out = await rc.execute_api(workflow, {"__capability": "query_status"}, send=True)
+
+    assert out["response"] == {"value": "LIVE"}
+    assert "_responses_by_step" not in out
 
 
 async def test_execute_api_accepts_capability_alias_fields():

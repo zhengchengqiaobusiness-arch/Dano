@@ -595,6 +595,21 @@ async def record_ws(ws: WebSocket) -> None:
                 headers = step.get("headers")
                 if (not headers) or all(v == "***" for v in (headers or {}).values()):
                     step["headers"] = old.headers
+                old_selects = {
+                    (select.path or "", select.param or ""): select
+                    for select in old.selects
+                }
+                for select in step.get("selects") or []:
+                    if not isinstance(select, dict):
+                        continue
+                    old_select = old_selects.get((str(select.get("path") or ""), str(select.get("param") or "")))
+                    if old_select is None:
+                        continue
+                    if not select.get("source_body"):
+                        select["source_body"] = old_select.source_body
+                    source_headers = select.get("source_headers") or {}
+                    if (not source_headers) or all(value == "***" for value in source_headers.values()):
+                        select["source_headers"] = old_select.source_headers
                 old_identity = {i.path: i for i in old.identity}
                 for idn in step.get("identity") or []:
                     if isinstance(idn, dict) and idn.get("value") == "***":
@@ -1080,22 +1095,24 @@ async def record_ws(ws: WebSocket) -> None:
                         flow_spec_required_params,
                         flow_spec_to_api_request,
                         flow_spec_to_summary,
-                        refresh_review_items,
-                        run_recording_pi_loop,
                         validate_flow_spec,
                     )
-                    from dano.config import get_settings
                     raw_spec = msg.get("flow_spec")
                     if isinstance(raw_spec, dict):
                         raw_spec = _restore_hidden_flow_spec_fields(raw_spec)
-                        pending_flow_spec = refresh_review_items(FlowSpec.model_validate(raw_spec))
-                    pending_flow_spec = await run_recording_pi_loop(
-                        pending_flow_spec,
-                        llm_client=_page_semantic_client("complete_json"),
-                        model=get_settings().pi_model,
-                        mode="repair",
-                        max_rounds=3,
-                    )
+                        pending_flow_spec = FlowSpec.model_validate(raw_spec)
+                    # 发布只校验并编译工作台当前版本。Planner/Repair 必须由用户显式点击
+                    # “生成/优化能力”触发，禁止在发布阶段静默恢复已删除步骤或改写人工字段。
+                    if not pending_flow_spec.capabilities:
+                        await ws.send_json({
+                            "type": "result",
+                            "report": {
+                                "ok": False,
+                                "stage": "capability_missing",
+                                "reason": "尚未生成业务能力；请先点击“生成/优化能力”并确认能力后再发布",
+                            },
+                        })
+                        continue
                     check_report = validate_flow_spec(pending_flow_spec)
                     if not check_report.get("passed"):
                         await ws.send_json({
@@ -1147,7 +1164,8 @@ async def record_ws(ws: WebSocket) -> None:
                     title=msg.get("title", ""), api_request=apir, sample_inputs=sample_in,
                     required=required,
                     goal=msg.get("goal") or pending_flow_spec.goal,
-                    deploy=init.get("deploy"), storage_state=login_state)
+                    deploy=init.get("deploy"), storage_state=login_state,
+                    allow_repair=False)
                 if rep.get("ok"):
                     try:
                         skill_id = rep.get("skill_id") or f"{sub}.{msg['action']}"

@@ -22,6 +22,27 @@ def test_recorder_key_safety_policy() -> None:
         assert not _safe_recorder_key(key)
 
 
+def test_same_endpoint_responses_attach_by_request_identity_index() -> None:
+    sess = RecordSession()
+    first = sess._record_all("GET", "https://example.test/api/items?id=1")
+    second = sess._record_all("GET", "https://example.test/api/items?id=1")
+
+    # 较早请求后返回时，不能因为“最近一条”策略贴到第二个请求上。
+    assert sess._attach_response(
+        url="https://example.test/api/items?id=1", method="GET",
+        response_json={"request": "first"}, status=200,
+        content_type="application/json", request_index=first,
+    )
+    assert sess._attach_response(
+        url="https://example.test/api/items?id=1", method="GET",
+        response_json={"request": "second"}, status=200,
+        content_type="application/json", request_index=second,
+    )
+
+    assert sess.all_requests[first]["response_json"] == {"request": "first"}
+    assert sess.all_requests[second]["response_json"] == {"request": "second"}
+
+
 def test_recorded_page_enum_options_attach_popup_pick_to_previous_field() -> None:
     sess = RecordSession()
     sess.steps = [

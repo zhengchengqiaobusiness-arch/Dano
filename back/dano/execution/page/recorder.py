@@ -439,6 +439,7 @@ class RecordSession:
         # P0-1:诊断事件(console/pageerror/requestfailed)→ 排查"接口成功但页面报错"等隐蔽故障。
         self.diagnostics: list[dict] = []
         self._req_counter: int = 0          # 顺序号,作为 all_requests[i]["index"] 与 diagnostics 关联锚点
+        self._request_fact_index: dict[int, int] = {}
         self._page_counter: int = 0
         self._frame_counter: int = 0
         self._page_ids: dict[int, str] = {}
@@ -624,12 +625,16 @@ class RecordSession:
         self._classify_entry(entry)
         return idx
 
-    def _attach_response(self, *, url: str, method: str, response_json, status, content_type: str) -> bool:
-        """把响应贴回 all_requests 里同 url+method 的最近一条未回填记录。返回是否贴成功。
+    def _attach_response(self, *, url: str, method: str, response_json, status, content_type: str,
+                         request_index: int | None = None) -> bool:
+        """优先按请求实例精确贴回响应，缺少实例锚点时才退回 url+method。
 
         集中处理反查 + 改字段,避免 _route / _on_response / 后续 P0-3 依赖闭包都各自遍历 all_requests。
         P0-2:贴完响应后顺手再分类一次(此时 read_option / business_get 才能判准)。"""
-        for r in reversed(self.all_requests):
+        candidates = self.all_requests
+        if request_index is not None:
+            candidates = [r for r in self.all_requests if r.get("index") == request_index]
+        for r in reversed(candidates):
             if r.get("url") == url and r.get("method") == method and r.get("response_json") is None:
                 r["response_json"] = response_json
                 r["status"] = status
@@ -666,14 +671,16 @@ class RecordSession:
         rec.update({k: v for k, v in (payload or {}).items() if v is not None})
         self.diagnostics.append(rec)
 
-    def _capture(self, m: str, url: str, pd: str | None, ct: str, headers: dict | None = None) -> None:
+    def _capture(self, m: str, url: str, pd: str | None, ct: str, headers: dict | None = None,
+                 request_index: int | None = None) -> None:
         """登记一个写请求(含请求头,回放鉴权用)+ 实时推给前端诊断。
 
         P0-1 收敛:本函数只负责写 self.requests 与触发 on_request_cb;all_requests 由调用方
         (_route / _on_request)在调本函数**之前**自己 _record_all,避免同一请求被记两次。"""
         if pd:
             self.requests.append({"method": m, "url": url, "post_data": pd,
-                                  "content_type": ct, "headers": headers or {}})
+                                  "content_type": ct, "headers": headers or {},
+                                  "request_index": request_index})
         if self._on_request_cb is not None:
             is_json = "json" in (ct or "").lower() or (pd or "").lstrip().startswith(("{", "["))
             try:
@@ -695,10 +702,13 @@ class RecordSession:
                 pass
             # P0-1:GET 也落 all_requests(全量捕获,治"业务 GET 前置接口被早筛丢")。
             # _record_all 是 all_requests 的唯一写入点;_capture 只负责写 requests(写请求才走)。
-            self._record_all(m, url, pd=pd, headers=hd, content_type=hd.get("content-type", ""),
-                             **self._request_scope(request))
+            request_index = self._record_all(
+                m, url, pd=pd, headers=hd, content_type=hd.get("content-type", ""),
+                **self._request_scope(request),
+            )
+            self._request_fact_index[id(request)] = request_index
             if m in ("POST", "PUT", "PATCH", "DELETE"):
-                self._capture(m, url, pd, hd.get("content-type", ""), hd)
+                self._capture(m, url, pd, hd.get("content-type", ""), hd, request_index)
         except Exception:  # noqa: BLE001
             pass
 
@@ -740,7 +750,10 @@ class RecordSession:
                 pass
             ct = hd.get("content-type", "")
             # P0-1:GET 也落 all_requests(全量捕获)。后续 P0-3 依赖闭包要靠它发现"业务 GET 前置接口"。
-            self._record_all(m, url, pd=pd, headers=hd, content_type=ct, **self._request_scope(request))
+            request_index = self._record_all(
+                m, url, pd=pd, headers=hd, content_type=ct, **self._request_scope(request),
+            )
+            self._request_fact_index[id(request)] = request_index
             # H7 修复:multipart/form-data 上传(文件/附件)必须真发,否则文件丢失但 UI 显示成功
             # multipart body 不在 request.post_data,而在 post_data_buffer,pd 必为 None,自然走 continue_,但要
             # 在此显式再判一次 content_type 兜底(部分框架 multipart 也会塞进 post_data)
@@ -750,7 +763,7 @@ class RecordSession:
             # 业务写请求 → 抓下来,假装成功不真发;登录/鉴权/上传等基建写、以及 POST 形态的读/查询
             #(getXxxList/queryXxx:下拉/列表源)照常放行真发(否则录制时下拉/列表加载不出来,选不了值)
             if pd and not looks_like_auth_write(url, pd) and not looks_like_read_request(url, pd):
-                self._capture(m, url, pd, ct, hd)
+                self._capture(m, url, pd, ct, hd, request_index)
                 await route.fulfill(status=200, content_type="application/json",
                                     body=self._success_envelope())
                 return
@@ -819,11 +832,17 @@ class RecordSession:
                 except Exception:  # noqa: BLE001
                     data = None
                 if data is not None:
-                    self._attach_response(url=url, method=m, response_json=data,
-                                          status=response.status, content_type=ct)
+                    request_index = self._request_fact_index.get(id(response.request))
+                    self._attach_response(
+                        url=url, method=m, response_json=data,
+                        status=response.status, content_type=ct,
+                        request_index=request_index,
+                    )
                     if m in ("POST", "PUT", "PATCH"):
                         for r in self.requests:
-                            if r.get("url") == url and "response_json" not in r:
+                            exact = request_index is not None and r.get("request_index") == request_index
+                            fallback = request_index is None and r.get("url") == url
+                            if (exact or fallback) and "response_json" not in r:
                                 r["response_json"] = data
                                 break
                     # 不 return:有些系统用 POST 查"下拉/选人"列表(带过滤条件)→ 列表型响应也当 select 候选源
@@ -1004,6 +1023,7 @@ class RecordSession:
         self.all_requests.clear()
         self.diagnostics.clear()
         self._req_counter = 0
+        self._request_fact_index.clear()
         self._page_counter = 0
         self._frame_counter = 0
         self._page_ids.clear()
