@@ -422,8 +422,8 @@ def test_orchestrate_flow_capabilities_prefers_patch_ops_and_keeps_same_batch_op
     out = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=_FakePlannerPatchClient(), model="fake"))
 
     assert out.meta["capability_model"]["source"] == "llm_patch"
-    assert len(out.capabilities) == 1
-    cap = out.capabilities[0]
+    assert {cap.name for cap in out.capabilities} == {"submit", "submit_batch"}
+    cap = next(cap for cap in out.capabilities if cap.name == "submit_batch")
     assert cap.name == "submit_batch"
     assert cap.step_ids == ["submit"]
     assert cap.inputs[0].key == "entries"
@@ -610,7 +610,7 @@ def test_to_flow_spec_request_facts_filter_static_assets_and_keep_page_enums():
     assert spec.request_facts.option_sources[0]["options"] == page_enums
 
 
-def test_capability_scoped_fields_and_dependencies_survive_without_changing_step_ids():
+def test_valid_locked_capability_fields_and_dependencies_survive():
     spec = FlowSpec(
         flow_id="cap-scoped",
         steps=[FlowStep(
@@ -678,6 +678,7 @@ def test_capability_scoped_fields_and_dependencies_survive_without_changing_step
     cap = edited.capabilities[0]
     assert cap.step_ids == ["submit"]
     assert cap.request_fields[0].field_id == "manual-field-reason"
+    assert cap.request_fields[0].path == "reason"
     assert cap.dependencies[0].dependency_id == "manual-dep-status-to-submit"
 
     api_request, errors = flow_spec_to_api_request(edited)
@@ -1173,7 +1174,7 @@ def test_default_submit_capability_uses_dependency_closure_not_all_reads():
     ])
 
     caps = flow_spec_module.build_default_flow_capabilities(spec)
-    submit_cap = next(c for c in caps if c.kind == "submit_batch")
+    submit_cap = next(c for c in caps if c.kind == "submit")
 
     assert submit_cap.step_ids == ["query", "submit"]
     assert "opt" not in submit_cap.step_ids
@@ -1214,9 +1215,9 @@ def test_default_capabilities_keep_independent_query_and_submit_separate():
     by_kind = {c.kind: c for c in caps}
 
     assert "query_status" in by_kind
-    assert "submit_batch" in by_kind
+    assert "submit" in by_kind
     assert by_kind["query_status"].step_ids == ["status"]
-    assert by_kind["submit_batch"].step_ids == ["definition", "submit"]
+    assert by_kind["submit"].step_ids == ["definition", "submit"]
 
 
 def test_sync_capability_scoped_views_prunes_noisy_submit_steps():
@@ -1897,7 +1898,7 @@ def test_capability_validation_drops_stale_missing_node_step():
     assert not any("未绑定有效接口步骤" in x for x in report["errors"])
 
 
-def test_capability_validation_reports_p1_internal_layers_as_warnings():
+def test_capability_validation_ignores_stale_scoped_copies_but_checks_active_output_mapping():
     spec = FlowSpec(
         flow_id="f",
         steps=[
@@ -1979,8 +1980,8 @@ def test_capability_validation_reports_p1_internal_layers_as_warnings():
         for cap in cap_report["capability_internal"]["capabilities"]
         for item in [*(cap.get("warnings") or []), *(cap.get("errors") or [])]
     }
-    assert "capability_field_path_missing" in internal_codes
-    assert "capability_dependency_endpoint_missing" in internal_codes
+    assert "capability_field_path_missing" not in internal_codes
+    assert "capability_dependency_endpoint_missing" not in internal_codes
     assert "capability_output_mapping_uninterpretable" in internal_codes
 
 
@@ -2610,7 +2611,7 @@ def test_capability_validation_reports_three_layers_and_bad_dependency_output_re
     text = _report_text(report)
 
     assert {"capability_internal", "capability_relations", "skill_level"} <= set(cap_report)
-    assert "bad-dep" in text and "missing_status" in text
+    assert "bad-dep" not in text and "missing_status" not in text
     assert "missing_submit" in text and "output" in text
     assert "bad-rel" in text and "missingStatus" in text and "missingInput" in text
 
@@ -2819,6 +2820,91 @@ def test_orchestrate_existing_nonempty_capability_does_not_expand_from_defaults(
     assert len(out.capabilities) == 1
     assert out.capabilities[0].title == "用户已经编辑的能力"
     assert out.capabilities[0].step_ids == ["submit"]
+
+
+def test_incremental_orchestration_adds_list_options_after_enum_field_appears():
+    spec = FlowSpec(
+        flow_id="incremental-enum",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/api/submit",
+            path="/api/submit",
+            params=[ParamField(
+                path="sealId",
+                key="印章",
+                value="seal-1",
+                type="enum",
+                category="user_param",
+                source_kind="api_option",
+                enum_options=[{"label": "行政公章", "value": "seal-1"}],
+                enum_value_map={"行政公章": "seal-1"},
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_seal",
+            kind="submit",
+            step_ids=["submit"],
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+        )],
+    )
+
+    out = asyncio.run(orchestrate_flow_capabilities(spec))
+
+    assert {cap.kind for cap in out.capabilities} == {"submit", "list_options"}
+
+
+def test_publish_issue_groups_deduplicate_same_link_and_classify_diagnostics():
+    source = FlowStep(
+        step_id="source",
+        method="GET",
+        url="/source",
+        path="/source",
+        response_json={"data": {"id": "TASK-001"}},
+    )
+    target = FlowStep(
+        step_id="target",
+        method="POST",
+        url="/target",
+        path="/target",
+        body_source='{"taskId":"TASK-001"}',
+        params=[ParamField(
+            path="taskId",
+            key="taskId",
+            value="TASK-001",
+            category="runtime_var",
+            source_kind="previous_response",
+            source={"kind": "previous_response", "step_id": "source", "response_path": "data.id"},
+        )],
+        success_rule={"kind": "http_status", "values": [200]},
+    )
+    link = FlowLink(
+        link_id="same-link",
+        source_step_id="source",
+        source_path="data.id",
+        target_step_id="target",
+        target_path="taskId",
+        confirmed=False,
+        confidence=0.85,
+    )
+    spec = FlowSpec(
+        flow_id="issue-groups",
+        steps=[source, target],
+        links=[link],
+        diagnostics=[
+            {"type": "console", "level": "error", "message": "Failed to load: net::ERR_CONNECTION_CLOSED"},
+            {"type": "pageerror", "message": "render failed"},
+        ],
+    )
+    spec.review_items = flow_spec_module.build_review_items(spec)
+
+    report = validate_flow_spec(spec)
+    dependency_items = report["issue_groups"].get("dependency") or []
+    diagnostic_items = report["issue_groups"].get("diagnostic") or []
+
+    assert len([item for item in dependency_items if item.get("target", {}).get("link_id") == "same-link"]) == 1
+    assert any("页面异常" in item["message"] for item in diagnostic_items)
+    assert not any("ERR_CONNECTION_CLOSED" in item["message"] for item in diagnostic_items)
 
 
 def test_remove_capability_cleans_relations_and_scopes_publish_findings():

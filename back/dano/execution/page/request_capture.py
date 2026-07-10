@@ -302,19 +302,42 @@ def _find_value_tokens(node, value, toks=None, expected_type: str | None = None)
     return None
 
 
+def _request_input_leaves(request: dict) -> list[tuple[str, list[str | int], str, object]]:
+    body = _parse_body(request.get("post_data"))
+    if body is not None:
+        return _leaf_paths(body)
+    query = request.get("query")
+    if not isinstance(query, dict):
+        try:
+            query = dict(parse_qsl(urlparse(str(request.get("url") or "")).query, keep_blank_values=True))
+        except Exception:  # noqa: BLE001
+            query = {}
+    leaves: list[tuple[str, list[str | int], str, object]] = []
+    for key, raw in (query or {}).items():
+        if isinstance(raw, list):
+            for index, item in enumerate(raw):
+                leaves.append((f"query.{key}[{index}]", ["query", key, index], str(item), item))
+        elif raw is not None:
+            leaves.append((f"query.{key}", ["query", key], str(raw), raw))
+    return leaves
+
+
 def discover_step_links(writes: list[dict]) -> list[dict]:
-    """有序写请求(含 response_json)→ 步间数据流(Q3):某步 body 的值 == 更早某步「响应」里的值 → step: 链。
+    """有序请求(含 response_json)→ 步间数据流。
+
+    下游目标既可以位于写请求 body，也可以位于 GET query；例如流程定义响应
+    ``data.id`` 注入审批详情 ``query.processDefinitionId``，再进入最终提交。
 
     返回 [{target_step, target_path, source_step, source_path}]。如第2步 flowTask.taskId 来自第1步响应 data.taskId。
     H13 修复:阈值保持 4(短 taskId 如 T-777/P-1/U-123 是常见长度,提到 6 会把真实工作流链路打掉);同时校验
     value 类型匹配(int 不与字符串撞值,如 10 位时间戳 vs 字符串 hash),防误连。
     """
-    bodies = [_parse_body(w.get("post_data")) for w in writes]
+    request_leaves = [_request_input_leaves(request) for request in writes]
     links: list[dict] = []
-    for i, body in enumerate(bodies):
-        if body is None:
+    for i, leaves in enumerate(request_leaves):
+        if not leaves:
             continue
-        for tpath, ttoks, tval, _raw in _leaf_paths(body):
+        for tpath, ttoks, tval, _raw in leaves:
             if len(tval) < 4:                              # 保持 4:短 taskId/uuid 前缀常见
                 continue
             for j in range(i):
@@ -738,7 +761,9 @@ def _looks_people_or_org_label(label: str) -> bool:
 
 def _sample_values_for_leaf(path: str, sv: str, samples: dict | None, field: dict | None = None) -> set[str]:
     """只取当前字段自己的录制佐证值，避免短码字段被其它字段的下拉样例误确认。"""
-    out = {str(sv)} if sv not in (None, "") else set()
+    # body 当前值不是“用户输入佐证”。把它放进 sample_vals 会让所有 code/ID
+    # 字段都被误判为“用户亲手输入的自由文本”，从而拒绝真实候选接口绑定。
+    out: set[str] = set()
     leaf = path.split(".")[-1].split("[")[0]
     keys = {path, leaf}
     if field:
@@ -783,8 +808,11 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
         small = len(items) <= _SMALL_LIST
         hits: list[dict] = []
         for path, toks, sv, raw in leaves:
-            if not sv or _is_const_value(raw):           # 系统常量(流程键/uuid/雪花)不作"按名字选"的下拉参数
+            if not sv:
                 continue
+            # UUID/雪花 ID 不能仅凭形态跳过：选择控件的提交值本来就经常是长 ID。
+            # 只有它真实命中候选项 value_key 时 _match_select 才会返回 code 绑定；
+            # 未命中仍按普通系统常量处理，因此不会把任意流程 ID 误当枚举。
             sample_vals = (_sample_values_for_leaf(path, sv, samples, field_by_path.get(path))
                            if use_field_scope else all_sample_vals)
             m = _match_select(sv, items, sample_vals, small,
@@ -848,10 +876,22 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
     out: list[dict] = []
     claimed: set[str] = set()                             # 已被某 select 接管的路径(含配对 id 字段),不重复绑
     order = {p: i for i, (p, _t, _s, _r) in enumerate(leaves)}
+    # 只有显示字段得到录制样例强确认时，才让“显示名 + 内部 ID”作为一对接管 ID。
+    # 否则内部 ID 字段直接作为 enum 参数暴露 label、运行期提交 value，禁止猜相邻文本字段。
+    confirmed_pair_ids = {
+        str(entry.get("id_path") or "")
+        for candidates in by_path.values()
+        for entry in candidates
+        if entry.get("id_path") and entry.get("_confirmed")
+    }
     for path in sorted(by_path, key=lambda p: order.get(p, 1 << 30)):
         if path in claimed:
             continue
+        if path in confirmed_pair_ids:
+            continue
         best = sorted(by_path[path], key=lambda e: (e["_confirmed"], -e["count"]), reverse=True)[0]
+        if best.get("id_path") and best["id_path"] in claimed:
+            continue
         claimed.add(path)
         if best.get("id_path"):
             claimed.add(best["id_path"])

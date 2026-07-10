@@ -527,6 +527,45 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
             "identity": suggest_identity(pd, storage, samples)}   # 字段=当前用户/会话值(运行期重取;排除用户填值/平凡撞值)
 
 
+def _frontend_recording_field_metadata(raw_steps: list[dict]) -> tuple[dict, set[str], dict]:
+    """把前端编辑后的录制步骤投影成样例、必填字段和页面枚举。"""
+    from dano.execution.page.recorder import assign_step_field_keys, has_recorded_value
+
+    keymap = assign_step_field_keys(raw_steps)
+    samples = {
+        keymap[i]: raw_steps[i].get("value", "")
+        for i in keymap
+        if raw_steps[i].get("op") in ("fill", "select", "pick")
+        and has_recorded_value(raw_steps[i])
+    }
+    required_labels = {
+        keymap[i]
+        for i in keymap
+        if raw_steps[i].get("required")
+        and raw_steps[i].get("op") in ("fill", "select", "pick")
+    }
+    page_enum_options: dict = {}
+    last_field_idx: int | None = None
+    for i, step in enumerate(raw_steps):
+        if i in keymap:
+            last_field_idx = i
+        if step.get("op") not in ("pick", "select") or not step.get("options"):
+            continue
+        owner_idx = i if i in keymap else last_field_idx
+        field_key = keymap.get(owner_idx, "") if owner_idx is not None else ""
+        if not field_key:
+            continue
+        selected = str(step.get("value", "") or "").strip()
+        if selected and field_key not in samples:
+            samples[field_key] = selected
+        entry = {"options": list(step["options"]), "field_key": field_key, "selected": selected}
+        if selected and selected not in page_enum_options:
+            page_enum_options[selected] = entry
+        if field_key not in page_enum_options:
+            page_enum_options[field_key] = entry
+    return samples, required_labels, page_enum_options
+
+
 # ── 方式B:网页内录制(WebSocket:截屏流出 + 输入回传入 + 实时步骤 + 录完发布)──
 @app.websocket("/onboarding/page/record")
 async def record_ws(ws: WebSocket) -> None:
@@ -638,7 +677,6 @@ async def record_ws(ws: WebSocket) -> None:
                     flushed_tail = [after_flush_steps[-1]]
                 raw = msg.get("steps")
                 if raw is not None:           # 前端编辑后的步骤(删了噪声/重复/调序)→ 以它为准
-                    from dano.execution.page.recorder import assign_field_keys
                     for s in flushed_tail:
                         if s.get("op") not in ("fill", "select", "pick"):
                             continue
@@ -653,33 +691,7 @@ async def record_ws(ws: WebSocket) -> None:
                     steps = [{"op": s["op"], "locator": s.get("locator"), "field": (s.get("field") or None)}
                              for s in raw]
                     # 字段 key 保持与录制样例、必填标记一致。
-                    fb_idx = [i for i, s in enumerate(raw) if s.get("field")]
-                    keymap = dict(zip(fb_idx, assign_field_keys([raw[i]["field"] for i in fb_idx])))
-                    samples = {keymap[i]: raw[i].get("value", "") for i in fb_idx
-                               if raw[i].get("op") in ("fill", "select", "pick") and raw[i].get("value")}
-                    required_labels = {keymap[i] for i in fb_idx
-                                       if raw[i].get("required") and raw[i].get("op") in ("fill", "select", "pick")}
-                    # 下拉真实可见选项(枚举地面真值):同时按「选中显示值」和「字段 key」建索引。
-                    # selected 用于把页面显示项(病假)与提交短码(type=2)连起来。
-                    page_enum_options = {}
-                    last_field_idx = None
-                    for i, step in enumerate(raw):
-                        if i in keymap:
-                            last_field_idx = i
-                        if step.get("op") not in ("pick", "select") or not step.get("options"):
-                            continue
-                        owner_idx = i if i in keymap else last_field_idx
-                        field_key = keymap.get(owner_idx, "") if owner_idx is not None else ""
-                        if not field_key:
-                            continue
-                        selected = str(step.get("value", "") or "").strip()
-                        if selected and not samples.get(field_key):
-                            samples[field_key] = selected
-                        entry = {"options": list(step["options"]), "field_key": field_key, "selected": selected}
-                        if selected and selected not in page_enum_options:
-                            page_enum_options[selected] = entry
-                        if field_key and field_key not in page_enum_options:
-                            page_enum_options[field_key] = entry
+                    samples, required_labels, page_enum_options = _frontend_recording_field_metadata(raw)
                 else:
                     steps, samples = sess.recorded_steps()
                     required_labels = sess.recorded_required_labels()

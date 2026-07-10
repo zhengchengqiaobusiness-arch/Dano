@@ -46,6 +46,48 @@ def assign_field_keys(raw_fields: list[str | None]) -> list[str]:
         out.append(key)
     return out
 
+
+def assign_step_field_keys(steps: list[dict]) -> dict[int, str]:
+    """为录制步骤分配稳定字段键。
+
+    浏览器对同一个控件可能连续上报 click/fill/change/select 等多个事件。字段键必须按
+    ``标准字段语义 + locator`` 标识控件，而不是按事件次数编号；同名但 locator 不同的
+    两个真实控件仍分配 ``字段``、``字段#2``。返回值以原步骤下标为键，供样例、必填和
+    页面枚举共同复用，避免各自计算后发生错位。
+    """
+    identity_to_key: dict[tuple[str, str, str, str], str] = {}
+    semantic_bases: dict[str, str] = {}
+    used: set[str] = set()
+    out: dict[int, str] = {}
+    for index, step in enumerate(steps):
+        raw_field = str(step.get("field") or "").strip()
+        if not raw_field:
+            continue
+        semantic = _std_key(raw_field) or raw_field
+        semantic_id = semantic.casefold()
+        locator = str(step.get("locator") or "").strip()
+        page_id = str(step.get("page_id") or "").strip()
+        frame_id = str(step.get("frame_id") or "").strip()
+        locator_identity = locator or f"@event:{index}"
+        identity = (semantic_id, page_id, frame_id, locator_identity)
+        key = identity_to_key.get(identity)
+        if key is None:
+            candidate = semantic_bases.setdefault(semantic_id, semantic)
+            key, suffix = candidate, 2
+            while key in used:
+                key = f"{candidate}#{suffix}"
+                suffix += 1
+            identity_to_key[identity] = key
+            used.add(key)
+        out[index] = key
+    return out
+
+
+def has_recorded_value(step: dict) -> bool:
+    value = step.get("value")
+    return value is not None and value != ""
+
+
 _VIEW_W, _VIEW_H = 1280, 800
 _CAST_W, _CAST_H = 1024, 640
 _CAST_QUALITY = 50
@@ -870,9 +912,22 @@ class RecordSession:
             step = json.loads(payload)
         except Exception:  # noqa: BLE001
             return
+        try:
+            source_page = source.get("page") if isinstance(source, dict) else None
+            source_frame = source.get("frame") if isinstance(source, dict) else None
+            page_id = self._page_id(source_page)
+            frame_id = self._frame_id(source_frame)
+            if page_id:
+                step["page_id"] = page_id
+            if frame_id:
+                step["frame_id"] = frame_id
+        except Exception:  # noqa: BLE001
+            pass
         self._mark_active()
         # 同一 locator 连续 fill/select/pick(用户改了又改/逐字符)→ 覆盖,只留最后一次
         if (self.steps and self.steps[-1].get("locator") == step.get("locator")
+                and self.steps[-1].get("page_id") == step.get("page_id")
+                and self.steps[-1].get("frame_id") == step.get("frame_id")
                 and step.get("op") in ("fill", "select", "pick")):
             self.steps[-1] = step
         else:
@@ -1043,16 +1098,14 @@ class RecordSession:
             return None
 
     def recorded_steps(self):
-        """已捕获步骤 → (普通 dict 步骤列表, sample_inputs)。字段 key 用 assign_field_keys 统一分配。"""
-        fb_idx = [i for i, s in enumerate(self.steps) if s.get("field")]
-        keys = assign_field_keys([self.steps[i]["field"] for i in fb_idx])
-        keymap = dict(zip(fb_idx, keys))
+        """已捕获步骤 → (普通 dict 步骤列表, sample_inputs)。"""
+        keymap = assign_step_field_keys(self.steps)
         steps: list[dict] = []
-        samples: dict[str, str] = {}
+        samples: dict[str, object] = {}
         for i, s in enumerate(self.steps):
             field = s.get("field") or None
             steps.append({"op": s["op"], "locator": s.get("locator"), "field": field})
-            if field and s.get("op") in ("fill", "select", "pick") and s.get("value") != "":
+            if field and s.get("op") in ("fill", "select", "pick") and has_recorded_value(s):
                 samples[keymap[i]] = s.get("value", "")
         return steps, samples
 
@@ -1062,9 +1115,7 @@ class RecordSession:
         返回 {字段key: {options, field_key, selected}}。保留 selected 是为了把 DOM 显示项
         与提交体短码(type=2)连起来,避免发布 skill 时把下拉退化成 number。
         """
-        fb_idx = [i for i, s in enumerate(self.steps) if s.get("field")]
-        keys = assign_field_keys([self.steps[i]["field"] for i in fb_idx])
-        keymap = dict(zip(fb_idx, keys))
+        keymap = assign_step_field_keys(self.steps)
         out: dict[str, dict] = {}
         last_field_idx: int | None = None
         for i, s in enumerate(self.steps):
@@ -1087,10 +1138,12 @@ class RecordSession:
 
     def recorded_required_labels(self) -> set:
         """录制中标了表单 * 必填的字段(供 flatten 标 required)。key 与 recorded_steps 同算法分配,保持一致。"""
-        fb_idx = [i for i, s in enumerate(self.steps) if s.get("field")]
-        keys = assign_field_keys([self.steps[i]["field"] for i in fb_idx])
-        return {k for i, k in zip(fb_idx, keys)
-                if self.steps[i].get("required") and self.steps[i].get("op") in ("fill", "select", "pick")}
+        keymap = assign_step_field_keys(self.steps)
+        return {
+            key for i, key in keymap.items()
+            if self.steps[i].get("required")
+            and self.steps[i].get("op") in ("fill", "select", "pick")
+        }
 
     async def stop(self) -> None:
         self._closing = True         # 先置位:此后任何 page close 事件都不再重开截屏(避免在关闭中的 context 上 new_cdp_session)

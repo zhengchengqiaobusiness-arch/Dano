@@ -595,9 +595,9 @@ def _request_header_source_for_token(key: str, path: str, value: str, request_he
 def _looks_system_const_field(key: str, path: str) -> bool:
     k = _norm_field_name(key, path)
     return any(x in k for x in (
-        "processdefinitionkey", "processdefinitionid", "billtype", "formtype",
+        "processdefinitionkey", "processdefinitionid", "processdefkey", "processdefid", "billtype", "formtype",
         "flowtype", "businesstype", "templateid", "template_id", "formid",
-        "menuid", "appid", "appname", "status", "flowstatus",
+        "menuid", "appid", "appname", "activityid", "startnodeid", "bpmnnodeid",
     ))
 
 
@@ -669,16 +669,18 @@ def _read_is_option_source(read: dict) -> bool:
     if path.endswith("/page") or "/page?" in str(url).lower():
         if not is_known_option_path:
             return False
+    payload = read.get("json", read.get("response_json"))
+    has_list_payload = bool(as_list_payload(payload))
     if role == "explicit_read_option":
-        return True
+        return has_list_payload
     if role == "read_option":
-        return is_known_option_path
+        return has_list_payload
     if role in {"business_get", "read_context"}:
-        return False
+        # URL 命名不可靠；只要真实响应是列表，后续仍须通过提交值精确命中才会绑定。
+        return has_list_payload
     if not _is_option_source_url(url):
         return False
-    payload = read.get("json", read.get("response_json"))
-    return bool(as_list_payload(payload))
+    return has_list_payload
 
 
 def _option_candidate_reads(reads: list[dict] | None) -> list[dict]:
@@ -800,6 +802,16 @@ def _param_source_guess(
         }
 
     if method == "GET" and path.startswith("query."):
+        if _looks_system_const_field(key, path) or _is_const_value(value):
+            return {
+                "category": "system_const",
+                "source_kind": "constant",
+                "source": {"kind": "query_constant", "path": path},
+                "editable": True,
+                "exposed_to_user": False,
+                "reason": "该 GET 查询参数是稳定流程键、节点键或内部标识，默认作为接口常量；若有上游依赖会自动改为运行期来源",
+                "need_human_confirm": False,
+            }
         return {
             "category": "system_const",
             "source_kind": "page_context",
@@ -851,7 +863,7 @@ def _param_source_guess(
             "editable": True,
             "exposed_to_user": False,
             "reason": "字段名像流程定义、表单类型、应用 ID 或固定状态，默认作为系统常量",
-            "need_human_confirm": True,
+            "need_human_confirm": False,
         }
 
     if _looks_page_context_field(key, path) and value not in _sample_value_set(samples):
@@ -891,6 +903,18 @@ def _param_source_guess(
             "editable": False,
             "exposed_to_user": False,
             "reason": "该值像一次性会话值/运行期 ID，不能直接固化录制值；需要绑定上游响应、页面上下文或改为用户参数",
+            "need_human_confirm": True,
+        }
+
+    raw_leaf = re.sub(r"[^a-z0-9]+", "", str(path or key).split(".")[-1].lower())
+    if raw_leaf.endswith("id") and _is_const_value(value):
+        return {
+            "category": "runtime_var",
+            "source_kind": "unknown",
+            "source": {"kind": "selected_entity_id", "path": path},
+            "editable": True,
+            "exposed_to_user": False,
+            "reason": "该字段像用户选择项对应的内部 ID；必须绑定页面/API 候选或明确改为系统常量，不能直接把录制 ID 暴露给调用方",
             "need_human_confirm": True,
         }
 
@@ -2344,17 +2368,67 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
                     inputs.setdefault(key, _capability_field_from_param(st, param, scope="input", request_id=request_id))
                 else:
                     internal_fields.append(_capability_field_from_param(st, param, scope="internal", request_id=request_id))
-        cap.inputs = _merge_capability_scoped_fields(list(inputs.values()), old_inputs)
-        cap.request_fields = _merge_capability_scoped_fields(request_fields, old_request_fields)
-        cap.internal_fields = _merge_capability_scoped_fields(internal_fields, old_internal_fields)
-        cap.computed_fields = _merge_capability_scoped_fields(list(cap.computed_fields or []), old_computed_fields)
+        # steps/params 是请求字段的唯一真相；能力自身的聚合输入（例如批量 entries）
+        # 可以独立存在。绑定到步骤的旧字段只有步骤和路径仍有效时才能覆盖派生项，
+        # 从而同时避免 stale applyTitle/useTime 与丢失人工定义的能力输入。
+        valid_old_inputs = [
+            item for item in old_inputs
+            if not item.step_id
+            or (
+                item.step_id in cap_step_ids
+                and _capability_step_param_exists(by_step.get(item.step_id), item.path or item.key)
+            )
+        ]
+        valid_old_request_fields = [
+            item for item in old_request_fields
+            if item.step_id in cap_step_ids
+            and _capability_step_param_exists(by_step.get(item.step_id), item.path or item.key)
+        ]
+        valid_old_internal_fields = [
+            item for item in old_internal_fields
+            if item.step_id in cap_step_ids
+            and _capability_step_param_exists(by_step.get(item.step_id), item.path or item.key)
+        ]
+        cap.inputs = _merge_capability_scoped_fields(list(inputs.values()), valid_old_inputs)
+        cap.request_fields = _merge_capability_scoped_fields(request_fields, valid_old_request_fields)
+        cap.internal_fields = _merge_capability_scoped_fields(internal_fields, valid_old_internal_fields)
+        cap.computed_fields = [item.model_copy(deep=True) for item in old_computed_fields]
         derived_dependencies = [
             _capability_dependency_from_link(link)
             for link in spec.links
             if link.source_step_id in cap_step_ids and link.target_step_id in cap_step_ids
         ]
-        cap.dependencies = _merge_capability_scoped_dependencies(derived_dependencies, old_dependencies)
-        cap.outputs = _merge_capability_scoped_fields(_capability_output_fields(cap), old_outputs)
+        valid_old_dependencies = [
+            item for item in old_dependencies
+            if str((item.target or {}).get("step_id") or "") in cap_step_ids
+            and _capability_step_param_exists(
+                by_step.get(str((item.target or {}).get("step_id") or "")),
+                str((item.target or {}).get("path") or ""),
+            )
+            and (
+                bool(str((item.source or {}).get("request_id") or ""))
+                or (
+                    str((item.source or {}).get("step_id") or "") in cap_step_ids
+                    and _capability_response_path_exists(
+                        by_step.get(str((item.source or {}).get("step_id") or "")),
+                        str((item.source or {}).get("path") or ""),
+                    )
+                )
+            )
+        ]
+        cap.dependencies = _merge_capability_scoped_dependencies(
+            derived_dependencies, valid_old_dependencies,
+        )
+        derived_outputs = _capability_output_fields(cap)
+        valid_old_outputs = [
+            item for item in old_outputs
+            if not item.step_id
+            or (
+                item.step_id in cap_step_ids
+                and _capability_response_path_exists(by_step.get(item.step_id), item.path or item.key)
+            )
+        ]
+        cap.outputs = _merge_capability_scoped_fields(derived_outputs, valid_old_outputs)
         cap.fields = [
             *(cap.inputs or []),
             *(cap.request_fields or []),
@@ -2499,6 +2573,14 @@ def _auto_dependency_target_allowed(param: ParamField | None) -> bool:
 def _auto_dependency_link_allowed(param: ParamField | None, source_path: str, lk: FlowLink | None = None) -> bool:
     if lk is not None and not _link_is_auto_generated(lk):
         return True
+    if param is not None and lk is not None and lk.confirmed and float(lk.confidence or 0.0) >= 0.95:
+        source_leaf = re.sub(r"[^a-z0-9]+", "", str(source_path or "").split(".")[-1].lower())
+        target_leaf = re.sub(r"[^a-z0-9]+", "", str(param.path or param.key or "").split(".")[-1].lower())
+        # 完整事实库已证明该真实值只来自一个响应端点时，允许通用 id -> *Id
+        # 注入（典型为 data.id -> query.processDefinitionId）。这比字段名模糊匹配强，
+        # 同时仍拒绝 title/date/status 等常见值造成的假关联。
+        if source_leaf == "id" and target_leaf.endswith("id"):
+            return True
     if not _auto_dependency_target_allowed(param):
         return False
     if param is None:
@@ -2608,11 +2690,18 @@ def to_flow_spec(
             and role_by_key.get(_request_role_key(c), {}).get("role") in {"submit_anchor", "business_write"})
     ]
 
-    # 2) 前置读请求：GET 或 POST 查询，只在响应被后续业务请求引用时进入主流程。
+    # 2) 前置读候选：business_get 直接进入候选；存在写锚点时，把 read_context
+    # 也交给后续数据/控制依赖闭包判断。这里不再用 keep 先删掉事实，否则审批详情
+    # 这类“响应不直接进入 POST”的控制前置永远没有机会被识别。
     preread_cands = [
         r for r in captured_requests
-        if (role_by_key.get(_request_role_key(r), {}).get("keep")
-            and role_by_key.get(_request_role_key(r), {}).get("role") in {"business_get", "read_context"})
+        if (
+            role_by_key.get(_request_role_key(r), {}).get("role") == "business_get"
+            or (
+                bool(write_cands)
+                and role_by_key.get(_request_role_key(r), {}).get("role") == "read_context"
+            )
+        )
     ]
     preread_before_dedupe = len(preread_cands)
     preread_cands = _dedupe_preread_candidates(preread_cands)
@@ -2663,7 +2752,85 @@ def to_flow_spec(
             write_idxs = [len(write_cands) - 1]
 
     selected_write_keys = {_request_role_key(write_cands[i]) for i in write_idxs if 0 <= i < len(write_cands)}
-    selected_preread_keys = {_request_role_key(r) for r in preread_cands}
+    preread_keys = {_request_role_key(r) for r in preread_cands}
+    potential_keys = selected_write_keys | preread_keys
+    potential_steps = [r for r in captured_requests if _request_role_key(r) in potential_keys]
+    # 只物化写请求的真实上游依赖闭包。独立查询/详情接口继续留在 RequestFacts，
+    # 由 Planner 决定是否提升为单独能力，不能因为 role=business_get 就偷偷进入提交链。
+    required_positions = {
+        idx for idx, req in enumerate(potential_steps)
+        if _request_role_key(req) in selected_write_keys
+    }
+
+    def workflow_context_values(request: dict) -> set[str]:
+        values: set[str] = set()
+        for field_path, raw_value in _request_values(request):
+            value = str(raw_value or "").strip()
+            norm_path = re.sub(r"[^a-z0-9]+", "", str(field_path or "").lower())
+            if len(value) < 6 or value.lower() in _BORING_LINK_VALUES:
+                continue
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ t].*)?", value):
+                continue
+            if any(token in norm_path for token in (
+                "process", "definition", "flow", "billtype", "formtype",
+                "businesstype", "template", "appkey", "processdefkey",
+            )) or ((request.get("method") or "").upper() == "GET" and norm_path.endswith("key")):
+                values.add(value)
+        return values
+
+    write_context = {
+        value
+        for idx, request in enumerate(potential_steps)
+        if idx in required_positions
+        for value in workflow_context_values(request)
+    }
+
+    def same_workflow_context(left: str, right: str) -> bool:
+        if left == right:
+            return True
+        shorter, longer = sorted((left, right), key=len)
+        if len(shorter) < 6 or not longer.startswith(shorter):
+            return False
+        return longer[len(shorter):len(shorter) + 1] in {":", "/", "-", "_"}
+
+    for idx, request in enumerate(potential_steps):
+        if _request_role_key(request) not in preread_keys:
+            continue
+        if any(
+            same_workflow_context(candidate, write_value)
+            for candidate in workflow_context_values(request)
+            for write_value in write_context
+        ):
+            required_positions.add(idx)
+    try:
+        potential_links = discover_step_links(potential_steps)
+    except Exception:
+        potential_links = []
+    changed = True
+    while changed:
+        changed = False
+        for link in potential_links:
+            source_pos = link.get("source_step")
+            target_pos = link.get("target_step")
+            if target_pos in required_positions and source_pos not in required_positions:
+                required_positions.add(source_pos)
+                changed = True
+            # 控制前置链：某个已选 workflow GET 的响应驱动后续 workflow GET query
+            # 时，二者共同属于写能力前置闭包，即使后者响应不直接进入 POST body。
+            if (
+                source_pos in required_positions
+                and target_pos not in required_positions
+                and isinstance(target_pos, int)
+                and 0 <= target_pos < len(potential_steps)
+                and _request_role_key(potential_steps[target_pos]) in preread_keys
+            ):
+                required_positions.add(target_pos)
+                changed = True
+    selected_preread_keys = {
+        _request_role_key(potential_steps[idx])
+        for idx in required_positions
+        if 0 <= idx < len(potential_steps) and _request_role_key(potential_steps[idx]) in preread_keys
+    }
     selected_keys = selected_write_keys | selected_preread_keys
     request_graph = _build_request_graph(captured_requests, request_roles, selected_keys)
     cands = [r for r in captured_requests if _request_role_key(r) in selected_keys]
@@ -2682,6 +2849,11 @@ def to_flow_spec(
             page_enum_options=page_enum_options,
             step_index=pos,
         )
+        if _request_role_key(req) in selected_preread_keys:
+            st.source_meta = {
+                **(st.source_meta or {}),
+                "control_preflight_for_write": True,
+            }
         step_objs.append(st)
         idx_to_step_id[pos] = st.step_id
 
@@ -2697,7 +2869,36 @@ def to_flow_spec(
                 target_step = step_objs[tgt_pos]
                 target_path = _strip_body_prefix(str(lk.get("target_path", "")))
                 target_param = next((p for p in target_step.params if p.path == target_path), None)
-                if not _auto_dependency_link_allowed(target_param, str(lk.get("source_path") or "")):
+                target_value = str(target_param.value if target_param is not None else "")
+                matching_sources: set[tuple[str, str, str]] = set()
+                # 唯一性必须以完整请求事实库为准，不能只看已物化步骤；两个候选 GET
+                # 返回同一 ID 时，即使去重后只保留一个步骤，也仍属于歧义证据。
+                for candidate_request in captured_requests:
+                    response_payload = candidate_request.get("response_json")
+                    if response_payload is None:
+                        continue
+                    for response_path, _tokens, scalar, _raw in _leaf_paths(response_payload):
+                        if target_value and str(scalar) == target_value:
+                            matching_sources.add((
+                                str(candidate_request.get("method") or "GET").upper(),
+                                _request_path(candidate_request),
+                                response_path,
+                            ))
+                strong_unique_match = (
+                    len(target_value) >= 4
+                    and len(matching_sources) == 1
+                    and target_value.lower() not in {"true", "false", "null", "none", "success"}
+                )
+                source_leaf = re.sub(
+                    r"[^a-z0-9]+", "", str(lk.get("source_path") or "").split(".")[-1].lower()
+                )
+                target_leaf = re.sub(
+                    r"[^a-z0-9]+", "", str(target_path or "").split(".")[-1].lower()
+                )
+                strong_id_dependency = strong_unique_match and source_leaf == "id" and target_leaf.endswith("id")
+                if not strong_id_dependency and not _auto_dependency_link_allowed(
+                    target_param, str(lk.get("source_path") or ""),
+                ):
                     continue
                 link_objs.append(FlowLink(
                     source_step_id=idx_to_step_id[src_pos],
@@ -2707,8 +2908,8 @@ def to_flow_spec(
                     target_path=lk.get("target_path", ""),
                     target_tokens=lk.get("target_tokens"),
                     param_name=None,
-                    confirmed=False,
-                    confidence=0.85,
+                    confirmed=strong_unique_match,
+                    confidence=0.96 if strong_unique_match else 0.85,
                     reason="上游响应值与下游请求字段值一致，判定为运行期依赖",
                     evidence={
                         "source_step": src_pos,
@@ -3058,7 +3259,7 @@ def suggest_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
                 },
             },
             confirmed=False,
-            confidence=0.72,
+            confidence=0.9 if kind == "submit_batch" else 0.95,
             requires_human_confirm=True,
             evidence=[_step_evidence(s) for s in read_steps],
             caller_responsibilities=["根据结构化查询结果与最终用户确认下一步"],
@@ -3258,7 +3459,14 @@ def _submit_capability_steps(spec: FlowSpec) -> list[FlowStep]:
     write_ids = {st.step_id for st in _write_steps(spec) if st.step_id}
     if not write_ids:
         return []
-    return _ordered_steps_by_ids(spec, _dependency_closure_step_ids(spec, write_ids))
+    preflight_ids = {
+        st.step_id for st in spec.steps
+        if bool((st.source_meta or {}).get("control_preflight_for_write"))
+    }
+    return _ordered_steps_by_ids(
+        spec,
+        _dependency_closure_step_ids(spec, write_ids | preflight_ids),
+    )
 
 
 def _capability_step_allowed(spec: FlowSpec, cap: FlowCapability, step: FlowStep) -> bool:
@@ -3369,11 +3577,42 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
             skill_responsibilities=["执行真实查询接口并返回原始响应/结构化摘要"],
         ))
 
+    option_fields = _option_field_names(spec)
+    if option_fields:
+        caps.append(FlowCapability(
+            name="list_options",
+            title="查询字段候选项",
+            intent="按字段名调用已绑定的真实页面枚举或接口来源，返回显示名与提交值。",
+            kind="list_options",
+            step_ids=[],
+            nodes=[],
+            input_schema={
+                "type": "object",
+                "properties": {"field": {"type": "string", "enum": option_fields}},
+                "required": ["field"],
+            },
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "field": {"type": "string"},
+                    "options": {"type": "array", "items": {"type": "object"}},
+                    "count": {"type": "number"},
+                },
+            },
+            confirmed=True,
+            confidence=0.95,
+            requires_human_confirm=False,
+            status="confirmed",
+            evidence=[{"kind": "option_field", "field": field} for field in option_fields],
+            caller_responsibilities=["在展示选择控件前传入 field 获取实时候选"],
+            skill_responsibilities=["调用真实选项源并返回 label/value"],
+        ))
+
     if write_steps:
-        kind = "submit_batch"
+        kind = "submit_batch" if any(_looks_batch_step(step) for step in write_steps) else "submit"
         caps.append(FlowCapability(
             name=kind,
-            title="批量提交业务申请",
+            title="批量提交业务申请" if kind == "submit_batch" else "提交业务申请",
             intent="调用方提供业务字段；Skill 按已纳入接口顺序执行前置查询、依赖注入和最终提交，并返回最后写接口结果。",
             kind=kind,
             step_ids=_capability_step_ids(submit_steps),
@@ -3392,7 +3631,7 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
                 "response_path": "response",
             }],
             confirmed=False,
-            confidence=0.72,
+            confidence=0.9 if kind == "submit_batch" else 0.95,
             requires_human_confirm=True,
             status="draft",
             evidence=[{
@@ -3400,7 +3639,7 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
                 "step_ids": _capability_step_ids(write_steps),
                 "paths": [s.path or s.url for s in write_steps],
             }],
-            caller_responsibilities=["提供 input_schema 中的业务字段", "按需确认批量条数和幂等策略"],
+            caller_responsibilities=["提供 input_schema 中的业务字段", "确认写操作后调用"],
             skill_responsibilities=["按 FlowStep 顺序执行请求", "注入 links/system_values/runtime_var", "返回每条提交的成功状态"],
         ))
         return caps
@@ -3679,20 +3918,29 @@ def _removed_capability_names(spec: FlowSpec | None) -> set[str]:
     return {str(x) for x in ((spec.meta or {}).get("removed_capabilities") or []) if str(x)}
 
 
-def _remember_removed_capability(spec: FlowSpec, cap_name: str) -> None:
+def _remember_removed_capability(spec: FlowSpec, cap_name: str, cap_kind: str = "") -> None:
     if not cap_name:
         return
     meta = dict(spec.meta or {})
     removed = set(str(x) for x in (meta.get("removed_capabilities") or []))
     removed.add(cap_name)
     meta["removed_capabilities"] = sorted(removed)
+    if cap_kind:
+        removed_kinds = set(str(x) for x in (meta.get("removed_capability_kinds") or []))
+        removed_kinds.add(_capability_kind_family(cap_kind))
+        meta["removed_capability_kinds"] = sorted(removed_kinds)
     spec.meta = meta
 
 
-def _forget_removed_capability(spec: FlowSpec, cap_name: str) -> None:
+def _forget_removed_capability(spec: FlowSpec, cap_name: str, cap_kind: str = "") -> None:
     meta = dict(spec.meta or {})
     removed = [x for x in (meta.get("removed_capabilities") or []) if str(x) != cap_name]
     meta["removed_capabilities"] = removed
+    if cap_kind:
+        family = _capability_kind_family(cap_kind)
+        meta["removed_capability_kinds"] = [
+            x for x in (meta.get("removed_capability_kinds") or []) if str(x) != family
+        ]
     spec.meta = meta
 
 
@@ -3729,19 +3977,48 @@ def _forget_removed_capability_step(spec: FlowSpec, cap_name: str, step_id: str)
     spec.meta = meta
 
 
-def _merge_capability_lists(existing: list[FlowCapability], generated: list[FlowCapability], *, spec: FlowSpec | None = None) -> list[FlowCapability]:
+def _capability_kind_family(kind: str) -> str:
+    return "write" if kind in {"submit", "submit_batch"} else str(kind or "")
+
+
+def _merge_capability_lists(
+    existing: list[FlowCapability],
+    generated: list[FlowCapability],
+    *,
+    spec: FlowSpec | None = None,
+    allow_new: bool = True,
+) -> list[FlowCapability]:
     """把新生成能力合并到已有能力上，避免每次“生成编排”覆盖人工编辑。"""
+    removed_capabilities = _removed_capability_names(spec)
+    removed_families = {
+        _capability_kind_family(name)
+        for name in removed_capabilities
+        if name in {"submit", "submit_batch", "query_status", "list_options", "validate_batch"}
+    } | {
+        str(x) for x in (((spec.meta or {}).get("removed_capability_kinds") or []) if spec is not None else [])
+    }
     if not existing:
-        removed_capabilities = _removed_capability_names(spec)
-        return [cap for cap in generated if cap.name not in removed_capabilities]
+        return [
+            cap for cap in generated
+            if cap.name not in removed_capabilities
+            and _capability_kind_family(cap.kind) not in removed_families
+        ]
     out = [cap.model_copy(deep=True) for cap in existing]
     by_name = {cap.name: cap for cap in out if cap.name}
-    removed_capabilities = _removed_capability_names(spec)
     for cap in generated:
-        if cap.name in removed_capabilities:
+        if cap.name in removed_capabilities or _capability_kind_family(cap.kind) in removed_families:
             continue
         cur = by_name.get(cap.name)
         if cur is None:
+            same_kind = [
+                item for item in out
+                if _capability_kind_family(item.kind) == _capability_kind_family(cap.kind)
+            ]
+            if len(same_kind) == 1:
+                cur = same_kind[0]
+        if cur is None:
+            if not allow_new and cap.kind != "list_options":
+                continue
             out.append(cap)
             if cap.name:
                 by_name[cap.name] = cap
@@ -3864,11 +4141,28 @@ def _normalize_capability_references(spec: FlowSpec) -> FlowSpec:
             if sid and not (sid in seen or seen.add(sid))
         ]
         cap.nodes = clean_nodes(cap.nodes or [], cap.step_ids)
-        if not cap.step_ids:
-            cap.step_ids = _capability_call_step_ids_from_nodes(cap.nodes or [])
+        node_step_ids = _capability_call_step_ids_from_nodes(cap.nodes or [])
+        # nodes 是实际执行计划；所有 call 必须在 step_ids 中可见、可编辑。保留 node
+        # 执行顺序，再追加尚未进入 nodes 的显式 step_ids。
+        cap.step_ids = list(dict.fromkeys([*node_step_ids, *cap.step_ids]))
         if cap.step_ids:
             _sync_capability_order(spec, cap)
     return spec
+
+
+def _remove_capability_step_nodes(nodes: list[dict[str, Any]], step_id: str) -> list[dict[str, Any]]:
+    cleaned: list[dict[str, Any]] = []
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        if node.get("type") == "call" and str(node.get("step_id") or "") == step_id:
+            continue
+        copied = dict(node)
+        for child_key in ("children", "steps", "then", "else", "otherwise"):
+            if isinstance(copied.get(child_key), list):
+                copied[child_key] = _remove_capability_step_nodes(copied[child_key], step_id)
+        cleaned.append(copied)
+    return cleaned
 
 
 def _sync_capability_order(spec: FlowSpec, cap: FlowCapability) -> None:
@@ -4152,96 +4446,51 @@ async def orchestrate_flow_capabilities(
     - 首次生成：调用 build_default_flow_capabilities 出 baseline，再让 LLM 优化。
     """
     current = spec.model_copy(deep=True)
-    existing = list(current.capabilities or [])
-    has_existing = bool(existing)
-
-    caps: list[FlowCapability] = []
-    source = "deterministic" if not has_existing else "incremental"
+    had_existing = bool(current.capabilities)
+    # 每次都把当前人工版本与确定性基线做增量合并。removed_* 记录由 merge 层
+    # 负责保护，因此既能补齐漏能力/漏步骤，也不会恢复用户明确删除的内容。
+    current.capabilities = _merge_capability_lists(
+        list(current.capabilities or []),
+        build_default_flow_capabilities(current),
+        spec=current,
+        allow_new=not had_existing,
+    )
+    source = "incremental" if had_existing else "deterministic"
     reason = ""
 
-    if has_existing:
-        # 已存在能力：保留人工编辑（confirmed / locked / step_ids / fields / dependencies），
-        # 严禁再调 build_default_flow_capabilities，也不把未使用步骤自动塞回能力。
-        # 后续点击只能在当前能力版本上应用有证据的 patch；用户删除的能力/步骤保持删除状态。
-        caps = [cap.model_copy(deep=True) for cap in existing]
-        # 手工“新增能力”得到的是空壳；允许同名（或唯一同类型）的确定性结果只补这个空壳。
-        # 非空能力绝不自动扩张，也不追加新的能力。
-        defaults = build_default_flow_capabilities(current)
-        for idx, cap in enumerate(caps):
-            if _capability_node_step_ids(cap):
-                continue
-            candidate = next((item for item in defaults if item.name == cap.name), None)
-            if candidate is None:
-                same_kind = [item for item in defaults if item.kind == cap.kind]
-                candidate = same_kind[0] if len(same_kind) == 1 else None
-            if candidate is not None:
-                caps[idx] = _merge_capability_lists([cap], [candidate], spec=current)[0]
-        if llm_client is not None and model:
-            try:
-                out = await llm_client.complete_json(
-                    model=model,
-                    system=_FLOW_ORCHESTRATE_SYSTEM,
-                    user="【FlowSpec 编排上下文】\n" + json.dumps(_orchestration_context(current), ensure_ascii=False),
-                    timeout_s=timeout_s,
+    if llm_client is not None and model:
+        try:
+            out = await llm_client.complete_json(
+                model=model,
+                system=_FLOW_ORCHESTRATE_SYSTEM,
+                user="【FlowSpec 编排上下文】\n" + json.dumps(_orchestration_context(current), ensure_ascii=False),
+                timeout_s=timeout_s,
+            )
+            raw_ops = out.get("ops") if isinstance(out, dict) else None
+            if isinstance(raw_ops, list):
+                edits = _autofix_ops_to_edits(current, raw_ops)
+                if edits:
+                    current = apply_flow_edits(current, edits)
+                    source = "llm_patch"
+            raw_abilities = out.get("abilities") if isinstance(out, dict) else None
+            if isinstance(raw_abilities, list):
+                step_ids = {step.step_id for step in current.steps}
+                used = {cap.name for cap in current.capabilities if cap.name}
+                generated = [
+                    cap for raw in raw_abilities
+                    if (cap := _capability_from_llm(raw, step_ids, used)) is not None
+                ]
+                current.capabilities = _merge_capability_lists(
+                    list(current.capabilities or []), generated, spec=current, allow_new=True,
                 )
-                raw_ops = out.get("ops") if isinstance(out, dict) else None
-                if isinstance(raw_ops, list):
-                    edits = _autofix_ops_to_edits(current, raw_ops)
-                    if edits:
-                        current = apply_flow_edits(current, edits)
-                        existing = list(current.capabilities or [])
-                        caps = [cap.model_copy(deep=True) for cap in existing]
-                        source = "llm_patch"
-            except Exception as exc:  # noqa: BLE001
-                reason = str(exc)[:240]
-        if not caps:
-            caps = list(current.capabilities or [])
-    else:
-        # 首次生成：baseline + LLM 优化
-        fallback = _merge_capability_lists(existing, build_default_flow_capabilities(current), spec=current)
-        if llm_client is not None and model:
-            try:
-                out = await llm_client.complete_json(
-                    model=model,
-                    system=_FLOW_ORCHESTRATE_SYSTEM,
-                    user="【FlowSpec 编排上下文】\n" + json.dumps(_orchestration_context(current), ensure_ascii=False),
-                    timeout_s=timeout_s,
-                )
-                raw_ops = out.get("ops") if isinstance(out, dict) else None
-                if isinstance(raw_ops, list):
-                    edits = _autofix_ops_to_edits(current, raw_ops)
-                    if edits:
-                        current = apply_flow_edits(current, edits)
-                        existing = list(current.capabilities or [])
-                        fallback = _merge_capability_lists(existing, build_default_flow_capabilities(current), spec=current)
-                        caps = list(current.capabilities or [])
-                        source = "llm_patch"
-                raw_abilities = out.get("abilities") if isinstance(out, dict) else None
-                if not caps and isinstance(raw_abilities, list):
-                    step_ids = {s.step_id for s in current.steps}
-                    used: set[str] = set()
-                    for raw in raw_abilities:
-                        cap = _capability_from_llm(raw, step_ids, used)
-                        if cap is not None:
-                            caps.append(cap)
-                if caps and source != "llm_patch":
+                if generated and source != "llm_patch":
                     source = "llm"
-            except Exception as exc:  # noqa: BLE001
-                reason = str(exc)[:240]
+        except Exception as exc:  # noqa: BLE001
+            reason = str(exc)[:240]
 
-        if not caps:
-            caps = fallback
-            source = "deterministic"
-        else:
-            caps = _merge_capability_lists(existing, caps, spec=current)
-
-    current.capabilities = caps
-    # 仅对非 confirmed 能力做引用规范化（已 confirmed 的保持用户编辑顺序不动）
-    for cap in current.capabilities:
-        if cap.confirmed and cap.locked:
-            continue
-        _normalize_capability_references(current)
-        break  # 只规范化一次
+    _normalize_capability_references(current)
+    current = _sync_capability_io_schemas(sync_flow_spec_models(current, prefer_request_facts=False))
+    caps = list(current.capabilities or [])
     current.meta = {
         **(current.meta or {}),
         "capability_model": {
@@ -4703,15 +4952,17 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
             )
             for dep in cap.dependencies or []
         }
-        seen_field_entries: set[tuple[str, str, str, str]] = set()
-        for field in [
-            *(cap.fields or []),
+        canonical_fields = [
             *(cap.inputs or []),
             *(cap.request_fields or []),
             *(cap.internal_fields or []),
             *(cap.computed_fields or []),
             *(cap.outputs or []),
-        ]:
+        ]
+        if not canonical_fields:  # 仅兼容尚未迁移的旧资产
+            canonical_fields = list(cap.fields or [])
+        seen_field_entries: set[tuple[str, str, str, str]] = set()
+        for field in canonical_fields:
             field_key = (field.field_id, field.scope, field.step_id, field.path or field.key)
             if field_key in seen_field_entries:
                 continue
@@ -4764,7 +5015,11 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                         message=msg,
                         target=target,
                     )
-            if field.exposed_to_caller and _capability_field_looks_internal(field):
+            if (
+                field.scope in {"input", "request_field"}
+                and field.exposed_to_caller
+                and _capability_field_looks_internal(field)
+            ):
                 msg = f"Capability `{label}` 字段 `{field_name}` 看起来是内部 ID/短码/状态码，不能直接暴露给调用方"
                 target = {"kind": "capability_field", "capability": label, "field_id": field.field_id, "path": field.path}
                 if cap.confirmed:
@@ -5261,6 +5516,20 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
     ]
     step_ids = {s.step_id for s in visible_steps}
     steps_by_id = {s.step_id: s for s in visible_steps}
+    visible_request_indexes = {
+        str(step.source_meta.get("request_index"))
+        for step in visible_steps
+        if step.source_meta.get("request_index") is not None
+    }
+    visible_request_paths = {
+        _request_path({"path": step.path or step.url})
+        for step in visible_steps
+        if step.path or step.url
+    }
+    confirmed_dependency_sources = {
+        link.source_step_id for link in spec.links
+        if link.confirmed and link.source_step_id in step_ids and link.target_step_id in step_ids
+    }
 
     for st in visible_steps:
         if st.risk_level == "L4":
@@ -5406,7 +5675,34 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
             ))
 
     for role in spec.meta.get("request_roles") or []:
-        if role.get("keep") and role.get("role") in {"business_get", "read_context"}:
+        role_index = str(role.get("index")) if role.get("index") is not None else ""
+        role_path = _request_path({"path": str(role.get("path") or role.get("url") or "")})
+        matched_step = next((
+            step for step in visible_steps
+            if (
+                role_index
+                and str(step.source_meta.get("request_index")) == role_index
+            ) or (
+                role_path
+                and _request_path({"path": step.path or step.url}) == role_path
+            )
+        ), None)
+        role_is_active = bool(
+            matched_step
+            or (role_index and role_index in visible_request_indexes)
+            or (role_path and role_path in visible_request_paths)
+        )
+        confidence = float(role.get("confidence") or 0.0)
+        needs_role_confirmation = bool(
+            role.get("keep")
+            and role.get("role") in {"business_get", "read_context"}
+            and role_is_active
+            and confidence < 0.9
+            and not bool(matched_step and matched_step.source_meta.get("manual_added"))
+            and not bool(matched_step and matched_step.source_meta.get("control_preflight_for_write"))
+            and not bool(matched_step and matched_step.step_id in confirmed_dependency_sources)
+        )
+        if needs_role_confirmation:
             items.append(_review_item(
                 "request_role",
                 severity="medium",
@@ -5420,7 +5716,7 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
                 current_guess=str(role.get("role") or ""),
                 suggested_action="confirm_request_role",
                 reason=str(role.get("reason") or "该读接口被自动保留为流程前置步骤"),
-                confidence=float(role.get("confidence") or 0.0),
+                confidence=confidence,
             ))
 
     if visible_steps and not flow_spec_user_params(spec):
@@ -6496,6 +6792,16 @@ def _diagnostic_publish_findings(spec: FlowSpec) -> tuple[list[str], list[str]]:
         url = str(d.get("url") or "")
         req_idx = d.get("request_index")
         detail = msg or url or kind
+        # Playwright 页面切换、录制结束或目标服务主动断开连接时，浏览器控制台常会
+        # 留下 ERR_CONNECTION_CLOSED/ERR_ABORTED。若它没有关联到已纳入的业务请求，
+        # 这只是录制环境噪声，不应成为 Skill 流程问题。
+        benign_disconnect = bool(re.search(
+            r"ERR_(?:CONNECTION_CLOSED|ABORTED|CANCELED)|Target page, context or browser has been closed",
+            detail,
+            re.I,
+        )) and req_idx not in kept_request_indices and url not in kept_urls
+        if benign_disconnect:
+            continue
         if kind == "requestfailed" and (req_idx in kept_request_indices or url in kept_urls):
             errors.append(f"录制期业务请求失败: {detail[:200]}")
         elif kind == "pageerror":
@@ -6574,6 +6880,13 @@ def _param_looks_exposed_internal_value(param: ParamField) -> bool:
     """内部 ID/短码/空 id 不应作为普通用户输入暴露。"""
     if param.category != "user_param" or not param.exposed_to_user:
         return False
+    if (
+        param.source_kind in _OPTION_SOURCE_KINDS
+        and bool(param.enum_value_map or param.enum_options)
+        and _enum_map_covers_recorded_value(param)
+    ):
+        # 调用方看到的是业务 label，运行期才映射为内部 ID；这正是正确的枚举契约。
+        return False
     if param.source_kind not in {"user_input", "unknown", "api_option"}:
         return False
     path_key = f"{param.path}.{param.key}"
@@ -6589,6 +6902,11 @@ def _param_looks_exposed_internal_value(param: ParamField) -> bool:
 
 def _publish_issue_category(message: str) -> str:
     text = str(message or "").lower()
+    if any(token in text for token in (
+        "console", "pageerror", "requestfailed", "诊断", "控制台", "页面异常",
+        "录制期业务请求失败", "err_connection", "err_aborted",
+    )):
+        return "diagnostic"
     if "capability" in text or "能力" in text:
         return "capability"
     if "链接" in text or "依赖" in text or "link" in text or "source_path" in text or "target_path" in text:
@@ -6597,8 +6915,6 @@ def _publish_issue_category(message: str) -> str:
         return "field"
     if any(token in text for token in ("步骤", "接口", "请求", "step", "request")):
         return "interface"
-    if any(token in text for token in ("console", "pageerror", "requestfailed", "诊断")):
-        return "diagnostic"
     if any(token in text for token in ("dry-run", "dry_run", "success_rule", "成功判断", "fact_check", "self_check")):
         return "execution"
     return "flow"
@@ -6612,19 +6928,54 @@ def _publish_issue_groups(
     groups: dict[str, list[dict[str, Any]]] = {
         key: [] for key in ("capability", "interface", "field", "dependency", "execution", "diagnostic", "flow")
     }
-    seen: set[tuple[str, str, str]] = set()
+    seen: dict[tuple[Any, ...], tuple[str, int]] = {}
+    severity_rank = {"error": 3, "high": 3, "warning": 2, "medium": 2, "low": 1}
+
+    def semantic_key(
+        category: str,
+        message: str,
+        target: dict[str, Any] | None,
+    ) -> tuple[Any, ...]:
+        target = target or {}
+        if category == "dependency":
+            link_id = str(target.get("link_id") or target.get("dependency_id") or "")
+            if link_id:
+                return (category, "link", link_id)
+            endpoints = tuple(str(target.get(k) or "") for k in (
+                "source_step_id", "source_path", "target_step_id", "target_path",
+            ))
+            if any(endpoints):
+                return (category, "endpoints", *endpoints)
+        if category == "field":
+            field_id = str(target.get("field_id") or "")
+            step_id = str(target.get("step_id") or "")
+            path = str(target.get("path") or target.get("key") or "")
+            if field_id or step_id or path:
+                return (category, target.get("capability") or "", field_id, step_id, path)
+        if category == "capability" and target.get("capability"):
+            return (category, target.get("capability"), target.get("code") or message)
+        return (category, message)
 
     def add(category: str, severity: str, message: str, *, source: str, target: dict[str, Any] | None = None) -> None:
-        key = (category, severity, message)
-        if not message or key in seen:
+        if not message:
             return
-        seen.add(key)
-        groups.setdefault(category, []).append({
+        key = semantic_key(category, message, target)
+        existing = seen.get(key)
+        entry = {
             "severity": severity,
             "message": message,
             "source": source,
             "target": target or {},
-        })
+        }
+        if existing is not None:
+            existing_category, existing_index = existing
+            old = groups[existing_category][existing_index]
+            if severity_rank.get(severity, 0) > severity_rank.get(str(old.get("severity") or ""), 0):
+                groups[existing_category][existing_index] = entry
+            return
+        bucket = groups.setdefault(category, [])
+        seen[key] = (category, len(bucket))
+        bucket.append(entry)
 
     for item in review_items:
         if item.resolved:
@@ -7802,7 +8153,12 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
 
         if op == "generate_capabilities":
             existing = list(new_spec.capabilities or [])
-            new_spec.capabilities = _merge_capability_lists(existing, build_default_flow_capabilities(new_spec), spec=new_spec)
+            new_spec.capabilities = _merge_capability_lists(
+                existing,
+                build_default_flow_capabilities(new_spec),
+                spec=new_spec,
+                allow_new=not bool(existing),
+            )
             new_spec.meta = {
                 **(new_spec.meta or {}),
                 "capability_model": {
@@ -7825,14 +8181,14 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 raise ValueError(f"invalid capability data: {e}")
             if any(c.name == cap.name for c in new_spec.capabilities):
                 raise ValueError(f"duplicate capability name: {cap.name}")
-            _forget_removed_capability(new_spec, cap.name)
+            _forget_removed_capability(new_spec, cap.name, cap.kind)
             new_spec.capabilities.append(cap)
             continue
 
         if op == "remove_capability":
             idx = _find_capability_index(new_spec, edit)
             cap = new_spec.capabilities.pop(idx)
-            _remember_removed_capability(new_spec, cap.name)
+            _remember_removed_capability(new_spec, cap.name, cap.kind)
             removed_refs = {str(cap.name or ""), str(cap.capability_id or "")}
             new_spec.capability_relations = [
                 relation for relation in (new_spec.capability_relations or [])
@@ -7905,6 +8261,8 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 raw.setdefault("name", name)
                 raw.setdefault("title", raw["name"])
                 raw.setdefault("kind", "submit")
+                raw.setdefault("confidence", 0.7)
+                raw.setdefault("requires_human_confirm", True)
                 new_spec.capabilities.append(FlowCapability.model_validate(raw))
             else:
                 cap = new_spec.capabilities[idx]
@@ -7971,16 +8329,16 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             step_id = str(edit.get("step_id") or "")
             _remember_removed_capability_step(new_spec, new_spec.capabilities[idx].name, step_id)
             new_spec.capabilities[idx].step_ids = [sid for sid in new_spec.capabilities[idx].step_ids if sid != step_id]
-            new_spec.capabilities[idx].nodes = [
-                n for n in (new_spec.capabilities[idx].nodes or [])
-                if not (n.get("type") == "call" and n.get("step_id") == step_id)
-            ]
+            new_spec.capabilities[idx].nodes = _remove_capability_step_nodes(
+                new_spec.capabilities[idx].nodes or [], step_id,
+            )
             new_spec.capabilities[idx].updated_by = "user"
             _sync_capability_order(new_spec, new_spec.capabilities[idx])
             continue
 
         if op == "bind_dependency":
             idx = _find_capability_index(new_spec, edit)
+            cap = new_spec.capabilities[idx]
             raw = dict(edit.get("dependency") or {})
             raw.setdefault("type", edit.get("type") or "response_to_request")
             raw.setdefault("source", edit.get("source") or {
@@ -7995,8 +8353,26 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             raw.setdefault("locked", bool(edit.get("locked", False)))
             raw.setdefault("confidence", float(edit.get("confidence") or 0.75))
             raw.setdefault("reason", edit.get("reason") or "能力级修复绑定的依赖")
-            dep = _upsert_capability_dependency(new_spec.capabilities[idx], raw)
+            dep = _upsert_capability_dependency(cap, raw)
+            # 能力内依赖的两个端点必须同属该能力执行闭包；否则依赖视图会在下一次
+            # 同步时被正确判为无效并丢弃，造成“刚绑定又消失”。
+            for endpoint in (dep.source or {}, dep.target or {}):
+                endpoint_step_id = str(endpoint.get("step_id") or "")
+                if endpoint_step_id:
+                    _find_step(new_spec, endpoint_step_id)
+                    _add_step_id_to_capability(new_spec, cap, endpoint_step_id)
+                    if not any(
+                        n.get("type") == "call" and n.get("step_id") == endpoint_step_id
+                        for n in _iter_capability_nodes(cap.nodes or [])
+                        if isinstance(n, dict)
+                    ):
+                        cap.nodes.append({
+                            "id": f"call_{len(cap.nodes or []) + 1}",
+                            "type": "call",
+                            "step_id": endpoint_step_id,
+                        })
             _upsert_global_link_from_capability_dependency(new_spec, dep)
+            _sync_capability_order(new_spec, cap)
             continue
 
         if op in {"set_map", "set_condition"}:
@@ -8420,6 +8796,11 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
 _FLOW_AUTOFIX_SYSTEM = """你是录制型 Skill 的自动修正器。
 只能输出 JSON: {"ops":[...]}。
 不要输出完整 FlowSpec，不要编造 step_id/request_id/path。
+证据规则：
+- 字段重命名只能依据页面样例名、现有 label/evidence、请求路径和真实响应字段；证据不足保持原名。
+- 绑定上游依赖必须是唯一、类型兼容且业务语义相同的 response -> request，不得因日期、标题、备注或 0/1 等常见值相同就关联。
+- 绑定枚举必须使用 candidate_option_sources 的真实列表项，同时给出 value_key/label_key；内部 ID 不能直接暴露为用户输入。
+- 已确认、locked 或用户修改过的字段/能力不得覆盖；removed_capabilities/removed steps 不得恢复。
 允许操作:
 - {"op":"promote_request","request_id":"...","request_index":1}
 - {"op":"rename_field","step_id":"...","path":"...","label":"请假类型"}
@@ -8446,6 +8827,22 @@ _FLOW_AUTOFIX_SYSTEM = """你是录制型 Skill 的自动修正器。
 def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, Any]:
     graph = _request_graph_for_spec(spec)
     cap_validation = report.get("capability_validation") or {}
+    option_sources: list[dict[str, Any]] = []
+    for fact in (spec.request_facts.requests or []):
+        if (fact.method or "").upper() != "GET":
+            continue
+        items = as_list_payload(fact.response_json)
+        if not items:
+            continue
+        option_sources.append({
+            "request_id": fact.request_id,
+            "request_index": fact.request_index,
+            "path": fact.path or fact.url,
+            "sample_items": items[:20],
+            "count": len(items),
+        })
+        if len(option_sources) >= 30:
+            break
     return {
         "title": spec.title,
         "goal": spec.goal,
@@ -8474,10 +8871,15 @@ def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, A
                         "category": p.category,
                         "source_kind": p.source_kind,
                         "exposed_to_user": p.exposed_to_user,
+                        "reason": p.reason,
+                        "enum_options": list(p.enum_options or [])[:30],
+                        "enum_value_map": dict(p.enum_value_map or {}),
+                        "evidence": list(p.evidence or [])[:10],
                     }
                     for p in (st.params or [])[:60]
                 ],
                 "response_paths": [p for p, *_ in (_leaf_paths(st.response_json)[:80] if st.response_json is not None else [])],
+                "selects": [sel.model_dump(exclude_none=True) for sel in (st.selects or [])[:20]],
             }
             for st in spec.steps
         ],
@@ -8500,6 +8902,7 @@ def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, A
             }
             for r in (graph.get("all_requests") or [])[:120]
         ],
+        "candidate_option_sources": option_sources,
     }
 
 
@@ -8914,6 +9317,7 @@ async def auto_fix_flow_spec(
     model: str | None = None,
     timeout_s: float = 60.0,
     max_rounds: int = 3,
+    expand_requests: bool = True,
 ) -> FlowSpec:
     """一键修正：确定性补齐 + 可选 LLM 受限 patch + 重新校验。"""
     current = spec.model_copy(deep=True)
@@ -8926,7 +9330,7 @@ async def auto_fix_flow_spec(
             edits.append({"op": "generate_capabilities"})
         cap_report = report.get("capability_validation") or {}
         edits.extend(_deterministic_capability_repair_edits(current, report))
-        for item in cap_report.get("unused_high_confidence_requests") or []:
+        for item in (cap_report.get("unused_high_confidence_requests") or []) if expand_requests else []:
             role = item.get("role") or ""
             if role not in {"submit_anchor", "business_write", "business_get", "read_context", "read_option"}:
                 continue
@@ -8979,6 +9383,57 @@ async def auto_fix_flow_spec(
     return append_flow_version(refresh_review_items(_sync_capability_io_schemas(current)), "auto_fix", reason="一键自动修正")
 
 
+def _auto_confirm_ready_capabilities(spec: FlowSpec) -> FlowSpec:
+    """仅对证据完整、无待确认字段/依赖的高置信能力自动确认。"""
+    _normalize_capability_references(spec)
+    by_step = {step.step_id: step for step in spec.steps}
+    for cap in spec.capabilities or []:
+        if cap.confirmed:
+            continue
+        if cap.kind == "list_options" and cap.confidence >= 0.9:
+            cap.confirmed = True
+            cap.requires_human_confirm = False
+            cap.status = "confirmed"
+            continue
+        if float(cap.confidence or 0) < 0.9:
+            continue
+        step_ids = _capability_node_step_ids(cap)
+        cap_steps = [by_step[sid] for sid in step_ids if sid in by_step]
+        if not cap_steps:
+            continue
+        unsafe = False
+        for step in cap_steps:
+            for param in step.params or []:
+                if param.need_human_confirm:
+                    unsafe = True
+                    break
+                if param.category == "runtime_var" and param.source_kind == "unknown":
+                    unsafe = True
+                    break
+                if _param_looks_exposed_internal_value(param):
+                    unsafe = True
+                    break
+                if _capability_param_enum_issue(param):
+                    unsafe = True
+                    break
+            if unsafe:
+                break
+        if unsafe:
+            continue
+        scoped = set(step_ids)
+        if any(
+            not link.confirmed
+            for link in spec.links
+            if link.source_step_id in scoped and link.target_step_id in scoped
+        ):
+            continue
+        cap.confirmed = True
+        cap.requires_human_confirm = False
+        cap.status = "confirmed"
+        cap.updated_by = "planner"
+    return spec
+
+
 async def run_recording_pi_loop(
     spec: FlowSpec,
     *,
@@ -9016,13 +9471,16 @@ async def run_recording_pi_loop(
             "errors": len(report.get("errors") or []),
             "warnings": len(report.get("warnings") or []),
         })
-        if report.get("passed"):
-            break
-
-        # “生成/优化能力”只运行受控 Planner：它以当前能力为基线输出增量 patch，
-        # 不在同一次点击里再启动自动修复器扩张接口/字段范围。修复闭环仅由显式
-        # repair 或发布前 publish 模式执行，避免用户刚删除的内容被隐式补回。
-        if mode == "plan":
+        # plan 模式首次生成后仍执行一轮受限 Repair：能力校验可能已通过，但字段名、
+        # 枚举来源和输出映射仍可由 LLM 依据完整请求事实补强。后续轮次通过即停止，
+        # 避免重复点击时无边界改写人工内容。
+        needs_quality_repair = bool(
+            mode == "plan"
+            and round_idx == 0
+            and llm_client is not None
+            and model
+        )
+        if report.get("passed") and not needs_quality_repair:
             break
 
         current = await auto_fix_flow_spec(
@@ -9031,6 +9489,7 @@ async def run_recording_pi_loop(
             model=model,
             timeout_s=timeout_s,
             max_rounds=1,
+            expand_requests=mode != "plan",
         )
         fixed_report = validate_flow_spec(current)
         history.append({
@@ -9045,6 +9504,15 @@ async def run_recording_pi_loop(
             break
         run_planner = True
 
+    current = _auto_confirm_ready_capabilities(
+        _sync_capability_io_schemas(sync_flow_spec_models(current, prefer_request_facts=False))
+    )
+    if not str(current.business_description or "").strip():
+        current.business_description = render_business_description(current, llm_client=llm_client)
+        current.meta = {
+            **(current.meta or {}),
+            "business_description_source": "recording_pi_loop",
+        }
     current.meta = {
         **(current.meta or {}),
         "recording_pi_loop": {
@@ -9438,6 +9906,13 @@ def render_business_description(spec: FlowSpec, *, llm_client: Any | None = None
         risks.append("存在 GET 前置步骤，执行时会按 query_template 构造运行期 URL。")
     for risk in risks:
         lines.append(f"- {risk}")
+
+    lines.extend([
+        "",
+        "## 8.1 失败处理",
+        "- 任一步接口返回失败、响应无法解析或必需依赖取值为空时，立即停止后续写操作，并向调用方返回失败步骤、接口路径和原始错误摘要。",
+        "- 写操作不做隐式重试；是否重试由调用方根据幂等性和业务确认结果决定。",
+    ])
 
     lines.extend(["", "## 9. 需要人工确认的问题"])
     unresolved = [item for item in current.review_items if not item.resolved]

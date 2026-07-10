@@ -266,6 +266,64 @@ def test_suggest_selects_binds_field_to_list_source():
     assert b["source_url"].endswith("/system/user/list") and b["count"] == 2
 
 
+def test_suggest_selects_binds_long_entity_id_without_guessing_text_sibling():
+    """只有内部 ID 被提交时，枚举应挂在 ID 字段本身，不能猜相邻标题是显示字段。"""
+    seal_id = "f13a450364df1b8a269365f90f44aee0"
+    submit = json.dumps({
+        "sealId": seal_id,
+        "applyTitle": "出差用章申请",
+        "remark": "客户材料",
+    }, ensure_ascii=False)
+    reads = [{
+        "url": "/admin-api/system/seal/simple-list",
+        "json": {"data": [
+            {"id": seal_id, "name": "行政公章"},
+            {"id": "d8896f988f51434ea6cdb1a48d71ee99", "name": "合同章"},
+        ]},
+    }]
+
+    selects = suggest_selects(
+        submit,
+        reads,
+        {"申请标题": "出差用章申请", "备注": "客户材料", "印章": "行政公章"},
+    )
+
+    assert len(selects) == 1
+    assert selects[0]["path"] == "sealId"
+    assert "id_path" not in selects[0]
+    assert selects[0]["option_map"] == {
+        "行政公章": seal_id,
+        "合同章": "d8896f988f51434ea6cdb1a48d71ee99",
+    }
+
+
+def test_discover_step_links_includes_get_query_targets():
+    process_id = "oa_seal_apply:1:aa840521"
+    requests = [
+        {
+            "method": "GET",
+            "url": "/process-definition/get?key=oa_seal_apply",
+            "response_json": {"data": {"id": process_id}},
+        },
+        {
+            "method": "GET",
+            "url": "/approval-detail?processDefinitionId=oa_seal_apply%3A1%3Aaa840521&activityId=StartUserNode",
+            "response_json": {"data": {"node": "StartUserNode"}},
+        },
+    ]
+
+    links = discover_step_links(requests)
+
+    assert links == [{
+        "target_step": 1,
+        "target_path": "query.processDefinitionId",
+        "target_tokens": ["query", "processDefinitionId"],
+        "source_step": 0,
+        "source_path": "data.id",
+        "source_tokens": ["data", "id"],
+    }]
+
+
 def test_suggest_selects_code_dropdown_via_small_dict():
     """代码型下拉:type=2 命中字典小列表 dictValue=2 → 绑 select,agent 传"病假"、运行期换 2。"""
     submit = '{"type":2,"reason":"回家"}'

@@ -102,18 +102,19 @@ class ToFlowSpecTest(unittest.TestCase):
         lk = spec.links[0]
         self.assertEqual(lk.source_step_id, spec.steps[0].step_id)
         self.assertEqual(lk.target_step_id, spec.steps[1].step_id)
-        self.assertFalse(lk.confirmed)
+        self.assertTrue(lk.confirmed)
+        self.assertEqual(lk.confidence, 0.96)
         p_by_path = {p.path: p for p in spec.steps[1].params}
         self.assertEqual(p_by_path["flowTask.taskId"].category, "runtime_var")
         self.assertEqual(p_by_path["flowTask.taskId"].source_kind, "previous_response")
         self.assertEqual(p_by_path["flowTask.taskId"].source["step_id"], spec.steps[0].step_id)
         self.assertFalse(p_by_path["flowTask.taskId"].exposed_to_user)
         review_types = {item.type for item in spec.review_items}
-        self.assertIn("link_confirmation", review_types)
-        self.assertIn("field_category", review_types)
+        self.assertNotIn("link_confirmation", review_types)
+        self.assertNotIn("field_category", review_types)
         report = validate_flow_spec(spec)
-        self.assertGreaterEqual(report["review_summary"]["total"], 2)
-        self.assertTrue(any(i["type"] == "link_confirmation" for i in report["review_items"]))
+        self.assertEqual(report["review_summary"]["total"], 0)
+        self.assertFalse(any(i["type"] == "link_confirmation" for i in report["review_items"]))
 
         broken = apply_flow_edits(spec, [{
             "op": "update",
@@ -354,7 +355,7 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertEqual(s["capabilities"], [])
 
         orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=None, model=None))
-        self.assertIn("submit_batch", {c.kind for c in orchestrated.capabilities})
+        self.assertIn("submit", {c.kind for c in orchestrated.capabilities})
         st_sum = s["steps"][0]
         self.assertIn("step_id", st_sum)
         self.assertNotIn("params", st_sum)  # 轻量摘要不含 params
@@ -535,13 +536,12 @@ class GetBusinessStepTest(unittest.TestCase):
         get_step = next(s for s in spec.steps if "/getappid" in s.path)
         get_params = {p.path: p for p in get_step.params}
         self.assertEqual(get_params["query.appId"].category, "system_const")
-        self.assertEqual(get_params["query.appId"].source_kind, "page_context")
+        self.assertEqual(get_params["query.appId"].source_kind, "constant")
         self.assertFalse(get_params["query.appId"].exposed_to_user)
-        self.assertTrue(get_params["query.appId"].need_human_confirm)
+        self.assertFalse(get_params["query.appId"].need_human_confirm)
         review_types = {item.type for item in spec.review_items}
-        self.assertIn("request_role", review_types)
         self.assertIn("field_category", review_types)
-        self.assertTrue(any(item.target.get("path") == "query.appId" for item in spec.review_items))
+        self.assertFalse(any(item.target.get("path") == "query.appId" for item in spec.review_items))
 
         desc = render_business_description(spec)
         for heading in [
@@ -560,7 +560,7 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertIn("conversation_id", desc)
         self.assertIn("appCode", desc)
         self.assertIn("getappid", desc)
-        self.assertIn("待确认", desc)
+        self.assertIn("需要人工确认", desc)
 
         apir, errors = flow_spec_to_api_request(spec)
         self.assertEqual(errors, [])
@@ -727,20 +727,20 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertEqual(spec.capabilities, [])
         orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=None, model=None))
         cap_kinds = {c.kind for c in orchestrated.capabilities}
-        self.assertEqual(cap_kinds, {"query_status", "submit_batch"})
-        query_cap = next(c for c in orchestrated.capabilities if c.kind == "query_status")
-        submit_cap = next(c for c in orchestrated.capabilities if c.kind == "submit_batch")
-        self.assertTrue(any("/get-approval-detail" in s.path for s in orchestrated.steps if s.step_id in query_cap.step_ids))
+        self.assertEqual(cap_kinds, {"list_options", "submit"})
+        submit_cap = next(c for c in orchestrated.capabilities if c.kind == "submit")
+        # 审批详情是提交能力的控制前置，不重复拆成独立状态查询能力。
+        self.assertTrue(any("/get-approval-detail" in s.path for s in orchestrated.steps if s.step_id in submit_cap.step_ids))
         self.assertTrue(any("/submit-process" in s.path for s in orchestrated.steps if s.step_id in submit_cap.step_ids))
 
         client = flow_spec_to_client(orchestrated)
         self.assertIn("capabilities", client)
-        self.assertEqual({c["kind"] for c in client["capabilities"]}, {"query_status", "submit_batch"})
+        self.assertEqual({c["kind"] for c in client["capabilities"]}, {"list_options", "submit"})
         apir, errors = flow_spec_to_api_request(orchestrated)
         self.assertEqual(errors, [])
         self.assertIn("capabilities", apir)
         self.assertTrue(all(s.get("step_id") for s in apir["steps"]))
-        self.assertIn("submit_batch", {c["kind"] for c in apir["capabilities"]})
+        self.assertIn("submit", {c["kind"] for c in apir["capabilities"]})
 
     def test_capability_validate_gate_sanitizes_stale_missing_step(self):
         spec = FlowSpec(

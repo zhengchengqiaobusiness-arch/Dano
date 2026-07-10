@@ -135,6 +135,7 @@ interface RequestGraphEntry {
   response_json?: any; response_schema?: any; evidence?: any;
   page_id?: string | null; frame_id?: string | null; sequence?: number | string | null;
   state?: string; materialized_step_id?: string;
+  used_by_capabilities?: string[];
   headers?: Record<string, string>; post_data?: any; content_type?: string;
   occurrence_count?: number;
 }
@@ -670,7 +671,7 @@ function allCapturedRequests(spec?: FlowSpecData | null) {
   const graph = spec?.meta?.request_graph || {};
   const factSource = (facts?.requests || []).map((req) => {
     const key = requestGraphKey(req);
-    const analysis = facts?.analysis?.[req.request_id || key] || facts?.analysis?.[key] || {};
+    const analysis = (facts?.analysis?.[req.request_id || key] || facts?.analysis?.[key] || {}) as Partial<RequestRoleData & Record<string, any>>;
     const usage = facts?.usage?.[req.request_id || key] || facts?.usage?.[key] || {};
     return {
       ...req,
@@ -680,6 +681,10 @@ function allCapturedRequests(spec?: FlowSpecData | null) {
       confidence: typeof req.confidence === "number" ? req.confidence : analysis.confidence,
       state: req.state || usage.state,
       materialized_step_id: req.materialized_step_id || usage.materialized_step_id,
+      used_by_capabilities: Array.from(new Set([
+        ...(req.used_by_capabilities || []),
+        ...(usage.used_by_capabilities || []),
+      ].filter(Boolean))),
     };
   });
   const source = factSource.length ? factSource : graph.all_requests?.length ? graph.all_requests : [
@@ -713,8 +718,16 @@ function allCapturedRequests(spec?: FlowSpecData | null) {
       continue;
     }
     current.occurrence_count = (current.occurrence_count || 1) + 1;
+    current.used_by_capabilities = Array.from(new Set([
+      ...(current.used_by_capabilities || []),
+      ...(req.used_by_capabilities || []),
+    ]));
     if (current.response_json == null && req.response_json != null) {
-      grouped.set(signature, { ...req, occurrence_count: current.occurrence_count });
+      grouped.set(signature, {
+        ...req,
+        occurrence_count: current.occurrence_count,
+        used_by_capabilities: current.used_by_capabilities,
+      });
     }
   }
   return Array.from(grouped.values());
@@ -737,14 +750,71 @@ function findCapturedRequest(spec: FlowSpecData | null | undefined, key?: string
 function stepRequestSignature(step: FlowStepData) {
   return `${(step.method || "").toUpperCase()} ${purePath(step.path || step.url)}`;
 }
-function isRequestInSteps(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
-  const sig = requestGraphSignature(req);
-  return (spec?.steps || []).some((st) => {
-    const meta = st.source_meta || {};
+const CAPABILITY_NODE_CHILD_KEYS = ["children", "steps", "then", "else", "otherwise"] as const;
+function capabilityNodeStepIds(nodes?: Array<Record<string, any>>) {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const visit = (items: any) => {
+    if (!Array.isArray(items)) return;
+    for (const node of items) {
+      if (!node || typeof node !== "object") continue;
+      if (String(node.type || "") === "call") {
+        const stepId = String(node.step_id || "").trim();
+        if (stepId && !seen.has(stepId)) {
+          seen.add(stepId);
+          ordered.push(stepId);
+        }
+      }
+      for (const key of CAPABILITY_NODE_CHILD_KEYS) visit(node[key]);
+    }
+  };
+  visit(nodes || []);
+  return ordered;
+}
+function capabilityActualStepIds(cap?: FlowCapabilityData | null) {
+  const ordered = capabilityNodeStepIds(cap?.nodes);
+  const seen = new Set(ordered);
+  for (const raw of cap?.step_ids || []) {
+    const stepId = String(raw || "").trim();
+    if (!stepId || seen.has(stepId)) continue;
+    seen.add(stepId);
+    ordered.push(stepId);
+  }
+  return ordered;
+}
+function capturedRequestSteps(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
+  const signature = requestGraphSignature(req);
+  return (spec?.steps || []).filter((step) => {
+    const meta = step.source_meta || {};
     return (req.request_id && String(meta.request_id || "") === String(req.request_id)) ||
       (req.request_index != null && String(meta.request_index ?? "") === String(req.request_index)) ||
-      stepRequestSignature(st) === sig;
+      stepRequestSignature(step) === signature;
   });
+}
+function capturedRequestCapabilityNames(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
+  const requestStepIds = new Set(capturedRequestSteps(spec, req).map((step) => step.step_id));
+  const names = (spec?.capabilities || [])
+    .filter((cap) => capabilityActualStepIds(cap).some((stepId) => requestStepIds.has(stepId)))
+    .map((cap) => String(cap.title || cap.name || cap.capability_id || "").trim())
+    .filter(Boolean);
+  return Array.from(new Set(names));
+}
+function isCapturedRequestFieldCandidate(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
+  if (req.role === "read_option") return true;
+  const reqPath = requestGraphPath(req);
+  const usedAsSelectSource = (spec?.steps || []).some((step) => (step.selects || []).some((select) =>
+    (req.request_id && String(select.source_request_id || "") === String(req.request_id)) ||
+    (select.source_url && purePath(select.source_url) === purePath(reqPath))
+  ));
+  if (usedAsSelectSource) return true;
+  return (spec?.request_facts?.option_sources || []).some((source: any) => {
+    if (!source || typeof source !== "object") return false;
+    return (req.request_id && [source.request_id, source.source_request_id].some((value) => String(value || "") === String(req.request_id))) ||
+      [source.path, source.url, source.source_url].some((value) => value && purePath(String(value)) === purePath(reqPath));
+  });
+}
+function isRequestInSteps(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
+  return capturedRequestSteps(spec, req).length > 0;
 }
 function capturedRequestOptions(spec: FlowSpecData | null | undefined, opts: { includeIncluded?: boolean } = {}) {
   return allCapturedRequests(spec)
@@ -756,11 +826,11 @@ function capturedRequestOptions(spec: FlowSpecData | null | undefined, opts: { i
     .filter((x) => x.value);
 }
 function confidencePercent(value?: number) {
-  if (typeof value !== "number" || Number.isNaN(value)) return "";
+  if (typeof value !== "number" || Number.isNaN(value) || value <= 0) return "待评估";
   return `${Math.round(value * 100)}%`;
 }
 function confidenceColor(value?: number) {
-  if (typeof value !== "number") return "default";
+  if (typeof value !== "number" || Number.isNaN(value) || value <= 0) return "default";
   if (value >= 0.9) return "success";
   if (value >= 0.7) return "warning";
   return "error";
@@ -1481,7 +1551,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           target_step_id: targetStepId,
           target_path: targetPath,
           confirmed: true,
-          confidence: suggestion.confidence || 0,
+          ...(typeof suggestion.confidence === "number" ? { confidence: suggestion.confidence } : {}),
           reason: suggestion.reason || "LLM 推荐并由用户确认的上游响应依赖",
         },
       });
@@ -1753,7 +1823,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const list = (checkReport?.review_items?.length ? checkReport.review_items : flowSpec?.review_items) || [];
     const capStepIds = new Set<string>();
     for (const cap of (flowSpec?.capabilities || [])) {
-      for (const sid of (cap.step_ids || [])) capStepIds.add(sid);
+      for (const sid of capabilityActualStepIds(cap)) capStepIds.add(sid);
     }
     return list
       .filter((i) => !i.resolved && i.severity === "high")
@@ -2132,39 +2202,44 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!flowSpec) return null;
     const rows = allCapturedRequests(flowSpec);
     if (!rows.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有捕获接口" />;
-    const includedStep = (req: RequestGraphEntry) => (flowSpec.steps || []).find((st) => isRequestInSteps(flowSpec, req) && stepRequestSignature(st) === requestGraphSignature(req));
     return (
       <List
         size="small"
         rowKey={(req) => requestOptionValue(req)}
         dataSource={rows}
-        renderItem={(req, idx) => (
-          <List.Item
-            style={{ paddingLeft: 0, paddingRight: 0 }}
-            actions={[
-              <Button key="goto" size="small" onClick={() => setActiveFlowTab("abilities")}>去能力处理</Button>,
-            ]}
-          >
-            <Space direction="vertical" size={4} style={{ width: "100%" }}>
-              <Space wrap>
-                <Tag>{idx + 1}</Tag>
-                <Tag color={(req.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{req.method || "GET"}</Tag>
-                <PathText value={req.path || stripHost(req.url || "")} maxWidth={620} />
-                {(req.occurrence_count || 1) > 1 && <Tag>{req.occurrence_count} 次</Tag>}
-                {includedStep(req) && <Tag color="success">已纳入能力/字段</Tag>}
-                {req.role && <Tag>{req.role}</Tag>}
-                {typeof req.confidence === "number" && <Tag color={confidenceColor(req.confidence)}>{confidencePercent(req.confidence)}</Tag>}
-                {req.response_status != null && <Tag>{req.response_status}</Tag>}
+        renderItem={(req, idx) => {
+          const capabilityNames = capturedRequestCapabilityNames(flowSpec, req);
+          const fieldCandidate = !capabilityNames.length && isCapturedRequestFieldCandidate(flowSpec, req);
+          return (
+            <List.Item
+              style={{ paddingLeft: 0, paddingRight: 0 }}
+              actions={[
+                <Button key="goto" size="small" onClick={() => setActiveFlowTab("abilities")}>去能力处理</Button>,
+              ]}
+            >
+              <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                <Space wrap>
+                  <Tag>{idx + 1}</Tag>
+                  <Tag color={(req.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{req.method || "GET"}</Tag>
+                  <PathText value={req.path || stripHost(req.url || "")} maxWidth={620} />
+                  {(req.occurrence_count || 1) > 1 && <Tag>{req.occurrence_count} 次</Tag>}
+                  {capabilityNames.map((name) => <Tag color="success" key={name}>能力：{name}</Tag>)}
+                  {!capabilityNames.length && fieldCandidate && <Tag color="cyan">仅字段候选</Tag>}
+                  {!capabilityNames.length && !fieldCandidate && <Tag>仅事实</Tag>}
+                  {req.role && <Tag>{req.role}</Tag>}
+                  <Tag color={confidenceColor(req.confidence)}>置信度 {confidencePercent(req.confidence)}</Tag>
+                  {req.response_status != null && <Tag>{req.response_status}</Tag>}
+                </Space>
+                {req.reason && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{req.reason}</Typography.Text>}
               </Space>
-              {req.reason && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{req.reason}</Typography.Text>}
-            </Space>
-          </List.Item>
-        )}
+            </List.Item>
+          );
+        }}
       />
     );
   }
   function capabilityStepSelectOptions(cap: FlowCapabilityData) {
-    const existing = new Set(cap.step_ids || []);
+    const existing = new Set(capabilityActualStepIds(cap));
     const allStepReqKeys = new Set((flowSpec?.steps || []).flatMap((s) => {
       const meta = s.source_meta || {};
       const keys: string[] = [];
@@ -2479,7 +2554,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     );
   }
   function renderCapabilityStepWithFields(cap: FlowCapabilityData, capIdx: number, stepId: string, stepIdx: number) {
-    const stepIds = cap.step_ids || [];
+    const stepIds = capabilityActualStepIds(cap);
     const scopedStepIds = new Set(stepIds);
     const st = stepById[stepId];
     if (!st) {
@@ -2514,7 +2589,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     );
   }
   function renderCapabilityInterfacesWithFields(cap: FlowCapabilityData, capIdx: number) {
-    const stepIds = cap.step_ids || [];
+    const stepIds = capabilityActualStepIds(cap);
     const addOptions = capabilityStepSelectOptions(cap);
     const fieldCount = stepIds.reduce((n, sid) => n + (stepById[sid]?.params?.length || 0), 0);
     return (
@@ -2552,7 +2627,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function renderCapabilityDependencyEditor(cap: FlowCapabilityData) {
     if (!flowSpec) return null;
-    const stepIds = new Set(cap.step_ids || []);
+    const stepIds = new Set(capabilityActualStepIds(cap));
     const scopedSteps = (flowSpec.steps || []).filter((s) => stepIds.has(s.step_id));
     const scopedStepOptions = scopedSteps.map((s) => ({
       label: `${s.name || s.path} · ${s.method} ${s.path}`,
@@ -2684,7 +2759,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         {!capabilities.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有能力编排" /> : (
           <Collapse size="small">
             {capabilities.map((cap, idx) => {
-              const stepIds = cap.step_ids || [];
+              const stepIds = capabilityActualStepIds(cap);
               const capSteps = stepIds.map((sid) => stepById[sid]).filter(Boolean);
               const capParams = capSteps.flatMap((st) => st.params || []);
               const derivedInputSchema = {
@@ -2705,7 +2780,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     <Space wrap>
                       <Tag color={cap.confirmed ? "success" : "warning"}>{cap.confirmed ? "已确认" : "未确认"}</Tag>
                       <Tag color="blue">{optionLabel(kindOptions, cap.kind || "submit")}</Tag>
-                      {typeof cap.confidence === "number" && <Tag color={confidenceColor(cap.confidence)}>置信度 {confidencePercent(cap.confidence)}</Tag>}
+                      <Tag color={confidenceColor(cap.confidence)}>置信度 {confidencePercent(cap.confidence)}</Tag>
                       <Typography.Text strong>{cap.title || cap.name || `能力 ${idx + 1}`}</Typography.Text>
                       {cap.name && <Typography.Text code>{cap.name}</Typography.Text>}
                     </Space>
@@ -2796,9 +2871,27 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         <List
           dataSource={capabilities}
           renderItem={(cap, idx) => {
-            const stepIds = cap.step_ids || [];
+            const stepIds = capabilityActualStepIds(cap);
             const mappings = cap.output_mapping || [];
             const preconditions = cap.preconditions || [];
+            const capSteps = stepIds.map((stepId) => stepById[stepId]).filter(Boolean);
+            const capParams = capSteps.flatMap((step) => step.params || []);
+            const derivedInputSchema = {
+              type: "object",
+              properties: Object.fromEntries(capParams
+                .filter((param) => param.category === "user_param" && param.exposed_to_user !== false)
+                .map((param) => [param.key || param.path, jsonSchemaForParam(param)])),
+              required: capParams
+                .filter((param) => param.category === "user_param" && param.exposed_to_user !== false && param.required)
+                .map((param) => param.key || param.path),
+            };
+            const lastResponse = [...capSteps].reverse().find((step) => step.response_json != null)?.response_json;
+            const inputSchema = Object.keys(cap.input_schema?.properties || {}).length
+              ? cap.input_schema
+              : derivedInputSchema;
+            const outputSchema = Object.keys(cap.output_schema?.properties || {}).length
+              ? cap.output_schema
+              : (lastResponse != null ? inferJsonSchema(lastResponse) : {});
             return (
               <List.Item
                 style={{ paddingLeft: 0, paddingRight: 0 }}
@@ -2820,7 +2913,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                           <Tag color={cap.confirmed ? "success" : "warning"}>{cap.confirmed ? "已确认" : "待确认"}</Tag>
                           {cap.requires_human_confirm && <Tag color="orange">需要人工确认</Tag>}
                           {cap.kind && <Tag color="blue">{cap.kind}</Tag>}
-                          {typeof cap.confidence === "number" && <Tag color={confidenceColor(cap.confidence)}>置信度 {confidencePercent(cap.confidence)}</Tag>}
+                          <Tag color={confidenceColor(cap.confidence)}>置信度 {confidencePercent(cap.confidence)}</Tag>
                           <Typography.Text strong>{cap.title || cap.name || `能力 ${idx + 1}`}</Typography.Text>
                           {cap.name && <Typography.Text code>{cap.name}</Typography.Text>}
                         </Space>
@@ -2828,8 +2921,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                       </Col>
                     </Row>
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
-                      {schemaBlock("输入", cap.input_schema, "未声明输入")}
-                      {schemaBlock("输出", cap.output_schema, "未声明输出")}
+                      {schemaBlock("输入", inputSchema, "未声明输入")}
+                      {schemaBlock("输出", outputSchema, "未声明输出")}
                       <div>
                         <Typography.Text strong style={{ fontSize: 12 }}>步骤</Typography.Text>
                         <Space direction="vertical" size={4} style={{ width: "100%", marginTop: 6 }}>
@@ -2936,7 +3029,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                           <Space wrap>
                             <Tag color="blue">LLM 建议</Tag>
                             <Tag>{s.action}</Tag>
-                            {typeof s.confidence === "number" && <Tag>{Math.round(s.confidence * 100)}%</Tag>}
+                            <Tag color={confidenceColor(s.confidence)}>置信度 {confidencePercent(s.confidence)}</Tag>
                             {s.source_step_id && <Typography.Text code>{s.source_step_id}</Typography.Text>}
                             {s.source_path && <Typography.Text code>{s.source_path}</Typography.Text>}
                             {s.source_kind && <Typography.Text code>{s.source_kind}</Typography.Text>}
