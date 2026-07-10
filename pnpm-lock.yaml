@@ -45,8 +45,8 @@ importers:
         specifier: ^3.12.2
         version: 3.12.2
       '@josephyoung/pi-heimdall':
-        specifier: 0.2.16
-        version: 0.2.16(@earendil-works/pi-coding-agent@0.80.2(ws@8.21.0)(zod@4.4.3))
+        specifier: 0.2.17
+        version: 0.2.17(@earendil-works/pi-coding-agent@0.80.2(ws@8.21.0)(zod@4.4.3))
       bits-ui:
         specifier: ^2.18.1
         version: 2.18.1(@internationalized/date@3.12.2)(svelte@5.56.3)
@@ -312,8 +312,8 @@ packages:
   '@internationalized/date@3.12.2':
     resolution: {integrity: sha512-FY1Y+H64NDs+HAF6omlnWxm3mEpfgaCSWtL5l551ZZfImA+kGjPFgrnJrGjH6lfmLL0g8Z/mBu1R3kufeCp6Jw==}
 
-  '@josephyoung/pi-heimdall@0.2.16':
-    resolution: {integrity: sha512-qXvAcAmvz4lOdYJCE09dSyxxLAzMDg8GUxCCWJafnHK6I0AlruyW4cR3CbZCT/hwUro/aHs6Zzo5j3qNPcoMVg==}
+  '@josephyoung/pi-heimdall@0.2.17':
+    resolution: {integrity: sha512-WnKpPoW6Qil/e9ErOS6Gy0G/KboHIWEbyKlwn2qFf5MgmleFIaNl6jv4ObfVi/S8s2HjFVyO+CzttO1MTMnZ9w==}
     engines: {node: '>=22.19.0'}
     peerDependencies:
       '@earendil-works/pi-coding-agent': '*'
@@ -2257,7 +2257,7 @@ snapshots:
     dependencies:
       '@swc/helpers': 0.5.23
 
-  '@josephyoung/pi-heimdall@0.2.16(@earendil-works/pi-coding-agent@0.80.2(ws@8.21.0)(zod@4.4.3))':
+  '@josephyoung/pi-heimdall@0.2.17(@earendil-works/pi-coding-agent@0.80.2(ws@8.21.0)(zod@4.4.3))':
     dependencies:
       '@earendil-works/pi-coding-agent': 0.80.2(ws@8.21.0)(zod@4.4.3)
       shell-quote: 1.8.4

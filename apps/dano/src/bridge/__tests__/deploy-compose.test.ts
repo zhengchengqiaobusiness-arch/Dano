@@ -246,7 +246,10 @@ describe("deploy compose wrapper", () => {
     expect(dockerfileText).toContain("ENV HOME=/home/node");
     expect(dockerfileText).toContain("ENV DANO_RUNTIME_DIR=/opt/dano/runtime-data");
     expect(dockerfileText).toContain("ENV HEIMDALL_BWRAP_BIND_KERNEL_FS=1");
-    expect(dockerfileText).toContain("ENV HEIMDALL_BWRAP_BIND_ROOT=/opt/dano");
+    expect(dockerfileText).toContain("ENV HEIMDALL_BWRAP_BIND_PROC=0");
+    expect(dockerfileText).toContain(
+      "ENV HEIMDALL_BWRAP_BIND_ROOT=/opt/dano/runtime-data/workspaces",
+    );
     expect(dockerfileText).not.toContain("COPY patches");
     expect(dockerfileText).not.toContain("patched_heimdall_dir=");
     expect(dockerfileText).not.toContain("prod_heimdall_dir=");

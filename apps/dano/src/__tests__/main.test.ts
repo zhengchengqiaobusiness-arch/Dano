@@ -54,7 +54,7 @@ describe("Dano main", () => {
     };
 
     expect(appPackage.dependencies?.["@josephyoung/pi-heimdall"]).toBe(
-      "0.2.16",
+      "0.2.17",
     );
     expect(appPackage.dependencies?.["@earendil-works/pi-coding-agent"]).toBe(
       "0.80.2",
@@ -71,8 +71,15 @@ describe("Dano main", () => {
       { mode: "write" },
       { path: ".pi" },
     ]);
-    expect(heimdall.sandbox?.paths?.["$DANO_RUNTIME_DIR/.pi"]).toEqual({});
-    expect(heimdall.sandbox?.paths?.["$PI_CODING_AGENT_DIR"]).toEqual({});
+    expect(heimdall.sandbox?.paths?.["/opt"]).toEqual([
+      { path: "$DANO_RUNTIME_DIR/.agents/skills" },
+    ]);
+    expect(heimdall.sandbox?.paths?.["$DANO_RUNTIME_DIR/.pi"]).toEqual({
+      mode: "deny",
+    });
+    expect(heimdall.sandbox?.paths?.["$PI_CODING_AGENT_DIR"]).toEqual({
+      mode: "deny",
+    });
     expect(heimdall.sandbox?.paths?.["~/.pi"]).toEqual({});
     expect(heimdall.sandbox?.env?.allow).toEqual(
       expect.arrayContaining(["DANO_URL", "DANO_TENANT_KEY"]),
@@ -82,6 +89,7 @@ describe("Dano main", () => {
       'if (config.userNamespace) args.push("--unshare-user");',
     );
     expect(sandboxGuard).toContain("HEIMDALL_BWRAP_BIND_KERNEL_FS");
+    expect(sandboxGuard).toContain("HEIMDALL_BWRAP_BIND_PROC");
     expect(sandboxGuard).toContain("HEIMDALL_BWRAP_BIND_ROOT");
     expect(sandboxGuard).toContain("function bwrapBindRoot()");
     expect(sandboxGuard).toContain("writeMounts.push(bindRoot");
@@ -96,6 +104,9 @@ describe("Dano main", () => {
     expect(sandboxGuard).toContain('entry.mode === "write" ? "write"');
     expect(sandboxGuard).toContain("function protectedConfigBashBlockReason");
     expect(sandboxGuard).toContain("protectHeimdallConfigPaths");
+    expect(sandboxGuard).toContain(
+      'getSandboxPathAccess(config, cwd, path).access === "none"',
+    );
     expect(sandboxGuard).toContain("Blocked: bash cannot run because Heimdall Protected Configuration cannot be hidden without an active sandbox");
     expect(sandboxGuard).toContain("Blocked: ${event.toolName} attempted to ${operation} Heimdall Protected Configuration.");
     expect(sandboxGuard).toContain('args.push("--dev-bind", "/dev", "/dev");');

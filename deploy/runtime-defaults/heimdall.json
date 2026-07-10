@@ -7,8 +7,11 @@
         { "mode": "write" },
         { "path": ".pi" }
       ],
-      "$DANO_RUNTIME_DIR/.pi": {},
-      "$PI_CODING_AGENT_DIR": {},
+      "/opt": [
+        { "path": "$DANO_RUNTIME_DIR/.agents/skills" }
+      ],
+      "$DANO_RUNTIME_DIR/.pi": { "mode": "deny" },
+      "$PI_CODING_AGENT_DIR": { "mode": "deny" },
       "~/.pi": {}
     },
     "env": {
