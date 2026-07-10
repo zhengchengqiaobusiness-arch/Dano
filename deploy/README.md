@@ -17,10 +17,10 @@ This directory contains deployment-specific defaults and proxy config.
   `${DANO_RUNTIME_DIR:-/opt/dano/runtime-data}:/opt/dano/runtime-data` for
   host-visible runtime state such as sessions and skills. The `.pi` and
   `workspaces` subtrees are Compose named volumes, mounted at
-  `/opt/dano/runtime-data/.pi` and `/opt/dano/runtime-data/workspaces`, so
-  Heimdall can overlay-hide protected config files in Bubblewrap while protecting
-  runtime `.pi` files as read-only via `sandbox.paths`. Agent config, Runtime
-  Workspaces, and uploads still survive container recreation.
+  `/opt/dano/runtime-data/.pi` and `/opt/dano/runtime-data/workspaces`.
+  Model-triggered bash mounts Runtime Workspaces as writable and runtime skills
+  as read-only, but does not mount `/opt/dano/runtime-data/.pi` or its contents.
+  Agent config, Runtime Workspaces, and uploads still survive container recreation.
   Do not run Compose with `-v` unless you intend to remove those volumes.
 
 On container startup, `deploy/docker-entrypoint.sh` creates:
@@ -45,11 +45,13 @@ verified working combination for model-triggered Heimdall `bash`. The app
 process still runs as `node`, not root.
 
 The image also sets `HEIMDALL_BWRAP_BIND_KERNEL_FS=1` so Heimdall binds the
-container's existing `/dev` and `/proc` instead of asking Bubblewrap to mount
-nested kernel filesystems. It sets `HEIMDALL_BWRAP_BIND_ROOT=/opt/dano` because
-non-root Bubblewrap cannot remount the bind-mounted
-`/opt/dano/runtime-data` subtree directly, while binding the container-owned
-parent keeps Runtime Workspace paths usable.
+container's existing `/dev` instead of asking Bubblewrap to mount nested device
+filesystems. It sets `HEIMDALL_BWRAP_BIND_PROC=0` so chat-triggered bash cannot
+reach the outer container filesystem through `/proc/<pid>/root`. It also sets
+`HEIMDALL_BWRAP_BIND_ROOT=/opt/dano/runtime-data/workspaces` so non-root
+Bubblewrap can keep Runtime Workspaces writable without exposing sibling runtime
+state such as `.pi`. The sandbox replaces Heimdall's default `/opt` mount with
+the exact read-only runtime skills path.
 
 ## Local Compose Run
 

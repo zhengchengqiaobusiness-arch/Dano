@@ -44,7 +44,8 @@ ENV DANO_PORT=8080
 ENV DANO_RUNTIME_DIR=/opt/dano/runtime-data
 ENV HOME=/home/node
 ENV HEIMDALL_BWRAP_BIND_KERNEL_FS=1
-ENV HEIMDALL_BWRAP_BIND_ROOT=/opt/dano
+ENV HEIMDALL_BWRAP_BIND_PROC=0
+ENV HEIMDALL_BWRAP_BIND_ROOT=/opt/dano/runtime-data/workspaces
 
 COPY --from=build /prod/dano/package.json ./package.json
 COPY --from=build /app/package.json ./package-versions/package.json
