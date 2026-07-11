@@ -8,6 +8,12 @@ runtime_defaults_dir="${DANO_RUNTIME_DEFAULTS_DIR:-/app/deploy/runtime-defaults}
 npm_registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-${DANO_DEFAULT_NPM_REGISTRY:-https://mirrors.cloud.tencent.com/npm/}}}"
 
 mkdir -p "$agent_dir"
+mkdir -p "$agent_dir/bin"
+
+if fd_path="$(command -v fd)" && rg_path="$(command -v rg)"; then
+  ln -sf "$fd_path" "$agent_dir/bin/fd"
+  ln -sf "$rg_path" "$agent_dir/bin/rg"
+fi
 
 if command -v npm >/dev/null 2>&1; then
   npm config set registry "$npm_registry" >/dev/null

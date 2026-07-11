@@ -37,9 +37,6 @@ RUN sed -i 's|https\?://deb.debian.org/debian-security|http://mirrors.aliyun.com
   && apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates bubblewrap curl fd-find python3 ripgrep \
   && ln -sf "$(command -v fdfind)" /usr/local/bin/fd \
-  && mkdir -p /home/node/.pi/agent/bin \
-  && ln -sf "$(command -v fd)" /home/node/.pi/agent/bin/fd \
-  && ln -sf "$(command -v rg)" /home/node/.pi/agent/bin/rg \
   && chmod 4755 /usr/bin/bwrap \
   && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production

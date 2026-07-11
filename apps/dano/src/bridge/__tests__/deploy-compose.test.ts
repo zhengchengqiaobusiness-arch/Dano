@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readlinkSync,
   readdirSync,
   readFileSync,
   rmSync,
@@ -235,15 +236,13 @@ describe("deploy compose wrapper", () => {
 
   it("preinstalls Pi search tools in its runtime cache", () => {
     const dockerfileText = readFileSync(dockerfile, "utf8");
+    const entrypointText = readFileSync(entrypointFile, "utf8");
 
     expect(dockerfileText).toMatch(/fd-find[^\n]*ripgrep/);
     expect(dockerfileText).toContain("/usr/local/bin/fd");
-    expect(dockerfileText).toContain("/home/node/.pi/agent/bin");
-    expect(dockerfileText).toContain("/home/node/.pi/agent/bin/fd");
-    expect(dockerfileText).toContain("/home/node/.pi/agent/bin/rg");
-    expect(dockerfileText.indexOf("/home/node/.pi/agent/bin")).toBeLessThan(
-      dockerfileText.indexOf("USER node"),
-    );
+    expect(entrypointText).toContain('mkdir -p "$agent_dir/bin"');
+    expect(entrypointText).toContain('"$agent_dir/bin/fd"');
+    expect(entrypointText).toContain('"$agent_dir/bin/rg"');
   });
 
   it("keeps local package stores out of the Docker build context", () => {
@@ -588,9 +587,15 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     const workspaceDir = join(cwd, "workspace");
     const agentDir = join(runtimeDir, ".pi/agent");
     const agentDirOut = join(cwd, "agent-dir.txt");
+    const fakeBin = join(cwd, "bin");
 
     mkdirSync(defaultsDir, { recursive: true });
+    mkdirSync(fakeBin);
     mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(fakeBin, "fd"), "#!/bin/sh\n");
+    writeFileSync(join(fakeBin, "rg"), "#!/bin/sh\n");
+    chmodSync(join(fakeBin, "fd"), 0o755);
+    chmodSync(join(fakeBin, "rg"), 0o755);
     writeFileSync(join(defaultsDir, "SYSTEM.md"), "default system\n");
     writeFileSync(join(defaultsDir, "settings.json"), "{\"default\":true}\n");
     writeFileSync(join(defaultsDir, "heimdall.json"), "{\"guard\":true}\n");
@@ -604,7 +609,7 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     ], {
       env: {
         ...process.env,
-        PATH: "/usr/bin:/bin",
+        PATH: `${fakeBin}:/usr/bin:/bin`,
         DANO_RUNTIME_DEFAULTS_DIR: defaultsDir,
         DANO_RUNTIME_DIR: runtimeDir,
         DANO_DEFAULT_WORKSPACE_PATH: workspaceDir,
@@ -622,6 +627,8 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     expect(readFileSync(join(agentDir, "heimdall.json"), "utf8")).toBe(
       "{\"guard\":true}\n",
     );
+    expect(readlinkSync(join(agentDir, "bin/fd"))).toBe(join(fakeBin, "fd"));
+    expect(readlinkSync(join(agentDir, "bin/rg"))).toBe(join(fakeBin, "rg"));
     expect(existsSync(join(workspaceDir, ".pi"))).toBe(false);
   });
 
