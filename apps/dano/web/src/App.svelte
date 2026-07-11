@@ -50,6 +50,7 @@
     type DebugStreamPlan,
   } from "./utils/debugSession";
   import { parseCompactSlashCommand } from "./utils/slashCommands";
+  import { getRuntimeSlashCommandsAndMentionsEnabled } from "./utils/runtimeConfig";
 
   type RightSidebarTabId = string;
 
@@ -132,6 +133,8 @@
     (typeof window !== "undefined" &&
       window.__PI_WEB_CONFIG__?.debugModeAvailable === true) ||
     (import.meta.env.DEV && __PI_WEB_DEV_DEBUG__);
+  const slashCommandsAndMentionsEnabled =
+    getRuntimeSlashCommandsAndMentionsEnabled();
 
   function readCachedRailWidth(
     cacheKey: string,
@@ -942,7 +945,10 @@
       return true;
     }
 
-    const compactCommand = parseCompactSlashCommand(payload.message);
+    const compactCommand = parseCompactSlashCommand(
+      payload.message,
+      slashCommandsAndMentionsEnabled,
+    );
     if (compactCommand) {
       pendingRevision = null;
       bridge.compactSession(compactCommand.customInstructions).catch(() => {});
@@ -1262,6 +1268,7 @@
         isStreaming={displayedIsStreaming}
         isCompacting={displayedIsCompacting}
         isDebugMode={debugModeAvailable}
+        {slashCommandsAndMentionsEnabled}
         connectionStatus={bridge.connectionStatus}
         commands={bridge.commands}
         workspaceEntries={displayedWorkspaceEntries}

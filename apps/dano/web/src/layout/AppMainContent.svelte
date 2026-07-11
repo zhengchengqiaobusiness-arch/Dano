@@ -38,6 +38,7 @@
     isStreaming = false,
     isCompacting = false,
     isDebugMode = false,
+    slashCommandsAndMentionsEnabled = false,
     connectionStatus = "disconnected" as ConnectionStatus,
     commands = [] as readonly RpcSlashCommand[],
     workspaceEntries = [] as readonly RpcWorkspaceEntry[],
@@ -111,6 +112,7 @@
     isStreaming?: boolean;
     isCompacting?: boolean;
     isDebugMode?: boolean;
+    slashCommandsAndMentionsEnabled?: boolean;
     connectionStatus?: ConnectionStatus;
     commands?: readonly RpcSlashCommand[];
     workspaceEntries?: readonly RpcWorkspaceEntry[];
@@ -247,6 +249,7 @@
     {isStreaming}
     {isDebugMode}
     {isDebugSession}
+    {slashCommandsAndMentionsEnabled}
     {commands}
     {workspaceEntries}
     {workspaceEntriesLoading}

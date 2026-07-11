@@ -942,6 +942,16 @@ export interface BridgeQuickActionConfig {
   readonly prompt: string;
 }
 
+/** JSON-safe configuration injected by the Dano server into the browser page. */
+export interface BridgeBrowserRuntimeConfig {
+  readonly debugModeAvailable?: boolean;
+  readonly locale?: "zh-CN" | "en-US";
+  readonly productName?: string;
+  readonly emptyState?: Partial<BridgeEmptyStateConfig>;
+  readonly quickActions?: readonly BridgeQuickActionConfig[];
+  readonly slashCommandsAndMentionsEnabled?: boolean;
+}
+
 // ============================================================================
 // Wire Protocol (JSON over HTTP/SSE)
 // ============================================================================

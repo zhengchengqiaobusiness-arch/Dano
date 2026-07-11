@@ -23,7 +23,6 @@ import {
   debugSlashCommandOptions,
   getSlashCommandContext,
   mergeSlashCommandOptions,
-  parseCompactSlashCommand,
   slashCommandOptionsFromRpc,
 } from "../utils/slashCommands";
 import { getNextThinkingLevel } from "../utils/thinkingLevels";
@@ -37,7 +36,10 @@ import {
   shouldEnterInsertNewline,
   shouldSubmitComposerEnter,
 } from "./composerKeyboard";
-import { canSubmitComposerMessage } from "./composerSubmit";
+import {
+  canSubmitComposerMessage,
+  shouldRejectCompactAttachments,
+} from "./composerSubmit";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -47,6 +49,7 @@ export interface ComposerBarProps {
   readonly connectionStatus: ConnectionStatus;
   readonly isStreaming: boolean;
   readonly isDebugMode: boolean;
+  readonly slashCommandsAndMentionsEnabled: boolean;
   readonly commands: readonly RpcSlashCommand[];
   readonly workspaceEntries: readonly RpcWorkspaceEntry[];
   readonly workspaceEntriesLoading: boolean;
@@ -218,7 +221,11 @@ export function createComposerBarState(
 
   let isDisabled = $derived(props.connectionStatus !== "connected");
   let canEditPrompt = $derived(props.connectionStatus !== "connecting");
+  let slashCommandsEnabled = $derived(
+    props.slashCommandsAndMentionsEnabled,
+  );
   let availableSlashCommands = $derived.by(() => {
+    if (!slashCommandsEnabled) return [];
     const baseCommands = props.isDebugMode
       ? debugSlashCommandOptions()
       : slashCommandOptionsFromRpc(props.commands);
@@ -229,7 +236,11 @@ export function createComposerBarState(
   });
 
   let commandContext = $derived(
-    getSlashCommandContext($rx.inputText, $rx.cursorOffset),
+    getSlashCommandContext(
+      $rx.inputText,
+      $rx.cursorOffset,
+      slashCommandsEnabled,
+    ),
   );
 
   let filteredSlashCommands = $derived.by(() => {
@@ -563,7 +574,13 @@ export function createComposerBarState(
   ): Promise<boolean> {
     const text = normalizedInputText;
     if (!canSubmit) return false;
-    if (parseCompactSlashCommand(text) && hasAttachments) {
+    if (
+      shouldRejectCompactAttachments({
+        message: text,
+        hasAttachments,
+        slashCommandsEnabled,
+      })
+    ) {
       setAttachmentNotice(t("composer.warning.compactNoImages"));
       return false;
     }

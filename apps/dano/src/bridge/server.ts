@@ -18,6 +18,7 @@ import { getLanIps, isTailscaleIp } from "./network.js";
 import { UploadRegistry } from "./upload-registry.js";
 import type {
   BridgeConfig,
+  BridgeBrowserRuntimeConfig,
   BridgeEvent,
   ClientMessage,
   RpcUploadedFileRef,
@@ -1001,11 +1002,13 @@ function serializeRuntimeConfig(config: unknown): string {
 }
 
 function injectRuntimeConfig(html: string, config: BridgeConfig): string {
-  const runtimeConfig = {
+  const runtimeConfig: BridgeBrowserRuntimeConfig = {
     debugModeAvailable: runtimeDebugModeEnabled(),
     productName: config.productName,
     emptyState: config.emptyState,
     quickActions: config.quickActions,
+    slashCommandsAndMentionsEnabled:
+      config.slashCommandsAndMentionsEnabled,
   };
   const configScript = `<script>window.__PI_WEB_CONFIG__=${serializeRuntimeConfig(runtimeConfig)};</script>`;
   return html.includes("</head>")
