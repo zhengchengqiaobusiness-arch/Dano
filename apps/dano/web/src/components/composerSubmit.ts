@@ -1,4 +1,5 @@
 import type { ConnectionStatus } from "../composables/bridgeStore.svelte";
+import { parseCompactSlashCommand } from "../utils/slashCommands";
 
 export function canSubmitComposerMessage(input: {
   connectionStatus: ConnectionStatus;
@@ -12,5 +13,16 @@ export function canSubmitComposerMessage(input: {
     !input.hasUploadingAttachments &&
     !input.hasFailedAttachments &&
     (input.hasText || input.hasSubmittableAttachments)
+  );
+}
+
+export function shouldRejectCompactAttachments(input: {
+  message: string;
+  hasAttachments: boolean;
+  slashCommandsEnabled: boolean;
+}): boolean {
+  return (
+    input.hasAttachments &&
+    parseCompactSlashCommand(input.message, input.slashCommandsEnabled) !== null
   );
 }

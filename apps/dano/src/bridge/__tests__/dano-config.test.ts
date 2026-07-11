@@ -18,6 +18,7 @@ describe("Dano config", () => {
         fieldAssist: {
           maxRetries: 10,
         },
+        slashCommandsAndMentionsEnabled: true,
         quickActions: [
           { label: " 请假 ", prompt: " 帮我申请请假 " },
           { label: "", prompt: "ignored" },
@@ -39,6 +40,7 @@ describe("Dano config", () => {
       fieldAssist: {
         maxRetries: 10,
       },
+      slashCommandsAndMentionsEnabled: true,
       quickActions: [{ label: "请假", prompt: "帮我申请请假" }],
     });
 
@@ -54,7 +56,54 @@ describe("Dano config", () => {
         env: { DANO_CONFIG_PATH: path.join(tmpDir, "missing.json") },
         startDir: tmpDir,
       }),
-    ).toEqual({});
+    ).toEqual({ slashCommandsAndMentionsEnabled: false });
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it.each([
+    ["true", true],
+    ["TRUE", true],
+    ["1", true],
+    ["false", false],
+    ["FALSE", false],
+    ["0", false],
+  ])(
+    "lets DANO_SLASH_COMMANDS_AND_MENTIONS_ENABLED=%s override the config file",
+    (value, expected) => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-config-"));
+      const configPath = path.join(tmpDir, "dano.config.json");
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({ slashCommandsAndMentionsEnabled: !expected }),
+      );
+
+      expect(
+        loadDanoConfig({
+          cwd: tmpDir,
+          env: {
+            DANO_CONFIG_PATH: configPath,
+            DANO_SLASH_COMMANDS_AND_MENTIONS_ENABLED: value,
+          },
+        }).slashCommandsAndMentionsEnabled,
+      ).toBe(expected);
+
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    },
+  );
+
+  it("rejects an invalid slash command environment value", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-config-"));
+
+    expect(() =>
+      loadDanoConfig({
+        cwd: tmpDir,
+        env: { DANO_SLASH_COMMANDS_AND_MENTIONS_ENABLED: "sometimes" },
+        startDir: tmpDir,
+      }),
+    ).toThrow(
+      'DANO_SLASH_COMMANDS_AND_MENTIONS_ENABLED has invalid value "sometimes"',
+    );
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });

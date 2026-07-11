@@ -64,3 +64,7 @@ export function getRuntimeQuickActions(): BridgeQuickActionConfig[] {
     return label && prompt ? [{ label, prompt }] : [];
   });
 }
+
+export function getRuntimeSlashCommandsAndMentionsEnabled(): boolean {
+  return runtimeConfig()?.slashCommandsAndMentionsEnabled === true;
+}

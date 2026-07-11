@@ -203,7 +203,10 @@ describe("BridgeRpcAdapter", () => {
       client,
       message => ws.send(JSON.stringify(message)),
       context,
-      DEFAULT_BRIDGE_CONFIG,
+      {
+        ...DEFAULT_BRIDGE_CONFIG,
+        slashCommandsAndMentionsEnabled: true,
+      },
       eventBus,
       emitEvent as any,
       uploadRegistry as any,
@@ -275,6 +278,132 @@ describe("BridgeRpcAdapter", () => {
         commandType: "prompt",
         correlationId: "cmd-1",
       });
+
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("keeps disabled slash commands literal for idle and streaming prompts", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-prompt-"));
+      const sessionFile = path.join(tmpDir, "session.jsonl");
+      fs.writeFileSync(
+        sessionFile,
+        JSON.stringify({
+          type: "session",
+          version: 3,
+          id: "live-session",
+          timestamp: new Date().toISOString(),
+          cwd: tmpDir,
+        }),
+      );
+      (
+        context.state.sessionManager.getSessionFile as ReturnType<typeof vi.fn>
+      ).mockReturnValue(sessionFile);
+
+      const promptSpy = vi.fn().mockResolvedValue(undefined);
+      const session = {
+        sessionFile: undefined as string | undefined,
+        sessionId: "auto-session",
+        isStreaming: false,
+        bindExtensions: vi.fn().mockResolvedValue(undefined),
+        subscribe: vi.fn().mockReturnValue(() => {}),
+        prompt: promptSpy,
+        sessionManager: {
+          getSessionFile: vi.fn().mockReturnValue(undefined),
+          getSessionId: vi.fn().mockReturnValue("auto-session"),
+          getEntries: vi.fn().mockReturnValue([]),
+          getBranch: vi.fn().mockReturnValue([]),
+          getCwd: vi.fn().mockReturnValue(tmpDir),
+        },
+      };
+      createAgentSessionMock.mockResolvedValue({ session });
+
+      adapter.dispose();
+      adapter = new BridgeRpcAdapter(
+        client,
+        message => ws.send(JSON.stringify(message)),
+        context,
+        DEFAULT_BRIDGE_CONFIG,
+        eventBus,
+        emitEvent as any,
+        uploadRegistry as any,
+      );
+
+      ws.trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: {
+              id: "disabled-idle",
+              type: "prompt",
+              message: "/compact keep this literal",
+            },
+          }),
+        ),
+      );
+      await new Promise(r => setTimeout(r, 30));
+
+      expect(promptSpy).toHaveBeenNthCalledWith(
+        1,
+        "/compact keep this literal",
+        expect.objectContaining({
+          source: "rpc",
+          expandPromptTemplates: false,
+        }),
+      );
+
+      session.isStreaming = true;
+      ws.trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: {
+              id: "disabled-streaming",
+              type: "prompt",
+              message: "/skill:review",
+              streamingBehavior: "followUp",
+            },
+          }),
+        ),
+      );
+      await new Promise(r => setTimeout(r, 30));
+
+      expect(promptSpy).toHaveBeenNthCalledWith(
+        2,
+        "/skill:review",
+        expect.objectContaining({
+          source: "rpc",
+          streamingBehavior: "followUp",
+          expandPromptTemplates: false,
+        }),
+      );
+
+      ws.trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: {
+              id: "disabled-steering",
+              type: "prompt",
+              message: "/template-review",
+              streamingBehavior: "steer",
+            },
+          }),
+        ),
+      );
+      await new Promise(r => setTimeout(r, 30));
+
+      expect(promptSpy).toHaveBeenNthCalledWith(
+        3,
+        "/template-review",
+        expect.objectContaining({
+          source: "rpc",
+          streamingBehavior: "steer",
+          expandPromptTemplates: false,
+        }),
+      );
 
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });

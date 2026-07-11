@@ -13,6 +13,7 @@ export interface DanoConfig {
   fieldAssist?: {
     maxRetries?: number;
   };
+  slashCommandsAndMentionsEnabled?: boolean;
   quickActions?: BridgeQuickActionConfig[];
 }
 
@@ -24,6 +25,7 @@ export const DANO_DEFAULT_CONFIG = {
   fieldAssist: {
     maxRetries: 10,
   },
+  slashCommandsAndMentionsEnabled: false,
   quickActions: [],
 } satisfies Required<DanoConfig>;
 
@@ -52,6 +54,31 @@ function readNonNegativeInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isInteger(value) && value >= 0
     ? value
     : undefined;
+}
+
+function readBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function readSlashCommandsAndMentionsEnabled(
+  env: Record<string, string | undefined>,
+  configured: boolean | undefined,
+): boolean {
+  const raw = env.DANO_SLASH_COMMANDS_AND_MENTIONS_ENABLED?.trim();
+  if (!raw) return configured ?? false;
+
+  switch (raw.toLowerCase()) {
+    case "true":
+    case "1":
+      return true;
+    case "false":
+    case "0":
+      return false;
+    default:
+      throw new Error(
+        `DANO_SLASH_COMMANDS_AND_MENTIONS_ENABLED has invalid value "${raw}"`,
+      );
+  }
 }
 
 function readFieldAssist(value: unknown): DanoConfig["fieldAssist"] {
@@ -89,6 +116,9 @@ function normalizeDanoConfig(raw: unknown): DanoConfig {
     ? record.defaultThinkingLevel
     : undefined;
   const fieldAssist = readFieldAssist(record.fieldAssist);
+  const slashCommandsAndMentionsEnabled = readBoolean(
+    record.slashCommandsAndMentionsEnabled,
+  );
   const quickActions = readQuickActions(record.quickActions);
 
   return {
@@ -97,6 +127,9 @@ function normalizeDanoConfig(raw: unknown): DanoConfig {
     ...(defaultThinkingLevel ? { defaultThinkingLevel } : {}),
     ...(defaultProjectTrust ? { defaultProjectTrust } : {}),
     ...(fieldAssist ? { fieldAssist } : {}),
+    ...(slashCommandsAndMentionsEnabled !== undefined
+      ? { slashCommandsAndMentionsEnabled }
+      : {}),
     ...(quickActions ? { quickActions } : {}),
   };
 }
@@ -129,10 +162,18 @@ export function loadDanoConfig(
     : (findNearestDanoConfig(options.startDir ?? cwd) ??
       findNearestDanoConfig(dirname(fileURLToPath(import.meta.url))));
 
-  if (!configPath || !existsSync(configPath)) {
-    return {};
-  }
+  const configured =
+    configPath && existsSync(configPath)
+      ? normalizeDanoConfig(
+          JSON.parse(readFileSync(configPath, "utf8")) as unknown,
+        )
+      : {};
 
-  const raw = JSON.parse(readFileSync(configPath, "utf8")) as unknown;
-  return normalizeDanoConfig(raw);
+  return {
+    ...configured,
+    slashCommandsAndMentionsEnabled: readSlashCommandsAndMentionsEnabled(
+      env,
+      configured.slashCommandsAndMentionsEnabled,
+    ),
+  };
 }

@@ -621,6 +621,8 @@ async function runDanoMain(): Promise<number> {
         emptyState: options.emptyState,
         upload: options.upload,
         quickActions: danoConfig.quickActions ?? [],
+        slashCommandsAndMentionsEnabled:
+          danoConfig.slashCommandsAndMentionsEnabled ?? false,
         staticDir: options.staticDir,
       };
 

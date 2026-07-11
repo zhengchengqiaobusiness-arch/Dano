@@ -4483,6 +4483,7 @@ export class BridgeRpcAdapter {
   private readonly uiBridge: ExtensionUIBridge;
   private readonly sessionStatsPusher: SessionStatsPusher;
   private readonly detachedSessionRegistry: DetachedSessionRegistry;
+  private readonly slashCommandsAndMentionsEnabled: boolean;
   private pendingTranscriptDeltaBatch: PendingTranscriptDeltaBatch | null =
     null;
 
@@ -4513,6 +4514,8 @@ export class BridgeRpcAdapter {
     this.eventBus = eventBus;
     this.emitEvent = emitEvent;
     this.uploadRegistry = uploadRegistry;
+    this.slashCommandsAndMentionsEnabled =
+      config.slashCommandsAndMentionsEnabled;
     this.detachedSessionRegistry =
       sessionRegistry ?? new DetachedSessionRegistry(context.state.cwd);
     this.uiBridge = new ExtensionUIBridge(client.id, config, message => {
@@ -5189,13 +5192,17 @@ export class BridgeRpcAdapter {
           transcriptImages,
           uploadedImageFilesToRpcImages(projectFiles),
         );
+        const promptExpansionOptions = this.slashCommandsAndMentionsEnabled
+          ? {}
+          : { expandPromptTemplates: false as const };
         const promptOptions = session.isStreaming
           ? {
               source: "rpc" as const,
               images,
               streamingBehavior: command.streamingBehavior ?? "steer",
+              ...promptExpansionOptions,
             }
-          : { source: "rpc" as const, images };
+          : { source: "rpc" as const, images, ...promptExpansionOptions };
         const injectedMessage = appendProjectFileReferences(
           command.message,
           projectFiles,

@@ -86,7 +86,9 @@ export function mergeSlashCommandOptions(
 export function getSlashCommandContext(
   text: string,
   cursor: number,
+  enabled: boolean = true,
 ): SlashCommandContext | null {
+  if (!enabled) return null;
   const safeCursor = Math.max(0, Math.min(cursor, text.length));
   const prefix = text.slice(0, safeCursor);
   const match = prefix.match(/^\s*\/([^\s\n\r]*)$/);
@@ -117,9 +119,13 @@ export function applySlashCommandCompletion(
   };
 }
 
-export function parseCompactSlashCommand(text: string): {
+export function parseCompactSlashCommand(
+  text: string,
+  enabled: boolean = true,
+): {
   customInstructions?: string;
 } | null {
+  if (!enabled) return null;
   const normalized = text.trim();
   const match = normalized.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
 

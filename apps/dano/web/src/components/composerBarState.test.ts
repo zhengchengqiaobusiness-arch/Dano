@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { canSubmitComposerMessage } from "./composerSubmit";
+import {
+  canSubmitComposerMessage,
+  shouldRejectCompactAttachments,
+} from "./composerSubmit";
 
 const base = {
   connectionStatus: "connected" as const,
@@ -62,6 +65,38 @@ describe("canSubmitComposerMessage", () => {
       canSubmitComposerMessage({
         ...base,
         hasFailedAttachments: true,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("compact attachment submission", () => {
+  it("submits compact-shaped text with attachments when slash commands are disabled", () => {
+    expect(
+      shouldRejectCompactAttachments({
+        message: "/compact keep this literal",
+        hasAttachments: true,
+        slashCommandsEnabled: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps the compact attachment warning when slash commands are enabled", () => {
+    expect(
+      shouldRejectCompactAttachments({
+        message: "/compact keep decisions",
+        hasAttachments: true,
+        slashCommandsEnabled: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not reject attachments for ordinary slash text", () => {
+    expect(
+      shouldRejectCompactAttachments({
+        message: "/docs/reference",
+        hasAttachments: true,
+        slashCommandsEnabled: true,
       }),
     ).toBe(false);
   });

@@ -1,23 +1,13 @@
 /// <reference types="svelte" />
 /// <reference types="vite/client" />
 
+import type { BridgeBrowserRuntimeConfig } from "@dano/types/protocol";
+
 declare global {
   const __PI_WEB_DEV_DEBUG__: boolean;
 
   interface Window {
-    __PI_WEB_CONFIG__?: {
-      debugModeAvailable?: boolean;
-      locale?: "zh-CN" | "en-US";
-      productName?: string;
-      emptyState?: {
-        mode?: "text" | "html";
-        content?: string;
-      };
-      quickActions?: Array<{
-        label?: string;
-        prompt?: string;
-      }>;
-    };
+    __PI_WEB_CONFIG__?: BridgeBrowserRuntimeConfig;
   }
 }
 

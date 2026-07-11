@@ -4,6 +4,7 @@ import {
   getRuntimeLocale,
   getRuntimeProductName,
   getRuntimeQuickActions,
+  getRuntimeSlashCommandsAndMentionsEnabled,
 } from "./runtimeConfig";
 
 function stubRuntimeConfig(config: NonNullable<Window["__PI_WEB_CONFIG__"]>) {
@@ -24,6 +25,7 @@ describe("runtimeConfig", () => {
       mode: "text",
       content: "给 Dano 发消息",
     });
+    expect(getRuntimeSlashCommandsAndMentionsEnabled()).toBe(false);
   });
 
   it("uses the configured locale for default empty state copy", () => {
@@ -93,5 +95,11 @@ describe("runtimeConfig", () => {
     vi.stubGlobal("window", {});
 
     expect(getRuntimeQuickActions()).toEqual([]);
+  });
+
+  it("exposes the server-resolved slash command capability", () => {
+    stubRuntimeConfig({ slashCommandsAndMentionsEnabled: true });
+
+    expect(getRuntimeSlashCommandsAndMentionsEnabled()).toBe(true);
   });
 });
