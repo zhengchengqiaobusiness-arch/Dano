@@ -208,7 +208,9 @@ function scoreEmptyScopedSuggestion(
 export function getWorkspaceMentionContext(
   text: string,
   cursorOffset: number,
+  enabled: boolean = true,
 ): WorkspaceMentionContext | null {
+  if (!enabled) return null;
   const safeCursor = Math.max(0, Math.min(cursorOffset, text.length));
   const lineStart = text.lastIndexOf("\n", Math.max(0, safeCursor - 1)) + 1;
   const textBeforeCursor = text.slice(lineStart, safeCursor);
@@ -223,6 +225,19 @@ export function getWorkspaceMentionContext(
     start: safeCursor - prefix.length,
     end: safeCursor,
   };
+}
+
+export function requestWorkspaceMentionEntries(
+  context: WorkspaceMentionContext | null,
+  workspaceContextKey: string | null,
+  previousInteractionKey: string | null,
+  ensureWorkspaceEntries: () => Promise<unknown>,
+): string | null {
+  if (!context) return null;
+  const interactionKey = `${workspaceContextKey ?? ""}:${context.start}`;
+  if (previousInteractionKey === interactionKey) return interactionKey;
+  void ensureWorkspaceEntries();
+  return interactionKey;
 }
 
 export function getWorkspaceMentionSuggestions(
