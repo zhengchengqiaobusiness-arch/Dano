@@ -10,6 +10,7 @@
  */
 
 import type { SessionManager } from "@earendil-works/pi-coding-agent";
+import type { RpcSlashCommand } from "../../types/protocol.js";
 
 // ============================================================================
 // 1. BridgeSessionEvents  — subscribe to live-session lifecycle events
@@ -123,5 +124,5 @@ export interface BridgeSessionActions {
   setSessionName(name: string): void;
 
   /** List registered slash commands. */
-  getCommands(): Array<{ name: string; description?: string }>;
+  getCommands(): RpcSlashCommand[];
 }
