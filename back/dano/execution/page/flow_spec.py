@@ -1295,7 +1295,11 @@ def _build_step_from_capture(
             description=enum_description,
             need_human_confirm=bool(
                 source_guess["need_human_confirm"]
-                or (select_meta is not None and select_meta.enum_confirmed is False)
+                or (
+                    source_guess["source_kind"] == "page_enum"
+                    and select_meta is not None
+                    and select_meta.enum_confirmed is False
+                )
             ),
             evidence=evidence,
         ))
@@ -3475,6 +3479,13 @@ def ensure_recorded_goal(spec: FlowSpec) -> FlowSpec:
 
 def _normalize_generated_capability_semantics(spec: FlowSpec, cap: FlowCapability) -> None:
     """Align Planner capabilities with the recorded request evidence before validation."""
+    public_names = {"query_status", "list_options", "validate_batch", "submit_batch", "submit"}
+    if cap.name in public_names and cap.kind in public_names and cap.name != cap.kind:
+        cap.name = cap.kind
+        if cap.kind == "submit" and "批量" in str(cap.title or ""):
+            cap.title = str(cap.title).replace("批量", "", 1) or "提交"
+        elif cap.kind == "submit_batch" and "批量" not in str(cap.title or ""):
+            cap.title = "批量" + (str(cap.title or "提交"))
     duplicate_generated_name = bool(re.fullmatch(r"submit_batch\d+", str(cap.name or "")))
     needs_batch_audit = cap.kind in {"submit_batch", "validate_batch"}
     if cap.locked or (not cap.evidence and not duplicate_generated_name and not needs_batch_audit):
@@ -3510,14 +3521,14 @@ def _repair_generated_capability_contracts(spec: FlowSpec) -> FlowSpec:
     by_id = {step.step_id: step for step in spec.steps}
     renamed: dict[str, str] = {}
     for cap in spec.capabilities or []:
-        duplicate_generated_name = bool(re.fullmatch(r"submit_batch\d+", str(cap.name or "")))
-        needs_batch_audit = cap.kind in {"submit_batch", "validate_batch"}
-        if cap.locked or (not cap.evidence and not duplicate_generated_name and not needs_batch_audit):
-            continue
         old_name = cap.name
+        was_generated_duplicate = bool(re.fullmatch(r"submit_batch\d+", str(cap.name or "")))
+        needed_batch_audit = cap.kind in {"submit_batch", "validate_batch"}
         _normalize_generated_capability_semantics(spec, cap)
         if old_name and cap.name and old_name != cap.name:
             renamed[old_name] = cap.name
+        if cap.locked or (not cap.evidence and not was_generated_duplicate and not needed_batch_audit):
+            continue
         cap.nodes = _sanitize_capability_nodes(spec, cap)
         cap.nodes = [
             node for node in (cap.nodes or [])
@@ -7779,9 +7790,12 @@ def migrate_v2_flow_spec_to_capability_spec(spec: FlowSpec | dict[str, Any]) -> 
     if not current.capabilities:
         current.capabilities = build_default_flow_capabilities(current)
     _normalize_capability_references(current)
+    current = _repair_generated_capability_contracts(current)
     for cap in current.capabilities or []:
         _sync_capability_order(current, cap)
-    return ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(current, prefer_request_facts=False)))
+    return ensure_recorded_goal(_ensure_external_transform_relations(
+        _sync_capability_io_schemas(sync_flow_spec_models(current, prefer_request_facts=False))
+    ))
 
 
 def capability_spec_to_legacy_flow_spec(
@@ -8333,6 +8347,9 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
         select_by_path = {s.path: s for s in st.selects if s.path}
         select_by_param = {s.param: s for s in st.selects if s.param}
         for p in st.params:
+            enum_contract_error = _capability_param_enum_issue(p)
+            if enum_contract_error:
+                errors.append(f"枚举字段 `{p.key or p.path}` {enum_contract_error}")
             source_contract_error = _field_source_contract_error(p)
             if source_contract_error:
                 errors.append(source_contract_error)
@@ -8475,10 +8492,11 @@ def _client_redact_sensitive(node, key_hint: str = ""):
 
 
 def flow_spec_to_client(spec: FlowSpec) -> dict:
-    """给前端展示的 FlowSpec：保留编辑需要的信息，隐藏鉴权头和原始请求体。
+    """给前端展示的 FlowSpec：保留可编辑请求事实，只隐藏鉴权信息。
 
-    H20 修复:body_source 不再清空,而是备份到 backup_body_source;前端可见备份,
-    编辑时优先使用客户端编辑的 body_source(若有),否则用备份;避免 build_api_request 拿不到 body。
+    ``body_source`` 是步骤请求体的唯一事实源，不能在客户端投影中清空；否则客户端
+    回传当前 FlowSpec 时会把有效 POST 降级成无请求体步骤。请求体字段本来就在字段
+    工作台中可见，真正需要隐藏的是认证头、身份值和响应中的敏感字段。
     """
     client_spec = sync_flow_spec_models(spec.model_copy(deep=True), prefer_request_facts=False)
     _normalize_capability_references(client_spec)
@@ -8502,9 +8520,6 @@ def flow_spec_to_client(spec: FlowSpec) -> dict:
             req["response_json"] = _client_redact_sensitive(req.get("response_json"))
     for st in data.get("steps") or []:
         st["headers"] = {k: "***" for k in (st.get("headers") or {})}
-        if st.get("body_source"):
-            st["backup_body_source"] = st["body_source"]   # H20:保留原始 body 备份
-            st["body_source"] = ""                         # 编辑面板默认空,用户/前端可显式填回
         if st.get("response_json") is not None:
             st["response_json"] = _client_redact_sensitive(st.get("response_json"))
         for select in st.get("selects") or []:

@@ -225,3 +225,24 @@ async def test_orchestrator_capability_invoke_bypasses_whole_skill_required_fiel
     assert out.state == TaskState.COMPLETED
     assert out.audit["api"]["dry_run"] is True
     assert out.audit["api"]["api_shape"]["step_count"] == 1
+
+
+async def test_orchestrator_requires_explicit_capability_for_multi_capability_skill():
+    skill = _skill()
+    orch = Orchestrator(
+        registry=SkillRegistry([skill]),
+        store=_Store(uuid4(), {}),
+        harness=object(),
+        action_executor=object(),
+    )
+
+    out = await orch.invoke_skill(
+        Subsystem.OA,
+        "submit_form",
+        {"month": "2026-05"},
+        tenant="t",
+    )
+
+    assert out.state == TaskState.NEEDS_SELECT
+    assert out.audit["capability_required"] is True
+    assert set(out.audit["candidates"]) == {"query_status", "submit_batch"}

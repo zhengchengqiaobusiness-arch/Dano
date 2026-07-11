@@ -520,6 +520,38 @@ def test_capability_manifest_removes_hard_enum_for_nested_live_options():
     assert "--capability submit_batch --list-options 审批人" in (_options_md(manifest) or "")
 
 
+def test_live_option_marker_discards_corrupted_snapshot_and_multi_title_covers_write():
+    from dano.catalog.manifest import to_manifest
+    from dano.export.agent_skills import _options_md
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    manifest = to_manifest(SkillSpec(
+        skill_id="A-OA.leave", subsystem=Subsystem.OA, action="leave",
+        title="查询流程状态", risk_level=RiskLevel.L3,
+        capabilities=[
+            {"name": "query_status", "kind": "query_status", "title": "查询流程状态"},
+            {
+                "name": "submit", "kind": "submit", "title": "提交请假申请",
+                "input_schema": {"type": "object", "properties": {"请假类型": {
+                    "type": "string", "enum": ["冰机", "实际"],
+                    "x-options": [{"label": "冰机", "value": 2}],
+                    "x-options-source": True,
+                    "x-options-source-meta": {"source_url": "/dict/leave-type"},
+                }}},
+            },
+        ],
+    ))
+
+    field = manifest.capabilities[1]["parameters"]["properties"]["请假类型"]
+    assert "enum" not in field and "x-options" not in field
+    assert field["x-options-source"] is True
+    assert "冰机" not in field["description"]
+    assert "运行期接口实时获取" in field["description"]
+    assert "冰机" not in (_options_md(manifest) or "")
+    assert manifest.title == "查询流程状态 · 提交请假申请"
+
+
 def test_export_quality_gate_rejects_routing_only_batch_entries():
     from dano.catalog.manifest import to_manifest
     from dano.export.agent_skills import _export_contract_errors

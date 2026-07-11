@@ -1925,6 +1925,28 @@ def test_recording_v3_golden_shadow_and_adapters():
     assert scoped_api["capability_contracts"][0]["execution_contract"]["batch"]["items_field"] == "entries"
 
 
+def test_v2_migration_repairs_public_capability_name_kind_mismatch():
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit", method="POST", path="/submit", url="/submit",
+            body_source='{"reason":"x"}',
+            params=[ParamField(path="reason", key="原因")],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_batch", title="批量提交请假申请", kind="submit",
+            step_ids=["submit"], nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+        )],
+    )
+
+    migrated = migrate_v2_flow_spec_to_capability_spec(spec)
+    cap = migrated.capabilities[0]
+
+    assert cap.name == "submit"
+    assert cap.kind == "submit"
+    assert "批量" not in cap.title
+    assert "entries" not in (cap.input_schema.get("properties") or {})
+
+
 def test_v1_adapter_generates_default_capability_without_request_facts():
     spec = FlowSpec(
         flow_id="legacy-v1",

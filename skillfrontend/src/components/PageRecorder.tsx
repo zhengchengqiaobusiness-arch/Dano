@@ -75,7 +75,7 @@ interface FlowStepData {
   step_id: string; name: string; method: string; url: string; path: string; risk_level: string;
   params: FlowParam[]; selects?: FlowSelectBinding[]; identity?: any[];
   source_meta?: { role?: string; [k: string]: any }; semantic_role?: string;
-  content_type?: string; body_source?: string; headers?: Record<string, string>;
+  content_type?: string; body_source?: string; backup_body_source?: string; headers?: Record<string, string>;
   sample_inputs?: Record<string, string>; response_json?: any; success_rule?: any; fact_check?: any;
 }
 interface FlowLinkData {
@@ -2360,7 +2360,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const hasPublishAdvice = publishIssueGroups.some((group) => group.items.length > 0);
     return (
       <Card style={{ marginTop: 16 }} styles={{ body: { paddingTop: 8 } }}>
-        {checkReport && (
+        {checkReport && capabilities.length > 0 && (
           <Alert
             type={checkReport.passed && !hasPublishAdvice ? "success" : "warning"}
             showIcon

@@ -630,7 +630,7 @@ async def record_ws(ws: WebSocket) -> None:
                 if old is None:
                     continue
                 if not step.get("body_source"):
-                    step["body_source"] = old.body_source
+                    step["body_source"] = step.get("backup_body_source") or old.body_source
                 headers = step.get("headers")
                 if (not headers) or all(v == "***" for v in (headers or {}).values()):
                     step["headers"] = old.headers
@@ -920,7 +920,7 @@ async def record_ws(ws: WebSocket) -> None:
                             if old is None:
                                 continue
                             if not step.get("body_source"):
-                                step["body_source"] = old.body_source
+                                step["body_source"] = step.get("backup_body_source") or old.body_source
                             headers = step.get("headers")
                             if (not headers) or all(v == "***" for v in (headers or {}).values()):
                                 step["headers"] = old.headers

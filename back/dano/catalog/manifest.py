@@ -95,6 +95,23 @@ def _manifest_title(skill: SkillSpec) -> str:
     kinds = [str(cap.get("kind") or "") for cap in capabilities]
     has_read = any(kind in _READ_ONLY_CAPABILITY_KINDS for kind in kinds)
     has_write = any(kind and kind not in _READ_ONLY_CAPABILITY_KINDS for kind in kinds)
+    if current and has_read and has_write and re.search(r"查询|列表|状态|query|list", current, re.I):
+        write_title = next((
+            _canonical_capability_identity(cap)[2] for cap in capabilities
+            if str(cap.get("kind") or "") not in _READ_ONLY_CAPABILITY_KINDS
+        ), "")
+        if write_title and write_title not in current:
+            return f"{current} · {write_title}"
+    if has_read and has_write and (not current or _TECHNICAL_TITLE_RE.search(current)):
+        read_title = next((
+            _canonical_capability_identity(cap)[2] for cap in capabilities
+            if str(cap.get("kind") or "") in _READ_ONLY_CAPABILITY_KINDS
+        ), "查询")
+        write_title = next((
+            _canonical_capability_identity(cap)[2] for cap in capabilities
+            if str(cap.get("kind") or "") not in _READ_ONLY_CAPABILITY_KINDS
+        ), "提交")
+        return f"{read_title} · {write_title}"
     # A legacy title often names only the first query endpoint. For a public
     # multi-capability Skill that would hide its write ability and misroute agents.
     if current and not _TECHNICAL_TITLE_RE.search(current):
@@ -439,14 +456,13 @@ def _sanitize_capability_parameter_schema(schema: dict, cap: dict) -> dict:
         for name, prop in props.items():
             if not isinstance(prop, dict):
                 continue
-            is_dynamic = name in dynamic or (
-                prop.get("x-options-source") and not prop.get("x-options")
-            )
+            is_dynamic = name in dynamic or bool(prop.get("x-options-source"))
             if is_dynamic:
-                snapshot = prop.pop("x-options", None)
-                if snapshot:
-                    prop.setdefault("x-options-snapshot", snapshot)
+                prop.pop("x-options", None)
+                prop.pop("x-options-snapshot", None)
+                prop.pop("x-enum-value-map", None)
                 prop.pop("enum", None)
+                prop["description"] = "候选值由运行期接口实时获取；调用前按字段名查询当前可选项并传显示值"
                 if isinstance(prop.get("items"), dict):
                     prop["items"].pop("enum", None)
                     prop["items"].setdefault("format", "name-ref")

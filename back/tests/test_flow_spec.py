@@ -1160,7 +1160,7 @@ class FlowSpecPublishTest(unittest.TestCase):
         self.assertEqual(links[0]["source_step"], 0)
         self.assertEqual(links[0]["target_path"], "flowTask.taskId")
 
-    def test_client_spec_redacts_secrets_and_raw_body(self):
+    def test_client_spec_redacts_secrets_but_preserves_editable_request_body(self):
         spec = to_flow_spec([
             _post("https://oa/api/submit", {"a": 1},
                   resp={"code": 200, "data": {"accessToken": "secret-token", "answer": "ok"}},
@@ -1172,7 +1172,7 @@ class FlowSpecPublishTest(unittest.TestCase):
 
         self.assertEqual(step["headers"]["Authorization"], "***")
         self.assertEqual(step["headers"]["X-Tenant"], "***")
-        self.assertEqual(step["body_source"], "")
+        self.assertEqual(json.loads(step["body_source"]), {"a": 1})
         self.assertEqual(step["response_json"]["data"]["accessToken"], "***")
         self.assertEqual(step["response_json"]["data"]["answer"], "ok")
 
@@ -1497,7 +1497,7 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         self.assertEqual(by_path["type"].type, "enum")
         report = validate_flow_spec(spec)
         self.assertFalse(report["passed"])
-        self.assertTrue(any("label→value" in e and "type" in e for e in report["errors"]))
+        self.assertTrue(any("页面枚举快照不完整" in e and "type" in e for e in report["errors"]))
 
     def test_dom_label_options_never_guess_numeric_codes_by_selected_order(self):
         """无字典接口时只能确认本次 label/value，禁止按 DOM 顺序猜其它短码。"""
