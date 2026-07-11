@@ -238,6 +238,23 @@ class Orchestrator:
 
         intent = Intent(kind="action", action_hint=action, fields=dict(fields))
         capability = _requested_capability(intent.fields)
+        scope = Scope(tenant=tenant, subsystem=skill.subsystem)
+        policy = await self._load_policy(scope)
+        decision = self.gate.decide(
+            risk_level=RiskLevel(skill.risk_level), fields=intent.fields, policy=policy
+        )
+        if decision.action == GateAction.REJECT:
+            return TaskOutcome(task_id=task_id, state=TaskState.REJECTED, skill_id=skill.skill_id,
+                               message=decision.reason)
+        if not capability and len(skill.capabilities or []) > 1:
+            return TaskOutcome(
+                task_id=task_id,
+                state=TaskState.NEEDS_SELECT,
+                skill_id=skill.skill_id,
+                message="该 Skill 包含多个独立能力，必须显式指定 capability",
+                audit={"capability_required": True,
+                       "candidates": [c.get("name") for c in skill.capabilities if c.get("name")]},
+            )
         if capability:
             if skill.has_api or skill.is_workflow:
                 return TaskOutcome(
@@ -256,15 +273,7 @@ class Orchestrator:
             return TaskOutcome(task_id=task_id, state=TaskState.NEEDS_INPUT, skill_id=skill.skill_id,
                                message=f"缺必填字段: {missing}", audit={"missing": missing})
 
-        scope = Scope(tenant=tenant, subsystem=skill.subsystem)
-        policy = await self._load_policy(scope)
-        decision = self.gate.decide(
-            risk_level=RiskLevel(skill.risk_level), fields=intent.fields, policy=policy
-        )
         confirm_fn = lambda s, f: confirm  # noqa: E731
-        if decision.action == GateAction.REJECT:
-            return TaskOutcome(task_id=task_id, state=TaskState.REJECTED, skill_id=skill.skill_id,
-                               message=decision.reason)
         if decision.action == GateAction.CONFIRM and not confirm:
             return TaskOutcome(task_id=task_id, state=TaskState.CANCELLED, skill_id=skill.skill_id,
                                message="需用户确认(confirm=true)")
@@ -558,7 +567,7 @@ class Orchestrator:
         stage = str(out.get("stage") or "")
         if ok:
             state = TaskState.COMPLETED
-        elif stage == "missing_input":
+        elif stage in {"missing_input", "invalid_input"}:
             state = TaskState.NEEDS_INPUT
         elif stage == "confirmation_required":
             state = TaskState.CANCELLED
@@ -585,7 +594,7 @@ class Orchestrator:
         )
 
     async def list_field_options(self, subsystem: Subsystem, action: str, field: str,
-                                 *, tenant: str = "") -> dict:
+                                 *, capability: str = "", tenant: str = "") -> dict:
         """**实时**列出某选择型字段的当前可选项 —— 直接调它的来源接口,带运行期登录态(与 invoke 同一套配置)。
         问题1:把接口放进 skill。选字段前先拉真实选项,agent 从中选,不凭空猜、不靠过时快照。失败 → options=[]。"""
         import json as _json
@@ -601,6 +610,23 @@ class Orchestrator:
         apir = (env.body or {}).get("api_request") if env else None
         if not apir:
             return {"field": field, "options": [], "count": 0, "note": "该 skill 无接口请求"}
+        if capability:
+            capability_def = next((
+                item for item in (getattr(skill, "capabilities", None) or apir.get("capabilities") or [])
+                if isinstance(item, dict)
+                and capability in {str(item.get("name") or ""), str(item.get("capability_id") or "")}
+            ), None)
+            if capability_def is None:
+                return {"field": field, "capability": capability, "options": [], "count": 0,
+                        "note": "未知 capability"}
+            allowed_steps = set(capability_def.get("step_ids") or [])
+            if allowed_steps and isinstance(apir.get("steps"), list):
+                import copy as _copy
+                apir = _copy.deepcopy(apir)
+                apir["steps"] = [
+                    step for step in apir.get("steps") or []
+                    if str(step.get("step_id") or "") in allowed_steps
+                ]
         scope = Scope(tenant=tenant, subsystem=skill.subsystem)
         ep = await self.store.get_published(AssetType.ENV_PROFILE, scope, asset_key="env_profile")
         base_url = ((ep.body.get("base_url") if ep else "") or "")
@@ -614,8 +640,11 @@ class Orchestrator:
         override = await get_token_headers(tenant, skill.subsystem.value)   # 运行期最新鉴权头(治焊死旧 token 过期)
         if override:
             apir = merge_auth_headers(apir, override)
-        return await fetch_field_options(apir, field, base_url=base_url, storage_state=storage,
-                                         verify=tls_verify())
+        result = await fetch_field_options(apir, field, base_url=base_url, storage_state=storage,
+                                           verify=tls_verify())
+        if capability:
+            result["capability"] = capability
+        return result
 
     async def _run_recording(self, task_id, skill, intent, *, confirm, tenant="") -> TaskOutcome:  # noqa: ANN001
         """录制 V2 能力执行。api_request 直接发请求,不开浏览器。"""

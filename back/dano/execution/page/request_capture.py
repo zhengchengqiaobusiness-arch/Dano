@@ -454,18 +454,18 @@ def _enum_records_from_items(items, label_key: str | None, value_key: str | None
 def _enum_records_from_page_options(opts: list | tuple | None) -> list[dict]:
     """DOM 下拉快照 → 标准枚举 [{label,value}]。
 
-    原生 select 会提供 {label,value};弹窗类下拉通常只有文字,此时 value=label。
+    原生 select 会提供 {label,value};弹窗类下拉通常只有文字,此时只保留 label。
     """
     out: list[dict] = []
     seen: set[str] = set()
     for opt in opts or []:
         if isinstance(opt, dict):
-            rec = _enum_option_record(
-                opt.get("label") or opt.get("text") or opt.get("name") or opt.get("value"),
-                opt.get("value", opt.get("label", opt.get("text", opt.get("name")))),
-            )
+            label = opt.get("label") or opt.get("text") or opt.get("name") or opt.get("value")
+            rec = _enum_option_record(label, opt.get("value")) if "value" in opt else None
+            if rec is None and str(label or "").strip():
+                rec = {"label": str(label).strip()}
         else:
-            rec = _enum_option_record(opt, opt)
+            rec = {"label": str(opt).strip()} if str(opt or "").strip() else None
         if not rec or rec["label"] in seen:
             continue
         seen.add(rec["label"])
@@ -484,23 +484,29 @@ def _page_enum_selected_label(opts, picked: str) -> str:
 
 
 def _records_with_existing_option_map(records: list[dict], option_map: dict | None) -> list[dict]:
-    """DOM 只给 label 时,保留之前从 API 字典学到的 label→提交值映射。
+    """DOM 只给 label 时,补入同一 API 源已捕获的精确 label→value 映射。
 
     典型场景:页面下拉显示「病假/事假/婚假」,提交体是 type=2;API 字典已识别
-    「病假→2」。DOM 选项是地面真值,但不能把已有映射洗成 label→label。
+    「病假→2」。DOM 自带 value 时以 DOM 原值为准，不允许旧快照覆盖。
     """
     if not isinstance(option_map, dict) or not option_map:
         return records
     out: list[dict] = []
     for rec in records:
         label = str(rec.get("label") or "").strip()
-        if label and label in option_map:
+        if label and "value" not in rec and label in option_map:
             nr = dict(rec)
             nr["value"] = option_map[label]
             out.append(nr)
         else:
             out.append(rec)
     return out
+
+
+def _option_map_matches_source(entry: dict) -> bool:
+    """已有 API 映射是否明确属于当前接口；无 provenance 时保守拒绝复用。"""
+    mapped_source = entry.get("option_map_source_url")
+    return bool(mapped_source) and str(mapped_source) == str(entry.get("source_url") or "")
 
 
 _CN_FIELD_ALIASES = {
@@ -522,8 +528,7 @@ def _label_matches_internal_field(label: str, path: str, field: dict | None = No
     path_s = str(path or "")
     leaf = path_s.split(".")[-1].split("[")[0]
     candidates = [path_s, leaf]
-    if field:
-        candidates.extend([field.get("key"), field.get("path"), field.get("suggest_name")])
+    candidates.extend(_grounded_field_names(field))
     cand_norm = {_norm_field_token(c) for c in candidates if c not in (None, "")}
     label_norm = _norm_field_token(label_s)
     if label_norm and any(label_norm == c or label_norm in c or c in label_norm for c in cand_norm if c):
@@ -535,28 +540,31 @@ def _label_matches_internal_field(label: str, path: str, field: dict | None = No
 
 
 def _records_with_recorded_value(records: list[dict], selected: str, current) -> list[dict]:
-    """DOM 只有显示名时,用录制时提交值推导 label→value。
-
-    常见 Element/Ant 下拉:第 1/2/3 个选项提交 1/2/3；若选中「婚假」且 body 为 3,
-    就可安全推导 事假→1、病假→2、婚假→3。无法证明时保留原记录,交给发布闸门阻断。
-    """
-    labels = [str(r.get("label") or "").strip() for r in records]
-    if not labels:
-        return records
+    """Bind only the label/value pair directly proven by this recording."""
     selected_s = str(selected or "").strip()
-    try:
-        idx = next(i for i, label in enumerate(labels) if _name_match(label, selected_s))
-    except StopIteration:
+    if not selected_s or current in (None, ""):
         return records
-    cur = str(current if current is not None else "").strip()
-    if not _re.fullmatch(r"-?\d+", cur):
-        return records
-    n = int(cur)
-    if n == idx + 1:
-        return [{**r, "value": i + 1} for i, r in enumerate(records)]
-    if n == idx:
-        return [{**r, "value": i} for i, r in enumerate(records)]
-    return records
+    return [
+        ({**record, "value": current}
+         if "value" not in record and str(record.get("label") or "").strip() == selected_s else record)
+        for record in records
+    ]
+
+
+def _exact_recorded_match(label, recorded) -> bool:
+    """枚举事实只按原文精确确认；不做包含、相似、OCR 或 LLM 纠错。"""
+    left, right = str(label or "").strip(), str(recorded or "").strip()
+    return bool(left) and left == right
+
+
+def _grounded_field_names(field: dict | None) -> list[str]:
+    """枚举绑定仅信请求结构及确定性 DOM 名，不采纳 LLM/OCR 建议名。"""
+    if not field:
+        return []
+    names = [field.get("key"), field.get("path")]
+    if str(field.get("name_source") or "").lower() not in {"llm", "ocr"}:
+        names.append(field.get("suggest_name"))
+    return [str(name) for name in names if name not in (None, "")]
 
 
 def _enum_labels(records: list[dict]) -> list[str]:
@@ -564,7 +572,8 @@ def _enum_labels(records: list[dict]) -> list[str]:
 
 
 def _enum_option_map(records: list[dict]) -> dict:
-    return {str(r["label"]): r.get("value") for r in records if str(r.get("label") or "").strip()}
+    return {str(r["label"]): r.get("value") for r in records
+            if str(r.get("label") or "").strip() and "value" in r}
 
 
 def _attach_enum_binding(entry: dict, records: list[dict], *, source: str, confirmed: bool) -> dict:
@@ -642,7 +651,7 @@ def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool, *,
         if id_vk is not None:                            # NAME:sv 命中该项的**显示名**字段(非随便某文字)+ 项里另有 id 类字段
             disp = _pick_label_key(it, id_vk)            # 项的规范显示名字段(nickName/xtmc/label…),非 dictType 这类分类键
             if disp != id_vk and not _is_idlike(disp) and _is_scalar(it.get(disp)) and str(it.get(disp)) == sv:
-                conf = any(_name_match(sv, s) for s in sample_vals)
+                conf = any(_exact_recorded_match(sv, s) for s in sample_vals)
                 if name_cand is None or (conf and not name_cand[4]):
                     name_cand = ("name", id_vk, disp, sv, conf, it)
                 if conf:
@@ -654,7 +663,7 @@ def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool, *,
             clk = _pick_label_key(it, cvk)
             label = str(it.get(clk, "")).strip()
             if clk != cvk and label:
-                conf = any(_name_match(label, s) for s in sample_vals)
+                conf = any(_exact_recorded_match(label, s) for s in sample_vals)
                 if code_cand is None or (conf and not code_cand[4]):
                     code_cand = ("code", cvk, clk, label, conf, it)
     cands = [c for c in (name_cand, code_cand) if c]
@@ -775,8 +784,7 @@ def _sample_values_for_leaf(path: str, sv: str, samples: dict | None, field: dic
     out: set[str] = set()
     leaf = path.split(".")[-1].split("[")[0]
     keys = {path, leaf}
-    if field:
-        keys.update(str(field.get(k) or "") for k in ("key", "suggest_name", "path"))
+    keys.update(_grounded_field_names(field))
     for k, v in (samples or {}).items():
         if v in (None, ""):
             continue
@@ -852,6 +860,7 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
                 source="api",
                 confirmed=confirmed,
             )
+            entry["option_map_source_url"] = entry.get("source_url")
             if cat_key is not None and cat_val is not None:     # 分类过滤随 select 走(运行期 list-options / 名→ID 同样收窄)
                 entry["category_key"], entry["category_value"] = cat_key, str(cat_val)
             if mode == "name":                           # 名/ID 配对:找兄弟"内部 id"字段(同父 + 值==该项的 id)
@@ -1000,7 +1009,7 @@ def suggest_list_selects(post_data: str | None, reads: list[dict] | None,
             continue
         label_sub = next((sk for sk, m in template.items() if m.get("item_key") == lk), None) or name_subs[0]
         labels = [str(x.get(label_sub, "")).strip() for x in elems if str(x.get(label_sub, "")).strip()]
-        confirmed = any(any(_name_match(lb, s) for s in sample_vals) for lb in labels)
+        confirmed = any(any(_exact_recorded_match(lb, s) for s in sample_vals) for lb in labels)
         entry = {"path": path, "tokens": list(toks), "multi": True, "source_url": src_url,
                  "value_key": vk, "label_key": lk, "element_template": template,
                  "label_subkey": label_sub,
@@ -1034,12 +1043,8 @@ def _page_enum_field_key(opts, picked: str) -> str | None:
 def _dom_key_matches_field(dom_key: str, field: dict | None) -> bool:
     if not field:
         return False
-    keys = [
-        field.get("suggest_name"),
-        field.get("key"),
-        field.get("path"),
-        str(field.get("path") or "").split(".")[-1].split("[")[0],
-    ]
+    keys = _grounded_field_names(field)
+    keys.append(str(field.get("path") or "").split(".")[-1].split("[")[0])
     return any(_name_match(dom_key, k) for k in keys if k not in (None, ""))
 
 
@@ -1063,6 +1068,7 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
             pairs.append((str(k), opts, _page_enum_field_key(v, str(k)), _page_enum_selected_label(v, str(k))))
     body = _parse_body(post_data) if post_data is not None else None
     value_by_path = {p: sv for p, _t, sv, _raw in _leaf_paths(body)} if body is not None else {}
+    raw_by_path = {p: raw for p, _t, _sv, raw in _leaf_paths(body)} if body is not None else {}
     field_by_path = {str(f.get("path") or ""): f for f in (fields or []) if f.get("path")}
     for s in selects or []:
         lbl, val = str(s.get("label") or ""), str(s.get("value") or "")
@@ -1071,12 +1077,12 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
         field = field_by_path.get(path)
         leaf_key = str(path).split(".")[-1].split("[")[0]
         matched = next(((ov, fk, selected) for kv, ov, fk, selected in pairs
-                     if _name_match(kv, lbl)
-                     or _name_match(kv, val)
-                     or _name_match(kv, body_val)
-                     or _name_match(selected, lbl)
-                     or _name_match(selected, val)
-                     or _name_match(selected, body_val)
+                     if _exact_recorded_match(kv, lbl)
+                     or _exact_recorded_match(kv, val)
+                     or _exact_recorded_match(kv, body_val)
+                     or _exact_recorded_match(selected, lbl)
+                     or _exact_recorded_match(selected, val)
+                     or _exact_recorded_match(selected, body_val)
                      or _name_match(kv, path)
                      or _name_match(kv, leaf_key)
                      or (fk and _name_match(fk, leaf_key))
@@ -1084,16 +1090,18 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
                      or _dom_key_matches_field(selected, field)), None)
         if matched:
             opts, fk, _selected = matched
-            records = _records_with_existing_option_map(
-                _enum_records_from_page_options(opts),
-                s.get("option_map") if isinstance(s, dict) else None,
-            )
+            records = _enum_records_from_page_options(opts)
+            if s.get("enum_source") == "api" and _option_map_matches_source(s):
+                records = _records_with_existing_option_map(records, s.get("option_map"))
+            records = _records_with_recorded_value(records, _selected, raw_by_path.get(path, body_val))
             _attach_enum_binding(
                 s,
                 records,
-                source="dom",
+                source="api" if s.get("source_url") else "dom",
                 confirmed=True,
             )
+            s["enum_label_source"] = "dom"
+            s["option_map_source_url"] = s.get("source_url") or "dom"
             if fk:
                 s["field_key"] = fk
             s.pop("category_key", None)
@@ -1141,7 +1149,10 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
                     score += 2
                 if _name_match(str(picked), leaf) or _name_match(selected, leaf):
                     score += 2
-                if str(sv).strip() and not any(_name_match(str(sv), o.get("label")) for o in _enum_records_from_page_options(opts)):
+                if str(sv).strip() and not any(
+                    _exact_recorded_match(sv, o.get("label"))
+                    for o in _enum_records_from_page_options(opts)
+                ):
                     # 下拉显示名不在 body,body 大概率是内部值;短数字/短码更像枚举值,长文本更像普通输入。
                     score += 2 if _re.fullmatch(r"[A-Za-z0-9_-]{1,8}", str(sv).strip()) else -2
                 if score > 0:
@@ -1153,10 +1164,11 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
         if path in existing or any(o.get("path") == path for o in out):
             continue
         current = next((sv for p, _t, sv, _raw in leaves if p == path), "")
+        current_raw = next((raw for p, _t, _sv, raw in leaves if p == path), current)
         entry = {"path": path, "tokens": toks, "source_url": "", "value_key": "", "label_key": "",
                  "label": selected or picked, "value": current, "count": len(opts), "field_key": fk or ""}
         records = _enum_records_from_page_options(opts)
-        records = _records_with_recorded_value(records, selected or picked, current)
+        records = _records_with_recorded_value(records, selected or picked, current_raw)
         _attach_enum_binding(
             entry,
             records,
@@ -1208,7 +1220,7 @@ def suggest_select_names(selects: list[dict], samples: dict | None) -> dict:
         path = s.get("path")
         if not (path and label):
             continue
-        field = next((k for k, v in pairs if _name_match(label, v)), None)   # 含带后缀显示名的子串匹配
+        field = next((k for k, v in pairs if _exact_recorded_match(label, v)), None)
         if field:
             out[path] = field
     return out
@@ -2105,8 +2117,12 @@ def build_api_request(req: dict, param_map: dict, base_url: str = "",
                 "count": s.get("count")}
         if s.get("option_map"):
             meta["option_map"] = dict(s.get("option_map") or {})
+        if s.get("option_map_source_url"):
+            meta["option_map_source_url"] = s.get("option_map_source_url")
         if s.get("enum_source"):
             meta["enum_source"] = s.get("enum_source")
+        if s.get("enum_label_source"):
+            meta["enum_label_source"] = s.get("enum_label_source")
         if s.get("enum_confirmed") is not None:
             meta["enum_confirmed"] = bool(s.get("enum_confirmed"))
         if s.get("category_key"):                            # 聚合字典:分类过滤随 select 走 → 运行期同样按类目收窄
@@ -2726,13 +2742,12 @@ async def _resolve_selects(api_request: dict, fields: dict, *, base_url: str, st
             continue
         name = fields[param]
         opt_map = s.get("option_map") or {}
-        if isinstance(opt_map, dict) and str(name) in {str(k) for k in opt_map}:
+        map_is_dom = s.get("option_map_source_url") == "dom"
+        if isinstance(opt_map, dict) and (map_is_dom or not s.get("source_url")) and str(name) in {str(k) for k in opt_map}:
             match_key = next(k for k in opt_map if str(k) == str(name))
             mapped = opt_map[match_key]
-            # DOM/native select 已给出真实提交值时,它比全量字典更可靠;若只是 label→label,继续尝试接口解析。
-            if str(mapped) != str(name) or not s.get("source_url"):
-                fields[param] = mapped
-                continue
+            fields[param] = mapped
+            continue
         if not s.get("source_url"):
             continue
         items = await _fetch_select_list(
@@ -2804,7 +2819,7 @@ async def _resolve_list_selects(api_request: dict, fields: dict, *, base_url: st
         items = _filter_category(items, s)
         built = []
         for nm in names:
-            it = next((x for x in items if isinstance(x, dict) and _name_match(str(x.get(lk)), nm)), None)
+            it = next((x for x in items if isinstance(x, dict) and str(x.get(lk)) == str(nm)), None)
             built.append(_build_element(it, tmpl, nm, label_sub))
         fields[param] = built
     return fields
@@ -3291,6 +3306,11 @@ def _cap_parse_literal(value):
         return None
     if (text.startswith("'") and text.endswith("'")) or (text.startswith('"') and text.endswith('"')):
         return text[1:-1]
+    if (text.startswith("{") and text.endswith("}")) or (text.startswith("[") and text.endswith("]")):
+        try:
+            return json.loads(text)
+        except Exception:  # noqa: BLE001
+            return text
     try:
         return int(text) if _re.fullmatch(r"-?\d+", text) else float(text)
     except Exception:  # noqa: BLE001
@@ -3305,6 +3325,12 @@ def _cap_get_context_value(expr, ctx: dict):
     text = str(expr).strip()
     if not text:
         return None
+    if text.startswith(("literal:", "const:")):
+        return _cap_parse_literal(text.split(":", 1)[1])
+    if text.startswith("computed:"):
+        # ``computed:`` values are already rendered by the FlowSpec compiler.
+        # Keep the rendered payload as text (for serialized form variables).
+        return text.split(":", 1)[1]
     if text.startswith(("'", '"')) or _re.fullmatch(r"-?\d+(?:\.\d+)?", text) or text.lower() in {"true", "false", "null", "none"}:
         return _cap_parse_literal(text)
     if text.startswith("input."):
@@ -3475,6 +3501,41 @@ def _capability_precondition_failures(cap: dict | None, fields: dict) -> list[st
     return failures
 
 
+def _capability_input_failures(cap: dict | None, fields: dict) -> list[str]:
+    if not cap:
+        return []
+    schema = cap.get("input_schema") or cap.get("parameters") or {}
+    props = schema.get("properties") or {} if isinstance(schema, dict) else {}
+    failures = [
+        f"缺少能力必填字段 `{name}`"
+        for name in (schema.get("required") or [])
+        if name not in fields or fields.get(name) in (None, "")
+    ]
+    for name, field_schema in props.items():
+        if name not in fields or not isinstance(field_schema, dict):
+            continue
+        value = fields.get(name)
+        if field_schema.get("type") != "array":
+            continue
+        if not isinstance(value, list):
+            failures.append(f"能力字段 `{name}` 必须是数组")
+            continue
+        min_items = int(field_schema.get("minItems") or 0)
+        if len(value) < min_items:
+            failures.append(f"能力字段 `{name}` 至少需要 {min_items} 条")
+        item_schema = field_schema.get("items") if isinstance(field_schema.get("items"), dict) else {}
+        item_required = list(item_schema.get("required") or [])
+        for index, item in enumerate(value):
+            if item_schema.get("type") == "object" and not isinstance(item, dict):
+                failures.append(f"能力字段 `{name}[{index}]` 必须是对象")
+                continue
+            if isinstance(item, dict):
+                missing = [key for key in item_required if key not in item or item.get(key) in (None, "")]
+                if missing:
+                    failures.append(f"能力字段 `{name}[{index}]` 缺少: {', '.join(missing)}")
+    return failures
+
+
 async def _execute_capability_batch(api_request: dict, fields: dict, *, cap: dict, runner, kw: dict) -> dict:
     contract = cap.get("execution_contract") if isinstance(cap.get("execution_contract"), dict) else {}
     batch = contract.get("batch") if isinstance(contract.get("batch"), dict) else {}
@@ -3544,6 +3605,7 @@ async def _execute_capability_plan(api_request: dict, fields: dict, *, cap: dict
         "last_response": None,
         "last_result": None,
         "item": None,
+        "mapped_overrides": {},
     }
 
     async def run_call(node: dict, local_fields: dict, local_item=None) -> dict:
@@ -3551,7 +3613,7 @@ async def _execute_capability_plan(api_request: dict, fields: dict, *, cap: dict
         step = step_by_id.get(step_id)
         if step is None:
             return {"ok": False, "blocked": True, "detail": f"能力节点缺少有效接口步骤: {step_id}", "node": node.get("id")}
-        overrides: dict = {}
+        overrides: dict = dict((ctx.get("mapped_overrides") or {}).get(step_id) or {})
         for lk in step.get("links") or []:
             old_src = lk.get("source_step")
             source_step_id = ""
@@ -3643,6 +3705,11 @@ async def _execute_capability_plan(api_request: dict, fields: dict, *, cap: dict
                         _set_by_path(ctx["vars"], target.split(".", 1)[1], value)
                     elif target.startswith("input."):
                         _set_by_path(local_fields, target.split(".", 1)[1], value)
+                    elif "." in target:
+                        target_step_id, target_path = target.split(".", 1)
+                        if target_step_id in step_by_id and target_path:
+                            step_overrides = ctx["mapped_overrides"].setdefault(target_step_id, {})
+                            step_overrides[tuple(_split_path(target_path))] = value
                     last = {"ok": True, "mapped": target, "value": value}
                     ctx["node_results"][node_id] = last
                 elif node_type == "return":
@@ -3750,9 +3817,11 @@ async def _grounded_recheck(fc: dict, fields: dict, *, base_url: str, storage_st
     param, mf, ep = fc.get("param"), fc.get("match_field"), fc.get("endpoint", "")
     retries = int(fc.get("retries", retries))
     backoff = float(fc.get("backoff_s", backoff))
+    if not ep:
+        return False, "事实核查配置缺少 endpoint，不能确认写操作已生效"
     target = fields.get(param)
-    if target is None or not ep:
-        return True, ""
+    if not param or target is None:
+        return False, f"事实核查缺少匹配字段 `{param or '<未配置>'}`，不能确认写操作已生效"
     truncated, total = False, None                    # truncated:列表确有更多页未取(total>已取)→ 不武断判失败
     for i in range(max(1, retries)):
         data = await _get_json(ep, base_url, storage_state, token_key, verify, auth_headers)
@@ -3764,10 +3833,67 @@ async def _grounded_recheck(fc: dict, fields: dict, *, base_url: str, storage_st
         if i < retries - 1:
             await asyncio.sleep(backoff)
     if truncated:
-        # 列表分页、记录可能在别的页 → 证据不足,不把"接口已自报成功"翻成失败(咨询性,避免误杀)
-        return True, f"回查不确定:列表分页(共{total}条,仅取部分),未在已取页找到 {param}={target}(不据此判失败)"
+        # Evidence is incomplete. A write may have succeeded, but reporting success
+        # would be a false positive; surface an unverified failure and never retry.
+        return False, f"事实核查证据不足:列表分页(共{total}条,仅取部分),未找到 {param}={target}"
     # 无分页(整表已取)却没有 → 真"空操作",一票否决(接地核查的价值所在)
     return False, f"回查未生效:记录列表里没找到 {param}={target}(疑似空操作)"
+
+
+async def _grounded_recheck_many(
+    fc: dict,
+    field_sets: list[dict],
+    *,
+    base_url: str,
+    storage_state,
+    token_key: str | None,
+    verify: bool,
+    auth_headers: dict | None,
+    retries: int = 4,
+    backoff: float = 0.6,
+) -> list[tuple[bool, str]]:
+    """Batch fact-check with one list fetch per retry instead of one fetch per item."""
+    import asyncio
+
+    param, match_field, endpoint = fc.get("param"), fc.get("match_field"), fc.get("endpoint", "")
+    if not endpoint:
+        return [(False, "事实核查配置缺少 endpoint，不能确认写操作已生效") for _ in field_sets]
+    if not param:
+        return [(False, "事实核查缺少匹配字段，不能确认写操作已生效") for _ in field_sets]
+    targets = [fields.get(param) for fields in field_sets]
+    if any(target is None for target in targets):
+        return [
+            (False, f"事实核查缺少匹配字段 `{param}`，不能确认写操作已生效") if target is None else (False, "尚未核查")
+            for target in targets
+        ]
+    retries = int(fc.get("retries", retries))
+    backoff = float(fc.get("backoff_s", backoff))
+    found: set[str] = set()
+    truncated, total = False, None
+    for attempt in range(max(1, retries)):
+        data = await _get_json(endpoint, base_url, storage_state, token_key, verify, auth_headers)
+        items = as_list_payload(data) or []
+        available = {
+            str(item.get(match_field))
+            for item in items
+            if isinstance(item, dict) and item.get(match_field) is not None
+        }
+        found.update(str(target) for target in targets if str(target) in available)
+        if all(str(target) in found for target in targets):
+            break
+        total = _extract_total(data)
+        truncated = total is not None and total > len(items)
+        if attempt < retries - 1:
+            await asyncio.sleep(backoff)
+    results: list[tuple[bool, str]] = []
+    for target in targets:
+        if str(target) in found:
+            results.append((True, ""))
+        elif truncated:
+            results.append((False, f"事实核查证据不足:列表分页(共{total}条),未找到 {param}={target}"))
+        else:
+            results.append((False, f"回查未生效:记录列表里没找到 {param}={target}(疑似空操作)"))
+    return results
 
 
 async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
@@ -3783,6 +3909,9 @@ async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
         selected, cap, error = _select_api_request_for_capability(api_request, capability)
         if error:
             return {"ok": False, "blocked": True, "detail": error, "capability": capability}
+        failures = _capability_input_failures(cap, fields)
+        if failures:
+            return {"ok": False, "blocked": True, "detail": "；".join(failures), "capability": capability}
         failures = _capability_precondition_failures(cap, fields)
         if failures:
             return {"ok": False, "blocked": True, "detail": "；".join(failures), "capability": capability}
@@ -3802,11 +3931,20 @@ async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
         api_request = selected or api_request
     runner = execute_api_workflow if api_request.get("steps") else execute_api_request
     if cap and _capability_has_structured_plan(cap):
-        return await _execute_capability_plan(api_request, fields, cap=cap, kw=kw)
-    if cap and _capability_batch_enabled(cap) and isinstance(fields.get("entries") or fields.get("items"), list):
-        return await _execute_capability_batch(api_request, fields, cap=cap, runner=runner, kw=kw)
-    out = await runner(api_request, fields, **kw)
-    if cap and cap.get("output_mapping"):
+        out = await _execute_capability_plan(api_request, fields, cap=cap, kw=kw)
+    elif cap and _capability_batch_enabled(cap):
+        entries = fields.get("entries") if "entries" in fields else fields.get("items")
+        if not isinstance(entries, list):
+            return {
+                "ok": False,
+                "blocked": True,
+                "detail": f"Capability `{cap.get('name') or capability}` 需要数组输入 `entries`",
+                "capability": capability,
+            }
+        out = await _execute_capability_batch(api_request, fields, cap=cap, runner=runner, kw=kw)
+    else:
+        out = await runner(api_request, fields, **kw)
+    if cap and cap.get("output_mapping") and not out.get("structured_output"):
         steps = list(api_request.get("steps") or [])
         responses_by_step: dict = dict(out.get("_responses_by_step") or {})
         if not responses_by_step:
@@ -3827,15 +3965,36 @@ async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
     fc = api_request.get("fact_check")
     if kw.get("send", True) and out.get("ok") and fc:
         auth = api_request.get("auth_headers") or ((api_request.get("steps") or [{}])[-1].get("auth_headers"))
-        fok, freason = await _grounded_recheck(
-            fc, fields, base_url=kw.get("base_url", ""), storage_state=kw.get("storage_state"),
-            token_key=kw.get("token_key"), verify=kw.get("verify", True), auth_headers=auth)
-        out["fact_check_passed"] = fok
-        if not fok:
+        fact_fields = [fields]
+        fact_param = str(fc.get("param") or "")
+        entries = fields.get("entries") if isinstance(fields.get("entries"), list) else fields.get("items")
+        if fact_param not in fields and isinstance(entries, list):
+            fact_fields = [
+                {**{k: v for k, v in fields.items() if k not in {"entries", "items"}}, **item}
+                for item in entries
+                if isinstance(item, dict)
+            ] or [fields]
+        if len(fact_fields) > 1:
+            grounded_results = await _grounded_recheck_many(
+                fc, fact_fields, base_url=kw.get("base_url", ""), storage_state=kw.get("storage_state"),
+                token_key=kw.get("token_key"), verify=kw.get("verify", True), auth_headers=auth)
+        else:
+            grounded_results = [await _grounded_recheck(
+                fc, fact_fields[0], base_url=kw.get("base_url", ""), storage_state=kw.get("storage_state"),
+                token_key=kw.get("token_key"), verify=kw.get("verify", True), auth_headers=auth)]
+        checks: list[dict] = []
+        for index, (fok, freason) in enumerate(grounded_results):
+            checks.append({"index": index, "passed": fok, "reason": freason})
+        out["fact_check_items"] = checks
+        out["fact_check_passed"] = bool(checks) and all(item["passed"] for item in checks)
+        failed_check = next((item for item in checks if not item["passed"]), None)
+        if failed_check:
             out["ok"] = False
-            out["detail"] = freason
-        elif freason:                                # 通过但不确定(列表分页未找到)→ 记咨询性说明,不翻失败
-            out["fact_check_note"] = freason
+            out["detail"] = failed_check["reason"]
+        else:
+            notes = [item["reason"] for item in checks if item["reason"]]
+            if notes:
+                out["fact_check_note"] = "；".join(notes)
     return out
 
 

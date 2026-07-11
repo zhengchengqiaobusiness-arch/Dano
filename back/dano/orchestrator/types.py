@@ -6,7 +6,7 @@ from typing import Any, Literal
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from dano.shared.enums import RiskLevel, Subsystem, TaskState
 from dano.shared.models import ExecResult
@@ -27,6 +27,7 @@ class SkillSpec(BaseModel):
     capability: str = ""                                       # 对外能力键;空则兼容退回 skill_id
     capability_meta: dict[str, Any] = Field(default_factory=dict)  # 能力分组/别名/协议草案等扩展元数据
     capabilities: list[dict[str, Any]] = Field(default_factory=list)  # 一个 Skill 内可调用的能力列表
+    capability_relations: list[dict[str, Any]] = Field(default_factory=list)  # 能力间建议数据流；调用方显式编排
     subsystem: Subsystem
     action: str
     risk_level: RiskLevel
@@ -70,7 +71,9 @@ class CapabilityCallEnvelope(BaseModel):
     兼容旧 function-calling 载荷:旧侧只传 name+arguments;新侧可传 capability+input。
     """
 
-    protocol: str = "dano.capability_call.draft"
+    model_config = ConfigDict(extra="forbid")
+
+    protocol: str = "dano.capability_call.v1"
     name: str | None = None                # 旧工具名,如 A-OA__submit_leave
     capability: str | None = None          # 新能力键;服务端未支持时仍可按 name 兼容执行
     arguments: dict[str, Any] | str | None = None

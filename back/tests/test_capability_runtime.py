@@ -5,9 +5,12 @@ from uuid import uuid4
 from dano.orchestrator.orchestrator import Orchestrator
 from dano.orchestrator.capability_runtime import (
     CapabilityInvokePayload,
+    capability_input_issues,
     capability_missing_fields,
     capability_requires_confirmation,
     find_capability,
+    invoke_skill_capability,
+    normalize_capability_result,
     payload_fields,
 )
 from dano.orchestrator.skills import SkillRegistry
@@ -63,6 +66,70 @@ def test_find_capability_and_required_fields():
     assert capability_missing_fields(cap, {}) == ["month"]
 
 
+def test_batch_capability_validates_required_fields_inside_entries():
+    cap = {
+        "name": "submit_batch",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "entries": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {"date": {"type": "string"}, "content": {"type": "string"}},
+                        "required": ["date", "content"],
+                    },
+                },
+            },
+            "required": ["entries"],
+        },
+    }
+
+    assert capability_input_issues(cap, {"entries": []})
+    assert capability_input_issues(cap, {"entries": [{"date": "2026-05-12"}]}) == [
+        "Field `entries[0]` missing required fields: ['content']"
+    ]
+    assert capability_input_issues(cap, {"entries": [{"date": "2026-05-12", "content": "x"}]}) == []
+
+
+def test_capability_input_rejects_extra_root_and_batch_item_fields():
+    cap = find_capability(_skill(), "submit_batch")
+    cap["input_schema"] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"entries": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"date": {"type": "string"}},
+                "required": ["date"],
+            },
+        }},
+        "required": ["entries"],
+    }
+    cap.pop("parameters", None)
+
+    issues = capability_input_issues(cap, {
+        "entries": [{"date": "2026-05-12", "unexpected": True}],
+        "rogue": "value",
+    })
+
+    assert any("rogue" in issue for issue in issues)
+    assert any("entries[0]" in issue and "unexpected" in issue for issue in issues)
+
+
+def test_pseudo_batch_alias_does_not_select_submit_capability():
+    skill = _skill()
+    skill.capabilities = [{"name": "submit_batch2", "kind": "submit", "title": "批量提交"}]
+
+    assert find_capability(skill, "submit_batch2") is None
+    cap = find_capability(skill, "submit")
+    assert cap["name"] == cap["kind"] == "submit"
+    assert cap["title"] == "提交"
+
+
 def test_read_capability_does_not_require_confirmation_but_write_does():
     skill = _skill()
     query = find_capability(skill, "query_status")
@@ -70,6 +137,46 @@ def test_read_capability_does_not_require_confirmation_but_write_does():
 
     assert capability_requires_confirmation(skill, query) is False
     assert capability_requires_confirmation(skill, submit) is True
+
+
+async def test_capability_invoke_rejects_invalid_batch_shape_before_execution():
+    out = await invoke_skill_capability(
+        skill=_skill(),
+        capability="submit_batch",
+        payload=CapabilityInvokePayload(input={"entries": "not-an-array"}, confirm=True),
+        api_request={"steps": [{"step_id": "submit", "method": "POST", "url": "http://x/submit"}]},
+    )
+
+    assert out["ok"] is False
+    assert out["stage"] == "invalid_input"
+    assert "array" in out["detail"]
+
+
+def test_normalized_capability_result_preserves_fact_check_state():
+    out = normalize_capability_result(
+        {"ok": True, "response": {"code": 0}, "fact_check_passed": True},
+        "submit",
+        skill_id="A-OA.submit",
+    )
+
+    assert out["fact_check_passed"] is True
+
+
+def test_normalized_capability_result_rejects_output_schema_mismatch():
+    out = normalize_capability_result(
+        {"ok": True, "structured_output": {"count": "one"}},
+        "query_status",
+        output_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {"count": {"type": "integer"}},
+            "required": ["count"],
+        },
+    )
+
+    assert out["ok"] is False
+    assert out["stage"] == "invalid_output"
+    assert "output.count" in out["detail"]
 
 
 class _Env:

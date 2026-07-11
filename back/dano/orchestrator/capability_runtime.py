@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from dano.catalog.manifest import to_manifest
 from dano.execution.page.request_capture import execute_api
@@ -80,9 +80,9 @@ def find_capability(skill, capability: str) -> dict[str, Any] | None:  # noqa: A
         for cap in list(getattr(manifest, "capabilities", []) or []):
             if isinstance(cap, dict) and target in _capability_names(cap):
                 return {**(raw_match or {}), **dict(cap)}
+        return None
     except Exception:  # noqa: BLE001
         return raw_match
-    return raw_match
 
 
 def capability_missing_fields(cap: dict[str, Any] | None, fields: dict[str, Any]) -> list[str]:
@@ -91,6 +91,68 @@ def capability_missing_fields(cap: dict[str, Any] | None, fields: dict[str, Any]
         schema = cap.get("parameters") or cap.get("input_schema") or {}
     required = list(schema.get("required") or []) if isinstance(schema, dict) else []
     return [str(k) for k in required if k not in fields or fields.get(k) in (None, "")]
+
+
+def schema_issues(value: Any, schema: dict[str, Any] | None, path: str = "input") -> list[str]:
+    """Validate the JSON-Schema subset emitted by Dano contracts."""
+    if not isinstance(schema, dict):
+        return []
+    issues: list[str] = []
+    expected = schema.get("type")
+    if expected == "object":
+        if not isinstance(value, dict):
+            return [f"Field `{path}` must be an object"]
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        missing = [
+            str(name) for name in (schema.get("required") or [])
+            if name not in value or value.get(name) in (None, "")
+        ]
+        if missing:
+            issues.append(f"Field `{path}` missing required fields: {missing}")
+        if schema.get("additionalProperties") is False:
+            extra = sorted(str(name) for name in value if name not in properties)
+            if extra:
+                issues.append(f"Field `{path}` has unexpected fields: {extra}")
+        for name, child_schema in properties.items():
+            if name in value and value[name] is not None and isinstance(child_schema, dict):
+                issues.extend(schema_issues(value[name], child_schema, f"{path}.{name}"))
+    elif expected == "array":
+        if not isinstance(value, list):
+            return [f"Field `{path}` must be an array"]
+        if schema.get("minItems") is not None and len(value) < int(schema["minItems"]):
+            issues.append(f"Field `{path}` must contain at least {schema['minItems']} item(s)")
+        item_schema = schema.get("items") if isinstance(schema.get("items"), dict) else {}
+        for index, item in enumerate(value):
+            issues.extend(schema_issues(item, item_schema, f"{path}[{index}]"))
+    elif expected == "string" and not isinstance(value, str):
+        issues.append(f"Field `{path}` must be a string")
+    elif expected == "boolean" and not isinstance(value, bool):
+        issues.append(f"Field `{path}` must be a boolean")
+    elif expected == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
+        issues.append(f"Field `{path}` must be an integer")
+    elif expected == "number" and (not isinstance(value, (int, float)) or isinstance(value, bool)):
+        issues.append(f"Field `{path}` must be a number")
+    if schema.get("enum") and value not in schema["enum"]:
+        issues.append(f"Field `{path}` must be one of: {schema['enum']}")
+    return issues
+
+
+def capability_input_issues(cap: dict[str, Any] | None, fields: dict[str, Any]) -> list[str]:
+    """Validate the complete capability boundary, including every batch entry."""
+    if not isinstance(cap, dict):
+        return []
+    schema = cap.get("parameters") or cap.get("input_schema") or {}
+    public_fields = {name: value for name, value in fields.items() if not str(name).startswith("__")}
+    issues = schema_issues(public_fields, schema, "input")
+    issues = [issue.replace("Field `input.", "Field `") for issue in issues]
+    kind = str(cap.get("kind") or cap.get("name") or "")
+    if kind == "submit_batch":
+        entries = public_fields.get("entries")
+        if not isinstance(entries, list):
+            marker = "Field `input.entries` must be an array"
+            if marker not in issues:
+                issues.append(marker)
+    return issues
 
 
 def capability_requires_confirmation(skill, cap: dict[str, Any] | None) -> bool:  # noqa: ANN001
@@ -109,17 +171,21 @@ def capability_requires_confirmation(skill, cap: dict[str, Any] | None) -> bool:
         return False
 
 
-def normalize_capability_result(result: dict[str, Any], capability: str, *, skill_id: str = "") -> dict[str, Any]:
-    output = (
-        result.get("structured_output")
-        or result.get("output")
-        or result.get("response")
-        or result.get("final")
-        or result
-    )
+def normalize_capability_result(
+    result: dict[str, Any],
+    capability: str,
+    *,
+    skill_id: str = "",
+    output_schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    output = result
+    for key in ("structured_output", "output", "response", "final"):
+        if key in result and result[key] is not None:
+            output = result[key]
+            break
     response = result.get("response", output)
     structured = result.get("structured_output", output)
-    return {
+    normalized = {
         "ok": bool(result.get("ok")),
         "skill_id": skill_id,
         "capability": capability,
@@ -130,7 +196,20 @@ def normalize_capability_result(result: dict[str, Any], capability: str, *, skil
         "blocked": bool(result.get("blocked", False)),
         "detail": result.get("detail", ""),
         "status": result.get("status"),
+        "fact_check_passed": result.get("fact_check_passed"),
+        "fact_check_note": result.get("fact_check_note"),
     }
+    if normalized["ok"] and output_schema:
+        issues = schema_issues(output, output_schema, "output")
+        if issues:
+            normalized.update({
+                "ok": False,
+                "blocked": True,
+                "stage": "invalid_output",
+                "detail": "；".join(issues),
+                "output_issues": issues,
+            })
+    return normalized
 
 
 async def invoke_skill_capability(
@@ -166,6 +245,17 @@ async def invoke_skill_capability(
             "detail": f"Missing required capability fields: {missing}",
             "capability": capability,
             "missing": missing,
+        }
+
+    input_issues = capability_input_issues(cap, fields)
+    if input_issues:
+        return {
+            "ok": False,
+            "blocked": True,
+            "stage": "invalid_input",
+            "detail": "；".join(input_issues),
+            "capability": capability,
+            "input_issues": input_issues,
         }
 
     if capability_requires_confirmation(skill, cap) and not payload.confirm:
@@ -214,4 +304,10 @@ async def invoke_skill_capability(
         verify=verify,
         send=True,
     )
-    return normalize_capability_result(out, capability, skill_id=getattr(skill, "skill_id", ""))
+    return normalize_capability_result(
+        out,
+        capability,
+        skill_id=getattr(skill, "skill_id", ""),
+        output_schema=cap.get("output_schema") or {},
+    )
+    model_config = ConfigDict(extra="forbid")

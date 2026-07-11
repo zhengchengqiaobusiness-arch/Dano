@@ -154,6 +154,7 @@ interface FlowSpecData {
   meta?: {
     request_roles?: RequestRoleData[];
     capability_model?: { status?: string; source?: string; generated_count?: number };
+    recording_pi_loop?: { mode?: "plan" | "repair"; updated_at?: string; [k: string]: any };
     request_graph?: {
       all_requests?: RequestGraphEntry[];
       selected_steps?: RequestGraphEntry[];
@@ -184,6 +185,7 @@ interface FlowCheckReport {
   };
   issue_groups?: Record<string, Array<{
     severity?: string; message?: string; source?: string; target?: Record<string, any>;
+    audience?: "operator" | "internal"; actionable?: boolean; blocking?: boolean; auto_fixable?: boolean;
   }>>;
 }
 interface RecResult {
@@ -1020,6 +1022,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [llmBusy, setLlmBusy] = useState(false);
   const [orchestrateBusy, setOrchestrateBusy] = useState(false);
   const [autoFixBusy, setAutoFixBusy] = useState(false);
+  const flowOperationRef = useRef<{ mode: "plan" | "repair"; previousUpdatedAt?: string } | null>(null);
   const [activeFlowTab, setActiveFlowTab] = useState("abilities");
 
   function acceptFlowSpec(fs: FlowSpecData) {
@@ -1027,6 +1030,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setFlowSpec(fs);
     const nextTitle = preferredSkillTitle(fs);
     if (nextTitle && !title.trim()) setTitle(nextTitle);
+  }
+
+  function finishFlowOperation(loop?: { mode?: string; updated_at?: string }) {
+    const active = flowOperationRef.current;
+    if (
+      !active
+      || loop?.mode !== active.mode
+      || !loop.updated_at
+      || loop.updated_at === active.previousUpdatedAt
+    ) return;
+    flowOperationRef.current = null;
+    setOrchestrateBusy(false);
+    setAutoFixBusy(false);
+  }
+
+  function clearFlowOperation() {
+    flowOperationRef.current = null;
+    setOrchestrateBusy(false);
+    setAutoFixBusy(false);
   }
 
   useEffect(() => () => {
@@ -1138,6 +1160,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setJsonErr("");
     setLastServerJson("");
     setActiveFlowTab("abilities");
+    flowOperationRef.current = null;
+    setOrchestrateBusy(false);
+    setAutoFixBusy(false);
   }
 
   function start() {
@@ -1197,12 +1222,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         message.success("抓到提交请求，请核对字段和流程");
       }
       else if (m.type === "flow_spec" || m.type === "flow_spec_updated") {
-        setLlmBusy(false); setOrchestrateBusy(false); setAutoFixBusy(false);
+        setLlmBusy(false);
         setPhase("recording");
         const fs = m.full_spec || m.flow_spec;
         if (fs) {
           acceptFlowSpec(fs);
           setLastServerJson(JSON.stringify(fs));
+          finishFlowOperation(fs.meta?.recording_pi_loop);
         }
         if (m.check_report) setCheckReport(m.check_report);
       }
@@ -1232,7 +1258,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
       else if (m.type === "error") {
         const detail = m.detail || "录制出错";
-        setNamingBusy(false); setDescBusy(false); setLlmBusy(false); setOrchestrateBusy(false); setAutoFixBusy(false);
+        setNamingBusy(false); setDescBusy(false); setLlmBusy(false); clearFlowOperation();
         if (detail.includes("step not found") || detail.includes("link not found")) {
           message.warning("流程已变更，正在同步最新版本");
           send({ type: "refresh_flow_spec" });
@@ -1333,9 +1359,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setCands([]); setSelects({}); setIdentity({}); setStepSel({}); resetEditorState();
   }
 
-  function sendReplace(next: FlowSpecData) { send({ type: "flow_replace", flow_spec: next }); }
+  function sendReplace(next: FlowSpecData) {
+    flowSpecRef.current = next;
+    setFlowSpec(next);
+    send({ type: "flow_replace", flow_spec: next });
+  }
   function updateFlowField(k: string, v: any) { send({ type: "flow_update", edits: [{ op: "update_flow", field: k, value: v }] }); }
   function updateStep(stepId: string, field: string, value: any) {
+    patchLocalStep(stepId, { [field]: value });
     send({ type: "flow_update", edits: [{ op: "update", step_id: stepId, field, value }] });
   }
   function paramDraftKey(stepId: string, p: FlowParam) {
@@ -1414,6 +1445,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         return { ...step, params: newParams, selects: newSelects, sample_inputs: newSampleInputs };
       }),
+      capabilities: (base.capabilities || []).map((cap) => capabilityActualStepIds(cap).includes(stepId)
+        ? { ...cap, confirmed: false }
+        : cap),
     };
     flowSpecRef.current = next;
     setFlowSpec(next);
@@ -1427,6 +1461,21 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const next: FlowSpecData = {
       ...base,
       steps: (base.steps || []).map((step) => step.step_id === stepId ? { ...step, ...updates } : step),
+      capabilities: (base.capabilities || []).map((cap) => capabilityActualStepIds(cap).includes(stepId)
+        ? { ...cap, confirmed: false }
+        : cap),
+    };
+    flowSpecRef.current = next;
+    setFlowSpec(next);
+  }
+  function patchLocalCapability(idx: number, updates: Partial<FlowCapabilityData>, invalidateConfirmation = true) {
+    const base = flowSpecRef.current;
+    if (!base) return;
+    const next: FlowSpecData = {
+      ...base,
+      capabilities: (base.capabilities || []).map((cap, capIdx) => capIdx === idx
+        ? { ...cap, ...updates, ...(invalidateConfirmation ? { confirmed: false } : {}) }
+        : cap),
     };
     flowSpecRef.current = next;
     setFlowSpec(next);
@@ -1436,10 +1485,51 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     send({ type: "flow_update", edits: [paramEdit(stepId, p, field, value)] });
   }
   function updateParamType(step: FlowStepData, p: FlowParam, value: string) {
-    // 类型只描述数据形态，不拥有分类和来源。用户把文本改成枚举、或把枚举改回文本时，
-    // 不能顺带把 runtime_var/previous_response 等人工配置改掉。
-    patchLocalParam(step.step_id, p, { type: value });
-    send({ type: "flow_update", edits: [paramEdit(step.step_id, p, "type", value)] });
+    const currentStep = flowSpecRef.current?.steps.find((item) => item.step_id === step.step_id) || step;
+    const currentParam = currentStep.params.find((item) => paramMatches(item, p)) || p;
+    const wasEnum = currentParam.type === "enum" || currentParam.type === "list-enum";
+    const isEnum = value === "enum" || value === "list-enum";
+    if (!wasEnum || isEnum) {
+      patchLocalParam(step.step_id, currentParam, { type: value });
+      send({ type: "flow_update", edits: [paramEdit(step.step_id, currentParam, "type", value)] });
+      return;
+    }
+
+    const enumSource = ["api_option", "manual_enum", "page_enum", "form_option", "static_enum"]
+      .includes(currentParam.source_kind || "");
+    const sourceKind = enumSource
+      ? defaultSourceForCategory(currentParam.category || "user_param")
+      : (currentParam.source_kind || "unknown");
+    const source = enumSource ? sourceDescriptor(sourceKind, currentParam) : currentParam.source;
+    const nextSelects = (currentStep.selects || []).filter((sel) =>
+      !(sel.path === currentParam.path || (!sel.path && sel.param === currentParam.key) || sel.param === currentParam.key)
+    );
+    const updates: Record<string, any> = {
+      type: value,
+      enum_options: null,
+      enum_value_map: null,
+      ...(enumSource ? {
+        source_kind: sourceKind,
+        source,
+        need_human_confirm: sourceNeedsConfiguration(sourceKind, source as any),
+      } : {}),
+    };
+    patchLocalParam(step.step_id, currentParam, updates);
+    patchLocalStep(step.step_id, { selects: nextSelects });
+    const edits: any[] = [
+      paramEdit(step.step_id, currentParam, "type", value),
+      paramEdit(step.step_id, currentParam, "enum_options", null),
+      paramEdit(step.step_id, currentParam, "enum_value_map", null),
+      { op: "update", step_id: step.step_id, field: "selects", value: nextSelects },
+    ];
+    if (enumSource) {
+      edits.push(
+        paramEdit(step.step_id, currentParam, "source_kind", sourceKind),
+        paramEdit(step.step_id, currentParam, "source", source),
+        paramEdit(step.step_id, currentParam, "need_human_confirm", sourceNeedsConfiguration(sourceKind, source as any)),
+      );
+    }
+    send({ type: "flow_update", edits });
   }
   function updateParamCategory(stepId: string, p: FlowParam, category: string) {
     const currentSourceKind = normalizeSourceKindForUi(p.source_kind);
@@ -1513,11 +1603,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     ] });
   }
   function moveStep(idx: number, dir: -1 | 1) {
-    if (!flowSpec) return;
-    const ids = flowSpec.steps.map((s) => s.step_id);
+    const current = flowSpecRef.current;
+    if (!current) return;
+    const ids = current.steps.map((s) => s.step_id);
     const j = idx + dir;
     if (j < 0 || j >= ids.length) return;
     [ids[idx], ids[j]] = [ids[j], ids[idx]];
+    const byId = Object.fromEntries(current.steps.map((step) => [step.step_id, step]));
+    const next = { ...current, steps: ids.map((id) => byId[id]) };
+    flowSpecRef.current = next;
+    setFlowSpec(next);
     send({ type: "flow_update", edits: [{ op: "reorder_steps", step_ids: ids }] });
   }
   function removeStepWithConfirm(step: FlowStepData) {
@@ -1536,6 +1631,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             ...cur,
             steps: cur.steps.filter((s) => s.step_id !== step.step_id),
             links: cur.links.filter((l) => l.source_step_id !== step.step_id && l.target_step_id !== step.step_id),
+            capabilities: (cur.capabilities || []).map((cap) => {
+              if (!capabilityActualStepIds(cap).includes(step.step_id)) return cap;
+              return {
+                ...cap,
+                step_ids: (cap.step_ids || []).filter((stepId) => stepId !== step.step_id),
+                confirmed: false,
+              };
+            }),
           };
           flowSpecRef.current = next;
           setFlowSpec(next);
@@ -1759,42 +1862,64 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     cancelEditLink(linkId);
   }
   function orchestrateFlow() {
-    const currentSpec = flowSpecRef.current || flowSpec;
-    if (!currentSpec) return;
+    if (!flowSpecRef.current || flowOperationRef.current) return;
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    const currentSpec = flowSpecRef.current;
+    if (!currentSpec) return;
+    flowOperationRef.current = {
+      mode: "plan",
+      previousUpdatedAt: currentSpec.meta?.recording_pi_loop?.updated_at,
+    };
     setOrchestrateBusy(true);
     setAutoFixBusy(true);
-    send({ type: "orchestrate_flow", flow_spec: currentSpec });
+    if (!send({ type: "orchestrate_flow", flow_spec: currentSpec })) clearFlowOperation();
   }
   function autoFixFlow() {
-    if (!flowSpec) return;
+    if (!flowSpecRef.current || flowOperationRef.current) return;
+    flowOperationRef.current = {
+      mode: "repair",
+      previousUpdatedAt: flowSpecRef.current.meta?.recording_pi_loop?.updated_at,
+    };
     setAutoFixBusy(true);
-    send({ type: "auto_fix_flow" });
+    if (!send({ type: "auto_fix_flow" })) clearFlowOperation();
   }
   function addCapability() {
-    const idx = (flowSpec?.capabilities?.length || 0) + 1;
+    const current = flowSpecRef.current;
+    if (!current) return;
+    const idx = (current.capabilities?.length || 0) + 1;
+    const capability: FlowCapabilityData = {
+      name: `capability_${idx}`,
+      title: `能力 ${idx}`,
+      intent: "",
+      kind: "submit",
+      step_ids: [],
+      input_schema: { type: "object", properties: {}, required: [] },
+      output_schema: { type: "object", properties: { raw: { type: "object" } } },
+      output_mapping: [{ kind: "final_response", response_path: "response" }],
+      confirmed: false,
+      requires_human_confirm: true,
+      confidence: 0.5,
+    };
+    const next = { ...current, capabilities: [...(current.capabilities || []), capability] };
+    flowSpecRef.current = next;
+    setFlowSpec(next);
     send({ type: "flow_update", edits: [{
       op: "add_capability",
-      capability: {
-        name: `capability_${idx}`,
-        title: `能力 ${idx}`,
-        intent: "",
-        kind: "submit",
-        step_ids: [],
-        input_schema: { type: "object", properties: {}, required: [] },
-        output_schema: { type: "object", properties: { raw: { type: "object" } } },
-        output_mapping: [{ kind: "final_response", response_path: "response" }],
-        confirmed: false,
-        requires_human_confirm: true,
-        confidence: 0.5,
-      },
+      capability,
     }] });
   }
   function updateCapabilityConfirmed(idx: number, confirmed: boolean) {
+    // Backend confirmation is an atomic preflight transaction. Do not paint an
+    // optimistic checked state that would remain stale when the server rejects it.
+    if (!confirmed) patchLocalCapability(idx, { confirmed: false }, false);
     send({ type: "flow_update", edits: [{ op: "update_capability", capability_index: idx, field: "confirmed", value: confirmed }] });
   }
   function updateCapabilityField(idx: number, field: string, value: any) {
-    send({ type: "flow_update", edits: [{ op: "update_capability", capability_index: idx, field, value }] });
+    patchLocalCapability(idx, { [field]: value });
+    send({ type: "flow_update", edits: [
+      { op: "update_capability", capability_index: idx, field, value },
+      { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
+    ] });
   }
   function removeCapability(idx: number) {
     Modal.confirm({
@@ -1818,18 +1943,35 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function addStepToCapability(idx: number, value?: string) {
     if (!value) return;
     if (value.startsWith("step:")) {
-      send({ type: "flow_update", edits: [{ op: "add_capability_step", capability_index: idx, step_id: value.slice(5) }] });
+      const stepId = value.slice(5);
+      const cap = flowSpecRef.current?.capabilities?.[idx];
+      const stepIds = Array.from(new Set([...(capabilityActualStepIds(cap || {})), stepId]));
+      patchLocalCapability(idx, { step_ids: stepIds });
+      send({ type: "flow_update", edits: [
+        { op: "add_capability_step", capability_index: idx, step_id: stepId },
+        { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
+      ] });
       return;
     }
     if (value.startsWith("req:")) {
       const requestKey = value.slice(4);
-      const req = findCapturedRequest(flowSpec, requestKey);
+      const req = findCapturedRequest(flowSpecRef.current, requestKey);
       if (!req) { message.warning("没有找到选中的捕获接口"); return; }
-      send({ type: "flow_update", edits: [{ op: "add_capability_step", capability_index: idx, request_index: req?.request_index, request_id: req?.request_id }] });
+      patchLocalCapability(idx, {});
+      send({ type: "flow_update", edits: [
+        { op: "add_capability_step", capability_index: idx, request_index: req?.request_index, request_id: req?.request_id },
+        { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
+      ] });
     }
   }
   function removeStepFromCapability(idx: number, stepId: string) {
-    send({ type: "flow_update", edits: [{ op: "remove_capability_step", capability_index: idx, step_id: stepId }] });
+    const cap = flowSpecRef.current?.capabilities?.[idx];
+    const stepIds = capabilityActualStepIds(cap || {}).filter((id) => id !== stepId);
+    patchLocalCapability(idx, { step_ids: stepIds });
+    send({ type: "flow_update", edits: [
+      { op: "remove_capability_step", capability_index: idx, step_id: stepId },
+      { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
+    ] });
   }
   function moveStepInCapability(idx: number, stepIds: string[], from: number, delta: number) {
     const to = from + delta;
@@ -1843,13 +1985,18 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return cap.name || cap.capability_id || `idx:${idx}`;
   }
   function moveCapability(idx: number, delta: number) {
-    if (!flowSpec) return;
-    const caps = flowSpec.capabilities || [];
+    const current = flowSpecRef.current;
+    if (!current) return;
+    const caps = [...(current.capabilities || [])];
     const to = idx + delta;
     if (to < 0 || to >= caps.length) return;
     const refs = caps.map(capabilityRef);
     const [item] = refs.splice(idx, 1);
     refs.splice(to, 0, item);
+    const ordered = refs.map((ref) => caps.find((cap, capIdx) => capabilityRef(cap, capIdx) === ref)!).filter(Boolean);
+    const next = { ...current, capabilities: ordered };
+    flowSpecRef.current = next;
+    setFlowSpec(next);
     send({ type: "flow_update", edits: [{ op: "reorder_capabilities", capability_refs: refs }] });
   }
   function loadJsonDraft() {
@@ -1906,8 +2053,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       { key: "diagnostic", label: "页面诊断", color: "volcano" },
       { key: "flow", label: "整体流程", color: "default" },
     ];
-    type OperatorIssue = { message: string; severity: string; source?: string; target?: Record<string, any> };
+    type OperatorIssue = {
+      message: string; severity: string; source?: string; target?: Record<string, any>;
+      audience?: "operator" | "internal"; actionable?: boolean; blocking?: boolean; auto_fixable?: boolean;
+    };
     const isOperatorIssue = (item: OperatorIssue) => {
+      if (item.audience) return item.audience === "operator" && item.actionable !== false;
       const severity = String(item.severity || "").toLowerCase();
       if (severity === "error" || severity === "high") return true;
       // Validator warnings are planner/schema diagnostics. They remain available to
@@ -1926,6 +2077,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         severity: item.severity || "warning",
         source: item.source,
         target: item.target,
+        audience: item.audience,
+        actionable: item.actionable,
+        blocking: item.blocking,
+        auto_fixable: item.auto_fixable,
       })).filter(isOperatorIssue);
     }
     if (!Object.keys(by).length) {
@@ -2199,14 +2354,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const totalParams = flowSpec.steps.reduce((n, s) => n + (s.params?.length || 0), 0);
     const capabilities = flowSpec.capabilities || [];
     const capturedTotal = allCapturedRequests(flowSpec).length;
-    const capabilityGenerated = capabilities.length > 0 && !!flowSpec.meta?.capability_model?.status;
-    const visibleReviewItems = capabilityGenerated ? reviewItems : [];
+    const visibleReviewItems = reviewItems;
     const unconfirmedCapabilities = capabilities.filter((cap) => !cap.confirmed || cap.requires_human_confirm).length;
     const publishIssueGroups = groupedPublishIssues(checkReport, visibleReviewItems);
     const hasPublishAdvice = publishIssueGroups.some((group) => group.items.length > 0);
     return (
       <Card style={{ marginTop: 16 }} styles={{ body: { paddingTop: 8 } }}>
-        {checkReport && capabilityGenerated && (
+        {checkReport && (
           <Alert
             type={checkReport.passed && !hasPublishAdvice ? "success" : "warning"}
             showIcon

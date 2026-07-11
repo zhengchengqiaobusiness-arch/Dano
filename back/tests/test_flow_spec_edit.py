@@ -210,8 +210,8 @@ def test_repair_mode_fixes_warning_only_batch_nodes_and_dangling_relations():
         meta={"capability_model": {"status": "ready"}},
     )
     before = validate_flow_spec(spec)
-    assert before["passed"] is True
-    assert before["warnings"]
+    assert before["passed"] is False
+    assert any("没有批量接口事实" in error for error in before["errors"])
 
     fixed = asyncio.run(run_recording_pi_loop(spec, llm_client=None, model=None, mode="repair"))
 
@@ -967,7 +967,7 @@ def test_valid_locked_capability_fields_and_dependencies_survive():
 
     cap = edited.capabilities[0]
     assert cap.step_ids == ["submit"]
-    assert cap.request_fields[0].field_id == "manual-field-reason"
+    assert cap.request_fields[0].field_id == "request_field:submit:reason"
     assert cap.request_fields[0].path == "reason"
     assert cap.dependencies[0].dependency_id == "manual-dep-status-to-submit"
 
@@ -977,7 +977,7 @@ def test_valid_locked_capability_fields_and_dependencies_survive():
     exported = api_request["capabilities"][0]
     assert exported["step_ids"] == ["submit"]
     assert exported["compiled_step_ids"] == ["submit"]
-    assert exported["request_fields"][0]["field_id"] == "manual-field-reason"
+    assert exported["request_fields"][0]["field_id"] == "request_field:submit:reason"
     assert exported["dependencies"][0]["dependency_id"] == "manual-dep-status-to-submit"
 
 
@@ -1218,7 +1218,7 @@ def test_edit_type():
     assert new.steps[0].params[0].type == "number"
 
 
-def test_edit_type_to_string_preserves_independent_source_configuration():
+def test_edit_type_to_string_atomically_removes_enum_contract():
     step = FlowStep(
         step_id="step1",
         method="POST",
@@ -1254,10 +1254,10 @@ def test_edit_type_to_string_preserves_independent_source_configuration():
 
     param = new.steps[0].params[0]
     assert param.type == "string"
-    assert param.source_kind == "page_enum"
-    assert param.enum_options
-    assert param.enum_value_map
-    assert new.steps[0].selects
+    assert param.source_kind == "user_input"
+    assert param.enum_options is None
+    assert param.enum_value_map is None
+    assert new.steps[0].selects == []
 
 
 def test_edit_type_to_enum_does_not_overwrite_category_or_source():
@@ -1985,7 +1985,7 @@ def test_auto_fix_promotes_high_confidence_request_into_capability_closure():
     assert "auto_fix_history" in fixed.meta
 
 
-def test_capability_scoped_view_preserves_locked_field_while_deriving_new_fields():
+def test_capability_scoped_view_uses_param_as_truth_over_locked_mirror():
     spec = FlowSpec(
         flow_id="cap-locked-field",
         steps=[FlowStep(
@@ -2021,10 +2021,10 @@ def test_capability_scoped_view_preserves_locked_field_while_deriving_new_fields
     fields = synced.capabilities[0].request_fields
 
     locked = next(f for f in fields if f.path == "type")
-    assert locked.key == "leave_type"
-    assert locked.display_name == "请假类型"
-    assert locked.type == "enum"
-    assert locked.locked is True
+    assert locked.key == "type"
+    assert locked.display_name == "type"
+    assert locked.type == "number"
+    assert locked.locked is False
     assert any(f.path == "reason" and f.key == "reason" for f in fields)
 
 
@@ -2107,7 +2107,7 @@ def test_auto_fix_routes_option_and_status_requests_to_matching_capabilities():
         for fixed_step in fixed.steps
         if fixed_step.step_id in by_name["query_status"].step_ids
     )
-    assert "submit" in by_name["submit_batch"].step_ids
+    assert "submit" in by_name["submit"].step_ids
 
 
 def test_recording_pi_loop_records_planner_and_repair_history():
@@ -2285,7 +2285,10 @@ def test_capability_validator_reports_deep_p1_field_and_loop_findings():
         params=[
             ParamField(path="[0].type", key="type", value="2", type="number", required=True),
             ParamField(path="[0].date", key="date", value="2026-05-12", type="date", required=True),
-            ParamField(path="[0].content", key="content", value="x", type="string", required=True),
+            ParamField(
+                path="[0].content", key="content", value="x", type="string", required=True,
+                category="runtime_var", source_kind="unknown", exposed_to_user=False,
+            ),
         ],
     )
     spec = FlowSpec(
@@ -2401,7 +2404,10 @@ def test_confirmed_capability_blocks_required_internal_request_field_without_sou
             method="POST",
             url="/api/submit",
             path="/api/submit",
-            params=[ParamField(path="processDefinitionId", key="processDefinitionId", value="p1", type="string", required=True)],
+            params=[ParamField(
+                path="runtimeTicket", key="runtimeTicket", value="p1", type="string", required=True,
+                category="runtime_var", source_kind="unknown", exposed_to_user=False,
+            )],
             response_json={"code": 0},
         )],
         capabilities=[FlowCapability(
@@ -2413,8 +2419,8 @@ def test_confirmed_capability_blocks_required_internal_request_field_without_sou
                 field_id="proc",
                 scope="request_field",
                 step_id="submit",
-                path="processDefinitionId",
-                key="processDefinitionId",
+                path="runtimeTicket",
+                key="runtimeTicket",
                 type="string",
                 required=True,
                 exposed_to_caller=False,
@@ -2432,6 +2438,72 @@ def test_confirmed_capability_blocks_required_internal_request_field_without_sou
 
     assert report["passed"] is False
     assert "capability_field_source_missing" in text
+
+
+def test_confirmation_is_atomic_and_rejects_invalid_contract_before_state_change():
+    spec = FlowSpec(
+        flow_id="confirm-preflight",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/submit",
+            path="/submit",
+            body_source='{"runtimeTicket":"recorded"}',
+            params=[ParamField(
+                path="runtimeTicket", key="runtimeTicket", value="recorded",
+                category="runtime_var", source_kind="unknown", exposed_to_user=False,
+            )],
+            response_json={"code": 0},
+        )],
+        capabilities=[FlowCapability(
+            name="submit",
+            kind="submit",
+            step_ids=["submit"],
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+            output_mapping=[{"kind": "final_response", "step_id": "submit", "response_path": "response"}],
+        )],
+    )
+
+    with pytest.raises(ValueError, match="能力确认失败"):
+        apply_flow_edits(spec, [{
+            "op": "update_capability", "capability_name": "submit",
+            "field": "confirmed", "value": True,
+        }])
+
+    assert spec.capabilities[0].confirmed is False
+
+
+def test_enum_to_scalar_rebuilds_capability_schema_without_stale_keywords():
+    spec = FlowSpec(
+        flow_id="enum-scalar-contract",
+        steps=[FlowStep(
+            step_id="submit", method="POST", url="/submit", path="/submit",
+            body_source='{"type":"A"}',
+            params=[ParamField(
+                path="type", key="类型", value="A", type="enum",
+                source_kind="page_enum", category="user_param",
+                enum_options=[{"label": "甲", "value": "A"}],
+                enum_value_map={"甲": "A"},
+            )],
+            selects=[SelectBinding(param="类型", path="type", options=[{"label": "甲", "value": "A"}])],
+        )],
+        capabilities=[FlowCapability(
+            name="submit", kind="submit", step_ids=["submit"],
+            input_schema={"type": "object", "properties": {
+                "类型": {"type": "string", "enum": ["甲"], "x-options": ["甲"], "format": "name-ref"},
+            }},
+        )],
+    )
+
+    edited = apply_flow_edits(spec, [{
+        "op": "update", "step_id": "submit", "param_path": "type",
+        "field": "type", "value": "string",
+    }])
+    schema = edited.capabilities[0].input_schema["properties"]["类型"]
+
+    assert schema["type"] == "string"
+    assert not ({"enum", "x-options", "x-enum-value-map", "format"} & set(schema))
+    assert edited.steps[0].selects == []
 
 
 def test_strict_skill_level_blocks_missing_description_and_failure_handling():
@@ -2683,6 +2755,7 @@ def test_batch_capability_exports_execution_contract_and_entries_schema():
             path="/api/submit",
             content_type="application/json",
             body_source='[{"date":"2026-05-12","content":"x"}]',
+            source_meta={"batch_intent": True},
             params=[
                 ParamField(path="[0].date", key="date", value="2026-05-12", type="date", required=True),
                 ParamField(path="[0].content", key="content", value="x", type="string", required=True),
@@ -2702,6 +2775,29 @@ def test_batch_capability_exports_execution_contract_and_entries_schema():
     assert "entries" in cap["input_schema"]["properties"]
     assert any(n.get("type") == "foreach" for n in cap["workflow_nodes"])
     assert api_request["capability_protocol"] == "dano.capability_plan.v1"
+    report = validate_flow_spec(spec)
+    assert not any("条目 schema 未覆盖" in warning for warning in report["warnings"])
+
+
+def test_single_array_wrapped_form_is_not_inferred_as_batch_without_evidence():
+    spec = FlowSpec(
+        flow_id="single-array-form",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/api/form/submit",
+            path="/api/form/submit",
+            content_type="application/json",
+            body_source='[{"reason":"x"}]',
+            params=[ParamField(path="[0].reason", key="reason", value="x", required=True)],
+        )],
+    )
+
+    planned = apply_flow_edits(spec, [{"op": "generate_capabilities"}])
+
+    assert len(planned.capabilities) == 1
+    assert planned.capabilities[0].kind == "submit"
+    assert not any(node.get("type") == "foreach" for node in planned.capabilities[0].nodes)
 
 
 def _two_capability_compile_spec():
@@ -3145,8 +3241,8 @@ def test_repeated_orchestration_repairs_contract_without_expanding_interface_sco
 
     out = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=_ScopeExpandingPlanner(), model="fake"))
 
-    assert [cap.name for cap in out.capabilities] == ["submit_batch"]
-    assert out.capabilities[0].title == "完善后的批量提交"
+    assert [cap.name for cap in out.capabilities] == ["submit"]
+    assert out.capabilities[0].title == "完善后的提交"
     assert out.capabilities[0].step_ids == ["submit"]
 
 
@@ -3352,6 +3448,240 @@ def test_batch_input_schema_requires_entries_and_keeps_only_shared_fields_at_top
     assert schema["properties"]["entries"]["items"]["required"] == ["日期", "工作内容"]
 
 
+def test_approval_list_in_single_form_is_not_exported_as_batch_entries():
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        url="/leave/submit-process",
+        path="/leave/submit-process",
+        body_source=json.dumps([{
+            "type": 2, "reason": "x", "startTime": "2026-07-01",
+            "leaderApprover": "u1", "hrApprover": "u2",
+        }]),
+        params=[
+            ParamField(path="[0].type", key="请假类型", category="user_param", source_kind="page_enum"),
+            ParamField(path="[0].reason", key="原因", category="user_param", source_kind="user_input"),
+            ParamField(path="[0].startTime", key="开始时间", category="user_param", source_kind="user_input"),
+            ParamField(path="[0].leaderApprover", key="领导审批人", category="user_param", source_kind="api_option"),
+            ParamField(path="[0].hrApprover", key="人力审批人", category="user_param", source_kind="api_option"),
+        ],
+    )
+    spec = FlowSpec(
+        flow_id="single-leave",
+        steps=[submit],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            title="批量提交",
+            kind="submit_batch",
+            step_ids=["submit"],
+            nodes=[{"id": "foreach_entries", "type": "foreach", "items": "input.entries", "steps": [
+                {"id": "call_submit", "type": "call", "step_id": "submit"},
+            ]}],
+            evidence=[{"step_id": "submit"}],
+            updated_by="planner",
+        )],
+    )
+
+    repaired = flow_spec_module._repair_generated_capability_contracts(spec)
+    synced = flow_spec_module._sync_capability_io_schemas(repaired)
+
+    cap = synced.capabilities[0]
+    assert cap.kind == "submit"
+    assert "entries" not in cap.input_schema["properties"]
+    assert set(cap.input_schema["properties"]) == {"请假类型", "原因", "开始时间", "领导审批人", "人力审批人"}
+    assert not any(node.get("type") == "foreach" for node in cap.nodes)
+
+
+def test_dynamic_option_snapshot_is_not_a_hard_capability_enum():
+    param = ParamField(
+        path="approverId",
+        key="审批人",
+        label="审批人",
+        type="enum",
+        category="user_param",
+        source_kind="api_option",
+        source={"source_step_id": "users", "source_url": "/users/list"},
+        enum_options=[{"label": "录制时用户", "value": "u1"}],
+        enum_value_map={"录制时用户": "u1"},
+    )
+
+    schema = flow_spec_module._capability_input_schema([param])
+    field = schema["properties"]["审批人"]
+
+    assert field["format"] == "name-ref"
+    assert field["x-options-source"] is True
+    assert field["x-options-snapshot"] == [{"label": "录制时用户", "value": "u1"}]
+    assert "enum" not in field
+
+
+def test_activity_id_cannot_be_changed_into_random_uuid_and_capability_view_stays_in_sync():
+    step = FlowStep(
+        step_id="approval",
+        method="GET",
+        path="/approval-detail",
+        params=[ParamField(
+            path="query.activityId",
+            key="activityId",
+            value="StartUserNode",
+            category="system_const",
+            source_kind="constant",
+            source={"kind": "constant"},
+            exposed_to_user=False,
+        )],
+    )
+    spec = FlowSpec(
+        flow_id="stable-activity",
+        steps=[step],
+        capabilities=[FlowCapability(
+            name="submit",
+            kind="submit",
+            step_ids=["approval"],
+            confirmed=True,
+            request_fields=[CapabilityField(
+                field_id="request_field:approval:query.activityId",
+                scope="request_field",
+                display_name="activityId",
+                path="query.activityId",
+                key="activityId",
+                step_id="approval",
+                source_kind="unknown",
+                exposed_to_caller=True,
+                locked=True,
+            )],
+        )],
+    )
+
+    changed = apply_flow_edits(spec, [
+        {"op": "update", "step_id": "approval", "param_path": "query.activityId",
+         "field": "category", "value": "runtime_var"},
+        {"op": "update", "step_id": "approval", "param_path": "query.activityId",
+         "field": "source_kind", "value": "system_generated"},
+        {"op": "update", "step_id": "approval", "param_path": "query.activityId",
+         "field": "source", "value": {"kind": "system_generated", "strategy": "uuid"}},
+        {"op": "update", "step_id": "approval", "param_path": "query.activityId",
+         "field": "exposed_to_user", "value": False},
+    ])
+
+    param = changed.steps[0].params[0]
+    assert param.category == "system_const"
+    assert param.source_kind == "constant"
+    assert param.source["semantic"] == "workflow_identifier"
+    assert param.value == "StartUserNode"
+    field = changed.capabilities[0].internal_fields[0]
+    assert field.source_kind == "constant"
+    assert field.exposed_to_caller is False
+    report = validate_flow_spec(changed)
+    text = "\n".join([*report["errors"], *report["warnings"]])
+    assert "activityId" not in text
+
+
+def test_leave_skill_repairs_process_id_flattens_submit_and_excludes_option_reads_from_query():
+    process_id = "oa_duty_leave:4:f92ff5"
+    process = FlowStep(
+        step_id="process",
+        method="GET",
+        path="/admin-api/bpm/process-definition/get?key=oa_duty_leave",
+        response_json={"data": {"id": process_id}},
+        source_meta={"role": "business_get"},
+    )
+    users = FlowStep(
+        step_id="users",
+        method="GET",
+        path="/admin-api/system/user/page",
+        response_json={"data": {"list": [{"id": 1, "nickname": "张三"}], "total": 1}},
+        source_meta={"role": "business_get"},
+    )
+    approval = FlowStep(
+        step_id="approval",
+        method="GET",
+        path="/admin-api/bpm/process-instance/get-approval-detail",
+        params=[ParamField(
+            path="query.processDefinitionId",
+            key="processDefinitionId",
+            value=process_id,
+            category="system_const",
+            source_kind="constant",
+            exposed_to_user=False,
+        )],
+        response_json={"data": {"node": "StartUserNode"}},
+        source_meta={"role": "read_context", "control_preflight_for_write": True},
+    )
+    leave_page = FlowStep(
+        step_id="leave-page",
+        method="GET",
+        path="/admin-api/oa/duty-leave/page",
+        response_json={"data": {"list": [{"id": "L1", "reason": "测试"}], "total": 1}},
+        source_meta={"role": "business_get"},
+    )
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/admin-api/oa/duty-leave/submit-process",
+        body_source='[{"type":3,"reason":"测试","approver1":1,"approver2":2}]',
+        params=[
+            ParamField(path="[0].type", key="类型", type="enum", category="user_param", source_kind="page_enum"),
+            ParamField(path="[0].reason", key="原因", category="user_param", source_kind="user_input"),
+            ParamField(path="[0].approver1", key="审批人1", type="enum", category="user_param",
+                       source_kind="api_option", source={"source_step_id": "users", "source_url": users.path}),
+            ParamField(path="[0].approver2", key="审批人2", type="enum", category="user_param",
+                       source_kind="api_option", source={"source_step_id": "users", "source_url": users.path}),
+        ],
+    )
+    spec = FlowSpec(
+        flow_id="leave-complete",
+        steps=[process, users, approval, leave_page, submit],
+        capabilities=[
+            FlowCapability(
+                name="query_status", kind="query_status",
+                step_ids=["users", "leave-page"], confirmed=True,
+                output_mapping=[
+                    {"name": "records", "step_id": "users", "response_path": "data.list"},
+                    {"name": "records_2", "step_id": "leave-page", "response_path": "data.list"},
+                ],
+            ),
+            FlowCapability(
+                name="submit", kind="submit",
+                step_ids=["process", "approval", "submit"], confirmed=True,
+                input_schema={"type": "object", "properties": {
+                    "entries": {"type": "array", "items": {"type": "object", "properties": {
+                        "审批人1": {"type": "string"}, "审批人2": {"type": "string"},
+                    }}},
+                    "processDefinitionId": {"type": "string"},
+                }},
+            ),
+        ],
+    )
+
+    synced = flow_spec_module._sync_capability_io_schemas(spec)
+    query = next(cap for cap in synced.capabilities if cap.name == "query_status")
+    write = next(cap for cap in synced.capabilities if cap.name == "submit")
+
+    assert query.step_ids == ["leave-page"]
+    assert set(query.output_schema["properties"]) == {"records", "total"}
+    assert "username" not in json.dumps(query.output_schema, ensure_ascii=False)
+    assert "entries" not in write.input_schema["properties"]
+    assert "processDefinitionId" not in write.input_schema["properties"]
+    assert set(write.input_schema["properties"]) == {"类型", "原因", "审批人1", "审批人2"}
+    process_param = approval.params[0]
+    assert process_param.category == "runtime_var"
+    assert process_param.source_kind == "previous_response"
+    assert process_param.source["step_id"] == "process"
+    assert process_param.source["response_path"] == "data.id"
+
+
+def test_query_list_response_uses_records_and_total_output_contract():
+    step = FlowStep(
+        step_id="query",
+        method="GET",
+        path="/leave/page",
+        response_json={"data": {"list": [{"id": "1", "status": 1}], "total": 1}},
+    )
+    mappings = flow_spec_module._query_output_mappings([step])
+    assert {(item["name"], item["response_path"]) for item in mappings} == {
+        ("records", "data.list"), ("total", "data.total"),
+    }
+
+
 def test_incremental_orchestration_keeps_enum_in_existing_capability():
     spec = FlowSpec(
         flow_id="incremental-enum",
@@ -3534,6 +3864,77 @@ def test_publish_validation_exposes_structured_issue_groups():
 
     assert "field" in report["issue_groups"]
     assert all(item.get("message") for item in report["issue_groups"]["field"])
+    assert all(item.get("audience") == "operator" for item in report["issue_groups"]["field"])
+    assert all(item.get("actionable") is True for item in report["issue_groups"]["field"])
+
+
+def test_publish_validation_marks_non_blocking_validator_advice_internal():
+    spec = FlowSpec(
+        flow_id="internal-advice",
+        steps=[FlowStep(step_id="query", method="GET", url="/api/query", path="/api/query")],
+        capabilities=[FlowCapability(
+            name="query_status",
+            kind="query_status",
+            step_ids=["query"],
+            nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
+            confirmed=True,
+        )],
+        meta={"capability_model": {"status": "ready"}},
+    )
+
+    report = validate_flow_spec(spec)
+    warnings = [
+        item
+        for group in report["issue_groups"].values()
+        for item in group
+        if item.get("source") == "validator" and item.get("severity") == "warning"
+    ]
+
+    assert warnings
+    assert all(item.get("audience") == "internal" for item in warnings)
+    assert all(item.get("actionable") is False for item in warnings)
+    assert all(item.get("auto_fixable") is True for item in warnings)
+
+
+def test_capability_map_accepts_quoted_constants_and_compiled_values():
+    step = FlowStep(
+        step_id="submit",
+        method="POST",
+        url="/api/submit",
+        path="/api/submit",
+        body_source='{"billType":"oa_duty_leave","processDefKey":"oa_duty_leave",'
+                    '"activityId":"StartUserNode","processVariablesStr":"{\\"day\\":2}"}',
+        params=[
+            ParamField(path="billType", key="billType", value="oa_duty_leave", category="system_const", source_kind="constant"),
+            ParamField(path="processDefKey", key="processDefKey", value="oa_duty_leave", category="system_const", source_kind="constant"),
+            ParamField(path="activityId", key="activityId", value="StartUserNode", category="system_const", source_kind="constant"),
+            ParamField(path="processVariablesStr", key="processVariablesStr", value='{"day":2}', category="system_const", source_kind="constant"),
+        ],
+        success_rule={"kind": "http_status", "values": [200]},
+    )
+    spec = FlowSpec(
+        flow_id="literal-map",
+        steps=[step],
+        capabilities=[FlowCapability(
+            name="submit",
+            kind="submit",
+            step_ids=["submit"],
+            nodes=[
+                {"id": "map_billType", "type": "map", "source": "'oa_duty_leave'", "target": "submit.billType"},
+                {"id": "map_processDefKey", "type": "map", "source": '"oa_duty_leave"', "target": "submit.processDefKey"},
+                {"id": "map_activityId", "type": "map", "source": "'StartUserNode'", "target": "submit.activityId"},
+                {"id": "map_processVariablesStr", "type": "map", "source": 'computed:{"day":2}', "target": "submit.processVariablesStr"},
+                {"id": "call_submit", "type": "call", "step_id": "submit"},
+            ],
+            output_mapping=[{"kind": "final_response", "step_id": "submit", "response_path": "response"}],
+            confirmed=True,
+        )],
+        meta={"capability_model": {"status": "ready"}},
+    )
+
+    report = validate_flow_spec(spec)
+
+    assert not any("map 节点" in message and "来源" in message and "不存在" in message for message in report["errors"])
 
 
 # ── Type inference ──

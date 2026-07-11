@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import re
 
 from pydantic import BaseModel, Field
@@ -35,6 +36,7 @@ class SkillManifest(BaseModel):
     capability: str = ""              # 对外能力键;旧资产为空时等于 name,保持 skill_id 兼容
     capability_meta: dict = Field(default_factory=dict)  # 能力别名/来源/迁移信息,不进入 JSON Schema
     capabilities: list[dict] = Field(default_factory=list)  # 一个 Skill 内可调用的业务能力列表
+    capability_relations: list[dict] = Field(default_factory=list)  # 能力间数据流；不代表自动串联
     subsystem: str
     action: str
     title: str
@@ -70,6 +72,53 @@ def _is_reserved(field: str) -> bool:
 
 _OPTIONS_INLINE_MAX = 50    # 候选 ≤ 此数 → 内置 enum 进 schema(agent 直接选);更多 → 只留来源,运行期 --list-options 现拉
 _READ_ONLY_CAPABILITY_KINDS = {"query", "query_status", "list_options", "validate", "validate_batch", "preview", "inspect"}
+_CAPABILITY_TITLES = {
+    "query": "查询",
+    "query_status": "查询状态",
+    "list_options": "查询可选项",
+    "validate": "校验",
+    "validate_batch": "批量校验",
+    "preview": "预览",
+    "inspect": "检查",
+    "submit": "提交",
+    "submit_batch": "批量提交",
+}
+_TECHNICAL_TITLE_RE = re.compile(
+    r"(?:\b(?:get|post|put|delete|patch|submit|insert|update)[-_ ]|process|流程\s*\(?\d+\s*步\)?)",
+    re.I,
+)
+
+
+def _manifest_title(skill: SkillSpec) -> str:
+    current = str(skill.title or "").strip()
+    capabilities = [cap for cap in (getattr(skill, "capabilities", []) or []) if isinstance(cap, dict)]
+    kinds = [str(cap.get("kind") or "") for cap in capabilities]
+    has_read = any(kind in _READ_ONLY_CAPABILITY_KINDS for kind in kinds)
+    has_write = any(kind and kind not in _READ_ONLY_CAPABILITY_KINDS for kind in kinds)
+    # A legacy title often names only the first query endpoint. For a public
+    # multi-capability Skill that would hide its write ability and misroute agents.
+    if current and not _TECHNICAL_TITLE_RE.search(current):
+        if has_read and has_write and re.search(r"查询|列表|状态|query|list", current, re.I):
+            write_title = next((
+                str(cap.get("title") or "").strip() for cap in capabilities
+                if str(cap.get("kind") or "") not in _READ_ONLY_CAPABILITY_KINDS
+                and str(cap.get("title") or "").strip()
+            ), "")
+            if write_title and write_title not in current:
+                return f"{current} · {write_title}"
+        return current
+    candidates = [
+        str((getattr(skill, "goal", {}) or {}).get("intent") or "").strip(),
+        *[
+            str(cap.get("title") or "").strip()
+            for cap in capabilities
+            if isinstance(cap, dict)
+        ],
+    ]
+    for candidate in candidates:
+        if candidate and not _TECHNICAL_TITLE_RE.search(candidate):
+            return candidate
+    return current or _ACTION_TITLES.get(skill.action, skill.action)
 
 
 def _api_selects(skill: SkillSpec) -> dict:
@@ -363,12 +412,79 @@ def _capability_call_protocol(skill_id: str, capability: str) -> dict:
     }
 
 
+def _sanitize_capability_parameter_schema(schema: dict, cap: dict) -> dict:
+    """Normalize persisted capability schemas before exposing them to callers.
+
+    Old recordings may contain a short recording snapshot as a hard enum even
+    though the field is backed by a live people/department/dictionary endpoint.
+    The source metadata is authoritative: live fields must be resolved at call
+    time and must never reject valid values merely because they were not visible
+    during recording.
+    """
+    normalized = copy.deepcopy(schema or {"type": "object", "properties": {}, "required": []})
+    dynamic: dict[str, dict] = {}
+    for group in ("fields", "inputs", "request_fields"):
+        for field in cap.get(group) or []:
+            if not isinstance(field, dict) or field.get("source_kind") != "api_option":
+                continue
+            name = str(field.get("key") or field.get("display_name") or field.get("path") or "").split(".")[-1]
+            if name:
+                dynamic[name] = dict(field.get("source") or {})
+
+    def visit(node: dict) -> None:
+        if node.get("type") == "object" or isinstance(node.get("properties"), dict):
+            node.setdefault("type", "object")
+            node["additionalProperties"] = False
+        props = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+        for name, prop in props.items():
+            if not isinstance(prop, dict):
+                continue
+            is_dynamic = name in dynamic or (
+                prop.get("x-options-source") and not prop.get("x-options")
+            )
+            if is_dynamic:
+                snapshot = prop.pop("x-options", None)
+                if snapshot:
+                    prop.setdefault("x-options-snapshot", snapshot)
+                prop.pop("enum", None)
+                if isinstance(prop.get("items"), dict):
+                    prop["items"].pop("enum", None)
+                    prop["items"].setdefault("format", "name-ref")
+                else:
+                    prop.setdefault("format", "name-ref")
+                prop["x-options-source"] = True
+                if dynamic.get(name):
+                    prop["x-options-source-meta"] = dynamic[name]
+            visit(prop)
+            if isinstance(prop.get("items"), dict):
+                visit(prop["items"])
+
+    visit(normalized)
+    return normalized
+
+
+def _canonical_capability_identity(cap: dict) -> tuple[str, str, str]:
+    """Keep the public identifier semantic instead of preserving planner aliases."""
+    raw_name = str(cap.get("name") or cap.get("capability_id") or "").strip()
+    kind = str(cap.get("kind") or raw_name).strip()
+    if kind in _CAPABILITY_TITLES:
+        name = kind
+    else:
+        name = raw_name or kind
+    title = str(cap.get("title") or "").strip() or _CAPABILITY_TITLES.get(kind, name)
+    if kind == "submit" and re.search(r"(?:batch|bulk|multi|many|批量)", title, re.I):
+        title = _CAPABILITY_TITLES["submit"]
+    if kind == "submit_batch" and not re.search(r"(?:batch|bulk|批量)", title, re.I):
+        title = f"批量{title}"
+    return name, kind, title
+
+
 def _capability_manifest(skill: SkillSpec, cap: dict) -> dict:
-    name = str(cap.get("name") or cap.get("kind") or cap.get("capability_id") or "").strip()
+    name, kind, title = _canonical_capability_identity(cap)
     out = dict(cap)
-    out.setdefault("name", name)
-    out.setdefault("kind", cap.get("kind") or name)
-    out.setdefault("title", cap.get("title") or name)
+    out["name"] = name
+    out["kind"] = kind
+    out["title"] = title
     if cap.get("input_schema"):
         out["parameters"] = cap.get("input_schema")
     elif cap.get("inputs"):
@@ -386,10 +502,24 @@ def _capability_manifest(skill: SkillSpec, cap: dict) -> dict:
         out["parameters"] = {"type": "object", "properties": props, "required": required}
     else:
         out["parameters"] = {"type": "object", "properties": {}, "required": []}
-    out["input_schema"] = out.get("input_schema") or out["parameters"]
+    out["parameters"] = _sanitize_capability_parameter_schema(out["parameters"], cap)
+    if kind == "submit_batch":
+        props = out["parameters"].setdefault("properties", {})
+        entries = props.setdefault("entries", {"type": "array"})
+        entries["type"] = "array"
+        entries.setdefault("minItems", 1)
+        items = entries.setdefault("items", {"type": "object", "properties": {}})
+        if isinstance(items, dict):
+            items.setdefault("type", "object")
+            items.setdefault("properties", {})
+            items["additionalProperties"] = False
+        required = list(out["parameters"].get("required") or [])
+        if "entries" not in required:
+            required.append("entries")
+        out["parameters"]["required"] = required
+    out["input_schema"] = out["parameters"]
     out["output_schema"] = out.get("output_schema") or {"type": "object"}
     out["call_protocol"] = _capability_call_protocol(skill.skill_id, name)
-    kind = str(out.get("kind") or out.get("name") or "").strip()
     if bool(cap.get("requires_confirmation")) or bool(cap.get("requires_human_confirm")):
         out["requires_confirmation"] = True
     elif bool(cap.get("readonly")) or bool(cap.get("read_only")) or kind in _READ_ONLY_CAPABILITY_KINDS:
@@ -402,6 +532,35 @@ def _capability_manifest(skill: SkillSpec, cap: dict) -> dict:
 def _capability_manifests(skill: SkillSpec) -> list[dict]:
     caps = list(getattr(skill, "capabilities", []) or [])
     return [_capability_manifest(skill, c) for c in caps if isinstance(c, dict)]
+
+
+def _capability_relations(skill: SkillSpec) -> list[dict]:
+    """Expose grounded cross-capability data flow without implying auto execution."""
+    api_request = getattr(skill, "api_request", {}) or {}
+    flow_spec = api_request.get("_flow_spec") if isinstance(api_request, dict) else {}
+    candidates = [
+        getattr(skill, "capability_relations", None),
+        (getattr(skill, "call_metadata", {}) or {}).get("capability_relations"),
+        api_request.get("capability_relations") if isinstance(api_request, dict) else None,
+        flow_spec.get("capability_relations") if isinstance(flow_spec, dict) else None,
+    ]
+    raw_relations = next((value for value in candidates if isinstance(value, list) and value), [])
+    relations: list[dict] = []
+    for raw in raw_relations:
+        if not isinstance(raw, dict):
+            continue
+        relation = copy.deepcopy(raw)
+        relation_type = str(relation.get("type") or "suggested_call_chain")
+        relation["type"] = relation_type
+        relation["automatic"] = False
+        relation["caller_responsibility"] = (
+            "调用方必须将前一能力输出转换为后一能力 input_schema，并逐项校验、取得必要确认后显式调用；"
+            "Skill 不执行隐式转换或自动串联。"
+            if relation_type == "external_transform"
+            else "调用方根据前一能力输出和用户意图决定是否显式调用后一能力；Skill 不自动串联。"
+        )
+        relations.append(relation)
+    return relations
 
 
 def _req_path(req: dict) -> str:
@@ -459,7 +618,7 @@ def _flow_meta(skill: SkillSpec) -> dict:
 def to_manifest(skill: SkillSpec) -> SkillManifest:
     risk = RiskLevel(skill.risk_level)
     # 阶段4:标题优先用接口 summary(skill.title),退而用内置词典,再退动作名
-    title = skill.title or _ACTION_TITLES.get(skill.action, skill.action)
+    title = _manifest_title(skill)
     if skill.is_workflow:
         integration, kind = "workflow", "流程"
     elif skill.has_api:
@@ -477,15 +636,39 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
             for c in list(call_metadata.get("capabilities") or [])
             if isinstance(c, dict)
         ]
+    public_names = {str(c.get("name") or "") for c in capabilities}
+    if capability not in public_names:
+        raw_selected = next((
+            c for c in (getattr(skill, "capabilities", []) or [])
+            if isinstance(c, dict) and capability in {
+                str(c.get("name") or ""), str(c.get("kind") or ""), str(c.get("capability_id") or "")
+            }
+        ), None)
+        if raw_selected is not None:
+            capability = _canonical_capability_identity(raw_selected)[0]
+        elif len(capabilities) == 1:
+            capability = str(capabilities[0].get("name") or capability)
     output_schema = {"type": "object"}
     default_cap = next((c for c in capabilities if c.get("name") == capability), None)
     if default_cap and isinstance(default_cap.get("output_schema"), dict):
         output_schema = default_cap["output_schema"]
+    capability_relations = _capability_relations(skill)
+    call_protocol = _call_protocol(capability, skill.skill_id)
+    if len(capabilities) > 1:
+        call_protocol.update({
+            "default_capability": None,
+            "requires_explicit_capability": True,
+            "capabilities": [str(c.get("name") or c.get("kind") or "") for c in capabilities],
+        })
+    else:
+        call_protocol["default_capability"] = capability
+        call_protocol["requires_explicit_capability"] = False
     return SkillManifest(
         name=skill.skill_id,
         capability=capability,
         capability_meta=_capability_meta(skill, capability),
         capabilities=capabilities,
+        capability_relations=capability_relations,
         subsystem=skill.subsystem.value,
         action=skill.action,
         title=title,
@@ -506,7 +689,7 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         verification_basis=call_metadata.get("verification_basis", ""),
         parameters=parameters,
         output_schema=output_schema,
-        call_protocol=_call_protocol(capability, skill.skill_id),
+        call_protocol=call_protocol,
         flow=_flow_meta(skill),
     )
 

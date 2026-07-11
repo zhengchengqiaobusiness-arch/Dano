@@ -814,8 +814,9 @@ class GetBusinessStepTest(unittest.TestCase):
 
         out = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=None, model=None))
 
-        cap = next(c for c in out.capabilities if c.name == "submit_batch")
+        cap = next(c for c in out.capabilities if c.name == "submit")
         self.assertEqual(cap.title, "人工改过的标题")
+        self.assertEqual(cap.kind, "submit")
         self.assertTrue(cap.confirmed)
         self.assertIn("submit", cap.step_ids)
         self.assertGreaterEqual(cap.confidence, 0.3)
@@ -1474,7 +1475,7 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         by_path = {p.path: p for s in spec.steps for p in s.params}
         p = by_path["type"]
         self.assertEqual(p.type, "enum")
-        self.assertEqual(p.source_kind, "page_enum")
+        self.assertEqual(p.source_kind, "api_option")
         self.assertEqual(p.key, "类型")
         self.assertEqual(p.enum_value_map, {"病假": 2, "事假": 1, "婚假": 3})
 
@@ -1498,8 +1499,8 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertTrue(any("label→value" in e and "type" in e for e in report["errors"]))
 
-    def test_dom_label_options_infer_numeric_code_by_selected_order(self):
-        """无字典接口时,DOM 下拉选中第 N 项且 body 提交 N,应产出 label→N 的可调用枚举。"""
+    def test_dom_label_options_never_guess_numeric_codes_by_selected_order(self):
+        """无字典接口时只能确认本次 label/value，禁止按 DOM 顺序猜其它短码。"""
         captured = [_post("https://oa/api/submit", {"type": 3, "reason": "回家"}, resp={"code": 200})]
         spec = to_flow_spec(
             captured,
@@ -1512,9 +1513,10 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         self.assertEqual(p.key, "类型")
         self.assertEqual(p.type, "enum")
         self.assertEqual(p.source_kind, "page_enum")
-        self.assertEqual(p.enum_value_map, {"病假": 1, "事假": 2, "婚假": 3})
+        self.assertEqual(p.enum_value_map, {"婚假": 3})
+        self.assertFalse(p.source.get("enum_confirmed"))
         report = validate_flow_spec(spec)
-        self.assertTrue(report["passed"], report["errors"])
+        self.assertFalse(report["passed"])
 
     def test_manual_enum_value_only_options_block_publish_until_label_map(self):
         """人工把 number 改 enum 后只填 1/2/3 时必须阻断;补成 病假=2 后才能产出可调用 Skill。"""

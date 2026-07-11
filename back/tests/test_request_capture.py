@@ -749,7 +749,8 @@ def test_apply_page_enum_options_overrides_garbage_dict():
     apply_page_enum_options(selects, {"周末加班": ["工作日加班", "周末加班", "节假日加班"]})
     s = selects[0]
     assert s["options"] == ["工作日加班", "周末加班", "节假日加班"] and s["count"] == 3
-    assert s["enum_source"] == "dom" and "category_key" not in s     # DOM 即权威,不再按类目收窄
+    assert s["enum_source"] == "api" and s["enum_label_source"] == "dom"
+    assert "category_key" not in s                                  # DOM 标签即权威,动态值仍归当前 API
     assert s["source_url"] == "/dict"                               # 来源保留(运行期名→ID 仍用它)
 
 
@@ -773,7 +774,8 @@ def test_apply_page_enum_options_preserves_api_map_when_dom_only_has_labels():
     selects = [{"path": "type", "label": "病假", "value": "2", "source_url": "/dict/leave-type",
                 "value_key": "dictValue", "label_key": "dictLabel",
                 "options": ["其它类型", "病假"], "count": 2,
-                "option_map": {"事假": 1, "病假": 2, "婚假": 3}, "enum_source": "api"}]
+                "option_map": {"事假": 1, "病假": 2, "婚假": 3},
+                "option_map_source_url": "/dict/leave-type", "enum_source": "api"}]
     apply_page_enum_options(
         selects,
         {"病假": {"options": ["病假", "事假", "婚假"], "field_key": "类型", "selected": "病假"}},
@@ -783,7 +785,51 @@ def test_apply_page_enum_options_preserves_api_map_when_dom_only_has_labels():
 
     assert selects[0]["options"] == ["病假", "事假", "婚假"]
     assert selects[0]["option_map"] == {"病假": 2, "事假": 1, "婚假": 3}
-    assert selects[0]["enum_source"] == "dom"
+    assert selects[0]["enum_source"] == "api"
+    assert selects[0]["enum_label_source"] == "dom"
+
+
+def test_apply_page_enum_options_prefers_dom_values_and_rejects_foreign_map():
+    selects = [{"path": "type", "label": "病假", "value": "SICK",
+                "source_url": "/dict/leave-type", "value_key": "value", "label_key": "label",
+                "option_map": {"病假": "OLD-SICK", "事假": "OLD-PERSONAL"},
+                "option_map_source_url": "/dict/other", "enum_source": "api"}]
+
+    apply_page_enum_options(
+        selects,
+        {"病假": {"options": [{"label": "病假", "value": "SICK"},
+                                {"label": "事假", "value": "PERSONAL"},
+                                {"label": "年假", "value": "ANNUAL"}],
+                  "selected": "病假"}},
+        post_data='{"type":"SICK"}',
+    )
+
+    assert selects[0]["option_map"] == {
+        "病假": "SICK", "事假": "PERSONAL", "年假": "ANNUAL",
+    }
+
+
+def test_dynamic_dom_snapshot_is_not_manifest_hard_enum():
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel, Subsystem
+
+    selects = [{"path": "type", "label": "病假", "value": "2", "source_url": "/dict/leave",
+                "value_key": "value", "label_key": "label", "enum_source": "api",
+                "option_map": {"事假": "1", "病假": "2", "年假": "3"},
+                "option_map_source_url": "/dict/leave"}]
+    apply_page_enum_options(selects, {"病假": ["事假", "病假", "年假"]}, post_data='{"type":"2"}')
+    api_request = build_api_request(
+        {"url": "http://x/leave", "post_data": '{"type":"2"}'},
+        {"type": "请假类型"}, selects=selects,
+    )
+    skill = SkillSpec(skill_id="A-OA.leave", subsystem=Subsystem.OA, action="leave",
+                      risk_level=RiskLevel.L3, field_types={"请假类型": "enum"},
+                      required_fields=["请假类型"], api_request=api_request)
+
+    prop = to_manifest(skill).parameters["properties"]["请假类型"]
+    assert "enum" not in prop and "x-options" not in prop
+    assert prop["x-options-source"] is True
 
 
 def test_page_enum_selects_creates_sourceless_enum():
@@ -812,18 +858,92 @@ def test_page_enum_selects_matches_field_label_when_body_stores_code():
     assert out[0]["option_map"] == {"事假": 2, "病假": 3}
 
 
+def test_page_enum_label_only_snapshot_maps_only_recorded_pair():
+    out = page_enum_selects(
+        '{"type":2}',
+        {"类型": {"options": ["事假", "病假", "年假"], "selected": "病假"}},
+        set(),
+        fields=[{"path": "type", "key": "type", "suggest_name": "类型", "value": "2"}],
+    )
+
+    assert out[0]["options"] == ["事假", "病假", "年假"]
+    assert out[0]["option_map"] == {"病假": 2}
+
+
+def test_api_enum_keeps_original_labels_when_recorded_text_is_ocr_like():
+    read = [{
+        "url": "/dict/leave",
+        "json": {"data": [
+            {"value": "1", "label": "事假"},
+            {"value": "2", "label": "病假"},
+            {"value": "3", "label": "年假"},
+        ]},
+    }]
+
+    for recorded_text in ("冰机", "实际", "年假"):
+        selects = suggest_selects('{"type":"2"}', read, {"请假类型": recorded_text})
+        assert selects[0]["options"] == ["事假", "病假", "年假"]
+        assert selects[0]["option_map"] == {"事假": "1", "病假": "2", "年假": "3"}
+        assert "冰机" not in selects[0]["options"] and "实际" not in selects[0]["options"]
+
+
+async def test_resolve_select_uses_current_source_not_stale_option_map(monkeypatch):
+    from dano.execution.page import request_capture as rc
+
+    api_request = {"selects": [{
+        "param": "请假类型",
+        "source_url": "/dict/new",
+        "value_key": "value",
+        "label_key": "label",
+        "option_map": {"病假": "OLD-2"},
+        "option_map_source_url": "/dict/old",
+        "enum_source": "api",
+    }]}
+
+    async def current_source(*args, **kwargs):
+        return [{"value": "NEW-2", "label": "病假"}]
+
+    monkeypatch.setattr(rc, "_fetch_select_list", current_source)
+    fields, _ = await _resolve_selects(
+        api_request, {"请假类型": "病假"}, base_url="", storage_state=None,
+        token_key=None, verify=True,
+    )
+    assert fields["请假类型"] == "NEW-2"
+
+
+async def test_resolve_select_does_not_fuzzy_map_label(monkeypatch):
+    from dano.execution.page import request_capture as rc
+
+    api_request = {"selects": [{
+        "param": "请假类型", "source_url": "/dict/leave",
+        "value_key": "value", "label_key": "label",
+    }]}
+
+    async def current_source(*args, **kwargs):
+        return [{"value": "2", "label": "病假"}]
+
+    monkeypatch.setattr(rc, "_fetch_select_list", current_source)
+    fields, _ = await _resolve_selects(
+        api_request, {"请假类型": "病假(年度)"}, base_url="", storage_state=None,
+        token_key=None, verify=True,
+    )
+    assert fields["请假类型"] == "病假(年度)"
+
+
 def test_build_api_request_carries_page_enum_options():
     """发布构建:DOM 覆盖后的 3 项选项随 select 进资产(导出/manifest 就只见 3 项,不是 222)。"""
     selects = [{"path": "type", "label": "周末加班", "value": "2", "source_url": "/dict",
                 "value_key": "dictValue", "label_key": "dictLabel",
                 "options": ["工作日加班", "周末加班", "节假日加班"],
                 "option_map": {"工作日加班": 1, "周末加班": 2, "节假日加班": 3},
-                "count": 3, "enum_source": "dom", "enum_confirmed": True}]
+                "count": 3, "enum_source": "dom", "enum_confirmed": True,
+                "option_map_source_url": "/dict", "enum_label_source": "dom"}]
     apir = build_api_request({"url": "http://x/ot", "post_data": '{"type":"2"}'}, {"type": "加班类型"}, selects=selects)
     sm = next(s for s in apir["selects"] if s["param"] == "加班类型")
     assert sm["options"] == ["工作日加班", "周末加班", "节假日加班"] and apir["field_types"]["加班类型"] == "enum"
     assert sm["option_map"] == {"工作日加班": 1, "周末加班": 2, "节假日加班": 3}
     assert sm["enum_source"] == "dom"
+    assert sm["option_map_source_url"] == "/dict" and sm["enum_label_source"] == "dom"
 
 
 async def test_resolve_static_enum_uses_option_map_without_source_url():
@@ -1596,7 +1716,7 @@ async def test_execute_api_dispatches_single_and_workflow():
 
 
 async def test_execute_api_routes_by_capability_without_running_full_workflow():
-    """一个 Skill 多能力:query_status 只跑读步骤,submit_batch 跑完整提交链。"""
+    """一个 Skill 多能力:query_status 只跑读步骤,submit 跑完整提交链。"""
     wf = {
         "steps": [
             {
@@ -1620,7 +1740,7 @@ async def test_execute_api_routes_by_capability_without_running_full_workflow():
         ],
         "capabilities": [
             {"name": "query_status", "kind": "query_status", "step_ids": ["query"]},
-            {"name": "submit_batch", "kind": "submit_batch", "step_ids": ["query", "submit"]},
+            {"name": "submit", "kind": "submit", "step_ids": ["query", "submit"]},
         ],
     }
 
@@ -1629,7 +1749,7 @@ async def test_execute_api_routes_by_capability_without_running_full_workflow():
     assert status["steps"] == 1
     assert status["final"]["url"].endswith("/api/status")
 
-    submitted = await execute_api(wf, {"__capability": "submit_batch", "reason": "日报"}, send=False)
+    submitted = await execute_api(wf, {"__capability": "submit", "reason": "日报"}, send=False)
     assert submitted["ok"] is True
     assert submitted["steps"] == 2
     assert submitted["final"]["body"] == {"reason": "日报"}
@@ -1741,6 +1861,131 @@ async def test_execute_capability_plan_foreach_and_return_batch_result():
     assert out["structured_output"] == out["response"]
 
 
+async def test_structured_capability_plan_still_runs_grounded_fact_check(monkeypatch):
+    import dano.execution.page.request_capture as capture
+
+    workflow = {
+        "steps": [{
+            "step_id": "submit",
+            "method": "POST",
+            "url": "http://x/api/submit",
+            "path": "/api/submit",
+            "body_template": {"reason": "{{reason}}"},
+            "params": ["reason"],
+        }],
+        "fact_check": {"endpoint": "/api/page", "param": "reason", "match_field": "reason"},
+        "capabilities": [{
+            "name": "submit",
+            "kind": "submit",
+            "step_ids": ["submit"],
+            "nodes": [
+                {"id": "call_submit", "type": "call", "step_id": "submit"},
+                {"id": "return_submit", "type": "return", "from": "submit", "path": "response"},
+            ],
+        }],
+    }
+
+    async def fake_request(*args, **kwargs):
+        return {"ok": True, "response": {"code": 0, "data": {"id": "R-1"}}}
+
+    async def failed_recheck(*args, **kwargs):
+        return False, "事实核查未找到新记录"
+
+    monkeypatch.setattr(capture, "execute_api_request", fake_request)
+    monkeypatch.setattr(capture, "_grounded_recheck", failed_recheck)
+
+    out = await execute_api(
+        workflow,
+        {"__capability": "submit", "reason": "日报"},
+        send=True,
+        base_url="http://x",
+    )
+
+    assert out["ok"] is False
+    assert out["fact_check_passed"] is False
+    assert "事实核查" in out["detail"]
+
+
+async def test_batch_capability_fact_checks_each_entry(monkeypatch):
+    import dano.execution.page.request_capture as capture
+
+    workflow = {
+        "steps": [{"step_id": "submit", "method": "POST", "url": "http://x/api/submit"}],
+        "fact_check": {"endpoint": "/api/page", "param": "date", "match_field": "date"},
+        "capabilities": [{
+            "name": "submit_batch",
+            "kind": "submit_batch",
+            "step_ids": ["submit"],
+            "input_schema": {
+                "type": "object",
+                "properties": {"entries": {"type": "array", "items": {"type": "object"}}},
+                "required": ["entries"],
+            },
+            "execution_contract": {"batch": {"enabled": True, "items_field": "entries"}},
+        }],
+    }
+    checked_dates = []
+
+    async def fake_workflow(*args, **kwargs):
+        return {"ok": True, "response": {"code": 0}}
+
+    async def successful_recheck_many(fc, field_sets, **kwargs):
+        checked_dates.extend(fields.get("date") for fields in field_sets)
+        return [(True, "") for _ in field_sets]
+
+    monkeypatch.setattr(capture, "execute_api_workflow", fake_workflow)
+    monkeypatch.setattr(capture, "_grounded_recheck_many", successful_recheck_many)
+
+    out = await execute_api(workflow, {
+        "__capability": "submit_batch",
+        "entries": [{"date": "2026-05-12"}, {"date": "2026-05-13"}],
+    }, send=True)
+
+    assert out["ok"] is True
+    assert out["fact_check_passed"] is True
+    assert checked_dates == ["2026-05-12", "2026-05-13"]
+    assert len(out["fact_check_items"]) == 2
+
+
+async def test_capability_map_applies_literal_and_compiled_values_to_request():
+    workflow = {
+        "steps": [{
+            "step_id": "submit",
+            "method": "POST",
+            "url": "http://x/api/submit",
+            "path": "/api/submit",
+            "body_template": {
+                "billType": "old",
+                "processDefKey": "old",
+                "activityId": "old",
+                "processVariablesStr": "old",
+            },
+        }],
+        "capabilities": [{
+            "name": "submit",
+            "kind": "submit",
+            "step_ids": ["submit"],
+            "nodes": [
+                {"id": "map_billType", "type": "map", "source": "'oa_duty_leave'", "target": "submit.billType"},
+                {"id": "map_processDefKey", "type": "map", "source": '"oa_duty_leave"', "target": "submit.processDefKey"},
+                {"id": "map_activityId", "type": "map", "source": "literal:StartUserNode", "target": "submit.activityId"},
+                {"id": "map_processVariablesStr", "type": "map", "source": 'computed:{"day":2}', "target": "submit.processVariablesStr"},
+                {"id": "call_submit", "type": "call", "step_id": "submit"},
+            ],
+        }],
+    }
+
+    out = await execute_api(workflow, {"__capability": "submit"}, send=False)
+
+    assert out["ok"] is True
+    assert out["body"] == {
+        "billType": "oa_duty_leave",
+        "processDefKey": "oa_duty_leave",
+        "activityId": "StartUserNode",
+        "processVariablesStr": '{"day":2}',
+    }
+
+
 async def test_execute_capability_output_mapping_for_query_status():
     wf = {
         "steps": [
@@ -1770,7 +2015,7 @@ async def test_execute_capability_output_mapping_for_query_status():
                     {"field": "missing_dates", "step_id": "query", "response_path": "data.missing"},
                 ],
             },
-            {"name": "submit_batch", "kind": "submit_batch", "step_ids": ["query", "submit"]},
+            {"name": "submit", "kind": "submit", "step_ids": ["query", "submit"]},
         ],
     }
 

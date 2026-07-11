@@ -1543,6 +1543,7 @@ async def call_tool(req: ToolCallReq, x_tenant_key: str | None = Header(default=
 class ToolOptionsReq(BaseModel):
     name: str                       # 工具名(= skill_id 点转 __)
     field: str                      # 要列可选项的**参数名**(选择型字段)
+    capability: str | None = None   # 多能力 Skill 必须限定字段所属能力
 
 
 @app.post("/v1/tools/options")
@@ -1555,7 +1556,9 @@ async def tool_options(req: ToolOptionsReq, x_tenant_key: str | None = Header(de
     if not action:
         raise HTTPException(status_code=400, detail="name 应能解析为 {subsystem}.{action}")
     orch = await _orchestrator(tenant)
-    return await orch.list_field_options(Subsystem(sub_str), action, req.field, tenant=tenant)
+    return await orch.list_field_options(
+        Subsystem(sub_str), action, req.field, capability=req.capability or "", tenant=tenant,
+    )
 
 
 class ExportSkillsReq(BaseModel):
@@ -1567,7 +1570,7 @@ async def export_agent_skills_ep(req: ExportSkillsReq,
                                  x_tenant_key: str | None = Header(default=None)) -> dict:
     """把本租户已上架 Skill 导出为 pi 文件式 skill(.agents/skills/<name>/),写入 out_dir。
 
-    后端与目标目录同机时直接写文件,免敲命令。真执行仍在 Dano 侧;导出的脚本用 curl 调 /v1/tools/call。
+    后端与目标目录同机时直接写文件,免敲命令。真执行仍在 Dano 侧；导出的脚本调用能力级 invoke 端点。
     """
     tenant = await _auth_tenant(x_tenant_key)
     from dano.execution.page.sessions import save_export_dir

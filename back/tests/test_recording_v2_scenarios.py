@@ -20,6 +20,7 @@ from dano.execution.page.flow_spec import (
     ParamField,
     apply_flow_edits,
     build_default_flow_capabilities,
+    flow_spec_to_api_request,
     flow_spec_to_client,
     orchestrate_flow_capabilities,
     run_recording_pi_loop,
@@ -462,11 +463,23 @@ def test_daily_report_builds_independent_query_and_batch_submit_capabilities():
     assert set(by_kind) == {"query_status", "submit_batch"}
     assert by_kind["query_status"].step_ids == [step.step_id for step in query_steps]
     assert by_kind["submit_batch"].step_ids == [step.step_id for step in [*submit_preflights, submit]]
-    assert [mapping["step_id"] for mapping in by_kind["query_status"].output_mapping] == [
-        step.step_id for step in query_steps
-    ]
-    assert by_kind["submit_batch"].output_mapping[0]["step_id"] == "submit_batch"
+    assert {mapping["name"] for mapping in by_kind["query_status"].output_mapping} == {
+        "filled_dates", "missing_dates",
+    }
+    assert {mapping["step_id"] for mapping in by_kind["query_status"].output_mapping} == {"query_5"}
+    assert all(mapping["kind"] == "batch_result" for mapping in by_kind["submit_batch"].output_mapping)
     assert not set(by_kind["query_status"].step_ids) & set(by_kind["submit_batch"].step_ids)
+
+    orchestrated = asyncio.run(orchestrate_flow_capabilities(spec))
+    assert len(orchestrated.capability_relations) == 1
+    relation = orchestrated.capability_relations[0]
+    assert relation.type == "external_transform"
+    assert relation.transform_owner == "caller"
+    assert relation.from_output == "missing_dates"
+    assert relation.to_input == "entries"
+    api_request, errors = flow_spec_to_api_request(orchestrated)
+    assert errors == []
+    assert api_request["capability_graph"]["relations"][0]["mode"] == "external_transform"
 
 
 def test_query_output_mapping_uses_stable_names_for_numeric_urls():
@@ -485,3 +498,27 @@ def test_query_output_mapping_uses_stable_names_for_numeric_urls():
     cap = build_default_flow_capabilities(FlowSpec(flow_id="numeric-query-output", steps=steps))[0]
 
     assert [mapping["name"] for mapping in cap.output_mapping] == ["query_1", "query_2", "query_3"]
+
+
+def test_missing_dates_query_and_single_row_submit_compile_to_foreach_batch_contract():
+    query = FlowStep(
+        step_id="query_missing", method="GET", path="/daily/page",
+        source_meta={"role": "business_get", "confidence": 0.96},
+        response_json={"data": {"filled_dates": ["2026-05-01"], "missing_dates": ["2026-05-11"]}},
+    )
+    submit = FlowStep(
+        step_id="submit_one", method="POST", path="/daily/submit", url="/daily/submit",
+        body_source='{"date":"2026-05-11","content":"开发"}',
+        source_meta={"role": "submit_anchor"},
+        params=[
+            ParamField(path="date", key="日报日期", type="date", category="user_param", source_kind="user_input"),
+            ParamField(path="content", key="工作内容", category="user_param", source_kind="user_input"),
+        ],
+    )
+
+    out = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[query, submit])))
+    batch = next(cap for cap in out.capabilities if cap.kind == "submit_batch")
+
+    assert batch.input_schema["properties"]["entries"]["type"] == "array"
+    assert any(node.get("type") == "foreach" for node in batch.nodes)
+    assert out.capability_relations[0].type == "external_transform"

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
+
 from dano.orchestrator.skills import SkillRegistry
 from dano.shared.asset_bodies import WorkflowSkillBody, WorkflowStep
 from dano.shared.enums import AssetType, Subsystem
@@ -155,6 +157,208 @@ def test_manifest_capability_confirmation_is_capability_scoped():
     assert caps["submit_batch"]["requires_confirmation"] is True
 
 
+def test_manifest_prefers_business_capability_title_over_technical_endpoint_title():
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    skill = SkillSpec(
+        skill_id="A-OA.submit_form",
+        subsystem=Subsystem.OA,
+        action="submit_form",
+        title="submit-process 流程(5 步)",
+        risk_level=RiskLevel.L3,
+        capabilities=[{"name": "submit", "kind": "submit", "title": "提交请假申请"}],
+    )
+
+    assert to_manifest(skill).title == "提交请假申请"
+
+
+def test_manifest_normalizes_capability_identity_batch_schema_and_relations():
+    from dano.catalog.manifest import to_manifest
+    from dano.export.agent_skills import _skill_md
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    skill = SkillSpec(
+        skill_id="A-OA.daily_report",
+        subsystem=Subsystem.OA,
+        action="daily_report",
+        risk_level=RiskLevel.L3,
+        has_api=False,
+        api_request={"_flow_spec": {"capability_relations": [{
+            "type": "external_transform",
+            "from_capability": "query_status",
+            "from_output": "missing_dates",
+            "to_capability": "submit_batch",
+            "to_input": "entries",
+        }]}},
+        capabilities=[
+            {"name": "query_status", "kind": "query_status", "title": "查询未填日期"},
+            {
+                "name": "submit_batch_legacy",
+                "kind": "submit_batch",
+                "title": "填报日报",
+                "input_schema": {"type": "object", "properties": {"entries": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {"date": {"type": "string"}}},
+                }}},
+            },
+        ],
+    )
+
+    manifest = to_manifest(skill)
+    submit = next(cap for cap in manifest.capabilities if cap["kind"] == "submit_batch")
+    assert submit["name"] == "submit_batch"
+    assert "批量" in submit["title"]
+    assert submit["parameters"]["required"] == ["entries"]
+    assert submit["parameters"]["additionalProperties"] is False
+    assert submit["parameters"]["properties"]["entries"]["items"]["additionalProperties"] is False
+    assert manifest.call_protocol["requires_explicit_capability"] is True
+    assert manifest.capability_relations[0]["automatic"] is False
+    assert "逐项校验" in manifest.capability_relations[0]["caller_responsibility"]
+    markdown = _skill_md(manifest, "dano-a-oa-daily-report")
+    assert "## 能力关系" in markdown
+    assert "external_transform" in markdown
+    assert "调用方责任" in markdown
+
+
+def test_manifest_submit_rejects_pseudo_batch_identity_and_schema_at_export_gate():
+    from dano.catalog.manifest import to_manifest
+    from dano.export.agent_skills import _export_contract_errors
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    manifest = to_manifest(SkillSpec(
+        skill_id="A-OA.fake_batch",
+        subsystem=Subsystem.OA,
+        action="fake_batch",
+        risk_level=RiskLevel.L3,
+        capabilities=[{
+            "name": "submit_batch2",
+            "kind": "submit",
+            "title": "批量提交",
+            "input_schema": {"type": "object", "properties": {
+                "entries": {"type": "array", "items": {"type": "object"}},
+            }},
+        }],
+    ))
+
+    cap = manifest.capabilities[0]
+    assert cap["name"] == cap["kind"] == "submit"
+    assert cap["title"] == "提交"
+    assert any("不能伪装成批量契约" in error for error in _export_contract_errors(manifest))
+
+
+def test_exported_agent_script_uses_capability_scoped_contracts_and_fact_check(monkeypatch, capsys):
+    import json
+    import sys
+
+    from dano.catalog.manifest import to_manifest
+    from dano.export.agent_skills import _dano_call_py, _skill_md
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    skill = SkillSpec(
+        skill_id="A-OA.daily_report",
+        subsystem=Subsystem.OA,
+        action="daily_report",
+        title="日报查询与填报",
+        risk_level=RiskLevel.L3,
+        has_api=False,
+        required_fields=["legacy_submit_field"],
+        api_request={"fact_check": {"endpoint": "/report/page"}},
+        capabilities=[
+            {
+                "name": "query_status",
+                "kind": "query_status",
+                "title": "查询未填日期",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"month": {"type": "string"}},
+                    "required": ["month"],
+                },
+            },
+            {
+                "name": "submit_batch",
+                "kind": "submit_batch",
+                "title": "批量填报日报",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"entries": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"date": {"type": "string"}, "content": {"type": "string"}},
+                            "required": ["date", "content"],
+                        },
+                    }},
+                    "required": ["entries"],
+                },
+            },
+        ],
+    )
+    source = _dano_call_py(to_manifest(skill))
+    manifest = to_manifest(skill)
+    markdown = _skill_md(manifest, "dano-a-oa-daily-report")
+    assert "### `query_status` · 查询未填日期" in markdown
+    assert "### `submit_batch` · 批量填报日报" in markdown
+    assert "entries[].date" in markdown
+    assert "多个独立能力" in markdown
+    assert "必须显式指定" in markdown
+    namespace = {"__name__": "generated_test"}
+    exec(compile(source, "<generated-dano-call>", "exec"), namespace)  # noqa: S102
+
+    assert namespace["CAPABILITY"] is None
+    assert namespace["CAPABILITIES"]["query_status"]["required"] == ["month"]
+    assert namespace["CAPABILITIES"]["submit_batch"]["required"] == ["entries"]
+    assert namespace["CAPABILITIES"]["query_status"]["verify_required"] is False
+    assert namespace["CAPABILITIES"]["submit_batch"]["verify_required"] is True
+
+    monkeypatch.setenv("DANO_URL", "http://dano.test")
+    monkeypatch.setenv("DANO_TENANT_KEY", "tenant-key")
+    monkeypatch.setattr(sys, "argv", ["dano_call.py"])
+    namespace["main"]()
+    selection = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert selection["status"] == "need_select"
+    assert {item["name"] for item in selection["candidates"]} == {"query_status", "submit_batch"}
+
+    class _Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "state": "completed",
+                "audit": {"fact_check": {"passed": False}},
+                "exec_result": {"structured_output": {"code": 0}},
+            }).encode()
+
+    monkeypatch.setattr(namespace["urllib"].request, "urlopen", lambda *args, **kwargs: _Response())
+    monkeypatch.setattr(sys, "argv", [
+        "dano_call.py", "--capability", "query_status", "--month", "2026-05",
+    ])
+    namespace["main"]()
+    query_result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert query_result["status"] == "succeeded"
+
+    monkeypatch.setattr(sys, "argv", [
+        "dano_call.py", "--capability", "submit_batch", "--entries",
+        '[{"date":"2026-05-12","content":"开发"}]', "--confirm",
+    ])
+    with pytest.raises(SystemExit) as exc:
+        namespace["main"]()
+    assert exc.value.code == 1
+    failed = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert failed["status"] == "failed"
+    assert "事实核查" in failed["reason"]
+
+
 def test_manifest_preserves_select_and_datetime_semantics():
     """选择型(enum)/日期(datetime)字段的语义不被塌成裸 string:
     enum → type=string + format=name-ref + 描述提示「传名字→ID」;datetime → format=date-time。
@@ -275,6 +479,113 @@ def test_manifest_does_not_inline_value_only_enum_options():
     assert "enum_options" not in m.call_metadata["fields"]["类型"]
 
 
+def test_capability_manifest_removes_hard_enum_for_nested_live_options():
+    from dano.catalog.manifest import to_manifest
+    from dano.export.agent_skills import _options_md
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    skill = SkillSpec(
+        skill_id="A-OA.leave",
+        subsystem=Subsystem.OA,
+        action="leave",
+        title="请假查询与提交",
+        risk_level=RiskLevel.L3,
+        capabilities=[{
+            "name": "submit_batch",
+            "kind": "submit_batch",
+            "title": "批量提交请假",
+            "inputs": [{
+                "key": "审批人", "path": "[0].approverId", "source_kind": "api_option",
+                "source": {"source_step_id": "users", "source_url": "/users"},
+            }],
+            "input_schema": {
+                "type": "object",
+                "properties": {"entries": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {"审批人": {
+                        "type": "string", "enum": ["旧用户"], "x-options": ["旧用户"],
+                    }}},
+                }},
+                "required": ["entries"],
+            },
+        }],
+    )
+
+    manifest = to_manifest(skill)
+    field = manifest.capabilities[0]["parameters"]["properties"]["entries"]["items"]["properties"]["审批人"]
+    assert field["x-options-source"] is True
+    assert "enum" not in field
+    assert "x-options" not in field
+    assert "--capability submit_batch --list-options 审批人" in (_options_md(manifest) or "")
+
+
+def test_export_quality_gate_rejects_routing_only_batch_entries():
+    from dano.catalog.manifest import to_manifest
+    from dano.export.agent_skills import _export_contract_errors
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    manifest = to_manifest(SkillSpec(
+        skill_id="A-OA.bad_batch",
+        subsystem=Subsystem.OA,
+        action="bad_batch",
+        title="请假提交",
+        risk_level=RiskLevel.L3,
+        capabilities=[{
+            "name": "submit_batch",
+            "kind": "submit_batch",
+            "input_schema": {
+                "type": "object",
+                "properties": {"entries": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {
+                        "领导审批人": {"type": "string"},
+                        "人力审批人": {"type": "string"},
+                    }},
+                }},
+                "required": ["entries"],
+            },
+        }],
+    ))
+
+    assert any("人员列表误判" in error for error in _export_contract_errors(manifest))
+
+
+def test_export_quality_gate_rejects_internal_process_id_and_submit_routing_entries():
+    from dano.catalog.manifest import to_manifest
+    from dano.export.agent_skills import _export_contract_errors, _skill_md
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    manifest = to_manifest(SkillSpec(
+        skill_id="A-OA.bad_submit",
+        subsystem=Subsystem.OA,
+        action="bad_submit",
+        title="查询请假状态",
+        risk_level=RiskLevel.L3,
+        capabilities=[
+            {"name": "query_status", "kind": "query_status", "title": "查询请假状态"},
+            {
+                "name": "submit", "kind": "submit", "title": "提交请假申请",
+                "input_schema": {"type": "object", "properties": {
+                    "processDefinitionId": {"type": "string"},
+                    "entries": {"type": "array", "items": {"type": "object", "properties": {
+                        "审批人1": {"type": "string"}, "审批人2": {"type": "string"},
+                    }}},
+                }, "required": ["processDefinitionId", "entries"]},
+            },
+        ],
+    ))
+
+    errors = _export_contract_errors(manifest)
+    assert any("内部流程字段" in error for error in errors)
+    assert any("人员列表误判" in error for error in errors)
+    markdown = _skill_md(manifest, "dano-a-oa-bad-submit")
+    assert "compatibility:" not in markdown
+    assert "提交请假申请" in manifest.title
+
+
 async def test_page_skill_reads_recording_metadata_from_asset_body():
     from dano.catalog.manifest import to_manifest
 
@@ -314,6 +625,8 @@ async def test_page_skill_reads_recording_metadata_from_asset_body():
     assert m.recording_mode == "real_submit"
     assert {c["name"] for c in m.capabilities} == {"query_status", "submit_batch"}
     assert m.capability == "submit_batch"
+    assert m.call_protocol["requires_explicit_capability"] is True
+    assert m.call_protocol["default_capability"] is None
     by_cap = {c["name"]: c for c in m.capabilities}
     assert by_cap["query_status"]["parameters"]["properties"]["month"]["type"] == "string"
     assert by_cap["query_status"]["output_schema"]["properties"]["missing_dates"]["type"] == "array"
