@@ -30,6 +30,7 @@ import {
   applyWorkspaceMentionCompletion,
   getWorkspaceMentionContext,
   getWorkspaceMentionSuggestions,
+  requestWorkspaceMentionEntries,
   type WorkspaceMentionSuggestion,
 } from "../utils/workspaceMentions";
 import {
@@ -255,7 +256,11 @@ export function createComposerBarState(
   });
 
   let mentionContext = $derived(
-    getWorkspaceMentionContext($rx.inputText, $rx.cursorOffset),
+    getWorkspaceMentionContext(
+      $rx.inputText,
+      $rx.cursorOffset,
+      props.slashCommandsAndMentionsEnabled,
+    ),
   );
 
   let mentionSuggestions = $derived.by(() => {
@@ -859,14 +864,12 @@ export function createComposerBarState(
       dismissedMentionKey = null;
     }
 
-    if (!mentionContext) {
-      mentionInteractionWorkspaceKey = null;
-      return;
-    }
-    const nik = `${props.workspaceContextKey ?? ""}:${mentionContext.start}`;
-    if (mentionInteractionWorkspaceKey === nik) return;
-    mentionInteractionWorkspaceKey = nik;
-    void props.ensureWorkspaceEntries();
+    mentionInteractionWorkspaceKey = requestWorkspaceMentionEntries(
+      mentionContext,
+      props.workspaceContextKey,
+      mentionInteractionWorkspaceKey,
+      props.ensureWorkspaceEntries,
+    );
   });
 
   let previousRevision: RevisionPayload | null = null;
