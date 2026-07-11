@@ -233,6 +233,13 @@ describe("deploy compose wrapper", () => {
     expect(dockerfileText).not.toContain("https://mirrors.aliyun.com/debian");
   });
 
+  it("preinstalls Pi search tools on the system PATH", () => {
+    const dockerfileText = readFileSync(dockerfile, "utf8");
+
+    expect(dockerfileText).toMatch(/fd-find[^\n]*ripgrep/);
+    expect(dockerfileText).toContain("/usr/local/bin/fd");
+  });
+
   it("keeps local package stores out of the Docker build context", () => {
     const dockerignoreText = readFileSync(dockerignoreFile, "utf8");
 

@@ -35,7 +35,8 @@ RUN registry="${NPM_REGISTRY:-${NPM_CONFIG_REGISTRY:-$DANO_DEFAULT_NPM_REGISTRY}
   && npm config set registry "$registry"
 RUN sed -i 's|https\?://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; s|https\?://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources \
   && apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates bubblewrap curl python3 \
+  && apt-get install -y --no-install-recommends ca-certificates bubblewrap curl fd-find python3 ripgrep \
+  && ln -sf "$(command -v fdfind)" /usr/local/bin/fd \
   && chmod 4755 /usr/bin/bwrap \
   && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production
