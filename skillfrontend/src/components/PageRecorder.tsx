@@ -252,7 +252,9 @@ const SOURCE_KIND_OPTIONS = [
   { label: "请求头", value: "request_header" },
   { label: "当前用户", value: "current_user" },
   { label: "系统时间", value: "system_time" },
-  { label: "页面上下文", value: "page_context" },
+  { label: "系统生成值", value: "system_generated" },
+  { label: "系统计算值", value: "computed" },
+  { label: "调用上下文", value: "page_context" },
   { label: "固定值", value: "constant" },
 ];
 const OPTION_SOURCE_KINDS = ["api_option", "manual_enum" ];
@@ -264,7 +266,7 @@ const SOURCE_OPTIONS_BY_CATEGORY: Record<string, Array<{ label: string; value: s
   ),
   // 运行期变量由执行环境注入；先允许保持“待配置”，不能静默写死成上游响应。
   runtime_var: SOURCE_KIND_OPTIONS.filter((x) =>
-    ["unknown", "previous_response", "page_context", "current_user", "system_time", "request_header"].includes(x.value)
+    ["unknown", "previous_response", "page_context", "current_user", "system_time", "system_generated", "computed", "request_header"].includes(x.value)
   ),
   system_const: SOURCE_KIND_OPTIONS.filter((x) =>
     ["constant"].includes(x.value)
@@ -362,6 +364,52 @@ function defaultSourceForCategory(category: string, current?: string) {
   if (category === "runtime_var") return "unknown";
   if (category === "system_const") return "constant";
   return "user_input";
+}
+function sourceDescriptor(sourceKind: string, p: FlowParam, current?: Record<string, any>) {
+  const path = p.path;
+  const previous = current || {};
+  if (sourceKind === "unknown") return {};
+  if (sourceKind === "user_input") return { kind: "sample", path };
+  if (sourceKind === "constant") return { kind: "constant", path, manual: true };
+  if (sourceKind === "page_context") return {
+    kind: "page_context",
+    context_key: previous.context_key || p.key || stripBodyPrefix(path).split(".").pop() || "",
+    path,
+    manual: true,
+  };
+  if (sourceKind === "request_header") return {
+    kind: "request_header",
+    header: previous.header || "",
+    path,
+    manual: true,
+  };
+  if (sourceKind === "system_time") return { kind: "system_time", path, manual: true };
+  if (sourceKind === "system_generated") return {
+    kind: "system_generated",
+    strategy: previous.strategy || "uuid",
+    path,
+    manual: true,
+  };
+  if (sourceKind === "computed") return {
+    ...previous,
+    kind: "computed",
+    path,
+    manual: true,
+  };
+  if (sourceKind === "current_user") return { kind: "current_user", path, manual: true };
+  if (sourceKind === "previous_response" && (previous.step_id || previous.response_path)) {
+    return { ...previous, kind: "previous_response", path };
+  }
+  return { kind: sourceKind, path, manual: true };
+}
+function sourceNeedsConfiguration(sourceKind: string, source?: Record<string, any>) {
+  if (sourceKind === "unknown") return true;
+  if (sourceKind === "request_header") return !source?.header;
+  if (sourceKind === "page_context") return !source?.context_key;
+  if (sourceKind === "previous_response") return !(source?.step_id && (source?.response_path || source?.path));
+  if (sourceKind === "system_generated") return !["uuid", "random_string", "random_number"].includes(source?.strategy || "");
+  if (sourceKind === "computed") return !(source?.strategy && source?.start_field && source?.end_field);
+  return false;
 }
 function sourceSelectOptionsForParam(p: FlowParam) {
   const options = sourceOptionsForCategory(p.category);
@@ -843,7 +891,7 @@ function schemaFieldRows(schema?: Record<string, any>) {
     .filter(([, spec]) => spec && typeof spec === "object")
     .map(([name, spec]) => ({
       name,
-      type: String((spec as any).type || (spec as any).format || "any"),
+      type: String((spec as any).format === "date-time" ? "datetime" : (spec as any).format || (spec as any).type || "any"),
       description: String((spec as any).description || (spec as any).title || ""),
       required: required.has(name),
     }));
@@ -866,8 +914,8 @@ function jsonSchemaForParam(p: FlowParam) {
     { type: "string" };
   if (p.label || p.key) schema.description = p.label || p.key;
   const opts = enumOptionRecordList(p.enum_options || []);
-  if (t === "enum" && opts.length) schema.enum = opts.map((x) => x.value);
-  if (t === "list-enum" && opts.length) schema.items = { type: "string", enum: opts.map((x) => x.value) };
+  if (t === "enum" && opts.length) schema.enum = opts.map((x) => x.label);
+  if (t === "list-enum" && opts.length) schema.items = { type: "string", enum: opts.map((x) => x.label) };
   return schema;
 }
 function enumOptionRecordList(raw: any[]) {
@@ -1401,17 +1449,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       sourceKind !== "previous_response"
       || !!((p.source as any)?.step_id || (p.source as any)?.response_path)
     );
-    const source = keepExistingSource
-      ? p.source
-      : sourceKind === "unknown" ? {}
-        : sourceKind === "user_input" ? { kind: "sample", path: p.path }
-          : { kind: sourceKind, path: p.path, manual: true };
+    const source = keepExistingSource ? p.source : sourceDescriptor(sourceKind, p, p.source as any);
     const patch: Record<string, any> = {
       category,
       source_kind: sourceKind,
       source,
       exposed_to_user: category === "user_param",
-      need_human_confirm: sourceKind === "unknown",
+      need_human_confirm: sourceNeedsConfiguration(sourceKind, source as any),
     };
     patchLocalParams(stepId, p, patch);
     const edits: any[] = (category === "runtime_var" ? [] : ((flowSpecRef.current || flowSpec)?.links || []))
@@ -1422,18 +1466,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       paramEdit(stepId, p, "source_kind", sourceKind),
       paramEdit(stepId, p, "source", source),
       paramEdit(stepId, p, "exposed_to_user", category === "user_param"),
-      paramEdit(stepId, p, "need_human_confirm", sourceKind === "unknown"),
+      paramEdit(stepId, p, "need_human_confirm", sourceNeedsConfiguration(sourceKind, source as any)),
     );
     send({ type: "flow_update", edits });
   }
   function updateParamSourceKind(stepId: string, p: FlowParam, sourceKind: string) {
     const category = p.category || "user_param";
     const currentSource = p.source as any;
-    const nextSource = sourceKind === "unknown" ? {}
-      : sourceKind === "user_input" ? { kind: "sample", path: p.path }
-        : sourceKind === "previous_response" && (currentSource?.step_id || currentSource?.response_path)
-          ? { ...currentSource, kind: "previous_response" }
-          : { kind: sourceKind, path: p.path, manual: true };
+    const nextSource = sourceDescriptor(sourceKind, p, currentSource);
+    const needsConfiguration = sourceNeedsConfiguration(sourceKind, nextSource);
     // 只有离开“上游响应”时才移除原依赖；重新选择上游响应不能先把现有绑定删掉。
     const edits: any[] = sourceKind === "previous_response" ? [] : (flowSpec?.links || [])
       .filter((l) => l.target_step_id === stepId && stripBodyPrefix(l.target_path) === stripBodyPrefix(p.path))
@@ -1442,14 +1483,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       paramEdit(stepId, p, "source_kind", sourceKind),
       paramEdit(stepId, p, "source", nextSource),
       paramEdit(stepId, p, "exposed_to_user", category === "user_param"),
-      paramEdit(stepId, p, "need_human_confirm", sourceKind === "unknown"),
+      paramEdit(stepId, p, "need_human_confirm", needsConfiguration),
       paramEdit(stepId, p, "editable", true),
     );
     patchLocalParams(stepId, p, {
       source_kind: sourceKind,
       source: nextSource,
       exposed_to_user: category === "user_param",
-      need_human_confirm: sourceKind === "unknown",
+      need_human_confirm: needsConfiguration,
       editable: true,
     });
     send({ type: "flow_update", edits });
@@ -1461,6 +1502,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }));
       message.info("已在下方“绑定上游响应”里指定来源步骤和响应字段");
     }
+  }
+  function updateRuntimeSourceDetail(stepId: string, p: FlowParam, patch: Record<string, any>) {
+    const source = { ...(p.source || {}), ...patch, kind: p.source_kind, path: p.path, manual: true };
+    const needsConfiguration = sourceNeedsConfiguration(p.source_kind || "unknown", source);
+    patchLocalParams(stepId, p, { source, need_human_confirm: needsConfiguration });
+    send({ type: "flow_update", edits: [
+      paramEdit(stepId, p, "source", source),
+      paramEdit(stepId, p, "need_human_confirm", needsConfiguration),
+    ] });
   }
   function moveStep(idx: number, dir: -1 | 1) {
     if (!flowSpec) return;
@@ -1856,13 +1906,27 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       { key: "diagnostic", label: "页面诊断", color: "volcano" },
       { key: "flow", label: "整体流程", color: "default" },
     ];
-    const by: Record<string, Array<{ message: string; severity: string; target?: Record<string, any> }>> = {};
+    type OperatorIssue = { message: string; severity: string; source?: string; target?: Record<string, any> };
+    const isOperatorIssue = (item: OperatorIssue) => {
+      const severity = String(item.severity || "").toLowerCase();
+      if (severity === "error" || severity === "high") return true;
+      // Validator warnings are planner/schema diagnostics. They remain available to
+      // auto-repair and logs, but an operator cannot resolve them with business input.
+      if (item.source === "validator") return false;
+      const kind = String(item.target?.kind || "");
+      return item.source === "review" && [
+        "param", "capability_enum", "link", "step", "request_role",
+        "capability", "capability_relation", "flow",
+      ].includes(kind);
+    };
+    const by: Record<string, OperatorIssue[]> = {};
     for (const [key, items] of Object.entries(report?.issue_groups || {})) {
       by[key] = (items || []).map((item) => ({
         message: item.message || "待处理问题",
         severity: item.severity || "warning",
+        source: item.source,
         target: item.target,
-      }));
+      })).filter(isOperatorIssue);
     }
     if (!Object.keys(by).length) {
       for (const item of reviews) {
@@ -1879,7 +1943,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         by.flow.push({ message: messageText, severity: "error" });
       }
     }
-    const out: Array<{ key: string; label: string; color: string; items: Array<{ message: string; severity: string; target?: Record<string, any> }> }> = [];
+    const out: Array<{ key: string; label: string; color: string; items: OperatorIssue[] }> = [];
     for (const item of order) {
       if (by[item.key]?.length) out.push({ ...item, items: by[item.key] });
     }
@@ -1887,6 +1951,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       if (!order.some((item) => item.key === key)) out.push({ key, label: key, color: "default", items: by[key] });
     }
     return out;
+  }
+  function publishIssueTargetLabel(target?: Record<string, any>) {
+    if (!target) return "";
+    const cap = target.capability_name || target.capability_id || target.capability;
+    const sid = target.target_step_id || target.step_id || target.source_step_id;
+    const path = target.target_path || target.path || target.source_path;
+    return [cap ? `能力 ${cap}` : "", sid ? `接口 ${stepBrief(sid)}` : "", path ? `字段 ${path}` : ""]
+      .filter(Boolean).join(" · ");
+  }
+  function locatePublishIssue(target?: Record<string, any>) {
+    if (!target) return;
+    const sid = target.target_step_id || target.step_id || target.source_step_id;
+    const capRef = target.capability_name || target.capability_id || target.capability
+      || (flowSpec?.capabilities || []).find((cap) => capabilityActualStepIds(cap).includes(sid || ""))?.name;
+    setActiveFlowTab(target.kind === "request_role" ? "requests" : "abilities");
+    requestAnimationFrame(() => {
+      const id = capRef ? `capability-${String(capRef).replace(/[^a-zA-Z0-9_-]+/g, "-")}` : "";
+      document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
   }
   function renderPublishIssue(item: ReviewItemData) {
     const tgt = item.target || {};
@@ -1961,18 +2044,18 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       selects.find((s) => s.param === p.key);
   }
   function enumOptionEdits(step: FlowStepData, p: FlowParam, options: Array<string | { label: string; value: any }>, optionMap?: Record<string, any>) {
+    const nextSourceKind = p.source_kind === "api_option" ? "api_option" : "manual_enum";
     const edits: any[] = [
       paramEdit(step.step_id, p, "enum_options", options),
       paramEdit(step.step_id, p, "enum_value_map", optionMap || null),
+      paramEdit(step.step_id, p, "category", "user_param"),
+      paramEdit(step.step_id, p, "source_kind", nextSourceKind),
+      paramEdit(step.step_id, p, "source", sourceDescriptor(nextSourceKind, p, p.source as any)),
+      paramEdit(step.step_id, p, "exposed_to_user", true),
+      paramEdit(step.step_id, p, "need_human_confirm", false),
     ];
     if (p.type !== "enum" && p.type !== "list-enum" && options.length) {
       edits.push(paramEdit(step.step_id, p, "type", "enum"));
-    }
-    if (p.category !== "user_param") {
-      edits.push(paramEdit(step.step_id, p, "category", "user_param"));
-    }
-    if (!OPTION_SOURCE_KINDS.includes(p.source_kind || "")) {
-      edits.push(paramEdit(step.step_id, p, "source_kind", "manual_enum"));
     }
     return edits;
   }
@@ -2106,7 +2189,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (p.source_kind === "constant") return "固定默认值：发布后按当前值写入，通常不暴露给用户";
     if (p.source_kind === "current_user") return "当前用户：运行期从登录态/身份信息注入，不使用录制旧值";
     if (p.source_kind === "system_time") return "系统时间：运行期自动生成，不使用录制旧值";
-    if (p.source_kind === "page_context") return "页面上下文：由当前页面/应用上下文提供";
+    if (p.source_kind === "system_generated") return `系统生成值：运行期生成 ${({ uuid: "UUID", random_string: "随机字符串", random_number: "随机数字" } as Record<string, string>)[(p.source as any)?.strategy || "uuid"] || "动态值"}，不使用录制旧值`;
+    if (p.source_kind === "computed") return `系统计算值：运行期根据 ${(p.source as any)?.start_field || "开始字段"} 与 ${(p.source as any)?.end_field || "结束字段"} 自动计算`;
+    if (p.source_kind === "page_context") return `调用上下文：运行期从 ${(p.source as any)?.context_key || "未配置 context_key"} 注入；它不是上游接口响应`;
     return "来源未确认：需要选择用户输入、上游响应、固定值或系统来源";
   }
   function renderFlowWorkbench() {
@@ -2120,26 +2205,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const publishIssueGroups = groupedPublishIssues(checkReport, visibleReviewItems);
     const hasPublishAdvice = publishIssueGroups.some((group) => group.items.length > 0);
     return (
-      <Card
-        style={{ marginTop: 16 }}
-        title={
-          <Space wrap>
-            <Typography.Text strong>编排工作台</Typography.Text>
-            <Tag color="cyan">{capturedTotal} 接口</Tag>
-            <Tag>{totalParams} 字段</Tag>
-            {capabilities.length > 0 && <Tag color="geekblue">{capabilities.length} 能力</Tag>}
-            {unconfirmedCapabilities > 0 && <Tag color="warning">{unconfirmedCapabilities} 能力待确认</Tag>}
-            <Tag color={flowSpec.risk_level === "L4" ? "error" : "orange"}>风险 {flowSpec.risk_level}</Tag>
-            {visibleReviewItems.length > 0 && <Tag color="error">{visibleReviewItems.length} 高风险待确认</Tag>}
-          </Space>
-        }
-        extra={
-          <Space wrap>
-            <Button size="small" loading={phase === "publishing"} onClick={finalize}>重新抓取</Button>
-            <Button size="small" type="primary" loading={phase === "publishing"} onClick={publishRequest}>发布当前流程</Button>
-          </Space>
-        }
-      >
+      <Card style={{ marginTop: 16 }} styles={{ body: { paddingTop: 8 } }}>
         {checkReport && capabilityGenerated && (
           <Alert
             type={checkReport.passed && !hasPublishAdvice ? "success" : "warning"}
@@ -2160,16 +2226,24 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     <div key={group.key} style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: 8, alignItems: "start" }}>
                       <Tag color={group.color} style={{ margin: 0, textAlign: "center" }}>{group.label} {group.items.length}</Tag>
                       <Space direction="vertical" size={2}>
-                        {group.items.slice(0, 4).map((item, issueIdx) => (
-                          <Typography.Text key={`${group.key}-${issueIdx}`} type={item.severity === "warning" ? "secondary" : "danger"} style={{ fontSize: 12 }}>
-                            {item.message}
-                          </Typography.Text>
+                        {group.items.map((item, issueIdx) => (
+                          <Space key={`${group.key}-${issueIdx}`} wrap size={4}>
+                            {publishIssueTargetLabel(item.target) && <Tag>{publishIssueTargetLabel(item.target)}</Tag>}
+                            <Typography.Text type={item.severity === "warning" ? "secondary" : "danger"} style={{ fontSize: 12 }}>
+                              {item.message}
+                            </Typography.Text>
+                            {item.target && <Button type="link" size="small" onClick={() => locatePublishIssue(item.target)}>定位</Button>}
+                          </Space>
                         ))}
-                        {group.items.length > 4 && <Typography.Text type="secondary" style={{ fontSize: 12 }}>另有 {group.items.length - 4} 项</Typography.Text>}
                       </Space>
                     </div>
                   ))}
                 </Space>
+                {hasPublishAdvice && (
+                  <Button size="small" icon={<RobotOutlined />} loading={autoFixBusy} onClick={autoFixFlow}>
+                    自动处理可修复项
+                  </Button>
+                )}
               </Space>
             }
           />
@@ -2178,6 +2252,24 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           activeKey={activeFlowTab}
           onChange={setActiveFlowTab}
           destroyOnHidden={false}
+          tabBarExtraContent={{
+            left: (
+              <Space wrap size={4} style={{ marginRight: 16 }}>
+                <Typography.Text strong>编排工作台</Typography.Text>
+                <Tag color="cyan">{capturedTotal} 接口</Tag>
+                <Tag>{totalParams} 字段</Tag>
+                {capabilities.length > 0 && <Tag color="geekblue">{capabilities.length} 能力</Tag>}
+                {unconfirmedCapabilities > 0 && <Tag color="warning">{unconfirmedCapabilities} 待确认</Tag>}
+                <Tag color={flowSpec.risk_level === "L4" ? "error" : "orange"}>风险 {flowSpec.risk_level}</Tag>
+              </Space>
+            ),
+            right: (
+              <Space wrap style={{ marginLeft: 12 }}>
+                <Button size="small" loading={phase === "publishing"} onClick={finalize}>重新抓取</Button>
+                <Button size="small" type="primary" loading={phase === "publishing"} onClick={publishRequest}>发布当前流程</Button>
+              </Space>
+            ),
+          }}
           items={[
             { key: "abilities", label: `能力列表 ${capabilities.length || ""}`, children: renderCapabilityComposerPanel() },
             { key: "requests", label: `捕获接口 ${capturedTotal || ""}`, children: renderRequestsPanel() },
@@ -2277,7 +2369,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       source_step_id: p.source?.step_id || linked?.source_step_id,
       source_path: p.source?.response_path || linked?.source_path,
     };
-    const needsManualConfirm = !!p.need_human_confirm && p.category === "runtime_var" && p.source_kind === "unknown";
+    const needsManualConfirm = !!p.need_human_confirm && p.category === "runtime_var";
+    const runtimeSourceComplete = !sourceNeedsConfiguration(p.source_kind || "unknown", p.source as any);
     const selectBinding = selectBindingForParam(step, p);
     const enumOptions = enumOptionsForParam(step, p);
     const enumSelectOptions = enumOptions.map((x) => ({ label: x, value: x }));
@@ -2364,7 +2457,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               ) : <Typography.Text type="secondary">不对调用方展示</Typography.Text>}
             </FieldControl>
           </div>
-          {needsManualConfirm && <Button size="small" style={{ marginTop: 8 }} onClick={() => updateParam(step.step_id, p, "need_human_confirm", false)}>已确认</Button>}
+          {needsManualConfirm && runtimeSourceComplete && (
+            <Button size="small" style={{ marginTop: 8 }} onClick={() => updateParam(step.step_id, p, "need_human_confirm", false)}>
+              确认当前来源
+            </Button>
+          )}
           {(hasBindingPanel || hasRuntimePanel) && (
             <Collapse size="small" ghost style={{ marginTop: 10 }} defaultActiveKey={needsManualConfirm ? ["runtime"] : []}>
               {hasBindingPanel && (
@@ -2413,7 +2510,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                           </FieldControl>
                           <FieldControl label="配对 ID 字段">
                             <EditableComboInput
-                              value={selectBinding?.id_path || selectBinding?.path || p.path || p.key || ""}
+                              value={selectBinding?.id_path || p.path || p.key || ""}
                               options={(step.params || []).map((x) => ({ label: `${x.path} · ${x.key}`, value: x.path }))}
                               placeholder="默认当前字段路径，可改为隐藏 ID 字段"
                               onSave={(v) => upsertSelectBinding(step, p, { id_path: v || null })}
@@ -2461,18 +2558,52 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               {hasRuntimePanel && (
                 <Collapse.Panel key="runtime" header={<Space><BranchesOutlined />运行期来源</Space>}>
                   <div style={{ background: "#fafafa", border: "1px solid #f0f0f0", borderRadius: 6, padding: 10 }}>
-                    <Space wrap>
-                      <Typography.Text strong style={{ fontSize: 12 }}>运行期来源</Typography.Text>
-                      <NativeSelect value={currentBind.source_step_id || ""} width={300}
-                        options={sourceStepOptions}
-                        onChange={(v) => setBindDraft((d) => ({ ...d, [bindKey]: { ...currentBind, source_step_id: v, source_path: "" } }))} />
-                      <ComboInput value={currentBind.source_path || ""} width={300}
-                        options={sourceRespOptions}
-                        disabled={!currentBind.source_step_id}
-                        placeholder={currentBind.source_step_id ? "选择或输入响应字段，如 data.id" : "先选择来源接口"}
-                        onChange={(v) => setBindDraft((d) => ({ ...d, [bindKey]: { ...currentBind, source_path: v } }))} />
-                      <Button size="small" type="primary" icon={<LinkOutlined />} onClick={() => bindParamToPreviousResponse(step, p)}>绑定上游响应</Button>
-                    </Space>
+                    {p.source_kind === "previous_response" || linked ? (
+                      <Space wrap>
+                        <Typography.Text strong style={{ fontSize: 12 }}>上游响应</Typography.Text>
+                        <NativeSelect value={currentBind.source_step_id || ""} width={300}
+                          options={sourceStepOptions}
+                          onChange={(v) => setBindDraft((d) => ({ ...d, [bindKey]: { ...currentBind, source_step_id: v, source_path: "" } }))} />
+                        <ComboInput value={currentBind.source_path || ""} width={300}
+                          options={sourceRespOptions}
+                          disabled={!currentBind.source_step_id}
+                          placeholder={currentBind.source_step_id ? "选择或输入响应字段，如 data.id" : "先选择来源接口"}
+                          onChange={(v) => setBindDraft((d) => ({ ...d, [bindKey]: { ...currentBind, source_path: v } }))} />
+                        <Button size="small" type="primary" icon={<LinkOutlined />} onClick={() => bindParamToPreviousResponse(step, p)}>绑定上游响应</Button>
+                      </Space>
+                    ) : p.source_kind === "page_context" ? (
+                      <FieldControl label="调用上下文键">
+                        <EditableText value={(p.source as any)?.context_key || p.key || ""} width={320}
+                          placeholder="如 department_id；由调用方运行环境注入"
+                          onSave={(v) => updateRuntimeSourceDetail(step.step_id, p, { context_key: v })} />
+                      </FieldControl>
+                    ) : p.source_kind === "request_header" ? (
+                      <FieldControl label="请求头名称">
+                        <EditableText value={(p.source as any)?.header || ""} width={320}
+                          placeholder="如 Authorization / X-Tenant-Id"
+                          onSave={(v) => updateRuntimeSourceDetail(step.step_id, p, { header: v })} />
+                      </FieldControl>
+                    ) : p.source_kind === "current_user" ? (
+                      <Typography.Text type="secondary">运行期从当前登录身份注入，不依赖前置接口。</Typography.Text>
+                    ) : p.source_kind === "system_time" ? (
+                      <Typography.Text type="secondary">运行期按字段类型生成当前系统时间，不使用录制样例。</Typography.Text>
+                    ) : p.source_kind === "system_generated" ? (
+                      <FieldControl label="生成策略">
+                        <NativeSelect value={(p.source as any)?.strategy || "uuid"} width={260}
+                          options={[
+                            { label: "UUID", value: "uuid" },
+                            { label: "随机字符串", value: "random_string" },
+                            { label: "随机数字", value: "random_number" },
+                          ]}
+                          onChange={(v) => updateRuntimeSourceDetail(step.step_id, p, { strategy: v })} />
+                      </FieldControl>
+                    ) : p.source_kind === "computed" ? (
+                      <Typography.Text type="secondary">
+                        运行期按规则 {(p.source as any)?.strategy || "未配置"}，根据 {(p.source as any)?.start_field || "开始字段"} 与 {(p.source as any)?.end_field || "结束字段"} 自动计算。
+                      </Typography.Text>
+                    ) : (
+                      <Typography.Text type="warning">请选择明确来源；未配置来源的运行期变量不会被当成可执行字段。</Typography.Text>
+                    )}
                   </div>
                 </Collapse.Panel>
               )}
@@ -2777,7 +2908,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 <Collapse.Panel
                   key={`${cap.name || idx}-${idx}`}
                   header={
-                    <Space wrap>
+                    <Space wrap id={`capability-${String(cap.name || cap.capability_id || idx).replace(/[^a-zA-Z0-9_-]+/g, "-")}`}>
                       <Tag color={cap.confirmed ? "success" : "warning"}>{cap.confirmed ? "已确认" : "未确认"}</Tag>
                       <Tag color="blue">{optionLabel(kindOptions, cap.kind || "submit")}</Tag>
                       <Tag color={confidenceColor(cap.confidence)}>置信度 {confidencePercent(cap.confidence)}</Tag>
@@ -2848,7 +2979,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             {rows.slice(0, 8).map((row) => (
               <Space key={`${title}-${row.name}`} size={4} wrap>
                 <Typography.Text code style={{ fontSize: 12 }}>{row.name}</Typography.Text>
-                <Tag>{row.type}</Tag>
+                <Tag>{PARAM_TYPE_LABELS[row.type] || row.type}</Tag>
                 {row.required && <Tag color="red">必填</Tag>}
                 {row.description && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{row.description}</Typography.Text>}
               </Space>
@@ -3408,7 +3539,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                                   </FieldControl>
                                   <FieldControl label="配对 ID 字段">
                                     <EditableComboInput
-                                      value={selectBinding?.id_path || selectBinding?.path || p.path || p.key || ""}
+                                      value={selectBinding?.id_path || p.path || p.key || ""}
                                       options={(step.params || []).map((x) => ({ label: `${x.path} · ${x.key}`, value: x.path }))}
                                       placeholder="默认当前字段路径，可改为隐藏 ID 字段"
                                       onSave={(v) => upsertSelectBinding(step, p, { id_path: v || null })}
@@ -3456,18 +3587,50 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                         {hasRuntimePanel && (
                             <Collapse.Panel key="runtime" header={<Space><BranchesOutlined />运行期来源</Space>}>
                           <div style={{ background: "#fafafa", border: "1px solid #f0f0f0", borderRadius: 6, padding: 10 }}>
-                            <Space wrap>
-                              <Typography.Text strong style={{ fontSize: 12 }}>运行期来源</Typography.Text>
-                              <NativeSelect value={currentBind.source_step_id || ""} width={300}
-                                options={sourceStepOptions}
-                                onChange={(v) => setBindDraft((d) => ({ ...d, [bindKey]: { ...currentBind, source_step_id: v, source_path: "" } }))} />
-                              <ComboInput value={currentBind.source_path || ""} width={280}
-                                options={sourceRespOptions}
-                                disabled={!currentBind.source_step_id}
-                                placeholder={currentBind.source_step_id ? "选择或输入响应字段，如 data.id" : "先选择来源步骤"}
-                                onChange={(v) => setBindDraft((d) => ({ ...d, [bindKey]: { ...currentBind, source_path: v } }))} />
-                              <Button size="small" type="primary" icon={<LinkOutlined />} onClick={() => bindParamToPreviousResponse(step, p)}>绑定上游响应</Button>
-                            </Space>
+                            {p.source_kind === "previous_response" || linked ? (
+                              <Space wrap>
+                                <Typography.Text strong style={{ fontSize: 12 }}>上游响应</Typography.Text>
+                                <NativeSelect value={currentBind.source_step_id || ""} width={300}
+                                  options={sourceStepOptions}
+                                  onChange={(v) => setBindDraft((d) => ({ ...d, [bindKey]: { ...currentBind, source_step_id: v, source_path: "" } }))} />
+                                <ComboInput value={currentBind.source_path || ""} width={280}
+                                  options={sourceRespOptions}
+                                  disabled={!currentBind.source_step_id}
+                                  placeholder={currentBind.source_step_id ? "选择或输入响应字段，如 data.id" : "先选择来源步骤"}
+                                  onChange={(v) => setBindDraft((d) => ({ ...d, [bindKey]: { ...currentBind, source_path: v } }))} />
+                                <Button size="small" type="primary" icon={<LinkOutlined />} onClick={() => bindParamToPreviousResponse(step, p)}>绑定上游响应</Button>
+                              </Space>
+                            ) : p.source_kind === "page_context" ? (
+                              <FieldControl label="调用上下文键">
+                                <EditableText value={(p.source as any)?.context_key || p.key || ""} width={320}
+                                  onSave={(v) => updateRuntimeSourceDetail(step.step_id, p, { context_key: v })} />
+                              </FieldControl>
+                            ) : p.source_kind === "request_header" ? (
+                              <FieldControl label="请求头名称">
+                                <EditableText value={(p.source as any)?.header || ""} width={320}
+                                  onSave={(v) => updateRuntimeSourceDetail(step.step_id, p, { header: v })} />
+                              </FieldControl>
+                            ) : p.source_kind === "system_generated" ? (
+                              <FieldControl label="生成策略">
+                                <NativeSelect value={(p.source as any)?.strategy || "uuid"} width={260}
+                                  options={[
+                                    { label: "UUID", value: "uuid" },
+                                    { label: "随机字符串", value: "random_string" },
+                                    { label: "随机数字", value: "random_number" },
+                                  ]}
+                                  onChange={(v) => updateRuntimeSourceDetail(step.step_id, p, { strategy: v })} />
+                              </FieldControl>
+                            ) : p.source_kind === "computed" ? (
+                              <Typography.Text type="secondary">
+                                运行期按规则 {(p.source as any)?.strategy || "未配置"}，根据 {(p.source as any)?.start_field || "开始字段"} 与 {(p.source as any)?.end_field || "结束字段"} 自动计算。
+                              </Typography.Text>
+                            ) : p.source_kind === "current_user" ? (
+                              <Typography.Text type="secondary">运行期从当前登录身份注入。</Typography.Text>
+                            ) : p.source_kind === "system_time" ? (
+                              <Typography.Text type="secondary">运行期生成当前系统时间。</Typography.Text>
+                            ) : (
+                              <Typography.Text type="warning">请选择并配置明确的运行期来源。</Typography.Text>
+                            )}
                           </div>
                             </Collapse.Panel>
                         )}

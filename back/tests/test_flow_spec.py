@@ -727,7 +727,7 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertEqual(spec.capabilities, [])
         orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=None, model=None))
         cap_kinds = {c.kind for c in orchestrated.capabilities}
-        self.assertEqual(cap_kinds, {"list_options", "submit"})
+        self.assertEqual(cap_kinds, {"submit"})
         submit_cap = next(c for c in orchestrated.capabilities if c.kind == "submit")
         # 审批详情是提交能力的控制前置，不重复拆成独立状态查询能力。
         self.assertTrue(any("/get-approval-detail" in s.path for s in orchestrated.steps if s.step_id in submit_cap.step_ids))
@@ -735,7 +735,7 @@ class GetBusinessStepTest(unittest.TestCase):
 
         client = flow_spec_to_client(orchestrated)
         self.assertIn("capabilities", client)
-        self.assertEqual({c["kind"] for c in client["capabilities"]}, {"list_options", "submit"})
+        self.assertEqual({c["kind"] for c in client["capabilities"]}, {"submit"})
         apir, errors = flow_spec_to_api_request(orchestrated)
         self.assertEqual(errors, [])
         self.assertIn("capabilities", apir)
@@ -803,7 +803,8 @@ class GetBusinessStepTest(unittest.TestCase):
                 name="submit_batch",
                 title="人工改过的标题",
                 kind="submit_batch",
-                step_ids=[],
+                step_ids=["submit"],
+                nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
                 input_schema={"type": "object"},
                 confirmed=True,
                 requires_human_confirm=False,
@@ -880,7 +881,8 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertEqual(by_path["ywsxList[0].yyxtid"].category, "runtime_var")
         self.assertEqual(by_path["ywsxList[0].yyxtid"].source_kind, "api_option")
         self.assertFalse(by_path["ywsxList[0].yyxtid"].exposed_to_user)
-        self.assertEqual(by_path["ssbmId"].category, "system_const")
+        self.assertEqual(by_path["ssbmId"].category, "runtime_var")
+        self.assertEqual(by_path["ssbmId"].source_kind, "page_context")
         self.assertFalse(by_path["ssbmId"].exposed_to_user)
         self.assertEqual(by_path["bmId"].source_kind, "page_context")
         self.assertFalse(by_path["bmId"].exposed_to_user)

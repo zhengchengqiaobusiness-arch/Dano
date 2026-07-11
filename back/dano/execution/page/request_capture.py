@@ -340,6 +340,7 @@ def discover_step_links(writes: list[dict]) -> list[dict]:
         for tpath, ttoks, tval, _raw in leaves:
             if len(tval) < 4:                              # 保持 4:短 taskId/uuid 前缀常见
                 continue
+            matches: list[tuple[int, list[str | int]]] = []
             for j in range(i):
                 resp = writes[j].get("response_json")
                 if resp is None:
@@ -347,10 +348,18 @@ def discover_step_links(writes: list[dict]) -> list[dict]:
                 resp_unwrapped = _unwrap_json_strings(resp)   # H14 修复:stringified JSON 嵌套也要解开比对(Ruoyi 风格)
                 stoks = _find_value_tokens(resp_unwrapped, tval, expected_type=_raw_type(_raw))
                 if stoks is not None:
-                    links.append({"target_step": i, "target_path": tpath, "target_tokens": ttoks,
-                                  "source_step": j, "source_path": _tokens_to_str(stoks),
-                                  "source_tokens": stoks})
-                    break
+                    matches.append((j, stoks))
+            # 相同录制值在多个前置响应出现时没有足够证据判断来源。宁可留给 Planner/
+            # 人工确认，也不能用“第一个命中”制造时好时坏的假依赖。
+            unique = {
+                (source_step, _tokens_to_str(source_tokens)): (source_step, source_tokens)
+                for source_step, source_tokens in matches
+            }
+            if len(unique) == 1:
+                source_step, source_tokens = next(iter(unique.values()))
+                links.append({"target_step": i, "target_path": tpath, "target_tokens": ttoks,
+                              "source_step": source_step, "source_path": _tokens_to_str(source_tokens),
+                              "source_tokens": source_tokens})
     return links
 
 
@@ -1779,11 +1788,39 @@ def classify_network_request(req: dict) -> dict:
     path = (urlparse(url).path if str(url).startswith("http") else str(url)).lower()
     segs = {s for s in _re.split(r"[^a-zA-Z0-9]+", path) if s}
 
+    def list_is_business_records(items: list) -> bool:
+        sample = next((item for item in items[:5] if isinstance(item, dict)), None)
+        keys = {
+            _re.sub(r"[^a-z0-9]+", "", str(key).lower())
+            for key in (sample or {}).keys()
+        }
+        strong_business_key_hints = {
+            "date", "day", "startdate", "enddate", "applydate", "reportdate",
+            "content", "workcontent", "reason", "remark", "description", "hours",
+            "approvestatus", "approvalstatus", "projectid", "projectname", "filled", "missing",
+        }
+        business_path_hints = {
+            "report", "daily", "workhour", "worktime", "apply", "approval", "leave",
+            "reimburse", "expense", "order", "record", "detail", "history", "task",
+        }
+        option_path_hints = {
+            "dict", "dictionary", "option", "options", "select", "candidate", "candidates",
+            "tree", "simple", "simplelist", "user", "users", "dept", "department", "role", "employee",
+        }
+        if keys & strong_business_key_hints:
+            return True
+        return bool(segs & business_path_hints) and not bool(segs & option_path_hints)
+
     # 4) GET 路径:细分 read_option / read_context / business_get
     if method not in _WRITE:
-        # 4a) 列表型响应 → read_option(下拉/选人/字典源,作为字段来源,不入主流程)
+        # 4a) 列表响应不等于下拉。日报、审批、记录列表是独立业务查询；
+        # 只有字典/人员/label-value 形态才作为字段候选源。
         items = as_list_payload(resp) if resp is not None else None
         if items:
+            if list_is_business_records(items):
+                return {"role": "business_get", "keep": True,
+                        "reason": "列表响应包含日期/状态/业务记录字段，作为独立查询能力候选",
+                        "confidence": 0.93}
             seg_hint = "路径含 list/options/dict/select/candidates" if (segs & {"list", "options", "dict", "select", "candidates", "tree", "menu", "candidates"}) else "响应为列表"
             return {"role": "read_option", "keep": False,
                     "reason": f"{seg_hint} → 作为下拉/选人/字典源,供字段绑定,不进主流程",
@@ -1806,6 +1843,11 @@ def classify_network_request(req: dict) -> dict:
     # 5) POST/PUT/PATCH:细分 submit_anchor / business_write / read_option
     # 5a) POST 形态的读/查询(getXxxList/queryXxx)→ 不当业务写
     if method == "POST" and looks_like_read_request(url, pd):
+        items = as_list_payload(resp) if resp is not None else None
+        if items and list_is_business_records(items):
+            return {"role": "business_get", "keep": True,
+                    "reason": "POST 查询返回业务记录列表，作为独立查询能力候选",
+                    "confidence": 0.93}
         return {"role": "read_option", "keep": False,
                 "reason": "POST 路径动词是 get/query/list/search(下拉/列表源)",
                 "confidence": 0.9}
@@ -2254,13 +2296,73 @@ def _apply_identity(body, api_request: dict, storage_state: dict | None) -> list
     return failed
 
 
-def _apply_system_values(body, api_request: dict) -> None:
-    """系统生成的时间戳(submitTime/createTime 等)运行期填**当前时间**,而非焊死录制时刻。通用,不挑系统。"""
+def _system_generated_value(kind: str):
+    """Generate runtime-only values without leaking a recorded sample into later calls."""
+    import secrets as _secrets
     import time as _time
+    import uuid as _uuid
+    from datetime import datetime as _datetime, timezone as _timezone
+
     now_ms = int(_time.time() * 1000)
+    if kind == "now_ms":
+        return now_ms
+    if kind == "now_s":
+        return now_ms // 1000
+    if kind == "now_iso":
+        return _datetime.now(_timezone.utc).isoformat()
+    if kind == "now_date":
+        return _datetime.now(_timezone.utc).date().isoformat()
+    if kind == "uuid":
+        return str(_uuid.uuid4())
+    if kind == "random_string":
+        return _secrets.token_urlsafe(18)
+    if kind == "random_number":
+        return _secrets.randbelow(10**12)
+    raise ValueError(f"unsupported system value kind: {kind}")
+
+
+def _apply_system_values(body, api_request: dict) -> None:
+    """Inject declared system-generated values at execution time."""
     for sv in api_request.get("system_values") or []:
-        val = now_ms if sv.get("kind") == "now_ms" else now_ms // 1000
+        val = _system_generated_value(str(sv.get("kind") or "now_ms"))
         _set_by_path(body, sv.get("tokens") or sv.get("path", ""), val)
+
+
+def _apply_runtime_fields(fields: dict, api_request: dict) -> dict:
+    out = dict(fields)
+    for field in api_request.get("runtime_fields") or []:
+        name = str(field.get("name") or "")
+        if not name or name in out:
+            continue
+        kind = str(field.get("kind") or "uuid")
+        if kind == "date_span_days_json":
+            import json as _json
+            from datetime import datetime as _datetime
+
+            def seconds(value):
+                try:
+                    number = float(value)
+                    return number / 1000.0 if abs(number) >= 10**11 else number
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    return _datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+                except (TypeError, ValueError):
+                    return None
+
+            start = seconds(out.get(str(field.get("start_field") or "")))
+            end = seconds(out.get(str(field.get("end_field") or "")))
+            if start is None or end is None:
+                continue
+            days = int(round(abs(end - start) / 86400.0))
+            out[name] = _json.dumps(
+                {str(field.get("output_key") or "days"): days},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        else:
+            out[name] = _system_generated_value(kind)
+    return out
 
 
 # ─────────── P0:发布前确定性自检(self_check) + 运行期换身后置审计 ───────────
@@ -2393,8 +2495,14 @@ def self_check(api_request: dict) -> list[str]:
 
     # (b)+(c):每个参数一个唯一哨兵 → 跑完整构造流水线(substitute→finalize)→ 哨兵必须都出现在最终 body
     probes = {p: f"{_PROBE_PREFIX}{i}__" for i, p in enumerate(params)}
-    nested = substitute(templ, probes, {}) if has_body else None              # 不喂 defaults:逼出"参数无占位"的问题
-    query = _render_query_template(query_templ, probes, {}) if has_query else {}
+    runtime_probes = {
+        str(field.get("name")): f"{_PROBE_PREFIX}RUNTIME_{i}__"
+        for i, field in enumerate(api_request.get("runtime_fields") or [])
+        if field.get("name")
+    }
+    all_probes = {**probes, **runtime_probes}
+    nested = substitute(templ, all_probes, {}) if has_body else None          # 不喂 defaults:逼出"参数无占位"的问题
+    query = _render_query_template(query_templ, all_probes, {}) if has_query else {}
     final_parts: list[str] = []
     if has_body:
         final_parts.append(json.dumps(_finalize_jsonstr(nested), ensure_ascii=False))
@@ -2919,7 +3027,7 @@ async def execute_api_request(api_request: dict, fields: dict, *, base_url: str 
     覆盖 identity 字段(申请人=谁调用就是谁,不冻结成录制者);③ overrides 把上一步响应值注入本步 body
     (Q3 步链,如 taskId)。dry 不连网,只校验参数齐全。
     """
-    fields = dict(fields)
+    fields = _apply_runtime_fields(dict(fields), api_request)
     sel_overrides: dict = {}
     if send:                                                 # 选择型:名字→ID(需连网查候选列表);名/ID 配对返回 id 覆盖
         fields, sel_overrides = await _resolve_selects(api_request, fields, base_url=base_url,

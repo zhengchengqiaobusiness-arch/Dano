@@ -260,7 +260,7 @@ def test_stale_capability_fields_are_removed_from_validation_and_input_schema():
     assert all("missing.path" not in message and "stale" not in message for message in report["errors"])
 
 
-def test_to_flow_spec_keeps_independent_get_as_fact_and_materializes_dependency_closure():
+def test_to_flow_spec_materializes_high_confidence_business_query_and_dependency_closure():
     captured = [
         _get(1, "/daily-report/page", {"data": {"list": [{"date": "2026-05-01"}]}}),
         _get(2, "/process/definition/get?key=daily", {"data": {"id": "PROC-UNIQUE-001"}}),
@@ -273,17 +273,26 @@ def test_to_flow_spec_keeps_independent_get_as_fact_and_materializes_dependency_
 
     spec = to_flow_spec(captured, samples={"content": "完成回归测试"})
 
-    assert [step.method for step in spec.steps] == ["GET", "POST"]
+    assert [step.method for step in spec.steps] == ["GET", "GET", "POST"]
     assert [step.path.split("?", 1)[0] for step in spec.steps] == [
+        "/daily-report/page",
         "/process/definition/get",
         "/daily-report/submit",
     ]
     assert len(spec.request_facts.requests) == 3
     independent = next(fact for fact in spec.request_facts.requests if "/daily-report/page" in fact.path)
-    assert independent.request_id not in {
+    assert independent.request_id in {
         (step.source_meta or {}).get("request_id") for step in spec.steps
     }
-    assert spec.request_facts.usage[independent.request_id].state == "captured"
+    assert spec.request_facts.usage[independent.request_id].state == "materialized"
+
+    orchestrated = asyncio.run(orchestrate_flow_capabilities(spec))
+    by_kind = {cap.kind: cap for cap in orchestrated.capabilities}
+    assert set(by_kind) == {"query_status", "submit"}
+    assert [orchestrated.steps[[s.step_id for s in orchestrated.steps].index(sid)].path.split("?", 1)[0]
+            for sid in by_kind["query_status"].step_ids] == ["/daily-report/page"]
+    assert [orchestrated.steps[[s.step_id for s in orchestrated.steps].index(sid)].path.split("?", 1)[0]
+            for sid in by_kind["submit"].step_ids] == ["/process/definition/get", "/daily-report/submit"]
 
 
 def test_unique_real_value_dependency_is_confirmed_but_ambiguous_value_is_not():
@@ -302,12 +311,12 @@ def test_unique_real_value_dependency_is_confirmed_but_ambiguous_value_is_not():
         _post(3, "/leave/submit", {"taskId": "TASK-SHARED-001", "reason": "年假"}),
     ], samples={"reason": "年假"})
 
-    assert len(ambiguous.links) >= 1
-    assert all(link.confirmed is False for link in ambiguous.links)
+    # 同一个值来自多个上游响应时来源不唯一，不能生成随机候选依赖。
+    assert ambiguous.links == []
     assert all(link.confidence == 0.85 for link in ambiguous.links)
 
 
-def test_default_capabilities_use_submit_for_single_post_and_add_list_options_for_enum():
+def test_default_capabilities_keep_enum_inside_submit_contract_without_empty_ability():
     spec = FlowSpec(
         flow_id="single-submit-with-enum",
         steps=[FlowStep(
@@ -335,11 +344,10 @@ def test_default_capabilities_use_submit_for_single_post_and_add_list_options_fo
     capabilities = build_default_flow_capabilities(spec)
     by_kind = {cap.kind: cap for cap in capabilities}
 
-    assert set(by_kind) == {"list_options", "submit"}
+    assert set(by_kind) == {"submit"}
     assert by_kind["submit"].step_ids == ["submit"]
     assert by_kind["submit"].name == "submit"
-    assert by_kind["list_options"].input_schema["properties"]["field"]["enum"] == ["请假类型"]
-    assert by_kind["list_options"].confirmed is True
+    assert by_kind["submit"].input_schema["properties"]["请假类型"]["enum"] == ["病假", "事假"]
 
 
 def test_seal_application_keeps_control_preflights_and_maps_long_id_enum():
@@ -407,3 +415,73 @@ def test_seal_application_keeps_control_preflights_and_maps_long_id_enum():
     planned_report = validate_flow_spec(planned)
     assert planned_report["passed"] is True
     assert not any("前置接口保留" in item.title for item in planned.review_items if not item.resolved)
+
+
+def test_daily_report_builds_independent_query_and_batch_submit_capabilities():
+    query_steps = [
+        FlowStep(
+            step_id=f"query_{idx}",
+            name=f"查询日报阶段{idx}",
+            method="GET",
+            url=f"/daily-report/query/{idx}",
+            path=f"/daily-report/query/{idx}",
+            source_meta={"role": "business_get", "sequence": idx},
+            response_json={"data": {"filled_dates": ["2026-05-01"], "missing_dates": ["2026-05-11"]}},
+        )
+        for idx in range(1, 6)
+    ]
+    submit_preflights = [
+        FlowStep(
+            step_id=f"submit_context_{idx}",
+            name=f"填报上下文{idx}",
+            method="GET",
+            url=f"/daily-report/submit-context/{idx}",
+            path=f"/daily-report/submit-context/{idx}",
+            source_meta={"role": "read_context", "sequence": idx + 5, "control_preflight_for_write": True},
+        )
+        for idx in range(1, 4)
+    ]
+    submit = FlowStep(
+        step_id="submit_batch",
+        name="批量填写日报",
+        method="POST",
+        url="/daily-report/submit-batch",
+        path="/daily-report/submit-batch",
+        body_source='[{"date":"2026-05-11","content":"开发"}]',
+        source_meta={"role": "submit_anchor", "sequence": 9},
+        params=[
+            ParamField(path="[0].date", key="日期", type="date", category="user_param", source_kind="user_input"),
+            ParamField(path="[0].content", key="工作内容", category="user_param", source_kind="user_input"),
+        ],
+    )
+    spec = FlowSpec(flow_id="daily-two-capabilities", steps=[*query_steps, *submit_preflights, submit])
+
+    capabilities = build_default_flow_capabilities(spec)
+    by_kind = {cap.kind: cap for cap in capabilities}
+
+    assert set(by_kind) == {"query_status", "submit_batch"}
+    assert by_kind["query_status"].step_ids == [step.step_id for step in query_steps]
+    assert by_kind["submit_batch"].step_ids == [step.step_id for step in [*submit_preflights, submit]]
+    assert [mapping["step_id"] for mapping in by_kind["query_status"].output_mapping] == [
+        step.step_id for step in query_steps
+    ]
+    assert by_kind["submit_batch"].output_mapping[0]["step_id"] == "submit_batch"
+    assert not set(by_kind["query_status"].step_ids) & set(by_kind["submit_batch"].step_ids)
+
+
+def test_query_output_mapping_uses_stable_names_for_numeric_urls():
+    steps = [
+        FlowStep(
+            step_id=f"query_{idx}",
+            method="GET",
+            url=f"/daily/query/{idx}",
+            path=f"/daily/query/{idx}",
+            source_meta={"role": "business_get", "confidence": 0.93},
+            response_json={"data": {"value": idx}},
+        )
+        for idx in range(1, 4)
+    ]
+
+    cap = build_default_flow_capabilities(FlowSpec(flow_id="numeric-query-output", steps=steps))[0]
+
+    assert [mapping["name"] for mapping in cap.output_mapping] == ["query_1", "query_2", "query_3"]

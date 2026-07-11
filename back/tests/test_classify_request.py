@@ -75,6 +75,20 @@ def test_dict_get_response_is_read_option():
     assert cls["role"] == "read_option"
 
 
+def test_daily_report_page_is_business_query_not_option_list():
+    cls = classify_network_request({
+        "method": "GET",
+        "url": "https://x/api/daily-report/page?start=2026-05-01&end=2026-05-31",
+        "response_json": {"data": {"list": [
+            {"date": "2026-05-01", "content": "开发", "status": "submitted"},
+        ]}},
+    })
+
+    assert cls["role"] == "business_get"
+    assert cls["keep"] is True
+    assert cls["confidence"] >= 0.9
+
+
 def test_getappid_business_get():
     """getappid 返回单值对象 → business_get,保留为主流程候选(P0-3 依赖闭包基于此)。"""
     cls = classify_network_request({
@@ -197,6 +211,22 @@ def test_response_reclassification_changes_role():
                        response_json={"rows": [{"id": 1, "name": "张三"}]},
                        status=200, content_type="application/json")
     assert entry["role"] == "read_option"
+
+
+def test_tenant_simple_list_with_status_field_remains_option_source():
+    """通用管理列表带 status/createTime，不等于业务状态查询能力。"""
+    s = _new_sess()
+    s._record_all(
+        "GET",
+        "https://x/admin-api/system/tenant/simple-list",
+        response_json={"data": [{"id": 1, "name": "默认租户", "status": 0, "createTime": 1}]},
+        status=200,
+        content_type="application/json",
+    )
+
+    entry = s.captured_all_requests()[0]
+    assert entry["role"] == "read_option"
+    assert entry["keep"] is False
 
 
 def test_keep_filter_drops_noise_and_auth():

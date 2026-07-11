@@ -19,6 +19,7 @@ from dano.execution.page.flow_spec import (
     migrate_v2_flow_spec_to_capability_spec, capability_spec_to_legacy_flow_spec,
     capability_spec_to_api_request, to_flow_spec,
 )
+from dano.execution.page.request_capture import execute_api_request
 
 
 def _make_spec():
@@ -29,6 +30,295 @@ def _make_spec():
         params=[param1, param2], risk_level="L3", sample_inputs={"userId": "123", "name": "test"},
     )
     return FlowSpec(flow_id="test", steps=[step1])
+
+
+def test_system_generated_runtime_value_is_compiled_and_not_exposed():
+    step = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/submit",
+        url="/api/submit",
+        body_source='{"nonce":"recorded"}',
+        params=[ParamField(
+            path="nonce",
+            key="nonce",
+            value="recorded",
+            category="runtime_var",
+            source_kind="system_generated",
+            source={"kind": "system_generated", "strategy": "uuid"},
+            exposed_to_user=False,
+        )],
+    )
+
+    api_request, errors = flow_spec_module._flow_step_to_api_step(step)
+    assert errors == []
+    assert api_request is not None
+    assert api_request["params"] == []
+    assert {item["kind"] for item in api_request["system_values"]} == {"uuid"}
+    dry = asyncio.run(execute_api_request(api_request, {}, send=False))
+    assert dry["ok"] is True
+    assert dry["body"]["nonce"] != "recorded"
+
+
+def test_capability_interface_reorder_updates_flat_calls_even_with_return_node():
+    spec = FlowSpec(
+        flow_id="order",
+        steps=[
+            FlowStep(step_id="a", method="GET", path="/a"),
+            FlowStep(step_id="b", method="POST", path="/b"),
+        ],
+        capabilities=[FlowCapability(
+            name="submit",
+            step_ids=["a", "b"],
+            nodes=[
+                {"id": "call_a", "type": "call", "step_id": "a"},
+                {"id": "call_b", "type": "call", "step_id": "b"},
+                {"id": "return_b", "type": "return", "from": "b"},
+            ],
+        )],
+    )
+
+    updated = apply_flow_edits(spec, [{
+        "op": "update_capability",
+        "capability_index": 0,
+        "field": "step_ids",
+        "value": ["b", "a"],
+    }])
+
+    calls = [node["step_id"] for node in updated.capabilities[0].nodes if node.get("type") == "call"]
+    assert calls == ["b", "a"]
+
+
+def test_generated_capabilities_repair_wrong_option_query_batch_and_stale_output():
+    option = FlowStep(
+        step_id="tenant-options",
+        method="GET",
+        path="/admin-api/system/tenant/simple-list",
+        semantic_role="read_option",
+        response_json={"data": [{"id": 1, "name": "默认租户", "status": 0}]},
+    )
+    submit = FlowStep(
+        step_id="leave-submit",
+        method="POST",
+        path="/admin-api/oa/duty-leave/submit-process",
+        body_source='{"type":"2","reason":"年假"}',
+        params=[
+            ParamField(
+                path="type", key="请假类型", type="enum", value="2", required=True,
+                enum_options=[{"label": "病假", "value": "2"}, {"label": "事假", "value": "3"}],
+            ),
+            ParamField(path="reason", key="原因", value="年假", required=True),
+        ],
+        response_json={"code": 0, "data": "ok"},
+    )
+    spec = FlowSpec(
+        flow_id="repair-generated",
+        steps=[option, submit],
+        capabilities=[
+            FlowCapability(
+                name="query_status", kind="query_status", step_ids=["tenant-options"],
+                nodes=[{"id": "call_option", "type": "call", "step_id": "tenant-options"}],
+                output_mapping=[{"step_id": "old-step", "response_path": "response"}],
+                evidence=[{"kind": "read_step", "step_id": "tenant-options"}],
+                confirmed=True,
+            ),
+            FlowCapability(
+                name="submit_batch", title="批量提交业务申请", kind="submit_batch",
+                step_ids=["leave-submit"],
+                nodes=[{
+                    "id": "foreach_entries", "type": "foreach", "items": "input.entries",
+                    "steps": [{"id": "call_submit", "type": "call", "step_id": "leave-submit"}],
+                }],
+                output_mapping=[{"step_id": "old-step", "response_path": "response"}],
+                evidence=[{"kind": "write_steps", "step_ids": ["leave-submit"]}],
+                confirmed=True,
+            ),
+        ],
+    )
+
+    repaired = flow_spec_module._repair_generated_capability_contracts(spec)
+    repaired = flow_spec_module._sync_capability_io_schemas(repaired)
+
+    assert [cap.name for cap in repaired.capabilities] == ["submit"]
+    cap = repaired.capabilities[0]
+    assert cap.kind == "submit"
+    assert not any(node.get("type") == "foreach" for node in flow_spec_module._iter_capability_nodes(cap.nodes))
+    assert cap.output_mapping == [{
+        "kind": "final_response",
+        "name": "result",
+        "step_id": "leave-submit",
+        "response_path": "response",
+    }]
+    assert cap.input_schema["properties"]["请假类型"]["enum"] == ["病假", "事假"]
+    report_text = "\n".join([
+        *validate_flow_spec(repaired).get("errors", []),
+        *validate_flow_spec(repaired).get("warnings", []),
+    ])
+    assert "output_mapping" not in report_text
+    assert "foreach" not in report_text
+    assert "tenant-options" not in report_text
+
+
+def test_repair_mode_fixes_warning_only_batch_nodes_and_dangling_relations():
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/leave/submit-process",
+        body_source='{"type":"2","reason":"年假","startTime":1,"endTime":2}',
+        params=[
+            ParamField(
+                path="type", key="类型", value="2", type="enum", required=True,
+                source_kind="manual_enum", enum_options=[{"label": "病假", "value": "2"}],
+            ),
+            ParamField(path="reason", key="原因", value="年假", required=True),
+            ParamField(path="startTime", key="start_time", value="1", required=True),
+            ParamField(path="endTime", key="end_time", value="2", required=True),
+        ],
+        response_json={"code": 0},
+        success_rule={"path": "code", "equals": 0},
+    )
+    spec = FlowSpec(
+        flow_id="warning-only-repair",
+        steps=[submit],
+        capabilities=[FlowCapability(
+            name="submit_batch2",
+            title="批量提交业务申请",
+            kind="submit_batch",
+            step_ids=["submit"],
+            nodes=[
+                {
+                    "id": "foreach_entries", "type": "foreach", "items": "input.entries",
+                    "steps": [{"id": "call_submit", "type": "call", "step_id": "submit"}],
+                },
+                {"id": "map_date", "type": "map", "source": "item.date", "target": "submit.[0].date"},
+                {"id": "has_entries", "type": "condition", "condition": "input.entries.length > 0", "then": []},
+            ],
+            input_schema={"type": "object", "properties": {"entries": {"type": "array"}}},
+            output_mapping=[{"kind": "final_response", "step_id": "submit", "response_path": "response"}],
+            confirmed=True,
+            confidence=0.95,
+            updated_by="planner",
+        )],
+        capability_relations=[CapabilityRelation(
+            relation_id="dangling",
+            type="output_to_input",
+            from_capability="missing_query",
+            from_output="result",
+            to_capability="submit_batch2",
+            to_input="entries",
+        )],
+        meta={"capability_model": {"status": "ready"}},
+    )
+    before = validate_flow_spec(spec)
+    assert before["passed"] is True
+    assert before["warnings"]
+
+    fixed = asyncio.run(run_recording_pi_loop(spec, llm_client=None, model=None, mode="repair"))
+
+    assert len(fixed.capabilities) == 1
+    cap = fixed.capabilities[0]
+    assert cap.kind == "submit"
+    node_types = [node.get("type") for node in flow_spec_module._iter_capability_nodes(cap.nodes)]
+    assert "foreach" not in node_types
+    assert "map" not in node_types
+    assert "condition" not in node_types
+    assert fixed.capability_relations == []
+    after_text = "\n".join([*validate_flow_spec(fixed)["errors"], *validate_flow_spec(fixed)["warnings"]])
+    assert "foreach_entries" not in after_text
+    assert "map_date" not in after_text
+    assert "has_entries" not in after_text
+
+
+def test_process_variables_date_span_is_computed_and_hidden_from_skill_inputs():
+    approval = FlowStep(
+        step_id="approval",
+        method="GET",
+        path="/approval-detail",
+        url="/approval-detail",
+        params=[ParamField(
+            path="query.processVariablesStr",
+            key="processVariablesStr",
+            value='{"day":9}',
+            required=True,
+        )],
+    )
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/leave/submit",
+        body_source='{"startTime":1782835200000,"endTime":1783612800000}',
+        params=[
+            ParamField(path="startTime", key="start_time", value="1782835200000", type="datetime", required=True),
+            ParamField(path="endTime", key="end_time", value="1783612800000", type="datetime", required=True),
+        ],
+    )
+    spec = FlowSpec(flow_id="computed-days", steps=[approval, submit])
+
+    flow_spec_module._infer_computed_runtime_fields(spec)
+    param = approval.params[0]
+    assert param.category == "runtime_var"
+    assert param.source_kind == "computed"
+    assert param.exposed_to_user is False
+    assert "processVariablesStr" not in flow_spec_module.flow_spec_user_params(spec)
+
+    api_request, errors = flow_spec_module._flow_step_to_api_step(approval)
+    assert errors == []
+    dry = asyncio.run(execute_api_request(api_request, {
+        "start_time": "1782835200000",
+        "end_time": "1783612800000",
+    }, send=False))
+    assert dry["ok"] is True
+    assert dry["query"]["processVariablesStr"] == '{"day":9}'
+
+
+def test_rebuild_dependency_promotes_unique_internal_id_constant_to_upstream_response():
+    source = FlowStep(
+        step_id="definition",
+        method="GET",
+        path="/process-definition/get",
+        response_json={"data": {"id": "oa_leave:4:abc"}},
+    )
+    target = FlowStep(
+        step_id="approval",
+        method="GET",
+        path="/approval-detail",
+        params=[ParamField(
+            path="query.processDefinitionId",
+            key="processDefinitionId",
+            value="oa_leave:4:abc",
+            category="system_const",
+            source_kind="constant",
+            exposed_to_user=False,
+        )],
+    )
+    spec = FlowSpec(flow_id="id-link", steps=[source, target])
+
+    assert flow_spec_module.rebuild_flow_dependencies(spec) == 1
+    assert len(spec.links) == 1
+    assert target.params[0].source_kind == "previous_response"
+    assert target.params[0].source["step_id"] == "definition"
+
+
+def test_sync_clears_select_pair_path_that_is_not_a_request_field():
+    step = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/submit",
+        params=[ParamField(path="approverId", key="审批人", type="enum")],
+        selects=[SelectBinding(
+            param="审批人",
+            path="approverId",
+            source_url="/users/page",
+            value_key="id",
+            label_key="nickname",
+            id_path="data.list",
+        )],
+    )
+    spec = FlowSpec(flow_id="bad-id-path", steps=[step])
+
+    sync_flow_spec_models(spec)
+
+    assert step.selects[0].id_path is None
 
 
 def test_manual_category_change_removes_conflicting_incoming_link():
@@ -361,7 +651,7 @@ def test_capability_validator_checks_condition_and_map_refs():
 
     text = "\n".join(report["errors"] + report["warnings"])
     assert "引用的输入 `missing` 不存在" in text
-    assert "来源 `input.unknown` 不存在" in text
+    assert "来源 `input.unknown` 不存在" not in text
 
 
 class _FakeFixClient:
@@ -422,9 +712,9 @@ def test_orchestrate_flow_capabilities_prefers_patch_ops_and_keeps_same_batch_op
     out = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=_FakePlannerPatchClient(), model="fake"))
 
     assert out.meta["capability_model"]["source"] == "llm_patch"
-    assert {cap.name for cap in out.capabilities} == {"submit", "submit_batch"}
-    cap = next(cap for cap in out.capabilities if cap.name == "submit_batch")
-    assert cap.name == "submit_batch"
+    assert {cap.name for cap in out.capabilities} == {"submit_batch"}
+    cap = out.capabilities[0]
+    assert cap.kind == "submit_batch"
     assert cap.step_ids == ["submit"]
     assert cap.inputs[0].key == "entries"
     assert cap.output_mapping[0]["step_id"] == "submit"
@@ -2822,7 +3112,247 @@ def test_orchestrate_existing_nonempty_capability_does_not_expand_from_defaults(
     assert out.capabilities[0].step_ids == ["submit"]
 
 
-def test_incremental_orchestration_adds_list_options_after_enum_field_appears():
+class _ScopeExpandingPlanner:
+    async def complete_json(self, **_kwargs):
+        return {"ops": [
+            {"op": "upsert_capability", "capability": {
+                "name": "submit_batch", "title": "完善后的批量提交", "kind": "submit_batch",
+            }},
+            {"op": "upsert_capability", "capability": {
+                "name": "unexpected_query", "title": "不应新增", "kind": "query_status",
+            }},
+            {"op": "add_request_to_capability", "capability": "submit_batch", "step_id": "status"},
+            {"op": "remove_request_from_capability", "capability": "submit_batch", "step_id": "submit"},
+        ]}
+
+
+def test_repeated_orchestration_repairs_contract_without_expanding_interface_scope():
+    spec = FlowSpec(
+        flow_id="scope-locked",
+        steps=[
+            FlowStep(step_id="status", method="GET", url="/api/status", path="/api/status"),
+            FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit"),
+        ],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            title="批量提交",
+            kind="submit_batch",
+            step_ids=["submit"],
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+        )],
+        meta={"capability_model": {"status": "ready"}},
+    )
+
+    out = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=_ScopeExpandingPlanner(), model="fake"))
+
+    assert [cap.name for cap in out.capabilities] == ["submit_batch"]
+    assert out.capabilities[0].title == "完善后的批量提交"
+    assert out.capabilities[0].step_ids == ["submit"]
+
+
+class _OverwriteManualFieldPlanner:
+    async def complete_json(self, **_kwargs):
+        return {"ops": [{"op": "mark_field_as_system_var", "step_id": "submit", "path": "content"}]}
+
+
+def test_manual_field_contract_is_locked_against_planner_overwrite():
+    spec = FlowSpec(
+        flow_id="manual-field-lock",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            url="/daily/submit",
+            path="/daily/submit",
+            params=[ParamField(
+                path="content",
+                key="工作内容",
+                category="runtime_var",
+                source_kind="unknown",
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="submit",
+            kind="submit",
+            step_ids=["submit"],
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+        )],
+    )
+    edited = apply_flow_edits(spec, [
+        {"op": "update", "step_id": "submit", "param_path": "content", "field": "category", "value": "user_param"},
+        {"op": "update", "step_id": "submit", "param_path": "content", "field": "source_kind", "value": "user_input"},
+        {"op": "update", "step_id": "submit", "param_path": "content", "field": "source", "value": {"kind": "sample", "path": "content"}},
+    ])
+
+    fixed = asyncio.run(auto_fix_flow_spec(
+        edited,
+        llm_client=_OverwriteManualFieldPlanner(),
+        model="fake",
+        max_rounds=1,
+        expand_requests=False,
+        allow_scope_changes=False,
+    ))
+    param = fixed.steps[0].params[0]
+
+    assert param.locked is True
+    assert param.category == "user_param"
+    assert param.source_kind == "user_input"
+
+
+def test_page_context_requires_explicit_context_key_and_differs_from_upstream_response():
+    step = FlowStep(
+        step_id="submit",
+        method="POST",
+        url="/api/submit",
+        path="/api/submit",
+        params=[ParamField(
+            path="departmentId",
+            key="部门",
+            category="runtime_var",
+            source_kind="page_context",
+            source={"kind": "page_context", "path": "departmentId"},
+        )],
+    )
+    spec = FlowSpec(
+        flow_id="context-source",
+        steps=[step],
+        capabilities=[FlowCapability(
+            name="submit",
+            kind="submit",
+            step_ids=["submit"],
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+        )],
+    )
+
+    invalid = validate_flow_spec(spec)
+    assert any("context_key" in message for message in invalid["errors"])
+
+    step.params[0].source = {"kind": "page_context", "context_key": "department_id", "path": "departmentId"}
+    valid = validate_flow_spec(spec)
+    assert not any("context_key" in message for message in valid["errors"])
+
+
+def test_orchestration_removes_empty_planner_capability():
+    spec = FlowSpec(
+        flow_id="empty-capability",
+        steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
+        capabilities=[
+            FlowCapability(name="list_options", kind="list_options", confirmed=True),
+            FlowCapability(
+                name="submit",
+                kind="submit",
+                step_ids=["submit"],
+                nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+            ),
+        ],
+    )
+
+    out = asyncio.run(orchestrate_flow_capabilities(spec))
+
+    assert [cap.name for cap in out.capabilities] == ["submit"]
+
+
+def test_only_empty_capability_is_replaced_with_real_baseline():
+    spec = FlowSpec(
+        flow_id="only-empty-capability",
+        steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
+        capabilities=[FlowCapability(name="list_options", kind="list_options", confirmed=True)],
+    )
+
+    out = asyncio.run(orchestrate_flow_capabilities(spec))
+
+    assert len(out.capabilities) == 1
+    assert out.capabilities[0].kind == "submit"
+    assert out.capabilities[0].step_ids == ["submit"]
+
+
+class _SplitIndependentWritesPlanner:
+    async def complete_json(self, **_kwargs):
+        return {"ops": [
+            {"op": "upsert_capability", "capability": {
+                "name": "submit_daily", "title": "提交日报", "kind": "submit",
+            }},
+            {"op": "add_request_to_capability", "capability": "submit_daily", "step_id": "daily"},
+            {"op": "upsert_capability", "capability": {
+                "name": "submit_weekly", "title": "提交周报", "kind": "submit",
+            }},
+            {"op": "add_request_to_capability", "capability": "submit_weekly", "step_id": "weekly"},
+        ]}
+
+
+def test_initial_planner_can_split_multiple_write_capabilities_without_family_merge():
+    spec = FlowSpec(
+        flow_id="two-write-capabilities",
+        steps=[
+            FlowStep(step_id="daily", method="POST", url="/daily/submit", path="/daily/submit"),
+            FlowStep(step_id="weekly", method="POST", url="/weekly/submit", path="/weekly/submit"),
+        ],
+    )
+
+    out = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        llm_client=_SplitIndependentWritesPlanner(),
+        model="fake",
+    ))
+
+    assert {cap.name for cap in out.capabilities} == {"submit_daily", "submit_weekly"}
+    assert {cap.name: cap.step_ids for cap in out.capabilities} == {
+        "submit_daily": ["daily"],
+        "submit_weekly": ["weekly"],
+    }
+
+
+def test_batch_input_schema_requires_entries_and_keeps_only_shared_fields_at_top_level():
+    shared = FlowStep(
+        step_id="query",
+        method="GET",
+        url="/daily/context",
+        path="/daily/context",
+        params=[ParamField(
+            path="query.project",
+            key="项目",
+            required=True,
+            category="user_param",
+            source_kind="user_input",
+        )],
+        source_meta={"role": "read_context", "control_preflight_for_write": True},
+    )
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        url="/daily/submit-batch",
+        path="/daily/submit-batch",
+        body_source='[{"date":"2026-05-11","content":"开发"}]',
+        params=[
+            ParamField(path="[0].date", key="日期", required=True, category="user_param", source_kind="user_input"),
+            ParamField(path="[0].content", key="工作内容", required=True, category="user_param", source_kind="user_input"),
+        ],
+    )
+    spec = FlowSpec(
+        flow_id="batch-contract",
+        steps=[shared, submit],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            kind="submit_batch",
+            step_ids=["query", "submit"],
+            nodes=[
+                {"id": "call_query", "type": "call", "step_id": "query"},
+                {"id": "foreach_entries", "type": "foreach", "items": "input.entries", "steps": [
+                    {"id": "call_submit", "type": "call", "step_id": "submit"},
+                ]},
+            ],
+        )],
+    )
+
+    synced = flow_spec_module._sync_capability_io_schemas(spec)
+    schema = synced.capabilities[0].input_schema
+
+    assert set(schema["properties"]) == {"项目", "entries"}
+    assert schema["required"] == ["项目", "entries"]
+    assert set(schema["properties"]["entries"]["items"]["properties"]) == {"日期", "工作内容"}
+    assert schema["properties"]["entries"]["items"]["required"] == ["日期", "工作内容"]
+
+
+def test_incremental_orchestration_keeps_enum_in_existing_capability():
     spec = FlowSpec(
         flow_id="incremental-enum",
         steps=[FlowStep(
@@ -2851,7 +3381,8 @@ def test_incremental_orchestration_adds_list_options_after_enum_field_appears():
 
     out = asyncio.run(orchestrate_flow_capabilities(spec))
 
-    assert {cap.kind for cap in out.capabilities} == {"submit", "list_options"}
+    assert {cap.kind for cap in out.capabilities} == {"submit"}
+    assert out.capabilities[0].step_ids == ["submit"]
 
 
 def test_publish_issue_groups_deduplicate_same_link_and_classify_diagnostics():
