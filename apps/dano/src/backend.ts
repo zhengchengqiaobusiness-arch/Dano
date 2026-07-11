@@ -23,7 +23,10 @@ import type {
   BridgeSessionState,
 } from "./bridge/live-session.js";
 import type { BridgeRpcAdapterContext } from "./bridge/bridge-rpc-adapter.js";
-import type { RpcThinkingLevel } from "../types/protocol.js";
+import type {
+  RpcSlashCommand,
+  RpcThinkingLevel,
+} from "../types/protocol.js";
 
 export interface DanoBackend {
   readonly context: BridgeRpcAdapterContext;
@@ -38,43 +41,27 @@ export interface CreateDanoBackendOptions {
   danoConfig?: DanoConfig;
 }
 
-type SessionCommandLike = {
-  name?: string;
-  command?: string;
-  description?: string;
-};
-
-function normalizeCommandName(name: string): string {
-  return name.startsWith("/") ? name : `/${name}`;
-}
-
-function listSessionCommands(session: AgentSession): Array<{
-  name: string;
-  description?: string;
-}> {
-  const commands = new Map<string, { name: string; description?: string }>();
+function listSessionCommands(session: AgentSession): RpcSlashCommand[] {
+  const commands = new Map<string, RpcSlashCommand>();
+  const addCommand = (
+    name: string,
+    description: string | undefined,
+    source: RpcSlashCommand["source"],
+  ) => {
+    if (!name || commands.has(name)) return;
+    commands.set(name, { name, description, source });
+  };
 
   for (const command of session.extensionRunner.getRegisteredCommands()) {
-    const name = normalizeCommandName(command.name);
-    commands.set(name, {
-      name,
-      description: command.description,
-    });
+    addCommand(command.invocationName, command.description, "extension");
   }
 
-  for (const template of session.promptTemplates as unknown as readonly SessionCommandLike[]) {
-    const rawName = template.command ?? template.name;
-    if (!rawName) {
-      continue;
-    }
+  for (const template of session.promptTemplates) {
+    addCommand(template.name, template.description, "prompt");
+  }
 
-    const name = normalizeCommandName(rawName);
-    if (!commands.has(name)) {
-      commands.set(name, {
-        name,
-        description: template.description,
-      });
-    }
+  for (const skill of session.resourceLoader.getSkills().skills) {
+    addCommand(`skill:${skill.name}`, skill.description, "skill");
   }
 
   return [...commands.values()].sort((left, right) =>

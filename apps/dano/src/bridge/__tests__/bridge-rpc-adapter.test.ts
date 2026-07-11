@@ -167,7 +167,13 @@ const createMockContext = (): BridgeRpcAdapterContext => {
     setSessionName: vi.fn(),
     getCommands: vi
       .fn()
-      .mockReturnValue([{ name: "test", description: "Test command" }]),
+      .mockReturnValue([
+        {
+          name: "test",
+          description: "Test command",
+          source: "prompt" as const,
+        },
+      ]),
   };
 
   return { events, state, actions };
@@ -404,6 +410,82 @@ describe("BridgeRpcAdapter", () => {
           expandPromptTemplates: false,
         }),
       );
+
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("passes enabled extension, prompt, and skill commands to Pi expansion", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-commands-"));
+      const sessionFile = path.join(tmpDir, "session.jsonl");
+      fs.writeFileSync(
+        sessionFile,
+        JSON.stringify({
+          type: "session",
+          version: 3,
+          id: "command-session",
+          timestamp: new Date().toISOString(),
+          cwd: tmpDir,
+        }),
+      );
+      (
+        context.state.sessionManager.getSessionFile as ReturnType<typeof vi.fn>
+      ).mockReturnValue(sessionFile);
+
+      const prompt = vi.fn().mockResolvedValue(undefined);
+      createAgentSessionMock.mockResolvedValue({
+        session: {
+          sessionFile: undefined,
+          sessionId: "command-session",
+          isStreaming: false,
+          bindExtensions: vi.fn().mockResolvedValue(undefined),
+          subscribe: vi.fn().mockReturnValue(() => {}),
+          prompt,
+          sessionManager: {
+            getSessionFile: vi.fn().mockReturnValue(undefined),
+            getSessionId: vi.fn().mockReturnValue("command-session"),
+            getEntries: vi.fn().mockReturnValue([]),
+            getBranch: vi.fn().mockReturnValue([]),
+            getCwd: vi.fn().mockReturnValue(tmpDir),
+          },
+        },
+      });
+
+      for (const [index, message] of [
+        "/deploy:2 production",
+        "/review current changes",
+        "/skill:audit repository",
+      ].entries()) {
+        ws.trigger(
+          "message",
+          Buffer.from(
+            JSON.stringify({
+              type: "command",
+              payload: {
+                id: `enabled-command-${index}`,
+                type: "prompt",
+                message,
+              },
+            }),
+          ),
+        );
+        await vi.waitFor(() => {
+          expect(prompt).toHaveBeenCalledTimes(index + 1);
+        });
+      }
+
+      for (const [index, message] of [
+        "/deploy:2 production",
+        "/review current changes",
+        "/skill:audit repository",
+      ].entries()) {
+        const [actualMessage, options] = prompt.mock.calls[index] as [
+          string,
+          Record<string, unknown>,
+        ];
+        expect(actualMessage).toBe(message);
+        expect(options).toMatchObject({ source: "rpc" });
+        expect(options).not.toHaveProperty("expandPromptTemplates");
+      }
 
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
@@ -1844,6 +1926,44 @@ describe("BridgeRpcAdapter", () => {
       expect(response.payload.success).toBe(true);
       expect(response.payload.data.commands).toHaveLength(1);
       expect(response.payload.data.commands[0]).toHaveProperty("name", "test");
+      expect(response.payload.data.commands[0]).toHaveProperty(
+        "source",
+        "prompt",
+      );
+    });
+
+    it("returns no commands or hidden discovery work when disabled", async () => {
+      adapter.dispose();
+      adapter = new BridgeRpcAdapter(
+        client,
+        message => ws.send(JSON.stringify(message)),
+        context,
+        DEFAULT_BRIDGE_CONFIG,
+        eventBus,
+        emitEvent as any,
+        uploadRegistry as any,
+      );
+      const getCommands = context.actions.getCommands as ReturnType<
+        typeof vi.fn
+      >;
+      getCommands.mockClear();
+
+      ws.trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: { id: "cmd-disabled", type: "get_commands" },
+          }),
+        ),
+      );
+
+      await new Promise(r => setTimeout(r, 10));
+
+      const sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls;
+      const response = JSON.parse(sendCalls[sendCalls.length - 1][0] as string);
+      expect(response.payload.data.commands).toEqual([]);
+      expect(getCommands).not.toHaveBeenCalled();
     });
 
     it("should handle set_model command with valid model", async () => {

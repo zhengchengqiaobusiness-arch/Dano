@@ -6026,11 +6026,11 @@ export class BridgeRpcAdapter {
        * ------------------------------------------------------------------ */
 
       case "get_commands": {
-        const commands = this.context.actions.getCommands();
-        const rpcCommands: RpcSlashCommand[] = commands.map(cmd => ({
-          name: cmd.name,
-          description: cmd.description,
-          source: "extension" as const,
+        const commands = this.slashCommandsAndMentionsEnabled
+          ? this.context.actions.getCommands()
+          : [];
+        const rpcCommands: RpcSlashCommand[] = commands.map(command => ({
+          ...command,
         }));
         return {
           id: correlationId,

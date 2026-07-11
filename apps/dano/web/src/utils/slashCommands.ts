@@ -70,8 +70,18 @@ export function mergeSlashCommandOptions(
   commands: readonly SlashCommandOption[],
   builtins: readonly SlashCommandOption[] = BUILTIN_SLASH_COMMANDS,
 ): SlashCommandOption[] {
-  const merged = commands.map(command => ({ ...command }));
-  const seen = new Set(merged.map(command => command.name.toLowerCase()));
+  const merged: SlashCommandOption[] = [];
+  const builtinNames = new Set(
+    builtins.map(command => command.name.toLowerCase()),
+  );
+  const seen = new Set<string>();
+
+  for (const command of commands) {
+    const key = command.name.toLowerCase();
+    if (builtinNames.has(key) || seen.has(key)) continue;
+    merged.push({ ...command });
+    seen.add(key);
+  }
 
   for (const command of builtins) {
     const key = command.name.toLowerCase();

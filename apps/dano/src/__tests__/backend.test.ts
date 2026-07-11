@@ -46,7 +46,23 @@ function createMockSession() {
   const extensionRunner = {
     getRegisteredCommands: vi
       .fn()
-      .mockReturnValue([{ name: "/ext", description: "Extension command" }]),
+      .mockReturnValue([
+        {
+          name: "deploy",
+          invocationName: "deploy:1",
+          description: "First deploy command",
+        },
+        {
+          name: "deploy",
+          invocationName: "deploy:2",
+          description: "Second deploy command",
+        },
+        {
+          name: "template",
+          invocationName: "template",
+          description: "Extension wins callable-name collisions",
+        },
+      ]),
   };
 
   const session = {
@@ -58,7 +74,18 @@ function createMockSession() {
       getDefaultThinkingLevel: vi.fn().mockReturnValue("medium"),
     },
     extensionRunner,
-    promptTemplates: [{ name: "template", description: "Prompt template" }],
+    promptTemplates: [
+      { name: "template", description: "Shadowed prompt template" },
+      { name: "review", description: "Review prompt template" },
+    ],
+    resourceLoader: {
+      getSkills: vi.fn().mockReturnValue({
+        skills: [
+          { name: "audit", description: "Audit with the project skill" },
+        ],
+        diagnostics: [],
+      }),
+    },
     model: {
       id: "gpt-4",
       name: "GPT-4",
@@ -122,8 +149,31 @@ describe("Dano backend", () => {
       percent: 15,
     });
     expect(backend.context.actions.getCommands()).toEqual([
-      { name: "/ext", description: "Extension command" },
-      { name: "/template", description: "Prompt template" },
+      {
+        name: "deploy:1",
+        description: "First deploy command",
+        source: "extension",
+      },
+      {
+        name: "deploy:2",
+        description: "Second deploy command",
+        source: "extension",
+      },
+      {
+        name: "review",
+        description: "Review prompt template",
+        source: "prompt",
+      },
+      {
+        name: "skill:audit",
+        description: "Audit with the project skill",
+        source: "skill",
+      },
+      {
+        name: "template",
+        description: "Extension wins callable-name collisions",
+        source: "extension",
+      },
     ]);
 
     mock.emit({ type: "agent_start" });
