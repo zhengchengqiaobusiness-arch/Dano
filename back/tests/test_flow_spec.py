@@ -1644,7 +1644,7 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(api_req["selects"][0]["option_map"], {"事假": 1, "病假": 2, "婚假": 3})
 
-    def test_api_option_without_source_or_options_blocks_publish(self):
+    def test_api_option_without_source_or_options_does_not_emit_dynamic_source_error(self):
         step = FlowStep(
             step_id="s", name="提交", method="POST", url="/submit", path="/submit",
             content_type="application/json", body_source='{"xmId":"YF202412060001"}',
@@ -1655,8 +1655,9 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         )
         spec = FlowSpec(flow_id="apiopt", steps=[step])
         report = validate_flow_spec(spec)
-        self.assertFalse(report["passed"])
-        self.assertTrue(any("接口选项" in e and "source_url/options/option_map" in e for e in report["errors"]))
+        messages = [*report["errors"], *report["warnings"]]
+        self.assertFalse(any("接口选项" in message and "source_url/options/option_map" in message for message in messages))
+        self.assertFalse(any("动态枚举缺少可执行的实时来源接口" in message for message in messages))
 
     def test_internal_short_code_user_input_blocks_publish(self):
         step = FlowStep(

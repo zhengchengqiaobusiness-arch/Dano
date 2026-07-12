@@ -26,7 +26,9 @@ from dano.execution.page.flow_spec import (
     flow_spec_to_client,
     orchestrate_flow_capabilities,
     prepare_flow_spec_for_publish,
+    promote_request_to_step,
     run_recording_pi_loop,
+    sync_flow_spec_models,
     to_flow_spec,
     validate_flow_spec,
 )
@@ -723,12 +725,262 @@ def test_api_option_binding_preserves_source_request_in_capability_field():
     param = prepared.steps[0].params[0]
     field = prepared.capabilities[0].inputs[0]
 
-    assert (param.type, param.source_kind) == ("enum", "api_option")
+    assert (param.type, param.source_kind) == ("string", "api_option")
     assert param.source["source_url"] == "/users/options"
     assert param.source["source_request_id"] == "users-options"
     assert field.source_kind == "api_option"
     assert field.source["source_url"] == "/users/options"
     assert field.enum_value_map == {"张三": "142"}
+
+
+def test_api_option_reselection_refreshes_candidates_without_changing_field_type():
+    captured = [
+        _get(1, "/api/old/options", {"data": []}),
+        _get(2, "/api/new/options", {"data": [
+            {"code": 2, "title": "行政章"},
+            {"code": 3, "title": "合同章"},
+        ]}),
+        _post(3, "/seal/borrow", {"sealCode": 2}),
+    ]
+    spec = to_flow_spec(captured, samples={"公章": 2})
+    submit = spec.steps[-1]
+    param = next(item for item in submit.params if item.path == "sealCode")
+    param.type = "number"
+    param.source_kind = "api_option"
+    submit.selects = [SelectBinding(
+        param=param.key,
+        path=param.path,
+        source_url="https://oa.example.test/api/old/options",
+        source_request_id="1",
+        value_key="id",
+        label_key="name",
+        options=[],
+        enum_source="api",
+    )]
+
+    spec = sync_flow_spec_models(spec)
+    binding = spec.steps[-1].selects[0]
+    binding.source_url = "https://oa.example.test/api/new/options"
+    spec = sync_flow_spec_models(spec)
+    submit = spec.steps[-1]
+    param = next(item for item in submit.params if item.path == "sealCode")
+    binding = submit.selects[0]
+
+    assert (param.type, param.source_kind) == ("number", "api_option")
+    assert (binding.value_key, binding.label_key) == ("code", "title")
+    assert binding.options == [
+        {"label": "行政章", "value": 2},
+        {"label": "合同章", "value": 3},
+    ]
+    assert param.enum_options == binding.options
+
+
+def test_empty_api_candidates_are_valid_and_do_not_emit_dynamic_enum_warning():
+    step = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/seal/borrow",
+        params=[ParamField(
+            path="sealId",
+            key="公章",
+            type="enum",
+            category="user_param",
+            source_kind="api_option",
+            source={"kind": "api_option"},
+            enum_options=None,
+            enum_value_map=None,
+        )],
+        selects=[SelectBinding(param="公章", path="sealId", options=[])],
+    )
+    report = validate_flow_spec(FlowSpec(
+        steps=[step],
+        capabilities=[FlowCapability(name="submit", kind="submit", step_ids=["submit"])],
+    ))
+    messages = [*report["errors"], *report["warnings"]]
+
+    assert not any("动态枚举缺少可执行的实时来源接口" in message for message in messages)
+    assert not any("标记为接口选项，但缺少可执行" in message for message in messages)
+
+
+def test_option_endpoint_unmatched_filters_are_constants_but_recorded_search_is_input():
+    spec = to_flow_spec([_get(
+        1,
+        "/system/seal/simple-list?status=0&keyword=%E8%A1%8C%E6%94%BF",
+        {"data": [{"id": "s1", "name": "行政章"}]},
+    )], samples={"搜索词": "行政"})
+    step = promote_request_to_step(spec, request_index=1)
+    by_path = {param.path: param for param in step.params}
+
+    assert (by_path["query.status"].category, by_path["query.status"].source_kind) == (
+        "system_const", "constant",
+    )
+    assert (by_path["query.keyword"].category, by_path["query.keyword"].source_kind) == (
+        "user_param", "user_input",
+    )
+
+
+def test_complex_business_domains_split_into_independent_capabilities():
+    steps = [
+        FlowStep(
+            step_id="leave-query", method="GET", path="/oa/leave/page",
+            source_meta={"role": "business_get"},
+            response_json={"data": {"list": [{"id": 1}]}},
+        ),
+        FlowStep(
+            step_id="expense-query", method="GET", path="/oa/expense/page",
+            source_meta={"role": "business_get"},
+            response_json={"data": {"list": [{"id": 2}]}},
+        ),
+        FlowStep(step_id="leave-submit", method="POST", path="/oa/leave/submit"),
+        FlowStep(step_id="expense-submit", method="POST", path="/oa/expense/submit"),
+    ]
+
+    capabilities = build_default_flow_capabilities(FlowSpec(steps=steps))
+    by_name = {cap.name: cap for cap in capabilities}
+
+    assert set(by_name) == {
+        "query_status_leave", "query_status_expense", "submit_leave", "submit_expense",
+    }
+    assert by_name["query_status_leave"].step_ids == ["leave-query"]
+    assert by_name["query_status_expense"].step_ids == ["expense-query"]
+    assert by_name["submit_leave"].step_ids == ["leave-submit"]
+    assert by_name["submit_expense"].step_ids == ["expense-submit"]
+
+
+def test_cross_domain_write_dependency_prevents_unsafe_automatic_split():
+    spec = FlowSpec(
+        steps=[
+            FlowStep(step_id="draft", method="POST", path="/oa/draft/create"),
+            FlowStep(step_id="archive", method="POST", path="/oa/archive/commit"),
+        ],
+        links=[FlowLink(
+            source_step_id="draft", source_path="data.id",
+            target_step_id="archive", target_path="draftId",
+        )],
+    )
+
+    capabilities = build_default_flow_capabilities(spec)
+
+    assert [(cap.name, cap.step_ids) for cap in capabilities] == [
+        ("submit", ["draft", "archive"]),
+    ]
+
+
+def test_initial_generation_splits_empty_list_from_previous_page_without_changing_incremental_rules():
+    query = FlowStep(
+        step_id="seal-page",
+        method="GET",
+        path="/admin-api/oa/seal-apply/page?pageNo=1&pageSize=10",
+        # SPA route changes retain the same browser page_id; the response-backed
+        # /page contract must still win over the initial preflight heuristic.
+        source_meta={"page_id": "page_1", "control_preflight_for_write": True},
+        response_json={"data": {"list": [], "total": 0}},
+        params=[
+            ParamField(path="query.useTime[0]", key="useTime[0]", type="datetime", category="user_param"),
+            ParamField(path="query.useTime[1]", key="useTime[1]", type="datetime", category="user_param"),
+        ],
+    )
+    definition = FlowStep(
+        step_id="definition",
+        method="GET",
+        path="/admin-api/bpm/process-definition/get?key=oa_seal_apply",
+        source_meta={"page_id": "page_1", "control_preflight_for_write": True},
+    )
+    approval = FlowStep(
+        step_id="approval",
+        method="GET",
+        path="/admin-api/bpm/process-instance/get-approval-detail",
+        source_meta={"page_id": "page_1", "control_preflight_for_write": True},
+    )
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/admin-api/oa/seal-apply/submit-process",
+        source_meta={"page_id": "page_1"},
+        params=[
+            ParamField(path="sealId", key="印章编号", type="enum", category="user_param"),
+            ParamField(path="applyTitle", key="申请标题", category="user_param"),
+            ParamField(path="useTime", key="使用日期", type="datetime", category="user_param"),
+            ParamField(path="returnTime", key="归还日期", type="datetime", category="user_param"),
+            ParamField(path="description", key="使用描述", category="user_param"),
+            ParamField(path="remark", key="备注", category="user_param"),
+        ],
+    )
+
+    raw = FlowSpec(steps=[query, definition, approval, submit])
+    unchanged_default = build_default_flow_capabilities(raw)
+    generated = flow_spec_module.ensure_flow_capabilities(raw.model_copy(deep=True))
+    capabilities = generated.capabilities
+    by_kind = {cap.kind: cap for cap in capabilities}
+
+    # The ordinary/default builder and incremental rules are intentionally not
+    # changed; only the zero-capability initialization corrects page boundaries.
+    assert [(cap.kind, cap.step_ids) for cap in unchanged_default] == [(
+        "submit", ["seal-page", "definition", "approval", "submit"],
+    )]
+    assert set(by_kind) == {"query_status", "submit"}
+    assert by_kind["query_status"].step_ids == ["seal-page"]
+    assert set(by_kind["query_status"].input_schema["properties"]) == {"useTime[0]", "useTime[1]"}
+    assert by_kind["submit"].step_ids == ["definition", "approval", "submit"]
+    assert set(by_kind["submit"].input_schema["properties"]) == {
+        "印章编号", "申请标题", "使用日期", "归还日期", "使用描述", "备注",
+    }
+
+    incremental = asyncio.run(orchestrate_flow_capabilities(
+        FlowSpec(
+            steps=[query, definition, approval, submit],
+            capabilities=unchanged_default,
+        ),
+        llm_client=None,
+        model=None,
+    ))
+    assert [(cap.kind, cap.step_ids) for cap in incremental.capabilities] == [(
+        "submit", ["seal-page", "definition", "approval", "submit"],
+    )]
+
+
+class _InitialSingleCapabilityPlanner:
+    async def complete_json(self, **_kwargs):
+        return {
+            "ops": [{
+                "op": "add_request_to_capability",
+                "capability": "submit",
+                "step_id": "seal-page",
+            }],
+            "abilities": [{
+                "name": "submit_all",
+                "kind": "submit",
+                "step_ids": ["seal-page", "definition", "approval", "submit"],
+            }],
+        }
+
+
+def test_initial_planner_cannot_merge_deterministic_page_boundaries_back_into_one_capability():
+    query = FlowStep(
+        step_id="seal-page", method="GET", path="/oa/seal-apply/page",
+        source_meta={"control_preflight_for_write": True},
+        response_json={"data": {"list": [], "total": 0}},
+    )
+    definition = FlowStep(
+        step_id="definition", method="GET", path="/bpm/process-definition/get",
+        source_meta={"control_preflight_for_write": True},
+    )
+    approval = FlowStep(
+        step_id="approval", method="GET", path="/bpm/process-instance/get-approval-detail",
+        source_meta={"control_preflight_for_write": True},
+    )
+    submit = FlowStep(step_id="submit", method="POST", path="/oa/seal-apply/submit-process")
+
+    out = asyncio.run(orchestrate_flow_capabilities(
+        FlowSpec(steps=[query, definition, approval, submit]),
+        llm_client=_InitialSingleCapabilityPlanner(),
+        model="fake",
+    ))
+    by_kind = {cap.kind: cap for cap in out.capabilities}
+
+    assert set(by_kind) == {"query_status", "submit"}
+    assert by_kind["query_status"].step_ids == ["seal-page"]
+    assert by_kind["submit"].step_ids == ["definition", "approval", "submit"]
 
 
 def test_publish_preparation_removes_stale_batch_fields_outputs_and_goal_capability():

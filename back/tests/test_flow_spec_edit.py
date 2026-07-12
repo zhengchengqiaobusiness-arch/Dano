@@ -706,7 +706,7 @@ def test_bind_option_source_updates_param_and_select_binding():
     }])
 
     param = new.steps[1].params[0]
-    assert param.type == "enum"
+    assert param.type == "number"
     assert param.source_kind == "api_option"
     assert param.enum_value_map == {"病假": "1"}
     assert new.steps[1].selects[0].source_url == "/api/dict/type"

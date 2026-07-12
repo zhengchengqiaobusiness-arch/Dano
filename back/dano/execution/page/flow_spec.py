@@ -764,6 +764,7 @@ def _param_source_guess(
     select_by_id_path: dict[str, SelectBinding] | None = None,
     samples: dict,
     request_headers: dict | None = None,
+    query_is_option_source: bool = False,
 ) -> dict[str, Any]:
     value = str(field.get("value") or "")
 
@@ -855,7 +856,42 @@ def _param_source_guess(
             "need_human_confirm": False,
         }
 
+    # A value captured from a real user interaction is stronger evidence than
+    # GET/query naming heuristics.  This also prevents genuine search filters
+    # on option endpoints from being hidden as constants.
+    if value not in (None, "") and value in _sample_value_set(samples):
+        return {
+            "category": "user_param",
+            "source_kind": "user_input",
+            "source": {"kind": "sample", "path": path, "recorded": True},
+            "editable": True,
+            "exposed_to_user": True,
+            "reason": "该值由用户在录制页面真实填写，调用 Skill 时作为用户参数",
+            "need_human_confirm": False,
+        }
+
     if method == "GET" and path.startswith("query."):
+        if query_is_option_source:
+            query_key = path.split(".")[-1].lower()
+            if re.fullmatch(r"(?:q|kw|keyword|search|searchtext|query|name|text)", query_key):
+                return {
+                    "category": "user_param",
+                    "source_kind": "user_input",
+                    "source": {"kind": "option_search", "path": path},
+                    "editable": True,
+                    "exposed_to_user": True,
+                    "reason": "该参数是候选接口的搜索条件，保留为调用方可选输入",
+                    "need_human_confirm": False,
+                }
+            return {
+                "category": "system_const",
+                "source_kind": "constant",
+                "source": {"kind": "option_query_filter", "path": path},
+                "editable": True,
+                "exposed_to_user": False,
+                "reason": "该参数是候选接口录制时的固定筛选条件，未匹配到用户操作，作为接口内部常量保留",
+                "need_human_confirm": False,
+            }
         if _looks_system_const_field(key, path) or _is_const_value(value):
             return {
                 "category": "system_const",
@@ -890,17 +926,6 @@ def _param_source_guess(
     # 录制期间由用户真实填写/选择并出现在 samples 中，是字段归属的强事实。
     # 它必须优先于 *Id/*Type 等命名启发式；否则不同系统的业务字段只因内部
     # 命名像 ID/状态码就会被错误改成运行期变量或系统常量。
-    if value not in (None, "") and value in _sample_value_set(samples):
-        return {
-            "category": "user_param",
-            "source_kind": "user_input",
-            "source": {"kind": "sample", "path": path, "recorded": True},
-            "editable": True,
-            "exposed_to_user": True,
-            "reason": "该值由用户在录制页面真实填写，调用 Skill 时作为用户参数",
-            "need_human_confirm": False,
-        }
-
     if value == "" and value not in _sample_value_set(samples):
         return {
             "category": "system_const",
@@ -1183,6 +1208,7 @@ def _build_step_from_capture(
         return bool(sb.options) or bool(sb.source_url and sb.value_key and sb.label_key)
 
     option_reads = _option_candidate_reads(reads or [])
+    query_is_option_source = method == "GET" and _read_is_option_source(req)
     grounded_samples = dict(samples or {})
     for picked, raw_options in (page_enum_options or {}).items():
         if not isinstance(raw_options, dict):
@@ -1316,6 +1342,7 @@ def _build_step_from_capture(
             select_by_id_path=select_by_id_path,
             samples=samples,
             request_headers=req.get("headers") or {},
+            query_is_option_source=query_is_option_source,
         )
         enum_options = _enum_options_for_param(select_meta)
         enum_value_map = _enum_value_map_for_param(select_meta)
@@ -1399,6 +1426,8 @@ def _build_step_from_capture(
         "response_status": req.get("response_status"),
         "request_index": req.get("index"),
         "request_id": str(req.get("request_id") or req.get("id") or req.get("index") or ""),
+        "page_id": req.get("page_id"),
+        "frame_id": req.get("frame_id"),
         "role": request_role.get("role", ""),
         "keep": request_role.get("keep"),
         "keep_reason": request_role.get("keep_reason") or request_role.get("reason", ""),
@@ -2915,6 +2944,16 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
             param.description = _strip_option_descriptions(param.description) or None
             param.reason = "分页参数由 Skill 内部按默认分页提交，不作为普通业务字段暴露"
             continue
+        if param.source_kind == "api_option":
+            # A live candidate source remains valid even when the captured
+            # snapshot is empty and regardless of the field's declared type.
+            if param.category == "user_param":
+                param.exposed_to_user = True
+                param.editable = True
+            param.need_human_confirm = False
+            if param.type in _ENUM_PARAM_TYPES:
+                _refresh_param_enum_description(param)
+            continue
         option_contract = bool(param.enum_options or param.enum_value_map or normalized_path in display_paths)
         if normalized_path in id_paths and normalized_path not in display_paths:
             continue
@@ -3001,7 +3040,7 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
         )
     ]
     for param in step.params or []:
-        if param.type in _ENUM_PARAM_TYPES or param.source_kind in _ENUM_SOURCE_KINDS:
+        if param.type in _ENUM_PARAM_TYPES or param.source_kind in _ENUM_SOURCE_KINDS or param.source_kind == "api_option":
             continue
         param.enum_options = None
         param.enum_value_map = None
@@ -3027,7 +3066,7 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
                 item for item in (step.params or [])
                 if binding.id_path and _strip_body_prefix(item.path) == _strip_body_prefix(binding.id_path)
             ), None)
-        if param is None or not _select_has_executable_options(binding):
+        if param is None or not (binding.source_url or _select_has_executable_options(binding)):
             continue
         # 人工修改过数据契约后，SelectBinding 只能作为历史证据，不能在每次
         # sync 时把类型/分类/来源自动改回录制推断值。
@@ -3041,8 +3080,7 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
         ):
             continue
         page_contract = _page_enum_contract_for_param(spec, step, param, binding)
-        trusted_api = _api_option_binding_is_trustworthy(binding)
-        source_kind = "page_enum" if page_contract else ("api_option" if trusted_api else ("page_enum" if not binding.source_url else "unknown"))
+        source_kind = "page_enum" if page_contract else ("api_option" if binding.source_url else "page_enum")
         options = list(page_contract[0]) if page_contract else _enum_options_for_param(binding)
         option_map = dict(page_contract[1]) if page_contract else (_enum_value_map_for_param(binding) or {})
         if page_contract:
@@ -3054,13 +3092,24 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
                 str(label): value for label, value in (_enum_value_map_for_param(binding) or {}).items()
                 if str(label) in page_labels and value is not None
             })
-        param.type = "list-enum" if binding.multi else "enum"
+        # A candidate API is a value source only. It must never rewrite the
+        # request field's declared type (string/number/object/array are all
+        # valid). Static/page enums keep the historic enum projection.
+        if source_kind != "api_option":
+            param.type = "list-enum" if binding.multi else "enum"
         param.category = "user_param"
         param.source_kind = source_kind
         param.exposed_to_user = True
         param.editable = True
-        param.enum_options = list(options or param.enum_options or []) or None
-        param.enum_value_map = dict(option_map or param.enum_value_map or {}) or None
+        if source_kind == "api_option":
+            # The selected API is authoritative, including an empty result.
+            # Never resurrect candidates captured from the previously selected
+            # endpoint after a source change.
+            param.enum_options = list(options or []) or None
+            param.enum_value_map = dict(option_map or {}) or None
+        else:
+            param.enum_options = list(options or param.enum_options or []) or None
+            param.enum_value_map = dict(option_map or param.enum_value_map or {}) or None
         param.source = {
             **dict(param.source or {}),
             "kind": source_kind,
@@ -3070,11 +3119,11 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
             "value_key": binding.value_key,
             "label_key": binding.label_key,
             "id_path": binding.id_path or binding.path or param.path,
-            "enum_source": "dom" if source_kind == "page_enum" else (binding.enum_source or ("api" if trusted_api else "unknown")),
+            "enum_source": "dom" if source_kind == "page_enum" else (binding.enum_source or "api"),
             "enum_confirmed": (
                 len(option_map) == len(options or [])
                 if page_contract
-                else (binding.enum_confirmed if trusted_api or not binding.source_url else False)
+                else (binding.enum_confirmed if binding.enum_confirmed is not None else True)
             ),
         }
         param.need_human_confirm = bool(
@@ -3112,7 +3161,7 @@ def _reset_param_source(param: ParamField, *, reason: str | None = None) -> None
 
 _ENUM_PARAM_TYPES = frozenset({"enum", "list-enum"})
 _ENUM_SOURCE_KINDS = frozenset({
-    "api_option", "page_enum", "static_enum", "manual_enum", "form_option",
+    "page_enum", "static_enum", "manual_enum", "form_option",
 })
 
 
@@ -3136,6 +3185,15 @@ def _transition_param_type(spec: FlowSpec, step: FlowStep, param: ParamField, va
     new_type = str(value or "string")
     param.type = new_type
     if old_type in _ENUM_PARAM_TYPES and new_type not in _ENUM_PARAM_TYPES:
+        # API-backed candidates describe where values come from, not the JSON
+        # type of the request field. Keep that live binding when a user changes
+        # an enum field back to string/number/object/array.
+        if param.source_kind == "api_option":
+            param.category = "user_param"
+            param.exposed_to_user = True
+            param.editable = True
+            param.need_human_confirm = False
+            return
         param.enum_options = None
         param.enum_value_map = None
         param.description = _strip_option_descriptions(param.description) or None
@@ -3164,7 +3222,7 @@ def _transition_param_type(spec: FlowSpec, step: FlowStep, param: ParamField, va
     elif new_type in _ENUM_PARAM_TYPES and old_type not in _ENUM_PARAM_TYPES:
         # Entering enum mode never invents options. The user/planner must bind a
         # DOM/API/manual fact source before confirmation.
-        if param.source_kind not in _ENUM_SOURCE_KINDS:
+        if param.source_kind not in _ENUM_SOURCE_KINDS and param.source_kind != "api_option":
             param.source_kind = "unknown"
             param.source = {}
             param.need_human_confirm = True
@@ -5099,6 +5157,118 @@ def _option_field_names(spec: FlowSpec) -> list[str]:
     return names
 
 
+_CAPABILITY_PATH_PREFIXES = frozenset({
+    "api", "rest", "gateway", "openapi", "v1", "v2", "v3", "oa", "system", "admin",
+})
+
+
+def _capability_business_key(step: FlowStep) -> str:
+    """Return a conservative business-domain key for automatic splitting.
+
+    Explicit recorder/planner metadata wins. Otherwise only the first stable
+    resource segment is used, so action endpoints inside one resource remain a
+    single capability while genuinely separate domains can be partitioned.
+    """
+    meta = step.source_meta or {}
+    explicit = str(meta.get("capability_key") or meta.get("business_domain") or "").strip()
+    if explicit:
+        return _flow_capability_id("domain", explicit).removeprefix("domain_")
+    path = _request_path({"url": step.path or step.url}).lower()
+    segments = [
+        segment for segment in path.split("/")
+        if segment and segment not in _CAPABILITY_PATH_PREFIXES and not re.fullmatch(r"\d+", segment)
+    ]
+    return _flow_capability_id("domain", segments[0]).removeprefix("domain_") if segments else ""
+
+
+def _partition_steps_by_business_key(steps: list[FlowStep]) -> list[tuple[str, list[FlowStep]]]:
+    groups: dict[str, list[FlowStep]] = {}
+    unknown: list[FlowStep] = []
+    for step in steps:
+        key = _capability_business_key(step)
+        if key:
+            groups.setdefault(key, []).append(step)
+        else:
+            unknown.append(step)
+    if unknown:
+        groups.setdefault("shared", []).extend(unknown)
+    return list(groups.items())
+
+
+def _build_complex_default_capabilities(
+    spec: FlowSpec,
+    status_steps: list[FlowStep],
+    write_steps: list[FlowStep],
+) -> list[FlowCapability]:
+    """Split only clearly independent business domains, preserving old fallback."""
+    all_submit_ids = {step.step_id for step in (_submit_capability_steps(spec) if write_steps else [])}
+    independent_status = [step for step in status_steps if step.step_id not in all_submit_ids]
+    query_groups = _partition_steps_by_business_key(independent_status)
+    write_groups = _partition_steps_by_business_key(write_steps)
+
+    # A response dependency between write anchors means one transactional
+    # chain, even if endpoint prefixes differ; never split that chain.
+    write_key_by_id = {
+        step.step_id: key for key, group in write_groups for step in group if step.step_id
+    }
+    cross_write_dependency = any(
+        link.source_step_id in write_key_by_id
+        and link.target_step_id in write_key_by_id
+        and write_key_by_id[link.source_step_id] != write_key_by_id[link.target_step_id]
+        for link in (spec.links or [])
+    )
+    split_queries = len(query_groups) > 1
+    split_writes = len(write_groups) > 1 and not cross_write_dependency
+    if not split_queries and not split_writes:
+        return []
+
+    partitions: list[tuple[str, list[FlowStep]]] = []
+    if split_queries:
+        partitions.extend((key, group) for key, group in query_groups)
+    elif independent_status:
+        partitions.append((query_groups[0][0] if query_groups else "query", independent_status))
+
+    if split_writes:
+        preflights = [
+            step for step in spec.steps
+            if bool((step.source_meta or {}).get("control_preflight_for_write"))
+        ]
+        write_keys = {key for key, _group in write_groups}
+        for key, anchors in write_groups:
+            ids = _dependency_closure_step_ids(spec, {step.step_id for step in anchors if step.step_id})
+            ids.update(
+                step.step_id for step in preflights
+                if _capability_business_key(step) == key
+                or _capability_business_key(step) not in write_keys
+            )
+            partitions.append((key, _ordered_steps_by_ids(spec, ids)))
+    elif write_steps:
+        partitions.append((write_groups[0][0] if write_groups else "submit", _submit_capability_steps(spec)))
+
+    capabilities: list[FlowCapability] = []
+    for key, steps in partitions:
+        if not steps:
+            continue
+        step_ids = {step.step_id for step in steps}
+        sub = spec.model_copy(deep=True)
+        sub.steps = [step.model_copy(deep=True) for step in spec.steps if step.step_id in step_ids]
+        sub.links = [
+            link.model_copy(deep=True) for link in (spec.links or [])
+            if link.source_step_id in step_ids and link.target_step_id in step_ids
+        ]
+        sub.capabilities = []
+        sub.capability_relations = []
+        for capability in build_default_flow_capabilities(sub):
+            capability.name = _flow_capability_id(capability.kind, key)
+            capability.evidence.append({
+                "kind": "automatic_business_partition",
+                "business_key": key,
+                "step_ids": list(capability.step_ids),
+            })
+            capabilities.append(capability)
+    return capabilities
+
+
 def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
     """从 FlowSpec 的 steps/request_graph 生成默认业务能力编排。
 
@@ -5107,6 +5277,9 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
     caps: list[FlowCapability] = []
     status_steps = _read_status_steps(spec)
     write_steps = _write_steps(spec)
+    complex_capabilities = _build_complex_default_capabilities(spec, status_steps, write_steps)
+    if complex_capabilities:
+        return complex_capabilities
     submit_steps = _submit_capability_steps(spec) if write_steps else []
     submit_step_ids = {s.step_id for s in submit_steps}
     independent_status_steps = [s for s in status_steps if s.step_id not in submit_step_ids]
@@ -5192,6 +5365,12 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
             caller_responsibilities=["提供 input_schema 中的业务字段", "确认写操作后调用"],
             skill_responsibilities=["按 FlowStep 顺序执行请求", "注入 links/system_values/runtime_var", "返回每条提交的成功状态"],
         ))
+        return caps
+
+    # The independent-status branch above already materialized the complete
+    # read-only capability. Do not append the legacy graph fallback a second
+    # time for query-only recordings.
+    if independent_status_steps:
         return caps
 
     status_graph = _request_graph_entries(spec, {"business_get", "read_context"})
@@ -5397,10 +5576,72 @@ def suggest_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
     return build_default_flow_capabilities(spec)
 
 
+def _step_page_id_from_facts(spec: FlowSpec, step: FlowStep) -> str:
+    meta = step.source_meta or {}
+    if meta.get("page_id"):
+        return str(meta["page_id"])
+    request_id = str(meta.get("request_id") or "")
+    request_index = meta.get("request_index")
+    for fact in spec.request_facts.requests or []:
+        if request_id and str(fact.request_id or "") == request_id:
+            return str(fact.page_id or "")
+        if request_index is not None and fact.request_index == request_index:
+            return str(fact.page_id or "")
+    return ""
+
+
+def _build_initial_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
+    """Build the first capability draft without changing later optimization rules.
+
+    Initial recording can mark every read before a write as a preflight. A
+    list/page request captured on another page is instead an independently
+    callable query, even when its response contains zero rows. This correction
+    runs only while capability count is zero; subsequent orchestration keeps the
+    existing capability scope immutable.
+    """
+    initial = spec.model_copy(deep=True)
+    option_ids = _option_source_step_ids(initial)
+    write_page_ids = {
+        page_id
+        for step in _write_steps(initial)
+        if (page_id := _step_page_id_from_facts(initial, step))
+    }
+    for step in initial.steps:
+        if (step.method or "GET").upper() not in {"GET", "HEAD"}:
+            continue
+        if step.step_id in option_ids:
+            continue
+        role = str((step.source_meta or {}).get("role") or step.semantic_role or "")
+        if role in {"read_option", "read_context"}:
+            continue
+        path = _request_path({"url": step.path or step.url}).lower()
+        if not re.search(r"(?:^|/)(?:page|list|search|query|history|records?|status|statistics|detail)(?:/|$|\?)", path):
+            continue
+        query_score = _business_query_evidence_score(step)
+        if query_score < 2:
+            continue
+        page_id = _step_page_id_from_facts(initial, step)
+        marked_preflight = bool((step.source_meta or {}).get("control_preflight_for_write"))
+        cross_page = bool(page_id and write_page_ids and page_id not in write_page_ids)
+        # A response-backed business page/list is stronger evidence than the
+        # coarse "all reads before write are preflight" initial heuristic. This
+        # also covers SPA navigation where page_id stays the same across routes.
+        strong_business_query = query_score >= 3
+        if marked_preflight and not (cross_page or strong_business_query):
+            continue
+        step.source_meta = {
+            **(step.source_meta or {}),
+            "role": "business_get",
+            "control_preflight_for_write": False,
+            "initial_capability_boundary": "cross_page_business_query" if cross_page else "business_query",
+        }
+    return build_default_flow_capabilities(initial)
+
+
 def _with_default_capabilities(spec: FlowSpec) -> FlowSpec:
     if spec.capabilities:
         return sync_flow_spec_models(spec, prefer_request_facts=False)
-    spec.capabilities = build_default_flow_capabilities(spec)
+    spec.capabilities = _build_initial_flow_capabilities(spec)
     if spec.capabilities:
         spec.meta = {
             **(spec.meta or {}),
@@ -6232,12 +6473,21 @@ def _planner_patch_edits(
     edits: list[dict[str, Any]],
     *,
     scope_locked: bool,
+    initial_membership: dict[str, set[str]] | None = None,
 ) -> list[dict[str, Any]]:
     """限制 Planner 只能修当前编排，不能把捕获事实偷偷扩进能力。"""
     existing_caps = {cap.name for cap in spec.capabilities if cap.name}
     existing_steps = {step.step_id for step in spec.steps}
     step_by_id = {step.step_id: step for step in spec.steps}
     cap_by_name = {cap.name: cap for cap in spec.capabilities if cap.name}
+    planned_cap_families = {
+        str((edit.get("capability") or {}).get("name") or ""): _capability_kind_family(
+            str((edit.get("capability") or {}).get("kind") or "")
+        )
+        for edit in (edits or [])
+        if str(edit.get("op") or "") == "upsert_capability"
+        and isinstance(edit.get("capability"), dict)
+    }
     safe: list[dict[str, Any]] = []
     scope_ops = {
         "add_request_step", "add_candidate_step", "promote_request",
@@ -6257,6 +6507,12 @@ def _planner_patch_edits(
             step_id = str(edit.get("step_id") or "")
             if not step_id or step_id not in existing_steps:
                 continue
+            if initial_membership is not None:
+                cap_name = str(edit.get("capability_name") or edit.get("capability") or "")
+                target = cap_by_name.get(cap_name)
+                target_family = _capability_kind_family(target.kind) if target is not None else planned_cap_families.get(cap_name, "")
+                if not target_family or target_family not in initial_membership.get(step_id, set()):
+                    continue
         if op == "upsert_capability":
             payload = dict(edit.get("capability") or {})
             name = str(edit.get("capability_name") or edit.get("capability") or edit.get("name") or "")
@@ -6454,8 +6710,20 @@ async def orchestrate_flow_capabilities(
     # 首次从当前已物化步骤建立能力；再次点击时锁定能力和接口集合，只修契约。
     # 捕获事实库中的其他接口只能由用户显式加入，Planner 不得静默扩张范围。
     if not had_existing:
-        current.capabilities = build_default_flow_capabilities(current)
+        current.capabilities = _build_initial_flow_capabilities(current)
+    # Once the zero-capability initializer has established interface
+    # boundaries, the Planner may enrich names/schemas/maps but may not merge
+    # requests back into a single capability during that same first run.
+    initial_scope_established = bool(not had_existing and current.capabilities)
     baseline_ids = {cap.capability_id for cap in current.capabilities} if not had_existing else set()
+    initial_membership = ({
+        step_id: {
+            _capability_kind_family(cap.kind)
+            for cap in current.capabilities
+            if step_id in set(_capability_node_step_ids(cap))
+        }
+        for step_id in {step.step_id for step in current.steps}
+    } if initial_scope_established else None)
     current = _prune_empty_capabilities(current)
     source = "incremental" if had_existing else "deterministic"
     reason = ""
@@ -6477,12 +6745,13 @@ async def orchestrate_flow_capabilities(
                     current,
                     _autofix_ops_to_edits(current, raw_ops),
                     scope_locked=had_existing,
+                    initial_membership=initial_membership,
                 )
                 if edits:
                     current = apply_flow_edits(current, [{**edit, "actor": "planner"} for edit in edits])
                     source = "llm_patch"
             raw_abilities = out.get("abilities") if isinstance(out, dict) else None
-            if isinstance(raw_abilities, list) and not had_existing:
+            if isinstance(raw_abilities, list) and not had_existing and not initial_scope_established:
                 step_ids = {step.step_id for step in current.steps}
                 used = {cap.name for cap in current.capabilities if cap.name}
                 generated = [
@@ -6832,16 +7101,12 @@ def _capability_field_has_valid_source(
 
 
 def _capability_param_enum_issue(param: ParamField) -> str:
-    if param.type not in {"enum", "list-enum"} and param.source_kind not in _OPTION_SOURCE_KINDS:
+    if param.type not in {"enum", "list-enum"}:
         return ""
     if param.source_kind == "api_option":
-        if (
-            (param.source or {}).get("source_step_id")
-            or (param.source or {}).get("source_url")
-            or (param.source or {}).get("url")
-        ):
-            return ""
-        return "动态枚举缺少可执行的实时来源接口"
+        # API candidates are resolved at runtime. An empty capture snapshot (or
+        # a source that is being reselected) is valid and must not block publish.
+        return ""
     if param.source_kind == "page_enum" and (param.source or {}).get("enum_confirmed") is False:
         return "页面枚举快照不完整，必须重新展开下拉捕获全部选项或绑定真实选项接口"
     if not param.enum_options:
@@ -9384,22 +9649,14 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
                 errors.append(f"字段 `{p.path}` 是 system_const，但仍暴露给用户")
             if p.source_kind == "api_option":
                 sel = select_by_path.get(p.path) or select_by_param.get(p.key)
-                if not _select_has_executable_options(sel):
-                    errors.append(
-                        f"字段 `{p.key or p.path}` 标记为接口选项，但缺少可执行的 source_url/options/option_map，"
-                        "不能发布为可调用 Skill"
-                    )
-                elif sel and (sel.source_method or "GET").upper() not in {"GET", "HEAD"} and sel.source_role not in {
+                if sel and sel.source_url and (sel.source_method or "GET").upper() not in {"GET", "HEAD"} and sel.source_role not in {
                     "business_get", "read_context", "read_option",
                 }:
                     errors.append(
                         f"字段 `{p.key or p.path}` 的接口选项源 `{sel.source_method} {sel.source_url}` "
                         "未被识别为只读接口，不能在运行期自动调用"
                     )
-            has_executable_api_options = (
-                p.source_kind == "api_option"
-                and _select_has_executable_options(select_by_path.get(p.path) or select_by_param.get(p.key))
-            )
+            has_executable_api_options = p.source_kind == "api_option"
             if not has_executable_api_options and _param_looks_exposed_internal_value(p):
                 errors.append(
                     f"字段 `{p.key or p.path}` 看起来是内部 ID/短码/空标识，不能直接暴露给用户；"
@@ -10144,7 +10401,8 @@ def _bind_option_source(
 
     param.category = "user_param"
     param.source_kind = "api_option"
-    param.type = "list-enum" if multi else "enum"
+    # Binding an interface candidate source does not alter the request field's
+    # declared data type. Callers may select values for any JSON-compatible type.
     param.exposed_to_user = True
     param.editable = True
     param.need_human_confirm = False
@@ -10406,6 +10664,7 @@ def _hydrate_select_source_contract(spec: FlowSpec, binding: SelectBinding) -> N
     if not candidates:
         return
     fact = next((item for item in reversed(candidates) if item.response_json is not None), candidates[-1])
+    source_changed = bool(binding.source_request_id and binding.source_request_id != (fact.request_id or ""))
     analysis = spec.request_facts.analysis.get(fact.request_id) if fact.request_id else None
     role = analysis.role if analysis is not None else ""
     safe_headers = {
@@ -10421,6 +10680,74 @@ def _hydrate_select_source_contract(spec: FlowSpec, binding: SelectBinding) -> N
     binding.source_content_type = fact.content_type or ""
     binding.source_role = role
     binding.source_request_id = fact.request_id or ""
+    binding.enum_source = "api"
+
+    # Initial capture already applies field-specific filtering (for example a
+    # shared dictionary endpoint narrowed to one dictType). Preserve that
+    # grounded subset. A changed source or an empty snapshot is rehydrated.
+    if not source_changed and (binding.options or binding.option_map):
+        return
+
+    # Refresh the captured candidate snapshot whenever the interface is
+    # selected/reselected. Runtime execution may legitimately return no rows;
+    # in that case an empty snapshot is authoritative rather than an error.
+    items = as_list_payload(fact.response_json) or []
+    if not items:
+        binding.options = []
+        binding.option_map = None
+        binding.count = 0
+        binding.enum_confirmed = True
+        return
+
+    first = items[0]
+    if not isinstance(first, dict):
+        records = [{"label": str(item), "value": item} for item in items[:200]]
+        binding.options = records
+        binding.option_map = {record["label"]: record["value"] for record in records}
+        binding.count = len(items)
+        binding.enum_confirmed = True
+        return
+
+    keys = list(first.keys())
+    value_candidates = [binding.value_key, "value", "id", "code", "dictValue", "key"]
+    label_candidates = [binding.label_key, "label", "name", "text", "title", "dictLabel"]
+    value_key = next((key for key in value_candidates if key and key in first), "")
+    label_key = next((key for key in label_candidates if key and key in first and key != value_key), "")
+    if not value_key:
+        value_key = next((key for key in keys if not isinstance(first.get(key), (dict, list))), "")
+    if not label_key:
+        label_key = next((
+            key for key in keys
+            if key != value_key and isinstance(first.get(key), str) and str(first.get(key) or "").strip()
+        ), value_key)
+    if not value_key:
+        if source_changed:
+            binding.options = []
+            binding.option_map = None
+            binding.count = 0
+        return
+
+    binding.value_key = value_key
+    binding.label_key = label_key or value_key
+    records: list[dict[str, Any]] = []
+    option_map: dict[str, Any] = {}
+    seen: set[tuple[str, str]] = set()
+    for item in items[:200]:
+        if not isinstance(item, dict) or value_key not in item:
+            continue
+        raw_value = item.get(value_key)
+        raw_label = item.get(binding.label_key, raw_value)
+        label = str(raw_label if raw_label not in (None, "") else raw_value)
+        signature = (label, repr(raw_value))
+        if not label or signature in seen:
+            continue
+        seen.add(signature)
+        records.append({"label": label, "value": raw_value})
+        option_map[label] = raw_value
+    binding.options = records
+    binding.option_map = option_map or None
+    binding.count = len(items)
+    binding.enum_confirmed = True
 
 
 def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
@@ -10521,9 +10848,14 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
 
         if op == "generate_capabilities":
             existing = list(new_spec.capabilities or [])
+            generated = (
+                build_default_flow_capabilities(new_spec)
+                if existing
+                else _build_initial_flow_capabilities(new_spec)
+            )
             new_spec.capabilities = _merge_capability_lists(
                 existing,
-                build_default_flow_capabilities(new_spec),
+                generated,
                 spec=new_spec,
                 allow_new=not bool(existing),
             )

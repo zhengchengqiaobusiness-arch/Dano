@@ -1650,6 +1650,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const currentParam = currentStep.params.find((item) => paramMatches(item, p)) || p;
     const wasEnum = currentParam.type === "enum" || currentParam.type === "list-enum";
     const isEnum = value === "enum" || value === "list-enum";
+    if (currentParam.source_kind === "api_option") {
+      // 接口候选描述值从哪里来，不约束请求字段的数据类型。
+      patchLocalParam(step.step_id, currentParam, { type: value });
+      send({ type: "flow_update", edits: [paramEdit(step.step_id, currentParam, "type", value)] });
+      return;
+    }
     if (!wasEnum || isEnum) {
       patchLocalParam(step.step_id, currentParam, { type: value });
       send({ type: "flow_update", edits: [paramEdit(step.step_id, currentParam, "type", value)] });
@@ -2397,7 +2403,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       paramEdit(step.step_id, p, "exposed_to_user", true),
       paramEdit(step.step_id, p, "need_human_confirm", false),
     ];
-    if (p.type !== "enum" && p.type !== "list-enum" && options.length) {
+    if (nextSourceKind !== "api_option" && p.type !== "enum" && p.type !== "list-enum" && options.length) {
       edits.push(paramEdit(step.step_id, p, "type", "enum"));
     }
     return edits;
@@ -2410,6 +2416,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function upsertSelectBinding(step: FlowStepData, p: FlowParam, patch: Partial<FlowSelectBinding>, extraEdits: any[] = []) {
     const existing = selectBindingForParam(step, p);
     const hasExplicitIdPath = Object.prototype.hasOwnProperty.call(patch, "id_path");
+    const sourceChanged = Object.prototype.hasOwnProperty.call(patch, "source_url")
+      && (patch.source_url || "") !== (existing?.source_url || "");
     const currentPath = p.path || existing?.path || p.key || "";
     const nextBinding: FlowSelectBinding = {
       source_url: "",
@@ -2422,6 +2430,18 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       param: p.key,
       path: currentPath,
     };
+    if (sourceChanged) {
+      // 新接口必须以新响应重建候选，不能沿用首次误匹配留下的空值或旧值。
+      nextBinding.options = [];
+      nextBinding.option_map = null;
+      nextBinding.count = 0;
+      nextBinding.source_request_id = "";
+      nextBinding.source_role = "";
+      nextBinding.enum_source = "api";
+      nextBinding.enum_confirmed = true;
+      nextBinding.value_key = "";
+      nextBinding.label_key = "";
+    }
     if (!hasExplicitIdPath && !nextBinding.id_path && (nextBinding.source_url || p.source_kind === "api_option")) {
       nextBinding.id_path = currentPath;
     }
@@ -2436,7 +2456,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       edits.push(paramEdit(step.step_id, p, "category", "user_param"));
       paramUpdates.category = "user_param";
     }
-    if (p.type !== "enum" && p.type !== "list-enum") {
+    const apiBacked = p.source_kind === "api_option" || !!nextBinding.source_url;
+    if (!apiBacked && p.type !== "enum" && p.type !== "list-enum") {
       const nextType = nextBinding.multi ? "list-enum" : "enum";
       edits.push(paramEdit(step.step_id, p, "type", nextType));
       paramUpdates.type = nextType;
