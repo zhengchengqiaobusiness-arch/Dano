@@ -868,6 +868,43 @@ def test_page_enum_label_only_snapshot_maps_only_recorded_pair():
 
     assert out[0]["options"] == ["事假", "病假", "年假"]
     assert out[0]["option_map"] == {"病假": 2}
+    assert out[0]["enum_confirmed"] is False
+
+
+def test_page_enum_null_values_do_not_fake_identity_mapping():
+    """自定义下拉未知 wire value 时只确认本次选中项，不能伪造 label=value。"""
+    out = page_enum_selects(
+        '{"type":2}',
+        {"类型": {
+            "options": [
+                {"label": "事假"},
+                {"label": "病假", "value": None},
+                {"label": "年假"},
+            ],
+            "selected": "病假",
+            "field_key": "类型",
+        }},
+        set(),
+        fields=[{"path": "type", "key": "type", "suggest_name": "类型", "value": "2"}],
+    )
+
+    assert out[0]["options"] == ["事假", "病假", "年假"]
+    assert out[0]["option_map"] == {"病假": 2}
+    assert out[0]["enum_confirmed"] is False
+
+
+def test_unrelated_page_enum_does_not_bind_arbitrary_short_code_field():
+    out = page_enum_selects(
+        '{"type":2,"reason":"请假"}',
+        {"所属部门": {"options": ["研发部门", "市场部门"], "selected": "研发部门"}},
+        set(),
+        fields=[
+            {"path": "type", "key": "type", "suggest_name": "请假类型", "value": "2"},
+            {"path": "reason", "key": "reason", "suggest_name": "原因", "value": "请假"},
+        ],
+    )
+
+    assert out == []
 
 
 def test_api_enum_keeps_original_labels_when_recorded_text_is_ocr_like():

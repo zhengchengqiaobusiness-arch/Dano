@@ -691,7 +691,11 @@ def _flow_meta(skill: SkillSpec) -> dict:
             judged = bool(apir.get("success_rule") or last.get("success_rule"))
             return {"step_count": max(len(wf), 1), "preconditions": [], "computes": [],
                     "verify": verify, "judged_by_code": judged,
-                    "step_paths": _step_paths(wf or [apir])}   # 各步 接口(method+path),供 SOP 展示编排
+                    "step_paths": _step_paths(wf or [apir]),
+                    "release": {
+                        key: value for key, value in dict(apir.get("_release_snapshot") or {}).items()
+                        if key != "flow_spec"
+                    }}   # 各步 接口(method+path),供 SOP 展示编排
         return {"step_count": 1, "preconditions": [], "computes": [],
                 "verify": bool(getattr(skill, "api_request", None)), "judged_by_code": False}
     # 普通连接器

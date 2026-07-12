@@ -61,6 +61,7 @@ class ParamField(BaseModel):
     label: str = ""
     value: Any = ""
     type: str = "string"  # string/number/boolean/datetime/date/array/object/list-enum
+    wire_type: str = ""  # immutable request-leaf transport type before business projection
     required: bool = True
     confidence: float = 0.0
     confidence_tier: str = "auto"
@@ -222,6 +223,7 @@ class RequestAnalysis(BaseModel):
 
     request_id: str = ""
     role: str = ""
+    semantic_roles: list[str] = Field(default_factory=list)
     keep: bool = False
     reason: str = ""
     confidence: float = 0.0
@@ -239,6 +241,7 @@ class RequestUsage(BaseModel):
     materialized_step_id: str = ""
     state: str = "captured"
     used_by_capabilities: list[str] = Field(default_factory=list)
+    capability_memberships: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class RequestFacts(BaseModel):
@@ -270,6 +273,10 @@ class CapabilityRequestRef(BaseModel):
     sequence: Any = None
     confidence: float = 0.0
     reason: str = ""
+    usage: str = "execute"  # execute / option_source / fact_check / preflight
+    origin: str = "planner"  # planner / manual / repair / migration
+    pinned: bool = False
+    confirmed: bool = False
 
 
 class CapabilityField(BaseModel):
@@ -281,6 +288,7 @@ class CapabilityField(BaseModel):
     path: str = ""
     key: str = ""
     type: str = "string"
+    wire_type: str = ""
     required: bool = False
     request_id: str = ""
     request_index: Any = None
@@ -448,19 +456,28 @@ class FlowSpec(BaseModel):
 
 
 # ─────────── Step A: 收敛函数 ───────────
-def _infer_type_from_value(value: str) -> str:
-    if not value:
+def _infer_type_from_value(value: Any) -> str:
+    if value in (None, ""):
         return "string"
-    if value.lower() in ("true", "false"):
+    if isinstance(value, bool):
         return "boolean"
-    if re.match(r"^\d{4}-\d{2}-\d{2}T", value):
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    text = str(value)
+    if text.lower() in ("true", "false"):
+        return "boolean"
+    if re.match(r"^\d{4}-\d{2}-\d{2}T", text):
         return "datetime"
-    if re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", text):
         return "date"
     try:
-        float(value)
+        float(text)
         return "number"
-    except ValueError:
+    except (ValueError, TypeError):
         pass
     return "string"
 
@@ -869,6 +886,20 @@ def _param_source_guess(
             "need_human_confirm": False,
         }
 
+    # 录制期间由用户真实填写/选择并出现在 samples 中，是字段归属的强事实。
+    # 它必须优先于 *Id/*Type 等命名启发式；否则不同系统的业务字段只因内部
+    # 命名像 ID/状态码就会被错误改成运行期变量或系统常量。
+    if value not in (None, "") and value in _sample_value_set(samples):
+        return {
+            "category": "user_param",
+            "source_kind": "user_input",
+            "source": {"kind": "sample", "path": path, "recorded": True},
+            "editable": True,
+            "exposed_to_user": True,
+            "reason": "该值由用户在录制页面真实填写，调用 Skill 时作为用户参数",
+            "need_human_confirm": False,
+        }
+
     if value == "" and value not in _sample_value_set(samples):
         return {
             "category": "system_const",
@@ -1019,7 +1050,7 @@ def _enum_options_for_param(sb) -> list | None:
         else:
             label = str(o or "").strip()
             if label:
-                out.append({"label": label, "value": (om or {}).get(label, label)} if om else label)
+                out.append({"label": label, "value": om[label]} if om and label in om else ({"label": label, "value": None} if om else label))
     if om:
         return out or None
     if opts:
@@ -1107,11 +1138,23 @@ def _upsert_option_description(reason: str, detail: str | None) -> str:
     return "；".join(parts)
 
 
+_OPTION_DESCRIPTION_PREFIXES = (
+    "页面枚举选项：", "接口候选选项：", "手工枚举选项：", "固定枚举选项：", "表单枚举选项：", "枚举选项：",
+)
+
+
+def _strip_option_descriptions(text: str | None) -> str:
+    return "；".join(
+        part for part in str(text or "").split("；")
+        if part.strip() and not part.strip().startswith(_OPTION_DESCRIPTION_PREFIXES)
+    )
+
+
 def _enum_option_map_from_options(options: list[Any] | None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for opt in options or []:
         pair = _enum_label_value(opt)
-        if pair:
+        if pair and pair[1] is not None:
             out[pair[0]] = pair[1]
     return out
 
@@ -1228,7 +1271,8 @@ def _build_step_from_capture(
     params: list[ParamField] = []
     for f in flat_fields:
         path = f.get("path", "")
-        ptype = f.get("type") or "string"
+        wire_type = f.get("wire_type") or f.get("type") or _infer_type_from_value(f.get("value")) or "string"
+        ptype = wire_type
         if path in list_paths:
             ptype = "list-enum"
         elif path in select_paths:
@@ -1290,6 +1334,7 @@ def _build_step_from_capture(
             label=nm,
             value=str(f.get("value") or ""),
             type=ptype,
+            wire_type=wire_type,
             required=bool(f.get("required")),
             confidence=float(f.get("confidence") or 0.0),
             confidence_tier=f.get("confidence_tier") or "auto",
@@ -1973,9 +2018,21 @@ def _request_fact_from_graph_entry(entry: dict[str, Any]) -> RequestFact:
 
 def _request_analysis_from_graph_entry(entry: dict[str, Any], bucket: str) -> RequestAnalysis:
     payload = dict(entry)
+    role = str(entry.get("role") or "")
+    semantic_roles = [str(value) for value in (entry.get("semantic_roles") or []) if str(value)]
+    role_semantic = {
+        "business_get": "business_query",
+        "read_option": "option_source",
+        "read_context": "context_read",
+        "submit_anchor": "business_write",
+        "business_write": "business_write",
+    }.get(role)
+    if role_semantic and role_semantic not in semantic_roles:
+        semantic_roles.append(role_semantic)
     payload.update({
         "request_id": _request_fact_key(entry),
-        "role": entry.get("role") or "",
+        "role": role,
+        "semantic_roles": semantic_roles,
         "keep": bool(entry.get("keep")),
         "reason": entry.get("reason") or "",
         "confidence": float(entry.get("confidence") or 0.0),
@@ -2232,7 +2289,11 @@ def _step_request_fact_for_capability(spec: FlowSpec, step: FlowStep) -> Request
     )
 
 
-def _capability_request_ref_from_step(spec: FlowSpec, step: FlowStep) -> CapabilityRequestRef:
+def _capability_request_ref_from_step(
+    spec: FlowSpec,
+    step: FlowStep,
+    existing: CapabilityRequestRef | None = None,
+) -> CapabilityRequestRef:
     fact = _step_request_fact_for_capability(spec, step)
     rid = fact.request_id if fact else str((step.source_meta or {}).get("request_id") or "")
     analysis = spec.request_facts.analysis.get(rid) if rid else None
@@ -2246,6 +2307,10 @@ def _capability_request_ref_from_step(spec: FlowSpec, step: FlowStep) -> Capabil
         sequence=fact.sequence if fact else (step.source_meta or {}).get("sequence", (step.source_meta or {}).get("request_index")),
         confidence=float((analysis.confidence if analysis else None) or (step.source_meta or {}).get("confidence") or 0.0),
         reason=(analysis.reason if analysis else "") or (step.source_meta or {}).get("keep_reason") or "",
+        usage=existing.usage if existing else str((step.source_meta or {}).get("capability_usage") or "execute"),
+        origin=existing.origin if existing else str((step.source_meta or {}).get("membership_origin") or "planner"),
+        pinned=bool(existing.pinned) if existing else bool((step.source_meta or {}).get("membership_pinned")),
+        confirmed=bool(existing.confirmed) if existing else False,
     )
 
 
@@ -2264,6 +2329,7 @@ def _capability_field_from_param(
         path=param.path,
         key=param.key,
         type=param.type,
+        wire_type=param.wire_type or _infer_type_from_value(param.value),
         required=bool(param.required),
         request_id=request_id,
         request_index=(step.source_meta or {}).get("request_index"),
@@ -2451,14 +2517,23 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
     by_step = {s.step_id: s for s in spec.steps}
     used_by_request: dict[str, list[str]] = {}
     materialized_by_request: dict[str, str] = {}
+    memberships_by_request: dict[str, list[dict[str, Any]]] = {}
     for cap in spec.capabilities:
+        previous_refs = {ref.step_id: ref for ref in (cap.request_refs or []) if ref.step_id}
+        auxiliary_refs = [
+            ref for ref in (cap.request_refs or [])
+            if ref.usage == "option_source" and ref.step_id not in _capability_scoped_step_ids(cap)
+        ]
         cap_step_ids = [
             sid for sid in _capability_scoped_step_ids(cap)
             if sid in by_step and _capability_step_allowed(spec, cap, by_step[sid])
         ]
         cap.step_ids = cap_step_ids
         step_objs = [by_step[sid] for sid in cap_step_ids]
-        cap.request_refs = [_capability_request_ref_from_step(spec, st) for st in step_objs]
+        cap.request_refs = [
+            _capability_request_ref_from_step(spec, st, previous_refs.get(st.step_id))
+            for st in step_objs
+        ] + auxiliary_refs
         cap_name = cap.name or cap.capability_id
         for ref in cap.request_refs:
             if ref.request_id and cap_name:
@@ -2467,6 +2542,14 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
                     used_by_request[ref.request_id].append(cap_name)
                 if ref.step_id:
                     materialized_by_request[ref.request_id] = ref.step_id
+                memberships_by_request.setdefault(ref.request_id, []).append({
+                    "capability": cap_name,
+                    "step_id": ref.step_id,
+                    "usage": ref.usage,
+                    "origin": ref.origin,
+                    "pinned": ref.pinned,
+                    "confirmed": ref.confirmed,
+                })
         inputs: dict[str, CapabilityField] = {}
         request_fields: list[CapabilityField] = []
         internal_fields: list[CapabilityField] = []
@@ -2562,6 +2645,7 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
             continue
         usage = spec.request_facts.usage.get(request_id) or RequestUsage(request_id=request_id)
         usage.used_by_capabilities = list(used_by_request.get(request_id) or [])
+        usage.capability_memberships = list(memberships_by_request.get(request_id) or [])
         if materialized_by_request.get(request_id):
             usage.materialized_step_id = materialized_by_request[request_id]
             usage.state = "materialized"
@@ -2609,6 +2693,52 @@ def sync_flow_spec_models(spec: FlowSpec, *, prefer_request_facts: bool = True) 
     return sync_capability_scoped_views(spec)
 
 
+def _api_option_binding_is_trustworthy(binding: SelectBinding) -> bool:
+    if not binding.source_url:
+        return False
+    label_key = str(binding.label_key or "").strip().lower()
+    value_key = str(binding.value_key or "").strip().lower()
+    if label_key and value_key and label_key != value_key:
+        return True
+    path = _request_path({"url": binding.source_url}).lower()
+    if re.search(r"(?:^|/)(?:dict|dictionary|options?|candidates?|simple-list|tree|users?|departments?|roles?|employees?)(?:/|$)", path):
+        return True
+    pairs = [pair for pair in (_enum_label_value(item) for item in (binding.options or [])) if pair]
+    return any(str(label).strip() != str(value).strip() for label, value in pairs)
+
+
+def _page_enum_contract_for_param(
+    spec: FlowSpec,
+    step: FlowStep,
+    param: ParamField,
+    binding: SelectBinding,
+) -> tuple[list[Any], dict[str, Any]] | None:
+    page_options = _page_enum_options_from_request_facts(spec.request_facts)
+    keys = [
+        binding.path, binding.id_path, param.path, param.key, param.label,
+        _strip_body_prefix(binding.path or ""), _strip_body_prefix(param.path or ""),
+    ]
+    for key in [str(value or "") for value in keys if str(value or "")]:
+        raw = page_options.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, dict):
+            options = list(raw.get("options") or raw.get("values") or [])
+            value_map = dict(raw.get("option_map") or raw.get("value_map") or {})
+        elif isinstance(raw, list):
+            options = list(raw)
+            value_map = {
+                str(item.get("label")): item.get("value")
+                for item in options
+                if isinstance(item, dict) and item.get("label") not in (None, "") and "value" in item and item.get("value") is not None
+            }
+        else:
+            continue
+        if options:
+            return options, value_map
+    return None
+
+
 def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
     """Project executable select bindings back onto their request parameters.
 
@@ -2616,6 +2746,13 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
     the ParamField as ``user_input`` loses label-to-value mapping and the source
     request when capabilities are rebuilt.
     """
+    for param in step.params or []:
+        if param.type in _ENUM_PARAM_TYPES or param.source_kind in _ENUM_SOURCE_KINDS:
+            continue
+        param.enum_options = None
+        param.enum_value_map = None
+        param.description = _strip_option_descriptions(param.description) or None
+        param.reason = _strip_option_descriptions(param.reason)
     for binding in step.selects or []:
         _hydrate_select_source_contract(spec, binding)
         # Paired controls commonly have both ``name`` and ``id`` leaves.  The
@@ -2638,9 +2775,31 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
             ), None)
         if param is None or not _select_has_executable_options(binding):
             continue
-        source_kind = "api_option" if binding.source_url else "page_enum"
-        options = _enum_options_for_param(binding)
-        option_map = _enum_value_map_for_param(binding)
+        # 人工修改过数据契约后，SelectBinding 只能作为历史证据，不能在每次
+        # sync 时把类型/分类/来源自动改回录制推断值。
+        if any(
+            isinstance(item, dict)
+            and item.get("source") == "manual_edit"
+            and item.get("field") in {
+                "type", "category", "source_kind", "source", "enum_options", "enum_value_map",
+            }
+            for item in (param.evidence or [])
+        ):
+            continue
+        page_contract = _page_enum_contract_for_param(spec, step, param, binding)
+        trusted_api = _api_option_binding_is_trustworthy(binding)
+        source_kind = "page_enum" if page_contract else ("api_option" if trusted_api else ("page_enum" if not binding.source_url else "unknown"))
+        options = list(page_contract[0]) if page_contract else _enum_options_for_param(binding)
+        option_map = dict(page_contract[1]) if page_contract else (_enum_value_map_for_param(binding) or {})
+        if page_contract:
+            page_labels = {
+                str(pair[0]) for item in page_contract[0]
+                if (pair := _enum_label_value(item)) is not None
+            }
+            option_map.update({
+                str(label): value for label, value in (_enum_value_map_for_param(binding) or {}).items()
+                if str(label) in page_labels and value is not None
+            })
         param.type = "list-enum" if binding.multi else "enum"
         param.category = "user_param"
         param.source_kind = source_kind
@@ -2651,22 +2810,30 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
         param.source = {
             **dict(param.source or {}),
             "kind": source_kind,
-            "source_url": binding.source_url,
+            "source_url": binding.source_url if source_kind == "api_option" else None,
             "source_method": binding.source_method,
             "source_request_id": binding.source_request_id,
             "value_key": binding.value_key,
             "label_key": binding.label_key,
             "id_path": binding.id_path or binding.path or param.path,
-            "enum_source": binding.enum_source or ("api" if binding.source_url else "dom"),
-            "enum_confirmed": binding.enum_confirmed,
+            "enum_source": "dom" if source_kind == "page_enum" else (binding.enum_source or ("api" if trusted_api else "unknown")),
+            "enum_confirmed": (
+                len(option_map) == len(options or [])
+                if page_contract
+                else (binding.enum_confirmed if trusted_api or not binding.source_url else False)
+            ),
         }
         param.need_human_confirm = bool(
-            source_kind == "page_enum" and binding.enum_confirmed is False
+            source_kind == "unknown" or (source_kind == "page_enum" and (param.source or {}).get("enum_confirmed") is False)
         )
         source_reason = (
             "候选来自录制捕获的只读接口；调用方传显示值，运行期按当前接口结果映射真实值"
             if source_kind == "api_option"
-            else "候选来自页面真实下拉；调用方传显示值，运行期按录制的 label/value 映射真实值"
+            else (
+                "候选来自页面真实下拉；调用方传显示值，运行期按录制的 label/value 映射真实值"
+                if source_kind == "page_enum"
+                else "候选接口缺少可信的 label/value 证据，不能作为已确认枚举来源"
+            )
         )
         option_description = _enum_options_description(source_kind, param.enum_options, param.enum_value_map)
         param.description = _upsert_option_description(param.description, option_description)
@@ -2717,8 +2884,8 @@ def _transition_param_type(spec: FlowSpec, step: FlowStep, param: ParamField, va
     if old_type in _ENUM_PARAM_TYPES and new_type not in _ENUM_PARAM_TYPES:
         param.enum_options = None
         param.enum_value_map = None
-        if not _param_has_manual_description(param):
-            param.description = None
+        param.description = _strip_option_descriptions(param.description) or None
+        param.reason = _strip_option_descriptions(param.reason)
         if param.source_kind in _ENUM_SOURCE_KINDS:
             if param.category == "user_param":
                 param.source_kind = "user_input"
@@ -3030,7 +3197,18 @@ def to_flow_spec(
     diagnostics = diagnostics or []
     recording_mode = recording_mode or "unknown"
 
-    request_roles = [classify_network_request(r, captured_requests, samples) for r in captured_requests]
+    request_roles = []
+    for request in captured_requests:
+        recorded = request.get("_request_role") if isinstance(request.get("_request_role"), dict) else None
+        if recorded is None and request.get("role"):
+            recorded = {
+                "role": request.get("role"),
+                "keep": request.get("keep"),
+                "reason": request.get("reason") or request.get("keep_reason") or "",
+                "confidence": request.get("confidence") or 0.0,
+                "evidence": request.get("evidence") or {},
+            }
+        request_roles.append(recorded or classify_network_request(request, captured_requests, samples))
     role_by_key = {_request_role_key(r): role for r, role in zip(captured_requests, request_roles)}
     flow_reads = _merge_flow_read_sources(reads, captured_requests, request_roles)
 
@@ -3433,6 +3611,23 @@ def _schema_for_param_type(ptype: str) -> dict[str, Any]:
     return {"type": "string"}
 
 
+def _business_type_for_param(param: ParamField) -> str:
+    ptype = (param.type or "string").lower()
+    if ptype == "list-enum":
+        return "multi_enum"
+    if ptype == "enum" or param.source_kind in _OPTION_SOURCE_KINDS:
+        return "single_enum"
+    return {
+        "datetime": "datetime",
+        "date": "date",
+        "number": "number",
+        "integer": "number",
+        "boolean": "boolean",
+        "array": "array",
+        "object": "object",
+    }.get(ptype, "text")
+
+
 def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
     props: dict[str, Any] = {}
     required: list[str] = []
@@ -3440,7 +3635,27 @@ def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
         if p.category != "user_param" or not p.exposed_to_user:
             continue
         key = p.key or p.path
+        if key in props:
+            existing = props[key]
+            candidate_business = _business_type_for_param(p)
+            candidate_wire = p.wire_type or _infer_type_from_value(p.value) or "string"
+            if (
+                existing.get("x-dano-business-type") != candidate_business
+                or existing.get("x-dano-wire-type") != candidate_wire
+                or existing.get("x-flow-path") != p.path
+            ):
+                existing.setdefault("x-dano-conflicts", []).append({
+                    "path": p.path,
+                    "business_type": candidate_business,
+                    "wire_type": candidate_wire,
+                })
+            if p.required and key not in required:
+                required.append(key)
+            continue
         props[key] = _schema_for_param_type(p.type)
+        props[key]["x-flow-path"] = p.path
+        props[key]["x-dano-business-type"] = _business_type_for_param(p)
+        props[key]["x-dano-wire-type"] = p.wire_type or _infer_type_from_value(p.value) or "string"
         if p.label:
             props[key]["label"] = p.label
         if p.description or p.reason:
@@ -3744,12 +3959,19 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
     for cap in spec.capabilities:
         if cap.kind == "query_status":
             option_source_ids = _option_source_step_ids(spec)
+            memberships = {ref.step_id: ref for ref in (cap.request_refs or []) if ref.step_id}
             cap.step_ids = [
                 sid for sid in (cap.step_ids or [])
-                if sid not in option_source_ids
-                and (
-                    sid not in by_id
-                    or ((by_id[sid].source_meta or {}).get("role") or by_id[sid].semantic_role or "") != "read_option"
+                if (
+                    bool(memberships.get(sid) and memberships[sid].pinned and memberships[sid].usage in {"execute", "preflight", "fact_check"})
+                    or (
+                        (sid not in option_source_ids or (sid in by_id and _is_business_query_step(by_id[sid])))
+                        and (
+                            sid not in by_id
+                            or ((by_id[sid].source_meta or {}).get("role") or by_id[sid].semantic_role or "") != "read_option"
+                            or _is_business_query_step(by_id[sid])
+                        )
+                    )
                 )
             ]
         cap.nodes = _sanitize_capability_nodes(spec, cap)
@@ -4131,6 +4353,8 @@ def _json_schema_for_params(params: list[ParamField]) -> dict[str, Any]:
             "title": p.label or name,
             "x-flow-path": p.path,
             "x-source-kind": p.source_kind,
+            "x-dano-business-type": _business_type_for_param(p),
+            "x-dano-wire-type": p.wire_type or _infer_type_from_value(p.value) or "string",
         }
         if p.description:
             prop["description"] = p.description
@@ -4288,18 +4512,45 @@ def _option_source_step_ids(spec: FlowSpec) -> set[str]:
     return ids
 
 
+def _business_query_evidence_score(step: FlowStep) -> int:
+    if (step.method or "GET").upper() not in {"GET", "HEAD"}:
+        return -100
+    path = _request_path({"url": step.path or step.url}).lower()
+    if re.search(
+        r"(?:process-definition|approval-detail|form-config|permissions?|tenant|current-user|auth|dict(?:ionary)?|options?|simple-list|departments?|roles?)",
+        path,
+    ) or re.search(r"(?:^|/)(?:system|im)/users?(?:/|$)", path):
+        return -10
+    score = 0
+    role = str((step.source_meta or {}).get("role") or step.semantic_role or "")
+    if role == "business_get":
+        score += 2
+    if re.search(r"(?:^|/)(?:page|list|search|query|history|records?|status|statistics|detail)(?:/|$|\?)", path):
+        score += 2
+    response = step.response_json
+    if isinstance(response, list):
+        score += 4
+    if isinstance(response, dict):
+        for candidate in ("data.list", "data.records", "data.rows", "data.items", "list", "records", "rows", "items"):
+            value = _flow_path_lookup(response, candidate)
+            if isinstance(value, list):
+                score += 4
+                break
+        if any(_flow_path_lookup(response, candidate) is not _FLOW_PATH_MISSING for candidate in ("data.total", "total", "count")):
+            score += 1
+    return score
+
+
+def _is_business_query_step(step: FlowStep) -> bool:
+    return _business_query_evidence_score(step) >= 3
+
+
 def _read_status_steps(spec: FlowSpec) -> list[FlowStep]:
-    status_hint = re.compile(r"(status|state|progress|history|detail|approval|process|instance|task|todo)", re.I)
     out: list[FlowStep] = []
-    option_source_ids = _option_source_step_ids(spec)
     for st in spec.steps:
         if (st.method or "").upper() in _WRITE_METHODS:
             continue
-        role = (st.source_meta or {}).get("role") or st.semantic_role or ""
-        path = st.path or st.url or st.name
-        if role == "read_option" or st.step_id in option_source_ids:
-            continue
-        if role == "business_get" or status_hint.search(path or ""):
+        if _is_business_query_step(st):
             out.append(st)
     return out
 
@@ -4469,16 +4720,21 @@ def _repair_versioned_workflow_id_links(spec: FlowSpec) -> int:
 def _capability_step_allowed(spec: FlowSpec, cap: FlowCapability, step: FlowStep) -> bool:
     role = (step.source_meta or {}).get("role") or step.semantic_role or ""
     kind = (cap.kind or "").strip()
-    if kind == "query_status" and (
-        role == "read_option" or step.step_id in _option_source_step_ids(spec)
-    ):
-        return False
-    # 人工/已确认范围永不被角色启发式覆盖；没有角色证据的旧数据也保持原样。
-    # 仅对尚未确认且有明确角色证据的 Planner 草案清理 read_option 等噪声。
+    membership = next((ref for ref in (cap.request_refs or []) if ref.step_id == step.step_id), None)
+    # Explicit user membership is authoritative. Request role describes evidence,
+    # not whether the same request may execute inside a capability.
+    if membership and membership.pinned and membership.usage in {"execute", "preflight", "fact_check"}:
+        return True
     if step.step_id in set(cap.step_ids or []) and (
         cap.updated_by == "user" or cap.locked or cap.confirmed or not role
     ):
         return True
+    if kind == "query_status" and _is_business_query_step(step):
+        return True
+    if kind == "query_status" and (
+        role == "read_option" or step.step_id in _option_source_step_ids(spec)
+    ):
+        return False
     method = (step.method or "GET").upper()
     if method in _WRITE_METHODS:
         return True
@@ -4503,6 +4759,26 @@ def _add_step_id_to_capability(spec: FlowSpec, cap: FlowCapability, step_id: str
             cap.step_ids.insert(idx, step_id)
             return
     cap.step_ids.append(step_id)
+
+
+def _set_capability_request_membership(
+    spec: FlowSpec,
+    cap: FlowCapability,
+    step: FlowStep,
+    *,
+    usage: str,
+    origin: str,
+    pinned: bool,
+) -> CapabilityRequestRef:
+    current = next((ref for ref in (cap.request_refs or []) if ref.step_id == step.step_id), None)
+    ref = _capability_request_ref_from_step(spec, step, current)
+    ref.usage = usage if usage in {"execute", "option_source", "fact_check", "preflight"} else "execute"
+    ref.origin = origin or "manual"
+    ref.pinned = bool(pinned)
+    ref.confirmed = bool(pinned)
+    cap.request_refs = [item for item in (cap.request_refs or []) if item.step_id != step.step_id]
+    cap.request_refs.append(ref)
+    return ref
 
 
 def _request_graph_entries(spec: FlowSpec, roles: set[str]) -> list[dict[str, Any]]:
@@ -5763,6 +6039,14 @@ def _enforce_incremental_orchestration_scope(before: FlowSpec, after: FlowSpec) 
         current = current_by_id.get(original.capability_id) or current_by_name.get(original.name)
         if current is None:
             current = original.model_copy(deep=True)
+        # Repeated optimization may enrich the contract but cannot change the
+        # public API identity or membership chosen by the operator.
+        current.capability_id = original.capability_id
+        current.name = original.name
+        current.kind = original.kind
+        current.request_refs = [ref.model_copy(deep=True) for ref in (original.request_refs or [])]
+        current.locked = original.locked
+        current.updated_by = original.updated_by
         allowed_steps = list(_capability_node_step_ids(original))
         allowed_set = set(allowed_steps)
         current.step_ids = list(original.step_ids or allowed_steps)
@@ -5910,8 +6194,7 @@ async def orchestrate_flow_capabilities(
     _normalize_capability_references(current)
     if not had_existing:
         current = _repair_generated_capability_contracts(current)
-    else:
-        _normalize_incremental_write_kind(current)
+    # Existing public capability identities are immutable on repeated optimize.
     current = _ensure_external_transform_relations(
         _sync_capability_io_schemas(sync_flow_spec_models(current, prefer_request_facts=False))
     )
@@ -7365,6 +7648,10 @@ def _flow_fingerprint(spec: FlowSpec) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def flow_spec_fingerprint(spec: FlowSpec) -> str:
+    return _flow_fingerprint(spec)
+
+
 def append_flow_version(
     spec: FlowSpec,
     action: str,
@@ -8659,6 +8946,40 @@ def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
     return ensure_recorded_goal(current)
 
 
+def prepare_flow_release_candidate(spec: FlowSpec) -> tuple[FlowSpec, dict[str, Any]]:
+    """Freeze the exact canonical workbench contract consumed by publish/export."""
+    current = prepare_flow_spec_for_publish(spec)
+    fingerprint = _flow_fingerprint(current)
+    inventory = [
+        {
+            "capability_id": cap.capability_id,
+            "name": cap.name,
+            "kind": cap.kind,
+            "step_ids": list(_capability_node_step_ids(cap)),
+            "memberships": [
+                {
+                    "step_id": ref.step_id,
+                    "request_id": ref.request_id,
+                    "usage": ref.usage,
+                    "origin": ref.origin,
+                    "pinned": ref.pinned,
+                }
+                for ref in (cap.request_refs or [])
+            ],
+        }
+        for cap in current.capabilities or []
+    ]
+    release = {
+        "protocol": "dano.recording_release.v1",
+        "release_id": f"{current.flow_id}-{fingerprint}",
+        "flow_fingerprint": fingerprint,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "interface_inventory": inventory,
+    }
+    current.meta = {**(current.meta or {}), "release_candidate": release}
+    return current, release
+
+
 def validate_flow_spec(spec: FlowSpec) -> dict:
     from dano.execution.page.repair_ops import collect_repair_findings
 
@@ -8690,6 +9011,19 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
     capability_warnings = list(capability_validation.get("warnings") or [])
     errors.extend(capability_errors)
     warnings.extend(capability_warnings)
+    by_step_id = {step.step_id: step for step in spec.steps}
+    for capability in spec.capabilities or []:
+        cap_label = capability.title or capability.name or capability.capability_id
+        for ref in capability.request_refs or []:
+            if ref.pinned and ref.usage in {"execute", "preflight", "fact_check"} and ref.step_id not in set(_capability_node_step_ids(capability)):
+                errors.append(f"Capability `{cap_label}` 手工锁定接口 `{ref.step_id or ref.request_id}` 未进入执行计划")
+        for field_name, field_schema in (capability.input_schema.get("properties") or {}).items():
+            if isinstance(field_schema, dict) and field_schema.get("x-dano-conflicts"):
+                errors.append(f"Capability `{cap_label}` 输入字段 `{field_name}` 在多个接口中类型或路径冲突")
+        if capability.kind == "query_status":
+            cap_steps = [by_step_id[sid] for sid in _capability_node_step_ids(capability) if sid in by_step_id]
+            if cap_steps and not any(_is_business_query_step(step) for step in cap_steps):
+                errors.append(f"Capability `{cap_label}` 没有返回业务记录/状态的查询接口，仅包含配置或前置接口")
     api_request, build_errors = flow_spec_to_api_request(spec)
     errors.extend(build_errors)
     if not flow_spec_user_params(spec):
@@ -8852,6 +9186,7 @@ def flow_spec_to_client(spec: FlowSpec) -> dict:
     client_spec = sync_flow_spec_models(spec.model_copy(deep=True), prefer_request_facts=False)
     _normalize_capability_references(client_spec)
     data = refresh_review_items(_sync_capability_io_schemas(client_spec)).model_dump()
+    data["meta"] = {**(data.get("meta") or {}), "current_fingerprint": _flow_fingerprint(client_spec)}
     request_graph = ((data.get("meta") or {}).get("request_graph") or {})
     for bucket in ("all_requests", "candidate_reads", "selected_steps", "filtered_requests"):
         for req in request_graph.get(bucket) or []:
@@ -10057,12 +10392,19 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     request_id=str(edit.get("request_id") or ""),
                 ).step_id
                 needs_dependency_rebuild = True
-            _find_step(new_spec, step_id)
+            step = _find_step(new_spec, step_id)
+            usage = str(edit.get("usage") or "execute")
+            origin = str(edit.get("origin") or edit.get("actor") or "manual")
+            pinned = bool(edit.get("pinned", origin in {"manual", "user"}))
             _forget_removed_capability_step(new_spec, cap.name, step_id)
-            _add_step_id_to_capability(new_spec, cap, step_id)
+            _set_capability_request_membership(
+                new_spec, cap, step, usage=usage, origin=origin, pinned=pinned,
+            )
+            if usage != "option_source":
+                _add_step_id_to_capability(new_spec, cap, step_id)
             cap.updated_by = "user"
             _invalidate_capability_contract(cap)
-            if not any(n.get("type") == "call" and n.get("step_id") == step_id for n in (cap.nodes or [])):
+            if usage != "option_source" and not any(n.get("type") == "call" and n.get("step_id") == step_id for n in (cap.nodes or [])):
                 cap.nodes.append({"id": f"call_{len(cap.nodes or []) + 1}", "type": "call", "step_id": step_id})
             _sync_capability_order(new_spec, cap)
             continue
@@ -10072,6 +10414,9 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             step_id = str(edit.get("step_id") or "")
             _remember_removed_capability_step(new_spec, new_spec.capabilities[idx].name, step_id)
             new_spec.capabilities[idx].step_ids = [sid for sid in new_spec.capabilities[idx].step_ids if sid != step_id]
+            new_spec.capabilities[idx].request_refs = [
+                ref for ref in new_spec.capabilities[idx].request_refs if ref.step_id != step_id
+            ]
             new_spec.capabilities[idx].nodes = _remove_capability_step_nodes(
                 new_spec.capabilities[idx].nodes or [], step_id,
             )
@@ -10392,6 +10737,25 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                         _remove_param_incoming_links(new_spec, step, param)
                     elif field == "source_kind" and str(value) != "previous_response":
                         _remove_param_incoming_links(new_spec, step, param)
+                    if (
+                        actor == "user"
+                        and (
+                            (field == "source_kind" and str(value) not in _OPTION_SOURCE_KINDS)
+                            or (field == "category" and str(value) != "user_param")
+                        )
+                    ):
+                        step.selects = [
+                            binding for binding in (step.selects or [])
+                            if not (
+                                _strip_body_prefix(binding.path or "") == _strip_body_prefix(param.path)
+                                or _strip_body_prefix(binding.id_path or "") == _strip_body_prefix(param.path)
+                                or binding.param in {param.key, param.label}
+                            )
+                        ]
+                        param.enum_options = None
+                        param.enum_value_map = None
+                        param.source = {}
+                        param.need_human_confirm = False
                     elif field == "source" and (
                         not isinstance(value, dict)
                         or str(value.get("kind") or "") != "previous_response"

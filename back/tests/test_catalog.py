@@ -209,6 +209,36 @@ def test_manifest_collapses_stale_enum_description_snapshots():
     assert prop["description"] == "页面枚举选项：病假=2、事假=1、年假=3"
 
 
+def test_manifest_exports_recording_release_identity_without_embedded_flow_body():
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    skill = SkillSpec(
+        skill_id="A-OA.release",
+        subsystem=Subsystem.OA,
+        action="release",
+        risk_level=RiskLevel.L3,
+        has_api=False,
+        api_request={
+            "steps": [{"method": "POST", "path": "/api/submit"}],
+            "_release_snapshot": {
+                "protocol": "dano.recording_release.v1",
+                "release_id": "flow-deadbeef",
+                "flow_fingerprint": "deadbeef",
+                "flow_spec": {"large": "body"},
+                "interface_inventory": [{"name": "submit", "step_ids": ["submit"]}],
+            },
+        },
+    )
+
+    release = to_manifest(skill).flow["release"]
+
+    assert release["release_id"] == "flow-deadbeef"
+    assert release["flow_fingerprint"] == "deadbeef"
+    assert "flow_spec" not in release
+
+
 def test_manifest_exports_complete_capability_protocol_requirements():
     from dano.catalog.manifest import to_manifest
     from dano.orchestrator.types import SkillSpec

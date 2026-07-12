@@ -234,6 +234,16 @@ async def run_request_onboarding(
             # 故此处 verdicts 已是修正后的(评审仅因"未真跑"否决不会误阻断发布)。
             rev = await T.request_review(run_id, {"asset_draft_id": d["asset_draft_id"]})
             review_run_ids = rev.get("review_run_ids", []) or []
+            if rev.get("review_unavailable"):
+                return {
+                    "ok": False,
+                    "stage": "review_service",
+                    "status": IngestionStatus.NEEDS_CLARIFICATION.value,
+                    "action": action,
+                    "retryable": True,
+                    "clarifications": [rev.get("review_error") or "评审服务暂时不可用"],
+                    "reason": "评审服务暂时不可用，本次未发布；无需修改字段或能力，请重试发布",
+                }
             rev_find = review_findings(rev.get("verdicts"))
             findings = collect_repair_findings(api_request) + rev_find
             log.info("ingest.review", all_passed=rev.get("all_passed"), findings=len(findings))

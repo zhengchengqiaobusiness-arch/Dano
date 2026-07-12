@@ -95,7 +95,7 @@ interface FlowCapabilityDependencyData {
 }
 interface FlowCapabilityData {
   name?: string; title?: string; intent?: string; kind?: string; capability_id?: string;
-  request_refs?: Array<Record<string, any>>;
+  request_refs?: FlowCapabilityRequestRefData[];
   step_ids?: string[];
   fields?: FlowCapabilityFieldData[];
   inputs?: FlowCapabilityFieldData[];
@@ -113,6 +113,13 @@ interface FlowCapabilityData {
   evidence?: Array<Record<string, any>>;
   caller_responsibilities?: string[]; skill_responsibilities?: string[];
   status?: string; locked?: boolean; updated_by?: string;
+}
+type CapabilityUsage = "execute" | "option_source" | "fact_check" | "preflight";
+interface FlowCapabilityRequestRefData {
+  request_id?: string; request_index?: number | string | null; step_id?: string;
+  role?: string; method?: string; path?: string; sequence?: number | string | null;
+  confidence?: number; reason?: string; usage?: CapabilityUsage; origin?: string;
+  pinned?: boolean; confirmed?: boolean;
 }
 interface FlowCapabilityRelationData {
   relation_id?: string; type?: string; mode?: string;
@@ -254,10 +261,8 @@ const SOURCE_KIND_OPTIONS = [
   { label: "待配置", value: "unknown" },
   { label: "用户输入", value: "user_input" },
   { label: "接口候选", value: "api_option" },
-  // { label: "枚举(页面)", value:  },
-  // { label: "枚举(表单)", value:  },
-  { label: "枚举(手动)", value: "manual_enum" },
-  // { label: "枚举(静态)", value:  },
+  // 页面/接口快照/人工枚举在 UI 只保留一个入口，后端仍保留真实 provenance。
+  { label: "枚举候选", value: "manual_enum" },
   { label: "上游响应", value: "previous_response" },
   { label: "请求头", value: "request_header" },
   { label: "当前用户", value: "current_user" },
@@ -267,8 +272,8 @@ const SOURCE_KIND_OPTIONS = [
   { label: "调用上下文", value: "page_context" },
   { label: "固定值", value: "constant" },
 ];
-const OPTION_SOURCE_KINDS = ["api_option", "manual_enum" ];
-const ENUM_SOURCE_KINDS = [ "manual_enum"];
+const OPTION_SOURCE_KINDS = ["api_option", "page_enum", "form_option", "static_enum", "manual_enum"];
+const ENUM_SOURCE_KINDS = ["page_enum", "form_option", "static_enum", "manual_enum"];
 // 三类分类 × 各自允许的来源，避免出现"用户参数 + 固定值"这种语义不一致组合。
 const SOURCE_OPTIONS_BY_CATEGORY: Record<string, Array<{ label: string; value: string }>> = {
   user_param: SOURCE_KIND_OPTIONS.filter((x) =>
@@ -292,6 +297,9 @@ const PARAM_TYPE_LABELS: Record<string, string> = {
   array: "数组",
   object: "对象",
   "list-enum": "多选枚举",
+  single_enum: "单选枚举",
+  multi_enum: "多选枚举",
+  text: "文本",
 };
 const PARAM_TYPE_OPTIONS = ["string", "number", "boolean", "datetime", "date", "enum", "array", "object", "list-enum"]
   .map((x) => ({ label: PARAM_TYPE_LABELS[x] || x, value: x }));
@@ -301,6 +309,12 @@ const CAPABILITY_KIND_OPTIONS = [
   { label: "批量校验", value: "validate_batch" },
   { label: "批量提交", value: "submit_batch" },
   { label: "提交", value: "submit" },
+];
+const CAPABILITY_USAGE_OPTIONS: Array<{ label: string; value: CapabilityUsage }> = [
+  { label: "执行", value: "execute" },
+  { label: "选项来源", value: "option_source" },
+  { label: "事实核查", value: "fact_check" },
+  { label: "前置检查", value: "preflight" },
 ];
 const STEP_ROLE_OPTIONS = [
   "submit_anchor", "business_write", "business_get", "read_context", "read_option", "auth", "noise",
@@ -840,6 +854,12 @@ function capabilityActualStepIds(cap?: FlowCapabilityData | null) {
   }
   return ordered;
 }
+function capabilityRequestRefForStep(cap: FlowCapabilityData | null | undefined, stepId: string) {
+  return (cap?.request_refs || []).find((ref) => ref.step_id === stepId);
+}
+function capabilityUsageLabel(usage?: string) {
+  return optionLabel(CAPABILITY_USAGE_OPTIONS, usage || "execute");
+}
 function capturedRequestSteps(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
   const signature = requestGraphSignature(req);
   return (spec?.steps || []).filter((step) => {
@@ -893,13 +913,23 @@ function confidenceColor(value?: number) {
   if (value >= 0.7) return "warning";
   return "error";
 }
-function schemaBusinessType(spec: Record<string, any>) {
+function inferredSchemaBusinessType(spec: Record<string, any>) {
   if (Array.isArray(spec.enum) && spec.enum.length) return "enum";
   if (spec.type === "array" && Array.isArray(spec.items?.enum) && spec.items.enum.length) return "list-enum";
   if (spec.format === "date-time") return "datetime";
   if (spec.format === "date") return "date";
   if (spec.format === "name-ref" || spec["x-options-source"] || Array.isArray(spec["x-options"])) return "enum";
   return String(spec.type || spec.format || "any");
+}
+function schemaBusinessType(spec: Record<string, any>) {
+  return String(spec["x-dano-business-type"] || inferredSchemaBusinessType(spec));
+}
+function schemaWireType(spec: Record<string, any>) {
+  const explicit = String(spec["x-dano-wire-type"] || "");
+  if (explicit) return explicit;
+  const type = String(spec.type || "any");
+  const itemType = spec.items && typeof spec.items === "object" ? String(spec.items.type || "") : "";
+  return type === "array" && itemType ? `${type}<${itemType}>` : type;
 }
 function schemaFieldRows(schema?: Record<string, any>) {
   if (!schema || typeof schema !== "object") return [];
@@ -909,7 +939,8 @@ function schemaFieldRows(schema?: Record<string, any>) {
     .filter(([, spec]) => spec && typeof spec === "object")
     .map(([name, spec]) => ({
       name,
-      type: schemaBusinessType(spec as Record<string, any>),
+      businessType: schemaBusinessType(spec as Record<string, any>),
+      wireType: schemaWireType(spec as Record<string, any>),
       description: String((spec as any).description || (spec as any).title || ""),
       required: required.has(name),
     }));
@@ -1026,6 +1057,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [newStepRequestKey, setNewStepRequestKey] = useState("");
   const [newParamRequestKey, setNewParamRequestKey] = useState("");
   const [capabilityAddValue, setCapabilityAddValue] = useState<Record<number, string>>({});
+  const [capabilityAddUsage, setCapabilityAddUsage] = useState<Record<number, CapabilityUsage | "">>({});
+  const pendingCapabilityMembershipRef = useRef<Array<{
+    capability: string; requestId?: string; requestIndex?: number | string | null; usage: CapabilityUsage;
+  }>>([]);
   const [newParam, setNewParam] = useState({ step_id: "", path: "", key: "", type: "string", category: "user_param" });
   const [newLink, setNewLink] = useState({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
   const [editingLink, setEditingLink] = useState<Record<string, FlowLinkData>>({});
@@ -1043,9 +1078,53 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [activeFlowTab, setActiveFlowTab] = useState("abilities");
 
   function acceptFlowSpec(fs: FlowSpecData) {
-    flowSpecRef.current = fs;
-    setFlowSpec(fs);
-    const nextTitle = preferredSkillTitle(fs);
+    const pending = pendingCapabilityMembershipRef.current;
+    const edits: any[] = [];
+    const remaining: typeof pending = [];
+    let nextSpec = fs;
+    for (const item of pending) {
+      const capIdx = (nextSpec.capabilities || []).findIndex((cap, idx) => capabilityRef(cap, idx) === item.capability);
+      const step = (nextSpec.steps || []).find((candidate) => {
+        const meta = candidate.source_meta || {};
+        return (item.requestId && String(meta.request_id || "") === item.requestId) ||
+          (item.requestIndex != null && String(meta.request_index ?? "") === String(item.requestIndex));
+      });
+      const serverRef = capIdx >= 0 && step ? capabilityRequestRefForStep(nextSpec.capabilities?.[capIdx], step.step_id) : undefined;
+      if (
+        capIdx < 0 || !step
+        || (item.usage !== "option_source" && !capabilityActualStepIds(nextSpec.capabilities?.[capIdx]).includes(step.step_id))
+        || (item.usage === "option_source" && !serverRef)
+      ) {
+        remaining.push(item);
+        continue;
+      }
+      const cap = nextSpec.capabilities![capIdx];
+      const existingRef = serverRef || capabilityRequestRefForStep(cap, step.step_id);
+      const requestRefs: FlowCapabilityRequestRefData[] = [
+        ...(cap.request_refs || []).filter((ref) => ref.step_id !== step.step_id),
+        {
+          ...(existingRef || {}),
+          request_id: item.requestId || existingRef?.request_id,
+          request_index: item.requestIndex ?? existingRef?.request_index,
+          step_id: step.step_id,
+          usage: item.usage,
+          origin: "manual",
+          pinned: true,
+          confirmed: true,
+        },
+      ];
+      const capabilities = [...(nextSpec.capabilities || [])];
+      capabilities[capIdx] = { ...cap, request_refs: requestRefs };
+      nextSpec = { ...nextSpec, capabilities };
+      if (existingRef?.usage !== item.usage || existingRef?.origin !== "manual" || !existingRef?.pinned) {
+        edits.push({ op: "update_capability", capability_index: capIdx, field: "request_refs", value: requestRefs });
+      }
+    }
+    pendingCapabilityMembershipRef.current = remaining;
+    flowSpecRef.current = nextSpec;
+    setFlowSpec(nextSpec);
+    if (edits.length) send({ type: "flow_update", edits });
+    const nextTitle = preferredSkillTitle(nextSpec);
     if (nextTitle && !title.trim()) setTitle(nextTitle);
   }
 
@@ -1180,6 +1259,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setCheckReport(null);
     setBindDraft({});
     setEditingLink({});
+    setCapabilityAddValue({});
+    setCapabilityAddUsage({});
+    pendingCapabilityMembershipRef.current = [];
     setJsonDraft("");
     setJsonErr("");
     setLastServerJson("");
@@ -1245,7 +1327,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
       else if (m.type === "flow_spec" || m.type === "flow_spec_updated") {
         setLlmBusy(false);
-        setPhase("recording");
+        // 发布请求可能与最后一次字段更新响应交错到达。普通更新不能把发布中的
+        // loading/状态提前重置，否则用户看到按钮闪退但后端仍在发布。
+        if (phaseRef.current !== "publishing") setPhase("recording");
         const fs = m.full_spec || m.flow_spec;
         if (fs) {
           acceptFlowSpec(fs);
@@ -1285,6 +1369,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       else if (m.type === "error") {
         const detail = m.detail || "录制出错";
         setNamingBusy(false); setDescBusy(false); setLlmBusy(false); clearFlowOperation();
+        if (m.full_spec) {
+          acceptFlowSpec(m.full_spec);
+          setLastServerJson(JSON.stringify(m.full_spec));
+        }
+        if (m.check_report) setCheckReport(m.check_report);
         if (detail.includes("step not found") || detail.includes("link not found")) {
           message.warning("流程已变更，正在同步最新版本");
           send({ type: "refresh_flow_spec" });
@@ -1377,7 +1466,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const publishTitle = title.trim() || preferredSkillTitle(currentSpec);
     setResult(null); setPhase("publishing");
     if (!send({ type: "publish_request", action: action.trim(), title: publishTitle,
-      param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: true, flow_spec: currentSpec })) {
+      param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: true, flow_spec: currentSpec,
+      expected_fingerprint: currentSpec.meta?.current_fingerprint })) {
       setPhase("recording");
       setResult({ ok: false, reason: "录制连接已断开，发布请求未发送" });
     }
@@ -1979,15 +2069,24 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       },
     });
   }
-  function addStepToCapability(idx: number, value?: string) {
-    if (!value) return;
+  function addStepToCapability(idx: number, value?: string, usage?: CapabilityUsage | "") {
+    if (!value || !usage) return;
+    const membership = { usage, origin: "manual", pinned: true, confirmed: true };
     if (value.startsWith("step:")) {
       const stepId = value.slice(5);
       const cap = flowSpecRef.current?.capabilities?.[idx];
-      const stepIds = Array.from(new Set([...(capabilityActualStepIds(cap || {})), stepId]));
-      patchLocalCapability(idx, { step_ids: stepIds });
+      const stepIds = usage === "option_source"
+        ? capabilityActualStepIds(cap || {})
+        : Array.from(new Set([...(capabilityActualStepIds(cap || {})), stepId]));
+      const existingRef = (cap?.request_refs || []).find((ref) => ref.step_id === stepId);
+      const requestRefs = [
+        ...(cap?.request_refs || []).filter((ref) => ref.step_id !== stepId),
+        { ...(existingRef || {}), step_id: stepId, ...membership },
+      ];
+      patchLocalCapability(idx, { step_ids: stepIds, request_refs: requestRefs });
       send({ type: "flow_update", edits: [
-        { op: "add_capability_step", capability_index: idx, step_id: stepId },
+        { op: "add_capability_step", capability_index: idx, step_id: stepId, ...membership },
+        { op: "update_capability", capability_index: idx, field: "request_refs", value: requestRefs },
         { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
       ] });
       return;
@@ -1996,9 +2095,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       const requestKey = value.slice(4);
       const req = findCapturedRequest(flowSpecRef.current, requestKey);
       if (!req) { message.warning("没有找到选中的捕获接口"); return; }
+      const cap = flowSpecRef.current?.capabilities?.[idx];
+      pendingCapabilityMembershipRef.current.push({
+        capability: capabilityRef(cap || {}, idx),
+        requestId: req.request_id,
+        requestIndex: req.request_index,
+        usage,
+      });
       patchLocalCapability(idx, {});
       send({ type: "flow_update", edits: [
-        { op: "add_capability_step", capability_index: idx, request_index: req?.request_index, request_id: req?.request_id },
+        { op: "add_capability_step", capability_index: idx, request_index: req?.request_index, request_id: req?.request_id, ...membership },
         { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
       ] });
     }
@@ -2882,6 +2988,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const stepIds = capabilityActualStepIds(cap);
     const scopedStepIds = new Set(stepIds);
     const st = stepById[stepId];
+    const requestRef = capabilityRequestRefForStep(cap, stepId);
     if (!st) {
       return (
         <Collapse.Panel key={stepId} header={<Typography.Text type="danger">接口不存在：{stepId}</Typography.Text>}>
@@ -2898,6 +3005,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             <Tag color={(st.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{st.method}</Tag>
             <Typography.Text strong>{st.name || fallbackStepName(st.method, st.path)}</Typography.Text>
             <PathText value={st.path || stripHost(st.url)} maxWidth={420} />
+            <Tag color="blue">用途：{capabilityUsageLabel(requestRef?.usage)}</Tag>
+            {requestRef?.pinned && <Tag color="gold">手工锁定</Tag>}
             <Tag>{st.params?.length || 0} 字段</Tag>
           </Space>
         }
@@ -2915,6 +3024,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function renderCapabilityInterfacesWithFields(cap: FlowCapabilityData, capIdx: number) {
     const stepIds = capabilityActualStepIds(cap);
+    const auxiliaryRefs = (cap.request_refs || []).filter((ref) => ref.usage === "option_source" && ref.step_id && !stepIds.includes(ref.step_id));
     const addOptions = capabilityStepSelectOptions(cap);
     const fieldCount = stepIds.reduce((n, sid) => n + (stepById[sid]?.params?.length || 0), 0);
     return (
@@ -2927,18 +3037,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             options={[{ label: addOptions.length ? "选择要加入能力的接口" : "没有可添加的接口", value: "" }, ...addOptions]}
             onChange={(v) => setCapabilityAddValue((s) => ({ ...s, [capIdx]: v }))}
           />
+          <NativeSelect
+            value={capabilityAddUsage[capIdx] || ""}
+            width={140}
+            options={[{ label: "选择用途", value: "" }, ...CAPABILITY_USAGE_OPTIONS]}
+            onChange={(v) => setCapabilityAddUsage((s) => ({ ...s, [capIdx]: v as CapabilityUsage | "" }))}
+          />
           <Button
             size="small"
             type="primary"
-            disabled={!capabilityAddValue[capIdx]}
+            disabled={!capabilityAddValue[capIdx] || !capabilityAddUsage[capIdx]}
             onClick={() => {
-              addStepToCapability(capIdx, capabilityAddValue[capIdx]);
+              addStepToCapability(capIdx, capabilityAddValue[capIdx], capabilityAddUsage[capIdx]);
               setCapabilityAddValue((s) => ({ ...s, [capIdx]: "" }));
+              setCapabilityAddUsage((s) => ({ ...s, [capIdx]: "" }));
             }}
           >
             添加接口
           </Button>
-          <Tag>{stepIds.length} 接口 / {fieldCount} 字段</Tag>
+          <Tag>{stepIds.length} 执行接口 / {auxiliaryRefs.length} 候选来源 / {fieldCount} 字段</Tag>
         </Space>
         {!stepIds.length ? (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未绑定接口" />
@@ -2946,6 +3063,26 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <Collapse size="small">
             {stepIds.map((stepId, stepIdx) => renderCapabilityStepWithFields(cap, capIdx, stepId, stepIdx))}
           </Collapse>
+        )}
+        {auxiliaryRefs.length > 0 && (
+          <List
+            size="small"
+            header={<Typography.Text strong>候选来源</Typography.Text>}
+            dataSource={auxiliaryRefs}
+            renderItem={(ref) => {
+              const st = stepById[String(ref.step_id || "")];
+              return (
+                <List.Item actions={[<Button key="remove" size="small" danger onClick={() => removeStepFromCapability(capIdx, String(ref.step_id || ""))}>移除</Button>]}>
+                  <Space wrap>
+                    <Tag color="cyan">选项来源</Tag>
+                    <Typography.Text>{st?.name || ref.path || ref.step_id}</Typography.Text>
+                    {st && <PathText value={st.path || stripHost(st.url)} maxWidth={420} />}
+                    {ref.pinned && <Tag color="gold">手工锁定</Tag>}
+                  </Space>
+                </List.Item>
+              );
+            }}
+          />
         )}
       </Space>
     );
@@ -3025,7 +3162,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <List.Item>
             <Space wrap>
               <Typography.Text code>{row.name}</Typography.Text>
-              <Tag>{PARAM_TYPE_LABELS[row.type] || row.type}</Tag>
+              <Tag color="blue">业务类型：{PARAM_TYPE_LABELS[row.businessType] || row.businessType}</Tag>
+              <Tag>Wire：{row.wireType}</Tag>
               {row.required && <Tag color="red">必填</Tag>}
               {row.description && <Typography.Text type="secondary">{row.description}</Typography.Text>}
             </Space>
@@ -3209,7 +3347,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             {rows.slice(0, 8).map((row) => (
               <Space key={`${title}-${row.name}`} size={4} wrap>
                 <Typography.Text code style={{ fontSize: 12 }}>{row.name}</Typography.Text>
-                <Tag>{PARAM_TYPE_LABELS[row.type] || row.type}</Tag>
+                <Tag color="blue">业务类型：{PARAM_TYPE_LABELS[row.businessType] || row.businessType}</Tag>
+                <Tag>Wire：{row.wireType}</Tag>
                 {row.required && <Tag color="red">必填</Tag>}
                 {row.description && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{row.description}</Typography.Text>}
               </Space>
@@ -3289,10 +3428,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                         <Space direction="vertical" size={4} style={{ width: "100%", marginTop: 6 }}>
                           {stepIds.length ? stepIds.map((stepId) => {
                             const st = stepById[stepId];
+                            const requestRef = capabilityRequestRefForStep(cap, stepId);
                             return (
                               <Space key={stepId} size={4} wrap>
                                 <Tag>{st?.name || st?.path || stepId}</Tag>
                                 {st && <PathText value={st.path || stripHost(st.url)} maxWidth={260} />}
+                                <Tag color="blue">用途：{capabilityUsageLabel(requestRef?.usage)}</Tag>
+                                {requestRef?.pinned && <Tag color="gold">手工锁定</Tag>}
                               </Space>
                             );
                           }) : <Typography.Text type="secondary" style={{ fontSize: 12 }}>未绑定步骤</Typography.Text>}

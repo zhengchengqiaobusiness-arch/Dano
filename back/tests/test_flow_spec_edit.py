@@ -10,6 +10,7 @@ import dano.execution.page.flow_spec as flow_spec_module
 from dano.execution.page.flow_spec import (
     FlowSpec, FlowStep, FlowLink, ParamField, SelectBinding, FlowCapability,
     CapabilityDependency, CapabilityField, CapabilityRelation,
+    RequestFacts,
     apply_flow_edits, validate_flow_spec, _infer_type_from_value,
     refresh_review_items, flow_spec_to_api_request,
     capability_to_flow_spec_view, compile_capability_to_api_request, flow_spec_capability_contracts,
@@ -18,6 +19,7 @@ from dano.execution.page.flow_spec import (
     flow_spec_canonical_summary, flow_spec_shadow_diff, migrate_v1_flow_spec_to_capability_spec,
     migrate_v2_flow_spec_to_capability_spec, capability_spec_to_legacy_flow_spec,
     capability_spec_to_api_request, to_flow_spec,
+    build_default_flow_capabilities, prepare_flow_spec_for_publish, prepare_flow_release_candidate,
 )
 from dano.execution.page.request_capture import execute_api_request
 
@@ -1231,6 +1233,8 @@ def test_edit_type_to_string_atomically_removes_enum_contract():
             type="enum",
             category="user_param",
             source_kind="page_enum",
+            reason="用户选择；页面枚举选项：类型A=A、类型B=B",
+            description="业务类型；页面枚举选项：类型A=A、类型B=B",
             enum_options=[{"label": "类型A", "value": "A"}, {"label": "类型B", "value": "B"}],
             enum_value_map={"类型A": "A", "类型B": "B"},
         )],
@@ -1257,7 +1261,40 @@ def test_edit_type_to_string_atomically_removes_enum_contract():
     assert param.source_kind == "user_input"
     assert param.enum_options is None
     assert param.enum_value_map is None
+    assert param.reason == "字段已改为普通输入，不再使用旧枚举候选"
+    assert param.description == "业务类型"
     assert new.steps[0].selects == []
+
+
+def test_manual_field_contract_is_not_reinferred_from_stale_select_binding():
+    spec = FlowSpec(flow_id="manual-contract", steps=[FlowStep(
+        step_id="submit", method="POST", url="/submit", path="/submit",
+        params=[ParamField(
+            path="type", key="请假类型", value="2", type="string",
+            category="system_const", source_kind="constant", source={"kind": "constant"},
+            reason="分页参数内部提交；枚举选项：模式一=1、模式二=2",
+            description="分页配置；页面枚举选项：模式一=1、模式二=2",
+            enum_options=[{"label": "模式一", "value": 1}],
+            enum_value_map={"模式一": 1},
+            locked=True,
+            evidence=[{"source": "manual_edit", "field": "category", "value": "system_const"}],
+        )],
+        selects=[SelectBinding(
+            param="请假类型", path="type", enum_source="dom",
+            options=[{"label": "病假", "value": 2}], option_map={"病假": 2},
+        )],
+    )])
+
+    synced = sync_flow_spec_models(spec)
+    param = synced.steps[0].params[0]
+
+    assert param.type == "string"
+    assert param.category == "system_const"
+    assert param.source_kind == "constant"
+    assert param.enum_options is None
+    assert param.enum_value_map is None
+    assert param.reason == "分页参数内部提交"
+    assert param.description == "分页配置"
 
 
 def test_edit_type_to_enum_does_not_overwrite_category_or_source():
@@ -2555,6 +2592,141 @@ def test_enum_option_description_replaces_stale_snapshot_instead_of_appending():
     assert synced.steps[0].params[0].description == "页面枚举选项：病假=2、事假=1、年假=3"
 
 
+def test_manual_pinned_business_query_membership_survives_all_sync_layers():
+    spec = FlowSpec(
+        flow_id="manual-query-membership",
+        steps=[FlowStep(
+            step_id="records", method="GET", url="/api/leave/page", path="/api/leave/page",
+            source_meta={"role": "read_option", "request_id": "req-records", "request_index": 7},
+            response_json={"data": {"list": [{"id": "1"}], "total": 1}},
+        )],
+        capabilities=[FlowCapability(name="query_status", kind="query_status")],
+    )
+
+    edited = apply_flow_edits(spec, [{
+        "op": "add_capability_step",
+        "capability_name": "query_status",
+        "step_id": "records",
+        "usage": "execute",
+        "origin": "manual",
+        "pinned": True,
+    }])
+    prepared = prepare_flow_spec_for_publish(edited)
+
+    capability = prepared.capabilities[0]
+    assert capability.step_ids == ["records"]
+    assert any(node.get("type") == "call" and node.get("step_id") == "records" for node in capability.nodes)
+    assert capability.request_refs[0].pinned is True
+    assert capability.request_refs[0].usage == "execute"
+
+
+def test_option_source_membership_is_visible_but_not_executed():
+    spec = FlowSpec(
+        flow_id="option-source-membership",
+        steps=[FlowStep(
+            step_id="options", method="GET", url="/api/dict/options", path="/api/dict/options",
+            source_meta={"role": "read_option", "request_id": "req-options"},
+            response_json={"data": [{"label": "甲", "value": 1}]},
+        )],
+        capabilities=[FlowCapability(name="submit", kind="submit")],
+    )
+
+    edited = apply_flow_edits(spec, [{
+        "op": "add_capability_step", "capability_name": "submit", "step_id": "options",
+        "usage": "option_source", "origin": "manual", "pinned": True,
+    }])
+    prepared = prepare_flow_spec_for_publish(edited)
+
+    capability = prepared.capabilities[0]
+    assert capability.step_ids == []
+    assert not any(node.get("type") == "call" for node in capability.nodes)
+    assert [(ref.step_id, ref.usage, ref.pinned) for ref in capability.request_refs] == [
+        ("options", "option_source", True),
+    ]
+
+
+def test_default_query_capability_uses_business_records_not_process_configuration():
+    spec = FlowSpec(
+        flow_id="query-evidence",
+        steps=[
+            FlowStep(
+                step_id="definition", method="GET",
+                url="/admin-api/bpm/process-definition/get", path="/admin-api/bpm/process-definition/get",
+                source_meta={"role": "business_get"}, response_json={"data": {"id": "definition-id"}},
+            ),
+            FlowStep(
+                step_id="records", method="GET",
+                url="/admin-api/oa/duty-leave/page", path="/admin-api/oa/duty-leave/page",
+                source_meta={"role": "read_option"},
+                response_json={"data": {"list": [{"id": "leave-1", "type": 2}], "total": 1}},
+            ),
+        ],
+    )
+
+    capabilities = build_default_flow_capabilities(spec)
+    query = next(cap for cap in capabilities if cap.kind == "query_status")
+
+    assert query.step_ids == ["records"]
+
+
+def test_capability_schema_separates_enum_business_type_from_numeric_wire_type():
+    spec = FlowSpec(
+        flow_id="enum-wire-contract",
+        steps=[FlowStep(
+            step_id="submit", method="POST", url="/submit", path="/submit",
+            params=[ParamField(
+                path="type", key="请假类型", value=2, type="enum", wire_type="number",
+                category="user_param", source_kind="page_enum",
+                enum_options=[{"label": "病假", "value": 2}], enum_value_map={"病假": 2},
+            )],
+        )],
+        capabilities=[FlowCapability(name="submit", kind="submit", step_ids=["submit"])],
+    )
+
+    prepared, release = prepare_flow_release_candidate(spec)
+    field = prepared.capabilities[0].input_schema["properties"]["请假类型"]
+
+    assert field["type"] == "string"
+    assert field["x-dano-business-type"] == "single_enum"
+    assert field["x-dano-wire-type"] == "number"
+    assert release["interface_inventory"][0]["step_ids"] == ["submit"]
+
+
+def test_page_enum_truth_is_not_overwritten_by_business_record_list():
+    spec = FlowSpec(
+        flow_id="page-enum-priority",
+        request_facts=RequestFacts(option_sources=[{
+            "kind": "page_enum_options",
+            "options": {
+                "type": {
+                    "options": [
+                        {"label": "病假", "value": 2},
+                        {"label": "事假", "value": 1},
+                        {"label": "婚假", "value": 3},
+                    ],
+                    "option_map": {"病假": 2, "事假": 1, "婚假": 3},
+                },
+            },
+        }]),
+        steps=[FlowStep(
+            step_id="submit", method="POST", url="/submit", path="/submit",
+            params=[ParamField(path="type", key="请假类型", value=3, type="enum", wire_type="number")],
+            selects=[SelectBinding(
+                param="请假类型", path="type",
+                source_url="/api/leave/page", label_key="type", value_key="type",
+                options=[{"label": "3", "value": 3}], option_map={"3": 3}, enum_source="api", enum_confirmed=True,
+            )],
+        )],
+    )
+
+    synced = sync_flow_spec_models(spec)
+    param = synced.steps[0].params[0]
+
+    assert param.source_kind == "page_enum"
+    assert param.enum_value_map == {"病假": 2, "事假": 1, "婚假": 3}
+    assert [item["label"] for item in param.enum_options] == ["病假", "事假", "婚假"]
+
+
 def test_strict_skill_level_blocks_missing_description_and_failure_handling():
     spec = FlowSpec(
         flow_id="f",
@@ -3354,8 +3526,9 @@ def test_repeated_orchestration_repairs_contract_without_expanding_interface_sco
 
     out = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=_ScopeExpandingPlanner(), model="fake"))
 
-    assert [cap.name for cap in out.capabilities] == ["submit"]
-    assert out.capabilities[0].title == "完善后的提交"
+    assert [cap.name for cap in out.capabilities] == ["submit_batch"]
+    assert out.capabilities[0].kind == "submit_batch"
+    assert out.capabilities[0].title == "完善后的批量提交"
     assert out.capabilities[0].step_ids == ["submit"]
 
 

@@ -897,7 +897,15 @@ async def record_ws(ws: WebSocket) -> None:
                         "check_report": validate_flow_spec(pending_flow_spec),
                     })
                 except Exception as e:  # noqa: BLE001
-                    await ws.send_json({"type": "error", "detail": f"flow_update failed: {e}"})
+                    # 前端会先做乐观更新。失败时必须回传服务端权威版本，否则页面与
+                    # pending_flow_spec 分叉，下一次发布会发生指纹冲突或使用旧字段。
+                    await ws.send_json({
+                        "type": "error",
+                        "detail": f"flow_update failed: {e}",
+                        "operation": "flow_update",
+                        "full_spec": flow_spec_to_client(pending_flow_spec),
+                        "check_report": validate_flow_spec(pending_flow_spec),
+                    })
             elif t == "flow_replace":
                 try:
                     from dano.execution.page.flow_spec import (
@@ -1109,12 +1117,28 @@ async def record_ws(ws: WebSocket) -> None:
                         FlowSpec,
                         flow_spec_to_client,
                         flow_spec_required_params,
+                        flow_spec_fingerprint,
                         flow_spec_to_api_request,
                         flow_spec_to_summary,
-                        prepare_flow_spec_for_publish,
+                        prepare_flow_release_candidate,
                         validate_flow_spec,
                     )
                     raw_spec = msg.get("flow_spec")
+                    expected_fingerprint = str(msg.get("expected_fingerprint") or "")
+                    current_fingerprint = flow_spec_fingerprint(pending_flow_spec)
+                    if expected_fingerprint and expected_fingerprint != current_fingerprint:
+                        await ws.send_json({
+                            "type": "result",
+                            "report": {
+                                "ok": False,
+                                "stage": "flow_spec_conflict",
+                                "reason": "工作台版本已变化，请使用最新版本重新发布",
+                                "expected_fingerprint": expected_fingerprint,
+                                "current_fingerprint": current_fingerprint,
+                                "full_spec": flow_spec_to_client(pending_flow_spec),
+                            },
+                        })
+                        continue
                     if isinstance(raw_spec, dict):
                         raw_spec = _restore_hidden_flow_spec_fields(raw_spec)
                         pending_flow_spec = FlowSpec.model_validate(raw_spec)
@@ -1130,7 +1154,7 @@ async def record_ws(ws: WebSocket) -> None:
                             },
                         })
                         continue
-                    pending_flow_spec = prepare_flow_spec_for_publish(pending_flow_spec)
+                    pending_flow_spec, release_candidate = prepare_flow_release_candidate(pending_flow_spec)
                     check_report = validate_flow_spec(pending_flow_spec)
                     if not check_report.get("passed"):
                         await ws.send_json({
@@ -1160,6 +1184,10 @@ async def record_ws(ws: WebSocket) -> None:
                         })
                         continue
                     apir["_flow_spec"] = flow_spec_to_summary(pending_flow_spec)
+                    apir["_release_snapshot"] = {
+                        **release_candidate,
+                        "flow_spec": pending_flow_spec.model_dump(exclude_none=True),
+                    }
                     apir["recording_mode"] = recording_mode
                     required = flow_spec_required_params(pending_flow_spec)
                     last_params = apir.get("params") or ((apir.get("steps") or [{}])[-1].get("params") or [])
@@ -1196,6 +1224,7 @@ async def record_ws(ws: WebSocket) -> None:
                     await _auto_export(init["tenant"])
                 await ws.send_json({"type": "result", "report": {**rep, "check_report": check_report,
                                                                   "full_spec": flow_spec_to_client(pending_flow_spec),
+                                                                  "release": release_candidate,
                                                                   "recording_mode": recording_mode},
                                     "parsed_steps": len(last_params), "via": "flow_spec",
                                     "recording_mode": recording_mode,

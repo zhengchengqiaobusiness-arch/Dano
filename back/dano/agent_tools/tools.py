@@ -807,6 +807,13 @@ async def request_review(run_id: str, params: dict) -> dict:
         board = ReviewBoard.from_settings()
     verdicts = await board.review(asset_type=draft.asset_type.value, asset_key=draft.asset_key,
                                   body=draft.body, evidence=evidence)
+    unavailable = [
+        reason
+        for verdict in verdicts
+        if not verdict.passed
+        for reason in (verdict.reasons or [])
+        if str(reason).startswith("评审服务不可用:")
+    ]
     # 确定性容错(写进 DB 证据,故 verify_reviewed 也认):若本资产是 **dry-only**(无 live health 证据,
     # 即录制路径 by-design 的写安全模式 → partially_verified),评审若**仅因"dry/self_check 未真跑"否决** = 误判该安全模式
     # → 剔除该理由;某维度理由清空即视为通过。**确定性层承重,不让 LLM 抖动阻断按设计的安全行为。**
@@ -828,7 +835,14 @@ async def request_review(run_id: str, params: dict) -> dict:
         out.append({"role": v.role, "model": v.model_id, "passed": passed, "reasons": reasons})
     all_passed = bool(out) and all(o["passed"] for o in out)
     log.info("request_review", draft=str(draft.asset_draft_id), all_passed=all_passed)
-    return {"all_passed": all_passed, "verdicts": out, "review_run_ids": review_run_ids}
+    return {
+        "all_passed": all_passed,
+        "verdicts": out,
+        "review_run_ids": review_run_ids,
+        "review_unavailable": bool(unavailable),
+        "retryable": bool(unavailable),
+        "review_error": "评审服务暂时未返回有效结果，请稍后重试发布" if unavailable else "",
+    }
 
 
 # ── 发布硬关卡:后端重读证据校验,通过才入库发布 ──

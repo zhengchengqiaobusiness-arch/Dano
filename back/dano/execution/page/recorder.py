@@ -299,7 +299,10 @@ _RECORDER_JS = r"""() => {
             }
           }
         } catch (_) {}
-        return label;
+        // 自定义下拉没有暴露 data-value/value 时，真实提交值未知。不能把
+        // label 伪装成 value，否则 body 提交短码(如 type=2)时会生成一份
+        // 看似完整、实际不可执行的 label/value 映射。
+        return null;
       }
       function harvest(nodes) {
         for (var i = 0; i < nodes.length; i++) {
@@ -315,7 +318,10 @@ _RECORDER_JS = r"""() => {
           if (!t || t.length > 60 || /^\s*[\*\-•]\s*$/.test(t)) continue;
           if (!seen_labels[t]) {
             seen_labels[t] = 1;
-            out.push({ label: t, value: optionValue(n, t) });
+            var option = { label: t };
+            var option_value = optionValue(n, t);
+            if (option_value !== null && option_value !== undefined && option_value !== '') option.value = option_value;
+            out.push(option);
           }
           if (out.length >= 500) break;
         }
@@ -447,10 +453,12 @@ _RECORDER_JS = r"""() => {
   }
   // 选中值落定检测:**不靠固定延时**,轮询显示值直到变成「非空且与点击前不同」才记 pick
   // —— 异步/远程搜索/级联(值晚一点回填)也能稳抓,不会读太早拿空值而漏掉(框架无关)。
-  function pollPick(trig) {
+  function pollPick(trig, resetOptions) {
     if (pickTimer) { clearInterval(pickTimer); pickTimer = null; }
     if (!trig) return;
-    lastPickOptions = [];                                 // H9 修复:启动即清,避免快速切换两个下拉时旧 timer 用新值错位
+    // 只有打开一个新触发框时才清理旧候选。点击弹层选项后再次启动轮询时，
+    // 必须保留刚从弹层抓到的 options，否则录制结果只剩内部提交码。
+    if (resetOptions) lastPickOptions = [];
     var tries = 0;
     pickTimer = setInterval(function () {
       tries++;
@@ -468,14 +476,14 @@ _RECORDER_JS = r"""() => {
     //    再轮询触发框值落定后随 pick 一起回传(选完即生效)
     if (e.target.closest && e.target.closest(POPUP)) {
       var _opts = popupOptions(e.target.closest(POPUP)); if (_opts.length) lastPickOptions = _opts;
-      pollPick(activeTrigger); return;
+      pollPick(activeTrigger, false); return;
     }
     // B) 点选择型触发框 → 记住它 + 点击前的显示值,开始轮询(覆盖单击即选 / 远程搜索异步回填 / 级联)
     var trig = triggerOf(e.target);
     if (trig) {
       activeTrigger = trig;
       prevVal = pickVal(trig);
-      pollPick(trig);
+      pollPick(trig, true);
       return;
     }
     // C) 普通输入框点击 = 聚焦噪声(打字会另记 fill)→ 跳过
@@ -926,9 +934,21 @@ class RecordSession:
             items = as_list_payload(data_for_list)
             if items is None:
                 return
-            self.reads.append({"method": m, "url": url, "status": response.status,
-                               "json": data_for_list if len(self.reads) < 60 else None,
-                               "count": len(items)})
+            request_index = self._request_fact_index.get(id(response.request))
+            fact = next((item for item in self.all_requests if item.get("request_index") == request_index), {})
+            self.reads.append({
+                "method": m,
+                "url": url,
+                "status": response.status,
+                "json": data_for_list if len(self.reads) < 60 else None,
+                "count": len(items),
+                "request_index": request_index,
+                "request_id": fact.get("request_id"),
+                "sequence": fact.get("sequence", request_index),
+                "page_id": fact.get("page_id"),
+                "frame_id": fact.get("frame_id"),
+                "role": fact.get("role"),
+            })
         except Exception:  # noqa: BLE001
             pass
 

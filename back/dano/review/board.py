@@ -120,14 +120,24 @@ class OpenAICompatClient:
         }
         headers = {"Authorization": f"Bearer {self.api_key}"}
         async with httpx.AsyncClient(timeout=timeout_s) as c:
-            # 优先用 JSON 模式;若模型(如 reasoner 类)不支持 response_format 而 4xx,则去掉重试一次。
-            r = await c.post(self._url, json={**base, "response_format": {"type": "json_object"}},
-                             headers=headers)
-            if r.status_code in (400, 422):
-                r = await c.post(self._url, json=base, headers=headers)
-            r.raise_for_status()
-            content = r.json()["choices"][0]["message"]["content"]
-        return _loads_lenient(content)
+            # 优先用 JSON 模式。部分兼容模型会返回 200 但 content 为空，把结果
+            # 放进分段 content/reasoning_content/tool arguments；若仍无法解析，再
+            # 去掉 response_format 重试一次，避免外层重复三次同一个空响应。
+            payloads = [{**base, "response_format": {"type": "json_object"}}, base]
+            last_error: Exception | None = None
+            for index, payload in enumerate(payloads):
+                r = await c.post(self._url, json=payload, headers=headers)
+                if index == 0 and r.status_code in (400, 422):
+                    continue
+                r.raise_for_status()
+                try:
+                    return _completion_json(r.json())
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                    last_error = exc
+                    if index == 0:
+                        continue
+                    raise
+        raise last_error or json.JSONDecodeError("评审服务未返回有效 JSON", "", 0)
 
 
 class ReviewBoard:
@@ -195,11 +205,50 @@ class ReviewBoard:
         log.warning("review.one.failed", role=role, model=model,
                     retries=self.max_retries, error=str(last_err))
         return ReviewVerdict(role=role, model_id=model, passed=False,
-                             reasons=[f"评审调用失败(重试{self.max_retries}次): {last_err}"])
+                             reasons=[f"评审服务不可用: {last_err}"])
 
 
-def _loads_lenient(content: str) -> dict[str, Any]:
+def _completion_json(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract structured output across common OpenAI-compatible response shapes."""
+    choices = payload.get("choices") or []
+    choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    candidates: list[Any] = []
+    content = message.get("content")
+    if isinstance(content, list):
+        text_parts = [
+            item.get("text") or item.get("content")
+            for item in content
+            if isinstance(item, dict) and (item.get("text") or item.get("content"))
+        ]
+        if text_parts:
+            candidates.append("".join(str(item) for item in text_parts))
+    elif content not in (None, ""):
+        candidates.append(content)
+    for tool_call in message.get("tool_calls") or []:
+        function = tool_call.get("function") if isinstance(tool_call, dict) else None
+        if isinstance(function, dict) and function.get("arguments") not in (None, ""):
+            candidates.append(function.get("arguments"))
+    for value in (choice.get("text"), payload.get("output_text"), message.get("reasoning_content")):
+        if value not in (None, ""):
+            candidates.append(value)
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            parsed = _loads_lenient(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            last_error = exc
+    if last_error:
+        raise last_error
+    raise json.JSONDecodeError("评审服务返回空响应", "", 0)
+
+
+def _loads_lenient(content: Any) -> dict[str, Any]:
     """容忍非严格 JSON 输出(部分模型不遵守 response_format:带 ```fence 或前后文字)。"""
+    if isinstance(content, dict):
+        return content
     try:
         return json.loads(content)
     except (json.JSONDecodeError, TypeError):
@@ -287,13 +336,39 @@ def _build_user(asset_type: str, asset_key: str, body: dict, evidence: list[dict
     payload = json.dumps({
         "asset_type": asset_type,
         "asset_key": asset_key,
-        "declarative_body": _redact_secrets(body),     # 脱敏:不把 auth_headers/Cookie/token 喂给评审模型
-        "sandbox_evidence": _redact_secrets(evidence),
+        "declarative_body": _review_projection(_redact_secrets(body)),
+        "sandbox_evidence": _review_projection(_redact_secrets(evidence)),
     }, ensure_ascii=False, indent=2)
     user = _SYSTEM_CONTEXT + "\n\n【待评审资产】\n" + payload
     if asset_type == "page_script" and (body or {}).get("api_request") and not (body or {}).get("actions"):
         user += _CAPTURE_REVIEW_NOTE   # 录制抓请求:三模型只判语义、拿 Goal 当业务方案对照
     return user
+
+
+_REVIEW_OMIT_KEYS = {
+    "_release_snapshot", "_flow_spec", "request_facts", "response_json", "response_body",
+    "raw_response", "captured_requests", "sample_inputs", "backup_body_source",
+}
+
+
+def _review_projection(value: Any, *, depth: int = 0) -> Any:
+    """Keep review semantics while dropping recorder snapshots and bulky response facts."""
+    if depth > 12:
+        return "[省略深层结构]"
+    if isinstance(value, dict):
+        return {
+            key: _review_projection(item, depth=depth + 1)
+            for key, item in value.items()
+            if key not in _REVIEW_OMIT_KEYS
+        }
+    if isinstance(value, list):
+        projected = [_review_projection(item, depth=depth + 1) for item in value[:100]]
+        if len(value) > 100:
+            projected.append({"省略条数": len(value) - 100})
+        return projected
+    if isinstance(value, str) and len(value) > 4000:
+        return value[:4000] + "...[已截断]"
+    return value
 
 
 # ─────────── P3:录制 skill 的**非阻断**语义顾问(LLM 只提议,不当结构闸门) ───────────

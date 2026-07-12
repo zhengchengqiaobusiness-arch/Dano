@@ -47,6 +47,22 @@ def _get(url, resp=None):
 
 
 class ToFlowSpecTest(unittest.TestCase):
+    def test_recorded_user_input_wins_over_internal_field_name_heuristics(self):
+        spec = to_flow_spec(
+            captured_requests=[_post("https://oa.test/submit", {"activityId": 142, "reason": "请假"})],
+            reads=[],
+            samples={"审批节点": "142", "原因": "请假"},
+            storage_state=None,
+            required_labels={"审批节点", "原因"},
+            page_enum_options={},
+        )
+
+        params = {param.path: param for step in spec.steps for param in step.params}
+        activity = params["activityId"]
+        assert activity.category == "user_param"
+        assert activity.source_kind == "user_input"
+        assert activity.exposed_to_user is True
+
 
     def test_single_submit_step(self):
         captured = [_post(
@@ -814,9 +830,9 @@ class GetBusinessStepTest(unittest.TestCase):
 
         out = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=None, model=None))
 
-        cap = next(c for c in out.capabilities if c.name == "submit")
+        cap = next(c for c in out.capabilities if c.name == "submit_batch")
         self.assertEqual(cap.title, "人工改过的标题")
-        self.assertEqual(cap.kind, "submit")
+        self.assertEqual(cap.kind, "submit_batch")
         self.assertTrue(cap.confirmed)
         self.assertIn("submit", cap.step_ids)
         self.assertGreaterEqual(cap.confidence, 0.3)

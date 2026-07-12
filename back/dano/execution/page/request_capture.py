@@ -461,7 +461,9 @@ def _enum_records_from_page_options(opts: list | tuple | None) -> list[dict]:
     for opt in opts or []:
         if isinstance(opt, dict):
             label = opt.get("label") or opt.get("text") or opt.get("name") or opt.get("value")
-            rec = _enum_option_record(label, opt.get("value")) if "value" in opt else None
+            # value=None 表示页面只暴露了显示名，并不表示真实提交值等于 label。
+            # 保留为 label-only，稍后仅把本次实际选中项绑定到请求体中的录制值。
+            rec = _enum_option_record(label, opt.get("value")) if opt.get("value") is not None else None
             if rec is None and str(label or "").strip():
                 rec = {"label": str(label).strip()}
         else:
@@ -585,7 +587,10 @@ def _attach_enum_binding(entry: dict, records: list[dict], *, source: str, confi
     entry["option_map"] = _enum_option_map(records)
     entry["count"] = len(labels)
     entry["enum_source"] = source
-    entry["enum_confirmed"] = bool(confirmed)
+    # Confirmation is per mapping, not merely per visible label. A DOM popup
+    # may expose every label while the recording proves the wire value of only
+    # the selected item; such a partial map must remain unconfirmed.
+    entry["enum_confirmed"] = bool(confirmed and len(entry["option_map"]) == len(labels))
     return entry
 
 
@@ -1149,13 +1154,15 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
                     score += 2
                 if _name_match(str(picked), leaf) or _name_match(selected, leaf):
                     score += 2
+                semantic_score = score
                 if str(sv).strip() and not any(
                     _exact_recorded_match(sv, o.get("label"))
                     for o in _enum_records_from_page_options(opts)
                 ):
-                    # 下拉显示名不在 body,body 大概率是内部值;短数字/短码更像枚举值,长文本更像普通输入。
-                    score += 2 if _re.fullmatch(r"[A-Za-z0-9_-]{1,8}", str(sv).strip()) else -2
-                if score > 0:
+                    # 短码只能增强已有的字段语义证据，不能独立制造匹配；否则任意
+                    # 部门/人员下拉都会被绑定到第一个 type/status/id 短码字段。
+                    score += 2 if semantic_score > 0 and _re.fullmatch(r"[A-Za-z0-9_-]{1,8}", str(sv).strip()) else -2
+                if semantic_score > 0 and score > 0:
                     scored.append((score, path, toks))
             hit = max(scored, default=None, key=lambda x: x[0])
             if hit is None:

@@ -10,7 +10,7 @@ import pytest
 pytest.importorskip("playwright")
 
 from dano.execution.page.driver import PlaywrightPageDriver
-from dano.execution.page.recorder import RecordSession
+from dano.execution.page.recorder import RecordSession, _RECORDER_JS
 
 
 def test_recorder_key_safety_policy() -> None:
@@ -54,6 +54,14 @@ def test_recorded_page_enum_options_attach_popup_pick_to_previous_field() -> Non
 
     assert enums["类型"]["selected"] == "病假"
     assert enums["类型"]["options"] == ["病假", "事假", "婚假"]
+
+
+def test_popup_pick_preserves_options_until_selected_value_is_recorded() -> None:
+    """点击弹层项时不得清空刚抓到的候选，未知 value 也不能伪装成 label。"""
+    assert "pollPick(activeTrigger, false)" in _RECORDER_JS
+    assert "pollPick(trig, true)" in _RECORDER_JS
+    assert "if (resetOptions) lastPickOptions = []" in _RECORDER_JS
+    assert "return label;" not in _RECORDER_JS
 
 
 _HTML = """<!doctype html><html><head><meta charset="utf-8"></head><body>
