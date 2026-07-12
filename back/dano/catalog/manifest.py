@@ -360,9 +360,19 @@ def _capability_of(skill: SkillSpec) -> str:
     meta = getattr(skill, "call_metadata", {}) or {}
     goal = getattr(skill, "goal", {}) or {}
     caps = list(getattr(skill, "capabilities", []) or meta.get("capabilities") or [])
+    canonical_refs: dict[str, str] = {}
+    canonical_caps: list[dict] = []
+    for raw in caps:
+        if not isinstance(raw, dict):
+            continue
+        name, kind, _title = _canonical_capability_identity(raw)
+        canonical_caps.append({**raw, "name": name, "kind": kind})
+        for ref in (raw.get("name"), raw.get("capability_id"), raw.get("kind")):
+            if ref:
+                canonical_refs[str(ref)] = name
     default_cap = ""
     for preferred in ("submit_batch", "submit", "query_status", "list_options"):
-        hit = next((c for c in caps if isinstance(c, dict) and (c.get("name") == preferred or c.get("kind") == preferred)), None)
+        hit = next((c for c in canonical_caps if c.get("name") == preferred or c.get("kind") == preferred), None)
         if hit:
             default_cap = str(hit.get("name") or hit.get("kind") or "").strip()
             break
@@ -376,7 +386,7 @@ def _capability_of(skill: SkillSpec) -> str:
     for val in candidates:
         cap = str(val or "").strip()
         if cap:
-            return cap
+            return canonical_refs.get(cap, cap)
     return skill.skill_id
 
 
@@ -630,11 +640,35 @@ def _capability_relations(skill: SkillSpec) -> list[dict]:
         flow_spec.get("capability_relations") if isinstance(flow_spec, dict) else None,
     ]
     raw_relations = next((value for value in candidates if isinstance(value, list) and value), [])
+    canonical_refs: dict[str, str] = {}
+    for cap in list(getattr(skill, "capabilities", []) or []):
+        if not isinstance(cap, dict):
+            continue
+        canonical_name, _kind, _title = _canonical_capability_identity(cap)
+        if canonical_name:
+            for ref in (cap.get("name"), cap.get("capability_id"), cap.get("kind")):
+                if ref:
+                    canonical_refs[str(ref)] = canonical_name
     relations: list[dict] = []
     for raw in raw_relations:
         if not isinstance(raw, dict):
             continue
         relation = copy.deepcopy(raw)
+        relation["from_capability"] = canonical_refs.get(
+            str(relation.get("from_capability") or ""), str(relation.get("from_capability") or ""),
+        )
+        relation["to_capability"] = canonical_refs.get(
+            str(relation.get("to_capability") or ""), str(relation.get("to_capability") or ""),
+        )
+        target = next((
+            cap for cap in list(getattr(skill, "capabilities", []) or [])
+            if isinstance(cap, dict)
+            and canonical_refs.get(str(cap.get("name") or cap.get("capability_id") or cap.get("kind") or ""))
+            == relation["to_capability"]
+        ), None)
+        target_kind = str((target or {}).get("kind") or "")
+        if relation.get("to_input") in {"entries", "items"} and target_kind not in {"submit_batch", "validate_batch"}:
+            continue
         relation_type = str(relation.get("type") or "suggested_call_chain")
         relation["type"] = relation_type
         relation["automatic"] = False

@@ -62,6 +62,185 @@ def test_system_generated_runtime_value_is_compiled_and_not_exposed():
     assert dry["body"]["nonce"] != "recorded"
 
 
+def test_duplicate_param_does_not_merge_foreign_enum_domains():
+    leave = ParamField(
+        path="type", key="请假类型", label="请假类型", value="2", type="enum",
+        source_kind="page_enum", source={"enum_confirmed": True},
+        enum_options=[{"label": "病假", "value": 1}, {"label": "事假", "value": 2}],
+        enum_value_map={"病假": 1, "事假": 2}, confidence=0.95,
+        description="页面枚举选项：病假=1、事假=2",
+    )
+    department = ParamField(
+        path="type", key="请假类型", label="请假类型", value="2", type="enum",
+        source_kind="api_option", source={"source_url": "/system/dept/list"},
+        enum_options=[{"label": "研发部", "value": 103}, {"label": "市场部", "value": 104}],
+        enum_value_map={"研发部": 103, "市场部": 104}, confidence=0.7,
+    )
+    spec = FlowSpec(flow_id="enum-domain", steps=[FlowStep(step_id="submit", method="POST", params=[leave, department])])
+
+    refreshed = refresh_review_items(spec)
+    param = refreshed.steps[0].params[0]
+
+    assert param.enum_value_map == {"病假": 1, "事假": 2}
+    assert "研发部" not in (param.description or "")
+
+
+def test_publish_canonicalizes_submit_alias_and_all_relations_atomically():
+    step = FlowStep(
+        step_id="submit-step", method="POST", path="/submit", body_source='{"reason":"x"}',
+        params=[ParamField(path="reason", key="原因", value="x", category="user_param", exposed_to_user=True)],
+    )
+    spec = FlowSpec(
+        flow_id="canonical-capability", steps=[step],
+        capabilities=[FlowCapability(
+            capability_id="write-cap", name="submit_batch", kind="submit",
+            step_ids=["submit-step"], nodes=[{"id": "call", "type": "call", "step_id": "submit-step"}],
+        )],
+        capability_relations=[CapabilityRelation(
+            from_capability="query_status", to_capability="submit_batch", type="caller_decision",
+        )],
+        goal={"capabilities": ["query_status", "submit_batch"]},
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+
+    assert prepared.capabilities[0].name == "submit"
+    assert prepared.capability_relations[0].to_capability == "submit"
+    assert prepared.goal["capabilities"] == ["submit"]
+
+
+def test_leave_range_is_single_submit_but_grounded_missing_day_flow_is_batch():
+    leave_query = FlowStep(
+        step_id="leave-query", method="GET",
+        url="/leave/page?startDate=2026-07-01&endDate=2026-07-11",
+        response_json={"data": {"list": [{"startDate": "2026-07-01", "endDate": "2026-07-11"}]}},
+        source_meta={"role": "business_get", "confidence": 0.95},
+    )
+    leave_submit = FlowStep(
+        step_id="leave-submit", method="POST", path="/leave/submit", body_source='{"startDate":"2026-07-01","endDate":"2026-07-11","reason":"x"}',
+        params=[
+            ParamField(path="startDate", key="开始日期", value="2026-07-01", type="date", category="user_param", exposed_to_user=True),
+            ParamField(path="endDate", key="结束日期", value="2026-07-11", type="date", category="user_param", exposed_to_user=True),
+        ],
+    )
+    leave_caps = build_default_flow_capabilities(FlowSpec(flow_id="leave", steps=[leave_query, leave_submit]))
+    assert next(cap for cap in leave_caps if cap.kind in {"submit", "submit_batch"}).kind == "submit"
+
+    daily_query = FlowStep(
+        step_id="daily-query", method="GET", path="/daily/missing",
+        response_json={"data": {"missingDates": ["2026-07-11", "2026-07-12"]}},
+        source_meta={"role": "business_get", "confidence": 0.95},
+    )
+    daily_submit = FlowStep(
+        step_id="daily-submit", method="POST", path="/daily/submit", body_source='{"reportDate":"2026-07-11","workContent":"x"}',
+        params=[
+            ParamField(path="reportDate", key="日报日期", value="2026-07-11", type="date", category="user_param", exposed_to_user=True),
+            ParamField(path="workContent", key="工作内容", value="x", category="user_param", exposed_to_user=True),
+        ],
+    )
+    daily_caps = build_default_flow_capabilities(FlowSpec(flow_id="daily", steps=[daily_query, daily_submit]))
+    batch = next(cap for cap in daily_caps if cap.kind in {"submit", "submit_batch"})
+    assert batch.kind == "submit_batch"
+    assert batch.input_schema["properties"]["entries"]["type"] == "array"
+
+
+def test_sync_upgrades_default_query_step_to_richer_captured_search_fact():
+    default = FlowStep(
+        step_id="query", method="GET", url="/leave/page?pageNo=1&pageSize=10",
+        path="/leave/page?pageNo=1&pageSize=10",
+        params=[
+            ParamField(path="query.pageNo", key="pageNo", value="1"),
+            ParamField(path="query.pageSize", key="pageSize", value="10"),
+        ],
+        source_meta={"request_id": "req-default", "request_index": 1, "role": "business_get"},
+    )
+    spec = FlowSpec.model_validate({
+        "flow_id": "upgrade-query",
+        "steps": [default.model_dump()],
+        "request_facts": {
+            "requests": [
+                {"request_id": "req-default", "request_index": 1, "method": "GET", "url": "/leave/page?pageNo=1&pageSize=10"},
+                {
+                    "request_id": "req-search", "request_index": 2, "method": "GET", "url": "/leave/page",
+                    "query": {"type": ["1"], "startDate": ["2026-07-01"], "endDate": ["2026-07-11"], "pageNo": ["1"], "pageSize": ["10"]},
+                    "response_json": {"data": {"list": [], "total": 0}},
+                },
+            ],
+            "analysis": {
+                "req-default": {"request_id": "req-default", "role": "business_get", "confidence": 0.9},
+                "req-search": {"request_id": "req-search", "role": "business_get", "confidence": 0.95},
+            },
+        },
+    })
+
+    synced = sync_flow_spec_models(spec)
+    step = synced.steps[0]
+
+    assert (step.source_meta or {})["request_id"] == "req-search"
+    assert "startDate=2026-07-01" in step.url
+    assert {p.path for p in step.params} >= {"query.type", "query.startDate", "query.endDate"}
+
+
+def test_planner_foreach_alone_does_not_promote_single_leave_submit_to_batch():
+    submit = FlowStep(
+        step_id="submit", method="POST", path="/leave/submit",
+        body_source='[{"type":1,"approverId":2}]',
+        params=[
+            ParamField(path="[0].type", key="请假类型", type="enum", category="user_param", exposed_to_user=True),
+            ParamField(path="[0].approverId", key="审批人", type="enum", category="user_param", exposed_to_user=True),
+        ],
+    )
+    cap = FlowCapability(
+        name="submit_batch", kind="submit_batch", step_ids=["submit"], updated_by="planner",
+        nodes=[{"id": "foreach", "type": "foreach", "items": "input.entries", "steps": [
+            {"id": "call", "type": "call", "step_id": "submit"},
+        ]}],
+        input_schema={"type": "object", "properties": {"entries": {"type": "array", "items": {"type": "object"}}}},
+    )
+    spec = FlowSpec(flow_id="single-leave", steps=[submit], capabilities=[cap])
+
+    repaired = flow_spec_module._repair_generated_capability_contracts(spec)
+
+    assert repaired.capabilities[0].kind == "submit"
+    assert repaired.capabilities[0].name == "submit"
+    report = flow_spec_module._capability_validation_report(repaired)
+    assert not any("只有审批/路由字段" in message for message in report["errors"])
+
+
+def test_single_submit_prunes_stale_entries_relations_and_keeps_one_decision_relation():
+    query = FlowCapability(
+        capability_id="query-cap", name="query_status", kind="query_status",
+        step_ids=["query"], output_schema={"type": "object", "properties": {"records": {"type": "array"}}},
+    )
+    submit = FlowCapability(
+        capability_id="submit-cap", name="submit", kind="submit",
+        step_ids=["submit"], input_schema={"type": "object", "properties": {"原因": {"type": "string"}}},
+    )
+    spec = FlowSpec(
+        flow_id="stale-relations",
+        steps=[
+            FlowStep(step_id="query", method="GET", path="/records", response_json={"data": {"list": []}}),
+            FlowStep(step_id="submit", method="POST", path="/submit", body_source='{"reason":"x"}', params=[
+                ParamField(path="reason", key="原因", value="x", category="user_param", exposed_to_user=True),
+            ]),
+        ],
+        capabilities=[query, submit],
+        capability_relations=[
+            CapabilityRelation(type="external_transform", mode="external_transform", from_capability="query_status", from_output="data.list", to_capability="submit", to_input="entries"),
+            CapabilityRelation(type="external_transform", mode="external_transform", from_capability="query_status", from_output="records", to_capability="submit", to_input="entries"),
+        ],
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+
+    assert len(prepared.capability_relations) == 1
+    relation = prepared.capability_relations[0]
+    assert relation.type == "caller_decision"
+    assert relation.from_capability == "query_status"
+    assert relation.to_capability == "submit"
+    assert not relation.from_output and not relation.to_input
+
+
 def test_capability_interface_reorder_updates_flat_calls_even_with_return_node():
     spec = FlowSpec(
         flow_id="order",

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode
 
 # 复用 request_capture 的纯函数
 from dano.execution.page.request_capture import (
@@ -207,6 +207,7 @@ class RequestFact(BaseModel):
     method: str = ""
     url: str = ""
     path: str = ""
+    query: dict[str, Any] = Field(default_factory=dict)
     headers: dict[str, Any] = Field(default_factory=dict)
     content_type: str = ""
     post_data: Any = None
@@ -1182,25 +1183,37 @@ def _build_step_from_capture(
         return bool(sb.options) or bool(sb.source_url and sb.value_key and sb.label_key)
 
     option_reads = _option_candidate_reads(reads or [])
+    grounded_samples = dict(samples or {})
+    for picked, raw_options in (page_enum_options or {}).items():
+        if not isinstance(raw_options, dict):
+            continue
+        field_key = str(raw_options.get("field_key") or "").strip()
+        selected = next((
+            str(raw_options.get(key))
+            for key in ("selected", "selected_label", "label", "value")
+            if raw_options.get(key) not in (None, "")
+        ), str(picked or ""))
+        if field_key and selected:
+            grounded_samples.setdefault(field_key, selected)
 
     # GET 请求：从 URL query string 提参,同时对 query 也跑 select 检测
     # (治"参数来源接口没识别":接口型 query 参数如 keyword=xxx / status=xxx 应该被识别为接口选择字段)
     if method == "GET" or body is None:
         list_paths: list[str] = []
         iden_raw: list[dict] = []
-        flat_fields = _params_from_get_query(req)
+        flat_fields = _params_from_get_query(req, grounded_samples)
         # select/选人:在 query 参数名上做下拉检测,与 POST body 同套算法
-        selects_raw = _detect_query_selects(req, samples, option_reads, page_enum_options)
+        selects_raw = _detect_query_selects(req, grounded_samples, option_reads, page_enum_options)
     else:
         # 列表多选先识别
-        list_selects = suggest_list_selects(pd, option_reads, samples)
+        list_selects = suggest_list_selects(pd, option_reads, grounded_samples)
         list_paths = [s["path"] for s in list_selects]
 
         # 字段拍平
         flat_fields = flatten_body(pd, samples, required_labels, collapse_paths=list_paths)
 
         # select/选人
-        selects_raw = suggest_selects(pd, option_reads, samples, skip_paths=list_paths, fields=flat_fields) + list_selects
+        selects_raw = suggest_selects(pd, option_reads, grounded_samples, skip_paths=list_paths, fields=flat_fields) + list_selects
         apply_page_enum_options(selects_raw, page_enum_options, post_data=pd, fields=flat_fields)
         selects_raw += page_enum_selects(pd, page_enum_options, {s.get("path", "") for s in selects_raw}, fields=flat_fields)
 
@@ -1376,9 +1389,11 @@ def _build_step_from_capture(
     sample_inputs = {p.key: p.value for p in params if p.value}
 
     # source_meta
+    full_url = _request_url_with_query(req)
     source_meta = {
         "method": method,
-        "url": req.get("url") or "",
+        "url": full_url,
+        "query": dict(req.get("query") or _request_query_values(req)),
         "headers_count": len(req.get("headers") or {}),
         "captured_at": req.get("captured_at"),
         "response_status": req.get("response_status"),
@@ -1392,7 +1407,6 @@ def _build_step_from_capture(
         "evidence": request_role.get("evidence"),
     }
 
-    full_url = req.get("url") or ""
     path = _path_from_url(full_url)
 
     return FlowStep(
@@ -1417,28 +1431,69 @@ def _build_step_from_capture(
     )
 
 
-def _params_from_get_query(req: dict) -> list[dict]:
-    """GET 请求：从 URL query string 提参。"""
-    url = req.get("url") or ""
-    if "?" not in url:
-        return []
+def _query_param_type(key: str, value: Any) -> str:
+    text = str(value or "").strip()
+    key_text = str(key or "").lower()
+    if re.search(r"(?:date|time|day|日期|时间)", key_text):
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            return "date"
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[ t]\d{2}:\d{2}(?::\d{2})?)?", text, re.I):
+            return "datetime"
+    if text.lower() in {"true", "false"}:
+        return "boolean"
+    if re.fullmatch(r"-?(?:\d+|\d+\.\d+)", text) and not re.search(
+        r"(?:id|code|key|type|status|no|number)", key_text,
+    ):
+        return "number"
+    return "string"
+
+
+def _query_param_label(key: str, value: Any, samples: dict | None = None) -> str:
+    exact = [
+        str(label) for label, sample in (samples or {}).items()
+        if sample not in (None, "") and str(sample).strip() == str(value or "").strip()
+    ]
+    return exact[0] if len(exact) == 1 else str(key or "")
+
+
+def _request_query_values(req: dict) -> dict[str, list[Any]]:
+    raw = req.get("query")
+    if isinstance(raw, dict) and raw:
+        return {
+            str(key): list(value) if isinstance(value, list) else [value]
+            for key, value in raw.items()
+        }
     try:
-        u = urlparse(url)
-        qs = parse_qs(u.query, keep_blank_values=True)
-    except Exception:
+        return parse_qs(urlparse(str(req.get("url") or req.get("path") or "")).query, keep_blank_values=True)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _request_url_with_query(req: dict) -> str:
+    url = str(req.get("url") or req.get("path") or "")
+    if "?" in url or not (query := _request_query_values(req)):
+        return url
+    return f"{url}?{urlencode(query, doseq=True)}"
+
+
+def _params_from_get_query(req: dict, samples: dict | None = None) -> list[dict]:
+    """GET 请求：从 URL query string 提参。"""
+    qs = _request_query_values(req)
+    if not qs:
         return []
     out: list[dict] = []
     for k, vals in qs.items():
-        v = vals[0] if vals else ""
+        v = (vals or [""])[0]
+        label = _query_param_label(k, v, samples)
         out.append({
             "path": f"query.{k}",
-            "key": k,
+            "key": label,
             "value": v,
-            "type": "string",
+            "type": _query_param_type(k, v),
             "required": True,
-            "confidence": 0.7,
-            "confidence_tier": "auto",
-            "name_source": "auto",
+            "confidence": 0.9 if label != k else 0.75,
+            "confidence_tier": "grounded" if label != k else "auto",
+            "name_source": "sample" if label != k else "auto",
         })
     return out
 
@@ -1454,20 +1509,26 @@ def _detect_query_selects(req: dict, samples: dict | None,
     suggest_selects 之外,还做一道 value-形态匹配置信信号 —— 当 query 值与 reads 候选的某
     「value/字典值字段」精准相等,即便没有 label 佐证,也以低置信度挂上 enum 标记,前端会把它
     当作低置信度 enum 项处理。"""
-    flat = _params_from_get_query(req)
+    flat = _params_from_get_query(req, samples)
     if not flat:
         return []
-    syn_body: dict[str, Any] = {f.get("key"): f.get("value") for f in flat if f.get("key")}
+    selectable_flat = [
+        field for field in flat
+        if not _looks_pagination_field(str(field.get("key") or ""), str(field.get("path") or ""))
+    ]
+    if not selectable_flat:
+        return []
+    syn_body: dict[str, Any] = {f.get("key"): f.get("value") for f in selectable_flat if f.get("key")}
     syn_pd = json.dumps(syn_body, ensure_ascii=False)
-    selects_raw = suggest_selects(syn_pd, reads or [], samples, skip_paths=[], fields=flat) + []
-    apply_page_enum_options(selects_raw, page_enum_options, post_data=syn_pd, fields=flat)
+    selects_raw = suggest_selects(syn_pd, reads or [], samples, skip_paths=[], fields=selectable_flat) + []
+    apply_page_enum_options(selects_raw, page_enum_options, post_data=syn_pd, fields=selectable_flat)
     selects_raw += page_enum_selects(syn_pd, page_enum_options,
-                                     {s.get("path", "") for s in selects_raw}, fields=flat)
+                                     {s.get("path", "") for s in selects_raw}, fields=selectable_flat)
 
     # 第二道:value 形态兜底(suggest_selects 当 value 与 label 不挂钩时容易漏)——
     # query 值若与 reads 候选列表里某 value 字段精准相等,就挂上 select 标记。
     hits_paths = {s.get("path") for s in selects_raw}
-    for f in flat:
+    for f in selectable_flat:
         k = f.get("key") or ""
         v = str(f.get("value") or "")
         if not k or not v or f"query.{k}" in hits_paths:
@@ -1832,6 +1893,14 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
             return _role_row(req, role="business_get", keep=True,
                              reason="GET 响应值被后续业务请求引用，作为前置步骤保留",
                              confidence=0.96, semantic=semantic, evidence=response_ref)
+        if (
+            segs & {"page", "list", "search", "query", "records", "history", "detail"}
+            and segs & {"report", "daily", "workhour", "worktime", "apply", "approval", "leave", "reimburse", "expense", "order", "record", "task"}
+            and not segs & _OPTION_SEGS
+        ):
+            return _role_row(req, role="business_get", keep=True,
+                             reason="业务分页/搜索接口即使当前结果为空，也保留为独立查询能力",
+                             confidence=0.9, semantic=semantic)
         return _role_row(req, role="read_context", keep=False,
                          reason="普通读接口，未发现后续业务请求依赖，默认不进入主流程",
                          confidence=0.68, semantic=semantic)
@@ -1888,14 +1957,45 @@ def _preread_dedupe_key(req: dict) -> tuple[str, str]:
     return ((req.get("method") or "GET").upper(), _request_path(req))
 
 
+def _business_filter_count(req: dict) -> int:
+    """Count caller-meaningful filters without treating pagination as business input."""
+    query = req.get("query")
+    if not isinstance(query, dict):
+        try:
+            query = parse_qs(urlparse(str(req.get("url") or "")).query, keep_blank_values=True)
+        except Exception:  # noqa: BLE001
+            query = {}
+    return sum(
+        1 for key, value in (query or {}).items()
+        if not _looks_pagination_field(str(key), f"query.{key}")
+        and any(str(item).strip() for item in (value if isinstance(value, list) else [value]))
+    )
+
+
+def _preread_candidate_score(req: dict) -> tuple[int, int, int, float]:
+    """Prefer the searched request over an initial/refresh request on the same endpoint."""
+    business_filters = _business_filter_count(req)
+    query_size = len(req.get("query") or _params_from_get_query(req))
+    sequence = _request_sequence_value(req.get("sequence", req.get("index"))) or 0.0
+    return (
+        business_filters,
+        query_size,
+        1 if req.get("response_json", req.get("json")) is not None else 0,
+        sequence,
+    )
+
+
 def _dedupe_preread_candidates(preread_cands: list[dict]) -> list[dict]:
-    """同一路径的前置读请求反复触发时，只保留最后一次录制结果。"""
-    latest_by_path: dict[tuple[str, str], Any] = {}
+    """同一路径反复触发时保留业务条件最完整的一次，序号仅作为同分兜底。"""
+    best_by_path: dict[tuple[str, str], dict] = {}
     for req in preread_cands:
-        latest_by_path[_preread_dedupe_key(req)] = _request_role_key(req)
+        key = _preread_dedupe_key(req)
+        current = best_by_path.get(key)
+        if current is None or _preread_candidate_score(req) >= _preread_candidate_score(current):
+            best_by_path[key] = req
     return [
         req for req in preread_cands
-        if latest_by_path.get(_preread_dedupe_key(req)) == _request_role_key(req)
+        if best_by_path.get(_preread_dedupe_key(req)) is req
     ]
 
 
@@ -1932,6 +2032,7 @@ def _request_graph_entry(req: dict, role: dict, *, include_payload: bool = False
     if include_payload:
         out.update({
             "headers": dict(req.get("headers") or {}),
+            "query": dict(req.get("query") or {}),
             "content_type": req.get("content_type") or "",
             "post_data": req.get("post_data"),
             "response_status": req.get("response_status", req.get("status")),
@@ -2005,6 +2106,7 @@ def _request_fact_from_graph_entry(entry: dict[str, Any]) -> RequestFact:
         "method": (entry.get("method") or "").upper(),
         "url": entry.get("url") or "",
         "path": entry.get("path") or entry.get("url") or "",
+        "query": dict(entry.get("query") or {}),
         "headers": dict(entry.get("headers") or {}),
         "content_type": entry.get("content_type") or "",
         "post_data": entry.get("post_data"),
@@ -2153,6 +2255,7 @@ def _graph_entry_from_request_fact(
         "state": usage.state if usage else "captured",
         "materialized_step_id": usage.materialized_step_id if usage else "",
         "headers": dict(fact.headers or {}),
+        "query": dict(fact.query or {}),
         "content_type": fact.content_type,
         "post_data": fact.post_data,
         "response_status": fact.response_status,
@@ -2666,8 +2769,75 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
     return spec
 
 
+def _upgrade_materialized_query_facts(spec: FlowSpec) -> None:
+    """Replace an initial pagination request with the richer searched instance."""
+    pinned_steps = {
+        ref.step_id
+        for cap in (spec.capabilities or [])
+        for ref in (cap.request_refs or [])
+        if ref.step_id and ref.pinned
+    }
+    for step in spec.steps:
+        if (step.method or "GET").upper() not in {"GET", "HEAD"} or step.step_id in pinned_steps:
+            continue
+        if any(
+            _param_has_manual_contract(param)
+            for param in (step.params or [])
+            if str(param.path or "").startswith("query.")
+        ):
+            continue
+        current = {
+            "method": step.method,
+            "url": step.url or step.path,
+            "query": dict((step.source_meta or {}).get("query") or {}),
+            "index": (step.source_meta or {}).get("request_index"),
+        }
+        current_path = _request_path(current)
+        candidates: list[tuple[RequestFact, RequestAnalysis | None, dict[str, Any]]] = []
+        for fact in spec.request_facts.requests or []:
+            raw = fact.model_dump(exclude_none=True)
+            if (fact.method or "GET").upper() != (step.method or "GET").upper():
+                continue
+            if _request_path(raw) != current_path:
+                continue
+            analysis = spec.request_facts.analysis.get(fact.request_id or "")
+            if analysis is not None and analysis.role not in {"business_get", "read_context"}:
+                continue
+            candidates.append((fact, analysis, raw))
+        if not candidates:
+            continue
+        fact, analysis, best = max(candidates, key=lambda item: _preread_candidate_score(item[2]))
+        if _business_filter_count(best) <= _business_filter_count(current):
+            continue
+        step.url = _request_url_with_query(best)
+        step.path = _path_from_url(step.url)
+        step.response_json = fact.response_json
+        if fact.headers:
+            step.headers = extract_auth_headers(fact.headers)
+        step.params = [
+            param for param in (step.params or [])
+            if not str(param.path or "").startswith("query.")
+        ]
+        for usage in spec.request_facts.usage.values():
+            if usage.materialized_step_id == step.step_id:
+                usage.materialized_step_id = ""
+                usage.state = "captured"
+        step.source_meta = {
+            **(step.source_meta or {}),
+            "url": step.url,
+            "query": dict(fact.query or {}),
+            "request_id": fact.request_id,
+            "request_index": fact.request_index,
+            "response_status": fact.response_status,
+            "role": analysis.role if analysis else (step.source_meta or {}).get("role"),
+            "confidence": analysis.confidence if analysis else (step.source_meta or {}).get("confidence"),
+            "query_fact_upgraded": True,
+        }
+
+
 def sync_flow_spec_models(spec: FlowSpec, *, prefer_request_facts: bool = True) -> FlowSpec:
     ensure_request_facts(spec, prefer="request_facts" if prefer_request_facts else "meta")
+    _upgrade_materialized_query_facts(spec)
     # FlowStep 已经是可编辑/可编排接口的物化事实；usage 不能等到能力绑定后才更新，
     # 否则初次分析会把已进入字段页的查询接口仍标成 captured。
     for step in spec.steps:
@@ -2678,6 +2848,7 @@ def sync_flow_spec_models(spec: FlowSpec, *, prefer_request_facts: bool = True) 
             query_url = step.url if "?" in str(step.url or "") else step.path
             _append_query_params_to_step(step, query_url or step.url)
         _sync_step_option_contracts(spec, step)
+        _audit_step_param_contracts(step)
         valid_param_paths = {param.path for param in step.params if param.path}
         for select in step.selects or []:
             if select.id_path and select.id_path not in valid_param_paths:
@@ -2691,6 +2862,83 @@ def sync_flow_spec_models(spec: FlowSpec, *, prefer_request_facts: bool = True) 
         usage.materialized_step_id = step.step_id
         spec.request_facts.usage[request_id] = usage
     return sync_capability_scoped_views(spec)
+
+
+def _param_has_manual_contract(param: ParamField) -> bool:
+    return any(
+        isinstance(item, dict)
+        and item.get("source") == "manual_edit"
+        and item.get("field") in {
+            "type", "category", "source_kind", "source", "enum_options", "enum_value_map",
+        }
+        for item in (param.evidence or [])
+    )
+
+
+def _semantic_recorded_type(param: ParamField) -> str:
+    text = " ".join(str(value or "") for value in (param.path, param.key, param.label)).lower()
+    value = str(param.value or param.default_value or "").strip()
+    if re.search(r"(?:date|time|day|日期|时间)", text):
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            return "date"
+        if re.fullmatch(r"\d{10}|\d{13}|\d{4}-\d{2}-\d{2}[ t]\d{2}:\d{2}(?::\d{2})?", value, re.I):
+            return "datetime"
+    return param.type or param.wire_type or _infer_type_from_value(value)
+
+
+def _audit_step_param_contracts(step: FlowStep) -> None:
+    """Conservatively repair only contradictory generated field contracts."""
+    display_paths = {
+        _strip_body_prefix(binding.path)
+        for binding in (step.selects or [])
+        if binding.path and _select_has_executable_options(binding)
+    }
+    id_paths = {
+        _strip_body_prefix(binding.id_path)
+        for binding in (step.selects or [])
+        if binding.id_path and _select_has_executable_options(binding)
+    }
+    for param in step.params or []:
+        if _param_has_manual_contract(param):
+            continue
+        normalized_path = _strip_body_prefix(param.path or "")
+        if _looks_pagination_field(param.key, param.path):
+            param.type = _infer_type_from_value(param.value)
+            param.category = "system_const"
+            param.source_kind = "constant"
+            param.source = {"kind": "pagination", "path": param.path}
+            param.exposed_to_user = False
+            param.editable = True
+            param.need_human_confirm = False
+            param.enum_options = None
+            param.enum_value_map = None
+            param.description = _strip_option_descriptions(param.description) or None
+            param.reason = "分页参数由 Skill 内部按默认分页提交，不作为普通业务字段暴露"
+            continue
+        option_contract = bool(param.enum_options or param.enum_value_map or normalized_path in display_paths)
+        if normalized_path in id_paths and normalized_path not in display_paths:
+            continue
+        if param.type in _ENUM_PARAM_TYPES or param.source_kind in _ENUM_SOURCE_KINDS:
+            if not option_contract and param.source_kind not in _ENUM_SOURCE_KINDS:
+                param.type = param.wire_type or _infer_type_from_value(param.value)
+                param.enum_options = None
+                param.enum_value_map = None
+                if param.category == "user_param":
+                    param.source_kind = "user_input"
+                    param.source = {"kind": "sample", "path": param.path}
+                    param.exposed_to_user = True
+                    param.editable = True
+                param.description = _strip_option_descriptions(param.description) or None
+                param.reason = _strip_option_descriptions(param.reason)
+            else:
+                param.category = "user_param"
+                param.exposed_to_user = True
+                param.editable = True
+                _refresh_param_enum_description(param)
+        elif param.category == "user_param" and param.source_kind == "user_input":
+            semantic_type = _semantic_recorded_type(param)
+            if semantic_type in {"date", "datetime"}:
+                param.type = semantic_type
 
 
 def _api_option_binding_is_trustworthy(binding: SelectBinding) -> bool:
@@ -2746,6 +2994,12 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
     the ParamField as ``user_input`` loses label-to-value mapping and the source
     request when capabilities are rebuilt.
     """
+    step.selects = [
+        binding for binding in (step.selects or [])
+        if not _looks_pagination_field(
+            str(binding.param or ""), str(binding.path or binding.id_path or ""),
+        )
+    ]
     for param in step.params or []:
         if param.type in _ENUM_PARAM_TYPES or param.source_kind in _ENUM_SOURCE_KINDS:
             continue
@@ -3826,6 +4080,34 @@ def _normalize_generated_capability_semantics(spec: FlowSpec, cap: FlowCapabilit
         cap.step_ids = []
 
 
+def _canonicalize_public_capability_identities(spec: FlowSpec) -> FlowSpec:
+    """Atomically align public names and every cross-capability reference."""
+    public_names = {"query_status", "list_options", "validate_batch", "submit_batch", "submit"}
+    renamed: dict[str, str] = {}
+    for cap in spec.capabilities or []:
+        old_name = str(cap.name or "")
+        kind = str(cap.kind or "")
+        stale_standard_alias = old_name in public_names and old_name != kind
+        stale_generated_alias = bool(
+            kind in public_names
+            and re.fullmatch(r"(?:query_status|list_options|validate_batch|submit_batch|submit)\d*", old_name)
+        )
+        if kind in public_names and (stale_standard_alias or stale_generated_alias or not old_name):
+            cap.name = kind
+            if old_name and old_name != kind:
+                renamed[old_name] = kind
+    if not renamed:
+        return spec
+    for relation in spec.capability_relations or []:
+        relation.from_capability = renamed.get(relation.from_capability, relation.from_capability)
+        relation.to_capability = renamed.get(relation.to_capability, relation.to_capability)
+    if isinstance(spec.goal, dict):
+        spec.goal["capabilities"] = list(dict.fromkeys(
+            renamed.get(str(name), str(name)) for name in (spec.goal.get("capabilities") or []) if str(name)
+        ))
+    return spec
+
+
 def _repair_generated_capability_contracts(spec: FlowSpec) -> FlowSpec:
     """Deterministically repair only Planner-generated capability contracts."""
     _infer_computed_runtime_fields(spec)
@@ -3884,6 +4166,7 @@ def _repair_generated_capability_contracts(spec: FlowSpec) -> FlowSpec:
         for relation in spec.capability_relations or []:
             relation.from_capability = renamed.get(relation.from_capability, relation.from_capability)
             relation.to_capability = renamed.get(relation.to_capability, relation.to_capability)
+    _canonicalize_public_capability_identities(spec)
     spec = _prune_empty_capabilities(spec)
     valid_refs = {
         ref
@@ -4113,7 +4396,11 @@ def _query_implies_repeated_submit(spec: FlowSpec, write_steps: list[FlowStep]) 
     has_missing_dates = any(
         any(
             re.search(r"(?:missing|unfilled|未填|待填).*(?:date|day|日期|天)", path, re.I)
-            for path, _tokens, _value, _raw in _leaf_paths(step.response_json)
+            or (
+                re.search(r"(?:missing|unfilled|未填|待填)", path, re.I)
+                and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(value or ""))
+            )
+            for path, _tokens, value, _raw in _leaf_paths(step.response_json)
         )
         for step in spec.steps
         if (step.method or "GET").upper() == "GET"
@@ -4166,10 +4453,9 @@ def _capability_has_explicit_batch_intent(cap: FlowCapability) -> bool:
         for field in (cap.inputs or [])
     ):
         return True
-    if has_entries_loop:
-        item_props, _required = _capability_schema_array_item_props(cap.input_schema, "entries")
-        if any(not _ROUTING_FIELD_RE.search(str(name or "")) for name in item_props):
-            return True
+    # Planner-created foreach/schema is a proposal, not evidence. It may only
+    # become public batch behavior through recorded request shape/query evidence
+    # or an explicit operator edit handled above.
     return False
 
 
@@ -4993,25 +5279,34 @@ def _ensure_external_transform_relations(spec: FlowSpec) -> FlowSpec:
         for ref in (cap.name, cap.capability_id)
         if ref
     }
-    spec.capability_relations = [
-        relation
-        for relation in spec.capability_relations
-        if (relation.evidence or {}).get("kind") != "typed_capability_contract"
-        or (
-            relation.from_capability in capability_by_ref
-            and relation.to_capability in capability_by_ref
-            and (
-                not _capability_relation_requires_fields(relation)
-                or (
-                    relation.from_output in (
-                        (capability_by_ref[relation.from_capability].output_schema or {}).get("properties") or {}
-                    )
-                    and relation.to_input in (
-                        (capability_by_ref[relation.to_capability].input_schema or {}).get("properties") or {}
-                    )
-                )
-            )
+    def relation_is_valid(relation: CapabilityRelation) -> bool:
+        source = capability_by_ref.get(relation.from_capability)
+        target = capability_by_ref.get(relation.to_capability)
+        relation_kind = str(relation.mode or relation.type or "").strip().lower()
+        if (
+            relation_kind == "external_transform"
+            and source is not None
+            and target is not None
+            and source.kind == "query_status"
+            and target.kind == "submit"
+            and relation.to_input == "entries"
+        ):
+            return False
+        if (relation.evidence or {}).get("kind") != "typed_capability_contract":
+            return True
+        if source is None or target is None:
+            return False
+        if not _capability_relation_requires_fields(relation):
+            return True
+        return bool(
+            relation.from_output
+            and relation.to_input
+            and relation.from_output in ((source.output_schema or {}).get("properties") or {})
+            and relation.to_input in ((target.input_schema or {}).get("properties") or {})
         )
+
+    spec.capability_relations = [
+        relation for relation in spec.capability_relations if relation_is_valid(relation)
     ]
     queries = [cap for cap in spec.capabilities if cap.kind == "query_status"]
     batches = [cap for cap in spec.capabilities if cap.kind == "submit_batch"]
@@ -5081,6 +5376,19 @@ def _ensure_external_transform_relations(spec: FlowSpec) -> FlowSpec:
                 reason="调用方先读取查询结果，再结合用户意图决定是否显式调用提交能力",
                 evidence={"kind": "typed_capability_contract", "automatic_execution": False},
             ))
+    deduped_relations: list[CapabilityRelation] = []
+    seen_relations: set[tuple[str, str, str, str, str]] = set()
+    for relation in spec.capability_relations:
+        identity = (
+            relation.from_capability, relation.from_output,
+            relation.to_capability, relation.to_input,
+            str(relation.mode or relation.type or ""),
+        )
+        if identity in seen_relations:
+            continue
+        seen_relations.add(identity)
+        deduped_relations.append(relation)
+    spec.capability_relations = deduped_relations
     return spec
 
 
@@ -7579,7 +7887,37 @@ def _param_dedupe_key(param: ParamField) -> tuple[str, str]:
     return (path, key if not path else "")
 
 
+def _enum_sources_compatible(dst: ParamField, src: ParamField) -> bool:
+    if dst.source_kind != src.source_kind:
+        return False
+    dst_source = dst.source or {}
+    src_source = src.source or {}
+    if dst.source_kind == "api_option":
+        return bool(dst_source.get("source_url")) and (
+            _request_path({"url": str(dst_source.get("source_url") or "")})
+            == _request_path({"url": str(src_source.get("source_url") or "")})
+        )
+    if dst.source_kind == "page_enum":
+        return bool(
+            dst_source.get("enum_confirmed") is True
+            and src_source.get("enum_confirmed") is True
+            and (dst.key or dst.label or dst.path) == (src.key or src.label or src.path)
+        )
+    return dst.source_kind in {"manual_enum", "static_enum", "form_option"}
+
+
+def _refresh_param_enum_description(param: ParamField) -> None:
+    base_description = _strip_option_descriptions(param.description)
+    base_reason = _strip_option_descriptions(param.reason)
+    detail = _enum_options_description(param.source_kind, param.enum_options, param.enum_value_map)
+    param.description = _upsert_option_description(base_description, detail) or None
+    param.reason = _upsert_option_description(base_reason, detail)
+
+
 def _merge_enum_values(dst: ParamField, src: ParamField) -> None:
+    if not _enum_sources_compatible(dst, src):
+        _refresh_param_enum_description(dst)
+        return
     if not dst.enum_options and src.enum_options:
         dst.enum_options = list(src.enum_options)
     elif dst.enum_options and src.enum_options:
@@ -7593,6 +7931,7 @@ def _merge_enum_values(dst: ParamField, src: ParamField) -> None:
         dst.enum_value_map = dict(src.enum_value_map)
     elif dst.enum_value_map and src.enum_value_map:
         dst.enum_value_map = {**src.enum_value_map, **dst.enum_value_map}
+    _refresh_param_enum_description(dst)
 
 
 def _param_quality(param: ParamField) -> tuple[int, int, float]:
@@ -8941,6 +9280,7 @@ def _publish_issue_groups(
 def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
     """Canonicalize the current workbench state without invoking Planner or LLM."""
     current = sync_flow_spec_models(spec.model_copy(deep=True), prefer_request_facts=False)
+    _canonicalize_public_capability_identities(current)
     _normalize_capability_references(current)
     current = _ensure_external_transform_relations(_sync_capability_io_schemas(current))
     return ensure_recorded_goal(current)

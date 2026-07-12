@@ -286,6 +286,34 @@ def test_manifest_exports_complete_capability_protocol_requirements():
     assert requirements["partial_success_must_be_reported"] is True
     assert requirements["verification_status"] == "verified"
     assert manifest.capability_relations[0]["automatic"] is False
+
+
+def test_manifest_rewrites_stale_submit_batch_relation_to_single_submit():
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    skill = SkillSpec(
+        skill_id="A-OA.leave",
+        subsystem=Subsystem.OA,
+        action="leave",
+        risk_level=RiskLevel.L3,
+        capabilities=[
+            {"name": "query_status", "kind": "query_status"},
+            {"name": "submit_batch", "kind": "submit"},
+        ],
+        capability_relations=[{
+            "from_capability": "query_status",
+            "to_capability": "submit_batch",
+            "type": "caller_decision",
+        }],
+    )
+
+    manifest = to_manifest(skill)
+
+    assert manifest.capability == "submit"
+    assert [cap["name"] for cap in manifest.capabilities] == ["query_status", "submit"]
+    assert manifest.capability_relations[0]["to_capability"] == "submit"
     assert "partial_success" in manifest.call_protocol["result_statuses"]
     assert manifest.call_protocol["protocol"] == "dano.capability_call.v1"
 

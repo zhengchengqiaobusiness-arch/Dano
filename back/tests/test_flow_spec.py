@@ -47,6 +47,87 @@ def _get(url, resp=None):
 
 
 class ToFlowSpecTest(unittest.TestCase):
+    def test_same_query_endpoint_keeps_richest_recorded_search_filters(self):
+        response = {"data": {"list": [{"id": 1, "applyDate": "2026-07-03"}], "total": 1}, "code": 0}
+        captured = [
+            {**_get("https://oa.test/admin-api/oa/duty-leave/page?pageNo=1&pageSize=10", response), "index": 1},
+            {**_get(
+                "https://oa.test/admin-api/oa/duty-leave/page?type=1&startDate=2026-07-01&endDate=2026-07-11&status=1&pageNo=1&pageSize=10",
+                response,
+            ), "index": 2},
+        ]
+
+        spec = to_flow_spec(
+            captured,
+            samples={"请假类型": "1", "开始日期": "2026-07-01", "结束日期": "2026-07-11", "审批结果": "1"},
+        )
+
+        query_steps = [step for step in spec.steps if "duty-leave/page" in (step.url or step.path)]
+        self.assertEqual(len(query_steps), 1)
+        by_path = {param.path: param for param in query_steps[0].params}
+        self.assertTrue({"query.type", "query.startDate", "query.endDate", "query.status"}.issubset(by_path))
+        self.assertEqual(by_path["query.startDate"].type, "date")
+        self.assertEqual(by_path["query.endDate"].type, "date")
+        self.assertEqual(by_path["query.startDate"].key, "开始日期")
+
+    def test_query_dict_is_executable_even_when_captured_url_has_no_query_string(self):
+        response = {"data": {"list": [{"id": 1, "applyDate": "2026-07-03"}], "total": 1}, "code": 0}
+        captured = [{
+            **_get("https://oa.test/admin-api/oa/duty-leave/page", response),
+            "index": 73,
+            "query": {
+                "type": ["1"], "startDate": ["2026-07-01"], "endDate": ["2026-07-11"],
+                "status": ["1"], "pageNo": ["1"], "pageSize": ["10"],
+            },
+        }]
+
+        spec = to_flow_spec(captured, samples={"请假类型": "1", "开始日期": "2026-07-01", "结束日期": "2026-07-11"})
+        step = spec.steps[0]
+        by_path = {param.path: param for param in step.params}
+
+        self.assertIn("startDate=2026-07-01", step.url)
+        self.assertEqual(by_path["query.pageNo"].category, "system_const")
+        self.assertEqual(by_path["query.pageNo"].type, "number")
+        self.assertEqual(by_path["query.pageNo"].source_kind, "constant")
+        self.assertFalse(by_path["query.pageNo"].exposed_to_user)
+        self.assertNotIn("query.pageNo", {select.path for select in step.selects})
+
+    def test_leave_query_and_submit_keep_business_filters_and_leave_enum_domain(self):
+        dictionary = [
+            {"dictValue": "100", "dictLabel": "研发部门", "dictType": "system_dept"},
+            {"dictValue": "101", "dictLabel": "市场部门", "dictType": "system_dept"},
+            {"dictValue": "1", "dictLabel": "病假", "dictType": "oa_leave_type"},
+            {"dictValue": "2", "dictLabel": "事假", "dictType": "oa_leave_type"},
+            {"dictValue": "3", "dictLabel": "婚假", "dictType": "oa_leave_type"},
+        ] + [
+            {"dictValue": str(200 + index), "dictLabel": f"其它{index}", "dictType": "misc"}
+            for index in range(55)
+        ]
+        captured = [
+            _get("https://oa.test/admin-api/system/dict-data/simple-list", {"data": dictionary}),
+            {
+                **_get("https://oa.test/admin-api/oa/duty-leave/page", {"data": {"list": [], "total": 0}}),
+                "query": {"type": ["1"], "startDate": ["2026-07-01"], "endDate": ["2026-07-11"], "pageNo": ["1"], "pageSize": ["10"]},
+            },
+            _post("https://oa.test/admin-api/oa/duty-leave/submit-process", [{"type": 1, "reason": "测试"}], resp={"code": 0}),
+        ]
+
+        spec = to_flow_spec(
+            captured,
+            samples={"请假类型": "病假", "开始日期": "2026-07-01", "结束日期": "2026-07-11", "原因": "测试"},
+            page_enum_options={"病假": {"selected": "病假", "field_key": "type", "options": ["病假", "事假", "婚假"]}},
+        )
+        query = next(step for step in spec.steps if "duty-leave/page" in step.path)
+        submit = next(step for step in spec.steps if step.method == "POST")
+        query_paths = {param.path for param in query.params}
+        leave_type = next(param for param in submit.params if param.path == "[0].type")
+
+        self.assertTrue({"query.type", "query.startDate", "query.endDate"}.issubset(query_paths))
+        self.assertEqual(leave_type.enum_value_map, {"病假": "1", "事假": "2", "婚假": "3"})
+        self.assertNotIn("研发部门", leave_type.enum_value_map)
+        self.assertEqual(leave_type.source_kind, "api_option")
+
+
     def test_recorded_user_input_wins_over_internal_field_name_heuristics(self):
         spec = to_flow_spec(
             captured_requests=[_post("https://oa.test/submit", {"activityId": 142, "reason": "请假"})],

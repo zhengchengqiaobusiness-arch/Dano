@@ -508,6 +508,39 @@ def test_suggest_selects_prefers_confirmed_over_huge_generic_dict():
     assert s[0]["options"] == ["事假", "病假", "年假"]           # 选项快照是小字典(不是垃圾大字典)
 
 
+def test_short_code_never_binds_unconfirmed_department_or_user_source():
+    departments = [{"id": 1, "name": "研发部门"}, {"id": 2, "name": "市场部门"}]
+
+    assert suggest_selects(
+        '{"type":1}',
+        [{"url": "/system/dept/simple-list", "json": {"data": departments}}],
+        {"请假类型": "病假"},
+        fields=[{"path": "type", "key": "type", "suggest_name": "请假类型", "name_source": "sample"}],
+    ) == []
+
+
+def test_unique_code_global_dictionary_still_narrows_by_explicit_dict_type():
+    items = [
+        {"dictValue": str(index), "dictLabel": f"噪声{index}", "dictType": "misc"}
+        for index in range(60)
+    ] + [
+        {"dictValue": "101", "dictLabel": "病假", "dictType": "oa_leave_type"},
+        {"dictValue": "102", "dictLabel": "事假", "dictType": "oa_leave_type"},
+        {"dictValue": "103", "dictLabel": "婚假", "dictType": "oa_leave_type"},
+    ]
+
+    result = suggest_selects(
+        '{"type":"101"}',
+        [{"url": "/system/dict-data/simple-list", "json": {"data": items}}],
+        {"请假类型": "病假"},
+        fields=[{"path": "type", "key": "type", "suggest_name": "请假类型", "name_source": "sample"}],
+    )
+
+    assert len(result) == 1
+    assert result[0]["options"] == ["病假", "事假", "婚假"]
+    assert result[0]["category_key"] == "dictType"
+
+
 def test_suggest_selects_picks_smaller_dict_when_both_unconfirmed():
     """无录制佐证时,跨源择优取**更小(更专门)**的字典,而非通用大字典。"""
     sub = '{"type":"VIP"}'

@@ -151,6 +151,7 @@ interface RequestGraphEntry {
   state?: string; materialized_step_id?: string;
   used_by_capabilities?: string[];
   headers?: Record<string, string>; post_data?: any; content_type?: string;
+  query?: Record<string, any>;
   occurrence_count?: number;
 }
 interface FlowSpecData {
@@ -728,6 +729,44 @@ function requestGraphKey(req: RequestGraphEntry) {
   if (req.request_index != null) return `idx:${String(req.request_index)}`;
   return `sig:${requestGraphSignature(req)}`;
 }
+function requestQueryValues(req: RequestGraphEntry) {
+  if (req.query && Object.keys(req.query).length) return req.query;
+  const raw = String(req.url || "");
+  const queryText = raw.includes("?") ? raw.slice(raw.indexOf("?") + 1) : "";
+  const values: Record<string, string[]> = {};
+  new URLSearchParams(queryText).forEach((value, key) => {
+    values[key] = [...(values[key] || []), value];
+  });
+  return values;
+}
+function isPaginationQueryKey(key: string) {
+  return /^(?:page(?:no|num|number|index|size)?|current|limit|offset|rows?)$/i.test(key.replace(/[._-]/g, ""));
+}
+function requestBusinessFilterCount(req: RequestGraphEntry) {
+  return Object.entries(requestQueryValues(req)).filter(([key, value]) =>
+    !isPaginationQueryKey(key) && (Array.isArray(value) ? value : [value]).some((item) => String(item ?? "").trim())
+  ).length;
+}
+function requestQueryFieldCount(req: RequestGraphEntry) {
+  return Object.keys(requestQueryValues(req)).length;
+}
+function richerRequestFact(candidate: RequestGraphEntry, current: RequestGraphEntry) {
+  const candidateScore = [requestBusinessFilterCount(candidate), requestQueryFieldCount(candidate), candidate.response_json != null ? 1 : 0];
+  const currentScore = [requestBusinessFilterCount(current), requestQueryFieldCount(current), current.response_json != null ? 1 : 0];
+  for (let idx = 0; idx < candidateScore.length; idx += 1) {
+    if (candidateScore[idx] !== currentScore[idx]) return candidateScore[idx] > currentScore[idx];
+  }
+  return Number(candidate.sequence ?? candidate.request_index ?? 0) > Number(current.sequence ?? current.request_index ?? 0);
+}
+function requestDisplayPath(req: RequestGraphEntry) {
+  const base = req.path || stripHost(req.url || "");
+  if (String(base || "").includes("?") || !requestQueryFieldCount(req)) return base;
+  const query = new URLSearchParams();
+  Object.entries(requestQueryValues(req)).forEach(([key, value]) => {
+    (Array.isArray(value) ? value : [value]).forEach((item) => query.append(key, String(item ?? "")));
+  });
+  return `${base}?${query.toString()}`;
+}
 function isApiLikeRequest(req: RequestGraphEntry) {
   const path = (req.path || stripHost(req.url || "") || "").split("?", 1)[0].toLowerCase();
   if (!path) return false;
@@ -794,7 +833,7 @@ function allCapturedRequests(spec?: FlowSpecData | null) {
       ...(current.used_by_capabilities || []),
       ...(req.used_by_capabilities || []),
     ]));
-    if (current.response_json == null && req.response_json != null) {
+    if (richerRequestFact(req, current)) {
       grouped.set(signature, {
         ...req,
         occurrence_count: current.occurrence_count,
@@ -862,11 +901,14 @@ function capabilityUsageLabel(usage?: string) {
 }
 function capturedRequestSteps(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
   const signature = requestGraphSignature(req);
-  return (spec?.steps || []).filter((step) => {
+  const exact = (spec?.steps || []).filter((step) => {
     const meta = step.source_meta || {};
     return (req.request_id && String(meta.request_id || "") === String(req.request_id)) ||
-      (req.request_index != null && String(meta.request_index ?? "") === String(req.request_index)) ||
-      stepRequestSignature(step) === signature;
+      (req.request_index != null && String(meta.request_index ?? "") === String(req.request_index));
+  });
+  if (req.request_id || req.request_index != null) return exact;
+  return (spec?.steps || []).filter((step) => {
+    return stepRequestSignature(step) === signature;
   });
 }
 function capturedRequestCapabilityNames(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
@@ -898,7 +940,7 @@ function capturedRequestOptions(spec: FlowSpecData | null | undefined, opts: { i
   return allCapturedRequests(spec)
     .filter((req) => opts.includeIncluded || !isRequestInSteps(spec, req))
     .map((req) => ({
-      label: `#${req.sequence ?? req.request_index ?? ""} ${req.method || "GET"} ${req.path || stripHost(req.url || "")}${(req.occurrence_count || 1) > 1 ? ` · ${req.occurrence_count} 次` : ""}`,
+      label: `#${req.sequence ?? req.request_index ?? ""} ${req.method || "GET"} ${requestDisplayPath(req)}${(req.occurrence_count || 1) > 1 ? ` · ${req.occurrence_count} 次` : ""}`,
       value: requestOptionValue(req),
     }))
     .filter((x) => x.value);
