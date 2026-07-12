@@ -128,7 +128,14 @@ def _capability_contracts(m: SkillManifest) -> dict[str, dict]:
             "option_fields": _schema_option_fields(schema),
             "output_schema": raw.get("output_schema") or {"type": "object"},
             "requires_confirmation": bool(raw.get("requires_confirmation")),
-            "verify_required": bool((m.flow or {}).get("verify")) and kind not in _READ_CAPABILITY_KINDS,
+            "verify_required": bool(
+                (raw.get("validation_requirements") or {}).get(
+                    "verification_required",
+                    bool((m.flow or {}).get("verify")) and kind not in _READ_CAPABILITY_KINDS,
+                )
+            ),
+            "validation_requirements": dict(raw.get("validation_requirements") or {}),
+            "call_protocol": dict(raw.get("call_protocol") or {}),
             "caller_responsibilities": list(raw.get("caller_responsibilities") or []),
         }
     if contracts:
@@ -147,6 +154,8 @@ def _capability_contracts(m: SkillManifest) -> dict[str, dict]:
         "output_schema": m.output_schema,
         "requires_confirmation": bool(m.requires_confirmation),
         "verify_required": bool((m.flow or {}).get("verify")),
+        "validation_requirements": {},
+        "call_protocol": dict(m.call_protocol or {}),
         "caller_responsibilities": [],
     }}
 
@@ -250,20 +259,28 @@ def _capability_contract_section(m: SkillManifest) -> str:
                    f"类型:`{contract.get('kind')}` · {confirm}"]
         if not props:
             blocks.append("\n(无业务输入参数)")
-            continue
-        rows = ["| 参数 | 类型 | 必填 | 说明 |", "|---|---|---|---|"]
-        for field, prop in props.items():
-            desc = str((prop or {}).get("description") or (prop or {}).get("label") or field).replace("|", "\\|")
-            rows.append(f"| `{field}` | {_schema_type_text(prop)} | {'是' if field in required else '否'} | {desc} |")
-            item_props = (((prop or {}).get("items") or {}).get("properties") or {})
-            item_required = set((((prop or {}).get("items") or {}).get("required") or []))
-            for item_name, item_schema in item_props.items():
-                item_desc = str((item_schema or {}).get("description") or item_name).replace("|", "\\|")
-                rows.append(
-                    f"| `  {field}[].{item_name}` | {_schema_type_text(item_schema)} | "
-                    f"{'是' if item_name in item_required else '否'} | {item_desc} |"
-                )
-        blocks.extend(rows)
+        else:
+            rows = ["| 参数 | 类型 | 必填 | 说明 |", "|---|---|---|---|"]
+            for field, prop in props.items():
+                desc = str((prop or {}).get("description") or (prop or {}).get("label") or field).replace("|", "\\|")
+                rows.append(f"| `{field}` | {_schema_type_text(prop)} | {'是' if field in required else '否'} | {desc} |")
+                item_props = (((prop or {}).get("items") or {}).get("properties") or {})
+                item_required = set((((prop or {}).get("items") or {}).get("required") or []))
+                for item_name, item_schema in item_props.items():
+                    item_desc = str((item_schema or {}).get("description") or item_name).replace("|", "\\|")
+                    rows.append(
+                        f"| `  {field}[].{item_name}` | {_schema_type_text(item_schema)} | "
+                        f"{'是' if item_name in item_required else '否'} | {item_desc} |"
+                    )
+            blocks.extend(rows)
+        requirements = contract.get("validation_requirements") or {}
+        verification = "需要事实核查" if contract.get("verify_required") else "按 output_schema 校验"
+        batch_note = (
+            "；`entries[]` 逐项校验并保留顺序，允许部分成功但必须逐项报告"
+            if requirements.get("validate_batch_items_individually") else ""
+        )
+        blocks.append(f"\n输出与验证:{verification}{batch_note}。完整 output schema:")
+        blocks += ["```json", json.dumps(contract.get("output_schema") or {}, ensure_ascii=False, indent=2), "```"]
         payload = {"capability": name, "input": {
             field: _schema_example_value(field, field_schema) for field, field_schema in props.items()
         }}
@@ -287,7 +304,8 @@ def _multi_capability_sop(m: SkillManifest) -> str:
     lines += [
         "3. 只读能力返回的数据由调用方用于展示、确认或组织下一次能力调用；Skill 不擅自执行后续写能力。",
         "4. 写能力只有在明确 `confirm=true` 后执行；超时或结果不明时不得自动重试。",
-        "5. 按末行 JSON 的 `status` 处理结果，不能把 HTTP 200 或 `state=completed` 单独当成业务成功。",
+        "5. 批量输入按 `entries[]` 逐项校验；任一条失败都要保留原索引和原因，不得把部分成功折叠成全部成功。",
+        "6. 按末行 JSON 的 `status` 处理结果，不能把 HTTP 200 或 `state=completed` 单独当成业务成功。",
     ]
     return "\n".join(lines)
 
@@ -738,6 +756,7 @@ metadata:
 | status | 含义 | 你应做的 |
 |---|---|---|
 | `succeeded` | 所选能力执行完成；要求事实核查的写能力已核查通过 | 按该能力的 output_schema 解读 `output` |
+| `partial_success` | 批量能力仅部分条目成功 | 逐项报告成功/失败及原索引；不得笼统宣称全部成功，也不得自动重试成功项 |
 | `need_select` | 复合流程消歧:有多个候选待选 | 把 `candidates` 给用户选,再用 `--json` 把选中项的 `bind` 值带上重跑 |
 | `need_confirm` | 写操作未确认被拦 | 向用户确认后,**带 `--confirm` 重跑** |
 | `failed` | 失败(见 `reason`) | 把 reason 告知用户;缺参/凭证按故障排除处理,**勿谎报成功** |
@@ -776,7 +795,7 @@ metadata:
 {json.dumps(protocol_example, ensure_ascii=False)}
 ```
 
-速查见 `references/QUICKREF.md`,详细说明见 `references/README.md`。
+速查见 `references/QUICKREF.md`；完整机器契约见 `references/CONTRACT.json`。
 """
 
 
@@ -809,7 +828,7 @@ bash scripts/submit.sh --diagnose
 {relationships}
 
 ## 常见状态
-`succeeded` / `need_select` / `need_confirm` / `failed`
+`succeeded` / `partial_success` / `need_select` / `need_confirm` / `failed`
 """
     flags = _flags(m)
     cflag = " --confirm" if m.requires_confirmation else ""
@@ -832,6 +851,7 @@ bash scripts/submit.sh {flags}{cflag}
 ## 常见状态(末行 JSON)
 ```json
 {{"status": "succeeded", "state": "completed", "output": {{}}}}
+{{"status": "partial_success", "state": "partially_completed", "output": {{}}}}
 {{"status": "need_confirm"}}
 {{"status": "failed", "reason": "..."}}
 ```
@@ -879,55 +899,14 @@ def _options_md(m: SkillManifest) -> str | None:
 
 
 def _readme(m: SkillManifest) -> str:
-    contracts = _capability_contracts(m)
-    keys, required, props = _fields(m)
-    field_lines = (
-        "字段以各 capability 的输入契约为准；只收集所选能力的字段，不混用其它能力参数。"
-        if len(contracts) > 1
-        else ("\n".join(
-            f"- `{k}`（{'必填' if k in required else '可选'}）:{(props[k] or {}).get('description', '') or k}"
-            for k in keys) or "- (无业务参数)")
-    )
-    crit = (m.goal or {}).get("success_criteria") or []
-    verdict = ("\n".join(f"- {c}" for c in crit) if crit else
-               ("- `status=succeeded`" + ("(且事实核查通过)" if (m.flow or {}).get("verify") else "")
-                + " 才算成功;`failed` 据 `reason` 处置,**勿谎报成功**。"))
-    capability_details = []
-    for name, contract in contracts.items():
-        fields = contract.get("fields") or []
-        required_fields = set(contract.get("required") or [])
-        capability_details.append(
-            f"### `{name}` · {contract.get('title') or name}\n"
-            f"类型:`{contract.get('kind')}`；"
-            f"{'写操作需确认' if contract.get('requires_confirmation') else '只读能力'}；"
-            f"字段:" + ("、".join(f"`{field}`{'*' if field in required_fields else ''}" for field in fields) or "无")
-        )
-    relationships = _capability_relationship_section(m)
-    return f"""# {m.title} — 详细说明
+    return f"""# {m.title} · 导出文件导航
 
-`source: dano:{m.name}` · `capability: {'explicit-selection' if len(contracts) > 1 else _capability(m)}` · 风险 {m.risk_level} · {'写操作需确认' if m.requires_confirmation else '读操作'}
+- `../SKILL.md`:面向 Agent 的使用、交互、确认和结果处置说明。
+- `QUICKREF.md`:常用命令速查。
+- `CONTRACT.json`:无损机器契约，包含全部 capabilities、relations、input/output schema、确认与验证要求。
+- `OPTIONS.md`:存在静态或动态选择型字段时生成；动态选项仍以运行期查询结果为准。
 
-## 字段
-{field_lines}
-
-## 能力
-{chr(10).join(capability_details)}
-
-{relationships}
-
-不需要填的(Dano 运行期注入):流程句柄/模板、`__base_url__`、调用凭证;**调用者身份**取自登录凭证(谁的 token 就是谁操作),不作参数。
-
-## 执行与判定
-脚本按所选能力 POST 到 Dano `/v1/skills/<skill_id>/capabilities/<capability>/invoke`(带 `X-Tenant-Key`)。Dano 侧:能力级参数校验 → 风险闸门(写操作要 `--confirm`)→ 隔离执行适配器 → **事实核查**回查是否真生效。脚本末行 JSON 的 `status` 是唯一可信结论:
-- `succeeded`:接口成功**且**事实核查通过(真生效);`output` 含业务标识(单号/实例号)。
-- `need_confirm`:写操作没带 `--confirm` 被拦;向用户确认后重跑。
-- `failed`:含 `reason`;`事实核查未过` 表示疑似空操作,**不要**因为接口回了 200 就报成功。
-
-## 验收(怎样算做好)
-{verdict}
-
-## 环境变量(部署方配置,勿写进文件)
-- `DANO_URL` / `DANO_TENANT_KEY`
+`source: dano:{m.name}` · 风险 `{m.risk_level}`。契约冲突时以 `CONTRACT.json` 和运行时校验结果为准。
 """
 
 
@@ -939,6 +918,7 @@ _PY_TEMPLATE = r'''#!/usr/bin/env python3
 凭证 / 模板 / base_url / 调用者身份由 Dano 注入,本端不接触。
 """
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -949,7 +929,7 @@ import urllib.request
 SKILL_ID = "__SKILL_ID__"
 TOOL = "__TOOL__"
 CAPABILITY = __CAPABILITY__
-PROTOCOL = "dano.capability_call.draft"
+PROTOCOL = "dano.capability_call.v1"
 CAPABILITIES = __CAPABILITIES__
 FIELDS = __FIELDS__
 REQUIRED = __REQUIRED__
@@ -1009,6 +989,21 @@ def _coerce_cli_values(arguments, contract):
 
 def _validate_schema(value, schema, path="input"):
     schema = schema or {}
+    if "const" in schema and value != schema.get("const"):
+        raise ValueError("字段 %s 必须等于 %r" % (path, schema.get("const")))
+    alternatives = schema.get("oneOf") or schema.get("anyOf")
+    if alternatives:
+        failures = []
+        matched = 0
+        for alternative in alternatives:
+            try:
+                _validate_schema(value, alternative, path)
+                matched += 1
+            except ValueError as exc:
+                failures.append(str(exc))
+        if not matched or (schema.get("oneOf") and matched != 1):
+            raise ValueError("字段 %s 不符合候选 schema: %s" % (path, "; ".join(failures[:3])))
+        return
     expected = schema.get("type")
     if expected == "object":
         if not isinstance(value, dict):
@@ -1030,6 +1025,10 @@ def _validate_schema(value, schema, path="input"):
             raise ValueError("字段 %s 需为 JSON 数组" % path)
         if schema.get("minItems") is not None and len(value) < int(schema.get("minItems")):
             raise ValueError("字段 %s 至少需要 %s 项" % (path, schema.get("minItems")))
+        if schema.get("maxItems") is not None and len(value) > int(schema.get("maxItems")):
+            raise ValueError("字段 %s 最多允许 %s 项" % (path, schema.get("maxItems")))
+        if schema.get("uniqueItems") and len({json.dumps(item, ensure_ascii=False, sort_keys=True) for item in value}) != len(value):
+            raise ValueError("字段 %s 不允许重复项" % path)
         for index, item in enumerate(value):
             _validate_schema(item, schema.get("items") or {}, "%s[%s]" % (path, index))
     elif expected == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
@@ -1040,6 +1039,21 @@ def _validate_schema(value, schema, path="input"):
         raise ValueError("字段 %s 需为布尔值" % path)
     elif expected == "string" and not isinstance(value, str):
         raise ValueError("字段 %s 需为字符串" % path)
+    if isinstance(value, str):
+        if schema.get("minLength") is not None and len(value) < int(schema.get("minLength")):
+            raise ValueError("字段 %s 长度至少为 %s" % (path, schema.get("minLength")))
+        if schema.get("maxLength") is not None and len(value) > int(schema.get("maxLength")):
+            raise ValueError("字段 %s 长度最多为 %s" % (path, schema.get("maxLength")))
+        if schema.get("format") == "date":
+            try:
+                datetime.date.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError("字段 %s 需为有效日期 YYYY-MM-DD" % path) from exc
+        elif schema.get("format") == "date-time":
+            try:
+                datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError("字段 %s 需为有效日期时间 ISO 8601" % path) from exc
     allowed = schema.get("enum")
     if allowed and value not in allowed:
         raise ValueError("字段 %s 必须是: %s" % (path, ", ".join(map(str, allowed))))
@@ -1089,6 +1103,10 @@ def main():
             return
         if capability not in CAPABILITIES:
             _emit({"status": "failed", "reason": "未知 capability: %s" % capability})
+            sys.exit(1)
+        if args.list_options not in (CAPABILITIES[capability].get("option_fields") or []):
+            _emit({"status": "failed", "reason": "字段 %s 不是 capability %s 的动态选项字段" %
+                   (args.list_options, capability)})
             sys.exit(1)
         payload = json.dumps({"protocol": PROTOCOL, "name": TOOL, "capability": capability,
                               "field": args.list_options}).encode("utf-8")
@@ -1166,6 +1184,11 @@ def main():
         _emit({"status": "failed", "reason": str(e)})
         sys.exit(1)
 
+    if contract.get("requires_confirmation") and not confirm:
+        _emit({"status": "need_confirm", "reason": "写能力执行前需要明确确认",
+               "capability": capability})
+        return
+
     payload = json.dumps({"protocol": PROTOCOL, "name": TOOL, "capability": capability,
                           "arguments": arguments, "input": arguments, "confirm": confirm}).encode("utf-8")
     invoke_path = "/v1/skills/%s/capabilities/%s/invoke" % (
@@ -1193,9 +1216,10 @@ def main():
     if fc is None and "fact_check_passed" in api_audit:
         fc = {"passed": bool(api_audit.get("fact_check_passed")), "reason": api_audit.get("detail")}
     output = (res.get("exec_result") or {}).get("structured_output")
-    if state == "completed":
+    partial = state in {"partially_completed", "partial_success", "completed_with_errors"} or res.get("status") == "partial_success"
+    if state == "completed" or partial:
         fact_passed = fc is True or (isinstance(fc, dict) and fc.get("passed") is True)
-        if contract.get("verify_required") and not fact_passed:
+        if contract.get("verify_required") and not fact_passed and not partial:
             _emit({"status": "failed", "state": state,
                    "reason": "事实核查未通过或缺少核查结果，不能判定写操作成功",
                    "output": output, "fact_check": fc})
@@ -1206,7 +1230,8 @@ def main():
             _emit({"status": "failed", "state": state,
                    "reason": "输出不符合 output_schema: %s" % e, "output": output})
             sys.exit(1)
-        _emit({"status": "succeeded", "state": state, "output": output, "fact_check": fc})
+        _emit({"status": "partial_success" if partial else "succeeded", "state": state,
+               "output": output, "fact_check": fc})
     elif state == "needs_select":
         sel = audit.get("select") or {}
         _emit({"status": "need_select", "state": state, "message": res.get("message"),
@@ -1275,6 +1300,10 @@ def _write_skill(out_dir: Path, m: SkillManifest) -> Path:
     (folder / "SKILL.md").write_text(_skill_md(m, slug), encoding="utf-8")
     (folder / "references" / "QUICKREF.md").write_text(_quickref(m), encoding="utf-8")
     (folder / "references" / "README.md").write_text(_readme(m), encoding="utf-8")
+    (folder / "references" / "CONTRACT.json").write_text(
+        json.dumps(m.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     opts_md = _options_md(m)                          # 选择型候选值清单(让 agent 从真实选项里选,问题1)
     if opts_md:
         (folder / "references" / "OPTIONS.md").write_text(opts_md, encoding="utf-8")
@@ -1356,29 +1385,13 @@ def _biz_quickref(business: str, manifests: list[SkillManifest]) -> str:
 
 def _biz_readme(subsystem: str, business: str, manifests: list[SkillManifest]) -> str:
     label = _biz_label(business, manifests)
-    blocks = []
-    for m in manifests:
-        cap_lines = []
-        for name, contract in _capability_contracts(m).items():
-            required = set(contract.get("required") or [])
-            props = ((contract.get("parameters") or {}).get("properties") or {})
-            fields = "、".join(f"`{key}`{'*' if key in required else ''}" for key in props) or "无"
-            cap_lines.append(
-                f"  - `{name}`({contract.get('title') or name}，"
-                f"{'写·需确认' if contract.get('requires_confirmation') else '只读'}):{fields}"
-            )
-        blocks.append(f"### `{m.action}` — {m.title}\n" + "\n".join(cap_lines))
-    return f"""# {label} — 业务操作集详细说明
+    return f"""# {label} · 导出文件导航
 
-`business: {business}` · 子系统 {subsystem} · 共 {len(manifests)} 个操作。
-每个操作按 capability 校验输入并调用 Dano 能力级 invoke 端点(带 `X-Tenant-Key`);
-末行 JSON 的 `status` 是唯一可信结论(succeeded / need_confirm / failed)。
+- `../SKILL.md`:业务操作选择、交互、确认和结果处置说明。
+- `QUICKREF.md`:各操作与 capability 的常用命令。
+- `CONTRACT.json`:无损机器契约，包含本业务全部 Skill、capabilities、relations 和 schema。
 
-## 各操作字段
-{chr(10).join(blocks)}
-
-## 环境变量(部署方配置,勿写进文件)
-- `DANO_URL` / `DANO_TENANT_KEY`
+`business: {business}` · 子系统 `{subsystem}` · 共 {len(manifests)} 个操作。契约冲突时以 `CONTRACT.json` 和运行时校验结果为准。
 """
 
 
@@ -1435,7 +1448,8 @@ metadata:
 ## 通用规则
 - 缺必填字段先追问,不要臆造。
 - 写操作必须取得用户明确确认并带 `--confirm`。
-- 结果只认脚本末行 JSON 的 `status`;失败或回查未通过时不要报成功。
+- 批量操作按条目逐项报告；`partial_success` 不得表述成全部成功，也不得自动重试成功项。
+- 结果只认脚本末行 JSON 的 `status`;失败、部分成功或回查未通过时不要报全部成功。
 - `DANO_URL` 和 `DANO_TENANT_KEY` 由部署环境提供,不要写进文件。
 
 ## 操作细则
@@ -1458,6 +1472,16 @@ def _write_business_skill(out_dir: Path, subsystem: str, business: str,
     (folder / "SKILL.md").write_text(md_text, encoding="utf-8")
     (folder / "references" / "QUICKREF.md").write_text(_biz_quickref(business, manifests), encoding="utf-8")
     (folder / "references" / "README.md").write_text(_biz_readme(subsystem, business, manifests), encoding="utf-8")
+    bundle_contract = {
+        "protocol": "dano.skill_bundle.v1",
+        "subsystem": subsystem,
+        "business": business,
+        "skills": [manifest.model_dump(mode="json") for manifest in manifests],
+    }
+    (folder / "references" / "CONTRACT.json").write_text(
+        json.dumps(bundle_contract, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     entry = (manifests[0].action if manifests else "diagnose")   # 自检入口:转发任一操作的 --diagnose
     (folder / "scripts" / "diagnose.sh").write_text(
         _DIAGNOSE_SH.replace("__ENTRY__", entry), encoding="utf-8", newline="\n")

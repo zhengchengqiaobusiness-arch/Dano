@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,7 +32,11 @@ class CapabilityInvokePayload(BaseModel):
     dry_run: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str | None = None
-    protocol: str = "dano.capability_call.v1"
+    name: str | None = None
+    capability: str | None = None
+    protocol: Literal["dano.capability_call.v1"] = "dano.capability_call.v1"
+
+    model_config = ConfigDict(extra="forbid")
 
     def effective_arguments(self) -> dict[str, Any]:
         return _dict_from(self.arguments)
@@ -47,8 +51,10 @@ def _dict_from(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
     if isinstance(value, str):
-        return dict(json.loads(value or "{}"))
-    return {}
+        parsed = json.loads(value or "{}")
+        if isinstance(parsed, dict):
+            return dict(parsed)
+    raise ValueError("capability input and arguments must be JSON objects")
 
 
 def payload_fields(payload: CapabilityInvokePayload, capability: str) -> dict[str, Any]:
@@ -70,19 +76,50 @@ def find_capability(skill, capability: str) -> dict[str, Any] | None:  # noqa: A
     target = str(capability or "").strip()
     if not target:
         return None
-    raw_match = None
-    for cap in list(getattr(skill, "capabilities", []) or []):
-        if isinstance(cap, dict) and target in _capability_names(cap):
-            raw_match = dict(cap)
-            break
+    raw_matches = [
+        dict(cap) for cap in list(getattr(skill, "capabilities", []) or [])
+        if isinstance(cap, dict) and target in _capability_names(cap)
+    ]
+    raw_match = raw_matches[0] if len(raw_matches) == 1 else None
     try:
         manifest = to_manifest(skill)
-        for cap in list(getattr(manifest, "capabilities", []) or []):
-            if isinstance(cap, dict) and target in _capability_names(cap):
-                return {**(raw_match or {}), **dict(cap)}
-        return None
+        matches = [
+            cap for cap in list(getattr(manifest, "capabilities", []) or [])
+            if isinstance(cap, dict) and target in _capability_names(cap)
+        ]
+        if len(matches) != 1:
+            return None
+        return {**(raw_match or {}), **dict(matches[0])}
     except Exception:  # noqa: BLE001
         return raw_match
+
+
+def capability_relation_context(skill, capability: str) -> dict[str, Any]:  # noqa: ANN001
+    """Return relation metadata without turning a relation into an execution plan."""
+    try:
+        relations = list(getattr(to_manifest(skill), "capability_relations", []) or [])
+    except Exception:  # noqa: BLE001
+        relations = list(getattr(skill, "capability_relations", []) or [])
+    incoming: list[dict[str, Any]] = []
+    outgoing: list[dict[str, Any]] = []
+    for raw in relations:
+        if not isinstance(raw, dict):
+            continue
+        relation = dict(raw)
+        relation_type = str(relation.get("mode") or relation.get("type") or "suggested_call_chain")
+        relation["type"] = relation_type
+        relation["automatic"] = False
+        relation["transform_owner"] = "caller" if relation_type == "external_transform" else relation.get("transform_owner")
+        if relation.get("to_capability") == capability:
+            incoming.append(relation)
+        if relation.get("from_capability") == capability:
+            outgoing.append(relation)
+    return {
+        "incoming": incoming,
+        "outgoing": outgoing,
+        "automatic": False,
+        "requires_external_transform": any(r["type"] == "external_transform" for r in incoming),
+    }
 
 
 def capability_missing_fields(cap: dict[str, Any] | None, fields: dict[str, Any]) -> list[str]:
@@ -96,6 +133,16 @@ def capability_missing_fields(cap: dict[str, Any] | None, fields: dict[str, Any]
 def schema_issues(value: Any, schema: dict[str, Any] | None, path: str = "input") -> list[str]:
     """Validate the JSON-Schema subset emitted by Dano contracts."""
     if not isinstance(schema, dict):
+        return []
+    alternatives = schema.get("oneOf") or schema.get("anyOf")
+    if isinstance(alternatives, list) and alternatives:
+        matches = [
+            not schema_issues(value, candidate, path)
+            for candidate in alternatives if isinstance(candidate, dict)
+        ]
+        valid = sum(bool(match) for match in matches)
+        if valid == 0 or (schema.get("oneOf") and valid != 1):
+            return [f"Field `{path}` does not match the allowed schema alternatives"]
         return []
     issues: list[str] = []
     expected = schema.get("type")
@@ -121,6 +168,10 @@ def schema_issues(value: Any, schema: dict[str, Any] | None, path: str = "input"
             return [f"Field `{path}` must be an array"]
         if schema.get("minItems") is not None and len(value) < int(schema["minItems"]):
             issues.append(f"Field `{path}` must contain at least {schema['minItems']} item(s)")
+        if schema.get("uniqueItems"):
+            encoded = [json.dumps(item, ensure_ascii=False, sort_keys=True) for item in value]
+            if len(set(encoded)) != len(encoded):
+                issues.append(f"Field `{path}` must not contain duplicate items")
         item_schema = schema.get("items") if isinstance(schema.get("items"), dict) else {}
         for index, item in enumerate(value):
             issues.extend(schema_issues(item, item_schema, f"{path}[{index}]"))
@@ -132,6 +183,29 @@ def schema_issues(value: Any, schema: dict[str, Any] | None, path: str = "input"
         issues.append(f"Field `{path}` must be an integer")
     elif expected == "number" and (not isinstance(value, (int, float)) or isinstance(value, bool)):
         issues.append(f"Field `{path}` must be a number")
+    elif expected == "null" and value is not None:
+        issues.append(f"Field `{path}` must be null")
+    if isinstance(value, str):
+        if schema.get("minLength") is not None and len(value) < int(schema["minLength"]):
+            issues.append(f"Field `{path}` must contain at least {schema['minLength']} character(s)")
+        if schema.get("maxLength") is not None and len(value) > int(schema["maxLength"]):
+            issues.append(f"Field `{path}` must contain at most {schema['maxLength']} character(s)")
+        if schema.get("format") == "date":
+            try:
+                from datetime import date
+                date.fromisoformat(value)
+            except ValueError:
+                issues.append(f"Field `{path}` must be a valid ISO date")
+        elif schema.get("format") == "date-time":
+            try:
+                from datetime import datetime
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                issues.append(f"Field `{path}` must be a valid ISO date-time")
+    if isinstance(value, list) and schema.get("maxItems") is not None and len(value) > int(schema["maxItems"]):
+        issues.append(f"Field `{path}` must contain at most {schema['maxItems']} item(s)")
+    if "const" in schema and value != schema["const"]:
+        issues.append(f"Field `{path}` must equal: {schema['const']!r}")
     if schema.get("enum") and value not in schema["enum"]:
         issues.append(f"Field `{path}` must be one of: {schema['enum']}")
     return issues
@@ -177,6 +251,7 @@ def normalize_capability_result(
     *,
     skill_id: str = "",
     output_schema: dict[str, Any] | None = None,
+    relation_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     output = result
     for key in ("structured_output", "output", "response", "final"):
@@ -185,6 +260,29 @@ def normalize_capability_result(
             break
     response = result.get("response", output)
     structured = result.get("structured_output", output)
+    fact_items = list(result.get("fact_check_items") or [])
+    passed_facts = sum(1 for item in fact_items if isinstance(item, dict) and item.get("passed") is True)
+    failed_facts = sum(1 for item in fact_items if isinstance(item, dict) and item.get("passed") is False)
+    success_count = int(result.get("success_count") or 0)
+    failed_count = int(result.get("failed_count") or 0)
+    total = int(result.get("total") or (success_count + failed_count))
+    if result.get("blocked"):
+        status = "blocked"
+    elif (success_count and failed_count) or (passed_facts and failed_facts):
+        status = "partial_success"
+    elif result.get("ok"):
+        status = "succeeded"
+    else:
+        status = "failed"
+    fact_check_passed = result.get("fact_check_passed")
+    if fact_check_passed is True or (passed_facts and not failed_facts):
+        verification_status = "verified"
+    elif passed_facts and failed_facts:
+        verification_status = "partially_verified"
+    elif fact_check_passed is False or failed_facts:
+        verification_status = "unverified"
+    else:
+        verification_status = "not_checked"
     normalized = {
         "ok": bool(result.get("ok")),
         "skill_id": skill_id,
@@ -195,9 +293,19 @@ def normalize_capability_result(
         "raw": result,
         "blocked": bool(result.get("blocked", False)),
         "detail": result.get("detail", ""),
-        "status": result.get("status"),
-        "fact_check_passed": result.get("fact_check_passed"),
+        "status": status,
+        "source_status": result.get("status"),
+        "batch": bool(result.get("batch", False)),
+        "total": total,
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "failed_items": list(result.get("failed_items") or []),
+        "results": list(result.get("results") or []),
+        "fact_check_passed": fact_check_passed,
         "fact_check_note": result.get("fact_check_note"),
+        "fact_check_items": fact_items,
+        "verification_status": verification_status,
+        "relations": relation_context or {"incoming": [], "outgoing": [], "automatic": False},
     }
     if normalized["ok"] and output_schema:
         issues = schema_issues(output, output_schema, "output")
@@ -206,6 +314,7 @@ def normalize_capability_result(
                 "ok": False,
                 "blocked": True,
                 "stage": "invalid_output",
+                "status": "failed",
                 "detail": "；".join(issues),
                 "output_issues": issues,
             })
@@ -235,7 +344,19 @@ async def invoke_skill_capability(
             "capability": capability,
         }
 
-    fields = payload_fields(payload, capability)
+    relation_context = capability_relation_context(skill, capability)
+    try:
+        fields = payload_fields(payload, capability)
+    except (TypeError, ValueError) as exc:
+        return {
+            "ok": False,
+            "blocked": True,
+            "stage": "invalid_input",
+            "detail": str(exc),
+            "capability": capability,
+            "input_issues": [str(exc)],
+            "relations": relation_context,
+        }
     missing = capability_missing_fields(cap, fields)
     if missing:
         return {
@@ -245,6 +366,7 @@ async def invoke_skill_capability(
             "detail": f"Missing required capability fields: {missing}",
             "capability": capability,
             "missing": missing,
+            "relations": relation_context,
         }
 
     input_issues = capability_input_issues(cap, fields)
@@ -256,6 +378,7 @@ async def invoke_skill_capability(
             "detail": "；".join(input_issues),
             "capability": capability,
             "input_issues": input_issues,
+            "relations": relation_context,
         }
 
     if capability_requires_confirmation(skill, cap) and not payload.confirm:
@@ -266,6 +389,7 @@ async def invoke_skill_capability(
             "detail": f"Capability `{capability}` requires confirm=true",
             "capability": capability,
             "requires_confirmation": True,
+            "relations": relation_context,
         }
 
     api_request = dict(api_request or getattr(skill, "api_request", None) or {})
@@ -276,6 +400,7 @@ async def invoke_skill_capability(
             "stage": "missing_api_request",
             "detail": f"Skill `{getattr(skill, 'skill_id', '')}` has no executable api_request",
             "capability": capability,
+            "relations": relation_context,
         }
 
     if payload.dry_run:
@@ -293,6 +418,7 @@ async def invoke_skill_capability(
                     if isinstance(c, dict)
                 ],
             },
+            "relations": relation_context,
         }
 
     out = await execute_api(
@@ -309,5 +435,5 @@ async def invoke_skill_capability(
         capability,
         skill_id=getattr(skill, "skill_id", ""),
         output_schema=cap.get("output_schema") or {},
+        relation_context=relation_context,
     )
-    model_config = ConfigDict(extra="forbid")

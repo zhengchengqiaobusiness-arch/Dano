@@ -284,6 +284,23 @@ _RECORDER_JS = r"""() => {
       // 三段优先级合并去重
       var seen_labels = {};
       var out = [];
+      function optionValue(n, label) {
+        try {
+          var attrs = ['data-value','data-key','data-id','value','aria-valuenow','aria-value'];
+          for (var ai = 0; ai < attrs.length; ai++) {
+            var raw = n.getAttribute && n.getAttribute(attrs[ai]);
+            if (raw !== null && raw !== undefined && clean(raw) !== '') return clean(raw);
+          }
+          var nested = n.querySelector && n.querySelector('[data-value],[data-key],[data-id],[value]');
+          if (nested) {
+            for (var ni = 0; ni < attrs.length; ni++) {
+              var nestedRaw = nested.getAttribute && nested.getAttribute(attrs[ni]);
+              if (nestedRaw !== null && nestedRaw !== undefined && clean(nestedRaw) !== '') return clean(nestedRaw);
+            }
+          }
+        } catch (_) {}
+        return label;
+      }
       function harvest(nodes) {
         for (var i = 0; i < nodes.length; i++) {
           var n = nodes[i];
@@ -296,7 +313,10 @@ _RECORDER_JS = r"""() => {
           var t = clean(n.innerText || n.textContent || '');
           // 跳过空 / 纯标签符号(过滤 placeholder 灰文字 / *必填)
           if (!t || t.length > 60 || /^\s*[\*\-•]\s*$/.test(t)) continue;
-          if (!seen_labels[t]) { seen_labels[t] = 1; out.push(t); }
+          if (!seen_labels[t]) {
+            seen_labels[t] = 1;
+            out.push({ label: t, value: optionValue(n, t) });
+          }
           if (out.length >= 500) break;
         }
       }
@@ -304,8 +324,13 @@ _RECORDER_JS = r"""() => {
       if (out.length === 0) harvest(pop.querySelectorAll(frame_sel));
       if (out.length === 0) harvest(pop.querySelectorAll(fallback_sel));
       // 干掉弹层里的"搜索框 placeholder"、"清空"等按钮文本(只 trim,不暴力过滤):
-      return out.map(function (t) { return t.replace(/^[　\s]+|[　\s]+$/g, ''); })
-                .filter(function (t) { return t && t !== '清空' && t !== '清除' && t !== '搜索'; });
+      return out.map(function (item) {
+                  item.label = clean(item.label).replace(/^[　\s]+|[　\s]+$/g, '');
+                  return item;
+                })
+                .filter(function (item) {
+                  return item.label && item.label !== '清空' && item.label !== '清除' && item.label !== '搜索';
+                });
     } catch (e) { return []; }
   }
   // 原生 <select> 的全部 <option> 文字(去掉占位空项),返回 [{label, value}] 让标签与提交值都可追溯

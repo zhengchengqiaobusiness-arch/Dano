@@ -1,10 +1,20 @@
 """导出文件夹名(_slug):中文动作名也要唯一,不能塌成同一目录互相覆盖。"""
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from dano.export.agent_skills import _PROTOTYPE_SUBSYSTEMS, _slug, _tenant_subsystems
-from dano.shared.enums import Subsystem
+from dano.catalog.manifest import to_manifest
+from dano.export.agent_skills import (
+    _PROTOTYPE_SUBSYSTEMS,
+    _slug,
+    _tenant_subsystems,
+    _write_business_skill,
+    _write_skill,
+)
+from dano.orchestrator.types import SkillSpec
+from dano.shared.enums import RiskLevel, Subsystem
 
 
 def test_slug_english_action_readable():
@@ -44,3 +54,42 @@ async def test_export_falls_back_to_prototypes_when_empty_or_no_db():
     """发现为空 / DB 不可用 → 退回原型常量兜底(不致导出整体失败,行为与旧版一致)。"""
     assert await _tenant_subsystems(_FakeRepo([]), "acme") == _PROTOTYPE_SUBSYSTEMS
     assert await _tenant_subsystems(_FakeRepo(raises=True), "acme") == _PROTOTYPE_SUBSYSTEMS
+
+
+def test_write_skill_exports_lossless_contract_and_compact_navigation(tmp_path):
+    manifest = to_manifest(SkillSpec(
+        skill_id="A-OA.export_contract",
+        subsystem=Subsystem.OA,
+        action="export_contract",
+        risk_level=RiskLevel.L3,
+        capability_relations=[{
+            "from_capability": "query_status", "from_output": "dates",
+            "to_capability": "submit_batch", "to_input": "entries",
+        }],
+        capabilities=[
+            {"name": "query_status", "kind": "query_status",
+             "output_schema": {"type": "object", "properties": {"dates": {"type": "array"}}}},
+            {"name": "submit_batch", "kind": "submit_batch",
+             "input_schema": {"type": "object", "properties": {"entries": {
+                 "type": "array", "items": {"type": "object", "properties": {
+                     "date": {"type": "string", "format": "date"},
+                 }},
+             }}}},
+        ],
+    ))
+
+    folder = _write_skill(tmp_path, manifest)
+    contract = json.loads((folder / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
+    readme = (folder / "references" / "README.md").read_text(encoding="utf-8")
+
+    assert contract == manifest.model_dump(mode="json")
+    assert len(contract["capabilities"]) == 2
+    assert contract["capability_relations"][0]["automatic"] is False
+    assert contract["capabilities"][1]["input_schema"]["properties"]["entries"]["type"] == "array"
+    assert "CONTRACT.json" in readme
+    assert "## 执行与判定" not in readme
+
+    bundle = _write_business_skill(tmp_path, "A-OA", "日报", [manifest])
+    bundle_contract = json.loads((bundle / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
+    assert bundle_contract["protocol"] == "dano.skill_bundle.v1"
+    assert bundle_contract["skills"] == [manifest.model_dump(mode="json")]

@@ -157,6 +157,136 @@ def test_manifest_capability_confirmation_is_capability_scoped():
     assert caps["submit_batch"]["requires_confirmation"] is True
 
 
+def test_read_capability_ignores_stale_explicit_confirmation_flag():
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    sk = SkillSpec(
+        skill_id="A-OA.query",
+        subsystem=Subsystem.OA,
+        action="query",
+        risk_level=RiskLevel.L3,
+        has_api=False,
+        capabilities=[{
+            "name": "query_status",
+            "kind": "query_status",
+            "requires_confirmation": True,
+        }],
+    )
+
+    assert to_manifest(sk).capabilities[0]["requires_confirmation"] is False
+
+
+def test_manifest_collapses_stale_enum_description_snapshots():
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    sk = SkillSpec(
+        skill_id="A-OA.submit",
+        subsystem=Subsystem.OA,
+        action="submit",
+        risk_level=RiskLevel.L3,
+        has_api=False,
+        capabilities=[{
+            "name": "submit",
+            "kind": "submit",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "类型": {
+                        "type": "string",
+                        "enum": ["病假", "事假", "年假"],
+                        "description": "页面枚举选项：病假=2；页面枚举选项：病假=2、事假=1、年假=3",
+                    },
+                },
+            },
+        }],
+    )
+
+    prop = to_manifest(sk).capabilities[0]["input_schema"]["properties"]["类型"]
+    assert prop["description"] == "页面枚举选项：病假=2、事假=1、年假=3"
+
+
+def test_manifest_exports_complete_capability_protocol_requirements():
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    skill = SkillSpec(
+        skill_id="A-OA.daily_report",
+        subsystem=Subsystem.OA,
+        action="daily_report",
+        risk_level=RiskLevel.L3,
+        verification_status="verified",
+        verification_basis="fact_check_configured",
+        api_request={"fact_check": {"endpoint": "/reports"}},
+        capability_relations=[{
+            "from_capability": "query_status", "from_output": "missing_dates",
+            "to_capability": "submit_batch", "to_input": "entries",
+        }],
+        capabilities=[{
+            "name": "submit_batch", "kind": "submit_batch",
+            "input_schema": {
+                "type": "object", "properties": {"entries": {
+                    "type": "array", "items": {
+                        "type": "object", "properties": {
+                            "date": {"type": "string", "format": "date"},
+                        }, "required": ["date"],
+                    },
+                }}, "required": ["entries"],
+            },
+            "output_schema": {
+                "type": "object", "properties": {
+                    "results": {"type": "array", "items": {"type": "object"}},
+                }, "required": ["results"], "additionalProperties": False,
+            },
+        }],
+    )
+
+    manifest = to_manifest(skill)
+    cap = manifest.capabilities[0]
+    requirements = cap["validation_requirements"]
+    assert cap["input_schema"] == cap["parameters"]
+    assert cap["call_protocol"]["output_schema"] == cap["output_schema"]
+    assert cap["call_protocol"]["requires_confirmation"] is True
+    assert requirements["verification_required"] is True
+    assert requirements["validate_batch_items_individually"] is True
+    assert requirements["partial_success_must_be_reported"] is True
+    assert requirements["verification_status"] == "verified"
+    assert manifest.capability_relations[0]["automatic"] is False
+    assert "partial_success" in manifest.call_protocol["result_statuses"]
+    assert manifest.call_protocol["protocol"] == "dano.capability_call.v1"
+
+
+def test_manifest_upgrades_legacy_output_required_from_explicit_mapping():
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    skill = SkillSpec(
+        skill_id="A-OA.query_records", subsystem=Subsystem.OA,
+        action="query_records", risk_level=RiskLevel.L1,
+        capabilities=[{
+            "name": "query_status", "kind": "query_status",
+            "input_schema": {"type": "object", "properties": {}},
+            "output_schema": {
+                "type": "object",
+                "properties": {"records": {"type": "array"}, "debug": {"type": "string"}},
+                "required": [],
+            },
+            "output_mapping": [
+                {"name": "records", "step_id": "query", "response_path": "data.records"},
+            ],
+        }],
+    )
+
+    manifest = to_manifest(skill)
+
+    assert manifest.capabilities[0]["output_schema"]["required"] == ["records"]
+
+
 def test_manifest_prefers_business_capability_title_over_technical_endpoint_title():
     from dano.catalog.manifest import to_manifest
     from dano.orchestrator.types import SkillSpec
@@ -357,6 +487,105 @@ def test_exported_agent_script_uses_capability_scoped_contracts_and_fact_check(m
     failed = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert failed["status"] == "failed"
     assert "事实核查" in failed["reason"]
+
+
+def test_exported_runtime_validates_batch_dates_confirmation_partial_and_output(monkeypatch, capsys):
+    import json
+    import sys
+
+    from dano.catalog.manifest import to_manifest
+    from dano.export.agent_skills import _dano_call_py
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    skill = SkillSpec(
+        skill_id="A-OA.daily_report_runtime",
+        subsystem=Subsystem.OA,
+        action="daily_report_runtime",
+        risk_level=RiskLevel.L3,
+        capabilities=[{
+            "name": "submit_batch", "kind": "submit_batch",
+            "input_schema": {
+                "type": "object", "properties": {"entries": {
+                    "type": "array", "items": {
+                        "type": "object", "properties": {
+                            "date": {"type": "string", "format": "date"},
+                            "content": {"type": "string", "minLength": 1},
+                        }, "required": ["date", "content"],
+                    },
+                }}, "required": ["entries"],
+            },
+            "output_schema": {
+                "type": "object", "properties": {
+                    "results": {"type": "array", "items": {
+                        "type": "object", "properties": {
+                            "index": {"type": "integer"}, "status": {"type": "string"},
+                        }, "required": ["index", "status"], "additionalProperties": False,
+                    }},
+                }, "required": ["results"], "additionalProperties": False,
+            },
+        }],
+    )
+    namespace = {"__name__": "generated_test"}
+    exec(compile(_dano_call_py(to_manifest(skill)), "<generated-dano-call>", "exec"), namespace)  # noqa: S102
+    monkeypatch.setenv("DANO_URL", "http://dano.test")
+    monkeypatch.setenv("DANO_TENANT_KEY", "tenant-key")
+    calls = []
+    monkeypatch.setattr(namespace["urllib"].request, "urlopen", lambda *args, **kwargs: calls.append(args))
+
+    monkeypatch.setattr(sys, "argv", [
+        "dano_call.py", "--entries",
+        '[{"date":"2026-07-12","content":"ok"},{"date":"2026-02-30","content":"bad"}]',
+        "--confirm",
+    ])
+    with pytest.raises(SystemExit):
+        namespace["main"]()
+    invalid = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert "input.entries[1].date" in invalid["reason"]
+    assert calls == []
+
+    monkeypatch.setattr(sys, "argv", [
+        "dano_call.py", "--entries", '[{"date":"2026-07-12","content":"ok"}]',
+    ])
+    namespace["main"]()
+    assert json.loads(capsys.readouterr().out.strip())["status"] == "need_confirm"
+    assert calls == []
+
+    class _Response:
+        status = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+    partial_payload = {
+        "state": "partially_completed",
+        "exec_result": {"structured_output": {"results": [
+            {"index": 0, "status": "succeeded"}, {"index": 1, "status": "failed"},
+        ]}},
+    }
+    monkeypatch.setattr(namespace["urllib"].request, "urlopen", lambda *args, **kwargs: _Response(partial_payload))
+    monkeypatch.setattr(sys, "argv", [
+        "dano_call.py", "--entries", '[{"date":"2026-07-12","content":"ok"}]', "--confirm",
+    ])
+    namespace["main"]()
+    assert json.loads(capsys.readouterr().out.strip())["status"] == "partial_success"
+
+    bad_output = {"state": "completed", "exec_result": {"structured_output": {"unexpected": True}}}
+    monkeypatch.setattr(namespace["urllib"].request, "urlopen", lambda *args, **kwargs: _Response(bad_output))
+    with pytest.raises(SystemExit):
+        namespace["main"]()
+    rejected = json.loads(capsys.readouterr().out.strip())
+    assert rejected["status"] == "failed"
+    assert "output_schema" in rejected["reason"]
 
 
 def test_manifest_preserves_select_and_datetime_semantics():

@@ -2528,6 +2528,33 @@ def test_enum_to_scalar_rebuilds_capability_schema_without_stale_keywords():
     assert edited.steps[0].selects == []
 
 
+def test_enum_option_description_replaces_stale_snapshot_instead_of_appending():
+    spec = FlowSpec(
+        flow_id="enum-description-refresh",
+        steps=[FlowStep(
+            step_id="submit", method="POST", url="/submit", path="/submit",
+            params=[ParamField(
+                path="type", key="请假类型", value=2, type="enum",
+                category="user_param", source_kind="page_enum",
+                description="页面枚举选项：病假=2",
+                enum_options=[{"label": "病假", "value": 2}],
+            )],
+            selects=[SelectBinding(
+                param="请假类型", path="type", enum_source="dom",
+                options=[
+                    {"label": "病假", "value": 2},
+                    {"label": "事假", "value": 1},
+                    {"label": "年假", "value": 3},
+                ],
+            )],
+        )],
+    )
+
+    synced = sync_flow_spec_models(spec)
+
+    assert synced.steps[0].params[0].description == "页面枚举选项：病假=2、事假=1、年假=3"
+
+
 def test_strict_skill_level_blocks_missing_description_and_failure_handling():
     spec = FlowSpec(
         flow_id="f",
@@ -3242,6 +3269,70 @@ class _ScopeExpandingPlanner:
             {"op": "add_request_to_capability", "capability": "submit_batch", "step_id": "status"},
             {"op": "remove_request_from_capability", "capability": "submit_batch", "step_id": "submit"},
         ]}
+
+
+class _DestructiveIncrementalPlanner:
+    async def complete_json(self, **_kwargs):
+        return {"ops": [
+            {"op": "remove_capability", "capability": "query_status"},
+            {"op": "remove_request_from_capability", "capability": "submit", "step_id": "submit"},
+            {"op": "reject_dependency", "link_id": "confirmed-link"},
+            {"op": "upsert_capability", "capability": {
+                "name": "unexpected", "title": "不得新增", "kind": "submit",
+            }},
+            {"op": "upsert_capability", "capability": {
+                "name": "submit", "title": "完善后的提交能力", "kind": "submit",
+            }},
+        ]}
+
+
+def test_repeated_pi_loop_preserves_capabilities_interfaces_links_and_relations():
+    query = FlowStep(
+        step_id="query", method="GET", path="/records/page",
+        response_json={"data": {"records": []}},
+    )
+    submit = FlowStep(
+        step_id="submit", method="POST", path="/records/submit",
+        body_source='{"recordId":"one"}',
+        params=[ParamField(
+            path="recordId", key="记录", value="one", category="runtime_var",
+            source_kind="previous_response",
+            source={"kind": "previous_response", "step_id": "query", "response_path": "data.records[0].id"},
+        )],
+        response_json={"code": 0},
+    )
+    link = FlowLink(
+        link_id="confirmed-link", source_step_id="query", source_path="data.records[0].id",
+        target_step_id="submit", target_path="recordId", confirmed=True, locked=True,
+    )
+    relation = CapabilityRelation(
+        relation_id="confirmed-relation", type="caller_decision", mode="caller_decision",
+        from_capability="query_status", to_capability="submit", confirmed=True,
+    )
+    spec = FlowSpec(
+        steps=[query, submit], links=[link], capability_relations=[relation],
+        capabilities=[
+            FlowCapability(name="query_status", kind="query_status", step_ids=["query"],
+                           nodes=[{"id": "call_query", "type": "call", "step_id": "query"}]),
+            FlowCapability(name="submit", kind="submit", step_ids=["submit"],
+                           nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}]),
+        ],
+        meta={"capability_model": {"status": "ready"}},
+    )
+
+    out = asyncio.run(run_recording_pi_loop(
+        spec, llm_client=_DestructiveIncrementalPlanner(), model="fake", mode="plan", max_rounds=1,
+    ))
+
+    assert [cap.name for cap in out.capabilities] == ["query_status", "submit"]
+    assert {cap.name: cap.step_ids for cap in out.capabilities} == {
+        "query_status": ["query"], "submit": ["submit"],
+    }
+    assert out.capabilities[1].title == "完善后的提交能力"
+    assert [item.link_id for item in out.links] == ["confirmed-link"]
+    assert out.links[0].confirmed is True and out.links[0].locked is True
+    assert [item.relation_id for item in out.capability_relations] == ["confirmed-relation"]
+    assert out.capability_relations[0].confirmed is True
 
 
 def test_repeated_orchestration_repairs_contract_without_expanding_interface_scope():

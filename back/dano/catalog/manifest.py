@@ -402,9 +402,9 @@ def _capability_meta(skill: SkillSpec, capability: str) -> dict:
 
 
 def _call_protocol(capability: str, skill_id: str) -> dict:
-    """导出给 Agent 的调用协议草案;同时声明旧 name 兼容通道。"""
+    """导出给 Agent 的稳定调用协议，同时声明旧 name 兼容通道。"""
     return {
-        "protocol": "dano.capability_call.draft",
+        "protocol": "dano.capability_call.v1",
         "transport": "POST /v1/tools/call",
         "capability": capability,
         "capability_key": "capability",
@@ -429,6 +429,40 @@ def _capability_call_protocol(skill_id: str, capability: str) -> dict:
     }
 
 
+def _capability_requirements(skill: SkillSpec, cap: dict, kind: str, requires_confirmation: bool) -> dict:
+    """Build the machine-readable caller obligations for one capability."""
+    explicit_verify = cap.get("verify_required", cap.get("requires_verification"))
+    verification_status = str(cap.get("verification_status") or getattr(skill, "verification_status", "") or "")
+    verification_basis = str(cap.get("verification_basis") or getattr(skill, "verification_basis", "") or "")
+    verify_required = (
+        bool(explicit_verify)
+        if explicit_verify is not None
+        else (
+            bool(_flow_meta(skill).get("verify"))
+            or verification_basis == "fact_check_configured"
+        ) and kind not in _READ_ONLY_CAPABILITY_KINDS
+    )
+    requirements = copy.deepcopy(cap.get("validation_requirements") or {})
+    requirements.update({
+        "validate_input_before_call": True,
+        "validate_output_before_success": True,
+        "requires_confirmation": requires_confirmation,
+        "confirmation_scope": "final_write" if requires_confirmation else "none",
+        "verification_required": verify_required,
+        "verification_status": verification_status,
+        "verification_basis": verification_basis,
+    })
+    if kind in {"submit_batch", "validate_batch"}:
+        requirements.update({
+            "batch_input": "entries",
+            "validate_batch_items_individually": True,
+            "preserve_input_order": True,
+            "allow_partial_success": True,
+            "partial_success_must_be_reported": True,
+        })
+    return requirements
+
+
 def _sanitize_capability_parameter_schema(schema: dict, cap: dict) -> dict:
     """Normalize persisted capability schemas before exposing them to callers.
 
@@ -449,6 +483,19 @@ def _sanitize_capability_parameter_schema(schema: dict, cap: dict) -> dict:
                 dynamic[name] = dict(field.get("source") or {})
 
     def visit(node: dict) -> None:
+        description = str(node.get("description") or "")
+        if "；" in description:
+            option_prefixes = ("页面枚举选项：", "枚举选项：", "接口候选选项：", "手工枚举选项：", "固定枚举选项：", "表单枚举选项：")
+            parts = [part.strip() for part in description.split("；") if part.strip()]
+            latest: dict[str, str] = {}
+            plain: list[str] = []
+            for part in parts:
+                prefix = next((value for value in option_prefixes if part.startswith(value)), "")
+                if prefix:
+                    latest[prefix] = part
+                else:
+                    plain.append(part)
+            node["description"] = "；".join([*plain, *latest.values()])
         if node.get("type") == "object" or isinstance(node.get("properties"), dict):
             node.setdefault("type", "object")
             node["additionalProperties"] = False
@@ -533,15 +580,37 @@ def _capability_manifest(skill: SkillSpec, cap: dict) -> dict:
         if "entries" not in required:
             required.append("entries")
         out["parameters"]["required"] = required
-    out["input_schema"] = out["parameters"]
-    out["output_schema"] = out.get("output_schema") or {"type": "object"}
-    out["call_protocol"] = _capability_call_protocol(skill.skill_id, name)
-    if bool(cap.get("requires_confirmation")) or bool(cap.get("requires_human_confirm")):
-        out["requires_confirmation"] = True
-    elif bool(cap.get("readonly")) or bool(cap.get("read_only")) or kind in _READ_ONLY_CAPABILITY_KINDS:
+    out["input_schema"] = copy.deepcopy(out["parameters"])
+    out["output_schema"] = copy.deepcopy(out.get("output_schema") or {"type": "object"})
+    output_props = out["output_schema"].get("properties") or {}
+    mapped_output_names = [
+        str(mapping.get("name") or mapping.get("field") or mapping.get("response_path") or "")
+        for mapping in (cap.get("output_mapping") or [])
+        if isinstance(mapping, dict)
+    ]
+    mapped_required = [name for name in mapped_output_names if name and name in output_props]
+    if mapped_required:
+        existing_required = list(out["output_schema"].get("required") or [])
+        out["output_schema"]["required"] = list(dict.fromkeys([*existing_required, *mapped_required]))
+    # Capability kind is authoritative. A stale skill-level confirmation flag
+    # must not turn a read-only capability into a write operation on export.
+    if bool(cap.get("readonly")) or bool(cap.get("read_only")) or kind in _READ_ONLY_CAPABILITY_KINDS:
         out["requires_confirmation"] = False
+    elif bool(cap.get("requires_confirmation")) or bool(cap.get("requires_human_confirm")):
+        out["requires_confirmation"] = True
     else:
         out["requires_confirmation"] = RiskLevel(skill.risk_level) in _CONFIRM_FROM
+    requirements = _capability_requirements(skill, cap, kind, out["requires_confirmation"])
+    out["validation_requirements"] = requirements
+    protocol = _capability_call_protocol(skill.skill_id, name)
+    protocol.update({
+        "input_schema": out["input_schema"],
+        "output_schema": out["output_schema"],
+        "requires_confirmation": out["requires_confirmation"],
+        "validation_requirements": requirements,
+        "result_statuses": ["succeeded", "partial_success", "need_select", "need_confirm", "failed"],
+    })
+    out["call_protocol"] = protocol
     return out
 
 
@@ -670,6 +739,9 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
         output_schema = default_cap["output_schema"]
     capability_relations = _capability_relations(skill)
     call_protocol = _call_protocol(capability, skill.skill_id)
+    call_protocol["result_statuses"] = [
+        "succeeded", "partial_success", "need_select", "need_confirm", "failed",
+    ]
     if len(capabilities) > 1:
         call_protocol.update({
             "default_capability": None,

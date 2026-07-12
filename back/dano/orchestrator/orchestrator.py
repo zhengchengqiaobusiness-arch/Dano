@@ -247,13 +247,17 @@ class Orchestrator:
             return TaskOutcome(task_id=task_id, state=TaskState.REJECTED, skill_id=skill.skill_id,
                                message=decision.reason)
         if not capability and len(skill.capabilities or []) > 1:
+            candidates = list(dict.fromkeys(
+                str(c.get("name") or c.get("capability_id") or c.get("kind") or "").strip()
+                for c in skill.capabilities if isinstance(c, dict)
+            ))
+            candidates = [name for name in candidates if name]
             return TaskOutcome(
                 task_id=task_id,
                 state=TaskState.NEEDS_SELECT,
                 skill_id=skill.skill_id,
                 message="该 Skill 包含多个独立能力，必须显式指定 capability",
-                audit={"capability_required": True,
-                       "candidates": [c.get("name") for c in skill.capabilities if c.get("name")]},
+                audit={"capability_required": True, "candidates": candidates},
             )
         if capability:
             if skill.has_api or skill.is_workflow:
@@ -565,7 +569,9 @@ class Orchestrator:
         )
         ok = bool(out.get("ok"))
         stage = str(out.get("stage") or "")
-        if ok:
+        if out.get("status") == "partial_success":
+            state = TaskState.PARTIAL_SUCCESS
+        elif ok:
             state = TaskState.COMPLETED
         elif stage in {"missing_input", "invalid_input"}:
             state = TaskState.NEEDS_INPUT
@@ -589,7 +595,10 @@ class Orchestrator:
             state=state,
             skill_id=skill.skill_id,
             exec_result=er,
-            message=out.get("detail") or ("capability 调用完成" if ok else "capability 调用未完成"),
+            message=out.get("detail") or (
+                "capability 部分成功" if out.get("status") == "partial_success"
+                else "capability 调用完成" if ok else "capability 调用未完成"
+            ),
             audit={"capability": capability, "api": out},
         )
 

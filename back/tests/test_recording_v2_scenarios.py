@@ -13,20 +13,24 @@ import json
 import dano.execution.page.flow_spec as flow_spec_module
 from dano.execution.page.flow_spec import (
     CapabilityField,
+    CapabilityRelation,
     FlowCapability,
     FlowLink,
     FlowSpec,
     FlowStep,
     ParamField,
+    SelectBinding,
     apply_flow_edits,
     build_default_flow_capabilities,
     flow_spec_to_api_request,
     flow_spec_to_client,
     orchestrate_flow_capabilities,
+    prepare_flow_spec_for_publish,
     run_recording_pi_loop,
     to_flow_spec,
     validate_flow_spec,
 )
+from dano.execution.page.repair_ops import collect_capability_findings
 
 
 def _get(index: int, path: str, response_json: dict) -> dict:
@@ -522,3 +526,312 @@ def test_missing_dates_query_and_single_row_submit_compile_to_foreach_batch_cont
     assert batch.input_schema["properties"]["entries"]["type"] == "array"
     assert any(node.get("type") == "foreach" for node in batch.nodes)
     assert out.capability_relations[0].type == "external_transform"
+
+
+def test_legacy_query_url_materializes_capability_inputs_from_step_params():
+    query = FlowStep(
+        step_id="query",
+        method="GET",
+        url="/daily/page?keyword=alice&pageNo=1&pageSize=20",
+        path="/daily/page",
+        source_meta={"role": "business_get"},
+        response_json={"data": {"records": []}},
+    )
+
+    spec = FlowSpec(steps=[query])
+    params = {param.path: param for param in spec.steps[0].params}
+    cap = build_default_flow_capabilities(spec)[0]
+
+    assert set(params) == {"query.keyword", "query.pageNo", "query.pageSize"}
+    assert params["query.keyword"].category == "user_param"
+    assert params["query.pageNo"].category == "system_const"
+    assert set(cap.input_schema["properties"]) == {"keyword"}
+
+
+def test_query_output_fields_use_mapped_response_schema_types():
+    query = FlowStep(
+        step_id="query",
+        method="GET",
+        path="/daily/page",
+        source_meta={"role": "business_get"},
+        response_json={"data": {"missing_dates": ["2026-05-11"], "total": 1}},
+    )
+
+    out = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[query])))
+    cap = out.capabilities[0]
+    fields = {field.key: field.type for field in cap.outputs}
+
+    assert fields["missing_dates"] == "array"
+    assert fields["total"] == "number"
+    assert set(cap.output_schema["required"]) == {"missing_dates", "total"}
+    assert all(field.required for field in cap.outputs)
+
+
+def test_planner_batch_kind_uses_same_recorded_evidence_as_default_planner():
+    query = FlowStep(
+        step_id="query_missing",
+        method="GET",
+        path="/daily/page",
+        source_meta={"role": "business_get"},
+        response_json={"data": {"missing_dates": ["2026-05-11"]}},
+    )
+    submit = FlowStep(
+        step_id="submit_one",
+        method="POST",
+        path="/daily/submit",
+        body_source='{"date":"2026-05-11","content":"开发"}',
+        params=[
+            ParamField(path="date", key="日报日期", type="date", source_kind="user_input"),
+            ParamField(path="content", key="工作内容", source_kind="user_input"),
+        ],
+    )
+    spec = FlowSpec(
+        steps=[query, submit],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            kind="submit_batch",
+            step_ids=["submit_one"],
+            evidence=[{"kind": "planner"}],
+        )],
+    )
+
+    repaired = flow_spec_module._repair_generated_capability_contracts(spec)
+
+    assert repaired.capabilities[0].kind == "submit_batch"
+    assert repaired.capabilities[0].name == "submit_batch"
+
+
+def test_external_transform_relation_prunes_only_stale_derived_mapping():
+    query = FlowCapability(
+        name="query_status",
+        kind="query_status",
+        output_schema={"type": "object", "properties": {"records": {"type": "array"}}},
+    )
+    submit = FlowCapability(
+        name="submit_batch",
+        kind="submit_batch",
+        input_schema={"type": "object", "properties": {"entries": {"type": "array"}}},
+    )
+    stale = CapabilityRelation(
+        relation_id="stale",
+        from_capability="query_status",
+        from_output="missing_dates",
+        to_capability="submit_batch",
+        to_input="entries",
+        evidence={"kind": "typed_capability_contract"},
+    )
+    manual = stale.model_copy(deep=True)
+    manual.relation_id = "manual"
+    manual.evidence = {"kind": "user_confirmed"}
+    spec = FlowSpec(capabilities=[query, submit], capability_relations=[stale, manual])
+
+    flow_spec_module._ensure_external_transform_relations(spec)
+
+    assert [relation.relation_id for relation in spec.capability_relations] == ["manual"]
+
+
+def test_query_then_submit_creates_caller_decision_without_fake_field_mapping():
+    query = FlowStep(
+        step_id="query_status", method="GET", path="/records/page",
+        source_meta={"role": "business_get"},
+        response_json={"data": {"records": [{"date": "2026-05-01"}]}},
+    )
+    submit = FlowStep(
+        step_id="submit", method="POST", path="/records/submit",
+        body_source='{"date":"2026-05-02","content":"开发"}',
+        source_meta={"role": "submit_anchor"},
+        params=[ParamField(path="date", key="日期", type="date", source_kind="user_input")],
+    )
+
+    out = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[query, submit])))
+
+    assert {cap.kind for cap in out.capabilities} == {"query_status", "submit"}
+    assert len(out.capability_relations) == 1
+    relation = out.capability_relations[0]
+    assert relation.type == "caller_decision"
+    assert relation.from_output == ""
+    assert relation.to_input == ""
+    assert relation.evidence["automatic_execution"] is False
+    report = validate_flow_spec(out)
+    assert not any("output/input 字段" in message for message in report["errors"])
+
+
+def test_page_enum_binding_is_projected_to_param_and_capability_contract():
+    step = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/leave/submit",
+        body_source='{"type":"2"}',
+        params=[ParamField(
+            path="type", key="请假类型", value="2", type="string",
+            category="user_param", source_kind="user_input", required=True,
+        )],
+        selects=[SelectBinding(
+            param="请假类型", path="type", enum_source="dom", enum_confirmed=True,
+            options=[
+                {"label": "病假", "value": "1"},
+                {"label": "事假", "value": "2"},
+                {"label": "婚假", "value": "3"},
+            ],
+            option_map={"病假": "1", "事假": "2", "婚假": "3"},
+        )],
+        response_json={"code": 0, "data": {"id": "leave-1"}},
+    )
+    spec = FlowSpec(
+        steps=[step],
+        capabilities=[FlowCapability(name="submit", kind="submit", step_ids=["submit"])],
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+    param = prepared.steps[0].params[0]
+    capability_field = prepared.capabilities[0].inputs[0]
+    api_request, errors = flow_spec_to_api_request(prepared)
+
+    assert errors == []
+    assert (param.type, param.source_kind) == ("enum", "page_enum")
+    assert param.enum_value_map == {"病假": "1", "事假": "2", "婚假": "3"}
+    assert capability_field.source_kind == "page_enum"
+    assert capability_field.enum_options == param.enum_options
+    assert api_request["capabilities"][0]["input_schema"]["properties"]["请假类型"]["enum"] == ["病假", "事假", "婚假"]
+    assert not any("内部 ID/短码" in message for message in validate_flow_spec(prepared)["errors"])
+
+
+def test_api_option_binding_preserves_source_request_in_capability_field():
+    step = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/leave/submit",
+        body_source='{"assigneeId":"142"}',
+        params=[ParamField(
+            path="assigneeId", key="审批人", value="142", type="string",
+            category="user_param", source_kind="user_input", required=True,
+        )],
+        selects=[SelectBinding(
+            param="审批人", path="assigneeId", source_url="/users/options",
+            source_method="GET", source_role="read_option", source_request_id="users-options",
+            value_key="id", label_key="name", enum_source="api", enum_confirmed=True,
+            options=[{"label": "张三", "value": "142"}], option_map={"张三": "142"},
+        )],
+        response_json={"code": 0},
+    )
+    spec = FlowSpec(
+        steps=[step],
+        capabilities=[FlowCapability(name="submit", kind="submit", step_ids=["submit"])],
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+    param = prepared.steps[0].params[0]
+    field = prepared.capabilities[0].inputs[0]
+
+    assert (param.type, param.source_kind) == ("enum", "api_option")
+    assert param.source["source_url"] == "/users/options"
+    assert param.source["source_request_id"] == "users-options"
+    assert field.source_kind == "api_option"
+    assert field.source["source_url"] == "/users/options"
+    assert field.enum_value_map == {"张三": "142"}
+
+
+def test_publish_preparation_removes_stale_batch_fields_outputs_and_goal_capability():
+    step = FlowStep(
+        step_id="submit", method="POST", path="/leave/submit",
+        body_source='{"reason":"事假"}',
+        params=[ParamField(path="reason", key="原因", value="事假", required=True)],
+        response_json={"code": 0, "data": {"id": "leave-1"}},
+    )
+    capability = FlowCapability(
+        name="submit", kind="submit", step_ids=["submit"],
+        input_schema={"type": "object", "properties": {"entries": {"type": "array"}}, "required": ["entries"]},
+        output_schema={"type": "object", "properties": {}},
+        inputs=[CapabilityField(scope="input", key="entries", path="entries", type="array", locked=True)],
+        outputs=[CapabilityField(scope="output", key="response", path="response", type="object", locked=True)],
+        output_mapping=[{"kind": "final_response", "name": "result", "step_id": "submit", "response_path": "response"}],
+    )
+    spec = FlowSpec(
+        steps=[step], capabilities=[capability],
+        goal={"intent": "提交请假", "capabilities": ["list_options", "submit"]},
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+    api_request, errors = flow_spec_to_api_request(prepared)
+
+    assert errors == []
+    assert prepared.goal["capabilities"] == ["submit"]
+    assert set(prepared.capabilities[0].input_schema["properties"]) == {"原因"}
+    assert [field.key for field in prepared.capabilities[0].inputs] == ["原因"]
+    assert "result" in prepared.capabilities[0].output_schema["properties"]
+    assert collect_capability_findings(api_request) == []
+
+
+def test_final_response_output_uses_one_canonical_name_in_fields_and_schema():
+    step = FlowStep(
+        step_id="submit", method="POST", path="/submit",
+        body_source='{"reason":"test"}',
+        params=[ParamField(path="reason", key="原因", value="test", required=True)],
+        response_json={"code": 0, "data": {"id": "one"}},
+    )
+    spec = FlowSpec(
+        steps=[step],
+        capabilities=[FlowCapability(
+            name="submit", kind="submit", step_ids=["submit"],
+            output_mapping=[{"kind": "final_response", "step_id": "submit", "response_path": "response"}],
+        )],
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+    cap = prepared.capabilities[0]
+    api_request, errors = flow_spec_to_api_request(prepared)
+
+    assert errors == []
+    assert set(cap.output_schema["properties"]) == {"output_1"}
+    assert [field.key for field in cap.outputs] == ["output_1"]
+    assert collect_capability_findings(api_request) == []
+
+
+def test_relation_without_field_mapping_is_canonicalized_as_caller_decision():
+    query = FlowStep(
+        step_id="query", method="GET", path="/leave/page",
+        response_json={"data": {"records": []}},
+    )
+    submit = FlowStep(
+        step_id="submit", method="POST", path="/leave/submit",
+        body_source='{"reason":"test"}',
+        params=[ParamField(path="reason", key="原因", value="test")],
+        response_json={"code": 0},
+    )
+    spec = FlowSpec(
+        steps=[query, submit],
+        capabilities=[
+            FlowCapability(name="query_status", kind="query_status", step_ids=["query"]),
+            FlowCapability(name="submit", kind="submit", step_ids=["submit"]),
+        ],
+        capability_relations=[CapabilityRelation(
+            relation_id="legacy-empty-transform",
+            type="suggested_call_chain",
+            mode="external_transform",
+            from_capability="query_status",
+            to_capability="submit",
+            confirmed=True,
+        )],
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+    relation = prepared.capability_relations[0]
+    api_request, errors = flow_spec_to_api_request(prepared)
+
+    assert errors == []
+    assert (relation.type, relation.mode) == ("caller_decision", "caller_decision")
+    assert relation.from_output == "" and relation.to_input == ""
+    assert not any("relation" in item["kind"] for item in collect_capability_findings(api_request))
+
+
+def test_external_transform_with_only_one_field_remains_invalid():
+    relation = CapabilityRelation(
+        type="external_transform", mode="external_transform",
+        from_capability="query_status", from_output="records",
+        to_capability="submit", to_input="",
+    )
+
+    normalized = flow_spec_module._normalize_capability_relation_semantics(relation)
+
+    assert normalized.type == "external_transform"
+    assert normalized.mode == "external_transform"

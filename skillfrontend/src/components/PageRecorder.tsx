@@ -114,6 +114,13 @@ interface FlowCapabilityData {
   caller_responsibilities?: string[]; skill_responsibilities?: string[];
   status?: string; locked?: boolean; updated_by?: string;
 }
+interface FlowCapabilityRelationData {
+  relation_id?: string; type?: string; mode?: string;
+  from_capability?: string; from_output?: string;
+  to_capability?: string; to_input?: string;
+  transform_owner?: string; requires_user_confirmation?: boolean;
+  confidence?: number; confirmed?: boolean; reason?: string;
+}
 interface ReviewItemData {
   id: string; type: string; severity: string; title: string; reason: string;
   current_guess?: string; suggested_action?: string; resolved?: boolean; confidence?: number;
@@ -142,6 +149,7 @@ interface RequestGraphEntry {
 interface FlowSpecData {
   flow_id: string; title: string; business_description?: string;
   steps: FlowStepData[]; links: FlowLinkData[]; capabilities?: FlowCapabilityData[];
+  capability_relations?: FlowCapabilityRelationData[];
   risk_level: string; review_items?: ReviewItemData[];
   request_facts?: {
     requests?: RequestGraphEntry[];
@@ -885,6 +893,14 @@ function confidenceColor(value?: number) {
   if (value >= 0.7) return "warning";
   return "error";
 }
+function schemaBusinessType(spec: Record<string, any>) {
+  if (Array.isArray(spec.enum) && spec.enum.length) return "enum";
+  if (spec.type === "array" && Array.isArray(spec.items?.enum) && spec.items.enum.length) return "list-enum";
+  if (spec.format === "date-time") return "datetime";
+  if (spec.format === "date") return "date";
+  if (spec.format === "name-ref" || spec["x-options-source"] || Array.isArray(spec["x-options"])) return "enum";
+  return String(spec.type || spec.format || "any");
+}
 function schemaFieldRows(schema?: Record<string, any>) {
   if (!schema || typeof schema !== "object") return [];
   const props = schema.properties && typeof schema.properties === "object" ? schema.properties : schema;
@@ -893,7 +909,7 @@ function schemaFieldRows(schema?: Record<string, any>) {
     .filter(([, spec]) => spec && typeof spec === "object")
     .map(([name, spec]) => ({
       name,
-      type: String((spec as any).format === "date-time" ? "datetime" : (spec as any).format || (spec as any).type || "any"),
+      type: schemaBusinessType(spec as Record<string, any>),
       description: String((spec as any).description || (spec as any).title || ""),
       required: required.has(name),
     }));
@@ -1023,6 +1039,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [orchestrateBusy, setOrchestrateBusy] = useState(false);
   const [autoFixBusy, setAutoFixBusy] = useState(false);
   const flowOperationRef = useRef<{ mode: "plan" | "repair"; previousUpdatedAt?: string } | null>(null);
+  const flowOperationTimerRef = useRef<number | null>(null);
   const [activeFlowTab, setActiveFlowTab] = useState("abilities");
 
   function acceptFlowSpec(fs: FlowSpecData) {
@@ -1032,20 +1049,27 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (nextTitle && !title.trim()) setTitle(nextTitle);
   }
 
-  function finishFlowOperation(loop?: { mode?: string; updated_at?: string }) {
+  function finishFlowOperation(loop?: { mode?: string; updated_at?: string }, operation?: string) {
     const active = flowOperationRef.current;
     if (
       !active
-      || loop?.mode !== active.mode
-      || !loop.updated_at
-      || loop.updated_at === active.previousUpdatedAt
+      || (operation && operation !== active.mode)
+      || (!operation && (
+        loop?.mode !== active.mode
+        || !loop.updated_at
+        || loop.updated_at === active.previousUpdatedAt
+      ))
     ) return;
+    if (flowOperationTimerRef.current != null) window.clearTimeout(flowOperationTimerRef.current);
+    flowOperationTimerRef.current = null;
     flowOperationRef.current = null;
     setOrchestrateBusy(false);
     setAutoFixBusy(false);
   }
 
   function clearFlowOperation() {
+    if (flowOperationTimerRef.current != null) window.clearTimeout(flowOperationTimerRef.current);
+    flowOperationTimerRef.current = null;
     flowOperationRef.current = null;
     setOrchestrateBusy(false);
     setAutoFixBusy(false);
@@ -1160,9 +1184,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setJsonErr("");
     setLastServerJson("");
     setActiveFlowTab("abilities");
-    flowOperationRef.current = null;
-    setOrchestrateBusy(false);
-    setAutoFixBusy(false);
+    clearFlowOperation();
   }
 
   function start() {
@@ -1228,7 +1250,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         if (fs) {
           acceptFlowSpec(fs);
           setLastServerJson(JSON.stringify(fs));
-          finishFlowOperation(fs.meta?.recording_pi_loop);
+          finishFlowOperation(fs.meta?.recording_pi_loop, m.operation);
         }
         if (m.check_report) setCheckReport(m.check_report);
       }
@@ -1250,6 +1272,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         message.success("业务说明已生成");
       }
       else if (m.type === "result") {
+        if (m.report?.full_spec) {
+          acceptFlowSpec(m.report.full_spec);
+          setLastServerJson(JSON.stringify(m.report.full_spec));
+        }
         setResult(m.report); setPhase("recording");
         if (m.report?.check_report) setCheckReport(m.report.check_report);
         if (m.report?.ok) {
@@ -1350,8 +1376,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!currentSpec) { message.error("请先生成 FlowSpec 后再发布"); return; }
     const publishTitle = title.trim() || preferredSkillTitle(currentSpec);
     setResult(null); setPhase("publishing");
-    send({ type: "publish_request", action: action.trim(), title: publishTitle,
-      param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: true, flow_spec: currentSpec });
+    if (!send({ type: "publish_request", action: action.trim(), title: publishTitle,
+      param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: true, flow_spec: currentSpec })) {
+      setPhase("recording");
+      setResult({ ok: false, reason: "录制连接已断开，发布请求未发送" });
+    }
   }
   function stopAll() {
     send({ type: "stop" }); wsRef.current?.close();
@@ -1872,6 +1901,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     };
     setOrchestrateBusy(true);
     setAutoFixBusy(true);
+    flowOperationTimerRef.current = window.setTimeout(() => {
+      if (!flowOperationRef.current) return;
+      clearFlowOperation();
+      message.error("能力生成超时，请检查服务端日志后重试");
+    }, 120000);
     if (!send({ type: "orchestrate_flow", flow_spec: currentSpec })) clearFlowOperation();
   }
   function autoFixFlow() {
@@ -1881,6 +1915,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       previousUpdatedAt: flowSpecRef.current.meta?.recording_pi_loop?.updated_at,
     };
     setAutoFixBusy(true);
+    flowOperationTimerRef.current = window.setTimeout(() => {
+      if (!flowOperationRef.current) return;
+      clearFlowOperation();
+      message.error("自动修复超时，请检查服务端日志后重试");
+    }, 120000);
     if (!send({ type: "auto_fix_flow" })) clearFlowOperation();
   }
   function addCapability() {
@@ -2195,6 +2234,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function selectBindingForParam(step: FlowStepData, p: FlowParam) {
     const selects = step.selects || [];
     return selects.find((s) => s.path === p.path) ||
+      selects.find((s) => s.id_path === p.path) ||
       selects.find((s) => !s.path && s.param === p.key) ||
       selects.find((s) => s.param === p.key);
   }
@@ -3031,6 +3071,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function renderCapabilityComposerPanel() {
     if (!flowSpec) return null;
     const capabilities = flowSpec.capabilities || [];
+    const capabilityRelations = flowSpec.capability_relations || [];
     const kindOptions = CAPABILITY_KIND_OPTIONS;
     return (
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
@@ -3112,6 +3153,41 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 </Collapse.Panel>
               );
             })}
+          </Collapse>
+        )}
+        {capabilityRelations.length > 0 && (
+          <Collapse size="small" bordered={false}>
+            <Collapse.Panel key="capability-relations" header={`能力关系 ${capabilityRelations.length}`}>
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                {capabilityRelations.map((relation, index) => {
+                  const relationType = relation.mode || relation.type || "external_transform";
+                  const owner = relation.transform_owner === "skill" ? "Skill 内部" : "调用方";
+                  return (
+                    <div key={relation.relation_id || `${relation.from_capability}-${relation.to_capability}-${index}`}
+                      style={{ display: "grid", gridTemplateColumns: "minmax(160px, 1fr) auto minmax(160px, 1fr)", gap: 8, alignItems: "center" }}>
+                      <Space wrap size={4}>
+                        <Tag color="blue">{relation.from_capability || "未指定来源能力"}</Tag>
+                        {relation.from_output && <Typography.Text code>{relation.from_output}</Typography.Text>}
+                      </Space>
+                      <Space direction="vertical" size={0} align="center">
+                        <Tag color={relation.confirmed ? "success" : "warning"}>{relationType}</Tag>
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>{owner}负责</Typography.Text>
+                      </Space>
+                      <Space wrap size={4}>
+                        <Tag color="geekblue">{relation.to_capability || "未指定目标能力"}</Tag>
+                        {relation.to_input && <Typography.Text code>{relation.to_input}</Typography.Text>}
+                        {relation.requires_user_confirmation && <Tag color="orange">需用户确认</Tag>}
+                      </Space>
+                      {relation.reason && (
+                        <Typography.Text type="secondary" style={{ gridColumn: "1 / -1", fontSize: 12 }}>
+                          {relation.reason}
+                        </Typography.Text>
+                      )}
+                    </div>
+                  );
+                })}
+              </Space>
+            </Collapse.Panel>
           </Collapse>
         )}
       </Space>

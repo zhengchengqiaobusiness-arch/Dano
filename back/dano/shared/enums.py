@@ -137,6 +137,7 @@ class TaskState(StrEnum):
     """运行期一次任务的终态(流程6)。"""
 
     COMPLETED = "completed"            # 跑通 + 事实核查通过
+    PARTIAL_SUCCESS = "partial_success"  # 批量任务部分成功，必须逐项报告
     ANSWERED = "answered"             # 问事:知识检索合成答案返回(仅信息)
     FAILED = "failed"                 # 跑不通 / 验证不通过 → 流程10
     DRIFT = "drift"                   # 页面/字段漂移,执行前指纹不一致 → 转流程11

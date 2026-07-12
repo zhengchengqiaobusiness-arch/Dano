@@ -25,6 +25,7 @@ from dano.execution.connectors.auth import AuthManager
 from dano.execution.connectors.executor import RealActionExecutor, SystemEndpoint, system_key_for
 from dano.execution.harness.harness import Harness
 from dano.orchestrator.orchestrator import Orchestrator
+from dano.orchestrator.capability_runtime import CapabilityInvokePayload
 from dano.orchestrator.skills import SkillRegistry
 from dano.registry import InMemoryRegistry, PgRegistry, TenantRecord
 from dano.shared.asset_bodies import EnvProfileBody
@@ -983,6 +984,7 @@ async def record_ws(ws: WebSocket) -> None:
                     )
                     await ws.send_json({
                         "type": "flow_spec_updated",
+                        "operation": "plan",
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
                         "full_spec": flow_spec_to_client(pending_flow_spec),
                         "check_report": validate_flow_spec(pending_flow_spec),
@@ -1010,6 +1012,7 @@ async def record_ws(ws: WebSocket) -> None:
                     )
                     await ws.send_json({
                         "type": "flow_spec_updated",
+                        "operation": "repair",
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
                         "full_spec": flow_spec_to_client(pending_flow_spec),
                         "check_report": validate_flow_spec(pending_flow_spec),
@@ -1104,9 +1107,11 @@ async def record_ws(ws: WebSocket) -> None:
                 try:
                     from dano.execution.page.flow_spec import (
                         FlowSpec,
+                        flow_spec_to_client,
                         flow_spec_required_params,
                         flow_spec_to_api_request,
                         flow_spec_to_summary,
+                        prepare_flow_spec_for_publish,
                         validate_flow_spec,
                     )
                     raw_spec = msg.get("flow_spec")
@@ -1125,6 +1130,7 @@ async def record_ws(ws: WebSocket) -> None:
                             },
                         })
                         continue
+                    pending_flow_spec = prepare_flow_spec_for_publish(pending_flow_spec)
                     check_report = validate_flow_spec(pending_flow_spec)
                     if not check_report.get("passed"):
                         await ws.send_json({
@@ -1135,6 +1141,7 @@ async def record_ws(ws: WebSocket) -> None:
                                 "reason": "FlowSpec 发布前校验未通过",
                                 "clarifications": check_report.get("errors") or [],
                                 "check_report": check_report,
+                                "full_spec": flow_spec_to_client(pending_flow_spec),
                             },
                         })
                         continue
@@ -1148,6 +1155,7 @@ async def record_ws(ws: WebSocket) -> None:
                                 "reason": "FlowSpec 无法转换成可执行请求",
                                 "clarifications": build_errors,
                                 "check_report": check_report,
+                                "full_spec": flow_spec_to_client(pending_flow_spec),
                             },
                         })
                         continue
@@ -1187,6 +1195,7 @@ async def record_ws(ws: WebSocket) -> None:
                         log.warning("recording.lifecycle_register_failed", error=str(e), subsystem=sub, action=msg.get("action"))
                     await _auto_export(init["tenant"])
                 await ws.send_json({"type": "result", "report": {**rep, "check_report": check_report,
+                                                                  "full_spec": flow_spec_to_client(pending_flow_spec),
                                                                   "recording_mode": recording_mode},
                                     "parsed_steps": len(last_params), "via": "flow_spec",
                                     "recording_mode": recording_mode,
@@ -1502,12 +1511,14 @@ async def invoke_skill(skill_id: str, req: InvokeReq,
 
 
 @app.post("/v1/skills/{skill_id}/capabilities/{capability}/invoke")
-async def invoke_skill_capability(skill_id: str, capability: str, req: InvokeReq,
+async def invoke_skill_capability(skill_id: str, capability: str, req: CapabilityInvokePayload,
                                   x_tenant_key: str | None = Header(default=None)) -> dict:
     """按 Skill 内的指定 capability 调用。
 
     这是 P3 的显式能力调用入口；旧 `/invoke` + body.capability 继续兼容。
     """
+    if req.capability and req.capability != capability:
+        raise HTTPException(status_code=422, detail="body capability must match path capability")
     tenant = await _auth_tenant(x_tenant_key)
     args = _normalize_skill_call(req, capability=capability)
     return await _invoke(tenant, skill_id, args, req.confirm)

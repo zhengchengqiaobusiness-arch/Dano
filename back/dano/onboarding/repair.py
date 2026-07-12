@@ -63,7 +63,27 @@ def _request_skeleton(api_request: dict) -> dict:
                 "placements": placements, "identity": [i.get("path") for i in (req.get("identity") or [])]}
 
     steps = api_request.get("steps")
-    return {"steps": [one(s) for s in steps]} if steps else one(api_request)
+    request = {"steps": [one(s) for s in steps]} if steps else one(api_request)
+    capabilities = []
+    for cap in api_request.get("capabilities") or []:
+        if not isinstance(cap, dict):
+            continue
+        contract = cap.get("execution_contract") or {}
+        capabilities.append({
+            "name": cap.get("name"),
+            "kind": cap.get("kind"),
+            "step_ids": cap.get("compiled_step_ids") or cap.get("step_ids"),
+            "input_keys": sorted(((cap.get("input_schema") or {}).get("properties") or {}).keys()),
+            "output_keys": sorted(((cap.get("output_schema") or {}).get("properties") or {}).keys()),
+            "batch": contract.get("batch") if isinstance(contract, dict) else None,
+        })
+    if capabilities:
+        request = {
+            "request": request,
+            "capabilities": capabilities,
+            "relations": api_request.get("capability_relations") or [],
+        }
+    return request
 
 
 def review_findings(verdicts) -> list[dict]:
@@ -100,27 +120,44 @@ async def run_repair_loop(api_request, propose, *, goal=None, seed_findings=None
     propose(api_request, findings, goal) -> list[op](async)。seed_findings(三模型语义 findings)只并入首轮
     给修复器看(后续轮以确定性 findings 判收敛,不重复跑审核)。收敛:findings 清零→成功;没减少→停;限轮→停。
     """
-    from dano.execution.page.repair_ops import apply_fix_ops, collect_repair_findings
+    from dano.execution.page.repair_ops import (
+        apply_deterministic_repairs,
+        apply_fix_ops,
+        collect_repair_findings,
+    )
     apir = api_request
     history: list[dict] = []
-    prev = None
+    previous_signature = None
     for r in range(max_rounds):
+        apir, deterministic = apply_deterministic_repairs(apir)
         findings = collect_repair_findings(apir)
         if r == 0 and seed_findings:
             findings = findings + list(seed_findings)        # 首轮把审核语义 findings 也喂给修复器
         if not findings:
             log.info("repair.converged", round=r)
+            if deterministic:
+                history.append({"round": r, "findings": 0, "deterministic": deterministic,
+                                "applied": [], "rejected": []})
             return apir, r, history, []
-        if prev is not None and len(findings) >= prev:        # 没改少 → 不收敛,停(交上层问)
+        signature = json.dumps(findings, ensure_ascii=False, sort_keys=True, default=str)
+        if previous_signature == signature:                  # finding 集合未变化 → 停(交上层问)
             log.warning("repair.stalled", round=r, findings=len(findings))
             return apir, r, history, findings
-        prev = len(findings)
+        previous_signature = signature
         ops = await propose(apir, findings, goal) or []
         if not ops:
             log.warning("repair.no_ops", round=r, findings=len(findings))
+            if deterministic:
+                history.append({"round": r, "findings": len(findings), "deterministic": deterministic,
+                                "applied": [], "rejected": []})
             return apir, r, history, findings
         apir, applied, rejected = apply_fix_ops(apir, ops)
         log.info("repair.round", round=r, findings=len(findings),
-                 applied=len(applied), rejected=len(rejected))
-        history.append({"round": r, "findings": len(findings), "applied": applied, "rejected": rejected})
+                 deterministic=len(deterministic), applied=len(applied), rejected=len(rejected))
+        history.append({"round": r, "findings": len(findings), "deterministic": deterministic,
+                        "applied": applied, "rejected": rejected})
+    apir, deterministic = apply_deterministic_repairs(apir)
+    if deterministic:
+        history.append({"round": max_rounds, "findings": 0, "deterministic": deterministic,
+                        "applied": [], "rejected": []})
     return apir, max_rounds, history, collect_repair_findings(apir)

@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import uuid
 import json
+import copy
 import hashlib
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -286,6 +287,9 @@ class CapabilityField(BaseModel):
     step_id: str = ""
     source_kind: str = "unknown"
     source: dict[str, Any] = Field(default_factory=dict)
+    category: str = "user_param"
+    enum_options: list[Any] | None = None
+    enum_value_map: dict[str, Any] | None = None
     exposed_to_caller: bool = True
     confidence: float = 0.0
     confirmed: bool = False
@@ -1087,6 +1091,20 @@ def _append_reason_detail(reason: str, detail: str | None) -> str:
     if detail in reason:
         return reason
     return f"{reason}；{detail}" if reason else detail
+
+
+def _upsert_option_description(reason: str, detail: str | None) -> str:
+    """Replace an older option snapshot from the same source instead of appending it."""
+    reason = str(reason or "")
+    if not detail:
+        return reason
+    prefix = detail.split("：", 1)[0]
+    parts = [
+        part for part in reason.split("；")
+        if part.strip() and not part.strip().startswith(f"{prefix}：")
+    ]
+    parts.append(detail)
+    return "；".join(parts)
 
 
 def _enum_option_map_from_options(options: list[Any] | None) -> dict[str, Any]:
@@ -2252,6 +2270,9 @@ def _capability_field_from_param(
         step_id=step.step_id,
         source_kind=param.source_kind,
         source=dict(param.source or {}),
+        category=param.category,
+        enum_options=list(param.enum_options) if param.enum_options else None,
+        enum_value_map=dict(param.enum_value_map) if param.enum_value_map else None,
         exposed_to_caller=exposed if scope != "request_field" else bool(param.exposed_to_user),
         confidence=float(param.confidence or 0.0),
         confirmed=bool(param.locked or not param.need_human_confirm),
@@ -2288,18 +2309,22 @@ def _capability_dependency_from_link(link: FlowLink) -> CapabilityDependency:
 
 def _capability_output_fields(cap: FlowCapability) -> list[CapabilityField]:
     fields: list[CapabilityField] = []
+    output_props = (cap.output_schema or {}).get("properties") or {}
+    required = set((cap.output_schema or {}).get("required") or [])
     for idx, mapping in enumerate(cap.output_mapping or []):
         if not isinstance(mapping, dict):
             continue
-        name = str(mapping.get("name") or mapping.get("field") or mapping.get("response_path") or f"output_{idx + 1}")
+        name = _capability_output_name(mapping, idx)
+        schema = output_props.get(name) if isinstance(output_props, dict) else None
+        field_type = str(schema.get("type") or "") if isinstance(schema, dict) else ""
         fields.append(CapabilityField(
             field_id=f"output:{cap.name or cap.capability_id}:{idx}:{name}",
             scope="output",
             display_name=name,
             path=name,
             key=name,
-            type="object" if name in {"response", "raw", "detail"} else "string",
-            required=False,
+            type=field_type or ("object" if name in {"response", "raw", "detail"} else "string"),
+            required=name in required,
             step_id=str(mapping.get("step_id") or ""),
             source_kind=str(mapping.get("kind") or "final_response"),
             source=dict(mapping),
@@ -2479,12 +2504,7 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
         valid_old_inputs = [
             item for item in old_inputs
             if not item.step_id
-            and (
-                item.locked
-                or item.confirmed
-                or cap.updated_by == "user"
-                or _schema_path_exists(cap.input_schema, item.path, item.key)
-            )
+            and _schema_path_exists(cap.input_schema, item.path, item.key)
         ]
         cap.inputs = _merge_capability_scoped_fields(list(inputs.values()), valid_old_inputs)
         cap.request_fields = request_fields
@@ -2519,10 +2539,13 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
         derived_outputs = _capability_output_fields(cap)
         valid_old_outputs = [
             item for item in old_outputs
-            if not item.step_id
-            or (
+            if _schema_path_exists(cap.output_schema, item.path, item.key)
+            and (
+                not item.step_id
+                or (
                 item.step_id in cap_step_ids
                 and _capability_response_path_exists(by_step.get(item.step_id), item.path or item.key)
+                )
             )
         ]
         cap.outputs = _merge_capability_scoped_fields(derived_outputs, valid_old_outputs)
@@ -2564,6 +2587,13 @@ def sync_flow_spec_models(spec: FlowSpec, *, prefer_request_facts: bool = True) 
     # FlowStep 已经是可编辑/可编排接口的物化事实；usage 不能等到能力绑定后才更新，
     # 否则初次分析会把已进入字段页的查询接口仍标成 captured。
     for step in spec.steps:
+        if (step.method or "GET").upper() in {"GET", "HEAD"}:
+            # Legacy/imported specs may only carry query values in the URL. Put
+            # them into ParamField first so request compilation, capability input
+            # schemas and scoped field views all read the same executable truth.
+            query_url = step.url if "?" in str(step.url or "") else step.path
+            _append_query_params_to_step(step, query_url or step.url)
+        _sync_step_option_contracts(spec, step)
         valid_param_paths = {param.path for param in step.params if param.path}
         for select in step.selects or []:
             if select.id_path and select.id_path not in valid_param_paths:
@@ -2577,6 +2607,70 @@ def sync_flow_spec_models(spec: FlowSpec, *, prefer_request_facts: bool = True) 
         usage.materialized_step_id = step.step_id
         spec.request_facts.usage[request_id] = usage
     return sync_capability_scoped_views(spec)
+
+
+def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
+    """Project executable select bindings back onto their request parameters.
+
+    SelectBinding is the grounded evidence for page/API choices.  Keeping only
+    the ParamField as ``user_input`` loses label-to-value mapping and the source
+    request when capabilities are rebuilt.
+    """
+    for binding in step.selects or []:
+        _hydrate_select_source_contract(spec, binding)
+        # Paired controls commonly have both ``name`` and ``id`` leaves.  The
+        # caller-facing option contract belongs to the display/name path; the ID
+        # remains a runtime-derived request field.  Only use id_path when there is
+        # no separate display path in the request.
+        param = next((
+            item for item in (step.params or [])
+            if binding.path and _strip_body_prefix(item.path) == _strip_body_prefix(binding.path)
+        ), None)
+        if param is None:
+            param = next((
+                item for item in (step.params or [])
+                if binding.param and binding.param in {item.key, item.label}
+            ), None)
+        if param is None:
+            param = next((
+                item for item in (step.params or [])
+                if binding.id_path and _strip_body_prefix(item.path) == _strip_body_prefix(binding.id_path)
+            ), None)
+        if param is None or not _select_has_executable_options(binding):
+            continue
+        source_kind = "api_option" if binding.source_url else "page_enum"
+        options = _enum_options_for_param(binding)
+        option_map = _enum_value_map_for_param(binding)
+        param.type = "list-enum" if binding.multi else "enum"
+        param.category = "user_param"
+        param.source_kind = source_kind
+        param.exposed_to_user = True
+        param.editable = True
+        param.enum_options = list(options or param.enum_options or []) or None
+        param.enum_value_map = dict(option_map or param.enum_value_map or {}) or None
+        param.source = {
+            **dict(param.source or {}),
+            "kind": source_kind,
+            "source_url": binding.source_url,
+            "source_method": binding.source_method,
+            "source_request_id": binding.source_request_id,
+            "value_key": binding.value_key,
+            "label_key": binding.label_key,
+            "id_path": binding.id_path or binding.path or param.path,
+            "enum_source": binding.enum_source or ("api" if binding.source_url else "dom"),
+            "enum_confirmed": binding.enum_confirmed,
+        }
+        param.need_human_confirm = bool(
+            source_kind == "page_enum" and binding.enum_confirmed is False
+        )
+        source_reason = (
+            "候选来自录制捕获的只读接口；调用方传显示值，运行期按当前接口结果映射真实值"
+            if source_kind == "api_option"
+            else "候选来自页面真实下拉；调用方传显示值，运行期按录制的 label/value 映射真实值"
+        )
+        option_description = _enum_options_description(source_kind, param.enum_options, param.enum_value_map)
+        param.description = _upsert_option_description(param.description, option_description)
+        param.reason = _upsert_option_description(param.reason or source_reason, option_description)
 
 
 def _strip_body_prefix(path: str) -> str:
@@ -3471,7 +3565,12 @@ def ensure_recorded_goal(spec: FlowSpec) -> FlowSpec:
     goal.setdefault("output_expectation", fresh.get("output_expectation") or [])
     goal.setdefault("forbidden_actions", fresh.get("forbidden_actions") or [])
     goal.setdefault("risk_level", fresh.get("risk_level") or spec.risk_level or "L3")
-    goal["capabilities"] = fresh.get("capabilities") or goal.get("capabilities") or []
+    actual_capabilities = [
+        str(cap.name or cap.capability_id)
+        for cap in (spec.capabilities or [])
+        if str(cap.name or cap.capability_id)
+    ]
+    goal["capabilities"] = actual_capabilities if spec.capabilities else (fresh.get("capabilities") or [])
     goal["evidence"] = fresh.get("evidence") or goal.get("evidence") or []
     spec.goal = goal
     return spec
@@ -3496,7 +3595,7 @@ def _normalize_generated_capability_semantics(spec: FlowSpec, cap: FlowCapabilit
         return
     writes = [step for step in steps if _is_write_step(step)]
     if cap.kind in {"submit", "submit_batch", "validate_batch"} and writes:
-        actual_batch = any(_looks_batch_step(step) for step in writes) or _capability_has_explicit_batch_intent(cap)
+        actual_batch = _write_contract_is_batch(spec, writes, cap)
         if cap.kind == "submit_batch" and not actual_batch:
             cap.kind = "submit"
             if re.fullmatch(r"submit_batch\d*", str(cap.name or "")):
@@ -3682,7 +3781,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
             cap.output_schema = reconcile_schema({
                 "type": "object",
                 "properties": mapped_output_props,
-                "required": [],
+                "required": list(mapped_output_props),
             }, cap.output_schema or {})
         else:
             last_response = next((st.response_json for st in reversed(cap_steps) if st.response_json is not None), None)
@@ -3850,6 +3949,19 @@ def _capability_has_explicit_batch_intent(cap: FlowCapability) -> bool:
         if any(not _ROUTING_FIELD_RE.search(str(name or "")) for name in item_props):
             return True
     return False
+
+
+def _write_contract_is_batch(
+    spec: FlowSpec,
+    write_steps: list[FlowStep],
+    cap: FlowCapability | None = None,
+) -> bool:
+    """Return the single reproducible submit/submit_batch decision."""
+    return bool(
+        any(_looks_batch_step(step) for step in write_steps)
+        or _query_implies_repeated_submit(spec, write_steps)
+        or (cap is not None and _capability_has_explicit_batch_intent(cap))
+    )
 
 
 def _default_capability_nodes(
@@ -4472,9 +4584,7 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
 
     if write_steps:
         inferred_repeated_submit = _query_implies_repeated_submit(spec, write_steps)
-        kind = "submit_batch" if (
-            any(_looks_batch_step(step) for step in write_steps) or inferred_repeated_submit
-        ) else "submit"
+        kind = "submit_batch" if _write_contract_is_batch(spec, write_steps) else "submit"
         submit_input_schema = (
             _batch_capability_input_schema(submit_steps)
             if kind == "submit_batch"
@@ -4570,8 +4680,63 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
     return caps
 
 
+_FIELD_MAPPED_CAPABILITY_RELATIONS = {"external_transform", "data_mapping", "field_mapping"}
+
+
+def _capability_relation_requires_fields(relation: CapabilityRelation) -> bool:
+    relation_kind = str(relation.mode or relation.type or "").strip().lower()
+    return relation_kind in _FIELD_MAPPED_CAPABILITY_RELATIONS
+
+
+def _normalize_capability_relation_semantics(relation: CapabilityRelation) -> CapabilityRelation:
+    """Resolve legacy type/mode defaults from the actual relation contract."""
+    has_from = bool(str(relation.from_output or "").strip())
+    has_to = bool(str(relation.to_input or "").strip())
+    if not has_from and not has_to:
+        relation.type = "caller_decision"
+        relation.mode = "caller_decision"
+        relation.transform_owner = "caller"
+        relation.required = False
+        relation.requires_user_confirmation = True
+        relation.input_schema = {}
+        relation.output_schema = {}
+        relation.source_selector = ""
+        relation.target_path = ""
+    return relation
+
+
 def _ensure_external_transform_relations(spec: FlowSpec) -> FlowSpec:
-    """Describe caller-owned query -> batch transformations without auto-running them."""
+    """Describe grounded caller-owned capability cooperation without auto-running it."""
+    spec.capability_relations = [
+        _normalize_capability_relation_semantics(relation)
+        for relation in (spec.capability_relations or [])
+    ]
+    capability_by_ref = {
+        ref: cap
+        for cap in spec.capabilities
+        for ref in (cap.name, cap.capability_id)
+        if ref
+    }
+    spec.capability_relations = [
+        relation
+        for relation in spec.capability_relations
+        if (relation.evidence or {}).get("kind") != "typed_capability_contract"
+        or (
+            relation.from_capability in capability_by_ref
+            and relation.to_capability in capability_by_ref
+            and (
+                not _capability_relation_requires_fields(relation)
+                or (
+                    relation.from_output in (
+                        (capability_by_ref[relation.from_capability].output_schema or {}).get("properties") or {}
+                    )
+                    and relation.to_input in (
+                        (capability_by_ref[relation.to_capability].input_schema or {}).get("properties") or {}
+                    )
+                )
+            )
+        )
+    ]
     queries = [cap for cap in spec.capabilities if cap.kind == "query_status"]
     batches = [cap for cap in spec.capabilities if cap.kind == "submit_batch"]
     for query in queries:
@@ -4609,6 +4774,35 @@ def _ensure_external_transform_relations(spec: FlowSpec) -> FlowSpec:
                 reason="调用方读取未填写日期、向用户确认并生成 entries 后，再显式调用批量提交能力",
                 input_schema=output_props.get("missing_dates") or {},
                 output_schema=entries_schema,
+                evidence={"kind": "typed_capability_contract", "automatic_execution": False},
+            ))
+
+    # A single query + single ordinary submit is a caller-controlled conversation
+    # boundary, not an implicit data mapping.  This captures workflows such as
+    # "query existing records, ask the user, then explicitly submit".
+    submits = [cap for cap in spec.capabilities if cap.kind == "submit"]
+    if len(queries) == 1 and len(submits) == 1:
+        query, submit = queries[0], submits[0]
+        query_ref = query.name or query.capability_id
+        submit_ref = submit.name or submit.capability_id
+        already_related = any(
+            relation.from_capability in {query.name, query.capability_id}
+            and relation.to_capability in {submit.name, submit.capability_id}
+            for relation in spec.capability_relations
+        )
+        if query_ref and submit_ref and not already_related:
+            spec.capability_relations.append(CapabilityRelation(
+                type="caller_decision",
+                mode="caller_decision",
+                transform_owner="caller",
+                from_capability=query_ref,
+                to_capability=submit_ref,
+                cardinality="one_to_one",
+                required=False,
+                requires_user_confirmation=True,
+                confirmed=True,
+                confidence=0.9,
+                reason="调用方先读取查询结果，再结合用户意图决定是否显式调用提交能力",
                 evidence={"kind": "typed_capability_contract", "automatic_execution": False},
             ))
     return spec
@@ -4783,6 +4977,28 @@ def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
             }
             for cap in spec.capabilities
         ],
+        # Complete compact indexes guarantee that every recorded field and
+        # response path participates in planning. Detailed samples below remain
+        # bounded so a single huge response cannot exhaust the model context.
+        "complete_field_index": {
+            st.step_id: [
+                {
+                    "path": p.path,
+                    "key": p.key,
+                    "type": p.type,
+                    "category": p.category,
+                    "source_kind": p.source_kind,
+                    "required": bool(p.required),
+                }
+                for p in (st.params or [])
+            ]
+            for st in spec.steps
+        },
+        "complete_response_path_index": {
+            st.step_id: [str(item[0]) for item in _leaf_paths(st.response_json)]
+            if st.response_json is not None else []
+            for st in spec.steps
+        },
         "steps": [
             {
                 "step_id": st.step_id,
@@ -4815,7 +5031,7 @@ def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
                 "confidence": r.get("confidence"),
                 "reason": r.get("reason"),
             }
-            for r in (graph.get("all_requests") or [])[:80]
+            for r in (graph.get("all_requests") or [])
         ],
     }
 
@@ -5182,7 +5398,8 @@ def _capability_is_batch(spec: FlowSpec, cap: FlowCapability) -> bool:
         return False
     by_id = {s.step_id: s for s in spec.steps}
     cap_steps = [by_id[sid] for sid in _capability_node_step_ids(cap) if sid in by_id]
-    return any(_looks_batch_step(st) for st in cap_steps) or _capability_has_explicit_batch_intent(cap)
+    write_steps = [step for step in cap_steps if _is_write_step(step)]
+    return _write_contract_is_batch(spec, write_steps, cap)
 
 
 def _capability_execution_contract(spec: FlowSpec, cap: FlowCapability) -> dict[str, Any]:
@@ -5441,7 +5658,7 @@ def _planner_patch_edits(
     scope_ops = {
         "add_request_step", "add_candidate_step", "promote_request",
         "add_capability", "create_capability", "remove_capability",
-        "remove_request_from_capability",
+        "remove_request_from_capability", "reject_dependency",
     }
     for raw in edits or []:
         edit = dict(raw)
@@ -5510,6 +5727,109 @@ def _planner_patch_edits(
     return safe
 
 
+def _relation_identity(relation: CapabilityRelation) -> tuple[str, str, str, str, str]:
+    return (
+        str(relation.relation_id or ""),
+        str(relation.from_capability or ""),
+        str(relation.from_output or ""),
+        str(relation.to_capability or ""),
+        str(relation.to_input or ""),
+    )
+
+
+def _link_identity(link: FlowLink) -> tuple[str, str, str, str, str]:
+    return (
+        str(link.link_id or ""),
+        str(link.source_step_id or ""),
+        str(link.source_path or ""),
+        str(link.target_step_id or ""),
+        str(link.target_path or ""),
+    )
+
+
+def _enforce_incremental_orchestration_scope(before: FlowSpec, after: FlowSpec) -> FlowSpec:
+    """Hard guard for repeated Planner runs.
+
+    Existing capabilities and their interface membership are immutable during an
+    optimization click.  Fields, schemas, maps, conditions, dependencies and new
+    explanatory relations may improve, while previously established links and
+    relations cannot disappear.
+    """
+    current_by_id = {cap.capability_id: cap for cap in after.capabilities if cap.capability_id}
+    current_by_name = {cap.name: cap for cap in after.capabilities if cap.name}
+    guarded: list[FlowCapability] = []
+    global_step_ids = {step.step_id for step in before.steps}
+    for original in before.capabilities:
+        current = current_by_id.get(original.capability_id) or current_by_name.get(original.name)
+        if current is None:
+            current = original.model_copy(deep=True)
+        allowed_steps = list(_capability_node_step_ids(original))
+        allowed_set = set(allowed_steps)
+        current.step_ids = list(original.step_ids or allowed_steps)
+        # Remove any newly introduced call to an interface outside the original
+        # capability scope. Non-call orchestration nodes remain eligible.
+        for step_id in global_step_ids - allowed_set:
+            current.nodes = _remove_capability_step_nodes(current.nodes or [], step_id)
+        current_node_ids = {
+            str(node.get("id") or "")
+            for node in _iter_capability_nodes(current.nodes or [])
+            if isinstance(node, dict) and node.get("id")
+        }
+        for node in original.nodes or []:
+            node_id = str(node.get("id") or "") if isinstance(node, dict) else ""
+            # Preserve concrete interface calls only. Invalid map/condition/
+            # foreach nodes are repairable orchestration semantics and must not
+            # be resurrected by the scope guard.
+            if (
+                isinstance(node, dict)
+                and node.get("type") == "call"
+                and node_id
+                and node_id not in current_node_ids
+            ):
+                current.nodes.append(copy.deepcopy(node))
+                current_node_ids.add(node_id)
+        guarded.append(current)
+    after.capabilities = guarded
+
+    existing_relations = {_relation_identity(item): item for item in after.capability_relations or []}
+    for relation in before.capability_relations or []:
+        identity = _relation_identity(relation)
+        if identity not in existing_relations:
+            after.capability_relations.append(relation.model_copy(deep=True))
+            existing_relations[identity] = relation
+
+    existing_links = {_link_identity(item): item for item in after.links or []}
+    for link in before.links or []:
+        identity = _link_identity(link)
+        if identity not in existing_links:
+            after.links.append(link.model_copy(deep=True))
+            existing_links[identity] = link
+    _normalize_capability_references(after)
+    return after
+
+
+def _normalize_incremental_write_kind(spec: FlowSpec) -> None:
+    """Correct only an unsupported batch label; never alter capability scope."""
+    by_id = {step.step_id: step for step in spec.steps}
+    for cap in spec.capabilities or []:
+        if cap.kind != "submit_batch":
+            continue
+        writes = [
+            by_id[step_id]
+            for step_id in _capability_node_step_ids(cap)
+            if step_id in by_id and _is_write_step(by_id[step_id])
+        ]
+        if not writes or _write_contract_is_batch(spec, writes, cap):
+            continue
+        cap.kind = "submit"
+        if re.fullmatch(r"submit_batch\d*", str(cap.name or "")):
+            cap.name = "submit"
+        if "批量提交" in str(cap.title or ""):
+            cap.title = str(cap.title).replace("批量提交", "提交", 1)
+        elif str(cap.title or "").startswith("批量"):
+            cap.title = str(cap.title)[2:] or "提交"
+
+
 def _capability_to_api_dict(spec: FlowSpec, cap: FlowCapability) -> dict[str, Any]:
     out = cap.model_dump(exclude_none=True)
     contract = _capability_execution_contract(spec, cap)
@@ -5533,9 +5853,12 @@ async def orchestrate_flow_capabilities(
       仅由 LLM 通过 patch ops 增量修正；LLM 不可用时不动 capabilities。
     - 首次生成：调用 build_default_flow_capabilities 出 baseline，再让 LLM 优化。
     """
-    current = _prune_empty_capabilities(spec.model_copy(deep=True))
+    original = spec.model_copy(deep=True)
+    initial_report = validate_flow_spec(original)
+    current = _prune_empty_capabilities(original.model_copy(deep=True))
     rebuild_flow_dependencies(current)
     had_existing = bool(current.capabilities)
+    scope_baseline = current.model_copy(deep=True)
     # 首次从当前已物化步骤建立能力；再次点击时锁定能力和接口集合，只修契约。
     # 捕获事实库中的其他接口只能由用户显式加入，Planner 不得静默扩张范围。
     if not had_existing:
@@ -5585,11 +5908,17 @@ async def orchestrate_flow_capabilities(
     if baseline_ids:
         current = _drop_superseded_baseline_capabilities(current, baseline_ids)
     _normalize_capability_references(current)
-    current = _repair_generated_capability_contracts(current)
+    if not had_existing:
+        current = _repair_generated_capability_contracts(current)
+    else:
+        _normalize_incremental_write_kind(current)
     current = _ensure_external_transform_relations(
         _sync_capability_io_schemas(sync_flow_spec_models(current, prefer_request_facts=False))
     )
+    if had_existing:
+        current = _enforce_incremental_orchestration_scope(scope_baseline, current)
     caps = list(current.capabilities or [])
+    final_report = validate_flow_spec(current)
     current.meta = {
         **(current.meta or {}),
         "capability_model": {
@@ -5598,6 +5927,19 @@ async def orchestrate_flow_capabilities(
             "generated_count": len(caps),
             "reason": reason,
             "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        "capability_orchestration_audit": {
+            "mode": "incremental" if had_existing else "initial",
+            "checked_steps": len(original.steps),
+            "checked_fields": sum(len(step.params or []) for step in original.steps),
+            "checked_captured_requests": len(_request_graph_items(original)),
+            "before_errors": len(initial_report.get("errors") or []),
+            "before_warnings": len(initial_report.get("warnings") or []),
+            "after_errors": len(final_report.get("errors") or []),
+            "after_warnings": len(final_report.get("warnings") or []),
+            "scope_locked": had_existing,
+            "capability_count_before": len(scope_baseline.capabilities or []),
+            "capability_count_after": len(caps),
         },
     }
     return append_flow_version(refresh_review_items(current), "orchestrate_flow", reason=f"生成能力编排: {source}")
@@ -5791,7 +6133,11 @@ def _capability_field_looks_internal(field: CapabilityField) -> bool:
     if not _INTERNAL_EXPOSED_PATH_RE.search(text):
         return False
     source_kind = str(field.source_kind or "")
-    if source_kind in _OPTION_SOURCE_KINDS or source_kind in {"page_enum", "static_enum", "manual_enum", "form_option"}:
+    if (
+        source_kind in _OPTION_SOURCE_KINDS
+        or source_kind in {"page_enum", "static_enum", "manual_enum", "form_option"}
+        or bool(field.enum_options or field.enum_value_map)
+    ):
         return False
     return True
 
@@ -6507,9 +6853,10 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
         to_key = str(relation.to_capability or "")
         from_cap = cap_by_ref.get(from_key)
         to_cap = cap_by_ref.get(to_key)
-        from_type = _capability_field_type(from_cap, relation.from_output, direction="output") if from_cap else ""
-        to_type = _capability_field_type(to_cap, relation.to_input, direction="input") if to_cap else ""
-        compatible = _capability_types_compatible(from_type, to_type)
+        requires_fields = _capability_relation_requires_fields(relation)
+        from_type = _capability_field_type(from_cap, relation.from_output, direction="output") if from_cap and requires_fields else ""
+        to_type = _capability_field_type(to_cap, relation.to_input, direction="input") if to_cap and requires_fields else ""
+        compatible = not requires_fields or _capability_types_compatible(from_type, to_type)
         relation_entry = {
             "relation_id": relation.relation_id,
             "type": relation.type,
@@ -6522,6 +6869,7 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
             "to_exists": to_cap is not None,
             "to_input_type": to_type,
             "type_compatible": compatible,
+            "requires_field_mapping": requires_fields,
         }
         capability_relations["relations"].append(relation_entry)
         if from_cap is None or to_cap is None:
@@ -6541,7 +6889,7 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                     message=msg,
                     target={"kind": "capability_relation", "relation_id": relation.relation_id},
                 )
-        elif not from_type or not to_type:
+        elif requires_fields and (not from_type or not to_type):
             msg = f"Capability relation `{relation.relation_id}` 的 output/input 字段缺少可解析类型"
             if relation.confirmed:
                 capability_relations.setdefault("errors", []).append({
@@ -6558,7 +6906,7 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                     message=msg,
                     target={"kind": "capability_relation", "relation_id": relation.relation_id},
                 )
-        elif not compatible:
+        elif requires_fields and not compatible:
             msg = f"Capability relation `{relation.relation_id}` output/input 类型不兼容: {from_type} -> {to_type}"
             if relation.confirmed:
                 capability_relations.setdefault("errors", []).append({
@@ -7680,12 +8028,7 @@ def flow_spec_to_api_request(
         )
     if not spec.steps:
         return None, ["FlowSpec 没有任何步骤，不能发布"]
-    spec = ensure_recorded_goal(_ensure_external_transform_relations(
-        _sync_capability_io_schemas(sync_flow_spec_models(
-            spec.model_copy(deep=True),
-            prefer_request_facts=False,
-        ))
-    ))
+    spec = prepare_flow_spec_for_publish(spec)
     active_step_ids = _active_capability_step_ids(spec)
 
     built_steps: list[dict] = []
@@ -8308,12 +8651,20 @@ def _publish_issue_groups(
     return {key: value for key, value in groups.items() if value}
 
 
+def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
+    """Canonicalize the current workbench state without invoking Planner or LLM."""
+    current = sync_flow_spec_models(spec.model_copy(deep=True), prefer_request_facts=False)
+    _normalize_capability_references(current)
+    current = _ensure_external_transform_relations(_sync_capability_io_schemas(current))
+    return ensure_recorded_goal(current)
+
+
 def validate_flow_spec(spec: FlowSpec) -> dict:
     from dano.execution.page.repair_ops import collect_repair_findings
 
     # 校验只面对规范化后的当前事实。字段、接口顺序或能力范围改变后产生的旧
     # input/map/return/link 由同步层确定性清理，不能继续作为“用户待处理”告警。
-    spec = _sync_capability_io_schemas(spec.model_copy(deep=True))
+    spec = prepare_flow_spec_for_publish(spec)
     for capability in spec.capabilities or []:
         capability.nodes = _sanitize_capability_nodes(spec, capability)
     spec = _prune_empty_capabilities(spec)
@@ -8777,8 +9128,18 @@ def _append_query_params_to_step(step: FlowStep, url: str) -> None:
         if not key or key in existing or path in existing or key in existing_keys:
             continue
         value = values[0] if values else ""
-        category = _classify_field_category(key, key, str(value))
-        source_kind = "constant" if category == "system_const" else "user_input"
+        source_guess = _param_source_guess(
+            field={"path": path, "key": key, "value": value},
+            path=path,
+            key=key,
+            method=(step.method or "GET").upper(),
+            identity_paths=set(),
+            system_paths=set(),
+            select_paths=set(),
+            select_id_paths=set(),
+            samples=step.sample_inputs or {},
+            request_headers=step.headers or {},
+        )
         step.params.append(ParamField(
             path=path,
             key=key,
@@ -8786,12 +9147,13 @@ def _append_query_params_to_step(step: FlowStep, url: str) -> None:
             value=str(value),
             type=_param_type_from_value(value),
             required=False,
-            category=category,
-            source_kind=source_kind,
-            source={"kind": source_kind, "path": key, "from": "query"},
-            exposed_to_user=category == "user_param",
-            editable=True,
-            reason="从捕获接口 query 参数生成，可在字段页修改分类和来源",
+            category=source_guess["category"],
+            source_kind=source_guess["source_kind"],
+            source={**source_guess["source"], "from": "query"},
+            exposed_to_user=bool(source_guess["exposed_to_user"]),
+            editable=bool(source_guess["editable"]),
+            need_human_confirm=bool(source_guess["need_human_confirm"]),
+            reason=source_guess["reason"],
         ))
         existing.add(path)
         existing_keys.add(key)
@@ -9320,7 +9682,7 @@ def _upsert_capability_node(cap: FlowCapability, node_type: str, data: dict[str,
 
 
 def _upsert_capability_relation(spec: FlowSpec, data: dict[str, Any]) -> CapabilityRelation:
-    rel = CapabilityRelation.model_validate(dict(data or {}))
+    rel = _normalize_capability_relation_semantics(CapabilityRelation.model_validate(dict(data or {})))
     rel_sig = (
         rel.relation_id,
         rel.from_capability,
@@ -10756,6 +11118,7 @@ async def auto_fix_flow_spec(
     max_rounds: int = 3,
     expand_requests: bool = True,
     allow_scope_changes: bool | None = None,
+    strict_incremental: bool = False,
 ) -> FlowSpec:
     """一键修正：确定性补齐 + 可选 LLM 受限 patch + 重新校验。"""
     current = spec.model_copy(deep=True)
@@ -10827,8 +11190,12 @@ async def auto_fix_flow_spec(
         if validate_flow_spec(current).get("passed"):
             break
     current.meta = {**(current.meta or {}), "auto_fix_history": history}
-    current = _repair_generated_capability_contracts(current)
-    return append_flow_version(refresh_review_items(_sync_capability_io_schemas(current)), "auto_fix", reason="一键自动修正")
+    if allow_scope_changes or not strict_incremental:
+        current = _repair_generated_capability_contracts(current)
+    current = _sync_capability_io_schemas(current)
+    if strict_incremental and not allow_scope_changes and spec.capabilities:
+        current = _enforce_incremental_orchestration_scope(spec, current)
+    return append_flow_version(refresh_review_items(current), "auto_fix", reason="一键自动修正")
 
 
 def _auto_confirm_ready_capabilities(spec: FlowSpec) -> FlowSpec:
@@ -10910,6 +11277,7 @@ async def run_recording_pi_loop(
     在有限轮次内规划、校验、修复并重新校验，直到通过或无法继续收敛。
     """
     current = ensure_recorded_goal(spec.model_copy(deep=True))
+    incremental_baseline = current.model_copy(deep=True) if current.capabilities and mode == "plan" else None
     _normalize_capability_references(current)
     history: list[dict[str, Any]] = []
     run_planner = mode == "plan" or not current.capabilities
@@ -10963,6 +11331,7 @@ async def run_recording_pi_loop(
             max_rounds=1,
             expand_requests=False,
             allow_scope_changes=False,
+            strict_incremental=incremental_baseline is not None,
         )
         fixed_report = validate_flow_spec(current)
         history.append({
@@ -10980,6 +11349,8 @@ async def run_recording_pi_loop(
     current = _auto_confirm_ready_capabilities(
         _sync_capability_io_schemas(sync_flow_spec_models(current, prefer_request_facts=False))
     )
+    if incremental_baseline is not None:
+        current = _enforce_incremental_orchestration_scope(incremental_baseline, current)
     if not str(current.business_description or "").strip():
         current.business_description = render_business_description(current, llm_client=llm_client)
         current.meta = {
