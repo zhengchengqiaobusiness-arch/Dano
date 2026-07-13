@@ -155,3 +155,30 @@ def test_gateway_frontend_steps_use_the_same_field_mapping() -> None:
     assert required == {"使用日期"}
     assert enums["使用日期"]["field_key"] == "使用日期"
     assert "使用日期#2" not in samples
+
+
+def test_submit_snapshot_preserves_required_range_and_page_business_context() -> None:
+    session = RecordSession()
+    session._on_record(None, json.dumps({
+        "op": "form_snapshot",
+        "required_fields": ["使用时间", "申请标题"],
+        "fields": [
+            {"label": "使用时间", "value": "2026-07-09 00:00:00", "required": True},
+            {"label": "使用时间", "value": "2026-08-11 23:59:59", "required": True},
+            {"label": "备注", "value": "出差", "required": False},
+        ],
+        "page_context": {
+            "path": "/oa/seal-apply",
+            "document_title": "OA 管理系统",
+            "visible_titles": ["公章借阅", "申请信息"],
+        },
+    }, ensure_ascii=False))
+
+    assert session.steps == []
+    assert session.recorded_required_labels() == {"使用时间", "申请标题"}
+    assert session.recorded_form_samples() == {
+        "使用时间": "2026-07-09 00:00:00",
+        "使用时间#2": "2026-08-11 23:59:59",
+        "备注": "出差",
+    }
+    assert session.form_snapshots[-1]["page_context"]["visible_titles"][0] == "公章借阅"

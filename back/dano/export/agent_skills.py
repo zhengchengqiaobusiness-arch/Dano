@@ -209,8 +209,14 @@ def _capability_relationship_section(m: SkillManifest) -> str:
         return ""
     lines = ["## 能力关系", "", "能力关系只描述数据流建议，不会触发自动串联；每一步都必须显式选择 capability。"]
     for relation in relations:
-        source = f"`{relation.get('from_capability')}.{relation.get('from_output')}`"
-        target = f"`{relation.get('to_capability')}.{relation.get('to_input')}`"
+        source_ref = str(relation.get("from_capability") or "")
+        target_ref = str(relation.get("to_capability") or "")
+        if relation.get("from_output"):
+            source_ref += f".{relation['from_output']}"
+        if relation.get("to_input"):
+            target_ref += f".{relation['to_input']}"
+        source = f"`{source_ref}`"
+        target = f"`{target_ref}`"
         lines.append(f"- {source} → {target}（`{relation.get('type') or 'suggested_call_chain'}`）")
         lines.append(f"  调用方责任：{relation.get('caller_responsibility') or '根据输出和用户意图决定是否继续调用。'}")
     return "\n".join(lines)
@@ -294,19 +300,30 @@ def _capability_contract_section(m: SkillManifest) -> str:
 
 def _multi_capability_sop(m: SkillManifest) -> str:
     lines = ["## 操作步骤(SOP)", "", "1. 根据用户目标选择明确的 capability；多个能力不会静默默认到写操作。"]
+    step_no = 2
     for name, contract in _capability_contracts(m).items():
         required = "、".join(f"`{field}`" for field in (contract.get("required") or [])) or "无"
         confirmation = "；整理内容后单独取得最终确认" if contract.get("requires_confirmation") else ""
         lines.append(
-            f"2. `{name}`({contract.get('title') or name}):补齐该能力必填输入 {required}{confirmation}，"
+            f"{step_no}. `{name}`({contract.get('title') or name}):补齐该能力必填输入 {required}{confirmation}，"
             f"再以 `--capability {name}` 调用。"
         )
-    lines += [
-        "3. 只读能力返回的数据由调用方用于展示、确认或组织下一次能力调用；Skill 不擅自执行后续写能力。",
-        "4. 写能力只有在明确 `confirm=true` 后执行；超时或结果不明时不得自动重试。",
-        "5. 批量输入按 `entries[]` 逐项校验；任一条失败都要保留原索引和原因，不得把部分成功折叠成全部成功。",
-        "6. 按末行 JSON 的 `status` 处理结果，不能把 HTTP 200 或 `state=completed` 单独当成业务成功。",
-    ]
+        step_no += 1
+    lines.append(f"{step_no}. 只读能力返回的数据由调用方用于展示、确认或组织下一次能力调用；Skill 不擅自执行后续写能力。")
+    step_no += 1
+    lines.append(f"{step_no}. 写能力只有在明确 `confirm=true` 后执行；超时或结果不明时不得自动重试。")
+    step_no += 1
+    has_batch = any(
+        contract.get("kind") in {"submit_batch", "validate_batch"}
+        for contract in _capability_contracts(m).values()
+    )
+    if has_batch:
+        lines.append(
+            f"{step_no}. 批量输入按 `entries[]` 逐项校验；任一条失败都要保留原索引和原因，"
+            "不得把部分成功折叠成全部成功。"
+        )
+        step_no += 1
+    lines.append(f"{step_no}. 按末行 JSON 的 `status` 处理结果，不能把 HTTP 200 单独当成业务成功。")
     return "\n".join(lines)
 
 
@@ -316,7 +333,7 @@ def _multi_capability_quality_section(m: SkillManifest) -> str:
         required = "、".join(f"`{field}`" for field in (contract.get("required") or [])) or "无"
         verdict = "事实核查通过后才可报告成功" if contract.get("verify_required") else "返回值必须符合该能力 output_schema"
         lines.append(f"- `{name}`:只校验本能力必填输入 {required}；{verdict}。")
-    lines.append("- 能力未明确、输入缺失、需要确认但未确认、事实核查失败时均不得执行或报告成功。")
+    lines.append("- 能力未明确、输入缺失或需要确认但未确认时不得执行；验证不通过时不得报告成功。")
     return "\n".join(lines)
 
 
@@ -656,6 +673,11 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
     cap_line = ", ".join(dict.fromkeys(capabilities)) or capability
     confirm = m.requires_confirmation
     contracts = _capability_contracts(m)
+    has_fact_verification = any(contract.get("verify_required") for contract in contracts.values())
+    has_batch_capability = any(
+        contract.get("kind") in {"submit_batch", "validate_batch"}
+        for contract in contracts.values()
+    )
     multi_capability = len(contracts) > 1
     keys, required, props = _fields(m)
     numset = set(_numeric_fields(props))
@@ -720,6 +742,22 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
             field: _schema_example_value(field, schema) for field, schema in props.items()
         }, "confirm": confirm}
     )
+    platform_guards = "业务编排与风险闸门"
+    if has_fact_verification:
+        platform_guards += "、已配置的事实核查"
+    success_meaning = (
+        "所选能力执行完成；要求事实核查的写能力已核查通过"
+        if has_fact_verification else
+        "所选能力已按业务成功规则完成，并通过输出合同校验"
+    )
+    success_example = {"status": "succeeded", "state": "completed", "output": {}}
+    if has_fact_verification:
+        success_example["fact_check"] = {"passed": True}
+    partial_status_row = (
+        "| `partial_success` | 批量能力仅部分条目成功 | 逐项报告成功/失败及原索引；"
+        "不得笼统宣称全部成功，也不得自动重试成功项 |"
+        if has_batch_capability else ""
+    )
     return f"""---
 name: {slug}
 description: {desc}
@@ -733,7 +771,7 @@ metadata:
 
 # {m.title}
 
-这是 Dano **已上架 Skill 的代理**:真正的业务编排、风险闸门与事实核查都在 Dano 侧。本端负责**收集参数、本地校验、提交前确认**,再调用 Dano,**不接触目标系统凭证、不自行裁定结果**。
+这是 Dano **已上架 Skill 的代理**:{platform_guards}都在 Dano 侧。本端负责**收集参数、本地校验、提交前确认**,再调用 Dano,**不接触目标系统凭证、不自行裁定结果**。
 {confirm_note}
 ## 何时使用
 当用户想办理「{m.title}」({m.subsystem})时使用本 skill,即使没说出 skill 名或接口名。
@@ -755,15 +793,15 @@ metadata:
 ## 输出契约(脚本末行 JSON)
 | status | 含义 | 你应做的 |
 |---|---|---|
-| `succeeded` | 所选能力执行完成；要求事实核查的写能力已核查通过 | 按该能力的 output_schema 解读 `output` |
-| `partial_success` | 批量能力仅部分条目成功 | 逐项报告成功/失败及原索引；不得笼统宣称全部成功，也不得自动重试成功项 |
+| `succeeded` | {success_meaning} | 按该能力的 output_schema 解读 `output` |
+{partial_status_row}
 | `need_select` | 复合流程消歧:有多个候选待选 | 把 `candidates` 给用户选,再用 `--json` 把选中项的 `bind` 值带上重跑 |
 | `need_confirm` | 写操作未确认被拦 | 向用户确认后,**带 `--confirm` 重跑** |
 | `failed` | 失败(见 `reason`) | 把 reason 告知用户;缺参/凭证按故障排除处理,**勿谎报成功** |
 
 示例:
 ```json
-{{"status": "succeeded", "state": "completed", "output": {{}}, "fact_check": {{"passed": true}}}}
+{json.dumps(success_example, ensure_ascii=False)}
 {{"status": "failed", "reason": "缺必填: <字段>"}}
 ```
 

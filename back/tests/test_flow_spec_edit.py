@@ -62,6 +62,45 @@ def test_page_required_runtime_value_is_not_required_from_caller():
     assert flow_spec_module.flow_spec_required_params(spec) == ["申请标题"]
 
 
+def test_submit_time_page_evidence_drives_range_required_and_optional_fields():
+    spec = to_flow_spec(
+        captured_requests=[{
+            "method": "POST",
+            "url": "https://oa.example.test/oa/seal-apply/submit-process",
+            "headers": {"content-type": "application/json"},
+            "post_data": json.dumps({
+                "useTime": ["2026-07-09 00:00:00", "2026-08-11 23:59:59"],
+                "applyTitle": "出差用章",
+                "remark": "出差",
+            }, ensure_ascii=False),
+            "response_json": {"code": 0, "data": True},
+        }],
+        samples={
+            "使用时间": "2026-07-09 00:00:00",
+            "使用时间#2": "2026-08-11 23:59:59",
+            "申请标题": "出差用章",
+            "备注": "出差",
+        },
+        required_labels={"使用时间", "申请标题"},
+        page_context={"path": "/oa/seal-apply", "visible_titles": ["公章借阅"]},
+    )
+    submit = spec.steps[-1]
+    params = {param.path: param for param in submit.params}
+
+    assert params["useTime[0]"].page_required is True
+    assert params["useTime[1]"].page_required is True
+    assert params["applyTitle"].page_required is True
+    assert params["remark"].page_required is False
+    assert params["remark"].required is False
+    assert spec.meta["page_context"]["visible_titles"] == ["公章借阅"]
+
+    prepared = flow_spec_module.ensure_flow_capabilities(spec)
+    submit_cap = next(cap for cap in prepared.capabilities if cap.kind == "submit")
+    cap_fields = {field.path: field for field in submit_cap.inputs}
+    assert cap_fields["useTime[0]"].page_required is True
+    assert cap_fields["remark"].required_source == "page"
+
+
 def test_system_generated_runtime_value_is_compiled_and_not_exposed():
     step = FlowStep(
         step_id="submit",
@@ -235,7 +274,7 @@ def test_planner_foreach_alone_does_not_promote_single_leave_submit_to_batch():
     assert not any("只有审批/路由字段" in message for message in report["errors"])
 
 
-def test_single_submit_prunes_stale_entries_relations_and_keeps_one_decision_relation():
+def test_single_submit_prunes_stale_entries_relations_without_inventing_decision_relation():
     query = FlowCapability(
         capability_id="query-cap", name="query_status", kind="query_status",
         step_ids=["query"], output_schema={"type": "object", "properties": {"records": {"type": "array"}}},
@@ -261,12 +300,7 @@ def test_single_submit_prunes_stale_entries_relations_and_keeps_one_decision_rel
 
     prepared = prepare_flow_spec_for_publish(spec)
 
-    assert len(prepared.capability_relations) == 1
-    relation = prepared.capability_relations[0]
-    assert relation.type == "caller_decision"
-    assert relation.from_capability == "query_status"
-    assert relation.to_capability == "submit"
-    assert not relation.from_output and not relation.to_input
+    assert prepared.capability_relations == []
 
 
 def test_capability_interface_reorder_updates_flat_calls_even_with_return_node():
@@ -599,7 +633,64 @@ def test_unconfirmed_capabilities_block_publish_validation():
     report = validate_flow_spec(spec)
 
     assert report["passed"] is False
-    assert any("已确认能力" in message for message in report["errors"])
+    assert any("未确认的公开能力" in message for message in report["errors"])
+
+
+def test_confirmed_capability_contract_change_requires_reconfirmation():
+    spec = FlowSpec(
+        title="请假申请",
+        business_description="提交失败时报告接口错误且不自动重试。",
+        steps=[FlowStep(
+            step_id="submit", method="POST", path="/api/leave/submit",
+            body_source='{"reason":"事假"}',
+            params=[ParamField(
+                path="reason", key="请假原因", label="请假原因", value="事假",
+                required=True, page_required=True, required_source="page",
+                category="user_param", source_kind="user_input", exposed_to_user=True,
+            )],
+            success_rule={"path": "code", "equals": 0},
+        )],
+        capabilities=[FlowCapability(
+            capability_id="submit-cap", name="submit", title="提交请假申请", kind="submit",
+            step_ids=["submit"],
+            nodes=[
+                {"id": "call_submit", "type": "call", "step_id": "submit"},
+                {"id": "return_result", "type": "return", "from": "submit", "path": "response"},
+            ],
+            confirmed=True, requires_human_confirm=False,
+        )],
+    )
+    spec = prepare_flow_spec_for_publish(spec)
+    cap = spec.capabilities[0]
+    cap.confirmation_hash = flow_spec_module._capability_confirmation_hash(spec, cap)
+    assert not any("确认后合同已变化" in error for error in validate_flow_spec(spec)["errors"])
+
+    spec.steps[0].params[0].label = "事由"
+    spec.steps[0].params[0].key = "事由"
+    report = validate_flow_spec(spec)
+
+    assert any("确认后合同已变化" in error for error in report["errors"])
+
+
+def test_generated_placeholder_output_name_is_normalized_to_stable_result():
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit", method="POST", path="/api/submit",
+            body_source="{}", response_json={"code": 0, "data": {"id": "1"}},
+        )],
+        capabilities=[FlowCapability(
+            name="submit", title="提交申请", kind="submit", step_ids=["submit"],
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+            output_mapping=[{
+                "kind": "final_response", "name": "output_1",
+                "step_id": "submit", "response_path": "response",
+            }],
+        )],
+    )
+
+    repaired = flow_spec_module._repair_generated_capability_contracts(spec)
+
+    assert repaired.capabilities[0].output_mapping[0]["name"] == "result"
 
 
 def test_select_source_is_hydrated_from_captured_post_read_contract():

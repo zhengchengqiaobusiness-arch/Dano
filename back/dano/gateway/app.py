@@ -672,6 +672,7 @@ async def record_ws(ws: WebSocket) -> None:
                 before_flush_steps = sess.recorded_raw_steps()
                 await sess.flush_recording()
                 observed_required_labels = await sess.observed_required_labels()
+                observed_page_context = await sess.observed_page_context()
                 after_flush_steps = sess.recorded_raw_steps()
                 flushed_tail: list[dict] = []
                 if len(after_flush_steps) > len(before_flush_steps):
@@ -715,6 +716,11 @@ async def record_ws(ws: WebSocket) -> None:
                             page_enum_options[label] = entry
                         if field_key and field_key not in page_enum_options:
                             page_enum_options[field_key] = entry
+                # Submit-time form evidence survives modal teardown and fills
+                # untouched/compound controls (for example a two-input date
+                # range) into the same sample map used for body-field matching.
+                for field_key, value in sess.recorded_form_samples().items():
+                    samples.setdefault(field_key, value)
                 sub = init.get("subsystem", "A-报销")
                 login_state = await sess.storage_state()   # 录制会话(已真人登录)的登录态快照
 
@@ -763,6 +769,7 @@ async def record_ws(ws: WebSocket) -> None:
                             storage_state=pending_storage,
                             required_labels=pending_required,
                             page_enum_options=pending_page_enum_options,
+                            page_context=observed_page_context,
                             recording_mode=recording_mode,
                             diagnostics=sess.captured_diagnostics(),
                             tenant=init.get("tenant", ""),
@@ -818,6 +825,7 @@ async def record_ws(ws: WebSocket) -> None:
                         storage_state=pending_storage,
                         required_labels=pending_required,
                         page_enum_options=pending_page_enum_options,
+                        page_context=observed_page_context,
                         recording_mode=recording_mode,
                         diagnostics=sess.captured_diagnostics(),
                         tenant=init.get("tenant", ""),
@@ -867,6 +875,7 @@ async def record_ws(ws: WebSocket) -> None:
                             storage_state=pending_storage,
                             required_labels=pending_required,
                             page_enum_options=pending_page_enum_options,
+                            page_context=observed_page_context,
                             recording_mode=recording_mode,
                             diagnostics=sess.captured_diagnostics(),
                             tenant=init.get("tenant", ""),

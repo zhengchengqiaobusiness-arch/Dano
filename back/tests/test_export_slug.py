@@ -93,3 +93,47 @@ def test_write_skill_exports_lossless_contract_and_compact_navigation(tmp_path):
     bundle_contract = json.loads((bundle / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
     assert bundle_contract["protocol"] == "dano.skill_bundle.v1"
     assert bundle_contract["skills"] == [manifest.model_dump(mode="json")]
+
+
+def test_non_batch_multi_capability_export_has_no_batch_or_fake_fact_check_residue(tmp_path):
+    manifest = to_manifest(SkillSpec(
+        skill_id="A-OA.borrow_official_seal",
+        subsystem=Subsystem.OA,
+        action="borrow_official_seal",
+        title="公章借阅",
+        description="查询公章借阅记录并提交借阅申请",
+        risk_level=RiskLevel.L3,
+        capabilities=[
+            {
+                "name": "query_status", "kind": "query_status", "title": "查询公章借阅记录",
+                "input_schema": {"type": "object", "properties": {}, "required": []},
+                "output_schema": {"type": "object", "properties": {"result": {"type": "object"}}},
+            },
+            {
+                "name": "submit", "kind": "submit", "title": "提交公章借阅申请",
+                "requires_human_confirm": True,
+                "inputs": [{
+                    "key": "申请标题", "path": "applyTitle", "type": "string", "required": True,
+                    "page_required": True, "required_source": "page",
+                }],
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"申请标题": {"type": "string"}},
+                    "required": ["申请标题"],
+                },
+                "output_schema": {"type": "object", "properties": {"result": {"type": "object"}}},
+            },
+        ],
+    ))
+
+    folder = _write_skill(tmp_path, manifest)
+    skill_md = (folder / "SKILL.md").read_text(encoding="utf-8")
+    contract = json.loads((folder / "references" / "CONTRACT.json").read_text(encoding="utf-8"))
+
+    assert "批量输入按 `entries[]`" not in skill_md
+    assert "`partial_success`" not in skill_md
+    assert "真正的业务编排、风险闸门与事实核查" not in skill_md
+    assert "业务成功规则" in skill_md
+    submit = next(cap for cap in contract["capabilities"] if cap["kind"] == "submit")
+    assert submit["inputs"][0]["page_required"] is True
+    assert submit["inputs"][0]["required_source"] == "page"

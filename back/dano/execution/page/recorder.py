@@ -255,6 +255,63 @@ _RECORDER_JS = r"""() => {
     } catch (e) {}
     return Object.keys(out);
   };
+  window.__danoPageContext = function () {
+    var seen = {}; var texts = [];
+    function add(value) {
+      value = clean(String(value || '').replace(/\s+/g, ' '));
+      if (!value || value.length > 120 || seen[value]) return;
+      seen[value] = true; texts.push(value);
+    }
+    try {
+      add(document.title);
+      var nodes = document.querySelectorAll(
+        'h1,h2,h3,legend,.el-breadcrumb,.ant-breadcrumb,.page-title,.form-title,' +
+        '[class*="page-title"],[class*="page_title"],[class*="form-title"],[class*="form_title"],' +
+        '[role="dialog"] [class*="title"]'
+      );
+      for (var i = 0; i < nodes.length && texts.length < 20; i++) {
+        var node = nodes[i];
+        var style = window.getComputedStyle ? window.getComputedStyle(node) : null;
+        if (style && (style.display === 'none' || style.visibility === 'hidden')) continue;
+        add(node.textContent);
+      }
+    } catch (e) {}
+    return {
+      url: String(location.href || '').split('#')[0],
+      path: String(location.pathname || ''),
+      document_title: clean(document.title || ''),
+      visible_titles: texts
+    };
+  };
+  window.__danoFormFieldEvidence = function () {
+    var out = [];
+    try {
+      var controls = document.querySelectorAll('input,select,textarea,[role="textbox"],[role="combobox"],[role="spinbutton"]');
+      for (var i = 0; i < controls.length; i++) {
+        var el = controls[i];
+        var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+        if (style && (style.display === 'none' || style.visibility === 'hidden')) continue;
+        var loc = locateField(el);
+        var label = clean(labelText(el));
+        var field = clean(fieldOf(loc));
+        var value = clean(el.value || el.getAttribute('value') || '');
+        if (!label && !field) continue;
+        out.push({field: field, label: label, value: value, required: requiredOf(el)});
+      }
+    } catch (e) {}
+    return out.slice(0, 200);
+  };
+  function emitFormSnapshot() {
+    if (onLoginPage()) return;
+    try {
+      window.__danoRecord(JSON.stringify({
+        op: 'form_snapshot',
+        required_fields: window.__danoRequiredFields ? window.__danoRequiredFields() : [],
+        fields: window.__danoFormFieldEvidence ? window.__danoFormFieldEvidence() : [],
+        page_context: window.__danoPageContext ? window.__danoPageContext() : {}
+      }));
+    } catch (e) {}
+  }
   function emit(op, loc, value, field, required, options) {
     if (!loc || onLoginPage()) return;            // 登录页上的任何操作一律不录(自动跳过登录,免手点「从这里开始录」)
     try { window.__danoRecord(JSON.stringify({ op: op, locator: loc, value: value || '', field: field || '', required: !!required, options: options || [] })); } catch (e) {}
@@ -526,6 +583,7 @@ _RECORDER_JS = r"""() => {
     var loc = locateClickable(el); if (!loc) return;
     var role = roleOf(el); var name = accName(el);
     var isSubmit = role === 'button' && SUBMIT.some(function (h) { return name.toLowerCase().indexOf(h) >= 0; });
+    if (isSubmit) emitFormSnapshot();
     emit(isSubmit ? 'submit' : 'click', loc, '', '');
   }, true);
 }"""
@@ -538,6 +596,9 @@ class RecordSession:
                  on_request: Callable[[dict], None] | None = None,
                  intercept_submit: bool = True, capture_reads: bool = True) -> None:
         self.steps: list[dict] = []
+        # 点击提交时保存的页面语义/必填快照。它独立于操作步骤，避免弹窗关闭后
+        # finalize 扫描不到表单，也避免把证据误导出成回放动作。
+        self.form_snapshots: list[dict] = []
         self.requests: list[dict] = []      # 抓到的写请求(有序,method/url/post_data/headers)→ 参数化/多步工作流
         self.reads: list[dict] = []         # 抓到的读请求(GET+JSON 列表/字典)→ Q2 选领导等 select 的候选源
         # P0-1:全量捕获(基础事实)。先抓全再筛 → 治"GET 业务接口被早筛丢"等根因。
@@ -1002,6 +1063,11 @@ class RecordSession:
         except Exception:  # noqa: BLE001
             pass
         self._mark_active()
+        if step.get("op") == "form_snapshot":
+            self.form_snapshots.append(step)
+            # 同一表单反复点击只保留有限快照；最后一份是发布时的地面真值。
+            self.form_snapshots = self.form_snapshots[-20:]
+            return
         # 同一 locator 连续 fill/select/pick(用户改了又改/逐字符)→ 覆盖,只留最后一次
         if (self.steps and self.steps[-1].get("locator") == step.get("locator")
                 and self.steps[-1].get("page_id") == step.get("page_id")
@@ -1151,6 +1217,7 @@ class RecordSession:
         """清空已录步骤(用户登录完后点「从这里开始录」,丢弃登录步骤,只留业务流程)。
         同时清 all_requests/diagnostics 与请求计数——后续诊断基于录制期抓的事实,登录噪声不计。"""
         self.steps.clear()
+        self.form_snapshots.clear()
         self.requests.clear()
         self.reads.clear()
         self.all_requests.clear()
@@ -1217,11 +1284,37 @@ class RecordSession:
     def recorded_required_labels(self) -> set:
         """录制中标了表单 * 必填的字段(供 flatten 标 required)。key 与 recorded_steps 同算法分配,保持一致。"""
         keymap = assign_step_field_keys(self.steps)
-        return {
+        out = {
             key for i, key in keymap.items()
             if self.steps[i].get("required")
             and self.steps[i].get("op") in ("fill", "select", "pick")
         }
+        snapshots = self.form_snapshots[-1:] if self.form_snapshots else []
+        for snapshot in snapshots:
+            out.update(
+                str(label or "").strip()
+                for label in (snapshot.get("required_fields") or [])
+                if str(label or "").strip()
+            )
+        return out
+
+    def recorded_form_samples(self) -> dict[str, str]:
+        """Return submit-time label/value evidence, preserving range members."""
+        out: dict[str, str] = {}
+        counters: dict[str, int] = {}
+        snapshots = self.form_snapshots[-1:] if self.form_snapshots else []
+        for snapshot in snapshots:
+            for field in snapshot.get("fields") or []:
+                if not isinstance(field, dict):
+                    continue
+                label = str(field.get("label") or field.get("field") or "").strip()
+                value = str(field.get("value") or "").strip()
+                if not label or not value:
+                    continue
+                counters[label] = counters.get(label, 0) + 1
+                key = label if counters[label] == 1 else f"{label}#{counters[label]}"
+                out[key] = value
+        return out
 
     async def observed_required_labels(self) -> set[str]:
         """Scan the live page for required controls, including untouched fields."""
@@ -1244,6 +1337,42 @@ class RecordSession:
                 if text:
                     out.add(text)
         return out
+
+    async def observed_page_context(self) -> dict:
+        """Return stable business page evidence captured before and after submit."""
+        submitted_contexts = [
+            snapshot.get("page_context")
+            for snapshot in self.form_snapshots
+            if isinstance(snapshot.get("page_context"), dict)
+        ]
+        live_contexts: list[dict] = []
+        if self.page is not None:
+            for frame in list(self.page.frames):
+                try:
+                    context = await frame.evaluate(
+                        "() => window.__danoPageContext ? window.__danoPageContext() : {}"
+                    )
+                except Exception:  # noqa: BLE001
+                    continue
+                if isinstance(context, dict):
+                    live_contexts.append(context)
+        contexts = [*submitted_contexts, *live_contexts]
+        titles: list[str] = []
+        seen: set[str] = set()
+        for context in contexts:
+            for value in [context.get("document_title"), *(context.get("visible_titles") or [])]:
+                text = str(value or "").strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    titles.append(text)
+        latest = live_contexts[-1] if live_contexts else {}
+        submitted = submitted_contexts[-1] if submitted_contexts else latest
+        return {
+            "url": str(submitted.get("url") or latest.get("url") or ""),
+            "path": str(submitted.get("path") or latest.get("path") or ""),
+            "document_title": str(submitted.get("document_title") or latest.get("document_title") or ""),
+            "visible_titles": titles[:30],
+        }
 
     async def stop(self) -> None:
         self._closing = True         # 先置位:此后任何 page close 事件都不再重开截屏(避免在关闭中的 context 上 new_cdp_session)

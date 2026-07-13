@@ -297,6 +297,11 @@ class CapabilityField(BaseModel):
     type: str = "string"
     wire_type: str = ""
     required: bool = False
+    # Preserve the distinction between what the page requires and what the
+    # public caller must provide. Runtime-supplied values can be page-required
+    # while remaining absent from the public input schema.
+    page_required: bool | None = None
+    required_source: str = ""
     request_id: str = ""
     request_index: Any = None
     step_id: str = ""
@@ -2483,6 +2488,8 @@ def _capability_field_from_param(
         type=param.type,
         wire_type=param.wire_type or _infer_type_from_value(param.value),
         required=bool(param.required),
+        page_required=param.page_required,
+        required_source=param.required_source,
         request_id=request_id,
         request_index=(step.source_meta or {}).get("request_index"),
         step_id=step.step_id,
@@ -3364,22 +3371,35 @@ def _apply_capability_field_to_param(spec: FlowSpec, raw: dict[str, Any], *, sco
 
 
 def _capability_confirmation_hash(spec: FlowSpec, cap: FlowCapability) -> str:
-    by_id = {step.step_id: step for step in spec.steps}
+    # Hash the same canonical contract shape used by validation/publish. Raw
+    # editor state may still have derived fields or schemas pending sync;
+    # hashing it directly made an immediate validation look stale.
+    canonical = _sync_capability_io_schemas(
+        sync_flow_spec_models(spec.model_copy(deep=True), prefer_request_facts=False)
+    )
+    canonical_cap = next(
+        (
+            item for item in canonical.capabilities
+            if item.capability_id == cap.capability_id
+        ),
+        cap,
+    )
+    by_id = {step.step_id: step for step in canonical.steps}
     payload = {
-        "capability": cap.model_dump(exclude={
+        "capability": canonical_cap.model_dump(exclude={
             "confirmed", "confirmation_hash", "status", "requires_human_confirm",
             "confidence", "updated_by",
         }),
         "steps": [
             by_id[sid].model_dump()
-            for sid in _capability_node_step_ids(cap)
+            for sid in _capability_node_step_ids(canonical_cap)
             if sid in by_id
         ],
         "links": [
             link.model_dump()
-            for link in spec.links
-            if link.source_step_id in set(_capability_node_step_ids(cap))
-            and link.target_step_id in set(_capability_node_step_ids(cap))
+            for link in canonical.links
+            if link.source_step_id in set(_capability_node_step_ids(canonical_cap))
+            and link.target_step_id in set(_capability_node_step_ids(canonical_cap))
         ],
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
@@ -3569,6 +3589,7 @@ def to_flow_spec(
     storage_state: dict | None = None,
     required_labels: set | None = None,
     page_enum_options: dict | None = None,
+    page_context: dict | None = None,
     recording_mode: str = "",
     diagnostics: list[dict] | None = None,
     tenant: str = "",
@@ -3579,6 +3600,7 @@ def to_flow_spec(
     samples = samples or {}
     required_labels = required_labels or set()
     page_enum_options = page_enum_options or {}
+    page_context = page_context or {}
     diagnostics = diagnostics or []
     recording_mode = recording_mode or "unknown"
 
@@ -3650,6 +3672,7 @@ def to_flow_spec(
                 "request_graph": request_graph,
                 "recording_mode": recording_mode,
                 "diagnostics": diagnostics,
+                "page_context": page_context,
                 "note": "录制未抓到任何业务写请求或业务 GET；用户可能未点提交，或页面是纯 GET 表单",
             },
         )
@@ -3888,6 +3911,7 @@ def to_flow_spec(
             "request_graph": request_graph,
             "recording_mode": recording_mode,
             "diagnostics": diagnostics,
+            "page_context": page_context,
             "schema_version": 1,
         },
     )
@@ -4273,6 +4297,13 @@ def _repair_generated_capability_contracts(spec: FlowSpec) -> FlowSpec:
         was_generated_duplicate = bool(re.fullmatch(r"submit_batch\d+", str(cap.name or "")))
         needed_batch_audit = cap.kind in {"submit_batch", "validate_batch"}
         _normalize_generated_capability_semantics(spec, cap)
+        if not cap.locked:
+            for mapping in cap.output_mapping or []:
+                if not isinstance(mapping, dict):
+                    continue
+                name = str(mapping.get("name") or "")
+                if not name or re.fullmatch(r"(?:output|result)(?:_?\d+)?", name, re.I):
+                    mapping["name"] = "result"
         if old_name and cap.name and old_name != cap.name:
             renamed[old_name] = cap.name
         if cap.locked or (not cap.evidence and not was_generated_duplicate and not needed_batch_audit):
@@ -5624,34 +5655,6 @@ def _ensure_external_transform_relations(spec: FlowSpec) -> FlowSpec:
                 evidence={"kind": "typed_capability_contract", "automatic_execution": False},
             ))
 
-    # A single query + single ordinary submit is a caller-controlled conversation
-    # boundary, not an implicit data mapping.  This captures workflows such as
-    # "query existing records, ask the user, then explicitly submit".
-    submits = [cap for cap in spec.capabilities if cap.kind == "submit"]
-    if len(queries) == 1 and len(submits) == 1:
-        query, submit = queries[0], submits[0]
-        query_ref = query.name or query.capability_id
-        submit_ref = submit.name or submit.capability_id
-        already_related = any(
-            relation.from_capability in {query.name, query.capability_id}
-            and relation.to_capability in {submit.name, submit.capability_id}
-            for relation in spec.capability_relations
-        )
-        if query_ref and submit_ref and not already_related:
-            spec.capability_relations.append(CapabilityRelation(
-                type="caller_decision",
-                mode="caller_decision",
-                transform_owner="caller",
-                from_capability=query_ref,
-                to_capability=submit_ref,
-                cardinality="one_to_one",
-                required=False,
-                requires_user_confirmation=True,
-                confirmed=True,
-                confidence=0.9,
-                reason="调用方先读取查询结果，再结合用户意图决定是否显式调用提交能力",
-                evidence={"kind": "typed_capability_contract", "automatic_execution": False},
-            ))
     deduped_relations: list[CapabilityRelation] = []
     seen_relations: set[tuple[str, str, str, str, str]] = set()
     for relation in spec.capability_relations:
@@ -5765,6 +5768,7 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
         "tenant": spec.tenant,
         "subsystem": spec.subsystem,
         "title": spec.title,
+        "page_context": dict((spec.meta or {}).get("page_context") or {}),
         "recording_mode": spec.recording_mode,
         "risk_level": spec.risk_level,
         "steps": [
@@ -6442,13 +6446,18 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
         target_raw = str(relation.get("to_capability") or relation.get("to") or "")
         source = capability_name_map.get(source_raw, source_raw)
         target = capability_name_map.get(target_raw, target_raw)
-        if source and target:
+        from_output = str(relation.get("from_output") or "").strip()
+        to_input = str(relation.get("to_input") or "").strip()
+        # A model statement such as "query then submit" is not a data
+        # relationship. Automatic relations require concrete endpoints;
+        # operators may still create an explicit caller-decision relation.
+        if source and target and from_output and to_input:
             ops.append({
                 "op": "set_capability_relation",
                 "from_capability": source,
-                "from_output": str(relation.get("from_output") or ""),
+                "from_output": from_output,
                 "to_capability": target,
-                "to_input": str(relation.get("to_input") or ""),
+                "to_input": to_input,
                 "type": str(relation.get("type") or relation.get("mode") or "caller_decision"),
                 "mode": str(relation.get("mode") or relation.get("type") or "caller_decision"),
                 "confidence": float(relation.get("confidence") or 0.0),
@@ -6546,6 +6555,200 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         "covered_fields": len(covered_fields & required_fields),
         "total_fields": len(required_fields),
     }
+
+
+def _is_technical_business_title(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    normalized = re.sub(r"[\s_-]+", "", text.lower())
+    return bool(
+        re.match(r"^(?:get|post|put|patch|delete)", normalized)
+        or normalized in {
+            "流程", "业务流程", "提交流程", "submit", "submitprocess",
+            "提交业务申请", "查询流程状态", "未命名",
+        }
+        or re.fullmatch(r"submitprocess流程(?:\(\d+步\))?", normalized)
+    )
+
+
+def _page_context_business_name(spec: FlowSpec) -> str:
+    context = dict((spec.meta or {}).get("page_context") or {})
+    candidates = [
+        *(context.get("visible_titles") or []),
+        context.get("document_title"),
+    ]
+    ignored = re.compile(r"登录|首页|工作台|系统管理|确定|取消|提交|新增|编辑|详情$")
+    ranked: list[tuple[int, str]] = []
+    for raw in candidates:
+        text = re.sub(r"\s+", " ", str(raw or "")).strip(" -_|—")
+        if not text or len(text) > 40 or _is_technical_business_title(text):
+            continue
+        score = 0
+        if re.search(r"[\u4e00-\u9fff]", text):
+            score += 4
+        if 2 <= len(text) <= 12:
+            score += 3
+        if re.search(r"申请|借阅|审批|报销|请假|用印|印章|登记|查询|办理", text):
+            score += 4
+        if ignored.search(text):
+            score -= 5
+        ranked.append((score, text))
+    return max(ranked, default=(0, ""), key=lambda item: item[0])[1]
+
+
+def _capability_business_name(spec: FlowSpec) -> str:
+    subjects: list[str] = []
+    for capability in spec.capabilities or []:
+        title = str(capability.title or "").strip()
+        if not title or _is_technical_business_title(title):
+            continue
+        subject = re.sub(r"^(?:批量提交|查询|提交|校验|办理|创建)", "", title)
+        subject = re.sub(r"(?:记录|列表|状态|详情|申请|批量输入)$", "", subject).strip()
+        if subject and subject not in subjects:
+            subjects.append(subject)
+    if len(subjects) == 1:
+        return subjects[0]
+    if subjects:
+        common = subjects[0]
+        while common and not all(common in item for item in subjects[1:]):
+            common = common[:-1]
+        if len(common) >= 2:
+            return common
+    return ""
+
+
+def _apply_semantic_business_understanding(
+    spec: FlowSpec,
+    semantic_plan: dict[str, Any],
+) -> FlowSpec:
+    """Apply business identity once without overwriting explicit operator edits."""
+    understanding = semantic_plan.get("business_understanding")
+    understanding = understanding if isinstance(understanding, dict) else {}
+    title_source = str((spec.meta or {}).get("title_source") or "")
+    proposed_title = str(
+        understanding.get("business_name")
+        or understanding.get("object")
+        or _page_context_business_name(spec)
+        or _capability_business_name(spec)
+        or ""
+    ).strip()
+    if title_source != "user" and proposed_title and (
+        _is_technical_business_title(spec.title) or understanding.get("business_name")
+    ):
+        spec.title = proposed_title
+        spec.meta = {**(spec.meta or {}), "title_source": "semantic_plan"}
+    business_title = str(spec.title or proposed_title or "").strip()
+    if business_title and not _is_technical_business_title(business_title):
+        for capability in spec.capabilities or []:
+            if capability.locked or capability.updated_by == "user":
+                continue
+            if not _is_technical_business_title(capability.title):
+                continue
+            if capability.kind == "query_status":
+                capability.title = f"查询{business_title}记录"
+            elif capability.kind == "submit":
+                capability.title = (
+                    f"提交{business_title}"
+                    if business_title.endswith(("申请", "登记", "表单"))
+                    else f"提交{business_title}申请"
+                )
+            elif capability.kind == "submit_batch":
+                capability.title = f"批量提交{business_title}"
+            elif capability.kind == "validate_batch":
+                capability.title = f"校验{business_title}批量输入"
+    description_source = str((spec.meta or {}).get("business_description_source") or "")
+    proposed_description = str(
+        understanding.get("summary") or understanding.get("intent") or ""
+    ).strip()
+    if description_source != "user" and proposed_description:
+        spec.business_description = proposed_description
+        spec.meta = {**(spec.meta or {}), "business_description_source": "semantic_plan"}
+    return spec
+
+
+def _complete_semantic_plan_from_spec(
+    spec: FlowSpec,
+    proposed: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Complete a first-pass semantic plan from grounded FlowSpec facts.
+
+    The model remains responsible for semantic choices. This function only
+    fills omitted coverage records with already accepted names, types, roles
+    and capability boundaries, so structural omissions never trigger another
+    full-context model call.
+    """
+    plan = copy.deepcopy(proposed) if isinstance(proposed, dict) else {}
+    understanding = plan.get("business_understanding")
+    if not isinstance(understanding, dict):
+        understanding = {}
+    business_name = str(
+        understanding.get("business_name")
+        or ("" if _is_technical_business_title(spec.title) else spec.title)
+        or _page_context_business_name(spec)
+        or _capability_business_name(spec)
+        or "录制业务流程"
+    ).strip()
+    understanding.setdefault("business_name", business_name)
+    plan["business_understanding"] = understanding
+
+    role_by_step = {
+        str(item.get("step_id") or ""): item
+        for item in (plan.get("request_roles") or [])
+        if isinstance(item, dict) and str(item.get("step_id") or "")
+    }
+    for step in spec.steps:
+        item = role_by_step.setdefault(step.step_id, {"step_id": step.step_id})
+        role = str((step.source_meta or {}).get("role") or step.semantic_role or "business_request")
+        item.setdefault("role", role)
+        item.setdefault("name", step.name or f"{step.method} {step.path or step.url}")
+        item.setdefault("reason", str((step.source_meta or {}).get("keep_reason") or "来自录制请求事实"))
+    plan["request_roles"] = list(role_by_step.values())
+
+    field_by_ref = {
+        (
+            str(item.get("step_id") or ""),
+            _strip_body_prefix(str(item.get("wire_path") or item.get("path") or "")),
+        ): item
+        for item in (plan.get("field_semantics") or [])
+        if isinstance(item, dict)
+    }
+    for step in spec.steps:
+        for param in step.params:
+            if param.category != "user_param" or not param.exposed_to_user:
+                continue
+            ref = (step.step_id, _strip_body_prefix(param.path))
+            item = field_by_ref.setdefault(ref, {
+                "step_id": step.step_id,
+                "wire_path": param.path,
+            })
+            item.setdefault("public_name", param.label or param.key or param.path)
+            item.setdefault("business_type", param.type)
+            item.setdefault("source_kind", param.source_kind or "user_input")
+            item.setdefault("confidence", float(param.confidence or (1.0 if param.locked else 0.8)))
+            item.setdefault("evidence", list(param.evidence or [{"source": "recorded_flow_spec"}]))
+    plan["field_semantics"] = list(field_by_ref.values())
+
+    capability_by_name = {
+        str(item.get("name") or ""): item
+        for item in (plan.get("capabilities") or [])
+        if isinstance(item, dict) and str(item.get("name") or "")
+    }
+    for capability in spec.capabilities or []:
+        item = capability_by_name.setdefault(capability.name, {"name": capability.name})
+        item.setdefault("title", capability.title or capability.name)
+        item.setdefault("kind", capability.kind)
+        item.setdefault("intent", capability.intent or capability.title or capability.name)
+        item.setdefault("step_ids", list(_capability_node_step_ids(capability)))
+    plan["capabilities"] = list(capability_by_name.values())
+    plan["capability_relations"] = [
+        relation.model_dump(exclude_none=True)
+        for relation in (spec.capability_relations or [])
+        if relation.from_output and relation.to_input
+    ]
+    if not isinstance(plan.get("unresolved_items"), list):
+        plan["unresolved_items"] = []
+    return plan
 
 
 def _semantic_mutable_context(spec: FlowSpec, *, scope_locked: bool) -> dict[str, Any]:
@@ -6917,6 +7120,8 @@ def _capability_field_summary(field: CapabilityField) -> dict[str, Any]:
         "path": field.path,
         "type": field.type,
         "required": bool(field.required),
+        "page_required": field.page_required,
+        "required_source": field.required_source,
         "step_id": field.step_id,
         "request_id": field.request_id,
         "request_index": field.request_index,
@@ -7541,6 +7746,10 @@ async def orchestrate_flow_capabilities(
         current = proposal_baseline
         source = "deterministic" if initial_generation else "incremental_rejected"
         reason = "自动语义 Proposal 未通过单调质量准入: " + ",".join(proposal_gate["reasons"])
+    if initial_generation:
+        semantic_plan = _complete_semantic_plan_from_spec(current, semantic_plan)
+        current = _apply_semantic_business_understanding(current, semantic_plan)
+        semantic_coverage = _semantic_plan_coverage(current, {"semantic_plan": semantic_plan})
     caps = list(current.capabilities or [])
     final_report = validate_flow_spec(current)
     current.meta = {
@@ -8020,7 +8229,11 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                 cap_warnings.append(msg)
 
         if not cap.confirmed or cap.requires_human_confirm:
-            cap_warnings.append(f"Capability `{label}` 尚未确认，需要人工确认后再作为稳定业务能力暴露")
+            cap_warnings.append(f"Capability `{label}` 尚未确认，需要确认或移除后再发布")
+        elif not cap.confirmation_hash:
+            cap_warnings.append(f"Capability `{label}` 来自旧版确认记录；下次合同编辑后将启用版本指纹校验")
+        elif cap.confirmation_hash != _capability_confirmation_hash(spec, cap):
+            cap_errors.append(f"Capability `{label}` 确认后合同已变化，请复核并重新确认")
 
         cap_steps = [step_by_id[sid] for sid in node_step_ids if sid in step_by_id]
         cap_step_id_set = {s.step_id for s in cap_steps}
@@ -8547,10 +8760,10 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                     message=msg,
                     target={"kind": "capability_relation", "relation_id": relation.relation_id},
                 )
-    if caps and not any(c.confirmed for c in caps):
-        message = "Skill 尚无已确认能力；请确认至少一个能力后再发布"
+    if caps and any(not c.confirmed or c.requires_human_confirm for c in caps):
+        message = "Skill 存在未确认的公开能力；请逐一确认或移除后再发布"
         skill_level.setdefault("errors", []).append({
-            "code": "no_confirmed_capability",
+            "code": "unconfirmed_public_capability",
             "message": message,
             "target": {"kind": "flow", "flow_id": spec.flow_id},
         })
@@ -8561,8 +8774,9 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
         skill_issues: list[tuple[str, str]] = []
         if not str(spec.business_description or "").strip():
             skill_issues.append(("skill_description_missing", "Skill 缺少面向调用方的整体说明"))
-        if len(confirmed_caps) > 1 and not (spec.capability_relations or (spec.meta or {}).get("default_capability_order")):
-            skill_issues.append(("skill_default_call_order_missing", "Skill 有多个 confirmed capability，但缺少默认调用顺序或能力关系"))
+        # Multiple independent capabilities require explicit selection, not a
+        # fabricated call order or relation. A relation is required only when
+        # a concrete output-to-input mapping exists and is validated above.
         failure_text = " ".join([
             str((spec.meta or {}).get("failure_handling") or ""),
             str(spec.business_description or ""),
@@ -11817,6 +12031,14 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             if field not in allowed:
                 raise ValueError(f"unknown flow field: {field}")
             setattr(new_spec, field, value)
+            actor = str(edit.get("actor") or "user")
+            if field == "title" and actor != "planner":
+                new_spec.meta = {**(new_spec.meta or {}), "title_source": "user"}
+            if field == "business_description" and actor != "planner":
+                new_spec.meta = {
+                    **(new_spec.meta or {}),
+                    "business_description_source": "user",
+                }
             continue
 
         if op == "dedupe_steps":
@@ -11970,6 +12192,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 candidate.confirmed = True
                 candidate.requires_human_confirm = False
                 candidate.status = "confirmed"
+                candidate.confirmation_hash = _capability_confirmation_hash(candidate_spec, candidate)
                 candidate_report = _capability_validation_report(candidate_spec)
                 scoped = next((
                     item for item in (candidate_report.get("capabilities") or [])
@@ -13362,6 +13585,7 @@ def _auto_confirm_ready_capabilities(spec: FlowSpec) -> FlowSpec:
         candidate.confirmed = True
         candidate.requires_human_confirm = False
         candidate.status = "confirmed"
+        candidate.confirmation_hash = _capability_confirmation_hash(candidate_spec, candidate)
         candidate_report = _capability_validation_report(candidate_spec)
         scoped_report = next((
             item for item in (candidate_report.get("capabilities") or [])
@@ -13536,32 +13760,13 @@ async def run_recording_pi_loop(
                 conversation=conversation,
             )
 
-            coverage = ((current.meta or {}).get("capability_model") or {}).get("semantic_coverage") or {}
-            if (
-                initial_generation
-                and round_idx == 0
-                and conversation is not None
-                and hasattr(llm_client, "complete_json_messages")
-                and not coverage.get("complete")
-            ):
-                current = await orchestrate_flow_capabilities(
-                    current,
-                    llm_client=llm_client,
-                    model=model,
-                    timeout_s=timeout_s,
-                    generation_mode="initial",
-                    conversation=conversation,
-                )
-                completed_coverage = (
-                    ((current.meta or {}).get("capability_model") or {}).get("semantic_coverage") or {}
-                )
-                history.append({
-                    "round": round_idx + 1,
-                    "stage": "semantic_plan_completion",
-                    "complete": bool(completed_coverage.get("complete")),
-                    "missing": list(completed_coverage.get("missing") or []),
-                })
-
+        # Confirmation readiness is deterministic and must be evaluated before
+        # deciding whether semantic Repair is needed. Otherwise every valid
+        # first plan appears publish-invalid solely because its newly created
+        # capabilities are still drafts, causing a redundant full model call.
+        current = _auto_confirm_ready_capabilities(
+            _sync_capability_io_schemas(sync_flow_spec_models(current, prefer_request_facts=False))
+        )
         report = validate_flow_spec(current)
         history.append({
             "round": round_idx + 1,
@@ -13596,7 +13801,6 @@ async def run_recording_pi_loop(
         if report.get("passed") and not needs_quality_repair and not needs_requested_repair:
             break
 
-        before_repair = _flow_fingerprint(current)
         current = await auto_fix_flow_spec(
             current,
             llm_client=llm_client,
@@ -13616,10 +13820,11 @@ async def run_recording_pi_loop(
             "errors": len(fixed_report.get("errors") or []),
             "warnings": len(fixed_report.get("warnings") or []),
         })
-        after = _flow_fingerprint(current)
-        if fixed_report.get("passed") or before_repair == after:
-            break
-        run_planner = True
+        # A click is bounded to one complete Planner turn plus, only when
+        # necessary, one targeted Repair turn. Remaining findings stay visible
+        # for the operator; re-entering Planner with a growing transcript made
+        # latency and cost non-deterministic and could undo accepted semantics.
+        break
 
     current = _auto_confirm_ready_capabilities(
         _sync_capability_io_schemas(sync_flow_spec_models(current, prefer_request_facts=False))

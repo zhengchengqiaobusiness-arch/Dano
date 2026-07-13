@@ -632,7 +632,7 @@ def test_external_transform_relation_prunes_only_stale_derived_mapping():
     assert [relation.relation_id for relation in spec.capability_relations] == ["manual"]
 
 
-def test_query_then_submit_creates_caller_decision_without_fake_field_mapping():
+def test_query_then_submit_does_not_invent_relation_without_field_mapping():
     query = FlowStep(
         step_id="query_status", method="GET", path="/records/page",
         source_meta={"role": "business_get"},
@@ -648,14 +648,39 @@ def test_query_then_submit_creates_caller_decision_without_fake_field_mapping():
     out = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[query, submit])))
 
     assert {cap.kind for cap in out.capabilities} == {"query_status", "submit"}
-    assert len(out.capability_relations) == 1
-    relation = out.capability_relations[0]
-    assert relation.type == "caller_decision"
-    assert relation.from_output == ""
-    assert relation.to_input == ""
-    assert relation.evidence["automatic_execution"] is False
+    assert out.capability_relations == []
     report = validate_flow_spec(out)
     assert not any("output/input 字段" in message for message in report["errors"])
+
+
+def test_page_context_names_business_and_default_capabilities_without_model_guessing():
+    spec = FlowSpec(
+        title="submit-process 流程(2 步)",
+        meta={"page_context": {
+            "path": "/oa/seal-apply",
+            "document_title": "OA 管理系统",
+            "visible_titles": ["OA 管理系统", "公章借阅", "申请信息"],
+        }},
+        steps=[
+            FlowStep(
+                step_id="query", method="GET", path="/oa/seal-apply/page",
+                source_meta={"role": "business_get"}, response_json={"data": {"list": []}},
+            ),
+            FlowStep(
+                step_id="submit", method="POST", path="/oa/seal-apply/submit-process",
+                source_meta={"role": "submit_anchor"}, body_source='{"title":"借阅"}',
+                params=[ParamField(path="title", key="申请标题", category="user_param")],
+                success_rule={"path": "code", "equals": 0},
+            ),
+        ],
+    )
+
+    generated = asyncio.run(run_recording_pi_loop(spec, mode="plan"))
+
+    assert generated.title == "公章借阅"
+    assert {cap.title for cap in generated.capabilities} == {
+        "查询公章借阅记录", "提交公章借阅申请",
+    }
 
 
 def test_page_enum_binding_is_projected_to_param_and_capability_contract():
@@ -1047,6 +1072,10 @@ def test_initial_semantic_generation_names_indexed_range_inherits_context_and_re
         ("查询结束时间", "query.useTime[1]"),
     ]
     assert {cap.kind for cap in generated.capabilities} == {"query_status", "submit"}
+    assert generated.title == "公章借阅"
+    assert {cap.title for cap in generated.capabilities} == {
+        "查询公章借阅记录", "提交公章借阅申请",
+    }
     assert {step.step_id: step.name for step in generated.steps} == {
         "seal-page": "查询公章借阅记录",
         "definition": "获取公章申请流程定义",
@@ -1056,8 +1085,9 @@ def test_initial_semantic_generation_names_indexed_range_inherits_context_and_re
     assert generated.meta["capability_generation"]["initial_completed"] is True
     assert generated.meta["capability_generation"]["status"] == "ready"
     initial_call_count = len(planner.requests)
-    assert 2 <= initial_call_count <= 8  # plan/repair loop is bounded
-    assert planner.requests[1][:3] == planner.requests[0]
+    assert 1 <= initial_call_count <= 2  # one Planner plus at most one targeted Repair
+    if initial_call_count == 2:
+        assert planner.requests[1][:3] == planner.requests[0]
 
     optimized = asyncio.run(run_recording_pi_loop(
         generated, llm_client=planner, model="semantic-model", mode="plan",
@@ -1108,6 +1138,41 @@ def test_small_manual_change_runs_one_incremental_planner_then_reuses_result():
     assert len(delta_planner.requests) == 1
     assert reused.meta["capability_generation"]["application_cache_hit"] is True
     assert reused.meta["capability_generation"]["model_calls"] == 0
+
+
+def test_partial_first_planner_response_is_completed_without_second_full_call():
+    class SparsePlanner:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete_json_messages(self, **_kwargs):
+            self.calls += 1
+            return {
+                "semantic_plan": {
+                    "business_understanding": {"business_name": "请假申请"},
+                },
+                "ops": [],
+            }
+
+    planner = SparsePlanner()
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/oa/leave/submit",
+        body_source='{"reason":"事假"}', response_json={"code": 0, "data": True},
+        params=[ParamField(
+            path="reason", key="请假原因", value="事假", required=True,
+            category="user_param", source_kind="user_input", exposed_to_user=True,
+        )],
+        success_rule={"path": "code", "equals": 0},
+    )])
+
+    generated = asyncio.run(run_recording_pi_loop(
+        spec, llm_client=planner, model="semantic-model", mode="plan",
+    ))
+
+    assert planner.calls == 1
+    assert generated.meta["capability_generation"]["model_calls"] == 1
+    assert generated.meta["capability_generation"]["initial_completed"] is True
+    assert generated.meta["capability_model"]["semantic_coverage"]["complete"] is True
 
 
 def test_indexed_range_semantics_are_grounded_even_when_model_is_unavailable():
