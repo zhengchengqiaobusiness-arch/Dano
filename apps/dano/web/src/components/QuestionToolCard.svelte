@@ -533,7 +533,7 @@
             {/if}
 
             {#if item.kind === "single"}
-              <fieldset disabled={!pending || submitting}>
+              <fieldset class="single-options" disabled={!pending || submitting}>
                 <legend class="sr-only">{item.question}</legend>
                 {#each itemOptions(item) as option}
                   <label class="question-option">
@@ -774,6 +774,12 @@
   form { display: flex; flex-direction: column; gap: 12px; }
   fieldset { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; }
 
+  .single-options {
+    display: flex;
+    flex-wrap: wrap;
+    column-gap: 24px;
+  }
+
   .question-group {
     display: grid;
     gap: 10px;
@@ -790,19 +796,57 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 10px 12px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: var(--bg);
+    color: var(--text);
     cursor: pointer;
+    transition: color 0.12s ease;
   }
 
+  .question-option:hover,
   .question-option:has(input:checked) {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+    color: var(--accent);
   }
 
   .question-option input { accent-color: var(--accent); }
+
+  .question-option input[type="checkbox"] {
+    appearance: none;
+    -webkit-appearance: none;
+    flex: 0 0 auto;
+    display: grid;
+    place-content: center;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 3px;
+    background: transparent;
+    transition:
+      border-color 0.12s ease,
+      background-color 0.12s ease;
+  }
+
+  .question-option input[type="checkbox"]::before {
+    content: "";
+    width: 8px;
+    height: 4px;
+    border-bottom: 2px solid var(--bg);
+    border-left: 2px solid var(--bg);
+    opacity: 0;
+    transform: translateY(-1px) rotate(-45deg) scale(0.75);
+    transition:
+      opacity 0.12s ease,
+      transform 0.12s ease;
+  }
+
+  .question-option input[type="checkbox"]:checked {
+    border-color: var(--accent);
+    background: var(--accent);
+  }
+
+  .question-option input[type="checkbox"]:checked::before {
+    opacity: 1;
+    transform: translateY(-1px) rotate(-45deg) scale(1);
+  }
 
   .question-option input[type="radio"] {
     appearance: none;

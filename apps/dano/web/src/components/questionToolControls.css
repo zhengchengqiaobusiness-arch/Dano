@@ -37,10 +37,13 @@ select.question-input {
 }
 
 .question-input:focus-visible,
-.question-button:focus-visible,
-.question-option:focus-within {
+.question-button:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
+}
+
+.question-option:has(input:focus-visible) {
+  color: var(--accent);
 }
 
 .question-input:disabled,

@@ -2355,14 +2355,14 @@
 
   @media (max-width: 900px) {
     .chat-transcript {
-      padding: 42px 16px 8px;
+      padding: 42px 16px 48px;
       gap: 6px;
     }
   }
 
   @media (max-width: 640px) {
     .chat-transcript {
-      padding: 42px 12px 8px;
+      padding: 42px 12px 48px;
     }
 
     .message-content.user {
