@@ -1140,6 +1140,49 @@ def test_small_manual_change_runs_one_incremental_planner_then_reuses_result():
     assert reused.meta["capability_generation"]["model_calls"] == 0
 
 
+def test_force_replan_reopens_a_wrong_first_capability_boundary():
+    query = FlowStep(
+        step_id="query",
+        method="GET",
+        path="/work-hours/list",
+        source_meta={"role": "business_get", "confidence": 0.99},
+        response_json={"data": {"list": [{"project": "A"}], "total": 1}},
+    )
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/work-hours/submit",
+        params=[ParamField(
+            path="content", key="工作内容", value="实现功能", required=True,
+            category="user_param", source_kind="user_input", exposed_to_user=True,
+        )],
+    )
+    wrong = FlowCapability(
+        name="submit_all",
+        title="错误地合并查询和提交",
+        kind="submit",
+        step_ids=["query", "submit"],
+        confirmed=True,
+    )
+    spec = FlowSpec(
+        steps=[query, submit],
+        capabilities=[wrong],
+        meta={
+            "capability_generation": {
+                "protocol": "dano.capability-generation.v2",
+                "initial_completed": True,
+                "fact_hash": "old",
+            },
+        },
+    )
+
+    replanned = asyncio.run(run_recording_pi_loop(spec, mode="plan", force_replan=True))
+
+    assert {cap.kind for cap in replanned.capabilities} == {"query_status", "submit"}
+    assert all(cap.name != "submit_all" for cap in replanned.capabilities)
+    assert replanned.meta["capability_generation"]["last_mode"] == "replan"
+
+
 def test_partial_first_planner_response_is_completed_without_second_full_call():
     class SparsePlanner:
         def __init__(self):

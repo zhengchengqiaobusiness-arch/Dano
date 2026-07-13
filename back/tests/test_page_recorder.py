@@ -5,12 +5,50 @@
 """
 from __future__ import annotations
 
+import json
 import pytest
 
 pytest.importorskip("playwright")
 
 from dano.execution.page.driver import PlaywrightPageDriver
 from dano.execution.page.recorder import RecordSession, _RECORDER_JS
+
+
+def test_observer_correlates_action_dom_effect_and_request_without_copying_values() -> None:
+    sess = RecordSession()
+    sess._on_record(None, json.dumps({
+        "op": "submit",
+        "action_id": "action_7",
+        "locator": "role=button[name=提交]",
+        "field": "",
+        "value": "must-not-enter-page-events",
+        "observed_at": 1000,
+    }))
+    sess._on_record(None, json.dumps({
+        "op": "dom_effect",
+        "action_id": "action_7",
+        "observed_at": 1100,
+        "changes": [{"type": "childList", "added": 1, "removed": 0}],
+    }))
+    sess._record_all("POST", "https://example.test/api/submit", pd='{"secret":"x"}')
+
+    events = sess.recorded_page_events()
+    assert [event["kind"] for event in events] == ["action", "dom_effect"]
+    assert events[0]["has_value"] is True
+    assert "must-not-enter-page-events" not in json.dumps(events, ensure_ascii=False)
+    request = sess.captured_all_requests()[0]
+    assert request["trigger_action_id"] == "action_7"
+    assert request["trigger_event_id"] == "event_1"
+    assert request["causality_confidence"] == "high"
+
+
+def test_reset_clears_observer_causality_state() -> None:
+    sess = RecordSession()
+    sess._on_record(None, json.dumps({"op": "click", "locator": "text=查询"}))
+    sess.reset()
+    sess._record_all("GET", "https://example.test/api/query")
+    assert sess.recorded_page_events() == []
+    assert "trigger_action_id" not in sess.captured_all_requests()[0]
 
 
 def test_recorder_key_safety_policy() -> None:
@@ -160,6 +198,8 @@ async def test_password_never_recorded_and_reset(tmp_path) -> None:  # noqa: ANN
         assert any((s.get("field") or "") == "账号" for s in steps)
         assert not any("password" in (s["locator"] or "") or (s.get("field") or "") == "password" for s in steps)
         assert "secret123" not in str(samples)
+        snapshot_fields = await sess.page.evaluate("window.__danoFormFieldEvidence()")
+        assert "secret123" not in str(snapshot_fields)
         # reset 清空(登录后只录业务)
         sess.reset()
         assert sess.recorded_steps()[0] == []

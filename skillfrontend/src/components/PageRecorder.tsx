@@ -211,6 +211,19 @@ interface FlowCheckReport {
     audience?: "operator" | "internal"; actionable?: boolean; blocking?: boolean; auto_fixable?: boolean;
   }>>;
 }
+interface FlowOperationReport {
+  operation?: "plan" | "repair" | "replan";
+  changed?: boolean;
+  changes?: Record<string, number>;
+  summary?: string;
+  cache_hit?: boolean;
+  model_calls?: number;
+  model_errors?: string[];
+  errors_before?: number;
+  errors_after?: number;
+  warnings_before?: number;
+  warnings_after?: number;
+}
 interface RecResult {
   ok?: boolean; action?: string; risk_level?: string; mode?: string; reason?: string;
   status?: string; warnings?: string[]; review_notes?: string[]; clarifications?: string[];
@@ -390,6 +403,10 @@ function mergeUrlQuery(url: string | undefined, lines: string) {
 }
 function stripBodyPrefix(path: string) {
   return path?.startsWith("body.") ? path.slice(5) : path;
+}
+
+function domAnchorPart(value: unknown) {
+  return String(value ?? "").replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "item";
 }
 function popupContainer(node?: HTMLElement) {
   return document.body;
@@ -1133,10 +1150,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [lastServerJson, setLastServerJson] = useState("");
   const [namingBusy, setNamingBusy] = useState(false);
   const [descBusy, setDescBusy] = useState(false);
-  const [llmBusy, setLlmBusy] = useState(false);
   const [orchestrateBusy, setOrchestrateBusy] = useState(false);
   const [autoFixBusy, setAutoFixBusy] = useState(false);
-  const flowOperationRef = useRef<{ mode: "plan" | "repair"; previousUpdatedAt?: string } | null>(null);
+  const [lastOperationReport, setLastOperationReport] = useState<FlowOperationReport | null>(null);
+  const [expandedCapabilityKeys, setExpandedCapabilityKeys] = useState<string[]>([]);
+  const [expandedCapabilitySections, setExpandedCapabilitySections] = useState<Record<number, string[]>>({});
+  const [expandedCapabilitySteps, setExpandedCapabilitySteps] = useState<Record<number, string[]>>({});
+  const [expandedRequestPanels, setExpandedRequestPanels] = useState<string[]>([]);
+  const flowOperationRef = useRef<{ mode: "plan" | "repair" | "replan"; previousUpdatedAt?: string } | null>(null);
   const flowOperationTimerRef = useRef<number | null>(null);
   const flowMutationQueueRef = useRef<any[]>([]);
   const flowMutationInFlightRef = useRef<any | null>(null);
@@ -1466,7 +1487,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         message.success("抓到提交请求，请核对字段和流程");
       }
       else if (m.type === "flow_spec" || m.type === "flow_spec_updated") {
-        setLlmBusy(false);
         // 发布请求可能与最后一次字段更新响应交错到达。普通更新不能把发布中的
         // loading/状态提前重置，否则用户看到按钮闪退但后端仍在发布。
         if (phaseRef.current !== "publishing") setPhase("recording");
@@ -1477,6 +1497,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           finishFlowOperation(fs.meta?.recording_pi_loop, m.operation);
         }
         if (m.check_report) setCheckReport(m.check_report);
+        if (m.operation_report) {
+          const report = m.operation_report as FlowOperationReport;
+          setLastOperationReport(report);
+          if (report.changed) message.success(report.summary || "流程编排已更新");
+          else if (report.model_errors?.length) message.error(report.summary || "模型修复失败");
+          else message.info(report.summary || "检查完成，没有可自动修改的内容");
+        }
         if (m.operation === "flow_update" || m.operation === "flow_replace") finishQueuedFlowMutation(m.operation_id);
       }
       else if (m.type === "step_names") {
@@ -1509,7 +1536,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
       else if (m.type === "error") {
         const detail = m.detail || "录制出错";
-        setNamingBusy(false); setDescBusy(false); setLlmBusy(false); clearFlowOperation();
+        setNamingBusy(false); setDescBusy(false); clearFlowOperation();
         if (m.full_spec) {
           acceptFlowSpec(m.full_spec);
           setLastServerJson(JSON.stringify(m.full_spec));
@@ -2004,8 +2031,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function refreshLlmRecommendations() {
     if (!flowSpec) return;
-    setLlmBusy(true);
-    send({ type: "llm_recommendations" });
+    autoFixFlow();
   }
   function requiresManualSourceBinding(item: ReviewItemData) {
     return item.suggested_action === "bind_runtime_source" && /\/unknown$/.test(item.current_guess || "");
@@ -2152,6 +2178,34 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     armFlowOperationWatchdog("能力生成");
     if (!send({ type: "orchestrate_flow", flow_spec: currentSpec })) clearFlowOperation();
   }
+  function performReplanFlow() {
+    if (!flowSpecRef.current || flowOperationRef.current) return;
+    const currentSpec = flowSpecRef.current;
+    flowOperationRef.current = {
+      mode: "replan",
+      previousUpdatedAt: currentSpec.meta?.recording_pi_loop?.updated_at,
+    };
+    setOrchestrateBusy(true);
+    setAutoFixBusy(true);
+    armFlowOperationWatchdog("能力边界重新分析");
+    if (!send({ type: "orchestrate_flow", flow_spec: currentSpec, force_replan: true })) clearFlowOperation();
+  }
+  function replanFlow() {
+    if (!flowSpecRef.current || flowOperationRef.current) return;
+    Modal.confirm({
+      title: "重新分析能力边界？",
+      content: "将保留底层捕获接口、字段和依赖，清空当前能力层后重新拆分。适用于第一次能力拆分错误的情况。",
+      okText: "重新分析",
+      cancelText: "取消",
+      onOk: () => {
+        if (flowMutationInFlightRef.current || flowMutationQueueRef.current.length) {
+          runAfterFlowSync(performReplanFlow);
+          return;
+        }
+        performReplanFlow();
+      },
+    });
+  }
   function autoFixFlow() {
     if (!flowSpecRef.current || flowOperationRef.current) return;
     if (flowMutationInFlightRef.current || flowMutationQueueRef.current.length) {
@@ -2282,6 +2336,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function capabilityRef(cap: FlowCapabilityData, idx: number) {
     return cap.name || cap.capability_id || `idx:${idx}`;
+  }
+  function capabilityPanelKey(cap: FlowCapabilityData, idx: number) {
+    return `${cap.name || idx}-${idx}`;
   }
   function moveCapability(idx: number, delta: number) {
     const current = flowSpecRef.current;
@@ -2419,11 +2476,49 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const sid = target.target_step_id || target.step_id || target.source_step_id;
     const capRef = target.capability_name || target.capability_id || target.capability
       || (flowSpec?.capabilities || []).find((cap) => capabilityActualStepIds(cap).includes(sid || ""))?.name;
-    setActiveFlowTab(target.kind === "request_role" ? "requests" : "abilities");
-    requestAnimationFrame(() => {
-      const id = capRef ? `capability-${String(capRef).replace(/[^a-zA-Z0-9_-]+/g, "-")}` : "";
-      document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "center" });
-    });
+    const capabilities = flowSpec?.capabilities || [];
+    const capIdx = capabilities.findIndex((cap) =>
+      [cap.name, cap.capability_id].filter(Boolean).includes(capRef)
+      || capabilityActualStepIds(cap).includes(sid || ""));
+    const isRequest = target.kind === "request_role";
+    setActiveFlowTab(isRequest ? "requests" : "abilities");
+    let anchor = "";
+    if (isRequest) {
+      setExpandedRequestPanels(["captured"]);
+      anchor = `request-${domAnchorPart(target.request_index ?? target.index ?? target.request_id ?? target.path ?? sid)}`;
+    } else if (capIdx >= 0) {
+      const cap = capabilities[capIdx];
+      const panelKey = capabilityPanelKey(cap, capIdx);
+      setExpandedCapabilityKeys((keys) => Array.from(new Set([...keys, panelKey])));
+      const section = target.kind === "link" ? "deps" : target.kind === "capability" || target.kind === "capability_node" ? "io" : "interfaces";
+      setExpandedCapabilitySections((current) => ({
+        ...current,
+        [capIdx]: Array.from(new Set([...(current[capIdx] || ["interfaces"]), section])),
+      }));
+      if (sid) {
+        setExpandedCapabilitySteps((current) => ({
+          ...current,
+          [capIdx]: Array.from(new Set([...(current[capIdx] || []), sid])),
+        }));
+      }
+      if (target.link_id) anchor = `link-${domAnchorPart(target.link_id)}`;
+      else if (sid && (target.target_path || target.path)) anchor = `field-${domAnchorPart(sid)}-${domAnchorPart(stripBodyPrefix(target.target_path || target.path))}`;
+      else if (sid) anchor = `step-${domAnchorPart(sid)}`;
+      else anchor = `capability-${domAnchorPart(cap.name || cap.capability_id || capIdx)}`;
+    }
+    if (!anchor && capRef) anchor = `capability-${domAnchorPart(capRef)}`;
+    window.setTimeout(() => {
+      const element = document.getElementById(anchor);
+      if (!element) {
+        message.warning("已切换到对应工作区，但错误项缺少可定位的结构化目标");
+        return;
+      }
+      element.scrollIntoView({ behavior: "smooth", block: "center" });
+      element.animate(
+        [{ backgroundColor: "#fff1b8" }, { backgroundColor: "#fffbe6" }, { backgroundColor: "transparent" }],
+        { duration: 2200, easing: "ease-out" },
+      );
+    }, 180);
   }
   function renderPublishIssue(item: ReviewItemData) {
     const tgt = item.target || {};
@@ -2752,7 +2847,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function renderRequestsPanel() {
     const capturedTotal = allCapturedRequests(flowSpec).length;
     return (
-      <Collapse defaultActiveKey={[]} bordered={false}>
+      <Collapse
+        activeKey={expandedRequestPanels}
+        onChange={(keys) => setExpandedRequestPanels((Array.isArray(keys) ? keys : [keys]).map(String))}
+        bordered={false}
+      >
         <Collapse.Panel header={`捕获接口 ${capturedTotal}`} key="captured">
           {renderCapturedRequestsPanel()}
         </Collapse.Panel>
@@ -2773,6 +2872,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           const fieldCandidate = !capabilityNames.length && isCapturedRequestFieldCandidate(flowSpec, req);
           return (
             <List.Item
+              id={`request-${domAnchorPart(req.request_index ?? req.request_id ?? req.path ?? idx)}`}
               style={{ paddingLeft: 0, paddingRight: 0 }}
               actions={[
                 <Button key="goto" size="small" onClick={() => setActiveFlowTab("abilities")}>去能力处理</Button>,
@@ -2861,7 +2961,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       ...sourcePathOptions(currentBind.source_step_id),
     ];
     return (
-      <List.Item key={paramDraftKey(step.step_id, p)} style={{ padding: "12px 0" }}>
+      <List.Item
+        key={paramDraftKey(step.step_id, p)}
+        id={`field-${domAnchorPart(step.step_id)}-${domAnchorPart(p.path)}`}
+        style={{ padding: "12px 0" }}
+      >
         <div style={{ width: "100%", border: "1px solid #f0f0f0", borderRadius: 6, padding: 12, background: "#fff" }}>
           <Row gutter={[12, 8]} align="top">
             <Col flex="auto">
@@ -3177,7 +3281,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       <Collapse.Panel
         key={stepId}
         header={
-          <Space wrap>
+          <Space wrap id={`step-${domAnchorPart(stepId)}`}>
             <Tag color="purple">接口 {stepIdx + 1}</Tag>
             <Tag color={(st.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{st.method}</Tag>
             <Typography.Text strong>{st.name || fallbackStepName(st.method, st.path)}</Typography.Text>
@@ -3237,7 +3341,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         {!stepIds.length ? (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未绑定接口" />
         ) : (
-          <Collapse size="small">
+          <Collapse
+            size="small"
+            activeKey={expandedCapabilitySteps[capIdx] || []}
+            onChange={(keys) => setExpandedCapabilitySteps((current) => ({
+              ...current,
+              [capIdx]: (Array.isArray(keys) ? keys : [keys]).map(String),
+            }))}
+          >
             {stepIds.map((stepId, stepIdx) => renderCapabilityStepWithFields(cap, capIdx, stepId, stepIdx))}
           </Collapse>
         )}
@@ -3305,6 +3416,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               const targetStep = stepById[link.target_step_id];
               return (
                 <List.Item
+                  id={`link-${domAnchorPart(link.link_id)}`}
                   actions={[
                     <Checkbox key="cf" checked={!!link.confirmed}
                       onChange={(e) => send({ type: "flow_update", edits: [{ op: "update", link_id: link.link_id, field: "confirmed", value: e.target.checked }] })}>已确认</Checkbox>,
@@ -3394,6 +3506,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <Tooltip title="基于当前能力、接口和人工修改继续规划，并同步修正字段绑定、枚举来源、依赖和接口闭包">
             <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy || autoFixBusy} onClick={orchestrateFlow}>生成/优化能力</Button>
           </Tooltip>
+          <Tooltip title="清空能力层并基于已捕获接口重新拆分；保留底层字段、接口和依赖事实">
+            <Button icon={<BranchesOutlined />} loading={orchestrateBusy || autoFixBusy} onClick={replanFlow}>重新分析能力边界</Button>
+          </Tooltip>
           <Button icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
           <Button icon={<RobotOutlined />} loading={namingBusy} onClick={() => { setNamingBusy(true); send({ type: "step_naming" }); }}>命名步骤</Button>
           {flowSpec.meta?.capability_generation && <>
@@ -3412,8 +3527,29 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <Tag color="cyan">识别区间字段 {flowSpec.meta.capability_generation.indexed_range_changes.length}</Tag>}
           </>}
         </Space>
+        {lastOperationReport && (
+          <Alert
+            type={lastOperationReport.changed ? "success" : lastOperationReport.model_errors?.length ? "error" : "info"}
+            showIcon
+            message={lastOperationReport.summary || "编排操作完成"}
+            description={
+              <Space wrap size={4}>
+                {lastOperationReport.cache_hit && <Tag color="green">结果复用</Tag>}
+                <Tag>模型调用 {lastOperationReport.model_calls || 0}</Tag>
+                <Tag color={(lastOperationReport.errors_after || 0) > 0 ? "error" : "success"}>
+                  错误 {lastOperationReport.errors_before || 0} → {lastOperationReport.errors_after || 0}
+                </Tag>
+                <Tag>警告 {lastOperationReport.warnings_before || 0} → {lastOperationReport.warnings_after || 0}</Tag>
+              </Space>
+            }
+          />
+        )}
         {!capabilities.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有能力编排" /> : (
-          <Collapse size="small">
+          <Collapse
+            size="small"
+            activeKey={expandedCapabilityKeys}
+            onChange={(keys) => setExpandedCapabilityKeys((Array.isArray(keys) ? keys : [keys]).map(String))}
+          >
             {capabilities.map((cap, idx) => {
               const stepIds = capabilityActualStepIds(cap);
               const capSteps = stepIds.map((sid) => stepById[sid]).filter(Boolean);
@@ -3427,13 +3563,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   .filter(paramRequiredFromCaller)
                   .map((p) => p.key || p.path),
               };
+              const inputSchema = Object.keys(cap.input_schema?.properties || {}).length
+                ? cap.input_schema
+                : derivedInputSchema;
               const lastResponse = [...capSteps].reverse().find((st) => st.response_json != null)?.response_json;
               const derivedOutputSchema = lastResponse != null ? inferJsonSchema(lastResponse) : (cap.output_schema || {});
               return (
                 <Collapse.Panel
-                  key={`${cap.name || idx}-${idx}`}
+                  key={capabilityPanelKey(cap, idx)}
                   header={
-                    <Space wrap id={`capability-${String(cap.name || cap.capability_id || idx).replace(/[^a-zA-Z0-9_-]+/g, "-")}`}>
+                    <Space wrap id={`capability-${domAnchorPart(cap.name || cap.capability_id || idx)}`}>
                       <Tag color={cap.confirmed ? "success" : "warning"}>{cap.confirmed ? "已确认" : "未确认"}</Tag>
                       <Tag color="blue">{optionLabel(kindOptions, cap.kind || "submit")}</Tag>
                       <Tag color={confidenceColor(cap.confidence)}>置信度 {confidencePercent(cap.confidence)}</Tag>
@@ -3465,7 +3604,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     <FieldControl label="说明">
                       <EditableTextArea rows={3} value={cap.intent || ""} onSave={(v) => updateCapabilityField(idx, "intent", v)} />
                     </FieldControl>
-                    <Collapse ghost size="small" defaultActiveKey={["interfaces"]}>
+                    <Collapse
+                      ghost
+                      size="small"
+                      activeKey={expandedCapabilitySections[idx] || ["interfaces"]}
+                      onChange={(keys) => setExpandedCapabilitySections((current) => ({
+                        ...current,
+                        [idx]: (Array.isArray(keys) ? keys : [keys]).map(String),
+                      }))}
+                    >
                       <Collapse.Panel
                         key="interfaces"
                         header={`接口与字段 ${stepIds.length} 接口 / ${capParams.length} 字段`}
@@ -3476,7 +3623,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                         {renderCapabilityDependencyEditor(cap)}
                       </Collapse.Panel>
                       <Collapse.Panel key="io" header="调用参数 / 返回结果">
-                        {renderCapabilityIOBusinessView(idx, derivedInputSchema, derivedOutputSchema)}
+                        {renderCapabilityIOBusinessView(idx, inputSchema, derivedOutputSchema)}
                       </Collapse.Panel>
                     </Collapse>
                   </Space>
@@ -3688,7 +3835,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             </Col>
             <Col>
               <Space wrap>
-                <Button icon={<RobotOutlined />} loading={llmBusy} onClick={refreshLlmRecommendations}>刷新智能推荐</Button>
+                <Button icon={<RobotOutlined />} loading={autoFixBusy} onClick={refreshLlmRecommendations}>自动修复建议</Button>
                 <Button type="primary" onClick={() => bulkReview("accept")}>全部采纳</Button>
                 <Button onClick={() => bulkReview("ignore")}>全部忽略</Button>
               </Space>
@@ -3701,8 +3848,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           renderItem={(item) => {
             const manualBind = requiresManualSourceBinding(item);
             return (
-              <List.Item
-                actions={[
+                <List.Item
+                  id={`link-${domAnchorPart(link.link_id)}`}
+                  actions={[
                   manualBind
                     ? <Button key="bind" size="small" type="primary" onClick={() => setActiveFlowTab("abilities")}>去能力卡片绑定</Button>
                     : <Button key="apply" size="small" type="primary" onClick={() => applyReviewSuggestion(item)}>采纳</Button>,

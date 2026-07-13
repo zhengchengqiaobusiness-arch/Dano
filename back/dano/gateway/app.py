@@ -618,6 +618,7 @@ async def record_ws(ws: WebSocket) -> None:
         pending_storage: dict | None = None    # 登录态(认 identity 字段)
         pending_required: set = set()          # 录制时表单 * 必填的字段标签
         pending_page_enum_options: dict = {}         # 录制时下拉里真实可见的选项 {选中显示值: [选项文字]}(枚举地面真值)
+        pending_page_events: list[dict] = []          # 动作→DOM 变化→请求的脱敏 Observer 时间线
         applied_flow_operations: dict[str, dict] = {}  # flow_update 幂等回执(operation_id → response)
         recording_mode = "intercepted_submit" if init.get("intercept", True) else "real_submit"
 
@@ -740,6 +741,7 @@ async def record_ws(ws: WebSocket) -> None:
                 pending_storage = login_state               # identity 字段识别
                 pending_required = required_labels          # 表单 * 必填
                 pending_page_enum_options = page_enum_options           # 下拉枚举地面真值
+                pending_page_events = sess.recorded_page_events()
                 log.info("record.finalize", captured=len(all_caps), cands=len(cands), steps=len(steps),
                          captured_urls=[((c.get("method") or ""), (c.get("url") or "")[:140]) for c in all_caps][:25])
                 if not cands and not all_caps:
@@ -772,6 +774,7 @@ async def record_ws(ws: WebSocket) -> None:
                             page_context=observed_page_context,
                             recording_mode=recording_mode,
                             diagnostics=sess.captured_diagnostics(),
+                            page_events=pending_page_events,
                             tenant=init.get("tenant", ""),
                             subsystem=init.get("subsystem", ""),
                         )
@@ -828,6 +831,7 @@ async def record_ws(ws: WebSocket) -> None:
                         page_context=observed_page_context,
                         recording_mode=recording_mode,
                         diagnostics=sess.captured_diagnostics(),
+                        page_events=pending_page_events,
                         tenant=init.get("tenant", ""),
                         subsystem=init.get("subsystem", ""),
                     )
@@ -878,6 +882,7 @@ async def record_ws(ws: WebSocket) -> None:
                             page_context=observed_page_context,
                             recording_mode=recording_mode,
                             diagnostics=sess.captured_diagnostics(),
+                            page_events=pending_page_events,
                             tenant=init.get("tenant", ""),
                             subsystem=init.get("subsystem", ""),
                         )
@@ -1015,6 +1020,7 @@ async def record_ws(ws: WebSocket) -> None:
                         FlowSpec,
                         flow_spec_to_client,
                         flow_spec_to_summary,
+                        flow_operation_report,
                         refresh_review_items,
                         run_recording_pi_loop,
                         validate_flow_spec,
@@ -1023,18 +1029,25 @@ async def record_ws(ws: WebSocket) -> None:
                     if isinstance(raw_spec, dict):
                         raw_spec = _restore_hidden_flow_spec_fields(raw_spec)
                         pending_flow_spec = refresh_review_items(FlowSpec.model_validate(raw_spec))
+                    before_operation = pending_flow_spec.model_copy(deep=True)
+                    force_replan = bool(msg.get("force_replan"))
                     pending_flow_spec = await run_recording_pi_loop(
                         pending_flow_spec,
                         llm_client=_page_semantic_client("complete_json"),
                         model=get_settings().pi_model,
                         mode="plan",
+                        force_replan=force_replan,
                     )
+                    operation = "replan" if force_replan else "plan"
                     await ws.send_json({
                         "type": "flow_spec_updated",
-                        "operation": "plan",
+                        "operation": operation,
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
                         "full_spec": flow_spec_to_client(pending_flow_spec),
                         "check_report": validate_flow_spec(pending_flow_spec),
+                        "operation_report": flow_operation_report(
+                            before_operation, pending_flow_spec, operation=operation,
+                        ),
                     })
                 except Exception as e:  # noqa: BLE001
                     await ws.send_json({"type": "error", "detail": f"orchestrate_flow failed: {e}"})
@@ -1048,9 +1061,11 @@ async def record_ws(ws: WebSocket) -> None:
                     from dano.execution.page.flow_spec import (
                         flow_spec_to_client,
                         flow_spec_to_summary,
+                        flow_operation_report,
                         run_recording_pi_loop,
                         validate_flow_spec,
                     )
+                    before_operation = pending_flow_spec.model_copy(deep=True)
                     pending_flow_spec = await run_recording_pi_loop(
                         pending_flow_spec,
                         llm_client=_page_semantic_client("complete_json"),
@@ -1063,6 +1078,9 @@ async def record_ws(ws: WebSocket) -> None:
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
                         "full_spec": flow_spec_to_client(pending_flow_spec),
                         "check_report": validate_flow_spec(pending_flow_spec),
+                        "operation_report": flow_operation_report(
+                            before_operation, pending_flow_spec, operation="repair",
+                        ),
                     })
                 except Exception as e:  # noqa: BLE001
                     await ws.send_json({"type": "error", "detail": f"auto_fix_flow failed: {e}"})

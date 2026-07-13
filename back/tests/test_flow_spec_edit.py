@@ -20,6 +20,7 @@ from dano.execution.page.flow_spec import (
     migrate_v2_flow_spec_to_capability_spec, capability_spec_to_legacy_flow_spec,
     capability_spec_to_api_request, to_flow_spec,
     build_default_flow_capabilities, prepare_flow_spec_for_publish, prepare_flow_release_candidate,
+    flow_operation_report,
 )
 from dano.execution.page.request_capture import execute_api_request
 from dano.execution.page.repair_ops import collect_capability_findings
@@ -954,6 +955,107 @@ def test_capability_validator_checks_condition_and_map_refs():
     assert "来源 `input.unknown` 不存在" not in text
 
 
+def test_batch_map_top_level_input_is_rewritten_to_loop_item():
+    """批量 Schema 只公开 entries 时，旧 Planner 的 input.<字段> 必须迁移为 item.<字段>。"""
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            path="/api/work-hours/batch",
+            source_meta={"batch": True},
+            params=[ParamField(
+                path="[0].projectId", key="项目ID", value="P-1", required=True,
+                category="user_param", source_kind="user_input", exposed_to_user=True,
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            kind="submit_batch",
+            step_ids=["submit"],
+            nodes=[
+                {"id": "foreach_entries", "type": "foreach", "items": "input.entries", "steps": [
+                    {"id": "call_submit", "type": "call", "step_id": "submit"},
+                ]},
+                {"id": "map_project", "type": "map", "source": "input.项目ID", "target": "submit.[0].projectId"},
+            ],
+        )],
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+    maps = [node for node in prepared.capabilities[0].nodes if node.get("type") == "map"]
+
+    assert maps[0]["source"] == "item.项目ID"
+    assert not any("map 节点 `map_project` 来源" in error for error in validate_flow_spec(prepared)["errors"])
+
+
+def test_duplicate_caller_field_names_are_disambiguated_without_splitting_shared_inputs():
+    first = FlowStep(
+        step_id="lookup",
+        method="GET",
+        path="/api/project",
+        params=[ParamField(path="query.projectId", key="项目ID", value="P-1", category="user_param", source_kind="user_input")],
+    )
+    second = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/submit",
+        params=[
+            ParamField(path="body.projectId", key="项目ID", value="P-1", category="user_param", source_kind="user_input"),
+            ParamField(path="body.parentProjectId", key="项目ID", value="P-2", category="user_param", source_kind="user_input"),
+        ],
+    )
+    spec = FlowSpec(
+        steps=[first, second],
+        capabilities=[FlowCapability(name="submit_project", kind="submit", step_ids=["lookup", "submit"])],
+    )
+
+    normalized = flow_spec_module._sync_capability_io_schemas(spec)
+    keys = [param.key for step in normalized.steps for param in step.params]
+    assert keys.count("项目ID") == 2  # 同一 projectId 跨接口共享调用参数
+    assert "项目ID#2" in keys
+    renamed = normalized.steps[1].params[1]
+    assert renamed.source["original_key"] == "项目ID"
+    assert normalized.steps[1].sample_inputs["项目ID#2"] == "P-2"
+    assert set(normalized.capabilities[0].input_schema["properties"]) == {"项目ID", "项目ID#2"}
+
+
+def test_flow_operation_report_explains_noop_and_changes():
+    before = _make_spec()
+    unchanged = before.model_copy(deep=True)
+    internal_only = before.model_copy(deep=True)
+    internal_only.request_facts.diagnostics.append({"type": "console", "message": "derived audit"})
+    changed = before.model_copy(deep=True)
+    changed.steps[0].params[0].key = "申请人ID"
+
+    noop = flow_operation_report(before, unchanged, operation="plan")
+    internal = flow_operation_report(before, internal_only, operation="plan")
+    delta = flow_operation_report(before, changed, operation="plan")
+
+    assert noop["changed"] is False
+    assert noop["summary"]
+    assert internal["changed"] is False
+    assert delta["changed"] is True
+    assert delta["changes"]["fields"] == 1
+
+
+class _BrokenFixClient:
+    async def complete_json(self, **_kwargs):
+        raise RuntimeError("model unavailable")
+
+
+def test_auto_fix_records_model_failure_instead_of_silently_swallowing():
+    spec = FlowSpec(
+        flow_id="f",
+        steps=[FlowStep(step_id="submit", method="POST", path="/api/submit")],
+        capabilities=[FlowCapability(name="submit", kind="submit", step_ids=["submit"])],
+    )
+
+    fixed = asyncio.run(auto_fix_flow_spec(spec, llm_client=_BrokenFixClient(), model="fake", max_rounds=1))
+
+    assert fixed.meta["auto_fix_history"][0]["model_error"] == "model unavailable"
+
+
 class _FakeFixClient:
     async def complete_json(self, **_kwargs):
         return {"ops": [
@@ -1307,11 +1409,16 @@ def test_to_flow_spec_request_facts_filter_static_assets_and_keep_page_enums():
             "post_data": '{"type":"2","reason":"test"}',
             "response_status": 200,
             "response_json": {"code": 0},
+            "trigger_action_id": "action_3",
+            "trigger_event_id": "event_3",
+            "action_delta_ms": 42,
+            "causality_confidence": "high",
         },
     ]
     page_enums = {"type": {"options": [{"label": "病假", "value": "2"}], "option_map": {"病假": "2"}}}
+    page_events = [{"event_id": "event_3", "kind": "action", "action_id": "action_3", "op": "submit"}]
 
-    spec = to_flow_spec(captured, page_enum_options=page_enums)
+    spec = to_flow_spec(captured, page_enum_options=page_enums, page_events=page_events)
 
     ids = {fact.request_id for fact in spec.request_facts.requests}
     assert "post-1" in ids
@@ -1319,6 +1426,55 @@ def test_to_flow_spec_request_facts_filter_static_assets_and_keep_page_enums():
     assert "js-1" not in ids
     assert spec.request_facts.option_sources
     assert spec.request_facts.option_sources[0]["options"] == page_enums
+    assert spec.request_facts.page_events == page_events
+    post_fact = next(fact for fact in spec.request_facts.requests if fact.request_id == "post-1")
+    assert post_fact.trigger_action_id == "action_3"
+    assert spec.meta["request_graph"]["all_requests"][-1]["trigger_action_id"] == "action_3"
+
+
+def test_observer_anchor_is_required_for_auto_confirming_discovered_links():
+    captured = [
+        {
+            "index": 1,
+            "request_id": "detail",
+            "method": "GET",
+            "url": "/api/entity/detail?id=E-1",
+            "query": {"id": ["E-1"]},
+            "response_json": {"data": {"id": "ENTITY-1234"}},
+            "status": 200,
+            "trigger_action_id": "action_1",
+            "trigger_locator": "role=button[name=查询]",
+            "causality_confidence": "high",
+        },
+        {
+            "index": 2,
+            "request_id": "submit",
+            "method": "POST",
+            "url": "/api/entity/submit",
+            "headers": {"content-type": "application/json"},
+            "post_data": '{"entityId":"ENTITY-1234","reason":"ok"}',
+            "response_json": {"ok": True},
+            "status": 200,
+            "trigger_action_id": "action_2",
+            "trigger_locator": "role=button[name=提交]",
+            "causality_confidence": "high",
+        },
+    ]
+    events = [
+        {"kind": "action", "action_id": "action_1", "op": "click"},
+        {"kind": "action", "action_id": "action_2", "op": "submit"},
+    ]
+
+    anchored = to_flow_spec(captured, page_events=events)
+    assert anchored.links and anchored.links[0].confirmed is True
+    assert anchored.links[0].evidence["target_action_id"] == "action_2"
+
+    unanchored_requests = [dict(item) for item in captured]
+    for key in ("trigger_action_id", "trigger_locator", "causality_confidence"):
+        unanchored_requests[1].pop(key, None)
+    unanchored = to_flow_spec(unanchored_requests, page_events=events)
+    assert unanchored.links and unanchored.links[0].confirmed is False
+    assert "缺少操作因果锚点" in unanchored.links[0].reason
 
 
 def test_valid_locked_capability_fields_and_dependencies_survive():
@@ -1964,6 +2120,39 @@ def test_default_capabilities_keep_independent_query_and_submit_separate():
     assert "submit" in by_kind
     assert by_kind["query_status"].step_ids == ["status"]
     assert by_kind["submit"].step_ids == ["definition", "submit"]
+
+
+def test_default_capabilities_use_observed_action_boundaries_inside_one_domain():
+    query = FlowStep(
+        step_id="query",
+        name="GET_page",
+        method="GET",
+        path="/admin-api/oa/work-hours/page",
+        source_meta={
+            "role": "business_get",
+            "trigger_locator": "role=button[name=查询]",
+            "causality_confidence": "high",
+        },
+        response_json={"data": {"list": [{"id": "row-1"}], "total": 1}},
+    )
+    detail = FlowStep(
+        step_id="detail",
+        name="GET_detail",
+        method="GET",
+        path="/admin-api/oa/work-hours/detail",
+        source_meta={
+            "role": "business_get",
+            "trigger_locator": "role=button[name=查看详情]",
+            "causality_confidence": "high",
+        },
+        response_json={"data": {"id": "row-1", "status": "approved"}},
+    )
+
+    caps = build_default_flow_capabilities(FlowSpec(flow_id="action-split", steps=[query, detail]))
+
+    assert len(caps) == 2
+    assert {tuple(cap.step_ids) for cap in caps} == {("query",), ("detail",)}
+    assert all(any(item.get("kind") == "automatic_business_partition" for item in cap.evidence) for cap in caps)
 
 
 def test_sync_capability_scoped_views_prunes_noisy_submit_steps():

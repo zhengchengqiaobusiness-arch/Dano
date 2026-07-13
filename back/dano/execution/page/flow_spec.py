@@ -1459,6 +1459,12 @@ def _build_step_from_capture(
         "filter_reason": request_role.get("filter_reason", ""),
         "confidence": request_role.get("confidence"),
         "evidence": request_role.get("evidence"),
+        "trigger_action_id": req.get("trigger_action_id"),
+        "trigger_event_id": req.get("trigger_event_id"),
+        "trigger_op": req.get("trigger_op"),
+        "trigger_locator": req.get("trigger_locator"),
+        "action_delta_ms": req.get("action_delta_ms"),
+        "causality_confidence": req.get("causality_confidence"),
     }
 
     path = _path_from_url(full_url)
@@ -2082,7 +2088,15 @@ def _request_graph_entry(req: dict, role: dict, *, include_payload: bool = False
         "evidence": role.get("evidence") or {},
         "state": "captured",
         "materialized_step_id": req.get("materialized_step_id"),
+        "timestamp": req.get("timestamp") or req.get("captured_at"),
     }
+    for causal_key in (
+        "trigger_action_id", "trigger_event_id", "trigger_op", "trigger_locator",
+        "action_delta_ms", "causality_confidence",
+    ):
+        causal_value = req.get(causal_key)
+        if causal_value not in (None, ""):
+            out[causal_key] = causal_value
     if include_payload:
         out.update({
             "headers": dict(req.get("headers") or {}),
@@ -2236,6 +2250,7 @@ def _request_facts_from_graph(
     *,
     diagnostics: list[dict[str, Any]] | None = None,
     page_enum_options: dict[str, Any] | None = None,
+    page_events: list[dict[str, Any]] | None = None,
 ) -> RequestFacts:
     facts_by_id: dict[str, RequestFact] = {}
     analysis: dict[str, RequestAnalysis] = {}
@@ -2281,6 +2296,7 @@ def _request_facts_from_graph(
     return RequestFacts(
         requests=requests,
         diagnostics=list(diagnostics or []),
+        page_events=list(page_events or []),
         option_sources=_option_sources_from_page_enum_options(page_enum_options),
         analysis=analysis,
         usage=usage,
@@ -2315,7 +2331,16 @@ def _graph_entry_from_request_fact(
         "response_status": fact.response_status,
         "response_json": fact.response_json,
         "response_schema": dict(fact.response_schema or {}),
+        "timestamp": fact.timestamp,
     }
+    # RequestFact 允许携带录制期因果锚点；legacy request_graph 也必须无损保留。
+    for key in (
+        "trigger_action_id", "trigger_event_id", "trigger_op", "trigger_locator",
+        "action_delta_ms", "causality_confidence",
+    ):
+        value = (fact.model_extra or {}).get(key)
+        if value not in (None, ""):
+            out[key] = value
     return out
 
 
@@ -2373,9 +2398,14 @@ def ensure_request_facts(spec: FlowSpec, *, prefer: str = "request_facts") -> Fl
     has_graph = _request_graph_has_entries(graph)
     has_facts = bool(spec.request_facts.requests)
     old_option_sources = list(spec.request_facts.option_sources or [])
+    old_page_events = list(spec.request_facts.page_events or [])
     if prefer == "meta":
         if has_graph:
-            spec.request_facts = _request_facts_from_graph(graph, diagnostics=spec.diagnostics)
+            spec.request_facts = _request_facts_from_graph(
+                graph,
+                diagnostics=spec.diagnostics,
+                page_events=old_page_events,
+            )
             if old_option_sources and not spec.request_facts.option_sources:
                 spec.request_facts.option_sources = old_option_sources
         elif has_facts:
@@ -2387,7 +2417,11 @@ def ensure_request_facts(spec: FlowSpec, *, prefer: str = "request_facts") -> Fl
         meta["request_graph"] = _request_graph_from_request_facts(spec.request_facts)
         spec.meta = meta
     elif has_graph:
-        spec.request_facts = _request_facts_from_graph(graph, diagnostics=spec.diagnostics)
+        spec.request_facts = _request_facts_from_graph(
+            graph,
+            diagnostics=spec.diagnostics,
+            page_events=old_page_events,
+        )
         if old_option_sources and not spec.request_facts.option_sources:
             spec.request_facts.option_sources = old_option_sources
     return spec
@@ -3592,6 +3626,7 @@ def to_flow_spec(
     page_context: dict | None = None,
     recording_mode: str = "",
     diagnostics: list[dict] | None = None,
+    page_events: list[dict] | None = None,
     tenant: str = "",
     subsystem: str = "",
 ) -> FlowSpec:
@@ -3602,6 +3637,7 @@ def to_flow_spec(
     page_enum_options = page_enum_options or {}
     page_context = page_context or {}
     diagnostics = diagnostics or []
+    page_events = page_events or []
     recording_mode = recording_mode or "unknown"
 
     request_roles = []
@@ -3654,6 +3690,7 @@ def to_flow_spec(
                 request_graph,
                 diagnostics=diagnostics,
                 page_enum_options=page_enum_options,
+                page_events=page_events,
             ),
             goal=RecordedGoal(
                 intent="录制业务请求",
@@ -3672,6 +3709,7 @@ def to_flow_spec(
                 "request_graph": request_graph,
                 "recording_mode": recording_mode,
                 "diagnostics": diagnostics,
+                "page_events_count": len(page_events),
                 "page_context": page_context,
                 "note": "录制未抓到任何业务写请求或业务 GET；用户可能未点提交，或页面是纯 GET 表单",
             },
@@ -3843,6 +3881,13 @@ def to_flow_spec(
                     target_param, str(lk.get("source_path") or ""),
                 ):
                     continue
+                source_request = cands[src_pos]
+                target_request = cands[tgt_pos]
+                source_action = str(source_request.get("trigger_action_id") or "")
+                target_action = str(target_request.get("trigger_action_id") or "")
+                causal_supported = bool(target_action)
+                same_action_chain = bool(source_action and source_action == target_action)
+                auto_confirmed = bool(strong_unique_match and (not page_events or causal_supported))
                 link_objs.append(FlowLink(
                     source_step_id=idx_to_step_id[src_pos],
                     source_path=lk.get("source_path", ""),
@@ -3851,14 +3896,27 @@ def to_flow_spec(
                     target_path=lk.get("target_path", ""),
                     target_tokens=lk.get("target_tokens"),
                     param_name=None,
-                    confirmed=strong_unique_match,
-                    confidence=0.96 if strong_unique_match else 0.85,
-                    reason="上游响应值与下游请求字段值一致，判定为运行期依赖",
+                    confirmed=auto_confirmed,
+                    confidence=(0.98 if same_action_chain and strong_unique_match
+                                else 0.96 if auto_confirmed else 0.9 if strong_unique_match else 0.85),
+                    reason=(
+                        "同一用户操作触发的请求链中，上游响应值与下游请求字段值唯一一致，判定为运行期依赖"
+                        if same_action_chain else
+                        "上游响应值与下游请求字段值唯一一致，且下游请求有操作锚点，判定为运行期依赖"
+                        if auto_confirmed and page_events else
+                        "上游响应值与下游请求字段值一致，但缺少操作因果锚点，保留为待确认依赖"
+                        if strong_unique_match and page_events else
+                        "上游响应值与下游请求字段值一致，判定为运行期依赖"
+                    ),
                     evidence={
                         "source_step": src_pos,
                         "target_step": tgt_pos,
                         "source_path": lk.get("source_path", ""),
                         "target_path": lk.get("target_path", ""),
+                        "source_action_id": source_action,
+                        "target_action_id": target_action,
+                        "same_action_chain": same_action_chain,
+                        "observer_available": bool(page_events),
                     },
                 ))
         except Exception:
@@ -3898,6 +3956,7 @@ def to_flow_spec(
             request_graph,
             diagnostics=diagnostics,
             page_enum_options=page_enum_options,
+            page_events=page_events,
         ),
         meta={
             "captured_total": len(captured_requests),
@@ -3911,6 +3970,7 @@ def to_flow_spec(
             "request_graph": request_graph,
             "recording_mode": recording_mode,
             "diagnostics": diagnostics,
+            "page_events_count": len(page_events),
             "page_context": page_context,
             "schema_version": 1,
         },
@@ -4071,13 +4131,16 @@ def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
             if (
                 existing.get("x-dano-business-type") != candidate_business
                 or existing.get("x-dano-wire-type") != candidate_wire
-                or existing.get("x-flow-path") != p.path
             ):
                 existing.setdefault("x-dano-conflicts", []).append({
                     "path": p.path,
                     "business_type": candidate_business,
                     "wire_type": candidate_wire,
                 })
+            elif existing.get("x-flow-path") != p.path:
+                paths = existing.setdefault("x-flow-paths", [existing.get("x-flow-path")])
+                if p.path not in paths:
+                    paths.append(p.path)
             if _param_requires_caller_input(p) and key not in required:
                 required.append(key)
             continue
@@ -4377,6 +4440,80 @@ def _repair_generated_capability_contracts(spec: FlowSpec) -> FlowSpec:
     return spec
 
 
+def _param_path_leaf(path: str) -> str:
+    tokens = [token for token in re.split(r"[.\[\]/]+", _strip_body_prefix(path or "")) if token]
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", tokens[-1].lower()) if tokens else ""
+
+
+def _params_can_share_caller_key(left: ParamField, right: ParamField) -> bool:
+    """同名字段仅在请求叶子与类型都一致时复用一个调用参数。"""
+    return bool(
+        _param_path_leaf(left.path) == _param_path_leaf(right.path)
+        and _business_type_for_param(left) == _business_type_for_param(right)
+        and (left.wire_type or _infer_type_from_value(left.value) or "string")
+        == (right.wire_type or _infer_type_from_value(right.value) or "string")
+    )
+
+
+def _disambiguate_capability_param_keys(steps: list[FlowStep]) -> list[dict[str, Any]]:
+    """为能力闭包中的同名异义字段生成稳定 ``#2`` 别名。
+
+    同一个业务叶子跨接口复用时保留共享输入；不同请求叶子不能继续争用同一个
+    caller key，否则 schema、sample_inputs 和请求编译会互相覆盖。
+    """
+    entries = [(step, param) for step in steps for param in (step.params or []) if _param_exposed_to_caller(param)]
+    used = {str(param.key or param.path or "").strip() for _step, param in entries if str(param.key or param.path or "").strip()}
+    canonical_by_key: dict[str, ParamField] = {}
+    changes: list[dict[str, Any]] = []
+    # 锁定字段优先占用原名，自动字段围绕它消歧，避免覆盖人工契约。
+    ordered = sorted(enumerate(entries), key=lambda item: (not bool(item[1][1].locked), item[0]))
+    for _position, (step, param) in ordered:
+        key = str(param.key or param.path or "").strip() or "field"
+        canonical = canonical_by_key.get(key)
+        if canonical is None:
+            canonical_by_key[key] = param
+            continue
+        if _params_can_share_caller_key(canonical, param):
+            continue
+        if param.locked:
+            # 两个互相冲突的人工锁定字段不擅自改名，交给发布校验明确阻断。
+            continue
+        base = key
+        suffix = 2
+        candidate = f"{base}#{suffix}"
+        while candidate in used:
+            suffix += 1
+            candidate = f"{base}#{suffix}"
+        old_key = param.key
+        param.key = candidate
+        param.source = {**(param.source or {}), "original_key": old_key or base, "collision_resolved": True}
+        param.evidence = [*(param.evidence or []), {
+            "kind": "field_key_collision_resolved",
+            "original_key": old_key or base,
+            "resolved_key": candidate,
+            "path": param.path,
+            "step_id": step.step_id,
+        }]
+        used.add(candidate)
+        canonical_by_key[candidate] = param
+        for binding in step.selects or []:
+            if binding.path and _strip_body_prefix(binding.path) == _strip_body_prefix(param.path):
+                binding.param = candidate
+        changes.append({
+            "step_id": step.step_id,
+            "path": param.path,
+            "original_key": old_key or base,
+            "resolved_key": candidate,
+        })
+    for step in steps:
+        step.sample_inputs = {
+            str(param.key or param.path): param.value
+            for param in (step.params or [])
+            if param.value not in (None, "")
+        }
+    return changes
+
+
 def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
     """让 capability 的输入输出 schema 始终跟当前字段/响应保持一致。"""
     _repair_versioned_workflow_id_links(spec)
@@ -4444,6 +4581,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
         cap_steps = [by_id[sid] for sid in (cap.step_ids or []) if sid in by_id]
         if not cap_steps:
             continue
+        _disambiguate_capability_param_keys(cap_steps)
         params = [p for st in cap_steps for p in (st.params or [])]
         derived_input = _capability_input_schema(params)
         if _capability_is_batch(spec, cap):
@@ -4483,6 +4621,11 @@ def _sanitize_capability_nodes(spec: FlowSpec, cap: FlowCapability) -> list[dict
     by_id = {step.step_id: step for step in spec.steps}
     cap_step_ids = set(cap.step_ids or [])
     is_batch = _capability_is_batch(spec, cap)
+    batch_schema = _batch_capability_input_schema(
+        [by_id[step_id] for step_id in cap.step_ids if step_id in by_id]
+    ) if is_batch else {}
+    batch_top_inputs = set((batch_schema.get("properties") or {}).keys())
+    batch_item_inputs, _batch_item_required = _capability_schema_array_item_props(batch_schema, "entries")
 
     def clean(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -4507,6 +4650,16 @@ def _sanitize_capability_nodes(spec: FlowSpec, cap: FlowCapability) -> list[dict
                 target = str(node.get("target") or "")
                 if not source or not target:
                     continue
+                if is_batch and source.startswith("input."):
+                    # A batch capability exposes one top-level ``entries`` array.
+                    # Older Planner output addressed row fields as input.<field>;
+                    # migrate that reference only when the derived item schema
+                    # proves the field exists, otherwise keep it for validation.
+                    suffix = source.split(".", 1)[1]
+                    field = suffix.split(".", 1)[0]
+                    if field not in batch_top_inputs and field in batch_item_inputs:
+                        node["source"] = f"item.{suffix}"
+                        source = str(node["source"])
                 if not is_batch and source.startswith(("item.", "loop.", "input.entries")):
                     continue
                 if "." in target and not target.startswith(("var.", "computed.", "loop.", "item.", "node.", "input.")):
@@ -4529,13 +4682,18 @@ def _sanitize_capability_nodes(spec: FlowSpec, cap: FlowCapability) -> list[dict
 
 
 def _step_evidence(step: FlowStep) -> dict[str, Any]:
-    return {
+    evidence = {
         "step_id": step.step_id,
         "name": step.name,
         "method": (step.method or "").upper(),
         "path": step.path or step.url,
         "role": (step.source_meta or {}).get("role") or step.semantic_role,
     }
+    for key in ("trigger_action_id", "trigger_event_id", "trigger_op", "trigger_locator", "action_delta_ms", "causality_confidence"):
+        value = (step.source_meta or {}).get(key)
+        if value not in (None, ""):
+            evidence[key] = value
+    return evidence
 
 
 def _is_write_step(step: FlowStep) -> bool:
@@ -5306,7 +5464,14 @@ def _capability_business_key(step: FlowStep) -> str:
         segment for segment in path.split("/")
         if segment and segment not in _CAPABILITY_PATH_PREFIXES and not re.fullmatch(r"\d+", segment)
     ]
-    return _flow_capability_id("domain", segments[0]).removeprefix("domain_") if segments else ""
+    domain = _flow_capability_id("domain", segments[0]).removeprefix("domain_") if segments else ""
+    trigger_locator = str(meta.get("trigger_locator") or "").strip()
+    causal_confidence = str(meta.get("causality_confidence") or "")
+    if trigger_locator and causal_confidence in {"high", "medium"}:
+        # 中文 accessible name 在 ASCII slug 中会被抹掉；短哈希保证“查询/查看详情”仍稳定分组。
+        action_key = hashlib.sha1(trigger_locator.casefold().encode("utf-8")).hexdigest()[:8]
+        return "__".join(part for part in (domain, action_key) if part)
+    return domain
 
 
 def _partition_steps_by_business_key(steps: list[FlowStep]) -> list[tuple[str, list[FlowStep]]]:
@@ -5345,7 +5510,16 @@ def _build_complex_default_capabilities(
         and write_key_by_id[link.source_step_id] != write_key_by_id[link.target_step_id]
         for link in (spec.links or [])
     )
-    split_queries = len(query_groups) > 1
+    query_key_by_id = {
+        step.step_id: key for key, group in query_groups for step in group if step.step_id
+    }
+    cross_query_dependency = any(
+        link.source_step_id in query_key_by_id
+        and link.target_step_id in query_key_by_id
+        and query_key_by_id[link.source_step_id] != query_key_by_id[link.target_step_id]
+        for link in (spec.links or [])
+    )
+    split_queries = len(query_groups) > 1 and not cross_query_dependency
     split_writes = len(write_groups) > 1 and not cross_write_dependency
     if not split_queries and not split_writes:
         return []
@@ -5779,6 +5953,10 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 "page_id": _step_page_id_from_facts(spec, step),
                 "role": (step.source_meta or {}).get("role") or step.semantic_role,
                 "sequence": (step.source_meta or {}).get("sequence"),
+                "trigger_action_id": (step.source_meta or {}).get("trigger_action_id"),
+                "trigger_op": (step.source_meta or {}).get("trigger_op"),
+                "trigger_locator": (step.source_meta or {}).get("trigger_locator"),
+                "causality_confidence": (step.source_meta or {}).get("causality_confidence"),
                 "params": [
                     {
                         "path": param.path,
@@ -5825,8 +6003,25 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 "role": request.get("role"),
                 "confidence": request.get("confidence"),
                 "reason": request.get("reason"),
+                "trigger_action_id": request.get("trigger_action_id"),
+                "trigger_op": request.get("trigger_op"),
+                "trigger_locator": request.get("trigger_locator"),
+                "action_delta_ms": request.get("action_delta_ms"),
+                "causality_confidence": request.get("causality_confidence"),
             }
             for request in (graph.get("all_requests") or [])
+        ],
+        "page_events": [
+            {
+                key: event.get(key)
+                for key in (
+                    "event_id", "kind", "action_id", "op", "locator", "field",
+                    "required", "observed_at", "page_id", "frame_id", "changes",
+                )
+                if event.get(key) not in (None, "", [], {})
+            }
+            for event in (spec.request_facts.page_events or [])[-300:]
+            if isinstance(event, dict)
         ],
         "manual_constraints": {
             "removed_capabilities": sorted(str(item) for item in ((spec.meta or {}).get("removed_capabilities") or [])),
@@ -5849,6 +6044,7 @@ def _semantic_fact_hash(spec: FlowSpec) -> str:
                 "method": (step.method or "GET").upper(),
                 "path": step.path or step.url,
                 "page_id": _step_page_id_from_facts(spec, step),
+                "trigger_locator": (step.source_meta or {}).get("trigger_locator"),
                 "param_paths": sorted(param.path for param in step.params),
                 "response_paths": sorted({
                     str(path) for path, *_ in (_leaf_paths(step.response_json) if step.response_json is not None else [])
@@ -9238,6 +9434,116 @@ def flow_spec_fingerprint(spec: FlowSpec) -> str:
     return _flow_fingerprint(spec)
 
 
+def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) -> dict[str, Any]:
+    """Build a safe, operator-facing semantic diff for a workbench operation."""
+
+    def field_index(spec: FlowSpec) -> dict[tuple[str, str], tuple[Any, ...]]:
+        return {
+            (step.step_id, param.path): (
+                param.key, param.label, param.type, param.wire_type,
+                param.category, param.source_kind, _stable_json_hash(param.source or {}),
+                bool(param.required), bool(param.exposed_to_user),
+                _stable_json_hash(param.enum_options or []), _stable_json_hash(param.enum_value_map or {}),
+            )
+            for step in spec.steps for param in step.params
+        }
+
+    def capability_index(spec: FlowSpec) -> dict[str, tuple[Any, ...]]:
+        return {
+            str(cap.capability_id or cap.name or index): (
+                cap.name, cap.title, cap.kind, tuple(_capability_node_step_ids(cap)),
+                bool(cap.confirmed), bool(cap.requires_human_confirm),
+                _stable_json_hash(cap.nodes or []),
+                _stable_json_hash(cap.input_schema or {}),
+                _stable_json_hash(cap.output_schema or {}),
+                _stable_json_hash(cap.output_mapping or []),
+                _stable_json_hash(cap.preconditions or []),
+            )
+            for index, cap in enumerate(spec.capabilities or [])
+        }
+
+    def link_index(spec: FlowSpec) -> dict[str, tuple[Any, ...]]:
+        return {
+            str(link.link_id or index): (
+                link.source_step_id, link.source_path, link.target_step_id,
+                link.target_path, bool(link.confirmed), float(link.confidence or 0),
+            )
+            for index, link in enumerate(spec.links or [])
+        }
+
+    def relation_index(spec: FlowSpec) -> dict[str, tuple[Any, ...]]:
+        return {
+            str(relation.relation_id or index): (
+                relation.from_capability, relation.from_output,
+                relation.to_capability, relation.to_input,
+                relation.mode or relation.type, bool(relation.confirmed), float(relation.confidence or 0),
+            )
+            for index, relation in enumerate(spec.capability_relations or [])
+        }
+
+    def changed_count(left: dict[Any, Any], right: dict[Any, Any]) -> int:
+        return sum(1 for key in set(left) | set(right) if left.get(key) != right.get(key))
+
+    before_report = validate_flow_spec(before)
+    after_report = validate_flow_spec(after)
+    generation = dict((after.meta or {}).get("capability_generation") or {})
+    loop = dict((after.meta or {}).get("recording_pi_loop") or {})
+    auto_fix_history = list((after.meta or {}).get("auto_fix_history") or [])
+    proposal_gate = dict(((after.meta or {}).get("capability_model") or {}).get("proposal_gate") or {})
+    changes = {
+        "steps": changed_count(
+            {step.step_id: (step.method, step.path, step.name, step.semantic_role) for step in before.steps},
+            {step.step_id: (step.method, step.path, step.name, step.semantic_role) for step in after.steps},
+        ),
+        "fields": changed_count(field_index(before), field_index(after)),
+        "capabilities": changed_count(capability_index(before), capability_index(after)),
+        "links": changed_count(link_index(before), link_index(after)),
+        "relations": changed_count(relation_index(before), relation_index(after)),
+        "flow": int(
+            (before.title, before.business_description, before.risk_level, _stable_json_hash(before.goal or {}))
+            != (after.title, after.business_description, after.risk_level, _stable_json_hash(after.goal or {}))
+        ),
+    }
+    # 请求事实 usage、版本戳和 review 派生项变化不应冒充“优化了业务流程”。
+    changed = any(changes.values())
+    model_errors = [
+        str(item.get("model_error")) for item in auto_fix_history
+        if isinstance(item, dict) and item.get("model_error")
+    ]
+    if changed:
+        details = "，".join(
+            f"{label}{changes[key]}项" for key, label in (
+                ("capabilities", "能力"), ("fields", "字段"), ("links", "依赖"),
+                ("relations", "能力关系"), ("steps", "接口步骤"),
+                ("flow", "流程说明"),
+            ) if changes[key]
+        )
+        summary = "已更新流程编排" + (f"：{details}" if details else "")
+    elif generation.get("application_cache_hit") or loop.get("cache_hit"):
+        summary = "当前录制事实和工作台内容未变化，已复用上次优化结果"
+    elif proposal_gate.get("accepted") is False:
+        reasons = "、".join(str(item) for item in proposal_gate.get("reasons") or [])
+        summary = f"候选修改未通过安全准入，已保留原流程{('：' + reasons) if reasons else ''}"
+    elif model_errors:
+        summary = "模型修复失败，未静默改写流程：" + "；".join(model_errors)
+    else:
+        summary = "已完成检查，但没有发现有充分证据可自动修改的内容"
+    return {
+        "operation": operation,
+        "changed": changed,
+        "changes": changes,
+        "summary": summary,
+        "cache_hit": bool(generation.get("application_cache_hit") or loop.get("cache_hit")),
+        "model_calls": int(generation.get("model_calls") or loop.get("model_calls") or 0),
+        "model_errors": model_errors,
+        "proposal_gate": proposal_gate,
+        "errors_before": len(before_report.get("errors") or []),
+        "errors_after": len(after_report.get("errors") or []),
+        "warnings_before": len(before_report.get("warnings") or []),
+        "warnings_after": len(after_report.get("warnings") or []),
+    }
+
+
 def append_flow_version(
     spec: FlowSpec,
     action: str,
@@ -10551,9 +10857,16 @@ def _publish_issue_groups(
         capability_match = re.search(r"Capability\s+`([^`]+)`", message)
         field_match = re.search(r"字段\s+`([^`]+)`", message)
         link_match = re.search(r"(?:链接|link)\s+`([^`]+)`", message, re.I)
+        node_match = re.search(r"(?:map|condition|foreach|call|return)\s*节点\s*`([^`]+)`", message, re.I)
         target: dict[str, Any] = {}
         if capability_match:
             target = {"kind": "capability", "capability": capability_match.group(1)}
+        if node_match:
+            target = {
+                **target,
+                "kind": "capability_node",
+                "node_id": node_match.group(1),
+            }
         if field_match:
             target = {
                 **target,
@@ -10662,6 +10975,21 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
     by_step_id = {step.step_id: step for step in spec.steps}
     for capability in spec.capabilities or []:
         cap_label = capability.title or capability.name or capability.capability_id
+        caller_params = [
+            param
+            for step_id in _capability_node_step_ids(capability)
+            for param in (by_step_id.get(step_id).params if by_step_id.get(step_id) else [])
+            if _param_exposed_to_caller(param)
+        ]
+        caller_by_key: dict[str, list[ParamField]] = {}
+        for param in caller_params:
+            caller_by_key.setdefault(str(param.key or param.path or ""), []).append(param)
+        for field_name, duplicates in caller_by_key.items():
+            if len(duplicates) > 1 and any(
+                not _params_can_share_caller_key(duplicates[0], other)
+                for other in duplicates[1:]
+            ):
+                errors.append(f"Capability `{cap_label}` 输入字段 `{field_name}` 同名但对应不同请求字段，请重命名或解除锁定后自动消歧")
         for ref in capability.request_refs or []:
             if ref.pinned and ref.usage in {"execute", "preflight", "fact_check"} and ref.step_id not in set(_capability_node_step_ids(capability)):
                 errors.append(f"Capability `{cap_label}` 手工锁定接口 `{ref.step_id or ref.request_id}` 未进入执行计划")
@@ -13416,6 +13744,7 @@ async def auto_fix_flow_spec(
     for round_idx in range(max_rounds):
         report = validate_flow_spec(current)
         edits: list[dict[str, Any]] = []
+        model_error = ""
         if not current.capabilities and current.steps:
             edits.append({"op": "generate_capabilities"})
         cap_report = report.get("capability_validation") or {}
@@ -13478,10 +13807,17 @@ async def auto_fix_flow_spec(
                     if not allow_scope_changes:
                         llm_edits = _planner_patch_edits(current, llm_edits, scope_locked=True)
                     edits.extend(llm_edits)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                # Deterministic repair may still be useful, but the operator must
+                # be able to distinguish that from a successful semantic repair.
+                model_error = str(exc)[:500]
         if not edits:
-            history.append({"round": round_idx, "applied": 0, "remaining_errors": len(report.get("errors") or [])})
+            history.append({
+                "round": round_idx,
+                "applied": 0,
+                "remaining_errors": len(report.get("errors") or []),
+                **({"model_error": model_error} if model_error else {}),
+            })
             break
         before = _flow_fingerprint(current)
         candidate = apply_flow_edits(current, [{**edit, "actor": "repair"} for edit in edits])
@@ -13518,11 +13854,17 @@ async def auto_fix_flow_spec(
                 "changed": False,
                 "proposal_rejected": True,
                 "proposal_gate": gate,
+                **({"model_error": model_error} if model_error else {}),
             })
             break
         current = candidate
         after = _flow_fingerprint(current)
-        history.append({"round": round_idx, "applied": len(edits), "changed": before != after})
+        history.append({
+            "round": round_idx,
+            "applied": len(edits),
+            "changed": before != after,
+            **({"model_error": model_error} if model_error else {}),
+        })
         if before == after:
             break
         if validate_flow_spec(current).get("passed"):
@@ -13658,6 +14000,7 @@ async def run_recording_pi_loop(
     mode: str = "plan",
     timeout_s: float = 60.0,
     max_rounds: int = 4,
+    force_replan: bool = False,
 ) -> FlowSpec:
     """录制路径 PI 闭环：Goal → Planner → Validator → Repair → 再验证。
 
@@ -13665,6 +14008,28 @@ async def run_recording_pi_loop(
     在有限轮次内规划、校验、修复并重新校验，直到通过或无法继续收敛。
     """
     current = ensure_recorded_goal(spec.model_copy(deep=True))
+    if force_replan:
+        previous_scope = [
+            {
+                "capability_id": cap.capability_id,
+                "name": cap.name,
+                "kind": cap.kind,
+                "step_ids": list(_capability_node_step_ids(cap)),
+            }
+            for cap in current.capabilities or []
+        ]
+        current.capabilities = []
+        current.capability_relations = []
+        current.meta = dict(current.meta or {})
+        for key in (
+            "capability_generation", "capability_model", "capability_orchestration_audit",
+            "removed_capabilities", "capability_removed_steps",
+        ):
+            current.meta.pop(key, None)
+        current.meta["forced_replan"] = {
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+            "previous_scope": previous_scope,
+        }
     fact_hash = _semantic_fact_hash(current)
     previous_generation = dict((current.meta or {}).get("capability_generation") or {})
     legacy_capability_model = (current.meta or {}).get("capability_model") or {}
@@ -13869,7 +14234,7 @@ async def run_recording_pi_loop(
                 + (1 if str(previous_generation.get("fact_hash") or "") != fact_hash else 0)
             ),
             "status": generation_status,
-            "last_mode": "initial" if initial_generation else mode,
+            "last_mode": "replan" if force_replan else ("initial" if initial_generation else mode),
             "last_optimization_input_hash": _semantic_optimization_input_hash(current),
             "last_cache_hit": False,
             "application_cache_hit": False,
@@ -13889,7 +14254,7 @@ async def run_recording_pi_loop(
         },
         "recording_pi_loop": {
             "mode": mode,
-            "generation_mode": "initial" if initial_generation else "optimize",
+            "generation_mode": "replan" if force_replan else ("initial" if initial_generation else "optimize"),
             "rounds": history,
             "cache_hit": False,
             "model_calls": conversation.calls if conversation else 0,

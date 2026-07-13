@@ -207,6 +207,18 @@ _RECORDER_JS = r"""() => {
     if (k === 'css') { var c = r.match(/\[name="([^"]+)"\]/); if (c) return c[1]; return r.replace(/^[#.]/, ''); }
     return r;
   }
+  function isSensitive(el) {
+    try {
+      if (!el) return false;
+      var ty = ((el.type || '') + '').toLowerCase();
+      if (ty === 'password') return true;
+      var ac = ((el.getAttribute && el.getAttribute('autocomplete')) || '').toLowerCase();
+      if (/(?:^|\s)(?:current-password|new-password|one-time-code|cc-|card|cvv|cvc|iban|account-number)/.test(ac)) return true;
+      var sig = ((el.id || '') + ' ' + (el.name || '') + ' ' + (el.className || '') + ' ' +
+                 ((el.getAttribute && el.getAttribute('aria-label')) || '')).toLowerCase();
+      return /(pass(?:word)?|pwd|credit.?card|card.?no|cvv|cvc|secret.?code|pay.?password|bank.?account|access.?token)/.test(sig);
+    } catch (e) { return true; }
+  }
   // 登录页检测(通用、保守):URL 命中 login/signin(SPA 路由守卫重定向就长这样)。登录不是业务步骤,不录。
   // 只看 URL,不看密码框 —— 免把业务里的"修改密码"页或测试登录表单整页误跳过。
   function onLoginPage() {
@@ -294,7 +306,8 @@ _RECORDER_JS = r"""() => {
         var loc = locateField(el);
         var label = clean(labelText(el));
         var field = clean(fieldOf(loc));
-        var value = clean(el.value || el.getAttribute('value') || '');
+        // 页面快照只为业务字段匹配服务；密码、验证码、支付与令牌类控件绝不采集值。
+        var value = isSensitive(el) ? '' : clean(el.value || el.getAttribute('value') || '');
         if (!label && !field) continue;
         out.push({field: field, label: label, value: value, required: requiredOf(el)});
       }
@@ -312,14 +325,89 @@ _RECORDER_JS = r"""() => {
       }));
     } catch (e) {}
   }
+  var actionSeq = 0;
+  var mutationSeq = 0;
+  var mutationBuffer = [];
+  function nodeEvidence(node) {
+    try {
+      var el = node && node.nodeType === 1 ? node : (node && node.parentElement);
+      if (!el) return {};
+      var loc = locateField(el) || locateClickable(el) || '';
+      return {
+        tag: String(el.tagName || '').toLowerCase(),
+        role: roleOf(el),
+        locator: loc,
+        field: fieldOf(loc),
+        required: requiredOf(el),
+        hidden: !!(el.hidden || (el.getAttribute && el.getAttribute('aria-hidden') === 'true'))
+      };
+    } catch (e) { return {}; }
+  }
+  function rememberMutation(mutation) {
+    try {
+      mutationSeq += 1;
+      var item = {
+        sequence: mutationSeq,
+        type: mutation.type,
+        target: nodeEvidence(mutation.target)
+      };
+      if (mutation.type === 'attributes') item.attribute = mutation.attributeName || '';
+      if (mutation.type === 'childList') {
+        item.added = mutation.addedNodes ? mutation.addedNodes.length : 0;
+        item.removed = mutation.removedNodes ? mutation.removedNodes.length : 0;
+      }
+      mutationBuffer.push(item);
+      if (mutationBuffer.length > 300) mutationBuffer.splice(0, mutationBuffer.length - 300);
+    } catch (e) {}
+  }
+  try {
+    new MutationObserver(function (mutations) {
+      for (var i = 0; i < mutations.length; i++) rememberMutation(mutations[i]);
+    }).observe(document.documentElement || document, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['hidden','disabled','required','aria-hidden','aria-disabled','aria-required','aria-expanded','aria-selected','aria-checked']
+    });
+  } catch (e) {}
+  function emitDomEffect(actionId, startMutationSeq) {
+    try {
+      var changes = mutationBuffer.filter(function (item) { return item.sequence > startMutationSeq; }).slice(-80);
+      window.__danoRecord(JSON.stringify({
+        op: 'dom_effect',
+        action_id: actionId,
+        observed_at: Date.now(),
+        changes: changes,
+        required_fields: window.__danoRequiredFields ? window.__danoRequiredFields() : [],
+        page_context: window.__danoPageContext ? window.__danoPageContext() : {}
+      }));
+    } catch (e) {}
+  }
   function emit(op, loc, value, field, required, options) {
     if (!loc || onLoginPage()) return;            // 登录页上的任何操作一律不录(自动跳过登录,免手点「从这里开始录」)
-    try { window.__danoRecord(JSON.stringify({ op: op, locator: loc, value: value || '', field: field || '', required: !!required, options: options || [] })); } catch (e) {}
+    try {
+      actionSeq += 1;
+      var actionId = 'action_' + actionSeq;
+      var startMutationSeq = mutationSeq;
+      window.__danoRecord(JSON.stringify({
+        op: op,
+        action_id: actionId,
+        observed_at: Date.now(),
+        locator: loc,
+        value: value || '',
+        field: field || '',
+        required: !!required,
+        options: options || [],
+        page_context: window.__danoPageContext ? window.__danoPageContext() : {}
+      }));
+      setTimeout(function () { emitDomEffect(actionId, startMutationSeq); }, 350);
+    } catch (e) {}
   }
   var pendingFill = {};
   var fillTimers = {};
   function scheduleFill(el) {
     try {
+      if (isSensitive(el)) return;
       var loc = locateField(el);
       if (!loc) return;
       pendingFill[loc] = { el: el, value: el.value, field: fieldOf(loc), required: requiredOf(el) };
@@ -338,6 +426,7 @@ _RECORDER_JS = r"""() => {
   }
   function flushElementFill(el) {
     try {
+      if (isSensitive(el)) return;
       var loc = locateField(el);
       if (loc) {
         var pending = pendingFill[loc];
@@ -453,13 +542,8 @@ _RECORDER_JS = r"""() => {
   }
   document.addEventListener('input', function (e) {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
-    // 密码/支付敏感字段绝不录(M-A2):密码框、信用卡号、CVC、有效期、卡名、银行账号等
-    if (tag === 'input' && ty === 'password') return;
-    var ac = (el.getAttribute && (el.getAttribute('autocomplete') || '') + '').toLowerCase();
-    if (ac && /(cc-|card|cvv|cvc|exp|iban|account-number)/.test(ac)) return;     // 信用卡/银行账号属性
-    // 已知 sensitive class / id 模式
-    var sig = ((el.id || '') + ' ' + (el.name || '') + ' ' + (el.className || '')).toLowerCase();
-    if (/(credit.?card|card.?no|cvv|cvc|secret.?code|pay.?password|bank.?account)/.test(sig)) return;
+    // 密码/验证码/支付/令牌敏感字段绝不录；change/blur 路径也复用同一判断。
+    if (isSensitive(el)) return;
     // 密码框绝不录(安全);非文本类型跳过
     if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) {
       scheduleFill(el);
@@ -467,12 +551,14 @@ _RECORDER_JS = r"""() => {
   }, true);
   document.addEventListener('change', function (e) {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
+    if (isSensitive(el)) return;
     if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) flushElementFill(el);
     if (tag === 'select') { var l1 = locateField(el); emit('select', l1, el.value, fieldOf(l1), requiredOf(el), nativeOptions(el)); }
     else if (tag === 'input' && ty === 'file') { var l2 = locateField(el); emit('upload', l2, el.value || '', fieldOf(l2), requiredOf(el)); }
   }, true);
   document.addEventListener('blur', function (e) {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
+    if (isSensitive(el)) return;
     if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) flushElementFill(el);
   }, true);
   // 选择型控件参数化(框架无关):日期/下拉/级联是"点"出来的,不该录成写死的点击,而该录成一个
@@ -607,6 +693,10 @@ class RecordSession:
         self.all_requests: list[dict] = []
         # P0-1:诊断事件(console/pageerror/requestfailed)→ 排查"接口成功但页面报错"等隐蔽故障。
         self.diagnostics: list[dict] = []
+        # Observer 事件链与回放步骤分开保存，避免观察证据被误当成可执行动作。
+        self.page_events: list[dict] = []
+        self._event_counter: int = 0
+        self._last_action_by_scope: dict[tuple[str, str], dict] = {}
         self._req_counter: int = 0          # 顺序号,作为 all_requests[i]["index"] 与 diagnostics 关联锚点
         self._request_fact_index: dict[int, int] = {}
         self._page_counter: int = 0
@@ -790,6 +880,22 @@ class RecordSession:
             # P0-2:角色分类字段。响应未到时先按现有信息初分(_classify_entry),响应落地后再 _classify_entry 一次。
             # classify_field 缺失 = 还没分类过(兜底用)。
         }
+        # 时间相邻只能作为候选因果证据，所以同时记录延迟和置信等级，供后续推导/复核使用。
+        now_monotonic = time.monotonic()
+        action = self._last_action_by_scope.get((page_id, frame_id))
+        if action is None and (page_id or frame_id):
+            action = self._last_action_by_scope.get(("", ""))
+        if action is not None:
+            delta_ms = max(0, int((now_monotonic - float(action.get("monotonic") or now_monotonic)) * 1000))
+            if delta_ms <= 8000:
+                entry.update({
+                    "trigger_action_id": action.get("action_id") or "",
+                    "trigger_event_id": action.get("event_id") or "",
+                    "trigger_op": action.get("op") or "",
+                    "trigger_locator": action.get("locator") or "",
+                    "action_delta_ms": delta_ms,
+                    "causality_confidence": "high" if delta_ms <= 1200 else "medium" if delta_ms <= 3500 else "low",
+                })
         self.all_requests.append(entry)
         self._classify_entry(entry)
         return idx
@@ -969,6 +1075,10 @@ class RecordSession:
         每条字段:type/level?(console 用)/message/url?/timestamp/request_index?(requestfailed 用)。"""
         return [dict(d) for d in self.diagnostics]
 
+    def recorded_page_events(self) -> list[dict]:
+        """返回脱敏后的页面观察时间线，不包含输入值或响应正文。"""
+        return [dict(event) for event in self.page_events]
+
     def recorded_raw_steps(self) -> list[dict]:
         """返回原始录制步骤副本。用于 finalize 前 flush 后补齐前端尚未收到的最后输入。"""
         return [dict(s) for s in self.steps]
@@ -1063,11 +1173,68 @@ class RecordSession:
         except Exception:  # noqa: BLE001
             pass
         self._mark_active()
+        self._event_counter += 1
+        event_id = f"event_{self._event_counter}"
+        observed_at = step.get("observed_at") or int(time.time() * 1000)
+        scope = (str(step.get("page_id") or ""), str(step.get("frame_id") or ""))
+        op = str(step.get("op") or "")
+        if op == "dom_effect":
+            self.page_events.append({
+                "event_id": event_id,
+                "kind": "dom_effect",
+                "action_id": str(step.get("action_id") or ""),
+                "observed_at": observed_at,
+                "page_id": scope[0],
+                "frame_id": scope[1],
+                "changes": list(step.get("changes") or [])[:80],
+                "required_fields": list(step.get("required_fields") or [])[:200],
+                "page_context": dict(step.get("page_context") or {}),
+            })
+            self.page_events = self.page_events[-1000:]
+            return
         if step.get("op") == "form_snapshot":
             self.form_snapshots.append(step)
+            self.page_events.append({
+                "event_id": event_id,
+                "kind": "form_snapshot",
+                "observed_at": observed_at,
+                "page_id": scope[0],
+                "frame_id": scope[1],
+                "required_fields": list(step.get("required_fields") or [])[:200],
+                "field_count": len(step.get("fields") or []),
+                "page_context": dict(step.get("page_context") or {}),
+            })
             # 同一表单反复点击只保留有限快照；最后一份是发布时的地面真值。
             self.form_snapshots = self.form_snapshots[-20:]
+            self.page_events = self.page_events[-1000:]
             return
+        action_id = str(step.get("action_id") or f"action_server_{self._event_counter}")
+        step["action_id"] = action_id
+        step["event_id"] = event_id
+        self.page_events.append({
+            "event_id": event_id,
+            "kind": "action",
+            "action_id": action_id,
+            "op": op,
+            "locator": str(step.get("locator") or ""),
+            "field": str(step.get("field") or ""),
+            "required": bool(step.get("required")),
+            "has_value": bool(step.get("value")),
+            "observed_at": observed_at,
+            "page_id": scope[0],
+            "frame_id": scope[1],
+            "page_context": dict(step.get("page_context") or {}),
+        })
+        action_ref = {
+            "action_id": action_id,
+            "event_id": event_id,
+            "op": op,
+            "locator": str(step.get("locator") or ""),
+            "monotonic": time.monotonic(),
+        }
+        self._last_action_by_scope[scope] = action_ref
+        self._last_action_by_scope[("", "")] = action_ref
+        self.page_events = self.page_events[-1000:]
         # 同一 locator 连续 fill/select/pick(用户改了又改/逐字符)→ 覆盖,只留最后一次
         if (self.steps and self.steps[-1].get("locator") == step.get("locator")
                 and self.steps[-1].get("page_id") == step.get("page_id")
@@ -1222,7 +1389,10 @@ class RecordSession:
         self.reads.clear()
         self.all_requests.clear()
         self.diagnostics.clear()
+        self.page_events.clear()
         self._req_counter = 0
+        self._event_counter = 0
+        self._last_action_by_scope.clear()
         self._request_fact_index.clear()
         self._page_counter = 0
         self._frame_counter = 0
