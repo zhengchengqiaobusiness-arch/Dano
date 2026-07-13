@@ -22,6 +22,7 @@ from dano.execution.page.flow_spec import (
     build_default_flow_capabilities, prepare_flow_spec_for_publish, prepare_flow_release_candidate,
 )
 from dano.execution.page.request_capture import execute_api_request
+from dano.execution.page.repair_ops import collect_capability_findings
 
 
 def _make_spec():
@@ -887,7 +888,7 @@ class _FakePlannerPatchClient:
 def test_orchestrate_flow_capabilities_prefers_patch_ops_and_keeps_same_batch_ops():
     spec = FlowSpec(
         flow_id="f",
-        steps=[FlowStep(step_id="submit", method="POST", url="/api/report", path="/api/report")],
+        steps=[FlowStep(step_id="submit", method="POST", url="/api/report/batch", path="/api/report/batch")],
     )
 
     out = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=_FakePlannerPatchClient(), model="fake"))
@@ -899,6 +900,127 @@ def test_orchestrate_flow_capabilities_prefers_patch_ops_and_keeps_same_batch_op
     assert cap.step_ids == ["submit"]
     assert cap.inputs[0].key == "entries"
     assert cap.output_mapping[0]["step_id"] == "submit"
+
+
+class _FalseBatchPlanner:
+    async def complete_json(self, **_kwargs):
+        return {"ops": [
+            {"op": "upsert_capability", "capability": {
+                "name": "submit", "title": "批量提交用印申请", "kind": "submit_batch",
+            }},
+            {"op": "upsert_input_field", "capability": "submit", "field": {
+                "key": "entries", "type": "array", "required": True, "confirmed": True,
+            }},
+            {"op": "set_loop_source", "capability": "submit", "items": "input.entries"},
+            {"op": "set_condition", "capability": "submit", "node": {
+                "id": "has_entries", "condition": "input.entries.length > 0", "then": [],
+            }},
+        ]}
+
+
+def test_single_form_defaults_to_submit_even_when_planner_invents_confirmed_entries():
+    spec = FlowSpec(
+        flow_id="single-seal-form",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            path="/oa/seal-apply/submit-process",
+            body_source='{"applyTitle":"测试","useInfo":"借章"}',
+            params=[
+                ParamField(path="applyTitle", key="申请标题", value="测试", required=True, category="user_param"),
+                ParamField(path="useInfo", key="使用描述", value="借章", required=True, category="user_param"),
+            ],
+            response_json={"code": 0},
+        )],
+    )
+
+    out = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        llm_client=_FalseBatchPlanner(),
+        model="fake",
+    ))
+    cap = out.capabilities[0]
+    messages = [*validate_flow_spec(out)["errors"], *validate_flow_spec(out)["warnings"]]
+
+    assert cap.kind == "submit"
+    assert cap.name == "submit"
+    assert "entries" not in (cap.input_schema.get("properties") or {})
+    assert not any(node.get("type") in {"foreach", "condition"}
+                   for node in flow_spec_module._iter_capability_nodes(cap.nodes))
+    assert not any("批量能力" in message or "entries" in message for message in messages)
+
+
+def test_user_capability_kind_transition_is_atomic_and_later_param_type_edit_stays_valid():
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/oa/seal-apply/submit-process",
+        body_source='{"applyTitle":"测试","useTime":"2026-07-13","backTime":"2026-07-14","useInfo":"借章","remark":"无"}',
+        params=[
+            ParamField(path="applyTitle", key="申请标题", value="测试", required=True, category="user_param"),
+            ParamField(path="useTime", key="使用日期", value="2026-07-13", required=True, category="user_param"),
+            ParamField(path="backTime", key="归还日期", value="2026-07-14", required=True, category="user_param"),
+            ParamField(path="useInfo", key="使用描述", value="借章", required=True, category="user_param"),
+            ParamField(path="remark", key="备注", value="无", required=True, category="user_param"),
+        ],
+        response_json={"code": 0, "data": "ok"},
+    )
+    spec = FlowSpec(
+        flow_id="atomic-kind",
+        steps=[submit],
+        capabilities=[FlowCapability(
+            name="submit_batch",
+            title="提交用印申请",
+            kind="submit",
+            step_ids=["submit"],
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+            confirmed=True,
+        )],
+    )
+
+    batch = apply_flow_edits(spec, [{
+        "op": "update_capability",
+        "capability_index": 0,
+        "field": "kind",
+        "value": "submit_batch",
+    }])
+    cap = batch.capabilities[0]
+    entries = cap.input_schema["properties"]["entries"]
+
+    assert cap.kind == "submit_batch"
+    assert entries["type"] == "array"
+    assert set(entries["items"]["properties"]) == {"申请标题", "使用日期", "归还日期", "使用描述", "备注"}
+    assert any(node.get("type") == "foreach" and node.get("items") == "input.entries"
+               for node in flow_spec_module._iter_capability_nodes(cap.nodes))
+    assert not any(node.get("id") == "has_entries" for node in flow_spec_module._iter_capability_nodes(cap.nodes))
+
+    changed = apply_flow_edits(batch, [{
+        "op": "update",
+        "step_id": "submit",
+        "param_path": "useTime",
+        "field": "type",
+        "value": "datetime",
+    }])
+    api_request, build_errors = flow_spec_to_api_request(changed)
+    findings = collect_capability_findings(api_request)
+    messages = [*build_errors, *validate_flow_spec(changed)["errors"], *[
+        str(item.get("detail") or "") for item in findings
+    ]]
+
+    assert changed.capabilities[0].input_schema["properties"]["entries"]["items"]["properties"]["使用日期"]["format"] == "date-time"
+    assert not any("未进入 input_schema" in message for message in messages)
+    assert not any("entries` 不存在" in message or "没有批量接口事实" in message for message in messages)
+
+    ordinary = apply_flow_edits(changed, [{
+        "op": "update_capability",
+        "capability_index": 0,
+        "field": "kind",
+        "value": "submit",
+    }])
+    ordinary_cap = ordinary.capabilities[0]
+    assert "entries" not in ordinary_cap.input_schema["properties"]
+    assert not any(node.get("type") in {"foreach", "condition"}
+                   for node in flow_spec_module._iter_capability_nodes(ordinary_cap.nodes))
 
 
 def test_auto_fix_deterministically_adds_batch_loop_maps_and_output():

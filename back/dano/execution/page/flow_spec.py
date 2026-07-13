@@ -2641,6 +2641,50 @@ def _merge_capability_scoped_dependencies(
     return out
 
 
+def _capability_inputs_from_top_level_schema(
+    schema: dict[str, Any],
+    existing: list[CapabilityField] | None = None,
+) -> list[CapabilityField]:
+    """Materialize aggregate capability inputs without leaking nested row fields.
+
+    Batch request fields live under ``entries[].*``.  Mirroring those same
+    ParamFields as top-level caller inputs makes the release validator demand
+    both ``entries`` and every row field, producing duplicated errors after an
+    otherwise unrelated type edit.
+    """
+    properties = dict((schema or {}).get("properties") or {})
+    required = {str(name) for name in ((schema or {}).get("required") or [])}
+    old_by_name = {
+        str(item.key or item.path or item.display_name): item
+        for item in (existing or [])
+        if not item.step_id
+    }
+    out: list[CapabilityField] = []
+    for name, raw in properties.items():
+        field_schema = raw if isinstance(raw, dict) else {}
+        previous = old_by_name.get(str(name))
+        field = previous.model_copy(deep=True) if previous is not None else CapabilityField(
+            field_id=f"input:{name}",
+            scope="input",
+            key=str(name),
+            path=str(name),
+            display_name=str(name),
+            source_kind="user_input",
+            category="user_param",
+            exposed_to_caller=True,
+        )
+        field.scope = "input"
+        field.key = str(name)
+        field.path = str(name)
+        field.display_name = field.display_name or str(name)
+        field.type = str(field_schema.get("type") or field.type or "string")
+        field.required = str(name) in required
+        field.step_id = ""
+        field.exposed_to_caller = True
+        out.append(field)
+    return out
+
+
 def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
     """从旧 steps/links/step_ids 派生能力内字段/依赖视图。"""
     ensure_request_facts(spec)
@@ -2721,7 +2765,16 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
             if not item.step_id
             and _schema_path_exists(cap.input_schema, item.path, item.key)
         ]
-        cap.inputs = _merge_capability_scoped_fields(list(inputs.values()), valid_old_inputs)
+        if _capability_is_batch(spec, cap):
+            cap.inputs = _capability_inputs_from_top_level_schema(cap.input_schema, valid_old_inputs)
+            nested_item_names = set(
+                (((cap.input_schema or {}).get("properties") or {}).get("entries") or {}).get("items", {}).get("properties", {})
+            )
+            for field in request_fields:
+                if field.step_id and field.key in nested_item_names:
+                    field.exposed_to_caller = False
+        else:
+            cap.inputs = _merge_capability_scoped_fields(list(inputs.values()), valid_old_inputs)
         cap.request_fields = request_fields
         cap.internal_fields = internal_fields
         cap.computed_fields = [item.model_copy(deep=True) for item in old_computed_fields]
@@ -4507,7 +4560,10 @@ def _capability_has_explicit_batch_intent(cap: FlowCapability) -> bool:
         return True
     if any(
         (field.key or field.path) in {"entries", "items"}
-        and (field.confirmed or field.locked or cap.updated_by == "user")
+        # ``confirmed`` alone is not operator evidence: Planner patch ops can
+        # emit confirmed fields.  Counting that as proof lets the Planner invent
+        # entries and then use its own invention to keep a false submit_batch.
+        and (field.locked or cap.updated_by == "user")
         for field in (cap.inputs or [])
     ):
         return True
@@ -10371,6 +10427,99 @@ def _find_capability_index(spec: FlowSpec, edit: dict[str, Any]) -> int:
     raise ValueError("capability not found")
 
 
+def _transition_capability_kind(spec: FlowSpec, cap: FlowCapability, value: Any) -> None:
+    """Atomically migrate submit contracts when the operator changes the kind."""
+    old_kind = str(cap.kind or "submit")
+    new_kind = str(value or "submit")
+    cap.kind = new_kind
+    if old_kind == new_kind or {old_kind, new_kind} - {"submit", "submit_batch"}:
+        return
+
+    by_id = {step.step_id: step for step in spec.steps}
+    cap_steps = [
+        by_id[step_id]
+        for step_id in _capability_node_step_ids(cap)
+        if step_id in by_id
+    ]
+    if not cap_steps:
+        return
+    write_steps = [step for step in cap_steps if _is_write_step(step)]
+    final_write = write_steps[-1] if write_steps else cap_steps[-1]
+
+    if new_kind == "submit_batch":
+        # Selecting "批量提交" is explicit operator intent. Build the complete
+        # executable contract in the same edit instead of leaving kind/schema/
+        # nodes in three mutually contradictory states.
+        cap.evidence = [
+            item for item in (cap.evidence or [])
+            if not (isinstance(item, dict) and item.get("kind") == "user_capability_kind")
+        ]
+        cap.evidence.append({
+            "kind": "user_capability_kind",
+            "batch_intent": True,
+            "repeated_submission": True,
+            "from": old_kind,
+            "to": new_kind,
+        })
+        cap.input_schema = _batch_capability_input_schema(cap_steps)
+        cap.inputs = _capability_inputs_from_top_level_schema(cap.input_schema, cap.inputs)
+        cap.nodes = _default_capability_nodes(cap_steps, kind="submit_batch", force_batch=True)
+        cap.output_schema = {
+            "type": "object",
+            "properties": {
+                "total": {"type": "number"},
+                "success_count": {"type": "number"},
+                "failed_count": {"type": "number"},
+                "results": {"type": "array", "items": {"type": "object"}},
+                "failed_items": {"type": "array", "items": {"type": "object"}},
+            },
+        }
+        cap.output_mapping = [
+            {"kind": "batch_result", "name": name, "response_path": name}
+            for name in ("total", "success_count", "failed_count", "results", "failed_items")
+        ]
+        if "批量" not in str(cap.title or ""):
+            cap.title = "批量" + (str(cap.title or "提交业务申请"))
+        return
+
+    # Leaving batch mode must remove every entries-dependent node/schema/relation
+    # in the same transaction; otherwise later field edits resurrect stale
+    # has_entries/foreach validation errors.
+    cap.evidence = [
+        item for item in (cap.evidence or [])
+        if not (
+            isinstance(item, dict)
+            and (
+                item.get("kind") == "user_capability_kind"
+                or item.get("batch_intent")
+                or item.get("repeated_submission")
+            )
+        )
+    ]
+    params = [param for step in cap_steps for param in (step.params or [])]
+    cap.input_schema = _capability_input_schema(params)
+    cap.nodes = _default_capability_nodes(cap_steps, kind="submit")
+    cap.output_mapping = [{
+        "kind": "final_response",
+        "name": "result",
+        "step_id": final_write.step_id,
+        "response_path": "response",
+    }]
+    cap.inputs = []
+    if "批量提交" in str(cap.title or ""):
+        cap.title = str(cap.title).replace("批量提交", "提交", 1)
+    elif str(cap.title or "").startswith("批量"):
+        cap.title = str(cap.title)[2:] or "提交业务申请"
+    cap_refs = {str(cap.name or ""), str(cap.capability_id or "")}
+    spec.capability_relations = [
+        relation for relation in (spec.capability_relations or [])
+        if not (
+            str(relation.to_capability or "") in cap_refs
+            and str(relation.to_input or "") in {"entries", "items"}
+        )
+    ]
+
+
 def _find_select_binding(step: FlowStep, param: ParamField) -> SelectBinding | None:
     for sel in step.selects:
         if sel.path == param.path or sel.param == param.key or (sel.id_path and sel.id_path == param.path):
@@ -10971,7 +11120,10 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 blockers = list(scoped.get("errors") or [])
                 if blockers:
                     raise ValueError("能力确认失败: " + "；".join(blockers[:8]))
-            setattr(cap, field, value)
+            if field == "kind":
+                _transition_capability_kind(new_spec, cap, value)
+            else:
+                setattr(cap, field, value)
             if field == "confirmed" and value:
                 cap.requires_human_confirm = False
                 cap.status = "confirmed"
@@ -11040,6 +11192,17 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 "upsert_output_field": "output",
             }.get(op, str(edit.get("scope") or "request_field"))
             raw = dict(edit.get("field_data") or edit.get("field") or {})
+            actor = str(edit.get("actor") or "user")
+            if actor == "planner":
+                # Planner output is a proposal. It cannot self-confirm/self-lock
+                # a synthetic aggregate field and then use that field as proof
+                # that the recorded request was batch-shaped.
+                raw["locked"] = False
+                raw["confirmed"] = False
+                raw["evidence"] = [
+                    *list(raw.get("evidence") or []),
+                    {"source": "planner_proposal"},
+                ]
             if "field" in edit and not isinstance(edit.get("field"), dict):
                 raw["key"] = str(edit.get("field") or "")
             for alias in ("field_id", "key", "path", "step_id", "request_id", "request_index", "type", "source_kind"):
@@ -11049,7 +11212,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 # Only capability-owned aggregate inputs/outputs are persisted on
                 # FlowCapability. Step-bound fields are redirected to ParamField.
                 _upsert_capability_field(new_spec.capabilities[idx], raw, default_scope=default_scope)
-            new_spec.capabilities[idx].updated_by = str(edit.get("actor") or "user")
+            new_spec.capabilities[idx].updated_by = actor
             _invalidate_capability_contract(new_spec.capabilities[idx])
             continue
 
