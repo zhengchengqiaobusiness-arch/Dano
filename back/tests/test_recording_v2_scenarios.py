@@ -939,6 +939,221 @@ def test_initial_generation_splits_empty_list_from_previous_page_without_changin
     )]
 
 
+def _seal_semantic_spec() -> FlowSpec:
+    return FlowSpec(steps=[
+        FlowStep(
+            step_id="seal-page", method="GET",
+            path="/admin-api/oa/seal-apply/page?pageNo=1&pageSize=10",
+            source_meta={"page_id": "page-list", "control_preflight_for_write": True},
+            response_json={"data": {"list": [], "total": 0}},
+            params=[
+                ParamField(
+                    path="query.useTime[0]", key="useTime[0]", value="2026-07-09 00:00:00",
+                    type="datetime", category="user_param", source_kind="user_input",
+                ),
+                ParamField(
+                    path="query.useTime[1]", key="useTime[1]", value="2026-08-11 23:59:59",
+                    type="datetime", category="user_param", source_kind="user_input",
+                ),
+            ],
+        ),
+        FlowStep(
+            step_id="definition", method="GET",
+            path="/admin-api/bpm/process-definition/get?key=oa_seal_apply",
+            source_meta={"page_id": "page-form", "control_preflight_for_write": True},
+        ),
+        FlowStep(
+            step_id="approval", method="GET",
+            path="/admin-api/bpm/process-instance/get-approval-detail",
+            source_meta={"page_id": "page-form", "control_preflight_for_write": True},
+        ),
+        FlowStep(
+            step_id="submit", method="POST", path="/admin-api/oa/seal-apply/submit-process",
+            source_meta={"page_id": "page-form"},
+            params=[
+                ParamField(path="sealId", key="印章编号", type="enum", category="user_param"),
+                ParamField(path="applyTitle", key="申请标题", category="user_param"),
+                ParamField(path="useTime", key="使用日期", type="datetime", category="user_param"),
+                ParamField(path="returnTime", key="归还日期", type="datetime", category="user_param"),
+                ParamField(path="description", key="使用描述", category="user_param"),
+                ParamField(path="remark", key="备注", category="user_param"),
+            ],
+        ),
+    ])
+
+
+class _CompleteSemanticPlanner:
+    def __init__(self):
+        self.requests = []
+
+    async def complete_json_messages(self, **kwargs):
+        self.requests.append(kwargs["messages"])
+        return {
+            "semantic_plan": {
+                "business_understanding": {
+                    "intent": "查询公章借阅记录并提交公章借阅申请",
+                },
+                "request_roles": [
+                    {"step_id": "seal-page", "role": "business_query", "name": "查询公章借阅记录", "reason": "列表页查询"},
+                    {"step_id": "definition", "role": "submit_preflight", "name": "获取公章申请流程定义", "reason": "提交前流程定义"},
+                    {"step_id": "approval", "role": "submit_preflight", "name": "获取公章申请审批配置", "reason": "提交前审批配置"},
+                    {"step_id": "submit", "role": "business_write", "name": "提交公章借阅申请", "reason": "最终写接口"},
+                ],
+                "field_semantics": [
+                    {
+                        "step_id": step.step_id,
+                        "wire_path": param.path,
+                        "public_name": {
+                            "query.useTime[0]": "查询开始时间",
+                            "query.useTime[1]": "查询结束时间",
+                        }.get(param.path, param.key),
+                        "business_type": param.type,
+                        "source_kind": param.source_kind,
+                        "confidence": 0.99,
+                    }
+                    for step in _seal_semantic_spec().steps
+                    for param in step.params
+                ],
+                "capabilities": [
+                    {
+                        "name": "query_status", "kind": "query_status",
+                        "title": "查询公章借阅记录", "intent": "查询现有公章借阅记录",
+                        "step_ids": ["seal-page"],
+                    },
+                    {
+                        "name": "submit", "kind": "submit",
+                        "title": "提交公章借阅申请", "intent": "提交单个公章借阅申请",
+                        "step_ids": ["definition", "approval", "submit"],
+                    },
+                ],
+                "capability_relations": [{
+                    "from": "query_status", "to": "submit", "type": "caller_decision",
+                }],
+                "unresolved_items": [],
+            },
+            "ops": [],
+        }
+
+
+def test_initial_semantic_generation_names_indexed_range_inherits_context_and_reuses_result():
+    planner = _CompleteSemanticPlanner()
+    generated = asyncio.run(run_recording_pi_loop(
+        _seal_semantic_spec(), llm_client=planner, model="semantic-model", mode="plan",
+    ))
+
+    query = next(step for step in generated.steps if step.step_id == "seal-page")
+    assert [(param.key, param.path) for param in query.params if "useTime" in param.path] == [
+        ("查询开始时间", "query.useTime[0]"),
+        ("查询结束时间", "query.useTime[1]"),
+    ]
+    assert {cap.kind for cap in generated.capabilities} == {"query_status", "submit"}
+    assert {step.step_id: step.name for step in generated.steps} == {
+        "seal-page": "查询公章借阅记录",
+        "definition": "获取公章申请流程定义",
+        "approval": "获取公章申请审批配置",
+        "submit": "提交公章借阅申请",
+    }
+    assert generated.meta["capability_generation"]["initial_completed"] is True
+    assert generated.meta["capability_generation"]["status"] == "ready"
+    initial_call_count = len(planner.requests)
+    assert 2 <= initial_call_count <= 8  # plan/repair loop is bounded
+    assert planner.requests[1][:3] == planner.requests[0]
+
+    optimized = asyncio.run(run_recording_pi_loop(
+        generated, llm_client=planner, model="semantic-model", mode="plan",
+    ))
+    assert len(planner.requests) == initial_call_count
+    assert optimized.meta["recording_pi_loop"]["cache_hit"] is True
+
+
+def test_small_manual_change_runs_one_incremental_planner_then_reuses_result():
+    initial_planner = _CompleteSemanticPlanner()
+    generated = asyncio.run(run_recording_pi_loop(
+        _seal_semantic_spec(), llm_client=initial_planner, model="semantic-model", mode="plan",
+    ))
+    submit = next(step for step in generated.steps if step.step_id == "submit")
+    remark = next(param for param in submit.params if param.path == "remark")
+    remark.required = False
+    remark.required_source = "manual"
+
+    class DeltaPlanner:
+        def __init__(self):
+            self.requests = []
+
+        async def complete_json_messages(self, **kwargs):
+            self.requests.append(kwargs["messages"])
+            return {
+                "reviewed_scope": {
+                    "changed_fields": ["submit:remark"],
+                    "affected_capabilities": ["submit"],
+                    "reason": "调用方将备注改为可选",
+                },
+                "ops": [],
+                "unresolved_items": [],
+            }
+
+    delta_planner = DeltaPlanner()
+    optimized = asyncio.run(run_recording_pi_loop(
+        generated, llm_client=delta_planner, model="semantic-model", mode="plan",
+    ))
+
+    assert len(delta_planner.requests) == 1
+    assert "增量优化" in delta_planner.requests[0][-1]["content"]
+    assert optimized.meta["capability_generation"]["application_cache_hit"] is False
+    assert optimized.meta["capability_generation"]["model_calls"] == 1
+
+    reused = asyncio.run(run_recording_pi_loop(
+        optimized, llm_client=delta_planner, model="semantic-model", mode="plan",
+    ))
+    assert len(delta_planner.requests) == 1
+    assert reused.meta["capability_generation"]["application_cache_hit"] is True
+    assert reused.meta["capability_generation"]["model_calls"] == 0
+
+
+def test_indexed_range_semantics_are_grounded_even_when_model_is_unavailable():
+    generated = asyncio.run(run_recording_pi_loop(
+        _seal_semantic_spec(), llm_client=None, model=None, mode="plan",
+    ))
+    query = next(step for step in generated.steps if step.step_id == "seal-page")
+    assert [(param.key, param.path) for param in query.params if "useTime" in param.path] == [
+        ("查询开始时间", "query.useTime[0]"),
+        ("查询结束时间", "query.useTime[1]"),
+    ]
+    assert generated.meta["capability_generation"]["status"] == "degraded_deterministic"
+
+
+def test_complete_semantic_plan_can_split_one_deterministic_write_family_on_first_run():
+    class SplitPlanner:
+        async def complete_json(self, **_kwargs):
+            return {"semantic_plan": {
+                "business_understanding": {"intent": "分别保存草稿并提交订单"},
+                "request_roles": [
+                    {"step_id": "draft", "role": "business_write", "name": "保存订单草稿", "reason": "独立保存动作"},
+                    {"step_id": "commit", "role": "business_write", "name": "提交订单", "reason": "独立提交动作"},
+                ],
+                "field_semantics": [],
+                "capabilities": [
+                    {"name": "save_draft", "title": "保存订单草稿", "kind": "submit", "intent": "保存草稿", "step_ids": ["draft"]},
+                    {"name": "commit_order", "title": "提交订单", "kind": "submit", "intent": "提交订单", "step_ids": ["commit"]},
+                ],
+                "capability_relations": [],
+                "unresolved_items": [],
+            }, "ops": []}
+
+    spec = FlowSpec(steps=[
+        FlowStep(step_id="draft", method="POST", path="/api/order/draft", body_source="{}"),
+        FlowStep(step_id="commit", method="POST", path="/api/order/commit", body_source="{}"),
+    ])
+    generated = asyncio.run(orchestrate_flow_capabilities(
+        spec, llm_client=SplitPlanner(), model="semantic", generation_mode="initial",
+    ))
+
+    assert {(cap.name, tuple(cap.step_ids)) for cap in generated.capabilities} == {
+        ("save_draft", ("draft",)),
+        ("commit_order", ("commit",)),
+    }
+
+
 class _InitialSingleCapabilityPlanner:
     async def complete_json(self, **_kwargs):
         return {

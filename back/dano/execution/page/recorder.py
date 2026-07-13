@@ -215,13 +215,46 @@ _RECORDER_JS = r"""() => {
   function requiredOf(el) {                       // 该字段是否必填:读表单 * 标记(通用,跨 Element-UI / Ant / 原生)
     try {
       if (el.required || el.getAttribute('aria-required') === 'true') return true;
-      var item = el.closest('.el-form-item,.ant-form-item,[class*="form-item"],[class*="form_item"]');
-      if (item && /required/i.test(item.className)) return true;   // el is-required / ant-form-item-required
-      var lab = item && item.querySelector('label');
-      if (lab && lab.textContent.indexOf('*') >= 0) return true;   // 少数把 * 直接写进 label 文本
+      // Do not stop at an inner ``form-item__content`` node.  Date ranges,
+      // cascaders and composed controls often put ``is-required`` on an outer
+      // form item while the actual input is nested several levels below it.
+      var node = el; var depth = 0;
+      while (node && depth++ < 12) {
+        if (node.getAttribute && node.getAttribute('aria-required') === 'true') return true;
+        var cls = String(node.className || '');
+        var isFormItem = /(?:^|\s)(?:el-form-item|ant-form-item)(?:\s|$)/.test(cls) || /form[-_]item/i.test(cls);
+        if (isFormItem && /(?:^|[-_\s])(?:is-)?required(?:[-_\s]|$)/i.test(cls)) return true;
+        if (isFormItem) {
+          var lab = node.querySelector && node.querySelector('label');
+          if (lab && String(lab.textContent || '').indexOf('*') >= 0) return true;
+        }
+        node = node.parentElement;
+      }
     } catch (e) {}
     return false;
   }
+  window.__danoRequiredFields = function () {
+    var out = {};
+    try {
+      var controls = document.querySelectorAll('input,select,textarea,[role="textbox"],[role="combobox"],[role="spinbutton"]');
+      for (var i = 0; i < controls.length; i++) {
+        var el = controls[i];
+        if (!requiredOf(el)) continue;
+        var loc = locateField(el); var name = fieldOf(loc);
+        if (clean(name)) out[clean(name)] = true;
+        var lt = labelText(el); if (clean(lt)) out[clean(lt)] = true;
+      }
+      var items = document.querySelectorAll('.el-form-item,.ant-form-item,[class*="form-item"],[class*="form_item"]');
+      for (var j = 0; j < items.length; j++) {
+        var item = items[j]; var cls = String(item.className || '');
+        var lab = item.querySelector && item.querySelector('label');
+        var marked = /(?:^|[-_\s])(?:is-)?required(?:[-_\s]|$)/i.test(cls)
+          || (lab && String(lab.textContent || '').indexOf('*') >= 0);
+        if (marked && lab && clean(lab.textContent)) out[clean(String(lab.textContent).replace(/\*/g, ''))] = true;
+      }
+    } catch (e) {}
+    return Object.keys(out);
+  };
   function emit(op, loc, value, field, required, options) {
     if (!loc || onLoginPage()) return;            // 登录页上的任何操作一律不录(自动跳过登录,免手点「从这里开始录」)
     try { window.__danoRecord(JSON.stringify({ op: op, locator: loc, value: value || '', field: field || '', required: !!required, options: options || [] })); } catch (e) {}
@@ -1189,6 +1222,28 @@ class RecordSession:
             if self.steps[i].get("required")
             and self.steps[i].get("op") in ("fill", "select", "pick")
         }
+
+    async def observed_required_labels(self) -> set[str]:
+        """Scan the live page for required controls, including untouched fields."""
+        out: set[str] = set()
+        if self.page is None:
+            return out
+        # The active page owns the submit form. Scanning every still-open tab
+        # would let an unrelated required label from an earlier page leak into
+        # the current request's field contract. Recorded interactions already
+        # preserve required evidence for earlier pages.
+        for frame in list(self.page.frames):
+            try:
+                labels = await frame.evaluate(
+                    "() => window.__danoRequiredFields ? window.__danoRequiredFields() : []"
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            for label in labels or []:
+                text = str(label or "").strip()
+                if text:
+                    out.add(text)
+        return out
 
     async def stop(self) -> None:
         self._closing = True         # 先置位:此后任何 page close 事件都不再重开截屏(避免在关闭中的 context 上 new_cdp_session)

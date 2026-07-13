@@ -63,6 +63,12 @@ class ParamField(BaseModel):
     type: str = "string"  # string/number/boolean/datetime/date/array/object/list-enum
     wire_type: str = ""  # immutable request-leaf transport type before business projection
     required: bool = True
+    # ``page_required`` is evidence captured from the live form. ``required``
+    # remains the public/caller requirement for backward compatibility.  They
+    # intentionally differ for values supplied by identity, constants,
+    # previous responses or other runtime sources.
+    page_required: bool | None = None
+    required_source: str = ""  # page / conservative / runtime_source / manual
     confidence: float = 0.0
     confidence_tier: str = "auto"
     name_source: str = "auto"
@@ -1368,6 +1374,15 @@ def _build_step_from_capture(
                 "option_map": enum_value_map or {},
             })
 
+        caller_owned = bool(
+            source_guess["category"] == "user_param"
+            and source_guess["exposed_to_user"]
+            and source_guess["source_kind"] not in {
+                "previous_response", "current_user", "storage", "cookie",
+                "page_context", "request_header", "system_time",
+                "system_generated", "computed", "constant", "loop_item",
+            }
+        )
         params.append(ParamField(
             path=path,
             key=nm,
@@ -1375,7 +1390,12 @@ def _build_step_from_capture(
             value=str(f.get("value") or ""),
             type=ptype,
             wire_type=wire_type,
-            required=bool(f.get("required")),
+            required=bool(f.get("required")) and caller_owned,
+            page_required=f.get("page_required"),
+            required_source=(
+                str(f.get("required_source") or "page")
+                if caller_owned else "runtime_source"
+            ),
             confidence=float(f.get("confidence") or 0.0),
             confidence_tier=f.get("confidence_tier") or "auto",
             name_source=ns,
@@ -2752,7 +2772,7 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
             request_id = request_id_by_step.get(st.step_id, "")
             for param in st.params:
                 request_fields.append(_capability_field_from_param(st, param, scope="request_field", request_id=request_id))
-                if param.category == "user_param" and param.exposed_to_user:
+                if _param_exposed_to_caller(param):
                     key = param.key or param.label or param.path
                     inputs.setdefault(key, _capability_field_from_param(st, param, scope="input", request_id=request_id))
                 else:
@@ -3993,11 +4013,31 @@ def _business_type_for_param(param: ParamField) -> str:
     }.get(ptype, "text")
 
 
+_RUNTIME_SUPPLIED_SOURCE_KINDS = frozenset({
+    "previous_response", "current_user", "storage", "cookie", "page_context",
+    "request_header", "system_time", "system_generated", "computed",
+    "constant", "loop_item",
+})
+
+
+def _param_exposed_to_caller(param: ParamField) -> bool:
+    """Whether the caller, rather than the workflow runtime, supplies a value."""
+    return bool(
+        param.category == "user_param"
+        and param.exposed_to_user
+        and param.source_kind not in _RUNTIME_SUPPLIED_SOURCE_KINDS
+    )
+
+
+def _param_requires_caller_input(param: ParamField) -> bool:
+    return bool(param.required and _param_exposed_to_caller(param))
+
+
 def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
     props: dict[str, Any] = {}
     required: list[str] = []
     for p in params:
-        if p.category != "user_param" or not p.exposed_to_user:
+        if not _param_exposed_to_caller(p):
             continue
         key = p.key or p.path
         if key in props:
@@ -4014,7 +4054,7 @@ def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
                     "business_type": candidate_business,
                     "wire_type": candidate_wire,
                 })
-            if p.required and key not in required:
+            if _param_requires_caller_input(p) and key not in required:
                 required.append(key)
             continue
         props[key] = _schema_for_param_type(p.type)
@@ -4057,7 +4097,7 @@ def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
                     props[key]["enum"] = labels
         if p.enum_value_map:
             props[key]["x-enum-value-map"] = dict(p.enum_value_map)
-        if p.required:
+        if _param_requires_caller_input(p):
             required.append(key)
     return {"type": "object", "properties": props, "required": required}
 
@@ -4086,7 +4126,7 @@ def _recorded_goal_from_parts(title: str, steps: list[FlowStep], risk_level: str
     params: list[str] = []
     for st in steps:
         for p in st.params:
-            if p.category == "user_param" and p.exposed_to_user and p.key and p.key not in params:
+            if _param_requires_caller_input(p) and p.key and p.key not in params:
                 params.append(p.key)
     capabilities: list[str] = []
     if read_steps:
@@ -4117,10 +4157,11 @@ def _recorded_goal_from_parts(title: str, steps: list[FlowStep], risk_level: str
 
 
 def _recorded_user_param_names(steps: list[FlowStep]) -> list[str]:
+    """Required public inputs used by RecordedGoal.required_inputs."""
     params: list[str] = []
     for st in steps:
         for p in st.params:
-            if p.category == "user_param" and p.exposed_to_user and p.key and p.key not in params:
+            if _param_requires_caller_input(p) and p.key and p.key not in params:
                 params.append(p.key)
     return params
 
@@ -4647,7 +4688,7 @@ def _legacy_suggest_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
                 },
             },
             confirmed=False,
-            confidence=0.9 if kind == "submit_batch" else 0.95,
+            confidence=0.95,
             requires_human_confirm=True,
             evidence=[_step_evidence(s) for s in read_steps],
             caller_responsibilities=["根据结构化查询结果与最终用户确认下一步"],
@@ -4734,7 +4775,7 @@ def _json_schema_for_params(params: list[ParamField]) -> dict[str, Any]:
     properties: dict[str, Any] = {}
     required: list[str] = []
     for p in params:
-        if p.category != "user_param" or not p.exposed_to_user:
+        if not _param_exposed_to_caller(p):
             continue
         name = (p.key or p.path or "").strip()
         if not name or name in properties:
@@ -4772,7 +4813,7 @@ def _json_schema_for_params(params: list[ParamField]) -> dict[str, Any]:
                 else:
                     prop["enum"] = labels
         properties[name] = prop
-        if p.required:
+        if _param_requires_caller_input(p):
             required.append(name)
     return {
         "type": "object",
@@ -5710,9 +5751,259 @@ def _with_default_capabilities(spec: FlowSpec) -> FlowSpec:
     return sync_flow_spec_models(spec, prefer_request_facts=False)
 
 
+_FLOW_SEMANTIC_SYSTEM = """你是企业录制型 Skill 的业务语义架构师。
+真实接口、字段 wire path、响应路径、用户锁定和删除记录是不可编造的事实。
+首次生成必须完整覆盖业务理解、接口角色、字段语义、能力、编排节点和能力关系；
+后续轮次继承已接受结论，只根据校验差量补强。所有输出必须是 JSON 对象。
+模型负责提出完整语义模型，代码负责白名单、编译、校验和安全准入。"""
+
+def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
+    """Build a stable, non-volatile recording fact prefix for model reuse."""
+    graph = _request_graph_for_spec(spec)
+    return {
+        "protocol": "dano.recording-semantic-facts.v1",
+        "tenant": spec.tenant,
+        "subsystem": spec.subsystem,
+        "title": spec.title,
+        "recording_mode": spec.recording_mode,
+        "risk_level": spec.risk_level,
+        "steps": [
+            {
+                "step_id": step.step_id,
+                "method": (step.method or "GET").upper(),
+                "path": step.path or step.url,
+                "page_id": _step_page_id_from_facts(spec, step),
+                "role": (step.source_meta or {}).get("role") or step.semantic_role,
+                "sequence": (step.source_meta or {}).get("sequence"),
+                "params": [
+                    {
+                        "path": param.path,
+                        "key": param.key,
+                        "label": param.label,
+                        "business_type": param.type,
+                        "wire_type": param.wire_type,
+                        "category": param.category,
+                        "source_kind": param.source_kind,
+                        "caller_required": _param_requires_caller_input(param),
+                        "page_required": param.page_required,
+                        "required_source": param.required_source,
+                        "exposed": bool(param.exposed_to_user),
+                        "locked": bool(param.locked),
+                    }
+                    for param in step.params
+                ],
+                "response_paths": sorted({
+                    str(path) for path, *_ in (_leaf_paths(step.response_json) if step.response_json is not None else [])
+                }),
+            }
+            for step in spec.steps
+        ],
+        "links": sorted([
+            {
+                "source_step_id": link.source_step_id,
+                "source_path": link.source_path,
+                "target_step_id": link.target_step_id,
+                "target_path": link.target_path,
+                "confirmed": bool(link.confirmed),
+                "confidence": float(link.confidence or 0),
+            }
+            for link in spec.links
+        ], key=lambda item: (
+            item["source_step_id"], item["source_path"], item["target_step_id"], item["target_path"]
+        )),
+        "captured_requests": [
+            {
+                "request_id": request.get("request_id"),
+                "request_index": request.get("request_index"),
+                "method": request.get("method"),
+                "path": request.get("path") or request.get("url"),
+                "page_id": request.get("page_id"),
+                "role": request.get("role"),
+                "confidence": request.get("confidence"),
+                "reason": request.get("reason"),
+            }
+            for request in (graph.get("all_requests") or [])
+        ],
+        "manual_constraints": {
+            "removed_capabilities": sorted(str(item) for item in ((spec.meta or {}).get("removed_capabilities") or [])),
+            "removed_capability_steps": {
+                str(name): sorted(str(item) for item in values or [])
+                for name, values in sorted(((spec.meta or {}).get("capability_removed_steps") or {}).items())
+            },
+        },
+    }
+
+
+def _semantic_fact_hash(spec: FlowSpec) -> str:
+    # Public names, inferred types and confirmation state are mutable contract
+    # decisions.  The generation epoch changes only when the recorded wire
+    # facts change, not when an operator renames a field.
+    payload = {
+        "steps": [
+            {
+                "step_id": step.step_id,
+                "method": (step.method or "GET").upper(),
+                "path": step.path or step.url,
+                "page_id": _step_page_id_from_facts(spec, step),
+                "param_paths": sorted(param.path for param in step.params),
+                "response_paths": sorted({
+                    str(path) for path, *_ in (_leaf_paths(step.response_json) if step.response_json is not None else [])
+                }),
+            }
+            for step in spec.steps
+        ],
+        "request_ids": sorted(
+            (str(fact.request_id or ""), str(fact.request_index if fact.request_index is not None else ""))
+            for fact in spec.request_facts.requests or []
+        ),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _compact_semantic_plan(plan: dict[str, Any] | None) -> dict[str, Any]:
+    """Bounded semantic memory shared by later Planner/Repair turns."""
+    if not isinstance(plan, dict):
+        return {}
+
+    def project(items: Any, keys: tuple[str, ...], limit: int = 160) -> list[dict[str, Any]]:
+        return [
+            {key: item.get(key) for key in keys if item.get(key) not in (None, "", [], {})}
+            for item in (items or [])[:limit]
+            if isinstance(item, dict)
+        ]
+
+    understanding = plan.get("business_understanding")
+    if isinstance(understanding, dict):
+        understanding = {
+            key: value for key, value in understanding.items()
+            if key in {"intent", "summary", "object", "workflow", "business_name", "constraints"}
+        }
+    return {
+        "business_understanding": understanding or {},
+        "request_roles": project(
+            plan.get("request_roles"), ("step_id", "role", "name", "title", "reason")
+        ),
+        "field_semantics": project(
+            plan.get("field_semantics"),
+            ("step_id", "wire_path", "public_name", "business_type", "source_kind", "confidence"),
+            limit=320,
+        ),
+        "capabilities": project(
+            plan.get("capabilities"), ("name", "title", "kind", "intent", "step_ids")
+        ),
+        "capability_relations": project(
+            plan.get("capability_relations"),
+            ("from_capability", "from_output", "to_capability", "to_input", "confidence"),
+        ),
+        "unresolved_items": list(plan.get("unresolved_items") or [])[:80],
+    }
+
+
+@dataclass
+class _SemanticConversation:
+    """One recording PI run with an exact reusable prompt prefix."""
+
+    client: Any
+    model: str
+    facts: dict[str, Any]
+    timeout_s: float
+    messages: list[dict[str, str]] = None  # type: ignore[assignment]
+    calls: int = 0
+    cache_hits: int = 0
+    prompt_tokens: int = 0
+    cached_tokens: int = 0
+    completion_tokens: int = 0
+
+    def __post_init__(self) -> None:
+        self.messages = [
+            {"role": "system", "content": _FLOW_SEMANTIC_SYSTEM},
+            {
+                "role": "user",
+                "content": "【稳定录制事实】\n" + json.dumps(
+                    self.facts, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+                ),
+            },
+        ]
+
+    async def complete(self, *, task: str, payload: dict[str, Any]) -> dict[str, Any]:
+        user_message = {
+            "role": "user",
+            "content": task + "\n【本轮差量】\n" + json.dumps(
+                payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+            ),
+        }
+        request_messages = [*self.messages, user_message]
+        if hasattr(self.client, "complete_json_messages"):
+            result = await self.client.complete_json_messages(
+                model=self.model,
+                messages=request_messages,
+                timeout_s=self.timeout_s,
+            )
+            self.calls += 1
+        else:
+            # Existing test fakes and third-party clients keep working.  The
+            # tagged transcript still provides semantic inheritance even when
+            # that client only exposes the legacy two-message method.
+            transcript = "\n\n".join(
+                f"<{message['role']}>\n{message['content']}\n</{message['role']}>"
+                for message in request_messages[1:]
+            )
+            result = await self.client.complete_json(
+                model=self.model,
+                system=_FLOW_SEMANTIC_SYSTEM,
+                user=transcript,
+                timeout_s=self.timeout_s,
+            )
+            self.calls += 1
+        usage = getattr(self.client, "last_usage", None)
+        if isinstance(usage, dict):
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            cached_tokens = int(usage.get("cached_tokens") or 0)
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+            self.prompt_tokens += prompt_tokens
+            self.cached_tokens += cached_tokens
+            self.completion_tokens += completion_tokens
+            if cached_tokens:
+                self.cache_hits += 1
+        if not isinstance(result, dict):
+            result = {}
+        # Preserve dialogue inheritance without replaying the model's entire
+        # verbose JSON on every later turn.  The accepted FlowSpec delta is in
+        # the next user payload; this compact memory only carries conclusions.
+        semantic_plan = (
+            result.get("semantic_plan") if isinstance(result.get("semantic_plan"), dict)
+            else (result.get("plan") if isinstance(result.get("plan"), dict) else {})
+        )
+        compact_result = {
+            "semantic_plan": _compact_semantic_plan(semantic_plan),
+            "reviewed_scope": result.get("reviewed_scope") or {},
+            "unresolved_items": result.get("unresolved_items") or semantic_plan.get("unresolved_items") or [],
+            "ops": [
+                {
+                    key: op.get(key)
+                    for key in ("op", "capability", "step_id", "path", "from_capability", "to_capability")
+                    if op.get(key) not in (None, "")
+                }
+                for op in (result.get("ops") or [])[:40]
+                if isinstance(op, dict)
+            ],
+        }
+        self.messages.extend([
+            user_message,
+            {
+                "role": "assistant",
+                "content": json.dumps(compact_result, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str),
+            },
+        ])
+        return result
+
+
 _FLOW_ORCHESTRATE_SYSTEM = """你是企业 OA/API 录制结果的 Skill 编排器。
-只输出 JSON，不要输出解释。
-目标：根据真实捕获请求和当前能力编排，输出能力级增量 patch ops。
+这是首次完整生成或后续补强任务。只输出 JSON，不要输出解释。
+首次必须先输出覆盖全部已物化接口、全部对外字段和全部能力关系的完整 semantic_plan，
+再输出可落地的增量 patch ops；后续补强也必须说明复核覆盖范围。
+目标：根据真实捕获请求和当前能力编排，输出完整业务语义蓝图及能力级增量 patch ops。
 要求：
 - 优先输出 {"ops":[...]}，不要整份覆盖 capabilities。
 - 每个 op 必须指向已有 capability/step/request/path，不能编造接口。
@@ -5728,6 +6019,7 @@ _FLOW_ORCHESTRATE_SYSTEM = """你是企业 OA/API 录制结果的 Skill 编排�
 - 条件分支必须用 condition 节点表达，condition/check 只能引用 input.*、var.*、已执行 step_id 响应或 node.*。
 - 字段转换/响应取值必须用 map 节点表达 source/target，不要靠文字说明隐藏。
 - output_mapping 默认指向最后一个步骤 response。
+- page_required 表示页面控件约束；caller_required 只表示外部调用者必须提供。由登录态、常量、上游响应、系统时间、计算或页面上下文提供的字段即使页面必填，也不得加入调用方 required。
 允许 ops：
 - {"op":"upsert_capability","capability":{"name":"...","title":"...","kind":"query_status|validate_batch|submit_batch|submit","intent":"..."}}
 - 首次编排且 scope_locked=false 时可用 {"op":"add_request_to_capability","capability":"...","step_id":"..."}，step_id 必须已经存在于当前 FlowSpec；禁止通过 request_id/request_index 偷偷扩张接口范围。
@@ -5740,8 +6032,19 @@ _FLOW_ORCHESTRATE_SYSTEM = """你是企业 OA/API 录制结果的 Skill 编排�
 - {"op":"set_output_mapping","capability":"...","mapping":[{"kind":"final_response","step_id":"...","response_path":"response"}]}
 - {"op":"set_capability_relation","from_capability":"query_status","from_output":"missing_dates","to_capability":"submit_batch","to_input":"entries","confidence":0.8}
 兼容旧格式：如果你只能输出 abilities，也必须保证不覆盖已确认内容。
-JSON 形态优先：
-{"ops":[...]}
+JSON 形态：
+{"semantic_plan":{"business_understanding":{},"request_roles":[],"field_semantics":[],"capabilities":[],"capability_relations":[],"unresolved_items":[]},"ops":[...]}
+其中 request_roles 每项必须包含 step_id、role、业务 name/title 和 reason；field_semantics 每项必须包含
+step_id、wire_path、public_name、business_type、source_kind、confidence 和 evidence。
+"""
+
+_FLOW_OPTIMIZE_SYSTEM = """你正在增量优化一个已经完成首次语义建模的录制 Skill。
+只输出 JSON，不要重述完整 FlowSpec，也不要重新输出完整 semantic_plan。
+稳定录制事实和已接受语义记忆已经在上下文中；只检查本轮变更及其直接影响。
+scope_locked=true 时禁止新增、删除、合并能力或接口，禁止覆盖用户确认/锁定内容。
+只返回确有依据且能改善当前合同的白名单 ops；无需修改时 ops 必须为空。
+JSON 形态：{"reviewed_scope":{"changed_fields":[],"affected_capabilities":[],"reason":""},"ops":[],"unresolved_items":[]}。
+允许的 ops 与首次编排一致，但只能引用已有 capability、step、request 和 wire path。
 """
 
 
@@ -6018,6 +6321,282 @@ def _merge_capability_lists(
     } | {
         str(x) for x in (((spec.meta or {}).get("removed_capability_kinds") or []) if spec is not None else [])
     }
+    return _merge_capability_lists_impl(
+        existing,
+        generated,
+        spec=spec,
+        allow_new=allow_new,
+        removed_capabilities=removed_capabilities,
+        removed_families=removed_families,
+    )
+
+
+def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Compile a model's complete semantic blueprint into the existing edit DSL."""
+    plan = result.get("semantic_plan") or result.get("plan")
+    if not isinstance(plan, dict):
+        return []
+    ops: list[dict[str, Any]] = []
+    step_ids = {step.step_id for step in spec.steps}
+    by_kind: dict[str, list[FlowCapability]] = {}
+    for capability in spec.capabilities or []:
+        by_kind.setdefault(capability.kind, []).append(capability)
+    plan_capabilities = [
+        item for item in (plan.get("capabilities") or [])
+        if isinstance(item, dict)
+    ]
+    plan_by_kind: dict[str, list[dict[str, Any]]] = {}
+    for item in plan_capabilities:
+        plan_by_kind.setdefault(str(item.get("kind") or ""), []).append(item)
+    split_kinds: set[str] = set()
+    for kind, items in plan_by_kind.items():
+        existing_for_kind = by_kind.get(kind) or []
+        if len(existing_for_kind) != 1 or len(items) <= 1:
+            continue
+        baseline_steps = set(_capability_node_step_ids(existing_for_kind[0]))
+        planned_sets = [
+            {str(value) for value in (item.get("step_ids") or []) if str(value) in step_ids}
+            for item in items
+        ]
+        if baseline_steps and all(values and values.issubset(baseline_steps) for values in planned_sets):
+            if set().union(*planned_sets) == baseline_steps:
+                split_kinds.add(kind)
+    used_existing: set[str] = set()
+    capability_name_map: dict[str, str] = {}
+
+    step_by_id = {step.step_id: step for step in spec.steps}
+    for item in plan.get("request_roles") or []:
+        if not isinstance(item, dict):
+            continue
+        step_id = str(item.get("step_id") or "")
+        business_name = str(item.get("name") or item.get("title") or "").strip()
+        step = step_by_id.get(step_id)
+        if step is None or not business_name:
+            continue
+        current_name = str(step.name or "").strip()
+        technical_name = not current_name or bool(re.match(r"^(?:GET|POST|PUT|PATCH|DELETE)_", current_name, re.I))
+        if technical_name:
+            ops.append({"op": "rename_step", "step_id": step_id, "name": business_name})
+
+    for item in plan.get("field_semantics") or []:
+        if not isinstance(item, dict):
+            continue
+        step_id = str(item.get("step_id") or "")
+        path = str(item.get("path") or item.get("wire_path") or "")
+        public_name = str(
+            item.get("public_name") or item.get("business_name") or item.get("label") or ""
+        ).strip()
+        confidence = float(item.get("confidence") or 0.0)
+        if step_id in step_ids and path and public_name and confidence >= 0.8:
+            ops.append({
+                "op": "rename_field",
+                "step_id": step_id,
+                "path": path,
+                "label": public_name,
+                "confidence": confidence,
+                "evidence": item.get("evidence") or [],
+            })
+
+    for item in plan_capabilities:
+        kind = str(item.get("kind") or "")
+        if kind not in {"query_status", "validate_batch", "submit_batch", "submit"}:
+            continue
+        proposed_steps = [str(value) for value in (item.get("step_ids") or []) if str(value) in step_ids]
+        candidates = by_kind.get(kind) or []
+        available = [
+            capability for capability in candidates
+            if capability.capability_id not in used_existing
+        ]
+        existing = None if kind in split_kinds else max(
+            available,
+            key=lambda capability: len(set(_capability_node_step_ids(capability)) & set(proposed_steps)),
+            default=None,
+        )
+        if existing is not None:
+            used_existing.add(existing.capability_id)
+        proposed_name = str(item.get("name") or kind)
+        name = str((existing.name if existing is not None else None) or proposed_name)
+        if name in {cap.name for cap in spec.capabilities} and existing is None:
+            name = _flow_capability_id(kind, str(item.get("title") or proposed_name))
+        capability_name_map[proposed_name] = name
+        ops.append({
+            "op": "upsert_capability",
+            "capability": {
+                "name": name,
+                "title": str(item.get("title") or name),
+                "kind": kind,
+                "intent": str(item.get("intent") or item.get("description") or ""),
+            },
+        })
+        for step_id in proposed_steps:
+            ops.append({
+                "op": "add_request_to_capability",
+                "capability": name,
+                "step_id": step_id,
+            })
+
+    for relation in plan.get("capability_relations") or []:
+        if not isinstance(relation, dict):
+            continue
+        source_raw = str(relation.get("from_capability") or relation.get("from") or "")
+        target_raw = str(relation.get("to_capability") or relation.get("to") or "")
+        source = capability_name_map.get(source_raw, source_raw)
+        target = capability_name_map.get(target_raw, target_raw)
+        if source and target:
+            ops.append({
+                "op": "set_capability_relation",
+                "from_capability": source,
+                "from_output": str(relation.get("from_output") or ""),
+                "to_capability": target,
+                "to_input": str(relation.get("to_input") or ""),
+                "type": str(relation.get("type") or relation.get("mode") or "caller_decision"),
+                "mode": str(relation.get("mode") or relation.get("type") or "caller_decision"),
+                "confidence": float(relation.get("confidence") or 0.0),
+                "reason": str(relation.get("reason") or "模型完整语义蓝图中的能力关系"),
+            })
+    return ops
+
+
+def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str, Any]:
+    plan = result.get("semantic_plan") or result.get("plan")
+    if not isinstance(plan, dict):
+        return {
+            "complete": False,
+            "missing": ["semantic_plan"],
+            "covered_steps": 0,
+            "covered_fields": 0,
+        }
+    def confidence_of(item: dict[str, Any]) -> float:
+        try:
+            return float(item.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    role_items = [
+        item for item in (plan.get("request_roles") or []) if isinstance(item, dict)
+    ]
+    covered_steps = {
+        str(item.get("step_id") or "")
+        for item in role_items if str(item.get("step_id") or "")
+    }
+    field_items = [
+        item for item in (plan.get("field_semantics") or []) if isinstance(item, dict)
+    ]
+    covered_fields = {
+        (str(item.get("step_id") or ""), _strip_body_prefix(str(item.get("path") or item.get("wire_path") or "")))
+        for item in field_items
+    }
+    required_steps = {step.step_id for step in spec.steps}
+    required_fields = {
+        (step.step_id, _strip_body_prefix(param.path))
+        for step in spec.steps
+        for param in step.params
+        if param.category == "user_param" and param.exposed_to_user
+    }
+    missing: list[str] = []
+    if not required_steps.issubset(covered_steps):
+        missing.append("request_roles")
+    if any(
+        str(item.get("step_id") or "") in required_steps
+        and not (
+            str(item.get("role") or "").strip()
+            and str(item.get("name") or item.get("title") or "").strip()
+            and str(item.get("reason") or "").strip()
+        )
+        for item in role_items
+    ):
+        missing.append("request_role_semantics")
+    if not required_fields.issubset(covered_fields):
+        missing.append("field_semantics")
+    if any(
+        (str(item.get("step_id") or ""), _strip_body_prefix(str(item.get("path") or item.get("wire_path") or "")))
+        in required_fields
+        and not (
+            str(item.get("public_name") or item.get("business_name") or item.get("label") or "").strip()
+            and str(item.get("business_type") or item.get("type") or "").strip()
+            and str(item.get("source_kind") or "").strip()
+            and confidence_of(item) > 0
+        )
+        for item in field_items
+    ):
+        missing.append("field_semantic_contract")
+    if not isinstance(plan.get("capabilities"), list) or not plan.get("capabilities"):
+        missing.append("capabilities")
+    elif any(
+        not (
+            str(item.get("name") or "").strip()
+            and str(item.get("title") or "").strip()
+            and str(item.get("kind") or "").strip()
+            and str(item.get("intent") or item.get("description") or "").strip()
+            and isinstance(item.get("step_ids"), list)
+        )
+        for item in plan.get("capabilities") or [] if isinstance(item, dict)
+    ):
+        missing.append("capability_contracts")
+    if not isinstance(plan.get("business_understanding"), dict) or not plan.get("business_understanding"):
+        missing.append("business_understanding")
+    if not isinstance(plan.get("capability_relations"), list):
+        missing.append("capability_relations")
+    if not isinstance(plan.get("unresolved_items"), list):
+        missing.append("unresolved_items")
+    return {
+        "complete": not missing,
+        "missing": missing,
+        "covered_steps": len(covered_steps & required_steps),
+        "total_steps": len(required_steps),
+        "covered_fields": len(covered_fields & required_fields),
+        "total_fields": len(required_fields),
+    }
+
+
+def _semantic_mutable_context(spec: FlowSpec, *, scope_locked: bool) -> dict[str, Any]:
+    """Current contract delta; immutable request facts live in the prompt prefix."""
+    context = _orchestration_context(spec)
+    for key in (
+        "complete_field_index", "complete_response_path_index", "steps",
+        "links", "captured_requests",
+    ):
+        context.pop(key, None)
+    findings = context.get("validation_findings") or {}
+    context["validation_findings"] = {
+        "errors": list(findings.get("errors") or [])[:30],
+        "warnings": list(findings.get("warnings") or [])[:30],
+        "unused_high_confidence_requests": list(findings.get("unused_high_confidence_requests") or [])[:40],
+    }
+    if scope_locked:
+        context["existing_capabilities"] = [
+            {
+                key: cap.get(key)
+                for key in (
+                    "name", "title", "intent", "kind", "step_ids",
+                    "confirmed", "requires_human_confirm",
+                )
+            }
+            for cap in (context.get("existing_capabilities") or [])
+        ]
+    context["scope_locked"] = scope_locked
+    previous_model = (spec.meta or {}).get("capability_model") or {}
+    previous_plan = previous_model.get("semantic_plan")
+    if isinstance(previous_plan, dict) and previous_plan:
+        context["accepted_semantic_memory"] = _compact_semantic_plan(previous_plan)
+        context["accepted_semantic_plan_hash"] = _stable_json_hash(previous_plan)
+    generation_state = (spec.meta or {}).get("capability_generation") or {}
+    context["generation_state"] = {
+        key: generation_state.get(key)
+        for key in ("protocol", "initial_completed", "semantic_plan_hash", "generation_epoch", "status")
+        if generation_state.get(key) not in (None, "")
+    }
+    return context
+
+
+def _merge_capability_lists_impl(
+    existing: list[FlowCapability],
+    generated: list[FlowCapability],
+    *,
+    spec: FlowSpec | None,
+    allow_new: bool,
+    removed_capabilities: set[str],
+    removed_families: set[str],
+) -> list[FlowCapability]:
     if not existing:
         return [
             cap for cap in generated
@@ -6743,12 +7322,92 @@ def _capability_to_api_dict(spec: FlowSpec, cap: FlowCapability) -> dict[str, An
     return out
 
 
+def _semantic_wire_hash(spec: FlowSpec) -> str:
+    """Hash executable interface identity while excluding public field names."""
+    payload = [
+        {
+            "step_id": step.step_id,
+            "method": (step.method or "GET").upper(),
+            "path": step.path or step.url,
+            "content_type": step.content_type,
+            "param_paths": sorted((param.path, param.wire_type or "") for param in step.params),
+        }
+        for step in spec.steps
+    ]
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _semantic_candidate_gate(
+    before: FlowSpec,
+    candidate: FlowSpec,
+    *,
+    scope_locked: bool,
+) -> tuple[bool, dict[str, Any]]:
+    """Admit an automatic proposal only when executable quality is monotonic."""
+    before_report = validate_flow_spec(before)
+    after_report = validate_flow_spec(candidate)
+    before_error_list = [str(item) for item in (before_report.get("errors") or [])]
+    after_error_list = [str(item) for item in (after_report.get("errors") or [])]
+
+    def error_signature(message: str) -> str:
+        # Public titles/field names are expected semantic improvements. Error
+        # identity must not change merely because a backticked display label did.
+        return re.sub(r"`[^`]+`", "`<target>`", message)
+
+    before_errors = {error_signature(item) for item in before_error_list}
+    after_errors = {error_signature(item) for item in after_error_list}
+    reasons: list[str] = []
+    new_error_signatures = after_errors - before_errors
+    new_errors = sorted(
+        item for item in after_error_list if error_signature(item) in new_error_signatures
+    )
+    if new_errors or len(after_error_list) > len(before_error_list):
+        reasons.append("new_validation_errors")
+    before_warning_list = [str(item) for item in (before_report.get("warnings") or [])]
+    after_warning_list = [str(item) for item in (after_report.get("warnings") or [])]
+    if scope_locked and len(after_warning_list) > len(before_warning_list):
+        reasons.append("warnings_regressed")
+    if _semantic_wire_hash(before) != _semantic_wire_hash(candidate):
+        reasons.append("wire_contract_changed")
+    if scope_locked:
+        before_scope = [
+            (cap.capability_id, cap.name, cap.kind, tuple(_capability_node_step_ids(cap)))
+            for cap in before.capabilities
+        ]
+        after_scope = [
+            (cap.capability_id, cap.name, cap.kind, tuple(_capability_node_step_ids(cap)))
+            for cap in candidate.capabilities
+        ]
+        if before_scope != after_scope:
+            reasons.append("incremental_scope_changed")
+    before_dry = dry_run_flow_spec(before)
+    after_dry = dry_run_flow_spec(candidate)
+    if bool(before_dry.get("ok")) and not bool(after_dry.get("ok")):
+        reasons.append("dry_run_regressed")
+    audit = {
+        "accepted": not reasons,
+        "reasons": reasons,
+        "new_errors": new_errors[:40],
+        "before_errors": len(before_error_list),
+        "after_errors": len(after_error_list),
+        "before_warnings": len(before_warning_list),
+        "after_warnings": len(after_warning_list),
+        "before_dry_ok": bool(before_dry.get("ok")),
+        "after_dry_ok": bool(after_dry.get("ok")),
+        "scope_locked": scope_locked,
+    }
+    return not reasons, audit
+
+
 async def orchestrate_flow_capabilities(
     spec: FlowSpec,
     *,
     llm_client: Any | None = None,
     model: str | None = None,
     timeout_s: float = 60.0,
+    generation_mode: str | None = None,
+    conversation: _SemanticConversation | None = None,
 ) -> FlowSpec:
     """生成/优化能力编排。
 
@@ -6762,6 +7421,8 @@ async def orchestrate_flow_capabilities(
     current = _prune_empty_capabilities(original.model_copy(deep=True))
     rebuild_flow_dependencies(current)
     had_existing = bool(current.capabilities)
+    initial_generation = generation_mode == "initial" or (generation_mode is None and not had_existing)
+    scope_locked = not initial_generation
     scope_baseline = current.model_copy(deep=True)
     # 首次从当前已物化步骤建立能力；再次点击时锁定能力和接口集合，只修契约。
     # 捕获事实库中的其他接口只能由用户显式加入，Planner 不得静默扩张范围。
@@ -6770,8 +7431,8 @@ async def orchestrate_flow_capabilities(
     # Once the zero-capability initializer has established interface
     # boundaries, the Planner may enrich names/schemas/maps but may not merge
     # requests back into a single capability during that same first run.
-    initial_scope_established = bool(not had_existing and current.capabilities)
-    baseline_ids = {cap.capability_id for cap in current.capabilities} if not had_existing else set()
+    initial_scope_established = bool(initial_generation and current.capabilities)
+    baseline_ids = {cap.capability_id for cap in current.capabilities} if initial_generation and not had_existing else set()
     initial_membership = ({
         step_id: {
             _capability_kind_family(cap.kind)
@@ -6781,33 +7442,73 @@ async def orchestrate_flow_capabilities(
         for step_id in {step.step_id for step in current.steps}
     } if initial_scope_established else None)
     current = _prune_empty_capabilities(current)
-    source = "incremental" if had_existing else "deterministic"
+    source = "incremental" if scope_locked else "deterministic"
     reason = ""
+    semantic_plan: dict[str, Any] = {}
+    semantic_coverage: dict[str, Any] = {}
+    previous_model = (current.meta or {}).get("capability_model") or {}
+    previous_semantic_plan = (
+        previous_model.get("semantic_plan")
+        if isinstance(previous_model.get("semantic_plan"), dict) else {}
+    )
+    incremental_review: dict[str, Any] = {}
+    proposal_baseline = current.model_copy(deep=True)
+    if initial_generation:
+        proposal_baseline = _repair_generated_capability_contracts(proposal_baseline)
+    proposal_baseline = _ensure_external_transform_relations(
+        _sync_capability_io_schemas(sync_flow_spec_models(proposal_baseline, prefer_request_facts=False))
+    )
+    if scope_locked:
+        proposal_baseline = _enforce_incremental_orchestration_scope(scope_baseline, proposal_baseline)
 
     if llm_client is not None and model:
         try:
-            out = await llm_client.complete_json(
-                model=model,
-                system=_FLOW_ORCHESTRATE_SYSTEM,
-                user="【FlowSpec 编排上下文】\n" + json.dumps({
-                    **_orchestration_context(current),
-                    "scope_locked": had_existing,
-                }, ensure_ascii=False),
-                timeout_s=timeout_s,
+            payload = _semantic_mutable_context(current, scope_locked=scope_locked)
+            task = _FLOW_ORCHESTRATE_SYSTEM if initial_generation else _FLOW_OPTIMIZE_SYSTEM
+            if conversation is not None:
+                out = await conversation.complete(task=task, payload=payload)
+            else:
+                out = await llm_client.complete_json(
+                    model=model,
+                    system=_FLOW_SEMANTIC_SYSTEM,
+                    user=task + "\n【FlowSpec 当前合同】\n" + json.dumps(
+                        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+                    ),
+                    timeout_s=timeout_s,
+                )
+            proposed_semantic_plan = (
+                out.get("semantic_plan") if isinstance(out.get("semantic_plan"), dict)
+                else (out.get("plan") if isinstance(out.get("plan"), dict) else {})
             )
+            if initial_generation:
+                semantic_plan = proposed_semantic_plan
+                semantic_coverage = _semantic_plan_coverage(current, out)
+            else:
+                # Incremental responses are deltas, never a replacement for
+                # the accepted complete first-pass semantic memory.
+                semantic_plan = previous_semantic_plan
+                semantic_coverage = dict(previous_model.get("semantic_coverage") or {})
+                incremental_review = {
+                    "reviewed_scope": out.get("reviewed_scope") or {},
+                    "unresolved_items": out.get("unresolved_items") or [],
+                }
             raw_ops = out.get("ops") if isinstance(out, dict) else None
-            if isinstance(raw_ops, list):
+            combined_ops = [
+                *_semantic_plan_to_ops(current, out),
+                *((raw_ops or []) if isinstance(raw_ops, list) else []),
+            ]
+            if combined_ops:
                 edits = _planner_patch_edits(
                     current,
-                    _autofix_ops_to_edits(current, raw_ops),
-                    scope_locked=had_existing,
+                    _autofix_ops_to_edits(current, combined_ops),
+                    scope_locked=scope_locked,
                     initial_membership=initial_membership,
                 )
                 if edits:
                     current = apply_flow_edits(current, [{**edit, "actor": "planner"} for edit in edits])
                     source = "llm_patch"
             raw_abilities = out.get("abilities") if isinstance(out, dict) else None
-            if isinstance(raw_abilities, list) and not had_existing and not initial_scope_established:
+            if isinstance(raw_abilities, list) and initial_generation and not initial_scope_established:
                 step_ids = {step.step_id for step in current.steps}
                 used = {cap.name for cap in current.capabilities if cap.name}
                 generated = [
@@ -6825,14 +7526,21 @@ async def orchestrate_flow_capabilities(
     if baseline_ids:
         current = _drop_superseded_baseline_capabilities(current, baseline_ids)
     _normalize_capability_references(current)
-    if not had_existing:
+    if initial_generation:
         current = _repair_generated_capability_contracts(current)
     # Existing public capability identities are immutable on repeated optimize.
     current = _ensure_external_transform_relations(
         _sync_capability_io_schemas(sync_flow_spec_models(current, prefer_request_facts=False))
     )
-    if had_existing:
+    if scope_locked:
         current = _enforce_incremental_orchestration_scope(scope_baseline, current)
+    proposal_accepted, proposal_gate = _semantic_candidate_gate(
+        proposal_baseline, current, scope_locked=scope_locked,
+    )
+    if not proposal_accepted:
+        current = proposal_baseline
+        source = "deterministic" if initial_generation else "incremental_rejected"
+        reason = "自动语义 Proposal 未通过单调质量准入: " + ",".join(proposal_gate["reasons"])
     caps = list(current.capabilities or [])
     final_report = validate_flow_spec(current)
     current.meta = {
@@ -6843,9 +7551,13 @@ async def orchestrate_flow_capabilities(
             "generated_count": len(caps),
             "reason": reason,
             "updated_at": datetime.now(timezone.utc).isoformat(),
+            "semantic_plan": semantic_plan,
+            "semantic_coverage": semantic_coverage,
+            "last_incremental_review": incremental_review,
+            "proposal_gate": proposal_gate,
         },
         "capability_orchestration_audit": {
-            "mode": "incremental" if had_existing else "initial",
+            "mode": "incremental" if scope_locked else "initial",
             "checked_steps": len(original.steps),
             "checked_fields": sum(len(step.params or []) for step in original.steps),
             "checked_captured_requests": len(_request_graph_items(original)),
@@ -6853,7 +7565,7 @@ async def orchestrate_flow_capabilities(
             "before_warnings": len(initial_report.get("warnings") or []),
             "after_errors": len(final_report.get("errors") or []),
             "after_warnings": len(final_report.get("warnings") or []),
-            "scope_locked": had_existing,
+            "scope_locked": scope_locked,
             "capability_count_before": len(scope_baseline.capabilities or []),
             "capability_count_after": len(caps),
         },
@@ -6997,7 +7709,7 @@ def _batch_capability_input_schema(steps: list[FlowStep]) -> dict[str, Any]:
         is_write = (step.method or "").upper() in _WRITE_METHODS
         array_body = is_write and _step_body_is_array(step)
         for param in step.params or []:
-            if param.category != "user_param" or not param.exposed_to_user:
+            if not _param_exposed_to_caller(param):
                 continue
             if is_write:
                 write_user_params.append(param)
@@ -7637,7 +8349,7 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
                         for child_sid in child_step_ids:
                             child_step = step_by_id.get(child_sid)
                             for param in (child_step.params if child_step else []):
-                                if not param.required or param.category != "user_param" or not param.exposed_to_user:
+                                if not _param_requires_caller_input(param):
                                     continue
                                 pname = param.key or param.path
                                 item_shaped = str(param.path or "").startswith("[") or bool(child_step and _looks_batch_step(child_step))
@@ -8427,7 +9139,7 @@ def _step_param_map(step: FlowStep) -> dict[str, str]:
     """只把 user_param 暴露给 Skill 调用者；常量/运行期变量保留在流程内部。"""
     out: dict[str, str] = {}
     for p in step.params:
-        if p.category != "user_param":
+        if not _param_exposed_to_caller(p):
             continue
         key = (p.key or "").strip()
         if key:
@@ -8590,7 +9302,7 @@ def flow_spec_required_params(spec: FlowSpec) -> list[str]:
         if active_step_ids is not None and st.step_id not in active_step_ids:
             continue
         for p in st.params:
-            if p.category != "user_param" or not p.required:
+            if not _param_requires_caller_input(p):
                 continue
             key = (p.key or "").strip()
             if key and key not in names:
@@ -8608,8 +9320,13 @@ def _needs_llm_field_name(param: ParamField) -> bool:
         return False
     if looks_internal_param_name(key):
         return True
-    last = (param.path or "").split(".")[-1].split("[")[0]
-    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)) and key == last
+    path_leaf = (param.path or "").split(".")[-1]
+    # Indexed query/body leaves such as useTime[0] used to disappear from the
+    # naming request entirely.  Compare their stable base while retaining the
+    # full key/path in the model evidence so [0] and [1] remain distinguishable.
+    key_base = re.sub(r"\[\d+\]$", "", key)
+    path_base = re.sub(r"\[\d+\]$", "", path_leaf)
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key_base)) and key_base == path_base
 
 
 def llm_field_name_candidates(spec: FlowSpec) -> list[dict[str, str]]:
@@ -8626,6 +9343,71 @@ def llm_field_name_candidates(spec: FlowSpec) -> list[dict[str, str]]:
                 seen.add(sig)
                 out.append(item)
     return out
+
+
+def _apply_grounded_indexed_range_names(spec: FlowSpec) -> tuple[FlowSpec, list[dict[str, Any]]]:
+    """Name strongly grounded two-value date ranges before capability creation.
+
+    This is deliberately structural rather than business-specific: an indexed
+    pair on one read request, with a date/time wire type and a range-like base,
+    is the common query convention used by many frameworks.  Ambiguous arrays
+    (multi-selects, row items, more than two values) remain model/manual work.
+    """
+    current = spec.model_copy(deep=True)
+    changes: list[dict[str, Any]] = []
+    range_base = re.compile(r"(?:time|date|range|period|begin|start|end|from|to|时间|日期|区间)", re.I)
+    for step in current.steps:
+        if (step.method or "GET").upper() not in {"GET", "HEAD"}:
+            continue
+        groups: dict[str, dict[int, ParamField]] = {}
+        for param in step.params or []:
+            match = re.fullmatch(r"(.+)\[(\d+)\]", str(param.key or ""))
+            if not match:
+                continue
+            groups.setdefault(match.group(1), {})[int(match.group(2))] = param
+        for base, members in groups.items():
+            if set(members) != {0, 1} or not range_base.search(base):
+                continue
+            start, end = members[0], members[1]
+            if any(
+                param.locked
+                or param.category != "user_param"
+                or not param.exposed_to_user
+                or (param.type or "").lower() not in {"date", "datetime"}
+                for param in (start, end)
+            ):
+                continue
+            start_value = _date_like_epoch_seconds(start.value)
+            end_value = _date_like_epoch_seconds(end.value)
+            if start_value is not None and end_value is not None and start_value > end_value:
+                continue
+            proposed = ("查询开始时间", "查询结束时间")
+            if any(
+                other is not start and other is not end and other.key in proposed
+                for other in step.params
+            ):
+                proposed = (f"{base}开始时间", f"{base}结束时间")
+            for param, name, role in (
+                (start, proposed[0], "range_start"),
+                (end, proposed[1], "range_end"),
+            ):
+                old_key = param.key
+                _rename_param_public_key(current, step, param, name, actor="planner")
+                param.evidence.append({
+                    "source": "indexed_range_structure",
+                    "group": base,
+                    "role": role,
+                    "wire_path": param.path,
+                })
+                changes.append({
+                    "step_id": step.step_id,
+                    "path": param.path,
+                    "old_key": old_key,
+                    "new_key": name,
+                    "semantic_group": base,
+                    "role": role,
+                })
+    return current, changes
 
 
 def apply_llm_field_names(spec: FlowSpec, names: dict[str, str] | None) -> FlowSpec:
@@ -8648,16 +9430,7 @@ def apply_llm_field_names(spec: FlowSpec, names: dict[str, str] | None) -> FlowS
             old_key = p.key
             used.discard(old_key)
             used.add(proposed)
-            p.key = proposed
-            p.label = proposed
-            p.name_source = "llm"
-            if old_key in st.sample_inputs:
-                st.sample_inputs[proposed] = st.sample_inputs.pop(old_key)
-            elif p.value not in (None, ""):
-                st.sample_inputs[proposed] = p.value
-            for sb in st.selects:
-                if sb.path == p.path or sb.param == old_key:
-                    sb.param = proposed
+            _rename_param_public_key(new_spec, st, p, proposed, actor="planner")
             changed = True
     if not changed:
         return spec
@@ -10899,6 +11672,91 @@ def _hydrate_select_source_contract(spec: FlowSpec, binding: SelectBinding) -> N
     binding.enum_confirmed = True
 
 
+def _rename_param_public_key(
+    spec: FlowSpec,
+    step: FlowStep,
+    param: ParamField,
+    new_key: str,
+    *,
+    actor: str,
+) -> None:
+    """Atomically rename a caller-facing field without touching its wire path.
+
+    ``ParamField.path`` is the executable request contract. ``key``/``label``
+    are the public business name.  Keeping the mutation here prevents model
+    naming, manual naming and capability-schema regeneration from drifting into
+    three different representations of the same field.
+    """
+    proposed = str(new_key or "").strip()
+    if not proposed:
+        raise ValueError("field key cannot be empty")
+    if proposed == param.key:
+        return
+    if any(other is not param and other.key == proposed for other in step.params):
+        raise ValueError(f"duplicate param key: {proposed}")
+
+    old_key = param.key
+    param.key = proposed
+    param.label = proposed
+    if actor == "user":
+        param.name_source = "manual"
+        param.locked = True
+        evidence_source = "manual_edit"
+    else:
+        # A model proposal is useful semantic evidence, not an operator lock.
+        # It must remain editable and must never self-confirm its own decision.
+        param.name_source = "llm" if actor == "planner" else actor
+        evidence_source = f"{actor}_proposal"
+    param.evidence.append({
+        "source": evidence_source,
+        "field": "key",
+        "previous": old_key,
+        "value": proposed,
+    })
+
+    if old_key in step.sample_inputs:
+        step.sample_inputs[proposed] = step.sample_inputs.pop(old_key)
+    elif param.value not in (None, ""):
+        step.sample_inputs.setdefault(proposed, param.value)
+    for binding in step.selects:
+        if binding.path == param.path or binding.param == old_key:
+            binding.param = proposed
+
+    for capability in spec.capabilities or []:
+        for collection_name in (
+            "fields", "inputs", "request_fields", "internal_fields",
+            "computed_fields", "outputs",
+        ):
+            for field in getattr(capability, collection_name, []) or []:
+                same_wire_field = bool(
+                    field.step_id == step.step_id
+                    and _strip_body_prefix(field.path or "") == _strip_body_prefix(param.path)
+                )
+                if same_wire_field or (field.step_id == step.step_id and field.key == old_key):
+                    field.key = proposed
+                    if field.display_name in {"", old_key}:
+                        field.display_name = proposed
+        for relation in spec.capability_relations or []:
+            if relation.to_capability in {capability.name, capability.capability_id} and relation.to_input == old_key:
+                relation.to_input = proposed
+
+        def rename_node_refs(nodes: list[dict[str, Any]]) -> None:
+            old_ref = f"input.{old_key}"
+            new_ref = f"input.{proposed}"
+            for node in nodes or []:
+                if not isinstance(node, dict):
+                    continue
+                for field_name in ("source", "items", "condition", "check"):
+                    value = node.get(field_name)
+                    if isinstance(value, str):
+                        node[field_name] = value.replace(old_ref, new_ref)
+                for child_name in ("children", "steps", "then", "else", "otherwise"):
+                    if isinstance(node.get(child_name), list):
+                        rename_node_refs(node[child_name])
+
+        rename_node_refs(capability.nodes or [])
+
+
 def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
     """应用编辑列表，返回新 FlowSpec（深拷贝）。"""
     if not edits:
@@ -11149,6 +12007,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
 
         if op == "upsert_capability":
             raw = dict(edit.get("capability") or {})
+            actor = str(edit.get("actor") or "user")
             name = str(raw.get("name") or edit.get("capability_name") or edit.get("name") or "")
             if not name:
                 raise ValueError("upsert_capability missing name")
@@ -11159,11 +12018,22 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 raw.setdefault("kind", "submit")
                 raw.setdefault("confidence", 0.7)
                 raw.setdefault("requires_human_confirm", True)
-                new_spec.capabilities.append(FlowCapability.model_validate(raw))
+                created = FlowCapability.model_validate(raw)
+                created.updated_by = actor
+                if actor == "planner":
+                    created.confirmed = False
+                    created.locked = False
+                new_spec.capabilities.append(created)
             else:
                 cap = new_spec.capabilities[idx]
+                planner_protected = bool(
+                    actor == "planner"
+                    and (cap.locked or cap.confirmed or cap.updated_by == "user")
+                )
                 for key, value in raw.items():
                     if key not in _CAPABILITY_ALLOWED_FIELDS:
+                        continue
+                    if planner_protected and key not in {"confidence"}:
                         continue
                     if key in {"fields", "inputs", "request_fields", "internal_fields", "computed_fields", "outputs"}:
                         value = [CapabilityField.model_validate(x) for x in (value or [])]
@@ -11172,7 +12042,8 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     elif key == "request_refs":
                         value = [CapabilityRequestRef.model_validate(x) for x in (value or [])]
                     setattr(cap, key, value)
-                cap.updated_by = "repair"
+                if not planner_protected:
+                    cap.updated_by = actor
             continue
 
         if op in {
@@ -11514,21 +12385,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     param_label=str(edit.get("param_label") or ""),
                 )
                 if field == "key":
-                    old_key = param.key
-                    param.key = str(value)
-                    param.label = param.key
-                    param.name_source = "manual"
-                    param.locked = True
-                    param.evidence.append({
-                        "source": "manual_edit",
-                        "field": "key",
-                        "value": param.key,
-                    })
-                    if old_key in step.sample_inputs:
-                        step.sample_inputs[param.key] = step.sample_inputs.pop(old_key)
-                    for sb in step.selects:
-                        if sb.path == param.path or sb.param == old_key:
-                            sb.param = param.key
+                    _rename_param_public_key(new_spec, step, param, str(value), actor=actor)
                 elif field == "path":
                     old_path = param.path
                     new_path = str(value or "").strip()
@@ -11560,6 +12417,8 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     _transition_param_type(new_spec, step, param, value)
                 elif field == "required":
                     param.required = bool(value)
+                    if actor == "user":
+                        param.required_source = "manual"
                 elif field == "exposed_to_user":           # H22 修复:bool 字段显式 bool() 转换
                     param.exposed_to_user = bool(value)
                 elif field == "editable":
@@ -12002,7 +12861,12 @@ def _autofix_ops_to_edits(
         if not isinstance(op, dict):
             continue
         kind = str(op.get("op") or "")
-        if kind == "promote_request":
+        if kind == "rename_step":
+            step_id = str(op.get("step_id") or "")
+            name = str(op.get("name") or op.get("title") or "").strip()
+            if step_id in step_by_id and name:
+                edits.append({"op": "update", "step_id": step_id, "field": "name", "value": name})
+        elif kind == "promote_request":
             if not allow_scope_changes:
                 continue
             edits.append({
@@ -12318,6 +13182,7 @@ async def auto_fix_flow_spec(
     expand_requests: bool = True,
     allow_scope_changes: bool | None = None,
     strict_incremental: bool = False,
+    conversation: _SemanticConversation | None = None,
 ) -> FlowSpec:
     """一键修正：确定性补齐 + 可选 LLM 受限 patch + 重新校验。"""
     current = spec.model_copy(deep=True)
@@ -12351,12 +13216,35 @@ async def auto_fix_flow_spec(
             })
         if llm_client is not None and model:
             try:
-                out = await llm_client.complete_json(
-                    model=model,
-                    system=_FLOW_AUTOFIX_SYSTEM,
-                    user="【录制 FlowSpec 修复上下文】\n" + json.dumps(_flow_autofix_context(current, report), ensure_ascii=False),
-                    timeout_s=timeout_s,
-                )
+                repair_context = _flow_autofix_context(current, report)
+                if conversation is not None:
+                    # Immutable steps/request facts are already the exact prompt
+                    # prefix. Full capability dumps and nested validation trees
+                    # duplicated tens of thousands of tokens on every repair;
+                    # keep only actionable delta evidence.
+                    repair_context = {
+                        "title": repair_context.get("title"),
+                        "errors": repair_context.get("errors") or [],
+                        "warnings": repair_context.get("warnings") or [],
+                        "unused_high_confidence_requests": (
+                            (repair_context.get("capability_findings") or {}).get("unused_high_confidence_requests") or []
+                        ),
+                        "candidate_option_sources": repair_context.get("candidate_option_sources") or [],
+                        "semantic_coverage": (
+                            ((current.meta or {}).get("capability_model") or {}).get("semantic_coverage") or {}
+                        ),
+                    }
+                    out = await conversation.complete(task=_FLOW_AUTOFIX_SYSTEM, payload=repair_context)
+                else:
+                    out = await llm_client.complete_json(
+                        model=model,
+                        system=_FLOW_SEMANTIC_SYSTEM,
+                        user=_FLOW_AUTOFIX_SYSTEM + "\n【录制 FlowSpec 修复上下文】\n" + json.dumps(
+                            repair_context, ensure_ascii=False, sort_keys=True,
+                            separators=(",", ":"), default=str,
+                        ),
+                        timeout_s=timeout_s,
+                    )
                 raw_ops = out.get("ops") if isinstance(out, dict) else None
                 if isinstance(raw_ops, list):
                     llm_edits = _autofix_ops_to_edits(
@@ -12373,15 +13261,43 @@ async def auto_fix_flow_spec(
             history.append({"round": round_idx, "applied": 0, "remaining_errors": len(report.get("errors") or [])})
             break
         before = _flow_fingerprint(current)
-        current = apply_flow_edits(current, [{**edit, "actor": "repair"} for edit in edits])
-        current.meta = {
-            **(current.meta or {}),
+        candidate = apply_flow_edits(current, [{**edit, "actor": "repair"} for edit in edits])
+        candidate.meta = {
+            **(candidate.meta or {}),
             "auto_fix": {
                 "round": round_idx + 1,
                 "last_edits": edits[:50],
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             },
         }
+        candidate = _sync_capability_io_schemas(candidate)
+        if strict_incremental and not allow_scope_changes and spec.capabilities:
+            candidate = _enforce_incremental_orchestration_scope(spec, candidate)
+        if allow_scope_changes:
+            # Explicit repair may promote recorded requests and needs another
+            # round to finish their fields/dependencies. Preserve that existing
+            # workflow; the strict semantic plan/optimization path below never
+            # enables scope expansion.
+            accepted, gate = True, {
+                "accepted": True,
+                "reasons": [],
+                "scope_expansion_round": True,
+            }
+        else:
+            accepted, gate = _semantic_candidate_gate(
+                current, candidate,
+                scope_locked=bool(strict_incremental and spec.capabilities),
+            )
+        if not accepted:
+            history.append({
+                "round": round_idx,
+                "applied": 0,
+                "changed": False,
+                "proposal_rejected": True,
+                "proposal_gate": gate,
+            })
+            break
+        current = candidate
         after = _flow_fingerprint(current)
         history.append({"round": round_idx, "applied": len(edits), "changed": before != after})
         if before == after:
@@ -12461,6 +13377,55 @@ def _auto_confirm_ready_capabilities(spec: FlowSpec) -> FlowSpec:
     return spec
 
 
+def _semantic_optimization_input_hash(spec: FlowSpec) -> str:
+    report = validate_flow_spec(spec)
+    payload = {
+        "summary": flow_spec_canonical_summary(spec),
+        "mutable_contract": {
+            "fields": [
+                {
+                    "step_id": step.step_id,
+                    "path": param.path,
+                    "key": param.key,
+                    "type": param.type,
+                    "category": param.category,
+                    "source_kind": param.source_kind,
+                    "required": bool(param.required),
+                    "page_required": param.page_required,
+                    "exposed": bool(param.exposed_to_user),
+                    "locked": bool(param.locked),
+                }
+                for step in spec.steps
+                for param in step.params
+            ],
+            "capabilities": [
+                {
+                    "id": cap.capability_id,
+                    "name": cap.name,
+                    "title": cap.title,
+                    "kind": cap.kind,
+                    "intent": cap.intent,
+                    "step_ids": list(cap.step_ids or []),
+                    "input_schema": cap.input_schema or {},
+                    "output_schema": cap.output_schema or {},
+                    "confirmed": bool(cap.confirmed),
+                    "locked": bool(cap.locked),
+                }
+                for cap in spec.capabilities or []
+            ],
+        },
+        "errors": list(report.get("errors") or []),
+        "warnings": list(report.get("warnings") or []),
+        "unresolved_reviews": sorted(
+            item.id for item in refresh_review_items(spec.model_copy(deep=True)).review_items
+            if not item.resolved
+        ),
+        "removed_capabilities": sorted(str(item) for item in ((spec.meta or {}).get("removed_capabilities") or [])),
+        "removed_steps": (spec.meta or {}).get("capability_removed_steps") or {},
+    }
+    return _stable_json_hash(payload)
+
+
 async def run_recording_pi_loop(
     spec: FlowSpec,
     *,
@@ -12476,20 +13441,126 @@ async def run_recording_pi_loop(
     在有限轮次内规划、校验、修复并重新校验，直到通过或无法继续收敛。
     """
     current = ensure_recorded_goal(spec.model_copy(deep=True))
-    incremental_baseline = current.model_copy(deep=True) if current.capabilities and mode == "plan" else None
+    fact_hash = _semantic_fact_hash(current)
+    previous_generation = dict((current.meta or {}).get("capability_generation") or {})
+    legacy_capability_model = (current.meta or {}).get("capability_model") or {}
+    if (
+        current.capabilities
+        and not previous_generation
+        and legacy_capability_model.get("status") in {"ready", "draft"}
+    ):
+        # Existing workbenches generated before capability-generation.v2 are
+        # already in incremental mode. Never reinterpret an upgrade as a first
+        # run and silently reopen their capability/interface boundaries.
+        previous_generation = {
+            "protocol": "dano.capability-generation.v2",
+            "fact_hash": fact_hash,
+            "initial_completed": True,
+            "status": "legacy_migrated",
+            "generation_epoch": 1,
+        }
+    initial_generation = bool(
+        (mode == "plan" or not current.capabilities)
+        and not (
+            previous_generation.get("initial_completed")
+            and str(previous_generation.get("fact_hash") or "") == fact_hash
+        )
+    )
+
+    range_candidate, range_changes = _apply_grounded_indexed_range_names(current)
+    range_accepted, range_gate = _semantic_candidate_gate(current, range_candidate, scope_locked=False)
+    if range_changes and range_accepted:
+        current = ensure_recorded_goal(range_candidate)
+    else:
+        range_changes = []
+
+    incremental_baseline = (
+        current.model_copy(deep=True)
+        if current.capabilities and mode == "plan" and not initial_generation
+        else None
+    )
     _normalize_capability_references(current)
+    # Hash exactly the normalized/reviewed object that is returned to the
+    # frontend.  Previously the hash was stored before a final refresh pass,
+    # so a no-op second click could miss the application cache.
+    current = refresh_review_items(_sync_capability_io_schemas(current))
     history: list[dict[str, Any]] = []
     run_planner = mode == "plan" or not current.capabilities
+    conversation = (
+        _SemanticConversation(
+            client=llm_client,
+            model=str(model),
+            facts=_semantic_fact_snapshot(current),
+            timeout_s=timeout_s,
+        )
+        if llm_client is not None and model
+        else None
+    )
+
+    optimization_input_hash = _semantic_optimization_input_hash(current)
+    if (
+        mode == "plan"
+        and not initial_generation
+        and str(previous_generation.get("last_optimization_input_hash") or "") == optimization_input_hash
+    ):
+        now = datetime.now(timezone.utc).isoformat()
+        current.meta = {
+            **(current.meta or {}),
+            "recording_pi_loop": {
+                "mode": mode,
+                "generation_mode": "optimize",
+                "rounds": [],
+                "cache_hit": True,
+                "model_calls": 0,
+                "updated_at": now,
+            },
+            "capability_generation": {
+                **previous_generation,
+                "last_mode": "optimize",
+                "last_cache_hit": True,
+                "application_cache_hit": True,
+                "model_calls": 0,
+                "updated_at": now,
+            },
+        }
+        return current
 
     for round_idx in range(max_rounds):
-        before = _flow_fingerprint(current)
         if run_planner:
             current = await orchestrate_flow_capabilities(
                 current,
                 llm_client=llm_client,
                 model=model,
                 timeout_s=timeout_s,
+                generation_mode="initial" if initial_generation else "optimize",
+                conversation=conversation,
             )
+
+            coverage = ((current.meta or {}).get("capability_model") or {}).get("semantic_coverage") or {}
+            if (
+                initial_generation
+                and round_idx == 0
+                and conversation is not None
+                and hasattr(llm_client, "complete_json_messages")
+                and not coverage.get("complete")
+            ):
+                current = await orchestrate_flow_capabilities(
+                    current,
+                    llm_client=llm_client,
+                    model=model,
+                    timeout_s=timeout_s,
+                    generation_mode="initial",
+                    conversation=conversation,
+                )
+                completed_coverage = (
+                    ((current.meta or {}).get("capability_model") or {}).get("semantic_coverage") or {}
+                )
+                history.append({
+                    "round": round_idx + 1,
+                    "stage": "semantic_plan_completion",
+                    "complete": bool(completed_coverage.get("complete")),
+                    "missing": list(completed_coverage.get("missing") or []),
+                })
 
         report = validate_flow_spec(current)
         history.append({
@@ -12499,15 +13570,12 @@ async def run_recording_pi_loop(
             "errors": len(report.get("errors") or []),
             "warnings": len(report.get("warnings") or []),
         })
-        # plan 模式首次生成后仍执行一轮受限 Repair：能力校验可能已通过，但字段名、
-        # 枚举来源和输出映射仍可由 LLM 依据完整请求事实补强。后续轮次通过即停止，
-        # 避免重复点击时无边界改写人工内容。
-        needs_quality_repair = bool(
-            mode == "plan"
-            and round_idx == 0
-            and llm_client is not None
-            and model
-        )
+        # Planner candidate has already passed schema, wire and scope gates.
+        # Do not invoke Repair merely because the button was clicked: that
+        # doubled latency and replayed an ever-growing conversation even when
+        # the plan was already valid. Repair runs only for actual validation
+        # findings or when explicitly requested by the repair action.
+        needs_quality_repair = False
         # repair 按钮的职责是处理可修复建议，不只是处理 blocking errors。
         # 过去 passed=True 会让 warning-only 的错误编排直接提前退出，导致按钮无效果。
         needs_requested_repair = bool(
@@ -12519,9 +13587,16 @@ async def run_recording_pi_loop(
                 or report.get("issue_groups")
             )
         )
+        # A repeated "optimize" click is a single bounded delta review.  The
+        # Planner already receives current validation findings and its
+        # candidate is protected by the monotonic gate.  Re-entering Repair
+        # here turns a tiny manual edit into another full multi-round run.
+        if mode == "plan" and incremental_baseline is not None:
+            break
         if report.get("passed") and not needs_quality_repair and not needs_requested_repair:
             break
 
+        before_repair = _flow_fingerprint(current)
         current = await auto_fix_flow_spec(
             current,
             llm_client=llm_client,
@@ -12531,6 +13606,7 @@ async def run_recording_pi_loop(
             expand_requests=False,
             allow_scope_changes=False,
             strict_incremental=incremental_baseline is not None,
+            conversation=conversation,
         )
         fixed_report = validate_flow_spec(current)
         history.append({
@@ -12541,7 +13617,7 @@ async def run_recording_pi_loop(
             "warnings": len(fixed_report.get("warnings") or []),
         })
         after = _flow_fingerprint(current)
-        if fixed_report.get("passed") or before == after:
+        if fixed_report.get("passed") or before_repair == after:
             break
         run_planner = True
 
@@ -12556,16 +13632,70 @@ async def run_recording_pi_loop(
             **(current.meta or {}),
             "business_description_source": "recording_pi_loop",
         }
+    current = refresh_review_items(_sync_capability_io_schemas(current))
+    final_coverage = ((current.meta or {}).get("capability_model") or {}).get("semantic_coverage") or {}
+    model_available = bool(llm_client is not None and model)
+    initial_completed = bool(
+        previous_generation.get("initial_completed")
+        and str(previous_generation.get("fact_hash") or "") == fact_hash
+    )
+    if initial_generation:
+        final_gate = ((current.meta or {}).get("capability_model") or {}).get("proposal_gate") or {}
+        initial_completed = bool(
+            model_available
+            and final_coverage.get("complete")
+            and final_gate.get("accepted") is not False
+        )
+    semantic_plan = ((current.meta or {}).get("capability_model") or {}).get("semantic_plan") or {}
+    generation_status = (
+        "ready" if initial_completed
+        else ("degraded_deterministic" if not model_available else "incomplete_semantic_plan")
+    )
+    now = datetime.now(timezone.utc).isoformat()
     current.meta = {
         **(current.meta or {}),
+        "capability_generation": {
+            "protocol": "dano.capability-generation.v2",
+            "fact_hash": fact_hash,
+            "initial_completed": initial_completed,
+            "semantic_plan_hash": _stable_json_hash(semantic_plan) if semantic_plan else "",
+            "generation_epoch": (
+                int(previous_generation.get("generation_epoch") or 0)
+                + (1 if str(previous_generation.get("fact_hash") or "") != fact_hash else 0)
+            ),
+            "status": generation_status,
+            "last_mode": "initial" if initial_generation else mode,
+            "last_optimization_input_hash": _semantic_optimization_input_hash(current),
+            "last_cache_hit": False,
+            "application_cache_hit": False,
+            "model_calls": conversation.calls if conversation else 0,
+            "model_cache_hits": conversation.cache_hits if conversation else 0,
+            "provider_cache_hits": conversation.cache_hits if conversation else 0,
+            "model_prompt_tokens": conversation.prompt_tokens if conversation else 0,
+            "model_cached_tokens": conversation.cached_tokens if conversation else 0,
+            "model_completion_tokens": conversation.completion_tokens if conversation else 0,
+            "model_cache_rate": (
+                round(conversation.cached_tokens / conversation.prompt_tokens, 4)
+                if conversation and conversation.prompt_tokens else 0.0
+            ),
+            "indexed_range_changes": range_changes,
+            "indexed_range_gate": range_gate,
+            "updated_at": now,
+        },
         "recording_pi_loop": {
             "mode": mode,
+            "generation_mode": "initial" if initial_generation else "optimize",
             "rounds": history,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "cache_hit": False,
+            "model_calls": conversation.calls if conversation else 0,
+            "model_cache_hits": conversation.cache_hits if conversation else 0,
+            "model_prompt_tokens": conversation.prompt_tokens if conversation else 0,
+            "model_cached_tokens": conversation.cached_tokens if conversation else 0,
+            "updated_at": now,
         },
     }
     return append_flow_version(
-        refresh_review_items(_sync_capability_io_schemas(current)),
+        current,
         "recording_pi_loop",
         reason=f"录制 PI 闭环: {mode}",
         actor="planner",
@@ -12781,6 +13911,17 @@ def _unique_params(spec: FlowSpec, category: str) -> list[tuple[FlowStep, ParamF
 
 
 def _llm_purpose(spec: FlowSpec, llm_client: Any | None) -> str:
+    semantic_plan = ((spec.meta or {}).get("capability_model") or {}).get("semantic_plan") or {}
+    understanding = semantic_plan.get("business_understanding") if isinstance(semantic_plan, dict) else None
+    if isinstance(understanding, dict):
+        grounded = str(
+            understanding.get("intent")
+            or understanding.get("purpose")
+            or understanding.get("summary")
+            or ""
+        ).strip()
+        if grounded:
+            return grounded[:240]
     if llm_client is None:
         return ""
     try:

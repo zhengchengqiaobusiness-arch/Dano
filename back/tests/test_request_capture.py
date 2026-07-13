@@ -9,6 +9,7 @@ from dano.execution.page.request_capture import (
     _resolve_selects,
     as_list_payload,
     auto_required_fields,
+    classify_request_role,
     classify_network_request as classify_capture_request,
     infer_success_rule,
     build_api_request,
@@ -2368,6 +2369,35 @@ def test_flatten_required_from_form_star():
     assert fields["street"]["required"] is False   # 没 * → 非必填
 
 
+def test_flatten_required_range_marker_applies_to_both_indexed_values():
+    body = '{"useTime":["2026-07-09 00:00:00","2026-08-11 23:59:59"],"remark":"说明"}'
+    samples = {
+        "使用时间": "2026-07-09 00:00:00",
+        "使用时间#2": "2026-08-11 23:59:59",
+        "备注": "说明",
+    }
+    fields = {field["path"]: field for field in flatten_body(body, samples, {"使用时间"})}
+
+    assert fields["useTime[0]"]["required"] is True
+    assert fields["useTime[1]"]["required"] is True
+    assert fields["useTime[0]"]["page_required"] is True
+    assert fields["useTime[1]"]["page_required"] is True
+    assert fields["remark"]["required"] is False
+    assert fields["remark"]["page_required"] is False
+
+
+def test_classify_request_role_aggregates_multistep_write_instead_of_defaulting_to_get():
+    role = classify_request_role({
+        "method": None,
+        "steps": [
+            {"method": "GET", "path": "/api/process-definition/get"},
+            {"method": "POST", "path": "/api/seal-apply/submit-process", "post_data": '{"title":"x"}'},
+        ],
+    })
+
+    assert role == {"semanticRole": "workflow_submit", "sideEffect": "write", "riskLevel": "L3"}
+
+
 def test_flatten_required_defaults_all_when_no_star():
     """表单没抓到任何 * 必填标记(required_labels 空)→ 参数字段**默认全部必填**(写操作宁多勿漏,免手动勾选)。"""
     body = '{"reason":"回家","street":"中山路","type":"周末"}'
@@ -2751,6 +2781,8 @@ async def test_recorder_captures_required_star_elementui():
     html = ('<!doctype html><html><head><meta charset="utf-8"></head><body><form>'
             '<div class="el-form-item is-required"><label for="dest">目的地</label><input id="dest"></div>'
             '<div class="el-form-item"><label for="remark">备注</label><input id="remark"></div>'
+            '<div class="el-form-item is-required"><label for="untouched">未操作字段</label>'
+            '<div class="el-form-item__content"><input id="untouched"></div></div>'
             '</form></body></html>').encode("utf-8")
 
     class H(http.server.BaseHTTPRequestHandler):
@@ -2771,11 +2803,13 @@ async def test_recorder_captures_required_star_elementui():
         await sess.page.fill("#remark", "无")
         await sess.page.wait_for_timeout(300)
         req_labels = sess.recorded_required_labels()
+        observed_labels = await sess.observed_required_labels()
         await sess.stop()
     finally:
         httpd.shutdown()
     assert "目的地" in req_labels        # is-required → 必填
     assert "备注" not in req_labels      # 无 is-required → 非必填
+    assert "未操作字段" in observed_labels  # 页面级扫描不能依赖字段已被操作
 
 
 async def test_request_onboarding_publish_and_execute(tmp_path):

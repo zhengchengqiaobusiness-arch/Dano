@@ -101,21 +101,42 @@ class ChatClient(Protocol):
     async def complete_json(self, *, model: str, system: str, user: str,
                             timeout_s: float) -> dict[str, Any]: ...
 
+    async def complete_json_messages(self, *, model: str, messages: list[dict[str, str]],
+                                     timeout_s: float) -> dict[str, Any]: ...
+
 
 class OpenAICompatClient:
     """极薄 OpenAI 兼容 client:POST {base}/chat/completions,强制 JSON 输出。"""
 
     def __init__(self, *, api_key: str, base_url: str) -> None:
         self.api_key = api_key
+        self.last_usage: dict[str, Any] = {}
         base = base_url.rstrip("/")
         self._url = (base + "/chat/completions") if base.endswith("/v1") else (base + "/v1/chat/completions")
 
     async def complete_json(self, *, model: str, system: str, user: str,
                             timeout_s: float) -> dict[str, Any]:
+        return await self.complete_json_messages(
+            model=model,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            timeout_s=timeout_s,
+        )
+
+    async def complete_json_messages(self, *, model: str, messages: list[dict[str, str]],
+                                     timeout_s: float) -> dict[str, Any]:
+        """Complete a structured multi-turn conversation.
+
+        Recording capability generation uses this entry point to keep the
+        immutable facts and accepted model decisions as an exact prompt prefix.
+        Providers can then reuse their prefix cache while later validator
+        rounds append only a compact delta.  ``complete_json`` remains the
+        backwards-compatible two-message API used by existing fakes/callers.
+        """
         import httpx
+        self.last_usage = {}
         base = {
             "model": model,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "messages": messages,
             "temperature": 0,
         }
         headers = {"Authorization": f"Bearer {self.api_key}"}
@@ -131,7 +152,32 @@ class OpenAICompatClient:
                     continue
                 r.raise_for_status()
                 try:
-                    return _completion_json(r.json())
+                    response = r.json()
+                    usage = response.get("usage") if isinstance(response, dict) else None
+                    if isinstance(usage, dict):
+                        details = usage.get("prompt_tokens_details") or {}
+                        cached = (
+                            details.get("cached_tokens")
+                            or usage.get("cache_read_input_tokens")
+                            or usage.get("cached_input_tokens")
+                            or 0
+                        )
+                        log.info(
+                            "llm.usage",
+                            model=model,
+                            prompt_tokens=usage.get("prompt_tokens") or usage.get("input_tokens") or 0,
+                            cached_tokens=cached,
+                            completion_tokens=usage.get("completion_tokens") or usage.get("output_tokens") or 0,
+                            message_count=len(messages),
+                            json_fallback=bool(index),
+                        )
+                        self.last_usage = {
+                            "prompt_tokens": usage.get("prompt_tokens") or usage.get("input_tokens") or 0,
+                            "cached_tokens": cached,
+                            "completion_tokens": usage.get("completion_tokens") or usage.get("output_tokens") or 0,
+                            "json_fallback": bool(index),
+                        }
+                    return _completion_json(response)
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
                     last_error = exc
                     if index == 0:

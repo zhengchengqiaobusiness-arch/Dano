@@ -1744,6 +1744,30 @@ def looks_dangerous_write(api_request: dict) -> bool:
 def classify_request_role(req: dict) -> dict:
     """请求语义角色(**确定性**,node 4 语义分类):method + 路径段 + 内容 → {semanticRole, sideEffect, riskLevel}。
     跨系统通用、零业务字面量;供录入去噪/审计标注。比 LLM 分类更稳(且不占录制热路径)。"""
+    steps = [step for step in (req.get("steps") or []) if isinstance(step, dict)]
+    if steps:
+        roles = [classify_request_role({**step, "steps": []}) for step in steps]
+        destructive = next((role for role in roles if role.get("sideEffect") == "delete"), None)
+        if destructive:
+            return destructive
+        writes = [role for role in roles if role.get("sideEffect") == "write"]
+        if writes:
+            semantic = (
+                "workflow_submit"
+                if any(role.get("semanticRole") == "workflow_submit" for role in writes)
+                else "business_write"
+            )
+            return {"semanticRole": semantic, "sideEffect": "write", "riskLevel": "L3"}
+        non_auth_reads = [role for role in roles if role.get("sideEffect") == "read"]
+        if non_auth_reads:
+            semantic = (
+                "query"
+                if any(role.get("semanticRole") == "query" for role in non_auth_reads)
+                else "enum_options"
+            )
+            return {"semanticRole": semantic, "sideEffect": "read", "riskLevel": "L1"}
+        return {"semanticRole": "auth", "sideEffect": "none", "riskLevel": "L1"}
+
     method = (req.get("method") or "GET").upper()
     if looks_dangerous_write(req):
         return {"semanticRole": "destructive", "sideEffect": "delete", "riskLevel": "L4"}
@@ -1974,6 +1998,30 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         return []
     samples = samples or {}
     required_labels = required_labels or set()
+
+    def required_label_matches(label: str | None) -> bool:
+        """Match page-required labels across framework punctuation/range suffixes.
+
+        Range pickers commonly expose two controls as ``使用日期`` and
+        ``使用日期#2`` while the form container owns a single required marker.
+        Both controls are required in that case.  Whitespace, asterisks and
+        trailing Chinese/ASCII colons are presentation only.
+        """
+        def normalize(value: object, *, drop_suffix: bool = False) -> str:
+            text = _re.sub(r"[\s*：:]+", "", str(value or "")).strip()
+            return _re.sub(r"#\d+$", "", text) if drop_suffix else text
+
+        if not label or not required_labels:
+            return False
+        exact = normalize(label)
+        base = normalize(label, drop_suffix=True)
+        for raw in required_labels:
+            candidate = normalize(raw)
+            if candidate == exact:
+                return True
+            if normalize(raw, drop_suffix=True) == base:
+                return True
+        return False
     # 样例按录制顺序:(值字符串, 标签, 该值的日期集);allow 同值多标签按序消费
     sample_list = [(str(v), k, _date_keys(v)) for k, v in samples.items() if v not in ("", None)]
     used_i: set = set()
@@ -2041,12 +2089,18 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         #  · 表单确实区分了必填(抓到 * 标记,required_labels 非空)且本字段被**确信**映射到某 DOM 标签
         #    → 信表单:标了 * 才必填,没标 * 即可选
         #  · 其余(表单没区分 / 映射不确信)→ 默认必填(不敢判可选,宁多勿漏)
+        page_required: bool | None = None
+        if required_labels and label is not None and confident:
+            page_required = required_label_matches(label)
         if not is_param:
             required = False
-        elif required_labels and label is not None and confident:
-            required = label in required_labels
+            required_source = "internal"
+        elif page_required is not None:
+            required = page_required
+            required_source = "page"
         else:
             required = True
+            required_source = "conservative"
         out.append({"path": path, "key": key, "value": sv,
                     "suggest_param": is_param,
                     "suggest_name": label or key,            # 对不上 → 退原始 key(不瞎猜)
@@ -2054,6 +2108,8 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
                     "confidence": conf,                       # 字段语义置信度(P1)
                     "confidence_tier": confidence_tier(conf),  # auto / clarify / reject(需澄清)
                     "required": required,
+                    "page_required": page_required,
+                    "required_source": required_source,
                     "system_value": bool(sys_time)})          # 系统运行期自动填(submitTime/createTime),前端可标
     # 列表多选:把每个被接管的对象数组的逐元素叶子,折叠成**一个**列表参数字段(原位插回,前端只见一个参数)
     for ap in (collapse_paths or []):
@@ -2067,7 +2123,9 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         out.insert(min(pos, len(out)),
                    {"path": ap, "key": key, "value": "", "suggest_param": True,
                     "suggest_name": key, "type": "list-enum", "confidence": 0.78,
-                    "confidence_tier": "clarify", "required": True, "system_value": False})
+                    "confidence_tier": "clarify", "required": True,
+                    "page_required": None, "required_source": "conservative",
+                    "system_value": False})
     return out
 
 

@@ -35,6 +35,33 @@ def _make_spec():
     return FlowSpec(flow_id="test", steps=[step1])
 
 
+def test_page_required_runtime_value_is_not_required_from_caller():
+    runtime_value = ParamField(
+        path="applicantId", key="申请人标识", required=False, page_required=True,
+        required_source="runtime_source", category="runtime_var", source_kind="current_user",
+        exposed_to_user=False,
+    )
+    title = ParamField(
+        path="title", key="申请标题", required=True, page_required=True,
+        required_source="page", category="user_param", source_kind="user_input",
+        exposed_to_user=True,
+    )
+    optional_remark = ParamField(
+        path="remark", key="备注", required=False, page_required=False,
+        required_source="page", category="user_param", source_kind="user_input",
+        exposed_to_user=True,
+    )
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/api/submit",
+        params=[runtime_value, title, optional_remark],
+    )])
+
+    schema = flow_spec_module._capability_input_schema(spec.steps[0].params)
+    assert set(schema["properties"]) == {"申请标题", "备注"}
+    assert schema["required"] == ["申请标题"]
+    assert flow_spec_module.flow_spec_required_params(spec) == ["申请标题"]
+
+
 def test_system_generated_runtime_value_is_compiled_and_not_exposed():
     step = FlowStep(
         step_id="submit",
@@ -3879,6 +3906,75 @@ def test_manual_field_contract_is_locked_against_planner_overwrite():
     assert param.locked is True
     assert param.category == "user_param"
     assert param.source_kind == "user_input"
+
+
+def test_incremental_planner_cannot_overwrite_user_confirmed_capability_identity_or_title():
+    class Planner:
+        async def complete_json(self, **_kwargs):
+            return {"ops": [{
+                "op": "upsert_capability",
+                "capability": {
+                    "name": "submit",
+                    "title": "模型覆盖标题",
+                    "kind": "submit_batch",
+                    "intent": "模型覆盖意图",
+                },
+            }]}
+
+    spec = FlowSpec(
+        steps=[FlowStep(step_id="submit", method="POST", path="/submit")],
+        capabilities=[FlowCapability(
+            name="submit", title="人工确认标题", intent="人工确认意图", kind="submit",
+            step_ids=["submit"], confirmed=True, locked=True, updated_by="user",
+        )],
+        meta={"capability_model": {"status": "ready"}},
+    )
+
+    optimized = asyncio.run(orchestrate_flow_capabilities(
+        spec, llm_client=Planner(), model="planner", generation_mode="optimize",
+    ))
+    capability = optimized.capabilities[0]
+    assert capability.name == "submit"
+    assert capability.kind == "submit"
+    assert capability.title == "人工确认标题"
+    assert capability.intent == "人工确认意图"
+    assert capability.confirmed is True
+
+
+def test_incremental_semantic_candidate_with_new_validation_error_is_rolled_back_atomically():
+    class BadPlanner:
+        async def complete_json(self, **_kwargs):
+            return {"ops": [{
+                "op": "set_condition",
+                "capability": "submit",
+                "node": {
+                    "id": "bad_entries_condition",
+                    "condition": "input.entries.length > 0",
+                    "then": [{"id": "call_submit", "type": "call", "step_id": "submit"}],
+                },
+            }]}
+
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit", method="POST", path="/submit", body_source='{"title":"x"}',
+            params=[ParamField(path="title", key="标题", category="user_param", source_kind="user_input")],
+        )],
+        capabilities=[FlowCapability(
+            name="submit", title="提交", kind="submit", step_ids=["submit"],
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+        )],
+        meta={"capability_model": {"status": "ready"}},
+    )
+
+    optimized = asyncio.run(orchestrate_flow_capabilities(
+        spec, llm_client=BadPlanner(), model="planner", generation_mode="optimize",
+    ))
+    assert optimized.meta["capability_model"]["source"] == "incremental_rejected"
+    assert optimized.meta["capability_model"]["proposal_gate"]["accepted"] is False
+    assert not any(
+        node.get("type") == "condition"
+        for node in flow_spec_module._iter_capability_nodes(optimized.capabilities[0].nodes)
+    )
 
 
 def test_page_context_requires_explicit_context_key_and_differs_from_upstream_response():

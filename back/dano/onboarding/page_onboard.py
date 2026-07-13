@@ -318,8 +318,7 @@ async def run_request_onboarding(
         log.info("ingest.published", published=published, status=status.value,
                  asset_id=pub.get("asset_id"), live_ok=live_ok, reason=pub.get("reason", ""))
         review_notes = await _advisory_notes(action, api_request) if published else []
-        role = classify_request_role(api_request if not api_request.get("steps")
-                                     else ((api_request["steps"][-1] or {})))   # node 4 语义角色(确定性)
+        role = classify_request_role(api_request)   # 聚合多步骤流程，不能因顶层 method=None 降级成只读
         return {"ok": published, "stage": "publish", "status": status.value,
                 "action": action, "verification_plan": plan, "review_notes": review_notes,
                 "request_role": role,

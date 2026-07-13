@@ -618,6 +618,7 @@ async def record_ws(ws: WebSocket) -> None:
         pending_storage: dict | None = None    # 登录态(认 identity 字段)
         pending_required: set = set()          # 录制时表单 * 必填的字段标签
         pending_page_enum_options: dict = {}         # 录制时下拉里真实可见的选项 {选中显示值: [选项文字]}(枚举地面真值)
+        applied_flow_operations: dict[str, dict] = {}  # flow_update 幂等回执(operation_id → response)
         recording_mode = "intercepted_submit" if init.get("intercept", True) else "real_submit"
 
         def _restore_hidden_flow_spec_fields(raw_spec: dict) -> dict:
@@ -670,6 +671,7 @@ async def record_ws(ws: WebSocket) -> None:
             elif t == "finalize":
                 before_flush_steps = sess.recorded_raw_steps()
                 await sess.flush_recording()
+                observed_required_labels = await sess.observed_required_labels()
                 after_flush_steps = sess.recorded_raw_steps()
                 flushed_tail: list[dict] = []
                 if len(after_flush_steps) > len(before_flush_steps):
@@ -693,9 +695,11 @@ async def record_ws(ws: WebSocket) -> None:
                              for s in raw]
                     # 字段 key 保持与录制样例、必填标记一致。
                     samples, required_labels, page_enum_options = _frontend_recording_field_metadata(raw)
+                    required_labels.update(observed_required_labels)
                 else:
                     steps, samples = sess.recorded_steps()
                     required_labels = sess.recorded_required_labels()
+                    required_labels.update(observed_required_labels)
                     page_options_by_field = sess.recorded_page_enum_options()  # {字段key: {options, field_key, selected}}
                     # 枚举地面真值:既按「选中显示值」也对到「字段 key」,使 page_enum_selects 在 body leaf
                     # 不出现 label 但出现内部英文名时也能命中(治"请假类型=病假 → body.leaveType=2"漏识别)。
@@ -882,6 +886,10 @@ async def record_ws(ws: WebSocket) -> None:
                     await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 edits = msg.get("edits") or []
+                operation_id = str(msg.get("operation_id") or "")
+                if operation_id and operation_id in applied_flow_operations:
+                    await ws.send_json({**applied_flow_operations[operation_id], "duplicate": True})
+                    continue
                 try:
                     from dano.execution.page.flow_spec import (
                         apply_flow_edits,
@@ -890,12 +898,19 @@ async def record_ws(ws: WebSocket) -> None:
                         validate_flow_spec,
                     )
                     pending_flow_spec = apply_flow_edits(pending_flow_spec, edits)
-                    await ws.send_json({
+                    response = {
                         "type": "flow_spec_updated",
+                        "operation": "flow_update",
+                        "operation_id": operation_id,
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
                         "full_spec": flow_spec_to_client(pending_flow_spec),
                         "check_report": validate_flow_spec(pending_flow_spec),
-                    })
+                    }
+                    if operation_id:
+                        if len(applied_flow_operations) >= 256:
+                            applied_flow_operations.pop(next(iter(applied_flow_operations)), None)
+                        applied_flow_operations[operation_id] = response
+                    await ws.send_json(response)
                 except Exception as e:  # noqa: BLE001
                     # 前端会先做乐观更新。失败时必须回传服务端权威版本，否则页面与
                     # pending_flow_spec 分叉，下一次发布会发生指纹冲突或使用旧字段。
@@ -903,10 +918,15 @@ async def record_ws(ws: WebSocket) -> None:
                         "type": "error",
                         "detail": f"flow_update failed: {e}",
                         "operation": "flow_update",
+                        "operation_id": operation_id,
                         "full_spec": flow_spec_to_client(pending_flow_spec),
                         "check_report": validate_flow_spec(pending_flow_spec),
                     })
             elif t == "flow_replace":
+                operation_id = str(msg.get("operation_id") or "")
+                if operation_id and operation_id in applied_flow_operations:
+                    await ws.send_json({**applied_flow_operations[operation_id], "duplicate": True})
+                    continue
                 try:
                     from dano.execution.page.flow_spec import (
                         FlowSpec,
@@ -945,14 +965,24 @@ async def record_ws(ws: WebSocket) -> None:
                         reason="前端 JSON 编辑回写",
                         actor="user",
                     )
-                    await ws.send_json({
+                    response = {
                         "type": "flow_spec_updated",
+                        "operation": "flow_replace",
+                        "operation_id": operation_id,
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
                         "full_spec": flow_spec_to_client(pending_flow_spec),
                         "check_report": validate_flow_spec(pending_flow_spec),
-                    })
+                    }
+                    if operation_id:
+                        if len(applied_flow_operations) >= 256:
+                            applied_flow_operations.pop(next(iter(applied_flow_operations)), None)
+                        applied_flow_operations[operation_id] = response
+                    await ws.send_json(response)
                 except Exception as e:  # noqa: BLE001
-                    await ws.send_json({"type": "error", "detail": f"flow_replace failed: {e}"})
+                    await ws.send_json({
+                        "type": "error", "detail": f"flow_replace failed: {e}",
+                        "operation": "flow_replace", "operation_id": operation_id,
+                    })
             # Bug 修复: 前端收到 "step not found" 时主动刷新 spec
             elif t == "refresh_flow_spec":
                 if pending_flow_spec is None:

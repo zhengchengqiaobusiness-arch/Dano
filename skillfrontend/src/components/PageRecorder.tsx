@@ -56,6 +56,7 @@ interface RecIdentity { path: string; source: string }
 
 interface FlowParam {
   path: string; key: string; label?: string; value: string; type: string; required: boolean; name_source?: string;
+  page_required?: boolean | null; required_source?: string;
   category?: string; source_kind?: string; source?: any; reason?: string;
   exposed_to_user?: boolean; need_human_confirm?: boolean; editable?: boolean; confidence?: number;
   // 系统化:enum_options 兼容 list[string] 与 list[{label, value}];label→value 表由后端 enum_value_map 提供
@@ -170,6 +171,12 @@ interface FlowSpecData {
   meta?: {
     request_roles?: RequestRoleData[];
     capability_model?: { status?: string; source?: string; generated_count?: number };
+    capability_generation?: {
+      protocol?: string; status?: string; initial_completed?: boolean; last_mode?: string;
+      last_cache_hit?: boolean; application_cache_hit?: boolean; model_calls?: number; model_cache_hits?: number;
+      provider_cache_hits?: number; model_cache_rate?: number;
+      indexed_range_changes?: any[]; [k: string]: any;
+    };
     recording_pi_loop?: { mode?: "plan" | "repair"; updated_at?: string; [k: string]: any };
     request_graph?: {
       all_requests?: RequestGraphEntry[];
@@ -275,6 +282,20 @@ const SOURCE_KIND_OPTIONS = [
 ];
 const OPTION_SOURCE_KINDS = ["api_option", "page_enum", "form_option", "static_enum", "manual_enum"];
 const ENUM_SOURCE_KINDS = ["page_enum", "form_option", "static_enum", "manual_enum"];
+const RUNTIME_SUPPLIED_SOURCE_KINDS = new Set([
+  "previous_response", "current_user", "storage", "cookie", "page_context",
+  "request_header", "system_time", "system_generated", "computed", "constant", "loop_item",
+]);
+
+function paramExposedToCaller(p: FlowParam) {
+  return p.category === "user_param"
+    && p.exposed_to_user !== false
+    && !RUNTIME_SUPPLIED_SOURCE_KINDS.has(p.source_kind || "");
+}
+
+function paramRequiredFromCaller(p: FlowParam) {
+  return !!p.required && paramExposedToCaller(p);
+}
 // 三类分类 × 各自允许的来源，避免出现"用户参数 + 固定值"这种语义不一致组合。
 const SOURCE_OPTIONS_BY_CATEGORY: Record<string, Array<{ label: string; value: string }>> = {
   user_param: SOURCE_KIND_OPTIONS.filter((x) =>
@@ -1117,6 +1138,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [autoFixBusy, setAutoFixBusy] = useState(false);
   const flowOperationRef = useRef<{ mode: "plan" | "repair"; previousUpdatedAt?: string } | null>(null);
   const flowOperationTimerRef = useRef<number | null>(null);
+  const flowMutationQueueRef = useRef<any[]>([]);
+  const flowMutationInFlightRef = useRef<any | null>(null);
+  const flowMutationSeqRef = useRef(0);
+  const afterFlowSyncRef = useRef<(() => void) | null>(null);
   const [activeFlowTab, setActiveFlowTab] = useState("abilities");
 
   function acceptFlowSpec(fs: FlowSpecData) {
@@ -1196,6 +1221,21 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setAutoFixBusy(false);
   }
 
+  function armFlowOperationWatchdog(label: string) {
+    if (flowOperationTimerRef.current != null) window.clearTimeout(flowOperationTimerRef.current);
+    flowOperationTimerRef.current = window.setTimeout(() => {
+      if (!flowOperationRef.current) return;
+      // 120s is only a progress notice. The server-side LLM task remains
+      // active, so showing a failure here produced the observed "先报错、后成功".
+      message.warning(`${label}仍在服务端执行，完成后页面会自动更新`);
+      flowOperationTimerRef.current = window.setTimeout(() => {
+        if (!flowOperationRef.current) return;
+        clearFlowOperation();
+        message.error(`${label}超过10分钟未完成，请检查服务端连接`);
+      }, 480000);
+    }, 120000);
+  }
+
   useEffect(() => () => {
     // FC4 修复:仅当 phase 处于 recording/publishing 时才关 WS(避免 StrictMode 双 mount 或组件复用时误关正在用的 WS)
     // wsRef.current 在首次 mount 时为 null(start 才会建),所以首次 cleanup 一定是 noop,无副作用
@@ -1255,7 +1295,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function send(obj: unknown) {
+  function sendRaw(obj: unknown) {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(obj));
@@ -1268,6 +1308,61 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       message.warning("录制连接已断开，正在停止后续操作");
     }
     return false;
+  }
+
+  function flushFlowMutationQueue() {
+    if (flowMutationInFlightRef.current || !flowMutationQueueRef.current.length) return;
+    const next = flowMutationQueueRef.current.shift();
+    flowMutationInFlightRef.current = next;
+    if (!sendRaw(next)) {
+      flowMutationInFlightRef.current = null;
+      flowMutationQueueRef.current = [];
+      afterFlowSyncRef.current = null;
+    }
+  }
+
+  function enqueueFlowMutation(obj: any) {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return sendRaw(obj);
+    const operationId = obj.operation_id || `flow-${Date.now()}-${++flowMutationSeqRef.current}`;
+    flowMutationQueueRef.current.push({ ...obj, operation_id: operationId });
+    flushFlowMutationQueue();
+    return true;
+  }
+
+  function finishQueuedFlowMutation(operationId?: string) {
+    const active = flowMutationInFlightRef.current;
+    if (!active) return;
+    if (operationId && active.operation_id && operationId !== active.operation_id) return;
+    flowMutationInFlightRef.current = null;
+    flushFlowMutationQueue();
+    if (!flowMutationInFlightRef.current && !flowMutationQueueRef.current.length && afterFlowSyncRef.current) {
+      const callback = afterFlowSyncRef.current;
+      afterFlowSyncRef.current = null;
+      callback();
+    }
+  }
+
+  function failQueuedFlowMutation(operationId?: string) {
+    const active = flowMutationInFlightRef.current;
+    if (operationId && active?.operation_id && operationId !== active.operation_id) return;
+    flowMutationInFlightRef.current = null;
+    flowMutationQueueRef.current = [];
+    afterFlowSyncRef.current = null;
+  }
+
+  function runAfterFlowSync(callback: () => void) {
+    if (!flowMutationInFlightRef.current && !flowMutationQueueRef.current.length) {
+      callback();
+      return;
+    }
+    afterFlowSyncRef.current = callback;
+    message.info("正在同步最后一次工作台修改，完成后继续");
+  }
+
+  function send(obj: any) {
+    if (obj?.type === "flow_update" || obj?.type === "flow_replace") return enqueueFlowMutation(obj);
+    return sendRaw(obj);
   }
 
   function clearFrame() {
@@ -1308,6 +1403,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setJsonErr("");
     setLastServerJson("");
     setActiveFlowTab("abilities");
+    flowMutationInFlightRef.current = null;
+    flowMutationQueueRef.current = [];
+    afterFlowSyncRef.current = null;
     clearFlowOperation();
   }
 
@@ -1379,6 +1477,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           finishFlowOperation(fs.meta?.recording_pi_loop, m.operation);
         }
         if (m.check_report) setCheckReport(m.check_report);
+        if (m.operation === "flow_update" || m.operation === "flow_replace") finishQueuedFlowMutation(m.operation_id);
       }
       else if (m.type === "step_names") {
         setNamingBusy(false);
@@ -1416,6 +1515,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           setLastServerJson(JSON.stringify(m.full_spec));
         }
         if (m.check_report) setCheckReport(m.check_report);
+        if (m.operation === "flow_update" || m.operation === "flow_replace") failQueuedFlowMutation(m.operation_id);
         if (detail.includes("step not found") || detail.includes("link not found")) {
           message.warning("流程已变更，正在同步最新版本");
           send({ type: "refresh_flow_spec" });
@@ -1428,6 +1528,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     ws.onerror = () => setErr("WebSocket 连接失败");
     ws.onclose = () => {
       wsAliveRef.current = false;                                 // FC2 修复:WS 关闭,send 会自动避免刷屏
+      flowMutationInFlightRef.current = null;
+      flowMutationQueueRef.current = [];
+      afterFlowSyncRef.current = null;
       if (phaseRef.current === "recording" || phaseRef.current === "publishing") setPhase("idle");
     };
   }
@@ -1502,6 +1605,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function publishRequest() {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     if (!action.trim() || badAction(action.trim())) return;
+    runAfterFlowSync(performPublishRequest);
+  }
+  function performPublishRequest() {
     const { param_map, selList, idList, step_idxs } = payload();
     const currentSpec = flowSpecRef.current || flowSpec;
     if (!currentSpec) { message.error("请先生成 FlowSpec 后再发布"); return; }
@@ -2030,6 +2136,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function orchestrateFlow() {
     if (!flowSpecRef.current || flowOperationRef.current) return;
+    if (flowMutationInFlightRef.current || flowMutationQueueRef.current.length) {
+      runAfterFlowSync(orchestrateFlow);
+      return;
+    }
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     const currentSpec = flowSpecRef.current;
     if (!currentSpec) return;
@@ -2039,25 +2149,21 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     };
     setOrchestrateBusy(true);
     setAutoFixBusy(true);
-    flowOperationTimerRef.current = window.setTimeout(() => {
-      if (!flowOperationRef.current) return;
-      clearFlowOperation();
-      message.error("能力生成超时，请检查服务端日志后重试");
-    }, 120000);
+    armFlowOperationWatchdog("能力生成");
     if (!send({ type: "orchestrate_flow", flow_spec: currentSpec })) clearFlowOperation();
   }
   function autoFixFlow() {
     if (!flowSpecRef.current || flowOperationRef.current) return;
+    if (flowMutationInFlightRef.current || flowMutationQueueRef.current.length) {
+      runAfterFlowSync(autoFixFlow);
+      return;
+    }
     flowOperationRef.current = {
       mode: "repair",
       previousUpdatedAt: flowSpecRef.current.meta?.recording_pi_loop?.updated_at,
     };
     setAutoFixBusy(true);
-    flowOperationTimerRef.current = window.setTimeout(() => {
-      if (!flowOperationRef.current) return;
-      clearFlowOperation();
-      message.error("自动修复超时，请检查服务端日志后重试");
-    }, 120000);
+    armFlowOperationWatchdog("自动修复");
     if (!send({ type: "auto_fix_flow" })) clearFlowOperation();
   }
   function addCapability() {
@@ -2766,6 +2872,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 {linked && <Tag color="cyan">依赖字段</Tag>}
                 {isApiOption && <Tag color="geekblue">接口候选</Tag>}
                 {isEnumOption && enumOptions.length > 0 && <Tag color="purple">枚举 {enumOptions.length}</Tag>}
+                {p.page_required === true && <Tag color="red">页面必填</Tag>}
+                {p.page_required === false && <Tag>页面可选</Tag>}
+                {p.page_required == null && <Tag color="gold">页面必填性未确认</Tag>}
+                {paramRequiredFromCaller(p)
+                  ? <Tag color="volcano">调用方必填</Tag>
+                  : <Tag color="green">调用方无需必填</Tag>}
                 {needsManualConfirm && <Tag color="warning">待确认</Tag>}
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.reason}</Typography.Text>
               </Space>
@@ -2811,8 +2923,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <NativeSelect value={normalizeSourceKindForUi(p.source_kind) || defaultSourceForCategory(p.category || "user_param")} width="100%" options={sourceSelectOptionsForParam(p)}
                 onChange={(v) => updateParamSourceKind(step.step_id, p, v)} />
             </FieldControl>
-            <FieldControl label="必填">
-              <Checkbox checked={!!p.required} onChange={(e) => updateParam(step.step_id, p, "required", e.target.checked)}>必填</Checkbox>
+            <FieldControl label="调用方必填">
+              {paramExposedToCaller(p) ? (
+                <Checkbox checked={!!p.required} onChange={(e) => updateParam(step.step_id, p, "required", e.target.checked)}>调用时必须提供</Checkbox>
+              ) : <Typography.Text type="secondary">由流程运行期提供</Typography.Text>}
             </FieldControl>
             <FieldControl label="展示">
               {p.category === "user_param" ? (
@@ -3282,6 +3396,21 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           </Tooltip>
           <Button icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
           <Button icon={<RobotOutlined />} loading={namingBusy} onClick={() => { setNamingBusy(true); send({ type: "step_naming" }); }}>命名步骤</Button>
+          {flowSpec.meta?.capability_generation && <>
+            <Tag color={flowSpec.meta.capability_generation.initial_completed ? "success" : "warning"}>
+              {flowSpec.meta.capability_generation.initial_completed ? "首次语义生成完成" : "确定性降级结果"}
+            </Tag>
+            <Tag color={flowSpec.meta.capability_generation.application_cache_hit ? "green" : "blue"}>
+              {flowSpec.meta.capability_generation.application_cache_hit
+                ? "结果复用 · 零模型调用"
+                : `模型调用 ${flowSpec.meta.capability_generation.model_calls || 0}`}
+            </Tag>
+            {!flowSpec.meta.capability_generation.application_cache_hit
+              && !!flowSpec.meta.capability_generation.provider_cache_hits
+              && <Tag color="cyan">模型前缀缓存 {Math.round((flowSpec.meta.capability_generation.model_cache_rate || 0) * 100)}%</Tag>}
+            {!!flowSpec.meta.capability_generation.indexed_range_changes?.length &&
+              <Tag color="cyan">识别区间字段 {flowSpec.meta.capability_generation.indexed_range_changes.length}</Tag>}
+          </>}
         </Space>
         {!capabilities.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有能力编排" /> : (
           <Collapse size="small">
@@ -3292,10 +3421,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               const derivedInputSchema = {
                 type: "object",
                 properties: Object.fromEntries(capParams
-                  .filter((p) => p.category === "user_param" && p.exposed_to_user !== false)
+                  .filter(paramExposedToCaller)
                   .map((p) => [p.key || p.path, jsonSchemaForParam(p)])),
                 required: capParams
-                  .filter((p) => p.category === "user_param" && p.exposed_to_user !== false && p.required)
+                  .filter(paramRequiredFromCaller)
                   .map((p) => p.key || p.path),
               };
               const lastResponse = [...capSteps].reverse().find((st) => st.response_json != null)?.response_json;
@@ -3442,10 +3571,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             const derivedInputSchema = {
               type: "object",
               properties: Object.fromEntries(capParams
-                .filter((param) => param.category === "user_param" && param.exposed_to_user !== false)
+                .filter(paramExposedToCaller)
                 .map((param) => [param.key || param.path, jsonSchemaForParam(param)])),
               required: capParams
-                .filter((param) => param.category === "user_param" && param.exposed_to_user !== false && param.required)
+                .filter(paramRequiredFromCaller)
                 .map((param) => param.key || param.path),
             };
             const lastResponse = [...capSteps].reverse().find((step) => step.response_json != null)?.response_json;
@@ -3869,6 +3998,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                               {linked && <Tag color="cyan">依赖字段</Tag>}
                               {isApiOption && <Tag color="geekblue">接口候选</Tag>}
                               {isEnumOption && enumOptions.length > 0 && <Tag color="purple">枚举</Tag>}
+                              {p.page_required === true && <Tag color="red">页面必填</Tag>}
+                              {p.page_required === false && <Tag>页面可选</Tag>}
+                              {p.page_required == null && <Tag color="gold">页面必填性未确认</Tag>}
+                              {paramRequiredFromCaller(p)
+                                ? <Tag color="volcano">调用方必填</Tag>
+                                : <Tag color="green">调用方无需必填</Tag>}
                               {needsManualConfirm && <Tag color="warning">待确认</Tag>}
                               <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.reason}</Typography.Text>
                             </Space>
@@ -3916,8 +4051,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                             <NativeSelect value={normalizeSourceKindForUi(p.source_kind) || defaultSourceForCategory(p.category || "user_param")} width="100%" options={sourceSelectOptionsForParam(p)}
                               onChange={(v) => updateParamSourceKind(step.step_id, p, v)} />
                           </FieldControl>
-                          <FieldControl label="必填">
-                            <Checkbox checked={!!p.required} onChange={(e) => updateParam(step.step_id, p, "required", e.target.checked)}>必填</Checkbox>
+                          <FieldControl label="调用方必填">
+                            {paramExposedToCaller(p) ? (
+                              <Checkbox checked={!!p.required} onChange={(e) => updateParam(step.step_id, p, "required", e.target.checked)}>调用时必须提供</Checkbox>
+                            ) : <Typography.Text type="secondary">由流程运行期提供</Typography.Text>}
                           </FieldControl>
                           <FieldControl label="展示">
                             {p.category === "user_param" ? (

@@ -466,25 +466,35 @@ Capability 记录请求成员、输入/内部/计算/输出字段、依赖、执
 
 ### 10.3 PI 闭环
 
-`run_recording_pi_loop()` 执行有限轮次：
+`run_recording_pi_loop()` 明确区分首次完整生成和后续增量补强。是否首次以
+`meta.capability_generation.initial_completed + fact_hash` 为准，不再只看当前是否已有 capability：
 
 ```text
-RecordedGoal
-  → Planner（能力与契约编排）
+稳定录制事实
+  → 首次完整 semantic_plan（业务、接口角色、字段、能力、关系）
+  → 编译为白名单 FlowEdits
   → Validator
-  → 受限 Repair
+  → 同一上下文追加校验差量并受限 Repair
   → 再验证
   → 通过、没有变化或达到轮次上限后停止
+
+后续点击
+  → 继承已接受 semantic_plan
+  → 锁定能力身份/类型/接口成员
+  → 只补字段、依赖、节点、Schema 与返回映射
 ```
 
 约束：
 
 - 默认最多 4 轮，单次模型调用有超时。
-- `plan` 用于生成或增量优化能力。
+- 首次 `plan` 必须覆盖全部已物化接口和全部调用方字段；模型不可用时保留确定性结果并标记 `degraded_deterministic`，不伪装成完整语义生成。
+- 后续 `plan` 是增量优化；旧工作台自动迁移为该模式，不重开首次边界。
 - `repair` 处理错误、警告、review items 和可自动修复问题。
 - Repair 不允许偷偷扩张请求范围或改变人工确认的作用域。
+- 模型输出先应用到副本；新增错误、Wire 合同变化、dry-run 退化或增量能力范围变化会整轮回滚。
 - 能力输入输出、请求成员和依赖会在每轮后重新同步。
 - 可确定性确认的 ready capability 会自动确认并生成确认哈希。
+- 同一 PI run 使用稳定消息前缀和追加式校验差量；完全相同的重复优化直接命中工作台结果缓存，不再请求模型。
 - PI 历史写入 `meta.recording_pi_loop`，并追加 FlowSpec 版本。
 
 ## 11. 阶段九：发布前校验
@@ -513,6 +523,9 @@ RecordedGoal
 - 最新 `full_spec`。
 
 用户必须使用最新版本重新发布。
+
+前端对 `flow_update/flow_replace` 使用单请求串行队列；后端按 `operation_id` 幂等处理并回传最新指纹。
+发布、生成或修复会先等待队列清空，因此不会再用最后一次字段确认之前的旧 fingerprint 发起请求。
 
 ### 11.2 Release Candidate
 
@@ -704,6 +717,7 @@ idle → recording → publishing → recording
 | 录制期证据 | FlowSpec 表达 | 运行期行为 |
 |---|---|---|
 | 用户填写表单 | `user_param + user_input` | 调用方传值并写入请求模板 |
+| 页面必填标记 | `page_required` 录制证据 | 仅当字段确由调用方提供时进入 `input_schema.required`；运行期自动来源不向客户索取 |
 | 页面下拉 label/value | enum + page/static/manual enum | 调用方传显示值，映射真实提交值 |
 | 选项 API 响应 | `api_option + SelectBinding` | 运行期先调用只读接口，再做 name→ID 映射 |
 | 当前登录人 | `runtime_var + current_user` | 从当前会话身份重新注入 |
@@ -748,3 +762,4 @@ idle → recording → publishing → recording
 - 当前 `record_ws` 发布分支明确只使用消息中的 `flow_spec` 和会话内 `pending_flow_spec`；旧字段不再单独构造另一份发布资产。
 - 最终资产类型仍命名为 `page_script`/`PageScriptBody`，但其 `actions` 可以为空，实际执行契约保存在 `api_request` 中。这是从页面回放录制演进到抓请求录制后的兼容模型。
 - `flow_spec_to_client()` 只生成脱敏编辑投影；后端的 `pending_flow_spec` 始终保留真实请求体、认证头和身份绑定，是发布时恢复隐藏字段的依据。
+- 首次完整语义建模后，普通“生成/优化能力”只执行一轮差量 Planner；相同输入直接零调用复用，显式“自动修复”才进入 Repair。对话继承压缩语义记忆，不重复附加完整模型 JSON。
