@@ -808,6 +808,46 @@
 
   .question-option input { accent-color: var(--accent); }
 
+  .question-option input[type="checkbox"] {
+    appearance: none;
+    -webkit-appearance: none;
+    flex: 0 0 auto;
+    display: grid;
+    place-content: center;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    border: 1.5px solid var(--border-strong);
+    border-radius: 3px;
+    background: transparent;
+    transition:
+      border-color 0.12s ease,
+      background-color 0.12s ease;
+  }
+
+  .question-option input[type="checkbox"]::before {
+    content: "";
+    width: 8px;
+    height: 4px;
+    border-bottom: 2px solid var(--bg);
+    border-left: 2px solid var(--bg);
+    opacity: 0;
+    transform: translateY(-1px) rotate(-45deg) scale(0.75);
+    transition:
+      opacity 0.12s ease,
+      transform 0.12s ease;
+  }
+
+  .question-option input[type="checkbox"]:checked {
+    border-color: var(--accent);
+    background: var(--accent);
+  }
+
+  .question-option input[type="checkbox"]:checked::before {
+    opacity: 1;
+    transform: translateY(-1px) rotate(-45deg) scale(1);
+  }
+
   .question-option input[type="radio"] {
     appearance: none;
     -webkit-appearance: none;
