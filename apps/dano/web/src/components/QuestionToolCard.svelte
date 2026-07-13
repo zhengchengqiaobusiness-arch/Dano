@@ -533,7 +533,7 @@
             {/if}
 
             {#if item.kind === "single"}
-              <fieldset disabled={!pending || submitting}>
+              <fieldset class="single-options" disabled={!pending || submitting}>
                 <legend class="sr-only">{item.question}</legend>
                 {#each itemOptions(item) as option}
                   <label class="question-option">
@@ -774,6 +774,12 @@
   form { display: flex; flex-direction: column; gap: 12px; }
   fieldset { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; }
 
+  .single-options {
+    display: flex;
+    flex-wrap: wrap;
+    column-gap: 24px;
+  }
+
   .question-group {
     display: grid;
     gap: 10px;
@@ -790,16 +796,14 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 10px 12px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: var(--bg);
+    color: var(--text);
     cursor: pointer;
+    transition: color 0.12s ease;
   }
 
+  .question-option:hover,
   .question-option:has(input:checked) {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 10%, var(--bg));
+    color: var(--accent);
   }
 
   .question-option input { accent-color: var(--accent); }
