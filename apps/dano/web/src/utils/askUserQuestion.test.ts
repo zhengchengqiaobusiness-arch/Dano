@@ -6,6 +6,7 @@ import {
   askUserQuestionResult,
   hideAskUserQuestionToolBlock,
   isAskUserQuestionToolError,
+  isAskUserQuestionTerminalFailure,
   isPendingAskUserQuestionBlock,
 } from "./askUserQuestion";
 import type { ToolContentBlock } from "./transcript";
@@ -236,5 +237,19 @@ describe("ask user question transcript data", () => {
         block({ question: "Name?" }, { toolName: "curl", toolStatus: "error" }),
       ),
     ).toBe(false);
+  });
+
+  it("distinguishes bounded terminal presentation failures from retryable errors", () => {
+    const retryable = block({}, {
+      toolStatus: "error",
+      resultText: "QUESTION_PRESENTATION_TIMEOUT: retry",
+    });
+    const terminal = block({}, {
+      toolStatus: "error",
+      resultText: "QUESTION_PRESENTATION_FAILED: stop",
+    });
+
+    expect(isAskUserQuestionTerminalFailure(retryable)).toBe(false);
+    expect(isAskUserQuestionTerminalFailure(terminal)).toBe(true);
   });
 });

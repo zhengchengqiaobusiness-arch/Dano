@@ -6,6 +6,11 @@ import type {
   AskUserQuestionOption,
 } from "../types.js";
 import {
+  ASK_USER_QUESTION_PRESENTATION_RETRY_CODE,
+  ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE,
+} from "../types.js";
+import {
+  AskUserQuestionCoordinator,
   askUserQuestionCoordinator,
   askUserQuestionTool,
   normalizeAskUserQuestionCardRequest,
@@ -92,6 +97,89 @@ function defaultForQuestion(question: {
 
 describe("ask_user_question tool", () => {
   beforeEach(() => askUserQuestionCoordinator.cancelAll());
+
+  it("times out only before presentation and bounds presentation retries", async () => {
+    vi.useFakeTimers();
+    try {
+      const coordinator = new AskUserQuestionCoordinator(100, 2);
+      const controller = new AbortController();
+      const first = coordinator.wait(
+        "presentation-1",
+        { question: "姓名？", default: "张三" },
+        controller.signal,
+      );
+      const firstFailure = expect(first).rejects.toThrow(
+        ASK_USER_QUESTION_PRESENTATION_RETRY_CODE,
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await firstFailure;
+
+      const second = coordinator.wait(
+        "presentation-2",
+        { question: "姓名？", default: "张三" },
+        controller.signal,
+      );
+      const terminalFailure = expect(second).rejects.toThrow(
+        ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE,
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await terminalFailure;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("disables the presentation watchdog after the matching card is visible", async () => {
+    vi.useFakeTimers();
+    try {
+      const coordinator = new AskUserQuestionCoordinator(100, 2);
+      const pending = coordinator.wait(
+        "presented-question",
+        { question: "姓名？", default: "张三" },
+        undefined,
+      );
+      coordinator.present("presented-question");
+      await vi.advanceTimersByTimeAsync(10_000);
+      coordinator.answer("presented-question", {
+        cancelled: false,
+        answer: "李四",
+      });
+      await expect(pending).resolves.toEqual({
+        status: "answered",
+        answer: "李四",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the presentation watchdog on abort and disposal", async () => {
+    vi.useFakeTimers();
+    try {
+      const coordinator = new AskUserQuestionCoordinator(100, 2);
+      const controller = new AbortController();
+      const aborted = coordinator.wait(
+        "aborted-question",
+        { question: "姓名？", default: "张三" },
+        controller.signal,
+      );
+      const abortedFailure = expect(aborted).rejects.toThrow("aborted");
+      controller.abort();
+      await abortedFailure;
+
+      const disposed = coordinator.wait(
+        "disposed-question",
+        { question: "姓名？", default: "张三" },
+        undefined,
+      );
+      const disposedFailure = expect(disposed).rejects.toThrow("disposed");
+      coordinator.cancelAll();
+      await disposedFailure;
+      await vi.advanceTimersByTimeAsync(1_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("instructs the model to collect required input and confirm final summaries", () => {
     expect(askUserQuestionTool.promptGuidelines).toEqual([

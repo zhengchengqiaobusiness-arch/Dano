@@ -9,6 +9,7 @@
     FieldAssistResult,
     RpcResponse,
   } from "@dano/types/protocol";
+  import { tick } from "svelte";
   import { t } from "../i18n";
   import {
     type AskUserQuestionItem,
@@ -38,6 +39,7 @@
   let {
     block,
     active = true,
+    onPresent,
     onRespond,
     onFieldAssist = undefined as
       | ((payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>)
@@ -45,6 +47,7 @@
   }: {
     block: ToolContentBlock;
     active?: boolean;
+    onPresent: (toolCallId: string) => Promise<RpcResponse>;
     onRespond: (
       toolCallId: string,
       response:
@@ -62,6 +65,7 @@
     request ? (request.batch ? request.questions : [request]) : [],
   );
   let submittedResult = $state<AskUserQuestionResult | null>(null);
+  let presentationToolCallId = $state("");
   const result = $derived(
     askUserQuestionResult(block.resultDetails) ?? submittedResult,
   );
@@ -131,6 +135,25 @@
     }
 
     initializedRequestKey = requestKey;
+  });
+
+  $effect(() => {
+    const toolCallId = block.toolCallId;
+    if (!showCard || !pending || !toolCallId || presentationToolCallId === toolCallId) {
+      return;
+    }
+    presentationToolCallId = toolCallId;
+    void tick()
+      .then(() => onPresent(toolCallId))
+      .then(response => {
+        if (!response.success) throw new Error(response.error);
+      })
+      .catch(cause => {
+        if (presentationToolCallId === toolCallId) {
+          presentationToolCallId = "";
+          error = cause instanceof Error ? cause.message : String(cause);
+        }
+      });
   });
 
   $effect(() => {

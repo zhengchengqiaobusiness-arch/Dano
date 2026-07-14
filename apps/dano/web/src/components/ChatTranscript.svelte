@@ -16,14 +16,17 @@
   import X from "lucide-svelte/icons/x";
   import { slide } from "svelte/transition";
   import {
+    abortGeneration,
     answerQuestion,
     getBridgeClientId,
+    presentQuestion,
     type TranscriptDelta,
     type TranscriptEntry,
     type TranscriptStream,
   } from "../composables/bridgeStore.svelte";
   import {
     askUserQuestionRequest,
+    isAskUserQuestionTerminalFailure,
     isAskUserQuestionToolError,
   } from "../utils/askUserQuestion";
   import {
@@ -123,6 +126,26 @@
 
   const emptyStateConfig = getRuntimeEmptyStateConfig();
   const transcriptRevealTransition = { duration: 160 };
+  const terminalFailuresAborted = new Set<string>();
+
+  $effect(() => {
+    if (!isStreaming) return;
+    for (const message of messages) {
+      for (const block of contentBlocks(message)) {
+        if (
+          block.kind !== "tool" ||
+          !block.toolCallId ||
+          !isAskUserQuestionTerminalFailure(block) ||
+          terminalFailuresAborted.has(block.toolCallId)
+        ) {
+          continue;
+        }
+        terminalFailuresAborted.add(block.toolCallId);
+        void abortGeneration();
+        return;
+      }
+    }
+  });
 
   // ---- DOM refs ----
   let container = $state<HTMLDivElement | null>(null);
@@ -555,10 +578,15 @@
 
   function toolBlockDescriptor(block: ToolContentBlock) {
     if (isAskUserQuestionToolError(block)) {
+      const terminal = isAskUserQuestionTerminalFailure(block);
       return {
-        name: t("chatTranscript.askUserQuestionRetryFailure"),
+        name: t(terminal
+          ? "chatTranscript.askUserQuestionTerminalFailure"
+          : "chatTranscript.askUserQuestionRetryFailure"),
         params: undefined,
-        meta: t("chatTranscript.askUserQuestionRetryFailureMeta"),
+        meta: t(terminal
+          ? "chatTranscript.askUserQuestionTerminalFailureMeta"
+          : "chatTranscript.askUserQuestionRetryFailureMeta"),
         status: block.toolStatus,
       };
     }
@@ -1351,7 +1379,7 @@
               {:else if block.kind === "tool"}
                 {@const readClassification = classifyReadToolBlock(block)}
                 {#if askUserQuestionRequest(block) && !isAskUserQuestionToolError(block)}
-                  <QuestionToolCard {block} active={isStreaming && !initialLoading} onRespond={answerQuestion} {onFieldAssist} />
+                  <QuestionToolCard {block} active={isStreaming && !initialLoading} onPresent={presentQuestion} onRespond={answerQuestion} {onFieldAssist} />
                 {:else if readClassification?.kind === "skill"}
                   <SkillInvocationCard skillName={readClassification.label} />
                 {:else}
@@ -1422,7 +1450,9 @@
 
                         {#if isAskUserQuestionToolError(block)}
                           <section class="tool-inline-section">
-                            <pre class="tool-inline-pre">{t("chatTranscript.askUserQuestionRetryFailureDetail")}</pre>
+                            <pre class="tool-inline-pre">{t(isAskUserQuestionTerminalFailure(block)
+                              ? "chatTranscript.askUserQuestionTerminalFailureDetail"
+                              : "chatTranscript.askUserQuestionRetryFailureDetail")}</pre>
                           </section>
                         {:else if blockState.toolBlockDetail(block).kind !== "empty"}
                           <section class="tool-inline-section">

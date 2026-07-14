@@ -4,7 +4,11 @@ import type {
 } from "../../types/protocol.js";
 
 export type * from "../../types/protocol.js";
-export { ASK_USER_QUESTION_TOOL_NAME } from "../../types/protocol.js";
+export {
+  ASK_USER_QUESTION_PRESENTATION_RETRY_CODE,
+  ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE,
+  ASK_USER_QUESTION_TOOL_NAME,
+} from "../../types/protocol.js";
 
 // ============================================================================
 // Bridge Configuration

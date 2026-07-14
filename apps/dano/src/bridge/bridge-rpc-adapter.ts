@@ -5441,6 +5441,18 @@ export class BridgeRpcAdapter {
         };
       }
 
+      case "present_question": {
+        const toolCallId = command.toolCallId.trim();
+        if (!toolCallId) throw new Error("Question tool call ID is required");
+        askUserQuestionCoordinator.present(toolCallId);
+        return {
+          id: correlationId,
+          type: "response",
+          command: "present_question",
+          success: true,
+        };
+      }
+
       case "answer_question": {
         const toolCallId = command.toolCallId.trim();
         if (!toolCallId) throw new Error("Question tool call ID is required");

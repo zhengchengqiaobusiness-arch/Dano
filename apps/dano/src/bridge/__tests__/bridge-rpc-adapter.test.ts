@@ -1222,6 +1222,40 @@ describe("BridgeRpcAdapter", () => {
       });
     });
 
+    it("acknowledges presentation for the matching question tool call", async () => {
+      const pending = askUserQuestionCoordinator.wait(
+        "question-call-presented",
+        { question: "Keep or replace?", options: ["Keep", "Replace"], default: "Keep" },
+        undefined,
+      );
+      const command: RpcCommand = {
+        id: "present-1",
+        type: "present_question",
+        toolCallId: "question-call-presented",
+      };
+
+      ws.trigger(
+        "message",
+        Buffer.from(JSON.stringify({ type: "command", payload: command })),
+      );
+      await new Promise(r => setTimeout(r, 10));
+
+      expect(
+        (ws.send as ReturnType<typeof vi.fn>).mock.calls
+          .map(call => JSON.parse(call[0] as string))
+          .some(message =>
+            message.type === "response" &&
+            message.payload.command === "present_question" &&
+            message.payload.success === true,
+          ),
+      ).toBe(true);
+
+      askUserQuestionCoordinator.answer("question-call-presented", {
+        cancelled: true,
+      });
+      await expect(pending).resolves.toEqual({ status: "cancelled" });
+    });
+
     it("runs field assist through the command channel without transcript events", async () => {
       context.fieldAssist = {
         assist: vi.fn().mockResolvedValue({
