@@ -47,6 +47,134 @@ def _get(url, resp=None):
 
 
 class ToFlowSpecTest(unittest.TestCase):
+    def test_seal_query_fields_and_page_enum_stay_bound_to_their_own_wire_fields(self):
+        """公章真实场景：同值 query、候选接口 status 与页面流程状态不得串名/串枚举。"""
+        page = _get(
+            "https://oa.test/admin-api/oa/seal-apply/page?"
+            "pageNo=1&pageSize=10&billCode=1&"
+            "useTime%5B0%5D=2026-07-01%2000%3A00%3A00&"
+            "useTime%5B1%5D=2026-08-19%2023%3A59%3A59&"
+            "useInfo=1231&processStatus=1",
+            {"code": 0, "data": {"list": [], "total": 0}},
+        )
+        seal_options = _get(
+            "https://oa.test/admin-api/bd/seal/simple-list?status=0",
+            {"code": 0, "data": [
+                {"id": "seal-company", "name": "公司章", "status": 0},
+                {"id": "seal-legal", "name": "法人章", "status": 0},
+            ]},
+        )
+        seal_option_read = {
+            "url": seal_options["url"],
+            "method": "GET",
+            "json": seal_options["response_json"],
+        }
+        submit = _post(
+            "https://oa.test/admin-api/oa/seal-apply/submit-process",
+            {"sealId": "seal-legal", "applyTitle": "采购合同", "useInfo": "盖章说明"},
+            resp={"code": 0, "data": True},
+        )
+        samples = {
+            "单据编号": "1",
+            "开始时间": "2026-07-01 00:00:00",
+            "结束时间": "2026-08-19 23:59:59",
+            "使用信息": "1231",
+            "流程状态": "审批中",
+            "印章标识": "法人章",
+            "申请标题": "采购合同",
+            "使用描述": "盖章说明",
+        }
+        page_enums = {
+            "流程状态": {
+                "field_key": "流程状态",
+                "field_aliases": ["processStatus"],
+                "selected": "审批中",
+                "options": ["未提交", "审批中", "审批通过", "审批不通过", "已取消"],
+            },
+        }
+
+        page_step = flow_spec_module._build_step_from_capture(
+            page, reads=[seal_option_read], samples=samples, storage_state=None,
+            required_labels=set(), page_enum_options=page_enums, step_index=0,
+        )
+        option_step = flow_spec_module._build_step_from_capture(
+            seal_options, reads=[seal_option_read], samples=samples, storage_state=None,
+            required_labels=set(), page_enum_options=page_enums, step_index=1,
+        )
+        submit_step = flow_spec_module._build_step_from_capture(
+            submit, reads=[seal_option_read], samples=samples, storage_state=None,
+            required_labels=set(), page_enum_options=page_enums, step_index=2,
+        )
+
+        page_params = {param.path: param for param in page_step.params}
+        self.assertEqual(page_params["query.pageNo"].key, "pageNo")
+        self.assertEqual(page_params["query.pageNo"].category, "system_const")
+        self.assertEqual(page_params["query.pageSize"].category, "system_const")
+        self.assertEqual(page_params["query.billCode"].key, "单据编号")
+        self.assertEqual(page_params["query.useTime[0]"].key, "开始时间")
+        self.assertEqual(page_params["query.useTime[1]"].key, "结束时间")
+        self.assertEqual(page_params["query.useInfo"].key, "使用信息")
+        self.assertEqual(page_params["query.useInfo"].type, "string")
+        self.assertEqual(page_params["query.processStatus"].key, "流程状态")
+        self.assertEqual(page_params["query.processStatus"].source_kind, "page_enum")
+
+        option_status = {param.path: param for param in option_step.params}["query.status"]
+        self.assertEqual(option_status.key, "status")
+        self.assertEqual(option_status.category, "system_const")
+        self.assertEqual(option_status.source_kind, "constant")
+        self.assertNotIn(option_status.type, {"enum", "list-enum"})
+        self.assertFalse(option_status.enum_options)
+
+        submit_params = {param.path: param for param in submit_step.params}
+        self.assertEqual(submit_params["sealId"].source_kind, "api_option")
+        self.assertEqual(submit_params["sealId"].key, "印章标识")
+        self.assertNotEqual(submit_params["useInfo"].source_kind, "page_enum")
+
+    def test_recorded_text_query_fields_never_become_api_options_by_value_collision(self):
+        """真实公章查询：手输 11/12 与候选接口 id 撞值也不是接口选择字段。"""
+        request = _get(
+            "https://oa.test/admin-api/oa/seal-apply/page?"
+            "pageNo=1&pageSize=10&billCode=11&useInfo=12&processStatus=1",
+            {"code": 0, "data": {"list": [], "total": 0}},
+        )
+        reads = [{
+            "url": "https://oa.test/admin-api/unrelated/options",
+            "method": "GET",
+            "json": {"data": [
+                {"id": "1", "name": "候选一"},
+                {"id": "11", "name": "候选十一"},
+                {"id": "12", "name": "候选十二"},
+            ]},
+        }]
+        step = flow_spec_module._build_step_from_capture(
+            request,
+            reads=reads,
+            samples={"单据编号": "11", "使用描述": "12", "流程状态": "审批中"},
+            storage_state=None,
+            required_labels=set(),
+            page_enum_options={
+                "流程状态": {
+                    "field_key": "流程状态",
+                    "field_aliases": ["processStatus"],
+                    "selected": "审批中",
+                    "options": ["未提交", "审批中", "审批通过"],
+                },
+            },
+            step_index=0,
+        )
+
+        params = {param.path: param for param in step.params}
+        self.assertEqual(params["query.billCode"].key, "单据编号")
+        self.assertEqual(params["query.billCode"].type, "string")
+        self.assertEqual(params["query.billCode"].source_kind, "user_input")
+        self.assertEqual(params["query.useInfo"].key, "使用描述")
+        self.assertEqual(params["query.useInfo"].type, "string")
+        self.assertEqual(params["query.useInfo"].source_kind, "user_input")
+        self.assertEqual(params["query.processStatus"].key, "流程状态")
+        self.assertEqual(params["query.processStatus"].source_kind, "page_enum")
+        self.assertNotIn("query.billCode", {binding.path for binding in step.selects})
+        self.assertNotIn("query.useInfo", {binding.path for binding in step.selects})
+
     def test_same_query_endpoint_keeps_richest_recorded_search_filters(self):
         response = {"data": {"list": [{"id": 1, "applyDate": "2026-07-03"}], "total": 1}, "code": 0}
         captured = [
@@ -333,8 +461,9 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertEqual(spec.steps[0].risk_level, "L4")
         self.assertEqual(spec.risk_level, "L4")
         report = validate_flow_spec(spec)
-        self.assertFalse(report["passed"])
-        self.assertTrue(any("发布阻断项未处理" in e for e in report["errors"]))
+        self.assertTrue(report["passed"])
+        self.assertFalse(report["errors"])
+        self.assertTrue(report["suggestions"])
 
     def test_system_values_detected(self):
         captured = [_post("https://oa/api/submit",
@@ -403,7 +532,7 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertIn("question", apir.get("body_template", {}))
         report = validate_flow_spec(spec)
         self.assertTrue(report["passed"])
-        self.assertTrue(any("runtime_var" in w for w in report["warnings"]))
+        self.assertTrue(any("runtime_var" in w for w in report["suggestions"]))
 
     def test_flow_spec_records_recording_mode_and_diagnostics(self):
         diagnostics = [{"type": "console", "level": "error", "message": "x"}]
@@ -1470,7 +1599,7 @@ class PublishHardBlockRemovalTest(unittest.TestCase):
         spec = to_flow_spec(captured, reads=reads, samples={"type": "2", "reason": "123"})
         report = validate_flow_spec(spec)
         self.assertTrue(report["passed"])
-        self.assertTrue(any("runtime_var" in w for w in report["warnings"]))
+        self.assertTrue(any("runtime_var" in w for w in report["suggestions"]))
 
         spec = apply_flow_edits(spec, [{
             "op": "resolve_reviews",
@@ -1512,9 +1641,9 @@ class PublishHardBlockRemovalTest(unittest.TestCase):
         self.assertEqual(by_path["taskId"].category, "runtime_var")
         report = validate_flow_spec(spec)
         self.assertTrue(report["passed"])
-        self.assertTrue(any("runtime_var" in w for w in report["warnings"]))
+        self.assertTrue(any("runtime_var" in w for w in report["suggestions"]))
 
-    def test_system_const_exposed_is_publish_error(self):
+    def test_system_const_exposed_is_generation_advice(self):
         captured = [_post("https://oa/api/submit", {
             "billType": "oa_duty_leave",
             "reason": "123",
@@ -1523,8 +1652,8 @@ class PublishHardBlockRemovalTest(unittest.TestCase):
         param = {p.path: p for p in spec.steps[0].params}["billType"]
         param.exposed_to_user = True
         report = validate_flow_spec(spec)
-        self.assertFalse(report["passed"])
-        self.assertTrue(any("system_const" in e and "暴露给用户" in e for e in report["errors"]))
+        self.assertTrue(report["passed"])
+        self.assertTrue(any("system_const" in e and "暴露给用户" in e for e in report["suggestions"]))
 
 
 class ShortCodeEnumAlignmentTest(unittest.TestCase):
@@ -1581,8 +1710,8 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         self.assertEqual(api_req["field_types"]["类型"], "enum")
         self.assertEqual(api_req["selects"][0]["option_map"], {"病假": 2, "事假": 1, "婚假": 3})
 
-    def test_dom_label_options_without_short_code_map_blocks_publish(self):
-        """只有 DOM label、没有任何 label→短码映射时,不能导出会提交错值的 skill。"""
+    def test_dom_label_options_without_short_code_map_is_generation_advice(self):
+        """DOM label 缺少短码映射时给出建议，但不替代操作员决定。"""
         captured = [_post("https://oa/api/submit", {"type": 2, "reason": "回家"}, resp={"code": 200})]
         spec = to_flow_spec(
             captured,
@@ -1593,8 +1722,8 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         by_path = {p.path: p for s in spec.steps for p in s.params}
         self.assertEqual(by_path["type"].type, "enum")
         report = validate_flow_spec(spec)
-        self.assertFalse(report["passed"])
-        self.assertTrue(any("页面枚举快照不完整" in e and "type" in e for e in report["errors"]))
+        self.assertTrue(report["passed"])
+        self.assertTrue(any("页面枚举快照不完整" in e and "type" in e for e in report["suggestions"]))
 
     def test_dom_label_options_never_guess_numeric_codes_by_selected_order(self):
         """无字典接口时只能确认本次 label/value，禁止按 DOM 顺序猜其它短码。"""
@@ -1613,10 +1742,11 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         self.assertEqual(p.enum_value_map, {"婚假": 3})
         self.assertFalse(p.source.get("enum_confirmed"))
         report = validate_flow_spec(spec)
-        self.assertFalse(report["passed"])
+        self.assertTrue(report["passed"])
+        self.assertTrue(any("页面枚举快照不完整" in e for e in report["suggestions"]))
 
-    def test_manual_enum_value_only_options_block_publish_until_label_map(self):
-        """人工把 number 改 enum 后只填 1/2/3 时必须阻断;补成 病假=2 后才能产出可调用 Skill。"""
+    def test_manual_enum_value_only_options_are_advice_until_label_map(self):
+        """人工枚举只有 1/2/3 时给出建议；操作员仍可保留当前合同。"""
         captured = [_post("https://oa/api/submit", {"type": 2, "reason": "回家"}, resp={"code": 200})]
         spec = to_flow_spec(captured, samples={"type": "2", "reason": "回家"})
         p = {p.path: p for s in spec.steps for p in s.params}["type"]
@@ -1629,8 +1759,8 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         p.enum_value_map = None
 
         report = validate_flow_spec(spec)
-        self.assertFalse(report["passed"])
-        self.assertTrue(any("内部值/短码" in e and "类型" in e for e in report["errors"]))
+        self.assertTrue(report["passed"])
+        self.assertTrue(any("内部值/短码" in e and "类型" in e for e in report["suggestions"]))
 
         p.enum_options = [
             {"label": "事假", "value": 1},
@@ -1659,7 +1789,7 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         self.assertFalse(any("接口选项" in message and "source_url/options/option_map" in message for message in messages))
         self.assertFalse(any("动态枚举缺少可执行的实时来源接口" in message for message in messages))
 
-    def test_internal_short_code_user_input_blocks_publish(self):
+    def test_internal_short_code_user_input_is_generation_advice(self):
         step = FlowStep(
             step_id="s", name="提交", method="POST", url="/submit", path="/submit",
             content_type="application/json", body_source='{"gslx":"GG"}',
@@ -1670,8 +1800,8 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         )
         spec = FlowSpec(flow_id="shortcode", steps=[step])
         report = validate_flow_spec(spec)
-        self.assertFalse(report["passed"])
-        self.assertTrue(any("内部 ID/短码" in e for e in report["errors"]))
+        self.assertTrue(report["passed"])
+        self.assertTrue(any("内部 ID/短码" in e for e in report["suggestions"]))
 
     def test_unrelated_short_id_list_does_not_misfire(self):
         """type=int 短码不应与无关联的「id/name」tenant 列表撞名 → 仍然保持 user_input。"""
@@ -1707,6 +1837,8 @@ class GetQuerySelectTest(unittest.TestCase):
         paths = [s.get("path") for s in sels]
         self.assertIn("query.status", paths,
                       f"应当识别 query.status 是 enum,actual={paths}")
+
+
         sel = next(s for s in sels if s.get("path") == "query.status")
         self.assertEqual(sel.get("enum_source"), "api")
         # 接口候选应同时持有 options(label 列表)+ option_map
@@ -1756,6 +1888,59 @@ class GetQuerySelectTest(unittest.TestCase):
         if p is None:
             return
         self.assertEqual(p.type, "string", f"无佐证时不应误判 enum,实际: {p.type}")
+
+
+def test_hotel_recording_uses_scoped_control_identity_for_name_type_and_source():
+    query = _get(
+        "https://oa.test/admin-api/oa/hotel-apply/page?pageNo=1&pageSize=10&billCode=1&processStatus=1",
+        {"code": 0, "data": {"list": [], "total": 0}},
+    )
+    query.update({"page_id": "hotel-list", "frame_id": "main"})
+    submit = _post(
+        "https://oa.test/admin-api/oa/hotel-apply/submit-process",
+        {"applyTitle": "1", "totalAmt": 1, "roomType": 2, "useTime": 1784044800000, "remark": "1"},
+        resp={"code": 0, "data": True},
+    )
+    submit.update({"page_id": "hotel-form", "frame_id": "main"})
+    evidence = [
+        {"page_id": "hotel-list", "frame_id": "main", "label": "单据编号", "value": "1", "field_aliases": ["billCode"], "control_kind": "text"},
+        {"page_id": "hotel-list", "frame_id": "main", "label": "流程状态", "value": "审批中", "field_aliases": ["processStatus"], "control_kind": "select"},
+        {"page_id": "hotel-form", "frame_id": "main", "label": "申请标题", "value": "1", "field_aliases": ["applyTitle"], "control_kind": "text"},
+        {"page_id": "hotel-form", "frame_id": "main", "label": "预计金额", "value": "1", "field_aliases": ["totalAmt"], "control_kind": "number"},
+        {"page_id": "hotel-form", "frame_id": "main", "label": "房间类型", "value": "大床房", "field_aliases": ["roomType"], "control_kind": "select"},
+        {"page_id": "hotel-form", "frame_id": "main", "label": "入住时间", "value": "2026-07-14 00:00:00", "field_aliases": ["useTime"], "control_kind": "datetime"},
+        {"page_id": "hotel-form", "frame_id": "main", "label": "备注", "value": "1", "field_aliases": ["remark"], "control_kind": "textarea"},
+    ]
+    page_enums = {
+        "流程状态": {
+            "page_id": "hotel-list", "frame_id": "main", "field_key": "流程状态",
+            "field_aliases": ["processStatus"], "control_kind": "select", "selected": "审批中",
+            "options": [{"label": "未提交", "value": 0}, {"label": "审批中", "value": 1}],
+        },
+        "房间类型": {
+            "page_id": "hotel-form", "frame_id": "main", "field_key": "房间类型",
+            "field_aliases": ["roomType"], "control_kind": "select", "selected": "大床房",
+            "options": [{"label": "双床房", "value": 1}, {"label": "大床房", "value": 2}],
+        },
+    }
+    unrelated = [{"url": "/admin-api/system/dict-data/simple-list", "json": {"data": [
+        {"label": "歌词模式", "value": 1}, {"label": "描述模式", "value": 2},
+    ]}}]
+
+    spec = to_flow_spec(
+        [query, submit], reads=unrelated,
+        samples={item["label"]: item["value"] for item in evidence},
+        page_enum_options=page_enums, field_evidence=evidence,
+    )
+    params = {param.path: param for step in spec.steps for param in step.params}
+
+    assert (params["query.billCode"].key, params["query.billCode"].type, params["query.billCode"].source_kind) == ("单据编号", "string", "user_input")
+    assert (params["query.processStatus"].key, params["query.processStatus"].type, params["query.processStatus"].source_kind) == ("流程状态", "enum", "page_enum")
+    assert (params["applyTitle"].key, params["applyTitle"].type, params["applyTitle"].source_kind) == ("申请标题", "string", "user_input")
+    assert (params["totalAmt"].key, params["totalAmt"].type, params["totalAmt"].source_kind) == ("预计金额", "number", "user_input")
+    assert (params["roomType"].key, params["roomType"].type, params["roomType"].source_kind) == ("房间类型", "enum", "page_enum")
+    assert (params["useTime"].key, params["useTime"].type, params["useTime"].source_kind) == ("入住时间", "datetime", "user_input")
+    assert (params["remark"].key, params["remark"].type, params["remark"].source_kind) == ("备注", "string", "user_input")
 
 
 if __name__ == "__main__":

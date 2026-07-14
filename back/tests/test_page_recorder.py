@@ -38,8 +38,30 @@ def test_observer_correlates_action_dom_effect_and_request_without_copying_value
     assert "must-not-enter-page-events" not in json.dumps(events, ensure_ascii=False)
     request = sess.captured_all_requests()[0]
     assert request["trigger_action_id"] == "action_7"
+    assert request["trigger_transaction_id"] == "page_unknown|frame_unknown|action_7"
     assert request["trigger_event_id"] == "event_1"
     assert request["causality_confidence"] == "high"
+    assert events[0]["transaction_id"] == request["trigger_transaction_id"]
+
+
+def test_observer_never_attaches_another_pages_last_action() -> None:
+    sess = RecordSession()
+    sess._on_record(None, json.dumps({
+        "op": "click",
+        "action_id": "action-query",
+        "locator": "role=button[name=查询]",
+        "page_id": "page-a",
+        "frame_id": "frame-a",
+    }))
+
+    sess._record_all(
+        "GET",
+        "https://example.test/api/background",
+        page_id="page-b",
+        frame_id="frame-b",
+    )
+
+    assert "trigger_action_id" not in sess.captured_all_requests()[0]
 
 
 def test_reset_clears_observer_causality_state() -> None:
@@ -291,12 +313,50 @@ def test_recorded_page_enum_options_attach_popup_pick_to_previous_field() -> Non
     assert enums["类型"]["options"] == ["病假", "事假", "婚假"]
 
 
+def test_open_dropdown_snapshot_is_persisted_without_executable_pick() -> None:
+    sess = RecordSession()
+    sess._on_record(None, json.dumps({
+        "op": "enum_snapshot",
+        "locator": "role=combobox[name=房间类型]",
+        "field": "房间类型",
+        "options": [
+            {"label": "大床房", "value": 2},
+            {"label": "双床房", "value": 1},
+        ],
+        "page_id": "page-1",
+        "frame_id": "main",
+    }))
+
+    assert sess.steps == []
+    assert sess.recorded_page_enum_options() == {
+        "房间类型": {
+            "options": [
+                {"label": "大床房", "value": 2},
+                {"label": "双床房", "value": 1},
+            ],
+            "field_key": "房间类型",
+            "selected": "",
+        },
+    }
+    assert sess.recorded_page_events()[-1]["kind"] == "enum_snapshot"
+
+
 def test_popup_pick_preserves_options_until_selected_value_is_recorded() -> None:
     """点击弹层项时不得清空刚抓到的候选，未知 value 也不能伪装成 label。"""
     assert "pollPick(activeTrigger, false)" in _RECORDER_JS
     assert "pollPick(trig, true)" in _RECORDER_JS
     assert "if (resetOptions) lastPickOptions = []" in _RECORDER_JS
     assert "return label;" not in _RECORDER_JS
+
+
+def test_popup_option_value_reads_framework_props_without_label_fallback() -> None:
+    """Element/Ant 等自定义 option 的 wire value 常藏在框架 props，而非 DOM attribute。"""
+    assert "node.__vue__" in _RECORDER_JS
+    assert "node.__vueParentComponent" in _RECORDER_JS
+    assert "__reactProps$" in _RECORDER_JS
+    assert "__reactFiber$" in _RECORDER_JS
+    assert "ng-reflect-value" in _RECORDER_JS
+    assert "explicitly named `value` props" in _RECORDER_JS
 
 
 _HTML = """<!doctype html><html><head><meta charset="utf-8"></head><body>

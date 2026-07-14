@@ -582,7 +582,8 @@ async def onboarding(req: OnboardReq) -> dict:
 
 async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dict,
                               reads: list[dict] | None = None, storage: dict | None = None,
-                              required_labels: set | None = None, page_enum_options: dict | None = None) -> dict:
+                              required_labels: set | None = None, page_enum_options: dict | None = None,
+                              field_evidence: list[dict] | None = None) -> dict:
     """构造 request_fields 消息:字段表(含 type/required)+ 候选请求 + select(Q2)+ identity(Q1)。"""
     from dano.execution.page.request_capture import (apply_page_enum_options, page_enum_selects, flatten_body,
                                                      looks_internal_param_name, suggest_assignee_names,
@@ -593,13 +594,28 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
     def _path(u: str) -> str:
         i = u.find("//")
         return u[u.find("/", i + 2):] if i >= 0 and u.find("/", i + 2) >= 0 else u
+    def _same_scope(item: dict) -> bool:
+        req_page, req_frame = str(chosen.get("page_id") or ""), str(chosen.get("frame_id") or "")
+        item_page, item_frame = str(item.get("page_id") or ""), str(item.get("frame_id") or "")
+        return not (
+            (req_page and item_page and req_page != item_page)
+            or (req_frame and item_frame and req_frame != item_frame)
+        )
+    field_evidence = [item for item in (field_evidence or []) if isinstance(item, dict) and _same_scope(item)]
+    page_enum_options = {
+        key: item for key, item in (page_enum_options or {}).items()
+        if not isinstance(item, dict) or _same_scope(item)
+    }
     cand_list = [{"idx": i, "method": (c.get("method") or "POST").upper(), "path": _path(c.get("url") or "")}
                  for i, c in enumerate(candidates)]
     pd = chosen.get("post_data")
     # 列表多选(participants[]=选了多个人)先识别 → 折叠成**一个**列表参数,逐元素叶子不再单独冒出来
     list_selects = suggest_list_selects(pd, reads or [], samples)
     list_paths = [s["path"] for s in list_selects]
-    fields = flatten_body(pd, samples, required_labels, collapse_paths=list_paths)
+    fields = flatten_body(
+        pd, samples, required_labels, collapse_paths=list_paths,
+        field_evidence=field_evidence,
+    )
     # 传 samples:用录制选中的显示名消歧/确认(大字典里短码也能精确绑对那项);跳过已被列表多选接管的数组下逐元素叶子
     selects = suggest_selects(pd, reads or [], samples, skip_paths=list_paths, fields=fields) + list_selects
     # 页面枚举地面真值:用录制时下拉里真实可见的选项覆盖候选快照(治"加班类型绑到 222 项全量字典");
@@ -630,19 +646,6 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
         if f.get("path") in assignee_names and (nm == f.get("key") or looks_internal_param_name(nm)):
             f["suggest_name"] = assignee_names[f["path"]]
             f["name_source"] = "assignee"
-    # LLM 字段语义增强(最佳努力):只给"确定性没把握(名字仍=原始 key)"的字段补中文名;确信的不覆盖,失败不影响。
-    try:
-        from dano.agent_tools import tools as _T
-        from dano.execution.page.request_capture import merge_llm_field_names
-        from dano.review.board import suggest_field_names_llm
-        _board = _T._review_board
-        if _board is not None:
-            _names = await suggest_field_names_llm(
-                _board.client, (getattr(_board, "models", None) or {}).get("acceptance"),
-                action=_path(chosen.get("url") or ""), fields=fields)
-            fields = merge_llm_field_names(fields, _names)
-    except Exception:  # noqa: BLE001
-        pass
     return {"type": "request_fields",
             "method": (chosen.get("method") or "POST").upper(), "url": chosen.get("url"),
             "fields": fields,
@@ -709,9 +712,16 @@ def _frontend_recording_field_metadata(raw_steps: list[dict]) -> tuple[dict, set
         selected = str(step.get("value", "") or "").strip()
         if selected and field_key not in samples:
             samples[field_key] = selected
-        entry = {"options": list(step["options"]), "field_key": field_key, "selected": selected}
-        if selected and selected not in page_enum_options:
-            page_enum_options[selected] = entry
+        entry = {
+            "options": list(step["options"]),
+            "field_key": field_key,
+            "field_aliases": list(step.get("field_aliases") or []),
+            "selected": selected,
+            "page_id": str(step.get("page_id") or ""),
+            "frame_id": str(step.get("frame_id") or ""),
+            "page_context": dict(step.get("page_context") or {}),
+            "control_kind": str(step.get("control_kind") or "select"),
+        }
         if field_key not in page_enum_options:
             page_enum_options[field_key] = entry
     return samples, required_labels, page_enum_options
@@ -764,6 +774,7 @@ async def record_ws(ws: WebSocket) -> None:
         pending_storage: dict | None = None    # 登录态(认 identity 字段)
         pending_required: set = set()          # 录制时表单 * 必填的字段标签
         pending_page_enum_options: dict = {}         # 录制时下拉里真实可见的选项 {选中显示值: [选项文字]}(枚举地面真值)
+        pending_field_evidence: list[dict] = []       # 控件 name/data-prop/type 等结构证据，禁止按重复值猜字段
         pending_page_events: list[dict] = []          # 动作→DOM 变化→请求的脱敏 Observer 时间线
         applied_flow_operations: dict[str, dict] = {}  # flow_update 幂等回执(operation_id → response)
         costly_operation_results: dict[str, dict] = {}
@@ -829,6 +840,38 @@ async def record_ws(ws: WebSocket) -> None:
                         old_idn = old_identity.get(str(idn.get("path") or ""))
                         if old_idn is not None:
                             idn["value"] = old_idn.value
+
+            def request_key(item: dict) -> tuple[str, object]:
+                return (str(item.get("request_id") or ""), item.get("request_index"))
+
+            old_facts = {
+                (str(f.request_id or ""), f.request_index): f
+                for f in pending_flow_spec.request_facts.requests or []
+            }
+            for fact in ((raw_spec.get("request_facts") or {}).get("requests") or []):
+                if not isinstance(fact, dict):
+                    continue
+                old_fact = old_facts.get(request_key(fact))
+                if old_fact is not None:
+                    fact["response_json"] = old_fact.response_json
+                    fact["response_schema"] = old_fact.response_schema
+                    fact["post_data"] = old_fact.post_data
+                    fact["headers"] = old_fact.headers
+
+            old_graph = ((pending_flow_spec.meta or {}).get("request_graph") or {})
+            raw_graph = ((raw_spec.get("meta") or {}).get("request_graph") or {})
+            for bucket in ("all_requests", "candidate_reads", "selected_steps", "filtered_requests"):
+                old_items = {
+                    request_key(item): item
+                    for item in (old_graph.get(bucket) or []) if isinstance(item, dict)
+                }
+                for item in raw_graph.get(bucket) or []:
+                    if not isinstance(item, dict):
+                        continue
+                    old_item = old_items.get(request_key(item))
+                    if old_item is not None:
+                        for field in ("response_json", "response_schema", "post_data", "headers"):
+                            item[field] = old_item.get(field)
             return raw_spec
 
         while True:
@@ -900,22 +943,69 @@ async def record_ws(ws: WebSocket) -> None:
                     # 枚举地面真值:既按「选中显示值」也对到「字段 key」,使 page_enum_selects 在 body leaf
                     # 不出现 label 但出现内部英文名时也能命中(治"请假类型=病假 → body.leaveType=2"漏识别)。
                     page_enum_options = {}
-                    for field_key, raw_entry in (page_options_by_field or {}).items():
+                    for storage_key, raw_entry in (page_options_by_field or {}).items():
                         opts = raw_entry.get("options") if isinstance(raw_entry, dict) else raw_entry
                         if not opts:
                             continue
+                        field_key = str(raw_entry.get("field_key") or storage_key) if isinstance(raw_entry, dict) else str(storage_key)
                         label = str((raw_entry.get("selected") if isinstance(raw_entry, dict) else None)
                                     or samples.get(field_key, "") or "").strip()
-                        entry = {"options": list(opts), "field_key": field_key, "selected": label}
-                        if label and label not in page_enum_options:
-                            page_enum_options[label] = entry
-                        if field_key and field_key not in page_enum_options:
-                            page_enum_options[field_key] = entry
+                        entry = {
+                            "options": list(opts), "field_key": field_key, "selected": label,
+                            "field_aliases": list(raw_entry.get("field_aliases") or []) if isinstance(raw_entry, dict) else [],
+                            "page_id": str(raw_entry.get("page_id") or "") if isinstance(raw_entry, dict) else "",
+                            "frame_id": str(raw_entry.get("frame_id") or "") if isinstance(raw_entry, dict) else "",
+                            "page_context": dict(raw_entry.get("page_context") or {}) if isinstance(raw_entry, dict) else {},
+                            "control_kind": str(raw_entry.get("control_kind") or "select") if isinstance(raw_entry, dict) else "select",
+                        }
+                        if storage_key and storage_key not in page_enum_options:
+                            page_enum_options[str(storage_key)] = entry
+                # Browser enum snapshots live outside executable steps. Always
+                # merge them, including when the frontend sends an edited step
+                # list, or editing/reordering silently discards DOM evidence.
+                for storage_key, raw_entry in (sess.recorded_page_enum_options() or {}).items():
+                    opts = raw_entry.get("options") if isinstance(raw_entry, dict) else raw_entry
+                    if not opts:
+                        continue
+                    field_key = str(raw_entry.get("field_key") or storage_key) if isinstance(raw_entry, dict) else str(storage_key)
+                    selected = str(
+                        (raw_entry.get("selected") if isinstance(raw_entry, dict) else "")
+                        or samples.get(field_key, "")
+                        or ""
+                    ).strip()
+                    entry = {
+                        "options": list(opts),
+                        "field_key": field_key,
+                        "field_aliases": list(
+                            raw_entry.get("field_aliases") or []
+                            if isinstance(raw_entry, dict) else []
+                        ),
+                        "selected": selected,
+                        "page_id": str(raw_entry.get("page_id") or "") if isinstance(raw_entry, dict) else "",
+                        "frame_id": str(raw_entry.get("frame_id") or "") if isinstance(raw_entry, dict) else "",
+                        "page_context": dict(raw_entry.get("page_context") or {}) if isinstance(raw_entry, dict) else {},
+                        "control_kind": str(raw_entry.get("control_kind") or "select") if isinstance(raw_entry, dict) else "select",
+                    }
+                    existing = page_enum_options.get(str(storage_key))
+                    if isinstance(existing, dict):
+                        by_label = {
+                            str(option.get("label") if isinstance(option, dict) else option): option
+                            for option in [*(existing.get("options") or []), *entry["options"]]
+                            if str(option.get("label") if isinstance(option, dict) else option)
+                        }
+                        entry["options"] = list(by_label.values())
+                        entry["field_aliases"] = list(dict.fromkeys([
+                            *list(existing.get("field_aliases") or []),
+                            *entry["field_aliases"],
+                        ]))
+                        entry["selected"] = selected or str(existing.get("selected") or "")
+                    page_enum_options[str(storage_key)] = entry
                 # Submit-time form evidence survives modal teardown and fills
                 # untouched/compound controls (for example a two-input date
                 # range) into the same sample map used for body-field matching.
                 for field_key, value in sess.recorded_form_samples().items():
                     samples.setdefault(field_key, value)
+                field_evidence = sess.recorded_field_evidence()
                 sub = init.get("subsystem", "A-报销")
                 login_state = await sess.storage_state()   # 录制会话(已真人登录)的登录态快照
 
@@ -935,6 +1025,7 @@ async def record_ws(ws: WebSocket) -> None:
                 pending_storage = login_state               # identity 字段识别
                 pending_required = required_labels          # 表单 * 必填
                 pending_page_enum_options = page_enum_options           # 下拉枚举地面真值
+                pending_field_evidence = field_evidence
                 pending_page_events = sess.recorded_page_events()
                 log.info("record.finalize", captured=len(all_caps), cands=len(cands), steps=len(steps),
                          captured_urls=[((c.get("method") or ""), (c.get("url") or "")[:140]) for c in all_caps][:25])
@@ -952,6 +1043,7 @@ async def record_ws(ws: WebSocket) -> None:
                     request_fields = await _request_fields_msg(
                         chosen, cands, samples, pending_reads,
                         pending_storage, pending_required, page_enum_options,
+                        field_evidence,
                     )
                     await sender.send_json({**request_fields, "action": session_action})
                     # Step A: 灰度附带下发 flow_spec 摘要 + 完整 spec;前端暂不消费,零回归。
@@ -967,6 +1059,7 @@ async def record_ws(ws: WebSocket) -> None:
                             storage_state=pending_storage,
                             required_labels=pending_required,
                             page_enum_options=pending_page_enum_options,
+                            field_evidence=pending_field_evidence,
                             page_context=observed_page_context,
                             recording_mode=recording_mode,
                             diagnostics=sess.captured_diagnostics(),
@@ -1015,6 +1108,7 @@ async def record_ws(ws: WebSocket) -> None:
                         storage_state=pending_storage,
                         required_labels=pending_required,
                         page_enum_options=pending_page_enum_options,
+                        field_evidence=pending_field_evidence,
                         page_context=observed_page_context,
                         recording_mode=recording_mode,
                         diagnostics=sess.captured_diagnostics(),
@@ -1051,6 +1145,7 @@ async def record_ws(ws: WebSocket) -> None:
                         pending_req, pending_candidates, pending_samples,
                         pending_reads, pending_storage, pending_required,
                         pending_page_enum_options,
+                        pending_field_evidence,
                     )
                     await sender.send_json({**request_fields, "action": session_action})
                     try:
@@ -1074,6 +1169,7 @@ async def record_ws(ws: WebSocket) -> None:
                             storage_state=pending_storage,
                             required_labels=pending_required,
                             page_enum_options=pending_page_enum_options,
+                            field_evidence=pending_field_evidence,
                             page_context=observed_page_context,
                             recording_mode=recording_mode,
                             diagnostics=sess.captured_diagnostics(),
@@ -1210,15 +1306,13 @@ async def record_ws(ws: WebSocket) -> None:
                         raw_spec = _restore_hidden_flow_spec_fields(raw_spec)
                         pending_flow_spec = refresh_review_items(FlowSpec.model_validate(raw_spec))
                     before_operation = pending_flow_spec.model_copy(deep=True)
-                    force_replan = bool(msg.get("force_replan"))
                     pending_flow_spec = await run_recording_pi_loop(
                         pending_flow_spec,
                         llm_client=_page_semantic_client("complete_json"),
                         model=get_settings().pi_model,
                         mode="plan",
-                        force_replan=force_replan,
                     )
-                    operation = "replan" if force_replan else "plan"
+                    operation = "plan"
                     response = {
                         "type": "flow_spec_updated",
                         "operation": operation,
@@ -1507,6 +1601,9 @@ async def record_ws(ws: WebSocket) -> None:
         except Exception:  # noqa: BLE001
             pass
     finally:
+        if llm_budget_token is not None:
+            from dano.infra.llm_control import end_llm_budget
+            end_llm_budget(llm_budget_token)
         if sess is not None:
             await sess.stop()
         await sender.close()

@@ -8,6 +8,7 @@ derived field/dependency/schema views stay aligned with that scope.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 
 import dano.execution.page.flow_spec as flow_spec_module
@@ -872,6 +873,118 @@ def test_complex_business_domains_split_into_independent_capabilities():
     assert by_name["submit_expense"].step_ids == ["expense-submit"]
 
 
+def test_action_transaction_keeps_query_and_assigns_each_bpm_preflight_to_its_write():
+    initial_page = _get(
+        1,
+        "/admin-api/oa/hotel-apply/page?pageNo=1&pageSize=10",
+        {"data": {"list": [], "total": 0}},
+    )
+    seal_definition = _get(
+        2,
+        "/admin-api/bpm/process-definition/get?key=oa_seal_apply",
+        {"data": {"id": "PROC-SEAL"}},
+    )
+    seal_approval = _get(
+        3,
+        "/admin-api/bpm/process-instance/get-approval-detail?processDefinitionId=PROC-SEAL",
+        {"data": {"activityId": "StartUserNode"}},
+    )
+    seal_submit = _post(
+        4,
+        "/admin-api/oa/seal-apply/submit-process",
+        {"processDefKey": "oa_seal_apply", "applyTitle": "公章申请"},
+    )
+    seal_submit.update({
+        "page_id": "page-seal",
+        "frame_id": "frame-main",
+        "trigger_action_id": "action-seal-submit",
+        "trigger_transaction_id": "page-seal|frame-main|action-seal-submit",
+        "trigger_op": "submit",
+        "trigger_locator": "role=button[name=提交]",
+        "causality_confidence": "high",
+    })
+    hotel_definition = _get(
+        5,
+        "/admin-api/bpm/process-definition/get?key=oa_hotel_apply",
+        {"data": {"id": "PROC-HOTEL"}},
+    )
+    hotel_approval = _get(
+        6,
+        "/admin-api/bpm/process-instance/get-approval-detail?processDefinitionId=PROC-HOTEL",
+        {"data": {"activityId": "StartUserNode"}},
+    )
+    hotel_submit = _post(
+        7,
+        "/admin-api/oa/hotel-apply/submit-process",
+        {"processDefKey": "oa_hotel_apply", "applyTitle": "酒店申请", "roomType": 2},
+    )
+    hotel_submit.update({
+        "page_id": "page-hotel",
+        "frame_id": "frame-main",
+        "trigger_action_id": "action-hotel-submit",
+        "trigger_transaction_id": "page-hotel|frame-main|action-hotel-submit",
+        "trigger_op": "submit",
+        "trigger_locator": "role=button[name=提交]",
+        "causality_confidence": "high",
+    })
+    searched_page = _get(
+        8,
+        "/admin-api/oa/hotel-apply/page?pageNo=1&pageSize=10&hotelName=%E5%8C%97%E4%BA%AC",
+        {"data": {"list": [{"id": "H-1", "hotelName": "北京酒店", "applyStatus": 1}], "total": 1}},
+    )
+    searched_page.update({
+        "page_id": "page-list",
+        "frame_id": "frame-main",
+        "trigger_action_id": "action-query",
+        "trigger_transaction_id": "page-list|frame-main|action-query",
+        "trigger_op": "click",
+        "trigger_locator": "role=button[name=查询]",
+        "causality_confidence": "high",
+    })
+
+    spec = to_flow_spec([
+        initial_page,
+        seal_definition,
+        seal_approval,
+        seal_submit,
+        hotel_definition,
+        hotel_approval,
+        hotel_submit,
+        searched_page,
+    ])
+    generated = flow_spec_module.ensure_flow_capabilities(spec)
+    by_id = {step.step_id: step for step in generated.steps}
+    query_caps = [cap for cap in generated.capabilities if cap.kind == "query_status"]
+    submit_caps = [cap for cap in generated.capabilities if cap.kind in {"submit", "submit_batch"}]
+
+    assert len(query_caps) == 1
+    query_paths = [by_id[step_id].path for step_id in query_caps[0].step_ids]
+    assert len(query_paths) == 1
+    assert query_paths[0].startswith("/admin-api/oa/hotel-apply/page?")
+    query_step = by_id[query_caps[0].step_ids[0]]
+    assert query_step.source_meta["trigger_transaction_id"] == "page-list|frame-main|action-query"
+
+    assert len(submit_caps) == 2
+    submit_paths = {
+        next(
+            by_id[step_id].path
+            for step_id in cap.step_ids
+            if by_id[step_id].method == "POST"
+        ): [by_id[step_id] for step_id in cap.step_ids]
+        for cap in submit_caps
+    }
+    seal_steps = submit_paths["/admin-api/oa/seal-apply/submit-process"]
+    hotel_steps = submit_paths["/admin-api/oa/hotel-apply/submit-process"]
+    assert any("oa_seal_apply" in step.url for step in seal_steps if step.method == "GET")
+    assert not any("oa_hotel_apply" in step.url for step in seal_steps if step.method == "GET")
+    assert any("oa_hotel_apply" in step.url for step in hotel_steps if step.method == "GET")
+    assert not any("oa_seal_apply" in step.url for step in hotel_steps if step.method == "GET")
+
+
+def test_recording_pi_loop_has_no_force_replan_protocol():
+    assert "force_replan" not in inspect.signature(run_recording_pi_loop).parameters
+
+
 def test_cross_domain_write_dependency_prevents_unsafe_automatic_split():
     spec = FlowSpec(
         steps=[
@@ -962,6 +1075,106 @@ def test_initial_generation_splits_empty_list_from_previous_page_without_changin
     assert [(cap.kind, cap.step_ids) for cap in incremental.capabilities] == [(
         "submit", ["seal-page", "definition", "approval", "submit"],
     )]
+
+
+def test_seal_option_source_is_not_executed_by_submit_or_checked_as_submit_enum():
+    query = FlowStep(
+        step_id="seal-page", method="GET",
+        path="/admin-api/oa/seal-apply/page?pageNo=1&pageSize=10&processStatus=1",
+        source_meta={"page_id": "page-list", "role": "business_get"},
+        response_json={"data": {"list": [], "total": 0}},
+        params=[ParamField(
+            path="query.processStatus", key="流程状态", value="1", type="enum",
+            category="user_param", source_kind="page_enum",
+            source={"enum_confirmed": True},
+            enum_options=[{"label": "审批中", "value": 1}],
+            enum_value_map={"审批中": 1},
+        )],
+    )
+    option = FlowStep(
+        step_id="seal-options", method="GET",
+        path="/admin-api/bd/seal/simple-list?status=0",
+        source_meta={
+            "page_id": "page-form", "role": "read_option",
+            "control_preflight_for_write": True,
+            "control_preflight_for_write_ids": ["submit"],
+        },
+        response_json={"data": [{"id": 7, "name": "行政章"}]},
+        # This is the option endpoint's own filter.  It deliberately carries a
+        # stale/incomplete page enum contract to prove it cannot block submit.
+        params=[ParamField(
+            path="query.status", key="流程状态", value="0", type="enum",
+            category="user_param", source_kind="page_enum",
+            source={"enum_confirmed": False},
+            enum_options=[{"label": "未提交", "value": 0}],
+            enum_value_map={"未提交": 0},
+        )],
+    )
+    definition = FlowStep(
+        step_id="definition", method="GET",
+        path="/admin-api/bpm/process-definition/get?key=oa_seal_apply",
+        source_meta={"page_id": "page-form", "control_preflight_for_write": True},
+    )
+    approval = FlowStep(
+        step_id="approval", method="GET",
+        path="/admin-api/bpm/process-instance/get-approval-detail",
+        source_meta={"page_id": "page-form", "control_preflight_for_write": True},
+    )
+    submit = FlowStep(
+        step_id="submit", method="POST",
+        path="/admin-api/oa/seal-apply/submit-process",
+        source_meta={"page_id": "page-form"},
+        params=[ParamField(
+            path="sealId", key="印章标识", value="7", type="enum",
+            category="user_param", source_kind="api_option",
+            source={
+                "kind": "api_option", "source_step_id": "seal-options",
+                "source_url": "/admin-api/bd/seal/simple-list?status=0",
+                "value_key": "id", "label_key": "name",
+            },
+            enum_options=[{"label": "行政章", "value": 7}],
+            enum_value_map={"行政章": 7},
+        )],
+        selects=[SelectBinding(
+            param="印章标识", path="sealId",
+            source_url="/admin-api/bd/seal/simple-list?status=0",
+            value_key="id", label_key="name", enum_source="api", enum_confirmed=True,
+        )],
+    )
+
+    spec = flow_spec_module.ensure_flow_capabilities(FlowSpec(
+        steps=[query, option, definition, approval, submit],
+    ))
+    by_kind = {cap.kind: cap for cap in spec.capabilities}
+
+    assert by_kind["query_status"].step_ids == ["seal-page"]
+    assert by_kind["submit"].step_ids == ["definition", "approval", "submit"]
+    assert "seal-options" not in {
+        node.get("step_id") for node in _walk_nodes(by_kind["submit"].nodes)
+    }
+    assert submit.selects[0].source_url == "/admin-api/bd/seal/simple-list?status=0"
+
+    # Existing workbenches may already contain the old bad membership.  A
+    # normal sync/optimize pass must repair an unconfirmed generated contract,
+    # not require the operator to delete and recreate the capability.
+    by_kind["submit"].step_ids.insert(0, "seal-options")
+    by_kind["submit"].nodes.insert(0, {
+        "id": "call_bad_option", "type": "call", "step_id": "seal-options",
+    })
+    spec = sync_flow_spec_models(spec, prefer_request_facts=False)
+    by_kind = {cap.kind: cap for cap in spec.capabilities}
+    assert by_kind["submit"].step_ids == ["definition", "approval", "submit"]
+    assert "seal-options" not in {
+        node.get("step_id") for node in _walk_nodes(by_kind["submit"].nodes)
+    }
+
+    confirmed = apply_flow_edits(spec, [{
+        "op": "update_capability", "capability_name": by_kind["submit"].name,
+        "field": "confirmed", "value": True,
+    }])
+    confirmed_submit = next(cap for cap in confirmed.capabilities if cap.kind == "submit")
+    assert confirmed_submit.confirmed is True
+    assert confirmed_submit.requires_human_confirm is False
 
 
 def _seal_semantic_spec() -> FlowSpec:
@@ -1104,7 +1317,6 @@ def test_small_manual_change_runs_one_incremental_planner_then_reuses_result():
     submit = next(step for step in generated.steps if step.step_id == "submit")
     remark = next(param for param in submit.params if param.path == "remark")
     remark.required = False
-    remark.required_source = "manual"
 
     class DeltaPlanner:
         def __init__(self):
@@ -1138,49 +1350,6 @@ def test_small_manual_change_runs_one_incremental_planner_then_reuses_result():
     assert len(delta_planner.requests) == 1
     assert reused.meta["capability_generation"]["application_cache_hit"] is True
     assert reused.meta["capability_generation"]["model_calls"] == 0
-
-
-def test_force_replan_reopens_a_wrong_first_capability_boundary():
-    query = FlowStep(
-        step_id="query",
-        method="GET",
-        path="/work-hours/list",
-        source_meta={"role": "business_get", "confidence": 0.99},
-        response_json={"data": {"list": [{"project": "A"}], "total": 1}},
-    )
-    submit = FlowStep(
-        step_id="submit",
-        method="POST",
-        path="/work-hours/submit",
-        params=[ParamField(
-            path="content", key="工作内容", value="实现功能", required=True,
-            category="user_param", source_kind="user_input", exposed_to_user=True,
-        )],
-    )
-    wrong = FlowCapability(
-        name="submit_all",
-        title="错误地合并查询和提交",
-        kind="submit",
-        step_ids=["query", "submit"],
-        confirmed=True,
-    )
-    spec = FlowSpec(
-        steps=[query, submit],
-        capabilities=[wrong],
-        meta={
-            "capability_generation": {
-                "protocol": "dano.capability-generation.v2",
-                "initial_completed": True,
-                "fact_hash": "old",
-            },
-        },
-    )
-
-    replanned = asyncio.run(run_recording_pi_loop(spec, mode="plan", force_replan=True))
-
-    assert {cap.kind for cap in replanned.capabilities} == {"query_status", "submit"}
-    assert all(cap.name != "submit_all" for cap in replanned.capabilities)
-    assert replanned.meta["capability_generation"]["last_mode"] == "replan"
 
 
 def test_partial_first_planner_response_is_completed_without_second_full_call():

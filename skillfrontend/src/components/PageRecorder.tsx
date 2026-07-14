@@ -56,18 +56,17 @@ interface RecIdentity { path: string; source: string }
 
 interface FlowParam {
   path: string; key: string; label?: string; value: string; type: string; required: boolean; name_source?: string;
-  page_required?: boolean | null; required_source?: string;
   category?: string; source_kind?: string; source?: any; reason?: string;
   exposed_to_user?: boolean; need_human_confirm?: boolean; editable?: boolean; confidence?: number;
   // 系统化:enum_options 兼容 list[string] 与 list[{label, value}];label→value 表由后端 enum_value_map 提供
-  enum_options?: Array<string | { label: string; value: any }> | null;
+  enum_options?: Array<string | { label: string; value?: any }> | null;
   enum_value_map?: Record<string, any> | null;
 }
 interface FlowSelectBinding {
   param?: string; path?: string; source_url?: string; value_key?: string; label_key?: string;
   source_method?: string; source_headers?: Record<string, string>; source_body?: any;
   source_content_type?: string; source_role?: string; source_request_id?: string;
-  options?: Array<string | { label: string; value: any }> | null; count?: number; multi?: boolean;
+  options?: Array<string | { label: string; value?: any }> | null; count?: number; multi?: boolean;
   option_map?: Record<string, any> | null;
   enum_source?: string | null; enum_confirmed?: boolean | null;
   id_path?: string | null;
@@ -132,6 +131,7 @@ interface FlowCapabilityRelationData {
 interface ReviewItemData {
   id: string; type: string; severity: string; title: string; reason: string;
   current_guess?: string; suggested_action?: string; resolved?: boolean; confidence?: number;
+  code?: string; ignorable?: boolean; ignore_reason?: string; ignored?: boolean;
   target?: { kind?: string; step_id?: string; path?: string; link_id?: string; [k: string]: any };
   llm_suggestions?: Array<{
     action: "bind_previous_response" | "set_runtime_source" | "ask_human";
@@ -190,7 +190,7 @@ interface FlowSpecData {
   };
 }
 interface FlowCheckReport {
-  passed?: boolean; errors?: string[]; warnings?: string[];
+  passed?: boolean; errors?: string[]; warnings?: string[]; suggestions?: string[];
   dry_run?: {
     ok?: boolean; mode?: string; stage?: string; request_count?: number;
     missing_params?: string[]; self_check?: string[]; build_errors?: string[];
@@ -210,6 +210,7 @@ interface FlowCheckReport {
   issue_groups?: Record<string, Array<{
     severity?: string; message?: string; source?: string; target?: Record<string, any>;
     audience?: "operator" | "internal"; actionable?: boolean; blocking?: boolean; auto_fixable?: boolean;
+    issue_id?: string; code?: string; contract_hash?: string; ignorable?: boolean; ignored?: boolean; ignore_reason?: string; ignored_by?: string;
   }>>;
 }
 interface FlowOperationReport {
@@ -220,6 +221,7 @@ interface FlowOperationReport {
   cache_hit?: boolean;
   model_calls?: number;
   model_errors?: string[];
+  edit_errors?: string[];
   errors_before?: number;
   errors_after?: number;
   warnings_before?: number;
@@ -1093,15 +1095,15 @@ function jsonSchemaForParam(p: FlowParam) {
   return schema;
 }
 function enumOptionRecordList(raw: any[]) {
-  const out: Array<{ label: string; value: any }> = [];
+  const out: Array<{ label: string; value?: any }> = [];
   for (const x of raw || []) {
     if (x == null) continue;
     if (typeof x === "object") {
       const label = String(x.label ?? x.text ?? x.name ?? x.value ?? "").trim();
-      if (label) out.push({ label, value: x.value ?? label });
+      if (label) out.push({ label, ...(Object.prototype.hasOwnProperty.call(x, "value") ? { value: x.value } : {}) });
     } else {
       const label = String(x).trim();
-      if (label) out.push({ label, value: label });
+      if (label) out.push({ label });
     }
   }
   return out;
@@ -1216,6 +1218,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [expandedCapabilitySections, setExpandedCapabilitySections] = useState<Record<number, string[]>>({});
   const [expandedCapabilitySteps, setExpandedCapabilitySteps] = useState<Record<number, string[]>>({});
   const [expandedRequestPanels, setExpandedRequestPanels] = useState<string[]>([]);
+  const [expandedCapabilityRelationKeys, setExpandedCapabilityRelationKeys] = useState<string[]>([]);
   const flowOperationRef = useRef<{
     mode: "plan" | "repair" | "replan"; previousUpdatedAt?: string; operationId: string;
   } | null>(null);
@@ -1226,6 +1229,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const flowMutationInFlightRef = useRef<any | null>(null);
   const flowMutationSeqRef = useRef(0);
   const afterFlowSyncRef = useRef<(() => void) | null>(null);
+  const publishLocateTokenRef = useRef(0);
   const [activeFlowTab, setActiveFlowTab] = useState("abilities");
 
   function acceptFlowSpec(fs: FlowSpecData) {
@@ -1609,21 +1613,32 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         message.success("抓到提交请求，请核对字段和流程");
       }
       else if (m.type === "flow_spec" || m.type === "flow_spec_updated") {
+        if (m.operation === "finalize" && (!m.operation_id || m.operation_id === finalizeOperationRef.current)) {
+          finalizeOperationRef.current = null;
+        }
         // 发布请求可能与最后一次字段更新响应交错到达。普通更新不能把发布中的
         // loading/状态提前重置，否则用户看到按钮闪退但后端仍在发布。
         if (phaseRef.current !== "publishing") setPhase("recording");
         const fs = m.full_spec || m.flow_spec;
+        const acknowledgesActiveMutation = (m.operation === "flow_update" || m.operation === "flow_replace")
+          && (!m.operation_id || m.operation_id === flowMutationInFlightRef.current?.operation_id);
+        const hasNewerLocalMutation = acknowledgesActiveMutation && flowMutationQueueRef.current.length > 0;
         if (fs) {
-          acceptFlowSpec(fs);
+          // Every field mutation is serialized, but the user may already have made
+          // a newer local edit while the previous response is in flight.  Do not
+          // repaint that older snapshot over the newer draft.  The final queued
+          // response contains the complete server state and is accepted normally.
+          if (!hasNewerLocalMutation) acceptFlowSpec(fs);
           setLastServerJson(JSON.stringify(fs));
           finishFlowOperation(fs.meta?.recording_pi_loop, m.operation, m.operation_id);
         }
-        if (m.check_report) setCheckReport(m.check_report);
+        if (m.check_report && !hasNewerLocalMutation) setCheckReport(m.check_report);
+        else if (hasNewerLocalMutation) setCheckReport(null);
         if (m.operation_report) {
           const report = m.operation_report as FlowOperationReport;
           setLastOperationReport(report);
           if (report.changed) message.success(report.summary || "流程编排已更新");
-          else if (report.model_errors?.length) message.error(report.summary || "模型修复失败");
+          else if (report.model_errors?.length || report.edit_errors?.length) message.error(report.summary || "自动修复存在无效建议");
           else message.info(report.summary || "检查完成，没有可自动修改的内容");
         }
         if (m.operation === "flow_update" || m.operation === "flow_replace") finishQueuedFlowMutation(m.operation_id);
@@ -1668,12 +1683,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       else if (m.type === "error") {
         const detail = m.detail || "录制出错";
         setNamingBusy(false); setDescBusy(false); clearFlowOperation();
+        publishOperationRef.current = null;
+        finalizeOperationRef.current = null;
         if (m.full_spec) {
           acceptFlowSpec(m.full_spec);
           setLastServerJson(JSON.stringify(m.full_spec));
         }
         if (m.check_report) setCheckReport(m.check_report);
         if (m.operation === "flow_update" || m.operation === "flow_replace") failQueuedFlowMutation(m.operation_id);
+        if ((m.operation === "flow_update" || m.operation === "flow_replace") && !m.full_spec) {
+          sendRaw({ type: "refresh_flow_spec" });
+        }
         if (detail.includes("step not found") || detail.includes("link not found")) {
           message.warning("流程已变更，正在同步最新版本");
           send({ type: "refresh_flow_spec" });
@@ -2120,6 +2140,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     };
     flowSpecRef.current = next;
     setFlowSpec(next);
+    setCheckReport(null);
   }
   function patchLocalParams(stepId: string, p: FlowParam, updates: Record<string, any>) {
     patchLocalParam(stepId, p, updates);
@@ -2136,6 +2157,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     };
     flowSpecRef.current = next;
     setFlowSpec(next);
+    setCheckReport(null);
   }
   function patchLocalCapability(idx: number, updates: Partial<FlowCapabilityData>, invalidateConfirmation = true) {
     const base = flowSpecRef.current;
@@ -2148,6 +2170,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     };
     flowSpecRef.current = next;
     setFlowSpec(next);
+    setCheckReport(null);
   }
   function updateParam(stepId: string, p: FlowParam, field: string, value: any) {
     patchLocalParam(stepId, p, { [field]: value });
@@ -2158,12 +2181,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const currentParam = currentStep.params.find((item) => paramMatches(item, p)) || p;
     const wasEnum = currentParam.type === "enum" || currentParam.type === "list-enum";
     const isEnum = value === "enum" || value === "list-enum";
-    if (currentParam.source_kind === "api_option") {
-      // 接口候选描述值从哪里来，不约束请求字段的数据类型。
-      patchLocalParam(step.step_id, currentParam, { type: value });
-      send({ type: "flow_update", edits: [paramEdit(step.step_id, currentParam, "type", value)] });
-      return;
-    }
     if (!wasEnum || isEnum) {
       patchLocalParam(step.step_id, currentParam, { type: value });
       send({ type: "flow_update", edits: [paramEdit(step.step_id, currentParam, "type", value)] });
@@ -2241,9 +2258,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const nextSource = sourceDescriptor(sourceKind, p, currentSource);
     const needsConfiguration = sourceNeedsConfiguration(sourceKind, nextSource);
     // 只有离开“上游响应”时才移除原依赖；重新选择上游响应不能先把现有绑定删掉。
-    const edits: any[] = sourceKind === "previous_response" ? [] : (flowSpec?.links || [])
+    const edits: any[] = sourceKind === "previous_response" ? [] : ((flowSpecRef.current || flowSpec)?.links || [])
       .filter((l) => l.target_step_id === stepId && stripBodyPrefix(l.target_path) === stripBodyPrefix(p.path))
       .map((l) => ({ op: "remove", link_id: l.link_id, reset_target: false }));
+    const currentStep = (flowSpecRef.current || flowSpec)?.steps.find((step) => step.step_id === stepId);
+    const switchingToPlainInput = sourceKind === "user_input" && OPTION_SOURCE_KINDS.includes(p.source_kind || "");
+    const nextSelects = switchingToPlainInput
+      ? (currentStep?.selects || []).filter((sel) =>
+        !(sel.path === p.path || sel.id_path === p.path || (!sel.path && sel.param === p.key) || sel.param === p.key))
+      : currentStep?.selects;
     edits.push(
       paramEdit(stepId, p, "source_kind", sourceKind),
       paramEdit(stepId, p, "source", nextSource),
@@ -2251,13 +2274,27 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       paramEdit(stepId, p, "need_human_confirm", needsConfiguration),
       paramEdit(stepId, p, "editable", true),
     );
+    if (switchingToPlainInput) {
+      edits.push(
+        paramEdit(stepId, p, "enum_options", null),
+        paramEdit(stepId, p, "enum_value_map", null),
+        ...(p.type === "enum" || p.type === "list-enum" ? [paramEdit(stepId, p, "type", "string")] : []),
+        { op: "update", step_id: stepId, field: "selects", value: nextSelects || [] },
+      );
+    }
     patchLocalParams(stepId, p, {
       source_kind: sourceKind,
       source: nextSource,
       exposed_to_user: category === "user_param",
       need_human_confirm: needsConfiguration,
       editable: true,
+      ...(switchingToPlainInput ? {
+        enum_options: null,
+        enum_value_map: null,
+        ...(p.type === "enum" || p.type === "list-enum" ? { type: "string" } : {}),
+      } : {}),
     });
+    if (switchingToPlainInput && currentStep) patchLocalStep(stepId, { selects: nextSelects || [] });
     send({ type: "flow_update", edits });
     if (sourceKind === "previous_response") {
       const key = paramDraftKey(stepId, p);
@@ -2324,6 +2361,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function resolveReview(reviewId: string, resolved = true) {
     send({ type: "flow_update", edits: [{ op: "resolve_review", review_id: reviewId, resolved }] });
+  }
+  function reviewCanIgnore(item: ReviewItemData) {
+    // Review items are generated suggestions. The operator always keeps the
+    // final say and can either edit the contract manually or dismiss a guess.
+    return !!item;
+  }
+  function reviewIgnoreReason(item: ReviewItemData) {
+    return item.ignore_reason || "仅隐藏这条生成建议，不改变字段或接口配置";
   }
   function reviewSuggestionEdits(item: ReviewItemData) {
     const action = item.suggested_action || "";
@@ -2416,7 +2461,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const title = mode === "accept" ? "全部采纳当前判断？" : "全部忽略待确认项？";
     const content = mode === "accept"
       ? "会按系统当前判断批量确认字段分类、接口保留和依赖关系。建议先确认没有高风险项。"
-      : "会把当前待确认项标记为已处理，不改变 FlowSpec 内容。";
+      : "这些内容都是生成建议。全部忽略不会改动 FlowSpec，你仍可在能力卡片中手动修改。";
     Modal.confirm({
       title,
       content,
@@ -2554,35 +2599,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     armFlowOperationWatchdog("能力生成");
     if (!send({ type: "orchestrate_flow", operation_id: flowOperationRef.current.operationId, flow_spec: currentSpec })) clearFlowOperation();
   }
-  function performReplanFlow() {
-    if (!flowSpecRef.current || flowOperationRef.current) return;
-    const currentSpec = flowSpecRef.current;
-    flowOperationRef.current = {
-      mode: "replan",
-      previousUpdatedAt: currentSpec.meta?.recording_pi_loop?.updated_at,
-      operationId: newCostlyOperationId("replan"),
-    };
-    setOrchestrateBusy(true);
-    setAutoFixBusy(true);
-    armFlowOperationWatchdog("能力边界重新分析");
-    if (!send({ type: "orchestrate_flow", operation_id: flowOperationRef.current.operationId, flow_spec: currentSpec, force_replan: true })) clearFlowOperation();
-  }
-  function replanFlow() {
-    if (!flowSpecRef.current || flowOperationRef.current) return;
-    Modal.confirm({
-      title: "重新分析能力边界？",
-      content: "将保留底层捕获接口、字段和依赖，清空当前能力层后重新拆分。适用于第一次能力拆分错误的情况。",
-      okText: "重新分析",
-      cancelText: "取消",
-      onOk: () => {
-        if (flowMutationInFlightRef.current || flowMutationQueueRef.current.length) {
-          runAfterFlowSync(performReplanFlow);
-          return;
-        }
-        performReplanFlow();
-      },
-    });
-  }
   function autoFixFlow() {
     if (!flowSpecRef.current || flowOperationRef.current) return;
     if (flowMutationInFlightRef.current || flowMutationQueueRef.current.length) {
@@ -2624,9 +2640,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     }] });
   }
   function updateCapabilityConfirmed(idx: number, confirmed: boolean) {
-    // Backend confirmation is an atomic preflight transaction. Do not paint an
-    // optimistic checked state that would remain stale when the server rejects it.
-    if (!confirmed) patchLocalCapability(idx, { confirmed: false }, false);
+    patchLocalCapability(idx, { confirmed, requires_human_confirm: false }, false);
     send({ type: "flow_update", edits: [{ op: "update_capability", capability_index: idx, field: "confirmed", value: confirmed }] });
   }
   function updateCapabilityField(idx: number, field: string, value: any) {
@@ -2650,7 +2664,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           flowSpecRef.current = next;
           setFlowSpec(next);
         }
-        // 旧 checkReport 属于删除前的能力作用域，等待服务端按新能力重新校验。
         setCheckReport(null);
       },
     });
@@ -2778,7 +2791,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!st) return stepId || "";
     return `${st.name || fallbackStepName(st.method, st.path)} · ${st.method} ${st.path || stripHost(st.url)}`;
   }
-  function groupedPublishIssues(report: FlowCheckReport | null, reviews: ReviewItemData[]) {
+  function groupedPublishIssues(report: FlowCheckReport | null) {
     const order = [
       { key: "capability", label: "能力编排", color: "geekblue" },
       { key: "interface", label: "接口步骤", color: "purple" },
@@ -2791,6 +2804,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     type OperatorIssue = {
       message: string; severity: string; source?: string; target?: Record<string, any>;
       audience?: "operator" | "internal"; actionable?: boolean; blocking?: boolean; auto_fixable?: boolean;
+      issue_id?: string; code?: string; contract_hash?: string; ignorable?: boolean; ignored?: boolean; ignore_reason?: string; ignored_by?: string;
     };
     const isOperatorIssue = (item: OperatorIssue) => {
       if (item.audience) return item.audience === "operator" && item.actionable !== false;
@@ -2816,18 +2830,19 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         actionable: item.actionable,
         blocking: item.blocking,
         auto_fixable: item.auto_fixable,
+        issue_id: item.issue_id,
+        code: item.code,
+        contract_hash: item.contract_hash,
+        ignorable: item.ignorable,
+        ignored: item.ignored,
+        ignore_reason: item.ignore_reason,
+        ignored_by: item.ignored_by,
       })).filter(isOperatorIssue);
     }
     if (!Object.keys(by).length) {
-      for (const item of reviews) {
-        const kind = item.target?.kind || "flow";
-        const key = kind === "param" || kind === "capability_enum" ? "field"
-          : kind === "link" ? "dependency"
-            : kind === "step" || kind === "request_role" ? "interface"
-              : kind === "capability" ? "capability" : "flow";
-        by[key] = by[key] || [];
-        by[key].push({ message: item.title, severity: item.severity, target: item.target });
-      }
+      // ReviewItems are generated workbench advice, not publish failures.
+      // Reusing them as a fallback here made an accepted operator contract look
+      // blocked even when deterministic publish validation had passed.
       for (const messageText of report?.errors || []) {
         by.flow = by.flow || [];
         by.flow.push({ message: messageText, severity: "error" });
@@ -2851,14 +2866,29 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       .filter(Boolean).join(" · ");
   }
   function locatePublishIssue(target?: Record<string, any>) {
-    if (!target) return;
-    const sid = target.target_step_id || target.step_id || target.source_step_id;
-    const capRef = target.capability_name || target.capability_id || target.capability
-      || (flowSpec?.capabilities || []).find((cap) => capabilityActualStepIds(cap).includes(sid || ""))?.name;
+    if (!target || !Object.keys(target).length) {
+      message.warning("该旧版错误项没有可定位的结构化目标，请重新校验后再定位");
+      return;
+    }
     const capabilities = flowSpec?.capabilities || [];
+    const capabilityFields = (cap: FlowCapabilityData) => [
+      ...(cap.inputs || []), ...(cap.request_fields || []), ...(cap.internal_fields || []),
+      ...(cap.computed_fields || []), ...(cap.outputs || []), ...(cap.fields || []),
+    ];
+    let sid = target.target_step_id || target.step_id || target.source_step_id;
+    const capRef = target.capability_name || target.capability_id || target.capability
+      || capabilities.find((cap) => capabilityActualStepIds(cap).includes(sid || ""))?.name;
     const capIdx = capabilities.findIndex((cap) =>
-      [cap.name, cap.capability_id].filter(Boolean).includes(capRef)
+      [cap.name, cap.capability_id, cap.title, cap.kind].filter(Boolean).includes(capRef)
       || capabilityActualStepIds(cap).includes(sid || ""));
+    const cap = capIdx >= 0 ? capabilities[capIdx] : undefined;
+    if (!sid && target.field_id && cap) {
+      sid = capabilityFields(cap).find((field) => field.field_id === target.field_id)?.step_id;
+    }
+    const targetPath = target.target_path || target.path || target.source_path
+      || (target.field_id && cap
+        ? capabilityFields(cap).find((field) => field.field_id === target.field_id)?.path
+        : "");
     const isRequest = target.kind === "request_role";
     setActiveFlowTab(isRequest ? "requests" : "abilities");
     let anchor = "";
@@ -2866,10 +2896,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       setExpandedRequestPanels(["captured"]);
       anchor = `request-${domAnchorPart(target.request_index ?? target.index ?? target.request_id ?? target.path ?? sid)}`;
     } else if (capIdx >= 0) {
-      const cap = capabilities[capIdx];
-      const panelKey = capabilityPanelKey(cap, capIdx);
+      const panelKey = capabilityPanelKey(cap!, capIdx);
       setExpandedCapabilityKeys((keys) => Array.from(new Set([...keys, panelKey])));
-      const section = target.kind === "link" ? "deps" : target.kind === "capability" || target.kind === "capability_node" ? "io" : "interfaces";
+      const section = ["link", "capability_dependency"].includes(target.kind) ? "deps"
+        : ["capability_output", "capability_node", "capability_precondition"].includes(target.kind) ? "io"
+          : "interfaces";
       setExpandedCapabilitySections((current) => ({
         ...current,
         [capIdx]: Array.from(new Set([...(current[capIdx] || ["interfaces"]), section])),
@@ -2881,23 +2912,82 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }));
       }
       if (target.link_id) anchor = `link-${domAnchorPart(target.link_id)}`;
-      else if (sid && (target.target_path || target.path)) anchor = `field-${domAnchorPart(sid)}-${domAnchorPart(stripBodyPrefix(target.target_path || target.path))}`;
+      else if (sid && targetPath) anchor = `field-${domAnchorPart(sid)}-${domAnchorPart(stripBodyPrefix(targetPath))}`;
       else if (sid) anchor = `step-${domAnchorPart(sid)}`;
-      else anchor = `capability-${domAnchorPart(cap.name || cap.capability_id || capIdx)}`;
+      else anchor = `capability-${domAnchorPart(cap!.name || cap!.capability_id || capIdx)}`;
     }
     if (!anchor && capRef) anchor = `capability-${domAnchorPart(capRef)}`;
-    window.setTimeout(() => {
+    if (!anchor && target.kind === "capability_relation" && target.relation_id) {
+      setExpandedCapabilityRelationKeys(["capability-relations"]);
+      anchor = `capability-relation-${domAnchorPart(target.relation_id)}`;
+    }
+    if (!anchor && target.kind === "flow") anchor = "flow-workbench";
+    if (!anchor) {
+      message.warning("该错误项缺少能力、接口或字段锚点，请重新校验生成结构化目标");
+      return;
+    }
+    const locateToken = ++publishLocateTokenRef.current;
+    const focusAnchor = (attempt = 0) => {
+      if (locateToken !== publishLocateTokenRef.current) return;
       const element = document.getElementById(anchor);
-      if (!element) {
-        message.warning("已切换到对应工作区，但错误项缺少可定位的结构化目标");
+      if (!element || element.getClientRects().length === 0) {
+        if (attempt < 30) {
+          window.setTimeout(() => focusAnchor(attempt + 1), 100);
+          return;
+        }
+        message.warning(`没有找到该错误项对应的编辑位置（${publishIssueTargetLabel(target) || target.kind || "旧版目标"}），请重新校验`);
         return;
       }
       element.scrollIntoView({ behavior: "smooth", block: "center" });
       element.animate(
-        [{ backgroundColor: "#fff1b8" }, { backgroundColor: "#fffbe6" }, { backgroundColor: "transparent" }],
+        [
+          { backgroundColor: "#fff1b8", outline: "3px solid #faad14", outlineOffset: "3px" },
+          { backgroundColor: "#fffbe6", outline: "2px solid #ffc53d", outlineOffset: "2px" },
+          { backgroundColor: "transparent", outline: "0 solid transparent", outlineOffset: "0" },
+        ],
         { duration: 2200, easing: "ease-out" },
       );
-    }, 180);
+    };
+    window.setTimeout(() => focusAnchor(), 180);
+  }
+  function ignorePublishIssue(item: { issue_id?: string; ignorable?: boolean; ignore_reason?: string; message: string }) {
+    if (!item.issue_id) {
+      message.warning("该旧版错误没有稳定 issue_id，请重新校验后再忽略");
+      return;
+    }
+    if (!item.ignorable) {
+      message.warning(item.ignore_reason || "该问题会导致请求不可执行或产生错误数据，不能安全忽略");
+      return;
+    }
+    let reason = "";
+    Modal.confirm({
+      title: "忽略这条发布问题？",
+      content: (
+        <Space direction="vertical" size={8} style={{ width: "100%" }}>
+          <Typography.Text>{item.message}</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            忽略只适用于已有可执行兜底的启发式告警；字段合同变化后会自动失效。
+          </Typography.Text>
+          <Input.TextArea rows={3} placeholder="必填：说明为什么当前业务场景可以忽略" onChange={(e) => { reason = e.target.value; }} />
+        </Space>
+      ),
+      okText: "确认忽略",
+      cancelText: "取消",
+      onOk: () => {
+        if (!reason.trim()) {
+          message.warning("请填写忽略原因");
+          return Promise.reject(new Error("ignore reason required"));
+        }
+        send({ type: "flow_update", edits: [{ op: "ignore_publish_issue", issue_id: item.issue_id, reason: reason.trim(), actor: "operator" }] });
+      },
+    });
+  }
+  function unignorePublishIssue(item: { issue_id?: string }) {
+    if (!item.issue_id) {
+      message.warning("该旧版错误没有稳定 issue_id，请重新校验后再恢复");
+      return;
+    }
+    send({ type: "flow_update", edits: [{ op: "unignore_publish_issue", issue_id: item.issue_id }] });
   }
   function renderPublishIssue(item: ReviewItemData) {
     const tgt = item.target || {};
@@ -2972,8 +3062,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       selects.find((s) => !s.path && s.param === p.key) ||
       selects.find((s) => s.param === p.key);
   }
-  function enumOptionEdits(step: FlowStepData, p: FlowParam, options: Array<string | { label: string; value: any }>, optionMap?: Record<string, any>) {
+  function enumOptionEdits(step: FlowStepData, p: FlowParam, options: Array<string | { label: string; value?: any }>, optionMap?: Record<string, any> | null) {
     const nextSourceKind = p.source_kind === "api_option" ? "api_option" : "manual_enum";
+    const records = options.map(enumOptionRecord).filter((item): item is { label: string; value?: any } => !!item);
+    const mappingComplete = records.length > 0 && records.every((item) => item.value !== undefined);
     const edits: any[] = [
       paramEdit(step.step_id, p, "enum_options", options),
       paramEdit(step.step_id, p, "enum_value_map", optionMap || null),
@@ -2981,7 +3073,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       paramEdit(step.step_id, p, "source_kind", nextSourceKind),
       paramEdit(step.step_id, p, "source", sourceDescriptor(nextSourceKind, p, p.source as any)),
       paramEdit(step.step_id, p, "exposed_to_user", true),
-      paramEdit(step.step_id, p, "need_human_confirm", false),
+      paramEdit(step.step_id, p, "need_human_confirm", !mappingComplete),
     ];
     if (nextSourceKind !== "api_option" && p.type !== "enum" && p.type !== "list-enum" && options.length) {
       edits.push(paramEdit(step.step_id, p, "type", "enum"));
@@ -3018,7 +3110,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       nextBinding.source_request_id = "";
       nextBinding.source_role = "";
       nextBinding.enum_source = "api";
-      nextBinding.enum_confirmed = true;
+      // Selecting an endpoint only records the candidate source.  It is not proof
+      // that label/value keys or the complete option set have been captured.
+      nextBinding.enum_confirmed = false;
       nextBinding.value_key = "";
       nextBinding.label_key = "";
     }
@@ -3057,27 +3151,28 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (typeof x === "object" && typeof x.label === "string") return x.label;
     return String(x);
   }
-  function enumOptionRecord(x: any): { label: string; value: any } | null {
+  function enumOptionRecord(x: any): { label: string; value?: any } | null {
     if (x == null) return null;
     if (typeof x === "object") {
       const label = String(x.label ?? x.text ?? x.name ?? x.value ?? "").trim();
       if (!label) return null;
-      return { label, value: x.value ?? label };
+      return { label, ...(Object.prototype.hasOwnProperty.call(x, "value") ? { value: x.value } : {}) };
     }
     const label = String(x).trim();
-    return label ? { label, value: label } : null;
+    return label ? { label } : null;
   }
   function enumOptionRecordsForParam(step: FlowStepData, p: FlowParam) {
     const sel = selectBindingForParam(step, p);
     const raw = p.enum_options?.length ? p.enum_options : sel?.options || [];
     const map = p.enum_value_map || sel?.option_map || {};
     const seen = new Set<string>();
-    const out: Array<{ label: string; value: any }> = [];
+    const out: Array<{ label: string; value?: any }> = [];
     for (const item of raw || []) {
       const rec = enumOptionRecord(item);
       if (!rec || seen.has(rec.label)) continue;
       seen.add(rec.label);
-      out.push({ label: rec.label, value: Object.prototype.hasOwnProperty.call(map, rec.label) ? map[rec.label] : rec.value });
+      const value = Object.prototype.hasOwnProperty.call(map, rec.label) ? map[rec.label] : rec.value;
+      out.push({ label: rec.label, ...(value !== undefined ? { value } : {}) });
     }
     return out;
   }
@@ -3087,13 +3182,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function enumOptionsTextForParam(step: FlowStepData, p: FlowParam) {
     return enumOptionRecordsForParam(step, p)
-      .map((x) => String(x.value) !== String(x.label) ? `${x.label}=${String(x.value)}` : x.label)
+      .map((x) => x.value === undefined ? x.label : `${x.label}=${String(x.value)}`)
       .join("\n");
   }
-  function parseEnumOptionsText(text: string): { options: Array<{ label: string; value: any }>; optionMap: Record<string, any> | null } {
+  function enumMappingCompleteForParam(step: FlowStepData, p: FlowParam) {
+    const records = enumOptionRecordsForParam(step, p);
+    return records.length > 0 && records.every((item) => item.value !== undefined);
+  }
+  function parseEnumOptionsText(text: string): { options: Array<{ label: string; value?: any }>; optionMap: Record<string, any> | null; mappingComplete: boolean } {
     const chunks = text.includes("\n") ? text.split(/\n/) : text.split(/[,，]/);
     const seen = new Set<string>();
-    const options: Array<{ label: string; value: any }> = [];
+    const options: Array<{ label: string; value?: any }> = [];
     const optionMap: Record<string, any> = {};
     let hasMapped = false;
     for (const raw of chunks) {
@@ -3101,15 +3200,21 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       if (!line) continue;
       const m = line.match(/^(.+?)(?:\s*(?:=>|=|:|：|\t)\s*)(.+)$/);
       const label = (m ? m[1] : line).trim();
-      const valueRaw = (m ? m[2] : label).trim();
+      const valueRaw = m ? m[2].trim() : "";
       if (!label || seen.has(label)) continue;
       seen.add(label);
+      if (!m) {
+        // A visible label is evidence for display only.  Never invent an API value
+        // by assuming value === label; that made incomplete snapshots executable.
+        options.push({ label });
+        continue;
+      }
       const value = /^-?\d+(?:\.\d+)?$/.test(valueRaw) ? Number(valueRaw) : valueRaw;
       options.push({ label, value });
       optionMap[label] = value;
-      if (String(value) !== label) hasMapped = true;
+      hasMapped = true;
     }
-    return { options, optionMap: hasMapped ? optionMap : null };
+    return { options, optionMap: hasMapped ? optionMap : null, mappingComplete: options.length > 0 && options.every((item) => item.value !== undefined) };
   }
   function enumSourceLabel(sel?: FlowSelectBinding) {
     if (!sel) return "未绑定";
@@ -3143,10 +3248,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const totalParams = flowSpec.steps.reduce((n, s) => n + (s.params?.length || 0), 0);
     const capabilities = flowSpec.capabilities || [];
     const capturedTotal = allCapturedRequests(flowSpec).length;
-    const visibleReviewItems = reviewItems;
-    const unconfirmedCapabilities = capabilities.filter((cap) => !cap.confirmed || cap.requires_human_confirm).length;
-    const publishIssueGroups = groupedPublishIssues(checkReport, visibleReviewItems);
-    const hasPublishAdvice = publishIssueGroups.some((group) => group.items.length > 0);
+    const publishIssueGroups = groupedPublishIssues(checkReport);
+    const hasPublishAdvice = publishIssueGroups.some((group) => group.items.some((item) => !item.ignored));
     return (
       <Card style={{ marginTop: 16 }} styles={{ body: { paddingTop: 8 } }}>
         {checkReport && capabilities.length > 0 && (
@@ -3164,18 +3267,70 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   {checkReport.dry_run ? ` · Dry-run ${checkReport.dry_run.ok ? "OK" : "需要处理"}` : ""}
                   {checkReport.dry_run?.request_count != null ? ` · ${checkReport.dry_run.request_count} 步` : ""}
                 </Typography.Text>
+                {lastOperationReport && (
+                  <Space wrap size={4}>
+                    <Typography.Text style={{ fontSize: 12 }}>{lastOperationReport.summary || "编排操作完成"}</Typography.Text>
+                    {lastOperationReport.cache_hit && <Tag color="green">结果复用</Tag>}
+                    <Tag>模型调用 {lastOperationReport.model_calls || 0}</Tag>
+                    {!!lastOperationReport.edit_errors?.length && <Tag color="orange">跳过无效建议 {lastOperationReport.edit_errors.length}</Tag>}
+                    <Tag color={(lastOperationReport.errors_after || 0) > 0 ? "error" : "success"}>
+                      错误 {lastOperationReport.errors_before || 0} → {lastOperationReport.errors_after || 0}
+                    </Tag>
+                    <Tag>警告 {lastOperationReport.warnings_before || 0} → {lastOperationReport.warnings_after || 0}</Tag>
+                  </Space>
+                )}
+                {result && (
+                  <Space direction="vertical" size={2}>
+                    <Space wrap size={4}>
+                      <Typography.Text type={result.ok ? "success" : "danger"}>
+                        {result.ok ? `已发布：${result.action}` : `未发布：${result.reason || "需要调整"}`}
+                      </Typography.Text>
+                      {result.status && STATUS_META[result.status] && <Tag color={STATUS_META[result.status].color}>{STATUS_META[result.status].label}</Tag>}
+                    </Space>
+                    {result.ok && result.api && (
+                      <Typography.Text style={{ fontSize: 12 }}>
+                        接口 <Typography.Text code>{result.api.method} {result.api.path}</Typography.Text> · 参数 [{(result.api.params || []).join(", ")}]
+                      </Typography.Text>
+                    )}
+                    {result.recording_mode && (
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        录制模式：{result.recording_mode === "real_submit" ? "真实提交" : result.recording_mode === "intercepted_submit" ? "只录制不提交" : result.recording_mode}
+                      </Typography.Text>
+                    )}
+                    {result.verification_basis && <Typography.Text type="secondary" style={{ fontSize: 12 }}>验证依据：{result.verification_basis}</Typography.Text>}
+                    {(result.clarifications || []).map((item, index) => <Typography.Text key={index} type="warning" style={{ fontSize: 12 }}>{item}</Typography.Text>)}
+                    {result.ok && (
+                      <Button type="primary" size="small" onClick={() => nav(`/skills?invoke=${encodeURIComponent(result.skill_id || `${subsystem}.${result.action || action}`)}`)}>
+                        直接调用
+                      </Button>
+                    )}
+                  </Space>
+                )}
                 <Space direction="vertical" size={4}>
                   {publishIssueGroups.map((group) => (
                     <div key={group.key} style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: 8, alignItems: "start" }}>
                       <Tag color={group.color} style={{ margin: 0, textAlign: "center" }}>{group.label} {group.items.length}</Tag>
                       <Space direction="vertical" size={2}>
                         {group.items.map((item, issueIdx) => (
-                          <Space key={`${group.key}-${issueIdx}`} wrap size={4}>
+                          <Space key={item.issue_id || `${group.key}-${issueIdx}`} wrap size={4}>
+                            {item.ignored && <Tag color="default">已忽略</Tag>}
                             {publishIssueTargetLabel(item.target) && <Tag>{publishIssueTargetLabel(item.target)}</Tag>}
-                            <Typography.Text type={item.severity === "warning" ? "secondary" : "danger"} style={{ fontSize: 12 }}>
+                            <Typography.Text delete={!!item.ignored} type={item.ignored || item.severity === "warning" ? "secondary" : "danger"} style={{ fontSize: 12 }}>
                               {item.message}
                             </Typography.Text>
                             {item.target && <Button type="link" size="small" onClick={() => locatePublishIssue(item.target)}>定位</Button>}
+                            {item.ignored ? (
+                              <Button type="link" size="small" onClick={() => unignorePublishIssue(item)}>恢复</Button>
+                            ) : item.ignorable ? (
+                              <Button type="link" size="small" onClick={() => ignorePublishIssue(item)}>忽略</Button>
+                            ) : item.issue_id ? (
+                              <Tooltip title={item.ignore_reason || "该问题会影响请求可执行性，必须修改后才能发布"}>
+                                <Button type="link" size="small" disabled>不可忽略</Button>
+                              </Tooltip>
+                            ) : null}
+                            {item.ignored && item.ignore_reason && <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                              原因：{item.ignore_reason}{item.ignored_by ? `（${item.ignored_by}）` : ""}
+                            </Typography.Text>}
                           </Space>
                         ))}
                       </Space>
@@ -3202,7 +3357,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 <Tag color="cyan">{capturedTotal} 接口</Tag>
                 <Tag>{totalParams} 字段</Tag>
                 {capabilities.length > 0 && <Tag color="geekblue">{capabilities.length} 能力</Tag>}
-                {unconfirmedCapabilities > 0 && <Tag color="warning">{unconfirmedCapabilities} 待确认</Tag>}
                 <Tag color={flowSpec.risk_level === "L4" ? "error" : "orange"}>风险 {flowSpec.risk_level}</Tag>
               </Space>
             ),
@@ -3326,6 +3480,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const runtimeSourceComplete = !sourceNeedsConfiguration(p.source_kind || "unknown", p.source as any);
     const selectBinding = selectBindingForParam(step, p);
     const enumOptions = enumOptionsForParam(step, p);
+    const enumMappingComplete = enumMappingCompleteForParam(step, p);
     const enumSelectOptions = enumOptions.map((x) => ({ label: x, value: x }));
     const isApiOption = p.source_kind === "api_option";
     const isTypedEnum = p.type === "enum" || p.type === "list-enum";
@@ -3349,7 +3504,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         // key 不能包含可编辑的 path/key/label。失焦保存会立即更新这些值；
         // 若 key 随之变化，组件会在 click 前被卸载，导致删除事件丢失。
         key={`${step.step_id}:param:${paramIndex}`}
-        id={`field-${domAnchorPart(step.step_id)}-${domAnchorPart(p.path)}`}
+        id={`field-${domAnchorPart(step.step_id)}-${domAnchorPart(stripBodyPrefix(p.path))}`}
         style={{ padding: "12px 0" }}
       >
         <div style={{ width: "100%", border: "1px solid #f0f0f0", borderRadius: 6, padding: 12, background: "#fff" }}>
@@ -3362,12 +3517,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 {linked && <Tag color="cyan">依赖字段</Tag>}
                 {isApiOption && <Tag color="geekblue">接口候选</Tag>}
                 {isEnumOption && enumOptions.length > 0 && <Tag color="purple">枚举 {enumOptions.length}</Tag>}
-                {p.page_required === true && <Tag color="red">页面必填</Tag>}
-                {p.page_required === false && <Tag>页面可选</Tag>}
-                {p.page_required == null && <Tag color="gold">页面必填性未确认</Tag>}
-                {paramRequiredFromCaller(p)
-                  ? <Tag color="volcano">调用方必填</Tag>
-                  : <Tag color="green">调用方无需必填</Tag>}
+                {isEnumOption && enumOptions.length > 0 && !enumMappingComplete && <Tag color="orange">仅有名称，值未映射</Tag>}
                 {needsManualConfirm && <Tag color="warning">待确认</Tag>}
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.reason}</Typography.Text>
               </Space>
@@ -3398,7 +3548,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <EditableText value={p.path} width="100%" onSave={(v) => v && updateParam(step.step_id, p, "path", v)} />
             </FieldControl>
             <FieldControl label="默认值">
-              {enumOptions.length > 0 ? (
+              {enumOptions.length > 0 && enumMappingComplete ? (
                 <EnumValueInput value={String(p.value ?? "")} width="100%"
                   options={enumSelectOptions}
                   onSave={(v) => updateParam(step.step_id, p, "value", v)} />
@@ -3417,11 +3567,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             <FieldControl label="来源">
               <NativeSelect value={normalizeSourceKindForUi(p.source_kind) || defaultSourceForCategory(p.category || "user_param")} width="100%" options={sourceSelectOptionsForParam(p)}
                 onChange={(v) => updateParamSourceKind(step.step_id, p, v)} />
-            </FieldControl>
-            <FieldControl label="调用方必填">
-              {paramExposedToCaller(p) ? (
-                <Checkbox checked={!!p.required} onChange={(e) => updateParam(step.step_id, p, "required", e.target.checked)}>调用时必须提供</Checkbox>
-              ) : <Typography.Text type="secondary">由流程运行期提供</Typography.Text>}
             </FieldControl>
             <FieldControl label="展示">
               {p.category === "user_param" ? (
@@ -3445,6 +3590,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                         <Tag color={selectBinding?.source_url ? "geekblue" : "purple"}>{enumSourceLabel(selectBinding)}</Tag>
                         {enumOptions.slice(0, 8).map((x, enumIdx) => <Tag key={`${x}-${enumIdx}`}>{x}</Tag>)}
                         {enumOptions.length > 8 && <Tag>+{enumOptions.length - 8}</Tag>}
+                        {enumOptions.length > 0 && !enumMappingComplete && <Tag color="orange">未映射实际提交值</Tag>}
                       </Space>
                       {isApiOption && (
                         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 8, alignItems: "end" }}>
@@ -3501,9 +3647,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                           <EditableTextArea
                             rows={3}
                             value={enumOptionsTextForParam(step, p)}
-                            placeholder="每行一个候选项；提交短码时写成 病假=2"
+                            placeholder="每行写 名称=实际值；只有名称会保留为未映射，不会假定名称就是提交值"
                             onSave={(v) => {
-                              const { options, optionMap } = parseEnumOptionsText(v);
+                              const { options, optionMap, mappingComplete } = parseEnumOptionsText(v);
                               upsertSelectBinding(
                                 step,
                                 p,
@@ -3515,9 +3661,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                                   count: options.length,
                                   option_map: optionMap,
                                   enum_source: enumSourceForKind(p.source_kind),
-                                  enum_confirmed: true,
+                                  enum_confirmed: mappingComplete,
                                 },
-                                enumOptionEdits(step, p, options, optionMap || undefined),
+                                enumOptionEdits(step, p, options, optionMap),
                               );
                             }}
                           />
@@ -3892,13 +4038,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const capabilityRelations = flowSpec.capability_relations || [];
     const kindOptions = CAPABILITY_KIND_OPTIONS;
     return (
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <Space id="flow-workbench" direction="vertical" size={12} style={{ width: "100%" }}>
         <Space wrap>
           <Tooltip title="基于当前能力、接口和人工修改继续规划，并同步修正字段绑定、枚举来源、依赖和接口闭包">
             <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy || autoFixBusy} onClick={orchestrateFlow}>生成/优化能力</Button>
-          </Tooltip>
-          <Tooltip title="清空能力层并基于已捕获接口重新拆分；保留底层字段、接口和依赖事实">
-            <Button icon={<BranchesOutlined />} loading={orchestrateBusy || autoFixBusy} onClick={replanFlow}>重新分析能力边界</Button>
           </Tooltip>
           <Button icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
           <Button icon={<RobotOutlined />} loading={namingBusy} onClick={() => { setNamingBusy(true); send({ type: "step_naming" }); }}>命名步骤</Button>
@@ -3918,23 +4061,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <Tag color="cyan">识别区间字段 {flowSpec.meta.capability_generation.indexed_range_changes.length}</Tag>}
           </>}
         </Space>
-        {lastOperationReport && (
-          <Alert
-            type={lastOperationReport.changed ? "success" : lastOperationReport.model_errors?.length ? "error" : "info"}
-            showIcon
-            message={lastOperationReport.summary || "编排操作完成"}
-            description={
-              <Space wrap size={4}>
-                {lastOperationReport.cache_hit && <Tag color="green">结果复用</Tag>}
-                <Tag>模型调用 {lastOperationReport.model_calls || 0}</Tag>
-                <Tag color={(lastOperationReport.errors_after || 0) > 0 ? "error" : "success"}>
-                  错误 {lastOperationReport.errors_before || 0} → {lastOperationReport.errors_after || 0}
-                </Tag>
-                <Tag>警告 {lastOperationReport.warnings_before || 0} → {lastOperationReport.warnings_after || 0}</Tag>
-              </Space>
-            }
-          />
-        )}
         {!capabilities.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有能力编排" /> : (
           <Collapse
             size="small"
@@ -3955,7 +4081,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   .map((p) => p.key || p.path),
               };
               const inputSchema = Object.keys(cap.input_schema?.properties || {}).length
-                ? cap.input_schema
+                ? (cap.input_schema || derivedInputSchema)
                 : derivedInputSchema;
               const lastResponse = [...capSteps].reverse().find((st) => st.response_json != null)?.response_json;
               const derivedOutputSchema = lastResponse != null ? inferJsonSchema(lastResponse) : (cap.output_schema || {});
@@ -3964,7 +4090,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   key={capabilityPanelKey(cap, idx)}
                   header={
                     <Space wrap id={`capability-${domAnchorPart(cap.name || cap.capability_id || idx)}`}>
-                      <Tag color={cap.confirmed ? "success" : "warning"}>{cap.confirmed ? "已确认" : "未确认"}</Tag>
+                      <Tag color={cap.confirmed ? "success" : "default"}>{cap.confirmed ? "已采纳" : "模型建议"}</Tag>
                       <Tag color="blue">{optionLabel(kindOptions, cap.kind || "submit")}</Tag>
                       <Tag color={confidenceColor(cap.confidence)}>置信度 {confidencePercent(cap.confidence)}</Tag>
                       <Typography.Text strong>{cap.title || cap.name || `能力 ${idx + 1}`}</Typography.Text>
@@ -3975,7 +4101,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     <Space onClick={(e) => e.stopPropagation()}>
                       <Tooltip title="能力上移"><Button size="small" icon={<UpOutlined />} disabled={idx === 0} onClick={() => moveCapability(idx, -1)} /></Tooltip>
                       <Tooltip title="能力下移"><Button size="small" icon={<DownOutlined />} disabled={idx === capabilities.length - 1} onClick={() => moveCapability(idx, 1)} /></Tooltip>
-                      <Checkbox checked={!!cap.confirmed} onChange={(e) => updateCapabilityConfirmed(idx, e.target.checked)}>确认</Checkbox>
+                      <Checkbox checked={!!cap.confirmed} onChange={(e) => updateCapabilityConfirmed(idx, e.target.checked)}>采纳当前定义</Checkbox>
                       <Tooltip title="删除"><Button size="small" danger icon={<DeleteOutlined />}
                         onMouseDown={(e) => e.preventDefault()} onClick={() => removeCapability(idx)} /></Tooltip>
                     </Space>
@@ -4025,7 +4151,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           </Collapse>
         )}
         {capabilityRelations.length > 0 && (
-          <Collapse size="small" bordered={false}>
+          <Collapse size="small" bordered={false}
+            activeKey={expandedCapabilityRelationKeys}
+            onChange={(keys) => setExpandedCapabilityRelationKeys((Array.isArray(keys) ? keys : [keys]).map(String))}>
             <Collapse.Panel key="capability-relations" header={`能力关系 ${capabilityRelations.length}`}>
               <Space direction="vertical" size={8} style={{ width: "100%" }}>
                 {capabilityRelations.map((relation, index) => {
@@ -4033,6 +4161,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   const owner = relation.transform_owner === "skill" ? "Skill 内部" : "调用方";
                   return (
                     <div key={relation.relation_id || `${relation.from_capability}-${relation.to_capability}-${index}`}
+                      id={`capability-relation-${domAnchorPart(relation.relation_id || index)}`}
                       style={{ display: "grid", gridTemplateColumns: "minmax(160px, 1fr) auto minmax(160px, 1fr)", gap: 8, alignItems: "center" }}>
                       <Space wrap size={4}>
                         <Tag color="blue">{relation.from_capability || "未指定来源能力"}</Tag>
@@ -4132,7 +4261,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     checked={!!cap.confirmed}
                     onChange={(e) => updateCapabilityConfirmed(idx, e.target.checked)}
                   >
-                    已确认
+                    采纳当前定义
                   </Checkbox>,
                 ]}
               >
@@ -4141,8 +4270,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     <Row gutter={[12, 8]} align="top">
                       <Col flex="auto">
                         <Space wrap size={6}>
-                          <Tag color={cap.confirmed ? "success" : "warning"}>{cap.confirmed ? "已确认" : "待确认"}</Tag>
-                          {cap.requires_human_confirm && <Tag color="orange">需要人工确认</Tag>}
+                          <Tag color={cap.confirmed ? "success" : "default"}>{cap.confirmed ? "已采纳" : "模型建议"}</Tag>
                           {cap.kind && <Tag color="blue">{cap.kind}</Tag>}
                           <Tag color={confidenceColor(cap.confidence)}>置信度 {confidencePercent(cap.confidence)}</Tag>
                           <Typography.Text strong>{cap.title || cap.name || `能力 ${idx + 1}`}</Typography.Text>
@@ -4241,12 +4369,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             const manualBind = requiresManualSourceBinding(item);
             return (
                 <List.Item
-                  id={`link-${domAnchorPart(link.link_id)}`}
                   actions={[
                   manualBind
                     ? <Button key="bind" size="small" type="primary" onClick={() => setActiveFlowTab("abilities")}>去能力卡片绑定</Button>
                     : <Button key="apply" size="small" type="primary" onClick={() => applyReviewSuggestion(item)}>采纳</Button>,
-                  <Button key="skip" size="small" onClick={() => resolveReview(item.id, true)}>忽略</Button>,
+                  reviewCanIgnore(item)
+                    ? <Button key="skip" size="small" onClick={() => resolveReview(item.id, true)}>忽略</Button>
+                    : <Tooltip key="skip-disabled" title={reviewIgnoreReason(item)}><span><Button size="small" disabled>不可忽略</Button></span></Tooltip>,
                 ]}
               >
                 <Space direction="vertical" size={4} style={{ width: "100%" }}>
@@ -4510,6 +4639,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   const needsManualConfirm = !!p.need_human_confirm && p.category === "runtime_var" && p.source_kind === "unknown";
                   const selectBinding = selectBindingForParam(step, p);
                   const enumOptions = enumOptionsForParam(step, p);
+                  const enumMappingComplete = enumMappingCompleteForParam(step, p);
                   const enumSelectOptions = enumOptions.map((x) => ({ label: x, value: x }));
                   const isApiOption = p.source_kind === "api_option";
                   const isTypedEnum = p.type === "enum" || p.type === "list-enum";
@@ -4539,12 +4669,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                               {linked && <Tag color="cyan">依赖字段</Tag>}
                               {isApiOption && <Tag color="geekblue">接口候选</Tag>}
                               {isEnumOption && enumOptions.length > 0 && <Tag color="purple">枚举</Tag>}
-                              {p.page_required === true && <Tag color="red">页面必填</Tag>}
-                              {p.page_required === false && <Tag>页面可选</Tag>}
-                              {p.page_required == null && <Tag color="gold">页面必填性未确认</Tag>}
-                              {paramRequiredFromCaller(p)
-                                ? <Tag color="volcano">调用方必填</Tag>
-                                : <Tag color="green">调用方无需必填</Tag>}
+                              {isEnumOption && enumOptions.length > 0 && !enumMappingComplete && <Tag color="orange">仅有名称，值未映射</Tag>}
                               {needsManualConfirm && <Tag color="warning">待确认</Tag>}
                               <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.reason}</Typography.Text>
                             </Space>
@@ -4573,7 +4698,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                             <EditableText value={p.path} width="100%" onSave={(v) => v && updateParam(step.step_id, p, "path", v)} />
                           </FieldControl>
                           <FieldControl label="默认值">
-                            {enumOptions.length > 0 ? (
+                            {enumOptions.length > 0 && enumMappingComplete ? (
                               <EnumValueInput value={String(p.value ?? "")} width="100%"
                                 options={enumSelectOptions}
                                 onSave={(v) => updateParam(step.step_id, p, "value", v)} />
@@ -4593,11 +4718,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                             <NativeSelect value={normalizeSourceKindForUi(p.source_kind) || defaultSourceForCategory(p.category || "user_param")} width="100%" options={sourceSelectOptionsForParam(p)}
                               onChange={(v) => updateParamSourceKind(step.step_id, p, v)} />
                           </FieldControl>
-                          <FieldControl label="调用方必填">
-                            {paramExposedToCaller(p) ? (
-                              <Checkbox checked={!!p.required} onChange={(e) => updateParam(step.step_id, p, "required", e.target.checked)}>调用时必须提供</Checkbox>
-                            ) : <Typography.Text type="secondary">由流程运行期提供</Typography.Text>}
-                          </FieldControl>
                           <FieldControl label="展示">
                             {p.category === "user_param" ? (
                               <Checkbox checked={p.exposed_to_user !== false} onChange={(e) => updateParam(step.step_id, p, "exposed_to_user", e.target.checked)}>暴露给用户</Checkbox>
@@ -4616,6 +4736,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                                 <Tag color={selectBinding?.source_url ? "geekblue" : "purple"}>{enumSourceLabel(selectBinding)}</Tag>
                                 {enumOptions.slice(0, 8).map((x, enumIdx) => <Tag key={`${x}-${enumIdx}`}>{x}</Tag>)}
                                 {enumOptions.length > 8 && <Tag>+{enumOptions.length - 8}</Tag>}
+                                {enumOptions.length > 0 && !enumMappingComplete && <Tag color="orange">未映射实际提交值</Tag>}
                               </Space>
                               {isApiOption && (
                                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8, alignItems: "end" }}>
@@ -4672,9 +4793,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                                   <EditableTextArea
                                     rows={3}
                                     value={enumOptionsTextForParam(step, p)}
-                                    placeholder="每行一个候选项；提交短码时写成 病假=2"
+                                    placeholder="每行写 名称=实际值；只有名称会保留为未映射，不会假定名称就是提交值"
                                     onSave={(v) => {
-                                      const { options, optionMap } = parseEnumOptionsText(v);
+                                      const { options, optionMap, mappingComplete } = parseEnumOptionsText(v);
                                       upsertSelectBinding(
                                         step,
                                         p,
@@ -4686,9 +4807,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                                           count: options.length,
                                           option_map: optionMap,
                                           enum_source: enumSourceForKind(p.source_kind),
-                                          enum_confirmed: true,
+                                          enum_confirmed: mappingComplete,
                                         },
-                                        enumOptionEdits(step, p, options, optionMap || undefined),
+                                        enumOptionEdits(step, p, options, optionMap),
                                       );
                                     }}
                                   />
@@ -5033,44 +5154,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
           {renderFlowWorkbench()}
 
-          {result && (
-            <Alert
-              style={{ marginTop: 12 }}
-              type={result.ok ? "success" : "error"}
-              showIcon
-              message={
-                <Space wrap>
-                  <span>{result.ok ? `已发布：${result.action}` : `未发布：${result.reason || "需要调整"}`}</span>
-                  {result.status && STATUS_META[result.status] && <Tag color={STATUS_META[result.status].color}>{STATUS_META[result.status].label}</Tag>}
-                </Space>
-              }
-              description={
-                <Space direction="vertical" size={4}>
-                  {result.ok && result.api
-                    ? <Typography.Text>接口 <Typography.Text code>{result.api.method} {result.api.path}</Typography.Text> · 参数 [{(result.api.params || []).join(", ")}]</Typography.Text>
-                    : !result.ok ? <Typography.Text>请根据上方校验和待确认项调整后再发布。</Typography.Text> : null}
-                  {result.recording_mode && (
-                    <Typography.Text type="secondary">
-                      录制模式：{result.recording_mode === "real_submit" ? "真实提交" : result.recording_mode === "intercepted_submit" ? "只录制不提交" : result.recording_mode}
-                    </Typography.Text>
-                  )}
-                  {(result.clarifications || []).map((c, i) => <Typography.Text key={i} type="warning">{c}</Typography.Text>)}
-                  {result.verification_basis && (
-                    <Typography.Text type="secondary">验证依据：{result.verification_basis}</Typography.Text>
-                  )}
-                  {result.ok && (
-                    <Button
-                      type="primary"
-                      size="small"
-                      onClick={() => nav(`/skills?invoke=${encodeURIComponent(result.skill_id || `${subsystem}.${result.action || action}`)}`)}
-                    >
-                      直接调用
-                    </Button>
-                  )}
-                </Space>
-              }
-            />
-          )}
         </div>
       )}
     </Card>

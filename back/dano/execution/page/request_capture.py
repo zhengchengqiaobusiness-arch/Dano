@@ -313,7 +313,7 @@ def bounded_response_sample(
 ):
     """Build a small shape-preserving sample without mutating raw evidence."""
     if max_depth <= 0:
-        return "[???????]"
+        return "[深层结构已省略]"
     if isinstance(value, dict):
         items = list(value.items())
         out = {
@@ -344,7 +344,7 @@ def bounded_response_sample(
             out.append({"__dano_omitted_items__": len(value) - list_items})
         return out
     if isinstance(value, str) and len(value) > max_string:
-        return value[:max_string] + "...[???]"
+        return value[:max_string] + "...[已截断]"
     return value
 
 
@@ -624,6 +624,19 @@ def _norm_field_token(v) -> str:
     return _re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(v or "")).lower()
 
 
+def _identifier_matches_field(left: str, right: str) -> bool:
+    """Return whether two explicit DOM/wire identifiers are the same field.
+
+    Attribute aliases (``name``, ``data-prop``, ``formcontrolname``...) are
+    structural evidence, not fuzzy labels.  Substring matching here makes
+    ``processStatus`` claim an unrelated ``status`` query parameter, which in
+    turn moves the wrong enum and display name across requests.
+    """
+    left_norm = _norm_field_token(left)
+    right_norm = _norm_field_token(right)
+    return bool(left_norm and right_norm and left_norm == right_norm)
+
+
 def _label_matches_internal_field(label: str, path: str, field: dict | None = None) -> bool:
     """把 DOM 字段名(如「请假类型」)和提交体内部字段(type/leaveType/gslx)连起来。"""
     label_s = str(label or "")
@@ -636,7 +649,13 @@ def _label_matches_internal_field(label: str, path: str, field: dict | None = No
     if label_norm and any(label_norm == c or label_norm in c or c in label_norm for c in cand_norm if c):
         return True
     for cn, aliases in _CN_FIELD_ALIASES.items():
-        if cn in label_s and any(_norm_field_token(a) in cand_norm for a in aliases):
+        if cn in label_s and any(
+            alias_norm and any(
+                alias_norm == candidate or alias_norm in candidate or candidate in alias_norm
+                for candidate in cand_norm if candidate
+            )
+            for alias_norm in (_norm_field_token(alias) for alias in aliases)
+        ):
             return True
     return False
 
@@ -664,6 +683,7 @@ def _grounded_field_names(field: dict | None) -> list[str]:
     if not field:
         return []
     names = [field.get("key"), field.get("path")]
+    names.extend(field.get("field_aliases") or [])
     if str(field.get("name_source") or "").lower() not in {"llm", "ocr"}:
         names.append(field.get("suggest_name"))
     return [str(name) for name in names if name not in (None, "")]
@@ -754,7 +774,8 @@ def _aggregate_category(items: list[dict], value_key: str, label_key: str) -> st
 
 
 def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool, *,
-                  path_is_assignee: bool = False):
+                  path_is_assignee: bool = False,
+                  require_confirmed: bool = False):
     """判提交值 sv 对应候选列表里哪种选项 → (mode, value_key, label_key, label, confirmed, item) 或 None。
     mode='name':字段存的是**显示名**(配对 id 字段另存,如 yyxtmc=名 / yyxtid=id);
     mode='code':字段存的是**码/ID**(单字段,如 type=2 / approverId=12,agent 传名运行期换码)。通用,不挑系统。
@@ -786,28 +807,22 @@ def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool, *,
         return None
     cands.sort(key=lambda c: (c[4], c[0] == "name"), reverse=True)   # 确认命中优先;其次 name(更贴近人选)
     best = cands[0]
-    mode, _vk, _lk, _label, conf, _it = best
-    if conf:                                             # 录制选项佐证 → 强证据,直接采纳
+    mode, _vk, _lk, _label, confirmed, _item = best
+    # A matching wire value alone does not prove ownership. OA forms routinely
+    # submit many 0/1 values while unrelated small dictionaries are present.
+    # Only this exact control's recorded visible label may create an automatic
+    # API-option relationship; ambiguous sources stay ordinary input until the
+    # operator binds one explicitly.
+    if confirmed:
         return best
+    if require_confirmed:
+        return None
     if (
         mode == "code"
         and not path_is_assignee
         and _looks_people_or_org_candidate(_lk, _label)
     ):
-        # A numeric/short business code matching a user/dept/org id is merely a
-        # value collision. Without this field's selected label it is never an
-        # option-source relationship.
         return None
-    # 系统化:小列表 + 候选是「枚举形态」(value_key/labels 形如 dictValue/dictLabel/value/label/code 而不是 id/name/person) +
-    # value 恰好等于某候选的 cvk 值 → 视为可信命中,即使 unconfirmed(治「请假类型=1」短码撞状态字典而被「短串」拒)。
-    # 关键防误伤:必须 value_key 是 **enum 形**(dictValue/value/code),不是 `id`/`name` 等通用字段名。
-    # 系统化:小列表 + 候选**看起来是枚举形态**(value_key 是值态、label_key 是短文字标签)**且**
-    # candidate 列表整体形态像 person/org/tenant —— 才排除。
-    #   用以治「请假类型=1」短码撞状态字典而被「短串」规则误拒。
-    # 关键防误伤:候选**同时**满足 ① label_key 是「name/realname/deptname」类人员字段名
-    #                       ② label 值是「张三/研发中心」类具体人/部门词
-    #            才认为它**不是**枚举列表,而是 user/dept/org 列表;
-    # 仅满足其一不排除(否则会把字典里的「name」label 误伤)。
     is_small_aligned = bool(small) and _vk and _lk \
                        and _enum_like_key(_vk) and _enum_like_key(_lk) \
                        and not (_looks_people_or_org_key(_lk) and _looks_people_or_org_label(_label)) \
@@ -815,10 +830,8 @@ def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool, *,
     if not (len(sv) >= 2 or small) and not is_small_aligned:
         return None
     if mode == "code" and sv in sample_vals and not path_is_assignee and not is_small_aligned:
-        # 用户亲手填的值当码 → 自由文本,拒(治"1"撞状态字典)
-        # 审批人/选人容器下豁免;小列表对齐(短码真在枚举里)也豁免
         return None
-    if mode == "name" and not small:                     # 未确认的名选只在小列表认(大列表巧合多)
+    if mode == "name" and not small:
         return None
     return best
 
@@ -953,6 +966,12 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
     if skip_pref:
         leaves = [lf for lf in leaves if not lf[0].startswith(skip_pref)]
     use_field_scope = fields is not None
+    require_confirmed = bool(
+        use_field_scope and any(
+            (field.get("field_aliases") or str(field.get("control_kind") or "unknown") != "unknown")
+            for field in (fields or [])
+        )
+    )
     field_by_path = {str(f.get("path") or ""): f for f in (fields or []) if f.get("path")}
     all_sample_vals = {str(v) for v in (samples or {}).values() if v not in (None, "")}
     by_path: dict[str, list[dict]] = {}                   # path → 跨**所有** read 源的候选绑定(供择优)
@@ -968,10 +987,14 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
             # UUID/雪花 ID 不能仅凭形态跳过：选择控件的提交值本来就经常是长 ID。
             # 只有它真实命中候选项 value_key 时 _match_select 才会返回 code 绑定；
             # 未命中仍按普通系统常量处理，因此不会把任意流程 ID 误当枚举。
-            sample_vals = (_sample_values_for_leaf(path, sv, samples, field_by_path.get(path))
-                           if use_field_scope else all_sample_vals)
+            field = field_by_path.get(path)
+            sample_vals = (
+                _sample_values_for_leaf(path, sv, samples, field)
+                if use_field_scope else all_sample_vals
+            )
             m = _match_select(sv, items, sample_vals, small,
-                              path_is_assignee=_is_assignee_path(path))
+                              path_is_assignee=_is_assignee_path(path),
+                              require_confirmed=require_confirmed)
             if m is None:
                 continue
             mode, vk, lk, label, confirmed, item = m
@@ -1178,6 +1201,16 @@ def _page_enum_field_key(opts, picked: str) -> str | None:
     return None
 
 
+def _page_enum_field_aliases(opts) -> list[str]:
+    if not isinstance(opts, dict):
+        return []
+    return [
+        str(value).strip()
+        for value in (opts.get("field_aliases") or [])
+        if str(value or "").strip()
+    ]
+
+
 def _dom_key_matches_field(dom_key: str, field: dict | None) -> bool:
     if not field:
         return False
@@ -1203,29 +1236,55 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
     for k, v in page_enum_options.items():
         opts = _page_enum_option_list(v)
         if opts:
-            pairs.append((str(k), opts, _page_enum_field_key(v, str(k)), _page_enum_selected_label(v, str(k))))
+            pairs.append((
+                str(k), opts, _page_enum_field_key(v, str(k)),
+                _page_enum_selected_label(v, str(k)),
+                _page_enum_field_aliases(v),
+            ))
     body = _parse_body(post_data) if post_data is not None else None
     value_by_path = {p: sv for p, _t, sv, _raw in _leaf_paths(body)} if body is not None else {}
     raw_by_path = {p: raw for p, _t, _sv, raw in _leaf_paths(body)} if body is not None else {}
     field_by_path = {str(f.get("path") or ""): f for f in (fields or []) if f.get("path")}
+    strict_dom_identity = any(
+        aliases or (isinstance(page_enum_options.get(key), dict) and page_enum_options[key].get("control_kind"))
+        for key, _opts, _fk, _selected, aliases in pairs
+    )
     for s in selects or []:
         lbl, val = str(s.get("label") or ""), str(s.get("value") or "")
         path = str(s.get("path") or "")
         body_val = value_by_path.get(path, "")
         field = field_by_path.get(path)
         leaf_key = str(path).split(".")[-1].split("[")[0]
-        matched = next(((ov, fk, selected) for kv, ov, fk, selected in pairs
-                     if _exact_recorded_match(kv, lbl)
-                     or _exact_recorded_match(kv, val)
-                     or _exact_recorded_match(kv, body_val)
-                     or _exact_recorded_match(selected, lbl)
-                     or _exact_recorded_match(selected, val)
-                     or _exact_recorded_match(selected, body_val)
-                     or _name_match(kv, path)
-                     or _name_match(kv, leaf_key)
-                     or (fk and _name_match(fk, leaf_key))
-                     or _dom_key_matches_field(kv, field)
-                     or _dom_key_matches_field(selected, field)), None)
+        if strict_dom_identity:
+            matched = next((
+                (ov, fk, selected) for _kv, ov, fk, selected, aliases in pairs
+                if (
+                    any(
+                        _identifier_matches_field(alias, path)
+                        or _identifier_matches_field(alias, leaf_key)
+                        for alias in aliases
+                    )
+                    if aliases else bool(
+                        fk and (
+                            _identifier_matches_field(fk, path)
+                            or _identifier_matches_field(fk, leaf_key)
+                        )
+                    )
+                )
+            ), None)
+        else:
+            matched = next(((ov, fk, selected) for kv, ov, fk, selected, _aliases in pairs
+                if _exact_recorded_match(kv, lbl)
+                or _exact_recorded_match(kv, val)
+                or _exact_recorded_match(kv, body_val)
+                or _exact_recorded_match(selected, lbl)
+                or _exact_recorded_match(selected, val)
+                or _exact_recorded_match(selected, body_val)
+                or _name_match(kv, path)
+                or _name_match(kv, leaf_key)
+                or (fk and _name_match(fk, leaf_key))
+                or _dom_key_matches_field(kv, field)
+                or _dom_key_matches_field(selected, field)), None)
         if matched:
             opts, fk, _selected = matched
             records = _enum_records_from_page_options(opts)
@@ -1263,44 +1322,69 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
     for picked, opts_raw in page_enum_options.items():
         opts = _page_enum_option_list(opts_raw)
         fk = _page_enum_field_key(opts_raw, str(picked))
+        aliases = _page_enum_field_aliases(opts_raw)
         selected = _page_enum_selected_label(opts_raw, str(picked))
         if not opts:
             continue
-        # 1)精确匹配:body leaf 值等于显示值(label)
-        toks = _find_value_tokens(body, selected)
-        if toks is not None:
-            path = _tokens_to_str(toks)
-        else:
-            # 2)field_key/path 子串/leaf key 反查:治"请假类型=病假,但 body 字段是 leaveType=2 的内部码"
+        strict_identity = bool(aliases or (isinstance(opts_raw, dict) and opts_raw.get("control_kind")))
+        if strict_identity:
+            # New recorder evidence: only an explicit DOM property/name may own
+            # the request field. Selected values and translated labels are not
+            # identity evidence.
             scored = []
-            for path, toks, sv, _raw in leaves:
-                field = field_by_path.get(path)
+            for path, toks, _sv, _raw in leaves:
                 leaf = str(path).split(".")[-1].split("[")[0]
-                score = 0
-                if fk and (_name_match(fk, path) or _name_match(fk, leaf) or _label_matches_internal_field(fk, path, field)):
-                    score += 6
-                if _dom_key_matches_field(str(picked), field) or _dom_key_matches_field(selected, field):
-                    score += 5
-                if _label_matches_internal_field(str(picked), path, field) or _label_matches_internal_field(selected, path, field):
-                    score += 4
-                if _name_match(str(picked), path) or _name_match(selected, path):
-                    score += 2
-                if _name_match(str(picked), leaf) or _name_match(selected, leaf):
-                    score += 2
-                semantic_score = score
-                if str(sv).strip() and not any(
-                    _exact_recorded_match(sv, o.get("label"))
-                    for o in _enum_records_from_page_options(opts)
-                ):
-                    # 短码只能增强已有的字段语义证据，不能独立制造匹配；否则任意
-                    # 部门/人员下拉都会被绑定到第一个 type/status/id 短码字段。
-                    score += 2 if semantic_score > 0 and _re.fullmatch(r"[A-Za-z0-9_-]{1,8}", str(sv).strip()) else -2
-                if semantic_score > 0 and score > 0:
-                    scored.append((score, path, toks))
-            hit = max(scored, default=None, key=lambda x: x[0])
-            if hit is None:
+                alias_match = any(
+                    _identifier_matches_field(alias, path)
+                    or _identifier_matches_field(alias, leaf)
+                    for alias in aliases
+                )
+                key_match = bool(
+                    not aliases and fk and (
+                        _identifier_matches_field(fk, path)
+                        or _identifier_matches_field(fk, leaf)
+                    )
+                )
+                if alias_match or key_match:
+                    scored.append((10 if alias_match else 8, path, toks))
+            if len(scored) != 1:
                 continue
-            _score, path, toks = hit
+            _score, path, toks = scored[0]
+        else:
+            # Legacy recordings did not carry control aliases. Preserve their
+            # historic best-effort behavior while all newly recorded sessions
+            # use the strict branch above.
+            toks = _find_value_tokens(body, selected)
+            if toks is not None:
+                path = _tokens_to_str(toks)
+            else:
+                scored = []
+                for path, toks, sv, _raw in leaves:
+                    field = field_by_path.get(path)
+                    leaf = str(path).split(".")[-1].split("[")[0]
+                    score = 0
+                    if fk and (_name_match(fk, path) or _name_match(fk, leaf) or _label_matches_internal_field(fk, path, field)):
+                        score += 6
+                    if _dom_key_matches_field(str(picked), field) or _dom_key_matches_field(selected, field):
+                        score += 5
+                    if _label_matches_internal_field(str(picked), path, field) or _label_matches_internal_field(selected, path, field):
+                        score += 4
+                    if _name_match(str(picked), path) or _name_match(selected, path):
+                        score += 2
+                    if _name_match(str(picked), leaf) or _name_match(selected, leaf):
+                        score += 2
+                    semantic_score = score
+                    if str(sv).strip() and not any(
+                        _exact_recorded_match(sv, option.get("label"))
+                        for option in _enum_records_from_page_options(opts)
+                    ):
+                        score += 2 if semantic_score > 0 and _re.fullmatch(r"[A-Za-z0-9_-]{1,8}", str(sv).strip()) else -2
+                    if semantic_score > 0 and score > 0:
+                        scored.append((score, path, toks))
+                hit = max(scored, default=None, key=lambda value: value[0])
+                if hit is None:
+                    continue
+                _score, path, toks = hit
         if path in existing or any(o.get("path") == path for o in out):
             continue
         current = next((sv for p, _t, sv, _raw in leaves if p == path), "")
@@ -2084,7 +2168,8 @@ def goal_needs_confirmation(goal: dict | None) -> bool:
 
 def flatten_body(post_data: str | None, samples: dict | None = None,
                  required_labels: set | None = None,
-                 collapse_paths: list[str] | None = None) -> list[dict]:
+                 collapse_paths: list[str] | None = None,
+                 field_evidence: list[dict] | None = None) -> list[dict]:
     """把请求体拍平成叶子字段列表 + 参数建议,供前端勾选。任意嵌套(dict/list)→ 点路径。
 
     suggest_name=字段中文名(录制时的 DOM 标签),**只在能确定时给**(文本按值对;日期跨格式对毫秒戳↔显示),
@@ -2098,6 +2183,7 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         return []
     samples = samples or {}
     required_labels = required_labels or set()
+    strict_control_evidence = bool(field_evidence)
 
     def required_label_matches(label: str | None) -> bool:
         """Match page-required labels across framework punctuation/range suffixes.
@@ -2131,19 +2217,29 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
     for _v, _lab, _dk in sample_list:
         _val_mult[_v] = _val_mult.get(_v, 0) + 1
 
-    def match_label(sv: str):
-        """→ (中文标签 or None, 是否可信)。可信=该值在表单里唯一对应一个字段,可据此判必填。"""
-        for i, (v, lab, _dk) in enumerate(sample_list):        # 文本精确对(同值取下一个还没用的标签)
-            if i not in used_i and v == sv:
-                used_i.add(i)
-                return lab, _val_mult.get(sv, 0) == 1
+    def match_label(sv: str, body_value_count: int):
+        """Return only an unambiguous value-based label.
+
+        Repeated sample values are common when an operator enters ``1`` in many
+        controls.  Their DOM order is unrelated to JSON object order, so pairing
+        them sequentially manufactures wrong names. Structural control aliases
+        are handled separately below; without them ambiguity stays unresolved.
+        """
+        exact_count = _val_mult.get(sv, 0)
+        if exact_count:
+            if strict_control_evidence and (body_value_count != 1 or exact_count != 1):
+                return None, False
+            for i, (v, lab, _dk) in enumerate(sample_list):
+                if i not in used_i and v == sv:
+                    used_i.add(i)
+                    return lab, exact_count == 1
         sv_dates = _date_keys(sv)
         if sv_dates:                                           # 日期跨格式对(毫秒戳 ↔ 显示日期)
             for i, (v, lab, dk) in enumerate(sample_list):
                 if i not in used_i and (dk & sv_dates):
                     used_i.add(i)
                     dmult = sum(1 for _v, _l, _d in sample_list if _d & sv_dates)
-                    return lab, dmult == 1
+                    return (lab, True) if dmult == 1 else (None, False)
         return None, False
 
     # 先收集所有叶子(保录制序),再**两遍配样例**:真业务字段(非内部 id/状态)先认领样例值,内部标识字段
@@ -2165,13 +2261,77 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
             leaves.append((path, key, node, sv, time_like, internal))
 
     walk(body, "")
+    body_value_counts: dict[str, int] = {}
+    for _path, _key, _node, value, _time_like, _internal in leaves:
+        body_value_counts[value] = body_value_counts.get(value, 0) + 1
+
+    def evidence_aliases(item: dict) -> list[str]:
+        return [
+            str(value).strip()
+            for value in (item.get("field_aliases") or [])
+            if str(value or "").strip()
+        ]
+
+    structural: dict[int, dict] = {}
+    for item in field_evidence or []:
+        if not isinstance(item, dict):
+            continue
+        aliases = evidence_aliases(item)
+        if not aliases:
+            continue
+        candidates: list[int] = []
+        for index, (path, key, _node, _sv, _tl, _internal) in enumerate(leaves):
+            if any(
+                _identifier_matches_field(alias, path)
+                or _identifier_matches_field(alias, key)
+                for alias in aliases
+            ):
+                candidates.append(index)
+        if len(candidates) != 1:
+            continue
+        index = candidates[0]
+        previous = structural.get(index)
+        # Multiple controls can represent one range/object field. Prefer the
+        # evidence with a human label and a concrete control kind; never choose
+        # between conflicting labels by order.
+        if previous:
+            old_label = str(previous.get("label") or previous.get("field") or "").strip()
+            new_label = str(item.get("label") or item.get("field") or "").strip()
+            if old_label and new_label and old_label != new_label:
+                structural.pop(index, None)
+                continue
+            if old_label and not new_label:
+                continue
+        structural[index] = item
+
+    def type_from_control(item: dict | None, fallback: str) -> str:
+        kind = str((item or {}).get("control_kind") or "").lower()
+        if kind in {"text", "textarea"}:
+            return "string"
+        if kind == "number":
+            return "number"
+        if kind == "date":
+            return "date"
+        if kind in {"datetime", "time"}:
+            return "datetime"
+        if kind in {"checkbox", "radio"}:
+            return "boolean"
+        return fallback
+
     labels: dict[int, tuple] = {}
     for i, (_p, _k, _n, sv, _tl, internal) in enumerate(leaves):   # ① 真业务字段先认领样例
+        if i in structural:
+            item = structural[i]
+            label = str(item.get("label") or item.get("field") or "").strip()
+            labels[i] = (label or None, bool(label))
+            continue
         if not internal:
-            labels[i] = match_label(sv)
+            labels[i] = match_label(sv, body_value_counts.get(sv, 0))
     for i, (_p, _k, _n, sv, _tl, internal) in enumerate(leaves):   # ② 内部标识字段认领剩余(不与真字段抢同值)
+        if i in structural:
+            continue
         if internal:
-            labels[i] = match_label(sv)
+            labels[i] = match_label(sv, body_value_counts.get(sv, 0))
 
     out: list[dict] = []
     for i, (path, key, node, sv, time_like, internal) in enumerate(leaves):
@@ -2184,32 +2344,30 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         const = sys_time or internal
         is_param = bool(label is not None or (not const and sv != ""))
         conf = _field_confidence(label, confident, key, is_param)
-        # 必填判定(默认必填,写操作宁多勿漏;自动判,免手动勾选):
-        #  · 非参数(常量/内部 id)→ 非必填(本就不是用户要填的项)
-        #  · 表单确实区分了必填(抓到 * 标记,required_labels 非空)且本字段被**确信**映射到某 DOM 标签
-        #    → 信表单:标了 * 才必填,没标 * 即可选
-        #  · 其余(表单没区分 / 映射不确信)→ 默认必填(不敢判可选,宁多勿漏)
-        page_required: bool | None = None
-        if required_labels and label is not None and confident:
-            page_required = required_label_matches(label)
-        if not is_param:
-            required = False
-            required_source = "internal"
-        elif page_required is not None:
-            required = page_required
-            required_source = "page"
-        else:
-            required = True
-            required_source = "conservative"
+        # 只保留一个实际的 required 结论，不再维护两套会互相矛盾的必填状态。
+        required = bool(
+            is_param
+            and (
+                not required_labels
+                or label is None
+                or not confident
+                or required_label_matches(label)
+            )
+        )
+        control = structural.get(i)
+        inferred_type = type_from_control(control, _infer_type(node, key))
         out.append({"path": path, "key": key, "value": sv,
                     "suggest_param": is_param,
                     "suggest_name": label or key,            # 对不上 → 退原始 key(不瞎猜)
-                    "type": _infer_type(node, key),           # 字段类型(值推断),给 agent/契约
+                    "type": inferred_type,
+                    "wire_type": _infer_type(node, key),
+                    "name_source": "dom" if control and label else "sample" if label and label != key else "auto",
+                    "field_aliases": evidence_aliases(control or {}),
+                    "control_kind": str((control or {}).get("control_kind") or "unknown"),
+                    "recorded_user_input": bool(control),
                     "confidence": conf,                       # 字段语义置信度(P1)
                     "confidence_tier": confidence_tier(conf),  # auto / clarify / reject(需澄清)
                     "required": required,
-                    "page_required": page_required,
-                    "required_source": required_source,
                     "system_value": bool(sys_time)})          # 系统运行期自动填(submitTime/createTime),前端可标
     # 列表多选:把每个被接管的对象数组的逐元素叶子,折叠成**一个**列表参数字段(原位插回,前端只见一个参数)
     for ap in (collapse_paths or []):
@@ -2224,7 +2382,6 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
                    {"path": ap, "key": key, "value": "", "suggest_param": True,
                     "suggest_name": key, "type": "list-enum", "confidence": 0.78,
                     "confidence_tier": "clarify", "required": True,
-                    "page_required": None, "required_source": "conservative",
                     "system_value": False})
     return out
 

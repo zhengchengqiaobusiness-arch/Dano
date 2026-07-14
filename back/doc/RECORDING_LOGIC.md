@@ -717,7 +717,7 @@ idle → recording → publishing → recording
 | 录制期证据 | FlowSpec 表达 | 运行期行为 |
 |---|---|---|
 | 用户填写表单 | `user_param + user_input` | 调用方传值并写入请求模板 |
-| 页面必填标记 | `page_required` 录制证据 | 仅当字段确由调用方提供时进入 `input_schema.required`；运行期自动来源不向客户索取 |
+| 页面必填标记 | 合并为字段唯一的 `required` 结论 | 仅当字段确由调用方提供时进入 `input_schema.required`；运行期自动来源不向客户索取 |
 | 页面下拉 label/value | enum + page/static/manual enum | 调用方传显示值，映射真实提交值 |
 | 选项 API 响应 | `api_option + SelectBinding` | 运行期先调用只读接口，再做 name→ID 映射 |
 | 当前登录人 | `runtime_var + current_user` | 从当前会话身份重新注入 |

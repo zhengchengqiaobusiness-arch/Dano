@@ -293,6 +293,94 @@ _RECORDER_JS = r"""() => {
     } catch (e) {}
     return false;
   }
+  function controlAliases(el) {
+    // Keep the request-field identity carried by the control structure.  A
+    // repeated sample value ("1" is common in OA forms) is never an identity.
+    var attrs = ['name','data-field','data-name','data-key','data-prop','data-path','formcontrolname',
+                 'ng-reflect-name','ng-reflect-form-control-name'];
+    var out = []; var seen = {}; var nodes = [];
+    function add(raw) {
+      if (raw === null || raw === undefined) return;
+      var value = clean(String(raw));
+      if (!value || value.length > 120 || seen[value]) return;
+      seen[value] = true; out.push(value);
+      var leaf = value.split('.').pop();
+      if (leaf && leaf !== value && !seen[leaf]) { seen[leaf] = true; out.push(leaf); }
+    }
+    var cursor = el;
+    for (var depth = 0; cursor && depth < 7; depth++, cursor = cursor.parentElement) nodes.push(cursor);
+    try {
+      var owner = el && el.closest && el.closest(
+        '.el-form-item,.ant-form-item,[class*="form-item"],[class*="form_item"],[data-prop],[data-field],[formcontrolname]'
+      );
+      if (owner && nodes.indexOf(owner) < 0) nodes.push(owner);
+    } catch (_) {}
+    nodes.forEach(function (node) {
+      if (!node || !node.getAttribute) return;
+      attrs.forEach(function (attr) {
+        add(node.getAttribute(attr));
+      });
+      if (stableId(node)) {
+        add(node.id);
+      }
+      try {
+        var vue2 = node.__vue__;
+        [
+          vue2 && vue2.$props && vue2.$props.prop,
+          vue2 && vue2.$props && vue2.$props.name,
+          vue2 && vue2.$attrs && (vue2.$attrs.name || vue2.$attrs['data-prop']),
+          vue2 && vue2.$vnode && vue2.$vnode.data && vue2.$vnode.data.model && vue2.$vnode.data.model.expression,
+          vue2 && vue2.$vnode && vue2.$vnode.componentOptions && vue2.$vnode.componentOptions.propsData
+            && (vue2.$vnode.componentOptions.propsData.prop || vue2.$vnode.componentOptions.propsData.name)
+        ].forEach(add);
+        var vue3 = node.__vueParentComponent;
+        for (var vi = 0; vue3 && vi < 5; vi++, vue3 = vue3.parent) {
+          add(vue3.props && (vue3.props.prop || vue3.props.name));
+          add(vue3.attrs && (vue3.attrs.name || vue3.attrs['data-prop']));
+          add(vue3.vnode && vue3.vnode.props && (vue3.vnode.props.prop || vue3.vnode.props.name || vue3.vnode.props['data-prop']));
+        }
+        Object.keys(node).forEach(function (key) {
+          if (key.indexOf('__reactProps$') !== 0 && key.indexOf('__reactFiber$') !== 0) return;
+          var holder = node[key] || {};
+          var props = key.indexOf('__reactProps$') === 0 ? holder : (holder.memoizedProps || holder.pendingProps || {});
+          add(props && (props.name || props.field || props.dataIndex || props['data-prop']));
+        });
+      } catch (_) {}
+    });
+    return out;
+  }
+  function controlKind(el) {
+    try {
+      if (!el) return 'unknown';
+      var tag = String(el.tagName || '').toLowerCase();
+      var type = String(el.type || '').toLowerCase();
+      var host = el.closest ? el.closest(
+        '.el-date-editor,.el-time-select,.el-time-picker,.ant-picker,.van-picker,' +
+        '.el-select,.el-cascader,.el-autocomplete,.ant-select,.ant-cascader-picker,' +
+        '.mat-mdc-select,.mat-select,.q-select,.v-select'
+      ) : null;
+      var cls = String((host && host.className) || el.className || '').toLowerCase();
+      if (type === 'datetime-local' || /datetime/.test(cls)) return 'datetime';
+      if (type === 'time' || /time-picker|time-select|timepanel/.test(cls)) return 'time';
+      if (['date','month','week'].indexOf(type) >= 0 || /date|month|year|calendar/.test(cls)) return 'date';
+      if (tag === 'select' || /select|cascader|autocomplete/.test(cls)) return 'select';
+      if ((el.getAttribute && el.getAttribute('role')) === 'combobox') return 'select';
+      if (type === 'number' || (el.getAttribute && el.getAttribute('role')) === 'spinbutton') return 'number';
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (tag === 'textarea') return 'textarea';
+      if (tag === 'input') return 'text';
+    } catch (_) {}
+    return 'unknown';
+  }
+  function fieldEvidence(el) {
+    if (!el) return {};
+    return {
+      field_aliases: controlAliases(el),
+      control_kind: controlKind(el),
+      input_type: String(el.type || '').toLowerCase()
+    };
+  }
   window.__danoRequiredFields = function () {
     var out = {};
     try {
@@ -357,7 +445,13 @@ _RECORDER_JS = r"""() => {
         // 页面快照只为业务字段匹配服务；密码、验证码、支付与令牌类控件绝不采集值。
         var value = isSensitive(el) ? '' : clean(el.value || el.getAttribute('value') || '');
         if (!label && !field) continue;
-        out.push({field: field, label: label, value: value, required: requiredOf(el)});
+        var evidence = fieldEvidence(el);
+        out.push({
+          field: field, label: label, value: value, required: requiredOf(el),
+          field_aliases: evidence.field_aliases || [],
+          control_kind: evidence.control_kind || 'unknown',
+          input_type: evidence.input_type || ''
+        });
       }
     } catch (e) {}
     return out.slice(0, 200);
@@ -431,7 +525,7 @@ _RECORDER_JS = r"""() => {
       }));
     } catch (e) {}
   }
-  function emit(op, loc, value, field, required, options) {
+  function emit(op, loc, value, field, required, options, evidence) {
     if (!loc || onLoginPage()) return;            // 登录页上的任何操作一律不录(自动跳过登录,免手点「从这里开始录」)
     try {
       actionSeq += 1;
@@ -446,6 +540,9 @@ _RECORDER_JS = r"""() => {
         field: field || '',
         required: !!required,
         options: options || [],
+        field_aliases: (evidence && evidence.field_aliases) || [],
+        control_kind: (evidence && evidence.control_kind) || 'unknown',
+        input_type: (evidence && evidence.input_type) || '',
         page_context: window.__danoPageContext ? window.__danoPageContext() : {}
       }));
       setTimeout(function () { emitDomEffect(actionId, startMutationSeq); }, 350);
@@ -458,7 +555,7 @@ _RECORDER_JS = r"""() => {
       if (isSensitive(el)) return;
       var loc = locateField(el);
       if (!loc) return;
-      pendingFill[loc] = { el: el, value: el.value, field: fieldOf(loc), required: requiredOf(el) };
+      pendingFill[loc] = { el: el, value: el.value, field: fieldOf(loc), required: requiredOf(el), evidence: fieldEvidence(el) };
       if (fillTimers[loc]) clearTimeout(fillTimers[loc]);
       fillTimers[loc] = setTimeout(function () { flushFill(loc); }, 300);
     } catch (e) {}
@@ -469,7 +566,7 @@ _RECORDER_JS = r"""() => {
       if (!p) return;
       delete pendingFill[loc];
       if (fillTimers[loc]) { clearTimeout(fillTimers[loc]); delete fillTimers[loc]; }
-      emit('fill', loc, p.value, p.field, p.required);
+      emit('fill', loc, p.value, p.field, p.required, [], p.evidence || fieldEvidence(p.el));
     } catch (e) {}
   }
   function flushElementFill(el) {
@@ -479,7 +576,7 @@ _RECORDER_JS = r"""() => {
       if (loc) {
         var pending = pendingFill[loc];
         if (pending) pending.value = el.value;
-        else pendingFill[loc] = { el: el, value: el.value, field: fieldOf(loc), required: requiredOf(el) };
+        else pendingFill[loc] = { el: el, value: el.value, field: fieldOf(loc), required: requiredOf(el), evidence: fieldEvidence(el) };
         flushFill(loc);
       }
     } catch (e) {}
@@ -513,16 +610,70 @@ _RECORDER_JS = r"""() => {
       var out = [];
       function optionValue(n, label) {
         try {
-          var attrs = ['data-value','data-key','data-id','value','aria-valuenow','aria-value'];
+          function scalar(raw) {
+            if (raw === null || raw === undefined) return null;
+            if (typeof raw !== 'string' && typeof raw !== 'number' && typeof raw !== 'boolean') return null;
+            var value = clean(String(raw));
+            return value === '' ? null : value;
+          }
+          function componentValue(node) {
+            // Custom selects often keep the real option value in framework
+            // component props rather than a DOM attribute. Read only scalar,
+            // explicitly named `value` props; never serialize arbitrary
+            // component state or fall back to the visible label.
+            try {
+              var vue2 = node && node.__vue__;
+              var vue2Candidates = vue2 ? [
+                vue2.value,
+                vue2.$props && vue2.$props.value,
+                vue2.$attrs && vue2.$attrs.value,
+                vue2.$vnode && vue2.$vnode.componentOptions && vue2.$vnode.componentOptions.propsData
+                  && vue2.$vnode.componentOptions.propsData.value
+              ] : [];
+              for (var vi = 0; vi < vue2Candidates.length; vi++) {
+                var vue2Value = scalar(vue2Candidates[vi]);
+                if (vue2Value !== null) return vue2Value;
+              }
+              var vue3 = node && node.__vueParentComponent;
+              for (var depth = 0; vue3 && depth < 4; depth++, vue3 = vue3.parent) {
+                var vue3Candidates = [
+                  vue3.props && vue3.props.value,
+                  vue3.vnode && vue3.vnode.props && vue3.vnode.props.value
+                ];
+                for (var vj = 0; vj < vue3Candidates.length; vj++) {
+                  var vue3Value = scalar(vue3Candidates[vj]);
+                  if (vue3Value !== null) return vue3Value;
+                }
+              }
+              var keys = node ? Object.keys(node) : [];
+              for (var ki = 0; ki < keys.length; ki++) {
+                var key = keys[ki];
+                if (key.indexOf('__reactProps$') !== 0 && key.indexOf('__reactFiber$') !== 0) continue;
+                var holder = node[key] || {};
+                var props = key.indexOf('__reactProps$') === 0 ? holder : (holder.memoizedProps || holder.pendingProps || {});
+                var reactValue = scalar(props && (props.value !== undefined ? props.value : props['data-value']));
+                if (reactValue !== null) return reactValue;
+              }
+            } catch (_) {}
+            return null;
+          }
+          var attrs = ['data-value','data-key','data-id','value','aria-valuenow','aria-value','ng-reflect-value'];
           for (var ai = 0; ai < attrs.length; ai++) {
             var raw = n.getAttribute && n.getAttribute(attrs[ai]);
-            if (raw !== null && raw !== undefined && clean(raw) !== '') return clean(raw);
+            var attrValue = scalar(raw);
+            if (attrValue !== null) return attrValue;
           }
-          var nested = n.querySelector && n.querySelector('[data-value],[data-key],[data-id],[value]');
+          var componentNode = n;
+          for (var ci = 0; componentNode && ci < 4; ci++, componentNode = componentNode.parentElement) {
+            var frameworkValue = componentValue(componentNode);
+            if (frameworkValue !== null) return frameworkValue;
+          }
+          var nested = n.querySelector && n.querySelector('[data-value],[data-key],[data-id],[value],[ng-reflect-value]');
           if (nested) {
             for (var ni = 0; ni < attrs.length; ni++) {
               var nestedRaw = nested.getAttribute && nested.getAttribute(attrs[ni]);
-              if (nestedRaw !== null && nestedRaw !== undefined && clean(nestedRaw) !== '') return clean(nestedRaw);
+              var nestedValue = scalar(nestedRaw);
+              if (nestedValue !== null) return nestedValue;
             }
           }
         } catch (_) {}
@@ -601,7 +752,7 @@ _RECORDER_JS = r"""() => {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
     if (isSensitive(el)) return;
     if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) flushElementFill(el);
-    if (tag === 'select') { var l1 = locateField(el); emit('select', l1, el.value, fieldOf(l1), requiredOf(el), nativeOptions(el)); }
+    if (tag === 'select') { var l1 = locateField(el); emit('select', l1, el.value, fieldOf(l1), requiredOf(el), nativeOptions(el), fieldEvidence(el)); }
     else if (tag === 'input' && ty === 'file') { var l2 = locateField(el); emit('upload', l2, el.value || '', fieldOf(l2), requiredOf(el)); }
   }, true);
   document.addEventListener('blur', function (e) {
@@ -622,6 +773,52 @@ _RECORDER_JS = r"""() => {
               '.bp5-popover,.bp5-menu,.bp5-select-popover,.bp5-popover-content,' +
               '.v-overlay-container,.v-list-internal,.v-overlay__content,' +
               '.q-menu,.q-dialog__inner,.q-select__menu,.q-tooltip';
+  function enumFieldAliases(trig, inp) {
+    return controlAliases(inp || trig);
+  }
+  function isEnumTrigger(trig) {
+    var inp = trig && trig.querySelector ? trig.querySelector('input,select,[role="combobox"]') : trig;
+    return controlKind(inp || trig) === 'select';
+  }
+  function emitEnumSnapshot(trig) {
+    if (!trig || onLoginPage() || !isEnumTrigger(trig)) return;
+    try {
+      var inp = trig.querySelector ? trig.querySelector('input') : null;
+      var loc = locateField(inp || trig);
+      if (!loc || isSensitive(inp || trig)) return;
+      var records = []; var seen = {};
+      var popups = document.querySelectorAll(POPUP);
+      for (var i = 0; i < popups.length; i++) {
+        var popup = popups[i];
+        try {
+          var style = getComputedStyle(popup);
+          if (style.display === 'none' || style.visibility === 'hidden') continue;
+        } catch (_) {}
+        var options = popupOptions(popup);
+        for (var j = 0; j < options.length; j++) {
+          var option = options[j]; var label = clean(option && option.label);
+          if (!label || seen[label]) continue;
+          seen[label] = true; records.push(option);
+        }
+      }
+      if (!records.length) return;
+      window.__danoRecord(JSON.stringify({
+        op: 'enum_snapshot',
+        locator: loc,
+        field: fieldOf(loc),
+        field_aliases: enumFieldAliases(trig, inp),
+        control_kind: 'select',
+        options: records,
+        observed_at: Date.now(),
+        page_context: window.__danoPageContext ? window.__danoPageContext() : {}
+      }));
+    } catch (e) {}
+  }
+  function scheduleEnumSnapshots(trig) {
+    [60, 220, 600].forEach(function (delay) {
+      setTimeout(function () { emitEnumSnapshot(trig); }, delay);
+    });
+  }
   // 触发框:W3C aria-haspopup / readonly 优先 + Element/Ant/Vant 框架特定 class 兜底
   // 触发框 = 用户点击会弹出选项面板的那个元素
   var TRIGGER_CLS = '[aria-haspopup],[aria-expanded][aria-controls],[aria-autocomplete],' +
@@ -691,7 +888,10 @@ _RECORDER_JS = r"""() => {
         clearInterval(pickTimer); pickTimer = null;
         var inp = trig.querySelector ? trig.querySelector('input') : null;
         var loc = locateField(inp || trig);
-        if (loc) emit('pick', loc, v, fieldOf(loc), requiredOf(trig) || (inp && requiredOf(inp)), lastPickOptions);
+        if (loc) emit(
+          'pick', loc, v, fieldOf(loc), requiredOf(trig) || (inp && requiredOf(inp)),
+          isEnumTrigger(trig) ? lastPickOptions : [], fieldEvidence(inp || trig)
+        );
       } else if (tries >= 25) { clearInterval(pickTimer); pickTimer = null; }   // ~2.5s 仍没变 → 放弃
     }, 100);
   }
@@ -699,7 +899,8 @@ _RECORDER_JS = r"""() => {
     // A) 点在日期/下拉弹层内 = 正在选择 → 不记这次点击;先把**此刻弹层里可见的选项**抓下来(地面真值枚举),
     //    再轮询触发框值落定后随 pick 一起回传(选完即生效)
     if (e.target.closest && e.target.closest(POPUP)) {
-      var _opts = popupOptions(e.target.closest(POPUP)); if (_opts.length) lastPickOptions = _opts;
+      var _opts = isEnumTrigger(activeTrigger) ? popupOptions(e.target.closest(POPUP)) : [];
+      if (_opts.length) lastPickOptions = _opts;
       pollPick(activeTrigger, false); return;
     }
     // B) 点选择型触发框 → 记住它 + 点击前的显示值,开始轮询(覆盖单击即选 / 远程搜索异步回填 / 级联)
@@ -708,6 +909,7 @@ _RECORDER_JS = r"""() => {
       activeTrigger = trig;
       prevVal = pickVal(trig);
       pollPick(trig, true);
+      if (isEnumTrigger(trig)) scheduleEnumSnapshots(trig);
       return;
     }
     // C) 普通输入框点击 = 聚焦噪声(打字会另记 fill)→ 跳过
@@ -733,6 +935,7 @@ class RecordSession:
         # 点击提交时保存的页面语义/必填快照。它独立于操作步骤，避免弹窗关闭后
         # finalize 扫描不到表单，也避免把证据误导出成回放动作。
         self.form_snapshots: list[dict] = []
+        self.enum_snapshots: list[dict] = []
         self.requests: list[dict] = []      # 抓到的写请求(有序,method/url/post_data/headers)→ 参数化/多步工作流
         self.reads: list[dict] = []         # 抓到的读请求(GET+JSON 列表/字典)→ Q2 选领导等 select 的候选源
         # P0-1:全量捕获(基础事实)。先抓全再筛 → 治"GET 业务接口被早筛丢"等根因。
@@ -900,7 +1103,8 @@ class RecordSession:
     def _record_all(self, m: str, url: str, *, pd: str | None = None, query: dict | None = None,
                     headers: dict | None = None, status: int | None = None,
                     response_json=None, content_type: str = "", page_id: str = "",
-                    frame_id: str = "") -> int:
+                    frame_id: str = "", resource_type: str = "",
+                    navigation_request: bool = False) -> int:
         """全量捕获一条网络请求(GET/POST/PUT/PATCH/DELETE 都记)。返回 index。
 
         - 不做任何 method / 角色过滤:先抓全,后续 P0-2 角色分类 + P0-3 依赖闭包基于这份原数据工作。
@@ -924,6 +1128,8 @@ class RecordSession:
             "response_json": response_json,
             "status": status,
             "content_type": content_type,
+            "resource_type": resource_type,
+            "navigation_request": bool(navigation_request),
             "timestamp": int(time.time() * 1000),
             # P0-2:角色分类字段。响应未到时先按现有信息初分(_classify_entry),响应落地后再 _classify_entry 一次。
             # classify_field 缺失 = 还没分类过(兜底用)。
@@ -931,16 +1137,29 @@ class RecordSession:
         # 时间相邻只能作为候选因果证据，所以同时记录延迟和置信等级，供后续推导/复核使用。
         now_monotonic = time.monotonic()
         action = self._last_action_by_scope.get((page_id, frame_id))
-        if action is None and (page_id or frame_id):
+        if action is None and page_id:
+            # A request may originate from a child frame while the actionable
+            # click was observed in its owning page. Fall back only within that
+            # page; the old global fallback attached background requests from
+            # another tab/page to the most recent unrelated action.
+            same_page = [
+                candidate for (candidate_page, _candidate_frame), candidate in self._last_action_by_scope.items()
+                if candidate_page == page_id
+            ]
+            if same_page:
+                action = max(same_page, key=lambda item: float(item.get("monotonic") or 0))
+        if action is None and not page_id and not frame_id:
             action = self._last_action_by_scope.get(("", ""))
         if action is not None:
             delta_ms = max(0, int((now_monotonic - float(action.get("monotonic") or now_monotonic)) * 1000))
-            if delta_ms <= 8000:
+            if delta_ms <= 5000:
                 entry.update({
                     "trigger_action_id": action.get("action_id") or "",
+                    "trigger_transaction_id": action.get("transaction_id") or "",
                     "trigger_event_id": action.get("event_id") or "",
                     "trigger_op": action.get("op") or "",
                     "trigger_locator": action.get("locator") or "",
+                    "trigger_page_context": dict(action.get("page_context") or {}),
                     "action_delta_ms": delta_ms,
                     "causality_confidence": "high" if delta_ms <= 1200 else "medium" if delta_ms <= 3500 else "low",
                 })
@@ -1023,10 +1242,19 @@ class RecordSession:
                 hd = dict(request.headers or {})
             except Exception:  # noqa: BLE001
                 pass
+            try:
+                resource_type = str(request.resource_type or "")
+            except Exception:  # noqa: BLE001
+                resource_type = ""
+            try:
+                navigation_request = bool(request.is_navigation_request())
+            except Exception:  # noqa: BLE001
+                navigation_request = False
             # P0-1:GET 也落 all_requests(全量捕获,治"业务 GET 前置接口被早筛丢")。
             # _record_all 是 all_requests 的唯一写入点;_capture 只负责写 requests(写请求才走)。
             request_index = self._record_all(
                 m, url, pd=pd, headers=hd, content_type=hd.get("content-type", ""),
+                resource_type=resource_type, navigation_request=navigation_request,
                 **self._request_scope(request),
             )
             self._request_fact_index[id(request)] = request_index
@@ -1072,9 +1300,19 @@ class RecordSession:
             except Exception:  # noqa: BLE001
                 pass
             ct = hd.get("content-type", "")
+            try:
+                resource_type = str(request.resource_type or "")
+            except Exception:  # noqa: BLE001
+                resource_type = ""
+            try:
+                navigation_request = bool(request.is_navigation_request())
+            except Exception:  # noqa: BLE001
+                navigation_request = False
             # P0-1:GET 也落 all_requests(全量捕获)。后续 P0-3 依赖闭包要靠它发现"业务 GET 前置接口"。
             request_index = self._record_all(
-                m, url, pd=pd, headers=hd, content_type=ct, **self._request_scope(request),
+                m, url, pd=pd, headers=hd, content_type=ct,
+                resource_type=resource_type, navigation_request=navigation_request,
+                **self._request_scope(request),
             )
             self._request_fact_index[id(request)] = request_index
             # H7 修复:multipart/form-data 上传(文件/附件)必须真发,否则文件丢失但 UI 显示成功
@@ -1240,6 +1478,49 @@ class RecordSession:
             })
             self.page_events = self.page_events[-1000:]
             return
+        if op == "enum_snapshot":
+            options = list(step.get("options") or [])[:500]
+            if options and step.get("field"):
+                snapshot = {**step, "options": options, "event_id": event_id}
+                identity = tuple(str(snapshot.get(key) or "") for key in (
+                    "page_id", "frame_id", "locator", "field",
+                ))
+                replaced = False
+                for index in range(len(self.enum_snapshots) - 1, -1, -1):
+                    previous = self.enum_snapshots[index]
+                    previous_identity = tuple(str(previous.get(key) or "") for key in (
+                        "page_id", "frame_id", "locator", "field",
+                    ))
+                    if previous_identity != identity:
+                        continue
+                    merged = {
+                        str(item.get("label") if isinstance(item, dict) else item): item
+                        for item in (previous.get("options") or [])
+                        if str(item.get("label") if isinstance(item, dict) else item)
+                    }
+                    for option in options:
+                        label = str(option.get("label") if isinstance(option, dict) else option)
+                        if label:
+                            merged[label] = option
+                    snapshot["options"] = list(merged.values())[:500]
+                    self.enum_snapshots[index] = snapshot
+                    replaced = True
+                    break
+                if not replaced:
+                    self.enum_snapshots.append(snapshot)
+                self.enum_snapshots = self.enum_snapshots[-200:]
+                self.page_events.append({
+                    "event_id": event_id,
+                    "kind": "enum_snapshot",
+                    "field": str(step.get("field") or ""),
+                    "locator": str(step.get("locator") or ""),
+                    "option_count": len(options),
+                    "observed_at": observed_at,
+                    "page_id": scope[0],
+                    "frame_id": scope[1],
+                })
+                self.page_events = self.page_events[-1000:]
+            return
         if step.get("op") == "form_snapshot":
             self.form_snapshots.append(step)
             self.page_events.append({
@@ -1259,10 +1540,17 @@ class RecordSession:
         action_id = str(step.get("action_id") or f"action_server_{self._event_counter}")
         step["action_id"] = action_id
         step["event_id"] = event_id
+        transaction_id = "|".join(part for part in (
+            scope[0] or "page_unknown",
+            scope[1] or "frame_unknown",
+            action_id,
+        ))
+        step["transaction_id"] = transaction_id
         self.page_events.append({
             "event_id": event_id,
             "kind": "action",
             "action_id": action_id,
+            "transaction_id": transaction_id,
             "op": op,
             "locator": str(step.get("locator") or ""),
             "field": str(step.get("field") or ""),
@@ -1275,9 +1563,11 @@ class RecordSession:
         })
         action_ref = {
             "action_id": action_id,
+            "transaction_id": transaction_id,
             "event_id": event_id,
             "op": op,
             "locator": str(step.get("locator") or ""),
+            "page_context": dict(step.get("page_context") or {}),
             "monotonic": time.monotonic(),
         }
         self._last_action_by_scope[scope] = action_ref
@@ -1524,6 +1814,7 @@ class RecordSession:
         同时清 all_requests/diagnostics 与请求计数——后续诊断基于录制期抓的事实,登录噪声不计。"""
         self.steps.clear()
         self.form_snapshots.clear()
+        self.enum_snapshots.clear()
         self.requests.clear()
         self.reads.clear()
         self.all_requests.clear()
@@ -1569,13 +1860,18 @@ class RecordSession:
         返回 {字段key: {options, field_key, selected}}。保留 selected 是为了把 DOM 显示项
         与提交体短码(type=2)连起来,避免发布 skill 时把下拉退化成 number。
         """
-        keymap = assign_step_field_keys(self.steps)
+        # enum_snapshot is emitted as soon as a dropdown opens. It is kept
+        # outside executable steps so opening a control never pollutes the
+        # generated workflow, but it must share the same identity/key
+        # allocation as the later select/pick event.
+        evidence = [*self.steps, *self.enum_snapshots]
+        keymap = assign_step_field_keys(evidence)
         out: dict[str, dict] = {}
         last_field_idx: int | None = None
-        for i, s in enumerate(self.steps):
+        for i, s in enumerate(evidence):
             if i in keymap:
                 last_field_idx = i
-            if s.get("op") in ("pick", "select") and s.get("options"):
+            if s.get("op") in ("pick", "select", "enum_snapshot") and s.get("options"):
                 # 自定义下拉常见事件序列是「点开输入框/选择器」→「点弹层选项」。
                 # 后一个 pick 事件有 options/selected,但 DOM 目标已经是弹层项,拿不到字段 label。
                 # 因此优先用本步字段,否则回溯最近一个可填写字段,把弹层选项归回正确业务字段。
@@ -1583,12 +1879,90 @@ class RecordSession:
                 if owner_idx not in keymap:
                     continue
                 field_key = keymap[owner_idx]
-                out[field_key] = {
-                    "options": list(s["options"]),
+                scope_key = (str(s.get("page_id") or ""), str(s.get("frame_id") or ""))
+                storage_key = field_key
+                existing = out.get(storage_key)
+                if existing and (
+                    str(existing.get("page_id") or ""), str(existing.get("frame_id") or "")
+                ) != scope_key:
+                    storage_key = f"{field_key}@{scope_key[0]}:{scope_key[1]}"
+                previous = out.get(storage_key, {})
+                merged: dict[str, object] = {}
+                for option in [*(previous.get("options") or []), *list(s["options"])]:
+                    label = str(option.get("label") if isinstance(option, dict) else option).strip()
+                    if label:
+                        merged[label] = option
+                selected = str(s.get("value", "") or "").strip()
+                aliases = list(dict.fromkeys([
+                    *list(previous.get("field_aliases") or []),
+                    *list(s.get("field_aliases") or []),
+                ]))
+                entry = {
+                    "options": list(merged.values()),
                     "field_key": field_key,
-                    "selected": s.get("value", ""),
+                    "selected": selected or str(previous.get("selected") or ""),
                 }
+                if s.get("control_kind") or s.get("field_aliases") or previous.get("control_kind"):
+                    entry.update({
+                        "page_id": scope_key[0],
+                        "frame_id": scope_key[1],
+                        "page_context": dict(s.get("page_context") or previous.get("page_context") or {}),
+                        "control_kind": str(s.get("control_kind") or previous.get("control_kind") or "select"),
+                    })
+                if aliases:
+                    entry["field_aliases"] = aliases
+                out[storage_key] = entry
         return out
+
+    def recorded_field_evidence(self) -> list[dict]:
+        """Return control-identity evidence scoped to the page that emitted it.
+
+        Field names and types are grounded by ``name``/``data-prop``/control kind.
+        Values remain samples only; repeated values never identify a request field.
+        """
+        evidence: list[dict] = []
+        latest_snapshot_by_scope: dict[tuple[str, str], dict] = {}
+        for snapshot in self.form_snapshots:
+            scope = (str(snapshot.get("page_id") or ""), str(snapshot.get("frame_id") or ""))
+            latest_snapshot_by_scope[scope] = snapshot
+        for scope, snapshot in latest_snapshot_by_scope.items():
+            for field in snapshot.get("fields") or []:
+                if not isinstance(field, dict):
+                    continue
+                evidence.append({
+                    **field,
+                    "page_id": scope[0],
+                    "frame_id": scope[1],
+                    "page_context": dict(snapshot.get("page_context") or {}),
+                    "op": "snapshot",
+                })
+        for step in self.steps:
+            if step.get("op") not in {"fill", "select", "pick"}:
+                continue
+            evidence.append({
+                "field": str(step.get("field") or ""),
+                "label": str(step.get("field") or ""),
+                "value": step.get("value"),
+                "required": bool(step.get("required")),
+                "field_aliases": list(step.get("field_aliases") or []),
+                "control_kind": str(step.get("control_kind") or "unknown"),
+                "input_type": str(step.get("input_type") or ""),
+                "page_id": str(step.get("page_id") or ""),
+                "frame_id": str(step.get("frame_id") or ""),
+                "page_context": dict(step.get("page_context") or {}),
+                "op": str(step.get("op") or ""),
+            })
+        deduped: dict[tuple, dict] = {}
+        for item in evidence:
+            aliases = tuple(str(value) for value in (item.get("field_aliases") or []) if str(value or ""))
+            key = (
+                str(item.get("page_id") or ""), str(item.get("frame_id") or ""),
+                aliases, str(item.get("label") or item.get("field") or ""),
+                str(item.get("control_kind") or ""),
+            )
+            previous = deduped.get(key, {})
+            deduped[key] = {**previous, **item}
+        return list(deduped.values())[-500:]
 
     def recorded_required_labels(self) -> set:
         """录制中标了表单 * 必填的字段(供 flatten 标 required)。key 与 recorded_steps 同算法分配,保持一致。"""

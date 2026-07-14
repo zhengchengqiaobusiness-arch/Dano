@@ -36,20 +36,20 @@ def _make_spec():
     return FlowSpec(flow_id="test", steps=[step1])
 
 
-def test_page_required_runtime_value_is_not_required_from_caller():
+def test_single_required_flag_excludes_runtime_value_from_caller_schema():
     runtime_value = ParamField(
-        path="applicantId", key="申请人标识", required=False, page_required=True,
-        required_source="runtime_source", category="runtime_var", source_kind="current_user",
+        path="applicantId", key="申请人标识", required=False,
+        category="runtime_var", source_kind="current_user",
         exposed_to_user=False,
     )
     title = ParamField(
-        path="title", key="申请标题", required=True, page_required=True,
-        required_source="page", category="user_param", source_kind="user_input",
+        path="title", key="申请标题", required=True,
+        category="user_param", source_kind="user_input",
         exposed_to_user=True,
     )
     optional_remark = ParamField(
-        path="remark", key="备注", required=False, page_required=False,
-        required_source="page", category="user_param", source_kind="user_input",
+        path="remark", key="备注", required=False,
+        category="user_param", source_kind="user_input",
         exposed_to_user=True,
     )
     spec = FlowSpec(steps=[FlowStep(
@@ -63,7 +63,7 @@ def test_page_required_runtime_value_is_not_required_from_caller():
     assert flow_spec_module.flow_spec_required_params(spec) == ["申请标题"]
 
 
-def test_submit_time_page_evidence_drives_range_required_and_optional_fields():
+def test_submit_time_evidence_drives_single_required_flag():
     spec = to_flow_spec(
         captured_requests=[{
             "method": "POST",
@@ -88,18 +88,17 @@ def test_submit_time_page_evidence_drives_range_required_and_optional_fields():
     submit = spec.steps[-1]
     params = {param.path: param for param in submit.params}
 
-    assert params["useTime[0]"].page_required is True
-    assert params["useTime[1]"].page_required is True
-    assert params["applyTitle"].page_required is True
-    assert params["remark"].page_required is False
+    assert params["useTime[0]"].required is True
+    assert params["useTime[1]"].required is True
+    assert params["applyTitle"].required is True
     assert params["remark"].required is False
     assert spec.meta["page_context"]["visible_titles"] == ["公章借阅"]
 
     prepared = flow_spec_module.ensure_flow_capabilities(spec)
     submit_cap = next(cap for cap in prepared.capabilities if cap.kind == "submit")
     cap_fields = {field.path: field for field in submit_cap.inputs}
-    assert cap_fields["useTime[0]"].page_required is True
-    assert cap_fields["remark"].required_source == "page"
+    assert cap_fields["useTime[0]"].required is True
+    assert cap_fields["remark"].required is False
 
 
 def test_system_generated_runtime_value_is_compiled_and_not_exposed():
@@ -454,8 +453,8 @@ def test_repair_mode_fixes_warning_only_batch_nodes_and_dangling_relations():
         meta={"capability_model": {"status": "ready"}},
     )
     before = validate_flow_spec(spec)
-    assert before["passed"] is False
-    assert any("没有批量接口事实" in error for error in before["errors"])
+    assert before["passed"] is True
+    assert any("没有批量接口事实" in item for item in before["suggestions"])
 
     fixed = asyncio.run(run_recording_pi_loop(spec, llm_client=None, model=None, mode="repair"))
 
@@ -625,7 +624,7 @@ def test_capability_input_schema_drops_deleted_fields():
     assert schema["properties"]["name"]["type"] == "string"
 
 
-def test_unconfirmed_capabilities_block_publish_validation():
+def test_unconfirmed_capabilities_are_generation_advice_not_publish_policy():
     spec = _make_spec()
     spec.capabilities = [FlowCapability(
         name="submit", title="提交", kind="submit", step_ids=["step1"], confirmed=False,
@@ -633,11 +632,15 @@ def test_unconfirmed_capabilities_block_publish_validation():
 
     report = validate_flow_spec(spec)
 
-    assert report["passed"] is False
-    assert any("未确认的公开能力" in message for message in report["errors"])
+    assert not any("未确认的公开能力" in message for message in report["errors"])
+    assert any("未确认的公开能力" in message for message in report["suggestions"])
+    assert not any(
+        item.get("code") in {"capability_unconfirmed", "unconfirmed_public_capability"}
+        for items in report["issue_groups"].values() for item in items
+    )
 
 
-def test_confirmed_capability_contract_change_requires_reconfirmation():
+def test_confirmed_capability_contract_change_is_advice_not_publish_policy():
     spec = FlowSpec(
         title="请假申请",
         business_description="提交失败时报告接口错误且不自动重试。",
@@ -646,7 +649,7 @@ def test_confirmed_capability_contract_change_requires_reconfirmation():
             body_source='{"reason":"事假"}',
             params=[ParamField(
                 path="reason", key="请假原因", label="请假原因", value="事假",
-                required=True, page_required=True, required_source="page",
+                required=True,
                 category="user_param", source_kind="user_input", exposed_to_user=True,
             )],
             success_rule={"path": "code", "equals": 0},
@@ -670,7 +673,8 @@ def test_confirmed_capability_contract_change_requires_reconfirmation():
     spec.steps[0].params[0].key = "事由"
     report = validate_flow_spec(spec)
 
-    assert any("确认后合同已变化" in error for error in report["errors"])
+    assert not any("确认后合同已变化" in error for error in report["errors"])
+    assert any("确认后合同已变化" in item for item in report["suggestions"])
 
 
 def test_generated_placeholder_output_name_is_normalized_to_stable_result():
@@ -950,7 +954,8 @@ def test_capability_validator_checks_condition_and_map_refs():
 
     report = validate_flow_spec(spec)
 
-    text = "\n".join(report["errors"] + report["warnings"])
+    cap_report = report["capability_validation"]
+    text = "\n".join([*(cap_report.get("errors") or []), *(cap_report.get("warnings") or [])])
     assert "引用的输入 `missing` 不存在" in text
     assert "来源 `input.unknown` 不存在" not in text
 
@@ -1054,6 +1059,44 @@ def test_auto_fix_records_model_failure_instead_of_silently_swallowing():
     fixed = asyncio.run(auto_fix_flow_spec(spec, llm_client=_BrokenFixClient(), model="fake", max_rounds=1))
 
     assert fixed.meta["auto_fix_history"][0]["model_error"] == "model unavailable"
+
+
+class _MixedStaleFixClient:
+    async def complete_json(self, **_kwargs):
+        return {"ops": [
+            {"op": "rename_field", "step_id": "query", "path": "query.status", "label": "状态"},
+            {"op": "rename_field", "step_id": "query", "path": "query.key", "label": "关键词"},
+        ]}
+
+
+def test_auto_fix_skips_stale_field_patch_and_keeps_valid_suggestions():
+    spec = FlowSpec(
+        flow_id="stale-patch",
+        steps=[FlowStep(
+            step_id="query",
+            method="POST",
+            path="/api/items/search",
+            params=[ParamField(path="query.key", key="key", value="hotel")],
+        )],
+        capabilities=[FlowCapability(
+            name="search_items",
+            kind="submit",
+            step_ids=["query"],
+        )],
+    )
+
+    fixed = asyncio.run(auto_fix_flow_spec(
+        spec,
+        llm_client=_MixedStaleFixClient(),
+        model="fake",
+        max_rounds=1,
+        expand_requests=False,
+    ))
+
+    assert fixed.steps[0].params[0].key == "关键词"
+    rejected = fixed.meta["auto_fix_history"][0]["rejected_edits"]
+    assert rejected[0]["path"] == "query.status"
+    assert "param not found" in rejected[0]["error"]
 
 
 class _FakeFixClient:
@@ -2137,7 +2180,7 @@ def test_default_capabilities_keep_independent_query_and_submit_separate():
     assert by_kind["submit"].step_ids == ["definition", "submit"]
 
 
-def test_default_capabilities_use_observed_action_boundaries_inside_one_domain():
+def test_default_query_capabilities_split_distinct_commands_inside_one_domain():
     query = FlowStep(
         step_id="query",
         name="GET_page",
@@ -2145,6 +2188,7 @@ def test_default_capabilities_use_observed_action_boundaries_inside_one_domain()
         path="/admin-api/oa/work-hours/page",
         source_meta={
             "role": "business_get",
+            "trigger_op": "click",
             "trigger_locator": "role=button[name=查询]",
             "causality_confidence": "high",
         },
@@ -2157,6 +2201,7 @@ def test_default_capabilities_use_observed_action_boundaries_inside_one_domain()
         path="/admin-api/oa/work-hours/detail",
         source_meta={
             "role": "business_get",
+            "trigger_op": "click",
             "trigger_locator": "role=button[name=查看详情]",
             "causality_confidence": "high",
         },
@@ -2167,7 +2212,83 @@ def test_default_capabilities_use_observed_action_boundaries_inside_one_domain()
 
     assert len(caps) == 2
     assert {tuple(cap.step_ids) for cap in caps} == {("query",), ("detail",)}
-    assert all(any(item.get("kind") == "automatic_business_partition" for item in cap.evidence) for cap in caps)
+
+
+def test_default_query_capability_groups_multiple_requests_from_same_command():
+    steps = [
+        FlowStep(
+            step_id="page",
+            method="GET",
+            path="/admin-api/oa/hotel-apply/page",
+            source_meta={
+                "role": "business_get",
+                "trigger_op": "click",
+                "trigger_locator": "role=button[name=查询]",
+                "causality_confidence": "high",
+            },
+            response_json={"data": {"list": [{"id": "H-1"}], "total": 1}},
+        ),
+        FlowStep(
+            step_id="statistics",
+            method="GET",
+            path="/admin-api/oa/hotel-apply/statistics",
+            source_meta={
+                "role": "business_get",
+                "trigger_op": "click",
+                "trigger_locator": "role=button[name=查询]",
+                "causality_confidence": "high",
+            },
+            response_json={"data": {"pending": 1}},
+        ),
+    ]
+
+    caps = build_default_flow_capabilities(FlowSpec(flow_id="same-command", steps=steps))
+
+    assert len(caps) == 1
+    assert caps[0].step_ids == ["page", "statistics"]
+
+
+def test_saved_page_enum_repairs_internal_type_category_and_source_on_sync():
+    spec = FlowSpec(
+        flow_id="repair-page-enum",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            path="/admin-api/hotel/order/create",
+            params=[ParamField(
+                path="roomLevel",
+                key="roomLevel",
+                value="3",
+                type="number",
+                category="system_const",
+                source_kind="constant",
+            )],
+        )],
+        request_facts=RequestFacts(option_sources=[{
+            "kind": "page_enum_options",
+            "options": {
+                "房间等级": {
+                    "field_key": "房间等级",
+                    "field_aliases": ["roomLevel"],
+                    "selected": "豪华",
+                    "options": [
+                        {"label": "普通", "value": 1},
+                        {"label": "豪华", "value": 3},
+                    ],
+                },
+            },
+        }]),
+    )
+
+    fixed = sync_flow_spec_models(spec)
+    param = fixed.steps[0].params[0]
+
+    assert param.key == "房间等级"
+    assert param.type == "enum"
+    assert param.category == "user_param"
+    assert param.source_kind == "page_enum"
+    assert param.enum_value_map == {"普通": 1, "豪华": 3}
+    assert fixed.steps[0].selects[0].enum_confirmed is True
 
 
 def test_sync_capability_scoped_views_prunes_noisy_submit_steps():
@@ -2943,7 +3064,7 @@ def test_capability_validation_ignores_stale_scoped_copies_but_checks_active_out
     report = validate_flow_spec(spec)
     cap_report = report["capability_validation"]
 
-    assert report["passed"] is False
+    assert report["passed"] is True
     assert "capability_internal" in cap_report
     assert "capability_relations" in cap_report
     assert "skill_level" in cap_report
@@ -3122,7 +3243,7 @@ def test_confirmed_capability_blocks_required_internal_request_field_without_sou
     assert "capability_field_source_missing" in text
 
 
-def test_confirmation_is_atomic_and_rejects_invalid_contract_before_state_change():
+def test_confirmation_records_operator_decision_without_model_veto():
     spec = FlowSpec(
         flow_id="confirm-preflight",
         steps=[FlowStep(
@@ -3146,13 +3267,38 @@ def test_confirmation_is_atomic_and_rejects_invalid_contract_before_state_change
         )],
     )
 
-    with pytest.raises(ValueError, match="能力确认失败"):
-        apply_flow_edits(spec, [{
-            "op": "update_capability", "capability_name": "submit",
-            "field": "confirmed", "value": True,
-        }])
+    confirmed = apply_flow_edits(spec, [{
+        "op": "update_capability", "capability_name": "submit",
+        "field": "confirmed", "value": True,
+    }])
 
-    assert spec.capabilities[0].confirmed is False
+    assert confirmed.capabilities[0].confirmed is True
+    assert confirmed.capabilities[0].requires_human_confirm is False
+
+
+def test_capability_confidence_above_sixty_percent_is_auto_adopted():
+    spec = FlowSpec(capabilities=[
+        FlowCapability(name="manual", confidence=0.6, confirmed=False, requires_human_confirm=True),
+        FlowCapability(name="automatic", confidence=0.61, confirmed=False, requires_human_confirm=True),
+    ])
+
+    result = flow_spec_module._auto_confirm_ready_capabilities(spec)
+
+    assert result.capabilities[0].confirmed is False
+    assert result.capabilities[1].confirmed is True
+    assert result.capabilities[1].requires_human_confirm is False
+
+
+def test_legacy_dual_required_fields_are_discarded():
+    field = CapabilityField.model_validate({
+        "key": "申请标题", "required": True,
+        "page_required": False, "required_source": "page",
+    })
+
+    payload = field.model_dump()
+    assert payload["required"] is True
+    assert "page_required" not in payload
+    assert "required_source" not in payload
 
 
 def test_enum_to_scalar_rebuilds_capability_schema_without_stale_keywords():
@@ -3350,7 +3496,7 @@ def test_page_enum_truth_is_not_overwritten_by_business_record_list():
     assert [item["label"] for item in param.enum_options] == ["病假", "事假", "婚假"]
 
 
-def test_strict_skill_level_blocks_missing_description_and_failure_handling():
+def test_strict_skill_level_reports_advice_without_publish_veto():
     spec = FlowSpec(
         flow_id="f",
         meta={"publish_gate": True},
@@ -3359,6 +3505,7 @@ def test_strict_skill_level_blocks_missing_description_and_failure_handling():
             method="POST",
             url="/api/submit",
             path="/api/submit",
+            body_source="{}",
             response_json={"code": 0},
         )],
         capabilities=[FlowCapability(
@@ -3379,7 +3526,7 @@ def test_strict_skill_level_blocks_missing_description_and_failure_handling():
     skill_level = report["capability_validation"]["skill_level"]
     codes = {item["code"] for item in skill_level["errors"]}
 
-    assert report["passed"] is False
+    assert report["passed"] is True
     assert {"skill_description_missing", "skill_failure_handling_missing"} <= codes
 
 
@@ -3486,7 +3633,7 @@ def test_confirmed_capability_relation_type_mismatch_blocks_publish_gate():
     report = validate_flow_spec(spec)
     relation_report = report["capability_validation"]["capability_relations"]
 
-    assert report["passed"] is False
+    assert report["passed"] is True
     assert relation_report["passed"] is False
     assert relation_report["errors"][0]["code"] == "capability_relation_type_mismatch"
 
@@ -4203,6 +4350,94 @@ def test_manual_field_contract_is_locked_against_planner_overwrite():
     assert param.source_kind == "user_input"
 
 
+def test_manual_user_input_override_removes_inferred_option_contract_permanently():
+    """人工把误判的接口枚举改为手输后，同步/优化都不得恢复旧来源。"""
+    spec = FlowSpec(
+        flow_id="manual-query-source-override",
+        steps=[FlowStep(
+            step_id="query",
+            method="GET",
+            path="/oa/seal-apply/page",
+            params=[ParamField(
+                path="query.useInfo",
+                key="使用描述",
+                value="12",
+                type="enum",
+                wire_type="string",
+                category="user_param",
+                source_kind="api_option",
+                source={"kind": "api_option", "source_url": "/unrelated/options"},
+                enum_options=[{"label": "候选十二", "value": "12"}],
+                enum_value_map={"候选十二": "12"},
+            )],
+            selects=[SelectBinding(
+                param="使用描述",
+                path="query.useInfo",
+                source_url="/unrelated/options",
+                value_key="id",
+                label_key="name",
+                options=[{"label": "候选十二", "value": "12"}],
+                option_map={"候选十二": "12"},
+                enum_source="api",
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="query_status",
+            kind="query_status",
+            step_ids=["query"],
+            nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
+        )],
+    )
+
+    edited = apply_flow_edits(spec, [{
+        "op": "update",
+        "step_id": "query",
+        "param_path": "query.useInfo",
+        "field": "source_kind",
+        "value": "user_input",
+        "actor": "user",
+    }])
+    param = edited.steps[0].params[0]
+    assert param.locked is True
+    assert param.type == "string"
+    assert param.category == "user_param"
+    assert param.source_kind == "user_input"
+    assert param.source["kind"] == "sample"
+    assert param.enum_options is None
+    assert param.enum_value_map is None
+    assert edited.steps[0].selects == []
+
+    synced = sync_flow_spec_models(edited, prefer_request_facts=False)
+    synced_param = synced.steps[0].params[0]
+    assert synced_param.type == "string"
+    assert synced_param.source_kind == "user_input"
+    assert synced.steps[0].selects == []
+
+    class Planner:
+        async def complete_json(self, **_kwargs):
+            return {"ops": [{
+                "op": "bind_option_source",
+                "target_step": "query",
+                "target_path": "query.useInfo",
+                "source_url": "/unrelated/options",
+                "value_key": "id",
+                "label_key": "name",
+            }]}
+
+    optimized = asyncio.run(auto_fix_flow_spec(
+        synced,
+        llm_client=Planner(),
+        model="fake",
+        max_rounds=1,
+        expand_requests=False,
+        allow_scope_changes=False,
+    ))
+    optimized_param = optimized.steps[0].params[0]
+    assert optimized_param.type == "string"
+    assert optimized_param.source_kind == "user_input"
+    assert optimized.steps[0].selects == []
+
+
 def test_incremental_planner_cannot_overwrite_user_confirmed_capability_identity_or_title():
     class Planner:
         async def complete_json(self, **_kwargs):
@@ -4741,9 +4976,109 @@ def test_publish_issue_groups_deduplicate_same_link_and_classify_diagnostics():
     dependency_items = report["issue_groups"].get("dependency") or []
     diagnostic_items = report["issue_groups"].get("diagnostic") or []
 
-    assert len([item for item in dependency_items if item.get("target", {}).get("link_id") == "same-link"]) == 1
+    assert not dependency_items
+    assert any("same-link" in item for item in report["suggestions"])
     assert any("页面异常" in item["message"] for item in diagnostic_items)
     assert not any("ERR_CONNECTION_CLOSED" in item["message"] for item in diagnostic_items)
+
+
+def test_publish_validator_field_and_capability_issues_have_locatable_targets():
+    spec = FlowSpec(
+        flow_id="locatable",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            path="/api/hotel/submit",
+            params=[ParamField(path="roomType", key="房间类型", value="2")],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_hotel",
+            kind="submit",
+            step_ids=["submit"],
+        )],
+    )
+
+    grouped = flow_spec_module._publish_issue_groups(
+        spec,
+        [
+            "字段 `房间类型` 看起来是内部 ID/短码，不能直接暴露给用户",
+            "Capability `submit_hotel` 尚未确认；请确认该能力或从发布范围移除",
+        ],
+        [],
+        [],
+    )
+
+    field_target = grouped["field"][0]["target"]
+    assert field_target["step_id"] == "submit"
+    assert field_target["path"] == "roomType"
+    assert field_target["capability"] == "submit_hotel"
+    capability_target = grouped["capability"][0]["target"]
+    assert capability_target["kind"] == "capability"
+    assert capability_target["capability"] == "submit_hotel"
+    assert capability_target["capability_name"] == "submit_hotel"
+    assert capability_target["capability_index"] == 0
+
+
+def test_publish_capability_field_id_resolves_exact_body_field_anchor():
+    spec = FlowSpec(
+        flow_id="capability-field-location",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            path="/api/seal/submit",
+            params=[ParamField(path="body.processStatus", key="流程状态", value="1")],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_seal",
+            kind="submit",
+            step_ids=["submit"],
+            request_fields=[CapabilityField(
+                field_id="process-status",
+                scope="request_field",
+                step_id="submit",
+                path="body.processStatus",
+                key="流程状态",
+            )],
+        )],
+    )
+
+    field_id = spec.capabilities[0].request_fields[0].field_id
+    grouped = flow_spec_module._publish_issue_groups(
+        spec,
+        [],
+        [],
+        [flow_spec_module.ReviewItem(
+            id="enum-location",
+            type="field_enum",
+            severity="high",
+            title="流程状态枚举不完整",
+            target={
+                "kind": "capability_field",
+                "capability": "submit_seal",
+                "field_id": field_id,
+            },
+        )],
+    )
+
+    target = grouped["field"][0]["target"]
+    assert target["capability_name"] == "submit_seal"
+    assert target["step_id"] == "submit"
+    assert target["path"] == "body.processStatus"
+
+
+def test_publish_legacy_unstructured_issue_does_not_fabricate_location():
+    spec = FlowSpec(flow_id="legacy-no-location")
+
+    grouped = flow_spec_module._publish_issue_groups(
+        spec,
+        ["旧版校验失败，缺少任何字段或能力标识"],
+        [],
+        [],
+    )
+
+    legacy_items = [item for items in grouped.values() for item in items]
+    assert len(legacy_items) == 1
+    assert legacy_items[0]["target"] == {}
 
 
 def test_remove_capability_cleans_relations_and_scopes_publish_findings():
@@ -4815,7 +5150,7 @@ def test_remove_capability_cleans_relations_and_scopes_publish_findings():
     assert "runtimeId" not in "\n".join(report["errors"] + report["warnings"])
 
 
-def test_publish_validation_exposes_structured_issue_groups():
+def test_publish_validation_does_not_promote_generated_field_advice_to_issues():
     spec = FlowSpec(
         flow_id="issue-groups",
         steps=[FlowStep(
@@ -4823,6 +5158,7 @@ def test_publish_validation_exposes_structured_issue_groups():
             method="POST",
             url="/api/submit",
             path="/api/submit",
+            body_source='{"type":"2"}',
             params=[ParamField(
                 path="body.type",
                 key="type",
@@ -4840,13 +5176,12 @@ def test_publish_validation_exposes_structured_issue_groups():
 
     report = validate_flow_spec(spec)
 
-    assert "field" in report["issue_groups"]
-    assert all(item.get("message") for item in report["issue_groups"]["field"])
-    assert all(item.get("audience") == "operator" for item in report["issue_groups"]["field"])
-    assert all(item.get("actionable") is True for item in report["issue_groups"]["field"])
+    assert report["passed"] is True
+    assert "field" not in report["issue_groups"]
+    assert any("枚举字段" in item for item in report["suggestions"])
 
 
-def test_publish_validation_marks_non_blocking_validator_advice_internal():
+def test_publish_validation_keeps_generator_advice_outside_issue_groups():
     spec = FlowSpec(
         flow_id="internal-advice",
         steps=[FlowStep(step_id="query", method="GET", url="/api/query", path="/api/query")],
@@ -4861,17 +5196,12 @@ def test_publish_validation_marks_non_blocking_validator_advice_internal():
     )
 
     report = validate_flow_spec(spec)
-    warnings = [
-        item
-        for group in report["issue_groups"].values()
-        for item in group
-        if item.get("source") == "validator" and item.get("severity") == "warning"
+    assert report["passed"] is True
+    assert not [
+        item for group in report["issue_groups"].values() for item in group
+        if item.get("source") == "validator"
     ]
-
-    assert warnings
-    assert all(item.get("audience") == "internal" for item in warnings)
-    assert all(item.get("actionable") is False for item in warnings)
-    assert all(item.get("auto_fixable") is True for item in warnings)
+    assert report["suggestions"]
 
 
 def test_capability_map_accepts_quoted_constants_and_compiled_values():
@@ -4913,6 +5243,117 @@ def test_capability_map_accepts_quoted_constants_and_compiled_values():
     report = validate_flow_spec(spec)
 
     assert not any("map 节点" in message and "来源" in message and "不存在" in message for message in report["errors"])
+
+
+def _enum_policy_spec(param: ParamField, *, confirmed: bool = False) -> FlowSpec:
+    return FlowSpec(
+        flow_id="enum-policy",
+        steps=[FlowStep(
+            step_id="query", method="GET", url="/api/apply/page", path="/api/apply/page",
+            params=[param], response_json={"data": {"list": []}}, success_rule={"path": "data.list"},
+        )],
+        capabilities=[FlowCapability(
+            name="query_status", kind="query_status", step_ids=["query"],
+            nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
+            output_mapping=[{"kind": "final_response", "step_id": "query", "response_path": "response"}],
+            confirmed=confirmed, requires_human_confirm=not confirmed,
+        )],
+        meta={"capability_model": {"status": "ready"}},
+    )
+
+
+def test_manual_enum_guess_does_not_veto_operator_confirmation():
+    spec = _enum_policy_spec(ParamField(
+        path="query.processStatus", key="流程状态", value="1", type="enum",
+        category="user_param", source_kind="manual_enum",
+        # Simulates a client turning label-only DOM text into value=label.
+        enum_options=[
+            {"label": "未提交", "value": "未提交"},
+            {"label": "审批中", "value": "审批中"},
+        ],
+        enum_value_map={"未提交": "未提交", "审批中": "审批中"},
+        source={"enum_confirmed": True},
+    ))
+
+    confirmed = apply_flow_edits(spec, [{
+        "op": "update_capability", "capability_index": 0,
+        "field": "confirmed", "value": True,
+    }])
+    assert confirmed.capabilities[0].confirmed is True
+
+
+def test_change_enum_source_to_user_input_atomically_removes_stale_option_contract():
+    spec = _enum_policy_spec(ParamField(
+        path="query.useInfo", key="使用描述", value="12", type="enum", wire_type="string",
+        category="user_param", source_kind="api_option",
+        enum_options=[{"label": "测试", "value": "7"}], enum_value_map={"测试": "7"},
+    ))
+    spec.steps[0].selects = [SelectBinding(
+        param="使用描述", path="query.useInfo", source_url="/api/options",
+        value_key="id", label_key="name", enum_source="api", enum_confirmed=True,
+    )]
+
+    edited = apply_flow_edits(spec, [{
+        "op": "update", "step_id": "query", "param_path": "query.useInfo",
+        "field": "source_kind", "value": "user_input", "actor": "user",
+    }])
+    param = edited.steps[0].params[0]
+
+    assert (param.type, param.source_kind) == ("string", "user_input")
+    assert param.enum_options is None and param.enum_value_map is None
+    assert edited.steps[0].selects == []
+    assert "枚举字段" not in "\n".join(validate_flow_spec(edited)["errors"])
+
+
+def test_executable_partial_page_enum_is_only_a_generation_suggestion():
+    spec = _enum_policy_spec(ParamField(
+        path="query.processStatus", key="流程状态", value="审批中", type="enum",
+        category="user_param", source_kind="page_enum",
+        enum_options=["未提交", "审批中"],
+        source={"enum_confirmed": False},
+    ))
+    report = validate_flow_spec(spec)
+    assert report["passed"] is True
+    assert not any("快照" in item for item in report["errors"])
+    assert any("快照" in item for item in report["suggestions"])
+    assert not any(
+        item.get("code") == "enum_snapshot_incomplete"
+        for items in report["issue_groups"].values() for item in items
+    )
+
+
+def test_suspected_internal_value_is_not_a_publish_issue():
+    spec = _enum_policy_spec(ParamField(
+        path="query.billCode", key="单据编号", value="11", type="string",
+        category="user_param", source_kind="user_input", exposed_to_user=True,
+    ), confirmed=True)
+    report = validate_flow_spec(spec)
+    assert report["passed"] is True
+    assert any("内部 ID/短码" in item for item in report["suggestions"])
+    assert not any(
+        item.get("code") == "suspected_internal_value"
+        for items in report["issue_groups"].values() for item in items
+    )
+
+
+def test_inferred_enum_mapping_does_not_block_publish_or_confirmation():
+    spec = _enum_policy_spec(ParamField(
+        path="query.processStatus", key="流程状态", value="1", type="enum",
+        category="user_param", source_kind="page_enum",
+        enum_options=["未提交", "审批中"], source={"enum_confirmed": False},
+    ))
+    report = validate_flow_spec(spec)
+    assert report["passed"] is True
+    assert any("枚举字段" in item for item in report["suggestions"])
+    assert not any(
+        item.get("code") == "enum_mapping_missing"
+        for items in report["issue_groups"].values() for item in items
+    )
+    confirmed = apply_flow_edits(spec, [{
+        "op": "update_capability", "capability_index": 0,
+        "field": "confirmed", "value": True,
+    }])
+    assert confirmed.capabilities[0].confirmed is True
 
 
 # ── Type inference ──

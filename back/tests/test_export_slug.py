@@ -114,7 +114,6 @@ def test_non_batch_multi_capability_export_has_no_batch_or_fake_fact_check_resid
                 "requires_human_confirm": True,
                 "inputs": [{
                     "key": "申请标题", "path": "applyTitle", "type": "string", "required": True,
-                    "page_required": True, "required_source": "page",
                 }],
                 "input_schema": {
                     "type": "object",
@@ -135,5 +134,6 @@ def test_non_batch_multi_capability_export_has_no_batch_or_fake_fact_check_resid
     assert "真正的业务编排、风险闸门与事实核查" not in skill_md
     assert "业务成功规则" in skill_md
     submit = next(cap for cap in contract["capabilities"] if cap["kind"] == "submit")
-    assert submit["inputs"][0]["page_required"] is True
-    assert submit["inputs"][0]["required_source"] == "page"
+    assert submit["inputs"][0]["required"] is True
+    assert "page_required" not in submit["inputs"][0]
+    assert "required_source" not in submit["inputs"][0]

@@ -892,6 +892,26 @@ def test_page_enum_selects_matches_field_label_when_body_stores_code():
     assert out[0]["option_map"] == {"事假": 2, "病假": 3}
 
 
+def test_page_enum_uses_recorded_control_name_without_business_dictionary():
+    out = page_enum_selects(
+        '{"roomLevel":3,"roomType":2}',
+        {"房间等级": {
+            "field_key": "房间等级",
+            "field_aliases": ["roomLevel"],
+            "selected": "豪华",
+            "options": [
+                {"label": "普通", "value": 1},
+                {"label": "豪华", "value": 3},
+            ],
+        }},
+        set(),
+    )
+
+    assert len(out) == 1
+    assert out[0]["path"] == "roomLevel"
+    assert out[0]["option_map"] == {"普通": 1, "豪华": 3}
+
+
 def test_page_enum_label_only_snapshot_maps_only_recorded_pair():
     out = page_enum_selects(
         '{"type":2}',
@@ -2380,10 +2400,7 @@ def test_flatten_required_range_marker_applies_to_both_indexed_values():
 
     assert fields["useTime[0]"]["required"] is True
     assert fields["useTime[1]"]["required"] is True
-    assert fields["useTime[0]"]["page_required"] is True
-    assert fields["useTime[1]"]["page_required"] is True
     assert fields["remark"]["required"] is False
-    assert fields["remark"]["page_required"] is False
 
 
 def test_classify_request_role_aggregates_multistep_write_instead_of_defaulting_to_get():
@@ -2566,6 +2583,86 @@ def test_flatten_system_field_does_not_steal_user_value():
     f = {x["key"]: x for x in flatten_body(body, samples)}
     assert f["processStatus"]["suggest_param"] is False   # 系统状态码 → 不参数化
     assert f["remark"]["suggest_param"] is True and f["remark"]["suggest_name"] == "备注"
+
+
+def test_control_identity_maps_repeated_hotel_values_without_guessing_order():
+    body = json.dumps({
+        "applyTitle": "1",
+        "totalAmt": 1,
+        "roomType": 1,
+        "useTime": 1784044800000,
+        "remark": "1",
+    })
+    samples = {
+        "申请标题": "1",
+        "预计金额": "1",
+        "房间类型": "大床房",
+        "入住时间": "2026-07-14 00:00:00",
+        "备注": "1",
+    }
+    evidence = [
+        {"label": "申请标题", "value": "1", "field_aliases": ["applyTitle"], "control_kind": "text"},
+        {"label": "预计金额", "value": "1", "field_aliases": ["totalAmt"], "control_kind": "number"},
+        {"label": "房间类型", "value": "大床房", "field_aliases": ["roomType"], "control_kind": "select"},
+        {"label": "入住时间", "value": "2026-07-14 00:00:00", "field_aliases": ["useTime"], "control_kind": "datetime"},
+        {"label": "备注", "value": "1", "field_aliases": ["remark"], "control_kind": "textarea"},
+    ]
+
+    fields = {
+        item["path"]: item
+        for item in flatten_body(body, samples, field_evidence=evidence)
+    }
+
+    assert (fields["applyTitle"]["suggest_name"], fields["applyTitle"]["type"]) == ("申请标题", "string")
+    assert (fields["totalAmt"]["suggest_name"], fields["totalAmt"]["type"]) == ("预计金额", "number")
+    assert (fields["roomType"]["suggest_name"], fields["roomType"]["type"]) == ("房间类型", "number")
+    assert (fields["useTime"]["suggest_name"], fields["useTime"]["type"]) == ("入住时间", "datetime")
+    assert (fields["remark"]["suggest_name"], fields["remark"]["type"]) == ("备注", "string")
+
+
+def test_strict_page_enum_uses_dom_alias_not_repeated_selected_value():
+    body = '{"applyTitle":"1","useTime":"1","processStatus":1}'
+    fields = flatten_body(body, {
+        "申请标题": "1", "入住时间": "1", "流程状态": "审批中",
+    }, field_evidence=[
+        {"label": "申请标题", "field_aliases": ["applyTitle"], "control_kind": "text"},
+        {"label": "入住时间", "field_aliases": ["useTime"], "control_kind": "datetime"},
+        {"label": "流程状态", "field_aliases": ["processStatus"], "control_kind": "select"},
+    ])
+    out = page_enum_selects(
+        body,
+        {"流程状态": {
+            "field_key": "流程状态",
+            "field_aliases": ["processStatus"],
+            "control_kind": "select",
+            "selected": "审批中",
+            "options": [
+                {"label": "未提交", "value": 0},
+                {"label": "审批中", "value": 1},
+            ],
+        }},
+        fields=fields,
+    )
+
+    assert [item["path"] for item in out] == ["processStatus"]
+    assert out[0]["option_map"] == {"未提交": 0, "审批中": 1}
+
+
+def test_strict_api_option_requires_this_controls_selected_label():
+    body = '{"applyTitle":"1","roomType":2}'
+    fields = flatten_body(body, {"申请标题": "1", "房间类型": "大床房"}, field_evidence=[
+        {"label": "申请标题", "field_aliases": ["applyTitle"], "control_kind": "text"},
+        {"label": "房间类型", "field_aliases": ["roomType"], "control_kind": "select"},
+    ])
+    reads = [{"url": "/dict", "json": {"data": [
+        {"value": "1", "label": "无关候选"},
+        {"value": 2, "label": "大床房"},
+        {"value": 3, "label": "双床房"},
+    ]}}]
+
+    selects = suggest_selects(body, reads, {"申请标题": "1", "房间类型": "大床房"}, fields=fields)
+
+    assert [item["path"] for item in selects] == ["roomType"]
 
 
 def test_flatten_marks_system_timestamp_value():
