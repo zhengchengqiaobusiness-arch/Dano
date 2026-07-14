@@ -2957,6 +2957,23 @@ describe("BridgeRpcAdapter", () => {
               },
             ],
           },
+          questionRequest: {
+            batch: true,
+            questions: [
+              {
+                id: "approver1",
+                kind: "text",
+                question: "审批人 1",
+                default: "张三",
+              },
+              {
+                id: "approver2",
+                kind: "text",
+                question: "审批人 2",
+                default: "李四",
+              },
+            ],
+          },
         },
         {
           type: "toolResult",
@@ -2974,6 +2991,12 @@ describe("BridgeRpcAdapter", () => {
           arguments: {
             question: "确认提交请假申请吗？",
             confirm: true,
+          },
+          questionRequest: {
+            batch: false,
+            id: "answer",
+            kind: "confirm",
+            question: "确认提交请假申请吗？",
           },
         },
       ]);

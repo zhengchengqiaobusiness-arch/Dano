@@ -5,6 +5,8 @@ import {
   ASK_USER_QUESTION_TOOL_NAME,
   type AskUserQuestionAnswer,
   type AskUserQuestionAnswerInput,
+  type AskUserQuestionCardItem,
+  type AskUserQuestionCardRequest,
   type AskUserQuestionDataSource,
   type AskUserQuestionInputType,
   type AskUserQuestionOption,
@@ -221,11 +223,13 @@ type PendingQuestionOption = {
 interface PendingQuestionItem {
   id: string;
   kind: PendingQuestionKind;
+  question: string;
   inputType: AskUserQuestionInputType;
   options?: readonly PendingQuestionOption[];
   dataSource?: AskUserQuestionDataSource;
   dateFormat?: string;
   required: boolean;
+  default?: AskUserQuestionAnswer;
 }
 
 interface PendingQuestion {
@@ -265,6 +269,9 @@ class AskUserQuestionCoordinator {
     }
     if (questions.length === 0) {
       return Promise.reject(new Error("Question is required"));
+    }
+    if (!normalizeAskUserQuestionCardRequest(rawRequest)) {
+      return Promise.reject(new Error("Question cannot be rendered"));
     }
     const pendingInCurrentTurn = signal
       ? this.pendingToolCallBySignal.get(signal)
@@ -616,6 +623,95 @@ function normalizeRequestQuestions(
   return typeof question === "string" ? question : [question];
 }
 
+export function normalizeAskUserQuestionCardRequest(
+  rawRequest: unknown,
+): AskUserQuestionCardRequest | null {
+  const parsed = parseJsonString(rawRequest);
+  if (!isPlainRecord(parsed)) return null;
+  const request = normalizeCompatibleRequest(
+    parsed as AskUserQuestionRequestParams,
+  );
+  const questions = normalizeRequestQuestions(request);
+  if (typeof questions === "string" || questions.length === 0) return null;
+  if (
+    request.confirm &&
+    (request.options || request.multiple || request.questions || request.dataSource)
+  ) {
+    return null;
+  }
+  const cardItems = questions.map(toQuestionCardItem);
+  return request.questions === undefined
+    ? { ...cardItems[0], batch: false }
+    : { batch: true, questions: cardItems };
+}
+
+function toQuestionCardItem(
+  question: PendingQuestionItem,
+): AskUserQuestionCardItem {
+  const common = {
+    id: question.id,
+    question: question.question,
+    ...(question.required ? { required: true } : {}),
+  };
+  if (question.kind === "confirm") {
+    return {
+      ...common,
+      kind: "confirm",
+      ...(typeof question.default === "boolean"
+        ? { default: question.default }
+        : {}),
+    };
+  }
+  if (question.kind === "date") {
+    return {
+      ...common,
+      kind: "date",
+      dateFormat: question.dateFormat ?? "",
+      ...(typeof question.default === "string"
+        ? { default: question.default }
+        : {}),
+    };
+  }
+  if (question.kind === "text") {
+    return {
+      ...common,
+      kind: "text",
+      ...(question.inputType === "textarea"
+        ? { inputType: "textarea" as const }
+        : {}),
+      ...(typeof question.default === "string"
+        ? { default: question.default }
+        : {}),
+    };
+  }
+  if (question.kind === "multiple") {
+    return {
+      ...common,
+      kind: "multiple",
+      options: [...(question.options ?? [])],
+      ...(question.dataSource ? { dataSource: question.dataSource } : {}),
+      ...(question.inputType === "treeSelect"
+        ? { inputType: "treeSelect" as const }
+        : {}),
+      ...(Array.isArray(question.default)
+        ? { default: question.default }
+        : {}),
+    };
+  }
+  const choice = {
+    ...common,
+    options: [...(question.options ?? [])],
+    ...(question.dataSource ? { dataSource: question.dataSource } : {}),
+    ...(typeof question.default === "string" ||
+    typeof question.default === "number"
+      ? { default: question.default }
+      : {}),
+  };
+  return question.inputType === "select" || question.inputType === "treeSelect"
+    ? { ...choice, kind: question.inputType }
+    : { ...choice, kind: "single" };
+}
+
 function normalizeQuestion(
   request: {
     id?: string;
@@ -704,6 +800,7 @@ function normalizeQuestion(
   const question: PendingQuestionItem = {
     id: request.id?.trim() || fallbackId,
     kind,
+    question: request.question.trim(),
     inputType,
     required,
     ...(options ? { options } : {}),
@@ -718,7 +815,7 @@ function normalizeQuestion(
       return "默认答案无效：default 必须是非空推荐值，不能是空字符串";
     }
     try {
-      normalizeAnswer(question, request.default);
+      question.default = normalizeAnswer(question, request.default);
     } catch (cause) {
       if (cause instanceof Error) return `默认答案无效：${cause.message}`;
       return "默认答案无效";
