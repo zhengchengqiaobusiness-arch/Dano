@@ -1804,6 +1804,63 @@ describe("BridgeRpcAdapter", () => {
       });
     });
 
+    it("does not project question lifecycle states onto other tools", async () => {
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "successful-bash",
+              name: "bash",
+              arguments: { command: "printf success" },
+            },
+            {
+              type: "toolCall",
+              id: "failed-bash",
+              name: "bash",
+              arguments: { command: "exit 7" },
+            },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "successful-bash",
+          toolName: "bash",
+          content: [{ type: "text", text: "success" }],
+          isError: false,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "failed-bash",
+          toolName: "bash",
+          content: [{ type: "text", text: "failed" }],
+          isError: true,
+        },
+      ];
+      (
+        context.state.sessionManager.getBranch as ReturnType<typeof vi.fn>
+      ).mockReturnValue(messages);
+
+      ws.trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: { id: "cmd-non-question-recovery", type: "get_messages" },
+          }),
+        ),
+      );
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const response = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+        .map(([message]) => JSON.parse(message as string))
+        .find(message => message.payload?.id === "cmd-non-question-recovery");
+      expect(response.payload.data.messages[0].content).toEqual(
+        messages[0].content,
+      );
+    });
+
     it("correlates recovered question results across transcript page boundaries", async () => {
       const messages = [
         {

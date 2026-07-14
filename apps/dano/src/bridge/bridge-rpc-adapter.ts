@@ -4252,6 +4252,7 @@ function projectRecoveredQuestionLifecycle(
       if (
         typeof block === "string" ||
         block.type !== "toolCall" ||
+        block.name !== ASK_USER_QUESTION_TOOL_NAME ||
         !block.id ||
         !completed.has(block.id)
       ) {
