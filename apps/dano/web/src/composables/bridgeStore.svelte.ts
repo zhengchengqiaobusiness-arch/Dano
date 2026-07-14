@@ -408,6 +408,14 @@ let hasSessionOutline = $derived(
     _treeEntries.length > 0,
 );
 
+function beginPromptPending() {
+  _isPromptPending = true;
+}
+
+function clearPromptPending() {
+  _isPromptPending = false;
+}
+
 let visiblePendingTranscriptConfigEvent = $derived.by(
   (): PendingTranscriptSessionEvent | null => {
     const pending = _pendingTranscriptConfigEvent;
@@ -1372,7 +1380,7 @@ function replaceTranscript(
   }
   if (prevSp !== sessionPath) {
     _queuedUserMessages = [];
-    _isPromptPending = false;
+    clearPromptPending();
   }
   _transcriptSessionPath = sessionPath;
   reanchorMissingPendingTranscriptConfigEvent();
@@ -1411,7 +1419,7 @@ function applyTranscriptPage(
   if (prevSp !== nsp) {
     clearPendingTranscriptConfigEvent();
     _queuedUserMessages = [];
-    _isPromptPending = false;
+    clearPromptPending();
   }
   _transcriptSessionPath = nsp;
   _transcriptHasOlder = page.hasOlder;
@@ -1516,7 +1524,7 @@ function applySessionSnapshotResponse(
   if (prevSp !== getDisplayedSessionPath()) {
     resetGitRepoState();
     _isStreaming = false;
-    _isPromptPending = false;
+    clearPromptPending();
   }
   if (prevWp !== getWorkspaceEntriesContextKey()) invalidateWorkspaceEntries();
   if (options?.refreshState) sendCommand({ type: "get_state" }).catch(() => {});
@@ -1709,7 +1717,7 @@ async function sendPrompt(
       },
     ];
   }
-  if (!wasStreaming) _isPromptPending = true;
+  if (!wasStreaming) beginPromptPending();
   sendEnvelope({
     type: "command",
     payload: { type: "prompt", message, images, files, streamingBehavior },
@@ -2283,7 +2291,7 @@ function handleResponse(payload: RpcResponse) {
         break;
       }
       case "new_session": {
-        _isPromptPending = false;
+        clearPromptPending();
         const data = payload.data as
           | Parameters<typeof applySessionSnapshotResponse>[0]
           | undefined;
@@ -2385,7 +2393,7 @@ function handleEvent(payload: RpcBridgeEvent) {
       break;
     }
     case "command_error": {
-      _isPromptPending = false;
+      clearPromptPending();
       const message = bridgeCommandErrorNotificationMessage(
         payload,
         t("store.error.sendBridgeMessageFailed"),
@@ -2462,7 +2470,7 @@ function handleEvent(payload: RpcBridgeEvent) {
       setSessionRunning(sp, false);
       if (!sp || sp === getDisplayedSessionPath()) {
         _isStreaming = false;
-        _isPromptPending = false;
+        clearPromptPending();
         sendCommand({ type: "get_state" }).catch(() => {});
       }
       break;
@@ -2647,7 +2655,7 @@ function rejectPendingRequests(message: string) {
 
 function markDisconnected(reason = t("appHeader.connection.disconnected")) {
   _connectionStatus = "disconnected";
-  _isPromptPending = false;
+  clearPromptPending();
   _remoteCompactionActive = false;
   _reconnectCount++;
   _runningSessionPaths = [];
