@@ -55,6 +55,7 @@
     createChatTranscriptLightboxState,
   } from "./chatTranscriptBlockState.svelte";
   import {
+    TRANSCRIPT_START_NOTICE_DURATION_MS,
     nextTopLoadArmed,
     restoredScrollTop,
     shouldAutoLoadOlderTranscript,
@@ -128,7 +129,7 @@
   let showTranscriptEndNotice = $state(false);
   let olderLoadRequestPending = $state(false);
   let topLoadArmed = $state(true);
-  let hasReachedTranscriptStart = $state(false);
+  let transcriptEndNoticeTimer: number | undefined;
   let stickToBottomFrame = 0;
   let lastSessionPath: string | null | undefined = undefined;
 
@@ -819,21 +820,19 @@
     return el.scrollTop <= TOP_LOAD_THRESHOLD;
   }
 
-  function updateHistoryNotice() {
-    if (!container) return;
-    showTranscriptEndNotice = shouldShowTranscriptStartNotice({
-      hasReachedTranscriptStart,
-      isNearTop: isNearTop(container),
-      messagesLength: messages.length,
-      initialLoading,
-    });
+  function showTranscriptEndNoticeBriefly() {
+    showTranscriptEndNotice = true;
+    if (transcriptEndNoticeTimer !== undefined) {
+      window.clearTimeout(transcriptEndNoticeTimer);
+    }
+    transcriptEndNoticeTimer = window.setTimeout(() => {
+      showTranscriptEndNotice = false;
+      transcriptEndNoticeTimer = undefined;
+    }, TRANSCRIPT_START_NOTICE_DURATION_MS);
   }
 
   async function requestOlderTranscript() {
-    if (!container) {
-      updateHistoryNotice();
-      return;
-    }
+    if (!container) return;
 
     const nearTop = isNearTop(container);
     if (
@@ -846,7 +845,6 @@
         requestPending: olderLoadRequestPending,
       })
     ) {
-      updateHistoryNotice();
       return;
     }
 
@@ -856,29 +854,29 @@
 
     topLoadArmed = false;
     olderLoadRequestPending = true;
+    let reachedTranscriptStart = false;
     try {
       const loaded = await onLoadOlder();
       if (!loaded) {
         await tick();
-        if (!hasOlder) hasReachedTranscriptStart = true;
-        return;
-      }
-      hasReachedTranscriptStart = false;
-      await tick();
-      if (container === target) {
-        const nextScrollTop = restoredScrollTop({
-          loaded,
-          previousScrollTop,
-          previousScrollHeight,
-          nextScrollHeight: target.scrollHeight,
-        });
-        if (nextScrollTop !== null) target.scrollTop = nextScrollTop;
+        reachedTranscriptStart = !hasOlder;
+      } else {
+        await tick();
+        if (container === target) {
+          const nextScrollTop = restoredScrollTop({
+            loaded,
+            previousScrollTop,
+            previousScrollHeight,
+            nextScrollHeight: target.scrollHeight,
+          });
+          if (nextScrollTop !== null) target.scrollTop = nextScrollTop;
+        }
       }
     } finally {
       olderLoadRequestPending = false;
       updateBottomLock();
-      updateHistoryNotice();
     }
+    if (reachedTranscriptStart) showTranscriptEndNoticeBriefly();
   }
 
   function distanceFromBottom(el: HTMLElement): number {
@@ -915,13 +913,25 @@
     updateBottomLock();
     if (container) {
       const nearTop = isNearTop(container);
+      const topLoadTriggered = nearTop && topLoadArmed;
       topLoadArmed = nextTopLoadArmed({
         isNearTop: nearTop,
         current: topLoadArmed,
       });
-      if (nearTop && !hasOlder) hasReachedTranscriptStart = true;
+      if (
+        shouldShowTranscriptStartNotice({
+          topLoadTriggered,
+          hasOlder,
+          messagesLength: messages.length,
+          initialLoading,
+          pageLoading,
+          requestPending: olderLoadRequestPending,
+        })
+      ) {
+        topLoadArmed = false;
+        showTranscriptEndNoticeBriefly();
+      }
     }
-    updateHistoryNotice();
     if (!container || !isNearTop(container)) return;
     void requestOlderTranscript();
   }
@@ -1036,8 +1046,11 @@
     lastSessionPath = path;
     shouldStickToBottom = true;
     topLoadArmed = true;
-    hasReachedTranscriptStart = false;
     showTranscriptEndNotice = false;
+    if (transcriptEndNoticeTimer !== undefined) {
+      window.clearTimeout(transcriptEndNoticeTimer);
+      transcriptEndNoticeTimer = undefined;
+    }
     tick().then(() => {
       if (container !== el || sessionPath !== path) return;
       scheduleStickToBottom();
@@ -1071,6 +1084,9 @@
   onDestroy(() => {
     if (copiedMessageResetTimer !== undefined) {
       window.clearTimeout(copiedMessageResetTimer);
+    }
+    if (transcriptEndNoticeTimer !== undefined) {
+      window.clearTimeout(transcriptEndNoticeTimer);
     }
   });
 

@@ -13,10 +13,19 @@ select.question-input {
   appearance: none;
   -webkit-appearance: none;
   padding-right: 36px;
-  background:
-    linear-gradient(45deg, transparent 50%, var(--text-muted) 50%) right 17px center / 6px 6px no-repeat,
-    linear-gradient(135deg, var(--text-muted) 50%, transparent 50%) right 12px center / 6px 6px no-repeat,
-    var(--bg);
+}
+
+.question-select-control {
+  position: relative;
+}
+
+.question-select-control > svg {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  color: var(--text);
+  pointer-events: none;
+  transform: translateY(-50%);
 }
 
 .question-button {

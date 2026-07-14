@@ -1,3 +1,5 @@
+export const TRANSCRIPT_START_NOTICE_DURATION_MS = 3000;
+
 export function shouldAutoLoadOlderTranscript(options: {
   isNearTop: boolean;
   topLoadArmed: boolean;
@@ -38,15 +40,19 @@ export function restoredScrollTop(options: {
 }
 
 export function shouldShowTranscriptStartNotice(options: {
-  hasReachedTranscriptStart: boolean;
-  isNearTop: boolean;
+  topLoadTriggered: boolean;
+  hasOlder: boolean;
   messagesLength: number;
   initialLoading: boolean;
+  pageLoading: boolean;
+  requestPending: boolean;
 }): boolean {
   return (
-    options.hasReachedTranscriptStart &&
-    options.isNearTop &&
+    options.topLoadTriggered &&
+    !options.hasOlder &&
     options.messagesLength > 0 &&
-    !options.initialLoading
+    !options.initialLoading &&
+    !options.pageLoading &&
+    !options.requestPending
   );
 }

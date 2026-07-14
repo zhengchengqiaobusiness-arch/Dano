@@ -97,6 +97,12 @@
     if (nextOpen) void updatePopoverPlacement();
   }
 
+  function handleWindowPointerDown(event: PointerEvent) {
+    if (open && controlRowEl && !event.composedPath().includes(controlRowEl)) {
+      open = false;
+    }
+  }
+
   async function updatePopoverPlacement(estimatedHeight?: number) {
     if (!controlRowEl) return;
     const rowRect = controlRowEl.getBoundingClientRect();
@@ -113,9 +119,12 @@
   }
 </script>
 
-<svelte:window onresize={() => {
-  if (open) void updatePopoverPlacement();
-}} />
+<svelte:window
+  onpointerdown={handleWindowPointerDown}
+  onresize={() => {
+    if (open) void updatePopoverPlacement();
+  }}
+/>
 
 <div class="question-date-field">
   <div class="question-date-control-row" class:datetime={includesTime} bind:this={controlRowEl}>
@@ -134,14 +143,17 @@
     </button>
 
     {#if includesTime}
-      <input
-        class="question-input question-time-input"
-        type="time"
-        step="60"
-        value={timeValue}
-        disabled={disabled || !dateValue}
-        oninput={handleTimeInput}
-      />
+      <div class="question-time-control">
+        <input
+          class="question-input question-time-input"
+          type="time"
+          step="60"
+          value={timeValue}
+          disabled={disabled || !dateValue}
+          oninput={handleTimeInput}
+        />
+        <ChevronDown size={16} aria-hidden="true" />
+      </div>
     {/if}
 
     {#if open}
@@ -215,12 +227,12 @@
   .question-date-control-row {
     position: relative;
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: max-content;
     gap: 8px;
   }
 
   .question-date-control-row.datetime {
-    grid-template-columns: minmax(0, 1fr) minmax(140px, 180px);
+    grid-template-columns: max-content max-content;
     align-items: start;
   }
 
@@ -231,6 +243,7 @@
     gap: 8px;
     text-align: left;
     cursor: pointer;
+    width: auto;
   }
 
   :global(.question-date-popover) {
@@ -340,8 +353,34 @@
     outline-offset: 2px;
   }
 
+  .question-time-control {
+    position: relative;
+    width: fit-content;
+  }
+
+  .question-time-control > :global(svg) {
+    position: absolute;
+    top: 50%;
+    right: 12px;
+    color: var(--text);
+    pointer-events: none;
+    transform: translateY(-50%);
+  }
+
   .question-time-input {
-    max-width: 180px;
+    width: auto;
+    min-width: 140px;
+    padding-right: 36px;
+  }
+
+  .question-time-input::-webkit-calendar-picker-indicator {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    cursor: pointer;
+    opacity: 0;
   }
 
   .question-date-clear {
@@ -349,16 +388,20 @@
   }
 
   @media (max-width: 640px) {
+    .question-date-control-row,
     .question-date-control-row.datetime {
       grid-template-columns: minmax(0, 1fr);
+    }
+
+    :global(.question-date-trigger),
+    .question-time-control,
+    .question-time-input {
+      width: 100%;
     }
 
     :global(.question-date-popover) {
       width: min(100%, 320px);
     }
 
-    .question-time-input {
-      max-width: none;
-    }
   }
 </style>
