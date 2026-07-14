@@ -13,6 +13,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 import shutil
+import uuid
 
 import structlog
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
@@ -68,6 +69,103 @@ async def _tenant_subsystems(tenant: str) -> list[Subsystem]:
 _registry = InMemoryRegistry()       # DB 就绪换 PgRegistry(lifespan)
 _lifecycle = SkillLifecycle()        # 流程12 Skill 生命周期(进程内;可换 PgSkillStore)
 _breaker = InMemoryCounter()         # 流程10 失败计数/熔断
+
+
+_RECENT_RECORDING_ACTIONS: dict[str, None] = {}
+_MAX_RECENT_RECORDING_ACTIONS = 4096
+
+
+def _new_recording_action() -> str:
+    """Return a process-unique action compatible with the public action-name grammar."""
+    while True:
+        action = f"action_{uuid.uuid4().hex}"
+        if action not in _RECENT_RECORDING_ACTIONS:
+            break
+    if len(_RECENT_RECORDING_ACTIONS) >= _MAX_RECENT_RECORDING_ACTIONS:
+        _RECENT_RECORDING_ACTIONS.pop(next(iter(_RECENT_RECORDING_ACTIONS)), None)
+    _RECENT_RECORDING_ACTIONS[action] = None
+    return action
+
+
+class _WebSocketSendQueue:
+    """Serialize every websocket write through one task and drain cleanly on shutdown."""
+
+    def __init__(self, ws: WebSocket) -> None:
+        self._ws = ws
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._closed = False
+        self._failure: BaseException | None = None
+        self._background: set[asyncio.Task] = set()
+        self._writer = asyncio.create_task(self._run())
+
+    async def send_json(self, message: dict) -> None:
+        if self._closed:
+            if self._failure is not None:
+                raise self._failure
+            raise RuntimeError("websocket sender is closed")
+        acknowledged = asyncio.get_running_loop().create_future()
+        await self._queue.put((message, acknowledged))
+        await acknowledged
+
+    def send_background(self, message: dict) -> None:
+        """Enqueue a synchronous recorder callback without leaking task failures."""
+        if self._closed:
+            return
+        task = asyncio.create_task(self.send_json(message))
+        self._background.add(task)
+        task.add_done_callback(self._background_done)
+
+    def _background_done(self, task: asyncio.Task) -> None:
+        self._background.discard(task)
+        try:
+            task.result()
+        except (Exception, asyncio.CancelledError):
+            pass
+
+    async def _run(self) -> None:
+        try:
+            while True:
+                item = await self._queue.get()
+                if item is None:
+                    self._closed = True
+                    return
+                message, acknowledged = item
+                try:
+                    await self._ws.send_json(message)
+                except BaseException as exc:
+                    self._failure = exc
+                    self._closed = True
+                    if not acknowledged.done():
+                        acknowledged.set_exception(exc)
+                    self._reject_pending(exc)
+                    return
+                else:
+                    if not acknowledged.done():
+                        acknowledged.set_result(None)
+        except asyncio.CancelledError as exc:
+            self._failure = exc
+            self._closed = True
+            self._reject_pending(exc)
+            raise
+
+    def _reject_pending(self, exc: BaseException) -> None:
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            if item is None:
+                continue
+            _, acknowledged = item
+            if not acknowledged.done():
+                acknowledged.set_exception(exc)
+
+    async def close(self) -> None:
+        if self._background:
+            await asyncio.gather(*tuple(self._background), return_exceptions=True)
+        if not self._writer.done():
+            await self._queue.put(None)
+        await asyncio.gather(self._writer, return_exceptions=True)
 
 
 @asynccontextmanager
@@ -528,6 +626,32 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
             "identity": suggest_identity(pd, storage, samples)}   # 字段=当前用户/会话值(运行期重取;排除用户填值/平凡撞值)
 
 
+async def _enhance_flow_field_names(spec):  # noqa: ANN001, ANN202
+    """Run at most one bounded naming call for unresolved machine fields."""
+    try:
+        from dano.agent_tools import tools as tools_module
+        from dano.execution.page.flow_spec import (
+            apply_llm_field_names,
+            llm_field_name_candidates,
+        )
+        from dano.review.board import suggest_field_names_llm
+
+        board = tools_module._review_board
+        fields = llm_field_name_candidates(spec)
+        if board is None or not fields:
+            return spec
+        names = await suggest_field_names_llm(
+            board.client,
+            (getattr(board, "models", None) or {}).get("acceptance"),
+            action=spec.title or (spec.steps[-1].path if spec.steps else ""),
+            fields=fields,
+        )
+        return apply_llm_field_names(spec, names)
+    except Exception as exc:  # noqa: BLE001 - naming is non-blocking
+        log.warning("flow_spec.field_naming_failed", error=str(exc))
+        return spec
+
+
 def _frontend_recording_field_metadata(raw_steps: list[dict]) -> tuple[dict, set[str], dict]:
     """把前端编辑后的录制步骤投影成样例、必填字段和页面枚举。"""
     from dano.execution.page.recorder import assign_step_field_keys, has_recorded_value
@@ -573,11 +697,15 @@ async def record_ws(ws: WebSocket) -> None:
     """客户在网页里操作我们托管的浏览器,免安装/免命令行。协议见前端 PageRecorder。"""
     await ws.accept()
     sess = None
+    llm_budget_token = None
     try:
         init = await ws.receive_json()
         if init.get("type") != "start" or not init.get("start_url"):
             await ws.send_json({"type": "error", "detail": "首帧须为 {type:'start', start_url, ...}"})
             return
+        from dano.config import get_settings as _recording_settings
+        from dano.infra.llm_control import begin_llm_budget
+        llm_budget_token = begin_llm_budget(_recording_settings().llm_session_token_budget)
         from dano.execution.page.recorder import RecordSession
         loop = asyncio.get_event_loop()
 
@@ -620,7 +748,27 @@ async def record_ws(ws: WebSocket) -> None:
         pending_page_enum_options: dict = {}         # 录制时下拉里真实可见的选项 {选中显示值: [选项文字]}(枚举地面真值)
         pending_page_events: list[dict] = []          # 动作→DOM 变化→请求的脱敏 Observer 时间线
         applied_flow_operations: dict[str, dict] = {}  # flow_update 幂等回执(operation_id → response)
+        costly_operation_results: dict[str, dict] = {}
         recording_mode = "intercepted_submit" if init.get("intercept", True) else "real_submit"
+
+        def _costly_key(message: dict) -> str:
+            operation_id = str(message.get("operation_id") or "")
+            return f"{message.get('type')}:{operation_id}" if operation_id else ""
+
+        async def _replay_costly(message: dict) -> bool:
+            key = _costly_key(message)
+            if key and key in costly_operation_results:
+                await ws.send_json({**costly_operation_results[key], "duplicate": True})
+                return True
+            return False
+
+        def _remember_costly(message: dict, response: dict) -> None:
+            key = _costly_key(message)
+            if not key:
+                return
+            if len(costly_operation_results) >= 128:
+                costly_operation_results.pop(next(iter(costly_operation_results)), None)
+            costly_operation_results[key] = response
 
         def _restore_hidden_flow_spec_fields(raw_spec: dict) -> dict:
             if pending_flow_spec is None:
@@ -632,6 +780,11 @@ async def record_ws(ws: WebSocket) -> None:
                 old = old_by_id.get(str(step.get("step_id") or ""))
                 if old is None:
                     continue
+                # Client receives only a bounded response sample.  Raw response
+                # evidence remains authoritative on the server and must never
+                # be overwritten by that projection on a round-trip edit.
+                if old.response_json is not None:
+                    step["response_json"] = old.response_json
                 if not step.get("body_source"):
                     step["body_source"] = step.get("backup_body_source") or old.body_source
                 headers = step.get("headers")
@@ -670,6 +823,8 @@ async def record_ws(ws: WebSocket) -> None:
                 sess.reset()                          # 登录后:丢弃登录步骤,只录业务流程
                 await ws.send_json({"type": "reset_ok"})
             elif t == "finalize":
+                if await _replay_costly(msg):
+                    continue
                 before_flush_steps = sess.recorded_raw_steps()
                 await sess.flush_recording()
                 observed_required_labels = await sess.observed_required_labels()
@@ -760,8 +915,6 @@ async def record_ws(ws: WebSocket) -> None:
                     # 同时把 spec 存到 pending_flow_spec 供后续 flow_update / step_naming / 业务说明编辑。
                     try:
                         from dano.execution.page.flow_spec import (
-                            apply_llm_field_names,
-                            llm_field_name_candidates,
                             to_flow_spec,
                         )
                         pending_flow_spec = to_flow_spec(
@@ -778,32 +931,22 @@ async def record_ws(ws: WebSocket) -> None:
                             tenant=init.get("tenant", ""),
                             subsystem=init.get("subsystem", ""),
                         )
-                        try:
-                            from dano.agent_tools import tools as _T
-                            from dano.review.board import suggest_field_names_llm
-                            _board = _T._review_board
-                            _fields = llm_field_name_candidates(pending_flow_spec)
-                            if _board is not None and _fields:
-                                _names = await suggest_field_names_llm(
-                                    _board.client,
-                                    (getattr(_board, "models", None) or {}).get("acceptance"),
-                                    action=pending_flow_spec.title or (pending_flow_spec.steps[-1].path if pending_flow_spec.steps else ""),
-                                    fields=_fields,
-                                )
-                                pending_flow_spec = apply_llm_field_names(pending_flow_spec, _names)
-                        except Exception as _name_err:  # noqa: BLE001
-                            log.warning("flow_spec.field_naming_failed", error=str(_name_err))
+                        pending_flow_spec = await _enhance_flow_field_names(pending_flow_spec)
                         from dano.execution.page.flow_spec import (
                             flow_spec_to_client,
                             flow_spec_to_summary,
                             validate_flow_spec,
                         )
-                        await ws.send_json({
+                        response = {
                             "type": "flow_spec",
+                            "operation": "finalize",
+                            "operation_id": msg.get("operation_id"),
                             "flow_spec": flow_spec_to_summary(pending_flow_spec),
                             "full_spec": flow_spec_to_client(pending_flow_spec),
                             "check_report": validate_flow_spec(pending_flow_spec),
-                        })
+                        }
+                        _remember_costly(msg, response)
+                        await ws.send_json(response)
                     except Exception as _fs_err:  # noqa: BLE001
                         log.warning("flow_spec.emit_failed", error=str(_fs_err))
                         await ws.send_json({"type": "result",
@@ -835,12 +978,16 @@ async def record_ws(ws: WebSocket) -> None:
                         tenant=init.get("tenant", ""),
                         subsystem=init.get("subsystem", ""),
                     )
-                    await ws.send_json({
+                    response = {
                         "type": "flow_spec",
+                        "operation": "finalize",
+                        "operation_id": msg.get("operation_id"),
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
                         "full_spec": flow_spec_to_client(pending_flow_spec),
                         "check_report": validate_flow_spec(pending_flow_spec),
-                    })
+                    }
+                    _remember_costly(msg, response)
+                    await ws.send_json(response)
                 except Exception as _fs_err:  # noqa: BLE001
                     log.warning("flow_spec.read_only_emit_failed", error=str(_fs_err))
                     await ws.send_json({"type": "result",
@@ -886,6 +1033,7 @@ async def record_ws(ws: WebSocket) -> None:
                             tenant=init.get("tenant", ""),
                             subsystem=init.get("subsystem", ""),
                         )
+                        pending_flow_spec = await _enhance_flow_field_names(pending_flow_spec)
                         await ws.send_json({
                             "type": "flow_spec_updated",
                             "flow_spec": flow_spec_to_summary(pending_flow_spec),
@@ -954,25 +1102,7 @@ async def record_ws(ws: WebSocket) -> None:
                     if not isinstance(raw_spec, dict):
                         await ws.send_json({"type": "error", "detail": "flow_replace missing flow_spec object"})
                         continue
-                    if pending_flow_spec is not None:
-                        old_by_id = {s.step_id: s for s in pending_flow_spec.steps}
-                        for step in raw_spec.get("steps") or []:
-                            if not isinstance(step, dict):
-                                continue
-                            old = old_by_id.get(str(step.get("step_id") or ""))
-                            if old is None:
-                                continue
-                            if not step.get("body_source"):
-                                step["body_source"] = step.get("backup_body_source") or old.body_source
-                            headers = step.get("headers")
-                            if (not headers) or all(v == "***" for v in (headers or {}).values()):
-                                step["headers"] = old.headers
-                            old_identity = {i.path: i for i in old.identity}
-                            for idn in step.get("identity") or []:
-                                if isinstance(idn, dict) and idn.get("value") == "***":
-                                    old_idn = old_identity.get(str(idn.get("path") or ""))
-                                    if old_idn is not None:
-                                        idn["value"] = old_idn.value
+                    raw_spec = _restore_hidden_flow_spec_fields(raw_spec)
                     pending_flow_spec = append_flow_version(
                         refresh_review_items(FlowSpec.model_validate(raw_spec)),
                         "json_replace",
@@ -1011,6 +1141,8 @@ async def record_ws(ws: WebSocket) -> None:
                 })
             # 能力编排:LLM 生成对外可调用能力草案；失败则由 flow_spec 确定性规则兜底。
             elif t == "orchestrate_flow":
+                if await _replay_costly(msg):
+                    continue
                 if pending_flow_spec is None:
                     await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
@@ -1039,20 +1171,25 @@ async def record_ws(ws: WebSocket) -> None:
                         force_replan=force_replan,
                     )
                     operation = "replan" if force_replan else "plan"
-                    await ws.send_json({
+                    response = {
                         "type": "flow_spec_updated",
                         "operation": operation,
+                        "operation_id": msg.get("operation_id"),
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
                         "full_spec": flow_spec_to_client(pending_flow_spec),
                         "check_report": validate_flow_spec(pending_flow_spec),
                         "operation_report": flow_operation_report(
                             before_operation, pending_flow_spec, operation=operation,
                         ),
-                    })
+                    }
+                    _remember_costly(msg, response)
+                    await ws.send_json(response)
                 except Exception as e:  # noqa: BLE001
                     await ws.send_json({"type": "error", "detail": f"orchestrate_flow failed: {e}"})
             # 一键修正:确定性补齐 + LLM 受限 patch；后端应用后重跑校验。
             elif t == "auto_fix_flow":
+                if await _replay_costly(msg):
+                    continue
                 if pending_flow_spec is None:
                     await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
@@ -1072,16 +1209,19 @@ async def record_ws(ws: WebSocket) -> None:
                         model=get_settings().pi_model,
                         mode="repair",
                     )
-                    await ws.send_json({
+                    response = {
                         "type": "flow_spec_updated",
                         "operation": "repair",
+                        "operation_id": msg.get("operation_id"),
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
                         "full_spec": flow_spec_to_client(pending_flow_spec),
                         "check_report": validate_flow_spec(pending_flow_spec),
                         "operation_report": flow_operation_report(
                             before_operation, pending_flow_spec, operation="repair",
                         ),
-                    })
+                    }
+                    _remember_costly(msg, response)
+                    await ws.send_json(response)
                 except Exception as e:  # noqa: BLE001
                     await ws.send_json({"type": "error", "detail": f"auto_fix_flow failed: {e}"})
             # Step D2: LLM 给每个 step 起业务名
@@ -1163,6 +1303,8 @@ async def record_ws(ws: WebSocket) -> None:
                                  errors=summary["errors"],
                                  warnings=summary["warnings"])
             elif t == "publish_request":
+                if await _replay_costly(msg):
+                    continue
                 # FlowSpec 工作台是录制发布唯一入口：步骤、字段、依赖、说明都以同一份可编辑 spec 为准。
                 if pending_flow_spec is None:
                     await ws.send_json({"type": "result",

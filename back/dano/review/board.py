@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -86,6 +87,18 @@ _ROLE_SYSTEM: dict[str, str] = {
     ),
 }
 
+_COMBINED_REVIEW_SYSTEM = (
+    "你是同一资产的三维发布评审器。必须分别完成成果验收、漏洞检测、合规审核，"
+    "维度之间不得互相替代。" + _DISCIPLINE + "\n"
+    "成果验收要求：" + _ROLE_SYSTEM["acceptance"] + "\n"
+    "漏洞检测要求：" + _ROLE_SYSTEM["security"] + "\n"
+    "合规审核要求：" + _ROLE_SYSTEM["compliance"] + "\n"
+    "只输出 JSON 对象：{\"verdicts\":{"
+    "\"acceptance\":{\"passed\":true,\"reasons\":[]},"
+    "\"security\":{\"passed\":true,\"reasons\":[]},"
+    "\"compliance\":{\"passed\":true,\"reasons\":[]}}}。"
+)
+
 
 @dataclass
 class ReviewVerdict:
@@ -105,14 +118,39 @@ class ChatClient(Protocol):
                                      timeout_s: float) -> dict[str, Any]: ...
 
 
+def _message_purpose(messages: list[dict[str, str]]) -> str:
+    """Classify known prompt families without widening the public client API."""
+    text = "\n".join(str(message.get("content") or "") for message in messages)
+    markers = (
+        ("自动修正器", "recording_repair"),
+        ("业务语义架构师", "recording_semantic"),
+        ("三维发布评审器", "publish_review"),
+        ("成果验收审查员", "publish_review"),
+        ("漏洞检测审查员", "publish_review"),
+        ("合规审核审查员", "publish_review"),
+        ("字段命名助手", "field_naming"),
+        ("业务目标提炼器", "goal_generation"),
+        ("语义顾问", "capture_advisory"),
+    )
+    return next((purpose for marker, purpose in markers if marker in text), "structured_json")
+
+
 class OpenAICompatClient:
     """极薄 OpenAI 兼容 client:POST {base}/chat/completions,强制 JSON 输出。"""
 
     def __init__(self, *, api_key: str, base_url: str) -> None:
         self.api_key = api_key
-        self.last_usage: dict[str, Any] = {}
+        self._usage_var: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
+            f"dano_llm_usage_{id(self)}", default={}
+        )
+        self._json_mode_support: dict[str, bool] = {}
         base = base_url.rstrip("/")
         self._url = (base + "/chat/completions") if base.endswith("/v1") else (base + "/v1/chat/completions")
+
+    @property
+    def last_usage(self) -> dict[str, Any]:
+        """Task-local compatibility view; concurrent review calls cannot overwrite it."""
+        return dict(self._usage_var.get())
 
     async def complete_json(self, *, model: str, system: str, user: str,
                             timeout_s: float) -> dict[str, Any]:
@@ -133,64 +171,122 @@ class OpenAICompatClient:
         backwards-compatible two-message API used by existing fakes/callers.
         """
         import httpx
-        self.last_usage = {}
+        from dano.config import get_settings
+        from dano.infra.llm_control import (
+            cached_singleflight,
+            canonical_cache_key,
+            estimate_message_tokens,
+            reserve_llm_tokens,
+        )
+
+        settings = get_settings()
+        self._usage_var.set({})
         base = {
             "model": model,
             "messages": messages,
             "temperature": 0,
+            "max_tokens": settings.llm_max_output_tokens,
         }
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        async with httpx.AsyncClient(timeout=timeout_s) as c:
-            # 优先用 JSON 模式。部分兼容模型会返回 200 但 content 为空，把结果
-            # 放进分段 content/reasoning_content/tool arguments；若仍无法解析，再
-            # 去掉 response_format 重试一次，避免外层重复三次同一个空响应。
-            payloads = [{**base, "response_format": {"type": "json_object"}}, base]
-            last_error: Exception | None = None
-            for index, payload in enumerate(payloads):
-                r = await c.post(self._url, json=payload, headers=headers)
-                if index == 0 and r.status_code in (400, 422):
-                    continue
-                r.raise_for_status()
-                try:
-                    response = r.json()
-                    usage = response.get("usage") if isinstance(response, dict) else None
-                    if isinstance(usage, dict):
-                        details = usage.get("prompt_tokens_details") or {}
-                        cached = (
-                            details.get("cached_tokens")
-                            or usage.get("cache_read_input_tokens")
-                            or usage.get("cached_input_tokens")
-                            or 0
-                        )
-                        log.info(
-                            "llm.usage",
-                            model=model,
-                            prompt_tokens=usage.get("prompt_tokens") or usage.get("input_tokens") or 0,
-                            cached_tokens=cached,
-                            completion_tokens=usage.get("completion_tokens") or usage.get("output_tokens") or 0,
-                            message_count=len(messages),
-                            json_fallback=bool(index),
-                        )
-                        self.last_usage = {
-                            "prompt_tokens": usage.get("prompt_tokens") or usage.get("input_tokens") or 0,
-                            "cached_tokens": cached,
-                            "completion_tokens": usage.get("completion_tokens") or usage.get("output_tokens") or 0,
-                            "json_fallback": bool(index),
-                        }
-                    return _completion_json(response)
-                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-                    last_error = exc
-                    if index == 0:
+        purpose = _message_purpose(messages)
+        estimated_tokens = estimate_message_tokens(messages)
+        cache_key = canonical_cache_key(
+            model=model,
+            messages=messages,
+            version="dano.openai-json.v3",
+        )
+
+        async def produce() -> tuple[dict[str, Any], dict[str, Any]]:
+            reserve_llm_tokens(
+                estimated_tokens,
+                purpose=purpose,
+                per_request_limit=settings.llm_max_input_tokens,
+            )
+            support_key = f"{self._url}\0{model}"
+            json_supported = self._json_mode_support.get(support_key, True)
+            payloads = (
+                [{**base, "response_format": {"type": "json_object"}}, base]
+                if json_supported else [base]
+            )
+            async with httpx.AsyncClient(timeout=timeout_s) as client:
+                for index, payload in enumerate(payloads):
+                    response = await client.post(self._url, json=payload, headers=headers)
+                    if index == 0 and len(payloads) > 1 and response.status_code in (400, 422):
+                        # Capability probe failures are not model completions.
+                        # Remember the result so later calls do not probe again.
+                        self._json_mode_support[support_key] = False
                         continue
-                    raise
-        raise last_error or json.JSONDecodeError("评审服务未返回有效 JSON", "", 0)
+                    response.raise_for_status()
+                    decoded = response.json()
+                    raw_usage = decoded.get("usage") if isinstance(decoded, dict) else None
+                    details = (raw_usage or {}).get("prompt_tokens_details") or {}
+                    cached_tokens = (
+                        details.get("cached_tokens")
+                        or (raw_usage or {}).get("cache_read_input_tokens")
+                        or (raw_usage or {}).get("cached_input_tokens")
+                        or 0
+                    )
+                    usage = {
+                        "prompt_tokens": int(
+                            (raw_usage or {}).get("prompt_tokens")
+                            or (raw_usage or {}).get("input_tokens")
+                            or estimated_tokens
+                        ),
+                        "cached_tokens": int(cached_tokens),
+                        "completion_tokens": int(
+                            (raw_usage or {}).get("completion_tokens")
+                            or (raw_usage or {}).get("output_tokens")
+                            or 0
+                        ),
+                        "json_fallback": bool(index),
+                        "provider_request_id": response.headers.get("x-request-id", ""),
+                    }
+                    # A billable 200 with malformed JSON is not retried with the
+                    # same full prompt. The caller gets a deterministic failure
+                    # and may explicitly retry after correcting the input/model.
+                    parsed = _completion_json(decoded)
+                    log.info(
+                        "llm.usage",
+                        model=model,
+                        purpose=purpose,
+                        message_count=len(messages),
+                        application_cache_hit=False,
+                        **usage,
+                    )
+                    return parsed, usage
+            raise json.JSONDecodeError("评审服务未返回有效 JSON", "", 0)
+
+        result, usage, cache_hit = await cached_singleflight(
+            cache_key,
+            model=model,
+            purpose=purpose,
+            ttl_s=settings.llm_cache_ttl_s,
+            producer=produce,
+        )
+        final_usage = {
+            **usage,
+            "cached_tokens": (
+                int(usage.get("prompt_tokens") or 0)
+                if cache_hit else int(usage.get("cached_tokens") or 0)
+            ),
+            "application_cache_hit": cache_hit,
+            "billable_prompt_tokens": 0 if cache_hit else int(usage.get("prompt_tokens") or 0),
+            "billable_completion_tokens": 0 if cache_hit else int(usage.get("completion_tokens") or 0),
+        }
+        self._usage_var.set(final_usage)
+        if cache_hit:
+            log.info(
+                "llm.usage", model=model, purpose=purpose,
+                message_count=len(messages), **final_usage,
+            )
+        return result
 
 
 class ReviewBoard:
     """编排三审:并发调三个独立模型,各产出一条结构化 verdict。"""
 
     def __init__(self, *, client: ChatClient, models: dict[str, str], timeout_s: float = 60.0,
-                 max_retries: int = 2, backoff_s: float = 1.0) -> None:
+                 max_retries: int = 1, backoff_s: float = 1.0) -> None:
         # models:{"acceptance": 模型, "security": 模型, "compliance": 模型}
         self.client = client
         self.models = models
@@ -220,9 +316,57 @@ class ReviewBoard:
     async def review(self, *, asset_type: str, asset_key: str, body: dict,
                      evidence: list[dict] | None = None) -> list[ReviewVerdict]:
         user = _build_user(asset_type, asset_key, body, evidence or [])
+        if len(set(self.models.values())) == 1:
+            # Three calls to the same model do not provide independent-model
+            # assurance. Ask that model for three explicit dimensions once.
+            return await self._combined(next(iter(self.models.values())), user)
         results = await asyncio.gather(
             *(self._one(role, self.models[role], user) for role in ROLES))
         return list(results)
+
+    async def _combined(self, model: str, user: str) -> list[ReviewVerdict]:
+        last_err: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                out = await self.client.complete_json(
+                    model=model,
+                    system=_COMBINED_REVIEW_SYSTEM,
+                    user=user,
+                    timeout_s=self.timeout_s,
+                )
+                raw = out.get("verdicts") if isinstance(out, dict) else None
+                if not isinstance(raw, dict):
+                    raise ValueError("合并评审缺少 verdicts 对象")
+                verdicts: list[ReviewVerdict] = []
+                for role in ROLES:
+                    item = raw.get(role)
+                    if not isinstance(item, dict):
+                        raise ValueError(f"合并评审缺少 {role} 结论")
+                    reasons = item.get("reasons") or []
+                    if not isinstance(reasons, list):
+                        reasons = [str(reasons)]
+                    verdicts.append(ReviewVerdict(
+                        role=role,
+                        model_id=model,
+                        passed=bool(item.get("passed")),
+                        reasons=[str(reason) for reason in reasons],
+                    ))
+                log.info("review.combined", model=model, attempt=attempt)
+                return verdicts
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                if attempt >= self.max_retries or not _retryable_review_error(exc):
+                    break
+                await asyncio.sleep(self.backoff_s * (2 ** attempt))
+        return [
+            ReviewVerdict(
+                role=role,
+                model_id=model,
+                passed=False,
+                reasons=[f"评审服务不可用: {last_err}"],
+            )
+            for role in ROLES
+        ]
 
     async def _one(self, role: str, model: str, user: str) -> ReviewVerdict:
         key = _cache_key(model, role, user)
@@ -246,12 +390,27 @@ class ReviewBoard:
                 return ReviewVerdict(role=role, model_id=model, passed=passed, reasons=reasons)
             except Exception as e:  # noqa: BLE001 —— 瞬时错误退避重试,用尽才判不通过
                 last_err = e
-                if attempt < self.max_retries:
+                if attempt < self.max_retries and _retryable_review_error(e):
                     await asyncio.sleep(self.backoff_s * (2 ** attempt))
+                    continue
+                break
         log.warning("review.one.failed", role=role, model=model,
                     retries=self.max_retries, error=str(last_err))
         return ReviewVerdict(role=role, model_id=model, passed=False,
                              reasons=[f"评审服务不可用: {last_err}"])
+
+
+def _retryable_review_error(exc: Exception) -> bool:
+    """Retry only failures that clearly happened before a usable completion."""
+    try:
+        import httpx
+        if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code in {429, 500, 502, 503, 504}
+    except Exception:  # noqa: BLE001
+        return False
+    return False
 
 
 def _completion_json(payload: dict[str, Any]) -> dict[str, Any]:
@@ -374,6 +533,95 @@ _CAPTURE_REVIEW_NOTE = (
 )
 
 
+def _compact_schema(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 6:
+        return "[省略深层结构]"
+    if isinstance(value, dict):
+        return {
+            str(key): _compact_schema(item, depth=depth + 1)
+            for key, item in list(value.items())[:60]
+        }
+    if isinstance(value, list):
+        return [_compact_schema(item, depth=depth + 1) for item in value[:40]]
+    if isinstance(value, str) and len(value) > 512:
+        return value[:512] + "...[已截断]"
+    return value
+
+
+def _review_asset_projection(body: dict) -> dict[str, Any]:
+    """Canonical, non-duplicated review DTO; raw recorder facts never enter it."""
+    api = dict((body or {}).get("api_request") or {})
+    raw_steps = list(api.get("steps") or [])
+    if not raw_steps and api:
+        raw_steps = [api]
+    steps: list[dict[str, Any]] = []
+    for index, step in enumerate(raw_steps[:50]):
+        if not isinstance(step, dict):
+            continue
+        identities = [
+            {
+                "path": item.get("path"),
+                "source": item.get("source") or item.get("source_kind") or "current_user",
+            }
+            for item in (step.get("identity") or [])[:30]
+            if isinstance(item, dict)
+        ]
+        steps.append({
+            "step_id": step.get("step_id") or f"step_{index + 1}",
+            "method": step.get("method"),
+            "path": step.get("path") or step.get("url"),
+            "content_type": step.get("content_type"),
+            "params": list(step.get("params") or [])[:80],
+            "field_types": _compact_schema(step.get("field_types") or {}),
+            "param_map": _compact_schema(step.get("param_map") or {}),
+            "identity": identities,
+            "auth_header_names": sorted((step.get("auth_headers") or step.get("headers") or {}).keys()),
+            "success_rule": _compact_schema(step.get("success_rule")),
+            "fact_check": _compact_schema(step.get("fact_check")),
+        })
+
+    raw_caps = list((body or {}).get("capabilities") or api.get("capabilities") or [])
+    capabilities = []
+    for cap in raw_caps[:40]:
+        if not isinstance(cap, dict):
+            continue
+        nodes = [
+            {
+                key: node.get(key)
+                for key in ("id", "type", "step_id", "source", "target", "items", "condition")
+                if node.get(key) not in (None, "", [], {})
+            }
+            for node in (cap.get("nodes") or [])[:60]
+            if isinstance(node, dict)
+        ]
+        capabilities.append({
+            "name": cap.get("name"),
+            "title": cap.get("title"),
+            "kind": cap.get("kind"),
+            "intent": cap.get("intent"),
+            "step_ids": list(cap.get("step_ids") or [])[:50],
+            "input_schema": _compact_schema(cap.get("input_schema") or {}),
+            "output_schema": _compact_schema(cap.get("output_schema") or {}),
+            "nodes": nodes,
+        })
+
+    return {
+        "action": (body or {}).get("action"),
+        "title": (body or {}).get("title"),
+        "risk_level": (body or {}).get("risk_level"),
+        "recording_mode": (body or {}).get("recording_mode"),
+        "verification_status": (body or {}).get("verification_status"),
+        "verification_basis": (body or {}).get("verification_basis"),
+        "user_fields": list((body or {}).get("user_fields") or [])[:100],
+        "required_fields": list((body or {}).get("required_fields") or [])[:100],
+        "field_types": _compact_schema((body or {}).get("field_types") or api.get("field_types") or {}),
+        "goal": _compact_schema(api.get("goal") or (body or {}).get("goal") or {}),
+        "steps": steps,
+        "capabilities": capabilities,
+        "capability_relations": _compact_schema(api.get("capability_relations") or []),
+    }
+
+
 def _build_user(asset_type: str, asset_key: str, body: dict, evidence: list[dict]) -> str:
     """拼评审输入(运行架构上下文 + 声明式信息 + 沙箱证据,**凭证已脱敏**)。
 
@@ -382,9 +630,12 @@ def _build_user(asset_type: str, asset_key: str, body: dict, evidence: list[dict
     payload = json.dumps({
         "asset_type": asset_type,
         "asset_key": asset_key,
-        "declarative_body": _review_projection(_redact_secrets(body)),
-        "sandbox_evidence": _review_projection(_redact_secrets(evidence)),
-    }, ensure_ascii=False, indent=2)
+        # Projection selects names/contracts only and never copies credential or
+        # recorded values, so applying whole-key redaction before projection
+        # would erase useful auth-header presence metadata.
+        "declarative_body": _review_asset_projection(body),
+        "sandbox_evidence": _review_projection(_redact_secrets(evidence))[:20],
+    }, ensure_ascii=False, separators=(",", ":"), default=str)
     user = _SYSTEM_CONTEXT + "\n\n【待评审资产】\n" + payload
     if asset_type == "page_script" and (body or {}).get("api_request") and not (body or {}).get("actions"):
         user += _CAPTURE_REVIEW_NOTE   # 录制抓请求:三模型只判语义、拿 Goal 当业务方案对照

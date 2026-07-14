@@ -248,6 +248,106 @@ def _leaf_paths(body) -> list[tuple]:
     return out
 
 
+def normalized_leaf_paths(
+    body,
+    *,
+    max_paths: int = 200,
+    max_depth: int = 8,
+    list_samples: int = 3,
+) -> list[str]:
+    """Return a bounded structural path index for model/UI projections.
+
+    ``_leaf_paths`` intentionally preserves every concrete array index because
+    deterministic dependency discovery needs exact recorded values.  That
+    representation must never be used as an LLM prompt: a 1,000-row response
+    would otherwise create tens of thousands of near-identical paths.  This
+    projection normalizes every array index to ``[]``, samples only a few rows,
+    de-duplicates paths and enforces a hard upper bound.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(path: str) -> None:
+        if path and path not in seen and len(out) < max_paths:
+            seen.add(path)
+            out.append(path)
+
+    def walk(node, path: str, depth: int) -> None:
+        if len(out) >= max_paths:
+            return
+        if depth >= max_depth:
+            add(path)
+            return
+        if isinstance(node, dict):
+            if not node:
+                add(path)
+                return
+            for key, value in node.items():
+                walk(value, f"{path}.{key}" if path else str(key), depth + 1)
+                if len(out) >= max_paths:
+                    break
+            return
+        if isinstance(node, list):
+            array_path = f"{path}[]" if path else "[]"
+            if not node:
+                add(array_path)
+                return
+            for value in node[:max(1, list_samples)]:
+                walk(value, array_path, depth + 1)
+                if len(out) >= max_paths:
+                    break
+            return
+        add(path)
+
+    walk(body, "", 0)
+    return out
+
+
+def bounded_response_sample(
+    value,
+    *,
+    list_items: int = 3,
+    dict_items: int = 80,
+    max_depth: int = 8,
+    max_string: int = 256,
+):
+    """Build a small shape-preserving sample without mutating raw evidence."""
+    if max_depth <= 0:
+        return "[???????]"
+    if isinstance(value, dict):
+        items = list(value.items())
+        out = {
+            key: bounded_response_sample(
+                item,
+                list_items=list_items,
+                dict_items=dict_items,
+                max_depth=max_depth - 1,
+                max_string=max_string,
+            )
+            for key, item in items[:dict_items]
+        }
+        if len(items) > dict_items:
+            out["__dano_omitted_keys__"] = len(items) - dict_items
+        return out
+    if isinstance(value, list):
+        out = [
+            bounded_response_sample(
+                item,
+                list_items=list_items,
+                dict_items=dict_items,
+                max_depth=max_depth - 1,
+                max_string=max_string,
+            )
+            for item in value[:list_items]
+        ]
+        if len(value) > list_items:
+            out.append({"__dano_omitted_items__": len(value) - list_items})
+        return out
+    if isinstance(value, str) and len(value) > max_string:
+        return value[:max_string] + "...[???]"
+    return value
+
+
 def _find_value_path(node, value, prefix: str = "") -> str | None:
     """在 node 里找一个叶子值 == value 的点路径(深度优先,返回第一个)。无则 None。"""
     if isinstance(node, dict):

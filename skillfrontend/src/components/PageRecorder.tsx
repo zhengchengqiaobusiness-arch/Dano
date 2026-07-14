@@ -1157,7 +1157,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [expandedCapabilitySections, setExpandedCapabilitySections] = useState<Record<number, string[]>>({});
   const [expandedCapabilitySteps, setExpandedCapabilitySteps] = useState<Record<number, string[]>>({});
   const [expandedRequestPanels, setExpandedRequestPanels] = useState<string[]>([]);
-  const flowOperationRef = useRef<{ mode: "plan" | "repair" | "replan"; previousUpdatedAt?: string } | null>(null);
+  const flowOperationRef = useRef<{
+    mode: "plan" | "repair" | "replan"; previousUpdatedAt?: string; operationId: string;
+  } | null>(null);
+  const finalizeOperationRef = useRef<string | null>(null);
+  const publishOperationRef = useRef<string | null>(null);
   const flowOperationTimerRef = useRef<number | null>(null);
   const flowMutationQueueRef = useRef<any[]>([]);
   const flowMutationInFlightRef = useRef<any | null>(null);
@@ -1216,7 +1220,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (nextTitle && !title.trim()) setTitle(nextTitle);
   }
 
-  function finishFlowOperation(loop?: { mode?: string; updated_at?: string }, operation?: string) {
+  function newCostlyOperationId(prefix: string) {
+    const id = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return `${prefix}-${id}`;
+  }
+
+  function finishFlowOperation(loop?: { mode?: string; updated_at?: string }, operation?: string, operationId?: string) {
     const active = flowOperationRef.current;
     if (
       !active
@@ -1277,6 +1288,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const onRej = (event: PromiseRejectionEvent) => {
       const msg = event.reason?.message || (typeof event.reason === "string" ? event.reason : JSON.stringify(event.reason || ""));
       consoleBufRef.current.push({ type: "error", source: "unhandledrejection", text: msg || "unknown", ts: Date.now() });
+      || (operationId && operationId !== active.operationId)
     };
     const origError = console.error;
     console.error = (...args: any[]) => {
@@ -1494,7 +1506,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         if (fs) {
           acceptFlowSpec(fs);
           setLastServerJson(JSON.stringify(fs));
-          finishFlowOperation(fs.meta?.recording_pi_loop, m.operation);
+          finishFlowOperation(fs.meta?.recording_pi_loop, m.operation, m.operation_id);
         }
         if (m.check_report) setCheckReport(m.check_report);
         if (m.operation_report) {
@@ -1567,6 +1579,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const r = img.getBoundingClientRect();
     send({ type: "input", event: { kind: "click", nx: (e.clientX - r.left) / r.width, ny: (e.clientY - r.top) / r.height } });
     kbRef.current?.focus({ preventScroll: true });
+        if (m.operation === "finalize" && (!m.operation_id || m.operation_id === finalizeOperationRef.current)) {
+          finalizeOperationRef.current = null;
+        }
   }
   function relayKb(el: HTMLInputElement) {
     const v = el.value;
@@ -1604,6 +1619,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function resetFromHere() {
     send({ type: "reset" });
+        publishOperationRef.current = null;
+        finalizeOperationRef.current = null;
     setSteps([]); setResult(null); resetEditorState();
     message.success("已清空，从现在起只录业务步骤");
   }
@@ -1611,12 +1628,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!action.trim() || badAction(action.trim())) return;
     if (!steps.length && !reqs.length) { message.error("还没抓到提交请求、也没录到步骤"); return; }
     setResult(null); setPhase("publishing");
-    send({ type: "finalize", action: action.trim(), title: title.trim(), success_marker: null, steps });
+    if (!send({ type: "finalize", operation_id: operationId, action: action.trim(), title: title.trim(), success_marker: null, steps })) {
+      finalizeOperationRef.current = null;
+      setPhase("recording");
+    }
   }
   function chooseRequest(idx: number) { setChosenIdx(idx); send({ type: "choose_request", idx }); }
   function toggleField(path: string, on: boolean) { setPicked((p) => ({ ...p, [path]: { ...p[path], on } })); }
   function renameField(path: string, name: string) { setPicked((p) => ({ ...p, [path]: { ...p[path], name } })); }
   function badAction(a: string) {
+        publishOperationRef.current = null;
+        finalizeOperationRef.current = null;
     if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(a)) { message.error("动作名请用英文标识"); return true; }
     return false;
   }
@@ -1640,7 +1662,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!currentSpec) { message.error("请先生成 FlowSpec 后再发布"); return; }
     const publishTitle = title.trim() || preferredSkillTitle(currentSpec);
     setResult(null); setPhase("publishing");
-    if (!send({ type: "publish_request", action: action.trim(), title: publishTitle,
+    if (!send({ type: "publish_request", operation_id: operationId, action: action.trim(), title: publishTitle,
       param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: true, flow_spec: currentSpec,
       expected_fingerprint: currentSpec.meta?.current_fingerprint })) {
       setPhase("recording");
@@ -1698,8 +1720,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       field,
       value,
     };
+    if (finalizeOperationRef.current) return;
   }
   function paramMatches(a: FlowParam, b: FlowParam) {
+    const operationId = newCostlyOperationId("finalize");
+    finalizeOperationRef.current = operationId;
     const ap = stripBodyPrefix(a.path || "");
     const bp = stripBodyPrefix(b.path || "");
     if (ap && bp && ap === bp) return true;
@@ -1725,14 +1750,18 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         });
         const newSelects = (step.selects || []).map((sel) => {
           const sameParam = (sel.param && oldKey && sel.param === oldKey) || stripBodyPrefix(sel.path || "") === stripBodyPrefix(p.path || "");
+    if (publishOperationRef.current) return;
           if (!sameParam) return sel;
           return {
             ...sel,
             ...(updates.key != null ? { param: updates.key } : {}),
+    const operationId = newCostlyOperationId("publish");
+    publishOperationRef.current = operationId;
             ...(updates.path != null ? { path: updates.path, id_path: sel.id_path === p.path ? updates.path : sel.id_path } : {}),
           };
         });
         const newSampleInputs = { ...(step.sample_inputs || {}) };
+      publishOperationRef.current = null;
         if (updates.key != null && oldKey && oldKey in newSampleInputs) {
           newSampleInputs[updates.key] = newSampleInputs[oldKey];
           delete newSampleInputs[oldKey];
@@ -2176,7 +2205,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setOrchestrateBusy(true);
     setAutoFixBusy(true);
     armFlowOperationWatchdog("能力生成");
-    if (!send({ type: "orchestrate_flow", flow_spec: currentSpec })) clearFlowOperation();
+    if (!send({ type: "orchestrate_flow", operation_id: flowOperationRef.current.operationId, flow_spec: currentSpec })) clearFlowOperation();
   }
   function performReplanFlow() {
     if (!flowSpecRef.current || flowOperationRef.current) return;
@@ -2188,7 +2217,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setOrchestrateBusy(true);
     setAutoFixBusy(true);
     armFlowOperationWatchdog("能力边界重新分析");
-    if (!send({ type: "orchestrate_flow", flow_spec: currentSpec, force_replan: true })) clearFlowOperation();
+    if (!send({ type: "orchestrate_flow", operation_id: flowOperationRef.current.operationId, flow_spec: currentSpec, force_replan: true })) clearFlowOperation();
   }
   function replanFlow() {
     if (!flowSpecRef.current || flowOperationRef.current) return;
@@ -2218,7 +2247,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     };
     setAutoFixBusy(true);
     armFlowOperationWatchdog("自动修复");
-    if (!send({ type: "auto_fix_flow" })) clearFlowOperation();
+    if (!send({ type: "auto_fix_flow", operation_id: flowOperationRef.current.operationId })) clearFlowOperation();
   }
   function addCapability() {
     const current = flowSpecRef.current;
@@ -2262,6 +2291,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     Modal.confirm({
       title: "删除这个能力？",
       content: "只删除对外能力编排，不删除底层捕获接口和流程步骤。",
+      operationId: newCostlyOperationId("plan"),
       okText: "删除", okType: "danger", cancelText: "取消",
       onOk: () => {
         const ok = send({ type: "flow_update", edits: [{ op: "remove_capability", capability_index: idx }] });
@@ -2274,6 +2304,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         // 旧 checkReport 属于删除前的能力作用域，等待服务端按新能力重新校验。
         setCheckReport(null);
+      operationId: newCostlyOperationId("replan"),
       },
     });
   }
@@ -2305,6 +2336,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       if (!req) { message.warning("没有找到选中的捕获接口"); return; }
       const cap = flowSpecRef.current?.capabilities?.[idx];
       pendingCapabilityMembershipRef.current.push({
+      operationId: newCostlyOperationId("repair"),
         capability: capabilityRef(cap || {}, idx),
         requestId: req.request_id,
         requestIndex: req.request_index,

@@ -26,6 +26,8 @@ from dano.execution.page.request_capture import (
     _leaf_paths,
     _parse_body,
     _is_system_timestamp,
+    bounded_response_sample,
+    normalized_leaf_paths,
     auto_required_fields,
     as_list_payload,
     apply_page_enum_options,
@@ -5974,9 +5976,7 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                     }
                     for param in step.params
                 ],
-                "response_paths": sorted({
-                    str(path) for path, *_ in (_leaf_paths(step.response_json) if step.response_json is not None else [])
-                }),
+                "response_paths": normalized_leaf_paths(step.response_json),
             }
             for step in spec.steps
         ],
@@ -6046,9 +6046,7 @@ def _semantic_fact_hash(spec: FlowSpec) -> str:
                 "page_id": _step_page_id_from_facts(spec, step),
                 "trigger_locator": (step.source_meta or {}).get("trigger_locator"),
                 "param_paths": sorted(param.path for param in step.params),
-                "response_paths": sorted({
-                    str(path) for path, *_ in (_leaf_paths(step.response_json) if step.response_json is not None else [])
-                }),
+                "response_paths": normalized_leaf_paths(step.response_json),
             }
             for step in spec.steps
         ],
@@ -6153,6 +6151,7 @@ class _SemanticConversation:
                 model=self.model,
                 system=_FLOW_SEMANTIC_SYSTEM,
                 user=transcript,
+        "captured_request_count": len(graph.get("all_requests") or []),
                 timeout_s=self.timeout_s,
             )
             self.calls += 1
@@ -6379,7 +6378,7 @@ def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
             for st in spec.steps
         },
         "complete_response_path_index": {
-            st.step_id: [str(item[0]) for item in _leaf_paths(st.response_json)]
+            st.step_id: normalized_leaf_paths(st.response_json)
             if st.response_json is not None else []
             for st in spec.steps
         },
@@ -6401,7 +6400,7 @@ def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
                     }
                     for p in (st.params or [])[:80]
                 ],
-                "response_paths": _leaf_paths(st.response_json)[:80] if st.response_json is not None else [],
+                "response_paths": normalized_leaf_paths(st.response_json, max_paths=80),
             }
             for st in spec.steps
         ],
@@ -6559,6 +6558,7 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
             for item in items
         ]
         if baseline_steps and all(values and values.issubset(baseline_steps) for values in planned_sets):
+        "captured_request_count": len(graph.get("all_requests") or []),
             if set().union(*planned_sets) == baseline_steps:
                 split_kinds.add(kind)
     used_existing: set[str] = set()
@@ -7763,7 +7763,12 @@ def _semantic_candidate_gate(
     new_errors = sorted(
         item for item in after_error_list if error_signature(item) in new_error_signatures
     )
-    if new_errors or len(after_error_list) > len(before_error_list):
+    # During the first semantic generation a generic baseline may be split into
+    # several explicit capabilities.  The same expected "not confirmed" error
+    # then appears once per capability; that is not a new error class and must
+    # not reject an otherwise valid split.  Incremental optimization remains
+    # strict because its capability scope is locked.
+    if new_errors or (scope_locked and len(after_error_list) > len(before_error_list)):
         reasons.append("new_validation_errors")
     before_warning_list = [str(item) for item in (before_report.get("warnings") or [])]
     after_warning_list = [str(item) for item in (after_report.get("warnings") or [])]
@@ -11163,7 +11168,9 @@ def flow_spec_to_client(spec: FlowSpec) -> dict:
             if req.get("post_data") is not None:
                 req["post_data"] = ""
             if req.get("response_json") is not None:
-                req["response_json"] = _client_redact_sensitive(req.get("response_json"))
+                projected, projection = _client_response_projection(req.get("response_json"))
+                req["response_json"] = _client_redact_sensitive(projected)
+                req["response_projection"] = projection
     request_facts = data.get("request_facts") or {}
     for req in request_facts.get("requests") or []:
         if req.get("headers"):
@@ -11171,11 +11178,15 @@ def flow_spec_to_client(spec: FlowSpec) -> dict:
         if req.get("post_data") is not None:
             req["post_data"] = ""
         if req.get("response_json") is not None:
-            req["response_json"] = _client_redact_sensitive(req.get("response_json"))
+            projected, projection = _client_response_projection(req.get("response_json"))
+            req["response_json"] = _client_redact_sensitive(projected)
+            req["response_projection"] = projection
     for st in data.get("steps") or []:
         st["headers"] = {k: "***" for k in (st.get("headers") or {})}
         if st.get("response_json") is not None:
-            st["response_json"] = _client_redact_sensitive(st.get("response_json"))
+            projected, projection = _client_response_projection(st.get("response_json"))
+            st["response_json"] = _client_redact_sensitive(projected)
+            st["response_projection"] = projection
         for select in st.get("selects") or []:
             if select.get("source_headers"):
                 select["source_headers"] = {k: "***" for k in (select.get("source_headers") or {})}
@@ -11331,6 +11342,22 @@ def _dedupe_flow_steps(spec: FlowSpec) -> int:
 def _request_graph_items(spec: FlowSpec) -> list[dict[str, Any]]:
     graph = _request_graph_for_spec(spec)
     out: list[dict[str, Any]] = []
+def _client_response_projection(value: Any) -> tuple[Any, dict[str, Any]]:
+    """Return a bounded UI sample plus facts describing the raw response."""
+    sample = bounded_response_sample(value)
+    try:
+        raw_chars = len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str))
+        sample_chars = len(json.dumps(sample, ensure_ascii=False, separators=(",", ":"), default=str))
+    except Exception:  # noqa: BLE001 - projection metadata is best effort
+        raw_chars = sample_chars = 0
+    return sample, {
+        "raw_chars": raw_chars,
+        "sample_chars": sample_chars,
+        "truncated": bool(raw_chars > sample_chars),
+        "normalized_paths": normalized_leaf_paths(value),
+    }
+
+
     seen: set[tuple[str, Any, str, str]] = set()
     for bucket in ("all_requests", "selected_steps", "candidate_reads", "filtered_requests"):
         for item in graph.get(bucket) or []:
@@ -13267,7 +13294,7 @@ def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, A
                     }
                     for p in (st.params or [])[:60]
                 ],
-                "response_paths": [p for p, *_ in (_leaf_paths(st.response_json)[:80] if st.response_json is not None else [])],
+                "response_paths": normalized_leaf_paths(st.response_json, max_paths=80),
                 "selects": [sel.model_dump(exclude_none=True) for sel in (st.selects or [])[:20]],
             }
             for st in spec.steps

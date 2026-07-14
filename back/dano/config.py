@@ -58,8 +58,14 @@ class Settings(BaseSettings):
     review_model_security: str = "mimo-v2.5"            # 漏洞检测:注入/越权/密钥/SSRF/PII
     review_model_compliance: str = "mimo-v2.5"     # 合规审核:沙箱/测试凭证/风险/确认
     review_timeout_s: float = 240.0   # 单模型评审超时:OpenAI 兼容共享端点(SiliconFlow)拥塞时单次可达 ~180s,给足余量
-    review_max_retries: int = 2
+    review_max_retries: int = 1       # 仅明确网络/429/5xx 最多额外重试一次
     review_retry_backoff_s: float = 1.0
+
+    # ── LLM 成本护栏 ──
+    llm_max_input_tokens: int = 20_000       # 单次 provider 请求硬上限(保守本地估算)
+    llm_session_token_budget: int = 100_000  # 单次录制 WebSocket 内累计输入硬上限
+    llm_max_output_tokens: int = 2_048
+    llm_cache_ttl_s: int = 86_400             # 相同规范化输入跨会话/重启复用 24h
 
     # ── 录制 V2 浏览器设置 ──
     browser_headless: bool = True        # = DANO_BROWSER_HEADLESS:浏览器无头(调试可设 False 看界面)
