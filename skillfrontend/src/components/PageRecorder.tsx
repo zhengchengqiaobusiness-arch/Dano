@@ -260,6 +260,7 @@ const KEYMAP: Record<string, string> = {
 };
 const SAFE_COMBO_KEYS = new Set(["a", "c", "x", "z", "y", "Enter", "Backspace"]);
 const MOD_ORDER = ["Control", "Meta", "Alt", "Shift"];
+const POINTER_MOVE_INTERVAL_MS = 40;
 
 function recorderKeyName(e: React.KeyboardEvent<HTMLInputElement>): string | null {
   if (e.key === "Control" || e.key === "Shift" || e.key === "Alt" || e.key === "Meta") return null;
@@ -1138,7 +1139,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const latestFrameRef = useRef<{ seq: number; src: string; meta: RecorderFrameMeta } | null>(null);
   const frameRafRef = useRef<number | null>(null);
   const renderedFrameSeqRef = useRef(0);
-  const pointerMoveRafRef = useRef<number | null>(null);
+  const pointerMoveTimerRef = useRef<number | null>(null);
   const pendingPointerMoveRef = useRef<Record<string, unknown> | null>(null);
   const pointerGestureRef = useRef<{
     pointerId: number; nx: number; ny: number; clientX: number; clientY: number;
@@ -1342,7 +1343,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       intentionalCloseRef.current = true;
       wsRef.current?.close();
     }
-    if (pointerMoveRafRef.current != null) window.cancelAnimationFrame(pointerMoveRafRef.current);
+    if (pointerMoveTimerRef.current != null) window.clearTimeout(pointerMoveTimerRef.current);
     if (pendingClickRef.current) window.clearTimeout(pendingClickRef.current.timer);
     if (heartbeatTimerRef.current != null) window.clearInterval(heartbeatTimerRef.current);
   }, []);
@@ -1745,8 +1746,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       wsAliveRef.current = false;                                 // FC2 修复:WS 关闭,send 会自动避免刷屏
       pointerGestureRef.current = null;
       pendingPointerMoveRef.current = null;
-      if (pointerMoveRafRef.current != null) window.cancelAnimationFrame(pointerMoveRafRef.current);
-      pointerMoveRafRef.current = null;
+      if (pointerMoveTimerRef.current != null) window.clearTimeout(pointerMoveTimerRef.current);
+      pointerMoveTimerRef.current = null;
       if (pendingClickRef.current) window.clearTimeout(pendingClickRef.current.timer);
       pendingClickRef.current = null;
       finalizeOperationRef.current = null;
@@ -1791,15 +1792,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     };
   }
   function sendPendingPointerMove() {
-    pointerMoveRafRef.current = null;
+    pointerMoveTimerRef.current = null;
     const event = pendingPointerMoveRef.current;
     pendingPointerMoveRef.current = null;
     if (event) send({ type: "input", event });
   }
   function queuePointerMove(event: Record<string, unknown>) {
     pendingPointerMoveRef.current = event;
-    if (pointerMoveRafRef.current != null) return;
-    pointerMoveRafRef.current = window.requestAnimationFrame(sendPendingPointerMove);
+    if (pointerMoveTimerRef.current != null) return;
+    // Hover and drag events can arrive at the display refresh rate. Coalesce them
+    // to 25 FPS so input forwarding cannot starve screenshot decoding or editing.
+    pointerMoveTimerRef.current = window.setTimeout(sendPendingPointerMove, POINTER_MOVE_INTERVAL_MS);
   }
   function flushPendingRecorderClick() {
     const pending = pendingClickRef.current;
@@ -1898,8 +1901,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     e.preventDefault();
     try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* already released */ }
     if (gesture.dragging) {
-      if (pointerMoveRafRef.current != null) {
-        window.cancelAnimationFrame(pointerMoveRafRef.current);
+      if (pointerMoveTimerRef.current != null) {
+        window.clearTimeout(pointerMoveTimerRef.current);
         sendPendingPointerMove();
       }
       send({
@@ -1918,8 +1921,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!gesture || gesture.pointerId !== e.pointerId) return;
     pointerGestureRef.current = null;
     pendingPointerMoveRef.current = null;
-    if (pointerMoveRafRef.current != null) window.cancelAnimationFrame(pointerMoveRafRef.current);
-    pointerMoveRafRef.current = null;
+    if (pointerMoveTimerRef.current != null) window.clearTimeout(pointerMoveTimerRef.current);
+    pointerMoveTimerRef.current = null;
     if (gesture.dragging) {
       const point = normalizedPoint(e.clientX, e.clientY) || { nx: gesture.nx, ny: gesture.ny };
       send({ type: "input", event: { kind: "pointer_up", ...point, button: gesture.button, buttons: 0, pointer_type: gesture.pointerType } });
@@ -5153,11 +5156,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             <img ref={imgRef} draggable={false}
               onPointerDown={onImgPointerDown} onPointerMove={onImgPointerMove} onPointerUp={onImgPointerUp} onPointerCancel={onImgPointerCancel}
               onContextMenu={(e) => e.preventDefault()} onWheel={onImgWheel}
-              onLoad={(e) => setFrameMeta((current) => ({
-                ...current,
-                frameWidth: current.frameWidth || e.currentTarget.naturalWidth || undefined,
-                frameHeight: current.frameHeight || e.currentTarget.naturalHeight || undefined,
-              }))}
+              onLoad={(e) => setFrameMeta((current) => {
+                const frameWidth = current.frameWidth || e.currentTarget.naturalWidth || undefined;
+                const frameHeight = current.frameHeight || e.currentTarget.naturalHeight || undefined;
+                // A new object here re-rendered the entire workbench for every JPEG.
+                if (current.frameWidth === frameWidth && current.frameHeight === frameHeight) return current;
+                return { ...current, frameWidth, frameHeight };
+              })}
               style={{
                 width: frameMeta.frameWidth || "auto", maxWidth: "100%", height: "auto",
                 display: hasFrame ? "block" : "none", margin: "0 auto", cursor: connectionState === "connected" ? "crosshair" : "not-allowed",
