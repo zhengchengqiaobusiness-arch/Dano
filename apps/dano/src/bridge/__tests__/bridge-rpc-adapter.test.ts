@@ -1804,6 +1804,144 @@ describe("BridgeRpcAdapter", () => {
       });
     });
 
+    it("correlates recovered question results across transcript page boundaries", async () => {
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "paged-question",
+              name: "ask_user_question",
+              arguments: { question: "审批人？", default: "张三" },
+            },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "paged-question",
+          toolName: "ask_user_question",
+          content: [{ type: "text", text: "" }],
+          details: { status: "answered", answer: "李四" },
+          isError: false,
+        },
+      ];
+      (
+        context.state.sessionManager.getBranch as ReturnType<typeof vi.fn>
+      ).mockReturnValue(messages);
+
+      ws.trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: {
+              id: "latest-question-page",
+              type: "get_messages",
+              direction: "latest",
+              limit: 1,
+            },
+          }),
+        ),
+      );
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const latest = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+        .map(([message]) => JSON.parse(message as string))
+        .find(message => message.payload?.id === "latest-question-page");
+
+      ws.trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: {
+              id: "older-question-page",
+              type: "get_messages",
+              direction: "older",
+              cursor: latest.payload.data.oldestCursor,
+              limit: 1,
+            },
+          }),
+        ),
+      );
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const older = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+        .map(([message]) => JSON.parse(message as string))
+        .find(message => message.payload?.id === "older-question-page");
+
+      expect(older.payload.data.messages[0].content[0]).toMatchObject({
+        id: "paged-question",
+        questionState: "answered",
+      });
+    });
+
+    it("replays stopped questions as cancelled without matching incidental sentinel text", async () => {
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "stopped-question",
+              name: "ask_user_question",
+              arguments: { question: "请假原因？", default: "个人事务" },
+            },
+            {
+              type: "toolCall",
+              id: "invalid-question",
+              name: "ask_user_question",
+              arguments: { question: "审批人？", default: "张三" },
+            },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "stopped-question",
+          toolName: "ask_user_question",
+          content: [{ type: "text", text: "Question was aborted" }],
+          isError: true,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "invalid-question",
+          toolName: "ask_user_question",
+          content: [
+            {
+              type: "text",
+              text: "Validation mentioned QUESTION_PRESENTATION_FAILED but did not return that code",
+            },
+          ],
+          isError: true,
+        },
+      ];
+      (
+        context.state.sessionManager.getBranch as ReturnType<typeof vi.fn>
+      ).mockReturnValue(messages);
+
+      ws.trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: { id: "stopped-question-page", type: "get_messages" },
+          }),
+        ),
+      );
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const response = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+        .map(([message]) => JSON.parse(message as string))
+        .find(message => message.payload?.id === "stopped-question-page");
+
+      expect(response.payload.data.messages[0].content[0]).toMatchObject({
+        id: "stopped-question",
+        questionState: "cancelled",
+      });
+      expect(response.payload.data.messages[0].content[1]).toMatchObject({
+        id: "invalid-question",
+        questionState: "invalid",
+      });
+    });
+
     it("defaults transcript pages to the latest 80 messages", async () => {
       const messages = Array.from({ length: 95 }, (_, index) => ({
         role: "user",

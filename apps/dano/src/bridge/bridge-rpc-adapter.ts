@@ -27,6 +27,7 @@ import {
   type SessionDefaultsState,
 } from "./default-model.js";
 import {
+  ASK_USER_QUESTION_CANCELLED_CODE,
   askUserQuestionCoordinator,
   normalizeAskUserQuestionCardRequest,
 } from "./ask-user-question.js";
@@ -3892,14 +3893,17 @@ class TranscriptProjector {
     }
   }
 
-  projectPage(page: RpcTranscriptPage): RpcTranscriptPage {
+  projectPage(
+    page: RpcTranscriptPage,
+    recoveryMessages: readonly RpcTranscriptMessage[] = page.messages,
+  ): RpcTranscriptPage {
     const sessionPath = page.sessionPath ?? null;
     const messages = page.messages.map(message =>
       this.projectStructuredUserMessage(message, sessionPath, true),
     );
     return {
       ...page,
-      messages: projectRecoveredQuestionLifecycle(messages),
+      messages: projectRecoveredQuestionLifecycle(messages, recoveryMessages),
     };
   }
 
@@ -3933,8 +3937,11 @@ class TranscriptProjector {
     }
   }
 
-  buildSnapshotEvent(page: RpcTranscriptPage): RpcTranscriptSnapshotEvent {
-    const projectedPage = this.projectPage(page);
+  buildSnapshotEvent(
+    page: RpcTranscriptPage,
+    recoveryMessages?: readonly RpcTranscriptMessage[],
+  ): RpcTranscriptSnapshotEvent {
+    const projectedPage = this.projectPage(page, recoveryMessages);
     this.syncPage(projectedPage);
     return {
       type: "transcript_snapshot",
@@ -4222,13 +4229,18 @@ function projectAskUserQuestionRequests(
 
 function projectRecoveredQuestionLifecycle(
   messages: RpcTranscriptMessage[],
+  recoveryMessages: readonly RpcTranscriptMessage[],
 ): RpcTranscriptMessage[] {
   const completed = new Map<string, AskUserQuestionLifecycleState>();
-  for (const message of messages) {
+  for (const message of recoveryMessages) {
     if (message.role !== "toolResult" || !message.toolCallId) continue;
     completed.set(
       message.toolCallId,
-      questionResultLifecycleState(message.details, message.isError, message),
+      questionResultLifecycleState(
+        message.details,
+        message.isError,
+        questionResultErrorText(message),
+      ),
     );
   }
   if (completed.size === 0) return messages;
@@ -4255,7 +4267,7 @@ function projectRecoveredQuestionLifecycle(
 function questionResultLifecycleState(
   details: RpcToolResultDetails | undefined,
   isError: boolean | undefined,
-  serializedSource: unknown,
+  errorText: string,
 ): AskUserQuestionLifecycleState {
   if (
     details &&
@@ -4268,15 +4280,66 @@ function questionResultLifecycleState(
     }
   }
   if (isError) {
-    const serialized = JSON.stringify(serializedSource);
-    if (serialized.includes(ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE)) {
+    if (
+      hasQuestionErrorCode(
+        errorText,
+        ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE,
+      )
+    ) {
       return "terminal_failure";
     }
-    if (serialized.includes(ASK_USER_QUESTION_PRESENTATION_RETRY_CODE)) {
+    if (
+      hasQuestionErrorCode(errorText, ASK_USER_QUESTION_PRESENTATION_RETRY_CODE)
+    ) {
       return "retrying";
+    }
+    if (
+      hasQuestionErrorCode(errorText, ASK_USER_QUESTION_CANCELLED_CODE) ||
+      normalizedQuestionErrorLines(errorText).includes("Question was aborted")
+    ) {
+      return "cancelled";
     }
   }
   return "invalid";
+}
+
+function questionResultErrorText(source: {
+  text?: unknown;
+  content?: unknown;
+}): string {
+  const values: string[] = [];
+  if (typeof source.text === "string") values.push(source.text);
+  if (typeof source.content === "string") values.push(source.content);
+  if (Array.isArray(source.content)) {
+    for (const item of source.content) {
+      if (typeof item === "string") {
+        values.push(item);
+      } else if (
+        item &&
+        typeof item === "object" &&
+        "type" in item &&
+        item.type === "text" &&
+        "text" in item &&
+        typeof item.text === "string"
+      ) {
+        values.push(item.text);
+      }
+    }
+  }
+  return values.join("\n");
+}
+
+function normalizedQuestionErrorLines(errorText: string): string[] {
+  return errorText
+    .split("\n")
+    .map(line => line.trim().replace(/^Error:\s*/, ""))
+    .filter(Boolean);
+}
+
+function hasQuestionErrorCode(errorText: string, code: string): boolean {
+  return normalizedQuestionErrorLines(errorText).some(
+    line => line === code || line.startsWith(`${code}:`),
+  );
 }
 
 function questionLifecycleState(
@@ -4288,7 +4351,11 @@ function questionLifecycleState(
 ): AskUserQuestionLifecycleState | undefined {
   const result = content[index + 1];
   if (result && typeof result !== "string" && result.type === "toolResult") {
-    return questionResultLifecycleState(result.details, result.isError, result);
+    return questionResultLifecycleState(
+      result.details,
+      result.isError,
+      questionResultErrorText(result),
+    );
   }
   if (toolCallId) {
     const pendingState = askUserQuestionCoordinator.state(toolCallId);
@@ -4862,7 +4929,12 @@ export class BridgeRpcAdapter {
    * ---------------------------------------------------------------------- */
 
   private sendTranscriptSnapshot(page: RpcTranscriptPage): void {
-    this.sendEvent(this.transcriptProjector.buildSnapshotEvent(page));
+    this.sendEvent(
+      this.transcriptProjector.buildSnapshotEvent(
+        page,
+        this.sessionRuntime.buildCurrentTranscriptMessages(),
+      ),
+    );
   }
 
   private sendInitialTranscriptSnapshot(): void {
@@ -5980,8 +6052,12 @@ export class BridgeRpcAdapter {
             sessionPath,
             command.limit,
           );
+          const recoveryMessages = flattenMessagesForTranscript(
+            selected.sessionManager.getBranch(),
+          );
           const transcript = this.transcriptProjector.projectPage(
             selected.transcript,
+            recoveryMessages,
           );
           this.transcriptProjector.syncPage(transcript);
           return {
@@ -6156,12 +6232,19 @@ export class BridgeRpcAdapter {
 
       case "get_messages": {
         const direction = command.direction === "older" ? "older" : "latest";
+        const recoveryMessages =
+          this.sessionRuntime.buildCurrentTranscriptMessages();
         const page = this.transcriptProjector.projectPage(
-          this.sessionRuntime.buildCurrentTranscriptPage({
-            direction,
-            cursor: command.cursor,
-            limit: command.limit,
-          }),
+          buildTranscriptPage(
+            recoveryMessages,
+            this.sessionRuntime.currentTranscriptSessionPath(),
+            {
+              direction,
+              cursor: command.cursor,
+              limit: command.limit,
+            },
+          ),
+          recoveryMessages,
         );
         if (direction === "latest") {
           this.transcriptProjector.syncPage(page);
