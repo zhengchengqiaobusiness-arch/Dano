@@ -29,7 +29,13 @@ _OS_ENV_WHITELIST = (
     "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
     "NUMBER_OF_PROCESSORS", "OS", "HOMEDRIVE", "HOMEPATH",
 )
-_PI_ENV = ("DANO_PI_API_KEY", "DANO_PI_BASE_URL", "DANO_PI_MODEL", "DANO_PI_PROVIDER")
+_PI_ENV = (
+    "DANO_PI_API_KEY",
+    "DANO_PI_BASE_URL",
+    "DANO_PI_MODEL",
+    "DANO_PI_PROVIDER",
+    "DANO_RECORDING_PI_MAX_SUBMISSION_ATTEMPTS",
+)
 _ACTIVE_RECORDING_SESSIONS: dict[str, "RecordingPiSession"] = {}
 _ACTIVE_RECORDING_SCOPES: dict[str, "RecordingPiSession"] = {}
 _OPAQUE_RECORDING_ID = re.compile(r"recording_[0-9a-f]{32}\Z")
@@ -255,7 +261,13 @@ class RecordingPiSession:
             raise RecordingPiError("录制 Pi Session 尚未启动")
         async with self._prompt_lock:
             try:
-                return await self._command("prompt", timeout_s=timeout_s, text=text)
+                event = await self._command("prompt", timeout_s=timeout_s, text=text)
+                if event.get("status") == "submission_limit":
+                    raise RecordingPiError(
+                        "录制 Pi 在同一任务中连续提交被拒，已停止本轮以避免无效 Token 消耗；"
+                        "请基于最新状态重新发起操作"
+                    )
+                return event
             except asyncio.TimeoutError as exc:
                 try:
                     await self._command("cancel", timeout_s=min(self.timeout_s, 10.0))

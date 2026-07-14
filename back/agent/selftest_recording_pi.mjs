@@ -4,7 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { recordingTools } from "./recording_tools.mjs";
+import {
+  beginRecordingToolTurn,
+  endRecordingToolTurn,
+  guardRecordingToolAttempt,
+  recordingTools,
+} from "./recording_tools.mjs";
 
 const expectedTools = [
   "get_recording_state",
@@ -26,6 +31,26 @@ function verifyPersistentSession(tempDir) {
   const opened = SessionManager.open(created.getSessionFile(), tempDir, process.cwd());
   assert(opened.getSessionId() === "recording-persistence-self-test", "SessionManager.open did not restore the session id");
   assert(opened.getEntries().length === 2, "SessionManager.open did not restore session entries");
+}
+
+function verifySubmissionAttemptLimit() {
+  let exceeded = 0;
+  beginRecordingToolTurn({ maxSubmissionAttempts: 2, onLimitExceeded: () => { exceeded += 1; } });
+  try {
+    assert(guardRecordingToolAttempt("get_recording_state") === 0, "read tools must not consume submission budget");
+    assert(guardRecordingToolAttempt("submit_recording_plan") === 1, "first submission attempt missing");
+    assert(guardRecordingToolAttempt("submit_recording_repair") === 2, "second submission attempt missing");
+    let rejected = false;
+    try {
+      guardRecordingToolAttempt("submit_recording_review");
+    } catch (error) {
+      rejected = /attempt limit exceeded/.test(String(error?.message || error));
+    }
+    assert(rejected, "third submission attempt must be rejected");
+    assert(exceeded === 1, "submission limit callback must run exactly once");
+  } finally {
+    endRecordingToolTurn();
+  }
 }
 
 function verifyRuntimeProtocol(tempDir) {
@@ -104,6 +129,7 @@ function verifyRuntimeProtocol(tempDir) {
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-recording-pi-"));
 try {
   assert(JSON.stringify(recordingTools.map((tool) => tool.name)) === JSON.stringify(expectedTools), "recording tool allowlist mismatch");
+  verifySubmissionAttemptLimit();
   verifyPersistentSession(tempDir);
   await verifyRuntimeProtocol(tempDir);
   process.stdout.write(`${JSON.stringify({ status: "ok", tools: expectedTools, persistent_session: true, runtime_protocol: true })}\n`);

@@ -6,6 +6,42 @@ import { Type } from "typebox";
 const BASE_URL = process.env.DANO_AGENT_BASE_URL;
 const TOKEN = process.env.DANO_AGENT_TOKEN;
 const RUN_ID = process.env.DANO_AGENT_RUN_ID;
+const SUBMISSION_TOOLS = new Set([
+  "submit_recording_plan",
+  "submit_recording_repair",
+  "submit_recording_review",
+]);
+let activeTurnBudget = null;
+
+export function beginRecordingToolTurn({ maxSubmissionAttempts = 2, onLimitExceeded } = {}) {
+  activeTurnBudget = {
+    attempts: 0,
+    maxSubmissionAttempts: Math.max(1, Number.parseInt(String(maxSubmissionAttempts), 10) || 2),
+    onLimitExceeded,
+    limitReported: false,
+  };
+}
+
+export function endRecordingToolTurn() {
+  activeTurnBudget = null;
+}
+
+export function guardRecordingToolAttempt(name) {
+  if (!activeTurnBudget || !SUBMISSION_TOOLS.has(name)) return 0;
+  activeTurnBudget.attempts += 1;
+  if (activeTurnBudget.attempts <= activeTurnBudget.maxSubmissionAttempts) {
+    return activeTurnBudget.attempts;
+  }
+  const error = new Error(
+    `recording submission attempt limit exceeded (${activeTurnBudget.maxSubmissionAttempts}); `
+    + "stop this turn and read fresh state before a new request",
+  );
+  if (!activeTurnBudget.limitReported) {
+    activeTurnBudget.limitReported = true;
+    activeTurnBudget.onLimitExceeded?.(error);
+  }
+  throw error;
+}
 
 function requireBridgeEnvironment() {
   const missing = [];
@@ -45,6 +81,7 @@ function proxyTool({ name, label, description, parameters }) {
     description,
     parameters,
     execute: async (toolCallId, params) => {
+      guardRecordingToolAttempt(name);
       const output = await callRecordingTool(name, params, toolCallId);
       return {
         content: [{ type: "text", text: JSON.stringify(output) }],

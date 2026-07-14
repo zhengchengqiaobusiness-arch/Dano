@@ -1045,7 +1045,26 @@ def _strict_recording_params(params: dict, *, required: set[str], optional: set[
 
 
 def _recording_facts(spec) -> dict:  # noqa: ANN001
-    return spec.request_facts.model_dump(mode="json")
+    facts = spec.request_facts.model_dump(mode="json")
+    # RequestAnalysis and RequestUsage are explicitly derived projections. A
+    # valid plan changes capability membership, so sync_flow_spec_models must
+    # be allowed to refresh them. Everything else (including future extra
+    # fields) remains immutable recording evidence and is compared fail-closed.
+    facts.pop("analysis", None)
+    facts.pop("usage", None)
+    # Legacy request_graph compatibility projects analysis/usage back into
+    # RequestFact as Pydantic extra fields (role/state/materialized_step_id,
+    # etc.). Compare only the fields declared by RequestFact: those are the
+    # captured HTTP evidence. Future declared evidence fields are included
+    # automatically, while derived compatibility extras cannot false-trigger.
+    facts["requests"] = [
+        fact.model_dump(
+            mode="json",
+            include=set(type(fact).model_fields),
+        )
+        for fact in spec.request_facts.requests
+    ]
+    return facts
 
 
 def _restore_recording_session(

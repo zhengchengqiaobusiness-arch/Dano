@@ -10,7 +10,11 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { recordingTools } from "./recording_tools.mjs";
+import {
+  beginRecordingToolTurn,
+  endRecordingToolTurn,
+  recordingTools,
+} from "./recording_tools.mjs";
 
 const emit = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
 const log = (...parts) => process.stderr.write(`[recording_pi] ${parts.join(" ")}\n`);
@@ -24,6 +28,7 @@ const SYSTEM_PROMPT = `你是 Dano 网页录制模式的专用语义编排 Agent
 修复任务必须先调用 get_validation_report；需要完整事实时再调用 get_recording_state，然后调用 submit_recording_repair。
 审核任务必须先调用 get_recording_state 和 get_validation_report，再调用 submit_recording_review。
 不得泄漏或索取凭证，不得改写原始 URL、HTTP method、请求路径或录制事实，不得绕过版本、校验和发布闸门。
+提交工具被拒绝后，必须重新读取最新状态才能纠正一次；第二次仍被拒绝必须停止本轮，不得继续反复调用。
 完成对应提交工具调用后，用简短中文说明提交结果；若工具拒绝，明确说明拒绝原因，不要假装成功。`;
 
 let active = null;
@@ -36,6 +41,8 @@ function envInt(name, fallback, minimum = 0) {
   const parsed = Number.parseInt(process.env[name] || "", 10);
   return Number.isFinite(parsed) && parsed >= minimum ? parsed : fallback;
 }
+
+const SUBMISSION_ATTEMPT_LIMIT = envInt("DANO_RECORDING_PI_MAX_SUBMISSION_ATTEMPTS", 2, 1);
 
 function resolveModel() {
   const authStorage = AuthStorage.inMemory();
@@ -186,7 +193,16 @@ async function runPrompt(command) {
 
   promptRequestId = command.request_id || null;
   promptCancelled = false;
+  let submissionLimitError = "";
   const session = active.session;
+  beginRecordingToolTurn({
+    maxSubmissionAttempts: SUBMISSION_ATTEMPT_LIMIT,
+    onLimitExceeded: (error) => {
+      submissionLimitError = String(error?.message || error);
+      log(submissionLimitError);
+      void session.abort().catch((abortError) => log("submission limit abort failed", abortError));
+    },
+  });
   const work = session.prompt(command.text, {
     expandPromptTemplates: false,
     source: "rpc",
@@ -199,6 +215,7 @@ async function runPrompt(command) {
     else throw error;
   } finally {
     promptInFlight = null;
+    endRecordingToolTurn();
   }
   const stats = session.getSessionStats();
   emit({
@@ -206,7 +223,8 @@ async function runPrompt(command) {
     request_id: command.request_id,
     session_id: session.sessionId,
     session_file: session.sessionFile,
-    status: promptCancelled ? "cancelled" : "completed",
+    status: submissionLimitError ? "submission_limit" : (promptCancelled ? "cancelled" : "completed"),
+    ...(submissionLimitError ? { error: submissionLimitError } : {}),
     final_text: lastAssistantText(session).slice(0, 100000),
     usage: stats.tokens,
     session: stats,

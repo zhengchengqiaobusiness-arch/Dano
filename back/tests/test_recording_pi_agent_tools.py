@@ -24,6 +24,8 @@ from dano.execution.page.flow_spec import (
     FlowSpec,
     FlowStep,
     ParamField,
+    RequestFact,
+    RequestUsage,
     ensure_flow_version,
     flow_spec_fingerprint,
 )
@@ -166,6 +168,41 @@ def test_pi_tools_read_and_apply_plan_without_changing_request_facts(monkeypatch
     validation = asyncio.run(get_validation_report("run-recording", {"recording_id": "rec-1"}))
     assert validation["flow_version"] == result["flow_version"]
     assert "report" in validation and "repair_context" in validation
+
+
+def test_pi_plan_allows_backend_to_refresh_derived_request_usage(monkeypatch):
+    session = _bind(monkeypatch, recording_id="rec-derived-usage")
+    session.spec.steps[0].source_meta = {"request_id": "request-1"}
+    session.spec.request_facts.requests = [RequestFact(
+        request_id="request-1",
+        request_index=0,
+        method="POST",
+        url="https://example.invalid/api/submit",
+        path="/api/submit",
+        post_data={"title": "demo"},
+    )]
+    session.spec.request_facts.usage = {
+        "request-1": RequestUsage(request_id="request-1", state="captured"),
+    }
+    immutable_request_before = session.spec.request_facts.requests[0].model_dump(
+        mode="json",
+        include=set(RequestFact.model_fields),
+    )
+
+    result = asyncio.run(submit_recording_plan("run-derived-usage", {
+        "recording_id": "rec-derived-usage",
+        "base_flow_version": 1,
+        "plan": {"semantic_plan": {}, "ops": []},
+    }))
+
+    assert result["flow_version"] > 1
+    assert session.spec.request_facts.requests[0].model_dump(
+        mode="json",
+        include=set(RequestFact.model_fields),
+    ) == immutable_request_before
+    usage = session.spec.request_facts.usage["request-1"]
+    assert usage.state == "materialized"
+    assert usage.materialized_step_id == "submit"
 
 
 def test_pi_repair_rejects_stale_version_and_non_whitelisted_operation(monkeypatch):

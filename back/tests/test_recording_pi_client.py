@@ -168,6 +168,27 @@ async def test_recording_pi_runtime_error_has_no_fallback(monkeypatch, tmp_path)
     await client.close()
 
 
+@pytest.mark.asyncio
+async def test_recording_pi_submission_limit_is_exposed_as_hard_failure(monkeypatch) -> None:  # noqa: ANN001
+    client = recording_pi.RecordingPiSession(
+        tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_TWO,
+    )
+    client._proc = object()
+
+    async def limited_command(command_type, **_kwargs):  # noqa: ANN001
+        assert command_type == "prompt"
+        return {
+            "type": "prompt_completed",
+            "status": "submission_limit",
+            "error": "recording submission attempt limit exceeded",
+        }
+
+    monkeypatch.setattr(client, "_command", limited_command)
+    with pytest.raises(recording_pi.RecordingPiError, match="无效 Token 消耗"):
+        await client.prompt("执行规划")
+    client._proc = None
+
+
 async def _await(value):  # noqa: ANN001, ANN201
     return value
 
