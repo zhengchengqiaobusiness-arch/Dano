@@ -4,6 +4,7 @@ import {
   buildTranscriptProcessGroups,
   contentBlocks,
   formatTranscriptDuration,
+  isStreamingThinkingBlock,
   latestThinkingLine,
   normalizeTranscript,
   shouldShowAssistantPending,
@@ -315,6 +316,15 @@ describe("thinking transcript helpers", () => {
   it("uses the latest non-empty thinking line while streaming", () => {
     expect(latestThinkingLine("first\nsecond\n")).toBe("second");
     expect(latestThinkingLine("first\n  ")).toBe("first");
+  });
+
+  it("marks thinking complete when a later content block arrives", () => {
+    const thinking = { kind: "thinking", text: "Inspect" } as const;
+    const text = { kind: "text", text: "Done" } as const;
+
+    expect(isStreamingThinkingBlock(true, [thinking], 0)).toBe(true);
+    expect(isStreamingThinkingBlock(true, [thinking, text], 0)).toBe(false);
+    expect(isStreamingThinkingBlock(false, [thinking], 0)).toBe(false);
   });
 
   it("formats compact process durations", () => {

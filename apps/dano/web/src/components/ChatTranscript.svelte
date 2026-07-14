@@ -39,6 +39,7 @@
     formatTranscriptDuration,
     isAbortedMessage,
     isErrorMessage,
+    isStreamingThinkingBlock,
     isToolResultMessage,
     latestThinkingLine,
     messageContent,
@@ -533,23 +534,6 @@
 
   function isMessageThinkingActive(msg: TranscriptEntry, mi: number): boolean {
     return shouldDeferMessageMarkdownErrors(msg, mi);
-  }
-
-  function isActiveThinkingBlock(
-    msg: TranscriptEntry,
-    mi: number,
-    blocks: readonly ContentBlock[],
-    blockIndex: number,
-  ): boolean {
-    return (
-      isMessageThinkingActive(msg, mi) &&
-      blocks[blockIndex]?.kind === "thinking" &&
-      blockIndex === blocks.length - 1
-    );
-  }
-
-  function canToggleThinkingBlock(msg: TranscriptEntry, mi: number): boolean {
-    return !isMessageThinkingActive(msg, mi);
   }
 
   function previewText(text: string, maxLines: number = 8): string {
@@ -1337,11 +1321,11 @@
                 <div
                   class={`thinking-block ${blockState.isThinkingExpanded(thinkingBlockStateKey(item.message, item.messageIndex, bIdx)) ? "expanded" : ""}`}
                 >
-                  {#if isActiveThinkingBlock(item.message, item.messageIndex, blocks, bIdx)}
+                  {#if isStreamingThinkingBlock(isMessageThinkingActive(item.message, item.messageIndex), blocks, bIdx)}
                     <div class="thinking-stream-line">
                       {latestThinkingLine(block.text)}...
                     </div>
-                  {:else if canToggleThinkingBlock(item.message, item.messageIndex)}
+                  {:else}
                     <button
                       type="button"
                       class="thinking-toggle"
@@ -1351,10 +1335,8 @@
                       <Sparkle class="toggle-icon" aria-hidden="true" size={14} />
                       {t("chatTranscript.thinkingComplete")}
                     </button>
-                  {:else}
-                    <div class="thinking-complete-static">{t("chatTranscript.thinkingComplete")}</div>
                   {/if}
-                  {#if canToggleThinkingBlock(item.message, item.messageIndex) && blockState.isThinkingExpanded(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
+                  {#if blockState.isThinkingExpanded(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
                     <div class="thinking-content-panel" transition:slide={transcriptRevealTransition}>
                       <MarkdownRenderer
                         class="thinking-content"
@@ -2231,17 +2213,18 @@
     color: var(--text-muted);
     font: inherit;
     font-size: 0.9rem;
-    line-height: 1.3;
+    min-height: 24px;
+    line-height: 24px;
     cursor: pointer;
   }
 
   .thinking-toggle:hover { color: var(--text); }
 
-  .thinking-complete-static,
   .thinking-stream-line {
     color: var(--text-muted);
     font-size: 0.9rem;
-    line-height: 1.4;
+    min-height: 24px;
+    line-height: 24px;
   }
 
   .thinking-stream-line {
