@@ -50,7 +50,8 @@ export function isAskUserQuestionTerminalFailure(
 ): boolean {
   return (
     isAskUserQuestionToolError(block) &&
-    Boolean(block.resultText?.includes(ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE))
+    (block.questionState === "terminal_failure" ||
+      Boolean(block.resultText?.includes(ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE)))
   );
 }
 

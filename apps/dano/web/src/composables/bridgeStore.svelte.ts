@@ -51,7 +51,6 @@ import {
   transcriptConfigState,
   type PendingTranscriptSessionEvent,
 } from "../utils/transcript";
-import { isPendingAskUserQuestionBlock } from "../utils/askUserQuestion";
 
 type TranscriptConfigSnapshot = ReturnType<typeof transcriptConfigState>;
 
@@ -296,6 +295,23 @@ const pendingRequests = new Map<
 // Reactive state (module-level, initialized once)
 // ---------------------------------------------------------------------------
 
+const ACTIVE_SESSION_CACHE_KEY = "dano.activeSessionPath";
+
+function readCachedActiveSessionPath(): string | null {
+  if (typeof window === "undefined") return null;
+  return normalizeBridgePath(window.sessionStorage.getItem(ACTIVE_SESSION_CACHE_KEY));
+}
+
+function setActiveTreeSessionPath(sessionPath: string | null) {
+  _activeTreeSessionPath = sessionPath;
+  if (typeof window === "undefined") return;
+  if (sessionPath) {
+    window.sessionStorage.setItem(ACTIVE_SESSION_CACHE_KEY, sessionPath);
+  } else {
+    window.sessionStorage.removeItem(ACTIVE_SESSION_CACHE_KEY);
+  }
+}
+
 let _connectionStatus = $state<ConnectionStatus>("disconnected");
 let _rawTranscript = $state<TranscriptEntry[]>([]);
 let _transcriptSessionPath = $state<string | null>(null);
@@ -316,7 +332,7 @@ let _workspaceSessions = $state<Record<string, SessionEntry[]>>({});
 let _workspaceSessionLoaded = $state<Record<string, boolean>>({});
 let _workspaceSessionLoading = $state<Record<string, boolean>>({});
 let _treeEntries = $state<TreeEntry[]>([]);
-let _activeTreeSessionPath = $state<string | null>(null);
+let _activeTreeSessionPath = $state<string | null>(readCachedActiveSessionPath());
 let _liveSessionPath = $state<string | null>(null);
 let _runningSessionPaths = $state<string[]>([]);
 let _workspaceSessionCursors = $state<Record<string, string | null>>({});
@@ -563,7 +579,7 @@ function invalidateWorkspaceEntries() {
 }
 
 async function restoreLiveSessionState() {
-  _activeTreeSessionPath = null;
+  setActiveTreeSessionPath(null);
   _treeEntries = [];
   _sessionStats = null;
 
@@ -1469,7 +1485,7 @@ function applyTreeEntriesUpdate(
     return;
   }
   _treeEntries = [...entries];
-  _activeTreeSessionPath = sessionPath;
+  setActiveTreeSessionPath(sessionPath);
 }
 
 function applySessionSnapshotResponse(
@@ -1499,7 +1515,7 @@ function applySessionSnapshotResponse(
       force: true,
     });
   } else if (data.sessionPath) {
-    _activeTreeSessionPath = data.sessionPath;
+    setActiveTreeSessionPath(data.sessionPath);
   }
   if (data.workspacePath) {
     ensureWorkspaceSummary(data.workspacePath);
@@ -2220,7 +2236,7 @@ function handleResponse(payload: RpcResponse) {
           _isStreaming = data.isStreaming;
           setCompactionState(data.isCompacting);
           if (!_activeTreeSessionPath && data.sessionFile) {
-            _activeTreeSessionPath = data.sessionFile;
+            setActiveTreeSessionPath(data.sessionFile);
           }
           if (prevSp !== getDisplayedSessionPath()) resetGitRepoState();
           if (prevWp !== getWorkspaceEntriesContextKey())
@@ -2619,10 +2635,6 @@ async function fetchInitialState() {
       sendCommand({ type: "get_commands" }),
     ];
 
-    if (await startDefaultWorkspaceSession(bootstrap)) {
-      return;
-    }
-
     if (selectedSessionPath) {
       const response = await sendCommand({
         type: "switch_session",
@@ -2630,6 +2642,10 @@ async function fetchInitialState() {
       });
       await Promise.all(bootstrap);
       if (response.success) return;
+    }
+
+    if (await startDefaultWorkspaceSession(bootstrap)) {
+      return;
     }
 
     await Promise.all([restoreLiveSessionState(), ...bootstrap]);
@@ -2675,50 +2691,6 @@ function markDisconnected(reason = t("appHeader.connection.disconnected")) {
   _pendingExtensionRequest = null;
   _notifications = [];
   rejectPendingRequests(reason);
-}
-
-function pendingAskUserQuestionToolCallIds(): string[] {
-  const ids = new Set<string>();
-  for (const message of _transcript) {
-    for (const block of contentBlocks(message)) {
-      if (
-        block.kind === "tool" &&
-        isPendingAskUserQuestionBlock(block) &&
-        block.toolCallId
-      ) {
-        ids.add(block.toolCallId);
-      }
-    }
-  }
-  return [...ids];
-}
-
-function cancelPendingQuestionsOnDisconnect() {
-  if (!clientMessagesUrl) return;
-  for (const toolCallId of pendingAskUserQuestionToolCallIds()) {
-    const body = JSON.stringify({
-      type: "command",
-      payload: {
-        id: `cancel-question:${toolCallId}`,
-        type: "answer_question",
-        toolCallId,
-        cancelled: true,
-      },
-    } satisfies ClientMessage);
-    if (navigator.sendBeacon) {
-      navigator.sendBeacon(
-        clientMessagesUrl,
-        new Blob([body], { type: "application/json" }),
-      );
-    } else {
-      void fetch(clientMessagesUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body,
-        keepalive: true,
-      }).catch(() => {});
-    }
-  }
 }
 
 async function connect(): Promise<boolean> {
@@ -2816,7 +2788,6 @@ function disconnect() {
   const disconnectUrl = clientId
     ? `/api/clients/${encodeURIComponent(clientId)}/disconnect`
     : null;
-  cancelPendingQuestionsOnDisconnect();
   if (disconnectUrl) {
     if (navigator.sendBeacon) {
       navigator.sendBeacon(

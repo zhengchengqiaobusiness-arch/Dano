@@ -11,6 +11,7 @@ import {
   type AskUserQuestionCardRequest,
   type AskUserQuestionDataSource,
   type AskUserQuestionInputType,
+  type AskUserQuestionLifecycleState,
   type AskUserQuestionOption,
   type AskUserQuestionOptionId,
   type AskUserQuestionResult,
@@ -268,6 +269,7 @@ export class AskUserQuestionCoordinator {
     signal: AbortSignal | undefined,
   ): Promise<AskUserQuestionResult> {
     if (this.pending.has(toolCallId)) {
+      logQuestionLifecycle(toolCallId, "invalid");
       return Promise.reject(
         new Error(`Question is already pending: ${toolCallId}`),
       );
@@ -276,12 +278,15 @@ export class AskUserQuestionCoordinator {
     const request = normalizeCompatibleRequest(rawRequest);
     const questions = normalizeRequestQuestions(request);
     if (typeof questions === "string") {
+      logQuestionLifecycle(toolCallId, "invalid");
       return Promise.reject(new Error(questions));
     }
     if (questions.length === 0) {
+      logQuestionLifecycle(toolCallId, "invalid");
       return Promise.reject(new Error("Question is required"));
     }
     if (!normalizeAskUserQuestionCardRequest(rawRequest)) {
+      logQuestionLifecycle(toolCallId, "invalid");
       return Promise.reject(new Error("Question cannot be rendered"));
     }
     const pendingInCurrentTurn = signal
@@ -291,9 +296,11 @@ export class AskUserQuestionCoordinator {
       pendingInCurrentTurn !== undefined &&
       this.pending.has(pendingInCurrentTurn)
     ) {
+      logQuestionLifecycle(toolCallId, "invalid");
       return Promise.reject(new Error(groupedRetryError));
     }
     if (request.confirm && (request.options || request.multiple || request.questions || request.dataSource)) {
+      logQuestionLifecycle(toolCallId, "invalid");
       return Promise.reject(
         new Error("Confirmation questions cannot provide options or multiple"),
       );
@@ -313,6 +320,7 @@ export class AskUserQuestionCoordinator {
       };
       const abort = () => {
         cleanup();
+        logQuestionLifecycle(toolCallId, "cancelled");
         reject(new Error("Question was aborted"));
       };
       signal?.addEventListener("abort", abort, { once: true });
@@ -327,6 +335,7 @@ export class AskUserQuestionCoordinator {
         reject,
         cleanup,
       });
+      logQuestionLifecycle(toolCallId, "awaiting_presentation");
 
       const pending = this.pending.get(toolCallId);
       if (pending) {
@@ -336,6 +345,12 @@ export class AskUserQuestionCoordinator {
             : 1;
           if (signal) this.presentationFailuresBySignal.set(signal, failures);
           cleanup();
+          logQuestionLifecycle(
+            toolCallId,
+            failures >= this.maxPresentationFailures
+              ? "terminal_failure"
+              : "retrying",
+          );
           reject(
             new Error(
               failures >= this.maxPresentationFailures
@@ -353,14 +368,22 @@ export class AskUserQuestionCoordinator {
   present(toolCallId: string): void {
     const pending = this.pending.get(toolCallId);
     if (!pending) throw new Error(`Pending question not found: ${toolCallId}`);
+    if (pending.state === "presented") return;
     if (pending.presentationTimer) {
       clearTimeout(pending.presentationTimer);
       pending.presentationTimer = undefined;
     }
     pending.state = "presented";
+    logQuestionLifecycle(toolCallId, "presented");
     if (pending.signal) {
       this.presentationFailuresBySignal.delete(pending.signal);
     }
+  }
+
+  state(
+    toolCallId: string,
+  ): Extract<AskUserQuestionLifecycleState, "awaiting_presentation" | "presented"> | undefined {
+    return this.pending.get(toolCallId)?.state;
   }
 
   answer(
@@ -415,6 +438,10 @@ export class AskUserQuestionCoordinator {
     }
 
     pending.cleanup();
+    logQuestionLifecycle(
+      toolCallId,
+      result.status === "answered" ? "answered" : "cancelled",
+    );
     pending.resolve(result);
     return result;
   }
@@ -426,9 +453,17 @@ export class AskUserQuestionCoordinator {
   private rejectAll(error: Error): void {
     for (const [toolCallId, pending] of this.pending) {
       pending.cleanup();
+      logQuestionLifecycle(toolCallId, "cancelled");
       pending.reject(error);
     }
   }
+}
+
+function logQuestionLifecycle(
+  toolCallId: string,
+  state: AskUserQuestionLifecycleState,
+): void {
+  console.info(`[ask_user_question] state=${state} toolCallId=${toolCallId}`);
 }
 
 type NormalizedAskUserQuestionRequestItem = {

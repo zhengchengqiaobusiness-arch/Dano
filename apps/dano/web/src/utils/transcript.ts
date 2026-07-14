@@ -1,5 +1,6 @@
 import type {
   AskUserQuestionCardRequest,
+  AskUserQuestionLifecycleState,
   RpcJsonObject,
   RpcJsonValue,
   RpcToolArguments,
@@ -34,6 +35,7 @@ export interface ToolContentBlock {
   toolCallId?: string;
   toolArgs: RpcToolArguments | undefined;
   questionRequest?: AskUserQuestionCardRequest;
+  questionState?: AskUserQuestionLifecycleState;
   argumentsText: string;
   resultText?: string;
   resultBlocks?: ToolResultBlock[];
@@ -273,23 +275,30 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
         const resultIsError = nextToolResult?.isError;
         const resultSourceMessageId = nextToolResult?.sourceMessageId;
 
+        const questionLifecycleError =
+          block.questionState === "invalid" ||
+          block.questionState === "retrying" ||
+          block.questionState === "terminal_failure";
         blocks.push({
           kind: "tool",
           toolName: block.name ?? t("transcript.unknownTool"),
           toolCallId: block.id,
           toolArgs: parseToolArguments(block.arguments),
           questionRequest: block.questionRequest,
+          questionState: block.questionState,
           argumentsText: toolArgumentsText(block.arguments),
           resultText,
           resultBlocks,
           resultDetails,
           resultSourceMessageId,
-          toolStatus: toolStatusFromResult(
-            resultText,
-            resultBlocks,
-            resultDetails,
-            resultIsError,
-          ),
+          toolStatus: questionLifecycleError
+            ? "error"
+            : toolStatusFromResult(
+                resultText,
+                resultBlocks,
+                resultDetails,
+                resultIsError,
+              ),
         });
 
         if (nextToolResult) {

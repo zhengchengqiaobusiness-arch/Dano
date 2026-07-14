@@ -224,6 +224,15 @@ export type AskUserQuestionCardRequest =
   | (AskUserQuestionCardItem & { batch: false })
   | { batch: true; questions: AskUserQuestionCardItem[] };
 
+export type AskUserQuestionLifecycleState =
+  | "invalid"
+  | "retrying"
+  | "awaiting_presentation"
+  | "presented"
+  | "answered"
+  | "cancelled"
+  | "terminal_failure";
+
 export type FieldAssistAction = "regenerate" | "polish";
 export type FieldAssistFieldType = "input" | "textarea";
 export type FieldAssistWarningCode = "SENSITIVE_FIELD";
@@ -294,6 +303,7 @@ export interface RpcAgentToolCall {
   name: string;
   arguments: RpcJsonObject;
   questionRequest?: AskUserQuestionCardRequest;
+  questionState?: AskUserQuestionLifecycleState;
   thoughtSignature?: string;
 }
 
@@ -644,6 +654,7 @@ export interface RpcTranscriptToolCallBlock {
   name?: string;
   arguments?: RpcToolArguments;
   questionRequest?: AskUserQuestionCardRequest;
+  questionState?: AskUserQuestionLifecycleState;
   thoughtSignature?: string;
 }
 

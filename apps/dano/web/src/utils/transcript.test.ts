@@ -115,6 +115,30 @@ describe("curl transcript status", () => {
     });
   });
 
+  it("marks recovered terminal question state as an error", () => {
+    const messages = normalizeTranscript([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "question-terminal",
+            name: "ask_user_question",
+            arguments: { question: "请假原因？", default: "个人事务" },
+            questionState: "terminal_failure",
+          },
+        ],
+      },
+    ] as never);
+
+    const block = contentBlocks(messages[0]!).find(item => item.kind === "tool");
+    expect(block).toMatchObject({
+      kind: "tool",
+      questionState: "terminal_failure",
+      toolStatus: "error",
+    });
+  });
+
   it("attaches question results to the matching tool call id", () => {
     const messages = normalizeTranscript([
       {
