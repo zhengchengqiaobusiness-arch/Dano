@@ -757,6 +757,7 @@
     flex-direction: column;
     gap: 12px;
     width: 100%;
+    margin: 1rem 0;
     padding: 16px;
     border-radius: 14px;
     background: color-mix(in srgb, var(--panel) 84%, var(--panel-2));
@@ -791,13 +792,7 @@
   .question-group {
     display: grid;
     gap: 10px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
-  }
-
-  .question-group:first-child {
-    padding-top: 0;
-    border-top: 0;
+    margin-bottom: 1rem;
   }
 
   .question-option {
@@ -925,6 +920,11 @@
   }
 
   .question-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+  .question-actions .question-button {
+    padding: 6px 26px;
+    font-weight: normal;
+  }
 
   .question-field-header {
     display: grid;

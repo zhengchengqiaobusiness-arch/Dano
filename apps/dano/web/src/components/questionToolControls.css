@@ -12,11 +12,15 @@
 select.question-input {
   appearance: none;
   -webkit-appearance: none;
+  width: auto;
+  max-width: 100%;
   padding-right: 36px;
 }
 
 .question-select-control {
   position: relative;
+  width: fit-content;
+  max-width: 100%;
 }
 
 .question-select-control > svg {
