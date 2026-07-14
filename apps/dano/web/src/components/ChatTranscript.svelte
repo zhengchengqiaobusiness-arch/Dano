@@ -1734,7 +1734,7 @@
 
   .history-loader.history-end-notice {
     position: absolute;
-    top: 42px;
+    top: 4px;
     right: 0;
     left: 0;
     width: auto;
