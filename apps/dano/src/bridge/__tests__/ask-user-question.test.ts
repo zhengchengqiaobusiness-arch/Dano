@@ -8,6 +8,7 @@ import type {
 import {
   askUserQuestionCoordinator,
   askUserQuestionTool,
+  normalizeAskUserQuestionCardRequest,
 } from "../ask-user-question.js";
 
 function executeQuestion(
@@ -107,6 +108,104 @@ describe("ask_user_question tool", () => {
       "When using questions, put each field's id, question, options, inputType, dateFormat, required, dataSource, multiple, and default inside its questions item. Do not put top-level field configuration beside questions.",
       "For forms, applications, or other user-reviewed summaries, call ask_user_question with confirm: true after presenting the final summary and before treating it as confirmed, ready to submit, or complete.",
     ]);
+  });
+
+  it.each([
+    [
+      "single text",
+      { question: "姓名？", default: "张三" },
+      { batch: false, kind: "text", id: "answer", question: "姓名？", default: "张三" },
+    ],
+    [
+      "compatible aliases",
+      {
+        questions: {
+          key: "reason",
+          title: "请假原因？",
+          type: "textarea",
+          defaultValue: "个人事务",
+        },
+      },
+      {
+        batch: true,
+        questions: [
+          {
+            id: "reason",
+            kind: "text",
+            inputType: "textarea",
+            question: "请假原因？",
+            default: "个人事务",
+          },
+        ],
+      },
+    ],
+    [
+      "grouped fields with top-level instruction text",
+      {
+        prompt: "请补充请假信息",
+        questions: [
+          {
+            id: "leave_type",
+            question: "请假类型？",
+            options: ["事假", "病假"],
+            default: "事假",
+          },
+          { id: "reason", question: "原因？", default: "个人事务" },
+        ],
+      },
+      {
+        batch: true,
+        questions: [
+          {
+            id: "leave_type",
+            kind: "single",
+            question: "请假类型？",
+            options: [
+              { id: "事假", label: "事假" },
+              { id: "病假", label: "病假" },
+            ],
+            default: "事假",
+          },
+          {
+            id: "reason",
+            kind: "text",
+            question: "原因？",
+            default: "个人事务",
+          },
+        ],
+      },
+    ],
+    [
+      "date",
+      {
+        question: "开始日期？",
+        inputType: "date",
+        dateFormat: "yyyy-MM-dd",
+        default: "2026-07-14",
+      },
+      {
+        batch: false,
+        id: "answer",
+        kind: "date",
+        question: "开始日期？",
+        dateFormat: "yyyy-MM-dd",
+        default: "2026-07-14",
+      },
+    ],
+  ])("normalizes accepted %s calls into browser-safe card requests", (_, input, expected) => {
+    expect(normalizeAskUserQuestionCardRequest(input)).toEqual(expected);
+  });
+
+  it("rejects unsupported grouped top-level semantics from the card protocol", () => {
+    expect(
+      normalizeAskUserQuestionCardRequest({
+        options: ["A", "B"],
+        questions: [
+          { id: "reason", question: "原因？", default: "个人事务" },
+          { id: "note", question: "备注？", default: "无" },
+        ],
+      }),
+    ).toBeNull();
   });
 
   it("returns a free-text answer as structured tool details", async () => {

@@ -26,8 +26,12 @@ import {
   type DefaultSessionSettings,
   type SessionDefaultsState,
 } from "./default-model.js";
-import { askUserQuestionCoordinator } from "./ask-user-question.js";
+import {
+  askUserQuestionCoordinator,
+  normalizeAskUserQuestionCardRequest,
+} from "./ask-user-question.js";
 import { DetachedSessionRegistry } from "./session-registry.js";
+import { ASK_USER_QUESTION_TOOL_NAME } from "./types.js";
 import type {
   BridgeConfig,
   BridgeEvent,
@@ -346,11 +350,16 @@ function toRpcAgentAssistantContentBlock(
         redacted: block.redacted,
       };
     case "toolCall":
+      const questionRequest =
+        block.name === ASK_USER_QUESTION_TOOL_NAME
+          ? normalizeAskUserQuestionCardRequest(block.arguments)
+          : null;
       return {
         type: "toolCall",
         id: block.id,
         name: block.name,
         arguments: block.arguments,
+        ...(questionRequest ? { questionRequest } : {}),
         thoughtSignature: block.thoughtSignature,
       };
   }
@@ -4133,9 +4142,12 @@ class TranscriptProjector {
     message: RpcTranscriptMessage,
     sessionPath: string | null,
   ): RpcTranscriptMessage {
-    if (!message || message.role !== "user") return message;
+    const projectedMessage = projectAskUserQuestionRequests(message);
+    if (!projectedMessage || projectedMessage.role !== "user") {
+      return projectedMessage;
+    }
 
-    const candidates = transcriptTextCandidates(message);
+    const candidates = transcriptTextCandidates(projectedMessage);
     const pendingIndex = this.pendingStructuredUserMessages.findIndex(candidate => {
       if (
         candidate.sessionPath &&
@@ -4150,14 +4162,35 @@ class TranscriptProjector {
       pendingIndex >= 0
         ? this.pendingStructuredUserMessages.splice(pendingIndex, 1)[0]
         : undefined;
-    if (!pending) return stripProjectFileReferencesFromMessage(message);
+    if (!pending) return stripProjectFileReferencesFromMessage(projectedMessage);
 
     return {
-      ...message,
+      ...projectedMessage,
       content: pending.content,
       text: undefined,
     };
   }
+}
+
+function projectAskUserQuestionRequests(
+  message: RpcTranscriptMessage,
+): RpcTranscriptMessage {
+  if (!Array.isArray(message.content)) return message;
+  let changed = false;
+  const content = message.content.map(block => {
+    if (
+      typeof block === "string" ||
+      block.type !== "toolCall" ||
+      block.name !== ASK_USER_QUESTION_TOOL_NAME
+    ) {
+      return block;
+    }
+    const questionRequest = normalizeAskUserQuestionCardRequest(block.arguments);
+    if (!questionRequest) return block;
+    changed = true;
+    return { ...block, questionRequest };
+  });
+  return changed ? { ...message, content } : message;
 }
 
 /* ============================================================================

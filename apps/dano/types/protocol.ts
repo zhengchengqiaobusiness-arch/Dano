@@ -164,6 +164,62 @@ export type AskUserQuestionResult =
     }
   | { status: "cancelled" };
 
+export type AskUserQuestionCardItem =
+  | {
+      id: string;
+      kind: "text";
+      question: string;
+      inputType?: "text" | "textarea";
+      required?: boolean;
+      default?: string;
+    }
+  | {
+      id: string;
+      kind: "date";
+      question: string;
+      dateFormat: string;
+      required?: boolean;
+      default?: string;
+    }
+  | {
+      id: string;
+      kind: "single";
+      question: string;
+      options: AskUserQuestionOption[];
+      required?: boolean;
+      default?: AskUserQuestionOptionId;
+    }
+  | {
+      id: string;
+      kind: "select" | "treeSelect";
+      question: string;
+      options: AskUserQuestionOption[];
+      dataSource?: AskUserQuestionDataSource;
+      required?: boolean;
+      default?: AskUserQuestionOptionId;
+    }
+  | {
+      id: string;
+      kind: "multiple";
+      question: string;
+      options: AskUserQuestionOption[];
+      dataSource?: AskUserQuestionDataSource;
+      inputType?: "treeSelect";
+      required?: boolean;
+      default?: AskUserQuestionOptionId[];
+    }
+  | {
+      id: string;
+      kind: "confirm";
+      question: string;
+      required?: boolean;
+      default?: boolean;
+    };
+
+export type AskUserQuestionCardRequest =
+  | (AskUserQuestionCardItem & { batch: false })
+  | { batch: true; questions: AskUserQuestionCardItem[] };
+
 export type FieldAssistAction = "regenerate" | "polish";
 export type FieldAssistFieldType = "input" | "textarea";
 export type FieldAssistWarningCode = "SENSITIVE_FIELD";
@@ -233,6 +289,7 @@ export interface RpcAgentToolCall {
   id: string;
   name: string;
   arguments: RpcJsonObject;
+  questionRequest?: AskUserQuestionCardRequest;
   thoughtSignature?: string;
 }
 
@@ -581,6 +638,7 @@ export interface RpcTranscriptToolCallBlock {
   id?: string;
   name?: string;
   arguments?: RpcToolArguments;
+  questionRequest?: AskUserQuestionCardRequest;
   thoughtSignature?: string;
 }
 

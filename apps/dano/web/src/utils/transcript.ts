@@ -1,4 +1,5 @@
 import type {
+  AskUserQuestionCardRequest,
   RpcJsonObject,
   RpcJsonValue,
   RpcToolArguments,
@@ -32,6 +33,7 @@ export interface ToolContentBlock {
   toolName: string;
   toolCallId?: string;
   toolArgs: RpcToolArguments | undefined;
+  questionRequest?: AskUserQuestionCardRequest;
   argumentsText: string;
   resultText?: string;
   resultBlocks?: ToolResultBlock[];
@@ -276,6 +278,7 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
           toolName: block.name ?? t("transcript.unknownTool"),
           toolCallId: block.id,
           toolArgs: parseToolArguments(block.arguments),
+          questionRequest: block.questionRequest,
           argumentsText: toolArgumentsText(block.arguments),
           resultText,
           resultBlocks,

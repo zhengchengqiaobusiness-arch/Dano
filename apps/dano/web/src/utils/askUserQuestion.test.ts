@@ -9,6 +9,7 @@ import {
   isPendingAskUserQuestionBlock,
 } from "./askUserQuestion";
 import type { ToolContentBlock } from "./transcript";
+import type { AskUserQuestionCardRequest } from "@dano/types/protocol";
 
 function block(
   toolArgs: ToolContentBlock["toolArgs"],
@@ -25,6 +26,12 @@ function block(
   };
 }
 
+function questionBlock(
+  questionRequest: AskUserQuestionCardRequest,
+): ToolContentBlock {
+  return block({}, { questionRequest });
+}
+
 describe("ask user question transcript data", () => {
   it.each([
     ["real newlines", "| A | B |\n| --- | --- |", "| A | B |\n| --- | --- |"],
@@ -36,66 +43,46 @@ describe("ask user question transcript data", () => {
     expect(askUserQuestionMarkdown(question)).toBe(expected);
   });
 
-  it("parses a text question", () => {
-    expect(askUserQuestionRequest(block({ question: "Name?" }))).toEqual({
-      batch: false,
-      id: "answer",
-      kind: "text",
-      question: "Name?",
-    });
-  });
+  it("renders the canonical question request carried by the transcript", () => {
+    const questionRequest = {
+      batch: true as const,
+      questions: [
+        {
+          id: "leave_type",
+          kind: "single" as const,
+          question: "请假类型？",
+          options: [
+            { id: "annual", label: "年假" },
+            { id: "sick", label: "病假" },
+          ],
+          default: "annual",
+        },
+        {
+          id: "reason",
+          kind: "text" as const,
+          inputType: "textarea" as const,
+          question: "请假原因？",
+          default: "个人事务",
+        },
+      ],
+    };
 
-  it("parses a textarea question", () => {
     expect(
       askUserQuestionRequest(
-        block({ question: "Reason?", inputType: "textarea" }),
+        block(
+          { malformed: "browser must not reinterpret this" },
+          { questionRequest },
+        ),
       ),
-    ).toEqual({
-      batch: false,
-      id: "answer",
-      kind: "text",
-      inputType: "textarea",
-      question: "Reason?",
-    });
+    ).toEqual(questionRequest);
   });
 
-  it("parses a date question with a required format", () => {
+  it("does not reinterpret raw model arguments without a canonical request", () => {
     expect(
       askUserQuestionRequest(
-        block({
-          question: "Start time?",
-          inputType: "date",
-          dateFormat: "yyyy-MM-dd HH:mm",
-          required: true,
-          default: "2026-07-03 09:30",
-        }),
+        block({ question: "Name?", default: "Dano" }),
       ),
-    ).toEqual({
-      batch: false,
-      id: "answer",
-      kind: "date",
-      question: "Start time?",
-      dateFormat: "yyyy-MM-dd HH:mm",
-      required: true,
-      default: "2026-07-03 09:30",
-    });
-  });
-
-  it("parses custom dateFormat strings without forcing one display format", () => {
-    expect(
-      askUserQuestionRequest(
-        block({
-          question: "Start time?",
-          inputType: "date",
-          dateFormat: "yyyy/MM/dd HH:mm",
-          default: "2026/07/03 09:30",
-        }),
-      ),
-    ).toMatchObject({
-      kind: "date",
-      dateFormat: "yyyy/MM/dd HH:mm",
-      default: "2026/07/03 09:30",
-    });
+    ).toBeNull();
   });
 
   it("detects pending native question cards that can be cancelled on page unload", () => {
@@ -115,377 +102,6 @@ describe("ask user question transcript data", () => {
         block({ question: "Name?" }, { toolCallId: undefined }),
       ),
     ).toBe(false);
-  });
-
-  it("parses and trims a single-choice question", () => {
-    expect(
-      askUserQuestionRequest(
-        block({ question: " Choose? ", options: [" A ", "B"] }),
-      ),
-    ).toEqual({
-      batch: false,
-      id: "answer",
-      kind: "single",
-      question: "Choose?",
-      options: [
-        { id: "A", label: "A" },
-        { id: "B", label: "B" },
-      ],
-    });
-  });
-
-  it("parses multiple-choice and confirmation questions", () => {
-    expect(
-      askUserQuestionRequest(
-        block({ question: "Choose?", options: ["A", "B"], multiple: true }),
-      ),
-    ).toEqual({
-      batch: false,
-      id: "answer",
-      kind: "multiple",
-      question: "Choose?",
-      options: [
-        { id: "A", label: "A" },
-        { id: "B", label: "B" },
-      ],
-    });
-    expect(
-      askUserQuestionRequest(block({ question: "Continue?", confirm: true })),
-    ).toEqual({
-      batch: false,
-      id: "answer",
-      kind: "confirm",
-      question: "Continue?",
-    });
-  });
-
-  it("parses defaults for text, choice, multiple-choice, and confirmation questions", () => {
-    expect(
-      askUserQuestionRequest(block({ question: "Name?", default: " Dano " })),
-    ).toMatchObject({ kind: "text", default: "Dano" });
-    expect(
-      askUserQuestionRequest(
-        block({ question: "Pick?", options: ["A", "B"], default: "B" }),
-      ),
-    ).toMatchObject({ kind: "single", default: "B" });
-    expect(
-      askUserQuestionRequest(
-        block({
-          question: "Pick?",
-          options: ["A", "B"],
-          multiple: true,
-          default: ["A"],
-        }),
-      ),
-    ).toMatchObject({ kind: "multiple", default: ["A"] });
-    expect(
-      askUserQuestionRequest(
-        block({ question: "Continue?", confirm: true, default: false }),
-      ),
-    ).toMatchObject({ kind: "confirm", default: false });
-  });
-
-  it("parses grouped questions for one shared submit", () => {
-    expect(
-      askUserQuestionRequest(
-        block({
-          questions: [
-            { id: "name", question: "Name?", default: "Dano" },
-            {
-              id: "env",
-              question: "Environment?",
-              options: ["Test", "Prod"],
-              default: "Test",
-            },
-            {
-              question: "Features?",
-              options: ["Chat", "Deploy"],
-              multiple: true,
-              default: ["Chat"],
-            },
-            {
-              id: "start_at",
-              question: "Start time?",
-              inputType: "date",
-              dateFormat: "yyyy-MM-dd",
-            },
-          ],
-        }),
-      ),
-    ).toEqual({
-      batch: true,
-      questions: [
-        { id: "name", kind: "text", question: "Name?", default: "Dano" },
-        {
-          id: "env",
-          kind: "single",
-          question: "Environment?",
-          options: [
-            { id: "Test", label: "Test" },
-            { id: "Prod", label: "Prod" },
-          ],
-          default: "Test",
-        },
-        {
-          id: "q3",
-          kind: "multiple",
-          question: "Features?",
-          options: [
-            { id: "Chat", label: "Chat" },
-            { id: "Deploy", label: "Deploy" },
-          ],
-          default: ["Chat"],
-        },
-        {
-          id: "start_at",
-          kind: "date",
-          question: "Start time?",
-          dateFormat: "yyyy-MM-dd",
-        },
-      ],
-    });
-  });
-
-  it.each([
-    ["question", { question: "Leave details?" }],
-    ["options", { options: ["A", "B"] }],
-    ["inputType", { inputType: "date" }],
-    ["dateFormat", { dateFormat: "yyyy-MM-dd" }],
-    ["dataSource", { dataSource: { type: "api", endpoint: "/api/options" } }],
-    ["multiple false", { multiple: false }],
-    ["required false", { required: false }],
-    ["empty default", { default: "" }],
-    ["zero default", { default: 0 }],
-    ["false default", { default: false }],
-    ["confirm", { confirm: true }],
-  ])("rejects grouped questions mixed with top-level %s", (_, mixed) => {
-    expect(
-      askUserQuestionRequest(
-        block({
-          ...mixed,
-          questions: [
-            {
-              id: "start_at",
-              question: "Start time?",
-              inputType: "date",
-              dateFormat: "yyyy-MM-dd",
-            },
-          ],
-        }),
-      ),
-    ).toBeNull();
-  });
-
-  it("parses compatible single-question object and alias fields", () => {
-    expect(
-      askUserQuestionRequest(
-        block({
-          questions: {
-            key: "description",
-            title: "请填写说明",
-            type: "textarea",
-            defaultValue: "默认内容",
-          },
-        }),
-      ),
-    ).toEqual({
-      batch: true,
-      questions: [
-        {
-          id: "description",
-          kind: "text",
-          inputType: "textarea",
-          question: "请填写说明",
-          default: "默认内容",
-        },
-      ],
-    });
-  });
-
-  it("parses JSON-stringified compatible questions", () => {
-    expect(
-      askUserQuestionRequest(
-        block({
-          questions: JSON.stringify({
-            key: "description",
-            title: "请填写说明",
-            type: "textarea",
-            defaultValue: "默认内容",
-          }),
-        }),
-      ),
-    ).toMatchObject({
-      batch: true,
-      questions: [
-        {
-          id: "description",
-          inputType: "textarea",
-          question: "请填写说明",
-          default: "默认内容",
-        },
-      ],
-    });
-  });
-
-  it("parses structured options and remote select data sources", () => {
-    expect(
-      askUserQuestionRequest(
-        block({
-          question: "Employee?",
-          inputType: "select",
-          options: [
-            { id: "emp_1001", label: "Alice Chen", extra: { title: "Manager" } },
-            { id: "emp_1002", label: "Bob Li" },
-          ],
-          default: "emp_1002",
-        }),
-      ),
-    ).toEqual({
-      batch: false,
-      id: "answer",
-      kind: "select",
-      question: "Employee?",
-      options: [
-        { id: "emp_1001", label: "Alice Chen", extra: { title: "Manager" } },
-        { id: "emp_1002", label: "Bob Li" },
-      ],
-      default: "emp_1002",
-    });
-
-    expect(
-      askUserQuestionRequest(
-        block({
-          question: "Employee?",
-          inputType: "select",
-          dataSource: {
-            type: "api",
-            endpoint: "/api/employees",
-            searchParam: "keyword",
-            pageParam: "page",
-            pageSizeParam: "pageSize",
-            resultPath: "data.list",
-            totalPath: "data.total",
-            idField: "id",
-            labelField: "name",
-          },
-        }),
-      ),
-    ).toMatchObject({
-      batch: false,
-      kind: "select",
-      dataSource: { endpoint: "/api/employees" },
-      options: [],
-    });
-  });
-
-  it("parses number option ids without stringifying them", () => {
-    expect(
-      askUserQuestionRequest(
-        block({
-          question: "Department?",
-          inputType: "select",
-          options: [
-            { id: 0, label: "未分配" },
-            { id: 1, label: "研发部" },
-            { id: "1", label: "财务部" },
-          ],
-          default: { id: 1, label: "研发部" },
-        }),
-      ),
-    ).toEqual({
-      batch: false,
-      id: "answer",
-      kind: "select",
-      question: "Department?",
-      options: [
-        { id: 0, label: "未分配" },
-        { id: 1, label: "研发部" },
-        { id: "1", label: "财务部" },
-      ],
-      default: 1,
-    });
-  });
-
-  it("parses multiple-choice defaults from option items and number ids", () => {
-    expect(
-      askUserQuestionRequest(
-        block({
-          question: "Departments?",
-          options: [
-            { id: 1, label: "研发部" },
-            { id: 2, label: "财务部" },
-          ],
-          multiple: true,
-          default: [{ id: 1, label: "研发部" }, 2],
-        }),
-      ),
-    ).toMatchObject({
-      kind: "multiple",
-      default: [1, 2],
-    });
-  });
-
-
-  it("rejects malformed or unrelated tool calls", () => {
-    expect(askUserQuestionRequest(block({ question: "" }))).toBeNull();
-    expect(
-      askUserQuestionRequest(block({ question: "Choose?", options: ["A"] })),
-    ).toBeNull();
-    expect(
-      askUserQuestionRequest(block({ question: "Choose?", multiple: true })),
-    ).toBeNull();
-    expect(
-      askUserQuestionRequest(block({ question: "When?", inputType: "date" })),
-    ).toBeNull();
-    expect(
-      askUserQuestionRequest(
-        block({
-          question: "When?",
-          inputType: "date",
-          dateFormat: "yyyy-MM-dd HH:mm:ss",
-        }),
-      ),
-    ).toBeNull();
-    expect(
-      askUserQuestionRequest(
-        block({ question: "When?", inputType: "date", dateFormat: "yyyy-MM-dd", required: "yes" }),
-      ),
-    ).toBeNull();
-    expect(
-      askUserQuestionRequest(
-        block({
-          questions: [
-            {
-              id: "start_at",
-              question: "When?",
-              inputType: "date",
-              dateFormat: "yyyy-MM-dd",
-              required: "yes",
-            },
-          ],
-        }),
-      ),
-    ).toBeNull();
-    expect(
-      askUserQuestionRequest(
-        block({ question: "Name?", dateFormat: "yyyy-MM-dd" }),
-      ),
-    ).toBeNull();
-    expect(
-      askUserQuestionRequest(
-        block({ question: "Continue?", options: ["A", "B"], confirm: true }),
-      ),
-    ).toBeNull();
-    expect(
-      askUserQuestionRequest(
-        block({ question: "Name?" }, { toolName: "other_tool" }),
-      ),
-    ).toBeNull();
-    expect(
-      askUserQuestionRequest(
-        block({ questions: [{ id: "dup", question: "A?" }, { id: "dup", question: "B?" }] }),
-      ),
-    ).toBeNull();
   });
 
   it("parses answered result details", () => {
@@ -517,12 +133,13 @@ describe("ask user question transcript data", () => {
 
   it("formats grouped answers with question labels and markdown bullets", () => {
     const request = askUserQuestionRequest(
-      block({
+      questionBlock({
+        batch: true,
         questions: [
-          { id: "expense_type", question: "费用类型？", default: "交通费" },
-          { id: "expense_date", question: "发生时间：", default: "2026-06-28" },
-          { id: "expense_amount", question: "金额", default: "0" },
-          { id: "expense_reason", question: "事由", default: "办公相关支出" },
+          { id: "expense_type", kind: "text", question: "费用类型？", default: "交通费" },
+          { id: "expense_date", kind: "text", question: "发生时间：", default: "2026-06-28" },
+          { id: "expense_amount", kind: "text", question: "金额", default: "0" },
+          { id: "expense_reason", kind: "text", question: "事由", default: "办公相关支出" },
         ],
       }),
     );
@@ -546,7 +163,10 @@ describe("ask user question transcript data", () => {
 
   it("formats structured option answers with user-facing labels", () => {
     const request = askUserQuestionRequest(
-      block({
+      questionBlock({
+        batch: false,
+        id: "answer",
+        kind: "single",
         question: "请选择员工",
         options: [
           { id: "emp_1001", label: "张三" },
@@ -567,7 +187,10 @@ describe("ask user question transcript data", () => {
 
   it("formats number option answers with user-facing labels", () => {
     const request = askUserQuestionRequest(
-      block({
+      questionBlock({
+        batch: false,
+        id: "answer",
+        kind: "single",
         question: "请选择部门",
         options: [
           { id: 1, label: "研发部" },
