@@ -110,6 +110,7 @@ async def run_request_onboarding(
     deploy: dict | None = None, credentials: dict | None = None, run_id: str | None = None,
     goal: dict | None = None, storage_state: dict | None = None,
     allow_repair: bool = True,
+    recording_pi_required: bool = False,
 ) -> dict:
     """抓请求路径:把录制抓到的提交请求(已参数化)落成可执行 Skill → dry 自检 → 三模型评审+自动修复 → 发布。
 
@@ -127,6 +128,20 @@ async def run_request_onboarding(
     # start any ReviewBoard/goal/repair model call as a parallel fallback.
     from dano.onboarding.recording_pi import active_recording_session
     recording_session = active_recording_session(run_id)
+    if recording_pi_required and recording_session is None:
+        raise RuntimeError("录制发布要求 Pi AgentSession，但当前 session 不存在或已经关闭")
+
+    def require_same_recording_session() -> object | None:
+        """Keep recording-only mode sticky across every async publish stage."""
+        current = active_recording_session(run_id)
+        if recording_pi_required and (
+            current is None
+            or recording_session is None
+            or current is not recording_session
+        ):
+            raise RuntimeError("录制发布的 Pi AgentSession 已丢失或被替换，禁止回退其他模型链路")
+        return current
+
     sid = subsystem
     materials.register(materials.MaterialContext(
         run_id=run_id, tenant=tenant, system_instance_id=sid, subsystem=sid,
@@ -159,7 +174,8 @@ async def run_request_onboarding(
         #   用户确认的 goal 不过 → 阻断(需澄清);自动提炼的不过 → 仅作建议(不因 LLM 抖动阻断发布)。
         from dano.execution.page.request_capture import goal_needs_confirmation, validate_goal
         user_confirmed = bool(goal)
-        if not goal and recording_session is None:
+        require_same_recording_session()
+        if not goal and not recording_pi_required and recording_session is None:
             goal = await _auto_goal(action, api_request)
         goal = _sync_goal_required_inputs(goal, api_request)
         goal_issues: list[str] = validate_goal(goal, api_request) if goal else []
@@ -188,6 +204,7 @@ async def run_request_onboarding(
                     "reason": "字段语义门:必填参数名不可读(内部机器标识),需澄清命名"}
         d = await T.save_draft(run_id, {"system_instance_id": sid, "asset_type": "page_script",
                                         "asset_key": action, "body": body})
+        require_same_recording_session()
         log.info("ingest.draft_saved", draft_id=d.get("asset_draft_id"))
         # 自适应活体验证:仅当环境可逆沙箱 + 有回查手段(plan=live)且带测试登录态,才真发写 + fact_check → 可升 verified
         from dano.execution.page.request_capture import capture_verification_plan
@@ -198,6 +215,7 @@ async def run_request_onboarding(
         rp = await T.self_check_recording(run_id, {"asset_draft_id": d["asset_draft_id"],
                                                    "sample_inputs": sample_inputs or {},
                                                    "live": do_live, "storage_state": storage_state, "verify": False})
+        require_same_recording_session()
         log.info("ingest.self_check", passed=rp.get("passed"), mode=rp.get("mode"))
         if not rp["passed"]:
             sc = (rp.get("structured_output") or {}).get("self_check") or []
@@ -224,6 +242,7 @@ async def run_request_onboarding(
         # P2:写抓请求页面发布层**硬要求三模型评审证据**(verify_reviewed)。评审 client 未注入但评审已启用 →
         # 直接 return 可执行指引,**不静默跳过后在 publish 阶段以"缺角色"晦涩失败**(主路径网关启动会注入)。
         from dano.config import get_settings as _get_settings
+        require_same_recording_session()
         if recording_session is None and T._review_board is None and _get_settings().review_enabled:
             log.warning("ingest.gate.review_unavailable", review_enabled=True)
             return {"ok": False, "stage": "review", "status": IngestionStatus.NEEDS_CLARIFICATION.value,
@@ -237,6 +256,9 @@ async def run_request_onboarding(
             # 注:dry/self_check(录制 by-design 安全模式)的误判否决已在 request_review 内确定性剔除(改 DB 证据),
             # 故此处 verdicts 已是修正后的(评审仅因"未真跑"否决不会误阻断发布)。
             rev = await T.request_review(run_id, {"asset_draft_id": d["asset_draft_id"]})
+            require_same_recording_session()
+            if recording_pi_required and rev.get("source") != "pi_agent_session":
+                raise RuntimeError("录制发布未取得 Pi AgentSession 审核证据，禁止使用 ReviewBoard 结果")
             review_run_ids = rev.get("review_run_ids", []) or []
             if rev.get("review_unavailable"):
                 return {
@@ -254,13 +276,14 @@ async def run_request_onboarding(
             # Active recording runs have already been reviewed by their Pi
             # AgentSession.  Never borrow the process-wide ReviewBoard client
             # or its repair proposer, even when one happens to be configured.
-            board = None if recording_session is not None else T._review_board
+            require_same_recording_session()
+            board = None if (recording_pi_required or recording_session is not None) else T._review_board
             client, model = getattr(board, "client", None), (getattr(board, "models", None) or {}).get("acceptance")
-            proposer = None if recording_session is not None else T._fix_proposer
+            proposer = None if (recording_pi_required or recording_session is not None) else T._fix_proposer
             if proposer is None and client is not None and model:
                 async def proposer(a, f, g, _c=client, _m=model):     # noqa: E306
                     return await generate_fix_ops(_c, _m, goal=g, api_request=a, findings=f)
-            if findings and (not allow_repair or recording_session is not None):
+            if findings and (not allow_repair or recording_pi_required or recording_session is not None):
                 details = [str(f.get("detail") or f.get("message") or f) for f in findings]
                 return {
                     "ok": False,
@@ -308,6 +331,7 @@ async def run_request_onboarding(
                         "clarifications": reasons or ["三模型审核未通过"],
                         "reason": "审核未通过(格式 / 业务逻辑 / 风险合规)"}
         # 发布硬闸门:verify_publishable(self_check 等证据)+ verify_reviewed(capture 仍按既定放行,审核闸门在上方编排层把守)
+        require_same_recording_session()
         pub = await T.publish_asset(run_id, {"asset_draft_id": d["asset_draft_id"],
                                              "validation_run_ids": rp["validation_run_ids"],
                                              "review_run_ids": review_run_ids})

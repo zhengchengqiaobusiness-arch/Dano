@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from uuid import UUID, uuid4
 
 import structlog
@@ -825,6 +826,9 @@ async def request_review(run_id: str, params: dict) -> dict:
             or {str(item.get("role") or "") for item in verdicts} != expected_roles
         ):
             raise ToolError("录制 review 未完整覆盖 acceptance/security/compliance")
+        blocking_reasons = review.get("blocking_reasons") or []
+        if blocking_reasons:
+            raise ToolError("录制 review 存在 blocking_reasons，禁止发布: " + "; ".join(blocking_reasons))
         for verdict in verdicts:
             if not isinstance(verdict.get("passed"), bool):
                 raise ToolError(f"录制 review.{verdict.get('role')}.passed 必须是布尔值")
@@ -834,6 +838,56 @@ async def request_review(run_id: str, params: dict) -> dict:
             model_id = verdict.get("model_id")
             if model_id is not None and (not isinstance(model_id, str) or not model_id.strip()):
                 raise ToolError(f"录制 review.{verdict.get('role')}.model_id 必须是非空字符串")
+
+        # The Pi reviews a frozen FlowSpec release before the database draft
+        # exists.  Bind that review to the exact release snapshot embedded in
+        # the eventual draft, then bind its first consumption to one concrete
+        # draft id/content hash.  Merely matching a flow version is not enough:
+        # a rebuilt or substituted draft must never inherit earlier evidence.
+        from dano.execution.page.flow_spec import FlowSpec, flow_spec_fingerprint
+
+        current_spec = recording_session.current_flow_spec()
+        current_fingerprint = flow_spec_fingerprint(current_spec)
+        release = dict((current_spec.meta or {}).get("release_candidate") or {})
+        review_fingerprint = str(review.get("flow_fingerprint") or "")
+        if not review_fingerprint or review_fingerprint != current_fingerprint:
+            raise ToolError("录制 review 未绑定当前 FlowSpec 发布指纹")
+        if str(release.get("flow_fingerprint") or "") != review_fingerprint:
+            raise ToolError("录制 review 与冻结发布候选不一致")
+        api_request = draft.body.get("api_request") if isinstance(draft.body, dict) else None
+        release_snapshot = (
+            api_request.get("_release_snapshot")
+            if isinstance(api_request, dict) else None
+        )
+        if not isinstance(release_snapshot, dict):
+            raise ToolError("录制发布草案缺少冻结 release snapshot")
+        if str(release_snapshot.get("flow_fingerprint") or "") != review_fingerprint:
+            raise ToolError("录制发布草案与 Pi review 指纹不一致")
+        snapshot_flow = release_snapshot.get("flow_spec")
+        if not isinstance(snapshot_flow, dict):
+            raise ToolError("录制发布草案缺少冻结 FlowSpec")
+        try:
+            snapshot_fingerprint = flow_spec_fingerprint(FlowSpec.model_validate(snapshot_flow))
+        except Exception as exc:  # noqa: BLE001 - invalid persisted release evidence
+            raise ToolError("录制发布草案的冻结 FlowSpec 无效") from exc
+        if snapshot_fingerprint != review_fingerprint:
+            raise ToolError("录制发布草案的冻结 FlowSpec 与 Pi review 不一致")
+        draft_id = str(draft.asset_draft_id)
+        draft_hash = str(getattr(draft, "content_hash", "") or "")
+        if not draft_hash:
+            raise ToolError("录制发布草案缺少 content hash")
+        bound_draft_id = str(review.get("draft_id") or "")
+        bound_draft_hash = str(review.get("draft_content_hash") or "")
+        if bound_draft_id and bound_draft_id != draft_id:
+            raise ToolError("Pi review 已绑定其他发布草案，禁止跨草案复用")
+        if bound_draft_hash and bound_draft_hash != draft_hash:
+            raise ToolError("Pi review 已绑定其他草案内容，禁止跨内容复用")
+        review = {
+            **review,
+            "draft_id": draft_id,
+            "draft_content_hash": draft_hash,
+        }
+        recording_session.last_review = dict(review)
         review_run_ids, out = [], []
         for verdict in verdicts:
             rr = await _ds.record_review(
@@ -990,6 +1044,67 @@ def _strict_recording_params(params: dict, *, required: set[str], optional: set[
         raise ToolError("base_flow_version 必须是整数")
 
 
+def _recording_facts(spec) -> dict:  # noqa: ANN001
+    return spec.request_facts.model_dump(mode="json")
+
+
+def _restore_recording_session(
+    session,  # noqa: ANN001
+    before_spec,  # noqa: ANN001
+    *,
+    last_submission_kind,
+    last_review: dict,
+) -> None:
+    """Restore a failed recording mutation through the session's public bind API."""
+    bind = getattr(session, "bind_flow_spec", None)
+    if not callable(bind):
+        raise RuntimeError("录制 Pi Session 不支持原子回滚")
+    bind(before_spec)
+    if hasattr(session, "last_submission_kind"):
+        session.last_submission_kind = last_submission_kind
+    session.last_review = deepcopy(last_review)
+
+
+async def _apply_recording_submission_atomic(
+    session,  # noqa: ANN001
+    submission: dict,
+    *,
+    mode: str,
+    base_flow_version: int,
+) -> dict:
+    before_spec = session.current_flow_spec()
+    before_facts = _recording_facts(before_spec)
+    before_kind = getattr(session, "last_submission_kind", "")
+    before_review = deepcopy(getattr(session, "last_review", {}) or {})
+    try:
+        result = await session.apply_submission(
+            submission,
+            mode=mode,
+            base_flow_version=base_flow_version,
+        )
+        if _recording_facts(session.current_flow_spec()) != before_facts:
+            raise ToolError(
+                "录制计划不得修改原始 request facts"
+                if mode == "plan" else "录制修复不得修改原始 request facts"
+            )
+        return result
+    except Exception as exc:  # noqa: BLE001 - rollback all partial session mutations
+        try:
+            _restore_recording_session(
+                session,
+                before_spec,
+                last_submission_kind=before_kind,
+                last_review=before_review,
+            )
+        except Exception as rollback_exc:  # noqa: BLE001
+            raise ToolError(f"录制 {mode} 失败且会话回滚失败: {rollback_exc}") from rollback_exc
+        if isinstance(exc, ToolError):
+            raise
+        if isinstance(exc, (TypeError, ValueError, RuntimeError)):
+            raise ToolError(str(exc)) from exc
+        raise
+
+
 async def get_recording_state(run_id: str, params: dict) -> dict:
     _strict_recording_params(params, required={"recording_id"}, optional={"flow_version"})
     return await _recording_session(run_id, params).get_recording_state()
@@ -1010,18 +1125,12 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
         submission = {"semantic_plan": dict(raw_plan), "ops": []}
     submission.setdefault("submission_id", str(uuid4()))
     session = _recording_session(run_id, params)
-    before_facts = session.current_flow_spec().request_facts.model_dump(mode="json")
-    try:
-        result = await session.apply_submission(
-            submission,
-            mode="plan",
-            base_flow_version=params["base_flow_version"],
-        )
-    except (TypeError, ValueError, RuntimeError) as exc:
-        raise ToolError(str(exc)) from exc
-    if session.current_flow_spec().request_facts.model_dump(mode="json") != before_facts:
-        raise ToolError("录制计划不得修改原始 request facts")
-    return result
+    return await _apply_recording_submission_atomic(
+        session,
+        submission,
+        mode="plan",
+        base_flow_version=params["base_flow_version"],
+    )
 
 
 async def get_validation_report(run_id: str, params: dict) -> dict:
@@ -1039,18 +1148,12 @@ async def submit_recording_repair(run_id: str, params: dict) -> dict:
     if not isinstance(operations, list) or any(not isinstance(op, dict) for op in operations):
         raise ToolError("operations 必须是对象数组")
     session = _recording_session(run_id, params)
-    before_facts = session.current_flow_spec().request_facts.model_dump(mode="json")
-    try:
-        result = await session.apply_submission(
-            {"ops": operations, "submission_id": str(uuid4())},
-            mode="repair",
-            base_flow_version=params["base_flow_version"],
-        )
-    except (TypeError, ValueError, RuntimeError) as exc:
-        raise ToolError(str(exc)) from exc
-    if session.current_flow_spec().request_facts.model_dump(mode="json") != before_facts:
-        raise ToolError("录制修复不得修改原始 request facts")
-    return result
+    return await _apply_recording_submission_atomic(
+        session,
+        {"ops": operations, "submission_id": str(uuid4())},
+        mode="repair",
+        base_flow_version=params["base_flow_version"],
+    )
 
 
 async def submit_recording_review(run_id: str, params: dict) -> dict:
@@ -1071,6 +1174,8 @@ async def submit_recording_review(run_id: str, params: dict) -> dict:
         or any(not isinstance(reason, str) for reason in blocking_reasons)
     ):
         raise ToolError("review.blocking_reasons 必须是字符串数组")
+    if blocking_reasons:
+        raise ToolError("review.blocking_reasons 非空，发布审核必须失败")
     verdicts: list[dict[str, object]] = []
     for role in ("acceptance", "security", "compliance"):
         raw = review.get(role)
@@ -1098,8 +1203,18 @@ async def submit_recording_review(run_id: str, params: dict) -> dict:
         "blocking_reasons": blocking_reasons,
         "all_passed": all(bool(item["passed"]) for item in verdicts),
     }
+    session = _recording_session(run_id, params)
+    from dano.execution.page.flow_spec import flow_spec_fingerprint
+
+    current_spec = session.current_flow_spec()
+    fingerprint = flow_spec_fingerprint(current_spec)
+    release = dict((current_spec.meta or {}).get("release_candidate") or {})
+    if str(release.get("flow_fingerprint") or "") != fingerprint:
+        raise ToolError("当前 FlowSpec 尚未冻结为发布候选，不能提交发布审核")
+    normalized["flow_fingerprint"] = fingerprint
+    normalized["release_id"] = str(release.get("release_id") or "")
     try:
-        return await _recording_session(run_id, params).submit_review(
+        return await session.submit_review(
             normalized,
             base_flow_version=params["base_flow_version"],
         )

@@ -374,7 +374,7 @@ FlowSpec
 ├── capability_relations
 ├── review_items
 ├── goal
-└── meta                RequestGraph、版本、指纹、PI 历史等
+└── meta                RequestGraph、版本、指纹、录制 Agent 提交审计等
 ```
 
 ### 9.2 请求选择和物化
@@ -448,10 +448,10 @@ Capability 记录请求成员、输入/内部/计算/输出字段、依赖、执
 | `flow_update` | 应用结构化 edits：字段、步骤、链接、能力、顺序、review 状态等 |
 | `flow_replace` | 用前端 JSON 整体替换，并追加版本记录 |
 | `refresh_flow_spec` | 当前后端权威版本重新下发 |
-| `step_naming` | 用语义模型生成业务步骤名 |
-| `business_description` | 生成结构化业务说明 |
-| `orchestrate_flow` | 运行 PI `plan` 模式，生成或优化能力 |
-| `auto_fix_flow` | 运行 PI `repair` 模式，修复可修复问题 |
+| `step_naming` | 在同一 Pi `AgentSession` 中提交步骤命名规划 |
+| `business_description` | 在同一 Pi `AgentSession` 中提交结构化业务说明 |
+| `orchestrate_flow` | 让 Pi 读取最新权威状态并通过 `submit_recording_plan` 提交规划 |
+| `auto_fix_flow` | 让 Pi 读取最新验证报告并通过 `submit_recording_repair` 提交修复 |
 
 客户端显示的 FlowSpec 会脱敏认证头、身份值、选项源认证信息和响应中的敏感字段。客户端回传时，后端会从当前权威版本恢复被遮蔽的 body、headers、identity 和 select source 信息，防止脱敏值覆盖真实执行配置。
 
@@ -463,38 +463,30 @@ Capability 记录请求成员、输入/内部/计算/输出字段、依赖、执
 - 遇到 `step not found` 或 `link not found`，前端自动发送 `refresh_flow_spec`。
 - FlowSpec 每次下发带 `meta.current_fingerprint`，发布时用于乐观并发控制。
 
-### 10.3 PI 闭环
+### 10.3 唯一 Pi AgentSession 闭环
 
-`run_recording_pi_loop()` 明确区分首次完整生成和后续增量补强。是否首次以
-`meta.capability_generation.initial_completed + fact_hash` 为准，不再只看当前是否已有 capability：
+录制 WebSocket 为服务端签发的 opaque `recording_id` 复用一个长期 Node 进程和一个持久化 Pi `AgentSession`。首次连接由 `SessionManager.create` 建立会话；断线后只凭同一 opaque ID 在租户隔离目录中由 `SessionManager.open` 恢复。服务端对该目录持有跨进程独占锁，防止多 worker 同时追加同一 JSONL；浏览器不得接收或回传 `session_file`、目录或桥接令牌。
 
 ```text
-稳定录制事实
-  → 首次完整 semantic_plan（业务、接口角色、字段、能力、关系）
-  → 编译为白名单 FlowEdits
-  → Validator
-  → 同一上下文追加校验差量并受限 Repair
-  → 再验证
-  → 通过、没有变化或达到轮次上限后停止
-
-后续点击
-  → 继承已接受 semantic_plan
-  → 锁定能力身份/类型/接口成员
-  → 只补字段、依赖、节点、Schema 与返回映射
+当前后端录制事实 / FlowSpec
+  → Pi get_recording_state
+  → Pi submit_recording_plan(base_flow_version)
+  → 后端确定性 Schema、事实、版本与候选准入
+  → Pi get_validation_report
+  → Pi submit_recording_repair(base_flow_version)
+  → 后端重新验证
+  → 发布前 Pi submit_recording_review(base_flow_version)
+  → 后端三角色证据与发布硬闸门
 ```
 
 约束：
 
-- 默认最多 4 轮，单次模型调用有超时。
-- 首次 `plan` 必须覆盖全部已物化接口和全部调用方字段；模型不可用时保留确定性结果并标记 `degraded_deterministic`，不伪装成完整语义生成。
-- 后续 `plan` 是增量优化；旧工作台自动迁移为该模式，不重开首次边界。
-- `repair` 处理错误、警告、review items 和可自动修复问题。
-- Repair 不允许偷偷扩张请求范围或改变人工确认的作用域。
-- 模型输出先应用到副本；新增错误、Wire 合同变化、dry-run 退化或增量能力范围变化会整轮回滚。
-- 能力输入输出、请求成员和依赖会在每轮后重新同步。
-- 可确定性确认的 ready capability 会自动确认并生成确认哈希。
-- 同一 PI run 使用稳定消息前缀和追加式校验差量；完全相同的重复优化直接命中工作台结果缓存，不再请求模型。
-- PI 历史写入 `meta.recording_pi_loop`，并追加 FlowSpec 版本。
+- 录制 Runtime 只开放 `get_recording_state`、`submit_recording_plan`、`get_validation_report`、`submit_recording_repair`、`submit_recording_review` 五个工具；Shell、文件工具、skills、extensions、prompt templates 和 context files 均关闭。
+- `plan`、`repair`、步骤命名、业务说明和发布审核复用同一 `AgentSession`，但所有判断必须以工具读取的最新后端状态为准，不以会话记忆覆盖录制事实。
+- 模型提交只能通过带 `base_flow_version` 的受控工具写入；后端负责不可变请求事实、操作白名单、版本冲突、Wire 合同、dry-run 和发布闸门。
+- Retry 与 compaction 只由 Pi `SettingsManager` 原生能力配置和执行；应用层不维护模型消息数组，不编写摘要、重试、压缩或模型结果缓存。
+- Pi、Provider 或工具失败时当前操作明确失败；禁止回退到 Python 模型直连、确定性伪成功或另一套评审逻辑。
+- 每次已接受的提交写入 `meta.recording_agent_session` 的操作证据，并通过 FlowSpec 版本链保留审计记录；该元数据不是模型会话历史。
 
 ## 11. 阶段九：发布前校验
 

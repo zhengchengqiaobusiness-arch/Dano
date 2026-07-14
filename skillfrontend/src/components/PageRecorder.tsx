@@ -170,11 +170,9 @@ interface FlowSpecData {
     capability_model?: { status?: string; source?: string; generated_count?: number };
     capability_generation?: {
       protocol?: string; status?: string; initial_completed?: boolean; last_mode?: string;
-      last_cache_hit?: boolean; application_cache_hit?: boolean; model_calls?: number; model_cache_hits?: number;
-      provider_cache_hits?: number; model_cache_rate?: number;
       indexed_range_changes?: any[]; [k: string]: any;
     };
-    recording_pi_loop?: { mode?: "plan" | "repair"; updated_at?: string; [k: string]: any };
+    recording_agent_session?: { mode?: "plan" | "repair"; updated_at?: string; [k: string]: any };
     request_graph?: {
       all_requests?: RequestGraphEntry[];
       selected_steps?: RequestGraphEntry[];
@@ -215,9 +213,6 @@ interface FlowOperationReport {
   changed?: boolean;
   changes?: Record<string, number>;
   summary?: string;
-  cache_hit?: boolean;
-  model_calls?: number;
-  model_errors?: string[];
   edit_errors?: string[];
   errors_before?: number;
   errors_after?: number;
@@ -288,6 +283,39 @@ function recorderWebSocketUrl() {
   }
   const proto = location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${location.host}/onboarding/page/record`;
+}
+
+const PI_RECORDING_ID_PATTERN = /^recording_[0-9a-f]{32}$/;
+
+function piRecordingStorageKey(tenant: string, subsystem: string, startUrl: string) {
+  return ["dano", "recording-pi", tenant, subsystem, startUrl]
+    .map((part) => encodeURIComponent(part))
+    .join(":");
+}
+
+function readPiRecordingId(storageKey: string): string | null {
+  try {
+    const value = window.sessionStorage.getItem(storageKey);
+    return value && PI_RECORDING_ID_PATTERN.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePiRecordingId(storageKey: string, value: string) {
+  if (!PI_RECORDING_ID_PATTERN.test(value)) return;
+  try {
+    // The opaque resume ID is tab-scoped. Server paths, session files and
+    // credentials are never accepted or persisted by the browser.
+    window.sessionStorage.setItem(storageKey, value);
+  } catch {
+    // The component ref still supports reconnects when storage is unavailable.
+  }
+}
+
+function piRecordingIdFromMessage(messageData: any): string | null {
+  const value = messageData?.pi_session?.recording_id ?? messageData?.pi_recording_id;
+  return typeof value === "string" && PI_RECORDING_ID_PATTERN.test(value) ? value : null;
 }
 const CATEGORY_OPTIONS = [
   { label: "用户参数", value: "user_param" },
@@ -1108,6 +1136,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const sessionStartedRef = useRef(false);
   const connectionErrorRef = useRef("");
   const heartbeatTimerRef = useRef<number | null>(null);
+  const piRecordingScopeRef = useRef("");
+  const piRecordingIdRef = useRef<string | null>(null);
   const wsAliveRef = useRef(false);                                // FC2 修复:跟踪 WS 存活,避免 send 失败时反复弹错
   const isComposingRef = useRef(false);                           // FH2 修复:中文输入法拼写中标记,防 onKbInput 误发中间字符
 
@@ -1503,6 +1533,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function openRecorderConnection() {
     const intercept = recordingMode === "record_only";
+    const targetUrl = startUrl.trim();
+    const piRecordingScope = piRecordingStorageKey(tenant, subsystem, targetUrl);
+    if (piRecordingScopeRef.current !== piRecordingScope) {
+      piRecordingScopeRef.current = piRecordingScope;
+      piRecordingIdRef.current = readPiRecordingId(piRecordingScope);
+    }
+    const piRecordingId = piRecordingIdRef.current;
     intentionalCloseRef.current = false;
     sessionStartedRef.current = false;
     connectionErrorRef.current = "";
@@ -1513,10 +1550,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     ws.onopen = () => {
       if (wsRef.current !== ws) return;
       send({
-        type: "start", tenant, subsystem, start_url: startUrl.trim(),
+        type: "start", tenant, subsystem, start_url: targetUrl,
         base_url: baseUrl.trim() || undefined,
         storage_state: storageState.trim() || undefined,
         intercept,
+        pi_recording_id: piRecordingId || undefined,
       });
       // Keep both proxy directions active. Long periods without page changes can
       // otherwise be treated as an idle WebSocket by an intermediate proxy.
@@ -1528,6 +1566,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     ws.onmessage = (ev) => {
       if (wsRef.current !== ws) return;
       let m: any; try { m = JSON.parse(ev.data); } catch { return; }
+      const issuedPiRecordingId = piRecordingIdFromMessage(m);
+      if (issuedPiRecordingId) {
+        piRecordingScopeRef.current = piRecordingScope;
+        piRecordingIdRef.current = issuedPiRecordingId;
+        writePiRecordingId(piRecordingScope, issuedPiRecordingId);
+      }
       if (m.type === "started") {
         sessionStartedRef.current = true;
         const serverAction = m.action ?? m.action_name;
@@ -1601,7 +1645,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           // response contains the complete server state and is accepted normally.
           if (!hasNewerLocalMutation) acceptFlowSpec(fs);
           setLastServerJson(JSON.stringify(fs));
-          finishFlowOperation(fs.meta?.recording_pi_loop, m.operation, m.operation_id);
+          finishFlowOperation(fs.meta?.recording_agent_session, m.operation, m.operation_id);
         }
         if (m.check_report && !hasNewerLocalMutation) setCheckReport(m.check_report);
         else if (hasNewerLocalMutation) setCheckReport(null);
@@ -1609,7 +1653,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           const report = m.operation_report as FlowOperationReport;
           setLastOperationReport(report);
           if (report.changed) message.success(report.summary || "流程编排已更新");
-          else if (report.model_errors?.length || report.edit_errors?.length) message.error(report.summary || "自动修复存在无效建议");
+          else if (report.edit_errors?.length) message.error(report.summary || "自动修复存在无效建议");
           else message.info(report.summary || "检查完成，没有可自动修改的内容");
         }
         if (m.operation === "flow_update" || m.operation === "flow_replace") finishQueuedFlowMutation(m.operation_id);
@@ -2234,7 +2278,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!currentSpec) return;
     flowOperationRef.current = {
       mode: "plan",
-      previousUpdatedAt: currentSpec.meta?.recording_pi_loop?.updated_at,
+      previousUpdatedAt: currentSpec.meta?.recording_agent_session?.updated_at,
       operationId: newCostlyOperationId("plan"),
     };
     setOrchestrateBusy(true);
@@ -2250,7 +2294,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     }
     flowOperationRef.current = {
       mode: "repair",
-      previousUpdatedAt: flowSpecRef.current.meta?.recording_pi_loop?.updated_at,
+      previousUpdatedAt: flowSpecRef.current.meta?.recording_agent_session?.updated_at,
       operationId: newCostlyOperationId("repair"),
     };
     setAutoFixBusy(true);
@@ -2827,8 +2871,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 {lastOperationReport && (
                   <Space wrap size={4}>
                     <Typography.Text style={{ fontSize: 12 }}>{lastOperationReport.summary || "编排操作完成"}</Typography.Text>
-                    {lastOperationReport.cache_hit && <Tag color="green">结果复用</Tag>}
-                    <Tag>模型调用 {lastOperationReport.model_calls || 0}</Tag>
                     {!!lastOperationReport.edit_errors?.length && <Tag color="orange">跳过无效建议 {lastOperationReport.edit_errors.length}</Tag>}
                     <Tag color={(lastOperationReport.errors_after || 0) > 0 ? "error" : "success"}>
                       错误 {lastOperationReport.errors_before || 0} → {lastOperationReport.errors_after || 0}
@@ -3589,16 +3631,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <Button icon={<RobotOutlined />} loading={namingBusy} onClick={() => { setNamingBusy(true); send({ type: "step_naming" }); }}>命名步骤</Button>
           {flowSpec.meta?.capability_generation && <>
             <Tag color={flowSpec.meta.capability_generation.initial_completed ? "success" : "warning"}>
-              {flowSpec.meta.capability_generation.initial_completed ? "首次语义生成完成" : "确定性降级结果"}
+              {flowSpec.meta.capability_generation.initial_completed ? "语义规划完成" : "语义规划待补全"}
             </Tag>
-            <Tag color={flowSpec.meta.capability_generation.application_cache_hit ? "green" : "blue"}>
-              {flowSpec.meta.capability_generation.application_cache_hit
-                ? "结果复用 · 零模型调用"
-                : `模型调用 ${flowSpec.meta.capability_generation.model_calls || 0}`}
-            </Tag>
-            {!flowSpec.meta.capability_generation.application_cache_hit
-              && !!flowSpec.meta.capability_generation.provider_cache_hits
-              && <Tag color="cyan">模型前缀缓存 {Math.round((flowSpec.meta.capability_generation.model_cache_rate || 0) * 100)}%</Tag>}
+            {flowSpec.meta?.recording_agent_session?.mode &&
+              <Tag color="blue">Pi {flowSpec.meta.recording_agent_session.mode === "repair" ? "修复" : "规划"}</Tag>}
             {!!flowSpec.meta.capability_generation.indexed_range_changes?.length &&
               <Tag color="cyan">识别区间字段 {flowSpec.meta.capability_generation.indexed_range_changes.length}</Tag>}
           </>}

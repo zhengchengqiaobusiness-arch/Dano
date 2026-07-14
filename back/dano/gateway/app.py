@@ -1542,6 +1542,7 @@ async def record_ws(ws: WebSocket) -> None:
                     deploy=init.get("deploy"), storage_state=login_state,
                     allow_repair=False,
                     run_id=pi_session.run_id,
+                    recording_pi_required=True,
                 )
                 if rep.get("ok"):
                     try:

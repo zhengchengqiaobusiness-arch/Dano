@@ -13453,54 +13453,6 @@ def _auto_confirm_ready_capabilities(spec: FlowSpec) -> FlowSpec:
     return spec
 
 
-def _semantic_optimization_input_hash(spec: FlowSpec) -> str:
-    report = validate_flow_spec(spec)
-    payload = {
-        "summary": flow_spec_canonical_summary(spec),
-        "mutable_contract": {
-            "fields": [
-                {
-                    "step_id": step.step_id,
-                    "path": param.path,
-                    "key": param.key,
-                    "type": param.type,
-                    "category": param.category,
-                    "source_kind": param.source_kind,
-                    "required": bool(param.required),
-                    "exposed": bool(param.exposed_to_user),
-                    "locked": bool(param.locked),
-                }
-                for step in spec.steps
-                for param in step.params
-            ],
-            "capabilities": [
-                {
-                    "id": cap.capability_id,
-                    "name": cap.name,
-                    "title": cap.title,
-                    "kind": cap.kind,
-                    "intent": cap.intent,
-                    "step_ids": list(cap.step_ids or []),
-                    "input_schema": cap.input_schema or {},
-                    "output_schema": cap.output_schema or {},
-                    "confirmed": bool(cap.confirmed),
-                    "locked": bool(cap.locked),
-                }
-                for cap in spec.capabilities or []
-            ],
-        },
-        "errors": list(report.get("errors") or []),
-        "warnings": list(report.get("warnings") or []),
-        "unresolved_reviews": sorted(
-            item.id for item in refresh_review_items(spec.model_copy(deep=True)).review_items
-            if not item.resolved
-        ),
-        "removed_capabilities": sorted(str(item) for item in ((spec.meta or {}).get("removed_capabilities") or [])),
-        "removed_steps": (spec.meta or {}).get("capability_removed_steps") or {},
-    }
-    return _stable_json_hash(payload)
-
-
 def recording_agent_state(spec: FlowSpec) -> dict[str, Any]:
     """Return the authoritative, redacted state available to Pi tools."""
     current = refresh_review_items(_sync_capability_io_schemas(spec.model_copy(deep=True)))
@@ -13648,7 +13600,6 @@ async def apply_recording_agent_submission(
             ),
             "status": generation_status,
             "last_mode": "initial" if initial_generation else mode,
-            "last_optimization_input_hash": _semantic_optimization_input_hash(current),
             "indexed_range_changes": range_changes,
             "indexed_range_gate": range_gate,
             "updated_at": now,

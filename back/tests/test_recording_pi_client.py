@@ -262,6 +262,19 @@ def test_recording_pi_rejects_non_opaque_ids_and_has_no_session_path_argument() 
     assert "session_file" not in inspect.signature(recording_pi.RecordingPiSession).parameters
 
 
+def test_recording_pi_scope_file_lock_excludes_other_gateway_processes(tmp_path) -> None:  # noqa: ANN001
+    lock_path = tmp_path / ".pi-session.lock"
+    first = recording_pi._acquire_scope_file_lock(lock_path)
+    try:
+        with pytest.raises(recording_pi.RecordingPiError, match="另一个网关进程"):
+            recording_pi._acquire_scope_file_lock(lock_path)
+    finally:
+        recording_pi._release_scope_file_lock(first)
+
+    second = recording_pi._acquire_scope_file_lock(lock_path)
+    recording_pi._release_scope_file_lock(second)
+
+
 @pytest.mark.asyncio
 async def test_recording_pi_prevents_concurrent_open_of_same_persisted_scope(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     scope = hashlib.sha256(f"tenant-a\0A-OA\0{RECORDING_ONE}".encode()).hexdigest()[:32]
@@ -335,6 +348,11 @@ def test_require_publish_review_hard_fails_missing_stale_and_rejected(monkeypatc
     client.last_review["verdicts"][1] = {
         "role": "security", "passed": True, "reasons": [],
     }
+    client.last_review["blocking_reasons"] = ["仍有未解决的越权风险"]
+    with pytest.raises(recording_pi.RecordingPiError, match="仍有未解决的越权风险"):
+        client.require_publish_review(flow_version=7, flow_fingerprint="release-fingerprint")
+
+    client.last_review["blocking_reasons"] = []
     assert client.require_publish_review(
         flow_version=7, flow_fingerprint="release-fingerprint",
     )["all_passed"] is True

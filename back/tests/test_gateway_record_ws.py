@@ -223,5 +223,7 @@ def test_recording_gateway_has_one_pi_path_and_no_direct_llm_fallback() -> None:
     assert "begin_llm_budget" not in source
     assert "submit_recording_review" in source
     assert "run_id=pi_session.run_id" in source
+    assert "recording_pi_required=True" in source
     assert "run_id" in inspect.signature(run_request_onboarding).parameters
+    assert "recording_pi_required" in inspect.signature(run_request_onboarding).parameters
     assert "未切换" not in source  # errors are surfaced; no hidden alternate model branch

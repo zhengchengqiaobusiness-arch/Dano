@@ -15,7 +15,7 @@ import os
 import re
 import secrets
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 from uuid import uuid4
 
 import structlog
@@ -41,6 +41,48 @@ def active_recording_session(run_id: str) -> "RecordingPiSession | None":
 
 class RecordingPiError(RuntimeError):
     """The recording Pi runtime failed or returned an invalid protocol event."""
+
+
+def _acquire_scope_file_lock(path: Path) -> BinaryIO:
+    """Hold a cross-process lock for one persisted Pi JSONL scope."""
+    handle = path.open("a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError) as exc:
+        handle.close()
+        raise RecordingPiError("同一录制 Pi Session 已在另一个网关进程中使用") from exc
+    return handle
+
+
+def _release_scope_file_lock(handle: BinaryIO | None) -> None:
+    if handle is None:
+        return
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    finally:
+        handle.close()
 
 
 async def _start_tool_server() -> tuple[Any, asyncio.Task, int]:
@@ -96,6 +138,7 @@ class RecordingPiSession:
             f"{self.tenant}\0{self.subsystem}\0{self.recording_id}".encode("utf-8")
         ).hexdigest()
         self._scope_reserved = False
+        self._scope_file_lock: BinaryIO | None = None
         self._session_dir: str | None = None
         self._server: Any = None
         self._server_task: asyncio.Task | None = None
@@ -132,6 +175,10 @@ class RecordingPiSession:
         self._scope_reserved = True
 
         try:
+            session_dir = (self._session_root / self._scope[:32]).resolve()
+            session_dir.mkdir(parents=True, exist_ok=True)
+            self._session_dir = str(session_dir)
+            self._scope_file_lock = _acquire_scope_file_lock(session_dir / ".pi-session.lock")
             self._server, self._server_task, port = await _start_tool_server()
             runs.register(self.run_id, self.token)
             materials.register(materials.MaterialContext(
@@ -140,9 +187,6 @@ class RecordingPiSession:
                 system_instance_id=self.subsystem,
                 subsystem=self.subsystem,
             ))
-            session_dir = (self._session_root / self._scope[:32]).resolve()
-            session_dir.mkdir(parents=True, exist_ok=True)
-            self._session_dir = str(session_dir)
             # On reconnect (including after a gateway restart), discover the
             # persisted Pi JSONL inside the tenant-scoped server directory.
             # Resolve every candidate and reject symlinks/path escapes before
@@ -317,11 +361,19 @@ class RecordingPiSession:
             raise RecordingPiError("Pi 发布审核缺少 acceptance/security/compliance 三角色结论")
         if any(not isinstance(item.get("passed"), bool) for item in verdicts):
             raise RecordingPiError("Pi 发布审核包含无效的 passed 结论")
+        blocking_reasons = review.get("blocking_reasons") or []
+        if (
+            not isinstance(blocking_reasons, list)
+            or any(not isinstance(reason, str) for reason in blocking_reasons)
+        ):
+            raise RecordingPiError("Pi 发布审核包含无效的 blocking_reasons")
+        if blocking_reasons:
+            raise RecordingPiError("Pi 发布审核仍有阻断项: " + "; ".join(blocking_reasons))
         all_passed = all(bool(item["passed"]) for item in verdicts)
         if review.get("all_passed") is not all_passed:
             raise RecordingPiError("Pi 发布审核汇总结论与角色结论不一致")
         if not all_passed:
-            reasons = review.get("blocking_reasons") or [
+            reasons = [
                 reason
                 for item in verdicts if not item["passed"]
                 for reason in (item.get("reasons") or [])
@@ -411,36 +463,40 @@ class RecordingPiSession:
             return
         self._closed = True
         _ACTIVE_RECORDING_SESSIONS.pop(self.run_id, None)
-        if self._scope_reserved and _ACTIVE_RECORDING_SCOPES.get(self._scope) is self:
-            _ACTIVE_RECORDING_SCOPES.pop(self._scope, None)
-        self._scope_reserved = False
-        proc = self._proc
-        if proc is not None and proc.returncode is None:
-            try:
-                await self._command("close", timeout_s=min(self.timeout_s, 10.0))
-            except BaseException:  # noqa: BLE001 - cleanup must continue after a dead sidecar
-                pass
-            if proc.stdin is not None:
-                proc.stdin.close()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-        for task in (self._stdout_task, self._stderr_task):
-            if task is not None and not task.done():
-                task.cancel()
+        try:
+            proc = self._proc
+            if proc is not None and proc.returncode is None:
                 try:
-                    await task
+                    await self._command("close", timeout_s=min(self.timeout_s, 10.0))
+                except BaseException:  # noqa: BLE001 - cleanup must continue after a dead sidecar
+                    pass
+                if proc.stdin is not None:
+                    proc.stdin.close()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+            for task in (self._stdout_task, self._stderr_task):
+                if task is not None and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except BaseException:  # noqa: BLE001
+                        pass
+            self._proc = None
+            if self._server is not None:
+                self._server.should_exit = True
+            if self._server_task is not None:
+                try:
+                    await self._server_task
                 except BaseException:  # noqa: BLE001
                     pass
-        self._proc = None
-        if self._server is not None:
-            self._server.should_exit = True
-        if self._server_task is not None:
-            try:
-                await self._server_task
-            except BaseException:  # noqa: BLE001
-                pass
-        runs.unregister(self.run_id)
-        materials.clear_run(self.run_id)
+        finally:
+            runs.unregister(self.run_id)
+            materials.clear_run(self.run_id)
+            _release_scope_file_lock(self._scope_file_lock)
+            self._scope_file_lock = None
+            if self._scope_reserved and _ACTIVE_RECORDING_SCOPES.get(self._scope) is self:
+                _ACTIVE_RECORDING_SCOPES.pop(self._scope, None)
+            self._scope_reserved = False
