@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import re
 from types import SimpleNamespace
 
@@ -107,6 +108,8 @@ class _FakeWebSocket(_ConcurrentWriteProbe):
         self.incoming = list(incoming)
         self.accepted = False
         self.closed = False
+        self.close_code: int | None = None
+        self.close_reason = ""
 
     async def accept(self) -> None:
         self.accepted = True
@@ -114,8 +117,10 @@ class _FakeWebSocket(_ConcurrentWriteProbe):
     async def receive_json(self) -> dict:
         return self.incoming.pop(0)
 
-    async def close(self) -> None:
+    async def close(self, code: int = 1000, reason: str = "") -> None:
         self.closed = True
+        self.close_code = code
+        self.close_reason = reason
 
 
 @pytest.mark.asyncio
@@ -166,9 +171,12 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
     monkeypatch.setattr(llm_control, "end_llm_budget", lambda _token: None)
     gateway._RECENT_RECORDING_ACTIONS.clear()
 
+    resume_id = f"recording_{'a' * 32}"
+
     def incoming() -> list[dict]:
         return [
-            {"type": "start", "start_url": "https://example.test", "tenant": "tenant-a"},
+            {"type": "start", "start_url": "https://example.test", "tenant": "tenant-a",
+             "pi_recording_id": resume_id},
             {"type": "input", "event": {"kind": "pointer_move", "nx": 0.1, "ny": 0.2}},
             {"type": "input", "event": {"kind": "dblclick", "nx": 0.3, "ny": 0.4}},
             {"type": "input", "event": {"kind": "pointer_up", "nx": 0.5, "ny": 0.6}},
@@ -185,6 +193,8 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
     second_started = next(message for message in second_ws.messages if message["type"] == "started")
     assert re.fullmatch(r"action_[0-9a-f]{32}", first_started["action"])
     assert first_started["action"] != second_started["action"]
+    assert first_started["pi_recording_id"] == resume_id
+    assert second_started["pi_recording_id"] == resume_id
 
     errors = [message for message in first_ws.messages if message["type"] == "input_error"]
     assert [error["kind"] for error in errors] == ["pointer_move", "dblclick"]
@@ -198,4 +208,20 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
     assert second_ws.messages[-1] == {"type": "stopped"}
     assert all(session.stopped for session in sessions)
     assert first_ws.accepted and first_ws.closed
+    assert first_ws.close_code == 1000
     assert first_ws.max_active_writes == 1
+
+
+def test_recording_gateway_has_one_pi_path_and_no_direct_llm_fallback() -> None:
+    from dano.onboarding.page_onboard import run_request_onboarding
+
+    source = inspect.getsource(gateway.record_ws)
+    assert source.count("RecordingPiSession(") == 1
+    assert "_page_semantic_client" not in source
+    assert "OpenAICompatClient" not in source
+    assert "run_recording_pi_loop" not in source
+    assert "begin_llm_budget" not in source
+    assert "submit_recording_review" in source
+    assert "run_id=pi_session.run_id" in source
+    assert "run_id" in inspect.signature(run_request_onboarding).parameters
+    assert "未切换" not in source  # errors are surfaced; no hidden alternate model branch

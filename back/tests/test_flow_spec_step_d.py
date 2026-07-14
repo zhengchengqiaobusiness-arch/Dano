@@ -1,34 +1,10 @@
-"""Step D · LLM 命名 + 业务说明 + GET 表单手选 测试。"""
-
-import pytest
+"""Step D · 确定性命名 + 业务说明 + GET 表单手选 测试。"""
 
 from dano.execution.page.flow_spec import (
     FlowSpec, FlowStep, FlowLink, ParamField,
-    rename_steps_with_llm, render_business_description,
+    rename_steps_deterministically, render_business_description,
     _derive_step_name, _derive_title,
 )
-
-
-class _StubLLM:
-    """测试用 LLM stub,行为可控。"""
-    def __init__(self, *, name_step=None, summarize=None, raise_exc=None):
-        self.name_step_return = name_step
-        self.summarize_return = summarize
-        self.raise_exc = raise_exc
-        self.name_step_calls = []
-        self.summarize_calls = []
-
-    def name_step(self, ctx):
-        self.name_step_calls.append(ctx)
-        if self.raise_exc:
-            raise self.raise_exc
-        return self.name_step_return
-
-    def summarize_flow(self, ctx):
-        self.summarize_calls.append(ctx)
-        if self.raise_exc:
-            raise self.raise_exc
-        return self.summarize_return
 
 
 def _step(method="POST", path="/api/submit", name="", params_count=0, risk="L3"):
@@ -39,7 +15,7 @@ def _step(method="POST", path="/api/submit", name="", params_count=0, risk="L3")
     )
 
 
-# ── Step D2: LLM 命名 ──
+# ── Step D2: 确定性命名 ──
 def test_derive_step_name_basic():
     assert _derive_step_name(_step(method="POST", path="/api/submit")) == "POST_submit"
 
@@ -50,52 +26,19 @@ def test_derive_step_name_with_params():
     assert "含1字段" in _derive_step_name(s)
 
 
-def test_rename_no_llm_uses_deterministic():
+def test_rename_uses_deterministic_facts():
     s1 = _step(path="/api/leave/submit")
     s2 = _step(path="/api/leave/approve")
     spec = FlowSpec(flow_id="f", steps=[s1, s2])
-    new = rename_steps_with_llm(spec, llm_client=None)
+    new = rename_steps_deterministically(spec)
     assert new.steps[0].name == "POST_submit"
     assert new.steps[1].name == "POST_approve"
-
-
-def test_rename_with_llm_uses_llm():
-    s = _step(path="/api/submit")
-    spec = FlowSpec(flow_id="f", steps=[s])
-    llm = _StubLLM(name_step="提交请假")
-    new = rename_steps_with_llm(spec, llm_client=llm)
-    assert new.steps[0].name == "提交请假"
-    assert len(llm.name_step_calls) == 1
-
-
-def test_rename_truncates_long():
-    s = _step()
-    spec = FlowSpec(flow_id="f", steps=[s])
-    llm = _StubLLM(name_step="x" * 200)
-    new = rename_steps_with_llm(spec, llm_client=llm)
-    assert len(new.steps[0].name) == 60
-
-
-def test_rename_empty_string_falls_back():
-    s = _step(path="/api/submit")
-    spec = FlowSpec(flow_id="f", steps=[s])
-    llm = _StubLLM(name_step="   ")
-    new = rename_steps_with_llm(spec, llm_client=llm)
-    assert new.steps[0].name == "POST_submit"
-
-
-def test_rename_exception_falls_back():
-    s = _step(path="/api/submit")
-    spec = FlowSpec(flow_id="f", steps=[s])
-    llm = _StubLLM(raise_exc=RuntimeError("timeout"))
-    new = rename_steps_with_llm(spec, llm_client=llm)
-    assert new.steps[0].name == "POST_submit"
 
 
 def test_rename_does_not_mutate_input():
     s = _step(name="old", path="/api/submit")
     spec = FlowSpec(flow_id="f", steps=[s])
-    rename_steps_with_llm(spec, llm_client=_StubLLM(name_step="新名"))
+    rename_steps_deterministically(spec)
     assert spec.steps[0].name == "old"
 
 
@@ -150,33 +93,6 @@ def test_no_steps_returns_empty_message():
     desc = render_business_description(FlowSpec(flow_id="f"))
     assert "未包含" in desc
     assert "## 9. 需要人工确认的问题" in desc
-
-
-def test_with_llm_happy():
-    s = _step(name="提交", path="/api/submit")
-    spec = FlowSpec(flow_id="f", steps=[s])
-    llm = _StubLLM(summarize="用户提交请假申请。")
-    desc = render_business_description(spec, llm_client=llm)
-    assert "用户提交请假申请。" in desc
-    assert "## 2. 用户需要提供的参数" in desc
-    assert "`POST /api/submit`" in desc
-
-
-def test_with_llm_truncates():
-    s = _step(path="/api/submit")
-    spec = FlowSpec(flow_id="f", steps=[s])
-    llm = _StubLLM(summarize="x" * 500)
-    desc = render_business_description(spec, llm_client=llm)
-    assert "x" * 240 in desc
-    assert "## 5. 执行步骤" in desc
-
-
-def test_with_llm_exception_falls_back():
-    s = _step(name="提交", path="/api/submit")
-    spec = FlowSpec(flow_id="f", steps=[s])
-    llm = _StubLLM(raise_exc=RuntimeError("timeout"))
-    desc = render_business_description(spec, llm_client=llm)
-    assert "POST /api/submit" in desc
 
 
 def test_template_no_business_literals():

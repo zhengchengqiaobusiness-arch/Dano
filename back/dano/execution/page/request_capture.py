@@ -1190,6 +1190,10 @@ def _page_enum_field_aliases(opts) -> list[str]:
     ]
 
 
+def _page_enum_source(opts) -> str:
+    return str(opts.get("enum_source") or "dom") if isinstance(opts, dict) else "dom"
+
+
 def _dom_key_matches_field(dom_key: str, field: dict | None) -> bool:
     if not field:
         return False
@@ -1219,6 +1223,7 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
                 str(k), opts, _page_enum_field_key(v, str(k)),
                 _page_enum_selected_label(v, str(k)),
                 _page_enum_field_aliases(v),
+                _page_enum_source(v),
             ))
     body = _parse_body(post_data) if post_data is not None else None
     value_by_path = {p: sv for p, _t, sv, _raw in _leaf_paths(body)} if body is not None else {}
@@ -1226,7 +1231,7 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
     field_by_path = {str(f.get("path") or ""): f for f in (fields or []) if f.get("path")}
     strict_dom_identity = any(
         aliases or (isinstance(page_enum_options.get(key), dict) and page_enum_options[key].get("control_kind"))
-        for key, _opts, _fk, _selected, aliases in pairs
+        for key, _opts, _fk, _selected, aliases, _source in pairs
     )
     for s in selects or []:
         lbl, val = str(s.get("label") or ""), str(s.get("value") or "")
@@ -1236,7 +1241,7 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
         leaf_key = str(path).split(".")[-1].split("[")[0]
         if strict_dom_identity:
             matched = next((
-                (ov, fk, selected) for _kv, ov, fk, selected, aliases in pairs
+                (ov, fk, selected, evidence_source) for _kv, ov, fk, selected, aliases, evidence_source in pairs
                 if (
                     any(
                         _identifier_matches_field(alias, path)
@@ -1252,7 +1257,7 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
                 )
             ), None)
         else:
-            matched = next(((ov, fk, selected) for kv, ov, fk, selected, _aliases in pairs
+            matched = next(((ov, fk, selected, evidence_source) for kv, ov, fk, selected, _aliases, evidence_source in pairs
                 if _exact_recorded_match(kv, lbl)
                 or _exact_recorded_match(kv, val)
                 or _exact_recorded_match(kv, body_val)
@@ -1265,7 +1270,7 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
                 or _dom_key_matches_field(kv, field)
                 or _dom_key_matches_field(selected, field)), None)
         if matched:
-            opts, fk, _selected = matched
+            opts, fk, _selected, evidence_source = matched
             records = _enum_records_from_page_options(opts)
             if s.get("enum_source") == "api" and _option_map_matches_source(s):
                 records = _records_with_existing_option_map(records, s.get("option_map"))
@@ -1273,11 +1278,11 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
             _attach_enum_binding(
                 s,
                 records,
-                source="api" if s.get("source_url") else "dom",
+                source="api" if s.get("source_url") else evidence_source,
                 confirmed=True,
             )
-            s["enum_label_source"] = "dom"
-            s["option_map_source_url"] = s.get("source_url") or "dom"
+            s["enum_label_source"] = evidence_source
+            s["option_map_source_url"] = s.get("source_url") or evidence_source
             if fk:
                 s["field_key"] = fk
             s.pop("category_key", None)
@@ -1302,6 +1307,7 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
         opts = _page_enum_option_list(opts_raw)
         fk = _page_enum_field_key(opts_raw, str(picked))
         aliases = _page_enum_field_aliases(opts_raw)
+        evidence_source = _page_enum_source(opts_raw)
         selected = _page_enum_selected_label(opts_raw, str(picked))
         if not opts:
             continue
@@ -1375,7 +1381,7 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
         _attach_enum_binding(
             entry,
             records,
-            source="dom",
+            source=evidence_source,
             confirmed=True,
         )
         out.append(entry)

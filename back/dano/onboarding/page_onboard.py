@@ -119,10 +119,14 @@ async def run_request_onboarding(
     保证发布产物与用户确认版本一致；问题会原样返回工作台处理。
     """
     from dano.agent_tools import tools as T
-    from dano.shared.asset_bodies import PageScriptBody
-    from dano.shared.enums import IngestionStatus, RiskLevel
+    from dano.shared.enums import IngestionStatus
 
     run_id = run_id or f"req-{uuid4().hex[:8]}"
+    # A recording run owns one Pi AgentSession end to end.  Its run id is the
+    # authoritative discriminator: once present, this publishing path must not
+    # start any ReviewBoard/goal/repair model call as a parallel fallback.
+    from dano.onboarding.recording_pi import active_recording_session
+    recording_session = active_recording_session(run_id)
     sid = subsystem
     materials.register(materials.MaterialContext(
         run_id=run_id, tenant=tenant, system_instance_id=sid, subsystem=sid,
@@ -155,7 +159,7 @@ async def run_request_onboarding(
         #   用户确认的 goal 不过 → 阻断(需澄清);自动提炼的不过 → 仅作建议(不因 LLM 抖动阻断发布)。
         from dano.execution.page.request_capture import goal_needs_confirmation, validate_goal
         user_confirmed = bool(goal)
-        if not goal:
+        if not goal and recording_session is None:
             goal = await _auto_goal(action, api_request)
         goal = _sync_goal_required_inputs(goal, api_request)
         goal_issues: list[str] = validate_goal(goal, api_request) if goal else []
@@ -220,14 +224,14 @@ async def run_request_onboarding(
         # P2:写抓请求页面发布层**硬要求三模型评审证据**(verify_reviewed)。评审 client 未注入但评审已启用 →
         # 直接 return 可执行指引,**不静默跳过后在 publish 阶段以"缺角色"晦涩失败**(主路径网关启动会注入)。
         from dano.config import get_settings as _get_settings
-        if T._review_board is None and _get_settings().review_enabled:
+        if recording_session is None and T._review_board is None and _get_settings().review_enabled:
             log.warning("ingest.gate.review_unavailable", review_enabled=True)
             return {"ok": False, "stage": "review", "status": IngestionStatus.NEEDS_CLARIFICATION.value,
                     "action": action,
                     "reason": "评审已启用(review_enabled=true)但未配置审核模型 —— 写操作 skill 过不了发布层三模型评审闸门。"
                               "请配置审核模型(网关启动自动注入;离线直调需先 set_review_board),或运维临时设 "
                               "review_enabled=false 降级发布。"}
-        if T._review_board is not None:
+        if recording_session is not None or T._review_board is not None:
             from dano.execution.page.repair_ops import collect_repair_findings
             from dano.onboarding.repair import generate_fix_ops, review_findings, run_repair_loop
             # 注:dry/self_check(录制 by-design 安全模式)的误判否决已在 request_review 内确定性剔除(改 DB 证据),
@@ -247,13 +251,16 @@ async def run_request_onboarding(
             rev_find = review_findings(rev.get("verdicts"))
             findings = collect_repair_findings(api_request) + rev_find
             log.info("ingest.review", all_passed=rev.get("all_passed"), findings=len(findings))
-            board = T._review_board
+            # Active recording runs have already been reviewed by their Pi
+            # AgentSession.  Never borrow the process-wide ReviewBoard client
+            # or its repair proposer, even when one happens to be configured.
+            board = None if recording_session is not None else T._review_board
             client, model = getattr(board, "client", None), (getattr(board, "models", None) or {}).get("acceptance")
-            proposer = T._fix_proposer
+            proposer = None if recording_session is not None else T._fix_proposer
             if proposer is None and client is not None and model:
                 async def proposer(a, f, g, _c=client, _m=model):     # noqa: E306
                     return await generate_fix_ops(_c, _m, goal=g, api_request=a, findings=f)
-            if findings and not allow_repair:
+            if findings and (not allow_repair or recording_session is not None):
                 details = [str(f.get("detail") or f.get("message") or f) for f in findings]
                 return {
                     "ok": False,

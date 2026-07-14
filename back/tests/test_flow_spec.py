@@ -10,13 +10,11 @@ import dano.execution.page.flow_spec as flow_spec_module
 from dano.execution.page.flow_spec import (
     FlowSpec, FlowStep, FlowLink, ParamField, FlowCapability,
     apply_flow_edits,
-    apply_llm_field_names,
     classify_network_request,
     dry_run_flow_spec,
     flow_spec_to_api_request,
     flow_spec_to_client,
     flow_spec_to_summary,
-    llm_field_name_candidates,
     orchestrate_flow_capabilities,
     render_business_description,
     to_flow_spec,
@@ -581,7 +579,7 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertEqual(s["schema_version"], 1)
         self.assertEqual(s["capabilities"], [])
 
-        orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=None, model=None))
+        orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
         self.assertIn("submit", {c.kind for c in orchestrated.capabilities})
         st_sum = s["steps"][0]
         self.assertIn("step_id", st_sum)
@@ -952,7 +950,7 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertTrue(any("/system/user/page" in (r.get("path") or "") for r in graph.get("candidate_reads") or []))
 
         self.assertEqual(spec.capabilities, [])
-        orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=None, model=None))
+        orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
         cap_kinds = {c.kind for c in orchestrated.capabilities}
         self.assertEqual(cap_kinds, {"submit"})
         submit_cap = next(c for c in orchestrated.capabilities if c.kind == "submit")
@@ -1039,7 +1037,7 @@ class GetBusinessStepTest(unittest.TestCase):
             )],
         )
 
-        out = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=None, model=None))
+        out = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
 
         cap = next(c for c in out.capabilities if c.name == "submit_batch")
         self.assertEqual(cap.title, "人工改过的标题")
@@ -1244,29 +1242,6 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertNotEqual(by_path["type"].type, "enum")
         self.assertNotEqual(by_path["type"].source_kind, "api_option")
         self.assertEqual(spec.steps[0].selects, [])
-
-    def test_apply_llm_field_names_only_updates_machine_auto_names(self):
-        spec = to_flow_spec([
-            _post("https://oa/api/leave/submit",
-                  {"type": "事假", "reason": "回家", "days": 1},
-                  resp={"code": 200})
-        ], samples={"type": "事假", "reason": "回家", "days": "1"})
-        spec.steps[0].params[2].key = "天数"
-        spec.steps[0].params[2].label = "天数"
-        spec.steps[0].params[2].name_source = "manual"
-
-        candidates = llm_field_name_candidates(spec)
-        self.assertEqual({c["key"] for c in candidates}, {"type", "reason"})
-
-        renamed = apply_llm_field_names(spec, {"type": "请假类型", "reason": "原因", "days": "请假天数"})
-        by_path = {p.path: p for p in renamed.steps[0].params}
-        self.assertEqual(by_path["type"].key, "请假类型")
-        self.assertEqual(by_path["reason"].key, "原因")
-        self.assertEqual(by_path["days"].key, "天数")
-        self.assertEqual(renamed.steps[0].sample_inputs["请假类型"], "事假")
-        self.assertEqual(renamed.steps[0].sample_inputs["原因"], "回家")
-        self.assertNotIn("type", renamed.steps[0].sample_inputs)
-
 
 class RequestRoleTest(unittest.TestCase):
     def test_auth_request_is_filtered(self):

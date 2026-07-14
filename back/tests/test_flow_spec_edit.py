@@ -13,9 +13,9 @@ from dano.execution.page.flow_spec import (
     RequestFacts,
     apply_flow_edits, validate_flow_spec, _infer_type_from_value,
     refresh_review_items, flow_spec_to_api_request,
-    capability_to_flow_spec_view, compile_capability_to_api_request, flow_spec_capability_contracts,
+    compile_capability_to_api_request,
     flow_spec_to_client,
-    auto_fix_flow_spec, orchestrate_flow_capabilities, run_recording_pi_loop, sync_flow_spec_models,
+    apply_recording_agent_submission, auto_fix_flow_spec, orchestrate_flow_capabilities, sync_flow_spec_models,
     flow_spec_canonical_summary, to_flow_spec,
     build_default_flow_capabilities, prepare_flow_spec_for_publish, prepare_flow_release_candidate,
     flow_operation_report,
@@ -418,7 +418,7 @@ def test_repair_mode_fixes_warning_only_batch_nodes_and_dangling_relations():
     assert before["passed"] is True
     assert any("没有批量接口事实" in item for item in before["suggestions"])
 
-    fixed = asyncio.run(run_recording_pi_loop(spec, llm_client=None, model=None, mode="repair"))
+    fixed = asyncio.run(apply_recording_agent_submission(spec, submission={"ops": []}, mode="repair"))
 
     assert len(fixed.capabilities) == 1
     cap = fixed.capabilities[0]
@@ -1006,29 +1006,11 @@ def test_flow_operation_report_explains_noop_and_changes():
     assert delta["changes"]["fields"] == 1
 
 
-class _BrokenFixClient:
-    async def complete_json(self, **_kwargs):
-        raise RuntimeError("model unavailable")
-
-
-def test_auto_fix_records_model_failure_instead_of_silently_swallowing():
-    spec = FlowSpec(
-        flow_id="f",
-        steps=[FlowStep(step_id="submit", method="POST", path="/api/submit")],
-        capabilities=[FlowCapability(name="submit", kind="submit", step_ids=["submit"])],
-    )
-
-    fixed = asyncio.run(auto_fix_flow_spec(spec, llm_client=_BrokenFixClient(), model="fake", max_rounds=1))
-
-    assert fixed.meta["auto_fix_history"][0]["model_error"] == "model unavailable"
-
-
-class _MixedStaleFixClient:
-    async def complete_json(self, **_kwargs):
-        return {"ops": [
+def _mixed_stale_repair_ops() -> list[dict]:
+    return [
             {"op": "rename_field", "step_id": "query", "path": "query.status", "label": "状态"},
             {"op": "rename_field", "step_id": "query", "path": "query.key", "label": "关键词"},
-        ]}
+        ]
 
 
 def test_auto_fix_skips_stale_field_patch_and_keeps_valid_suggestions():
@@ -1049,8 +1031,7 @@ def test_auto_fix_skips_stale_field_patch_and_keeps_valid_suggestions():
 
     fixed = asyncio.run(auto_fix_flow_spec(
         spec,
-        llm_client=_MixedStaleFixClient(),
-        model="fake",
+        repair_ops=_mixed_stale_repair_ops(),
         max_rounds=1,
         expand_requests=False,
     ))
@@ -1061,9 +1042,8 @@ def test_auto_fix_skips_stale_field_patch_and_keeps_valid_suggestions():
     assert "param not found" in rejected[0]["error"]
 
 
-class _FakeFixClient:
-    async def complete_json(self, **_kwargs):
-        return {"ops": [
+def _capability_repair_ops() -> list[dict]:
+    return [
             {"op": "upsert_input_field", "capability": "submit_batch", "field": {
                 "key": "entries", "type": "array", "required": True,
             }},
@@ -1073,17 +1053,17 @@ class _FakeFixClient:
             {"op": "set_output_mapping", "capability": "submit_batch", "mapping": [{
                 "kind": "final_response", "step_id": "submit", "response_path": "response",
             }]},
-        ]}
+        ]
 
 
-def test_auto_fix_accepts_capability_scoped_patch_ops_from_llm():
+def test_auto_fix_accepts_capability_scoped_pi_repair_ops():
     spec = FlowSpec(
         flow_id="f",
         steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
         capabilities=[FlowCapability(name="submit_batch", kind="submit_batch", step_ids=["submit"])],
     )
 
-    fixed = asyncio.run(auto_fix_flow_spec(spec, llm_client=_FakeFixClient(), model="fake", max_rounds=1))
+    fixed = asyncio.run(auto_fix_flow_spec(spec, repair_ops=_capability_repair_ops(), max_rounds=1))
 
     cap = fixed.capabilities[0]
     assert cap.inputs[0].key == "entries"
@@ -1091,9 +1071,8 @@ def test_auto_fix_accepts_capability_scoped_patch_ops_from_llm():
     assert cap.output_mapping[0]["step_id"] == "submit"
 
 
-class _FakePlannerPatchClient:
-    async def complete_json(self, **_kwargs):
-        return {"ops": [
+def _capability_plan_submission() -> dict:
+    return {"ops": [
             {"op": "upsert_capability", "capability": {
                 "name": "submit_batch",
                 "title": "批量提交日报",
@@ -1116,9 +1095,9 @@ def test_orchestrate_flow_capabilities_prefers_patch_ops_and_keeps_same_batch_op
         steps=[FlowStep(step_id="submit", method="POST", url="/api/report/batch", path="/api/report/batch")],
     )
 
-    out = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=_FakePlannerPatchClient(), model="fake"))
+    out = asyncio.run(orchestrate_flow_capabilities(spec, submission=_capability_plan_submission()))
 
-    assert out.meta["capability_model"]["source"] == "llm_patch"
+    assert out.meta["capability_model"]["source"] == "pi_agent_patch"
     assert {cap.name for cap in out.capabilities} == {"submit_batch"}
     cap = out.capabilities[0]
     assert cap.kind == "submit_batch"
@@ -1127,9 +1106,8 @@ def test_orchestrate_flow_capabilities_prefers_patch_ops_and_keeps_same_batch_op
     assert cap.output_mapping[0]["step_id"] == "submit"
 
 
-class _FalseBatchPlanner:
-    async def complete_json(self, **_kwargs):
-        return {"ops": [
+def _false_batch_submission() -> dict:
+    return {"ops": [
             {"op": "upsert_capability", "capability": {
                 "name": "submit", "title": "批量提交用印申请", "kind": "submit_batch",
             }},
@@ -1161,8 +1139,7 @@ def test_single_form_defaults_to_submit_even_when_planner_invents_confirmed_entr
 
     out = asyncio.run(orchestrate_flow_capabilities(
         spec,
-        llm_client=_FalseBatchPlanner(),
-        model="fake",
+        submission=_false_batch_submission(),
     ))
     cap = out.capabilities[0]
     messages = [*validate_flow_spec(out)["errors"], *validate_flow_spec(out)["warnings"]]
@@ -1271,7 +1248,7 @@ def test_auto_fix_deterministically_adds_batch_loop_maps_and_output():
         )],
     )
 
-    fixed = asyncio.run(auto_fix_flow_spec(spec, max_rounds=1))
+    fixed = asyncio.run(auto_fix_flow_spec(spec, repair_ops=[], max_rounds=1))
     cap = fixed.capabilities[0]
 
     assert any(n.get("type") == "foreach" for n in cap.nodes)
@@ -2675,7 +2652,7 @@ def test_auto_fix_promotes_high_confidence_request_into_capability_closure():
         }]}}
     )
 
-    fixed = asyncio.run(auto_fix_flow_spec(spec, llm_client=None, max_rounds=2))
+    fixed = asyncio.run(auto_fix_flow_spec(spec, repair_ops=[], max_rounds=2))
 
     assert len(fixed.steps) == 2
     assert fixed.steps[0].source_meta["request_id"] == "req-date"
@@ -2791,7 +2768,7 @@ def test_auto_fix_routes_option_and_status_requests_to_matching_capabilities():
         ]}},
     )
 
-    fixed = asyncio.run(auto_fix_flow_spec(spec, llm_client=None, max_rounds=2))
+    fixed = asyncio.run(auto_fix_flow_spec(spec, repair_ops=[], max_rounds=2))
     by_name = {cap.name: cap for cap in fixed.capabilities}
 
     assert any((step.source_meta or {}).get("request_id") == "req-options" for step in fixed.steps)
@@ -2809,7 +2786,7 @@ def test_auto_fix_routes_option_and_status_requests_to_matching_capabilities():
     assert "submit" in by_name["submit"].step_ids
 
 
-def test_recording_pi_loop_records_planner_and_repair_history():
+def test_recording_agent_submission_records_plan_history():
     spec = FlowSpec(
         flow_id="f",
         steps=[FlowStep(
@@ -2823,11 +2800,13 @@ def test_recording_pi_loop_records_planner_and_repair_history():
         )],
     )
 
-    out = asyncio.run(run_recording_pi_loop(spec, llm_client=None, model=None, mode="plan", max_rounds=2))
+    out = asyncio.run(apply_recording_agent_submission(
+        spec, submission={"ops": []}, mode="plan", max_rounds=2,
+    ))
 
     assert out.capabilities
-    assert out.meta["recording_pi_loop"]["mode"] == "plan"
-    assert out.meta["recording_pi_loop"]["rounds"]
+    assert out.meta["recording_agent_session"]["mode"] == "plan"
+    assert out.meta["recording_agent_session"]["rounds"]
 
 
 def test_high_confidence_duplicate_path_is_treated_as_already_covered():
@@ -3257,7 +3236,7 @@ def test_enum_option_description_replaces_stale_snapshot_instead_of_appending():
     assert synced.steps[0].params[0].description == "页面枚举选项：病假=2、事假=1、年假=3"
 
 
-def test_manual_pinned_business_query_membership_survives_all_sync_layers():
+def test_manual_business_query_membership_survives_all_sync_layers_without_lock_flag():
     spec = FlowSpec(
         flow_id="manual-query-membership",
         steps=[FlowStep(
@@ -3274,6 +3253,7 @@ def test_manual_pinned_business_query_membership_survives_all_sync_layers():
         "step_id": "records",
         "usage": "execute",
         "origin": "manual",
+        # Legacy clients may still send this property; the backend discards it.
         "pinned": True,
     }])
     prepared = prepare_flow_spec_for_publish(edited)
@@ -3281,8 +3261,10 @@ def test_manual_pinned_business_query_membership_survives_all_sync_layers():
     capability = prepared.capabilities[0]
     assert capability.step_ids == ["records"]
     assert any(node.get("type") == "call" and node.get("step_id") == "records" for node in capability.nodes)
-    assert capability.request_refs[0].pinned is True
     assert capability.request_refs[0].usage == "execute"
+    assert capability.request_refs[0].origin == "manual"
+    assert capability.request_refs[0].confirmed is True
+    assert "pinned" not in capability.request_refs[0].model_dump()
 
 
 def test_option_source_membership_is_visible_but_not_executed():
@@ -3305,9 +3287,10 @@ def test_option_source_membership_is_visible_but_not_executed():
     capability = prepared.capabilities[0]
     assert capability.step_ids == []
     assert not any(node.get("type") == "call" for node in capability.nodes)
-    assert [(ref.step_id, ref.usage, ref.pinned) for ref in capability.request_refs] == [
-        ("options", "option_source", True),
+    assert [(ref.step_id, ref.usage, ref.origin, ref.confirmed) for ref in capability.request_refs] == [
+        ("options", "option_source", "manual", True),
     ]
+    assert "pinned" not in capability.request_refs[0].model_dump()
 
 
 def test_default_query_capability_uses_business_records_not_process_configuration():
@@ -4049,7 +4032,7 @@ def test_runtime_unknown_review_is_not_duplicated_as_field_category():
     assert target_items[0].severity == "high"
 
 
-def test_orchestrate_existing_nonempty_capability_does_not_expand_from_defaults():
+def test_orchestrate_existing_capability_reanalyses_uncovered_recorded_interfaces():
     spec = FlowSpec(
         flow_id="incremental-only",
         steps=[
@@ -4067,16 +4050,17 @@ def test_orchestrate_existing_nonempty_capability_does_not_expand_from_defaults(
         meta={"capability_model": {"status": "ready"}},
     )
 
-    out = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=None, model=None))
+    out = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
 
-    assert len(out.capabilities) == 1
-    assert out.capabilities[0].title == "用户已经编辑的能力"
-    assert out.capabilities[0].step_ids == ["submit"]
+    by_kind = {cap.kind: cap for cap in out.capabilities}
+    assert set(by_kind) == {"submit_batch", "query_status"}
+    assert by_kind["submit_batch"].title == "用户已经编辑的能力"
+    assert by_kind["submit_batch"].step_ids == ["submit"]
+    assert by_kind["query_status"].step_ids == ["status"]
 
 
-class _ScopeExpandingPlanner:
-    async def complete_json(self, **_kwargs):
-        return {"ops": [
+def _scope_expanding_submission() -> dict:
+    return {"ops": [
             {"op": "upsert_capability", "capability": {
                 "name": "submit_batch", "title": "完善后的批量提交", "kind": "submit_batch",
             }},
@@ -4088,9 +4072,8 @@ class _ScopeExpandingPlanner:
         ]}
 
 
-class _DestructiveIncrementalPlanner:
-    async def complete_json(self, **_kwargs):
-        return {"ops": [
+def _destructive_incremental_submission() -> dict:
+    return {"ops": [
             {"op": "remove_capability", "capability": "query_status"},
             {"op": "remove_request_from_capability", "capability": "submit", "step_id": "submit"},
             {"op": "reject_dependency", "link_id": "confirmed-link"},
@@ -4103,7 +4086,7 @@ class _DestructiveIncrementalPlanner:
         ]}
 
 
-def test_repeated_pi_loop_preserves_capabilities_interfaces_links_and_relations():
+def test_recording_submission_rejects_destructive_incremental_operations():
     query = FlowStep(
         step_id="query", method="GET", path="/records/page",
         response_json={"data": {"records": []}},
@@ -4137,22 +4120,13 @@ def test_repeated_pi_loop_preserves_capabilities_interfaces_links_and_relations(
         meta={"capability_model": {"status": "ready"}},
     )
 
-    out = asyncio.run(run_recording_pi_loop(
-        spec, llm_client=_DestructiveIncrementalPlanner(), model="fake", mode="plan", max_rounds=1,
-    ))
-
-    assert [cap.name for cap in out.capabilities] == ["query_status", "submit"]
-    assert {cap.name: cap.step_ids for cap in out.capabilities} == {
-        "query_status": ["query"], "submit": ["submit"],
-    }
-    assert out.capabilities[1].title == "完善后的提交能力"
-    assert [item.link_id for item in out.links] == ["confirmed-link"]
-    assert out.links[0].confirmed is True and out.links[0].locked is True
-    assert [item.relation_id for item in out.capability_relations] == ["confirmed-relation"]
-    assert out.capability_relations[0].confirmed is True
+    with pytest.raises(ValueError, match="remove_capability"):
+        asyncio.run(apply_recording_agent_submission(
+            spec, submission=_destructive_incremental_submission(), mode="plan", max_rounds=1,
+        ))
 
 
-def test_repeated_orchestration_repairs_contract_without_expanding_interface_scope():
+def test_repeated_orchestration_can_reanalyse_real_interfaces_but_not_remove_them():
     spec = FlowSpec(
         flow_id="scope-locked",
         steps=[
@@ -4169,17 +4143,16 @@ def test_repeated_orchestration_repairs_contract_without_expanding_interface_sco
         meta={"capability_model": {"status": "ready"}},
     )
 
-    out = asyncio.run(orchestrate_flow_capabilities(spec, llm_client=_ScopeExpandingPlanner(), model="fake"))
+    out = asyncio.run(orchestrate_flow_capabilities(spec, submission=_scope_expanding_submission()))
 
-    assert [cap.name for cap in out.capabilities] == ["submit_batch"]
-    assert out.capabilities[0].kind == "submit_batch"
-    assert out.capabilities[0].title == "完善后的批量提交"
-    assert out.capabilities[0].step_ids == ["submit"]
-
-
-class _OverwriteManualFieldPlanner:
-    async def complete_json(self, **_kwargs):
-        return {"ops": [{"op": "mark_field_as_system_var", "step_id": "submit", "path": "content"}]}
+    by_name = {cap.name: cap for cap in out.capabilities}
+    assert "submit_batch" in by_name
+    assert "query_status" in by_name
+    assert by_name["submit_batch"].title == "完善后的批量提交"
+    # remove_request_from_capability is not in the Pi whitelist, while the
+    # already materialized status interface is allowed into the re-analysis.
+    assert "submit" in by_name["submit_batch"].step_ids
+    assert "status" in by_name["submit_batch"].step_ids
 
 
 def test_manual_field_contract_is_locked_against_planner_overwrite():
@@ -4212,8 +4185,7 @@ def test_manual_field_contract_is_locked_against_planner_overwrite():
 
     fixed = asyncio.run(auto_fix_flow_spec(
         edited,
-        llm_client=_OverwriteManualFieldPlanner(),
-        model="fake",
+        repair_ops=[{"op": "mark_field_as_system_var", "step_id": "submit", "path": "content"}],
         max_rounds=1,
         expand_requests=False,
         allow_scope_changes=False,
@@ -4287,21 +4259,16 @@ def test_manual_source_override_is_preserved_without_rewriting_type_or_evidence(
     assert synced_param.source_kind == "user_input"
     assert len(synced.steps[0].selects) == 1
 
-    class Planner:
-        async def complete_json(self, **_kwargs):
-            return {"ops": [{
-                "op": "bind_option_source",
-                "target_step": "query",
-                "target_path": "query.useInfo",
-                "source_url": "/unrelated/options",
-                "value_key": "id",
-                "label_key": "name",
-            }]}
-
     optimized = asyncio.run(auto_fix_flow_spec(
         synced,
-        llm_client=Planner(),
-        model="fake",
+        repair_ops=[{
+            "op": "bind_option_source",
+            "target_step": "query",
+            "target_path": "query.useInfo",
+            "source_url": "/unrelated/options",
+            "value_key": "id",
+            "label_key": "name",
+        }],
         max_rounds=1,
         expand_requests=False,
         allow_scope_changes=False,
@@ -4313,18 +4280,6 @@ def test_manual_source_override_is_preserved_without_rewriting_type_or_evidence(
 
 
 def test_incremental_planner_cannot_overwrite_user_confirmed_capability_identity_or_title():
-    class Planner:
-        async def complete_json(self, **_kwargs):
-            return {"ops": [{
-                "op": "upsert_capability",
-                "capability": {
-                    "name": "submit",
-                    "title": "模型覆盖标题",
-                    "kind": "submit_batch",
-                    "intent": "模型覆盖意图",
-                },
-            }]}
-
     spec = FlowSpec(
         steps=[FlowStep(step_id="submit", method="POST", path="/submit")],
         capabilities=[FlowCapability(
@@ -4335,7 +4290,17 @@ def test_incremental_planner_cannot_overwrite_user_confirmed_capability_identity
     )
 
     optimized = asyncio.run(orchestrate_flow_capabilities(
-        spec, llm_client=Planner(), model="planner", generation_mode="optimize",
+        spec,
+        submission={"ops": [{
+            "op": "upsert_capability",
+            "capability": {
+                "name": "submit",
+                "title": "模型覆盖标题",
+                "kind": "submit_batch",
+                "intent": "模型覆盖意图",
+            },
+        }]},
+        generation_mode="optimize",
     ))
     capability = optimized.capabilities[0]
     assert capability.name == "submit"
@@ -4346,18 +4311,6 @@ def test_incremental_planner_cannot_overwrite_user_confirmed_capability_identity
 
 
 def test_incremental_semantic_candidate_with_new_validation_error_is_rolled_back_atomically():
-    class BadPlanner:
-        async def complete_json(self, **_kwargs):
-            return {"ops": [{
-                "op": "set_condition",
-                "capability": "submit",
-                "node": {
-                    "id": "bad_entries_condition",
-                    "condition": "input.entries.length > 0",
-                    "then": [{"id": "call_submit", "type": "call", "step_id": "submit"}],
-                },
-            }]}
-
     spec = FlowSpec(
         steps=[FlowStep(
             step_id="submit", method="POST", path="/submit", body_source='{"title":"x"}',
@@ -4371,7 +4324,17 @@ def test_incremental_semantic_candidate_with_new_validation_error_is_rolled_back
     )
 
     optimized = asyncio.run(orchestrate_flow_capabilities(
-        spec, llm_client=BadPlanner(), model="planner", generation_mode="optimize",
+        spec,
+        submission={"ops": [{
+            "op": "set_condition",
+            "capability": "submit",
+            "node": {
+                "id": "bad_entries_condition",
+                "condition": "input.entries.length > 0",
+                "then": [{"id": "call_submit", "type": "call", "step_id": "submit"}],
+            },
+        }]},
+        generation_mode="optimize",
     ))
     assert optimized.meta["capability_model"]["source"] == "incremental_rejected"
     assert optimized.meta["capability_model"]["proposal_gate"]["accepted"] is False
@@ -4429,7 +4392,7 @@ def test_orchestration_removes_empty_planner_capability():
         ],
     )
 
-    out = asyncio.run(orchestrate_flow_capabilities(spec))
+    out = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
 
     assert [cap.name for cap in out.capabilities] == ["submit"]
 
@@ -4441,16 +4404,15 @@ def test_only_empty_capability_is_replaced_with_real_baseline():
         capabilities=[FlowCapability(name="list_options", kind="list_options", confirmed=True)],
     )
 
-    out = asyncio.run(orchestrate_flow_capabilities(spec))
+    out = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
 
     assert len(out.capabilities) == 1
     assert out.capabilities[0].kind == "submit"
     assert out.capabilities[0].step_ids == ["submit"]
 
 
-class _SplitIndependentWritesPlanner:
-    async def complete_json(self, **_kwargs):
-        return {"ops": [
+def _split_independent_writes_submission() -> dict:
+    return {"ops": [
             {"op": "upsert_capability", "capability": {
                 "name": "submit_daily", "title": "提交日报", "kind": "submit",
             }},
@@ -4473,8 +4435,7 @@ def test_initial_planner_can_split_multiple_write_capabilities_without_family_me
 
     out = asyncio.run(orchestrate_flow_capabilities(
         spec,
-        llm_client=_SplitIndependentWritesPlanner(),
-        model="fake",
+        submission=_split_independent_writes_submission(),
     ))
 
     assert {cap.name for cap in out.capabilities} == {"submit_daily", "submit_weekly"}
@@ -4795,7 +4756,7 @@ def test_incremental_orchestration_keeps_enum_in_existing_capability():
         )],
     )
 
-    out = asyncio.run(orchestrate_flow_capabilities(spec))
+    out = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
 
     assert {cap.kind for cap in out.capabilities} == {"submit"}
     assert out.capabilities[0].step_ids == ["submit"]

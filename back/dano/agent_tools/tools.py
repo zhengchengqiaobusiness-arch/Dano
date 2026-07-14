@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 import structlog
 
 from dano.agent_tools import materials
-from dano.assets.drafts import REVIEW_REQUIRED_TYPES, DraftStore, page_is_capture, page_is_write
+from dano.assets.drafts import REVIEW_REQUIRED_TYPES, DraftStore, page_is_write
 from dano.assets.repository import AssetRepository
 from dano.capabilities import doc_parser, endpoint_classifier, fingerprint, oa_templates
 from dano.execution.connectors.auth import AuthManager
@@ -782,17 +782,19 @@ async def request_review(run_id: str, params: dict) -> dict:
     draft = await _ds.get_draft(UUID(params["asset_draft_id"]))
     if draft is None:
         raise ToolError("草案不存在")
+    from dano.onboarding.recording_pi import active_recording_session
+    recording_session = active_recording_session(run_id)
     from dano.config import get_settings
-    if not get_settings().review_enabled:        # 运维急停:跳过评审(发布闸门也会放行)
+    if recording_session is None and not get_settings().review_enabled:  # 非录制运维降级
         return {"all_passed": True, "verdicts": [], "review_run_ids": [],
                 "note": "评审已临时关闭(降级)"}
-    if draft.asset_type not in REVIEW_REQUIRED_TYPES:
+    if recording_session is None and draft.asset_type not in REVIEW_REQUIRED_TYPES:
         return {"all_passed": True, "verdicts": [], "review_run_ids": [],
                 "note": f"{draft.asset_type.value} 免三模型评审"}
-    if draft.asset_type == AssetType.CONNECTOR and draft.body.get("workflow_step"):
+    if recording_session is None and draft.asset_type == AssetType.CONNECTOR and draft.body.get("workflow_step"):
         return {"all_passed": True, "verdicts": [], "review_run_ids": [],
                 "note": "工作流步骤连接器免单独评审(复合流程整体评审)"}
-    if draft.asset_type == AssetType.PAGE_SCRIPT and not page_is_write(draft.body):
+    if recording_session is None and draft.asset_type == AssetType.PAGE_SCRIPT and not page_is_write(draft.body):
         return {"all_passed": True, "verdicts": [], "review_run_ids": [],
                 "note": "查询类页面免三模型评审"}
     # 录制抓请求页面:不再整体豁免 —— 结构由 self_check 硬卡,这里三模型只判**语义**(业务逻辑/越权/合规),
@@ -801,6 +803,62 @@ async def request_review(run_id: str, params: dict) -> dict:
     evidence = [{"kind": v.kind, "passed": v.passed, "environment": v.environment,
                  "credential_type": v.credential_type, "evidence": v.evidence, "response": v.response}
                 for v in vals]
+    if recording_session is not None:
+        review = dict(recording_session.last_review or {})
+        if not review:
+            raise ToolError("录制 run 缺少 Pi AgentSession 提交的三角色 review，禁止回退模型评审")
+        current_version = int((recording_session.current_flow_spec().meta or {}).get("current_version") or 0)
+        review_version = review.get("base_flow_version")
+        if (
+            isinstance(review_version, bool)
+            or not isinstance(review_version, int)
+            or review_version != current_version
+        ):
+            raise ToolError("录制 review 已过期，请 Pi 基于当前 FlowSpec 重新审核")
+        verdicts = list(review.get("verdicts") or [])
+        expected_roles = {
+            "acceptance", "security", "compliance",
+        }
+        if (
+            len(verdicts) != len(expected_roles)
+            or any(not isinstance(item, dict) for item in verdicts)
+            or {str(item.get("role") or "") for item in verdicts} != expected_roles
+        ):
+            raise ToolError("录制 review 未完整覆盖 acceptance/security/compliance")
+        for verdict in verdicts:
+            if not isinstance(verdict.get("passed"), bool):
+                raise ToolError(f"录制 review.{verdict.get('role')}.passed 必须是布尔值")
+            reasons = verdict.get("reasons") or []
+            if not isinstance(reasons, list) or any(not isinstance(reason, str) for reason in reasons):
+                raise ToolError(f"录制 review.{verdict.get('role')}.reasons 必须是字符串数组")
+            model_id = verdict.get("model_id")
+            if model_id is not None and (not isinstance(model_id, str) or not model_id.strip()):
+                raise ToolError(f"录制 review.{verdict.get('role')}.model_id 必须是非空字符串")
+        review_run_ids, out = [], []
+        for verdict in verdicts:
+            rr = await _ds.record_review(
+                asset_draft_id=draft.asset_draft_id,
+                role=str(verdict["role"]),
+                model_id=str(verdict.get("model_id") or "pi-agent-session"),
+                passed=bool(verdict["passed"]),
+                reasons=list(verdict.get("reasons") or []),
+            )
+            review_run_ids.append(str(rr.review_run_id))
+            out.append({
+                "role": verdict["role"],
+                "model": verdict.get("model_id") or "pi-agent-session",
+                "passed": bool(verdict["passed"]),
+                "reasons": list(verdict.get("reasons") or []),
+            })
+        return {
+            "all_passed": all(item["passed"] for item in out),
+            "verdicts": out,
+            "review_run_ids": review_run_ids,
+            "review_unavailable": False,
+            "retryable": False,
+            "review_error": "",
+            "source": "pi_agent_session",
+        }
     board = _review_board
     if board is None:
         from dano.review.board import ReviewBoard
@@ -903,6 +961,152 @@ async def self_check_recording(run_id: str, params: dict) -> dict:
             "structured_output": out, "validation_run_ids": vrids}
 
 
+def _recording_session(run_id: str, params: dict):  # noqa: ANN202
+    from dano.onboarding.recording_pi import active_recording_session
+
+    session = active_recording_session(run_id)
+    if session is None:
+        raise ToolError("录制 Pi Session 不存在或已经关闭")
+    recording_id = str(params.get("recording_id") or "")
+    if not recording_id or recording_id != session.recording_id:
+        raise ToolError("recording_id 与当前录制会话不匹配")
+    return session
+
+
+def _strict_recording_params(params: dict, *, required: set[str], optional: set[str] | None = None) -> None:
+    if not isinstance(params, dict):
+        raise ToolError("录制工具参数必须是对象")
+    allowed = required | (optional or set())
+    missing = sorted(key for key in required if params.get(key) in (None, ""))
+    unknown = sorted(set(params) - allowed)
+    if missing:
+        raise ToolError(f"录制工具缺少参数: {','.join(missing)}")
+    if unknown:
+        raise ToolError(f"录制工具包含未知参数: {','.join(unknown)}")
+    if "base_flow_version" in params and (
+        isinstance(params["base_flow_version"], bool)
+        or not isinstance(params["base_flow_version"], int)
+    ):
+        raise ToolError("base_flow_version 必须是整数")
+
+
+async def get_recording_state(run_id: str, params: dict) -> dict:
+    _strict_recording_params(params, required={"recording_id"}, optional={"flow_version"})
+    return await _recording_session(run_id, params).get_recording_state()
+
+
+async def submit_recording_plan(run_id: str, params: dict) -> dict:
+    _strict_recording_params(
+        params,
+        required={"recording_id", "base_flow_version", "plan"},
+        optional={"flow_version"},
+    )
+    raw_plan = params.get("plan")
+    if not isinstance(raw_plan, dict):
+        raise ToolError("plan 必须是对象")
+    if any(key in raw_plan for key in ("semantic_plan", "plan", "ops", "abilities")):
+        submission = dict(raw_plan)
+    else:
+        submission = {"semantic_plan": dict(raw_plan), "ops": []}
+    submission.setdefault("submission_id", str(uuid4()))
+    session = _recording_session(run_id, params)
+    before_facts = session.current_flow_spec().request_facts.model_dump(mode="json")
+    try:
+        result = await session.apply_submission(
+            submission,
+            mode="plan",
+            base_flow_version=params["base_flow_version"],
+        )
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise ToolError(str(exc)) from exc
+    if session.current_flow_spec().request_facts.model_dump(mode="json") != before_facts:
+        raise ToolError("录制计划不得修改原始 request facts")
+    return result
+
+
+async def get_validation_report(run_id: str, params: dict) -> dict:
+    _strict_recording_params(params, required={"recording_id"}, optional={"flow_version"})
+    return await _recording_session(run_id, params).get_validation_report()
+
+
+async def submit_recording_repair(run_id: str, params: dict) -> dict:
+    _strict_recording_params(
+        params,
+        required={"recording_id", "base_flow_version", "operations"},
+        optional={"flow_version"},
+    )
+    operations = params.get("operations")
+    if not isinstance(operations, list) or any(not isinstance(op, dict) for op in operations):
+        raise ToolError("operations 必须是对象数组")
+    session = _recording_session(run_id, params)
+    before_facts = session.current_flow_spec().request_facts.model_dump(mode="json")
+    try:
+        result = await session.apply_submission(
+            {"ops": operations, "submission_id": str(uuid4())},
+            mode="repair",
+            base_flow_version=params["base_flow_version"],
+        )
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise ToolError(str(exc)) from exc
+    if session.current_flow_spec().request_facts.model_dump(mode="json") != before_facts:
+        raise ToolError("录制修复不得修改原始 request facts")
+    return result
+
+
+async def submit_recording_review(run_id: str, params: dict) -> dict:
+    _strict_recording_params(
+        params,
+        required={"recording_id", "base_flow_version", "review"},
+        optional={"flow_version"},
+    )
+    review = params.get("review")
+    if not isinstance(review, dict):
+        raise ToolError("review 必须是对象")
+    allowed_review_keys = {"acceptance", "security", "compliance", "blocking_reasons"}
+    if set(review) - allowed_review_keys:
+        raise ToolError("review 包含未知字段")
+    blocking_reasons = review.get("blocking_reasons") or []
+    if (
+        not isinstance(blocking_reasons, list)
+        or any(not isinstance(reason, str) for reason in blocking_reasons)
+    ):
+        raise ToolError("review.blocking_reasons 必须是字符串数组")
+    verdicts: list[dict[str, object]] = []
+    for role in ("acceptance", "security", "compliance"):
+        raw = review.get(role)
+        if not isinstance(raw, dict) or set(raw) - {"passed", "reasons", "model_id"}:
+            raise ToolError(f"review.{role} 仅允许 passed/reasons/model_id")
+        passed = raw.get("passed")
+        reasons = raw.get("reasons") or []
+        if not isinstance(passed, bool):
+            raise ToolError(f"review.{role}.passed 必须是布尔值")
+        if not isinstance(reasons, list) or any(not isinstance(reason, str) for reason in reasons):
+            raise ToolError(f"review.{role}.reasons 必须是字符串数组")
+        model_id = raw.get("model_id")
+        if model_id is not None and (not isinstance(model_id, str) or not model_id.strip()):
+            raise ToolError(f"review.{role}.model_id 必须是非空字符串")
+        verdicts.append({
+            "role": role,
+            "passed": passed,
+            "reasons": reasons,
+            "model_id": model_id or "pi-agent-session",
+        })
+    normalized = {
+        "recording_id": str(params["recording_id"]),
+        "base_flow_version": params["base_flow_version"],
+        "verdicts": verdicts,
+        "blocking_reasons": blocking_reasons,
+        "all_passed": all(bool(item["passed"]) for item in verdicts),
+    }
+    try:
+        return await _recording_session(run_id, params).submit_review(
+            normalized,
+            base_flow_version=params["base_flow_version"],
+        )
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
 # 工具注册表(白名单)。验证类工具天然只走 sandbox/test。
 TOOLS = {
     "parse_spec": parse_spec,
@@ -920,6 +1124,11 @@ TOOLS = {
     "get_selected_flows": get_selected_flows,
     "draft_policy": draft_policy,
     "test_policy_cases": test_policy_cases,
+    "get_recording_state": get_recording_state,
+    "submit_recording_plan": submit_recording_plan,
+    "get_validation_report": get_validation_report,
+    "submit_recording_repair": submit_recording_repair,
+    "submit_recording_review": submit_recording_review,
     "request_review": request_review,
     "publish_asset": publish_asset,
     "self_check_recording": self_check_recording,

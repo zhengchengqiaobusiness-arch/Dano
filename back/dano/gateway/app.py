@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
+import re
 import shutil
 import uuid
 
@@ -40,22 +41,6 @@ from dano.shared.enums import SkillState
 log = structlog.get_logger(__name__)
 # 三件套只是**原型常量**(空租户兜底);真实系统由 _tenant_subsystems 从该租户已发布资产里发现,不写死。
 _PROTOTYPE_SUBSYSTEMS = [Subsystem.OA, Subsystem.TICKET, Subsystem.REIMBURSE]
-
-
-def _page_semantic_client(*required_methods: str):
-    """复用发布评审的 LLM client；缺少对应能力时返回 None，让调用方走确定性兜底。"""
-    try:
-        from dano.agent_tools import tools as agent_tools
-        board = agent_tools._review_board
-        client = getattr(board, "client", None) if board is not None else None
-    except Exception as exc:  # noqa: BLE001
-        log.warning("page.semantic_client_unavailable", error=str(exc))
-        return None
-    if client is None:
-        return None
-    if any(not hasattr(client, method) for method in required_methods):
-        return None
-    return client
 
 
 async def _tenant_subsystems(tenant: str) -> list[Subsystem]:
@@ -632,7 +617,11 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
             f["enum_options"] = list(sel.get("options") or [])
         if sel.get("option_map"):
             f["enum_value_map"] = dict(sel.get("option_map") or {})
-        f["source_kind"] = "page_enum" if sel.get("enum_source") == "dom" else "api_option"
+        f["source_kind"] = (
+            "page_enum" if sel.get("enum_source") == "dom"
+            else "static_enum" if sel.get("enum_source") == "script_static"
+            else "api_option"
+        )
     # select/选人字段:用录制选项标签当默认参数名(经候选列表桥接),避免漏内部 key(Activity_xxx/嵌套键)
     sel_names = suggest_select_names(selects, samples)
     for f in fields:
@@ -653,32 +642,6 @@ async def _request_fields_msg(chosen: dict, candidates: list[dict], samples: dic
             "suggested_steps": suggest_workflow_steps(candidates, samples),   # 自动建议哪几条组成业务流程(前端预勾)
             "selects": selects,
             "identity": suggest_identity(pd, storage, samples)}   # 字段=当前用户/会话值(运行期重取;排除用户填值/平凡撞值)
-
-
-async def _enhance_flow_field_names(spec):  # noqa: ANN001, ANN202
-    """Run at most one bounded naming call for unresolved machine fields."""
-    try:
-        from dano.agent_tools import tools as tools_module
-        from dano.execution.page.flow_spec import (
-            apply_llm_field_names,
-            llm_field_name_candidates,
-        )
-        from dano.review.board import suggest_field_names_llm
-
-        board = tools_module._review_board
-        fields = llm_field_name_candidates(spec)
-        if board is None or not fields:
-            return spec
-        names = await suggest_field_names_llm(
-            board.client,
-            (getattr(board, "models", None) or {}).get("acceptance"),
-            action=spec.title or (spec.steps[-1].path if spec.steps else ""),
-            fields=fields,
-        )
-        return apply_llm_field_names(spec, names)
-    except Exception as exc:  # noqa: BLE001 - naming is non-blocking
-        log.warning("flow_spec.field_naming_failed", error=str(exc))
-        return spec
 
 
 def _frontend_recording_field_metadata(raw_steps: list[dict]) -> tuple[dict, set[str], dict]:
@@ -734,17 +697,22 @@ async def record_ws(ws: WebSocket) -> None:
     await ws.accept()
     sender = _WebSocketSendQueue(ws)
     sess = None
-    llm_budget_token = None
+    recording_pi = None
     session_action = ""
+    close_code = 1000
+    close_reason = ""
     try:
         init = await ws.receive_json()
         if init.get("type") != "start" or not init.get("start_url"):
             await sender.send_json({"type": "error", "detail": "首帧须为 {type:'start', start_url, ...}"})
             return
         session_action = _new_recording_action()
-        from dano.config import get_settings as _recording_settings
-        from dano.infra.llm_control import begin_llm_budget
-        llm_budget_token = begin_llm_budget(_recording_settings().llm_session_token_budget)
+        requested_recording_id = str(init.get("pi_recording_id") or "")
+        recording_id = (
+            requested_recording_id
+            if re.fullmatch(r"recording_[0-9a-f]{32}", requested_recording_id)
+            else f"recording_{uuid.uuid4().hex}"
+        )
         from dano.execution.page.recorder import RecordSession
         def on_step(step: dict) -> None:
             sender.send_background({"type": "step", "step": step})
@@ -763,11 +731,12 @@ async def record_ws(ws: WebSocket) -> None:
             sender.send_latest_frame({"type": "frame", **frame})
 
         await sess.start_screencast(on_frame)
-        await sender.send_json({"type": "started", "action": session_action})
+        await sender.send_json({
+            "type": "started",
+            "action": session_action,
+            "pi_recording_id": recording_id,
+        })
 
-        pending_req: dict | None = None       # 抓到的提交请求,等用户勾完字段再发布
-        pending_candidates: list[dict] = []    # 所有 JSON 写请求(候选),供用户手选用哪个
-        pending_all_caps: list[dict] = []      # RequestGraph 全量事实,用于无写请求/手选请求重建 FlowSpec
         pending_flow_spec = None               # Step A/B/C/D:可编辑的完整 FlowSpec
         pending_samples: dict = {}             # 录制时填的样例值(选别的请求时重算参数建议)
         pending_reads: list[dict] = []         # 抓到的列表读响应(select 候选源)
@@ -779,6 +748,20 @@ async def record_ws(ws: WebSocket) -> None:
         applied_flow_operations: dict[str, dict] = {}  # flow_update 幂等回执(operation_id → response)
         costly_operation_results: dict[str, dict] = {}
         recording_mode = "intercepted_submit" if init.get("intercept", True) else "real_submit"
+
+        async def _ensure_recording_pi():
+            """Lazily start the sole AgentSession used by this websocket."""
+            nonlocal recording_pi
+            if recording_pi is None:
+                from dano.onboarding.recording_pi import RecordingPiSession
+
+                recording_pi = RecordingPiSession(
+                    tenant=str(init.get("tenant") or ""),
+                    subsystem=str(init.get("subsystem") or "A-报销"),
+                    recording_id=recording_id,
+                )
+                await recording_pi.start()
+            return recording_pi
 
         def _costly_key(message: dict) -> str:
             operation_id = str(message.get("operation_id") or "")
@@ -957,6 +940,8 @@ async def record_ws(ws: WebSocket) -> None:
                             "frame_id": str(raw_entry.get("frame_id") or "") if isinstance(raw_entry, dict) else "",
                             "page_context": dict(raw_entry.get("page_context") or {}) if isinstance(raw_entry, dict) else {},
                             "control_kind": str(raw_entry.get("control_kind") or "select") if isinstance(raw_entry, dict) else "select",
+                            "enum_source": str(raw_entry.get("enum_source") or "dom") if isinstance(raw_entry, dict) else "dom",
+                            "script_url": str(raw_entry.get("script_url") or "") if isinstance(raw_entry, dict) else "",
                         }
                         if storage_key and storage_key not in page_enum_options:
                             page_enum_options[str(storage_key)] = entry
@@ -985,6 +970,8 @@ async def record_ws(ws: WebSocket) -> None:
                         "frame_id": str(raw_entry.get("frame_id") or "") if isinstance(raw_entry, dict) else "",
                         "page_context": dict(raw_entry.get("page_context") or {}) if isinstance(raw_entry, dict) else {},
                         "control_kind": str(raw_entry.get("control_kind") or "select") if isinstance(raw_entry, dict) else "select",
+                        "enum_source": str(raw_entry.get("enum_source") or "dom") if isinstance(raw_entry, dict) else "dom",
+                        "script_url": str(raw_entry.get("script_url") or "") if isinstance(raw_entry, dict) else "",
                     }
                     existing = page_enum_options.get(str(storage_key))
                     if isinstance(existing, dict):
@@ -1018,8 +1005,6 @@ async def record_ws(ws: WebSocket) -> None:
                 cands = [c for c in json_write_requests(all_caps)
                          if flatten_body(c.get("post_data"))                       # 有可勾字段的
                          and not looks_like_auth_write(c.get("url") or "", c.get("post_data"))]  # 排除登录/鉴权写
-                pending_all_caps = list(all_caps or [])
-                pending_candidates = cands
                 pending_samples = samples
                 pending_reads = sess.captured_reads()       # select 候选源(选领导)
                 pending_storage = login_state               # identity 字段识别
@@ -1039,7 +1024,6 @@ async def record_ws(ws: WebSocket) -> None:
                     continue
                 if cands:
                     chosen = pick_submit_request(cands, samples) or cands[-1]
-                    pending_req = chosen
                     request_fields = await _request_fields_msg(
                         chosen, cands, samples, pending_reads,
                         pending_storage, pending_required, page_enum_options,
@@ -1067,7 +1051,6 @@ async def record_ws(ws: WebSocket) -> None:
                             tenant=init.get("tenant", ""),
                             subsystem=init.get("subsystem", ""),
                         )
-                        pending_flow_spec = await _enhance_flow_field_names(pending_flow_spec)
                         from dano.execution.page.flow_spec import (
                             flow_spec_to_client,
                             flow_spec_to_summary,
@@ -1232,7 +1215,7 @@ async def record_ws(ws: WebSocket) -> None:
                     "full_spec": flow_spec_to_client(pending_flow_spec),
                     "check_report": validate_flow_spec(pending_flow_spec),
                 })
-            # 能力编排:LLM 生成对外可调用能力草案；失败则由 flow_spec 确定性规则兜底。
+            # 能力编排：唯一的录制 Pi AgentSession 读取当前事实并通过受控工具提交计划。
             elif t == "orchestrate_flow":
                 if await _replay_costly(msg):
                     continue
@@ -1240,14 +1223,12 @@ async def record_ws(ws: WebSocket) -> None:
                     await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 try:
-                    from dano.config import get_settings
                     from dano.execution.page.flow_spec import (
                         FlowSpec,
                         flow_spec_to_client,
                         flow_spec_to_summary,
                         flow_operation_report,
                         refresh_review_items,
-                        run_recording_pi_loop,
                         validate_flow_spec,
                     )
                     raw_spec = msg.get("flow_spec")
@@ -1255,12 +1236,17 @@ async def record_ws(ws: WebSocket) -> None:
                         raw_spec = _restore_hidden_flow_spec_fields(raw_spec)
                         pending_flow_spec = refresh_review_items(FlowSpec.model_validate(raw_spec))
                     before_operation = pending_flow_spec.model_copy(deep=True)
-                    pending_flow_spec = await run_recording_pi_loop(
-                        pending_flow_spec,
-                        llm_client=_page_semantic_client("complete_json"),
-                        model=get_settings().pi_model,
-                        mode="plan",
+                    pi_session = await _ensure_recording_pi()
+                    pi_session.bind_flow_spec(pending_flow_spec)
+                    await pi_session.prompt(
+                        "生成/优化当前录制能力。必须先调用 get_recording_state，完整复核所有已物化接口的能力边界；"
+                        "补入同次操作中遗漏的真实接口，补全占位或空白的能力标题、说明和业务语义，"
+                        "尊重人工删除记录，不得编造接口。最后必须调用 submit_recording_plan。"
+                        f" recording_id={recording_id}"
                     )
+                    if pi_session.last_submission_kind != "plan":
+                        raise RuntimeError("Pi 未提交 recording plan")
+                    pending_flow_spec = pi_session.current_flow_spec()
                     operation = "plan"
                     response = {
                         "type": "flow_spec_updated",
@@ -1272,12 +1258,13 @@ async def record_ws(ws: WebSocket) -> None:
                         "operation_report": flow_operation_report(
                             before_operation, pending_flow_spec, operation=operation,
                         ),
+                        "pi_session": pi_session.descriptor,
                     }
                     _remember_costly(msg, response)
                     await sender.send_json(response)
                 except Exception as e:  # noqa: BLE001
                     await sender.send_json({"type": "error", "detail": f"orchestrate_flow failed: {e}"})
-            # 一键修正:确定性补齐 + LLM 受限 patch；后端应用后重跑校验。
+            # 一键修正：同一个录制 Pi Session 读取最新校验并提交白名单修复。
             elif t == "auto_fix_flow":
                 if await _replay_costly(msg):
                     continue
@@ -1285,21 +1272,23 @@ async def record_ws(ws: WebSocket) -> None:
                     await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 try:
-                    from dano.config import get_settings
                     from dano.execution.page.flow_spec import (
                         flow_spec_to_client,
                         flow_spec_to_summary,
                         flow_operation_report,
-                        run_recording_pi_loop,
                         validate_flow_spec,
                     )
                     before_operation = pending_flow_spec.model_copy(deep=True)
-                    pending_flow_spec = await run_recording_pi_loop(
-                        pending_flow_spec,
-                        llm_client=_page_semantic_client("complete_json"),
-                        model=get_settings().pi_model,
-                        mode="repair",
+                    pi_session = await _ensure_recording_pi()
+                    pi_session.bind_flow_spec(pending_flow_spec)
+                    await pi_session.prompt(
+                        "修复当前录制编排。必须先调用 get_validation_report；必要时调用 get_recording_state，"
+                        "仅根据当前事实提交可验证的修复，最后必须调用 submit_recording_repair。"
+                        f" recording_id={recording_id}"
                     )
+                    if pi_session.last_submission_kind != "repair":
+                        raise RuntimeError("Pi 未提交 recording repair")
+                    pending_flow_spec = pi_session.current_flow_spec()
                     response = {
                         "type": "flow_spec_updated",
                         "operation": "repair",
@@ -1310,12 +1299,13 @@ async def record_ws(ws: WebSocket) -> None:
                         "operation_report": flow_operation_report(
                             before_operation, pending_flow_spec, operation="repair",
                         ),
+                        "pi_session": pi_session.descriptor,
                     }
                     _remember_costly(msg, response)
                     await sender.send_json(response)
                 except Exception as e:  # noqa: BLE001
                     await sender.send_json({"type": "error", "detail": f"auto_fix_flow failed: {e}"})
-            # Step D2: LLM 给每个 step 起业务名
+            # Step D2：沿用同一个 Pi Session 补充步骤业务名称。
             elif t == "step_naming":
                 if pending_flow_spec is None:
                     await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
@@ -1324,50 +1314,57 @@ async def record_ws(ws: WebSocket) -> None:
                     from dano.execution.page.flow_spec import (
                         flow_spec_to_client,
                         flow_spec_to_summary,
-                        rename_steps_with_llm,
                         validate_flow_spec,
                     )
-                    pending_flow_spec = rename_steps_with_llm(
-                        pending_flow_spec,
-                        llm_client=_page_semantic_client("name_step"),
+                    pi_session = await _ensure_recording_pi()
+                    pi_session.bind_flow_spec(pending_flow_spec)
+                    await pi_session.prompt(
+                        "补全当前录制中仍为技术名或占位名的接口业务名称；保留已有人工业务名称。"
+                        "必须先调用 get_recording_state，最后调用 submit_recording_plan。"
+                        f" recording_id={recording_id}"
                     )
+                    if pi_session.last_submission_kind != "plan":
+                        raise RuntimeError("Pi 未提交 step naming plan")
+                    pending_flow_spec = pi_session.current_flow_spec()
                     await sender.send_json({
                         "type": "step_names",
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
                         "full_spec": flow_spec_to_client(pending_flow_spec),
                         "check_report": validate_flow_spec(pending_flow_spec),
+                        "pi_session": pi_session.descriptor,
                     })
                 except Exception as e:  # noqa: BLE001
                     await sender.send_json({"type": "error", "detail": f"step_naming failed: {e}"})
-            # Step D3: LLM 生成业务说明
+            # Step D3：沿用同一个 Pi Session 生成整体业务说明。
             elif t == "business_description":
                 if pending_flow_spec is None:
                     await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 try:
                     from dano.execution.page.flow_spec import (
-                        append_flow_version,
                         flow_spec_to_client,
                         flow_spec_to_summary,
-                        render_business_description,
                         validate_flow_spec,
                     )
-                    desc = render_business_description(
-                        pending_flow_spec,
-                        llm_client=_page_semantic_client("summarize_flow"),
+                    pi_session = await _ensure_recording_pi()
+                    pi_session.bind_flow_spec(pending_flow_spec)
+                    await pi_session.prompt(
+                        "基于当前已录制接口、字段、依赖和能力生成完整整体说明，写入 semantic_plan 的"
+                        " business_understanding.summary；不得改写人工业务文本。必须先调用"
+                        " get_recording_state，最后调用 submit_recording_plan。"
+                        f" recording_id={recording_id}"
                     )
-                    pending_flow_spec.business_description = desc
-                    pending_flow_spec = append_flow_version(
-                        pending_flow_spec,
-                        "business_description",
-                        reason="生成结构化业务说明",
-                    )
+                    if pi_session.last_submission_kind != "plan":
+                        raise RuntimeError("Pi 未提交 business description plan")
+                    pending_flow_spec = pi_session.current_flow_spec()
+                    desc = pending_flow_spec.business_description
                     await sender.send_json({
                         "type": "business_description",
                         "description": desc,
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
                         "full_spec": flow_spec_to_client(pending_flow_spec),
                         "check_report": validate_flow_spec(pending_flow_spec),
+                        "pi_session": pi_session.descriptor,
                     })
                 except Exception as e:  # noqa: BLE001
                     await sender.send_json({"type": "error", "detail": f"business_description failed: {e}"})
@@ -1496,6 +1493,37 @@ async def record_ws(ws: WebSocket) -> None:
                                                    "reason": f"FlowSpec 发布构造失败:{e}"}})
                     continue
 
+                # 发布审核仍使用同一录制 Pi Session。缺少三角色审核、版本
+                # 不匹配或任一角色拒绝都必须硬失败，禁止回退到 ReviewBoard。
+                try:
+                    pi_session = await _ensure_recording_pi()
+                    pi_session.bind_flow_spec(pending_flow_spec)
+                    review_version = int((pending_flow_spec.meta or {}).get("current_version") or 0)
+                    await pi_session.prompt(
+                        "对当前录制发布候选执行最终审核。必须先调用 get_recording_state 和 "
+                        "get_validation_report，再通过 submit_recording_review 提交 acceptance、"
+                        "security、compliance 三角色结论。"
+                        f" recording_id={recording_id} flow_version={review_version}"
+                    )
+                    pi_session.require_publish_review(
+                        flow_version=review_version,
+                        flow_fingerprint=str(release_candidate["flow_fingerprint"]),
+                    )
+                except Exception as e:  # noqa: BLE001
+                    await sender.send_json({
+                        "type": "result",
+                        "operation": "publish",
+                        "operation_id": msg.get("operation_id"),
+                        "report": {
+                            "ok": False,
+                            "stage": "recording_pi_review",
+                            "reason": str(e),
+                            "full_spec": flow_spec_to_client(pending_flow_spec),
+                        },
+                        **({"pi_session": recording_pi.descriptor} if recording_pi is not None else {}),
+                    })
+                    continue
+
                 sub = init.get("subsystem", "A-报销")
                 login_state = await sess.storage_state()
                 from dano.execution.page.sessions import save_session
@@ -1512,7 +1540,9 @@ async def record_ws(ws: WebSocket) -> None:
                     required=required,
                     goal=msg.get("goal") or pending_flow_spec.goal,
                     deploy=init.get("deploy"), storage_state=login_state,
-                    allow_repair=False)
+                    allow_repair=False,
+                    run_id=pi_session.run_id,
+                )
                 if rep.get("ok"):
                     try:
                         skill_id = rep.get("skill_id") or f"{sub}.{session_action}"
@@ -1534,7 +1564,8 @@ async def record_ws(ws: WebSocket) -> None:
                                        "recording_mode": recording_mode},
                             "parsed_steps": len(last_params), "via": "flow_spec",
                             "recording_mode": recording_mode,
-                            "workflow_steps": len(apir.get("steps") or []) or None}
+                            "workflow_steps": len(apir.get("steps") or []) or None,
+                            "pi_session": pi_session.descriptor}
                 _remember_costly(msg, response)
                 await sender.send_json(response)
             elif t == "stop":
@@ -1544,22 +1575,32 @@ async def record_ws(ws: WebSocket) -> None:
                 # be forwarding queued frames and writes into an upstream FIN.
                 await sender.send_json({"type": "stopped"})
                 break
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as exc:
+        log.info(
+            "recording.websocket_disconnected",
+            action=session_action,
+            close_code=exc.code,
+        )
     except Exception as e:  # noqa: BLE001
+        close_code = 1011
+        close_reason = "recording_server_error"
+        log.exception(
+            "recording.websocket_failed",
+            action=session_action,
+            error=str(e),
+        )
         try:
             await sender.send_json({"type": "error", "detail": str(e)})
         except Exception:  # noqa: BLE001
             pass
     finally:
-        if llm_budget_token is not None:
-            from dano.infra.llm_control import end_llm_budget
-            end_llm_budget(llm_budget_token)
+        if recording_pi is not None:
+            await recording_pi.close()
         if sess is not None:
             await sess.stop()
         await sender.close()
         try:
-            await ws.close()
+            await ws.close(code=close_code, reason=close_reason)
         except Exception:  # noqa: BLE001
             pass
 

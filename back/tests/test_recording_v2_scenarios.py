@@ -8,7 +8,6 @@ derived field/dependency/schema views stay aligned with that scope.
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 
 import dano.execution.page.flow_spec as flow_spec_module
@@ -22,13 +21,13 @@ from dano.execution.page.flow_spec import (
     ParamField,
     SelectBinding,
     apply_flow_edits,
+    apply_recording_agent_submission,
     build_default_flow_capabilities,
     flow_spec_to_api_request,
     flow_spec_to_client,
     orchestrate_flow_capabilities,
     prepare_flow_spec_for_publish,
     promote_request_to_step,
-    run_recording_pi_loop,
     sync_flow_spec_models,
     to_flow_spec,
     validate_flow_spec,
@@ -72,6 +71,62 @@ def _walk_nodes(nodes: list[dict]) -> list[dict]:
             if isinstance(child, list):
                 flattened.extend(_walk_nodes([item for item in child if isinstance(item, dict)]))
     return flattened
+
+
+def test_same_command_transaction_keeps_auxiliary_json_interface_in_operation():
+    transaction = "page-1|frame-1|action-cancel"
+    auxiliary = _get(1, "/api/workflow/preflight", {"allowed": True})
+    auxiliary.update({
+        "resource_type": "xhr",
+        "trigger_transaction_id": transaction,
+        "trigger_action_id": "action-cancel",
+        "trigger_op": "click",
+        "causality_confidence": "high",
+        "_request_role": {
+            "role": "noise", "keep": False, "reason": "response arrived after initial classification",
+            "confidence": 0.2,
+        },
+    })
+    command = _post(2, "/api/application/cancel", {"id": "one"})
+    command.update({
+        "resource_type": "xhr",
+        "trigger_transaction_id": transaction,
+        "trigger_action_id": "action-cancel",
+        "trigger_op": "click",
+        "causality_confidence": "high",
+        "_request_role": {
+            "role": "business_write", "keep": True, "reason": "command request",
+            "confidence": 0.99,
+        },
+    })
+
+    spec = to_flow_spec([auxiliary, command])
+    assert {step.path for step in spec.steps} == {
+        "/api/workflow/preflight", "/api/application/cancel",
+    }
+    submit = next(cap for cap in build_default_flow_capabilities(spec) if cap.kind == "submit")
+    assert set(submit.step_ids) == {step.step_id for step in spec.steps}
+
+
+def test_optimize_fills_placeholder_capability_title_and_intent_without_model_guess():
+    spec = FlowSpec(
+        title="酒店申请",
+        steps=[FlowStep(
+            step_id="cancel", method="DELETE", path="/api/application/cancel",
+            source_meta={"role": "business_write"},
+        )],
+        capabilities=[FlowCapability(
+            name="capability_2", title="能力 2", intent="", kind="submit",
+            step_ids=["cancel"], nodes=[{"id": "call_cancel", "type": "call", "step_id": "cancel"}],
+        )],
+        meta={"capability_model": {"status": "ready"}},
+    )
+
+    optimized = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
+    capability = next(cap for cap in optimized.capabilities if cap.name == "capability_2")
+    assert capability.title == "提交酒店申请"
+    assert "真实接口" in capability.intent
+    assert capability.step_ids == ["cancel"]
 
 
 def test_capability_nodes_expand_stale_step_ids_and_derive_all_three_step_views():
@@ -294,7 +349,7 @@ def test_to_flow_spec_materializes_high_confidence_business_query_and_dependency
     }
     assert spec.request_facts.usage[independent.request_id].state == "materialized"
 
-    orchestrated = asyncio.run(orchestrate_flow_capabilities(spec))
+    orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
     by_kind = {cap.kind: cap for cap in orchestrated.capabilities}
     assert set(by_kind) == {"query_status", "submit"}
     assert [orchestrated.steps[[s.step_id for s in orchestrated.steps].index(sid)].path.split("?", 1)[0]
@@ -410,12 +465,12 @@ def test_seal_application_keeps_control_preflights_and_maps_long_id_enum():
         if param.path in {"query.key", "query.processDefinitionId", "query.activityId", "billType", "processDefKey"}
     )
 
-    orchestrated = asyncio.run(orchestrate_flow_capabilities(spec))
+    orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
     submit_cap = next(cap for cap in orchestrated.capabilities if cap.kind == "submit")
     assert submit_cap.step_ids == [step.step_id for step in spec.steps]
     assert not any(cap.kind == "query_status" for cap in orchestrated.capabilities)
 
-    planned = asyncio.run(run_recording_pi_loop(spec, mode="plan"))
+    planned = asyncio.run(apply_recording_agent_submission(spec, submission={"ops": []}, mode="plan"))
     planned_submit = next(cap for cap in planned.capabilities if cap.kind == "submit")
     assert planned_submit.confirmed is True
     assert planned_submit.requires_human_confirm is False
@@ -477,7 +532,7 @@ def test_daily_report_builds_independent_query_and_batch_submit_capabilities():
     assert all(mapping["kind"] == "batch_result" for mapping in by_kind["submit_batch"].output_mapping)
     assert not set(by_kind["query_status"].step_ids) & set(by_kind["submit_batch"].step_ids)
 
-    orchestrated = asyncio.run(orchestrate_flow_capabilities(spec))
+    orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
     assert len(orchestrated.capability_relations) == 1
     relation = orchestrated.capability_relations[0]
     assert relation.type == "external_transform"
@@ -523,7 +578,7 @@ def test_missing_dates_query_and_single_row_submit_compile_to_foreach_batch_cont
         ],
     )
 
-    out = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[query, submit])))
+    out = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[query, submit]), submission={"ops": []}))
     batch = next(cap for cap in out.capabilities if cap.kind == "submit_batch")
 
     assert batch.input_schema["properties"]["entries"]["type"] == "array"
@@ -560,7 +615,7 @@ def test_query_output_fields_use_mapped_response_schema_types():
         response_json={"data": {"missing_dates": ["2026-05-11"], "total": 1}},
     )
 
-    out = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[query])))
+    out = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[query]), submission={"ops": []}))
     cap = out.capabilities[0]
     fields = {field.key: field.type for field in cap.outputs}
 
@@ -646,7 +701,7 @@ def test_query_then_submit_does_not_invent_relation_without_field_mapping():
         params=[ParamField(path="date", key="日期", type="date", source_kind="user_input")],
     )
 
-    out = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[query, submit])))
+    out = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[query, submit]), submission={"ops": []}))
 
     assert {cap.kind for cap in out.capabilities} == {"query_status", "submit"}
     assert out.capability_relations == []
@@ -676,7 +731,7 @@ def test_page_context_names_business_and_default_capabilities_without_model_gues
         ],
     )
 
-    generated = asyncio.run(run_recording_pi_loop(spec, mode="plan"))
+    generated = asyncio.run(apply_recording_agent_submission(spec, submission={"ops": []}, mode="plan"))
 
     assert generated.title == "公章借阅"
     assert {cap.title for cap in generated.capabilities} == {
@@ -875,10 +930,6 @@ def test_complex_business_domains_split_into_independent_capabilities():
 
 
 
-def test_recording_pi_loop_has_no_force_replan_protocol():
-    assert "force_replan" not in inspect.signature(run_recording_pi_loop).parameters
-
-
 def test_cross_domain_write_dependency_prevents_unsafe_automatic_split():
     spec = FlowSpec(
         steps=[
@@ -945,13 +996,8 @@ def _seal_semantic_spec() -> FlowSpec:
     ])
 
 
-class _CompleteSemanticPlanner:
-    def __init__(self):
-        self.requests = []
-
-    async def complete_json_messages(self, **kwargs):
-        self.requests.append(kwargs["messages"])
-        return {
+def _complete_semantic_submission() -> dict:
+    return {
             "semantic_plan": {
                 "business_understanding": {
                     "intent": "查询公章借阅记录并提交公章借阅申请",
@@ -998,10 +1044,9 @@ class _CompleteSemanticPlanner:
         }
 
 
-def test_initial_semantic_generation_names_indexed_range_inherits_context_and_reuses_result():
-    planner = _CompleteSemanticPlanner()
-    generated = asyncio.run(run_recording_pi_loop(
-        _seal_semantic_spec(), llm_client=planner, model="semantic-model", mode="plan",
+def test_initial_pi_submission_names_indexed_range_and_inherits_context():
+    generated = asyncio.run(apply_recording_agent_submission(
+        _seal_semantic_spec(), submission=_complete_semantic_submission(), mode="plan",
     ))
 
     query = next(step for step in generated.steps if step.step_id == "seal-page")
@@ -1022,112 +1067,35 @@ def test_initial_semantic_generation_names_indexed_range_inherits_context_and_re
     }
     assert generated.meta["capability_generation"]["initial_completed"] is True
     assert generated.meta["capability_generation"]["status"] == "ready"
-    initial_call_count = len(planner.requests)
-    assert 1 <= initial_call_count <= 2  # one Planner plus at most one targeted Repair
-    if initial_call_count == 2:
-        assert planner.requests[1][:3] == planner.requests[0]
-
-    optimized = asyncio.run(run_recording_pi_loop(
-        generated, llm_client=planner, model="semantic-model", mode="plan",
-    ))
-    assert len(planner.requests) == initial_call_count
-    assert optimized.meta["recording_pi_loop"]["cache_hit"] is True
+    assert generated.meta["recording_agent_session"]["mode"] == "plan"
 
 
-def test_small_manual_change_runs_one_incremental_planner_then_reuses_result():
-    initial_planner = _CompleteSemanticPlanner()
-    generated = asyncio.run(run_recording_pi_loop(
-        _seal_semantic_spec(), llm_client=initial_planner, model="semantic-model", mode="plan",
+def test_small_manual_change_accepts_one_incremental_pi_submission():
+    generated = asyncio.run(apply_recording_agent_submission(
+        _seal_semantic_spec(), submission=_complete_semantic_submission(), mode="plan",
     ))
     submit = next(step for step in generated.steps if step.step_id == "submit")
     remark = next(param for param in submit.params if param.path == "remark")
     remark.required = False
-
-    class DeltaPlanner:
-        def __init__(self):
-            self.requests = []
-
-        async def complete_json_messages(self, **kwargs):
-            self.requests.append(kwargs["messages"])
-            return {
-                "reviewed_scope": {
-                    "changed_fields": ["submit:remark"],
-                    "affected_capabilities": ["submit"],
-                    "reason": "调用方将备注改为可选",
-                },
-                "ops": [],
-                "unresolved_items": [],
-            }
-
-    delta_planner = DeltaPlanner()
-    optimized = asyncio.run(run_recording_pi_loop(
-        generated, llm_client=delta_planner, model="semantic-model", mode="plan",
+    optimized = asyncio.run(apply_recording_agent_submission(
+        generated,
+        submission={
+            "reviewed_scope": {
+                "changed_fields": ["submit:remark"],
+                "affected_capabilities": ["submit"],
+                "reason": "调用方将备注改为可选",
+            },
+            "ops": [],
+            "unresolved_items": [],
+        },
+        mode="plan",
     ))
 
-    assert len(delta_planner.requests) == 1
-    assert "增量优化" in delta_planner.requests[0][-1]["content"]
-    assert optimized.meta["capability_generation"]["application_cache_hit"] is False
-    assert optimized.meta["capability_generation"]["model_calls"] == 1
-
-    reused = asyncio.run(run_recording_pi_loop(
-        optimized, llm_client=delta_planner, model="semantic-model", mode="plan",
-    ))
-    assert len(delta_planner.requests) == 1
-    assert reused.meta["capability_generation"]["application_cache_hit"] is True
-    assert reused.meta["capability_generation"]["model_calls"] == 0
-
-
-def test_partial_first_planner_response_is_completed_without_second_full_call():
-    class SparsePlanner:
-        def __init__(self):
-            self.calls = 0
-
-        async def complete_json_messages(self, **_kwargs):
-            self.calls += 1
-            return {
-                "semantic_plan": {
-                    "business_understanding": {"business_name": "请假申请"},
-                },
-                "ops": [],
-            }
-
-    planner = SparsePlanner()
-    spec = FlowSpec(steps=[FlowStep(
-        step_id="submit", method="POST", path="/oa/leave/submit",
-        body_source='{"reason":"事假"}', response_json={"code": 0, "data": True},
-        params=[ParamField(
-            path="reason", key="请假原因", value="事假", required=True,
-            category="user_param", source_kind="user_input", exposed_to_user=True,
-        )],
-        success_rule={"path": "code", "equals": 0},
-    )])
-
-    generated = asyncio.run(run_recording_pi_loop(
-        spec, llm_client=planner, model="semantic-model", mode="plan",
-    ))
-
-    assert planner.calls == 1
-    assert generated.meta["capability_generation"]["model_calls"] == 1
-    assert generated.meta["capability_generation"]["initial_completed"] is True
-    assert generated.meta["capability_model"]["semantic_coverage"]["complete"] is True
-
-
-def test_indexed_range_semantics_are_grounded_even_when_model_is_unavailable():
-    generated = asyncio.run(run_recording_pi_loop(
-        _seal_semantic_spec(), llm_client=None, model=None, mode="plan",
-    ))
-    query = next(step for step in generated.steps if step.step_id == "seal-page")
-    assert [(param.key, param.path) for param in query.params if "useTime" in param.path] == [
-        ("查询开始时间", "query.useTime[0]"),
-        ("查询结束时间", "query.useTime[1]"),
-    ]
-    assert generated.meta["capability_generation"]["status"] == "degraded_deterministic"
+    assert optimized.meta["recording_agent_session"]["generation_mode"] == "optimize"
 
 
 def test_complete_semantic_plan_can_split_one_deterministic_write_family_on_first_run():
-    class SplitPlanner:
-        async def complete_json(self, **_kwargs):
-            return {"semantic_plan": {
+    submission = {"semantic_plan": {
                 "business_understanding": {"intent": "分别保存草稿并提交订单"},
                 "request_roles": [
                     {"step_id": "draft", "role": "business_write", "name": "保存订单草稿", "reason": "独立保存动作"},
@@ -1147,29 +1115,13 @@ def test_complete_semantic_plan_can_split_one_deterministic_write_family_on_firs
         FlowStep(step_id="commit", method="POST", path="/api/order/commit", body_source="{}"),
     ])
     generated = asyncio.run(orchestrate_flow_capabilities(
-        spec, llm_client=SplitPlanner(), model="semantic", generation_mode="initial",
+        spec, submission=submission, generation_mode="initial",
     ))
 
     assert {(cap.name, tuple(cap.step_ids)) for cap in generated.capabilities} == {
         ("save_draft", ("draft",)),
         ("commit_order", ("commit",)),
     }
-
-
-class _InitialSingleCapabilityPlanner:
-    async def complete_json(self, **_kwargs):
-        return {
-            "ops": [{
-                "op": "add_request_to_capability",
-                "capability": "submit",
-                "step_id": "seal-page",
-            }],
-            "abilities": [{
-                "name": "submit_all",
-                "kind": "submit",
-                "step_ids": ["seal-page", "definition", "approval", "submit"],
-            }],
-        }
 
 
 def test_initial_planner_cannot_merge_deterministic_page_boundaries_back_into_one_capability():
@@ -1190,8 +1142,18 @@ def test_initial_planner_cannot_merge_deterministic_page_boundaries_back_into_on
 
     out = asyncio.run(orchestrate_flow_capabilities(
         FlowSpec(steps=[query, definition, approval, submit]),
-        llm_client=_InitialSingleCapabilityPlanner(),
-        model="fake",
+        submission={
+            "ops": [{
+                "op": "add_request_to_capability",
+                "capability": "submit",
+                "step_id": "seal-page",
+            }],
+            "abilities": [{
+                "name": "submit_all",
+                "kind": "submit",
+                "step_ids": ["seal-page", "definition", "approval", "submit"],
+            }],
+        },
     ))
     by_kind = {cap.kind: cap for cap in out.capabilities}
 

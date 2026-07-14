@@ -116,7 +116,7 @@ interface FlowCapabilityRequestRefData {
   request_id?: string; request_index?: number | string | null; step_id?: string;
   role?: string; method?: string; path?: string; sequence?: number | string | null;
   confidence?: number; reason?: string; usage?: CapabilityUsage; origin?: string;
-  pinned?: boolean; confirmed?: boolean;
+  confirmed?: boolean;
 }
 interface FlowCapabilityRelationData {
   relation_id?: string; type?: string; mode?: string;
@@ -276,6 +276,18 @@ function recorderKeyName(e: React.KeyboardEvent<HTMLInputElement>): string | nul
   const ordered = MOD_ORDER.filter((m) => mods.includes(m));
   const key = [...ordered, normalizedBase].join("+");
   return key;
+}
+
+function recorderWebSocketUrl() {
+  const configured = String(import.meta.env.VITE_DANO_RECORDING_WS_URL || "").trim();
+  if (configured) return configured;
+  // The Vite websocket proxy has repeatedly terminated long recording streams.
+  // Bypass it in the standard local setup; deployed builds remain same-origin.
+  if (import.meta.env.DEV && location.port === "5173" && ["localhost", "127.0.0.1", "::1"].includes(location.hostname)) {
+    return "ws://127.0.0.1:8077/onboarding/page/record";
+  }
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${location.host}/onboarding/page/record`;
 }
 const CATEGORY_OPTIONS = [
   { label: "用户参数", value: "user_param" },
@@ -1206,14 +1218,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           step_id: step.step_id,
           usage: item.usage,
           origin: "manual",
-          pinned: true,
           confirmed: true,
         },
       ];
       const capabilities = [...(nextSpec.capabilities || [])];
       capabilities[capIdx] = { ...cap, request_refs: requestRefs };
       nextSpec = { ...nextSpec, capabilities };
-      if (existingRef?.usage !== item.usage || existingRef?.origin !== "manual" || !existingRef?.pinned) {
+      if (existingRef?.usage !== item.usage || existingRef?.origin !== "manual" || !existingRef?.confirmed) {
         edits.push({ op: "update_capability", capability_index: capIdx, field: "request_refs", value: requestRefs });
       }
     }
@@ -1497,8 +1508,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     connectionErrorRef.current = "";
     if (heartbeatTimerRef.current != null) window.clearInterval(heartbeatTimerRef.current);
     wsAliveRef.current = true;                                     // FC2 修复:每次 start 重置存活标志
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/onboarding/page/record`);
+    const ws = new WebSocket(recorderWebSocketUrl());
     wsRef.current = ws;
     ws.onopen = () => {
       if (wsRef.current !== ws) return;
@@ -1671,8 +1681,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         setErr(connectionErrorRef.current);
       }
     };
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       if (wsRef.current !== ws) return;
+      if (!intentionalCloseRef.current && event.code !== 1000 && !connectionErrorRef.current) {
+        const reason = event.reason ? `：${event.reason}` : "";
+        connectionErrorRef.current = `录制连接异常关闭（代码 ${event.code || 1006}）${reason}`;
+      }
       const hadStarted = sessionStartedRef.current;
       sessionStartedRef.current = false;
       wsRef.current = null;
@@ -2299,7 +2313,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function addStepToCapability(idx: number, value?: string, usage?: CapabilityUsage | "") {
     if (!value || !usage) return;
-    const membership = { usage, origin: "manual", pinned: true, confirmed: true };
+    const membership = { usage, origin: "manual", confirmed: true };
     if (value.startsWith("step:")) {
       const stepId = value.slice(5);
       const cap = flowSpecRef.current?.capabilities?.[idx];
@@ -3354,7 +3368,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             <Typography.Text strong>{st.name || fallbackStepName(st.method, st.path)}</Typography.Text>
             <PathText value={st.path || stripHost(st.url)} maxWidth={420} />
             <Tag color="blue">用途：{capabilityUsageLabel(requestRef?.usage)}</Tag>
-            {requestRef?.pinned && <Tag color="gold">手工锁定</Tag>}
             <Tag>{st.params?.length || 0} 字段</Tag>
           </Space>
         }
@@ -3432,7 +3445,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     <Tag color="cyan">选项来源</Tag>
                     <Typography.Text>{st?.name || ref.path || ref.step_id}</Typography.Text>
                     {st && <PathText value={st.path || stripHost(st.url)} maxWidth={420} />}
-                    {ref.pinned && <Tag color="gold">手工锁定</Tag>}
                   </Space>
                 </List.Item>
               );

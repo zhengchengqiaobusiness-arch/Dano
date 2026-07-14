@@ -923,6 +923,11 @@ class RecordSession:
         # finalize 扫描不到表单，也避免把证据误导出成回放动作。
         self.form_snapshots: list[dict] = []
         self.enum_snapshots: list[dict] = []
+        # Bounded same-origin JavaScript bodies are optional enum evidence.
+        # They are never executable steps and never override runtime DOM/API
+        # mappings; they only repair a label-only snapshot when a statically
+        # declared option array can be tied to the exact field alias.
+        self.script_sources: list[dict] = []
         self.requests: list[dict] = []      # 抓到的写请求(有序,method/url/post_data/headers)→ 参数化/多步工作流
         self.reads: list[dict] = []         # 抓到的读请求(GET+JSON 列表/字典)→ Q2 选领导等 select 的候选源
         # P0-1:全量捕获(基础事实)。先抓全再筛 → 治"GET 业务接口被早筛丢"等根因。
@@ -1375,6 +1380,23 @@ class RecordSession:
                 ct = (response.headers or {}).get("content-type", "")
             except Exception:  # noqa: BLE001
                 pass
+            try:
+                resource_type = str(response.request.resource_type or "").lower()
+            except Exception:  # noqa: BLE001
+                resource_type = ""
+            if resource_type == "script" or "javascript" in ct.lower():
+                # Keep strict bounds: script evidence is a fallback index, not
+                # an archive of application bundles. Cross-origin/CORS does not
+                # matter here because Playwright reads the already loaded
+                # response body, and no script is evaluated by Python.
+                if len(self.script_sources) < 30:
+                    try:
+                        body = await response.text()
+                    except Exception:  # noqa: BLE001
+                        body = ""
+                    if body and len(body) <= 1_500_000:
+                        self.script_sources.append({"url": response.url, "text": body})
+                return
             # P0-1:全量捕获响应(JSON body)→ 贴回 all_requests 同源记录(P0-3 依赖闭包靠它发现 step 串联)。
             # 写请求同时贴回 self.requests(Q3 步链 taskId);读候选源走 as_list_payload 单独进 self.reads。
             # 容错:content-type 不是 JSON 也再试一次 response.json()(治"没设 ct 但 body 是 JSON 文本")。
@@ -1802,6 +1824,7 @@ class RecordSession:
         self.steps.clear()
         self.form_snapshots.clear()
         self.enum_snapshots.clear()
+        self.script_sources.clear()
         self.requests.clear()
         self.reads.clear()
         self.all_requests.clear()
@@ -1899,7 +1922,87 @@ class RecordSession:
                 if aliases:
                     entry["field_aliases"] = aliases
                 out[storage_key] = entry
+        self._supplement_page_enums_from_scripts(out)
         return out
+
+    @staticmethod
+    def _script_literal_value(raw: str):  # noqa: ANN205
+        value = str(raw or "").strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            return value[1:-1].replace("\\'", "'").replace('\\"', '"')
+        if value == "true":
+            return True
+        if value == "false":
+            return False
+        try:
+            return float(value) if "." in value else int(value)
+        except (TypeError, ValueError):
+            return value
+
+    @classmethod
+    def _static_enum_arrays(cls, source: str) -> list[dict]:
+        arrays: list[dict] = []
+        array_re = re.compile(
+            r"(?P<name>[A-Za-z_$][\w$]{2,80})\s*[:=]\s*\[(?P<body>.{1,30000}?)\]",
+            re.S,
+        )
+        object_re = re.compile(r"\{(?P<body>[^{}]{1,600})\}", re.S)
+        item_re = re.compile(
+            r"(?:['\"](?P<qkey>[^'\"]+)['\"]|(?P<key>[A-Za-z_$][\w$]*))\s*:\s*"
+            r"(?P<value>'(?:\\.|[^'])*'|\"(?:\\.|[^\"])*\"|-?\d+(?:\.\d+)?|true|false)",
+            re.S,
+        )
+        label_keys = {"label", "text", "name", "title"}
+        value_keys = {"value", "id", "code", "key"}
+        for match in array_re.finditer(source or ""):
+            options: list[dict] = []
+            for obj in object_re.finditer(match.group("body")):
+                values = {
+                    str(item.group("qkey") or item.group("key") or "").lower(): cls._script_literal_value(item.group("value"))
+                    for item in item_re.finditer(obj.group("body"))
+                }
+                label_key = next((key for key in label_keys if values.get(key) not in (None, "")), "")
+                value_key = next((key for key in value_keys if key in values), "")
+                if label_key and value_key:
+                    options.append({"label": str(values[label_key]), "value": values[value_key]})
+            unique = {(item["label"], repr(item["value"])) for item in options}
+            if len(unique) >= 2:
+                arrays.append({"name": match.group("name"), "options": options[:200]})
+        return arrays
+
+    def _supplement_page_enums_from_scripts(self, page_options: dict) -> None:
+        if not page_options or not self.script_sources:
+            return
+
+        def normalized(value: object) -> str:
+            return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+        arrays: list[dict] = []
+        for script in self.script_sources:
+            for candidate in self._static_enum_arrays(str(script.get("text") or "")):
+                candidate["url"] = str(script.get("url") or "")
+                arrays.append(candidate)
+        for entry in page_options.values():
+            options = list(entry.get("options") or [])
+            if options and all(isinstance(item, dict) and "value" in item for item in options):
+                continue
+            aliases = {
+                normalized(str(alias).split(":", 1)[-1])
+                for alias in [entry.get("field_key"), *(entry.get("field_aliases") or [])]
+                if len(normalized(str(alias).split(":", 1)[-1])) >= 3
+            }
+            matches = [
+                candidate for candidate in arrays
+                if any(alias in normalized(candidate["name"]) or normalized(candidate["name"]) in alias for alias in aliases)
+            ]
+            # Ambiguous bundles are not evidence. Exact one-field/one-array
+            # association is required before static JS can fill wire values.
+            if len(matches) != 1:
+                continue
+            entry["options"] = list(matches[0]["options"])
+            entry["enum_source"] = "script_static"
+            entry["script_url"] = matches[0]["url"]
+            entry["mapping_complete"] = True
 
     def recorded_field_evidence(self) -> list[dict]:
         """Return control-identity evidence scoped to the page that emitted it.

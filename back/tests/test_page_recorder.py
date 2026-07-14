@@ -14,6 +14,53 @@ from dano.execution.page.driver import PlaywrightPageDriver
 from dano.execution.page.recorder import RecordSession, _RECORDER_JS
 
 
+def test_static_script_enum_repairs_only_exact_label_value_mapping() -> None:
+    sess = RecordSession()
+    sess.script_sources = [{
+        "url": "https://example.test/assets/form.js",
+        "text": "const processStatusOptions=[{label:'未提交',value:0},{label:'审批中',value:1},{label:'已完成',value:2}]",
+    }]
+    page_options = {
+        "流程状态": {
+            "field_key": "processStatus",
+            "field_aliases": ["name:processStatus"],
+            "options": ["未提交", "审批中", "已完成"],
+        },
+    }
+
+    sess._supplement_page_enums_from_scripts(page_options)
+
+    assert page_options["流程状态"]["enum_source"] == "script_static"
+    assert page_options["流程状态"]["options"] == [
+        {"label": "未提交", "value": 0},
+        {"label": "审批中", "value": 1},
+        {"label": "已完成", "value": 2},
+    ]
+
+
+def test_static_script_enum_does_not_guess_without_unique_field_alias() -> None:
+    sess = RecordSession()
+    sess.script_sources = [{
+        "url": "https://example.test/assets/form.js",
+        "text": (
+            "const processStatusOptions=[{label:'未提交',value:0},{label:'审批中',value:1}];"
+            "const processStatusBackup=[{label:'草稿',value:10},{label:'完成',value:20}]"
+        ),
+    }]
+    page_options = {
+        "流程状态": {
+            "field_key": "processStatus",
+            "field_aliases": ["name:processStatus"],
+            "options": ["未提交", "审批中"],
+        },
+    }
+
+    sess._supplement_page_enums_from_scripts(page_options)
+
+    assert page_options["流程状态"]["options"] == ["未提交", "审批中"]
+    assert "enum_source" not in page_options["流程状态"]
+
+
 def test_observer_correlates_action_dom_effect_and_request_without_copying_values() -> None:
     sess = RecordSession()
     sess._on_record(None, json.dumps({
