@@ -13168,9 +13168,26 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 param_key=str(edit.get("param_key") or ""),
                 param_label=str(edit.get("param_label") or ""),
             )
+            # 字段删除是一个完整的契约删除：不能只移除 params，却留下指向该字段的
+            # 依赖、枚举绑定或身份绑定。否则前端看似删除成功，下一轮同步/校验又会
+            # 从这些残留引用中恢复旧字段，表现为“修改后无法删除”。
+            _remove_param_incoming_links(new_spec, step, param)
+            param_path_normalized = _strip_body_prefix(param.path)
+            step.selects = [
+                binding for binding in (step.selects or [])
+                if not (
+                    _strip_body_prefix(binding.path or binding.id_path or "") == param_path_normalized
+                    or binding.param in {param.key, param.label}
+                )
+            ]
+            step.identity = [
+                binding for binding in (step.identity or [])
+                if _strip_body_prefix(binding.path or "") != param_path_normalized
+            ]
             step.params.remove(param)
             if param.key in step.sample_inputs:
                 del step.sample_inputs[param.key]
+            _invalidate_capabilities_for_steps(new_spec, {step.step_id})
             continue
 
         else:

@@ -1976,8 +1976,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function stopAll() {
     intentionalCloseRef.current = true;
-    send({ type: "stop" }); wsRef.current?.close();
-    wsRef.current = null;
+    const ws = wsRef.current;
+    const stopSent = send({ type: "stop" });
+    // Let the server flush, acknowledge, and initiate the WebSocket close.  Closing
+    // here immediately races the Vite proxy against queued recording frames.
+    if (!stopSent) ws?.close(1000, "recording stopped");
+    else if (ws) window.setTimeout(() => {
+      if (wsRef.current === ws && ws.readyState < WebSocket.CLOSING) {
+        ws.close(1000, "recording stop timeout");
+      }
+    }, 2000);
     setConnectionState("idle");
     setPhase("idle"); setResult(null); setSteps([]); clearFrame(); setFields([]); setPicked({});
     setCands([]); setSelects({}); setIdentity({}); setStepSel({}); resetEditorState();
@@ -2015,6 +2023,43 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       param_key: p.key,
       param_label: p.label || p.key,
     };
+  }
+  function removeParam(stepId: string, p: FlowParam) {
+    const edit = paramRemoveEdit(stepId, p);
+    if (!send({ type: "flow_update", edits: [edit] })) return;
+
+    // 删除立即反映到页面；服务端失败时会通过 full_spec 回滚到权威版本。
+    // 同时清理依赖和选择器，避免字段卡片消失后仍残留不可见引用。
+    const current = flowSpecRef.current;
+    if (!current) return;
+    const removedPath = stripBodyPrefix(p.path || "");
+    const next: FlowSpecData = {
+      ...current,
+      steps: (current.steps || []).map((step) => {
+        if (step.step_id !== stepId) return step;
+        const sampleInputs = { ...(step.sample_inputs || {}) };
+        delete sampleInputs[p.key];
+        return {
+          ...step,
+          params: (step.params || []).filter((candidate) => !paramMatches(candidate, p)),
+          selects: (step.selects || []).filter((binding) => {
+            const bindingPath = stripBodyPrefix(binding.path || binding.id_path || "");
+            return bindingPath !== removedPath && binding.param !== p.key;
+          }),
+          identity: (step.identity || []).filter((binding) =>
+            stripBodyPrefix(String(binding?.path || "")) !== removedPath),
+          sample_inputs: sampleInputs,
+        };
+      }),
+      links: (current.links || []).filter((link) =>
+        !(link.target_step_id === stepId && stripBodyPrefix(link.target_path || "") === removedPath)),
+      capabilities: (current.capabilities || []).map((cap) => capabilityActualStepIds(cap).includes(stepId)
+        ? { ...cap, confirmed: false }
+        : cap),
+    };
+    flowSpecRef.current = next;
+    setFlowSpec(next);
+    setCheckReport(null);
   }
   function targetParamEdit(stepId: string, target: Record<string, any>, field: string, value: any) {
     const path = target.path || target.target_path || target.param_path || "";
@@ -2671,7 +2716,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return cap.name || cap.capability_id || `idx:${idx}`;
   }
   function capabilityPanelKey(cap: FlowCapabilityData, idx: number) {
-    return `${cap.name || idx}-${idx}`;
+    // capability name 可编辑，不能作为面板 key；否则失焦保存会吞掉紧随其后的删除点击。
+    return cap.capability_id || `capability-index:${idx}`;
   }
   function moveCapability(idx: number, delta: number) {
     const current = flowSpecRef.current;
@@ -3264,7 +3310,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }));
     return [...stepItems, ...reqItems];
   }
-  function renderParamEditorInCapability(step: FlowStepData, p: FlowParam, scopedStepIds: Set<string>) {
+  function renderParamEditorInCapability(
+    step: FlowStepData,
+    p: FlowParam,
+    scopedStepIds: Set<string>,
+    paramIndex: number,
+  ) {
     const bindKey = paramDraftKey(step.step_id, p);
     const linked = incomingLink(step.step_id, p.path);
     const currentBind = bindDraft[bindKey] || {
@@ -3295,7 +3346,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     ];
     return (
       <List.Item
-        key={paramDraftKey(step.step_id, p)}
+        // key 不能包含可编辑的 path/key/label。失焦保存会立即更新这些值；
+        // 若 key 随之变化，组件会在 click 前被卸载，导致删除事件丢失。
+        key={`${step.step_id}:param:${paramIndex}`}
         id={`field-${domAnchorPart(step.step_id)}-${domAnchorPart(p.path)}`}
         style={{ padding: "12px 0" }}
       >
@@ -3323,7 +3376,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               </Typography.Text>
             </Col>
             <Col>
-              <Button size="small" danger onClick={() => send({ type: "flow_update", edits: [paramRemoveEdit(step.step_id, p)] })}>删除字段</Button>
+              <Button
+                size="small"
+                danger
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => removeParam(step.step_id, p)}
+              >删除字段</Button>
             </Col>
           </Row>
           <div style={{
@@ -3587,9 +3645,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         {(step.params || []).length ? (
           <List
             size="small"
-            rowKey={(p) => paramDraftKey(step.step_id, p)}
+            rowKey={(_p, index) => `${step.step_id}:param:${index}`}
             dataSource={step.params || []}
-            renderItem={(p) => renderParamEditorInCapability(step, p, scopedStepIds)}
+            renderItem={(p, index) => renderParamEditorInCapability(step, p, scopedStepIds, index)}
           />
         ) : (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="这个接口没有请求入参" />
@@ -3918,7 +3976,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                       <Tooltip title="能力上移"><Button size="small" icon={<UpOutlined />} disabled={idx === 0} onClick={() => moveCapability(idx, -1)} /></Tooltip>
                       <Tooltip title="能力下移"><Button size="small" icon={<DownOutlined />} disabled={idx === capabilities.length - 1} onClick={() => moveCapability(idx, 1)} /></Tooltip>
                       <Checkbox checked={!!cap.confirmed} onChange={(e) => updateCapabilityConfirmed(idx, e.target.checked)}>确认</Checkbox>
-                      <Tooltip title="删除"><Button size="small" danger icon={<DeleteOutlined />} onClick={() => removeCapability(idx)} /></Tooltip>
+                      <Tooltip title="删除"><Button size="small" danger icon={<DeleteOutlined />}
+                        onMouseDown={(e) => e.preventDefault()} onClick={() => removeCapability(idx)} /></Tooltip>
                     </Space>
                   }
                 >
@@ -4294,7 +4353,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 <Space onClick={(e) => e.stopPropagation()}>
                   <Tooltip title="上移"><Button size="small" icon={<UpOutlined />} disabled={idx === 0} onClick={() => moveStep(idx, -1)} /></Tooltip>
                   <Tooltip title="下移"><Button size="small" icon={<DownOutlined />} disabled={idx === flowSpec.steps.length - 1} onClick={() => moveStep(idx, 1)} /></Tooltip>
-                  <Tooltip title="删除"><Button size="small" danger icon={<DeleteOutlined />} onClick={() => removeStepWithConfirm(step)} /></Tooltip>
+                  <Tooltip title="删除"><Button size="small" danger icon={<DeleteOutlined />}
+                    onMouseDown={(e) => e.preventDefault()} onClick={() => removeStepWithConfirm(step)} /></Tooltip>
                 </Space>
               }
             >
@@ -4494,7 +4554,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                           </Col>
                           <Col>
                             <Space size={6} wrap>
-                              <Button size="small" danger onClick={() => send({ type: "flow_update", edits: [paramRemoveEdit(step.step_id, p)] })}>删除</Button>
+                              <Button size="small" danger onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => removeParam(step.step_id, p)}>删除</Button>
                             </Space>
                           </Col>
                         </Row>

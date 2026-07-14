@@ -8,7 +8,7 @@ import pytest
 import dano.execution.page.flow_spec as flow_spec_module
 
 from dano.execution.page.flow_spec import (
-    FlowSpec, FlowStep, FlowLink, ParamField, SelectBinding, FlowCapability,
+    FlowSpec, FlowStep, FlowLink, ParamField, SelectBinding, IdentityBinding, FlowCapability,
     CapabilityDependency, CapabilityField, CapabilityRelation,
     RequestFacts,
     apply_flow_edits, validate_flow_spec, _infer_type_from_value,
@@ -1895,9 +1895,24 @@ def test_add_param():
 
 
 def test_remove_param():
-    new = apply_flow_edits(_make_spec(), [{"op": "remove", "step_id": "step1", "param_path": "form.name"}])
+    spec = _make_spec()
+    spec.steps[0].selects = [SelectBinding(param="name", path="form.name")]
+    spec.steps[0].identity = [IdentityBinding(path="form.name", source="recorded")]
+    spec.links = [FlowLink(
+        link_id="name-link",
+        source_step_id="step1",
+        source_path="response.name",
+        target_step_id="step1",
+        target_path="form.name",
+    )]
+
+    new = apply_flow_edits(spec, [{"op": "remove", "step_id": "step1", "param_path": "form.name"}])
+
     assert len(new.steps[0].params) == 1
     assert "name" not in new.steps[0].sample_inputs
+    assert new.steps[0].selects == []
+    assert new.steps[0].identity == []
+    assert new.links == []
 
 
 def test_nonexistent_step_lists_available():

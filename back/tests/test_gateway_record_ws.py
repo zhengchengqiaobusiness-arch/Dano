@@ -192,6 +192,8 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
     assert errors[1]["detail"] == "transient input failure"
     assert all(error["recoverable"] for error in errors)
     assert sessions[0].events[-1]["kind"] == "pointer_up"
+    assert first_ws.messages[-1] == {"type": "stopped"}
+    assert second_ws.messages[-1] == {"type": "stopped"}
     assert all(session.stopped for session in sessions)
     assert first_ws.accepted and first_ws.closed
     assert first_ws.max_active_writes == 1

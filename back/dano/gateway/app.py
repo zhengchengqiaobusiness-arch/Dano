@@ -1494,6 +1494,10 @@ async def record_ws(ws: WebSocket) -> None:
                 await sender.send_json(response)
             elif t == "stop":
                 await sess.flush_recording()
+                # Acknowledge the stop before closing from the server side.  If the
+                # browser closes immediately after sending ``stop``, Vite can still
+                # be forwarding queued frames and writes into an upstream FIN.
+                await sender.send_json({"type": "stopped"})
                 break
     except WebSocketDisconnect:
         pass
