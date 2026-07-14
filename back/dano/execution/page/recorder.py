@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -89,22 +90,69 @@ def has_recorded_value(step: dict) -> bool:
 
 
 _VIEW_W, _VIEW_H = 1280, 800
-_CAST_W, _CAST_H = 1024, 640
-_CAST_QUALITY = 50
+_CAST_W, _CAST_H = _VIEW_W, _VIEW_H
+_CAST_QUALITY = 80
 _CAST_ACTIVE_FPS = 20
 _CAST_IDLE_FPS = 6
 _CAST_ACTIVE_WINDOW_S = 6.0
 _SAFE_KEY_RE = re.compile(
     r"^(?:(?:Control|Shift|Alt|Meta)\+){0,3}"
     r"(?:Enter|Tab|Backspace|Delete|Escape|Home|End|PageUp|PageDown|"
-    r"ArrowUp|ArrowDown|ArrowLeft|ArrowRight|A|Z|Y)$"
+    r"ArrowUp|ArrowDown|ArrowLeft|ArrowRight|A|C|X|Z|Y)$"
 )
 _PLAIN_KEYS = {
     "Enter", "Tab", "Backspace", "Delete", "Escape", "Home", "End",
     "PageUp", "PageDown", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
 }
-_CTRL_META_KEYS = {"A", "Z", "Y", "Enter", "Backspace"}
+_CTRL_META_KEYS = {"A", "C", "X", "Z", "Y", "Enter", "Backspace"}
 _SHIFT_KEYS = {"Tab", "Enter"}
+
+
+def _finite_number(value, default: float) -> float:  # noqa: ANN001
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def _positive_dimension(value, default: int) -> int:  # noqa: ANN001
+    number = int(_finite_number(value, float(default)))
+    return number if number > 0 else default
+
+
+def _input_point(ev: dict, *, prefix: str = "") -> tuple[float, float]:
+    """读取归一坐标并约束到当前固定视口，异常/越界客户端不能击穿输入循环。"""
+    nx = _finite_number(ev.get(f"{prefix}nx"), 0.0)
+    ny = _finite_number(ev.get(f"{prefix}ny"), 0.0)
+    return min(1.0, max(0.0, nx)) * _VIEW_W, min(1.0, max(0.0, ny)) * _VIEW_H
+
+
+def _mouse_button(value) -> str:  # noqa: ANN001
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"left", "middle", "right"}:
+            return normalized
+        if normalized.isdigit():
+            value = int(normalized)
+    return {0: "left", 1: "middle", 2: "right"}.get(value, "left")
+
+
+def _mouse_steps(value) -> int:  # noqa: ANN001
+    try:
+        steps = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return min(100, max(1, steps))
+
+
+def _page_is_open(page) -> bool:  # noqa: ANN001
+    if page is None:
+        return False
+    try:
+        return not page.is_closed()
+    except Exception:  # noqa: BLE001 —— page/context 拆除竞态
+        return False
 
 
 def _safe_recorder_key(key: str) -> bool:
@@ -1326,7 +1374,22 @@ class RecordSession:
                         return
                     self._last_frame_sent_at = now
                     self._frame_seq += 1
-                    await self._on_frame({"seq": self._frame_seq, "data": params["data"]})  # base64 jpeg
+                    metadata = params.get("metadata") or {}
+                    # Chromium 的 screencast metadata 是当前设备视口；固定 DPR=1 时也正是
+                    # JPEG 的像素尺寸。字段同时保留扁平/分组形式，便于新旧前端平滑升级。
+                    frame_width = _positive_dimension(metadata.get("deviceWidth"), _CAST_W)
+                    frame_height = _positive_dimension(metadata.get("deviceHeight"), _CAST_H)
+                    await self._on_frame({
+                        "seq": self._frame_seq,
+                        "data": params["data"],
+                        "width": frame_width,
+                        "height": frame_height,
+                        "frame_width": frame_width,
+                        "frame_height": frame_height,
+                        "viewport_width": _VIEW_W,
+                        "viewport_height": _VIEW_H,
+                        "viewport": {"width": _VIEW_W, "height": _VIEW_H},
+                    })  # base64 jpeg
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1350,25 +1413,101 @@ class RecordSession:
         if not self._closing:
             await self._open_screencast()
 
-    # ── 输入回传(归一坐标 0~1 → 视口像素)──
-    async def dispatch_input(self, ev: dict) -> None:
-        if self.page is None or self.page.is_closed():    # 切页瞬间 / 活动页已关 → 丢弃,避免抛错
-            return
+    async def _input_page(self, *, exclude=None):  # noqa: ANN001
+        """返回可操作页；活动页关闭/输入竞态时尽量切到最近仍存活的弹窗或标签页。"""
+        page = self.page
+        if exclude is None and _page_is_open(page):
+            return page
+        if self._closing or self._context is None:
+            return None
+        try:
+            pages = list(self._context.pages)
+        except Exception:  # noqa: BLE001 —— context 正在关闭
+            return None
+        candidates = [candidate for candidate in reversed(pages) if _page_is_open(candidate)]
+        replacement = next((candidate for candidate in candidates if candidate is not exclude), None)
+        if replacement is None:
+            replacement = next((candidate for candidate in candidates if candidate is exclude), None)
+        if replacement is None:
+            return None
+        changed = replacement is not self.page
+        self.page = replacement
+        self._page_id(replacement)
+        self._attach_diag_handlers(replacement)
         self._mark_active()
-        k = ev.get("kind")
-        if k == "click":
-            await self.page.mouse.click(ev.get("nx", 0) * _VIEW_W, ev.get("ny", 0) * _VIEW_H)
-        elif k == "dblclick":
-            await self.page.mouse.dblclick(ev.get("nx", 0) * _VIEW_W, ev.get("ny", 0) * _VIEW_H)
-        elif k == "text":
-            # insert_text 直接插入文本(含中文 CJK)并触发 input 事件;type 模拟物理键对 CJK 不可靠
-            await self.page.keyboard.insert_text(ev.get("text", ""))
-        elif k == "key":
-            key = str(ev.get("key") or "")
-            if _safe_recorder_key(key):
-                await self.page.keyboard.press(key)
-        elif k == "scroll":
-            await self.page.mouse.wheel(0, ev.get("dy", 0))
+        if changed and self._on_frame is not None:
+            try:
+                await self._restart_screencast()
+            except Exception:  # noqa: BLE001 —— 恢复截屏失败不能反过来击穿输入通道
+                pass
+        return replacement
+
+    # ── 输入回传(归一坐标 0~1 → 视口像素)──
+    async def dispatch_input(self, ev: dict) -> dict:
+        """把前端输入转发给活动页，任何单次 Playwright 异常都不得终止录制会话。
+
+        pointer_* 是当前协议，mouse_* 是兼容别名。返回值供直接调用方诊断；WebSocket
+        当前无需消费它。失败后不自动重放输入，避免操作已部分生效时造成双击/重复提交。
+        """
+        kind = str(ev.get("kind") or "")
+        page = await self._input_page()
+        if page is None:
+            return {"ok": False, "recoverable": True, "kind": kind, "error": "no_active_page"}
+        self._mark_active()
+        try:
+            x, y = _input_point(ev)
+            button = _mouse_button(ev.get("button"))
+            steps = _mouse_steps(ev.get("steps"))
+            if kind == "click":
+                await page.mouse.click(x, y, button=button)
+            elif kind == "dblclick":
+                await page.mouse.dblclick(x, y, button=button)
+            elif kind in {"right_click", "contextmenu"}:
+                await page.mouse.click(x, y, button="right")
+            elif kind in {"pointer_move", "mouse_move", "hover"}:
+                await page.mouse.move(x, y, steps=steps)
+            elif kind in {"pointer_down", "mouse_down"}:
+                await page.mouse.move(x, y)
+                await page.mouse.down(button=button)
+            elif kind in {"pointer_up", "mouse_up"}:
+                await page.mouse.move(x, y)
+                await page.mouse.up(button=button)
+            elif kind == "drag":
+                start_x, start_y = _input_point(ev, prefix="from_")
+                await page.mouse.move(start_x, start_y)
+                pressed = False
+                try:
+                    await page.mouse.down(button=button)
+                    pressed = True
+                    await page.mouse.move(x, y, steps=steps)
+                finally:
+                    if pressed:
+                        try:
+                            await page.mouse.up(button=button)
+                        except Exception:  # noqa: BLE001 —— 外层统一报告原始操作错误
+                            pass
+            elif kind == "text":
+                # insert_text 直接插入文本(含中文 CJK)并触发 input 事件;type 模拟物理键对 CJK 不可靠
+                await page.keyboard.insert_text(str(ev.get("text") or ""))
+            elif kind == "key":
+                key = str(ev.get("key") or "")
+                if _safe_recorder_key(key):
+                    await page.keyboard.press(key)
+            elif kind == "scroll":
+                await page.mouse.wheel(_finite_number(ev.get("dx"), 0.0), _finite_number(ev.get("dy"), 0.0))
+            else:
+                return {"ok": False, "recoverable": False, "kind": kind, "error": "unsupported_input"}
+            return {"ok": True, "kind": kind}
+        except Exception as exc:  # noqa: BLE001 —— TargetClosed/navigation/popup 竞态必须停在事件边界内
+            await self._input_page(exclude=page)
+            log.debug("recorder_input_ignored", kind=kind, error_type=type(exc).__name__)
+            return {
+                "ok": False,
+                "recoverable": True,
+                "kind": kind,
+                "error": "input_dispatch_failed",
+                "error_type": type(exc).__name__,
+            }
 
     async def flush_recording(self) -> None:
         """把页面端防抖中的 fill 立即推回 Python,用于 finalize/reset/stop 前收口。"""

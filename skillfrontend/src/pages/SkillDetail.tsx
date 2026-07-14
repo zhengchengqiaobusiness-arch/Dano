@@ -39,6 +39,7 @@ export default function SkillDetail() {
   }, [skillId]);
 
   async function doFreeze() {
+    if (!skill) return;
     try {
       const r = await freezeSkill(skill.name);
       message.success(`已冻结 ${skill.name}，清理 ${r.removed_folders?.length || 0} 个文件夹`);
@@ -48,6 +49,7 @@ export default function SkillDetail() {
     }
   }
   async function doResume() {
+    if (!skill) return;
     try {
       await resumeSkill(skill.name);
       message.success(`已恢复 ${skill.name}`);
@@ -57,6 +59,7 @@ export default function SkillDetail() {
     }
   }
   async function doDelete() {
+    if (!skill) return;
     try {
       const r = await deleteSkill(skill.name);
       message.success(`已删除 ${skill.name}(${r.deleted} 条资产,清理 ${r.removed_folders?.length || 0} 个文件夹)`);

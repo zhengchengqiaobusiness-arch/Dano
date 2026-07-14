@@ -54,10 +54,207 @@ def test_reset_clears_observer_causality_state() -> None:
 def test_recorder_key_safety_policy() -> None:
     from dano.execution.page.recorder import _safe_recorder_key
 
-    for key in ["Escape", "Delete", "Shift+Tab", "Control+A", "Meta+Z", "Control+Enter", "Control+Backspace"]:
+    for key in [
+        "Escape", "Delete", "Shift+Tab", "Control+A", "Control+C", "Control+X",
+        "Meta+C", "Meta+X", "Meta+Z", "Control+Enter", "Control+Backspace",
+    ]:
         assert _safe_recorder_key(key)
-    for key in ["Alt+F4", "F5", "F12", "Control+R", "Control+W", "Alt+Delete", "Control+Shift+I"]:
+    for key in [
+        "Alt+F4", "F5", "F12", "Control+R", "Control+V", "Control+W",
+        "Alt+Delete", "Control+Shift+I",
+    ]:
         assert not _safe_recorder_key(key)
+
+
+class _RecordingMouse:
+    def __init__(self, *, fail: dict[str, Exception] | None = None) -> None:
+        self.events: list[tuple] = []
+        self.fail = fail or {}
+
+    async def _record(self, operation: str, *args) -> None:  # noqa: ANN002
+        self.events.append((operation, *args))
+        if operation in self.fail:
+            raise self.fail[operation]
+
+    async def click(self, x, y, *, button="left") -> None:  # noqa: ANN001
+        await self._record("click", x, y, button)
+
+    async def dblclick(self, x, y, *, button="left") -> None:  # noqa: ANN001
+        await self._record("dblclick", x, y, button)
+
+    async def move(self, x, y, *, steps=1) -> None:  # noqa: ANN001
+        await self._record("move", x, y, steps)
+
+    async def down(self, *, button="left") -> None:
+        await self._record("down", button)
+
+    async def up(self, *, button="left") -> None:
+        await self._record("up", button)
+
+    async def wheel(self, dx, dy) -> None:  # noqa: ANN001
+        await self._record("wheel", dx, dy)
+
+
+class _RecordingKeyboard:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str]] = []
+
+    async def insert_text(self, text: str) -> None:
+        self.events.append(("text", text))
+
+    async def press(self, key: str) -> None:
+        self.events.append(("key", key))
+
+
+class _InputPage:
+    def __init__(self, mouse: _RecordingMouse | None = None, *, closed: bool = False) -> None:
+        self.mouse = mouse or _RecordingMouse()
+        self.keyboard = _RecordingKeyboard()
+        self.closed = closed
+
+    def is_closed(self) -> bool:
+        return self.closed
+
+    def on(self, *_args) -> None:  # diag handlers are irrelevant to these protocol tests
+        return None
+
+
+class _InputContext:
+    def __init__(self, pages: list[_InputPage]) -> None:
+        self.pages = pages
+
+
+async def test_dispatch_input_supports_pointer_drag_and_explicit_drag() -> None:
+    page = _InputPage()
+    sess = RecordSession()
+    sess.page = page
+    sess._context = _InputContext([page])
+
+    assert (await sess.dispatch_input({"kind": "pointer_down", "nx": 0.1, "ny": 0.2, "button": 0}))["ok"]
+    assert (await sess.dispatch_input({"kind": "pointer_move", "nx": 0.7, "ny": 0.8, "steps": 6}))["ok"]
+    assert (await sess.dispatch_input({"kind": "pointer_up", "nx": 0.7, "ny": 0.8, "button": 0}))["ok"]
+    assert page.mouse.events == [
+        ("move", 128.0, 160.0, 1),
+        ("down", "left"),
+        ("move", 896.0, 640.0, 6),
+        ("move", 896.0, 640.0, 1),
+        ("up", "left"),
+    ]
+
+    page.mouse.events.clear()
+    result = await sess.dispatch_input({
+        "kind": "drag", "from_nx": 0.2, "from_ny": 0.25,
+        "nx": 0.9, "ny": 0.75, "button": "left", "steps": 8,
+    })
+    assert result["ok"]
+    assert page.mouse.events == [
+        ("move", 256.0, 200.0, 1),
+        ("down", "left"),
+        ("move", 1152.0, 600.0, 8),
+        ("up", "left"),
+    ]
+
+
+async def test_dispatch_input_supports_double_right_click_and_hover() -> None:
+    page = _InputPage()
+    sess = RecordSession()
+    sess.page = page
+    sess._context = _InputContext([page])
+
+    assert (await sess.dispatch_input({"kind": "dblclick", "nx": 0.5, "ny": 0.5, "button": 2}))["ok"]
+    assert (await sess.dispatch_input({"kind": "right_click", "nx": 0.25, "ny": 0.4}))["ok"]
+    assert (await sess.dispatch_input({"kind": "hover", "nx": 0.8, "ny": 0.1, "steps": 3}))["ok"]
+    assert page.mouse.events == [
+        ("dblclick", 640.0, 400.0, "right"),
+        ("click", 320.0, 320.0, "right"),
+        ("move", 1024.0, 80.0, 3),
+    ]
+
+
+async def test_dispatch_input_target_closed_error_isolated_and_switches_page() -> None:
+    class TargetClosedError(RuntimeError):
+        pass
+
+    failed = _InputPage(_RecordingMouse(fail={"click": TargetClosedError("page closed during click")}))
+    fallback = _InputPage()
+    sess = RecordSession()
+    sess.page = failed
+    sess._context = _InputContext([failed, fallback])
+
+    result = await sess.dispatch_input({"kind": "click", "nx": 0.5, "ny": 0.5})
+    assert result == {
+        "ok": False,
+        "recoverable": True,
+        "kind": "click",
+        "error": "input_dispatch_failed",
+        "error_type": "TargetClosedError",
+    }
+    assert sess.page is fallback
+    assert (await sess.dispatch_input({"kind": "text", "text": "会话仍可用"}))["ok"]
+    assert fallback.keyboard.events == [("text", "会话仍可用")]
+
+
+async def test_dispatch_input_generic_operation_error_never_escapes() -> None:
+    failed = _InputPage(_RecordingMouse(fail={"move": RuntimeError("navigation interrupted input")}))
+    sess = RecordSession()
+    sess.page = failed
+    sess._context = _InputContext([failed])
+
+    result = await sess.dispatch_input({"kind": "pointer_move", "nx": 0.5, "ny": 0.5})
+    assert result["ok"] is False
+    assert result["recoverable"] is True
+    assert result["error_type"] == "RuntimeError"
+
+
+async def test_screencast_uses_full_viewport_quality_and_emits_dimensions() -> None:
+    class FakeCdp:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict | None]] = []
+            self.handlers: dict[str, object] = {}
+
+        async def send(self, method: str, params: dict | None = None) -> None:
+            self.calls.append((method, params))
+
+        def on(self, event: str, callback) -> None:  # noqa: ANN001
+            self.handlers[event] = callback
+
+    class FakeContext:
+        def __init__(self, cdp: FakeCdp) -> None:
+            self.cdp = cdp
+
+        async def new_cdp_session(self, _page):  # noqa: ANN001
+            return self.cdp
+
+    page = _InputPage()
+    cdp = FakeCdp()
+    sess = RecordSession()
+    sess.page = page
+    sess._context = FakeContext(cdp)
+    frames: list[dict] = []
+
+    async def on_frame(frame: dict) -> None:
+        frames.append(frame)
+
+    await sess.start_screencast(on_frame)
+    start_params = next(params for method, params in cdp.calls if method == "Page.startScreencast")
+    assert start_params == {"format": "jpeg", "quality": 80, "maxWidth": 1280, "maxHeight": 800}
+    task = cdp.handlers["Page.screencastFrame"]({
+        "sessionId": 7,
+        "data": "jpeg-base64",
+        "metadata": {"deviceWidth": 1280, "deviceHeight": 800},
+    })
+    await task
+    assert frames == [{
+        "seq": 1,
+        "data": "jpeg-base64",
+        "width": 1280,
+        "height": 800,
+        "frame_width": 1280,
+        "frame_height": 800,
+        "viewport_width": 1280,
+        "viewport_height": 800,
+        "viewport": {"width": 1280, "height": 800},
+    }]
 
 
 def test_same_endpoint_responses_attach_by_request_identity_index() -> None:

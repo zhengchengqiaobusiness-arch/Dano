@@ -186,6 +186,7 @@ interface FlowSpecData {
     };
     versions?: Array<{ version: number; action: string; reason?: string; created_at?: string; summary?: any }>;
     current_version?: number;
+    current_fingerprint?: string;
   };
 }
 interface FlowCheckReport {
@@ -232,6 +233,15 @@ interface RecResult {
   check_report?: FlowCheckReport;
 }
 type RecordingMode = "real_submit" | "record_only";
+type RecorderConnectionState = "idle" | "connecting" | "connected" | "reconnecting" | "disconnected";
+
+interface RecorderFrameMeta {
+  frameWidth?: number;
+  frameHeight?: number;
+  viewportWidth?: number;
+  viewportHeight?: number;
+  deviceScaleFactor?: number;
+}
 
 const STATUS_META: Record<string, { color: string; label: string }> = {
   verified: { color: "success", label: "已验证" },
@@ -246,7 +256,7 @@ const KEYMAP: Record<string, string> = {
   ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight", ArrowUp: "ArrowUp", ArrowDown: "ArrowDown",
   Escape: "Escape", Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown",
 };
-const SAFE_COMBO_KEYS = new Set(["a", "z", "y", "Enter", "Backspace"]);
+const SAFE_COMBO_KEYS = new Set(["a", "c", "x", "z", "y", "Enter", "Backspace"]);
 const MOD_ORDER = ["Control", "Meta", "Alt", "Shift"];
 
 function recorderKeyName(e: React.KeyboardEvent<HTMLInputElement>): string | null {
@@ -403,6 +413,41 @@ function mergeUrlQuery(url: string | undefined, lines: string) {
 }
 function stripBodyPrefix(path: string) {
   return path?.startsWith("body.") ? path.slice(5) : path;
+}
+
+function newRecordingActionName() {
+  let uuid: string;
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    uuid = crypto.randomUUID();
+  } else if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+  } else {
+    uuid = `${Date.now().toString(16)}${Math.random().toString(16).slice(2).padEnd(16, "0")}`;
+  }
+  return `action_${uuid.replace(/-/g, "").toLowerCase()}`;
+}
+
+function positiveNumber(...values: unknown[]) {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return undefined;
+}
+
+function frameMetaFromMessage(message: any): RecorderFrameMeta {
+  const frame = message?.frame || message?.frame_meta || message?.metadata || message?.meta || {};
+  const viewport = message?.viewport || frame?.viewport || {};
+  return {
+    frameWidth: positiveNumber(message?.frame_width, message?.width, frame?.frame_width, frame?.width),
+    frameHeight: positiveNumber(message?.frame_height, message?.height, frame?.frame_height, frame?.height),
+    viewportWidth: positiveNumber(message?.viewport_width, viewport?.width, frame?.viewport_width),
+    viewportHeight: positiveNumber(message?.viewport_height, viewport?.height, frame?.viewport_height),
+    deviceScaleFactor: positiveNumber(message?.device_scale_factor, message?.dpr, viewport?.deviceScaleFactor, frame?.device_scale_factor),
+  };
 }
 
 function domAnchorPart(value: unknown) {
@@ -1088,9 +1133,20 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const imgRef = useRef<HTMLImageElement | null>(null);
   const kbRef = useRef<HTMLInputElement | null>(null);
   const consoleBufRef = useRef<any[]>([]);
-  const latestFrameRef = useRef<{ seq: number; src: string } | null>(null);
+  const latestFrameRef = useRef<{ seq: number; src: string; meta: RecorderFrameMeta } | null>(null);
   const frameRafRef = useRef<number | null>(null);
   const renderedFrameSeqRef = useRef(0);
+  const pointerMoveRafRef = useRef<number | null>(null);
+  const pendingPointerMoveRef = useRef<Record<string, unknown> | null>(null);
+  const pointerGestureRef = useRef<{
+    pointerId: number; nx: number; ny: number; clientX: number; clientY: number;
+    button: string; buttons: number; pointerType: string; dragging: boolean;
+  } | null>(null);
+  const pendingClickRef = useRef<{
+    timer: number; nx: number; ny: number; clientX: number; clientY: number; button: string; pointerType: string;
+  } | null>(null);
+  const lastInputErrorNoticeRef = useRef(0);
+  const intentionalCloseRef = useRef(false);
   const wsAliveRef = useRef(false);                                // FC2 修复:跟踪 WS 存活,避免 send 失败时反复弹错
   const isComposingRef = useRef(false);                           // FH2 修复:中文输入法拼写中标记,防 onKbInput 误发中间字符
 
@@ -1098,7 +1154,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const phaseRef = useRef(phase);                                  // FC1 修复:同步最新 phase,ws.onclose 闭包不再 stale
   useEffect(() => { phaseRef.current = phase; }, [phase]);
   const [startUrl, setStartUrl] = useState("");
+  const [connectionState, setConnectionState] = useState<RecorderConnectionState>("idle");
+  const [reconnectedSessionNeedsCapture, setReconnectedSessionNeedsCapture] = useState(false);
   const [hasFrame, setHasFrame] = useState(false);
+  const [frameMeta, setFrameMeta] = useState<RecorderFrameMeta>({});
   const hasFrameRef = useRef(false);
   useEffect(() => { hasFrameRef.current = hasFrame; }, [hasFrame]);
   const [steps, setSteps] = useState<RecStep[]>([]);
@@ -1111,7 +1170,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [stepSel, setStepSel] = useState<Record<number, boolean>>({});
   const [selects, setSelects] = useState<Record<string, RecSelect>>({});
   const [identity, setIdentity] = useState<Record<string, RecIdentity>>({});
-  const [action, setAction] = useState("submit_form");
+  const [action, setAction] = useState(() => newRecordingActionName());
   const [title, setTitle] = useState("");
   const [result, setResult] = useState<RecResult | null>(null);
   const [recordingMode, setRecordingMode] = useState<RecordingMode>("real_submit");
@@ -1231,6 +1290,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const active = flowOperationRef.current;
     if (
       !active
+      || (operationId && operationId !== active.operationId)
       || (operation && operation !== active.mode)
       || (!operation && (
         loop?.mode !== active.mode
@@ -1272,8 +1332,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     // FC4 修复:仅当 phase 处于 recording/publishing 时才关 WS(避免 StrictMode 双 mount 或组件复用时误关正在用的 WS)
     // wsRef.current 在首次 mount 时为 null(start 才会建),所以首次 cleanup 一定是 noop,无副作用
     if (phaseRef.current === "recording" || phaseRef.current === "publishing") {
+      intentionalCloseRef.current = true;
       wsRef.current?.close();
     }
+    if (pointerMoveRafRef.current != null) window.cancelAnimationFrame(pointerMoveRafRef.current);
+    if (pendingClickRef.current) window.clearTimeout(pendingClickRef.current.timer);
   }, []);
 
   useEffect(() => {
@@ -1288,7 +1351,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const onRej = (event: PromiseRejectionEvent) => {
       const msg = event.reason?.message || (typeof event.reason === "string" ? event.reason : JSON.stringify(event.reason || ""));
       consoleBufRef.current.push({ type: "error", source: "unhandledrejection", text: msg || "unknown", ts: Date.now() });
-      || (operationId && operationId !== active.operationId)
     };
     const origError = console.error;
     console.error = (...args: any[]) => {
@@ -1407,11 +1469,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     }
     if (imgRef.current) imgRef.current.removeAttribute("src");
     setHasFrame(false);
+    setFrameMeta({});
   }
 
-  function queueFrame(seq: number, data: string) {
+  function queueFrame(seq: number, data: string, meta: RecorderFrameMeta = {}) {
     if (!data) return;
-    latestFrameRef.current = { seq: Number(seq || 0), src: `data:image/jpeg;base64,${data}` };
+    const normalizedSeq = Number(seq || 0) > 0 ? Number(seq) : renderedFrameSeqRef.current + 1;
+    latestFrameRef.current = { seq: normalizedSeq, src: `data:image/jpeg;base64,${data}`, meta };
     if (frameRafRef.current != null) return;
     frameRafRef.current = window.requestAnimationFrame(() => {
       frameRafRef.current = null;
@@ -1419,6 +1483,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       if (!latest || latest.seq <= renderedFrameSeqRef.current) return;
       renderedFrameSeqRef.current = latest.seq;
       if (imgRef.current) imgRef.current.src = latest.src;
+      setFrameMeta((current) => ({ ...current, ...Object.fromEntries(Object.entries(latest.meta).filter(([, value]) => value != null)) }));
       if (!hasFrameRef.current) setHasFrame(true);
     });
   }
@@ -1445,23 +1510,63 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function start() {
     if (!tenant) { message.error("请先到「创建 / 进入租户」"); return; }
     if (!startUrl.trim()) { message.error("请填页面地址 start_url"); return; }
-    const intercept = recordingMode === "record_only";
     setErr(""); setResult(null); setSteps([]); setReqs([]); clearFrame(); setFields([]); setPicked({});
     setCands([]); setSelects({}); setIdentity({}); setStepSel({}); resetEditorState();
+    setAction(newRecordingActionName());
+    setReconnectedSessionNeedsCapture(false);
+    setConnectionState("connecting");
+    openRecorderConnection();
+  }
+
+  function reconnectRecorder() {
+    if (!tenant || !startUrl.trim() || connectionState === "connecting" || connectionState === "reconnecting") return;
+    setErr("");
+    // WebSocket 断开时后端 RecordSession 也已结束。重连不能继续使用旧请求事实、
+    // FlowSpec 或交互步骤；仅保留最后画面作为视觉参考，避免新旧会话事实混合发布。
+    setSteps([]); setReqs([]); setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({});
+    setResult(null); resetEditorState();
+    // 新 RecordSession 的帧序号会从 1 重新开始；保留 <img> 当前 src，但重置序号门槛，
+    // 否则新会话的所有帧都会因小于旧序号而被丢弃。
+    latestFrameRef.current = null;
+    renderedFrameSeqRef.current = 0;
+    if (frameRafRef.current != null) window.cancelAnimationFrame(frameRafRef.current);
+    frameRafRef.current = null;
+    setReconnectedSessionNeedsCapture(true);
+    setConnectionState("reconnecting");
+    openRecorderConnection();
+  }
+
+  function openRecorderConnection() {
+    const intercept = recordingMode === "record_only";
+    intentionalCloseRef.current = false;
     wsAliveRef.current = true;                                     // FC2 修复:每次 start 重置存活标志
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/onboarding/page/record`);
     wsRef.current = ws;
-    ws.onopen = () => send({
-      type: "start", tenant, subsystem, start_url: startUrl.trim(),
-      base_url: baseUrl.trim() || undefined,
-      storage_state: storageState.trim() || undefined,
-      intercept,
-    });
+    ws.onopen = () => {
+      if (wsRef.current !== ws) return;
+      send({
+        type: "start", tenant, subsystem, start_url: startUrl.trim(),
+        base_url: baseUrl.trim() || undefined,
+        storage_state: storageState.trim() || undefined,
+        intercept,
+      });
+    };
     ws.onmessage = (ev) => {
+      if (wsRef.current !== ws) return;
       let m: any; try { m = JSON.parse(ev.data); } catch { return; }
-      if (m.type === "started") setPhase("recording");
-      else if (m.type === "frame") queueFrame(Number(m.seq || 0), m.data);
+      if (m.type === "started") {
+        const serverAction = m.action ?? m.action_name;
+        if (typeof serverAction === "string" && /^[a-zA-Z][a-zA-Z0-9_]*$/.test(serverAction)) setAction(serverAction);
+        setPhase("recording");
+        setConnectionState("connected");
+      }
+      else if (m.type === "frame") {
+        queueFrame(Number(m.seq || 0), m.data, frameMetaFromMessage(m));
+        // A fresh frame proves the replacement RecordSession is active. This also keeps
+        // GET-only recordings analyzable after reconnect, where no write callback exists.
+        setReconnectedSessionNeedsCapture(false);
+      }
       else if (m.type === "step") setSteps((s) => {
         const st = m.step;
         const last = s[s.length - 1];
@@ -1477,8 +1582,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         return [...s, st];
       });
-      else if (m.type === "request") setReqs((r) => [...r, m.request].slice(-40));
+      else if (m.type === "request") {
+        setReqs((r) => [...r, m.request].slice(-40));
+        // request_fields 要到 finalize 分析后才会产生，因此重连门禁必须由新会话的实时请求解锁。
+        setReconnectedSessionNeedsCapture(false);
+      }
       else if (m.type === "request_fields") {
+        setReconnectedSessionNeedsCapture(false);
         const fs: RecField[] = m.fields || [];
         const selMap: Record<string, RecSelect> = {};
         (m.selects || []).forEach((s: RecSelect) => { selMap[s.path] = s; });
@@ -1535,7 +1645,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         if (m.check_report) setCheckReport(m.check_report);
         message.success("业务说明已生成");
       }
+      else if (m.type === "input_error") {
+        const now = Date.now();
+        if (now - lastInputErrorNoticeRef.current >= 2000) {
+          lastInputErrorNoticeRef.current = now;
+          message.warning(m.detail || "本次页面操作未执行，请稍后重试");
+        }
+      }
       else if (m.type === "result") {
+        publishOperationRef.current = null;
+        finalizeOperationRef.current = null;
         if (m.report?.full_spec) {
           acceptFlowSpec(m.report.full_spec);
           setLastServerJson(JSON.stringify(m.report.full_spec));
@@ -1564,28 +1683,201 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
       }
     };
-    ws.onerror = () => setErr("WebSocket 连接失败");
+    ws.onerror = () => {
+      if (wsRef.current === ws) setErr("WebSocket 连接失败，当前画面和已录步骤已保留");
+    };
     ws.onclose = () => {
+      if (wsRef.current !== ws) return;
+      wsRef.current = null;
       wsAliveRef.current = false;                                 // FC2 修复:WS 关闭,send 会自动避免刷屏
+      pointerGestureRef.current = null;
+      pendingPointerMoveRef.current = null;
+      if (pointerMoveRafRef.current != null) window.cancelAnimationFrame(pointerMoveRafRef.current);
+      pointerMoveRafRef.current = null;
+      if (pendingClickRef.current) window.clearTimeout(pendingClickRef.current.timer);
+      pendingClickRef.current = null;
+      finalizeOperationRef.current = null;
+      publishOperationRef.current = null;
+      setNamingBusy(false);
+      setDescBusy(false);
+      clearFlowOperation();
       flowMutationInFlightRef.current = null;
       flowMutationQueueRef.current = [];
       afterFlowSyncRef.current = null;
-      if (phaseRef.current === "recording" || phaseRef.current === "publishing") setPhase("idle");
+      if (intentionalCloseRef.current) {
+        setConnectionState("idle");
+        return;
+      }
+      if (phaseRef.current === "publishing") setPhase("recording");
+      setConnectionState("disconnected");
+      setErr("录制连接已断开，已保留最后画面、步骤和编辑内容");
     };
   }
 
-  function onImgClick(e: React.MouseEvent<HTMLImageElement>) {
-    const img = imgRef.current; if (!img) return;
-    const r = img.getBoundingClientRect();
-    send({ type: "input", event: { kind: "click", nx: (e.clientX - r.left) / r.width, ny: (e.clientY - r.top) / r.height } });
+  function pointerButton(button: number) {
+    if (button === 1) return "middle";
+    if (button === 2) return "right";
+    return "left";
+  }
+  function normalizedPoint(clientX: number, clientY: number) {
+    const img = imgRef.current;
+    if (!img) return null;
+    const rect = img.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    return {
+      nx: Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)),
+      ny: Math.max(0, Math.min(1, (clientY - rect.top) / rect.height)),
+    };
+  }
+  function sendPendingPointerMove() {
+    pointerMoveRafRef.current = null;
+    const event = pendingPointerMoveRef.current;
+    pendingPointerMoveRef.current = null;
+    if (event) send({ type: "input", event });
+  }
+  function queuePointerMove(event: Record<string, unknown>) {
+    pendingPointerMoveRef.current = event;
+    if (pointerMoveRafRef.current != null) return;
+    pointerMoveRafRef.current = window.requestAnimationFrame(sendPendingPointerMove);
+  }
+  function flushPendingRecorderClick() {
+    const pending = pendingClickRef.current;
+    if (!pending) return;
+    window.clearTimeout(pending.timer);
+    pendingClickRef.current = null;
+    send({
+      type: "input",
+      event: {
+        kind: "click", nx: pending.nx, ny: pending.ny, button: pending.button,
+        pointer_type: pending.pointerType,
+      },
+    });
+  }
+  function onImgPointerDown(e: React.PointerEvent<HTMLImageElement>) {
+    if (connectionState !== "connected" || e.button < 0) return;
+    const point = normalizedPoint(e.clientX, e.clientY);
+    if (!point) return;
+    e.preventDefault();
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* pointer capture may be unavailable */ }
+    pointerGestureRef.current = {
+      pointerId: e.pointerId,
+      ...point,
+      clientX: e.clientX,
+      clientY: e.clientY,
+      button: pointerButton(e.button),
+      buttons: e.buttons,
+      pointerType: e.pointerType || "mouse",
+      dragging: false,
+    };
     kbRef.current?.focus({ preventScroll: true });
-        if (m.operation === "finalize" && (!m.operation_id || m.operation_id === finalizeOperationRef.current)) {
-          finalizeOperationRef.current = null;
-        }
+  }
+  function onImgPointerMove(e: React.PointerEvent<HTMLImageElement>) {
+    if (connectionState !== "connected") return;
+    const point = normalizedPoint(e.clientX, e.clientY);
+    if (!point) return;
+    const gesture = pointerGestureRef.current;
+    if (gesture?.pointerId === e.pointerId && !gesture.dragging) {
+      const distance = Math.hypot(e.clientX - gesture.clientX, e.clientY - gesture.clientY);
+      if (distance >= 5) {
+        gesture.dragging = true;
+        send({
+          type: "input",
+          event: {
+            kind: "pointer_down", nx: gesture.nx, ny: gesture.ny, button: gesture.button,
+            buttons: gesture.buttons, pointer_type: gesture.pointerType,
+          },
+        });
+      }
+    }
+    queuePointerMove({
+      kind: "pointer_move", ...point, buttons: e.buttons, pointer_type: e.pointerType || "mouse",
+    });
+    if (gesture?.dragging) e.preventDefault();
+  }
+  function dispatchRecorderClick(
+    point: { nx: number; ny: number },
+    e: React.PointerEvent<HTMLImageElement>,
+    button: string,
+  ) {
+    const previous = pendingClickRef.current;
+    const isDoubleClick = button === "left" && previous?.button === button
+      && Math.hypot(e.clientX - previous.clientX, e.clientY - previous.clientY) <= 8;
+    if (isDoubleClick && previous) {
+      window.clearTimeout(previous.timer);
+      pendingClickRef.current = null;
+      send({
+        type: "input",
+        event: { kind: "dblclick", ...point, button, pointer_type: e.pointerType || "mouse" },
+      });
+      return;
+    }
+    if (previous) {
+      flushPendingRecorderClick();
+    }
+    const pending = {
+      timer: 0,
+      ...point,
+      clientX: e.clientX,
+      clientY: e.clientY,
+      button,
+      pointerType: e.pointerType || "mouse",
+    };
+    pending.timer = window.setTimeout(() => {
+      if (pendingClickRef.current !== pending) return;
+      pendingClickRef.current = null;
+      send({ type: "input", event: { kind: "click", ...point, button, pointer_type: pending.pointerType } });
+    }, button === "left" ? 250 : 0);
+    pendingClickRef.current = pending;
+  }
+  function onImgPointerUp(e: React.PointerEvent<HTMLImageElement>) {
+    const gesture = pointerGestureRef.current;
+    if (!gesture || gesture.pointerId !== e.pointerId) return;
+    pointerGestureRef.current = null;
+    const point = normalizedPoint(e.clientX, e.clientY) || { nx: gesture.nx, ny: gesture.ny };
+    e.preventDefault();
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+    if (gesture.dragging) {
+      if (pointerMoveRafRef.current != null) {
+        window.cancelAnimationFrame(pointerMoveRafRef.current);
+        sendPendingPointerMove();
+      }
+      send({
+        type: "input",
+        event: {
+          kind: "pointer_up", ...point, button: gesture.button, buttons: e.buttons,
+          pointer_type: gesture.pointerType,
+        },
+      });
+    } else {
+      dispatchRecorderClick(point, e, gesture.button);
+    }
+  }
+  function onImgPointerCancel(e: React.PointerEvent<HTMLImageElement>) {
+    const gesture = pointerGestureRef.current;
+    if (!gesture || gesture.pointerId !== e.pointerId) return;
+    pointerGestureRef.current = null;
+    pendingPointerMoveRef.current = null;
+    if (pointerMoveRafRef.current != null) window.cancelAnimationFrame(pointerMoveRafRef.current);
+    pointerMoveRafRef.current = null;
+    if (gesture.dragging) {
+      const point = normalizedPoint(e.clientX, e.clientY) || { nx: gesture.nx, ny: gesture.ny };
+      send({ type: "input", event: { kind: "pointer_up", ...point, button: gesture.button, buttons: 0, pointer_type: gesture.pointerType } });
+    }
+  }
+  function onImgWheel(e: React.WheelEvent<HTMLImageElement>) {
+    if (connectionState !== "connected") return;
+    const point = normalizedPoint(e.clientX, e.clientY);
+    e.preventDefault();
+    flushPendingRecorderClick();
+    send({ type: "input", event: { kind: "scroll", dy: e.deltaY, dx: e.deltaX, ...(point || {}) } });
   }
   function relayKb(el: HTMLInputElement) {
     const v = el.value;
-    if (v) { send({ type: "input", event: { kind: "text", text: v } }); el.value = ""; }
+    if (v) {
+      flushPendingRecorderClick();
+      send({ type: "input", event: { kind: "text", text: v } });
+      el.value = "";
+    }
   }
   function onKbInput(e: React.FormEvent<HTMLInputElement>) {
     const ne = e.nativeEvent as { isComposing?: boolean };
@@ -1595,6 +1887,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function onKbCompositionStart(_e: React.CompositionEvent<HTMLInputElement>) {
     // FH2 修复:compositionStart 显式标记 isComposing=true;某些浏览器在 CompositionStart→Input 之间 isComposing
     // 可能短暂为 false,导致 onKbInput 误发未拼写完的中间字符(显示"拼字"而不是中文)→ ref 守门
+    flushPendingRecorderClick();
     isComposingRef.current = true;
   }
   function onKbCompositionUpdate(_e: React.CompositionEvent<HTMLInputElement>) {
@@ -1606,11 +1899,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function onKbKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     const key = recorderKeyName(e);
-    if (key) { send({ type: "input", event: { kind: "key", key } }); e.preventDefault(); }
+    if (key) {
+      flushPendingRecorderClick();
+      send({ type: "input", event: { kind: "key", key } });
+      e.preventDefault();
+    }
   }
   function onKbPaste(e: React.ClipboardEvent<HTMLInputElement>) {
     const text = e.clipboardData.getData("text");
     if (text) {
+      flushPendingRecorderClick();
       send({ type: "input", event: { kind: "text", text } });
       e.preventDefault();
       e.currentTarget.value = "";
@@ -1619,14 +1917,19 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function resetFromHere() {
     send({ type: "reset" });
-        publishOperationRef.current = null;
-        finalizeOperationRef.current = null;
     setSteps([]); setResult(null); resetEditorState();
     message.success("已清空，从现在起只录业务步骤");
   }
   function finalize() {
+    if (finalizeOperationRef.current) return;
+    if (connectionState !== "connected" || reconnectedSessionNeedsCapture) {
+      message.warning("请先在当前录制会话中重新触发并抓取提交请求");
+      return;
+    }
     if (!action.trim() || badAction(action.trim())) return;
-    if (!steps.length && !reqs.length) { message.error("还没抓到提交请求、也没录到步骤"); return; }
+    if (!hasFrame && !steps.length && !reqs.length) { message.error("还没有可分析的页面画面或请求"); return; }
+    const operationId = newCostlyOperationId("finalize");
+    finalizeOperationRef.current = operationId;
     setResult(null); setPhase("publishing");
     if (!send({ type: "finalize", operation_id: operationId, action: action.trim(), title: title.trim(), success_marker: null, steps })) {
       finalizeOperationRef.current = null;
@@ -1637,8 +1940,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function toggleField(path: string, on: boolean) { setPicked((p) => ({ ...p, [path]: { ...p[path], on } })); }
   function renameField(path: string, name: string) { setPicked((p) => ({ ...p, [path]: { ...p[path], name } })); }
   function badAction(a: string) {
-        publishOperationRef.current = null;
-        finalizeOperationRef.current = null;
     if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(a)) { message.error("动作名请用英文标识"); return true; }
     return false;
   }
@@ -1657,20 +1958,27 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     runAfterFlowSync(performPublishRequest);
   }
   function performPublishRequest() {
+    if (publishOperationRef.current) return;
     const { param_map, selList, idList, step_idxs } = payload();
     const currentSpec = flowSpecRef.current || flowSpec;
     if (!currentSpec) { message.error("请先生成 FlowSpec 后再发布"); return; }
     const publishTitle = title.trim() || preferredSkillTitle(currentSpec);
+    const operationId = newCostlyOperationId("publish");
+    publishOperationRef.current = operationId;
     setResult(null); setPhase("publishing");
     if (!send({ type: "publish_request", operation_id: operationId, action: action.trim(), title: publishTitle,
       param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: true, flow_spec: currentSpec,
       expected_fingerprint: currentSpec.meta?.current_fingerprint })) {
+      publishOperationRef.current = null;
       setPhase("recording");
       setResult({ ok: false, reason: "录制连接已断开，发布请求未发送" });
     }
   }
   function stopAll() {
+    intentionalCloseRef.current = true;
     send({ type: "stop" }); wsRef.current?.close();
+    wsRef.current = null;
+    setConnectionState("idle");
     setPhase("idle"); setResult(null); setSteps([]); clearFrame(); setFields([]); setPicked({});
     setCands([]); setSelects({}); setIdentity({}); setStepSel({}); resetEditorState();
   }
@@ -1720,11 +2028,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       field,
       value,
     };
-    if (finalizeOperationRef.current) return;
   }
   function paramMatches(a: FlowParam, b: FlowParam) {
-    const operationId = newCostlyOperationId("finalize");
-    finalizeOperationRef.current = operationId;
     const ap = stripBodyPrefix(a.path || "");
     const bp = stripBodyPrefix(b.path || "");
     if (ap && bp && ap === bp) return true;
@@ -1750,18 +2055,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         });
         const newSelects = (step.selects || []).map((sel) => {
           const sameParam = (sel.param && oldKey && sel.param === oldKey) || stripBodyPrefix(sel.path || "") === stripBodyPrefix(p.path || "");
-    if (publishOperationRef.current) return;
           if (!sameParam) return sel;
           return {
             ...sel,
             ...(updates.key != null ? { param: updates.key } : {}),
-    const operationId = newCostlyOperationId("publish");
-    publishOperationRef.current = operationId;
             ...(updates.path != null ? { path: updates.path, id_path: sel.id_path === p.path ? updates.path : sel.id_path } : {}),
           };
         });
         const newSampleInputs = { ...(step.sample_inputs || {}) };
-      publishOperationRef.current = null;
         if (updates.key != null && oldKey && oldKey in newSampleInputs) {
           newSampleInputs[updates.key] = newSampleInputs[oldKey];
           delete newSampleInputs[oldKey];
@@ -2201,6 +2502,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     flowOperationRef.current = {
       mode: "plan",
       previousUpdatedAt: currentSpec.meta?.recording_pi_loop?.updated_at,
+      operationId: newCostlyOperationId("plan"),
     };
     setOrchestrateBusy(true);
     setAutoFixBusy(true);
@@ -2213,6 +2515,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     flowOperationRef.current = {
       mode: "replan",
       previousUpdatedAt: currentSpec.meta?.recording_pi_loop?.updated_at,
+      operationId: newCostlyOperationId("replan"),
     };
     setOrchestrateBusy(true);
     setAutoFixBusy(true);
@@ -2244,6 +2547,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     flowOperationRef.current = {
       mode: "repair",
       previousUpdatedAt: flowSpecRef.current.meta?.recording_pi_loop?.updated_at,
+      operationId: newCostlyOperationId("repair"),
     };
     setAutoFixBusy(true);
     armFlowOperationWatchdog("自动修复");
@@ -2291,7 +2595,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     Modal.confirm({
       title: "删除这个能力？",
       content: "只删除对外能力编排，不删除底层捕获接口和流程步骤。",
-      operationId: newCostlyOperationId("plan"),
       okText: "删除", okType: "danger", cancelText: "取消",
       onOk: () => {
         const ok = send({ type: "flow_update", edits: [{ op: "remove_capability", capability_index: idx }] });
@@ -2304,7 +2607,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         // 旧 checkReport 属于删除前的能力作用域，等待服务端按新能力重新校验。
         setCheckReport(null);
-      operationId: newCostlyOperationId("replan"),
       },
     });
   }
@@ -2336,7 +2638,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       if (!req) { message.warning("没有找到选中的捕获接口"); return; }
       const cap = flowSpecRef.current?.capabilities?.[idx];
       pendingCapabilityMembershipRef.current.push({
-      operationId: newCostlyOperationId("repair"),
         capability: capabilityRef(cap || {}, idx),
         requestId: req.request_id,
         requestIndex: req.request_index,
@@ -4555,7 +4856,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               placeholder="https://oa.example.com/reimburse/new" onPressEnter={start} />
           </Form.Item>
           <Space align="center" wrap>
-            <Button type="primary" onClick={start}>开始录制</Button>
+            <Button type="primary" onClick={start} loading={connectionState === "connecting"} disabled={connectionState === "connecting"}>开始录制</Button>
             <Segmented
               value={recordingMode}
               onChange={(v) => setRecordingMode(v as RecordingMode)}
@@ -4586,30 +4887,72 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             boxShadow: "0 2px 8px rgba(0,0,0,0.04)",
           }}>
             <Space align="center" wrap size={12}>
-              <Tag color="processing">{phase === "publishing" ? "发布中" : "录制中"}</Tag>
-              <Button size="small" disabled={phase === "publishing"} onClick={resetFromHere}>从这里开始录</Button>
+              <Tag color={connectionState === "connected" ? "processing" : connectionState === "reconnecting" ? "warning" : "error"}>
+                {connectionState === "connected" ? (phase === "publishing" ? "发布中" : "录制中") : connectionState === "reconnecting" ? "重连中" : "已断开"}
+              </Tag>
+              <Button size="small" disabled={phase === "publishing" || connectionState !== "connected"} onClick={resetFromHere}>从这里开始录</Button>
               <Button size="small" onClick={stopAll} disabled={phase === "publishing"}>结束录制</Button>
               <Form.Item label="动作名" required style={{ marginBottom: 0 }}>
-                <Input value={action} onChange={(e) => setAction(e.target.value)} style={{ width: 190 }} />
+                <Tooltip title="每个录制会话自动生成唯一 UUID 动作名，避免与历史资产重复">
+                  <Input value={action} readOnly style={{ width: 340, fontFamily: "monospace" }} />
+                </Tooltip>
               </Form.Item>
               <Form.Item label="标题" style={{ marginBottom: 0 }}>
                 <Input value={title} onChange={(e) => setTitle(e.target.value)} style={{ width: 180 }} />
               </Form.Item>
-              <Button type="primary" loading={phase === "publishing"} disabled={!steps.length && !reqs.length} onClick={finalize}>
+              <Button type="primary" loading={phase === "publishing"} disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || (!hasFrame && !steps.length && !reqs.length)} onClick={finalize}>
                 停止并分析请求
               </Button>
             </Space>
           </div>
-          <div style={{ border: "1px solid #d9d9d9", borderRadius: 6, overflow: "hidden", lineHeight: 0, position: "relative" }}>
-            <img ref={imgRef} onClick={onImgClick} draggable={false}
-              onWheel={(e) => send({ type: "input", event: { kind: "scroll", dy: e.deltaY } })}
-              style={{ width: "100%", display: hasFrame ? "block" : "none", cursor: "crosshair" }} alt="录制画面" />
+          {connectionState !== "connected" && (
+            <Alert
+              style={{ marginBottom: 8 }}
+              type="warning"
+              showIcon
+              message={connectionState === "reconnecting" ? "正在重新连接录制浏览器" : "录制连接已断开，当前现场已保留"}
+              description={connectionState === "disconnected" ? (
+                <Space wrap>
+                  <Typography.Text>断线期间最后画面、已录步骤和编辑内容不会被清空。重连会启动新的后端会话，清除旧步骤与分析结果，仅保留画面参考。</Typography.Text>
+                  <Button size="small" type="primary" onClick={reconnectRecorder}>重新连接</Button>
+                </Space>
+              ) : undefined}
+            />
+          )}
+          {connectionState === "connected" && reconnectedSessionNeedsCapture && (
+            <Alert
+              style={{ marginBottom: 8 }} type="info" showIcon
+              message="已连接新录制会话"
+              description="旧会话的最后画面仅作视觉参考，旧步骤和分析结果已清除。请在新页面中重新完成操作并触发提交请求。"
+            />
+          )}
+          <div style={{ border: "1px solid #d9d9d9", borderRadius: 6, overflow: "auto", lineHeight: 0, position: "relative", background: "#f5f5f5", textAlign: "center" }}>
+            <img ref={imgRef} draggable={false}
+              onPointerDown={onImgPointerDown} onPointerMove={onImgPointerMove} onPointerUp={onImgPointerUp} onPointerCancel={onImgPointerCancel}
+              onContextMenu={(e) => e.preventDefault()} onWheel={onImgWheel}
+              onLoad={(e) => setFrameMeta((current) => ({
+                ...current,
+                frameWidth: current.frameWidth || e.currentTarget.naturalWidth || undefined,
+                frameHeight: current.frameHeight || e.currentTarget.naturalHeight || undefined,
+              }))}
+              style={{
+                width: frameMeta.frameWidth || "auto", maxWidth: "100%", height: "auto",
+                display: hasFrame ? "block" : "none", margin: "0 auto", cursor: connectionState === "connected" ? "crosshair" : "not-allowed",
+                touchAction: "none", userSelect: "none",
+              }} alt="录制画面" />
             {!hasFrame && <div style={{ padding: 40, textAlign: "center", color: "#999", lineHeight: 1.6 }}>等待浏览器画面</div>}
             <input ref={kbRef} onInput={onKbInput} onKeyDown={onKbKeyDown} onPaste={onKbPaste}
               onCompositionStart={onKbCompositionStart} onCompositionUpdate={onKbCompositionUpdate} onCompositionEnd={onKbCompositionEnd}
-              autoComplete="off" aria-hidden="true"
-              style={{ position: "absolute", left: 0, top: 0, width: 1, height: 1, opacity: 0, border: 0, padding: 0 }} />
+              autoComplete="off" aria-label="录制画面键盘输入" tabIndex={-1}
+              style={{ position: "absolute", left: 0, top: 0, width: 2, height: 2, opacity: 0.01, border: 0, padding: 0, pointerEvents: "none" }} />
           </div>
+          {hasFrame && (frameMeta.frameWidth || frameMeta.viewportWidth) && (
+            <Typography.Text type="secondary" style={{ display: "block", marginTop: 4, fontSize: 12 }}>
+              画面 {frameMeta.frameWidth || "?"}×{frameMeta.frameHeight || "?"}
+              {frameMeta.viewportWidth ? ` · 浏览器 ${frameMeta.viewportWidth}×${frameMeta.viewportHeight || "?"}` : ""}
+              {frameMeta.deviceScaleFactor ? ` · DPR ${frameMeta.deviceScaleFactor}` : ""}
+            </Typography.Text>
+          )}
 
           {fields.length > 0 && !flowSpec && (
             <Alert

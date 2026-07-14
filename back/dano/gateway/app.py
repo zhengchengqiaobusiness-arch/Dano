@@ -88,7 +88,9 @@ def _new_recording_action() -> str:
 
 
 class _WebSocketSendQueue:
-    """Serialize every websocket write through one task and drain cleanly on shutdown."""
+    """Serialize writes; reliable controls queue, while screenshots coalesce latest-only."""
+
+    _FRAME_ITEM = object()
 
     def __init__(self, ws: WebSocket) -> None:
         self._ws = ws
@@ -96,6 +98,8 @@ class _WebSocketSendQueue:
         self._closed = False
         self._failure: BaseException | None = None
         self._background: set[asyncio.Task] = set()
+        self._latest_frame: dict | None = None
+        self._frame_enqueued = False
         self._writer = asyncio.create_task(self._run())
 
     async def send_json(self, message: dict) -> None:
@@ -115,6 +119,16 @@ class _WebSocketSendQueue:
         self._background.add(task)
         task.add_done_callback(self._background_done)
 
+    def send_latest_frame(self, message: dict) -> bool:
+        """Keep at most one unsent screenshot and return without waiting for network I/O."""
+        if self._closed:
+            return False
+        self._latest_frame = message
+        if not self._frame_enqueued:
+            self._frame_enqueued = True
+            self._queue.put_nowait(self._FRAME_ITEM)
+        return True
+
     def _background_done(self, task: asyncio.Task) -> None:
         self._background.discard(task)
         try:
@@ -129,18 +143,26 @@ class _WebSocketSendQueue:
                 if item is None:
                     self._closed = True
                     return
-                message, acknowledged = item
+                if item is self._FRAME_ITEM:
+                    message = self._latest_frame
+                    self._latest_frame = None
+                    self._frame_enqueued = False
+                    acknowledged = None
+                    if message is None:
+                        continue
+                else:
+                    message, acknowledged = item
                 try:
                     await self._ws.send_json(message)
                 except BaseException as exc:
                     self._failure = exc
                     self._closed = True
-                    if not acknowledged.done():
+                    if acknowledged is not None and not acknowledged.done():
                         acknowledged.set_exception(exc)
                     self._reject_pending(exc)
                     return
                 else:
-                    if not acknowledged.done():
+                    if acknowledged is not None and not acknowledged.done():
                         acknowledged.set_result(None)
         except asyncio.CancelledError as exc:
             self._failure = exc
@@ -155,6 +177,10 @@ class _WebSocketSendQueue:
             except asyncio.QueueEmpty:
                 return
             if item is None:
+                continue
+            if item is self._FRAME_ITEM:
+                self._latest_frame = None
+                self._frame_enqueued = False
                 continue
             _, acknowledged = item
             if not acknowledged.done():
@@ -696,30 +722,25 @@ def _frontend_recording_field_metadata(raw_steps: list[dict]) -> tuple[dict, set
 async def record_ws(ws: WebSocket) -> None:
     """客户在网页里操作我们托管的浏览器,免安装/免命令行。协议见前端 PageRecorder。"""
     await ws.accept()
+    sender = _WebSocketSendQueue(ws)
     sess = None
     llm_budget_token = None
+    session_action = ""
     try:
         init = await ws.receive_json()
         if init.get("type") != "start" or not init.get("start_url"):
-            await ws.send_json({"type": "error", "detail": "首帧须为 {type:'start', start_url, ...}"})
+            await sender.send_json({"type": "error", "detail": "首帧须为 {type:'start', start_url, ...}"})
             return
+        session_action = _new_recording_action()
         from dano.config import get_settings as _recording_settings
         from dano.infra.llm_control import begin_llm_budget
         llm_budget_token = begin_llm_budget(_recording_settings().llm_session_token_budget)
         from dano.execution.page.recorder import RecordSession
-        loop = asyncio.get_event_loop()
-
         def on_step(step: dict) -> None:
-            try:
-                loop.create_task(ws.send_json({"type": "step", "step": step}))
-            except Exception:  # noqa: BLE001
-                pass
+            sender.send_background({"type": "step", "step": step})
 
         def on_request(r: dict) -> None:                  # 诊断:抓到的写请求实时推给前端
-            try:
-                loop.create_task(ws.send_json({"type": "request", "request": r}))
-            except Exception:  # noqa: BLE001
-                pass
+            sender.send_background({"type": "request", "request": r})
 
         sess = RecordSession(on_step=on_step, on_request=on_request,
                              intercept_submit=init.get("intercept", True),
@@ -729,13 +750,10 @@ async def record_ws(ws: WebSocket) -> None:
                          token=init.get("token") or None)   # 贴 token → 预置登录态,免在画面里登录
 
         async def on_frame(frame: dict) -> None:
-            try:
-                await ws.send_json({"type": "frame", **frame})
-            except Exception:  # noqa: BLE001
-                pass
+            sender.send_latest_frame({"type": "frame", **frame})
 
         await sess.start_screencast(on_frame)
-        await ws.send_json({"type": "started"})
+        await sender.send_json({"type": "started", "action": session_action})
 
         pending_req: dict | None = None       # 抓到的提交请求,等用户勾完字段再发布
         pending_candidates: list[dict] = []    # 所有 JSON 写请求(候选),供用户手选用哪个
@@ -758,7 +776,7 @@ async def record_ws(ws: WebSocket) -> None:
         async def _replay_costly(message: dict) -> bool:
             key = _costly_key(message)
             if key and key in costly_operation_results:
-                await ws.send_json({**costly_operation_results[key], "duplicate": True})
+                await sender.send_json({**costly_operation_results[key], "duplicate": True})
                 return True
             return False
 
@@ -817,11 +835,32 @@ async def record_ws(ws: WebSocket) -> None:
             msg = await ws.receive_json()
             t = msg.get("type")
             if t == "input":
-                await sess.dispatch_input(msg.get("event") or {})
+                event = msg.get("event") or {}
+                try:
+                    input_result = await sess.dispatch_input(event)
+                except Exception as exc:  # noqa: BLE001 - one bad browser event must not end the session
+                    await sender.send_json({
+                        "type": "input_error",
+                        "detail": str(exc) or exc.__class__.__name__,
+                        "event": event,
+                        "kind": event.get("kind"),
+                        "recoverable": True,
+                        "error_type": exc.__class__.__name__,
+                    })
+                    continue
+                if isinstance(input_result, dict) and not input_result.get("ok", True):
+                    await sender.send_json({
+                        "type": "input_error",
+                        "detail": str(input_result.get("error") or "浏览器输入事件执行失败"),
+                        "event": event,
+                        "kind": input_result.get("kind") or event.get("kind"),
+                        "recoverable": bool(input_result.get("recoverable", True)),
+                        "error_type": input_result.get("error_type") or "InputDispatchError",
+                    })
             elif t == "reset":
                 await sess.flush_recording()
                 sess.reset()                          # 登录后:丢弃登录步骤,只录业务流程
-                await ws.send_json({"type": "reset_ok"})
+                await sender.send_json({"type": "reset_ok"})
             elif t == "finalize":
                 if await _replay_costly(msg):
                     continue
@@ -902,15 +941,19 @@ async def record_ws(ws: WebSocket) -> None:
                 if not cands and not all_caps:
                     # 一条写请求都没抓到 → 多半是**没点「提交」**或刚重连过会话(新浏览器没有旧请求)→ 明确引导重点提交,
                     # 不再发布页面回放脚本；现场还在，重新点击一次真实提交即可抓请求。
-                    await ws.send_json({"type": "result", "parsed_steps": len(steps), "report": {"ok": False,
+                    await sender.send_json({"type": "result", "action": session_action,
+                        "parsed_steps": len(steps), "report": {"ok": False,
                         "reason": "没抓到任何提交接口请求 —— 拦截模式下**点一次「提交」**才会抓到那条请求。"
                                   "若刚重连过会话/浏览器,请在画面里**重新点一次「提交」**(现场还在),然后再发布。"}})
                     continue
                 if cands:
                     chosen = pick_submit_request(cands, samples) or cands[-1]
                     pending_req = chosen
-                    await ws.send_json(await _request_fields_msg(chosen, cands, samples, pending_reads,
-                                                                 pending_storage, pending_required, page_enum_options))
+                    request_fields = await _request_fields_msg(
+                        chosen, cands, samples, pending_reads,
+                        pending_storage, pending_required, page_enum_options,
+                    )
+                    await sender.send_json({**request_fields, "action": session_action})
                     # Step A: 灰度附带下发 flow_spec 摘要 + 完整 spec;前端暂不消费,零回归。
                     # 同时把 spec 存到 pending_flow_spec 供后续 flow_update / step_naming / 业务说明编辑。
                     try:
@@ -939,6 +982,7 @@ async def record_ws(ws: WebSocket) -> None:
                         )
                         response = {
                             "type": "flow_spec",
+                            "action": session_action,
                             "operation": "finalize",
                             "operation_id": msg.get("operation_id"),
                             "flow_spec": flow_spec_to_summary(pending_flow_spec),
@@ -946,10 +990,10 @@ async def record_ws(ws: WebSocket) -> None:
                             "check_report": validate_flow_spec(pending_flow_spec),
                         }
                         _remember_costly(msg, response)
-                        await ws.send_json(response)
+                        await sender.send_json(response)
                     except Exception as _fs_err:  # noqa: BLE001
                         log.warning("flow_spec.emit_failed", error=str(_fs_err))
-                        await ws.send_json({"type": "result",
+                        await sender.send_json({"type": "result", "action": session_action,
                                             "report": {"ok": False, "stage": "flow_spec_build",
                                                        "reason": f"FlowSpec 生成失败:{_fs_err}"},
                                             "parsed_steps": 0})
@@ -980,6 +1024,7 @@ async def record_ws(ws: WebSocket) -> None:
                     )
                     response = {
                         "type": "flow_spec",
+                        "action": session_action,
                         "operation": "finalize",
                         "operation_id": msg.get("operation_id"),
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
@@ -987,10 +1032,10 @@ async def record_ws(ws: WebSocket) -> None:
                         "check_report": validate_flow_spec(pending_flow_spec),
                     }
                     _remember_costly(msg, response)
-                    await ws.send_json(response)
+                    await sender.send_json(response)
                 except Exception as _fs_err:  # noqa: BLE001
                     log.warning("flow_spec.read_only_emit_failed", error=str(_fs_err))
-                    await ws.send_json({"type": "result",
+                    await sender.send_json({"type": "result", "action": session_action,
                                         "report": {"ok": False,
                                                    "stage": "capture_request",
                                                    "reason": "没有抓到可发布的 JSON 提交请求，且 GET/读请求 FlowSpec 生成失败:"
@@ -1002,9 +1047,12 @@ async def record_ws(ws: WebSocket) -> None:
                 idx = msg.get("idx", 0)
                 if pending_candidates and 0 <= idx < len(pending_candidates):
                     pending_req = pending_candidates[idx]
-                    await ws.send_json(await _request_fields_msg(pending_req, pending_candidates, pending_samples,
-                                                                 pending_reads, pending_storage, pending_required,
-                                                                 pending_page_enum_options))
+                    request_fields = await _request_fields_msg(
+                        pending_req, pending_candidates, pending_samples,
+                        pending_reads, pending_storage, pending_required,
+                        pending_page_enum_options,
+                    )
+                    await sender.send_json({**request_fields, "action": session_action})
                     try:
                         from dano.execution.page.flow_spec import (
                             flow_spec_to_client,
@@ -1034,23 +1082,23 @@ async def record_ws(ws: WebSocket) -> None:
                             subsystem=init.get("subsystem", ""),
                         )
                         pending_flow_spec = await _enhance_flow_field_names(pending_flow_spec)
-                        await ws.send_json({
+                        await sender.send_json({
                             "type": "flow_spec_updated",
                             "flow_spec": flow_spec_to_summary(pending_flow_spec),
                             "full_spec": flow_spec_to_client(pending_flow_spec),
                             "check_report": validate_flow_spec(pending_flow_spec),
                         })
                     except Exception as e:  # noqa: BLE001
-                        await ws.send_json({"type": "error", "detail": f"choose_request flow_spec failed: {e}"})
+                        await sender.send_json({"type": "error", "detail": f"choose_request flow_spec failed: {e}"})
             # Step B: 前端编辑 FlowSpec → 应用编辑,返回新 spec
             elif t == "flow_update":
                 if pending_flow_spec is None:
-                    await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
+                    await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 edits = msg.get("edits") or []
                 operation_id = str(msg.get("operation_id") or "")
                 if operation_id and operation_id in applied_flow_operations:
-                    await ws.send_json({**applied_flow_operations[operation_id], "duplicate": True})
+                    await sender.send_json({**applied_flow_operations[operation_id], "duplicate": True})
                     continue
                 try:
                     from dano.execution.page.flow_spec import (
@@ -1072,11 +1120,11 @@ async def record_ws(ws: WebSocket) -> None:
                         if len(applied_flow_operations) >= 256:
                             applied_flow_operations.pop(next(iter(applied_flow_operations)), None)
                         applied_flow_operations[operation_id] = response
-                    await ws.send_json(response)
+                    await sender.send_json(response)
                 except Exception as e:  # noqa: BLE001
                     # 前端会先做乐观更新。失败时必须回传服务端权威版本，否则页面与
                     # pending_flow_spec 分叉，下一次发布会发生指纹冲突或使用旧字段。
-                    await ws.send_json({
+                    await sender.send_json({
                         "type": "error",
                         "detail": f"flow_update failed: {e}",
                         "operation": "flow_update",
@@ -1087,7 +1135,7 @@ async def record_ws(ws: WebSocket) -> None:
             elif t == "flow_replace":
                 operation_id = str(msg.get("operation_id") or "")
                 if operation_id and operation_id in applied_flow_operations:
-                    await ws.send_json({**applied_flow_operations[operation_id], "duplicate": True})
+                    await sender.send_json({**applied_flow_operations[operation_id], "duplicate": True})
                     continue
                 try:
                     from dano.execution.page.flow_spec import (
@@ -1100,7 +1148,7 @@ async def record_ws(ws: WebSocket) -> None:
                     )
                     raw_spec = msg.get("flow_spec")
                     if not isinstance(raw_spec, dict):
-                        await ws.send_json({"type": "error", "detail": "flow_replace missing flow_spec object"})
+                        await sender.send_json({"type": "error", "detail": "flow_replace missing flow_spec object"})
                         continue
                     raw_spec = _restore_hidden_flow_spec_fields(raw_spec)
                     pending_flow_spec = append_flow_version(
@@ -1121,19 +1169,19 @@ async def record_ws(ws: WebSocket) -> None:
                         if len(applied_flow_operations) >= 256:
                             applied_flow_operations.pop(next(iter(applied_flow_operations)), None)
                         applied_flow_operations[operation_id] = response
-                    await ws.send_json(response)
+                    await sender.send_json(response)
                 except Exception as e:  # noqa: BLE001
-                    await ws.send_json({
+                    await sender.send_json({
                         "type": "error", "detail": f"flow_replace failed: {e}",
                         "operation": "flow_replace", "operation_id": operation_id,
                     })
             # Bug 修复: 前端收到 "step not found" 时主动刷新 spec
             elif t == "refresh_flow_spec":
                 if pending_flow_spec is None:
-                    await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
+                    await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 from dano.execution.page.flow_spec import flow_spec_to_client, flow_spec_to_summary, validate_flow_spec
-                await ws.send_json({
+                await sender.send_json({
                     "type": "flow_spec",
                     "flow_spec": flow_spec_to_summary(pending_flow_spec),
                     "full_spec": flow_spec_to_client(pending_flow_spec),
@@ -1144,7 +1192,7 @@ async def record_ws(ws: WebSocket) -> None:
                 if await _replay_costly(msg):
                     continue
                 if pending_flow_spec is None:
-                    await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
+                    await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 try:
                     from dano.config import get_settings
@@ -1183,15 +1231,15 @@ async def record_ws(ws: WebSocket) -> None:
                         ),
                     }
                     _remember_costly(msg, response)
-                    await ws.send_json(response)
+                    await sender.send_json(response)
                 except Exception as e:  # noqa: BLE001
-                    await ws.send_json({"type": "error", "detail": f"orchestrate_flow failed: {e}"})
+                    await sender.send_json({"type": "error", "detail": f"orchestrate_flow failed: {e}"})
             # 一键修正:确定性补齐 + LLM 受限 patch；后端应用后重跑校验。
             elif t == "auto_fix_flow":
                 if await _replay_costly(msg):
                     continue
                 if pending_flow_spec is None:
-                    await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
+                    await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 try:
                     from dano.config import get_settings
@@ -1221,13 +1269,13 @@ async def record_ws(ws: WebSocket) -> None:
                         ),
                     }
                     _remember_costly(msg, response)
-                    await ws.send_json(response)
+                    await sender.send_json(response)
                 except Exception as e:  # noqa: BLE001
-                    await ws.send_json({"type": "error", "detail": f"auto_fix_flow failed: {e}"})
+                    await sender.send_json({"type": "error", "detail": f"auto_fix_flow failed: {e}"})
             # Step D2: LLM 给每个 step 起业务名
             elif t == "step_naming":
                 if pending_flow_spec is None:
-                    await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
+                    await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 try:
                     from dano.execution.page.flow_spec import (
@@ -1240,18 +1288,18 @@ async def record_ws(ws: WebSocket) -> None:
                         pending_flow_spec,
                         llm_client=_page_semantic_client("name_step"),
                     )
-                    await ws.send_json({
+                    await sender.send_json({
                         "type": "step_names",
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
                         "full_spec": flow_spec_to_client(pending_flow_spec),
                         "check_report": validate_flow_spec(pending_flow_spec),
                     })
                 except Exception as e:  # noqa: BLE001
-                    await ws.send_json({"type": "error", "detail": f"step_naming failed: {e}"})
+                    await sender.send_json({"type": "error", "detail": f"step_naming failed: {e}"})
             # Step D3: LLM 生成业务说明
             elif t == "business_description":
                 if pending_flow_spec is None:
-                    await ws.send_json({"type": "error", "detail": "no flow_spec loaded"})
+                    await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 try:
                     from dano.execution.page.flow_spec import (
@@ -1271,7 +1319,7 @@ async def record_ws(ws: WebSocket) -> None:
                         "business_description",
                         reason="生成结构化业务说明",
                     )
-                    await ws.send_json({
+                    await sender.send_json({
                         "type": "business_description",
                         "description": desc,
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
@@ -1279,7 +1327,7 @@ async def record_ws(ws: WebSocket) -> None:
                         "check_report": validate_flow_spec(pending_flow_spec),
                     })
                 except Exception as e:  # noqa: BLE001
-                    await ws.send_json({"type": "error", "detail": f"business_description failed: {e}"})
+                    await sender.send_json({"type": "error", "detail": f"business_description failed: {e}"})
             # Step D5: 前端上报 console 错误
             elif t == "console_log_upload":
                 entries = msg.get("entries") or []
@@ -1305,9 +1353,16 @@ async def record_ws(ws: WebSocket) -> None:
             elif t == "publish_request":
                 if await _replay_costly(msg):
                     continue
+                requested_action = str(msg.get("action") or "")
+                if requested_action and requested_action != session_action:
+                    log.info(
+                        "recording.client_action_overridden",
+                        requested_action=requested_action,
+                        action=session_action,
+                    )
                 # FlowSpec 工作台是录制发布唯一入口：步骤、字段、依赖、说明都以同一份可编辑 spec 为准。
                 if pending_flow_spec is None:
-                    await ws.send_json({"type": "result",
+                    await sender.send_json({"type": "result",
                                         "report": {"ok": False, "stage": "flow_spec_missing",
                                                    "reason": "没有可发布的 FlowSpec；请先停止并分析请求，生成 FlowSpec 后再发布。"}})
                     continue
@@ -1326,7 +1381,7 @@ async def record_ws(ws: WebSocket) -> None:
                     expected_fingerprint = str(msg.get("expected_fingerprint") or "")
                     current_fingerprint = flow_spec_fingerprint(pending_flow_spec)
                     if expected_fingerprint and expected_fingerprint != current_fingerprint:
-                        await ws.send_json({
+                        await sender.send_json({
                             "type": "result",
                             "report": {
                                 "ok": False,
@@ -1344,7 +1399,7 @@ async def record_ws(ws: WebSocket) -> None:
                     # 发布只校验并编译工作台当前版本。Planner/Repair 必须由用户显式点击
                     # “生成/优化能力”触发，禁止在发布阶段静默恢复已删除步骤或改写人工字段。
                     if not pending_flow_spec.capabilities:
-                        await ws.send_json({
+                        await sender.send_json({
                             "type": "result",
                             "report": {
                                 "ok": False,
@@ -1356,7 +1411,7 @@ async def record_ws(ws: WebSocket) -> None:
                     pending_flow_spec, release_candidate = prepare_flow_release_candidate(pending_flow_spec)
                     check_report = validate_flow_spec(pending_flow_spec)
                     if not check_report.get("passed"):
-                        await ws.send_json({
+                        await sender.send_json({
                             "type": "result",
                             "report": {
                                 "ok": False,
@@ -1370,7 +1425,7 @@ async def record_ws(ws: WebSocket) -> None:
                         continue
                     apir, build_errors = flow_spec_to_api_request(pending_flow_spec)
                     if build_errors or not apir:
-                        await ws.send_json({
+                        await sender.send_json({
                             "type": "result",
                             "report": {
                                 "ok": False,
@@ -1391,7 +1446,7 @@ async def record_ws(ws: WebSocket) -> None:
                     required = flow_spec_required_params(pending_flow_spec)
                     last_params = apir.get("params") or ((apir.get("steps") or [{}])[-1].get("params") or [])
                 except Exception as e:  # noqa: BLE001
-                    await ws.send_json({"type": "result",
+                    await sender.send_json({"type": "result",
                                         "report": {"ok": False, "stage": "flow_spec_build",
                                                    "reason": f"FlowSpec 发布构造失败:{e}"}})
                     continue
@@ -1407,7 +1462,7 @@ async def record_ws(ws: WebSocket) -> None:
                     await save_token(init["tenant"], sub, _tok_headers, source="recording")
                 sample_in = apir.get("sample_inputs") or ((apir.get("steps") or [{}])[-1].get("sample_inputs") or {})
                 rep = await run_request_onboarding(
-                    tenant=init["tenant"], subsystem=sub, action=msg["action"],
+                    tenant=init["tenant"], subsystem=sub, action=session_action,
                     title=msg.get("title", ""), api_request=apir, sample_inputs=sample_in,
                     required=required,
                     goal=msg.get("goal") or pending_flow_spec.goal,
@@ -1415,19 +1470,28 @@ async def record_ws(ws: WebSocket) -> None:
                     allow_repair=False)
                 if rep.get("ok"):
                     try:
-                        skill_id = rep.get("skill_id") or f"{sub}.{msg['action']}"
-                        version = await _latest_skill_version(init["tenant"], Subsystem(sub), msg["action"], {"integration": "page"})
-                        await _lifecycle.register_published(skill_id, Subsystem(sub), msg["action"], version)
+                        skill_id = rep.get("skill_id") or f"{sub}.{session_action}"
+                        version = await _latest_skill_version(
+                            init["tenant"], Subsystem(sub), session_action, {"integration": "page"},
+                        )
+                        await _lifecycle.register_published(skill_id, Subsystem(sub), session_action, version)
                     except Exception as e:  # noqa: BLE001
-                        log.warning("recording.lifecycle_register_failed", error=str(e), subsystem=sub, action=msg.get("action"))
+                        log.warning(
+                            "recording.lifecycle_register_failed",
+                            error=str(e), subsystem=sub, action=session_action,
+                        )
                     await _auto_export(init["tenant"])
-                await ws.send_json({"type": "result", "report": {**rep, "check_report": check_report,
-                                                                  "full_spec": flow_spec_to_client(pending_flow_spec),
-                                                                  "release": release_candidate,
-                                                                  "recording_mode": recording_mode},
-                                    "parsed_steps": len(last_params), "via": "flow_spec",
-                                    "recording_mode": recording_mode,
-                                    "workflow_steps": len(apir.get("steps") or []) or None})
+                response = {"type": "result", "operation": "publish", "action": session_action,
+                            "operation_id": msg.get("operation_id"),
+                            "report": {**rep, "check_report": check_report,
+                                       "full_spec": flow_spec_to_client(pending_flow_spec),
+                                       "release": release_candidate,
+                                       "recording_mode": recording_mode},
+                            "parsed_steps": len(last_params), "via": "flow_spec",
+                            "recording_mode": recording_mode,
+                            "workflow_steps": len(apir.get("steps") or []) or None}
+                _remember_costly(msg, response)
+                await sender.send_json(response)
             elif t == "stop":
                 await sess.flush_recording()
                 break
@@ -1435,12 +1499,13 @@ async def record_ws(ws: WebSocket) -> None:
         pass
     except Exception as e:  # noqa: BLE001
         try:
-            await ws.send_json({"type": "error", "detail": str(e)})
+            await sender.send_json({"type": "error", "detail": str(e)})
         except Exception:  # noqa: BLE001
             pass
     finally:
         if sess is not None:
             await sess.stop()
+        await sender.close()
         try:
             await ws.close()
         except Exception:  # noqa: BLE001
