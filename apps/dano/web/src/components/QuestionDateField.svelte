@@ -368,6 +368,8 @@
   }
 
   .question-time-input {
+    -webkit-appearance: none;
+    appearance: none;
     width: auto;
     min-width: 140px;
     padding-right: 36px;
