@@ -417,6 +417,9 @@
   let displayedIsStreaming = $derived(
     activeDebugSession?.sessionState.isStreaming ?? bridge.isStreaming,
   );
+  let displayedIsPromptPending = $derived(
+    activeDebugSession ? false : bridge.isPromptPending,
+  );
   let displayedIsCompacting = $derived(activeDebugSession ? false : bridge.isCompacting);
   let displayedTreeEntries = $derived(activeDebugSession ? [] : bridge.treeEntries);
   let displayedHasSessionOutline = $derived(
@@ -1266,6 +1269,7 @@
         transcriptPageLoading={displayedTranscriptPageLoading}
         pendingTranscriptConfigEvent={displayedPendingTranscriptConfigEvent}
         isStreaming={displayedIsStreaming}
+        isPromptPending={displayedIsPromptPending}
         isCompacting={displayedIsCompacting}
         isDebugMode={debugModeAvailable}
         {slashCommandsAndMentionsEnabled}

@@ -83,6 +83,7 @@
     pageLoading = false,
     pendingTranscriptConfigEvent = null as PendingTranscriptSessionEvent | null,
     isStreaming = false,
+    isPromptPending = false,
     isCompacting = false,
     showMessageIds = false,
     allowRevision = false,
@@ -103,6 +104,7 @@
     pageLoading?: boolean;
     pendingTranscriptConfigEvent?: PendingTranscriptSessionEvent | null;
     isStreaming?: boolean;
+    isPromptPending?: boolean;
     isCompacting?: boolean;
     showMessageIds?: boolean;
     allowRevision?: boolean;
@@ -165,8 +167,13 @@
   let showBusyIndicator = $derived(hasVisibleStreaming || isCompacting);
   let showAssistantPending = $derived(
     shouldShowAssistantPending(
-      [...messages, ...streamDisplayMessages],
-      isStreaming,
+      [
+        ...messages.map((message, index) =>
+          messageWithTranscriptDeltas(message, index),
+        ),
+        ...streamDisplayMessages,
+      ],
+      isPromptPending || isStreaming,
     ),
   );
   let copiedMessageKey = $state<string | null>(null);

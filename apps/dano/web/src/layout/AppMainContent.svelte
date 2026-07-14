@@ -36,6 +36,7 @@
     transcriptPageLoading = false,
     pendingTranscriptConfigEvent = null as PendingTranscriptSessionEvent | null,
     isStreaming = false,
+    isPromptPending = false,
     isCompacting = false,
     isDebugMode = false,
     slashCommandsAndMentionsEnabled = false,
@@ -110,6 +111,7 @@
     transcriptPageLoading?: boolean;
     pendingTranscriptConfigEvent?: PendingTranscriptSessionEvent | null;
     isStreaming?: boolean;
+    isPromptPending?: boolean;
     isCompacting?: boolean;
     isDebugMode?: boolean;
     slashCommandsAndMentionsEnabled?: boolean;
@@ -197,6 +199,7 @@
     pageLoading={transcriptPageLoading}
     {pendingTranscriptConfigEvent}
     {isStreaming}
+    {isPromptPending}
     {isCompacting}
     showMessageIds={isDebugMode}
     {allowRevision}

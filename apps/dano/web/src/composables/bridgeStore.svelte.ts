@@ -328,6 +328,7 @@ let _availableModels = $state<RpcModelInfo[]>([]);
 let _currentModel = $state<RpcModelInfo | null>(null);
 let _currentThinkingLevel = $state<RpcThinkingLevel | null>(null);
 let _isStreaming = $state(false);
+let _isPromptPending = $state(false);
 let _compactingRequestCount = $state(0);
 let _remoteCompactionActive = $state(false);
 let _queuedUserMessages = $state<RpcQueuedMessage[]>([]);
@@ -377,6 +378,7 @@ let availableModels = $derived(_availableModels);
 let currentModel = $derived(_currentModel);
 let currentThinkingLevel = $derived(_currentThinkingLevel);
 let isStreaming = $derived(_isStreaming);
+let isPromptPending = $derived(_isPromptPending);
 let isCompacting = $derived(
   _compactingRequestCount > 0 || _remoteCompactionActive,
 );
@@ -1370,6 +1372,7 @@ function replaceTranscript(
   }
   if (prevSp !== sessionPath) {
     _queuedUserMessages = [];
+    _isPromptPending = false;
   }
   _transcriptSessionPath = sessionPath;
   reanchorMissingPendingTranscriptConfigEvent();
@@ -1408,6 +1411,7 @@ function applyTranscriptPage(
   if (prevSp !== nsp) {
     clearPendingTranscriptConfigEvent();
     _queuedUserMessages = [];
+    _isPromptPending = false;
   }
   _transcriptSessionPath = nsp;
   _transcriptHasOlder = page.hasOlder;
@@ -1512,6 +1516,7 @@ function applySessionSnapshotResponse(
   if (prevSp !== getDisplayedSessionPath()) {
     resetGitRepoState();
     _isStreaming = false;
+    _isPromptPending = false;
   }
   if (prevWp !== getWorkspaceEntriesContextKey()) invalidateWorkspaceEntries();
   if (options?.refreshState) sendCommand({ type: "get_state" }).catch(() => {});
@@ -1692,6 +1697,7 @@ async function sendPrompt(
 ): Promise<boolean> {
   if (!(await ensureConnectedForPrompt())) return false;
 
+  const wasStreaming = _isStreaming;
   if (_isStreaming) {
     _queuedUserMessages = [
       ..._queuedUserMessages,
@@ -1703,6 +1709,7 @@ async function sendPrompt(
       },
     ];
   }
+  if (!wasStreaming) _isPromptPending = true;
   sendEnvelope({
     type: "command",
     payload: { type: "prompt", message, images, files, streamingBehavior },
@@ -2276,6 +2283,7 @@ function handleResponse(payload: RpcResponse) {
         break;
       }
       case "new_session": {
+        _isPromptPending = false;
         const data = payload.data as
           | Parameters<typeof applySessionSnapshotResponse>[0]
           | undefined;
@@ -2377,6 +2385,7 @@ function handleEvent(payload: RpcBridgeEvent) {
       break;
     }
     case "command_error": {
+      _isPromptPending = false;
       const message = bridgeCommandErrorNotificationMessage(
         payload,
         t("store.error.sendBridgeMessageFailed"),
@@ -2453,6 +2462,7 @@ function handleEvent(payload: RpcBridgeEvent) {
       setSessionRunning(sp, false);
       if (!sp || sp === getDisplayedSessionPath()) {
         _isStreaming = false;
+        _isPromptPending = false;
         sendCommand({ type: "get_state" }).catch(() => {});
       }
       break;
@@ -2637,6 +2647,7 @@ function rejectPendingRequests(message: string) {
 
 function markDisconnected(reason = t("appHeader.connection.disconnected")) {
   _connectionStatus = "disconnected";
+  _isPromptPending = false;
   _remoteCompactionActive = false;
   _reconnectCount++;
   _runningSessionPaths = [];
@@ -2899,6 +2910,9 @@ export function initBridge() {
     },
     get isStreaming() {
       return isStreaming;
+    },
+    get isPromptPending() {
+      return isPromptPending;
     },
     get isCompacting() {
       return isCompacting;
