@@ -6,7 +6,45 @@ import {
   formatTranscriptDuration,
   latestThinkingLine,
   normalizeTranscript,
+  shouldShowAssistantPending,
 } from "./transcript";
+
+describe("assistant pending indicator", () => {
+  const userMessage = { id: "user-1", role: "user", content: "hello" } as never;
+
+  it("shows after a user message while the assistant stream is empty", () => {
+    expect(shouldShowAssistantPending([
+      userMessage,
+      { id: "assistant-1", role: "assistant", content: [] },
+    ], true)).toBe(true);
+  });
+
+  it("hides when the first assistant text becomes visible", () => {
+    expect(shouldShowAssistantPending([
+      userMessage,
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [{ type: "text", text: "H" }],
+      },
+    ] as never, true)).toBe(false);
+  });
+
+  it("hides when the first assistant tool call becomes visible", () => {
+    expect(shouldShowAssistantPending([
+      userMessage,
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [{ type: "toolCall", id: "tool-1", name: "read", arguments: {} }],
+      },
+    ] as never, true)).toBe(false);
+  });
+
+  it("does not show outside an active response", () => {
+    expect(shouldShowAssistantPending([userMessage], false)).toBe(false);
+  });
+});
 
 describe("curl transcript status", () => {
   it("marks a completed non-zero curl result as an error", () => {

@@ -5,6 +5,7 @@
   import { onMount, tick } from "svelte";
   import { highlightCodeHtml, readThemeMode } from "../utils/codeHighlight";
   import { parseInlineFileReference } from "../utils/fileReferences";
+  import { markdownDroppedObjectLiteralContent } from "../utils/markdownFallback";
   import { copyTextToClipboard } from "../utils/messageCopy";
   import { t } from "../i18n";
 
@@ -55,22 +56,12 @@
     return Boolean(root.querySelector("img, svg, pre, code, table, ul, ol, blockquote, hr, details"));
   }
 
-  function markdownBodyDroppedJsonLikePayload(root: HTMLElement, source: string): boolean {
-    if (!/\{[\s\S]*\}/.test(source)) return false;
-    const renderedText = root.textContent ?? "";
-    if (renderedText.includes("{") || renderedText.includes("}")) return false;
-
-    const braceIndex = source.indexOf("{");
-    const payload = source.slice(braceIndex).trim();
-    return /["'][^"']+["']\s*:/.test(payload);
-  }
-
   function updateFallbackVisibility() {
     const root = markdownBody();
     showFallback = Boolean(fallbackText.trim()) && (
       !root ||
       !markdownBodyHasContent(root) ||
-      markdownBodyDroppedJsonLikePayload(root, fallbackText)
+      markdownDroppedObjectLiteralContent(fallbackText, root.textContent ?? "")
     );
   }
 

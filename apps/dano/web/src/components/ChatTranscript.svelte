@@ -42,6 +42,7 @@
     isToolResultMessage,
     latestThinkingLine,
     messageContent,
+    shouldShowAssistantPending,
     type FileContentBlock,
     type ImageContentBlock,
     type PendingTranscriptSessionEvent,
@@ -82,6 +83,7 @@
     pageLoading = false,
     pendingTranscriptConfigEvent = null as PendingTranscriptSessionEvent | null,
     isStreaming = false,
+    isPromptPending = false,
     isCompacting = false,
     showMessageIds = false,
     allowRevision = false,
@@ -102,6 +104,7 @@
     pageLoading?: boolean;
     pendingTranscriptConfigEvent?: PendingTranscriptSessionEvent | null;
     isStreaming?: boolean;
+    isPromptPending?: boolean;
     isCompacting?: boolean;
     showMessageIds?: boolean;
     allowRevision?: boolean;
@@ -162,6 +165,17 @@
     isStreaming || transcriptStreams.length > 0 || transcriptDeltas.length > 0,
   );
   let showBusyIndicator = $derived(hasVisibleStreaming || isCompacting);
+  let showAssistantPending = $derived(
+    shouldShowAssistantPending(
+      [
+        ...messages.map((message, index) =>
+          messageWithTranscriptDeltas(message, index),
+        ),
+        ...streamDisplayMessages,
+      ],
+      isPromptPending || isStreaming,
+    ),
+  );
   let copiedMessageKey = $state<string | null>(null);
   let copiedMessageResetTimer: number | undefined;
   let filePreview = $state<{
@@ -1575,6 +1589,20 @@
     {/if}
   {/each}
 
+  {#if showAssistantPending}
+    <div
+      class="message-row assistant assistant-pending-row"
+      role="status"
+      aria-label={t("chatTranscript.waitingForResponse")}
+    >
+      <div class="assistant-pending" aria-hidden="true">
+        <span></span>
+        <span></span>
+        <span></span>
+      </div>
+    </div>
+  {/if}
+
   {#if shouldShowScrollToBottom()}
     <div class="scroll-bottom-overlay">
       <button
@@ -1772,6 +1800,40 @@
   .message-row.tool {
     display: flex;
     overflow-anchor: none;
+  }
+
+  .assistant-pending-row {
+    padding-left: 10px;
+    overflow-anchor: none;
+  }
+
+  .assistant-pending {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 24px;
+  }
+
+  .assistant-pending span {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--text-subtle);
+    animation: assistant-pending-dot 1.2s ease-in-out infinite;
+  }
+
+  .assistant-pending span:nth-child(2) { animation-delay: 0.15s; }
+  .assistant-pending span:nth-child(3) { animation-delay: 0.3s; }
+
+  @keyframes assistant-pending-dot {
+    0%, 60%, 100% {
+      opacity: 0.25;
+      transform: translateY(0);
+    }
+    30% {
+      opacity: 1;
+      transform: translateY(-2px);
+    }
   }
 
   .process-summary-row {

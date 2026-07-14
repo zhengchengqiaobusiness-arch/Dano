@@ -325,6 +325,31 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
   return blocks;
 }
 
+function hasVisibleAssistantContent(message: TranscriptEntryLike): boolean {
+  if (message.role !== "assistant") return false;
+  return contentBlocks(message).some(block =>
+    block.kind !== "text" || Boolean(block.text.trim()),
+  );
+}
+
+export function shouldShowAssistantPending(
+  messages: readonly TranscriptEntryLike[],
+  isStreaming: boolean,
+): boolean {
+  if (!isStreaming) return false;
+
+  let lastUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index]?.role === "user") {
+      lastUserIndex = index;
+      break;
+    }
+  }
+  if (lastUserIndex < 0) return false;
+
+  return !messages.slice(lastUserIndex + 1).some(hasVisibleAssistantContent);
+}
+
 export function normalizeTranscript(
   messages: readonly TranscriptEntryLike[],
 ): TranscriptEntryLike[] {
