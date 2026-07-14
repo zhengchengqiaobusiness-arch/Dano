@@ -14,7 +14,6 @@ import {
   List,
   Modal,
   Row,
-  Select,
   Segmented,
   Space,
   Tabs,
@@ -24,7 +23,6 @@ import {
   message,
 } from "antd";
 import {
-  ApiOutlined,
   BranchesOutlined,
   DeleteOutlined,
   FileTextOutlined,
@@ -33,7 +31,6 @@ import {
   ReloadOutlined,
   RobotOutlined,
   SaveOutlined,
-  SettingOutlined,
   UpOutlined,
   DownOutlined,
 } from "@ant-design/icons";
@@ -131,7 +128,7 @@ interface FlowCapabilityRelationData {
 interface ReviewItemData {
   id: string; type: string; severity: string; title: string; reason: string;
   current_guess?: string; suggested_action?: string; resolved?: boolean; confidence?: number;
-  code?: string; ignorable?: boolean; ignore_reason?: string; ignored?: boolean;
+  code?: string;
   target?: { kind?: string; step_id?: string; path?: string; link_id?: string; [k: string]: any };
   llm_suggestions?: Array<{
     action: "bind_previous_response" | "set_runtime_source" | "ask_human";
@@ -210,11 +207,11 @@ interface FlowCheckReport {
   issue_groups?: Record<string, Array<{
     severity?: string; message?: string; source?: string; target?: Record<string, any>;
     audience?: "operator" | "internal"; actionable?: boolean; blocking?: boolean; auto_fixable?: boolean;
-    issue_id?: string; code?: string; contract_hash?: string; ignorable?: boolean; ignored?: boolean; ignore_reason?: string; ignored_by?: string;
+    issue_id?: string; code?: string;
   }>>;
 }
 interface FlowOperationReport {
-  operation?: "plan" | "repair" | "replan";
+  operation?: "plan" | "repair";
   changed?: boolean;
   changes?: Record<string, number>;
   summary?: string;
@@ -322,19 +319,6 @@ function paramExposedToCaller(p: FlowParam) {
 function paramRequiredFromCaller(p: FlowParam) {
   return !!p.required && paramExposedToCaller(p);
 }
-// 三类分类 × 各自允许的来源，避免出现"用户参数 + 固定值"这种语义不一致组合。
-const SOURCE_OPTIONS_BY_CATEGORY: Record<string, Array<{ label: string; value: string }>> = {
-  user_param: SOURCE_KIND_OPTIONS.filter((x) =>
-    ["user_input", "api_option" , "manual_enum", ].includes(x.value)
-  ),
-  // 运行期变量由执行环境注入；先允许保持“待配置”，不能静默写死成上游响应。
-  runtime_var: SOURCE_KIND_OPTIONS.filter((x) =>
-    ["unknown", "previous_response", "page_context", "current_user", "system_time", "system_generated", "computed", "request_header"].includes(x.value)
-  ),
-  system_const: SOURCE_KIND_OPTIONS.filter((x) =>
-    ["constant"].includes(x.value)
-  ),
-};
 const PARAM_TYPE_LABELS: Record<string, string> = {
   string: "文本",
   number: "数字",
@@ -364,13 +348,6 @@ const CAPABILITY_USAGE_OPTIONS: Array<{ label: string; value: CapabilityUsage }>
   { label: "事实核查", value: "fact_check" },
   { label: "前置检查", value: "preflight" },
 ];
-const STEP_ROLE_OPTIONS = [
-  "submit_anchor", "business_write", "business_get", "read_context", "read_option", "auth", "noise",
-].map((x) => ({ label: x, value: x }));
-const RISK_OPTIONS = ["L1", "L2", "L3", "L4"].map((x) => ({ label: x, value: x }));
-const CT_OPTIONS = ["application/json", "application/x-www-form-urlencoded", "multipart/form-data", "text/plain"]
-  .map((x) => ({ label: x, value: x }));
-
 function fallbackStepName(method: string, path: string) {
   const seg = (path || "").split("/").filter(Boolean).pop() || "default";
   return `${(method || "POST").toUpperCase()}_${seg}`;
@@ -456,7 +433,7 @@ function frameMetaFromMessage(message: any): RecorderFrameMeta {
 function domAnchorPart(value: unknown) {
   return String(value ?? "").replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "item";
 }
-function popupContainer(node?: HTMLElement) {
+function popupContainer(_node?: HTMLElement) {
   return document.body;
 }
 function optionLabel(options: Array<{ label: string; value: string }>, value: string) {
@@ -465,8 +442,8 @@ function optionLabel(options: Array<{ label: string; value: string }>, value: st
 function normalizeSourceKindForUi(sourceKind?: string | null) {
   return ENUM_SOURCE_KINDS.includes(sourceKind || "") ? "manual_enum" : (sourceKind || "");
 }
-function sourceOptionsForCategory(category?: string) {
-  return SOURCE_OPTIONS_BY_CATEGORY[category || "user_param"] || SOURCE_KIND_OPTIONS;
+function sourceOptionsForCategory(_category?: string) {
+  return SOURCE_KIND_OPTIONS;
 }
 function defaultSourceForCategory(category: string, current?: string) {
   const options = sourceOptionsForCategory(category);
@@ -523,13 +500,7 @@ function sourceNeedsConfiguration(sourceKind: string, source?: Record<string, an
   return false;
 }
 function sourceSelectOptionsForParam(p: FlowParam) {
-  const options = sourceOptionsForCategory(p.category);
-  const current = normalizeSourceKindForUi(p.source_kind);
-  if (!current || options.some((item) => item.value === current)) return options;
-  return [
-    { label: `${optionLabel(SOURCE_KIND_OPTIONS, current)}（与当前分类不一致）`, value: current },
-    ...options,
-  ];
+  return sourceOptionsForCategory(p.category);
 }
 function NativeSelect({
   value,
@@ -801,9 +772,6 @@ function leafPathValues(node: any, prefix = ""): Array<{ path: string; value: st
   if (prefix) out.push({ path: prefix, value: String(node) });
   return out;
 }
-function severityColor(sev?: string) {
-  return sev === "high" ? "error" : sev === "medium" ? "warning" : "default";
-}
 function requestGraphPath(req: RequestGraphEntry) {
   return (req.path || stripHost(req.url || "") || "").split("?", 1)[0];
 }
@@ -843,15 +811,6 @@ function richerRequestFact(candidate: RequestGraphEntry, current: RequestGraphEn
     if (candidateScore[idx] !== currentScore[idx]) return candidateScore[idx] > currentScore[idx];
   }
   return Number(candidate.sequence ?? candidate.request_index ?? 0) > Number(current.sequence ?? current.request_index ?? 0);
-}
-function requestDisplayPath(req: RequestGraphEntry) {
-  const base = req.path || stripHost(req.url || "");
-  if (String(base || "").includes("?") || !requestQueryFieldCount(req)) return base;
-  const query = new URLSearchParams();
-  Object.entries(requestQueryValues(req)).forEach(([key, value]) => {
-    (Array.isArray(value) ? value : [value]).forEach((item) => query.append(key, String(item ?? "")));
-  });
-  return `${base}?${query.toString()}`;
 }
 function isApiLikeRequest(req: RequestGraphEntry) {
   const path = (req.path || stripHost(req.url || "") || "").split("?", 1)[0].toLowerCase();
@@ -1022,15 +981,6 @@ function isCapturedRequestFieldCandidate(spec: FlowSpecData | null | undefined, 
 function isRequestInSteps(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
   return capturedRequestSteps(spec, req).length > 0;
 }
-function capturedRequestOptions(spec: FlowSpecData | null | undefined, opts: { includeIncluded?: boolean } = {}) {
-  return allCapturedRequests(spec)
-    .filter((req) => opts.includeIncluded || !isRequestInSteps(spec, req))
-    .map((req) => ({
-      label: `#${req.sequence ?? req.request_index ?? ""} ${req.method || "GET"} ${requestDisplayPath(req)}${(req.occurrence_count || 1) > 1 ? ` · ${req.occurrence_count} 次` : ""}`,
-      value: requestOptionValue(req),
-    }))
-    .filter((x) => x.value);
-}
 function confidencePercent(value?: number) {
   if (typeof value !== "number" || Number.isNaN(value) || value <= 0) return "待评估";
   return `${Math.round(value * 100)}%`;
@@ -1121,13 +1071,6 @@ function inferJsonSchema(value: any): Record<string, any> {
   if (typeof value === "boolean") return { type: "boolean" };
   return { type: "string" };
 }
-function compactJson(value: any, maxLen = 160) {
-  if (value == null) return "";
-  const rawValue = typeof value === "string" ? value : JSON.stringify(value);
-  const raw = rawValue == null ? "" : rawValue;
-  return raw.length > maxLen ? `${raw.slice(0, maxLen)}...` : raw;
-}
-
 export default function PageRecorder({ tenant, subsystem, baseUrl, storageState }: {
   tenant: string; subsystem: string; baseUrl: string; storageState: string;
 }) {
@@ -1197,10 +1140,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       setJsonDraft(JSON.stringify(flowSpec, null, 2));
     }
   }, [flowSpec]);
-  const [addingStep, setAddingStep] = useState(false);
-  const [newStep, setNewStep] = useState({ method: "POST", path: "/api/", name: "", risk_level: "L3", role: "business_write" });
-  const [newStepRequestKey, setNewStepRequestKey] = useState("");
-  const [newParamRequestKey, setNewParamRequestKey] = useState("");
   const [capabilityAddValue, setCapabilityAddValue] = useState<Record<number, string>>({});
   const [capabilityAddUsage, setCapabilityAddUsage] = useState<Record<number, CapabilityUsage | "">>({});
   const pendingCapabilityMembershipRef = useRef<Array<{
@@ -1208,7 +1147,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }>>([]);
   const [newParam, setNewParam] = useState({ step_id: "", path: "", key: "", type: "string", category: "user_param" });
   const [newLink, setNewLink] = useState({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
-  const [editingLink, setEditingLink] = useState<Record<string, FlowLinkData>>({});
   const [bindDraft, setBindDraft] = useState<Record<string, { source_step_id?: string; source_path?: string }>>({});
   const [jsonDraft, setJsonDraft] = useState("");
   const [jsonErr, setJsonErr] = useState("");
@@ -1224,7 +1162,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [expandedRequestPanels, setExpandedRequestPanels] = useState<string[]>([]);
   const [expandedCapabilityRelationKeys, setExpandedCapabilityRelationKeys] = useState<string[]>([]);
   const flowOperationRef = useRef<{
-    mode: "plan" | "repair" | "replan"; previousUpdatedAt?: string; operationId: string;
+    mode: "plan" | "repair"; previousUpdatedAt?: string; operationId: string;
   } | null>(null);
   const finalizeOperationRef = useRef<string | null>(null);
   const publishOperationRef = useRef<string | null>(null);
@@ -1510,7 +1448,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setFlowSpec(null);
     setCheckReport(null);
     setBindDraft({});
-    setEditingLink({});
     setCapabilityAddValue({});
     setCapabilityAddUsage({});
     pendingCapabilityMembershipRef.current = [];
@@ -2000,9 +1937,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       setPhase("recording");
     }
   }
-  function chooseRequest(idx: number) { setChosenIdx(idx); send({ type: "choose_request", idx }); }
-  function toggleField(path: string, on: boolean) { setPicked((p) => ({ ...p, [path]: { ...p[path], on } })); }
-  function renameField(path: string, name: string) { setPicked((p) => ({ ...p, [path]: { ...p[path], name } })); }
   function badAction(a: string) {
     if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(a)) { message.error("动作名请用英文标识"); return true; }
     return false;
@@ -2061,10 +1995,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     send({ type: "flow_replace", flow_spec: next });
   }
   function updateFlowField(k: string, v: any) { send({ type: "flow_update", edits: [{ op: "update_flow", field: k, value: v }] }); }
-  function updateStep(stepId: string, field: string, value: any) {
-    patchLocalStep(stepId, { [field]: value });
-    send({ type: "flow_update", edits: [{ op: "update", step_id: stepId, field, value }] });
-  }
   function paramDraftKey(stepId: string, p: FlowParam) {
     return `${stepId}:${p.path || ""}:${p.key || ""}:${p.label || ""}`;
   }
@@ -2124,19 +2054,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     flowSpecRef.current = next;
     setFlowSpec(next);
     setCheckReport(null);
-  }
-  function targetParamEdit(stepId: string, target: Record<string, any>, field: string, value: any) {
-    const path = target.path || target.target_path || target.param_path || "";
-    const key = target.key || target.param_name || target.current_guess || "";
-    return {
-      op: "update",
-      step_id: stepId,
-      param_path: path || key,
-      param_key: key,
-      param_label: target.label || key,
-      field,
-      value,
-    };
   }
   function paramMatches(a: FlowParam, b: FlowParam) {
     const ap = stripBodyPrefix(a.path || "");
@@ -2223,122 +2140,29 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function updateParamType(step: FlowStepData, p: FlowParam, value: string) {
     const currentStep = flowSpecRef.current?.steps.find((item) => item.step_id === step.step_id) || step;
     const currentParam = currentStep.params.find((item) => paramMatches(item, p)) || p;
-    const wasEnum = currentParam.type === "enum" || currentParam.type === "list-enum";
-    const isEnum = value === "enum" || value === "list-enum";
-    if (!wasEnum || isEnum) {
-      patchLocalParam(step.step_id, currentParam, { type: value });
-      send({ type: "flow_update", edits: [paramEdit(step.step_id, currentParam, "type", value)] });
-      return;
-    }
-
-    const enumSource = ["api_option", "manual_enum", "page_enum", "form_option", "static_enum"]
-      .includes(currentParam.source_kind || "");
-    const sourceKind = enumSource
-      ? defaultSourceForCategory(currentParam.category || "user_param")
-      : (currentParam.source_kind || "unknown");
-    const source = enumSource ? sourceDescriptor(sourceKind, currentParam) : currentParam.source;
-    const nextSelects = (currentStep.selects || []).filter((sel) =>
-      !(sel.path === currentParam.path || (!sel.path && sel.param === currentParam.key) || sel.param === currentParam.key)
-    );
-    const updates: Record<string, any> = {
-      type: value,
-      enum_options: null,
-      enum_value_map: null,
-      ...(enumSource ? {
-        source_kind: sourceKind,
-        source,
-        need_human_confirm: sourceNeedsConfiguration(sourceKind, source as any),
-      } : {}),
-    };
-    patchLocalParam(step.step_id, currentParam, updates);
-    patchLocalStep(step.step_id, { selects: nextSelects });
-    const edits: any[] = [
-      paramEdit(step.step_id, currentParam, "type", value),
-      paramEdit(step.step_id, currentParam, "enum_options", null),
-      paramEdit(step.step_id, currentParam, "enum_value_map", null),
-      { op: "update", step_id: step.step_id, field: "selects", value: nextSelects },
-    ];
-    if (enumSource) {
-      edits.push(
-        paramEdit(step.step_id, currentParam, "source_kind", sourceKind),
-        paramEdit(step.step_id, currentParam, "source", source),
-        paramEdit(step.step_id, currentParam, "need_human_confirm", sourceNeedsConfiguration(sourceKind, source as any)),
-      );
-    }
-    send({ type: "flow_update", edits });
+    patchLocalParam(step.step_id, currentParam, { type: value });
+    send({ type: "flow_update", edits: [paramEdit(step.step_id, currentParam, "type", value)] });
   }
   function updateParamCategory(stepId: string, p: FlowParam, category: string) {
-    const currentSourceKind = normalizeSourceKindForUi(p.source_kind);
-    const allowed = sourceOptionsForCategory(category).some((o) => o.value === currentSourceKind);
-    const sourceKind = allowed ? currentSourceKind : defaultSourceForCategory(category);
-    const keepExistingSource = allowed && !!p.source && (
-      sourceKind !== "previous_response"
-      || !!((p.source as any)?.step_id || (p.source as any)?.response_path)
-    );
-    const source = keepExistingSource ? p.source : sourceDescriptor(sourceKind, p, p.source as any);
-    const patch: Record<string, any> = {
-      category,
-      source_kind: sourceKind,
-      source,
-      exposed_to_user: category === "user_param",
-      need_human_confirm: sourceNeedsConfiguration(sourceKind, source as any),
-    };
-    patchLocalParams(stepId, p, patch);
-    const edits: any[] = (category === "runtime_var" ? [] : ((flowSpecRef.current || flowSpec)?.links || []))
-      .filter((l) => l.target_step_id === stepId && stripBodyPrefix(l.target_path) === stripBodyPrefix(p.path))
-      .map((l) => ({ op: "remove", link_id: l.link_id, record_rejection: true }));
-    edits.push(
-      paramEdit(stepId, p, "category", category),
-      paramEdit(stepId, p, "source_kind", sourceKind),
-      paramEdit(stepId, p, "source", source),
-      paramEdit(stepId, p, "exposed_to_user", category === "user_param"),
-      paramEdit(stepId, p, "need_human_confirm", sourceNeedsConfiguration(sourceKind, source as any)),
-    );
-    send({ type: "flow_update", edits });
+    patchLocalParams(stepId, p, { category });
+    send({ type: "flow_update", edits: [paramEdit(stepId, p, "category", category)] });
   }
   function updateParamSourceKind(stepId: string, p: FlowParam, sourceKind: string) {
-    const category = p.category || "user_param";
     const currentSource = p.source as any;
     const nextSource = sourceDescriptor(sourceKind, p, currentSource);
     const needsConfiguration = sourceNeedsConfiguration(sourceKind, nextSource);
-    // 只有离开“上游响应”时才移除原依赖；重新选择上游响应不能先把现有绑定删掉。
-    const edits: any[] = sourceKind === "previous_response" ? [] : ((flowSpecRef.current || flowSpec)?.links || [])
-      .filter((l) => l.target_step_id === stepId && stripBodyPrefix(l.target_path) === stripBodyPrefix(p.path))
-      .map((l) => ({ op: "remove", link_id: l.link_id, reset_target: false }));
-    const currentStep = (flowSpecRef.current || flowSpec)?.steps.find((step) => step.step_id === stepId);
-    const switchingToPlainInput = sourceKind === "user_input" && OPTION_SOURCE_KINDS.includes(p.source_kind || "");
-    const nextSelects = switchingToPlainInput
-      ? (currentStep?.selects || []).filter((sel) =>
-        !(sel.path === p.path || sel.id_path === p.path || (!sel.path && sel.param === p.key) || sel.param === p.key))
-      : currentStep?.selects;
-    edits.push(
+    const edits: any[] = [
       paramEdit(stepId, p, "source_kind", sourceKind),
       paramEdit(stepId, p, "source", nextSource),
-      paramEdit(stepId, p, "exposed_to_user", category === "user_param"),
       paramEdit(stepId, p, "need_human_confirm", needsConfiguration),
       paramEdit(stepId, p, "editable", true),
-    );
-    if (switchingToPlainInput) {
-      edits.push(
-        paramEdit(stepId, p, "enum_options", null),
-        paramEdit(stepId, p, "enum_value_map", null),
-        ...(p.type === "enum" || p.type === "list-enum" ? [paramEdit(stepId, p, "type", "string")] : []),
-        { op: "update", step_id: stepId, field: "selects", value: nextSelects || [] },
-      );
-    }
+    ];
     patchLocalParams(stepId, p, {
       source_kind: sourceKind,
       source: nextSource,
-      exposed_to_user: category === "user_param",
       need_human_confirm: needsConfiguration,
       editable: true,
-      ...(switchingToPlainInput ? {
-        enum_options: null,
-        enum_value_map: null,
-        ...(p.type === "enum" || p.type === "list-enum" ? { type: "string" } : {}),
-      } : {}),
     });
-    if (switchingToPlainInput && currentStep) patchLocalStep(stepId, { selects: nextSelects || [] });
     send({ type: "flow_update", edits });
     if (sourceKind === "previous_response") {
       const key = paramDraftKey(stepId, p);
@@ -2357,229 +2181,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       paramEdit(stepId, p, "source", source),
       paramEdit(stepId, p, "need_human_confirm", needsConfiguration),
     ] });
-  }
-  function moveStep(idx: number, dir: -1 | 1) {
-    const current = flowSpecRef.current;
-    if (!current) return;
-    const ids = current.steps.map((s) => s.step_id);
-    const j = idx + dir;
-    if (j < 0 || j >= ids.length) return;
-    [ids[idx], ids[j]] = [ids[j], ids[idx]];
-    const byId = Object.fromEntries(current.steps.map((step) => [step.step_id, step]));
-    const next = { ...current, steps: ids.map((id) => byId[id]) };
-    flowSpecRef.current = next;
-    setFlowSpec(next);
-    send({ type: "flow_update", edits: [{ op: "reorder_steps", step_ids: ids }] });
-  }
-  function removeStepWithConfirm(step: FlowStepData) {
-    if (!flowSpec) return;
-    const links = flowSpec.links.filter((l) => l.source_step_id === step.step_id || l.target_step_id === step.step_id);
-    Modal.confirm({
-      title: `删除步骤 ${step.name || step.path}?`,
-      content: links.length ? `该步骤关联 ${links.length} 条依赖，删除后会一并清理。` : "确认删除该步骤？",
-      okText: "删除", okType: "danger", cancelText: "取消",
-      onOk: () => {
-        const ok = send({ type: "flow_update", edits: [{ op: "remove_step", step_id: step.step_id }] });
-        if (!ok) return;
-        const cur = flowSpecRef.current;
-        if (cur) {
-          const next = {
-            ...cur,
-            steps: cur.steps.filter((s) => s.step_id !== step.step_id),
-            links: cur.links.filter((l) => l.source_step_id !== step.step_id && l.target_step_id !== step.step_id),
-            capabilities: (cur.capabilities || []).map((cap) => {
-              if (!capabilityActualStepIds(cap).includes(step.step_id)) return cap;
-              return {
-                ...cap,
-                step_ids: (cap.step_ids || []).filter((stepId) => stepId !== step.step_id),
-                confirmed: false,
-              };
-            }),
-          };
-          flowSpecRef.current = next;
-          setFlowSpec(next);
-        }
-        message.success("已删除步骤，正在同步校验");
-      },
-    });
-  }
-  function resolveReview(reviewId: string, resolved = true) {
-    send({ type: "flow_update", edits: [{ op: "resolve_review", review_id: reviewId, resolved }] });
-  }
-  function reviewCanIgnore(item: ReviewItemData) {
-    // Review items are generated suggestions. The operator always keeps the
-    // final say and can either edit the contract manually or dismiss a guess.
-    return !!item;
-  }
-  function reviewIgnoreReason(item: ReviewItemData) {
-    return item.ignore_reason || "仅隐藏这条生成建议，不改变字段或接口配置";
-  }
-  function reviewSuggestionEdits(item: ReviewItemData) {
-    const action = item.suggested_action || "";
-    const tgt = item.target || {};
-    const guess = item.current_guess || "";
-    const edits: any[] = [];
-    if (action === "confirm_link" && tgt.link_id) {
-      edits.push({ op: "update", link_id: tgt.link_id, field: "confirmed", value: true });
-    } else if ((action === "fix_or_remove_link" || action === "fix_link_source" || action === "fix_link_target") && tgt.link_id) {
-      edits.push({ op: "remove", link_id: tgt.link_id });
-    } else if (action === "confirm_request_role" && tgt.step_id) {
-      edits.push({ op: "update", step_id: tgt.step_id, field: "role", value: guess || "business_write" });
-    } else if (action === "hide_system_const" && tgt.step_id && tgt.path) {
-      edits.push(
-        targetParamEdit(tgt.step_id, tgt, "category", "system_const"),
-        targetParamEdit(tgt.step_id, tgt, "exposed_to_user", false),
-        { op: "resolve_review", review_id: item.id, resolved: true },
-      );
-    } else if (tgt.step_id && tgt.path && (action === "confirm_field_source" || action === "bind_runtime_source")) {
-      const [cat, sourceKind] = guess.split("/");
-      edits.push(
-        targetParamEdit(tgt.step_id, tgt, "category", cat || "runtime_var"),
-        ...(sourceKind ? [targetParamEdit(tgt.step_id, tgt, "source_kind", sourceKind)] : []),
-        targetParamEdit(tgt.step_id, tgt, "need_human_confirm", false),
-      );
-    } else {
-      edits.push({ op: "resolve_review", review_id: item.id, resolved: true });
-    }
-    if (!edits.some((e) => e.op === "resolve_review" && e.review_id === item.id)) {
-      edits.push({ op: "resolve_review", review_id: item.id, resolved: true });
-    }
-    return edits;
-  }
-  function applyReviewSuggestion(item: ReviewItemData) {
-    if (!flowSpec) return;
-    const edits = reviewSuggestionEdits(item);
-    send({ type: "flow_update", edits });
-  }
-  function applyLlmSuggestion(item: ReviewItemData, suggestion: NonNullable<ReviewItemData["llm_suggestions"]>[number]) {
-    if (!flowSpec) return;
-    const tgt = item.target || {};
-    const targetStepId = suggestion.target_step_id || tgt.step_id;
-    const targetPath = suggestion.target_path || tgt.path;
-    if (!targetStepId || !targetPath) return;
-    const edits: any[] = [];
-    if (suggestion.action === "bind_previous_response" && suggestion.source_step_id && suggestion.source_path) {
-      edits.push({
-        op: "add",
-        step_id: suggestion.source_step_id,
-        link: {
-          source_step_id: suggestion.source_step_id,
-          source_path: suggestion.source_path,
-          target_step_id: targetStepId,
-          target_path: targetPath,
-          confirmed: true,
-          ...(typeof suggestion.confidence === "number" ? { confidence: suggestion.confidence } : {}),
-          reason: suggestion.reason || "LLM 推荐并由用户确认的上游响应依赖",
-        },
-      });
-    } else if (suggestion.action === "set_runtime_source" && suggestion.source_kind) {
-      if (suggestion.source_kind === "request_header" || suggestion.source_kind === "unknown") {
-        message.warning("该建议仍缺少可执行来源，请在能力卡片内补充");
-        setActiveFlowTab("abilities");
-        return;
-      }
-      const target = { ...tgt, path: targetPath };
-      edits.push(
-        targetParamEdit(targetStepId, target, "category", "runtime_var"),
-        targetParamEdit(targetStepId, target, "source_kind", suggestion.source_kind),
-        targetParamEdit(targetStepId, target, "source", { kind: suggestion.source_kind, path: targetPath }),
-        targetParamEdit(targetStepId, target, "need_human_confirm", false),
-      );
-    } else {
-      message.info("该项仍需要人工判断，请在能力卡片内确认");
-      setActiveFlowTab("abilities");
-      return;
-    }
-    edits.push({ op: "resolve_review", review_id: item.id, resolved: true });
-    send({ type: "flow_update", edits });
-  }
-  function refreshLlmRecommendations() {
-    if (!flowSpec) return;
-    autoFixFlow();
-  }
-  function requiresManualSourceBinding(item: ReviewItemData) {
-    return item.suggested_action === "bind_runtime_source" && /\/unknown$/.test(item.current_guess || "");
-  }
-  function bulkReview(mode: "accept" | "ignore") {
-    if (!flowSpec || !reviewItems.length) return;
-    const title = mode === "accept" ? "全部采纳当前判断？" : "全部忽略待确认项？";
-    const content = mode === "accept"
-      ? "会按系统当前判断批量确认字段分类、接口保留和依赖关系。建议先确认没有高风险项。"
-      : "这些内容都是生成建议。全部忽略不会改动 FlowSpec，你仍可在能力卡片中手动修改。";
-    Modal.confirm({
-      title,
-      content,
-      okText: mode === "accept" ? "全部采纳" : "全部忽略",
-      cancelText: "取消",
-      onOk: () => {
-        const rawEdits = mode === "accept"
-          ? reviewItems.filter((item) => !requiresManualSourceBinding(item)).flatMap((item) => reviewSuggestionEdits(item))
-          : reviewItems.map((item) => ({ op: "resolve_review", review_id: item.id, resolved: true }));
-        if (mode === "accept" && !rawEdits.length) {
-          message.warning("当前高风险项需要先在能力卡片内手动绑定来源");
-          setActiveFlowTab("abilities");
-          return;
-        }
-        const seen = new Set<string>();
-        const edits = rawEdits.filter((edit) => {
-          const key = JSON.stringify(edit);
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        });
-        if (edits.length) send({ type: "flow_update", edits });
-      },
-    });
-  }
-  function addStep() {
-    if (!flowSpec) return;
-    if (newStepRequestKey) {
-      const req = findCapturedRequest(flowSpec, newStepRequestKey);
-      if (!req) { message.warning("没有找到选中的捕获接口"); return; }
-      send({ type: "flow_update", edits: [{ op: "add_request_step", request_index: req.request_index, request_id: req.request_id }] });
-      setAddingStep(false);
-      setNewStepRequestKey("");
-      return;
-    }
-    const draft = { ...newStep, path: newStep.path.trim(), name: newStep.name.trim() };
-    if (!draft.path || !draft.path.startsWith("/")) { message.warning("接口 path 需要以 / 开头"); return; }
-    const step: FlowStepData = {
-      step_id: "new_" + Math.random().toString(36).slice(2, 10),
-      name: draft.name || fallbackStepName(draft.method, draft.path),
-      method: draft.method, url: draft.path, path: draft.path, risk_level: draft.risk_level,
-      params: [], selects: [], identity: [], source_meta: { role: draft.role, manual: true },
-      sample_inputs: {}, headers: {}, body_source: "",
-    };
-    sendReplace({ ...flowSpec, steps: [...flowSpec.steps, step] });
-    setAddingStep(false);
-    setNewStep({ method: "POST", path: "/api/", name: "", risk_level: "L3", role: "business_write" });
-    setNewStepRequestKey("");
-  }
-  function addCapturedRequestToFields(req?: RequestGraphEntry) {
-    if (!req) { message.warning("请选择捕获接口"); return; }
-    send({ type: "flow_update", edits: [{ op: "add_request_step", request_index: req.request_index, request_id: req.request_id }] });
-    setNewParamRequestKey("");
-    setNewStepRequestKey("");
-    setActiveFlowTab("abilities");
-  }
-  function addParam() {
-    const stepId = newParam.step_id || flowSpec?.steps?.[0]?.step_id || "";
-    const path = newParam.path.trim();
-    const key = newParam.key.trim();
-    if (!stepId || !path || !key) { message.warning("请选择步骤并填写字段路径和参数名"); return; }
-    const isEnum = newParam.type === "enum" || newParam.type === "list-enum";
-    const sourceKind = defaultSourceForCategory(newParam.category);
-    send({ type: "flow_update", edits: [{
-      op: "add", step_id: stepId, param: {
-        path, key, label: key, value: "", type: newParam.type, required: false,
-        category: newParam.category, source_kind: sourceKind,
-        source: sourceKind === "unknown" ? {} : { kind: sourceKind, path, manual: true },
-        enum_options: isEnum ? [] : undefined,
-        exposed_to_user: newParam.category === "user_param", editable: true,
-        reason: "人工新增字段", need_human_confirm: false,
-      },
-    }] });
-    setNewParam({ step_id: stepId, path: "", key: "", type: "string", category: "user_param" });
   }
   function addLink() {
     const { source_step_id, source_path, target_step_id, target_path } = newLink;
@@ -2607,22 +2208,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       },
     });
     send({ type: "flow_update", edits });
-  }
-  function startEditLink(link: FlowLinkData) { setEditingLink((s) => ({ ...s, [link.link_id]: { ...link } })); }
-  function cancelEditLink(linkId: string) { setEditingLink((s) => { const c = { ...s }; delete c[linkId]; return c; }); }
-  function saveLinkEdits(linkId: string) {
-    if (!flowSpec) return;
-    const edited = editingLink[linkId];
-    if (!edited) return;
-    const edits = [
-      { op: "update", link_id: linkId, field: "source_step_id", value: edited.source_step_id },
-      { op: "update", link_id: linkId, field: "source_path", value: edited.source_path },
-      { op: "update", link_id: linkId, field: "target_step_id", value: edited.target_step_id },
-      { op: "update", link_id: linkId, field: "target_path", value: edited.target_path },
-      { op: "update", link_id: linkId, field: "confirmed", value: !!edited.confirmed },
-    ];
-    send({ type: "flow_update", edits });
-    cancelEditLink(linkId);
   }
   function orchestrateFlow() {
     if (!flowSpecRef.current || flowOperationRef.current) return;
@@ -2808,27 +2393,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     try { sendReplace(JSON.parse(lastServerJson)); } catch { /* ignore */ }
   }
 
-  const reviewItems = useMemo(() => {
-    const list = (checkReport?.review_items?.length ? checkReport.review_items : flowSpec?.review_items) || [];
-    const capStepIds = new Set<string>();
-    for (const cap of (flowSpec?.capabilities || [])) {
-      for (const sid of capabilityActualStepIds(cap)) capStepIds.add(sid);
-    }
-    return list
-      .filter((i) => !i.resolved && i.severity === "high")
-      .filter((i) => {
-        const t = i.target || {};
-        const k = t.kind;
-        if (k === "flow" || k === "capability" || k === "request_role" || k === undefined) return true;
-        const sid = t.step_id || t.target_step_id || t.source_step_id;
-        if (!sid) return true;
-        return capStepIds.has(sid);
-      });
-  }, [checkReport, flowSpec]);
-  const stepOptions = useMemo(() => (flowSpec?.steps || []).map((s) => ({
-    label: `${s.name || fallbackStepName(s.method, s.path)} · ${s.method} ${s.path || stripHost(s.url)}`,
-    value: s.step_id,
-  })), [flowSpec]);
   const stepById = useMemo(() => Object.fromEntries((flowSpec?.steps || []).map((s) => [s.step_id, s])), [flowSpec]);
   function stepBrief(stepId?: string) {
     const st = stepId ? stepById[stepId] : undefined;
@@ -2848,7 +2412,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     type OperatorIssue = {
       message: string; severity: string; source?: string; target?: Record<string, any>;
       audience?: "operator" | "internal"; actionable?: boolean; blocking?: boolean; auto_fixable?: boolean;
-      issue_id?: string; code?: string; contract_hash?: string; ignorable?: boolean; ignored?: boolean; ignore_reason?: string; ignored_by?: string;
+      issue_id?: string; code?: string;
     };
     const isOperatorIssue = (item: OperatorIssue) => {
       if (item.audience) return item.audience === "operator" && item.actionable !== false;
@@ -2876,11 +2440,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         auto_fixable: item.auto_fixable,
         issue_id: item.issue_id,
         code: item.code,
-        contract_hash: item.contract_hash,
-        ignorable: item.ignorable,
-        ignored: item.ignored,
-        ignore_reason: item.ignore_reason,
-        ignored_by: item.ignored_by,
       })).filter(isOperatorIssue);
     }
     if (!Object.keys(by).length) {
@@ -2993,60 +2552,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       );
     };
     window.setTimeout(() => focusAnchor(), 180);
-  }
-  function ignorePublishIssue(item: { issue_id?: string; ignorable?: boolean; ignore_reason?: string; message: string }) {
-    if (!item.issue_id) {
-      message.warning("该旧版错误没有稳定 issue_id，请重新校验后再忽略");
-      return;
-    }
-    if (!item.ignorable) {
-      message.warning(item.ignore_reason || "该问题会导致请求不可执行或产生错误数据，不能安全忽略");
-      return;
-    }
-    let reason = "";
-    Modal.confirm({
-      title: "忽略这条发布问题？",
-      content: (
-        <Space direction="vertical" size={8} style={{ width: "100%" }}>
-          <Typography.Text>{item.message}</Typography.Text>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            忽略只适用于已有可执行兜底的启发式告警；字段合同变化后会自动失效。
-          </Typography.Text>
-          <Input.TextArea rows={3} placeholder="必填：说明为什么当前业务场景可以忽略" onChange={(e) => { reason = e.target.value; }} />
-        </Space>
-      ),
-      okText: "确认忽略",
-      cancelText: "取消",
-      onOk: () => {
-        if (!reason.trim()) {
-          message.warning("请填写忽略原因");
-          return Promise.reject(new Error("ignore reason required"));
-        }
-        send({ type: "flow_update", edits: [{ op: "ignore_publish_issue", issue_id: item.issue_id, reason: reason.trim(), actor: "operator" }] });
-      },
-    });
-  }
-  function unignorePublishIssue(item: { issue_id?: string }) {
-    if (!item.issue_id) {
-      message.warning("该旧版错误没有稳定 issue_id，请重新校验后再恢复");
-      return;
-    }
-    send({ type: "flow_update", edits: [{ op: "unignore_publish_issue", issue_id: item.issue_id }] });
-  }
-  function renderPublishIssue(item: ReviewItemData) {
-    const tgt = item.target || {};
-    const sourceStep = tgt.source_step_id ? stepBrief(tgt.source_step_id) : "";
-    const targetStep = tgt.target_step_id || tgt.step_id ? stepBrief(tgt.target_step_id || tgt.step_id) : "";
-    const fieldPath = tgt.target_path || tgt.path || "";
-    return (
-      <Space key={item.id} wrap size={4}>
-        <Tag color={severityColor(item.severity)}>{item.type}</Tag>
-        {targetStep && <Tag>接口 {targetStep}</Tag>}
-        {fieldPath && <Tag>字段 {fieldPath}</Tag>}
-        {sourceStep && <Tag>来源 {sourceStep}{tgt.source_path ? ` / ${tgt.source_path}` : ""}</Tag>}
-        <Typography.Text type="danger" style={{ fontSize: 12 }}>{item.title}</Typography.Text>
-      </Space>
-    );
   }
   function sourcePathOptions(stepId?: string) {
     const st = stepId ? stepById[stepId] : undefined;
@@ -3189,12 +2694,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (Object.keys(paramUpdates).length) patchLocalParam(step.step_id, p, paramUpdates);
     send({ type: "flow_update", edits: [...edits, ...extraEdits] });
   }
-  function normalizeEnumOption(x: any): string {
-    if (x == null) return "";
-    if (typeof x === "string") return x;
-    if (typeof x === "object" && typeof x.label === "string") return x.label;
-    return String(x);
-  }
   function enumOptionRecord(x: any): { label: string; value?: any } | null {
     if (x == null) return null;
     if (typeof x === "object") {
@@ -3293,7 +2792,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const capabilities = flowSpec.capabilities || [];
     const capturedTotal = allCapturedRequests(flowSpec).length;
     const publishIssueGroups = groupedPublishIssues(checkReport);
-    const hasPublishAdvice = publishIssueGroups.some((group) => group.items.some((item) => !item.ignored));
+    const hasPublishAdvice = publishIssueGroups.some((group) => group.items.length > 0);
     return (
       <Card style={{ marginTop: 16 }} styles={{ body: { paddingTop: 8 } }}>
         {checkReport && capabilities.length > 0 && (
@@ -3357,24 +2856,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                       <Space direction="vertical" size={2}>
                         {group.items.map((item, issueIdx) => (
                           <Space key={item.issue_id || `${group.key}-${issueIdx}`} wrap size={4}>
-                            {item.ignored && <Tag color="default">已忽略</Tag>}
                             {publishIssueTargetLabel(item.target) && <Tag>{publishIssueTargetLabel(item.target)}</Tag>}
-                            <Typography.Text delete={!!item.ignored} type={item.ignored || item.severity === "warning" ? "secondary" : "danger"} style={{ fontSize: 12 }}>
+                            <Typography.Text type={item.severity === "warning" ? "secondary" : "danger"} style={{ fontSize: 12 }}>
                               {item.message}
                             </Typography.Text>
-                            {item.target && <Button type="link" size="small" onClick={() => locatePublishIssue(item.target)}>定位</Button>}
-                            {item.ignored ? (
-                              <Button type="link" size="small" onClick={() => unignorePublishIssue(item)}>恢复</Button>
-                            ) : item.ignorable ? (
-                              <Button type="link" size="small" onClick={() => ignorePublishIssue(item)}>忽略</Button>
-                            ) : item.issue_id ? (
-                              <Tooltip title={item.ignore_reason || "该问题会影响请求可执行性，必须修改后才能发布"}>
-                                <Button type="link" size="small" disabled>不可忽略</Button>
-                              </Tooltip>
-                            ) : null}
-                            {item.ignored && item.ignore_reason && <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                              原因：{item.ignore_reason}{item.ignored_by ? `（${item.ignored_by}）` : ""}
-                            </Typography.Text>}
+                            {item.target && Object.keys(item.target).length > 0 && (
+                              <Button type="link" size="small" onClick={() => locatePublishIssue(item.target)}>定位</Button>
+                            )}
                           </Space>
                         ))}
                       </Space>
@@ -3511,7 +2999,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function renderParamEditorInCapability(
     step: FlowStepData,
     p: FlowParam,
-    scopedStepIds: Set<string>,
     paramIndex: number,
   ) {
     const bindKey = paramDraftKey(step.step_id, p);
@@ -3828,16 +3315,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       </Card>
     );
   }
-  function renderStepFieldsInCapability(step: FlowStepData, scopedStepIds: Set<string>) {
+  function renderStepFieldsInCapability(step: FlowStepData) {
     return (
       <Space direction="vertical" size={10} style={{ width: "100%" }}>
         {renderAddFieldForStep(step)}
         {(step.params || []).length ? (
           <List
             size="small"
-            rowKey={(_p, index) => `${step.step_id}:param:${index}`}
+            rowKey={(p) => `${step.step_id}:param:${p.path}:${p.key}`}
             dataSource={step.params || []}
-            renderItem={(p, index) => renderParamEditorInCapability(step, p, scopedStepIds, index)}
+            renderItem={(p, index) => renderParamEditorInCapability(step, p, index)}
           />
         ) : (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="这个接口没有请求入参" />
@@ -3848,7 +3335,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function renderCapabilityStepWithFields(cap: FlowCapabilityData, capIdx: number, stepId: string, stepIdx: number) {
     const stepIds = capabilityActualStepIds(cap);
-    const scopedStepIds = new Set(stepIds);
     const st = stepById[stepId];
     const requestRef = capabilityRequestRefForStep(cap, stepId);
     if (!st) {
@@ -3880,7 +3366,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           </Space>
         }
       >
-        {renderStepFieldsInCapability(st, scopedStepIds)}
+        {renderStepFieldsInCapability(st)}
       </Collapse.Panel>
     );
   }
@@ -4235,781 +3721,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       </Space>
     );
   }
-  function renderCapabilitiesPanel() {
-    if (!flowSpec) return null;
-    const capabilities = flowSpec.capabilities || [];
-    if (!capabilities.length) {
-      return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有业务能力编排" />;
-    }
-    const schemaBlock = (title: string, schema?: Record<string, any>, emptyText = "未声明") => {
-      const rows = schemaFieldRows(schema);
-      const fallback = rows.length ? "" : compactJson(schema);
-      return (
-        <div style={{ minWidth: 220 }}>
-          <Typography.Text strong style={{ fontSize: 12 }}>{title}</Typography.Text>
-          <Space direction="vertical" size={4} style={{ width: "100%", marginTop: 6 }}>
-            {rows.slice(0, 8).map((row) => (
-              <Space key={`${title}-${row.name}`} size={4} wrap>
-                <Typography.Text code style={{ fontSize: 12 }}>{row.name}</Typography.Text>
-                <Tag color="blue">业务类型：{PARAM_TYPE_LABELS[row.businessType] || row.businessType}</Tag>
-                <Tag>Wire：{row.wireType}</Tag>
-                {row.required && <Tag color="red">必填</Tag>}
-                {row.description && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{row.description}</Typography.Text>}
-              </Space>
-            ))}
-            {rows.length > 8 && <Typography.Text type="secondary" style={{ fontSize: 12 }}>+{rows.length - 8} 个字段</Typography.Text>}
-            {!rows.length && fallback && <Typography.Text code style={{ fontSize: 12 }}>{fallback}</Typography.Text>}
-            {!rows.length && !fallback && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{emptyText}</Typography.Text>}
-          </Space>
-        </div>
-      );
-    };
-    return (
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <Alert
-          type="info"
-          showIcon
-          message="业务能力编排"
-          description="这里展示外部调用方看到的能力层；接口、字段、依赖和输入输出都应在能力卡片内维护。"
-        />
-        <List
-          dataSource={capabilities}
-          renderItem={(cap, idx) => {
-            const stepIds = capabilityActualStepIds(cap);
-            const mappings = cap.output_mapping || [];
-            const preconditions = cap.preconditions || [];
-            const capSteps = stepIds.map((stepId) => stepById[stepId]).filter(Boolean);
-            const capParams = capSteps.flatMap((step) => step.params || []);
-            const derivedInputSchema = {
-              type: "object",
-              properties: Object.fromEntries(capParams
-                .filter(paramExposedToCaller)
-                .map((param) => [param.key || param.path, jsonSchemaForParam(param)])),
-              required: capParams
-                .filter(paramRequiredFromCaller)
-                .map((param) => param.key || param.path),
-            };
-            const lastResponse = [...capSteps].reverse().find((step) => step.response_json != null)?.response_json;
-            const inputSchema = Object.keys(cap.input_schema?.properties || {}).length
-              ? cap.input_schema
-              : derivedInputSchema;
-            const outputSchema = Object.keys(cap.output_schema?.properties || {}).length
-              ? cap.output_schema
-              : (lastResponse != null ? inferJsonSchema(lastResponse) : {});
-            return (
-              <List.Item
-                style={{ paddingLeft: 0, paddingRight: 0 }}
-                actions={[
-                  <Checkbox
-                    key="confirmed"
-                    checked={!!cap.confirmed}
-                    onChange={(e) => updateCapabilityConfirmed(idx, e.target.checked)}
-                  >
-                    采纳当前定义
-                  </Checkbox>,
-                ]}
-              >
-                <div style={{ width: "100%", border: "1px solid #f0f0f0", borderRadius: 6, padding: 12, background: "#fff" }}>
-                  <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                    <Row gutter={[12, 8]} align="top">
-                      <Col flex="auto">
-                        <Space wrap size={6}>
-                          <Tag color={cap.confirmed ? "success" : "default"}>{cap.confirmed ? "已采纳" : "模型建议"}</Tag>
-                          {cap.kind && <Tag color="blue">{cap.kind}</Tag>}
-                          <Tag color={confidenceColor(cap.confidence)}>置信度 {confidencePercent(cap.confidence)}</Tag>
-                          <Typography.Text strong>{cap.title || cap.name || `能力 ${idx + 1}`}</Typography.Text>
-                          {cap.name && <Typography.Text code>{cap.name}</Typography.Text>}
-                        </Space>
-                        {cap.intent && <Typography.Text type="secondary" style={{ display: "block", marginTop: 6, fontSize: 12 }}>{cap.intent}</Typography.Text>}
-                      </Col>
-                    </Row>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
-                      {schemaBlock("输入", inputSchema, "未声明输入")}
-                      {schemaBlock("输出", outputSchema, "未声明输出")}
-                      <div>
-                        <Typography.Text strong style={{ fontSize: 12 }}>步骤</Typography.Text>
-                        <Space direction="vertical" size={4} style={{ width: "100%", marginTop: 6 }}>
-                          {stepIds.length ? stepIds.map((stepId) => {
-                            const st = stepById[stepId];
-                            const requestRef = capabilityRequestRefForStep(cap, stepId);
-                            return (
-                              <Space key={stepId} size={4} wrap>
-                                <Tag>{st?.name || st?.path || stepId}</Tag>
-                                {st && <PathText value={st.path || stripHost(st.url)} maxWidth={260} />}
-                                <Tag color="blue">用途：{capabilityUsageLabel(requestRef?.usage)}</Tag>
-                                {requestRef?.pinned && <Tag color="gold">手工锁定</Tag>}
-                              </Space>
-                            );
-                          }) : <Typography.Text type="secondary" style={{ fontSize: 12 }}>未绑定步骤</Typography.Text>}
-                        </Space>
-                      </div>
-                    </div>
-                    {(mappings.length > 0 || preconditions.length > 0) && (
-                      <Collapse ghost size="small">
-                        {mappings.length > 0 && (
-                          <Collapse.Panel key="mapping" header={`输出映射 ${mappings.length}`}>
-                            <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                              {mappings.map((item, mapIdx) => (
-                                <Typography.Text key={mapIdx} code style={{ fontSize: 12 }}>{compactJson(item, 240)}</Typography.Text>
-                              ))}
-                            </Space>
-                          </Collapse.Panel>
-                        )}
-                        {preconditions.length > 0 && (
-                          <Collapse.Panel key="preconditions" header={`前置条件 ${preconditions.length}`}>
-                            <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                              {preconditions.map((item, preIdx) => (
-                                <Typography.Text key={preIdx} code style={{ fontSize: 12 }}>{compactJson(item, 240)}</Typography.Text>
-                              ))}
-                            </Space>
-                          </Collapse.Panel>
-                        )}
-                      </Collapse>
-                    )}
-                  </Space>
-                </div>
-              </List.Item>
-            );
-          }}
-        />
-      </Space>
-    );
-  }
-  function renderReviewPanel() {
-    if (!flowSpec) return null;
-    if (!reviewItems.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有待确认项" />;
-    const highCount = reviewItems.length;
-    const llmMeta = (flowSpec.meta as any)?.llm_recommendations || {};
-    const llmSuggestionCount = reviewItems.reduce((n, item) => n + (item.llm_suggestions?.length || 0), 0);
-    return (
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <Card size="small" style={{ background: "#fafafa" }}>
-          <Row gutter={[12, 8]} align="middle">
-            <Col flex="auto">
-              <Space wrap>
-                <Typography.Text strong>无法自动匹配字段 {reviewItems.length} 项</Typography.Text>
-                <Tag color="error">{highCount} 高风险</Tag>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  第一层规则已自动处理可确定项；第二层可刷新 LLM 辅助推荐；第三层由你确认后才生效。
-                </Typography.Text>
-                {llmMeta.status && <Tag color={llmMeta.status === "ok" ? "blue" : "default"}>
-                  智能推荐 {llmMeta.status}{llmSuggestionCount ? ` ${llmSuggestionCount} 条` : ""}
-                </Tag>}
-              </Space>
-            </Col>
-            <Col>
-              <Space wrap>
-                <Button icon={<RobotOutlined />} loading={autoFixBusy} onClick={refreshLlmRecommendations}>自动修复建议</Button>
-                <Button type="primary" onClick={() => bulkReview("accept")}>全部采纳</Button>
-                <Button onClick={() => bulkReview("ignore")}>全部忽略</Button>
-              </Space>
-            </Col>
-          </Row>
-        </Card>
-        <List
-          size="small"
-          dataSource={reviewItems}
-          renderItem={(item) => {
-            const manualBind = requiresManualSourceBinding(item);
-            return (
-                <List.Item
-                  actions={[
-                  manualBind
-                    ? <Button key="bind" size="small" type="primary" onClick={() => setActiveFlowTab("abilities")}>去能力卡片绑定</Button>
-                    : <Button key="apply" size="small" type="primary" onClick={() => applyReviewSuggestion(item)}>采纳</Button>,
-                  reviewCanIgnore(item)
-                    ? <Button key="skip" size="small" onClick={() => resolveReview(item.id, true)}>忽略</Button>
-                    : <Tooltip key="skip-disabled" title={reviewIgnoreReason(item)}><span><Button size="small" disabled>不可忽略</Button></span></Tooltip>,
-                ]}
-              >
-                <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                  <Space wrap>
-                    <Tag color={severityColor(item.severity)}>{item.severity || "medium"}</Tag>
-                    <Tag>{item.type}</Tag>
-                    <Typography.Text strong>{item.title}</Typography.Text>
-                    {item.current_guess && <Tag>{item.current_guess}</Tag>}
-                  </Space>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>{item.reason}</Typography.Text>
-                  {!!item.llm_suggestions?.length && (
-                    <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                      {item.llm_suggestions.map((s, idx) => (
-                        <div key={`${item.id}-llm-${idx}`} style={{ border: "1px solid #e6f4ff", background: "#f6fbff", padding: 8, borderRadius: 6 }}>
-                          <Space wrap>
-                            <Tag color="blue">LLM 建议</Tag>
-                            <Tag>{s.action}</Tag>
-                            <Tag color={confidenceColor(s.confidence)}>置信度 {confidencePercent(s.confidence)}</Tag>
-                            {s.source_step_id && <Typography.Text code>{s.source_step_id}</Typography.Text>}
-                            {s.source_path && <Typography.Text code>{s.source_path}</Typography.Text>}
-                            {s.source_kind && <Typography.Text code>{s.source_kind}</Typography.Text>}
-                            <Button size="small" type="primary" onClick={() => applyLlmSuggestion(item, s)}>采纳此建议</Button>
-                          </Space>
-                          {s.reason && <div style={{ marginTop: 4 }}>
-                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>{s.reason}</Typography.Text>
-                          </div>}
-                        </div>
-                      ))}
-                    </Space>
-                  )}
-                </Space>
-              </List.Item>
-            );
-          }}
-        />
-      </Space>
-    );
-  }
-  function renderStepsPanel() {
-    if (!flowSpec) return null;
-    return (
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <Space wrap>
-          <Button icon={<PlusOutlined />} onClick={() => setAddingStep(true)}>新增步骤</Button>
-          <Button icon={<ReloadOutlined />} onClick={() => send({ type: "flow_update", edits: [{ op: "dedupe_steps" }] })}>清理重复步骤</Button>
-        </Space>
-        {addingStep && (
-          <Card size="small" title="新增步骤">
-            <Space direction="vertical" size={10} style={{ width: "100%" }}>
-              <Space wrap>
-                <Typography.Text strong style={{ fontSize: 12 }}>从捕获接口选择</Typography.Text>
-                <Select
-                  allowClear
-                  showSearch
-                  placeholder="选择已捕获的接口"
-                  notFoundContent="没有可添加的捕获接口"
-                  style={{ minWidth: 520 }}
-                  value={newStepRequestKey || undefined}
-                  optionFilterProp="label"
-                  options={allCapturedRequests(flowSpec).map((req) => ({
-                    label: `${req.method || "GET"} ${req.path || stripHost(req.url || "")}`,
-                    value: requestOptionValue(req),
-                  })).filter((x) => x.value)}
-                  onChange={(v) => setNewStepRequestKey(v || "")}
-                />
-                <Button type="primary" onClick={addStep} disabled={!newStepRequestKey && !newStep.path.trim()}>添加</Button>
-                <Button onClick={() => { setAddingStep(false); setNewStepRequestKey(""); }}>取消</Button>
-              </Space>
-              <Collapse ghost size="small">
-                <Collapse.Panel key="manual" header="手工新增接口">
-                  <Space wrap>
-                    <NativeSelect value={newStep.method} width={110} options={["GET", "POST", "PUT", "PATCH", "DELETE"].map((x) => ({ label: x, value: x }))}
-                      onChange={(v) => setNewStep((s) => ({ ...s, method: v }))} />
-                    <Input placeholder="/api/path" value={newStep.path} style={{ width: 260 }}
-                      onChange={(e) => setNewStep((s) => ({ ...s, path: e.target.value }))} />
-                    <Input placeholder="步骤名" value={newStep.name} style={{ width: 180 }}
-                      onChange={(e) => setNewStep((s) => ({ ...s, name: e.target.value }))} />
-                    <NativeSelect value={newStep.role} width={160} options={STEP_ROLE_OPTIONS}
-                      onChange={(v) => setNewStep((s) => ({ ...s, role: v }))} />
-                    <NativeSelect value={newStep.risk_level} width={90} options={RISK_OPTIONS}
-                      onChange={(v) => setNewStep((s) => ({ ...s, risk_level: v }))} />
-                  </Space>
-                </Collapse.Panel>
-              </Collapse>
-            </Space>
-          </Card>
-        )}
-        <Collapse size="small">
-          {flowSpec.steps.map((step, idx) => (
-            <Collapse.Panel
-              key={step.step_id}
-              header={
-                <Space wrap style={{ minWidth: 0, maxWidth: "100%" }}>
-                  <Tag color="purple">第 {idx + 1} 步</Tag>
-                  <Tag color={step.method === "GET" ? "blue" : "green"}>{step.method}</Tag>
-                  <Typography.Text strong style={{ maxWidth: 220 }} ellipsis={{ tooltip: step.name || fallbackStepName(step.method, step.path) }}>
-                    {step.name || fallbackStepName(step.method, step.path)}
-                  </Typography.Text>
-                  <PathText value={step.path || stripHost(step.url)} maxWidth={420} />
-                  <Tag>{step.params?.length || 0} 字段</Tag>
-                </Space>
-              }
-              extra={
-                <Space onClick={(e) => e.stopPropagation()}>
-                  <Tooltip title="上移"><Button size="small" icon={<UpOutlined />} disabled={idx === 0} onClick={() => moveStep(idx, -1)} /></Tooltip>
-                  <Tooltip title="下移"><Button size="small" icon={<DownOutlined />} disabled={idx === flowSpec.steps.length - 1} onClick={() => moveStep(idx, 1)} /></Tooltip>
-                  <Tooltip title="删除"><Button size="small" danger icon={<DeleteOutlined />}
-                    onMouseDown={(e) => e.preventDefault()} onClick={() => removeStepWithConfirm(step)} /></Tooltip>
-                </Space>
-              }
-            >
-              <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, alignItems: "end" }}>
-                  <FieldControl label="名称">
-                    <EditableText value={step.name || ""} width={220}
-                      onSave={(v) => updateStep(step.step_id, "name", v)} />
-                  </FieldControl>
-                  <FieldControl label="角色">
-                    <NativeSelect value={step.source_meta?.role || step.semantic_role || ""}
-                      width="100%"
-                      options={[{ label: "未设置", value: "" }, ...STEP_ROLE_OPTIONS]}
-                      onChange={(v) => updateStep(step.step_id, "role", v)} />
-                  </FieldControl>
-                  <FieldControl label="风险">
-                    <NativeSelect value={step.risk_level} width="100%" options={RISK_OPTIONS}
-                      onChange={(v) => updateStep(step.step_id, "risk_level", v)} />
-                  </FieldControl>
-                </div>
-                <Collapse ghost size="small">
-                  <Collapse.Panel key="advanced" header="高级设置">
-                    <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, alignItems: "end" }}>
-                        <FieldControl label="方法">
-                          <NativeSelect value={step.method} width="100%"
-                            options={["GET", "POST", "PUT", "PATCH", "DELETE"].map((x) => ({ label: x, value: x }))}
-                            onChange={(v) => updateStep(step.step_id, "method", v)} />
-                        </FieldControl>
-                        <FieldControl label="Path / URL">
-                          <EditableText value={step.path} width="100%"
-                            onSave={(v) => {
-                              if (v) {
-                                updateStep(step.step_id, "path", v);
-                                updateStep(step.step_id, "url", v);
-                              }
-                            }} />
-                        </FieldControl>
-                        <FieldControl label="内容类型">
-                          <NativeSelect value={step.content_type || "application/json"} width="100%"
-                            options={CT_OPTIONS} onChange={(v) => updateStep(step.step_id, "content_type", v)} />
-                        </FieldControl>
-                      </div>
-                      <EditableTextArea value={step.body_source || ""}
-                        placeholder="请求体模板。通常不需要手改，只有录制体缺失或需要高级修复时再改。"
-                        onSave={(v) => updateStep(step.step_id, "body_source", v)} />
-                      <HeadersEditor value={step.headers || {}} onChange={(h) => updateStep(step.step_id, "headers", h)} />
-                    </Space>
-                  </Collapse.Panel>
-                </Collapse>
-              </Space>
-            </Collapse.Panel>
-          ))}
-        </Collapse>
-      </Space>
-    );
-  }
-  function renderParamsPanel() {
-    if (!flowSpec) return null;
-    const fieldRequestOptions = capturedRequestOptions(flowSpec);
-    return (
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <Card size="small" styles={{ body: { padding: 10 } }}>
-          <Space wrap align="center" size={8}>
-            <Typography.Text strong>从捕获接口添加字段</Typography.Text>
-            <NativeSelect
-              value={newParamRequestKey || ""}
-              width={460}
-              options={[{ label: fieldRequestOptions.length ? "选择未纳入能力字段的接口" : "没有可添加的捕获接口", value: "" }, ...fieldRequestOptions]}
-              onChange={(v) => setNewParamRequestKey(v || "")}
-            />
-            <Button
-              type="primary"
-              disabled={!newParamRequestKey}
-              onClick={() => addCapturedRequestToFields(findCapturedRequest(flowSpec, newParamRequestKey))}
-            >
-              加入能力字段
-            </Button>
-          </Space>
-        </Card>
-        <Card size="small">
-          <Space wrap>
-            <NativeSelect value={newParam.step_id || ""} width={320}
-              options={[{ label: "选择步骤", value: "" }, ...stepOptions]}
-              onChange={(v) => setNewParam((s) => ({ ...s, step_id: v }))} />
-            <Input placeholder="字段路径" value={newParam.path} style={{ width: 180 }}
-              onChange={(e) => setNewParam((s) => ({ ...s, path: e.target.value }))} />
-            <Input placeholder="参数名" value={newParam.key} style={{ width: 160 }}
-              onChange={(e) => setNewParam((s) => ({ ...s, key: e.target.value }))} />
-            <NativeSelect value={newParam.type} width={120} options={PARAM_TYPE_OPTIONS}
-              onChange={(v) => setNewParam((s) => ({ ...s, type: v }))} />
-            <NativeSelect value={newParam.category} width={130} options={CATEGORY_OPTIONS}
-              onChange={(v) => setNewParam((s) => ({ ...s, category: v }))} />
-            <Button type="primary" onClick={addParam}>添加</Button>
-          </Space>
-        </Card>
-        <Collapse size="small">
-          {flowSpec.steps.map((step) => (
-            <Collapse.Panel
-              key={step.step_id}
-              header={
-                <Space wrap style={{ minWidth: 0, maxWidth: "100%" }}>
-                  <ApiOutlined />
-                  <Tag color={step.method === "GET" ? "blue" : "green"}>{step.method}</Tag>
-                  <Typography.Text strong style={{ maxWidth: 220 }} ellipsis={{ tooltip: step.name || step.path }}>
-                    {step.name || step.path}
-                  </Typography.Text>
-                  <PathText value={step.path} maxWidth={420} />
-                  <Tag>{step.params?.length || 0} 字段</Tag>
-                </Space>
-              }
-              extra={
-                <Button
-                  size="small"
-                  danger
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    send({ type: "flow_update", edits: [{ op: "remove_step", step_id: step.step_id }] });
-                  }}
-                >
-                  删除接口
-                </Button>
-              }
-            >
-            {(step.params || []).length === 0 ? (
-              <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="这个接口没有请求入参" />
-                {step.response_json != null && (
-                  <Card size="small" title="响应字段">
-                    <Space wrap size={4}>
-                      {leafPathValues(step.response_json).slice(0, 40).map((leaf, leafIdx) => (
-                        <Tooltip key={`${leaf.path}-${leafIdx}`} title={leaf.value}>
-                          <Typography.Text code style={{ fontSize: 12 }}>{leaf.path}</Typography.Text>
-                        </Tooltip>
-                      ))}
-                      {leafPathValues(step.response_json).length > 40 && <Tag>+{leafPathValues(step.response_json).length - 40}</Tag>}
-                    </Space>
-                  </Card>
-                )}
-              </Space>
-            ) : (
-              <List
-                size="small"
-                rowKey={(p) => paramDraftKey(step.step_id, p)}
-                dataSource={step.params}
-                renderItem={(p) => {
-                  const bindKey = paramDraftKey(step.step_id, p);
-                  const linked = incomingLink(step.step_id, p.path);
-                  const currentBind = bindDraft[bindKey] || {
-                    source_step_id: p.source?.step_id || linked?.source_step_id,
-                    source_path: p.source?.response_path || linked?.source_path,
-                  };
-                  const needsManualConfirm = !!p.need_human_confirm && p.category === "runtime_var" && p.source_kind === "unknown";
-                  const selectBinding = selectBindingForParam(step, p);
-                  const enumOptions = enumOptionsForParam(step, p);
-                  const enumMappingComplete = enumMappingCompleteForParam(step, p);
-                  const enumSelectOptions = enumOptions.map((x) => ({ label: x, value: x }));
-                  const isApiOption = p.source_kind === "api_option";
-                  const isTypedEnum = p.type === "enum" || p.type === "list-enum";
-                  const isEnumOption = ENUM_SOURCE_KINDS.includes(p.source_kind || "") || isTypedEnum;
-                  const hasBindingPanel = isApiOption || isEnumOption;
-                  const hasRuntimePanel = !!linked || p.category === "runtime_var" || p.source_kind === "previous_response";
-                  const sourceStepOptions = [
-                    { label: "选择来源步骤", value: "" },
-                    ...flowSpec.steps.filter((s) => s.step_id !== step.step_id).map((s) => ({
-                      label: `${s.name || s.path} · ${s.method} ${s.path}`,
-                      value: s.step_id,
-                    })),
-                  ];
-                  const sourceRespOptions = [
-                    { label: currentBind.source_step_id ? "选择响应字段" : "先选择来源步骤", value: "" },
-                    ...sourcePathOptions(currentBind.source_step_id),
-                  ];
-                  return (
-                    <List.Item style={{ padding: "12px 0" }}>
-                      <div style={{ width: "100%", border: "1px solid #f0f0f0", borderRadius: 6, padding: 12, background: "#fff" }}>
-                        <Row gutter={[12, 8]} align="top">
-                          <Col flex="auto">
-                            <Space wrap size={6}>
-                              <Tag color={p.category === "runtime_var" ? "gold" : p.category === "system_const" ? "default" : "blue"}>{p.path}</Tag>
-                              <Tag>{optionLabel(CATEGORY_OPTIONS, p.category || "user_param")}</Tag>
-                              <Tag>{optionLabel(SOURCE_KIND_OPTIONS, normalizeSourceKindForUi(p.source_kind) || "unknown")}</Tag>
-                              {linked && <Tag color="cyan">依赖字段</Tag>}
-                              {isApiOption && <Tag color="geekblue">接口候选</Tag>}
-                              {isEnumOption && enumOptions.length > 0 && <Tag color="purple">枚举</Tag>}
-                              {isEnumOption && enumOptions.length > 0 && !enumMappingComplete && <Tag color="orange">仅有名称，值未映射</Tag>}
-                              {needsManualConfirm && <Tag color="warning">待确认</Tag>}
-                              <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.reason}</Typography.Text>
-                            </Space>
-                            <Typography.Text type="secondary" style={{ display: "block", marginTop: 6, fontSize: 12 }}>
-                              {paramSourceText(step, p, linked)}
-                            </Typography.Text>
-                          </Col>
-                          <Col>
-                            <Space size={6} wrap>
-                              <Button size="small" danger onMouseDown={(e) => e.preventDefault()}
-                                onClick={() => removeParam(step.step_id, p)}>删除</Button>
-                            </Space>
-                          </Col>
-                        </Row>
-                        <div style={{
-                          display: "grid",
-                          gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
-                          gap: 10,
-                          alignItems: "end",
-                          marginTop: 10,
-                        }}>
-                          <FieldControl label="名称">
-                            <EditableText value={p.key} width="100%" onSave={(v) => v && updateParam(step.step_id, p, "key", v)} />
-                          </FieldControl>
-                          <FieldControl label="路径">
-                            <EditableText value={p.path} width="100%" onSave={(v) => v && updateParam(step.step_id, p, "path", v)} />
-                          </FieldControl>
-                          <FieldControl label="默认值">
-                            {enumOptions.length > 0 && enumMappingComplete ? (
-                              <EnumValueInput value={String(p.value ?? "")} width="100%"
-                                options={enumSelectOptions}
-                                onSave={(v) => updateParam(step.step_id, p, "value", v)} />
-                            ) : (
-                              <EditableText value={String(p.value ?? "")} width="100%" onSave={(v) => updateParam(step.step_id, p, "value", v)} />
-                            )}
-                          </FieldControl>
-                          <FieldControl label="类型">
-                            <NativeSelect value={p.type} width="100%" options={PARAM_TYPE_OPTIONS}
-                              onChange={(v) => updateParamType(step, p, v)} />
-                          </FieldControl>
-                          <FieldControl label="分类">
-                            <NativeSelect value={p.category || "user_param"} width="100%" options={CATEGORY_OPTIONS}
-                              onChange={(v) => updateParamCategory(step.step_id, p, v)} />
-                          </FieldControl>
-                          <FieldControl label="来源">
-                            <NativeSelect value={normalizeSourceKindForUi(p.source_kind) || defaultSourceForCategory(p.category || "user_param")} width="100%" options={sourceSelectOptionsForParam(p)}
-                              onChange={(v) => updateParamSourceKind(step.step_id, p, v)} />
-                          </FieldControl>
-                          <FieldControl label="展示">
-                            {p.category === "user_param" ? (
-                              <Checkbox checked={p.exposed_to_user !== false} onChange={(e) => updateParam(step.step_id, p, "exposed_to_user", e.target.checked)}>暴露给用户</Checkbox>
-                            ) : <Typography.Text type="secondary">不对调用方展示</Typography.Text>}
-                          </FieldControl>
-                        </div>
-                        {needsManualConfirm && <Button size="small" style={{ marginTop: 8 }} onClick={() => updateParam(step.step_id, p, "need_human_confirm", false)}>已确认</Button>}
-                        {(hasBindingPanel || hasRuntimePanel) && <Collapse size="small" ghost style={{ marginTop: 10 }}
-                          defaultActiveKey={needsManualConfirm ? ["runtime"] : []}>
-                          {hasBindingPanel && (
-                            <Collapse.Panel key="binding" header={<Space><LinkOutlined />来源绑定</Space>}>
-                          <div style={{ background: "#fafafa", border: "1px solid #f0f0f0", borderRadius: 6, padding: 8 }}>
-                            <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                              <Space wrap size={6}>
-                                <Typography.Text strong style={{ fontSize: 12 }}>{isApiOption ? "接口候选配置" : "枚举候选配置"}</Typography.Text>
-                                <Tag color={selectBinding?.source_url ? "geekblue" : "purple"}>{enumSourceLabel(selectBinding)}</Tag>
-                                {enumOptions.slice(0, 8).map((x, enumIdx) => <Tag key={`${x}-${enumIdx}`}>{x}</Tag>)}
-                                {enumOptions.length > 8 && <Tag>+{enumOptions.length - 8}</Tag>}
-                                {enumOptions.length > 0 && !enumMappingComplete && <Tag color="orange">未映射实际提交值</Tag>}
-                              </Space>
-                              {isApiOption && (
-                                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8, alignItems: "end" }}>
-                                  <FieldControl label="来源接口">
-                                    <EditableComboInput
-                                      value={selectBinding?.source_url || ""}
-                                      options={readSourceOptions()}
-                                      placeholder="选择或输入接口地址"
-                                      onSave={(v) => upsertSelectBinding(step, p, { source_url: v })}
-                                    />
-                                  </FieldControl>
-                                  <FieldControl label="接口参数">
-                                    <EditableTextArea
-                                      rows={1}
-                                      value={queryToLines(selectBinding?.source_url || "")}
-                                      placeholder="每行一个参数，如 pageNo=1"
-                                      onSave={(v) => upsertSelectBinding(step, p, { source_url: mergeUrlQuery(selectBinding?.source_url || "", v) })}
-                                    />
-                                  </FieldControl>
-                                  <FieldControl label="值字段">
-                                    <EditableComboInput
-                                      value={selectBinding?.value_key || ""}
-                                      options={responseKeyOptionsForSource(selectBinding?.source_url)}
-                                      placeholder="如 id/userId/dictValue"
-                                      onSave={(v) => upsertSelectBinding(step, p, { value_key: v })}
-                                    />
-                                  </FieldControl>
-                                  <FieldControl label="显示字段">
-                                    <EditableComboInput
-                                      value={selectBinding?.label_key || ""}
-                                      options={responseKeyOptionsForSource(selectBinding?.source_url)}
-                                      placeholder="如 name/label/dictLabel"
-                                      onSave={(v) => upsertSelectBinding(step, p, { label_key: v })}
-                                    />
-                                  </FieldControl>
-                                  <FieldControl label="配对 ID 字段">
-                                    <EditableComboInput
-                                      value={selectBinding?.id_path || p.path || p.key || ""}
-                                      options={(step.params || []).map((x) => ({ label: `${x.path} · ${x.key}`, value: x.path }))}
-                                      placeholder="默认当前字段路径，可改为隐藏 ID 字段"
-                                      onSave={(v) => upsertSelectBinding(step, p, { id_path: v || null })}
-                                    />
-                                  </FieldControl>
-                                  <FieldControl label="多选">
-                                    <Checkbox checked={!!selectBinding?.multi || p.type === "list-enum"}
-                                      onChange={(e) => upsertSelectBinding(step, p, { multi: e.target.checked })}>
-                                      列表多选
-                                    </Checkbox>
-                                  </FieldControl>
-                                </div>
-                              )}
-                              {isEnumOption && (
-                                <FieldControl label="枚举候选">
-                                  <EditableTextArea
-                                    rows={3}
-                                    value={enumOptionsTextForParam(step, p)}
-                                    placeholder="每行写 名称=实际值；只有名称会保留为未映射，不会假定名称就是提交值"
-                                    onSave={(v) => {
-                                      const { options, optionMap, mappingComplete } = parseEnumOptionsText(v);
-                                      upsertSelectBinding(
-                                        step,
-                                        p,
-                                        {
-                                          source_url: "",
-                                          value_key: "",
-                                          label_key: "",
-                                          options,
-                                          count: options.length,
-                                          option_map: optionMap,
-                                          enum_source: enumSourceForKind(p.source_kind),
-                                          enum_confirmed: mappingComplete,
-                                        },
-                                        enumOptionEdits(step, p, options, optionMap),
-                                      );
-                                    }}
-                                  />
-                                </FieldControl>
-                              )}
-                            </Space>
-                          </div>
-                            </Collapse.Panel>
-                          )}
-                        {hasRuntimePanel && (
-                            <Collapse.Panel key="runtime" header={<Space><BranchesOutlined />运行期来源</Space>}>
-                          <div style={{ background: "#fafafa", border: "1px solid #f0f0f0", borderRadius: 6, padding: 10 }}>
-                            {p.source_kind === "previous_response" || linked ? (
-                              <Space wrap>
-                                <Typography.Text strong style={{ fontSize: 12 }}>上游响应</Typography.Text>
-                                <NativeSelect value={currentBind.source_step_id || ""} width={300}
-                                  options={sourceStepOptions}
-                                  onChange={(v) => setBindDraft((d) => ({ ...d, [bindKey]: { ...currentBind, source_step_id: v, source_path: "" } }))} />
-                                <ComboInput value={currentBind.source_path || ""} width={280}
-                                  options={sourceRespOptions}
-                                  disabled={!currentBind.source_step_id}
-                                  placeholder={currentBind.source_step_id ? "选择或输入响应字段，如 data.id" : "先选择来源步骤"}
-                                  onChange={(v) => setBindDraft((d) => ({ ...d, [bindKey]: { ...currentBind, source_path: v } }))} />
-                                <Button size="small" type="primary" icon={<LinkOutlined />} onClick={() => bindParamToPreviousResponse(step, p)}>绑定上游响应</Button>
-                              </Space>
-                            ) : p.source_kind === "page_context" ? (
-                              <FieldControl label="调用上下文键">
-                                <EditableText value={(p.source as any)?.context_key || p.key || ""} width={320}
-                                  onSave={(v) => updateRuntimeSourceDetail(step.step_id, p, { context_key: v })} />
-                              </FieldControl>
-                            ) : p.source_kind === "request_header" ? (
-                              <FieldControl label="请求头名称">
-                                <EditableText value={(p.source as any)?.header || ""} width={320}
-                                  onSave={(v) => updateRuntimeSourceDetail(step.step_id, p, { header: v })} />
-                              </FieldControl>
-                            ) : p.source_kind === "system_generated" ? (
-                              <FieldControl label="生成策略">
-                                <NativeSelect value={(p.source as any)?.strategy || "uuid"} width={260}
-                                  options={[
-                                    { label: "UUID", value: "uuid" },
-                                    { label: "随机字符串", value: "random_string" },
-                                    { label: "随机数字", value: "random_number" },
-                                  ]}
-                                  onChange={(v) => updateRuntimeSourceDetail(step.step_id, p, { strategy: v })} />
-                              </FieldControl>
-                            ) : p.source_kind === "computed" ? (
-                              <Typography.Text type="secondary">
-                                运行期按规则 {(p.source as any)?.strategy || "未配置"}，根据 {(p.source as any)?.start_field || "开始字段"} 与 {(p.source as any)?.end_field || "结束字段"} 自动计算。
-                              </Typography.Text>
-                            ) : p.source_kind === "current_user" ? (
-                              <Typography.Text type="secondary">运行期从当前登录身份注入。</Typography.Text>
-                            ) : p.source_kind === "system_time" ? (
-                              <Typography.Text type="secondary">运行期生成当前系统时间。</Typography.Text>
-                            ) : (
-                              <Typography.Text type="warning">请选择并配置明确的运行期来源。</Typography.Text>
-                            )}
-                          </div>
-                            </Collapse.Panel>
-                        )}
-                        </Collapse>}
-                      </div>
-                    </List.Item>
-                  );
-                }}
-              />
-            )}
-            </Collapse.Panel>
-          ))}
-        </Collapse>
-      </Space>
-    );
-  }
-  function renderLinksPanel() {
-    if (!flowSpec) return null;
-    return (
-      <Space direction="vertical" size={12} style={{ width: "100%" }}>
-        <Card size="small" title={<Space><PlusOutlined />新增依赖</Space>}>
-          <Row gutter={[8, 8]} align="middle">
-            <Col span={6}><NativeSelect value={newLink.source_step_id || ""} width="100%"
-              options={[{ label: "选择来源步骤", value: "" }, ...stepOptions]}
-              onChange={(v) => setNewLink((s) => ({ ...s, source_step_id: v, source_path: "" }))} /></Col>
-            <Col span={6}><ComboInput value={newLink.source_path || ""} width="100%"
-              options={[{ label: newLink.source_step_id ? "选择来源响应字段" : "先选择来源步骤", value: "" }, ...sourcePathOptions(newLink.source_step_id)]}
-              disabled={!newLink.source_step_id}
-              placeholder={newLink.source_step_id ? "选择或输入来源响应字段" : "先选择来源步骤"}
-              onChange={(v) => setNewLink((s) => ({ ...s, source_path: v }))} /></Col>
-            <Col span={5}><NativeSelect value={newLink.target_step_id || ""} width="100%"
-              options={[{ label: "选择目标步骤", value: "" }, ...stepOptions]}
-              onChange={(v) => setNewLink((s) => ({ ...s, target_step_id: v, target_path: "" }))} /></Col>
-            <Col span={5}><ComboInput value={newLink.target_path || ""} width="100%"
-              options={[{ label: newLink.target_step_id ? "选择目标字段" : "先选择目标步骤", value: "" }, ...targetPathOptions(newLink.target_step_id)]}
-              disabled={!newLink.target_step_id}
-              placeholder={newLink.target_step_id ? "选择或输入目标字段" : "先选择目标步骤"}
-              onChange={(v) => setNewLink((s) => ({ ...s, target_path: v }))} /></Col>
-            <Col span={2}><Button type="primary" block onClick={addLink}>添加</Button></Col>
-          </Row>
-        </Card>
-        {!flowSpec.links?.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有跨接口依赖" /> : (
-          <List
-            dataSource={flowSpec.links}
-            renderItem={(link) => {
-              const editing = editingLink[link.link_id];
-              const sourceStep = stepById[link.source_step_id];
-              const targetStep = stepById[link.target_step_id];
-              return (
-                <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}
-                  actions={editing ? [
-                    <Button key="save" size="small" type="primary" icon={<SaveOutlined />} onClick={() => saveLinkEdits(link.link_id)}>保存</Button>,
-                    <Button key="cancel" size="small" onClick={() => cancelEditLink(link.link_id)}>取消</Button>,
-                  ] : [
-                    <Button key="edit" size="small" icon={<SettingOutlined />} onClick={() => startEditLink(link)}>编辑</Button>,
-                    <Checkbox key="cf" checked={!!link.confirmed}
-                      onChange={(e) => send({ type: "flow_update", edits: [{ op: "update", link_id: link.link_id, field: "confirmed", value: e.target.checked }] })}>已确认</Checkbox>,
-                    <Button key="rm" size="small" danger onClick={() => send({ type: "flow_update", edits: [{ op: "remove", link_id: link.link_id, reset_target: true }] })}>删除</Button>,
-                  ]}
-                >
-                  {editing ? (
-                    <Row gutter={[8, 8]} style={{ width: "100%" }} align="middle">
-                      <Col span={6}><NativeSelect value={editing.source_step_id || ""} width="100%"
-                        options={[{ label: "选择来源步骤", value: "" }, ...stepOptions]}
-                        onChange={(v) => setEditingLink((d) => ({ ...d, [link.link_id]: { ...editing, source_step_id: v, source_path: "" } }))} /></Col>
-                      <Col span={6}><ComboInput value={editing.source_path || ""} width="100%"
-                        options={[{ label: "选择来源响应字段", value: "" }, ...sourcePathOptions(editing.source_step_id)]}
-                        placeholder="选择或输入来源响应字段"
-                        onChange={(v) => setEditingLink((d) => ({ ...d, [link.link_id]: { ...editing, source_path: v } }))} /></Col>
-                      <Col span={5}><NativeSelect value={editing.target_step_id || ""} width="100%"
-                        options={[{ label: "选择目标步骤", value: "" }, ...stepOptions]}
-                        onChange={(v) => setEditingLink((d) => ({ ...d, [link.link_id]: { ...editing, target_step_id: v, target_path: "" } }))} /></Col>
-                      <Col span={5}><ComboInput value={stripBodyPrefix(editing.target_path) || ""} width="100%"
-                        options={[{ label: "选择目标字段", value: "" }, ...targetPathOptions(editing.target_step_id)]}
-                        placeholder="选择或输入目标字段"
-                        onChange={(v) => setEditingLink((d) => ({ ...d, [link.link_id]: { ...editing, target_path: v } }))} /></Col>
-                      <Col span={2}><Checkbox checked={!!editing.confirmed}
-                        onChange={(e) => setEditingLink((d) => ({ ...d, [link.link_id]: { ...editing, confirmed: e.target.checked } }))}>确认</Checkbox></Col>
-                    </Row>
-                  ) : (
-                    <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                      <Space wrap>
-                        <Tag color="blue">{sourceStep?.name || sourceStep?.path || link.source_step_id}</Tag>
-                        <Typography.Text code>{link.source_path}</Typography.Text>
-                        <BranchesOutlined />
-                        <Tag color="green">{targetStep?.name || targetStep?.path || link.target_step_id}</Tag>
-                        <Typography.Text code>{stripBodyPrefix(link.target_path)}</Typography.Text>
-                        {link.confirmed ? <Tag color="success">已确认</Tag> : <Tag color="warning">待确认</Tag>}
-                      </Space>
-                      {link.reason && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{link.reason}</Typography.Text>}
-                    </Space>
-                  )}
-                </List.Item>
-              );
-            }}
-          />
-        )}
-      </Space>
-    );
-  }
   function renderDescriptionPanel() {
     if (!flowSpec) return null;
     return (
@@ -5204,45 +3915,5 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       )}
     </Card>
     </ConfigProvider>
-  );
-}
-
-function HeadersEditor({ value, onChange }: { value: Record<string, string>; onChange: (h: Record<string, string>) => void }) {
-  const [newKey, setNewKey] = useState("");
-  const [newVal, setNewVal] = useState("");
-  const entries = Object.entries(value || {});
-  return (
-    <div style={{ background: "#f5f5f5", padding: 8, borderRadius: 6 }}>
-      <Typography.Text type="secondary" style={{ fontSize: 12 }}>请求头</Typography.Text>
-      <Space direction="vertical" size={4} style={{ width: "100%", marginTop: 6 }}>
-        {entries.map(([k, v], i) => (
-          <Space key={k + i} wrap>
-            <Input size="small" value={k} style={{ width: 160 }} onChange={(e) => {
-              const nk = e.target.value.trim(); if (!nk) return;
-              const { [k]: _, ...rest } = value;
-              onChange({ ...rest, [nk]: v });
-            }} />
-            <Input size="small" value={v} style={{ width: 260 }} onChange={(e) => onChange({ ...value, [k]: e.target.value })} />
-            <Button size="small" danger onClick={() => { const { [k]: _, ...rest } = value; onChange(rest); }}>删除</Button>
-          </Space>
-        ))}
-        <Space wrap>
-          <Input size="small" placeholder="key" value={newKey} style={{ width: 160 }} onChange={(e) => setNewKey(e.target.value)} />
-          <Input size="small" placeholder="value" value={newVal} style={{ width: 260 }} onChange={(e) => setNewVal(e.target.value)} />
-          <Button size="small" onClick={() => {
-            const k = newKey.trim();
-            if (!k) return;
-            // FH7 修复:不允许重复 key(连续点添加会塞空 value 重复头,后端 401)—— 大小写不敏感判断(Header 名是大小写不敏感的)
-            const existingKey = Object.keys(value || {}).find((x) => x.toLowerCase() === k.toLowerCase());
-            if (existingKey) {
-              message.warning(`请求头 ${existingKey} 已存在,请直接编辑`);
-              return;
-            }
-            onChange({ ...value, [k]: newVal });
-            setNewKey(""); setNewVal("");
-          }}>添加</Button>
-        </Space>
-      </Space>
-    </div>
   );
 }

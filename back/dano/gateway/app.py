@@ -1136,57 +1136,6 @@ async def record_ws(ws: WebSocket) -> None:
                                                              f"{_fs_err}"},
                                         "parsed_steps": 0})
                 continue
-            elif t == "choose_request":
-                # 用户在候选里手选用哪个写请求(噪声误判/多写请求时)→ 重发该请求的字段表
-                idx = msg.get("idx", 0)
-                if pending_candidates and 0 <= idx < len(pending_candidates):
-                    pending_req = pending_candidates[idx]
-                    request_fields = await _request_fields_msg(
-                        pending_req, pending_candidates, pending_samples,
-                        pending_reads, pending_storage, pending_required,
-                        pending_page_enum_options,
-                        pending_field_evidence,
-                    )
-                    await sender.send_json({**request_fields, "action": session_action})
-                    try:
-                        from dano.execution.page.flow_spec import (
-                            flow_spec_to_client,
-                            flow_spec_to_summary,
-                            to_flow_spec,
-                            validate_flow_spec,
-                        )
-                        # 录制 V2:手选写请求必须同步到 FlowSpec。保留所有非写请求事实，
-                        # 只把写请求候选收敛为当前 chosen，避免发布仍用自动候选。
-                        chosen = pending_req
-                        selected_caps = [
-                            r for r in (pending_all_caps or [])
-                            if r == chosen or r not in pending_candidates
-                        ]
-                        pending_flow_spec = to_flow_spec(
-                            captured_requests=selected_caps,
-                            reads=pending_reads,
-                            samples=pending_samples,
-                            storage_state=pending_storage,
-                            required_labels=pending_required,
-                            page_enum_options=pending_page_enum_options,
-                            field_evidence=pending_field_evidence,
-                            page_context=observed_page_context,
-                            recording_mode=recording_mode,
-                            diagnostics=sess.captured_diagnostics(),
-                            page_events=pending_page_events,
-                            tenant=init.get("tenant", ""),
-                            subsystem=init.get("subsystem", ""),
-                        )
-                        pending_flow_spec = await _enhance_flow_field_names(pending_flow_spec)
-                        await sender.send_json({
-                            "type": "flow_spec_updated",
-                            "flow_spec": flow_spec_to_summary(pending_flow_spec),
-                            "full_spec": flow_spec_to_client(pending_flow_spec),
-                            "check_report": validate_flow_spec(pending_flow_spec),
-                        })
-                    except Exception as e:  # noqa: BLE001
-                        await sender.send_json({"type": "error", "detail": f"choose_request flow_spec failed: {e}"})
-            # Step B: 前端编辑 FlowSpec → 应用编辑,返回新 spec
             elif t == "flow_update":
                 if pending_flow_spec is None:
                     await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})

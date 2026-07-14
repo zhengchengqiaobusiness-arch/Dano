@@ -10,7 +10,6 @@ import dano.execution.page.flow_spec as flow_spec_module
 from dano.execution.page.flow_spec import (
     FlowSpec, FlowStep, FlowLink, ParamField, FlowCapability,
     apply_flow_edits,
-    apply_flow_publish_selection,
     apply_llm_field_names,
     classify_network_request,
     dry_run_flow_spec,
@@ -23,7 +22,7 @@ from dano.execution.page.flow_spec import (
     to_flow_spec,
     validate_flow_spec,
     _default_step_name, _derive_step_name, _infer_type_from_value,
-    _params_from_get_query, _is_business_get,
+    _params_from_get_query,
 )
 
 
@@ -348,9 +347,10 @@ class ToFlowSpecTest(unittest.TestCase):
             "value": "data.missing",
         }])
         broken_report = validate_flow_spec(broken)
-        self.assertFalse(broken_report["passed"])
+        self.assertTrue(broken_report["passed"])
         self.assertTrue(any(i["type"] == "link_source_missing" for i in broken_report["review_items"]))
-        self.assertTrue(any("来源路径" in e and "data.missing" in e for e in broken_report["errors"]))
+        self.assertTrue(any("来源路径" in e and "data.missing" in e for e in broken_report["suggestions"]))
+        self.assertEqual(broken_report["errors"], [])
 
         confirmed = apply_flow_edits(spec, [{
             "op": "update",
@@ -552,7 +552,7 @@ class ToFlowSpecTest(unittest.TestCase):
         self.assertEqual(client["recording_mode"], "intercepted_submit")
         self.assertEqual(client["diagnostics"], diagnostics)
 
-    def test_validate_blocks_key_requestfailed_diagnostic(self):
+    def test_validate_reports_requestfailed_diagnostic_without_blocking_publish(self):
         spec = to_flow_spec(
             [_post("https://oa/api/submit", {"a": 1}, resp={"code": 200})],
             samples={"a": "1"},
@@ -565,8 +565,9 @@ class ToFlowSpecTest(unittest.TestCase):
         )
         report = validate_flow_spec(spec)
 
-        self.assertFalse(report["passed"])
-        self.assertTrue(any("录制期业务请求失败" in e for e in report["errors"]))
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["errors"], [])
+        self.assertTrue(any("录制期业务请求失败" in e for e in report["suggestions"]))
 
     def test_summary_shape(self):
         captured = [_post("https://oa/api/submit", {"a": 1}, resp={"code": 200})]
@@ -1325,31 +1326,6 @@ class TypeInferenceTest(unittest.TestCase):
 
 
 class FlowSpecPublishTest(unittest.TestCase):
-    def test_publish_selection_turns_checked_fields_into_api_params(self):
-        spec = to_flow_spec([
-            _post("https://oa/api/leave/submit",
-                  {"reason": "回家", "days": 3},
-                  resp={"code": 200})
-        ], samples={"reason": "回家", "days": "3"})
-
-        spec = apply_flow_publish_selection(
-            spec,
-            {"reason": "leave_reason"},
-            selected_scope_paths={"reason", "days"},
-        )
-        apir, errors = flow_spec_to_api_request(spec)
-
-        self.assertEqual(errors, [])
-        self.assertIsNotNone(apir)
-        self.assertEqual(apir["params"], ["leave_reason"])
-        self.assertEqual(apir["body_template"]["reason"], "{{leave_reason}}")
-        self.assertEqual(apir["body_template"]["days"], 3)
-        params = {p.path: p for p in spec.steps[0].params}
-        self.assertEqual(params["days"].category, "system_const")
-        self.assertEqual(params["days"].source_kind, "constant")
-        self.assertFalse(params["days"].exposed_to_user)
-        self.assertTrue(validate_flow_spec(spec)["passed"])
-
     def test_dry_run_constructs_single_request(self):
         spec = to_flow_spec([
             _post("https://oa/api/leave/submit",

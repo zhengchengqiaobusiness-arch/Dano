@@ -16,9 +16,7 @@ from dano.execution.page.flow_spec import (
     capability_to_flow_spec_view, compile_capability_to_api_request, flow_spec_capability_contracts,
     flow_spec_to_client,
     auto_fix_flow_spec, orchestrate_flow_capabilities, run_recording_pi_loop, sync_flow_spec_models,
-    flow_spec_canonical_summary, flow_spec_shadow_diff, migrate_v1_flow_spec_to_capability_spec,
-    migrate_v2_flow_spec_to_capability_spec, capability_spec_to_legacy_flow_spec,
-    capability_spec_to_api_request, to_flow_spec,
+    flow_spec_canonical_summary, to_flow_spec,
     build_default_flow_capabilities, prepare_flow_spec_for_publish, prepare_flow_release_candidate,
     flow_operation_report,
 )
@@ -63,42 +61,6 @@ def test_single_required_flag_excludes_runtime_value_from_caller_schema():
     assert flow_spec_module.flow_spec_required_params(spec) == ["申请标题"]
 
 
-def test_submit_time_evidence_drives_single_required_flag():
-    spec = to_flow_spec(
-        captured_requests=[{
-            "method": "POST",
-            "url": "https://oa.example.test/oa/seal-apply/submit-process",
-            "headers": {"content-type": "application/json"},
-            "post_data": json.dumps({
-                "useTime": ["2026-07-09 00:00:00", "2026-08-11 23:59:59"],
-                "applyTitle": "出差用章",
-                "remark": "出差",
-            }, ensure_ascii=False),
-            "response_json": {"code": 0, "data": True},
-        }],
-        samples={
-            "使用时间": "2026-07-09 00:00:00",
-            "使用时间#2": "2026-08-11 23:59:59",
-            "申请标题": "出差用章",
-            "备注": "出差",
-        },
-        required_labels={"使用时间", "申请标题"},
-        page_context={"path": "/oa/seal-apply", "visible_titles": ["公章借阅"]},
-    )
-    submit = spec.steps[-1]
-    params = {param.path: param for param in submit.params}
-
-    assert params["useTime[0]"].required is True
-    assert params["useTime[1]"].required is True
-    assert params["applyTitle"].required is True
-    assert params["remark"].required is False
-    assert spec.meta["page_context"]["visible_titles"] == ["公章借阅"]
-
-    prepared = flow_spec_module.ensure_flow_capabilities(spec)
-    submit_cap = next(cap for cap in prepared.capabilities if cap.kind == "submit")
-    cap_fields = {field.path: field for field in submit_cap.inputs}
-    assert cap_fields["useTime[0]"].required is True
-    assert cap_fields["remark"].required is False
 
 
 def test_system_generated_runtime_value_is_compiled_and_not_exposed():
@@ -564,7 +526,7 @@ def test_sync_clears_select_pair_path_that_is_not_a_request_field():
     assert step.selects[0].id_path is None
 
 
-def test_manual_category_change_removes_conflicting_incoming_link():
+def test_manual_category_and_source_change_preserves_independently_managed_link():
     source = FlowStep(
         step_id="source", method="GET", url="/api/source", path="/api/source",
         response_json={"data": {"id": "LIVE"}},
@@ -596,7 +558,7 @@ def test_manual_category_change_removes_conflicting_incoming_link():
     }])
 
     param = edited.steps[1].params[0]
-    assert edited.links == []
+    assert [link.link_id for link in edited.links] == ["link-1"]
     assert param.category == "user_param"
     assert param.source_kind == "user_input"
     assert param.editable is True
@@ -1838,7 +1800,7 @@ def test_edit_type():
     assert new.steps[0].params[0].type == "number"
 
 
-def test_edit_type_to_string_atomically_removes_enum_contract():
+def test_edit_type_only_changes_type_and_preserves_recorded_enum_evidence():
     step = FlowStep(
         step_id="step1",
         method="POST",
@@ -1876,12 +1838,12 @@ def test_edit_type_to_string_atomically_removes_enum_contract():
 
     param = new.steps[0].params[0]
     assert param.type == "string"
-    assert param.source_kind == "user_input"
-    assert param.enum_options is None
-    assert param.enum_value_map is None
-    assert param.reason == "字段已改为普通输入，不再使用旧枚举候选"
-    assert param.description == "业务类型"
-    assert new.steps[0].selects == []
+    assert param.source_kind == "page_enum"
+    assert param.enum_options == [{"label": "类型A", "value": "A"}]
+    assert param.enum_value_map == {"类型A": "A"}
+    assert "页面枚举选项" in (param.reason or "")
+    assert "业务类型" in (param.description or "")
+    assert len(new.steps[0].selects) == 1
 
 
 def test_manual_field_contract_is_not_reinferred_from_stale_select_binding():
@@ -2680,76 +2642,10 @@ def test_remove_capability_step_clears_request_usage_without_deleting_step():
     assert edited.request_facts.usage["req-date"].materialized_step_id == "read"
 
 
-def test_recording_v3_golden_shadow_and_adapters():
-    fixture = Path(__file__).parent / "fixtures" / "recording_v3" / "daily_report_flow_spec.json"
-    spec = FlowSpec.model_validate(json.loads(fixture.read_text(encoding="utf-8")))
-
-    migrated = migrate_v2_flow_spec_to_capability_spec(spec)
-    canonical = flow_spec_canonical_summary(migrated)
-    shadow = flow_spec_shadow_diff(migrated)
-    legacy_view = capability_spec_to_legacy_flow_spec(migrated, capability_name="submit_batch")
-    scoped_api, scoped_errors = capability_spec_to_api_request(migrated, capability_name="submit_batch")
-
-    assert canonical["protocol"] == "dano.recording_shadow.v1"
-    assert canonical["request_facts"]["request_count"] == 2
-    assert canonical["capabilities"][0]["name"] == "submit_batch"
-    assert canonical["capabilities"][0]["node_types"] == ["call", "foreach", "call", "return"]
-    assert canonical["summary_hash"]
-
-    assert shadow["passed"] is True
-    assert shadow["legacy"]["shape"]["capability_protocol"] == "dano.capability_plan.v1"
-    assert shadow["capabilities"][0]["passed"] is True
-
-    assert [s.step_id for s in legacy_view.steps] == ["query_missing", "submit_report"]
-    assert scoped_errors == []
-    assert scoped_api["selected_capability"]["name"] == "submit_batch"
-    assert scoped_api["capability_contracts"][0]["execution_contract"]["batch"]["items_field"] == "entries"
 
 
-def test_v2_migration_repairs_public_capability_name_kind_mismatch():
-    spec = FlowSpec(
-        steps=[FlowStep(
-            step_id="submit", method="POST", path="/submit", url="/submit",
-            body_source='{"reason":"x"}',
-            params=[ParamField(path="reason", key="原因")],
-        )],
-        capabilities=[FlowCapability(
-            name="submit_batch", title="批量提交请假申请", kind="submit",
-            step_ids=["submit"], nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
-        )],
-    )
-
-    migrated = migrate_v2_flow_spec_to_capability_spec(spec)
-    cap = migrated.capabilities[0]
-
-    assert cap.name == "submit"
-    assert cap.kind == "submit"
-    assert "批量" not in cap.title
-    assert "entries" not in (cap.input_schema.get("properties") or {})
 
 
-def test_v1_adapter_generates_default_capability_without_request_facts():
-    spec = FlowSpec(
-        flow_id="legacy-v1",
-        title="提交旧表单",
-        steps=[FlowStep(
-            step_id="submit",
-            method="POST",
-            url="/api/submit",
-            path="/api/submit",
-            body_source='{"reason":"old"}',
-            params=[ParamField(path="reason", key="reason", value="old", type="string", required=True)],
-            sample_inputs={"reason": "old"},
-        )],
-    )
-
-    migrated = migrate_v1_flow_spec_to_capability_spec(spec)
-    api_request, errors = capability_spec_to_api_request(migrated)
-
-    assert errors == []
-    assert migrated.capabilities
-    assert migrated.request_facts.protocol == "dano.request_facts.v1"
-    assert api_request["capability_protocol"] == "dano.capability_plan.v1"
 
 
 def test_auto_fix_promotes_high_confidence_request_into_capability_closure():
@@ -3301,7 +3197,7 @@ def test_legacy_dual_required_fields_are_discarded():
     assert "required_source" not in payload
 
 
-def test_enum_to_scalar_rebuilds_capability_schema_without_stale_keywords():
+def test_scalar_type_controls_capability_schema_without_deleting_enum_evidence():
     spec = FlowSpec(
         flow_id="enum-scalar-contract",
         steps=[FlowStep(
@@ -3331,7 +3227,7 @@ def test_enum_to_scalar_rebuilds_capability_schema_without_stale_keywords():
 
     assert schema["type"] == "string"
     assert not ({"enum", "x-options", "x-enum-value-map", "format"} & set(schema))
-    assert edited.steps[0].selects == []
+    assert len(edited.steps[0].selects) == 1
 
 
 def test_enum_option_description_replaces_stale_snapshot_instead_of_appending():
@@ -3935,27 +3831,6 @@ def test_flow_spec_to_api_request_can_compile_single_capability_without_changing
     assert direct["selected_capability"]["name"] == "query_status"
 
 
-def test_shadow_diff_detects_existing_step_missing_from_scoped_compile(monkeypatch):
-    spec = _two_capability_compile_spec()
-    real_compile = flow_spec_module.capability_spec_to_api_request
-
-    def fake_compile(flow_spec, *args, **kwargs):
-        api, errors = real_compile(flow_spec, *args, **kwargs)
-        if kwargs.get("capability_id") and api:
-            api = json.loads(json.dumps(api, ensure_ascii=False))
-            api["steps"] = []
-            api.pop("step_id", None)
-            for cap in api.get("capabilities") or []:
-                cap["compiled_step_ids"] = []
-        return api, errors
-
-    monkeypatch.setitem(flow_spec_shadow_diff.__globals__, "capability_spec_to_api_request", fake_compile)
-
-    shadow = flow_spec_shadow_diff(spec)
-    submit_report = next(x for x in shadow["capabilities"] if x["capability_id"] == "cap-submit")
-
-    assert shadow["passed"] is False
-    assert submit_report["missing_steps"] == ["submit"]
 
 
 def test_capability_validation_reports_three_layers_and_bad_dependency_output_relation():
@@ -4350,8 +4225,8 @@ def test_manual_field_contract_is_locked_against_planner_overwrite():
     assert param.source_kind == "user_input"
 
 
-def test_manual_user_input_override_removes_inferred_option_contract_permanently():
-    """人工把误判的接口枚举改为手输后，同步/优化都不得恢复旧来源。"""
+def test_manual_source_override_is_preserved_without_rewriting_type_or_evidence():
+    """人工来源是最终结果；类型和录制证据保持独立，不做跨字段强制改写。"""
     spec = FlowSpec(
         flow_id="manual-query-source-override",
         steps=[FlowStep(
@@ -4390,28 +4265,27 @@ def test_manual_user_input_override_removes_inferred_option_contract_permanently
     )
 
     edited = apply_flow_edits(spec, [{
-        "op": "update",
-        "step_id": "query",
-        "param_path": "query.useInfo",
-        "field": "source_kind",
-        "value": "user_input",
-        "actor": "user",
+        "op": "update", "step_id": "query", "param_path": "query.useInfo",
+        "field": "source_kind", "value": "user_input", "actor": "user",
+    }, {
+        "op": "update", "step_id": "query", "param_path": "query.useInfo",
+        "field": "source", "value": {"kind": "sample", "path": "query.useInfo"}, "actor": "user",
     }])
     param = edited.steps[0].params[0]
     assert param.locked is True
-    assert param.type == "string"
+    assert param.type == "enum"
     assert param.category == "user_param"
     assert param.source_kind == "user_input"
     assert param.source["kind"] == "sample"
-    assert param.enum_options is None
-    assert param.enum_value_map is None
-    assert edited.steps[0].selects == []
+    assert param.enum_options == [{"label": "候选十二", "value": "12"}]
+    assert param.enum_value_map == {"候选十二": "12"}
+    assert len(edited.steps[0].selects) == 1
 
     synced = sync_flow_spec_models(edited, prefer_request_facts=False)
     synced_param = synced.steps[0].params[0]
-    assert synced_param.type == "string"
+    assert synced_param.type == "enum"
     assert synced_param.source_kind == "user_input"
-    assert synced.steps[0].selects == []
+    assert len(synced.steps[0].selects) == 1
 
     class Planner:
         async def complete_json(self, **_kwargs):
@@ -4433,9 +4307,9 @@ def test_manual_user_input_override_removes_inferred_option_contract_permanently
         allow_scope_changes=False,
     ))
     optimized_param = optimized.steps[0].params[0]
-    assert optimized_param.type == "string"
+    assert optimized_param.type == "enum"
     assert optimized_param.source_kind == "user_input"
-    assert optimized.steps[0].selects == []
+    assert len(optimized.steps[0].selects) == 1
 
 
 def test_incremental_planner_cannot_overwrite_user_confirmed_capability_identity_or_title():
@@ -4727,7 +4601,7 @@ def test_dynamic_option_snapshot_is_not_a_hard_capability_enum():
     assert "enum" not in field
 
 
-def test_activity_id_cannot_be_changed_into_random_uuid_and_capability_view_stays_in_sync():
+def test_manual_activity_id_source_is_not_overridden_by_engine_specific_rules():
     step = FlowStep(
         step_id="approval",
         method="GET",
@@ -4776,19 +4650,19 @@ def test_activity_id_cannot_be_changed_into_random_uuid_and_capability_view_stay
     ])
 
     param = changed.steps[0].params[0]
-    assert param.category == "system_const"
-    assert param.source_kind == "constant"
-    assert param.source["semantic"] == "workflow_identifier"
+    assert param.category == "runtime_var"
+    assert param.source_kind == "system_generated"
+    assert param.source == {"kind": "system_generated", "strategy": "uuid"}
     assert param.value == "StartUserNode"
     field = changed.capabilities[0].internal_fields[0]
-    assert field.source_kind == "constant"
+    assert field.source_kind == "system_generated"
     assert field.exposed_to_caller is False
     report = validate_flow_spec(changed)
     text = "\n".join([*report["errors"], *report["warnings"]])
     assert "activityId" not in text
 
 
-def test_leave_skill_repairs_process_id_flattens_submit_and_excludes_option_reads_from_query():
+def test_capability_sync_preserves_process_field_and_excludes_option_reads_from_query():
     process_id = "oa_duty_leave:4:f92ff5"
     process = FlowStep(
         step_id="process",
@@ -4876,10 +4750,9 @@ def test_leave_skill_repairs_process_id_flattens_submit_and_excludes_option_read
     assert "processDefinitionId" not in write.input_schema["properties"]
     assert set(write.input_schema["properties"]) == {"类型", "原因", "审批人1", "审批人2"}
     process_param = approval.params[0]
-    assert process_param.category == "runtime_var"
-    assert process_param.source_kind == "previous_response"
-    assert process_param.source["step_id"] == "process"
-    assert process_param.source["response_path"] == "data.id"
+    assert process_param.category == "system_const"
+    assert process_param.source_kind == "constant"
+    assert not synced.links
 
 
 def test_query_list_response_uses_records_and_total_output_contract():
@@ -4973,112 +4846,20 @@ def test_publish_issue_groups_deduplicate_same_link_and_classify_diagnostics():
     spec.review_items = flow_spec_module.build_review_items(spec)
 
     report = validate_flow_spec(spec)
-    dependency_items = report["issue_groups"].get("dependency") or []
-    diagnostic_items = report["issue_groups"].get("diagnostic") or []
-
-    assert not dependency_items
+    assert not any(report["issue_groups"].values())
     assert any("same-link" in item for item in report["suggestions"])
-    assert any("页面异常" in item["message"] for item in diagnostic_items)
-    assert not any("ERR_CONNECTION_CLOSED" in item["message"] for item in diagnostic_items)
+    assert any("页面异常" in item for item in report["suggestions"])
+    assert not any("ERR_CONNECTION_CLOSED" in item for item in report["suggestions"])
 
 
-def test_publish_validator_field_and_capability_issues_have_locatable_targets():
-    spec = FlowSpec(
-        flow_id="locatable",
-        steps=[FlowStep(
-            step_id="submit",
-            method="POST",
-            path="/api/hotel/submit",
-            params=[ParamField(path="roomType", key="房间类型", value="2")],
-        )],
-        capabilities=[FlowCapability(
-            name="submit_hotel",
-            kind="submit",
-            step_ids=["submit"],
-        )],
-    )
+def test_request_builder_issue_has_flow_anchor_without_waiver_protocol():
+    grouped = flow_spec_module._publish_issue_groups(["无法构造请求"], [])
+    item = grouped["execution"][0]
 
-    grouped = flow_spec_module._publish_issue_groups(
-        spec,
-        [
-            "字段 `房间类型` 看起来是内部 ID/短码，不能直接暴露给用户",
-            "Capability `submit_hotel` 尚未确认；请确认该能力或从发布范围移除",
-        ],
-        [],
-        [],
-    )
-
-    field_target = grouped["field"][0]["target"]
-    assert field_target["step_id"] == "submit"
-    assert field_target["path"] == "roomType"
-    assert field_target["capability"] == "submit_hotel"
-    capability_target = grouped["capability"][0]["target"]
-    assert capability_target["kind"] == "capability"
-    assert capability_target["capability"] == "submit_hotel"
-    assert capability_target["capability_name"] == "submit_hotel"
-    assert capability_target["capability_index"] == 0
-
-
-def test_publish_capability_field_id_resolves_exact_body_field_anchor():
-    spec = FlowSpec(
-        flow_id="capability-field-location",
-        steps=[FlowStep(
-            step_id="submit",
-            method="POST",
-            path="/api/seal/submit",
-            params=[ParamField(path="body.processStatus", key="流程状态", value="1")],
-        )],
-        capabilities=[FlowCapability(
-            name="submit_seal",
-            kind="submit",
-            step_ids=["submit"],
-            request_fields=[CapabilityField(
-                field_id="process-status",
-                scope="request_field",
-                step_id="submit",
-                path="body.processStatus",
-                key="流程状态",
-            )],
-        )],
-    )
-
-    field_id = spec.capabilities[0].request_fields[0].field_id
-    grouped = flow_spec_module._publish_issue_groups(
-        spec,
-        [],
-        [],
-        [flow_spec_module.ReviewItem(
-            id="enum-location",
-            type="field_enum",
-            severity="high",
-            title="流程状态枚举不完整",
-            target={
-                "kind": "capability_field",
-                "capability": "submit_seal",
-                "field_id": field_id,
-            },
-        )],
-    )
-
-    target = grouped["field"][0]["target"]
-    assert target["capability_name"] == "submit_seal"
-    assert target["step_id"] == "submit"
-    assert target["path"] == "body.processStatus"
-
-
-def test_publish_legacy_unstructured_issue_does_not_fabricate_location():
-    spec = FlowSpec(flow_id="legacy-no-location")
-
-    grouped = flow_spec_module._publish_issue_groups(
-        spec,
-        ["旧版校验失败，缺少任何字段或能力标识"],
-        [],
-        [],
-    )
-
-    legacy_items = [item for items in grouped.values() for item in items]
-    assert len(legacy_items) == 1
-    assert legacy_items[0]["target"] == {}
+    assert item["target"] == {"kind": "flow"}
+    assert item["blocking"] is True
+    assert "ignorable" not in item
+    assert "ignored" not in item
 
 
 def test_remove_capability_cleans_relations_and_scopes_publish_findings():
@@ -5282,7 +5063,7 @@ def test_manual_enum_guess_does_not_veto_operator_confirmation():
     assert confirmed.capabilities[0].confirmed is True
 
 
-def test_change_enum_source_to_user_input_atomically_removes_stale_option_contract():
+def test_change_enum_source_only_preserves_type_and_recorded_option_evidence():
     spec = _enum_policy_spec(ParamField(
         path="query.useInfo", key="使用描述", value="12", type="enum", wire_type="string",
         category="user_param", source_kind="api_option",
@@ -5299,9 +5080,10 @@ def test_change_enum_source_to_user_input_atomically_removes_stale_option_contra
     }])
     param = edited.steps[0].params[0]
 
-    assert (param.type, param.source_kind) == ("string", "user_input")
-    assert param.enum_options is None and param.enum_value_map is None
-    assert edited.steps[0].selects == []
+    assert (param.type, param.source_kind) == ("enum", "user_input")
+    assert param.enum_options == [{"label": "测试", "value": "7"}]
+    assert param.enum_value_map == {"测试": "7"}
+    assert len(edited.steps[0].selects) == 1
     assert "枚举字段" not in "\n".join(validate_flow_spec(edited)["errors"])
 
 

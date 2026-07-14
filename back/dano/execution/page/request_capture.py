@@ -49,8 +49,6 @@ def extract_auth_headers(headers: dict | None) -> dict:
             continue
         out[k] = v
     return out
-
-
 # 标记"这层原本是字符串化的 JSON"(如若依/工作流把整张表单打成一段 JSON 文本塞进 formData):
 # 运行期 substitute 据此把填好值的内层结构 re-stringify 回字符串,目标系统照常解析。
 _JSONSTR = "__dano_jsonstr__"
@@ -246,8 +244,6 @@ def _leaf_paths(body) -> list[tuple]:
 
     walk(body, "", [])
     return out
-
-
 def normalized_leaf_paths(
     body,
     *,
@@ -301,8 +297,6 @@ def normalized_leaf_paths(
 
     walk(body, "", 0)
     return out
-
-
 def bounded_response_sample(
     value,
     *,
@@ -348,21 +342,6 @@ def bounded_response_sample(
     return value
 
 
-def _find_value_path(node, value, prefix: str = "") -> str | None:
-    """在 node 里找一个叶子值 == value 的点路径(深度优先,返回第一个)。无则 None。"""
-    if isinstance(node, dict):
-        for k, v in node.items():
-            r = _find_value_path(v, value, f"{prefix}.{k}" if prefix else k)
-            if r is not None:
-                return r
-    elif isinstance(node, list):
-        for i, v in enumerate(node):
-            r = _find_value_path(v, value, f"{prefix}[{i}]")
-            if r is not None:
-                return r
-    elif node is not None and not isinstance(node, bool) and str(node) == str(value):
-        return prefix or None
-    return None
 
 
 def _tokens_to_str(toks) -> str:
@@ -612,7 +591,7 @@ def _option_map_matches_source(entry: dict) -> bool:
 
 
 _CN_FIELD_ALIASES = {
-    "类型": {"type", "kind", "category", "class", "leaveType", "gslx"},
+    "类型": {"type", "kind", "category", "class"},
     "类别": {"type", "kind", "category", "class"},
     "状态": {"status", "state"},
     "项目": {"project", "xm", "xmId", "projectId"},
@@ -1619,20 +1598,6 @@ def suggest_fact_check(samples: dict, reads: list[dict]) -> dict | None:
     return None
 
 
-def list_read_requests(reads: list[dict]) -> list[dict]:
-    """从抓到的读响应里挑出「列表型」候选(select 候选源),给出条数 + 列表项字段名。
-
-    供 P3 让用户把某个提交字段(如 approverId)绑定到「来自哪个列表 + 哪个字段是名字/哪个是值」。
-    """
-    out: list[dict] = []
-    for r in reads:
-        items = as_list_payload(r.get("json"))
-        if not items:
-            continue
-        first = items[0] if isinstance(items[0], dict) else {}
-        out.append({"url": r.get("url"), "count": len(items),
-                    "item_keys": list(first.keys())[:20]})
-    return out
 
 
 def pick_submit_request(requests: list[dict], samples: dict) -> dict | None:
@@ -1709,53 +1674,6 @@ def suggest_workflow_steps(writes: list[dict], samples: dict) -> list[int]:
     return [biz[p][0] for p in ordered]
 
 
-def parameterize_request(req: dict, samples: dict, base_url: str = "") -> dict | None:
-    """把请求体里"等于用户样例值"的字段替换成 {{字段}} 占位;内部 ID/常量保持原样。
-
-    返回 {method, path, body_template(占位后的JSON), params:[字段], sample_inputs, content_type}。
-    """
-    body = _parse_body(req.get("post_data"))
-    if body is None:
-        return None
-    val2fields: dict[str, list[str]] = {}
-    for k, v in (samples or {}).items():
-        if v in ("", None):
-            continue
-        val2fields.setdefault(str(v), []).append(k)
-    params: dict[str, str] = {}
-
-    def walk(node, provenance: list | None = None, path: str = ""):
-        if isinstance(node, dict):
-            return {k: walk(v, provenance, f"{path}.{k}" if path else k) for k, v in node.items()}
-        if isinstance(node, list):
-            return [walk(x, provenance, f"{path}[{i}]") for i, x in enumerate(node)]
-        sv = str(node)
-        if val2fields.get(sv):                         # 这个值是用户填的 → 变参数；同值字段按叶子顺序逐个消费
-            f = val2fields[sv].pop(0)
-            params[f] = sv
-            if provenance is not None:
-                provenance.append({"path": path, "field": f, "kind": "user_input", "source": "sample"})
-            return "{{" + f + "}}"
-        # H15 修复:常量/内部 ID 也记入 provenance,审计可追溯"为什么这个字段没被参数化"
-        if provenance is not None and path:
-            provenance.append({"path": path, "field": None, "kind": "constant", "source": "raw_value"})
-        return node                                    # 内部 ID/常量 → 原样保留
-
-    provenance: list[dict] = []                       # H15:全字段溯源数组,前端/修复期可见
-    templ = walk(body, provenance)
-    url = req.get("url") or ""
-    path = url
-    if base_url and url.startswith(base_url):
-        path = url[len(base_url):] or "/"
-    elif url.startswith("http"):                       # 去掉协议+域名,留 path(+query)
-        from urllib.parse import urlparse
-        u = urlparse(url)
-        path = (u.path or "/") + (("?" + u.query) if u.query else "")
-    return {"method": (req.get("method") or "POST").upper(), "path": path, "url": url,
-            "content_type": req.get("content_type", "application/json"),
-            "body_template": templ, "params": list(params.keys()),
-            "sample_inputs": params, "auth_headers": extract_auth_headers(req.get("headers")),
-            "provenance": provenance}                  # H15 修复:全字段溯源(用户值+常量都记),供接口图全追溯
 
 
 # key 像内部标识(默认不当参数):以 id/key/code/token/... 结尾
@@ -1901,9 +1819,6 @@ def capture_verification_plan(deploy: dict | None, api_request: dict) -> dict:
     return {"mode": "structural", "controllability": ctrl, "fact_check": has_fc, "reason": reason}
 
 
-def test_data_tag(run_id: str) -> str:
-    """活体真跑时给测试单据打的唯一标记 → 便于事后识别/撤销,避免污染真实审批队列。"""
-    return f"[DANO-TEST-{run_id}]"
 
 
 # 危险写概念(整段命中,跨系统通用):删除/驳回/终止/撤销 —— 这类不做自动化录入(代他人删/驳回风险)。
@@ -2145,18 +2060,6 @@ def validate_goal(goal: dict, api_request: dict) -> list[str]:
     return out
 
 
-def merge_llm_field_names(fields: list[dict], llm_names: dict) -> list[dict]:
-    """把 LLM 提议的字段中文名**只**补到「确定性没把握」的字段上(suggest_name 仍等于原始 key);
-    确定性已确信的名字(值对到 DOM 标签)**绝不覆盖**。打 `name_source="llm"` 标记。通用,不挑系统。"""
-    if not llm_names:
-        return fields
-    for f in fields:
-        key = f.get("key")
-        proposed = llm_names.get(key) or llm_names.get(f.get("path"))
-        if proposed and f.get("suggest_name") == key and str(proposed).strip() and str(proposed).strip() != key:
-            f["suggest_name"] = str(proposed).strip()
-            f["name_source"] = "llm"                  # 标明此名是 LLM 提议(供前端区分/用户确认)
-    return fields
 
 
 def goal_needs_confirmation(goal: dict | None) -> bool:
@@ -4351,31 +4254,3 @@ async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
             if notes:
                 out["fact_check_note"] = "；".join(notes)
     return out
-
-
-def build_api_workflow(writes: list[dict], *, param_map: dict, base_url: str = "",
-                       selects: list[dict] | None = None, identity: list[dict] | None = None,
-                       typed: dict | None = None) -> dict:
-    """把有序写请求组装成多步工作流(Q3):每步=一个抓到的请求;**最后一步**带用户参数/select/identity,
-    其余步是常量(其动态值靠步链注入);自动发现步间数据流(taskId 等)挂到对应目标步。
-
-    返回 {steps:[...]}(放进 PageScriptBody.api_request;运行期 execute_api 自动走工作流)。
-    """
-    n = len(writes)
-    steps: list[dict] = []
-    for i, w in enumerate(writes):
-        last = i == n - 1
-        apir = build_api_request(w, param_map if last else {}, base_url,
-                                 selects=selects if last else None,
-                                 identity=identity if last else None,
-                                 typed=typed if last else None)
-        st = apir or {}
-        if w.get("response_json") is not None:
-            st["response_json"] = w["response_json"]         # 供修复期校验 link 的 source_path(引用必须真实)
-        steps.append(st)
-    for lk in discover_step_links(writes):                   # 步间数据流挂到目标步
-        steps[lk["target_step"]].setdefault("links", []).append(
-            {"target_path": lk["target_path"], "target_tokens": lk.get("target_tokens"),
-             "source_step": lk["source_step"],
-             "source_path": lk["source_path"], "source_tokens": lk.get("source_tokens")})
-    return {"steps": steps}

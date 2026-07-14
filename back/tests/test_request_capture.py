@@ -13,7 +13,6 @@ from dano.execution.page.request_capture import (
     classify_network_request as classify_capture_request,
     infer_success_rule,
     build_api_request,
-    build_api_workflow,
     _extract_total,
     discover_step_links,
     execute_api,
@@ -25,8 +24,6 @@ from dano.execution.page.request_capture import (
     flatten_body,
     fetch_field_options,
     json_write_requests,
-    list_read_requests,
-    parameterize_request,
     pick_submit_request,
     resolve_identity_value,
     self_check,
@@ -133,52 +130,6 @@ def test_graphql_request_is_explicitly_marked_unsupported():
     assert role["keep"] is False
 
 
-def test_parameterize_repeated_values_in_nested_business_list_independently():
-    """同一个录制值出现在多个字段时，必须按字段顺序生成不同参数，不能互相覆盖。"""
-    body = {
-        "ssbmId": "02021060111315890400000101001838",
-        "bmId": "02021060111315890400000101001838",
-        "csmc": "1",
-        "ercsmc": "1",
-        "qzms": "1123123123",
-        "lxr": "1",
-        "lxfs": "13243211234",
-        "ssbmmc": "dept-name",
-        "ywsxList": [{
-            "ywsxmc": "1",
-            "yyxtid": "02025092210431550900000101539125",
-            "ssxts": "",
-            "catalogStatus": "",
-            "yyxtmc": "system-name",
-            "tableHcommentList": [],
-            "ywsxKbList": [],
-        }],
-        "ywsxKbList": [],
-    }
-    samples = {
-        "level1": "1",
-        "level2": "1",
-        "desc": "1123123123",
-        "contact": "1",
-        "phone": "13243211234",
-        "businessItem": "1",
-        "system": "system-name",
-    }
-    out = parameterize_request({
-        "method": "POST",
-        "url": "https://oa/api/save",
-        "post_data": json.dumps(body, ensure_ascii=False),
-        "content_type": "application/json",
-    }, samples)
-
-    assert out["params"] == ["level1", "level2", "desc", "contact", "phone", "businessItem", "system"]
-    templ = out["body_template"]
-    assert templ["csmc"] == "{{level1}}"
-    assert templ["ercsmc"] == "{{level2}}"
-    assert templ["lxr"] == "{{contact}}"
-    assert templ["ywsxList"][0]["ywsxmc"] == "{{businessItem}}"
-    assert templ["ssbmId"] == body["ssbmId"]
-    assert templ["ywsxList"][0]["yyxtid"] == body["ywsxList"][0]["yyxtid"]
 
 
 def test_suggest_selects_binds_nested_name_id_pair_for_business_system():
@@ -239,18 +190,6 @@ def test_list_selects_does_not_collapse_editable_detail_rows():
     assert suggest_list_selects(post, reads, {"职能清单": "123123qweqw", "所属系统": "交通信息系统01"}) == []
 
 
-def test_list_read_requests_surfaces_select_candidates():
-    """P2:从读响应挑出「选领导」这类候选源,给出条数 + 列表项字段名(供 P3 绑定 label/value)。"""
-    reads = [
-        {"url": "http://oa.x/prod-api/system/user/list",
-         "json": {"rows": [{"userId": 12, "nickName": "张经理", "dept": "研发"},
-                           {"userId": 34, "nickName": "李总", "dept": "行政"}]}},
-        {"url": "http://oa.x/prod-api/getInfo", "json": {"code": 200}},     # 非列表 → 不入选
-    ]
-    cands = list_read_requests(reads)
-    assert len(cands) == 1
-    assert cands[0]["url"].endswith("/system/user/list") and cands[0]["count"] == 2
-    assert "userId" in cands[0]["item_keys"] and "nickName" in cands[0]["item_keys"]
 
 
 def test_suggest_selects_binds_field_to_list_source():
@@ -1238,16 +1177,6 @@ def test_build_api_request_learns_success_rule_from_own_response():
     assert apir["response_json"]["data"]["taskId"] == "T1"
 
 
-def test_build_api_workflow_last_step_learns_success_rule():
-    """P1(多步):最后一步(提交)从自身响应学 success_rule,即便没单独 GET 查询读。"""
-    writes = [
-        {"method": "POST", "url": "http://oa/create", "post_data": '{"x":1}',
-         "response_json": {"code": 200, "data": {"taskId": "T9"}}},
-        {"method": "POST", "url": "http://oa/submit", "post_data": '{"reason":"回家","taskId":"T9"}',
-         "response_json": {"success": True}},
-    ]
-    wf = build_api_workflow(writes, param_map={"reason": "原因"}, typed={"原因": "回家"})
-    assert wf["steps"][-1]["success_rule"]["field"] == "success"
 
 
 def test_build_api_request_carries_select_id_pair():
@@ -1778,22 +1707,6 @@ def test_self_check_flags_missing_link_source_path_when_response_sample_exists()
     assert any("来源路径" in p and "data.missing" in p for p in self_check(workflow))
 
 
-def test_build_api_workflow_assembles_steps_links_and_last_params():
-    """组装多步:参数落最后一步;步链(taskId)自动挂到目标步;前置步是常量。"""
-    writes = [
-        {"method": "POST", "url": "http://oa.x/flow/start", "post_data": '{"procDefKey":"oa_leave"}',
-         "response_json": {"data": {"taskId": "TASK-5566"}}},
-        {"method": "POST", "url": "http://oa.x/flow/submit",
-         "post_data": '{"taskId":"TASK-5566","reason":"回家"}', "response_json": {"code": 200}},
-    ]
-    wf = build_api_workflow(writes, param_map={"reason": "reason"})
-    assert len(wf["steps"]) == 2
-    assert wf["steps"][0]["body_template"] == {"procDefKey": "oa_leave"}     # 前置步全常量
-    assert wf["steps"][1]["body_template"]["reason"] == "{{reason}}"          # 最后一步带用户参数
-    assert wf["steps"][1]["params"] == ["reason"]
-    assert wf["steps"][1]["links"] == [{"target_path": "taskId", "target_tokens": ["taskId"],
-                                        "source_step": 0, "source_path": "data.taskId",
-                                        "source_tokens": ["data", "taskId"]}]
 
 
 async def test_execute_api_dispatches_single_and_workflow():
@@ -2239,24 +2152,8 @@ def test_pick_submit_skips_noise_and_picks_by_value_match():
     assert req["url"].endswith("/oa/leave/start")          # 含最多用户填的值的写请求,跳过 login/captcha
 
 
-def test_parameterize_user_values_keep_internal_constants():
-    req = pick_submit_request(_REQUESTS, _SAMPLES)
-    p = parameterize_request(req, _SAMPLES, base_url="http://oa.x/prod-api")
-    assert p["method"] == "POST" and p["path"] == "/oa/leave/start"
-    assert set(p["params"]) == {"请假类型", "开始时间", "结束时间", "原因"}   # 4 个填的值都成参数
-    assert p["body_template"]["leaveType"] == "{{请假类型}}"
-    assert p["body_template"]["reason"] == "{{原因}}"
-    assert p["body_template"]["procDefId"] == "PROC123"    # 内部 ID 保持常量
-    assert p["body_template"]["draft"] is False            # 布尔常量不动
 
 
-def test_substitute_fills_params_at_runtime():
-    req = pick_submit_request(_REQUESTS, _SAMPLES)
-    p = parameterize_request(req, _SAMPLES, base_url="http://oa.x/prod-api")
-    body = substitute(p["body_template"], {"请假类型": "病假", "开始时间": "2026-07-01",
-                                           "结束时间": "2026-07-02", "原因": "感冒"})
-    assert body["leaveType"] == "病假" and body["reason"] == "感冒"
-    assert body["procDefId"] == "PROC123" and body["draft"] is False   # 常量原样
 
 
 def test_substitute_falls_back_to_recorded_default():
@@ -2269,9 +2166,6 @@ def test_substitute_falls_back_to_recorded_default():
     assert body["leaveType"] == "事假"                         # 没传 → 录制原值
 
 
-def test_non_json_body_returns_none():
-    # 纯文本(非 JSON、非表单)→ None;form-urlencoded 现已支持,见 test_parse_body_form_urlencoded
-    assert parameterize_request({"method": "POST", "url": "/x", "post_data": "plain text no kv"}, _SAMPLES) is None
 
 
 def test_real_leave_body_fixed_fields_preserved_generally():
@@ -2806,64 +2700,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b'{"code":200,"echo":' + (raw or b'{}') + b'}')   # 回显收到的 body
 
 
-async def test_capture_submit_request_e2e():
-    pytest.importorskip("playwright")
-    from dano.execution.page.driver import PlaywrightPageDriver
-    from dano.execution.page.recorder import RecordSession
-    try:
-        d, _ = await PlaywrightPageDriver.launch(headless=True); await d.close()
-    except Exception:  # noqa: BLE001
-        pytest.skip("chromium 未安装")
-
-    httpd = socketserver.TCPServer(("127.0.0.1", 0), _Handler)
-    port = httpd.server_address[1]
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    try:
-        sess = RecordSession()
-        await sess.start(f"http://127.0.0.1:{port}/")
-        await sess.page.fill("#reason", "大地色多")
-        await sess.page.click("#submit")               # JS fetch POST → 抓到提交请求
-        await sess.page.wait_for_timeout(500)
-        reqs = sess.captured_requests()
-        await sess.stop()
-    finally:
-        httpd.shutdown()
-
-    req = pick_submit_request(reqs, {"原因": "大地色多"})
-    assert req is not None and req["url"].endswith("/prod-api/oa/leave/start")
-    p = parameterize_request(req, {"原因": "大地色多"}, base_url=f"http://127.0.0.1:{port}/prod-api")
-    assert p["method"] == "POST" and p["path"] == "/oa/leave/start"
-    assert p["body_template"]["reason"] == "{{原因}}"      # 用户填的值→参数
-    assert p["body_template"]["procDefId"] == "P1"        # 内部常量保留
 
 
-async def test_capture_reads_e2e():
-    """P2 真浏览器:页面加载时拉的「选领导」列表(GET+JSON 数组)被抓为 read 候选源(给 Q2 的 select 用)。"""
-    pytest.importorskip("playwright")
-    from dano.execution.page.driver import PlaywrightPageDriver
-    from dano.execution.page.recorder import RecordSession
-    from dano.execution.page.request_capture import list_read_requests
-    try:
-        d, _ = await PlaywrightPageDriver.launch(headless=True); await d.close()
-    except Exception:  # noqa: BLE001
-        pytest.skip("chromium 未安装")
-
-    httpd = socketserver.TCPServer(("127.0.0.1", 0), _Handler)
-    port = httpd.server_address[1]
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    try:
-        sess = RecordSession()
-        await sess.start(f"http://127.0.0.1:{port}/")
-        await sess.page.wait_for_timeout(700)          # 等页面 load 时的 GET 列表回来
-        reads = sess.captured_reads()
-        await sess.stop()
-    finally:
-        httpd.shutdown()
-
-    cands = list_read_requests(reads)
-    leaders = [c for c in cands if c["url"].endswith("/system/user/list")]
-    assert leaders and leaders[0]["count"] == 2                     # 抓到 2 人的候选列表
-    assert "userId" in leaders[0]["item_keys"] and "nickName" in leaders[0]["item_keys"]  # 供 P3 绑 value/label
 
 
 async def test_recorder_captures_required_star_elementui():
@@ -2909,76 +2747,6 @@ async def test_recorder_captures_required_star_elementui():
     assert "未操作字段" in observed_labels  # 页面级扫描不能依赖字段已被操作
 
 
-async def test_request_onboarding_publish_and_execute(tmp_path):
-    """端到端:抓提交请求 → 发布成 Skill → 真发(新参数值,服务器回显验证)。PG+chromium 门控。"""
-    pytest.importorskip("playwright")
-    pytest.importorskip("asyncpg")
-    import socketserver as _ss
-    import threading as _th
-    from uuid import uuid4
-
-    from dano.assets.repository import AssetRepository
-    from dano.execution.page.driver import PlaywrightPageDriver
-    from dano.execution.page.recorder import RecordSession
-    from dano.execution.page.request_capture import execute_api_request
-    from dano.infra.db import close_pool, get_pool, init_pool
-    from dano.onboarding.page_onboard import run_request_onboarding
-    from dano.orchestrator.skills import SkillRegistry
-    from dano.shared.enums import Subsystem
-
-    try:
-        await init_pool()
-    except Exception:  # noqa: BLE001
-        pytest.skip("PG 不可用")
-    try:
-        d, _ = await PlaywrightPageDriver.launch(headless=True); await d.close()
-    except Exception:  # noqa: BLE001
-        await close_pool(); pytest.skip("chromium 不可用")
-
-    httpd = _ss.TCPServer(("127.0.0.1", 0), _Handler)
-    port = httpd.server_address[1]
-    _th.Thread(target=httpd.serve_forever, daemon=True).start()
-    from dano.agent_tools import tools as _T
-    _T.set_review_board(_FakeBoard())                       # 录制抓请求免评审;留 fake 板作安全网(绝不触真 LLM)
-    tenant = f"req-e2e-{uuid4().hex[:8]}"
-    sid = Subsystem.REIMBURSE.value
-    try:
-        sess = RecordSession()
-        await sess.start(f"http://127.0.0.1:{port}/")
-        await sess.page.fill("#reason", "大地色多")
-        await sess.page.click("#submit")
-        await sess.page.wait_for_timeout(500)
-        reqs = sess.captured_requests()
-        await sess.stop()
-
-        req = pick_submit_request(reqs, {"原因": "大地色多"})
-        apir = parameterize_request(req, {"原因": "大地色多"})
-        assert apir["body_template"]["reason"] == "{{原因}}"
-
-        rep = await run_request_onboarding(tenant=tenant, subsystem=sid, action="submit_leave",
-                                           title="请假", api_request=apir,
-                                           sample_inputs=apir["sample_inputs"])
-        assert rep["ok"] is True, rep                       # 发布成功(录制抓请求免三模型评审 + self_check)
-        assert rep["status"] == "partially_verified"        # capture dry-only:结构已验、活体未验(诚实降级)
-
-        reg = await SkillRegistry.from_store(AssetRepository(), tenant=tenant,
-                                             subsystems=[Subsystem.REIMBURSE])
-        sk = reg.by_action(Subsystem.REIMBURSE, "submit_leave")
-        # 参数都带录制原值兜底 → 都是可选(required 空),原因在 optional/user_fields 里
-        assert sk is not None and sk.has_api is False
-        assert "原因" in (sk.optional_fields + sk.required_fields)
-
-        # 真发:传新参数值 → 服务器回显应是新值(证明参数化+替换+真发整条通)
-        out = await execute_api_request(apir, {"原因": "感冒"}, send=True, verify=False)
-        assert out["ok"] and out["status"] == 200
-        assert out["response"]["echo"]["reason"] == "感冒"
-    finally:
-        _T.set_review_board(None)
-        httpd.shutdown()
-        async with get_pool().acquire() as c:
-            await c.execute("DELETE FROM asset_drafts WHERE tenant=$1", tenant)
-            await c.execute("DELETE FROM assets WHERE tenant=$1", tenant)
-        await close_pool()
 
 
 # ─────────── P0:发布前确定性自检 self_check + 运行期换身后置审计 ───────────
@@ -3104,17 +2872,6 @@ def test_suggest_identity_emits_tokens_for_dotted_key():
     assert out and out[0]["tokens"] == ["formData", "applicantId"]
 
 
-def test_workflow_step_link_taskid_chains_via_tokens():
-    """Q3:多步串联带 tokens;link 目标路径可达 → self_check 通过。"""
-    writes = [
-        {"method": "POST", "url": "http://oa.x/flow/start",
-         "post_data": '{"procDefKey":"oa_leave"}', "response_json": {"code": 200, "data": {"taskId": "TASK-5566"}}},
-        {"method": "POST", "url": "http://oa.x/flow/submit",
-         "post_data": '{"flowTask":{"taskId":"TASK-5566"},"reason":"回家"}', "response_json": {"code": 200}},
-    ]
-    wf = build_api_workflow(writes, param_map={"reason": "reason"})
-    assert wf["steps"][1]["links"][0]["target_tokens"] == ["flowTask", "taskId"]
-    assert self_check(wf) == []
 
 
 async def test_onboarding_unsupported_when_no_writeable_body():
@@ -3324,9 +3081,6 @@ def test_capture_verification_plan_adaptive():
     assert capture_verification_plan({}, {"fact_check": {}})["mode"] == "structural"
 
 
-def test_test_data_tag():
-    from dano.execution.page.request_capture import test_data_tag
-    assert test_data_tag("run-20260625-001") == "[DANO-TEST-run-20260625-001]"
 
 
 # ─────────── P3:LLM 非阻断语义顾问(只提议,不当结构闸门;喂元数据不带凭证) ───────────
@@ -3554,19 +3308,6 @@ async def test_suggest_field_names_llm_safe_degrade():
     assert await suggest_field_names_llm(_FakeChat({"names": {"x": "y"}}), "m", action="a", fields=named) == {}
 
 
-def test_merge_llm_field_names_fills_only_keyfallback():
-    """LLM 名只补到 suggest_name==key 的字段;确信的 DOM 标签名不被覆盖。"""
-    from dano.execution.page.request_capture import merge_llm_field_names
-    fields = [
-        {"key": "reason", "suggest_name": "原因"},                  # 确信 → 不动
-        {"key": "applicantId", "suggest_name": "applicantId"},      # key 兜底 → 补
-        {"key": "Activity_09dlq0g", "suggest_name": "Activity_09dlq0g"},  # LLM 也没给 → 保持
-    ]
-    merge_llm_field_names(fields, {"applicantId": "申请人"})
-    by = {f["key"]: f for f in fields}
-    assert by["reason"]["suggest_name"] == "原因" and "name_source" not in by["reason"]
-    assert by["applicantId"]["suggest_name"] == "申请人" and by["applicantId"]["name_source"] == "llm"
-    assert by["Activity_09dlq0g"]["suggest_name"] == "Activity_09dlq0g"   # 没补,保持原 key
 
 
 # ─────────── 补齐:业务相关性门 / 字段语义门 / 步骤依赖门(无源) ───────────

@@ -33,19 +33,6 @@ def _std_key(field: str) -> str:
     return (field or "").strip()
 
 
-def assign_field_keys(raw_fields: list[str | None]) -> list[str]:
-    used: set[str] = set()
-    out: list[str] = []
-    for f in raw_fields:
-        std = _std_key(f or "")
-        cand = std if (std and std not in used) else ((f or "").strip() or std or "field")
-        key, n = cand, 2
-        while key in used:
-            key = f"{cand}#{n}"
-            n += 1
-        used.add(key)
-        out.append(key)
-    return out
 
 
 def assign_step_field_keys(steps: list[dict]) -> dict[int, str]:

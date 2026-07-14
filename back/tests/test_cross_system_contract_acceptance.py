@@ -1,9 +1,4 @@
-"""Cross-system acceptance tests for recorded capability contracts.
-
-The assertions deliberately cross subsystem boundaries: captured request facts
-must remain attached to a capability, then survive manifest and agent-script
-generation without changing the caller-visible schema.
-"""
+"""Cross-system acceptance tests for the active recording release pipeline."""
 
 from __future__ import annotations
 
@@ -15,8 +10,8 @@ import pytest
 from dano.catalog.manifest import to_manifest
 from dano.execution.page.flow_spec import (
     FlowSpec,
-    capability_spec_to_api_request,
-    migrate_v2_flow_spec_to_capability_spec,
+    flow_spec_to_api_request,
+    prepare_flow_release_candidate,
 )
 from dano.export.agent_skills import _dano_call_py
 from dano.orchestrator.capability_runtime import normalize_capability_result
@@ -98,17 +93,17 @@ def _ordinary_form_spec() -> FlowSpec:
 def _load_scenario(name: str) -> FlowSpec:
     if name == "ordinary_form":
         return _ordinary_form_spec()
-    raw = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
-    return FlowSpec.model_validate(raw)
+    return FlowSpec.model_validate(json.loads((FIXTURES / name).read_text(encoding="utf-8")))
 
 
 def _export_chain(spec: FlowSpec):
-    capability_spec = migrate_v2_flow_spec_to_capability_spec(spec)
-    api_request, errors = capability_spec_to_api_request(capability_spec)
+    release, snapshot = prepare_flow_release_candidate(spec)
+    api_request, errors = flow_spec_to_api_request(release)
     assert errors == []
     assert api_request is not None
+    assert snapshot["flow_fingerprint"]
 
-    capabilities = [cap.model_dump(mode="json") for cap in capability_spec.capabilities]
+    capabilities = [cap.model_dump(mode="json") for cap in release.capabilities]
     skill = SkillSpec(
         skill_id=f"A-OA.{spec.flow_id.replace('-', '_')}",
         subsystem=Subsystem.OA,
@@ -122,7 +117,7 @@ def _export_chain(spec: FlowSpec):
     manifest = to_manifest(skill)
     namespace = {"__name__": "generated_contract_acceptance"}
     exec(compile(_dano_call_py(manifest), "<generated-dano-call>", "exec"), namespace)  # noqa: S102
-    return capability_spec, api_request, manifest, namespace
+    return release, api_request, manifest, namespace
 
 
 @pytest.mark.parametrize(
@@ -132,50 +127,32 @@ def _export_chain(spec: FlowSpec):
         ("daily_report_flow_spec.json", "submit_batch", {"month", "entries"}),
         ("ordinary_form", "submit", {"employee_name", "mobileNo", "follow_up_at"}),
     ],
-    ids=["leave-approval", "daily-report-batch", "ordinary-form"],
+    ids=["approval", "batch", "ordinary-crm-form"],
 )
-def test_request_facts_to_generated_script_contract_stays_aligned(
+def test_active_release_pipeline_keeps_public_contract_aligned(
     scenario: str,
     expected_kind: str,
     expected_fields: set[str],
 ):
-    capability_spec, api_request, manifest, script = _export_chain(_load_scenario(scenario))
+    release, api_request, manifest, script = _export_chain(_load_scenario(scenario))
 
-    fact_ids = {fact.request_id for fact in capability_spec.request_facts.requests}
-    materialized = {
-        request_id
-        for request_id, usage in capability_spec.request_facts.usage.items()
-        if usage.state == "materialized" and usage.used_by_capabilities
-    }
-    contract_refs = {
-        ref["request_id"]
-        for contract in api_request["capability_contracts"]
-        for ref in contract["request_refs"]
-    }
-    assert fact_ids == materialized == contract_refs
-
-    capability = next(cap for cap in capability_spec.capabilities if cap.kind == expected_kind)
+    capability = next(cap for cap in release.capabilities if cap.kind == expected_kind)
     manifest_capability = next(cap for cap in manifest.capabilities if cap["kind"] == expected_kind)
     script_capability = script["CAPABILITIES"][manifest_capability["name"]]
 
-    capability_schema = capability.input_schema
-    assert set(capability_schema["properties"]) == expected_fields
+    assert set(capability.input_schema["properties"]) == expected_fields
     assert set(manifest_capability["parameters"]["properties"]) == expected_fields
     assert script_capability["parameters"] == manifest_capability["parameters"]
     assert set(script_capability["fields"]) == expected_fields
-    assert set(script_capability["required"]) == set(capability_schema.get("required") or [])
+    assert api_request["capability_contracts"]
 
     if expected_kind == "submit_batch":
         item_fields = manifest_capability["parameters"]["properties"]["entries"]["items"]["properties"]
         assert set(item_fields) == {"date", "content", "project"}
-    if scenario == "leave_flow_spec.json":
-        assert "processDefinitionId" not in expected_fields
-        assert manifest_capability["parameters"]["properties"]["请假类型"]["format"] == "name-ref"
 
 
-def test_work_hours_internal_field_names_do_not_leak_into_public_batch_contract():
-    spec = _load_scenario("work_hours_flow_spec.json")
-    _capability_spec, _api_request, manifest, script = _export_chain(spec)
+def test_work_hours_internal_names_do_not_leak_into_public_batch_contract():
+    _release, _api_request, manifest, script = _export_chain(_load_scenario("work_hours_flow_spec.json"))
 
     batch = next(cap for cap in manifest.capabilities if cap["kind"] == "submit_batch")
     item_fields = batch["parameters"]["properties"]["entries"]["items"]["properties"]

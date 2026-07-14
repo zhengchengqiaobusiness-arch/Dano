@@ -346,7 +346,7 @@ BrowserContext 路由所有请求：
 4. 获取当前 BrowserContext 的 `storage_state`。
 5. 获取全量请求、写请求候选、列表读响应和诊断事实。
 6. 排除无请求体写请求以及登录/鉴权写请求。
-7. 自动选择最像提交的候选；如有多个，前端可发送 `choose_request` 改选。
+7. 依据完整的操作事务和请求因果链保留所有业务候选，由能力编排统一确定范围。
 8. 调用 `to_flow_spec()` 生成工作台初版。
 
 分支行为：
@@ -448,7 +448,6 @@ Capability 记录请求成员、输入/内部/计算/输出字段、依赖、执
 | `flow_update` | 应用结构化 edits：字段、步骤、链接、能力、顺序、review 状态等 |
 | `flow_replace` | 用前端 JSON 整体替换，并追加版本记录 |
 | `refresh_flow_spec` | 当前后端权威版本重新下发 |
-| `choose_request` | 改选写请求并重建 FlowSpec |
 | `step_naming` | 用语义模型生成业务步骤名 |
 | `business_description` | 生成结构化业务说明 |
 | `orchestrate_flow` | 运行 PI `plan` 模式，生成或优化能力 |
@@ -632,7 +631,6 @@ Capability 记录请求成员、输入/内部/计算/输出字段、依赖、执
 | `input` | event | 点击、文本、键盘、滚动输入 |
 | `reset` | — | 清空当前录制事实，从当前位置重新开始 |
 | `finalize` | action/title/steps | 停止采集阶段并分析请求 |
-| `choose_request` | idx | 改选写请求候选 |
 | `flow_update` | edits | 增量编辑 FlowSpec |
 | `flow_replace` | flow_spec | 整体 JSON 替换 |
 | `refresh_flow_spec` | — | 拉取后端权威版本 |

@@ -5,7 +5,7 @@ import pytest
 from dano.execution.page.flow_spec import (
     FlowSpec, FlowStep, FlowLink, ParamField,
     rename_steps_with_llm, render_business_description,
-    pick_manual, flow_spec_for_get_form, _derive_step_name, _derive_title,
+    _derive_step_name, _derive_title,
 )
 
 
@@ -198,53 +198,16 @@ def _get_form_spec():
                            _gs("g3", "/api/contract/list")], links=[])
 
 
-def test_pick_promotes_to_first():
-    new = pick_manual(_get_form_spec(), "g2")
-    assert [s.step_id for s in new.steps] == ["g2", "g1", "g3"]
 
 
-def test_pick_sets_risk_to_l1():
-    spec = _get_form_spec()
-    spec.risk_level = "L3"
-    new = pick_manual(spec, "g1")
-    assert new.risk_level == "L1"
 
 
-def test_pick_filters_links():
-    spec = _get_form_spec()
-    spec.links = [
-        FlowLink(link_id="l1", source_step_id="g1", source_path="x", target_step_id="g2", target_path="y"),
-        FlowLink(link_id="l2", source_step_id="g2", source_path="x", target_step_id="g3", target_path="y"),
-    ]
-    new = pick_manual(spec, "g1")
-    assert len(new.links) == 1
-    assert new.links[0].link_id == "l1"
 
 
-def test_pick_nonexistent_raises():
-    with pytest.raises(ValueError, match="step not found"):
-        pick_manual(_get_form_spec(), "nope")
 
 
-def test_pick_does_not_mutate():
-    spec = _get_form_spec()
-    pick_manual(spec, "g2")
-    assert [s.step_id for s in spec.steps] == ["g1", "g2", "g3"]
 
 
-def test_pick_meta_records():
-    new = pick_manual(_get_form_spec(), "g3")
-    assert new.meta.get("picked_step_id") == "g3"
-    assert new.meta.get("manual_pick") is True
 
 
 # ── flow_spec_for_get_form ──
-def test_flow_spec_for_get_form_builds_candidates():
-    reads = [
-        {"method": "GET", "url": "https://x/api/a", "response_json": {"data": {"id": 1}}},
-        {"method": "GET", "url": "https://x/api/b", "response_json": {"data": {"id": 2}}},
-    ]
-    spec = flow_spec_for_get_form(reads)
-    assert len(spec.steps) == 2
-    assert spec.title == "(GET 表单待选)"
-    assert spec.meta.get("step_d") is True
