@@ -106,6 +106,10 @@ export type RpcToolArguments = string | RpcJsonObject;
 export type RpcToolResultDetails = RpcJsonValue;
 
 export const ASK_USER_QUESTION_TOOL_NAME = "ask_user_question";
+export const ASK_USER_QUESTION_PRESENTATION_RETRY_CODE =
+  "QUESTION_PRESENTATION_TIMEOUT";
+export const ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE =
+  "QUESTION_PRESENTATION_FAILED";
 
 export type AskUserQuestionOptionId = string | number;
 
@@ -407,6 +411,7 @@ export interface RpcCommandMap {
   };
   abort: {};
   field_assist: FieldAssistCommandPayload;
+  present_question: { toolCallId: string };
   answer_question:
     | { toolCallId: string; cancelled: true }
     | {
@@ -791,6 +796,7 @@ export interface RpcResponseMap {
   follow_up: void;
   abort: void;
   field_assist: FieldAssistResult;
+  present_question: void;
   answer_question: AskUserQuestionResult;
   new_session: {
     transcript: RpcTranscriptPage;

@@ -2128,6 +2128,10 @@ export function answerQuestion(
   return sendCommand({ type: "answer_question", toolCallId, ...response });
 }
 
+export function presentQuestion(toolCallId: string): Promise<RpcResponse> {
+  return sendCommand({ type: "present_question", toolCallId });
+}
+
 export async function fieldAssist(
   payload: FieldAssistCommandPayload,
 ): Promise<FieldAssistResult> {
@@ -2997,6 +3001,7 @@ export function initBridge() {
     cancelQueuedMessage,
     editQueuedMessage,
     respondToUIRequest,
+    presentQuestion,
     answerQuestion,
     fieldAssist,
     dismissNotification,

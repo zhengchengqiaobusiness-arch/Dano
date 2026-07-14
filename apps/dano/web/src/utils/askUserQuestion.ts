@@ -1,5 +1,6 @@
 import {
   ASK_USER_QUESTION_TOOL_NAME,
+  ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE,
   type AskUserQuestionAnswer,
   type AskUserQuestionCardItem,
   type AskUserQuestionCardRequest,
@@ -41,6 +42,15 @@ export function askUserQuestionAnswerMarkdown(
 export function isAskUserQuestionToolError(block: ToolContentBlock): boolean {
   return (
     block.toolName === ASK_USER_QUESTION_TOOL_NAME && block.toolStatus === "error"
+  );
+}
+
+export function isAskUserQuestionTerminalFailure(
+  block: ToolContentBlock,
+): boolean {
+  return (
+    isAskUserQuestionToolError(block) &&
+    Boolean(block.resultText?.includes(ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE))
   );
 }
 

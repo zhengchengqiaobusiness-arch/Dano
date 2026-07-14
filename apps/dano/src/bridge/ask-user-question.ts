@@ -3,6 +3,8 @@ import { Type } from "typebox";
 import { parseAskUserQuestionDateValue, validateAskUserQuestionDateFormat } from "../../types/ask-user-question-date.js";
 import {
   ASK_USER_QUESTION_TOOL_NAME,
+  ASK_USER_QUESTION_PRESENTATION_RETRY_CODE,
+  ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE,
   type AskUserQuestionAnswer,
   type AskUserQuestionAnswerInput,
   type AskUserQuestionCardItem,
@@ -235,6 +237,9 @@ interface PendingQuestionItem {
 interface PendingQuestion {
   grouped: boolean;
   questions: readonly PendingQuestionItem[];
+  state: "awaiting_presentation" | "presented";
+  signal?: AbortSignal;
+  presentationTimer?: ReturnType<typeof setTimeout>;
   resolve(result: AskUserQuestionResult): void;
   reject(error: Error): void;
   cleanup(): void;
@@ -247,9 +252,15 @@ function isOtherOption(value: string | PendingQuestionOption): boolean {
   return normalized === "其他" || normalized === "other";
 }
 
-class AskUserQuestionCoordinator {
+export class AskUserQuestionCoordinator {
   private readonly pending = new Map<string, PendingQuestion>();
   private readonly pendingToolCallBySignal = new WeakMap<AbortSignal, string>();
+  private readonly presentationFailuresBySignal = new WeakMap<AbortSignal, number>();
+
+  constructor(
+    private readonly presentationTimeoutMs = 5_000,
+    private readonly maxPresentationFailures = 2,
+  ) {}
 
   wait(
     toolCallId: string,
@@ -290,6 +301,10 @@ class AskUserQuestionCoordinator {
 
     return new Promise((resolve, reject) => {
       const cleanup = () => {
+        const pending = this.pending.get(toolCallId);
+        if (pending?.presentationTimer) {
+          clearTimeout(pending.presentationTimer);
+        }
         this.pending.delete(toolCallId);
         signal?.removeEventListener("abort", abort);
         if (signal && this.pendingToolCallBySignal.get(signal) === toolCallId) {
@@ -306,13 +321,46 @@ class AskUserQuestionCoordinator {
       this.pending.set(toolCallId, {
         grouped: request.questions !== undefined,
         questions,
+        state: "awaiting_presentation",
+        signal,
         resolve,
         reject,
         cleanup,
       });
 
+      const pending = this.pending.get(toolCallId);
+      if (pending) {
+        pending.presentationTimer = setTimeout(() => {
+          const failures = signal
+            ? (this.presentationFailuresBySignal.get(signal) ?? 0) + 1
+            : 1;
+          if (signal) this.presentationFailuresBySignal.set(signal, failures);
+          cleanup();
+          reject(
+            new Error(
+              failures >= this.maxPresentationFailures
+                ? `${ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE}: Dano could not display the question card after bounded retries. Stop this response and let the user retry.`
+                : `${ASK_USER_QUESTION_PRESENTATION_RETRY_CODE}: The accepted question card was not presented. Retry once with a corrected native ask_user_question call.`,
+            ),
+          );
+        }, this.presentationTimeoutMs);
+      }
+
       if (signal?.aborted) abort();
     });
+  }
+
+  present(toolCallId: string): void {
+    const pending = this.pending.get(toolCallId);
+    if (!pending) throw new Error(`Pending question not found: ${toolCallId}`);
+    if (pending.presentationTimer) {
+      clearTimeout(pending.presentationTimer);
+      pending.presentationTimer = undefined;
+    }
+    pending.state = "presented";
+    if (pending.signal) {
+      this.presentationFailuresBySignal.delete(pending.signal);
+    }
   }
 
   answer(
@@ -328,6 +376,9 @@ class AskUserQuestionCoordinator {
   ): AskUserQuestionResult {
     const pending = this.pending.get(toolCallId);
     if (!pending) throw new Error(`Pending question not found: ${toolCallId}`);
+    if (pending.state === "awaiting_presentation") {
+      this.present(toolCallId);
+    }
 
     let result: AskUserQuestionResult;
     if (response.cancelled) {
