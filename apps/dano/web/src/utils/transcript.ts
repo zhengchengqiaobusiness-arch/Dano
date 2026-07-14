@@ -528,6 +528,18 @@ export function latestThinkingLine(text: string): string {
   return "";
 }
 
+export function isStreamingThinkingBlock(
+  messageActive: boolean,
+  blocks: readonly ContentBlock[],
+  blockIndex: number,
+): boolean {
+  return (
+    messageActive &&
+    blocks[blockIndex]?.kind === "thinking" &&
+    blockIndex === blocks.length - 1
+  );
+}
+
 export function formatTranscriptDuration(durationMs: number | undefined): string | null {
   if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs < 0) {
     return null;
