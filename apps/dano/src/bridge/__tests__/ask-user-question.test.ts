@@ -10,6 +10,7 @@ import {
   ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE,
 } from "../types.js";
 import {
+  ASK_USER_QUESTION_CANCELLED_CODE,
   AskUserQuestionCoordinator,
   askUserQuestionCoordinator,
   askUserQuestionTool,
@@ -129,6 +130,26 @@ describe("ask_user_question tool", () => {
     }
   });
 
+  it("fails terminally when presentation retries cannot be correlated without a signal", async () => {
+    vi.useFakeTimers();
+    try {
+      const coordinator = new AskUserQuestionCoordinator(100, 2);
+      const pending = coordinator.wait(
+        "presentation-without-signal",
+        { question: "姓名？", default: "张三" },
+        undefined,
+      );
+      const terminalFailure = expect(pending).rejects.toThrow(
+        ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE,
+      );
+
+      await vi.advanceTimersByTimeAsync(100);
+      await terminalFailure;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("disables the presentation watchdog after the matching card is visible", async () => {
     vi.useFakeTimers();
     try {
@@ -187,7 +208,9 @@ describe("ask_user_question tool", () => {
         { question: "姓名？", default: "张三" },
         controller.signal,
       );
-      const abortedFailure = expect(aborted).rejects.toThrow("aborted");
+      const abortedFailure = expect(aborted).rejects.toThrow(
+        ASK_USER_QUESTION_CANCELLED_CODE,
+      );
       controller.abort();
       await abortedFailure;
 

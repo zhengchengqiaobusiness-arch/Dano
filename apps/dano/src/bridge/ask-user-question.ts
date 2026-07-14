@@ -17,6 +17,9 @@ import {
   type AskUserQuestionResult,
 } from "./types.js";
 
+export const ASK_USER_QUESTION_CANCELLED_CODE =
+  "ASK_USER_QUESTION_CANCELLED";
+
 const askUserQuestionOptionItemSchema = Type.Object({
   id: Type.Union([Type.String({ minLength: 1 }), Type.Number()]),
   label: Type.String({ minLength: 1 }),
@@ -275,20 +278,12 @@ export class AskUserQuestionCoordinator {
       );
     }
 
-    const request = normalizeCompatibleRequest(rawRequest);
-    const questions = normalizeRequestQuestions(request);
-    if (typeof questions === "string") {
+    const normalized = normalizeAskUserQuestionRequest(rawRequest);
+    if ("error" in normalized) {
       logQuestionLifecycle(toolCallId, "invalid");
-      return Promise.reject(new Error(questions));
+      return Promise.reject(new Error(normalized.error));
     }
-    if (questions.length === 0) {
-      logQuestionLifecycle(toolCallId, "invalid");
-      return Promise.reject(new Error("Question is required"));
-    }
-    if (!normalizeAskUserQuestionCardRequest(rawRequest)) {
-      logQuestionLifecycle(toolCallId, "invalid");
-      return Promise.reject(new Error("Question cannot be rendered"));
-    }
+    const { request, questions } = normalized;
     const pendingInCurrentTurn = signal
       ? this.pendingToolCallBySignal.get(signal)
       : undefined;
@@ -299,13 +294,6 @@ export class AskUserQuestionCoordinator {
       logQuestionLifecycle(toolCallId, "invalid");
       return Promise.reject(new Error(groupedRetryError));
     }
-    if (request.confirm && (request.options || request.multiple || request.questions || request.dataSource)) {
-      logQuestionLifecycle(toolCallId, "invalid");
-      return Promise.reject(
-        new Error("Confirmation questions cannot provide options or multiple"),
-      );
-    }
-
     return new Promise((resolve, reject) => {
       const cleanup = () => {
         const pending = this.pending.get(toolCallId);
@@ -321,7 +309,11 @@ export class AskUserQuestionCoordinator {
       const abort = () => {
         cleanup();
         logQuestionLifecycle(toolCallId, "cancelled");
-        reject(new Error("Question was aborted"));
+        reject(
+          new Error(
+            `${ASK_USER_QUESTION_CANCELLED_CODE}: Question was aborted`,
+          ),
+        );
       };
       signal?.addEventListener("abort", abort, { once: true });
       if (signal) this.pendingToolCallBySignal.set(signal, toolCallId);
@@ -342,7 +334,7 @@ export class AskUserQuestionCoordinator {
         pending.presentationTimer = setTimeout(() => {
           const failures = signal
             ? (this.presentationFailuresBySignal.get(signal) ?? 0) + 1
-            : 1;
+            : this.maxPresentationFailures;
           if (signal) this.presentationFailuresBySignal.set(signal, failures);
           cleanup();
           logQuestionLifecycle(
@@ -447,7 +439,11 @@ export class AskUserQuestionCoordinator {
   }
 
   cancelAll(): void {
-    this.rejectAll(new Error("Question coordinator was disposed"));
+    this.rejectAll(
+      new Error(
+        `${ASK_USER_QUESTION_CANCELLED_CODE}: Question coordinator was disposed`,
+      ),
+    );
   }
 
   private rejectAll(error: Error): void {
@@ -712,23 +708,42 @@ function normalizeRequestQuestions(
 export function normalizeAskUserQuestionCardRequest(
   rawRequest: unknown,
 ): AskUserQuestionCardRequest | null {
+  const normalized = normalizeAskUserQuestionRequest(rawRequest);
+  return "error" in normalized ? null : normalized.cardRequest;
+}
+
+function normalizeAskUserQuestionRequest(rawRequest: unknown):
+  | {
+      request: NormalizedAskUserQuestionRequest;
+      questions: PendingQuestionItem[];
+      cardRequest: AskUserQuestionCardRequest;
+    }
+  | { error: string } {
   const parsed = parseJsonString(rawRequest);
-  if (!isPlainRecord(parsed)) return null;
+  if (!isPlainRecord(parsed)) return { error: "Question cannot be rendered" };
   const request = normalizeCompatibleRequest(
     parsed as AskUserQuestionRequestParams,
   );
   const questions = normalizeRequestQuestions(request);
-  if (typeof questions === "string" || questions.length === 0) return null;
+  if (typeof questions === "string") return { error: questions };
+  if (questions.length === 0) return { error: "Question is required" };
   if (
     request.confirm &&
     (request.options || request.multiple || request.questions || request.dataSource)
   ) {
-    return null;
+    return {
+      error: "Confirmation questions cannot provide options or multiple",
+    };
   }
   const cardItems = questions.map(toQuestionCardItem);
-  return request.questions === undefined
-    ? { ...cardItems[0], batch: false }
-    : { batch: true, questions: cardItems };
+  return {
+    request,
+    questions,
+    cardRequest:
+      request.questions === undefined
+        ? { ...cardItems[0], batch: false }
+        : { batch: true, questions: cardItems },
+  };
 }
 
 function toQuestionCardItem(
