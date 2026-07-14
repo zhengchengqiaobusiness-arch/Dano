@@ -172,6 +172,7 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
             {"type": "input", "event": {"kind": "pointer_move", "nx": 0.1, "ny": 0.2}},
             {"type": "input", "event": {"kind": "dblclick", "nx": 0.3, "ny": 0.4}},
             {"type": "input", "event": {"kind": "pointer_up", "nx": 0.5, "ny": 0.6}},
+            {"type": "ping", "at": 123456},
             {"type": "stop"},
         ]
 
@@ -192,6 +193,7 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
     assert errors[1]["detail"] == "transient input failure"
     assert all(error["recoverable"] for error in errors)
     assert sessions[0].events[-1]["kind"] == "pointer_up"
+    assert {"type": "pong", "at": 123456} in first_ws.messages
     assert first_ws.messages[-1] == {"type": "stopped"}
     assert second_ws.messages[-1] == {"type": "stopped"}
     assert all(session.stopped for session in sessions)

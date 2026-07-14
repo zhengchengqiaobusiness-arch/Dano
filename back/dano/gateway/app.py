@@ -1444,6 +1444,8 @@ async def record_ws(ws: WebSocket) -> None:
                                  total=summary["total"],
                                  errors=summary["errors"],
                                  warnings=summary["warnings"])
+            elif t == "ping":
+                await sender.send_json({"type": "pong", "at": msg.get("at")})
             elif t == "publish_request":
                 if await _replay_costly(msg):
                     continue

@@ -88,6 +88,14 @@ def test_recorder_key_safety_policy() -> None:
         assert not _safe_recorder_key(key)
 
 
+def test_screencast_rate_limits_preserve_clarity_without_overloading_ui() -> None:
+    from dano.execution.page.recorder import _CAST_ACTIVE_FPS, _CAST_IDLE_FPS, _CAST_QUALITY
+
+    assert _CAST_ACTIVE_FPS <= 12
+    assert _CAST_IDLE_FPS <= 2
+    assert _CAST_QUALITY >= 75
+
+
 class _RecordingMouse:
     def __init__(self, *, fail: dict[str, Exception] | None = None) -> None:
         self.events: list[tuple] = []

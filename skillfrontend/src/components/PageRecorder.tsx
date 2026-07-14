@@ -1149,6 +1149,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   } | null>(null);
   const lastInputErrorNoticeRef = useRef(0);
   const intentionalCloseRef = useRef(false);
+  const sessionStartedRef = useRef(false);
+  const connectionErrorRef = useRef("");
+  const heartbeatTimerRef = useRef<number | null>(null);
   const wsAliveRef = useRef(false);                                // FC2 修复:跟踪 WS 存活,避免 send 失败时反复弹错
   const isComposingRef = useRef(false);                           // FH2 修复:中文输入法拼写中标记,防 onKbInput 误发中间字符
 
@@ -1341,6 +1344,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     }
     if (pointerMoveRafRef.current != null) window.cancelAnimationFrame(pointerMoveRafRef.current);
     if (pendingClickRef.current) window.clearTimeout(pendingClickRef.current.timer);
+    if (heartbeatTimerRef.current != null) window.clearInterval(heartbeatTimerRef.current);
   }, []);
 
   useEffect(() => {
@@ -1487,7 +1491,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       if (!latest || latest.seq <= renderedFrameSeqRef.current) return;
       renderedFrameSeqRef.current = latest.seq;
       if (imgRef.current) imgRef.current.src = latest.src;
-      setFrameMeta((current) => ({ ...current, ...Object.fromEntries(Object.entries(latest.meta).filter(([, value]) => value != null)) }));
+      // Frame dimensions normally stay constant. Returning the same state object
+      // avoids re-rendering the entire editor for every screenshot frame.
+      setFrameMeta((current) => {
+        const updates = Object.fromEntries(Object.entries(latest.meta).filter(([, value]) => value != null));
+        if (Object.entries(updates).every(([key, value]) => current[key as keyof RecorderFrameMeta] === value)) {
+          return current;
+        }
+        return { ...current, ...updates };
+      });
       if (!hasFrameRef.current) setHasFrame(true);
     });
   }
@@ -1543,6 +1555,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function openRecorderConnection() {
     const intercept = recordingMode === "record_only";
     intentionalCloseRef.current = false;
+    sessionStartedRef.current = false;
+    connectionErrorRef.current = "";
+    if (heartbeatTimerRef.current != null) window.clearInterval(heartbeatTimerRef.current);
     wsAliveRef.current = true;                                     // FC2 修复:每次 start 重置存活标志
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/onboarding/page/record`);
@@ -1555,16 +1570,24 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         storage_state: storageState.trim() || undefined,
         intercept,
       });
+      // Keep both proxy directions active. Long periods without page changes can
+      // otherwise be treated as an idle WebSocket by an intermediate proxy.
+      heartbeatTimerRef.current = window.setInterval(() => {
+        if (wsRef.current !== ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({ type: "ping", at: Date.now() }));
+      }, 10000);
     };
     ws.onmessage = (ev) => {
       if (wsRef.current !== ws) return;
       let m: any; try { m = JSON.parse(ev.data); } catch { return; }
       if (m.type === "started") {
+        sessionStartedRef.current = true;
         const serverAction = m.action ?? m.action_name;
         if (typeof serverAction === "string" && /^[a-zA-Z][a-zA-Z0-9_]*$/.test(serverAction)) setAction(serverAction);
         setPhase("recording");
         setConnectionState("connected");
       }
+      else if (m.type === "pong" || m.type === "stopped") return;
       else if (m.type === "frame") {
         queueFrame(Number(m.seq || 0), m.data, frameMetaFromMessage(m));
         // A fresh frame proves the replacement RecordSession is active. This also keeps
@@ -1682,6 +1705,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
       else if (m.type === "error") {
         const detail = m.detail || "录制出错";
+        connectionErrorRef.current = detail;
         setNamingBusy(false); setDescBusy(false); clearFlowOperation();
         publishOperationRef.current = null;
         finalizeOperationRef.current = null;
@@ -1704,11 +1728,20 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
     };
     ws.onerror = () => {
-      if (wsRef.current === ws) setErr("WebSocket 连接失败，当前画面和已录步骤已保留");
+      if (wsRef.current === ws && !connectionErrorRef.current) {
+        connectionErrorRef.current = "WebSocket 连接失败，当前画面和已录步骤已保留";
+        setErr(connectionErrorRef.current);
+      }
     };
     ws.onclose = () => {
       if (wsRef.current !== ws) return;
+      const hadStarted = sessionStartedRef.current;
+      sessionStartedRef.current = false;
       wsRef.current = null;
+      if (heartbeatTimerRef.current != null) {
+        window.clearInterval(heartbeatTimerRef.current);
+        heartbeatTimerRef.current = null;
+      }
       wsAliveRef.current = false;                                 // FC2 修复:WS 关闭,send 会自动避免刷屏
       pointerGestureRef.current = null;
       pendingPointerMoveRef.current = null;
@@ -1728,9 +1761,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         setConnectionState("idle");
         return;
       }
+      // A failure before "started" never created a recording session or a
+      // recoverable recording state. Keep the real backend error and let the user fix the URL.
+      if (!hadStarted) {
+        setConnectionState("idle");
+        setPhase("idle");
+        setErr((current) => current || connectionErrorRef.current || "录制连接未建立，请检查业务页地址和后端日志");
+        return;
+      }
       if (phaseRef.current === "publishing") setPhase("recording");
       setConnectionState("disconnected");
-      setErr("录制连接已断开，已保留最后画面、步骤和编辑内容");
+      setErr((current) => current || connectionErrorRef.current || "录制连接已断开，已保留最后画面、步骤和编辑内容");
     };
   }
 
