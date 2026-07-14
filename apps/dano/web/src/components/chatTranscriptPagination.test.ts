@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  TRANSCRIPT_START_NOTICE_DURATION_MS,
   nextTopLoadArmed,
   restoredScrollTop,
   shouldAutoLoadOlderTranscript,
@@ -7,6 +8,10 @@ import {
 } from "./chatTranscriptPagination";
 
 describe("chat transcript older pagination", () => {
+  it("keeps the no-more history notice visible for three seconds", () => {
+    expect(TRANSCRIPT_START_NOTICE_DURATION_MS).toBe(3000);
+  });
+
   it("restores scroll position only after older messages were added", () => {
     expect(
       restoredScrollTop({
@@ -65,31 +70,37 @@ describe("chat transcript older pagination", () => {
     expect(nextTopLoadArmed({ isNearTop: false, current: false })).toBe(true);
   });
 
-  it("shows no-more history only after transcript start was confirmed", () => {
+  it("shows no-more history only for a top pagination trigger with no older messages", () => {
     expect(
       shouldShowTranscriptStartNotice({
-        hasReachedTranscriptStart: false,
-        isNearTop: true,
+        topLoadTriggered: false,
+        hasOlder: false,
         messagesLength: 20,
         initialLoading: false,
+        pageLoading: false,
+        requestPending: false,
       }),
     ).toBe(false);
 
     expect(
       shouldShowTranscriptStartNotice({
-        hasReachedTranscriptStart: true,
-        isNearTop: true,
+        topLoadTriggered: true,
+        hasOlder: false,
         messagesLength: 20,
         initialLoading: false,
+        pageLoading: false,
+        requestPending: false,
       }),
     ).toBe(true);
 
     expect(
       shouldShowTranscriptStartNotice({
-        hasReachedTranscriptStart: true,
-        isNearTop: false,
+        topLoadTriggered: true,
+        hasOlder: true,
         messagesLength: 20,
         initialLoading: false,
+        pageLoading: false,
+        requestPending: false,
       }),
     ).toBe(false);
   });

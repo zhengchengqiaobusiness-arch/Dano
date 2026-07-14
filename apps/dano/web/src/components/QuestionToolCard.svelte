@@ -28,6 +28,7 @@
   import type { ToolContentBlock } from "../utils/transcript";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import QuestionDateField from "./QuestionDateField.svelte";
+  import ChevronDown from "lucide-svelte/icons/chevron-down";
   import RefreshCw from "lucide-svelte/icons/refresh-cw";
   import Sparkle from "lucide-svelte/icons/sparkle";
   import "./questionToolControls.css";
@@ -564,17 +565,20 @@
                 </div>
               {/if}
               <label class="sr-only" for={`question-${block.toolCallId}-${item.id}`}>{item.question}</label>
-              <select
-                id={`question-${block.toolCallId}-${item.id}`}
-                class="question-input"
-                bind:value={selectedOption[item.id]}
-                disabled={!pending || submitting || remoteLoading[item.id]}
-              >
-                <option value="">{t("questionTool.selectPlaceholder")}</option>
-                {#each itemOptions(item) as option}
-                  <option value={optionKey(option.id)}>{option.label}</option>
-                {/each}
-              </select>
+              <div class="question-select-control">
+                <select
+                  id={`question-${block.toolCallId}-${item.id}`}
+                  class="question-input"
+                  bind:value={selectedOption[item.id]}
+                  disabled={!pending || submitting || remoteLoading[item.id]}
+                >
+                  <option value="">{t("questionTool.selectPlaceholder")}</option>
+                  {#each itemOptions(item) as option}
+                    <option value={optionKey(option.id)}>{option.label}</option>
+                  {/each}
+                </select>
+                <ChevronDown size={16} aria-hidden="true" />
+              </div>
               {#if remoteError[item.id]}
                 <div class="question-error" role="alert">{remoteError[item.id]}</div>
               {/if}
@@ -662,7 +666,11 @@
                 </div>
               </div>
               <label class="sr-only" for={`question-${block.toolCallId}-${item.id}`}>{item.question}</label>
-              <div class="question-input-wrap" class:loading={Boolean(aiAssistLoading[item.id])}>
+              <div
+                class="question-input-wrap"
+                class:single-line={item.inputType !== "textarea"}
+                class:loading={Boolean(aiAssistLoading[item.id])}
+              >
                 {#if item.inputType === "textarea"}
                   <textarea
                     id={`question-${block.toolCallId}-${item.id}`}
@@ -878,6 +886,10 @@
 
   .question-input-wrap {
     position: relative;
+  }
+
+  .question-input-wrap.single-line {
+    width: 100%;
   }
 
   .question-input-wrap.loading .question-input {
