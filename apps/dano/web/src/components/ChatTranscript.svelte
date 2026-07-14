@@ -1159,7 +1159,12 @@
   {/if}
 
   {#if !initialLoading && (pageLoading || olderLoadRequestPending || showTranscriptEndNotice)}
-    <div class="history-loader" role="status" aria-live="polite">
+    <div
+      class="history-loader"
+      class:history-end-notice={showTranscriptEndNotice && !pageLoading && !olderLoadRequestPending}
+      role="status"
+      aria-live="polite"
+    >
       {#if pageLoading || olderLoadRequestPending}
         <span class="history-loader-spinner" aria-hidden="true"></span>
         <span>{t("chatTranscript.loadingEarlierMessages")}</span>
@@ -1609,6 +1614,7 @@
 
 <style>
   .chat-transcript {
+    position: relative;
     flex: 1;
     min-height: 0;
     overflow-y: auto;
@@ -1724,6 +1730,14 @@
     min-height: 32px;
     color: var(--text-subtle);
     font-size: 0.74rem;
+  }
+
+  .history-loader.history-end-notice {
+    position: absolute;
+    top: 42px;
+    right: 0;
+    left: 0;
+    width: auto;
   }
 
   .history-loader-spinner {
