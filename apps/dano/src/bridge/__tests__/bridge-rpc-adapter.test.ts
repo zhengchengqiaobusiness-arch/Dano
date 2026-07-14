@@ -1742,6 +1742,68 @@ describe("BridgeRpcAdapter", () => {
       expect(response.payload.data.hasOlder).toBe(false);
     });
 
+    it("projects recovered question lifecycle states without resurrecting orphan cards", async () => {
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "answered-question",
+              name: "ask_user_question",
+              arguments: { question: "审批人？", default: "张三" },
+            },
+            {
+              type: "toolCall",
+              id: "orphan-question",
+              name: "ask_user_question",
+              arguments: { question: "请假原因？", default: "个人事务" },
+            },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "answered-question",
+          toolName: "ask_user_question",
+          content: [{ type: "text", text: "" }],
+          details: { status: "answered", answer: "李四" },
+          isError: false,
+        },
+      ];
+      (
+        context.state.sessionManager.getBranch as ReturnType<typeof vi.fn>
+      ).mockReturnValue(messages);
+      (
+        context.state.sessionManager.getEntries as ReturnType<typeof vi.fn>
+      ).mockReturnValue(messages);
+
+      (
+        ws as unknown as { trigger: (event: string, data: Buffer) => void }
+      ).trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: { id: "cmd-question-recovery", type: "get_messages" },
+          }),
+        ),
+      );
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const response = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+        .map(([message]) => JSON.parse(message as string))
+        .find(message => message.payload?.id === "cmd-question-recovery");
+      const content = response.payload.data.messages[0].content;
+      expect(content[0]).toMatchObject({
+        id: "answered-question",
+        questionState: "answered",
+      });
+      expect(content[1]).toMatchObject({
+        id: "orphan-question",
+        questionState: "terminal_failure",
+      });
+    });
+
     it("defaults transcript pages to the latest 80 messages", async () => {
       const messages = Array.from({ length: 95 }, (_, index) => ({
         role: "user",
@@ -3008,6 +3070,7 @@ describe("BridgeRpcAdapter", () => {
               },
             ],
           },
+          questionState: "answered",
         },
         {
           type: "toolResult",
@@ -6016,6 +6079,70 @@ describe("BridgeRpcAdapter", () => {
         },
       });
 
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("restores a presented question card when switching back after reconnect", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-question-reconnect-"));
+      const sessionManager = SessionManager.create(tmpDir, tmpDir);
+      sessionManager.appendMessage({
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "reconnected-question",
+            name: "ask_user_question",
+            arguments: {
+              question: "请假原因？",
+              default: "个人事务",
+            },
+          },
+        ],
+        timestamp: Date.now(),
+      } as any);
+      const sessionFile = sessionManager.getSessionFile();
+      if (!sessionFile) throw new Error("session file was not created");
+
+      const pending = askUserQuestionCoordinator.wait(
+        "reconnected-question",
+        { question: "请假原因？", default: "个人事务" },
+        undefined,
+      );
+      askUserQuestionCoordinator.present("reconnected-question");
+
+      ws.trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: {
+              id: "switch-reconnected-question",
+              type: "switch_session",
+              sessionPath: sessionFile,
+            },
+          }),
+        ),
+      );
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const response = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+        .map(([message]) => JSON.parse(message as string))
+        .find(message => message.payload?.id === "switch-reconnected-question");
+      expect(response.payload.data.transcript.messages[0].content[0]).toMatchObject({
+        id: "reconnected-question",
+        questionRequest: {
+          batch: false,
+          kind: "text",
+          question: "请假原因？",
+          default: "个人事务",
+        },
+        questionState: "presented",
+      });
+
+      askUserQuestionCoordinator.answer("reconnected-question", {
+        cancelled: true,
+      });
+      await pending;
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 

@@ -86,7 +86,7 @@ describe("ask user question transcript data", () => {
     ).toBeNull();
   });
 
-  it("detects pending native question cards that can be cancelled on page unload", () => {
+  it("detects pending native question cards", () => {
     expect(isPendingAskUserQuestionBlock(block({ question: "Name?" }))).toBe(true);
     expect(
       isPendingAskUserQuestionBlock(
@@ -103,6 +103,14 @@ describe("ask user question transcript data", () => {
         block({ question: "Name?" }, { toolCallId: undefined }),
       ),
     ).toBe(false);
+  });
+
+  it("recognizes terminal presentation state after transcript recovery", () => {
+    expect(
+      isAskUserQuestionTerminalFailure(
+        block({}, { questionState: "terminal_failure", toolStatus: "error" }),
+      ),
+    ).toBe(true);
   });
 
   it("parses answered result details", () => {

@@ -153,6 +153,30 @@ describe("ask_user_question tool", () => {
     }
   });
 
+  it("logs lifecycle transitions without question content", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const coordinator = new AskUserQuestionCoordinator();
+    const pending = coordinator.wait(
+      "logged-question",
+      { question: "不得写入日志的请假原因", default: "个人事务" },
+      undefined,
+    );
+
+    coordinator.present("logged-question");
+    coordinator.answer("logged-question", {
+      cancelled: false,
+      answer: "家庭事务",
+    });
+    await pending;
+
+    expect(info.mock.calls.map(([message]) => message)).toEqual([
+      "[ask_user_question] state=awaiting_presentation toolCallId=logged-question",
+      "[ask_user_question] state=presented toolCallId=logged-question",
+      "[ask_user_question] state=answered toolCallId=logged-question",
+    ]);
+    expect(JSON.stringify(info.mock.calls)).not.toContain("请假原因");
+  });
+
   it("clears the presentation watchdog on abort and disposal", async () => {
     vi.useFakeTimers();
     try {

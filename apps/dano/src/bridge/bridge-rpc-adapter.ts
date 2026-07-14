@@ -31,8 +31,13 @@ import {
   normalizeAskUserQuestionCardRequest,
 } from "./ask-user-question.js";
 import { DetachedSessionRegistry } from "./session-registry.js";
-import { ASK_USER_QUESTION_TOOL_NAME } from "./types.js";
+import {
+  ASK_USER_QUESTION_PRESENTATION_RETRY_CODE,
+  ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE,
+  ASK_USER_QUESTION_TOOL_NAME,
+} from "./types.js";
 import type {
+  AskUserQuestionLifecycleState,
   BridgeConfig,
   BridgeEvent,
   ClientMessage,
@@ -58,6 +63,7 @@ import type {
   RpcSessionStatsEvent,
   RpcSlashCommand,
   RpcThinkingLevel,
+  RpcToolResultDetails,
   RpcTranscriptContentBlock,
   RpcTranscriptMessage,
   RpcTranscriptDeltaEvent,
@@ -360,6 +366,13 @@ function toRpcAgentAssistantContentBlock(
         name: block.name,
         arguments: block.arguments,
         ...(questionRequest ? { questionRequest } : {}),
+        ...(questionRequest
+          ? {
+              questionState:
+                askUserQuestionCoordinator.state(block.id) ??
+                "awaiting_presentation",
+            }
+          : {}),
         thoughtSignature: block.thoughtSignature,
       };
   }
@@ -3881,11 +3894,12 @@ class TranscriptProjector {
 
   projectPage(page: RpcTranscriptPage): RpcTranscriptPage {
     const sessionPath = page.sessionPath ?? null;
+    const messages = page.messages.map(message =>
+      this.projectStructuredUserMessage(message, sessionPath, true),
+    );
     return {
       ...page,
-      messages: page.messages.map(message =>
-        this.projectStructuredUserMessage(message, sessionPath),
-      ),
+      messages: projectRecoveredQuestionLifecycle(messages),
     };
   }
 
@@ -4141,8 +4155,9 @@ class TranscriptProjector {
   private projectStructuredUserMessage(
     message: RpcTranscriptMessage,
     sessionPath: string | null,
+    recovering = false,
   ): RpcTranscriptMessage {
-    const projectedMessage = projectAskUserQuestionRequests(message);
+    const projectedMessage = projectAskUserQuestionRequests(message, recovering);
     if (!projectedMessage || projectedMessage.role !== "user") {
       return projectedMessage;
     }
@@ -4174,10 +4189,11 @@ class TranscriptProjector {
 
 function projectAskUserQuestionRequests(
   message: RpcTranscriptMessage,
+  recovering = false,
 ): RpcTranscriptMessage {
   if (!Array.isArray(message.content)) return message;
   let changed = false;
-  const content = message.content.map(block => {
+  const content = message.content.map((block, index) => {
     if (
       typeof block === "string" ||
       block.type !== "toolCall" ||
@@ -4186,11 +4202,99 @@ function projectAskUserQuestionRequests(
       return block;
     }
     const questionRequest = normalizeAskUserQuestionCardRequest(block.arguments);
-    if (!questionRequest) return block;
+    const questionState = questionLifecycleState(
+      message.content as Array<string | RpcTranscriptContentBlock>,
+      index,
+      block.id,
+      Boolean(questionRequest),
+      recovering,
+    );
+    if (!questionRequest && !questionState) return block;
     changed = true;
-    return { ...block, questionRequest };
+    return {
+      ...block,
+      ...(questionRequest ? { questionRequest } : {}),
+      ...(questionState ? { questionState } : {}),
+    };
   });
   return changed ? { ...message, content } : message;
+}
+
+function projectRecoveredQuestionLifecycle(
+  messages: RpcTranscriptMessage[],
+): RpcTranscriptMessage[] {
+  const completed = new Map<string, AskUserQuestionLifecycleState>();
+  for (const message of messages) {
+    if (message.role !== "toolResult" || !message.toolCallId) continue;
+    completed.set(
+      message.toolCallId,
+      questionResultLifecycleState(message.details, message.isError, message),
+    );
+  }
+  if (completed.size === 0) return messages;
+
+  return messages.map(message => {
+    if (!Array.isArray(message.content)) return message;
+    let changed = false;
+    const content = message.content.map(block => {
+      if (
+        typeof block === "string" ||
+        block.type !== "toolCall" ||
+        !block.id ||
+        !completed.has(block.id)
+      ) {
+        return block;
+      }
+      changed = true;
+      return { ...block, questionState: completed.get(block.id) };
+    });
+    return changed ? { ...message, content } : message;
+  });
+}
+
+function questionResultLifecycleState(
+  details: RpcToolResultDetails | undefined,
+  isError: boolean | undefined,
+  serializedSource: unknown,
+): AskUserQuestionLifecycleState {
+  if (
+    details &&
+    typeof details === "object" &&
+    !Array.isArray(details) &&
+    "status" in details
+  ) {
+    if (details.status === "answered" || details.status === "cancelled") {
+      return details.status;
+    }
+  }
+  if (isError) {
+    const serialized = JSON.stringify(serializedSource);
+    if (serialized.includes(ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE)) {
+      return "terminal_failure";
+    }
+    if (serialized.includes(ASK_USER_QUESTION_PRESENTATION_RETRY_CODE)) {
+      return "retrying";
+    }
+  }
+  return "invalid";
+}
+
+function questionLifecycleState(
+  content: Array<string | RpcTranscriptContentBlock>,
+  index: number,
+  toolCallId: string | undefined,
+  hasQuestionRequest: boolean,
+  recovering: boolean,
+): AskUserQuestionLifecycleState | undefined {
+  const result = content[index + 1];
+  if (result && typeof result !== "string" && result.type === "toolResult") {
+    return questionResultLifecycleState(result.details, result.isError, result);
+  }
+  if (toolCallId) {
+    const pendingState = askUserQuestionCoordinator.state(toolCallId);
+    if (pendingState) return pendingState;
+  }
+  return hasQuestionRequest && recovering ? "terminal_failure" : undefined;
 }
 
 /* ============================================================================
@@ -5876,14 +5980,17 @@ export class BridgeRpcAdapter {
             sessionPath,
             command.limit,
           );
-          this.transcriptProjector.syncPage(selected.transcript);
+          const transcript = this.transcriptProjector.projectPage(
+            selected.transcript,
+          );
+          this.transcriptProjector.syncPage(transcript);
           return {
             id: correlationId,
             type: "response",
             command: "switch_session",
             success: true,
             data: {
-              transcript: selected.transcript,
+              transcript,
               treeEntries: selected.treeEntries,
               sessionId: selected.sessionId,
               sessionName: selected.sessionName,
@@ -6049,11 +6156,13 @@ export class BridgeRpcAdapter {
 
       case "get_messages": {
         const direction = command.direction === "older" ? "older" : "latest";
-        const page = this.sessionRuntime.buildCurrentTranscriptPage({
-          direction,
-          cursor: command.cursor,
-          limit: command.limit,
-        });
+        const page = this.transcriptProjector.projectPage(
+          this.sessionRuntime.buildCurrentTranscriptPage({
+            direction,
+            cursor: command.cursor,
+            limit: command.limit,
+          }),
+        );
         if (direction === "latest") {
           this.transcriptProjector.syncPage(page);
         }

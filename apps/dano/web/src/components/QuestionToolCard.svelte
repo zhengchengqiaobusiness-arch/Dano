@@ -519,7 +519,13 @@
 </script>
 
 {#if request && showCard}
-  <article class="question-card" data-status={result?.status ?? "pending"}>
+  <article
+    class="question-card"
+    data-status={result?.status ?? "pending"}
+    aria-live="polite"
+    aria-label={t("questionTool.label")}
+    aria-busy={pending && submitting}
+  >
     <div class="question-label">{t("questionTool.label")}</div>
     {#if !request.batch && request.kind !== "text"}
       <div class="question-text">
