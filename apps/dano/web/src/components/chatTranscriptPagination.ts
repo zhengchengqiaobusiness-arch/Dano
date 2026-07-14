@@ -1,4 +1,4 @@
-export const TRANSCRIPT_START_NOTICE_DURATION_MS = 3000;
+export const TRANSCRIPT_START_NOTICE_DURATION_MS = 1000;
 
 export function shouldAutoLoadOlderTranscript(options: {
   isNearTop: boolean;

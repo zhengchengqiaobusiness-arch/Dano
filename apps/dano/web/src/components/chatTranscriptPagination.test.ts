@@ -8,8 +8,8 @@ import {
 } from "./chatTranscriptPagination";
 
 describe("chat transcript older pagination", () => {
-  it("keeps the no-more history notice visible for three seconds", () => {
-    expect(TRANSCRIPT_START_NOTICE_DURATION_MS).toBe(3000);
+  it("keeps the no-more history notice visible for one second", () => {
+    expect(TRANSCRIPT_START_NOTICE_DURATION_MS).toBe(1000);
   });
 
   it("restores scroll position only after older messages were added", () => {
