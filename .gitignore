@@ -32,5 +32,6 @@ get_token.py
 PAGE_SKILL_PLAN.md
 back/_e2e_leave2.log
 back/.dano-sessions/
-back/.dano/                 # Pi 录制 SessionManager JSONL（服务端持久会话，可能含上下文）
+# Pi 录制 SessionManager JSONL（服务端持久会话，可能含上下文）
+back/.dano/
 /.claude
