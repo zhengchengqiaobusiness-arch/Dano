@@ -68,6 +68,7 @@
   let leftSidebarCollapsed = $state(false);
   let outlineSidebarOpen = $state(false);
   let themeSettingsOpen = $state(false);
+  let newSessionPending = $state(false);
   let activeRightSidebarTabId = $state<RightSidebarTabId>(TREE_TAB_ID);
   let fileViewerTabs = $state<FileViewerTab[]>([]);
   let mainContentRef: AppMainContent | null = $state(null);
@@ -806,6 +807,24 @@
     }
   }
 
+  async function handleExplicitNewSession() {
+    newSessionPending = true;
+
+    try {
+      const response = await bridge.explicitNewSession();
+      if (response.success) {
+        pendingRevision = null;
+        activeDebugSessionPath = null;
+        editQueuedPayload = null;
+        sidebarOpen = false;
+      }
+    } catch {
+      // The store reports the error and preserves the current session.
+    } finally {
+      newSessionPending = false;
+    }
+  }
+
   async function handleRegisterWorkspace() {
     try {
       const response = await bridge.registerWorkspace(undefined);
@@ -1247,6 +1266,8 @@
       connectionStatus={bridge.connectionStatus}
       disconnectReason={bridge.lastDisconnectReason}
       onReconnect={bridge.reconnect}
+      onNewSession={handleExplicitNewSession}
+      {newSessionPending}
     />
 
     <ReconnectBanner

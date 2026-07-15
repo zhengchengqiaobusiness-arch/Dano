@@ -46,6 +46,11 @@ import {
   summarizeErrorMessage,
 } from "../utils/bridgeErrors";
 import {
+  createExplicitNewSessionAction,
+  readActiveSessionCache,
+  writeActiveSessionCache,
+} from "../utils/newSession";
+import {
   contentBlocks,
   normalizeTranscript,
   transcriptConfigState,
@@ -295,21 +300,15 @@ const pendingRequests = new Map<
 // Reactive state (module-level, initialized once)
 // ---------------------------------------------------------------------------
 
-const ACTIVE_SESSION_CACHE_KEY = "dano.activeSessionPath";
-
 function readCachedActiveSessionPath(): string | null {
   if (typeof window === "undefined") return null;
-  return normalizeBridgePath(window.sessionStorage.getItem(ACTIVE_SESSION_CACHE_KEY));
+  return normalizeBridgePath(readActiveSessionCache(window.sessionStorage));
 }
 
 function setActiveTreeSessionPath(sessionPath: string | null) {
   _activeTreeSessionPath = sessionPath;
   if (typeof window === "undefined") return;
-  if (sessionPath) {
-    window.sessionStorage.setItem(ACTIVE_SESSION_CACHE_KEY, sessionPath);
-  } else {
-    window.sessionStorage.removeItem(ACTIVE_SESSION_CACHE_KEY);
-  }
+  writeActiveSessionCache(window.sessionStorage, sessionPath);
 }
 
 let _connectionStatus = $state<ConnectionStatus>("disconnected");
@@ -2067,8 +2066,24 @@ export async function switchSession(sessionPath: string): Promise<RpcResponse> {
   return sendCommand({ type: "switch_session", sessionPath });
 }
 
-export async function newSession(workspacePath: string): Promise<RpcResponse> {
+export function newSession(workspacePath?: string): Promise<RpcResponse> {
   return sendCommand({ type: "new_session", workspacePath });
+}
+
+const requestExplicitNewSession = createExplicitNewSessionAction(
+  () => newSession(),
+  error => {
+    const message =
+      error instanceof Error ? error.message : String(error ?? "");
+    pushNotification(
+      summarizeErrorMessage(message, t("store.error.newSessionFailed")),
+      "error",
+    );
+  },
+);
+
+export function explicitNewSession(): Promise<RpcResponse> {
+  return requestExplicitNewSession();
 }
 
 export function registerWorkspace(
@@ -2182,6 +2197,35 @@ function handleServerMessage(raw: MessageEvent) {
   }
 }
 
+export function applyNewSessionResponse(payload: RpcResponse):
+  | { success: false }
+  | { success: true; workspacePath: string | null }
+  | null {
+  if (payload.command !== "new_session") return null;
+  if (!payload.success) return { success: false };
+
+  clearPromptPending();
+  const data = payload.data as NonNullable<
+    Parameters<typeof applySessionSnapshotResponse>[0]
+  >;
+  if (!applySessionSnapshotResponse(data)) {
+    replaceTranscript([], data.sessionPath ?? null);
+    _transcriptHasOlder = false;
+    _transcriptOldestCursor = null;
+    _transcriptNewestCursor = null;
+    _transcriptInitialLoading = false;
+    _treeEntries = [];
+    _sessionState = null;
+    _isStreaming = false;
+    setActiveTreeSessionPath(data.sessionPath ?? null);
+  }
+  setCompactionState(false);
+  return {
+    success: true,
+    workspacePath: data.workspacePath ?? _sessionState?.workspacePath ?? null,
+  };
+}
+
 function handleResponse(payload: RpcResponse) {
   if (payload.id) {
     const pending = pendingRequests.get(payload.id);
@@ -2190,6 +2234,21 @@ function handleResponse(payload: RpcResponse) {
       pendingRequests.delete(payload.id);
       pending.resolve(payload);
     }
+  }
+
+  const newSessionResult = applyNewSessionResponse(payload);
+  if (newSessionResult) {
+    if (newSessionResult.success) {
+      void refreshWorkspaces().catch(() => {});
+      if (newSessionResult.workspacePath) {
+        void loadWorkspaceSessions({
+          workspacePath: newSessionResult.workspacePath,
+          limit: 5,
+          merge: "replace",
+        }).catch(() => {});
+      }
+    }
+    return;
   }
 
   if (payload.success) {
@@ -2308,34 +2367,6 @@ function handleResponse(payload: RpcResponse) {
           | undefined;
         if (data)
           applyTreeEntriesUpdate(data.entries, data.sessionPath ?? null);
-        break;
-      }
-      case "new_session": {
-        clearPromptPending();
-        const data = payload.data as
-          | Parameters<typeof applySessionSnapshotResponse>[0]
-          | undefined;
-        if (!applySessionSnapshotResponse(data)) {
-          replaceTranscript([], null);
-          _transcriptHasOlder = false;
-          _transcriptOldestCursor = null;
-          _transcriptNewestCursor = null;
-          _transcriptInitialLoading = false;
-          _treeEntries = [];
-          _sessionState = null;
-          _isStreaming = false;
-        }
-        setCompactionState(false);
-        const workspacePath =
-          data?.workspacePath ?? _sessionState?.workspacePath;
-        void refreshWorkspaces().catch(() => {});
-        if (workspacePath) {
-          void loadWorkspaceSessions({
-            workspacePath,
-            limit: 5,
-            merge: "replace",
-          }).catch(() => {});
-        }
         break;
       }
       case "compact": {
@@ -2963,6 +2994,7 @@ export function initBridge() {
     createGitBranch,
     switchSession,
     newSession,
+    explicitNewSession,
     registerWorkspace,
     abortGeneration,
     compactSession,
