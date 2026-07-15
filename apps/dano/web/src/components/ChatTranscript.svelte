@@ -2471,11 +2471,11 @@
     }
 
     .scroll-bottom-button {
-      transform: translateY(calc(1rem - 0.2rem));
+      transform: translateY(calc(0.5rem - 0.2rem));
     }
 
     .scroll-bottom-button:active {
-      transform: translateY(calc(1rem - 0.2rem)) scale(0.96);
+      transform: translateY(calc(0.5rem - 0.2rem)) scale(0.96);
     }
   }
 
