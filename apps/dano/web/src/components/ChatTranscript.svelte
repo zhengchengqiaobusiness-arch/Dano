@@ -1672,7 +1672,7 @@
 
   .scroll-bottom-overlay {
     position: sticky;
-    bottom: 8px;
+    bottom: 56px;
     z-index: 5;
     height: 0;
     display: flex;
@@ -1697,7 +1697,6 @@
     justify-content: center;
     cursor: pointer;
     pointer-events: auto;
-    transform: translateY(-48px);
     transition:
       background 0.16s ease,
       box-shadow 0.16s ease,
@@ -1712,7 +1711,7 @@
   }
 
   .scroll-bottom-button:active {
-    transform: translateY(-48px) scale(0.96);
+    transform: scale(0.96);
   }
 
   .empty-state {
@@ -2467,15 +2466,7 @@
     }
 
     .scroll-bottom-overlay {
-      bottom: 0;
-    }
-
-    .scroll-bottom-button {
-      transform: translateY(0.3rem);
-    }
-
-    .scroll-bottom-button:active {
-      transform: translateY(0.3rem) scale(0.96);
+      bottom: -0.3rem;
     }
   }
 
