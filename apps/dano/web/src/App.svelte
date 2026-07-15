@@ -409,6 +409,12 @@
   let displayedTranscriptInitialLoading = $derived(
     activeDebugSession ? false : bridge.transcriptInitialLoading,
   );
+  let isEmptyConversation = $derived(
+    !displayedTranscriptInitialLoading && displayedTranscript.length === 0,
+  );
+  let showNewSession = $derived(
+    !displayedTranscriptInitialLoading && !isEmptyConversation,
+  );
   let displayedTranscriptPageLoading = $derived(
     activeDebugSession ? false : bridge.transcriptPageLoading,
   );
@@ -1268,6 +1274,7 @@
       onReconnect={bridge.reconnect}
       onNewSession={handleExplicitNewSession}
       {newSessionPending}
+      {showNewSession}
     />
 
     <ReconnectBanner
@@ -1287,6 +1294,7 @@
         transcriptStreams={displayedTranscriptStreams}
         transcriptHasOlder={displayedTranscriptHasOlder}
         transcriptInitialLoading={displayedTranscriptInitialLoading}
+        {isEmptyConversation}
         transcriptPageLoading={displayedTranscriptPageLoading}
         pendingTranscriptConfigEvent={displayedPendingTranscriptConfigEvent}
         isStreaming={displayedIsStreaming}

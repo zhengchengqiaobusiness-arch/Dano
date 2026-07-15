@@ -9,12 +9,14 @@
     onReconnect,
     onNewSession,
     newSessionPending = false,
+    showNewSession = true,
   }: {
     connectionStatus: ConnectionStatus;
     disconnectReason?: string;
     onReconnect?: () => void;
     onNewSession?: () => void;
     newSessionPending?: boolean;
+    showNewSession?: boolean;
   } = $props();
 
   const statusMeta = $derived.by(() => {
@@ -50,17 +52,19 @@
       <span>{statusMeta.label}</span>
     </button>
   </div>
-  <button
-    class="new-session-button"
-    type="button"
-    aria-label={t("appHeader.newSession")}
-    title={t("appHeader.newSession")}
-    disabled={newSessionPending}
-    onclick={() => onNewSession?.()}
-  >
-    <SquarePen size={18} aria-hidden="true" />
-    <span>{t("appHeader.newSession")}</span>
-  </button>
+  {#if showNewSession}
+    <button
+      class="new-session-button"
+      type="button"
+      aria-label={t("appHeader.newSession")}
+      title={t("appHeader.newSession")}
+      disabled={newSessionPending}
+      onclick={() => onNewSession?.()}
+    >
+      <SquarePen size={18} aria-hidden="true" />
+      <span>{t("appHeader.newSession")}</span>
+    </button>
+  {/if}
 </header>
 
 <style>
@@ -87,10 +91,10 @@
     gap: 8px;
     height: 40px;
     padding: 0 14px;
-    border: 1px solid #e4e5e2;
+    border: 1px solid var(--border);
     border-radius: 999px;
-    background: #fff;
-    color: #5f6368;
+    background: var(--panel);
+    color: var(--text-muted);
     font: inherit;
     font-size: 0.82rem;
     font-weight: 600;
@@ -100,11 +104,11 @@
   }
 
   .new-session-button:hover:not(:disabled) {
-    background: #f7f7f5;
+    background: var(--panel-2);
   }
 
   .new-session-button:focus-visible {
-    outline: 2px solid #5f6368;
+    outline: 2px solid var(--text-muted);
     outline-offset: 2px;
   }
 
