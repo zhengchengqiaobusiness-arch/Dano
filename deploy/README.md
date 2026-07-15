@@ -85,6 +85,17 @@ minimum acceptance sequence against the Podman Compose deployment:
 
 1. Build and start the image with Podman Compose.
 2. Run `smoke:deploy` against nginx.
+   For exposure-mode changes, also run the isolated four-mode acceptance against
+   the current prebuilt image. It generates a disposable self-signed certificate
+   with Compose-significant filename characters, verifies the served certificate,
+   published protocols, redirect path/query, and application health, then removes
+   its containers, volumes, network, and temporary files:
+
+   ```bash
+   DANO_COMPOSE=podman \
+   DANO_IMAGE=dano-app:local \
+   pnpm run deploy:check-exposure
+   ```
 3. In the browser, send a plain text chat and confirm the model replies.
 4. In the browser, upload an image and confirm the model can read it.
 5. In the browser, ask the model to run exactly this safe command and not read

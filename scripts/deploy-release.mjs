@@ -82,6 +82,15 @@ function requireValue(name, value) {
   return value;
 }
 
+function serializeEnvValue(value) {
+  const text = String(value);
+  if (/[\r\n]/.test(text)) {
+    throw new Error("deployment environment values cannot contain newlines");
+  }
+  if (/^[a-zA-Z0-9_./:@+-]+$/.test(text)) return text;
+  return `'${text.replaceAll("'", "\\'")}'`;
+}
+
 function updateEnvFile(values) {
   const current = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
   const lines = current.split(/\r?\n/).filter(line => line.length > 0);
@@ -90,10 +99,10 @@ function updateEnvFile(values) {
     const match = line.match(/^([A-Z0-9_]+)=/);
     if (!match || !(match[1] in values)) return line;
     seen.add(match[1]);
-    return `${match[1]}=${values[match[1]]}`;
+    return `${match[1]}=${serializeEnvValue(values[match[1]])}`;
   });
   for (const [key, value] of Object.entries(values)) {
-    if (!seen.has(key)) next.push(`${key}=${value}`);
+    if (!seen.has(key)) next.push(`${key}=${serializeEnvValue(value)}`);
   }
   writeFileSync(envPath, `${next.join("\n")}\n`, { mode: 0o600 });
 }

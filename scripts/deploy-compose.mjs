@@ -8,6 +8,9 @@ import { resolveDeploymentExposure } from "./deploy-exposure.mjs";
 const command = process.argv[2] ?? "up";
 const composeBin = process.env.DANO_COMPOSE || "docker";
 const baseArgs = composeBin === "podman" ? ["compose"] : ["compose"];
+const shouldPullImage = Boolean(process.env.DANO_IMAGE?.trim());
+const shellNginxConf = process.env.DANO_NGINX_CONF;
+const shellNginxSharedDir = process.env.DANO_NGINX_SHARED_DIR;
 const hasEnvFile = existsSync(".env");
 if (hasEnvFile) process.loadEnvFile(".env");
 const envFileArgs = hasEnvFile ? ["--env-file", ".env"] : [];
@@ -22,7 +25,7 @@ const sourceRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const composeEnv = {
   ...process.env,
   ...exposure.tlsEnv,
-  ...(!usesReleaseAssets && !process.env.DANO_NGINX_CONF
+  ...(!usesReleaseAssets && !shellNginxConf
     ? {
         DANO_NGINX_CONF: join(
           sourceRoot,
@@ -30,7 +33,7 @@ const composeEnv = {
         ),
       }
     : {}),
-  ...(!usesReleaseAssets && !process.env.DANO_NGINX_SHARED_DIR
+  ...(!usesReleaseAssets && !shellNginxSharedDir
     ? { DANO_NGINX_SHARED_DIR: join(sourceRoot, "deploy/nginx/shared") }
     : {}),
 };
@@ -61,7 +64,7 @@ function run(args) {
 
 switch (command) {
   case "up": {
-    if (process.env.DANO_IMAGE?.trim()) {
+    if (shouldPullImage) {
       run(["pull", "app"]);
     }
     run(["up", "-d", "--no-build"]);

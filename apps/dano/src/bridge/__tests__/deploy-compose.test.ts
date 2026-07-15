@@ -33,6 +33,10 @@ const composeFile = new URL(
   "../../../../../docker-compose.yml",
   import.meta.url,
 ).pathname;
+const envExampleFile = new URL(
+  "../../../../../.env.example",
+  import.meta.url,
+).pathname;
 const deployRoot = new URL("../../../../../deploy/", import.meta.url).pathname;
 const dockerfile = new URL("../../../../../Dockerfile", import.meta.url).pathname;
 const dockerignoreFile = new URL(
@@ -44,6 +48,7 @@ const entrypointFile = new URL(
   import.meta.url,
 ).pathname;
 const tempDirs: string[] = [];
+let lastComposeEnv: Record<string, string | undefined> = {};
 
 function run(
   command: string,
@@ -57,12 +62,18 @@ function run(
   const cwd = mkdtempSync(join(tmpdir(), "dano-deploy-compose-"));
   tempDirs.push(cwd);
   const logPath = join(cwd, "compose.log");
+  const composeEnvPath = join(cwd, "compose-env.json");
   const composePath = join(cwd, "compose");
   writeFileSync(
     composePath,
     `#!/usr/bin/env node
 import { appendFileSync } from "node:fs";
 appendFileSync(process.env.DANO_COMPOSE_LOG, JSON.stringify(process.argv.slice(2)) + "\\n");
+import { writeFileSync } from "node:fs";
+writeFileSync(process.env.DANO_COMPOSE_ENV_LOG, JSON.stringify({
+  DANO_NGINX_CONF: process.env.DANO_NGINX_CONF,
+  DANO_NGINX_SHARED_DIR: process.env.DANO_NGINX_SHARED_DIR,
+}));
 `,
   );
   chmodSync(composePath, 0o755);
@@ -77,6 +88,7 @@ appendFileSync(process.env.DANO_COMPOSE_LOG, JSON.stringify(process.argv.slice(2
     ...process.env,
     DANO_COMPOSE: composePath,
     DANO_COMPOSE_LOG: logPath,
+    DANO_COMPOSE_ENV_LOG: composeEnvPath,
   };
   delete env.DANO_IMAGE;
   delete env.DANO_EXPOSURE_MODE;
@@ -85,6 +97,7 @@ appendFileSync(process.env.DANO_COMPOSE_LOG, JSON.stringify(process.argv.slice(2
   if (options.image) env.DANO_IMAGE = options.image;
   Object.assign(env, options.env);
   execFileSync(process.execPath, [deployScript, command], { cwd, env });
+  lastComposeEnv = JSON.parse(readFileSync(composeEnvPath, "utf8"));
 
   return readFileSync(logPath, "utf8")
     .trim()
@@ -113,15 +126,15 @@ function runRelease(
   const logPath = join(cwd, "commands.log");
   const tlsDir =
     options.tlsPathStyle === "relative" ? join(deployDir, "operator-tls") : cwd;
-  const tlsCertPath = join(tlsDir, "operator certificate.crt");
-  const tlsKeyPath = join(tlsDir, "operator private key.key");
+  const tlsCertPath = join(tlsDir, "operator \\$certificate#1.crt");
+  const tlsKeyPath = join(tlsDir, "operator \\$private-key#1.key");
   const tlsCertInput =
     options.tlsPathStyle === "relative"
-      ? "operator-tls/operator certificate.crt"
+      ? "operator-tls/operator \\$certificate#1.crt"
       : tlsCertPath;
   const tlsKeyInput =
     options.tlsPathStyle === "relative"
-      ? "operator-tls/operator private key.key"
+      ? "operator-tls/operator \\$private-key#1.key"
       : tlsKeyPath;
 
   mkdirSync(join(fakeRepo, "deploy/compose"), { recursive: true });
@@ -361,6 +374,34 @@ describe("deploy compose wrapper", () => {
     ]);
   });
 
+  it("keeps the documented local .env flow on local images and source nginx assets", () => {
+    expect(
+      run("up", {
+        envFile: true,
+        envFileContent: readFileSync(envExampleFile, "utf8"),
+      }),
+    ).toEqual([
+      [
+        "compose",
+        "-f",
+        "docker-compose.yml",
+        "-f",
+        "deploy/compose/http.yml",
+        "--env-file",
+        ".env",
+        "up",
+        "-d",
+        "--no-build",
+      ],
+    ]);
+    expect(lastComposeEnv.DANO_NGINX_CONF).toBe(
+      join(deployRoot, "nginx/http.conf.template"),
+    );
+    expect(lastComposeEnv.DANO_NGINX_SHARED_DIR).toBe(
+      join(deployRoot, "nginx/shared"),
+    );
+  });
+
   it("rejects an unknown exposure mode", () => {
     expect(() =>
       run("ps", { env: { DANO_EXPOSURE_MODE: "ftp" } }),
@@ -440,6 +481,9 @@ describe("deploy compose wrapper", () => {
     expect(httpCompose).not.toContain("DANO_HTTPS_PORT");
     expect(httpsCompose).toContain("DANO_HTTPS_PORT");
     expect(httpsCompose).not.toContain("DANO_NGINX_PORT");
+    expect(httpsCompose).toContain("type: bind");
+    expect(httpsCompose).toContain("source: ${DANO_TLS_CERT_PATH}");
+    expect(httpsCompose).not.toContain("${DANO_TLS_CERT_PATH}:");
     expect(bothCompose).toContain("DANO_NGINX_PORT");
     expect(bothCompose).toContain("DANO_HTTPS_PORT");
     expect(bothNoRedirectCompose).toContain("DANO_NGINX_PORT");
@@ -946,8 +990,12 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     expect(readFileSync(nginxConf, "utf8")).toContain("listen 443 ssl");
     const env = readFileSync(join(deployDir, ".env"), "utf8");
     expect(env).toContain("DANO_EXPOSURE_MODE=https");
-    expect(env).toContain(`DANO_TLS_CERT_PATH=${tlsCertPath}`);
-    expect(env).toContain(`DANO_TLS_KEY_PATH=${tlsKeyPath}`);
+    expect(env).toContain(
+      `DANO_TLS_CERT_PATH='${tlsCertPath.replaceAll("'", "\\\\'")}'`,
+    );
+    expect(env).toContain(
+      `DANO_TLS_KEY_PATH='${tlsKeyPath.replaceAll("'", "\\\\'")}'`,
+    );
   });
 
   it("resolves relative TLS paths from the Deploy Control Directory", () => {
@@ -957,8 +1005,12 @@ writeFileSync(process.env.DANO_COMMAND_LOG, JSON.stringify(process.argv.slice(2)
     });
 
     const env = readFileSync(join(deployDir, ".env"), "utf8");
-    expect(env).toContain(`DANO_TLS_CERT_PATH=${tlsCertPath}`);
-    expect(env).toContain(`DANO_TLS_KEY_PATH=${tlsKeyPath}`);
+    expect(env).toContain(
+      `DANO_TLS_CERT_PATH='${tlsCertPath.replaceAll("'", "\\\\'")}'`,
+    );
+    expect(env).toContain(
+      `DANO_TLS_KEY_PATH='${tlsKeyPath.replaceAll("'", "\\\\'")}'`,
+    );
   });
 
   it.each([
