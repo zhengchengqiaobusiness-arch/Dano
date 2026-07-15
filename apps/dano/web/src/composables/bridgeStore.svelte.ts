@@ -46,6 +46,11 @@ import {
   summarizeErrorMessage,
 } from "../utils/bridgeErrors";
 import {
+  createSingleFlightNewSession,
+  readActiveSessionCache,
+  writeActiveSessionCache,
+} from "../utils/newSession";
+import {
   contentBlocks,
   normalizeTranscript,
   transcriptConfigState,
@@ -295,21 +300,15 @@ const pendingRequests = new Map<
 // Reactive state (module-level, initialized once)
 // ---------------------------------------------------------------------------
 
-const ACTIVE_SESSION_CACHE_KEY = "dano.activeSessionPath";
-
 function readCachedActiveSessionPath(): string | null {
   if (typeof window === "undefined") return null;
-  return normalizeBridgePath(window.sessionStorage.getItem(ACTIVE_SESSION_CACHE_KEY));
+  return normalizeBridgePath(readActiveSessionCache(window.sessionStorage));
 }
 
 function setActiveTreeSessionPath(sessionPath: string | null) {
   _activeTreeSessionPath = sessionPath;
   if (typeof window === "undefined") return;
-  if (sessionPath) {
-    window.sessionStorage.setItem(ACTIVE_SESSION_CACHE_KEY, sessionPath);
-  } else {
-    window.sessionStorage.removeItem(ACTIVE_SESSION_CACHE_KEY);
-  }
+  writeActiveSessionCache(window.sessionStorage, sessionPath);
 }
 
 let _connectionStatus = $state<ConnectionStatus>("disconnected");
@@ -2067,8 +2066,19 @@ export async function switchSession(sessionPath: string): Promise<RpcResponse> {
   return sendCommand({ type: "switch_session", sessionPath });
 }
 
-export async function newSession(workspacePath: string): Promise<RpcResponse> {
-  return sendCommand({ type: "new_session", workspacePath });
+const requestNewSession = createSingleFlightNewSession(
+  (workspacePath?: string) => sendCommand({ type: "new_session", workspacePath }),
+  message => {
+    pushNotification(
+      summarizeErrorMessage(message, t("store.error.newSessionFailed")),
+      "error",
+    );
+  },
+  () => t("store.error.newSessionFailed"),
+);
+
+export function newSession(workspacePath?: string): Promise<RpcResponse> {
+  return requestNewSession(workspacePath);
 }
 
 export function registerWorkspace(
