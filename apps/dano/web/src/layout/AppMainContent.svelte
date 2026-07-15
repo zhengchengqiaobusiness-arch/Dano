@@ -320,6 +320,10 @@
     margin-bottom: 0;
   }
 
+  .center-column.empty-conversation :global(.composer-bar::before) {
+    display: none;
+  }
+
   .queued-messages-strip {
     display: flex;
     flex-direction: column;

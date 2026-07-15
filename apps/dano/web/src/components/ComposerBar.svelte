@@ -566,9 +566,22 @@
 
 <style>
   .composer-bar {
+    position: relative;
     flex-shrink: 0;
     width: min(960px, calc(100% - 48px));
     margin: 0 auto max(36px, env(safe-area-inset-bottom));
+  }
+
+  .composer-bar::before {
+    content: "";
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    width: 100vw;
+    height: 20px;
+    pointer-events: none;
+    background: linear-gradient(to bottom, transparent, var(--bg));
+    transform: translateX(-50%);
   }
 
   .composer-inner-wrap {
@@ -1054,21 +1067,8 @@
 
   @media (max-width: 900px) {
     .composer-bar {
-      position: relative;
       width: calc(100% - 32px);
       margin: 0 auto max(12px, env(safe-area-inset-bottom));
-    }
-
-    .composer-bar::before {
-      content: "";
-      position: absolute;
-      bottom: 100%;
-      left: 50%;
-      width: 100vw;
-      height: 20px;
-      pointer-events: none;
-      background: linear-gradient(to bottom, transparent, var(--bg));
-      transform: translateX(-50%);
     }
 
     .composer-inner-wrap { width: 100%; }
