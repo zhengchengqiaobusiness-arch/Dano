@@ -61,6 +61,46 @@ def test_single_required_flag_excludes_runtime_value_from_caller_schema():
     assert flow_spec_module.flow_spec_required_params(spec) == ["申请标题"]
 
 
+@pytest.mark.parametrize("required", [True, False], ids=["required", "optional"])
+def test_required_flag_changes_caller_schema_without_blocking_publish(required):
+    step = FlowStep(
+        step_id="submit",
+        method="POST",
+        url="/api/submit",
+        path="/api/submit",
+        body_source='{"title":"demo"}',
+        params=[ParamField(
+            path="title",
+            key="申请标题",
+            value="demo",
+            required=required,
+            category="user_param",
+            source_kind="user_input",
+            exposed_to_user=True,
+        )],
+        success_rule={"kind": "http_status", "values": [200]},
+    )
+    spec = FlowSpec(
+        flow_id=f"required-is-contract-{required}",
+        steps=[step],
+        capabilities=[FlowCapability(
+            name="submit",
+            kind="submit",
+            step_ids=["submit"],
+            nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+        )],
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+    report = validate_flow_spec(prepared)
+
+    expected_required = ["申请标题"] if required else []
+    assert prepared.capabilities[0].input_schema["required"] == expected_required
+    assert report["api_preview"]["required"] == expected_required
+    assert report["passed"] is True
+    assert report["errors"] == []
+
+
 
 
 def test_system_generated_runtime_value_is_compiled_and_not_exposed():
@@ -4228,8 +4268,14 @@ def test_resolve_review_item_is_preserved_in_validation():
 
 def test_resolve_reviews_excluding_high():
     spec = _two_step_spec_with_link()
-    spec.steps[0].risk_level = "L4"
+    spec.steps[0].params[0].category = "system_const"
+    spec.steps[0].params[0].source_kind = "constant"
+    spec.steps[0].params[0].exposed_to_user = True
     spec = apply_flow_edits(spec, [])
+    high_items = [item for item in spec.review_items if item.severity == "high"]
+
+    assert high_items
+    assert any(item.type == "system_const_exposed" for item in high_items)
 
     new = apply_flow_edits(spec, [{
         "op": "resolve_reviews",
@@ -4244,12 +4290,45 @@ def test_resolve_reviews_excluding_high():
             assert item.resolved is True
 
 
-def test_unknown_source_review_is_locatable_ignorable_and_non_blocking():
+@pytest.mark.parametrize(
+    "capability_model",
+    [None, {"status": "ready"}],
+    ids=["not-generated", "all-capabilities-removed"],
+)
+def test_unknown_source_review_is_hidden_until_a_capability_exists(capability_model):
+    spec = _make_spec()
+    spec.steps[0].body_source = '{"form":{"userId":"123","name":"test"}}'
+    spec.steps[0].params[0].category = "runtime_var"
+    spec.steps[0].params[0].source_kind = "unknown"
+    spec.steps[0].params[0].need_human_confirm = True
+    if capability_model is not None:
+        spec.meta = {**(spec.meta or {}), "capability_model": capability_model}
+
+    report = validate_flow_spec(spec)
+
+    assert not any(
+        item.get("type") in {"field_source_unknown", "field_source_incomplete"}
+        for item in report["review_items"]
+    )
+    assert not any(
+        item.get("code") in {"field_source_unknown", "field_source_incomplete"}
+        for items in report["issue_groups"].values()
+        for item in items
+    )
+
+
+def test_unknown_source_review_is_locatable_ignorable_and_non_blocking_after_capability_generation():
     spec = _make_spec()
     param = spec.steps[0].params[0]
     param.category = "runtime_var"
     param.source_kind = "unknown"
     param.need_human_confirm = True
+    spec.capabilities = [FlowCapability(
+        name="submit",
+        kind="submit",
+        step_ids=["step1"],
+        nodes=[{"id": "call_step1", "type": "call", "step_id": "step1"}],
+    )]
 
     new = apply_flow_edits(spec, [])
     target_items = [i for i in new.review_items if i.target.get("path") == param.path]
@@ -4337,6 +4416,11 @@ def test_missing_runtime_source_configuration_is_advisory(
             need_human_confirm=True,
         )],
         success_rule={"kind": "http_status", "values": [200]},
+    )], capabilities=[FlowCapability(
+        name="query_status",
+        kind="query_status",
+        step_ids=["query"],
+        nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
     )])
 
     api_request, build_errors = flow_spec_to_api_request(spec)
@@ -4377,6 +4461,11 @@ def test_source_warning_does_not_hide_unrelated_request_builder_error():
             category="runtime_var", source_kind="unknown", source={},
             exposed_to_user=False,
         )],
+    )], capabilities=[FlowCapability(
+        name="submit",
+        kind="submit",
+        step_ids=["submit"],
+        nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
     )])
 
     report = validate_flow_spec(spec)

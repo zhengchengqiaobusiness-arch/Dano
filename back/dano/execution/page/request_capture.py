@@ -1860,14 +1860,18 @@ def capture_verification_plan(deploy: dict | None, api_request: dict) -> dict:
 
 
 
-# 危险写概念(整段命中,跨系统通用):删除/驳回/终止/撤销 —— 这类不做自动化录入(代他人删/驳回风险)。
-# 只收明确破坏性的词;不收 cancel/abort 等易在合法端点出现的歧义词,避免误伤。
+# 高风险写提示词(整段命中,跨系统通用):删除/驳回/终止/撤销。
+# 该结果仅是审计/风险元数据，不证明操作越权，也不是录入或发布硬门。
+# 只收明确破坏性的词；不收 cancel/abort 等易在合法端点出现的歧义词，减少误标。
 _DANGER_PATH_SEGS = frozenset({"delete", "remove", "destroy", "reject", "terminate", "revoke"})
 
 
 def looks_dangerous_write(api_request: dict) -> bool:
-    """危险写请求识别(确定性,业务相关性门):DELETE 方法,或 URL 路径**整段**命中删除/驳回/终止/撤销概念。
-    命中则该录制不应静默自动化(代他人删单/驳回审批等),应拒发让人工处理。通用,不挑系统。"""
+    """识别高风险写元数据：DELETE 方法，或 URL 路径整段命中相关概念。
+
+    命中只用于记录请求语义和风险等级；真实业务中的撤回、删除、驳回同样应被完整录入，
+    调用方不得仅凭本函数结果拒绝生成或发布。通用，不挑系统。
+    """
     for r in (api_request.get("steps") or [api_request]):
         if (r.get("method") or "").upper() == "DELETE":
             return True
@@ -1958,7 +1962,7 @@ def classify_network_request(req: dict) -> dict:
     输出:
         role ∈ {auth, noise, read_option, read_context, business_get, business_write,
                  submit_anchor, post_submit_verify, destructive, unsupported_upload, unknown}
-        keep ∈ {True, False}: 是否进入主流程候选。危险写保留录制事实，执行/发布风险由后续安全层处理。
+        keep ∈ {True, False}: 是否进入主流程候选。高风险标签仅作元数据，不能单独成为录入/发布限制。
         reason: 给人看的一句话解释
         confidence: 0~1,0.9+ 高置信,0.7~0.9 中等,<0.7 让人工确认
     """
@@ -1987,11 +1991,11 @@ def classify_network_request(req: dict) -> dict:
                 "reason": "GraphQL 请求可能包含多操作与动态 selection set；当前 FlowSpec 暂不自动复用",
                 "confidence": 0.92}
 
-    # 2) 危险写仍是用户真实操作，不能在捕获阶段删除。保留为业务写候选，
-    # semantic_role/risk_level 会继续标记 destructive/L4，由执行与发布层决定是否允许。
+    # 2) 高风险写仍是用户真实操作，不能在捕获阶段删除。保留为业务写候选；
+    # semantic_role/risk_level 仅记录审计元数据，不能据此单独拒绝录入或发布。
     if looks_dangerous_write(req):
         return {"role": "business_write", "keep": True,
-                "reason": "删除/驳回/终止/撤销类业务操作已保留；执行与发布时按高风险动作审核",
+                "reason": "已保留真实业务写操作；方法、路径关键词和风险标签仅作为审计元数据",
                 "confidence": 0.98}
 
     # 3) 登录/鉴权/基建写

@@ -3029,11 +3029,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const totalParams = flowSpec.steps.reduce((n, s) => n + (s.params?.length || 0), 0);
     const capabilities = flowSpec.capabilities || [];
     const capturedTotal = allCapturedRequests(flowSpec).length;
-    const publishIssueGroups = groupedPublishIssues(checkReport);
+    // Before a capability contract exists there is nothing actionable to
+    // locate or confirm in the capability workbench.  Initial recording
+    // diagnostics remain in checkReport, but must not surface as field-source
+    // warnings before the operator has generated abilities.
+    const publishIssueGroups = capabilities.length > 0 ? groupedPublishIssues(checkReport) : [];
     const hasPublishAdvice = publishIssueGroups.some((group) => group.items.length > 0);
     return (
       <Card style={{ marginTop: 16 }} styles={{ body: { paddingTop: 8 } }}>
-        {checkReport && (
+        {checkReport && capabilities.length > 0 && (
           <Alert
             type={checkReport.passed && !hasPublishAdvice ? "success" : "warning"}
             showIcon
@@ -3372,6 +3376,19 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <NativeSelect value={normalizeSourceKindForUi(p.source_kind) || "unknown"} width="100%" options={sourceSelectOptionsForParam(p)}
                 onChange={(v) => updateParamSourceKind(step.step_id, p, v)} />
             </FieldControl>
+            {paramExposedToCaller(p) && (
+              <FieldControl label="必填性">
+                <NativeSelect
+                  value={p.required ? "required" : "optional"}
+                  width="100%"
+                  options={[
+                    { label: "必填", value: "required" },
+                    { label: "非必填", value: "optional" },
+                  ]}
+                  onChange={(v) => updateParam(step.step_id, p, "required", v === "required")}
+                />
+              </FieldControl>
+            )}
             <FieldControl label="展示">
               {p.category === "user_param" ? (
                 <Checkbox checked={p.exposed_to_user !== false} onChange={(e) => updateParam(step.step_id, p, "exposed_to_user", e.target.checked)}>暴露给调用方</Checkbox>
@@ -3800,7 +3817,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <Typography.Text code>{row.name}</Typography.Text>
               <Tag color="blue">业务类型：{PARAM_TYPE_LABELS[row.businessType] || row.businessType}</Tag>
               <Tag>Wire：{row.wireType}</Tag>
-              {row.required && <Tag color="red">必填</Tag>}
+              <Tag color={row.required ? "red" : undefined}>{row.required ? "必填" : "非必填"}</Tag>
               {row.description && <Typography.Text type="secondary">{row.description}</Typography.Text>}
             </Space>
           </List.Item>

@@ -161,15 +161,10 @@ async def run_request_onboarding(
             log.warning("ingest.gate.unsupported", reason="no body_template/steps")
             return {"ok": False, "stage": "ingest", "status": IngestionStatus.UNSUPPORTED.value,
                     "action": action, "reason": "没有可参数化的写请求体(无 body_template/steps)—— 无法安全自动化"}
-        # 业务相关性门:危险写请求(删除/驳回/终止/撤销)不做自动化录入 → 拒发(避免代他人删单/驳回审批)
-        from dano.execution.page.request_capture import classify_request_role, looks_dangerous_write
+        # 请求角色只作为审计与风险元数据。DELETE、撤回、驳回等也可能是
+        # 管理员刚刚真实执行的业务操作，不能仅凭方法或路径关键词在录入阶段拒发。
+        from dano.execution.page.request_capture import classify_request_role
         log.info("ingest.request_role", **classify_request_role(api_request))   # node 4 语义角色
-        if looks_dangerous_write(api_request):
-            log.warning("ingest.gate.dangerous_write_rejected",
-                        method=api_request.get("method"), url=api_request.get("url") or api_request.get("path"))
-            return {"ok": False, "stage": "relevance", "status": IngestionStatus.REJECTED.value,
-                    "action": action,
-                    "reason": "识别到危险写请求(删除/驳回/终止/撤销)—— 这类不做自动化录入,请人工处理"}
         # 业务 Goal:用户确认的优先;没传则 LLM 就绪时**自动提炼**(随资产存档,Goal 无条件化)。Goal 完整性门:
         #   用户确认的 goal 不过 → 阻断(需澄清);自动提炼的不过 → 仅作建议(不因 LLM 抖动阻断发布)。
         from dano.execution.page.request_capture import goal_needs_confirmation, validate_goal

@@ -3358,15 +3358,6 @@ def test_self_check_step_link_no_source_flagged():
     assert any("无来源" in p for p in self_check(wf))
 
 
-async def test_onboarding_rejects_dangerous_write():
-    """业务相关性门:DELETE/驳回类写请求 → rejected(发布前 return,不连库)。"""
-    from dano.onboarding.page_onboard import run_request_onboarding
-    out = await run_request_onboarding(tenant="t-x", subsystem="reimburse", action="del",
-                                       api_request={"method": "DELETE", "url": "http://x/order/1",
-                                                    "body_template": {"id": 1}, "params": []})
-    assert out["ok"] is False and out["status"] == "rejected"
-
-
 async def test_onboarding_field_semantics_blocks_internal_required():
     """字段语义门:必填参数是内部机器标识(Activity_xxx)→ needs_clarification(不静默泄漏)。"""
     from dano.onboarding.page_onboard import run_request_onboarding

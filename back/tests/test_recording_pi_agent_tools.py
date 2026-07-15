@@ -438,7 +438,17 @@ def test_fact_violation_rolls_back_entire_recording_session(monkeypatch, mode):
     assert session.last_review == {"sentinel": "preserve"}
 
 
-def test_page_onboard_active_recording_bypasses_board_precheck_and_model_helpers(monkeypatch):
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/submit"),
+        ("DELETE", "/admin-api/bpm/process-instance/cancel-by-start-user"),
+    ],
+    ids=["ordinary-submit", "recorded-withdraw"],
+)
+def test_page_onboard_active_recording_bypasses_board_precheck_and_model_helpers(
+    monkeypatch, method, path,
+):
     from dano.agent_tools import tools as tool_module
 
     calls: list[str] = []
@@ -491,9 +501,9 @@ def test_page_onboard_active_recording_bypasses_board_precheck_and_model_helpers
         action="recorded_submit",
         title="提交申请",
         api_request={
-            "method": "POST",
-            "url": "https://example.invalid/api/submit",
-            "path": "/api/submit",
+            "method": method,
+            "url": f"https://example.invalid{path}",
+            "path": path,
             "body_template": {"reason": "{{reason}}"},
             "params": ["reason"],
             "field_types": {"reason": "string"},
@@ -507,6 +517,10 @@ def test_page_onboard_active_recording_bypasses_board_precheck_and_model_helpers
     ))
     assert result["ok"] is True
     assert calls == ["save", "self_check", "pi_review", "publish"]
+    if method == "DELETE":
+        assert result["stage"] == "publish"
+        assert result["status"] != "rejected"
+        assert result["request_role"]["semanticRole"] == "destructive"
 
 
 def _recording_api_request() -> dict:

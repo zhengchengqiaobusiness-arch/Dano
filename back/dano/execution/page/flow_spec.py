@@ -142,7 +142,6 @@ _STEP_ALLOWED_FIELDS = frozenset({
 })
 
 _PUBLISH_BLOCKING_REVIEW_TYPES = frozenset({
-    "dangerous_step",
     "system_const_exposed",
     "broken_link",
     "link_source_missing",
@@ -3616,6 +3615,13 @@ _AUTOMATED_FIELD_EDIT_ACTORS = frozenset({
     "planner", "repair", "auto", "autofix", "optimizer", "system",
 })
 
+_DEFAULT_RECORDED_FORBIDDEN_ACTIONS = [
+    "调用当前录制范围外的接口",
+    "篡改录制事实",
+    "泄露认证凭证",
+]
+_LEGACY_RECORDED_FORBIDDEN_ACTIONS = frozenset({"删除", "作废", "撤销", "终止", "驳回"})
+
 
 def _apply_capability_field_to_param(
     spec: FlowSpec,
@@ -4026,7 +4032,7 @@ def to_flow_spec(
                 required_inputs=[],
                 success_criteria=["重新录制后捕获至少一个业务 GET 或写请求"],
                 output_expectation=["生成可编辑 FlowSpec"],
-                forbidden_actions=["删除", "作废", "撤销", "终止", "驳回"],
+                forbidden_actions=list(_DEFAULT_RECORDED_FORBIDDEN_ACTIONS),
                 risk_level="L1",
                 capabilities=[],
             ).model_dump(),
@@ -4659,7 +4665,7 @@ def _recorded_goal_from_parts(title: str, steps: list[FlowStep], risk_level: str
             "返回所调用能力的最终响应",
             "批量提交时返回 success_count、failed_items 和每条结果" if any(_looks_batch_step(s) for s in write_steps) else "返回执行状态和原始响应",
         ],
-        forbidden_actions=["删除", "作废", "撤销", "终止", "驳回"],
+        forbidden_actions=list(_DEFAULT_RECORDED_FORBIDDEN_ACTIONS),
         risk_level=risk_level or "L3",
         capabilities=capabilities,
         evidence=[_step_evidence(s) for s in steps[:20]],
@@ -4695,7 +4701,15 @@ def ensure_recorded_goal(spec: FlowSpec) -> FlowSpec:
     goal.setdefault("intent", fresh.get("intent") or spec.title)
     goal.setdefault("success_criteria", fresh.get("success_criteria") or [])
     goal.setdefault("output_expectation", fresh.get("output_expectation") or [])
-    goal.setdefault("forbidden_actions", fresh.get("forbidden_actions") or [])
+    existing_forbidden = {
+        str(item).strip() for item in (goal.get("forbidden_actions") or []) if str(item).strip()
+    }
+    if existing_forbidden == _LEGACY_RECORDED_FORBIDDEN_ACTIONS:
+        # Migrate the old generic deny-list.  A recorded withdraw/delete action
+        # must not produce a goal that forbids its own observed business step.
+        goal["forbidden_actions"] = list(_DEFAULT_RECORDED_FORBIDDEN_ACTIONS)
+    else:
+        goal.setdefault("forbidden_actions", fresh.get("forbidden_actions") or [])
     goal.setdefault("risk_level", fresh.get("risk_level") or spec.risk_level or "L3")
     actual_capabilities = [
         str(cap.name or cap.capability_id)
@@ -9417,70 +9431,59 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
         if link.confirmed and link.source_step_id in step_ids and link.target_step_id in step_ids
     }
 
-    # 来源告警覆盖所有已经物化的接口字段，包括尚未归属能力的步骤；其它
-    # 风险/能力级 Review 仍只针对当前发布范围。这样顶部告警的“定位”可
-    # 直接落到捕获接口页的未归属字段，同时不会扩大实际发布范围。
-    for st in spec.steps:
-        for p in st.params:
-            target = {
-                "kind": "param",
-                "step_id": st.step_id,
-                "step_name": st.name,
-                "path": p.path,
-                "key": p.key,
-                "param_type": p.type,
-                "category": p.category,
-                "source_kind": p.source_kind or "unknown",
-            }
-            guess = f"{p.category}/{p.source_kind}"
-            source_unknown = str(p.source_kind or "").strip().lower() in {"", "unknown"}
-            source_advice = _field_source_configuration_advice(p)
-            if source_unknown:
-                items.append(_review_item(
-                    "field_source_unknown",
-                    severity="medium",
-                    title=f"字段 {p.path} 的来源尚未识别",
-                    target=target,
-                    current_guess=guess,
-                    suggested_action="configure_or_ignore_field_source",
-                    reason=(
-                        "系统会保留当前类型、分类和来源组合，不会自动改写或阻止保存、优化、发布；"
-                        "可补充明确来源，或确认当前人工配置后忽略此提示"
-                    ),
-                    confidence=p.confidence,
-                    blocking=False,
-                    ignorable=True,
-                ))
-            elif source_advice:
-                items.append(_review_item(
-                    "field_source_incomplete",
-                    severity="medium",
-                    title=f"字段 {p.path} 的来源配置不完整",
-                    target=target,
-                    current_guess=guess,
-                    suggested_action="configure_or_ignore_field_source",
-                    reason=(
-                        f"{source_advice}；系统会保留当前人工配置，"
-                        "该提示可忽略且不会阻止保存、优化、发布"
-                    ),
-                    confidence=p.confidence,
-                    blocking=False,
-                    ignorable=True,
-                ))
+    # 来源建议属于能力合同的编辑反馈。尚未生成能力时，字段还没有发布
+    # 边界和可定位的能力锚点，不能提前制造“待处理”告警。能力存在后仍
+    # 覆盖所有已物化字段（含未归属步骤），方便定位和人工忽略。
+    if spec.capabilities:
+        for st in spec.steps:
+            for p in st.params:
+                target = {
+                    "kind": "param",
+                    "step_id": st.step_id,
+                    "step_name": st.name,
+                    "path": p.path,
+                    "key": p.key,
+                    "param_type": p.type,
+                    "category": p.category,
+                    "source_kind": p.source_kind or "unknown",
+                }
+                guess = f"{p.category}/{p.source_kind}"
+                source_unknown = str(p.source_kind or "").strip().lower() in {"", "unknown"}
+                source_advice = _field_source_configuration_advice(p)
+                if source_unknown:
+                    items.append(_review_item(
+                        "field_source_unknown",
+                        severity="medium",
+                        title=f"字段 {p.path} 的来源尚未识别",
+                        target=target,
+                        current_guess=guess,
+                        suggested_action="configure_or_ignore_field_source",
+                        reason=(
+                            "系统会保留当前类型、分类和来源组合，不会自动改写或阻止保存、优化、发布；"
+                            "可补充明确来源，或确认当前人工配置后忽略此提示"
+                        ),
+                        confidence=p.confidence,
+                        blocking=False,
+                        ignorable=True,
+                    ))
+                elif source_advice:
+                    items.append(_review_item(
+                        "field_source_incomplete",
+                        severity="medium",
+                        title=f"字段 {p.path} 的来源配置不完整",
+                        target=target,
+                        current_guess=guess,
+                        suggested_action="configure_or_ignore_field_source",
+                        reason=(
+                            f"{source_advice}；系统会保留当前人工配置，"
+                            "该提示可忽略且不会阻止保存、优化、发布"
+                        ),
+                        confidence=p.confidence,
+                        blocking=False,
+                        ignorable=True,
+                    ))
 
     for st in visible_steps:
-        if st.risk_level == "L4":
-            items.append(_review_item(
-                "dangerous_step",
-                severity="high",
-                title=f"确认高风险步骤 {st.name or st.path or st.step_id}",
-                target={"kind": "step", "step_id": st.step_id, "path": st.path},
-                current_guess=st.semantic_role or st.risk_level,
-                suggested_action="confirm_step_risk",
-                reason="该步骤被识别为高风险写操作，发布前需要人工确认是否允许生成 Skill",
-                confidence=float(st.source_meta.get("confidence") or 0.0),
-            ))
-
         for p in st.params:
             target = {
                 "kind": "param",
@@ -14438,8 +14441,6 @@ def render_business_description(spec: FlowSpec) -> str:
 
     lines.extend(["", "## 8. 风险与注意事项"])
     risks: list[str] = [f"整体风险等级为 `{current.risk_level}`。"]
-    if any(st.risk_level == "L4" for st in current.steps):
-        risks.append("存在高风险写操作，发布前必须确认操作边界。")
     if any(p.category == "runtime_var" and p.source_kind == "unknown" for st in current.steps for p in st.params):
         risks.append("存在来源未知的 runtime_var，不能直接使用录制旧值。")
     if any(p.category == "system_const" and p.exposed_to_user for st in current.steps for p in st.params):

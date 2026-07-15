@@ -1523,7 +1523,10 @@ async def record_ws(ws: WebSocket) -> None:
                         "get_validation_report，再通过 submit_recording_review 提交 acceptance、"
                         "security、compliance 三角色结论。每个角色只能包含 passed(bool)、"
                         "reasons(string[])、可选 model_id(string)，review 顶层只能包含这三个角色；"
-                        "审核不通过时设置 passed=false 并填写 reasons。提交成功后立即结束，不得再次读取或重复提交。"
+                        "审核不通过时设置 passed=false 并填写 reasons。录制事实中的撤回、删除、驳回、终止等"
+                        "可能是管理员刚刚真实执行的合法业务写操作；不得仅凭 HTTP 方法、路径关键词或"
+                        "destructive/L4 等风险标签拒绝，拒绝必须基于独立、具体且可定位的契约、权限或校验证据。"
+                        "提交成功后立即结束，不得再次读取或重复提交。"
                         f" recording_id={recording_id} flow_version={review_version}"
                     )
                     pi_session.require_publish_review(
