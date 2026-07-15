@@ -79,9 +79,9 @@ def has_recorded_value(step: dict) -> bool:
 _VIEW_W, _VIEW_H = 1280, 800
 _CAST_W, _CAST_H = _VIEW_W, _VIEW_H
 _CAST_QUALITY = 80
-_CAST_ACTIVE_FPS = 8
-_CAST_IDLE_FPS = 1
-_CAST_ACTIVE_WINDOW_S = 6.0
+_CAST_ACTIVE_FPS = 20
+_CAST_IDLE_FPS = 4
+_CAST_ACTIVE_WINDOW_S = 10.0
 _SAFE_KEY_RE = re.compile(
     r"^(?:(?:Control|Shift|Alt|Meta)\+){0,3}"
     r"(?:Enter|Tab|Backspace|Delete|Escape|Home|End|PageUp|PageDown|"

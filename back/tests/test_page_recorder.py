@@ -138,8 +138,9 @@ def test_recorder_key_safety_policy() -> None:
 def test_screencast_rate_limits_preserve_clarity_without_overloading_ui() -> None:
     from dano.execution.page.recorder import _CAST_ACTIVE_FPS, _CAST_IDLE_FPS, _CAST_QUALITY
 
-    assert _CAST_ACTIVE_FPS <= 8
-    assert _CAST_IDLE_FPS <= 1
+    assert 15 <= _CAST_ACTIVE_FPS <= 24
+    assert 2 <= _CAST_IDLE_FPS <= 6
+    assert _CAST_IDLE_FPS < _CAST_ACTIVE_FPS
     assert _CAST_QUALITY >= 75
 
 

@@ -706,7 +706,12 @@ async def record_ws(ws: WebSocket) -> None:
         if init.get("type") != "start" or not init.get("start_url"):
             await sender.send_json({"type": "error", "detail": "首帧须为 {type:'start', start_url, ...}"})
             return
-        session_action = _new_recording_action()
+        requested_action = str(init.get("resume_action") or "")
+        session_action = (
+            requested_action
+            if re.fullmatch(r"action_[0-9a-f]{32}", requested_action)
+            else _new_recording_action()
+        )
         requested_recording_id = str(init.get("pi_recording_id") or "")
         recording_id = (
             requested_recording_id
@@ -730,12 +735,15 @@ async def record_ws(ws: WebSocket) -> None:
         async def on_frame(frame: dict) -> None:
             sender.send_latest_frame({"type": "frame", **frame})
 
-        await sess.start_screencast(on_frame)
+        # Make the workbench interactive before the first large JPEG is encoded
+        # and written. The screencast starts immediately afterwards, while input
+        # remains serialized by the same websocket loop.
         await sender.send_json({
             "type": "started",
             "action": session_action,
             "pi_recording_id": recording_id,
         })
+        await sess.start_screencast(on_frame)
 
         pending_flow_spec = None               # Step A/B/C/D:可编辑的完整 FlowSpec
         pending_samples: dict = {}             # 录制时填的样例值(选别的请求时重算参数建议)

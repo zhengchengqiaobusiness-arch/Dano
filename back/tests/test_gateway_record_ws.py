@@ -173,10 +173,10 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
 
     resume_id = f"recording_{'a' * 32}"
 
-    def incoming() -> list[dict]:
+    def incoming(resume_action: str = "") -> list[dict]:
         return [
             {"type": "start", "start_url": "https://example.test", "tenant": "tenant-a",
-             "pi_recording_id": resume_id},
+             "pi_recording_id": resume_id, **({"resume_action": resume_action} if resume_action else {})},
             {"type": "input", "event": {"kind": "pointer_move", "nx": 0.1, "ny": 0.2}},
             {"type": "input", "event": {"kind": "dblclick", "nx": 0.3, "ny": 0.4}},
             {"type": "input", "event": {"kind": "pointer_up", "nx": 0.5, "ny": 0.6}},
@@ -191,8 +191,12 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
 
     first_started = next(message for message in first_ws.messages if message["type"] == "started")
     second_started = next(message for message in second_ws.messages if message["type"] == "started")
+    resumed_ws = _FakeWebSocket(incoming(first_started["action"]))
+    await gateway.record_ws(resumed_ws)
+    resumed_started = next(message for message in resumed_ws.messages if message["type"] == "started")
     assert re.fullmatch(r"action_[0-9a-f]{32}", first_started["action"])
     assert first_started["action"] != second_started["action"]
+    assert resumed_started["action"] == first_started["action"]
     assert first_started["pi_recording_id"] == resume_id
     assert second_started["pi_recording_id"] == resume_id
 
