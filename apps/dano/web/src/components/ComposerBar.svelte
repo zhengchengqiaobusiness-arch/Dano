@@ -1054,9 +1054,6 @@
 
   @media (max-width: 900px) {
     .composer-bar {
-      position: sticky;
-      bottom: 0;
-      z-index: 10;
       width: calc(100% - 32px);
       margin: 0 auto max(12px, env(safe-area-inset-bottom));
     }
