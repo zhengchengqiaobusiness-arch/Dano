@@ -316,6 +316,14 @@ function writePiRecordingId(storageKey: string, value: string) {
   }
 }
 
+function clearPiRecordingId(storageKey: string) {
+  try {
+    window.sessionStorage.removeItem(storageKey);
+  } catch {
+    // The in-memory ref is still cleared when tab storage is unavailable.
+  }
+}
+
 function piRecordingIdFromMessage(messageData: any): string | null {
   const value = messageData?.pi_session?.recording_id ?? messageData?.pi_recording_id;
   return typeof value === "string" && PI_RECORDING_ID_PATTERN.test(value) ? value : null;
@@ -1605,6 +1613,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const nextAction = newRecordingActionName();
     actionRef.current = nextAction;
     setAction(nextAction);
+    // “开始录制” always creates a new logical recording.  Only the automatic
+    // reconnect path may reuse the opaque server resume id; otherwise a fresh
+    // run can accidentally reopen the previous run's browser/draft snapshot.
+    const targetUrl = startUrl.trim();
+    const piRecordingScope = piRecordingStorageKey(tenant, subsystem, targetUrl);
+    clearPiRecordingId(piRecordingScope);
+    piRecordingScopeRef.current = piRecordingScope;
+    piRecordingIdRef.current = null;
     setReconnectedSessionNeedsCapture(false);
     setConnectionState("connecting");
     setPhase("recording");
@@ -1701,7 +1717,19 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         setPhase("recording");
         setConnectionState("connected");
-        if (isReconnect && flowSpecRef.current) {
+        // The server draft is authoritative across a transient WebSocket
+        // reconnect.  In particular, an ability plan may have completed just
+        // before a 1006 close; restoring the older local empty draft here used
+        // to erase that successful first result.
+        const resumedServerSpec = m.resumed_server_draft && m.full_spec ? m.full_spec : null;
+        if (resumedServerSpec) {
+          acceptFlowSpec(resumedServerSpec);
+          setLastServerJson(JSON.stringify(resumedServerSpec));
+          if (m.check_report) setCheckReport(m.check_report);
+          reconnectRestoreOperationRef.current = null;
+          setReconnectedSessionNeedsCapture(false);
+          if (isReconnect) message.success("录制连接和最新能力已自动恢复");
+        } else if (isReconnect && flowSpecRef.current) {
           flowMutationInFlightRef.current = null;
           flowMutationQueueRef.current = [];
           afterFlowSyncRef.current = null;
@@ -1796,6 +1824,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         if (m.check_report && !hasNewerLocalMutation) setCheckReport(m.check_report);
         else if (hasNewerLocalMutation) setCheckReport(null);
+        // A successful server mutation produces a new validation snapshot.
+        // Do not keep rendering clarifications from an older failed publish;
+        // fixed or explicitly ignored warnings must disappear with that old
+        // result as soon as the authoritative update is acknowledged.
+        if (!hasNewerLocalMutation && ["flow_update", "flow_replace", "plan", "repair"].includes(String(m.operation || ""))) {
+          setResult(null);
+        }
         if (m.operation_report) {
           const report = m.operation_report as FlowOperationReport;
           setLastOperationReport(report);
@@ -2131,7 +2166,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const publishTitle = title.trim() || preferredSkillTitle(currentSpec);
     const operationId = newCostlyOperationId("publish");
     publishOperationRef.current = operationId;
-    setResult(null); setPhase("publishing");
+    // Keep the previous result until this operation receives its own reply.
+    // Clearing it here made the base validator's green state look like an
+    // instantaneous publish success while the backend was still reviewing.
+    setPhase("publishing");
     if (!send({ type: "publish_request", operation_id: operationId, action: action.trim(), title: publishTitle,
       param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: true, flow_spec: currentSpec,
       expected_fingerprint: currentSpec.meta?.current_fingerprint })) {
@@ -2663,7 +2701,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!target) return "";
     const cap = target.capability_name || target.capability_id || target.capability;
     const sid = target.target_step_id || target.step_id || target.source_step_id;
-    const path = target.target_path || target.path || target.source_path;
+    const path = target.target_path || target.path || target.source_path || target.field;
     return [cap ? `能力 ${cap}` : "", sid ? `接口 ${stepBrief(sid)}` : "", path ? `字段 ${path}` : ""]
       .filter(Boolean).join(" · ");
   }
@@ -2808,7 +2846,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           : current.issue_groups,
       };
     });
-    message.success(`已忽略来源告警${publishIssueTargetLabel(item.target) ? `：${publishIssueTargetLabel(item.target)}` : ""}`);
+    message.success(`已忽略告警${publishIssueTargetLabel(item.target) ? `：${publishIssueTargetLabel(item.target)}` : ""}`);
   }
   function sourcePathOptions(stepId?: string) {
     const st = stepId ? stepById[stepId] : undefined;
@@ -3035,16 +3073,22 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     // warnings before the operator has generated abilities.
     const publishIssueGroups = capabilities.length > 0 ? groupedPublishIssues(checkReport) : [];
     const hasPublishAdvice = publishIssueGroups.some((group) => group.items.length > 0);
+    const publishFailed = result?.ok === false;
+    const publishPending = phase === "publishing" && !!publishOperationRef.current;
     return (
       <Card style={{ marginTop: 16 }} styles={{ body: { paddingTop: 8 } }}>
         {checkReport && capabilities.length > 0 && (
           <Alert
-            type={checkReport.passed && !hasPublishAdvice ? "success" : "warning"}
+            type={publishPending ? "info" : (!publishFailed && checkReport.passed && !hasPublishAdvice ? "success" : "warning")}
             showIcon
             style={{ marginBottom: 12 }}
-            message={checkReport.passed
-              ? (hasPublishAdvice ? "基础校验通过，仍有建议项" : "发布校验通过")
-              : "发布校验需要处理"}
+            message={publishPending
+              ? "正在审核并发布当前流程"
+              : publishFailed
+              ? "发布未完成"
+              : checkReport.passed
+                ? (hasPublishAdvice ? "基础校验通过，仍有建议项" : "发布校验通过")
+                : "发布校验需要处理"}
             description={
               <Space direction="vertical" size={2}>
                 <Typography.Text style={{ fontSize: 12 }}>
@@ -3062,7 +3106,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     <Tag>警告 {lastOperationReport.warnings_before || 0} → {lastOperationReport.warnings_after || 0}</Tag>
                   </Space>
                 )}
-                {result && (
+                {result && !publishPending && (
                   <Space direction="vertical" size={2}>
                     <Space wrap size={4}>
                       <Typography.Text type={result.ok ? "success" : "danger"}>

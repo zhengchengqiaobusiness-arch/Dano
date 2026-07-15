@@ -1,7 +1,8 @@
 """页面登录态(storageState)持久化:录制时真人登一次 → 存盘 → 回放/运行期复用。
 
-不依赖系统怎么存 token —— storageState 是整个浏览器登录态(cookie+localStorage)的快照,
-任何登录方式(cookie/localStorage/验证码/RSA)都覆盖。⚠ 含凭证,目录应 gitignore;会过期需重录刷新。
+主文件始终保持 Playwright ``storage_state`` 兼容(cookie+localStorage)；Playwright
+未覆盖的 sessionStorage 单独保存在 sidecar，并由 :func:`load_session_state`
+合并回录制器使用的扩展状态。⚠ 含凭证,目录应 gitignore;会过期需重录刷新。
 按 (tenant, subsystem) 分文件。
 """
 
@@ -15,10 +16,16 @@ import structlog
 log = structlog.get_logger(__name__)
 
 _DIR = Path(__file__).resolve().parents[3] / ".dano-sessions"   # back/.dano-sessions
+SESSION_STORAGE_STATE_KEY = "_dano_session_storage"
 
 
 def session_file(tenant: str, subsystem: str) -> Path:
     return _DIR / f"{tenant}__{subsystem.replace('/', '_')}.json"
+
+
+def session_storage_file(tenant: str, subsystem: str) -> Path:
+    """扩展 sessionStorage sidecar；主文件仍可直接交给 Playwright。"""
+    return session_file(tenant, subsystem).with_suffix(".session-storage.json")
 
 
 def save_session(tenant: str, subsystem: str, state: dict | None) -> str | None:
@@ -27,12 +34,50 @@ def save_session(tenant: str, subsystem: str, state: dict | None) -> str | None:
     try:
         _DIR.mkdir(exist_ok=True)
         p = session_file(tenant, subsystem)
-        p.write_text(json.dumps(state), encoding="utf-8")
+        # 自定义根键不是 Playwright storage_state schema 的一部分，不能写进
+        # 运行期直接传给 BrowserContext 的主文件。
+        playwright_state = dict(state)
+        session_storage = playwright_state.pop(SESSION_STORAGE_STATE_KEY, None)
+        p.write_text(json.dumps(playwright_state), encoding="utf-8")
+        sidecar = session_storage_file(tenant, subsystem)
+        if session_storage:
+            sidecar.write_text(json.dumps(session_storage), encoding="utf-8")
+        elif sidecar.exists():
+            # 新快照明确没有 sessionStorage 时删除旧 sidecar，避免复用过期 token。
+            sidecar.unlink()
         log.info("page_session.saved", tenant=tenant, subsystem=subsystem, path=str(p))
         return str(p)
     except Exception as e:  # noqa: BLE001
         log.warning("page_session.save_failed", error=str(e))
         return None
+
+
+def load_session_state(tenant: str, subsystem: str) -> dict | None:
+    """读取主 Playwright 状态，并在存在时合并 sessionStorage sidecar。
+
+    旧安装只有主文件时仍返回原结构；sidecar 损坏不会让可用的 cookie /
+    localStorage 登录态一并失效。
+    """
+    p = session_file(tenant, subsystem)
+    if not p.exists():
+        return None
+    try:
+        state = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            raise ValueError("page session root must be an object")
+    except Exception as e:  # noqa: BLE001
+        log.warning("page_session.load_failed", error=str(e), path=str(p))
+        return None
+
+    sidecar = session_storage_file(tenant, subsystem)
+    if sidecar.exists():
+        try:
+            session_storage = json.loads(sidecar.read_text(encoding="utf-8"))
+            if isinstance(session_storage, dict) and session_storage:
+                state[SESSION_STORAGE_STATE_KEY] = session_storage
+        except Exception as e:  # noqa: BLE001
+            log.warning("page_session.session_storage_load_failed", error=str(e), path=str(sidecar))
+    return state
 
 
 def session_path_if_exists(tenant: str, subsystem: str) -> str | None:

@@ -102,6 +102,72 @@ def test_recording_action_uses_safe_uuid_and_retries_recent_collision(monkeypatc
     assert first != second
 
 
+def test_recording_resume_state_is_scoped_reused_and_bounded(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(gateway, "_MAX_RECORDING_RESUME_STATES", 2)
+    gateway._RECORDING_RESUME_STATES.clear()
+    first_key = ("tenant-a", "system-a", f"recording_{'1' * 32}")
+    second_key = ("tenant-a", "system-a", f"recording_{'2' * 32}")
+    third_key = ("tenant-b", "system-a", f"recording_{'3' * 32}")
+
+    first = gateway._recording_resume_state(first_key)
+    first["flow_spec"] = "authoritative"
+    assert gateway._recording_resume_state(first_key)["flow_spec"] == "authoritative"
+    gateway._recording_resume_state(second_key)
+    # Touching first makes second the least recently used entry.
+    gateway._recording_resume_state(first_key)
+    gateway._recording_resume_state(third_key)
+
+    assert first_key in gateway._RECORDING_RESUME_STATES
+    assert second_key not in gateway._RECORDING_RESUME_STATES
+    assert third_key in gateway._RECORDING_RESUME_STATES
+
+
+def test_recording_storage_cache_does_not_replace_authenticated_state_with_login_page() -> None:
+    state: dict = {}
+    authenticated = {
+        "cookies": [{"name": "sid", "value": "secret"}],
+        "origins": [{
+            "origin": "https://oa.example.test",
+            "localStorage": [
+                {"name": "ACCESS_TOKEN", "value": "secret"},
+                {"name": "tenantId", "value": "1"},
+            ],
+        }],
+    }
+    login_page = {
+        "cookies": [],
+        "origins": [{
+            "origin": "https://oa.example.test",
+            "localStorage": [{"name": "tenantId", "value": "1"}],
+        }],
+    }
+
+    gateway._remember_recording_storage(state, authenticated)
+    gateway._remember_recording_storage(state, login_page)
+
+    assert state["storage_state"] == authenticated
+
+
+def test_recording_storage_cache_accepts_richer_checkpoint() -> None:
+    state = {
+        "storage_state": {
+            "cookies": [],
+            "origins": [{"origin": "https://oa.example.test", "localStorage": []}],
+        },
+    }
+    authenticated = {
+        "cookies": [{"name": "sid", "value": "secret"}],
+        "origins": [{
+            "origin": "https://oa.example.test",
+            "localStorage": [{"name": "ACCESS_TOKEN", "value": "secret"}],
+        }],
+    }
+
+    gateway._remember_recording_storage(state, authenticated)
+
+    assert state["storage_state"] == authenticated
+
+
 class _FakeWebSocket(_ConcurrentWriteProbe):
     def __init__(self, incoming: list[dict]) -> None:
         super().__init__()

@@ -146,6 +146,7 @@ async def run_request_onboarding(
     materials.register(materials.MaterialContext(
         run_id=run_id, tenant=tenant, system_instance_id=sid, subsystem=sid,
         deploy=deploy or {}, credentials=credentials or {}))
+    recording_advisory_findings: list[dict] = []
     try:
         from dano.infra.logging import configure_logging
         configure_logging()                                   # 幂等:直连/离线调用也能看到日志
@@ -266,7 +267,18 @@ async def run_request_onboarding(
                     "reason": "评审服务暂时不可用，本次未发布；无需修改字段或能力，请重试发布",
                 }
             rev_find = review_findings(rev.get("verdicts"))
-            findings = collect_repair_findings(api_request) + rev_find
+            contract_findings = collect_repair_findings(api_request)
+            if recording_pi_required or recording_session is not None:
+                # The FlowSpec workbench already ran the exact compiled
+                # contract validator and presents its non-blocking, locatable
+                # advice to the operator.  Do not turn those same generated
+                # suggestions into a second, stricter onboarding gate after Pi
+                # has approved the frozen release.  Actual Pi review failures
+                # remain blocking below.
+                recording_advisory_findings = list(contract_findings)
+                findings = list(rev_find)
+            else:
+                findings = [*contract_findings, *rev_find]
             log.info("ingest.review", all_passed=rev.get("all_passed"), findings=len(findings))
             # Active recording runs have already been reviewed by their Pi
             # AgentSession.  Never borrow the process-wide ReviewBoard client
@@ -334,6 +346,11 @@ async def run_request_onboarding(
         bad = [p for p in opt_fields if looks_internal_param_name(p)]
         warnings = ([f"可选参数 `{p}` 像内部标识(非人类名),建议命名;agent 不传它时用录制原值"
                      for p in bad] if bad else [])
+        warnings.extend([
+            str(item.get("detail") or item.get("message") or item)
+            for item in recording_advisory_findings
+        ])
+        warnings = list(dict.fromkeys(item for item in warnings if item))
         if warnings:
             log.warning("ingest.warn.optional_internal_names", params=bad)
         published = pub.get("published", False)

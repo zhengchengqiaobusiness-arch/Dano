@@ -21,7 +21,7 @@ from dano.execution.page.flow_spec import (
     flow_operation_report,
 )
 from dano.execution.page.request_capture import execute_api_request
-from dano.execution.page.repair_ops import collect_capability_findings
+from dano.execution.page.repair_ops import collect_capability_findings, collect_repair_findings
 
 
 def _make_spec():
@@ -698,6 +698,194 @@ def test_generated_placeholder_output_name_is_normalized_to_stable_result():
     repaired = flow_spec_module._repair_generated_capability_contracts(spec)
 
     assert repaired.capabilities[0].output_mapping[0]["name"] == "result"
+
+
+def test_publish_preparation_strips_actionable_placeholder_field_name_atomically():
+    placeholder = "请输入撤回原因"
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="withdraw",
+            method="DELETE",
+            path="/api/process/withdraw",
+            body_source='{"reason":"测试原因"}',
+            sample_inputs={placeholder: "测试原因"},
+            params=[ParamField(
+                path="reason",
+                key=placeholder,
+                label=placeholder,
+                value="测试原因",
+                required=True,
+                category="user_param",
+                source_kind="user_input",
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="withdraw_request",
+            kind="submit",
+            step_ids=["withdraw"],
+            nodes=[{"id": "call_withdraw", "type": "call", "step_id": "withdraw"}],
+            output_mapping=[{
+                "kind": "final_response",
+                "name": "result",
+                "step_id": "withdraw",
+                "response_path": "response",
+            }],
+        )],
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+    param = prepared.steps[0].params[0]
+    api_request, errors = flow_spec_to_api_request(prepared)
+
+    assert errors == []
+    assert param.key == "撤回原因"
+    assert param.label == "撤回原因"
+    assert prepared.steps[0].sample_inputs == {"撤回原因": "测试原因"}
+    assert set(prepared.capabilities[0].input_schema["properties"]) == {"撤回原因"}
+    assert api_request is not None
+    assert "请输入撤回原因" not in api_request["params"]
+    assert not any(
+        finding.get("kind") == "placeholder_name"
+        for finding in collect_repair_findings(api_request)
+    )
+
+
+def test_manual_placeholder_name_remains_locatable_nonblocking_and_stays_ignored():
+    placeholder = "请输入撤回原因"
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="withdraw",
+            method="DELETE",
+            path="/api/process/withdraw",
+            body_source='{"reason":"测试原因"}',
+            response_json={"code": 0},
+            params=[ParamField(
+                path="reason",
+                key=placeholder,
+                label=placeholder,
+                value="测试原因",
+                required=True,
+                category="user_param",
+                source_kind="user_input",
+                locked=True,
+                name_source="manual",
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="withdraw_request",
+            kind="submit",
+            step_ids=["withdraw"],
+            nodes=[{"id": "call_withdraw", "type": "call", "step_id": "withdraw"}],
+            output_mapping=[{
+                "kind": "final_response",
+                "name": "result",
+                "step_id": "withdraw",
+                "response_path": "response",
+            }],
+        )],
+    )
+
+    current = refresh_review_items(spec)
+    review = next(item for item in current.review_items if item.type == "compiled_placeholder_name")
+    report = validate_flow_spec(current)
+    issue = next(
+        item for item in report["issue_groups"]["field"]
+        if item.get("code") == "placeholder_name"
+    )
+
+    assert current.steps[0].params[0].key == placeholder
+    assert report["passed"] is True
+    assert issue["blocking"] is False
+    assert issue["ignorable"] is True
+    assert issue["review_id"] == review.id
+    assert issue["target"] == {
+        "kind": "param",
+        "step_id": "withdraw",
+        "path": "reason",
+        "key": placeholder,
+    }
+
+    ignored = apply_flow_edits(current, [{
+        "op": "resolve_review",
+        "review_id": review.id,
+        "resolved": True,
+    }])
+    prepared = prepare_flow_spec_for_publish(ignored)
+    repeated = validate_flow_spec(prepared)
+
+    assert next(item for item in repeated["review_items"] if item["id"] == review.id)["resolved"] is True
+    assert not any(
+        item.get("code") == "placeholder_name"
+        for items in repeated["issue_groups"].values()
+        for item in items
+    )
+
+
+def test_no_response_final_response_mapping_builds_consistent_object_output_contract():
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="withdraw",
+            method="DELETE",
+            path="/api/process/withdraw",
+            body_source='{"id":"one"}',
+            params=[ParamField(
+                path="id",
+                key="业务编号",
+                value="one",
+                category="user_param",
+                source_kind="user_input",
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="withdraw_request",
+            kind="submit",
+            step_ids=["withdraw"],
+            nodes=[{"id": "call_withdraw", "type": "call", "step_id": "withdraw"}],
+            output_mapping=[{
+                "kind": "final_response",
+                "name": "result",
+                "step_id": "withdraw",
+                "response_path": "response",
+            }],
+        )],
+    )
+
+    prepared = prepare_flow_spec_for_publish(spec)
+    capability = prepared.capabilities[0]
+    api_request, errors = flow_spec_to_api_request(prepared)
+
+    assert errors == []
+    assert capability.output_schema["properties"] == {"result": {"type": "object"}}
+    assert [(field.key, field.type) for field in capability.outputs] == [("result", "object")]
+    assert api_request is not None
+    assert collect_capability_findings(api_request) == []
+
+
+def test_compiled_capability_output_issue_targets_capability_io_not_request_field():
+    spec = FlowSpec(capabilities=[FlowCapability(
+        name="withdraw_request",
+        kind="submit",
+        step_ids=["withdraw"],
+    )])
+    groups = flow_spec_module._compiled_contract_issue_groups(
+        spec,
+        {"steps": [{"step_id": "withdraw"}]},
+        [{
+            "kind": "capability_output_schema_missing",
+            "capability": "withdraw_request",
+            "field": "result",
+            "detail": "result 未进入 output_schema",
+        }],
+    )
+
+    issue = groups["capability"][0]
+    assert issue["target"] == {
+        "kind": "capability_output",
+        "capability": "withdraw_request",
+        "field": "result",
+    }
+    assert issue["review_id"]
+    assert issue["issue_id"] == f"review:{issue['review_id']}"
 
 
 def test_select_source_is_hydrated_from_captured_post_read_contract():

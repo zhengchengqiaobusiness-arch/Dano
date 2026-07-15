@@ -28,6 +28,7 @@ from dano.execution.page.flow_spec import (
     RequestUsage,
     ensure_flow_version,
     flow_spec_fingerprint,
+    prepare_flow_release_candidate,
 )
 from dano.onboarding.page_onboard import run_request_onboarding
 
@@ -64,6 +65,94 @@ def _spec() -> FlowSpec:
         },
     }
     return spec
+
+
+def test_flow_fingerprint_is_stable_after_frozen_snapshot_revalidation() -> None:
+    spec = _spec()
+    ref = flow_module.CapabilityRequestRef(
+        request_id="request-submit",
+        step_id="submit",
+        method="POST",
+        path="/api/submit",
+    )
+    # Old clients could round-trip this removed field as model extra data.  The
+    # before-validator deliberately drops it when a frozen snapshot is loaded.
+    # That migration must not make the in-memory review and persisted snapshot
+    # look like different releases.
+    ref.__pydantic_extra__ = {"pinned": True}
+    spec.capabilities = [flow_module.FlowCapability(
+        capability_id="submit-capability",
+        name="submit",
+        title="提交申请",
+        request_refs=[ref],
+        step_ids=["submit"],
+    )]
+
+    frozen = FlowSpec.model_validate(spec.model_dump(mode="json", exclude_none=True))
+
+    assert "pinned" not in frozen.capabilities[0].request_refs[0].model_dump()
+    assert flow_spec_fingerprint(spec) == flow_spec_fingerprint(frozen)
+
+
+def test_manual_edit_then_release_reviews_the_exact_persisted_snapshot() -> None:
+    spec = _spec()
+    spec.capabilities = [flow_module.FlowCapability(
+        capability_id="submit-capability",
+        name="submit_request",
+        title="提交申请",
+        kind="submit",
+        step_ids=["submit"],
+        nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+        confirmed=True,
+    )]
+    edited = flow_module.apply_flow_edits(spec, [{
+        "op": "update",
+        "step_id": "submit",
+        "param_path": "title",
+        "field": "key",
+        "value": "申请标题",
+    }])
+
+    frozen, release = prepare_flow_release_candidate(edited)
+    persisted = frozen.model_dump(mode="json", exclude_none=True)
+    reconstructed = FlowSpec.model_validate(persisted)
+
+    assert frozen.steps[0].params[0].key == "申请标题"
+    assert flow_spec_fingerprint(frozen) == release["flow_fingerprint"]
+    assert flow_spec_fingerprint(reconstructed) == release["flow_fingerprint"]
+
+
+def test_release_fingerprint_treats_missing_and_explicit_none_evidence_as_equal() -> None:
+    with_none = _spec()
+    with_none.request_facts.requests = [RequestFact(
+        request_id="request-submit",
+        request_index=1,
+        method="POST",
+        path="/api/submit",
+    )]
+    with_none.request_facts.analysis = {
+        "request-submit": flow_module.RequestAnalysis.model_validate({
+            "request_id": "request-submit",
+            "role": "business_write",
+            "post_data": None,
+            "response_json": None,
+            "response_status": None,
+        }),
+    }
+    without_none = with_none.model_copy(deep=True)
+    without_none.request_facts.analysis = {
+        "request-submit": flow_module.RequestAnalysis(
+            request_id="request-submit",
+            role="business_write",
+        ),
+    }
+
+    assert flow_spec_fingerprint(with_none) == flow_spec_fingerprint(without_none)
+    prepared, release = prepare_flow_release_candidate(with_none)
+    reconstructed = FlowSpec.model_validate(
+        flow_module.flow_spec_release_payload(prepared)
+    )
+    assert flow_spec_fingerprint(reconstructed) == release["flow_fingerprint"]
 
 
 class _Session:
@@ -439,15 +528,16 @@ def test_fact_violation_rolls_back_entire_recording_session(monkeypatch, mode):
 
 
 @pytest.mark.parametrize(
-    ("method", "path"),
+    ("method", "path", "param_name"),
     [
-        ("POST", "/api/submit"),
-        ("DELETE", "/admin-api/bpm/process-instance/cancel-by-start-user"),
+        ("POST", "/api/submit", "reason"),
+        ("DELETE", "/admin-api/bpm/process-instance/cancel-by-start-user", "reason"),
+        ("DELETE", "/admin-api/bpm/process-instance/cancel-by-start-user", "请输入撤回原因"),
     ],
-    ids=["ordinary-submit", "recorded-withdraw"],
+    ids=["ordinary-submit", "recorded-withdraw", "recorded-advisory-placeholder"],
 )
 def test_page_onboard_active_recording_bypasses_board_precheck_and_model_helpers(
-    monkeypatch, method, path,
+    monkeypatch, method, path, param_name,
 ):
     from dano.agent_tools import tools as tool_module
 
@@ -504,13 +594,13 @@ def test_page_onboard_active_recording_bypasses_board_precheck_and_model_helpers
             "method": method,
             "url": f"https://example.invalid{path}",
             "path": path,
-            "body_template": {"reason": "{{reason}}"},
-            "params": ["reason"],
-            "field_types": {"reason": "string"},
+            "body_template": {param_name: "{{" + param_name + "}}"},
+            "params": [param_name],
+            "field_types": {param_name: "string"},
             "success_rule": {"field": "code", "ok_values": [0]},
         },
-        sample_inputs={"reason": "demo"},
-        required=["reason"],
+        sample_inputs={param_name: "demo"},
+        required=[param_name],
         run_id="run-pi-publish",
         allow_repair=True,
         recording_pi_required=True,
@@ -521,6 +611,8 @@ def test_page_onboard_active_recording_bypasses_board_precheck_and_model_helpers
         assert result["stage"] == "publish"
         assert result["status"] != "rejected"
         assert result["request_role"]["semanticRole"] == "destructive"
+    if param_name.startswith("请输入"):
+        assert any("占位" in warning for warning in result.get("warnings") or [])
 
 
 def _recording_api_request() -> dict:

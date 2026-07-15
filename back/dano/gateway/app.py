@@ -59,6 +59,57 @@ _breaker = InMemoryCounter()         # 流程10 失败计数/熔断
 _RECENT_RECORDING_ACTIONS: dict[str, None] = {}
 _MAX_RECENT_RECORDING_ACTIONS = 4096
 
+# A recorder WebSocket is a transport, not the lifetime of the recording.
+# Keep the latest authoritative draft and browser login snapshot across a
+# transient reconnect.  The key contains the tenant/subsystem and an opaque,
+# server-issued recording id; entries are process-local, bounded and never
+# returned outside that recording connection.
+_RECORDING_RESUME_STATES: dict[tuple[str, str, str], dict] = {}
+_MAX_RECORDING_RESUME_STATES = 128
+
+
+def _recording_resume_state(key: tuple[str, str, str]) -> dict:
+    state = _RECORDING_RESUME_STATES.get(key)
+    if state is not None:
+        # Reinsertion provides a small LRU without another cache abstraction.
+        _RECORDING_RESUME_STATES.pop(key, None)
+        _RECORDING_RESUME_STATES[key] = state
+        return state
+    if len(_RECORDING_RESUME_STATES) >= _MAX_RECORDING_RESUME_STATES:
+        _RECORDING_RESUME_STATES.pop(next(iter(_RECORDING_RESUME_STATES)), None)
+    state = {"operations": {}, "connection_generation": 0}
+    _RECORDING_RESUME_STATES[key] = state
+    return state
+
+
+def _storage_state_strength(value: object) -> int:
+    """Score an in-memory Playwright storage state without inspecting secrets."""
+    if not isinstance(value, dict):
+        return 0
+    cookies = value.get("cookies") if isinstance(value.get("cookies"), list) else []
+    origins = value.get("origins") if isinstance(value.get("origins"), list) else []
+    local_values = sum(
+        len(origin.get("localStorage") or [])
+        for origin in origins
+        if isinstance(origin, dict) and isinstance(origin.get("localStorage"), list)
+    )
+    session_values = value.get("_dano_session_storage")
+    session_count = sum(
+        len(items)
+        for items in session_values.values()
+        if isinstance(items, list)
+    ) if isinstance(session_values, dict) else 0
+    return len(cookies) + local_values + session_count
+
+
+def _remember_recording_storage(state: dict, candidate: object) -> None:
+    """Keep a fresh authenticated snapshot; never replace it with an empty login page."""
+    if not isinstance(candidate, dict):
+        return
+    existing = state.get("storage_state")
+    if not isinstance(existing, dict) or _storage_state_strength(candidate) >= _storage_state_strength(existing):
+        state["storage_state"] = candidate
+
 
 def _new_recording_action() -> str:
     """Return a process-unique action compatible with the public action-name grammar."""
@@ -701,6 +752,10 @@ async def record_ws(ws: WebSocket) -> None:
     session_action = ""
     close_code = 1000
     close_reason = ""
+    resume_state: dict | None = None
+    resume_generation = 0
+    pending_flow_spec = None
+    costly_operation_results: dict[str, dict] = {}
     try:
         init = await ws.receive_json()
         if init.get("type") != "start" or not init.get("start_url"):
@@ -718,6 +773,21 @@ async def record_ws(ws: WebSocket) -> None:
             if re.fullmatch(r"recording_[0-9a-f]{32}", requested_recording_id)
             else f"recording_{uuid.uuid4().hex}"
         )
+        resume_key = (
+            str(init.get("tenant") or ""),
+            str(init.get("subsystem") or "A-报销"),
+            recording_id,
+        )
+        resume_state = _recording_resume_state(resume_key)
+        # A reconnect replaces the transport/browser owner for this logical
+        # recording.  The superseded handler may still be unwinding after a
+        # 1006 close; generation ownership prevents its late ``finally`` from
+        # overwriting the newer draft or authenticated browser snapshot.
+        resume_generation = int(resume_state.get("connection_generation") or 0) + 1
+        resume_state["connection_generation"] = resume_generation
+        resumed_flow_spec = resume_state.get("flow_spec")
+        from dano.execution.page.sessions import load_session_state
+        persisted_storage = load_session_state(resume_key[0], resume_key[1])
         from dano.execution.page.recorder import RecordSession
         def on_step(step: dict) -> None:
             sender.send_background({"type": "step", "step": step})
@@ -728,8 +798,14 @@ async def record_ws(ws: WebSocket) -> None:
         sess = RecordSession(on_step=on_step, on_request=on_request,
                              intercept_submit=init.get("intercept", True),
                              capture_reads=init.get("capture_reads", True))
+        start_storage = resume_state.get("storage_state") or persisted_storage or init.get("storage_state") or None
         await sess.start(init["start_url"], base_url=init.get("base_url", ""),
-                         storage_state=init.get("storage_state") or None,
+                         # A reconnect must prefer the state captured by the
+                         # live recorder (or its persisted snapshot) over the
+                         # original prop sent when the component first mounted.
+                         # That prop can be stale and was reopening the OA login
+                         # page after every transient WebSocket replacement.
+                         storage_state=start_storage,
                          token=init.get("token") or None)   # 贴 token → 预置登录态,免在画面里登录
 
         async def on_frame(frame: dict) -> None:
@@ -738,14 +814,26 @@ async def record_ws(ws: WebSocket) -> None:
         # Make the workbench interactive before the first large JPEG is encoded
         # and written. The screencast starts immediately afterwards, while input
         # remains serialized by the same websocket loop.
-        await sender.send_json({
+        started_message = {
             "type": "started",
             "action": session_action,
             "pi_recording_id": recording_id,
-        })
+            "browser_state_restored": bool(start_storage),
+        }
+        if resumed_flow_spec is not None:
+            from dano.execution.page.flow_spec import flow_spec_to_client, validate_flow_spec
+            started_message.update({
+                "full_spec": flow_spec_to_client(resumed_flow_spec),
+                "check_report": validate_flow_spec(resumed_flow_spec),
+                "resumed_server_draft": True,
+            })
+        await sender.send_json(started_message)
         await sess.start_screencast(on_frame)
 
-        pending_flow_spec = None               # Step A/B/C/D:可编辑的完整 FlowSpec
+        pending_flow_spec = (
+            resumed_flow_spec.model_copy(deep=True)
+            if resumed_flow_spec is not None else None
+        )                                      # Step A/B/C/D:可编辑的完整 FlowSpec
         pending_samples: dict = {}             # 录制时填的样例值(选别的请求时重算参数建议)
         pending_reads: list[dict] = []         # 抓到的列表读响应(select 候选源)
         pending_storage: dict | None = None    # 登录态(认 identity 字段)
@@ -754,8 +842,24 @@ async def record_ws(ws: WebSocket) -> None:
         pending_field_evidence: list[dict] = []       # 控件 name/data-prop/type 等结构证据，禁止按重复值猜字段
         pending_page_events: list[dict] = []          # 动作→DOM 变化→请求的脱敏 Observer 时间线
         applied_flow_operations: dict[str, dict] = {}  # flow_update 幂等回执(operation_id → response)
-        costly_operation_results: dict[str, dict] = {}
+        costly_operation_results = dict(resume_state.get("operations") or {})
         recording_mode = "intercepted_submit" if init.get("intercept", True) else "real_submit"
+
+        def _owns_resume_state() -> bool:
+            return bool(
+                resume_state is not None
+                and int(resume_state.get("connection_generation") or 0) == resume_generation
+            )
+
+        def _checkpoint_resume(*, storage_state: object = None) -> None:
+            """Persist the latest authoritative state before any long operation."""
+            if not _owns_resume_state():
+                return
+            if storage_state is not None:
+                _remember_recording_storage(resume_state, storage_state)
+            if pending_flow_spec is not None:
+                resume_state["flow_spec"] = pending_flow_spec.model_copy(deep=True)
+            resume_state["operations"] = dict(costly_operation_results)
 
         async def _ensure_recording_pi():
             """Lazily start the sole AgentSession used by this websocket."""
@@ -789,6 +893,7 @@ async def record_ws(ws: WebSocket) -> None:
             if len(costly_operation_results) >= 128:
                 costly_operation_results.pop(next(iter(costly_operation_results)), None)
             costly_operation_results[key] = response
+            _checkpoint_resume()
 
         def _restore_hidden_flow_spec_fields(raw_spec: dict) -> dict:
             if pending_flow_spec is None:
@@ -894,6 +999,13 @@ async def record_ws(ws: WebSocket) -> None:
             elif t == "reset":
                 await sess.flush_recording()
                 sess.reset()                          # 登录后:丢弃登录步骤,只录业务流程
+                # “从这里开始录” normally follows a successful interactive
+                # login.  Capture that authenticated state immediately rather
+                # than waiting for a later finalize/finally race.
+                reset_storage = await sess.storage_state()
+                _checkpoint_resume(storage_state=reset_storage)
+                from dano.execution.page.sessions import save_session
+                save_session(str(init.get("tenant") or ""), str(init.get("subsystem") or "A-报销"), reset_storage)
                 await sender.send_json({"type": "reset_ok"})
             elif t == "finalize":
                 if await _replay_costly(msg):
@@ -1014,6 +1126,9 @@ async def record_ws(ws: WebSocket) -> None:
                 field_evidence = sess.recorded_field_evidence()
                 sub = init.get("subsystem", "A-报销")
                 login_state = await sess.storage_state()   # 录制会话(已真人登录)的登录态快照
+                _checkpoint_resume(storage_state=login_state)
+                from dano.execution.page.sessions import save_session
+                save_session(str(init.get("tenant") or ""), str(sub), login_state)
 
                 # 抓请求路径优先:列出所有 JSON 写请求(候选),默认选最像提交的那个,生成 FlowSpec 工作台。
                 # 发布只从 FlowSpec 出口走,避免字段勾选表和工作台两套口径。
@@ -1070,6 +1185,7 @@ async def record_ws(ws: WebSocket) -> None:
                             tenant=init.get("tenant", ""),
                             subsystem=init.get("subsystem", ""),
                         )
+                        _checkpoint_resume()
                         from dano.execution.page.flow_spec import (
                             flow_spec_to_client,
                             flow_spec_to_summary,
@@ -1118,6 +1234,7 @@ async def record_ws(ws: WebSocket) -> None:
                         tenant=init.get("tenant", ""),
                         subsystem=init.get("subsystem", ""),
                     )
+                    _checkpoint_resume()
                     response = {
                         "type": "flow_spec",
                         "action": session_action,
@@ -1155,6 +1272,7 @@ async def record_ws(ws: WebSocket) -> None:
                         validate_flow_spec,
                     )
                     pending_flow_spec = apply_flow_edits(pending_flow_spec, edits)
+                    _checkpoint_resume()
                     response = {
                         "type": "flow_spec_updated",
                         "operation": "flow_update",
@@ -1204,6 +1322,7 @@ async def record_ws(ws: WebSocket) -> None:
                         reason="前端 JSON 编辑回写",
                         actor="user",
                     )
+                    _checkpoint_resume()
                     response = {
                         "type": "flow_spec_updated",
                         "operation": "flow_replace",
@@ -1254,6 +1373,7 @@ async def record_ws(ws: WebSocket) -> None:
                     if isinstance(raw_spec, dict):
                         raw_spec = _restore_hidden_flow_spec_fields(raw_spec)
                         pending_flow_spec = refresh_review_items(FlowSpec.model_validate(raw_spec))
+                    _checkpoint_resume()
                     before_operation = pending_flow_spec.model_copy(deep=True)
                     pi_session = await _ensure_recording_pi()
                     pi_session.bind_flow_spec(pending_flow_spec)
@@ -1266,6 +1386,7 @@ async def record_ws(ws: WebSocket) -> None:
                     if pi_session.last_submission_kind != "plan":
                         raise RuntimeError("Pi 未提交 recording plan")
                     pending_flow_spec = pi_session.current_flow_spec()
+                    _checkpoint_resume()
                     operation = "plan"
                     response = {
                         "type": "flow_spec_updated",
@@ -1308,6 +1429,7 @@ async def record_ws(ws: WebSocket) -> None:
                     if pi_session.last_submission_kind != "repair":
                         raise RuntimeError("Pi 未提交 recording repair")
                     pending_flow_spec = pi_session.current_flow_spec()
+                    _checkpoint_resume()
                     response = {
                         "type": "flow_spec_updated",
                         "operation": "repair",
@@ -1345,6 +1467,7 @@ async def record_ws(ws: WebSocket) -> None:
                     if pi_session.last_submission_kind != "plan":
                         raise RuntimeError("Pi 未提交 step naming plan")
                     pending_flow_spec = pi_session.current_flow_spec()
+                    _checkpoint_resume()
                     await sender.send_json({
                         "type": "step_names",
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
@@ -1376,6 +1499,7 @@ async def record_ws(ws: WebSocket) -> None:
                     if pi_session.last_submission_kind != "plan":
                         raise RuntimeError("Pi 未提交 business description plan")
                     pending_flow_spec = pi_session.current_flow_spec()
+                    _checkpoint_resume()
                     desc = pending_flow_spec.business_description
                     await sender.send_json({
                         "type": "business_description",
@@ -1433,6 +1557,7 @@ async def record_ws(ws: WebSocket) -> None:
                         flow_spec_to_client,
                         flow_spec_required_params,
                         flow_spec_fingerprint,
+                        flow_spec_release_payload,
                         flow_spec_to_api_request,
                         flow_spec_to_summary,
                         prepare_flow_release_candidate,
@@ -1470,6 +1595,9 @@ async def record_ws(ws: WebSocket) -> None:
                         })
                         continue
                     pending_flow_spec, release_candidate = prepare_flow_release_candidate(pending_flow_spec)
+                    # Freeze manual edits in the reconnect cache before the
+                    # comparatively long Pi review begins.
+                    _checkpoint_resume()
                     check_report = validate_flow_spec(pending_flow_spec)
                     if not check_report.get("passed"):
                         await sender.send_json({
@@ -1501,7 +1629,9 @@ async def record_ws(ws: WebSocket) -> None:
                     apir["_flow_spec"] = flow_spec_to_summary(pending_flow_spec)
                     apir["_release_snapshot"] = {
                         **release_candidate,
-                        "flow_spec": pending_flow_spec.model_dump(exclude_none=True),
+                        # Persist the exact JSON form whose round-trip identity
+                        # was asserted by prepare_flow_release_candidate.
+                        "flow_spec": flow_spec_release_payload(pending_flow_spec),
                     }
                     apir["recording_mode"] = recording_mode
                     required = flow_spec_required_params(pending_flow_spec)
@@ -1550,6 +1680,7 @@ async def record_ws(ws: WebSocket) -> None:
 
                 sub = init.get("subsystem", "A-报销")
                 login_state = await sess.storage_state()
+                _checkpoint_resume(storage_state=login_state)
                 from dano.execution.page.sessions import save_session
                 from dano.onboarding.page_onboard import run_request_onboarding
                 save_session(init["tenant"], sub, login_state)
@@ -1558,16 +1689,33 @@ async def record_ws(ws: WebSocket) -> None:
                 if _tok_headers:
                     await save_token(init["tenant"], sub, _tok_headers, source="recording")
                 sample_in = apir.get("sample_inputs") or ((apir.get("steps") or [{}])[-1].get("sample_inputs") or {})
-                rep = await run_request_onboarding(
-                    tenant=init["tenant"], subsystem=sub, action=session_action,
-                    title=msg.get("title", ""), api_request=apir, sample_inputs=sample_in,
-                    required=required,
-                    goal=msg.get("goal") or pending_flow_spec.goal,
-                    deploy=init.get("deploy"), storage_state=login_state,
-                    allow_repair=False,
-                    run_id=pi_session.run_id,
-                    recording_pi_required=True,
-                )
+                try:
+                    rep = await run_request_onboarding(
+                        tenant=init["tenant"], subsystem=sub, action=session_action,
+                        title=msg.get("title", ""), api_request=apir, sample_inputs=sample_in,
+                        required=required,
+                        goal=msg.get("goal") or pending_flow_spec.goal,
+                        deploy=init.get("deploy"), storage_state=login_state,
+                        allow_repair=False,
+                        run_id=pi_session.run_id,
+                        recording_pi_required=True,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    # A publish failure belongs to the workbench validation
+                    # result.  Do not tear down the recorder WebSocket or emit
+                    # a detached global toast: the operator must retain the
+                    # captured page and be able to retry from the same draft.
+                    log.exception(
+                        "recording.publish_failed",
+                        action=session_action,
+                        error=str(e),
+                    )
+                    rep = {
+                        "ok": False,
+                        "stage": "recording_publish",
+                        "reason": str(e),
+                        "retryable": True,
+                    }
                 if rep.get("ok"):
                     try:
                         skill_id = rep.get("skill_id") or f"{sub}.{session_action}"
@@ -1619,6 +1767,13 @@ async def record_ws(ws: WebSocket) -> None:
         except Exception:  # noqa: BLE001
             pass
     finally:
+        if sess is not None and session_action and resume_state is not None and (
+            int(resume_state.get("connection_generation") or 0) == resume_generation
+        ):
+            try:
+                _checkpoint_resume(storage_state=await sess.storage_state())
+            except Exception as e:  # noqa: BLE001
+                log.warning("recording.resume_snapshot_failed", action=session_action, error=str(e))
         if recording_pi is not None:
             await recording_pi.close()
         if sess is not None:

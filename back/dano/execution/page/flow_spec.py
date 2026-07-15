@@ -176,7 +176,10 @@ class FlowStep(BaseModel):
     semantic_role: str = ""
     source_meta: dict[str, Any] = Field(default_factory=dict)
     fact_check: dict[str, Any] | None = None
-    sample_inputs: dict[str, str] = Field(default_factory=dict)
+    # Recorded samples preserve the request's wire type.  Enum IDs, counts and
+    # booleans are valid JSON scalars and must not be forced into strings merely
+    # to make a release snapshot re-validate.
+    sample_inputs: dict[str, Any] = Field(default_factory=dict)
 
 
 class FlowLink(BaseModel):
@@ -4504,6 +4507,8 @@ def _schema_for_param_type(ptype: str) -> dict[str, Any]:
         return {"type": "string", "format": "date"}
     if t == "datetime":
         return {"type": "string", "format": "date-time"}
+    if t == "object":
+        return {"type": "object"}
     if t in {"list-enum", "array"}:
         return {"type": "array", "items": {"type": "string"}}
     return {"type": "string"}
@@ -4950,10 +4955,54 @@ def _disambiguate_capability_param_keys(steps: list[FlowStep]) -> list[dict[str,
     return changes
 
 
+_ACTIONABLE_PLACEHOLDER_NAME_RE = re.compile(
+    r"^(?:请输入|请选择|请填写|请选取|请录入)\s*[：:、，,。.!！?？-]*\s*(.+)$",
+    re.I,
+)
+
+
+def _normalize_actionable_placeholder_param_names(spec: FlowSpec) -> list[dict[str, str]]:
+    """Turn a uniquely recoverable placeholder into its business field name.
+
+    ``请输入撤回原因`` carries enough page evidence to become ``撤回原因``;
+    vague examples such as ``例如 XXX`` do not, and remain operator advice.
+    Manual/locked names are never rewritten.
+    """
+    changes: list[dict[str, str]] = []
+    for step in spec.steps:
+        for param in step.params or []:
+            current = str(param.key or param.label or "").strip()
+            match = _ACTIONABLE_PLACEHOLDER_NAME_RE.fullmatch(current)
+            if (
+                not match
+                or param.locked
+                or param.name_source == "manual"
+            ):
+                continue
+            business_name = re.sub(r"\s+", "", match.group(1)).strip("：:、，,。.!！?？-_ ")
+            if not business_name or business_name == current:
+                continue
+            try:
+                _rename_param_public_key(spec, step, param, business_name, actor="planner")
+            except ValueError:
+                # A duplicate business name is ambiguous; preserve both fields
+                # and expose the normal structured warning instead.
+                continue
+            changes.append({
+                "step_id": step.step_id,
+                "path": param.path,
+                "old_name": current,
+                "new_name": business_name,
+            })
+    return changes
+
+
 def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
     """让 capability 的输入输出 schema 始终跟当前字段/响应保持一致。"""
     if not spec.capabilities:
         return spec
+
+    _normalize_actionable_placeholder_param_names(spec)
 
     def reconcile_schema(derived: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
         """当前有效字段是契约真相；仅保留仍存在字段上的人工说明等扩展。"""
@@ -5047,6 +5096,41 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
             last_response = next((st.response_json for st in reversed(cap_steps) if st.response_json is not None), None)
             if last_response is not None:
                 cap.output_schema = reconcile_schema(_schema_from_response_value(last_response), cap.output_schema or {})
+            elif cap.output_mapping:
+                # A write endpoint may legitimately return no captured JSON
+                # body.  Its declared final-response mapping is still enough to
+                # build a stable public output contract; leaving an unrelated
+                # stale schema here caused a late onboarding-only failure.
+                existing_fields = {
+                    field.key or field.path: field
+                    for field in (cap.outputs or [])
+                    if field.key or field.path
+                }
+                fallback_props: dict[str, Any] = {}
+                for mapping_idx, mapping in enumerate(cap.output_mapping or []):
+                    if not isinstance(mapping, dict):
+                        continue
+                    name = _capability_output_name(mapping, mapping_idx)
+                    field = existing_fields.get(name)
+                    mapping_kind = str(mapping.get("kind") or "")
+                    response_path = str(mapping.get("response_path") or mapping.get("path") or "")
+                    is_full_response = bool(
+                        mapping_kind == "final_response"
+                        and response_path in {"", "response", "$", "."}
+                    )
+                    fallback_props[name] = _schema_for_param_type(
+                        "object" if is_full_response else (
+                            field.type if field is not None else (
+                            "object" if name in {"response", "raw", "detail"} else "string"
+                            )
+                        )
+                    )
+                if fallback_props:
+                    cap.output_schema = reconcile_schema({
+                        "type": "object",
+                        "properties": fallback_props,
+                        "required": [],
+                    }, cap.output_schema or {})
     return sync_capability_scoped_views(spec)
 
 
@@ -9343,6 +9427,8 @@ def _review_id(item_type: str, target: dict[str, Any]) -> str:
         str(target.get("path") or ""),
         str(target.get("link_id") or ""),
         str(target.get("request_index") or ""),
+        str(target.get("capability") or target.get("capability_name") or target.get("capability_id") or ""),
+        str(target.get("field") or ""),
     ]
     raw = "|".join(parts)
     safe = re.sub(r"[^a-zA-Z0-9_]+", "_", raw).strip("_").lower()
@@ -9780,7 +9866,7 @@ def refresh_review_items(spec: FlowSpec) -> FlowSpec:
                 str(item.target.get("path") or ""),
             )
             legacy_source_resolved.setdefault(target_key, item.resolved)
-    spec.review_items = build_review_items(spec)
+    spec.review_items = _generated_review_items(spec)
     for item in spec.review_items:
         if item.id in old_resolved:
             item.resolved = old_resolved[item.id]
@@ -9795,8 +9881,26 @@ def refresh_review_items(spec: FlowSpec) -> FlowSpec:
     return spec
 
 
+def flow_spec_release_payload(spec: FlowSpec) -> dict[str, Any]:
+    """Return the one JSON representation used for release persistence."""
+    return spec.model_dump(mode="json", exclude_none=True)
+
+
 def _flow_fingerprint(spec: FlowSpec) -> str:
-    payload = spec.model_dump(exclude={"meta", "review_items"})
+    # Fingerprints are persisted in a JSON release snapshot and later checked
+    # after ``FlowSpec.model_validate`` reconstructs that snapshot.  Some
+    # recording values are assigned after model construction, so their Python
+    # runtime type can temporarily differ from the declared Pydantic type
+    # (for example an integer in a legacy ``str | None`` evidence field).
+    # Canonicalise through JSON + validation before hashing; otherwise the
+    # in-memory review and its semantically identical frozen draft can produce
+    # different hashes merely because validation coerced ``2`` to ``"2"``.
+    canonical = FlowSpec.model_validate(flow_spec_release_payload(spec))
+    payload = canonical.model_dump(
+        mode="json",
+        exclude={"meta", "review_items"},
+        exclude_none=True,
+    )
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -10958,6 +11062,128 @@ def _field_source_review_issues(review_items: list[ReviewItem]) -> list[dict[str
     return issues
 
 
+def _compiled_contract_issue_groups(
+    spec: FlowSpec,
+    api_request: dict[str, Any],
+    findings: list[dict[str, Any]],
+    *,
+    resolved_review_ids: set[str] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Convert late compiled-contract advice into locatable workbench issues."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    resolved_review_ids = resolved_review_ids or set()
+    compiled_steps = list(api_request.get("steps") or [api_request])
+    by_step_id = {step.step_id: step for step in spec.steps}
+    for finding in findings or []:
+        if not isinstance(finding, dict):
+            continue
+        kind = str(finding.get("kind") or "compiled_contract")
+        if kind in {"self_check", "session_constant"}:
+            continue
+        target: dict[str, Any] = {}
+        group = "flow"
+        step_index = finding.get("step")
+        compiled_step = (
+            compiled_steps[step_index]
+            if isinstance(step_index, int) and 0 <= step_index < len(compiled_steps)
+            else {}
+        )
+        step_id = str((compiled_step or {}).get("step_id") or "")
+        if kind == "placeholder_name":
+            param_name = str(finding.get("param") or "")
+            step = by_step_id.get(step_id)
+            param = next((
+                item for item in (step.params if step else [])
+                if param_name in {item.key, item.label, item.path}
+            ), None)
+            target = {
+                "kind": "param",
+                "step_id": step_id,
+                "path": param.path if param is not None else param_name,
+                "key": param.key if param is not None else param_name,
+            }
+            group = "field"
+        elif kind.startswith("capability_"):
+            cap_ref = str(finding.get("capability") or "")
+            field_name = str(finding.get("field") or "")
+            target = {
+                "kind": "capability_output" if "output" in kind else "capability",
+                "capability": cap_ref,
+                **({"field": field_name} if field_name else {}),
+            }
+            group = "capability"
+        else:
+            target = {"kind": "flow"}
+        review_id = _review_id(f"compiled_{kind}", target)
+        if review_id in resolved_review_ids:
+            continue
+        issue = {
+            "severity": "warning",
+            "message": str(finding.get("detail") or finding.get("message") or kind),
+            "source": "review",
+            "target": {key: value for key, value in target.items() if value not in (None, "")},
+            "blocking": False,
+            "ignorable": True,
+            "audience": "operator",
+            "actionable": True,
+            "auto_fixable": False,
+            "code": kind,
+            "issue_id": f"review:{review_id}",
+            "review_id": review_id,
+        }
+        groups.setdefault(group, []).append(issue)
+    return groups
+
+
+def _compiled_contract_review_items(spec: FlowSpec) -> list[ReviewItem]:
+    """Materialize unresolved compiled-contract advice as stable ReviewItems.
+
+    Publish validation operates on a compiled ``api_request`` while ignore state
+    lives in ``FlowSpec.review_items``.  Keeping these findings in both forms is
+    what makes an operator dismissal survive the next prepare/validate cycle.
+    """
+    if not spec.capabilities:
+        return []
+    api_request, build_errors = flow_spec_to_api_request(spec)
+    if api_request is None or build_errors:
+        return []
+    from dano.execution.page.repair_ops import collect_repair_findings
+
+    groups = _compiled_contract_issue_groups(
+        spec,
+        api_request,
+        collect_repair_findings(api_request),
+    )
+    items: list[ReviewItem] = []
+    for issues in groups.values():
+        for issue in issues:
+            message = str(issue.get("message") or "待确认的编译契约建议")
+            items.append(ReviewItem(
+                id=str(issue["review_id"]),
+                type=f"compiled_{issue.get('code') or 'contract'}",
+                severity="medium",
+                title=message,
+                target=dict(issue.get("target") or {}),
+                current_guess="compiled_contract",
+                suggested_action="review_compiled_contract",
+                reason=message,
+                blocking=False,
+                ignorable=True,
+            ))
+    return items
+
+
+def _generated_review_items(spec: FlowSpec) -> list[ReviewItem]:
+    """Build every generated review item with one stable-ID dedupe pass."""
+    generated = [*build_review_items(spec), *_compiled_contract_review_items(spec)]
+    deduped: dict[str, ReviewItem] = {}
+    for item in generated:
+        existing = deduped.get(item.id)
+        if existing is None or _severity_rank(item.severity) > _severity_rank(existing.severity):
+            deduped[item.id] = item
+    return list(deduped.values())
+
+
 def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
     """Canonicalize the current workbench state without invoking the Pi Agent."""
     current = sync_flow_spec_models(spec.model_copy(deep=True), prefer_request_facts=False)
@@ -10974,6 +11200,13 @@ def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
 def prepare_flow_release_candidate(spec: FlowSpec) -> tuple[FlowSpec, dict[str, Any]]:
     """Freeze the exact canonical workbench contract consumed by publish/export."""
     current = prepare_flow_spec_for_publish(spec)
+    # The release is persisted as JSON and reconstructed before its Pi review
+    # is consumed.  Freeze that exact round-tripped model *before* computing
+    # the fingerprint.  Previously ``_flow_fingerprint`` normalised a private
+    # copy but this function returned the pre-normalised ``current`` object;
+    # after a manual workbench edit the review therefore hashed one model while
+    # the draft stored another.
+    current = FlowSpec.model_validate(flow_spec_release_payload(current))
     fingerprint = _flow_fingerprint(current)
     inventory = [
         {
@@ -11001,6 +11234,17 @@ def prepare_flow_release_candidate(spec: FlowSpec) -> tuple[FlowSpec, dict[str, 
         "interface_inventory": inventory,
     }
     current.meta = {**(current.meta or {}), "release_candidate": release}
+    # Keep this invariant next to the only release-freezing function.  A future
+    # schema migration or derived-model synchroniser must fail here, before Pi
+    # review and draft creation, rather than surface as a misleading publish
+    # error after the operator has already waited for review.
+    frozen = flow_spec_release_payload(current)
+    frozen_fingerprint = _flow_fingerprint(FlowSpec.model_validate(frozen))
+    if frozen_fingerprint != fingerprint:
+        raise ValueError(
+            "FlowSpec release snapshot is not serialization-stable: "
+            f"{fingerprint} != {frozen_fingerprint}"
+        )
     return current, release
 
 
@@ -11131,10 +11375,17 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
     if active_steps and not any((st.success_rule for st in active_steps)):
         suggestions.append("未识别到明确 success_rule，运行期只能使用通用成功判断")
     self_check_errors: list[str] = []
+    compiled_issue_groups: dict[str, list[dict[str, Any]]] = {}
     if api_request is not None:
         self_check_errors = self_check(api_request)
         suggestions.extend(self_check_errors)
         repair_findings = collect_repair_findings(api_request)
+        compiled_issue_groups = _compiled_contract_issue_groups(
+            spec,
+            api_request,
+            repair_findings,
+            resolved_review_ids={item.id for item in review_items if item.resolved},
+        )
         # 系统化:session_constant 仅当对应字段**真的被识别为 system_const/constant** 时才算发布阻断;
         # 若字段在 spec 里被标 runtime_var/unknown → 这部分错误让前端 review_items 兜底,
         # 避免一锅端。修复者应在 dynamic_run 时再注入。
@@ -11165,6 +11416,8 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
     field_source_issues = _field_source_review_issues(review_items)
     if field_source_issues:
         issue_groups.setdefault("field", []).extend(field_source_issues)
+    for group, items in compiled_issue_groups.items():
+        issue_groups.setdefault(group, []).extend(items)
     return {
         "passed": not errors,
         "errors": errors,
@@ -12432,7 +12685,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             severities = set(edit.get("severities") or [])
             exclude_severities = set(edit.get("exclude_severities") or [])
             bulk_review_resolutions.append((severities, exclude_severities, resolved))
-            generated = build_review_items(new_spec)
+            generated = _generated_review_items(new_spec)
             old_by_id = {item.id: item for item in new_spec.review_items}
             for item in generated:
                 if item.id in old_by_id:
@@ -12456,7 +12709,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     found = True
                     break
             if not found:
-                generated = build_review_items(new_spec)
+                generated = _generated_review_items(new_spec)
                 for item in generated:
                     if item.id == item_id:
                         item.resolved = bool(edit.get("resolved", True))
@@ -13317,7 +13570,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
     if needs_dependency_rebuild:
         rebuild_flow_dependencies(new_spec)
     if bulk_review_resolutions:
-        generated = build_review_items(new_spec)
+        generated = _generated_review_items(new_spec)
         old_by_id = {item.id: item for item in new_spec.review_items}
         for item in generated:
             if item.id in old_by_id:

@@ -16,10 +16,12 @@ import math
 import re
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import structlog
 
+from dano.execution.page.sessions import SESSION_STORAGE_STATE_KEY
 from dano.shared.std_fields import ALL_STD_FIELDS
 
 log = structlog.get_logger(__name__)
@@ -1039,7 +1041,7 @@ class RecordSession:
         self._last_activity_at = time.monotonic()
 
     async def start(self, start_url: str, *, base_url: str = "", headless: bool = True,
-                    storage_state: str | None = None, token: str | None = None,
+                    storage_state: str | dict | None = None, token: str | None = None,
                     token_key: str | None = None) -> None:
         from playwright.async_api import async_playwright
 
@@ -1049,9 +1051,26 @@ class RecordSession:
         self._browser = await self._pw.chromium.launch(headless=headless)
         ctx_kwargs: dict = {"viewport": {"width": _VIEW_W, "height": _VIEW_H},
                             "ignore_https_errors": not tls_verify()}
-        if storage_state:
-            ctx_kwargs["storage_state"] = storage_state
+        playwright_state, session_storage = self._split_browser_storage_state(storage_state)
+        if playwright_state:
+            ctx_kwargs["storage_state"] = playwright_state
         self._context = await self._browser.new_context(**ctx_kwargs)
+        if session_storage:
+            # BrowserContext init scripts run in every page/frame before the
+            # application's scripts. Restore only the matching origin so one
+            # system's credentials can never leak into another embedded origin.
+            payload = json.dumps(session_storage, ensure_ascii=False).replace("</", "<\\/")
+            await self._context.add_init_script(
+                "(() => {"
+                f"const byOrigin={payload};"
+                "const entries=byOrigin[location.origin];"
+                "if(!Array.isArray(entries))return;"
+                "try{for(const entry of entries){"
+                "if(entry&&typeof entry.name==='string'&&typeof entry.value==='string')"
+                "sessionStorage.setItem(entry.name,entry.value);"
+                "}}catch(_error){}"
+                "})();"
+            )
         full = start_url if start_url.startswith(("http", "file")) else f"{base_url.rstrip('/')}{start_url}"
         if token:                                          # 预置登录态:免在画面里登录,开局即业务页
             await apply_token_auth(self._context, token=token, url=full, token_key=token_key)
@@ -1079,6 +1098,40 @@ class RecordSession:
         self._attach_diag_handlers(self.page)
         # SPA 常不触发 "load"(长连接/轮询挂着)→ 用 domcontentloaded,否则 goto 卡到超时(与运行期 driver 一致)
         await self.page.goto(full, wait_until="domcontentloaded")
+
+    @staticmethod
+    def _split_browser_storage_state(storage_state: str | dict | None) -> tuple[str | dict | None, dict]:
+        """Return Playwright-compatible state plus our per-origin sessionStorage.
+
+        Existing callers may supply a path, a JSON object string, or an in-memory
+        dict. A plain path without the custom root key remains a path so legacy
+        Playwright behavior is unchanged.
+        """
+        if not storage_state:
+            return None, {}
+        raw: object = storage_state
+        if isinstance(storage_state, str):
+            stripped = storage_state.strip()
+            try:
+                if stripped.startswith("{"):
+                    raw = json.loads(stripped)
+                else:
+                    path = Path(storage_state)
+                    if not path.exists():
+                        return storage_state, {}
+                    loaded = json.loads(path.read_text(encoding="utf-8"))
+                    if not isinstance(loaded, dict) or SESSION_STORAGE_STATE_KEY not in loaded:
+                        return storage_state, {}
+                    raw = loaded
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                return storage_state, {}
+        if not isinstance(raw, dict):
+            return storage_state if isinstance(storage_state, str) else None, {}
+        playwright_state = dict(raw)
+        session_storage = playwright_state.pop(SESSION_STORAGE_STATE_KEY, {})
+        if not isinstance(session_storage, dict):
+            session_storage = {}
+        return playwright_state, session_storage
 
     async def _on_new_page(self, page) -> None:  # noqa: ANN001 —— 新标签页/新窗口(context "page" 事件)
         """用户操作打开了新页(target=_blank / window.open / 弹窗)→ 跟随:设为活动页,把截屏切过去。
@@ -1937,14 +1990,51 @@ class RecordSession:
         self._page_id(self.page)
 
     async def storage_state(self) -> dict | None:
-        """抓当前会话登录态快照(所有 cookie + localStorage),不管系统把 token 存哪。
+        """抓当前会话登录态快照(cookie/localStorage + 各 origin sessionStorage)。
 
         用户在画面里真人登录后调用 → 回放/运行期复用这份登录态,免再登录(验证码/RSA 都已过)。
         """
         if self._context is None:
             return None
         try:
-            return await self._context.storage_state()
+            state = await self._context.storage_state()
+            by_origin: dict[str, dict[str, str]] = {}
+            # sessionStorage is scoped to a top-level browsing context and is
+            # deliberately omitted by Playwright storage_state. Inspect every
+            # live page/frame; same-origin entries are merged deterministically.
+            for page in list(self._context.pages):
+                for frame in list(page.frames):
+                    try:
+                        snapshot = await frame.evaluate(
+                            """() => {
+                              const items = [];
+                              for (let i = 0; i < sessionStorage.length; i += 1) {
+                                const name = sessionStorage.key(i);
+                                if (name !== null) items.push({name, value: sessionStorage.getItem(name) ?? ''});
+                              }
+                              return {origin: location.origin, items};
+                            }"""
+                        )
+                    except Exception:  # noqa: BLE001 - detached/opaque/cross-origin frame
+                        continue
+                    origin = str((snapshot or {}).get("origin") or "")
+                    if not origin or origin == "null":
+                        continue
+                    values = by_origin.setdefault(origin, {})
+                    for entry in (snapshot or {}).get("items") or []:
+                        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                            continue
+                        value = entry.get("value")
+                        values[entry["name"]] = value if isinstance(value, str) else str(value or "")
+            if by_origin:
+                state[SESSION_STORAGE_STATE_KEY] = {
+                    origin: [{"name": name, "value": value} for name, value in sorted(values.items())]
+                    for origin, values in sorted(by_origin.items())
+                    if values
+                }
+                if not state[SESSION_STORAGE_STATE_KEY]:
+                    state.pop(SESSION_STORAGE_STATE_KEY, None)
+            return state
         except Exception:  # noqa: BLE001
             return None
 

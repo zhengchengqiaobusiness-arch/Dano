@@ -14,6 +14,7 @@ pytest.importorskip("playwright")
 
 from dano.execution.page.driver import PlaywrightPageDriver
 from dano.execution.page.recorder import RecordSession, _RECORDER_JS
+from dano.execution.page.sessions import SESSION_STORAGE_STATE_KEY
 
 
 def test_static_script_enum_repairs_only_exact_label_value_mapping() -> None:
@@ -847,6 +848,79 @@ async def test_record_session_storage_state_snapshot(tmp_path) -> None:  # noqa:
     finally:
         await sess.stop()
     assert isinstance(state, dict) and "cookies" in state and "origins" in state
+
+
+async def test_record_session_restores_session_storage_for_each_origin_before_page_scripts() -> None:
+    """sessionStorage 不在 Playwright storage_state 中，主页面和跨域 frame 都必须显式恢复。"""
+    if not await _chromium_available():
+        pytest.skip("chromium 未安装")
+    from aiohttp import web
+
+    async def frame_handler(_req):  # noqa: ANN001
+        return web.Response(text=(
+            "<!doctype html><html><body><div id='boot'></div><script>"
+            "document.getElementById('boot').textContent="
+            "sessionStorage.getItem('frame-token')||'missing';"
+            "</script></body></html>"
+        ), content_type="text/html")
+
+    frame_app = web.Application()
+    frame_app.router.add_get("/frame", frame_handler)
+    frame_runner = web.AppRunner(frame_app)
+    await frame_runner.setup()
+    frame_site = web.TCPSite(frame_runner, "127.0.0.1", 0)
+    await frame_site.start()
+    frame_port = frame_site._server.sockets[0].getsockname()[1]  # noqa: SLF001
+    frame_origin = f"http://127.0.0.1:{frame_port}"
+
+    async def main_handler(_req):  # noqa: ANN001
+        return web.Response(text=(
+            "<!doctype html><html><head><script>"
+            "document.title=sessionStorage.getItem('main-token')||'missing';"
+            "</script></head><body>"
+            f"<iframe src='{frame_origin}/frame'></iframe>"
+            "</body></html>"
+        ), content_type="text/html")
+
+    main_app = web.Application()
+    main_app.router.add_get("/", main_handler)
+    main_runner = web.AppRunner(main_app)
+    await main_runner.setup()
+    main_site = web.TCPSite(main_runner, "127.0.0.1", 0)
+    await main_site.start()
+    main_port = main_site._server.sockets[0].getsockname()[1]  # noqa: SLF001
+    main_origin = f"http://127.0.0.1:{main_port}"
+
+    first = RecordSession()
+    second = RecordSession()
+    try:
+        await first.start(f"{main_origin}/")
+        await first.page.wait_for_selector("iframe")
+        frame = next(item for item in first.page.frames if item.url.startswith(frame_origin))
+        await first.page.evaluate("sessionStorage.setItem('main-token','main-restored')")
+        await frame.evaluate("sessionStorage.setItem('frame-token','frame-restored')")
+        state = await first.storage_state()
+
+        assert state is not None
+        assert state[SESSION_STORAGE_STATE_KEY][main_origin] == [
+            {"name": "main-token", "value": "main-restored"},
+        ]
+        assert state[SESSION_STORAGE_STATE_KEY][frame_origin] == [
+            {"name": "frame-token", "value": "frame-restored"},
+        ]
+
+        # Inline application scripts read the values during initial parsing.
+        # Passing only after goto would leave title/#boot as "missing".
+        await second.start(f"{main_origin}/", storage_state=state)
+        await second.page.wait_for_selector("iframe")
+        restored_frame = next(item for item in second.page.frames if item.url.startswith(frame_origin))
+        assert await second.page.title() == "main-restored"
+        assert await restored_frame.locator("#boot").text_content() == "frame-restored"
+    finally:
+        await second.stop()
+        await first.stop()
+        await main_runner.cleanup()
+        await frame_runner.cleanup()
 
 
 _PICKER = """<!doctype html><html><head><meta charset="utf-8"></head><body>
