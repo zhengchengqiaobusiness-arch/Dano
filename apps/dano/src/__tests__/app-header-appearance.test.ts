@@ -17,4 +17,12 @@ describe("AppHeader control appearance", () => {
     expect(newSessionRule).toContain("box-shadow: var(--header-control-shadow)");
     expect(connectionRule).toContain("box-shadow: var(--header-control-shadow)");
   });
+
+  it("uses the same text color for connection and new-session controls", () => {
+    const newSessionRule = source.match(/\.new-session-button\s*\{([^}]*)\}/)?.[1] ?? "";
+    const connectionRule = source.match(/\.connection-status\s*\{([^}]*)\}/)?.[1] ?? "";
+
+    expect(newSessionRule).toContain("color: var(--text)");
+    expect(connectionRule).toContain("color: var(--text)");
+  });
 });
