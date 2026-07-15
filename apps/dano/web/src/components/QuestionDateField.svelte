@@ -1,7 +1,6 @@
 <script lang="ts">
-  import { tick } from "svelte";
-  import { CalendarDate, getLocalTimeZone, type DateValue } from "@internationalized/date";
-  import { Calendar } from "bits-ui";
+  import { CalendarDate, Time, getLocalTimeZone, type DateValue } from "@internationalized/date";
+  import { DatePicker, TimeField } from "bits-ui";
   import ChevronDown from "lucide-svelte/icons/chevron-down";
   import { formatAskUserQuestionDateValue, isAskUserQuestionDateTimeFormat, parseAskUserQuestionDateValue } from "@dano/types/ask-user-question-date";
   import { t } from "../i18n";
@@ -27,15 +26,11 @@
 
   const includesTime = $derived(isAskUserQuestionDateTimeFormat(dateFormat));
   const POPOVER_GAP_PX = 8;
-  const ESTIMATED_POPOVER_HEIGHT_PX = 314;
   let open = $state(false);
-  let popoverPlacement = $state<"bottom" | "top">("bottom");
   let dateValue = $state<DateValue | undefined>();
-  let timeValue = $state("00:00");
+  let timeValue = $state(new Time(0, 0));
   let initialValueSynced = $state(false);
   let lastPropValue = $state<string | undefined>(undefined);
-  let controlRowEl: HTMLDivElement | null = $state(null);
-  let popoverEl: HTMLDivElement | null = $state(null);
   const displayValue = $derived(formattedValue(dateValue, timeValue));
 
   $effect(() => {
@@ -44,7 +39,7 @@
     lastPropValue = value;
     if (!value) {
       dateValue = undefined;
-      timeValue = "00:00";
+      timeValue = new Time(0, 0);
       return;
     }
     const parsed = parseAskUserQuestionDateValue(value, dateFormat);
@@ -54,15 +49,14 @@
       parsed.getMonth() + 1,
       parsed.getDate(),
     );
-    timeValue = `${String(parsed.getHours()).padStart(2, "0")}:${String(parsed.getMinutes()).padStart(2, "0")}`;
+    timeValue = new Time(parsed.getHours(), parsed.getMinutes());
   });
 
   function formattedValue(nextDate = dateValue, nextTime = timeValue): string | undefined {
     if (!nextDate) return undefined;
     const date = nextDate.toDate(getLocalTimeZone());
     if (includesTime) {
-      const [hour = "0", minute = "0"] = nextTime.split(":");
-      date.setHours(Number(hour), Number(minute), 0, 0);
+      date.setHours(nextTime.hour, nextTime.minute, 0, 0);
     }
     return formatAskUserQuestionDateValue(date, dateFormat);
   }
@@ -74,136 +68,115 @@
 
   function handleDateChange(nextDate: DateValue | undefined) {
     dateValue = nextDate;
-    open = false;
+    if (!includesTime) open = false;
     emit(nextDate, timeValue);
   }
 
-  function handleTimeInput(event: Event) {
-    timeValue = event.currentTarget instanceof HTMLInputElement
-      ? event.currentTarget.value
-      : "00:00";
-    emit(dateValue, timeValue);
+  function handleTimeChange(nextTime: Time | undefined) {
+    if (!nextTime) return;
+    timeValue = nextTime;
+    emit(dateValue, nextTime);
   }
 
   function clearValue() {
     dateValue = undefined;
-    timeValue = "00:00";
+    timeValue = new Time(0, 0);
     onValueChange(undefined);
   }
 
-  function setOpen(nextOpen: boolean) {
-    if (nextOpen) updatePopoverPlacement(ESTIMATED_POPOVER_HEIGHT_PX);
-    open = nextOpen;
-    if (nextOpen) void updatePopoverPlacement();
-  }
-
-  function handleWindowPointerDown(event: PointerEvent) {
-    if (open && controlRowEl && !event.composedPath().includes(controlRowEl)) {
-      open = false;
-    }
-  }
-
-  async function updatePopoverPlacement(estimatedHeight?: number) {
-    if (!controlRowEl) return;
-    const rowRect = controlRowEl.getBoundingClientRect();
-    let popoverHeight = estimatedHeight;
-    if (popoverHeight === undefined) {
-      await tick();
-      popoverHeight = popoverEl?.getBoundingClientRect().height ?? ESTIMATED_POPOVER_HEIGHT_PX;
-    }
-    const spaceBelow = window.innerHeight - rowRect.bottom - POPOVER_GAP_PX;
-    const spaceAbove = rowRect.top - POPOVER_GAP_PX;
-    popoverPlacement = spaceBelow < popoverHeight && spaceAbove > spaceBelow
-      ? "top"
-      : "bottom";
-  }
 </script>
 
-<svelte:window
-  onpointerdown={handleWindowPointerDown}
-  onresize={() => {
-    if (open) void updatePopoverPlacement();
-  }}
-/>
-
 <div class="question-date-field">
-  <div class="question-date-control-row" class:datetime={includesTime} bind:this={controlRowEl}>
-    <button
-      id={`${id}-trigger`}
-      type="button"
-      class="question-input question-date-trigger"
-      disabled={disabled}
-      aria-expanded={open}
-      onclick={() => {
-        setOpen(!open);
-      }}
-    >
-      <span>{displayValue ?? placeholder}</span>
-      <ChevronDown size={16} aria-hidden="true" />
-    </button>
+  <DatePicker.Root
+    bind:open
+    bind:value={dateValue}
+    onValueChange={handleDateChange}
+    closeOnDateSelect={false}
+    fixedWeeks
+    preventDeselect
+    {disabled}
+  >
+    <div class="question-date-control-row">
+      <DatePicker.Input class="question-date-input">
+        {#snippet children()}
+          <DatePicker.Trigger
+            id={`${id}-trigger`}
+            class="question-input question-date-trigger"
+            {disabled}
+          >
+            <span>{displayValue ?? placeholder}</span>
+            <ChevronDown size={16} aria-hidden="true" />
+          </DatePicker.Trigger>
+        {/snippet}
+      </DatePicker.Input>
 
-    {#if includesTime}
-      <div class="question-time-control">
-        <input
-          class="question-input question-time-input"
-          type="time"
-          step="60"
-          value={timeValue}
-          disabled={disabled || !dateValue}
-          oninput={handleTimeInput}
-        />
-        <ChevronDown size={16} aria-hidden="true" />
-      </div>
-    {/if}
-
-    {#if open}
-      <div
+      <DatePicker.Content
         class="question-date-popover"
-        class:above={popoverPlacement === "top"}
-        bind:this={popoverEl}
+        align="start"
+        sideOffset={POPOVER_GAP_PX}
+        collisionPadding={POPOVER_GAP_PX}
+        trapFocus={false}
+        onOpenAutoFocus={(event) => event.preventDefault()}
       >
-        <Calendar.Root
-          type="single"
-          bind:value={dateValue}
-          onValueChange={handleDateChange}
-          fixedWeeks
-          preventDeselect
-          {disabled}
-          class="question-calendar"
-        >
+        <DatePicker.Calendar class="question-calendar">
           {#snippet children({ months, weekdays })}
-            <Calendar.Header class="question-calendar-header">
-              <Calendar.PrevButton class="question-button secondary question-calendar-nav" aria-label="Previous month">‹</Calendar.PrevButton>
-              <Calendar.Heading class="question-calendar-heading" />
-              <Calendar.NextButton class="question-button secondary question-calendar-nav" aria-label="Next month">›</Calendar.NextButton>
-            </Calendar.Header>
+            <DatePicker.Header class="question-calendar-header">
+              <DatePicker.PrevButton class="question-button secondary question-calendar-nav" aria-label="Previous month">‹</DatePicker.PrevButton>
+              <DatePicker.Heading class="question-calendar-heading" />
+              <DatePicker.NextButton class="question-button secondary question-calendar-nav" aria-label="Next month">›</DatePicker.NextButton>
+            </DatePicker.Header>
             {#each months as month}
-              <Calendar.Grid class="question-calendar-grid">
-                <Calendar.GridHead>
-                  <Calendar.GridRow>
+              <DatePicker.Grid class="question-calendar-grid">
+                <DatePicker.GridHead>
+                  <DatePicker.GridRow>
                     {#each weekdays as weekday}
-                      <Calendar.HeadCell class="question-calendar-weekday">{weekday}</Calendar.HeadCell>
+                      <DatePicker.HeadCell class="question-calendar-weekday">{weekday}</DatePicker.HeadCell>
                     {/each}
-                  </Calendar.GridRow>
-                </Calendar.GridHead>
-                <Calendar.GridBody>
+                  </DatePicker.GridRow>
+                </DatePicker.GridHead>
+                <DatePicker.GridBody>
                   {#each month.weeks as week}
-                    <Calendar.GridRow>
+                    <DatePicker.GridRow>
                       {#each week as date}
-                        <Calendar.Cell {date} month={month.value} class="question-calendar-cell">
-                          <Calendar.Day class="question-calendar-day" />
-                        </Calendar.Cell>
+                        <DatePicker.Cell {date} month={month.value} class="question-calendar-cell">
+                          <DatePicker.Day class="question-calendar-day" />
+                        </DatePicker.Cell>
                       {/each}
-                    </Calendar.GridRow>
+                    </DatePicker.GridRow>
                   {/each}
-                </Calendar.GridBody>
-              </Calendar.Grid>
+                </DatePicker.GridBody>
+              </DatePicker.Grid>
             {/each}
           {/snippet}
-        </Calendar.Root>
-      </div>
-    {/if}
-  </div>
+        </DatePicker.Calendar>
+
+        {#if includesTime}
+          <div class="question-date-time-section">
+            <TimeField.Root
+              bind:value={timeValue}
+              onValueChange={handleTimeChange}
+              granularity="minute"
+              hourCycle={24}
+              disabled={disabled || !dateValue}
+            >
+              <TimeField.Input class="question-time-input">
+                {#snippet children({ segments })}
+                  {#each segments as segment}
+                    <TimeField.Segment
+                      part={segment.part}
+                      class="question-time-segment"
+                    >
+                      {segment.value}
+                    </TimeField.Segment>
+                  {/each}
+                {/snippet}
+              </TimeField.Input>
+            </TimeField.Root>
+          </div>
+        {/if}
+      </DatePicker.Content>
+    </div>
+  </DatePicker.Root>
 
   {#if !required && dateValue}
     <button
@@ -219,21 +192,21 @@
 
 <style>
   .question-date-field {
+    --question-date-picker-width: 260px;
+
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     gap: 8px;
   }
 
   .question-date-control-row {
-    position: relative;
     display: grid;
     grid-template-columns: max-content;
     gap: 8px;
   }
 
-  .question-date-control-row.datetime {
-    grid-template-columns: max-content max-content;
-    align-items: start;
+  :global(.question-date-input) {
+    width: var(--question-date-picker-width);
   }
 
   :global(.question-date-trigger) {
@@ -243,26 +216,18 @@
     gap: 8px;
     text-align: left;
     cursor: pointer;
-    width: auto;
+    width: 100%;
   }
 
   :global(.question-date-popover) {
-    position: absolute;
-    top: calc(100% + 8px);
-    left: 0;
     z-index: 20;
-    width: max-content;
+    width: var(--question-date-picker-width);
     padding: 10px;
     border: 1px solid var(--border);
     border-radius: 10px;
     background: var(--panel);
     color: var(--text);
     box-shadow: var(--shadow-raised);
-  }
-
-  :global(.question-date-popover.above) {
-    top: auto;
-    bottom: calc(100% + 8px);
   }
 
   :global(.question-calendar) {
@@ -353,36 +318,52 @@
     outline-offset: 2px;
   }
 
-  .question-time-control {
-    position: relative;
-    width: fit-content;
+  .question-date-time-section {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
   }
 
-  .question-time-control > :global(svg) {
-    position: absolute;
-    top: 50%;
-    right: 12px;
-    color: var(--text);
-    pointer-events: none;
-    transform: translateY(-50%);
-  }
-
-  .question-time-input {
-    -webkit-appearance: none;
-    appearance: none;
-    width: auto;
-    min-width: 140px;
-    padding-right: 36px;
-  }
-
-  .question-time-input::-webkit-calendar-picker-indicator {
-    position: absolute;
-    inset: 0;
+  :global(.question-time-input) {
+    display: flex;
+    align-items: center;
     width: 100%;
-    height: 100%;
-    margin: 0;
-    cursor: pointer;
-    opacity: 0;
+    min-height: 44px;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--control-bg);
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  :global(.question-time-input:focus-within) {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--focus-ring);
+  }
+
+  :global(.question-time-segment) {
+    min-width: 2ch;
+    padding: 4px 5px;
+    border-radius: 6px;
+    color: var(--text);
+    text-align: center;
+    outline: none;
+  }
+
+  :global(.question-time-segment[data-segment="literal"]) {
+    min-width: auto;
+    padding-inline: 1px;
+  }
+
+  :global(.question-time-segment:focus) {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+
+  :global(.question-time-segment[data-disabled]) {
+    cursor: not-allowed;
+    opacity: 0.5;
   }
 
   .question-date-clear {
@@ -390,14 +371,13 @@
   }
 
   @media (max-width: 640px) {
-    .question-date-control-row,
-    .question-date-control-row.datetime {
+    .question-date-control-row {
       grid-template-columns: minmax(0, 1fr);
     }
 
     :global(.question-date-trigger),
-    .question-time-control,
-    .question-time-input {
+    :global(.question-date-input),
+    :global(.question-time-input) {
       width: 100%;
     }
 

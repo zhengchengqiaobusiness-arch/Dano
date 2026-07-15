@@ -7,14 +7,22 @@ const source = readFileSync(
 );
 
 describe("QuestionDateField time picker appearance", () => {
-  it("suppresses the native time-input arrow when rendering the shared chevron", () => {
-    const timeControlMarkup = source.match(
-      /<div class="question-time-control">([\s\S]*?)<\/div>/,
-    )?.[1] ?? "";
-    const timeInputRule = source.match(/\.question-time-input\s*\{([^}]*)\}/)?.[1] ?? "";
+  it("shares one desktop width between the trigger and popover", () => {
+    expect(source).toContain("--question-date-picker-width: 260px");
+    expect(source).toContain("width: var(--question-date-picker-width)");
+    expect(source).toContain(":global(.question-date-popover)");
+  });
 
-    expect(timeControlMarkup).toContain('<ChevronDown size={16} aria-hidden="true" />');
-    expect(timeInputRule).toContain("-webkit-appearance: none");
-    expect(timeInputRule).toContain("appearance: none");
+  it("uses a themeable segmented time field instead of the native time picker", () => {
+    expect(source).toContain("<TimeField.Root");
+    expect(source).toContain("<TimeField.Input");
+    expect(source).toContain("<TimeField.Segment");
+    expect(source).toContain('data-segment="literal"');
+    expect(source).toContain("font-variant-numeric: tabular-nums");
+    expect(source).toContain("background: var(--accent)");
+    expect(source).toContain("color: var(--on-accent)");
+    expect(source).toContain("min-height: 44px");
+    expect(source).not.toContain('type="time"');
+    expect(source).not.toContain("::-webkit-calendar-picker-indicator");
   });
 });

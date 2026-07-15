@@ -69,6 +69,8 @@
 
 <style>
   .app-header {
+    --header-control-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+
     position: fixed;
     top: 0;
     left: 0;
@@ -100,7 +102,7 @@
     font-weight: 600;
     line-height: 1;
     cursor: pointer;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+    box-shadow: var(--header-control-shadow);
   }
 
   .new-session-button:hover:not(:disabled) {
@@ -141,13 +143,7 @@
     background: color-mix(in srgb, var(--panel) 65%, transparent);
     -webkit-backdrop-filter: blur(2px);
     backdrop-filter: blur(2px);
-    box-shadow:
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0) 0px 0px 0px 0px,
-      rgba(0, 0, 0, 0.04) 0px 0px 0px 1px,
-      rgba(0, 0, 0, 0.04) 0px 2px 8px 0px;
+    box-shadow: var(--header-control-shadow);
     cursor: pointer;
   }
 
