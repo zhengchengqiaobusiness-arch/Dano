@@ -1,0 +1,11 @@
+include /etc/nginx/dano/http.conf;
+
+server {
+  listen 80;
+  include /etc/nginx/dano/proxy-server.conf;
+}
+
+server {
+  listen 443 ssl;
+  include /etc/nginx/dano/tls-server.conf;
+}

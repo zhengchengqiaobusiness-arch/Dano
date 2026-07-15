@@ -1,6 +1,6 @@
 {
   "name": "@dano/dano",
-  "version": "0.1.82",
+  "version": "0.1.83",
   "private": true,
   "description": "Dano P0 web LLM chat",
   "type": "module",
@@ -21,6 +21,7 @@
     "deploy:up": "node scripts/deploy-compose.mjs up",
     "deploy:check-bash": "node scripts/check-bash-acceptance.mjs",
     "deploy:check-bash:container": "sh scripts/check-bash-acceptance-container.sh",
+    "deploy:check-exposure": "node scripts/check-deploy-exposure.mjs",
     "dev:server": "pnpm -C apps/dano dev:server",
     "dev:web": "pnpm -C apps/dano dev:web",
     "secret:set": "node scripts/set-env-secret.mjs",

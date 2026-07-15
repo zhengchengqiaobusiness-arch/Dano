@@ -1,0 +1,13 @@
+services:
+  nginx:
+    ports:
+      - "${DANO_HTTPS_PORT:-443}:443"
+    volumes:
+      - type: bind
+        source: ${DANO_TLS_CERT_PATH}
+        target: /etc/nginx/tls/fullchain.pem
+        read_only: true
+      - type: bind
+        source: ${DANO_TLS_KEY_PATH}
+        target: /etc/nginx/tls/privkey.pem
+        read_only: true

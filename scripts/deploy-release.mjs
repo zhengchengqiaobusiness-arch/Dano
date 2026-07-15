@@ -12,6 +12,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolveDeploymentExposure } from "./deploy-exposure.mjs";
 
 const composeBin = process.env.DANO_COMPOSE || "docker";
 const composeArgs = composeBin === "podman" ? ["compose"] : ["compose"];
@@ -19,8 +20,12 @@ const buildParent = process.env.DANO_BUILD_PARENT_DIR || tmpdir();
 const deployDir = process.env.DANO_DEPLOY_DIR || "/opt/dano/deploy";
 const runtimeDir = process.env.DANO_RUNTIME_DIR || "/opt/dano/runtime-data";
 const secretsDir = process.env.DANO_SECRETS_DIR || join(deployDir, ".secrets");
-const nginxConf = process.env.DANO_NGINX_CONF || join(deployDir, "nginx/default.conf");
+const nginxConf =
+  process.env.DANO_NGINX_CONF || join(deployDir, "nginx/default.conf.template");
+const nginxSharedDir = join(deployDir, "nginx/shared");
+const exposureComposeFile = join(deployDir, "docker-compose.exposure.yml");
 const envPath = join(deployDir, ".env");
+const exposure = resolveDeploymentExposure(process.env, { baseDir: deployDir });
 const runtimeOwner = "1000:1000";
 const defaultNpmRegistry = "https://mirrors.cloud.tencent.com/npm/";
 const npmRegistry =
@@ -77,6 +82,15 @@ function requireValue(name, value) {
   return value;
 }
 
+function serializeEnvValue(value) {
+  const text = String(value);
+  if (/[\r\n]/.test(text)) {
+    throw new Error("deployment environment values cannot contain newlines");
+  }
+  if (/^[a-zA-Z0-9_./:@+-]+$/.test(text)) return text;
+  return `'${text.replaceAll("'", "\\'")}'`;
+}
+
 function updateEnvFile(values) {
   const current = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
   const lines = current.split(/\r?\n/).filter(line => line.length > 0);
@@ -85,10 +99,10 @@ function updateEnvFile(values) {
     const match = line.match(/^([A-Z0-9_]+)=/);
     if (!match || !(match[1] in values)) return line;
     seen.add(match[1]);
-    return `${match[1]}=${values[match[1]]}`;
+    return `${match[1]}=${serializeEnvValue(values[match[1]])}`;
   });
   for (const [key, value] of Object.entries(values)) {
-    if (!seen.has(key)) next.push(`${key}=${value}`);
+    if (!seen.has(key)) next.push(`${key}=${serializeEnvValue(value)}`);
   }
   writeFileSync(envPath, `${next.join("\n")}\n`, { mode: 0o600 });
 }
@@ -129,17 +143,43 @@ try {
   prepareRuntimeDir();
   mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
   cpSync(join(buildDir, "docker-compose.yml"), join(deployDir, "docker-compose.yml"));
-  cpSync(join(buildDir, "deploy/nginx/default.conf"), nginxConf);
+  cpSync(
+    join(buildDir, `deploy/compose/${exposure.mode}.yml`),
+    exposureComposeFile,
+  );
+  cpSync(
+    join(buildDir, `deploy/nginx/${exposure.mode}.conf.template`),
+    nginxConf,
+  );
+  cpSync(join(buildDir, "deploy/nginx/shared"), nginxSharedDir, {
+    recursive: true,
+  });
   updateEnvFile({
     DANO_IMAGE: image,
     DANO_RUNTIME_DIR: runtimeDir,
     DANO_SECRETS_DIR: secretsDir,
     DANO_NGINX_CONF: nginxConf,
+    DANO_NGINX_SHARED_DIR: nginxSharedDir,
+    DANO_EXPOSURE_MODE: exposure.mode,
+    ...exposure.tlsEnv,
   });
 
-  run(composeBin, [...composeArgs, "--env-file", ".env", "up", "-d", "--no-build"], {
-    cwd: deployDir,
-  });
+  run(
+    composeBin,
+    [
+      ...composeArgs,
+      "-f",
+      "docker-compose.yml",
+      "-f",
+      "docker-compose.exposure.yml",
+      "--env-file",
+      ".env",
+      "up",
+      "-d",
+      "--no-build",
+    ],
+    { cwd: deployDir },
+  );
   run(process.execPath, [join(buildDir, "scripts/smoke-dano-deploy.mjs")], {
     env: {
       ...process.env,

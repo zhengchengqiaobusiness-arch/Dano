@@ -68,10 +68,9 @@ services:
     depends_on:
       app:
         condition: service_healthy
-    ports:
-      - "${DANO_NGINX_PORT:-80}:80"
     volumes:
-      - ${DANO_NGINX_CONF:-/opt/dano/deploy/nginx/default.conf}:/etc/nginx/conf.d/default.conf:ro
+      - ${DANO_NGINX_CONF:-/opt/dano/deploy/nginx/default.conf.template}:/etc/nginx/templates/default.conf.template:ro
+      - ${DANO_NGINX_SHARED_DIR:-/opt/dano/deploy/nginx/shared}:/etc/nginx/dano:ro
     networks:
       - default
       - skillmanner
