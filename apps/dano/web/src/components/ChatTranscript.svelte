@@ -2466,7 +2466,7 @@
     }
 
     .scroll-bottom-overlay {
-      bottom: -0.3rem;
+      bottom: 0;
     }
   }
 
