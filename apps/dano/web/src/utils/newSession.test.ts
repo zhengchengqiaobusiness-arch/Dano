@@ -187,4 +187,45 @@ describe("bridge new session response", () => {
     expect(bridge.activeSessionPath).toBe("/sessions/new.jsonl");
     expect(readActiveSessionCache(storage)).toBe("/sessions/new.jsonl");
   });
+
+  it("keeps loading while a cached session restore receives another session snapshot", async () => {
+    const storage = createStorage();
+    writeActiveSessionCache(storage, "/sessions/history.jsonl");
+    vi.stubGlobal("window", { sessionStorage: storage });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+
+    const store = await import("../composables/bridgeStore.svelte");
+    const bridge = store.initBridge();
+
+    store.applyTranscriptSnapshotEvent({
+      type: "transcript_snapshot",
+      sessionPath: "/sessions/empty.jsonl",
+      messages: [],
+      hasOlder: false,
+      hasNewer: false,
+    });
+
+    expect(bridge.transcriptInitialLoading).toBe(true);
+    expect(bridge.transcript).toEqual([]);
+
+    store.applyTranscriptSnapshotEvent({
+      type: "transcript_snapshot",
+      sessionPath: "/sessions/history.jsonl",
+      messages: [
+        {
+          id: "history-message",
+          role: "assistant",
+          content: "Restored history",
+        },
+      ],
+      hasOlder: false,
+      hasNewer: false,
+    });
+
+    expect(bridge.transcriptInitialLoading).toBe(false);
+    expect(bridge.transcript).toHaveLength(1);
+  });
 });
