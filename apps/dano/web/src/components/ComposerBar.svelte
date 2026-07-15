@@ -567,14 +567,13 @@
 <style>
   .composer-bar {
     flex-shrink: 0;
-    padding: 6px 24px 36px;
-    padding-bottom: max(36px, env(safe-area-inset-bottom));
+    width: min(960px, calc(100% - 48px));
+    margin: 6px auto max(36px, env(safe-area-inset-bottom));
   }
 
   .composer-inner-wrap {
     position: relative;
-    width: min(960px, 100%);
-    margin: 0 auto;
+    width: 100%;
   }
 
   .quick-actions {
@@ -1058,8 +1057,8 @@
       position: sticky;
       bottom: 0;
       z-index: 10;
-      padding: 10px 16px 12px;
-      padding-bottom: max(12px, env(safe-area-inset-bottom));
+      width: calc(100% - 32px);
+      margin: 10px auto max(12px, env(safe-area-inset-bottom));
     }
 
     .composer-inner-wrap { width: 100%; }
@@ -1070,8 +1069,8 @@
 
   @media (max-width: 640px) {
     .composer-bar {
-      padding: 8px 12px 10px;
-      padding-bottom: max(10px, env(safe-area-inset-bottom));
+      width: calc(100% - 24px);
+      margin: 8px auto max(10px, env(safe-area-inset-bottom));
     }
 
     .composer-dock { gap: 8px; padding: 10px 14px; border-radius: 24px; }
