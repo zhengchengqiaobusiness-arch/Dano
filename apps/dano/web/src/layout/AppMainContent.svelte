@@ -33,6 +33,7 @@
     transcriptStreams = [] as readonly TranscriptStream[],
     transcriptHasOlder = false,
     transcriptInitialLoading = false,
+    isEmptyConversation = false,
     transcriptPageLoading = false,
     pendingTranscriptConfigEvent = null as PendingTranscriptSessionEvent | null,
     isStreaming = false,
@@ -108,6 +109,7 @@
     transcriptStreams?: readonly TranscriptStream[];
     transcriptHasOlder?: boolean;
     transcriptInitialLoading?: boolean;
+    isEmptyConversation?: boolean;
     transcriptPageLoading?: boolean;
     pendingTranscriptConfigEvent?: PendingTranscriptSessionEvent | null;
     isStreaming?: boolean;
@@ -175,9 +177,6 @@
   } = $props();
 
   let isDebugSession = $derived(isDebugSessionPath(activeSessionPath));
-  let isEmptyConversation = $derived(
-    !transcriptInitialLoading && transcript.length === 0,
-  );
   const quickActions = getRuntimeQuickActions();
 
   export function scrollToTranscriptEntry(entryId: string): boolean {
