@@ -105,8 +105,10 @@ class ToFlowSpecTest(unittest.TestCase):
 
         page_params = {param.path: param for param in page_step.params}
         self.assertEqual(page_params["query.pageNo"].key, "pageNo")
-        self.assertEqual(page_params["query.pageNo"].category, "system_const")
-        self.assertEqual(page_params["query.pageSize"].category, "system_const")
+        self.assertEqual(page_params["query.pageNo"].category, "user_param")
+        self.assertEqual(page_params["query.pageSize"].category, "user_param")
+        self.assertFalse(page_params["query.pageNo"].required)
+        self.assertTrue(page_params["query.pageNo"].exposed_to_user)
         self.assertEqual(page_params["query.billCode"].key, "单据编号")
         self.assertEqual(page_params["query.useTime[0]"].key, "开始时间")
         self.assertEqual(page_params["query.useTime[1]"].key, "结束时间")
@@ -211,10 +213,11 @@ class ToFlowSpecTest(unittest.TestCase):
         by_path = {param.path: param for param in step.params}
 
         self.assertIn("startDate=2026-07-01", step.url)
-        self.assertEqual(by_path["query.pageNo"].category, "system_const")
+        self.assertEqual(by_path["query.pageNo"].category, "user_param")
         self.assertEqual(by_path["query.pageNo"].type, "number")
-        self.assertEqual(by_path["query.pageNo"].source_kind, "constant")
-        self.assertFalse(by_path["query.pageNo"].exposed_to_user)
+        self.assertEqual(by_path["query.pageNo"].source_kind, "user_input")
+        self.assertTrue(by_path["query.pageNo"].exposed_to_user)
+        self.assertFalse(by_path["query.pageNo"].required)
         self.assertNotIn("query.pageNo", {select.path for select in step.selects})
 
     def test_leave_query_and_submit_keep_business_filters_and_leave_enum_domain(self):
@@ -424,9 +427,11 @@ class ToFlowSpecTest(unittest.TestCase):
         )
         by_path = {p.path: p for p in step.params}
 
-        self.assertEqual(by_path["query.pageNo"].category, "system_const")
-        self.assertEqual(by_path["query.pageNo"].source_kind, "constant")
-        self.assertEqual(by_path["query.pageSize"].category, "system_const")
+        self.assertEqual(by_path["query.pageNo"].category, "user_param")
+        self.assertEqual(by_path["query.pageNo"].source_kind, "user_input")
+        self.assertEqual(by_path["query.pageSize"].category, "user_param")
+        self.assertFalse(by_path["query.pageNo"].required)
+        self.assertTrue(by_path["query.pageNo"].exposed_to_user)
         self.assertNotEqual(by_path["query.pageNo"].source_kind, "api_option")
 
     def test_no_business_writes_returns_empty_spec(self):

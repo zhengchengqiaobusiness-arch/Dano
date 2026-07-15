@@ -336,8 +336,8 @@ def _field_call_metadata(skill: SkillSpec, props: dict, sels: dict) -> dict:
             info["options_source"] = sel.get("source_url")
         if sel.get("enum_source"):
             info["enum_source"] = sel.get("enum_source")
-        if sel.get("enum_confirmed") is not None:
-            info["enum_confirmed"] = bool(sel.get("enum_confirmed"))
+        if isinstance(sel.get("enum_confirmed"), bool):
+            info["enum_confirmed"] = sel["enum_confirmed"]
         fields[name] = info
     return fields
 
@@ -422,6 +422,66 @@ def _call_protocol(capability: str, skill_id: str) -> dict:
         "arguments_keys": ["input", "arguments"],
         "confirm_key": "confirm",
         "compatibility": "payload always includes legacy name for existing Dano gateways",
+        "interaction_protocol": _ask_user_question_interaction_protocol(),
+    }
+
+
+def _ask_user_question_interaction_protocol() -> dict:
+    """Machine-readable projection of ``doc/dano-tool-call-contract.md``."""
+    return {
+        "tool": "ask_user_question",
+        "native_tool_call_required": True,
+        "plain_text_question_forbidden": True,
+        "max_calls_per_assistant_response": 1,
+        "single_field_collection": {
+            "mode": "top_level",
+            "configuration_location": "top_level",
+            "keys": [
+                "question", "options", "inputType", "dateFormat", "required",
+                "dataSource", "multiple", "default",
+            ],
+        },
+        "multi_field_collection": {
+            "mode": "questions_array",
+            "single_submit": True,
+            "field_configuration_location": "questions[]",
+            "top_level_field_configuration_forbidden": True,
+        },
+        "non_confirmation_default": {
+            "required": True,
+            "string_must_be_non_empty": True,
+            "purpose": "recommended_prefill",
+            "placeholder_forbidden": True,
+        },
+        "field_rules": {
+            "required_default": False,
+            "required_true_only_for_mandatory_answer": True,
+            "date": {
+                "inputType": "date",
+                "dateFormat_required": True,
+                "examples": ["yyyy-MM-dd", "yyyy-MM-dd HH:mm"],
+            },
+            "choices": {
+                "static": "options",
+                "remote": "dataSource",
+                "remote_input_types": ["select", "treeSelect"],
+            },
+        },
+        "confirmation": {
+            "separate_call": True,
+            "confirm": True,
+            "allowed_keys": ["question", "confirm"],
+            "forbidden_keys": ["options", "multiple", "questions"],
+        },
+        "answer_mapping": {
+            "single": "result.answer scalar -> matching input field",
+            "multiple": "result.answer object keyed by questions[].id -> matching input fields",
+            "continue_only_when_status": "answered",
+        },
+        "validation_error_behavior": "retry_silently_with_corrected_native_tool_call",
+        "cancel_behavior": "stop_current_workflow_and_do_not_retry_until_new_explicit_user_request",
+        "result_statuses": ["answered", "cancelled"],
+        "source_contract": "back/doc/dano-tool-call-contract.md",
     }
 
 
@@ -436,6 +496,7 @@ def _capability_call_protocol(skill_id: str, capability: str) -> dict:
         "tool_payload": {"name": tool_name, "capability": capability, "input": {}, "confirm": False},
         "invoke_path": f"/v1/skills/{skill_id}/capabilities/{capability}/invoke",
         "legacy_invoke_path": f"/v1/skills/{skill_id}/invoke",
+        "interaction_protocol": _ask_user_question_interaction_protocol(),
     }
 
 
@@ -445,10 +506,10 @@ def _capability_requirements(skill: SkillSpec, cap: dict, kind: str, requires_co
     verification_status = str(cap.get("verification_status") or getattr(skill, "verification_status", "") or "")
     verification_basis = str(cap.get("verification_basis") or getattr(skill, "verification_basis", "") or "")
     verify_required = (
-        bool(explicit_verify)
+        explicit_verify is True
         if explicit_verify is not None
         else (
-            bool(_flow_meta(skill).get("verify"))
+            _flow_meta(skill).get("verify") is True
             or verification_basis == "fact_check_configured"
         ) and kind not in _READ_ONLY_CAPABILITY_KINDS
     )
@@ -513,7 +574,12 @@ def _sanitize_capability_parameter_schema(schema: dict, cap: dict) -> dict:
         for name, prop in props.items():
             if not isinstance(prop, dict):
                 continue
-            is_dynamic = name in dynamic or bool(prop.get("x-options-source"))
+            if "x-options-source" in prop and not isinstance(prop.get("x-options-source"), bool):
+                # Persisted strings such as "false" are not safety booleans and
+                # must not advertise a live source to downstream callers.
+                prop.pop("x-options-source", None)
+                prop.pop("x-options-source-meta", None)
+            is_dynamic = name in dynamic or prop.get("x-options-source") is True
             if is_dynamic:
                 prop.pop("x-options", None)
                 prop.pop("x-options-snapshot", None)
@@ -540,7 +606,15 @@ def _canonical_capability_identity(cap: dict) -> tuple[str, str, str]:
     """Keep the public identifier semantic instead of preserving planner aliases."""
     raw_name = str(cap.get("name") or cap.get("capability_id") or "").strip()
     kind = str(cap.get("kind") or raw_name).strip()
-    if kind in _CAPABILITY_TITLES:
+    generic_kinds = "|".join(re.escape(value) for value in sorted(_CAPABILITY_TITLES, key=len, reverse=True))
+    generic_alias = bool(
+        not raw_name
+        or raw_name == kind
+        or raw_name in _CAPABILITY_TITLES
+        or re.fullmatch(rf"(?:{generic_kinds})(?:\d+|_?legacy)?", raw_name, re.I)
+        or re.fullmatch(r"(?:capability|ability)_?\d*", raw_name, re.I)
+    )
+    if kind in _CAPABILITY_TITLES and generic_alias:
         name = kind
     else:
         name = raw_name or kind
@@ -558,6 +632,12 @@ def _capability_manifest(skill: SkillSpec, cap: dict) -> dict:
     out["name"] = name
     out["kind"] = kind
     out["title"] = title
+    aliases = [str(value) for value in (out.get("aliases") or []) if str(value)]
+    for alias in (kind, str(cap.get("name") or ""), str(cap.get("capability_id") or "")):
+        if alias and alias != name and alias not in aliases:
+            aliases.append(alias)
+    if aliases:
+        out["aliases"] = aliases
     if cap.get("input_schema"):
         out["parameters"] = cap.get("input_schema")
     elif cap.get("inputs"):
@@ -570,7 +650,7 @@ def _capability_manifest(skill: SkillSpec, cap: dict) -> dict:
             if not key:
                 continue
             props[key] = {"type": field.get("type") or "string", "description": field.get("display_name") or key}
-            if field.get("required"):
+            if field.get("required") is True:
                 required.append(key)
         out["parameters"] = {"type": "object", "properties": props, "required": required}
     else:
@@ -604,9 +684,9 @@ def _capability_manifest(skill: SkillSpec, cap: dict) -> dict:
         out["output_schema"]["required"] = list(dict.fromkeys([*existing_required, *mapped_required]))
     # Capability kind is authoritative. A stale skill-level confirmation flag
     # must not turn a read-only capability into a write operation on export.
-    if bool(cap.get("readonly")) or bool(cap.get("read_only")) or kind in _READ_ONLY_CAPABILITY_KINDS:
+    if cap.get("readonly") is True or cap.get("read_only") is True or kind in _READ_ONLY_CAPABILITY_KINDS:
         out["requires_confirmation"] = False
-    elif bool(cap.get("requires_confirmation")) or bool(cap.get("requires_human_confirm")):
+    elif cap.get("requires_confirmation") is True or cap.get("requires_human_confirm") is True:
         out["requires_confirmation"] = True
     else:
         out["requires_confirmation"] = RiskLevel(skill.risk_level) in _CONFIRM_FROM

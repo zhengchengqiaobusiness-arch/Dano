@@ -603,8 +603,158 @@ def test_legacy_query_url_materializes_capability_inputs_from_step_params():
 
     assert set(params) == {"query.keyword", "query.pageNo", "query.pageSize"}
     assert params["query.keyword"].category == "user_param"
-    assert params["query.pageNo"].category == "system_const"
-    assert set(cap.input_schema["properties"]) == {"keyword"}
+    assert params["query.pageNo"].category == "user_param"
+    assert params["query.pageNo"].required is False
+    assert set(cap.input_schema["properties"]) == {"keyword", "pageNo", "pageSize"}
+    assert cap.input_schema["properties"]["pageNo"]["default"] == 1
+    assert cap.input_schema["properties"]["pageNo"]["x-dano-apply-default"] is True
+    assert cap.input_schema["properties"]["pageSize"]["default"] == 20
+    assert set(cap.input_schema["required"]) == set()
+
+    # The recorded pagination values are defaults, not constants: explicit
+    # caller values must win in the executable query.
+    from dano.execution.page.request_capture import substitute
+    spec.capabilities = [cap]
+    api_request, errors = flow_spec_to_api_request(spec)
+    assert errors == []
+    rendered = substitute(
+        api_request["query_template"],
+        {"pageNo": 4, "pageSize": 50},
+        api_request["sample_inputs"],
+    )
+    assert rendered["pageNo"] == 4
+    assert rendered["pageSize"] == 50
+
+
+def test_query_required_and_text_wire_type_follow_observed_controls_not_sample_shape():
+    params = flow_spec_module._params_from_get_query(
+        {
+            "method": "GET",
+            "url": (
+                "https://oa.example.test/hotel/page?hotelName=1&street=1"
+                "&pageNo=1&pageSize=10"
+            ),
+        },
+        field_evidence=[
+            {
+                "label": "酒店名称",
+                "field_aliases": ["hotelName"],
+                "control_kind": "text",
+            },
+            {
+                "label": "所在街道",
+                "field_aliases": ["street"],
+                "control_kind": "text",
+            },
+        ],
+        required_labels={"酒店名称"},
+    )
+    by_path = {param["path"]: param for param in params}
+
+    assert by_path["query.hotelName"]["required"] is True
+    assert by_path["query.street"]["required"] is False
+    assert by_path["query.hotelName"]["type"] == "string"
+    assert by_path["query.hotelName"]["wire_type"] == "string"
+    assert by_path["query.pageNo"]["required"] is False
+
+
+def test_schema_defaults_are_type_safe_and_only_pagination_is_silently_applicable():
+    schema = flow_spec_module._capability_input_schema([
+        ParamField(
+            path="query.pageNo", key="pageNo", value="1", type="integer",
+            category="user_param", source_kind="user_input", required=False,
+            exposed_to_user=True,
+        ),
+        ParamField(
+            path="id", key="id", value="H-100", type="string",
+            category="user_param", source_kind="user_input", required=True,
+            exposed_to_user=True,
+        ),
+        ParamField(
+            path="confirmed", key="confirmed", value="false", type="boolean",
+            category="user_param", source_kind="user_input", required=False,
+            exposed_to_user=True,
+        ),
+        ParamField(
+            path="roomType", key="roomType", value="2", type="enum",
+            category="user_param", source_kind="page_enum", required=False,
+            exposed_to_user=True, enum_options=["标准间", "大床房"],
+            enum_value_map={"标准间": 1, "大床房": 2},
+        ),
+        ParamField(
+            path="unknownCode", key="unknownCode", value="9", type="enum",
+            category="user_param", source_kind="user_input", required=False,
+            exposed_to_user=True,
+        ),
+    ])
+    props = schema["properties"]
+
+    assert props["pageNo"]["default"] == 1
+    assert props["pageNo"]["x-dano-apply-default"] is True
+    assert props["id"]["default"] == "H-100"
+    assert "x-dano-apply-default" not in props["id"]
+    assert props["confirmed"]["default"] is False
+    assert props["roomType"]["default"] == "大床房"
+    assert "default" not in props["unknownCode"]
+
+
+def test_richer_observed_query_response_defines_record_item_schema_and_id():
+    empty_response = {"code": 0, "data": {"list": [], "total": 0}}
+    populated_response = {
+        "code": 0,
+        "data": {"list": [{"id": "H-1", "hotelName": "海景酒店"}], "total": 1},
+    }
+    query = FlowStep(
+        step_id="query", method="GET",
+        url="/hotel/page?pageNo=1&pageSize=10", path="/hotel/page",
+        source_meta={"request_id": "query-empty", "role": "business_get"},
+        response_json=empty_response,
+    )
+    spec = FlowSpec(
+        steps=[query],
+        request_facts=flow_spec_module.RequestFacts(requests=[
+            flow_spec_module.RequestFact(
+                request_id="query-empty", method="GET", path="/hotel/page",
+                url="/hotel/page?pageNo=1&pageSize=10", response_json=empty_response,
+            ),
+            flow_spec_module.RequestFact(
+                request_id="query-populated", method="GET", path="/hotel/page",
+                url="/hotel/page?pageNo=1&pageSize=10&hotelName=%E6%B5%B7%E6%99%AF",
+                response_json=populated_response,
+            ),
+        ]),
+    )
+
+    out = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
+    records = out.capabilities[0].output_schema["properties"]["records"]
+
+    assert records["items"]["properties"]["id"]["type"] == "string"
+    assert records["items"]["properties"]["hotelName"]["type"] == "string"
+    assert out.steps[0].source_meta["response_shape_enriched"] is True
+
+
+def test_enum_binding_without_real_label_value_contract_is_removed_not_guessed():
+    param = ParamField(
+        path="query.processStatus", key="流程状态", value="1", type="enum",
+        wire_type="string", category="user_param", source_kind="api_option",
+        exposed_to_user=True,
+    )
+    step = FlowStep(
+        step_id="query", method="GET", path="/hotel/page",
+        params=[param],
+        selects=[SelectBinding(
+            param="流程状态", path="query.processStatus", enum_source="api",
+            source_url="/dict/process-status",
+        )],
+    )
+
+    sync_flow_spec_models(FlowSpec(steps=[step]))
+
+    assert step.selects == []
+    assert param.type == "string"
+    assert param.source_kind == "user_input"
+    assert param.enum_options is None
+    assert param.enum_value_map is None
 
 
 def test_query_output_fields_use_mapped_response_schema_types():

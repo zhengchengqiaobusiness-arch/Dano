@@ -513,14 +513,19 @@ def _enum_records_from_items(items, label_key: str | None, value_key: str | None
 
     label 是用户/前端选择的真实业务枚举；value 是请求实际提交值。
     """
-    if not label_key:
+    if not label_key or not value_key:
         return []
     out: list[dict] = []
     seen: set[str] = set()
     for it in items or []:
         if not isinstance(it, dict):
             continue
-        rec = _enum_option_record(it.get(label_key), it.get(value_key) if value_key and value_key in it else None)
+        # An API enum is executable only when the response explicitly carries
+        # both sides of the mapping.  Missing values are not evidence that the
+        # displayed label is also the wire value.
+        if value_key not in it or it.get(value_key) is None:
+            continue
+        rec = _enum_option_record(it.get(label_key), it.get(value_key))
         if not rec or rec["label"] in seen:
             continue
         seen.add(rec["label"])
@@ -702,6 +707,33 @@ def _attach_enum_binding(entry: dict, records: list[dict], *, source: str, confi
     return entry
 
 
+def _records_have_complete_mapping(records: list[dict], *, expected_count: int | None = None) -> bool:
+    """Whether every observed option has an explicit, unambiguous wire value."""
+    if not records:
+        return False
+    if expected_count is not None and len(records) != expected_count:
+        return False
+    labels = [str(record.get("label") or "").strip() for record in records]
+    return bool(
+        all(labels)
+        and len(set(labels)) == len(labels)
+        and all("value" in record and record.get("value") is not None for record in records)
+    )
+
+
+def _field_has_structural_select_identity(field: dict | None) -> bool:
+    """Only a recorded select control with an exact request alias owns an API enum."""
+    if not field or str(field.get("control_kind") or "").lower() != "select":
+        return False
+    path = str(field.get("path") or "")
+    leaf = path.split(".")[-1].split("[")[0]
+    return any(
+        _identifier_matches_field(alias, path) or _identifier_matches_field(alias, leaf)
+        for alias in (field.get("field_aliases") or [])
+        if str(alias or "").strip()
+    )
+
+
 def _is_scalar(v) -> bool:
     return isinstance(v, (str, int, float)) and not isinstance(v, bool)
 
@@ -761,14 +793,13 @@ def _aggregate_category(items: list[dict], value_key: str, label_key: str) -> st
     return best[1] if best else None
 
 
-def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool, *,
-                  path_is_assignee: bool = False,
-                  require_confirmed: bool = False):
+def _match_select(sv: str, items: list[dict], sample_vals: set):
     """判提交值 sv 对应候选列表里哪种选项 → (mode, value_key, label_key, label, confirmed, item) 或 None。
     mode='name':字段存的是**显示名**(配对 id 字段另存,如 yyxtmc=名 / yyxtid=id);
     mode='code':字段存的是**码/ID**(单字段,如 type=2 / approverId=12,agent 传名运行期换码)。通用,不挑系统。
     返回里带命中的**列表项 item**:聚合字典需读它的分类键(dictType…)把全量收窄成该字段的真实选项。
-    path_is_assignee: 路径在审批人/选人容器下时,豁免「亲手填的值当码」的拒判。"""
+    Only an exact recorded label for this structurally identified select may
+    confirm ownership.  A matching code/ID is merely a value collision."""
     name_cand = code_cand = None
     for it in items:
         id_vk = next((k for k, v in it.items() if _is_scalar(v) and _is_idlike(k)), None)
@@ -795,125 +826,7 @@ def _match_select(sv: str, items: list[dict], sample_vals: set, small: bool, *,
         return None
     cands.sort(key=lambda c: (c[4], c[0] == "name"), reverse=True)   # 确认命中优先;其次 name(更贴近人选)
     best = cands[0]
-    mode, _vk, _lk, _label, confirmed, _item = best
-    # A matching wire value alone does not prove ownership. OA forms routinely
-    # submit many 0/1 values while unrelated small dictionaries are present.
-    # Only this exact control's recorded visible label may create an automatic
-    # API-option relationship; ambiguous sources stay ordinary input until the
-    # operator binds one explicitly.
-    if confirmed:
-        return best
-    if require_confirmed:
-        return None
-    if (
-        mode == "code"
-        and not path_is_assignee
-        and _looks_people_or_org_candidate(_lk, _label)
-    ):
-        return None
-    is_small_aligned = bool(small) and _vk and _lk \
-                       and _enum_like_key(_vk) and _enum_like_key(_lk) \
-                       and not (_looks_people_or_org_key(_lk) and _looks_people_or_org_label(_label)) \
-                       and any(str(it.get(_vk)) == sv for it in items if isinstance(it, dict))
-    if not (len(sv) >= 2 or small) and not is_small_aligned:
-        return None
-    if mode == "code" and sv in sample_vals and not path_is_assignee and not is_small_aligned:
-        return None
-    if mode == "name" and not small:
-        return None
-    return best
-
-
-# 系统化:value/label 字段名形如「枚举」(dictValue/dictLabel/value/code/dict_type/dict_type_id)。
-# 关键:**不**包含通用 `id`、`name`——这两太常见,在非枚举列表(用户/部门)里也出现,
-# 容易错认成 enum。不包 `code` 也容易撞通用字段名但**保留**(字典 status/code 是常见枚举)。
-# 字段形态用「判定字段名」做数据形态过滤,不绑具体业务。
-_ENUM_LIKE_VALUE_KEYS = ("value", "valuecode", "dictvalue", "dict_value",
-                        "dicttype", "dict_type",
-                        "type", "types", "kind", "category", "status",
-                        "state", "level", "code", "id",
-                        "no", "num", "number")
-# 系统化:`name` 也常作 enum label(若依/OA 系统常见 `name`/`labelName`/`text`/`title` 当 label),
-# 配合 `_looks_people_or_org_key`/`_looks_people_or_org_label` 兜底排除人/部门列表。
-_ENUM_LIKE_LABEL_KEYS = ("label", "labelname", "dictlabel", "dict_label",
-                         "text", "title", "caption", "typename",
-                         "name", "displayname", "showname", "description")
-
-
-def _enum_like_key(k: str) -> bool:
-    """候选里 value 或 label 字段名是否形如「枚举」(dictValue/dictLabel/value/code)—
-    不绑具体业务;通用字典响应里前端的约定俗成。
-    刻意**不**包含 `id`/`name`/`userId`/`deptId`——它们太常见,在无关 user/org/tenant 列表里也出现,
-    易把无关 user/dept 列表误当 enum 命中(系统化不误伤的保证)。
-    """
-    if not k:
-        return False
-    kl = k.lower()
-    if any(h in kl for h in _ENUM_LIKE_VALUE_KEYS):
-        return True
-    if any(h in kl for h in _ENUM_LIKE_LABEL_KEYS):
-        return True
-    return False
-
-
-# 系统化:人员/部门/组织/职位 字段名 —— 当作人员/实体列表,不当 enum。
-# 通用:对中英文 OA 通用,只要字段名命中这些形态词就不当 enum label。
-_PEOPLE_ORG_LABEL_KEYS = ("name", "username", "realname", "fullname", "nickname",
-                          "deptname", "orgname", "unitname", "companyname",
-                          "tenantname", "teamname", "rolename", "position",
-                          "title_label", "displayname", "showname")
-
-
-def _looks_people_or_org_key(k: str) -> bool:
-    """候选 label 字段名是否像「人/组织/职位」——不当 enum label 形态(避免 user/dept 列表误命中)。"""
-    if not k:
-        return False
-    kl = k.lower().replace("_", "")
-    return any(h.replace("_", "") in kl for h in _PEOPLE_ORG_LABEL_KEYS)
-
-
-def _looks_people_or_org_candidate(key: str, label: str) -> bool:
-    key_norm = str(key or "").lower().replace("_", "")
-    strong_key = any(token in key_norm for token in (
-        "username", "realname", "fullname", "nickname", "deptname", "orgname",
-        "unitname", "companyname", "tenantname", "teamname", "rolename", "position",
-    ))
-    label_norm = str(label or "").lower()
-    strong_label = any(token in label_norm for token in (
-        "部门", "组织", "公司", "单位", "团队", "岗位", "角色", "人员", "员工",
-        "department", "organization", "company", "tenant", "team", "role", "user",
-    ))
-    return strong_key or strong_label
-
-
-def _looks_people_or_org_label(label: str) -> bool:
-    """label 值看着像「人/部门/组织/职位」——不当 enum label 形态(避免 user/dept/org 列表误命中)。
-    启发式:
-    - 含「状态/类型/性别/等级/审批/意见/启用/停用」等枚举语义词 → 不是人/组织
-    - 长度 3+ 且无数字 + 不是状态/类型语义 → 多半是描述(人名/部门/组织)3-8 字
-    通用,不绑具体业务系统,纯形态判定。
-    """
-    if not label:
-        return False
-    s = str(label).strip()
-    if not s:
-        return False
-    if len(s) > 30:
-        return False  # 长文本一定不是 enum label
-    if s[0].isdigit() or s.replace(" ", "").replace("-", "").replace("_", "").isdigit():
-        return False
-    # 含枚举语义词 — 直接不当 enum
-    enum_words = ("状态", "类型", "类别", "等级", "性别", "方式", "审批",
-                    "意见", "结果", "级别", "方向", "模式", "办法", "原因",
-                    "enabled", "disabled", "active", "inactive", "pending",
-                    "approved", "rejected", "open", "closed", "yes", "no")
-    s_norm = s.lower().replace(" ", "")
-    if any(w in s_norm for w in enum_words):
-        return False
-    # 长度 ≥ 3 且无数字特征 → 多半是描述性词(人名/部门/组织)
-    if len(s) >= 3 and not any(c in s for c in "0123456789"):
-        return True
-    return False
+    return best if best[4] else None
 
 
 def _sample_values_for_leaf(path: str, sv: str, samples: dict | None, field: dict | None = None) -> set[str]:
@@ -928,7 +841,7 @@ def _sample_values_for_leaf(path: str, sv: str, samples: dict | None, field: dic
         if v in (None, ""):
             continue
         sk = str(k)
-        if sk in keys or any(_name_match(sk, kk) for kk in keys if kk):
+        if any(_identifier_matches_field(sk, kk) for kk in keys if kk):
             out.add(str(v))
     return out
 

@@ -833,12 +833,12 @@ def _param_source_guess(
 
     if _looks_pagination_field(key, path):
         return {
-            "category": "system_const",
-            "source_kind": "constant",
+            "category": "user_param",
+            "source_kind": "user_input",
             "source": {"kind": "pagination", "path": path},
             "editable": True,
-            "exposed_to_user": False,
-            "reason": "分页参数由 Skill 内部按默认分页提交，不作为普通业务字段暴露",
+            "exposed_to_user": True,
+            "reason": "分页参数具有录制默认值；调用方省略时安全使用默认值，也可以显式覆盖",
             "need_human_confirm": False,
         }
 
@@ -1268,7 +1268,9 @@ def _build_step_from_capture(
     if method == "GET" or body is None:
         list_paths: list[str] = []
         iden_raw: list[dict] = []
-        flat_fields = _params_from_get_query(req, grounded_samples, page_enum_options, field_evidence)
+        flat_fields = _params_from_get_query(
+            req, grounded_samples, page_enum_options, field_evidence, required_labels,
+        )
         # select/选人:在 query 参数名上做下拉检测,与 POST body 同套算法
         # Query parameters on an option-source request configure that source;
         # they are not themselves options selected from its own response.  In
@@ -1416,6 +1418,16 @@ def _build_step_from_capture(
                 "source": "recorder_dom",
                 "field_aliases": list(f.get("field_aliases") or []),
                 "control_kind": str(f.get("control_kind") or "unknown"),
+                "request_path": path,
+            })
+        if f.get("required"):
+            # Persist the page marker as evidence instead of only persisting the
+            # resulting boolean. This lets later re-analysis distinguish an
+            # actually-required search control from a filter that merely had a
+            # value in the recorded URL.
+            evidence.append({
+                "kind": "page_required",
+                "source": "recorder_dom",
                 "request_path": path,
             })
         if enum_description and source_guess["source_kind"] in _OPTION_SOURCE_KINDS:
@@ -1577,6 +1589,7 @@ def _params_from_get_query(
     samples: dict | None = None,
     page_enum_options: dict | None = None,
     field_evidence: list[dict] | None = None,
+    required_labels: set | None = None,
 ) -> list[dict]:
     """GET 请求：从 URL query string 提参，并保持 wire key 与显示名分离。
 
@@ -1589,9 +1602,29 @@ def _params_from_get_query(
     qs = _request_query_values(req)
     if not qs:
         return []
+    required_labels = required_labels or set()
 
     def norm_identifier(value: Any) -> str:
         return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(value or "")).casefold()
+
+    required_norms = {
+        norm_identifier(value)
+        for value in required_labels
+        if norm_identifier(value)
+    }
+
+    def has_required_evidence(key: str, label: str, control: dict[str, Any]) -> bool:
+        """A search filter is mandatory only when the page said so.
+
+        A value occurring in the captured URL proves that the filter was used;
+        it does not prove that callers must always provide it.  Structural
+        aliases are accepted because frameworks often put the required marker
+        on a control whose visible label was normalized separately.
+        """
+        if _looks_pagination_field(key, f"query.{key}") or not required_norms:
+            return False
+        names = {key, label, f"query.{key}", *(control.get("field_aliases") or [])}
+        return any(norm_identifier(name) in required_norms for name in names if norm_identifier(name))
 
     raw_keys = list(qs)
     labels: dict[str, str] = {key: key for key in raw_keys}
@@ -1696,6 +1729,12 @@ def _params_from_get_query(
             # such as billCode/useInfo remains text unless a number control says
             # otherwise.
             inferred_type = "string"
+        wire_type = _query_param_type(k, v)
+        if control_kind in {"text", "textarea"}:
+            # URL query values are text emitted by a real text control.  A
+            # numeric-looking sample such as hotelName=1 is not a numeric wire
+            # contract merely because this recording used digits.
+            wire_type = "string"
         out.append({
             "path": f"query.{k}",
             "key": k,
@@ -1704,8 +1743,8 @@ def _params_from_get_query(
             # A real text control remains text even when this particular sample
             # contains only digits (for example useInfo="1231").
             "type": inferred_type,
-            "wire_type": _query_param_type(k, v),
-            "required": True,
+            "wire_type": wire_type,
+            "required": has_required_evidence(k, label, control),
             "confidence": 0.9 if label != k else 0.75,
             "confidence_tier": "grounded" if label != k else "auto",
             "name_source": "sample" if label != k else "auto",
@@ -3112,9 +3151,64 @@ def _upgrade_materialized_query_facts(spec: FlowSpec) -> None:
         }
 
 
+def _response_shape_evidence_score(value: Any, *, depth: int = 0) -> int:
+    """Score observed response structure, not business values.
+
+    Repeated calls to one list endpoint often capture an empty initial page and
+    a populated page after the operator searches.  Both are real facts, but the
+    populated response is the only one that can describe ``records.items``.
+    """
+    if depth > 8:
+        return 0
+    if isinstance(value, dict):
+        return len(value) + sum(
+            _response_shape_evidence_score(item, depth=depth + 1)
+            for item in value.values()
+        )
+    if isinstance(value, list):
+        if not value:
+            return 0
+        samples = value[:3]
+        return 5 + max(_response_shape_evidence_score(item, depth=depth + 1) for item in samples)
+    return 1 if value is not None else 0
+
+
+def _enrich_materialized_response_shapes(spec: FlowSpec) -> None:
+    """Use a richer response from the same observed endpoint for schema only.
+
+    Request URL/query ownership stays unchanged.  No field is synthesized and
+    no response from a different method/path may participate.
+    """
+    for step in spec.steps:
+        method = (step.method or "GET").upper()
+        if method not in {"GET", "HEAD"}:
+            continue
+        path = _request_path({"url": step.path or step.url})
+        current_score = _response_shape_evidence_score(step.response_json)
+        candidates = [
+            fact for fact in (spec.request_facts.requests or [])
+            if (fact.method or "GET").upper() == method
+            and _request_path({"url": fact.path or fact.url}) == path
+            and fact.response_json is not None
+        ]
+        if not candidates:
+            continue
+        richest = max(candidates, key=lambda fact: _response_shape_evidence_score(fact.response_json))
+        richest_score = _response_shape_evidence_score(richest.response_json)
+        if richest_score <= current_score:
+            continue
+        step.response_json = copy.deepcopy(richest.response_json)
+        step.source_meta = {
+            **(step.source_meta or {}),
+            "response_shape_request_id": richest.request_id,
+            "response_shape_enriched": True,
+        }
+
+
 def sync_flow_spec_models(spec: FlowSpec, *, prefer_request_facts: bool = True) -> FlowSpec:
     ensure_request_facts(spec, prefer="request_facts" if prefer_request_facts else "meta")
     _upgrade_materialized_query_facts(spec)
+    _enrich_materialized_response_shapes(spec)
     _ground_saved_page_enums(spec)
     # FlowStep 已经是可编辑/可编排接口的物化事实；usage 不能等到能力绑定后才更新，
     # 否则初次分析会把已进入字段页的查询接口仍标成 captured。
@@ -3227,6 +3321,9 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
             }
             for item in (param.evidence or [])
         ):
+            # Keep the binding as operator-owned evidence, but never project it
+            # back over the edited field contract.
+            grounded_bindings.append(binding)
             continue
 
         existing_binding = next((
@@ -3294,6 +3391,34 @@ def _param_has_manual_contract(param: ParamField) -> bool:
     )
 
 
+def _param_field_manually_edited(param: ParamField, field: str) -> bool:
+    return any(
+        isinstance(item, dict)
+        and item.get("source") == "manual_edit"
+        and item.get("field") == field
+        for item in (param.evidence or [])
+    )
+
+
+def _param_has_page_required_evidence(param: ParamField) -> bool:
+    """Return true only for a captured page-required marker.
+
+    A populated query string, planner-required flag, field name, or sample value
+    is not proof that a search filter is mandatory.
+    """
+    return any(
+        isinstance(item, dict)
+        and (
+            item.get("kind") == "page_required"
+            or (
+                item.get("source") in {"recorder_dom", "page", "page_snapshot"}
+                and item.get("required") is True
+            )
+        )
+        for item in (param.evidence or [])
+    )
+
+
 def _semantic_recorded_type(param: ParamField) -> str:
     text = " ".join(str(value or "") for value in (param.path, param.key, param.label)).lower()
     value = str(param.value or param.default_value or "").strip()
@@ -3321,18 +3446,33 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
         if _param_has_manual_contract(param):
             continue
         normalized_path = _strip_body_prefix(param.path or "")
+        if (
+            (step.method or "GET").upper() in {"GET", "HEAD"}
+            and str(param.path or "").startswith("query.")
+            and not _param_field_manually_edited(param, "required")
+        ):
+            # Legacy recordings marked every populated query filter required.
+            # Preserve mandatory status only when the recorder captured an
+            # actual page-required marker.
+            param.required = _param_has_page_required_evidence(param)
+            if param.type == "string" and param.source_kind == "user_input":
+                # HTTP query serialization is textual. A sample such as
+                # hotelName=1 must not turn a text business field into number.
+                param.wire_type = "string"
         if _looks_pagination_field(param.key, param.path):
             param.type = _infer_type_from_value(param.value)
-            param.category = "system_const"
-            param.source_kind = "constant"
+            param.wire_type = param.type
+            param.required = False
+            param.category = "user_param"
+            param.source_kind = "user_input"
             param.source = {"kind": "pagination", "path": param.path}
-            param.exposed_to_user = False
+            param.exposed_to_user = True
             param.editable = True
             param.need_human_confirm = False
             param.enum_options = None
             param.enum_value_map = None
             param.description = _strip_option_descriptions(param.description) or None
-            param.reason = "分页参数由 Skill 内部按默认分页提交，不作为普通业务字段暴露"
+            param.reason = "分页参数具有录制默认值；调用方省略时安全使用默认值，也可以显式覆盖"
             continue
         if param.source_kind == "api_option":
             # A live candidate source remains valid even when the captured
@@ -3444,6 +3584,7 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
         param.enum_value_map = None
         param.description = _strip_option_descriptions(param.description) or None
         param.reason = _strip_option_descriptions(param.reason)
+    grounded_bindings: list[SelectBinding] = []
     for binding in step.selects or []:
         _hydrate_select_source_contract(spec, binding)
         # Paired controls commonly have both ``name`` and ``id`` leaves.  The
@@ -3464,7 +3605,7 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
                 item for item in (step.params or [])
                 if binding.id_path and _strip_body_prefix(item.path) == _strip_body_prefix(binding.id_path)
             ), None)
-        if param is None or not (binding.source_url or _select_has_executable_options(binding)):
+        if param is None:
             continue
         # 人工修改过数据契约后，SelectBinding 只能作为历史证据，不能在每次
         # sync 时把类型/分类/来源自动改回录制推断值。
@@ -3478,7 +3619,63 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
         ):
             continue
         page_contract = _page_enum_contract_for_param(spec, step, param, binding)
-        source_kind = "page_enum" if page_contract else ("api_option" if binding.source_url else "page_enum")
+        source_path = _request_path({"url": binding.source_url}) if binding.source_url else ""
+        captured_source = any(
+            fact.response_json is not None
+            and (fact.method or "GET").upper() in {"GET", "HEAD"}
+            and _request_path({"url": fact.path or fact.url}) == source_path
+            for fact in (spec.request_facts.requests or [])
+        ) if source_path else False
+        api_contract = bool(
+            binding.source_url
+            and binding.value_key
+            and binding.label_key
+            and (captured_source or binding.option_map or binding.options)
+            and str(binding.enum_source or "api") == "api"
+        )
+        static_contract = bool(
+            str(binding.enum_source or "") == "script_static"
+            and (binding.option_map or binding.options)
+        )
+        dom_contract = bool(
+            page_contract
+            or (
+                str(binding.enum_source or "") == "dom"
+                and (binding.option_map or binding.options)
+            )
+        )
+        manual_contract = bool(
+            str(binding.enum_source or "") == "manual"
+            and (binding.option_map or binding.options)
+        )
+        if not (api_contract or static_contract or dom_contract or manual_contract):
+            # A field name, a numeric sample, or a URL without a captured
+            # label/value contract is not enum evidence.  Preserve the field as
+            # ordinary input and remove the speculative binding from the
+            # executable view below.
+            if not _param_has_manual_contract(param):
+                param.type = param.wire_type or _infer_type_from_value(param.value)
+                param.enum_options = None
+                param.enum_value_map = None
+                if param.category == "user_param":
+                    param.source_kind = "user_input"
+                    param.source = {"kind": "sample", "path": param.path}
+                    param.exposed_to_user = True
+                    param.editable = True
+                param.need_human_confirm = False
+                param.description = _strip_option_descriptions(param.description) or None
+                param.reason = _strip_option_descriptions(param.reason)
+            continue
+        source_kind = (
+            # A captured option endpoint is the stronger and renewable source.
+            # Its DOM snapshot remains evidence/default material, but must not
+            # hide the live source from the exported contract.
+            "api_option" if api_contract
+            else "page_enum" if dom_contract
+            else "manual_enum" if manual_contract
+            else "static_enum"
+        )
+        grounded_bindings.append(binding)
         options = list(page_contract[0]) if page_contract else _enum_options_for_param(binding)
         option_map = dict(page_contract[1]) if page_contract else (_enum_value_map_for_param(binding) or {})
         if page_contract:
@@ -3517,7 +3714,12 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
             "value_key": binding.value_key,
             "label_key": binding.label_key,
             "id_path": binding.id_path or binding.path or param.path,
-            "enum_source": "dom" if source_kind == "page_enum" else (binding.enum_source or "api"),
+            "enum_source": (
+                "dom" if source_kind == "page_enum"
+                else "script_static" if source_kind == "static_enum"
+                else "manual" if source_kind == "manual_enum"
+                else "api"
+            ),
             "enum_confirmed": (
                 len(option_map) == len(options or [])
                 if page_contract
@@ -3539,6 +3741,7 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
         option_description = _enum_options_description(source_kind, param.enum_options, param.enum_value_map)
         param.description = _upsert_option_description(param.description, option_description)
         param.reason = _upsert_option_description(param.reason or source_reason, option_description)
+    step.selects = grounded_bindings
 
 
 def _strip_body_prefix(path: str) -> str:
@@ -4551,6 +4754,100 @@ def _param_requires_caller_input(param: ParamField) -> bool:
     return bool(param.required and _param_exposed_to_caller(param))
 
 
+_NO_SCHEMA_DEFAULT = object()
+
+
+def _schema_default_for_param(param: ParamField) -> Any:
+    """Return the recorded, type-correct prompt default without inventing one.
+
+    Defaults on normal business fields are question-card prefills.  Pagination
+    is marked separately as safe to apply when omitted.  Enum request samples
+    are wire values, so expose the matching human label when the evidence map
+    proves one instead of leaking an internal code as the default.
+    """
+    value = param.default_value
+    if value is None:
+        value = param.value
+    if value in (None, ""):
+        return _NO_SCHEMA_DEFAULT
+
+    if param.type in {"enum", "list-enum"}:
+        value_map = dict(param.enum_value_map or _enum_option_map_from_options(param.enum_options))
+        if param.type == "enum":
+            label = next(
+                (str(name) for name, wire in value_map.items() if str(wire) == str(value)),
+                None,
+            )
+            if label:
+                return label
+            option_labels = [
+                str(pair[0])
+                for item in (param.enum_options or [])
+                if (pair := _enum_label_value(item)) is not None
+            ]
+            if str(value) in option_labels:
+                return str(value)
+            # The recording contains an internal code but no evidence-backed
+            # label for it.  Do not prefill a user-facing question with that
+            # code and do not guess a label by option order.
+            return _NO_SCHEMA_DEFAULT
+        elif isinstance(value, list):
+            reverse = {str(wire): str(name) for name, wire in value_map.items()}
+            if all(str(item) in reverse for item in value):
+                return [reverse[str(item)] for item in value]
+            return _NO_SCHEMA_DEFAULT
+        return _NO_SCHEMA_DEFAULT
+
+    if param.type in {"number", "integer"}:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value) if param.type == "integer" else value
+        text = str(value).strip()
+        try:
+            if param.type == "integer":
+                return int(text) if re.fullmatch(r"-?\d+", text) else _NO_SCHEMA_DEFAULT
+            return int(text) if re.fullmatch(r"-?\d+", text) else float(text)
+        except (TypeError, ValueError):
+            return _NO_SCHEMA_DEFAULT
+    if param.type == "boolean":
+        if isinstance(value, bool):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n"}:
+            return False
+        return _NO_SCHEMA_DEFAULT
+    if param.type in {"date", "datetime"}:
+        text = str(value).strip()
+        date_pattern = r"\d{4}-\d{2}-\d{2}"
+        datetime_pattern = r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?"
+        if param.type == "date" and re.fullmatch(date_pattern, text):
+            return text
+        if param.type == "datetime" and re.fullmatch(datetime_pattern, text):
+            return text
+        if re.fullmatch(r"\d{10}|\d{13}", text):
+            seconds = int(text) / (1000 if len(text) == 13 else 1)
+            observed = datetime.fromtimestamp(seconds, tz=timezone.utc)
+            return observed.strftime("%Y-%m-%d" if param.type == "date" else "%Y-%m-%d %H:%M:%S")
+        return _NO_SCHEMA_DEFAULT
+    if param.type in {"array", "list-enum"} and not isinstance(value, list):
+        return _NO_SCHEMA_DEFAULT
+    if param.type == "object" and not isinstance(value, dict):
+        return _NO_SCHEMA_DEFAULT
+    return value if not isinstance(value, str) else value.strip()
+
+
+def _apply_param_schema_default(prop: dict[str, Any], param: ParamField) -> None:
+    default = _schema_default_for_param(param)
+    if default is _NO_SCHEMA_DEFAULT:
+        return
+    prop["default"] = default
+    # Only pagination is safe for the invocation layer to apply silently.
+    # Other defaults exist for ask_user_question prefill and user review.
+    if _looks_pagination_field(param.key, param.path):
+        prop["x-dano-apply-default"] = True
+
+
 def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
     props: dict[str, Any] = {}
     required: list[str] = []
@@ -4586,6 +4883,7 @@ def _capability_input_schema(params: list[ParamField]) -> dict[str, Any]:
             props[key]["label"] = p.label
         if p.description or p.reason:
             props[key]["description"] = p.description or p.reason
+        _apply_param_schema_default(props[key], p)
         enum_input = p.type in {"enum", "list-enum"}
         dynamic_options = enum_input and p.source_kind == "api_option"
         enum_confirmed = (p.source or {}).get("enum_confirmed")
@@ -5118,13 +5416,22 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
                         mapping_kind == "final_response"
                         and response_path in {"", "response", "$", "."}
                     )
-                    fallback_props[name] = _schema_for_param_type(
-                        "object" if is_full_response else (
+                    if is_full_response:
+                        # No captured response means its JSON type is unknown.
+                        # Declaring ``object`` with no properties fabricates a
+                        # contract and made callers assume fields that were never
+                        # observed. Keep a valid unconstrained JSON Schema with
+                        # explicit provenance until a real response is recorded.
+                        fallback_props[name] = {
+                            "description": "接口原始响应；录制未捕获可推导的响应结构",
+                            "x-dano-untyped-response": True,
+                        }
+                    else:
+                        fallback_props[name] = _schema_for_param_type(
                             field.type if field is not None else (
-                            "object" if name in {"response", "raw", "detail"} else "string"
+                                "object" if name in {"response", "raw", "detail"} else "string"
                             )
                         )
-                    )
                 if fallback_props:
                     cap.output_schema = reconcile_schema({
                         "type": "object",
@@ -5386,6 +5693,7 @@ def _json_schema_for_params(params: list[ParamField]) -> dict[str, Any]:
         typ = p.type or "string"
         schema_type = {
             "number": "number",
+            "integer": "integer",
             "boolean": "boolean",
             "array": "array",
             "object": "object",
@@ -5402,6 +5710,7 @@ def _json_schema_for_params(params: list[ParamField]) -> dict[str, Any]:
         }
         if p.description:
             prop["description"] = p.description
+        _apply_param_schema_default(prop, p)
         if p.type in {"enum", "list-enum"} and p.enum_options:
             labels = []
             for opt in p.enum_options:
@@ -11801,6 +12110,7 @@ def _append_query_params_to_step(step: FlowStep, url: str) -> None:
             label=key,
             value=str(value),
             type=_param_type_from_value(value),
+            wire_type=_param_type_from_value(value),
             required=False,
             category=source_guess["category"],
             source_kind=source_guess["source_kind"],
@@ -11808,8 +12118,11 @@ def _append_query_params_to_step(step: FlowStep, url: str) -> None:
             exposed_to_user=bool(source_guess["exposed_to_user"]),
             editable=bool(source_guess["editable"]),
             need_human_confirm=bool(source_guess["need_human_confirm"]),
+            default_value=value,
             reason=source_guess["reason"],
         ))
+        if value not in (None, ""):
+            step.sample_inputs.setdefault(key, value)
         existing.add(path)
         existing_keys.add(key)
 

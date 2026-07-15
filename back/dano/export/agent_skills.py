@@ -27,6 +27,7 @@ import structlog
 from dano.assets.repository import AssetRepository
 from dano.catalog.manifest import SkillManifest, build_manifests, tool_name_of
 from dano.orchestrator.skills import SkillRegistry
+from dano.orchestrator.types import SkillSpec
 from dano.shared.enums import Subsystem
 
 log = structlog.get_logger(__name__)
@@ -45,6 +46,72 @@ async def _tenant_subsystems(repo: AssetRepository, tenant: str) -> list[Subsyst
         log.warning("export.discover_subsystems_failed", tenant=tenant, error=str(e))
         subs = []
     return subs or _PROTOTYPE_SUBSYSTEMS
+
+
+def _upgrade_recorded_skill_for_export(skill: SkillSpec) -> SkillSpec:
+    """Rebuild a recorded Skill from its immutable release evidence.
+
+    Older published page assets kept the full request facts in
+    ``_release_snapshot.flow_spec`` but persisted a lossy top-level capability
+    projection (no defaults, empty record item schema, stale required flags).
+    Re-running the current deterministic compiler over that same snapshot is a
+    compatibility migration, not new inference: enums/defaults/response fields
+    still come only from recorded evidence.
+    """
+    api_request = dict(getattr(skill, "api_request", {}) or {})
+    release = dict(api_request.get("_release_snapshot") or {})
+    frozen_flow = release.get("flow_spec")
+    if not isinstance(frozen_flow, dict) or not frozen_flow.get("steps"):
+        return skill
+    try:
+        from dano.execution.page.flow_spec import (
+            FlowSpec,
+            flow_spec_to_api_request,
+            prepare_flow_spec_for_publish,
+        )
+
+        prepared = prepare_flow_spec_for_publish(FlowSpec.model_validate(frozen_flow))
+        rebuilt, errors = flow_spec_to_api_request(prepared)
+    except Exception as exc:  # noqa: BLE001 - legacy asset stays exportable via its stored contract
+        log.warning("export.release_contract_upgrade_failed", skill_id=skill.skill_id, error=str(exc))
+        return skill
+    if rebuilt is None or errors:
+        log.warning(
+            "export.release_contract_upgrade_rejected",
+            skill_id=skill.skill_id,
+            errors=list(errors or []),
+        )
+        return skill
+
+    rebuilt = dict(rebuilt)
+    rebuilt["_release_snapshot"] = release
+    capabilities = [item for item in (rebuilt.get("capabilities") or []) if isinstance(item, dict)]
+    if not capabilities:
+        return skill
+
+    required: list[str] = []
+    all_fields: list[str] = []
+    field_types = dict(getattr(skill, "field_types", {}) or {})
+    for capability in capabilities:
+        schema = capability.get("input_schema") or capability.get("parameters") or {}
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        for name, prop in props.items():
+            if name not in all_fields:
+                all_fields.append(name)
+            if isinstance(prop, dict) and prop.get("type"):
+                field_types[name] = str(prop["type"])
+        for name in schema.get("required") or []:
+            if name in props and name not in required:
+                required.append(name)
+
+    upgraded = skill.model_copy(deep=True)
+    upgraded.api_request = rebuilt
+    upgraded.capabilities = capabilities
+    upgraded.capability_relations = list(rebuilt.get("capability_relations") or [])
+    upgraded.required_fields = required
+    upgraded.optional_fields = [name for name in all_fields if name not in required]
+    upgraded.field_types = field_types
+    return upgraded
 
 
 def _slug(skill_id: str) -> str:
@@ -127,12 +194,12 @@ def _capability_contracts(m: SkillManifest) -> dict[str, dict]:
             "parameters": schema,
             "option_fields": _schema_option_fields(schema),
             "output_schema": raw.get("output_schema") or {"type": "object"},
-            "requires_confirmation": bool(raw.get("requires_confirmation")),
-            "verify_required": bool(
+            "requires_confirmation": raw.get("requires_confirmation") is True,
+            "verify_required": (
                 (raw.get("validation_requirements") or {}).get(
                     "verification_required",
-                    bool((m.flow or {}).get("verify")) and kind not in _READ_CAPABILITY_KINDS,
-                )
+                    (m.flow or {}).get("verify") is True and kind not in _READ_CAPABILITY_KINDS,
+                ) is True
             ),
             "validation_requirements": dict(raw.get("validation_requirements") or {}),
             "call_protocol": dict(raw.get("call_protocol") or {}),
@@ -179,8 +246,8 @@ def _export_contract_errors(m: SkillManifest) -> list[str]:
         missing_required = [item for item in required if item not in props]
         if missing_required:
             errors.append(f"{name}: required 字段不在 properties: {', '.join(missing_required)}")
-        if contract.get("kind") in _CAPABILITY_PUBLIC_KINDS and name != contract.get("kind"):
-            errors.append(f"{name}: capability name 必须与 kind `{contract.get('kind')}` 一致")
+        if contract.get("kind") in _CAPABILITY_PUBLIC_KINDS and not str(name or "").strip():
+            errors.append(f"{contract.get('kind')}: capability name 不能为空")
         exposed_internal = [
             field for field in props
             if _INTERNAL_CALLER_FIELD_RE.search(re.sub(r"[^a-z0-9]+", "", str(field).lower()))
@@ -238,6 +305,10 @@ def _schema_type_text(schema: dict) -> str:
 
 def _schema_example_value(name: str, schema: dict):  # noqa: ANN001
     schema = schema or {}
+    if "default" in schema and schema.get("default") not in (None, ""):
+        return schema.get("default")
+    if "const" in schema:
+        return schema.get("const")
     if schema.get("type") == "array":
         item = schema.get("items") if isinstance(schema.get("items"), dict) else {}
         if item.get("type") == "object":
@@ -254,6 +325,14 @@ def _schema_example_value(name: str, schema: dict):  # noqa: ANN001
     return f"<{name}>"
 
 
+def _schema_default_text(schema: dict) -> str:
+    """Render a grounded default without inventing a business value."""
+    schema = schema or {}
+    if "default" not in schema or schema.get("default") in (None, ""):
+        return "运行时按用户上下文给出非空推荐值"
+    return f"`{json.dumps(schema.get('default'), ensure_ascii=False)}`"
+
+
 def _capability_contract_section(m: SkillManifest) -> str:
     blocks = ["## 能力调用契约"]
     for name, contract in _capability_contracts(m).items():
@@ -266,17 +345,21 @@ def _capability_contract_section(m: SkillManifest) -> str:
         if not props:
             blocks.append("\n(无业务输入参数)")
         else:
-            rows = ["| 参数 | 类型 | 必填 | 说明 |", "|---|---|---|---|"]
+            rows = ["| 参数 | 类型 | 必填 | 默认值 | 说明 |", "|---|---|---|---|---|"]
             for field, prop in props.items():
                 desc = str((prop or {}).get("description") or (prop or {}).get("label") or field).replace("|", "\\|")
-                rows.append(f"| `{field}` | {_schema_type_text(prop)} | {'是' if field in required else '否'} | {desc} |")
+                rows.append(
+                    f"| `{field}` | {_schema_type_text(prop)} | {'是' if field in required else '否'} | "
+                    f"{_schema_default_text(prop)} | {desc} |"
+                )
                 item_props = (((prop or {}).get("items") or {}).get("properties") or {})
                 item_required = set((((prop or {}).get("items") or {}).get("required") or []))
                 for item_name, item_schema in item_props.items():
                     item_desc = str((item_schema or {}).get("description") or item_name).replace("|", "\\|")
                     rows.append(
                         f"| `  {field}[].{item_name}` | {_schema_type_text(item_schema)} | "
-                        f"{'是' if item_name in item_required else '否'} | {item_desc} |"
+                        f"{'是' if item_name in item_required else '否'} | "
+                        f"{_schema_default_text(item_schema)} | {item_desc} |"
                     )
             blocks.extend(rows)
         requirements = contract.get("validation_requirements") or {}
@@ -605,7 +688,7 @@ def _quality_section(m: SkillManifest) -> str:
 
 
 def _interaction_section(m: SkillManifest) -> str:
-    """调用方交互约束:约束上层 Agent 如何追问/确认,不写死具体业务字段。"""
+    """Keep generated Skills aligned with doc/dano-tool-call-contract.md."""
     contracts = _capability_contracts(m)
     keys, required, props = _fields(m)
     reqs = [k for k in keys if k in required]
@@ -613,10 +696,15 @@ def _interaction_section(m: SkillManifest) -> str:
     lines = [
         "## 调用方交互约束",
         "",
-        "- 需要向用户补充信息时,必须原生调用 `ask_user_question`;禁止在普通文本、Markdown 或 `<question>` 标签中模拟提问。",
-        "- 多个相关缺失字段要合并到同一次 `ask_user_question` 的 `questions` 数组里;不要逐字段拆成多轮打扰用户。",
-        "- `questions` 数组中的每个问题都要设置合理 `default`:优先使用用户已说出的值,其次使用录制样例/业务常用默认值;确实无法推断时用空字符串或安全默认值,并让用户确认。",
-        "- 选择型字段先按参数说明或 `--list-options <字段名>` 取得真实候选;问题里展示显示名/选项文字,不要要求用户填写内部 ID/编号。",
+        "- 用户要求填写表单、办理业务或需要补充任何字段时,必须原生调用 `ask_user_question`;禁止在普通文本、Markdown 或 `<question>` 标签中模拟提问。",
+        "- 每次回复最多原生调用一次 `ask_user_question`;多个相关缺失字段必须合并到这一次调用的 `questions` 数组里,不要逐字段拆成多轮打扰用户。",
+        "- 只收集一个非确认字段时使用顶层 `question` 及该字段自己的 `default`/`options`/`inputType`/`dateFormat`/`required`/`dataSource`/`multiple`;收集多个字段时只使用 `questions[]`。",
+        "- `questions[]` 的每一项都必须把自己的 `id`、`question`、`default` 以及适用的 `options`、`inputType`、`dateFormat`、`required`、`dataSource`、`multiple` 放在该项内部;使用 `questions` 时不要混入顶层字段配置或顶层 `confirm`。",
+        "- 每个非确认问题都必须设置结合当前上下文的非空 `default`:优先使用用户已说出的值,其次使用契约中有证据的默认值或录制样例;禁止空字符串、`<字段>` 等占位值,也不得凭字段名臆造业务值。",
+        "- 只有业务上确实必填的字段才设置 `required: true`;可选字段使用 `required: false` 或省略。工具返回 `status=answered` 后,单题取 `answer`,多题按 questions 的 `id` 从 answer 对象合并到能力参数。",
+        "- 日期字段使用 `inputType: \"date\"` 并提供 `dateFormat`(如 `yyyy-MM-dd` 或 `yyyy-MM-dd HH:mm`);下游格式不同由调用方在提交前转换。",
+        "- 选择型字段只使用参数契约、完整 DOM/JS 证据或真实来源接口提供的候选。API 选项使用 `inputType: \"select\"`/`treeSelect` 与有真实 endpoint 的 `dataSource`;否则先按参数说明或 `--list-options <字段名>` 获取已证实候选,不得猜测枚举或来源接口。",
+        "- 如果用户取消 `ask_user_question`,立即停止当前流程;除非用户之后主动重新发起,不要自动追问或重试。工具返回校验错误时,应修正参数后静默重试原生工具调用,不要在普通文本中模拟纠错提问。",
     ]
     if len(contracts) > 1:
         lines.append("- 先根据用户目标选择一个明确 capability；不同能力的必填字段不能混用。")
@@ -635,7 +723,8 @@ def _interaction_section(m: SkillManifest) -> str:
         write_names = [name for name, contract in contracts.items() if contract.get("requires_confirmation")]
         lines += [
             f"- 写能力({', '.join('`' + name + '`' for name in write_names) or '无'})执行前，"
-            "必须使用**单独一次** `ask_user_question`，且只带 `question` 与 `confirm: true`。",
+            "必须使用**单独一次** `ask_user_question`，且只带 `question` 与 `confirm: true`,不要带 `options`、`multiple` 或 `questions`。",
+            "- 只有最终确认工具返回 `status=answered` 且 `answer=true` 时才允许带 `--confirm` 调用；返回 `cancelled`、`false` 或其他值都必须停止。",
             "- 只读能力无需最终确认；查询完成后由调用方决定是否询问用户并调用写能力，Skill 不自动越过确认边界。",
             "- 用户没有明确确认、只是询问/预览/修改草稿时，不得调用写能力。",
         ]
@@ -644,6 +733,7 @@ def _interaction_section(m: SkillManifest) -> str:
         lines += [
             "- 整理好申请/提交内容后,必须再用**单独一次** `ask_user_question` 做最终确认;这次调用只能包含 `question` 与 `confirm: true`,不要带 `options`、`multiple` 或 `questions`。",
             f"- 最终确认的 `question` 要逐项复述将提交的内容({recap})以及风险提示;只有用户确认后才允许带 `--confirm` 调用脚本。",
+            "- 只有最终确认工具返回 `status=answered` 且 `answer=true` 时才算确认；返回 `cancelled`、`false` 或其他值都必须停止。",
             "- 用户没有明确确认、只是询问/预览/修改草稿时,不得调用写操作。",
         ]
     else:
@@ -688,9 +778,10 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
             h = _opts_hint(p)
             return (d + ("；" + h if h else "")).replace("\n", " ").replace("|", "\\|")
         rows = "\n".join(
-            f"| `{k}` | {_ptype(k, props, numset)} | {'是' if k in required else '否'} | {_cell(k)} |"
+            f"| `{k}` | {_ptype(k, props, numset)} | {'是' if k in required else '否'} | "
+            f"{_schema_default_text(props[k])} | {_cell(k)} |"
             for k in keys)
-        table = "| 参数 | 类型 | 必填 | 说明 |\n|---|---|---|---|\n" + rows
+        table = "| 参数 | 类型 | 必填 | 默认值 | 说明 |\n|---|---|---|---|---|\n" + rows
         ex_args = "{" + ", ".join(
             (f'"{k}": <{k}>' if k in numset else f'"{k}": "<{k}>"') for k in keys) + "}"
     else:
@@ -699,8 +790,16 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
     cflag = " --confirm" if confirm else ""
     confirm_note = ("\n> ⚠ 高风险写操作:**执行前必须向用户复述将提交内容并取得同意**,确认后再带 `--confirm` 调用。\n"
                     if confirm else "")
-    desc = (f"{m.description}。当用户想办理「{m.title}」或相关 {m.subsystem} 操作时,**务必使用本 skill**,"
-            f"即使用户没有明确说出 skill 名或接口名。")
+    supported_titles = list(dict.fromkeys(
+        str(contract.get("title") or name).strip()
+        for name, contract in contracts.items()
+        if str(contract.get("title") or name).strip()
+    ))
+    supported_scope = "、".join(f"「{title}」" for title in supported_titles) or f"「{m.title}」"
+    desc = (
+        f"{m.description}。仅用于这些已发布能力:{supported_scope};"
+        "只有用户意图明确匹配其中一项时才使用,不把同一业务域的其他动作视为已支持。"
+    )
     # 审批路径(有 business_meta 才出,grounded);放在 SOP 前,供阶段3 引用
     approval = _approval_section(getattr(m, "business_meta", {}) or {})
     approval_md = (approval + "\n\n") if approval else ""
@@ -774,7 +873,7 @@ metadata:
 这是 Dano **已上架 Skill 的代理**:{platform_guards}都在 Dano 侧。本端负责**收集参数、本地校验、提交前确认**,再调用 Dano,**不接触目标系统凭证、不自行裁定结果**。
 {confirm_note}
 ## 何时使用
-当用户想办理「{m.title}」({m.subsystem})时使用本 skill,即使没说出 skill 名或接口名。
+当用户明确需要{supported_scope}之一时使用本 skill,即使没说出 skill 名或接口名；未列出的新建、提交、查询、撤回或审批动作不在本 Skill 范围内。
 
 **不该直接使用**:{not_use}
 
@@ -901,8 +1000,11 @@ def _options_md(m: SkillManifest) -> str | None:
     无任何选择型候选 → 返回 None(不产生空文件)。提交时 Dano 仍按名字现查内部 ID(选项更新以运行期为准)。"""
     contracts = _capability_contracts(m)
     blocks: list[str] = []
+    has_live_source = False
+    has_snapshot = False
 
     def walk(capability: str, node: dict, prefix: str = "") -> None:
+        nonlocal has_live_source, has_snapshot
         for key, prop in ((node or {}).get("properties") or {}).items():
             if not isinstance(prop, dict):
                 continue
@@ -911,6 +1013,8 @@ def _options_md(m: SkillManifest) -> str | None:
             selectable = prop.get("format") == "name-ref" or item.get("format") == "name-ref" or prop.get("x-options-source")
             if selectable:
                 opts = _option_labels(prop)
+                has_live_source = has_live_source or bool(prop.get("x-options-source"))
+                has_snapshot = has_snapshot or bool(opts)
                 command = f"bash scripts/submit.sh --capability {capability} --list-options {key}"
                 label = str(prop.get("label") or prop.get("title") or key)
                 if prop.get("x-options-source") and not opts:
@@ -930,9 +1034,17 @@ def _options_md(m: SkillManifest) -> str | None:
         walk(capability, contract.get("parameters") or {})
     if not blocks:
         return None
-    return ("# 可选值参考\n\n选择型字段的候选值。多能力 Skill 必须同时指定 `--capability`；"
-            "Dano 直接调用字段来源接口返回当前 `options`。\n"
-            "下面是录制时抓取的**离线快照**(可能过时,仅供快速参考);agent 传**名字/选项文字**,Dano 提交时按名字现查内部 ID。\n\n"
+    source_note = (
+        "带有可信 `x-options-source` 的字段会在运行期调用其真实来源接口；没有该证据的字段不会伪装成动态来源。\n"
+        if has_live_source else
+        "本产物没有声明可验证的动态选项接口；以下候选仅来自已确认的页面/录制证据。\n"
+    )
+    snapshot_note = (
+        "下面是录制时抓取的**离线快照**(可能过时,仅供快速参考);提交时按字段契约映射显示名与真实值。\n"
+        if has_snapshot else ""
+    )
+    return ("# 可选值参考\n\n选择型字段的候选值。多能力 Skill 必须同时指定 `--capability`。\n"
+            + source_note + snapshot_note + "\n"
             + "\n\n".join(blocks) + "\n")
 
 
@@ -978,6 +1090,11 @@ def _emit(obj):
     print(json.dumps(obj, ensure_ascii=False))
 
 
+def _strict_boolean(value):
+    """Only JSON booleans are booleans; strings/numbers must never open a gate."""
+    return value if isinstance(value, bool) else None
+
+
 def _coerce_arguments(obj):
     if isinstance(obj, str):
         obj = json.loads(obj or "{}")
@@ -995,8 +1112,10 @@ def _is_envelope(obj):
 
 
 def _choose_capability(requested, field=None):
-    if requested:
-        return requested
+    if requested is not None:
+        if not isinstance(requested, str) or not requested.strip():
+            raise ValueError("capability 必须是非空字符串")
+        return requested.strip()
     if field:
         matches = [name for name, contract in CAPABILITIES.items()
                    if field in contract.get("option_fields", []) or field in contract.get("fields", [])]
@@ -1022,6 +1141,22 @@ def _coerce_cli_values(arguments, contract):
             if field_type == "object" and not isinstance(parsed, dict):
                 raise ValueError("字段 %s 需为 JSON 对象" % field)
             arguments[field] = parsed
+    return arguments
+
+
+def _apply_safe_defaults(arguments, contract):
+    """Apply only defaults explicitly marked safe for silent invocation.
+
+    Ordinary field defaults are question-card recommendations and must still be
+    reviewed by the user. Pagination defaults are deterministic transport
+    controls and may be applied when omitted while remaining caller-overridable.
+    """
+    properties = (contract.get("parameters") or {}).get("properties") or {}
+    for field, schema in properties.items():
+        if field in arguments or not isinstance(schema, dict):
+            continue
+        if schema.get("x-dano-apply-default") is True and "default" in schema:
+            arguments[field] = schema.get("default")
     return arguments
 
 
@@ -1113,19 +1248,35 @@ def main():
                     help="实时列出某选择型字段的当前可选项(Dano 调来源接口),再从中选准确名字")
     args = ap.parse_args()
 
-    capability = _choose_capability(args.capability, args.list_options)
-    confirm = bool(args.confirm)
+    try:
+        capability = _choose_capability(args.capability, args.list_options)
+    except ValueError as e:
+        _emit({"status": "failed", "reason": str(e)})
+        sys.exit(2)
+    confirm = args.confirm is True
 
     raw_obj = None
     if args.raw:
         try:
             raw_obj = json.loads(args.raw)
-            if _is_envelope(raw_obj):
-                capability = _choose_capability(raw_obj.get("capability") or capability)
-                confirm = bool(confirm or raw_obj.get("confirm"))
         except Exception as e:
             _emit({"status": "failed", "reason": "--json 不是合法 JSON: %s" % e})
             sys.exit(2)
+        if _is_envelope(raw_obj):
+            try:
+                if "capability" in raw_obj:
+                    envelope_capability = raw_obj.get("capability")
+                    if envelope_capability is None:
+                        raise ValueError("capability 必须是非空字符串")
+                    capability = _choose_capability(envelope_capability)
+                if "confirm" in raw_obj:
+                    envelope_confirm = _strict_boolean(raw_obj.get("confirm"))
+                    if envelope_confirm is None:
+                        raise ValueError("confirm 必须是 JSON 布尔值 true/false，字符串或数字不被接受")
+                    confirm = confirm or envelope_confirm is True
+            except ValueError as e:
+                _emit({"status": "failed", "reason": str(e)})
+                sys.exit(2)
 
     url = os.environ.get("DANO_URL")
     key = os.environ.get("DANO_TENANT_KEY")
@@ -1199,6 +1350,7 @@ def main():
 
     try:
         arguments = _coerce_cli_values(arguments, contract)
+        arguments = _apply_safe_defaults(arguments, contract)
     except ValueError as e:
         _emit({"status": "failed", "reason": str(e)})
         sys.exit(1)
@@ -1250,14 +1402,21 @@ def main():
     raw_api = api_audit.get("raw") if isinstance(api_audit.get("raw"), dict) else {}
     fc = audit.get("fact_check") or api_audit.get("fact_check")
     if fc is None and "fact_check_passed" in raw_api:
-        fc = {"passed": bool(raw_api.get("fact_check_passed")), "reason": raw_api.get("detail")}
+        fc = {"passed": _strict_boolean(raw_api.get("fact_check_passed")), "reason": raw_api.get("detail")}
     if fc is None and "fact_check_passed" in api_audit:
-        fc = {"passed": bool(api_audit.get("fact_check_passed")), "reason": api_audit.get("detail")}
+        fc = {"passed": _strict_boolean(api_audit.get("fact_check_passed")), "reason": api_audit.get("detail")}
     output = (res.get("exec_result") or {}).get("structured_output")
-    partial = state in {"partially_completed", "partial_success", "completed_with_errors"} or res.get("status") == "partial_success"
+    partial_state = state in {"partially_completed", "partial_success", "completed_with_errors"} or res.get("status") == "partial_success"
+    allow_partial = (contract.get("validation_requirements") or {}).get("allow_partial_success") is True
+    if partial_state and not allow_partial:
+        _emit({"status": "failed", "state": state,
+               "reason": "该能力不允许部分成功，不能把不完整结果判为成功",
+               "output": output, "fact_check": fc})
+        sys.exit(1)
+    partial = partial_state and allow_partial
     if state == "completed" or partial:
         fact_passed = fc is True or (isinstance(fc, dict) and fc.get("passed") is True)
-        if contract.get("verify_required") and not fact_passed and not partial:
+        if contract.get("verify_required") and not fact_passed:
             _emit({"status": "failed", "state": state,
                    "reason": "事实核查未通过或缺少核查结果，不能判定写操作成功",
                    "output": output, "fact_check": fc})
@@ -1278,6 +1437,7 @@ def main():
         _emit({"status": "need_confirm", "state": state, "message": res.get("message")})
     else:
         _emit({"status": "failed", "state": state, "reason": res.get("message"), "fact_check": fc})
+        sys.exit(1)
 
 
 if __name__ == "__main__":
@@ -1318,6 +1478,7 @@ exec "$PY" "$DIR/dano_call.py" "$@"
 _SUBMIT_PS1 = """# 由 Dano 自动生成:转发到 dano_call.py(真逻辑)。
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 python "$dir/dano_call.py" @args
+exit $LASTEXITCODE
 """
 
 
@@ -1585,7 +1746,8 @@ async def write_skills(tenant: str, out_dir: str, *, rich: bool = True,
     subs = await _tenant_subsystems(repo, tenant)   # 发现该租户真实系统(任意系统),与网关一致
     reg = await SkillRegistry.from_store(repo, tenant=tenant, subsystems=subs)
     excluded = set(exclude_skill_ids or set())
-    manifests = [m for m in build_manifests(reg.skills) if m.name not in excluded]
+    export_skills = [_upgrade_recorded_skill_for_export(skill) for skill in reg.skills]
+    manifests = [m for m in build_manifests(export_skills) if m.name not in excluded]
     valid_manifests: list[SkillManifest] = []
     for manifest in manifests:
         errors = _export_contract_errors(manifest)

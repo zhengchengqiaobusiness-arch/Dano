@@ -1120,6 +1120,63 @@ def test_forbidden_actions_excludes_normal_submit():
     assert any("terminate" in f for f in forb)
 
 
+def test_manifest_keeps_semantic_capability_names_and_only_aliases_generic_kinds():
+    from dano.catalog.manifest import _canonical_capability_identity
+
+    assert _canonical_capability_identity({
+        "name": "query_hotel_apply", "kind": "query_status", "title": "查询酒店申请记录",
+    })[0] == "query_hotel_apply"
+    assert _canonical_capability_identity({
+        "name": "withdraw_hotel_apply", "kind": "submit", "title": "撤回酒店申请",
+    })[0] == "withdraw_hotel_apply"
+    assert _canonical_capability_identity({
+        "name": "capability_2", "kind": "submit", "title": "撤回酒店申请",
+    })[0] == "submit"
+
+
+def test_manifest_exposes_native_batched_question_and_separate_confirmation_protocol():
+    from dano.catalog.manifest import _ask_user_question_interaction_protocol
+
+    protocol = _ask_user_question_interaction_protocol()
+    assert protocol["tool"] == "ask_user_question"
+    assert protocol["native_tool_call_required"] is True
+    assert protocol["multi_field_collection"]["mode"] == "questions_array"
+    assert protocol["non_confirmation_default"]["required"] is True
+    assert protocol["confirmation"]["allowed_keys"] == ["question", "confirm"]
+    assert set(protocol["confirmation"]["forbidden_keys"]) == {"options", "multiple", "questions"}
+
+
+def test_manifest_does_not_treat_string_false_as_safety_boolean():
+    from dano.catalog.manifest import to_manifest
+    from dano.orchestrator.types import SkillSpec
+    from dano.shared.enums import RiskLevel
+
+    manifest = to_manifest(SkillSpec(
+        skill_id="A-OA.strict_flags",
+        subsystem=Subsystem.OA,
+        action="strict_flags",
+        risk_level=RiskLevel.L1,
+        capabilities=[{
+            "name": "save_strict_flags",
+            "kind": "submit",
+            "requires_confirmation": "false",
+            "verify_required": "false",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "状态": {"type": "string", "x-options-source": "false"},
+                },
+                "required": [],
+            },
+        }],
+    ))
+
+    capability = manifest.capabilities[0]
+    assert capability["requires_confirmation"] is False
+    assert capability["validation_requirements"]["verification_required"] is False
+    assert "x-options-source" not in capability["input_schema"]["properties"]["状态"]
+
+
 async def test_workflow_skill_carries_business_meta_to_manifest():
     from dano.catalog.manifest import to_manifest
     wf = WorkflowSkillBody(
