@@ -1672,7 +1672,7 @@
 
   .scroll-bottom-overlay {
     position: sticky;
-    bottom: 8px;
+    bottom: 56px;
     z-index: 5;
     height: 0;
     display: flex;
@@ -1685,7 +1685,9 @@
     height: 40px;
     border: 0;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--panel) 92%, transparent);
+    background: color-mix(in srgb, var(--panel) 65%, transparent);
+    -webkit-backdrop-filter: blur(2px);
+    backdrop-filter: blur(2px);
     color: var(--text);
     box-shadow:
       0 0 0 1px color-mix(in srgb, var(--border) 70%, transparent),
@@ -1695,7 +1697,6 @@
     justify-content: center;
     cursor: pointer;
     pointer-events: auto;
-    transform: translateY(-48px);
     transition:
       background 0.16s ease,
       box-shadow 0.16s ease,
@@ -1703,14 +1704,14 @@
   }
 
   .scroll-bottom-button:hover {
-    background: var(--panel-2);
+    background: color-mix(in srgb, var(--panel-2) 75%, transparent);
     box-shadow:
       0 0 0 1px color-mix(in srgb, var(--border-strong) 80%, transparent),
       var(--shadow-floating);
   }
 
   .scroll-bottom-button:active {
-    transform: translateY(-48px) scale(0.96);
+    transform: scale(0.96);
   }
 
   .empty-state {
@@ -2462,6 +2463,10 @@
     .chat-transcript {
       padding: 42px 16px 48px;
       gap: 6px;
+    }
+
+    .scroll-bottom-overlay {
+      bottom: 0;
     }
   }
 

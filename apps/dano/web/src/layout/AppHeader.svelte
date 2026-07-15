@@ -134,7 +134,9 @@
     font-size: 0.78rem;
     font-weight: 650;
     line-height: 1;
-    background: var(--panel);
+    background: color-mix(in srgb, var(--panel) 65%, transparent);
+    -webkit-backdrop-filter: blur(2px);
+    backdrop-filter: blur(2px);
     box-shadow:
       rgba(0, 0, 0, 0) 0px 0px 0px 0px,
       rgba(0, 0, 0, 0) 0px 0px 0px 0px,

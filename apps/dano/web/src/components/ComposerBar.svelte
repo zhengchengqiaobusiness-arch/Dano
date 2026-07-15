@@ -566,15 +566,27 @@
 
 <style>
   .composer-bar {
+    position: relative;
     flex-shrink: 0;
-    padding: 6px 24px 36px;
-    padding-bottom: max(36px, env(safe-area-inset-bottom));
+    width: min(960px, calc(100% - 48px));
+    margin: 0 auto max(36px, env(safe-area-inset-bottom));
+  }
+
+  .composer-bar::before {
+    content: "";
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    width: 100vw;
+    height: 20px;
+    pointer-events: none;
+    background: linear-gradient(to bottom, transparent, var(--bg));
+    transform: translateX(-50%);
   }
 
   .composer-inner-wrap {
     position: relative;
-    width: min(960px, 100%);
-    margin: 0 auto;
+    width: 100%;
   }
 
   .quick-actions {
@@ -1055,11 +1067,8 @@
 
   @media (max-width: 900px) {
     .composer-bar {
-      position: sticky;
-      bottom: 0;
-      z-index: 10;
-      padding: 10px 16px 12px;
-      padding-bottom: max(12px, env(safe-area-inset-bottom));
+      width: calc(100% - 32px);
+      margin: 0 auto max(12px, env(safe-area-inset-bottom));
     }
 
     .composer-inner-wrap { width: 100%; }
@@ -1070,8 +1079,8 @@
 
   @media (max-width: 640px) {
     .composer-bar {
-      padding: 8px 12px 10px;
-      padding-bottom: max(10px, env(safe-area-inset-bottom));
+      width: calc(100% - 24px);
+      margin: 0 auto max(10px, env(safe-area-inset-bottom));
     }
 
     .composer-dock { gap: 8px; padding: 10px 14px; border-radius: 24px; }

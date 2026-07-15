@@ -1438,17 +1438,13 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .app-shell.left-rail-collapsed .app-main-column {
-    background: var(--bg);
-  }
-
   .app-main-column {
     display: flex;
     flex-direction: column;
     min-width: 0;
     min-height: 0;
     overflow: hidden;
-    background: var(--rail-bg);
+    background: transparent;
   }
 
   .app-body {

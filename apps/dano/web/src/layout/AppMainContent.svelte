@@ -316,8 +316,12 @@
 
   .center-column.empty-conversation :global(.composer-bar) {
     grid-row: 2;
-    padding-top: 0;
-    padding-bottom: 0;
+    margin-top: 0;
+    margin-bottom: 0;
+  }
+
+  .center-column.empty-conversation :global(.composer-bar::before) {
+    display: none;
   }
 
   .queued-messages-strip {
