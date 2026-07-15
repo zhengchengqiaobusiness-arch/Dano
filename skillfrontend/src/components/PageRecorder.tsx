@@ -1141,10 +1141,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const pendingPointerMoveRef = useRef<Record<string, unknown> | null>(null);
   const pointerGestureRef = useRef<{
     pointerId: number; nx: number; ny: number; clientX: number; clientY: number;
-    button: string; buttons: number; pointerType: string; dragging: boolean;
+    button: string; buttons: number; pointerType: string; dragging: boolean; clickCount: number;
   } | null>(null);
-  const pendingClickRef = useRef<{
-    timer: number; nx: number; ny: number; clientX: number; clientY: number; button: string; pointerType: string;
+  const lastPointerClickRef = useRef<{
+    at: number; clientX: number; clientY: number; button: string; clickCount: number;
   } | null>(null);
   const lastInputErrorNoticeRef = useRef(0);
   const intentionalCloseRef = useRef(false);
@@ -1366,7 +1366,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       wsRef.current?.close();
     }
     if (pointerMoveTimerRef.current != null) window.clearTimeout(pointerMoveTimerRef.current);
-    if (pendingClickRef.current) window.clearTimeout(pendingClickRef.current.timer);
     if (heartbeatTimerRef.current != null) window.clearInterval(heartbeatTimerRef.current);
     if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
     frameDecodeGenerationRef.current += 1;
@@ -1895,8 +1894,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       pendingPointerMoveRef.current = null;
       if (pointerMoveTimerRef.current != null) window.clearTimeout(pointerMoveTimerRef.current);
       pointerMoveTimerRef.current = null;
-      if (pendingClickRef.current) window.clearTimeout(pendingClickRef.current.timer);
-      pendingClickRef.current = null;
+      lastPointerClickRef.current = null;
       finalizeOperationRef.current = null;
       publishOperationRef.current = null;
       setNamingBusy(false);
@@ -1946,35 +1944,41 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     // responsive. The backend and frame sender both drop superseded work.
     pointerMoveTimerRef.current = window.setTimeout(sendPendingPointerMove, POINTER_MOVE_INTERVAL_MS);
   }
-  function flushPendingRecorderClick() {
-    const pending = pendingClickRef.current;
-    if (!pending) return;
-    window.clearTimeout(pending.timer);
-    pendingClickRef.current = null;
-    send({
-      type: "input",
-      event: {
-        kind: "click", nx: pending.nx, ny: pending.ny, button: pending.button,
-        pointer_type: pending.pointerType,
-      },
-    });
-  }
   function onImgPointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
     if (connectionState !== "connected" || e.button < 0) return;
     const point = normalizedPoint(e.clientX, e.clientY);
     if (!point) return;
     e.preventDefault();
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* pointer capture may be unavailable */ }
+    const button = pointerButton(e.button);
+    const previous = lastPointerClickRef.current;
+    const now = performance.now();
+    const clickCount = button === "left" && previous?.button === button && previous.clickCount === 1
+      && now - previous.at <= 350
+      && Math.hypot(e.clientX - previous.clientX, e.clientY - previous.clientY) <= 8
+      ? 2
+      : 1;
     pointerGestureRef.current = {
       pointerId: e.pointerId,
       ...point,
       clientX: e.clientX,
       clientY: e.clientY,
-      button: pointerButton(e.button),
+      button,
       buttons: e.buttons,
       pointerType: e.pointerType || "mouse",
       dragging: false,
+      clickCount,
     };
+    // Forward the press immediately. Waiting to decide between click and
+    // double-click made every button feel delayed and prevented press-driven
+    // lazy loaders from starting until 250 ms later.
+    send({
+      type: "input",
+      event: {
+        kind: "pointer_down", ...point, button, buttons: e.buttons,
+        pointer_type: e.pointerType || "mouse", click_count: clickCount,
+      },
+    });
     kbRef.current?.focus({ preventScroll: true });
   }
   function onImgPointerMove(e: React.PointerEvent<HTMLCanvasElement>) {
@@ -1986,54 +1990,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       const distance = Math.hypot(e.clientX - gesture.clientX, e.clientY - gesture.clientY);
       if (distance >= 5) {
         gesture.dragging = true;
-        send({
-          type: "input",
-          event: {
-            kind: "pointer_down", nx: gesture.nx, ny: gesture.ny, button: gesture.button,
-            buttons: gesture.buttons, pointer_type: gesture.pointerType,
-          },
-        });
+        lastPointerClickRef.current = null;
       }
     }
     queuePointerMove({
       kind: "pointer_move", ...point, buttons: e.buttons, pointer_type: e.pointerType || "mouse",
     });
     if (gesture?.dragging) e.preventDefault();
-  }
-  function dispatchRecorderClick(
-    point: { nx: number; ny: number },
-    e: React.PointerEvent<HTMLCanvasElement>,
-    button: string,
-  ) {
-    const previous = pendingClickRef.current;
-    const isDoubleClick = button === "left" && previous?.button === button
-      && Math.hypot(e.clientX - previous.clientX, e.clientY - previous.clientY) <= 8;
-    if (isDoubleClick && previous) {
-      window.clearTimeout(previous.timer);
-      pendingClickRef.current = null;
-      send({
-        type: "input",
-        event: { kind: "dblclick", ...point, button, pointer_type: e.pointerType || "mouse" },
-      });
-      return;
-    }
-    if (previous) {
-      flushPendingRecorderClick();
-    }
-    const pending = {
-      timer: 0,
-      ...point,
-      clientX: e.clientX,
-      clientY: e.clientY,
-      button,
-      pointerType: e.pointerType || "mouse",
-    };
-    pending.timer = window.setTimeout(() => {
-      if (pendingClickRef.current !== pending) return;
-      pendingClickRef.current = null;
-      send({ type: "input", event: { kind: "click", ...point, button, pointer_type: pending.pointerType } });
-    }, button === "left" ? 250 : 0);
-    pendingClickRef.current = pending;
   }
   function onImgPointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
     const gesture = pointerGestureRef.current;
@@ -2042,21 +2005,21 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const point = normalizedPoint(e.clientX, e.clientY) || { nx: gesture.nx, ny: gesture.ny };
     e.preventDefault();
     try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* already released */ }
-    if (gesture.dragging) {
-      if (pointerMoveTimerRef.current != null) {
-        window.clearTimeout(pointerMoveTimerRef.current);
-        sendPendingPointerMove();
-      }
-      send({
-        type: "input",
-        event: {
-          kind: "pointer_up", ...point, button: gesture.button, buttons: e.buttons,
-          pointer_type: gesture.pointerType,
-        },
-      });
-    } else {
-      dispatchRecorderClick(point, e, gesture.button);
+    if (pointerMoveTimerRef.current != null) {
+      window.clearTimeout(pointerMoveTimerRef.current);
+      sendPendingPointerMove();
     }
+    send({
+      type: "input",
+      event: {
+        kind: "pointer_up", ...point, button: gesture.button, buttons: e.buttons,
+        pointer_type: gesture.pointerType, click_count: gesture.clickCount,
+      },
+    });
+    lastPointerClickRef.current = gesture.dragging ? null : {
+      at: performance.now(), clientX: e.clientX, clientY: e.clientY,
+      button: gesture.button, clickCount: gesture.clickCount,
+    };
   }
   function onImgPointerCancel(e: React.PointerEvent<HTMLCanvasElement>) {
     const gesture = pointerGestureRef.current;
@@ -2065,22 +2028,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     pendingPointerMoveRef.current = null;
     if (pointerMoveTimerRef.current != null) window.clearTimeout(pointerMoveTimerRef.current);
     pointerMoveTimerRef.current = null;
-    if (gesture.dragging) {
-      const point = normalizedPoint(e.clientX, e.clientY) || { nx: gesture.nx, ny: gesture.ny };
-      send({ type: "input", event: { kind: "pointer_up", ...point, button: gesture.button, buttons: 0, pointer_type: gesture.pointerType } });
-    }
+    lastPointerClickRef.current = null;
+    const point = normalizedPoint(e.clientX, e.clientY) || { nx: gesture.nx, ny: gesture.ny };
+    send({
+      type: "input",
+      event: {
+        kind: "pointer_up", ...point, button: gesture.button, buttons: 0,
+        pointer_type: gesture.pointerType, click_count: gesture.clickCount,
+      },
+    });
   }
   function onImgWheel(e: React.WheelEvent<HTMLCanvasElement>) {
     if (connectionState !== "connected") return;
     const point = normalizedPoint(e.clientX, e.clientY);
     e.preventDefault();
-    flushPendingRecorderClick();
     send({ type: "input", event: { kind: "scroll", dy: e.deltaY, dx: e.deltaX, ...(point || {}) } });
   }
   function relayKb(el: HTMLInputElement) {
     const v = el.value;
     if (v) {
-      flushPendingRecorderClick();
       send({ type: "input", event: { kind: "text", text: v } });
       el.value = "";
     }
@@ -2093,7 +2059,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function onKbCompositionStart(_e: React.CompositionEvent<HTMLInputElement>) {
     // FH2 修复:compositionStart 显式标记 isComposing=true;某些浏览器在 CompositionStart→Input 之间 isComposing
     // 可能短暂为 false,导致 onKbInput 误发未拼写完的中间字符(显示"拼字"而不是中文)→ ref 守门
-    flushPendingRecorderClick();
     isComposingRef.current = true;
   }
   function onKbCompositionUpdate(_e: React.CompositionEvent<HTMLInputElement>) {
@@ -2106,7 +2071,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function onKbKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     const key = recorderKeyName(e);
     if (key) {
-      flushPendingRecorderClick();
       send({ type: "input", event: { kind: "key", key } });
       e.preventDefault();
     }
@@ -2114,7 +2078,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function onKbPaste(e: React.ClipboardEvent<HTMLInputElement>) {
     const text = e.clipboardData.getData("text");
     if (text) {
-      flushPendingRecorderClick();
       send({ type: "input", event: { kind: "text", text } });
       e.preventDefault();
       e.currentTarget.value = "";

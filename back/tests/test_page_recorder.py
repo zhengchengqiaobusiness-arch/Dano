@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import pytest
@@ -371,11 +372,11 @@ class _RecordingMouse:
     async def move(self, x, y, *, steps=1) -> None:  # noqa: ANN001
         await self._record("move", x, y, steps)
 
-    async def down(self, *, button="left") -> None:
-        await self._record("down", button)
+    async def down(self, *, button="left", click_count=1) -> None:  # noqa: ANN001
+        await self._record("down", button, click_count)
 
-    async def up(self, *, button="left") -> None:
-        await self._record("up", button)
+    async def up(self, *, button="left", click_count=1) -> None:  # noqa: ANN001
+        await self._record("up", button, click_count)
 
     async def wheel(self, dx, dy) -> None:  # noqa: ANN001
         await self._record("wheel", dx, dy)
@@ -416,15 +417,19 @@ async def test_dispatch_input_supports_pointer_drag_and_explicit_drag() -> None:
     sess.page = page
     sess._context = _InputContext([page])
 
-    assert (await sess.dispatch_input({"kind": "pointer_down", "nx": 0.1, "ny": 0.2, "button": 0}))["ok"]
+    assert (await sess.dispatch_input({
+        "kind": "pointer_down", "nx": 0.1, "ny": 0.2, "button": 0, "click_count": 2,
+    }))["ok"]
     assert (await sess.dispatch_input({"kind": "pointer_move", "nx": 0.7, "ny": 0.8, "steps": 6}))["ok"]
-    assert (await sess.dispatch_input({"kind": "pointer_up", "nx": 0.7, "ny": 0.8, "button": 0}))["ok"]
+    assert (await sess.dispatch_input({
+        "kind": "pointer_up", "nx": 0.7, "ny": 0.8, "button": 0, "click_count": 2,
+    }))["ok"]
     assert page.mouse.events == [
         ("move", 128.0, 160.0, 1),
-        ("down", "left"),
+        ("down", "left", 2),
         ("move", 896.0, 640.0, 6),
         ("move", 896.0, 640.0, 1),
-        ("up", "left"),
+        ("up", "left", 2),
     ]
 
     page.mouse.events.clear()
@@ -435,9 +440,9 @@ async def test_dispatch_input_supports_pointer_drag_and_explicit_drag() -> None:
     assert result["ok"]
     assert page.mouse.events == [
         ("move", 256.0, 200.0, 1),
-        ("down", "left"),
+        ("down", "left", 1),
         ("move", 1152.0, 600.0, 8),
-        ("up", "left"),
+        ("up", "left", 1),
     ]
 
 
@@ -530,6 +535,7 @@ async def test_screencast_uses_full_viewport_quality_and_emits_dimensions() -> N
         "metadata": {"deviceWidth": 1280, "deviceHeight": 800},
     })
     await task
+    await asyncio.sleep(0)
     assert frames == [{
         "seq": 1,
         "data": "jpeg-base64",
@@ -541,6 +547,46 @@ async def test_screencast_uses_full_viewport_quality_and_emits_dimensions() -> N
         "viewport_height": 800,
         "viewport": {"width": 1280, "height": 800},
     }]
+
+
+async def test_screencast_coalesces_burst_but_flushes_final_dynamic_frame() -> None:
+    class FakeCdp:
+        def __init__(self) -> None:
+            self.handlers: dict[str, object] = {}
+
+        async def send(self, _method: str, _params: dict | None = None) -> None:
+            return None
+
+        def on(self, event: str, callback) -> None:  # noqa: ANN001
+            self.handlers[event] = callback
+
+    class FakeContext:
+        def __init__(self, cdp: FakeCdp) -> None:
+            self.cdp = cdp
+
+        async def new_cdp_session(self, _page):  # noqa: ANN001
+            return self.cdp
+
+    cdp = FakeCdp()
+    sess = RecordSession()
+    sess.page = _InputPage()
+    sess._context = FakeContext(cdp)
+    frames: list[dict] = []
+
+    async def on_frame(frame: dict) -> None:
+        frames.append(frame)
+
+    await sess.start_screencast(on_frame)
+    callback = cdp.handlers["Page.screencastFrame"]
+    await callback({"sessionId": 1, "data": "initial", "metadata": {}})
+    await asyncio.sleep(0)
+    await callback({"sessionId": 2, "data": "loading", "metadata": {}})
+    await callback({"sessionId": 3, "data": "loaded-final", "metadata": {}})
+
+    assert [frame["data"] for frame in frames] == ["initial"]
+    await asyncio.sleep((1 / 20) + 0.03)
+    assert [frame["data"] for frame in frames] == ["initial", "loaded-final"]
+    assert [frame["seq"] for frame in frames] == [1, 2]
 
 
 def test_same_endpoint_responses_attach_by_request_identity_index() -> None:

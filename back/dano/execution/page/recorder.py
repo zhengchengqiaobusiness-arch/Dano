@@ -133,6 +133,15 @@ def _mouse_steps(value) -> int:  # noqa: ANN001
     return min(100, max(1, steps))
 
 
+def _mouse_click_count(value) -> int:  # noqa: ANN001
+    """Keep native single/double-click semantics without accepting arbitrary counts."""
+    try:
+        click_count = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return 2 if click_count == 2 else 1
+
+
 def _page_is_open(page) -> bool:  # noqa: ANN001
     if page is None:
         return False
@@ -1708,34 +1717,72 @@ class RecordSession:
         except Exception:  # noqa: BLE001 —— TargetClosedError 等(context/page 关闭竞态)→ 不重开,静默
             return
         self._cdp = cdp
+        pending_frame: dict | None = None
+        frame_flush_task: asyncio.Task | None = None
+
+        def _frame_delay() -> float:
+            now = time.monotonic()
+            active = (now - self._last_activity_at) <= _CAST_ACTIVE_WINDOW_S
+            min_gap = 1.0 / (_CAST_ACTIVE_FPS if active else _CAST_IDLE_FPS)
+            return max(0.0, min_gap - (now - self._last_frame_sent_at))
+
+        async def _forward_frame(params: dict) -> None:
+            if self._on_frame is None or cdp is not self._cdp:
+                return
+            self._last_frame_sent_at = time.monotonic()
+            self._frame_seq += 1
+            metadata = params.get("metadata") or {}
+            # Chromium 的 screencast metadata 是当前设备视口；固定 DPR=1 时也正是
+            # JPEG 的像素尺寸。字段同时保留扁平/分组形式，便于新旧前端平滑升级。
+            frame_width = _positive_dimension(metadata.get("deviceWidth"), _CAST_W)
+            frame_height = _positive_dimension(metadata.get("deviceHeight"), _CAST_H)
+            await self._on_frame({
+                "seq": self._frame_seq,
+                "data": params["data"],
+                "width": frame_width,
+                "height": frame_height,
+                "frame_width": frame_width,
+                "frame_height": frame_height,
+                "viewport_width": _VIEW_W,
+                "viewport_height": _VIEW_H,
+                "viewport": {"width": _VIEW_W, "height": _VIEW_H},
+            })  # base64 jpeg
+
+        async def _flush_latest_frame() -> None:
+            nonlocal pending_frame, frame_flush_task
+            try:
+                while self._on_frame is not None and cdp is self._cdp:
+                    delay = _frame_delay()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    params = pending_frame
+                    pending_frame = None
+                    if params is None:
+                        return
+                    await _forward_frame(params)
+                    if pending_frame is None:
+                        return
+            except Exception:  # noqa: BLE001 —— 截图失败不能影响输入通道
+                pass
+            finally:
+                frame_flush_task = None
+                # A frame can arrive while the previous callback is being sent.
+                # Never strand that final visual update when the page becomes idle.
+                if pending_frame is not None and self._on_frame is not None and cdp is self._cdp:
+                    frame_flush_task = asyncio.create_task(_flush_latest_frame())
 
         async def _emit(params: dict) -> None:
+            nonlocal pending_frame, frame_flush_task
             try:
                 await cdp.send("Page.screencastFrameAck", {"sessionId": params["sessionId"]})
                 if self._on_frame is not None and cdp is self._cdp:   # 只发**活动页**的帧(切页后旧帧丢弃)
-                    now = time.monotonic()
-                    active = (now - self._last_activity_at) <= _CAST_ACTIVE_WINDOW_S
-                    min_gap = 1.0 / (_CAST_ACTIVE_FPS if active else _CAST_IDLE_FPS)
-                    if now - self._last_frame_sent_at < min_gap:
-                        return
-                    self._last_frame_sent_at = now
-                    self._frame_seq += 1
-                    metadata = params.get("metadata") or {}
-                    # Chromium 的 screencast metadata 是当前设备视口；固定 DPR=1 时也正是
-                    # JPEG 的像素尺寸。字段同时保留扁平/分组形式，便于新旧前端平滑升级。
-                    frame_width = _positive_dimension(metadata.get("deviceWidth"), _CAST_W)
-                    frame_height = _positive_dimension(metadata.get("deviceHeight"), _CAST_H)
-                    await self._on_frame({
-                        "seq": self._frame_seq,
-                        "data": params["data"],
-                        "width": frame_width,
-                        "height": frame_height,
-                        "frame_width": frame_width,
-                        "frame_height": frame_height,
-                        "viewport_width": _VIEW_W,
-                        "viewport_height": _VIEW_H,
-                        "viewport": {"width": _VIEW_W, "height": _VIEW_H},
-                    })  # base64 jpeg
+                    # Coalesce to the newest pending frame, but schedule it for
+                    # the end of the FPS window instead of dropping it. Dropping
+                    # the last paint made lazy-loaded content appear permanently
+                    # missing whenever the page became still immediately after it.
+                    pending_frame = params
+                    if frame_flush_task is None or frame_flush_task.done():
+                        frame_flush_task = asyncio.create_task(_flush_latest_frame())
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1804,6 +1851,7 @@ class RecordSession:
             x, y = _input_point(ev)
             button = _mouse_button(ev.get("button"))
             steps = _mouse_steps(ev.get("steps"))
+            click_count = _mouse_click_count(ev.get("click_count"))
             if kind == "click":
                 await page.mouse.click(x, y, button=button)
             elif kind == "dblclick":
@@ -1814,10 +1862,10 @@ class RecordSession:
                 await page.mouse.move(x, y, steps=steps)
             elif kind in {"pointer_down", "mouse_down"}:
                 await page.mouse.move(x, y)
-                await page.mouse.down(button=button)
+                await page.mouse.down(button=button, click_count=click_count)
             elif kind in {"pointer_up", "mouse_up"}:
                 await page.mouse.move(x, y)
-                await page.mouse.up(button=button)
+                await page.mouse.up(button=button, click_count=click_count)
             elif kind == "drag":
                 start_x, start_y = _input_point(ev, prefix="from_")
                 await page.mouse.move(start_x, start_y)
