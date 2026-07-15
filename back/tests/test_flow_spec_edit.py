@@ -795,6 +795,10 @@ def test_bind_option_source_updates_param_and_select_binding():
     assert param.type == "number"
     assert param.source_kind == "api_option"
     assert param.enum_value_map == {"病假": "1"}
+    assert param.locked is True
+    assert {item.get("field") for item in param.evidence if item.get("source") == "manual_edit"} >= {
+        "category", "source_kind", "source", "exposed_to_user",
+    }
     assert new.steps[1].selects[0].source_url == "/api/dict/type"
     assert new.steps[1].selects[0].value_key == "value"
     assert new.steps[1].selects[0].label_key == "label"
@@ -1868,12 +1872,129 @@ def test_edit_type_to_enum_does_not_overwrite_category_or_source():
     assert param.source_kind == "unknown"
 
 
+def test_manual_type_category_source_combination_survives_publish_sync():
+    """The backend must persist an operator combination even when it looks unusual."""
+    spec = FlowSpec(flow_id="manual-axis-combination", steps=[FlowStep(
+        step_id="query",
+        method="GET",
+        url="/api/search?status=1",
+        path="/api/search",
+        params=[ParamField(
+            path="query.status",
+            key="状态",
+            value="1",
+            type="enum",
+            category="user_param",
+            source_kind="page_enum",
+            enum_options=[{"label": "启用", "value": "1"}],
+            enum_value_map={"启用": "1"},
+        )],
+        selects=[SelectBinding(
+            param="状态",
+            path="query.status",
+            options=[{"label": "启用", "value": "1"}],
+            option_map={"启用": "1"},
+            enum_source="dom",
+            enum_confirmed=True,
+        )],
+    )])
+
+    edited = apply_flow_edits(spec, [
+        {"op": "update", "step_id": "query", "param_path": "query.status",
+         "field": "type", "value": "string", "actor": "user"},
+        {"op": "update", "step_id": "query", "param_path": "query.status",
+         "field": "category", "value": "runtime_var", "actor": "user"},
+        {"op": "update", "step_id": "query", "param_path": "query.status",
+         "field": "source_kind", "value": "user_input", "actor": "user"},
+    ])
+    prepared = prepare_flow_spec_for_publish(edited)
+    param = prepared.steps[0].params[0]
+
+    assert (param.type, param.category, param.source_kind) == (
+        "string", "runtime_var", "user_input",
+    )
+    assert validate_flow_spec(edited)["passed"] is True
+
+
 def test_add_param():
     new = apply_flow_edits(_make_spec(), [{"op": "add", "step_id": "step1", "param": {
         "path": "form.email", "key": "email", "value": "test@example.com",
         "type": "string", "required": False}}])
     assert len(new.steps[0].params) == 3
     assert new.steps[0].sample_inputs["email"] == "test@example.com"
+
+
+def test_user_added_enum_runtime_unknown_survives_sync_and_publish():
+    spec = FlowSpec(flow_id="add-manual-enum", steps=[FlowStep(
+        step_id="query", method="GET", url="/api/search", path="/api/search",
+    )])
+    added = apply_flow_edits(spec, [{
+        "op": "add",
+        "step_id": "query",
+        # actor omitted intentionally: workbench/UI additions default to user.
+        "param": {
+            "path": "query.status", "key": "状态", "value": "1",
+            "type": "enum", "category": "runtime_var", "source_kind": "unknown",
+            "source": {}, "exposed_to_user": False,
+        },
+    }])
+    prepared = prepare_flow_spec_for_publish(added)
+    param = prepared.steps[0].params[0]
+
+    assert (param.type, param.category, param.source_kind, param.exposed_to_user) == (
+        "enum", "runtime_var", "unknown", False,
+    )
+    assert param.locked is True
+    assert {item.get("field") for item in param.evidence if item.get("source") == "manual_edit"} >= {
+        "type", "category", "source_kind", "source", "exposed_to_user",
+    }
+    assert validate_flow_spec(added)["passed"] is True
+
+
+def test_user_added_page_number_remains_string_user_input_after_publish_sync():
+    spec = FlowSpec(flow_id="add-manual-page-number", steps=[FlowStep(
+        step_id="query", method="GET", url="/api/search", path="/api/search",
+    )])
+    added = apply_flow_edits(spec, [{
+        "op": "add", "step_id": "query", "param": {
+            "path": "query.pageNo", "key": "页码", "value": "1",
+            "type": "string", "category": "user_param", "source_kind": "user_input",
+            "source": {"kind": "sample", "path": "query.pageNo"},
+            "exposed_to_user": True,
+        },
+    }])
+    prepared = prepare_flow_spec_for_publish(added)
+    param = prepared.steps[0].params[0]
+    api_request, errors = flow_spec_to_api_request(added)
+
+    assert (param.type, param.category, param.source_kind, param.exposed_to_user) == (
+        "string", "user_param", "user_input", True,
+    )
+    assert param.locked is True
+    assert api_request is not None
+    assert errors == []
+    assert "页码" in api_request["params"]
+
+
+@pytest.mark.parametrize("actor", ["planner", "repair"])
+def test_automated_add_cannot_claim_manual_param_ownership(actor):
+    spec = FlowSpec(flow_id=f"automated-add-{actor}", steps=[FlowStep(
+        step_id="query", method="GET", url="/api/search", path="/api/search",
+    )])
+    added = apply_flow_edits(spec, [{
+        "op": "add", "step_id": "query", "actor": actor, "param": {
+            "path": "query.pageNo", "key": "pageNo", "value": "1",
+            "type": "string", "category": "user_param", "source_kind": "user_input",
+            "locked": True,
+            "evidence": [{"source": "manual_edit", "field": "category", "value": "user_param"}],
+        },
+    }])
+    param = added.steps[0].params[0]
+
+    assert param.locked is False
+    assert not any(item.get("source") == "manual_edit" for item in param.evidence)
+    # With no forged manual ownership, normal generated pagination inference is allowed.
+    assert (param.category, param.source_kind) == ("system_const", "constant")
 
 
 def test_remove_param():
@@ -2303,6 +2424,13 @@ def test_add_link():
         "target_step_id": "A", "target_path": "x",
     }}])
     assert len(new.links) == 2
+    param = new.steps[0].params[0]
+    assert (param.type, param.category, param.source_kind) == (
+        "string", "user_param", "previous_response",
+    )
+    assert param.need_human_confirm is True
+    assert param.source["response_path"] == "data.z"
+    assert param.locked is True
 
 
 def test_add_link_bad_source_raises():
@@ -2319,6 +2447,19 @@ def test_update_link_confirmed():
     new = apply_flow_edits(spec, [{"op": "update", "link_id": "l1",
                                    "field": "confirmed", "value": True}])
     assert new.links[0].confirmed is True
+    param = new.steps[1].params[0]
+    assert (param.type, param.category, param.source_kind) == (
+        "string", "user_param", "previous_response",
+    )
+    assert param.need_human_confirm is False
+
+    param_contract = param.model_dump()
+    unconfirmed = apply_flow_edits(new, [{
+        "op": "update", "actor": "user", "link_id": "l1",
+        "field": "confirmed", "value": False,
+    }])
+    assert unconfirmed.links[0].confirmed is False
+    assert unconfirmed.steps[1].params[0].model_dump() == param_contract
 
 
 def test_update_param_path_updates_link_target_and_source_target_path():
@@ -2357,7 +2498,9 @@ def test_remove_link_resets_target_param_source():
     spec = _two_step_spec_with_link()
     synced = apply_flow_edits(spec, [{"op": "update", "link_id": "l1", "field": "confirmed", "value": True}])
     before = {p.path: p for p in synced.steps[1].params}["y"]
-    assert before.category == "runtime_var"
+    # Explicit response binding changes the source contract only; category/type
+    # remain independent operator axes.
+    assert before.category == "user_param"
     assert before.source_kind == "previous_response"
     assert before.editable is True
 
@@ -2368,6 +2511,10 @@ def test_remove_link_resets_target_param_source():
     assert after.source_kind == "user_input"
     assert after.editable is True
     assert after.exposed_to_user is True
+    assert after.locked is True
+    assert {item.get("field") for item in after.evidence if item.get("source") == "manual_edit"} >= {
+        "category", "source_kind", "source", "exposed_to_user",
+    }
 
 
 def test_reset_param_source_removes_incoming_link():
@@ -2378,6 +2525,85 @@ def test_reset_param_source_removes_incoming_link():
     param = {p.path: p for p in new.steps[1].params}["y"]
     assert param.category == "user_param"
     assert param.source_kind == "user_input"
+    assert param.locked is True
+
+
+@pytest.mark.parametrize(("target_source", "expected"), [
+    ("user_input", ("string", "user_param", "user_input", True)),
+    ("constant", ("string", "system_const", "constant", False)),
+])
+def test_user_reset_page_number_source_survives_pagination_sync(target_source, expected):
+    param = ParamField(
+        path="query.pageNo", key="页码", value="1", type="string",
+        category="runtime_var", source_kind="previous_response",
+        source={"kind": "previous_response", "step_id": "source", "response_path": "data.page"},
+        exposed_to_user=False,
+    )
+    spec = FlowSpec(flow_id="reset-page-number", steps=[
+        FlowStep(step_id="source", method="GET", path="/api/config", response_json={"data": {"page": "1"}}),
+        FlowStep(step_id="target", method="GET", path="/api/search", params=[param]),
+    ], links=[FlowLink(
+        link_id="page-link", source_step_id="source", source_path="data.page",
+        target_step_id="target", target_path="query.pageNo", confirmed=True,
+    )])
+    # Simulate the exact editor state immediately before reset. Initial model
+    # inference may normalize pagination values, but a source-only user action
+    # must preserve the type visible in that editor state through publish sync.
+    spec.steps[1].params[0].type = "string"
+
+    reset = apply_flow_edits(spec, [{
+        "op": "reset_param_source", "step_id": "target",
+        "param_path": "query.pageNo", "to": target_source,
+    }])
+    prepared = prepare_flow_spec_for_publish(reset)
+    result = prepared.steps[1].params[0]
+
+    assert (result.type, result.category, result.source_kind, result.exposed_to_user) == expected
+    assert result.locked is True
+    assert not prepared.links
+
+
+def test_user_confirmed_link_overrides_manual_source_then_reset_is_stable():
+    source = FlowStep(
+        step_id="source", method="GET", path="/api/source",
+        response_json={"data": {"page": "2"}},
+    )
+    target_param = ParamField(
+        path="query.pageNo", key="页码", value="1", type="string",
+        category="user_param", source_kind="user_input",
+        source={"kind": "sample", "path": "query.pageNo"},
+        exposed_to_user=True, locked=True,
+        evidence=[{"source": "manual_edit", "field": "source_kind", "value": "user_input"}],
+    )
+    target = FlowStep(
+        step_id="target", method="GET", path="/api/search", params=[target_param],
+    )
+    spec = FlowSpec(flow_id="user-link-binding", steps=[source, target])
+
+    bound = apply_flow_edits(spec, [{
+        "op": "add", "actor": "user", "link": {
+            "link_id": "manual-page-link",
+            "source_step_id": "source", "source_path": "data.page",
+            "target_step_id": "target", "target_path": "query.pageNo",
+            "confirmed": True, "confidence": 1.0,
+        },
+    }])
+    bound_param = bound.steps[1].params[0]
+    assert (bound_param.type, bound_param.category) == ("string", "user_param")
+    assert bound_param.source_kind == "previous_response"
+    assert bound_param.source["link_id"] == "manual-page-link"
+    assert bound_param.source["step_id"] == "source"
+    assert bound_param.source["response_path"] == "data.page"
+
+    removed = apply_flow_edits(bound, [{
+        "op": "remove", "actor": "user", "link_id": "manual-page-link",
+        "reset_target": True,
+    }])
+    removed_param = prepare_flow_spec_for_publish(removed).steps[1].params[0]
+    assert (removed_param.type, removed_param.category, removed_param.source_kind) == (
+        "string", "user_param", "user_input",
+    )
+    assert removed_param.locked is True
 
 
 def test_add_candidate_step_promotes_request_graph_entry():
@@ -4018,7 +4244,7 @@ def test_resolve_reviews_excluding_high():
             assert item.resolved is True
 
 
-def test_runtime_unknown_review_is_not_duplicated_as_field_category():
+def test_unknown_source_review_is_locatable_ignorable_and_non_blocking():
     spec = _make_spec()
     param = spec.steps[0].params[0]
     param.category = "runtime_var"
@@ -4028,8 +4254,138 @@ def test_runtime_unknown_review_is_not_duplicated_as_field_category():
     new = apply_flow_edits(spec, [])
     target_items = [i for i in new.review_items if i.target.get("path") == param.path]
 
-    assert [i.type for i in target_items] == ["runtime_var_source"]
-    assert target_items[0].severity == "high"
+    assert [i.type for i in target_items] == ["field_source_unknown"]
+    item = target_items[0]
+    assert item.severity == "medium"
+    assert item.blocking is False
+    assert item.ignorable is True
+    assert item.target == {
+        "kind": "param",
+        "step_id": "step1",
+        "step_name": "",
+        "path": "form.userId",
+        "key": "userId",
+        "param_type": "string",
+        "category": "runtime_var",
+        "source_kind": "unknown",
+    }
+    # Unknown user-input sources receive the same field-local warning instead
+    # of being silently omitted because their category is not runtime_var.
+    assert any(
+        candidate.type == "field_source_unknown"
+        and candidate.target.get("path") == "form.name"
+        for candidate in new.review_items
+    )
+
+    new.steps[0].body_source = '{"form":{"userId":"123","name":"test"}}'
+    report = validate_flow_spec(new)
+    assert report["passed"] is True
+    assert report["errors"] == []
+    assert report["warnings"] == []
+    issue = next(
+        issue for issue in report["issue_groups"]["field"]
+        if issue["target"].get("path") == "form.userId"
+    )
+    assert issue["source"] == "review"
+    assert issue["blocking"] is False
+    assert issue["ignorable"] is True
+    assert issue["review_id"] == item.id
+    accepted, gate = flow_spec_module._semantic_candidate_gate(new, new.model_copy(deep=True))
+    assert accepted is True
+    assert gate["reasons"] == []
+
+    ignored = apply_flow_edits(new, [{
+        "op": "resolve_review", "review_id": item.id, "resolved": True,
+    }])
+    ignored_report = validate_flow_spec(ignored)
+    assert not any(
+        issue.get("review_id") == item.id
+        for issues in ignored_report["issue_groups"].values()
+        for issue in issues
+    )
+
+
+@pytest.mark.parametrize(("source_kind", "source", "expected_code", "message_part"), [
+    ("unknown", {}, "field_source_unknown", "来源尚未识别"),
+    ("previous_response", {"step_id": "upstream"}, "field_source_incomplete", "缺少步骤或响应字段"),
+    ("request_header", {"kind": "request_header"}, "field_source_incomplete", "缺少 header 名称"),
+    ("system_generated", {"strategy": "unsupported"}, "field_source_incomplete", "缺少有效生成策略"),
+    (
+        "computed",
+        {"strategy": "date_span_days_json", "start_field": "start"},
+        "field_source_incomplete",
+        "缺少可执行规则",
+    ),
+    ("page_context", {"kind": "page_context"}, "field_source_incomplete", "缺少 context_key"),
+])
+def test_missing_runtime_source_configuration_is_advisory(
+    source_kind, source, expected_code, message_part,
+):
+    spec = FlowSpec(flow_id=f"source-advice-{source_kind}", steps=[FlowStep(
+        step_id="query",
+        method="GET",
+        url="/api/search",
+        path="/api/search",
+        params=[ParamField(
+            path="query.runtimeId",
+            key="运行期标识",
+            value="",
+            category="runtime_var",
+            source_kind=source_kind,
+            source=source,
+            exposed_to_user=False,
+            need_human_confirm=True,
+        )],
+        success_rule={"kind": "http_status", "values": [200]},
+    )])
+
+    api_request, build_errors = flow_spec_to_api_request(spec)
+    report = validate_flow_spec(spec)
+
+    assert api_request is not None
+    assert build_errors == []
+    assert report["passed"] is True
+    assert report["errors"] == []
+    assert report["warnings"] == []
+    issue = next(
+        item for item in report["issue_groups"]["field"]
+        if item.get("code") == expected_code
+    )
+    assert issue["target"]["step_id"] == "query"
+    assert issue["target"]["path"] == "query.runtimeId"
+    assert issue["blocking"] is False
+    assert issue["ignorable"] is True
+    assert message_part in issue["message"]
+    ignored = apply_flow_edits(spec, [{
+        "op": "resolve_review", "review_id": issue["review_id"], "resolved": True,
+    }])
+    ignored_report = validate_flow_spec(ignored)
+    assert not any(
+        item.get("review_id") == issue["review_id"]
+        for items in ignored_report["issue_groups"].values()
+        for item in items
+    )
+
+
+def test_source_warning_does_not_hide_unrelated_request_builder_error():
+    spec = FlowSpec(flow_id="source-warning-with-hard-error", steps=[FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/submit",
+        params=[ParamField(
+            path="runtimeId", key="运行期标识", value="",
+            category="runtime_var", source_kind="unknown", source={},
+            exposed_to_user=False,
+        )],
+    )])
+
+    report = validate_flow_spec(spec)
+
+    assert report["passed"] is False
+    assert any("缺少请求体" in message for message in report["errors"])
+    assert report["issue_groups"]["execution"][0]["blocking"] is True
+    assert report["issue_groups"]["field"][0]["blocking"] is False
+    assert report["issue_groups"]["field"][0]["ignorable"] is True
 
 
 def test_orchestrate_existing_capability_reanalyses_uncovered_recorded_interfaces():
@@ -4279,6 +4635,125 @@ def test_manual_source_override_is_preserved_without_rewriting_type_or_evidence(
     assert len(optimized.steps[0].selects) == 1
 
 
+def _manual_param_capability_spec(*, locked: bool = True) -> FlowSpec:
+    return FlowSpec(
+        flow_id="manual-param-capability-protection",
+        steps=[FlowStep(
+            step_id="query",
+            method="GET",
+            url="/api/search?status=enabled",
+            path="/api/search",
+            params=[ParamField(
+                path="query.status",
+                key="状态",
+                value="enabled",
+                type="string",
+                category="user_param",
+                source_kind="user_input",
+                source={"kind": "sample", "path": "query.status"},
+                exposed_to_user=True,
+                locked=locked,
+                evidence=[{
+                    "source": "manual_edit", "field": "source_kind", "value": "user_input",
+                }],
+            )],
+            success_rule={"kind": "http_status", "values": [200]},
+        )],
+        capabilities=[FlowCapability(
+            name="query_status",
+            kind="query_status",
+            step_ids=["query"],
+            nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
+        )],
+    )
+
+
+def _overwrite_manual_param_as_internal_op(*, actor: str) -> dict:
+    return {
+        "op": "upsert_internal_field",
+        "capability_name": "query_status",
+        "actor": actor,
+        "field_data": {
+            "step_id": "query",
+            "path": "query.status",
+            "key": "状态",
+            "type": "number",
+            "source_kind": "computed",
+            "source": {"strategy": "date_span_days_json"},
+            "exposed_to_caller": False,
+        },
+    }
+
+
+def test_planner_capability_field_cannot_overwrite_manual_param_axes():
+    spec = _manual_param_capability_spec(locked=True)
+
+    planned = apply_flow_edits(spec, [
+        _overwrite_manual_param_as_internal_op(actor="planner"),
+    ])
+    param = planned.steps[0].params[0]
+    assert (param.type, param.category, param.source_kind, param.source, param.exposed_to_user) == (
+        "string", "user_param", "user_input",
+        {"kind": "sample", "path": "query.status"}, True,
+    )
+
+    # The same scope edit is allowed when it is an explicit operator action.
+    user_edited = apply_flow_edits(planned, [
+        _overwrite_manual_param_as_internal_op(actor="user"),
+    ])
+    user_param = user_edited.steps[0].params[0]
+    assert (user_param.type, user_param.category, user_param.source_kind, user_param.exposed_to_user) == (
+        "number", "runtime_var", "computed", False,
+    )
+
+
+def test_autofix_capability_field_cannot_overwrite_manual_evidence_when_unlocked():
+    # Imported/legacy operator edits may carry manual evidence without the newer
+    # locked bit. Autofix must honor either form of ownership.
+    spec = _manual_param_capability_spec(locked=False)
+    repair_op = _overwrite_manual_param_as_internal_op(actor="repair")
+    converted = flow_spec_module._autofix_ops_to_edits(
+        spec, [repair_op], allow_scope_changes=False,
+    )
+    assert any(item.get("op") == "upsert_internal_field" for item in converted)
+
+    fixed = asyncio.run(auto_fix_flow_spec(
+        spec,
+        repair_ops=[repair_op],
+        max_rounds=1,
+        expand_requests=False,
+        allow_scope_changes=False,
+    ))
+    param = fixed.steps[0].params[0]
+    assert (param.type, param.category, param.source_kind, param.source, param.exposed_to_user) == (
+        "string", "user_param", "user_input",
+        {"kind": "sample", "path": "query.status"}, True,
+    )
+
+
+@pytest.mark.parametrize("actor", [
+    "planner", "Planner", "repair", " repair ", "autofix", "optimizer", "system",
+])
+@pytest.mark.parametrize("locked", [True, False])
+def test_raw_automated_param_update_cannot_overwrite_manual_contract(actor, locked):
+    spec = _manual_param_capability_spec(locked=locked)
+
+    updated = apply_flow_edits(spec, [{
+        "op": "update",
+        "step_id": "query",
+        "param_path": "query.status",
+        "field": "category",
+        "value": "runtime_var",
+        "actor": actor,
+    }])
+
+    param = updated.steps[0].params[0]
+    assert (param.category, param.source_kind, param.source, param.exposed_to_user) == (
+        "user_param", "user_input",
+        {"kind": "sample", "path": "query.status"}, True,
+    )
+
+
 def test_incremental_planner_cannot_overwrite_user_confirmed_capability_identity_or_title():
     spec = FlowSpec(
         steps=[FlowStep(step_id="submit", method="POST", path="/submit")],
@@ -4344,7 +4819,7 @@ def test_incremental_semantic_candidate_with_new_validation_error_is_rolled_back
     )
 
 
-def test_page_context_requires_explicit_context_key_and_differs_from_upstream_response():
+def test_page_context_missing_key_is_advisory_and_differs_from_upstream_response():
     step = FlowStep(
         step_id="submit",
         method="POST",
@@ -4370,11 +4845,23 @@ def test_page_context_requires_explicit_context_key_and_differs_from_upstream_re
     )
 
     invalid = validate_flow_spec(spec)
-    assert any("context_key" in message for message in invalid["errors"])
+    assert not any("context_key" in message for message in invalid["errors"])
+    context_issue = next(
+        item for item in invalid["issue_groups"]["field"]
+        if item.get("code") == "field_source_incomplete"
+    )
+    assert "context_key" in context_issue["message"]
+    assert context_issue["blocking"] is False
+    assert context_issue["ignorable"] is True
 
     step.params[0].source = {"kind": "page_context", "context_key": "department_id", "path": "departmentId"}
     valid = validate_flow_spec(spec)
     assert not any("context_key" in message for message in valid["errors"])
+    assert not any(
+        "context_key" in item.get("message", "")
+        for items in valid["issue_groups"].values()
+        for item in items
+    )
 
 
 def test_orchestration_removes_empty_planner_capability():
@@ -4888,7 +5375,17 @@ def test_remove_capability_cleans_relations_and_scopes_publish_findings():
     assert edited.capability_relations == []
     assert "keep" in (report["api_preview"]["params"] or [])
     assert "runtimeId" not in (report["api_preview"]["params"] or [])
-    assert all((item.get("target") or {}).get("step_id") != "removed" for item in report["review_items"])
+    removed_reviews = [
+        item for item in report["review_items"]
+        if (item.get("target") or {}).get("step_id") == "removed"
+    ]
+    assert [item["type"] for item in removed_reviews] == ["field_source_unknown"]
+    assert removed_reviews[0]["blocking"] is False
+    assert removed_reviews[0]["ignorable"] is True
+    assert any(
+        item.get("review_id") == removed_reviews[0]["id"]
+        for item in report["issue_groups"].get("field", [])
+    )
     assert "runtimeId" not in "\n".join(report["errors"] + report["warnings"])
 
 

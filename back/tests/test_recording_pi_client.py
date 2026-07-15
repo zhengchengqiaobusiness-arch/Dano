@@ -189,6 +189,30 @@ async def test_recording_pi_submission_limit_is_exposed_as_hard_failure(monkeypa
     client._proc = None
 
 
+@pytest.mark.asyncio
+async def test_recording_pi_accepted_submission_wins_over_late_limit(monkeypatch) -> None:  # noqa: ANN001
+    client = recording_pi.RecordingPiSession(
+        tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_TWO,
+    )
+    client._proc = object()
+
+    async def accepted_command(command_type, **_kwargs):  # noqa: ANN001
+        assert command_type == "prompt"
+        return {
+            "type": "prompt_completed",
+            "status": "submission_limit",
+            "error": "late duplicate",
+            "accepted_submission": "submit_recording_review",
+        }
+
+    monkeypatch.setattr(client, "_command", accepted_command)
+    result = await client.prompt("执行发布审核")
+    assert result["status"] == "submitted"
+    assert result["accepted_submission"] == "submit_recording_review"
+    assert "error" not in result
+    client._proc = None
+
+
 async def _await(value):  # noqa: ANN001, ANN201
     return value
 
@@ -331,6 +355,32 @@ class _ReviewSpec:
 
     def model_copy(self, *, deep: bool):  # noqa: ARG002, ANN201
         return _ReviewSpec(self.meta["current_version"], self.fingerprint)
+
+
+@pytest.mark.asyncio
+async def test_submit_review_is_first_write_wins_and_exact_replay_is_idempotent() -> None:
+    client = recording_pi.RecordingPiSession(
+        tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_TWO,
+    )
+    client.flow_spec = _ReviewSpec(7, "release-fingerprint")
+    first_review = {
+        "base_flow_version": 7,
+        "all_passed": True,
+        "verdicts": [
+            {"role": role, "passed": True, "reasons": []}
+            for role in ("acceptance", "security", "compliance")
+        ],
+    }
+    first = await client.submit_review(first_review, base_flow_version=7)
+    replay = await client.submit_review(dict(first_review), base_flow_version=7)
+    assert first["replayed"] is False
+    assert replay["replayed"] is True
+
+    changed = dict(first_review)
+    changed["all_passed"] = False
+    with pytest.raises(recording_pi.RecordingPiError, match="拒绝被后续结论覆盖"):
+        await client.submit_review(changed, base_flow_version=7)
+    assert client.last_review == first_review
 
 
 def test_require_publish_review_hard_fails_missing_stale_and_rejected(monkeypatch) -> None:  # noqa: ANN001

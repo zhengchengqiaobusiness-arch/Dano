@@ -1521,7 +1521,9 @@ async def record_ws(ws: WebSocket) -> None:
                     await pi_session.prompt(
                         "对当前录制发布候选执行最终审核。必须先调用 get_recording_state 和 "
                         "get_validation_report，再通过 submit_recording_review 提交 acceptance、"
-                        "security、compliance 三角色结论。"
+                        "security、compliance 三角色结论。每个角色只能包含 passed(bool)、"
+                        "reasons(string[])、可选 model_id(string)，review 顶层只能包含这三个角色；"
+                        "审核不通过时设置 passed=false 并填写 reasons。提交成功后立即结束，不得再次读取或重复提交。"
                         f" recording_id={recording_id} flow_version={review_version}"
                     )
                     pi_session.require_publish_review(

@@ -143,7 +143,6 @@ _STEP_ALLOWED_FIELDS = frozenset({
 
 _PUBLISH_BLOCKING_REVIEW_TYPES = frozenset({
     "dangerous_step",
-    "runtime_var_missing_source",
     "system_const_exposed",
     "broken_link",
     "link_source_missing",
@@ -378,6 +377,12 @@ class ReviewItem(BaseModel):
     reason: str = ""
     resolved: bool = False
     confidence: float = 0.0
+    # Review items are operator guidance, not deterministic publish gates.
+    # Keep this explicit in the wire contract so clients do not have to infer
+    # blocking behaviour from severity (an unresolved warning may still be
+    # high-visibility while remaining safe to dismiss).
+    blocking: bool = False
+    ignorable: bool = True
 
 
 class FlowCapability(BaseModel):
@@ -3538,8 +3543,31 @@ def _strip_body_prefix(path: str) -> str:
     return path[len("body."):] if path.startswith("body.") else path
 
 
-def _reset_param_source(param: ParamField, *, reason: str | None = None) -> None:
+def _record_param_manual_contract(param: ParamField, fields: list[str] | tuple[str, ...]) -> None:
+    """Mark explicit operator-owned ParamField axes before any derived sync."""
+    param.locked = True
+    for field in dict.fromkeys(fields):
+        if not hasattr(param, field):
+            continue
+        param.evidence.append({
+            "source": "manual_edit",
+            "field": field,
+            "value": getattr(param, field),
+        })
+
+
+def _reset_param_source(
+    param: ParamField,
+    *,
+    reason: str | None = None,
+    actor: str = "system",
+) -> None:
     """把字段从运行期/接口来源恢复成普通用户输入，供删除依赖/重置来源使用。"""
+    normalized_actor = str(actor or "system").strip().lower()
+    if normalized_actor in _AUTOMATED_FIELD_EDIT_ACTORS and (
+        param.locked or _param_has_manual_contract(param)
+    ):
+        return
     param.category = "user_param"
     param.source_kind = "user_input"
     param.source = {"kind": "sample", "path": param.path}
@@ -3548,6 +3576,11 @@ def _reset_param_source(param: ParamField, *, reason: str | None = None) -> None
     param.need_human_confirm = False
     param.confidence_tier = "manual"
     param.reason = reason or "已取消运行期/接口来源绑定，改为调用 Skill 时由用户填写"
+    if normalized_actor == "user":
+        _record_param_manual_contract(param, (
+            "category", "source_kind", "source", "editable",
+            "exposed_to_user", "need_human_confirm",
+        ))
 
 
 _ENUM_PARAM_TYPES = frozenset({"enum", "list-enum"})
@@ -3579,7 +3612,18 @@ def _invalidate_capability_contract(cap: FlowCapability) -> None:
     cap.requires_human_confirm = True
 
 
-def _apply_capability_field_to_param(spec: FlowSpec, raw: dict[str, Any], *, scope: str) -> bool:
+_AUTOMATED_FIELD_EDIT_ACTORS = frozenset({
+    "planner", "repair", "auto", "autofix", "optimizer", "system",
+})
+
+
+def _apply_capability_field_to_param(
+    spec: FlowSpec,
+    raw: dict[str, Any],
+    *,
+    scope: str,
+    actor: str = "user",
+) -> bool:
     """Persist a step-bound capability field edit on its canonical ParamField."""
     step_id = str(raw.get("step_id") or "")
     path = str(raw.get("path") or raw.get("key") or "")
@@ -3596,6 +3640,14 @@ def _apply_capability_field_to_param(spec: FlowSpec, raw: dict[str, Any], *, sco
         )
     except ValueError:
         return False
+    normalized_actor = str(actor or "user").strip().lower()
+    if normalized_actor in _AUTOMATED_FIELD_EDIT_ACTORS and (
+        param.locked or _param_has_manual_contract(param)
+    ):
+        # A capability field proposal is a derived view over ParamField, never
+        # stronger evidence than an operator-owned request contract. Consume
+        # the step-bound edit without mutating any user-owned axis.
+        return True
     if raw.get("key"):
         param.key = str(raw["key"])
         param.label = str(raw.get("display_name") or raw["key"])
@@ -3620,7 +3672,24 @@ def _apply_capability_field_to_param(spec: FlowSpec, raw: dict[str, Any], *, sco
     param.locked = bool(raw.get("locked", True))
     if "confirmed" in raw:
         param.need_human_confirm = not bool(raw.get("confirmed"))
-    param.evidence.append({"source": "capability_field_edit", "scope": scope})
+    param.evidence.append({
+        "source": "capability_field_edit", "scope": scope, "actor": normalized_actor,
+    })
+    if normalized_actor == "user":
+        manual_fields = [
+            field for field in ("type", "source_kind", "source", "exposed_to_caller")
+            if field in raw
+        ]
+        if scope in {"input", "internal"}:
+            manual_fields.extend(["category", "exposed_to_user"])
+        for field in dict.fromkeys(manual_fields):
+            value = (
+                param.exposed_to_user if field in {"exposed_to_caller", "exposed_to_user"}
+                else getattr(param, field, None)
+            )
+            param.evidence.append({
+                "source": "manual_edit", "field": field, "value": value,
+            })
     return True
 
 
@@ -3714,6 +3783,41 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
             if p.key in target.sample_inputs:
                 target.sample_inputs.pop(p.key, None)
             break
+
+
+def _apply_user_link_source(steps: list[FlowStep], link: FlowLink) -> None:
+    """Persist a user-created UI response binding without rewriting type/category."""
+    by_id = {step.step_id: step for step in steps}
+    source_step = by_id.get(link.source_step_id)
+    target_step = by_id.get(link.target_step_id)
+    if source_step is None or target_step is None:
+        return
+    target_path = _strip_body_prefix(link.target_path)
+    param = next((
+        item for item in target_step.params
+        if _strip_body_prefix(item.path) == target_path
+    ), None)
+    if param is None:
+        return
+    param.source_kind = "previous_response"
+    param.source = {
+        "kind": "previous_response",
+        "step_id": source_step.step_id,
+        "step_name": source_step.name,
+        "response_path": link.source_path,
+        "target_path": target_path,
+        "link_id": link.link_id,
+    }
+    param.editable = True
+    param.need_human_confirm = not bool(link.confirmed)
+    param.reason = (
+        f"该字段由用户绑定到 `{source_step.name or source_step.path or source_step.step_id}` "
+        f"的响应 `{link.source_path}`"
+    )
+    param.confidence = max(float(param.confidence or 0.0), float(link.confidence or 0.0))
+    param.confidence_tier = "manual"
+    target_step.sample_inputs.pop(param.key, None)
+    _record_param_manual_contract(param, ("source_kind", "source"))
 
 
 def _link_is_auto_generated(lk: FlowLink) -> bool:
@@ -9241,6 +9345,8 @@ def _review_item(
     suggested_action: str = "",
     reason: str = "",
     confidence: float = 0.0,
+    blocking: bool = False,
+    ignorable: bool = True,
 ) -> ReviewItem:
     return ReviewItem(
         id=_review_id(item_type, target),
@@ -9252,6 +9358,8 @@ def _review_item(
         suggested_action=suggested_action,
         reason=reason,
         confidence=confidence,
+        blocking=blocking,
+        ignorable=ignorable,
     )
 
 
@@ -9309,6 +9417,57 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
         if link.confirmed and link.source_step_id in step_ids and link.target_step_id in step_ids
     }
 
+    # 来源告警覆盖所有已经物化的接口字段，包括尚未归属能力的步骤；其它
+    # 风险/能力级 Review 仍只针对当前发布范围。这样顶部告警的“定位”可
+    # 直接落到捕获接口页的未归属字段，同时不会扩大实际发布范围。
+    for st in spec.steps:
+        for p in st.params:
+            target = {
+                "kind": "param",
+                "step_id": st.step_id,
+                "step_name": st.name,
+                "path": p.path,
+                "key": p.key,
+                "param_type": p.type,
+                "category": p.category,
+                "source_kind": p.source_kind or "unknown",
+            }
+            guess = f"{p.category}/{p.source_kind}"
+            source_unknown = str(p.source_kind or "").strip().lower() in {"", "unknown"}
+            source_advice = _field_source_configuration_advice(p)
+            if source_unknown:
+                items.append(_review_item(
+                    "field_source_unknown",
+                    severity="medium",
+                    title=f"字段 {p.path} 的来源尚未识别",
+                    target=target,
+                    current_guess=guess,
+                    suggested_action="configure_or_ignore_field_source",
+                    reason=(
+                        "系统会保留当前类型、分类和来源组合，不会自动改写或阻止保存、优化、发布；"
+                        "可补充明确来源，或确认当前人工配置后忽略此提示"
+                    ),
+                    confidence=p.confidence,
+                    blocking=False,
+                    ignorable=True,
+                ))
+            elif source_advice:
+                items.append(_review_item(
+                    "field_source_incomplete",
+                    severity="medium",
+                    title=f"字段 {p.path} 的来源配置不完整",
+                    target=target,
+                    current_guess=guess,
+                    suggested_action="configure_or_ignore_field_source",
+                    reason=(
+                        f"{source_advice}；系统会保留当前人工配置，"
+                        "该提示可忽略且不会阻止保存、优化、发布"
+                    ),
+                    confidence=p.confidence,
+                    blocking=False,
+                    ignorable=True,
+                ))
+
     for st in visible_steps:
         if st.risk_level == "L4":
             items.append(_review_item(
@@ -9329,45 +9488,25 @@ def build_review_items(spec: FlowSpec) -> list[ReviewItem]:
                 "step_name": st.name,
                 "path": p.path,
                 "key": p.key,
+                "param_type": p.type,
+                "category": p.category,
+                "source_kind": p.source_kind or "unknown",
             }
             guess = f"{p.category}/{p.source_kind}"
 
-            runtime_unknown = p.category == "runtime_var" and p.source_kind == "unknown"
+            source_unknown = str(p.source_kind or "").strip().lower() in {"", "unknown"}
 
-            if p.need_human_confirm and not runtime_unknown:
-                severity = "high" if p.category == "runtime_var" and p.source_kind == "unknown" else "medium"
+            source_advice = _field_source_configuration_advice(p)
+
+            if p.need_human_confirm and not source_unknown and not source_advice:
                 items.append(_review_item(
                     "field_category",
-                    severity=severity,
+                    severity="medium",
                     title=f"确认字段 {p.path} 的分类和来源",
                     target=target,
                     current_guess=guess,
                     suggested_action="confirm_field_source",
                     reason=p.reason or "该字段分类由规则推断，建议人工确认",
-                    confidence=p.confidence,
-                ))
-
-            if runtime_unknown:
-                items.append(_review_item(
-                    "runtime_var_source",
-                    severity="high",
-                    title=f"补充字段 {p.path} 的运行期来源",
-                    target=target,
-                    current_guess=guess,
-                    suggested_action="bind_runtime_source",
-                    reason="运行期变量不能使用录制旧值；请在字段页绑定上游响应，或改为当前用户、系统时间、页面上下文",
-                    confidence=p.confidence,
-                ))
-
-            if p.category == "runtime_var" and p.source_kind != "unknown" and not p.source:
-                items.append(_review_item(
-                    "runtime_var_missing_source",
-                    severity="high",
-                    title=f"补充字段 {p.path} 的 source 详情",
-                    target=target,
-                    current_guess=guess,
-                    suggested_action="bind_runtime_source",
-                    reason="字段已判为运行期变量，但缺少可执行的 source 描述",
                     confidence=p.confidence,
                 ))
 
@@ -9621,13 +9760,35 @@ def refresh_review_items(spec: FlowSpec) -> FlowSpec:
     for step in spec.steps:
         _dedupe_step_params(step)
     old_resolved: dict[str, bool] = {}
+    legacy_source_resolved: dict[tuple[str, str, str], bool] = {}
     for item in spec.review_items:
         # id 已是 target 的稳定 hash；同字段前后 ID 一致，resolved 跟着保留。
         old_resolved.setdefault(item.id, item.resolved)
+        # Preserve dismissals while migrating the two legacy runtime-only
+        # source warnings to category-agnostic field source review items.
+        legacy_type = {
+            "runtime_var_source": "field_source_unknown",
+            "runtime_var_missing_source": "field_source_incomplete",
+        }.get(item.type)
+        if legacy_type:
+            target_key = (
+                legacy_type,
+                str(item.target.get("step_id") or ""),
+                str(item.target.get("path") or ""),
+            )
+            legacy_source_resolved.setdefault(target_key, item.resolved)
     spec.review_items = build_review_items(spec)
     for item in spec.review_items:
         if item.id in old_resolved:
             item.resolved = old_resolved[item.id]
+        elif item.type in {"field_source_unknown", "field_source_incomplete"}:
+            target_key = (
+                item.type,
+                str(item.target.get("step_id") or ""),
+                str(item.target.get("path") or ""),
+            )
+            if target_key in legacy_source_resolved:
+                item.resolved = legacy_source_resolved[target_key]
     return spec
 
 
@@ -9873,46 +10034,14 @@ def _step_param_map(step: FlowStep) -> dict[str, str]:
 
 
 def _runtime_param_publish_error(param: ParamField) -> str | None:
-    """系统化:不要用 runtime_var/unknown 一刀切拒绝发布——启发式错误太多,
-    真实场景里很多字段只是因为 samples 没传到位被误判。让"完全无来源 + 无来源 fall-back"才硬拒,
-    其余的 runtime_var 字段(尤其 user_input 误导)走 warning + 前端 UI 兜底确认。"""
-    if param.category != "runtime_var":
-        return None
-    if param.source_kind == "previous_response":
-        if param.source.get("step_id") and (param.source.get("response_path") or param.source.get("path")):
-            return None
-        return f"字段 `{param.path}` 是上游响应变量，但缺少来源步骤或响应字段"
-    if param.source_kind == "request_header":
-        return None if param.source.get("header") else f"字段 `{param.path}` 是请求头变量，但缺少请求头名称"
-    if param.source_kind == "system_time":
-        return None
-    if param.source_kind == "system_generated":
-        strategy = str((param.source or {}).get("strategy") or "")
-        return None if strategy in {"uuid", "random_string", "random_number"} else (
-            f"字段 `{param.path}` 是系统生成值，但缺少有效生成策略"
-        )
-    if param.source_kind == "computed":
-        source = param.source or {}
-        if source.get("strategy") == "date_span_days_json" and source.get("start_field") and source.get("end_field"):
-            return None
-        return f"字段 `{param.path}` 是系统计算值，但缺少可执行计算规则"
-    if param.source_kind in {"api_option", "page_enum", "static_enum", "manual_enum", "form_option"}:
-        return None
-    if param.source_kind == "current_user":
-        return None
-    if param.source_kind == "page_context":
-        return None if param.source.get("context_key") else (
-            f"字段 `{param.path}` 使用调用上下文，但缺少 context_key"
-        )
-    # 系统化:不再因 runtime_var/unknown 单一硬拒;允许发布,把校验交给前端 review_items + 自我检查(运行时)。
-    # 用户在 UI 上能改 category 即可消除歧义;同时保留 review_items 提示(need_human_confirm)。
-    # 历史:这条规则最初是为防止用户「运行时被冻死的录制值」漏掉,但实际启发式经常误判
-    # (13 位毫秒/dict 字段名/审批人码),导致完全可发布的 spec 被截拦。现调整为「任何有 value 的 runtime_var 都放行」，
-    # 仅在完全没有 source 字典 / 完全无可执行来源时才报。
-    if param.value not in (None, "") and param.source_kind == "unknown":
-        return None
-    if not param.source and param.value in (None, ""):
-        return f"字段 `{param.path}` 是运行期变量，但缺少可执行来源"
+    """Source inference/configuration is advisory and never a publish error.
+
+    The same field-local finding is exposed by ``build_review_items`` and
+    ``_field_source_configuration_advice``.  Keeping this compatibility helper
+    returning ``None`` prevents source heuristics from entering request-builder
+    errors while preserving hard failures elsewhere (missing request body,
+    malformed request data, absent executable steps, and so on).
+    """
     return None
 
 
@@ -10797,6 +10926,35 @@ def _publish_issue_groups(errors: list[str], warnings: list[str]) -> dict[str, l
     return {"execution": entries} if entries else {}
 
 
+def _field_source_review_issues(review_items: list[ReviewItem]) -> list[dict[str, Any]]:
+    """Project unresolved field-source advice into the operator warning list.
+
+    This is deliberately separate from request-builder failures: an unknown
+    source is useful, field-local review context, but it is not proof that the
+    operator's type/category/source combination is invalid.
+    """
+    issues: list[dict[str, Any]] = []
+    for item in review_items:
+        if item.type not in {"field_source_unknown", "field_source_incomplete"} or item.resolved:
+            continue
+        issues.append({
+            "severity": "warning",
+            "message": f"{item.title}：{item.reason}" if item.reason else item.title,
+            "source": "review",
+            "target": dict(item.target or {}),
+            "blocking": False,
+            "ignorable": True,
+            "audience": "operator",
+            "actionable": True,
+            "auto_fixable": False,
+            "code": item.type,
+            "issue_id": f"review:{item.id}",
+            "review_id": item.id,
+            "suggested_action": item.suggested_action,
+        })
+    return issues
+
+
 def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
     """Canonicalize the current workbench state without invoking the Pi Agent."""
     current = sync_flow_spec_models(spec.model_copy(deep=True), prefer_request_facts=False)
@@ -10997,9 +11155,13 @@ def validate_flow_spec(spec: FlowSpec) -> dict:
     errors = list(dict.fromkeys(str(item) for item in errors if item))
     warnings = list(dict.fromkeys(str(item) for item in warnings if item))
     suggestions = list(dict.fromkeys(str(item) for item in suggestions if item))
-    # Generated ReviewItems remain in ``review_items`` and ``suggestions`` for
-    # editing assistance.  They deliberately do not enter publish issue_groups.
+    # Generated ReviewItems remain advisory. Field-source items are also
+    # projected into the operator field-warning group for visibility, while
+    # staying explicitly ignorable and outside the publish pass/fail decision.
     issue_groups = _publish_issue_groups(errors, warnings)
+    field_source_issues = _field_source_review_issues(review_items)
+    if field_source_issues:
+        issue_groups.setdefault("field", []).extend(field_source_issues)
     return {
         "passed": not errors,
         "errors": errors,
@@ -11790,9 +11952,15 @@ def _bind_option_source(
     options: list[Any] | None = None,
     option_map: dict[str, Any] | None = None,
     multi: bool = False,
+    actor: str = "system",
 ) -> None:
     step = _find_step(spec, target_step_id)
     param = _find_param(step, target_path)
+    normalized_actor = str(actor or "system").strip().lower()
+    if normalized_actor in _AUTOMATED_FIELD_EDIT_ACTORS and (
+        param.locked or _param_has_manual_contract(param)
+    ):
+        return
     source_step = _find_step(spec, source_step_id) if source_step_id else None
     src_url = source_url or (source_step.path or source_step.url if source_step else "")
     if not src_url:
@@ -11845,6 +12013,16 @@ def _bind_option_source(
     sel.enum_source = "api"
     sel.enum_confirmed = True
     _hydrate_select_source_contract(spec, sel)
+    if normalized_actor == "user":
+        manual_fields = [
+            "category", "source_kind", "source", "exposed_to_user",
+            "editable", "need_human_confirm",
+        ]
+        if options:
+            manual_fields.append("enum_options")
+        if option_map:
+            manual_fields.append("enum_value_map")
+        _record_param_manual_contract(param, manual_fields)
 
 
 def _set_capability_loop_source(cap: FlowCapability, items: str = "input.entries") -> None:
@@ -12412,6 +12590,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
 
         if op == "update_capability":
             idx = _find_capability_index(new_spec, edit)
+            actor = str(edit.get("actor") or "user").strip().lower()
             field = str(edit.get("field") or "")
             if field not in _CAPABILITY_ALLOWED_FIELDS:
                 raise ValueError(f"unknown capability field: {field}")
@@ -12439,7 +12618,9 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 routed: list[CapabilityField] = []
                 for item in value:
                     scope = scope_by_field.get(field, item.scope or "request_field")
-                    if not _apply_capability_field_to_param(new_spec, item.model_dump(), scope=scope):
+                    if not _apply_capability_field_to_param(
+                        new_spec, item.model_dump(), scope=scope, actor=actor,
+                    ):
                         routed.append(item)
                 value = routed
             if field == "dependencies":
@@ -12462,7 +12643,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 cap.status = "draft"
                 cap.confirmation_hash = ""
             elif field != "updated_by":
-                cap.updated_by = "user"
+                cap.updated_by = actor
                 if field in {
                     "name", "title", "intent", "kind", "request_refs", "step_ids", "nodes",
                     "fields", "inputs", "request_fields", "internal_fields", "computed_fields",
@@ -12558,7 +12739,9 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             for alias in ("field_id", "key", "path", "step_id", "request_id", "request_index", "type", "source_kind"):
                 if alias in edit and alias not in raw:
                     raw[alias] = edit.get(alias)
-            if not _apply_capability_field_to_param(new_spec, raw, scope=default_scope):
+            if not _apply_capability_field_to_param(
+                new_spec, raw, scope=default_scope, actor=actor,
+            ):
                 # Only capability-owned aggregate inputs/outputs are persisted on
                 # FlowCapability. Step-bound fields are redirected to ParamField.
                 _upsert_capability_field(new_spec.capabilities[idx], raw, default_scope=default_scope)
@@ -12710,6 +12893,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 options=edit.get("options") if isinstance(edit.get("options"), list) else None,
                 option_map=edit.get("option_map") if isinstance(edit.get("option_map"), dict) else None,
                 multi=bool(edit.get("multi")),
+                actor=str(edit.get("actor") or "user"),
             )
             _invalidate_capabilities_for_steps(new_spec, {
                 str(edit.get("target_step") or edit.get("target_step_id") or edit.get("step_id") or "")
@@ -12809,10 +12993,32 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     _merge_link(duplicate, link)
                     if link in new_spec.links:
                         new_spec.links.remove(link)
+                    effective_link = duplicate
+                else:
+                    effective_link = link
+                if (
+                    str(edit.get("actor") or "user").strip().lower() == "user"
+                    and field == "confirmed"
+                    and effective_link.confirmed
+                ):
+                    _apply_user_link_source(new_spec.steps, effective_link)
                 continue
 
             if op == "remove":
                 link = _find_link(new_spec, link_id)
+                if edit.get("reset_target"):
+                    target_step = _find_step(new_spec, link.target_step_id)
+                    target_param = _find_param(target_step, link.target_path)
+                    actor = str(edit.get("actor") or "user").strip().lower()
+                    if actor in _AUTOMATED_FIELD_EDIT_ACTORS and (
+                        target_param.locked or _param_has_manual_contract(target_param)
+                    ):
+                        continue
+                    _reset_param_source(
+                        target_param,
+                        reason="依赖已由用户移除，字段已恢复为用户输入",
+                        actor=actor,
+                    )
                 if edit.get("record_rejection", True):
                     _record_rejected_dependency(new_spec, link)
                 new_spec.links.remove(link)
@@ -12834,9 +13040,14 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             existing = _matching_link(new_spec, new_link)
             if existing is not None:
                 _merge_link(existing, new_link)
-                continue
-            _ensure_unique_link(new_spec, new_link)
-            new_spec.links.append(new_link)
+                effective_link = existing
+            else:
+                _ensure_unique_link(new_spec, new_link)
+                new_spec.links.append(new_link)
+                effective_link = new_link
+            actor = str(edit.get("actor") or "user").strip().lower()
+            if actor == "user":
+                _apply_user_link_source(new_spec.steps, effective_link)
             continue
 
         # 步骤/参数编辑
@@ -12850,7 +13061,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             param_path = edit.get("param_path")
             field = edit.get("field")
             value = edit.get("value")
-            actor = str(edit.get("actor") or "user")
+            actor = str(edit.get("actor") or "user").strip().lower()
 
             if not field:
                 raise ValueError("update edit missing field")
@@ -12863,6 +13074,10 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     param_key=str(edit.get("param_key") or ""),
                     param_label=str(edit.get("param_label") or ""),
                 )
+                if actor in _AUTOMATED_FIELD_EDIT_ACTORS and (
+                    param.locked or _param_has_manual_contract(param)
+                ):
+                    continue
                 if field == "key":
                     _rename_param_public_key(new_spec, step, param, str(value), actor=actor)
                 elif field == "path":
@@ -12997,6 +13212,11 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 param_label=str(edit.get("param_label") or ""),
             )
             target = str(edit.get("to") or "user_input")
+            actor = str(edit.get("actor") or "user").strip().lower()
+            if actor in _AUTOMATED_FIELD_EDIT_ACTORS and (
+                param.locked or _param_has_manual_contract(param)
+            ):
+                continue
             new_spec.links = [
                 lk for lk in new_spec.links
                 if not (lk.target_step_id == step.step_id and _strip_body_prefix(lk.target_path) == _strip_body_prefix(param.path))
@@ -13009,21 +13229,47 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 param.exposed_to_user = False
                 param.need_human_confirm = False
                 param.reason = "已重置为系统固定值，发布后按当前录制值提交"
+                if actor == "user":
+                    _record_param_manual_contract(param, (
+                        "category", "source_kind", "source", "editable",
+                        "exposed_to_user", "need_human_confirm",
+                    ))
             else:
-                _reset_param_source(param)
+                _reset_param_source(param, actor=actor)
                 step.sample_inputs[param.key] = param.value
             continue
 
         elif op == "add":
-            param_data = edit.get("param")
-            if not param_data:
+            raw_param_data = edit.get("param")
+            if not isinstance(raw_param_data, dict) or not raw_param_data:
                 raise ValueError("add edit missing param")
+            param_data = dict(raw_param_data)
+            explicit_fields = set(param_data)
             if "type" not in param_data and "value" in param_data:
                 param_data["type"] = _infer_type_from_value(param_data["value"])
             try:
                 new_param = ParamField(**param_data)
             except ValidationError as e:
                 raise ValueError(f"invalid param data: {e}")
+            actor = str(edit.get("actor") or "user").strip().lower()
+            if actor == "user":
+                # A field added in the workbench is already an explicit
+                # operator decision. Record each supplied contract axis before
+                # the final sync so enum/pagination heuristics cannot rewrite it.
+                manual_fields = [field for field in (
+                    "type", "category", "source_kind", "source",
+                    "exposed_to_user", "editable", "required",
+                    "need_human_confirm", "enum_options", "enum_value_map",
+                ) if field in explicit_fields]
+                _record_param_manual_contract(new_param, manual_fields)
+            elif actor in _AUTOMATED_FIELD_EDIT_ACTORS:
+                # Planner/repair payloads are proposals and cannot grant
+                # themselves operator ownership through locked/manual markers.
+                new_param.locked = False
+                new_param.evidence = [
+                    item for item in (new_param.evidence or [])
+                    if not isinstance(item, dict) or item.get("source") != "manual_edit"
+                ]
             step.params.append(new_param)
             if new_param.value:
                 step.sample_inputs[new_param.key] = new_param.value

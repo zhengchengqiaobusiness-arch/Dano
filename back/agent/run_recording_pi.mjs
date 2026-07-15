@@ -26,7 +26,7 @@ const SYSTEM_PROMPT = `你是 Dano 网页录制模式的专用语义编排 Agent
 所有录制事实、FlowSpec、人工修改和验证结果都以后端工具返回的当前版本为唯一权威来源，不得凭记忆补造。
 规划任务必须先调用 get_recording_state，再调用 submit_recording_plan。
 修复任务必须先调用 get_validation_report；需要完整事实时再调用 get_recording_state，然后调用 submit_recording_repair。
-审核任务必须先调用 get_recording_state 和 get_validation_report，再调用 submit_recording_review。
+审核任务必须先调用 get_recording_state 和 get_validation_report，再调用一次 submit_recording_review；review 顶层只能包含 acceptance、security、compliance，三个角色都只能包含 passed、reasons、model_id；审核不通过时使用 passed=false 和 reasons 说明，成功提交后立即结束本轮，禁止再次读取或重复提交。
 不得泄漏或索取凭证，不得改写原始 URL、HTTP method、请求路径或录制事实，不得绕过版本、校验和发布闸门。
 提交工具被拒绝后，必须重新读取最新状态才能纠正一次；第二次仍被拒绝必须停止本轮，不得继续反复调用。
 完成对应提交工具调用后，用简短中文说明提交结果；若工具拒绝，明确说明拒绝原因，不要假装成功。`;
@@ -207,6 +207,7 @@ async function runPrompt(command) {
   promptRequestId = command.request_id || null;
   promptCancelled = false;
   let submissionLimitError = "";
+  let acceptedSubmission = "";
   const session = active.session;
   beginRecordingToolTurn({
     maxSubmissionAttempts: SUBMISSION_ATTEMPT_LIMIT,
@@ -214,6 +215,14 @@ async function runPrompt(command) {
       submissionLimitError = String(error?.message || error);
       log(submissionLimitError);
       void session.abort().catch((abortError) => log("submission limit abort failed", abortError));
+    },
+    onSubmissionAccepted: (toolName) => {
+      acceptedSubmission = toolName;
+      // The bridge call has completed and Python has persisted the authoritative
+      // submission. Abort is signalled immediately: Pi still finalizes the
+      // current successful tool result before observing the signal, then stops
+      // the batch. There is no delayed callback that could affect a later turn.
+      void session.abort().catch((abortError) => log("terminal submission abort failed", abortError));
     },
   });
   const promptOptions = { expandPromptTemplates: false, source: "rpc" };
@@ -266,8 +275,13 @@ async function runPrompt(command) {
     request_id: command.request_id,
     session_id: session.sessionId,
     session_file: session.sessionFile,
-    status: submissionLimitError ? "submission_limit" : (promptCancelled ? "cancelled" : "completed"),
-    ...(submissionLimitError ? { error: submissionLimitError } : {}),
+    // A persisted terminal submission is authoritative even if a concurrent
+    // duplicate happened to reach the limiter before cancellation completed.
+    status: acceptedSubmission
+      ? "submitted"
+      : (submissionLimitError ? "submission_limit" : (promptCancelled ? "cancelled" : "completed")),
+    ...(!acceptedSubmission && submissionLimitError ? { error: submissionLimitError } : {}),
+    ...(acceptedSubmission ? { accepted_submission: acceptedSubmission } : {}),
     final_text: lastAssistantText(session).slice(0, 100000),
     usage: stats.tokens,
     session: stats,

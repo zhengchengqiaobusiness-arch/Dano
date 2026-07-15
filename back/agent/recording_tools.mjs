@@ -13,12 +13,19 @@ const SUBMISSION_TOOLS = new Set([
 ]);
 let activeTurnBudget = null;
 
-export function beginRecordingToolTurn({ maxSubmissionAttempts = 2, onLimitExceeded } = {}) {
+export function beginRecordingToolTurn({
+  maxSubmissionAttempts = 2,
+  onLimitExceeded,
+  onSubmissionAccepted,
+} = {}) {
   activeTurnBudget = {
     attempts: 0,
     maxSubmissionAttempts: Math.max(1, Number.parseInt(String(maxSubmissionAttempts), 10) || 2),
     onLimitExceeded,
+    onSubmissionAccepted,
+    acceptedSubmission: "",
     limitReported: false,
+    submissionTail: Promise.resolve(),
   };
 }
 
@@ -26,21 +33,65 @@ export function endRecordingToolTurn() {
   activeTurnBudget = null;
 }
 
-export function guardRecordingToolAttempt(name) {
-  if (!activeTurnBudget || !SUBMISSION_TOOLS.has(name)) return 0;
-  activeTurnBudget.attempts += 1;
-  if (activeTurnBudget.attempts <= activeTurnBudget.maxSubmissionAttempts) {
-    return activeTurnBudget.attempts;
+export function guardRecordingToolAttempt(name, turn = activeTurnBudget) {
+  if (!turn || !SUBMISSION_TOOLS.has(name)) return 0;
+  // Once one terminal submission has been persisted, later tool calls from the
+  // same model turn are harmless duplicates, not failed attempts.
+  if (turn.acceptedSubmission) return -1;
+  turn.attempts += 1;
+  if (turn.attempts <= turn.maxSubmissionAttempts) {
+    return turn.attempts;
   }
   const error = new Error(
-    `recording submission attempt limit exceeded (${activeTurnBudget.maxSubmissionAttempts}); `
+    `recording submission attempt limit exceeded (${turn.maxSubmissionAttempts}); `
     + "stop this turn and read fresh state before a new request",
   );
-  if (!activeTurnBudget.limitReported) {
-    activeTurnBudget.limitReported = true;
-    activeTurnBudget.onLimitExceeded?.(error);
+  if (!turn.limitReported) {
+    turn.limitReported = true;
+    turn.onLimitExceeded?.(error);
   }
   throw error;
+}
+
+export function acceptRecordingToolSubmission(name, turn = activeTurnBudget) {
+  if (!turn || !SUBMISSION_TOOLS.has(name)) return false;
+  if (turn.acceptedSubmission) return false;
+  turn.acceptedSubmission = name;
+  turn.onSubmissionAccepted?.(name);
+  return true;
+}
+
+export async function runRecordingSubmissionAttempt(name, operation) {
+  const turn = activeTurnBudget;
+  if (!turn || !SUBMISSION_TOOLS.has(name)) {
+    return { output: await operation(), duplicate: false };
+  }
+
+  // Pi may execute tool calls from one assistant message concurrently. Queue
+  // terminal submissions so only one can reach Python at a time; after one is
+  // accepted, queued duplicates return success without another HTTP mutation.
+  const previous = turn.submissionTail;
+  let release;
+  turn.submissionTail = new Promise((resolve) => { release = resolve; });
+  await previous;
+  try {
+    if (turn.acceptedSubmission) {
+      return {
+        output: {
+          ok: true,
+          status: "already_submitted",
+          accepted_submission: turn.acceptedSubmission,
+        },
+        duplicate: true,
+      };
+    }
+    guardRecordingToolAttempt(name, turn);
+    const output = await operation();
+    acceptRecordingToolSubmission(name, turn);
+    return { output, duplicate: false };
+  } finally {
+    release();
+  }
 }
 
 function requireBridgeEnvironment() {
@@ -80,8 +131,21 @@ function proxyTool({ name, label, description, parameters }) {
     label,
     description,
     parameters,
+    ...(SUBMISSION_TOOLS.has(name) ? { executionMode: "sequential" } : {}),
     execute: async (toolCallId, params) => {
-      guardRecordingToolAttempt(name);
+      if (SUBMISSION_TOOLS.has(name)) {
+        const { output } = await runRecordingSubmissionAttempt(
+          name,
+          () => callRecordingTool(name, params, toolCallId),
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(output) }],
+          isError: false,
+          // This is the SDK-native terminal signal. The abort callback in the
+          // runtime remains a fallback for mixed parallel tool batches.
+          terminate: true,
+        };
+      }
       const output = await callRecordingTool(name, params, toolCallId);
       return {
         content: [{ type: "text", text: JSON.stringify(output) }],
@@ -150,10 +214,21 @@ export const recordingTools = [
         base_flow_version: Type.Integer({ minimum: 0 }),
         review: Type.Object(
           {
-            acceptance: Type.Record(Type.String(), Type.Any()),
-            security: Type.Record(Type.String(), Type.Any()),
-            compliance: Type.Record(Type.String(), Type.Any()),
-            blocking_reasons: Type.Optional(Type.Array(Type.String())),
+            acceptance: Type.Object({
+              passed: Type.Boolean(),
+              reasons: Type.Optional(Type.Array(Type.String())),
+              model_id: Type.Optional(Type.String({ minLength: 1 })),
+            }, { additionalProperties: false }),
+            security: Type.Object({
+              passed: Type.Boolean(),
+              reasons: Type.Optional(Type.Array(Type.String())),
+              model_id: Type.Optional(Type.String({ minLength: 1 })),
+            }, { additionalProperties: false }),
+            compliance: Type.Object({
+              passed: Type.Boolean(),
+              reasons: Type.Optional(Type.Array(Type.String())),
+              model_id: Type.Optional(Type.String({ minLength: 1 })),
+            }, { additionalProperties: false }),
           },
           { additionalProperties: false },
         ),

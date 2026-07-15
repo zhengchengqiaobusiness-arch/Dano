@@ -5,10 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
+  acceptRecordingToolSubmission,
   beginRecordingToolTurn,
   endRecordingToolTurn,
   guardRecordingToolAttempt,
   recordingTools,
+  runRecordingSubmissionAttempt,
 } from "./recording_tools.mjs";
 
 const expectedTools = [
@@ -50,6 +52,87 @@ function verifySubmissionAttemptLimit() {
     assert(exceeded === 1, "submission limit callback must run exactly once");
   } finally {
     endRecordingToolTurn();
+  }
+}
+
+async function verifySuccessfulSubmissionEndsTurn() {
+  const accepted = [];
+  beginRecordingToolTurn({ onSubmissionAccepted: (name) => accepted.push(name) });
+  try {
+    let backendCalls = 0;
+    const first = runRecordingSubmissionAttempt("submit_recording_review", async () => {
+      backendCalls += 1;
+      await Promise.resolve();
+      return { ok: true };
+    });
+    const duplicate = runRecordingSubmissionAttempt("submit_recording_review", async () => {
+      backendCalls += 1;
+      return { ok: true };
+    });
+    const [firstResult, duplicateResult] = await Promise.all([first, duplicate]);
+    assert(firstResult.duplicate === false, "first successful submission was marked duplicate");
+    assert(duplicateResult.duplicate === true, "parallel duplicate submission was not suppressed");
+    assert(backendCalls === 1, "parallel duplicate reached the backend");
+    assert(guardRecordingToolAttempt("submit_recording_review") === -1, "accepted submission must bypass attempt limit");
+    assert(acceptRecordingToolSubmission("submit_recording_review") === false, "duplicate success must not fire twice");
+    assert(JSON.stringify(accepted) === JSON.stringify(["submit_recording_review"]), "terminal submission callback mismatch");
+  } finally {
+    endRecordingToolTurn();
+  }
+}
+
+async function verifyRejectedThenAcceptedSubmissionIsTerminal() {
+  let backendCalls = 0;
+  let exceeded = 0;
+  beginRecordingToolTurn({
+    maxSubmissionAttempts: 2,
+    onLimitExceeded: () => { exceeded += 1; },
+  });
+  try {
+    let rejected = false;
+    try {
+      await runRecordingSubmissionAttempt("submit_recording_review", async () => {
+        backendCalls += 1;
+        throw new Error("schema rejected");
+      });
+    } catch (error) {
+      rejected = /schema rejected/.test(String(error?.message || error));
+    }
+    assert(rejected, "first rejected review was not surfaced");
+    const accepted = await runRecordingSubmissionAttempt("submit_recording_review", async () => {
+      backendCalls += 1;
+      return { ok: true };
+    });
+    const afterAccepted = await runRecordingSubmissionAttempt("submit_recording_review", async () => {
+      backendCalls += 1;
+      return { ok: true };
+    });
+    assert(accepted.duplicate === false, "corrected review was not accepted");
+    assert(afterAccepted.duplicate === true, "post-success review was not suppressed");
+    assert(backendCalls === 2, "post-success review reached the backend");
+    assert(exceeded === 0, "post-success review incorrectly triggered the attempt limit");
+  } finally {
+    endRecordingToolTurn();
+  }
+}
+
+function verifyReviewToolSchema() {
+  const reviewTool = recordingTools.find((tool) => tool.name === "submit_recording_review");
+  assert(reviewTool?.executionMode === "sequential", "terminal review tool must execute sequentially");
+  for (const tool of recordingTools.filter((item) => item.name.startsWith("submit_recording_"))) {
+    assert(tool.executionMode === "sequential", `${tool.name} must execute sequentially`);
+  }
+  const reviewSchema = reviewTool?.parameters?.properties?.review;
+  assert(reviewSchema?.additionalProperties === false, "review schema must reject unknown top-level fields");
+  assert(!("blocking_reasons" in (reviewSchema?.properties || {})), "Pi review schema must use role verdicts for rejection");
+  for (const role of ["acceptance", "security", "compliance"]) {
+    const roleSchema = reviewSchema?.properties?.[role];
+    assert(roleSchema?.additionalProperties === false, `review.${role} must reject unknown fields`);
+    assert(
+      JSON.stringify(Object.keys(roleSchema?.properties || {}).sort())
+        === JSON.stringify(["model_id", "passed", "reasons"]),
+      `review.${role} schema fields mismatch`,
+    );
   }
 }
 
@@ -130,6 +213,9 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-recording-pi-"));
 try {
   assert(JSON.stringify(recordingTools.map((tool) => tool.name)) === JSON.stringify(expectedTools), "recording tool allowlist mismatch");
   verifySubmissionAttemptLimit();
+  await verifySuccessfulSubmissionEndsTurn();
+  await verifyRejectedThenAcceptedSubmissionIsTerminal();
+  verifyReviewToolSchema();
   verifyPersistentSession(tempDir);
   await verifyRuntimeProtocol(tempDir);
   process.stdout.write(`${JSON.stringify({ status: "ok", tools: expectedTools, persistent_session: true, runtime_protocol: true })}\n`);

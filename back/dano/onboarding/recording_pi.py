@@ -262,6 +262,13 @@ class RecordingPiSession:
         async with self._prompt_lock:
             try:
                 event = await self._command("prompt", timeout_s=timeout_s, text=text)
+                # A terminal tool submission has already been persisted by the
+                # Python bridge. It is authoritative even if an older sidecar
+                # also reports a late limiter/cancel status in the same event.
+                if event.get("accepted_submission"):
+                    event["status"] = "submitted"
+                    event.pop("error", None)
+                    return event
                 if event.get("status") == "submission_limit":
                     raise RecordingPiError(
                         "录制 Pi 在同一任务中连续提交被拒，已停止本轮以避免无效 Token 消耗；"
@@ -342,9 +349,14 @@ class RecordingPiSession:
                 raise RecordingPiError(
                     f"录制版本冲突: base={base_flow_version}, current={actual_version}; 请重新读取状态"
                 )
-            self.last_review = dict(review or {})
+            candidate = dict(review or {})
+            if self.last_submission_kind == "review" and self.last_review:
+                if candidate == self.last_review:
+                    return {"accepted": True, "flow_version": actual_version, "replayed": True}
+                raise RecordingPiError("当前 FlowSpec 版本的发布审核已提交，拒绝被后续结论覆盖")
+            self.last_review = candidate
             self.last_submission_kind = "review"
-            return {"accepted": True, "flow_version": actual_version}
+            return {"accepted": True, "flow_version": actual_version, "replayed": False}
 
     def require_publish_review(
         self,
