@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Alert,
@@ -331,7 +331,7 @@ const CATEGORY_OPTIONS = [
 //   上游链侧: previous_response(本能力内 step 响应)
 //   系统侧: current_user / system_time / request_header / page_context / constant
 const SOURCE_KIND_OPTIONS = [
-  { label: "待配置", value: "unknown" },
+  { label: "来源不明", value: "unknown" },
   { label: "用户输入", value: "user_input" },
   { label: "接口候选", value: "api_option" },
   // 页面/接口快照/人工枚举在 UI 只保留一个入口，后端仍保留真实 provenance。
@@ -475,6 +475,9 @@ function frameMetaFromMessage(message: any): RecorderFrameMeta {
 function domAnchorPart(value: unknown) {
   return String(value ?? "").replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "item";
 }
+function fieldEditorAnchorId(stepId: string, path: string) {
+  return `field-${domAnchorPart(stepId)}-${domAnchorPart(stripBodyPrefix(path))}`;
+}
 function popupContainer(_node?: HTMLElement) {
   return document.body;
 }
@@ -483,17 +486,6 @@ function optionLabel(options: Array<{ label: string; value: string }>, value: st
 }
 function normalizeSourceKindForUi(sourceKind?: string | null) {
   return ENUM_SOURCE_KINDS.includes(sourceKind || "") ? "manual_enum" : (sourceKind || "");
-}
-function sourceOptionsForCategory(_category?: string) {
-  return SOURCE_KIND_OPTIONS;
-}
-function defaultSourceForCategory(category: string, current?: string) {
-  const options = sourceOptionsForCategory(category);
-  const normalized = normalizeSourceKindForUi(current);
-  if (normalized && options.some((x) => x.value === normalized)) return normalized;
-  if (category === "runtime_var") return "unknown";
-  if (category === "system_const") return "constant";
-  return "user_input";
 }
 function sourceDescriptor(sourceKind: string, p: FlowParam, current?: Record<string, any>) {
   const path = p.path;
@@ -542,7 +534,20 @@ function sourceNeedsConfiguration(sourceKind: string, source?: Record<string, an
   return false;
 }
 function sourceSelectOptionsForParam(p: FlowParam) {
-  return sourceOptionsForCategory(p.category);
+  const current = normalizeSourceKindForUi(p.source_kind);
+  if (!current || SOURCE_KIND_OPTIONS.some((option) => option.value === current)) return SOURCE_KIND_OPTIONS;
+  return [
+    { label: optionLabel(SOURCE_KIND_OPTIONS, current), value: current },
+    ...SOURCE_KIND_OPTIONS,
+  ];
+}
+
+function typeSelectOptionsForParam(p: FlowParam) {
+  if (!p.type || PARAM_TYPE_OPTIONS.some((option) => option.value === p.type)) return PARAM_TYPE_OPTIONS;
+  return [
+    { label: PARAM_TYPE_LABELS[p.type] || p.type, value: p.type },
+    ...PARAM_TYPE_OPTIONS,
+  ];
 }
 function NativeSelect({
   value,
@@ -1179,6 +1184,28 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [flowSpec, setFlowSpec] = useState<FlowSpecData | null>(null);
   const flowSpecRef = useRef<FlowSpecData | null>(null);
   useEffect(() => { flowSpecRef.current = flowSpec; }, [flowSpec]);
+  const pendingEditorViewportRef = useRef<{ id: string; top: number } | null>(null);
+  const lastEditedFieldRef = useRef<{ id: string; expiresAt: number } | null>(null);
+  function preserveEditorViewport(id: string, remember = true) {
+    const element = document.getElementById(id);
+    if (!element) return;
+    pendingEditorViewportRef.current = { id, top: element.getBoundingClientRect().top };
+    if (remember) lastEditedFieldRef.current = { id, expiresAt: Date.now() + 5000 };
+  }
+  function preserveLastEditedViewport() {
+    const remembered = lastEditedFieldRef.current;
+    if (!remembered || remembered.expiresAt < Date.now()) return;
+    preserveEditorViewport(remembered.id, false);
+  }
+  useLayoutEffect(() => {
+    const pending = pendingEditorViewportRef.current;
+    if (!pending) return;
+    pendingEditorViewportRef.current = null;
+    const element = document.getElementById(pending.id);
+    if (!element) return;
+    const delta = element.getBoundingClientRect().top - pending.top;
+    if (Math.abs(delta) > 1) window.scrollBy({ top: delta, left: 0, behavior: "auto" });
+  }, [flowSpec]);
   const [checkReport, setCheckReport] = useState<FlowCheckReport | null>(null);
   const [titleDraft, setTitleDraft] = useState("");               // FC3 修复:标题本地草稿,WS 推送不再即时覆盖编辑
   const [descDraft, setDescDraft] = useState("");                 // FC3 修复:说明本地草稿
@@ -1196,7 +1223,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const pendingCapabilityMembershipRef = useRef<Array<{
     capability: string; requestId?: string; requestIndex?: number | string | null; usage: CapabilityUsage;
   }>>([]);
-  const [newParam, setNewParam] = useState({ step_id: "", path: "", key: "", type: "string", category: "user_param" });
+  const [newParam, setNewParam] = useState({
+    step_id: "", path: "", key: "", type: "string", category: "user_param", source_kind: "unknown",
+  });
   const [newLink, setNewLink] = useState({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
   const [bindDraft, setBindDraft] = useState<Record<string, { source_step_id?: string; source_path?: string }>>({});
   const [jsonDraft, setJsonDraft] = useState("");
@@ -1226,6 +1255,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [activeFlowTab, setActiveFlowTab] = useState("abilities");
 
   function acceptFlowSpec(fs: FlowSpecData) {
+    preserveLastEditedViewport();
     const pending = pendingCapabilityMembershipRef.current;
     const edits: any[] = [];
     const remaining: typeof pending = [];
@@ -2238,6 +2268,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function patchLocalParam(stepId: string, p: FlowParam, updates: Record<string, any>) {
     const base = flowSpecRef.current;
     if (!base) return;
+    preserveEditorViewport(fieldEditorAnchorId(stepId, p.path));
     const next: FlowSpecData = {
       ...base,
       steps: (base.steps || []).map((step) => {
@@ -2316,31 +2347,34 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     send({ type: "flow_update", edits: [paramEdit(step.step_id, currentParam, "type", value)] });
   }
   function updateParamCategory(stepId: string, p: FlowParam, category: string) {
-    patchLocalParams(stepId, p, { category });
-    send({ type: "flow_update", edits: [paramEdit(stepId, p, "category", category)] });
+    const currentStep = flowSpecRef.current?.steps.find((item) => item.step_id === stepId);
+    const current = currentStep?.params.find((item) => paramMatches(item, p)) || p;
+    const updates = {
+      category,
+      editable: true,
+    };
+    patchLocalParams(stepId, current, updates);
+    send({ type: "flow_update", edits: Object.entries(updates).map(([field, value]) => paramEdit(stepId, current, field, value)) });
   }
   function updateParamSourceKind(stepId: string, p: FlowParam, sourceKind: string) {
-    const currentSource = p.source as any;
-    const nextSource = sourceDescriptor(sourceKind, p, currentSource);
+    const currentStep = flowSpecRef.current?.steps.find((item) => item.step_id === stepId);
+    const current = currentStep?.params.find((item) => paramMatches(item, p)) || p;
+    const currentSource = current.source as any;
+    const nextSource = sourceDescriptor(sourceKind, current, currentSource);
     const needsConfiguration = sourceNeedsConfiguration(sourceKind, nextSource);
-    const edits: any[] = [
-      paramEdit(stepId, p, "source_kind", sourceKind),
-      paramEdit(stepId, p, "source", nextSource),
-      paramEdit(stepId, p, "need_human_confirm", needsConfiguration),
-      paramEdit(stepId, p, "editable", true),
-    ];
-    patchLocalParams(stepId, p, {
+    const updates = {
       source_kind: sourceKind,
       source: nextSource,
       need_human_confirm: needsConfiguration,
       editable: true,
-    });
-    send({ type: "flow_update", edits });
+    };
+    patchLocalParams(stepId, current, updates);
+    send({ type: "flow_update", edits: Object.entries(updates).map(([field, value]) => paramEdit(stepId, current, field, value)) });
     if (sourceKind === "previous_response") {
       const key = paramDraftKey(stepId, p);
       setBindDraft((d) => ({
         ...d,
-        [key]: d[key] || { source_step_id: (p.source as any)?.step_id || "", source_path: (p.source as any)?.response_path || "" },
+        [key]: d[key] || { source_step_id: (current.source as any)?.step_id || "", source_path: (current.source as any)?.response_path || "" },
       }));
       message.info("已在下方“绑定上游响应”里指定来源步骤和响应字段");
     }
@@ -3177,6 +3211,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       source_step_id: p.source?.step_id || linked?.source_step_id,
       source_path: p.source?.response_path || linked?.source_path,
     };
+    const normalizedSourceKind = normalizeSourceKindForUi(p.source_kind);
+    const sourceIsUnknown = !normalizedSourceKind || normalizedSourceKind === "unknown";
+    const sourceConfigurationIncomplete = sourceNeedsConfiguration(p.source_kind || "unknown", p.source as any);
+    const sourceWarning = sourceIsUnknown
+      ? "没有检测到可靠来源。请选择真实来源；也可以关闭此提示后继续处理，它不会阻止编辑、保存或继续规划。"
+      : sourceConfigurationIncomplete
+        ? `已选择“${optionLabel(SOURCE_KIND_OPTIONS, normalizedSourceKind)}”，但必要配置尚不完整。请在下方补充来源配置；此提示可关闭且不会阻止后续操作。`
+        : "";
     const needsManualConfirm = !!p.need_human_confirm && p.category === "runtime_var";
     const runtimeSourceComplete = !sourceNeedsConfiguration(p.source_kind || "unknown", p.source as any);
     const selectBinding = selectBindingForParam(step, p);
@@ -3205,7 +3247,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         // key 不能包含可编辑的 path/key/label。失焦保存会立即更新这些值；
         // 若 key 随之变化，组件会在 click 前被卸载，导致删除事件丢失。
         key={`${step.step_id}:param:${paramIndex}`}
-        id={`field-${domAnchorPart(step.step_id)}-${domAnchorPart(stripBodyPrefix(p.path))}`}
+        id={fieldEditorAnchorId(step.step_id, p.path)}
         style={{ padding: "12px 0" }}
       >
         <div style={{ width: "100%", border: "1px solid #f0f0f0", borderRadius: 6, padding: 12, background: "#fff" }}>
@@ -3235,6 +3277,18 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               >删除字段</Button>
             </Col>
           </Row>
+          {sourceWarning && (
+            <Alert
+              id={`${fieldEditorAnchorId(step.step_id, p.path)}-source-warning`}
+              data-field-path={p.path}
+              style={{ marginTop: 10 }}
+              type="warning"
+              showIcon
+              closable
+              message={`字段来源需要确认：${p.path || p.key}`}
+              description={sourceWarning}
+            />
+          )}
           <div style={{
             display: "grid",
             gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
@@ -3258,7 +3312,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               )}
             </FieldControl>
             <FieldControl label="类型">
-              <NativeSelect value={p.type} width="100%" options={PARAM_TYPE_OPTIONS}
+              <NativeSelect value={p.type} width="100%" options={typeSelectOptionsForParam(p)}
                 onChange={(v) => updateParamType(step, p, v)} />
             </FieldControl>
             <FieldControl label="分类">
@@ -3266,7 +3320,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 onChange={(v) => updateParamCategory(step.step_id, p, v)} />
             </FieldControl>
             <FieldControl label="来源">
-              <NativeSelect value={normalizeSourceKindForUi(p.source_kind) || defaultSourceForCategory(p.category || "user_param")} width="100%" options={sourceSelectOptionsForParam(p)}
+              <NativeSelect value={normalizeSourceKindForUi(p.source_kind) || "unknown"} width="100%" options={sourceSelectOptionsForParam(p)}
                 onChange={(v) => updateParamSourceKind(step.step_id, p, v)} />
             </FieldControl>
             <FieldControl label="展示">
@@ -3446,24 +3500,33 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             onChange={(v) => setNewParam((s) => ({ ...s, step_id: step.step_id, type: v }))} />
           <NativeSelect value={isActive ? newParam.category : "user_param"} width={140} options={CATEGORY_OPTIONS}
             onChange={(v) => setNewParam((s) => ({ ...s, step_id: step.step_id, category: v }))} />
+          <NativeSelect value={isActive ? newParam.source_kind : "unknown"} width={140} options={SOURCE_KIND_OPTIONS}
+            onChange={(v) => setNewParam((s) => ({ ...s, step_id: step.step_id, source_kind: v }))} />
           <Button type="primary" onClick={() => {
             const draft = isActive ? newParam : { ...newParam, step_id: step.step_id };
             const path = draft.path.trim();
             const key = draft.key.trim();
             if (!path || !key) { message.warning("请填写字段路径和参数名"); return; }
             const isEnum = draft.type === "enum" || draft.type === "list-enum";
-            const sourceKind = defaultSourceForCategory(draft.category);
+            const sourceKind = draft.source_kind || "unknown";
+            const param: FlowParam = {
+              path, key, label: key, value: "", type: draft.type, required: false,
+              category: draft.category, source_kind: sourceKind,
+              enum_options: isEnum ? [] : undefined,
+              exposed_to_user: draft.category === "user_param", editable: true,
+              reason: "人工新增字段",
+            };
+            const source = sourceDescriptor(sourceKind, param);
             send({ type: "flow_update", edits: [{
               op: "add", step_id: step.step_id, param: {
-                path, key, label: key, value: "", type: draft.type, required: false,
-                category: draft.category, source_kind: sourceKind,
-                source: sourceKind === "unknown" ? {} : { kind: sourceKind, path, manual: true },
-                enum_options: isEnum ? [] : undefined,
-                exposed_to_user: draft.category === "user_param", editable: true,
-                reason: "人工新增字段", need_human_confirm: false,
+                ...param,
+                source,
+                need_human_confirm: sourceNeedsConfiguration(sourceKind, source),
               },
             }] });
-            setNewParam({ step_id: step.step_id, path: "", key: "", type: "string", category: "user_param" });
+            setNewParam({
+              step_id: step.step_id, path: "", key: "", type: "string", category: "user_param", source_kind: "unknown",
+            });
           }}>添加字段</Button>
         </Space>
       </Card>

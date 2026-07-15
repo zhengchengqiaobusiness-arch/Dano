@@ -770,13 +770,39 @@ _RECORDER_JS = r"""() => {
   function emitEnumSnapshot(trig) {
     if (!trig || onLoginPage() || !isEnumTrigger(trig)) return;
     try {
-      var inp = trig.querySelector ? trig.querySelector('input') : null;
+      var inp = trig.matches && trig.matches('input,select,[role="combobox"]') ? trig :
+                (trig.querySelector ? trig.querySelector('input,select,[role="combobox"]') : null);
       var loc = locateField(inp || trig);
       if (!loc || isSensitive(inp || trig)) return;
       var records = []; var seen = {};
-      var popups = document.querySelectorAll(POPUP);
+      var controller = (inp && inp.getAttribute && (inp.getAttribute('aria-controls') || inp.getAttribute('aria-owns'))) ||
+                       (trig.getAttribute && (trig.getAttribute('aria-controls') || trig.getAttribute('aria-owns'))) || '';
+      if (!controller && trig.querySelector) {
+        var owned = trig.querySelector('[aria-controls],[aria-owns]');
+        controller = owned && (owned.getAttribute('aria-controls') || owned.getAttribute('aria-owns')) || '';
+      }
+      var popups = [];
+      controller.split(/\s+/).filter(Boolean).forEach(function (id) {
+        var controlled = document.getElementById(id);
+        if (!controlled) return;
+        var popup = controlled.matches && controlled.matches(POPUP) ? controlled :
+                    (controlled.closest ? controlled.closest(POPUP) : null);
+        if (!popup) popup = controlled;
+        if (popups.indexOf(popup) < 0) popups.push(popup);
+      });
+      // Only the popup owned by this combobox is authoritative. The fallback
+      // is for frameworks without ARIA ownership and still excludes hidden
+      // teleported dropdowns (Element Plus keeps closed menus in the DOM).
+      if (!popups.length) {
+        var expanded = (inp && inp.getAttribute && inp.getAttribute('aria-expanded')) ||
+                       (trig.getAttribute && trig.getAttribute('aria-expanded')) || '';
+        if (expanded === 'false') return;
+        popups = Array.prototype.slice.call(document.querySelectorAll(POPUP));
+      }
       for (var i = 0; i < popups.length; i++) {
         var popup = popups[i];
+        if (popup.getAttribute && popup.getAttribute('aria-hidden') === 'true') continue;
+        if (popup.closest && popup.closest('[aria-hidden="true"]')) continue;
         try {
           var style = getComputedStyle(popup);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
@@ -928,6 +954,10 @@ class RecordSession:
         # mappings; they only repair a label-only snapshot when a statically
         # declared option array can be tied to the exact field alias.
         self.script_sources: list[dict] = []
+        self._script_source_bytes = 0
+        # 字典接口经常在用户点击“从这里开始录”之前随页面初始化完成。只保留具备
+        # dictType + label + value 结构的引用数据，reset 时不清除，避免枚举证据丢失。
+        self.dictionary_reads: list[dict] = []
         self.requests: list[dict] = []      # 抓到的写请求(有序,method/url/post_data/headers)→ 参数化/多步工作流
         self.reads: list[dict] = []         # 抓到的读请求(GET+JSON 列表/字典)→ Q2 选领导等 select 的候选源
         # P0-1:全量捕获(基础事实)。先抓全再筛 → 治"GET 业务接口被早筛丢"等根因。
@@ -1196,6 +1226,18 @@ class RecordSession:
         except Exception:  # noqa: BLE001 —— 分类失败不影响事实链路,留空给兜底
             pass
 
+    @staticmethod
+    def _looks_like_dictionary_items(items: list) -> bool:
+        """只缓存明确的通用字典记录，避免把业务列表跨 reset 保存。"""
+        matched = 0
+        for item in items[:20]:
+            if not isinstance(item, dict):
+                continue
+            keys = {re.sub(r"[^a-z0-9]+", "", str(key).casefold()) for key in item}
+            if "dicttype" in keys and "label" in keys and "value" in keys:
+                matched += 1
+        return matched >= 2
+
     def _record_diag(self, kind: str, payload: dict) -> None:
         """记录一条诊断事件:console/pageerror/requestfailed。
 
@@ -1389,13 +1431,15 @@ class RecordSession:
                 # an archive of application bundles. Cross-origin/CORS does not
                 # matter here because Playwright reads the already loaded
                 # response body, and no script is evaluated by Python.
-                if len(self.script_sources) < 30:
+                if len(self.script_sources) < 40 and self._script_source_bytes < 12_000_000:
                     try:
                         body = await response.text()
                     except Exception:  # noqa: BLE001
                         body = ""
-                    if body and len(body) <= 1_500_000:
+                    body_size = len(body.encode("utf-8", errors="ignore")) if body else 0
+                    if body and body_size <= 6_000_000 and self._script_source_bytes + body_size <= 12_000_000:
                         self.script_sources.append({"url": response.url, "text": body})
+                        self._script_source_bytes += body_size
                 return
             # P0-1:全量捕获响应(JSON body)→ 贴回 all_requests 同源记录(P0-3 依赖闭包靠它发现 step 串联)。
             # 写请求同时贴回 self.requests(Q3 步链 taskId);读候选源走 as_list_payload 单独进 self.reads。
@@ -1434,8 +1478,8 @@ class RecordSession:
             if items is None:
                 return
             request_index = self._request_fact_index.get(id(response.request))
-            fact = next((item for item in self.all_requests if item.get("request_index") == request_index), {})
-            self.reads.append({
+            fact = next((item for item in self.all_requests if item.get("index") == request_index), {})
+            read_fact = {
                 "method": m,
                 "url": url,
                 "status": response.status,
@@ -1447,7 +1491,10 @@ class RecordSession:
                 "page_id": fact.get("page_id"),
                 "frame_id": fact.get("frame_id"),
                 "role": fact.get("role"),
-            })
+            }
+            self.reads.append(read_fact)
+            if self._looks_like_dictionary_items(items) and len(self.dictionary_reads) < 20:
+                self.dictionary_reads.append(read_fact)
         except Exception:  # noqa: BLE001
             pass
 
@@ -1824,7 +1871,8 @@ class RecordSession:
         self.steps.clear()
         self.form_snapshots.clear()
         self.enum_snapshots.clear()
-        self.script_sources.clear()
+        # JS 与结构化字典是当前页面的只读引用证据，通常在开始录制前已经加载；
+        # reset 只清业务轨迹，不能把这些枚举证据一起清掉。
         self.requests.clear()
         self.reads.clear()
         self.all_requests.clear()
@@ -1922,6 +1970,7 @@ class RecordSession:
                 if aliases:
                     entry["field_aliases"] = aliases
                 out[storage_key] = entry
+        self._supplement_page_enums_from_dictionaries(out)
         self._supplement_page_enums_from_scripts(out)
         return out
 
@@ -1942,10 +1991,6 @@ class RecordSession:
     @classmethod
     def _static_enum_arrays(cls, source: str) -> list[dict]:
         arrays: list[dict] = []
-        array_re = re.compile(
-            r"(?P<name>[A-Za-z_$][\w$]{2,80})\s*[:=]\s*\[(?P<body>.{1,30000}?)\]",
-            re.S,
-        )
         object_re = re.compile(r"\{(?P<body>[^{}]{1,600})\}", re.S)
         item_re = re.compile(
             r"(?:['\"](?P<qkey>[^'\"]+)['\"]|(?P<key>[A-Za-z_$][\w$]*))\s*:\s*"
@@ -1954,9 +1999,71 @@ class RecordSession:
         )
         label_keys = {"label", "text", "name", "title"}
         value_keys = {"value", "id", "code", "key"}
-        for match in array_re.finditer(source or ""):
+        text = source or ""
+        identifier_chars = frozenset(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$"
+        )
+
+        # Do not use ``.*?`` to search a whole minified bundle.  On a multi-MB
+        # application chunk a missing/remote closing bracket makes that regex
+        # backtrack over the same bytes many times.  Find assignment brackets
+        # linearly, then scan only the bounded candidate while respecting JS
+        # string literals.  This keeps the fallback usable for large bundles
+        # without executing their code.
+        candidates: list[tuple[str, str]] = []
+        cursor = 0
+        while True:
+            bracket = text.find("[", cursor)
+            if bracket < 0:
+                break
+            cursor = bracket + 1
+            before = bracket - 1
+            while before >= 0 and text[before].isspace():
+                before -= 1
+            if before < 0 or text[before] not in ":=":
+                continue
+            before -= 1
+            while before >= 0 and text[before].isspace():
+                before -= 1
+            name_end = before + 1
+            while before >= 0 and text[before] in identifier_chars:
+                before -= 1
+            name = text[before + 1:name_end]
+            if not (3 <= len(name) <= 80) or name[0] not in (
+                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$"
+            ):
+                continue
+
+            depth = 1
+            quote = ""
+            escaped = False
+            body_end = -1
+            limit = min(len(text), bracket + 1 + 30_000)
+            for index in range(bracket + 1, limit):
+                char = text[index]
+                if quote:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == quote:
+                        quote = ""
+                    continue
+                if char in {"'", '"', "`"}:
+                    quote = char
+                elif char == "[":
+                    depth += 1
+                elif char == "]":
+                    depth -= 1
+                    if depth == 0:
+                        body_end = index
+                        break
+            if body_end > bracket + 1:
+                candidates.append((name, text[bracket + 1:body_end]))
+
+        for name, body in candidates:
             options: list[dict] = []
-            for obj in object_re.finditer(match.group("body")):
+            for obj in object_re.finditer(body):
                 values = {
                     str(item.group("qkey") or item.group("key") or "").lower(): cls._script_literal_value(item.group("value"))
                     for item in item_re.finditer(obj.group("body"))
@@ -1967,8 +2074,223 @@ class RecordSession:
                     options.append({"label": str(values[label_key]), "value": values[value_key]})
             unique = {(item["label"], repr(item["value"])) for item in options}
             if len(unique) >= 2:
-                arrays.append({"name": match.group("name"), "options": options[:200]})
+                arrays.append({"name": name, "options": options[:200]})
         return arrays
+
+    @staticmethod
+    def _script_dictionary_constants(source: str) -> dict[str, str]:
+        """Extract symbolic dictionary constants without executing application JS."""
+        # Matching may start immediately after ``.`` in ``e.SYMBOL=...``; the
+        # optional ``identifier.`` prefix used here previously was unnecessary
+        # and catastrophically expensive on minified multi-MB bundles.
+        constant_re = re.compile(
+            r"(?<![A-Za-z0-9_$])(?P<name>[A-Z][A-Z0-9_]{2,})\s*=\s*"
+            r"(?P<quote>['\"])(?P<value>[a-z][a-z0-9_.:-]{2,})(?P=quote)"
+        )
+        return {
+            match.group("name"): match.group("value")
+            for match in constant_re.finditer(source or "")
+        }
+
+    @classmethod
+    def _script_dictionary_associations(
+        cls,
+        source: str,
+        constants: dict[str, str],
+    ) -> dict[str, set[str]]:
+        """Return exact form-field -> dictType links found in one compiled chunk.
+
+        A field section is bounded by the next form identity marker. This avoids
+        assigning every dictionary referenced by a minified page to every field.
+        """
+        if not constants:
+            return {}
+        marker_re = re.compile(
+            r"(?:prop|name|field|fieldName)\s*:\s*['\"](?P<field>[A-Za-z_$][\w$.-]{1,100})['\"]"
+        )
+        markers = list(marker_re.finditer(source or ""))
+        symbol_re = re.compile(
+            r"(?<![A-Za-z0-9_$])(?P<name>[A-Z][A-Z0-9_]{2,})(?![A-Za-z0-9_$])"
+        )
+        result: dict[str, set[str]] = {}
+        for index, marker in enumerate(markers):
+            end = markers[index + 1].start() if index + 1 < len(markers) else min(len(source), marker.end() + 2000)
+            segment = source[marker.end():min(end, marker.end() + 2000)]
+            # Tokenize the bounded segment once.  The former nested loop ran a
+            # separately compiled regex for every known dictionary constant
+            # (hundreds of searches per field marker).
+            names = {
+                match.group("name")
+                for match in symbol_re.finditer(segment)
+                if match.group("name") in constants
+            }
+            types = {constants[name] for name in names}
+            if len(types) == 1:
+                result.setdefault(marker.group("field"), set()).update(types)
+        return result
+
+    @staticmethod
+    def _decode_script_label(raw: str) -> str:
+        """Decode a quoted JS label without evaluating the application bundle."""
+        literal = str(raw or "")
+        if len(literal) < 2 or literal[0] not in {"'", '"'} or literal[-1] != literal[0]:
+            return ""
+        body = literal[1:-1]
+        body = re.sub(
+            r"\\u([0-9a-fA-F]{4})",
+            lambda match: chr(int(match.group(1), 16)),
+            body,
+        )
+        body = re.sub(
+            r"\\x([0-9a-fA-F]{2})",
+            lambda match: chr(int(match.group(1), 16)),
+            body,
+        )
+        return (
+            body.replace(r"\'", "'")
+            .replace(r'\"', '"')
+            .replace(r"\\/", "/")
+            .replace(r"\\\\", "\\")
+            .strip()
+        )
+
+    @classmethod
+    def _script_form_label_fields(cls, source: str) -> dict[str, set[str]]:
+        """Return exact visible-label -> request-field links from compiled forms.
+
+        Component libraries often keep ``prop`` only on a virtual form-item,
+        so the rendered input exposes the Chinese label but no ``name`` or
+        ``data-prop`` attribute.  Compiled Vue/React form declarations still
+        place ``label`` and ``prop`` in the same item.  Bind only that local,
+        explicit pair; order-based or fuzzy cross-field matching is forbidden.
+        """
+        marker_re = re.compile(
+            r"(?:prop|name|field|fieldName)\s*:\s*['\"](?P<field>[A-Za-z_$][\w$.-]{1,100})['\"]"
+        )
+        label_re = re.compile(
+            r"(?:^|[,{}])\s*label\s*:\s*"
+            r"(?P<label>'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\")"
+        )
+        markers = list(marker_re.finditer(source or ""))
+        result: dict[str, set[str]] = {}
+        for index, marker in enumerate(markers):
+            previous_end = markers[index - 1].end() if index else max(0, marker.start() - 800)
+            prefix = source[max(previous_end, marker.start() - 800):marker.start()]
+            labels = list(label_re.finditer(prefix))
+            if not labels:
+                continue
+            # The last label before prop belongs to this form-item.  Keep a
+            # tight distance bound so unrelated component labels cannot leak.
+            label_match = labels[-1]
+            if len(prefix) - label_match.end() > 240:
+                continue
+            label = cls._decode_script_label(label_match.group("label"))
+            if label:
+                result.setdefault(label, set()).add(marker.group("field"))
+        return result
+
+    @staticmethod
+    def _dictionary_options_from_reads(reads: list[dict], dict_type: str) -> tuple[list[dict], str]:
+        from dano.execution.page.request_capture import as_list_payload
+
+        merged: dict[tuple[str, str], dict] = {}
+        source_url = ""
+        for read in reads:
+            items = as_list_payload(read.get("json"))
+            if not items:
+                continue
+            matched_here = False
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                normalized = {
+                    re.sub(r"[^a-z0-9]+", "", str(key).casefold()): value
+                    for key, value in item.items()
+                }
+                if str(normalized.get("dicttype") or "") != dict_type:
+                    continue
+                label = normalized.get("label")
+                if label in (None, "") or "value" not in normalized:
+                    continue
+                option = {"label": str(label), "value": normalized["value"]}
+                merged[(option["label"], repr(option["value"]))] = option
+                matched_here = True
+            if matched_here and not source_url:
+                source_url = str(read.get("url") or "")
+        return list(merged.values())[:200], source_url
+
+    def _supplement_page_enums_from_dictionaries(self, page_options: dict) -> None:
+        if not page_options or not self.script_sources:
+            return
+
+        constants: dict[str, str] = {}
+        for script in self.script_sources:
+            constants.update(self._script_dictionary_constants(str(script.get("text") or "")))
+        if not constants:
+            return
+
+        associations: dict[str, set[str]] = {}
+        label_fields: dict[str, set[str]] = {}
+        for script in self.script_sources:
+            source = str(script.get("text") or "")
+            for field, dict_types in self._script_dictionary_associations(
+                source, constants,
+            ).items():
+                associations.setdefault(field, set()).update(dict_types)
+            for label, fields in self._script_form_label_fields(source).items():
+                label_fields.setdefault(label, set()).update(fields)
+
+        def normalized(value: object) -> str:
+            return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+        reads = [*self.dictionary_reads, *self.reads]
+        def normalized_label(value: object) -> str:
+            return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(value or "")).casefold()
+
+        labels_by_norm: dict[str, set[str]] = {}
+        for label, fields in label_fields.items():
+            key = normalized_label(label)
+            if key:
+                labels_by_norm.setdefault(key, set()).update(fields)
+
+        for storage_key, entry in page_options.items():
+            options = list(entry.get("options") or [])
+            explicit_fields = {
+                field
+                for label in (storage_key, entry.get("field_key"))
+                for field in labels_by_norm.get(normalized_label(label), set())
+            }
+            # A single exact compiled label/prop pair repairs Element Plus
+            # controls whose rendered input has no structural DOM alias.
+            if len(explicit_fields) == 1:
+                field = next(iter(explicit_fields))
+                field_aliases = list(entry.get("field_aliases") or [])
+                if field not in field_aliases:
+                    entry["field_aliases"] = [*field_aliases, field]
+            if options and all(isinstance(item, dict) and "value" in item for item in options):
+                continue
+            aliases = {
+                normalized(str(alias).split(":", 1)[-1])
+                for alias in [entry.get("field_key"), *(entry.get("field_aliases") or [])]
+                if len(normalized(str(alias).split(":", 1)[-1])) >= 3
+            }
+            matched_types = {
+                dict_type
+                for field, dict_types in associations.items()
+                if normalized(field) in aliases
+                for dict_type in dict_types
+            }
+            if len(matched_types) != 1:
+                continue
+            dict_type = next(iter(matched_types))
+            mapped, source_url = self._dictionary_options_from_reads(reads, dict_type)
+            if len(mapped) < 2:
+                continue
+            entry["options"] = mapped
+            entry["enum_source"] = "script_dictionary"
+            entry["dict_type"] = dict_type
+            entry["source_url"] = source_url
+            entry["mapping_complete"] = True
 
     def _supplement_page_enums_from_scripts(self, page_options: dict) -> None:
         if not page_options or not self.script_sources:

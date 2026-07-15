@@ -5,7 +5,7 @@
 2. 下拉列表 GET → role=read_option / keep=False
 3. getappid 业务 GET → role=business_get / keep=True
 4. sjws_chat 业务写 → role=business_write 或 submit_anchor / keep=True
-5. 危险 DELETE → role=destructive / keep=False
+5. 危险 DELETE → role=business_write / keep=True（风险在执行/发布层审核）
 6. 静态资源 → role=noise / keep=False
 7. submit 锚点路径段 → role=submit_anchor / keep=True
 8. all_requests 每条都带 role/keep/reason/confidence 字段
@@ -42,19 +42,19 @@ def test_sse_is_noise():
     assert cls["keep"] is False
 
 
-def test_dangerous_delete_is_destructive():
+def test_dangerous_delete_is_preserved_as_business_write():
     cls = classify_network_request({"method": "DELETE", "url": "https://x/api/leave/123"})
-    assert cls["role"] == "destructive"
-    assert cls["keep"] is False
+    assert cls["role"] == "business_write"
+    assert cls["keep"] is True
     assert cls["confidence"] >= 0.9
 
 
-def test_delete_keyword_path_is_destructive():
-    """URL 路径段含 delete/remove/reject 等 → 即使 method 是 POST 也是 destructive。"""
+def test_delete_keyword_path_is_preserved_as_business_write():
+    """URL 路径段含 delete/remove/reject 等也保留事实，安全层仍可按 destructive/L4 审核。"""
     cls = classify_network_request({"method": "POST", "url": "https://x/api/leave/reject/123",
                                     "post_data": '{"reason":"x"}'})
-    assert cls["role"] == "destructive"
-    assert cls["keep"] is False
+    assert cls["role"] == "business_write"
+    assert cls["keep"] is True
 
 
 def test_list_get_is_read_option():
@@ -245,11 +245,11 @@ def test_keep_filter_drops_noise_and_auth():
     drops = [r["url"] for r in cap if not r["keep"]]
     # 主流程只留业务写
     assert any("save_dataiq_chat_list" in u for u in keeps), keeps
-    # 噪声/登录/列表源/destructive 都不进主流程
+    # 噪声/登录/列表源不进主流程；危险业务操作不能在录制层丢失。
     assert not any("login" in u for u in keeps), keeps
     assert not any("logo.png" in u for u in keeps), keeps
     assert not any("users/list" in u for u in keeps), keeps
-    assert not any("leave/123" in u for u in keeps), keeps
+    assert any("leave/123" in u for u in keeps), keeps
 
 
 def test_reason_is_human_readable():

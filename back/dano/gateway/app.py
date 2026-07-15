@@ -908,6 +908,11 @@ async def record_ws(ws: WebSocket) -> None:
                     flushed_tail = after_flush_steps[len(before_flush_steps):]
                 elif before_flush_steps and after_flush_steps and before_flush_steps[-1] != after_flush_steps[-1]:
                     flushed_tail = [after_flush_steps[-1]]
+                # DOM/JS enum evidence can be moderately expensive to index.
+                # Build it once after the final browser flush and reuse the
+                # same snapshot in both the recorded-step and edited-step
+                # branches below.
+                recorded_page_options = sess.recorded_page_enum_options()
                 raw = msg.get("steps")
                 if raw is not None:           # 前端编辑后的步骤(删了噪声/重复/调序)→ 以它为准
                     for s in flushed_tail:
@@ -930,7 +935,7 @@ async def record_ws(ws: WebSocket) -> None:
                     steps, samples = sess.recorded_steps()
                     required_labels = sess.recorded_required_labels()
                     required_labels.update(observed_required_labels)
-                    page_options_by_field = sess.recorded_page_enum_options()  # {字段key: {options, field_key, selected}}
+                    page_options_by_field = recorded_page_options  # {字段key: {options, field_key, selected}}
                     # 枚举地面真值:既按「选中显示值」也对到「字段 key」,使 page_enum_selects 在 body leaf
                     # 不出现 label 但出现内部英文名时也能命中(治"请假类型=病假 → body.leaveType=2"漏识别)。
                     page_enum_options = {}
@@ -950,13 +955,16 @@ async def record_ws(ws: WebSocket) -> None:
                             "control_kind": str(raw_entry.get("control_kind") or "select") if isinstance(raw_entry, dict) else "select",
                             "enum_source": str(raw_entry.get("enum_source") or "dom") if isinstance(raw_entry, dict) else "dom",
                             "script_url": str(raw_entry.get("script_url") or "") if isinstance(raw_entry, dict) else "",
+                            "source_url": str(raw_entry.get("source_url") or "") if isinstance(raw_entry, dict) else "",
+                            "dict_type": str(raw_entry.get("dict_type") or "") if isinstance(raw_entry, dict) else "",
+                            "mapping_complete": bool(raw_entry.get("mapping_complete")) if isinstance(raw_entry, dict) else False,
                         }
                         if storage_key and storage_key not in page_enum_options:
                             page_enum_options[str(storage_key)] = entry
                 # Browser enum snapshots live outside executable steps. Always
                 # merge them, including when the frontend sends an edited step
                 # list, or editing/reordering silently discards DOM evidence.
-                for storage_key, raw_entry in (sess.recorded_page_enum_options() or {}).items():
+                for storage_key, raw_entry in (recorded_page_options or {}).items():
                     opts = raw_entry.get("options") if isinstance(raw_entry, dict) else raw_entry
                     if not opts:
                         continue
@@ -980,6 +988,9 @@ async def record_ws(ws: WebSocket) -> None:
                         "control_kind": str(raw_entry.get("control_kind") or "select") if isinstance(raw_entry, dict) else "select",
                         "enum_source": str(raw_entry.get("enum_source") or "dom") if isinstance(raw_entry, dict) else "dom",
                         "script_url": str(raw_entry.get("script_url") or "") if isinstance(raw_entry, dict) else "",
+                        "source_url": str(raw_entry.get("source_url") or "") if isinstance(raw_entry, dict) else "",
+                        "dict_type": str(raw_entry.get("dict_type") or "") if isinstance(raw_entry, dict) else "",
+                        "mapping_complete": bool(raw_entry.get("mapping_complete")) if isinstance(raw_entry, dict) else False,
                     }
                     existing = page_enum_options.get(str(storage_key))
                     if isinstance(existing, dict):

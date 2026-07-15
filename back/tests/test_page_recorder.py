@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 import pytest
 
 pytest.importorskip("playwright")
@@ -59,6 +60,213 @@ def test_static_script_enum_does_not_guess_without_unique_field_alias() -> None:
 
     assert page_options["流程状态"]["options"] == ["未提交", "审批中"]
     assert "enum_source" not in page_options["流程状态"]
+
+
+def test_large_minified_script_enum_scans_are_bounded_and_keep_exact_results() -> None:
+    """A production-sized main bundle must not turn finalize into a minute-long regex scan."""
+    noise = 'a.b="noise",' * 100_000
+    main = (
+        noise
+        + 'e.OA_HOTEL_ROOM_TYPE="oa_hotel_room_type",'
+        + 'e.OA_HOTEL_ROOM_LEVEL="oa_hotel_room_level";'
+        + "const processStatusOptions=[{label:'未提交',value:0},{label:'审批中',value:1}]"
+    )
+    started = time.perf_counter()
+    constants = RecordSession._script_dictionary_constants(main)
+    arrays = RecordSession._static_enum_arrays(main)
+    elapsed = time.perf_counter() - started
+
+    assert constants["OA_HOTEL_ROOM_TYPE"] == "oa_hotel_room_type"
+    assert constants["OA_HOTEL_ROOM_LEVEL"] == "oa_hotel_room_level"
+    assert arrays == [{
+        "name": "processStatusOptions",
+        "options": [{"label": "未提交", "value": 0}, {"label": "审批中", "value": 1}],
+    }]
+    # This is deliberately generous for shared CI runners.  The optimized
+    # scanner normally completes this ~1.2 MB fixture in well under 0.1 s;
+    # the former whole-bundle regex takes many seconds.
+    assert elapsed < 2.0
+
+
+def test_dictionary_association_scans_each_field_segment_once() -> None:
+    constants = {f"DICT_{index}": f"dict_{index}" for index in range(400)}
+    route = ";".join(
+        f'prop:"field{index}",render(DictType.DICT_{index})'
+        for index in range(300)
+    )
+
+    started = time.perf_counter()
+    associations = RecordSession._script_dictionary_associations(route, constants)
+    elapsed = time.perf_counter() - started
+
+    assert associations["field0"] == {"dict_0"}
+    assert associations["field299"] == {"dict_299"}
+    assert elapsed < 1.0
+
+
+def test_compiled_dictionary_enum_binds_exact_field_to_captured_label_value_records() -> None:
+    sess = RecordSession()
+    sess.script_sources = [
+        {
+            "url": "https://example.test/assets/index.js",
+            "text": (
+                'e.OA_HOTEL_ROOM_TYPE="oa_hotel_room_type",'
+                'e.OA_HOTEL_ROOM_LEVEL="oa_hotel_room_level",'
+                'e.BPM_PROCESS_INSTANCE_STATUS="bpm_process_instance_status"'
+            ),
+        },
+        {
+            "url": "https://example.test/assets/hotel-page.js",
+            "text": (
+                'prop:"roomType",render(getDict(DictType.OA_HOTEL_ROOM_TYPE));'
+                'prop:"roomLevel",render(getDict(DictType.OA_HOTEL_ROOM_LEVEL));'
+                'prop:"processStatus",render(getDict(DictType.BPM_PROCESS_INSTANCE_STATUS));'
+                'prop:"hotelName",renderText()'
+            ),
+        },
+    ]
+    sess.dictionary_reads = [{
+        "url": "https://example.test/system/dict-data/simple-list",
+        "json": {"data": [
+            {"dictType": "oa_hotel_room_type", "label": "标准间", "value": 1},
+            {"dictType": "oa_hotel_room_type", "label": "大床房", "value": 2},
+            {"dictType": "oa_hotel_room_level", "label": "标准", "value": "normal"},
+            {"dictType": "oa_hotel_room_level", "label": "豪华", "value": "luxury"},
+            {"dictType": "bpm_process_instance_status", "label": "未提交", "value": 0},
+            {"dictType": "bpm_process_instance_status", "label": "审批中", "value": 1},
+        ]},
+    }]
+    page_options = {
+        "房间类型": {"field_key": "roomType", "field_aliases": ["name:roomType"], "options": ["标准间", "大床房"]},
+        "房间等级": {"field_key": "roomLevel", "field_aliases": ["name:roomLevel"], "options": ["标准", "豪华"]},
+        "流程状态": {"field_key": "processStatus", "field_aliases": ["name:processStatus"], "options": ["未提交", "审批中"]},
+    }
+
+    sess._supplement_page_enums_from_dictionaries(page_options)
+
+    assert page_options["房间类型"]["dict_type"] == "oa_hotel_room_type"
+    assert page_options["房间类型"]["options"] == [
+        {"label": "标准间", "value": 1}, {"label": "大床房", "value": 2},
+    ]
+    assert page_options["流程状态"]["options"][0] == {"label": "未提交", "value": 0}
+    assert all(item["enum_source"] == "script_dictionary" for item in page_options.values())
+
+
+def test_compiled_dictionary_enum_bridges_visible_label_to_virtual_form_prop() -> None:
+    """Element Plus renders the label but does not put form-item prop on input DOM."""
+    sess = RecordSession()
+    sess.script_sources = [
+        {
+            "url": "https://example.test/assets/index.js",
+            "text": (
+                'e.OA_HOTEL_ROOM_TYPE="oa_hotel_room_type",'
+                'e.OA_HOTEL_ROOM_LEVEL="oa_hotel_room_level",'
+                'e.BPM_PROCESS_INSTANCE_STATUS="bpm_process_instance_status"'
+            ),
+        },
+        {
+            "url": "https://example.test/assets/hotel-page.js",
+            "text": (
+                r'e(u,{label:"\u623F\u95F4\u7C7B\u578B",prop:"roomType"},'
+                r'render(getDict(DictType.OA_HOTEL_ROOM_TYPE)));'
+                r'e(u,{label:"\u623F\u95F4\u7B49\u7EA7",prop:"roomLevel"},'
+                r'render(getDict(DictType.OA_HOTEL_ROOM_LEVEL)));'
+                r'e(u,{label:"\u6D41\u7A0B\u72B6\u6001",prop:"processStatus"},'
+                r'render(getDict(DictType.BPM_PROCESS_INSTANCE_STATUS)))'
+            ),
+        },
+    ]
+    sess.dictionary_reads = [{
+        "url": "https://example.test/system/dict-data/simple-list",
+        "json": {"data": [
+            {"dictType": "oa_hotel_room_type", "label": "标准间", "value": 1},
+            {"dictType": "oa_hotel_room_type", "label": "大床房", "value": 2},
+            {"dictType": "oa_hotel_room_level", "label": "标准", "value": 1},
+            {"dictType": "oa_hotel_room_level", "label": "豪华", "value": 2},
+            {"dictType": "bpm_process_instance_status", "label": "未提交", "value": 0},
+            {"dictType": "bpm_process_instance_status", "label": "审批中", "value": 1},
+        ]},
+    }]
+    # This is the actual browser shape: visible labels/options are available,
+    # but the rendered Element Plus input exposes no name/data-prop alias.
+    page_options = {
+        "房间类型": {"field_key": "房间类型", "control_kind": "select", "options": ["标准间", "大床房"]},
+        "房间等级": {"field_key": "房间等级", "control_kind": "select", "options": ["标准", "豪华"]},
+        "流程状态": {"field_key": "流程状态", "control_kind": "select", "options": ["未提交", "审批中"]},
+    }
+
+    sess._supplement_page_enums_from_dictionaries(page_options)
+
+    assert page_options["房间类型"]["field_aliases"] == ["roomType"]
+    assert page_options["房间等级"]["field_aliases"] == ["roomLevel"]
+    assert page_options["流程状态"]["field_aliases"] == ["processStatus"]
+    assert page_options["房间类型"]["options"] == [
+        {"label": "标准间", "value": 1}, {"label": "大床房", "value": 2},
+    ]
+    assert page_options["流程状态"]["dict_type"] == "bpm_process_instance_status"
+    assert page_options["流程状态"]["source_url"].endswith("/system/dict-data/simple-list")
+
+    # Prove the repaired aliases are consumed by the next layer, not merely
+    # present in recorder output.  This is the real list-page shape where all
+    # three controls submit short codes in one GET query.
+    from dano.execution.page.flow_spec import to_flow_spec
+
+    spec = to_flow_spec(
+        [{
+            "method": "GET",
+            "url": (
+                "https://example.test/admin-api/oa/hotel-apply/page?"
+                "pageNo=1&pageSize=10&roomType=1&roomLevel=1&processStatus=1"
+            ),
+            "headers": {},
+            "response_json": {"code": 0, "data": {"list": [], "total": 0}},
+        }],
+        samples={"房间类型": "标准间", "房间等级": "标准", "流程状态": "审批中"},
+        page_enum_options=page_options,
+    )
+    projected = {
+        param.path: (param.key, param.type, param.source_kind)
+        for step in spec.steps
+        for param in step.params
+        if param.path in {"query.roomType", "query.roomLevel", "query.processStatus"}
+    }
+    assert projected == {
+        "query.roomType": ("房间类型", "enum", "page_enum"),
+        "query.roomLevel": ("房间等级", "enum", "page_enum"),
+        "query.processStatus": ("流程状态", "enum", "page_enum"),
+    }
+
+
+def test_compiled_dictionary_enum_does_not_guess_ambiguous_field_binding() -> None:
+    sess = RecordSession()
+    sess.script_sources = [{
+        "url": "https://example.test/assets/page.js",
+        "text": (
+            'e.STATUS_A="status_a",e.STATUS_B="status_b";'
+            'prop:"status",render(getDict(DictType.STATUS_A),getDict(DictType.STATUS_B))'
+        ),
+    }]
+    sess.dictionary_reads = [{
+        "url": "https://example.test/system/dict-data/simple-list",
+        "json": {"data": [
+            {"dictType": "status_a", "label": "A1", "value": 1},
+            {"dictType": "status_a", "label": "A2", "value": 2},
+            {"dictType": "status_b", "label": "B1", "value": 1},
+            {"dictType": "status_b", "label": "B2", "value": 2},
+        ]},
+    }]
+    page_options = {"状态": {"field_key": "status", "options": ["A1", "A2"]}}
+
+    sess._supplement_page_enums_from_dictionaries(page_options)
+
+    assert page_options["状态"]["options"] == ["A1", "A2"]
+    assert "dict_type" not in page_options["状态"]
+
+
+def test_enum_snapshot_scopes_options_to_the_combobox_owned_popup() -> None:
+    assert "document.getElementById(id)" in _RECORDER_JS
+    assert "popup.closest('[aria-hidden=\"true\"]')" in _RECORDER_JS
+    assert "if (expanded === 'false') return" in _RECORDER_JS
 
 
 def test_observer_correlates_action_dom_effect_and_request_without_copying_values() -> None:

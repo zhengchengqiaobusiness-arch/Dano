@@ -611,8 +611,17 @@ def _identifier_matches_field(left: str, right: str) -> bool:
     ``processStatus`` claim an unrelated ``status`` query parameter, which in
     turn moves the wrong enum and display name across requests.
     """
-    left_norm = _norm_field_token(left)
-    right_norm = _norm_field_token(right)
+    def attribute_value(value: str) -> str:
+        raw = str(value or "").strip()
+        prefix, separator, remainder = raw.partition(":")
+        if separator and _norm_field_token(prefix) in {
+            "name", "id", "prop", "dataprop", "field", "fieldname", "formcontrolname", "model",
+        }:
+            return remainder
+        return raw
+
+    left_norm = _norm_field_token(attribute_value(left))
+    right_norm = _norm_field_token(attribute_value(right))
     return bool(left_norm and right_norm and left_norm == right_norm)
 
 
@@ -1194,6 +1203,16 @@ def _page_enum_source(opts) -> str:
     return str(opts.get("enum_source") or "dom") if isinstance(opts, dict) else "dom"
 
 
+def _page_enum_metadata(opts) -> dict:
+    if not isinstance(opts, dict):
+        return {}
+    return {
+        key: opts.get(key)
+        for key in ("source_url", "dict_type")
+        if opts.get(key) not in (None, "")
+    }
+
+
 def _dom_key_matches_field(dom_key: str, field: dict | None) -> bool:
     if not field:
         return False
@@ -1224,6 +1243,7 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
                 _page_enum_selected_label(v, str(k)),
                 _page_enum_field_aliases(v),
                 _page_enum_source(v),
+                _page_enum_metadata(v),
             ))
     body = _parse_body(post_data) if post_data is not None else None
     value_by_path = {p: sv for p, _t, sv, _raw in _leaf_paths(body)} if body is not None else {}
@@ -1231,7 +1251,7 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
     field_by_path = {str(f.get("path") or ""): f for f in (fields or []) if f.get("path")}
     strict_dom_identity = any(
         aliases or (isinstance(page_enum_options.get(key), dict) and page_enum_options[key].get("control_kind"))
-        for key, _opts, _fk, _selected, aliases, _source in pairs
+        for key, _opts, _fk, _selected, aliases, _source, _metadata in pairs
     )
     for s in selects or []:
         lbl, val = str(s.get("label") or ""), str(s.get("value") or "")
@@ -1241,7 +1261,7 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
         leaf_key = str(path).split(".")[-1].split("[")[0]
         if strict_dom_identity:
             matched = next((
-                (ov, fk, selected, evidence_source) for _kv, ov, fk, selected, aliases, evidence_source in pairs
+                (ov, fk, selected, evidence_source, metadata) for _kv, ov, fk, selected, aliases, evidence_source, metadata in pairs
                 if (
                     any(
                         _identifier_matches_field(alias, path)
@@ -1257,7 +1277,7 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
                 )
             ), None)
         else:
-            matched = next(((ov, fk, selected, evidence_source) for kv, ov, fk, selected, _aliases, evidence_source in pairs
+            matched = next(((ov, fk, selected, evidence_source, metadata) for kv, ov, fk, selected, _aliases, evidence_source, metadata in pairs
                 if _exact_recorded_match(kv, lbl)
                 or _exact_recorded_match(kv, val)
                 or _exact_recorded_match(kv, body_val)
@@ -1270,7 +1290,14 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
                 or _dom_key_matches_field(kv, field)
                 or _dom_key_matches_field(selected, field)), None)
         if matched:
-            opts, fk, _selected, evidence_source = matched
+            opts, fk, _selected, evidence_source, metadata = matched
+            if metadata.get("source_url"):
+                s["source_url"] = metadata["source_url"]
+                s.setdefault("label_key", "label")
+                s.setdefault("value_key", "value")
+            if metadata.get("dict_type"):
+                s["category_key"] = "dictType"
+                s["category_value"] = metadata["dict_type"]
             records = _enum_records_from_page_options(opts)
             if s.get("enum_source") == "api" and _option_map_matches_source(s):
                 records = _records_with_existing_option_map(records, s.get("option_map"))
@@ -1285,8 +1312,9 @@ def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
             s["option_map_source_url"] = s.get("source_url") or evidence_source
             if fk:
                 s["field_key"] = fk
-            s.pop("category_key", None)
-            s.pop("category_value", None)
+            if not metadata.get("dict_type"):
+                s.pop("category_key", None)
+                s.pop("category_value", None)
     return selects
 
 
@@ -1308,6 +1336,7 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
         fk = _page_enum_field_key(opts_raw, str(picked))
         aliases = _page_enum_field_aliases(opts_raw)
         evidence_source = _page_enum_source(opts_raw)
+        metadata = _page_enum_metadata(opts_raw)
         selected = _page_enum_selected_label(opts_raw, str(picked))
         if not opts:
             continue
@@ -1374,8 +1403,12 @@ def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
             continue
         current = next((sv for p, _t, sv, _raw in leaves if p == path), "")
         current_raw = next((raw for p, _t, _sv, raw in leaves if p == path), current)
-        entry = {"path": path, "tokens": toks, "source_url": "", "value_key": "", "label_key": "",
+        entry = {"path": path, "tokens": toks, "source_url": metadata.get("source_url", ""),
+                 "value_key": "value" if metadata.get("source_url") else "",
+                 "label_key": "label" if metadata.get("source_url") else "",
                  "label": selected or picked, "value": current, "count": len(opts), "field_key": fk or ""}
+        if metadata.get("dict_type"):
+            entry.update({"category_key": "dictType", "category_value": metadata["dict_type"]})
         records = _enum_records_from_page_options(opts)
         records = _records_with_recorded_value(records, selected or picked, current_raw)
         _attach_enum_binding(
@@ -1925,7 +1958,7 @@ def classify_network_request(req: dict) -> dict:
     输出:
         role ∈ {auth, noise, read_option, read_context, business_get, business_write,
                  submit_anchor, post_submit_verify, destructive, unsupported_upload, unknown}
-        keep ∈ {True, False}: 是否进入主流程步骤(destructive / noise / auth / read_option 都不进)
+        keep ∈ {True, False}: 是否进入主流程候选。危险写保留录制事实，执行/发布风险由后续安全层处理。
         reason: 给人看的一句话解释
         confidence: 0~1,0.9+ 高置信,0.7~0.9 中等,<0.7 让人工确认
     """
@@ -1954,11 +1987,12 @@ def classify_network_request(req: dict) -> dict:
                 "reason": "GraphQL 请求可能包含多操作与动态 selection set；当前 FlowSpec 暂不自动复用",
                 "confidence": 0.92}
 
-    # 2) 危险写:DELETE 或路径含 delete/remove/destroy/reject/terminate/revoke
+    # 2) 危险写仍是用户真实操作，不能在捕获阶段删除。保留为业务写候选，
+    # semantic_role/risk_level 会继续标记 destructive/L4，由执行与发布层决定是否允许。
     if looks_dangerous_write(req):
-        return {"role": "destructive", "keep": False,
-                "reason": "DELETE 或路径含删除/驳回/终止/撤销概念,代他人操作风险高",
-                "confidence": 0.95}
+        return {"role": "business_write", "keep": True,
+                "reason": "删除/驳回/终止/撤销类业务操作已保留；执行与发布时按高风险动作审核",
+                "confidence": 0.98}
 
     # 3) 登录/鉴权/基建写
     if looks_like_auth_write(url, pd):

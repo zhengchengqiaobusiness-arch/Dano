@@ -124,8 +124,9 @@ def test_optimize_fills_placeholder_capability_title_and_intent_without_model_gu
 
     optimized = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
     capability = next(cap for cap in optimized.capabilities if cap.name == "capability_2")
-    assert capability.title == "提交酒店申请"
-    assert "真实接口" in capability.intent
+    assert capability.title == "取消酒店申请"
+    assert "取消酒店申请" in capability.intent
+    assert "真实接口" not in capability.intent
     assert capability.step_ids == ["cancel"]
 
 
@@ -737,6 +738,104 @@ def test_page_context_names_business_and_default_capabilities_without_model_gues
     assert {cap.title for cap in generated.capabilities} == {
         "查询公章借阅记录", "提交公章借阅申请",
     }
+
+
+def test_withdraw_operation_uses_page_and_button_semantics_not_endpoint_text():
+    page_context = {
+        "path": "/oa/common/hotel-apply",
+        "document_title": "点狮全业务管理平台",
+        "visible_titles": ["点狮全业务管理平台", "系统首页酒店申请", "查询条件"],
+    }
+    spec = FlowSpec(
+        title="cancel-by-start-user 流程(2 步)",
+        meta={"page_context": page_context},
+        steps=[
+            FlowStep(
+                step_id="hotel-page", method="GET", path="/admin-api/oa/hotel-apply/page",
+                source_meta={
+                    "role": "business_get", "trigger_locator": "role=button[name=搜索]",
+                    "trigger_op": "click", "trigger_page_context": page_context,
+                },
+                response_json={"data": {"list": [], "total": 0}},
+                params=[ParamField(
+                    path="query.roomType", key="房间类型", label="房间类型",
+                    category="user_param", source_kind="user_input",
+                )],
+            ),
+            FlowStep(
+                step_id="withdraw", method="DELETE",
+                path="/admin-api/bpm/process-instance/cancel-by-start-user",
+                source_meta={
+                    "role": "business_write", "trigger_locator": "role=button[name=撤回]",
+                    "trigger_op": "click", "trigger_page_context": page_context,
+                },
+                params=[ParamField(
+                    path="id", key="单据编号", label="单据编号",
+                    category="user_param", source_kind="user_input",
+                )],
+            ),
+        ],
+    )
+
+    generated = asyncio.run(apply_recording_agent_submission(
+        spec, submission={"ops": []}, mode="plan",
+    ))
+    by_name = {cap.name: cap for cap in generated.capabilities}
+
+    assert generated.title == "酒店申请"
+    assert set(by_name) == {"query_hotel_apply", "withdraw_hotel_apply"}
+    assert by_name["query_hotel_apply"].title == "查询酒店申请记录"
+    assert by_name["withdraw_hotel_apply"].title == "撤回酒店申请"
+    assert "房间类型" in by_name["query_hotel_apply"].intent
+    assert "单据编号" in by_name["withdraw_hotel_apply"].intent
+    public_text = "\n".join(
+        [generated.title]
+        + [value for cap in generated.capabilities for value in (cap.title, cap.intent)]
+    )
+    assert "cancel-by-start-user" not in public_text
+    assert "真实接口" not in public_text
+    assert "调用方提供业务字段" not in public_text
+
+
+def test_reoptimization_can_refresh_auto_accepted_semantics_but_keeps_user_owned_text():
+    page_context = {
+        "path": "/oa/common/hotel-apply",
+        "visible_titles": ["酒店申请"],
+    }
+    step = FlowStep(
+        step_id="withdraw", method="DELETE",
+        path="/admin-api/bpm/process-instance/cancel-by-start-user",
+        source_meta={
+            "role": "business_write", "trigger_locator": "role=button[name=撤回]",
+        },
+    )
+    auto = FlowCapability(
+        name="submit", title="提交业务申请",
+        intent="调用方提供业务字段；Skill 按已纳入接口顺序执行前置查询、依赖注入和最终提交。",
+        kind="submit", step_ids=["withdraw"],
+        nodes=[{"id": "call_withdraw", "type": "call", "step_id": "withdraw"}],
+        confirmed=True, updated_by="planner", confidence=0.95,
+    )
+    optimized = asyncio.run(orchestrate_flow_capabilities(
+        FlowSpec(title="cancel-by-start-user 流程(1 步)", steps=[step], capabilities=[auto], meta={
+            "page_context": page_context,
+            "capability_model": {"status": "ready", "semantic_plan": {}},
+        }),
+        submission={"semantic_plan": {
+            "business_understanding": {"business_name": "酒店申请"},
+            "capabilities": [{
+                "name": "withdraw_hotel_application", "kind": "submit",
+                "title": "撤回酒店申请", "intent": "撤回用户选定的酒店申请记录。",
+                "step_ids": ["withdraw"],
+            }],
+        }, "ops": []},
+        generation_mode="optimize",
+    ))
+
+    capability = optimized.capabilities[0]
+    assert capability.name == "withdraw_hotel_apply"
+    assert capability.title == "撤回酒店申请"
+    assert capability.intent == "撤回用户选定的酒店申请记录。"
 
 
 def test_page_enum_binding_is_projected_to_param_and_capability_contract():

@@ -231,3 +231,11 @@ def test_recording_gateway_has_one_pi_path_and_no_direct_llm_fallback() -> None:
     assert "run_id" in inspect.signature(run_request_onboarding).parameters
     assert "recording_pi_required" in inspect.signature(run_request_onboarding).parameters
     assert "未切换" not in source  # errors are surfaced; no hidden alternate model branch
+
+
+def test_recording_gateway_builds_enum_evidence_once_per_finalize() -> None:
+    source = inspect.getsource(gateway.record_ws)
+
+    assert source.count("recorded_page_enum_options()") == 1
+    assert "recorded_page_options = sess.recorded_page_enum_options()" in source
+    assert "page_options_by_field = recorded_page_options" in source

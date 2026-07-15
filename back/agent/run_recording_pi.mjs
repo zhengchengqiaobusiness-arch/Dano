@@ -133,6 +133,19 @@ function lastAssistantText(session) {
   return "";
 }
 
+function messageText(message) {
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((item) => item?.type === "text" ? item.text || "" : "").join("");
+}
+
+function promptWasAppended(session, startIndex, text) {
+  return session.messages.slice(startIndex).some((message) => (
+    message?.role === "user" && messageText(message).trim() === text.trim()
+  ));
+}
+
 async function startSession(command) {
   if (active) throw new Error("a recording Pi session is already active; close it before starting another");
   if (promptInFlight) throw new Error("cannot start a session while a prompt is running");
@@ -203,13 +216,43 @@ async function runPrompt(command) {
       void session.abort().catch((abortError) => log("submission limit abort failed", abortError));
     },
   });
-  const work = session.prompt(command.text, {
-    expandPromptTemplates: false,
-    source: "rpc",
-  });
+  const promptOptions = { expandPromptTemplates: false, source: "rpc" };
+  const startIndex = session.messages.length;
+  let work = session.prompt(command.text, promptOptions);
   promptInFlight = work;
   try {
-    await work;
+    try {
+      await work;
+    } catch (error) {
+      const continuationBoundaryError = String(error?.message || error).includes(
+        "Cannot continue from message role: assistant",
+      );
+      if (!continuationBoundaryError) throw error;
+      if (!promptWasAppended(session, startIndex, command.text)) {
+        // Pi may finish automatic compaction with an assistant message and then
+        // call Agent.continue() before appending this RPC prompt. Retry exactly
+        // once at the now-stable boundary; unrelated provider/runtime failures
+        // are never swallowed or retried here.
+        emit({
+          type: "agent_event",
+          event: "continuation_boundary_recovered",
+          request_id: command.request_id,
+          session_id: session.sessionId,
+        });
+        work = session.prompt(command.text, promptOptions);
+        promptInFlight = work;
+        await work;
+      } else {
+        // The prompt is already in the transcript. Retrying would execute the
+        // same recording tools twice, so the completed turn is kept as-is.
+        emit({
+          type: "agent_event",
+          event: "continuation_completion_recovered",
+          request_id: command.request_id,
+          session_id: session.sessionId,
+        });
+      }
+    }
   } catch (error) {
     if (/abort/i.test(String(error?.message || error))) promptCancelled = true;
     else throw error;

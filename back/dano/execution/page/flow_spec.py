@@ -4290,6 +4290,17 @@ def to_flow_spec(
 def _derive_title(steps: list[FlowStep]) -> str:
     if not steps:
         return ""
+    # The recorder already carries the page titles that were visible when an
+    # operation was clicked.  They are stronger business evidence than an API
+    # action suffix (``submit-process``, ``cancel-by-start-user`` and the like).
+    # Prefer that evidence before exposing a transport path as the flow title.
+    page_business = _page_context_business_name_from_contexts([
+        dict((step.source_meta or {}).get("trigger_page_context") or {})
+        for step in steps
+        if isinstance((step.source_meta or {}).get("trigger_page_context"), dict)
+    ])
+    if page_business:
+        return page_business
     first = next((s for s in reversed(steps) if (s.method or "").upper() not in {"GET", "HEAD", "OPTIONS"}), steps[-1])
     try:
         url = first.url or first.path
@@ -6674,15 +6685,99 @@ def _is_technical_business_title(value: str) -> bool:
     if not text:
         return True
     normalized = re.sub(r"[\s_-]+", "", text.lower())
+    endpoint_action = re.search(
+        r"(?:^|[/_.-])(?:get|list|page|query|search|submit|save|create|update|delete|"
+        r"cancel|withdraw|approve|reject|start|process)(?:[/_.-]|$)",
+        text,
+        re.I,
+    )
+    endpoint_flow_title = bool(
+        re.search(r"[A-Za-z]", text)
+        and (
+            endpoint_action
+            or re.search(r"[/_-]", text)
+            or re.search(r"[a-z][A-Z]", text)
+        )
+        and re.search(r"流程\s*[（(]?\s*\d*\s*步?", text)
+    )
     return bool(
-        re.match(r"^(?:get|post|put|patch|delete)", normalized)
+        endpoint_flow_title
+        or re.search(
+            r"(?:查询|提交|执行|处理)?\s*(?:get|post|put|patch|delete|cancel|withdraw)"
+            r"(?:[-_/]|[A-Z])",
+            text,
+            re.I,
+        )
+        or re.match(r"^(?:get|post|put|patch|delete)", normalized)
         or normalized in {
             "流程", "业务流程", "提交流程", "submit", "submitprocess",
-            "提交业务申请", "查询流程状态", "未命名",
+            "录制业务", "录制业务流程", "提交业务申请", "查询流程状态", "未命名",
         }
         or re.fullmatch(r"(?:capability|能力)\d*", normalized)
         or re.fullmatch(r"submitprocess流程(?:\(\d+步\))?", normalized)
     )
+
+
+_GENERIC_PAGE_TITLE_RE = re.compile(
+    r"^(?:OA\s*)?(?:管理)?(?:平台|系统|工作台|首页|业务平台|办公平台|管理系统)$|"
+    r"^(?:申请|查询|搜索|筛选|基本|详细|更多)?信息$|^(?:申请|查询|搜索)条件$|"
+    r"^(?:确定|取消|关闭|新增|编辑|详情|操作|撤回成功|提交成功)$",
+    re.I,
+)
+
+
+def _clean_page_business_candidate(value: Any) -> str:
+    """Normalize one visible heading without guessing a business domain."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip(" -_|—·>/»›")
+    if not text:
+        return ""
+    # Breadcrumb containers are sometimes captured as one string.  Preserve
+    # the terminal business crumb and discard navigation chrome.
+    chunks = [part.strip() for part in re.split(r"\s*(?:/|>|»|›|→|\||—| - )\s*", text) if part.strip()]
+    if chunks:
+        text = chunks[-1]
+    for prefix in ("当前位置", "系统首页", "管理首页", "工作台首页", "首页"):
+        if text.startswith(prefix) and len(text) > len(prefix):
+            text = text[len(prefix):].strip(" -_|—·>/»›")
+    text = re.sub(r"\s*[（(]\s*\d+\s*[）)]\s*$", "", text).strip()
+    if not text or len(text) > 40 or _GENERIC_PAGE_TITLE_RE.fullmatch(text):
+        return ""
+    if re.search(r"(?:管理平台|管理系统|业务平台|办公平台)$", text) and not re.search(
+        r"申请|借阅|报销|请假|用印|印章|登记|办理", text,
+    ):
+        return ""
+    if _is_technical_business_title(text):
+        return ""
+    return text
+
+
+def _page_context_business_name_from_contexts(contexts: list[dict[str, Any]]) -> str:
+    ranked: list[tuple[int, int, str]] = []
+    seen: set[str] = set()
+    for context in contexts:
+        if not isinstance(context, dict):
+            continue
+        document_title = str(context.get("document_title") or "").strip()
+        candidates = [*(context.get("visible_titles") or []), document_title]
+        for position, raw in enumerate(candidates):
+            text = _clean_page_business_candidate(raw)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            score = 0
+            if re.search(r"[\u4e00-\u9fff]", text):
+                score += 5
+            if 2 <= len(text) <= 12:
+                score += 4
+            if re.search(r"申请|借阅|审批|报销|请假|用印|印章|登记|查询|办理|酒店|公章", text):
+                score += 6
+            if re.search(r"管理|平台|系统|首页|工作台", text):
+                score -= 7
+            if raw == document_title:
+                score -= 2
+            ranked.append((score, -position, text))
+    best = max(ranked, default=(0, 0, ""))
+    return best[2] if best[0] > 0 else ""
 
 
 def _capability_text_is_placeholder(value: str, capability: FlowCapability) -> bool:
@@ -6698,76 +6793,294 @@ def _capability_text_is_placeholder(value: str, capability: FlowCapability) -> b
     )
 
 
+_GENERIC_CAPABILITY_INTENT_RE = re.compile(
+    r"(?:查询流程、审批或上下文详情|调用方提供业务字段|"
+    r"按录制顺序调用\s*\d+\s*个真实接口|根据调用方提供的条件调用已录制查询接口|"
+    r"按已纳入接口顺序执行前置查询)",
+)
+
+
+def _capability_intent_needs_refresh(value: str, capability: FlowCapability) -> bool:
+    text = str(value or "").strip()
+    return bool(
+        not text
+        or text == str(capability.title or "").strip()
+        or _is_technical_business_title(text)
+        or _GENERIC_CAPABILITY_INTENT_RE.search(text)
+    )
+
+
+def _locator_action_name(locator: str) -> str:
+    text = str(locator or "").strip()
+    match = re.search(r"\[name=([^\]]+)\]", text)
+    if match:
+        return match.group(1).strip(" '\"")
+    if text.startswith("text="):
+        return text[5:].strip(" '\"")
+    return ""
+
+
+_ACTION_LABELS = (
+    "撤回", "撤销", "作废", "取消", "删除", "驳回", "同意", "审批",
+    "提交", "保存", "新增", "创建", "更新", "编辑", "导出", "查询", "搜索",
+)
+
+
+def _capability_action_label(spec: FlowSpec, capability: FlowCapability) -> str:
+    by_id = {step.step_id: step for step in spec.steps}
+    steps = [by_id[sid] for sid in _capability_node_step_ids(capability) if sid in by_id]
+    for step in reversed(steps):
+        accessible_name = _locator_action_name(str((step.source_meta or {}).get("trigger_locator") or ""))
+        for label in _ACTION_LABELS:
+            if label in accessible_name:
+                if label == "搜索":
+                    return "查询"
+                return label
+    # Some component libraries do not expose a stable accessible name.  In
+    # that case use only an unambiguous action segment from the recorded write
+    # request; never leak the segment itself into public text.
+    for step in reversed(steps):
+        if not _is_write_step(step):
+            continue
+        path = _request_path({"url": step.path or step.url}).lower()
+        name = str(step.name or "").lower()
+        signature = f"{path}/{name}"
+        if re.search(r"(?:^|[/_.-])(?:cancel-by-start-user|withdraw|revoke)(?:[/_.-]|$)", signature):
+            return "撤回"
+        if re.search(r"(?:^|[/_.-])(?:cancel)(?:[/_.-]|$)", signature):
+            return "取消"
+        if re.search(r"(?:^|[/_.-])(?:delete|remove)(?:[/_.-]|$)", signature):
+            return "删除"
+        if re.search(r"(?:^|[/_.-])(?:reject)(?:[/_.-]|$)", signature):
+            return "驳回"
+        if re.search(r"(?:^|[/_.-])(?:approve|approval|pass)(?:[/_.-]|$)", signature):
+            return "审批"
+        if re.search(r"(?:^|[/_.-])(?:save|draft)(?:[/_.-]|$)", signature):
+            return "保存"
+    if capability.kind == "query_status":
+        return "查询"
+    if capability.kind == "validate_batch":
+        return "校验"
+    if capability.kind == "submit_batch":
+        return "批量提交"
+    return "提交"
+
+
+def _capability_param_labels(spec: FlowSpec, capability: FlowCapability) -> list[str]:
+    by_id = {step.step_id: step for step in spec.steps}
+    labels: list[str] = []
+    for step_id in _capability_node_step_ids(capability):
+        step = by_id.get(step_id)
+        if step is None:
+            continue
+        for param in step.params or []:
+            if not _param_exposed_to_caller(param):
+                continue
+            label = str(param.label or param.key or "").strip()
+            if label and label not in labels:
+                labels.append(label)
+    return labels
+
+
+def _capability_fallback_title(business: str, action: str, kind: str) -> str:
+    subject = business or "录制业务"
+    if kind == "query_status":
+        return f"查询{subject}" if subject.endswith(("记录", "列表", "状态", "详情")) else f"查询{subject}记录"
+    if kind == "list_options":
+        return f"获取{subject}选项"
+    if kind == "validate_batch":
+        return f"校验{subject}批量输入"
+    if action == "批量提交":
+        return f"批量提交{subject}"
+    if action == "提交":
+        return f"提交{subject}" if subject.endswith(("申请", "登记", "表单")) else f"提交{subject}申请"
+    return f"{action}{subject}"
+
+
+def _capability_fallback_intent(
+    spec: FlowSpec,
+    capability: FlowCapability,
+    *,
+    business: str,
+    action: str,
+) -> str:
+    labels = _capability_param_labels(spec, capability)
+    field_text = "、".join(labels[:4])
+    if len(labels) > 4:
+        field_text += "等条件"
+    elif field_text:
+        field_text += "等条件"
+    if capability.kind in {"query_status", "list_options"}:
+        prefix = f"按{field_text}" if field_text else "按调用方提供的查询条件"
+        return f"{prefix}查询{business}记录，并返回可供调用方使用的业务结果。"
+    prefix = f"根据调用方提供的{field_text}" if field_text else "根据调用方提供的业务信息"
+    return f"{prefix}，按已录制的接口依赖{action}{business}，并返回本次操作结果。"
+
+
+def _page_business_slug(spec: FlowSpec) -> str:
+    context = dict((spec.meta or {}).get("page_context") or {})
+    raw_path = str(context.get("path") or "")
+    if not raw_path and context.get("url"):
+        raw_path = urlparse(str(context.get("url") or "")).path
+    ignored = {
+        "api", "admin", "admin-api", "oa", "common", "system", "management",
+        "page", "list", "index", "detail", "view", "form",
+    }
+    for segment in reversed([part for part in raw_path.split("/") if part]):
+        slug = re.sub(r"[^a-zA-Z0-9]+", "_", segment).strip("_").lower()
+        if slug and slug not in ignored and not slug.isdigit():
+            return slug[:40]
+    return ""
+
+
+def _capability_action_slug(action: str, kind: str) -> str:
+    mapping = {
+        "查询": "query", "撤回": "withdraw", "撤销": "revoke", "作废": "void",
+        "取消": "cancel", "删除": "delete", "驳回": "reject", "同意": "approve",
+        "审批": "approve", "提交": "submit", "批量提交": "submit_batch", "保存": "save",
+        "新增": "create", "创建": "create", "更新": "update", "编辑": "update",
+        "导出": "export", "校验": "validate",
+    }
+    return mapping.get(action) or {
+        "query_status": "query", "validate_batch": "validate",
+        "submit_batch": "submit_batch", "submit": "submit",
+    }.get(kind, "execute")
+
+
+def _meaningful_planned_capability_name(value: str, kind: str) -> str:
+    name = re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "")).strip("_").lower()
+    generic = {
+        "query_status", "list_options", "validate_batch", "submit_batch", "submit",
+        "capability", "ability",
+    }
+    if not name or name in generic or re.fullmatch(r"(?:capability|ability)_?\d*", name):
+        return ""
+    # A semantic name must contain an action plus a subject, not just mirror an
+    # endpoint verb such as ``cancel``.
+    if "_" not in name or name in {kind, "query", "cancel", "withdraw", "submit"}:
+        return ""
+    return name[:64]
+
+
+def _rename_capability_identity(
+    spec: FlowSpec,
+    capability: FlowCapability,
+    new_name: str,
+    semantic_plan: dict[str, Any] | None,
+) -> None:
+    old_name = str(capability.name or "")
+    if not new_name or new_name == old_name:
+        return
+    used = {str(item.name or "") for item in spec.capabilities if item is not capability}
+    base = new_name
+    suffix = 2
+    while new_name in used:
+        new_name = f"{base[:60]}_{suffix}"
+        suffix += 1
+    capability.name = new_name
+    for relation in spec.capability_relations or []:
+        if relation.from_capability == old_name:
+            relation.from_capability = new_name
+        if relation.to_capability == old_name:
+            relation.to_capability = new_name
+    if isinstance(spec.goal, dict):
+        spec.goal["capabilities"] = [
+            new_name if str(value) == old_name else value
+            for value in (spec.goal.get("capabilities") or [])
+        ]
+    plan = semantic_plan if isinstance(semantic_plan, dict) else {}
+    for item in plan.get("capabilities") or []:
+        if isinstance(item, dict) and str(item.get("name") or "") == old_name:
+            item["name"] = new_name
+    for relation in plan.get("capability_relations") or []:
+        if not isinstance(relation, dict):
+            continue
+        for key in ("from", "from_capability"):
+            if str(relation.get(key) or "") == old_name:
+                relation[key] = new_name
+        for key in ("to", "to_capability"):
+            if str(relation.get(key) or "") == old_name:
+                relation[key] = new_name
+
+
 def _ensure_capability_explanations(
     spec: FlowSpec,
     semantic_plan: dict[str, Any] | None = None,
 ) -> FlowSpec:
     """Fill missing generated text without replacing meaningful user wording."""
+    plan_items = [
+        item for item in ((semantic_plan or {}).get("capabilities") or [])
+        if isinstance(item, dict)
+    ]
     plan_by_name = {
-        str(item.get("name") or ""): item
-        for item in ((semantic_plan or {}).get("capabilities") or [])
-        if isinstance(item, dict) and str(item.get("name") or "")
+        str(item.get("name") or ""): item for item in plan_items
+        if str(item.get("name") or "")
     }
+
+    def planned_for(capability: FlowCapability) -> dict[str, Any]:
+        exact = plan_by_name.get(capability.name)
+        if exact is not None:
+            return exact
+        cap_steps = set(_capability_node_step_ids(capability))
+        candidates = [item for item in plan_items if str(item.get("kind") or "") == capability.kind]
+        scored = sorted(
+            (
+                len(cap_steps & {str(value) for value in (item.get("step_ids") or [])}),
+                item,
+            )
+            for item in candidates
+        )
+        if not scored or scored[-1][0] <= 0:
+            return candidates[0] if len(candidates) == 1 else {}
+        top_score = scored[-1][0]
+        top = [item for score, item in scored if score == top_score]
+        return top[0] if len(top) == 1 else {}
+
     page_business = _page_context_business_name(spec)
     spec_business = "" if _is_technical_business_title(spec.title) else str(spec.title or "").strip()
     business = page_business or spec_business or _capability_business_name(spec) or "录制业务"
     for capability in spec.capabilities or []:
-        planned = plan_by_name.get(capability.name) or {}
+        planned = planned_for(capability)
+        user_owned = bool(capability.locked or capability.updated_by == "user")
+        action = _capability_action_label(spec, capability)
         planned_title = str(planned.get("title") or "").strip()
-        if _capability_text_is_placeholder(capability.title, capability):
+        if not user_owned and _capability_text_is_placeholder(capability.title, capability):
             if planned_title and not _capability_text_is_placeholder(planned_title, capability):
                 capability.title = planned_title
-            elif capability.kind == "query_status":
-                capability.title = f"查询{business}记录"
-            elif capability.kind == "submit_batch":
-                capability.title = f"批量提交{business}"
-            elif capability.kind == "validate_batch":
-                capability.title = f"校验{business}批量输入"
-            elif capability.kind == "list_options":
-                capability.title = f"获取{business}选项"
-            elif capability.kind == "submit":
-                capability.title = f"提交{business}"
             else:
-                capability.title = f"执行{business}"
+                capability.title = _capability_fallback_title(business, action, capability.kind)
         planned_intent = str(planned.get("intent") or planned.get("description") or "").strip()
-        if _capability_text_is_placeholder(capability.intent, capability) or capability.intent.strip() == capability.title.strip():
-            if planned_intent and not _capability_text_is_placeholder(planned_intent, capability):
+        if not user_owned and _capability_intent_needs_refresh(capability.intent, capability):
+            if planned_intent and not _capability_intent_needs_refresh(planned_intent, capability):
                 capability.intent = planned_intent
             else:
-                step_count = len(_capability_node_step_ids(capability))
-                if capability.kind in {"query_status", "list_options"}:
-                    capability.intent = f"根据调用方提供的条件调用已录制查询接口，返回{business}结果。"
-                else:
-                    capability.intent = (
-                        f"按录制顺序调用 {step_count} 个真实接口完成{capability.title}，"
-                        "并返回最终接口结果。"
-                    )
+                capability.intent = _capability_fallback_intent(
+                    spec, capability, business=business, action=action,
+                )
+        if user_owned:
+            continue
+        planned_name = _meaningful_planned_capability_name(
+            str(planned.get("name") or ""), capability.kind,
+        )
+        page_slug = _page_business_slug(spec) if page_business else ""
+        deterministic_name = (
+            _flow_capability_id(_capability_action_slug(action, capability.kind), page_slug)
+            if page_slug else ""
+        )
+        current_generic = bool(
+            capability.name in {"query_status", "list_options", "validate_batch", "submit_batch", "submit"}
+            or re.fullmatch(r"(?:capability|ability)_?\d*", str(capability.name or ""), re.I)
+        )
+        if current_generic and (planned_name or deterministic_name):
+            _rename_capability_identity(
+                spec, capability, planned_name or deterministic_name, semantic_plan,
+            )
     return spec
 
 
 def _page_context_business_name(spec: FlowSpec) -> str:
     context = dict((spec.meta or {}).get("page_context") or {})
-    candidates = [
-        *(context.get("visible_titles") or []),
-        context.get("document_title"),
-    ]
-    ignored = re.compile(r"登录|首页|工作台|系统管理|确定|取消|提交|新增|编辑|详情$")
-    ranked: list[tuple[int, str]] = []
-    for raw in candidates:
-        text = re.sub(r"\s+", " ", str(raw or "")).strip(" -_|—")
-        if not text or len(text) > 40 or _is_technical_business_title(text):
-            continue
-        score = 0
-        if re.search(r"[\u4e00-\u9fff]", text):
-            score += 4
-        if 2 <= len(text) <= 12:
-            score += 3
-        if re.search(r"申请|借阅|审批|报销|请假|用印|印章|登记|查询|办理", text):
-            score += 4
-        if ignored.search(text):
-            score -= 5
-        ranked.append((score, text))
-    return max(ranked, default=(0, ""), key=lambda item: item[0])[1]
+    return _page_context_business_name_from_contexts([context])
 
 
 def _capability_business_name(spec: FlowSpec) -> str:
@@ -6799,18 +7112,26 @@ def _apply_semantic_business_understanding(
     understanding = semantic_plan.get("business_understanding")
     understanding = understanding if isinstance(understanding, dict) else {}
     title_source = str((spec.meta or {}).get("title_source") or "")
+    model_title = _clean_page_business_candidate(
+        understanding.get("business_name") or understanding.get("object") or ""
+    )
+    # Runtime page evidence outranks a model paraphrase.  In particular, an
+    # endpoint-derived phrase must never replace a grounded page object such as
+    # “酒店申请”.
     proposed_title = str(
-        understanding.get("business_name")
-        or understanding.get("object")
-        or _page_context_business_name(spec)
+        _page_context_business_name(spec)
+        or model_title
         or _capability_business_name(spec)
         or ""
     ).strip()
     if title_source != "user" and proposed_title and (
-        _is_technical_business_title(spec.title) or understanding.get("business_name")
+        _is_technical_business_title(spec.title) or model_title
     ):
         spec.title = proposed_title
-        spec.meta = {**(spec.meta or {}), "title_source": "semantic_plan"}
+        spec.meta = {
+            **(spec.meta or {}),
+            "title_source": "page_context" if _page_context_business_name(spec) else "semantic_plan",
+        }
     business_title = str(spec.title or proposed_title or "").strip()
     if business_title and not _is_technical_business_title(business_title):
         for capability in spec.capabilities or []:
@@ -6818,18 +7139,11 @@ def _apply_semantic_business_understanding(
                 continue
             if not _is_technical_business_title(capability.title):
                 continue
-            if capability.kind == "query_status":
-                capability.title = f"查询{business_title}记录"
-            elif capability.kind == "submit":
-                capability.title = (
-                    f"提交{business_title}"
-                    if business_title.endswith(("申请", "登记", "表单"))
-                    else f"提交{business_title}申请"
-                )
-            elif capability.kind == "submit_batch":
-                capability.title = f"批量提交{business_title}"
-            elif capability.kind == "validate_batch":
-                capability.title = f"校验{business_title}批量输入"
+            capability.title = _capability_fallback_title(
+                business_title,
+                _capability_action_label(spec, capability),
+                capability.kind,
+            )
     description_source = str((spec.meta or {}).get("business_description_source") or "")
     proposed_description = str(
         understanding.get("summary") or understanding.get("intent") or ""
@@ -6856,13 +7170,16 @@ def _complete_semantic_plan_from_spec(
     if not isinstance(understanding, dict):
         understanding = {}
     business_name = str(
-        understanding.get("business_name")
+        _clean_page_business_candidate(understanding.get("business_name"))
         or ("" if _is_technical_business_title(spec.title) else spec.title)
         or _page_context_business_name(spec)
         or _capability_business_name(spec)
         or "录制业务流程"
     ).strip()
-    understanding.setdefault("business_name", business_name)
+    if _is_technical_business_title(str(understanding.get("business_name") or "")):
+        understanding["business_name"] = business_name
+    else:
+        understanding.setdefault("business_name", business_name)
     plan["business_understanding"] = understanding
 
     role_by_step = {
@@ -12183,7 +12500,14 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 cap = new_spec.capabilities[idx]
                 planner_protected = bool(
                     actor == "planner"
-                    and (cap.locked or cap.confirmed or cap.updated_by == "user")
+                    and (
+                        cap.locked
+                        or cap.updated_by == "user"
+                        # Automatically accepted (>60%) planner drafts remain
+                        # optimizable.  A legacy/manual confirmation without a
+                        # planner provenance stays protected conservatively.
+                        or (cap.confirmed and cap.updated_by != "planner")
+                    )
                 )
                 for key, value in raw.items():
                     if key not in _CAPABILITY_ALLOWED_FIELDS:
@@ -12245,6 +12569,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
         if op in {"add_request_to_capability", "add_capability_step"}:
             idx = _find_capability_index(new_spec, edit)
             cap = new_spec.capabilities[idx]
+            actor = str(edit.get("actor") or edit.get("origin") or "user")
             step_id = str(edit.get("step_id") or "")
             if not step_id and ("request_index" in edit or edit.get("request_id")):
                 step_id = promote_request_to_step(
@@ -12255,14 +12580,14 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 needs_dependency_rebuild = True
             step = _find_step(new_spec, step_id)
             usage = str(edit.get("usage") or "execute")
-            origin = str(edit.get("origin") or edit.get("actor") or "manual")
+            origin = str(edit.get("origin") or actor or "manual")
             _forget_removed_capability_step(new_spec, cap.name, step_id)
             _set_capability_request_membership(
                 new_spec, cap, step, usage=usage, origin=origin,
             )
             if usage != "option_source":
                 _add_step_id_to_capability(new_spec, cap, step_id)
-            cap.updated_by = "user"
+            cap.updated_by = "planner" if actor == "planner" else "user"
             _invalidate_capability_contract(cap)
             if usage != "option_source" and not any(n.get("type") == "call" and n.get("step_id") == step_id for n in (cap.nodes or [])):
                 cap.nodes.append({"id": f"call_{len(cap.nodes or []) + 1}", "type": "call", "step_id": step_id})

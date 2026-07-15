@@ -742,6 +742,34 @@ def test_apply_page_enum_options_matches_submitted_code_and_keeps_option_map():
     assert selects[0]["enum_source"] == "dom"
 
 
+def test_script_dictionary_enum_preserves_runtime_source_and_category_filter():
+    selects = [{"path": "query.processStatus", "label": "审批中", "value": "1"}]
+    apply_page_enum_options(
+        selects,
+        {
+            "流程状态": {
+                "field_key": "processStatus",
+                "field_aliases": ["name:processStatus"],
+                "options": [
+                    {"label": "未提交", "value": 0},
+                    {"label": "审批中", "value": 1},
+                ],
+                "enum_source": "script_dictionary",
+                "source_url": "/system/dict-data/simple-list",
+                "dict_type": "bpm_process_instance_status",
+            },
+        },
+        post_data='{"query":{"processStatus":1}}',
+        fields=[{"path": "query.processStatus", "key": "processStatus", "field_aliases": ["name:processStatus"]}],
+    )
+
+    assert selects[0]["source_url"] == "/system/dict-data/simple-list"
+    assert selects[0]["category_key"] == "dictType"
+    assert selects[0]["category_value"] == "bpm_process_instance_status"
+    assert selects[0]["option_map"] == {"未提交": 0, "审批中": 1}
+    assert selects[0]["enum_label_source"] == "script_dictionary"
+
+
 def test_apply_page_enum_options_preserves_api_map_when_dom_only_has_labels():
     """DOM 自定义下拉只抓到 label,不能覆盖掉 API 字典已识别的 label→短码映射。"""
     selects = [{"path": "type", "label": "病假", "value": "2", "source_url": "/dict/leave-type",
