@@ -354,15 +354,23 @@ _RECORDER_JS = r"""() => {
       var type = String(el.type || '').toLowerCase();
       var host = el.closest ? el.closest(
         '.el-date-editor,.el-time-select,.el-time-picker,.ant-picker,.van-picker,' +
-        '.el-select,.el-cascader,.el-autocomplete,.ant-select,.ant-cascader-picker,' +
+        '.el-select,.el-cascader,.ant-select,.ant-cascader-picker,' +
         '.mat-mdc-select,.mat-select,.q-select,.v-select'
       ) : null;
       var cls = String((host && host.className) || el.className || '').toLowerCase();
+      var role = String((el.getAttribute && el.getAttribute('role')) || '').toLowerCase();
+      var ariaAutocomplete = String((el.getAttribute && el.getAttribute('aria-autocomplete')) || '').toLowerCase();
+      var editableCombobox = tag === 'input' && !el.readOnly
+        && role === 'combobox' && ['list','both','inline'].indexOf(ariaAutocomplete) >= 0;
+      var autocompleteHost = el.closest && el.closest('.el-autocomplete,[class*="autocomplete"]');
       if (type === 'datetime-local' || /datetime/.test(cls)) return 'datetime';
       if (type === 'time' || /time-picker|time-select|timepanel/.test(cls)) return 'time';
       if (['date','month','week'].indexOf(type) >= 0 || /date|month|year|calendar/.test(cls)) return 'date';
-      if (tag === 'select' || /select|cascader|autocomplete/.test(cls)) return 'select';
-      if ((el.getAttribute && el.getAttribute('role')) === 'combobox') return 'select';
+      // Autocomplete/ARIA comboboxes may accept arbitrary text.  Only native
+      // selects and non-editable picker controls are executable enums.
+      if (editableCombobox || (tag === 'input' && !el.readOnly && autocompleteHost)) return 'text';
+      if (tag === 'select' || /select|cascader/.test(cls)) return 'select';
+      if (role === 'combobox' && (el.readOnly || ariaAutocomplete === '' || ariaAutocomplete === 'none')) return 'select';
       if (type === 'number' || (el.getAttribute && el.getAttribute('role')) === 'spinbutton') return 'number';
       if (type === 'checkbox') return 'checkbox';
       if (type === 'radio') return 'radio';
@@ -541,6 +549,8 @@ _RECORDER_JS = r"""() => {
         field_aliases: (evidence && evidence.field_aliases) || [],
         control_kind: (evidence && evidence.control_kind) || 'unknown',
         input_type: (evidence && evidence.input_type) || '',
+        enum_source: (evidence && evidence.enum_source) || '',
+        mapping_complete: !!(evidence && evidence.mapping_complete),
         page_context: window.__danoPageContext ? window.__danoPageContext() : {}
       }));
       setTimeout(function () { emitDomEffect(actionId, startMutationSeq); }, 350);
@@ -611,8 +621,11 @@ _RECORDER_JS = r"""() => {
           function scalar(raw) {
             if (raw === null || raw === undefined) return null;
             if (typeof raw !== 'string' && typeof raw !== 'number' && typeof raw !== 'boolean') return null;
-            var value = clean(String(raw));
-            return value === '' ? null : value;
+            if (typeof raw === 'string') {
+              var value = clean(raw);
+              return value === '' ? null : value;
+            }
+            return raw;
           }
           function componentValue(node) {
             // Custom selects often keep the real option value in framework
@@ -633,7 +646,7 @@ _RECORDER_JS = r"""() => {
                 if (vue2Value !== null) return vue2Value;
               }
               var vue3 = node && node.__vueParentComponent;
-              for (var depth = 0; vue3 && depth < 4; depth++, vue3 = vue3.parent) {
+              if (vue3) {
                 var vue3Candidates = [
                   vue3.props && vue3.props.value,
                   vue3.vnode && vue3.vnode.props && vue3.vnode.props.value
@@ -661,11 +674,8 @@ _RECORDER_JS = r"""() => {
             var attrValue = scalar(raw);
             if (attrValue !== null) return attrValue;
           }
-          var componentNode = n;
-          for (var ci = 0; componentNode && ci < 4; ci++, componentNode = componentNode.parentElement) {
-            var frameworkValue = componentValue(componentNode);
-            if (frameworkValue !== null) return frameworkValue;
-          }
+          var frameworkValue = componentValue(n);
+          if (frameworkValue !== null) return frameworkValue;
           var nested = n.querySelector && n.querySelector('[data-value],[data-key],[data-id],[value],[ng-reflect-value]');
           if (nested) {
             for (var ni = 0; ni < attrs.length; ni++) {
@@ -750,7 +760,11 @@ _RECORDER_JS = r"""() => {
     var el = e.target; var tag = (el.tagName || '').toLowerCase(); var ty = ((el.type || '') + '').toLowerCase();
     if (isSensitive(el)) return;
     if (tag === 'textarea' || (tag === 'input' && ['checkbox','radio','submit','button','file','hidden'].indexOf(ty) < 0)) flushElementFill(el);
-    if (tag === 'select') { var l1 = locateField(el); emit('select', l1, el.value, fieldOf(l1), requiredOf(el), nativeOptions(el), fieldEvidence(el)); }
+    if (tag === 'select') {
+      var l1 = locateField(el); var nativeEvidence = fieldEvidence(el);
+      nativeEvidence.enum_source = 'dom'; nativeEvidence.mapping_complete = true;
+      emit('select', l1, el.value, fieldOf(l1), requiredOf(el), nativeOptions(el), nativeEvidence);
+    }
     else if (tag === 'input' && ty === 'file') { var l2 = locateField(el); emit('upload', l2, el.value || '', fieldOf(l2), requiredOf(el)); }
   }, true);
   document.addEventListener('blur', function (e) {
@@ -833,6 +847,10 @@ _RECORDER_JS = r"""() => {
         field_aliases: enumFieldAliases(trig, inp),
         control_kind: 'select',
         options: records,
+        enum_source: 'dom',
+        // A custom/virtual/remote popup only proves the currently rendered
+        // rows.  A dictionary API or a complete static array must fill this.
+        mapping_complete: false,
         observed_at: Date.now(),
         page_context: window.__danoPageContext ? window.__danoPageContext() : {}
       }));
@@ -1597,9 +1615,16 @@ class RecordSession:
             self.page_events = self.page_events[-1000:]
             return
         if op == "enum_snapshot":
-            options = list(step.get("options") or [])[:500]
+            raw_options = list(step.get("options") or [])
+            options = raw_options[:500]
             if options and step.get("field"):
-                snapshot = {**step, "options": options, "event_id": event_id}
+                snapshot = {
+                    **step,
+                    "options": options,
+                    "event_id": event_id,
+                    "mapping_complete": bool(step.get("mapping_complete")) and len(raw_options) <= 500,
+                    "snapshot_truncated": len(raw_options) > 500,
+                }
                 identity = tuple(str(snapshot.get(key) or "") for key in (
                     "page_id", "frame_id", "locator", "field",
                 ))
@@ -1619,8 +1644,30 @@ class RecordSession:
                     for option in options:
                         label = str(option.get("label") if isinstance(option, dict) else option)
                         if label:
+                            old = merged.get(label)
+                            if (
+                                isinstance(old, dict) and isinstance(option, dict)
+                                and old.get("value") != option.get("value")
+                                and "value" in old and "value" in option
+                            ):
+                                snapshot["mapping_conflict"] = True
                             merged[label] = option
-                    snapshot["options"] = list(merged.values())[:500]
+                    merged_options = list(merged.values())
+                    snapshot["options"] = merged_options[:500]
+                    snapshot["snapshot_truncated"] = bool(
+                        snapshot.get("snapshot_truncated")
+                        or previous.get("snapshot_truncated")
+                        or len(merged_options) > 500
+                    )
+                    snapshot["mapping_conflict"] = bool(
+                        snapshot.get("mapping_conflict") or previous.get("mapping_conflict")
+                    )
+                    snapshot["mapping_complete"] = bool(
+                        snapshot.get("mapping_complete")
+                        and previous.get("mapping_complete")
+                        and not snapshot["snapshot_truncated"]
+                        and not snapshot["mapping_conflict"]
+                    )
                     self.enum_snapshots[index] = snapshot
                     replaced = True
                     break
@@ -2060,22 +2107,35 @@ class RecordSession:
         # outside executable steps so opening a control never pollutes the
         # generated workflow, but it must share the same identity/key
         # allocation as the later select/pick event.
-        evidence = [*self.steps, *self.enum_snapshots]
+        def evidence_order(item: dict) -> tuple[int, int]:
+            event_id = str(item.get("event_id") or "")
+            match = re.search(r"(\d+)$", event_id)
+            return (
+                int(item.get("observed_at") or 0),
+                int(match.group(1)) if match else 0,
+            )
+
+        evidence = sorted([*self.steps, *self.enum_snapshots], key=evidence_order)
         keymap = assign_step_field_keys(evidence)
         out: dict[str, dict] = {}
-        last_field_idx: int | None = None
+        last_field_idx_by_scope: dict[tuple[str, str], int] = {}
         for i, s in enumerate(evidence):
+            scope_key = (str(s.get("page_id") or ""), str(s.get("frame_id") or ""))
             if i in keymap:
-                last_field_idx = i
+                last_field_idx_by_scope[scope_key] = i
             if s.get("op") in ("pick", "select", "enum_snapshot") and s.get("options"):
                 # 自定义下拉常见事件序列是「点开输入框/选择器」→「点弹层选项」。
                 # 后一个 pick 事件有 options/selected,但 DOM 目标已经是弹层项,拿不到字段 label。
                 # 因此优先用本步字段,否则回溯最近一个可填写字段,把弹层选项归回正确业务字段。
-                owner_idx = i if i in keymap else last_field_idx
+                owner_idx = i if i in keymap else last_field_idx_by_scope.get(scope_key)
                 if owner_idx not in keymap:
                     continue
+                owner = evidence[owner_idx]
                 field_key = keymap[owner_idx]
-                scope_key = (str(s.get("page_id") or ""), str(s.get("frame_id") or ""))
+                scope_key = (
+                    str(s.get("page_id") or owner.get("page_id") or ""),
+                    str(s.get("frame_id") or owner.get("frame_id") or ""),
+                )
                 storage_key = field_key
                 existing = out.get(storage_key)
                 if existing and (
@@ -2084,26 +2144,70 @@ class RecordSession:
                     storage_key = f"{field_key}@{scope_key[0]}:{scope_key[1]}"
                 previous = out.get(storage_key, {})
                 merged: dict[str, object] = {}
+                mapping_conflict = bool(previous.get("mapping_conflict") or s.get("mapping_conflict"))
                 for option in [*(previous.get("options") or []), *list(s["options"])]:
                     label = str(option.get("label") if isinstance(option, dict) else option).strip()
                     if label:
+                        old = merged.get(label)
+                        if (
+                            isinstance(old, dict) and isinstance(option, dict)
+                            and "value" in old and "value" in option
+                            and old.get("value") != option.get("value")
+                        ):
+                            mapping_conflict = True
                         merged[label] = option
-                selected = str(s.get("value", "") or "").strip()
+                selected_raw = s.get("value", "")
+                selected_label = ""
+                selected_value = None
+                if s.get("mapping_complete") and s.get("enum_source") == "dom":
+                    selected_value = selected_raw
+                    native_matches = [
+                        option for option in merged.values()
+                        if isinstance(option, dict)
+                        and "value" in option
+                        and str(option.get("value")) == str(selected_raw)
+                    ]
+                    if len(native_matches) == 1:
+                        selected_label = str(native_matches[0].get("label") or "").strip()
+                else:
+                    selected_label = str(selected_raw or "").strip()
                 aliases = list(dict.fromkeys([
                     *list(previous.get("field_aliases") or []),
+                    *list(owner.get("field_aliases") or []),
                     *list(s.get("field_aliases") or []),
                 ]))
                 entry = {
                     "options": list(merged.values()),
                     "field_key": field_key,
-                    "selected": selected or str(previous.get("selected") or ""),
+                    "selected": selected_label or str(previous.get("selected_label") or previous.get("selected") or ""),
+                    "selected_label": selected_label or str(previous.get("selected_label") or previous.get("selected") or ""),
+                    "mapping_complete": bool(
+                        s.get("mapping_complete")
+                        and not s.get("snapshot_truncated")
+                        and not mapping_conflict
+                    ),
                 }
-                if s.get("control_kind") or s.get("field_aliases") or previous.get("control_kind"):
+                if selected_value not in (None, ""):
+                    entry["selected_value"] = selected_value
+                elif previous.get("selected_value") not in (None, ""):
+                    entry["selected_value"] = previous.get("selected_value")
+                if mapping_conflict:
+                    entry["mapping_conflict"] = True
+                if (
+                    s.get("control_kind") or owner.get("control_kind")
+                    or aliases or previous.get("control_kind")
+                ):
                     entry.update({
                         "page_id": scope_key[0],
                         "frame_id": scope_key[1],
-                        "page_context": dict(s.get("page_context") or previous.get("page_context") or {}),
-                        "control_kind": str(s.get("control_kind") or previous.get("control_kind") or "select"),
+                        "page_context": dict(
+                            s.get("page_context") or owner.get("page_context")
+                            or previous.get("page_context") or {}
+                        ),
+                        "control_kind": str(
+                            s.get("control_kind") or owner.get("control_kind")
+                            or previous.get("control_kind") or "select"
+                        ),
                     })
                 if aliases:
                     entry["field_aliases"] = aliases
@@ -2135,8 +2239,12 @@ class RecordSession:
             r"(?P<value>'(?:\\.|[^'])*'|\"(?:\\.|[^\"])*\"|-?\d+(?:\.\d+)?|true|false)",
             re.S,
         )
-        label_keys = {"label", "text", "name", "title"}
-        value_keys = {"value", "id", "code", "key"}
+        key_re = re.compile(
+            r"(?:['\"](?P<qkey>[^'\"]+)['\"]|(?P<key>[A-Za-z_$][\w$]*))\s*:",
+            re.S,
+        )
+        label_keys = ("label", "text", "name", "title")
+        value_keys = ("value", "id", "code", "key")
         text = source or ""
         identifier_chars = frozenset(
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$"
@@ -2199,20 +2307,88 @@ class RecordSession:
             if body_end > bracket + 1:
                 candidates.append((name, text[bracket + 1:body_end]))
 
+        def split_top_level(body: str) -> list[str]:
+            elements: list[str] = []
+            start = 0
+            brace = bracket = paren = 0
+            quote = ""
+            escaped = False
+            for index, char in enumerate(body):
+                if quote:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == quote:
+                        quote = ""
+                    continue
+                if char in {"'", '"', "`"}:
+                    quote = char
+                elif char == "{":
+                    brace += 1
+                elif char == "}":
+                    brace -= 1
+                elif char == "[":
+                    bracket += 1
+                elif char == "]":
+                    bracket -= 1
+                elif char == "(":
+                    paren += 1
+                elif char == ")":
+                    paren -= 1
+                elif char == "," and brace == bracket == paren == 0:
+                    if body[start:index].strip():
+                        elements.append(body[start:index].strip())
+                    start = index + 1
+            if body[start:].strip():
+                elements.append(body[start:].strip())
+            return elements
+
         for name, body in candidates:
             options: list[dict] = []
-            for obj in object_re.finditer(body):
+            elements = split_top_level(body)
+            mapping_complete = bool(elements) and len(elements) <= 200
+            for element in elements:
+                obj = object_re.fullmatch(element)
+                if obj is None:
+                    mapping_complete = False
+                    continue
                 values = {
                     str(item.group("qkey") or item.group("key") or "").lower(): cls._script_literal_value(item.group("value"))
                     for item in item_re.finditer(obj.group("body"))
                 }
-                label_key = next((key for key in label_keys if values.get(key) not in (None, "")), "")
-                value_key = next((key for key in value_keys if key in values), "")
+                present_keys = {
+                    str(item.group("qkey") or item.group("key") or "").lower()
+                    for item in key_re.finditer(obj.group("body"))
+                }
+                present_label_keys = [key for key in label_keys if key in present_keys]
+                present_value_keys = [key for key in value_keys if key in present_keys]
+                if any(key not in values for key in [*present_label_keys, *present_value_keys]):
+                    mapping_complete = False
+                label_key = present_label_keys[0] if present_label_keys else ""
+                value_key = present_value_keys[0] if present_value_keys else ""
                 if label_key and value_key:
-                    options.append({"label": str(values[label_key]), "value": values[value_key]})
+                    if values.get(label_key) not in (None, "") and value_key in values:
+                        options.append({"label": str(values[label_key]), "value": values[value_key]})
+                    else:
+                        mapping_complete = False
+                else:
+                    mapping_complete = False
             unique = {(item["label"], repr(item["value"])) for item in options}
+            unique_labels = {item["label"] for item in options}
+            mapping_complete = bool(
+                mapping_complete
+                and len(options) == len(elements)
+                and len(unique) == len(options)
+                and len(unique_labels) == len(options)
+            )
             if len(unique) >= 2:
-                arrays.append({"name": name, "options": options[:200]})
+                arrays.append({
+                    "name": name,
+                    "options": options[:200],
+                    "mapping_complete": mapping_complete,
+                    "truncated": len(options) > 200,
+                })
         return arrays
 
     @staticmethod
@@ -2257,11 +2433,24 @@ class RecordSession:
             # Tokenize the bounded segment once.  The former nested loop ran a
             # separately compiled regex for every known dictionary constant
             # (hundreds of searches per field marker).
-            names = {
-                match.group("name")
-                for match in symbol_re.finditer(segment)
-                if match.group("name") in constants
-            }
+            names: set[str] = set()
+            for match in symbol_re.finditer(segment):
+                name = match.group("name")
+                if name not in constants:
+                    continue
+                prefix = segment[max(0, match.start() - 160):match.start()]
+                # Match the symbol at its actual call position.  Looking at a
+                # suffix after the symbol made the end anchor impossible for
+                # real forms such as ``getDict(DictType.STATUS)`` because the
+                # context ended in ``))`` rather than ``DictType.``.
+                direct_dict_type = re.search(r"(?:[A-Za-z_$][\w$]*\.)?DictType\s*\.\s*$", prefix, re.I)
+                direct_dict_call = re.search(
+                    r"(?:get|use)?dict(?:ionary|type)?\s*\(\s*(?:[A-Za-z_$][\w$]*\.)?\s*$",
+                    prefix,
+                    re.I,
+                )
+                if direct_dict_type or direct_dict_call:
+                    names.add(name)
             types = {constants[name] for name in names}
             if len(types) == 1:
                 result.setdefault(marker.group("field"), set()).update(types)
@@ -2328,16 +2517,20 @@ class RecordSession:
         return result
 
     @staticmethod
-    def _dictionary_options_from_reads(reads: list[dict], dict_type: str) -> tuple[list[dict], str]:
+    def _dictionary_options_from_reads(reads: list[dict], dict_type: str) -> tuple[list[dict], str, bool]:
         from dano.execution.page.request_capture import as_list_payload
 
-        merged: dict[tuple[str, str], dict] = {}
-        source_url = ""
+        candidates: dict[str, tuple[list[dict], bool]] = {}
         for read in reads:
+            source_url = str(read.get("url") or "").strip()
+            if not source_url:
+                continue
             items = as_list_payload(read.get("json"))
             if not items:
                 continue
+            by_label: dict[str, dict] = {}
             matched_here = False
+            complete = True
             for item in items:
                 if not isinstance(item, dict):
                     continue
@@ -2347,23 +2540,40 @@ class RecordSession:
                 }
                 if str(normalized.get("dicttype") or "") != dict_type:
                     continue
+                matched_here = True
                 label = normalized.get("label")
-                if label in (None, "") or "value" not in normalized:
+                if label in (None, "") or "value" not in normalized or normalized.get("value") is None:
+                    complete = False
                     continue
                 option = {"label": str(label), "value": normalized["value"]}
-                merged[(option["label"], repr(option["value"]))] = option
-                matched_here = True
-            if matched_here and not source_url:
-                source_url = str(read.get("url") or "")
-        return list(merged.values())[:200], source_url
+                previous = by_label.get(option["label"])
+                if previous is not None and previous.get("value") != option["value"]:
+                    complete = False
+                by_label[option["label"]] = option
+            options = list(by_label.values())
+            if matched_here:
+                complete = bool(complete and 2 <= len(options) <= 200)
+                # Repeated captures of the same endpoint use the latest
+                # complete snapshot. A different endpoint is ambiguous.
+                candidates[source_url] = (options[:200], complete)
+        if len(candidates) != 1:
+            return [], "", False
+        source_url, (options, complete) = next(iter(candidates.items()))
+        return options, source_url, complete
 
     def _supplement_page_enums_from_dictionaries(self, page_options: dict) -> None:
         if not page_options or not self.script_sources:
             return
 
-        constants: dict[str, str] = {}
+        constant_values: dict[str, set[str]] = {}
         for script in self.script_sources:
-            constants.update(self._script_dictionary_constants(str(script.get("text") or "")))
+            for name, value in self._script_dictionary_constants(str(script.get("text") or "")).items():
+                constant_values.setdefault(name, set()).add(value)
+        constants = {
+            name: next(iter(values))
+            for name, values in constant_values.items()
+            if len(values) == 1
+        }
         if not constants:
             return
 
@@ -2405,8 +2615,6 @@ class RecordSession:
                 field_aliases = list(entry.get("field_aliases") or [])
                 if field not in field_aliases:
                     entry["field_aliases"] = [*field_aliases, field]
-            if options and all(isinstance(item, dict) and "value" in item for item in options):
-                continue
             aliases = {
                 normalized(str(alias).split(":", 1)[-1])
                 for alias in [entry.get("field_key"), *(entry.get("field_aliases") or [])]
@@ -2421,8 +2629,8 @@ class RecordSession:
             if len(matched_types) != 1:
                 continue
             dict_type = next(iter(matched_types))
-            mapped, source_url = self._dictionary_options_from_reads(reads, dict_type)
-            if len(mapped) < 2:
+            mapped, source_url, mapping_complete = self._dictionary_options_from_reads(reads, dict_type)
+            if len(mapped) < 2 or not source_url or not mapping_complete:
                 continue
             entry["options"] = mapped
             entry["enum_source"] = "script_dictionary"
@@ -2437,27 +2645,72 @@ class RecordSession:
         def normalized(value: object) -> str:
             return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
 
+        def owner_name(value: object) -> str:
+            name = normalized(value)
+            # Deterministic generated-code convention, not substring/fuzzy
+            # matching: only a complete, recognized collection suffix may be
+            # removed before comparing with the exact form property.
+            for suffix in ("selectoptions", "enumoptions", "optionlist", "options"):
+                if name.endswith(suffix) and len(name) > len(suffix):
+                    return name[:-len(suffix)]
+            return name
+
         arrays: list[dict] = []
         for script in self.script_sources:
             for candidate in self._static_enum_arrays(str(script.get("text") or "")):
                 candidate["url"] = str(script.get("url") or "")
-                arrays.append(candidate)
+                options = list(candidate.get("options") or [])
+                labels = [str(option.get("label") or "").strip() for option in options]
+                if (
+                    candidate["url"]
+                    and candidate.get("mapping_complete") is True
+                    and candidate.get("truncated") is not True
+                    and len(options) >= 2
+                    and all(
+                        isinstance(option, dict)
+                        and option.get("label") not in (None, "")
+                        and "value" in option
+                        and option.get("value") is not None
+                        for option in options
+                    )
+                    and len(set(labels)) == len(labels)
+                ):
+                    arrays.append(candidate)
         for entry in page_options.values():
             options = list(entry.get("options") or [])
-            if options and all(isinstance(item, dict) and "value" in item for item in options):
+            if (
+                entry.get("mapping_complete") is True
+                and options
+                and all(isinstance(item, dict) and "value" in item for item in options)
+            ):
                 continue
             aliases = {
                 normalized(str(alias).split(":", 1)[-1])
                 for alias in [entry.get("field_key"), *(entry.get("field_aliases") or [])]
                 if len(normalized(str(alias).split(":", 1)[-1])) >= 3
             }
-            matches = [
+            related = [
                 candidate for candidate in arrays
-                if any(alias in normalized(candidate["name"]) or normalized(candidate["name"]) in alias for alias in aliases)
+                if any(
+                    normalized(candidate["name"]).startswith(alias)
+                    for alias in aliases
+                )
+            ]
+            matches = [
+                candidate for candidate in related
+                if owner_name(candidate["name"]) in aliases
+                and {
+                    str(option.get("label") if isinstance(option, dict) else option).strip()
+                    for option in options
+                    if str(option.get("label") if isinstance(option, dict) else option).strip()
+                }.issubset({str(option.get("label") or "").strip() for option in candidate["options"]})
             ]
             # Ambiguous bundles are not evidence. Exact one-field/one-array
             # association is required before static JS can fill wire values.
-            if len(matches) != 1:
+            # A second field-prefixed array (for example ``statusBackup``)
+            # makes the naming convention ambiguous even if only one array
+            # happens to end in ``Options``.
+            if len(related) != 1 or len(matches) != 1:
                 continue
             entry["options"] = list(matches[0]["options"])
             entry["enum_source"] = "script_static"

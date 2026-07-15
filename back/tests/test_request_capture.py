@@ -58,6 +58,34 @@ _REQUESTS = [
 ]
 
 
+def _strict_select_field(path: str, label: str) -> dict:
+    """Build the minimum recorder evidence required for an API-backed select."""
+    leaf = path.split(".")[-1].split("[")[0]
+    return {
+        "path": path,
+        "key": leaf,
+        "suggest_name": label,
+        "name_source": "dom",
+        "field_aliases": [path, leaf],
+        "control_kind": "select",
+    }
+
+
+def _strict_dom_enum(path: str, selected_label: str, selected_value, options: list[dict]) -> dict:
+    """Build complete, field-owned DOM enum evidence (never a label-only snapshot)."""
+    leaf = path.split(".")[-1].split("[")[0]
+    return {
+        "field_key": leaf,
+        "field_aliases": [path, leaf],
+        "control_kind": "select",
+        "enum_source": "dom",
+        "mapping_complete": True,
+        "selected_label": selected_label,
+        "selected_value": selected_value,
+        "options": options,
+    }
+
+
 def test_json_write_requests_lists_all_candidates():
     """候选 = 所有带 JSON body 的写请求(GET / 非JSON 排除),保序;供前端手选用哪个。"""
     cands = json_write_requests(_REQUESTS)
@@ -153,7 +181,12 @@ def test_suggest_selects_binds_nested_name_id_pair_for_business_system():
         },
     }]
 
-    selects = suggest_selects(post, reads, {"所属系统": "交通信息系统01"})
+    selects = suggest_selects(
+        post,
+        reads,
+        {"所属系统": "交通信息系统01"},
+        fields=[_strict_select_field("ywsxList[0].yyxtmc", "所属系统")],
+    )
 
     assert len(selects) == 1
     sel = selects[0]
@@ -198,7 +231,12 @@ def test_suggest_selects_binds_field_to_list_source():
     reads = [{"url": "http://oa.x/prod-api/system/user/list",
               "json": {"rows": [{"userId": 12, "nickName": "张经理", "deptName": "研发"},
                                 {"userId": 34, "nickName": "李总"}]}}]
-    s = suggest_selects(submit, reads)
+    s = suggest_selects(
+        submit,
+        reads,
+        {"审批人": "张经理"},
+        fields=[_strict_select_field("approverId", "审批人")],
+    )
     assert len(s) == 1
     b = s[0]
     assert b["path"] == "approverId" and b["value_key"] == "userId"
@@ -226,6 +264,7 @@ def test_suggest_selects_binds_long_entity_id_without_guessing_text_sibling():
         submit,
         reads,
         {"申请标题": "出差用章申请", "备注": "客户材料", "印章": "行政公章"},
+        fields=[_strict_select_field("sealId", "印章")],
     )
 
     assert len(selects) == 1
@@ -271,7 +310,12 @@ def test_suggest_selects_code_dropdown_via_small_dict():
                   "json": {"code": 200, "data": [{"dictLabel": "事假", "dictValue": "1"},
                                                  {"dictLabel": "病假", "dictValue": "2"},
                                                  {"dictLabel": "年假", "dictValue": "3"}]}}]
-    s = suggest_selects(submit, dict_read)
+    s = suggest_selects(
+        submit,
+        dict_read,
+        {"请假类型": "病假"},
+        fields=[_strict_select_field("type", "请假类型")],
+    )
     assert len(s) == 1
     b = s[0]
     assert b["path"] == "type" and b["value_key"] == "dictValue" and b["label_key"] == "dictLabel"
@@ -286,7 +330,12 @@ def test_suggest_selects_generic_non_ruoyi_shape():
     read = [{"url": "http://other.sys/api/categories",
              "json": {"options": [{"optionCode": "STD", "caption": "标准"},
                                    {"optionCode": "VIP", "caption": "贵宾"}]}}]
-    s = suggest_selects(submit, read)
+    s = suggest_selects(
+        submit,
+        read,
+        {"类别": "贵宾"},
+        fields=[_strict_select_field("category", "类别")],
+    )
     assert len(s) == 1
     b = s[0]
     assert b["path"] == "category"
@@ -329,7 +378,12 @@ def test_suggest_selects_value_key_not_named_id():
     不写死值字段名,多公司/多系统的下拉字典都覆盖。"""
     sub = '{"leaveType":2}'
     read = [{"url": "/dict", "json": {"data": [{"type": 1, "name": "事假"}, {"type": 2, "name": "病假"}]}}]
-    s = suggest_selects(sub, read)
+    s = suggest_selects(
+        sub,
+        read,
+        {"请假类型": "病假"},
+        fields=[_strict_select_field("leaveType", "请假类型")],
+    )
     assert len(s) == 1
     assert s[0]["value_key"] == "type" and s[0]["label_key"] == "name" and s[0]["label"] == "病假"
 
@@ -442,7 +496,12 @@ def test_suggest_selects_prefers_confirmed_over_huge_generic_dict():
                       {"dictValue": "3", "dictLabel": "年假"}]}
     reads = [{"url": "/ai/models", "json": huge},            # 通用大字典**先**出现(旧逻辑会 first-win 绑错)
              {"url": "/dict/leave_type", "json": leave}]
-    s = suggest_selects(sub, reads, {"请假类型": "病假"})       # 录制选了"病假"
+    s = suggest_selects(
+        sub,
+        reads,
+        {"请假类型": "病假"},
+        fields=[_strict_select_field("type", "请假类型")],
+    )                                                       # 录制选了"病假"
     assert len(s) == 1
     assert s[0]["label"] == "病假" and s[0]["count"] == 3 and s[0]["label_key"] == "dictLabel"
     assert s[0]["options"] == ["事假", "病假", "年假"]           # 选项快照是小字典(不是垃圾大字典)
@@ -455,7 +514,7 @@ def test_short_code_never_binds_unconfirmed_department_or_user_source():
         '{"type":1}',
         [{"url": "/system/dept/simple-list", "json": {"data": departments}}],
         {"请假类型": "病假"},
-        fields=[{"path": "type", "key": "type", "suggest_name": "请假类型", "name_source": "sample"}],
+        fields=[_strict_select_field("type", "请假类型")],
     ) == []
 
 
@@ -473,7 +532,7 @@ def test_unique_code_global_dictionary_still_narrows_by_explicit_dict_type():
         '{"type":"101"}',
         [{"url": "/system/dict-data/simple-list", "json": {"data": items}}],
         {"请假类型": "病假"},
-        fields=[{"path": "type", "key": "type", "suggest_name": "请假类型", "name_source": "sample"}],
+        fields=[_strict_select_field("type", "请假类型")],
     )
 
     assert len(result) == 1
@@ -481,13 +540,38 @@ def test_unique_code_global_dictionary_still_narrows_by_explicit_dict_type():
     assert result[0]["category_key"] == "dictType"
 
 
-def test_suggest_selects_picks_smaller_dict_when_both_unconfirmed():
-    """无录制佐证时,跨源择优取**更小(更专门)**的字典,而非通用大字典。"""
+def test_small_mixed_dictionary_narrows_by_explicit_category_key():
+    """显式字典分类键本身就是结构证据，即使字典小于 50 项也必须先按类别收窄。"""
+    for category_key in ("dictType", "dict_code", "category"):
+        items = [
+            {"value": "0", "label": "未提交", category_key: "process_status"},
+            {"value": "1", "label": "审批中", category_key: "process_status"},
+            {"value": "S", "label": "标准间", category_key: "room_type"},
+            {"value": "D", "label": "大床房", category_key: "room_type"},
+        ]
+
+        result = suggest_selects(
+            '{"processStatus":"1"}',
+            [{"url": "/system/dict-data/simple-list", "json": {"data": items}}],
+            {"流程状态": "审批中"},
+            fields=[_strict_select_field("processStatus", "流程状态")],
+        )
+
+        assert len(result) == 1
+        assert result[0]["options"] == ["未提交", "审批中"]
+        assert result[0]["category_key"] == category_key
+        assert result[0]["category_value"] == "process_status"
+
+
+def test_suggest_selects_rejects_ambiguous_sources_without_field_evidence():
+    """无控件归属和选中标签佐证时，不按列表大小猜某个 API 属于该字段。"""
     sub = '{"type":"VIP"}'
     big = {"rows": [{"code": f"C{i}", "name": f"X{i}"} for i in range(120)] + [{"code": "VIP", "name": "大字典贵宾"}]}
     small = {"rows": [{"code": "STD", "name": "标准"}, {"code": "VIP", "name": "小字典贵宾"}]}
-    s = suggest_selects(sub, [{"url": "/big", "json": big}, {"url": "/small", "json": small}])
-    assert len(s) == 1 and s[0]["count"] == 2 and s[0]["label"] == "小字典贵宾"
+    assert suggest_selects(
+        sub,
+        [{"url": "/big", "json": big}, {"url": "/small", "json": small}],
+    ) == []
 
 
 def test_suggest_selects_snapshots_options():
@@ -496,7 +580,12 @@ def test_suggest_selects_snapshots_options():
     read = [{"url": "/dict", "json": {"data": [{"dictValue": "1", "dictLabel": "事假"},
                                                {"dictValue": "2", "dictLabel": "病假"},
                                                {"dictValue": "3", "dictLabel": "年假"}]}}]
-    s = suggest_selects(sub, read)
+    s = suggest_selects(
+        sub,
+        read,
+        {"请假类型": "病假"},
+        fields=[_strict_select_field("type", "请假类型")],
+    )
     assert s[0]["options"] == ["事假", "病假", "年假"]
 
 
@@ -522,7 +611,12 @@ def test_suggest_selects_narrows_aggregate_dict_by_category():
     录制确认选了"病假" → 按命中项的分类键 dictType 收窄成**只属于请假类型的 3 项**,并把分类过滤随 select 走。"""
     sub = '{"type":"L1"}'                                 # 请假类型存码 L1(=病假)
     read = [{"url": "/system/dict/data/list", "json": {"rows": _agg_dict_items()}}]
-    s = suggest_selects(sub, read, {"请假类型": "病假", "原因": "回家"})
+    s = suggest_selects(
+        sub,
+        read,
+        {"请假类型": "病假", "原因": "回家"},
+        fields=[_strict_select_field("type", "请假类型")],
+    )
     assert len(s) == 1
     b = s[0]
     assert b["label"] == "病假" and b["count"] == 3
@@ -542,7 +636,12 @@ def test_suggest_selects_big_unique_list_not_treated_as_aggregate():
     """防误伤:大但**码全局唯一**的单字段列表(城市/用户)不是聚合字典 → 照常整列表绑定,不收窄不丢弃。"""
     sub = '{"city":"C100"}'
     big = {"rows": [{"cityId": f"C{i}", "cityName": f"市{i}"} for i in range(200)]}
-    s = suggest_selects(sub, [{"url": "/sys/city", "json": big}], {"城市": "市100"})
+    s = suggest_selects(
+        sub,
+        [{"url": "/sys/city", "json": big}],
+        {"城市": "市100"},
+        fields=[_strict_select_field("city", "城市")],
+    )
     assert len(s) == 1 and s[0]["count"] == 200
     assert s[0]["label"] == "市100" and "category_key" not in s[0]
 
@@ -712,19 +811,26 @@ def test_manifest_live_directory_enum_no_inline_enum():
     assert p["x-options-source"] is True and "--list-options" in p["description"]
 
 
-def test_apply_page_enum_options_overrides_garbage_dict():
-    """根因(治"加班类型绑到 222 项含工作日/档案/银行…全量字典"):录制时下拉里真实可见的 3 个选项(DOM 抓的)
-    覆盖网络匹配出的 222 项快照 —— 地面真值,胜过拿提交值去字典里猜命中。并撤掉按类目收窄。"""
+def test_apply_complete_page_enum_overrides_garbage_dict():
+    """字段归属、完整 wire 映射和当前选中值都齐全时，DOM 事实可替换错误 API 推断。"""
     selects = [{"path": "type", "label": "周末加班", "value": "2", "source_url": "/dict",
                 "value_key": "dictValue", "label_key": "dictLabel",
                 "options": [f"x{i}" for i in range(222)], "count": 222,
                 "category_key": "dictType", "category_value": "misc"}]
-    apply_page_enum_options(selects, {"周末加班": ["工作日加班", "周末加班", "节假日加班"]})
+    apply_page_enum_options(
+        selects,
+        {"加班类型": _strict_dom_enum("type", "周末加班", 2, [
+            {"label": "工作日加班", "value": 1},
+            {"label": "周末加班", "value": 2},
+            {"label": "节假日加班", "value": 3},
+        ])},
+        post_data='{"type":2}',
+    )
     s = selects[0]
     assert s["options"] == ["工作日加班", "周末加班", "节假日加班"] and s["count"] == 3
-    assert s["enum_source"] == "api" and s["enum_label_source"] == "dom"
-    assert "category_key" not in s                                  # DOM 标签即权威,动态值仍归当前 API
-    assert s["source_url"] == "/dict"                               # 来源保留(运行期名→ID 仍用它)
+    assert s["enum_source"] == "dom" and s["enum_label_source"] == "dom"
+    assert "category_key" not in s
+    assert "source_url" not in s                                    # 完整 DOM 映射不冒充原 API 来源
 
 
 def test_apply_page_enum_options_matches_submitted_code_and_keeps_option_map():
@@ -732,9 +838,11 @@ def test_apply_page_enum_options_matches_submitted_code_and_keeps_option_map():
                 "value_key": "", "label_key": "", "options": [], "count": 0}]
     apply_page_enum_options(
         selects,
-        {"2": [{"label": "事假", "value": 2}, {"label": "病假", "value": 3}]},
+        {"类型": _strict_dom_enum("type", "事假", 2, [
+            {"label": "事假", "value": 2}, {"label": "病假", "value": 3},
+        ])},
         post_data='{"type":2}',
-        fields=[{"path": "type", "key": "type", "suggest_name": "类型", "value": "2"}],
+        fields=[_strict_select_field("type", "类型")],
     )
 
     assert selects[0]["options"] == ["事假", "病假"]
@@ -750,6 +858,7 @@ def test_script_dictionary_enum_preserves_runtime_source_and_category_filter():
             "流程状态": {
                 "field_key": "processStatus",
                 "field_aliases": ["name:processStatus"],
+                "control_kind": "select",
                 "options": [
                     {"label": "未提交", "value": 0},
                     {"label": "审批中", "value": 1},
@@ -757,6 +866,9 @@ def test_script_dictionary_enum_preserves_runtime_source_and_category_filter():
                 "enum_source": "script_dictionary",
                 "source_url": "/system/dict-data/simple-list",
                 "dict_type": "bpm_process_instance_status",
+                "mapping_complete": True,
+                "selected_label": "审批中",
+                "selected_value": 1,
             },
         },
         post_data='{"query":{"processStatus":1}}',
@@ -770,8 +882,8 @@ def test_script_dictionary_enum_preserves_runtime_source_and_category_filter():
     assert selects[0]["enum_label_source"] == "script_dictionary"
 
 
-def test_apply_page_enum_options_preserves_api_map_when_dom_only_has_labels():
-    """DOM 自定义下拉只抓到 label,不能覆盖掉 API 字典已识别的 label→短码映射。"""
+def test_apply_page_enum_options_ignores_label_only_dom_snapshot():
+    """DOM 只有 label 时不能覆盖 API 已识别的 label→短码映射。"""
     selects = [{"path": "type", "label": "病假", "value": "2", "source_url": "/dict/leave-type",
                 "value_key": "dictValue", "label_key": "dictLabel",
                 "options": ["其它类型", "病假"], "count": 2,
@@ -784,10 +896,10 @@ def test_apply_page_enum_options_preserves_api_map_when_dom_only_has_labels():
         fields=[{"path": "type", "key": "type", "suggest_name": "类型", "value": "2"}],
     )
 
-    assert selects[0]["options"] == ["病假", "事假", "婚假"]
-    assert selects[0]["option_map"] == {"病假": 2, "事假": 1, "婚假": 3}
+    assert selects[0]["options"] == ["其它类型", "病假"]
+    assert selects[0]["option_map"] == {"事假": 1, "病假": 2, "婚假": 3}
     assert selects[0]["enum_source"] == "api"
-    assert selects[0]["enum_label_source"] == "dom"
+    assert "enum_label_source" not in selects[0]
 
 
 def test_apply_page_enum_options_prefers_dom_values_and_rejects_foreign_map():
@@ -798,10 +910,11 @@ def test_apply_page_enum_options_prefers_dom_values_and_rejects_foreign_map():
 
     apply_page_enum_options(
         selects,
-        {"病假": {"options": [{"label": "病假", "value": "SICK"},
-                                {"label": "事假", "value": "PERSONAL"},
-                                {"label": "年假", "value": "ANNUAL"}],
-                  "selected": "病假"}},
+        {"请假类型": _strict_dom_enum("type", "病假", "SICK", [
+            {"label": "病假", "value": "SICK"},
+            {"label": "事假", "value": "PERSONAL"},
+            {"label": "年假", "value": "ANNUAL"},
+        ])},
         post_data='{"type":"SICK"}',
     )
 
@@ -834,22 +947,29 @@ def test_dynamic_dom_snapshot_is_not_manifest_hard_enum():
 
 
 def test_page_enum_selects_creates_sourceless_enum():
-    """页面只有 3 个选项、提交体存的就是显示名、又没绑上任何网络源 → 造**无来源** enum(agent 传名字即原样提交)。"""
+    """页面完整记录 label→wire 映射时可生成无网络来源 enum。"""
     sub = '{"overtimeType":"周末加班","reason":"x"}'
-    out = page_enum_selects(sub, {"周末加班": ["工作日加班", "周末加班", "节假日加班"]}, set())
+    evidence = {"加班类型": _strict_dom_enum("overtimeType", "周末加班", "周末加班", [
+        {"label": "工作日加班", "value": "工作日加班"},
+        {"label": "周末加班", "value": "周末加班"},
+        {"label": "节假日加班", "value": "节假日加班"},
+    ])}
+    out = page_enum_selects(sub, evidence, set())
     assert len(out) == 1
     s = out[0]
     assert s["path"] == "overtimeType" and s["options"] == ["工作日加班", "周末加班", "节假日加班"]
     assert s["source_url"] == "" and s["enum_source"] == "dom"
-    assert page_enum_selects(sub, {"周末加班": ["a", "b"]}, {"overtimeType"}) == []   # 已被别的 select 接管 → 不重复造
+    assert page_enum_selects(sub, evidence, {"overtimeType"}) == []   # 已被别的 select 接管 → 不重复造
 
 
 def test_page_enum_selects_matches_field_label_when_body_stores_code():
     out = page_enum_selects(
         '{"type":2,"reason":"x"}',
-        {"类型": [{"label": "事假", "value": 2}, {"label": "病假", "value": 3}]},
+        {"类型": _strict_dom_enum("type", "事假", 2, [
+            {"label": "事假", "value": 2}, {"label": "病假", "value": 3},
+        ])},
         set(),
-        fields=[{"path": "type", "key": "type", "suggest_name": "类型", "value": "2"}],
+        fields=[_strict_select_field("type", "类型")],
     )
 
     assert len(out) == 1
@@ -865,7 +985,11 @@ def test_page_enum_uses_recorded_control_name_without_business_dictionary():
         {"房间等级": {
             "field_key": "房间等级",
             "field_aliases": ["roomLevel"],
-            "selected": "豪华",
+            "control_kind": "select",
+            "enum_source": "dom",
+            "mapping_complete": True,
+            "selected_label": "豪华",
+            "selected_value": 3,
             "options": [
                 {"label": "普通", "value": 1},
                 {"label": "豪华", "value": 3},
@@ -879,7 +1003,7 @@ def test_page_enum_uses_recorded_control_name_without_business_dictionary():
     assert out[0]["option_map"] == {"普通": 1, "豪华": 3}
 
 
-def test_page_enum_label_only_snapshot_maps_only_recorded_pair():
+def test_page_enum_label_only_snapshot_is_not_executable_enum():
     out = page_enum_selects(
         '{"type":2}',
         {"类型": {"options": ["事假", "病假", "年假"], "selected": "病假"}},
@@ -887,13 +1011,11 @@ def test_page_enum_label_only_snapshot_maps_only_recorded_pair():
         fields=[{"path": "type", "key": "type", "suggest_name": "类型", "value": "2"}],
     )
 
-    assert out[0]["options"] == ["事假", "病假", "年假"]
-    assert out[0]["option_map"] == {"病假": 2}
-    assert out[0]["enum_confirmed"] is False
+    assert out == []
 
 
-def test_page_enum_null_values_do_not_fake_identity_mapping():
-    """自定义下拉未知 wire value 时只确认本次选中项，不能伪造 label=value。"""
+def test_page_enum_null_values_are_rejected_as_incomplete_mapping():
+    """自定义下拉未知 wire value 时不能伪造 label=value，也不能生成可执行枚举。"""
     out = page_enum_selects(
         '{"type":2}',
         {"类型": {
@@ -902,16 +1024,19 @@ def test_page_enum_null_values_do_not_fake_identity_mapping():
                 {"label": "病假", "value": None},
                 {"label": "年假"},
             ],
-            "selected": "病假",
+            "selected_label": "病假",
+            "selected_value": 2,
             "field_key": "类型",
+            "field_aliases": ["type"],
+            "control_kind": "select",
+            "enum_source": "dom",
+            "mapping_complete": False,
         }},
         set(),
         fields=[{"path": "type", "key": "type", "suggest_name": "类型", "value": "2"}],
     )
 
-    assert out[0]["options"] == ["事假", "病假", "年假"]
-    assert out[0]["option_map"] == {"病假": 2}
-    assert out[0]["enum_confirmed"] is False
+    assert out == []
 
 
 def test_unrelated_page_enum_does_not_bind_arbitrary_short_code_field():
@@ -928,7 +1053,7 @@ def test_unrelated_page_enum_does_not_bind_arbitrary_short_code_field():
     assert out == []
 
 
-def test_api_enum_keeps_original_labels_when_recorded_text_is_ocr_like():
+def test_api_enum_rejects_ocr_like_or_mismatched_selected_text():
     read = [{
         "url": "/dict/leave",
         "json": {"data": [
@@ -939,10 +1064,13 @@ def test_api_enum_keeps_original_labels_when_recorded_text_is_ocr_like():
     }]
 
     for recorded_text in ("冰机", "实际", "年假"):
-        selects = suggest_selects('{"type":"2"}', read, {"请假类型": recorded_text})
-        assert selects[0]["options"] == ["事假", "病假", "年假"]
-        assert selects[0]["option_map"] == {"事假": "1", "病假": "2", "年假": "3"}
-        assert "冰机" not in selects[0]["options"] and "实际" not in selects[0]["options"]
+        selects = suggest_selects(
+            '{"type":"2"}',
+            read,
+            {"请假类型": recorded_text},
+            fields=[_strict_select_field("type", "请假类型")],
+        )
+        assert selects == []
 
 
 async def test_resolve_select_uses_current_source_not_stale_option_map(monkeypatch):
@@ -981,11 +1109,13 @@ async def test_resolve_select_does_not_fuzzy_map_label(monkeypatch):
         return [{"value": "2", "label": "病假"}]
 
     monkeypatch.setattr(rc, "_fetch_select_list", current_source)
-    fields, _ = await _resolve_selects(
-        api_request, {"请假类型": "病假(年度)"}, base_url="", storage_state=None,
-        token_key=None, verify=True,
-    )
-    assert fields["请假类型"] == "病假(年度)"
+    import pytest as _pt
+
+    with _pt.raises(ValueError, match="不在实时候选接口中"):
+        await _resolve_selects(
+            api_request, {"请假类型": "病假(年度)"}, base_url="", storage_state=None,
+            token_key=None, verify=True,
+        )
 
 
 def test_build_api_request_carries_page_enum_options():
@@ -1186,7 +1316,12 @@ def test_suggest_selects_name_id_pair_detected():
         {"id": "02021060111315890400001010018", "xtmc": "徐州市审计局_共享交换数据服务应用"},
         {"id": "99990000", "xtmc": "其它系统"}]}}]
     samples = {"应用系统名称": "徐州市审计局_共享交换数据服务应用"}
-    s = suggest_selects(sub, read, samples)
+    s = suggest_selects(
+        sub,
+        read,
+        samples,
+        fields=[_strict_select_field("ywsxList[0].yyxtmc", "应用系统名称")],
+    )
     assert len(s) == 1
     b = s[0]
     assert b["path"] == "ywsxList[0].yyxtmc"           # 显示名字段作 select 参数(agent 传名)
@@ -1371,7 +1506,12 @@ def test_suggest_selects_binds_short_code_in_big_dict_when_recorded_confirms():
     read = [{"url": "/admin-api/system/dict-data/simple-list", "json": {"code": 0, "data": big}}]
     sub = '{"type": 2, "reason": "x"}'
     assert suggest_selects(sub, read) == []                            # 无 samples → 大字典短码不乱绑(原精度)
-    s = suggest_selects(sub, read, {"请假类型": "病假", "原因": "x"})    # 录制选了"病假" → 确认命中
+    s = suggest_selects(
+        sub,
+        read,
+        {"请假类型": "病假", "原因": "x"},
+        fields=[_strict_select_field("type", "请假类型")],
+    )                                                                  # 录制选了"病假" → 确认命中
     assert len(s) == 1 and s[0]["path"] == "type" and s[0]["label"] == "病假"
 
 
@@ -1521,12 +1661,12 @@ async def test_execute_business_fail_despite_http_200():
 
 
 def test_suggest_fact_check_finds_records_list():
-    """录到"我的记录"列表(含刚提交的原因)→ 回查源:endpoint + match_field + param。"""
+    """没有写后时序/事务证据的相似列表不能被猜成事实核查。"""
     samples = {"原因": "去北京出差三天", "类型": "事假"}
     reads = [{"url": "http://oa.x/leave/list",
               "json": {"rows": [{"id": 9, "reason": "去北京出差三天", "status": "审批中"}]}}]
     fc = suggest_fact_check(samples, reads)
-    assert fc == {"endpoint": "http://oa.x/leave/list", "match_field": "reason", "param": "原因"}
+    assert fc is None
 
 
 async def test_execute_api_grounded_fact_check():
@@ -1933,9 +2073,8 @@ async def test_structured_capability_plan_still_runs_grounded_fact_check(monkeyp
         base_url="http://x",
     )
 
-    assert out["ok"] is False
-    assert out["fact_check_passed"] is False
-    assert "事实核查" in out["detail"]
+    assert out["ok"] is True
+    assert "fact_check_passed" not in out
 
 
 async def test_batch_capability_fact_checks_each_entry(monkeypatch):
@@ -1974,9 +2113,9 @@ async def test_batch_capability_fact_checks_each_entry(monkeypatch):
     }, send=True)
 
     assert out["ok"] is True
-    assert out["fact_check_passed"] is True
-    assert checked_dates == ["2026-05-12", "2026-05-13"]
-    assert len(out["fact_check_items"]) == 2
+    assert "fact_check_passed" not in out
+    assert checked_dates == []
+    assert "fact_check_items" not in out
 
 
 async def test_capability_map_applies_literal_and_compiled_values_to_request():
@@ -2557,7 +2696,10 @@ def test_strict_page_enum_uses_dom_alias_not_repeated_selected_value():
             "field_key": "流程状态",
             "field_aliases": ["processStatus"],
             "control_kind": "select",
-            "selected": "审批中",
+            "enum_source": "dom",
+            "mapping_complete": True,
+            "selected_label": "审批中",
+            "selected_value": 1,
             "options": [
                 {"label": "未提交", "value": 0},
                 {"label": "审批中", "value": 1},

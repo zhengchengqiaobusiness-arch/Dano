@@ -581,9 +581,16 @@ def _sanitize_capability_parameter_schema(schema: dict, cap: dict) -> dict:
                 prop.pop("x-options-source-meta", None)
             is_dynamic = name in dynamic or prop.get("x-options-source") is True
             if is_dynamic:
+                # Only the recorder's explicitly proven snapshot may survive
+                # beside a live option source.  Historical ``x-options`` may
+                # come from the old value-collision heuristic and must not be
+                # promoted into evidence during sanitisation.
+                snapshot = prop.get("x-options-snapshot")
+                if snapshot:
+                    # Preserve the captured choices as evidence/default help,
+                    # but never expose them as a hard enum for a live source.
+                    prop["x-options-snapshot"] = copy.deepcopy(snapshot)
                 prop.pop("x-options", None)
-                prop.pop("x-options-snapshot", None)
-                prop.pop("x-enum-value-map", None)
                 prop.pop("enum", None)
                 prop["description"] = "候选值由运行期接口实时获取；调用前按字段名查询当前可选项并传显示值"
                 if isinstance(prop.get("items"), dict):

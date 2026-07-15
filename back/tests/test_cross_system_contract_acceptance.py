@@ -158,7 +158,7 @@ def test_work_hours_internal_names_do_not_leak_into_public_batch_contract():
     item_fields = batch["parameters"]["properties"]["entries"]["items"]["properties"]
     assert set(item_fields) == {"date", "content", "hours"}
     assert not ({"sbrq", "gznr", "sbgs"} & set(item_fields))
-    assert script["CAPABILITIES"]["submit_batch"]["parameters"] == batch["parameters"]
+    assert script["CAPABILITIES"][batch["name"]]["parameters"] == batch["parameters"]
 
 
 @pytest.mark.parametrize("wrapper", ["structured_output", "output", "response", "final"])

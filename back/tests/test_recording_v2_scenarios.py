@@ -441,6 +441,18 @@ def test_seal_application_keeps_control_preflights_and_maps_long_id_enum():
         captured,
         reads=[{"url": captured[0]["url"], "json": option_response, "role": "read_option"}],
         samples={"印章": "行政公章", "申请标题": "出差用章申请"},
+        field_evidence=[{
+            "path": "sealId",
+            "key": "sealId",
+            "suggest_name": "印章",
+            "name_source": "dom",
+            "label": "印章",
+            "value": "行政公章",
+            "field_aliases": ["sealId"],
+            "control_kind": "select",
+            "page_id": "seal-form",
+            "frame_id": "main",
+        }],
     )
 
     assert [step.method for step in spec.steps] == ["GET", "GET", "POST"]
@@ -733,7 +745,7 @@ def test_richer_observed_query_response_defines_record_item_schema_and_id():
     assert out.steps[0].source_meta["response_shape_enriched"] is True
 
 
-def test_enum_binding_without_real_label_value_contract_is_removed_not_guessed():
+def test_enum_binding_without_real_label_value_contract_is_not_executable_or_guessed():
     param = ParamField(
         path="query.processStatus", key="流程状态", value="1", type="enum",
         wire_type="string", category="user_param", source_kind="api_option",
@@ -750,7 +762,11 @@ def test_enum_binding_without_real_label_value_contract_is_removed_not_guessed()
 
     sync_flow_spec_models(FlowSpec(steps=[step]))
 
-    assert step.selects == []
+    # 保留未确认来源仅供诊断/后续人工补齐，但不得把它当成可执行枚举合同。
+    assert len(step.selects) == 1
+    assert step.selects[0].enum_confirmed is False
+    assert step.selects[0].options is None
+    assert step.selects[0].option_map is None
     assert param.type == "string"
     assert param.source_kind == "user_input"
     assert param.enum_options is None

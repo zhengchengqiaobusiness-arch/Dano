@@ -43,6 +43,40 @@ def _get(url, resp=None):
     }
 
 
+def _select_evidence(path, alias, label, value, *, page_id="page-1", frame_id="main"):
+    """Recorder evidence for an exact select control/request-field identity."""
+    return {
+        "path": path,
+        "key": alias,
+        "suggest_name": label,
+        "name_source": "dom",
+        "label": label,
+        "value": value,
+        "field_aliases": [alias],
+        "control_kind": "select",
+        "page_id": page_id,
+        "frame_id": frame_id,
+    }
+
+
+def _dom_enum(label, alias, selected_label, selected_value, options, *, page_id="page-1", frame_id="main"):
+    """Complete, scoped DOM label-to-wire-value evidence."""
+    return {
+        label: {
+            "field_key": label,
+            "field_aliases": [alias],
+            "control_kind": "select",
+            "selected": selected_label,
+            "selected_label": selected_label,
+            "selected_value": selected_value,
+            "mapping_complete": True,
+            "options": options,
+            "page_id": page_id,
+            "frame_id": frame_id,
+        }
+    }
+
+
 class ToFlowSpecTest(unittest.TestCase):
     def test_seal_query_fields_and_page_enum_stay_bound_to_their_own_wire_fields(self):
         """公章真实场景：同值 query、候选接口 status 与页面流程状态不得串名/串枚举。"""
@@ -54,6 +88,7 @@ class ToFlowSpecTest(unittest.TestCase):
             "useInfo=1231&processStatus=1",
             {"code": 0, "data": {"list": [], "total": 0}},
         )
+        page.update({"page_id": "seal-list", "frame_id": "main"})
         seal_options = _get(
             "https://oa.test/admin-api/bd/seal/simple-list?status=0",
             {"code": 0, "data": [
@@ -71,6 +106,7 @@ class ToFlowSpecTest(unittest.TestCase):
             {"sealId": "seal-legal", "applyTitle": "采购合同", "useInfo": "盖章说明"},
             resp={"code": 0, "data": True},
         )
+        submit.update({"page_id": "seal-form", "frame_id": "main"})
         samples = {
             "单据编号": "1",
             "开始时间": "2026-07-01 00:00:00",
@@ -81,18 +117,24 @@ class ToFlowSpecTest(unittest.TestCase):
             "申请标题": "采购合同",
             "使用描述": "盖章说明",
         }
-        page_enums = {
-            "流程状态": {
-                "field_key": "流程状态",
-                "field_aliases": ["processStatus"],
-                "selected": "审批中",
-                "options": ["未提交", "审批中", "审批通过", "审批不通过", "已取消"],
-            },
-        }
+        page_enums = _dom_enum(
+            "流程状态", "processStatus", "审批中", 1,
+            [
+                {"label": "未提交", "value": 0},
+                {"label": "审批中", "value": 1},
+                {"label": "审批通过", "value": 2},
+                {"label": "审批不通过", "value": 3},
+                {"label": "已取消", "value": 4},
+            ],
+            page_id="seal-list",
+        )
 
         page_step = flow_spec_module._build_step_from_capture(
             page, reads=[seal_option_read], samples=samples, storage_state=None,
             required_labels=set(), page_enum_options=page_enums, step_index=0,
+            field_evidence=[_select_evidence(
+                "query.processStatus", "processStatus", "流程状态", "审批中", page_id="seal-list",
+            )],
         )
         option_step = flow_spec_module._build_step_from_capture(
             seal_options, reads=[seal_option_read], samples=samples, storage_state=None,
@@ -101,6 +143,9 @@ class ToFlowSpecTest(unittest.TestCase):
         submit_step = flow_spec_module._build_step_from_capture(
             submit, reads=[seal_option_read], samples=samples, storage_state=None,
             required_labels=set(), page_enum_options=page_enums, step_index=2,
+            field_evidence=[_select_evidence(
+                "sealId", "sealId", "印章标识", "法人章", page_id="seal-form",
+            )],
         )
 
         page_params = {param.path: param for param in page_step.params}
@@ -136,6 +181,7 @@ class ToFlowSpecTest(unittest.TestCase):
             "pageNo=1&pageSize=10&billCode=11&useInfo=12&processStatus=1",
             {"code": 0, "data": {"list": [], "total": 0}},
         )
+        request.update({"page_id": "seal-list", "frame_id": "main"})
         reads = [{
             "url": "https://oa.test/admin-api/unrelated/options",
             "method": "GET",
@@ -151,14 +197,18 @@ class ToFlowSpecTest(unittest.TestCase):
             samples={"单据编号": "11", "使用描述": "12", "流程状态": "审批中"},
             storage_state=None,
             required_labels=set(),
-            page_enum_options={
-                "流程状态": {
-                    "field_key": "流程状态",
-                    "field_aliases": ["processStatus"],
-                    "selected": "审批中",
-                    "options": ["未提交", "审批中", "审批通过"],
-                },
-            },
+            page_enum_options=_dom_enum(
+                "流程状态", "processStatus", "审批中", 1,
+                [
+                    {"label": "未提交", "value": 0},
+                    {"label": "审批中", "value": 1},
+                    {"label": "审批通过", "value": 2},
+                ],
+                page_id="seal-list",
+            ),
+            field_evidence=[_select_evidence(
+                "query.processStatus", "processStatus", "流程状态", "审批中", page_id="seal-list",
+            )],
             step_index=0,
         )
 
@@ -243,7 +293,7 @@ class ToFlowSpecTest(unittest.TestCase):
         spec = to_flow_spec(
             captured,
             samples={"请假类型": "病假", "开始日期": "2026-07-01", "结束日期": "2026-07-11", "原因": "测试"},
-            page_enum_options={"病假": {"selected": "病假", "field_key": "type", "options": ["病假", "事假", "婚假"]}},
+            field_evidence=[_select_evidence("[0].type", "type", "请假类型", "病假")],
         )
         query = next(step for step in spec.steps if "duty-leave/page" in step.path)
         submit = next(step for step in spec.steps if step.method == "POST")
@@ -1084,7 +1134,13 @@ class GetBusinessStepTest(unittest.TestCase):
             _post("https://oa/appgateway/dcensus/v1.0/qzqdsl/createQzqdSl", body, resp={"code": 200}),
         ]
 
-        spec = to_flow_spec(captured, samples={"职能清单": "123123qweqw", "所属系统": sys1})
+        spec = to_flow_spec(
+            captured,
+            samples={"职能清单": "123123qweqw", "所属系统": sys1},
+            field_evidence=[_select_evidence(
+                "ywsxList[0].yyxtmc", "yyxtmc", "所属系统", sys1,
+            )],
+        )
         step = spec.steps[0]
 
         self.assertEqual(len(step.selects), 1)
@@ -1122,12 +1178,20 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertEqual(by_path["ywsxList[0].ssxts"].category, "system_const")
         self.assertFalse(by_path["ywsxList[0].ssxts"].exposed_to_user)
 
-    def test_flow_spec_uses_page_enum_options_for_sourceless_enum(self):
+    def test_flow_spec_uses_complete_dom_enum_options_for_sourceless_enum(self):
         body = {"type": "事假", "reason": "回家"}
         spec = to_flow_spec(
             [_post("https://oa/api/leave/submit", body, resp={"code": 200})],
             samples={"type": "事假", "reason": "回家"},
-            page_enum_options={"事假": ["事假", "病假", "年假"]},
+            page_enum_options=_dom_enum(
+                "请假类型", "type", "事假", "事假",
+                [
+                    {"label": "事假", "value": "事假"},
+                    {"label": "病假", "value": "病假"},
+                    {"label": "年假", "value": "年假"},
+                ],
+            ),
+            field_evidence=[_select_evidence("type", "type", "请假类型", "事假")],
         )
 
         by_path = {p.path: p for p in spec.steps[0].params}
@@ -1140,14 +1204,22 @@ class GetBusinessStepTest(unittest.TestCase):
         labels1 = [o.get("label") if isinstance(o, dict) else o for o in (opts1 or [])]
         # 用 set 比较避免中文 sort 顺序差异
         self.assertEqual(set(labels1), {"病假", "年假", "事假"})
-        self.assertEqual(set(spec.steps[0].selects[0].options), {"事假", "病假", "年假"})
+        select_labels = [
+            option.get("label") if isinstance(option, dict) else option
+            for option in (spec.steps[0].selects[0].options or [])
+        ]
+        self.assertEqual(set(select_labels), {"事假", "病假", "年假"})
 
     def test_flow_spec_uses_page_enum_options_when_enum_submits_code(self):
         body = {"type": 2, "reason": "回家"}
         spec = to_flow_spec(
             [_post("https://oa/api/leave/submit", body, resp={"code": 200})],
-            samples={"类型": "2", "reason": "回家"},
-            page_enum_options={"类型": [{"label": "事假", "value": 2}, {"label": "病假", "value": 3}]},
+            samples={"类型": "事假", "reason": "回家"},
+            page_enum_options=_dom_enum(
+                "类型", "type", "事假", 2,
+                [{"label": "事假", "value": 2}, {"label": "病假", "value": 3}],
+            ),
+            field_evidence=[_select_evidence("type", "type", "类型", "事假")],
         )
 
         by_path = {p.path: p for p in spec.steps[0].params}
@@ -1166,17 +1238,15 @@ class GetBusinessStepTest(unittest.TestCase):
         spec = to_flow_spec(
             [_post("https://oa/api/leave/submit", body, resp={"code": 200})],
             samples={"请假类型": "病假", "reason": "回家"},
-            page_enum_options={
-                "type": {
-                    "field_key": "请假类型",
-                    "selected": "病假",
-                    "options": [
-                        {"label": "病假", "value": "SICK"},
-                        {"label": "事假", "value": "PERSONAL"},
-                        {"label": "婚假", "value": "MARRIAGE"},
-                    ],
-                }
-            },
+            page_enum_options=_dom_enum(
+                "请假类型", "type", "病假", "SICK",
+                [
+                    {"label": "病假", "value": "SICK"},
+                    {"label": "事假", "value": "PERSONAL"},
+                    {"label": "婚假", "value": "MARRIAGE"},
+                ],
+            ),
+            field_evidence=[_select_evidence("type", "type", "请假类型", "病假")],
         )
 
         by_path = {p.path: p for p in spec.steps[0].params}
@@ -1198,16 +1268,14 @@ class GetBusinessStepTest(unittest.TestCase):
         spec = to_flow_spec(
             captured,
             samples={"请假类型": "病假", "reason": "回家"},
-            page_enum_options={
-                "type": {
-                    "field_key": "请假类型",
-                    "selected": "病假",
-                    "options": [
-                        {"label": "病假", "value": "SICK"},
-                        {"label": "事假", "value": "PERSONAL"},
-                    ],
-                }
-            },
+            page_enum_options=_dom_enum(
+                "请假类型", "type", "病假", "SICK",
+                [
+                    {"label": "病假", "value": "SICK"},
+                    {"label": "事假", "value": "PERSONAL"},
+                ],
+            ),
+            field_evidence=[_select_evidence("type", "type", "请假类型", "病假")],
         )
 
         submit = spec.steps[1]
@@ -1369,33 +1437,34 @@ class PageEnumOnInternalFieldTest(unittest.TestCase):
         # body 用内部码 leaveType=2,但 DOM 抓到的 options 是 display label
         body = {"formData": {"leaveType": 2, "name": "张三"}}
         # page_enum_options 用新形态:{字段key: {options:[...], field_key:...}}
-        page_enum_options = {
-            "请假类型": {
-                "options": ["病假", "事假", "婚假"],
-                "field_key": "leaveType",
-            }
-        }
+        page_enum_options = _dom_enum(
+            "请假类型", "leaveType", "事假", 2,
+            [
+                {"label": "病假", "value": 1},
+                {"label": "事假", "value": 2},
+                {"label": "婚假", "value": 3},
+            ],
+        )
         from dano.execution.page.request_capture import apply_page_enum_options, page_enum_selects
         out = page_enum_selects(json.dumps(body, ensure_ascii=False), page_enum_options, set(), fields=[
-            {"path": "formData.leaveType", "key": "leaveType", "value": 2, "suggest_name": "请假类型"},
+            _select_evidence("formData.leaveType", "leaveType", "请假类型", "事假"),
             {"path": "formData.name", "key": "name", "value": "张三", "suggest_name": "姓名"},
         ])
         self.assertTrue(any(s.get("path") == "formData.leaveType" for s in out),
                         f"应当命中 leaveType 路径, 实际: {[s.get('path') for s in out]}")
 
     def test_dom_options_match_internal_field_with_old_legacy_shape(self):
-        """回退兼容:旧形态 {label: [opts]} 也得继续能用。"""
+        """旧形态只有 label，没有控件身份和 wire map，必须拒绝执行绑定。"""
         body = {"leaveType": 2}
         page_enum_options = {"病假": ["病假", "事假"]}
         from dano.execution.page.request_capture import page_enum_selects
         out = page_enum_selects(json.dumps(body, ensure_ascii=False), page_enum_options, set(), fields=[
             {"path": "leaveType", "key": "leaveType", "value": 2, "suggest_name": "请假类型"},
         ])
-        # 旧形态:label 值不在 body 里时,不应该误判命中,但也不应该报错
-        self.assertIsInstance(out, list)
+        self.assertEqual(out, [])
 
-    def test_apply_page_enum_options_backward_compatible(self):
-        """apply_page_enum_options 接收旧形态(纯 list 值)应当正常运行不报错。"""
+    def test_apply_page_enum_options_ignores_legacy_label_only_snapshot(self):
+        """纯 label 快照缺少 wire map；允许读取但不得改写可执行枚举。"""
         body = {"formData": {"status": "active"}}
         # 旧形态:value 为纯 list
         old_opts = {"active": ["启用", "停用"]}
@@ -1404,12 +1473,12 @@ class PageEnumOnInternalFieldTest(unittest.TestCase):
         # 输入 selects 为空,apply 不应该报错
         apply_page_enum_options([], old_opts, post_data=json.dumps(body, ensure_ascii=False),
                                 fields=fields)
-        # 输入 selects 含一个 select,旧形态挂 enum_source=dom
+        # 输入 selects 含一个 select，旧证据仍不得覆盖它。
         existing = [{"path": "formData.status", "label": "active", "value": "active"}]
         apply_page_enum_options(existing, old_opts, post_data=json.dumps(body, ensure_ascii=False),
                                 fields=fields)
-        self.assertEqual(existing[0].get("enum_source"), "dom")
-        self.assertIn("启用", existing[0].get("options") or [])
+        self.assertIsNone(existing[0].get("enum_source"))
+        self.assertNotIn("启用", existing[0].get("options") or [])
 
 
 class AssigneeSelectTest(unittest.TestCase):
@@ -1433,9 +1502,21 @@ class AssigneeSelectTest(unittest.TestCase):
                           {"startUserSelectAssignees": [{"Activity_09dlq0g": ["145"],
                                                          "Activity_0ag2wyz": ["117"]}]},
                           resp={"code": 200, "data": {"ok": True}})]
-        spec = to_flow_spec(captured, reads=reads,
-                            samples={"startUserSelectAssignees[0].Activity_09dlq0g[0]": "145",
-                                     "startUserSelectAssignees[0].Activity_0ag2wyz[0]": "117"})
+        spec = to_flow_spec(
+            captured,
+            reads=reads,
+            samples={"审批人一": "张三", "审批人二": "李四"},
+            field_evidence=[
+                _select_evidence(
+                    "startUserSelectAssignees[0].Activity_09dlq0g[0]",
+                    "Activity_09dlq0g", "审批人一", "张三",
+                ),
+                _select_evidence(
+                    "startUserSelectAssignees[0].Activity_0ag2wyz[0]",
+                    "Activity_0ag2wyz", "审批人二", "李四",
+                ),
+            ],
+        )
         params_by_path = {p.path: p for s in spec.steps for p in s.params}
         p1 = params_by_path["startUserSelectAssignees[0].Activity_09dlq0g[0]"]
         p2 = params_by_path["startUserSelectAssignees[0].Activity_0ag2wyz[0]"]
@@ -1464,7 +1545,14 @@ class AssigneeSelectTest(unittest.TestCase):
         ]}}]
         captured = [_post("https://oa/api/submit",
                           {"approvers": {"reviewer": ["u-1"]}}, resp={"code": 200, "data": {"ok": True}})]
-        spec = to_flow_spec(captured, reads=reads, samples={"approvers.reviewer[0]": "u-1"})
+        spec = to_flow_spec(
+            captured,
+            reads=reads,
+            samples={"审批人": "甲"},
+            field_evidence=[_select_evidence(
+                "approvers.reviewer[0]", "reviewer", "审批人", "甲",
+            )],
+        )
         params_by_path = {p.path: p for s in spec.steps for p in s.params}
         p = params_by_path["approvers.reviewer[0]"]
         self.assertEqual(p.type, "enum", f"approvers 容器下也应识别为 enum, 实际: {p.type}")
@@ -1518,7 +1606,12 @@ class DictShapeCoverageTest(unittest.TestCase):
 
     def _check(self, name: str, reads: list[dict]) -> None:
         captured = [_post("https://oa/api/submit", {"type": 2}, resp={"code": 200})]
-        spec = to_flow_spec(captured, reads=reads, samples={"类型": "2"})
+        spec = to_flow_spec(
+            captured,
+            reads=reads,
+            samples={"类型": "病假"},
+            field_evidence=[_select_evidence("type", "type", "类型", "病假")],
+        )
         by_path = {p.path: p for p in spec.steps[0].params}
         self.assertEqual(by_path["type"].type, "enum",
                          f"形态 {name} 应识别成 enum, 实际: {by_path['type'].type}")
@@ -1626,7 +1719,12 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
                       {"dictValue": 3, "dictLabel": "婚假"},
                   ]}}]
         captured = [_post("https://oa/api/submit", {"type": 3, "reason": "..."}, resp={"code": 200})]
-        spec = to_flow_spec(captured, reads=reads, samples={"type": "3"})
+        spec = to_flow_spec(
+            captured,
+            reads=reads,
+            samples={"请假类型": "婚假"},
+            field_evidence=[_select_evidence("type", "type", "请假类型", "婚假")],
+        )
         by_path = {p.path: p for s in spec.steps for p in s.params}
         p = by_path["type"]
         self.assertEqual(p.type, "enum", f"短码字典 value 必须被识别为 enum, 实际: {p.type}")
@@ -1638,8 +1736,8 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         vmap = p.enum_value_map or {}
         self.assertEqual(vmap.get("婚假"), 3)
 
-    def test_dom_label_options_keep_api_short_code_map(self):
-        """请假类型真实场景:DOM 只有中文选项,提交体是 type=2,API 字典映射不能丢。"""
+    def test_recorded_select_identity_keeps_api_short_code_map(self):
+        """控件身份 + 真实 API 字典应产出动态 api_option，而不是静态页面枚举。"""
         reads = [{"url": "https://oa/api/leave_type/list",
                   "json": {"data": [
                       {"dictValue": 1, "dictLabel": "事假"},
@@ -1651,7 +1749,7 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
             captured,
             reads=reads,
             samples={"类型": "病假", "reason": "回家"},
-            page_enum_options={"病假": {"options": ["病假", "事假", "婚假"], "field_key": "类型", "selected": "病假"}},
+            field_evidence=[_select_evidence("type", "type", "类型", "病假")],
         )
 
         by_path = {p.path: p for s in spec.steps for p in s.params}
@@ -1666,8 +1764,8 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         self.assertEqual(api_req["field_types"]["类型"], "enum")
         self.assertEqual(api_req["selects"][0]["option_map"], {"病假": 2, "事假": 1, "婚假": 3})
 
-    def test_dom_label_options_without_short_code_map_is_generation_advice(self):
-        """DOM label 缺少短码映射时给出建议，但不替代操作员决定。"""
+    def test_dom_label_options_without_short_code_map_are_not_executable(self):
+        """DOM 只有 label 时不能确认 wire map，字段保持普通参数。"""
         captured = [_post("https://oa/api/submit", {"type": 2, "reason": "回家"}, resp={"code": 200})]
         spec = to_flow_spec(
             captured,
@@ -1676,13 +1774,12 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
         )
 
         by_path = {p.path: p for s in spec.steps for p in s.params}
-        self.assertEqual(by_path["type"].type, "enum")
-        report = validate_flow_spec(spec)
-        self.assertTrue(report["passed"])
-        self.assertTrue(any("页面枚举快照不完整" in e and "type" in e for e in report["suggestions"]))
+        self.assertNotEqual(by_path["type"].type, "enum")
+        self.assertEqual(by_path["type"].source_kind, "user_input")
+        self.assertEqual(spec.steps[0].selects, [])
 
     def test_dom_label_options_never_guess_numeric_codes_by_selected_order(self):
-        """无字典接口时只能确认本次 label/value，禁止按 DOM 顺序猜其它短码。"""
+        """无完整 label→value 合同时，不确认本次值也不按 DOM 顺序猜码。"""
         captured = [_post("https://oa/api/submit", {"type": 3, "reason": "回家"}, resp={"code": 200})]
         spec = to_flow_spec(
             captured,
@@ -1692,14 +1789,11 @@ class ShortCodeEnumAlignmentTest(unittest.TestCase):
 
         by_path = {p.path: p for s in spec.steps for p in s.params}
         p = by_path["type"]
-        self.assertEqual(p.key, "类型")
-        self.assertEqual(p.type, "enum")
-        self.assertEqual(p.source_kind, "page_enum")
-        self.assertEqual(p.enum_value_map, {"婚假": 3})
-        self.assertFalse(p.source.get("enum_confirmed"))
-        report = validate_flow_spec(spec)
-        self.assertTrue(report["passed"])
-        self.assertTrue(any("页面枚举快照不完整" in e for e in report["suggestions"]))
+        self.assertEqual(p.key, "type")
+        self.assertNotEqual(p.type, "enum")
+        self.assertEqual(p.source_kind, "user_input")
+        self.assertIsNone(p.enum_value_map)
+        self.assertEqual(spec.steps[0].selects, [])
 
     def test_manual_enum_value_only_options_are_advice_until_label_map(self):
         """人工枚举只有 1/2/3 时给出建议；操作员仍可保留当前合同。"""
@@ -1776,9 +1870,8 @@ class GetQuerySelectTest(unittest.TestCase):
     选择字段(ParamField.type=enum + source=接口 select 来源),而不是单纯退化成 string。
     通用,不挑系统。"""
 
-    def test_get_query_parameter_recognized_as_enum_through_reads(self):
-        """接口型 GET 的 query 参数(典型 /api/users?status=active)被业务流后续的 POST 引用
-        时,query.status 应被识别为 enum(接口下拉)。通用,不挑系统。"""
+    def test_get_query_parameter_recognized_from_scoped_dynamic_dictionary(self):
+        """GET 枚举需有控件身份、完整 map 与真实动态字典来源。"""
         reads = [{
             "url": "https://oa/api/users/status/list",
             "json": {"data": [{"value": "active", "label": "启用"}, {"value": "inactive", "label": "停用"}]},
@@ -1788,8 +1881,38 @@ class GetQuerySelectTest(unittest.TestCase):
             "method": "GET",
             "url": "https://oa/api/users?status=active&keyword=张三",
             "headers": {"Authorization": "Bearer t"},
+            "page_id": "user-list",
+            "frame_id": "main",
         }
-        sels = _detect_query_selects(req, {"keyword": "张三"}, reads, page_enum_options=None)
+        page_options = {
+            "状态": {
+                "field_key": "状态",
+                "field_aliases": ["status"],
+                "control_kind": "select",
+                "enum_source": "script_dictionary",
+                "source_url": "https://oa/api/users/status/list",
+                "dict_type": "user_status",
+                "mapping_complete": True,
+                "selected": "启用",
+                "selected_value": "active",
+                "options": [
+                    {"label": "启用", "value": "active"},
+                    {"label": "停用", "value": "inactive"},
+                ],
+                "page_id": "user-list",
+                "frame_id": "main",
+            }
+        }
+        evidence = [_select_evidence(
+            "query.status", "status", "状态", "启用", page_id="user-list",
+        )]
+        sels = _detect_query_selects(
+            req,
+            {"keyword": "张三", "状态": "启用"},
+            reads,
+            page_enum_options=page_options,
+            field_evidence=evidence,
+        )
         paths = [s.get("path") for s in sels]
         self.assertIn("query.status", paths,
                       f"应当识别 query.status 是 enum,actual={paths}")
@@ -1797,6 +1920,7 @@ class GetQuerySelectTest(unittest.TestCase):
 
         sel = next(s for s in sels if s.get("path") == "query.status")
         self.assertEqual(sel.get("enum_source"), "api")
+        self.assertEqual(sel.get("source_url"), "https://oa/api/users/status/list")
         # 接口候选应同时持有 options(label 列表)+ option_map
         self.assertTrue(sel.get("options") and len(sel["options"]) >= 2)
         self.assertIn("启用", sel.get("options"))
@@ -1871,11 +1995,13 @@ def test_hotel_recording_uses_scoped_control_identity_for_name_type_and_source()
         "流程状态": {
             "page_id": "hotel-list", "frame_id": "main", "field_key": "流程状态",
             "field_aliases": ["processStatus"], "control_kind": "select", "selected": "审批中",
+            "selected_value": 1, "mapping_complete": True,
             "options": [{"label": "未提交", "value": 0}, {"label": "审批中", "value": 1}],
         },
         "房间类型": {
             "page_id": "hotel-form", "frame_id": "main", "field_key": "房间类型",
             "field_aliases": ["roomType"], "control_kind": "select", "selected": "大床房",
+            "selected_value": 2, "mapping_complete": True,
             "options": [{"label": "双床房", "value": 1}, {"label": "大床房", "value": 2}],
         },
     }

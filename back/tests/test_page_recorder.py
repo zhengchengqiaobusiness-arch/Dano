@@ -83,6 +83,8 @@ def test_large_minified_script_enum_scans_are_bounded_and_keep_exact_results() -
     assert arrays == [{
         "name": "processStatusOptions",
         "options": [{"label": "未提交", "value": 0}, {"label": "审批中", "value": 1}],
+        "mapping_complete": True,
+        "truncated": False,
     }]
     # This is deliberately generous for shared CI runners.  The optimized
     # scanner normally completes this ~1.2 MB fixture in well under 0.1 s;
@@ -233,9 +235,9 @@ def test_compiled_dictionary_enum_bridges_visible_label_to_virtual_form_prop() -
         if param.path in {"query.roomType", "query.roomLevel", "query.processStatus"}
     }
     assert projected == {
-        "query.roomType": ("房间类型", "enum", "page_enum"),
-        "query.roomLevel": ("房间等级", "enum", "page_enum"),
-        "query.processStatus": ("流程状态", "enum", "page_enum"),
+        "query.roomType": ("房间类型", "enum", "api_option"),
+        "query.roomLevel": ("房间等级", "enum", "api_option"),
+        "query.processStatus": ("流程状态", "enum", "api_option"),
     }
 
 
@@ -644,10 +646,12 @@ def test_open_dropdown_snapshot_is_persisted_without_executable_pick() -> None:
             "options": [
                 {"label": "大床房", "value": 2},
                 {"label": "双床房", "value": 1},
-            ],
-            "field_key": "房间类型",
-            "selected": "",
-        },
+                ],
+                "field_key": "房间类型",
+                "selected": "",
+                "selected_label": "",
+                "mapping_complete": False,
+            },
     }
     assert sess.recorded_page_events()[-1]["kind"] == "enum_snapshot"
 

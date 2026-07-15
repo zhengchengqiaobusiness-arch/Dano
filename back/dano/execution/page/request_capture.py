@@ -495,7 +495,6 @@ def _is_idlike(key: str) -> bool:
     return bool(key) and bool(_IDLIKE.search(key))
 
 
-_SMALL_LIST = 50    # "字典型下拉"是小列表(事假/病假…);城市/数据大字典是大列表 → 区分短码真假命中
 _OPTIONS_SNAPSHOT_MAX = 500    # 快照进 skill 的候选选项上限(再多就只存来源、运行期 --list-options 现拉)
 _LIST_ROW_CONST_OK_RE = _re.compile(r"(type|status|state|flag|sort|order|level|kind|class|role)$", _re.I)
 
@@ -562,11 +561,18 @@ def _enum_records_from_page_options(opts: list | tuple | None) -> list[dict]:
 def _page_enum_selected_label(opts, picked: str) -> str:
     """page_enum_options 里的选中显示值。兼容旧形态 key=选中值,新形态 {selected/value}。"""
     if isinstance(opts, dict):
-        for k in ("selected", "selected_label", "value", "label"):
+        for k in ("selected_label", "selected", "label"):
             v = opts.get(k)
             if v not in (None, ""):
                 return str(v)
+        return ""
     return str(picked or "")
+
+
+def _page_enum_selected_value(opts):  # noqa: ANN202 - wire value may be any JSON scalar
+    if not isinstance(opts, dict):
+        return None
+    return opts.get("selected_value")
 
 
 def _records_with_existing_option_map(records: list[dict], option_map: dict | None) -> list[dict]:
@@ -595,15 +601,6 @@ def _option_map_matches_source(entry: dict) -> bool:
     return bool(mapped_source) and str(mapped_source) == str(entry.get("source_url") or "")
 
 
-_CN_FIELD_ALIASES = {
-    "类型": {"type", "kind", "category", "class"},
-    "类别": {"type", "kind", "category", "class"},
-    "状态": {"status", "state"},
-    "项目": {"project", "xm", "xmId", "projectId"},
-    "审批": {"approver", "assignee", "user", "userId"},
-}
-
-
 def _norm_field_token(v) -> str:
     return _re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(v or "")).lower()
 
@@ -628,41 +625,6 @@ def _identifier_matches_field(left: str, right: str) -> bool:
     left_norm = _norm_field_token(attribute_value(left))
     right_norm = _norm_field_token(attribute_value(right))
     return bool(left_norm and right_norm and left_norm == right_norm)
-
-
-def _label_matches_internal_field(label: str, path: str, field: dict | None = None) -> bool:
-    """把 DOM 字段名(如「请假类型」)和提交体内部字段(type/leaveType/gslx)连起来。"""
-    label_s = str(label or "")
-    path_s = str(path or "")
-    leaf = path_s.split(".")[-1].split("[")[0]
-    candidates = [path_s, leaf]
-    candidates.extend(_grounded_field_names(field))
-    cand_norm = {_norm_field_token(c) for c in candidates if c not in (None, "")}
-    label_norm = _norm_field_token(label_s)
-    if label_norm and any(label_norm == c or label_norm in c or c in label_norm for c in cand_norm if c):
-        return True
-    for cn, aliases in _CN_FIELD_ALIASES.items():
-        if cn in label_s and any(
-            alias_norm and any(
-                alias_norm == candidate or alias_norm in candidate or candidate in alias_norm
-                for candidate in cand_norm if candidate
-            )
-            for alias_norm in (_norm_field_token(alias) for alias in aliases)
-        ):
-            return True
-    return False
-
-
-def _records_with_recorded_value(records: list[dict], selected: str, current) -> list[dict]:
-    """Bind only the label/value pair directly proven by this recording."""
-    selected_s = str(selected or "").strip()
-    if not selected_s or current in (None, ""):
-        return records
-    return [
-        ({**record, "value": current}
-         if "value" not in record and str(record.get("label") or "").strip() == selected_s else record)
-        for record in records
-    ]
 
 
 def _exact_recorded_match(label, recorded) -> bool:
@@ -746,12 +708,14 @@ def _parent_path(path: str) -> str:
     return path[:i] if i >= 0 else ""
 
 
-_AGG_MIN_ITEMS = 50    # 列表 ≥ 此规模才考虑"按类目聚合的全量字典"判定(更小的就是单字段选项列表)
+_AGG_MIN_ITEMS = 50    # 通用 type/group 等弱分类键仍须达到此规模；显式字典分类键不受此门槛限制
 # 像"分类/类目键"的字段名(若依 dictType / type / category / group …):聚合字典靠它分组,收窄时优先认它。
 _CATEGORY_KEY_RE = _re.compile(
     r"(dicttype|type|categ|category|group|kind|class|classify|module|biztype|sort|parent)", _re.I)
 _EXPLICIT_DICT_CATEGORY_RE = _re.compile(
-    r"(?:^|_)(?:dict(?:ionary)?(?:type|code|key|category)|category(?:code|key|type)|biztype|enumtype)(?:$|_)",
+    r"^(?:dict(?:ionary)?[_-]?(?:type|code|key|category)"
+    r"|category(?:[_-]?(?:code|key|type))?"
+    r"|biz[_-]?type|enum[_-]?type)$",
     _re.I,
 )
 
@@ -761,12 +725,13 @@ def _aggregate_category(items: list[dict], value_key: str, label_key: str) -> st
     是 → 返回**分类键**(供按"所选项所属类目"把全量收窄成真正属于该字段的选项);否(单字段选项源:
     城市/用户/部门,码/ID 全局唯一)→ None。**通用,不挑系统/字段名**。
 
-    判据:① 列表够大(>_AGG_MIN_ITEMS);② 值键取值在整列表里**大量重复**(distinct < 0.7×N)——单字段
-    选项源的码基本唯一,只有"多字段拼在一起的全量字典"才会重码;③ 存在一个标量、近乎全员都有、取值数
-    1<distinct<N 的列表字段当分类键(名字像 type/category/dictType 的加分,再取分组更粗的)。
+    判据:① dictType/dict_code/category 等显式字典分类键可直接证明该列表需分组,
+    不受列表规模限制;② type/group 等通用弱分类键仍需列表达到 _AGG_MIN_ITEMS,
+    且值键取值在整列表里大量重复(distinct < 0.7×N);③ 分类列必须是近乎全员都有的标量,
+    并且 1<distinct<N。
     """
     n = len(items)
-    if n < _AGG_MIN_ITEMS:
+    if n < 2:
         return None
     vals = [str(it.get(value_key)) for it in items if isinstance(it, dict) and it.get(value_key) is not None]
     if not vals:
@@ -782,6 +747,8 @@ def _aggregate_category(items: list[dict], value_key: str, label_key: str) -> st
         distinct = len({str(v) for v in col if v is not None})
         if 1 < distinct < n:                                # 能分组(既非全同也非全异)
             explicit_dict_key = bool(_EXPLICIT_DICT_CATEGORY_RE.search(str(k)))
+            if not explicit_dict_key and n < _AGG_MIN_ITEMS:
+                continue
             # Explicit dictionary category columns are reliable even when each
             # category uses globally unique codes. Generic type/group columns
             # still require the old repeated-value evidence.
@@ -800,17 +767,15 @@ def _match_select(sv: str, items: list[dict], sample_vals: set):
     返回里带命中的**列表项 item**:聚合字典需读它的分类键(dictType…)把全量收窄成该字段的真实选项。
     Only an exact recorded label for this structurally identified select may
     confirm ownership.  A matching code/ID is merely a value collision."""
-    name_cand = code_cand = None
+    confirmed_candidates: list[tuple] = []
     for it in items:
         id_vk = next((k for k, v in it.items() if _is_scalar(v) and _is_idlike(k)), None)
         if id_vk is not None:                            # NAME:sv 命中该项的**显示名**字段(非随便某文字)+ 项里另有 id 类字段
             disp = _pick_label_key(it, id_vk)            # 项的规范显示名字段(nickName/xtmc/label…),非 dictType 这类分类键
             if disp != id_vk and not _is_idlike(disp) and _is_scalar(it.get(disp)) and str(it.get(disp)) == sv:
                 conf = any(_exact_recorded_match(sv, s) for s in sample_vals)
-                if name_cand is None or (conf and not name_cand[4]):
-                    name_cand = ("name", id_vk, disp, sv, conf, it)
                 if conf:
-                    break
+                    confirmed_candidates.append(("name", id_vk, disp, sv, True, it))
         cvk = next((k for k, v in it.items() if _is_scalar(v) and str(v) == sv and _is_idlike(k)), None)
         if cvk is None and len(it) <= 4:                 # 小项允许值字段名不带 id/code(不写死字段名)
             cvk = next((k for k, v in it.items() if _is_scalar(v) and str(v) == sv), None)
@@ -819,14 +784,18 @@ def _match_select(sv: str, items: list[dict], sample_vals: set):
             label = str(it.get(clk, "")).strip()
             if clk != cvk and label:
                 conf = any(_exact_recorded_match(label, s) for s in sample_vals)
-                if code_cand is None or (conf and not code_cand[4]):
-                    code_cand = ("code", cvk, clk, label, conf, it)
-    cands = [c for c in (name_cand, code_cand) if c]
-    if not cands:
-        return None
-    cands.sort(key=lambda c: (c[4], c[0] == "name"), reverse=True)   # 确认命中优先;其次 name(更贴近人选)
-    best = cands[0]
-    return best if best[4] else None
+                if conf:
+                    confirmed_candidates.append(("code", cvk, clk, label, True, it))
+    unique = {
+        (
+            candidate[0], candidate[1], candidate[2], candidate[3],
+            json.dumps(candidate[5], ensure_ascii=False, sort_keys=True, default=str),
+        ): candidate
+        for candidate in confirmed_candidates
+    }
+    # Multiple rows/interpretations prove only a collision, not which option
+    # domain owns this field. Response order must never decide the category.
+    return next(iter(unique.values())) if len(unique) == 1 else None
 
 
 def _sample_values_for_leaf(path: str, sv: str, samples: dict | None, field: dict | None = None) -> set[str]:
@@ -849,110 +818,85 @@ def _sample_values_for_leaf(path: str, sv: str, samples: dict | None, field: dic
 def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | None = None,
                     skip_paths: list[str] | None = None,
                     fields: list[dict] | None = None) -> list[dict]:
-    """提交体里"对应某候选列表项"的字段 → 绑 select(Agent 传名字/文字→运行期查内部 ID)。
+    """Bind a request field to an observed option API without guessing.
 
-    两形态(通用,不挑系统):① **单码字段**(type=2↔字典 value=2、approverId=12↔user/list:字段存码,agent 传名)
-    ② **名/ID 配对**(yyxtmc=显示名 + 兄弟 yyxtid=内部 id:两字段一次选定)→ 输出 id_path/id_tokens,运行期
-    解析后**同时**写回显示名字段与配对 id 字段(换一个选项时 id 不再冻结成录制值)。
-    **录制样例(samples)= 字段级消歧器**:候选显示名 == 当前字段自己的录制选中值 →「确认命中」强证据。
-    无佐证时:短码(<2)只在小列表认、用户亲填值不当码、同源未确认命中 >3 个按通用字典整源丢弃。
-    skip_paths:已被**列表多选**(suggest_list_selects)整体接管的对象数组路径 → 其下逐元素叶子不再单独绑
-    (修"选了多个人却被拆成 participants[0].userId 冻死、只认最后一个"的根因)。
+    Three independent facts are required: the recorder identified this exact
+    request path as a select, this field's own selected label matches one API
+    row exactly, and every captured option has an explicit label/value pair.
+    Value collisions, translated labels, list size and endpoint ordering are
+    never ownership evidence.  Older recordings without structural control
+    identity therefore remain ordinary parameters until they are re-recorded.
     """
     body = _parse_body(post_data)
-    if body is None:
+    if body is None or not fields:
         return []
     leaves = _leaf_paths(body)                            # [(path, tokens, sv, raw)]
     skip_pref = tuple((p + "[") for p in (skip_paths or []))   # 数组多选路径下的逐元素叶子(participants[0]…)整体跳过
     if skip_pref:
         leaves = [lf for lf in leaves if not lf[0].startswith(skip_pref)]
-    use_field_scope = fields is not None
-    require_confirmed = bool(
-        use_field_scope and any(
-            (field.get("field_aliases") or str(field.get("control_kind") or "unknown") != "unknown")
-            for field in (fields or [])
-        )
-    )
     field_by_path = {str(f.get("path") or ""): f for f in (fields or []) if f.get("path")}
-    all_sample_vals = {str(v) for v in (samples or {}).values() if v not in (None, "")}
     by_path: dict[str, list[dict]] = {}                   # path → 跨**所有** read 源的候选绑定(供择优)
     for r in reads:
+        source_url = str(r.get("url") or "").strip()
+        if not source_url:
+            continue
         items = as_list_payload(r.get("json"))
         if not items or not isinstance(items[0], dict):
             continue
-        small = len(items) <= _SMALL_LIST
-        hits: list[dict] = []
         for path, toks, sv, raw in leaves:
             if not sv:
                 continue
-            # UUID/雪花 ID 不能仅凭形态跳过：选择控件的提交值本来就经常是长 ID。
-            # 只有它真实命中候选项 value_key 时 _match_select 才会返回 code 绑定；
-            # 未命中仍按普通系统常量处理，因此不会把任意流程 ID 误当枚举。
             field = field_by_path.get(path)
-            sample_vals = (
-                _sample_values_for_leaf(path, sv, samples, field)
-                if use_field_scope else all_sample_vals
-            )
-            m = _match_select(sv, items, sample_vals, small,
-                              path_is_assignee=_is_assignee_path(path),
-                              require_confirmed=require_confirmed)
+            if not _field_has_structural_select_identity(field):
+                continue
+            sample_vals = _sample_values_for_leaf(path, sv, samples, field)
+            m = _match_select(sv, items, sample_vals)
             if m is None:
                 continue
             mode, vk, lk, label, confirmed, item = m
-            # 来源是"按类目聚合的全量字典"(若依 dict_data:同码跨 dictType 重复)→ 整表不是这个字段的选项。
-            #   · 已确认(录制选中文字命中某项)→ 按命中项的**分类键**收窄成真正属于该字段的选项(治"请假类型
-            #     绑到 1431 项含歌词模式/OpenAI/档案/银行…的全量字典");并把分类过滤随 select 走,运行期同样收窄。
-            #   · 未确认 → 无从判定属于哪个类目,绑全量必错 → **不绑**(字段退回普通参数,诚实不瞎给选项)。
             cat_key = _aggregate_category(items, vk, lk)
             cat_val = None
             opt_items = items
             if cat_key is not None:
-                if not confirmed:
-                    continue
                 cat_val = item.get(cat_key)
                 if cat_val is not None:
                     opt_items = [it for it in items
                                  if isinstance(it, dict) and str(it.get(cat_key)) == str(cat_val)]
-            entry = {"path": path, "tokens": toks, "value": sv, "source_url": r.get("url"),
+            records = _enum_records_from_items(opt_items, lk, vk)
+            if not _records_have_complete_mapping(records, expected_count=len(opt_items)):
+                continue
+            entry = {"path": path, "tokens": toks, "value": sv, "source_url": source_url,
                      "value_key": vk, "label_key": lk, "label": label, "count": len(opt_items),
                      "_confirmed": confirmed}
             _attach_enum_binding(
                 entry,
-                _enum_records_from_items(opt_items, lk, vk),
+                records,
                 source="api",
                 confirmed=confirmed,
             )
+            if entry.get("enum_confirmed") is not True:
+                continue
             entry["option_map_source_url"] = entry.get("source_url")
             if cat_key is not None and cat_val is not None:     # 分类过滤随 select 走(运行期 list-options / 名→ID 同样收窄)
                 entry["category_key"], entry["category_value"] = cat_key, str(cat_val)
             if mode == "name":                           # 名/ID 配对:找兄弟"内部 id"字段(同父 + 值==该项的 id)
                 it = next((x for x in items if str(x.get(lk)) == sv), None)
                 idval = str(it.get(vk)) if it and it.get(vk) is not None else None
-                if idval is not None:
-                    par = _parent_path(path)
-                    sib = next(((lp, lt) for lp, lt, lsv, _lr in leaves
-                                if lp != path and _parent_path(lp) == par and lsv == idval), None)
-                    if sib:
-                        entry["id_path"], entry["id_tokens"] = sib[0], sib[1]
-            hits.append(entry)
-        # 同源内防护(沿用):短值数字巧合去重 + 未确认命中 >3 = 通用字典误命中(整源只留确认的)。
-        # **审批人/选人容器下的未确认命中不计入**:body 存 user id,佐证清晰,不该被通用字典误命中规则误杀。
-        # 确认命中永远保留。
-        vcount: dict[str, int] = {}
-        for h in hits:
-            if h["_confirmed"] or _is_assignee_path(h["path"]):
-                continue
-            vcount[h["value"]] = vcount.get(h["value"], 0) + 1
-        hits = [h for h in hits
-                if h["_confirmed"]
-                   or _is_assignee_path(h["path"])
-                   or not (len(h["value"]) <= 2 and vcount.get(h["value"], 0) >= 2)]
-        if len([h for h in hits if not h["_confirmed"] and not _is_assignee_path(h["path"])]) > 3:
-            hits = [h for h in hits if h["_confirmed"] or _is_assignee_path(h["path"])]
-        for h in hits:
-            by_path.setdefault(h["path"], []).append(h)
-    # **跨源择优(根治"请假类型绑到 1431 项通用大字典"):每条 leaf 在所有源里选最佳 ——
-    #  ① 确认命中(候选显示名==录制选中值)优先 ② 其次列表更小(更专门的字典,而非通用大字典)。**
+                if idval is None:
+                    continue
+                par = _parent_path(path)
+                siblings = [
+                    (lp, lt) for lp, lt, lsv, _lr in leaves
+                    if lp != path and _parent_path(lp) == par and lsv == idval
+                ]
+                if len(siblings) != 1:
+                    # A display-name field without its uniquely identified ID
+                    # sibling must stay text. Otherwise runtime resolution
+                    # would replace the display field itself with an ID.
+                    continue
+                entry["id_path"], entry["id_tokens"] = siblings[0]
+            by_path.setdefault(path, []).append(entry)
+
     out: list[dict] = []
     claimed: set[str] = set()                             # 已被某 select 接管的路径(含配对 id 字段),不重复绑
     order = {p: i for i, (p, _t, _s, _r) in enumerate(leaves)}
@@ -969,7 +913,26 @@ def suggest_selects(post_data: str | None, reads: list[dict], samples: dict | No
             continue
         if path in confirmed_pair_ids:
             continue
-        best = sorted(by_path[path], key=lambda e: (e["_confirmed"], -e["count"]), reverse=True)[0]
+        candidates = by_path[path]
+        # The same field matching multiple captured APIs is ambiguous.  Do not
+        # silently prefer the smaller/earlier list: either choice may execute
+        # a different business dictionary on the next system.
+        source_fingerprints = {
+            (
+                str(candidate.get("source_url") or ""),
+                str(candidate.get("category_key") or ""),
+                str(candidate.get("category_value") or ""),
+                str(candidate.get("value_key") or ""),
+                str(candidate.get("label_key") or ""),
+                tuple((str(label), repr(value)) for label, value in sorted(
+                    (candidate.get("option_map") or {}).items(), key=lambda pair: str(pair[0])
+                )),
+            )
+            for candidate in candidates
+        }
+        if len(source_fingerprints) != 1:
+            continue
+        best = candidates[0]
         if best.get("id_path") and best["id_path"] in claimed:
             continue
         claimed.add(path)
@@ -1113,7 +1076,14 @@ def _page_enum_field_aliases(opts) -> list[str]:
 
 
 def _page_enum_source(opts) -> str:
-    return str(opts.get("enum_source") or "dom") if isinstance(opts, dict) else "dom"
+    if not isinstance(opts, dict):
+        return ""
+    explicit = str(opts.get("enum_source") or "").strip()
+    if explicit:
+        return explicit
+    # A recorder-owned select with explicit label/value DOM options is valid
+    # DOM evidence.  Legacy list-shaped snapshots have no ownership metadata.
+    return "dom" if str(opts.get("control_kind") or "").lower() == "select" else ""
 
 
 def _page_enum_metadata(opts) -> dict:
@@ -1121,215 +1091,209 @@ def _page_enum_metadata(opts) -> dict:
         return {}
     return {
         key: opts.get(key)
-        for key in ("source_url", "dict_type")
+        for key in ("source_url", "dict_type", "script_url", "mapping_complete")
         if opts.get(key) not in (None, "")
     }
 
 
-def _dom_key_matches_field(dom_key: str, field: dict | None) -> bool:
-    if not field:
+def _page_enum_source_is_grounded(source: str, metadata: dict, records: list[dict], option_count: int) -> bool:
+    """Validate provenance and the complete label→wire-value mapping."""
+    if not _records_have_complete_mapping(records, expected_count=option_count):
         return False
-    keys = _grounded_field_names(field)
-    keys.append(str(field.get("path") or "").split(".")[-1].split("[")[0])
-    return any(_name_match(dom_key, k) for k in keys if k not in (None, ""))
+    if source == "script_static":
+        return metadata.get("mapping_complete") is True and bool(metadata.get("script_url"))
+    if source == "script_dictionary":
+        return (
+            metadata.get("mapping_complete") is True
+            and bool(metadata.get("source_url"))
+            and bool(metadata.get("dict_type"))
+        )
+    return source == "dom" and metadata.get("mapping_complete") is True
+
+
+def _page_enum_selection_matches(records: list[dict], selected_label: str, selected_value, current) -> bool:
+    """Require the captured selection and outgoing wire value to agree."""
+    label = str(selected_label or "").strip()
+    wire = selected_value if selected_value not in (None, "") else current
+    if selected_value not in (None, "") and current not in (None, "") and str(selected_value) != str(current):
+        return False
+    if label:
+        matches = [record for record in records if str(record.get("label") or "").strip() == label]
+        return bool(
+            len(matches) == 1
+            and wire not in (None, "")
+            and str(matches[0].get("value")) == str(wire)
+        )
+    if wire in (None, ""):
+        return False
+    return len([record for record in records if str(record.get("value")) == str(wire)]) == 1
 
 
 def apply_page_enum_options(selects: list[dict], page_enum_options: dict | None,
                       post_data: str | None = None, fields: list[dict] | None = None) -> list[dict]:
-    """用**录制时下拉里真实可见的选项**覆盖 select 的候选快照 —— 这是枚举地面真值,
-    胜过拿提交值去网络字典里猜命中(治"加班类型/请假类型绑到几百项含工作日/档案/银行…的全量字典")。
+    """Apply page enum evidence only to its exact recorded request field.
 
-    page_enum_options 形态向后兼容:
-      - 旧:{选中显示值: [选项文字]}
-      - 新:{键(显示值/字段 key): {"options": [...], "field_key": 内部字段名}}
-    按「选中显示值 ⟺ select 的 label/value/path/字段 key」把 DOM 选项挂上:options/count/option_map、
-    标 enum_source=dom,并撤掉按类目收窄。通用,不挑系统。
+    Legacy label-only snapshots and selected-value matching are deliberately
+    ignored.  They prove what was visible, but neither field ownership nor the
+    complete wire mapping needed for an executable enum.
     """
     if not page_enum_options:
         return selects
     pairs = []
     for k, v in page_enum_options.items():
         opts = _page_enum_option_list(v)
-        if opts:
+        if (
+            opts
+            and isinstance(v, dict)
+            and str(v.get("control_kind") or "").lower() == "select"
+            and (_page_enum_field_aliases(v) or _page_enum_field_key(v, str(k)))
+        ):
             pairs.append((
                 str(k), opts, _page_enum_field_key(v, str(k)),
                 _page_enum_selected_label(v, str(k)),
+                _page_enum_selected_value(v),
                 _page_enum_field_aliases(v),
                 _page_enum_source(v),
                 _page_enum_metadata(v),
             ))
     body = _parse_body(post_data) if post_data is not None else None
     value_by_path = {p: sv for p, _t, sv, _raw in _leaf_paths(body)} if body is not None else {}
-    raw_by_path = {p: raw for p, _t, _sv, raw in _leaf_paths(body)} if body is not None else {}
-    field_by_path = {str(f.get("path") or ""): f for f in (fields or []) if f.get("path")}
-    strict_dom_identity = any(
-        aliases or (isinstance(page_enum_options.get(key), dict) and page_enum_options[key].get("control_kind"))
-        for key, _opts, _fk, _selected, aliases, _source, _metadata in pairs
-    )
     for s in selects or []:
-        lbl, val = str(s.get("label") or ""), str(s.get("value") or "")
         path = str(s.get("path") or "")
-        body_val = value_by_path.get(path, "")
-        field = field_by_path.get(path)
         leaf_key = str(path).split(".")[-1].split("[")[0]
-        if strict_dom_identity:
-            matched = next((
-                (ov, fk, selected, evidence_source, metadata) for _kv, ov, fk, selected, aliases, evidence_source, metadata in pairs
-                if (
-                    any(
-                        _identifier_matches_field(alias, path)
-                        or _identifier_matches_field(alias, leaf_key)
-                        for alias in aliases
-                    )
-                    if aliases else bool(
-                        fk and (
-                            _identifier_matches_field(fk, path)
-                            or _identifier_matches_field(fk, leaf_key)
-                        )
+        matches = [
+            (ov, fk, selected, selected_value, evidence_source, metadata)
+            for _kv, ov, fk, selected, selected_value, aliases, evidence_source, metadata in pairs
+            if (
+                any(
+                    _identifier_matches_field(alias, path)
+                    or _identifier_matches_field(alias, leaf_key)
+                    for alias in aliases
+                )
+                if aliases else bool(
+                    fk and (
+                        _identifier_matches_field(fk, path)
+                        or _identifier_matches_field(fk, leaf_key)
                     )
                 )
-            ), None)
-        else:
-            matched = next(((ov, fk, selected, evidence_source, metadata) for kv, ov, fk, selected, _aliases, evidence_source, metadata in pairs
-                if _exact_recorded_match(kv, lbl)
-                or _exact_recorded_match(kv, val)
-                or _exact_recorded_match(kv, body_val)
-                or _exact_recorded_match(selected, lbl)
-                or _exact_recorded_match(selected, val)
-                or _exact_recorded_match(selected, body_val)
-                or _name_match(kv, path)
-                or _name_match(kv, leaf_key)
-                or (fk and _name_match(fk, leaf_key))
-                or _dom_key_matches_field(kv, field)
-                or _dom_key_matches_field(selected, field)), None)
-        if matched:
-            opts, fk, _selected, evidence_source, metadata = matched
-            if metadata.get("source_url"):
-                s["source_url"] = metadata["source_url"]
-                s.setdefault("label_key", "label")
-                s.setdefault("value_key", "value")
-            if metadata.get("dict_type"):
-                s["category_key"] = "dictType"
-                s["category_value"] = metadata["dict_type"]
-            records = _enum_records_from_page_options(opts)
-            if s.get("enum_source") == "api" and _option_map_matches_source(s):
-                records = _records_with_existing_option_map(records, s.get("option_map"))
-            records = _records_with_recorded_value(records, _selected, raw_by_path.get(path, body_val))
-            _attach_enum_binding(
-                s,
-                records,
-                source="api" if s.get("source_url") else evidence_source,
-                confirmed=True,
             )
-            s["enum_label_source"] = evidence_source
-            s["option_map_source_url"] = s.get("source_url") or evidence_source
-            if fk:
-                s["field_key"] = fk
-            if not metadata.get("dict_type"):
-                s.pop("category_key", None)
-                s.pop("category_value", None)
+        ]
+        if len(matches) != 1:
+            continue
+        opts, fk, selected, selected_value, evidence_source, metadata = matches[0]
+        records = _enum_records_from_page_options(opts)
+        if s.get("enum_source") == "api" and _option_map_matches_source(s):
+            records = _records_with_existing_option_map(records, s.get("option_map"))
+            evidence_source = "api"
+        if not _page_enum_source_is_grounded(evidence_source, metadata, records, len(opts)):
+            # An already-grounded API select stays intact; incomplete page
+            # evidence must never downgrade or overwrite its real mapping.
+            continue
+        current = value_by_path.get(path, s.get("value"))
+        if not _page_enum_selection_matches(records, selected, selected_value, current):
+            continue
+        if metadata.get("source_url"):
+            s["source_url"] = metadata["source_url"]
+            s["label_key"] = "label"
+            s["value_key"] = "value"
+        elif evidence_source in {"dom", "script_static"}:
+            for key in (
+                "source_url", "label_key", "value_key", "category_key",
+                "category_value", "option_map_source_url",
+            ):
+                s.pop(key, None)
+        if metadata.get("dict_type"):
+            s["category_key"] = "dictType"
+            s["category_value"] = metadata["dict_type"]
+        _attach_enum_binding(
+            s,
+            records,
+            source="api" if metadata.get("source_url") else evidence_source,
+            confirmed=True,
+        )
+        s["enum_label_source"] = evidence_source
+        s["option_map_source_url"] = (
+            metadata.get("source_url") or metadata.get("script_url") or evidence_source
+        )
+        if metadata.get("script_url"):
+            s["script_url"] = metadata["script_url"]
+        if fk:
+            s["field_key"] = fk
+        if not metadata.get("dict_type"):
+            s.pop("category_key", None)
+            s.pop("category_value", None)
     return selects
 
 
 def page_enum_selects(post_data: str | None, page_enum_options: dict | None,
                      existing_paths: set | None = None,
                      fields: list[dict] | None = None) -> list[dict]:
-    """录到了下拉选项、但提交体里这个字段**没绑上任何来源 select**(纯枚举:body 存的就是显示名)→
-    造一个**无来源**枚举 select(options + option_map),agent 传名字时按真实提交值回填。治"页面明明只有 3 个选项,
-    却因为匹配不到网络字典而被当普通文本"。通用,不挑系统。page_enum_options 兼容新旧两种形态。"""
+    """Build a page enum only from exact control identity and full mapping."""
     body = _parse_body(post_data)
     if body is None or not page_enum_options:
         return []
     existing = existing_paths or set()
     out: list[dict] = []
-    field_by_path = {str(f.get("path") or ""): f for f in (fields or []) if f.get("path")}
     leaves = _leaf_paths(body)
     for picked, opts_raw in page_enum_options.items():
+        if (
+            not isinstance(opts_raw, dict)
+            or str(opts_raw.get("control_kind") or "").lower() != "select"
+        ):
+            continue
         opts = _page_enum_option_list(opts_raw)
         fk = _page_enum_field_key(opts_raw, str(picked))
         aliases = _page_enum_field_aliases(opts_raw)
         evidence_source = _page_enum_source(opts_raw)
         metadata = _page_enum_metadata(opts_raw)
         selected = _page_enum_selected_label(opts_raw, str(picked))
-        if not opts:
+        selected_value = _page_enum_selected_value(opts_raw)
+        if not opts or not (aliases or fk):
             continue
-        strict_identity = bool(aliases or (isinstance(opts_raw, dict) and opts_raw.get("control_kind")))
-        if strict_identity:
-            # New recorder evidence: only an explicit DOM property/name may own
-            # the request field. Selected values and translated labels are not
-            # identity evidence.
-            scored = []
-            for path, toks, _sv, _raw in leaves:
-                leaf = str(path).split(".")[-1].split("[")[0]
-                alias_match = any(
-                    _identifier_matches_field(alias, path)
-                    or _identifier_matches_field(alias, leaf)
-                    for alias in aliases
+        matches: list[tuple[str, list]] = []
+        for path, toks, _sv, _raw in leaves:
+            leaf = str(path).split(".")[-1].split("[")[0]
+            alias_match = any(
+                _identifier_matches_field(alias, path)
+                or _identifier_matches_field(alias, leaf)
+                for alias in aliases
+            )
+            key_match = bool(
+                not aliases and fk and (
+                    _identifier_matches_field(fk, path)
+                    or _identifier_matches_field(fk, leaf)
                 )
-                key_match = bool(
-                    not aliases and fk and (
-                        _identifier_matches_field(fk, path)
-                        or _identifier_matches_field(fk, leaf)
-                    )
-                )
-                if alias_match or key_match:
-                    scored.append((10 if alias_match else 8, path, toks))
-            if len(scored) != 1:
-                continue
-            _score, path, toks = scored[0]
-        else:
-            # Legacy recordings did not carry control aliases. Preserve their
-            # historic best-effort behavior while all newly recorded sessions
-            # use the strict branch above.
-            toks = _find_value_tokens(body, selected)
-            if toks is not None:
-                path = _tokens_to_str(toks)
-            else:
-                scored = []
-                for path, toks, sv, _raw in leaves:
-                    field = field_by_path.get(path)
-                    leaf = str(path).split(".")[-1].split("[")[0]
-                    score = 0
-                    if fk and (_name_match(fk, path) or _name_match(fk, leaf) or _label_matches_internal_field(fk, path, field)):
-                        score += 6
-                    if _dom_key_matches_field(str(picked), field) or _dom_key_matches_field(selected, field):
-                        score += 5
-                    if _label_matches_internal_field(str(picked), path, field) or _label_matches_internal_field(selected, path, field):
-                        score += 4
-                    if _name_match(str(picked), path) or _name_match(selected, path):
-                        score += 2
-                    if _name_match(str(picked), leaf) or _name_match(selected, leaf):
-                        score += 2
-                    semantic_score = score
-                    if str(sv).strip() and not any(
-                        _exact_recorded_match(sv, option.get("label"))
-                        for option in _enum_records_from_page_options(opts)
-                    ):
-                        score += 2 if semantic_score > 0 and _re.fullmatch(r"[A-Za-z0-9_-]{1,8}", str(sv).strip()) else -2
-                    if semantic_score > 0 and score > 0:
-                        scored.append((score, path, toks))
-                hit = max(scored, default=None, key=lambda value: value[0])
-                if hit is None:
-                    continue
-                _score, path, toks = hit
+            )
+            if alias_match or key_match:
+                matches.append((path, toks))
+        if len(matches) != 1:
+            continue
+        path, toks = matches[0]
         if path in existing or any(o.get("path") == path for o in out):
             continue
         current = next((sv for p, _t, sv, _raw in leaves if p == path), "")
-        current_raw = next((raw for p, _t, _sv, raw in leaves if p == path), current)
+        records = _enum_records_from_page_options(opts)
+        if not _page_enum_source_is_grounded(evidence_source, metadata, records, len(opts)):
+            continue
+        if not _page_enum_selection_matches(records, selected, selected_value, current):
+            continue
         entry = {"path": path, "tokens": toks, "source_url": metadata.get("source_url", ""),
                  "value_key": "value" if metadata.get("source_url") else "",
                  "label_key": "label" if metadata.get("source_url") else "",
                  "label": selected or picked, "value": current, "count": len(opts), "field_key": fk or ""}
         if metadata.get("dict_type"):
             entry.update({"category_key": "dictType", "category_value": metadata["dict_type"]})
-        records = _enum_records_from_page_options(opts)
-        records = _records_with_recorded_value(records, selected or picked, current_raw)
         _attach_enum_binding(
             entry,
             records,
-            source=evidence_source,
+            source="api" if metadata.get("source_url") else evidence_source,
             confirmed=True,
         )
+        entry["option_map_source_url"] = (
+            metadata.get("source_url") or metadata.get("script_url") or evidence_source
+        )
+        if metadata.get("script_url"):
+            entry["script_url"] = metadata["script_url"]
         out.append(entry)
     return out
 
@@ -1349,15 +1313,6 @@ def looks_internal_param_name(name: str) -> bool:
     if not n or not n.isascii():
         return False
     return bool(_INTERNAL_NAME_RE.search(n))
-
-
-def _name_match(label: str, value) -> bool:
-    """候选显示名与"录制选中值"是否同指:精确相等,或一方是另一方的子串(≥2 字)——容忍真实选人下拉
-    常见的带后缀显示名(如『张三(研发部)』『病假(年度)』)。≥2 字防单字噪声误配。通用,不挑系统。"""
-    a, b = (label or "").strip(), (str(value) or "").strip()
-    if not a or not b:
-        return False
-    return a == b or (len(a) >= 2 and a in b) or (len(b) >= 2 and b in a)
 
 
 def suggest_select_names(selects: list[dict], samples: dict | None) -> dict:
@@ -1385,17 +1340,6 @@ def suggest_select_names(selects: list[dict], samples: dict | None) -> dict:
 #   提交体里审批人挂在 startUserSelectAssignees / approvers / candidate… 下,叶子键是节点 ID(Activity_xxx)。
 _ASSIGNEE_CONTAINER_RE = _re.compile(
     r"(start_?user_?select_?assignees|assignees?|approvers?|candidate(?:users?|groups?)?)", _re.I)
-
-
-def _is_assignee_path(path: str) -> bool:
-    """路径看起来是审批人选人字段(路径在 startUserSelectAssignees/approvers/assignees/Activity_xxx 等容器下)。
-    通用,不挑系统。"""
-    if not path:
-        return False
-    if _ASSIGNEE_CONTAINER_RE.search(path):
-        return True
-    leaf_key = path.split(".")[-1].split("[")[0]
-    return bool(_BPMN_NODE_RE.match(leaf_key)) if leaf_key else False
 
 
 _BPMN_NODE_RE = _re.compile(r"^(activity|usertask|task|node|flow|gateway|sequenceflow|sid)[_-]", _re.I)
@@ -1529,25 +1473,93 @@ def suggest_identity(post_data: str | None, storage_state: dict | None,
     return out
 
 
-def suggest_fact_check(samples: dict, reads: list[dict]) -> dict | None:
-    """提交后回查源(grounded):用户提交后看了"我的记录"列表 → 该列表含刚提交的值。
+_FACT_PATH_NOISE = {
+    "admin", "api", "v1", "v2", "page", "list", "query", "search", "detail",
+    "create", "submit", "save", "update", "process", "instance", "workflow",
+}
 
-    在抓到的列表读响应里找"含某提交值"的列表项 → 返回 {endpoint, match_field(项里等于该值的字段),
-    param(对应用户参数/标签)}。优先用最独特(最长)的提交值,降低巧合。通用,不挑系统。
+
+def _fact_path_tokens(url: str) -> set[str]:
+    try:
+        path = urlparse(str(url or "")).path
+    except Exception:  # noqa: BLE001
+        path = str(url or "").split("?", 1)[0]
+    return {
+        token for token in _re.split(r"[^a-z0-9]+", path.lower())
+        if len(token) >= 3 and token not in _FACT_PATH_NOISE
+    }
+
+
+def suggest_fact_check(samples: dict, reads: list[dict], *, write_request: dict | None = None) -> dict | None:
+    """Return post-write business evidence, never a value-collision guess.
+
+    The read must be a captured ``business_get`` after the owning write and
+    either belong to the same observer transaction or share a concrete
+    business path domain.  Only values belonging to that write's public
+    parameters are considered. Destructive DELETE/withdraw operations cannot
+    be proven by a record still being present, so they remain structure-only
+    unless a future recorder captures an explicit before/after assertion.
     """
-    cand = sorted(((str(v), k) for k, v in (samples or {}).items() if v not in ("", None) and len(str(v)) >= 2),
-                  key=lambda x: -len(x[0]))
-    for r in reads or []:
-        items = as_list_payload(r.get("json"))
+    write = write_request or {}
+    method = str(write.get("method") or "").upper()
+    if method not in {"POST", "PUT", "PATCH"}:
+        return None
+    try:
+        write_sequence = float(write.get("sequence", write.get("request_index")))
+    except (TypeError, ValueError):
+        return None
+    write_url = str(write.get("url") or write.get("path") or "")
+    write_tx = str(write.get("trigger_transaction_id") or "")
+    write_tokens = _fact_path_tokens(write_url)
+    candidates = sorted(
+        (
+            (str(value), str(param))
+            for param, value in (samples or {}).items()
+            if value not in ("", None) and len(str(value)) >= 2
+        ),
+        key=lambda pair: -len(pair[0]),
+    )
+    grounded: list[dict] = []
+    for read in reads or []:
+        if str(read.get("role") or read.get("request_role") or "") != "business_get":
+            continue
+        try:
+            read_sequence = float(read.get("sequence", read.get("request_index")))
+        except (TypeError, ValueError):
+            continue
+        if read_sequence <= write_sequence:
+            continue
+        read_url = str(read.get("url") or read.get("path") or "")
+        read_tx = str(read.get("trigger_transaction_id") or "")
+        same_transaction = bool(write_tx and read_tx and write_tx == read_tx)
+        same_business_domain = bool(write_tokens & _fact_path_tokens(read_url))
+        if not (same_transaction or same_business_domain):
+            continue
+        items = as_list_payload(read.get("json", read.get("response_json")))
         if not items:
             continue
-        for sv, param in cand:
-            for it in items:
-                if isinstance(it, dict):
-                    mf = next((k for k, v in it.items() if str(v) == sv), None)
-                    if mf:
-                        return {"endpoint": r.get("url"), "match_field": mf, "param": param}
-    return None
+        for value, param in candidates:
+            matches = [
+                (item, key)
+                for item in items if isinstance(item, dict)
+                for key, item_value in item.items()
+                if str(item_value) == value
+            ]
+            if len(matches) != 1:
+                continue
+            _item, match_field = matches[0]
+            grounded.append({
+                "endpoint": read_url,
+                "match_field": match_field,
+                "param": param,
+                "source_request_id": str(read.get("request_id") or ""),
+                "source_sequence": read_sequence,
+                "source_role": "business_get",
+                "write_sequence": write_sequence,
+                "same_transaction": same_transaction,
+            })
+    # More than one plausible endpoint/value is ambiguous; do not first-win.
+    return grounded[0] if len(grounded) == 1 else None
 
 
 
@@ -2970,9 +2982,20 @@ async def _resolve_selects(api_request: dict, fields: dict, *, base_url: str, st
         )
         items = _filter_category(items, s)        # 聚合字典 → 只在该字段所属类目里名→ID(同名跨类目不串)
         lk, vk = s.get("label_key"), s.get("value_key")
-        match = next((it for it in items if isinstance(it, dict) and str(it.get(lk)) == str(name)), None)
-        if match is None:
-            continue
+        matches = [it for it in items if isinstance(it, dict) and str(it.get(lk)) == str(name)]
+        if len(matches) > 1:
+            raise ValueError(f"选择字段 {param} 的候选名称 {name!r} 不唯一，已拒绝猜测内部值")
+        if not matches:
+            value_matches = [it for it in items if isinstance(it, dict) and str(it.get(vk)) == str(name)]
+            if len(value_matches) == 1:
+                # Caller already supplied the exact current wire value.
+                continue
+            if len(value_matches) > 1:
+                raise ValueError(f"选择字段 {param} 的内部值 {name!r} 在候选接口中不唯一")
+            if not items:
+                raise RuntimeError(f"选择字段 {param} 的实时候选接口未返回数据，已拒绝使用过期快照猜值")
+            raise ValueError(f"选择字段 {param} 的值 {name!r} 不在实时候选接口中")
+        match = matches[0]
         if s.get("id_tokens") or s.get("id_path"):       # 名/ID 配对:显示名字段保留名、配对 id 字段写 id
             if lk in match:
                 fields[param] = match[lk]                 # 规整成候选里的规范显示名
@@ -3032,9 +3055,16 @@ async def _resolve_list_selects(api_request: dict, fields: dict, *, base_url: st
             s, base_url, storage_state, token_key, verify, api_request.get("auth_headers"),
         )
         items = _filter_category(items, s)
+        if not items:
+            raise RuntimeError(f"选择字段 {param} 的实时候选接口未返回数据，已拒绝猜测多选对象")
         built = []
         for nm in names:
-            it = next((x for x in items if isinstance(x, dict) and str(x.get(lk)) == str(nm)), None)
+            matches = [x for x in items if isinstance(x, dict) and str(x.get(lk)) == str(nm)]
+            if len(matches) > 1:
+                raise ValueError(f"选择字段 {param} 的候选名称 {nm!r} 不唯一，已拒绝猜测内部值")
+            if not matches:
+                raise ValueError(f"选择字段 {param} 的值 {nm!r} 不在实时候选接口中")
+            it = matches[0]
             built.append(_build_element(it, tmpl, nm, label_sub))
         fields[param] = built
     return fields
@@ -3433,6 +3463,7 @@ def _capability_node_step_ids(cap: dict) -> list[str]:
 
 def _workflow_with_steps(api_request: dict, steps: list[dict], cap: dict) -> dict:
     out = copy.deepcopy(api_request)
+    out.pop("fact_check", None)
     out["steps"] = steps
     out["capability"] = cap.get("name") or cap.get("kind") or ""
     out["capability_kind"] = cap.get("kind") or ""
@@ -3449,8 +3480,15 @@ def _workflow_with_steps(api_request: dict, steps: list[dict], cap: dict) -> dic
     out["params"] = params
     out["sample_inputs"] = samples
     out["field_types"] = field_types
-    if (cap.get("kind") or "") in {"query_status", "list_options", "validate_batch"}:
-        out.pop("fact_check", None)
+    kind = str(cap.get("kind") or "")
+    if kind not in {"query_status", "list_options", "validate_batch"}:
+        checks = [st.get("fact_check") for st in steps if isinstance(st.get("fact_check"), dict)]
+        unique_checks = {
+            json.dumps(check, ensure_ascii=False, sort_keys=True, default=str): check
+            for check in checks
+        }
+        if len(unique_checks) == 1:
+            out["fact_check"] = copy.deepcopy(next(iter(unique_checks.values())))
     return out
 
 

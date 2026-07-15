@@ -44,6 +44,8 @@ def test_repeated_events_for_same_field_and_locator_reuse_one_key() -> None:
             "options": ["2026-07-11", "2026-07-12"],
             "field_key": "使用日期",
             "selected": "2026-07-12",
+            "selected_label": "2026-07-12",
+            "mapping_complete": False,
         }
     }
 

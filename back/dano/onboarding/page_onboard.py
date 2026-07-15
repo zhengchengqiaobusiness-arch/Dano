@@ -63,7 +63,27 @@ def _build_page_body(api_request: dict, action: str, title: str, required):
     if not ftypes and api_request.get("steps"):
         ftypes = dict((api_request["steps"][-1] or {}).get("field_types") or {})
     recording_mode = str(api_request.get("recording_mode") or "unknown")
-    has_fact_check = bool(api_request.get("fact_check") or any((s or {}).get("fact_check") for s in api_request.get("steps") or []))
+    steps = list(api_request.get("steps") or [])
+    step_by_id = {str((step or {}).get("step_id") or ""): step for step in steps}
+    capabilities = []
+    for raw_cap in api_request.get("capabilities") or []:
+        if not isinstance(raw_cap, dict):
+            continue
+        cap = dict(raw_cap)
+        cap_steps = [step_by_id[sid] for sid in (str(value) for value in cap.get("step_ids") or []) if sid in step_by_id]
+        cap_has_fact = bool(any((step or {}).get("fact_check") for step in cap_steps))
+        cap_has_success = bool(any((step or {}).get("success_rule") for step in cap_steps))
+        cap["verification_status"] = IngestionStatus.PARTIALLY_VERIFIED.value
+        cap["verification_basis"] = (
+            "fact_check_configured" if cap_has_fact else
+            "success_rule_configured" if cap_has_success else
+            "structure_only"
+        )
+        cap["verify_required"] = bool(
+            cap_has_fact and str(cap.get("kind") or "") not in {"query", "query_status", "list_options", "validate"}
+        )
+        capabilities.append(cap)
+    has_fact_check = bool(api_request.get("fact_check") or any((s or {}).get("fact_check") for s in steps))
     has_success_rule = bool(api_request.get("success_rule") or any((s or {}).get("success_rule") for s in api_request.get("steps") or []))
     verification_basis = (
         "fact_check_configured" if has_fact_check else
@@ -76,7 +96,7 @@ def _build_page_body(api_request: dict, action: str, title: str, required):
                           recording_mode=recording_mode,
                           verification_status=IngestionStatus.PARTIALLY_VERIFIED.value,
                           verification_basis=verification_basis,
-                          capabilities=list(api_request.get("capabilities") or [])).model_dump()
+                          capabilities=capabilities).model_dump()
     return body, params, req_fields, opt_fields
 
 

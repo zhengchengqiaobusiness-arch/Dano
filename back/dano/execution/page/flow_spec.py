@@ -22,6 +22,7 @@ from urllib.parse import urlparse, parse_qs, urlencode
 # 复用 request_capture 的纯函数
 from dano.execution.page.request_capture import (
     _is_const_value,
+    _fact_path_tokens,
     _leaf_paths,
     _parse_body,
     _is_system_timestamp,
@@ -1248,7 +1249,10 @@ def _build_step_from_capture(
     def has_real_enum_source(sb: SelectBinding) -> bool:
         return bool(sb.options) or bool(sb.source_url and sb.value_key and sb.label_key)
 
-    option_reads = _option_candidate_reads(reads or [])
+    option_reads = _option_candidate_reads([
+        read for read in (reads or [])
+        if _recording_evidence_matches_request(req, read)
+    ])
     query_is_option_source = method == "GET" and _read_is_option_source(req)
     grounded_samples = dict(samples or {})
     for picked, raw_options in (page_enum_options or {}).items():
@@ -2752,7 +2756,13 @@ def _capability_output_fields(cap: FlowCapability) -> list[CapabilityField]:
             continue
         name = _capability_output_name(mapping, idx)
         schema = output_props.get(name) if isinstance(output_props, dict) else None
-        field_type = str(schema.get("type") or "") if isinstance(schema, dict) else ""
+        field_type = (
+            str(
+                schema.get("type")
+                or ("unknown" if schema.get("x-dano-untyped-response") is True else "")
+            )
+            if isinstance(schema, dict) else ""
+        )
         fields.append(CapabilityField(
             field_id=f"output:{cap.name or cap.capability_id}:{idx}:{name}",
             scope="output",
@@ -2780,7 +2790,10 @@ def _capability_output_fields(cap: FlowCapability) -> list[CapabilityField]:
             display_name=str(schema.get("title") or name),
             path=str(name),
             key=str(name),
-            type=str(schema.get("type") or "string"),
+            type=str(
+                schema.get("type")
+                or ("unknown" if schema.get("x-dano-untyped-response") is True else "string")
+            ),
             required=name in required,
             exposed_to_caller=True,
             confidence=float(cap.confidence or 0.0),
@@ -3255,25 +3268,36 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
     seen: set[str] = set()
     for raw_key, raw in page_options.items():
         if isinstance(raw, dict):
+            source_kind = str(raw.get("enum_source") or "dom").strip()
+            if (
+                str(raw.get("control_kind") or "").lower() != "select"
+                or raw.get("mapping_complete") is not True
+                or source_kind not in {"dom", "script_static", "script_dictionary"}
+                or (source_kind == "script_static" and not raw.get("script_url"))
+                or (
+                    source_kind == "script_dictionary"
+                    and (not raw.get("source_url") or not raw.get("dict_type"))
+                )
+            ):
+                continue
             options = list(raw.get("options") or raw.get("values") or [])
             field_key = str(raw.get("field_key") or raw_key or "").strip()
             field_aliases = [
                 str(value).strip() for value in (raw.get("field_aliases") or [])
                 if str(value or "").strip()
             ]
-            selected = str(raw.get("selected") or raw.get("value") or "").strip()
+            selected = str(raw.get("selected_label") or raw.get("selected") or "").strip()
             explicit_map = dict(raw.get("option_map") or raw.get("value_map") or {})
-            strict_control_identity = bool(raw.get("control_kind"))
-        elif isinstance(raw, list):
-            options = list(raw)
-            field_key = str(raw_key or "").strip()
-            field_aliases = []
-            selected = ""
-            explicit_map = {}
-            strict_control_identity = False
+            strict_control_identity = True
         else:
             continue
         if not field_key or not options:
+            continue
+        option_pairs = [_enum_label_value(option) for option in options]
+        if (
+            any(pair is None or pair[1] is None for pair in option_pairs)
+            or len({str(pair[0]) for pair in option_pairs if pair}) != len(options)
+        ):
             continue
         signature = json.dumps(
             {"field": field_key, "aliases": field_aliases, "selected": selected, "options": options},
@@ -3321,23 +3345,15 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
             }
             for item in (param.evidence or [])
         ):
-            # Keep the binding as operator-owned evidence, but never project it
-            # back over the edited field contract.
-            grounded_bindings.append(binding)
+            # This recovery pass does not rebuild ``step.selects``.  Preserve
+            # the operator-owned field contract and leave any existing binding
+            # untouched; do not manufacture a new inferred enum here.
             continue
 
         existing_binding = next((
             item for item in (step.selects or [])
             if _strip_body_prefix(item.path or item.id_path or "") == _strip_body_prefix(param.path)
         ), None)
-        # Initial inference already created a richer binding (frequently backed
-        # by a live dictionary API). The recovery pass must not downgrade it to
-        # a label-only DOM snapshot.
-        if existing_binding is not None and (
-            existing_binding.source_url or _select_has_executable_options(existing_binding)
-        ):
-            continue
-
         option_map = dict(explicit_map)
         for option in options:
             # A bare string proves only a visible label, not that the backend
@@ -3365,7 +3381,29 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
         binding.path = param.path
         binding.options = options
         binding.option_map = option_map or None
-        binding.enum_source = "dom"
+        if source_kind == "script_dictionary":
+            binding.source_url = str(raw.get("source_url") or "")
+            binding.source_method = "GET"
+            binding.value_key = "value"
+            binding.label_key = "label"
+            binding.category_key = "dictType"
+            binding.category_value = str(raw.get("dict_type") or "")
+            binding.enum_source = "api"
+            _hydrate_select_source_contract(spec, binding)
+        elif source_kind == "script_static":
+            binding.source_url = ""
+            binding.value_key = ""
+            binding.label_key = ""
+            binding.category_key = None
+            binding.category_value = None
+            binding.enum_source = "script_static"
+        else:
+            binding.source_url = ""
+            binding.value_key = ""
+            binding.label_key = ""
+            binding.category_key = None
+            binding.category_value = None
+            binding.enum_source = "dom"
         binding.enum_confirmed = confirmed
 
         # DOM label is stronger public naming evidence than an internal wire
@@ -3455,9 +3493,11 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
             # Preserve mandatory status only when the recorder captured an
             # actual page-required marker.
             param.required = _param_has_page_required_evidence(param)
-            if param.type == "string" and param.source_kind == "user_input":
-                # HTTP query serialization is textual. A sample such as
-                # hotelName=1 must not turn a text business field into number.
+            if param.type not in {"array", "object"}:
+                # HTTP query serialization is textual, including enum codes.
+                # A numeric-looking sample or dictionary value must not make
+                # one list filter advertise a different wire contract from
+                # the same value serialized in the URL.
                 param.wire_type = "string"
         if _looks_pagination_field(param.key, param.path):
             param.type = _infer_type_from_value(param.value)
@@ -3517,7 +3557,8 @@ def _page_enum_contract_for_param(
     step: FlowStep,
     param: ParamField,
     binding: SelectBinding,
-) -> tuple[list[Any], dict[str, Any]] | None:
+) -> tuple[list[Any], dict[str, Any], dict[str, Any]] | None:
+    """Return a page enum only when ownership and the full wire map are proven."""
     page_options = _page_enum_options_from_request_facts(spec.request_facts)
     def normalized(value: Any) -> str:
         return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(value or "")).casefold()
@@ -3535,32 +3576,73 @@ def _page_enum_contract_for_param(
         raw = page_options.get(key)
         if raw is None:
             continue
-        if isinstance(raw, dict):
-            if not _recording_evidence_matches_request(step.source_meta or {}, raw):
-                continue
-            aliases = [normalized(value) for value in (raw.get("field_aliases") or []) if normalized(value)]
-            field_key = normalized(raw.get("field_key"))
-            if aliases:
-                if not any(alias in param_names for alias in aliases):
-                    continue
-            elif raw.get("control_kind"):
-                if not field_key or field_key not in param_names:
-                    continue
-            elif (field_key or normalized(key)) not in param_names:
-                continue
-            options = list(raw.get("options") or raw.get("values") or [])
-            value_map = dict(raw.get("option_map") or raw.get("value_map") or {})
-        elif isinstance(raw, list):
-            options = list(raw)
-            value_map = {
-                str(item.get("label")): item.get("value")
-                for item in options
-                if isinstance(item, dict) and item.get("label") not in (None, "") and "value" in item and item.get("value") is not None
-            }
-        else:
+        if not isinstance(raw, dict):
+            # Legacy list/label-only snapshots are useful diagnostics but do
+            # not prove control ownership or the backend wire values.
             continue
-        if options:
-            return options, value_map
+        if (
+            str(raw.get("control_kind") or "").lower() != "select"
+            or raw.get("mapping_complete") is not True
+            or not _recording_evidence_matches_request(step.source_meta or {}, raw)
+        ):
+            continue
+        aliases = [normalized(value) for value in (raw.get("field_aliases") or []) if normalized(value)]
+        field_key = normalized(raw.get("field_key"))
+        if aliases:
+            if not any(alias in param_names for alias in aliases):
+                continue
+        elif not field_key or field_key not in param_names:
+            continue
+        source = str(raw.get("enum_source") or "dom").strip()
+        if source == "script_dictionary":
+            if not raw.get("source_url") or not raw.get("dict_type"):
+                continue
+        elif source == "script_static":
+            if not raw.get("script_url"):
+                continue
+        elif source != "dom":
+            continue
+        options = list(raw.get("options") or raw.get("values") or [])
+        if len(options) < 2:
+            continue
+        value_map: dict[str, Any] = {}
+        valid = True
+        for option in options:
+            pair = _enum_label_value(option)
+            if pair is None or pair[0] in value_map or pair[1] is None:
+                valid = False
+                break
+            value_map[str(pair[0])] = pair[1]
+        explicit_map = dict(raw.get("option_map") or raw.get("value_map") or {})
+        if not valid or len(value_map) != len(options):
+            continue
+        if any(
+            label in explicit_map and str(explicit_map[label]) != str(value)
+            for label, value in value_map.items()
+        ):
+            continue
+        selected_label = str(raw.get("selected_label") or raw.get("selected") or "").strip()
+        selected_value = raw.get("selected_value")
+        current = param.value
+        wire_value = selected_value if selected_value not in (None, "") else current
+        if (
+            selected_value not in (None, "")
+            and current not in (None, "")
+            and str(selected_value) != str(current)
+        ):
+            continue
+        if selected_label:
+            if selected_label not in value_map or wire_value in (None, "") or str(value_map[selected_label]) != str(wire_value):
+                continue
+        elif current not in (None, ""):
+            if sum(str(value) == str(current) for value in value_map.values()) != 1:
+                continue
+        return options, value_map, {
+            "enum_source": source,
+            "source_url": str(raw.get("source_url") or ""),
+            "dict_type": str(raw.get("dict_type") or ""),
+            "script_url": str(raw.get("script_url") or ""),
+        }
     return None
 
 
@@ -3617,8 +3699,51 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
             }
             for item in (param.evidence or [])
         ):
+            # ``step.selects`` is rebuilt from ``grounded_bindings`` below.
+            # Keep the existing binding as historical/runtime evidence while
+            # refusing to project it back over an operator-edited contract.
+            grounded_bindings.append(binding)
             continue
         page_contract = _page_enum_contract_for_param(spec, step, param, binding)
+        if page_contract:
+            page_options, page_value_map, page_meta = page_contract
+            page_source = str(page_meta.get("enum_source") or "dom")
+            binding.options = copy.deepcopy(page_options)
+            binding.option_map = dict(page_value_map)
+            binding.count = len(page_options)
+            binding.enum_confirmed = True
+            if page_source == "script_dictionary":
+                source_changed = str(binding.source_url or "") != str(page_meta.get("source_url") or "")
+                binding.source_url = str(page_meta.get("source_url") or "")
+                binding.source_method = "GET"
+                binding.value_key = "value"
+                binding.label_key = "label"
+                binding.category_key = "dictType"
+                binding.category_value = str(page_meta.get("dict_type") or "")
+                binding.enum_source = "api"
+                if source_changed:
+                    binding.source_headers = {}
+                    binding.source_body = None
+                    binding.source_content_type = ""
+                    binding.source_role = ""
+                    binding.source_request_id = ""
+                _hydrate_select_source_contract(spec, binding)
+            else:
+                # A complete DOM/static map is self-contained.  Keeping an old
+                # guessed endpoint here lets unknown labels fall through to a
+                # foreign API at runtime, so clear every stale dynamic source.
+                binding.source_url = ""
+                binding.source_method = "GET"
+                binding.source_headers = {}
+                binding.source_body = None
+                binding.source_content_type = ""
+                binding.source_role = ""
+                binding.source_request_id = ""
+                binding.value_key = ""
+                binding.label_key = ""
+                binding.category_key = None
+                binding.category_value = None
+                binding.enum_source = "script_static" if page_source == "script_static" else "dom"
         source_path = _request_path({"url": binding.source_url}) if binding.source_url else ""
         captured_source = any(
             fact.response_json is not None
@@ -3650,9 +3775,12 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
         )
         if not (api_contract or static_contract or dom_contract or manual_contract):
             # A field name, a numeric sample, or a URL without a captured
-            # label/value contract is not enum evidence.  Preserve the field as
-            # ordinary input and remove the speculative binding from the
-            # executable view below.
+            # label/value contract is not enum evidence. Preserve the binding
+            # itself so a user can finish/edit the configuration without the
+            # next sync silently deleting it, but keep it unconfirmed and do
+            # not project it as an executable enum contract.
+            binding.enum_confirmed = False
+            grounded_bindings.append(binding)
             if not _param_has_manual_contract(param):
                 param.type = param.wire_type or _infer_type_from_value(param.value)
                 param.enum_options = None
@@ -3713,6 +3841,8 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
             "source_request_id": binding.source_request_id,
             "value_key": binding.value_key,
             "label_key": binding.label_key,
+            "category_key": binding.category_key,
+            "category_value": binding.category_value,
             "id_path": binding.id_path or binding.path or param.path,
             "enum_source": (
                 "dom" if source_kind == "page_enum"
@@ -4127,30 +4257,90 @@ def _merge_flow_read_sources(explicit_reads: list[dict], captured_requests: list
     recorder 现在会把 GET/POST 查询放进 captured_requests；字段下拉/选人绑定不能只依赖旧 reads 通道。
     """
     out: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    merged_by_key: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 
-    def add(url: str, payload: Any, *, role: str = "") -> None:
+    def add(url: str, payload: Any, *, role: str = "", source: dict | None = None,
+            sequence: int | None = None) -> None:
         if payload is None:
             return
-        key = (url or "", json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)[:500])
-        if key in seen:
+        source = source or {}
+        source_sequence = next((
+            source.get(key) for key in ("sequence", "request_index", "index")
+            if source.get(key) is not None
+        ), sequence)
+        source_request_index = next((
+            source.get(key) for key in ("request_index", "index")
+            if source.get(key) is not None
+        ), source_sequence)
+        request_id = str(source.get("request_id") or "")
+        page_id = str(source.get("page_id") or "")
+        frame_id = str(source.get("frame_id") or "")
+        payload_fingerprint = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        # ``reads`` and ``captured_requests`` often contain two projections of
+        # the same network request.  Merge only when their immutable request id
+        # (or recorder sequence fallback) agrees.  Two identical GET responses
+        # observed before and after a write are distinct causal events and must
+        # not be collapsed merely because URL/body/page are equal.
+        identity = (
+            f"request:{request_id}" if request_id
+            else f"sequence:{source_sequence}" if source_sequence is not None
+            else page_id
+        )
+        key = (
+            url or "",
+            payload_fingerprint,
+            identity,
+            "" if request_id or source_sequence is not None else frame_id,
+        )
+        existing = merged_by_key.get(key)
+        incoming = {
+            "url": url or "",
+            "json": payload,
+            "role": role or "",
+            "page_id": page_id,
+            "frame_id": frame_id,
+            "trigger_action_id": str(source.get("trigger_action_id") or source.get("action_id") or ""),
+            "trigger_transaction_id": str(source.get("trigger_transaction_id") or ""),
+            "request_id": request_id,
+            "request_index": source_request_index,
+            "sequence": source_sequence,
+            "path": _request_path(source) if source else _request_path({"url": url}),
+        }
+        if existing is not None:
+            # The captured-request projection carries the classifier result and
+            # action/transaction anchors that the lightweight response-read
+            # projection may lack.  Fill/replace metadata without duplicating
+            # the response payload.
+            for field in (
+                "role", "page_id", "frame_id", "trigger_action_id",
+                "trigger_transaction_id", "request_id", "request_index",
+                "sequence", "path",
+            ):
+                value = incoming.get(field)
+                if value not in (None, ""):
+                    existing[field] = value
             return
-        seen.add(key)
-        out.append({"url": url or "", "json": payload, "role": role or ""})
+        merged_by_key[key] = incoming
+        out.append(incoming)
 
     for r in explicit_reads or []:
         add(
             r.get("url") or "",
             r.get("json", r.get("response_json")),
-        role=str(r.get("role") or r.get("request_role") or "explicit_read_option"),
+            role=str(r.get("role") or r.get("request_role") or "explicit_read_option"),
+            source=r,
         )
-    for req, role in zip(captured_requests or [], request_roles or []):
+    for sequence, (req, role) in enumerate(zip(captured_requests or [], request_roles or [])):
         if role.get("role") not in {"read_option", "read_context", "business_get"}:
             continue
         add(
             req.get("url") or "",
             req.get("response_json", req.get("json")),
             role=str(role.get("role") or ""),
+            source=req,
+            sequence=sequence,
         )
     return out
 
@@ -4556,10 +4746,35 @@ def to_flow_spec(
         if rl == "L3" and overall != "L4":
             overall = "L3"
 
-    # 7) fact_check
-    fc = suggest_fact_check(samples, flow_reads)
-    if step_objs and fc:
-        step_objs[-1].fact_check = fc
+    # 7) fact_check — capability/write scoped and causally after the write.
+    # A value collision in a user/dictionary endpoint is not verification, and
+    # a follow-up GET step must not own the write's check merely because it is
+    # last in the workflow.
+    for step in step_objs:
+        step.fact_check = None
+        if (step.method or "").upper() not in {"POST", "PUT", "PATCH"}:
+            continue
+        meta = step.source_meta or {}
+        step_samples = dict(step.sample_inputs or {})
+        if not step_samples:
+            step_samples = {
+                param.key: param.value
+                for param in step.params
+                if param.key and param.value not in (None, "") and _param_exposed_to_caller(param)
+            }
+        fc = suggest_fact_check(
+            step_samples,
+            flow_reads,
+            write_request={
+                "method": step.method,
+                "url": step.url or step.path,
+                "sequence": meta.get("sequence", meta.get("request_index")),
+                "request_index": meta.get("request_index"),
+                "trigger_transaction_id": meta.get("trigger_transaction_id"),
+            },
+        )
+        if fc:
+            step.fact_check = fc
 
     # 8) title
     title = _derive_title(step_objs)
@@ -10635,6 +10850,87 @@ def _apply_grounded_indexed_range_names(spec: FlowSpec) -> tuple[FlowSpec, list[
     return current, changes
 
 
+def _select_param_for_runtime(step: FlowStep, binding: SelectBinding) -> ParamField | None:
+    """Return the current field contract owned by a recorded select binding."""
+    normalized_path = _strip_body_prefix(binding.path or "")
+    if normalized_path:
+        matched = next((
+            param for param in (step.params or [])
+            if _strip_body_prefix(param.path or "") == normalized_path
+        ), None)
+        if matched is not None:
+            return matched
+    if binding.param:
+        matched = next((
+            param for param in (step.params or [])
+            if binding.param in {param.key, param.label}
+        ), None)
+        if matched is not None:
+            return matched
+    normalized_id_path = _strip_body_prefix(binding.id_path or "")
+    if normalized_id_path:
+        return next((
+            param for param in (step.params or [])
+            if _strip_body_prefix(param.path or "") == normalized_id_path
+        ), None)
+    return None
+
+
+def _select_binding_is_runtime_executable(step: FlowStep, binding: SelectBinding) -> bool:
+    """Execute only an explicitly confirmed binding compatible with the live field contract.
+
+    ``step.selects`` also keeps historical recorder evidence so the workbench can
+    restore or inspect it.  It must not override an operator who has changed the
+    field back to ordinary text/user input, nor may an incomplete candidate be
+    promoted merely because it survived in that evidence list.
+    """
+    if binding.enum_confirmed is not True:
+        return False
+    param = _select_param_for_runtime(step, binding)
+    if param is None or param.category != "user_param" or not param.exposed_to_user:
+        return False
+    source_kind = str(param.source_kind or "")
+    if source_kind not in {"api_option", *_ENUM_SOURCE_KINDS}:
+        return False
+    if (
+        source_kind != "api_option"
+        and _param_field_manually_edited(param, "type")
+        and param.type not in _ENUM_PARAM_TYPES
+    ):
+        return False
+    if source_kind == "api_option":
+        configured_url = str((param.source or {}).get("source_url") or "").strip()
+        if configured_url and _request_path({"url": configured_url}) != _request_path({"url": binding.source_url}):
+            return False
+        return bool(binding.source_url and binding.value_key and binding.label_key)
+
+    options = list(binding.options or [])
+    if not options:
+        return False
+    option_map = dict(binding.option_map or _enum_option_map_from_options(options))
+    labels: list[str] = []
+    for option in options:
+        pair = _enum_label_value(option)
+        if pair is None or pair[0] in labels or pair[1] is None:
+            return False
+        labels.append(pair[0])
+    return bool(labels) and all(label in option_map and option_map[label] is not None for label in labels)
+
+
+def _runtime_select_bindings(step: FlowStep) -> list[dict[str, Any]]:
+    """Serialize only bindings that remain executable after workbench edits."""
+    current_key_by_path = {p.path: p.key for p in (step.params or [])}
+    out: list[dict[str, Any]] = []
+    for binding in step.selects or []:
+        if not _select_binding_is_runtime_executable(step, binding):
+            continue
+        item = binding.model_dump(exclude_none=True)
+        if binding.path in current_key_by_path:
+            item["param"] = current_key_by_path[binding.path]
+        out.append(item)
+    return out
+
+
 def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
     errors: list[str] = []
     runtime_errors = [err for p in step.params if (err := _runtime_param_publish_error(p))]
@@ -10643,6 +10939,7 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
     if not step.body_source:
         if step.method.upper() == "GET":
             query_template, params, samples, field_types, runtime_fields = _flow_step_query_template(step)
+            selects = _runtime_select_bindings(step)
             apir = {
                 "step_id": step.step_id,
                 "step_name": step.name,
@@ -10656,7 +10953,7 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
                 "sample_inputs": samples,
                 "auth_headers": extract_auth_headers(step.headers),
                 "field_types": field_types,
-                "selects": [],
+                "selects": selects,
                 "identity": [],
                 "system_values": [],
                 "runtime_fields": runtime_fields,
@@ -10682,21 +10979,21 @@ def _flow_step_to_api_step(step: FlowStep) -> tuple[dict | None, list[str]]:
     if step.response_json is not None:
         req["response_json"] = step.response_json
     param_map = _step_param_map(step)
-    current_key_by_path = {p.path: p.key for p in step.params}
-    selects = []
+    selects = _runtime_select_bindings(step)
     select_paths = set()
-    for s in step.selects:
-        item = s.model_dump(exclude_none=True)
-        if s.path in current_key_by_path:
-            item["param"] = current_key_by_path[s.path]
-        selects.append(item)
-        if s.path:
-            select_paths.add(s.path)
+    for item in selects:
+        path = str(item.get("path") or "")
+        if path:
+            select_paths.add(path)
     for p in step.params:
         if (
             p.category == "user_param"
             and p.source_kind in {"page_enum", "static_enum", "manual_enum", "form_option"}
             and p.enum_options
+            and not (
+                _param_field_manually_edited(p, "type")
+                and p.type not in _ENUM_PARAM_TYPES
+            )
             and p.path not in select_paths
         ):
             selects.append({
@@ -11493,9 +11790,68 @@ def _generated_review_items(spec: FlowSpec) -> list[ReviewItem]:
     return list(deduped.values())
 
 
+def _legacy_fact_check_is_grounded(spec: FlowSpec, step: FlowStep, fact_check: dict) -> bool:
+    """Revalidate persisted checks against immutable request facts."""
+    if not fact_check or (step.method or "").upper() not in {"POST", "PUT", "PATCH"}:
+        return False
+    facts = list((spec.request_facts or RequestFacts()).requests or [])
+    if not facts:
+        return False
+    meta = step.source_meta or {}
+    write_id = str(meta.get("request_id") or "")
+    write_seq = _request_sequence_value(meta.get("sequence", meta.get("request_index")))
+    write_fact = next((fact for fact in facts if write_id and fact.request_id == write_id), None)
+    if write_fact is None and write_seq is not None:
+        write_fact = next((fact for fact in facts if _request_sequence_value(fact.sequence) == write_seq), None)
+    if write_fact is None:
+        return False
+    write_seq = _request_sequence_value(write_fact.sequence)
+    if write_seq is None:
+        return False
+
+    endpoint_path = _request_path({"url": str(fact_check.get("endpoint") or "")})
+    read_facts = [
+        fact for fact in facts
+        if _request_path({"url": fact.url or fact.path}) == endpoint_path
+        and (_request_sequence_value(fact.sequence) or -1) > write_seq
+        and str(((spec.request_facts.analysis or {}).get(fact.request_id) or RequestAnalysis()).role) == "business_get"
+    ]
+    if len(read_facts) != 1:
+        return False
+    read_fact = read_facts[0]
+    write_tx = str(getattr(write_fact, "trigger_transaction_id", "") or "")
+    read_tx = str(getattr(read_fact, "trigger_transaction_id", "") or "")
+    if not (
+        (write_tx and read_tx and write_tx == read_tx)
+        or (_fact_path_tokens(write_fact.url or write_fact.path) & _fact_path_tokens(read_fact.url or read_fact.path))
+    ):
+        return False
+
+    param_name = str(fact_check.get("param") or "")
+    param = next((item for item in step.params if item.key == param_name), None)
+    value = (step.sample_inputs or {}).get(param_name)
+    if value in (None, "") and param is not None:
+        value = param.value
+    if param is None or value in (None, ""):
+        return False
+    match_field = str(fact_check.get("match_field") or "")
+    matches = [
+        item for item in (as_list_payload(read_fact.response_json) or [])
+        if isinstance(item, dict) and match_field in item and str(item.get(match_field)) == str(value)
+    ]
+    return len(matches) == 1
+
+
+def _prune_invalid_fact_checks(spec: FlowSpec) -> None:
+    for step in spec.steps:
+        if step.fact_check and not _legacy_fact_check_is_grounded(spec, step, step.fact_check):
+            step.fact_check = None
+
+
 def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
     """Canonicalize the current workbench state without invoking the Pi Agent."""
     current = sync_flow_spec_models(spec.model_copy(deep=True), prefer_request_facts=False)
+    _prune_invalid_fact_checks(current)
     _canonicalize_public_capability_identities(current)
     _normalize_capability_references(current)
     current = _ensure_capability_explanations(
@@ -12838,6 +13194,12 @@ def _hydrate_select_source_contract(spec: FlowSpec, binding: SelectBinding) -> N
     # selected/reselected. Runtime execution may legitimately return no rows;
     # in that case an empty snapshot is authoritative rather than an error.
     items = as_list_payload(fact.response_json) or []
+    if binding.category_key and binding.category_value is not None:
+        items = [
+            item for item in items
+            if isinstance(item, dict)
+            and str(item.get(binding.category_key)) == str(binding.category_value)
+        ]
     if not items:
         binding.options = []
         binding.option_map = None
@@ -13745,6 +14107,27 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                         step.selects = [SelectBinding.model_validate(x) for x in (value or [])]
                         for binding in step.selects:
                             _hydrate_select_source_contract(new_spec, binding)
+                            if (
+                                actor == "user"
+                                and binding.enum_confirmed is None
+                                and (
+                                    (
+                                        binding.source_url
+                                        and binding.value_key
+                                        and binding.label_key
+                                        and (binding.options or binding.option_map)
+                                    )
+                                    or (
+                                        not binding.source_url
+                                        and binding.options
+                                        and len(_enum_option_map_from_options(binding.options))
+                                        == len(binding.options)
+                                    )
+                                )
+                            ):
+                                # A complete binding explicitly saved by the
+                                # operator is a confirmation, not a model guess.
+                                binding.enum_confirmed = True
                     except ValidationError as e:
                         raise ValueError(f"invalid selects data: {e}")
                 elif field == "identity":

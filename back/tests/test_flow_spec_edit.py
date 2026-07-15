@@ -855,8 +855,11 @@ def test_no_response_final_response_mapping_builds_consistent_object_output_cont
     api_request, errors = flow_spec_to_api_request(prepared)
 
     assert errors == []
-    assert capability.output_schema["properties"] == {"result": {"type": "object"}}
-    assert [(field.key, field.type) for field in capability.outputs] == [("result", "object")]
+    assert capability.output_schema["properties"] == {"result": {
+        "description": "接口原始响应；录制未捕获可推导的响应结构",
+        "x-dano-untyped-response": True,
+    }}
+    assert [(field.key, field.type) for field in capability.outputs] == [("result", "unknown")]
     assert api_request is not None
     assert collect_capability_findings(api_request) == []
 
@@ -1828,6 +1831,12 @@ def test_edit_key_syncs_label_select_and_exported_api_request():
             value_key="id",
             label_key="name",
             id_path="form.systemId",
+            options=[
+                {"label": "系统A", "value": "id-a"},
+                {"label": "系统B", "value": "id-b"},
+            ],
+            option_map={"系统A": "id-a", "系统B": "id-b"},
+            enum_confirmed=True,
         )],
         sample_inputs={"oldName": "系统A"},
     )
@@ -2221,8 +2230,8 @@ def test_automated_add_cannot_claim_manual_param_ownership(actor):
 
     assert param.locked is False
     assert not any(item.get("source") == "manual_edit" for item in param.evidence)
-    # With no forged manual ownership, normal generated pagination inference is allowed.
-    assert (param.category, param.source_kind) == ("system_const", "constant")
+    # Pagination has a safe default but remains caller-overridable.
+    assert (param.category, param.source_kind) == ("user_param", "user_input")
 
 
 def test_remove_param():
@@ -2555,10 +2564,14 @@ def test_saved_page_enum_repairs_internal_type_category_and_source_on_sync():
         request_facts=RequestFacts(option_sources=[{
             "kind": "page_enum_options",
             "options": {
-                "房间等级": {
-                    "field_key": "房间等级",
-                    "field_aliases": ["roomLevel"],
-                    "selected": "豪华",
+                    "房间等级": {
+                        "field_key": "房间等级",
+                        "field_aliases": ["roomLevel"],
+                        "control_kind": "select",
+                        "enum_source": "dom",
+                        "mapping_complete": True,
+                        "selected_label": "豪华",
+                        "selected_value": 3,
                     "options": [
                         {"label": "普通", "value": 1},
                         {"label": "豪华", "value": 3},
@@ -3800,8 +3813,15 @@ def test_page_enum_truth_is_not_overwritten_by_business_record_list():
         request_facts=RequestFacts(option_sources=[{
             "kind": "page_enum_options",
             "options": {
-                "type": {
-                    "options": [
+                    "type": {
+                        "field_key": "type",
+                        "field_aliases": ["type"],
+                        "control_kind": "select",
+                        "enum_source": "dom",
+                        "mapping_complete": True,
+                        "selected_label": "婚假",
+                        "selected_value": 3,
+                        "options": [
                         {"label": "病假", "value": 2},
                         {"label": "事假", "value": 1},
                         {"label": "婚假", "value": 3},
@@ -5221,6 +5241,7 @@ def test_batch_input_schema_requires_entries_and_keeps_only_shared_fields_at_top
             required=True,
             category="user_param",
             source_kind="user_input",
+            evidence=[{"kind": "page_required", "required": True}],
         )],
         source_meta={"role": "read_context", "control_preflight_for_write": True},
     )
@@ -5820,6 +5841,60 @@ def test_change_enum_source_only_preserves_type_and_recorded_option_evidence():
     assert param.enum_value_map == {"测试": "7"}
     assert len(edited.steps[0].selects) == 1
     assert "枚举字段" not in "\n".join(validate_flow_spec(edited)["errors"])
+    api_request, errors = flow_spec_to_api_request(edited)
+    assert errors == []
+    assert api_request["selects"] == []
+
+
+def test_get_query_export_keeps_confirmed_runtime_enum_binding():
+    spec = _enum_policy_spec(ParamField(
+        path="query.processStatus", key="流程状态", value="1", type="string", wire_type="string",
+        category="user_param", source_kind="api_option",
+        enum_options=[
+            {"label": "未提交", "value": "0"},
+            {"label": "审批中", "value": "1"},
+        ],
+        enum_value_map={"未提交": "0", "审批中": "1"},
+        source={"kind": "api_option", "source_url": "/api/dict", "enum_confirmed": True},
+    ))
+    spec.steps[0].selects = [SelectBinding(
+        param="流程状态", path="query.processStatus", source_url="/api/dict",
+        value_key="value", label_key="label", category_key="dictType",
+        category_value="process_status", enum_source="api", enum_confirmed=True,
+        options=[
+            {"label": "未提交", "value": "0"},
+            {"label": "审批中", "value": "1"},
+        ],
+        option_map={"未提交": "0", "审批中": "1"},
+    )]
+
+    api_request, errors = flow_spec_to_api_request(spec)
+
+    assert errors == []
+    assert api_request["method"] == "GET"
+    assert api_request["selects"] == [{
+        "param": "流程状态",
+        "path": "query.processStatus",
+        "source_url": "/api/dict",
+        "source_method": "GET",
+        "source_headers": {},
+        "source_content_type": "",
+        "source_role": "",
+        "source_request_id": "",
+        "value_key": "value",
+        "label_key": "label",
+        "category_key": "dictType",
+        "category_value": "process_status",
+        "multi": False,
+        "count": 0,
+        "options": [
+            {"label": "未提交", "value": "0"},
+            {"label": "审批中", "value": "1"},
+        ],
+        "option_map": {"未提交": "0", "审批中": "1"},
+        "enum_source": "api",
+        "enum_confirmed": True,
+    }]
 
 
 def test_executable_partial_page_enum_is_only_a_generation_suggestion():
