@@ -1685,7 +1685,9 @@
     height: 40px;
     border: 0;
     border-radius: 999px;
-    background: color-mix(in srgb, var(--panel) 92%, transparent);
+    background: color-mix(in srgb, var(--panel) 65%, transparent);
+    -webkit-backdrop-filter: blur(2px);
+    backdrop-filter: blur(2px);
     color: var(--text);
     box-shadow:
       0 0 0 1px color-mix(in srgb, var(--border) 70%, transparent),
@@ -1703,7 +1705,7 @@
   }
 
   .scroll-bottom-button:hover {
-    background: var(--panel-2);
+    background: color-mix(in srgb, var(--panel-2) 75%, transparent);
     box-shadow:
       0 0 0 1px color-mix(in srgb, var(--border-strong) 80%, transparent),
       var(--shadow-floating);
@@ -2462,6 +2464,18 @@
     .chat-transcript {
       padding: 42px 16px 48px;
       gap: 6px;
+    }
+
+    .scroll-bottom-overlay {
+      bottom: 0;
+    }
+
+    .scroll-bottom-button {
+      transform: translateY(calc(1rem - 0.2rem));
+    }
+
+    .scroll-bottom-button:active {
+      transform: translateY(calc(1rem - 0.2rem)) scale(0.96);
     }
   }
 
