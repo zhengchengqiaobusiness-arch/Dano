@@ -38,6 +38,25 @@ import {
   DownOutlined,
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
+import type { RecordingSessionController } from "../features/recording-v3/hooks/useRecordingSession";
+import { useRecordingChannel } from "../features/recording-v3/hooks/useRecordingChannel";
+import {
+  browserOperationScheduler,
+  OperationWatchdog,
+} from "../features/recording-v3/state/operationWatchdog";
+import {
+  capabilityAnchorId,
+  opaqueV3Identity,
+  stableCapabilityRef,
+  stableFieldKey,
+  stableIssueKey,
+  stableMappingKey,
+  stablePreconditionKey,
+  stableRelationKey,
+  stableRequestKey,
+  stableRequestMutationTarget,
+  stableStepRef,
+} from "../features/recording-v3/state/stableIdentity";
 
 interface RecStep { op: string; locator?: string; field?: string; value?: string; required?: boolean; options?: any[] }
 interface RecReq { method: string; url: string; has_body?: boolean; json?: boolean }
@@ -54,8 +73,14 @@ interface RecSelect {
 }
 interface RecIdentity { path: string; source: string }
 
+type RecordingBusyOperation = "capture" | "analysis" | "semantic";
+const CAPTURE_OPERATION_TIMEOUT_MS = 2 * 60 * 1000;
+const ANALYSIS_OPERATION_TIMEOUT_MS = 10 * 60 * 1000;
+
 interface FlowParam {
   path: string; key: string; label?: string; value: string; type: string; required: boolean; name_source?: string;
+  field_uuid?: string; field_id?: string; lineage_id?: string; aliases?: string[];
+  decisions?: Record<string, unknown>; required_contract?: Record<string, boolean>;
   page_required?: boolean | null; required_source?: string;
   category?: string; source_kind?: string; source?: any; reason?: string;
   exposed_to_user?: boolean; need_human_confirm?: boolean; editable?: boolean; confidence?: number;
@@ -73,7 +98,7 @@ interface FlowSelectBinding {
   id_path?: string | null;
 }
 interface FlowStepData {
-  step_id: string; name: string; method: string; url: string; path: string; risk_level: string;
+  step_id: string; step_uuid?: string; name: string; method: string; url: string; path: string; risk_level: string;
   params: FlowParam[]; selects?: FlowSelectBinding[]; identity?: any[];
   source_meta?: { role?: string; [k: string]: any }; semantic_role?: string;
   content_type?: string; body_source?: string; backup_body_source?: string; headers?: Record<string, string>;
@@ -81,11 +106,12 @@ interface FlowStepData {
 }
 interface FlowLinkData {
   link_id: string; source_step_id: string; source_path: string;
-  target_step_id: string; target_path: string;
+  source_step_uuid?: string; target_step_id: string; target_step_uuid?: string; target_path: string;
   confirmed?: boolean; confidence?: number; param_name?: string | null; reason?: string;
 }
 interface FlowCapabilityFieldData {
-  field_id?: string; scope?: string; display_name?: string; path?: string; key?: string; type?: string;
+  field_uuid?: string; field_id?: string; lineage_id?: string; aliases?: string[];
+  scope?: string; display_name?: string; path?: string; key?: string; type?: string;
   required?: boolean; request_id?: string; request_index?: number | string | null; step_id?: string;
   source_kind?: string; source?: any; exposed_to_caller?: boolean; confidence?: number;
   confirmed?: boolean; locked?: boolean; evidence?: any[];
@@ -95,7 +121,7 @@ interface FlowCapabilityDependencyData {
   confidence?: number; confirmed?: boolean; locked?: boolean; reason?: string; evidence?: Record<string, any>;
 }
 interface FlowCapabilityData {
-  name?: string; title?: string; intent?: string; kind?: string; capability_id?: string;
+  name?: string; title?: string; intent?: string; kind?: string; capability_uuid?: string; capability_id?: string;
   request_refs?: FlowCapabilityRequestRefData[];
   step_ids?: string[];
   fields?: FlowCapabilityFieldData[];
@@ -117,23 +143,25 @@ interface FlowCapabilityData {
 }
 type CapabilityUsage = "execute" | "option_source" | "fact_check" | "preflight";
 interface FlowCapabilityRequestRefData {
-  request_id?: string; request_index?: number | string | null; step_id?: string;
+  request_id?: string; observation_id?: string; request_definition_id?: string;
+  request_index?: number | string | null; step_id?: string; step_uuid?: string;
   role?: string; method?: string; path?: string; sequence?: number | string | null;
   confidence?: number; reason?: string; usage?: CapabilityUsage; origin?: string;
   pinned?: boolean; confirmed?: boolean;
 }
 interface FlowCapabilityRelationData {
-  relation_id?: string; type?: string; mode?: string;
+  relation_uuid?: string; relation_id?: string; type?: string; mode?: string;
   from_capability?: string; from_output?: string;
   to_capability?: string; to_input?: string;
   transform_owner?: string; requires_user_confirmation?: boolean;
   confidence?: number; confirmed?: boolean; reason?: string;
 }
 interface ReviewItemData {
-  id: string; type: string; severity: string; title: string; reason: string;
+  id: string; issue_id?: string; fingerprint?: string; type: string; severity: string; title: string; reason: string;
   current_guess?: string; suggested_action?: string; resolved?: boolean; confidence?: number;
   target?: { kind?: string; step_id?: string; path?: string; link_id?: string; [k: string]: any };
   llm_suggestions?: Array<{
+    suggestion_id?: string;
     action: "bind_previous_response" | "set_runtime_source" | "ask_human";
     confidence?: number; reason?: string;
     source_step_id?: string; source_path?: string;
@@ -145,7 +173,8 @@ interface RequestRoleData {
   reason: string; confidence?: number;
 }
 interface RequestGraphEntry {
-  request_index?: number | string | null; request_id?: string; method?: string; url?: string; path?: string; role?: string;
+  request_index?: number | string | null; request_id?: string; observation_id?: string; request_definition_id?: string;
+  method?: string; url?: string; path?: string; role?: string;
   keep?: boolean; reason?: string; confidence?: number; response_status?: number | null;
   response_json?: any; response_schema?: any; evidence?: any;
   page_id?: string | null; frame_id?: string | null; sequence?: number | string | null;
@@ -186,6 +215,7 @@ interface FlowSpecData {
     };
     versions?: Array<{ version: number; action: string; reason?: string; created_at?: string; summary?: any }>;
     current_version?: number;
+    current_fingerprint?: string;
   };
 }
 interface FlowCheckReport {
@@ -207,6 +237,7 @@ interface FlowCheckReport {
     unused_high_confidence_requests?: Array<Record<string, any>>;
   };
   issue_groups?: Record<string, Array<{
+    id?: string; issue_id?: string;
     severity?: string; message?: string; source?: string; target?: Record<string, any>;
     audience?: "operator" | "internal"; actionable?: boolean; blocking?: boolean; auto_fixable?: boolean;
   }>>;
@@ -214,7 +245,8 @@ interface FlowCheckReport {
 interface RecResult {
   ok?: boolean; action?: string; risk_level?: string; mode?: string; reason?: string;
   status?: string; warnings?: string[]; review_notes?: string[]; clarifications?: string[];
-  recording_mode?: string; verification_status?: string; verification_basis?: string; skill_id?: string; asset_id?: string;
+  recording_mode?: string; verification_status?: string; publication_status?: string;
+  verification_basis?: string; skill_id?: string; asset_id?: string;
   api?: { method?: string; path?: string; params?: string[] };
   check_report?: FlowCheckReport;
 }
@@ -222,6 +254,9 @@ type RecordingMode = "real_submit" | "record_only";
 
 const STATUS_META: Record<string, { color: string; label: string }> = {
   verified: { color: "success", label: "已验证" },
+  unverified: { color: "warning", label: "未验证" },
+  published_verified: { color: "success", label: "已发布并验证" },
+  published_unverified: { color: "warning", label: "已发布但未验证" },
   partially_verified: { color: "warning", label: "部分验证" },
   needs_clarification: { color: "warning", label: "待澄清" },
   unsupported: { color: "default", label: "不支持" },
@@ -528,17 +563,21 @@ function EditableText({
   placeholder?: string;
 }) {
   const [local, setLocal] = useState(value || "");
-  useEffect(() => setLocal(value || ""), [value]);
+  const dirtyRef = useRef(false);
+  useEffect(() => {
+    if (!dirtyRef.current) setLocal(value || "");
+  }, [value]);
   function save() {
     const next = local.trim();
     if (next !== (value || "")) onSave(next);
+    dirtyRef.current = false;
   }
   return (
     <Input
       value={local}
       placeholder={placeholder}
       style={{ width }}
-      onChange={(e) => setLocal(e.target.value)}
+      onChange={(e) => { dirtyRef.current = true; setLocal(e.target.value); }}
       onBlur={save}
       onPressEnter={(e) => e.currentTarget.blur()}
     />
@@ -598,10 +637,14 @@ function EnumValueInput({
 }) {
   const [local, setLocal] = useState(value || "");
   const listIdRef = useRef(`enum_${Math.random().toString(36).slice(2, 10)}`);
-  useEffect(() => setLocal(value || ""), [value]);
+  const dirtyRef = useRef(false);
+  useEffect(() => {
+    if (!dirtyRef.current) setLocal(value || "");
+  }, [value]);
   function save() {
     const next = local.trim();
     if (next !== (value || "")) onSave(next);
+    dirtyRef.current = false;
   }
   return (
     <>
@@ -610,7 +653,7 @@ function EnumValueInput({
         list={listIdRef.current}
         placeholder="选择或输入枚举值"
         style={{ width }}
-        onChange={(e) => setLocal(e.target.value)}
+        onChange={(e) => { dirtyRef.current = true; setLocal(e.target.value); }}
         onBlur={save}
         onPressEnter={(e) => e.currentTarget.blur()}
       />
@@ -635,10 +678,14 @@ function EditableComboInput({
 }) {
   const [local, setLocal] = useState(value || "");
   const listIdRef = useRef(`edit_combo_${Math.random().toString(36).slice(2, 10)}`);
-  useEffect(() => setLocal(value || ""), [value]);
+  const dirtyRef = useRef(false);
+  useEffect(() => {
+    if (!dirtyRef.current) setLocal(value || "");
+  }, [value]);
   function save() {
     const next = local.trim();
     if (next !== (value || "")) onSave(next);
+    dirtyRef.current = false;
   }
   return (
     <>
@@ -647,7 +694,7 @@ function EditableComboInput({
         list={listIdRef.current}
         placeholder={placeholder}
         style={{ width }}
-        onChange={(e) => setLocal(e.target.value)}
+        onChange={(e) => { dirtyRef.current = true; setLocal(e.target.value); }}
         onBlur={save}
         onPressEnter={(e) => e.currentTarget.blur()}
       />
@@ -669,16 +716,20 @@ function EditableTextArea({
   placeholder?: string;
 }) {
   const [local, setLocal] = useState(value || "");
-  useEffect(() => setLocal(value || ""), [value]);
+  const dirtyRef = useRef(false);
+  useEffect(() => {
+    if (!dirtyRef.current) setLocal(value || "");
+  }, [value]);
   function save() {
     if (local !== (value || "")) onSave(local);
+    dirtyRef.current = false;
   }
   return (
     <Input.TextArea
       rows={rows}
       value={local}
       placeholder={placeholder}
-      onChange={(e) => setLocal(e.target.value)}
+      onChange={(e) => { dirtyRef.current = true; setLocal(e.target.value); }}
       onBlur={save}
     />
   );
@@ -746,9 +797,14 @@ function requestGraphSignature(req: RequestGraphEntry) {
   return `${(req.method || "GET").toUpperCase()} ${requestGraphPath(req)}`;
 }
 function requestGraphKey(req: RequestGraphEntry) {
-  if (req.request_id) return `id:${req.request_id}`;
-  if (req.request_index != null) return `idx:${String(req.request_index)}`;
-  return `sig:${requestGraphSignature(req)}`;
+  return stableRequestKey(req);
+}
+function explicitRequestIdentityKeys(req: RequestGraphEntry | Record<string, any>) {
+  const keys: string[] = [];
+  if (req.request_id) keys.push(stableRequestKey({ request_id: String(req.request_id) }));
+  if (req.observation_id) keys.push(stableRequestKey({ observation_id: String(req.observation_id) }));
+  if (req.request_definition_id) keys.push(stableRequestKey({ request_definition_id: String(req.request_definition_id) }));
+  return keys;
 }
 function requestQueryValues(req: RequestGraphEntry) {
   if (req.query && Object.keys(req.query).length) return req.query;
@@ -827,15 +883,12 @@ function allCapturedRequests(spec?: FlowSpecData | null) {
   const stepSigs = new Set((spec?.steps || []).map((s) => `${(s.method || "").toUpperCase()} ${purePath(s.path || s.url || "")}`));
   const stepReqKeys = new Set((spec?.steps || []).flatMap((s) => {
     const meta = s.source_meta || {};
-    const out: string[] = [];
-    if (meta.request_id) out.push(`id:${meta.request_id}`);
-    if (meta.request_index != null) out.push(`idx:${String(meta.request_index)}`);
-    return out;
+    return explicitRequestIdentityKeys(meta);
   }));
   const selectedRank = (req: RequestGraphEntry) => (
     selectedSigs.has(requestGraphSignature(req)) ||
     stepSigs.has(`${(req.method || "").toUpperCase()} ${purePath(req.path || req.url || "")}`) ||
-    stepReqKeys.has(requestGraphKey(req))
+    explicitRequestIdentityKeys(req).some((key) => stepReqKeys.has(key))
   ) ? 0 : 1;
   const sorted = source
     .filter(isApiLikeRequest)
@@ -922,12 +975,12 @@ function capabilityUsageLabel(usage?: string) {
 }
 function capturedRequestSteps(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
   const signature = requestGraphSignature(req);
+  const requestKeys = new Set(explicitRequestIdentityKeys(req));
   const exact = (spec?.steps || []).filter((step) => {
     const meta = step.source_meta || {};
-    return (req.request_id && String(meta.request_id || "") === String(req.request_id)) ||
-      (req.request_index != null && String(meta.request_index ?? "") === String(req.request_index));
+    return explicitRequestIdentityKeys(meta).some((key) => requestKeys.has(key));
   });
-  if (req.request_id || req.request_index != null) return exact;
+  if (requestKeys.size) return exact;
   return (spec?.steps || []).filter((step) => {
     return stepRequestSignature(step) === signature;
   });
@@ -936,9 +989,12 @@ function capturedRequestCapabilityNames(spec: FlowSpecData | null | undefined, r
   const requestStepIds = new Set(capturedRequestSteps(spec, req).map((step) => step.step_id));
   const names = (spec?.capabilities || [])
     .filter((cap) => capabilityActualStepIds(cap).some((stepId) => requestStepIds.has(stepId)))
-    .map((cap) => String(cap.title || cap.name || cap.capability_id || "").trim())
-    .filter(Boolean);
-  return Array.from(new Set(names));
+    .map((cap) => ({
+      key: stableCapabilityRef(cap),
+      label: String(cap.title || cap.name || cap.capability_id || "").trim(),
+    }))
+    .filter((item) => item.label);
+  return Array.from(new Map(names.map((item) => [item.key, item])).values());
 }
 function isCapturedRequestFieldCandidate(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
   if (req.role === "read_option") return true;
@@ -1002,6 +1058,8 @@ function schemaFieldRows(schema?: Record<string, any>) {
     .filter(([, spec]) => spec && typeof spec === "object")
     .map(([name, spec]) => ({
       name,
+      fieldUuid: String((spec as any)["x-dano-field-uuid"] || (spec as any).field_uuid || ""),
+      identitySource: spec as Record<string, any>,
       businessType: schemaBusinessType(spec as Record<string, any>),
       wireType: schemaWireType(spec as Record<string, any>),
       description: String((spec as any).description || (spec as any).title || ""),
@@ -1063,19 +1121,21 @@ function compactJson(value: any, maxLen = 160) {
   return raw.length > maxLen ? `${raw.slice(0, maxLen)}...` : raw;
 }
 
-export default function PageRecorder({ tenant, subsystem, baseUrl, storageState }: {
+export default function PageRecorder({ tenant, subsystem, baseUrl, storageState, recordingSession }: {
   tenant: string; subsystem: string; baseUrl: string; storageState: string;
+  recordingSession?: RecordingSessionController;
 }) {
   const nav = useNavigate();
-  const wsRef = useRef<WebSocket | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const kbRef = useRef<HTMLInputElement | null>(null);
   const consoleBufRef = useRef<any[]>([]);
   const latestFrameRef = useRef<{ seq: number; src: string } | null>(null);
   const frameRafRef = useRef<number | null>(null);
   const renderedFrameSeqRef = useRef(0);
-  const wsAliveRef = useRef(false);                                // FC2 修复:跟踪 WS 存活,避免 send 失败时反复弹错
   const isComposingRef = useRef(false);                           // FH2 修复:中文输入法拼写中标记,防 onKbInput 误发中间字符
+  const piRetryNeededRef = useRef(false);
+  const piRetryInFlightRef = useRef(false);
+  const missingStepIdentityRef = useRef(new Map<string, { step_uuid?: string }>());
 
   const [phase, setPhase] = useState<"idle" | "recording" | "publishing" | "done">("idle");
   const phaseRef = useRef(phase);                                  // FC1 修复:同步最新 phase,ws.onclose 闭包不再 stale
@@ -1096,9 +1156,68 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [identity, setIdentity] = useState<Record<string, RecIdentity>>({});
   const [action, setAction] = useState("submit_form");
   const [title, setTitle] = useState("");
+  const actionDirtyRef = useRef(false);
+  const recordingTitleDirtyRef = useRef(false);
+  const recordingTitleValueRef = useRef(title);
   const [result, setResult] = useState<RecResult | null>(null);
   const [recordingMode, setRecordingMode] = useState<RecordingMode>("real_submit");
   const [err, setErr] = useState("");
+  const [captureBusy, setCaptureBusy] = useState(false);
+  const [analysisBusy, setAnalysisBusy] = useState(false);
+  const [publishBusy, setPublishBusy] = useState(false);
+  const analysisBusyRef = useRef(analysisBusy);
+  const publishBusyRef = useRef(publishBusy);
+  const operationTimeoutHandlerRef = useRef<(operation: RecordingBusyOperation) => void>(() => undefined);
+  const operationWatchdogRef = useRef<OperationWatchdog<RecordingBusyOperation, number> | null>(null);
+  if (!operationWatchdogRef.current) {
+    operationWatchdogRef.current = new OperationWatchdog(
+      browserOperationScheduler,
+      (operation) => operationTimeoutHandlerRef.current(operation),
+    );
+  }
+
+  function transitionPhase(next: "idle" | "recording" | "publishing" | "done") {
+    phaseRef.current = next;
+    setPhase(next);
+  }
+  function updateCaptureBusy(next: boolean) {
+    setCaptureBusy(next);
+  }
+  function updateAnalysisBusy(next: boolean) {
+    analysisBusyRef.current = next;
+    setAnalysisBusy(next);
+  }
+  function updatePublishBusy(next: boolean) {
+    publishBusyRef.current = next;
+    setPublishBusy(next);
+  }
+  function clearOperationWatchdog(operation: RecordingBusyOperation) {
+    operationWatchdogRef.current?.clear(operation);
+  }
+  function ensureOperationWatchdog(operation: RecordingBusyOperation) {
+    if (operationWatchdogRef.current?.isArmed(operation)) return;
+    operationWatchdogRef.current?.arm(
+      operation,
+      operation === "capture" ? CAPTURE_OPERATION_TIMEOUT_MS : ANALYSIS_OPERATION_TIMEOUT_MS,
+    );
+  }
+  operationTimeoutHandlerRef.current = (operation) => {
+    if (operation === "capture") updateCaptureBusy(false);
+    else if (operation === "analysis") updateAnalysisBusy(false);
+    else {
+      setNamingBusy(false);
+      setDescBusy(false);
+      setLlmBusy(false);
+    }
+    const detail = operation === "capture"
+      ? "重新抓取超过2分钟未确认，已解除等待状态"
+      : operation === "analysis"
+        ? "分析超过10分钟未完成，已解除等待状态；可查询状态后重试"
+        : "语义任务超过10分钟未完成，已解除等待状态；可稍后重试";
+    setErr(detail);
+    if (!publishBusyRef.current) transitionPhase("recording");
+    message.error(detail);
+  };
 
   const [flowSpec, setFlowSpec] = useState<FlowSpecData | null>(null);
   const flowSpecRef = useRef<FlowSpecData | null>(null);
@@ -1106,8 +1225,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [checkReport, setCheckReport] = useState<FlowCheckReport | null>(null);
   const [titleDraft, setTitleDraft] = useState("");               // FC3 修复:标题本地草稿,WS 推送不再即时覆盖编辑
   const [descDraft, setDescDraft] = useState("");                 // FC3 修复:说明本地草稿
-  useEffect(() => { setTitleDraft(flowSpec?.title || ""); }, [flowSpec?.title]);
-  useEffect(() => { setDescDraft(flowSpec?.business_description || ""); }, [flowSpec?.business_description]);
+  const titleDirtyRef = useRef(false);
+  const descDirtyRef = useRef(false);
+  useEffect(() => {
+    if (!titleDirtyRef.current) setTitleDraft(flowSpec?.title || "");
+  }, [flowSpec?.title]);
+  useEffect(() => {
+    if (!descDirtyRef.current) setDescDraft(flowSpec?.business_description || "");
+  }, [flowSpec?.business_description]);
   // FH6 修复:JSON 面板 — 仅在 jsonDraft 未被本地编辑时才跟随 flowSpec 同步;否则用户输入会被 WS 推送覆盖
   const jsonDirtyRef = useRef(false);
   useEffect(() => {
@@ -1119,10 +1244,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [newStep, setNewStep] = useState({ method: "POST", path: "/api/", name: "", risk_level: "L3", role: "business_write" });
   const [newStepRequestKey, setNewStepRequestKey] = useState("");
   const [newParamRequestKey, setNewParamRequestKey] = useState("");
-  const [capabilityAddValue, setCapabilityAddValue] = useState<Record<number, string>>({});
-  const [capabilityAddUsage, setCapabilityAddUsage] = useState<Record<number, CapabilityUsage | "">>({});
+  const [capabilityAddValue, setCapabilityAddValue] = useState<Record<string, string>>({});
+  const [capabilityAddUsage, setCapabilityAddUsage] = useState<Record<string, CapabilityUsage | "">>({});
   const pendingCapabilityMembershipRef = useRef<Array<{
-    capability: string; requestId?: string; requestIndex?: number | string | null; usage: CapabilityUsage;
+    capability: string; requestKey: string;
+    requestTarget: ReturnType<typeof stableRequestMutationTarget>;
+    usage: CapabilityUsage;
   }>>([]);
   const [newParam, setNewParam] = useState({ step_id: "", path: "", key: "", type: "string", category: "user_param" });
   const [newLink, setNewLink] = useState({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
@@ -1136,13 +1263,58 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [llmBusy, setLlmBusy] = useState(false);
   const [orchestrateBusy, setOrchestrateBusy] = useState(false);
   const [autoFixBusy, setAutoFixBusy] = useState(false);
+  const optimizationBusy = orchestrateBusy || autoFixBusy || namingBusy || descBusy || llmBusy;
   const flowOperationRef = useRef<{ mode: "plan" | "repair"; previousUpdatedAt?: string } | null>(null);
   const flowOperationTimerRef = useRef<number | null>(null);
-  const flowMutationQueueRef = useRef<any[]>([]);
-  const flowMutationInFlightRef = useRef<any | null>(null);
-  const flowMutationSeqRef = useRef(0);
-  const afterFlowSyncRef = useRef<(() => void) | null>(null);
   const [activeFlowTab, setActiveFlowTab] = useState("abilities");
+
+  const channel = useRecordingChannel(recordingSession, {
+    onEvent: handleRecordingEvent,
+    onSnapshot: restoreSessionSnapshot,
+    onResumeInput: (input) => {
+      if (!input) return;
+      setStartUrl(input.start_url);
+      setRecordingMode(input.recording_mode);
+    },
+    onResumeReady: () => transitionPhase(publishBusyRef.current ? "publishing" : "recording"),
+    onOpen: () => setErr(""),
+    onDisconnected: (willReconnect) => {
+      operationWatchdogRef.current?.clearAll();
+      updateCaptureBusy(false);
+      updateAnalysisBusy(false);
+      updatePublishBusy(false);
+      clearFlowOperation();
+      setNamingBusy(false);
+      setDescBusy(false);
+      setLlmBusy(false);
+      if (phaseRef.current === "recording" || phaseRef.current === "publishing") {
+        transitionPhase(willReconnect ? "recording" : "idle");
+      }
+    },
+    onConnectionError: (detail, terminal) => {
+      setErr(detail);
+      if (!terminal) return;
+      operationWatchdogRef.current?.clearAll();
+      updateCaptureBusy(false);
+      updateAnalysisBusy(false);
+      updatePublishBusy(false);
+      clearFlowOperation();
+      setNamingBusy(false);
+      setDescBusy(false);
+      setLlmBusy(false);
+      transitionPhase("idle");
+    },
+    onOperationTimeout: (operation, detail) => {
+      if (operation !== "publish") return;
+      updatePublishBusy(false);
+      setErr(detail);
+      setResult({ ok: false, reason: detail });
+      transitionPhase("recording");
+      message.error(detail);
+    },
+  });
+
+  useEffect(() => () => operationWatchdogRef.current?.clearAll(), []);
 
   function acceptFlowSpec(fs: FlowSpecData) {
     const pending = pendingCapabilityMembershipRef.current;
@@ -1150,11 +1322,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const remaining: typeof pending = [];
     let nextSpec = fs;
     for (const item of pending) {
-      const capIdx = (nextSpec.capabilities || []).findIndex((cap, idx) => capabilityRef(cap, idx) === item.capability);
+      const capIdx = (nextSpec.capabilities || []).findIndex((cap) => stableCapabilityRef(cap) === item.capability);
       const step = (nextSpec.steps || []).find((candidate) => {
         const meta = candidate.source_meta || {};
-        return (item.requestId && String(meta.request_id || "") === item.requestId) ||
-          (item.requestIndex != null && String(meta.request_index ?? "") === String(item.requestIndex));
+        return [
+          ...explicitRequestIdentityKeys(candidate),
+          ...explicitRequestIdentityKeys(meta),
+        ].includes(item.requestKey);
       });
       const serverRef = capIdx >= 0 && step ? capabilityRequestRefForStep(nextSpec.capabilities?.[capIdx], step.step_id) : undefined;
       if (
@@ -1171,9 +1345,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         ...(cap.request_refs || []).filter((ref) => ref.step_id !== step.step_id),
         {
           ...(existingRef || {}),
-          request_id: item.requestId || existingRef?.request_id,
-          request_index: item.requestIndex ?? existingRef?.request_index,
+          ...(item.requestTarget || {}),
           step_id: step.step_id,
+          step_uuid: stableStepRef(step),
           usage: item.usage,
           origin: "manual",
           pinned: true,
@@ -1184,7 +1358,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       capabilities[capIdx] = { ...cap, request_refs: requestRefs };
       nextSpec = { ...nextSpec, capabilities };
       if (existingRef?.usage !== item.usage || existingRef?.origin !== "manual" || !existingRef?.pinned) {
-        edits.push({ op: "update_capability", capability_index: capIdx, field: "request_refs", value: requestRefs });
+        const capabilityUuid = stableCapabilityRef(cap);
+        edits.push({
+          op: "update_capability",
+          capability_uuid: capabilityUuid,
+          capability_ref: capabilityUuid,
+          field: "request_refs",
+          value: requestRefs,
+        });
       }
     }
     pendingCapabilityMembershipRef.current = remaining;
@@ -1192,14 +1373,20 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setFlowSpec(nextSpec);
     if (edits.length) send({ type: "flow_update", edits });
     const nextTitle = preferredSkillTitle(nextSpec);
-    if (nextTitle && !title.trim()) setTitle(nextTitle);
+    if (nextTitle && !recordingTitleDirtyRef.current && !recordingTitleValueRef.current.trim()) {
+      recordingTitleValueRef.current = nextTitle;
+      setTitle(nextTitle);
+    }
   }
 
   function finishFlowOperation(loop?: { mode?: string; updated_at?: string }, operation?: string) {
     const active = flowOperationRef.current;
+    const operationMode = operation === "orchestrate_flow"
+      ? "plan"
+      : operation === "auto_fix_flow" ? "repair" : operation;
     if (
       !active
-      || (operation && operation !== active.mode)
+      || (operationMode && operationMode !== active.mode)
       || (!operation && (
         loop?.mode !== active.mode
         || !loop.updated_at
@@ -1236,13 +1423,20 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     }, 120000);
   }
 
-  useEffect(() => () => {
-    // FC4 修复:仅当 phase 处于 recording/publishing 时才关 WS(避免 StrictMode 双 mount 或组件复用时误关正在用的 WS)
-    // wsRef.current 在首次 mount 时为 null(start 才会建),所以首次 cleanup 一定是 noop,无副作用
-    if (phaseRef.current === "recording" || phaseRef.current === "publishing") {
-      wsRef.current?.close();
-    }
-  }, []);
+  useEffect(() => {
+    if (!recordingSession?.state.pi.lastError) return;
+    piRetryNeededRef.current = true;
+    piRetryInFlightRef.current = false;
+    setNamingBusy(false);
+    setDescBusy(false);
+    setLlmBusy(false);
+    clearOperationWatchdog("semantic");
+    clearFlowOperation();
+  // Pi failure is a terminal state for the current optimization attempt; the
+  // deterministic/manual draft remains editable and the existing optimize
+  // button will use retry_pi on its next click.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recordingSession?.state.pi.lastError]);
 
   useEffect(() => {
     const onError = (event: ErrorEvent) => {
@@ -1295,74 +1489,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function sendRaw(obj: unknown) {
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(obj));
-      return true;
-    }
-    // FC2 修复:不再每次 send 失败都弹 error(高频 click 触发会刷屏)
-    // 统一在 ws.onclose 里通过 wsAliveRef 标记后,首次发现时弹一次提示
-    if (wsAliveRef.current) {
-      wsAliveRef.current = false;
-      message.warning("录制连接已断开，正在停止后续操作");
-    }
-    return false;
-  }
-
-  function flushFlowMutationQueue() {
-    if (flowMutationInFlightRef.current || !flowMutationQueueRef.current.length) return;
-    const next = flowMutationQueueRef.current.shift();
-    flowMutationInFlightRef.current = next;
-    if (!sendRaw(next)) {
-      flowMutationInFlightRef.current = null;
-      flowMutationQueueRef.current = [];
-      afterFlowSyncRef.current = null;
-    }
-  }
-
-  function enqueueFlowMutation(obj: any) {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return sendRaw(obj);
-    const operationId = obj.operation_id || `flow-${Date.now()}-${++flowMutationSeqRef.current}`;
-    flowMutationQueueRef.current.push({ ...obj, operation_id: operationId });
-    flushFlowMutationQueue();
-    return true;
-  }
-
-  function finishQueuedFlowMutation(operationId?: string) {
-    const active = flowMutationInFlightRef.current;
-    if (!active) return;
-    if (operationId && active.operation_id && operationId !== active.operation_id) return;
-    flowMutationInFlightRef.current = null;
-    flushFlowMutationQueue();
-    if (!flowMutationInFlightRef.current && !flowMutationQueueRef.current.length && afterFlowSyncRef.current) {
-      const callback = afterFlowSyncRef.current;
-      afterFlowSyncRef.current = null;
-      callback();
-    }
-  }
-
-  function failQueuedFlowMutation(operationId?: string) {
-    const active = flowMutationInFlightRef.current;
-    if (operationId && active?.operation_id && operationId !== active.operation_id) return;
-    flowMutationInFlightRef.current = null;
-    flowMutationQueueRef.current = [];
-    afterFlowSyncRef.current = null;
-  }
-
   function runAfterFlowSync(callback: () => void) {
-    if (!flowMutationInFlightRef.current && !flowMutationQueueRef.current.length) {
-      callback();
-      return;
+    if (channel.hasPendingFlowMutations()) {
+      message.info("正在同步最后一次工作台修改，完成后继续");
     }
-    afterFlowSyncRef.current = callback;
-    message.info("正在同步最后一次工作台修改，完成后继续");
+    channel.runAfterFlowSync(callback);
   }
 
   function send(obj: any) {
-    if (obj?.type === "flow_update" || obj?.type === "flow_replace") return enqueueFlowMutation(obj);
-    return sendRaw(obj);
+    return channel.send(obj);
   }
 
   function clearFrame() {
@@ -1399,35 +1534,78 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setCapabilityAddValue({});
     setCapabilityAddUsage({});
     pendingCapabilityMembershipRef.current = [];
+    piRetryNeededRef.current = false;
+    piRetryInFlightRef.current = false;
     setJsonDraft("");
     setJsonErr("");
     setLastServerJson("");
+    titleDirtyRef.current = false;
+    descDirtyRef.current = false;
+    jsonDirtyRef.current = false;
+    setTitleDraft("");
+    setDescDraft("");
     setActiveFlowTab("abilities");
-    flowMutationInFlightRef.current = null;
-    flowMutationQueueRef.current = [];
-    afterFlowSyncRef.current = null;
+    channel.clearFlowMutations();
     clearFlowOperation();
   }
 
-  function start() {
-    if (!tenant) { message.error("请先到「创建 / 进入租户」"); return; }
-    if (!startUrl.trim()) { message.error("请填页面地址 start_url"); return; }
-    const intercept = recordingMode === "record_only";
-    setErr(""); setResult(null); setSteps([]); setReqs([]); clearFrame(); setFields([]); setPicked({});
-    setCands([]); setSelects({}); setIdentity({}); setStepSel({}); resetEditorState();
-    wsAliveRef.current = true;                                     // FC2 修复:每次 start 重置存活标志
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/onboarding/page/record`);
-    wsRef.current = ws;
-    ws.onopen = () => send({
-      type: "start", tenant, subsystem, start_url: startUrl.trim(),
-      base_url: baseUrl.trim() || undefined,
-      storage_state: storageState.trim() || undefined,
-      intercept,
-    });
-    ws.onmessage = (ev) => {
-      let m: any; try { m = JSON.parse(ev.data); } catch { return; }
-      if (m.type === "started") setPhase("recording");
+  function handleRecordingEvent(m: any, staleRevision = false) {
+      if (staleRevision && (m.full_spec || m.flow_spec || m.report?.full_spec)) {
+        channel.runAfterFlowSync(() => send({ type: "refresh_flow_spec" }));
+      }
+      if (m.type === "started") {
+        clearOperationWatchdog("capture");
+        updateCaptureBusy(false);
+        transitionPhase(publishBusyRef.current ? "publishing" : "recording");
+      }
+      else if (m.type === "recapture_started") {
+        clearOperationWatchdog("capture");
+        updateCaptureBusy(false);
+        updateAnalysisBusy(false);
+        setSteps([]); setReqs([]); setFields([]); setPicked({}); setCands([]);
+        setSelects({}); setIdentity({}); setStepSel({}); setResult(null);
+        transitionPhase(publishBusyRef.current ? "publishing" : "recording");
+      }
+      else if (m.type === "analysis_started") {
+        ensureOperationWatchdog("analysis");
+        updateAnalysisBusy(true);
+        transitionPhase(publishBusyRef.current ? "publishing" : "recording");
+      }
+      else if (m.type === "analysis_status") {
+        const running = m.state === "running";
+        if (running) ensureOperationWatchdog("analysis");
+        else clearOperationWatchdog("analysis");
+        updateAnalysisBusy(running);
+        if (running) transitionPhase(publishBusyRef.current ? "publishing" : "recording");
+        else if (!publishBusyRef.current) transitionPhase("recording");
+      }
+      else if (m.type === "analysis_cancelled") {
+        clearOperationWatchdog("analysis");
+        updateAnalysisBusy(false);
+        transitionPhase(publishBusyRef.current ? "publishing" : "recording");
+      }
+      else if (m.type === "pi_status") {
+        const unavailable = m.available === false || m.state === "unavailable" || m.state === "failed";
+        if (unavailable) piRetryNeededRef.current = true;
+        else if (["running", "idle", "completed", "ok"].includes(String(m.state || ""))) {
+          piRetryNeededRef.current = false;
+        }
+        if (piRetryInFlightRef.current && ["idle", "completed", "ok"].includes(String(m.state || ""))) {
+          piRetryNeededRef.current = false;
+          piRetryInFlightRef.current = false;
+          clearFlowOperation();
+        }
+      }
+      else if (m.type === "deterministic_flow") {
+        const fs = m.full_spec || m.flow_spec;
+        // First analysis gets an immediate deterministic workbench. During
+        // reanalysis, keep the current manually edited revision visible until
+        // the server returns its rebased committed revision.
+        if (fs && !staleRevision && !flowSpecRef.current) {
+          acceptFlowSpec(fs);
+          if (m.check_report) setCheckReport(m.check_report);
+        }
+      }
       else if (m.type === "frame") queueFrame(Number(m.seq || 0), m.data);
       else if (m.type === "step") setSteps((s) => {
         const st = m.step;
@@ -1462,77 +1640,228 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         setCands(m.candidates || []);
         setChosenIdx(m.chosen_idx ?? 0);
         setStepSel(Object.fromEntries((m.suggested_steps || []).map((i: number) => [i, true])));
-        setPhase("recording");
+        if (!publishBusyRef.current && !analysisBusyRef.current) transitionPhase("recording");
         message.success("抓到提交请求，请核对字段和流程");
       }
       else if (m.type === "flow_spec" || m.type === "flow_spec_updated") {
-        setLlmBusy(false);
+        updateCaptureBusy(false);
+        if (m.operation === "llm_recommendations") {
+          clearOperationWatchdog("semantic");
+          setLlmBusy(false);
+        }
+        if (m.operation === "finalize" || m.operation === "reanalyze") {
+          clearOperationWatchdog("analysis");
+          updateAnalysisBusy(false);
+        }
         // 发布请求可能与最后一次字段更新响应交错到达。普通更新不能把发布中的
         // loading/状态提前重置，否则用户看到按钮闪退但后端仍在发布。
-        if (phaseRef.current !== "publishing") setPhase("recording");
+        if (!publishBusyRef.current && !analysisBusyRef.current) transitionPhase("recording");
         const fs = m.full_spec || m.flow_spec;
-        if (fs) {
+        const manualMutationResponse = m.operation === "flow_update" || m.operation === "flow_replace";
+        // Pi/background analysis may commit while the operator is editing. Only
+        // the acknowledgement for the last manual mutation may replace the
+        // optimistic draft; every unrelated snapshot waits for the serialized
+        // lane to rebase and acknowledge that draft first.
+        const preserveOptimisticEdits = staleRevision || (manualMutationResponse
+          ? channel.hasQueuedFlowMutations()
+          : channel.hasPendingFlowMutations());
+        if (fs && !preserveOptimisticEdits) {
           acceptFlowSpec(fs);
           setLastServerJson(JSON.stringify(fs));
           finishFlowOperation(fs.meta?.recording_pi_loop, m.operation);
+        } else if (fs) {
+          finishFlowOperation(fs.meta?.recording_pi_loop, m.operation);
         }
-        if (m.check_report) setCheckReport(m.check_report);
-        if (m.operation === "flow_update" || m.operation === "flow_replace") finishQueuedFlowMutation(m.operation_id);
+        if (m.check_report && !preserveOptimisticEdits) setCheckReport(m.check_report);
+        if (m.operation === "flow_update" || m.operation === "flow_replace") channel.finishFlowMutation(m.operation_id);
       }
       else if (m.type === "step_names") {
+        clearOperationWatchdog("semantic");
         setNamingBusy(false);
-        if (m.full_spec) { acceptFlowSpec(m.full_spec); setLastServerJson(JSON.stringify(m.full_spec)); }
-        if (m.check_report) setCheckReport(m.check_report);
+        const preserveOptimisticEdits = staleRevision || channel.hasPendingFlowMutations();
+        if (m.full_spec && !preserveOptimisticEdits) { acceptFlowSpec(m.full_spec); setLastServerJson(JSON.stringify(m.full_spec)); }
+        if (m.check_report && !preserveOptimisticEdits) setCheckReport(m.check_report);
         message.success("步骤名称已刷新");
       }
       else if (m.type === "business_description") {
+        clearOperationWatchdog("semantic");
         setDescBusy(false);
-        if (m.full_spec) { acceptFlowSpec(m.full_spec); setLastServerJson(JSON.stringify(m.full_spec)); }
-        else if (m.description && flowSpec) {
-          const next = { ...flowSpec, business_description: m.description };
+        const preserveOptimisticEdits = staleRevision || channel.hasPendingFlowMutations();
+        if (m.full_spec && !preserveOptimisticEdits) { acceptFlowSpec(m.full_spec); setLastServerJson(JSON.stringify(m.full_spec)); }
+        else if (!preserveOptimisticEdits && m.description && flowSpecRef.current) {
+          const next = { ...flowSpecRef.current, business_description: m.description };
           flowSpecRef.current = next;
           setFlowSpec(next);
         }
-        if (m.check_report) setCheckReport(m.check_report);
+        if (m.check_report && !preserveOptimisticEdits) setCheckReport(m.check_report);
         message.success("业务说明已生成");
       }
       else if (m.type === "result") {
-        if (m.report?.full_spec) {
+        if (!channel.acceptsPublishEvent(m)) return;
+        channel.completePublish();
+        updatePublishBusy(false);
+        if (m.report?.full_spec && !staleRevision) {
           acceptFlowSpec(m.report.full_spec);
           setLastServerJson(JSON.stringify(m.report.full_spec));
         }
-        setResult(m.report); setPhase("recording");
-        if (m.report?.check_report) setCheckReport(m.report.check_report);
+        setResult(m.report); transitionPhase("recording");
+        if (m.report?.check_report && !staleRevision) setCheckReport(m.report.check_report);
         if (m.report?.ok) {
           setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({});
         }
       }
       else if (m.type === "error") {
+        if (m.operation === "publish_request" && !channel.acceptsPublishEvent(m)) return;
         const detail = m.detail || "录制出错";
-        setNamingBusy(false); setDescBusy(false); setLlmBusy(false); clearFlowOperation();
-        if (m.full_spec) {
+        const revisionConflict = /revision|expected_revision|版本冲突|版本已变更/i.test(detail);
+        const publishInProgress = m.operation === "publish_request"
+          && channel.acceptsPublishEvent(m)
+          && /already in progress|正在执行|执行中/i.test(detail);
+        if (m.code === "pi_unavailable" || m.code === "pi_failed") piRetryNeededRef.current = true;
+        if (m.operation === "retry_pi" || (piRetryInFlightRef.current && (m.code === "pi_unavailable" || m.code === "pi_failed"))) {
+          piRetryInFlightRef.current = false;
+          clearFlowOperation();
+        }
+        if (m.operation === "step_naming") {
+          clearOperationWatchdog("semantic");
+          setNamingBusy(false);
+        }
+        if (m.operation === "business_description") {
+          clearOperationWatchdog("semantic");
+          setDescBusy(false);
+        }
+        if (m.operation === "llm_recommendations") {
+          clearOperationWatchdog("semantic");
+          setLlmBusy(false);
+        }
+        if (m.operation === "orchestrate_flow" || m.operation === "auto_fix_flow") clearFlowOperation();
+        if (m.operation === "finalize" || m.operation === "reanalyze" || m.code === "analysis_failed") {
+          clearOperationWatchdog("analysis");
+          updateAnalysisBusy(false);
+          transitionPhase(publishBusyRef.current ? "publishing" : "recording");
+        }
+        if (m.operation === "recapture") {
+          clearOperationWatchdog("capture");
+          updateCaptureBusy(false);
+          transitionPhase(publishBusyRef.current ? "publishing" : "recording");
+        }
+        if (m.operation === "publish_request" && channel.acceptsPublishEvent(m) && !publishInProgress) {
+          channel.completePublish();
+          updatePublishBusy(false);
+          transitionPhase("recording");
+        }
+        const preserveOptimisticEdit = revisionConflict
+          && (m.operation === "flow_update" || m.operation === "flow_replace")
+          && channel.hasPendingFlowMutations();
+        if (m.full_spec && !staleRevision && !preserveOptimisticEdit) {
           acceptFlowSpec(m.full_spec);
           setLastServerJson(JSON.stringify(m.full_spec));
         }
-        if (m.check_report) setCheckReport(m.check_report);
-        if (m.operation === "flow_update" || m.operation === "flow_replace") failQueuedFlowMutation(m.operation_id);
-        if (detail.includes("step not found") || detail.includes("link not found")) {
+        if (m.check_report && !staleRevision) setCheckReport(m.check_report);
+        if (m.operation === "flow_update" || m.operation === "flow_replace") {
+          if (revisionConflict) channel.retryFlowMutation(m.operation_id);
+          else channel.failFlowMutation(m.operation_id);
+        }
+        if (publishInProgress) {
+          channel.keepPublishPending(2500);
+        } else if (revisionConflict && (m.operation === "flow_update" || m.operation === "flow_replace")) {
+          message.warning("流程版本已更新，正在基于最新版本重试本次修改");
+        } else if (revisionConflict || detail.includes("step not found") || detail.includes("link not found")) {
           message.warning("流程已变更，正在同步最新版本");
+          send({ type: "refresh_flow_spec" });
+        } else if (m.operation === "flow_update" || m.operation === "flow_replace") {
+          message.error(detail);
+          setErr(detail);
           send({ type: "refresh_flow_spec" });
         } else {
           message.error(detail);
           setErr(detail);
         }
       }
+  }
+
+  function restoreSessionSnapshot(snapshot?: Record<string, unknown> | null) {
+    if (!snapshot) return;
+    const snap: any = snapshot;
+    const restoredFlow = snap.full_spec || snap.flow_spec || snap.draft?.flow_spec;
+    const hasPendingManualEdits = channel.hasPendingFlowMutations();
+    if (restoredFlow && (!hasPendingManualEdits || !flowSpecRef.current)) {
+      acceptFlowSpec(restoredFlow);
+      setLastServerJson(JSON.stringify(restoredFlow));
+    }
+    if (snap.check_report && !hasPendingManualEdits) setCheckReport(snap.check_report);
+    if (Array.isArray(snap.steps)) setSteps(snap.steps);
+    if (Array.isArray(snap.requests || snap.reqs)) setReqs((snap.requests || snap.reqs).slice(-40));
+    if (Array.isArray(snap.fields)) {
+      setFields(snap.fields);
+      const restoredSelects: Record<string, RecSelect> = Array.isArray(snap.selects)
+        ? Object.fromEntries(snap.selects.map((item: RecSelect) => [item.path, item]))
+        : (snap.selects || {});
+      const restoredIdentity: Record<string, RecIdentity> = Array.isArray(snap.identity)
+        ? Object.fromEntries(snap.identity.map((item: RecIdentity) => [item.path, item]))
+        : (snap.identity || {});
+      setSelects(restoredSelects);
+      setIdentity(restoredIdentity);
+      if (snap.picked && typeof snap.picked === "object") setPicked(snap.picked);
+      else setPicked(Object.fromEntries(snap.fields.map((field: RecField) => [
+        field.path,
+        {
+          on: restoredIdentity[field.path] ? false : (restoredSelects[field.path] ? true : !!field.suggest_param),
+          name: field.suggest_name || field.key,
+        },
+      ])));
+    }
+    if (snap.request_meta) setReqMeta(snap.request_meta);
+    if (Array.isArray(snap.candidates)) setCands(snap.candidates);
+    if (snap.chosen_idx != null) setChosenIdx(Number(snap.chosen_idx));
+    if (Array.isArray(snap.suggested_steps)) {
+      setStepSel(Object.fromEntries(snap.suggested_steps.map((idx: number) => [idx, true])));
+    }
+    if (snap.result) setResult(snap.result);
+    if (typeof snap.action === "string" && !actionDirtyRef.current) setAction(snap.action);
+    if (typeof snap.title === "string" && !recordingTitleDirtyRef.current) {
+      recordingTitleValueRef.current = snap.title;
+      setTitle(snap.title);
+    }
+    if (typeof snap.start_url === "string") setStartUrl(snap.start_url);
+    if (snap.recording_mode === "real_submit" || snap.recording_mode === "record_only") setRecordingMode(snap.recording_mode);
+  }
+
+  async function start() {
+    if (!tenant) { message.error("请先到「创建 / 进入租户」"); return; }
+    if (!startUrl.trim()) { message.error("请填页面地址 start_url"); return; }
+    if (!recordingSession) { message.error("V3 录制会话不可用"); return; }
+    if (channel.isStarting()) return;
+    operationWatchdogRef.current?.clearAll();
+    updateCaptureBusy(false);
+    updateAnalysisBusy(false);
+    updatePublishBusy(false);
+    const intercept = recordingMode === "record_only";
+    setErr(""); setResult(null); setSteps([]); setReqs([]); clearFrame(); setFields([]); setPicked({});
+    setCands([]); setSelects({}); setIdentity({}); setStepSel({}); resetEditorState();
+    const initialMessage = {
+      type: "start",
+      tenant,
+      subsystem,
+      start_url: startUrl.trim(),
+      base_url: baseUrl.trim() || undefined,
+      storage_state: storageState.trim() || undefined,
+      recording_mode: recordingMode,
+      intercept,
     };
-    ws.onerror = () => setErr("WebSocket 连接失败");
-    ws.onclose = () => {
-      wsAliveRef.current = false;                                 // FC2 修复:WS 关闭,send 会自动避免刷屏
-      flowMutationInFlightRef.current = null;
-      flowMutationQueueRef.current = [];
-      afterFlowSyncRef.current = null;
-      if (phaseRef.current === "recording" || phaseRef.current === "publishing") setPhase("idle");
-    };
+    transitionPhase("recording");
+    try {
+      await channel.start({
+        subsystem,
+        start_url: startUrl.trim(),
+        base_url: baseUrl.trim(),
+        recording_mode: recordingMode,
+      }, initialMessage);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "创建录制会话失败";
+      setErr(detail);
+      transitionPhase("idle");
+    }
   }
 
   function onImgClick(e: React.MouseEvent<HTMLImageElement>) {
@@ -1576,15 +1905,51 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
 
   function resetFromHere() {
+    if (channel.hasPendingFlowMutations()) {
+      runAfterFlowSync(resetFromHere);
+      return;
+    }
     send({ type: "reset" });
     setSteps([]); setResult(null); resetEditorState();
     message.success("已清空，从现在起只录业务步骤");
   }
   function finalize() {
+    if (publishBusyRef.current || optimizationBusy || captureBusy) return;
     if (!action.trim() || badAction(action.trim())) return;
     if (!steps.length && !reqs.length) { message.error("还没抓到提交请求、也没录到步骤"); return; }
-    setResult(null); setPhase("publishing");
-    send({ type: "finalize", action: action.trim(), title: title.trim(), success_marker: null, steps });
+    setResult(null); updateAnalysisBusy(true); transitionPhase("recording");
+    if (!send({ type: "finalize", action: action.trim(), title: title.trim(), success_marker: null, steps })) {
+      updateAnalysisBusy(false); transitionPhase("recording");
+    } else {
+      ensureOperationWatchdog("analysis");
+      actionDirtyRef.current = false;
+      recordingTitleDirtyRef.current = false;
+    }
+  }
+  function reanalyze() {
+    if (publishBusyRef.current || optimizationBusy || captureBusy) return;
+    if (!flowSpecRef.current && !steps.length && !reqs.length) return;
+    setResult(null); updateAnalysisBusy(true); transitionPhase("recording");
+    if (!send({ type: "reanalyze", action: action.trim(), title: title.trim(), success_marker: null, steps })) {
+      updateAnalysisBusy(false); transitionPhase("recording");
+    } else {
+      ensureOperationWatchdog("analysis");
+      actionDirtyRef.current = false;
+      recordingTitleDirtyRef.current = false;
+    }
+  }
+  function recapture() {
+    if (publishBusyRef.current) return;
+    updateCaptureBusy(true);
+    if (!send({ type: "recapture" })) { updateCaptureBusy(false); return; }
+    ensureOperationWatchdog("capture");
+  }
+  function cancelAnalysis() {
+    if (!analysisBusyRef.current) return;
+    if (!send({ type: "cancel_analysis" })) {
+      clearOperationWatchdog("analysis");
+      updateAnalysisBusy(false);
+    }
   }
   function chooseRequest(idx: number) { setChosenIdx(idx); send({ type: "choose_request", idx }); }
   function toggleField(path: string, on: boolean) { setPicked((p) => ({ ...p, [path]: { ...p[path], on } })); }
@@ -1593,36 +1958,56 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(a)) { message.error("动作名请用英文标识"); return true; }
     return false;
   }
-  function payload() {
-    const param_map: Record<string, string> = {};
-    fields.forEach((f) => { const p = picked[f.path]; if (p?.on && p.name.trim()) param_map[f.path] = p.name.trim(); });
-    const selList = Object.values(selects).filter((s) => param_map[s.path]);
-    const idList = Object.values(identity);
-    const checked = cands.filter((c) => stepSel[c.idx]).map((c) => c.idx);
-    const step_idxs = checked.length >= 2 ? [...checked.filter((i) => i !== chosenIdx).sort((a, b) => a - b), chosenIdx] : [];
-    return { param_map, selList, idList, step_idxs };
-  }
   function publishRequest() {
+    if (channel.hasPendingPublish()) {
+      message.info("上一次发布结果仍在恢复中，请等待结果或超时后再试");
+      return;
+    }
+    if (analysisBusyRef.current || captureBusy) {
+      message.warning("请等待当前抓取或分析任务完成后再发布");
+      return;
+    }
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     if (!action.trim() || badAction(action.trim())) return;
     runAfterFlowSync(performPublishRequest);
   }
   function performPublishRequest() {
-    const { param_map, selList, idList, step_idxs } = payload();
+    if (channel.hasPendingPublish()) {
+      message.info("上一次发布结果仍在恢复中，请等待结果或超时后再试");
+      return;
+    }
     const currentSpec = flowSpecRef.current || flowSpec;
     if (!currentSpec) { message.error("请先生成 FlowSpec 后再发布"); return; }
     const publishTitle = title.trim() || preferredSkillTitle(currentSpec);
-    setResult(null); setPhase("publishing");
-    if (!send({ type: "publish_request", action: action.trim(), title: publishTitle,
-      param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: true, flow_spec: currentSpec,
-      expected_fingerprint: currentSpec.meta?.current_fingerprint })) {
-      setPhase("recording");
+    const metadataEdits: any[] = [];
+    if ((currentSpec as any).action !== action.trim()) {
+      metadataEdits.push({ op: "update_flow", field: "action", value: action.trim() });
+    }
+    if ((currentSpec.title || "") !== publishTitle) {
+      metadataEdits.push({ op: "update_flow", field: "title", value: publishTitle });
+    }
+    if (metadataEdits.length) {
+      send({ type: "flow_update", edits: metadataEdits });
+      runAfterFlowSync(performPublishRequest);
+      return;
+    }
+    const publishMessage = {
+      type: "publish_request",
+      action: action.trim(),
+      title: publishTitle,
+      expected_fingerprint: currentSpec.meta?.current_fingerprint,
+    };
+    setResult(null); updatePublishBusy(true); transitionPhase("publishing");
+    if (!channel.sendPublish(publishMessage)) {
+      updatePublishBusy(false); transitionPhase("recording");
       setResult({ ok: false, reason: "录制连接已断开，发布请求未发送" });
     }
   }
   function stopAll() {
-    send({ type: "stop" }); wsRef.current?.close();
-    setPhase("idle"); setResult(null); setSteps([]); clearFrame(); setFields([]); setPicked({});
+    channel.stop();
+    operationWatchdogRef.current?.clearAll();
+    updateCaptureBusy(false); updateAnalysisBusy(false); updatePublishBusy(false);
+    transitionPhase("idle"); setResult(null); setSteps([]); clearFrame(); setFields([]); setPicked({});
     setCands([]); setSelects({}); setIdentity({}); setStepSel({}); resetEditorState();
   }
 
@@ -1632,17 +2017,34 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     send({ type: "flow_replace", flow_spec: next });
   }
   function updateFlowField(k: string, v: any) { send({ type: "flow_update", edits: [{ op: "update_flow", field: k, value: v }] }); }
+  function stepForId(stepId: string) {
+    return flowSpecRef.current?.steps.find((step) => step.step_id === stepId);
+  }
+  function stepUuidForId(stepId: string) {
+    const step = stepForId(stepId);
+    return step ? stableStepRef(step) : undefined;
+  }
+  function stepMutationTarget(stepId: string) {
+    const step = stepForId(stepId);
+    if (!step) {
+      let identity = missingStepIdentityRef.current.get(stepId);
+      if (!identity) {
+        identity = {};
+        missingStepIdentityRef.current.set(stepId, identity);
+      }
+      return { step_uuid: stableStepRef(identity), step_id: stepId };
+    }
+    return { step_uuid: stableStepRef(step), step_id: step.step_id };
+  }
   function updateStep(stepId: string, field: string, value: any) {
     patchLocalStep(stepId, { [field]: value });
-    send({ type: "flow_update", edits: [{ op: "update", step_id: stepId, field, value }] });
-  }
-  function paramDraftKey(stepId: string, p: FlowParam) {
-    return `${stepId}:${p.path || ""}:${p.key || ""}:${p.label || ""}`;
+    send({ type: "flow_update", edits: [{ op: "update", ...stepMutationTarget(stepId), field, value }] });
   }
   function paramEdit(stepId: string, p: FlowParam, field: string, value: any) {
     return {
       op: "update",
-      step_id: stepId,
+      ...stepMutationTarget(stepId),
+      field_uuid: stableFieldKey(stepForId(stepId) || stepId, p),
       param_path: p.path || p.key || p.label,
       param_key: p.key,
       param_label: p.label || p.key,
@@ -1653,7 +2055,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function paramRemoveEdit(stepId: string, p: FlowParam) {
     return {
       op: "remove",
-      step_id: stepId,
+      ...stepMutationTarget(stepId),
+      field_uuid: stableFieldKey(stepForId(stepId) || stepId, p),
       param_path: p.path || p.key || p.label,
       param_key: p.key,
       param_label: p.label || p.key,
@@ -1664,7 +2067,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const key = target.key || target.param_name || target.current_guess || "";
     return {
       op: "update",
-      step_id: stepId,
+      ...stepMutationTarget(stepId),
+      field_uuid: target.field_uuid || opaqueV3Identity(target, "field-target"),
       param_path: path || key,
       param_key: key,
       param_label: target.label || key,
@@ -1673,12 +2077,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     };
   }
   function paramMatches(a: FlowParam, b: FlowParam) {
-    const ap = stripBodyPrefix(a.path || "");
-    const bp = stripBodyPrefix(b.path || "");
-    if (ap && bp && ap === bp) return true;
-    if (a.key && b.key && a.key === b.key) return true;
-    if (a.label && b.label && a.label === b.label) return true;
-    return false;
+    return stableFieldKey("", a) === stableFieldKey("", b);
   }
   function patchLocalParam(stepId: string, p: FlowParam, updates: Record<string, any>) {
     const base = flowSpecRef.current;
@@ -1793,7 +2192,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       paramEdit(step.step_id, currentParam, "type", value),
       paramEdit(step.step_id, currentParam, "enum_options", null),
       paramEdit(step.step_id, currentParam, "enum_value_map", null),
-      { op: "update", step_id: step.step_id, field: "selects", value: nextSelects },
+      { op: "update", ...stepMutationTarget(step.step_id), field: "selects", value: nextSelects },
     ];
     if (enumSource) {
       edits.push(
@@ -1858,7 +2257,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     });
     send({ type: "flow_update", edits });
     if (sourceKind === "previous_response") {
-      const key = paramDraftKey(stepId, p);
+      const key = stableFieldKey(flowSpecRef.current?.steps.find((step) => step.step_id === stepId) || stepId, p);
       setBindDraft((d) => ({
         ...d,
         [key]: d[key] || { source_step_id: (p.source as any)?.step_id || "", source_path: (p.source as any)?.response_path || "" },
@@ -1886,7 +2285,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const next = { ...current, steps: ids.map((id) => byId[id]) };
     flowSpecRef.current = next;
     setFlowSpec(next);
-    send({ type: "flow_update", edits: [{ op: "reorder_steps", step_ids: ids }] });
+    send({
+      type: "flow_update",
+      edits: [{
+        op: "reorder_steps",
+        step_uuids: next.steps.map((step) => stableStepRef(step)),
+        step_ids: ids,
+      }],
+    });
   }
   function removeStepWithConfirm(step: FlowStepData) {
     if (!flowSpec) return;
@@ -1896,7 +2302,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       content: links.length ? `该步骤关联 ${links.length} 条依赖，删除后会一并清理。` : "确认删除该步骤？",
       okText: "删除", okType: "danger", cancelText: "取消",
       onOk: () => {
-        const ok = send({ type: "flow_update", edits: [{ op: "remove_step", step_id: step.step_id }] });
+        const ok = send({ type: "flow_update", edits: [{ op: "remove_step", ...stepMutationTarget(step.step_id) }] });
         if (!ok) return;
         const cur = flowSpecRef.current;
         if (cur) {
@@ -1933,7 +2339,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     } else if ((action === "fix_or_remove_link" || action === "fix_link_source" || action === "fix_link_target") && tgt.link_id) {
       edits.push({ op: "remove", link_id: tgt.link_id });
     } else if (action === "confirm_request_role" && tgt.step_id) {
-      edits.push({ op: "update", step_id: tgt.step_id, field: "role", value: guess || "business_write" });
+      edits.push({ op: "update", ...stepMutationTarget(tgt.step_id), field: "role", value: guess || "business_write" });
     } else if (action === "hide_system_const" && tgt.step_id && tgt.path) {
       edits.push(
         targetParamEdit(tgt.step_id, tgt, "category", "system_const"),
@@ -1970,11 +2376,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (suggestion.action === "bind_previous_response" && suggestion.source_step_id && suggestion.source_path) {
       edits.push({
         op: "add",
-        step_id: suggestion.source_step_id,
+        ...stepMutationTarget(suggestion.source_step_id),
         link: {
           source_step_id: suggestion.source_step_id,
+          source_step_uuid: stepUuidForId(suggestion.source_step_id),
           source_path: suggestion.source_path,
           target_step_id: targetStepId,
+          target_step_uuid: stepUuidForId(targetStepId),
           target_path: targetPath,
           confirmed: true,
           ...(typeof suggestion.confidence === "number" ? { confidence: suggestion.confidence } : {}),
@@ -2005,7 +2413,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function refreshLlmRecommendations() {
     if (!flowSpec) return;
     setLlmBusy(true);
-    send({ type: "llm_recommendations" });
+    if (!send({ type: "llm_recommendations" })) setLlmBusy(false);
+    else ensureOperationWatchdog("semantic");
   }
   function requiresManualSourceBinding(item: ReviewItemData) {
     return item.suggested_action === "bind_runtime_source" && /\/unknown$/.test(item.current_guess || "");
@@ -2046,15 +2455,21 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (newStepRequestKey) {
       const req = findCapturedRequest(flowSpec, newStepRequestKey);
       if (!req) { message.warning("没有找到选中的捕获接口"); return; }
-      send({ type: "flow_update", edits: [{ op: "add_request_step", request_index: req.request_index, request_id: req.request_id }] });
+      const requestTarget = stableRequestMutationTarget(req);
+      if (!requestTarget) { message.warning("选中的捕获接口缺少稳定身份，无法添加"); return; }
+      send({ type: "flow_update", edits: [{ op: "add_request_step", ...requestTarget }] });
       setAddingStep(false);
       setNewStepRequestKey("");
       return;
     }
     const draft = { ...newStep, path: newStep.path.trim(), name: newStep.name.trim() };
     if (!draft.path || !draft.path.startsWith("/")) { message.warning("接口 path 需要以 / 开头"); return; }
+    const stepUuid = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `step-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const step: FlowStepData = {
-      step_id: "new_" + Math.random().toString(36).slice(2, 10),
+      step_id: stepUuid,
+      step_uuid: stepUuid,
       name: draft.name || fallbackStepName(draft.method, draft.path),
       method: draft.method, url: draft.path, path: draft.path, risk_level: draft.risk_level,
       params: [], selects: [], identity: [], source_meta: { role: draft.role, manual: true },
@@ -2067,7 +2482,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function addCapturedRequestToFields(req?: RequestGraphEntry) {
     if (!req) { message.warning("请选择捕获接口"); return; }
-    send({ type: "flow_update", edits: [{ op: "add_request_step", request_index: req.request_index, request_id: req.request_id }] });
+    const requestTarget = stableRequestMutationTarget(req);
+    if (!requestTarget) { message.warning("选中的捕获接口缺少稳定身份，无法添加"); return; }
+    send({ type: "flow_update", edits: [{ op: "add_request_step", ...requestTarget }] });
     setNewParamRequestKey("");
     setNewStepRequestKey("");
     setActiveFlowTab("abilities");
@@ -2079,8 +2496,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!stepId || !path || !key) { message.warning("请选择步骤并填写字段路径和参数名"); return; }
     const isEnum = newParam.type === "enum" || newParam.type === "list-enum";
     const sourceKind = defaultSourceForCategory(newParam.category);
+    const fieldUuid = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `field-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     send({ type: "flow_update", edits: [{
-      op: "add", step_id: stepId, param: {
+      op: "add", ...stepMutationTarget(stepId), param: {
+        field_uuid: fieldUuid, field_id: fieldUuid,
         path, key, label: key, value: "", type: newParam.type, required: false,
         category: newParam.category, source_kind: sourceKind,
         source: sourceKind === "unknown" ? {} : { kind: sourceKind, path, manual: true },
@@ -2094,12 +2515,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function addLink() {
     const { source_step_id, source_path, target_step_id, target_path } = newLink;
     if (!source_step_id || !target_step_id || !source_path || !target_path) { message.warning("请填写完整的来源和目标"); return; }
-    send({ type: "flow_update", edits: [{ op: "add", step_id: source_step_id, link: { source_step_id, source_path, target_step_id, target_path, confirmed: false, reason: "人工新增依赖，需确认后才可发布" } }] });
+    send({ type: "flow_update", edits: [{
+      op: "add",
+      ...stepMutationTarget(source_step_id),
+      link: {
+        source_step_id,
+        source_step_uuid: stepUuidForId(source_step_id),
+        source_path,
+        target_step_id,
+        target_step_uuid: stepUuidForId(target_step_id),
+        target_path,
+        confirmed: false,
+        reason: "人工新增依赖，需确认后才可发布",
+      },
+    }] });
     setNewLink({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
   }
   function bindParamToPreviousResponse(step: FlowStepData, p: FlowParam) {
     if (!flowSpec) return;
-    const key = paramDraftKey(step.step_id, p);
+    const key = stableFieldKey(step, p);
     const draft = bindDraft[key] || {};
     if (!draft.source_step_id || !draft.source_path) { message.warning("请选择来源步骤和响应字段"); return; }
     const edits: any[] = flowSpec.links
@@ -2107,11 +2541,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       .map((l) => ({ op: "remove", link_id: l.link_id, reset_target: false }));
     edits.push({
       op: "add",
-      step_id: draft.source_step_id,
+      ...stepMutationTarget(draft.source_step_id),
       link: {
         source_step_id: draft.source_step_id,
+        source_step_uuid: stepUuidForId(draft.source_step_id),
         source_path: draft.source_path,
         target_step_id: step.step_id,
+        target_step_uuid: stableStepRef(step),
         target_path: p.path,
         confirmed: true,
       },
@@ -2126,8 +2562,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!edited) return;
     const edits = [
       { op: "update", link_id: linkId, field: "source_step_id", value: edited.source_step_id },
+      { op: "update", link_id: linkId, field: "source_step_uuid", value: stepUuidForId(edited.source_step_id) },
       { op: "update", link_id: linkId, field: "source_path", value: edited.source_path },
       { op: "update", link_id: linkId, field: "target_step_id", value: edited.target_step_id },
+      { op: "update", link_id: linkId, field: "target_step_uuid", value: stepUuidForId(edited.target_step_id) },
       { op: "update", link_id: linkId, field: "target_path", value: edited.target_path },
       { op: "update", link_id: linkId, field: "confirmed", value: !!edited.confirmed },
     ];
@@ -2135,8 +2573,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     cancelEditLink(linkId);
   }
   function orchestrateFlow() {
+    if (analysisBusyRef.current || publishBusyRef.current || captureBusy) return;
     if (!flowSpecRef.current || flowOperationRef.current) return;
-    if (flowMutationInFlightRef.current || flowMutationQueueRef.current.length) {
+    if (channel.hasPendingFlowMutations()) {
       runAfterFlowSync(orchestrateFlow);
       return;
     }
@@ -2150,11 +2589,21 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setOrchestrateBusy(true);
     setAutoFixBusy(true);
     armFlowOperationWatchdog("能力生成");
+    const retryPi = piRetryNeededRef.current || !!recordingSession?.state.pi.lastError;
+    if (retryPi) {
+      piRetryInFlightRef.current = true;
+      if (!send({ type: "retry_pi" })) {
+        piRetryInFlightRef.current = false;
+        clearFlowOperation();
+      }
+      return;
+    }
     if (!send({ type: "orchestrate_flow", flow_spec: currentSpec })) clearFlowOperation();
   }
   function autoFixFlow() {
+    if (analysisBusyRef.current || publishBusyRef.current || captureBusy) return;
     if (!flowSpecRef.current || flowOperationRef.current) return;
-    if (flowMutationInFlightRef.current || flowMutationQueueRef.current.length) {
+    if (channel.hasPendingFlowMutations()) {
       runAfterFlowSync(autoFixFlow);
       return;
     }
@@ -2170,7 +2619,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const current = flowSpecRef.current;
     if (!current) return;
     const idx = (current.capabilities?.length || 0) + 1;
+    const capabilityId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `capability-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const capability: FlowCapabilityData = {
+      capability_uuid: capabilityId,
+      capability_id: capabilityId,
       name: `capability_${idx}`,
       title: `能力 ${idx}`,
       intent: "",
@@ -2191,30 +2645,50 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       capability,
     }] });
   }
+  function capabilityMutationTarget(idx: number) {
+    const capability = flowSpecRef.current?.capabilities?.[idx];
+    if (!capability) {
+      message.error("能力已变更，请等待工作台同步后重试");
+      return null;
+    }
+    const capabilityUuid = stableCapabilityRef(capability);
+    return { capability_uuid: capabilityUuid, capability_ref: capabilityUuid };
+  }
   function updateCapabilityConfirmed(idx: number, confirmed: boolean) {
+    const target = capabilityMutationTarget(idx);
+    if (!target) return;
     // Backend confirmation is an atomic preflight transaction. Do not paint an
     // optimistic checked state that would remain stale when the server rejects it.
     if (!confirmed) patchLocalCapability(idx, { confirmed: false }, false);
-    send({ type: "flow_update", edits: [{ op: "update_capability", capability_index: idx, field: "confirmed", value: confirmed }] });
+    send({ type: "flow_update", edits: [{ op: "update_capability", ...target, field: "confirmed", value: confirmed }] });
   }
   function updateCapabilityField(idx: number, field: string, value: any) {
+    const target = capabilityMutationTarget(idx);
+    if (!target) return;
     patchLocalCapability(idx, { [field]: value });
     send({ type: "flow_update", edits: [
-      { op: "update_capability", capability_index: idx, field, value },
-      { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
+      { op: "update_capability", ...target, field, value },
+      { op: "update_capability", ...target, field: "confirmed", value: false },
     ] });
   }
   function removeCapability(idx: number) {
+    const target = capabilityMutationTarget(idx);
+    if (!target) return;
     Modal.confirm({
       title: "删除这个能力？",
       content: "只删除对外能力编排，不删除底层捕获接口和流程步骤。",
       okText: "删除", okType: "danger", cancelText: "取消",
       onOk: () => {
-        const ok = send({ type: "flow_update", edits: [{ op: "remove_capability", capability_index: idx }] });
+        const ok = send({ type: "flow_update", edits: [{ op: "remove_capability", ...target }] });
         if (!ok) return;
         const current = flowSpecRef.current;
         if (current) {
-          const next = { ...current, capabilities: (current.capabilities || []).filter((_, capIdx) => capIdx !== idx) };
+          const next = {
+            ...current,
+            capabilities: (current.capabilities || []).filter(
+              (capability) => stableCapabilityRef(capability) !== target.capability_uuid,
+            ),
+          };
           flowSpecRef.current = next;
           setFlowSpec(next);
         }
@@ -2225,6 +2699,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function addStepToCapability(idx: number, value?: string, usage?: CapabilityUsage | "") {
     if (!value || !usage) return;
+    const target = capabilityMutationTarget(idx);
+    if (!target) return;
     const membership = { usage, origin: "manual", pinned: true, confirmed: true };
     if (value.startsWith("step:")) {
       const stepId = value.slice(5);
@@ -2235,13 +2711,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       const existingRef = (cap?.request_refs || []).find((ref) => ref.step_id === stepId);
       const requestRefs = [
         ...(cap?.request_refs || []).filter((ref) => ref.step_id !== stepId),
-        { ...(existingRef || {}), step_id: stepId, ...membership },
+        { ...(existingRef || {}), step_id: stepId, step_uuid: stepUuidForId(stepId), ...membership },
       ];
       patchLocalCapability(idx, { step_ids: stepIds, request_refs: requestRefs });
       send({ type: "flow_update", edits: [
-        { op: "add_capability_step", capability_index: idx, step_id: stepId, ...membership },
-        { op: "update_capability", capability_index: idx, field: "request_refs", value: requestRefs },
-        { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
+        { op: "add_capability_step", ...target, ...stepMutationTarget(stepId), ...membership },
+        { op: "update_capability", ...target, field: "request_refs", value: requestRefs },
+        { op: "update_capability", ...target, field: "confirmed", value: false },
       ] });
       return;
     }
@@ -2249,27 +2725,31 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       const requestKey = value.slice(4);
       const req = findCapturedRequest(flowSpecRef.current, requestKey);
       if (!req) { message.warning("没有找到选中的捕获接口"); return; }
+      const requestTarget = stableRequestMutationTarget(req);
+      if (!requestTarget) { message.warning("选中的捕获接口缺少稳定身份，无法添加"); return; }
       const cap = flowSpecRef.current?.capabilities?.[idx];
       pendingCapabilityMembershipRef.current.push({
-        capability: capabilityRef(cap || {}, idx),
-        requestId: req.request_id,
-        requestIndex: req.request_index,
+        capability: stableCapabilityRef(cap || {}),
+        requestKey: requestGraphKey(req),
+        requestTarget,
         usage,
       });
       patchLocalCapability(idx, {});
       send({ type: "flow_update", edits: [
-        { op: "add_capability_step", capability_index: idx, request_index: req?.request_index, request_id: req?.request_id, ...membership },
-        { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
+        { op: "add_capability_step", ...target, ...requestTarget, ...membership },
+        { op: "update_capability", ...target, field: "confirmed", value: false },
       ] });
     }
   }
   function removeStepFromCapability(idx: number, stepId: string) {
     const cap = flowSpecRef.current?.capabilities?.[idx];
+    const target = capabilityMutationTarget(idx);
+    if (!target) return;
     const stepIds = capabilityActualStepIds(cap || {}).filter((id) => id !== stepId);
     patchLocalCapability(idx, { step_ids: stepIds });
     send({ type: "flow_update", edits: [
-      { op: "remove_capability_step", capability_index: idx, step_id: stepId },
-      { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
+      { op: "remove_capability_step", ...target, ...stepMutationTarget(stepId) },
+      { op: "update_capability", ...target, field: "confirmed", value: false },
     ] });
   }
   function moveStepInCapability(idx: number, stepIds: string[], from: number, delta: number) {
@@ -2280,23 +2760,20 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     next.splice(to, 0, item);
     updateCapabilityField(idx, "step_ids", next);
   }
-  function capabilityRef(cap: FlowCapabilityData, idx: number) {
-    return cap.name || cap.capability_id || `idx:${idx}`;
-  }
   function moveCapability(idx: number, delta: number) {
     const current = flowSpecRef.current;
     if (!current) return;
     const caps = [...(current.capabilities || [])];
     const to = idx + delta;
     if (to < 0 || to >= caps.length) return;
-    const refs = caps.map(capabilityRef);
+    const refs = caps.map(stableCapabilityRef);
     const [item] = refs.splice(idx, 1);
     refs.splice(to, 0, item);
-    const ordered = refs.map((ref) => caps.find((cap, capIdx) => capabilityRef(cap, capIdx) === ref)!).filter(Boolean);
+    const ordered = refs.map((ref) => caps.find((cap) => stableCapabilityRef(cap) === ref)!).filter(Boolean);
     const next = { ...current, capabilities: ordered };
     flowSpecRef.current = next;
     setFlowSpec(next);
-    send({ type: "flow_update", edits: [{ op: "reorder_capabilities", capability_refs: refs }] });
+    send({ type: "flow_update", edits: [{ op: "reorder_capabilities", capability_uuids: refs, capability_refs: refs }] });
   }
   function loadJsonDraft() {
     if (!flowSpec) return;
@@ -2353,6 +2830,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       { key: "flow", label: "整体流程", color: "default" },
     ];
     type OperatorIssue = {
+      id?: string;
       message: string; severity: string; source?: string; target?: Record<string, any>;
       audience?: "operator" | "internal"; actionable?: boolean; blocking?: boolean; auto_fixable?: boolean;
     };
@@ -2372,6 +2850,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const by: Record<string, OperatorIssue[]> = {};
     for (const [key, items] of Object.entries(report?.issue_groups || {})) {
       by[key] = (items || []).map((item) => ({
+        id: item.issue_id || item.id,
         message: item.message || "待处理问题",
         severity: item.severity || "warning",
         source: item.source,
@@ -2390,11 +2869,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             : kind === "step" || kind === "request_role" ? "interface"
               : kind === "capability" ? "capability" : "flow";
         by[key] = by[key] || [];
-        by[key].push({ message: item.title, severity: item.severity, target: item.target });
+        by[key].push({ id: item.id, message: item.title, severity: item.severity, target: item.target });
       }
       for (const messageText of report?.errors || []) {
         by.flow = by.flow || [];
-        by.flow.push({ message: messageText, severity: "error" });
+        by.flow.push({ id: `flow:${messageText}`, message: messageText, severity: "error" });
       }
     }
     const out: Array<{ key: string; label: string; color: string; items: OperatorIssue[] }> = [];
@@ -2417,11 +2896,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function locatePublishIssue(target?: Record<string, any>) {
     if (!target) return;
     const sid = target.target_step_id || target.step_id || target.source_step_id;
-    const capRef = target.capability_name || target.capability_id || target.capability
-      || (flowSpec?.capabilities || []).find((cap) => capabilityActualStepIds(cap).includes(sid || ""))?.name;
+    const requestedCapability = target.capability_uuid || target.capability_id || target.capability_name || target.capability;
+    const matchedCapability = (flowSpec?.capabilities || []).find((cap) =>
+      [cap.capability_uuid, cap.capability_id, cap.name].some((value) => value && value === requestedCapability)
+      || capabilityActualStepIds(cap).includes(sid || "")
+    );
     setActiveFlowTab(target.kind === "request_role" ? "requests" : "abilities");
     requestAnimationFrame(() => {
-      const id = capRef ? `capability-${String(capRef).replace(/[^a-zA-Z0-9_-]+/g, "-")}` : "";
+      const id = matchedCapability ? capabilityAnchorId(matchedCapability) : "";
       document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "center" });
     });
   }
@@ -2556,7 +3038,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const nextSelects = replaced
       ? (step.selects || []).map((s) => (s.path === p.path || (!s.path && s.param === p.key) || s === existing ? nextBinding : s))
       : [...(step.selects || []), nextBinding];
-    const edits: any[] = [{ op: "update", step_id: step.step_id, field: "selects", value: nextSelects }];
+    const edits: any[] = [{ op: "update", ...stepMutationTarget(step.step_id), field: "selects", value: nextSelects }];
     const paramUpdates: Record<string, any> = {};
     if (p.category !== "user_param" && p.category !== "runtime_var") {
       edits.push(paramEdit(step.step_id, p, "category", "user_param"));
@@ -2695,8 +3177,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     <div key={group.key} style={{ display: "grid", gridTemplateColumns: "100px 1fr", gap: 8, alignItems: "start" }}>
                       <Tag color={group.color} style={{ margin: 0, textAlign: "center" }}>{group.label} {group.items.length}</Tag>
                       <Space direction="vertical" size={2}>
-                        {group.items.map((item, issueIdx) => (
-                          <Space key={`${group.key}-${issueIdx}`} wrap size={4}>
+                        {group.items.map((item) => (
+                          <Space key={stableIssueKey(group.key, item, publishIssueTargetLabel(item.target))} wrap size={4}>
                             {publishIssueTargetLabel(item.target) && <Tag>{publishIssueTargetLabel(item.target)}</Tag>}
                             <Typography.Text type={item.severity === "warning" ? "secondary" : "danger"} style={{ fontSize: 12 }}>
                               {item.message}
@@ -2709,7 +3191,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   ))}
                 </Space>
                 {hasPublishAdvice && (
-                  <Button size="small" icon={<RobotOutlined />} loading={autoFixBusy} onClick={autoFixFlow}>
+                  <Button size="small" icon={<RobotOutlined />} loading={autoFixBusy} disabled={analysisBusy || publishBusy || captureBusy} onClick={autoFixFlow}>
                     自动处理可修复项
                   </Button>
                 )}
@@ -2734,8 +3216,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             ),
             right: (
               <Space wrap style={{ marginLeft: 12 }}>
-                <Button size="small" loading={phase === "publishing"} onClick={finalize}>重新抓取</Button>
-                <Button size="small" type="primary" loading={phase === "publishing"} onClick={publishRequest}>发布当前流程</Button>
+                <Button size="small" loading={captureBusy} disabled={publishBusy} onClick={recapture}>重新抓取</Button>
+                <Button size="small" type="primary" loading={publishBusy} disabled={analysisBusy || captureBusy} onClick={publishRequest}>发布当前流程</Button>
               </Space>
             ),
           }}
@@ -2784,7 +3266,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   <Tag color={(req.method || "GET").toUpperCase() === "GET" ? "blue" : "green"}>{req.method || "GET"}</Tag>
                   <PathText value={req.path || stripHost(req.url || "")} maxWidth={620} />
                   {(req.occurrence_count || 1) > 1 && <Tag>{req.occurrence_count} 次</Tag>}
-                  {capabilityNames.map((name) => <Tag color="success" key={name}>能力：{name}</Tag>)}
+                  {capabilityNames.map((item) => <Tag color="success" key={item.key}>能力：{item.label}</Tag>)}
                   {!capabilityNames.length && fieldCandidate && <Tag color="cyan">仅字段候选</Tag>}
                   {!capabilityNames.length && !fieldCandidate && <Tag>仅事实</Tag>}
                   {req.role && <Tag>{req.role}</Tag>}
@@ -2803,18 +3285,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const existing = new Set(capabilityActualStepIds(cap));
     const allStepReqKeys = new Set((flowSpec?.steps || []).flatMap((s) => {
       const meta = s.source_meta || {};
-      const keys: string[] = [];
-      if (meta.request_id) keys.push(`id:${meta.request_id}`);
-      if (meta.request_index != null) keys.push(`idx:${String(meta.request_index)}`);
-      return keys;
+      return explicitRequestIdentityKeys(meta);
     }));
     const existingReqKeys = new Set((flowSpec?.steps || [])
       .filter((s) => existing.has(s.step_id))
       .flatMap((s) => {
         const meta = s.source_meta || {};
-        const keys: string[] = [];
-        if (meta.request_id) keys.push(`id:${meta.request_id}`);
-        if (meta.request_index != null) keys.push(`idx:${String(meta.request_index)}`);
+        const keys = explicitRequestIdentityKeys(meta);
         return keys.length ? keys : [`step:${s.step_id}`];
       }));
     const stepItems = (flowSpec?.steps || [])
@@ -2824,7 +3301,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         value: `step:${s.step_id}`,
       }));
     const reqItems = allCapturedRequests(flowSpec)
-      .filter((req) => !existingReqKeys.has(requestGraphKey(req)) && !allStepReqKeys.has(requestGraphKey(req)))
+      .filter((req) => {
+        const keys = explicitRequestIdentityKeys(req);
+        return !keys.some((key) => existingReqKeys.has(key) || allStepReqKeys.has(key));
+      })
       .map((req) => ({
         label: `#${req.sequence ?? req.request_index ?? ""} ${req.method || "GET"} ${req.path || stripHost(req.url || "")}`,
         value: `req:${requestOptionValue(req)}`,
@@ -2832,7 +3312,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return [...stepItems, ...reqItems];
   }
   function renderParamEditorInCapability(step: FlowStepData, p: FlowParam, scopedStepIds: Set<string>) {
-    const bindKey = paramDraftKey(step.step_id, p);
+    const bindKey = stableFieldKey(step, p);
     const linked = incomingLink(step.step_id, p.path);
     const currentBind = bindDraft[bindKey] || {
       source_step_id: p.source?.step_id || linked?.source_step_id,
@@ -2861,7 +3341,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       ...sourcePathOptions(currentBind.source_step_id),
     ];
     return (
-      <List.Item key={paramDraftKey(step.step_id, p)} style={{ padding: "12px 0" }}>
+      <List.Item key={stableFieldKey(step, p)} style={{ padding: "12px 0" }}>
         <div style={{ width: "100%", border: "1px solid #f0f0f0", borderRadius: 6, padding: 12, background: "#fff" }}>
           <Row gutter={[12, 8]} align="top">
             <Col flex="auto">
@@ -2948,7 +3428,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                       <Space wrap size={6}>
                         <Typography.Text strong style={{ fontSize: 12 }}>{isApiOption ? "接口候选配置" : "枚举候选配置"}</Typography.Text>
                         <Tag color={selectBinding?.source_url ? "geekblue" : "purple"}>{enumSourceLabel(selectBinding)}</Tag>
-                        {enumOptions.slice(0, 8).map((x, enumIdx) => <Tag key={`${x}-${enumIdx}`}>{x}</Tag>)}
+                        {enumOptions.slice(0, 8).map((x) => <Tag key={x}>{x}</Tag>)}
                         {enumOptions.length > 8 && <Tag>+{enumOptions.length - 8}</Tag>}
                       </Space>
                       {isApiOption && (
@@ -3111,8 +3591,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             if (!path || !key) { message.warning("请填写字段路径和参数名"); return; }
             const isEnum = draft.type === "enum" || draft.type === "list-enum";
             const sourceKind = defaultSourceForCategory(draft.category);
+            const fieldUuid = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+              ? crypto.randomUUID()
+              : `field-${Date.now()}-${Math.random().toString(36).slice(2)}`;
             send({ type: "flow_update", edits: [{
-              op: "add", step_id: step.step_id, param: {
+              op: "add", ...stepMutationTarget(step.step_id), param: {
+                field_uuid: fieldUuid, field_id: fieldUuid,
                 path, key, label: key, value: "", type: draft.type, required: false,
                 category: draft.category, source_kind: sourceKind,
                 source: sourceKind === "unknown" ? {} : { kind: sourceKind, path, manual: true },
@@ -3133,8 +3617,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return (
       <Card size="small" title="响应字段" style={{ marginTop: 10 }}>
         <Space wrap size={4}>
-          {leaves.slice(0, 60).map((leaf, idx) => (
-            <Tooltip key={`${leaf.path}-${idx}`} title={leaf.value}>
+          {leaves.slice(0, 60).map((leaf) => (
+            <Tooltip key={opaqueV3Identity(leaf, "response-leaf")} title={leaf.value}>
               <Typography.Text code style={{ fontSize: 12 }}>{leaf.path}</Typography.Text>
             </Tooltip>
           ))}
@@ -3150,7 +3634,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         {(step.params || []).length ? (
           <List
             size="small"
-            rowKey={(p) => paramDraftKey(step.step_id, p)}
+            rowKey={(p) => stableFieldKey(step, p)}
             dataSource={step.params || []}
             renderItem={(p) => renderParamEditorInCapability(step, p, scopedStepIds)}
           />
@@ -3168,14 +3652,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const requestRef = capabilityRequestRefForStep(cap, stepId);
     if (!st) {
       return (
-        <Collapse.Panel key={stepId} header={<Typography.Text type="danger">接口不存在：{stepId}</Typography.Text>}>
+        <Collapse.Panel key={stableStepRef(requestRef || {})} header={<Typography.Text type="danger">接口不存在：{stepId}</Typography.Text>}>
           <Button danger size="small" onClick={() => removeStepFromCapability(capIdx, stepId)}>从能力移除</Button>
         </Collapse.Panel>
       );
     }
     return (
       <Collapse.Panel
-        key={stepId}
+        key={stableStepRef(st)}
         header={
           <Space wrap>
             <Tag color="purple">接口 {stepIdx + 1}</Tag>
@@ -3189,8 +3673,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         extra={
           <Space onClick={(e) => e.stopPropagation()}>
-            <Tooltip title="上移"><Button size="small" icon={<UpOutlined />} disabled={stepIdx === 0} onClick={() => moveStepInCapability(capIdx, stepIds, stepIdx, -1)} /></Tooltip>
-            <Tooltip title="下移"><Button size="small" icon={<DownOutlined />} disabled={stepIdx === stepIds.length - 1} onClick={() => moveStepInCapability(capIdx, stepIds, stepIdx, 1)} /></Tooltip>
+            <Tooltip title="上移"><Button size="small" icon={<UpOutlined />} disabled={stepIdx === 0} onMouseDown={(e) => e.preventDefault()} onClick={() => moveStepInCapability(capIdx, stepIds, stepIdx, -1)} /></Tooltip>
+            <Tooltip title="下移"><Button size="small" icon={<DownOutlined />} disabled={stepIdx === stepIds.length - 1} onMouseDown={(e) => e.preventDefault()} onClick={() => moveStepInCapability(capIdx, stepIds, stepIdx, 1)} /></Tooltip>
             <Button size="small" danger onClick={() => removeStepFromCapability(capIdx, stepId)}>移除</Button>
           </Space>
         }
@@ -3200,6 +3684,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     );
   }
   function renderCapabilityInterfacesWithFields(cap: FlowCapabilityData, capIdx: number) {
+    const capKey = stableCapabilityRef(cap);
     const stepIds = capabilityActualStepIds(cap);
     const auxiliaryRefs = (cap.request_refs || []).filter((ref) => ref.usage === "option_source" && ref.step_id && !stepIds.includes(ref.step_id));
     const addOptions = capabilityStepSelectOptions(cap);
@@ -3209,25 +3694,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         <Space wrap align="center">
           <Typography.Text strong>添加接口</Typography.Text>
           <NativeSelect
-            value={capabilityAddValue[capIdx] || ""}
+            value={capabilityAddValue[capKey] || ""}
             width={460}
             options={[{ label: addOptions.length ? "选择要加入能力的接口" : "没有可添加的接口", value: "" }, ...addOptions]}
-            onChange={(v) => setCapabilityAddValue((s) => ({ ...s, [capIdx]: v }))}
+            onChange={(v) => setCapabilityAddValue((s) => ({ ...s, [capKey]: v }))}
           />
           <NativeSelect
-            value={capabilityAddUsage[capIdx] || ""}
+            value={capabilityAddUsage[capKey] || ""}
             width={140}
             options={[{ label: "选择用途", value: "" }, ...CAPABILITY_USAGE_OPTIONS]}
-            onChange={(v) => setCapabilityAddUsage((s) => ({ ...s, [capIdx]: v as CapabilityUsage | "" }))}
+            onChange={(v) => setCapabilityAddUsage((s) => ({ ...s, [capKey]: v as CapabilityUsage | "" }))}
           />
           <Button
             size="small"
             type="primary"
-            disabled={!capabilityAddValue[capIdx] || !capabilityAddUsage[capIdx]}
+            disabled={!capabilityAddValue[capKey] || !capabilityAddUsage[capKey]}
             onClick={() => {
-              addStepToCapability(capIdx, capabilityAddValue[capIdx], capabilityAddUsage[capIdx]);
-              setCapabilityAddValue((s) => ({ ...s, [capIdx]: "" }));
-              setCapabilityAddUsage((s) => ({ ...s, [capIdx]: "" }));
+              addStepToCapability(capIdx, capabilityAddValue[capKey], capabilityAddUsage[capKey]);
+              setCapabilityAddValue((s) => ({ ...s, [capKey]: "" }));
+              setCapabilityAddUsage((s) => ({ ...s, [capKey]: "" }));
             }}
           >
             添加接口
@@ -3245,6 +3730,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <List
             size="small"
             header={<Typography.Text strong>候选来源</Typography.Text>}
+            rowKey={(ref) => stableStepRef(ref)}
             dataSource={auxiliaryRefs}
             renderItem={(ref) => {
               const st = stepById[String(ref.step_id || "")];
@@ -3299,6 +3785,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         {!scopedLinks.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="这个能力没有接口依赖" /> : (
           <List
             size="small"
+            rowKey={(link) => link.link_id}
             dataSource={scopedLinks}
             renderItem={(link) => {
               const sourceStep = stepById[link.source_step_id];
@@ -3334,6 +3821,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return (
       <List
         size="small"
+        rowKey={(row) => row.fieldUuid || opaqueV3Identity(row.identitySource, "schema-field")}
         dataSource={rows}
         renderItem={(row) => (
           <List.Item>
@@ -3388,27 +3876,47 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const capabilities = flowSpec.capabilities || [];
     const capabilityRelations = flowSpec.capability_relations || [];
     const kindOptions = CAPABILITY_KIND_OPTIONS;
+    const pi = recordingSession?.state.pi;
+    const piLoop = flowSpec.meta?.recording_pi_loop as Record<string, any> | undefined;
+    const piSessionId = pi?.sessionId || piLoop?.session_id;
+    const piStatus = pi?.status || piLoop?.status || "等待中";
+    const piTurn = pi?.turn ?? piLoop?.current_turn ?? piLoop?.turn;
+    const piToolCalls = pi?.toolCalls ?? piLoop?.tool_calls_count ?? piLoop?.tool_call_count;
+    const piRetries = pi?.retries ?? piLoop?.retry_count ?? piLoop?.retries;
+    const piCompactions = pi?.compactions ?? piLoop?.compaction_count ?? piLoop?.compactions;
+    const piLastError = pi?.lastError || piLoop?.last_error;
+    const piUsage = pi?.usage || piLoop?.usage;
     return (
       <Space direction="vertical" size={12} style={{ width: "100%" }}>
         <Space wrap>
           <Tooltip title="基于当前能力、接口和人工修改继续规划，并同步修正字段绑定、枚举来源、依赖和接口闭包">
-            <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy || autoFixBusy} onClick={orchestrateFlow}>生成/优化能力</Button>
+            <Button icon={<RobotOutlined />} type="primary" loading={optimizationBusy} disabled={analysisBusy || publishBusy || captureBusy} onClick={orchestrateFlow}>生成/优化能力</Button>
           </Tooltip>
           <Button icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
-          <Button icon={<RobotOutlined />} loading={namingBusy} onClick={() => { setNamingBusy(true); send({ type: "step_naming" }); }}>命名步骤</Button>
-          {flowSpec.meta?.capability_generation && <>
+          <Button icon={<RobotOutlined />} loading={namingBusy} disabled={analysisBusy || publishBusy || captureBusy || optimizationBusy} onClick={() => {
+            setNamingBusy(true);
+            if (!send({ type: "step_naming" })) setNamingBusy(false);
+            else ensureOperationWatchdog("semantic");
+          }}>命名步骤</Button>
+          {(flowSpec.meta?.capability_generation || recordingSession) && <>
+            {flowSpec.meta?.capability_generation &&
             <Tag color={flowSpec.meta.capability_generation.initial_completed ? "success" : "warning"}>
               {flowSpec.meta.capability_generation.initial_completed ? "首次语义生成完成" : "确定性降级结果"}
+            </Tag>}
+            <Tag color={piStatus === "connected" || piStatus === "running" || piStatus === "ok" ? "blue" : "default"}
+              title={piSessionId || ""}>
+              Pi Session {piSessionId ? String(piSessionId).slice(-8) : piStatus}
             </Tag>
-            <Tag color={flowSpec.meta.capability_generation.application_cache_hit ? "green" : "blue"}>
-              {flowSpec.meta.capability_generation.application_cache_hit
-                ? "结果复用 · 零模型调用"
-                : `模型调用 ${flowSpec.meta.capability_generation.model_calls || 0}`}
+            <Tag color="geekblue" title={piLastError || ""}>
+              Turn {piTurn ?? "—"} · Tool {piToolCalls ?? 0} · Retry {piRetries ?? 0} · Compact {piCompactions ?? 0}
             </Tag>
-            {!flowSpec.meta.capability_generation.application_cache_hit
-              && !!flowSpec.meta.capability_generation.provider_cache_hits
-              && <Tag color="cyan">模型前缀缓存 {Math.round((flowSpec.meta.capability_generation.model_cache_rate || 0) * 100)}%</Tag>}
-            {!!flowSpec.meta.capability_generation.indexed_range_changes?.length &&
+            <Tag color="cyan">
+              用量 I {piUsage?.input ?? piUsage?.input_tokens ?? 0} / O {piUsage?.output ?? piUsage?.output_tokens ?? 0}
+              {Number(piUsage?.cacheRead ?? piUsage?.cache_read ?? piUsage?.cache_read_tokens ?? 0) > 0
+                || Number(piUsage?.cacheWrite ?? piUsage?.cache_write ?? piUsage?.cache_write_tokens ?? 0) > 0
+                ? ` / Cache R ${piUsage?.cacheRead ?? piUsage?.cache_read ?? piUsage?.cache_read_tokens ?? 0} W ${piUsage?.cacheWrite ?? piUsage?.cache_write ?? piUsage?.cache_write_tokens ?? 0}` : ""}
+            </Tag>
+            {!!flowSpec.meta?.capability_generation?.indexed_range_changes?.length &&
               <Tag color="cyan">识别区间字段 {flowSpec.meta.capability_generation.indexed_range_changes.length}</Tag>}
           </>}
         </Space>
@@ -3431,9 +3939,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               const derivedOutputSchema = lastResponse != null ? inferJsonSchema(lastResponse) : (cap.output_schema || {});
               return (
                 <Collapse.Panel
-                  key={`${cap.name || idx}-${idx}`}
+                  key={stableCapabilityRef(cap)}
                   header={
-                    <Space wrap id={`capability-${String(cap.name || cap.capability_id || idx).replace(/[^a-zA-Z0-9_-]+/g, "-")}`}>
+                    <Space wrap id={capabilityAnchorId(cap)}>
                       <Tag color={cap.confirmed ? "success" : "warning"}>{cap.confirmed ? "已确认" : "未确认"}</Tag>
                       <Tag color="blue">{optionLabel(kindOptions, cap.kind || "submit")}</Tag>
                       <Tag color={confidenceColor(cap.confidence)}>置信度 {confidencePercent(cap.confidence)}</Tag>
@@ -3443,8 +3951,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   }
                   extra={
                     <Space onClick={(e) => e.stopPropagation()}>
-                      <Tooltip title="能力上移"><Button size="small" icon={<UpOutlined />} disabled={idx === 0} onClick={() => moveCapability(idx, -1)} /></Tooltip>
-                      <Tooltip title="能力下移"><Button size="small" icon={<DownOutlined />} disabled={idx === capabilities.length - 1} onClick={() => moveCapability(idx, 1)} /></Tooltip>
+                      <Tooltip title="能力上移"><Button size="small" icon={<UpOutlined />} disabled={idx === 0} onMouseDown={(e) => e.preventDefault()} onClick={() => moveCapability(idx, -1)} /></Tooltip>
+                      <Tooltip title="能力下移"><Button size="small" icon={<DownOutlined />} disabled={idx === capabilities.length - 1} onMouseDown={(e) => e.preventDefault()} onClick={() => moveCapability(idx, 1)} /></Tooltip>
                       <Checkbox checked={!!cap.confirmed} onChange={(e) => updateCapabilityConfirmed(idx, e.target.checked)}>确认</Checkbox>
                       <Tooltip title="删除"><Button size="small" danger icon={<DeleteOutlined />} onClick={() => removeCapability(idx)} /></Tooltip>
                     </Space>
@@ -3489,11 +3997,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <Collapse size="small" bordered={false}>
             <Collapse.Panel key="capability-relations" header={`能力关系 ${capabilityRelations.length}`}>
               <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                {capabilityRelations.map((relation, index) => {
+                {capabilityRelations.map((relation) => {
                   const relationType = relation.mode || relation.type || "external_transform";
                   const owner = relation.transform_owner === "skill" ? "Skill 内部" : "调用方";
                   return (
-                    <div key={relation.relation_id || `${relation.from_capability}-${relation.to_capability}-${index}`}
+                    <div key={stableRelationKey(relation)}
                       style={{ display: "grid", gridTemplateColumns: "minmax(160px, 1fr) auto minmax(160px, 1fr)", gap: 8, alignItems: "center" }}>
                       <Space wrap size={4}>
                         <Tag color="blue">{relation.from_capability || "未指定来源能力"}</Tag>
@@ -3537,7 +4045,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <Typography.Text strong style={{ fontSize: 12 }}>{title}</Typography.Text>
           <Space direction="vertical" size={4} style={{ width: "100%", marginTop: 6 }}>
             {rows.slice(0, 8).map((row) => (
-              <Space key={`${title}-${row.name}`} size={4} wrap>
+              <Space key={row.fieldUuid || opaqueV3Identity(row.identitySource, "schema-field")} size={4} wrap>
                 <Typography.Text code style={{ fontSize: 12 }}>{row.name}</Typography.Text>
                 <Tag color="blue">业务类型：{PARAM_TYPE_LABELS[row.businessType] || row.businessType}</Tag>
                 <Tag>Wire：{row.wireType}</Tag>
@@ -3561,6 +4069,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           description="这里展示外部调用方看到的能力层；接口、字段、依赖和输入输出都应在能力卡片内维护。"
         />
         <List
+          rowKey={(cap) => stableCapabilityRef(cap)}
           dataSource={capabilities}
           renderItem={(cap, idx) => {
             const stepIds = capabilityActualStepIds(cap);
@@ -3622,7 +4131,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                             const st = stepById[stepId];
                             const requestRef = capabilityRequestRefForStep(cap, stepId);
                             return (
-                              <Space key={stepId} size={4} wrap>
+                              <Space key={st ? stableStepRef(st) : stableStepRef(requestRef || {})} size={4} wrap>
                                 <Tag>{st?.name || st?.path || stepId}</Tag>
                                 {st && <PathText value={st.path || stripHost(st.url)} maxWidth={260} />}
                                 <Tag color="blue">用途：{capabilityUsageLabel(requestRef?.usage)}</Tag>
@@ -3638,8 +4147,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                         {mappings.length > 0 && (
                           <Collapse.Panel key="mapping" header={`输出映射 ${mappings.length}`}>
                             <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                              {mappings.map((item, mapIdx) => (
-                                <Typography.Text key={mapIdx} code style={{ fontSize: 12 }}>{compactJson(item, 240)}</Typography.Text>
+                              {mappings.map((item) => (
+                                <Typography.Text key={stableMappingKey(item)} code style={{ fontSize: 12 }}>{compactJson(item, 240)}</Typography.Text>
                               ))}
                             </Space>
                           </Collapse.Panel>
@@ -3647,8 +4156,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                         {preconditions.length > 0 && (
                           <Collapse.Panel key="preconditions" header={`前置条件 ${preconditions.length}`}>
                             <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                              {preconditions.map((item, preIdx) => (
-                                <Typography.Text key={preIdx} code style={{ fontSize: 12 }}>{compactJson(item, 240)}</Typography.Text>
+                              {preconditions.map((item) => (
+                                <Typography.Text key={stablePreconditionKey(item)} code style={{ fontSize: 12 }}>{compactJson(item, 240)}</Typography.Text>
                               ))}
                             </Space>
                           </Collapse.Panel>
@@ -3688,7 +4197,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             </Col>
             <Col>
               <Space wrap>
-                <Button icon={<RobotOutlined />} loading={llmBusy} onClick={refreshLlmRecommendations}>刷新智能推荐</Button>
+                <Button icon={<RobotOutlined />} loading={llmBusy} disabled={analysisBusy || publishBusy || captureBusy || optimizationBusy} onClick={refreshLlmRecommendations}>刷新智能推荐</Button>
                 <Button type="primary" onClick={() => bulkReview("accept")}>全部采纳</Button>
                 <Button onClick={() => bulkReview("ignore")}>全部忽略</Button>
               </Space>
@@ -3697,6 +4206,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         </Card>
         <List
           size="small"
+          rowKey={(item) => stableIssueKey("review", item, "")}
           dataSource={reviewItems}
           renderItem={(item) => {
             const manualBind = requiresManualSourceBinding(item);
@@ -3719,8 +4229,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   <Typography.Text type="secondary" style={{ fontSize: 12 }}>{item.reason}</Typography.Text>
                   {!!item.llm_suggestions?.length && (
                     <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                      {item.llm_suggestions.map((s, idx) => (
-                        <div key={`${item.id}-llm-${idx}`} style={{ border: "1px solid #e6f4ff", background: "#f6fbff", padding: 8, borderRadius: 6 }}>
+                      {item.llm_suggestions.map((s) => (
+                        <div key={s.suggestion_id || opaqueV3Identity(s, "suggestion")} style={{ border: "1px solid #e6f4ff", background: "#f6fbff", padding: 8, borderRadius: 6 }}>
                           <Space wrap>
                             <Tag color="blue">LLM 建议</Tag>
                             <Tag>{s.action}</Tag>
@@ -3797,7 +4307,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         <Collapse size="small">
           {flowSpec.steps.map((step, idx) => (
             <Collapse.Panel
-              key={step.step_id}
+              key={stableStepRef(step)}
               header={
                 <Space wrap style={{ minWidth: 0, maxWidth: "100%" }}>
                   <Tag color="purple">第 {idx + 1} 步</Tag>
@@ -3811,8 +4321,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               }
               extra={
                 <Space onClick={(e) => e.stopPropagation()}>
-                  <Tooltip title="上移"><Button size="small" icon={<UpOutlined />} disabled={idx === 0} onClick={() => moveStep(idx, -1)} /></Tooltip>
-                  <Tooltip title="下移"><Button size="small" icon={<DownOutlined />} disabled={idx === flowSpec.steps.length - 1} onClick={() => moveStep(idx, 1)} /></Tooltip>
+                  <Tooltip title="上移"><Button size="small" icon={<UpOutlined />} disabled={idx === 0} onMouseDown={(e) => e.preventDefault()} onClick={() => moveStep(idx, -1)} /></Tooltip>
+                  <Tooltip title="下移"><Button size="small" icon={<DownOutlined />} disabled={idx === flowSpec.steps.length - 1} onMouseDown={(e) => e.preventDefault()} onClick={() => moveStep(idx, 1)} /></Tooltip>
                   <Tooltip title="删除"><Button size="small" danger icon={<DeleteOutlined />} onClick={() => removeStepWithConfirm(step)} /></Tooltip>
                 </Space>
               }
@@ -3913,7 +4423,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         <Collapse size="small">
           {flowSpec.steps.map((step) => (
             <Collapse.Panel
-              key={step.step_id}
+              key={stableStepRef(step)}
               header={
                 <Space wrap style={{ minWidth: 0, maxWidth: "100%" }}>
                   <ApiOutlined />
@@ -3931,7 +4441,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   danger
                   onClick={(e) => {
                     e.stopPropagation();
-                    send({ type: "flow_update", edits: [{ op: "remove_step", step_id: step.step_id }] });
+                    send({ type: "flow_update", edits: [{ op: "remove_step", ...stepMutationTarget(step.step_id) }] });
                   }}
                 >
                   删除接口
@@ -3944,8 +4454,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 {step.response_json != null && (
                   <Card size="small" title="响应字段">
                     <Space wrap size={4}>
-                      {leafPathValues(step.response_json).slice(0, 40).map((leaf, leafIdx) => (
-                        <Tooltip key={`${leaf.path}-${leafIdx}`} title={leaf.value}>
+                      {leafPathValues(step.response_json).slice(0, 40).map((leaf) => (
+                        <Tooltip key={opaqueV3Identity(leaf, "response-leaf")} title={leaf.value}>
                           <Typography.Text code style={{ fontSize: 12 }}>{leaf.path}</Typography.Text>
                         </Tooltip>
                       ))}
@@ -3957,10 +4467,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             ) : (
               <List
                 size="small"
-                rowKey={(p) => paramDraftKey(step.step_id, p)}
+                rowKey={(p) => stableFieldKey(step, p)}
                 dataSource={step.params}
                 renderItem={(p) => {
-                  const bindKey = paramDraftKey(step.step_id, p);
+                  const bindKey = stableFieldKey(step, p);
                   const linked = incomingLink(step.step_id, p.path);
                   const currentBind = bindDraft[bindKey] || {
                     source_step_id: p.source?.step_id || linked?.source_step_id,
@@ -4072,7 +4582,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                               <Space wrap size={6}>
                                 <Typography.Text strong style={{ fontSize: 12 }}>{isApiOption ? "接口候选配置" : "枚举候选配置"}</Typography.Text>
                                 <Tag color={selectBinding?.source_url ? "geekblue" : "purple"}>{enumSourceLabel(selectBinding)}</Tag>
-                                {enumOptions.slice(0, 8).map((x, enumIdx) => <Tag key={`${x}-${enumIdx}`}>{x}</Tag>)}
+                                {enumOptions.slice(0, 8).map((x) => <Tag key={x}>{x}</Tag>)}
                                 {enumOptions.length > 8 && <Tag>+{enumOptions.length - 8}</Tag>}
                               </Space>
                               {isApiOption && (
@@ -4246,6 +4756,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         </Card>
         {!flowSpec.links?.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有跨接口依赖" /> : (
           <List
+            rowKey={(link) => link.link_id}
             dataSource={flowSpec.links}
             renderItem={(link) => {
               const editing = editingLink[link.link_id];
@@ -4312,37 +4823,45 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             面向调用方描述整体能力、输入输出和执行边界。
           </Typography.Text>
-          <Button icon={<FileTextOutlined />} type="primary" loading={descBusy} onClick={() => { setDescBusy(true); send({ type: "business_description" }); }}>
+          <Button icon={<FileTextOutlined />} type="primary" loading={descBusy} disabled={analysisBusy || publishBusy || captureBusy || optimizationBusy} onClick={() => {
+            setDescBusy(true);
+            if (!send({ type: "business_description" })) setDescBusy(false);
+            else ensureOperationWatchdog("semantic");
+          }}>
             {flowSpec.business_description ? "重新生成整体说明" : "生成整体说明"}
           </Button>
         </Space>
         <FieldControl label="最终标题">
           <Input value={titleDraft}
-            onChange={(e) => setTitleDraft(e.target.value)}
+            onChange={(e) => { titleDirtyRef.current = true; setTitleDraft(e.target.value); }}
             onBlur={(e) => {
-              if (e.target.value.trim() !== (flowSpec?.title || "")) {
-                const cur = flowSpecRef.current;
+              const value = e.target.value.trim();
+              const cur = flowSpecRef.current;
+              if (cur && value !== (cur.title || "")) {
                 if (cur) {
-                  const next = { ...cur, title: e.target.value.trim() };
+                  const next = { ...cur, title: value };
                   flowSpecRef.current = next;
                   setFlowSpec(next);
                 }
-                updateFlowField("title", e.target.value.trim());
+                updateFlowField("title", value);
               }
+              titleDirtyRef.current = false;
             }} />
         </FieldControl>
         <Input.TextArea rows={12} value={descDraft}
-          onChange={(e) => setDescDraft(e.target.value)}
+          onChange={(e) => { descDirtyRef.current = true; setDescDraft(e.target.value); }}
           onBlur={(e) => {
-            if (e.target.value !== (flowSpec?.business_description || "")) {
-              const cur = flowSpecRef.current;
+            const value = e.target.value;
+            const cur = flowSpecRef.current;
+            if (cur && value !== (cur.business_description || "")) {
               if (cur) {
-                const next = { ...cur, business_description: e.target.value };
+                const next = { ...cur, business_description: value };
                 flowSpecRef.current = next;
                 setFlowSpec(next);
               }
-              updateFlowField("business_description", e.target.value);
+              updateFlowField("business_description", value);
             }
+            descDirtyRef.current = false;
           }}
           placeholder="生成或手写最终整体说明：包含这个 Skill 能做什么、调用方需要传什么、Skill 会执行哪些查询/提交、最终返回什么。" />
       </Space>
@@ -4364,6 +4883,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       </Space>
     );
   }
+
+  const resultVerified = result?.verification_status === "verified"
+    && (!result.publication_status || result.publication_status === "published_verified");
+  const resultStatus = result?.publication_status || result?.verification_status || result?.status;
+  const resultPublicationLabel = result?.verification_status || result?.action;
 
   return (
     <ConfigProvider getPopupContainer={popupContainer}>
@@ -4406,17 +4930,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             boxShadow: "0 2px 8px rgba(0,0,0,0.04)",
           }}>
             <Space align="center" wrap size={12}>
-              <Tag color="processing">{phase === "publishing" ? "发布中" : "录制中"}</Tag>
-              <Button size="small" disabled={phase === "publishing"} onClick={resetFromHere}>从这里开始录</Button>
-              <Button size="small" onClick={stopAll} disabled={phase === "publishing"}>结束录制</Button>
+              <Tag color="processing">{publishBusy ? "发布中" : analysisBusy ? "分析中" : "录制中"}</Tag>
+              <Button size="small" disabled={publishBusy || analysisBusy} onClick={resetFromHere}>从这里开始录</Button>
+              <Button size="small" onClick={analysisBusy ? cancelAnalysis : stopAll} disabled={publishBusy}>
+                {analysisBusy ? "取消分析" : "结束录制"}
+              </Button>
               <Form.Item label="动作名" required style={{ marginBottom: 0 }}>
-                <Input value={action} onChange={(e) => setAction(e.target.value)} style={{ width: 190 }} />
+                <Input value={action} onChange={(e) => { actionDirtyRef.current = true; setAction(e.target.value); }} style={{ width: 190 }} />
               </Form.Item>
               <Form.Item label="标题" style={{ marginBottom: 0 }}>
-                <Input value={title} onChange={(e) => setTitle(e.target.value)} style={{ width: 180 }} />
+                <Input value={title} onChange={(e) => {
+                  recordingTitleDirtyRef.current = true;
+                  recordingTitleValueRef.current = e.target.value;
+                  setTitle(e.target.value);
+                }} style={{ width: 180 }} />
               </Form.Item>
-              <Button type="primary" loading={phase === "publishing"} disabled={!steps.length && !reqs.length} onClick={finalize}>
-                停止并分析请求
+              <Button type="primary" loading={analysisBusy}
+                disabled={publishBusy || captureBusy || optimizationBusy || (!flowSpec && !steps.length && !reqs.length)}
+                onClick={flowSpec ? reanalyze : finalize}>
+                {flowSpec ? "重新分析请求" : "停止并分析请求"}
               </Button>
             </Space>
           </div>
@@ -4441,7 +4973,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 <Space wrap>
                   {reqMeta && <Typography.Text code>{reqMeta.method} {stripHost(reqMeta.url)}</Typography.Text>}
                   <Typography.Text>请重新分析请求，发布只使用 FlowSpec 工作台中的步骤、字段、依赖和说明。</Typography.Text>
-                  <Button size="small" loading={phase === "publishing"} onClick={finalize}>重新分析</Button>
+                  <Button size="small" loading={analysisBusy} onClick={reanalyze}>重新分析</Button>
                 </Space>
               }
             />
@@ -4456,8 +4988,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               showIcon
               message={
                 <Space wrap>
-                  <span>{result.ok ? `已发布：${result.action}` : `未发布：${result.reason || "需要调整"}`}</span>
-                  {result.status && STATUS_META[result.status] && <Tag color={STATUS_META[result.status].color}>{STATUS_META[result.status].label}</Tag>}
+                  <span>{result.ok ? `已发布：${resultPublicationLabel}` : `未发布：${result.reason || "需要调整"}`}</span>
+                  {resultStatus && STATUS_META[resultStatus] && <Tag color={STATUS_META[resultStatus].color}>{STATUS_META[resultStatus].label}</Tag>}
                 </Space>
               }
               description={
@@ -4470,11 +5002,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                       录制模式：{result.recording_mode === "real_submit" ? "真实提交" : result.recording_mode === "intercepted_submit" ? "只录制不提交" : result.recording_mode}
                     </Typography.Text>
                   )}
-                  {(result.clarifications || []).map((c, i) => <Typography.Text key={i} type="warning">{c}</Typography.Text>)}
+                  {(result.clarifications || []).map((c) => <Typography.Text key={c} type="warning">{c}</Typography.Text>)}
                   {result.verification_basis && (
                     <Typography.Text type="secondary">验证依据：{result.verification_basis}</Typography.Text>
                   )}
-                  {result.ok && (
+                  {result.ok && resultVerified && (
                     <Button
                       type="primary"
                       size="small"
@@ -4502,8 +5034,8 @@ function HeadersEditor({ value, onChange }: { value: Record<string, string>; onC
     <div style={{ background: "#f5f5f5", padding: 8, borderRadius: 6 }}>
       <Typography.Text type="secondary" style={{ fontSize: 12 }}>请求头</Typography.Text>
       <Space direction="vertical" size={4} style={{ width: "100%", marginTop: 6 }}>
-        {entries.map(([k, v], i) => (
-          <Space key={k + i} wrap>
+        {entries.map(([k, v]) => (
+          <Space key={k} wrap>
             <Input size="small" value={k} style={{ width: 160 }} onChange={(e) => {
               const nk = e.target.value.trim(); if (!nk) return;
               const { [k]: _, ...rest } = value;

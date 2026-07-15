@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { TENANT_NAME } from "../api/client";
-import PageRecorder from "../components/PageRecorder";
+import RecordingWorkbench from "../features/recording-v3/RecordingWorkbench";
 
 export default function Recording() {
   const tenant = localStorage.getItem(TENANT_NAME) || "";
@@ -10,7 +10,7 @@ export default function Recording() {
 
   return (
     <div style={{ maxWidth: 1180, margin: "0 auto" }}>
-      <PageRecorder tenant={tenant} subsystem={subsystem} baseUrl={baseUrl} storageState={storageState} />
+      <RecordingWorkbench tenant={tenant} subsystem={subsystem} baseUrl={baseUrl} storageState={storageState} />
     </div>
   );
 }

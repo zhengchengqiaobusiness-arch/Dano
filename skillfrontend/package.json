@@ -6,6 +6,7 @@
   "description": "Dano Skill 管理后台(阶段一接入生成 + 阶段三运维)。P0:目录 + 测试调用。",
   "scripts": {
     "dev": "vite",
+    "test": "node --test tests/*.test.ts",
     "build": "vite build",
     "preview": "vite preview"
   },

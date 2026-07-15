@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from dano.catalog.manifest import to_manifest
 from dano.execution.page.request_capture import execute_api
@@ -28,8 +28,8 @@ class CapabilityInvokePayload(BaseModel):
 
     input: dict[str, Any] | None = Field(default_factory=dict)
     arguments: dict[str, Any] | str | None = Field(default_factory=dict)
-    confirm: bool = False
-    dry_run: bool = False
+    confirm: StrictBool = False
+    dry_run: StrictBool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str | None = None
     name: str | None = None
@@ -232,9 +232,17 @@ def capability_input_issues(cap: dict[str, Any] | None, fields: dict[str, Any]) 
 def capability_requires_confirmation(skill, cap: dict[str, Any] | None) -> bool:  # noqa: ANN001
     if not isinstance(cap, dict):
         return False
-    if bool(cap.get("requires_confirmation")) or bool(cap.get("requires_human_confirm")):
+    confirmation_flags = [
+        cap.get(name) for name in ("requires_confirmation", "requires_human_confirm")
+        if name in cap
+    ]
+    # Persisted confirmation metadata is a security boundary. Invalid scalar
+    # values (for example the string "false") never waive confirmation.
+    if any(not isinstance(value, bool) for value in confirmation_flags):
         return True
-    if bool(cap.get("readonly")) or bool(cap.get("read_only")):
+    if any(value is True for value in confirmation_flags):
+        return True
+    if cap.get("readonly") is True or cap.get("read_only") is True:
         return False
     kind = str(cap.get("kind") or cap.get("name") or "").strip()
     if kind in READ_ONLY_CAPABILITY_KINDS:
@@ -266,11 +274,19 @@ def normalize_capability_result(
     success_count = int(result.get("success_count") or 0)
     failed_count = int(result.get("failed_count") or 0)
     total = int(result.get("total") or (success_count + failed_count))
-    if result.get("blocked"):
+    invalid_boolean_fields = [
+        name for name in ("ok", "blocked", "batch")
+        if name in result and not isinstance(result.get(name), bool)
+    ]
+    result_ok = result.get("ok") is True and not invalid_boolean_fields
+    # A malformed explicit blocked marker is untrusted downstream data. Treat
+    # it as blocked rather than silently turning it into permission to succeed.
+    result_blocked = result.get("blocked") is True or "blocked" in invalid_boolean_fields
+    if result_blocked:
         status = "blocked"
     elif (success_count and failed_count) or (passed_facts and failed_facts):
         status = "partial_success"
-    elif result.get("ok"):
+    elif result_ok:
         status = "succeeded"
     else:
         status = "failed"
@@ -284,18 +300,18 @@ def normalize_capability_result(
     else:
         verification_status = "not_checked"
     normalized = {
-        "ok": bool(result.get("ok")),
+        "ok": result_ok,
         "skill_id": skill_id,
         "capability": capability,
         "output": output,
         "response": response,
         "structured_output": structured,
         "raw": result,
-        "blocked": bool(result.get("blocked", False)),
+        "blocked": result_blocked,
         "detail": result.get("detail", ""),
         "status": status,
         "source_status": result.get("status"),
-        "batch": bool(result.get("batch", False)),
+        "batch": result.get("batch") is True,
         "total": total,
         "success_count": success_count,
         "failed_count": failed_count,
@@ -307,6 +323,16 @@ def normalize_capability_result(
         "verification_status": verification_status,
         "relations": relation_context or {"incoming": [], "outgoing": [], "automatic": False},
     }
+    if invalid_boolean_fields:
+        normalized.update({
+            "ok": False,
+            "stage": "invalid_result_contract",
+            "status": "blocked" if "blocked" in invalid_boolean_fields else "failed",
+            "detail": (
+                "结果布尔字段必须是 JSON true/false: "
+                + ", ".join(invalid_boolean_fields)
+            ),
+        })
     if normalized["ok"] and output_schema:
         issues = schema_issues(output, output_schema, "output")
         if issues:
@@ -329,6 +355,8 @@ async def invoke_skill_capability(
     api_request: dict[str, Any] | None = None,
     base_url: str = "",
     storage_state: dict[str, Any] | None = None,
+    credential_headers: dict[str, Any] | None = None,
+    runtime_context: dict[str, Any] | None = None,
     token_key: str | None = None,
     verify: bool = True,
 ) -> dict[str, Any]:
@@ -403,6 +431,26 @@ async def invoke_skill_capability(
             "relations": relation_context,
         }
 
+    if api_request.get("recording_engine") == "playwright_v3":
+        metadata = dict(getattr(skill, "call_metadata", {}) or {})
+        authoritative_verified = (
+            metadata.get("recording_engine") == "playwright_v3"
+            and str(metadata.get("verification_status") or "") == "verified"
+            and str(metadata.get("publication_status") or "") == "published_verified"
+            and metadata.get("direct_call_enabled") is True
+            and metadata.get("contract_integrity", True) is True
+        )
+        nested_verified = (
+            str(api_request.get("verification_status") or "") == "verified"
+            and api_request.get("direct_call_enabled") is True
+        )
+        if not (authoritative_verified and nested_verified):
+            api_request.update({
+                "verification_status": "unverified",
+                "publication_status": "published_unverified",
+                "direct_call_enabled": False,
+            })
+
     if payload.dry_run:
         return {
             "ok": True,
@@ -421,15 +469,31 @@ async def invoke_skill_capability(
             "relations": relation_context,
         }
 
-    out = await execute_api(
-        api_request,
-        fields,
-        base_url=base_url,
-        storage_state=storage_state,
-        token_key=token_key,
-        verify=verify,
-        send=True,
-    )
+    if api_request.get("recording_engine") == "playwright_v3":
+        from dano.recording_v3 import execute_v3_capability
+
+        out = await execute_v3_capability(
+            api_request=api_request,
+            fields=fields,
+            capability=capability,
+            confirm=payload.confirm,
+            dry_run=payload.dry_run,
+            base_url=base_url,
+            storage_state=storage_state,
+            credential_headers=credential_headers,
+            runtime_context=runtime_context,
+        )
+    else:
+        # Existing recording assets retain the legacy runtime unchanged.
+        out = await execute_api(
+            api_request,
+            fields,
+            base_url=base_url,
+            storage_state=storage_state,
+            token_key=token_key,
+            verify=verify,
+            send=True,
+        )
     return normalize_capability_result(
         out,
         capability,

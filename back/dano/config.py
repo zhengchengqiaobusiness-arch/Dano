@@ -61,9 +61,19 @@ class Settings(BaseSettings):
     review_max_retries: int = 2
     review_retry_backoff_s: float = 1.0
 
-    # ── 录制 V2 浏览器设置 ──
+    # ── 录制浏览器设置 ──
     browser_headless: bool = True        # = DANO_BROWSER_HEADLESS:浏览器无头(调试可设 False 看界面)
     page_timeout_s: float = 120.0        # = DANO_PAGE_TIMEOUT_S:单次页面运行总超时(防卡死)
+    # 企业内网系统是现有录制能力的核心场景；V3 仍严格绑定用户声明的目标 host，
+    # 但允许管理员关闭内网访问以部署在公网边界。
+    recording_allow_private_networks: bool = True
+    recording_evidence_hmac_key: str = Field(
+        default="",
+        description=(
+            "录制 ValueEvidence 的稳定 HMAC 根密钥；多实例生产必须显式配置，"
+            "单机未配置时生成到 back/.secrets（不入库）"
+        ),
+    )
 
 
 @lru_cache

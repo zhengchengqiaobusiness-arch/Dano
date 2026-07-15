@@ -108,6 +108,7 @@ def _schema_option_fields(schema: dict) -> list[str]:
 def _capability_contracts(m: SkillManifest) -> dict[str, dict]:
     """Return the authoritative per-capability caller contracts used by exports."""
     contracts: dict[str, dict] = {}
+    manifest_engine = str((getattr(m, "call_metadata", {}) or {}).get("recording_engine") or "")
     for raw in getattr(m, "capabilities", []) or []:
         if not isinstance(raw, dict):
             continue
@@ -137,6 +138,8 @@ def _capability_contracts(m: SkillManifest) -> dict[str, dict]:
             "validation_requirements": dict(raw.get("validation_requirements") or {}),
             "call_protocol": dict(raw.get("call_protocol") or {}),
             "caller_responsibilities": list(raw.get("caller_responsibilities") or []),
+            "read_only": raw.get("read_only") is True,
+            "recording_engine": str(raw.get("recording_engine") or manifest_engine),
         }
     if contracts:
         return contracts
@@ -157,6 +160,8 @@ def _capability_contracts(m: SkillManifest) -> dict[str, dict]:
         "validation_requirements": {},
         "call_protocol": dict(m.call_protocol or {}),
         "caller_responsibilities": [],
+        "read_only": False,
+        "recording_engine": manifest_engine,
     }}
 
 
@@ -179,8 +184,12 @@ def _export_contract_errors(m: SkillManifest) -> list[str]:
         missing_required = [item for item in required if item not in props]
         if missing_required:
             errors.append(f"{name}: required 字段不在 properties: {', '.join(missing_required)}")
-        if contract.get("kind") in _CAPABILITY_PUBLIC_KINDS and name != contract.get("kind"):
-            errors.append(f"{name}: capability name 必须与 kind `{contract.get('kind')}` 一致")
+        if contract.get("kind") in _CAPABILITY_PUBLIC_KINDS and re.fullmatch(
+            r"(?:capability|ability)_?\d*|(?:query|submit|action)_?\d+",
+            str(name or ""),
+            re.I,
+        ):
+            errors.append(f"{name}: capability name 必须表达具体业务动作")
         exposed_internal = [
             field for field in props
             if _INTERNAL_CALLER_FIELD_RE.search(re.sub(r"[^a-z0-9]+", "", str(field).lower()))
@@ -193,10 +202,39 @@ def _export_contract_errors(m: SkillManifest) -> list[str]:
             item_props = items.get("properties") if isinstance(items.get("properties"), dict) else {}
             if contract.get("kind") in {"submit_batch", "validate_batch"} and not item_props:
                 errors.append(f"{name}: 批量能力缺少 entries 条目字段")
-            if contract.get("kind") == "submit" and entries is not None:
+            if (
+                contract.get("kind") == "submit"
+                and entries is not None
+                and contract.get("recording_engine") != "playwright_v3"
+            ):
                 errors.append(f"{name}: submit 不能伪装成批量契约；请使用 submit_batch + entries[]")
             if item_props and all(_ROUTING_FIELD_RE.search(str(field or "")) for field in item_props):
                 errors.append(f"{name}: entries 只有审批/路由字段，疑似把人员列表误判为批量业务条目")
+        output_schema = contract.get("output_schema") or {}
+        output_props = (
+            output_schema.get("properties")
+            if isinstance(output_schema.get("properties"), dict) else {}
+        )
+        for output_name, output_prop in output_props.items():
+            if not isinstance(output_prop, dict) or output_prop.get("type") != "array":
+                continue
+            items_schema = (
+                output_prop.get("items")
+                if isinstance(output_prop.get("items"), dict) else {}
+            )
+            item_props = (
+                items_schema.get("properties")
+                if isinstance(items_schema.get("properties"), dict) else {}
+            )
+            if not item_props:
+                errors.append(f"{name}: 输出数组 {output_name} 必须定义每条记录的字段结构")
+                continue
+            if contract.get("read_only") and str(output_name) in {"records", "items", "results"}:
+                record_id = str(output_prop.get("x-record-id-field") or "").strip()
+                if not record_id or record_id not in item_props:
+                    errors.append(
+                        f"{name}: 输出数组 {output_name} 必须声明可验证的 x-record-id-field"
+                    )
     return errors
 
 
@@ -614,9 +652,12 @@ def _interaction_section(m: SkillManifest) -> str:
         "## 调用方交互约束",
         "",
         "- 需要向用户补充信息时,必须原生调用 `ask_user_question`;禁止在普通文本、Markdown 或 `<question>` 标签中模拟提问。",
-        "- 多个相关缺失字段要合并到同一次 `ask_user_question` 的 `questions` 数组里;不要逐字段拆成多轮打扰用户。",
-        "- `questions` 数组中的每个问题都要设置合理 `default`:优先使用用户已说出的值,其次使用录制样例/业务常用默认值;确实无法推断时用空字符串或安全默认值,并让用户确认。",
-        "- 选择型字段先按参数说明或 `--list-options <字段名>` 取得真实候选;问题里展示显示名/选项文字,不要要求用户填写内部 ID/编号。",
+        "- 每次回复最多原生调用一次 `ask_user_question`;多个相关缺失字段必须合并到这一次调用的 `questions` 数组里,不要逐字段拆成多轮。",
+        "- 只收集一个非确认字段时使用顶层 `question` 和该字段的配置；收集多个字段时只使用 `questions[]`,每项用稳定 `id`，不要混入顶层字段配置或顶层 `confirm`。",
+        "- 每个非确认问题都必须有结合上下文的非空 `default`:优先用户已给值,其次使用契约中有证据的默认值；禁止空字符串、占位符或凭字段名臆造业务值。",
+        "- 只有业务上确实必填的字段才设置 `required: true`;日期字段使用 `inputType: \"date\"` 并提供 `dateFormat`。",
+        "- 选择型字段只使用参数契约、完整证据或真实来源接口候选；远程候选使用有真实 endpoint 的 `dataSource`,不得猜测枚举或来源。",
+        "- 用户取消时立即停止；校验错误只修正参数并静默重试原生工具调用，不在普通文本中模拟纠错提问。",
     ]
     if len(contracts) > 1:
         lines.append("- 先根据用户目标选择一个明确 capability；不同能力的必填字段不能混用。")
@@ -635,7 +676,8 @@ def _interaction_section(m: SkillManifest) -> str:
         write_names = [name for name, contract in contracts.items() if contract.get("requires_confirmation")]
         lines += [
             f"- 写能力({', '.join('`' + name + '`' for name in write_names) or '无'})执行前，"
-            "必须使用**单独一次** `ask_user_question`，且只带 `question` 与 `confirm: true`。",
+            "必须使用**单独一次** `ask_user_question`，且只带 `question` 与 `confirm: true`,不要带 `options`、`multiple` 或 `questions`。",
+            "- 只有最终确认返回 `status=answered` 且 `answer=true` 才允许带 `--confirm` 调用；取消、false 或其他值都必须停止。",
             "- 只读能力无需最终确认；查询完成后由调用方决定是否询问用户并调用写能力，Skill 不自动越过确认边界。",
             "- 用户没有明确确认、只是询问/预览/修改草稿时，不得调用写能力。",
         ]
@@ -644,6 +686,7 @@ def _interaction_section(m: SkillManifest) -> str:
         lines += [
             "- 整理好申请/提交内容后,必须再用**单独一次** `ask_user_question` 做最终确认;这次调用只能包含 `question` 与 `confirm: true`,不要带 `options`、`multiple` 或 `questions`。",
             f"- 最终确认的 `question` 要逐项复述将提交的内容({recap})以及风险提示;只有用户确认后才允许带 `--confirm` 调用脚本。",
+            "- 只有最终确认返回 `status=answered` 且 `answer=true` 才算确认；取消、false 或其他值都必须停止。",
             "- 用户没有明确确认、只是询问/预览/修改草稿时,不得调用写操作。",
         ]
     else:
@@ -699,8 +742,14 @@ def _skill_md(m: SkillManifest, slug: str) -> str:
     cflag = " --confirm" if confirm else ""
     confirm_note = ("\n> ⚠ 高风险写操作:**执行前必须向用户复述将提交内容并取得同意**,确认后再带 `--confirm` 调用。\n"
                     if confirm else "")
-    desc = (f"{m.description}。当用户想办理「{m.title}」或相关 {m.subsystem} 操作时,**务必使用本 skill**,"
-            f"即使用户没有明确说出 skill 名或接口名。")
+    published_scope = "、".join(
+        f"`{name}`({contract.get('title') or name})"
+        for name, contract in contracts.items()
+    )
+    desc = (
+        f"{m.description}。仅用于这些已发布能力:{published_scope}。"
+        "用户意图明确匹配其中一个能力时使用本 skill；不覆盖同子系统的其他操作。"
+    )
     # 审批路径(有 business_meta 才出,grounded);放在 SOP 前,供阶段3 引用
     approval = _approval_section(getattr(m, "business_meta", {}) or {})
     approval_md = (approval + "\n\n") if approval else ""
@@ -994,6 +1043,10 @@ def _is_envelope(obj):
     return any(k in obj for k in ("protocol", "capability", "name", "confirm"))
 
 
+def _strict_boolean(value):
+    return value if type(value) is bool else None
+
+
 def _choose_capability(requested, field=None):
     if requested:
         return requested
@@ -1012,7 +1065,12 @@ def _coerce_cli_values(arguments, contract):
         if not isinstance(value, str) or value == "":
             continue
         field_type = (schema or {}).get("type")
-        if field_type in {"array", "object"}:
+        if field_type == "boolean":
+            normalized = value.strip().lower()
+            if normalized not in {"true", "false"}:
+                raise ValueError("字段 %s 需为严格布尔值 true/false" % field)
+            arguments[field] = normalized == "true"
+        elif field_type in {"array", "object"}:
             try:
                 parsed = json.loads(value)
             except Exception as exc:
@@ -1022,6 +1080,17 @@ def _coerce_cli_values(arguments, contract):
             if field_type == "object" and not isinstance(parsed, dict):
                 raise ValueError("字段 %s 需为 JSON 对象" % field)
             arguments[field] = parsed
+    return arguments
+
+
+def _apply_safe_defaults(arguments, contract):
+    """Apply only defaults explicitly approved for silent transport use."""
+    properties = (contract.get("parameters") or {}).get("properties") or {}
+    for field, schema in properties.items():
+        if field in arguments or not isinstance(schema, dict):
+            continue
+        if schema.get("x-dano-apply-default") is True and "default" in schema:
+            arguments[field] = schema.get("default")
     return arguments
 
 
@@ -1114,7 +1183,7 @@ def main():
     args = ap.parse_args()
 
     capability = _choose_capability(args.capability, args.list_options)
-    confirm = bool(args.confirm)
+    confirm = args.confirm is True
 
     raw_obj = None
     if args.raw:
@@ -1122,10 +1191,16 @@ def main():
             raw_obj = json.loads(args.raw)
             if _is_envelope(raw_obj):
                 capability = _choose_capability(raw_obj.get("capability") or capability)
-                confirm = bool(confirm or raw_obj.get("confirm"))
         except Exception as e:
             _emit({"status": "failed", "reason": "--json 不是合法 JSON: %s" % e})
             sys.exit(2)
+        if _is_envelope(raw_obj) and "confirm" in raw_obj:
+            envelope_confirm = _strict_boolean(raw_obj.get("confirm"))
+            if envelope_confirm is None:
+                _emit({"status": "failed", "reason":
+                       "confirm 必须是 JSON 布尔值 true/false，字符串或数字不被接受"})
+                sys.exit(2)
+            confirm = confirm or envelope_confirm is True
 
     url = os.environ.get("DANO_URL")
     key = os.environ.get("DANO_TENANT_KEY")
@@ -1199,6 +1274,7 @@ def main():
 
     try:
         arguments = _coerce_cli_values(arguments, contract)
+        arguments = _apply_safe_defaults(arguments, contract)
     except ValueError as e:
         _emit({"status": "failed", "reason": str(e)})
         sys.exit(1)
@@ -1250,9 +1326,9 @@ def main():
     raw_api = api_audit.get("raw") if isinstance(api_audit.get("raw"), dict) else {}
     fc = audit.get("fact_check") or api_audit.get("fact_check")
     if fc is None and "fact_check_passed" in raw_api:
-        fc = {"passed": bool(raw_api.get("fact_check_passed")), "reason": raw_api.get("detail")}
+        fc = {"passed": _strict_boolean(raw_api.get("fact_check_passed")), "reason": raw_api.get("detail")}
     if fc is None and "fact_check_passed" in api_audit:
-        fc = {"passed": bool(api_audit.get("fact_check_passed")), "reason": api_audit.get("detail")}
+        fc = {"passed": _strict_boolean(api_audit.get("fact_check_passed")), "reason": api_audit.get("detail")}
     output = (res.get("exec_result") or {}).get("structured_output")
     partial = state in {"partially_completed", "partial_success", "completed_with_errors"} or res.get("status") == "partial_success"
     if state == "completed" or partial:
@@ -1277,7 +1353,10 @@ def main():
     elif state == "cancelled" or "确认" in (res.get("message") or ""):
         _emit({"status": "need_confirm", "state": state, "message": res.get("message")})
     else:
-        _emit({"status": "failed", "state": state, "reason": res.get("message"), "fact_check": fc})
+        _emit({"status": "failed", "state": state,
+               "reason": res.get("message") or "运行端返回了不受支持的终态",
+               "fact_check": fc})
+        sys.exit(1)
 
 
 if __name__ == "__main__":
@@ -1318,6 +1397,7 @@ exec "$PY" "$DIR/dano_call.py" "$@"
 _SUBMIT_PS1 = """# 由 Dano 自动生成:转发到 dano_call.py(真逻辑)。
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 python "$dir/dano_call.py" @args
+exit $LASTEXITCODE
 """
 
 
@@ -1367,7 +1447,8 @@ def _op_sh(action: str) -> str:
 def _op_ps1(action: str) -> str:
     return ("# 由 Dano 自动生成:转发到 %s.py。\n"
             "$dir = Split-Path -Parent $MyInvocation.MyCommand.Path\n"
-            'python "$dir/%s.py" @args\n' % (action, action))
+            'python "$dir/%s.py" @args\n'
+            "exit $LASTEXITCODE\n" % (action, action))
 
 
 def _biz_label(business: str, manifests: list[SkillManifest]) -> str:
@@ -1390,6 +1471,7 @@ exec "$PY" "$DIR/__ENTRY__.py" --diagnose
 _DIAGNOSE_PS1 = """# 由 Dano 自动生成:剧本自检。转发到某操作脚本的 --diagnose。
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 python "$dir/__ENTRY__.py" --diagnose
+exit $LASTEXITCODE
 """
 
 

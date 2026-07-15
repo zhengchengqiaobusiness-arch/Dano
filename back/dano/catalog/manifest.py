@@ -411,6 +411,60 @@ def _capability_meta(skill: SkillSpec, capability: str) -> dict:
     return meta
 
 
+def _ask_user_question_interaction_protocol() -> dict:
+    """Machine-readable projection of ``doc/dano-tool-call-contract.md``."""
+
+    return {
+        "tool": "ask_user_question",
+        "native_tool_call_required": True,
+        "plain_text_question_forbidden": True,
+        "max_calls_per_assistant_response": 1,
+        "single_field_collection": {
+            "mode": "top_level",
+            "configuration_location": "top_level",
+            "keys": [
+                "question", "options", "inputType", "dateFormat", "required",
+                "dataSource", "multiple", "default",
+            ],
+        },
+        "multi_field_collection": {
+            "mode": "questions_array",
+            "single_submit": True,
+            "field_configuration_location": "questions[]",
+            "top_level_field_configuration_forbidden": True,
+        },
+        "non_confirmation_default": {
+            "required": True,
+            "string_must_be_non_empty": True,
+            "placeholder_forbidden": True,
+        },
+        "field_rules": {
+            "required_default": False,
+            "date": {"inputType": "date", "dateFormat_required": True},
+            "choices": {
+                "static": "options",
+                "remote": "dataSource",
+                "remote_input_types": ["select", "treeSelect"],
+            },
+        },
+        "confirmation": {
+            "separate_call": True,
+            "confirm": True,
+            "allowed_keys": ["question", "confirm"],
+            "forbidden_keys": ["options", "multiple", "questions"],
+        },
+        "answer_mapping": {
+            "single": "result.answer scalar -> matching input field",
+            "multiple": "result.answer object keyed by questions[].id -> matching input fields",
+            "continue_only_when_status": "answered",
+        },
+        "validation_error_behavior": "retry_silently_with_corrected_native_tool_call",
+        "cancel_behavior": "stop_current_workflow_and_do_not_retry_until_new_explicit_user_request",
+        "result_statuses": ["answered", "cancelled"],
+        "source_contract": "back/doc/dano-tool-call-contract.md",
+    }
+
+
 def _call_protocol(capability: str, skill_id: str) -> dict:
     """导出给 Agent 的稳定调用协议，同时声明旧 name 兼容通道。"""
     return {
@@ -422,6 +476,7 @@ def _call_protocol(capability: str, skill_id: str) -> dict:
         "arguments_keys": ["input", "arguments"],
         "confirm_key": "confirm",
         "compatibility": "payload always includes legacy name for existing Dano gateways",
+        "interaction_protocol": _ask_user_question_interaction_protocol(),
     }
 
 
@@ -436,6 +491,7 @@ def _capability_call_protocol(skill_id: str, capability: str) -> dict:
         "tool_payload": {"name": tool_name, "capability": capability, "input": {}, "confirm": False},
         "invoke_path": f"/v1/skills/{skill_id}/capabilities/{capability}/invoke",
         "legacy_invoke_path": f"/v1/skills/{skill_id}/invoke",
+        "interaction_protocol": _ask_user_question_interaction_protocol(),
     }
 
 
@@ -510,10 +566,31 @@ def _sanitize_capability_parameter_schema(schema: dict, cap: dict) -> dict:
             node.setdefault("type", "object")
             node["additionalProperties"] = False
         props = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+        had_required = "required" in node
+        required = list(node.get("required") or [])
         for name, prop in props.items():
             if not isinstance(prop, dict):
                 continue
-            is_dynamic = name in dynamic or bool(prop.get("x-options-source"))
+            pagination_role = str(prop.get("x-pagination-role") or "").strip().lower()
+            normalized_name = re.sub(r"[^a-z0-9]", "", str(name).lower())
+            if pagination_role in {"page", "page_number"} or normalized_name in {
+                "page", "pageno", "pageindex", "currentpage",
+            }:
+                prop["type"] = "integer"
+                prop.setdefault("minimum", 1)
+                prop.setdefault("default", 1)
+                prop["x-dano-apply-default"] = True
+                required = [value for value in required if value != name]
+            elif pagination_role == "page_size" or normalized_name in {"pagesize", "perpage"}:
+                prop["type"] = "integer"
+                prop.setdefault("minimum", 1)
+                prop.setdefault("default", 10)
+                prop["x-dano-apply-default"] = True
+                required = [value for value in required if value != name]
+            if "x-options-source" in prop and not isinstance(prop.get("x-options-source"), bool):
+                prop.pop("x-options-source", None)
+                prop.pop("x-options-source-meta", None)
+            is_dynamic = name in dynamic or prop.get("x-options-source") is True
             if is_dynamic:
                 prop.pop("x-options", None)
                 prop.pop("x-options-snapshot", None)
@@ -531,6 +608,10 @@ def _sanitize_capability_parameter_schema(schema: dict, cap: dict) -> dict:
             visit(prop)
             if isinstance(prop.get("items"), dict):
                 visit(prop["items"])
+        if had_required or required:
+            node["required"] = required
+        else:
+            node.pop("required", None)
 
     visit(normalized)
     return normalized
@@ -540,7 +621,19 @@ def _canonical_capability_identity(cap: dict) -> tuple[str, str, str]:
     """Keep the public identifier semantic instead of preserving planner aliases."""
     raw_name = str(cap.get("name") or cap.get("capability_id") or "").strip()
     kind = str(cap.get("kind") or raw_name).strip()
-    if kind in _CAPABILITY_TITLES:
+    generic_kinds = "|".join(
+        re.escape(value) for value in sorted(_CAPABILITY_TITLES, key=len, reverse=True)
+    )
+    generic_alias = bool(
+        not raw_name
+        or raw_name == kind
+        or raw_name in _CAPABILITY_TITLES
+        or kind in {"query_status", "list_options", "validate_batch", "submit_batch"}
+        or (kind == "submit" and raw_name in {"submit_batch", "batch_submit"})
+        or re.fullmatch(rf"(?:{generic_kinds})\d+", raw_name, re.I)
+        or re.fullmatch(r"(?:capability|ability)_?\d*", raw_name, re.I)
+    )
+    if kind in _CAPABILITY_TITLES and generic_alias:
         name = kind
     else:
         name = raw_name or kind
@@ -550,6 +643,97 @@ def _canonical_capability_identity(cap: dict) -> tuple[str, str, str]:
     if kind == "submit_batch" and not re.search(r"(?:batch|bulk|批量)", title, re.I):
         title = f"批量{title}"
     return name, kind, title
+
+
+def _capability_runtime_steps(skill: SkillSpec, cap: dict) -> list[dict]:
+    api = getattr(skill, "api_request", {}) or {}
+    steps = [item for item in api.get("steps") or [] if isinstance(item, dict)]
+    by_uuid = {str(item.get("step_uuid") or ""): item for item in steps if item.get("step_uuid")}
+    by_id = {str(item.get("step_id") or ""): item for item in steps if item.get("step_id")}
+    selected: list[dict] = []
+    for value in cap.get("step_uuids") or []:
+        if str(value) in by_uuid:
+            selected.append(by_uuid[str(value)])
+    if not selected:
+        for value in cap.get("step_ids") or []:
+            if str(value) in by_id:
+                selected.append(by_id[str(value)])
+    if not selected:
+        for ref in cap.get("request_refs") or []:
+            if not isinstance(ref, dict) or ref.get("usage") == "option_source":
+                continue
+            item = by_uuid.get(str(ref.get("step_uuid") or "")) or by_id.get(
+                str(ref.get("step_id") or "")
+            )
+            if item is not None:
+                selected.append(item)
+    return list({id(item): item for item in selected}.values())
+
+
+def _capability_is_read_only(skill: SkillSpec, cap: dict, kind: str) -> bool:
+    if cap.get("readonly") is True or cap.get("read_only") is True:
+        return True
+    if kind in _READ_ONLY_CAPABILITY_KINDS:
+        return True
+    steps = _capability_runtime_steps(skill, cap)
+    return bool(steps) and all(
+        str(item.get("method") or "").upper() in {"GET", "HEAD"} for item in steps
+    )
+
+
+def _record_id_from_contract(
+    skill: SkillSpec,
+    cap: dict,
+    capability_name: str,
+    output_name: str,
+    properties: dict,
+) -> str:
+    aliases = {
+        capability_name,
+        str(cap.get("name") or ""),
+        str(cap.get("kind") or ""),
+        str(cap.get("capability_id") or ""),
+        str(cap.get("capability_uuid") or ""),
+    }
+    grounded: list[str] = []
+    for relation in getattr(skill, "capability_relations", []) or []:
+        if not isinstance(relation, dict) or str(relation.get("from_capability") or "") not in aliases:
+            continue
+        match = re.fullmatch(
+            rf"{re.escape(output_name)}\[\]\.([A-Za-z_][A-Za-z0-9_]*)",
+            str(relation.get("from_output") or ""),
+        )
+        if match and match.group(1) in properties:
+            grounded.append(match.group(1))
+    if len(set(grounded)) == 1:
+        return grounded[0]
+    preferred = [
+        name for name in ("id", "recordId", "record_id", "uuid", "applicationId", "application_id")
+        if name in properties
+        and str((properties.get(name) or {}).get("type") or "") in {"string", "integer", "number"}
+    ]
+    return preferred[0] if preferred else ""
+
+
+def _annotate_record_outputs(skill: SkillSpec, cap: dict, capability_name: str, schema: dict) -> dict:
+    output = copy.deepcopy(schema or {"type": "object"})
+    props = output.get("properties") if isinstance(output.get("properties"), dict) else {}
+    for output_name, collection in props.items():
+        if not isinstance(collection, dict) or collection.get("type") != "array":
+            continue
+        items = collection.get("items") if isinstance(collection.get("items"), dict) else {}
+        item_props = items.get("properties") if isinstance(items.get("properties"), dict) else {}
+        if not item_props:
+            continue
+        existing = str(collection.get("x-record-id-field") or "").strip()
+        if existing and existing in item_props:
+            continue
+        record_id = _record_id_from_contract(
+            skill, cap, capability_name, str(output_name), item_props,
+        )
+        if record_id:
+            collection["x-record-id-field"] = record_id
+    return output
 
 
 def _capability_manifest(skill: SkillSpec, cap: dict) -> dict:
@@ -591,7 +775,13 @@ def _capability_manifest(skill: SkillSpec, cap: dict) -> dict:
             required.append("entries")
         out["parameters"]["required"] = required
     out["input_schema"] = copy.deepcopy(out["parameters"])
-    out["output_schema"] = copy.deepcopy(out.get("output_schema") or {"type": "object"})
+    out["output_schema"] = _annotate_record_outputs(
+        skill,
+        cap,
+        name,
+        out.get("output_schema") or {"type": "object"},
+    )
+    out["read_only"] = _capability_is_read_only(skill, cap, kind)
     output_props = out["output_schema"].get("properties") or {}
     mapped_output_names = [
         str(mapping.get("name") or mapping.get("field") or mapping.get("response_path") or "")
@@ -604,9 +794,15 @@ def _capability_manifest(skill: SkillSpec, cap: dict) -> dict:
         out["output_schema"]["required"] = list(dict.fromkeys([*existing_required, *mapped_required]))
     # Capability kind is authoritative. A stale skill-level confirmation flag
     # must not turn a read-only capability into a write operation on export.
-    if bool(cap.get("readonly")) or bool(cap.get("read_only")) or kind in _READ_ONLY_CAPABILITY_KINDS:
+    if out["read_only"]:
         out["requires_confirmation"] = False
-    elif bool(cap.get("requires_confirmation")) or bool(cap.get("requires_human_confirm")):
+    elif any(
+        name in cap and not isinstance(cap.get(name), bool)
+        for name in ("requires_confirmation", "requires_human_confirm")
+    ):
+        # Invalid persisted policy metadata cannot waive a write confirmation.
+        out["requires_confirmation"] = True
+    elif cap.get("requires_confirmation") is True or cap.get("requires_human_confirm") is True:
         out["requires_confirmation"] = True
     else:
         out["requires_confirmation"] = RiskLevel(skill.risk_level) in _CONFIRM_FROM
@@ -845,4 +1041,17 @@ def to_function_tool(m: SkillManifest) -> dict:
 
 def build_function_tools(skills: list[SkillSpec]) -> list[dict]:
     """把租户 Skill 列表导出为聊天 LLM 可直接使用的 function-calling tools 数组。"""
-    return [to_function_tool(to_manifest(s)) for s in skills]
+    callable_skills: list[SkillSpec] = []
+    for skill in skills:
+        metadata = dict(getattr(skill, "call_metadata", {}) or {})
+        if metadata.get("recording_engine") == "playwright_v3" and (
+            str(metadata.get("verification_status") or "") != "verified"
+            or str(metadata.get("publication_status") or "") != "published_verified"
+            or metadata.get("direct_call_enabled") is not True
+            or metadata.get("contract_integrity", True) is not True
+        ):
+            # Unverified V3 revisions remain visible in the catalog for repair,
+            # but cannot become an agent-callable tool.
+            continue
+        callable_skills.append(skill)
+    return [to_function_tool(to_manifest(s)) for s in callable_skills]

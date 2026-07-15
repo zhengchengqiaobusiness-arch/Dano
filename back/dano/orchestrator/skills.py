@@ -19,6 +19,36 @@ from dano.shared.models import Scope
 log = structlog.get_logger(__name__)
 
 
+def _authoritative_v3_contract(body: dict, api_request: dict) -> dict:
+    """Return a fail-closed contract derived from the immutable top level.
+
+    Nested API/flow metadata is untrusted declarative data.  It may confirm the
+    top-level publication contract, but can never upgrade it.
+    """
+
+    verification = str((body or {}).get("verification_status") or "")
+    publication = str((body or {}).get("publication_status") or "")
+    direct = (body or {}).get("direct_call_enabled")
+    valid_pair = (
+        (verification, publication, direct)
+        in {
+            ("verified", "published_verified", True),
+            ("unverified", "published_unverified", False),
+        }
+    )
+    nested_matches = (
+        str((api_request or {}).get("verification_status") or "") == verification
+        and (api_request or {}).get("direct_call_enabled") is direct
+    )
+    valid = bool(valid_pair and nested_matches)
+    return {
+        "verification_status": verification if valid else "unverified",
+        "publication_status": publication if valid else "published_unverified",
+        "direct_call_enabled": direct if valid else False,
+        "contract_integrity": valid,
+    }
+
+
 class ActionMeta(BaseModel):
     keywords: list[str]
     fact_check_query: str | None = None
@@ -56,11 +86,23 @@ def _call_metadata_from_body(body: dict, env=None) -> dict:
             val = apir.get(key)
         if val not in (None, ""):
             meta[key] = val
-    for src in (body or {}, apir if isinstance(apir, dict) else {}, flow_meta):
-        for key in ("verification_status", "verification_basis", "recording_mode"):
+    # Lowest-precedence legacy projection first; immutable top-level body wins.
+    for src in (flow_meta, apir if isinstance(apir, dict) else {}, body or {}):
+        for key in (
+            "verification_status",
+            "verification_basis",
+            "recording_mode",
+            "publication_status",
+            "direct_call_enabled",
+        ):
             val = src.get(key)
             if val not in (None, ""):
                 meta[key] = val
+    if isinstance(body, dict) and body.get("api_request"):
+        is_v3 = body.get("recording_engine") == "playwright_v3"
+        meta["recording_engine"] = "playwright_v3" if is_v3 else "legacy"
+        if is_v3:
+            meta.update(_authoritative_v3_contract(body, apir))
     status = getattr(env, "verification_status", None) or getattr(env, "validation_status", None)
     if status is not None and "verification_status" not in meta:
         meta["verification_status"] = getattr(status, "value", status)
@@ -174,6 +216,12 @@ class SkillRegistry:
                 body_action = (body.get("action") or "").strip()
                 api_request = dict(body.get("api_request") or {})
                 if body_action and api_request:
+                    # The top-level immutable asset marker is authoritative.  A nested marker
+                    # cannot opt an old asset into V3 or force a V3 asset back to legacy.
+                    engine = "playwright_v3" if body.get("recording_engine") == "playwright_v3" else "legacy"
+                    api_request["recording_engine"] = engine
+                    if engine == "playwright_v3":
+                        api_request.update(_authoritative_v3_contract(body, api_request))
                     req = list(body.get("required_fields") or [])
                     user = list(body.get("user_fields") or [])
                     opt = [f for f in (user + list(body.get("optional_fields") or []))

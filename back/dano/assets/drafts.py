@@ -100,6 +100,8 @@ class ReviewRun(BaseModel):
     model_id: str
     passed: bool
     reasons: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime | None = None
     expires_at: datetime | None = None
 
@@ -159,7 +161,9 @@ class DraftStore:
         return [self._vrun(r) for r in rows]
 
     async def record_review(self, *, asset_draft_id: UUID, role: ReviewRole, model_id: str,
-                            passed: bool, reasons: list[str] | None = None) -> ReviewRun:
+                            passed: bool, reasons: list[str] | None = None,
+                            evidence: list[str] | None = None,
+                            metadata: dict[str, Any] | None = None) -> ReviewRun:
         """记录一条评审结论。content_hash 从草案取(绑定),非调用方传入。"""
         draft = await self.get_draft(asset_draft_id)
         if draft is None:
@@ -169,7 +173,11 @@ class DraftStore:
                 """INSERT INTO review_runs (asset_draft_id, content_hash, role, model_id, passed, findings)
                    VALUES ($1,$2,$3,$4,$5,$6) RETURNING *""",
                 asset_draft_id, draft.content_hash, role, model_id, passed,
-                _j({"reasons": reasons or []}),
+                _j({
+                    "reasons": reasons or [],
+                    "evidence": evidence or [],
+                    "metadata": metadata or {},
+                }),
             )
         return self._rrun(row)
 
@@ -304,6 +312,7 @@ class DraftStore:
             review_run_id=row["review_run_id"], asset_draft_id=row["asset_draft_id"],
             content_hash=row["content_hash"], role=row["role"], model_id=row["model_id"],
             passed=row["passed"], reasons=findings.get("reasons", []),
+            evidence=findings.get("evidence", []), metadata=findings.get("metadata", {}),
             created_at=row["created_at"], expires_at=row["expires_at"],
         )
 

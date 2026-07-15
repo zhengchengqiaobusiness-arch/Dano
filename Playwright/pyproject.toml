@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dano-recording"
+version = "0.1.0"
+description = "Deterministic Playwright recording domain and compiler for Dano recording v3"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.9",
+    "asyncpg>=0.30",
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "structlog>=24.4",
+]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.48"]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dano_recording = [
+    "pi/runtime/*.mjs",
+    "_resources/browser/*.js",
+    "_resources/js_analysis/*.mjs",
+]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["__pycache__/*", "*.py[cod]"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
+from pydantic import ValidationError
+
 from dano.orchestrator.orchestrator import Orchestrator
 from dano.orchestrator.capability_runtime import (
     CapabilityInvokePayload,
@@ -61,9 +64,6 @@ def test_payload_fields_merges_arguments_then_input_and_marks_capability():
 
 
 def test_capability_payload_rejects_unknown_protocol_fields():
-    import pytest
-    from pydantic import ValidationError
-
     payload = CapabilityInvokePayload(
         input={}, name="A-OA__submit", capability="query_status",
         protocol="dano.capability_call.v1",
@@ -75,6 +75,29 @@ def test_capability_payload_rejects_unknown_protocol_fields():
 
     with pytest.raises(ValidationError):
         CapabilityInvokePayload(input={}, protocol="dano.capability_call.v2")
+
+
+@pytest.mark.parametrize("field", ["confirm", "dry_run"])
+@pytest.mark.parametrize("value", ["true", "false", "yes", 1, 0, None])
+def test_external_invoke_models_require_literal_json_booleans(field, value):
+    from dano.gateway.app import InvokeReq, ToolCallReq
+
+    cases = [
+        (CapabilityInvokePayload, {"input": {}, field: value}),
+        (InvokeReq, {"input": {}, field: value}),
+        (ToolCallReq, {"name": "A-OA__submit_form", field: value}),
+    ]
+    for model, payload in cases:
+        with pytest.raises(ValidationError):
+            model.model_validate(payload)
+
+
+def test_external_invoke_models_accept_literal_json_booleans():
+    from dano.gateway.app import InvokeReq, ToolCallReq
+
+    assert CapabilityInvokePayload(confirm=True, dry_run=False).confirm is True
+    assert InvokeReq(confirm=False, dry_run=True).dry_run is True
+    assert ToolCallReq(name="A-OA__submit_form", confirm=True).confirm is True
 
 
 def test_gateway_capability_route_uses_strict_capability_payload():
@@ -181,6 +204,17 @@ def test_read_capability_does_not_require_confirmation_but_write_does():
     assert capability_requires_confirmation(skill, submit) is True
 
 
+def test_non_boolean_confirmation_metadata_fails_closed():
+    skill = _skill().model_copy(update={"risk_level": RiskLevel.L1})
+
+    assert capability_requires_confirmation(
+        skill, {"name": "submit", "kind": "submit", "requires_confirmation": "false"},
+    ) is True
+    assert capability_requires_confirmation(
+        skill, {"name": "submit", "kind": "submit", "requires_confirmation": False},
+    ) is False
+
+
 async def test_capability_invoke_rejects_invalid_batch_shape_before_execution():
     out = await invoke_skill_capability(
         skill=_skill(),
@@ -216,6 +250,32 @@ def test_normalized_capability_result_preserves_fact_check_state():
 
     assert out["fact_check_passed"] is True
     assert out["verification_status"] == "verified"
+
+
+@pytest.mark.parametrize("value", ["true", "false", 1, 0, None])
+def test_normalized_capability_result_rejects_non_boolean_success(value):
+    out = normalize_capability_result({"ok": value, "output": {"id": "R-1"}}, "submit")
+
+    assert out["ok"] is False
+    assert out["status"] == "failed"
+
+
+@pytest.mark.parametrize("value", ["true", "false", 1, 0, None])
+def test_normalized_capability_result_fails_closed_on_non_boolean_blocked(value):
+    out = normalize_capability_result({"ok": True, "blocked": value}, "submit")
+
+    assert out["ok"] is False
+    assert out["blocked"] is True
+    assert out["status"] == "blocked"
+    assert out["stage"] == "invalid_result_contract"
+
+
+def test_normalized_capability_result_defaults_missing_blocked_to_false():
+    out = normalize_capability_result({"ok": True}, "submit")
+
+    assert out["ok"] is True
+    assert out["blocked"] is False
+    assert out["status"] == "succeeded"
 
 
 def test_normalized_batch_result_preserves_partial_success_and_fact_evidence():

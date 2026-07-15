@@ -17,7 +17,7 @@ import shutil
 import structlog
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from dano.assets.repository import AssetRepository
 from dano.catalog.manifest import build_function_tools, build_manifests, skill_id_of
@@ -27,6 +27,7 @@ from dano.execution.harness.harness import Harness
 from dano.orchestrator.orchestrator import Orchestrator
 from dano.orchestrator.capability_runtime import CapabilityInvokePayload
 from dano.orchestrator.skills import SkillRegistry
+from dano.recording_v3 import install_recording_v3
 from dano.registry import InMemoryRegistry, PgRegistry, TenantRecord
 from dano.shared.asset_bodies import EnvProfileBody
 from dano.shared.enums import AssetType, Subsystem
@@ -77,6 +78,7 @@ async def lifespan(app: FastAPI):
     configure_logging()                    # **先配日志**:否则后台看不到任何记录
     log.info("gateway.starting")
     global _registry, _lifecycle, _breaker
+    recording_repository = None
     try:
         await init_pool()
         await run_migrations()
@@ -86,6 +88,11 @@ async def lifespan(app: FastAPI):
         from dano.resilience.circuit_breaker import PgFailureCounter
         _lifecycle = SkillLifecycle(PgSkillStore())
         _breaker = PgFailureCounter()
+        from dano.recording_v3 import ensure_recording_package
+        ensure_recording_package()
+        from dano_recording.persistence.postgres import AsyncpgRecordingRepository
+        from dano.infra.db import get_pool
+        recording_repository = AsyncpgRecordingRepository(get_pool())
         log.info("gateway.db_ready")
     except Exception as e:  # noqa: BLE001
         log.warning("gateway.db_unavailable", error=str(e))
@@ -95,8 +102,12 @@ async def lifespan(app: FastAPI):
         set_review_board(ReviewBoard.from_settings())
     except Exception as e:  # noqa: BLE001
         log.warning("gateway.review_board_unavailable", error=str(e))
-    yield
-    await close_pool()
+    await _recording_v3_service.start(repository=recording_repository)
+    try:
+        yield
+    finally:
+        await _recording_v3_service.close()
+        await close_pool()
 
 
 app = FastAPI(title="Dano Back", version="0.1.0", lifespan=lifespan)
@@ -152,6 +163,30 @@ async def _auth_tenant(x_tenant_key: str | None) -> str:
     if rec is None:
         raise HTTPException(status_code=401, detail="X-Tenant-Key 无效")
     return rec.tenant
+
+
+async def _recording_v3_lifecycle(payload: dict) -> None:
+    """Register only the exact V3 asset version returned by its publish transaction."""
+
+    skill_id = str(payload.get("skill_id") or "")
+    subsystem = Subsystem(str(payload.get("subsystem") or ""))
+    action = str(payload.get("action") or "")
+    version = int(payload.get("version") or 0)
+    await _lifecycle.register_published(skill_id, subsystem, action, version)
+
+
+async def _recording_v3_export(tenant: str) -> None:
+    # Resolved at call time; _auto_export is defined below with the existing
+    # export policy and remains the single implementation.
+    await _auto_export(tenant)
+
+
+_recording_v3_service = install_recording_v3(
+    app,
+    tenant_resolver=_auth_tenant,
+    lifecycle_callback=_recording_v3_lifecycle,
+    export_callback=_recording_v3_export,
+)
 
 
 @app.get("/health")
@@ -1518,9 +1553,9 @@ class InvokeReq(BaseModel):
     input: dict | None = Field(default_factory=dict)
     arguments: dict | str | None = Field(default_factory=dict)
     idempotency_key: str | None = None
-    confirm: bool = False
+    confirm: StrictBool = False
     capability: str | None = None
-    dry_run: bool = False
+    dry_run: StrictBool = False
     metadata: dict = Field(default_factory=dict)
     protocol: str = "dano.capability_call.v1"
 
@@ -1607,8 +1642,8 @@ class ToolCallReq(BaseModel):
     capability: str | None = None   # 新调用协议:一个 Skill 内的业务能力键(query_status/submit_batch...)
     input: dict | None = None       # 新调用协议:input 优先,arguments 兼容
     arguments: dict | str = Field(default_factory=dict)  # LLM 产出的参数(对象或 JSON 字符串都行)
-    confirm: bool = False
-    dry_run: bool = False
+    confirm: StrictBool = False
+    dry_run: StrictBool = False
 
 
 @app.post("/v1/tools/call")

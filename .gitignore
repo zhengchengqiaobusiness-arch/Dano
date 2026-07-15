@@ -1,6 +1,8 @@
 # ── Python 缓存 / 字节码 ──
 __pycache__/
 *.pyc
+*.egg-info/
+build/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
@@ -14,6 +16,8 @@ back/.dano-sessions/      # 录制保存的页面登录态(storageState,含凭�
 
 # ── pi agent 运行态(每 run 变动,临时)──
 back/.pi-agent/
+back/.recording-v3-pi-sessions/
+back/.recording-v3-artifacts/
 
 # ── 生成产物(频繁变动,不入库:接入自动导出的 skill 包等)──
 export/
@@ -23,6 +27,10 @@ back/examples/_chunks/
 back/agent/node_modules/
 skillfrontend/node_modules/
 skillfrontend/dist/
+Playwright/node_modules/
+Playwright/dist/
+Playwright/.pi-sessions/
+Playwright/.recording-v3-artifacts/
 
 # ── 其它本地/工具 ──
 

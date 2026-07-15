@@ -205,6 +205,10 @@ class SuccessEvidence(BaseModel):
 class PageScriptBody(BaseModel):
     """录制 V2 页面资产容器。api_request 承载最终执行请求。"""
 
+    recording_engine: Literal["legacy", "playwright_v3"] = Field(
+        default="legacy",
+        description="录制资产运行时分派标记；playwright_v3 只走独立 V3 HTTP 运行时",
+    )
     actions: list[dict] = Field(default_factory=list)
     dom_fingerprint: str = Field(default="")
     action: str = Field(default="", description="派生 Skill 名,如 submit_reimburse;空则按子系统兜底")

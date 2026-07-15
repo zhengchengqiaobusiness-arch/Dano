@@ -16,7 +16,7 @@ from dano.execution.harness.harness import Harness, tool_name_for
 from dano.assets.store import AssetStore
 from dano.orchestrator.gate import GateAction, PolicyGate
 from dano.orchestrator.capability_runtime import CapabilityInvokePayload, invoke_skill_capability
-from dano.orchestrator.skills import SkillRegistry
+from dano.orchestrator.skills import SkillRegistry, _authoritative_v3_contract
 from dano.orchestrator.types import SkillSpec, TaskOutcome
 from dano.shared.asset_bodies import (
     Assertions,
@@ -538,7 +538,10 @@ class Orchestrator:
                 message="录制资产不存在,无法按 capability 调用",
                 audit={"capability": capability},
             )
-        api_request = dict((env.body or {}).get("api_request") or {})
+        body = env.body or {}
+        api_request = dict(body.get("api_request") or {})
+        engine = "playwright_v3" if body.get("recording_engine") == "playwright_v3" else "legacy"
+        api_request["recording_engine"] = engine
         scope = Scope(tenant=tenant, subsystem=skill.subsystem)
         ep = await self.store.get_published(AssetType.ENV_PROFILE, scope, asset_key="env_profile")
         base_url = ((ep.body.get("base_url") if ep else "") or "")
@@ -550,13 +553,17 @@ class Orchestrator:
             except Exception:  # noqa: BLE001
                 pass
         override = await get_token_headers(tenant, skill.subsystem.value)
-        if override:
+        if override and engine != "playwright_v3":
             api_request = merge_auth_headers(api_request, override)
 
         payload = CapabilityInvokePayload(
             input=_without_capability_markers(intent.fields),
             confirm=confirm,
-            dry_run=bool(intent.fields.get("__dry_run")),
+            dry_run=(
+                intent.fields.get("__dry_run") is True
+                if engine == "playwright_v3"
+                else bool(intent.fields.get("__dry_run"))
+            ),
         )
         out = await invoke_skill_capability(
             skill=skill,
@@ -565,9 +572,11 @@ class Orchestrator:
             api_request=api_request,
             base_url=base_url,
             storage_state=storage,
+            credential_headers=override if engine == "playwright_v3" else None,
+            runtime_context={"current_tenant": {"id": tenant}},
             verify=tls_verify(),
         )
-        ok = bool(out.get("ok"))
+        ok = out.get("ok") is True if engine == "playwright_v3" else bool(out.get("ok"))
         stage = str(out.get("stage") or "")
         if out.get("status") == "partial_success":
             state = TaskState.PARTIAL_SUCCESS
@@ -608,17 +617,53 @@ class Orchestrator:
         问题1:把接口放进 skill。选字段前先拉真实选项,agent 从中选,不凭空猜、不靠过时快照。失败 → options=[]。"""
         import json as _json
 
-        from dano.execution.page.request_capture import fetch_field_options
         from dano.execution.page.sessions import session_path_if_exists
-        from dano.infra.http import tls_verify
-        from dano.infra.token_store import get_token_headers, merge_auth_headers
+        from dano.infra.token_store import get_token_headers
         skill = self.registry.by_action(subsystem, action)
         if skill is None or not getattr(skill, "recording_asset_id", None):
             return {"field": field, "options": [], "count": 0, "note": "未知动作 / 非录制型 skill"}
         env = await self.store.get(skill.recording_asset_id)
-        apir = (env.body or {}).get("api_request") if env else None
+        body = (env.body or {}) if env else {}
+        apir = body.get("api_request")
         if not apir:
             return {"field": field, "options": [], "count": 0, "note": "该 skill 无接口请求"}
+        scope = Scope(tenant=tenant, subsystem=skill.subsystem)
+        ep = await self.store.get_published(AssetType.ENV_PROFILE, scope, asset_key="env_profile")
+        base_url = ((ep.body.get("base_url") if ep else "") or "")
+        storage = None
+        sp = session_path_if_exists(tenant, skill.subsystem.value)
+        if sp:
+            try:
+                storage = _json.loads(open(sp, encoding="utf-8").read())
+            except Exception:  # noqa: BLE001
+                pass
+        override = await get_token_headers(tenant, skill.subsystem.value)   # 运行期最新鉴权头(治焊死旧 token 过期)
+        engine = "playwright_v3" if body.get("recording_engine") == "playwright_v3" else "legacy"
+        if engine == "playwright_v3":
+            from dano.recording_v3 import list_v3_field_options
+
+            contract = _authoritative_v3_contract(body, apir)
+            marked_request = {
+                **apir,
+                "recording_engine": "playwright_v3",
+                **contract,
+            }
+            return await list_v3_field_options(
+                api_request=marked_request,
+                field=field,
+                capability=capability or None,
+                base_url=base_url,
+                storage_state=storage,
+                credential_headers=override,
+                runtime_context={"current_tenant": {"id": tenant}},
+            )
+
+        # Assets without the authoritative top-level V3 marker retain the
+        # original legacy option resolver unchanged.
+        from dano.execution.page.request_capture import fetch_field_options
+        from dano.infra.http import tls_verify
+        from dano.infra.token_store import merge_auth_headers
+
         if capability:
             capability_def = next((
                 item for item in (getattr(skill, "capabilities", None) or apir.get("capabilities") or [])
@@ -636,17 +681,6 @@ class Orchestrator:
                     step for step in apir.get("steps") or []
                     if str(step.get("step_id") or "") in allowed_steps
                 ]
-        scope = Scope(tenant=tenant, subsystem=skill.subsystem)
-        ep = await self.store.get_published(AssetType.ENV_PROFILE, scope, asset_key="env_profile")
-        base_url = ((ep.body.get("base_url") if ep else "") or "")
-        storage = None
-        sp = session_path_if_exists(tenant, skill.subsystem.value)
-        if sp:
-            try:
-                storage = _json.loads(open(sp, encoding="utf-8").read())
-            except Exception:  # noqa: BLE001
-                pass
-        override = await get_token_headers(tenant, skill.subsystem.value)   # 运行期最新鉴权头(治焊死旧 token 过期)
         if override:
             apir = merge_auth_headers(apir, override)
         result = await fetch_field_options(apir, field, base_url=base_url, storage_state=storage,
@@ -659,12 +693,37 @@ class Orchestrator:
         """录制 V2 能力执行。api_request 直接发请求,不开浏览器。"""
         env = await self.store.get(skill.recording_asset_id)
         assert env is not None, "页面脚本资产不存在"
+        body = env.body or {}
+        raw_api_request = body.get("api_request") or {}
+        engine = "playwright_v3" if body.get("recording_engine") == "playwright_v3" else "legacy"
+        if engine == "playwright_v3":
+            contract = _authoritative_v3_contract(body, raw_api_request)
+            executable = (
+                contract.get("contract_integrity") is True
+                and contract.get("verification_status") == "verified"
+                and contract.get("publication_status") == "published_verified"
+                and contract.get("direct_call_enabled") is True
+            )
+            if not executable:
+                blocked = {
+                    "ok": False,
+                    "blocked": True,
+                    "stage": "unverified_contract",
+                    "detail": "V3 录制资产未通过顶层发布契约，禁止直接执行",
+                    **contract,
+                }
+                return TaskOutcome(
+                    task_id=task_id,
+                    state=TaskState.FAILED,
+                    skill_id=skill.skill_id,
+                    message=blocked["detail"],
+                    audit={"api": blocked},
+                )
 
         # 带登录态直接发 SPA 内部接口(参数填回 body_template)。已过 L3 确认闸门。
-        if (env.body or {}).get("api_request"):
+        if raw_api_request:
             import json as _json
 
-            from dano.execution.page.request_capture import execute_api   # 单请求或多步工作流(Q3)自动分派
             from dano.execution.page.sessions import session_path_if_exists
             from dano.infra.http import tls_verify
             scope = Scope(tenant=tenant, subsystem=skill.subsystem)
@@ -680,25 +739,72 @@ class Orchestrator:
             # 运行期真鉴权:用 token_store(PG)里最新存的鉴权头覆盖**焊进资产的旧 token**(录制那刻的会过期)。
             # token 过期时前端 PUT /settings/token 换一份即可恢复,无需重录整条流程(治本 401)。
             from dano.infra.token_store import get_token_headers, merge_auth_headers
-            api_request = env.body["api_request"]
+            api_request = raw_api_request
             override = await get_token_headers(tenant, skill.subsystem.value)
-            if override:
-                api_request = merge_auth_headers(api_request, override)
-            out = await execute_api(api_request, dict(intent.fields),
-                                    base_url=base_url, storage_state=storage,
-                                    send=True, verify=tls_verify())
-            ok = bool(out.get("ok"))
+            if engine == "playwright_v3":
+                from dano.recording_v3 import execute_v3_capability
+
+                marked_request = {
+                    **api_request,
+                    "recording_engine": "playwright_v3",
+                    **_authoritative_v3_contract(body, api_request),
+                }
+                capabilities = [
+                    item for item in marked_request.get("capabilities") or []
+                    if isinstance(item, dict)
+                ]
+                if len(capabilities) != 1:
+                    return TaskOutcome(
+                        task_id=task_id,
+                        state=TaskState.CAPABILITY_GAP,
+                        skill_id=skill.skill_id,
+                        message="V3 录制资产必须显式选择 capability",
+                        audit={"capability_required": True},
+                    )
+                cap_name = str(
+                    capabilities[0].get("name") or capabilities[0].get("kind")
+                    or capabilities[0].get("capability_id") or ""
+                )
+                try:
+                    confirmed = confirm(skill, intent.fields) is True
+                except TypeError:
+                    confirmed = False
+                out = await execute_v3_capability(
+                    api_request=marked_request,
+                    fields=_without_capability_markers(intent.fields),
+                    capability=cap_name,
+                    confirm=confirmed,
+                    dry_run=intent.fields.get("__dry_run") is True,
+                    base_url=base_url,
+                    storage_state=storage,
+                    credential_headers=override,
+                    runtime_context={"current_tenant": {"id": tenant}},
+                )
+            else:
+                # This is deliberately the original legacy path.  Assets without
+                # the top-level V3 marker never import or touch the V3 executor.
+                from dano.execution.page.request_capture import execute_api
+
+                if override:
+                    api_request = merge_auth_headers(api_request, override)
+                out = await execute_api(api_request, dict(intent.fields),
+                                        base_url=base_url, storage_state=storage,
+                                        send=True, verify=tls_verify())
+            ok = out.get("ok") is True if engine == "playwright_v3" else bool(out.get("ok"))
             er = ExecResult(task_id=task_id, outcome=Outcome.PASSED if ok else Outcome.FAILED,
                             evidence=Evidence(request_body=dict(intent.fields),
                                               response_body=out.get("response")),
                             structured_output=out)
             # 不信 HTTP 200:业务码失败(out.business_ok=False)也判 FAILED,把业务原因带出来
-            fail_reason = out.get("detail") or out.get("response")
+            fail_reason = out.get("detail") or out.get("reason") or out.get("response")
+            final_status = out.get("status")
+            if final_status is None and out.get("results"):
+                final_status = (out.get("results") or [{}])[-1].get("status")
             return TaskOutcome(
                 task_id=task_id, state=TaskState.COMPLETED if ok else TaskState.FAILED,
                 skill_id=skill.skill_id, exec_result=er,
-                message=(f"已提交(HTTP {out.get('status')})" if ok
-                         else f"提交未生效(HTTP {out.get('status')}):{fail_reason}"),
+                message=(f"已提交(HTTP {final_status})" if ok
+                         else f"提交未生效(HTTP {final_status}):{fail_reason}"),
                 audit={"api": out})
 
         return TaskOutcome(task_id=task_id, state=TaskState.TRANSFER_HUMAN,

@@ -6,6 +6,8 @@ M0 提供引用解析与取值接口;实际取值在执行层(M2)按最小权限
 
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 
 from dano.config import get_settings
@@ -51,3 +53,17 @@ class VaultClient:
         path, name = parse_ref(ref)
         resp = self._client.secrets.kv.v2.read_secret_version(path=f"{path}/{name}")
         return resp["data"]["data"]
+
+    def write_secret(self, path: str, values: dict[str, Any]) -> str:
+        """Write credential plaintext only to Vault and return an opaque ref."""
+
+        normalized = path.strip().strip("/")
+        if not normalized or not values:
+            raise ValueError("Vault secret path and values are required")
+        if self._client is None:
+            self._client = self._connect()
+        self._client.secrets.kv.v2.create_or_update_secret(
+            path=normalized,
+            secret=dict(values),
+        )
+        return f"{VAULT_SCHEME}{normalized}"
