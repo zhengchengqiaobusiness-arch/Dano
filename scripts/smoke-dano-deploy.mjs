@@ -1,8 +1,10 @@
 #!/usr/bin/env node
-const baseUrl = new URL(
-  process.env.DANO_SMOKE_BASE_URL ||
-    `http://127.0.0.1:${process.env.DANO_NGINX_PORT || "80"}`,
-);
+const exposureMode = process.env.DANO_EXPOSURE_MODE?.trim() || "http";
+const smokeUsesTls = exposureMode !== "http";
+const defaultSmokeUrl = smokeUsesTls
+  ? `https://127.0.0.1:${process.env.DANO_HTTPS_PORT || "443"}`
+  : `http://127.0.0.1:${process.env.DANO_NGINX_PORT || "80"}`;
+const baseUrl = new URL(process.env.DANO_SMOKE_BASE_URL || defaultSmokeUrl);
 
 const timeoutMs = Number.parseInt(process.env.DANO_SMOKE_TIMEOUT_MS || "15000", 10);
 

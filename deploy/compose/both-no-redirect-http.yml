@@ -1,0 +1,8 @@
+services:
+  nginx:
+    ports:
+      - "${DANO_NGINX_PORT:-80}:80"
+      - "${DANO_HTTPS_PORT:-443}:443"
+    volumes:
+      - "${DANO_TLS_CERT_PATH}:/etc/nginx/tls/fullchain.pem:ro"
+      - "${DANO_TLS_KEY_PATH}:/etc/nginx/tls/privkey.pem:ro"

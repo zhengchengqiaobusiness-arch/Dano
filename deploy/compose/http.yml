@@ -1,0 +1,4 @@
+services:
+  nginx:
+    ports:
+      - "${DANO_NGINX_PORT:-80}:80"

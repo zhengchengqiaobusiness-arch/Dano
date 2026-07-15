@@ -65,15 +65,17 @@ pnpm run deploy:stop
 pnpm run deploy:down
 ```
 
-For local runs, point `DANO_RUNTIME_DIR`, `DANO_NGINX_CONF`, and
-`DANO_SECRETS_DIR` in `.env` at local host paths. The app container still uses
+For local runs, point `DANO_RUNTIME_DIR` and `DANO_SECRETS_DIR` in `.env` at
+local host paths. The deploy wrapper selects the nginx template and shared
+proxy configuration for `DANO_EXPOSURE_MODE`. The app container still uses
 `/opt/dano/runtime-data` internally; the host `DANO_RUNTIME_DIR` only selects
 what is mounted there. `deploy:up` runs Compose with
 `--no-build`; build the image first or use `deploy:release`. `deploy:stop`
 preserves containers and runtime data. `deploy:down` removes the containers and
 Compose network; the bind-mounted runtime directory remains intact.
 
-The app container listens on `8080`; nginx publishes `${DANO_NGINX_PORT:-80}`.
+The app container listens on `8080`; nginx publishes only the ports selected by
+`DANO_EXPOSURE_MODE`.
 
 ### Full Local Podman Acceptance
 
@@ -230,7 +232,10 @@ To start from an already-built local or pulled image in `/opt/dano/deploy`:
 
 ```bash
 cd /opt/dano/deploy
-DANO_IMAGE=dano-app:local docker compose --env-file .env up -d --no-build
+DANO_IMAGE=dano-app:local docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.exposure.yml \
+  --env-file .env up -d --no-build
 ```
 
 `scripts/deploy-compose.mjs` uses the same `--no-build` path.
@@ -310,14 +315,61 @@ Compose mounts `${DANO_SECRETS_DIR:-/opt/dano/deploy/.secrets}:/run/secrets:ro`.
 
 ## HTTP and TLS
 
-This Compose deployment is HTTP-only. Open it with:
+Release Build accepts `DANO_EXPOSURE_MODE` with these values:
 
-```text
-http://host/
+| Mode | Published endpoints | HTTP behavior |
+| --- | --- | --- |
+| `http` | HTTP only | Serves Dano directly |
+| `https` | HTTPS only | No HTTP endpoint |
+| `both` | HTTP and HTTPS | Redirects HTTP to the matching HTTPS path and query |
+| `both-no-redirect-http` | HTTP and HTTPS | Serves Dano directly on both protocols |
+
+The default is `http`, so existing deployments do not gain a TLS port or
+certificate requirement after upgrading.
+
+TLS-capable modes require two environment-owned files:
+
+```bash
+DANO_EXPOSURE_MODE=https \
+DANO_TLS_CERT_PATH=/etc/example/tls/public-chain.crt \
+DANO_TLS_KEY_PATH=/etc/example/tls/private-key.pem \
+pnpm run deploy:release
 ```
 
-For HTTPS, terminate TLS in front of Dano with a reverse proxy, load balancer,
-or CDN. Point that proxy at the nginx service on port `80`.
+The host paths and filenames are arbitrary. Absolute paths are recommended for
+production. Relative paths resolve from the Deploy Control Directory. Dano
+mounts the files read-only at fixed container paths; it does not copy them into
+the image or source checkout.
+
+For local HTTPS on non-default ports:
+
+```bash
+DANO_EXPOSURE_MODE=both \
+DANO_NGINX_PORT=18082 \
+DANO_HTTPS_PORT=18443 \
+DANO_TLS_CERT_PATH=/absolute/path/to/test-cert.pem \
+DANO_TLS_KEY_PATH=/absolute/path/to/test-key.pem \
+pnpm run deploy:up
+```
+
+In `both` mode, the HTTP redirect uses `DANO_HTTPS_PORT` and preserves the
+request path and query. Use `both-no-redirect-http` when HTTP must remain a
+fully usable endpoint.
+
+Certificate issuance, provider selection, ACME configuration, renewal, and
+scheduling belong to the deployment environment. Dano does not install
+Certbot, systemd units, timers, or certificate lineage conventions. Because a
+file-level bind mount can keep referencing an old inode after an atomic
+certificate replacement, the environment should recreate the nginx container
+after renewal instead of assuming that `nginx -s reload` is sufficient:
+
+```bash
+cd /opt/dano/deploy
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.exposure.yml \
+  --env-file .env up -d --no-deps --force-recreate nginx
+```
 
 ## Smoke Test
 
