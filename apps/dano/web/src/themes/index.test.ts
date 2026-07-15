@@ -52,4 +52,23 @@ describe("resolveAppThemeVars", () => {
     expect(lightVars["--accent-hover"]).toBe(lightVars["--accent"]);
     expect(darkVars["--panel"]).toBe("#212121");
   });
+
+  it("keeps canvas, controls, code, and accent foregrounds semantically separate", () => {
+    const darkVars = resolveAppThemeVars(PI_BASE46_DARK_THEME);
+    const lightVars = resolveAppThemeVars(PI_BASE46_LIGHT_THEME);
+
+    expect(lightVars["--bg"]).toBe("#fbfbfb");
+    expect(lightVars["--control-bg"]).toBe("#ffffff");
+    expect(lightVars["--code-bg"]).toBe("#ffffff");
+    expect(lightVars["--on-accent"]).toBe("#ffffff");
+    expect(darkVars["--bg"]).toBe("#0d1117");
+  });
+
+  it("uses a dark shadow source in the light theme", () => {
+    const lightVars = resolveAppThemeVars(PI_BASE46_LIGHT_THEME);
+
+    expect(lightVars["--shadow-raised"]).toBe(
+      "0 8px 24px rgba(0, 0, 0, 0.08)",
+    );
+  });
 });

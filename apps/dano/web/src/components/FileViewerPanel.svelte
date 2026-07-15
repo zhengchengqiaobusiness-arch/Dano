@@ -146,7 +146,7 @@
 
 <style>
   .file-viewer-panel {
-    --file-viewer-code-bg: var(--bg);
+    --file-viewer-code-bg: var(--code-bg);
 
     display: flex;
     flex-direction: column;

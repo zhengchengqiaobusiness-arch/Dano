@@ -176,14 +176,17 @@ export function resolveAppThemeVars(
   theme: Base46Theme,
 ): Record<string, string> {
   const { base16, base30, mode } = theme;
-  const shadowSource = mode === "dark" ? base30.darker_black : base16.base00;
+  const shadowSource = mode === "dark" ? base30.darker_black : base16.base07;
 
   return {
-    "--bg": base16.base00,
+    "--bg": base30.black,
     "--bg-elevated": base16.base01,
     "--panel": base30.one_bg,
     "--panel-2": base30.one_bg2,
     "--panel-3": base30.one_bg3,
+    "--control-bg": base30.one_bg,
+    "--on-accent": base16.base00,
+    "--code-bg": base16.base00,
     "--tool-surface": base30.one_bg,
     "--tool-surface-strong": base30.one_bg2,
     "--tool-output-bg": base16.base01,

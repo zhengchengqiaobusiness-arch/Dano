@@ -789,10 +789,8 @@
     margin: 1rem 0;
     padding: 16px;
     border-radius: 14px;
-    background: color-mix(in srgb, var(--panel) 84%, var(--panel-2));
-    box-shadow:
-      0 1px 0 color-mix(in srgb, var(--bg) 64%, transparent) inset,
-      var(--shadow-raised);
+    background: var(--panel);
+    box-shadow: var(--shadow-raised);
   }
 
   .question-label {
@@ -861,8 +859,8 @@
     content: "";
     width: 8px;
     height: 4px;
-    border-bottom: 2px solid var(--bg);
-    border-left: 2px solid var(--bg);
+    border-bottom: 2px solid var(--on-accent);
+    border-left: 2px solid var(--on-accent);
     opacity: 0;
     transform: translateY(-1px) rotate(-45deg) scale(0.75);
     transition:
@@ -889,7 +887,7 @@
     margin: 0;
     border: 2px solid var(--border-strong);
     border-radius: 999px;
-    background: var(--bg);
+    background: var(--control-bg);
     transition:
       border-color 0.12s ease,
       background 0.12s ease;
@@ -899,7 +897,7 @@
     border-color: var(--accent);
     background:
       radial-gradient(circle, var(--accent) 0 38%, transparent 42%),
-      var(--bg);
+      var(--control-bg);
   }
 
   .question-remote-row {

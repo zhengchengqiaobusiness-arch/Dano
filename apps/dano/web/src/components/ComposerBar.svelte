@@ -710,7 +710,7 @@
     padding: 0;
     border-radius: 999px;
     border: 1px solid var(--border);
-    background: var(--bg);
+    background: var(--control-bg);
     color: var(--text-muted);
     font-size: 0.7rem;
     cursor: pointer;
@@ -722,7 +722,7 @@
 
   .revision-cancel-button:hover {
     border-color: var(--border-strong);
-    background: var(--bg);
+    background: var(--control-bg);
     color: var(--text);
   }
 
