@@ -18,7 +18,7 @@ describe("QuestionDateField pointer boundary", () => {
 
   it("renders the datetime input inside the date-picker popover", () => {
     const contentStart = source.indexOf("<DatePicker.Content");
-    const timeInput = source.indexOf('type="time"');
+    const timeInput = source.indexOf("<TimeField.Root");
     const contentEnd = source.indexOf("</DatePicker.Content>");
 
     expect(contentStart).toBeGreaterThan(-1);
@@ -26,5 +26,6 @@ describe("QuestionDateField pointer boundary", () => {
     expect(timeInput).toBeLessThan(contentEnd);
     expect(source).toContain("closeOnDateSelect={false}");
     expect(source).toContain("if (!includesTime) open = false");
+    expect(source).not.toContain('type="time"');
   });
 });

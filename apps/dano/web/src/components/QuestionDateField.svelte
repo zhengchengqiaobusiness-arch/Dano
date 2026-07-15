@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { CalendarDate, getLocalTimeZone, type DateValue } from "@internationalized/date";
-  import { DatePicker } from "bits-ui";
+  import { CalendarDate, Time, getLocalTimeZone, type DateValue } from "@internationalized/date";
+  import { DatePicker, TimeField } from "bits-ui";
   import ChevronDown from "lucide-svelte/icons/chevron-down";
   import { formatAskUserQuestionDateValue, isAskUserQuestionDateTimeFormat, parseAskUserQuestionDateValue } from "@dano/types/ask-user-question-date";
   import { t } from "../i18n";
@@ -28,7 +28,7 @@
   const POPOVER_GAP_PX = 8;
   let open = $state(false);
   let dateValue = $state<DateValue | undefined>();
-  let timeValue = $state("00:00");
+  let timeValue = $state(new Time(0, 0));
   let initialValueSynced = $state(false);
   let lastPropValue = $state<string | undefined>(undefined);
   const displayValue = $derived(formattedValue(dateValue, timeValue));
@@ -39,7 +39,7 @@
     lastPropValue = value;
     if (!value) {
       dateValue = undefined;
-      timeValue = "00:00";
+      timeValue = new Time(0, 0);
       return;
     }
     const parsed = parseAskUserQuestionDateValue(value, dateFormat);
@@ -49,15 +49,14 @@
       parsed.getMonth() + 1,
       parsed.getDate(),
     );
-    timeValue = `${String(parsed.getHours()).padStart(2, "0")}:${String(parsed.getMinutes()).padStart(2, "0")}`;
+    timeValue = new Time(parsed.getHours(), parsed.getMinutes());
   });
 
   function formattedValue(nextDate = dateValue, nextTime = timeValue): string | undefined {
     if (!nextDate) return undefined;
     const date = nextDate.toDate(getLocalTimeZone());
     if (includesTime) {
-      const [hour = "0", minute = "0"] = nextTime.split(":");
-      date.setHours(Number(hour), Number(minute), 0, 0);
+      date.setHours(nextTime.hour, nextTime.minute, 0, 0);
     }
     return formatAskUserQuestionDateValue(date, dateFormat);
   }
@@ -73,16 +72,15 @@
     emit(nextDate, timeValue);
   }
 
-  function handleTimeInput(event: Event) {
-    timeValue = event.currentTarget instanceof HTMLInputElement
-      ? event.currentTarget.value
-      : "00:00";
-    emit(dateValue, timeValue);
+  function handleTimeChange(nextTime: Time | undefined) {
+    if (!nextTime) return;
+    timeValue = nextTime;
+    emit(dateValue, nextTime);
   }
 
   function clearValue() {
     dateValue = undefined;
-    timeValue = "00:00";
+    timeValue = new Time(0, 0);
     onValueChange(undefined);
   }
 
@@ -154,17 +152,26 @@
 
         {#if includesTime}
           <div class="question-date-time-section">
-            <div class="question-time-control">
-              <input
-                class="question-input question-time-input"
-                type="time"
-                step="60"
-                value={timeValue}
-                disabled={disabled || !dateValue}
-                oninput={handleTimeInput}
-              />
-              <ChevronDown size={16} aria-hidden="true" />
-            </div>
+            <TimeField.Root
+              bind:value={timeValue}
+              onValueChange={handleTimeChange}
+              granularity="minute"
+              hourCycle={24}
+              disabled={disabled || !dateValue}
+            >
+              <TimeField.Input class="question-time-input">
+                {#snippet children({ segments })}
+                  {#each segments as segment}
+                    <TimeField.Segment
+                      part={segment.part}
+                      class="question-time-segment"
+                    >
+                      {segment.value}
+                    </TimeField.Segment>
+                  {/each}
+                {/snippet}
+              </TimeField.Input>
+            </TimeField.Root>
           </div>
         {/if}
       </DatePicker.Content>
@@ -311,42 +318,52 @@
     outline-offset: 2px;
   }
 
-  .question-time-control {
-    position: relative;
-    width: 100%;
-  }
-
   .question-date-time-section {
     margin-top: 10px;
     padding-top: 10px;
     border-top: 1px solid var(--border);
   }
 
-  .question-time-control > :global(svg) {
-    position: absolute;
-    top: 50%;
-    right: 12px;
+  :global(.question-time-input) {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    min-height: 44px;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--control-bg);
     color: var(--text);
-    pointer-events: none;
-    transform: translateY(-50%);
+    font-variant-numeric: tabular-nums;
   }
 
-  .question-time-input {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 100%;
-    min-width: 140px;
-    padding-right: 36px;
+  :global(.question-time-input:focus-within) {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--focus-ring);
   }
 
-  .question-time-input::-webkit-calendar-picker-indicator {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    margin: 0;
-    cursor: pointer;
-    opacity: 0;
+  :global(.question-time-segment) {
+    min-width: 2ch;
+    padding: 4px 5px;
+    border-radius: 6px;
+    color: var(--text);
+    text-align: center;
+    outline: none;
+  }
+
+  :global(.question-time-segment[data-segment="literal"]) {
+    min-width: auto;
+    padding-inline: 1px;
+  }
+
+  :global(.question-time-segment:focus) {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+
+  :global(.question-time-segment[data-disabled]) {
+    cursor: not-allowed;
+    opacity: 0.5;
   }
 
   .question-date-clear {
@@ -360,7 +377,7 @@
 
     :global(.question-date-trigger),
     :global(.question-date-input),
-    .question-time-control {
+    :global(.question-time-input) {
       width: 100%;
     }
 
