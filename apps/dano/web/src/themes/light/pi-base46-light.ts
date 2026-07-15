@@ -7,7 +7,7 @@ export const PI_BASE46_LIGHT_THEME: Base46Theme = {
   base30: {
     white: "#1f2328",
     darker_black: "#f7f7f5",
-    black: "#ffffff",
+    black: "#fbfbfb",
     black2: "#ffffff",
     one_bg: "#ffffff",
     one_bg2: "#f7f7f5",

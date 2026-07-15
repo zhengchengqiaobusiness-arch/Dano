@@ -94,7 +94,7 @@
     border: 1px solid var(--border);
     border-radius: 999px;
     background: var(--panel);
-    color: var(--text-muted);
+    color: var(--text);
     font: inherit;
     font-size: 0.82rem;
     font-weight: 600;

@@ -336,7 +336,7 @@
 
   :global(.question-calendar-day[data-selected]) {
     background: var(--accent);
-    color: var(--bg);
+    color: var(--on-accent);
     font-weight: 700;
   }
 
