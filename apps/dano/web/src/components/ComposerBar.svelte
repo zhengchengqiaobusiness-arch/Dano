@@ -568,7 +568,7 @@
   .composer-bar {
     flex-shrink: 0;
     width: min(960px, calc(100% - 48px));
-    margin: 6px auto max(36px, env(safe-area-inset-bottom));
+    margin: 0 auto max(36px, env(safe-area-inset-bottom));
   }
 
   .composer-inner-wrap {
@@ -1058,7 +1058,7 @@
       bottom: 0;
       z-index: 10;
       width: calc(100% - 32px);
-      margin: 10px auto max(12px, env(safe-area-inset-bottom));
+      margin: 0 auto max(12px, env(safe-area-inset-bottom));
     }
 
     .composer-inner-wrap { width: 100%; }
@@ -1070,7 +1070,7 @@
   @media (max-width: 640px) {
     .composer-bar {
       width: calc(100% - 24px);
-      margin: 8px auto max(10px, env(safe-area-inset-bottom));
+      margin: 0 auto max(10px, env(safe-area-inset-bottom));
     }
 
     .composer-dock { gap: 8px; padding: 10px 14px; border-radius: 24px; }
