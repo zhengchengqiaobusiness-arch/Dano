@@ -1,10 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RpcResponse } from "@dano/types/protocol";
 import {
   ACTIVE_SESSION_CACHE_KEY,
   createExplicitNewSessionAction,
   readActiveSessionCache,
-  transitionNewSessionView,
   writeActiveSessionCache,
 } from "./newSession";
 
@@ -125,43 +124,67 @@ describe("explicit new session action", () => {
   });
 });
 
-describe("new session response transition", () => {
-  const previousMessage = {
-    id: "previous-user-message",
-    role: "user",
-    content: "Keep this transcript",
-  } as const;
-  const previous = {
-    activeSessionPath: "/sessions/previous.jsonl",
-    transcript: [previousMessage],
-  };
-
-  it("switches a successful response to the returned blank session", () => {
-    const next = transitionNewSessionView(successfulResponse, previous);
-
-    expect(next).toEqual({
-      activeSessionPath: "/sessions/new.jsonl",
-      transcript: [],
-    });
-
-    const storage = createStorage();
-    writeActiveSessionCache(storage, next.activeSessionPath);
-    expect(readActiveSessionCache(storage)).toBe("/sessions/new.jsonl");
+describe("bridge new session response", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
   });
 
-  it("preserves the active session and transcript on failure", () => {
-    const next = transitionNewSessionView(
-      {
-        id: "new-session",
+  it("updates the real store and cache while preserving state on failure", async () => {
+    const storage = createStorage();
+    vi.stubGlobal("window", { sessionStorage: storage });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+
+    const store = await import("../composables/bridgeStore.svelte");
+    const bridge = store.initBridge();
+    const previousResponse = {
+      ...successfulResponse,
+      data: {
+        ...successfulResponse.data,
+        sessionId: "previous-session-id",
+        sessionName: "Previous session",
+        sessionPath: "/sessions/previous.jsonl",
+        transcript: {
+          messages: [
+            {
+              id: "previous-user-message",
+              role: "user",
+              content: "Keep this transcript",
+            },
+          ],
+          hasOlder: false,
+          hasNewer: false,
+        },
+      },
+    } satisfies RpcResponse;
+
+    expect(store.applyNewSessionResponse(previousResponse)).toMatchObject({
+      success: true,
+    });
+    expect(bridge.transcript).toHaveLength(1);
+    expect(bridge.activeSessionPath).toBe("/sessions/previous.jsonl");
+    expect(readActiveSessionCache(storage)).toBe("/sessions/previous.jsonl");
+
+    expect(
+      store.applyNewSessionResponse({
         type: "response",
         command: "new_session",
         success: false,
         error: "Runtime unavailable",
-      },
-      previous,
-    );
+      }),
+    ).toEqual({ success: false });
+    expect(bridge.transcript).toHaveLength(1);
+    expect(bridge.activeSessionPath).toBe("/sessions/previous.jsonl");
+    expect(readActiveSessionCache(storage)).toBe("/sessions/previous.jsonl");
 
-    expect(next).toBe(previous);
-    expect(next.transcript).toEqual([previousMessage]);
+    expect(store.applyNewSessionResponse(successfulResponse)).toMatchObject({
+      success: true,
+    });
+    expect(bridge.transcript).toEqual([]);
+    expect(bridge.activeSessionPath).toBe("/sessions/new.jsonl");
+    expect(readActiveSessionCache(storage)).toBe("/sessions/new.jsonl");
   });
 });

@@ -48,7 +48,6 @@ import {
 import {
   createExplicitNewSessionAction,
   readActiveSessionCache,
-  transitionNewSessionView,
   writeActiveSessionCache,
 } from "../utils/newSession";
 import {
@@ -2198,6 +2197,35 @@ function handleServerMessage(raw: MessageEvent) {
   }
 }
 
+export function applyNewSessionResponse(payload: RpcResponse):
+  | { success: false }
+  | { success: true; workspacePath: string | null }
+  | null {
+  if (payload.command !== "new_session") return null;
+  if (!payload.success) return { success: false };
+
+  clearPromptPending();
+  const data = payload.data as NonNullable<
+    Parameters<typeof applySessionSnapshotResponse>[0]
+  >;
+  if (!applySessionSnapshotResponse(data)) {
+    replaceTranscript([], data.sessionPath ?? null);
+    _transcriptHasOlder = false;
+    _transcriptOldestCursor = null;
+    _transcriptNewestCursor = null;
+    _transcriptInitialLoading = false;
+    _treeEntries = [];
+    _sessionState = null;
+    _isStreaming = false;
+    setActiveTreeSessionPath(data.sessionPath ?? null);
+  }
+  setCompactionState(false);
+  return {
+    success: true,
+    workspacePath: data.workspacePath ?? _sessionState?.workspacePath ?? null,
+  };
+}
+
 function handleResponse(payload: RpcResponse) {
   if (payload.id) {
     const pending = pendingRequests.get(payload.id);
@@ -2206,6 +2234,21 @@ function handleResponse(payload: RpcResponse) {
       pendingRequests.delete(payload.id);
       pending.resolve(payload);
     }
+  }
+
+  const newSessionResult = applyNewSessionResponse(payload);
+  if (newSessionResult) {
+    if (newSessionResult.success) {
+      void refreshWorkspaces().catch(() => {});
+      if (newSessionResult.workspacePath) {
+        void loadWorkspaceSessions({
+          workspacePath: newSessionResult.workspacePath,
+          limit: 5,
+          merge: "replace",
+        }).catch(() => {});
+      }
+    }
+    return;
   }
 
   if (payload.success) {
@@ -2324,39 +2367,6 @@ function handleResponse(payload: RpcResponse) {
           | undefined;
         if (data)
           applyTreeEntriesUpdate(data.entries, data.sessionPath ?? null);
-        break;
-      }
-      case "new_session": {
-        clearPromptPending();
-        const nextView = transitionNewSessionView(payload, {
-          activeSessionPath: getDisplayedSessionPath(),
-          transcript: currentRawTranscriptEntries(),
-        });
-        const data = payload.data as
-          | Parameters<typeof applySessionSnapshotResponse>[0]
-          | undefined;
-        if (!applySessionSnapshotResponse(data)) {
-          replaceTranscript(nextView.transcript, nextView.activeSessionPath);
-          _transcriptHasOlder = false;
-          _transcriptOldestCursor = null;
-          _transcriptNewestCursor = null;
-          _transcriptInitialLoading = false;
-          _treeEntries = [];
-          _sessionState = null;
-          _isStreaming = false;
-          setActiveTreeSessionPath(nextView.activeSessionPath);
-        }
-        setCompactionState(false);
-        const workspacePath =
-          data?.workspacePath ?? _sessionState?.workspacePath;
-        void refreshWorkspaces().catch(() => {});
-        if (workspacePath) {
-          void loadWorkspaceSessions({
-            workspacePath,
-            limit: 5,
-            merge: "replace",
-          }).catch(() => {});
-        }
         break;
       }
       case "compact": {
