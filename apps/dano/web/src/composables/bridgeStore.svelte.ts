@@ -2437,6 +2437,19 @@ function handleResponse(payload: RpcResponse) {
   }
 }
 
+export function applyTranscriptSnapshotEvent(
+  data: RpcTranscriptSnapshotEvent,
+): void {
+  if (
+    _transcriptInitialLoading &&
+    _activeTreeSessionPath &&
+    (data.sessionPath ?? null) !== _activeTreeSessionPath
+  ) {
+    return;
+  }
+  if (Array.isArray(data.messages)) applyTranscriptPage(data, "replace");
+}
+
 function handleEvent(payload: RpcBridgeEvent) {
   switch (payload.type) {
     case "heartbeat": {
@@ -2453,8 +2466,7 @@ function handleEvent(payload: RpcBridgeEvent) {
       break;
     }
     case "transcript_snapshot": {
-      const data = payload as RpcTranscriptSnapshotEvent;
-      if (Array.isArray(data.messages)) applyTranscriptPage(data, "replace");
+      applyTranscriptSnapshotEvent(payload as RpcTranscriptSnapshotEvent);
       break;
     }
     case "transcript_start": {
