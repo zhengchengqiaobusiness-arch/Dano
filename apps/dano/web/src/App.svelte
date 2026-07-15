@@ -808,13 +808,12 @@
   }
 
   async function handleExplicitNewSession() {
-    if (newSessionPending) return;
     newSessionPending = true;
-    pendingRevision = null;
 
     try {
-      const response = await bridge.newSession();
+      const response = await bridge.explicitNewSession();
       if (response.success) {
+        pendingRevision = null;
         activeDebugSessionPath = null;
         editQueuedPayload = null;
         sidebarOpen = false;

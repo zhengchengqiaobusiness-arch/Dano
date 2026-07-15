@@ -1,8 +1,13 @@
+import type {
+  RpcResponse,
+  RpcTranscriptMessage,
+} from "@dano/types/protocol";
+
 export const ACTIVE_SESSION_CACHE_KEY = "dano.activeSessionPath";
 
-type NewSessionResult = {
-  success: boolean;
-  error?: string;
+export type NewSessionViewState = {
+  activeSessionPath: string | null;
+  transcript: readonly RpcTranscriptMessage[];
 };
 
 export function readActiveSessionCache(storage: Storage): string | null {
@@ -20,29 +25,43 @@ export function writeActiveSessionCache(
   }
 }
 
-export function createSingleFlightNewSession<Result extends NewSessionResult>(
-  createSession: (workspacePath?: string) => Promise<Result>,
-  reportError: (message: string) => void,
-  fallbackError: () => string,
-): (workspacePath?: string) => Promise<Result> {
-  let pending: Promise<Result> | null = null;
+export function transitionNewSessionView(
+  response: RpcResponse,
+  current: NewSessionViewState,
+): NewSessionViewState {
+  if (response.command !== "new_session" || !response.success) return current;
 
-  return (workspacePath?: string) => {
+  const data = response.data as
+    | {
+        sessionPath?: string;
+        transcript?: { messages?: RpcTranscriptMessage[] };
+      }
+    | undefined;
+
+  return {
+    activeSessionPath: data?.sessionPath ?? null,
+    transcript: data?.transcript?.messages ?? [],
+  };
+}
+
+export function createExplicitNewSessionAction(
+  createSession: () => Promise<RpcResponse>,
+  reportError: (error: unknown) => void,
+): () => Promise<RpcResponse> {
+  let pending: Promise<RpcResponse> | null = null;
+
+  return () => {
     if (pending) return pending;
 
-    pending = createSession(workspacePath)
+    pending = createSession()
       .then(result => {
         if (!result.success) {
-          reportError(result.error?.trim() || fallbackError());
+          reportError(result.error);
         }
         return result;
       })
       .catch(error => {
-        reportError(
-          error instanceof Error && error.message.trim()
-            ? error.message
-            : fallbackError(),
-        );
+        reportError(error);
         throw error;
       })
       .finally(() => {

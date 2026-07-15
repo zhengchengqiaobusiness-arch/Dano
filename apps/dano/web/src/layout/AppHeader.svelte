@@ -88,7 +88,7 @@
     height: 40px;
     padding: 0 14px;
     border: 1px solid #e4e5e2;
-    border-radius: 10px;
+    border-radius: 999px;
     background: #fff;
     color: #5f6368;
     font: inherit;
@@ -180,6 +180,7 @@
       width: 40px;
       min-width: 40px;
       padding: 0;
+      border-radius: 50%;
     }
 
     .new-session-button span {

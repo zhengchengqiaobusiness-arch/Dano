@@ -46,8 +46,9 @@ import {
   summarizeErrorMessage,
 } from "../utils/bridgeErrors";
 import {
-  createSingleFlightNewSession,
+  createExplicitNewSessionAction,
   readActiveSessionCache,
+  transitionNewSessionView,
   writeActiveSessionCache,
 } from "../utils/newSession";
 import {
@@ -2066,19 +2067,24 @@ export async function switchSession(sessionPath: string): Promise<RpcResponse> {
   return sendCommand({ type: "switch_session", sessionPath });
 }
 
-const requestNewSession = createSingleFlightNewSession(
-  (workspacePath?: string) => sendCommand({ type: "new_session", workspacePath }),
-  message => {
+export function newSession(workspacePath?: string): Promise<RpcResponse> {
+  return sendCommand({ type: "new_session", workspacePath });
+}
+
+const requestExplicitNewSession = createExplicitNewSessionAction(
+  () => newSession(),
+  error => {
+    const message =
+      error instanceof Error ? error.message : String(error ?? "");
     pushNotification(
       summarizeErrorMessage(message, t("store.error.newSessionFailed")),
       "error",
     );
   },
-  () => t("store.error.newSessionFailed"),
 );
 
-export function newSession(workspacePath?: string): Promise<RpcResponse> {
-  return requestNewSession(workspacePath);
+export function explicitNewSession(): Promise<RpcResponse> {
+  return requestExplicitNewSession();
 }
 
 export function registerWorkspace(
@@ -2322,11 +2328,15 @@ function handleResponse(payload: RpcResponse) {
       }
       case "new_session": {
         clearPromptPending();
+        const nextView = transitionNewSessionView(payload, {
+          activeSessionPath: getDisplayedSessionPath(),
+          transcript: currentRawTranscriptEntries(),
+        });
         const data = payload.data as
           | Parameters<typeof applySessionSnapshotResponse>[0]
           | undefined;
         if (!applySessionSnapshotResponse(data)) {
-          replaceTranscript([], null);
+          replaceTranscript(nextView.transcript, nextView.activeSessionPath);
           _transcriptHasOlder = false;
           _transcriptOldestCursor = null;
           _transcriptNewestCursor = null;
@@ -2334,6 +2344,7 @@ function handleResponse(payload: RpcResponse) {
           _treeEntries = [];
           _sessionState = null;
           _isStreaming = false;
+          setActiveTreeSessionPath(nextView.activeSessionPath);
         }
         setCompactionState(false);
         const workspacePath =
@@ -2973,6 +2984,7 @@ export function initBridge() {
     createGitBranch,
     switchSession,
     newSession,
+    explicitNewSession,
     registerWorkspace,
     abortGeneration,
     compactSession,

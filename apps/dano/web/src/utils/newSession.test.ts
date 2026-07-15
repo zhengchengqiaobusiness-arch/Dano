@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import type { RpcResponse } from "@dano/types/protocol";
 import {
   ACTIVE_SESSION_CACHE_KEY,
-  createSingleFlightNewSession,
+  createExplicitNewSessionAction,
   readActiveSessionCache,
+  transitionNewSessionView,
   writeActiveSessionCache,
 } from "./newSession";
 
@@ -20,6 +22,22 @@ function createStorage(): Storage {
   };
 }
 
+const successfulResponse = {
+  type: "response",
+  command: "new_session",
+  success: true,
+  data: {
+    cancelled: false,
+    sessionId: "new-session-id",
+    sessionName: "New session",
+    sessionPath: "/sessions/new.jsonl",
+    transcript: { messages: [], hasOlder: false, hasNewer: false },
+    treeEntries: [],
+    thinkingLevel: "medium",
+    workspacePath: "/workspaces/new",
+  },
+} satisfies RpcResponse;
+
 describe("active session cache", () => {
   it("stores the newly active session and clears stale paths", () => {
     const storage = createStorage();
@@ -36,36 +54,31 @@ describe("active session cache", () => {
 });
 
 describe("explicit new session action", () => {
-  it("creates a new session through the supplied existing path", async () => {
-    const createSession = vi.fn().mockResolvedValue({
-      success: true,
-      data: { sessionPath: "/sessions/new.jsonl" },
-    });
+  it("creates a new session through the existing bridge command", async () => {
+    const createSession = vi.fn().mockResolvedValue(successfulResponse);
     const reportError = vi.fn();
-    const newSession = createSingleFlightNewSession(
+    const newSession = createExplicitNewSessionAction(
       createSession,
       reportError,
-      () => "Failed to create a new session",
     );
 
     await expect(newSession()).resolves.toMatchObject({ success: true });
     expect(createSession).toHaveBeenCalledOnce();
-    expect(createSession).toHaveBeenCalledWith(undefined);
+    expect(createSession).toHaveBeenCalledWith();
     expect(reportError).not.toHaveBeenCalled();
   });
 
   it("coalesces rapid activations into one creation request", async () => {
-    let resolveRequest!: (result: { success: true }) => void;
+    let resolveRequest!: (result: RpcResponse) => void;
     const createSession = vi.fn(
       () =>
-        new Promise<{ success: true }>(resolve => {
+        new Promise<RpcResponse>(resolve => {
           resolveRequest = resolve;
         }),
     );
-    const newSession = createSingleFlightNewSession(
+    const newSession = createExplicitNewSessionAction(
       createSession,
       vi.fn(),
-      () => "Failed to create a new session",
     );
 
     const first = newSession();
@@ -73,20 +86,24 @@ describe("explicit new session action", () => {
 
     expect(first).toBe(second);
     expect(createSession).toHaveBeenCalledOnce();
-    resolveRequest({ success: true });
+    resolveRequest(successfulResponse);
     await first;
   });
 
   it("reports failed responses and allows a later retry", async () => {
     const createSession = vi
       .fn()
-      .mockResolvedValueOnce({ success: false, error: "Runtime unavailable" })
-      .mockResolvedValueOnce({ success: true });
+      .mockResolvedValueOnce({
+        type: "response",
+        command: "new_session",
+        success: false,
+        error: "Runtime unavailable",
+      } satisfies RpcResponse)
+      .mockResolvedValueOnce(successfulResponse);
     const reportError = vi.fn();
-    const newSession = createSingleFlightNewSession(
+    const newSession = createExplicitNewSessionAction(
       createSession,
       reportError,
-      () => "Failed to create a new session",
     );
 
     await expect(newSession()).resolves.toMatchObject({ success: false });
@@ -98,13 +115,53 @@ describe("explicit new session action", () => {
 
   it("reports rejected requests without converting them into success", async () => {
     const reportError = vi.fn();
-    const newSession = createSingleFlightNewSession(
+    const newSession = createExplicitNewSessionAction(
       vi.fn().mockRejectedValue(new Error("Connection lost")),
       reportError,
-      () => "Failed to create a new session",
     );
 
     await expect(newSession()).rejects.toThrow("Connection lost");
-    expect(reportError).toHaveBeenCalledWith("Connection lost");
+    expect(reportError).toHaveBeenCalledWith(expect.any(Error));
+  });
+});
+
+describe("new session response transition", () => {
+  const previousMessage = {
+    id: "previous-user-message",
+    role: "user",
+    content: "Keep this transcript",
+  } as const;
+  const previous = {
+    activeSessionPath: "/sessions/previous.jsonl",
+    transcript: [previousMessage],
+  };
+
+  it("switches a successful response to the returned blank session", () => {
+    const next = transitionNewSessionView(successfulResponse, previous);
+
+    expect(next).toEqual({
+      activeSessionPath: "/sessions/new.jsonl",
+      transcript: [],
+    });
+
+    const storage = createStorage();
+    writeActiveSessionCache(storage, next.activeSessionPath);
+    expect(readActiveSessionCache(storage)).toBe("/sessions/new.jsonl");
+  });
+
+  it("preserves the active session and transcript on failure", () => {
+    const next = transitionNewSessionView(
+      {
+        id: "new-session",
+        type: "response",
+        command: "new_session",
+        success: false,
+        error: "Runtime unavailable",
+      },
+      previous,
+    );
+
+    expect(next).toBe(previous);
+    expect(next.transcript).toEqual([previousMessage]);
   });
 });
