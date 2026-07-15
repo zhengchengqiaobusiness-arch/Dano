@@ -2466,17 +2466,6 @@
       gap: 6px;
     }
 
-    .chat-transcript::after {
-      content: "";
-      position: sticky;
-      bottom: 0;
-      z-index: 4;
-      flex: 0 0 20px;
-      margin: -26px -16px 0;
-      pointer-events: none;
-      background: linear-gradient(to bottom, transparent, var(--bg));
-    }
-
     .scroll-bottom-overlay {
       bottom: 0;
     }
@@ -2493,10 +2482,6 @@
   @media (max-width: 640px) {
     .chat-transcript {
       padding: 42px 12px 48px;
-    }
-
-    .chat-transcript::after {
-      margin-inline: -12px;
     }
 
     .message-content.user {
