@@ -33,6 +33,7 @@
   import SubmittedAnswerValue from "./SubmittedAnswerValue.svelte";
   import ChevronDown from "lucide-svelte/icons/chevron-down";
   import Calendar from "lucide-svelte/icons/calendar";
+  import Check from "lucide-svelte/icons/check";
   import CircleCheck from "lucide-svelte/icons/circle-check";
   import ListChecks from "lucide-svelte/icons/list-checks";
   import MessageSquareText from "lucide-svelte/icons/message-square-text";
@@ -551,7 +552,7 @@
       <section class="desktop-question-result" aria-label={t("questionTool.submittedTitle")}>
         <header class="submitted-header">
           <span class="submitted-status-icon" aria-hidden="true">
-            <CircleCheck size={22} />
+            <Check size={22} />
           </span>
           <div>
             <h3>{t("questionTool.submittedTitle")}</h3>
