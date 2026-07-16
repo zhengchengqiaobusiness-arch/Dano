@@ -30,6 +30,7 @@ import {
   ASK_USER_QUESTION_CANCELLED_CODE,
   askUserQuestionRuntime,
   buildAskUserQuestionConfirmationCardRequest,
+  isAskUserQuestionConfirmationCall,
   normalizeAskUserQuestionCardRequest,
   type AskUserQuestionCoordinator,
   type AskUserQuestionRuntime,
@@ -4313,14 +4314,7 @@ function confirmationRequestFromTranscript(
   rawArguments: unknown,
   previousSubmittedForm?: SubmittedFormProjection,
 ): AskUserQuestionCardRequest | null {
-  if (
-    !rawArguments ||
-    typeof rawArguments !== "object" ||
-    Array.isArray(rawArguments) ||
-    !("confirm" in rawArguments) ||
-    rawArguments.confirm !== true ||
-    Object.keys(rawArguments).some(key => key !== "confirm")
-  ) {
+  if (!isAskUserQuestionConfirmationCall(rawArguments)) {
     return null;
   }
 

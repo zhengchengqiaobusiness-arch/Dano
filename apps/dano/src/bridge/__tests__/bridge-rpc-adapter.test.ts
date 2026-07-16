@@ -3372,6 +3372,102 @@ describe("BridgeRpcAdapter", () => {
       ]);
     });
 
+    it("projects live confirmation cards with redundant legacy fields after a submitted grouped form", async () => {
+      (ws.send as ReturnType<typeof vi.fn>).mockClear();
+
+      const handler = (context.events.subscribe as ReturnType<typeof vi.fn>)
+        .mock.calls[0]?.[0] as
+        | ((event: Record<string, unknown>) => void)
+        | undefined;
+      const formMessage = {
+        id: "assistant-form",
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "form-call",
+            name: "ask_user_question",
+            arguments: {
+              title: "公章使用申请表",
+              questions: JSON.stringify([
+                {
+                  id: "seal_id",
+                  question: "请选择印章",
+                  default: "公司章",
+                },
+                {
+                  id: "reason",
+                  question: "请描述具体用途",
+                  default: "用于公司业务文件盖章",
+                },
+              ]),
+            },
+          },
+        ],
+      };
+      const resultMessage = {
+        id: "form-result",
+        role: "toolResult",
+        toolCallId: "form-call",
+        toolName: "ask_user_question",
+        content: [{ type: "text", text: "answered" }],
+        details: {
+          status: "answered",
+          answer: {
+            seal_id: "公司章",
+            reason: "用于公司业务文件盖章",
+          },
+        },
+        isError: false,
+      };
+      const confirmMessage = {
+        id: "assistant-confirm",
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "confirm-call",
+            name: "ask_user_question",
+            arguments: {
+              confirm: true,
+              question: "是否确认提交？",
+            },
+          },
+        ],
+      };
+
+      for (const message of [formMessage, resultMessage, confirmMessage]) {
+        handler?.({ type: "message_start", message });
+        handler?.({ type: "message_end", message });
+      }
+
+      await new Promise(r => setTimeout(r, 250));
+
+      const sendCalls = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string),
+      );
+      const confirmUpsert = [...sendCalls].reverse().find(
+        (call: any) =>
+          call.payload?.type === "transcript_upsert" &&
+          call.payload.message?.id === "assistant-confirm",
+      );
+
+      expect(confirmUpsert?.payload.message.content[0]).toMatchObject({
+        id: "confirm-call",
+        name: "ask_user_question",
+        questionRequest: {
+          batch: false,
+          kind: "confirm",
+          title: "公章使用申请表确认",
+          confirmationOfToolCallId: "form-call",
+          answer: {
+            seal_id: "公司章",
+            reason: "用于公司业务文件盖章",
+          },
+        },
+      });
+    });
+
     it("coalesces consecutive transcript deltas for the same block", async () => {
       (ws.send as ReturnType<typeof vi.fn>).mockClear();
 

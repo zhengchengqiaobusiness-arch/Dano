@@ -298,10 +298,7 @@ export class AskUserQuestionCoordinator {
     }
 
     const parsedRequest = parseJsonString(rawRequest);
-    const confirmationCall =
-      isPlainRecord(parsedRequest) &&
-      parsedRequest.confirm === true &&
-      parsedRequest.questions === undefined;
+    const confirmationCall = isAskUserQuestionConfirmationCall(parsedRequest);
     const submittedForm = confirmationCall && signal
       ? this.submittedFormBySignal.get(signal)
       : undefined;
@@ -708,6 +705,17 @@ function parseJsonString(value: unknown): unknown {
   } catch {
     return value;
   }
+}
+
+export function isAskUserQuestionConfirmationCall(
+  rawRequest: unknown,
+): boolean {
+  const parsed = parseJsonString(rawRequest);
+  return (
+    isPlainRecord(parsed) &&
+    parsed.confirm === true &&
+    parsed.questions === undefined
+  );
 }
 
 function isCompatibleDataSource(
