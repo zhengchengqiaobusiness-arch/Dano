@@ -24,6 +24,7 @@
     answerQuestion,
     getBridgeClientId,
     presentQuestion,
+    updateQuestion,
     type TranscriptDelta,
     type TranscriptEntry,
     type TranscriptStream,
@@ -1418,7 +1419,7 @@
               {:else if block.kind === "tool"}
                 {@const readClassification = classifyReadToolBlock(block)}
                 {#if askUserQuestionRequest(block) && !isAskUserQuestionToolError(block)}
-                  <QuestionToolCard {block} active={isStreaming && !initialLoading} onPresent={presentQuestion} onRespond={answerQuestion} {onFieldAssist} />
+                  <QuestionToolCard {block} active={isStreaming && !initialLoading} onPresent={presentQuestion} onRespond={answerQuestion} onUpdate={updateQuestion} {onFieldAssist} />
                 {:else if readClassification?.kind === "skill"}
                   <SkillInvocationCard skillName={readClassification.label} />
                 {:else}

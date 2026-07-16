@@ -20,7 +20,8 @@ import {
 function executeQuestion(
   toolCallId: string,
   params: {
-    question: string;
+    question?: string;
+    title?: string;
     options?: (string | AskUserQuestionOption)[];
     inputType?: AskUserQuestionInputType;
     dataSource?: AskUserQuestionDataSource;
@@ -53,6 +54,7 @@ function executeQuestion(
 }
 
 function withRequiredDefault<T extends {
+  title?: string;
   options?: (string | AskUserQuestionOption)[];
   inputType?: AskUserQuestionInputType;
   multiple?: boolean;
@@ -70,6 +72,7 @@ function withRequiredDefault<T extends {
   if (params.questions) {
     return {
       ...params,
+      title: params.title ?? "测试表单",
       questions: params.questions.map(question => question.confirm || question.default !== undefined
         ? question
         : { ...question, default: defaultForQuestion(question) }),
@@ -240,8 +243,8 @@ describe("ask_user_question tool", () => {
       "Set required:true only when an answer is mandatory. required defaults to false.",
       "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
       "Dano returns the user's date answer as submitted; convert it yourself if a downstream interface needs another business format.",
-      "When using questions, put each field's id, question, options, inputType, dateFormat, required, dataSource, multiple, and default inside its questions item. Do not put top-level field configuration beside questions.",
-      "For forms, applications, or other user-reviewed summaries, call ask_user_question with confirm: true after presenting the final summary and before treating it as confirmed, ready to submit, or complete.",
+      "When using questions, provide a concise top-level title and put each field's id, question, options, inputType, dateFormat, required, dataSource, multiple, and default inside its questions item.",
+      "After a grouped form is answered, call ask_user_question with only {confirm:true}. Do not send confirmation text, the prior answers, or a relation id; Dano binds the latest saved form.",
     ]);
   });
 
@@ -883,25 +886,76 @@ describe("ask_user_question tool", () => {
     });
   });
 
-  it("returns a boolean confirmation", async () => {
-    const execution = executeQuestion("confirm-1", {
-      question: "Deploy now?",
-      confirm: true,
+  it("binds confirm-only calls to the latest submitted grouped form", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    const controller = new AbortController();
+    const form = coordinator.wait(
+      "form-1",
+      {
+        title: "公章使用申请",
+        questions: [{ id: "reason", question: "用途？", default: "签署合同" }],
+      },
+      controller.signal,
+    );
+    coordinator.present("form-1");
+    coordinator.answer("form-1", {
+      cancelled: false,
+      answer: { reason: "签署采购合同" },
+    });
+    await expect(form).resolves.toEqual({
+      status: "answered",
+      answer: { reason: "签署采购合同" },
     });
 
-    askUserQuestionCoordinator.answer("confirm-1", {
-      cancelled: false,
-      answer: false,
+    const confirmation = coordinator.wait(
+      "confirm-1",
+      { confirm: true },
+      controller.signal,
+    );
+    expect(coordinator.cardRequest("confirm-1")).toEqual({
+      batch: false,
+      kind: "confirm",
+      id: "confirmation",
+      title: "公章使用申请确认",
+      confirmationOfToolCallId: "form-1",
+      questions: [expect.objectContaining({ id: "reason", question: "用途？" })],
+      answer: { reason: "签署采购合同" },
     });
-    await expect(execution).resolves.toMatchObject({
-      details: { status: "answered", answer: false },
+
+    expect(coordinator.update("confirm-1", { reason: "签署销售合同" })).toMatchObject({
+      answer: { reason: "签署销售合同" },
     });
+    coordinator.answer("confirm-1", { cancelled: false, answer: true });
+    await expect(confirmation).resolves.toEqual({
+      status: "confirmed",
+      confirmationOfToolCallId: "form-1",
+      answer: { reason: "签署销售合同" },
+    });
+  });
+
+  it("rejects confirm-only calls without a submitted grouped form", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    await expect(
+      coordinator.wait("confirm-without-form", { confirm: true }, new AbortController().signal),
+    ).rejects.toThrow("only be called after the user submitted a grouped form");
+  });
+
+  it("rejects grouped forms without a top-level title", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    await expect(
+      coordinator.wait(
+        "form-without-title",
+        { questions: [{ id: "reason", question: "用途？", default: "签署合同" }] },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("Grouped forms require a top-level title");
   });
 
   it("returns grouped answers from one tool confirmation", async () => {
     const execution = askUserQuestionTool.execute(
       "group-1",
       {
+        title: "测试表单",
         questions: [
           { id: "name", question: "Name?", default: "Dano" },
           {
@@ -948,6 +1002,7 @@ describe("ask_user_question tool", () => {
     const execution = askUserQuestionTool.execute(
       "group-date",
       {
+        title: "测试表单",
         questions: [
           {
             id: "start_at",
@@ -981,6 +1036,7 @@ describe("ask_user_question tool", () => {
     const execution = askUserQuestionTool.execute(
       "compat-single-object",
       {
+        title: "测试表单",
         questions: {
           key: "description",
           title: "请填写说明",
@@ -1009,6 +1065,7 @@ describe("ask_user_question tool", () => {
     const execution = askUserQuestionTool.execute(
       "compat-json-string",
       {
+        title: "测试表单",
         questions: JSON.stringify({
           key: "description",
           title: "请填写说明",
@@ -1037,6 +1094,7 @@ describe("ask_user_question tool", () => {
     const execution = askUserQuestionTool.execute(
       "compat-single-mixed",
       {
+        title: "测试表单",
         question: "请假类型？",
         options: ["事假", "病假"],
         default: "事假",
@@ -1069,6 +1127,7 @@ describe("ask_user_question tool", () => {
     const execution = askUserQuestionTool.execute(
       "compat-multi-text-mixed",
       {
+        title: "测试表单",
         ...mixed,
         questions: [
           {
@@ -1169,6 +1228,7 @@ describe("ask_user_question tool", () => {
       askUserQuestionTool.execute(
         "group-mixed",
         {
+          title: "测试表单",
           ...mixed,
           questions: [
             { id: "leave_type", question: "Leave type?", default: "事假" },
@@ -1186,6 +1246,7 @@ describe("ask_user_question tool", () => {
     const execution = askUserQuestionTool.execute(
       "group-missing",
       {
+        title: "测试表单",
         questions: [
           { id: "name", question: "Name?", default: "Dano" },
           { id: "env", question: "Environment?", options: ["Test", "Prod"], default: "Test" },
@@ -1209,6 +1270,7 @@ describe("ask_user_question tool", () => {
     const execution = askUserQuestionTool.execute(
       "group-missing-required",
       {
+        title: "测试表单",
         questions: [
           { id: "name", question: "Name?", default: "Dano" },
           { id: "env", question: "Environment?", options: ["Test", "Prod"], default: "Test", required: true },
@@ -1263,7 +1325,7 @@ describe("ask_user_question tool", () => {
         options: ["Yes", "No"],
         confirm: true,
       }),
-    ).rejects.toThrow("cannot provide options");
+    ).rejects.toThrow("accept only confirm:true");
   });
 
   it("rejects grouped confirmation parameters instead of waiting forever", async () => {
@@ -1271,6 +1333,7 @@ describe("ask_user_question tool", () => {
       askUserQuestionTool.execute(
         "group-confirm-invalid",
         {
+          title: "测试表单",
           questions: [
             {
               id: "confirm_leave",

@@ -9,6 +9,7 @@ import {
   type AskUserQuestionAnswerInput,
   type AskUserQuestionCardItem,
   type AskUserQuestionCardRequest,
+  type AskUserQuestionConfirmationCardRequest,
   type AskUserQuestionDataSource,
   type AskUserQuestionInputType,
   type AskUserQuestionLifecycleState,
@@ -74,7 +75,10 @@ const groupedRetryError =
   "You called ask_user_question more than once in the same response while another question is still pending. Retry silently with exactly one native ask_user_question call using {\"questions\":[...]} so all fields render in one card with one submit button. Put every field's options, inputType, dateFormat, dataSource, multiple, required, and default inside its questions[] item. Do not explain this correction to the user.";
 
 const mixedGroupedFieldsError =
-  "Invalid ask_user_question call: when using questions, field configuration belongs inside each questions[] item. Move options, inputType, dateFormat, required, dataSource, multiple, default, and confirm out of the top level. Top-level question/title/label/prompt text is treated only as form instruction text and is ignored. Retry silently; do not explain this correction to the user.";
+  "Invalid ask_user_question call: field configuration belongs inside each questions[] item. Provide a top-level title and move options, inputType, dateFormat, required, dataSource, multiple, default, and confirm out of the top level. Retry silently; do not explain this correction to the user.";
+
+const missingConfirmationSourceError =
+  "Invalid ask_user_question confirmation: confirm:true can only be called after the user submitted a grouped form in this workflow. Retry silently with the form call first; do not explain this correction to the user.";
 
 const askUserQuestionOptionSchema = Type.Union([
   Type.String({ minLength: 1 }),
@@ -165,7 +169,8 @@ export const askUserQuestionParameters = Type.Object({
   ...askUserQuestionFields,
   confirm: Type.Optional(
     Type.Literal(true, {
-      description: "Set true without options to ask for confirmation.",
+      description:
+        "Call with only {confirm:true} after the user submitted a grouped form. Dano supplies the form title and latest saved answers.",
     }),
   ),
   questions: Type.Optional(
@@ -183,6 +188,11 @@ export const askUserQuestionResultSchema = Type.Union([
       askUserQuestionAnswerSchema,
       Type.Record(Type.String(), askUserQuestionAnswerSchema),
     ]),
+  }),
+  Type.Object({
+    status: Type.Literal("confirmed"),
+    answer: Type.Record(Type.String(), askUserQuestionAnswerSchema),
+    confirmationOfToolCallId: Type.String(),
   }),
   Type.Object({ status: Type.Literal("cancelled") }),
 ]);
@@ -241,12 +251,21 @@ interface PendingQuestionItem {
 interface PendingQuestion {
   grouped: boolean;
   questions: readonly PendingQuestionItem[];
+  cardRequest: AskUserQuestionCardRequest;
+  confirmation?: SubmittedForm;
   state: "awaiting_presentation" | "presented";
   signal?: AbortSignal;
   presentationTimer?: ReturnType<typeof setTimeout>;
   resolve(result: AskUserQuestionResult): void;
   reject(error: Error): void;
   cleanup(): void;
+}
+
+interface SubmittedForm {
+  toolCallId: string;
+  questions: readonly PendingQuestionItem[];
+  cardRequest: Extract<AskUserQuestionCardRequest, { batch: true }>;
+  answer: Record<string, AskUserQuestionAnswer>;
 }
 
 function isOtherOption(value: string | PendingQuestionOption): boolean {
@@ -260,6 +279,7 @@ export class AskUserQuestionCoordinator {
   private readonly pending = new Map<string, PendingQuestion>();
   private readonly pendingToolCallBySignal = new WeakMap<AbortSignal, string>();
   private readonly presentationFailuresBySignal = new WeakMap<AbortSignal, number>();
+  private readonly submittedFormBySignal = new WeakMap<AbortSignal, SubmittedForm>();
 
   constructor(
     private readonly presentationTimeoutMs = 5_000,
@@ -278,12 +298,38 @@ export class AskUserQuestionCoordinator {
       );
     }
 
-    const normalized = normalizeAskUserQuestionRequest(rawRequest);
+    const parsedRequest = parseJsonString(rawRequest);
+    const confirmationCall =
+      isPlainRecord(parsedRequest) &&
+      parsedRequest.confirm === true &&
+      parsedRequest.questions === undefined;
+    const submittedForm = confirmationCall && signal
+      ? this.submittedFormBySignal.get(signal)
+      : undefined;
+    if (confirmationCall && !isConfirmOnlyRequest(parsedRequest)) {
+      logQuestionLifecycle(toolCallId, "invalid");
+      return Promise.reject(new Error("Confirmation calls accept only confirm:true"));
+    }
+    if (confirmationCall && !submittedForm) {
+      logQuestionLifecycle(toolCallId, "invalid");
+      return Promise.reject(new Error(missingConfirmationSourceError));
+    }
+    const normalized = confirmationCall
+      ? confirmationRequest(submittedForm as SubmittedForm)
+      : normalizeAskUserQuestionRequest(rawRequest);
     if ("error" in normalized) {
       logQuestionLifecycle(toolCallId, "invalid");
       return Promise.reject(new Error(normalized.error));
     }
-    const { request, questions } = normalized;
+    if (
+      isPlainRecord(parsedRequest) &&
+      parsedRequest.questions !== undefined &&
+      !firstString(parsedRequest.title)
+    ) {
+      logQuestionLifecycle(toolCallId, "invalid");
+      return Promise.reject(new Error("Grouped forms require a top-level title"));
+    }
+    const { request, questions, cardRequest } = normalized;
     const pendingInCurrentTurn = signal
       ? this.pendingToolCallBySignal.get(signal)
       : undefined;
@@ -321,6 +367,8 @@ export class AskUserQuestionCoordinator {
       this.pending.set(toolCallId, {
         grouped: request.questions !== undefined,
         questions,
+        cardRequest,
+        ...(submittedForm ? { confirmation: submittedForm } : {}),
         state: "awaiting_presentation",
         signal,
         resolve,
@@ -378,6 +426,24 @@ export class AskUserQuestionCoordinator {
     return this.pending.get(toolCallId)?.state;
   }
 
+  cardRequest(toolCallId: string): AskUserQuestionCardRequest | undefined {
+    return this.pending.get(toolCallId)?.cardRequest;
+  }
+
+  update(
+    toolCallId: string,
+    answer: Record<string, AskUserQuestionAnswerInput>,
+  ): AskUserQuestionConfirmationCardRequest {
+    const pending = this.pending.get(toolCallId);
+    if (!pending?.confirmation) {
+      throw new Error(`Pending confirmation not found: ${toolCallId}`);
+    }
+    const normalized = normalizeGroupedAnswer(pending.questions, answer);
+    pending.confirmation.answer = normalized;
+    pending.cardRequest = confirmationCardRequest(pending.confirmation);
+    return pending.cardRequest as AskUserQuestionConfirmationCardRequest;
+  }
+
   answer(
     toolCallId: string,
     response:
@@ -398,23 +464,31 @@ export class AskUserQuestionCoordinator {
     let result: AskUserQuestionResult;
     if (response.cancelled) {
       result = { status: "cancelled" };
+    } else if (pending.confirmation) {
+      if (response.answer !== true) {
+        throw new Error("Confirmation answer must be true");
+      }
+      result = {
+        status: "confirmed",
+        answer: pending.confirmation.answer,
+        confirmationOfToolCallId: pending.confirmation.toolCallId,
+      };
     } else {
       const { answer } = response;
       if (pending.grouped) {
         if (!isAnswerRecord(answer)) {
           throw new Error("Grouped question answer must be an object");
         }
-        const normalized: Record<string, AskUserQuestionAnswer> = {};
-        for (const question of pending.questions) {
-          if (!(question.id in answer)) {
-            if (question.required) {
-              throw new Error(`Missing answer for grouped question: ${question.id}`);
-            }
-            continue;
-          }
-          normalized[question.id] = normalizeAnswer(question, answer[question.id]);
-        }
+        const normalized = normalizeGroupedAnswer(pending.questions, answer);
         result = { status: "answered", answer: normalized };
+        if (pending.signal && pending.cardRequest.batch) {
+          this.submittedFormBySignal.set(pending.signal, {
+            toolCallId,
+            questions: pending.questions,
+            cardRequest: pending.cardRequest,
+            answer: normalized,
+          });
+        }
       } else {
         if (isAnswerRecord(answer) && !isOptionObject(answer)) {
           throw new Error("请选择一个有效选项");
@@ -429,10 +503,13 @@ export class AskUserQuestionCoordinator {
       }
     }
 
+    if (pending.confirmation && pending.signal) {
+      this.submittedFormBySignal.delete(pending.signal);
+    }
     pending.cleanup();
     logQuestionLifecycle(
       toolCallId,
-      result.status === "answered" ? "answered" : "cancelled",
+      result.status === "cancelled" ? "cancelled" : "answered",
     );
     pending.resolve(result);
     return result;
@@ -476,6 +553,7 @@ type NormalizedAskUserQuestionRequestItem = {
 };
 
 type NormalizedAskUserQuestionRequest = NormalizedAskUserQuestionRequestItem & {
+  title?: string;
   questions?: readonly NormalizedAskUserQuestionRequestItem[];
 };
 
@@ -486,6 +564,9 @@ function normalizeCompatibleRequest(
     normalizeCompatibleQuestion(request);
   const rawQuestions = request.questions;
   if (rawQuestions !== undefined) {
+    normalized.title = firstString(request.title);
+    normalized.question = firstString(request.question, request.label, request.prompt);
+    if (!normalized.question) delete normalized.question;
     normalized.questions = normalizeCompatibleQuestions(rawQuestions);
     return foldCompatibleGroupedFields(normalized);
   }
@@ -509,12 +590,7 @@ function normalizeCompatibleQuestion(
   const id = firstString(request.id, request.key, request.name);
   if (id) normalized.id = id;
 
-  const question = firstString(
-    request.question,
-    request.title,
-    request.label,
-    request.prompt,
-  );
+  const question = firstString(request.question, request.label, request.prompt, request.title);
   if (question) normalized.question = question;
 
   const options = request.options ?? request.choices;
@@ -568,13 +644,14 @@ function foldCompatibleGroupedFields(
       request.required === undefined &&
       request.default === undefined
     ) {
-      return { questions };
+      return { title: request.title, questions };
     }
     return request;
   }
 
   const [question] = questions;
   return {
+    title: request.title,
     questions: [
       {
         ...request,
@@ -724,6 +801,9 @@ function normalizeAskUserQuestionRequest(rawRequest: unknown):
   const request = normalizeCompatibleRequest(
     parsed as AskUserQuestionRequestParams,
   );
+  if (request.confirm && request.questions === undefined) {
+    return { error: missingConfirmationSourceError };
+  }
   const questions = normalizeRequestQuestions(request);
   if (typeof questions === "string") return { error: questions };
   if (questions.length === 0) return { error: "Question is required" };
@@ -736,14 +816,86 @@ function normalizeAskUserQuestionRequest(rawRequest: unknown):
     };
   }
   const cardItems = questions.map(toQuestionCardItem);
+  const singleCard = cardItems[0];
+  if (request.questions === undefined && singleCard.kind === "confirm") {
+    return { error: missingConfirmationSourceError };
+  }
   return {
     request,
     questions,
     cardRequest:
       request.questions === undefined
-        ? { ...cardItems[0], batch: false }
-        : { batch: true, questions: cardItems },
+        ? {
+            ...(singleCard as Exclude<AskUserQuestionCardItem, { kind: "confirm" }>),
+            batch: false,
+          }
+        : {
+            batch: true,
+            ...(request.title ? { title: request.title } : {}),
+            questions: cardItems,
+          },
   };
+}
+
+function isConfirmOnlyRequest(request: Record<string, unknown>): boolean {
+  return Object.entries(request).every(
+    ([key, value]) => key === "confirm" && value === true,
+  );
+}
+
+function confirmationRequest(form: SubmittedForm): {
+  request: NormalizedAskUserQuestionRequest;
+  questions: PendingQuestionItem[];
+  cardRequest: AskUserQuestionConfirmationCardRequest;
+} {
+  return {
+    request: { confirm: true },
+    questions: [...form.questions],
+    cardRequest: confirmationCardRequest(form),
+  };
+}
+
+function confirmationCardRequest(
+  form: SubmittedForm,
+): AskUserQuestionConfirmationCardRequest {
+  return buildAskUserQuestionConfirmationCardRequest(
+    form.toolCallId,
+    form.cardRequest,
+    form.answer,
+  );
+}
+
+export function buildAskUserQuestionConfirmationCardRequest(
+  confirmationOfToolCallId: string,
+  request: Extract<AskUserQuestionCardRequest, { batch: true }>,
+  answer: Record<string, AskUserQuestionAnswer>,
+): AskUserQuestionConfirmationCardRequest {
+  return {
+    batch: false,
+    kind: "confirm",
+    id: "confirmation",
+    title: `${request.title ?? "表单"}确认`,
+    confirmationOfToolCallId,
+    questions: [...request.questions],
+    answer: { ...answer },
+  };
+}
+
+function normalizeGroupedAnswer(
+  questions: readonly PendingQuestionItem[],
+  answer: Record<string, AskUserQuestionAnswerInput>,
+): Record<string, AskUserQuestionAnswer> {
+  const normalized: Record<string, AskUserQuestionAnswer> = {};
+  for (const question of questions) {
+    if (!(question.id in answer)) {
+      if (question.required) {
+        throw new Error(`Missing answer for grouped question: ${question.id}`);
+      }
+      continue;
+    }
+    normalized[question.id] = normalizeAnswer(question, answer[question.id]);
+  }
+  return normalized;
 }
 
 function toQuestionCardItem(
@@ -1074,9 +1226,9 @@ export const askUserQuestionTool = defineTool({
 
 When the user asks to fill in a form, complete a form, or provide form fields, use ask_user_question to collect the fields instead of asking in assistant text. Every non-confirmation question must include a context-based recommended default so the user can usually submit directly. String defaults must be non-empty; never use default:"". required:true controls whether the user may submit an empty answer.
 
-Use exactly one ask_user_question call per assistant response. If you need more than one answer, use only the questions array: {"questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假","required":true},{"id":"start_at","question":"开始时间？","inputType":"date","dateFormat":"yyyy-MM-dd HH:mm","default":"2026-07-08 09:00","required":true},{"id":"reason","question":"原因？","default":"个人事务","required":true}]}. When questions is present, put every field's options, inputType, dateFormat, required, dataSource, multiple, and default inside the matching questions[] item; do not include top-level confirm or top-level field configuration.
+Use exactly one ask_user_question call per assistant response. If you need more than one answer, provide a form title and use only the questions array: {"title":"请假申请","questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假","required":true},{"id":"start_at","question":"开始时间？","inputType":"date","dateFormat":"yyyy-MM-dd HH:mm","default":"2026-07-08 09:00","required":true},{"id":"reason","question":"原因？","default":"个人事务","required":true}]}. When questions is present, put every field's options, inputType, dateFormat, required, dataSource, multiple, and default inside the matching questions[] item; do not include top-level confirm or top-level field configuration.
 
-For a single question, use top-level question/options/inputType/dateFormat/required/dataSource/multiple/default/confirm. For multiple questions, use questions[]. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. default is still required for non-confirmation questions whether required is true or false, and string defaults must be non-empty. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. Confirmation is a separate single-question call with question + confirm: true and no options/multiple/questions. The answer is returned as a tool result and execution then continues.`,
+For a single question, use top-level question/options/inputType/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. default is required and string defaults must be non-empty. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. After a grouped form is answered, call exactly {"confirm":true}; Dano binds the latest saved form and returns its final full answer only after the user confirms.`,
   promptSnippet:
     "Ask the user one native question card; for several fields use one questions array with one submit button",
   promptGuidelines: [
@@ -1090,8 +1242,8 @@ For a single question, use top-level question/options/inputType/dateFormat/requi
     "Set required:true only when an answer is mandatory. required defaults to false.",
     "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
     "Dano returns the user's date answer as submitted; convert it yourself if a downstream interface needs another business format.",
-    "When using questions, put each field's id, question, options, inputType, dateFormat, required, dataSource, multiple, and default inside its questions item. Do not put top-level field configuration beside questions.",
-    "For forms, applications, or other user-reviewed summaries, call ask_user_question with confirm: true after presenting the final summary and before treating it as confirmed, ready to submit, or complete.",
+    "When using questions, provide a concise top-level title and put each field's id, question, options, inputType, dateFormat, required, dataSource, multiple, and default inside its questions item.",
+    "After a grouped form is answered, call ask_user_question with only {confirm:true}. Do not send confirmation text, the prior answers, or a relation id; Dano binds the latest saved form.",
   ],
   parameters: askUserQuestionParameters,
   executionMode: "sequential",
@@ -1109,6 +1261,8 @@ For a single question, use top-level question/options/inputType/dateFormat/requi
           text:
             result.status === "answered"
               ? `User answered the question: ${JSON.stringify(result.answer)}. Continue with this answer.`
+              : result.status === "confirmed"
+                ? `User confirmed the final form answer: ${JSON.stringify(result.answer)}. Continue with this authoritative answer.`
               : "User cancelled the question. Stop the current workflow. Do not ask another question or retry unless the user sends a new message explicitly requesting it.",
         },
       ],

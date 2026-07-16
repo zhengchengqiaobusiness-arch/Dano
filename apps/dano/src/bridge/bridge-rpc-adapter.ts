@@ -29,6 +29,7 @@ import {
 import {
   ASK_USER_QUESTION_CANCELLED_CODE,
   askUserQuestionCoordinator,
+  buildAskUserQuestionConfirmationCardRequest,
   normalizeAskUserQuestionCardRequest,
 } from "./ask-user-question.js";
 import { DetachedSessionRegistry } from "./session-registry.js";
@@ -38,6 +39,8 @@ import {
   ASK_USER_QUESTION_TOOL_NAME,
 } from "./types.js";
 import type {
+  AskUserQuestionAnswer,
+  AskUserQuestionCardRequest,
   AskUserQuestionLifecycleState,
   BridgeConfig,
   BridgeEvent,
@@ -89,6 +92,12 @@ type RpcTranscriptToolCallBlock = Extract<
   RpcTranscriptContentBlock,
   { type: "toolCall" }
 >;
+
+type SubmittedFormProjection = {
+  toolCallId: string;
+  request: Extract<AskUserQuestionCardRequest, { batch: true }>;
+  answer: Record<string, AskUserQuestionAnswer>;
+};
 
 /** Model shape mirrored from Pi — used in shaping helpers below. */
 type PiModel = {
@@ -359,7 +368,8 @@ function toRpcAgentAssistantContentBlock(
     case "toolCall":
       const questionRequest =
         block.name === ASK_USER_QUESTION_TOOL_NAME
-          ? normalizeAskUserQuestionCardRequest(block.arguments)
+          ? askUserQuestionCoordinator.cardRequest(block.id) ??
+            normalizeAskUserQuestionCardRequest(block.arguments)
           : null;
       return {
         type: "toolCall",
@@ -3876,6 +3886,11 @@ class SessionRuntime {
 class TranscriptProjector {
   private readonly pendingStructuredUserMessages: PendingStructuredUserMessage[] =
     [];
+  private readonly submittedFormBySession = new Map<string, SubmittedFormProjection>();
+  private readonly batchFormByToolCallId = new Map<
+    string,
+    Extract<AskUserQuestionCardRequest, { batch: true }>
+  >();
 
   private state: TranscriptSyncState = {
     sessionPath: null,
@@ -4164,7 +4179,15 @@ class TranscriptProjector {
     sessionPath: string | null,
     recovering = false,
   ): RpcTranscriptMessage {
-    const projectedMessage = projectAskUserQuestionRequests(message, recovering);
+    const sessionKey = sessionPath ?? "active";
+    const projectedMessage = projectAskUserQuestionRequests(
+      message,
+      recovering,
+      this.submittedFormBySession.get(sessionKey),
+    );
+    const submittedForm = submittedFormFromMessage(projectedMessage);
+    if (submittedForm) this.submittedFormBySession.set(sessionKey, submittedForm);
+    this.recordSubmittedFormProjection(projectedMessage, sessionKey);
     if (!projectedMessage || projectedMessage.role !== "user") {
       return projectedMessage;
     }
@@ -4192,11 +4215,44 @@ class TranscriptProjector {
       text: undefined,
     };
   }
+
+  private recordSubmittedFormProjection(
+    message: RpcTranscriptMessage,
+    sessionKey: string,
+  ): void {
+    if (Array.isArray(message.content)) {
+      for (const block of message.content) {
+        if (
+          typeof block !== "string" &&
+          block.type === "toolCall" &&
+          block.id &&
+          block.questionRequest?.batch
+        ) {
+          this.batchFormByToolCallId.set(block.id, block.questionRequest);
+        }
+      }
+    }
+    if (
+      message.role !== "toolResult" ||
+      !message.toolCallId ||
+      !isAnsweredRecord(message.details)
+    ) {
+      return;
+    }
+    const request = this.batchFormByToolCallId.get(message.toolCallId);
+    if (!request) return;
+    this.submittedFormBySession.set(sessionKey, {
+      toolCallId: message.toolCallId,
+      request,
+      answer: message.details.answer,
+    });
+  }
 }
 
 function projectAskUserQuestionRequests(
   message: RpcTranscriptMessage,
   recovering = false,
+  previousSubmittedForm?: SubmittedFormProjection,
 ): RpcTranscriptMessage {
   if (!Array.isArray(message.content)) return message;
   let changed = false;
@@ -4204,11 +4260,20 @@ function projectAskUserQuestionRequests(
     if (
       typeof block === "string" ||
       block.type !== "toolCall" ||
-      block.name !== ASK_USER_QUESTION_TOOL_NAME
+      block.name !== ASK_USER_QUESTION_TOOL_NAME ||
+      !block.id
     ) {
       return block;
     }
-    const questionRequest = normalizeAskUserQuestionCardRequest(block.arguments);
+    const questionRequest =
+      askUserQuestionCoordinator.cardRequest(block.id) ??
+      normalizeAskUserQuestionCardRequest(block.arguments) ??
+      confirmationRequestFromTranscript(
+        message.content as Array<string | RpcTranscriptContentBlock>,
+        index,
+        block.arguments,
+        previousSubmittedForm,
+      );
     const questionState = questionLifecycleState(
       message.content as Array<string | RpcTranscriptContentBlock>,
       index,
@@ -4227,11 +4292,109 @@ function projectAskUserQuestionRequests(
   return changed ? { ...message, content } : message;
 }
 
+function confirmationRequestFromTranscript(
+  content: Array<string | RpcTranscriptContentBlock>,
+  confirmIndex: number,
+  rawArguments: unknown,
+  previousSubmittedForm?: SubmittedFormProjection,
+): AskUserQuestionCardRequest | null {
+  if (
+    !rawArguments ||
+    typeof rawArguments !== "object" ||
+    Array.isArray(rawArguments) ||
+    !("confirm" in rawArguments) ||
+    rawArguments.confirm !== true ||
+    Object.keys(rawArguments).some(key => key !== "confirm")
+  ) {
+    return null;
+  }
+
+  let answer: Record<string, AskUserQuestionAnswer> | undefined;
+  for (let index = confirmIndex - 1; index >= 0; index -= 1) {
+    const block = content[index];
+    if (typeof block === "string") continue;
+    if (block.type === "toolResult" && isAnsweredRecord(block.details)) {
+      answer = block.details.answer;
+      continue;
+    }
+    if (
+      answer &&
+      block.type === "toolCall" &&
+      block.name === ASK_USER_QUESTION_TOOL_NAME &&
+      block.id
+    ) {
+      const source =
+        block.questionRequest ??
+        normalizeAskUserQuestionCardRequest(block.arguments);
+      if (source?.batch) {
+        return buildAskUserQuestionConfirmationCardRequest(
+          block.id,
+          source,
+          answer,
+        );
+      }
+    }
+  }
+  return previousSubmittedForm
+    ? buildAskUserQuestionConfirmationCardRequest(
+        previousSubmittedForm.toolCallId,
+        previousSubmittedForm.request,
+        previousSubmittedForm.answer,
+      )
+    : null;
+}
+
+function submittedFormFromMessage(
+  message: RpcTranscriptMessage,
+): SubmittedFormProjection | null {
+  if (!Array.isArray(message.content)) return null;
+  let source:
+    | { toolCallId: string; request: Extract<AskUserQuestionCardRequest, { batch: true }> }
+    | undefined;
+  for (const block of message.content) {
+    if (typeof block === "string") continue;
+    if (
+      block.type === "toolCall" &&
+      block.name === ASK_USER_QUESTION_TOOL_NAME &&
+      block.id &&
+      block.questionRequest?.batch
+    ) {
+      source = { toolCallId: block.id, request: block.questionRequest };
+      continue;
+    }
+    if (source && block.type === "toolResult" && isAnsweredRecord(block.details)) {
+      return { ...source, answer: block.details.answer };
+    }
+  }
+  return null;
+}
+
+function isAnsweredRecord(
+  details: RpcToolResultDetails | undefined,
+): details is {
+  status: "answered";
+  answer: Record<string, AskUserQuestionAnswer>;
+} {
+  return Boolean(
+    details &&
+      typeof details === "object" &&
+      !Array.isArray(details) &&
+      details.status === "answered" &&
+      details.answer &&
+      typeof details.answer === "object" &&
+      !Array.isArray(details.answer),
+  );
+}
+
 function projectRecoveredQuestionLifecycle(
   messages: RpcTranscriptMessage[],
   recoveryMessages: readonly RpcTranscriptMessage[],
 ): RpcTranscriptMessage[] {
   const completed = new Map<string, AskUserQuestionLifecycleState>();
+  const confirmed = new Map<
+    string,
+    { confirmationOfToolCallId: string; answer: Record<string, AskUserQuestionAnswer> }
+  >();
   for (const message of recoveryMessages) {
     if (message.role !== "toolResult" || !message.toolCallId) continue;
     completed.set(
@@ -4242,8 +4405,29 @@ function projectRecoveredQuestionLifecycle(
         questionResultErrorText(message),
       ),
     );
+    if (isRecoveredConfirmationResult(message.details)) {
+      confirmed.set(message.toolCallId, message.details);
+    }
   }
   if (completed.size === 0) return messages;
+
+  const submittedForms = new Map<
+    string,
+    Extract<AskUserQuestionCardRequest, { batch: true }>
+  >();
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) continue;
+    for (const block of message.content) {
+      if (
+        typeof block !== "string" &&
+        block.type === "toolCall" &&
+        Boolean(block.id) &&
+        block.questionRequest?.batch
+      ) {
+        submittedForms.set(block.id as string, block.questionRequest);
+      }
+    }
+  }
 
   return messages.map(message => {
     if (!Array.isArray(message.content)) return message;
@@ -4258,11 +4442,46 @@ function projectRecoveredQuestionLifecycle(
       ) {
         return block;
       }
+      const confirmation = confirmed.get(block.id);
+      const source = confirmation
+        ? submittedForms.get(confirmation.confirmationOfToolCallId)
+        : undefined;
       changed = true;
-      return { ...block, questionState: completed.get(block.id) };
+      return {
+        ...block,
+        questionState: completed.get(block.id),
+        ...(confirmation && source
+          ? {
+              questionRequest: buildAskUserQuestionConfirmationCardRequest(
+                confirmation.confirmationOfToolCallId,
+                source,
+                confirmation.answer,
+              ),
+            }
+          : {}),
+      };
     });
     return changed ? { ...message, content } : message;
   });
+}
+
+function isRecoveredConfirmationResult(
+  details: RpcToolResultDetails | undefined,
+): details is {
+  status: "confirmed";
+  confirmationOfToolCallId: string;
+  answer: Record<string, AskUserQuestionAnswer>;
+} {
+  return Boolean(
+    details &&
+      typeof details === "object" &&
+      !Array.isArray(details) &&
+      details.status === "confirmed" &&
+      typeof details.confirmationOfToolCallId === "string" &&
+      details.answer &&
+      typeof details.answer === "object" &&
+      !Array.isArray(details.answer),
+  );
 }
 
 function questionResultLifecycleState(
@@ -4276,8 +4495,12 @@ function questionResultLifecycleState(
     !Array.isArray(details) &&
     "status" in details
   ) {
-    if (details.status === "answered" || details.status === "cancelled") {
-      return details.status;
+    if (
+      details.status === "answered" ||
+      details.status === "confirmed" ||
+      details.status === "cancelled"
+    ) {
+      return details.status === "confirmed" ? "answered" : details.status;
     }
   }
   if (isError) {
@@ -5647,6 +5870,22 @@ export class BridgeRpcAdapter {
           id: correlationId,
           type: "response",
           command: "answer_question",
+          success: true,
+          data: result,
+        };
+      }
+
+      case "update_question": {
+        const toolCallId = command.toolCallId.trim();
+        if (!toolCallId) throw new Error("Question tool call ID is required");
+        const result = askUserQuestionCoordinator.update(
+          toolCallId,
+          command.answer,
+        );
+        return {
+          id: correlationId,
+          type: "response",
+          command: "update_question",
           success: true,
           data: result,
         };

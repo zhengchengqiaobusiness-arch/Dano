@@ -3158,6 +3158,7 @@ describe("BridgeRpcAdapter", () => {
               id: "approvers-1",
               name: "ask_user_question",
               arguments: {
+                title: "请假申请",
                 questions: [
                   {
                     id: "approver1",
@@ -3186,6 +3187,7 @@ describe("BridgeRpcAdapter", () => {
               id: "approvers-1",
               name: "ask_user_question",
               arguments: {
+                title: "请假申请",
                 questions: [
                   {
                     id: "approver1",
@@ -3214,7 +3216,6 @@ describe("BridgeRpcAdapter", () => {
               id: "confirm-1",
               name: "ask_user_question",
               arguments: {
-                question: "确认提交请假申请吗？",
                 confirm: true,
               },
             },
@@ -3235,6 +3236,7 @@ describe("BridgeRpcAdapter", () => {
           id: "approvers-1",
           name: "ask_user_question",
           arguments: {
+            title: "请假申请",
             questions: [
               {
                 id: "approver1",
@@ -3250,6 +3252,7 @@ describe("BridgeRpcAdapter", () => {
           },
           questionRequest: {
             batch: true,
+            title: "请假申请",
             questions: [
               {
                 id: "approver1",
@@ -3281,14 +3284,29 @@ describe("BridgeRpcAdapter", () => {
           id: "confirm-1",
           name: "ask_user_question",
           arguments: {
-            question: "确认提交请假申请吗？",
             confirm: true,
           },
           questionRequest: {
             batch: false,
-            id: "answer",
             kind: "confirm",
-            question: "确认提交请假申请吗？",
+            id: "confirmation",
+            title: "请假申请确认",
+            confirmationOfToolCallId: "approvers-1",
+            questions: [
+              {
+                id: "approver1",
+                kind: "text",
+                question: "审批人 1",
+                default: "张三",
+              },
+              {
+                id: "approver2",
+                kind: "text",
+                question: "审批人 2",
+                default: "李四",
+              },
+            ],
+            answer: { approver1: "张三", approver2: "李四" },
           },
         },
       ]);
