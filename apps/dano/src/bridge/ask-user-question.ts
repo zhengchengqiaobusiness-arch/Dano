@@ -263,7 +263,6 @@ interface PendingQuestion {
 
 interface SubmittedForm {
   toolCallId: string;
-  title: string;
   questions: readonly PendingQuestionItem[];
   cardRequest: Extract<AskUserQuestionCardRequest, { batch: true }>;
   answer: Record<string, AskUserQuestionAnswer>;
@@ -485,7 +484,6 @@ export class AskUserQuestionCoordinator {
         if (pending.signal && pending.cardRequest.batch) {
           this.submittedFormBySignal.set(pending.signal, {
             toolCallId,
-            title: pending.cardRequest.title ?? "表单",
             questions: pending.questions,
             cardRequest: pending.cardRequest,
             answer: normalized,

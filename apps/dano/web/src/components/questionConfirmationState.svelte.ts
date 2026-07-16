@@ -4,10 +4,13 @@ import type {
 
 let editingConfirmationId = $state("");
 let editingSourceToolCallId = $state("");
-let requestOverrides = $state<Record<string, AskUserQuestionConfirmationCardRequest>>({});
-let confirmationIds = $state<Record<string, string>>({});
-let confirmedSources = $state<Record<string, boolean>>({});
-let cancelledSources = $state<Record<string, boolean>>({});
+type ConfirmationRecord = {
+  request: AskUserQuestionConfirmationCardRequest;
+  confirmationId: string;
+  status: "pending" | "confirmed" | "cancelled";
+};
+
+let confirmations = $state<Record<string, ConfirmationRecord>>({});
 
 export const questionConfirmationState = {
   sync(
@@ -16,16 +19,17 @@ export const questionConfirmationState = {
     confirmed = false,
     cancelled = false,
   ) {
-    requestOverrides[request.confirmationOfToolCallId] = request;
-    confirmationIds[request.confirmationOfToolCallId] = confirmationToolCallId;
-    if (confirmed) confirmedSources[request.confirmationOfToolCallId] = true;
-    if (cancelled) cancelledSources[request.confirmationOfToolCallId] = true;
+    confirmations[request.confirmationOfToolCallId] = {
+      request,
+      confirmationId: confirmationToolCallId,
+      status: confirmed ? "confirmed" : cancelled ? "cancelled" : "pending",
+    };
   },
   request(request: AskUserQuestionConfirmationCardRequest) {
-    return requestOverrides[request.confirmationOfToolCallId] ?? request;
+    return confirmations[request.confirmationOfToolCallId]?.request ?? request;
   },
   sourceAnswer(toolCallId: string) {
-    return requestOverrides[toolCallId]?.answer;
+    return confirmations[toolCallId]?.request.answer;
   },
   isEditing(toolCallId: string) {
     return editingSourceToolCallId === toolCallId;
@@ -34,25 +38,33 @@ export const questionConfirmationState = {
     return editingSourceToolCallId === toolCallId ? editingConfirmationId : "";
   },
   linkedConfirmationId(toolCallId: string) {
-    return confirmationIds[toolCallId] ?? "";
+    return confirmations[toolCallId]?.confirmationId ?? "";
   },
   isConfirmed(toolCallId: string) {
-    return Boolean(confirmedSources[toolCallId]);
+    return confirmations[toolCallId]?.status === "confirmed";
   },
   isCancelled(toolCallId: string) {
-    return Boolean(cancelledSources[toolCallId]);
+    return confirmations[toolCallId]?.status === "cancelled";
   },
   startEditing(
     confirmationToolCallId: string,
     request: AskUserQuestionConfirmationCardRequest,
   ) {
-    requestOverrides[request.confirmationOfToolCallId] = request;
-    confirmationIds[request.confirmationOfToolCallId] = confirmationToolCallId;
+    confirmations[request.confirmationOfToolCallId] = {
+      request,
+      confirmationId: confirmationToolCallId,
+      status: "pending",
+    };
     editingConfirmationId = confirmationToolCallId;
     editingSourceToolCallId = request.confirmationOfToolCallId;
   },
   finishEditing(request: AskUserQuestionConfirmationCardRequest) {
-    requestOverrides[request.confirmationOfToolCallId] = request;
+    const current = confirmations[request.confirmationOfToolCallId];
+    confirmations[request.confirmationOfToolCallId] = {
+      request,
+      confirmationId: current?.confirmationId ?? editingConfirmationId,
+      status: "pending",
+    };
     editingConfirmationId = "";
     editingSourceToolCallId = "";
   },
