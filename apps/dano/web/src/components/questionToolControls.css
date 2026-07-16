@@ -1,4 +1,6 @@
 .question-input {
+  --question-control-height: 36px;
+
   box-sizing: border-box;
   width: 100%;
   padding: 10px 12px;
@@ -7,6 +9,11 @@
   background: var(--control-bg);
   color: var(--text);
   font: inherit;
+}
+
+.question-input:not(textarea) {
+  height: var(--question-control-height);
+  padding-block: 0;
 }
 
 select.question-input {
@@ -63,4 +70,10 @@ select.question-input {
 .question-button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+@media (max-width: 640px) {
+  .question-input:not(textarea) {
+    --question-control-height: 44px;
+  }
 }
