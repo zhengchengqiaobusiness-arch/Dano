@@ -1,6 +1,7 @@
 import {
   ASK_USER_QUESTION_TOOL_NAME,
   ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE,
+  ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE,
   type AskUserQuestionAnswer,
   type AskUserQuestionCardItem,
   type AskUserQuestionCardRequest,
@@ -96,7 +97,17 @@ export function isAskUserQuestionTerminalFailure(
   return (
     isAskUserQuestionToolError(block) &&
     (block.questionState === "terminal_failure" ||
-      Boolean(block.resultText?.includes(ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE)))
+      Boolean(block.resultText?.includes(ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE)) ||
+      isAskUserQuestionValidationTerminalFailure(block))
+  );
+}
+
+export function isAskUserQuestionValidationTerminalFailure(
+  block: ToolContentBlock,
+): boolean {
+  return (
+    isAskUserQuestionToolError(block) &&
+    Boolean(block.resultText?.includes(ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE))
   );
 }
 

@@ -9,6 +9,7 @@ import {
   isAskUserQuestionToolError,
   isAskUserQuestionTerminalFailure,
   isPendingAskUserQuestionBlock,
+  isAskUserQuestionValidationTerminalFailure,
 } from "./askUserQuestion";
 import type { ToolContentBlock } from "./transcript";
 import type { AskUserQuestionCardRequest } from "@dano/types/protocol";
@@ -340,8 +341,15 @@ describe("ask user question transcript data", () => {
       toolStatus: "error",
       resultText: "QUESTION_PRESENTATION_FAILED: stop",
     });
+    const validationTerminal = block({}, {
+      toolStatus: "error",
+      resultText: "QUESTION_VALIDATION_FAILED: stop",
+    });
 
     expect(isAskUserQuestionTerminalFailure(retryable)).toBe(false);
     expect(isAskUserQuestionTerminalFailure(terminal)).toBe(true);
+    expect(isAskUserQuestionTerminalFailure(validationTerminal)).toBe(true);
+    expect(isAskUserQuestionValidationTerminalFailure(validationTerminal)).toBe(true);
+    expect(isAskUserQuestionValidationTerminalFailure(terminal)).toBe(false);
   });
 });

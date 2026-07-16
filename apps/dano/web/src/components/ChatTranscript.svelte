@@ -33,6 +33,7 @@
     askUserQuestionRequest,
     isAskUserQuestionTerminalFailure,
     isAskUserQuestionToolError,
+    isAskUserQuestionValidationTerminalFailure,
   } from "../utils/askUserQuestion";
   import {
     copyTextToClipboard,
@@ -584,15 +585,20 @@
 
   function toolBlockDescriptor(block: ToolContentBlock) {
     if (isAskUserQuestionToolError(block)) {
+      const validationTerminal = isAskUserQuestionValidationTerminalFailure(block);
       const terminal = isAskUserQuestionTerminalFailure(block);
       return {
-        name: t(terminal
-          ? "chatTranscript.askUserQuestionTerminalFailure"
-          : "chatTranscript.askUserQuestionRetryFailure"),
+        name: t(validationTerminal
+          ? "chatTranscript.askUserQuestionValidationFailure"
+          : terminal
+            ? "chatTranscript.askUserQuestionTerminalFailure"
+            : "chatTranscript.askUserQuestionRetryFailure"),
         params: undefined,
-        meta: t(terminal
-          ? "chatTranscript.askUserQuestionTerminalFailureMeta"
-          : "chatTranscript.askUserQuestionRetryFailureMeta"),
+        meta: t(validationTerminal
+          ? "chatTranscript.askUserQuestionValidationFailureMeta"
+          : terminal
+            ? "chatTranscript.askUserQuestionTerminalFailureMeta"
+            : "chatTranscript.askUserQuestionRetryFailureMeta"),
         status: block.toolStatus,
       };
     }
@@ -1490,9 +1496,11 @@
 
                         {#if isAskUserQuestionToolError(block)}
                           <section class="tool-inline-section">
-                            <pre class="tool-inline-pre">{t(isAskUserQuestionTerminalFailure(block)
-                              ? "chatTranscript.askUserQuestionTerminalFailureDetail"
-                              : "chatTranscript.askUserQuestionRetryFailureDetail")}</pre>
+                            <pre class="tool-inline-pre">{t(isAskUserQuestionValidationTerminalFailure(block)
+                              ? "chatTranscript.askUserQuestionValidationFailureDetail"
+                              : isAskUserQuestionTerminalFailure(block)
+                                ? "chatTranscript.askUserQuestionTerminalFailureDetail"
+                                : "chatTranscript.askUserQuestionRetryFailureDetail")}</pre>
                           </section>
                         {:else if blockState.toolBlockDetail(block).kind !== "empty"}
                           <section class="tool-inline-section">

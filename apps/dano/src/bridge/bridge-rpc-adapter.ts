@@ -37,6 +37,7 @@ import {
   ASK_USER_QUESTION_PRESENTATION_RETRY_CODE,
   ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE,
   ASK_USER_QUESTION_TOOL_NAME,
+  ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE,
 } from "./types.js";
 import type {
   AskUserQuestionAnswer,
@@ -3981,9 +3982,12 @@ class TranscriptProjector {
 
     const baseTranscriptMessage = this.toTranscriptMessage(message, transcriptKey);
     if (!baseTranscriptMessage) return null;
-    const transcriptMessage = mergeSparseTranscriptMessage(
-      this.state.lastMessagesByKey.get(transcriptKey),
-      this.projectStructuredUserMessage(baseTranscriptMessage, sessionPath),
+    const transcriptMessage = this.projectStructuredUserMessage(
+      mergeSparseTranscriptMessage(
+        this.state.lastMessagesByKey.get(transcriptKey),
+        baseTranscriptMessage,
+      ),
+      sessionPath,
     );
     const payloadMessage =
       eventType === "message_start"
@@ -4504,6 +4508,14 @@ function questionResultLifecycleState(
     }
   }
   if (isError) {
+    if (
+      hasQuestionErrorCode(
+        errorText,
+        ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE,
+      )
+    ) {
+      return "terminal_failure";
+    }
     if (
       hasQuestionErrorCode(
         errorText,
