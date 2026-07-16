@@ -8,9 +8,13 @@
     RpcTranscriptContentBlock,
   } from "@dano/types/protocol";
   import ArrowDown from "lucide-svelte/icons/arrow-down";
+  import BookOpenText from "lucide-svelte/icons/book-open-text";
   import ChevronRight from "lucide-svelte/icons/chevron-right";
+  import CodeXml from "lucide-svelte/icons/code-xml";
   import Copy from "lucide-svelte/icons/copy";
+  import FilePenLine from "lucide-svelte/icons/file-pen-line";
   import FileText from "lucide-svelte/icons/file-text";
+  import PenLine from "lucide-svelte/icons/pen-line";
   import Pencil from "lucide-svelte/icons/pencil";
   import Sparkle from "lucide-svelte/icons/sparkle";
   import X from "lucide-svelte/icons/x";
@@ -67,6 +71,7 @@
     shouldShowTranscriptStartNotice,
   } from "./chatTranscriptPagination";
   import { classifyReadToolBlock } from "../utils/toolBlock";
+  import { transcriptToolIconName } from "../utils/toolPresentation";
   import DiffView from "./DiffView.svelte";
   import HighlightedCode from "./HighlightedCode.svelte";
   import FilePreviewDialog from "./FilePreviewDialog.svelte";
@@ -1168,11 +1173,45 @@
 
 <svelte:document oncopy={handleCopy} />
 
+{#snippet toolSummaryName(toolName: string | undefined, fallbackName: string)}
+  {@const iconName = transcriptToolIconName(toolName)}
+  {#if iconName}
+    {@const accessibleName = toolName?.trim() || fallbackName}
+    <span class="tool-inline-name tool-inline-icon" aria-label={accessibleName} title={accessibleName}>
+      {#if iconName === "code-xml"}
+        <CodeXml size={15} strokeWidth={1.8} aria-hidden="true" />
+      {:else if iconName === "book-open-text"}
+        <BookOpenText size={15} strokeWidth={1.8} aria-hidden="true" />
+      {:else if iconName === "file-pen-line"}
+        <FilePenLine size={15} strokeWidth={1.8} aria-hidden="true" />
+      {:else}
+        <PenLine size={15} strokeWidth={1.8} aria-hidden="true" />
+      {/if}
+    </span>
+  {:else}
+    <span class="tool-inline-name">{fallbackName}</span>
+  {/if}
+{/snippet}
+
 <div bind:this={container} class="chat-transcript" onscroll={handleTranscriptScroll}>
   {#if initialLoading}
-    <div class="empty-state loading-state">
-      <p class="empty-title">{t("chatTranscript.loadingTitle")}</p>
-      <p class="empty-subtitle">{t("chatTranscript.loadingSubtitle")}</p>
+    <div
+    class="conversation-skeleton"
+    role="status"
+    aria-label={t("chatTranscript.loadingTitle")}
+  >
+      <div class="conversation-skeleton-row assistant" aria-hidden="true">
+        <span class="conversation-skeleton-line wide"></span>
+        <span class="conversation-skeleton-line medium"></span>
+        <span class="conversation-skeleton-line short"></span>
+      </div>
+      <div class="conversation-skeleton-row user" aria-hidden="true">
+        <span class="conversation-skeleton-bubble"></span>
+      </div>
+      <div class="conversation-skeleton-row assistant" aria-hidden="true">
+        <span class="conversation-skeleton-line medium"></span>
+        <span class="conversation-skeleton-line wide"></span>
+      </div>
     </div>
   {:else if messages.length === 0}
     <div class="empty-state">
@@ -1217,7 +1256,7 @@
               aria-expanded={blockState.isToolBlockExpanded(`${messageStableKey(item.message, item.messageIndex)}:tool-result`)}
             >
               <span class="tool-inline-summary">
-                <span class="tool-inline-name">{toolResultName(item.message)}</span>
+                {@render toolSummaryName(item.message.toolName, toolResultName(item.message))}
               </span>
               {#if toolResultMeta(item.message)}
                 <span class="tool-inline-meta">{toolResultMeta(item.message)}</span>
@@ -1399,7 +1438,7 @@
                         aria-expanded={blockState.isToolBlockExpanded(toolBlockStateKey(item.message, item.messageIndex, block, bIdx))}
                       >
                       <span class="tool-inline-summary">
-                        <span class="tool-inline-name">{descriptor.name}</span>
+                        {@render toolSummaryName(block.toolName, descriptor.name)}
                         {#if descriptor.params}
                           <span class="tool-inline-params">{descriptor.params}</span>
                         {/if}
@@ -1733,7 +1772,63 @@
     color: var(--text-muted);
   }
 
-  .loading-state { min-height: 240px; }
+  .conversation-skeleton {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 22px;
+    width: 100%;
+    max-width: 920px;
+    min-height: 240px;
+    margin: 0 auto;
+    padding: 22px 10px;
+  }
+
+  .conversation-skeleton-row {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: min(70%, 620px);
+  }
+
+  .conversation-skeleton-row.user {
+    align-self: flex-end;
+    width: min(58%, 520px);
+  }
+
+  .conversation-skeleton-line,
+  .conversation-skeleton-bubble {
+    display: block;
+    background: linear-gradient(
+      100deg,
+      color-mix(in srgb, var(--panel-2) 82%, transparent) 20%,
+      color-mix(in srgb, var(--text-subtle) 18%, var(--panel)) 42%,
+      color-mix(in srgb, var(--panel-2) 82%, transparent) 64%
+    );
+    background-size: 220% 100%;
+    animation: conversation-skeleton-shimmer 1.4s ease-in-out infinite;
+  }
+
+  .conversation-skeleton-line {
+    height: 12px;
+    border-radius: 999px;
+  }
+
+  .conversation-skeleton-line.wide { width: 100%; }
+  .conversation-skeleton-line.medium { width: 76%; }
+  .conversation-skeleton-line.short { width: 44%; }
+
+  .conversation-skeleton-bubble {
+    width: 100%;
+    height: 68px;
+    border-radius: 18px;
+    animation-delay: -0.35s;
+  }
+
+  @keyframes conversation-skeleton-shimmer {
+    from { background-position: 100% 0; }
+    to { background-position: -120% 0; }
+  }
 
   .empty-title,
   .empty-text {
@@ -2357,6 +2452,19 @@
     color: var(--text-muted);
   }
 
+  .tool-inline-name.tool-inline-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    line-height: 0;
+  }
+
+  .tool-inline-icon :global(svg) {
+    display: block;
+  }
+
   .tool-inline-params {
     min-width: 0;
     overflow: hidden;
@@ -2489,5 +2597,20 @@
       border-radius: 16px;
     }
 
+    .conversation-skeleton {
+      gap: 18px;
+      padding-inline: 2px;
+    }
+
+    .conversation-skeleton-row { width: 82%; }
+    .conversation-skeleton-row.user { width: 72%; }
+
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .conversation-skeleton-line,
+    .conversation-skeleton-bubble {
+      animation: none;
+    }
   }
 </style>
