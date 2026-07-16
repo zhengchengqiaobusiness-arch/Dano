@@ -165,6 +165,9 @@
           {placeholder}
         </span>
       {/if}
+      <span class="question-date-native-icon" aria-hidden="true">
+        <ChevronDown size={16} />
+      </span>
     </div>
   {:else}
     <DatePicker.Root
@@ -257,16 +260,6 @@
     </DatePicker.Root>
   {/if}
 
-  {#if !required && dateValue}
-    <button
-      type="button"
-      class="question-button secondary question-date-clear"
-      disabled={disabled}
-      onclick={clearValue}
-    >
-      {t("questionTool.clearDate")}
-    </button>
-  {/if}
 </div>
 
 <style>
@@ -426,7 +419,6 @@
   .question-time-select {
     appearance: none;
     width: 100%;
-    min-height: 44px;
     padding-right: 32px;
     background: var(--control-bg);
     color: var(--text);
@@ -445,7 +437,22 @@
     width: 100%;
   }
 
-  .question-date-native { width: 100%; }
+  .question-date-native {
+    width: 100%;
+    padding-right: 40px;
+  }
+
+  .question-date-native::-webkit-calendar-picker-indicator {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 40px;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
 
   .question-date-native-placeholder {
     position: absolute;
@@ -470,8 +477,19 @@
     opacity: 0.5;
   }
 
-  .question-date-clear {
-    width: fit-content;
+  .question-date-native-icon {
+    position: absolute;
+    top: 50%;
+    right: 12px;
+    display: grid;
+    place-items: center;
+    color: var(--text-subtle);
+    pointer-events: none;
+    transform: translateY(-50%);
+  }
+
+  .question-date-native-control.disabled .question-date-native-icon {
+    opacity: 0.5;
   }
 
   @media (max-width: 640px) {

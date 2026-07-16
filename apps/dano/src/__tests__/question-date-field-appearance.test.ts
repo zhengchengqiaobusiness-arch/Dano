@@ -5,6 +5,10 @@ const source = readFileSync(
   new URL("../../web/src/components/QuestionDateField.svelte", import.meta.url),
   "utf8",
 );
+const controlsSource = readFileSync(
+  new URL("../../web/src/components/questionToolControls.css", import.meta.url),
+  "utf8",
+);
 
 describe("QuestionDateField time picker appearance", () => {
   it("shares one desktop width between the trigger and popover", () => {
@@ -22,7 +26,9 @@ describe("QuestionDateField time picker appearance", () => {
     expect(source).toContain("handleTimePartChange(control.part, event)");
     expect(source).toContain('class="question-input question-time-select"');
     expect(source).toContain("font-variant-numeric: tabular-nums");
-    expect(source).toContain("min-height: 44px");
+    expect(controlsSource).toContain("--question-control-height: 36px");
+    expect(controlsSource).toContain(".question-input:not(textarea)");
+    expect(controlsSource).toContain("--question-control-height: 44px");
     expect(source).not.toContain("<TimeField.Root");
   });
 
@@ -33,6 +39,9 @@ describe("QuestionDateField time picker appearance", () => {
     expect(source).toContain('type={includesTime ? "datetime-local" : "date"}');
     expect(source).toContain("parseNativeDateInputValue");
     expect(source).toContain("if (useNativePicker) open = false");
+    expect(source).toContain('class="question-date-native-icon"');
+    expect(source).toContain(".question-date-native::-webkit-calendar-picker-indicator");
+    expect(source).not.toContain('class="question-button secondary question-date-clear"');
   });
 
   it("preserves the supplied placeholder over an empty native control", () => {
