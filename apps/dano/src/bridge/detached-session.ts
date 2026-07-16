@@ -35,6 +35,7 @@ export interface CreateDetachedAgentSessionOptions {
   thinkingLevel?: CreateAgentSessionFromServicesOptions["thinkingLevel"];
   defaultModel?: { provider?: string; modelId?: string };
   defaultThinkingLevel?: CreateAgentSessionFromServicesOptions["thinkingLevel"];
+  askUserQuestionTool?: ToolDefinition;
 }
 
 export async function createDetachedAgentSession(
@@ -73,7 +74,7 @@ export async function createDetachedAgentSession(
       createEditToolDefinition(cwd),
       createWriteToolDefinition(cwd),
       danoVersionTool,
-      askUserQuestionTool,
+      options.askUserQuestionTool ?? askUserQuestionTool,
     ] as unknown as ToolDefinition[],
   });
 }

@@ -129,6 +129,54 @@ function createMockSession() {
 }
 
 describe("Dano backend", () => {
+  it("keeps ask_user_question retry state isolated per backend", async () => {
+    const firstMock = createMockSession();
+    const first = createDanoBackendFromSession(firstMock.session, {
+      askUserQuestion: { maxRetries: 0 },
+    });
+    const secondMock = createMockSession();
+    const second = createDanoBackendFromSession(secondMock.session, {
+      askUserQuestion: { maxRetries: 2 },
+    });
+    const firstSignal = new AbortController().signal;
+    const secondSignal = new AbortController().signal;
+
+    expect(first.context.askUserQuestion.coordinator).not.toBe(
+      second.context.askUserQuestion.coordinator,
+    );
+    await expect(
+      first.context.askUserQuestion.coordinator.wait(
+        "first-invalid",
+        { questions: "{" },
+        firstSignal,
+      ),
+    ).rejects.toThrow("QUESTION_VALIDATION_FAILED");
+    await expect(
+      second.context.askUserQuestion.coordinator.wait(
+        "second-invalid-1",
+        { questions: "{" },
+        secondSignal,
+      ),
+    ).rejects.toThrow("questions must be valid JSON");
+    await expect(
+      second.context.askUserQuestion.coordinator.wait(
+        "second-invalid-2",
+        { questions: "{" },
+        secondSignal,
+      ),
+    ).rejects.toThrow("questions must be valid JSON");
+    await expect(
+      second.context.askUserQuestion.coordinator.wait(
+        "second-invalid-3",
+        { questions: "{" },
+        secondSignal,
+      ),
+    ).rejects.toThrow("QUESTION_VALIDATION_FAILED");
+
+    await first.dispose();
+    await second.dispose();
+  });
+
   it("adapts an AgentSession into bridge state, actions, and events", async () => {
     const mock = createMockSession();
     const backend = createDanoBackendFromSession(mock.session);

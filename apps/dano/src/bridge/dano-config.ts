@@ -13,6 +13,9 @@ export interface DanoConfig {
   fieldAssist?: {
     maxRetries?: number;
   };
+  askUserQuestion?: {
+    maxRetries?: number;
+  };
   slashCommandsAndMentionsEnabled?: boolean;
   quickActions?: BridgeQuickActionConfig[];
 }
@@ -23,6 +26,9 @@ export const DANO_DEFAULT_CONFIG = {
   defaultThinkingLevel: "medium",
   defaultProjectTrust: "always",
   fieldAssist: {
+    maxRetries: 10,
+  },
+  askUserQuestion: {
     maxRetries: 10,
   },
   slashCommandsAndMentionsEnabled: false,
@@ -81,7 +87,7 @@ function readSlashCommandsAndMentionsEnabled(
   }
 }
 
-function readFieldAssist(value: unknown): DanoConfig["fieldAssist"] {
+function readRetryOptions(value: unknown): { maxRetries?: number } | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const maxRetries = readNonNegativeInteger(
     (value as Record<string, unknown>).maxRetries,
@@ -115,7 +121,8 @@ function normalizeDanoConfig(raw: unknown): DanoConfig {
   const defaultThinkingLevel = isThinkingLevel(record.defaultThinkingLevel)
     ? record.defaultThinkingLevel
     : undefined;
-  const fieldAssist = readFieldAssist(record.fieldAssist);
+  const fieldAssist = readRetryOptions(record.fieldAssist);
+  const askUserQuestion = readRetryOptions(record.askUserQuestion);
   const slashCommandsAndMentionsEnabled = readBoolean(
     record.slashCommandsAndMentionsEnabled,
   );
@@ -127,6 +134,7 @@ function normalizeDanoConfig(raw: unknown): DanoConfig {
     ...(defaultThinkingLevel ? { defaultThinkingLevel } : {}),
     ...(defaultProjectTrust ? { defaultProjectTrust } : {}),
     ...(fieldAssist ? { fieldAssist } : {}),
+    ...(askUserQuestion ? { askUserQuestion } : {}),
     ...(slashCommandsAndMentionsEnabled !== undefined
       ? { slashCommandsAndMentionsEnabled }
       : {}),

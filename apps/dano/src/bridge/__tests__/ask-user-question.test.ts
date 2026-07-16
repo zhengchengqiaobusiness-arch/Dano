@@ -106,7 +106,7 @@ describe("ask_user_question tool", () => {
   it("times out only before presentation and bounds presentation retries", async () => {
     vi.useFakeTimers();
     try {
-      const coordinator = new AskUserQuestionCoordinator(100, 2);
+      const coordinator = new AskUserQuestionCoordinator(100, 1);
       const controller = new AbortController();
       const first = coordinator.wait(
         "presentation-1",
@@ -239,7 +239,7 @@ describe("ask_user_question tool", () => {
       "Call ask_user_question at most once per assistant response. If you need several answers, put every item in one questions array.",
       "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
       "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
-      "If ask_user_question returns a validation error, retry silently once with a corrected native tool call. If that retry fails, stop this response and let the user retry; do not explain the correction to the user.",
+      "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
       "Give every non-confirmation question a context-based recommended non-empty default. Do not use empty string or placeholder defaults.",
       "Set required:true only when an answer is mandatory. required defaults to false.",
       "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
@@ -335,16 +335,24 @@ describe("ask_user_question tool", () => {
     expect(normalizeAskUserQuestionCardRequest(input)).toEqual(expected);
   });
 
-  it("rejects unsupported grouped top-level semantics from the card protocol", () => {
+  it("drops redundant grouped top-level semantics from the card protocol", () => {
     expect(
       normalizeAskUserQuestionCardRequest({
+        title: "测试表单",
         options: ["A", "B"],
         questions: [
           { id: "reason", question: "原因？", default: "个人事务" },
           { id: "note", question: "备注？", default: "无" },
         ],
       }),
-    ).toBeNull();
+    ).toMatchObject({
+      batch: true,
+      title: "测试表单",
+      questions: [
+        { id: "reason", kind: "text", default: "个人事务" },
+        { id: "note", kind: "text", default: "无" },
+      ],
+    });
   });
 
   it("returns a free-text answer as structured tool details", async () => {
@@ -910,7 +918,13 @@ describe("ask_user_question tool", () => {
 
     const confirmation = coordinator.wait(
       "confirm-1",
-      { confirm: true },
+      {
+        confirm: true,
+        title: "旧版确认标题",
+        question: "是否确认提交？",
+        options: ["确认", "返回修改"],
+        default: "确认",
+      },
       controller.signal,
     );
     expect(coordinator.cardRequest("confirm-1")).toEqual({
@@ -1147,19 +1161,28 @@ describe("ask_user_question tool", () => {
     ).rejects.toThrow("questions must be valid JSON");
   });
 
-  it("terminates a second validation failure in the same response", async () => {
-    const coordinator = new AskUserQuestionCoordinator();
+  it("uses the configured validation retry count before terminating", async () => {
+    const coordinator = new AskUserQuestionCoordinator(5_000, 3);
     const controller = new AbortController();
     const malformed = {
       title: "公章使用申请",
       questions: '[{"id":"seal_id"',
     };
 
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const error: Error = await coordinator
+        .wait(`invalid-retry-${attempt}`, malformed, controller.signal)
+        .then(
+          () => { throw new Error("Expected validation failure"); },
+          cause => cause instanceof Error ? cause : new Error(String(cause)),
+        );
+      expect(error.message).toContain("questions must be valid JSON");
+      expect(error.message).not.toContain(
+        ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE,
+      );
+    }
     await expect(
-      coordinator.wait("invalid-retry-1", malformed, controller.signal),
-    ).rejects.toThrow("questions must be valid JSON");
-    await expect(
-      coordinator.wait("invalid-retry-2", malformed, controller.signal),
+      coordinator.wait("invalid-retry-4", malformed, controller.signal),
     ).rejects.toThrow(ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE);
   });
 
@@ -1178,22 +1201,34 @@ describe("ask_user_question tool", () => {
     ).rejects.toThrow("Grouped forms require a top-level title");
   });
 
-  it("still rejects top-level field configuration with JSON-stringified grouped forms", async () => {
+  it("ignores redundant top-level fields on a complete JSON-stringified grouped form", async () => {
     const coordinator = new AskUserQuestionCoordinator();
-    await expect(
-      coordinator.wait(
-        "compat-json-mixed-fields",
-        {
-          title: "公章使用申请",
-          options: ["公章", "合同章"],
-          questions: JSON.stringify([
-            { id: "seal_id", question: "印章类型？", default: "公章" },
-            { id: "reason", question: "用章事由？", default: "签署合同" },
-          ]),
-        },
-        new AbortController().signal,
-      ),
-    ).rejects.toThrow("field configuration belongs inside each questions[] item");
+    const pending = coordinator.wait(
+      "compat-json-mixed-fields",
+      {
+        title: "公章使用申请",
+        options: ["应忽略 A", "应忽略 B"],
+        questions: JSON.stringify([
+          { id: "seal_id", question: "印章类型？", default: "公章" },
+          { id: "reason", question: "用章事由？", default: "签署合同" },
+        ]),
+      },
+      new AbortController().signal,
+    );
+
+    expect(coordinator.cardRequest("compat-json-mixed-fields")).toMatchObject({
+      batch: true,
+      title: "公章使用申请",
+      questions: [
+        { id: "seal_id", kind: "text", default: "公章" },
+        { id: "reason", kind: "text", default: "签署合同" },
+      ],
+    });
+    coordinator.answer("compat-json-mixed-fields", {
+      cancelled: false,
+      answer: { seal_id: "公章", reason: "签署合同" },
+    });
+    await expect(pending).resolves.toMatchObject({ status: "answered" });
   });
 
   it("folds compatible top-level fields into a single grouped question", async () => {
@@ -1205,6 +1240,7 @@ describe("ask_user_question tool", () => {
         options: ["事假", "病假"],
         default: "事假",
         required: true,
+        confirm: true,
         questions: [{ id: "leave_type" }],
       } as never,
       undefined,
@@ -1329,23 +1365,24 @@ describe("ask_user_question tool", () => {
     ["zero default", { default: 0 }],
     ["false default", { default: false }],
     ["confirm", { confirm: true }],
-  ])("explains how to fix grouped calls that mix top-level %s", async (_, mixed) => {
-    await expect(
-      askUserQuestionTool.execute(
-        "group-mixed",
-        {
-          title: "测试表单",
-          ...mixed,
-          questions: [
-            { id: "leave_type", question: "Leave type?", default: "事假" },
-            { id: "reason", question: "Reason?", default: "个人事务" },
-          ],
-        } as never,
-        undefined,
-        undefined,
-        {} as never,
-      ),
-    ).rejects.toThrow("field configuration belongs inside each questions[] item");
+  ])("ignores redundant grouped top-level %s", (_, mixed) => {
+    expect(
+      normalizeAskUserQuestionCardRequest({
+        title: "测试表单",
+        ...mixed,
+        questions: [
+          { id: "leave_type", question: "Leave type?", default: "事假" },
+          { id: "reason", question: "Reason?", default: "个人事务" },
+        ],
+      }),
+    ).toMatchObject({
+      batch: true,
+      title: "测试表单",
+      questions: [
+        { id: "leave_type", question: "Leave type?", default: "事假" },
+        { id: "reason", question: "Reason?", default: "个人事务" },
+      ],
+    });
   });
 
   it("omits optional grouped answers that are not submitted", async () => {
@@ -1424,14 +1461,14 @@ describe("ask_user_question tool", () => {
     });
   });
 
-  it("rejects incompatible confirmation parameters", async () => {
+  it("still requires a submitted form when confirmation has legacy extra fields", async () => {
     await expect(
       executeQuestion("confirm-invalid", {
         question: "Deploy now?",
         options: ["Yes", "No"],
         confirm: true,
       }),
-    ).rejects.toThrow("accept only confirm:true");
+    ).rejects.toThrow("only be called after the user submitted a grouped form");
   });
 
   it("rejects grouped confirmation parameters instead of waiting forever", async () => {

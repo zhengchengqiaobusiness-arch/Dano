@@ -4,7 +4,11 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   type ExtensionUIContext,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import {
+  askUserQuestionTool as defaultAskUserQuestionTool,
+} from "./ask-user-question.js";
 import { createDetachedAgentSession } from "./detached-session.js";
 import { createHeadlessUIContext } from "./headless-ui-context.js";
 
@@ -28,6 +32,7 @@ export class DetachedSessionHandle {
     public sessionPath: string,
     private sessionManager: SessionManager,
     private readonly fallbackCwd: string,
+    private readonly askUserQuestionTool: ToolDefinition,
     private readonly onSessionEvent: (
       event: DetachedSessionRegistryEvent,
     ) => void,
@@ -76,6 +81,7 @@ export class DetachedSessionHandle {
     const created = await createDetachedAgentSession(
       this.sessionManager.getCwd() || this.fallbackCwd,
       this.sessionManager,
+      { askUserQuestionTool: this.askUserQuestionTool },
     );
 
     const session = created.session;
@@ -137,7 +143,11 @@ export class DetachedSessionRegistry {
     (event: DetachedSessionRegistryEvent) => void
   >();
 
-  constructor(private readonly fallbackCwd: string) {}
+  constructor(
+    private readonly fallbackCwd: string,
+    private readonly askUserQuestionTool: ToolDefinition =
+      defaultAskUserQuestionTool,
+  ) {}
 
   createSession(options?: {
     cwd?: string;
@@ -154,6 +164,7 @@ export class DetachedSessionRegistry {
       sessionPath,
       sessionManager,
       this.fallbackCwd,
+      this.askUserQuestionTool,
       event => {
         this.emit(event);
       },
@@ -177,6 +188,7 @@ export class DetachedSessionRegistry {
       sessionPath,
       sessionManager,
       this.fallbackCwd,
+      this.askUserQuestionTool,
       event => {
         this.emit(event);
       },

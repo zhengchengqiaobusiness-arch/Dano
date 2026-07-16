@@ -607,6 +607,7 @@ async function runDanoMain(): Promise<number> {
   });
   const sessionRegistry = new DetachedSessionRegistry(
     backend.context.state.cwd,
+    backend.context.askUserQuestion.tool,
   );
 
   try {

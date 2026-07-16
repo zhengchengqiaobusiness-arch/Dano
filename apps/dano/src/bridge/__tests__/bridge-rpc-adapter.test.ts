@@ -21,7 +21,10 @@ import {
   type BridgeClient,
 } from "../types.js";
 import { BridgeRpcAdapter, type BridgeRpcAdapterContext } from "../bridge-rpc-adapter.js";
-import { askUserQuestionCoordinator } from "../ask-user-question.js";
+import {
+  askUserQuestionCoordinator,
+  askUserQuestionRuntime,
+} from "../ask-user-question.js";
 
 interface MockTransport {
   send: ReturnType<typeof vi.fn<(message: string) => void>>;
@@ -176,7 +179,7 @@ const createMockContext = (): BridgeRpcAdapterContext => {
       ]),
   };
 
-  return { events, state, actions };
+  return { events, state, actions, askUserQuestion: askUserQuestionRuntime };
 };
 
 describe("BridgeRpcAdapter", () => {

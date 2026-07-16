@@ -6,6 +6,9 @@
   "fieldAssist": {
     "maxRetries": 10
   },
+  "askUserQuestion": {
+    "maxRetries": 10
+  },
   "quickActions": [
     {
       "label": "请假",

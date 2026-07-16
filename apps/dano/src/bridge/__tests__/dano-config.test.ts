@@ -18,6 +18,9 @@ describe("Dano config", () => {
         fieldAssist: {
           maxRetries: 10,
         },
+        askUserQuestion: {
+          maxRetries: 12,
+        },
         slashCommandsAndMentionsEnabled: true,
         quickActions: [
           { label: " 请假 ", prompt: " 帮我申请请假 " },
@@ -39,6 +42,9 @@ describe("Dano config", () => {
       defaultProjectTrust: "always",
       fieldAssist: {
         maxRetries: 10,
+      },
+      askUserQuestion: {
+        maxRetries: 12,
       },
       slashCommandsAndMentionsEnabled: true,
       quickActions: [{ label: "请假", prompt: "帮我申请请假" }],

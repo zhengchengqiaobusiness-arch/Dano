@@ -75,9 +75,6 @@ const askUserQuestionAnswerSchema = Type.Union([
 const groupedRetryError =
   "You called ask_user_question more than once in the same response while another question is still pending. Retry silently with exactly one native ask_user_question call using {\"questions\":[...]} so all fields render in one card with one submit button. Put every field's options, inputType, dateFormat, dataSource, multiple, required, and default inside its questions[] item. Do not explain this correction to the user.";
 
-const mixedGroupedFieldsError =
-  "Invalid ask_user_question call: field configuration belongs inside each questions[] item. Provide a top-level title and move options, inputType, dateFormat, required, dataSource, multiple, default, and confirm out of the top level. Retry silently; do not explain this correction to the user.";
-
 const missingConfirmationSourceError =
   "Invalid ask_user_question confirmation: confirm:true can only be called after the user submitted a grouped form in this workflow. Retry silently with the form call first; do not explain this correction to the user.";
 
@@ -285,8 +282,7 @@ export class AskUserQuestionCoordinator {
 
   constructor(
     private readonly presentationTimeoutMs = 5_000,
-    private readonly maxPresentationFailures = 2,
-    private readonly maxValidationFailures = 2,
+    private readonly maxRetries = 10,
   ) {}
 
   wait(
@@ -309,13 +305,6 @@ export class AskUserQuestionCoordinator {
     const submittedForm = confirmationCall && signal
       ? this.submittedFormBySignal.get(signal)
       : undefined;
-    if (confirmationCall && !isConfirmOnlyRequest(parsedRequest)) {
-      return this.rejectValidation(
-        toolCallId,
-        "Confirmation calls accept only confirm:true",
-        signal,
-      );
-    }
     if (confirmationCall && !submittedForm) {
       return this.rejectValidation(toolCallId, missingConfirmationSourceError, signal);
     }
@@ -390,20 +379,19 @@ export class AskUserQuestionCoordinator {
         pending.presentationTimer = setTimeout(() => {
           const failures = signal
             ? (this.presentationFailuresBySignal.get(signal) ?? 0) + 1
-            : this.maxPresentationFailures;
+            : this.maxRetries + 1;
           if (signal) this.presentationFailuresBySignal.set(signal, failures);
+          const terminal = failures > this.maxRetries;
           cleanup();
           logQuestionLifecycle(
             toolCallId,
-            failures >= this.maxPresentationFailures
-              ? "terminal_failure"
-              : "retrying",
+            terminal ? "terminal_failure" : "retrying",
           );
           reject(
             new Error(
-              failures >= this.maxPresentationFailures
+              terminal
                 ? `${ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE}: Dano could not display the question card after bounded retries. Stop this response and let the user retry.`
-                : `${ASK_USER_QUESTION_PRESENTATION_RETRY_CODE}: The accepted question card was not presented. Retry once with a corrected native ask_user_question call.`,
+                : `${ASK_USER_QUESTION_PRESENTATION_RETRY_CODE}: The accepted question card was not presented. Retry with a corrected native ask_user_question call.`,
             ),
           );
         }, this.presentationTimeoutMs);
@@ -546,9 +534,9 @@ export class AskUserQuestionCoordinator {
   ): Promise<never> {
     const failures = signal
       ? (this.validationFailuresBySignal.get(signal) ?? 0) + 1
-      : 1;
+      : this.maxRetries + 1;
     if (signal) this.validationFailuresBySignal.set(signal, failures);
-    const terminal = failures >= this.maxValidationFailures;
+    const terminal = failures > this.maxRetries;
     logQuestionLifecycle(toolCallId, terminal ? "terminal_failure" : "invalid");
     return Promise.reject(
       new Error(
@@ -687,21 +675,8 @@ function foldCompatibleGroupedFields(
   request: NormalizedAskUserQuestionRequest,
 ): NormalizedAskUserQuestionRequest {
   const questions = request.questions ?? [];
-  if (request.confirm) return request;
   if (questions.length !== 1) {
-    if (
-      request.question &&
-      request.options === undefined &&
-      request.inputType === undefined &&
-      request.dateFormat === undefined &&
-      request.dataSource === undefined &&
-      request.multiple === undefined &&
-      request.required === undefined &&
-      request.default === undefined
-    ) {
-      return { title: request.title, questions };
-    }
-    return request;
+    return { title: request.title, questions };
   }
 
   const [question] = questions;
@@ -709,8 +684,8 @@ function foldCompatibleGroupedFields(
     title: request.title,
     questions: [
       {
-        ...request,
         ...question,
+        id: question.id ?? request.id,
         question: question.question ?? request.question,
         options: question.options ?? request.options,
         inputType: question.inputType ?? request.inputType,
@@ -801,19 +776,6 @@ function normalizeRequestQuestions(
   request: NormalizedAskUserQuestionRequest,
 ): string | PendingQuestionItem[] {
   if (request.questions !== undefined) {
-    if (
-      request.question ||
-      request.options !== undefined ||
-      request.inputType ||
-      request.dateFormat !== undefined ||
-      request.dataSource ||
-      request.multiple !== undefined ||
-      request.required !== undefined ||
-      request.default !== undefined ||
-      request.confirm
-    ) {
-      return mixedGroupedFieldsError;
-    }
     const seenIds = new Set<string>();
     const questions: PendingQuestionItem[] = [];
     for (let index = 0; index < request.questions.length; index += 1) {
@@ -892,12 +854,6 @@ function normalizeAskUserQuestionRequest(rawRequest: unknown):
             questions: cardItems,
           },
   };
-}
-
-function isConfirmOnlyRequest(request: Record<string, unknown>): boolean {
-  return Object.entries(request).every(
-    ([key, value]) => key === "confirm" && value === true,
-  );
 }
 
 function confirmationRequest(form: SubmittedForm): {
@@ -1267,16 +1223,10 @@ function isAnswerRecord(
   return typeof answer === "object" && answer !== null && !Array.isArray(answer);
 }
 
-const coordinatorState = globalThis as typeof globalThis & {
-  __danoAskUserQuestionCoordinator?: AskUserQuestionCoordinator;
-};
-
-// ponytail: dev runtime reloads create separate module graphs in one process.
-export const askUserQuestionCoordinator =
-  (coordinatorState.__danoAskUserQuestionCoordinator ??=
-    new AskUserQuestionCoordinator());
-
-export const askUserQuestionTool = defineTool({
+export function createAskUserQuestionTool(
+  coordinator: AskUserQuestionCoordinator,
+) {
+  return defineTool({
   name: ASK_USER_QUESTION_TOOL_NAME,
   label: "Ask User Question",
   description: `Ask the user for structured input during execution.
@@ -1294,7 +1244,7 @@ For a single question, use top-level question/options/inputType/dateFormat/requi
     "Call ask_user_question at most once per assistant response. If you need several answers, put every item in one questions array.",
     "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
     "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
-    "If ask_user_question returns a validation error, retry silently once with a corrected native tool call. If that retry fails, stop this response and let the user retry; do not explain the correction to the user.",
+    "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
     "Give every non-confirmation question a context-based recommended non-empty default. Do not use empty string or placeholder defaults.",
     "Set required:true only when an answer is mandatory. required defaults to false.",
     "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
@@ -1305,7 +1255,7 @@ For a single question, use top-level question/options/inputType/dateFormat/requi
   parameters: askUserQuestionParameters,
   executionMode: "sequential",
   async execute(toolCallId, params, signal) {
-    const result = await askUserQuestionCoordinator.wait(
+    const result = await coordinator.wait(
       toolCallId,
       params,
       signal,
@@ -1326,4 +1276,31 @@ For a single question, use top-level question/options/inputType/dateFormat/requi
       details: result,
     };
   },
-});
+  });
+}
+
+export interface AskUserQuestionRuntime {
+  coordinator: AskUserQuestionCoordinator;
+  tool: ReturnType<typeof createAskUserQuestionTool>;
+}
+
+export function createAskUserQuestionRuntime(
+  maxRetries = 10,
+): AskUserQuestionRuntime {
+  const coordinator = new AskUserQuestionCoordinator(5_000, maxRetries);
+  return {
+    coordinator,
+    tool: createAskUserQuestionTool(coordinator),
+  };
+}
+
+const runtimeState = globalThis as typeof globalThis & {
+  __danoAskUserQuestionRuntime?: AskUserQuestionRuntime;
+};
+
+// ponytail: dev runtime reloads create separate module graphs in one process.
+export const askUserQuestionRuntime =
+  (runtimeState.__danoAskUserQuestionRuntime ??=
+    createAskUserQuestionRuntime());
+export const askUserQuestionCoordinator = askUserQuestionRuntime.coordinator;
+export const askUserQuestionTool = askUserQuestionRuntime.tool;
