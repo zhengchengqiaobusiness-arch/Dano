@@ -1681,6 +1681,7 @@
   }
 
   .scroll-bottom-button {
+    appearance: none;
     width: 40px;
     height: 40px;
     border: 0;
@@ -1697,6 +1698,8 @@
     justify-content: center;
     cursor: pointer;
     pointer-events: auto;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
     transition:
       background 0.16s ease,
       box-shadow 0.16s ease,
@@ -1712,6 +1715,11 @@
 
   .scroll-bottom-button:active {
     transform: scale(0.96);
+  }
+
+  .scroll-bottom-button:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
   }
 
   .empty-state {
