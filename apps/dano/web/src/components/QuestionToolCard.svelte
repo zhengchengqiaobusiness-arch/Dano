@@ -1,6 +1,7 @@
 <script lang="ts">
   import type {
     AskUserQuestionAnswer,
+    AskUserQuestionConfirmationCardRequest,
     AskUserQuestionDataSource,
     AskUserQuestionOptionId,
     AskUserQuestionResult,
@@ -40,6 +41,7 @@
   import RefreshCw from "lucide-svelte/icons/refresh-cw";
   import Sparkle from "lucide-svelte/icons/sparkle";
   import "./questionToolControls.css";
+  import { questionConfirmationState } from "./questionConfirmationState.svelte";
 
   const PENDING_RENDER_DELAY_MS = 400;
 
@@ -48,6 +50,7 @@
     active = true,
     onPresent,
     onRespond,
+    onUpdate,
     onFieldAssist = undefined as
       | ((payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>)
       | undefined,
@@ -64,12 +67,25 @@
             answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>;
         },
     ) => Promise<RpcResponse>;
+    onUpdate: (
+      toolCallId: string,
+      answer: Record<string, AskUserQuestionAnswer>,
+    ) => Promise<RpcResponse>;
     onFieldAssist?: (payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>;
   } = $props();
 
-  const request = $derived(askUserQuestionRequest(block));
+  const projectedRequest = $derived(askUserQuestionRequest(block));
+  const request = $derived(
+    projectedRequest && !projectedRequest.batch && projectedRequest.kind === "confirm"
+      ? questionConfirmationState.request(projectedRequest)
+      : projectedRequest,
+  );
   const questionItems = $derived(
-    request ? (request.batch ? request.questions : [request]) : [],
+    request
+      ? request.batch || request.kind === "confirm"
+        ? request.questions
+        : [request]
+      : [],
   );
   let submittedResult = $state<AskUserQuestionResult | null>(null);
   let presentationToolCallId = $state("");
@@ -79,6 +95,30 @@
   const pending = $derived(block.toolStatus === "pending" && !result && active);
   const interrupted = $derived(block.toolStatus === "pending" && !result && !active);
   const requestKey = $derived(request ? JSON.stringify(request) : "");
+  const editing = $derived(Boolean(block.toolCallId) && questionConfirmationState.isEditing(block.toolCallId ?? ""));
+  const linkedConfirmationId = $derived(
+    block.toolCallId ? questionConfirmationState.linkedConfirmationId(block.toolCallId) : "",
+  );
+  const linkedConfirmed = $derived(
+    Boolean(block.toolCallId) && questionConfirmationState.isConfirmed(block.toolCallId ?? ""),
+  );
+  const formEnabled = $derived(pending || editing);
+  const sourceAnswerOverride = $derived(
+    block.toolCallId ? questionConfirmationState.sourceAnswer(block.toolCallId) : undefined,
+  );
+  const confirmationEditing = $derived(
+    Boolean(
+      request &&
+        !request.batch &&
+        request.kind === "confirm" &&
+        questionConfirmationState.isEditing(request.confirmationOfToolCallId),
+    ),
+  );
+  const formAnswer = $derived(
+    sourceAnswerOverride ?? (result?.status === "answered" && typeof result.answer === "object" && !Array.isArray(result.answer)
+      ? result.answer
+      : undefined),
+  );
   let initializedRequestKey = $state("");
   let selectedOption = $state<Record<string, string>>({});
   let selectedOptions = $state<Record<string, string[]>>({});
@@ -98,7 +138,22 @@
   let aiAssistError = $state<Record<string, string>>({});
   let aiAssistWarning = $state<Record<string, string>>({});
   let aiAssistSeq = $state<Record<string, number>>({});
-  const showCard = $derived(Boolean(request) && (!pending || pendingReady));
+  const showCard = $derived(
+    Boolean(request) && (!pending || pendingReady) && !confirmationEditing,
+  );
+
+  $effect(() => {
+    if (projectedRequest && !projectedRequest.batch && projectedRequest.kind === "confirm") {
+      const synchronizedRequest = result?.status === "confirmed"
+        ? { ...projectedRequest, answer: result.answer }
+        : projectedRequest;
+      questionConfirmationState.sync(
+        synchronizedRequest,
+        block.toolCallId ?? "",
+        result?.status === "confirmed",
+      );
+    }
+  });
 
   $effect(() => {
     if (!request || initializedRequestKey === requestKey) return;
@@ -122,19 +177,22 @@
     submittedResult = null;
 
     for (const item of questionItems) {
+      const savedAnswer = formAnswer?.[item.id];
       if (item.kind === "text") {
-        textAnswer[item.id] = item.default ?? "";
+        textAnswer[item.id] = typeof savedAnswer === "string" ? savedAnswer : item.default ?? "";
       } else if (item.kind === "date") {
-        dateAnswer[item.id] = item.default;
+        dateAnswer[item.id] = typeof savedAnswer === "string" ? savedAnswer : item.default;
       } else if (item.kind === "single" || item.kind === "select" || item.kind === "treeSelect") {
-        selectedOption[item.id] = selectedOptionForDefault(item, item.default);
-        customAnswer[item.id] = customAnswerForDefault(item, item.default);
+        const answer = typeof savedAnswer === "string" || typeof savedAnswer === "number" ? savedAnswer : item.default;
+        selectedOption[item.id] = selectedOptionForDefault(item, answer);
+        customAnswer[item.id] = customAnswerForDefault(item, answer);
         if ((item.kind === "select" || item.kind === "treeSelect") && item.dataSource) {
           void loadRemoteOptions(item, 1, "", false);
         }
       } else if (item.kind === "multiple") {
-        selectedOptions[item.id] = selectedOptionsForDefault(item, item.default);
-        customAnswer[item.id] = customAnswerForDefault(item, item.default?.find(
+        const answers = Array.isArray(savedAnswer) ? savedAnswer : item.default;
+        selectedOptions[item.id] = selectedOptionsForDefault(item, answers);
+        customAnswer[item.id] = customAnswerForDefault(item, answers?.find(
           answer => !itemOptions(item).some(option => option.id === answer),
         ));
         if (item.dataSource) void loadRemoteOptions(item, 1, "", false);
@@ -198,6 +256,7 @@
           };
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
+    } finally {
       submitting = false;
     }
   }
@@ -212,13 +271,50 @@
         if (answer === null) return;
         if (answer !== undefined) answers[item.id] = answer;
       }
-      void respond({ cancelled: false, answer: answers });
+      if (editing) void saveRevision(answers);
+      else void respond({ cancelled: false, answer: answers });
       return;
     }
 
+    if (request.kind === "confirm") return;
     const answer = answerForItem(request);
     if (answer !== null) {
       void respond({ cancelled: false, answer: answer ?? "" });
+    }
+  }
+
+  async function saveRevision(answer: Record<string, AskUserQuestionAnswer>) {
+    const confirmationId = questionConfirmationState.confirmationId(block.toolCallId ?? "");
+    if (!confirmationId || submitting) return;
+    submitting = true;
+    error = "";
+    try {
+      const rpc = await onUpdate(confirmationId, answer);
+      if (!rpc.success) throw new Error(rpc.error);
+      questionConfirmationState.finishEditing(
+        rpc.data as AskUserQuestionConfirmationCardRequest,
+      );
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      submitting = false;
+    }
+  }
+
+  async function respondToLinkedConfirmation(cancelled: boolean) {
+    if (!linkedConfirmationId || submitting) return;
+    submitting = true;
+    error = "";
+    try {
+      const rpc = await onRespond(
+        linkedConfirmationId,
+        cancelled ? { cancelled: true } : { cancelled: false, answer: true },
+      );
+      if (!rpc.success) throw new Error(rpc.error);
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      submitting = false;
     }
   }
 
@@ -513,23 +609,25 @@
     { kind: "select" | "treeSelect" | "multiple" }
   > & { dataSource?: AskUserQuestionDataSource; inputType?: "treeSelect" };
 
-  const answeredMarkdown = $derived(
-    request && result?.status === "answered"
-      ? t("questionTool.answered", {
-          answer: askUserQuestionAnswerMarkdown(request, result.answer, {
-            confirm: t("questionTool.confirm"),
-            cancel: t("questionTool.cancel"),
-          }),
-        })
-      : "",
-  );
   const answeredItems = $derived(
-    request && result?.status === "answered"
-      ? askUserQuestionAnswerItems(request, result.answer, {
+    request && !request.batch && request.kind === "confirm"
+      ? askUserQuestionAnswerItems(
+          request,
+          result?.status === "confirmed" ? result.answer : request.answer,
+          {
           confirm: t("questionTool.confirm"),
           cancel: t("questionTool.cancel"),
-        })
+          },
+        )
       : [],
+  );
+  const confirmationMarkdown = $derived(
+    request && !request.batch && request.kind === "confirm"
+      ? `**${request.title}**\n\n${askUserQuestionAnswerMarkdown(request, result?.status === "confirmed" ? result.answer : request.answer, {
+          confirm: t("questionTool.confirm"),
+          cancel: t("questionTool.cancel"),
+        })}`
+      : "",
   );
 </script>
 
@@ -541,22 +639,26 @@
     aria-label={t("questionTool.label")}
     aria-busy={pending && submitting}
   >
-    <div class="question-label">{t("questionTool.label")}</div>
-    {#if !request.batch && request.kind !== "text"}
+    {#if !request.batch && request.kind !== "confirm"}
+      <div class="question-label">{t("questionTool.label")}</div>
+    {/if}
+    {#if request.batch && request.title}
+      <h2 class="question-form-title">{request.title}</h2>
+    {:else if !request.batch && request.kind !== "text" && request.kind !== "confirm"}
       <div class="question-text">
         <MarkdownRenderer content={askUserQuestionMarkdown(request.question)} />
       </div>
     {/if}
 
-    {#if result?.status === "answered"}
-      <section class="desktop-question-result" aria-label={t("questionTool.submittedTitle")}>
+    {#if !request.batch && request.kind === "confirm"}
+      <section class="desktop-question-result" aria-label={request.title}>
         <header class="submitted-header">
           <span class="submitted-status-icon" aria-hidden="true">
             <Check size={22} />
           </span>
           <div>
-            <h3>{t("questionTool.submittedTitle")}</h3>
-            <p>{t("questionTool.submittedDescription")}</p>
+            <h3>{request.title}</h3>
+            <p>{t("questionTool.confirmDescription")}</p>
           </div>
         </header>
         <div class="submitted-fields">
@@ -581,24 +683,35 @@
           {/each}
         </div>
       </section>
-      <div class="question-result mobile-question-result">
-        <MarkdownRenderer content={answeredMarkdown} />
+      <div class="mobile-question-result">
+        <MarkdownRenderer content={confirmationMarkdown} />
+      </div>
+      <div class="question-actions">
+        {#if result?.status !== "confirmed"}
+          <button type="button" class="question-button secondary" disabled={submitting} onclick={() => void respond({ cancelled: true })}>
+            {t("questionTool.cancel")}
+          </button>
+          <button
+            type="button"
+            class="question-button secondary"
+            disabled={submitting}
+            onclick={() => {
+              if (block.toolCallId) questionConfirmationState.startEditing(block.toolCallId, request);
+            }}
+          >
+            {t("questionTool.returnModify")}
+          </button>
+        {/if}
+        <button type="button" class="question-button" disabled={submitting || result?.status === "confirmed"} onclick={() => void respond({ cancelled: false, answer: true })}>
+          {result?.status === "confirmed" ? t("questionTool.confirmed") : t("questionTool.confirm")}
+        </button>
       </div>
     {:else if result?.status === "cancelled"}
       <div class="question-result muted">{t("questionTool.cancelled")}</div>
     {:else if interrupted}
       <div class="question-result muted">{t("questionTool.interrupted")}</div>
-    {:else if !pending}
+    {:else if !pending && result?.status !== "answered" && !editing}
       <div class="question-error" role="alert">{block.resultText}</div>
-    {:else if !request.batch && request.kind === "confirm"}
-      <div class="question-actions">
-        <button type="button" class="question-button secondary" disabled={submitting} onclick={() => void respond({ cancelled: false, answer: false })}>
-          {t("questionTool.cancel")}
-        </button>
-        <button type="button" class="question-button" disabled={submitting} onclick={() => void respond({ cancelled: false, answer: true })}>
-          {t("questionTool.confirm")}
-        </button>
-      </div>
     {:else}
       <form onsubmit={submit}>
         {#each questionItems as item}
@@ -610,7 +723,7 @@
             {/if}
 
             {#if item.kind === "single"}
-              <fieldset class="single-options" disabled={!pending || submitting}>
+              <fieldset class="single-options" disabled={!formEnabled || submitting}>
                 <legend class="sr-only">{item.question}</legend>
                 {#each itemOptions(item) as option}
                   <label class="question-option">
@@ -626,14 +739,14 @@
                     class="question-input"
                     type="search"
                     bind:value={remoteSearch[item.id]}
-                    disabled={!pending || submitting || remoteLoading[item.id]}
+                    disabled={!formEnabled || submitting || remoteLoading[item.id]}
                     placeholder={t("questionTool.searchPlaceholder")}
                     onkeydown={preventEnterSubmit}
                   />
                   <button
                     type="button"
                     class="question-button secondary"
-                    disabled={!pending || submitting || remoteLoading[item.id]}
+                    disabled={!formEnabled || submitting || remoteLoading[item.id]}
                     onclick={() => void loadRemoteOptions(item, 1, remoteSearch[item.id] ?? "", false)}
                   >
                     {t("questionTool.search")}
@@ -646,7 +759,7 @@
                   id={`question-${block.toolCallId}-${item.id}`}
                   class="question-input"
                   bind:value={selectedOption[item.id]}
-                  disabled={!pending || submitting || remoteLoading[item.id]}
+                  disabled={!formEnabled || submitting || remoteLoading[item.id]}
                 >
                   <option value="">{t("questionTool.selectPlaceholder")}</option>
                   {#each itemOptions(item) as option}
@@ -662,7 +775,7 @@
                 <button
                   type="button"
                   class="question-button secondary load-more"
-                  disabled={!pending || submitting || remoteLoading[item.id]}
+                  disabled={!formEnabled || submitting || remoteLoading[item.id]}
                   onclick={() => void loadRemoteOptions(item, (remotePage[item.id] ?? 1) + 1, remoteSearch[item.id] ?? "", true)}
                 >
                   {remoteLoading[item.id] ? t("questionTool.loading") : t("questionTool.loadMore")}
@@ -675,21 +788,21 @@
                     class="question-input"
                     type="search"
                     bind:value={remoteSearch[item.id]}
-                    disabled={!pending || submitting || remoteLoading[item.id]}
+                    disabled={!formEnabled || submitting || remoteLoading[item.id]}
                     placeholder={t("questionTool.searchPlaceholder")}
                     onkeydown={preventEnterSubmit}
                   />
                   <button
                     type="button"
                     class="question-button secondary"
-                    disabled={!pending || submitting || remoteLoading[item.id]}
+                    disabled={!formEnabled || submitting || remoteLoading[item.id]}
                     onclick={() => void loadRemoteOptions(item, 1, remoteSearch[item.id] ?? "", false)}
                   >
                     {t("questionTool.search")}
                   </button>
                 </div>
               {/if}
-              <fieldset disabled={!pending || submitting}>
+              <fieldset disabled={!formEnabled || submitting}>
                 <legend class="sr-only">{item.question}</legend>
                 {#each itemOptions(item) as option}
                   <label class="question-option">
@@ -705,7 +818,7 @@
                 <button
                   type="button"
                   class="question-button secondary load-more"
-                  disabled={!pending || submitting || remoteLoading[item.id]}
+                  disabled={!formEnabled || submitting || remoteLoading[item.id]}
                   onclick={() => void loadRemoteOptions(item, (remotePage[item.id] ?? 1) + 1, remoteSearch[item.id] ?? "", true)}
                 >
                   {remoteLoading[item.id] ? t("questionTool.loading") : t("questionTool.loadMore")}
@@ -720,7 +833,7 @@
                   <button
                     type="button"
                     class="question-button secondary icon-button"
-                    disabled={!pending || submitting || Boolean(aiAssistLoading[item.id])}
+                    disabled={!formEnabled || submitting || Boolean(aiAssistLoading[item.id])}
                     onclick={() => void runFieldAssist(item, "regenerate")}
                     aria-label={aiAssistLoading[item.id] === "regenerate" ? t("questionTool.aiAssistGenerating") : t("questionTool.aiAssistRegenerate")}
                     title={aiAssistLoading[item.id] === "regenerate" ? t("questionTool.aiAssistGenerating") : t("questionTool.aiAssistRegenerate")}
@@ -731,7 +844,7 @@
                   <button
                     type="button"
                     class="question-button secondary icon-button"
-                    disabled={!pending || submitting || Boolean(aiAssistLoading[item.id]) || !textAnswer[item.id]?.trim()}
+                    disabled={!formEnabled || submitting || Boolean(aiAssistLoading[item.id]) || !textAnswer[item.id]?.trim()}
                     onclick={() => void runFieldAssist(item, "polish")}
                     aria-label={aiAssistLoading[item.id] === "polish" ? t("questionTool.aiAssistPolishing") : t("questionTool.aiAssistPolish")}
                     title={aiAssistLoading[item.id] === "polish" ? t("questionTool.aiAssistPolishing") : t("questionTool.aiAssistPolish")}
@@ -753,7 +866,7 @@
                     class="question-input question-textarea"
                     rows="4"
                     bind:value={textAnswer[item.id]}
-                    disabled={!pending || submitting}
+                    disabled={!formEnabled || submitting}
                     readonly={Boolean(aiAssistLoading[item.id])}
                     placeholder={t("questionTool.inputPlaceholder")}
                   ></textarea>
@@ -763,7 +876,7 @@
                     class="question-input"
                     type="text"
                     bind:value={textAnswer[item.id]}
-                    disabled={!pending || submitting}
+                    disabled={!formEnabled || submitting}
                     readonly={Boolean(aiAssistLoading[item.id])}
                     placeholder={t("questionTool.inputPlaceholder")}
                     onkeydown={preventEnterSubmit}
@@ -786,7 +899,7 @@
                 value={dateAnswer[item.id]}
                 dateFormat={item.dateFormat}
                 required={item.required}
-                disabled={!pending || submitting}
+                disabled={!formEnabled || submitting}
                 placeholder={item.dateFormat}
                 onValueChange={(value) => {
                   dateAnswer[item.id] = value;
@@ -803,7 +916,7 @@
                 class="question-input"
                 type="text"
                 bind:value={customAnswer[item.id]}
-                disabled={!pending || submitting}
+                disabled={!formEnabled || submitting}
                 placeholder={t("questionTool.otherPlaceholder")}
                 onkeydown={preventEnterSubmit}
               />
@@ -812,12 +925,27 @@
         {/each}
 
         <div class="question-actions">
-          <button type="button" class="question-button secondary" disabled={!pending || submitting} onclick={() => void respond({ cancelled: true })}>
-            {t("questionTool.cancel")}
-          </button>
-          <button type="submit" class="question-button" disabled={!pending || submitting || !canSubmit()}>
-            {t("questionTool.submit")}
-          </button>
+          {#if pending}
+            <button type="button" class="question-button secondary" disabled={submitting} onclick={() => void respond({ cancelled: true })}>
+              {t("questionTool.cancel")}
+            </button>
+            <button type="submit" class="question-button" disabled={submitting || !canSubmit()}>
+              {t("questionTool.submit")}
+            </button>
+          {:else if editing}
+            <button type="submit" class="question-button" disabled={submitting || !canSubmit()}>
+              {t("questionTool.saveAndReturn")}
+            </button>
+          {:else if result?.status === "answered"}
+            {#if !linkedConfirmed}
+              <button type="button" class="question-button secondary" disabled={submitting || !linkedConfirmationId} onclick={() => void respondToLinkedConfirmation(true)}>
+                {t("questionTool.cancel")}
+              </button>
+            {/if}
+            <button type="button" class="question-button" disabled={submitting || !linkedConfirmationId || linkedConfirmed} onclick={() => void respondToLinkedConfirmation(false)}>
+              {linkedConfirmed ? t("questionTool.confirmed") : t("questionTool.confirm")}
+            </button>
+          {/if}
         </div>
       </form>
     {/if}
@@ -845,6 +973,14 @@
     font-size: 0.68rem;
     font-weight: 700;
     letter-spacing: 0.08em;
+  }
+
+  .question-form-title {
+    margin: 0;
+    color: var(--text);
+    font-size: 1rem;
+    font-weight: 700;
+    line-height: 1.4;
   }
 
   .question-text {
@@ -1098,16 +1234,7 @@
   }
 
   @media (min-width: 641px) {
-    .question-card[data-status="answered"] {
-      gap: 20px;
-      padding: 24px;
-    }
-
-    .question-card[data-status="answered"] > .question-label,
-    .question-card[data-status="answered"] > .question-text,
-    .mobile-question-result {
-      display: none;
-    }
+    .mobile-question-result { display: none; }
 
     .desktop-question-result {
       display: grid;

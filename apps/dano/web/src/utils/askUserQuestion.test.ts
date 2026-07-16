@@ -229,13 +229,16 @@ describe("ask user question transcript data", () => {
     ]);
   });
 
-  it("builds a submitted-answer field for a single confirmation", () => {
+  it("builds submitted-answer fields for a linked confirmation", () => {
     const request = askUserQuestionRequest(
       questionBlock({
         batch: false,
-        id: "confirm",
+        id: "confirmation",
         kind: "confirm",
-        question: "确认提交？",
+        title: "公章使用申请确认",
+        confirmationOfToolCallId: "form-1",
+        questions: [{ id: "type", kind: "text", question: "印章类型？" }],
+        answer: { type: "财务章" },
       }),
     );
 
@@ -243,11 +246,11 @@ describe("ask user question transcript data", () => {
     expect(
       askUserQuestionAnswerItems(
         request!,
-        true,
+        { type: "财务章" },
         { confirm: "确认", cancel: "取消" },
       ),
     ).toEqual([
-      { id: "confirm", kind: "confirm", label: "确认提交", value: "确认" },
+      { id: "type", kind: "text", label: "印章类型", value: "财务章" },
     ]);
   });
 

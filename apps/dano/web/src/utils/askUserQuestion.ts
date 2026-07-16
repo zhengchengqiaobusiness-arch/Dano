@@ -29,12 +29,23 @@ export function askUserQuestionAnswerMarkdown(
   answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>,
   labels: { confirm: string; cancel: string },
 ): string {
+  if (!request.batch && request.kind === "confirm") {
+    return groupedAnswerMarkdown(request.questions, answer, labels);
+  }
   if (!request.batch) return answerValueMarkdown(request, answer, labels);
+  return groupedAnswerMarkdown(request.questions, answer, labels);
+}
+
+function groupedAnswerMarkdown(
+  questions: AskUserQuestionCardItem[],
+  answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>,
+  labels: { confirm: string; cancel: string },
+): string {
   if (!isAnswerRecord(answer)) return answerValueMarkdown(undefined, answer, labels);
 
   const used = new Set<string>();
   const lines: string[] = [];
-  for (const item of request.questions) {
+  for (const item of questions) {
     if (!(item.id in answer)) continue;
     used.add(item.id);
     lines.push(`- ${questionLabel(item.question)}：${answerValueMarkdown(item, answer[item.id], labels)}`);
@@ -50,7 +61,7 @@ export function askUserQuestionAnswerItems(
   answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>,
   labels: { confirm: string; cancel: string },
 ): AskUserQuestionAnswerItem[] {
-  if (!request.batch) {
+  if (!request.batch && request.kind !== "confirm") {
     return [{
       id: request.id,
       kind: request.kind,
@@ -60,7 +71,8 @@ export function askUserQuestionAnswerItems(
   }
   if (!isAnswerRecord(answer)) return [];
 
-  return request.questions.flatMap(item =>
+  const questions = request.batch ? request.questions : request.questions;
+  return questions.flatMap(item =>
     item.id in answer
       ? [{
           id: item.id,
@@ -157,6 +169,17 @@ export function askUserQuestionResult(
 ): AskUserQuestionResult | null {
   if (!isRecord(details)) return null;
   if (details.status === "cancelled") return { status: "cancelled" };
+  if (
+    details.status === "confirmed" &&
+    typeof details.confirmationOfToolCallId === "string" &&
+    isAnswerRecord(details.answer)
+  ) {
+    return {
+      status: "confirmed",
+      confirmationOfToolCallId: details.confirmationOfToolCallId,
+      answer: details.answer,
+    };
+  }
   if (
     details.status === "answered" &&
     (typeof details.answer === "string" ||
