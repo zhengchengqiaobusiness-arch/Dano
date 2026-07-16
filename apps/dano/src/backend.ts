@@ -3,8 +3,15 @@ import {
   type AgentSession,
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
-import type { DanoConfig } from "./bridge/dano-config.js";
-import { loadDanoConfig } from "./bridge/dano-config.js";
+import {
+  DANO_DEFAULT_CONFIG,
+  type DanoConfig,
+  loadDanoConfig,
+} from "./bridge/dano-config.js";
+import {
+  createAskUserQuestionRuntime,
+  type AskUserQuestionRuntime,
+} from "./bridge/ask-user-question.js";
 import { createDetachedAgentSession } from "./bridge/detached-session.js";
 import {
   createFieldAssistService,
@@ -161,6 +168,10 @@ function toBridgeLiveEvent(event: AgentSessionEvent): BridgeLiveEvent | null {
 export function createDanoBackendFromSession(
   session: AgentSession,
   danoConfig: DanoConfig = {},
+  askUserQuestion: AskUserQuestionRuntime = createAskUserQuestionRuntime(
+    danoConfig.askUserQuestion?.maxRetries ??
+      DANO_DEFAULT_CONFIG.askUserQuestion.maxRetries,
+  ),
 ): DanoBackend {
   let pendingMessageCount = 0;
   const liveEventHandlers = new Set<(event: BridgeLiveEvent) => void>();
@@ -303,6 +314,7 @@ export function createDanoBackendFromSession(
       events,
       state,
       actions,
+      askUserQuestion,
       fieldAssist: createFieldAssistService({
         ai: createPiSdkFieldAssistClient({
           cwd: session.sessionManager.getCwd(),
@@ -332,12 +344,17 @@ export async function createDanoBackend(
   const sessionManager = options.sessionPath
     ? SessionManager.open(options.sessionPath)
     : SessionManager.create(cwd, options.sessionDir);
+  const askUserQuestion = createAskUserQuestionRuntime(
+    danoConfig.askUserQuestion?.maxRetries ??
+      DANO_DEFAULT_CONFIG.askUserQuestion.maxRetries,
+  );
   const result = await createDetachedAgentSession(
     sessionManager.getCwd() || cwd,
     sessionManager,
     {
       defaultModel: configuredDanoDefaultModel(danoConfig),
       defaultThinkingLevel: danoConfig.defaultThinkingLevel,
+      askUserQuestionTool: askUserQuestion.tool,
     },
   );
 
@@ -352,5 +369,9 @@ export async function createDanoBackend(
     shutdownHandler: () => {},
   });
 
-  return createDanoBackendFromSession(result.session, danoConfig);
+  return createDanoBackendFromSession(
+    result.session,
+    danoConfig,
+    askUserQuestion,
+  );
 }

@@ -39,7 +39,6 @@ vi.mock("../curl-tool.js", () => ({
 }));
 
 import { createDetachedAgentSession } from "../detached-session.js";
-import { askUserQuestionTool } from "../ask-user-question.js";
 import { danoVersionTool } from "../dano-version-tool.js";
 import { detectWorkspaceEnvironments } from "../workspace-environment.js";
 
@@ -125,6 +124,7 @@ describe("detached-session", () => {
     const curlToolDefinition = { name: "curl" };
     const editToolDefinition = { name: "edit" };
     const writeToolDefinition = { name: "write" };
+    const configuredAskUserQuestionTool = { name: "configured-question" };
     const sessionResult = { session: { sessionId: "session-123" } };
     const sessionManager = { getCwd: vi.fn().mockReturnValue(tmpDir) };
 
@@ -138,6 +138,7 @@ describe("detached-session", () => {
     const result = await createDetachedAgentSession(
       tmpDir,
       sessionManager as never,
+      { askUserQuestionTool: configuredAskUserQuestionTool as never },
     );
 
     expect(createAgentSessionServicesMock).toHaveBeenCalledWith({
@@ -164,7 +165,7 @@ describe("detached-session", () => {
         editToolDefinition,
         writeToolDefinition,
         danoVersionTool,
-        askUserQuestionTool,
+        configuredAskUserQuestionTool,
       ],
     });
     expect(result).toBe(sessionResult);

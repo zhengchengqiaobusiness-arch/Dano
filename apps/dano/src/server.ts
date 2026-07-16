@@ -49,7 +49,10 @@ export async function startDanoServer(
 
   const sessionRegistry =
     options.sessionRegistry ??
-    new DetachedSessionRegistry(backend.context.state.cwd);
+    new DetachedSessionRegistry(
+      backend.context.state.cwd,
+      backend.context.askUserQuestion.tool,
+    );
   const ownsSessionRegistry = !options.sessionRegistry;
 
   const emitEvent = (event: BridgeEvent): void => {

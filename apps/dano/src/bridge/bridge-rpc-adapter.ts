@@ -28,9 +28,11 @@ import {
 } from "./default-model.js";
 import {
   ASK_USER_QUESTION_CANCELLED_CODE,
-  askUserQuestionCoordinator,
+  askUserQuestionRuntime,
   buildAskUserQuestionConfirmationCardRequest,
   normalizeAskUserQuestionCardRequest,
+  type AskUserQuestionCoordinator,
+  type AskUserQuestionRuntime,
 } from "./ask-user-question.js";
 import { DetachedSessionRegistry } from "./session-registry.js";
 import {
@@ -164,6 +166,7 @@ export interface BridgeRpcAdapterContext {
   events: BridgeSessionEvents;
   state: BridgeSessionState;
   actions: BridgeSessionActions;
+  askUserQuestion: AskUserQuestionRuntime;
   fieldAssist?: FieldAssistService;
 }
 
@@ -292,7 +295,9 @@ function toRpcAgentMessage(message: PiAgentMessage): RpcAgentMessage | null {
     case "assistant":
       return {
         role: "assistant",
-        content: message.content.map(toRpcAgentAssistantContentBlock),
+        content: message.content.map(block =>
+          toRpcAgentAssistantContentBlock(block),
+        ),
         api: message.api,
         provider: message.provider,
         model: message.model,
@@ -351,6 +356,7 @@ function toRpcAgentTextOrImageContentBlock(
 
 function toRpcAgentAssistantContentBlock(
   block: PiAgentAssistantContentBlock,
+  coordinator = askUserQuestionRuntime.coordinator,
 ): RpcAgentAssistantContentBlock {
   switch (block.type) {
     case "text":
@@ -369,7 +375,7 @@ function toRpcAgentAssistantContentBlock(
     case "toolCall":
       const questionRequest =
         block.name === ASK_USER_QUESTION_TOOL_NAME
-          ? askUserQuestionCoordinator.cardRequest(block.id) ??
+          ? coordinator.cardRequest(block.id) ??
             normalizeAskUserQuestionCardRequest(block.arguments)
           : null;
       return {
@@ -381,7 +387,7 @@ function toRpcAgentAssistantContentBlock(
         ...(questionRequest
           ? {
               questionState:
-                askUserQuestionCoordinator.state(block.id) ??
+                coordinator.state(block.id) ??
                 "awaiting_presentation",
             }
           : {}),
@@ -3902,6 +3908,8 @@ class TranscriptProjector {
     closedKeys: new Set(),
   };
 
+  constructor(private readonly coordinator: AskUserQuestionCoordinator) {}
+
   registerStructuredUserMessage(message: PendingStructuredUserMessage): void {
     this.pendingStructuredUserMessages.push(message);
     if (this.pendingStructuredUserMessages.length > 100) {
@@ -4188,6 +4196,7 @@ class TranscriptProjector {
       message,
       recovering,
       this.submittedFormBySession.get(sessionKey),
+      this.coordinator,
     );
     const submittedForm = submittedFormFromMessage(projectedMessage);
     if (submittedForm) this.submittedFormBySession.set(sessionKey, submittedForm);
@@ -4257,6 +4266,7 @@ function projectAskUserQuestionRequests(
   message: RpcTranscriptMessage,
   recovering = false,
   previousSubmittedForm?: SubmittedFormProjection,
+  coordinator = askUserQuestionRuntime.coordinator,
 ): RpcTranscriptMessage {
   if (!Array.isArray(message.content)) return message;
   let changed = false;
@@ -4270,7 +4280,7 @@ function projectAskUserQuestionRequests(
       return block;
     }
     const questionRequest =
-      askUserQuestionCoordinator.cardRequest(block.id) ??
+      coordinator.cardRequest(block.id) ??
       normalizeAskUserQuestionCardRequest(block.arguments) ??
       confirmationRequestFromTranscript(
         message.content as Array<string | RpcTranscriptContentBlock>,
@@ -4284,6 +4294,7 @@ function projectAskUserQuestionRequests(
       block.id,
       Boolean(questionRequest),
       recovering,
+      coordinator,
     );
     if (!questionRequest && !questionState) return block;
     changed = true;
@@ -4584,6 +4595,7 @@ function questionLifecycleState(
   toolCallId: string | undefined,
   hasQuestionRequest: boolean,
   recovering: boolean,
+  coordinator: AskUserQuestionCoordinator,
 ): AskUserQuestionLifecycleState | undefined {
   const result = content[index + 1];
   if (result && typeof result !== "string" && result.type === "toolResult") {
@@ -4594,7 +4606,7 @@ function questionLifecycleState(
     );
   }
   if (toolCallId) {
-    const pendingState = askUserQuestionCoordinator.state(toolCallId);
+    const pendingState = coordinator.state(toolCallId);
     if (pendingState) return pendingState;
   }
   return hasQuestionRequest && recovering ? "terminal_failure" : undefined;
@@ -4919,7 +4931,7 @@ export class BridgeRpcAdapter {
   private uploadRegistry: UploadRegistry;
 
   private readonly sessionRuntime: SessionRuntime;
-  private readonly transcriptProjector = new TranscriptProjector();
+  private readonly transcriptProjector: TranscriptProjector;
   private readonly uiBridge: ExtensionUIBridge;
   private readonly sessionStatsPusher: SessionStatsPusher;
   private readonly detachedSessionRegistry: DetachedSessionRegistry;
@@ -4954,10 +4966,17 @@ export class BridgeRpcAdapter {
     this.eventBus = eventBus;
     this.emitEvent = emitEvent;
     this.uploadRegistry = uploadRegistry;
+    this.transcriptProjector = new TranscriptProjector(
+      context.askUserQuestion.coordinator,
+    );
     this.slashCommandsAndMentionsEnabled =
       config.slashCommandsAndMentionsEnabled;
     this.detachedSessionRegistry =
-      sessionRegistry ?? new DetachedSessionRegistry(context.state.cwd);
+      sessionRegistry ??
+      new DetachedSessionRegistry(
+        context.state.cwd,
+        context.askUserQuestion.tool,
+      );
     this.uiBridge = new ExtensionUIBridge(client.id, config, message => {
       this.sendResponse(message);
     });
@@ -5856,7 +5875,7 @@ export class BridgeRpcAdapter {
       case "present_question": {
         const toolCallId = command.toolCallId.trim();
         if (!toolCallId) throw new Error("Question tool call ID is required");
-        askUserQuestionCoordinator.present(toolCallId);
+        this.context.askUserQuestion.coordinator.present(toolCallId);
         return {
           id: correlationId,
           type: "response",
@@ -5873,8 +5892,10 @@ export class BridgeRpcAdapter {
         }
 
         const result = command.cancelled
-          ? askUserQuestionCoordinator.answer(toolCallId, { cancelled: true })
-          : askUserQuestionCoordinator.answer(toolCallId, {
+          ? this.context.askUserQuestion.coordinator.answer(toolCallId, {
+              cancelled: true,
+            })
+          : this.context.askUserQuestion.coordinator.answer(toolCallId, {
               cancelled: false,
               answer: command.answer,
             });
@@ -5890,7 +5911,7 @@ export class BridgeRpcAdapter {
       case "update_question": {
         const toolCallId = command.toolCallId.trim();
         if (!toolCallId) throw new Error("Question tool call ID is required");
-        const result = askUserQuestionCoordinator.update(
+        const result = this.context.askUserQuestion.coordinator.update(
           toolCallId,
           command.answer,
         );
