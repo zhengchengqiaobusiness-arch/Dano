@@ -14,6 +14,7 @@
   import {
     type AskUserQuestionItem,
     type NormalizedAskUserQuestionOption,
+    askUserQuestionAnswerItems,
     askUserQuestionAnswerMarkdown,
     askUserQuestionMarkdown,
     askUserQuestionRequest,
@@ -29,7 +30,12 @@
   import type { ToolContentBlock } from "../utils/transcript";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import QuestionDateField from "./QuestionDateField.svelte";
+  import SubmittedAnswerValue from "./SubmittedAnswerValue.svelte";
   import ChevronDown from "lucide-svelte/icons/chevron-down";
+  import Calendar from "lucide-svelte/icons/calendar";
+  import CircleCheck from "lucide-svelte/icons/circle-check";
+  import ListChecks from "lucide-svelte/icons/list-checks";
+  import MessageSquareText from "lucide-svelte/icons/message-square-text";
   import RefreshCw from "lucide-svelte/icons/refresh-cw";
   import Sparkle from "lucide-svelte/icons/sparkle";
   import "./questionToolControls.css";
@@ -516,6 +522,14 @@
         })
       : "",
   );
+  const answeredItems = $derived(
+    request && result?.status === "answered"
+      ? askUserQuestionAnswerItems(request, result.answer, {
+          confirm: t("questionTool.confirm"),
+          cancel: t("questionTool.cancel"),
+        })
+      : [],
+  );
 </script>
 
 {#if request && showCard}
@@ -534,7 +548,39 @@
     {/if}
 
     {#if result?.status === "answered"}
-      <div class="question-result">
+      <section class="desktop-question-result" aria-label={t("questionTool.submittedTitle")}>
+        <header class="submitted-header">
+          <span class="submitted-status-icon" aria-hidden="true">
+            <CircleCheck size={22} />
+          </span>
+          <div>
+            <h3>{t("questionTool.submittedTitle")}</h3>
+            <p>{t("questionTool.submittedDescription")}</p>
+          </div>
+        </header>
+        <div class="submitted-fields">
+          {#each answeredItems as item (item.id)}
+            <div class="submitted-field">
+              <div class="submitted-field-label">
+                <span class="submitted-field-icon" aria-hidden="true">
+                  {#if item.kind === "date"}
+                    <Calendar size={18} />
+                  {:else if item.kind === "single" || item.kind === "multiple" || item.kind === "select" || item.kind === "treeSelect"}
+                    <ListChecks size={18} />
+                  {:else if item.kind === "confirm"}
+                    <CircleCheck size={18} />
+                  {:else}
+                    <MessageSquareText size={18} />
+                  {/if}
+                </span>
+                <span>{item.label}</span>
+              </div>
+              <SubmittedAnswerValue value={item.value} />
+            </div>
+          {/each}
+        </div>
+      </section>
+      <div class="question-result mobile-question-result">
         <MarkdownRenderer content={answeredMarkdown} />
       </div>
     {:else if result?.status === "cancelled"}
@@ -1033,6 +1079,7 @@
   }
 
   .question-result { color: var(--text); }
+  .desktop-question-result { display: none; }
   .question-result.muted { color: var(--text-muted); }
   .question-warning { color: var(--text-muted); font-size: 0.76rem; }
   .question-error { color: var(--error-text); font-size: 0.76rem; }
@@ -1047,5 +1094,90 @@
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
     border: 0;
+  }
+
+  @media (min-width: 641px) {
+    .question-card[data-status="answered"] {
+      gap: 20px;
+      padding: 24px;
+    }
+
+    .question-card[data-status="answered"] > .question-label,
+    .question-card[data-status="answered"] > .question-text,
+    .mobile-question-result {
+      display: none;
+    }
+
+    .desktop-question-result {
+      display: grid;
+      gap: 24px;
+    }
+
+    .submitted-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+    }
+
+    .submitted-status-icon {
+      display: inline-flex;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      border-radius: 999px;
+      background: var(--accent);
+      color: var(--on-accent);
+    }
+
+    .submitted-header h3,
+    .submitted-header p {
+      margin: 0;
+    }
+
+    .submitted-header h3 {
+      color: var(--text);
+      font-size: 1.1rem;
+      line-height: 1.4;
+      text-wrap: balance;
+    }
+
+    .submitted-header p {
+      margin-top: 4px;
+      color: var(--text-muted);
+      font-size: 0.84rem;
+      line-height: 1.5;
+      text-wrap: pretty;
+    }
+
+    .submitted-fields {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px 28px;
+    }
+
+    .submitted-field {
+      min-width: 0;
+    }
+
+    .submitted-field-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      margin-bottom: 7px;
+      color: var(--text-subtle);
+      font-size: 0.84rem;
+      font-weight: normal;
+    }
+
+    .submitted-field-icon {
+      display: inline-flex;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent);
+    }
   }
 </style>

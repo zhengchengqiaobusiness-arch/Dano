@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  askUserQuestionAnswerItems,
   askUserQuestionAnswerMarkdown,
   askUserQuestionMarkdown,
   askUserQuestionRequest,
@@ -168,6 +169,86 @@ describe("ask user question transcript data", () => {
     ).toBe(
       "\n- 费用类型：交通费\n- 发生时间：2026-06-28\n- 金额：0\n- 事由：办公相关支出",
     );
+  });
+
+  it("builds ordered submitted-answer fields for the desktop result card", () => {
+    const request = askUserQuestionRequest(
+      questionBlock({
+        batch: true,
+        questions: [
+          {
+            id: "stamp_type",
+            kind: "single",
+            question: "印章类型？",
+            options: [
+              { id: "finance", label: "财务章" },
+              { id: "contract", label: "合同章" },
+            ],
+          },
+          {
+            id: "use_date",
+            kind: "date",
+            question: "使用日期：",
+            dateFormat: "yyyy-MM-dd HH:mm",
+          },
+          { id: "note", kind: "text", question: "备注。" },
+        ],
+      }),
+    );
+
+    expect(request).not.toBeNull();
+    expect(
+      askUserQuestionAnswerItems(
+        request!,
+        {
+          stamp_type: "finance",
+          use_date: "2026-07-16 08:00",
+          note: "一段很长但必须完整保留给 tooltip 的备注",
+        },
+        { confirm: "确认", cancel: "取消" },
+      ),
+    ).toEqual([
+      {
+        id: "stamp_type",
+        kind: "single",
+        label: "印章类型",
+        value: "财务章",
+      },
+      {
+        id: "use_date",
+        kind: "date",
+        label: "使用日期",
+        value: "2026-07-16 08:00",
+      },
+      {
+        id: "note",
+        kind: "text",
+        label: "备注",
+        value: "一段很长但必须完整保留给 tooltip 的备注",
+      },
+    ]);
+  });
+
+  it("builds a submitted-answer field for a single confirmation", () => {
+    const request = askUserQuestionRequest(
+      questionBlock({
+        batch: false,
+        id: "confirm",
+        kind: "confirm",
+        question: "确认提交？",
+      }),
+    );
+
+    expect(request).not.toBeNull();
+    expect(
+      askUserQuestionAnswerItems(
+        request!,
+        true,
+        { confirm: "确认", cancel: "取消" },
+      ),
+    ).toEqual([
+      { id: "confirm", kind: "confirm", label: "确认提交", value: "确认" },
+    ]);
   });
 
   it("formats structured option answers with user-facing labels", () => {

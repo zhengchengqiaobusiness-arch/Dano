@@ -13,6 +13,12 @@ export type NormalizedAskUserQuestionOption =
   Extract<AskUserQuestionCardItem, { kind: "single" }>["options"][number];
 export type AskUserQuestionItem = AskUserQuestionCardItem;
 export type AskUserQuestionRequest = AskUserQuestionCardRequest;
+export type AskUserQuestionAnswerItem = {
+  id: string;
+  kind: AskUserQuestionItem["kind"];
+  label: string;
+  value: string;
+};
 
 export function askUserQuestionMarkdown(question: string): string {
   return question.replace(/\\+(?:r\\+n|n)/g, "\n");
@@ -37,6 +43,33 @@ export function askUserQuestionAnswerMarkdown(
     if (!used.has(key)) lines.push(`- ${key}：${answerValueMarkdown(undefined, value, labels)}`);
   }
   return lines.length > 0 ? `\n${lines.join("\n")}` : "";
+}
+
+export function askUserQuestionAnswerItems(
+  request: AskUserQuestionRequest,
+  answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>,
+  labels: { confirm: string; cancel: string },
+): AskUserQuestionAnswerItem[] {
+  if (!request.batch) {
+    return [{
+      id: request.id,
+      kind: request.kind,
+      label: questionLabel(request.question),
+      value: answerValueMarkdown(request, answer, labels),
+    }];
+  }
+  if (!isAnswerRecord(answer)) return [];
+
+  return request.questions.flatMap(item =>
+    item.id in answer
+      ? [{
+          id: item.id,
+          kind: item.kind,
+          label: questionLabel(item.question),
+          value: answerValueMarkdown(item, answer[item.id], labels),
+        }]
+      : [],
+  );
 }
 
 export function isAskUserQuestionToolError(block: ToolContentBlock): boolean {
