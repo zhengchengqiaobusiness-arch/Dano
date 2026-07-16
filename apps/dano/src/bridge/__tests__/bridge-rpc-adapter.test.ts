@@ -2877,6 +2877,23 @@ describe("BridgeRpcAdapter", () => {
     it("preserves streamed tool call arguments when final update is sparse", async () => {
       (ws.send as ReturnType<typeof vi.fn>).mockClear();
 
+      const argumentsJson = JSON.stringify({
+        title: "公章使用申请",
+        questions: JSON.stringify([
+          {
+            id: "seal_id",
+            question: "印章类型？",
+            options: ["公章", "合同章"],
+            default: "公章",
+          },
+          {
+            id: "reason",
+            question: "用章事由？",
+            default: "签署合同",
+          },
+        ]),
+      });
+
       const handler = (context.events.subscribe as ReturnType<typeof vi.fn>)
         .mock.calls[0]?.[0] as
         | ((event: Record<string, unknown>) => void)
@@ -2903,7 +2920,7 @@ describe("BridgeRpcAdapter", () => {
         assistantMessageEvent: {
           type: "toolcall_delta",
           contentIndex: 0,
-          delta: '{"question":"请填写说明","inputType":"textarea","default":"默认内容"}',
+          delta: argumentsJson,
         },
       });
       handler?.({
@@ -2933,7 +2950,15 @@ describe("BridgeRpcAdapter", () => {
         type: "toolCall",
         id: "tool-1",
         name: "ask_user_question",
-        arguments: '{"question":"请填写说明","inputType":"textarea","default":"默认内容"}',
+        arguments: argumentsJson,
+        questionRequest: {
+          batch: true,
+          title: "公章使用申请",
+          questions: [
+            expect.objectContaining({ id: "seal_id", kind: "single" }),
+            expect.objectContaining({ id: "reason", kind: "text" }),
+          ],
+        },
       });
     });
 
@@ -3081,12 +3106,22 @@ describe("BridgeRpcAdapter", () => {
           id: "tool-1",
           name: "ask_user_question",
           arguments: '{"question":"选择配置","options":["A","B"],"default":"A"}',
+          questionRequest: expect.objectContaining({
+            batch: false,
+            kind: "single",
+            question: "选择配置",
+          }),
         },
         {
           type: "toolCall",
           id: "tool-2",
           name: "ask_user_question",
           arguments: '{"question":"请填写说明","inputType":"textarea","default":"默认内容"}',
+          questionRequest: expect.objectContaining({
+            batch: false,
+            kind: "text",
+            question: "请填写说明",
+          }),
         },
       ]);
     });

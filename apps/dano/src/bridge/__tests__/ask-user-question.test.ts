@@ -238,7 +238,7 @@ describe("ask_user_question tool", () => {
       "Call ask_user_question at most once per assistant response. If you need several answers, put every item in one questions array.",
       "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
       "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
-      "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
+      "If ask_user_question returns a validation error, retry silently once with a corrected native tool call. If that retry fails, stop this response and let the user retry; do not explain the correction to the user.",
       "Give every non-confirmation question a context-based recommended non-empty default. Do not use empty string or placeholder defaults.",
       "Set required:true only when an answer is mandatory. required defaults to false.",
       "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
@@ -1088,6 +1088,95 @@ describe("ask_user_question tool", () => {
         answer: { description: "默认内容" },
       },
     });
+  });
+
+  it("accepts a JSON-stringified questions array as a grouped form", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    const execution = coordinator.wait(
+      "compat-json-array",
+      {
+        title: "公章使用申请",
+        questions: JSON.stringify([
+          {
+            id: "seal_id",
+            question: "印章类型？",
+            options: ["公章", "合同章"],
+            default: "公章",
+            required: true,
+          },
+          {
+            id: "reason",
+            question: "用章事由？",
+            inputType: "textarea",
+            default: "签署合同",
+            required: true,
+          },
+        ]),
+      },
+      new AbortController().signal,
+    );
+
+    expect(coordinator.cardRequest("compat-json-array")).toMatchObject({
+      batch: true,
+      title: "公章使用申请",
+      questions: [
+        { id: "seal_id", kind: "single", default: "公章" },
+        { id: "reason", kind: "text", default: "签署合同" },
+      ],
+    });
+    coordinator.present("compat-json-array");
+    coordinator.answer("compat-json-array", {
+      cancelled: false,
+      answer: { seal_id: "合同章", reason: "签署采购合同" },
+    });
+    await expect(execution).resolves.toEqual({
+      status: "answered",
+      answer: { seal_id: "合同章", reason: "签署采购合同" },
+    });
+  });
+
+  it("rejects malformed JSON-stringified questions with a clear error", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    await expect(
+      coordinator.wait(
+        "compat-json-malformed",
+        { title: "公章使用申请", questions: '[{"id":"seal_id"' },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("questions must be valid JSON");
+  });
+
+  it("still requires a title for JSON-stringified grouped forms", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    await expect(
+      coordinator.wait(
+        "compat-json-missing-title",
+        {
+          questions: JSON.stringify([
+            { id: "seal_id", question: "印章类型？", default: "公章" },
+          ]),
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("Grouped forms require a top-level title");
+  });
+
+  it("still rejects top-level field configuration with JSON-stringified grouped forms", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    await expect(
+      coordinator.wait(
+        "compat-json-mixed-fields",
+        {
+          title: "公章使用申请",
+          options: ["公章", "合同章"],
+          questions: JSON.stringify([
+            { id: "seal_id", question: "印章类型？", default: "公章" },
+            { id: "reason", question: "用章事由？", default: "签署合同" },
+          ]),
+        },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("field configuration belongs inside each questions[] item");
   });
 
   it("folds compatible top-level fields into a single grouped question", async () => {

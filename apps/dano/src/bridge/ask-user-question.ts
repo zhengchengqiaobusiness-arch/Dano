@@ -559,7 +559,7 @@ type NormalizedAskUserQuestionRequest = NormalizedAskUserQuestionRequestItem & {
 
 function normalizeCompatibleRequest(
   request: AskUserQuestionRequestParams,
-): NormalizedAskUserQuestionRequest {
+): NormalizedAskUserQuestionRequest | string {
   const normalized: NormalizedAskUserQuestionRequest =
     normalizeCompatibleQuestion(request);
   const rawQuestions = request.questions;
@@ -567,7 +567,9 @@ function normalizeCompatibleRequest(
     normalized.title = firstString(request.title);
     normalized.question = firstString(request.question, request.label, request.prompt);
     if (!normalized.question) delete normalized.question;
-    normalized.questions = normalizeCompatibleQuestions(rawQuestions);
+    const questions = normalizeCompatibleQuestions(rawQuestions);
+    if (typeof questions === "string") return questions;
+    normalized.questions = questions;
     return foldCompatibleGroupedFields(normalized);
   }
   return normalized;
@@ -575,12 +577,23 @@ function normalizeCompatibleRequest(
 
 function normalizeCompatibleQuestions(
   value: AskUserQuestionRequestParams["questions"],
-): NormalizedAskUserQuestionRequestItem[] {
-  const parsed = parseJsonString(value);
-  const rawItems = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
-  return rawItems
-    .filter(isPlainRecord)
-    .map(value => normalizeCompatibleQuestion(value));
+): NormalizedAskUserQuestionRequestItem[] | string {
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value) as unknown;
+    } catch {
+      return "Invalid questions: questions must be valid JSON containing an array or object";
+    }
+  }
+  if (!Array.isArray(parsed) && !isPlainRecord(parsed)) {
+    return "Invalid questions: questions must be an array or object";
+  }
+  const rawItems = Array.isArray(parsed) ? parsed : [parsed];
+  if (!rawItems.every(isPlainRecord)) {
+    return "Invalid questions: every questions array item must be an object";
+  }
+  return rawItems.map(value => normalizeCompatibleQuestion(value));
 }
 
 function normalizeCompatibleQuestion(
@@ -801,6 +814,7 @@ function normalizeAskUserQuestionRequest(rawRequest: unknown):
   const request = normalizeCompatibleRequest(
     parsed as AskUserQuestionRequestParams,
   );
+  if (typeof request === "string") return { error: request };
   if (request.confirm && request.questions === undefined) {
     return { error: missingConfirmationSourceError };
   }
@@ -1237,7 +1251,7 @@ For a single question, use top-level question/options/inputType/dateFormat/requi
     "Call ask_user_question at most once per assistant response. If you need several answers, put every item in one questions array.",
     "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
     "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
-    "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
+    "If ask_user_question returns a validation error, retry silently once with a corrected native tool call. If that retry fails, stop this response and let the user retry; do not explain the correction to the user.",
     "Give every non-confirmation question a context-based recommended non-empty default. Do not use empty string or placeholder defaults.",
     "Set required:true only when an answer is mandatory. required defaults to false.",
     "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
