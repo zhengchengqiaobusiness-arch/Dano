@@ -322,6 +322,14 @@ export class AskUserQuestionCoordinator {
       logQuestionLifecycle(toolCallId, "invalid");
       return Promise.reject(new Error(normalized.error));
     }
+    if (
+      isPlainRecord(parsedRequest) &&
+      parsedRequest.questions !== undefined &&
+      !firstString(parsedRequest.title)
+    ) {
+      logQuestionLifecycle(toolCallId, "invalid");
+      return Promise.reject(new Error("Grouped forms require a top-level title"));
+    }
     const { request, questions, cardRequest } = normalized;
     const pendingInCurrentTurn = signal
       ? this.pendingToolCallBySignal.get(signal)
@@ -852,14 +860,26 @@ function confirmationRequest(form: SubmittedForm): {
 function confirmationCardRequest(
   form: SubmittedForm,
 ): AskUserQuestionConfirmationCardRequest {
+  return buildAskUserQuestionConfirmationCardRequest(
+    form.toolCallId,
+    form.cardRequest,
+    form.answer,
+  );
+}
+
+export function buildAskUserQuestionConfirmationCardRequest(
+  confirmationOfToolCallId: string,
+  request: Extract<AskUserQuestionCardRequest, { batch: true }>,
+  answer: Record<string, AskUserQuestionAnswer>,
+): AskUserQuestionConfirmationCardRequest {
   return {
     batch: false,
     kind: "confirm",
     id: "confirmation",
-    title: `${form.title}确认`,
-    confirmationOfToolCallId: form.toolCallId,
-    questions: [...form.cardRequest.questions],
-    answer: { ...form.answer },
+    title: `${request.title ?? "表单"}确认`,
+    confirmationOfToolCallId,
+    questions: [...request.questions],
+    answer: { ...answer },
   };
 }
 

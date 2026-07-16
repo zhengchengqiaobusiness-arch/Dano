@@ -29,6 +29,7 @@ import {
 import {
   ASK_USER_QUESTION_CANCELLED_CODE,
   askUserQuestionCoordinator,
+  buildAskUserQuestionConfirmationCardRequest,
   normalizeAskUserQuestionCardRequest,
 } from "./ask-user-question.js";
 import { DetachedSessionRegistry } from "./session-registry.js";
@@ -4326,28 +4327,20 @@ function confirmationRequestFromTranscript(
         block.questionRequest ??
         normalizeAskUserQuestionCardRequest(block.arguments);
       if (source?.batch) {
-        return {
-          batch: false,
-          kind: "confirm",
-          id: "confirmation",
-          title: `${source.title ?? "表单"}确认`,
-          confirmationOfToolCallId: block.id,
-          questions: source.questions,
+        return buildAskUserQuestionConfirmationCardRequest(
+          block.id,
+          source,
           answer,
-        };
+        );
       }
     }
   }
   return previousSubmittedForm
-    ? {
-        batch: false,
-        kind: "confirm",
-        id: "confirmation",
-        title: `${previousSubmittedForm.request.title ?? "表单"}确认`,
-        confirmationOfToolCallId: previousSubmittedForm.toolCallId,
-        questions: previousSubmittedForm.request.questions,
-        answer: previousSubmittedForm.answer,
-      }
+    ? buildAskUserQuestionConfirmationCardRequest(
+        previousSubmittedForm.toolCallId,
+        previousSubmittedForm.request,
+        previousSubmittedForm.answer,
+      )
     : null;
 }
 
@@ -4459,15 +4452,11 @@ function projectRecoveredQuestionLifecycle(
         questionState: completed.get(block.id),
         ...(confirmation && source
           ? {
-              questionRequest: {
-                batch: false as const,
-                kind: "confirm" as const,
-                id: "confirmation" as const,
-                title: `${source.title}确认`,
-                confirmationOfToolCallId: confirmation.confirmationOfToolCallId,
-                questions: source.questions,
-                answer: confirmation.answer,
-              },
+              questionRequest: buildAskUserQuestionConfirmationCardRequest(
+                confirmation.confirmationOfToolCallId,
+                source,
+                confirmation.answer,
+              ),
             }
           : {}),
       };

@@ -71,7 +71,7 @@ export function askUserQuestionAnswerItems(
   }
   if (!isAnswerRecord(answer)) return [];
 
-  const questions = request.batch ? request.questions : request.questions;
+  const questions = request.questions;
   return questions.flatMap(item =>
     item.id in answer
       ? [{

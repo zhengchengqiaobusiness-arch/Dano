@@ -130,6 +130,28 @@ still alive. Unsaved edits and server-process restarts are outside this contract
         }
       },
       "required": ["type", "endpoint"]
+    },
+    "question": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "question": { "type": "string", "minLength": 1 },
+        "options": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/$defs/option" }
+        },
+        "inputType": {
+          "type": "string",
+          "enum": ["text", "textarea", "date", "radio", "checkbox", "select", "treeSelect"]
+        },
+        "dateFormat": { "type": "string", "minLength": 1 },
+        "dataSource": { "$ref": "#/$defs/dataSource" },
+        "multiple": { "type": "boolean" },
+        "required": { "type": "boolean" },
+        "default": { "$ref": "#/$defs/defaultValue" }
+      },
+      "required": ["id", "question", "default"]
     }
   },
   "type": "object",
@@ -201,9 +223,23 @@ still alive. Unsaved edits and server-process restarts are outside this contract
       "description": "Call with only {confirm:true} after the user submitted a grouped form. Dano supplies the form title and latest saved answers."
     },
     "questions": {
-      "description": "Preferred for collecting more than one answer. Provide a top-level title and make exactly one ask_user_question call with questions: [{ id, question, default, options?, multiple?, inputType?, dateFormat?, required?, dataSource? }, ...]. Every questions[] item must include a context-based, non-empty default. A single question object is also accepted and normalized to an array. Do not include top-level confirm or top-level field configuration with questions."
+      "description": "Preferred for collecting more than one answer. Provide a top-level title and make exactly one ask_user_question call. A single question object is also accepted and normalized to an array. Do not include top-level confirm or top-level field configuration with questions.",
+      "anyOf": [
+        { "$ref": "#/$defs/question" },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/question" }
+        }
+      ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "required": ["questions"] },
+      "then": { "required": ["title"] }
+    }
+  ]
 }
 ```
 

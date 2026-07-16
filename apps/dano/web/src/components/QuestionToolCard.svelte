@@ -102,6 +102,9 @@
   const linkedConfirmed = $derived(
     Boolean(block.toolCallId) && questionConfirmationState.isConfirmed(block.toolCallId ?? ""),
   );
+  const linkedCancelled = $derived(
+    Boolean(block.toolCallId) && questionConfirmationState.isCancelled(block.toolCallId ?? ""),
+  );
   const formEnabled = $derived(pending || editing);
   const sourceAnswerOverride = $derived(
     block.toolCallId ? questionConfirmationState.sourceAnswer(block.toolCallId) : undefined,
@@ -151,6 +154,7 @@
         synchronizedRequest,
         block.toolCallId ?? "",
         result?.status === "confirmed",
+        result?.status === "cancelled",
       );
     }
   });
@@ -629,6 +633,20 @@
         })}`
       : "",
   );
+  const sourceAnsweredMarkdown = $derived(
+    request && request.batch && result?.status === "answered"
+      ? t("questionTool.answered", {
+          answer: askUserQuestionAnswerMarkdown(
+            request,
+            sourceAnswerOverride ?? result.answer,
+            {
+              confirm: t("questionTool.confirm"),
+              cancel: t("questionTool.cancel"),
+            },
+          ),
+        })
+      : "",
+  );
 </script>
 
 {#if request && showCard}
@@ -650,7 +668,9 @@
       </div>
     {/if}
 
-    {#if !request.batch && request.kind === "confirm"}
+    {#if !request.batch && request.kind === "confirm" && result?.status === "cancelled"}
+      <div class="question-result muted">{t("questionTool.cancelled")}</div>
+    {:else if !request.batch && request.kind === "confirm"}
       <section class="desktop-question-result" aria-label={request.title}>
         <header class="submitted-header">
           <span class="submitted-status-icon" aria-hidden="true">
@@ -713,7 +733,12 @@
     {:else if !pending && result?.status !== "answered" && !editing}
       <div class="question-error" role="alert">{block.resultText}</div>
     {:else}
-      <form onsubmit={submit}>
+      {#if result?.status === "answered"}
+        <div class="mobile-answered-result question-result">
+          <MarkdownRenderer content={sourceAnsweredMarkdown} />
+        </div>
+      {/if}
+      <form onsubmit={submit} class:answered-source-form={result?.status === "answered"}>
         {#each questionItems as item}
           <div class:question-group={request.batch}>
             {#if request.batch && item.kind !== "text"}
@@ -937,6 +962,11 @@
               {t("questionTool.saveAndReturn")}
             </button>
           {:else if result?.status === "answered"}
+            {#if linkedCancelled}
+              <button type="button" class="question-button" disabled>
+                {t("questionTool.cancelled")}
+              </button>
+            {:else}
             {#if !linkedConfirmed}
               <button type="button" class="question-button secondary" disabled={submitting || !linkedConfirmationId} onclick={() => void respondToLinkedConfirmation(true)}>
                 {t("questionTool.cancel")}
@@ -945,6 +975,7 @@
             <button type="button" class="question-button" disabled={submitting || !linkedConfirmationId || linkedConfirmed} onclick={() => void respondToLinkedConfirmation(false)}>
               {linkedConfirmed ? t("questionTool.confirmed") : t("questionTool.confirm")}
             </button>
+            {/if}
           {/if}
         </div>
       </form>
@@ -1217,6 +1248,7 @@
 
   .question-result { color: var(--text); }
   .desktop-question-result { display: none; }
+  .mobile-answered-result { display: none; }
   .question-result.muted { color: var(--text-muted); }
   .question-warning { color: var(--text-muted); font-size: 0.76rem; }
   .question-error { color: var(--error-text); font-size: 0.76rem; }
@@ -1307,5 +1339,10 @@
       justify-content: center;
       color: var(--accent);
     }
+  }
+
+  @media (max-width: 640px) {
+    .answered-source-form { display: none; }
+    .mobile-answered-result { display: block; }
   }
 </style>

@@ -227,6 +227,7 @@ export type AskUserQuestionCardItem =
 
 export type AskUserQuestionBatchCardRequest = {
   batch: true;
+  /** Optional only when replaying pre-title transcript entries. New tool calls require it. */
   title?: string;
   questions: AskUserQuestionCardItem[];
 };

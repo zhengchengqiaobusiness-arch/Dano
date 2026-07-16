@@ -940,10 +940,22 @@ describe("ask_user_question tool", () => {
     ).rejects.toThrow("only be called after the user submitted a grouped form");
   });
 
+  it("rejects grouped forms without a top-level title", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    await expect(
+      coordinator.wait(
+        "form-without-title",
+        { questions: [{ id: "reason", question: "用途？", default: "签署合同" }] },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("Grouped forms require a top-level title");
+  });
+
   it("returns grouped answers from one tool confirmation", async () => {
     const execution = askUserQuestionTool.execute(
       "group-1",
       {
+        title: "测试表单",
         questions: [
           { id: "name", question: "Name?", default: "Dano" },
           {
@@ -990,6 +1002,7 @@ describe("ask_user_question tool", () => {
     const execution = askUserQuestionTool.execute(
       "group-date",
       {
+        title: "测试表单",
         questions: [
           {
             id: "start_at",
@@ -1023,6 +1036,7 @@ describe("ask_user_question tool", () => {
     const execution = askUserQuestionTool.execute(
       "compat-single-object",
       {
+        title: "测试表单",
         questions: {
           key: "description",
           title: "请填写说明",
@@ -1051,6 +1065,7 @@ describe("ask_user_question tool", () => {
     const execution = askUserQuestionTool.execute(
       "compat-json-string",
       {
+        title: "测试表单",
         questions: JSON.stringify({
           key: "description",
           title: "请填写说明",
@@ -1079,6 +1094,7 @@ describe("ask_user_question tool", () => {
     const execution = askUserQuestionTool.execute(
       "compat-single-mixed",
       {
+        title: "测试表单",
         question: "请假类型？",
         options: ["事假", "病假"],
         default: "事假",
@@ -1111,6 +1127,7 @@ describe("ask_user_question tool", () => {
     const execution = askUserQuestionTool.execute(
       "compat-multi-text-mixed",
       {
+        title: "测试表单",
         ...mixed,
         questions: [
           {
@@ -1211,6 +1228,7 @@ describe("ask_user_question tool", () => {
       askUserQuestionTool.execute(
         "group-mixed",
         {
+          title: "测试表单",
           ...mixed,
           questions: [
             { id: "leave_type", question: "Leave type?", default: "事假" },
@@ -1228,6 +1246,7 @@ describe("ask_user_question tool", () => {
     const execution = askUserQuestionTool.execute(
       "group-missing",
       {
+        title: "测试表单",
         questions: [
           { id: "name", question: "Name?", default: "Dano" },
           { id: "env", question: "Environment?", options: ["Test", "Prod"], default: "Test" },
@@ -1251,6 +1270,7 @@ describe("ask_user_question tool", () => {
     const execution = askUserQuestionTool.execute(
       "group-missing-required",
       {
+        title: "测试表单",
         questions: [
           { id: "name", question: "Name?", default: "Dano" },
           { id: "env", question: "Environment?", options: ["Test", "Prod"], default: "Test", required: true },
@@ -1313,6 +1333,7 @@ describe("ask_user_question tool", () => {
       askUserQuestionTool.execute(
         "group-confirm-invalid",
         {
+          title: "测试表单",
           questions: [
             {
               id: "confirm_leave",
