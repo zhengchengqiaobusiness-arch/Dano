@@ -31,6 +31,10 @@
   const MOBILE_PICKER_QUERY = "(max-width: 640px)";
   const hourOptions = Array.from({ length: 24 }, (_, hour) => String(hour).padStart(2, "0"));
   const minuteOptions = Array.from({ length: 60 }, (_, minute) => String(minute).padStart(2, "0"));
+  const timeSelectControls = [
+    { part: "hour", labelKey: "questionTool.hour", options: hourOptions },
+    { part: "minute", labelKey: "questionTool.minute", options: minuteOptions },
+  ] as const;
   let open = $state(false);
   let useNativePicker = $state(false);
   let dateValue = $state<DateValue | undefined>();
@@ -107,14 +111,13 @@
     emit(dateValue, nextTime);
   }
 
-  function handleHourChange(event: Event) {
+  function handleTimePartChange(part: "hour" | "minute", event: Event) {
     if (!(event.currentTarget instanceof HTMLSelectElement)) return;
-    updateTime(Number(event.currentTarget.value), timeValue.minute);
-  }
-
-  function handleMinuteChange(event: Event) {
-    if (!(event.currentTarget instanceof HTMLSelectElement)) return;
-    updateTime(timeValue.hour, Number(event.currentTarget.value));
+    const value = Number(event.currentTarget.value);
+    updateTime(
+      part === "hour" ? value : timeValue.hour,
+      part === "minute" ? value : timeValue.minute,
+    );
   }
 
   function handleNativeInput(event: Event) {
@@ -144,16 +147,25 @@
 
 <div class="question-date-field">
   {#if useNativePicker}
-    <input
-      id={`${id}-trigger`}
-      class="question-input question-date-native"
-      type={includesTime ? "datetime-local" : "date"}
-      value={nativeInputValue}
-      step={includesTime ? 60 : undefined}
-      {disabled}
-      {required}
-      oninput={handleNativeInput}
-    />
+    <div class="question-date-native-control" class:disabled>
+      <input
+        id={`${id}-trigger`}
+        class="question-input question-date-native"
+        type={includesTime ? "datetime-local" : "date"}
+        value={nativeInputValue}
+        step={includesTime ? 60 : undefined}
+        {placeholder}
+        aria-placeholder={placeholder || undefined}
+        {disabled}
+        {required}
+        oninput={handleNativeInput}
+      />
+      {#if !nativeInputValue && placeholder}
+        <span class="question-date-native-placeholder" aria-hidden="true">
+          {placeholder}
+        </span>
+      {/if}
+    </div>
   {:else}
     <DatePicker.Root
       bind:open
@@ -221,34 +233,22 @@
           {#if includesTime}
             <div class="question-date-time-section">
               <div class="question-time-selects">
-                <div class="question-time-select-control">
-                  <select
-                    class="question-input question-time-select"
-                    aria-label={t("questionTool.hour")}
-                    value={String(timeValue.hour).padStart(2, "0")}
-                    disabled={disabled || !dateValue}
-                    onchange={handleHourChange}
-                  >
-                    {#each hourOptions as hour}
-                      <option value={hour}>{hour}</option>
-                    {/each}
-                  </select>
-                  <ChevronDown size={15} aria-hidden="true" />
-                </div>
-                <div class="question-time-select-control">
-                  <select
-                    class="question-input question-time-select"
-                    aria-label={t("questionTool.minute")}
-                    value={String(timeValue.minute).padStart(2, "0")}
-                    disabled={disabled || !dateValue}
-                    onchange={handleMinuteChange}
-                  >
-                    {#each minuteOptions as minute}
-                      <option value={minute}>{minute}</option>
-                    {/each}
-                  </select>
-                  <ChevronDown size={15} aria-hidden="true" />
-                </div>
+                {#each timeSelectControls as control}
+                  <div class="question-time-select-control">
+                    <select
+                      class="question-input question-time-select"
+                      aria-label={t(control.labelKey)}
+                      value={String(control.part === "hour" ? timeValue.hour : timeValue.minute).padStart(2, "0")}
+                      disabled={disabled || !dateValue}
+                      onchange={(event) => handleTimePartChange(control.part, event)}
+                    >
+                      {#each control.options as option}
+                        <option value={option}>{option}</option>
+                      {/each}
+                    </select>
+                    <ChevronDown size={15} aria-hidden="true" />
+                  </div>
+                {/each}
               </div>
             </div>
           {/if}
@@ -440,7 +440,35 @@
     outline-offset: 2px;
   }
 
+  .question-date-native-control {
+    position: relative;
+    width: 100%;
+  }
+
   .question-date-native { width: 100%; }
+
+  .question-date-native-placeholder {
+    position: absolute;
+    inset: 1px 40px 1px 1px;
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    padding-left: 11px;
+    border-radius: 9px 0 0 9px;
+    background: var(--control-bg);
+    color: var(--text-subtle);
+    pointer-events: none;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .question-date-native:focus + .question-date-native-placeholder {
+    opacity: 0;
+  }
+
+  .question-date-native-control.disabled .question-date-native-placeholder {
+    opacity: 0.5;
+  }
 
   .question-date-clear {
     width: fit-content;

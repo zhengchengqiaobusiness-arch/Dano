@@ -16,8 +16,10 @@ describe("QuestionDateField time picker appearance", () => {
   it("uses themeable hour and minute selects on desktop", () => {
     expect(source).toContain("hourOptions");
     expect(source).toContain("minuteOptions");
-    expect(source).toContain('aria-label={t("questionTool.hour")}');
-    expect(source).toContain('aria-label={t("questionTool.minute")}');
+    expect(source).toContain('part: "hour", labelKey: "questionTool.hour"');
+    expect(source).toContain('part: "minute", labelKey: "questionTool.minute"');
+    expect(source).toContain("{#each timeSelectControls as control}");
+    expect(source).toContain("handleTimePartChange(control.part, event)");
     expect(source).toContain('class="question-input question-time-select"');
     expect(source).toContain("font-variant-numeric: tabular-nums");
     expect(source).toContain("min-height: 44px");
@@ -31,5 +33,13 @@ describe("QuestionDateField time picker appearance", () => {
     expect(source).toContain('type={includesTime ? "datetime-local" : "date"}');
     expect(source).toContain("parseNativeDateInputValue");
     expect(source).toContain("if (useNativePicker) open = false");
+  });
+
+  it("preserves the supplied placeholder over an empty native control", () => {
+    expect(source).toContain("{placeholder}");
+    expect(source).toContain("aria-placeholder={placeholder || undefined}");
+    expect(source).toContain("{#if !nativeInputValue && placeholder}");
+    expect(source).toContain('class="question-date-native-placeholder"');
+    expect(source).toContain("pointer-events: none");
   });
 });
