@@ -1949,6 +1949,12 @@ describe("BridgeRpcAdapter", () => {
               name: "ask_user_question",
               arguments: { question: "审批人？", default: "张三" },
             },
+            {
+              type: "toolCall",
+              id: "validation-terminal-question",
+              name: "ask_user_question",
+              arguments: { title: "请假申请", questions: "[" },
+            },
           ],
         },
         {
@@ -1966,6 +1972,18 @@ describe("BridgeRpcAdapter", () => {
             {
               type: "text",
               text: "Validation mentioned QUESTION_PRESENTATION_FAILED but did not return that code",
+            },
+          ],
+          isError: true,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "validation-terminal-question",
+          toolName: "ask_user_question",
+          content: [
+            {
+              type: "text",
+              text: "QUESTION_VALIDATION_FAILED: repeated invalid calls",
             },
           ],
           isError: true,
@@ -1996,6 +2014,10 @@ describe("BridgeRpcAdapter", () => {
       expect(response.payload.data.messages[0].content[1]).toMatchObject({
         id: "invalid-question",
         questionState: "invalid",
+      });
+      expect(response.payload.data.messages[0].content[2]).toMatchObject({
+        id: "validation-terminal-question",
+        questionState: "terminal_failure",
       });
     });
 

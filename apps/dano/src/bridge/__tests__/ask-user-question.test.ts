@@ -8,6 +8,7 @@ import type {
 import {
   ASK_USER_QUESTION_PRESENTATION_RETRY_CODE,
   ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE,
+  ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE,
 } from "../types.js";
 import {
   ASK_USER_QUESTION_CANCELLED_CODE,
@@ -1144,6 +1145,22 @@ describe("ask_user_question tool", () => {
         new AbortController().signal,
       ),
     ).rejects.toThrow("questions must be valid JSON");
+  });
+
+  it("terminates a second validation failure in the same response", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    const controller = new AbortController();
+    const malformed = {
+      title: "公章使用申请",
+      questions: '[{"id":"seal_id"',
+    };
+
+    await expect(
+      coordinator.wait("invalid-retry-1", malformed, controller.signal),
+    ).rejects.toThrow("questions must be valid JSON");
+    await expect(
+      coordinator.wait("invalid-retry-2", malformed, controller.signal),
+    ).rejects.toThrow(ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE);
   });
 
   it("still requires a title for JSON-stringified grouped forms", async () => {

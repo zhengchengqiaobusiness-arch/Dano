@@ -5,6 +5,7 @@ import {
   ASK_USER_QUESTION_TOOL_NAME,
   ASK_USER_QUESTION_PRESENTATION_RETRY_CODE,
   ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE,
+  ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE,
   type AskUserQuestionAnswer,
   type AskUserQuestionAnswerInput,
   type AskUserQuestionCardItem,
@@ -279,11 +280,13 @@ export class AskUserQuestionCoordinator {
   private readonly pending = new Map<string, PendingQuestion>();
   private readonly pendingToolCallBySignal = new WeakMap<AbortSignal, string>();
   private readonly presentationFailuresBySignal = new WeakMap<AbortSignal, number>();
+  private readonly validationFailuresBySignal = new WeakMap<AbortSignal, number>();
   private readonly submittedFormBySignal = new WeakMap<AbortSignal, SubmittedForm>();
 
   constructor(
     private readonly presentationTimeoutMs = 5_000,
     private readonly maxPresentationFailures = 2,
+    private readonly maxValidationFailures = 2,
   ) {}
 
   wait(
@@ -307,28 +310,33 @@ export class AskUserQuestionCoordinator {
       ? this.submittedFormBySignal.get(signal)
       : undefined;
     if (confirmationCall && !isConfirmOnlyRequest(parsedRequest)) {
-      logQuestionLifecycle(toolCallId, "invalid");
-      return Promise.reject(new Error("Confirmation calls accept only confirm:true"));
+      return this.rejectValidation(
+        toolCallId,
+        "Confirmation calls accept only confirm:true",
+        signal,
+      );
     }
     if (confirmationCall && !submittedForm) {
-      logQuestionLifecycle(toolCallId, "invalid");
-      return Promise.reject(new Error(missingConfirmationSourceError));
+      return this.rejectValidation(toolCallId, missingConfirmationSourceError, signal);
     }
     const normalized = confirmationCall
       ? confirmationRequest(submittedForm as SubmittedForm)
       : normalizeAskUserQuestionRequest(rawRequest);
     if ("error" in normalized) {
-      logQuestionLifecycle(toolCallId, "invalid");
-      return Promise.reject(new Error(normalized.error));
+      return this.rejectValidation(toolCallId, normalized.error, signal);
     }
     if (
       isPlainRecord(parsedRequest) &&
       parsedRequest.questions !== undefined &&
       !firstString(parsedRequest.title)
     ) {
-      logQuestionLifecycle(toolCallId, "invalid");
-      return Promise.reject(new Error("Grouped forms require a top-level title"));
+      return this.rejectValidation(
+        toolCallId,
+        "Grouped forms require a top-level title",
+        signal,
+      );
     }
+    if (signal) this.validationFailuresBySignal.delete(signal);
     const { request, questions, cardRequest } = normalized;
     const pendingInCurrentTurn = signal
       ? this.pendingToolCallBySignal.get(signal)
@@ -530,6 +538,26 @@ export class AskUserQuestionCoordinator {
       pending.reject(error);
     }
   }
+
+  private rejectValidation(
+    toolCallId: string,
+    message: string,
+    signal: AbortSignal | undefined,
+  ): Promise<never> {
+    const failures = signal
+      ? (this.validationFailuresBySignal.get(signal) ?? 0) + 1
+      : 1;
+    if (signal) this.validationFailuresBySignal.set(signal, failures);
+    const terminal = failures >= this.maxValidationFailures;
+    logQuestionLifecycle(toolCallId, terminal ? "terminal_failure" : "invalid");
+    return Promise.reject(
+      new Error(
+        terminal
+          ? `${ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE}: Repeated invalid ask_user_question calls. Stop this response and let the user retry. Last validation error: ${message}`
+          : message,
+      ),
+    );
+  }
 }
 
 function logQuestionLifecycle(
@@ -557,9 +585,17 @@ type NormalizedAskUserQuestionRequest = NormalizedAskUserQuestionRequestItem & {
   questions?: readonly NormalizedAskUserQuestionRequestItem[];
 };
 
+type CompatibleRequestResult =
+  | { request: NormalizedAskUserQuestionRequest }
+  | { error: string };
+
+type CompatibleQuestionsResult =
+  | { questions: NormalizedAskUserQuestionRequestItem[] }
+  | { error: string };
+
 function normalizeCompatibleRequest(
   request: AskUserQuestionRequestParams,
-): NormalizedAskUserQuestionRequest | string {
+): CompatibleRequestResult {
   const normalized: NormalizedAskUserQuestionRequest =
     normalizeCompatibleQuestion(request);
   const rawQuestions = request.questions;
@@ -567,33 +603,39 @@ function normalizeCompatibleRequest(
     normalized.title = firstString(request.title);
     normalized.question = firstString(request.question, request.label, request.prompt);
     if (!normalized.question) delete normalized.question;
-    const questions = normalizeCompatibleQuestions(rawQuestions);
-    if (typeof questions === "string") return questions;
-    normalized.questions = questions;
-    return foldCompatibleGroupedFields(normalized);
+    const questionsResult = normalizeCompatibleQuestions(rawQuestions);
+    if ("error" in questionsResult) return questionsResult;
+    normalized.questions = questionsResult.questions;
+    return { request: foldCompatibleGroupedFields(normalized) };
   }
-  return normalized;
+  return { request: normalized };
 }
 
 function normalizeCompatibleQuestions(
   value: AskUserQuestionRequestParams["questions"],
-): NormalizedAskUserQuestionRequestItem[] | string {
+): CompatibleQuestionsResult {
   let parsed = value;
   if (typeof value === "string") {
     try {
       parsed = JSON.parse(value) as unknown;
     } catch {
-      return "Invalid questions: questions must be valid JSON containing an array or object";
+      return {
+        error: "Invalid questions: questions must be valid JSON containing an array or object",
+      };
     }
   }
   if (!Array.isArray(parsed) && !isPlainRecord(parsed)) {
-    return "Invalid questions: questions must be an array or object";
+    return { error: "Invalid questions: questions must be an array or object" };
   }
   const rawItems = Array.isArray(parsed) ? parsed : [parsed];
   if (!rawItems.every(isPlainRecord)) {
-    return "Invalid questions: every questions array item must be an object";
+    return {
+      error: "Invalid questions: every questions array item must be an object",
+    };
   }
-  return rawItems.map(value => normalizeCompatibleQuestion(value));
+  return {
+    questions: rawItems.map(value => normalizeCompatibleQuestion(value)),
+  };
 }
 
 function normalizeCompatibleQuestion(
@@ -811,10 +853,11 @@ function normalizeAskUserQuestionRequest(rawRequest: unknown):
   | { error: string } {
   const parsed = parseJsonString(rawRequest);
   if (!isPlainRecord(parsed)) return { error: "Question cannot be rendered" };
-  const request = normalizeCompatibleRequest(
+  const compatible = normalizeCompatibleRequest(
     parsed as AskUserQuestionRequestParams,
   );
-  if (typeof request === "string") return { error: request };
+  if ("error" in compatible) return compatible;
+  const { request } = compatible;
   if (request.confirm && request.questions === undefined) {
     return { error: missingConfirmationSourceError };
   }
