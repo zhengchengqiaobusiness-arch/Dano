@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onDestroy, tick } from "svelte";
-  import { Command, Popover } from "bits-ui";
   import Check from "lucide-svelte/icons/check";
   import ChevronDown from "lucide-svelte/icons/chevron-down";
   import CircleX from "lucide-svelte/icons/circle-x";
   import LoaderCircle from "lucide-svelte/icons/loader-circle";
   import RotateCw from "lucide-svelte/icons/rotate-cw";
   import Search from "lucide-svelte/icons/search";
+  import * as Command from "./ui/command";
+  import * as Popover from "./ui/popover";
   import "./questionToolControls.css";
 
   const SEARCH_DELAY_MS = 300;
@@ -122,15 +123,14 @@
     <ChevronDown size={16} aria-hidden="true" />
   </Popover.Trigger>
 
-  <Popover.Portal to=".app-shell">
-    <Popover.Content
-      class="question-combobox-popover"
-      align="start"
-      sideOffset={POPOVER_GAP_PX}
-      collisionPadding={12}
-      trapFocus={false}
-      onOpenAutoFocus={(event) => event.preventDefault()}
-    >
+  <Popover.Content
+    class="question-combobox-popover"
+    align="start"
+    sideOffset={POPOVER_GAP_PX}
+    collisionPadding={12}
+    trapFocus={false}
+    onOpenAutoFocus={(event) => event.preventDefault()}
+  >
       <Command.Root shouldFilter={false} label={label} loop>
         <div class="question-combobox-search">
           <Search size={16} aria-hidden="true" />
@@ -193,8 +193,7 @@
           {/if}
         </Command.List>
       </Command.Root>
-    </Popover.Content>
-  </Popover.Portal>
+  </Popover.Content>
 </Popover.Root>
 
 <style>
