@@ -25,6 +25,7 @@ import {
   askUserQuestionCoordinator,
   askUserQuestionRuntime,
 } from "../ask-user-question.js";
+import { readFormInteractions } from "../form-interaction.js";
 
 interface MockTransport {
   send: ReturnType<typeof vi.fn<(message: string) => void>>;
@@ -1320,6 +1321,151 @@ describe("BridgeRpcAdapter", () => {
           },
         });
       } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("persists and reloads interrupted Form Interaction projections through the RPC adapter", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-form-state-rpc-"));
+      const controller = new AbortController();
+      try {
+        const sessionManager = SessionManager.create(tmpDir, tmpDir);
+        (
+          context.state as unknown as { sessionManager: SessionManager }
+        ).sessionManager = sessionManager;
+
+        sessionManager.appendMessage({
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "rpc-form-a",
+            name: "ask_user_question",
+            arguments: {
+              title: "请假申请",
+              questions: [{ id: "reason", question: "原因？", default: "家庭事务" }],
+            },
+          }],
+          timestamp: Date.now(),
+          stopReason: "toolUse",
+        } as any);
+        const submitted = askUserQuestionCoordinator.wait(
+          "rpc-form-a",
+          {
+            title: "请假申请",
+            questions: [{ id: "reason", question: "原因？", default: "家庭事务" }],
+          },
+          controller.signal,
+        );
+        askUserQuestionCoordinator.present("rpc-form-a");
+        const submittedResult = askUserQuestionCoordinator.answer("rpc-form-a", {
+          cancelled: false,
+          answer: { reason: "家庭事务" },
+        });
+        await submitted;
+        sessionManager.appendMessage({
+          role: "toolResult",
+          toolCallId: "rpc-form-a",
+          toolName: "ask_user_question",
+          content: [{ type: "text", text: "answered" }],
+          details: submittedResult,
+          isError: false,
+          timestamp: Date.now(),
+        } as any);
+
+        sessionManager.appendMessage({
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "rpc-confirm-a",
+            name: "ask_user_question",
+            arguments: { confirm: true, formIds: ["rpc-form-a"] },
+          }],
+          timestamp: Date.now(),
+          stopReason: "toolUse",
+        } as any);
+        const confirmation = askUserQuestionCoordinator.wait(
+          "rpc-confirm-a",
+          { confirm: true, formIds: ["rpc-form-a"] },
+          controller.signal,
+        );
+        void confirmation.catch(() => undefined);
+
+        ws.trigger("message", Buffer.from(JSON.stringify({
+          type: "command",
+          payload: {
+            id: "present-rpc-confirm",
+            type: "present_question",
+            toolCallId: "rpc-confirm-a",
+          },
+        })));
+        await new Promise(resolve => setTimeout(resolve, 10));
+        expect(
+          readFormInteractions(sessionManager.getBranch()).get("rpc-confirm-a"),
+        ).toMatchObject({ state: "awaiting_confirmation", revision: 1 });
+
+        ws.trigger("message", Buffer.from(JSON.stringify({
+          type: "command",
+          payload: { id: "abort-rpc-confirm", type: "abort" },
+        })));
+        await new Promise(resolve => setTimeout(resolve, 10));
+        expect(
+          readFormInteractions(sessionManager.getBranch()).get("rpc-confirm-a"),
+        ).toMatchObject({ state: "interrupted", revision: 2 });
+
+        ws.trigger("message", Buffer.from(JSON.stringify({
+          type: "command",
+          payload: { id: "live-form-state", type: "get_messages" },
+        })));
+        await new Promise(resolve => setTimeout(resolve, 10));
+        const liveResponse = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+          .map(([message]) => JSON.parse(message as string))
+          .find(message => message.payload?.id === "live-form-state");
+        const liveToolCalls = liveResponse.payload.data.messages.flatMap(
+          (message: { content?: unknown[] }) => message.content ?? [],
+        ).filter((block: { type?: string }) => block.type === "toolCall");
+        expect(liveToolCalls).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            id: "rpc-form-a",
+            formInteraction: expect.objectContaining({
+              state: "interrupted",
+              allowedActions: [],
+            }),
+          }),
+          expect.objectContaining({
+            id: "rpc-confirm-a",
+            formInteraction: expect.objectContaining({
+              state: "interrupted",
+              allowedActions: [],
+            }),
+          }),
+        ]));
+
+        const sessionFile = sessionManager.getSessionFile();
+        expect(sessionFile).toBeTruthy();
+        const reopened = SessionManager.open(sessionFile!);
+        expect(readFormInteractions(reopened.getBranch()).get("rpc-confirm-a"))
+          .toMatchObject({ state: "interrupted", revision: 2 });
+        (
+          context.state as unknown as { sessionManager: SessionManager }
+        ).sessionManager = reopened;
+        ws.trigger("message", Buffer.from(JSON.stringify({
+          type: "command",
+          payload: { id: "reloaded-form-state", type: "get_messages" },
+        })));
+        await new Promise(resolve => setTimeout(resolve, 10));
+        const reloadedResponse = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+          .map(([message]) => JSON.parse(message as string))
+          .find(message => message.payload?.id === "reloaded-form-state");
+        expect(reloadedResponse.payload.data.messages.flatMap(
+          (message: { content?: unknown[] }) => message.content ?? [],
+        )).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            id: "rpc-confirm-a",
+            formInteraction: expect.objectContaining({ state: "interrupted" }),
+          }),
+        ]));
+      } finally {
+        controller.abort();
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });

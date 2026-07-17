@@ -21,7 +21,9 @@ vi.mock("lucide-svelte/icons/message-square-text", () => ({ default: () => {} })
 vi.mock("lucide-svelte/icons/refresh-cw", () => ({ default: () => {} }));
 vi.mock("lucide-svelte/icons/sparkle", () => ({ default: () => {} }));
 
-function submittedFormBlock(): ToolContentBlock {
+function submittedFormBlock(
+  state?: "awaiting_confirmation" | "confirmed" | "cancelled" | "interrupted",
+): ToolContentBlock {
   return {
     kind: "tool",
     toolName: "ask_user_question",
@@ -39,6 +41,15 @@ function submittedFormBlock(): ToolContentBlock {
       formId: "form-1",
       answer: { reason: "个人事务" },
     },
+    ...(state ? {
+      formInteraction: {
+        interactionId: "confirm-form-1",
+        state,
+        revision: state === "awaiting_confirmation" ? 1 : 2,
+        allowedActions:
+          state === "awaiting_confirmation" ? ["cancel", "confirm"] : [],
+      },
+    } : {}),
   };
 }
 
@@ -72,6 +83,12 @@ function multiFormConfirmationBlock(): ToolContentBlock {
           answer: { destination: "上海" },
         },
       ],
+    },
+    formInteraction: {
+      interactionId: "confirm-two",
+      state: "awaiting_confirmation",
+      revision: 1,
+      allowedActions: ["cancel", "confirm"],
     },
   };
 }
@@ -132,5 +149,66 @@ describe("QuestionToolCard", () => {
       unmount(component);
       vi.useRealTimers();
     }
+  });
+
+  it("keeps an interrupted Submitted Form terminal while a later turn is streaming", async () => {
+    const response = vi.fn(async () => {
+      throw new Error("a terminal Form Interaction must not issue RPCs");
+    });
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: submittedFormBlock("interrupted"),
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onUpdate: response,
+      },
+    });
+    await tick();
+
+    const buttons = target.querySelectorAll<HTMLButtonElement>(
+      ".question-actions button.question-button",
+    );
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]?.textContent).toContain("已中断");
+    expect(buttons[0]?.disabled).toBe(true);
+    expect(target.textContent).not.toContain("确认");
+    expect(target.textContent).not.toContain("取消");
+    expect(response).not.toHaveBeenCalled();
+
+    unmount(component);
+  });
+
+  it("renders an interrupted confirmation card as a disabled terminal snapshot", async () => {
+    const response = vi.fn(async () => ({ success: true } as never));
+    const block = multiFormConfirmationBlock();
+    block.formInteraction = {
+      interactionId: "confirm-two",
+      state: "interrupted",
+      revision: 2,
+      allowedActions: [],
+    };
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block,
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onUpdate: response,
+      },
+    });
+    await tick();
+
+    const buttons = target.querySelectorAll<HTMLButtonElement>("button.question-button");
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0]?.textContent).toContain("已中断");
+    expect(buttons[0]?.disabled).toBe(true);
+    expect(response).not.toHaveBeenCalled();
+
+    unmount(component);
   });
 });

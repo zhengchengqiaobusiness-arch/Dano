@@ -248,6 +248,24 @@ export type AskUserQuestionConfirmationForm = {
   answer: Record<string, AskUserQuestionAnswer>;
 };
 
+export type FormInteractionState =
+  | "awaiting_confirmation"
+  | "confirmed"
+  | "cancelled"
+  | "interrupted";
+
+export type FormInteractionAction =
+  | "confirm"
+  | "cancel"
+  | "return_modify";
+
+export type FormInteractionProjection = {
+  interactionId: string;
+  state: FormInteractionState;
+  revision: number;
+  allowedActions: FormInteractionAction[];
+};
+
 export type AskUserQuestionConfirmationCardRequest = {
   batch: false;
   kind: "confirm";
@@ -344,6 +362,7 @@ export interface RpcAgentToolCall {
   arguments: RpcJsonObject;
   questionRequest?: AskUserQuestionCardRequest;
   questionState?: AskUserQuestionLifecycleState;
+  formInteraction?: FormInteractionProjection;
   thoughtSignature?: string;
 }
 
@@ -707,6 +726,7 @@ export interface RpcTranscriptToolCallBlock {
   arguments?: RpcToolArguments;
   questionRequest?: AskUserQuestionCardRequest;
   questionState?: AskUserQuestionLifecycleState;
+  formInteraction?: FormInteractionProjection;
   thoughtSignature?: string;
 }
 
@@ -980,6 +1000,7 @@ export type RpcResponse =
       command: string;
       success: false;
       error: string;
+      data?: unknown;
     };
 
 // ============================================================================

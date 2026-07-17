@@ -1,6 +1,7 @@
 import type {
   AskUserQuestionCardRequest,
   AskUserQuestionLifecycleState,
+  FormInteractionProjection,
   RpcJsonObject,
   RpcJsonValue,
   RpcToolArguments,
@@ -46,6 +47,7 @@ export interface ToolContentBlock {
   toolArgs: RpcToolArguments | undefined;
   questionRequest?: AskUserQuestionCardRequest;
   questionState?: AskUserQuestionLifecycleState;
+  formInteraction?: FormInteractionProjection;
   argumentsText: string;
   resultText?: string;
   resultBlocks?: ToolResultBlock[];
@@ -315,6 +317,7 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
           toolArgs: parseToolArguments(block.arguments),
           questionRequest: block.questionRequest,
           questionState: block.questionState,
+          formInteraction: block.formInteraction,
           argumentsText: toolArgumentsText(block.arguments),
           resultText,
           resultBlocks,
