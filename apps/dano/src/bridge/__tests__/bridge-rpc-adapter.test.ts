@@ -5664,6 +5664,83 @@ describe("BridgeRpcAdapter", () => {
   });
 
   describe("disposal", () => {
+    it("aborts retry and the active detached operation exactly once", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-dispose-"));
+      const sessionFile = path.join(tmpDir, "session.jsonl");
+      fs.writeFileSync(
+        sessionFile,
+        JSON.stringify({
+          type: "session",
+          version: 3,
+          id: "dispose-session",
+          timestamp: new Date().toISOString(),
+          cwd: tmpDir,
+        }),
+      );
+      (
+        context.state.sessionManager.getSessionFile as ReturnType<typeof vi.fn>
+      ).mockReturnValue(sessionFile);
+
+      let sessionEventHandler: ((event: object) => void) | undefined;
+      const abortRetry = vi.fn();
+      const abort = vi.fn().mockResolvedValue(undefined);
+      createAgentSessionMock.mockResolvedValueOnce({
+        session: {
+          sessionFile,
+          sessionId: "dispose-session",
+          isStreaming: true,
+          abortRetry,
+          abort,
+          bindExtensions: vi.fn().mockResolvedValue(undefined),
+          subscribe: vi.fn().mockImplementation(handler => {
+            sessionEventHandler = handler;
+            return () => {};
+          }),
+          prompt: vi.fn().mockResolvedValue(undefined),
+          sessionManager: {
+            getSessionFile: vi.fn().mockReturnValue(sessionFile),
+            getSessionId: vi.fn().mockReturnValue("dispose-session"),
+            getEntries: vi.fn().mockReturnValue([]),
+            getBranch: vi.fn().mockReturnValue([]),
+            getCwd: vi.fn().mockReturnValue(tmpDir),
+            getLeafId: vi.fn().mockReturnValue(null),
+            getTree: vi.fn().mockReturnValue([]),
+          },
+        },
+      });
+
+      ws.trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: {
+              id: "dispose-prompt",
+              type: "prompt",
+              message: "Keep working",
+            },
+          }),
+        ),
+      );
+      await new Promise(resolve => setTimeout(resolve, 20));
+
+      adapter.dispose();
+      adapter.dispose();
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(abortRetry).toHaveBeenCalledTimes(1);
+      expect(abort).toHaveBeenCalledTimes(1);
+
+      (ws.send as ReturnType<typeof vi.fn>).mockClear();
+      sessionEventHandler?.({
+        type: "message_update",
+        message: { role: "assistant", content: "ghost" },
+      });
+      expect(ws.send).not.toHaveBeenCalled();
+
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
     it("should resolve pending UI requests on dispose", async () => {
       const uiContext = adapter.createExtensionUIContext();
 

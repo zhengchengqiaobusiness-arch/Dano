@@ -323,9 +323,10 @@ describe("BridgeServer HTTP/SSE transport", () => {
 
   it("replaces an existing SSE stream for the same logical client", async () => {
     const commandSpy = vi.fn();
+    const dispose = vi.fn();
     const { server } = createServer(() => ({
       handleClientMessage: commandSpy,
-      dispose: vi.fn(),
+      dispose,
     }), { heartbeatInterval: 10 });
     const address = await server.start();
     const origin = `http://127.0.0.1:${address.port}`;
@@ -349,6 +350,7 @@ describe("BridgeServer HTTP/SSE transport", () => {
       type: "command",
       payload: { id: "cmd-after-replace", type: "get_state" },
     });
+    expect(dispose).not.toHaveBeenCalled();
   });
 
   it("closes the SSE stream when the logical client is unregistered", async () => {

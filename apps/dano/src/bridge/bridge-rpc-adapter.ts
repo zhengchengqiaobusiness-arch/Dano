@@ -3808,7 +3808,23 @@ class SessionRuntime {
   }
 
   dispose(): void {
-    this.clearSelection();
+    if (this.unsubscribeSelectedSession) {
+      this.unsubscribeSelectedSession();
+      this.unsubscribeSelectedSession = undefined;
+    }
+
+    const selectedSessionPath = this.selectedSessionPath;
+    this.selectedSessionPath = null;
+    if (selectedSessionPath) {
+      void this.registry
+        .destroyViewer(selectedSessionPath, this.clientId)
+        .catch(error => {
+          console.error(
+            `BridgeRpcAdapter[${this.clientId}]: Failed to destroy detached session viewer:`,
+            error,
+          );
+        });
+    }
   }
 
   private buildSessionSummary(
@@ -5087,6 +5103,11 @@ export class BridgeRpcAdapter {
     this.unsubscribeRegistryEvents = sessionRegistry.subscribe(
       ({ sessionPath, event }) => {
         if (this.disposed) return;
+        if (
+          this.sessionRuntime.currentDetachedSessionPath() !== sessionPath
+        ) {
+          return;
+        }
 
         switch (event.type) {
           case "agent_start":
