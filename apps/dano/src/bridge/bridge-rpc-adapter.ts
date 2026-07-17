@@ -5083,12 +5083,7 @@ export class BridgeRpcAdapter {
         case "agent_end": {
           const liveSessionPath =
             this.context.state.sessionManager.getSessionFile();
-          if (event.willRetry) {
-            this.discardPendingLlmError(liveSessionPath);
-            return;
-          }
-          this.flushPendingLlmError(liveSessionPath);
-          this.sendEvent(toRpcAgentEndEvent(event, liveSessionPath));
+          if (!this.forwardAgentEnd(event, liveSessionPath)) return;
           if (!this.sessionRuntime.shouldHandleLiveSessionEvents()) return;
           this.sessionStatsPusher.queue(
             this.sessionRuntime.currentTranscriptSessionPath(),
@@ -5097,11 +5092,9 @@ export class BridgeRpcAdapter {
         }
 
         case "auto_retry_start":
-          this.sendEvent(
-            toRpcAutoRetryStartEvent(
-              event,
-              this.context.state.sessionManager.getSessionFile(),
-            ),
+          this.forwardAutoRetryStart(
+            event,
+            this.context.state.sessionManager.getSessionFile(),
           );
           return;
 
@@ -5151,12 +5144,7 @@ export class BridgeRpcAdapter {
             this.sendEvent(toRpcAgentStartEvent(sessionPath));
             return;
           case "agent_end":
-            if (event.willRetry) {
-              this.discardPendingLlmError(sessionPath);
-              return;
-            }
-            this.flushPendingLlmError(sessionPath);
-            this.sendEvent(toRpcAgentEndEvent(event, sessionPath));
+            if (!this.forwardAgentEnd(event, sessionPath)) return;
             if (
               this.sessionRuntime.currentDetachedSessionPath() === sessionPath
             ) {
@@ -5164,13 +5152,33 @@ export class BridgeRpcAdapter {
             }
             return;
           case "auto_retry_start":
-            this.sendEvent(toRpcAutoRetryStartEvent(event, sessionPath));
+            this.forwardAutoRetryStart(event, sessionPath);
             return;
           default:
             return;
         }
       },
     );
+  }
+
+  private forwardAgentEnd(
+    event: { messages?: unknown[]; willRetry?: boolean },
+    sessionPath: string | null | undefined,
+  ): boolean {
+    if (event.willRetry) {
+      this.discardPendingLlmError(sessionPath);
+      return false;
+    }
+    this.flushPendingLlmError(sessionPath);
+    this.sendEvent(toRpcAgentEndEvent(event, sessionPath));
+    return true;
+  }
+
+  private forwardAutoRetryStart(
+    event: { attempt: number; maxAttempts: number; delayMs: number },
+    sessionPath: string | null | undefined,
+  ): void {
+    this.sendEvent(toRpcAutoRetryStartEvent(event, sessionPath));
   }
 
   private sendEvent(payload: RpcBridgeEvent): void {

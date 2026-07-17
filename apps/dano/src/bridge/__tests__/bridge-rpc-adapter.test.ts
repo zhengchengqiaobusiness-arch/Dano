@@ -4006,6 +4006,61 @@ describe("BridgeRpcAdapter", () => {
       });
     });
 
+    it("preserves partial assistant output when a stream ends with an error", async () => {
+      (ws.send as ReturnType<typeof vi.fn>).mockClear();
+
+      const handler = (context.events.subscribe as ReturnType<typeof vi.fn>)
+        .mock.calls[0]?.[0] as
+        | ((event: Record<string, unknown>) => void)
+        | undefined;
+      const failedMessage = {
+        id: "assistant-partial-error",
+        role: "assistant",
+        content: [{ type: "text", text: "已经生成的内容" }],
+        api: "openai-completions",
+        provider: "test-provider",
+        model: "test-model",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0,
+          },
+        },
+        stopReason: "error",
+        errorMessage: "Request timed out.",
+        timestamp: 123,
+      };
+
+      handler?.({ type: "message_start", message: failedMessage });
+      handler?.({ type: "message_end", message: failedMessage });
+      handler?.({
+        type: "agent_end",
+        messages: [failedMessage],
+        willRetry: false,
+      });
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const payloads = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string).payload,
+      );
+      expect(
+        payloads.find(payload => payload.type === "transcript_upsert")?.message,
+      ).toMatchObject({
+        id: "assistant-partial-error",
+        content: [{ type: "text", text: "已经生成的内容" }],
+        stopReason: "error",
+        errorMessage: "DANO_LLM_INCOMPLETE",
+      });
+    });
+
     it("shapes model_select events explicitly", async () => {
       (ws.send as ReturnType<typeof vi.fn>).mockClear();
 

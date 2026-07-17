@@ -6,6 +6,8 @@ import type {
 
 export const DEFAULT_DANO_LLM_TIMEOUT_MS = 300_000;
 export const DANO_LLM_MAX_RETRIES = 10;
+export const DANO_LLM_RETRY_WINDOW_MS = 15 * 60_000;
+const DANO_LLM_RETRY_BASE_DELAY_MS = 2_000;
 
 const READ_ONLY_TOOLS = new Set(["read", "get_dano_version"]);
 
@@ -43,6 +45,9 @@ export function configureDanoLlmResilience(
 ): void {
   const timeoutMs = resolveDanoLlmTimeoutMs(env);
   let retryEnabled = true;
+  let providerTimeoutMs = timeoutMs;
+  let retryAttempt = 0;
+  let requestStartedAt = Date.now();
 
   settingsManager.applyOverrides({
     retry: {
@@ -61,9 +66,47 @@ export function configureDanoLlmResilience(
     settingsManager.applyOverrides({ retry: { enabled } });
   };
 
+  const setProviderTimeout = (nextTimeoutMs: number) => {
+    if (providerTimeoutMs === nextTimeoutMs) return;
+    providerTimeoutMs = nextTimeoutMs;
+    settingsManager.applyOverrides({
+      retry: { provider: { timeoutMs: nextTimeoutMs } },
+    });
+  };
+
   session.subscribe(event => {
     if (event.type === "message_start" && event.message.role === "user") {
+      requestStartedAt = Date.now();
+      retryAttempt = 0;
+      setProviderTimeout(timeoutMs);
       setRetryEnabled(true);
+      return;
+    }
+
+    if (event.type === "auto_retry_start") {
+      retryAttempt = event.attempt;
+      const remainingMs = Math.max(
+        1,
+        DANO_LLM_RETRY_WINDOW_MS -
+          (Date.now() - requestStartedAt) -
+          event.delayMs,
+      );
+      setProviderTimeout(Math.min(timeoutMs, remainingMs));
+      return;
+    }
+
+    if (
+      event.type === "message_end" &&
+      event.message.role === "assistant" &&
+      event.message.stopReason === "error"
+    ) {
+      const nextDelayMs =
+        DANO_LLM_RETRY_BASE_DELAY_MS * 2 ** retryAttempt;
+      const retryWouldStartAt =
+        Date.now() - requestStartedAt + nextDelayMs;
+      if (retryWouldStartAt >= DANO_LLM_RETRY_WINDOW_MS) {
+        setRetryEnabled(false);
+      }
       return;
     }
 
