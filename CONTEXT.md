@@ -16,6 +16,10 @@ _Avoid_: bridge workspace package, separate bridge service
 A transient AI helper for ask_user_question input and editor fields that rewrites or generates the field value without submitting the answer or creating a normal Dano conversation turn.
 _Avoid_: detached session, user prompt, field workflow, preview candidate
 
+**Submitted Form**:
+A completed, read-only grouped form identified by an opaque `formId` that reuses its source tool-call ID. Submission ends the original interactive question; a later confirmation flow may reference the form without reopening it.
+_Avoid_: pending confirmation, editable form, separate form identifier
+
 **Runtime Workspace**:
 The single project folder Dano gives to Pi for one Dano session. Dano may know the owning user and session, but Pi only sees this folder as its current project.
 _Avoid_: chat workspace, user workspace, project folder

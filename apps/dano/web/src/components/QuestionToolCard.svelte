@@ -674,6 +674,7 @@
   <article
     class="question-card"
     data-status={result?.status ?? "pending"}
+    data-form-id={result?.status === "answered" ? result.formId : undefined}
     aria-live="polite"
     aria-label={t("questionTool.label")}
     aria-busy={pending && submitting}
@@ -989,15 +990,21 @@
               <button type="button" class="question-button" disabled>
                 {t("questionTool.cancelled")}
               </button>
-            {:else}
-            {#if !linkedConfirmed}
+            {:else if linkedConfirmed}
+              <button type="button" class="question-button" disabled>
+                {t("questionTool.confirmed")}
+              </button>
+            {:else if linkedConfirmationId}
               <button type="button" class="question-button secondary" disabled={submitting || !linkedConfirmationId} onclick={() => void respondToLinkedConfirmation(true)}>
                 {t("questionTool.cancel")}
               </button>
-            {/if}
-            <button type="button" class="question-button" disabled={submitting || !linkedConfirmationId || linkedConfirmed} onclick={() => void respondToLinkedConfirmation(false)}>
-              {linkedConfirmed ? t("questionTool.confirmed") : t("questionTool.confirm")}
-            </button>
+              <button type="button" class="question-button" disabled={submitting || !linkedConfirmationId} onclick={() => void respondToLinkedConfirmation(false)}>
+                {t("questionTool.confirm")}
+              </button>
+            {:else}
+              <button type="button" class="question-button" disabled>
+                {t("questionTool.submitted")}
+              </button>
             {/if}
           {/if}
         </div>
