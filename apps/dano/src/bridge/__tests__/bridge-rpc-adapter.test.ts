@@ -21,6 +21,7 @@ import {
   type BridgeClient,
 } from "../types.js";
 import { BridgeRpcAdapter, type BridgeRpcAdapterContext } from "../bridge-rpc-adapter.js";
+import { DetachedSessionRegistry } from "../session-registry.js";
 import {
   askUserQuestionCoordinator,
   askUserQuestionRuntime,
@@ -1701,6 +1702,94 @@ describe("BridgeRpcAdapter", () => {
               state: "interrupted",
               revision: 3,
               allowedActions: [],
+            }),
+          }),
+        ]));
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not interrupt a pending Form Interaction owned by an active detached session", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-active-form-"));
+      try {
+        const registry = new DetachedSessionRegistry(
+          tmpDir,
+          context.askUserQuestion.tool,
+        );
+        const handle = registry.createSession({ cwd: tmpDir, sessionDir: tmpDir });
+        const sessionManager = handle.getSessionManager();
+        sessionManager.appendMessage({
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "active-confirm",
+            name: "ask_user_question",
+            arguments: { confirm: true, formIds: ["active-form"] },
+          }],
+          timestamp: Date.now(),
+          stopReason: "toolUse",
+        } as any);
+        createFormInteraction(sessionManager, {
+          interactionId: "active-confirm",
+          assistantTurnId: "active-turn",
+          forms: [{
+            formId: "active-form",
+            title: "活动申请",
+            questions: [{ id: "reason", kind: "text", question: "原因？" }],
+            answer: { reason: "仍在等待" },
+          }],
+        });
+        createAgentSessionMock.mockResolvedValueOnce({
+          session: {
+            sessionFile: handle.sessionPath,
+            sessionId: sessionManager.getSessionId(),
+            isStreaming: true,
+            bindExtensions: vi.fn().mockResolvedValue(undefined),
+            subscribe: vi.fn().mockReturnValue(() => {}),
+            sessionManager,
+          },
+        });
+        await registry.bindViewer(handle.sessionPath, {
+          clientId: "owner-client",
+          uiContext: {} as never,
+        });
+        await registry.ensureSession(handle.sessionPath);
+
+        adapter.dispose();
+        adapter = new BridgeRpcAdapter(
+          { ...client, id: "second-viewer" },
+          message => ws.send(JSON.stringify(message)),
+          context,
+          DEFAULT_BRIDGE_CONFIG,
+          eventBus,
+          emitEvent as any,
+          uploadRegistry as any,
+          registry,
+        );
+        ws.trigger("message", Buffer.from(JSON.stringify({
+          type: "command",
+          payload: {
+            id: "switch-active-form-session",
+            type: "switch_session",
+            sessionPath: handle.sessionPath,
+          },
+        })));
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        expect(readFormInteractions(sessionManager.getBranch()).get("active-confirm"))
+          .toMatchObject({ state: "awaiting_confirmation", revision: 1 });
+        const response = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+          .map(([message]) => JSON.parse(message as string))
+          .find(message => message.payload?.id === "switch-active-form-session");
+        expect(response.payload.data.transcript.messages.flatMap(
+          (message: { content?: unknown[] }) => message.content ?? [],
+        )).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            id: "active-confirm",
+            formInteraction: expect.objectContaining({
+              state: "awaiting_confirmation",
+              revision: 1,
             }),
           }),
         ]));

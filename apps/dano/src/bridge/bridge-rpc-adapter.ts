@@ -3851,9 +3851,10 @@ class SessionRuntime {
     sessionPath: string,
     transcriptLimit?: number,
   ): Promise<SessionSummary> {
+    const isActiveDetachedSession = this.registry.isSessionActive(sessionPath);
     const handle = this.registry.openSession(sessionPath);
     const liveSessionPath = this.context.state.sessionManager.getSessionFile();
-    if (sessionPath !== liveSessionPath) {
+    if (sessionPath !== liveSessionPath && !isActiveDetachedSession) {
       interruptOpenFormInteractions(handle.getSessionManager());
     }
     await this.selectSessionPath(sessionPath);
