@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createFormInteraction,
   interruptOpenFormInteractions,
+  projectFormInteractionsInMessage,
   readFormInteractions,
   transitionFormInteraction,
 } from "../form-interaction.js";
@@ -224,5 +225,45 @@ describe("Form Interaction", () => {
           { formId: "form-b", revision: 2 },
         ],
       });
+  });
+
+  it("reconstructs a read-only confirmation card from the persisted interaction", () => {
+    const manager = sessionManager();
+    createFormInteraction(manager, {
+      interactionId: "confirm-two",
+      assistantTurnId: "assistant-turn-1",
+      forms,
+    });
+    interruptOpenFormInteractions(manager);
+    const projected = projectFormInteractionsInMessage(
+      {
+        id: "assistant-turn-1",
+        role: "assistant",
+        content: [{
+          type: "toolCall",
+          id: "confirm-two",
+          name: "ask_user_question",
+          arguments: { confirm: true, formIds: ["form-a", "form-b"] },
+        }],
+      },
+      readFormInteractions(manager.getBranch()),
+    );
+    const block = projected.content?.[0];
+
+    expect(typeof block === "string" ? null : block).toMatchObject({
+      formInteraction: {
+        state: "interrupted",
+        allowedActions: [],
+      },
+      questionRequest: {
+        batch: false,
+        kind: "confirm",
+        title: "确认 2 份表单",
+        forms: [
+          { formId: "form-a", answer: { reason: "家庭事务" } },
+          { formId: "form-b", answer: { destination: "上海" } },
+        ],
+      },
+    });
   });
 });

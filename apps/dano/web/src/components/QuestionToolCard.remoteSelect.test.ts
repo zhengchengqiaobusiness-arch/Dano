@@ -38,6 +38,7 @@ function successfulResponse(): Promise<RpcResponse> {
     type: "response",
     command: "present_question",
     success: true,
+    data: null,
   });
 }
 

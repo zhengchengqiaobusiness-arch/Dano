@@ -21,11 +21,16 @@ import {
   type BridgeClient,
 } from "../types.js";
 import { BridgeRpcAdapter, type BridgeRpcAdapterContext } from "../bridge-rpc-adapter.js";
+import { DetachedSessionRegistry } from "../session-registry.js";
 import {
   askUserQuestionCoordinator,
   askUserQuestionRuntime,
 } from "../ask-user-question.js";
-import { readFormInteractions } from "../form-interaction.js";
+import {
+  createFormInteraction,
+  readFormInteractions,
+  transitionFormInteraction,
+} from "../form-interaction.js";
 
 interface MockTransport {
   send: ReturnType<typeof vi.fn<(message: string) => void>>;
@@ -1567,6 +1572,305 @@ describe("BridgeRpcAdapter", () => {
       }
     });
 
+    it("interrupts a revising Form Interaction when a stored JSONL session is restored", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-form-restore-"));
+      try {
+        const sessionManager = SessionManager.create(tmpDir, tmpDir);
+        sessionManager.appendMessage({
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "restore-confirm",
+            name: "ask_user_question",
+            arguments: { confirm: true, formIds: ["restore-form"] },
+          }],
+          timestamp: Date.now(),
+          stopReason: "toolUse",
+        } as any);
+        createFormInteraction(sessionManager, {
+          interactionId: "restore-confirm",
+          assistantTurnId: "restore-turn",
+          forms: [{
+            formId: "restore-form",
+            title: "请假申请",
+            questions: [{ id: "reason", kind: "text", question: "原因？" }],
+            answer: { reason: "照顾家人" },
+          }],
+        });
+        transitionFormInteraction(sessionManager, "restore-confirm", {
+          type: "return_modify",
+        });
+        sessionManager.appendMessage({
+          role: "user",
+          content: "恢复后的后续历史消息",
+          timestamp: Date.now(),
+        } as any);
+        const sessionFile = sessionManager.getSessionFile();
+        expect(sessionFile).toBeTruthy();
+
+        ws.trigger("message", Buffer.from(JSON.stringify({
+          type: "command",
+          payload: {
+            id: "restore-revising-session",
+            type: "switch_session",
+            sessionPath: sessionFile,
+            limit: 1,
+          },
+        })));
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        const switched = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+          .map(([message]) => JSON.parse(message as string))
+          .find(message => message.payload?.id === "restore-revising-session");
+        expect(switched.payload.data.transcript.messages).toHaveLength(1);
+        expect(switched.payload.data.transcript.hasOlder).toBe(true);
+
+        ws.trigger("message", Buffer.from(JSON.stringify({
+          type: "command",
+          payload: {
+            id: "restore-revising-older-page",
+            type: "get_messages",
+            direction: "older",
+            cursor: switched.payload.data.transcript.oldestCursor,
+            limit: 1,
+          },
+        })));
+        await new Promise(resolve => setTimeout(resolve, 20));
+        const older = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+          .map(([message]) => JSON.parse(message as string))
+          .find(message => message.payload?.id === "restore-revising-older-page");
+        expect(older.payload.data.messages.flatMap(
+          (message: { content?: unknown[] }) => message.content ?? [],
+        )).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            id: "restore-confirm",
+            formInteraction: {
+              interactionId: "restore-confirm",
+              state: "interrupted",
+              revision: 3,
+              allowedActions: [],
+              forms: [expect.objectContaining({
+                formId: "restore-form",
+                revision: 2,
+                answer: { reason: "照顾家人" },
+              })],
+            },
+          }),
+        ]));
+
+        const reopened = SessionManager.open(sessionFile!);
+        expect(readFormInteractions(reopened.getBranch()).get("restore-confirm"))
+          .toMatchObject({
+            state: "interrupted",
+            revision: 3,
+            forms: [{
+              formId: "restore-form",
+              revision: 2,
+              answer: { reason: "照顾家人" },
+            }],
+          });
+
+        adapter.dispose();
+        ws.send.mockClear();
+        adapter = new BridgeRpcAdapter(
+          { ...client, id: "reconnected-client" },
+          message => ws.send(JSON.stringify(message)),
+          context,
+          DEFAULT_BRIDGE_CONFIG,
+          eventBus,
+          emitEvent as any,
+          uploadRegistry as any,
+        );
+        ws.trigger("message", Buffer.from(JSON.stringify({
+          type: "command",
+          payload: {
+            id: "reconnect-restored-session",
+            type: "switch_session",
+            sessionPath: sessionFile,
+          },
+        })));
+        await new Promise(resolve => setTimeout(resolve, 20));
+        const reconnected = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+          .map(([message]) => JSON.parse(message as string))
+          .find(message => message.payload?.id === "reconnect-restored-session");
+        expect(reconnected.payload.data.transcript.messages.flatMap(
+          (message: { content?: unknown[] }) => message.content ?? [],
+        )).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            id: "restore-confirm",
+            formInteraction: expect.objectContaining({
+              state: "interrupted",
+              revision: 3,
+              allowedActions: [],
+            }),
+          }),
+        ]));
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not interrupt a pending Form Interaction owned by an active detached session", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-active-form-"));
+      try {
+        const registry = new DetachedSessionRegistry(
+          tmpDir,
+          context.askUserQuestion.tool,
+        );
+        const handle = registry.createSession({ cwd: tmpDir, sessionDir: tmpDir });
+        const sessionManager = handle.getSessionManager();
+        sessionManager.appendMessage({
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "active-confirm",
+            name: "ask_user_question",
+            arguments: { confirm: true, formIds: ["active-form"] },
+          }],
+          timestamp: Date.now(),
+          stopReason: "toolUse",
+        } as any);
+        createFormInteraction(sessionManager, {
+          interactionId: "active-confirm",
+          assistantTurnId: "active-turn",
+          forms: [{
+            formId: "active-form",
+            title: "活动申请",
+            questions: [{ id: "reason", kind: "text", question: "原因？" }],
+            answer: { reason: "仍在等待" },
+          }],
+        });
+        createAgentSessionMock.mockResolvedValueOnce({
+          session: {
+            sessionFile: handle.sessionPath,
+            sessionId: sessionManager.getSessionId(),
+            isStreaming: true,
+            bindExtensions: vi.fn().mockResolvedValue(undefined),
+            subscribe: vi.fn().mockReturnValue(() => {}),
+            sessionManager,
+          },
+        });
+        await registry.bindViewer(handle.sessionPath, {
+          clientId: "owner-client",
+          uiContext: {} as never,
+        });
+        await registry.ensureSession(handle.sessionPath);
+
+        adapter.dispose();
+        adapter = new BridgeRpcAdapter(
+          { ...client, id: "second-viewer" },
+          message => ws.send(JSON.stringify(message)),
+          context,
+          DEFAULT_BRIDGE_CONFIG,
+          eventBus,
+          emitEvent as any,
+          uploadRegistry as any,
+          registry,
+        );
+        ws.trigger("message", Buffer.from(JSON.stringify({
+          type: "command",
+          payload: {
+            id: "switch-active-form-session",
+            type: "switch_session",
+            sessionPath: handle.sessionPath,
+          },
+        })));
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        expect(readFormInteractions(sessionManager.getBranch()).get("active-confirm"))
+          .toMatchObject({ state: "awaiting_confirmation", revision: 1 });
+        const response = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+          .map(([message]) => JSON.parse(message as string))
+          .find(message => message.payload?.id === "switch-active-form-session");
+        expect(response.payload.data.transcript.messages.flatMap(
+          (message: { content?: unknown[] }) => message.content ?? [],
+        )).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            id: "active-confirm",
+            formInteraction: expect.objectContaining({
+              state: "awaiting_confirmation",
+              revision: 1,
+            }),
+          }),
+        ]));
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps legacy confirmation JSONL read-only without inferring Form Interaction state", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-legacy-form-"));
+      try {
+        const sessionManager = SessionManager.create(tmpDir, tmpDir);
+        sessionManager.appendMessage({
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "legacy-form",
+            name: "ask_user_question",
+            arguments: {
+              title: "旧申请",
+              questions: [{ id: "reason", question: "原因？" }],
+            },
+          }],
+          timestamp: Date.now(),
+          stopReason: "toolUse",
+        } as any);
+        sessionManager.appendMessage({
+          role: "toolResult",
+          toolCallId: "legacy-form",
+          toolName: "ask_user_question",
+          content: [{ type: "text", text: "answered" }],
+          details: { status: "answered", answer: { reason: "历史值" } },
+          isError: false,
+          timestamp: Date.now(),
+        } as any);
+        sessionManager.appendMessage({
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "legacy-confirm",
+            name: "ask_user_question",
+            arguments: { confirm: true, formIds: ["legacy-form"] },
+          }],
+          timestamp: Date.now(),
+          stopReason: "toolUse",
+        } as any);
+        const sessionFile = sessionManager.getSessionFile();
+        expect(sessionFile).toBeTruthy();
+
+        ws.trigger("message", Buffer.from(JSON.stringify({
+          type: "command",
+          payload: {
+            id: "restore-legacy-form-session",
+            type: "switch_session",
+            sessionPath: sessionFile,
+          },
+        })));
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        const response = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+          .map(([message]) => JSON.parse(message as string))
+          .find(message => message.payload?.id === "restore-legacy-form-session");
+        const calls = response.payload.data.transcript.messages.flatMap(
+          (message: { content?: unknown[] }) => message.content ?? [],
+        ).filter((block: { type?: string }) => block.type === "toolCall");
+        expect(calls).toEqual(expect.arrayContaining([
+          expect.objectContaining({ id: "legacy-form", questionState: "answered" }),
+          expect.objectContaining({ id: "legacy-confirm" }),
+        ]));
+        const legacyConfirmation = calls.find(
+          (block: { id?: string }) => block.id === "legacy-confirm",
+        );
+        expect(legacyConfirmation).not.toHaveProperty("formInteraction");
+        expect(legacyConfirmation).not.toHaveProperty("questionRequest");
+        expect(legacyConfirmation).not.toHaveProperty("questionState");
+        expect(readFormInteractions(SessionManager.open(sessionFile!).getBranch())).toHaveLength(0);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("converges duplicate, stale, and competing terminal requests from two clients", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-form-concurrency-"));
       const controller = new AbortController();
@@ -1637,10 +1941,17 @@ describe("BridgeRpcAdapter", () => {
             .find(message => message.payload?.id === payload.id)?.payload;
         };
 
-        await dispatch(adapter, {
+        expect(await dispatch(adapter, {
           id: "concurrent-present",
           type: "present_question",
           toolCallId: "concurrent-confirm",
+        })).toMatchObject({
+          success: true,
+          data: {
+            interactionId: "concurrent-confirm",
+            state: "awaiting_confirmation",
+            revision: 1,
+          },
         });
         expect(await dispatch(adapter, {
           id: "concurrent-revise",
@@ -7603,6 +7914,92 @@ describe("BridgeRpcAdapter", () => {
       ).toMatchObject({ isActive: true, isOnActivePath: true });
 
       fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("projects a replayed pending Form Interaction as interrupted", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-form-replay-"));
+      try {
+        const sessionManager = SessionManager.create(tmpDir, tmpDir);
+        sessionManager.appendMessage({
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "replay-confirm",
+            name: "ask_user_question",
+            arguments: { confirm: true, formIds: ["replay-form"] },
+          }],
+          timestamp: Date.now(),
+          stopReason: "toolUse",
+        } as any);
+        createFormInteraction(sessionManager, {
+          interactionId: "replay-confirm",
+          assistantTurnId: "replay-turn",
+          forms: [{
+            formId: "replay-form",
+            title: "报销申请",
+            questions: [{ id: "amount", kind: "text", question: "金额？" }],
+            answer: { amount: "100" },
+          }],
+        });
+        const pendingEntryId = String(
+          (sessionManager.getEntries().at(-1) as { id: string }).id,
+        );
+        transitionFormInteraction(sessionManager, "replay-confirm", {
+          type: "confirm",
+        });
+        const sessionFile = sessionManager.getSessionFile();
+        expect(sessionFile).toBeTruthy();
+
+        ws.trigger("message", Buffer.from(JSON.stringify({
+          type: "command",
+          payload: {
+            id: "switch-replay-session",
+            type: "switch_session",
+            sessionPath: sessionFile,
+          },
+        })));
+        await new Promise(resolve => setTimeout(resolve, 10));
+        createAgentSessionMock.mockResolvedValue({
+          session: {
+            sessionFile,
+            sessionId: sessionManager.getSessionId(),
+            isStreaming: false,
+            bindExtensions: vi.fn().mockResolvedValue(undefined),
+            subscribe: vi.fn().mockReturnValue(() => {}),
+            sessionManager,
+          },
+        });
+
+        ws.trigger("message", Buffer.from(JSON.stringify({
+          type: "command",
+          payload: {
+            id: "replay-pending-interaction",
+            type: "select_tree_entry",
+            entryId: pendingEntryId,
+          },
+        })));
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        const response = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+          .map(([message]) => JSON.parse(message as string))
+          .find(message => message.payload?.id === "replay-pending-interaction");
+        expect(response.payload.data.transcript.messages.flatMap(
+          (message: { content?: unknown[] }) => message.content ?? [],
+        )).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            id: "replay-confirm",
+            formInteraction: expect.objectContaining({
+              state: "interrupted",
+              revision: 2,
+              allowedActions: [],
+            }),
+          }),
+        ]));
+        expect(readFormInteractions(sessionManager.getBranch()).get("replay-confirm"))
+          .toMatchObject({ state: "interrupted", revision: 2 });
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
 
     it("should trim later tool calls when selecting a tool tree entry", async () => {

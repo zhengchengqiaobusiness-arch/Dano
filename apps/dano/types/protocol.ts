@@ -898,7 +898,7 @@ export interface RpcResponseMap {
   follow_up: void;
   abort: void;
   field_assist: FieldAssistResult;
-  present_question: void;
+  present_question: FormInteractionProjection | null;
   answer_question: AskUserQuestionResult;
   revise_question: FormInteractionProjection;
   submit_question_revision: FormInteractionProjection;

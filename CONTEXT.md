@@ -30,6 +30,8 @@ _Avoid_: frontend confirmation state, global streaming state, reconstructed form
 
 Form Interaction mutations use the projected interaction revision as an optimistic concurrency token. A stale client receives the latest authoritative projection without changing JSONL; the first persisted terminal state is immutable, and safe duplicate revision requests do not append contradictory snapshots.
 
+On process or stored-session recovery, any persisted open Form Interaction is terminalized as `interrupted`; the server never recreates the missing model tool call. Live updates, reconnects, transcript pages, and tree replay all attach state through the same structured-entry projector. Legacy JSONL without structured Form Interaction entries stays read-only and is not migrated or inferred from error text.
+
 **Form Revision**:
 The next editable revision of one Submitted Form inside a revising Form Interaction. It preserves the form's `formId`, increments its per-form revision, and starts from the latest complete submitted answer; all revisions in the interaction are submitted as one set before confirmation resumes.
 _Avoid_: new form identity, unsaved draft, reopened Submitted Form

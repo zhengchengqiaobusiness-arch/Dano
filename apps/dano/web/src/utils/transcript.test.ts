@@ -4,6 +4,7 @@ import {
   buildTranscriptProcessGroups,
   contentBlocks,
   formatTranscriptDuration,
+  hasTerminalFormInteractionBlock,
   isStreamingThinkingBlock,
   latestThinkingLine,
   normalizeTranscript,
@@ -139,6 +140,45 @@ describe("curl transcript status", () => {
     });
   });
 
+  it("lets an authoritative interrupted interaction render as a read-only card", () => {
+    const messages = normalizeTranscript([
+      {
+        role: "assistant",
+        content: [{
+          type: "toolCall",
+          id: "confirm-interrupted",
+          name: "ask_user_question",
+          arguments: { confirm: true },
+          questionState: "terminal_failure",
+          questionRequest: {
+            batch: false,
+            kind: "confirm",
+            id: "confirmation",
+            title: "请假申请确认",
+            confirmationOfToolCallId: "form-1",
+            questions: [{ id: "reason", kind: "text", question: "原因？" }],
+            answer: { reason: "家庭事务" },
+          },
+          formInteraction: {
+            interactionId: "confirm-interrupted",
+            state: "interrupted",
+            revision: 2,
+            allowedActions: [],
+            forms: [],
+          },
+        }],
+      },
+    ] as never);
+
+    const block = contentBlocks(messages[0]!).find(item => item.kind === "tool");
+    expect(block).toMatchObject({
+      kind: "tool",
+      questionState: "terminal_failure",
+      toolStatus: "pending",
+      formInteraction: { state: "interrupted", allowedActions: [] },
+    });
+  });
+
   it("attaches question results to the matching tool call id", () => {
     const messages = normalizeTranscript([
       {
@@ -227,6 +267,27 @@ describe("assistant thinking blocks", () => {
 });
 
 describe("transcript process groups", () => {
+  it("identifies terminal Form Interaction blocks that remain visible", () => {
+    const messages = normalizeTranscript([{
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        id: "confirm-1",
+        name: "ask_user_question",
+        arguments: { confirm: true },
+        formInteraction: {
+          interactionId: "confirm-1",
+          state: "confirmed",
+          revision: 2,
+          allowedActions: [],
+          forms: [],
+        },
+      }],
+    }] as never);
+
+    expect(hasTerminalFormInteractionBlock(contentBlocks(messages[0]!))).toBe(true);
+  });
+
   it("collapses structured thinking and tool work before a final answer", () => {
     const messages = normalizeTranscript([
       {

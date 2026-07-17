@@ -47,6 +47,7 @@
     contentBlocks,
     errorMessageText,
     formatTranscriptDuration,
+    hasTerminalFormInteractionBlock,
     isAbortedMessage,
     isErrorMessage,
     isStreamingThinkingBlock,
@@ -480,7 +481,15 @@
   function shouldRenderDisplayItemAt(index: number): boolean {
     const group = processGroupForItemIndex(index);
     if (!group || isProcessGroupExpanded(group)) return true;
-    return index === group.startItemIndex || index >= group.finalAnswerItemIndex;
+    const item = displayItems[index];
+    return index === group.startItemIndex ||
+      index >= group.finalAnswerItemIndex ||
+      Boolean(
+        item?.kind === "message" &&
+        hasTerminalFormInteractionBlock(
+          displayContentBlocks(item.message, item.messageIndex),
+        ),
+      );
   }
 
   function visibleContentBlocks(
@@ -1426,7 +1435,7 @@
               {:else if block.kind === "tool"}
                 {@const readClassification = classifyReadToolBlock(block)}
                 {#if askUserQuestionRequest(block) && !isAskUserQuestionToolError(block)}
-                  <QuestionToolCard {block} active={isStreaming && !initialLoading} onPresent={presentQuestion} onRespond={answerQuestion} onRevise={reviseQuestion} onSubmitRevision={submitQuestionRevision} {onFieldAssist} />
+                  <QuestionToolCard {block} active={isStreaming && !initialLoading && shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)} onPresent={presentQuestion} onRespond={answerQuestion} onRevise={reviseQuestion} onSubmitRevision={submitQuestionRevision} {onFieldAssist} />
                 {:else if readClassification?.kind === "skill"}
                   <SkillInvocationCard skillName={readClassification.label} />
                 {:else}
