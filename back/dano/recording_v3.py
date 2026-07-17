@@ -20,6 +20,18 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 
+_RECORDING_V3_MIGRATION = "014_recording_v3.sql"
+_RECORDING_V3_TABLES = (
+    "recording_sessions",
+    "recording_facts",
+    "recording_revisions",
+    "recording_operations",
+    "recording_pi_sessions",
+    "recording_pi_events",
+    "recording_artifacts",
+)
+
+
 def ensure_recording_package() -> Path:
     try:
         installed = import_module("dano_recording")
@@ -39,6 +51,43 @@ def ensure_recording_package() -> Path:
     if value not in sys.path:
         sys.path.insert(0, value)
     return source
+
+
+async def probe_recording_v3_readiness(service: Any) -> None:
+    """Fail closed unless the started service owns a live PostgreSQL repository."""
+
+    ensure_recording_package()
+    from dano_recording.persistence.postgres import AsyncpgRecordingRepository
+
+    if not getattr(service, "_started", False):
+        raise RuntimeError("recording-v3 application has not started")
+    service._ensure_available()
+    repository = getattr(service, "repository", None)
+    if not isinstance(repository, AsyncpgRecordingRepository):
+        raise RuntimeError("recording-v3 durable PostgreSQL repository is unavailable")
+    pool = getattr(repository, "_pool", None)
+    if pool is None:
+        raise RuntimeError("recording-v3 PostgreSQL pool is unavailable")
+    async with pool.acquire() as connection:
+        migration_ready = await connection.fetchval(
+            """
+            SELECT
+                EXISTS (
+                    SELECT 1
+                    FROM schema_migrations
+                    WHERE filename = $1
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM unnest($2::text[]) AS required(table_name)
+                    WHERE to_regclass(required.table_name) IS NULL
+                )
+            """,
+            _RECORDING_V3_MIGRATION,
+            list(_RECORDING_V3_TABLES),
+        )
+    if migration_ready is not True:
+        raise RuntimeError("recording-v3 PostgreSQL migration is unavailable")
 
 
 def _stable_evidence_secret(configured: str, *, key_file: Path) -> bytes:

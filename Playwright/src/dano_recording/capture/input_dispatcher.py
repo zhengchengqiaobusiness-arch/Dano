@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 from typing import Any
 
 from dano_recording.capture.action_transactions import ActionScope, ActionTracker
@@ -17,6 +18,77 @@ from dano_recording.value_evidence import ValueEvidence, ValueEvidenceFactory
 
 async def _await(value: Any) -> Any:
     return await value if inspect.isawaitable(value) else value
+
+
+_CLICK_TARGET_SCRIPT = r"""
+({x, y}) => {
+  const hit = document.elementFromPoint(x, y);
+  if (!hit) return null;
+  const target = hit.closest?.(
+    "button,a,input,select,textarea,[role='button'],[role='link']," +
+    "[role='menuitem'],[aria-label],[aria-labelledby],[name]"
+  ) || hit;
+  const clipped = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 256);
+  const labelledBy = clipped(target.getAttribute?.("aria-labelledby"));
+  const labelledText = labelledBy
+    ? labelledBy.split(/\s+/).map((id) => clipped(document.getElementById(id)?.textContent)).filter(Boolean).join(" ")
+    : "";
+  const associatedLabel = Array.from(target.labels || [])
+    .map((label) => clipped(label.innerText || label.textContent)).filter(Boolean).join(" ");
+  const inputType = clipped(target.getAttribute?.("type")).toLowerCase();
+  const buttonValue = ["button", "submit", "reset"].includes(inputType)
+    ? clipped(target.value)
+    : "";
+  return {
+    aria_label: clipped(target.getAttribute?.("aria-label")),
+    labelled_text: clipped(labelledText),
+    associated_label: clipped(associatedLabel),
+    title: clipped(target.getAttribute?.("title")),
+    visible_text: clipped(target.innerText || target.textContent),
+    button_value: buttonValue,
+    name: clipped(target.getAttribute?.("name")),
+  };
+}
+"""
+
+
+async def describe_click_target(
+    page: Any,
+    *,
+    x: float,
+    y: float,
+    redaction: RedactionPolicy | None = None,
+) -> str:
+    """Read a bounded business label for a server-dispatched coordinate click.
+
+    Page text is only descriptive evidence.  It never supplies the action id or
+    the causal trust flags, which remain owned by the Python dispatch boundary.
+    Input values are deliberately excluded except for button-like controls.
+    """
+
+    policy = redaction or RedactionPolicy()
+    try:
+        raw = await _await(page.evaluate(_CLICK_TARGET_SCRIPT, {"x": x, "y": y}))
+    except Exception:  # noqa: BLE001 - an unavailable label must not block the click
+        return ""
+    if not isinstance(raw, dict):
+        return ""
+    for key in (
+        "aria_label",
+        "labelled_text",
+        "associated_label",
+        "title",
+        "visible_text",
+        "button_value",
+        "name",
+    ):
+        candidate = re.sub(r"\s+", " ", str(raw.get(key) or "")).strip()
+        if not candidate:
+            continue
+        candidate = policy.redact_text(candidate)[:160].strip()
+        if candidate and candidate != policy.replacement:
+            return candidate
+    return ""
 
 
 class InputDispatcher:

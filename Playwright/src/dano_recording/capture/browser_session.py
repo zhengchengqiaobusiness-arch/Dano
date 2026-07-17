@@ -335,6 +335,7 @@ class BrowserCapture:
         self._popup_linked: set[int] = set()
         self._attached_context_ids: set[int] = set()
         self._listeners: list[tuple[Any, str, Any]] = []
+        self._paused = False
 
     def _listen(self, emitter: Any, event: str, handler: Any) -> None:
         emitter.on(event, handler)
@@ -408,7 +409,13 @@ class BrowserCapture:
     def frame_id(self, frame: Any) -> str | None:
         return self._frame_ids.get(id(frame))
 
-    def frame_event(self, frame: Any, *, page_id: str, event: str) -> RecordingFact:
+    def frame_event(
+        self,
+        frame: Any,
+        *,
+        page_id: str,
+        event: str,
+    ) -> RecordingFact | None:
         frame_key = id(frame)
         frame_id = self._frame_ids.setdefault(frame_key, new_id())
         parent = getattr(frame, "parent_frame", None)
@@ -423,7 +430,15 @@ class BrowserCapture:
             is_main_frame=parent is None,
         )
 
-    def _emit_page(self, event: str, *, page_id: str, **payload: Any) -> RecordingFact:
+    def _emit_page(
+        self,
+        event: str,
+        *,
+        page_id: str,
+        **payload: Any,
+    ) -> RecordingFact | None:
+        if self._paused:
+            return None
         clean = self.redaction.redact_value({"event": event, **payload})
         if "url" in clean:
             clean["url"] = self.redaction.redact_url(str(clean["url"]))
@@ -441,6 +456,14 @@ class BrowserCapture:
             error_type=type(error).__name__,
             message=str(error),
         )
+
+    def pause(self) -> None:
+        self._paused = True
+        self.diagnostics.pause()
+
+    def resume(self) -> None:
+        self._paused = False
+        self.diagnostics.resume()
 
     async def close(self) -> None:
         listeners, self._listeners = self._listeners, []

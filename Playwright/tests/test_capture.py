@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -15,6 +16,7 @@ from dano_recording.capture.ledger import CaptureCapacityExceeded
 from dano_recording.capture.network_observer import NetworkObserver, NetworkObserverConfig
 from dano_recording.capture.redaction import RedactionPolicy
 from dano_recording.capture.response_collector import ResponseCollector
+from dano_recording.capture.runtime import CaptureRuntime
 from dano_recording.capture.safety import URLSafetyPolicy
 from dano_recording.domain.facts import FactKind, RecordingFact, RequestFact
 
@@ -181,6 +183,11 @@ class EventSource:
     def on(self, event: str, handler) -> None:
         self.handlers.setdefault(event, []).append(handler)
 
+    def remove_listener(self, event: str, handler) -> None:
+        listeners = self.handlers.get(event, [])
+        if handler in listeners:
+            listeners.remove(handler)
+
     def emit(self, event: str, *args) -> None:
         for handler in self.handlers.get(event, []):
             handler(*args)
@@ -204,6 +211,216 @@ class FakeContext(EventSource):
     def __init__(self, pages=()) -> None:
         super().__init__()
         self.pages = list(pages)
+
+
+class RoutableContext(FakeContext):
+    def __init__(self, pages=()) -> None:
+        super().__init__(pages)
+        self.routes: list[tuple[str, object]] = []
+        self.bindings: dict[str, object] = {}
+        self.init_scripts: list[str] = []
+
+    async def route(self, pattern: str, handler) -> None:
+        self.routes.append((pattern, handler))
+
+    async def unroute(self, pattern: str, handler) -> None:
+        self.routes.remove((pattern, handler))
+
+    async def expose_binding(self, name: str, handler) -> None:
+        if name in self.bindings:
+            raise RuntimeError(f"binding {name} already exists")
+        self.bindings[name] = handler
+
+    async def add_init_script(self, *, path: str) -> None:
+        self.init_scripts.append(path)
+
+
+@pytest.mark.asyncio
+async def test_capture_runtime_pause_resume_keeps_one_binding_and_network_listener() -> None:
+    ledger = FactLedger(tenant="tenant-a", recording_id="recording-a")
+    context = RoutableContext()
+    runtime = CaptureRuntime(ledger)
+    await runtime.attach(context)
+
+    context.emit("request", FakeRequest("GET", "https://example.test/api/first"))
+    assert len([fact for fact in ledger.snapshot() if isinstance(fact, RequestFact)]) == 1
+
+    await runtime.pause()
+    context.emit("request", FakeRequest("GET", "https://example.test/api/frozen"))
+    assert len([fact for fact in ledger.snapshot() if isinstance(fact, RequestFact)]) == 1
+    frozen_write = FakeRoute(FakeRequest("POST", "https://example.test/api/frozen-write"))
+    await context.routes[0][1](frozen_write)
+    assert frozen_write.aborted_with == "blockedbyclient"
+    assert len([fact for fact in ledger.snapshot() if isinstance(fact, RequestFact)]) == 1
+
+    await runtime.resume(context)
+    assert tuple(context.bindings) == ("__danoRecordAction",)
+    assert len(context.handlers["request"]) == 1
+    assert len(context.routes) == 1
+    context.emit("request", FakeRequest("GET", "https://example.test/api/recaptured"))
+    assert [
+        fact.url for fact in ledger.snapshot() if isinstance(fact, RequestFact)
+    ] == [
+        "https://example.test/api/first",
+        "https://example.test/api/recaptured",
+    ]
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_capture_runtime_pause_cancels_work_that_misses_the_drain_deadline(
+    monkeypatch,
+) -> None:
+    ledger = FactLedger(tenant="tenant-a", recording_id="recording-a")
+    runtime = CaptureRuntime(ledger)
+    release = asyncio.Event()
+
+    async def late_mutation() -> None:
+        await release.wait()
+        ledger.emit(
+            RecordingFact,
+            kind=FactKind.DOM_MUTATION,
+            payload={"phase": "late"},
+        )
+
+    task = runtime.tasks.create(late_mutation())
+
+    async def timed_out_drain(*, timeout=None) -> bool:
+        assert timeout == 5.0
+        return False
+
+    monkeypatch.setattr(runtime.tasks, "drain", timed_out_drain)
+    await runtime.pause()
+    release.set()
+    await asyncio.sleep(0)
+
+    assert task.cancelled()
+    assert not any(fact.kind is FactKind.DOM_MUTATION for fact in ledger.snapshot())
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_pause_gates_network_before_waiting_for_script_drain(
+    monkeypatch,
+) -> None:
+    ledger = FactLedger(tenant="tenant-a", recording_id="recording-a")
+    context = RoutableContext()
+    runtime = CaptureRuntime(ledger)
+    await runtime.attach(context)
+    drain_started = asyncio.Event()
+    release_drain = asyncio.Event()
+
+    async def delayed_script_drain(*, timeout=None) -> bool:
+        assert timeout == 5.0
+        drain_started.set()
+        await release_drain.wait()
+        return True
+
+    monkeypatch.setattr(runtime.scripts._tasks, "drain", delayed_script_drain)
+    pause_task = asyncio.create_task(runtime.pause())
+    await drain_started.wait()
+    await asyncio.sleep(0)
+    context.emit("request", FakeRequest("GET", "https://example.test/api/during-freeze"))
+    release_drain.set()
+    await pause_task
+
+    assert not any(isinstance(fact, RequestFact) for fact in ledger.snapshot())
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_network_generation_reset_clears_request_identity_caches() -> None:
+    ledger = FactLedger(tenant="tenant-a", recording_id="recording-a")
+    observer = NetworkObserver(ledger)
+    request = FakeRequest("GET", "https://example.test/api/old-generation")
+    first = observer.record_request(request)
+
+    await observer.pause()
+    observer.reset_generation()
+    assert not observer._request_ids
+    assert not observer._request_facts
+    assert not observer._request_page_ids
+    assert not observer._request_action_ids
+    assert not observer._failed_requests
+
+    context = RoutableContext()
+    await observer.resume(context)
+    request.url = "https://example.test/api/current-generation"
+    second = observer.record_request(request)
+
+    assert second.request_id != first.request_id
+    assert second.url.endswith("/current-generation")
+    assert len([fact for fact in ledger.snapshot() if isinstance(fact, RequestFact)]) == 2
+    await observer.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_generation_reset_reenumerates_only_current_page_scripts() -> None:
+    class CdpSession(EventSource):
+        def __init__(self, context) -> None:
+            super().__init__()
+            self.context = context
+            self.detached = False
+
+        async def send(self, method: str, params=None):
+            if method == "Debugger.enable":
+                for script_id, url, _source in self.context.current_scripts:
+                    self.emit("Debugger.scriptParsed", {"scriptId": script_id, "url": url})
+                return {}
+            if method == "Debugger.getScriptSource":
+                script_id = str((params or {}).get("scriptId") or "")
+                source = next(
+                    source
+                    for current_id, _url, source in self.context.current_scripts
+                    if current_id == script_id
+                )
+                return {"scriptSource": source}
+            raise AssertionError(method)
+
+        async def detach(self) -> None:
+            self.detached = True
+
+    class CdpContext(RoutableContext):
+        def __init__(self, pages=()) -> None:
+            super().__init__(pages)
+            self.current_scripts = [
+                ("old-script", "https://example.test/old.js", "const OLD_ONLY = true;")
+            ]
+            self.sessions: list[CdpSession] = []
+
+        async def new_cdp_session(self, _page):
+            session = CdpSession(self)
+            self.sessions.append(session)
+            return session
+
+    ledger = FactLedger(tenant="tenant-a", recording_id="recording-a")
+    page = FakePage("https://example.test/app")
+    context = CdpContext([page])
+    runtime = CaptureRuntime(ledger)
+    await runtime.attach(context)
+    await runtime.tasks.drain()
+    await runtime.scripts._tasks.drain()
+    assert [script.url for script in runtime.scripts.scripts] == [
+        "https://example.test/old.js"
+    ]
+
+    await runtime.pause()
+    await runtime.reset_generation()
+    context.current_scripts = [
+        ("current-script", "https://example.test/current.js", "const CURRENT_ONLY = true;")
+    ]
+    await runtime.resume(context)
+    await runtime.scripts._tasks.drain()
+
+    assert [script.url for script in runtime.scripts.scripts] == [
+        "https://example.test/current.js"
+    ]
+    assert context.sessions[0].detached is True
+    assert len(context.sessions) == 2
+    assert tuple(context.bindings) == ("__danoRecordAction",)
+    assert len(context.handlers["request"]) == 1
+    assert len(context.routes) == 1
+    await runtime.close()
 
 
 def test_page_popup_and_frame_metadata_are_captured() -> None:

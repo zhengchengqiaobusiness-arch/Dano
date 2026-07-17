@@ -7,10 +7,12 @@ from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 import json
+from enum import StrEnum
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from dano_recording.capture.redaction import RedactionPolicy
+from dano_recording.pi_semantic_ops import ALLOWED_OPERATIONS
 
 from .events import PiSessionStatus
 from .sessions import PiSidecarClient
@@ -18,6 +20,30 @@ from .sessions import PiSidecarClient
 StateProvider = Callable[[str], Awaitable[dict[str, Any]]]
 SubmissionHandler = Callable[[str, str, dict[str, Any]], Awaitable[dict[str, Any]]]
 EventSink = Callable[[str, dict[str, Any]], Awaitable[None]]
+
+
+class PiPlanMode(StrEnum):
+    INITIAL = "initial"
+    REPLAN = "replan"
+    STEP_NAMING = "step_naming"
+    BUSINESS_DESCRIPTION = "business_description"
+    RECOMMENDATIONS = "llm_recommendations"
+
+
+_NAMING_OPERATIONS = frozenset({
+    "set_step_name",
+    "set_step_title",
+    "set_capability_name",
+    "set_capability_title",
+    "set_capability_description",
+})
+_PLAN_MODE_OPERATIONS: dict[PiPlanMode, frozenset[str]] = {
+    PiPlanMode.INITIAL: ALLOWED_OPERATIONS,
+    PiPlanMode.REPLAN: ALLOWED_OPERATIONS,
+    PiPlanMode.STEP_NAMING: _NAMING_OPERATIONS,
+    PiPlanMode.BUSINESS_DESCRIPTION: frozenset({"set_business_description"}),
+    PiPlanMode.RECOMMENDATIONS: frozenset(),
+}
 
 
 @dataclass(slots=True)
@@ -30,6 +56,8 @@ class _Binding:
 class _ActiveTurn:
     expected_revision: int
     mode: str
+    task_mode: PiPlanMode | None = None
+    allowed_operations: frozenset[str] = frozenset()
     inflight: bool = False
     committed: bool = False
     attempted: bool = False
@@ -129,20 +157,56 @@ class RecordingPiCoordinator:
             # optional event transport is temporarily unavailable.
             pass
 
-    async def plan(self, recording_id: str, revision: int, *, instruction: str = "initial") -> dict[str, Any]:
+    async def plan(
+        self,
+        recording_id: str,
+        revision: int,
+        *,
+        mode: PiPlanMode = PiPlanMode.INITIAL,
+    ) -> dict[str, Any]:
+        if not isinstance(mode, PiPlanMode):
+            raise TypeError("mode must be a PiPlanMode")
         sessions = await self.ensure_sessions(recording_id)
         status = sessions["planner"]
         async with self.locks[status.session_id]:
             status.state = "running"
-            self.active_turns[status.session_id] = _ActiveTurn(revision, "semantic")
+            self.active_turns[status.session_id] = _ActiveTurn(
+                revision,
+                "semantic",
+                task_mode=mode,
+                allowed_operations=_PLAN_MODE_OPERATIONS[mode],
+            )
+            if mode is PiPlanMode.STEP_NAMING:
+                task_scope = (
+                    "This naming turn may use only set_step_name, set_step_title, "
+                    "set_capability_name, set_capability_title and "
+                    "set_capability_description."
+                )
+            elif mode is PiPlanMode.BUSINESS_DESCRIPTION:
+                task_scope = (
+                    "This description turn may use only set_business_description."
+                )
+            elif mode is PiPlanMode.RECOMMENDATIONS:
+                task_scope = (
+                    "This recommendation turn is read-only. Inspect unresolved review "
+                    "items and submit an empty operations list."
+                )
+            else:
+                task_scope = (
+                    "For initial/replan turns, legally fill flow goal/action/business_description, "
+                    "step name/title, capability name/title/description, schemas, field axes and "
+                    "capability membership through their dedicated operations. Use the flow's "
+                    "lineage_id as target_uuid for flow-level operations."
+                )
             prompt = (
                 "You are the semantic planner for one Dano recording. Query only the evidence you need with "
                 "list_transactions/get_transaction, trace_field, trace_control, trace_submit_path, "
                 "get_request_response, get_enum_evidence, search_js_binding and list_unbound_requests. "
                 "Never infer an ID or evidence reference, never request secrets or raw JavaScript, and never "
-                "overwrite a manual field axis. Submit one atomic whitelist batch by calling "
+                "overwrite any manual semantic axis. "
+                f"{task_scope} Submit one atomic whitelist batch by calling "
                 "apply_semantic_operations exactly once, even when the operations list is empty.\n"
-                f"Task mode: {instruction}; expected revision: {revision}."
+                f"Task mode: {mode.value}; expected revision: {revision}."
             )
             try:
                 out = await self.client.prompt(session_id=status.session_id, prompt=prompt, revision=revision)
@@ -168,7 +232,11 @@ class RecordingPiCoordinator:
         status = sessions["planner"]
         async with self.locks[status.session_id]:
             status.state = "running"
-            self.active_turns[status.session_id] = _ActiveTurn(revision, "semantic")
+            self.active_turns[status.session_id] = _ActiveTurn(
+                revision,
+                "semantic",
+                allowed_operations=ALLOWED_OPERATIONS,
+            )
             try:
                 out = await self.client.prompt(
                     session_id=status.session_id,
@@ -254,6 +322,24 @@ class RecordingPiCoordinator:
         required_mode = "review" if tool == "submit_recording_review" else "semantic"
         if turn is None or turn.mode != required_mode:
             raise PermissionError(f"{tool} is not allowed outside its active Pi turn")
+        if tool == "apply_semantic_operations":
+            operations = submission.get("operations")
+            if not isinstance(operations, list):
+                raise ValueError(
+                    "apply_semantic_operations requires a top-level operations list"
+                )
+            forbidden = sorted({
+                str(operation.get("op") or "")
+                for operation in operations
+                if isinstance(operation, dict)
+                and str(operation.get("op") or "") not in turn.allowed_operations
+            })
+            if forbidden:
+                task_mode = turn.task_mode.value if turn.task_mode else "repair"
+                raise PermissionError(
+                    f"operations {forbidden} are not allowed for Pi task mode "
+                    f"{task_mode}"
+                )
         expected = int(submission.get("expected_revision", -1))
         if expected != turn.expected_revision:
             raise ValueError(

@@ -98,6 +98,7 @@ class NetworkObserver:
         self._request_action_ids: dict[int, str | None] = {}
         self._failed_requests: set[int] = set()
         self._attached_contexts: dict[int, tuple[Any, Any, Any, Any, Any]] = {}
+        self._paused = False
 
     def _capture_value(
         self,
@@ -159,6 +160,8 @@ class NetworkObserver:
         return self.redaction.redact_url(safe_url), tuple(evidence)
 
     async def attach(self, context: Any) -> None:
+        if self._paused:
+            return
         context_key = id(context)
         if context_key in self._attached_contexts:
             return
@@ -189,7 +192,9 @@ class NetworkObserver:
             self.action_id_provider(),
         )
 
-    def on_request(self, request: Any) -> RequestFact:
+    def on_request(self, request: Any) -> RequestFact | None:
+        if self._paused:
+            return None
         return self.record_request(request)
 
     def record_request(self, request: Any, *, intercepted: bool = False) -> RequestFact:
@@ -305,6 +310,8 @@ class NetworkObserver:
         return fact
 
     def on_response(self, response: Any) -> None:
+        if self._paused:
+            return
         request = _property(response, "request", None)
         if request is None:
             self.diagnostics.emit("response_without_request")
@@ -322,23 +329,28 @@ class NetworkObserver:
         request_fact: RequestFact,
         request_key: int,
     ) -> RecordingFact:
-        if self.response_started is not None:
-            started = self.response_started(response, request_fact)
-            if inspect.isawaitable(started):
-                await started
-        fact = await self.responses.collect(
-            response,
-            request_id=request_fact.request_id,
-            page_id=self._request_page_ids.get(request_key),
-            action_id=self._request_action_ids.get(request_key),
-        )
-        if self.response_collected is not None:
-            completed = self.response_collected(response, fact)
-            if inspect.isawaitable(completed):
-                await completed
-        return fact
+        try:
+            if self.response_started is not None:
+                started = self.response_started(response, request_fact)
+                if inspect.isawaitable(started):
+                    await started
+            fact = await self.responses.collect(
+                response,
+                request_id=request_fact.request_id,
+                page_id=self._request_page_ids.get(request_key),
+                action_id=self._request_action_ids.get(request_key),
+            )
+            if self.response_collected is not None:
+                completed = self.response_collected(response, fact)
+                if inspect.isawaitable(completed):
+                    await completed
+            return fact
+        finally:
+            self._forget_request(request_key)
 
     def on_request_failed(self, request: Any) -> RecordingFact | None:
+        if self._paused:
+            return None
         request_key = id(request)
         if request_key in self._failed_requests:
             return None
@@ -348,21 +360,31 @@ class NetworkObserver:
             error_text = failure.get("errorText") or failure.get("error_text") or str(failure)
         else:
             error_text = failure or "request failed"
-        fact = self.ledger.emit(
-            RecordingFact,
-            kind=FactKind.REQUEST_FAILED,
-            action_id=self._request_action_ids.get(request_key),
-            page_id=self._request_page_ids.get(request_key),
-            payload={
-                "request_id": request_fact.request_id,
-                "method": request_fact.method,
-                "url": request_fact.url,
-                "reason": self.redaction.redact_text(str(error_text)),
-            },
-            redacted=True,
-        )
-        self._failed_requests.add(request_key)
-        return fact
+        try:
+            fact = self.ledger.emit(
+                RecordingFact,
+                kind=FactKind.REQUEST_FAILED,
+                action_id=self._request_action_ids.get(request_key),
+                page_id=self._request_page_ids.get(request_key),
+                payload={
+                    "request_id": request_fact.request_id,
+                    "method": request_fact.method,
+                    "url": request_fact.url,
+                    "reason": self.redaction.redact_text(str(error_text)),
+                },
+                redacted=True,
+            )
+            self._failed_requests.add(request_key)
+            return fact
+        finally:
+            self._forget_request(request_key)
+
+    def _forget_request(self, request_key: int) -> None:
+        self._request_ids.pop(request_key, None)
+        self._request_facts.pop(request_key, None)
+        self._request_page_ids.pop(request_key, None)
+        self._request_action_ids.pop(request_key, None)
+        self._failed_requests.discard(request_key)
 
     async def route(self, route: Any, request: Any | None = None) -> None:
         # Playwright Python passes only Route; accepting an explicit request as
@@ -374,6 +396,23 @@ class NetworkObserver:
         should_block = self.config.safe_record and method in self.config.write_methods
         is_navigation = bool(_property(request, "is_navigation_request", False))
         policy = self.navigation_url_policy if is_navigation else self.url_policy
+        if self._paused:
+            unsafe_url = False
+            if self.config.block_unsafe_urls and policy is not None:
+                try:
+                    raw_url = str(_property(request, "url", "") or "")
+                    policy.validate(raw_url)
+                    await self._validate_resolved_target(raw_url, policy)
+                except UnsafeURL:
+                    unsafe_url = True
+            if should_block or unsafe_url:
+                result = getattr(route, "abort")(self.config.abort_error_code)
+            else:
+                continue_method = getattr(route, "continue_", None) or getattr(route, "fallback")
+                result = continue_method()
+            if inspect.isawaitable(result):
+                await result
+            return
         try:
             request_fact = self.record_request(request, intercepted=should_block)
         except Exception:
@@ -451,7 +490,31 @@ class NetworkObserver:
             message=str(error),
         )
 
+    async def pause(self) -> None:
+        """Gate fact capture while retaining listeners and safety routing."""
+
+        self._paused = True
+        # Finish response bodies which began before the immutable boundary.
+        if not await self.tasks.drain(timeout=5.0):
+            await self.tasks.cancel_pending()
+
+    async def resume(self, context: Any) -> None:
+        self._paused = False
+        await self.attach(context)
+
+    def reset_generation(self) -> None:
+        """Drop request-object correlations after the paused generation drains."""
+
+        if not self._paused:
+            raise RuntimeError("network observer must be paused before generation reset")
+        self._request_ids.clear()
+        self._request_facts.clear()
+        self._request_page_ids.clear()
+        self._request_action_ids.clear()
+        self._failed_requests.clear()
+
     async def close(self) -> None:
+        self._paused = True
         bindings, self._attached_contexts = tuple(self._attached_contexts.values()), {}
         for context, route_handler, request_handler, response_handler, failure_handler in bindings:
             remove = getattr(context, "remove_listener", None)
@@ -473,8 +536,6 @@ class NetworkObserver:
                         await result
                 except Exception as exc:
                     self._task_error(exc)
-        # Drain response bodies before stopping; only explicit shutdown cancels
-        # work that can no longer be persisted.
         drained = await self.tasks.drain(timeout=5.0)
         await self.tasks.close(cancel=not drained)
         await self.diagnostics.close()

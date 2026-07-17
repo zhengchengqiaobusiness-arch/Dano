@@ -15,9 +15,12 @@ from dano_recording.api.decision_commands import (
 from dano_recording.api.protocol import CreateRecordingRequest
 from dano_recording.app import install_recording_v3
 from dano_recording.bootstrap import RecordingApplication, RecordingUnavailable
+from dano_recording.capture.runtime import CaptureRuntime
+from dano_recording.compiler.pipeline import prepare_recording_materials
 from dano_recording.persistence.repository import OperationConflict
-from dano_recording.domain.facts import ActionFact, RequestFact
+from dano_recording.domain.facts import ActionFact, FactKind, RecordingFact, RequestFact
 from dano_recording.domain.recording import RecordingStatus
+from dano_recording.executability import _fields, check_executability
 
 
 def _workbench() -> dict:
@@ -53,6 +56,280 @@ def _workbench() -> dict:
         }]},
         "meta": {"recording_engine": "playwright_v3"},
     }
+
+
+@pytest.mark.asyncio
+async def test_finalize_freeze_retains_runtime_and_only_admits_explicit_dom_evidence(
+    tmp_path,
+) -> None:
+    service = RecordingApplication(pi_env={"PI_STUB": "1"}, artifact_root=tmp_path)
+    await service.start()
+    created = await service.create_session(
+        "tenant-a",
+        CreateRecordingRequest(
+            subsystem="oa",
+            start_url="https://example.com/app",
+            base_url="https://example.com",
+        ),
+    )
+    live = await service._get_live("tenant-a", created.recording_id)
+
+    class Drains:
+        async def drain(self, **_kwargs):
+            return True
+
+    class Scripts:
+        _tasks = Drains()
+        scripts = ()
+
+    class Capture:
+        @staticmethod
+        def page_id(_page):
+            return "page-a"
+
+        @staticmethod
+        def attach_page(_page):
+            return "page-a"
+
+    class Runtime:
+        def __init__(self) -> None:
+            self.tasks = Drains()
+            self.network = type("Network", (), {"tasks": Drains()})()
+            self.scripts = Scripts()
+            self.browser = Capture()
+            self.paused = 0
+            self.resumed = 0
+            self.closed = 0
+
+        async def pause(self) -> None:
+            self.paused += 1
+
+        async def resume(self, _context) -> None:
+            self.resumed += 1
+
+        async def close(self) -> None:
+            self.closed += 1
+
+        async def collect_page_evidence(self, _page):
+            live.ledger.emit(
+                RecordingFact,
+                kind=FactKind.DOM_CONTROL,
+                page_id="page-a",
+                payload={"type": "control", "selector": "#approval"},
+            )
+            return {"controls": (), "runtime_components": ()}
+
+    runtime = Runtime()
+    live.runtime = runtime  # type: ignore[assignment]
+    live.capture = runtime.browser  # type: ignore[assignment]
+    live.network = runtime.network  # type: ignore[assignment]
+    live.scripts = runtime.scripts  # type: ignore[assignment]
+    live.page = object()
+    live.capture_active = True
+    live.ledger.emit(
+        RequestFact,
+        request_id="before-freeze",
+        method="GET",
+        url="https://example.com/api/before",
+    )
+    await service._freeze_capture(live)
+    boundary = live.capture_end_sequence
+    assert boundary is not None
+    assert live.runtime is runtime
+    assert live.capture is runtime.browser
+    assert runtime.paused == 1
+    assert runtime.closed == 0
+
+    live.ledger.emit(
+        RequestFact,
+        request_id="late-background",
+        method="GET",
+        url="https://example.com/api/late",
+    )
+    preliminary = prepare_recording_materials(
+        tenant="tenant-a",
+        recording_id=created.recording_id,
+        facts=await service._capture_generation_facts(live),
+    )
+    await service._collect_evidence(live, preliminary)
+    await service._drain_facts(live)
+    frozen = await service._capture_generation_facts(live)
+    assert [fact.request_id for fact in frozen if isinstance(fact, RequestFact)] == [
+        "before-freeze"
+    ]
+    assert any(fact.kind is FactKind.DOM_CONTROL for fact in frozen)
+    capture_records = live.capture_store.snapshot().records
+    assert [
+        record.payload.get("request_id")
+        for record in capture_records
+        if record.payload.get("request_id")
+    ] == ["before-freeze"]
+    assert any(record.payload.get("selector") == "#approval" for record in capture_records)
+
+    class Page:
+        @staticmethod
+        async def screenshot(**_kwargs):
+            await asyncio.Event().wait()
+
+    live.started = True
+    live.context = object()
+    live.page = Page()  # type: ignore[assignment]
+    await service._resume_capture(live)
+    assert live.runtime is runtime
+    assert live.network is runtime.network
+    assert runtime.resumed == 1
+    resumed_session = await service.repository.get_session(
+        "tenant-a", created.recording_id
+    )
+    assert resumed_session.metadata.get("capture_end_sequence") is None
+    assert resumed_session.metadata.get("analysis_fact_ids") == []
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_frozen_generation_boundary_survives_live_rehydration(tmp_path) -> None:
+    service = RecordingApplication(pi_env={"PI_STUB": "1"}, artifact_root=tmp_path)
+    await service.start()
+    created = await service.create_session(
+        "tenant-a",
+        CreateRecordingRequest(
+            subsystem="oa",
+            start_url="https://example.com/app",
+            base_url="https://example.com",
+        ),
+    )
+    live = await service._get_live("tenant-a", created.recording_id)
+
+    class Runtime:
+        async def pause(self) -> None:
+            return None
+
+        async def collect_page_evidence(self, _page):
+            live.ledger.emit(
+                RecordingFact,
+                kind=FactKind.DOM_CONTROL,
+                page_id="page-a",
+                payload={"type": "control", "selector": "#approval"},
+            )
+            return {"controls": (), "runtime_components": ()}
+
+    class Capture:
+        @staticmethod
+        def page_id(_page):
+            return "page-a"
+
+        @staticmethod
+        def attach_page(_page):
+            return "page-a"
+
+    runtime = Runtime()
+    live.runtime = runtime  # type: ignore[assignment]
+    live.capture = Capture()  # type: ignore[assignment]
+    live.page = object()
+    live.capture_active = True
+    live.ledger.emit(
+        RequestFact,
+        request_id="before-freeze",
+        method="GET",
+        url="https://example.com/api/before",
+    )
+    await service._freeze_capture(live)
+    boundary = live.capture_end_sequence
+    live.ledger.emit(
+        RequestFact,
+        request_id="late-background",
+        method="GET",
+        url="https://example.com/api/late",
+    )
+    preliminary = prepare_recording_materials(
+        tenant="tenant-a",
+        recording_id=created.recording_id,
+        facts=await service._capture_generation_facts(live),
+    )
+    await service._collect_evidence(live, preliminary)
+    await service._drain_facts(live)
+
+    service.live.pop(("tenant-a", created.recording_id))
+    restored = await service._get_live("tenant-a", created.recording_id)
+    restored_facts = await service._capture_generation_facts(restored)
+
+    assert restored.capture_end_sequence == boundary
+    assert [
+        fact.request_id for fact in restored_facts if isinstance(fact, RequestFact)
+    ] == ["before-freeze"]
+    assert any(fact.kind is FactKind.DOM_CONTROL for fact in restored_facts)
+    assert "late-background" not in {
+        record.payload.get("request_id")
+        for record in restored.capture_store.snapshot().records
+    }
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_recapture_does_not_project_previous_generation_scripts(tmp_path) -> None:
+    service = RecordingApplication(pi_env={"PI_STUB": "1"}, artifact_root=tmp_path)
+    await service.start()
+    created = await service.create_session(
+        "tenant-a",
+        CreateRecordingRequest(
+            subsystem="oa",
+            start_url="https://example.com/app",
+            base_url="https://example.com",
+        ),
+    )
+    live = await service._get_live("tenant-a", created.recording_id)
+    runtime = CaptureRuntime(live.ledger)
+    await runtime.scripts.add(
+        script_id="old-script",
+        target_id="old-page",
+        url="https://example.com/old.js",
+        source='const staleEnum = ["OLD_ONLY"]',
+    )
+    await runtime.pause()
+    live.runtime = runtime
+    live.capture = runtime.browser
+    live.network = runtime.network
+    live.scripts = runtime.scripts
+    await service._drain_facts(live)
+
+    await service._recapture_command("tenant-a", created.recording_id)
+    compilation = prepare_recording_materials(
+        tenant="tenant-a",
+        recording_id=created.recording_id,
+        facts=await service._capture_generation_facts(live),
+    )
+    await service._collect_evidence(live, compilation)
+
+    assert runtime.scripts.scripts == ()
+    assert live.capture_store.snapshot().scripts == ()
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_pi_state_exposes_stable_flow_target_for_semantic_operations(tmp_path) -> None:
+    service = RecordingApplication(pi_env={"PI_STUB": "1"}, artifact_root=tmp_path)
+    await service.start()
+    created = await service.create_session(
+        "tenant-a",
+        CreateRecordingRequest(
+            subsystem="oa",
+            start_url="https://example.com/app",
+            base_url="https://example.com",
+        ),
+    )
+    live = await service._get_live("tenant-a", created.recording_id)
+
+    first = (await service._pi_state(created.recording_id))["pi_projection"]
+    second = (await service._pi_state(created.recording_id))["pi_projection"]
+
+    assert first["target_uuid"] == str(live.lineage_id)
+    assert first["flow_target"] == {
+        "kind": "flow",
+        "target_uuid": str(live.lineage_id),
+    }
+    assert second["target_uuid"] == first["target_uuid"]
+    assert "action" in first
+    await service.close()
 
 
 @pytest.mark.asyncio
@@ -264,6 +541,136 @@ async def test_bodyless_write_is_compiled_revisioned_and_resume_snapshot_is_stab
 
 
 @pytest.mark.asyncio
+async def test_finalize_submit_then_refresh_commits_canonical_contract_and_starts_pi(
+    tmp_path,
+) -> None:
+    service = RecordingApplication(pi_env={"PI_STUB": "1"}, artifact_root=tmp_path)
+    await service.start()
+    created = await service.create_session(
+        "tenant-a",
+        CreateRecordingRequest(
+            subsystem="oa",
+            start_url="https://example.com/leave",
+            base_url="https://example.com",
+            recording_mode="record_only",
+        ),
+    )
+    recording_id = created.recording_id
+    events: list[dict] = []
+    pi_starts: list[tuple[str, str, int]] = []
+
+    async def send(value: dict) -> None:
+        events.append(value)
+
+    async def capture_initial_pi(tenant: str, target: str, revision: int) -> None:
+        pi_starts.append((tenant, target, revision))
+
+    service._run_initial_pi = capture_initial_pi  # type: ignore[method-assign]
+    await service.attach_socket("tenant-a", recording_id, send)
+    live = await service._get_live("tenant-a", recording_id)
+    live.ledger.emit(
+        ActionFact,
+        action_id="submit-action",
+        action_type="click",
+        label="提交",
+        locator="#submit",
+        payload={
+            "causal_eligible": True,
+            "evidence_origin": "server_dispatched",
+        },
+    )
+    live.ledger.emit(
+        RequestFact,
+        action_id="submit-action",
+        request_id="submit-process",
+        method="POST",
+        url="https://example.com/admin-api/oa/duty-leave/submit-process",
+        request_body=None,
+        request_body_present=False,
+        response_status=200,
+        response_body={"success": True},
+    )
+    live.ledger.emit(
+        RequestFact,
+        action_id="submit-action",
+        request_id="refresh-page",
+        method="GET",
+        url="https://example.com/admin-api/oa/duty-leave/page?pageNo=1",
+        response_status=200,
+        response_body={"list": [], "total": 1},
+    )
+    await service._drain_facts(live)
+
+    await service.handle_message(
+        "tenant-a",
+        recording_id,
+        {
+            "type": "finalize",
+            "expected_revision": 0,
+            "operation_id": "finalize-submit-refresh",
+            "action": "submit_leave",
+            "title": "提交请假",
+        },
+        send,
+    )
+    await service.wait_for_analysis("tenant-a", recording_id)
+    await asyncio.sleep(0)
+
+    revision = await service.repository.get_revision("tenant-a", recording_id)
+    assert revision is not None
+    assert revision.revision == 1
+    snapshot = revision.snapshot
+    steps = {step["request_id"]: step for step in snapshot["steps"]}
+    assert set(steps) == {"submit-process", "refresh-page"}
+    assert all(step["step_uuid"] for step in steps.values())
+    matching_capabilities = [
+        item
+        for item in snapshot["capabilities"]
+        if any(
+            ref["request_id"] == "submit-process"
+            for ref in item["request_refs"]
+        )
+    ]
+    assert len(matching_capabilities) == 1, [
+        (
+            item.get("operation"),
+            [ref.get("request_id") for ref in item.get("request_refs") or []],
+            item.get("risk_level"),
+        )
+        for item in snapshot["capabilities"]
+    ]
+    capability = matching_capabilities[0]
+    assert capability["capability_uuid"]
+    assert capability["operation"] == "submit"
+    assert capability["risk_level"] == "L3"
+    assert capability["requires_human_confirm"] is True
+    assert steps["submit-process"]["step_uuid"] in capability["step_uuids"]
+    assert all(ref["step_uuid"] for ref in capability["request_refs"])
+    assert all(item["capability_uuid"] for item in snapshot["capabilities"])
+    assert {
+        step_uuid
+        for item in snapshot["capabilities"]
+        for step_uuid in item["step_uuids"]
+    } == {step["step_uuid"] for step in steps.values()}
+    report = check_executability(snapshot)
+    assert report["contract_faults"] == [], [
+        {
+            key: field.get(key)
+            for key in (
+                "field_uuid", "step_id", "step_uuid", "path", "wire_path",
+                "source_binding", "value_provider", "required_contract",
+                "axis_decisions",
+            )
+        }
+        for field in _fields(snapshot, {})
+    ]
+    assert pi_starts == [("tenant-a", recording_id, 1)]
+    final_event = next(item for item in events if item.get("type") == "flow_spec")
+    assert final_event["full_spec"]["meta"].get("preview") is not True
+    await service.close()
+
+
+@pytest.mark.asyncio
 async def test_finalize_runs_in_background_reports_progress_and_can_be_cancelled(tmp_path) -> None:
     service = RecordingApplication(pi_env={"PI_STUB": "1"}, artifact_root=tmp_path)
     await service.start()
@@ -310,6 +717,16 @@ async def test_finalize_runs_in_background_reports_progress_and_can_be_cancelled
     assert await service.repository.get_revision("tenant-a", recording_id) is None
     assert any(item.get("type") == "analysis_started" for item in events)
     assert any(item.get("type") == "deterministic_flow" for item in events)
+    first_preview = next(
+        item for item in events if item.get("type") == "deterministic_flow"
+    )
+    assert "check_report" not in first_preview
+    assert first_preview["full_spec"]["capabilities"]
+    assert all(
+        capability["status"] == "provisional"
+        for capability in first_preview["full_spec"]["capabilities"]
+    )
+    assert first_preview["full_spec"]["capabilities"][0]["request_refs"]
 
     await service.handle_message(
         "tenant-a",

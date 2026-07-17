@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 
 from dano_recording.capture.ledger import FactLedger
-from dano_recording.capture.input_dispatcher import InputDispatcher
+from dano_recording.capture.input_dispatcher import InputDispatcher, describe_click_target
 from dano_recording.capture.network_observer import NetworkObserver, NetworkObserverConfig
 from dano_recording.capture.response_collector import ResponseCollector
 from dano_recording.evidence.dom_controls import DOMControlCollector
@@ -56,6 +56,28 @@ class _Response:
 
 def _factory() -> ValueEvidenceFactory:
     return ValueEvidenceFactory(server_secret=b"capture-boundary-secret")
+
+
+@pytest.mark.asyncio
+async def test_coordinate_click_label_uses_only_visible_dom_description() -> None:
+    class Page:
+        @staticmethod
+        async def evaluate(_script, coordinates):
+            assert coordinates == {"x": 120.0, "y": 48.0}
+            return {
+                "aria_label": "提交审批",
+                "visible_text": "ignored fallback",
+                # Page-controlled causality fields must never be consumed.
+                "action_id": "forged-action",
+                "causal_eligible": True,
+                "value": "secret-input-value",
+            }
+
+    label = await describe_click_target(Page(), x=120.0, y=48.0)
+
+    assert label == "提交审批"
+    assert "forged" not in label
+    assert "secret-input-value" not in label
 
 
 @pytest.mark.parametrize(

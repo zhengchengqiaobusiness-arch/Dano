@@ -60,6 +60,15 @@ class TaskSupervisor:
         _, unfinished = await asyncio.wait(pending, timeout=timeout)
         return not unfinished
 
+    async def cancel_pending(self) -> None:
+        """Cancel unfinished work without closing the reusable supervisor."""
+
+        pending = tuple(task for task in self._tasks if not task.done())
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
     async def close(self, *, cancel: bool = True) -> None:
         if self._closed:
             return

@@ -30,6 +30,7 @@ from dano_recording.compiler.models import RecordingCompilation
 from dano_recording.compiler.validator import validate_compilation
 from dano_recording.capture_store import CaptureStore, CaptureStoreSnapshot
 from dano_recording.capability_planner import plan_capabilities
+from dano_recording.domain.capabilities import Capability, CapabilityRisk
 from dano_recording.domain.facts import ActionFact, FactKind, RecordingFact, RequestFact
 from dano_recording.domain.enums import (
     EnumEvidence,
@@ -74,6 +75,140 @@ from dano_recording.field_registry import (
 from dano_recording.value_evidence import ValueEvidence, ValueEvidenceFactory
 from dano_recording.value_evidence import ValueSensitivity
 from dano_recording.header_contracts import trusted_header_resolver
+
+
+_PROVISIONAL_DANGEROUS_WORDS = (
+    "delete", "remove", "revoke", "withdraw", "reject", "terminate", "cancel",
+    "撤回", "删除", "驳回", "终止", "作废",
+)
+
+
+def _provisional_operation(*, method: str, label: str, path: str) -> str:
+    """Return a conservative operation label without running CapabilityPlanner.
+
+    The preliminary workbench is emitted before evidence-graph construction.
+    It still needs a useful, complete shape, but it must not make the final
+    terminal/dependency decision early.  This deliberately small classifier is
+    therefore presentation-only; ``compile_recording`` remains the single
+    final CapabilityPlanner call for a generation.
+    """
+
+    text = f"{label} {path}".casefold()
+    if method == "DELETE" or any(word in text for word in ("delete", "remove", "删除", "移除")):
+        return "delete"
+    if any(word in text for word in ("withdraw", "revoke", "撤回", "撤销")):
+        return "withdraw"
+    if any(word in text for word in ("reject", "驳回", "拒绝")):
+        return "reject"
+    if any(word in text for word in ("approve", "accept", "同意", "审批通过")):
+        return "approve"
+    if any(word in text for word in ("export", "download", "导出", "下载")):
+        return "export"
+    if method == "GET" or any(word in text for word in ("query", "search", "list", "find", "查询", "搜索", "列表")):
+        return "query"
+    return "submit"
+
+
+def _provisional_capability_skeleton(
+    transactions: tuple[Any, ...],
+    requests: tuple[Any, ...],
+    fields: tuple[Any, ...],
+) -> tuple[Capability, ...]:
+    """Project every eligible action transaction before evidence collection.
+
+    One provisional capability per click/action prevents the first
+    ``deterministic_flow`` event from looking empty.  All eligible requests in
+    that transaction stay visible and no dependency or terminal relationship
+    is asserted.  The evidence-aware planner is still invoked exactly once by
+    the final compilation stage and may refine this skeleton.
+    """
+
+    requests_by_transaction: dict[str, list[Any]] = defaultdict(list)
+    for request in requests:
+        if request.capability_eligible:
+            requests_by_transaction[request.transaction_id].append(request)
+    fields_by_request: dict[str, list[str]] = defaultdict(list)
+    for field in fields:
+        field_id = str(
+            getattr(field, "field_uuid", None)
+            or getattr(field, "field_contract_id", None)
+            or ""
+        )
+        if field_id:
+            fields_by_request[str(getattr(field, "request_id", ""))].append(field_id)
+
+    capabilities: list[Capability] = []
+    operation_counts: dict[str, int] = defaultdict(int)
+    for transaction in sorted(
+        transactions, key=lambda item: (item.first_sequence, item.transaction_id)
+    ):
+        scoped = sorted(
+            requests_by_transaction.get(transaction.transaction_id, ()),
+            key=lambda item: (item.sequence, item.request_id),
+        )
+        if not scoped:
+            continue
+        terminal = scoped[-1]
+        operation = _provisional_operation(
+            method=terminal.method,
+            label=transaction.action_label,
+            path=terminal.path,
+        )
+        operation_counts[operation] += 1
+        suffix = operation_counts[operation]
+        name = operation if suffix == 1 else f"{operation}_{suffix}"
+        title = transaction.action_label.strip() or {
+            "query": "查询",
+            "submit": "提交",
+            "withdraw": "撤回",
+            "approve": "审批",
+            "reject": "驳回",
+            "delete": "删除",
+            "export": "导出",
+        }.get(operation, operation)
+        dangerous = terminal.method == "DELETE" or any(
+            word in f"{transaction.action_label} {terminal.path}".casefold()
+            for word in _PROVISIONAL_DANGEROUS_WORDS
+        )
+        mutating = any(
+            request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            for request in scoped
+        )
+        risk = (
+            CapabilityRisk.L4
+            if dangerous
+            else CapabilityRisk.L3 if mutating else CapabilityRisk.L1
+        )
+        request_ids = tuple(request.request_id for request in scoped)
+        capability_id = "cap_" + content_hash(
+            {
+                "transaction_id": transaction.transaction_id,
+                "terminal_request_id": terminal.request_id,
+            }
+        )[:20]
+        capabilities.append(
+            Capability(
+                capability_id=capability_id,
+                transaction_id=transaction.transaction_id,
+                name=name,
+                title=title,
+                operation=operation,
+                request_ids=request_ids,
+                field_contract_ids=tuple(
+                    dict.fromkeys(
+                        field_id
+                        for request_id in request_ids
+                        for field_id in fields_by_request.get(request_id, ())
+                    )
+                ),
+                risk_level=risk,
+                execution_enabled=not dangerous,
+                explicit_confirmation=mutating,
+                provisional=True,
+                origin="deterministic_preview",
+            )
+        )
+    return tuple(capabilities)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1384,7 +1519,17 @@ def prepare_recording_materials(
     compiled_requests = materialize_requests(requests, analyses, transactions)
     field_facts = extract_field_facts(compiled_requests)
     fields = materialize_field_contracts(field_facts, proposals, decisions)
-    validation = validate_compilation(requests, analyses, compiled_requests, ())
+    capabilities = _provisional_capability_skeleton(
+        transactions,
+        compiled_requests,
+        fields,
+    )
+    validation = validate_compilation(
+        requests,
+        analyses,
+        compiled_requests,
+        capabilities,
+    )
     payload = {
         "protocol": "dano.recording-v3.compilation.v1",
         "tenant": tenant,
@@ -1395,7 +1540,7 @@ def prepare_recording_materials(
         "requests": compiled_requests,
         "field_facts": field_facts,
         "fields": fields,
-        "capabilities": (),
+        "capabilities": capabilities,
         "relations": (),
         "validation": validation,
     }

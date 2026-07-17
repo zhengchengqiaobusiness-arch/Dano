@@ -8,7 +8,7 @@
     "check": "node --check src/dano_recording/pi/runtime/profile.mjs && node --check src/dano_recording/pi/runtime/protocol.mjs && node --check src/dano_recording/pi/runtime/sidecar.mjs && node --check src/dano_recording/pi/runtime/tools.mjs && node --check src/dano_recording/_resources/js_analysis/ast_enum_extractor.mjs && node --check src/dano_recording/_resources/js_analysis/sourcemap_loader.mjs && node --check src/dano_recording/_resources/js_analysis/worker.mjs && node --check src/dano_recording/_resources/browser/component_probe.js && node --check src/dano_recording/_resources/browser/mutation_observer.js && node --check src/dano_recording/_resources/browser/recorder.js"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.79.4",
+    "@earendil-works/pi-coding-agent": "0.79.10",
     "typebox": "1.1.38"
   }
 }

@@ -67,9 +67,9 @@ test("recapture keeps the current capture until the server confirms a new genera
 });
 
 test("direct invocation is exposed only for a verified publication", () => {
-  const directInvokeBlock = pageRecorder.match(/\{result\.ok[^\n]*&&[\s\S]{0,500}>\s*直接调用\s*<\/Button>/)?.[0] || "";
+  const directInvokeBlock = pageRecorder.match(/\{result\?\.ok[^\n]*&&[\s\S]{0,500}>\s*直接调用\s*<\/Button>/)?.[0] || "";
   assert.ok(directInvokeBlock, "direct invocation condition not found");
-  assert.match(directInvokeBlock, /resultVerified/);
+  assert.match(directInvokeBlock, /publicationVerified/);
   assert.match(pageRecorder, /verification_status\s*===\s*["']verified["']/);
   assert.match(pageRecorder, /publication_status\s*===\s*["']published_verified["']/);
 });

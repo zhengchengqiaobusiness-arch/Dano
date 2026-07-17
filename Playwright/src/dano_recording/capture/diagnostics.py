@@ -17,6 +17,7 @@ class DiagnosticsObserver:
         self.redaction = redaction or RedactionPolicy()
         self.tasks = TaskSupervisor(self._task_error)
         self._listeners: list[tuple[Any, str, Any]] = []
+        self._paused = False
 
     def attach(self, page: Any, *, page_id: str) -> None:
         self._listen(page, "console", lambda message: self.console(message, page_id=page_id))
@@ -32,7 +33,15 @@ class DiagnosticsObserver:
         emitter.on(event, handler)
         self._listeners.append((emitter, event, handler))
 
-    def emit(self, diagnostic_type: str, *, page_id: str | None = None, **payload: Any) -> RecordingFact:
+    def emit(
+        self,
+        diagnostic_type: str,
+        *,
+        page_id: str | None = None,
+        **payload: Any,
+    ) -> RecordingFact | None:
+        if self._paused:
+            return None
         clean = self.redaction.redact_value({"type": diagnostic_type, **payload})
         return self.ledger.emit(
             RecordingFact,
@@ -42,7 +51,7 @@ class DiagnosticsObserver:
             redacted=True,
         )
 
-    def console(self, message: Any, *, page_id: str) -> RecordingFact:
+    def console(self, message: Any, *, page_id: str) -> RecordingFact | None:
         location = getattr(message, "location", None)
         return self.emit(
             "console",
@@ -52,7 +61,7 @@ class DiagnosticsObserver:
             location=location if isinstance(location, dict) else {},
         )
 
-    def page_error(self, error: Any, *, page_id: str) -> RecordingFact:
+    def page_error(self, error: Any, *, page_id: str) -> RecordingFact | None:
         return self.emit(
             "pageerror",
             page_id=page_id,
@@ -60,7 +69,7 @@ class DiagnosticsObserver:
             name=type(error).__name__,
         )
 
-    def dialog(self, dialog: Any, *, page_id: str) -> RecordingFact:
+    def dialog(self, dialog: Any, *, page_id: str) -> RecordingFact | None:
         return self.emit(
             "dialog",
             page_id=page_id,
@@ -69,7 +78,7 @@ class DiagnosticsObserver:
             default_value=str(getattr(dialog, "default_value", "")),
         )
 
-    def _handle_dialog(self, dialog: Any, *, page_id: str) -> RecordingFact:
+    def _handle_dialog(self, dialog: Any, *, page_id: str) -> RecordingFact | None:
         # Once a listener exists Playwright no longer auto-dismisses dialogs.
         # Schedule the safe dismissal before persistence, so a full ledger
         # cannot leave the page deadlocked.
@@ -93,6 +102,12 @@ class DiagnosticsObserver:
             # Capture may already be failed/full; task completion must still be
             # consumed so asyncio never reports an unhandled exception.
             pass
+
+    def pause(self) -> None:
+        self._paused = True
+
+    def resume(self) -> None:
+        self._paused = False
 
     async def close(self) -> None:
         listeners, self._listeners = self._listeners, []

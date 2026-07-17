@@ -11,7 +11,13 @@ from uuid import UUID, uuid4
 from pydantic import Field, field_validator, model_validator
 
 from dano_recording.domain._base import FrozenDict, FrozenModel, freeze_json
-from dano_recording.domain.fields import AxisDecision, AxisOrigin, FieldDimension
+from dano_recording.domain.fields import (
+    AxisDecision,
+    AxisOrigin,
+    FieldDimension,
+    SourceBinding,
+    SourceBindingKind,
+)
 from dano_recording.value_evidence import ValueEvidence
 
 
@@ -553,6 +559,103 @@ def _snapshot_field_rows(snapshot: dict[str, Any]) -> tuple[dict[str, Any], ...]
     return tuple(rows)
 
 
+_ENUM_SOURCE_KINDS = frozenset(
+    {"api_option", "manual_enum", "page_enum", "form_option", "static_enum"}
+)
+
+
+def _project_source_binding(row: dict[str, Any], value: Any) -> None:
+    """Keep the legacy workbench projection aligned with the canonical axis."""
+
+    try:
+        binding = (
+            value
+            if isinstance(value, SourceBinding)
+            else SourceBinding.model_validate(value)
+        )
+    except (TypeError, ValueError):
+        # Historic snapshots can contain an unresolved legacy value. Preserve
+        # the canonical payload without inventing a compatibility projection.
+        row["source_binding"] = deepcopy(value)
+        return
+    row["source_binding"] = binding.model_dump(mode="json", exclude_none=True)
+    prior_source = row.get("source") if isinstance(row.get("source"), dict) else {}
+    manual = bool(prior_source.get("manual"))
+    needs_configuration = False
+
+    if binding.kind is SourceBindingKind.CALLER:
+        prior_kind = str(row.get("source_kind") or "")
+        source_kind = prior_kind if prior_kind in _ENUM_SOURCE_KINDS else "user_input"
+        source: dict[str, Any] = {"kind": source_kind}
+    elif binding.kind in {
+        SourceBindingKind.PREVIOUS_RESPONSE,
+        SourceBindingKind.DEPENDENCY_RESPONSE,
+    }:
+        request_ref = binding.request_definition_id or binding.request_id
+        source_kind = "previous_response"
+        source = {
+            "kind": source_kind,
+            "source_request_id": request_ref,
+            "request_definition_id": request_ref,
+            "source_path": binding.response_path,
+            "response_path": binding.response_path,
+        }
+    elif binding.kind in {SourceBindingKind.CONSTANT, SourceBindingKind.DEFAULT}:
+        source_kind = "constant"
+        source = {"kind": source_kind, "constant": binding.value}
+    elif binding.kind is SourceBindingKind.DERIVED:
+        source_kind = "computed"
+        source = {"kind": source_kind, "expression": binding.expression}
+    elif binding.kind is SourceBindingKind.RUNTIME_CONTEXT:
+        resolver = str(binding.runtime_resolver or "")
+        if resolver.startswith("runtime_context.request_headers"):
+            source_kind = "request_header"
+            header = resolver.removeprefix(
+                "runtime_context.request_headers"
+            ).lstrip(".")
+            source = {
+                "kind": source_kind,
+                "header": header,
+                "runtime_resolver": resolver,
+            }
+            needs_configuration = not bool(header)
+        elif resolver == "runtime_context.current_user" or resolver.startswith(
+            "runtime_context.current_user."
+        ):
+            source_kind = "current_user"
+            source = {"kind": source_kind, "runtime_resolver": resolver}
+        elif resolver == "runtime_context.system_time" or resolver.startswith(
+            "runtime_context.system_time."
+        ):
+            source_kind = "system_time"
+            source = {"kind": source_kind, "runtime_resolver": resolver}
+        elif resolver.startswith("runtime_context.generated."):
+            source_kind = "system_generated"
+            source = {
+                "kind": source_kind,
+                "strategy": resolver.rsplit(".", 1)[-1],
+                "runtime_resolver": resolver,
+            }
+        else:
+            source_kind = "page_context"
+            context_key = resolver.removeprefix("runtime_context.")
+            source = {
+                "kind": source_kind,
+                "context_key": context_key,
+                "runtime_resolver": resolver,
+            }
+            needs_configuration = not bool(context_key)
+    else:
+        source_kind = "unknown"
+        source = {}
+        needs_configuration = True
+    if manual:
+        source["manual"] = True
+    row["source_kind"] = source_kind
+    row["source"] = source
+    row["need_human_confirm"] = needs_configuration
+
+
 def _project_axis_value(
     row: dict[str, Any],
     axis: FieldDimension,
@@ -563,12 +666,9 @@ def _project_axis_value(
     elif axis is FieldDimension.BUSINESS_TYPE:
         row.update({"business_type": value, "type": value})
     elif axis is FieldDimension.CLASSIFICATION:
-        row["classification"] = value
+        row.update({"classification": value, "category": value})
     elif axis is FieldDimension.SOURCE_BINDING:
-        row["source_binding"] = (
-            value.model_dump(mode="json", exclude_none=True)
-            if hasattr(value, "model_dump") else deepcopy(value)
-        )
+        _project_source_binding(row, value)
     elif axis is FieldDimension.DEFAULT_VALUE:
         row["default_value"] = deepcopy(value)
     elif axis is FieldDimension.CALLER_REQUIRED:

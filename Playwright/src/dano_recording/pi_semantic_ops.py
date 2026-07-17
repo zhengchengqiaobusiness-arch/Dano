@@ -14,7 +14,13 @@ import re
 from typing import Any, Iterable
 from uuid import UUID, uuid4
 
-from dano_recording.domain.fields import AxisDecision, AxisOrigin, FieldDimension
+from dano_recording.domain.fields import (
+    AxisDecision,
+    AxisOrigin,
+    FieldDimension,
+    SourceBinding,
+    SourceBindingKind,
+)
 from dano_recording.field_registry import (
     BindingDirection,
     BindingRole,
@@ -46,7 +52,13 @@ ALLOWED_OPERATIONS = frozenset({
     "move_request_to_capability",
     "set_input_schema",
     "set_output_schema",
+    "set_flow_goal",
+    "set_flow_action",
+    "set_business_description",
+    "set_step_name",
+    "set_step_title",
     "set_capability_name",
+    "set_capability_title",
     "set_capability_description",
 })
 
@@ -69,6 +81,7 @@ _EVIDENCE_KEY = re.compile(
     r"(?:evidence|observation|request|control|action|transaction|capture|binding|fact).*ids?$",
     re.I,
 )
+_STABLE_IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,127}\Z")
 
 
 def _identity(value: dict[str, Any], names: Iterable[str]) -> str:
@@ -262,6 +275,93 @@ def _reject_manual_capability(
         )
 
 
+def _semantic_decision(
+    *, revision: int, evidence: tuple[str, ...], confidence: float,
+) -> dict[str, Any]:
+    return {
+        "origin": "pi",
+        "revision": revision,
+        "confidence": confidence,
+        "evidence_ids": list(evidence),
+        "manual_override": False,
+    }
+
+
+def _flow_uuid(spec: dict[str, Any]) -> str:
+    """Resolve the immutable lineage identity used by flow-level writes."""
+
+    registry = spec.get("field_registry") or {}
+    capture = spec.get("capture_store") or {}
+    value = (
+        spec.get("lineage_id")
+        or (registry.get("lineage_id") if isinstance(registry, dict) else None)
+        or (capture.get("lineage_id") if isinstance(capture, dict) else None)
+    )
+    if not value:
+        raise PiSemanticOperationError("flow target requires a stable lineage_id")
+    return _canonical_uuid(value, label="lineage_id")
+
+
+def _manual_flow_axis(spec: dict[str, Any], axis: str) -> bool:
+    decisions = (spec.get("meta") or {}).get("flow_semantic_decisions") or {}
+    decision = decisions.get(axis) if isinstance(decisions, dict) else None
+    if isinstance(decision, dict) and (
+        decision.get("manual_override") is True
+        or str(decision.get("origin") or "").casefold() in {"manual", "user"}
+    ):
+        return True
+    pins = (spec.get("meta") or {}).get("decision_origins") or {}
+    return isinstance(pins, dict) and str(pins.get(f"flow:{axis}") or "").casefold() in {
+        "manual", "user",
+    }
+
+
+def _manual_step_axis(
+    spec: dict[str, Any], step: dict[str, Any], step_uuid: str, axis: str,
+) -> bool:
+    decisions = step.get("semantic_decisions") or {}
+    decision = decisions.get(axis) if isinstance(decisions, dict) else None
+    if isinstance(decision, dict) and (
+        decision.get("manual_override") is True
+        or str(decision.get("origin") or "").casefold() in {"manual", "user"}
+    ):
+        return True
+    pins = (spec.get("meta") or {}).get("decision_origins") or {}
+    if not isinstance(pins, dict):
+        return False
+    identities = {step_uuid, str(step.get("step_id") or "")}
+    return any(
+        str(owner).casefold() in {"manual", "user"}
+        and str(path).split(":")[-1] == axis
+        and len(parts := str(path).split(":")) >= 3
+        and parts[0] == "step"
+        and parts[1] in identities
+        for path, owner in pins.items()
+    )
+
+
+def _safe_goal(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise PiSemanticOperationError("flow goal must be an object")
+    if not value:
+        raise PiSemanticOperationError("flow goal must be a non-empty object")
+    try:
+        json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise PiSemanticOperationError("flow goal is not JSON serializable") from exc
+    return deepcopy(value)
+
+
+def _semantic_text(value: Any, *, label: str, identifier: bool = False) -> str:
+    if not isinstance(value, str) or not (text := value.strip()):
+        raise PiSemanticOperationError(f"{label} must be a non-empty string")
+    if identifier and _STABLE_IDENTIFIER.fullmatch(text) is None:
+        raise PiSemanticOperationError(
+            f"{label} must be an ASCII identifier beginning with a letter"
+        )
+    return text
+
+
 def _schema_has_path(schema: Any, path: str) -> bool:
     if not path:
         return False
@@ -281,19 +381,20 @@ def _schema_has_path(schema: Any, path: str) -> bool:
     return True
 
 
-def _validate_source_binding(spec: dict[str, Any], value: Any) -> None:
-    if not isinstance(value, dict) or not value.get("kind"):
-        raise PiSemanticOperationError("source_binding is one atomic object with a kind")
-    if str(value.get("kind")) not in {"previous_response", "dependency_response"}:
-        return
-    source_id = str(
-        value.get("request_definition_id")
-        or value.get("request_id")
-        or value.get("source_request_id")
-        or value.get("source_step_id")
-        or ""
-    )
-    path = str(value.get("response_path") or value.get("source_path") or "")
+def _validate_source_binding(spec: dict[str, Any], value: Any) -> dict[str, Any]:
+    try:
+        binding = SourceBinding.model_validate(value)
+    except (TypeError, ValueError) as exc:
+        raise PiSemanticOperationError(
+            f"invalid atomic source_binding: {exc}"
+        ) from exc
+    if binding.kind not in {
+        SourceBindingKind.PREVIOUS_RESPONSE,
+        SourceBindingKind.DEPENDENCY_RESPONSE,
+    }:
+        return binding.model_dump(mode="json", exclude_none=True)
+    source_id = str(binding.request_definition_id or binding.request_id or "")
+    path = str(binding.response_path or "")
     source = next((
         step for step in spec.get("steps") or []
         if isinstance(step, dict)
@@ -309,6 +410,7 @@ def _validate_source_binding(spec: dict[str, Any], value: Any) -> None:
         raise PiSemanticOperationError(
             f"source_binding response path does not exist: {source_id}:{path}"
         )
+    return binding.model_dump(mode="json", exclude_none=True)
 
 
 def _write_axis(
@@ -433,15 +535,84 @@ def _apply_operation(
         if _manual_axis(spec, targets, target, axis):
             raise PiSemanticOperationError(f"manual field axis cannot be overwritten: {target}:{axis}")
         if axis == "source_binding":
-            _validate_source_binding(spec, value)
+            value = _validate_source_binding(spec, value)
         _write_axis(
             spec, target, targets, axis, value, revision=revision,
             evidence_ids=evidence, confidence=confidence,
         )
         return
 
+    flow_keys = {
+        "set_flow_goal": "goal",
+        "set_flow_action": "action",
+        "set_business_description": "business_description",
+    }
+    if kind in flow_keys:
+        target = _canonical_uuid(target, label="lineage_id")
+        expected_target = _flow_uuid(spec)
+        if target != expected_target:
+            raise PiSemanticOperationError(
+                f"flow target does not exist: {target}"
+            )
+        key = flow_keys[kind]
+        if _manual_flow_axis(spec, key):
+            raise PiSemanticOperationError(
+                f"manual flow decision cannot be overwritten: {target}:{key}"
+            )
+        spec[key] = (
+            _safe_goal(value)
+            if key == "goal"
+            else _semantic_text(
+                value,
+                label=f"flow {key}",
+                identifier=key == "action",
+            )
+        )
+        spec.setdefault("meta", {}).setdefault(
+            "flow_semantic_decisions", {}
+        )[key] = _semantic_decision(
+            revision=revision,
+            evidence=evidence,
+            confidence=confidence,
+        )
+        return
+
+    if kind in {"set_step_name", "set_step_title"}:
+        target = _canonical_uuid(target, label="step_uuid")
+        steps = [
+            step for step in spec.get("steps") or [] if isinstance(step, dict)
+        ]
+        matches = [
+            step
+            for step in steps
+            if _canonical_uuid(step.get("step_uuid"), label="step_uuid") == target
+        ]
+        if len(matches) != 1:
+            raise PiSemanticOperationError(
+                f"step target does not exist uniquely: {target}"
+            )
+        step = matches[0]
+        key = "name" if kind == "set_step_name" else "title"
+        if _manual_step_axis(spec, step, target, key):
+            raise PiSemanticOperationError(
+                f"manual step decision cannot be overwritten: {target}:{key}"
+            )
+        step[key] = _semantic_text(value, label=f"step {key}")
+        step.setdefault("semantic_decisions", {})[key] = _semantic_decision(
+            revision=revision,
+            evidence=evidence,
+            confidence=confidence,
+        )
+        return
+
     capabilities, by_capability = _capabilities(spec)
-    if kind in {"set_input_schema", "set_output_schema", "set_capability_name", "set_capability_description"}:
+    if kind in {
+        "set_input_schema",
+        "set_output_schema",
+        "set_capability_name",
+        "set_capability_title",
+        "set_capability_description",
+    }:
         target = _canonical_uuid(target, label="capability_uuid")
         capability = by_capability.get(target)
         if capability is None:
@@ -450,14 +621,24 @@ def _apply_operation(
             "set_input_schema": "input_schema",
             "set_output_schema": "output_schema",
             "set_capability_name": "name",
+            "set_capability_title": "title",
             "set_capability_description": "description",
         }[kind]
         _reject_manual_capability(spec, capability, target, key)
-        capability[key] = _safe_schema(value) if key.endswith("schema") else str(value or "").strip()
-        capability.setdefault("semantic_decisions", {})[key] = {
-            "origin": "pi", "revision": revision, "confidence": confidence,
-            "evidence_ids": list(evidence),
-        }
+        capability[key] = (
+            _safe_schema(value)
+            if key.endswith("schema")
+            else _semantic_text(
+                value,
+                label=f"capability {key}",
+                identifier=key == "name",
+            )
+        )
+        capability.setdefault("semantic_decisions", {})[key] = _semantic_decision(
+            revision=revision,
+            evidence=evidence,
+            confidence=confidence,
+        )
         return
 
     if kind == "link_field_binding":

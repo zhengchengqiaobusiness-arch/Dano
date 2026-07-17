@@ -102,7 +102,7 @@ def _fields(snapshot: dict[str, Any], body: dict[str, Any]) -> list[dict[str, An
                 continue
             key = (
                 str(raw.get("field_uuid") or raw.get("field_contract_id") or raw.get("field_id") or ""),
-                str(raw.get("step_id") or raw.get("step_uuid") or ""),
+                str(raw.get("step_uuid") or raw.get("step_id") or ""),
                 str(raw.get("wire_path") or raw.get("path") or raw.get("key") or ""),
             )
             if key in seen:

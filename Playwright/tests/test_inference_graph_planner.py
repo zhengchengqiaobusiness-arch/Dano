@@ -611,6 +611,36 @@ def test_capability_planner_keeps_only_proven_dependency_and_normalises_batch() 
     assert normalize_capability_operation("submit_batch") == "submit"
 
 
+def test_strong_click_with_opaque_get_object_materializes_one_read_capability() -> None:
+    transaction = ActionTransaction(
+        transaction_id="txn-submit",
+        tenant="tenant-a",
+        recording_id="recording-a",
+        action_id="server-click",
+        action_label="",
+        request_ids=("opaque-read",),
+        first_sequence=1,
+        last_sequence=1,
+    )
+    request = _request(
+        "opaque-read",
+        1,
+        method="GET",
+        path="/rpc/a7f91",
+        disposition=RequestDisposition.MATERIALIZED,
+        response_schema={
+            "type": "object",
+            "properties": {"id": {"type": "string"}, "status": {"type": "string"}},
+        },
+    )
+
+    plan = plan_capabilities((transaction,), (request,))
+
+    assert plan.terminal_request_ids == ("opaque-read",)
+    assert len(plan.capabilities) == 1
+    assert plan.capabilities[0].request_ids == ("opaque-read",)
+
+
 def test_capability_planner_splits_only_independently_usable_results() -> None:
     transaction = ActionTransaction(
         transaction_id="txn-submit",
@@ -639,7 +669,9 @@ def test_capability_planner_splits_only_independently_usable_results() -> None:
         ),
     )
     unsplit = plan_capabilities((transaction,), requests)
-    assert [item.request_ids for item in unsplit.capabilities] == [("approve",)]
+    assert [item.request_ids for item in unsplit.capabilities] == [
+        ("save", "approve")
+    ]
 
     split = plan_capabilities(
         (transaction,),
@@ -666,3 +698,47 @@ def test_capability_planner_splits_only_independently_usable_results() -> None:
     assert [item.name for item in split.capabilities] == ["submit", "approve"]
     assert [item.request_ids for item in split.capabilities] == [("save",), ("approve",)]
     assert all("batch" not in item.name for item in split.capabilities)
+
+
+def test_unsplittable_submit_then_refresh_keeps_write_policy_and_ownership() -> None:
+    transaction = ActionTransaction(
+        transaction_id="txn-submit",
+        tenant="tenant-a",
+        recording_id="recording-a",
+        action_id="submit-button",
+        action_label="提交",
+        request_ids=("submit-process", "refresh-page"),
+        first_sequence=1,
+        last_sequence=2,
+    )
+    requests = (
+        _request(
+            "submit-process",
+            1,
+            method="POST",
+            path="/admin-api/oa/duty-leave/submit-process",
+            disposition=RequestDisposition.MATERIALIZED,
+            body={"id": "leave-1"},
+        ),
+        _request(
+            "refresh-page",
+            2,
+            method="GET",
+            path="/admin-api/oa/duty-leave/page",
+            disposition=RequestDisposition.MATERIALIZED,
+            response_schema={
+                "type": "object",
+                "properties": {"list": {"type": "array"}},
+            },
+        ),
+    )
+
+    plan = plan_capabilities((transaction,), requests)
+
+    assert len(plan.capabilities) == 1
+    capability = plan.capabilities[0]
+    assert capability.request_ids == ("submit-process", "refresh-page")
+    assert capability.operation == "submit"
+    assert capability.risk_level.value == "L3"
+    assert capability.explicit_confirmation is True
+    assert plan.unbound_business_requests == ()

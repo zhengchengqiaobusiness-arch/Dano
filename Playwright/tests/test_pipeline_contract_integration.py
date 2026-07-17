@@ -254,6 +254,7 @@ def test_pi_free_text_projection_redacts_pii_credentials_and_identity_assignment
             "summary": "联系 alice@example.test，user_id=user-7",
             "token": "top-secret-token",
         },
+        "action": "删除 alice@example.test 的申请，Authorization: Bearer action-secret",
         "title": "审批 alice@example.test 电话 13800138000",
         "business_description": "Authorization: Bearer secret-value; user_id=user-7",
     })
@@ -263,10 +264,12 @@ def test_pi_free_text_projection_redacts_pii_credentials_and_identity_assignment
         "13800138000",
         "top-secret-token",
         "secret-value",
+        "action-secret",
         "user-7",
     ):
         assert plaintext not in serialized
     assert "审批" in projected["title"]
+    assert "删除" in projected["action"]
 
 
 def _identity_enum_facts() -> tuple[RecordingFact, ...]:
@@ -1267,6 +1270,7 @@ async def test_browser_text_event_and_action_fact_never_expose_raw_pii(tmp_path)
             return {"name": "email", "input_type": "email"}
 
     live.started = True
+    live.capture_active = True
     live.page = Page()  # type: ignore[assignment]
     await service._dispatch_input(  # noqa: SLF001
         TENANT,

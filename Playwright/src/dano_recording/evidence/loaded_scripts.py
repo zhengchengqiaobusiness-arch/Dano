@@ -78,6 +78,7 @@ class LoadedScriptCollector:
         self._total_bytes = 0
         self._cdp_sessions: list[Any] = []
         self._tasks = TaskSupervisor(self._task_error)
+        self._paused = False
 
     @property
     def scripts(self) -> tuple[LoadedScript, ...]:
@@ -95,6 +96,8 @@ class LoadedScriptCollector:
         target_id = new_id()
 
         def parsed(event: dict[str, Any]) -> None:
+            if self._paused:
+                return
             self._tasks.create(
                 self.collect_parsed_script(
                     event,
@@ -120,6 +123,8 @@ class LoadedScriptCollector:
         target_id: str = "manual",
         page_id: str | None = None,
     ) -> LoadedScript | None:
+        if self._paused:
+            return None
         script_id = str(event.get("scriptId") or event.get("script_id") or "")
         key = (target_id, script_id)
         if not script_id or key in self._scripts:
@@ -244,14 +249,39 @@ class LoadedScriptCollector:
         except Exception:
             pass
 
-    async def close(self) -> None:
-        drained = await self._tasks.drain(timeout=5.0)
-        await self._tasks.close(cancel=not drained)
+    async def pause(self) -> None:
+        self._paused = True
+        if not await self._tasks.drain(timeout=5.0):
+            await self._tasks.cancel_pending()
+
+    def resume(self) -> None:
+        self._paused = False
+
+    async def reset_generation(self) -> None:
+        """Clear script evidence and detach CDP sessions at a paused boundary."""
+
+        if not self._paused:
+            raise RuntimeError("script collector must be paused before generation reset")
+        await self._tasks.cancel_pending()
+        await self._detach_sessions()
+        self._scripts.clear()
+        self._total_bytes = 0
+
+    async def _detach_sessions(self) -> None:
         sessions, self._cdp_sessions = self._cdp_sessions, []
         for session in sessions:
             detach = getattr(session, "detach", None)
             if detach is None:
                 continue
-            result = detach()
-            if inspect.isawaitable(result):
-                await result
+            try:
+                result = detach()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:  # noqa: BLE001 - optional browser evidence
+                self._task_error(exc)
+
+    async def close(self) -> None:
+        self._paused = True
+        drained = await self._tasks.drain(timeout=5.0)
+        await self._tasks.close(cancel=not drained)
+        await self._detach_sessions()

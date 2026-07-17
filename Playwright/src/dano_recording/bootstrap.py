@@ -34,6 +34,7 @@ from dano_recording.api.decision_commands import (
 from dano_recording.api.events import RecordingEventBroker
 from dano_recording.api.protocol import CreateRecordingRequest, SessionConnectionResponse
 from dano_recording.capture.browser_session import BrowserCapture, BrowserSessionManager
+from dano_recording.capture.input_dispatcher import describe_click_target
 from dano_recording.capture.ledger import FactLedger
 from dano_recording.capture.network_observer import NetworkObserver, NetworkObserverConfig
 from dano_recording.capture.redaction import RedactionPolicy
@@ -81,7 +82,7 @@ from dano_recording.persistence.repository import (
     RecordingRepository,
     RevisionConflict,
 )
-from dano_recording.pi.coordinator import RecordingPiCoordinator
+from dano_recording.pi.coordinator import PiPlanMode, RecordingPiCoordinator
 from dano_recording.pi.sessions import PiSidecarClient, PiUnavailable
 from dano_recording.pi_semantic_ops import is_semantic_operation_submission
 from dano_recording.publish.review import ReviewCollector
@@ -149,6 +150,10 @@ class LiveRecording:
     reset_sequence: int = 0
     frame_sequence: int = 0
     started: bool = False
+    capture_active: bool = False
+    capture_end_sequence: int | None = None
+    analysis_fact_ids: set[str] = field(default_factory=set)
+    analysis_evidence_active: bool = False
     capture_finalized: bool = False
     artifact_hashes: set[tuple[str, str]] = field(default_factory=set)
 
@@ -814,10 +819,90 @@ class RecordingApplication:
         elif sender is not None:
             await sender(self._analysis_status_payload(live))
 
+    async def _freeze_capture(self, live: LiveRecording) -> None:
+        """Freeze one immutable capture boundary without closing the browser.
+
+        Closing observers drains their in-flight tasks.  The exclusive ledger
+        sequence recorded afterwards is then used by every compiler pass, so a
+        late callback or unrelated diagnostic can never drift the revision.
+        Cancellation waits for this small critical section before propagating.
+        """
+
+        if not live.capture_active and live.capture_end_sequence is not None:
+            await self.repository.update_session(
+                live.tenant,
+                live.recording_id,
+                metadata={
+                    "capture_end_sequence": live.capture_end_sequence,
+                    "analysis_fact_ids": sorted(live.analysis_fact_ids),
+                },
+            )
+            return
+        live.capture_active = False
+
+        async def finish_freeze() -> None:
+            if live.frame_task is not None:
+                live.frame_task.cancel()
+                await asyncio.gather(live.frame_task, return_exceptions=True)
+                live.frame_task = None
+            runtime = live.runtime
+            if runtime is not None:
+                await runtime.pause()
+            else:
+                seen: set[int] = set()
+                for observer in (live.network, live.scripts, live.capture):
+                    if observer is None or id(observer) in seen:
+                        continue
+                    seen.add(id(observer))
+                    pause = getattr(observer, "pause", None)
+                    if pause is not None:
+                        value = pause()
+                        if asyncio.iscoroutine(value):
+                            await value
+            await self._drain_facts(live)
+            live.capture_end_sequence = live.ledger.next_sequence
+            await self.repository.update_session(
+                live.tenant,
+                live.recording_id,
+                metadata={
+                    "capture_end_sequence": live.capture_end_sequence,
+                    "analysis_fact_ids": sorted(live.analysis_fact_ids),
+                },
+            )
+
+        task = asyncio.create_task(
+            finish_freeze(),
+            name=f"recording-freeze-{live.recording_id}",
+        )
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+
+    async def _capture_generation_facts(
+        self,
+        live: LiveRecording,
+    ) -> tuple[RecordingFact, ...]:
+        rows = await self.repository.list_facts(live.tenant, live.recording_id)
+        end = live.capture_end_sequence
+        return tuple(
+            fact
+            for fact in rows
+            if fact.sequence >= live.reset_sequence
+            and (
+                end is None
+                or fact.sequence < end
+                or fact.fact_id in live.analysis_fact_ids
+            )
+        )
+
     async def _recapture_command(self, tenant: str, recording_id: str) -> None:
         live = await self._get_live(tenant, recording_id)
         if live.analysis_task is not None and not live.analysis_task.done():
             await self._cancel_analysis(tenant, recording_id)
+        if live.capture_active:
+            await self._freeze_capture(live)
         # The generation and replay boundary form one persisted checkpoint.
         # Writing them separately leaves a crash window where restart restores
         # the new generation with the old boundary and reprojects prior facts.
@@ -829,14 +914,31 @@ class RecordingApplication:
             metadata={
                 "capture_generation": next_store.capture_generation,
                 "reset_sequence": next_reset_sequence,
+                "capture_end_sequence": None,
+                "analysis_fact_ids": [],
             },
         )
+        if live.runtime is not None:
+            await live.runtime.reset_generation()
+        else:
+            if live.network is not None:
+                reset_network = getattr(live.network, "reset_generation", None)
+                if reset_network is not None:
+                    reset_network()
+            if live.scripts is not None:
+                reset_scripts = getattr(live.scripts, "reset_generation", None)
+                if reset_scripts is not None:
+                    value = reset_scripts()
+                    if asyncio.iscoroutine(value):
+                        await value
         # Do not mutate live state until the durable checkpoint succeeds.  A
         # transient repository failure therefore leaves the current capture
         # generation fully usable and retryable.
         live.capture_store = next_store
         live.capture_generation = next_store.capture_generation
         live.capture_finalized = False
+        live.capture_end_sequence = None
+        live.analysis_fact_ids.clear()
         live.evidence = EvidenceRegistry()
         live.reset_sequence = next_reset_sequence
         live.ledger.emit(
@@ -845,6 +947,8 @@ class RecordingApplication:
             payload={"type": "recording_reset"},
             redacted=True,
         )
+        if live.started:
+            await self._resume_capture(live)
         await self.events.publish(tenant, recording_id, {"type": "started", "reset": True})
         await self.events.publish(tenant, recording_id, {
             "type": "recapture_started",
@@ -903,6 +1007,21 @@ class RecordingApplication:
             payload=payload,
         )
 
+    @staticmethod
+    def _capture_store_accepts_fact(
+        live: LiveRecording,
+        fact: RecordingFact,
+    ) -> bool:
+        """Apply the same immutable boundary to generation-owned raw records."""
+
+        end = live.capture_end_sequence
+        if end is None or fact.sequence < end:
+            return True
+        return (
+            live.analysis_evidence_active
+            and fact.kind in {FactKind.DOM_CONTROL, FactKind.SCRIPT}
+        )
+
     async def _get_live(self, tenant: str, recording_id: str) -> LiveRecording:
         key = (tenant, recording_id)
         live = self.live.get(key)
@@ -912,6 +1031,15 @@ class RecordingApplication:
         session = await self.repository.get_session(tenant, recording_id)
         reset_sequence = int(session.metadata.get("reset_sequence") or 0)
         capture_generation = int(session.metadata.get("capture_generation") or 0)
+        raw_capture_end = session.metadata.get("capture_end_sequence")
+        capture_end_sequence = (
+            int(raw_capture_end) if raw_capture_end is not None else None
+        )
+        analysis_fact_ids = {
+            str(fact_id)
+            for fact_id in session.metadata.get("analysis_fact_ids") or ()
+            if str(fact_id)
+        }
         revision = await self.repository.get_revision(tenant, recording_id)
         lineage_id = self._lineage_id(
             tenant,
@@ -979,7 +1107,8 @@ class RecordingApplication:
 
         def on_append(fact: RecordingFact) -> None:
             owner = live_ref["value"]
-            self._record_fact_in_capture_store(owner, fact)
+            if self._capture_store_accepts_fact(owner, fact):
+                self._record_fact_in_capture_store(owner, fact)
             task = asyncio.create_task(
                 self._persist_and_emit(owner, fact),
                 name=f"recording-fact-{recording_id}-{fact.sequence}",
@@ -1010,6 +1139,8 @@ class RecordingApplication:
             capture_store=capture_store,
             field_registry=field_registry,
             capture_generation=capture_store.capture_generation,
+            capture_end_sequence=capture_end_sequence,
+            analysis_fact_ids=analysis_fact_ids,
         )
         live_ref["value"] = live
         # The ledger intentionally retains immutable history, while every
@@ -1020,6 +1151,12 @@ class RecordingApplication:
         }
         for fact in facts:
             if fact.sequence < reset_sequence:
+                continue
+            if (
+                capture_end_sequence is not None
+                and fact.sequence >= capture_end_sequence
+                and fact.fact_id not in analysis_fact_ids
+            ):
                 continue
             if fact.fact_id not in existing_record_ids:
                 self._record_fact_in_capture_store(live, fact)
@@ -1100,6 +1237,8 @@ class RecordingApplication:
         session = await self.repository.get_session(tenant, recording_id)
         live = await self._get_live(tenant, recording_id)
         if live.started and live.page is not None:
+            if not live.capture_active:
+                await self._resume_capture(live, session=session)
             await self.events.publish(tenant, recording_id, {
                 "type": "started",
                 "revision": session.current_revision,
@@ -1127,40 +1266,7 @@ class RecordingApplication:
             )
             live.browser = browser
             live.context = context
-            safe_record = str(session.metadata.get("recording_mode") or "record_only") != "real_submit"
-            navigation_hosts = tuple(dict.fromkeys(
-                (urlsplit(value).hostname or "").lower()
-                for value in (
-                    start_url,
-                    str(session.metadata.get("base_url") or session.base_url or ""),
-                )
-                if value and urlsplit(value).hostname
-            ))
-            navigation_policy = URLSafetyPolicy(
-                allowed_hosts=navigation_hosts,
-                allow_private_networks=self.allow_private_networks,
-            )
-            resource_policy = URLSafetyPolicy(
-                # Fetch/XHR and static resources can legitimately use API/CDN
-                # origins. They are all captured, while public-network and URL
-                # credential safety still applies.
-                allow_private_networks=False,
-                private_host_allowlist=(
-                    navigation_hosts if self.allow_private_networks else ()
-                ),
-            )
-            live.runtime = CaptureRuntime(
-                live.ledger,
-                network_config=NetworkObserverConfig(safe_record=safe_record),
-                url_policy=navigation_policy,
-                network_url_policy=resource_policy,
-                value_evidence_factory=self.value_evidence_factory,
-                recording_lineage=str(live.lineage_id),
-            )
-            await live.runtime.attach(context)
-            live.capture = live.runtime.browser
-            live.network = live.runtime.network
-            live.scripts = live.runtime.scripts
+            await self._attach_capture_runtime(live, session=session)
             pages = tuple(getattr(context, "pages", ()) or ())
             page = pages[0] if pages else await context.new_page()
             live.page = page
@@ -1190,6 +1296,9 @@ class RecordingApplication:
             raise
         self._resume_tokens.pop((tenant, recording_id), None)
         live.started = True
+        live.capture_active = True
+        live.capture_end_sequence = None
+        live.analysis_fact_ids.clear()
         live.capture_finalized = False
         live.frame_task = asyncio.create_task(self._frame_loop(live), name=f"recording-frames-{recording_id}")
         await self.repository.update_session(
@@ -1205,9 +1314,95 @@ class RecordingApplication:
             "pi_status": self._client_pi_status(recording_id),
         })
 
+    async def _attach_capture_runtime(
+        self,
+        live: LiveRecording,
+        *,
+        session: RecordingSession,
+    ) -> None:
+        if live.context is None:
+            raise DecisionCommandError("browser context is unavailable")
+        start_url = str(session.metadata.get("start_url") or "")
+        safe_record = str(session.metadata.get("recording_mode") or "record_only") != "real_submit"
+        navigation_hosts = tuple(dict.fromkeys(
+            (urlsplit(value).hostname or "").lower()
+            for value in (
+                start_url,
+                str(session.metadata.get("base_url") or session.base_url or ""),
+            )
+            if value and urlsplit(value).hostname
+        ))
+        navigation_policy = URLSafetyPolicy(
+            allowed_hosts=navigation_hosts,
+            allow_private_networks=self.allow_private_networks,
+        )
+        resource_policy = URLSafetyPolicy(
+            # Fetch/XHR and static resources can legitimately use API/CDN
+            # origins. They are all captured, while public-network and URL
+            # credential safety still applies.
+            allow_private_networks=False,
+            private_host_allowlist=(navigation_hosts if self.allow_private_networks else ()),
+        )
+        runtime = CaptureRuntime(
+            live.ledger,
+            network_config=NetworkObserverConfig(safe_record=safe_record),
+            url_policy=navigation_policy,
+            network_url_policy=resource_policy,
+            value_evidence_factory=self.value_evidence_factory,
+            recording_lineage=str(live.lineage_id),
+        )
+        try:
+            await runtime.attach(live.context)
+        except Exception:
+            await runtime.close()
+            raise
+        live.runtime = runtime
+        live.capture = runtime.browser
+        live.network = runtime.network
+        live.scripts = runtime.scripts
+
+    async def _resume_capture(
+        self,
+        live: LiveRecording,
+        *,
+        session: RecordingSession | None = None,
+    ) -> None:
+        if not live.started or live.context is None or live.page is None:
+            raise DecisionCommandError("browser session is unavailable; resume it before recapturing")
+        if live.capture_active:
+            return
+        if live.runtime is None:
+            session = session or await self.repository.get_session(
+                live.tenant,
+                live.recording_id,
+            )
+            await self._attach_capture_runtime(live, session=session)
+        else:
+            await live.runtime.resume(live.context)
+            live.capture = live.runtime.browser
+            live.network = live.runtime.network
+            live.scripts = live.runtime.scripts
+        live.capture_active = True
+        live.capture_end_sequence = None
+        live.capture_finalized = False
+        if live.frame_task is None or live.frame_task.done():
+            live.frame_task = asyncio.create_task(
+                self._frame_loop(live),
+                name=f"recording-frames-{live.recording_id}",
+            )
+        await self.repository.update_session(
+            live.tenant,
+            live.recording_id,
+            status=RecordingStatus.RECORDING,
+            metadata={
+                "capture_end_sequence": None,
+                "analysis_fact_ids": [],
+            },
+        )
+
     async def _frame_loop(self, live: LiveRecording) -> None:
         try:
-            while live.started and live.page is not None:
+            while live.started and live.capture_active and live.page is not None:
                 data = await live.page.screenshot(type="jpeg", quality=65)
                 live.frame_sequence += 1
                 await self.events.publish(live.tenant, live.recording_id, {
@@ -1228,7 +1423,7 @@ class RecordingApplication:
 
     async def _dispatch_input(self, tenant: str, recording_id: str, event: dict[str, Any]) -> None:
         live = await self._get_live(tenant, recording_id)
-        if not live.started or live.page is None:
+        if not live.started or not live.capture_active or live.page is None:
             raise DecisionCommandError("browser capture has not started")
         kind = str(event.get("kind") or "")
         action_id = new_id()
@@ -1247,7 +1442,12 @@ class RecordingApplication:
             viewport = await live.page.evaluate("() => ({width: innerWidth, height: innerHeight})")
             x, y = nx * float(viewport.get("width") or 1280), ny * float(viewport.get("height") or 720)
             locator = f"screen:{nx:.5f},{ny:.5f}"
-            label = f"click {locator}"
+            label = await describe_click_target(
+                live.page,
+                x=x,
+                y=y,
+                redaction=self.redaction,
+            )
             live.last_action_id = action_id
             with action_window:
                 live.ledger.emit(
@@ -1344,7 +1544,10 @@ class RecordingApplication:
 
     async def _reset_capture(self, tenant: str, recording_id: str) -> None:
         live = await self._get_live(tenant, recording_id)
+        if not live.capture_active:
+            raise DecisionCommandError("browser capture is frozen; use recapture before resetting")
         live.reset_sequence = live.ledger.next_sequence
+        live.capture_end_sequence = None
         live.ledger.emit(
             RecordingFact,
             kind=FactKind.DIAGNOSTIC,
@@ -1404,6 +1607,29 @@ class RecordingApplication:
         })
 
     async def _collect_evidence(
+        self,
+        live: LiveRecording,
+        compilation: RecordingCompilation,
+    ) -> None:
+        start_sequence = live.ledger.next_sequence
+        live.analysis_evidence_active = True
+        try:
+            await self._collect_evidence_impl(live, compilation)
+        finally:
+            for fact in live.ledger.snapshot():
+                if (
+                    fact.sequence >= start_sequence
+                    and fact.kind in {FactKind.DOM_CONTROL, FactKind.SCRIPT}
+                ):
+                    live.analysis_fact_ids.add(fact.fact_id)
+            live.analysis_evidence_active = False
+            await self.repository.update_session(
+                live.tenant,
+                live.recording_id,
+                metadata={"analysis_fact_ids": sorted(live.analysis_fact_ids)},
+            )
+
+    async def _collect_evidence_impl(
         self,
         live: LiveRecording,
         compilation: RecordingCompilation,
@@ -1875,13 +2101,8 @@ class RecordingApplication:
                 raise RevisionConflict(expected=expected, actual=session.current_revision)
             live = await self._get_live(tenant, recording_id)
             await self._analysis_progress(live, stage="draining_capture", progress=10)
-            if live.network is not None:
-                await live.network.tasks.drain()
-            await self._drain_facts(live)
-            preliminary_facts = tuple(
-                fact for fact in await self.repository.list_facts(tenant, recording_id)
-                if fact.sequence >= live.reset_sequence
-            )
+            await self._freeze_capture(live)
+            preliminary_facts = await self._capture_generation_facts(live)
             await self.repository.update_session(tenant, recording_id, status=RecordingStatus.COMPILING)
             previous_revision = await self.repository.get_revision(tenant, recording_id)
             previous_snapshot: dict[str, Any] | None = None
@@ -1936,18 +2157,13 @@ class RecordingApplication:
                 "preview": True,
                 "full_spec": deterministic_preview,
                 "flow_spec": deterministic_preview,
-                "check_report": validate_workbench(deepcopy(deterministic_preview)),
             })
             await self._analysis_progress(live, stage="collecting_evidence", progress=35)
+            live.analysis_fact_ids.clear()
             await self._collect_evidence(live, preliminary)
             await self._analysis_progress(live, stage="compiling_contracts", progress=70)
-            if live.network is not None:
-                await live.network.tasks.drain()
             await self._drain_facts(live)
-            facts = tuple(
-                fact for fact in await self.repository.list_facts(tenant, recording_id)
-                if fact.sequence >= live.reset_sequence
-            )
+            facts = await self._capture_generation_facts(live)
             base_compilation = prepare_recording_materials(
                 tenant=tenant,
                 recording_id=recording_id,
@@ -2390,12 +2606,21 @@ class RecordingApplication:
         facts = snapshot.get("request_facts") or {}
         requests = facts.get("requests") if isinstance(facts, dict) else facts
         human_context = _pi_human_context(snapshot, self.redaction)
+        flow_target_uuid = str(snapshot.get("lineage_id") or self._lineage_id(
+            tenant,
+            recording_id,
+            session=session,
+            snapshot=snapshot,
+        ))
         pi_projection = {
             "protocol": "dano.recording-v3.pi-state.v1",
             "recording_id": recording_id,
             "revision": revision.revision if revision else 0,
             "status": session.status.value,
+            "target_uuid": flow_target_uuid,
+            "flow_target": {"kind": "flow", "target_uuid": flow_target_uuid},
             "goal": human_context["goal"],
+            "action": human_context["action"],
             "title": human_context["title"],
             "business_description": human_context["business_description"],
             "steps": [_pi_step(item) for item in snapshot.get("steps") or []],
@@ -2482,7 +2707,7 @@ class RecordingApplication:
                 "state": "running",
                 "pi_status": self._client_pi_status(recording_id),
             })
-            await self.pi.plan(recording_id, revision, instruction="initial")
+            await self.pi.plan(recording_id, revision, mode=PiPlanMode.INITIAL)
             await self._ensure_pi_sessions(tenant, recording_id)
             await self.events.publish(tenant, recording_id, {
                 "type": "pi_status",
@@ -2522,13 +2747,13 @@ class RecordingApplication:
             if kind == "auto_fix_flow":
                 await self.pi.repair(recording_id, expected)
             else:
-                instruction = {
-                    "orchestrate_flow": "replan",
-                    "step_naming": "refresh step and capability names only",
-                    "business_description": "refresh the overall business description only",
-                    "llm_recommendations": "refresh grounded recommendations for unresolved review items only",
-                }.get(kind, kind)
-                await self.pi.plan(recording_id, expected, instruction=instruction)
+                mode = {
+                    "orchestrate_flow": PiPlanMode.REPLAN,
+                    "step_naming": PiPlanMode.STEP_NAMING,
+                    "business_description": PiPlanMode.BUSINESS_DESCRIPTION,
+                    "llm_recommendations": PiPlanMode.RECOMMENDATIONS,
+                }[kind]
+                await self.pi.plan(recording_id, expected, mode=mode)
             latest = await self.repository.get_revision(tenant, recording_id)
             if latest is None:
                 raise DecisionCommandError("Pi completed without a recording revision")
@@ -2865,6 +3090,7 @@ class RecordingApplication:
 
     async def _close_live(self, live: LiveRecording, *, close_browser: bool) -> None:
         live.started = False
+        live.capture_active = False
         if live.frame_task:
             live.frame_task.cancel()
             await asyncio.gather(live.frame_task, return_exceptions=True)
@@ -3000,6 +3226,7 @@ def _pi_human_context(
     policy = redaction or RedactionPolicy()
     return {
         "goal": policy.redact_value(snapshot.get("goal") or {}),
+        "action": policy.redact_text(str(snapshot.get("action") or "")),
         "title": policy.redact_text(str(snapshot.get("title") or "")),
         "business_description": policy.redact_text(
             str(snapshot.get("business_description") or "")

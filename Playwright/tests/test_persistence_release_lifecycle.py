@@ -128,6 +128,8 @@ async def test_recapture_persists_generation_and_reset_boundary_atomically(tmp_p
     assert checkpoints == [{
         "capture_generation": 1,
         "reset_sequence": live.ledger.next_sequence,
+        "capture_end_sequence": None,
+        "analysis_fact_ids": [],
     }]
     assert live.capture_store is original_store
     assert live.capture_generation == 0

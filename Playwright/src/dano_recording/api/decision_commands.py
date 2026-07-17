@@ -237,7 +237,7 @@ def _param_ref(param: dict[str, Any]) -> str:
 _AXIS_EDIT_KEYS: dict[FieldDimension, frozenset[str]] = {
     FieldDimension.DISPLAY_NAME: frozenset({"display_name", "name", "label", "key"}),
     FieldDimension.BUSINESS_TYPE: frozenset({"business_type", "type"}),
-    FieldDimension.CLASSIFICATION: frozenset({"classification"}),
+    FieldDimension.CLASSIFICATION: frozenset({"classification", "category"}),
     FieldDimension.SOURCE_BINDING: frozenset({"source_binding", "source_kind", "source"}),
     FieldDimension.DEFAULT_VALUE: frozenset({"default_value", "default"}),
     FieldDimension.CALLER_REQUIRED: frozenset({"caller_required", "required"}),
@@ -305,6 +305,128 @@ def _manual_source_binding(param: dict[str, Any], value: Any) -> SourceBinding:
     if kind in {"unknown", "unresolved", ""}:
         return SourceBinding(kind=SourceBindingKind.UNKNOWN)
     raise DecisionCommandError(f"unsupported source binding kind: {kind}")
+
+
+_ENUM_SOURCE_KINDS = {
+    "api_option", "manual_enum", "page_enum", "form_option", "static_enum",
+}
+
+
+def _source_binding(value: Any) -> SourceBinding:
+    try:
+        return value if isinstance(value, SourceBinding) else SourceBinding.model_validate(value)
+    except ValueError as exc:
+        raise DecisionCommandError(f"source_binding must be atomic and complete: {exc}") from exc
+
+
+def _source_projection(
+    binding: SourceBinding,
+    *,
+    preferred_kind: str | None = None,
+) -> tuple[str, dict[str, Any], bool]:
+    preferred = str(preferred_kind or "").casefold()
+    if binding.kind is SourceBindingKind.CALLER:
+        if preferred not in _ENUM_SOURCE_KINDS | {"user_input"}:
+            preferred = "user_input"
+        return preferred, {"kind": preferred}, False
+    if binding.kind in {
+        SourceBindingKind.PREVIOUS_RESPONSE,
+        SourceBindingKind.DEPENDENCY_RESPONSE,
+    }:
+        request_ref = binding.request_definition_id or binding.request_id
+        return (
+            "previous_response",
+            {
+                "kind": "previous_response",
+                "source_request_id": request_ref,
+                "request_definition_id": request_ref,
+                "source_path": binding.response_path,
+                "response_path": binding.response_path,
+                "manual": True,
+            },
+            False,
+        )
+    if binding.kind is SourceBindingKind.CONSTANT:
+        return "constant", {"kind": "constant", "constant": binding.value, "manual": True}, False
+    if binding.kind is SourceBindingKind.DEFAULT:
+        return "constant", {"kind": "constant", "constant": binding.value, "manual": True}, False
+    if binding.kind is SourceBindingKind.DERIVED:
+        return "computed", {"kind": "computed", "expression": binding.expression, "manual": True}, False
+    if binding.kind is SourceBindingKind.RUNTIME_CONTEXT:
+        resolver = str(binding.runtime_resolver or "")
+        if resolver.startswith("runtime_context.request_headers"):
+            header = resolver.removeprefix("runtime_context.request_headers").lstrip(".")
+            return "request_header", {"kind": "request_header", "header": header, "runtime_resolver": resolver, "manual": True}, not bool(header)
+        if resolver == "runtime_context.current_user" or resolver.startswith("runtime_context.current_user."):
+            return "current_user", {"kind": "current_user", "runtime_resolver": resolver, "manual": True}, False
+        if resolver == "runtime_context.system_time" or resolver.startswith("runtime_context.system_time."):
+            return "system_time", {"kind": "system_time", "runtime_resolver": resolver, "manual": True}, False
+        if resolver.startswith("runtime_context.generated."):
+            strategy = resolver.rsplit(".", 1)[-1]
+            return "system_generated", {"kind": "system_generated", "strategy": strategy, "runtime_resolver": resolver, "manual": True}, False
+        context_key = resolver.removeprefix("runtime_context.")
+        return "page_context", {"kind": "page_context", "context_key": context_key, "runtime_resolver": resolver, "manual": True}, not bool(context_key)
+    if preferred in {"previous_response", "computed"}:
+        return preferred, {"kind": preferred, "manual": True}, True
+    return "unknown", {}, True
+
+
+def _source_kind_matches(binding: SourceBinding, preferred_kind: str) -> bool:
+    projected, _, _ = _source_projection(binding, preferred_kind=preferred_kind)
+    return projected == preferred_kind
+
+
+def _automatic_source_projection_kind(
+    param: dict[str, Any],
+    binding: SourceBinding,
+    step: dict[str, Any] | None = None,
+) -> str | None:
+    if binding.kind is not SourceBindingKind.CALLER:
+        return None
+    path = str(param.get("path") or "")
+    key = str(param.get("key") or "")
+    selects = [
+        item for item in (step or {}).get("selects") or ()
+        if isinstance(item, dict)
+        and (
+            str(item.get("path") or "") == path
+            or str(item.get("id_path") or "") == path
+            or str(item.get("param") or "") == key
+        )
+    ]
+    if any(item.get("source_url") for item in selects):
+        return "api_option"
+    if (
+        param.get("enum_binding")
+        or param.get("enum_options")
+        or any(item.get("options") or item.get("enum_source") for item in selects)
+    ):
+        return "manual_enum"
+    return None
+
+
+def _clear_enum_projection(
+    spec: dict[str, Any],
+    step: dict[str, Any],
+    param: dict[str, Any],
+) -> None:
+    param["enum_binding"] = None
+    param["enum_options"] = None
+    param["enum_value_map"] = None
+    path = str(param.get("path") or "")
+    key = str(param.get("key") or "")
+    step["selects"] = [
+        item for item in step.get("selects") or []
+        if str(item.get("path") or "") != path
+        and str(item.get("id_path") or "") != path
+        and str(item.get("param") or "") != key
+    ]
+    _sync_manual_axis(spec, param, field="enum_binding", value=None)
+    field_ref = _param_ref(param)
+    step_ref = _step_key(step)
+    for field in ("enum_binding", "enum_options", "enum_value_map"):
+        _pin(spec, f"field:{step_ref}:{field_ref}:{field}")
+    _pin(spec, f"step:{step_ref}:selects")
 
 
 def _manual_axis_value(
@@ -643,10 +765,25 @@ def apply_edits(snapshot: dict[str, Any], edits: Iterable[dict[str, Any]]) -> di
                 axis=axis,
                 revision=int(spec.get("revision") or 0) + 1,
             )
+            if axis is FieldDimension.SOURCE_BINDING:
+                restored_value = param.get("source_binding")
+                if isinstance(restored_value, dict):
+                    restored = _source_binding(restored_value)
+                    preferred_kind = _automatic_source_projection_kind(
+                        param, restored, step,
+                    )
+                    source_kind, source, needs_configuration = _source_projection(
+                        restored,
+                        preferred_kind=preferred_kind,
+                    )
+                    param["source_kind"] = source_kind
+                    param["source"] = source
+                    param["need_human_confirm"] = needs_configuration
             pins = _pins(spec)
             ref = _param_ref(param)
-            for key in _AXIS_EDIT_KEYS[axis]:
-                pins.pop(f"field:{_step_key(step)}:{ref}:{key}", None)
+            for step_ref in {_step_key(step), str(step.get("step_id") or "")}:
+                for key in _AXIS_EDIT_KEYS[axis]:
+                    pins.pop(f"field:{step_ref}:{ref}:{key}", None)
         elif op == "update" and edit.get("link_id"):
             link = _find_link(spec, str(edit["link_id"]))
             field = str(edit.get("field") or "")
@@ -662,14 +799,51 @@ def apply_edits(snapshot: dict[str, Any], edits: Iterable[dict[str, Any]]) -> di
                 or edit.get("param_label")
             ):
                 param = _find_param(step, edit, require_uuid=_is_v3(spec))
-                param[field] = edit.get("value")
-                _sync_manual_axis(
-                    spec,
-                    param,
-                    field=field,
-                    value=edit.get("value"),
-                )
-                _pin(spec, f"field:{_step_key(step)}:{_param_ref(param)}:{field}")
+                if field == "source_binding":
+                    prior_source_kind = str(param.get("source_kind") or "")
+                    binding = _source_binding(edit.get("value"))
+                    preferred_kind = str(edit.get("source_kind_projection") or "").casefold()
+                    if preferred_kind and not _source_kind_matches(binding, preferred_kind):
+                        raise DecisionCommandError(
+                            "source_kind_projection does not match source_binding"
+                        )
+                    source_kind, source, needs_configuration = _source_projection(
+                        binding,
+                        preferred_kind=preferred_kind or None,
+                    )
+                    param["source_binding"] = binding.model_dump(
+                        mode="json", exclude_none=True,
+                    )
+                    param["source_kind"] = source_kind
+                    param["source"] = source
+                    param["need_human_confirm"] = needs_configuration
+                    _sync_manual_axis(
+                        spec,
+                        param,
+                        field=field,
+                        value=param["source_binding"],
+                    )
+                    ref = _param_ref(param)
+                    step_ref = _step_key(step)
+                    for alias in ("source_binding", "source_kind", "source"):
+                        _pin(spec, f"field:{step_ref}:{ref}:{alias}")
+                    if (
+                        prior_source_kind in _ENUM_SOURCE_KINDS
+                        and prior_source_kind != source_kind
+                    ):
+                        _clear_enum_projection(spec, step, param)
+                else:
+                    param[field] = edit.get("value")
+                    if _axis_for_edit(field) is FieldDimension.BUSINESS_TYPE:
+                        param["business_type"] = edit.get("value")
+                        param["type"] = edit.get("value")
+                    _sync_manual_axis(
+                        spec,
+                        param,
+                        field=field,
+                        value=edit.get("value"),
+                    )
+                    _pin(spec, f"field:{_step_key(step)}:{_param_ref(param)}:{field}")
             else:
                 step[field] = edit.get("value")
                 _pin(spec, f"step:{_step_key(step)}:{field}")
@@ -753,15 +927,50 @@ def apply_edits(snapshot: dict[str, Any], edits: Iterable[dict[str, Any]]) -> di
             _pin(spec, "flow:dedupe_steps")
         elif op == "resolve_review":
             review_id = str(edit.get("review_id") or "")
-            review = next((item for item in _items(spec, "review_items") if str(item.get("id")) == review_id), None)
+            requested_fingerprint = str(edit.get("fingerprint") or "")
+            requested_kind = str(edit.get("issue_kind") or "")
+            if not review_id or not requested_fingerprint:
+                raise DecisionCommandError(
+                    "resolve_review requires the current issue id and fingerprint"
+                )
+            stored_reviews = _items(spec, "review_items")
+            stored_review = next(
+                (
+                    item for item in stored_reviews
+                    if (not review_id or str(item.get("id") or item.get("issue_id") or "") == review_id)
+                    and (not requested_fingerprint or str(item.get("fingerprint") or "") == requested_fingerprint)
+                ),
+                None,
+            )
+            recomputed = check_executability(spec)
+            server_issues = [
+                *list(recomputed.get("contract_faults") or ()),
+                *list(recomputed.get("advisories") or ()),
+            ]
+            review = next(
+                (
+                    item for item in server_issues
+                    if (not review_id or str(item.get("id") or item.get("issue_id") or "") == review_id)
+                    and (not requested_fingerprint or str(item.get("fingerprint") or "") == requested_fingerprint)
+                ),
+                None,
+            )
             if review is None:
-                raise DecisionCommandError(f"review item not found: {review_id}")
+                raise DecisionCommandError(
+                    f"review item not found: {review_id or requested_fingerprint}"
+                )
+            actual_kind = str(review.get("kind") or review.get("type") or "")
+            if requested_kind and actual_kind and requested_kind != actual_kind:
+                raise DecisionCommandError("review kind does not match server issue")
             resolved = bool(edit.get("resolved", True))
-            if resolved and str(review.get("kind") or review.get("type") or "") == "contract_fault":
+            if resolved and actual_kind == "contract_fault":
                 raise DecisionCommandError("ContractFault cannot be ignored; fix its concrete contract")
-            review["resolved"] = resolved
+            if resolved and actual_kind != "advisory":
+                raise DecisionCommandError("only Advisory issues can be ignored")
+            if stored_review is not None:
+                stored_review["resolved"] = resolved
             fingerprint = str(review.get("fingerprint") or "")
-            if fingerprint and str(review.get("kind") or review.get("type") or "") == "advisory":
+            if fingerprint and actual_kind == "advisory":
                 ignored = spec.setdefault("meta", {}).setdefault("ignored_advisory_fingerprints", [])
                 if resolved and fingerprint not in ignored:
                     ignored.append(fingerprint)
@@ -769,7 +978,7 @@ def apply_edits(snapshot: dict[str, Any], edits: Iterable[dict[str, Any]]) -> di
                     spec["meta"]["ignored_advisory_fingerprints"] = [
                         value for value in ignored if str(value) != fingerprint
                     ]
-            _pin(spec, f"review:{review_id}:resolved")
+            _pin(spec, f"review:{review_id or fingerprint}:resolved")
         elif op == "add_capability":
             capability = deepcopy(edit.get("capability") or {})
             if int(spec.get("recording_contract_version") or 0) >= 1:

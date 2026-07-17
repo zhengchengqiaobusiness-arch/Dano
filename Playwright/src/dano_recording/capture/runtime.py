@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 import inspect
 from dataclasses import dataclass, replace
@@ -96,11 +97,15 @@ class CaptureRuntime:
         self.runtime_components = RuntimeComponentCollector(redaction=self.redaction)
         self.tasks = TaskSupervisor(self._optional_capture_error)
         self._contexts: set[int] = set()
+        self._context_objects: dict[int, Any] = {}
         self._listeners: list[tuple[Any, str, Any]] = []
+        self._prepared_pages: set[int] = set()
         self._response_control_snapshots: dict[
             str, dict[str, _SecuredMutation]
         ] = {}
         self._closed = False
+        self._paused = False
+        self._script_reenumeration_required = False
         self._browser_scripts = tuple(
             Path(__file__).resolve().parents[1] / "_resources" / "browser" / name
             for name in ("recorder.js", "component_probe.js", "mutation_observer.js")
@@ -121,18 +126,26 @@ class CaptureRuntime:
         def attach_page(page: Any) -> None:
             if self._closed:
                 return
-            page_id = self.browser.attach_page(page)
-            self.tasks.create(self._prepare_page(context, page, page_id=page_id))
+            self._attach_runtime_page(context, page)
 
         context.on("page", attach_page)
         self._listeners.append((context, "page", attach_page))
         for page in tuple(getattr(context, "pages", ()) or ()):
             attach_page(page)
         self._contexts.add(id(context))
+        self._context_objects[id(context)] = context
+
+    def _attach_runtime_page(self, context: Any, page: Any) -> None:
+        page_id = self.browser.attach_page(page)
+        page_key = id(page)
+        if self._paused or page_key in self._prepared_pages:
+            return
+        self._prepared_pages.add(page_key)
+        self.tasks.create(self._prepare_page(context, page, page_id=page_id))
 
     async def _install_browser_hooks(self, context: Any) -> None:
         async def receive_action(source: Any, payload: Any) -> None:
-            if self._closed:
+            if self._closed or self._paused:
                 return
             if not isinstance(payload, dict):
                 return
@@ -463,6 +476,67 @@ class CaptureRuntime:
             message=str(error),
         )
 
+    async def pause(self) -> None:
+        """Freeze live observers without removing the context binding."""
+
+        if self._closed or self._paused:
+            return
+        self._paused = True
+        self.browser.pause()
+        # Gate both observers before either bounded drain can wait. Otherwise a
+        # slow script body leaves a window where fresh network requests enter
+        # the generation after freeze has already begun.
+        await asyncio.gather(self.scripts.pause(), self.network.pause())
+        if not await self.tasks.drain(timeout=5.0):
+            await self.tasks.cancel_pending()
+
+    async def resume(self, context: Any) -> None:
+        """Resume the same observer objects; never expose a duplicate binding."""
+
+        if self._closed:
+            raise RuntimeError("capture runtime is closed")
+        if not self._paused:
+            return
+        self._paused = False
+        self.browser.resume()
+        self.scripts.resume()
+        await self.network.resume(context)
+        if self._script_reenumeration_required:
+            for owner in tuple(self._context_objects.values()):
+                for page in tuple(getattr(owner, "pages", ()) or ()):
+                    if id(page) not in self._prepared_pages:
+                        continue
+                    try:
+                        await self.scripts.attach_cdp(
+                            owner,
+                            page,
+                            page_id=self.browser.page_id(page),
+                        )
+                    except Exception as exc:  # noqa: BLE001 - optional evidence
+                        self._optional_capture_error(exc)
+            self._script_reenumeration_required = False
+        for owner in tuple(self._context_objects.values()):
+            for page in tuple(getattr(owner, "pages", ()) or ()):
+                self._attach_runtime_page(owner, page)
+
+    async def reset_generation(self) -> None:
+        """Reset generation-owned observer caches while retaining browser hooks."""
+
+        if self._closed:
+            raise RuntimeError("capture runtime is closed")
+        if not self._paused:
+            raise RuntimeError("capture runtime must be paused before generation reset")
+        self.network.reset_generation()
+        self._response_control_snapshots.clear()
+        await self.scripts.reset_generation()
+        current_pages = {
+            id(page)
+            for owner in self._context_objects.values()
+            for page in tuple(getattr(owner, "pages", ()) or ())
+        }
+        self._prepared_pages.intersection_update(current_pages)
+        self._script_reenumeration_required = True
+
     async def close(self) -> None:
         if self._closed:
             return
@@ -476,6 +550,7 @@ class CaptureRuntime:
                 except Exception:
                     pass
         self._contexts.clear()
+        self._context_objects.clear()
         drained = await self.tasks.drain(timeout=5.0)
         await self.tasks.close(cancel=not drained)
         await self.network.close()

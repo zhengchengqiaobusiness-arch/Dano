@@ -17,6 +17,7 @@ import shutil
 import structlog
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StrictBool
 
 from dano.assets.repository import AssetRepository
@@ -27,7 +28,7 @@ from dano.execution.harness.harness import Harness
 from dano.orchestrator.orchestrator import Orchestrator
 from dano.orchestrator.capability_runtime import CapabilityInvokePayload
 from dano.orchestrator.skills import SkillRegistry
-from dano.recording_v3 import install_recording_v3
+from dano.recording_v3 import install_recording_v3, probe_recording_v3_readiness
 from dano.registry import InMemoryRegistry, PgRegistry, TenantRecord
 from dano.shared.asset_bodies import EnvProfileBody
 from dano.shared.enums import AssetType, Subsystem
@@ -192,6 +193,22 @@ _recording_v3_service = install_recording_v3(
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/recording-v3/health")
+async def recording_v3_health() -> JSONResponse:
+    try:
+        await probe_recording_v3_readiness(_recording_v3_service)
+    except Exception as exc:  # noqa: BLE001 - readiness must fail closed
+        log.warning(
+            "recording_v3.health_unavailable",
+            error_type=type(exc).__name__,
+        )
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "ready": False},
+        )
+    return JSONResponse(content={"status": "ready", "ready": True})
 
 
 # ── 运行配置全部走 config.py(不再有前端运行配置页 / 写入端点);仅保留只读 LLM 自检 ──

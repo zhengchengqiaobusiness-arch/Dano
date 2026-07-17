@@ -163,6 +163,17 @@ def _schema_has_collection(schema: dict[str, Any] | None) -> bool:
     return False
 
 
+def _schema_is_business_object(schema: dict[str, Any] | None) -> bool:
+    """Return true for a concrete JSON object, not an HTML/navigation response."""
+
+    return bool(
+        isinstance(schema, dict)
+        and schema.get("type") == "object"
+        and isinstance(schema.get("properties"), dict)
+        and schema["properties"]
+    )
+
+
 def _terminal_kind(
     transaction: ActionTransaction,
     request: CompiledRequest,
@@ -198,6 +209,18 @@ def _terminal_kind(
         or _QUERY.search(transaction.action_label)
     ):
         return BusinessTerminalKind.LIST_RESULT
+    # A strongly attributed user click followed by a concrete JSON object is a
+    # usable read capability even when the application uses opaque routes and
+    # icon-only controls.  Technical/resource/identity/option calls were
+    # already excluded above; an unattributed background GET cannot enter here.
+    if (
+        request.method == "GET"
+        and transaction.action_id is not None
+        and request.disposition
+        in {RequestDisposition.MATERIALIZED, RequestDisposition.REVIEW_CANDIDATE}
+        and _schema_is_business_object(request.response_schema)
+    ):
+        return BusinessTerminalKind.CONFIRMATION
     if (
         request.disposition
         in {RequestDisposition.MATERIALIZED, RequestDisposition.REVIEW_CANDIDATE}
@@ -306,16 +329,28 @@ def plan_capabilities(
         selected_terminals = terminals if can_split else [terminals[-1]]
 
         for terminal in selected_terminals:
-            dependency_ids = (
-                evidence_graph.request_dependencies(terminal.request_id)
-                if evidence_graph is not None
-                else ()
-            )
-            dependency_set = set(dependency_ids)
+            # An action that cannot be proven independently splittable is one
+            # command, so every terminal effect belongs to its ordered runtime
+            # chain.  Keeping only the last response would turn common
+            # ``POST -> refresh GET`` actions into read-only capabilities and
+            # leave the write without risk/confirmation ownership.
+            command_terminals = (terminal,) if can_split else tuple(terminals)
+            command_terminal_ids = {
+                request.request_id for request in command_terminals
+            }
+            dependency_set = {
+                dependency_id
+                for command_terminal in command_terminals
+                for dependency_id in (
+                    evidence_graph.request_dependencies(command_terminal.request_id)
+                    if evidence_graph is not None
+                    else ()
+                )
+            }
             execution_requests = tuple(
                 request
                 for request in scoped
-                if request.request_id == terminal.request_id
+                if request.request_id in command_terminal_ids
                 or (
                     request.request_id in dependency_set
                     and request.disposition
@@ -334,8 +369,16 @@ def plan_capabilities(
                 sorted(execution_requests, key=lambda item: (item.sequence, item.request_id))
             )
 
-            hint = hints_by_request.get(terminal.request_id)
-            operation = _operation(transaction, terminal, hint)
+            operation_request = next(
+                (
+                    request
+                    for request in reversed(execution_requests)
+                    if request.method in _MUTATION_METHODS
+                ),
+                terminal,
+            )
+            hint = hints_by_request.get(operation_request.request_id)
+            operation = _operation(transaction, operation_request, hint)
             operation = normalize_capability_operation(operation)
             count = used_names.get(operation, 0)
             used_names[operation] = count + 1

@@ -1,7 +1,37 @@
+import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
 
+const MIN_SAFE_PI_VERSION = [0, 79, 8];
+
+export function assertCompatiblePiVersion(version) {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(String(version || ""));
+  if (!match) throw new Error(`invalid Pi runtime version: ${String(version || "")}`);
+  const actual = match.slice(1).map(Number);
+  const compatible = actual.some((value, index) => {
+    if (value === MIN_SAFE_PI_VERSION[index]) return false;
+    return value > MIN_SAFE_PI_VERSION[index]
+      && actual.slice(0, index).every((item, prior) => item === MIN_SAFE_PI_VERSION[prior]);
+  }) || actual.every((value, index) => value === MIN_SAFE_PI_VERSION[index]);
+  if (!compatible) {
+    throw new Error(
+      `Pi runtime ${version} is unsupported; >=0.79.8 is required to prevent `
+      + "assistant-role continuation after successful overflow compaction",
+    );
+  }
+  return String(version);
+}
+
+export function installedPiVersion() {
+  const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+  const packageFile = path.resolve(path.dirname(entry), "../package.json");
+  const manifest = JSON.parse(fs.readFileSync(packageFile, "utf8"));
+  return assertCompatiblePiVersion(manifest.version);
+}
+
 export function createModelProfile() {
+  installedPiVersion();
   const auth = AuthStorage.inMemory();
   const registry = ModelRegistry.create(auth);
   const apiKey = process.env.DANO_PI_API_KEY || "";
