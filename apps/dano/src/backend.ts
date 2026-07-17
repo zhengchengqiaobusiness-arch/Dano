@@ -23,7 +23,7 @@ import {
   type DefaultSessionSettings,
 } from "./bridge/default-model.js";
 import { createHeadlessUIContext } from "./bridge/headless-ui-context.js";
-import { interruptAwaitingFormInteractions } from "./bridge/form-interaction.js";
+import { interruptOpenFormInteractions } from "./bridge/form-interaction.js";
 import type {
   BridgeLiveEvent,
   BridgeSessionActions,
@@ -185,7 +185,7 @@ export function createDanoBackendFromSession(
       DANO_DEFAULT_CONFIG.askUserQuestion.maxRetries,
   ),
 ): DanoBackend {
-  interruptAwaitingFormInteractions(session.sessionManager);
+  interruptOpenFormInteractions(session.sessionManager);
   let pendingMessageCount = 0;
   const liveEventHandlers = new Set<(event: BridgeLiveEvent) => void>();
 

@@ -250,19 +250,27 @@ export type AskUserQuestionConfirmationForm = {
 
 export type FormInteractionState =
   | "awaiting_confirmation"
+  | "revising"
   | "confirmed"
   | "cancelled"
   | "interrupted";
 
 export type FormInteractionAction =
   | "confirm"
-  | "cancel";
+  | "cancel"
+  | "return_modify"
+  | "submit_revision";
+
+export type FormRevisionProjection = AskUserQuestionConfirmationForm & {
+  revision: number;
+};
 
 export type FormInteractionProjection = {
   interactionId: string;
   state: FormInteractionState;
   revision: number;
   allowedActions: FormInteractionAction[];
+  forms: FormRevisionProjection[];
 };
 
 export type AskUserQuestionConfirmationCardRequest = {
@@ -489,14 +497,21 @@ export interface RpcCommandMap {
   field_assist: FieldAssistCommandPayload;
   present_question: { toolCallId: string };
   answer_question:
-    | { toolCallId: string; cancelled: true }
+    | { toolCallId: string; cancelled: true; expectedRevision?: number }
     | {
         toolCallId: string;
         cancelled: false;
+        expectedRevision?: number;
         answer:
           | AskUserQuestionAnswerInput
           | Record<string, AskUserQuestionAnswerInput>;
       };
+  revise_question: { toolCallId: string; expectedRevision: number };
+  submit_question_revision: {
+    toolCallId: string;
+    expectedRevision: number;
+    answers: Record<string, Record<string, AskUserQuestionAnswerInput>>;
+  };
   new_session: {
     parentSession?: string;
     limit?: number;
@@ -885,6 +900,8 @@ export interface RpcResponseMap {
   field_assist: FieldAssistResult;
   present_question: void;
   answer_question: AskUserQuestionResult;
+  revise_question: FormInteractionProjection;
+  submit_question_revision: FormInteractionProjection;
   new_session: {
     transcript: RpcTranscriptPage;
     treeEntries: RpcTreeEntry[];

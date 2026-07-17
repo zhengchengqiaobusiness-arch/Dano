@@ -6,7 +6,7 @@ import type { AskUserQuestionConfirmationForm } from "@dano/types/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createFormInteraction,
-  interruptAwaitingFormInteractions,
+  interruptOpenFormInteractions,
   readFormInteractions,
   transitionFormInteraction,
 } from "../form-interaction.js";
@@ -121,7 +121,7 @@ describe("Form Interaction", () => {
     expect(sessionFile).toBeTruthy();
     const restartedManager = SessionManager.open(sessionFile!);
 
-    expect(interruptAwaitingFormInteractions(restartedManager)).toHaveLength(1);
+    expect(interruptOpenFormInteractions(restartedManager)).toHaveLength(1);
     expect(readFormInteractions(restartedManager.getBranch()).get("confirm-two")).toMatchObject({
       state: "interrupted",
       revision: 2,
@@ -130,5 +130,99 @@ describe("Form Interaction", () => {
         { formId: "form-b", revision: 1 },
       ],
     });
+  });
+
+  it("projects editable revisions and preserves unchanged form answers on submit", () => {
+    const manager = sessionManager();
+    createFormInteraction(manager, {
+      interactionId: "confirm-two",
+      assistantTurnId: "assistant-turn-1",
+      forms,
+    });
+
+    const revising = transitionFormInteraction(manager, "confirm-two", {
+      type: "return_modify",
+    });
+    expect(revising).toMatchObject({
+      kind: "transitioned",
+      snapshot: {
+        state: "revising",
+        revision: 2,
+        forms: [
+          { formId: "form-a", revision: 2, answer: { reason: "家庭事务" } },
+          { formId: "form-b", revision: 2, answer: { destination: "上海" } },
+        ],
+      },
+    });
+
+    const sessionFile = manager.getSessionFile();
+    expect(sessionFile).toBeTruthy();
+    const reloaded = SessionManager.open(sessionFile!);
+    expect(readFormInteractions(reloaded.getBranch()).get("confirm-two"))
+      .toMatchObject({
+        state: "revising",
+        revision: 2,
+        forms: [
+          { formId: "form-a", revision: 2, answer: { reason: "家庭事务" } },
+          { formId: "form-b", revision: 2, answer: { destination: "上海" } },
+        ],
+      });
+
+    const submitted = transitionFormInteraction(reloaded, "confirm-two", {
+      type: "submit_revision",
+      forms: [{ ...forms[0], answer: { reason: "照顾家人" } }],
+    });
+    expect(submitted).toMatchObject({
+      kind: "transitioned",
+      snapshot: {
+        state: "awaiting_confirmation",
+        revision: 3,
+        forms: [
+          { formId: "form-a", revision: 2, answer: { reason: "照顾家人" } },
+          { formId: "form-b", revision: 2, answer: { destination: "上海" } },
+        ],
+      },
+    });
+  });
+
+  it("cancels the whole interaction while revising", () => {
+    const manager = sessionManager();
+    createFormInteraction(manager, {
+      interactionId: "confirm-two",
+      assistantTurnId: "assistant-turn-1",
+      forms,
+    });
+    transitionFormInteraction(manager, "confirm-two", { type: "return_modify" });
+
+    expect(
+      transitionFormInteraction(manager, "confirm-two", { type: "cancel" }),
+    ).toMatchObject({
+      kind: "transitioned",
+      snapshot: { state: "cancelled", revision: 3 },
+    });
+  });
+
+  it("interrupts a persisted revising interaction on process restart", () => {
+    const manager = sessionManager();
+    createFormInteraction(manager, {
+      interactionId: "confirm-two",
+      assistantTurnId: "assistant-turn-1",
+      forms,
+    });
+    transitionFormInteraction(manager, "confirm-two", { type: "return_modify" });
+    const sessionFile = manager.getSessionFile();
+    expect(sessionFile).toBeTruthy();
+    const restartedManager = SessionManager.open(sessionFile!);
+
+    expect(interruptOpenFormInteractions(restartedManager)).toHaveLength(1);
+    expect(readFormInteractions(restartedManager.getBranch()).get("confirm-two"))
+      .toMatchObject({
+        state: "interrupted",
+        revision: 3,
+        forms: [
+          { formId: "form-a", revision: 2 },
+          { formId: "form-b", revision: 2 },
+        ],
+      });
   });
 });

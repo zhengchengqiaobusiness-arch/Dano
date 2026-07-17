@@ -25,11 +25,38 @@ export type FormInteractionSnapshot = {
 export type FormInteractionTransition =
   | { type: "confirm" }
   | { type: "cancel" }
-  | { type: "interrupt" };
+  | { type: "interrupt" }
+  | { type: "return_modify" }
+  | { type: "submit_revision"; forms: AskUserQuestionConfirmationForm[] };
 
 export type FormInteractionTransitionResult =
   | { kind: "transitioned"; snapshot: FormInteractionSnapshot }
-  | { kind: "already_terminal"; snapshot: FormInteractionSnapshot };
+  | { kind: "already_terminal"; snapshot: FormInteractionSnapshot }
+  | { kind: "invalid_transition"; snapshot: FormInteractionSnapshot };
+
+type OpenFormInteractionState = Extract<
+  FormInteractionState,
+  "awaiting_confirmation" | "revising"
+>;
+
+const ALLOWED_TRANSITIONS = {
+  awaiting_confirmation: ["confirm", "cancel", "interrupt", "return_modify"],
+  revising: ["cancel", "interrupt", "submit_revision"],
+} as const satisfies Record<
+  OpenFormInteractionState,
+  readonly FormInteractionTransition["type"][]
+>;
+
+const CLIENT_ACTION_BY_TRANSITION = {
+  confirm: "confirm",
+  cancel: "cancel",
+  interrupt: null,
+  return_modify: "return_modify",
+  submit_revision: "submit_revision",
+} as const satisfies Record<
+  FormInteractionTransition["type"],
+  FormInteractionProjection["allowedActions"][number] | null
+>;
 
 export function createFormInteraction(
   sessionManager: SessionManager,
@@ -83,33 +110,73 @@ export function reduceFormInteraction(
   current: FormInteractionSnapshot,
   transition: FormInteractionTransition,
 ): FormInteractionTransitionResult {
-  if (current.state !== "awaiting_confirmation") {
+  if (
+    current.state === "confirmed" ||
+    current.state === "cancelled" ||
+    current.state === "interrupted"
+  ) {
     return { kind: "already_terminal", snapshot: current };
   }
-  const state: FormInteractionState =
-    transition.type === "confirm"
-      ? "confirmed"
-      : transition.type === "cancel"
-        ? "cancelled"
-        : "interrupted";
-  return {
-    kind: "transitioned",
-    snapshot: {
-      ...current,
-      state,
-      revision: current.revision + 1,
-    },
-  };
+  const allowed: readonly FormInteractionTransition["type"][] =
+    ALLOWED_TRANSITIONS[current.state];
+  if (!allowed.includes(transition.type)) {
+    return { kind: "invalid_transition", snapshot: current };
+  }
+  switch (transition.type) {
+    case "return_modify":
+      return {
+        kind: "transitioned",
+        snapshot: {
+          ...current,
+          state: "revising",
+          revision: current.revision + 1,
+          forms: current.forms.map(form => ({
+            ...form,
+            questions: [...form.questions],
+            answer: { ...form.answer },
+            revision: form.revision + 1,
+          })),
+        },
+      };
+    case "submit_revision": {
+      const answers = new Map(
+        transition.forms.map(form => [form.formId, form.answer]),
+      );
+      return {
+        kind: "transitioned",
+        snapshot: {
+          ...current,
+          state: "awaiting_confirmation",
+          revision: current.revision + 1,
+          forms: current.forms.map(form => ({
+            ...form,
+            answer: { ...(answers.get(form.formId) ?? form.answer) },
+          })),
+        },
+      };
+    }
+    case "confirm":
+      return terminalTransition(current, "confirmed");
+    case "cancel":
+      return terminalTransition(current, "cancelled");
+    case "interrupt":
+      return terminalTransition(current, "interrupted");
+    default:
+      return assertNever(transition);
+  }
 }
 
-export function interruptAwaitingFormInteractions(
+export function interruptOpenFormInteractions(
   sessionManager: SessionManager,
 ): FormInteractionSnapshot[] {
   const interrupted: FormInteractionSnapshot[] = [];
   for (const interaction of readFormInteractions(
     sessionManager.getBranch(),
   ).values()) {
-    if (interaction.state !== "awaiting_confirmation") continue;
+    if (
+      interaction.state !== "awaiting_confirmation" &&
+      interaction.state !== "revising"
+    ) continue;
     const result = transitionFormInteraction(
       sessionManager,
       interaction.interactionId,
@@ -143,11 +210,36 @@ export function projectFormInteraction(
     interactionId: snapshot.interactionId,
     state: snapshot.state,
     revision: snapshot.revision,
-    allowedActions:
-      snapshot.state === "awaiting_confirmation"
-        ? ["cancel", "confirm"]
-        : [],
+    allowedActions: isOpenState(snapshot.state)
+      ? ALLOWED_TRANSITIONS[snapshot.state].flatMap(transition => {
+          const action = CLIENT_ACTION_BY_TRANSITION[transition];
+          return action ? [action] : [];
+        })
+      : [],
+    forms: snapshot.forms.map(form => ({
+      ...form,
+      questions: [...form.questions],
+      answer: { ...form.answer },
+    })),
   };
+}
+
+function terminalTransition(
+  current: FormInteractionSnapshot,
+  state: Extract<FormInteractionState, "confirmed" | "cancelled" | "interrupted">,
+): FormInteractionTransitionResult {
+  return {
+    kind: "transitioned",
+    snapshot: { ...current, state, revision: current.revision + 1 },
+  };
+}
+
+function isOpenState(state: FormInteractionState): state is OpenFormInteractionState {
+  return state === "awaiting_confirmation" || state === "revising";
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled Form Interaction transition: ${String(value)}`);
 }
 
 export function projectFormInteractionsInMessage(
@@ -278,6 +370,7 @@ function isFormInteractionForm(value: unknown): value is FormInteractionForm {
 function isFormInteractionState(value: unknown): value is FormInteractionState {
   return (
     value === "awaiting_confirmation" ||
+    value === "revising" ||
     value === "confirmed" ||
     value === "cancelled" ||
     value === "interrupted"

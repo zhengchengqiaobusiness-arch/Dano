@@ -52,6 +52,8 @@
     active = true,
     onPresent,
     onRespond,
+    onRevise,
+    onSubmitRevision,
     onFieldAssist = undefined as
       | ((payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>)
       | undefined,
@@ -62,11 +64,18 @@
     onRespond: (
       toolCallId: string,
       response:
-        | { cancelled: true }
+        | { cancelled: true; expectedRevision?: number }
         | {
             cancelled: false;
+            expectedRevision?: number;
             answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>;
         },
+    ) => Promise<RpcResponse>;
+    onRevise: (toolCallId: string, expectedRevision: number) => Promise<RpcResponse>;
+    onSubmitRevision: (
+      toolCallId: string,
+      expectedRevision: number,
+      answers: Record<string, Record<string, AskUserQuestionAnswer>>,
     ) => Promise<RpcResponse>;
     onFieldAssist?: (payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>;
   } = $props();
@@ -77,8 +86,28 @@
   const isConfirmation = $derived(
     Boolean(request && !request.batch && request.kind === "confirm"),
   );
-  const questionItems = $derived(
-    request
+  type RevisionQuestionItem = AskUserQuestionItem & {
+    revisionFormId?: string;
+    originalId?: string;
+    revisionTitle?: string;
+  };
+  const revisionItems = $derived<RevisionQuestionItem[]>(
+    interaction?.state === "revising"
+      ? interaction.forms.flatMap(form =>
+          form.questions.map((item, index) => ({
+            ...item,
+            id: `${form.formId}:${item.id}`,
+            revisionFormId: form.formId,
+            originalId: item.id,
+            revisionTitle: index === 0 ? form.title : undefined,
+          })),
+        )
+      : [],
+  );
+  const questionItems = $derived<RevisionQuestionItem[]>(
+    revisionItems.length > 0
+      ? revisionItems
+      : request
       ? request.batch || request.kind === "confirm"
         ? request.questions
         : [request]
@@ -98,8 +127,11 @@
   const interrupted = $derived(
     !isConfirmation && block.toolStatus === "pending" && !result && !active,
   );
-  const requestKey = $derived(request ? JSON.stringify(request) : "");
-  const formEnabled = $derived(pending);
+  const requestKey = $derived(
+    request ? JSON.stringify([request, interaction]) : "",
+  );
+  const revising = $derived(isConfirmation && interaction?.state === "revising");
+  const formEnabled = $derived(pending || revising);
   const formAnswer = $derived(
     result?.status === "answered" && typeof result.answer === "object" && !Array.isArray(result.answer)
       ? result.answer
@@ -126,7 +158,9 @@
   let aiAssistWarning = $state<Record<string, string>>({});
   let aiAssistSeq = $state<Record<string, number>>({});
   const showCard = $derived(
-    Boolean(request) && (!pending || pendingReady),
+    Boolean(request) &&
+      (!pending || pendingReady) &&
+      !(request?.batch && result?.status === "answered" && interaction?.state === "revising"),
   );
 
   $effect(() => {
@@ -152,7 +186,12 @@
     submittedResult = null;
 
     for (const item of questionItems) {
-      const savedAnswer = formAnswer?.[item.id];
+      const revisionForm = item.revisionFormId
+        ? interaction?.forms.find(form => form.formId === item.revisionFormId)
+        : undefined;
+      const savedAnswer = revisionForm
+        ? revisionForm.answer[item.originalId ?? item.id]
+        : formAnswer?.[item.id];
       if (item.kind === "text") {
         textAnswer[item.id] = typeof savedAnswer === "string" ? savedAnswer : item.default ?? "";
       } else if (item.kind === "date") {
@@ -221,7 +260,10 @@
     submitting = true;
     error = "";
     try {
-      const rpc = await onRespond(block.toolCallId, response);
+      const rpc = await onRespond(block.toolCallId, {
+        ...response,
+        ...(interaction ? { expectedRevision: interaction.revision } : {}),
+      });
       if (!rpc.success) throw new Error(rpc.error);
       submittedResult = response.cancelled
         ? { status: "cancelled" }
@@ -239,6 +281,20 @@
   function submit(event: SubmitEvent) {
     event.preventDefault();
     if (!request) return;
+    if (revising && interaction) {
+      const answers = Object.fromEntries(
+        interaction.forms.map(form => [form.formId, { ...form.answer }]),
+      );
+      for (const item of questionItems) {
+        if (!item.revisionFormId) continue;
+        const answer = answerForItem(item);
+        if (answer === null) return;
+        if (answer === undefined) delete answers[item.revisionFormId][item.originalId ?? item.id];
+        else answers[item.revisionFormId][item.originalId ?? item.id] = answer;
+      }
+      void submitRevision(answers);
+      return;
+    }
     if (request.batch) {
       const answers: Record<string, AskUserQuestionAnswer> = {};
       for (const item of questionItems) {
@@ -254,6 +310,40 @@
     const answer = answerForItem(request);
     if (answer !== null) {
       void respond({ cancelled: false, answer: answer ?? "" });
+    }
+  }
+
+  async function startRevision() {
+    if (!block.toolCallId || !interaction || submitting) return;
+    submitting = true;
+    error = "";
+    try {
+      const rpc = await onRevise(block.toolCallId, interaction.revision);
+      if (!rpc.success) throw new Error(rpc.error);
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      submitting = false;
+    }
+  }
+
+  async function submitRevision(
+    answers: Record<string, Record<string, AskUserQuestionAnswer>>,
+  ) {
+    if (!block.toolCallId || !interaction || submitting) return;
+    submitting = true;
+    error = "";
+    try {
+      const rpc = await onSubmitRevision(
+        block.toolCallId,
+        interaction.revision,
+        answers,
+      );
+      if (!rpc.success) throw new Error(rpc.error);
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      submitting = false;
     }
   }
 
@@ -612,7 +702,9 @@
       items: ReturnType<typeof askUserQuestionAnswerItems>;
     }
   > {
-    const forms = askUserQuestionConfirmationForms(confirmationRequest);
+    const forms = interaction?.forms.length
+      ? interaction.forms
+      : askUserQuestionConfirmationForms(confirmationRequest);
     return forms.map(form => {
       const answer =
         confirmationResult?.status === "confirmed"
@@ -669,7 +761,7 @@
       </div>
     {/if}
 
-    {#if !request.batch && request.kind === "confirm"}
+    {#if !request.batch && request.kind === "confirm" && !revising}
       <section class="desktop-question-result" aria-label={request.title}>
         <header class="submitted-header">
           <span class="submitted-status-icon" aria-hidden="true">
@@ -716,6 +808,11 @@
             {t("questionTool.cancel")}
           </button>
         {/if}
+        {#if interaction?.allowedActions.includes("return_modify")}
+          <button type="button" class="question-button secondary" disabled={submitting} onclick={() => void startRevision()}>
+            {t("questionTool.returnModify")}
+          </button>
+        {/if}
         {#if interaction?.allowedActions.includes("confirm")}
           <button type="button" class="question-button" disabled={submitting} onclick={() => void respond({ cancelled: false, answer: true })}>
             {t("questionTool.confirm")}
@@ -731,9 +828,14 @@
       <div class="question-result muted">{t("questionTool.cancelled")}</div>
     {:else if interrupted}
       <div class="question-result muted">{t("questionTool.interrupted")}</div>
-    {:else if !pending && result?.status !== "answered"}
+    {:else if !pending && !revising && result?.status !== "answered"}
       <div class="question-error" role="alert">{block.resultText}</div>
     {:else}
+      {#if revising}
+        <h2 class="question-form-title">
+          {!request.batch && request.kind === "confirm" ? request.title : ""}
+        </h2>
+      {/if}
       {#if result?.status === "answered"}
         <div class="mobile-answered-result question-result">
           <MarkdownRenderer content={sourceAnsweredMarkdown} />
@@ -742,6 +844,9 @@
       <form onsubmit={submit} class:answered-source-form={result?.status === "answered"}>
         {#each questionItems as item}
           <div class:question-group={request.batch}>
+            {#if item.revisionTitle}
+              <h3 class="revision-form-title">{item.revisionTitle}</h3>
+            {/if}
             {#if request.batch && item.kind !== "text"}
               <div class="question-text">
                 <MarkdownRenderer content={askUserQuestionMarkdown(item.question)} />
@@ -953,7 +1058,18 @@
         {/each}
 
         <div class="question-actions">
-          {#if pending}
+          {#if revising && interaction}
+            {#if interaction.allowedActions.includes("cancel")}
+              <button type="button" class="question-button secondary" disabled={submitting} onclick={() => void respond({ cancelled: true })}>
+                {t("questionTool.cancel")}
+              </button>
+            {/if}
+            {#if interaction.allowedActions.includes("submit_revision")}
+              <button type="submit" class="question-button" disabled={submitting || !canSubmit()}>
+                {t("questionTool.saveAndReturn")}
+              </button>
+            {/if}
+          {:else if pending}
             <button type="button" class="question-button secondary" disabled={submitting} onclick={() => void respond({ cancelled: true })}>
               {t("questionTool.cancel")}
             </button>
@@ -1000,6 +1116,13 @@
     font-size: 1rem;
     font-weight: 700;
     line-height: 1.4;
+  }
+
+  .revision-form-title {
+    margin: 0 0 2px;
+    color: var(--text);
+    font-size: 0.92rem;
+    font-weight: 700;
   }
 
   .question-text {
