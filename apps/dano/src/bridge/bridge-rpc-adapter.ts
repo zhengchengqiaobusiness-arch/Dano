@@ -6239,8 +6239,11 @@ export class BridgeRpcAdapter {
         const coordinator = this.context.askUserQuestion.coordinator;
         const request = coordinator.cardRequest(toolCallId);
         coordinator.present(toolCallId);
+        let interaction:
+          | ReturnType<typeof createFormInteractionForQuestion>
+          | undefined;
         if (request && !request.batch && request.kind === "confirm") {
-          createFormInteractionForQuestion(
+          interaction = createFormInteractionForQuestion(
             this.sessionRuntime.currentSessionManager(),
             toolCallId,
             request,
@@ -6254,6 +6257,7 @@ export class BridgeRpcAdapter {
           type: "response",
           command: "present_question",
           success: true,
+          data: interaction ? projectFormInteraction(interaction) : null,
         };
       }
 

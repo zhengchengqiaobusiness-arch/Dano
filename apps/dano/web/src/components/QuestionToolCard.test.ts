@@ -254,6 +254,30 @@ describe("QuestionToolCard", () => {
     }
   });
 
+  it("does not bootstrap a historical confirmation during a later turn", async () => {
+    const block = multiFormConfirmationBlock();
+    block.formInteraction = undefined;
+    block.questionState = undefined;
+    const response = vi.fn(async () => ({ success: true } as never));
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block,
+        active: false,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
+      },
+    });
+    await tick();
+
+    expect(response).not.toHaveBeenCalled();
+    expect(target.querySelectorAll(".question-actions button")).toHaveLength(0);
+    unmount(component);
+  });
+
   it("keeps an interrupted Submitted Form terminal while a later turn is streaming", async () => {
     const response = vi.fn(async () => {
       throw new Error("a terminal Form Interaction must not issue RPCs");

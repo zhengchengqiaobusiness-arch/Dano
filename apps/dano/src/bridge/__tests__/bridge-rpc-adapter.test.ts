@@ -1941,10 +1941,17 @@ describe("BridgeRpcAdapter", () => {
             .find(message => message.payload?.id === payload.id)?.payload;
         };
 
-        await dispatch(adapter, {
+        expect(await dispatch(adapter, {
           id: "concurrent-present",
           type: "present_question",
           toolCallId: "concurrent-confirm",
+        })).toMatchObject({
+          success: true,
+          data: {
+            interactionId: "concurrent-confirm",
+            state: "awaiting_confirmation",
+            revision: 1,
+          },
         });
         expect(await dispatch(adapter, {
           id: "concurrent-revise",
