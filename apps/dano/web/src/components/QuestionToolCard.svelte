@@ -149,6 +149,11 @@
       ? result.answer
       : undefined,
   );
+  const interactionFormAnswer = $derived(
+    result?.status === "answered"
+      ? interaction?.forms.find(form => form.formId === result.formId)?.answer
+      : undefined,
+  );
   let initializedRequestKey = $state("");
   let selectedOption = $state<Record<string, string>>({});
   let selectedOptions = $state<Record<string, string[]>>({});
@@ -203,7 +208,7 @@
         : undefined;
       const savedAnswer = revisionForm
         ? revisionForm.answer[item.originalId ?? item.id]
-        : formAnswer?.[item.id];
+        : interactionFormAnswer?.[item.id] ?? formAnswer?.[item.id];
       if (item.kind === "text") {
         textAnswer[item.id] = typeof savedAnswer === "string" ? savedAnswer : item.default ?? "";
       } else if (item.kind === "date") {

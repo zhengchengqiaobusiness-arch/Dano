@@ -512,4 +512,35 @@ describe("QuestionToolCard", () => {
     expect(target.querySelector("article")).toBeNull();
     unmount(component);
   });
+
+  it("renders the latest revised answer when the Submitted Form returns", async () => {
+    const response = vi.fn(async () => ({ success: true } as never));
+    const block = submittedFormBlock("awaiting_confirmation");
+    block.formInteraction!.revision = 3;
+    block.formInteraction!.forms = [{
+      formId: "form-1",
+      title: "测试申请",
+      revision: 2,
+      questions: [{ id: "reason", kind: "text", question: "申请原因？" }],
+      answer: { reason: "照顾家人" },
+    }];
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block,
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
+      },
+    });
+    await tick();
+
+    expect(target.querySelector<HTMLInputElement>('input[type="text"]')?.value)
+      .toBe("照顾家人");
+    expect(target.textContent).toContain("待确认");
+    unmount(component);
+  });
 });
