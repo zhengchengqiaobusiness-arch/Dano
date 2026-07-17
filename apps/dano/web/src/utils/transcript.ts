@@ -307,9 +307,10 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
         const resultSourceMessageId = nextToolResult?.sourceMessageId;
 
         const questionLifecycleError =
-          block.questionState === "invalid" ||
-          block.questionState === "retrying" ||
-          block.questionState === "terminal_failure";
+          !isTerminalFormInteractionProjection(block.formInteraction) &&
+          (block.questionState === "invalid" ||
+            block.questionState === "retrying" ||
+            block.questionState === "terminal_failure");
         blocks.push({
           kind: "tool",
           toolName: block.name ?? t("transcript.unknownTool"),
@@ -367,6 +368,14 @@ export function contentBlocks(msg: TranscriptEntryLike): ContentBlock[] {
   }
 
   return blocks;
+}
+
+function isTerminalFormInteractionProjection(
+  interaction: FormInteractionProjection | undefined,
+): boolean {
+  return interaction?.state === "confirmed" ||
+    interaction?.state === "cancelled" ||
+    interaction?.state === "interrupted";
 }
 
 function hasVisibleAssistantContent(message: TranscriptEntryLike): boolean {
