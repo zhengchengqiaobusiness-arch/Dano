@@ -48,6 +48,7 @@ function submittedFormBlock(
         revision: state === "awaiting_confirmation" ? 1 : 2,
         allowedActions:
           state === "awaiting_confirmation" ? ["cancel", "confirm"] : [],
+        forms: [],
       },
     } : {}),
   };
@@ -88,7 +89,8 @@ function multiFormConfirmationBlock(): ToolContentBlock {
       interactionId: "confirm-two",
       state: "awaiting_confirmation",
       revision: 1,
-      allowedActions: ["cancel", "confirm"],
+      allowedActions: ["cancel", "return_modify", "confirm"],
+      forms: [],
     },
   };
 }
@@ -106,6 +108,8 @@ describe("QuestionToolCard", () => {
         active: false,
         onPresent: response,
         onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
       },
     });
     await tick();
@@ -130,6 +134,8 @@ describe("QuestionToolCard", () => {
         active: true,
         onPresent: response,
         onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
       },
     });
     try {
@@ -139,8 +145,8 @@ describe("QuestionToolCard", () => {
       expect(target.querySelectorAll("[data-form-id]")).toHaveLength(2);
       expect(target.textContent).toContain("请假申请");
       expect(target.textContent).toContain("出差申请");
-      expect(target.textContent).not.toContain("返回修改");
-      expect(target.querySelectorAll("button.question-button")).toHaveLength(2);
+      expect(target.textContent).toContain("返回修改");
+      expect(target.querySelectorAll("button.question-button")).toHaveLength(3);
       expect(target.textContent).toContain("取消");
       expect(target.textContent).toContain("确认");
     } finally {
@@ -163,6 +169,8 @@ describe("QuestionToolCard", () => {
         active: true,
         onPresent: response,
         onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
       },
     });
     try {
@@ -189,6 +197,8 @@ describe("QuestionToolCard", () => {
         active: true,
         onPresent: response,
         onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
       },
     });
     await tick();
@@ -214,6 +224,7 @@ describe("QuestionToolCard", () => {
       state: "interrupted",
       revision: 2,
       allowedActions: [],
+      forms: [],
     };
     const target = document.createElement("div");
     const component = mount(QuestionToolCard, {
@@ -223,6 +234,8 @@ describe("QuestionToolCard", () => {
         active: true,
         onPresent: response,
         onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
       },
     });
     await tick();
@@ -233,6 +246,94 @@ describe("QuestionToolCard", () => {
     expect(buttons[0]?.disabled).toBe(true);
     expect(response).not.toHaveBeenCalled();
 
+    unmount(component);
+  });
+
+  it("submits all projected form revisions while preserving unchanged values", async () => {
+    const response = vi.fn(async () => ({ success: true } as never));
+    const submitRevision = vi.fn(async () => ({ success: true } as never));
+    const block = multiFormConfirmationBlock();
+    block.formInteraction = {
+      interactionId: "confirm-two",
+      state: "revising",
+      revision: 2,
+      allowedActions: ["cancel", "submit_revision"],
+      forms: [
+        {
+          formId: "form-a",
+          title: "请假申请",
+          revision: 2,
+          questions: [{ id: "reason", kind: "text", question: "请假原因？" }],
+          answer: { reason: "家庭事务" },
+        },
+        {
+          formId: "form-b",
+          title: "出差申请",
+          revision: 2,
+          questions: [{ id: "destination", kind: "text", question: "目的地？" }],
+          answer: { destination: "上海" },
+        },
+      ],
+    };
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block,
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: submitRevision,
+      },
+    });
+    await tick();
+
+    const inputs = target.querySelectorAll<HTMLInputElement>('input[type="text"]');
+    expect([...inputs].map(input => input.value)).toEqual(["家庭事务", "上海"]);
+    inputs[0]!.value = "照顾家人";
+    inputs[0]!.dispatchEvent(new Event("input", { bubbles: true }));
+    await tick();
+    target.querySelector("form")?.dispatchEvent(
+      new SubmitEvent("submit", { bubbles: true, cancelable: true }),
+    );
+    await tick();
+
+    expect(submitRevision).toHaveBeenCalledWith("confirm-two", 2, {
+      "form-a": { reason: "照顾家人" },
+      "form-b": { destination: "上海" },
+    });
+    expect(target.textContent).toContain("请假申请");
+    expect(target.textContent).toContain("出差申请");
+
+    unmount(component);
+  });
+
+  it("omits old Submitted Forms while their interaction is revising", async () => {
+    const response = vi.fn(async () => ({ success: true } as never));
+    const block = submittedFormBlock();
+    block.formInteraction = {
+      interactionId: "confirm-form-1",
+      state: "revising",
+      revision: 2,
+      allowedActions: ["cancel", "submit_revision"],
+      forms: [],
+    };
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block,
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
+      },
+    });
+    await tick();
+
+    expect(target.querySelector("article")).toBeNull();
     unmount(component);
   });
 });

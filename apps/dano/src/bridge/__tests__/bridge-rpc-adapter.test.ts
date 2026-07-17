@@ -1264,11 +1264,108 @@ describe("BridgeRpcAdapter", () => {
           { confirm: true, formIds: ["form-a", "form-b"] },
           controller.signal,
         );
+        sessionManager.appendMessage({
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "confirm-two",
+            name: "ask_user_question",
+            arguments: { confirm: true, formIds: ["form-a", "form-b"] },
+          }],
+          timestamp: Date.now(),
+          stopReason: "toolUse",
+        } as any);
+        for (const payload of [
+          {
+            id: "present-confirm-two",
+            type: "present_question",
+            toolCallId: "confirm-two",
+          },
+          {
+            id: "revise-confirm-two",
+            type: "revise_question",
+            toolCallId: "confirm-two",
+            expectedRevision: 1,
+          },
+          {
+            id: "revising-confirm-two-page",
+            type: "get_messages",
+          },
+          {
+            id: "stale-submit-confirm-two",
+            type: "submit_question_revision",
+            toolCallId: "confirm-two",
+            expectedRevision: 1,
+            answers: { "form-a": { reason: "错误覆盖" } },
+          },
+          {
+            id: "submit-confirm-two",
+            type: "submit_question_revision",
+            toolCallId: "confirm-two",
+            expectedRevision: 2,
+            answers: { "form-a": { reason: "照顾家人" } },
+          },
+        ] satisfies RpcCommand[]) {
+          ws.trigger(
+            "message",
+            Buffer.from(JSON.stringify({ type: "command", payload })),
+          );
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        const staleResponse = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+          .map(([message]) => JSON.parse(message as string))
+          .find(message => message.payload?.id === "stale-submit-confirm-two");
+        expect(staleResponse.payload).toMatchObject({
+          success: false,
+          data: {
+            code: "stale_revision",
+            interaction: { state: "revising", revision: 2 },
+          },
+        });
+        const revisingPage = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+          .map(([message]) => JSON.parse(message as string))
+          .find(message => message.payload?.id === "revising-confirm-two-page");
+        expect(
+          revisingPage.payload.data.messages.flatMap(
+            (message: { content?: unknown[] }) => message.content ?? [],
+          ),
+        ).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            id: "confirm-two",
+            formInteraction: expect.objectContaining({
+              state: "revising",
+              revision: 2,
+              forms: [
+                expect.objectContaining({
+                  formId: "form-a",
+                  revision: 2,
+                  answer: { reason: "家庭事务" },
+                }),
+                expect.objectContaining({
+                  formId: "form-b",
+                  revision: 2,
+                  answer: { destination: "上海" },
+                }),
+              ],
+            }),
+          }),
+        ]));
+        expect(
+          readFormInteractions(sessionManager.getBranch()).get("confirm-two"),
+        ).toMatchObject({
+          state: "awaiting_confirmation",
+          revision: 3,
+          forms: [
+            { formId: "form-a", revision: 2, answer: { reason: "照顾家人" } },
+            { formId: "form-b", revision: 2, answer: { destination: "上海" } },
+          ],
+        });
         const command: RpcCommand = {
           id: "confirm-two-response",
           type: "answer_question",
           toolCallId: "confirm-two",
           cancelled: false,
+          expectedRevision: 3,
           answer: true,
         };
         ws.trigger(
@@ -1280,7 +1377,7 @@ describe("BridgeRpcAdapter", () => {
         expect(result).toMatchObject({
           status: "confirmed",
           forms: [
-            { formId: "form-a", answer: { reason: "家庭事务" } },
+            { formId: "form-a", answer: { reason: "照顾家人" } },
             { formId: "form-b", answer: { destination: "上海" } },
           ],
         });
@@ -1314,7 +1411,7 @@ describe("BridgeRpcAdapter", () => {
             details: {
               status: "confirmed",
               forms: [
-                { formId: "form-a", answer: { reason: "家庭事务" } },
+                { formId: "form-a", answer: { reason: "照顾家人" } },
                 { formId: "form-b", answer: { destination: "上海" } },
               ],
             },
@@ -1451,6 +1548,82 @@ describe("BridgeRpcAdapter", () => {
             formInteraction: expect.objectContaining({ state: "interrupted" }),
           }),
         ]));
+      } finally {
+        controller.abort();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("cancels one pending confirmation atomically while revising", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-revise-cancel-"));
+      const controller = new AbortController();
+      try {
+        const sessionManager = SessionManager.create(tmpDir, tmpDir);
+        (
+          context.state as unknown as { sessionManager: SessionManager }
+        ).sessionManager = sessionManager;
+        const submitted = askUserQuestionCoordinator.wait(
+          "cancel-form",
+          {
+            title: "采购申请",
+            questions: [{ id: "item", question: "采购物品？", default: "电脑" }],
+          },
+          controller.signal,
+        );
+        askUserQuestionCoordinator.present("cancel-form");
+        askUserQuestionCoordinator.answer("cancel-form", {
+          cancelled: false,
+          answer: { item: "电脑" },
+        });
+        await submitted;
+        const confirmation = askUserQuestionCoordinator.wait(
+          "cancel-confirm",
+          { confirm: true, formIds: ["cancel-form"] },
+          controller.signal,
+        );
+        sessionManager.appendMessage({
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "cancel-confirm",
+            name: "ask_user_question",
+            arguments: { confirm: true, formIds: ["cancel-form"] },
+          }],
+          timestamp: Date.now(),
+          stopReason: "toolUse",
+        } as any);
+
+        for (const payload of [
+          {
+            id: "present-cancel-confirm",
+            type: "present_question",
+            toolCallId: "cancel-confirm",
+          },
+          {
+            id: "revise-cancel-confirm",
+            type: "revise_question",
+            toolCallId: "cancel-confirm",
+            expectedRevision: 1,
+          },
+          {
+            id: "cancel-revising-confirm",
+            type: "answer_question",
+            toolCallId: "cancel-confirm",
+            expectedRevision: 2,
+            cancelled: true,
+          },
+        ] satisfies RpcCommand[]) {
+          ws.trigger(
+            "message",
+            Buffer.from(JSON.stringify({ type: "command", payload })),
+          );
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+
+        await expect(confirmation).resolves.toEqual({ status: "cancelled" });
+        expect(
+          readFormInteractions(sessionManager.getBranch()).get("cancel-confirm"),
+        ).toMatchObject({ state: "cancelled", revision: 3 });
       } finally {
         controller.abort();
         fs.rmSync(tmpDir, { recursive: true, force: true });

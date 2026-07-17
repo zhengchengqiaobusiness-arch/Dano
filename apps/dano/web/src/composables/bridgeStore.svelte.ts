@@ -2151,13 +2151,34 @@ export function respondToUIRequest(payload: RpcExtensionUIResponse) {
 export function answerQuestion(
   toolCallId: string,
   response:
-    | { cancelled: true }
+    | { cancelled: true; expectedRevision?: number }
       | {
           cancelled: false;
+          expectedRevision?: number;
           answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>;
         },
 ): Promise<RpcResponse> {
   return sendCommand({ type: "answer_question", toolCallId, ...response });
+}
+
+export function reviseQuestion(
+  toolCallId: string,
+  expectedRevision: number,
+): Promise<RpcResponse> {
+  return sendCommand({ type: "revise_question", toolCallId, expectedRevision });
+}
+
+export function submitQuestionRevision(
+  toolCallId: string,
+  expectedRevision: number,
+  answers: Record<string, Record<string, AskUserQuestionAnswer>>,
+): Promise<RpcResponse> {
+  return sendCommand({
+    type: "submit_question_revision",
+    toolCallId,
+    expectedRevision,
+    answers,
+  });
 }
 
 export function presentQuestion(toolCallId: string): Promise<RpcResponse> {

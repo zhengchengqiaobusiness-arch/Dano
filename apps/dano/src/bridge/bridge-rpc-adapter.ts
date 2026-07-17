@@ -96,7 +96,7 @@ import type { UploadRegistry } from "./upload-registry.js";
 import type { FieldAssistService } from "./field-assist.js";
 import {
   createFormInteractionForQuestion,
-  interruptAwaitingFormInteractions,
+  interruptOpenFormInteractions,
   projectFormInteraction,
   projectFormInteractionsInMessage,
   readFormInteractions,
@@ -6134,7 +6134,7 @@ export class BridgeRpcAdapter {
             pending.request,
           );
         }
-        const interrupted = interruptAwaitingFormInteractions(
+        const interrupted = interruptOpenFormInteractions(
           sessionManager,
         );
         if (interrupted.length > 0) {
@@ -6208,7 +6208,54 @@ export class BridgeRpcAdapter {
         const interaction = readFormInteractions(sessionManager.getBranch()).get(
           toolCallId,
         );
-        if (interaction && interaction.state !== "awaiting_confirmation") {
+        if (interaction && command.expectedRevision === undefined) {
+          return {
+            id: correlationId,
+            type: "response",
+            command: "answer_question",
+            success: false,
+            error: `Form Interaction ${toolCallId} requires expectedRevision ${interaction.revision}. Reload the authoritative projection and retry with that revision.`,
+            data: {
+              code: "missing_expected_revision",
+              interaction: projectFormInteraction(interaction),
+            },
+          };
+        }
+        if (
+          interaction &&
+          command.expectedRevision !== undefined &&
+          command.expectedRevision !== interaction.revision
+        ) {
+          return {
+            id: correlationId,
+            type: "response",
+            command: "answer_question",
+            success: false,
+            error: `Stale Form Interaction revision: expected ${command.expectedRevision}, current ${interaction.revision}. Reload the authoritative projection before retrying.`,
+            data: {
+              code: "stale_revision",
+              interaction: projectFormInteraction(interaction),
+            },
+          };
+        }
+        if (interaction?.state === "revising" && !command.cancelled) {
+          return {
+            id: correlationId,
+            type: "response",
+            command: "answer_question",
+            success: false,
+            error: `Form Interaction ${toolCallId} does not allow confirm while revising; submit the complete revision set first.`,
+            data: {
+              code: "invalid_state",
+              interaction: projectFormInteraction(interaction),
+            },
+          };
+        }
+        if (
+          interaction &&
+          interaction.state !== "awaiting_confirmation" &&
+          interaction.state !== "revising"
+        ) {
           return {
             id: correlationId,
             type: "response",
@@ -6244,6 +6291,133 @@ export class BridgeRpcAdapter {
           command: "answer_question",
           success: true,
           data: result,
+        };
+      }
+
+      case "revise_question": {
+        const toolCallId = command.toolCallId.trim();
+        const sessionManager = this.sessionRuntime.currentSessionManager();
+        const interaction = readFormInteractions(sessionManager.getBranch()).get(
+          toolCallId,
+        );
+        if (!interaction) {
+          throw new Error(`Form Interaction not found: ${toolCallId}`);
+        }
+        if (command.expectedRevision !== interaction.revision) {
+          return {
+            id: correlationId,
+            type: "response",
+            command: "revise_question",
+            success: false,
+            error: `Stale Form Interaction revision: expected ${command.expectedRevision}, current ${interaction.revision}. Reload the authoritative projection before retrying.`,
+            data: {
+              code: "stale_revision",
+              interaction: projectFormInteraction(interaction),
+            },
+          };
+        }
+        const transitioned = transitionFormInteraction(
+          sessionManager,
+          toolCallId,
+          { type: "return_modify" },
+        );
+        if (transitioned.kind !== "transitioned") {
+          return {
+            id: correlationId,
+            type: "response",
+            command: "revise_question",
+            success: false,
+            error: `Form Interaction ${toolCallId} does not allow return_modify from ${interaction.state}.`,
+            data: {
+              code: "invalid_state",
+              interaction: projectFormInteraction(interaction),
+            },
+          };
+        }
+        this.sendTranscriptSnapshot(
+          this.sessionRuntime.buildCurrentTranscriptPage(),
+        );
+        return {
+          id: correlationId,
+          type: "response",
+          command: "revise_question",
+          success: true,
+          data: projectFormInteraction(transitioned.snapshot),
+        };
+      }
+
+      case "submit_question_revision": {
+        const toolCallId = command.toolCallId.trim();
+        const sessionManager = this.sessionRuntime.currentSessionManager();
+        const interaction = readFormInteractions(sessionManager.getBranch()).get(
+          toolCallId,
+        );
+        if (!interaction) {
+          throw new Error(`Form Interaction not found: ${toolCallId}`);
+        }
+        if (command.expectedRevision !== interaction.revision) {
+          return {
+            id: correlationId,
+            type: "response",
+            command: "submit_question_revision",
+            success: false,
+            error: `Stale Form Interaction revision: expected ${command.expectedRevision}, current ${interaction.revision}. Reload the authoritative projection before retrying.`,
+            data: {
+              code: "stale_revision",
+              interaction: projectFormInteraction(interaction),
+            },
+          };
+        }
+        if (interaction.state !== "revising") {
+          return {
+            id: correlationId,
+            type: "response",
+            command: "submit_question_revision",
+            success: false,
+            error: `Form Interaction ${toolCallId} does not allow submit_revision from ${interaction.state}.`,
+            data: {
+              code: "invalid_state",
+              interaction: projectFormInteraction(interaction),
+            },
+          };
+        }
+        const request =
+          this.context.askUserQuestion.coordinator.submitConfirmationRevision(
+            toolCallId,
+            command.answers,
+          );
+        const forms = request.forms?.length
+          ? request.forms
+          : [
+              {
+                formId: request.confirmationOfToolCallId,
+                title: request.title,
+                questions: request.questions,
+                answer: request.answer,
+              },
+            ];
+        const transitioned = transitionFormInteraction(
+          sessionManager,
+          toolCallId,
+          {
+            type: "submit_revision",
+            forms,
+          },
+        );
+        if (transitioned.kind !== "transitioned") {
+          throw new Error(
+            `Failed to submit Form Interaction revision: ${toolCallId}`,
+          );
+        }
+        this.sendTranscriptSnapshot(
+          this.sessionRuntime.buildCurrentTranscriptPage(),
+        );
+        return {
+          id: correlationId,
+          type: "response",
+          command: "submit_question_revision",
+          success: true,
+          data: projectFormInteraction(transitioned.snapshot),
         };
       }
 

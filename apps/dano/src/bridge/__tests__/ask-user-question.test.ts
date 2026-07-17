@@ -947,15 +947,20 @@ describe("ask_user_question tool", () => {
       ],
     });
 
+    expect(
+      coordinator.submitConfirmationRevision("confirm-1", {
+        "form-1": { reason: "签署销售合同" },
+      }),
+    ).toMatchObject({ answer: { reason: "签署销售合同" } });
     coordinator.answer("confirm-1", { cancelled: false, answer: true });
     await expect(confirmation).resolves.toEqual({
       status: "confirmed",
       confirmationOfToolCallId: "form-1",
-      answer: { reason: "签署采购合同" },
+      answer: { reason: "签署销售合同" },
       forms: [
         {
           formId: "form-1",
-          answer: { reason: "签署采购合同" },
+          answer: { reason: "签署销售合同" },
         },
       ],
     });
