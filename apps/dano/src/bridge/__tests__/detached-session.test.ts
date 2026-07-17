@@ -40,6 +40,7 @@ vi.mock("../curl-tool.js", () => ({
 
 import { createDetachedAgentSession } from "../detached-session.js";
 import { danoVersionTool } from "../dano-version-tool.js";
+import { resolveDanoLlmTimeoutMs } from "../llm-resilience.js";
 import { detectWorkspaceEnvironments } from "../workspace-environment.js";
 
 describe("detached-session", () => {
@@ -58,6 +59,10 @@ describe("detached-session", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("defaults the model response timeout to 300 seconds", () => {
+    expect(resolveDanoLlmTimeoutMs({})).toBe(300_000);
   });
 
   it("detects the workspace environments exposed to the UI", () => {

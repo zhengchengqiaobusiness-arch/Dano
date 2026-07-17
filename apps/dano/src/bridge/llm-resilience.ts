@@ -4,7 +4,7 @@ import type {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
-export const DEFAULT_DANO_LLM_TIMEOUT_MS = 30_000;
+export const DEFAULT_DANO_LLM_TIMEOUT_MS = 300_000;
 
 const READ_ONLY_TOOLS = new Set(["read", "get_dano_version"]);
 
