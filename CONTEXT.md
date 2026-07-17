@@ -28,6 +28,8 @@ _Avoid_: one assistant message, one tool call, browser streaming state
 The server-owned confirmation lifecycle for one or more Submitted Forms. Its append-only snapshots live in the existing session JSONL and reduce to `awaiting_confirmation`, `revising`, `confirmed`, `cancelled`, or `interrupted`; the browser only renders the projected state, Form Revisions, and allowed actions.
 _Avoid_: frontend confirmation state, global streaming state, reconstructed form relationship
 
+Form Interaction mutations use the projected interaction revision as an optimistic concurrency token. A stale client receives the latest authoritative projection without changing JSONL; the first persisted terminal state is immutable, and safe duplicate revision requests do not append contradictory snapshots.
+
 **Form Revision**:
 The next editable revision of one Submitted Form inside a revising Form Interaction. It preserves the form's `formId`, increments its per-form revision, and starts from the latest complete submitted answer; all revisions in the interaction are submitted as one set before confirmation resumes.
 _Avoid_: new form identity, unsaved draft, reopened Submitted Form

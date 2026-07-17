@@ -95,6 +95,33 @@ function multiFormConfirmationBlock(): ToolContentBlock {
   };
 }
 
+function revisingMultiFormBlock(): ToolContentBlock {
+  const block = multiFormConfirmationBlock();
+  block.formInteraction = {
+    interactionId: "confirm-two",
+    state: "revising",
+    revision: 2,
+    allowedActions: ["cancel", "submit_revision"],
+    forms: [
+      {
+        formId: "form-a",
+        title: "请假申请",
+        revision: 2,
+        questions: [{ id: "reason", kind: "text", question: "请假原因？" }],
+        answer: { reason: "家庭事务" },
+      },
+      {
+        formId: "form-b",
+        title: "出差申请",
+        revision: 2,
+        questions: [{ id: "destination", kind: "text", question: "目的地？" }],
+        answer: { destination: "上海" },
+      },
+    ],
+  };
+  return block;
+}
+
 describe("QuestionToolCard", () => {
   it("renders an unconfirmed Submitted Form as read-only with a disabled submitted status", async () => {
     const response = vi.fn(async () => {
@@ -252,29 +279,7 @@ describe("QuestionToolCard", () => {
   it("submits all projected form revisions while preserving unchanged values", async () => {
     const response = vi.fn(async () => ({ success: true } as never));
     const submitRevision = vi.fn(async () => ({ success: true } as never));
-    const block = multiFormConfirmationBlock();
-    block.formInteraction = {
-      interactionId: "confirm-two",
-      state: "revising",
-      revision: 2,
-      allowedActions: ["cancel", "submit_revision"],
-      forms: [
-        {
-          formId: "form-a",
-          title: "请假申请",
-          revision: 2,
-          questions: [{ id: "reason", kind: "text", question: "请假原因？" }],
-          answer: { reason: "家庭事务" },
-        },
-        {
-          formId: "form-b",
-          title: "出差申请",
-          revision: 2,
-          questions: [{ id: "destination", kind: "text", question: "目的地？" }],
-          answer: { destination: "上海" },
-        },
-      ],
-    };
+    const block = revisingMultiFormBlock();
     const target = document.createElement("div");
     const component = mount(QuestionToolCard, {
       target,
@@ -307,6 +312,111 @@ describe("QuestionToolCard", () => {
     expect(target.textContent).toContain("出差申请");
 
     unmount(component);
+  });
+
+  it("recovers a stale revision from the authoritative response projection", async () => {
+    const response = vi.fn(async () => ({ success: true } as never));
+    const submitRevision = vi.fn(async () => ({
+      success: false,
+      error: "stale revision",
+      data: {
+        code: "stale_revision",
+        interaction: {
+          interactionId: "confirm-two",
+          state: "awaiting_confirmation",
+          revision: 3,
+          allowedActions: ["cancel", "return_modify", "confirm"],
+          forms: [
+            {
+              formId: "form-a",
+              title: "请假申请",
+              revision: 2,
+              questions: [{ id: "reason", kind: "text", question: "请假原因？" }],
+              answer: { reason: "另一标签页已修改" },
+            },
+            {
+              formId: "form-b",
+              title: "出差申请",
+              revision: 2,
+              questions: [{ id: "destination", kind: "text", question: "目的地？" }],
+              answer: { destination: "上海" },
+            },
+          ],
+        },
+      },
+    } as never));
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: revisingMultiFormBlock(),
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: submitRevision,
+      },
+    });
+    await tick();
+    target.querySelector("form")?.dispatchEvent(
+      new SubmitEvent("submit", { bubbles: true, cancelable: true }),
+    );
+    await tick();
+    await tick();
+
+    expect(target.querySelectorAll('input[type="text"]')).toHaveLength(0);
+    expect(target.textContent).toContain("返回修改");
+    unmount(component);
+  });
+
+  it("recovers an already-terminal response without local inference", async () => {
+    vi.useFakeTimers();
+    const success = vi.fn(async () => ({ success: true } as never));
+    const terminal = vi.fn(async () => ({
+      success: false,
+      error: "already terminal",
+      data: {
+        code: "already_terminal",
+        interaction: {
+          interactionId: "confirm-two",
+          state: "confirmed",
+          revision: 2,
+          allowedActions: [],
+          forms: [],
+        },
+      },
+    } as never));
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: multiFormConfirmationBlock(),
+        active: true,
+        onPresent: success,
+        onRespond: terminal,
+        onRevise: success,
+        onSubmitRevision: success,
+      },
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(400);
+      await tick();
+      [...target.querySelectorAll<HTMLButtonElement>("button")]
+        .find(button => button.textContent?.trim() === "确认")
+        ?.click();
+      await tick();
+      await tick();
+
+      const actions = target.querySelectorAll<HTMLButtonElement>(
+        ".question-actions button",
+      );
+      expect(actions).toHaveLength(1);
+      expect(actions[0]?.textContent).toContain("已确认");
+      expect(actions[0]?.disabled).toBe(true);
+    } finally {
+      unmount(component);
+      vi.useRealTimers();
+    }
   });
 
   it("omits old Submitted Forms while their interaction is revising", async () => {

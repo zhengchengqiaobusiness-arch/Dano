@@ -110,16 +110,10 @@ export function reduceFormInteraction(
   current: FormInteractionSnapshot,
   transition: FormInteractionTransition,
 ): FormInteractionTransitionResult {
-  if (
-    current.state === "confirmed" ||
-    current.state === "cancelled" ||
-    current.state === "interrupted"
-  ) {
+  if (isTerminalFormInteraction(current)) {
     return { kind: "already_terminal", snapshot: current };
   }
-  const allowed: readonly FormInteractionTransition["type"][] =
-    ALLOWED_TRANSITIONS[current.state];
-  if (!allowed.includes(transition.type)) {
+  if (!canApplyFormInteractionTransition(current, transition.type)) {
     return { kind: "invalid_transition", snapshot: current };
   }
   switch (transition.type) {
@@ -164,6 +158,22 @@ export function reduceFormInteraction(
     default:
       return assertNever(transition);
   }
+}
+
+export function canApplyFormInteractionTransition(
+  snapshot: FormInteractionSnapshot,
+  transition: FormInteractionTransition["type"],
+): boolean {
+  if (!isOpenState(snapshot.state)) return false;
+  const allowed: readonly FormInteractionTransition["type"][] =
+    ALLOWED_TRANSITIONS[snapshot.state];
+  return allowed.includes(transition);
+}
+
+export function isTerminalFormInteraction(
+  snapshot: FormInteractionSnapshot,
+): boolean {
+  return !isOpenState(snapshot.state);
 }
 
 export function interruptOpenFormInteractions(

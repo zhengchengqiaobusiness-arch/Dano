@@ -1567,6 +1567,194 @@ describe("BridgeRpcAdapter", () => {
       }
     });
 
+    it("converges duplicate, stale, and competing terminal requests from two clients", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-form-concurrency-"));
+      const controller = new AbortController();
+      const secondSend = vi.fn<(message: string) => void>();
+      let secondAdapter: BridgeRpcAdapter | undefined;
+      try {
+        const sessionManager = SessionManager.create(tmpDir, tmpDir);
+        (
+          context.state as unknown as { sessionManager: SessionManager }
+        ).sessionManager = sessionManager;
+        for (const [formId, title, id, value] of [
+          ["concurrent-a", "请假申请", "reason", "家庭事务"],
+          ["concurrent-b", "出差申请", "destination", "上海"],
+        ] as const) {
+          const submitted = askUserQuestionCoordinator.wait(
+            formId,
+            {
+              title,
+              questions: [{ id, question: `${id}？`, default: value }],
+            },
+            controller.signal,
+          );
+          askUserQuestionCoordinator.present(formId);
+          askUserQuestionCoordinator.answer(formId, {
+            cancelled: false,
+            answer: { [id]: value },
+          });
+          await submitted;
+        }
+        const confirmation = askUserQuestionCoordinator.wait(
+          "concurrent-confirm",
+          { confirm: true, formIds: ["concurrent-a", "concurrent-b"] },
+          controller.signal,
+        );
+        sessionManager.appendMessage({
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "concurrent-confirm",
+            name: "ask_user_question",
+            arguments: {
+              confirm: true,
+              formIds: ["concurrent-a", "concurrent-b"],
+            },
+          }],
+          timestamp: Date.now(),
+          stopReason: "toolUse",
+        } as any);
+
+        secondAdapter = new BridgeRpcAdapter(
+          { id: "second-client", seq: 2, connectedAt: new Date().toISOString() },
+          message => secondSend(JSON.stringify(message)),
+          context,
+          { ...DEFAULT_BRIDGE_CONFIG, slashCommandsAndMentionsEnabled: true },
+          eventBus,
+          emitEvent as any,
+          uploadRegistry as any,
+        );
+        const dispatch = async (
+          target: BridgeRpcAdapter,
+          payload: RpcCommand,
+        ) => {
+          target.handleRawMessage(JSON.stringify({ type: "command", payload }));
+          await new Promise(resolve => setTimeout(resolve, 10));
+          const send = target === adapter ? ws.send : secondSend;
+          return send.mock.calls
+            .map(([message]) => JSON.parse(message as string))
+            .find(message => message.payload?.id === payload.id)?.payload;
+        };
+
+        await dispatch(adapter, {
+          id: "concurrent-present",
+          type: "present_question",
+          toolCallId: "concurrent-confirm",
+        });
+        expect(await dispatch(adapter, {
+          id: "concurrent-revise",
+          type: "revise_question",
+          toolCallId: "concurrent-confirm",
+          expectedRevision: 1,
+        })).toMatchObject({ success: true, data: { state: "revising", revision: 2 } });
+        expect(await dispatch(secondAdapter, {
+          id: "concurrent-revise-repeat",
+          type: "revise_question",
+          toolCallId: "concurrent-confirm",
+          expectedRevision: 1,
+        })).toMatchObject({ success: true, data: { state: "revising", revision: 2 } });
+
+        expect(await dispatch(secondAdapter, {
+          id: "concurrent-submit-invalid",
+          type: "submit_question_revision",
+          toolCallId: "concurrent-confirm",
+          expectedRevision: 2,
+          answers: {
+            "concurrent-a": { reason: "不得部分写入" },
+            "concurrent-b": { destination: [] },
+          },
+        })).toMatchObject({ success: false });
+        const winnerAnswers = {
+          "concurrent-b": { destination: "北京" },
+        };
+        expect(await dispatch(adapter, {
+          id: "concurrent-submit",
+          type: "submit_question_revision",
+          toolCallId: "concurrent-confirm",
+          expectedRevision: 2,
+          answers: winnerAnswers,
+        })).toMatchObject({
+          success: true,
+          data: { state: "awaiting_confirmation", revision: 3 },
+        });
+        expect(await dispatch(secondAdapter, {
+          id: "concurrent-submit-repeat",
+          type: "submit_question_revision",
+          toolCallId: "concurrent-confirm",
+          expectedRevision: 2,
+          answers: winnerAnswers,
+        })).toMatchObject({
+          success: true,
+          data: { state: "awaiting_confirmation", revision: 3 },
+        });
+        expect(await dispatch(secondAdapter, {
+          id: "concurrent-submit-stale",
+          type: "submit_question_revision",
+          toolCallId: "concurrent-confirm",
+          expectedRevision: 2,
+          answers: {
+            "concurrent-a": { reason: "冲突覆盖" },
+            "concurrent-b": { destination: "北京" },
+          },
+        })).toMatchObject({
+          success: false,
+          data: {
+            code: "stale_revision",
+            interaction: {
+              state: "awaiting_confirmation",
+              revision: 3,
+              forms: [
+                expect.objectContaining({ answer: { reason: "家庭事务" } }),
+                expect.objectContaining({ answer: { destination: "北京" } }),
+              ],
+            },
+          },
+        });
+
+        expect(await dispatch(adapter, {
+          id: "concurrent-confirm-win",
+          type: "answer_question",
+          toolCallId: "concurrent-confirm",
+          expectedRevision: 3,
+          cancelled: false,
+          answer: true,
+        })).toMatchObject({ success: true });
+        expect(await dispatch(secondAdapter, {
+          id: "concurrent-cancel-late",
+          type: "answer_question",
+          toolCallId: "concurrent-confirm",
+          expectedRevision: 3,
+          cancelled: true,
+        })).toMatchObject({
+          success: false,
+          data: {
+            code: "already_terminal",
+            interaction: { state: "confirmed", revision: 4 },
+          },
+        });
+        expect(await dispatch(secondAdapter, {
+          id: "concurrent-stop-late",
+          type: "abort",
+        })).toMatchObject({ success: true });
+
+        await expect(confirmation).resolves.toMatchObject({
+          status: "confirmed",
+          forms: [
+            { formId: "concurrent-a", answer: { reason: "家庭事务" } },
+            { formId: "concurrent-b", answer: { destination: "北京" } },
+          ],
+        });
+        expect(
+          readFormInteractions(sessionManager.getBranch()).get("concurrent-confirm"),
+        ).toMatchObject({ state: "confirmed", revision: 4 });
+      } finally {
+        secondAdapter?.dispose();
+        controller.abort();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("cancels one pending confirmation atomically while revising", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-revise-cancel-"));
       const controller = new AbortController();
