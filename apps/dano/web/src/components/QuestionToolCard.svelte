@@ -129,7 +129,11 @@
   const pending = $derived(
     isConfirmation
       ? interaction?.state === "awaiting_confirmation" ||
-          (!interaction && block.questionState === "awaiting_presentation")
+          (!interaction &&
+            (block.questionState === "awaiting_presentation" ||
+              (block.questionState === undefined &&
+                block.toolStatus === "pending" &&
+                active)))
       : block.toolStatus === "pending" && !result && active,
   );
   const interrupted = $derived(
@@ -233,6 +237,7 @@
     void tick()
       .then(() => onPresent(toolCallId))
       .then(response => {
+        applyAuthoritativeInteraction(response);
         if (!response.success) throw new Error(response.error);
       })
       .catch(cause => {

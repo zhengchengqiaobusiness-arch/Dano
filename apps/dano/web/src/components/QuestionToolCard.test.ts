@@ -212,6 +212,48 @@ describe("QuestionToolCard", () => {
     }
   });
 
+  it("bootstraps a live confirmation when lifecycle projection races tool execution", async () => {
+    vi.useFakeTimers();
+    const block = multiFormConfirmationBlock();
+    block.formInteraction = undefined;
+    block.questionState = undefined;
+    const response = vi.fn(async () => ({
+      success: true,
+      data: {
+        interactionId: "confirm-two",
+        state: "awaiting_confirmation",
+        revision: 1,
+        allowedActions: ["cancel", "return_modify", "confirm"],
+        forms: [],
+      },
+    } as never));
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block,
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
+      },
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(400);
+      await tick();
+      await tick();
+
+      expect(response).toHaveBeenCalledWith("confirm-two");
+      expect(target.textContent).toContain("返回修改");
+      expect(target.textContent).toContain("取消");
+      expect(target.textContent).toContain("确认");
+    } finally {
+      unmount(component);
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps an interrupted Submitted Form terminal while a later turn is streaming", async () => {
     const response = vi.fn(async () => {
       throw new Error("a terminal Form Interaction must not issue RPCs");
