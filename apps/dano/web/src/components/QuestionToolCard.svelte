@@ -97,7 +97,7 @@
   const pending = $derived(
     isConfirmation
       ? interaction?.state === "awaiting_confirmation" ||
-          (!interaction && block.toolStatus === "pending" && !result && active)
+          (!interaction && block.questionState === "awaiting_presentation")
       : block.toolStatus === "pending" && !result && active,
   );
   const interrupted = $derived(
