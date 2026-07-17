@@ -31,6 +31,7 @@
   import type { ToolContentBlock } from "../utils/transcript";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import QuestionDateField from "./QuestionDateField.svelte";
+  import QuestionRemoteCombobox from "./QuestionRemoteCombobox.svelte";
   import SubmittedAnswerValue from "./SubmittedAnswerValue.svelte";
   import ChevronDown from "lucide-svelte/icons/chevron-down";
   import Calendar from "lucide-svelte/icons/calendar";
@@ -134,6 +135,7 @@
   let remoteHasMore = $state<Record<string, boolean>>({});
   let remoteLoading = $state<Record<string, boolean>>({});
   let remoteError = $state<Record<string, string>>({});
+  let remoteRequestSeq = $state<Record<string, number>>({});
   let submitting = $state(false);
   let error = $state("");
   let pendingReady = $state(false);
@@ -172,6 +174,7 @@
     remoteHasMore = {};
     remoteLoading = {};
     remoteError = {};
+    remoteRequestSeq = {};
     submitting = false;
     error = "";
     aiAssistLoading = {};
@@ -506,7 +509,9 @@
     search: string,
     append: boolean,
   ): Promise<void> {
-    if (!item.dataSource || remoteLoading[item.id]) return;
+    if (!item.dataSource || (append && remoteLoading[item.id])) return;
+    const requestSeq = (remoteRequestSeq[item.id] ?? 0) + 1;
+    remoteRequestSeq[item.id] = requestSeq;
     remoteLoading[item.id] = true;
     remoteError[item.id] = "";
     try {
@@ -517,17 +522,33 @@
         item.dataSource,
         item.kind === "treeSelect" || item.inputType === "treeSelect",
       );
-      remoteOptions[item.id] = append ? [...(remoteOptions[item.id] ?? []), ...options] : options;
+      if (remoteRequestSeq[item.id] !== requestSeq) return;
+      const selected = (remoteOptions[item.id] ?? []).find(
+        option => optionKey(option.id) === selectedOption[item.id],
+      );
+      remoteOptions[item.id] = mergeRemoteOptions(
+        append ? [...(remoteOptions[item.id] ?? []), ...options] : selected ? [selected, ...options] : options,
+      );
       remotePage[item.id] = page;
       remoteHasMore[item.id] =
         typeof response.total === "number"
           ? remoteOptions[item.id].length < response.total
           : options.length >= pageSize;
     } catch (cause) {
-      remoteError[item.id] = cause instanceof Error ? cause.message : String(cause);
+      if (remoteRequestSeq[item.id] === requestSeq) {
+        remoteError[item.id] = cause instanceof Error ? cause.message : String(cause);
+      }
     } finally {
-      remoteLoading[item.id] = false;
+      if (remoteRequestSeq[item.id] === requestSeq) remoteLoading[item.id] = false;
     }
+  }
+
+  function mergeRemoteOptions(
+    options: NormalizedAskUserQuestionOption[],
+  ): NormalizedAskUserQuestionOption[] {
+    const byId = new Map<string, NormalizedAskUserQuestionOption>();
+    for (const option of options) byId.set(optionKey(option.id), option);
+    return [...byId.values()];
   }
 
   async function fetchDataSource(
@@ -759,52 +780,54 @@
               </fieldset>
             {:else if item.kind === "select" || item.kind === "treeSelect"}
               {#if item.dataSource}
-                <div class="question-remote-row">
-                  <input
-                    class="question-input"
-                    type="search"
-                    bind:value={remoteSearch[item.id]}
-                    disabled={!formEnabled || submitting || remoteLoading[item.id]}
-                    placeholder={t("questionTool.searchPlaceholder")}
-                    onkeydown={preventEnterSubmit}
-                  />
-                  <button
-                    type="button"
-                    class="question-button secondary"
-                    disabled={!formEnabled || submitting || remoteLoading[item.id]}
-                    onclick={() => void loadRemoteOptions(item, 1, remoteSearch[item.id] ?? "", false)}
-                  >
-                    {t("questionTool.search")}
-                  </button>
-                </div>
-              {/if}
-              <label class="sr-only" for={`question-${block.toolCallId}-${item.id}`}>{item.question}</label>
-              <div class="question-select-control">
-                <select
+                <QuestionRemoteCombobox
                   id={`question-${block.toolCallId}-${item.id}`}
-                  class="question-input"
-                  bind:value={selectedOption[item.id]}
-                  disabled={!formEnabled || submitting || remoteLoading[item.id]}
-                >
-                  <option value="">{t("questionTool.selectPlaceholder")}</option>
-                  {#each itemOptions(item) as option}
-                    <option value={optionKey(option.id)}>{option.label}</option>
-                  {/each}
-                </select>
-                <ChevronDown size={16} aria-hidden="true" />
-              </div>
-              {#if remoteError[item.id]}
-                <div class="question-error" role="alert">{remoteError[item.id]}</div>
-              {/if}
-              {#if item.dataSource && remoteHasMore[item.id]}
-                <button
-                  type="button"
-                  class="question-button secondary load-more"
-                  disabled={!formEnabled || submitting || remoteLoading[item.id]}
-                  onclick={() => void loadRemoteOptions(item, (remotePage[item.id] ?? 1) + 1, remoteSearch[item.id] ?? "", true)}
-                >
-                  {remoteLoading[item.id] ? t("questionTool.loading") : t("questionTool.loadMore")}
-                </button>
+                  label={item.question}
+                  value={selectedOption[item.id] ?? ""}
+                  options={itemOptions(item).map(option => ({
+                    key: optionKey(option.id),
+                    label: option.label,
+                  }))}
+                  disabled={!formEnabled || submitting}
+                  loading={Boolean(remoteLoading[item.id])}
+                  error={Boolean(remoteError[item.id])}
+                  hasMore={Boolean(remoteHasMore[item.id])}
+                  placeholder={t("questionTool.selectPlaceholder")}
+                  searchPlaceholder={t("questionTool.searchPlaceholder")}
+                  loadingLabel={t("questionTool.loading")}
+                  emptyLabel={t("questionTool.remoteEmpty")}
+                  errorLabel={t("questionTool.remoteError")}
+                  retryLabel={t("questionTool.retry")}
+                  clearLabel={t("questionTool.clearSelection")}
+                  loadMoreLabel={t("questionTool.loadMore")}
+                  onValueChange={(value) => selectedOption[item.id] = value}
+                  onSearch={(search) => {
+                    remoteSearch[item.id] = search;
+                    void loadRemoteOptions(item, 1, search, false);
+                  }}
+                  onLoadMore={() => void loadRemoteOptions(
+                    item,
+                    (remotePage[item.id] ?? 1) + 1,
+                    remoteSearch[item.id] ?? "",
+                    true,
+                  )}
+                />
+              {:else}
+                <label class="sr-only" for={`question-${block.toolCallId}-${item.id}`}>{item.question}</label>
+                <div class="question-select-control">
+                  <select
+                    id={`question-${block.toolCallId}-${item.id}`}
+                    class="question-input"
+                    bind:value={selectedOption[item.id]}
+                    disabled={!formEnabled || submitting}
+                  >
+                    <option value="">{t("questionTool.selectPlaceholder")}</option>
+                    {#each itemOptions(item) as option}
+                      <option value={optionKey(option.id)}>{option.label}</option>
+                    {/each}
+                  </select>
+                  <ChevronDown size={16} aria-hidden="true" />
+                </div>
               {/if}
             {:else if item.kind === "multiple"}
               {#if item.dataSource}

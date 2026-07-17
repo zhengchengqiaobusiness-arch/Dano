@@ -5,8 +5,20 @@ import { defineConfig } from "vitest/config";
 const typesRoot = fileURLToPath(new URL("./apps/dano/types/", import.meta.url));
 
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [svelte({
+    dynamicCompileOptions: () => ({ generate: "client" }),
+  })],
+  ssr: {
+    noExternal: [
+      "@comark/svelte",
+      "bits-ui",
+      "lucide-svelte",
+      "runed",
+      "svelte-toolbelt",
+    ],
+  },
   resolve: {
+    conditions: ["browser"],
     alias: [
       {
         find: /^@dano\/types\//,
