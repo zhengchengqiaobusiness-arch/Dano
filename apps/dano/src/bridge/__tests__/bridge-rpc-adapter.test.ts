@@ -3468,6 +3468,125 @@ describe("BridgeRpcAdapter", () => {
       });
     });
 
+    it("keeps recoverable question failures retryable but aborts a terminal failure", async () => {
+      const handler = (context.events.subscribe as ReturnType<typeof vi.fn>)
+        .mock.calls[0]?.[0] as
+        | ((event: Record<string, unknown>) => void)
+        | undefined;
+
+      handler?.({
+        type: "message_end",
+        message: {
+          id: "question-retry-result",
+          role: "toolResult",
+          toolCallId: "question-retry",
+          toolName: "ask_user_question",
+          content: [
+            {
+              type: "text",
+              text: "QUESTION_PRESENTATION_TIMEOUT: retry the native tool call",
+            },
+          ],
+          isError: true,
+        },
+      });
+
+      expect(context.actions.abort).not.toHaveBeenCalled();
+
+      handler?.({
+        type: "message_end",
+        message: {
+          id: "question-terminal-result",
+          role: "toolResult",
+          toolCallId: "question-terminal",
+          toolName: "ask_user_question",
+          content: [
+            {
+              type: "text",
+              text: "QUESTION_PRESENTATION_FAILED: Dano could not display the question card",
+            },
+          ],
+          isError: true,
+        },
+      });
+
+      expect(context.actions.abort).toHaveBeenCalledTimes(1);
+    });
+
+    it("aborts the active detached session after a terminal question failure", async () => {
+      const tmpDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "dano-terminal-question-"),
+      );
+      const abort = vi.fn().mockResolvedValue(undefined);
+      const subscribe = vi.fn().mockReturnValue(() => {});
+      (
+        context.state.sessionManager.getSessionFile as ReturnType<typeof vi.fn>
+      ).mockReturnValue(path.join(tmpDir, "live.jsonl"));
+      (
+        context.state.sessionManager.getCwd as ReturnType<typeof vi.fn>
+      ).mockReturnValue(tmpDir);
+      createAgentSessionMock.mockResolvedValue({
+        session: {
+          sessionFile: undefined,
+          sessionId: "terminal-question-session",
+          isStreaming: true,
+          bindExtensions: vi.fn().mockResolvedValue(undefined),
+          subscribe,
+          prompt: vi.fn().mockResolvedValue(undefined),
+          abort,
+          sessionManager: {
+            getSessionFile: vi.fn().mockReturnValue(undefined),
+            getSessionId: vi.fn().mockReturnValue("terminal-question-session"),
+            getEntries: vi.fn().mockReturnValue([]),
+            getBranch: vi.fn().mockReturnValue([]),
+            getCwd: vi.fn().mockReturnValue(tmpDir),
+            getLeafId: vi.fn().mockReturnValue(null),
+            getTree: vi.fn().mockReturnValue([]),
+          },
+        },
+      });
+
+      ws.trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: {
+              id: "terminal-question-prompt",
+              type: "prompt",
+              message: "酒店申请",
+            },
+          }),
+        ),
+      );
+      await new Promise(resolve => setTimeout(resolve, 20));
+
+      const handler = subscribe.mock.calls[0]?.[0] as
+        | ((event: Record<string, unknown>) => void)
+        | undefined;
+      handler?.({
+        type: "message_end",
+        message: {
+          id: "question-terminal-result",
+          role: "toolResult",
+          toolCallId: "question-terminal",
+          toolName: "ask_user_question",
+          content: [
+            {
+              type: "text",
+              text: "QUESTION_VALIDATION_FAILED: repeated invalid calls",
+            },
+          ],
+          isError: true,
+        },
+      });
+      await Promise.resolve();
+
+      expect(abort).toHaveBeenCalledTimes(1);
+      expect(context.actions.abort).not.toHaveBeenCalled();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
     it("coalesces consecutive transcript deltas for the same block", async () => {
       (ws.send as ReturnType<typeof vi.fn>).mockClear();
 
