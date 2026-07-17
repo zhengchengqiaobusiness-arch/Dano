@@ -112,6 +112,38 @@ type RpcTranscriptToolCallBlock = Extract<
   { type: "toolCall" }
 >;
 
+function formInteractionCommandFailure(
+  correlationId: string,
+  command: string,
+  code: string,
+  error: string,
+  interaction: Parameters<typeof projectFormInteraction>[0],
+): RpcResponse {
+  return {
+    id: correlationId,
+    type: "response",
+    command,
+    success: false,
+    error,
+    data: { code, interaction: projectFormInteraction(interaction) },
+  };
+}
+
+function staleFormInteractionResponse(
+  correlationId: string,
+  command: string,
+  expectedRevision: number,
+  interaction: Parameters<typeof projectFormInteraction>[0],
+): RpcResponse {
+  return formInteractionCommandFailure(
+    correlationId,
+    command,
+    "stale_revision",
+    `Stale Form Interaction revision: expected ${expectedRevision}, current ${interaction.revision}. Reload the authoritative projection before retrying.`,
+    interaction,
+  );
+}
+
 type SubmittedFormProjection = {
   toolCallId: string;
   request: Extract<AskUserQuestionCardRequest, { batch: true }>;
@@ -6209,64 +6241,47 @@ export class BridgeRpcAdapter {
           toolCallId,
         );
         if (interaction && command.expectedRevision === undefined) {
-          return {
-            id: correlationId,
-            type: "response",
-            command: "answer_question",
-            success: false,
-            error: `Form Interaction ${toolCallId} requires expectedRevision ${interaction.revision}. Reload the authoritative projection and retry with that revision.`,
-            data: {
-              code: "missing_expected_revision",
-              interaction: projectFormInteraction(interaction),
-            },
-          };
+          return formInteractionCommandFailure(
+            correlationId,
+            "answer_question",
+            "missing_expected_revision",
+            `Form Interaction ${toolCallId} requires expectedRevision ${interaction.revision}. Reload the authoritative projection and retry with that revision.`,
+            interaction,
+          );
         }
         if (
           interaction &&
           command.expectedRevision !== undefined &&
           command.expectedRevision !== interaction.revision
         ) {
-          return {
-            id: correlationId,
-            type: "response",
-            command: "answer_question",
-            success: false,
-            error: `Stale Form Interaction revision: expected ${command.expectedRevision}, current ${interaction.revision}. Reload the authoritative projection before retrying.`,
-            data: {
-              code: "stale_revision",
-              interaction: projectFormInteraction(interaction),
-            },
-          };
+          return staleFormInteractionResponse(
+            correlationId,
+            "answer_question",
+            command.expectedRevision,
+            interaction,
+          );
         }
         if (interaction?.state === "revising" && !command.cancelled) {
-          return {
-            id: correlationId,
-            type: "response",
-            command: "answer_question",
-            success: false,
-            error: `Form Interaction ${toolCallId} does not allow confirm while revising; submit the complete revision set first.`,
-            data: {
-              code: "invalid_state",
-              interaction: projectFormInteraction(interaction),
-            },
-          };
+          return formInteractionCommandFailure(
+            correlationId,
+            "answer_question",
+            "invalid_state",
+            `Form Interaction ${toolCallId} does not allow confirm while revising; submit the complete revision set first.`,
+            interaction,
+          );
         }
         if (
           interaction &&
           interaction.state !== "awaiting_confirmation" &&
           interaction.state !== "revising"
         ) {
-          return {
-            id: correlationId,
-            type: "response",
-            command: "answer_question",
-            success: false,
-            error: `Form Interaction ${toolCallId} is already terminal (${interaction.state}); reload the transcript and do not retry this action.`,
-            data: {
-              code: "already_terminal",
-              interaction: projectFormInteraction(interaction),
-            },
-          };
+          return formInteractionCommandFailure(
+            correlationId,
+            "answer_question",
+            "already_terminal",
+            `Form Interaction ${toolCallId} is already terminal (${interaction.state}); reload the transcript and do not retry this action.`,
+            interaction,
+          );
         }
 
         const result = command.cancelled
@@ -6304,17 +6319,12 @@ export class BridgeRpcAdapter {
           throw new Error(`Form Interaction not found: ${toolCallId}`);
         }
         if (command.expectedRevision !== interaction.revision) {
-          return {
-            id: correlationId,
-            type: "response",
-            command: "revise_question",
-            success: false,
-            error: `Stale Form Interaction revision: expected ${command.expectedRevision}, current ${interaction.revision}. Reload the authoritative projection before retrying.`,
-            data: {
-              code: "stale_revision",
-              interaction: projectFormInteraction(interaction),
-            },
-          };
+          return staleFormInteractionResponse(
+            correlationId,
+            "revise_question",
+            command.expectedRevision,
+            interaction,
+          );
         }
         const transitioned = transitionFormInteraction(
           sessionManager,
@@ -6322,17 +6332,13 @@ export class BridgeRpcAdapter {
           { type: "return_modify" },
         );
         if (transitioned.kind !== "transitioned") {
-          return {
-            id: correlationId,
-            type: "response",
-            command: "revise_question",
-            success: false,
-            error: `Form Interaction ${toolCallId} does not allow return_modify from ${interaction.state}.`,
-            data: {
-              code: "invalid_state",
-              interaction: projectFormInteraction(interaction),
-            },
-          };
+          return formInteractionCommandFailure(
+            correlationId,
+            "revise_question",
+            "invalid_state",
+            `Form Interaction ${toolCallId} does not allow return_modify from ${interaction.state}.`,
+            interaction,
+          );
         }
         this.sendTranscriptSnapshot(
           this.sessionRuntime.buildCurrentTranscriptPage(),
@@ -6356,30 +6362,21 @@ export class BridgeRpcAdapter {
           throw new Error(`Form Interaction not found: ${toolCallId}`);
         }
         if (command.expectedRevision !== interaction.revision) {
-          return {
-            id: correlationId,
-            type: "response",
-            command: "submit_question_revision",
-            success: false,
-            error: `Stale Form Interaction revision: expected ${command.expectedRevision}, current ${interaction.revision}. Reload the authoritative projection before retrying.`,
-            data: {
-              code: "stale_revision",
-              interaction: projectFormInteraction(interaction),
-            },
-          };
+          return staleFormInteractionResponse(
+            correlationId,
+            "submit_question_revision",
+            command.expectedRevision,
+            interaction,
+          );
         }
         if (interaction.state !== "revising") {
-          return {
-            id: correlationId,
-            type: "response",
-            command: "submit_question_revision",
-            success: false,
-            error: `Form Interaction ${toolCallId} does not allow submit_revision from ${interaction.state}.`,
-            data: {
-              code: "invalid_state",
-              interaction: projectFormInteraction(interaction),
-            },
-          };
+          return formInteractionCommandFailure(
+            correlationId,
+            "submit_question_revision",
+            "invalid_state",
+            `Form Interaction ${toolCallId} does not allow submit_revision from ${interaction.state}.`,
+            interaction,
+          );
         }
         const request =
           this.context.askUserQuestion.coordinator.submitConfirmationRevision(

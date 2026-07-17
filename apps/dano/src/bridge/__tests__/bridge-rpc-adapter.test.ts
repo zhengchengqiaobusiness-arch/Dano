@@ -1306,11 +1306,24 @@ describe("BridgeRpcAdapter", () => {
             answers: { "form-a": { reason: "照顾家人" } },
           },
         ] satisfies RpcCommand[]) {
+          const reloadForProjection = payload.id === "revising-confirm-two-page";
+          if (reloadForProjection) {
+            const sessionFile = sessionManager.getSessionFile();
+            expect(sessionFile).toBeTruthy();
+            (
+              context.state as unknown as { sessionManager: SessionManager }
+            ).sessionManager = SessionManager.open(sessionFile!);
+          }
           ws.trigger(
             "message",
             Buffer.from(JSON.stringify({ type: "command", payload })),
           );
           await new Promise(resolve => setTimeout(resolve, 10));
+          if (reloadForProjection) {
+            (
+              context.state as unknown as { sessionManager: SessionManager }
+            ).sessionManager = sessionManager;
+          }
         }
         const staleResponse = (ws.send as ReturnType<typeof vi.fn>).mock.calls
           .map(([message]) => JSON.parse(message as string))
@@ -1624,6 +1637,98 @@ describe("BridgeRpcAdapter", () => {
         expect(
           readFormInteractions(sessionManager.getBranch()).get("cancel-confirm"),
         ).toMatchObject({ state: "cancelled", revision: 3 });
+      } finally {
+        controller.abort();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("resubmits and confirms one Form Revision through the original tool call", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-revise-single-"));
+      const controller = new AbortController();
+      try {
+        const sessionManager = SessionManager.create(tmpDir, tmpDir);
+        (
+          context.state as unknown as { sessionManager: SessionManager }
+        ).sessionManager = sessionManager;
+        const submitted = askUserQuestionCoordinator.wait(
+          "single-form",
+          {
+            title: "采购申请",
+            questions: [{ id: "item", question: "采购物品？", default: "电脑" }],
+          },
+          controller.signal,
+        );
+        askUserQuestionCoordinator.present("single-form");
+        askUserQuestionCoordinator.answer("single-form", {
+          cancelled: false,
+          answer: { item: "电脑" },
+        });
+        await submitted;
+        const confirmation = askUserQuestionCoordinator.wait(
+          "single-confirm",
+          { confirm: true, formIds: ["single-form"] },
+          controller.signal,
+        );
+        sessionManager.appendMessage({
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            id: "single-confirm",
+            name: "ask_user_question",
+            arguments: { confirm: true, formIds: ["single-form"] },
+          }],
+          timestamp: Date.now(),
+          stopReason: "toolUse",
+        } as any);
+
+        for (const payload of [
+          {
+            id: "present-single-confirm",
+            type: "present_question",
+            toolCallId: "single-confirm",
+          },
+          {
+            id: "revise-single-confirm",
+            type: "revise_question",
+            toolCallId: "single-confirm",
+            expectedRevision: 1,
+          },
+          {
+            id: "submit-single-confirm",
+            type: "submit_question_revision",
+            toolCallId: "single-confirm",
+            expectedRevision: 2,
+            answers: { "single-form": { item: "显示器" } },
+          },
+          {
+            id: "answer-single-confirm",
+            type: "answer_question",
+            toolCallId: "single-confirm",
+            expectedRevision: 3,
+            cancelled: false,
+            answer: true,
+          },
+        ] satisfies RpcCommand[]) {
+          ws.trigger(
+            "message",
+            Buffer.from(JSON.stringify({ type: "command", payload })),
+          );
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+
+        await expect(confirmation).resolves.toMatchObject({
+          status: "confirmed",
+          confirmationOfToolCallId: "single-form",
+          forms: [{ formId: "single-form", answer: { item: "显示器" } }],
+        });
+        expect(
+          readFormInteractions(sessionManager.getBranch()).get("single-confirm"),
+        ).toMatchObject({
+          state: "confirmed",
+          revision: 4,
+          forms: [{ formId: "single-form", revision: 2, answer: { item: "显示器" } }],
+        });
       } finally {
         controller.abort();
         fs.rmSync(tmpDir, { recursive: true, force: true });
