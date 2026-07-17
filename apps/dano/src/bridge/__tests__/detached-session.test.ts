@@ -56,6 +56,7 @@ describe("detached-session", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -115,9 +116,12 @@ describe("detached-session", () => {
   });
 
   it("builds custom tools for detached sessions", async () => {
+    vi.stubEnv("DANO_LLM_TIMEOUT_MS", "1234");
+    const applyOverrides = vi.fn();
     const services = {
       settingsManager: {
         getImageAutoResize: vi.fn().mockReturnValue(false),
+        applyOverrides,
       },
     };
     const readToolDefinition = { name: "read" };
@@ -125,7 +129,16 @@ describe("detached-session", () => {
     const editToolDefinition = { name: "edit" };
     const writeToolDefinition = { name: "write" };
     const configuredAskUserQuestionTool = { name: "configured-question" };
-    const sessionResult = { session: { sessionId: "session-123" } };
+    let sessionEventHandler: ((event: any) => void) | undefined;
+    const sessionResult = {
+      session: {
+        sessionId: "session-123",
+        subscribe: vi.fn((handler: (event: any) => void) => {
+          sessionEventHandler = handler;
+          return vi.fn();
+        }),
+      },
+    };
     const sessionManager = { getCwd: vi.fn().mockReturnValue(tmpDir) };
 
     createAgentSessionServicesMock.mockResolvedValue(services);
@@ -149,6 +162,16 @@ describe("detached-session", () => {
         ],
       },
     });
+    expect(applyOverrides).toHaveBeenCalledWith({
+      retry: {
+        enabled: true,
+        maxRetries: 1,
+        provider: {
+          timeoutMs: 1234,
+          maxRetries: 0,
+        },
+      },
+    });
     expect(createReadToolDefinitionMock).toHaveBeenCalledWith(tmpDir, {
       autoResizeImages: false,
     });
@@ -169,5 +192,63 @@ describe("detached-session", () => {
       ],
     });
     expect(result).toBe(sessionResult);
+
+    const overrideCallCount = applyOverrides.mock.calls.length;
+    sessionEventHandler?.({
+      type: "tool_execution_start",
+      toolCallId: "read-1",
+      toolName: "read",
+      args: { path: "README.md" },
+    });
+    expect(applyOverrides).toHaveBeenCalledTimes(overrideCallCount);
+
+    sessionEventHandler?.({
+      type: "message_update",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "partial response" }],
+      },
+    });
+    expect(applyOverrides).toHaveBeenLastCalledWith({
+      retry: { enabled: false },
+    });
+
+    sessionEventHandler?.({
+      type: "message_start",
+      message: { role: "user", content: "next request" },
+    });
+    expect(applyOverrides).toHaveBeenLastCalledWith({
+      retry: { enabled: true },
+    });
+
+    sessionEventHandler?.({
+      type: "tool_execution_start",
+      toolCallId: "write-1",
+      toolName: "write",
+      args: { path: "result.txt" },
+    });
+    expect(applyOverrides).toHaveBeenLastCalledWith({
+      retry: { enabled: false },
+    });
+  });
+
+  it("fails fast when DANO_LLM_TIMEOUT_MS is invalid", async () => {
+    vi.stubEnv("DANO_LLM_TIMEOUT_MS", "not-a-timeout");
+    const services = {
+      settingsManager: {
+        getImageAutoResize: vi.fn().mockReturnValue(false),
+        applyOverrides: vi.fn(),
+      },
+    };
+    createAgentSessionServicesMock.mockResolvedValue(services);
+    createAgentSessionFromServicesMock.mockResolvedValue({
+      session: { subscribe: vi.fn() },
+    });
+
+    await expect(
+      createDetachedAgentSession(tmpDir, {} as never),
+    ).rejects.toThrow(
+      'Invalid DANO_LLM_TIMEOUT_MS: expected a positive integer, received "not-a-timeout"',
+    );
   });
 });

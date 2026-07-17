@@ -153,7 +153,11 @@ function toBridgeLiveEvent(event: AgentSessionEvent): BridgeLiveEvent | null {
     case "agent_start":
       return { type: "agent_start" };
     case "agent_end":
-      return { type: "agent_end", messages: event.messages };
+      return {
+        type: "agent_end",
+        messages: event.messages,
+        willRetry: event.willRetry,
+      };
     case "message_start":
     case "message_update":
     case "message_end":

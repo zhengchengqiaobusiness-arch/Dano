@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { askUserQuestionTool } from "./ask-user-question.js";
 import { createCurlTool } from "./curl-tool.js";
 import { danoVersionTool } from "./dano-version-tool.js";
+import { configureDanoLlmResilience } from "./llm-resilience.js";
 
 function resolveHeimdallExtensionPath(): string {
   try {
@@ -60,7 +61,7 @@ export async function createDetachedAgentSession(
           )
       : undefined;
 
-  return createAgentSessionFromServices({
+  const result = await createAgentSessionFromServices({
     services,
     sessionManager,
     noTools: "builtin",
@@ -77,4 +78,6 @@ export async function createDetachedAgentSession(
       options.askUserQuestionTool ?? askUserQuestionTool,
     ] as unknown as ToolDefinition[],
   });
+  configureDanoLlmResilience(services.settingsManager, result.session);
+  return result;
 }
