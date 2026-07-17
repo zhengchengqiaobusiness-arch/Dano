@@ -6,6 +6,7 @@ import type {
   FormInteractionState,
   RpcTranscriptMessage,
 } from "./types.js";
+import { buildAskUserQuestionConfirmationCardRequestForForms } from "./ask-user-question.js";
 
 export const FORM_INTERACTION_CUSTOM_TYPE = "dano.form-interaction.v1";
 
@@ -272,12 +273,28 @@ export function projectFormInteractionsInMessage(
     ) {
       return block;
     }
-    const interaction = interactions.get(block.id) ?? byFormId.get(block.id);
+    const ownedInteraction = interactions.get(block.id);
+    const interaction = ownedInteraction ?? byFormId.get(block.id);
     if (!interaction) return block;
     changed = true;
     return {
       ...block,
       formInteraction: projectFormInteraction(interaction),
+      ...(ownedInteraction && !block.questionRequest
+        ? {
+            questionRequest: buildAskUserQuestionConfirmationCardRequestForForms(
+              ownedInteraction.forms.map(form => ({
+                formId: form.formId,
+                request: {
+                  batch: true as const,
+                  title: form.title,
+                  questions: [...form.questions],
+                },
+                answer: { ...form.answer },
+              })),
+            ),
+          }
+        : {}),
     };
   });
   return changed ? { ...message, content } : message;
