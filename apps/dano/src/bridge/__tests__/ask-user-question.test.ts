@@ -245,7 +245,8 @@ describe("ask_user_question tool", () => {
       "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
       "Dano returns the user's date answer as submitted; convert it yourself if a downstream interface needs another business format.",
       "When using questions, provide a concise top-level title and put each field's id, question, options, inputType, dateFormat, required, dataSource, multiple, and default inside its questions item.",
-      "After a grouped form is answered, call ask_user_question with only {confirm:true}. Do not send confirmation text, the prior answers, or a relation id; Dano binds the latest saved form.",
+      "When one or more submitted grouped forms require final confirmation, call ask_user_question with {confirm:true,formIds:[\"<formId>\"]} using their returned formId values. Do not send confirmation text or prior answers. If confirmation is not required, continue normally.",
+      "Use confirm:true only for submitted grouped forms. To confirm an ordinary sentence or operation, ask a normal single-choice question instead.",
     ]);
   });
 
@@ -936,6 +937,14 @@ describe("ask_user_question tool", () => {
       confirmationOfToolCallId: "form-1",
       questions: [expect.objectContaining({ id: "reason", question: "用途？" })],
       answer: { reason: "签署采购合同" },
+      forms: [
+        {
+          formId: "form-1",
+          title: "公章使用申请",
+          questions: [expect.objectContaining({ id: "reason", question: "用途？" })],
+          answer: { reason: "签署采购合同" },
+        },
+      ],
     });
 
     expect(coordinator.update("confirm-1", { reason: "签署销售合同" })).toMatchObject({
@@ -946,14 +955,226 @@ describe("ask_user_question tool", () => {
       status: "confirmed",
       confirmationOfToolCallId: "form-1",
       answer: { reason: "签署销售合同" },
+      forms: [
+        {
+          formId: "form-1",
+          answer: { reason: "签署销售合同" },
+        },
+      ],
     });
+  });
+
+  it("atomically confirms explicitly selected Submitted Forms", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    const controller = new AbortController();
+
+    for (const [formId, title, answer] of [
+      ["form-a", "请假申请", { reason: "家庭事务" }],
+      ["form-b", "出差申请", { destination: "上海" }],
+    ] as const) {
+      const form = coordinator.wait(
+        formId,
+        {
+          title,
+          questions: Object.keys(answer).map(id => ({
+            id,
+            question: `${id}？`,
+            default: answer[id as keyof typeof answer],
+          })),
+        },
+        controller.signal,
+      );
+      coordinator.present(formId);
+      coordinator.answer(formId, { cancelled: false, answer });
+      await form;
+    }
+
+    const confirmation = coordinator.wait(
+      "confirm-two",
+      {
+        confirm: true,
+        formIds: ["form-a", "unknown-form", "form-b", "form-a"],
+      } as never,
+      controller.signal,
+    );
+
+    expect(coordinator.cardRequest("confirm-two")).toMatchObject({
+      kind: "confirm",
+      title: "确认 2 份表单",
+      forms: [
+        {
+          formId: "form-a",
+          title: "请假申请",
+          answer: { reason: "家庭事务" },
+        },
+        {
+          formId: "form-b",
+          title: "出差申请",
+          answer: { destination: "上海" },
+        },
+      ],
+    });
+
+    coordinator.answer("confirm-two", { cancelled: false, answer: true });
+    await expect(confirmation).resolves.toMatchObject({
+      status: "confirmed",
+      forms: [
+        { formId: "form-a", answer: { reason: "家庭事务" } },
+        { formId: "form-b", answer: { destination: "上海" } },
+      ],
+    });
+  });
+
+  it("accepts formId compatibility input and falls back to the latest eligible form", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    const controller = new AbortController();
+    for (const formId of ["older-form", "latest-form"]) {
+      const form = coordinator.wait(
+        formId,
+        {
+          title: formId,
+          questions: [{ id: "value", question: "值？", default: formId }],
+        },
+        controller.signal,
+      );
+      coordinator.present(formId);
+      coordinator.answer(formId, {
+        cancelled: false,
+        answer: { value: formId },
+      });
+      await form;
+    }
+
+    const aliasConfirmation = coordinator.wait(
+      "confirm-alias",
+      { confirm: true, formId: "older-form" } as never,
+      controller.signal,
+    );
+    expect(coordinator.cardRequest("confirm-alias")).toMatchObject({
+      forms: [{ formId: "older-form" }],
+    });
+    coordinator.answer("confirm-alias", { cancelled: true });
+    await expect(aliasConfirmation).resolves.toEqual({ status: "cancelled" });
+
+    const fallbackConfirmation = coordinator.wait(
+      "confirm-fallback",
+      { confirm: true, formIds: ["missing"] } as never,
+      controller.signal,
+    );
+    expect(coordinator.cardRequest("confirm-fallback")).toMatchObject({
+      forms: [{ formId: "latest-form" }],
+    });
+    coordinator.answer("confirm-fallback", { cancelled: true });
+    await expect(fallbackConfirmation).resolves.toEqual({ status: "cancelled" });
+  });
+
+  it("combines formIds and formId while ignoring malformed, duplicate, and unavailable entries", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    const controller = new AbortController();
+    for (const formId of ["form-a", "form-b"]) {
+      const submitted = coordinator.wait(
+        formId,
+        {
+          title: formId,
+          questions: [{ id: "value", question: "值？", default: formId }],
+        },
+        controller.signal,
+      );
+      coordinator.present(formId);
+      coordinator.answer(formId, {
+        cancelled: false,
+        answer: { value: formId },
+      });
+      await submitted;
+    }
+
+    const confirmation = coordinator.wait(
+      "confirm-compatible",
+      {
+        confirm: true,
+        formIds: [null, "form-a", 7, "missing", "form-a"],
+        formId: ["form-b", false],
+      } as never,
+      controller.signal,
+    );
+    expect(coordinator.cardRequest("confirm-compatible")).toMatchObject({
+      forms: [{ formId: "form-a" }, { formId: "form-b" }],
+    });
+    coordinator.answer("confirm-compatible", { cancelled: true });
+    await expect(confirmation).resolves.toEqual({ status: "cancelled" });
+
+    for (const [index, formId] of ["form-a", "form-b"].entries()) {
+      await expect(
+        coordinator.wait(
+          `confirm-removed-${index}`,
+          { confirm: true, formIds: [formId] },
+          controller.signal,
+        ),
+      ).rejects.toThrow("invalid_confirmation_source");
+    }
+  });
+
+  it("does not expose unknown ids and does not cross Assistant Turn boundaries", async () => {
+    const coordinator = new AskUserQuestionCoordinator();
+    const submittedTurn = new AbortController();
+    const submitted = coordinator.wait(
+      "submitted-form",
+      {
+        title: "测试表单",
+        questions: [{ id: "value", question: "值？", default: "A" }],
+      },
+      submittedTurn.signal,
+    );
+    coordinator.present("submitted-form");
+    coordinator.answer("submitted-form", {
+      cancelled: false,
+      answer: { value: "A" },
+    });
+    await submitted;
+
+    const secretUnknownId = "secret-cross-turn-form-id";
+    let errorMessage = "";
+    try {
+      await coordinator.wait(
+        "confirm-other-turn",
+        { confirm: true, formIds: [secretUnknownId, "submitted-form"] },
+        new AbortController().signal,
+      );
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error);
+    }
+    expect(errorMessage).toContain("invalid_confirmation_source");
+    expect(errorMessage).toContain("unavailable_form_id");
+    expect(errorMessage).toContain("fallbackAttempted");
+    expect(errorMessage).not.toContain(secretUnknownId);
+    expect(errorMessage).not.toContain("submitted-form");
+
+    const unsubmittedTurn = new AbortController();
+    const ordinaryQuestion = coordinator.wait(
+      "ordinary-question",
+      { question: "继续吗？", options: ["是", "否"], default: "是" },
+      unsubmittedTurn.signal,
+    );
+    coordinator.present("ordinary-question");
+    coordinator.answer("ordinary-question", {
+      cancelled: false,
+      answer: "是",
+    });
+    await ordinaryQuestion;
+    await expect(
+      coordinator.wait(
+        "confirm-unsubmitted",
+        { confirm: true },
+        unsubmittedTurn.signal,
+      ),
+    ).rejects.toThrow("invalid_confirmation_source");
   });
 
   it("rejects confirm-only calls without a submitted grouped form", async () => {
     const coordinator = new AskUserQuestionCoordinator();
     await expect(
       coordinator.wait("confirm-without-form", { confirm: true }, new AbortController().signal),
-    ).rejects.toThrow("only be called after the user submitted a grouped form");
+    ).rejects.toThrow(/invalid_confirmation_source.*fallbackAttempted/s);
   });
 
   it("rejects grouped forms without a top-level title", async () => {
@@ -1477,7 +1698,7 @@ describe("ask_user_question tool", () => {
         options: ["Yes", "No"],
         confirm: true,
       }),
-    ).rejects.toThrow("only be called after the user submitted a grouped form");
+    ).rejects.toThrow(/invalid_confirmation_source.*fallbackAttempted/s);
   });
 
   it("rejects grouped confirmation parameters instead of waiting forever", async () => {

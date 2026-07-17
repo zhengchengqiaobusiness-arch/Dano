@@ -1225,6 +1225,105 @@ describe("BridgeRpcAdapter", () => {
       });
     });
 
+    it("atomically confirms multiple Submitted Forms through RPC and preserves the result in JSONL", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-confirm-forms-"));
+      try {
+        const sessionManager = SessionManager.create(tmpDir, tmpDir);
+        (
+          context.state as unknown as { sessionManager: SessionManager }
+        ).sessionManager = sessionManager;
+        const controller = new AbortController();
+
+        for (const [formId, title, answer] of [
+          ["form-a", "请假申请", { reason: "家庭事务" }],
+          ["form-b", "出差申请", { destination: "上海" }],
+        ] as const) {
+          const submitted = askUserQuestionCoordinator.wait(
+            formId,
+            {
+              title,
+              questions: Object.entries(answer).map(([id, value]) => ({
+                id,
+                question: `${id}？`,
+                default: value,
+              })),
+            },
+            controller.signal,
+          );
+          askUserQuestionCoordinator.present(formId);
+          askUserQuestionCoordinator.answer(formId, {
+            cancelled: false,
+            answer,
+          });
+          await submitted;
+        }
+
+        const confirmation = askUserQuestionCoordinator.wait(
+          "confirm-two",
+          { confirm: true, formIds: ["form-a", "form-b"] },
+          controller.signal,
+        );
+        const command: RpcCommand = {
+          id: "confirm-two-response",
+          type: "answer_question",
+          toolCallId: "confirm-two",
+          cancelled: false,
+          answer: true,
+        };
+        ws.trigger(
+          "message",
+          Buffer.from(JSON.stringify({ type: "command", payload: command })),
+        );
+
+        const result = await confirmation;
+        expect(result).toMatchObject({
+          status: "confirmed",
+          forms: [
+            { formId: "form-a", answer: { reason: "家庭事务" } },
+            { formId: "form-b", answer: { destination: "上海" } },
+          ],
+        });
+
+        sessionManager.appendMessage({
+          role: "toolResult",
+          toolCallId: "confirm-two",
+          toolName: "ask_user_question",
+          content: [{ type: "text", text: "confirmed" }],
+          details: result,
+          isError: false,
+          timestamp: Date.now(),
+        } as any);
+        const sessionFile = sessionManager.getSessionFile();
+        expect(sessionFile).toBeTruthy();
+        const lines = [
+          JSON.stringify({
+            type: "session",
+            version: 3,
+            id: sessionManager.getSessionId(),
+            timestamp: new Date().toISOString(),
+            cwd: tmpDir,
+          }),
+          ...sessionManager.getEntries().map(entry => JSON.stringify(entry)),
+        ];
+        fs.writeFileSync(sessionFile!, lines.join("\n"));
+        const reopened = SessionManager.open(sessionFile!);
+        expect(reopened.getBranch().at(-1)).toMatchObject({
+          message: {
+            role: "toolResult",
+            details: {
+              status: "confirmed",
+              forms: [
+                { formId: "form-a", answer: { reason: "家庭事务" } },
+                { formId: "form-b", answer: { destination: "上海" } },
+              ],
+            },
+          },
+        });
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("acknowledges presentation for the matching question tool call", async () => {
       const pending = askUserQuestionCoordinator.wait(
         "question-call-presented",
@@ -1870,6 +1969,160 @@ describe("BridgeRpcAdapter", () => {
           status: "answered",
           formId: "submitted-form",
           answer: { reason: "家庭事务" },
+        },
+      });
+    });
+
+    it("recovers every selected Submitted Form in a multi-form confirmation", async () => {
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "form-a",
+              name: "ask_user_question",
+              arguments: {
+                title: "请假申请",
+                questions: [
+                  { id: "reason", question: "请假原因？", default: "家庭事务" },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "form-a",
+          toolName: "ask_user_question",
+          content: [{ type: "text", text: "answered" }],
+          details: {
+            status: "answered",
+            formId: "form-a",
+            answer: { reason: "家庭事务" },
+          },
+          isError: false,
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "form-b",
+              name: "ask_user_question",
+              arguments: {
+                title: "出差申请",
+                questions: [
+                  { id: "destination", question: "目的地？", default: "上海" },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "form-b",
+          toolName: "ask_user_question",
+          content: [{ type: "text", text: "answered" }],
+          details: {
+            status: "answered",
+            formId: "form-b",
+            answer: { destination: "上海" },
+          },
+          isError: false,
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "confirm-two",
+              name: "ask_user_question",
+              arguments: { confirm: true, formIds: ["form-a", "form-b"] },
+            },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "confirm-two",
+          toolName: "ask_user_question",
+          content: [{ type: "text", text: "confirmed" }],
+          details: {
+            status: "confirmed",
+            confirmationOfToolCallId: "form-a",
+            answer: { reason: "家庭事务" },
+            forms: [
+              { formId: "form-a", answer: { reason: "家庭事务" } },
+              { formId: "form-b", answer: { destination: "上海" } },
+            ],
+          },
+          isError: false,
+        },
+      ];
+      (
+        context.state.sessionManager.getBranch as ReturnType<typeof vi.fn>
+      ).mockReturnValue(messages.slice(0, -1));
+      (
+        context.state.sessionManager.getEntries as ReturnType<typeof vi.fn>
+      ).mockReturnValue(messages.slice(0, -1));
+
+      ws.trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: { id: "pending-multi-form-history", type: "get_messages" },
+          }),
+        ),
+      );
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const pendingResponse = ws.send.mock.calls
+        .map(([message]) => JSON.parse(message as string))
+        .find(message => message.payload?.id === "pending-multi-form-history");
+      const pendingConfirmation = pendingResponse.payload.data.messages
+        .flatMap((message: any) =>
+          Array.isArray(message.content) ? message.content : [],
+        )
+        .find((block: any) => block.id === "confirm-two");
+      expect(pendingConfirmation.questionRequest.forms).toMatchObject([
+        { formId: "form-a", title: "请假申请" },
+        { formId: "form-b", title: "出差申请" },
+      ]);
+
+      (
+        context.state.sessionManager.getBranch as ReturnType<typeof vi.fn>
+      ).mockReturnValue(messages);
+      (
+        context.state.sessionManager.getEntries as ReturnType<typeof vi.fn>
+      ).mockReturnValue(messages);
+
+      ws.trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: { id: "multi-form-history", type: "get_messages" },
+          }),
+        ),
+      );
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const response = ws.send.mock.calls
+        .map(([message]) => JSON.parse(message as string))
+        .find(message => message.payload?.id === "multi-form-history");
+      const confirmation = response.payload.data.messages
+        .flatMap((message: any) =>
+          Array.isArray(message.content) ? message.content : [],
+        )
+        .find((block: any) => block.id === "confirm-two");
+      expect(confirmation).toMatchObject({
+        questionState: "answered",
+        questionRequest: {
+          title: "确认 2 份表单",
+          forms: [
+            { formId: "form-a", title: "请假申请", answer: { reason: "家庭事务" } },
+            { formId: "form-b", title: "出差申请", answer: { destination: "上海" } },
+          ],
         },
       });
     });
@@ -3434,6 +3687,27 @@ describe("BridgeRpcAdapter", () => {
               },
             ],
             answer: { approver1: "张三", approver2: "李四" },
+            forms: [
+              {
+                formId: "approvers-1",
+                title: "请假申请",
+                questions: [
+                  {
+                    id: "approver1",
+                    kind: "text",
+                    question: "审批人 1",
+                    default: "张三",
+                  },
+                  {
+                    id: "approver2",
+                    kind: "text",
+                    question: "审批人 2",
+                    default: "李四",
+                  },
+                ],
+                answer: { approver1: "张三", approver2: "李四" },
+              },
+            ],
           },
         },
       ]);

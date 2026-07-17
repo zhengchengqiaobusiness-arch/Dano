@@ -144,6 +144,43 @@ describe("ask user question transcript data", () => {
     });
   });
 
+  it("parses every Submitted Form in an atomic confirmation result", () => {
+    expect(
+      askUserQuestionResult({
+        status: "confirmed",
+        confirmationOfToolCallId: "form-a",
+        answer: { reason: "家庭事务" },
+        forms: [
+          { formId: "form-a", answer: { reason: "家庭事务" } },
+          { formId: "form-b", answer: { destination: "上海" } },
+        ],
+      }),
+    ).toEqual({
+      status: "confirmed",
+      confirmationOfToolCallId: "form-a",
+      answer: { reason: "家庭事务" },
+      forms: [
+        { formId: "form-a", answer: { reason: "家庭事务" } },
+        { formId: "form-b", answer: { destination: "上海" } },
+      ],
+    });
+  });
+
+  it("normalizes a legacy single-form confirmation result", () => {
+    expect(
+      askUserQuestionResult({
+        status: "confirmed",
+        confirmationOfToolCallId: "form-a",
+        answer: { reason: "家庭事务" },
+      }),
+    ).toEqual({
+      status: "confirmed",
+      confirmationOfToolCallId: "form-a",
+      answer: { reason: "家庭事务" },
+      forms: [{ formId: "form-a", answer: { reason: "家庭事务" } }],
+    });
+  });
+
   it("formats grouped answers with question labels and markdown bullets", () => {
     const request = askUserQuestionRequest(
       questionBlock({

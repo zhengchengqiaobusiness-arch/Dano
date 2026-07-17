@@ -30,8 +30,10 @@ import {
   ASK_USER_QUESTION_CANCELLED_CODE,
   askUserQuestionRuntime,
   buildAskUserQuestionConfirmationCardRequest,
+  buildAskUserQuestionConfirmationCardRequestForForms,
   isAskUserQuestionConfirmationCall,
   normalizeAskUserQuestionCardRequest,
+  selectAskUserQuestionConfirmationTargets,
   type AskUserQuestionCoordinator,
   type AskUserQuestionRuntime,
 } from "./ask-user-question.js";
@@ -3949,7 +3951,10 @@ class SessionRuntime {
 class TranscriptProjector {
   private readonly pendingStructuredUserMessages: PendingStructuredUserMessage[] =
     [];
-  private readonly submittedFormBySession = new Map<string, SubmittedFormProjection>();
+  private readonly submittedFormsBySession = new Map<
+    string,
+    Map<string, SubmittedFormProjection>
+  >();
   private readonly batchFormByToolCallId = new Map<
     string,
     Extract<AskUserQuestionCardRequest, { batch: true }>
@@ -4248,15 +4253,18 @@ class TranscriptProjector {
     recovering = false,
   ): RpcTranscriptMessage {
     const sessionKey = sessionPath ?? "active";
+    const submittedForms =
+      this.submittedFormsBySession.get(sessionKey) ?? new Map();
     const projectedMessage = projectAskUserQuestionRequests(
       message,
       recovering,
-      this.submittedFormBySession.get(sessionKey),
+      submittedForms,
       this.coordinator,
     );
     const submittedForm = submittedFormFromMessage(projectedMessage);
-    if (submittedForm) this.submittedFormBySession.set(sessionKey, submittedForm);
-    this.recordSubmittedFormProjection(projectedMessage, sessionKey);
+    if (submittedForm) submittedForms.set(submittedForm.toolCallId, submittedForm);
+    this.submittedFormsBySession.set(sessionKey, submittedForms);
+    this.recordSubmittedFormProjection(projectedMessage, submittedForms);
     if (!projectedMessage || projectedMessage.role !== "user") {
       return projectedMessage;
     }
@@ -4287,7 +4295,7 @@ class TranscriptProjector {
 
   private recordSubmittedFormProjection(
     message: RpcTranscriptMessage,
-    sessionKey: string,
+    submittedForms: Map<string, SubmittedFormProjection>,
   ): void {
     if (Array.isArray(message.content)) {
       for (const block of message.content) {
@@ -4310,7 +4318,7 @@ class TranscriptProjector {
     }
     const request = this.batchFormByToolCallId.get(message.toolCallId);
     if (!request) return;
-    this.submittedFormBySession.set(sessionKey, {
+    submittedForms.set(message.toolCallId, {
       toolCallId: message.toolCallId,
       request,
       answer: message.details.answer,
@@ -4321,7 +4329,7 @@ class TranscriptProjector {
 function projectAskUserQuestionRequests(
   message: RpcTranscriptMessage,
   recovering = false,
-  previousSubmittedForm?: SubmittedFormProjection,
+  previousSubmittedForms?: Map<string, SubmittedFormProjection>,
   coordinator = askUserQuestionRuntime.coordinator,
 ): RpcTranscriptMessage {
   if (!Array.isArray(message.content)) return message;
@@ -4342,7 +4350,7 @@ function projectAskUserQuestionRequests(
         message.content as Array<string | RpcTranscriptContentBlock>,
         index,
         block.arguments,
-        previousSubmittedForm,
+        previousSubmittedForms,
       );
     const questionState = questionLifecycleState(
       message.content as Array<string | RpcTranscriptContentBlock>,
@@ -4367,12 +4375,13 @@ function confirmationRequestFromTranscript(
   content: Array<string | RpcTranscriptContentBlock>,
   confirmIndex: number,
   rawArguments: unknown,
-  previousSubmittedForm?: SubmittedFormProjection,
+  previousSubmittedForms?: Map<string, SubmittedFormProjection>,
 ): AskUserQuestionCardRequest | null {
   if (!isAskUserQuestionConfirmationCall(rawArguments)) {
     return null;
   }
 
+  const availableForms = new Map(previousSubmittedForms);
   let answer: Record<string, AskUserQuestionAnswer> | undefined;
   for (let index = confirmIndex - 1; index >= 0; index -= 1) {
     const block = content[index];
@@ -4391,19 +4400,26 @@ function confirmationRequestFromTranscript(
         block.questionRequest ??
         normalizeAskUserQuestionCardRequest(block.arguments);
       if (source?.batch) {
-        return buildAskUserQuestionConfirmationCardRequest(
-          block.id,
-          source,
+        availableForms.set(block.id, {
+          toolCallId: block.id,
+          request: source,
           answer,
-        );
+        });
+        answer = undefined;
       }
     }
   }
-  return previousSubmittedForm
-    ? buildAskUserQuestionConfirmationCardRequest(
-        previousSubmittedForm.toolCallId,
-        previousSubmittedForm.request,
-        previousSubmittedForm.answer,
+  const forms = selectAskUserQuestionConfirmationTargets(
+    rawArguments,
+    availableForms,
+  ).targets;
+  return forms.length > 0
+    ? buildAskUserQuestionConfirmationCardRequestForForms(
+        forms.map(form => ({
+          formId: form.toolCallId,
+          request: form.request,
+          answer: form.answer,
+        })),
       )
     : null;
 }
@@ -4457,7 +4473,14 @@ function projectRecoveredQuestionLifecycle(
   const completed = new Map<string, AskUserQuestionLifecycleState>();
   const confirmed = new Map<
     string,
-    { confirmationOfToolCallId: string; answer: Record<string, AskUserQuestionAnswer> }
+    {
+      confirmationOfToolCallId: string;
+      answer: Record<string, AskUserQuestionAnswer>;
+      forms?: Array<{
+        formId: string;
+        answer: Record<string, AskUserQuestionAnswer>;
+      }>;
+    }
   >();
   for (const message of recoveryMessages) {
     if (message.role !== "toolResult" || !message.toolCallId) continue;
@@ -4507,19 +4530,30 @@ function projectRecoveredQuestionLifecycle(
         return block;
       }
       const confirmation = confirmed.get(block.id);
-      const source = confirmation
-        ? submittedForms.get(confirmation.confirmationOfToolCallId)
-        : undefined;
+      const confirmationForms = confirmation
+        ? confirmation.forms?.length
+          ? confirmation.forms
+          : [
+              {
+                formId: confirmation.confirmationOfToolCallId,
+                answer: confirmation.answer,
+              },
+            ]
+        : [];
+      const sources = confirmationForms.flatMap(form => {
+        const request = submittedForms.get(form.formId);
+        return request
+          ? [{ formId: form.formId, request, answer: form.answer }]
+          : [];
+      });
       changed = true;
       return {
         ...block,
         questionState: completed.get(block.id),
-        ...(confirmation && source
+        ...(sources.length > 0
           ? {
-              questionRequest: buildAskUserQuestionConfirmationCardRequest(
-                confirmation.confirmationOfToolCallId,
-                source,
-                confirmation.answer,
+              questionRequest: buildAskUserQuestionConfirmationCardRequestForForms(
+                sources,
               ),
             }
           : {}),
@@ -4535,6 +4569,10 @@ function isRecoveredConfirmationResult(
   status: "confirmed";
   confirmationOfToolCallId: string;
   answer: Record<string, AskUserQuestionAnswer>;
+  forms?: Array<{
+    formId: string;
+    answer: Record<string, AskUserQuestionAnswer>;
+  }>;
 } {
   return Boolean(
     details &&
@@ -4544,7 +4582,27 @@ function isRecoveredConfirmationResult(
       typeof details.confirmationOfToolCallId === "string" &&
       details.answer &&
       typeof details.answer === "object" &&
-      !Array.isArray(details.answer),
+      !Array.isArray(details.answer) &&
+      (details.forms === undefined || isRecoveredConfirmedForms(details.forms)),
+  );
+}
+
+function isRecoveredConfirmedForms(
+  value: unknown,
+): value is Array<{
+  formId: string;
+  answer: Record<string, AskUserQuestionAnswer>;
+}> {
+  return Array.isArray(value) && value.every(form =>
+    Boolean(
+      form &&
+        typeof form === "object" &&
+        !Array.isArray(form) &&
+        typeof (form as { formId?: unknown }).formId === "string" &&
+        (form as { answer?: unknown }).answer &&
+        typeof (form as { answer?: unknown }).answer === "object" &&
+        !Array.isArray((form as { answer?: unknown }).answer),
+    ),
   );
 }
 

@@ -42,6 +42,40 @@ function submittedFormBlock(): ToolContentBlock {
   };
 }
 
+function multiFormConfirmationBlock(): ToolContentBlock {
+  return {
+    kind: "tool",
+    toolName: "ask_user_question",
+    toolCallId: "confirm-two",
+    toolArgs: {},
+    argumentsText: "",
+    toolStatus: "pending",
+    questionRequest: {
+      batch: false,
+      id: "confirmation",
+      kind: "confirm",
+      title: "确认 2 份表单",
+      confirmationOfToolCallId: "form-a",
+      questions: [{ id: "reason", kind: "text", question: "请假原因？" }],
+      answer: { reason: "家庭事务" },
+      forms: [
+        {
+          formId: "form-a",
+          title: "请假申请",
+          questions: [{ id: "reason", kind: "text", question: "请假原因？" }],
+          answer: { reason: "家庭事务" },
+        },
+        {
+          formId: "form-b",
+          title: "出差申请",
+          questions: [{ id: "destination", kind: "text", question: "目的地？" }],
+          answer: { destination: "上海" },
+        },
+      ],
+    },
+  };
+}
+
 describe("QuestionToolCard", () => {
   it("renders an unconfirmed Submitted Form as read-only with a disabled submitted status", async () => {
     const response = vi.fn(async () => {
@@ -67,5 +101,36 @@ describe("QuestionToolCard", () => {
     expect(target.textContent).not.toContain("取消");
 
     unmount(component);
+  });
+
+  it("renders one atomic confirmation action set for multiple Submitted Forms", async () => {
+    vi.useFakeTimers();
+    const response = vi.fn(async () => ({ success: true } as never));
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: multiFormConfirmationBlock(),
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onUpdate: response,
+      },
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(400);
+      await tick();
+
+      expect(target.querySelectorAll("[data-form-id]")).toHaveLength(2);
+      expect(target.textContent).toContain("请假申请");
+      expect(target.textContent).toContain("出差申请");
+      expect(target.textContent).not.toContain("返回修改");
+      expect(target.querySelectorAll("button.question-button")).toHaveLength(2);
+      expect(target.textContent).toContain("取消");
+      expect(target.textContent).toContain("确认");
+    } finally {
+      unmount(component);
+      vi.useRealTimers();
+    }
   });
 });

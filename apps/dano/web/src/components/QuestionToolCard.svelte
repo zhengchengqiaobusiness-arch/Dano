@@ -2,6 +2,7 @@
   import type {
     AskUserQuestionAnswer,
     AskUserQuestionConfirmationCardRequest,
+    AskUserQuestionConfirmationForm,
     AskUserQuestionDataSource,
     AskUserQuestionOptionId,
     AskUserQuestionResult,
@@ -17,6 +18,7 @@
     type NormalizedAskUserQuestionOption,
     askUserQuestionAnswerItems,
     askUserQuestionAnswerMarkdown,
+    askUserQuestionConfirmationForms,
     askUserQuestionMarkdown,
     askUserQuestionRequest,
     askUserQuestionResult,
@@ -634,24 +636,26 @@
     { kind: "select" | "treeSelect" | "multiple" }
   > & { dataSource?: AskUserQuestionDataSource; inputType?: "treeSelect" };
 
-  const answeredItems = $derived(
+  const displayedConfirmationForms = $derived(
     request && !request.batch && request.kind === "confirm"
-      ? askUserQuestionAnswerItems(
-          request,
-          result?.status === "confirmed" ? result.answer : request.answer,
-          {
-          confirm: t("questionTool.confirm"),
-          cancel: t("questionTool.cancel"),
-          },
-        )
+      ? confirmationFormsForDisplay(request, result)
       : [],
   );
   const confirmationMarkdown = $derived(
     request && !request.batch && request.kind === "confirm"
-      ? `**${request.title}**\n\n${askUserQuestionAnswerMarkdown(request, result?.status === "confirmed" ? result.answer : request.answer, {
-          confirm: t("questionTool.confirm"),
-          cancel: t("questionTool.cancel"),
-        })}`
+      ? displayedConfirmationForms
+          .map(
+            form =>
+              `**${form.title}**\n\n${askUserQuestionAnswerMarkdown(
+                { batch: true, title: form.title, questions: form.questions },
+                form.answer,
+                {
+                  confirm: t("questionTool.confirm"),
+                  cancel: t("questionTool.cancel"),
+                },
+              )}`,
+          )
+          .join("\n\n")
       : "",
   );
   const sourceAnsweredMarkdown = $derived(
@@ -668,6 +672,37 @@
         })
       : "",
   );
+
+  function confirmationFormsForDisplay(
+    confirmationRequest: AskUserQuestionConfirmationCardRequest,
+    confirmationResult: AskUserQuestionResult | null,
+  ): Array<
+    AskUserQuestionConfirmationForm & {
+      items: ReturnType<typeof askUserQuestionAnswerItems>;
+    }
+  > {
+    const forms = askUserQuestionConfirmationForms(confirmationRequest);
+    return forms.map(form => {
+      const answer =
+        confirmationResult?.status === "confirmed"
+          ? confirmationResult.forms.find(
+              confirmedForm => confirmedForm.formId === form.formId,
+            )?.answer ?? form.answer
+          : form.answer;
+      return {
+        ...form,
+        answer,
+        items: askUserQuestionAnswerItems(
+          { batch: true, title: form.title, questions: form.questions },
+          answer,
+          {
+            confirm: t("questionTool.confirm"),
+            cancel: t("questionTool.cancel"),
+          },
+        ),
+      };
+    });
+  }
 </script>
 
 {#if request && showCard}
@@ -703,27 +738,32 @@
             <p>{t("questionTool.confirmDescription")}</p>
           </div>
         </header>
-        <div class="submitted-fields">
-          {#each answeredItems as item (item.id)}
-            <div class="submitted-field">
-              <div class="submitted-field-label">
-                <span class="submitted-field-icon" aria-hidden="true">
-                  {#if item.kind === "date"}
-                    <Calendar size={18} />
-                  {:else if item.kind === "single" || item.kind === "multiple" || item.kind === "select" || item.kind === "treeSelect"}
-                    <ListChecks size={18} />
-                  {:else if item.kind === "confirm"}
-                    <CircleCheck size={18} />
-                  {:else}
-                    <MessageSquareText size={18} />
-                  {/if}
-                </span>
-                <span>{item.label}</span>
-              </div>
-              <SubmittedAnswerValue value={item.value} />
+        {#each displayedConfirmationForms as form (form.formId)}
+          <div class="confirmation-form" data-form-id={form.formId}>
+            <h4>{form.title}</h4>
+            <div class="submitted-fields">
+              {#each form.items as item (item.id)}
+                <div class="submitted-field">
+                  <div class="submitted-field-label">
+                    <span class="submitted-field-icon" aria-hidden="true">
+                      {#if item.kind === "date"}
+                        <Calendar size={18} />
+                      {:else if item.kind === "single" || item.kind === "multiple" || item.kind === "select" || item.kind === "treeSelect"}
+                        <ListChecks size={18} />
+                      {:else if item.kind === "confirm"}
+                        <CircleCheck size={18} />
+                      {:else}
+                        <MessageSquareText size={18} />
+                      {/if}
+                    </span>
+                    <span>{item.label}</span>
+                  </div>
+                  <SubmittedAnswerValue value={item.value} />
+                </div>
+              {/each}
             </div>
-          {/each}
-        </div>
+          </div>
+        {/each}
       </section>
       <div class="mobile-question-result">
         <MarkdownRenderer content={confirmationMarkdown} />
@@ -733,16 +773,18 @@
           <button type="button" class="question-button secondary" disabled={submitting} onclick={() => void respond({ cancelled: true })}>
             {t("questionTool.cancel")}
           </button>
-          <button
-            type="button"
-            class="question-button secondary"
-            disabled={submitting}
-            onclick={() => {
-              if (block.toolCallId) questionConfirmationState.startEditing(block.toolCallId, request);
-            }}
-          >
-            {t("questionTool.returnModify")}
-          </button>
+          {#if displayedConfirmationForms.length === 1}
+            <button
+              type="button"
+              class="question-button secondary"
+              disabled={submitting}
+              onclick={() => {
+                if (block.toolCallId) questionConfirmationState.startEditing(block.toolCallId, request);
+              }}
+            >
+              {t("questionTool.returnModify")}
+            </button>
+          {/if}
         {/if}
         <button type="button" class="question-button" disabled={submitting || result?.status === "confirmed"} onclick={() => void respond({ cancelled: false, answer: true })}>
           {result?.status === "confirmed" ? t("questionTool.confirmed") : t("questionTool.confirm")}
@@ -1339,6 +1381,18 @@
       font-size: 0.84rem;
       line-height: 1.5;
       text-wrap: pretty;
+    }
+
+    .confirmation-form {
+      display: grid;
+      gap: 12px;
+    }
+
+    .confirmation-form h4 {
+      margin: 0;
+      color: var(--text);
+      font-size: 0.94rem;
+      line-height: 1.4;
     }
 
     .submitted-fields {

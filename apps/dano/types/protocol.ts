@@ -173,8 +173,14 @@ export type AskUserQuestionResult =
       status: "confirmed";
       answer: Record<string, AskUserQuestionAnswer>;
       confirmationOfToolCallId: string;
+      forms: AskUserQuestionConfirmedForm[];
     }
   | { status: "cancelled" };
+
+export type AskUserQuestionConfirmedForm = {
+  formId: string;
+  answer: Record<string, AskUserQuestionAnswer>;
+};
 
 export type AskUserQuestionCardItem =
   | {
@@ -235,6 +241,13 @@ export type AskUserQuestionBatchCardRequest = {
   questions: AskUserQuestionCardItem[];
 };
 
+export type AskUserQuestionConfirmationForm = {
+  formId: string;
+  title: string;
+  questions: AskUserQuestionCardItem[];
+  answer: Record<string, AskUserQuestionAnswer>;
+};
+
 export type AskUserQuestionConfirmationCardRequest = {
   batch: false;
   kind: "confirm";
@@ -243,6 +256,7 @@ export type AskUserQuestionConfirmationCardRequest = {
   confirmationOfToolCallId: string;
   questions: AskUserQuestionCardItem[];
   answer: Record<string, AskUserQuestionAnswer>;
+  forms?: AskUserQuestionConfirmationForm[];
 };
 
 export type AskUserQuestionCardRequest =
