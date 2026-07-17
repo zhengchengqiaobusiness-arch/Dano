@@ -378,6 +378,15 @@ function isTerminalFormInteractionProjection(
     interaction?.state === "interrupted";
 }
 
+export function hasTerminalFormInteractionBlock(
+  blocks: readonly ContentBlock[],
+): boolean {
+  return blocks.some(block =>
+    block.kind === "tool" &&
+    isTerminalFormInteractionProjection(block.formInteraction),
+  );
+}
+
 function hasVisibleAssistantContent(message: TranscriptEntryLike): boolean {
   if (message.role !== "assistant") return false;
   return contentBlocks(message).some(block =>

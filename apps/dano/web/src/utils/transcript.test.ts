@@ -4,6 +4,7 @@ import {
   buildTranscriptProcessGroups,
   contentBlocks,
   formatTranscriptDuration,
+  hasTerminalFormInteractionBlock,
   isStreamingThinkingBlock,
   latestThinkingLine,
   normalizeTranscript,
@@ -266,6 +267,27 @@ describe("assistant thinking blocks", () => {
 });
 
 describe("transcript process groups", () => {
+  it("identifies terminal Form Interaction blocks that remain visible", () => {
+    const messages = normalizeTranscript([{
+      role: "assistant",
+      content: [{
+        type: "toolCall",
+        id: "confirm-1",
+        name: "ask_user_question",
+        arguments: { confirm: true },
+        formInteraction: {
+          interactionId: "confirm-1",
+          state: "confirmed",
+          revision: 2,
+          allowedActions: [],
+          forms: [],
+        },
+      }],
+    }] as never);
+
+    expect(hasTerminalFormInteractionBlock(contentBlocks(messages[0]!))).toBe(true);
+  });
+
   it("collapses structured thinking and tool work before a final answer", () => {
     const messages = normalizeTranscript([
       {

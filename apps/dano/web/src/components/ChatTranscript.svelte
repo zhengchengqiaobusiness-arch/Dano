@@ -47,6 +47,7 @@
     contentBlocks,
     errorMessageText,
     formatTranscriptDuration,
+    hasTerminalFormInteractionBlock,
     isAbortedMessage,
     isErrorMessage,
     isStreamingThinkingBlock,
@@ -480,7 +481,15 @@
   function shouldRenderDisplayItemAt(index: number): boolean {
     const group = processGroupForItemIndex(index);
     if (!group || isProcessGroupExpanded(group)) return true;
-    return index === group.startItemIndex || index >= group.finalAnswerItemIndex;
+    const item = displayItems[index];
+    return index === group.startItemIndex ||
+      index >= group.finalAnswerItemIndex ||
+      Boolean(
+        item?.kind === "message" &&
+        hasTerminalFormInteractionBlock(
+          displayContentBlocks(item.message, item.messageIndex),
+        ),
+      );
   }
 
   function visibleContentBlocks(
