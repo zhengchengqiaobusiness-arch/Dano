@@ -4570,6 +4570,20 @@ function questionResultErrorText(source: {
   return values.join("\n");
 }
 
+function isTerminalAskUserQuestionResult(
+  message: RpcTranscriptMessage,
+): boolean {
+  return (
+    message.role === "toolResult" &&
+    message.toolName === ASK_USER_QUESTION_TOOL_NAME &&
+    questionResultLifecycleState(
+      message.details,
+      message.isError,
+      questionResultErrorText(message),
+    ) === "terminal_failure"
+  );
+}
+
 function normalizedQuestionErrorLines(errorText: string): string[] {
   return errorText
     .split("\n")
@@ -5233,6 +5247,22 @@ export class BridgeRpcAdapter {
 
     payload.treeEntries = treeEntries;
     this.sendEvent(payload);
+    if (
+      eventType === "message_end" &&
+      isTerminalAskUserQuestionResult(payload.message)
+    ) {
+      const detachedSession = this.sessionRuntime.getDetachedSession();
+      if (detachedSession) {
+        void detachedSession.abort().catch(error => {
+          console.error(
+            `BridgeRpcAdapter[${this.client.id}]: Failed to abort terminal question failure:`,
+            error,
+          );
+        });
+      } else {
+        this.context.actions.abort();
+      }
+    }
     if (eventType !== "message_start") {
       this.sessionStatsPusher.queue(sessionPath);
     }
