@@ -26,7 +26,7 @@ export class DetachedSessionHandle {
   private session: AgentSession | null = null;
   private unsubscribeSession: (() => void) | null = null;
   private readonly listeners = new Set<(event: AgentSessionEvent) => void>();
-  private viewerBinding: ViewerBinding | null = null;
+  private readonly viewerBindings = new Map<string, ViewerBinding>();
 
   constructor(
     public sessionPath: string,
@@ -58,18 +58,49 @@ export class DetachedSessionHandle {
   }
 
   async bindViewer(binding: ViewerBinding): Promise<void> {
-    this.viewerBinding = binding;
+    this.viewerBindings.delete(binding.clientId);
+    this.viewerBindings.set(binding.clientId, binding);
     if (!this.session) return;
     await this.bindSessionExtensions(this.session, binding.uiContext);
   }
 
   async releaseViewer(clientId: string): Promise<void> {
-    if (!this.viewerBinding || this.viewerBinding.clientId !== clientId) {
+    if (!this.viewerBindings.delete(clientId)) {
       return;
     }
 
-    this.viewerBinding = null;
     if (!this.session) return;
+    await this.bindSessionExtensions(
+      this.session,
+      this.latestViewer()?.uiContext ?? createHeadlessUIContext(),
+    );
+  }
+
+  async destroyViewer(clientId: string): Promise<void> {
+    if (!this.viewerBindings.delete(clientId)) {
+      return;
+    }
+
+    if (!this.session) return;
+    const remainingViewer = this.latestViewer();
+    if (remainingViewer) {
+      await this.bindSessionExtensions(
+        this.session,
+        remainingViewer.uiContext,
+      );
+      return;
+    }
+
+    try {
+      this.session.abortRetry();
+      await this.session.abort();
+    } catch (error) {
+      console.error(
+        `DetachedSessionHandle[${path.basename(this.sessionPath)}]: Failed to abort orphaned session:`,
+        error,
+      );
+    }
+
     await this.bindSessionExtensions(this.session, createHeadlessUIContext());
   }
 
@@ -90,7 +121,7 @@ export class DetachedSessionHandle {
 
     await this.bindSessionExtensions(
       session,
-      this.viewerBinding?.uiContext ?? createHeadlessUIContext(),
+      this.latestViewer()?.uiContext ?? createHeadlessUIContext(),
     );
 
     this.unsubscribeSession = session.subscribe(event => {
@@ -117,7 +148,11 @@ export class DetachedSessionHandle {
     this.session?.dispose();
     this.session = null;
     this.listeners.clear();
-    this.viewerBinding = null;
+    this.viewerBindings.clear();
+  }
+
+  private latestViewer(): ViewerBinding | undefined {
+    return Array.from(this.viewerBindings.values()).at(-1);
   }
 
   private async bindSessionExtensions(
@@ -239,6 +274,12 @@ export class DetachedSessionRegistry {
     const handle = this.handles.get(sessionPath);
     if (!handle) return;
     await handle.releaseViewer(clientId);
+  }
+
+  async destroyViewer(sessionPath: string, clientId: string): Promise<void> {
+    const handle = this.handles.get(sessionPath);
+    if (!handle) return;
+    await handle.destroyViewer(clientId);
   }
 
   async ensureSession(sessionPath: string): Promise<AgentSession> {
