@@ -44,7 +44,6 @@
   import RefreshCw from "lucide-svelte/icons/refresh-cw";
   import Sparkle from "lucide-svelte/icons/sparkle";
   import "./questionToolControls.css";
-  import { questionConfirmationState } from "./questionConfirmationState.svelte";
 
   const PENDING_RENDER_DELAY_MS = 400;
 
@@ -53,7 +52,6 @@
     active = true,
     onPresent,
     onRespond,
-    onUpdate,
     onFieldAssist = undefined as
       | ((payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>)
       | undefined,
@@ -70,18 +68,14 @@
             answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>;
         },
     ) => Promise<RpcResponse>;
-    onUpdate: (
-      toolCallId: string,
-      answer: Record<string, AskUserQuestionAnswer>,
-    ) => Promise<RpcResponse>;
     onFieldAssist?: (payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>;
   } = $props();
 
   const projectedRequest = $derived(askUserQuestionRequest(block));
-  const request = $derived(
-    projectedRequest && !projectedRequest.batch && projectedRequest.kind === "confirm"
-      ? questionConfirmationState.request(projectedRequest)
-      : projectedRequest,
+  const request = $derived(projectedRequest);
+  const interaction = $derived(block.formInteraction);
+  const isConfirmation = $derived(
+    Boolean(request && !request.batch && request.kind === "confirm"),
   );
   const questionItems = $derived(
     request
@@ -95,35 +89,21 @@
   const result = $derived(
     askUserQuestionResult(block.resultDetails) ?? submittedResult,
   );
-  const pending = $derived(block.toolStatus === "pending" && !result && active);
-  const interrupted = $derived(block.toolStatus === "pending" && !result && !active);
+  const pending = $derived(
+    isConfirmation
+      ? interaction?.state === "awaiting_confirmation" ||
+          (!interaction && block.questionState === "awaiting_presentation")
+      : block.toolStatus === "pending" && !result && active,
+  );
+  const interrupted = $derived(
+    !isConfirmation && block.toolStatus === "pending" && !result && !active,
+  );
   const requestKey = $derived(request ? JSON.stringify(request) : "");
-  const editing = $derived(Boolean(block.toolCallId) && questionConfirmationState.isEditing(block.toolCallId ?? ""));
-  const linkedConfirmationId = $derived(
-    block.toolCallId ? questionConfirmationState.linkedConfirmationId(block.toolCallId) : "",
-  );
-  const linkedConfirmed = $derived(
-    Boolean(block.toolCallId) && questionConfirmationState.isConfirmed(block.toolCallId ?? ""),
-  );
-  const linkedCancelled = $derived(
-    Boolean(block.toolCallId) && questionConfirmationState.isCancelled(block.toolCallId ?? ""),
-  );
-  const formEnabled = $derived(pending || editing);
-  const sourceAnswerOverride = $derived(
-    block.toolCallId ? questionConfirmationState.sourceAnswer(block.toolCallId) : undefined,
-  );
-  const confirmationEditing = $derived(
-    Boolean(
-      request &&
-        !request.batch &&
-        request.kind === "confirm" &&
-        questionConfirmationState.isEditing(request.confirmationOfToolCallId),
-    ),
-  );
+  const formEnabled = $derived(pending);
   const formAnswer = $derived(
-    sourceAnswerOverride ?? (result?.status === "answered" && typeof result.answer === "object" && !Array.isArray(result.answer)
+    result?.status === "answered" && typeof result.answer === "object" && !Array.isArray(result.answer)
       ? result.answer
-      : undefined),
+      : undefined,
   );
   let initializedRequestKey = $state("");
   let selectedOption = $state<Record<string, string>>({});
@@ -146,22 +126,8 @@
   let aiAssistWarning = $state<Record<string, string>>({});
   let aiAssistSeq = $state<Record<string, number>>({});
   const showCard = $derived(
-    Boolean(request) && (!pending || pendingReady) && !confirmationEditing,
+    Boolean(request) && (!pending || pendingReady),
   );
-
-  $effect(() => {
-    if (projectedRequest && !projectedRequest.batch && projectedRequest.kind === "confirm") {
-      const synchronizedRequest = result?.status === "confirmed"
-        ? { ...projectedRequest, answer: result.answer }
-        : projectedRequest;
-      questionConfirmationState.sync(
-        synchronizedRequest,
-        block.toolCallId ?? "",
-        result?.status === "confirmed",
-        result?.status === "cancelled",
-      );
-    }
-  });
 
   $effect(() => {
     if (!request || initializedRequestKey === requestKey) return;
@@ -280,8 +246,7 @@
         if (answer === null) return;
         if (answer !== undefined) answers[item.id] = answer;
       }
-      if (editing) void saveRevision(answers);
-      else void respond({ cancelled: false, answer: answers });
+      void respond({ cancelled: false, answer: answers });
       return;
     }
 
@@ -292,40 +257,6 @@
     }
   }
 
-  async function saveRevision(answer: Record<string, AskUserQuestionAnswer>) {
-    const confirmationId = questionConfirmationState.confirmationId(block.toolCallId ?? "");
-    if (!confirmationId || submitting) return;
-    submitting = true;
-    error = "";
-    try {
-      const rpc = await onUpdate(confirmationId, answer);
-      if (!rpc.success) throw new Error(rpc.error);
-      questionConfirmationState.finishEditing(
-        rpc.data as AskUserQuestionConfirmationCardRequest,
-      );
-    } catch (cause) {
-      error = cause instanceof Error ? cause.message : String(cause);
-    } finally {
-      submitting = false;
-    }
-  }
-
-  async function respondToLinkedConfirmation(cancelled: boolean) {
-    if (!linkedConfirmationId || submitting) return;
-    submitting = true;
-    error = "";
-    try {
-      const rpc = await onRespond(
-        linkedConfirmationId,
-        cancelled ? { cancelled: true } : { cancelled: false, answer: true },
-      );
-      if (!rpc.success) throw new Error(rpc.error);
-    } catch (cause) {
-      error = cause instanceof Error ? cause.message : String(cause);
-    } finally {
-      submitting = false;
-    }
-  }
 
   function canSubmit(): boolean {
     return questionItems.length > 0 &&
@@ -663,7 +594,7 @@
       ? t("questionTool.answered", {
           answer: askUserQuestionAnswerMarkdown(
             request,
-            sourceAnswerOverride ?? result.answer,
+            result.answer,
             {
               confirm: t("questionTool.confirm"),
               cancel: t("questionTool.cancel"),
@@ -703,6 +634,19 @@
       };
     });
   }
+
+  function interactionStatusLabel(): string {
+    if (interaction?.state === "confirmed" || result?.status === "confirmed") {
+      return t("questionTool.confirmed");
+    }
+    if (interaction?.state === "cancelled" || result?.status === "cancelled") {
+      return t("questionTool.interactionCancelled");
+    }
+    if (interaction?.state === "interrupted") {
+      return t("questionTool.interactionInterrupted");
+    }
+    return t("questionTool.awaitingConfirmation");
+  }
 </script>
 
 {#if request && showCard}
@@ -725,9 +669,7 @@
       </div>
     {/if}
 
-    {#if !request.batch && request.kind === "confirm" && result?.status === "cancelled"}
-      <div class="question-result muted">{t("questionTool.cancelled")}</div>
-    {:else if !request.batch && request.kind === "confirm"}
+    {#if !request.batch && request.kind === "confirm"}
       <section class="desktop-question-result" aria-label={request.title}>
         <header class="submitted-header">
           <span class="submitted-status-icon" aria-hidden="true">
@@ -769,32 +711,27 @@
         <MarkdownRenderer content={confirmationMarkdown} />
       </div>
       <div class="question-actions">
-        {#if result?.status !== "confirmed"}
+        {#if interaction?.allowedActions.includes("cancel")}
           <button type="button" class="question-button secondary" disabled={submitting} onclick={() => void respond({ cancelled: true })}>
             {t("questionTool.cancel")}
           </button>
-          {#if displayedConfirmationForms.length === 1}
-            <button
-              type="button"
-              class="question-button secondary"
-              disabled={submitting}
-              onclick={() => {
-                if (block.toolCallId) questionConfirmationState.startEditing(block.toolCallId, request);
-              }}
-            >
-              {t("questionTool.returnModify")}
-            </button>
-          {/if}
         {/if}
-        <button type="button" class="question-button" disabled={submitting || result?.status === "confirmed"} onclick={() => void respond({ cancelled: false, answer: true })}>
-          {result?.status === "confirmed" ? t("questionTool.confirmed") : t("questionTool.confirm")}
-        </button>
+        {#if interaction?.allowedActions.includes("confirm")}
+          <button type="button" class="question-button" disabled={submitting} onclick={() => void respond({ cancelled: false, answer: true })}>
+            {t("questionTool.confirm")}
+          </button>
+        {/if}
+        {#if interaction && interaction.allowedActions.length === 0}
+          <button type="button" class="question-button" disabled>
+            {interactionStatusLabel()}
+          </button>
+        {/if}
       </div>
     {:else if result?.status === "cancelled"}
       <div class="question-result muted">{t("questionTool.cancelled")}</div>
     {:else if interrupted}
       <div class="question-result muted">{t("questionTool.interrupted")}</div>
-    {:else if !pending && result?.status !== "answered" && !editing}
+    {:else if !pending && result?.status !== "answered"}
       <div class="question-error" role="alert">{block.resultText}</div>
     {:else}
       {#if result?.status === "answered"}
@@ -1023,31 +960,10 @@
             <button type="submit" class="question-button" disabled={submitting || !canSubmit()}>
               {t("questionTool.submit")}
             </button>
-          {:else if editing}
-            <button type="submit" class="question-button" disabled={submitting || !canSubmit()}>
-              {t("questionTool.saveAndReturn")}
-            </button>
           {:else if result?.status === "answered"}
-            {#if linkedCancelled}
-              <button type="button" class="question-button" disabled>
-                {t("questionTool.cancelled")}
-              </button>
-            {:else if linkedConfirmed}
-              <button type="button" class="question-button" disabled>
-                {t("questionTool.confirmed")}
-              </button>
-            {:else if linkedConfirmationId}
-              <button type="button" class="question-button secondary" disabled={submitting || !linkedConfirmationId} onclick={() => void respondToLinkedConfirmation(true)}>
-                {t("questionTool.cancel")}
-              </button>
-              <button type="button" class="question-button" disabled={submitting || !linkedConfirmationId} onclick={() => void respondToLinkedConfirmation(false)}>
-                {t("questionTool.confirm")}
-              </button>
-            {:else}
-              <button type="button" class="question-button" disabled>
-                {t("questionTool.submitted")}
-              </button>
-            {/if}
+            <button type="button" class="question-button" disabled>
+              {interaction ? interactionStatusLabel() : t("questionTool.submitted")}
+            </button>
           {/if}
         </div>
       </form>

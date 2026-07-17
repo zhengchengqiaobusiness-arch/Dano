@@ -248,6 +248,23 @@ export type AskUserQuestionConfirmationForm = {
   answer: Record<string, AskUserQuestionAnswer>;
 };
 
+export type FormInteractionState =
+  | "awaiting_confirmation"
+  | "confirmed"
+  | "cancelled"
+  | "interrupted";
+
+export type FormInteractionAction =
+  | "confirm"
+  | "cancel";
+
+export type FormInteractionProjection = {
+  interactionId: string;
+  state: FormInteractionState;
+  revision: number;
+  allowedActions: FormInteractionAction[];
+};
+
 export type AskUserQuestionConfirmationCardRequest = {
   batch: false;
   kind: "confirm";
@@ -344,6 +361,7 @@ export interface RpcAgentToolCall {
   arguments: RpcJsonObject;
   questionRequest?: AskUserQuestionCardRequest;
   questionState?: AskUserQuestionLifecycleState;
+  formInteraction?: FormInteractionProjection;
   thoughtSignature?: string;
 }
 
@@ -479,10 +497,6 @@ export interface RpcCommandMap {
           | AskUserQuestionAnswerInput
           | Record<string, AskUserQuestionAnswerInput>;
       };
-  update_question: {
-    toolCallId: string;
-    answer: Record<string, AskUserQuestionAnswerInput>;
-  };
   new_session: {
     parentSession?: string;
     limit?: number;
@@ -707,6 +721,7 @@ export interface RpcTranscriptToolCallBlock {
   arguments?: RpcToolArguments;
   questionRequest?: AskUserQuestionCardRequest;
   questionState?: AskUserQuestionLifecycleState;
+  formInteraction?: FormInteractionProjection;
   thoughtSignature?: string;
 }
 
@@ -870,7 +885,6 @@ export interface RpcResponseMap {
   field_assist: FieldAssistResult;
   present_question: void;
   answer_question: AskUserQuestionResult;
-  update_question: AskUserQuestionConfirmationCardRequest;
   new_session: {
     transcript: RpcTranscriptPage;
     treeEntries: RpcTreeEntry[];
@@ -980,6 +994,7 @@ export type RpcResponse =
       command: string;
       success: false;
       error: string;
+      data?: unknown;
     };
 
 // ============================================================================

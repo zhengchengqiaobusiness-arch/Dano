@@ -52,7 +52,6 @@ function mountCard(onRespond = vi.fn(successfulResponse)) {
       active: true,
       onPresent: successfulResponse,
       onRespond,
-      onUpdate: successfulResponse,
     },
   });
   return onRespond;

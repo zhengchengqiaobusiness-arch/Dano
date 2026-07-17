@@ -95,6 +95,14 @@ import { detectWorkspaceEnvironments } from "./workspace-environment.js";
 import type { UploadRegistry } from "./upload-registry.js";
 import type { FieldAssistService } from "./field-assist.js";
 import {
+  createFormInteractionForQuestion,
+  interruptAwaitingFormInteractions,
+  projectFormInteraction,
+  projectFormInteractionsInMessage,
+  readFormInteractions,
+  transitionFormInteraction,
+} from "./form-interaction.js";
+import {
   normalizeLlmErrorMessage,
   normalizeLlmTranscriptMessage,
 } from "./llm-error.js";
@@ -3554,6 +3562,15 @@ class SessionRuntime {
     );
   }
 
+  currentSessionManager(): SessionManager {
+    if (this.selectedSessionPath) {
+      return this.registry
+        .openSession(this.selectedSessionPath)
+        .getSessionManager();
+    }
+    return this.context.state.sessionManager;
+  }
+
   currentGitCwd(): string {
     if (this.selectedSessionPath) {
       const activeSession = this.registry.getActiveSession(
@@ -5347,12 +5364,34 @@ export class BridgeRpcAdapter {
    * ---------------------------------------------------------------------- */
 
   private sendTranscriptSnapshot(page: RpcTranscriptPage): void {
-    this.sendEvent(
-      this.transcriptProjector.buildSnapshotEvent(
-        page,
-        this.sessionRuntime.buildCurrentTranscriptMessages(),
-      ),
+    const snapshot = this.transcriptProjector.buildSnapshotEvent(
+      page,
+      this.sessionRuntime.buildCurrentTranscriptMessages(),
     );
+    this.sendEvent({
+      ...snapshot,
+      messages: this.projectCurrentFormInteractions(snapshot.messages),
+    });
+  }
+
+  private projectCurrentFormInteractions(
+    messages: readonly RpcTranscriptMessage[],
+  ): RpcTranscriptMessage[] {
+    const interactions = readFormInteractions(
+      this.sessionRuntime.currentSessionManager().getBranch(),
+    );
+    return messages.map(message =>
+      projectFormInteractionsInMessage(message, interactions),
+    );
+  }
+
+  private projectCurrentFormInteractionMessage(
+    message: RpcTranscriptMessage,
+  ): RpcTranscriptMessage {
+    const interactions = readFormInteractions(
+      this.sessionRuntime.currentSessionManager().getBranch(),
+    );
+    return projectFormInteractionsInMessage(message, interactions);
   }
 
   private sendInitialTranscriptSnapshot(): void {
@@ -5372,28 +5411,43 @@ export class BridgeRpcAdapter {
         sessionPath,
       );
       if (deltaPayload) {
+        const projectedDeltaPayload =
+          deltaPayload.type === "transcript_upsert"
+            ? {
+                ...deltaPayload,
+                message: this.projectCurrentFormInteractionMessage(
+                  deltaPayload.message,
+                ),
+              }
+            : deltaPayload;
         if (
-          deltaPayload.type === "transcript_upsert" &&
-          this.isLlmErrorMessage(deltaPayload.message)
+          projectedDeltaPayload.type === "transcript_upsert" &&
+          this.isLlmErrorMessage(projectedDeltaPayload.message)
         ) {
           this.pendingLlmErrors.set(
             this.llmErrorSessionKey(sessionPath),
-            deltaPayload,
+            projectedDeltaPayload,
           );
           return;
         }
-        this.sendEvent(deltaPayload);
+        this.sendEvent(projectedDeltaPayload);
         return;
       }
       return;
     }
 
-    const payload = this.transcriptProjector.projectLifecycleEvent(
+    const unprojectedPayload = this.transcriptProjector.projectLifecycleEvent(
       eventType,
       event,
       sessionPath,
     );
-    if (!payload) return;
+    if (!unprojectedPayload) return;
+    const payload = {
+      ...unprojectedPayload,
+      message: this.projectCurrentFormInteractionMessage(
+        unprojectedPayload.message,
+      ),
+    };
 
     let treeEntries =
       this.sessionRuntime.buildTreeEntriesForSessionPath(sessionPath);
@@ -6072,6 +6126,22 @@ export class BridgeRpcAdapter {
       }
 
       case "abort": {
+        const sessionManager = this.sessionRuntime.currentSessionManager();
+        for (const pending of this.context.askUserQuestion.coordinator.pendingConfirmationRequests()) {
+          createFormInteractionForQuestion(
+            sessionManager,
+            pending.toolCallId,
+            pending.request,
+          );
+        }
+        const interrupted = interruptAwaitingFormInteractions(
+          sessionManager,
+        );
+        if (interrupted.length > 0) {
+          this.sendTranscriptSnapshot(
+            this.sessionRuntime.buildCurrentTranscriptPage(),
+          );
+        }
         if (this.sessionRuntime.hasDetachedSelection()) {
           const session = await this.sessionRuntime.ensureDetachedSession();
           clearSteeringQueue(session);
@@ -6106,7 +6176,19 @@ export class BridgeRpcAdapter {
       case "present_question": {
         const toolCallId = command.toolCallId.trim();
         if (!toolCallId) throw new Error("Question tool call ID is required");
-        this.context.askUserQuestion.coordinator.present(toolCallId);
+        const coordinator = this.context.askUserQuestion.coordinator;
+        const request = coordinator.cardRequest(toolCallId);
+        coordinator.present(toolCallId);
+        if (request && !request.batch && request.kind === "confirm") {
+          createFormInteractionForQuestion(
+            this.sessionRuntime.currentSessionManager(),
+            toolCallId,
+            request,
+          );
+          this.sendTranscriptSnapshot(
+            this.sessionRuntime.buildCurrentTranscriptPage(),
+          );
+        }
         return {
           id: correlationId,
           type: "response",
@@ -6122,6 +6204,24 @@ export class BridgeRpcAdapter {
           throw new Error("Question answer is required");
         }
 
+        const sessionManager = this.sessionRuntime.currentSessionManager();
+        const interaction = readFormInteractions(sessionManager.getBranch()).get(
+          toolCallId,
+        );
+        if (interaction && interaction.state !== "awaiting_confirmation") {
+          return {
+            id: correlationId,
+            type: "response",
+            command: "answer_question",
+            success: false,
+            error: `Form Interaction ${toolCallId} is already terminal (${interaction.state}); reload the transcript and do not retry this action.`,
+            data: {
+              code: "already_terminal",
+              interaction: projectFormInteraction(interaction),
+            },
+          };
+        }
+
         const result = command.cancelled
           ? this.context.askUserQuestion.coordinator.answer(toolCallId, {
               cancelled: true,
@@ -6130,26 +6230,18 @@ export class BridgeRpcAdapter {
               cancelled: false,
               answer: command.answer,
             });
+        if (interaction) {
+          transitionFormInteraction(sessionManager, toolCallId, {
+            type: command.cancelled ? "cancel" : "confirm",
+          });
+          this.sendTranscriptSnapshot(
+            this.sessionRuntime.buildCurrentTranscriptPage(),
+          );
+        }
         return {
           id: correlationId,
           type: "response",
           command: "answer_question",
-          success: true,
-          data: result,
-        };
-      }
-
-      case "update_question": {
-        const toolCallId = command.toolCallId.trim();
-        if (!toolCallId) throw new Error("Question tool call ID is required");
-        const result = this.context.askUserQuestion.coordinator.update(
-          toolCallId,
-          command.answer,
-        );
-        return {
-          id: correlationId,
-          type: "response",
-          command: "update_question",
           success: true,
           data: result,
         };
@@ -6559,10 +6651,16 @@ export class BridgeRpcAdapter {
           const recoveryMessages = flattenMessagesForTranscript(
             selected.sessionManager.getBranch(),
           );
-          const transcript = this.transcriptProjector.projectPage(
+          const projectedTranscript = this.transcriptProjector.projectPage(
             selected.transcript,
             recoveryMessages,
           );
+          const transcript = {
+            ...projectedTranscript,
+            messages: this.projectCurrentFormInteractions(
+              projectedTranscript.messages,
+            ),
+          };
           this.transcriptProjector.syncPage(transcript);
           return {
             id: correlationId,
@@ -6738,7 +6836,7 @@ export class BridgeRpcAdapter {
         const direction = command.direction === "older" ? "older" : "latest";
         const recoveryMessages =
           this.sessionRuntime.buildCurrentTranscriptMessages();
-        const page = this.transcriptProjector.projectPage(
+        const projectedPage = this.transcriptProjector.projectPage(
           buildTranscriptPage(
             recoveryMessages,
             this.sessionRuntime.currentTranscriptSessionPath(),
@@ -6750,6 +6848,12 @@ export class BridgeRpcAdapter {
           ),
           recoveryMessages,
         );
+        const page = {
+          ...projectedPage,
+          messages: this.projectCurrentFormInteractions(
+            projectedPage.messages,
+          ),
+        };
         if (direction === "latest") {
           this.transcriptProjector.syncPage(page);
         }
