@@ -1,11 +1,14 @@
 import type {
   AskUserQuestionConfirmationCardRequest,
+  AskUserQuestionConfirmationForm,
 } from "@dano/types/protocol";
+import { askUserQuestionConfirmationForms } from "../utils/askUserQuestion";
 
 let editingConfirmationId = $state("");
 let editingSourceToolCallId = $state("");
 type ConfirmationRecord = {
   request: AskUserQuestionConfirmationCardRequest;
+  form: AskUserQuestionConfirmationForm;
   confirmationId: string;
   status: "pending" | "confirmed" | "cancelled";
 };
@@ -19,17 +22,21 @@ export const questionConfirmationState = {
     confirmed = false,
     cancelled = false,
   ) {
-    confirmations[request.confirmationOfToolCallId] = {
-      request,
-      confirmationId: confirmationToolCallId,
-      status: confirmed ? "confirmed" : cancelled ? "cancelled" : "pending",
-    };
+    for (const form of askUserQuestionConfirmationForms(request)) {
+      confirmations[form.formId] = {
+        request,
+        form,
+        confirmationId: confirmationToolCallId,
+        status: confirmed ? "confirmed" : cancelled ? "cancelled" : "pending",
+      };
+    }
   },
   request(request: AskUserQuestionConfirmationCardRequest) {
-    return confirmations[request.confirmationOfToolCallId]?.request ?? request;
+    const firstForm = askUserQuestionConfirmationForms(request)[0];
+    return (firstForm ? confirmations[firstForm.formId]?.request : undefined) ?? request;
   },
   sourceAnswer(toolCallId: string) {
-    return confirmations[toolCallId]?.request.answer;
+    return confirmations[toolCallId]?.form.answer;
   },
   isEditing(toolCallId: string) {
     return editingSourceToolCallId === toolCallId;
@@ -50,18 +57,24 @@ export const questionConfirmationState = {
     confirmationToolCallId: string,
     request: AskUserQuestionConfirmationCardRequest,
   ) {
-    confirmations[request.confirmationOfToolCallId] = {
+    const form = askUserQuestionConfirmationForms(request)[0];
+    if (!form) return;
+    confirmations[form.formId] = {
       request,
+      form,
       confirmationId: confirmationToolCallId,
       status: "pending",
     };
     editingConfirmationId = confirmationToolCallId;
-    editingSourceToolCallId = request.confirmationOfToolCallId;
+    editingSourceToolCallId = form.formId;
   },
   finishEditing(request: AskUserQuestionConfirmationCardRequest) {
-    const current = confirmations[request.confirmationOfToolCallId];
-    confirmations[request.confirmationOfToolCallId] = {
+    const form = askUserQuestionConfirmationForms(request)[0];
+    if (!form) return;
+    const current = confirmations[form.formId];
+    confirmations[form.formId] = {
       request,
+      form,
       confirmationId: current?.confirmationId ?? editingConfirmationId,
       status: "pending",
     };

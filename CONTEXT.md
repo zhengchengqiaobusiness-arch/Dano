@@ -17,8 +17,12 @@ A transient AI helper for ask_user_question input and editor fields that rewrite
 _Avoid_: detached session, user prompt, field workflow, preview candidate
 
 **Submitted Form**:
-A completed, read-only grouped form identified by an opaque `formId` that reuses its source tool-call ID. Submission ends the original interactive question; a later confirmation flow may reference the form without reopening it.
+A completed, read-only grouped form identified by an opaque `formId` that reuses its source tool-call ID. Submission ends the original interactive question; a later confirmation flow in the same Assistant Turn may reference the form without reopening it. Transcript identity may outlive that Turn, but confirmation eligibility does not.
 _Avoid_: pending confirmation, editable form, separate form identifier
+
+**Assistant Turn**:
+The server-owned execution that starts from one user message and may contain multiple sequential model responses and tool calls. Submitted Forms are eligible for confirmation only within the Assistant Turn that created them.
+_Avoid_: one assistant message, one tool call, browser streaming state
 
 **Runtime Workspace**:
 The single project folder Dano gives to Pi for one Dano session. Dano may know the owning user and session, but Pi only sees this folder as its current project.

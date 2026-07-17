@@ -5,6 +5,8 @@ import {
   type AskUserQuestionAnswer,
   type AskUserQuestionCardItem,
   type AskUserQuestionCardRequest,
+  type AskUserQuestionConfirmationCardRequest,
+  type AskUserQuestionConfirmationForm,
   type AskUserQuestionOptionId,
   type AskUserQuestionResult,
 } from "@dano/types/protocol";
@@ -20,6 +22,21 @@ export type AskUserQuestionAnswerItem = {
   label: string;
   value: string;
 };
+
+export function askUserQuestionConfirmationForms(
+  request: AskUserQuestionConfirmationCardRequest,
+): AskUserQuestionConfirmationForm[] {
+  return request.forms?.length
+    ? request.forms
+    : [
+        {
+          formId: request.confirmationOfToolCallId,
+          title: request.title,
+          questions: request.questions,
+          answer: request.answer,
+        },
+      ];
+}
 
 export function askUserQuestionMarkdown(question: string): string {
   return question.replace(/\\+(?:r\\+n|n)/g, "\n");
@@ -185,10 +202,19 @@ export function askUserQuestionResult(
     typeof details.confirmationOfToolCallId === "string" &&
     isAnswerRecord(details.answer)
   ) {
+    const forms = isConfirmedForms(details.forms)
+      ? details.forms
+      : [
+          {
+            formId: details.confirmationOfToolCallId,
+            answer: details.answer,
+          },
+        ];
     return {
       status: "confirmed",
       confirmationOfToolCallId: details.confirmationOfToolCallId,
       answer: details.answer,
+      forms,
     };
   }
   if (
@@ -207,6 +233,24 @@ export function askUserQuestionResult(
     };
   }
   return null;
+}
+
+function isConfirmedForms(
+  value: unknown,
+): value is Array<{
+  formId: string;
+  answer: Record<string, AskUserQuestionAnswer>;
+}> {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(
+      form =>
+        isRecord(form) &&
+        typeof form.formId === "string" &&
+        isAnswerRecord(form.answer),
+    )
+  );
 }
 
 function isAnswerRecord(
