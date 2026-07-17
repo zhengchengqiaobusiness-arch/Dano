@@ -6247,22 +6247,6 @@ export class BridgeRpcAdapter {
         };
       }
 
-      case "update_question": {
-        const toolCallId = command.toolCallId.trim();
-        if (!toolCallId) throw new Error("Question tool call ID is required");
-        const result = this.context.askUserQuestion.coordinator.update(
-          toolCallId,
-          command.answer,
-        );
-        return {
-          id: correlationId,
-          type: "response",
-          command: "update_question",
-          success: true,
-          data: result,
-        };
-      }
-
       /* ====================================================================
        * Session state and model settings
        * Shared state: SessionRuntime plus live ctx and pi settings APIs.

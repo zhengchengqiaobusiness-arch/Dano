@@ -477,20 +477,6 @@ export class AskUserQuestionCoordinator {
     return requests;
   }
 
-  update(
-    toolCallId: string,
-    answer: Record<string, AskUserQuestionAnswerInput>,
-  ): AskUserQuestionConfirmationCardRequest {
-    const pending = this.pending.get(toolCallId);
-    if (!pending?.confirmation || pending.confirmation.length !== 1) {
-      throw new Error(`Pending confirmation not found: ${toolCallId}`);
-    }
-    const normalized = normalizeGroupedAnswer(pending.questions, answer);
-    pending.confirmation[0].answer = normalized;
-    pending.cardRequest = confirmationCardRequest(pending.confirmation);
-    return pending.cardRequest as AskUserQuestionConfirmationCardRequest;
-  }
-
   answer(
     toolCallId: string,
     response:

@@ -497,10 +497,6 @@ export interface RpcCommandMap {
           | AskUserQuestionAnswerInput
           | Record<string, AskUserQuestionAnswerInput>;
       };
-  update_question: {
-    toolCallId: string;
-    answer: Record<string, AskUserQuestionAnswerInput>;
-  };
   new_session: {
     parentSession?: string;
     limit?: number;
@@ -889,7 +885,6 @@ export interface RpcResponseMap {
   field_assist: FieldAssistResult;
   present_question: void;
   answer_question: AskUserQuestionResult;
-  update_question: AskUserQuestionConfirmationCardRequest;
   new_session: {
     transcript: RpcTranscriptPage;
     treeEntries: RpcTreeEntry[];
