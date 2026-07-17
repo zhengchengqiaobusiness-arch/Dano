@@ -52,7 +52,6 @@
     active = true,
     onPresent,
     onRespond,
-    onUpdate,
     onFieldAssist = undefined as
       | ((payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>)
       | undefined,
@@ -68,10 +67,6 @@
             cancelled: false;
             answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>;
         },
-    ) => Promise<RpcResponse>;
-    onUpdate: (
-      toolCallId: string,
-      answer: Record<string, AskUserQuestionAnswer>,
     ) => Promise<RpcResponse>;
     onFieldAssist?: (payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>;
   } = $props();
@@ -716,14 +711,17 @@
         <MarkdownRenderer content={confirmationMarkdown} />
       </div>
       <div class="question-actions">
-        {#if interaction?.state === "awaiting_confirmation" || (!interaction && pending)}
+        {#if interaction?.allowedActions.includes("cancel")}
           <button type="button" class="question-button secondary" disabled={submitting} onclick={() => void respond({ cancelled: true })}>
             {t("questionTool.cancel")}
           </button>
+        {/if}
+        {#if interaction?.allowedActions.includes("confirm")}
           <button type="button" class="question-button" disabled={submitting} onclick={() => void respond({ cancelled: false, answer: true })}>
             {t("questionTool.confirm")}
           </button>
-        {:else}
+        {/if}
+        {#if interaction && interaction.allowedActions.length === 0}
           <button type="button" class="question-button" disabled>
             {interactionStatusLabel()}
           </button>

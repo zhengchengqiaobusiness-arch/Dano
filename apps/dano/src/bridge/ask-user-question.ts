@@ -459,6 +459,24 @@ export class AskUserQuestionCoordinator {
     return this.pending.get(toolCallId)?.cardRequest;
   }
 
+  pendingConfirmationRequests(): Array<{
+    toolCallId: string;
+    request: AskUserQuestionConfirmationCardRequest;
+  }> {
+    const requests: Array<{
+      toolCallId: string;
+      request: AskUserQuestionConfirmationCardRequest;
+    }> = [];
+    for (const [toolCallId, pending] of this.pending) {
+      if (!pending.confirmation) continue;
+      requests.push({
+        toolCallId,
+        request: pending.cardRequest as AskUserQuestionConfirmationCardRequest,
+      });
+    }
+    return requests;
+  }
+
   update(
     toolCallId: string,
     answer: Record<string, AskUserQuestionAnswerInput>,

@@ -6126,8 +6126,16 @@ export class BridgeRpcAdapter {
       }
 
       case "abort": {
+        const sessionManager = this.sessionRuntime.currentSessionManager();
+        for (const pending of this.context.askUserQuestion.coordinator.pendingConfirmationRequests()) {
+          createFormInteractionForQuestion(
+            sessionManager,
+            pending.toolCallId,
+            pending.request,
+          );
+        }
         const interrupted = interruptAwaitingFormInteractions(
-          this.sessionRuntime.currentSessionManager(),
+          sessionManager,
         );
         if (interrupted.length > 0) {
           this.sendTranscriptSnapshot(

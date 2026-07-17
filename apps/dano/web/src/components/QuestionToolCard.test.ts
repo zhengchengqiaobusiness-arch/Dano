@@ -106,7 +106,6 @@ describe("QuestionToolCard", () => {
         active: false,
         onPresent: response,
         onRespond: response,
-        onUpdate: response,
       },
     });
     await tick();
@@ -131,7 +130,6 @@ describe("QuestionToolCard", () => {
         active: true,
         onPresent: response,
         onRespond: response,
-        onUpdate: response,
       },
     });
     try {
@@ -151,6 +149,34 @@ describe("QuestionToolCard", () => {
     }
   });
 
+  it("presents a confirmation without locally authorizing actions before projection", async () => {
+    vi.useFakeTimers();
+    const response = vi.fn(async () => ({ success: true } as never));
+    const block = multiFormConfirmationBlock();
+    block.formInteraction = undefined;
+    block.questionState = "awaiting_presentation";
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block,
+        active: true,
+        onPresent: response,
+        onRespond: response,
+      },
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(400);
+      await tick();
+
+      expect(response).toHaveBeenCalledWith("confirm-two");
+      expect(target.querySelectorAll(".question-actions button")).toHaveLength(0);
+    } finally {
+      unmount(component);
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps an interrupted Submitted Form terminal while a later turn is streaming", async () => {
     const response = vi.fn(async () => {
       throw new Error("a terminal Form Interaction must not issue RPCs");
@@ -163,7 +189,6 @@ describe("QuestionToolCard", () => {
         active: true,
         onPresent: response,
         onRespond: response,
-        onUpdate: response,
       },
     });
     await tick();
@@ -198,7 +223,6 @@ describe("QuestionToolCard", () => {
         active: true,
         onPresent: response,
         onRespond: response,
-        onUpdate: response,
       },
     });
     await tick();

@@ -256,8 +256,7 @@ export type FormInteractionState =
 
 export type FormInteractionAction =
   | "confirm"
-  | "cancel"
-  | "return_modify";
+  | "cancel";
 
 export type FormInteractionProjection = {
   interactionId: string;

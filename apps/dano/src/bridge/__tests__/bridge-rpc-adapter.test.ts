@@ -1392,19 +1392,6 @@ describe("BridgeRpcAdapter", () => {
 
         ws.trigger("message", Buffer.from(JSON.stringify({
           type: "command",
-          payload: {
-            id: "present-rpc-confirm",
-            type: "present_question",
-            toolCallId: "rpc-confirm-a",
-          },
-        })));
-        await new Promise(resolve => setTimeout(resolve, 10));
-        expect(
-          readFormInteractions(sessionManager.getBranch()).get("rpc-confirm-a"),
-        ).toMatchObject({ state: "awaiting_confirmation", revision: 1 });
-
-        ws.trigger("message", Buffer.from(JSON.stringify({
-          type: "command",
           payload: { id: "abort-rpc-confirm", type: "abort" },
         })));
         await new Promise(resolve => setTimeout(resolve, 10));

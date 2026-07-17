@@ -2164,13 +2164,6 @@ export function presentQuestion(toolCallId: string): Promise<RpcResponse> {
   return sendCommand({ type: "present_question", toolCallId });
 }
 
-export function updateQuestion(
-  toolCallId: string,
-  answer: Record<string, AskUserQuestionAnswer>,
-): Promise<RpcResponse> {
-  return sendCommand({ type: "update_question", toolCallId, answer });
-}
-
 export async function fieldAssist(
   payload: FieldAssistCommandPayload,
 ): Promise<FieldAssistResult> {
