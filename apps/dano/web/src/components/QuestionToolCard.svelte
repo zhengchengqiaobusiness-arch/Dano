@@ -211,19 +211,38 @@
         : interactionFormAnswer !== undefined
           ? interactionFormAnswer[item.id]
           : formAnswer?.[item.id];
+      const authoritativeAnswer =
+        revisionForm !== undefined || interactionFormAnswer !== undefined;
+      const fallbackDefault = authoritativeAnswer ? undefined : item.default;
       if (item.kind === "text") {
-        textAnswer[item.id] = typeof savedAnswer === "string" ? savedAnswer : item.default ?? "";
+        textAnswer[item.id] = typeof savedAnswer === "string"
+          ? savedAnswer
+          : typeof fallbackDefault === "string"
+            ? fallbackDefault
+            : "";
       } else if (item.kind === "date") {
-        dateAnswer[item.id] = typeof savedAnswer === "string" ? savedAnswer : item.default;
+        dateAnswer[item.id] = typeof savedAnswer === "string"
+          ? savedAnswer
+          : typeof fallbackDefault === "string"
+            ? fallbackDefault
+            : undefined;
       } else if (item.kind === "single" || item.kind === "select" || item.kind === "treeSelect") {
-        const answer = typeof savedAnswer === "string" || typeof savedAnswer === "number" ? savedAnswer : item.default;
+        const answer = typeof savedAnswer === "string" || typeof savedAnswer === "number"
+          ? savedAnswer
+          : typeof fallbackDefault === "string" || typeof fallbackDefault === "number"
+            ? fallbackDefault
+            : undefined;
         selectedOption[item.id] = selectedOptionForDefault(item, answer);
         customAnswer[item.id] = customAnswerForDefault(item, answer);
         if ((item.kind === "select" || item.kind === "treeSelect") && item.dataSource) {
           void loadRemoteOptions(item, 1, "", false);
         }
       } else if (item.kind === "multiple") {
-        const answers = Array.isArray(savedAnswer) ? savedAnswer : item.default;
+        const answers = Array.isArray(savedAnswer)
+          ? savedAnswer
+          : Array.isArray(fallbackDefault)
+            ? fallbackDefault
+            : undefined;
         selectedOptions[item.id] = selectedOptionsForDefault(item, answers);
         customAnswer[item.id] = customAnswerForDefault(item, answers?.find(
           answer => !itemOptions(item).some(option => option.id === answer),

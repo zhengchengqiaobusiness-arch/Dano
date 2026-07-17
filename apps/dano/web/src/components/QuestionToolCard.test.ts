@@ -547,12 +547,19 @@ describe("QuestionToolCard", () => {
   it("keeps an optional answer cleared by the latest revision", async () => {
     const response = vi.fn(async () => ({ success: true } as never));
     const block = submittedFormBlock("awaiting_confirmation");
+    if (!block.questionRequest?.batch) throw new Error("expected grouped form");
+    block.questionRequest.questions[0]!.default = "个人事务";
     block.formInteraction!.revision = 3;
     block.formInteraction!.forms = [{
       formId: "form-1",
       title: "测试申请",
       revision: 2,
-      questions: [{ id: "reason", kind: "text", question: "申请原因？" }],
+      questions: [{
+        id: "reason",
+        kind: "text",
+        question: "申请原因？",
+        default: "个人事务",
+      }],
       answer: {},
     }];
     const target = document.createElement("div");
