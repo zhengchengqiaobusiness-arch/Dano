@@ -485,14 +485,32 @@ export class AskUserQuestionCoordinator {
     if (!pending?.confirmation) {
       throw new Error(`Pending confirmation not found: ${toolCallId}`);
     }
-    for (const form of pending.confirmation) {
+    const normalizedAnswers = pending.confirmation.map(form => {
       const answer = answers[form.toolCallId];
-      if (answer) {
-        form.answer = normalizeGroupedAnswer(form.questions, answer);
-      }
+      return answer
+        ? normalizeGroupedAnswer(form.questions, answer)
+        : form.answer;
+    });
+    for (const [index, form] of pending.confirmation.entries()) {
+      form.answer = normalizedAnswers[index];
     }
     pending.cardRequest = confirmationCardRequest(pending.confirmation);
     return pending.cardRequest as AskUserQuestionConfirmationCardRequest;
+  }
+
+  confirmationRevisionMatches(
+    toolCallId: string,
+    answers: Record<string, Record<string, AskUserQuestionAnswerInput>>,
+  ): boolean {
+    const pending = this.pending.get(toolCallId);
+    if (!pending?.confirmation) return false;
+    for (const [formId, answer] of Object.entries(answers)) {
+      const form = pending.confirmation.find(candidate => candidate.toolCallId === formId);
+      if (!form) return false;
+      const normalized = normalizeGroupedAnswer(form.questions, answer);
+      if (JSON.stringify(normalized) !== JSON.stringify(form.answer)) return false;
+    }
+    return true;
   }
 
   answer(

@@ -95,8 +95,10 @@ import { detectWorkspaceEnvironments } from "./workspace-environment.js";
 import type { UploadRegistry } from "./upload-registry.js";
 import type { FieldAssistService } from "./field-assist.js";
 import {
+  canApplyFormInteractionTransition,
   createFormInteractionForQuestion,
   interruptOpenFormInteractions,
+  isTerminalFormInteraction,
   projectFormInteraction,
   projectFormInteractionsInMessage,
   readFormInteractions,
@@ -6240,6 +6242,15 @@ export class BridgeRpcAdapter {
         const interaction = readFormInteractions(sessionManager.getBranch()).get(
           toolCallId,
         );
+        if (interaction && isTerminalFormInteraction(interaction)) {
+          return formInteractionCommandFailure(
+            correlationId,
+            "answer_question",
+            "already_terminal",
+            `Form Interaction ${toolCallId} is already terminal (${interaction.state}); use the returned authoritative projection and do not retry this action.`,
+            interaction,
+          );
+        }
         if (interaction && command.expectedRevision === undefined) {
           return formInteractionCommandFailure(
             correlationId,
@@ -6261,25 +6272,16 @@ export class BridgeRpcAdapter {
             interaction,
           );
         }
-        if (interaction?.state === "revising" && !command.cancelled) {
-          return formInteractionCommandFailure(
-            correlationId,
-            "answer_question",
-            "invalid_state",
-            `Form Interaction ${toolCallId} does not allow confirm while revising; submit the complete revision set first.`,
-            interaction,
-          );
-        }
+        const terminalTransition = command.cancelled ? "cancel" : "confirm";
         if (
           interaction &&
-          interaction.state !== "awaiting_confirmation" &&
-          interaction.state !== "revising"
+          !canApplyFormInteractionTransition(interaction, terminalTransition)
         ) {
           return formInteractionCommandFailure(
             correlationId,
             "answer_question",
-            "already_terminal",
-            `Form Interaction ${toolCallId} is already terminal (${interaction.state}); reload the transcript and do not retry this action.`,
+            "invalid_state",
+            `Form Interaction ${toolCallId} does not allow ${terminalTransition} while ${interaction.state}.`,
             interaction,
           );
         }
@@ -6294,7 +6296,7 @@ export class BridgeRpcAdapter {
             });
         if (interaction) {
           transitionFormInteraction(sessionManager, toolCallId, {
-            type: command.cancelled ? "cancel" : "confirm",
+            type: terminalTransition,
           });
           this.sendTranscriptSnapshot(
             this.sessionRuntime.buildCurrentTranscriptPage(),
@@ -6318,11 +6320,41 @@ export class BridgeRpcAdapter {
         if (!interaction) {
           throw new Error(`Form Interaction not found: ${toolCallId}`);
         }
+        if (isTerminalFormInteraction(interaction)) {
+          return formInteractionCommandFailure(
+            correlationId,
+            "revise_question",
+            "already_terminal",
+            `Form Interaction ${toolCallId} is already terminal (${interaction.state}); use the returned authoritative projection and do not retry this action.`,
+            interaction,
+          );
+        }
+        if (
+          interaction.state === "revising" &&
+          interaction.revision === command.expectedRevision + 1
+        ) {
+          return {
+            id: correlationId,
+            type: "response",
+            command: "revise_question",
+            success: true,
+            data: projectFormInteraction(interaction),
+          };
+        }
         if (command.expectedRevision !== interaction.revision) {
           return staleFormInteractionResponse(
             correlationId,
             "revise_question",
             command.expectedRevision,
+            interaction,
+          );
+        }
+        if (!canApplyFormInteractionTransition(interaction, "return_modify")) {
+          return formInteractionCommandFailure(
+            correlationId,
+            "revise_question",
+            "invalid_state",
+            `Form Interaction ${toolCallId} does not allow return_modify from ${interaction.state}.`,
             interaction,
           );
         }
@@ -6361,6 +6393,32 @@ export class BridgeRpcAdapter {
         if (!interaction) {
           throw new Error(`Form Interaction not found: ${toolCallId}`);
         }
+        if (isTerminalFormInteraction(interaction)) {
+          return formInteractionCommandFailure(
+            correlationId,
+            "submit_question_revision",
+            "already_terminal",
+            `Form Interaction ${toolCallId} is already terminal (${interaction.state}); use the returned authoritative projection and do not retry this action.`,
+            interaction,
+          );
+        }
+        if (
+          interaction.state === "awaiting_confirmation" &&
+          command.expectedRevision >= 1 &&
+          interaction.revision === command.expectedRevision + 1 &&
+          this.context.askUserQuestion.coordinator.confirmationRevisionMatches(
+            toolCallId,
+            command.answers,
+          )
+        ) {
+          return {
+            id: correlationId,
+            type: "response",
+            command: "submit_question_revision",
+            success: true,
+            data: projectFormInteraction(interaction),
+          };
+        }
         if (command.expectedRevision !== interaction.revision) {
           return staleFormInteractionResponse(
             correlationId,
@@ -6369,7 +6427,7 @@ export class BridgeRpcAdapter {
             interaction,
           );
         }
-        if (interaction.state !== "revising") {
+        if (!canApplyFormInteractionTransition(interaction, "submit_revision")) {
           return formInteractionCommandFailure(
             correlationId,
             "submit_question_revision",

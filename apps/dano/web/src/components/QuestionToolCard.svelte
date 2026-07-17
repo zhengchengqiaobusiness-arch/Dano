@@ -9,6 +9,7 @@
     FieldAssistAction,
     FieldAssistCommandPayload,
     FieldAssistResult,
+    FormInteractionProjection,
     RpcResponse,
   } from "@dano/types/protocol";
   import { tick } from "svelte";
@@ -82,7 +83,14 @@
 
   const projectedRequest = $derived(askUserQuestionRequest(block));
   const request = $derived(projectedRequest);
-  const interaction = $derived(block.formInteraction);
+  let interactionOverride = $state<FormInteractionProjection>();
+  const interaction = $derived(
+    interactionOverride &&
+      (!block.formInteraction ||
+        interactionOverride.revision >= block.formInteraction.revision)
+      ? interactionOverride
+      : block.formInteraction,
+  );
   const isConfirmation = $derived(
     Boolean(request && !request.batch && request.kind === "confirm"),
   );
@@ -159,7 +167,7 @@
   let aiAssistSeq = $state<Record<string, number>>({});
   const showCard = $derived(
     Boolean(request) &&
-      (!pending || pendingReady) &&
+      (!pending || pendingReady || Boolean(interaction)) &&
       !(request?.batch && result?.status === "answered" && interaction?.state === "revising"),
   );
 
@@ -264,6 +272,7 @@
         ...response,
         ...(interaction ? { expectedRevision: interaction.revision } : {}),
       });
+      applyAuthoritativeInteraction(rpc);
       if (!rpc.success) throw new Error(rpc.error);
       submittedResult = response.cancelled
         ? { status: "cancelled" }
@@ -319,6 +328,7 @@
     error = "";
     try {
       const rpc = await onRevise(block.toolCallId, interaction.revision);
+      applyAuthoritativeInteraction(rpc);
       if (!rpc.success) throw new Error(rpc.error);
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
@@ -339,12 +349,39 @@
         interaction.revision,
         answers,
       );
+      applyAuthoritativeInteraction(rpc);
       if (!rpc.success) throw new Error(rpc.error);
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
     } finally {
       submitting = false;
     }
+  }
+
+  function applyAuthoritativeInteraction(response: RpcResponse): void {
+    const data = response.data;
+    const candidate = isFormInteractionProjection(data)
+      ? data
+      : isRecord(data) && isFormInteractionProjection(data.interaction)
+        ? data.interaction
+        : undefined;
+    if (
+      candidate &&
+      (!interactionOverride || candidate.revision >= interactionOverride.revision)
+    ) {
+      interactionOverride = candidate;
+    }
+  }
+
+  function isFormInteractionProjection(
+    value: unknown,
+  ): value is FormInteractionProjection {
+    return isRecord(value) &&
+      typeof value.interactionId === "string" &&
+      typeof value.state === "string" &&
+      typeof value.revision === "number" &&
+      Array.isArray(value.allowedActions) &&
+      Array.isArray(value.forms);
   }
 
 
