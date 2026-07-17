@@ -674,6 +674,7 @@
   <article
     class="question-card"
     data-status={result?.status ?? "pending"}
+    data-form-id={result?.status === "answered" ? result.formId : undefined}
     aria-live="polite"
     aria-label={t("questionTool.label")}
     aria-busy={pending && submitting}

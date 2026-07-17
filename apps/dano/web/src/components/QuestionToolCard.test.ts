@@ -61,6 +61,7 @@ describe("QuestionToolCard", () => {
     await tick();
 
     expect(target.innerHTML).toContain("已提交");
+    expect(target.querySelector("article")?.dataset.formId).toBe("form-1");
     expect(target.querySelector("button")?.disabled).toBe(true);
     expect(target.textContent).not.toContain("确认");
     expect(target.textContent).not.toContain("取消");

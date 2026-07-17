@@ -200,7 +200,11 @@ export function askUserQuestionResult(
         details.answer.every(isOptionId)) ||
       isAnswerRecord(details.answer))
   ) {
-    return { status: "answered", answer: details.answer };
+    return {
+      status: "answered",
+      answer: details.answer,
+      ...(typeof details.formId === "string" ? { formId: details.formId } : {}),
+    };
   }
   return null;
 }

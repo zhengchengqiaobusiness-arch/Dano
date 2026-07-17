@@ -134,10 +134,12 @@ describe("ask user question transcript data", () => {
     expect(
       askUserQuestionResult({
         status: "answered",
+        formId: "grouped-form-1",
         answer: { name: "Dano", department: 1, features: ["Chat"], ok: true },
       }),
     ).toEqual({
       status: "answered",
+      formId: "grouped-form-1",
       answer: { name: "Dano", department: 1, features: ["Chat"], ok: true },
     });
   });
