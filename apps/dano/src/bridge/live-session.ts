@@ -19,7 +19,13 @@ import type { RpcSlashCommand } from "../../types/protocol.js";
 /** Discriminated-union event type for Pi agent session events. */
 export type BridgeLiveEvent =
   | { type: "agent_start" }
-  | { type: "agent_end"; messages?: unknown[] }
+  | { type: "agent_end"; messages?: unknown[]; willRetry?: boolean }
+  | {
+      type: "auto_retry_start";
+      attempt: number;
+      maxAttempts: number;
+      delayMs: number;
+    }
   | {
       type: "message_start" | "message_update" | "message_end";
       [key: string]: unknown;

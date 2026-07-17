@@ -52,6 +52,7 @@ import type {
   RpcAgentEndEvent,
   RpcAgentMessage,
   RpcAgentStartEvent,
+  RpcAutoRetryStartEvent,
   RpcBridgeEvent,
   RpcCommand,
   RpcCompactionEndEvent,
@@ -91,6 +92,10 @@ import type {
 import { detectWorkspaceEnvironments } from "./workspace-environment.js";
 import type { UploadRegistry } from "./upload-registry.js";
 import type { FieldAssistService } from "./field-assist.js";
+import {
+  normalizeLlmErrorMessage,
+  normalizeLlmTranscriptMessage,
+} from "./llm-error.js";
 
 type RpcTranscriptToolCallBlock = Extract<
   RpcTranscriptContentBlock,
@@ -282,6 +287,19 @@ function toRpcAgentEndEvent(
   };
 }
 
+function toRpcAutoRetryStartEvent(
+  event: { attempt: number; maxAttempts: number; delayMs: number },
+  sessionPath?: string | null,
+): RpcAutoRetryStartEvent {
+  return {
+    type: "auto_retry_start",
+    sessionPath: sessionPath ?? undefined,
+    attempt: event.attempt,
+    maxAttempts: event.maxAttempts,
+    delayMs: event.delayMs,
+  };
+}
+
 function toRpcAgentMessage(message: PiAgentMessage): RpcAgentMessage | null {
   switch (message.role) {
     case "user":
@@ -318,7 +336,7 @@ function toRpcAgentMessage(message: PiAgentMessage): RpcAgentMessage | null {
           },
         },
         stopReason: message.stopReason,
-        errorMessage: message.errorMessage,
+        errorMessage: normalizeLlmErrorMessage(message),
         timestamp: message.timestamp,
       };
     case "toolResult":
@@ -1563,6 +1581,7 @@ function buildTreePreviewText(
       }
     ).message;
     const content = collapseWhitespace(extractMessageText(message));
+    const errorMessage = normalizeLlmErrorMessage(message);
 
     switch (message.role) {
       case "user":
@@ -1570,8 +1589,8 @@ function buildTreePreviewText(
       case "assistant":
         if (content) return content;
         if (message.stopReason === "aborted") return "(aborted)";
-        if (message.errorMessage) {
-          return collapseWhitespace(message.errorMessage);
+        if (errorMessage) {
+          return collapseWhitespace(errorMessage);
         }
         return "(no content)";
       case "toolResult":
@@ -1969,7 +1988,7 @@ function transcriptMessageFromBranchEntry(
     const id = typeof typedEntry.id === "string" ? typedEntry.id : undefined;
     const role = typeof message.role === "string" ? message.role : null;
     if (!role) return null;
-    return {
+    return normalizeLlmTranscriptMessage({
       ...message,
       transcriptKey: id ?? fallbackKey,
       id,
@@ -1978,7 +1997,7 @@ function transcriptMessageFromBranchEntry(
         typeof typedEntry.timestamp === "string"
           ? typedEntry.timestamp
           : undefined,
-    };
+    });
   }
 
   if (typedEntry.type) {
@@ -1991,7 +2010,7 @@ function transcriptMessageFromBranchEntry(
   if (typeof typedEntry.role === "string") {
     const flatMessage = typedEntry as Record<string, unknown>;
     const id = typeof typedEntry.id === "string" ? typedEntry.id : undefined;
-    return {
+    return normalizeLlmTranscriptMessage({
       ...flatMessage,
       transcriptKey: id ?? fallbackKey,
       id,
@@ -2000,7 +2019,7 @@ function transcriptMessageFromBranchEntry(
         typeof typedEntry.timestamp === "string"
           ? typedEntry.timestamp
           : undefined,
-    };
+    });
   }
 
   return null;
@@ -2093,7 +2112,27 @@ function flattenMessagesForTranscript(
     }
   }
 
-  return filterBootstrapTranscriptMessages(messages);
+  return filterBootstrapTranscriptMessages(
+    filterSupersededLlmErrors(messages),
+  );
+}
+
+function filterSupersededLlmErrors(
+  messages: readonly RpcTranscriptMessage[],
+): RpcTranscriptMessage[] {
+  return messages.filter((message, index) => {
+    if (message.role !== "assistant" || message.stopReason !== "error") {
+      return true;
+    }
+
+    for (let nextIndex = index + 1; nextIndex < messages.length; nextIndex++) {
+      const next = messages[nextIndex];
+      if (next.role === "user") return true;
+      if (next.role === "toolResult" || next.role === "tool") return true;
+      if (next.role === "assistant") return false;
+    }
+    return true;
+  });
 }
 
 function trimAssistantContentToToolCall(
@@ -3403,6 +3442,7 @@ function describeMessage(message: {
 }): string {
   const role = message.role ?? "message";
   const content = collapseWhitespace(extractMessageText(message));
+  const errorMessage = normalizeLlmErrorMessage(message);
 
   switch (role) {
     case "user":
@@ -3410,8 +3450,8 @@ function describeMessage(message: {
     case "assistant":
       if (content) return `assistant: ${content}`;
       if (message.stopReason === "aborted") return "assistant: (aborted)";
-      if (message.errorMessage)
-        return `assistant: ${collapseWhitespace(message.errorMessage)}`;
+      if (errorMessage)
+        return `assistant: ${collapseWhitespace(errorMessage)}`;
       return "assistant: (no content)";
     case "toolResult":
       return message.toolName ? `[tool: ${message.toolName}]` : "[tool result]";
@@ -4192,14 +4232,14 @@ class TranscriptProjector {
     const role = typeof message.role === "string" ? message.role : null;
     if (!role) return null;
 
-    return {
+    return normalizeLlmTranscriptMessage({
       transcriptKey,
       ...message,
       id: typeof message.id === "string" ? message.id : undefined,
       role,
       timestamp:
         typeof message.timestamp === "string" ? message.timestamp : undefined,
-    };
+    });
   }
 
   private projectStructuredUserMessage(
@@ -4961,6 +5001,10 @@ export class BridgeRpcAdapter {
   private readonly slashCommandsAndMentionsEnabled: boolean;
   private pendingTranscriptDeltaBatch: PendingTranscriptDeltaBatch | null =
     null;
+  private readonly pendingLlmErrors = new Map<
+    string,
+    RpcTranscriptUpsertEvent
+  >();
   private readonly pendingDetachedPromptTimers = new Set<
     ReturnType<typeof setTimeout>
   >();
@@ -5057,13 +5101,20 @@ export class BridgeRpcAdapter {
         case "agent_end": {
           const liveSessionPath =
             this.context.state.sessionManager.getSessionFile();
-          this.sendEvent(toRpcAgentEndEvent(event, liveSessionPath));
+          if (!this.forwardAgentEnd(event, liveSessionPath)) return;
           if (!this.sessionRuntime.shouldHandleLiveSessionEvents()) return;
           this.sessionStatsPusher.queue(
             this.sessionRuntime.currentTranscriptSessionPath(),
           );
           return;
         }
+
+        case "auto_retry_start":
+          this.forwardAutoRetryStart(
+            event,
+            this.context.state.sessionManager.getSessionFile(),
+          );
+          return;
 
         case "session_compact":
           if (!this.sessionRuntime.shouldHandleLiveSessionEvents()) return;
@@ -5116,18 +5167,41 @@ export class BridgeRpcAdapter {
             this.sendEvent(toRpcAgentStartEvent(sessionPath));
             return;
           case "agent_end":
-            this.sendEvent(toRpcAgentEndEvent(event, sessionPath));
+            if (!this.forwardAgentEnd(event, sessionPath)) return;
             if (
               this.sessionRuntime.currentDetachedSessionPath() === sessionPath
             ) {
               this.sessionStatsPusher.queue(sessionPath);
             }
             return;
+          case "auto_retry_start":
+            this.forwardAutoRetryStart(event, sessionPath);
+            return;
           default:
             return;
         }
       },
     );
+  }
+
+  private forwardAgentEnd(
+    event: { messages?: unknown[]; willRetry?: boolean },
+    sessionPath: string | null | undefined,
+  ): boolean {
+    if (event.willRetry) {
+      this.discardPendingLlmError(sessionPath);
+      return false;
+    }
+    this.flushPendingLlmError(sessionPath);
+    this.sendEvent(toRpcAgentEndEvent(event, sessionPath));
+    return true;
+  }
+
+  private forwardAutoRetryStart(
+    event: { attempt: number; maxAttempts: number; delayMs: number },
+    sessionPath: string | null | undefined,
+  ): void {
+    this.sendEvent(toRpcAutoRetryStartEvent(event, sessionPath));
   }
 
   private sendEvent(payload: RpcBridgeEvent): void {
@@ -5240,6 +5314,16 @@ export class BridgeRpcAdapter {
         sessionPath,
       );
       if (deltaPayload) {
+        if (
+          deltaPayload.type === "transcript_upsert" &&
+          this.isLlmErrorMessage(deltaPayload.message)
+        ) {
+          this.pendingLlmErrors.set(
+            this.llmErrorSessionKey(sessionPath),
+            deltaPayload,
+          );
+          return;
+        }
         this.sendEvent(deltaPayload);
         return;
       }
@@ -5269,6 +5353,23 @@ export class BridgeRpcAdapter {
     }
 
     payload.treeEntries = treeEntries;
+    if (
+      eventType === "message_start" &&
+      this.isLlmErrorMessage(payload.message)
+    ) {
+      return;
+    }
+    if (
+      eventType === "message_end" &&
+      this.isLlmErrorMessage(payload.message)
+    ) {
+      this.pendingLlmErrors.set(
+        this.llmErrorSessionKey(sessionPath),
+        payload as RpcTranscriptUpsertEvent,
+      );
+      this.sessionStatsPusher.queue(sessionPath);
+      return;
+    }
     this.sendEvent(payload);
     if (
       eventType === "message_end" &&
@@ -5289,6 +5390,26 @@ export class BridgeRpcAdapter {
     if (eventType !== "message_start") {
       this.sessionStatsPusher.queue(sessionPath);
     }
+  }
+
+  private isLlmErrorMessage(message: RpcTranscriptMessage): boolean {
+    return message.role === "assistant" && message.stopReason === "error";
+  }
+
+  private llmErrorSessionKey(sessionPath: string | null | undefined): string {
+    return sessionPath ?? "__live__";
+  }
+
+  private discardPendingLlmError(sessionPath: string | null | undefined): void {
+    this.pendingLlmErrors.delete(this.llmErrorSessionKey(sessionPath));
+  }
+
+  private flushPendingLlmError(sessionPath: string | null | undefined): void {
+    const key = this.llmErrorSessionKey(sessionPath);
+    const pending = this.pendingLlmErrors.get(key);
+    if (!pending) return;
+    this.pendingLlmErrors.delete(key);
+    this.sendEvent(pending);
   }
 
   /* ------------------------------------------------------------------------
@@ -5333,6 +5454,7 @@ export class BridgeRpcAdapter {
       case "agent_start":
         return;
       case "agent_end":
+        if (event.willRetry) return;
         if (detachedSession) {
           // AgentSession persists message_end entries before agent_end fires, so
           // this snapshot includes the real session entry IDs for the finished turn.
@@ -7291,6 +7413,7 @@ export class BridgeRpcAdapter {
       clearTimeout(this.pendingTranscriptDeltaBatch.timeoutId);
       this.pendingTranscriptDeltaBatch = null;
     }
+    this.pendingLlmErrors.clear();
     for (const timer of this.pendingDetachedPromptTimers) {
       clearTimeout(timer);
     }

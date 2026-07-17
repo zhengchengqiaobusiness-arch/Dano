@@ -3866,6 +3866,201 @@ describe("BridgeRpcAdapter", () => {
       });
     });
 
+    it("sanitizes model failures in transcript and terminal events", async () => {
+      (ws.send as ReturnType<typeof vi.fn>).mockClear();
+
+      const handler = (context.events.subscribe as ReturnType<typeof vi.fn>)
+        .mock.calls[0]?.[0] as
+        | ((event: Record<string, unknown>) => void)
+        | undefined;
+      const failedMessage = {
+        id: "assistant-timeout",
+        role: "assistant",
+        content: [],
+        api: "openai-completions",
+        provider: "private-provider",
+        model: "private-model",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0,
+          },
+        },
+        stopReason: "error",
+        errorMessage: "Request timed out with Authorization: Bearer secret",
+        timestamp: 123,
+      };
+
+      handler?.({ type: "message_end", message: failedMessage });
+      handler?.({ type: "agent_end", messages: [failedMessage] });
+      await new Promise(r => setTimeout(r, 10));
+
+      const payloads = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string).payload,
+      );
+      expect(
+        payloads.find(payload => payload.type === "transcript_upsert")?.message
+          .errorMessage,
+      ).toBe("DANO_LLM_TIMEOUT");
+      expect(
+        payloads.find(payload => payload.type === "agent_end")?.messages[0]
+          .errorMessage,
+      ).toBe("DANO_LLM_TIMEOUT");
+      expect(JSON.stringify(payloads)).not.toContain("Bearer secret");
+    });
+
+    it("keeps retry attempts non-terminal and publishes only the final error", async () => {
+      (ws.send as ReturnType<typeof vi.fn>).mockClear();
+
+      const handler = (context.events.subscribe as ReturnType<typeof vi.fn>)
+        .mock.calls[0]?.[0] as
+        | ((event: Record<string, unknown>) => void)
+        | undefined;
+      const failedMessage = (id: string) => ({
+        id,
+        role: "assistant",
+        content: [],
+        api: "openai-completions",
+        provider: "test-provider",
+        model: "test-model",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0,
+          },
+        },
+        stopReason: "error",
+        errorMessage: "Request timed out.",
+        timestamp: 123,
+      });
+
+      const firstAttempt = failedMessage("assistant-timeout-1");
+      handler?.({ type: "message_start", message: firstAttempt });
+      handler?.({ type: "message_end", message: firstAttempt });
+      handler?.({
+        type: "agent_end",
+        messages: [firstAttempt],
+        willRetry: true,
+      });
+      expect(ws.send).not.toHaveBeenCalled();
+      handler?.({
+        type: "auto_retry_start",
+        attempt: 1,
+        maxAttempts: 10,
+        delayMs: 2000,
+        errorMessage: "Request timed out with Bearer secret",
+      });
+
+      const finalAttempt = failedMessage("assistant-timeout-2");
+      handler?.({ type: "message_start", message: finalAttempt });
+      handler?.({ type: "message_end", message: finalAttempt });
+      handler?.({
+        type: "agent_end",
+        messages: [finalAttempt],
+        willRetry: false,
+      });
+      await new Promise(r => setTimeout(r, 10));
+
+      const payloads = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string).payload,
+      );
+      expect(
+        payloads.filter(payload => payload.type === "auto_retry_start"),
+      ).toEqual([
+        {
+          type: "auto_retry_start",
+          sessionPath: "/path/to/session.json",
+          attempt: 1,
+          maxAttempts: 10,
+          delayMs: 2000,
+        },
+      ]);
+      expect(JSON.stringify(payloads)).not.toContain("Bearer secret");
+      expect(
+        payloads.filter(payload => payload.type === "transcript_upsert"),
+      ).toHaveLength(1);
+      expect(
+        payloads.filter(payload => payload.type === "agent_end"),
+      ).toHaveLength(1);
+      expect(
+        payloads.find(payload => payload.type === "transcript_upsert")?.message,
+      ).toMatchObject({
+        id: "assistant-timeout-2",
+        errorMessage: "DANO_LLM_TIMEOUT",
+      });
+    });
+
+    it("preserves partial assistant output when a stream ends with an error", async () => {
+      (ws.send as ReturnType<typeof vi.fn>).mockClear();
+
+      const handler = (context.events.subscribe as ReturnType<typeof vi.fn>)
+        .mock.calls[0]?.[0] as
+        | ((event: Record<string, unknown>) => void)
+        | undefined;
+      const failedMessage = {
+        id: "assistant-partial-error",
+        role: "assistant",
+        content: [{ type: "text", text: "已经生成的内容" }],
+        api: "openai-completions",
+        provider: "test-provider",
+        model: "test-model",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0,
+          },
+        },
+        stopReason: "error",
+        errorMessage: "Request timed out.",
+        timestamp: 123,
+      };
+
+      handler?.({ type: "message_start", message: failedMessage });
+      handler?.({ type: "message_end", message: failedMessage });
+      handler?.({
+        type: "agent_end",
+        messages: [failedMessage],
+        willRetry: false,
+      });
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const payloads = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        call => JSON.parse(call[0] as string).payload,
+      );
+      expect(
+        payloads.find(payload => payload.type === "transcript_upsert")?.message,
+      ).toMatchObject({
+        id: "assistant-partial-error",
+        content: [{ type: "text", text: "已经生成的内容" }],
+        stopReason: "error",
+        errorMessage: "DANO_LLM_INCOMPLETE",
+      });
+    });
+
     it("shapes model_select events explicitly", async () => {
       (ws.send as ReturnType<typeof vi.fn>).mockClear();
 

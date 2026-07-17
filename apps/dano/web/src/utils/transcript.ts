@@ -13,6 +13,16 @@ import type {
   RpcTranscriptSystemBlock,
   RpcTranscriptToolResultBlock,
 } from "@dano/types/protocol";
+import {
+  DANO_LLM_AUTHENTICATION_ERROR,
+  DANO_LLM_INCOMPLETE_ERROR,
+  DANO_LLM_NETWORK_ERROR,
+  DANO_LLM_QUOTA_ERROR,
+  DANO_LLM_RATE_LIMIT_ERROR,
+  DANO_LLM_SERVICE_ERROR,
+  DANO_LLM_TIMEOUT_ERROR,
+  DANO_LLM_UNKNOWN_ERROR,
+} from "@dano/types/protocol";
 import { t } from "../i18n";
 
 export type JsonObject = RpcJsonObject;
@@ -174,7 +184,26 @@ export function isErrorMessage(msg: TranscriptEntryLike): boolean {
 }
 
 export function errorMessageText(msg: TranscriptEntryLike): string {
-  return msg.errorMessage ?? "";
+  switch (msg.errorMessage) {
+    case DANO_LLM_TIMEOUT_ERROR:
+      return t("chatTranscript.llmError.timeout");
+    case DANO_LLM_AUTHENTICATION_ERROR:
+      return t("chatTranscript.llmError.authentication");
+    case DANO_LLM_RATE_LIMIT_ERROR:
+      return t("chatTranscript.llmError.rateLimit");
+    case DANO_LLM_QUOTA_ERROR:
+      return t("chatTranscript.llmError.quota");
+    case DANO_LLM_SERVICE_ERROR:
+      return t("chatTranscript.llmError.service");
+    case DANO_LLM_NETWORK_ERROR:
+      return t("chatTranscript.llmError.network");
+    case DANO_LLM_INCOMPLETE_ERROR:
+      return t("chatTranscript.llmError.incomplete");
+    case DANO_LLM_UNKNOWN_ERROR:
+      return t("chatTranscript.llmError.unknown");
+    default:
+      return msg.errorMessage ?? "";
+  }
 }
 
 export function isAbortedMessage(msg: TranscriptEntryLike): boolean {

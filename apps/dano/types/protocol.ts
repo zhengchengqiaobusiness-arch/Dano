@@ -403,6 +403,14 @@ export interface RpcAgentEndEvent {
   messages?: RpcAgentMessage[];
 }
 
+export interface RpcAutoRetryStartEvent {
+  type: "auto_retry_start";
+  sessionPath?: string;
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+}
+
 export interface RpcModelSelectEvent {
   type: "model_select";
   model: RpcModel;
@@ -750,6 +758,15 @@ export type RpcTranscriptContent =
   | string
   | Array<string | RpcTranscriptContentBlock>;
 
+export const DANO_LLM_TIMEOUT_ERROR = "DANO_LLM_TIMEOUT";
+export const DANO_LLM_AUTHENTICATION_ERROR = "DANO_LLM_AUTHENTICATION";
+export const DANO_LLM_RATE_LIMIT_ERROR = "DANO_LLM_RATE_LIMIT";
+export const DANO_LLM_QUOTA_ERROR = "DANO_LLM_QUOTA";
+export const DANO_LLM_SERVICE_ERROR = "DANO_LLM_SERVICE";
+export const DANO_LLM_NETWORK_ERROR = "DANO_LLM_NETWORK";
+export const DANO_LLM_INCOMPLETE_ERROR = "DANO_LLM_INCOMPLETE";
+export const DANO_LLM_UNKNOWN_ERROR = "DANO_LLM_UNKNOWN";
+
 export interface RpcTranscriptMessage {
   transcriptKey?: string;
   id?: string;
@@ -1071,6 +1088,7 @@ export type RpcBridgeEvent =
   | RpcQueueUpdateEvent
   | RpcAgentStartEvent
   | RpcAgentEndEvent
+  | RpcAutoRetryStartEvent
   | RpcModelSelectEvent
   | RpcCompactionStartEvent
   | RpcCompactionEndEvent

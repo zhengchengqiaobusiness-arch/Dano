@@ -7,6 +7,7 @@ import type {
   RpcCommand,
   RpcAgentEndEvent,
   RpcAgentStartEvent,
+  RpcAutoRetryStartEvent,
   RpcImageContent,
   RpcUploadedFileRef,
   RpcResponse,
@@ -2542,6 +2543,21 @@ function handleEvent(payload: RpcBridgeEvent) {
         _isStreaming = false;
         clearPromptPending();
         sendCommand({ type: "get_state" }).catch(() => {});
+      }
+      break;
+    }
+    case "auto_retry_start": {
+      const data = payload as RpcAutoRetryStartEvent;
+      const sp = data.sessionPath ?? _liveSessionPath ?? null;
+      if (!sp || sp === getDisplayedSessionPath()) {
+        pushNotification(
+          t("store.status.autoRetry", {
+            attempt: data.attempt,
+            maxAttempts: data.maxAttempts,
+            delaySeconds: Math.max(0, Math.ceil(data.delayMs / 1000)),
+          }),
+          "warn",
+        );
       }
       break;
     }
