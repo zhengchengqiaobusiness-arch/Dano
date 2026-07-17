@@ -670,6 +670,8 @@
 
     {#if !request.batch && request.kind === "confirm" && result?.status === "cancelled"}
       <div class="question-result muted">{t("questionTool.cancelled")}</div>
+    {:else if !request.batch && request.kind === "confirm" && interrupted}
+      <div class="question-result muted">{t("questionTool.interrupted")}</div>
     {:else if !request.batch && request.kind === "confirm"}
       <section class="desktop-question-result" aria-label={request.title}>
         <header class="submitted-header">
@@ -961,7 +963,7 @@
             <button type="submit" class="question-button" disabled={submitting || !canSubmit()}>
               {t("questionTool.saveAndReturn")}
             </button>
-          {:else if result?.status === "answered"}
+          {:else if result?.status === "answered" && (active || linkedConfirmed || linkedCancelled)}
             {#if linkedCancelled}
               <button type="button" class="question-button" disabled>
                 {t("questionTool.cancelled")}
