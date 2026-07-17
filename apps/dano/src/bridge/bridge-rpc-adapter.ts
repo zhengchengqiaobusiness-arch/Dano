@@ -3852,6 +3852,10 @@ class SessionRuntime {
     transcriptLimit?: number,
   ): Promise<SessionSummary> {
     const handle = this.registry.openSession(sessionPath);
+    const liveSessionPath = this.context.state.sessionManager.getSessionFile();
+    if (sessionPath !== liveSessionPath) {
+      interruptOpenFormInteractions(handle.getSessionManager());
+    }
     await this.selectSessionPath(sessionPath);
     return this.buildSessionSummary(
       handle.getSessionManager(),
@@ -5411,9 +5415,17 @@ export class BridgeRpcAdapter {
   private projectCurrentFormInteractions(
     messages: readonly RpcTranscriptMessage[],
   ): RpcTranscriptMessage[] {
-    const interactions = readFormInteractions(
-      this.sessionRuntime.currentSessionManager().getBranch(),
+    return this.projectFormInteractions(
+      messages,
+      this.sessionRuntime.currentSessionManager(),
     );
+  }
+
+  private projectFormInteractions(
+    messages: readonly RpcTranscriptMessage[],
+    sessionManager: SessionManager,
+  ): RpcTranscriptMessage[] {
+    const interactions = readFormInteractions(sessionManager.getBranch());
     return messages.map(message =>
       projectFormInteractionsInMessage(message, interactions),
     );
@@ -5808,13 +5820,26 @@ export class BridgeRpcAdapter {
     sessionPath: string,
     targetEntryId: string,
   ): RpcResponse {
-    const transcript = buildTranscriptPage(
-      buildExactSelectionTranscriptMessages(
-        sessionManager.getBranch(),
-        targetEntryId,
-      ),
-      sessionPath,
+    const recoveryMessages = flattenMessagesForTranscript(
+      sessionManager.getBranch(),
     );
+    const projectedTranscript = this.transcriptProjector.projectPage(
+      buildTranscriptPage(
+        buildExactSelectionTranscriptMessages(
+          sessionManager.getBranch(),
+          targetEntryId,
+        ),
+        sessionPath,
+      ),
+      recoveryMessages,
+    );
+    const transcript = {
+      ...projectedTranscript,
+      messages: this.projectFormInteractions(
+        projectedTranscript.messages,
+        sessionManager,
+      ),
+    };
     this.transcriptProjector.syncPage(transcript);
 
     return {
@@ -7152,6 +7177,7 @@ export class BridgeRpcAdapter {
         }
 
         session.sessionManager.branch(command.entryId);
+        interruptOpenFormInteractions(session.sessionManager);
         const sessionPath =
           session.sessionFile ??
           session.sessionManager.getSessionFile() ??
@@ -7205,6 +7231,7 @@ export class BridgeRpcAdapter {
           replaceInstructions: command.replaceInstructions,
           label: command.label,
         });
+        interruptOpenFormInteractions(session.sessionManager);
 
         this.sendTranscriptSnapshot(
           buildTranscriptPage(
