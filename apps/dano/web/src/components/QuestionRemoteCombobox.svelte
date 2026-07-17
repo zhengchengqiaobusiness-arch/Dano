@@ -7,15 +7,15 @@
   import LoaderCircle from "lucide-svelte/icons/loader-circle";
   import RotateCw from "lucide-svelte/icons/rotate-cw";
   import Search from "lucide-svelte/icons/search";
-  import {
-    remoteQuestionSelectStatus,
-    selectedRemoteQuestionOption,
-    type RemoteQuestionSelectOption,
-  } from "../utils/remoteQuestionSelect";
   import "./questionToolControls.css";
 
   const SEARCH_DELAY_MS = 300;
   const POPOVER_GAP_PX = 6;
+
+  type RemoteQuestionSelectOption = {
+    key: string;
+    label: string;
+  };
 
   let {
     id,
@@ -63,12 +63,16 @@
   let search = $state("");
   let inputElement = $state<HTMLInputElement | null>(null);
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
-  const selected = $derived(selectedRemoteQuestionOption(value, options));
-  const status = $derived(remoteQuestionSelectStatus({
-    loading,
-    error,
-    optionCount: options.length,
-  }));
+  const selected = $derived(options.find(option => option.key === value));
+  const status = $derived(
+    loading && options.length === 0
+      ? "loading"
+      : error
+        ? "error"
+        : options.length === 0
+          ? "empty"
+          : "ready",
+  );
 
   onDestroy(() => {
     if (searchTimer) clearTimeout(searchTimer);
@@ -168,7 +172,7 @@
               <Command.Item
                 class="question-combobox-item"
                 value={option.key}
-                aria-selected={option.key === value}
+                data-committed-selected={option.key === value ? "" : undefined}
                 onSelect={() => selectValue(option.key)}
               >
                 <Check class={option.key === value ? "visible" : ""} size={16} aria-hidden="true" />
@@ -310,6 +314,7 @@
   }
 
   :global(.question-combobox-item[data-selected]),
+  :global(.question-combobox-item[data-committed-selected]),
   :global(.question-combobox-item:hover) {
     background: color-mix(in srgb, var(--accent) 11%, var(--panel));
     color: var(--accent);
