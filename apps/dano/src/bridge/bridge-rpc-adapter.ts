@@ -3795,26 +3795,14 @@ class SessionRuntime {
   }
 
   clearSelection(): void {
-    if (this.unsubscribeSelectedSession) {
-      this.unsubscribeSelectedSession();
-      this.unsubscribeSelectedSession = undefined;
-    }
-
-    const selectedSessionPath = this.selectedSessionPath;
-    this.selectedSessionPath = null;
+    const selectedSessionPath = this.detachSelectedSession();
     if (selectedSessionPath) {
       void this.registry.releaseViewer(selectedSessionPath, this.clientId);
     }
   }
 
   dispose(): void {
-    if (this.unsubscribeSelectedSession) {
-      this.unsubscribeSelectedSession();
-      this.unsubscribeSelectedSession = undefined;
-    }
-
-    const selectedSessionPath = this.selectedSessionPath;
-    this.selectedSessionPath = null;
+    const selectedSessionPath = this.detachSelectedSession();
     if (selectedSessionPath) {
       void this.registry
         .destroyViewer(selectedSessionPath, this.clientId)
@@ -3825,6 +3813,17 @@ class SessionRuntime {
           );
         });
     }
+  }
+
+  private detachSelectedSession(): string | null {
+    if (this.unsubscribeSelectedSession) {
+      this.unsubscribeSelectedSession();
+      this.unsubscribeSelectedSession = undefined;
+    }
+
+    const selectedSessionPath = this.selectedSessionPath;
+    this.selectedSessionPath = null;
+    return selectedSessionPath;
   }
 
   private buildSessionSummary(
@@ -4962,6 +4961,9 @@ export class BridgeRpcAdapter {
   private readonly slashCommandsAndMentionsEnabled: boolean;
   private pendingTranscriptDeltaBatch: PendingTranscriptDeltaBatch | null =
     null;
+  private readonly pendingDetachedPromptTimers = new Set<
+    ReturnType<typeof setTimeout>
+  >();
 
   // Detached-session registry subscription.
   private unsubscribeRegistryEvents: (() => void) | undefined;
@@ -5726,7 +5728,10 @@ export class BridgeRpcAdapter {
           ),
         });
 
-        setTimeout(() => {
+        const promptTimer = setTimeout(() => {
+          this.pendingDetachedPromptTimers.delete(promptTimer);
+          if (this.disposed) return;
+
           void session
             .prompt(injectedMessage, promptOptions)
             .catch(error => {
@@ -5754,6 +5759,7 @@ export class BridgeRpcAdapter {
               if (sessionPath) this.sessionStatsPusher.queue(sessionPath);
             });
         }, 0);
+        this.pendingDetachedPromptTimers.add(promptTimer);
 
         if (autoCreated) {
           this.transcriptProjector.syncPage(autoCreated.transcript);
@@ -7285,6 +7291,10 @@ export class BridgeRpcAdapter {
       clearTimeout(this.pendingTranscriptDeltaBatch.timeoutId);
       this.pendingTranscriptDeltaBatch = null;
     }
+    for (const timer of this.pendingDetachedPromptTimers) {
+      clearTimeout(timer);
+    }
+    this.pendingDetachedPromptTimers.clear();
 
     this.uiBridge.dispose();
     this.sessionStatsPusher.dispose();

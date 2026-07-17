@@ -24,15 +24,28 @@ function createRegistry() {
 function createRunningSession(registry: DetachedSessionRegistry, root: string) {
   const handle = registry.createSession({ cwd: root, sessionDir: root });
   const calls: string[] = [];
-  const operationController = new AbortController();
+  const providerController = new AbortController();
+  const toolController = new AbortController();
   const retryController = new AbortController();
+  const waitForAbort = (signal: AbortSignal) =>
+    new Promise<never>((_resolve, reject) => {
+      signal.addEventListener(
+        "abort",
+        () => reject(new DOMException("Aborted", "AbortError")),
+        { once: true },
+      );
+    });
+  const requestProvider = vi.fn(() => waitForAbort(providerController.signal));
+  const executeTool = vi.fn(() => waitForAbort(toolController.signal));
+  const waitForRetryDelay = vi.fn(() => waitForAbort(retryController.signal));
   const abortRetry = vi.fn(() => {
     calls.push("abortRetry");
     retryController.abort();
   });
   const abort = vi.fn(async () => {
     calls.push("abort");
-    operationController.abort();
+    providerController.abort();
+    toolController.abort();
   });
   const session = {
     sessionFile: handle.sessionPath,
@@ -43,6 +56,7 @@ function createRunningSession(registry: DetachedSessionRegistry, root: string) {
     bindExtensions: vi.fn().mockResolvedValue(undefined),
     subscribe: vi.fn().mockReturnValue(() => {}),
     dispose: vi.fn(),
+    prompt: requestProvider,
     sessionManager: handle.getSessionManager(),
   };
   createAgentSessionMock.mockResolvedValueOnce({ session });
@@ -51,8 +65,9 @@ function createRunningSession(registry: DetachedSessionRegistry, root: string) {
     abort,
     abortRetry,
     calls,
-    operationSignal: operationController.signal,
-    retrySignal: retryController.signal,
+    requestProvider,
+    executeTool,
+    waitForRetryDelay,
   };
 }
 
@@ -67,29 +82,57 @@ afterEach(() => {
 });
 
 describe("DetachedSessionRegistry terminal viewer teardown", () => {
-  it.each([
-    { state: "provider request", signal: "operationSignal" as const },
-    { state: "tool execution", signal: "operationSignal" as const },
-    { state: "retry delay", signal: "retrySignal" as const },
-  ])(
-    "cancels an orphaned $state when its final viewer is destroyed",
-    async ({ signal }) => {
-      const { registry, root } = createRegistry();
-      const running = createRunningSession(registry, root);
+  async function bindRunningSession(
+    registry: DetachedSessionRegistry,
+    running: ReturnType<typeof createRunningSession>,
+  ) {
+    await registry.bindViewer(running.handle.sessionPath, {
+      clientId: "client-a",
+      uiContext: {} as never,
+    });
+    await registry.ensureSession(running.handle.sessionPath);
+  }
 
-      await registry.bindViewer(running.handle.sessionPath, {
-        clientId: "client-a",
-        uiContext: {} as never,
-      });
-      await registry.ensureSession(running.handle.sessionPath);
-      await registry.destroyViewer(running.handle.sessionPath, "client-a");
+  it("aborts an in-flight provider request when its final viewer is destroyed", async () => {
+    const { registry, root } = createRegistry();
+    const running = createRunningSession(registry, root);
+    await bindRunningSession(registry, running);
+    const requestResult = running.requestProvider().catch(error => error);
 
-      expect(running[signal].aborted).toBe(true);
-      expect(running.abortRetry).toHaveBeenCalledTimes(1);
-      expect(running.abort).toHaveBeenCalledTimes(1);
-      expect(running.calls).toEqual(["abortRetry", "abort"]);
-    },
-  );
+    await registry.destroyViewer(running.handle.sessionPath, "client-a");
+
+    await expect(requestResult).resolves.toMatchObject({ name: "AbortError" });
+    expect(running.requestProvider).toHaveBeenCalledTimes(1);
+    expect(running.executeTool).not.toHaveBeenCalled();
+    expect(running.calls).toEqual(["abortRetry", "abort"]);
+  });
+
+  it("aborts an executing tool when its final viewer is destroyed", async () => {
+    const { registry, root } = createRegistry();
+    const running = createRunningSession(registry, root);
+    await bindRunningSession(registry, running);
+    const toolResult = running.executeTool().catch(error => error);
+
+    await registry.destroyViewer(running.handle.sessionPath, "client-a");
+
+    await expect(toolResult).resolves.toMatchObject({ name: "AbortError" });
+    expect(running.executeTool).toHaveBeenCalledTimes(1);
+    expect(running.requestProvider).not.toHaveBeenCalled();
+    expect(running.calls).toEqual(["abortRetry", "abort"]);
+  });
+
+  it("cancels an active retry delay when its final viewer is destroyed", async () => {
+    const { registry, root } = createRegistry();
+    const running = createRunningSession(registry, root);
+    await bindRunningSession(registry, running);
+    const retryResult = running.waitForRetryDelay().catch(error => error);
+
+    await registry.destroyViewer(running.handle.sessionPath, "client-a");
+
+    await expect(retryResult).resolves.toMatchObject({ name: "AbortError" });
+    expect(running.waitForRetryDelay).toHaveBeenCalledTimes(1);
+    expect(running.calls).toEqual(["abortRetry", "abort"]);
+  });
 
   it("keeps a running session alive while another viewer still owns it", async () => {
     const { registry, root } = createRegistry();

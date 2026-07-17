@@ -5664,6 +5664,84 @@ describe("BridgeRpcAdapter", () => {
   });
 
   describe("disposal", () => {
+    it("does not start a queued detached prompt after disposal", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-dispose-"));
+      const sessionFile = path.join(tmpDir, "session.jsonl");
+      fs.writeFileSync(
+        sessionFile,
+        JSON.stringify({
+          type: "session",
+          version: 3,
+          id: "queued-prompt-session",
+          timestamp: new Date().toISOString(),
+          cwd: tmpDir,
+        }),
+      );
+      (
+        context.state.sessionManager.getSessionFile as ReturnType<typeof vi.fn>
+      ).mockReturnValue(sessionFile);
+
+      const prompt = vi.fn().mockResolvedValue(undefined);
+      createAgentSessionMock.mockResolvedValueOnce({
+        session: {
+          sessionFile,
+          sessionId: "queued-prompt-session",
+          isStreaming: false,
+          abortRetry: vi.fn(),
+          abort: vi.fn().mockResolvedValue(undefined),
+          bindExtensions: vi.fn().mockResolvedValue(undefined),
+          subscribe: vi.fn().mockReturnValue(() => {}),
+          prompt,
+          sessionManager: {
+            getSessionFile: vi.fn().mockReturnValue(sessionFile),
+            getSessionId: vi.fn().mockReturnValue("queued-prompt-session"),
+            getEntries: vi.fn().mockReturnValue([]),
+            getBranch: vi.fn().mockReturnValue([]),
+            getCwd: vi.fn().mockReturnValue(tmpDir),
+            getLeafId: vi.fn().mockReturnValue(null),
+            getTree: vi.fn().mockReturnValue([]),
+          },
+        },
+      });
+
+      let queuedPrompt: (() => void) | undefined;
+      const realSetTimeout = globalThis.setTimeout;
+      const setTimeoutSpy = vi
+        .spyOn(globalThis, "setTimeout")
+        .mockImplementation((callback, delay, ...args) => {
+          if (delay === 0 && !queuedPrompt) {
+            queuedPrompt = () => callback(...args);
+            return {} as ReturnType<typeof setTimeout>;
+          }
+          return realSetTimeout(callback, delay, ...args);
+        });
+
+      try {
+        ws.trigger(
+          "message",
+          Buffer.from(
+            JSON.stringify({
+              type: "command",
+              payload: {
+                id: "queued-prompt",
+                type: "prompt",
+                message: "Do not start after teardown",
+              },
+            }),
+          ),
+        );
+        await vi.waitFor(() => expect(queuedPrompt).toBeDefined());
+
+        adapter.dispose();
+        queuedPrompt?.();
+
+        expect(prompt).not.toHaveBeenCalled();
+      } finally {
+        setTimeoutSpy.mockRestore();
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("aborts retry and the active detached operation exactly once", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-dispose-"));
       const sessionFile = path.join(tmpDir, "session.jsonl");
