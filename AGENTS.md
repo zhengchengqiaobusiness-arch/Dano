@@ -28,6 +28,27 @@ This project is the Dano P0 browser-only LLM chat app.
 - Built backend: `pnpm run start`
 - Do not set the current project checkout as the Dano runtime directory. Use a separate runtime/workspace path so generated `.dano`, `.pi`, `uploads`, session, and upload files do not land in the repo checkout.
 
+### Local development lifecycle
+
+For browser validation, start the backend and frontend in separate terminals with
+these exact commands:
+
+```sh
+DANO_RUNTIME_DIR="$(mktemp -d /private/tmp/dano-runtime.XXXXXX)" pnpm run dev:server
+```
+
+```sh
+pnpm run dev:web
+```
+
+- Open `http://localhost:5173` in the Codex in-app Browser. The Vite dev server
+  proxies `/api` to the backend on `http://localhost:8080`.
+- Do not append `--host` or replace `localhost` with `127.0.0.1` unless the
+  standard command has failed and the actual listening address has been checked.
+- Stop both dev processes when validation is complete. Remove only the temporary
+  runtime directory created for that validation run after confirming the backend
+  has stopped.
+
 If the shell cannot find `pnpm` or `node`, use the Codex bundled Node runtime by prepending:
 
 ```sh
