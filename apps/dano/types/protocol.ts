@@ -167,6 +167,7 @@ export type AskUserQuestionResult =
   | {
       status: "answered";
       answer: AskUserQuestionAnswer | Record<string, AskUserQuestionAnswer>;
+      formId?: string;
     }
   | {
       status: "confirmed";

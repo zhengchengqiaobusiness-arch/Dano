@@ -473,7 +473,7 @@ export class AskUserQuestionCoordinator {
           throw new Error("Grouped question answer must be an object");
         }
         const normalized = normalizeGroupedAnswer(pending.questions, answer);
-        result = { status: "answered", answer: normalized };
+        result = { status: "answered", answer: normalized, formId: toolCallId };
         if (pending.signal && pending.cardRequest.batch) {
           this.submittedFormBySignal.set(pending.signal, {
             toolCallId,
@@ -1275,7 +1275,7 @@ For a single question, use top-level question/options/inputType/dateFormat/requi
           type: "text",
           text:
             result.status === "answered"
-              ? `User answered the question: ${JSON.stringify(result.answer)}. Continue with this answer.`
+              ? `User answered the question: ${JSON.stringify(result.answer)}.${result.formId ? ` Form ID: ${JSON.stringify(result.formId)}.` : ""} Continue with this answer.`
               : result.status === "confirmed"
                 ? `User confirmed the final form answer: ${JSON.stringify(result.answer)}. Continue with this authoritative answer.`
               : "User cancelled the question. Stop the current workflow. Do not ask another question or retry unless the user sends a new message explicitly requesting it.",

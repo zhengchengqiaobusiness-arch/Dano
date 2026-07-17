@@ -913,6 +913,7 @@ describe("ask_user_question tool", () => {
     });
     await expect(form).resolves.toEqual({
       status: "answered",
+      formId: "form-1",
       answer: { reason: "签署采购合同" },
     });
 
@@ -1002,8 +1003,15 @@ describe("ask_user_question tool", () => {
       },
     });
     await expect(execution).resolves.toMatchObject({
+      content: [
+        {
+          type: "text",
+          text: expect.stringContaining('Form ID: "group-1"'),
+        },
+      ],
       details: {
         status: "answered",
+        formId: "group-1",
         answer: {
           name: "Dano",
           env: "Production",
@@ -1146,6 +1154,7 @@ describe("ask_user_question tool", () => {
     });
     await expect(execution).resolves.toEqual({
       status: "answered",
+      formId: "compat-json-array",
       answer: { seal_id: "合同章", reason: "签署采购合同" },
     });
   });

@@ -1807,6 +1807,73 @@ describe("BridgeRpcAdapter", () => {
       });
     });
 
+    it("preserves Submitted Form identity when projecting session history", async () => {
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "submitted-form",
+              name: "ask_user_question",
+              arguments: {
+                title: "请假申请",
+                questions: [
+                  { id: "reason", question: "请假原因？", default: "个人事务" },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "submitted-form",
+          toolName: "ask_user_question",
+          content: [{ type: "text", text: "answered" }],
+          details: {
+            status: "answered",
+            formId: "submitted-form",
+            answer: { reason: "家庭事务" },
+          },
+          isError: false,
+        },
+      ];
+      (
+        context.state.sessionManager.getBranch as ReturnType<typeof vi.fn>
+      ).mockReturnValue(messages);
+      (
+        context.state.sessionManager.getEntries as ReturnType<typeof vi.fn>
+      ).mockReturnValue(messages);
+
+      ws.trigger(
+        "message",
+        Buffer.from(
+          JSON.stringify({
+            type: "command",
+            payload: { id: "submitted-form-history", type: "get_messages" },
+          }),
+        ),
+      );
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const response = (ws.send as ReturnType<typeof vi.fn>).mock.calls
+        .map(([message]) => JSON.parse(message as string))
+        .find(message => message.payload?.id === "submitted-form-history");
+
+      expect(response.payload.data.messages[0].content[0]).toMatchObject({
+        id: "submitted-form",
+        questionState: "answered",
+      });
+      expect(response.payload.data.messages[1]).toMatchObject({
+        toolCallId: "submitted-form",
+        details: {
+          status: "answered",
+          formId: "submitted-form",
+          answer: { reason: "家庭事务" },
+        },
+      });
+    });
+
     it("does not project question lifecycle states onto other tools", async () => {
       const messages = [
         {
