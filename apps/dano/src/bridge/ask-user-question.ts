@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { parseAskUserQuestionDateValue, validateAskUserQuestionDateFormat } from "../../types/ask-user-question-date.js";
@@ -508,7 +509,7 @@ export class AskUserQuestionCoordinator {
       const form = pending.confirmation.find(candidate => candidate.toolCallId === formId);
       if (!form) return false;
       const normalized = normalizeGroupedAnswer(form.questions, answer);
-      if (JSON.stringify(normalized) !== JSON.stringify(form.answer)) return false;
+      if (!isDeepStrictEqual(normalized, form.answer)) return false;
     }
     return true;
   }
