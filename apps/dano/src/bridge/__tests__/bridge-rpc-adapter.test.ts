@@ -3959,6 +3959,13 @@ describe("BridgeRpcAdapter", () => {
         willRetry: true,
       });
       expect(ws.send).not.toHaveBeenCalled();
+      handler?.({
+        type: "auto_retry_start",
+        attempt: 1,
+        maxAttempts: 10,
+        delayMs: 2000,
+        errorMessage: "Request timed out with Bearer secret",
+      });
 
       const finalAttempt = failedMessage("assistant-timeout-2");
       handler?.({ type: "message_start", message: finalAttempt });
@@ -3973,6 +3980,18 @@ describe("BridgeRpcAdapter", () => {
       const payloads = (ws.send as ReturnType<typeof vi.fn>).mock.calls.map(
         call => JSON.parse(call[0] as string).payload,
       );
+      expect(
+        payloads.filter(payload => payload.type === "auto_retry_start"),
+      ).toEqual([
+        {
+          type: "auto_retry_start",
+          sessionPath: "/path/to/session.json",
+          attempt: 1,
+          maxAttempts: 10,
+          delayMs: 2000,
+        },
+      ]);
+      expect(JSON.stringify(payloads)).not.toContain("Bearer secret");
       expect(
         payloads.filter(payload => payload.type === "transcript_upsert"),
       ).toHaveLength(1);

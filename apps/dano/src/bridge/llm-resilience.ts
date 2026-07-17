@@ -5,6 +5,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 export const DEFAULT_DANO_LLM_TIMEOUT_MS = 300_000;
+export const DANO_LLM_MAX_RETRIES = 10;
 
 const READ_ONLY_TOOLS = new Set(["read", "get_dano_version"]);
 
@@ -46,7 +47,7 @@ export function configureDanoLlmResilience(
   settingsManager.applyOverrides({
     retry: {
       enabled: true,
-      maxRetries: 1,
+      maxRetries: DANO_LLM_MAX_RETRIES,
       provider: {
         timeoutMs,
         maxRetries: 0,

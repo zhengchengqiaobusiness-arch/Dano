@@ -403,6 +403,14 @@ export interface RpcAgentEndEvent {
   messages?: RpcAgentMessage[];
 }
 
+export interface RpcAutoRetryStartEvent {
+  type: "auto_retry_start";
+  sessionPath?: string;
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+}
+
 export interface RpcModelSelectEvent {
   type: "model_select";
   model: RpcModel;
@@ -1080,6 +1088,7 @@ export type RpcBridgeEvent =
   | RpcQueueUpdateEvent
   | RpcAgentStartEvent
   | RpcAgentEndEvent
+  | RpcAutoRetryStartEvent
   | RpcModelSelectEvent
   | RpcCompactionStartEvent
   | RpcCompactionEndEvent

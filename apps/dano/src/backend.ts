@@ -158,6 +158,13 @@ function toBridgeLiveEvent(event: AgentSessionEvent): BridgeLiveEvent | null {
         messages: event.messages,
         willRetry: event.willRetry,
       };
+    case "auto_retry_start":
+      return {
+        type: "auto_retry_start",
+        attempt: event.attempt,
+        maxAttempts: event.maxAttempts,
+        delayMs: event.delayMs,
+      };
     case "message_start":
     case "message_update":
     case "message_end":

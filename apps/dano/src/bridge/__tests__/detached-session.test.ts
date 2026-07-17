@@ -170,7 +170,7 @@ describe("detached-session", () => {
     expect(applyOverrides).toHaveBeenCalledWith({
       retry: {
         enabled: true,
-        maxRetries: 1,
+        maxRetries: 10,
         provider: {
           timeoutMs: 1234,
           maxRetries: 0,

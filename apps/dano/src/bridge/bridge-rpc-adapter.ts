@@ -52,6 +52,7 @@ import type {
   RpcAgentEndEvent,
   RpcAgentMessage,
   RpcAgentStartEvent,
+  RpcAutoRetryStartEvent,
   RpcBridgeEvent,
   RpcCommand,
   RpcCompactionEndEvent,
@@ -283,6 +284,19 @@ function toRpcAgentEndEvent(
       const shaped = toRpcAgentMessage(message as PiAgentMessage);
       return shaped ? [shaped] : [];
     }),
+  };
+}
+
+function toRpcAutoRetryStartEvent(
+  event: { attempt: number; maxAttempts: number; delayMs: number },
+  sessionPath?: string | null,
+): RpcAutoRetryStartEvent {
+  return {
+    type: "auto_retry_start",
+    sessionPath: sessionPath ?? undefined,
+    attempt: event.attempt,
+    maxAttempts: event.maxAttempts,
+    delayMs: event.delayMs,
   };
 }
 
@@ -5082,6 +5096,15 @@ export class BridgeRpcAdapter {
           return;
         }
 
+        case "auto_retry_start":
+          this.sendEvent(
+            toRpcAutoRetryStartEvent(
+              event,
+              this.context.state.sessionManager.getSessionFile(),
+            ),
+          );
+          return;
+
         case "session_compact":
           if (!this.sessionRuntime.shouldHandleLiveSessionEvents()) return;
           this.sendTranscriptSnapshot(
@@ -5139,6 +5162,9 @@ export class BridgeRpcAdapter {
             ) {
               this.sessionStatsPusher.queue(sessionPath);
             }
+            return;
+          case "auto_retry_start":
+            this.sendEvent(toRpcAutoRetryStartEvent(event, sessionPath));
             return;
           default:
             return;
