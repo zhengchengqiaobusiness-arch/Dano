@@ -208,7 +208,9 @@
         : undefined;
       const savedAnswer = revisionForm
         ? revisionForm.answer[item.originalId ?? item.id]
-        : interactionFormAnswer?.[item.id] ?? formAnswer?.[item.id];
+        : interactionFormAnswer !== undefined
+          ? interactionFormAnswer[item.id]
+          : formAnswer?.[item.id];
       if (item.kind === "text") {
         textAnswer[item.id] = typeof savedAnswer === "string" ? savedAnswer : item.default ?? "";
       } else if (item.kind === "date") {
