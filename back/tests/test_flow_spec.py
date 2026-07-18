@@ -2027,3 +2027,79 @@ def test_hotel_recording_uses_scoped_control_identity_for_name_type_and_source()
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_timesheet_field_ownership_and_selected_project_projections():
+    option_response = {"data": [{
+        "projectId": "p-1", "projectName": "数据智能平台5.2.1",
+        "remainingHours": 8, "teamId": "team-public", "teamName": "公共团队",
+        "workTypeId": "work-public", "workTypeName": "公共工时",
+        "approverId": "user-yan", "approverName": "誉津津",
+    }]}
+    option_read = {
+        "method": "POST", "url": "https://work.test/rpc/load-context",
+        "json": option_response, "role": "read_option",
+        "trigger_op": "click", "trigger_locator": "[role=combobox][name=projectId]",
+    }
+    submit = _post("https://work.test/rpc/submit-timesheet", {
+        "projectId": "p-1", "applyDate": "2026-06-03",
+        "remainingHours": 8, "reportedHours": 8,
+        "teamId": "team-public", "workTypeId": "work-public", "approverId": "user-yan",
+    })
+    evidence = [
+        {"label": "项目名称", "field_aliases": ["projectId"], "control_kind": "select", "op": "select"},
+        {"label": "申报日期", "field_aliases": ["applyDate"], "control_kind": "date", "op": "fill"},
+        {"label": "剩余工时", "field_aliases": ["remainingHours"], "control_kind": "number", "op": "snapshot", "disabled": True},
+        {"label": "申报工时", "field_aliases": ["reportedHours"], "control_kind": "number", "op": "snapshot"},
+        {"label": "团队", "field_aliases": ["teamId"], "control_kind": "select", "op": "snapshot", "disabled": True},
+        {"label": "工时类型", "field_aliases": ["workTypeId"], "control_kind": "select", "op": "snapshot", "disabled": True},
+        {"label": "审批人", "field_aliases": ["approverId"], "control_kind": "select", "op": "snapshot", "disabled": True},
+    ]
+
+    step = flow_spec_module._build_step_from_capture(
+        submit, reads=[option_read],
+        samples={"项目名称": "数据智能平台5.2.1", "申报日期": "2026-06-03", "申报工时": "8"},
+        storage_state=None, required_labels={"项目名称", "申报日期"},
+        page_enum_options={}, step_index=1, field_evidence=evidence,
+    )
+    params = {param.path: param for param in step.params}
+
+    assert params["projectId"].source_kind == "api_option"
+    assert (params["applyDate"].category, params["applyDate"].source_kind, params["applyDate"].type) == (
+        "user_param", "user_input", "date",
+    )
+    assert params["reportedHours"].source_kind == "user_input"
+    assert params["reportedHours"].default_value == 8
+    for path in ("remainingHours", "teamId", "workTypeId", "approverId"):
+        assert params[path].category == "runtime_var"
+        assert params[path].source_kind == "selected_option_field"
+        assert params[path].exposed_to_user is False
+    project_binding = next(binding for binding in step.selects if binding.path == "projectId")
+    assert project_binding.field_projections["remainingHours"] == "remainingHours"
+    assert "reportedHours" not in project_binding.field_projections
+
+
+def test_short_readonly_value_can_link_by_exact_wire_path_without_hijacking_editable_default():
+    source = FlowStep(
+        step_id="context", method="GET", path="/rpc/context",
+        response_json={"data": {"remainingHours": 8}},
+    )
+    remaining = ParamField(
+        path="remainingHours", key="剩余工时", value=8,
+        category="runtime_var", source_kind="unknown", exposed_to_user=False,
+        evidence=[{"kind": "page_control", "disabled": True, "editable": False}],
+    )
+    reported = ParamField(
+        path="reportedHours", key="申报工时", value=8,
+        category="user_param", source_kind="user_input", exposed_to_user=True,
+        evidence=[{"kind": "page_control", "editable": True}],
+    )
+    target = FlowStep(step_id="submit", method="POST", path="/rpc/submit", params=[remaining, reported])
+    spec = FlowSpec(steps=[source, target])
+
+    assert flow_spec_module.rebuild_flow_dependencies(spec) == 1
+    assert [(link.source_path, link.target_path) for link in spec.links] == [
+        ("data.remainingHours", "remainingHours"),
+    ]
+    assert remaining.source_kind == "previous_response"
+    assert reported.source_kind == "user_input"

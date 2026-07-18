@@ -2228,7 +2228,7 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
         )
         control = structural.get(i)
         inferred_type = type_from_control(control, _infer_type(node, key))
-        out.append({"path": path, "key": key, "value": sv,
+        out.append({"path": path, "key": key, "value": sv, "raw_value": node,
                     "suggest_param": is_param,
                     "suggest_name": label or key,            # 对不上 → 退原始 key(不瞎猜)
                     "type": inferred_type,
@@ -2236,7 +2236,12 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
                     "name_source": "dom" if control and label else "sample" if label and label != key else "auto",
                     "field_aliases": evidence_aliases(control or {}),
                     "control_kind": str((control or {}).get("control_kind") or "unknown"),
-                    "recorded_user_input": bool(control),
+                    # A form snapshot proves identity/type, not ownership. Only
+                    # a real fill/select/pick proves the operator supplied it.
+                    "recorded_user_input": str((control or {}).get("op") or "").lower() in {"fill", "select", "pick"},
+                    "control_evidence_available": strict_control_evidence,
+                    "control_disabled": bool((control or {}).get("disabled")),
+                    "control_read_only": bool((control or {}).get("read_only")),
                     "confidence": conf,                       # 字段语义置信度(P1)
                     "confidence_tier": confidence_tier(conf),  # auto / clarify / reject(需澄清)
                     "required": required,
@@ -2985,17 +2990,19 @@ async def _resolve_selects(api_request: dict, fields: dict, *, base_url: str, st
         matches = [it for it in items if isinstance(it, dict) and str(it.get(lk)) == str(name)]
         if len(matches) > 1:
             raise ValueError(f"选择字段 {param} 的候选名称 {name!r} 不唯一，已拒绝猜测内部值")
-        if not matches:
+        match = matches[0] if matches else None
+        if match is None:
             value_matches = [it for it in items if isinstance(it, dict) and str(it.get(vk)) == str(name)]
             if len(value_matches) == 1:
-                # Caller already supplied the exact current wire value.
-                continue
-            if len(value_matches) > 1:
+                # Keep the selected object even when the caller supplied its raw
+                # ID, because sibling field projections still need that object.
+                match = value_matches[0]
+            elif len(value_matches) > 1:
                 raise ValueError(f"选择字段 {param} 的内部值 {name!r} 在候选接口中不唯一")
-            if not items:
+            elif not items:
                 raise RuntimeError(f"选择字段 {param} 的实时候选接口未返回数据，已拒绝使用过期快照猜值")
-            raise ValueError(f"选择字段 {param} 的值 {name!r} 不在实时候选接口中")
-        match = matches[0]
+            else:
+                raise ValueError(f"选择字段 {param} 的值 {name!r} 不在实时候选接口中")
         if s.get("id_tokens") or s.get("id_path"):       # 名/ID 配对:显示名字段保留名、配对 id 字段写 id
             if lk in match:
                 fields[param] = match[lk]                 # 规整成候选里的规范显示名
@@ -3004,6 +3011,10 @@ async def _resolve_selects(api_request: dict, fields: dict, *, base_url: str, st
                 id_overrides[tuple(toks)] = match[vk]
         elif vk in match:                                # 单码字段:字段值换成 id
             fields[param] = match[vk]
+        for target_path, source_path in (s.get("field_projections") or {}).items():
+            projected = _get_by_path(match, source_path)
+            if projected is not None:
+                id_overrides[tuple(_split_path(target_path))] = projected
     return fields, id_overrides
 
 

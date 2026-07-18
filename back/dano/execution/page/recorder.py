@@ -384,7 +384,9 @@ _RECORDER_JS = r"""() => {
     return {
       field_aliases: controlAliases(el),
       control_kind: controlKind(el),
-      input_type: String(el.type || '').toLowerCase()
+      input_type: String(el.type || '').toLowerCase(),
+      disabled: !!(el.disabled || (el.getAttribute && el.getAttribute('aria-disabled') === 'true')),
+      read_only: !!(el.readOnly || (el.getAttribute && el.getAttribute('readonly') !== null))
     };
   }
   window.__danoRequiredFields = function () {
@@ -456,7 +458,9 @@ _RECORDER_JS = r"""() => {
           field: field, label: label, value: value, required: requiredOf(el),
           field_aliases: evidence.field_aliases || [],
           control_kind: evidence.control_kind || 'unknown',
-          input_type: evidence.input_type || ''
+          input_type: evidence.input_type || '',
+          disabled: !!evidence.disabled,
+          read_only: !!evidence.read_only
         });
       }
     } catch (e) {}
@@ -549,6 +553,8 @@ _RECORDER_JS = r"""() => {
         field_aliases: (evidence && evidence.field_aliases) || [],
         control_kind: (evidence && evidence.control_kind) || 'unknown',
         input_type: (evidence && evidence.input_type) || '',
+        disabled: !!(evidence && evidence.disabled),
+        read_only: !!(evidence && evidence.read_only),
         enum_source: (evidence && evidence.enum_source) || '',
         mapping_complete: !!(evidence && evidence.mapping_complete),
         page_context: window.__danoPageContext ? window.__danoPageContext() : {}

@@ -1531,3 +1531,29 @@ def test_external_transform_with_only_one_field_remains_invalid():
 
     assert normalized.type == "external_transform"
     assert normalized.mode == "external_transform"
+
+
+def test_generic_write_endpoint_splits_by_grounded_visible_actions():
+    steps = [
+        FlowStep(
+            step_id="save", method="POST", path="/rpc/execute",
+            source_meta={
+                "trigger_action_id": "action-save", "trigger_op": "click",
+                "trigger_locator": "button[data-command=save]", "page_id": "form",
+                "causality_confidence": "high",
+            },
+        ),
+        FlowStep(
+            step_id="submit", method="POST", path="/rpc/execute",
+            source_meta={
+                "trigger_action_id": "action-submit", "trigger_op": "click",
+                "trigger_locator": "button[data-command=submit]", "page_id": "form",
+                "causality_confidence": "high",
+            },
+        ),
+    ]
+
+    capabilities = build_default_flow_capabilities(FlowSpec(steps=steps))
+
+    assert len(capabilities) == 2
+    assert {tuple(cap.step_ids) for cap in capabilities} == {("save",), ("submit",)}

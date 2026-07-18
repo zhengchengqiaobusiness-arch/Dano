@@ -3826,3 +3826,35 @@ def test_suggest_workflow_steps_keeps_user_value_step():
     ]
     out = suggest_workflow_steps(writes, {"标题": "我的标题", "原因": "回家"})
     assert 0 in out and 2 in out and 1 not in out          # draft(含用户值)+提交;心跳(无值)丢
+
+
+@pytest.mark.asyncio
+async def test_resolve_selects_projects_fields_from_selected_option_object(monkeypatch):
+    import dano.execution.page.request_capture as rc
+
+    async def current_source(*_args, **_kwargs):
+        return [{
+            "projectId": "p-1", "projectName": "数据智能平台5.2.1",
+            "remainingHours": 8, "teamId": "team-public", "approverId": "user-yan",
+        }]
+
+    monkeypatch.setattr(rc, "_fetch_select_list", current_source)
+    api_request = {"selects": [{
+        "param": "项目名称", "path": "projectId",
+        "source_url": "/rpc/project-context", "label_key": "projectName", "value_key": "projectId",
+        "id_path": "projectId",
+        "field_projections": {
+            "remainingHours": "remainingHours", "teamId": "teamId", "approverId": "approverId",
+        },
+    }]}
+
+    fields, overrides = await _resolve_selects(
+        api_request, {"项目名称": "数据智能平台5.2.1"},
+        base_url="", storage_state=None, token_key=None, verify=False,
+    )
+
+    assert fields["项目名称"] == "数据智能平台5.2.1"
+    assert overrides[("projectId",)] == "p-1"
+    assert overrides[("remainingHours",)] == 8
+    assert overrides[("teamId",)] == "team-public"
+    assert overrides[("approverId",)] == "user-yan"

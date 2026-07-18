@@ -67,6 +67,7 @@ interface FlowSelectBinding {
   option_map?: Record<string, any> | null;
   enum_source?: string | null; enum_confirmed?: boolean | null;
   id_path?: string | null;
+  field_projections?: Record<string, string>;
 }
 interface FlowStepData {
   step_id: string; name: string; method: string; url: string; path: string; risk_level: string;
@@ -343,6 +344,7 @@ const SOURCE_KIND_OPTIONS = [
   { label: "来源不明", value: "unknown" },
   { label: "用户输入", value: "user_input" },
   { label: "接口候选", value: "api_option" },
+  { label: "候选关联字段", value: "selected_option_field" },
   { label: "页面枚举", value: "page_enum" },
   { label: "表单选项", value: "form_option" },
   { label: "静态枚举", value: "static_enum" },
@@ -576,15 +578,12 @@ function NativeSelect({
   width?: number | string;
   disabled?: boolean;
 }) {
-  const [local, setLocal] = useState(value || "");
-  useEffect(() => setLocal(value || ""), [value]);
   const safeOptions = uniqueOptions(options);
   return (
     <select
-      value={local}
+      value={value || ""}
       disabled={disabled}
       onChange={(e) => {
-        setLocal(e.target.value);
         onChange(e.target.value);
       }}
       style={{
@@ -989,9 +988,16 @@ function capabilityNodeStepIds(nodes?: Array<Record<string, any>>) {
   return ordered;
 }
 function capabilityActualStepIds(cap?: FlowCapabilityData | null) {
-  const ordered = capabilityNodeStepIds(cap?.nodes);
-  const seen = new Set(ordered);
+  // step_ids is the operator-editable canonical order. The server projects it
+  // back into sibling call nodes after every edit. Reading nodes first made the
+  // up/down buttons appear to do nothing until a later full refresh.
+  const ordered: string[] = [];
   for (const raw of cap?.step_ids || []) {
+    const stepId = String(raw || "").trim();
+    if (stepId && !ordered.includes(stepId)) ordered.push(stepId);
+  }
+  const seen = new Set(ordered);
+  for (const raw of capabilityNodeStepIds(cap?.nodes)) {
     const stepId = String(raw || "").trim();
     if (!stepId || seen.has(stepId)) continue;
     seen.add(stepId);
@@ -1198,27 +1204,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [flowSpec, setFlowSpec] = useState<FlowSpecData | null>(null);
   const flowSpecRef = useRef<FlowSpecData | null>(null);
   useEffect(() => { flowSpecRef.current = flowSpec; }, [flowSpec]);
-  const pendingEditorViewportRef = useRef<{ id: string; top: number } | null>(null);
-  const lastEditedFieldRef = useRef<{ id: string; expiresAt: number } | null>(null);
-  function preserveEditorViewport(id: string, remember = true) {
-    const element = document.getElementById(id);
-    if (!element) return;
-    pendingEditorViewportRef.current = { id, top: element.getBoundingClientRect().top };
-    if (remember) lastEditedFieldRef.current = { id, expiresAt: Date.now() + 5000 };
-  }
-  function preserveLastEditedViewport() {
-    const remembered = lastEditedFieldRef.current;
-    if (!remembered || remembered.expiresAt < Date.now()) return;
-    preserveEditorViewport(remembered.id, false);
+  const pendingEditorScrollRef = useRef<number | null>(null);
+  function preserveEditorScrollForReorder() {
+    pendingEditorScrollRef.current = window.scrollY;
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
   }
   useLayoutEffect(() => {
-    const pending = pendingEditorViewportRef.current;
-    if (!pending) return;
-    pendingEditorViewportRef.current = null;
-    const element = document.getElementById(pending.id);
-    if (!element) return;
-    const delta = element.getBoundingClientRect().top - pending.top;
-    if (Math.abs(delta) > 1) window.scrollBy({ top: delta, left: 0, behavior: "auto" });
+    const scrollTop = pendingEditorScrollRef.current;
+    if (scrollTop == null) return;
+    pendingEditorScrollRef.current = null;
+    window.scrollTo({ top: scrollTop, left: window.scrollX, behavior: "auto" });
   }, [flowSpec]);
   const [checkReport, setCheckReport] = useState<FlowCheckReport | null>(null);
   const [titleDraft, setTitleDraft] = useState("");               // FC3 修复:标题本地草稿,WS 推送不再即时覆盖编辑
@@ -1270,7 +1265,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [activeFlowTab, setActiveFlowTab] = useState("abilities");
 
   function acceptFlowSpec(fs: FlowSpecData) {
-    preserveLastEditedViewport();
+
     const pending = pendingCapabilityMembershipRef.current;
     const edits: any[] = [];
     const remaining: typeof pending = [];
@@ -2276,7 +2271,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function patchLocalParam(stepId: string, p: FlowParam, updates: Record<string, any>) {
     const base = flowSpecRef.current;
     if (!base) return;
-    preserveEditorViewport(fieldEditorAnchorId(stepId, p.path));
+
     const next: FlowSpecData = {
       ...base,
       steps: (base.steps || []).map((step) => {
@@ -2566,6 +2561,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const next = [...stepIds];
     const [item] = next.splice(from, 1);
     next.splice(to, 0, item);
+    preserveEditorScrollForReorder();
     updateCapabilityField(idx, "step_ids", next);
   }
   function capabilityRef(cap: FlowCapabilityData, idx: number) {
@@ -2585,6 +2581,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const [item] = refs.splice(idx, 1);
     refs.splice(to, 0, item);
     const ordered = refs.map((ref) => caps.find((cap, capIdx) => capabilityRef(cap, capIdx) === ref)!).filter(Boolean);
+    preserveEditorScrollForReorder();
     const next = { ...current, capabilities: ordered };
     flowSpecRef.current = next;
     setFlowSpec(next);
@@ -2950,6 +2947,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       nextBinding.enum_confirmed = false;
       nextBinding.value_key = "";
       nextBinding.label_key = "";
+      nextBinding.field_projections = {};
     }
     if (!hasExplicitIdPath && !nextBinding.id_path && (nextBinding.source_url || p.source_kind === "api_option")) {
       nextBinding.id_path = currentPath;
@@ -3580,6 +3578,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                           ]}
                           onChange={(v) => updateRuntimeSourceDetail(step.step_id, p, { strategy: v })} />
                       </FieldControl>
+                    ) : p.source_kind === "selected_option_field" ? (
+                      <Typography.Text type="secondary">运行期从所选候选记录的 {(p.source as any)?.response_path || "关联字段"} 自动写入。</Typography.Text>
                     ) : p.source_kind === "computed" ? (
                       <Typography.Text type="secondary">
                         运行期按规则 {(p.source as any)?.strategy || "未配置"}，根据 {(p.source as any)?.start_field || "开始字段"} 与 {(p.source as any)?.end_field || "结束字段"} 自动计算。
@@ -3665,7 +3665,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         {(step.params || []).length ? (
           <List
             size="small"
-            rowKey={(p) => `${step.step_id}:param:${p.path}:${p.key}`}
+            // path/key are editable. Stable positional keys prevent row remounts between blur and click.
+            rowKey={(_p, index) => `${step.step_id}:param:${index}`}
             dataSource={step.params || []}
             renderItem={(p, index) => renderParamEditorInCapability(step, p, index)}
           />

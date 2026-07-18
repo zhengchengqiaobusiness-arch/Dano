@@ -121,6 +121,7 @@ class SelectBinding(BaseModel):
     enum_confirmed: bool | None = None
     id_path: str | None = None
     id_tokens: list[str | int] | None = None
+    field_projections: dict[str, str] = Field(default_factory=dict)  # target request path -> selected item response path
 
 
 class IdentityBinding(BaseModel):
@@ -739,6 +740,21 @@ def _read_is_option_source(read: dict) -> bool:
         return has_list_payload
     if role == "read_option":
         return has_list_payload
+    trigger_op = str(read.get("trigger_op") or "").lower()
+    trigger_locator = str(read.get("trigger_locator") or "").lower()
+    control_triggered = (
+        trigger_op in {"select", "pick"}
+        or (
+            trigger_op == "click"
+            and any(token in trigger_locator for token in (
+                "select", "combobox", "cascader", "picker", "dropdown",
+            ))
+        )
+    )
+    if has_list_payload and control_triggered:
+        # Endpoint naming is not portable. A list response causally triggered by
+        # opening/selecting a choice control is grounded option-source evidence.
+        return True
     if role in {"business_get", "read_context"}:
         # 业务记录列表不是字段枚举。角色分类是事实库结论，不能再因“响应是数组”
         # 二次降格成选项源，否则日报日期/审批记录会被错误绑定到提交字段。
@@ -894,7 +910,8 @@ def _param_source_guess(
     # previously exposed an option-source's fixed ``status=0`` merely because
     # another control recorded the same value.
     recorded_user_input = bool(field.get("recorded_user_input")) or bool(
-        method != "GET"
+        not field.get("control_evidence_available")
+        and method != "GET"
         and value not in (None, "")
         and value in _sample_value_set(samples)
     )
@@ -907,6 +924,30 @@ def _param_source_guess(
             "exposed_to_user": True,
             "reason": "该值由用户在录制页面真实填写，调用 Skill 时作为用户参数",
             "need_human_confirm": False,
+        }
+
+    control_kind = str(field.get("control_kind") or "unknown").lower()
+    has_control = bool(field.get("field_aliases")) or control_kind != "unknown"
+    control_locked = bool(field.get("control_disabled") or field.get("control_read_only"))
+    if has_control and control_kind in {"text", "textarea", "number", "date", "datetime", "time", "checkbox", "radio"}:
+        if not control_locked:
+            return {
+                "category": "user_param",
+                "source_kind": "user_input",
+                "source": {"kind": "control_default", "path": path},
+                "editable": True,
+                "exposed_to_user": True,
+                "reason": "页面快照证明该控件可编辑；录制默认值可省略，也允许调用方覆盖",
+                "need_human_confirm": False,
+            }
+        return {
+            "category": "runtime_var",
+            "source_kind": "unknown",
+            "source": {"kind": "readonly_control", "path": path},
+            "editable": True,
+            "exposed_to_user": False,
+            "reason": "页面控件为禁用或只读，值应由上游接口或运行上下文提供，不能当作用户输入",
+            "need_human_confirm": True,
         }
 
     if method == "GET" and path.startswith("query."):
@@ -1224,6 +1265,66 @@ def _enum_option_map_from_options(options: list[Any] | None) -> dict[str, Any]:
     return out
 
 
+def _attach_select_field_projections(
+    selects: list[dict],
+    fields: list[dict],
+    reads: list[dict],
+) -> None:
+    """Map sibling request fields from the same selected option object.
+
+    A project selector often returns the project plus remaining quota, team,
+    work type and approver. Exact wire-name agreement is required, so equal
+    short values in unrelated editable controls are never projected.
+    """
+    reads_by_path = {
+        _request_path({"url": str(read.get("url") or read.get("path") or "")}): read
+        for read in reads or [] if isinstance(read, dict)
+    }
+
+    def norm_leaf(value: Any) -> str:
+        leaf = re.split(r"\.|\[\d+\]", str(value or ""))[-1]
+        return re.sub(r"[^a-z0-9]+", "", leaf.lower())
+
+    for select in selects or []:
+        source_url = str(select.get("source_url") or "")
+        value_key = str(select.get("value_key") or "")
+        label_key = str(select.get("label_key") or "")
+        select_path = str(select.get("path") or "")
+        if not source_url or not value_key or not label_key or not select_path:
+            continue
+        source = reads_by_path.get(_request_path({"url": source_url}))
+        items = as_list_payload((source or {}).get("json", (source or {}).get("response_json"))) or []
+        selected_field = next((item for item in fields if str(item.get("path") or "") == select_path), None)
+        if selected_field is None:
+            continue
+        selected_value = str(selected_field.get("value") if selected_field.get("value") is not None else "")
+        matches = [
+            item for item in items if isinstance(item, dict)
+            and selected_value in {str(item.get(value_key)), str(item.get(label_key))}
+        ]
+        if len(matches) != 1:
+            continue
+        selected_item = matches[0]
+        excluded = {select_path, str(select.get("id_path") or "")}
+        projections: dict[str, str] = {}
+        for field in fields:
+            target_path = str(field.get("path") or "")
+            if not target_path or target_path in excluded or field.get("recorded_user_input"):
+                continue
+            target_leaf = norm_leaf(target_path)
+            if not target_leaf:
+                continue
+            field_value = str(field.get("value") if field.get("value") is not None else "")
+            candidates = [
+                source_path for source_path, _tokens, raw_value, _raw in _leaf_paths(selected_item)
+                if str(raw_value) == field_value and norm_leaf(source_path) == target_leaf
+            ]
+            if len(candidates) == 1:
+                projections[target_path] = candidates[0]
+        if projections:
+            select["field_projections"] = projections
+
+
 def _build_step_from_capture(
     req: dict,
     *,
@@ -1303,6 +1404,8 @@ def _build_step_from_capture(
         # identity(运行期重取)
         iden_raw = suggest_identity(pd, storage_state, samples)
 
+    _attach_select_field_projections(selects_raw, flat_fields, option_reads)
+
     # select 字段配中文名
     sel_names = _select_name_for_step(selects_raw, samples)
 
@@ -1330,6 +1433,7 @@ def _build_step_from_capture(
             enum_confirmed=s.get("enum_confirmed"),
             id_path=s.get("id_path"),
             id_tokens=s.get("id_tokens"),
+            field_projections=dict(s.get("field_projections") or {}),
         ))
 
     # identity
@@ -1422,6 +1526,10 @@ def _build_step_from_capture(
                 "source": "recorder_dom",
                 "field_aliases": list(f.get("field_aliases") or []),
                 "control_kind": str(f.get("control_kind") or "unknown"),
+                "interacted": bool(f.get("recorded_user_input")),
+                "disabled": bool(f.get("control_disabled")),
+                "read_only": bool(f.get("control_read_only")),
+                "editable": not bool(f.get("control_disabled") or f.get("control_read_only")),
                 "request_path": path,
             })
         if f.get("required"):
@@ -1477,7 +1585,7 @@ def _build_step_from_capture(
             },
             editable=bool(source_guess["editable"]),
             exposed_to_user=bool(source_guess["exposed_to_user"]),
-            default_value=f.get("value"),
+            default_value=f.get("raw_value", f.get("value")),
             reason=_append_reason_detail(source_guess["reason"], enum_description),
             description=enum_description,
             need_human_confirm=bool(
@@ -1495,6 +1603,28 @@ def _build_step_from_capture(
     path2key = {p.path: p.key for p in params}
     for sb, sraw in zip(selects_meta, selects_raw):
         sb.param = path2key.get(sraw.get("path", ""), "")
+
+    # Fields carried by the selected option object are runtime projections, not
+    # additional caller inputs. This covers project -> quota/team/type/approver.
+    for binding in selects_meta:
+        for target_path, response_path in (binding.field_projections or {}).items():
+            target = next((param for param in params if param.path == target_path), None)
+            if target is None or target.locked:
+                continue
+            target.category = "runtime_var"
+            target.source_kind = "selected_option_field"
+            target.source = {
+                "kind": "selected_option_field",
+                "selector_path": binding.path,
+                "selector_param": binding.param,
+                "source_url": binding.source_url,
+                "response_path": response_path,
+                "target_path": target_path,
+            }
+            target.exposed_to_user = False
+            target.editable = True
+            target.need_human_confirm = False
+            target.reason = f"该字段来自选择项接口中已选记录的 `{response_path}`，运行期随选择自动写入"
 
     # sample_inputs
     sample_inputs = {p.key: p.value for p in params if p.value}
@@ -4177,6 +4307,19 @@ def _link_is_auto_generated(lk: FlowLink) -> bool:
     )
 
 
+def _param_has_editable_control_evidence(param: ParamField | None) -> bool:
+    if param is None:
+        return False
+    for item in param.evidence or []:
+        if not isinstance(item, dict) or item.get("kind") != "page_control":
+            continue
+        if item.get("interacted"):
+            return True
+        if item.get("editable") and not item.get("disabled") and not item.get("read_only"):
+            return True
+    return False
+
+
 def _auto_dependency_target_allowed(param: ParamField | None) -> bool:
     if param is None:
         return False
@@ -4207,6 +4350,10 @@ def _auto_dependency_link_allowed(param: ParamField | None, source_path: str, lk
         # 注入（典型为 data.id -> query.processDefinitionId）。这比字段名模糊匹配强，
         # 同时仍拒绝 title/date/status 等常见值造成的假关联。
         if source_leaf == "id" and target_leaf.endswith("id"):
+            return True
+        if _dependency_match_score(param, source_path) >= 40 and not _param_has_editable_control_evidence(param):
+            # A read-only/default-free field with an exact wire-name match is a
+            # grounded response projection, including short values such as 8.
             return True
     if not _auto_dependency_target_allowed(param):
         return False
@@ -4952,7 +5099,7 @@ def _business_type_for_param(param: ParamField) -> str:
 _RUNTIME_SUPPLIED_SOURCE_KINDS = frozenset({
     "previous_response", "current_user", "storage", "cookie", "page_context",
     "request_header", "system_time", "system_generated", "computed",
-    "constant", "loop_item",
+    "constant", "loop_item", "selected_option_field",
 })
 
 
@@ -6324,15 +6471,33 @@ def _query_operation_key(step: FlowStep) -> str:
     return "__".join(part for part in (business, f"action_{action_key}") if part)
 
 
+def _write_operation_key(step: FlowStep) -> str:
+    """Prefer grounded visible-action boundaries over vendor URL conventions."""
+    meta = step.source_meta or {}
+    action_ref = str(meta.get("trigger_transaction_id") or meta.get("trigger_action_id") or "").strip()
+    trigger_op = str(meta.get("trigger_op") or "").lower()
+    confidence = str(meta.get("causality_confidence") or "high").lower()
+    if action_ref and trigger_op in {"click", "submit", "select", "pick"} and confidence in {"high", "medium"}:
+        identity = "|".join((
+            str(meta.get("page_id") or ""),
+            str(meta.get("frame_id") or ""),
+            action_ref,
+            re.sub(r"\s+", "", str(meta.get("trigger_locator") or "").casefold()),
+        ))
+        return f"action_{hashlib.sha1(identity.encode('utf-8')).hexdigest()[:10]}"
+    return _capability_business_key(step)
+
+
 def _partition_steps_by_business_key(
     steps: list[FlowStep],
     *,
     query_operations: bool = False,
+    write_operations: bool = False,
 ) -> list[tuple[str, list[FlowStep]]]:
     groups: dict[str, list[FlowStep]] = {}
     unknown: list[FlowStep] = []
     for step in steps:
-        key = _query_operation_key(step) if query_operations else _capability_business_key(step)
+        key = _query_operation_key(step) if query_operations else (_write_operation_key(step) if write_operations else _capability_business_key(step))
         if key:
             groups.setdefault(key, []).append(step)
         else:
@@ -6351,7 +6516,7 @@ def _build_complex_default_capabilities(
     all_submit_ids = {step.step_id for step in (_submit_capability_steps(spec) if write_steps else [])}
     independent_status = [step for step in status_steps if step.step_id not in all_submit_ids]
     query_groups = _partition_steps_by_business_key(independent_status, query_operations=True)
-    write_groups = _partition_steps_by_business_key(write_steps)
+    write_groups = _partition_steps_by_business_key(write_steps, write_operations=True)
 
     # A response dependency between write anchors means one transactional
     # chain, even if endpoint prefixes differ; never split that chain.
@@ -10925,6 +11090,8 @@ def _runtime_select_bindings(step: FlowStep) -> list[dict[str, Any]]:
         if not _select_binding_is_runtime_executable(step, binding):
             continue
         item = binding.model_dump(exclude_none=True)
+        if not item.get("field_projections"):
+            item.pop("field_projections", None)
         if binding.path in current_key_by_path:
             item["param"] = current_key_by_path[binding.path]
         out.append(item)
@@ -12489,20 +12656,26 @@ def _dependency_sig(source_step_id: str, source_path: str, target_step_id: str, 
 
 
 def _dependency_match_score(param: ParamField, source_path: str) -> int:
-    source_norm = _norm_field_name(source_path, source_path)
-    target_tokens = [
-        _norm_field_name(str(param.key or ""), param.path),
-        _norm_field_name(str(param.label or ""), param.path),
-        _norm_field_name(param.path.split(".")[-1], param.path),
-    ]
+    def token(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+    source_full = token(source_path)
+    source_leaf = token(re.split(r"\.|\[\d+\]", str(source_path or ""))[-1])
+    target_tokens = {
+        token(param.key),
+        token(param.label),
+        token(re.split(r"\.|\[\d+\]", str(param.path or ""))[-1]),
+    } - {""}
     score = 0
-    for idx, token in enumerate(t for t in target_tokens if t):
-        if token and token in source_norm:
-            score += 30 - idx
+    for target in target_tokens:
+        if source_leaf and target == source_leaf:
+            score = max(score, 50)
+        elif target == source_full:
+            score = max(score, 45)
+        elif len(target) >= 4 and (target in source_full or (source_leaf and source_leaf in target)):
+            score = max(score, 30)
     if "[" not in source_path:
         score += 3
-    if source_path.lower().endswith(str(param.key or "").lower()):
-        score += 12
     return score
 
 
@@ -12568,13 +12741,19 @@ def rebuild_flow_dependencies(spec: FlowSpec) -> int:
                 r"[^a-z0-9]+", "", str(param.path or param.key or "").split(".")[-1].lower()
             )
             internal_id_target = target_leaf.endswith("id") and not _looks_user_entered_business_field(param.key, param.path)
-            if _skip_auto_dependency_target(param) and not internal_id_target:
+            response_owned_candidate = bool(
+                not _param_has_editable_control_evidence(param)
+                and param.source_kind not in _OPTION_SOURCE_KINDS
+                and param.source_kind not in {"user_input", "current_user", "system_time", "computed", "page_context"}
+            )
+            if _skip_auto_dependency_target(param) and not internal_id_target and not response_owned_candidate:
                 continue
             if param.source_kind == "previous_response" and param.source.get("step_id"):
                 continue
             value = str(param.value if param.value is not None else "").strip()
-            if len(value) < 4:
+            if not value:
                 continue
+            short_value = len(value) < 4
             matches: list[tuple[FlowStep, str]] = []
             for source in spec.steps[:tgt_idx]:
                 if source.response_json is None:
@@ -12598,8 +12777,12 @@ def rebuild_flow_dependencies(spec: FlowSpec) -> int:
                     continue
                 _score, source, source_path = ranked[0]
             source_leaf = re.sub(r"[^a-z0-9]+", "", str(source_path or "").split(".")[-1].lower())
+            semantic_score = _dependency_match_score(param, source_path)
             strong_internal_id = internal_id_target and source_leaf == "id" and len(matches) == 1
-            if not strong_internal_id and not _auto_dependency_link_allowed(param, source_path):
+            strong_semantic_response = response_owned_candidate and semantic_score >= 40
+            if short_value and not (strong_internal_id or strong_semantic_response):
+                continue
+            if not strong_internal_id and not strong_semantic_response and not _auto_dependency_link_allowed(param, source_path):
                 continue
             sig = _dependency_sig(source.step_id, source_path, target.step_id, param.path)
             if sig in existing or sig in rejected:
@@ -12613,7 +12796,7 @@ def rebuild_flow_dependencies(spec: FlowSpec) -> int:
                 confirmed=True,
                 confidence=0.97,
                 reason="promote 后重建依赖：目标字段录制值唯一命中上游响应字段，自动确认为运行期依赖",
-                evidence={"kind": "value_match", "value": value, "auto_rebuilt": True},
+                evidence={"kind": "value_match", "value": value, "path_score": semantic_score, "auto_rebuilt": True},
             ))
             existing.add(sig)
             added += 1
