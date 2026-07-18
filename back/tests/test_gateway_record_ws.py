@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import re
 from types import SimpleNamespace
@@ -8,6 +9,47 @@ from types import SimpleNamespace
 import pytest
 
 from dano.gateway import app as gateway
+
+
+def test_analysis_screenshots_are_validated_and_reduced_to_pi_images() -> None:
+    raw = b"\x89PNG\r\n\x1a\n" + b"screenshot-content"
+    screenshots = gateway._normalize_analysis_screenshots([{
+        "name": "form-screen.png",
+        "mime_type": "image/png",
+        "data": base64.b64encode(raw).decode("ascii"),
+    }])
+
+    assert screenshots == [{
+        "name": "form-screen.png",
+        "type": "image",
+        "data": base64.b64encode(raw).decode("ascii"),
+        "mimeType": "image/png",
+        "byte_size": len(raw),
+    }]
+    assert gateway._pi_analysis_images(screenshots) == [{
+        "type": "image",
+        "data": base64.b64encode(raw).decode("ascii"),
+        "mimeType": "image/png",
+    }]
+    assert "semantic evidence" in gateway._analysis_screenshot_guidance(screenshots)
+
+
+def test_analysis_screenshots_reject_spoofed_or_excess_images() -> None:
+    jpeg = base64.b64encode(b"\xff\xd8\xffcontent").decode("ascii")
+    with pytest.raises(ValueError, match="does not match"):
+        gateway._normalize_analysis_screenshots([{
+            "mime_type": "image/png", "data": jpeg,
+        }])
+
+    with pytest.raises(ValueError, match="at most 4"):
+        gateway._normalize_analysis_screenshots([
+            {"mime_type": "image/jpeg", "data": jpeg} for _ in range(5)
+        ])
+
+
+def test_no_analysis_screenshot_keeps_original_fact_based_path() -> None:
+    assert gateway._normalize_analysis_screenshots(None) == []
+    assert gateway._analysis_screenshot_guidance([]) == ""
 
 
 class _ConcurrentWriteProbe:
@@ -146,6 +188,161 @@ def test_recording_storage_cache_does_not_replace_authenticated_state_with_login
     gateway._remember_recording_storage(state, login_page)
 
     assert state["storage_state"] == authenticated
+
+@pytest.mark.asyncio
+async def test_recording_connection_lease_waits_for_previous_owner_cleanup() -> None:
+    claim = getattr(gateway, "_claim_recording_connection", None)
+    release = getattr(gateway, "_release_recording_connection", None)
+    assert claim is not None, "recording connection handoff is not implemented"
+    assert release is not None, "recording connection release is not implemented"
+
+    key = ("tenant-a", "A-OA", f"recording_{'b' * 32}")
+    gateway._ACTIVE_RECORDING_CONNECTIONS.clear()
+    old_started = asyncio.Event()
+    old_cleaned = asyncio.Event()
+    release_old = asyncio.Event()
+
+    async def old_handler() -> None:
+        lease = await claim(key)
+        old_started.set()
+        try:
+            await release_old.wait()
+        finally:
+            old_cleaned.set()
+            release(key, lease)
+
+    old_task = asyncio.create_task(old_handler())
+    await old_started.wait()
+
+    replacement_task = asyncio.create_task(claim(key))
+    await asyncio.sleep(0)
+
+    assert not replacement_task.done()
+    assert not old_task.cancelled()
+    release_old.set()
+    await old_task
+    replacement = await replacement_task
+
+    assert old_cleaned.is_set()
+    assert gateway._ACTIVE_RECORDING_CONNECTIONS[key] is replacement
+    release(key, replacement)
+    assert key not in gateway._ACTIVE_RECORDING_CONNECTIONS
+
+
+@pytest.mark.asyncio
+async def test_cancelled_connection_waiter_relays_predecessor_release() -> None:
+    key = ("tenant-a", "A-OA", f"recording_{'d' * 32}")
+    gateway._ACTIVE_RECORDING_CONNECTIONS.clear()
+    current_task = asyncio.current_task()
+    assert current_task is not None
+    original = gateway._RecordingConnectionLease(
+        task=current_task, released=asyncio.Event(),
+    )
+    gateway._ACTIVE_RECORDING_CONNECTIONS[key] = original
+
+    second_task = asyncio.create_task(gateway._claim_recording_connection(key))
+    await asyncio.sleep(0)
+    second = gateway._ACTIVE_RECORDING_CONNECTIONS[key]
+    assert second is not original
+
+    third_task = asyncio.create_task(gateway._claim_recording_connection(key))
+    await asyncio.sleep(0)
+    third = gateway._ACTIVE_RECORDING_CONNECTIONS[key]
+    assert third is not second
+
+    second_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second_task
+    await asyncio.sleep(0)
+    assert not third_task.done()
+
+    gateway._release_recording_connection(key, original)
+    replacement = await asyncio.wait_for(third_task, timeout=1)
+    assert replacement is third
+    assert gateway._ACTIVE_RECORDING_CONNECTIONS[key] is third
+    gateway._release_recording_connection(key, third)
+
+
+@pytest.mark.asyncio
+async def test_recording_connection_lease_old_release_cannot_remove_replacement() -> None:
+    claim = getattr(gateway, "_claim_recording_connection", None)
+    release = getattr(gateway, "_release_recording_connection", None)
+    assert claim is not None, "recording connection handoff is not implemented"
+    assert release is not None, "recording connection release is not implemented"
+
+    key = ("tenant-a", "A-OA", f"recording_{'c' * 32}")
+    gateway._ACTIVE_RECORDING_CONNECTIONS.clear()
+    current_task = asyncio.current_task()
+    assert current_task is not None
+    old = gateway._RecordingConnectionLease(task=current_task, released=asyncio.Event())
+    replacement = gateway._RecordingConnectionLease(task=current_task, released=asyncio.Event())
+    gateway._ACTIVE_RECORDING_CONNECTIONS[key] = replacement
+
+    release(key, old)
+
+    assert old.released.is_set()
+    assert gateway._ACTIVE_RECORDING_CONNECTIONS[key] is replacement
+    release(key, replacement)
+
+
+@pytest.mark.asyncio
+async def test_recording_pi_candidate_failed_start_is_closed_and_not_reused() -> None:
+    start_candidate = getattr(gateway, "_start_recording_pi_candidate", None)
+    assert start_candidate is not None, "transactional Pi startup is not implemented"
+
+    class Candidate:
+        def __init__(self, error: Exception | None = None) -> None:
+            self.error = error
+            self.started = 0
+            self.closed = 0
+
+        async def start(self):  # noqa: ANN201
+            self.started += 1
+            if self.error is not None:
+                raise self.error
+            return self
+
+        async def close(self) -> None:
+            self.closed += 1
+
+    failed = Candidate(RuntimeError("scope busy"))
+    healthy = Candidate()
+
+    with pytest.raises(RuntimeError, match="scope busy"):
+        await start_candidate(lambda: failed)
+    result = await start_candidate(lambda: healthy)
+
+    assert failed.started == 1
+    assert failed.closed == 1
+    assert healthy.started == 1
+    assert healthy.closed == 0
+    assert result is healthy
+
+
+def test_accepted_submission_prefers_only_newer_pi_flow_spec() -> None:
+    prefer = getattr(gateway, "_prefer_accepted_recording_pi_spec", None)
+    assert prefer is not None, "accepted Pi submission salvage is not implemented"
+
+    pending = SimpleNamespace(meta={"current_version": 4})
+    newer = SimpleNamespace(meta={"current_version": 5})
+    older = SimpleNamespace(meta={"current_version": 3})
+
+    accepted = SimpleNamespace(
+        last_submission_kind="plan",
+        current_flow_spec=lambda: newer,
+    )
+    stale = SimpleNamespace(
+        last_submission_kind="repair",
+        current_flow_spec=lambda: older,
+    )
+    unsubmitted = SimpleNamespace(
+        last_submission_kind="",
+        current_flow_spec=lambda: newer,
+    )
+
+    assert prefer(pending, accepted) is newer
+    assert prefer(pending, stale) is pending
+    assert prefer(pending, unsubmitted) is pending
 
 
 def test_recording_storage_cache_accepts_richer_checkpoint() -> None:

@@ -27,6 +27,7 @@ import {
   DeleteOutlined,
   FileTextOutlined,
   LinkOutlined,
+  PictureOutlined,
   PlusOutlined,
   ReloadOutlined,
   RobotOutlined,
@@ -50,6 +51,20 @@ interface RecSelect {
   enum_source?: string; enum_confirmed?: boolean;
 }
 interface RecIdentity { path: string; source: string }
+
+interface AnalysisScreenshotPayload {
+  name: string;
+  mime_type: "image/jpeg";
+  data: string;
+  width: number;
+  height: number;
+  byte_size: number;
+}
+
+interface AnalysisScreenshot extends AnalysisScreenshotPayload {
+  id: string;
+  preview_url: string;
+}
 
 interface FlowParam {
   path: string; key: string; label?: string; value: string; type: string; required: boolean; name_source?: string;
@@ -1138,6 +1153,70 @@ function inferJsonSchema(value: any): Record<string, any> {
   if (typeof value === "boolean") return { type: "boolean" };
   return { type: "string" };
 }
+
+const MAX_ANALYSIS_SCREENSHOTS = 4;
+const MAX_ANALYSIS_SCREENSHOT_BYTES = 1_400_000;
+
+function base64ByteSize(data: string) {
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  return Math.floor(data.length * 3 / 4) - padding;
+}
+
+function loadScreenshotImage(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const image = new window.Image();
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("Unable to read screenshot"));
+    };
+    image.src = objectUrl;
+  });
+}
+
+async function prepareAnalysisScreenshot(file: File): Promise<AnalysisScreenshot> {
+  if (!file.type.startsWith("image/")) throw new Error("Only image files are supported");
+  const image = await loadScreenshotImage(file);
+  const sourceWidth = image.naturalWidth || image.width;
+  const sourceHeight = image.naturalHeight || image.height;
+  if (!sourceWidth || !sourceHeight) throw new Error("Screenshot has no readable dimensions");
+
+  let scale = Math.min(1, 1800 / Math.max(sourceWidth, sourceHeight));
+  let latest: AnalysisScreenshot | null = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const width = Math.max(1, Math.round(sourceWidth * scale));
+    const height = Math.max(1, Math.round(sourceHeight * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Canvas is unavailable");
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, width, height);
+    context.drawImage(image, 0, 0, width, height);
+    const quality = Math.max(0.62, 0.92 - attempt * 0.08);
+    const previewUrl = canvas.toDataURL("image/jpeg", quality);
+    const data = previewUrl.slice(previewUrl.indexOf(",") + 1);
+    latest = {
+      id: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+      name: file.name || "screenshot.jpg",
+      mime_type: "image/jpeg",
+      data,
+      width,
+      height,
+      byte_size: base64ByteSize(data),
+      preview_url: previewUrl,
+    };
+    if (latest.byte_size <= MAX_ANALYSIS_SCREENSHOT_BYTES) return latest;
+    scale *= 0.78;
+  }
+  throw new Error(`Screenshot remains too large (${latest?.byte_size || 0} bytes)`);
+}
+
 export default function PageRecorder({ tenant, subsystem, baseUrl, storageState }: {
   tenant: string; subsystem: string; baseUrl: string; storageState: string;
 }) {
@@ -1245,6 +1324,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [orchestrateBusy, setOrchestrateBusy] = useState(false);
   const [autoFixBusy, setAutoFixBusy] = useState(false);
   const [lastOperationReport, setLastOperationReport] = useState<FlowOperationReport | null>(null);
+  const [analysisScreenshots, setAnalysisScreenshots] = useState<AnalysisScreenshot[]>([]);
+  const analysisScreenshotsRef = useRef<AnalysisScreenshot[]>([]);
+  useEffect(() => { analysisScreenshotsRef.current = analysisScreenshots; }, [analysisScreenshots]);
+  const screenshotInputRef = useRef<HTMLInputElement>(null);
+  const [analysisScreenshotBusy, setAnalysisScreenshotBusy] = useState(false);
+  const [lastAnalysisEvidence, setLastAnalysisEvidence] = useState<{ screenshot_count: number; screenshot_names?: string[] } | null>(null);
   const [expandedCapabilityKeys, setExpandedCapabilityKeys] = useState<string[]>([]);
   const [expandedCapabilitySections, setExpandedCapabilitySections] = useState<Record<number, string[]>>({});
   const [expandedCapabilitySteps, setExpandedCapabilitySteps] = useState<Record<number, string[]>>({});
@@ -1253,6 +1338,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [expandedCapabilityRelationKeys, setExpandedCapabilityRelationKeys] = useState<string[]>([]);
   const flowOperationRef = useRef<{
     mode: "plan" | "repair"; previousUpdatedAt?: string; operationId: string;
+    analysisScreenshots: AnalysisScreenshotPayload[];
   } | null>(null);
   const finalizeOperationRef = useRef<string | null>(null);
   const publishOperationRef = useRef<string | null>(null);
@@ -1359,6 +1445,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       flowOperationTimerRef.current = window.setTimeout(reportStillRunning, 120000);
     };
     flowOperationTimerRef.current = window.setTimeout(reportStillRunning, 120000);
+  }
+
+  function resumeFlowOperationAfterReconnect(restoredSpec: FlowSpecData | null) {
+    const active = flowOperationRef.current;
+    const currentSpec = restoredSpec || flowSpecRef.current;
+    if (!active || !currentSpec) return;
+    finishFlowOperation(currentSpec.meta?.recording_agent_session);
+    const pending = flowOperationRef.current;
+    if (!pending) return;
+    if (pending.mode === "repair") {
+      send({ type: "auto_fix_flow", operation_id: pending.operationId });
+      return;
+    }
+    send({
+      type: "orchestrate_flow",
+      operation_id: pending.operationId,
+      flow_spec: currentSpec,
+      analysis_screenshots: pending.analysisScreenshots,
+    });
   }
 
   useEffect(() => () => {
@@ -1588,6 +1693,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setCapabilityAddUsage({});
     pendingCapabilityMembershipRef.current = [];
     setJsonDraft("");
+    analysisScreenshotsRef.current = [];
+    setAnalysisScreenshots([]);
+    setLastAnalysisEvidence(null);
     setJsonErr("");
     setLastServerJson("");
     setActiveFlowTab("abilities");
@@ -1724,6 +1832,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           reconnectRestoreOperationRef.current = null;
           setReconnectedSessionNeedsCapture(false);
           if (isReconnect) message.success("录制连接和最新能力已自动恢复");
+          if (isReconnect) resumeFlowOperationAfterReconnect(resumedServerSpec);
         } else if (isReconnect && flowSpecRef.current) {
           flowMutationInFlightRef.current = null;
           flowMutationQueueRef.current = [];
@@ -1817,8 +1926,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           setLastServerJson(JSON.stringify(fs));
           finishFlowOperation(fs.meta?.recording_agent_session, m.operation, m.operation_id);
         }
+        if (restoredAfterReconnect && fs) resumeFlowOperationAfterReconnect(fs);
         if (m.check_report && !hasNewerLocalMutation) setCheckReport(m.check_report);
         else if (hasNewerLocalMutation) setCheckReport(null);
+        if (m.operation === "plan" && m.analysis_evidence) {
+          setLastAnalysisEvidence(m.analysis_evidence);
+        }
         // A successful server mutation produces a new validation snapshot.
         // Do not keep rendering clarifications from an older failed publish;
         // fixed or explicitly ignored warnings must disappear with that old
@@ -1929,12 +2042,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       publishOperationRef.current = null;
       setNamingBusy(false);
       setDescBusy(false);
-      clearFlowOperation();
       flowMutationInFlightRef.current = null;
       flowMutationQueueRef.current = [];
       afterFlowSyncRef.current = null;
       if (intentionalCloseRef.current) {
         setConnectionState("idle");
+        clearFlowOperation();
         return;
       }
       reconnectRestoreOperationRef.current = null;
@@ -2418,6 +2531,51 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     });
     send({ type: "flow_update", edits });
   }
+
+  async function handleAnalysisScreenshotSelection(files: FileList | null) {
+    const selected = Array.from(files || []);
+    if (!selected.length) return;
+    const remaining = Math.max(0, MAX_ANALYSIS_SCREENSHOTS - analysisScreenshotsRef.current.length);
+    if (!remaining) {
+      message.warning("\u6700\u591a\u4e0a\u4f20 4 \u5f20\u53c2\u8003\u622a\u56fe");
+      if (screenshotInputRef.current) screenshotInputRef.current.value = "";
+      return;
+    }
+    if (selected.length > remaining) message.warning(`\u672c\u6b21\u53ea\u6dfb\u52a0\u524d ${remaining} \u5f20\u622a\u56fe`);
+    setAnalysisScreenshotBusy(true);
+    const prepared: AnalysisScreenshot[] = [];
+    try {
+      for (const file of selected.slice(0, remaining)) {
+        try {
+          prepared.push(await prepareAnalysisScreenshot(file));
+        } catch (error) {
+          message.error(`${file.name}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      if (prepared.length) {
+        setAnalysisScreenshots((current) => {
+          const next = [...current, ...prepared].slice(0, MAX_ANALYSIS_SCREENSHOTS);
+          analysisScreenshotsRef.current = next;
+          return next;
+        });
+        setLastAnalysisEvidence(null);
+        message.success(`\u5df2\u6dfb\u52a0 ${prepared.length} \u5f20\u53c2\u8003\u622a\u56fe\uff0c\u4e0b\u6b21\u751f\u6210/\u4f18\u5316\u5c06\u91cd\u65b0\u53c2\u8003`);
+      }
+    } finally {
+      setAnalysisScreenshotBusy(false);
+      if (screenshotInputRef.current) screenshotInputRef.current.value = "";
+    }
+  }
+
+  function removeAnalysisScreenshot(id: string) {
+    setAnalysisScreenshots((current) => {
+      const next = current.filter((item) => item.id !== id);
+      analysisScreenshotsRef.current = next;
+      return next;
+    });
+    setLastAnalysisEvidence(null);
+  }
+
   function orchestrateFlow() {
     if (!flowSpecRef.current || flowOperationRef.current) return;
     if (flowMutationInFlightRef.current || flowMutationQueueRef.current.length) {
@@ -2427,15 +2585,24 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     const currentSpec = flowSpecRef.current;
     if (!currentSpec) return;
+    const screenshots = analysisScreenshotsRef.current.map((item) => ({
+      name: item.name,
+      mime_type: item.mime_type,
+      data: item.data,
+      width: item.width,
+      height: item.height,
+      byte_size: item.byte_size,
+    }));
     flowOperationRef.current = {
       mode: "plan",
       previousUpdatedAt: currentSpec.meta?.recording_agent_session?.updated_at,
       operationId: newCostlyOperationId("plan"),
+      analysisScreenshots: screenshots,
     };
     setOrchestrateBusy(true);
     setAutoFixBusy(true);
     armFlowOperationWatchdog("能力生成");
-    if (!send({ type: "orchestrate_flow", operation_id: flowOperationRef.current.operationId, flow_spec: currentSpec })) clearFlowOperation();
+    if (!send({ type: "orchestrate_flow", operation_id: flowOperationRef.current.operationId, flow_spec: currentSpec, analysis_screenshots: screenshots })) clearFlowOperation();
   }
   function autoFixFlow() {
     if (!flowSpecRef.current || flowOperationRef.current) return;
@@ -2447,6 +2614,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       mode: "repair",
       previousUpdatedAt: flowSpecRef.current.meta?.recording_agent_session?.updated_at,
       operationId: newCostlyOperationId("repair"),
+      analysisScreenshots: [],
     };
     setAutoFixBusy(true);
     armFlowOperationWatchdog("自动修复");
@@ -3073,22 +3241,27 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const hasPublishAdvice = publishIssueGroups.some((group) => group.items.length > 0);
     const publishFailed = result?.ok === false;
     const publishPending = phase === "publishing" && !!publishOperationRef.current;
+    const validationRefreshing = !checkReport;
     return (
       <Card style={{ marginTop: 16 }} styles={{ body: { paddingTop: 8 } }}>
-        {checkReport && capabilities.length > 0 && (
+        {capabilities.length > 0 && (
           <Alert
-            type={publishPending ? "info" : (!publishFailed && checkReport.passed && !hasPublishAdvice ? "success" : "warning")}
+            type={publishPending || validationRefreshing ? "info" : (!publishFailed && checkReport?.passed && !hasPublishAdvice ? "success" : "warning")}
             showIcon
             style={{ marginBottom: 12 }}
             message={publishPending
               ? "正在审核并发布当前流程"
+              : validationRefreshing
+              ? "\u6b63\u5728\u66f4\u65b0\u53d1\u5e03\u6821\u9a8c"
               : publishFailed
               ? "发布未完成"
-              : checkReport.passed
+              : checkReport?.passed
                 ? (hasPublishAdvice ? "基础校验通过，仍有建议项" : "发布校验通过")
                 : "发布校验需要处理"}
             description={
-              <Space direction="vertical" size={2}>
+              !checkReport ? (
+                <Typography.Text style={{ fontSize: 12 }}>{"\u6821\u9a8c\u533a\u57df\u56fa\u5b9a\u4fdd\u7559\uff0c\u6700\u65b0\u7ed3\u679c\u8fd4\u56de\u540e\u5c06\u5728\u8fd9\u91cc\u66f4\u65b0\u3002"}</Typography.Text>
+              ) : <Space direction="vertical" size={2}>
                 <Typography.Text style={{ fontSize: 12 }}>
                   Skill 参数：{checkReport.api_preview?.params?.length ? checkReport.api_preview.params.join(", ") : "无"}
                   {checkReport.dry_run ? ` · Dry-run ${checkReport.dry_run.ok ? "OK" : "需要处理"}` : ""}
@@ -3915,6 +4088,18 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <Tooltip title="基于当前能力、接口和人工修改继续规划，并同步修正字段绑定、枚举来源、依赖和接口闭包">
             <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy || autoFixBusy} onClick={orchestrateFlow}>生成/优化能力</Button>
           </Tooltip>
+          <Button
+            icon={<PictureOutlined />}
+            loading={analysisScreenshotBusy}
+            disabled={analysisScreenshots.length >= MAX_ANALYSIS_SCREENSHOTS || orchestrateBusy || autoFixBusy}
+            onClick={() => screenshotInputRef.current?.click()}
+          >{"\u4e0a\u4f20\u53c2\u8003\u622a\u56fe"}</Button>
+          <input
+            ref={screenshotInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple hidden
+            onChange={(event) => { void handleAnalysisScreenshotSelection(event.target.files); }}
+          />
+          {analysisScreenshots.length > 0 && <Tag color="purple">{"\u5df2\u4e0a\u4f20"} {analysisScreenshots.length} / {MAX_ANALYSIS_SCREENSHOTS}</Tag>}
+          {lastAnalysisEvidence && <Tag color={lastAnalysisEvidence.screenshot_count > 0 ? "success" : "default"}>{"\u6700\u8fd1\u5206\u6790\u5df2\u53c2\u8003"} {lastAnalysisEvidence.screenshot_count} {"\u5f20\u622a\u56fe"}</Tag>}
           <Button icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
           <Button icon={<RobotOutlined />} loading={namingBusy} onClick={() => { setNamingBusy(true); send({ type: "step_naming" }); }}>命名步骤</Button>
           {flowSpec.meta?.capability_generation && <>
@@ -3927,6 +4112,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <Tag color="cyan">识别区间字段 {flowSpec.meta.capability_generation.indexed_range_changes.length}</Tag>}
           </>}
         </Space>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>{"\u622a\u56fe\u53ef\u9009\uff1b\u4e0a\u4f20\u540e\uff0c\u6bcf\u6b21\u70b9\u51fb\u751f\u6210/\u4f18\u5316\u90fd\u4f1a\u7ed3\u5408\u622a\u56fe\u4e0e\u5df2\u5f55\u5236\u63a5\u53e3\u91cd\u65b0\u5206\u6790\u3002"}</Typography.Text>
+        {analysisScreenshots.length > 0 && (
+          <Space wrap size={8}>
+            {analysisScreenshots.map((item) => (
+              <div key={item.id} style={{ position: "relative", width: 112, height: 72, border: "1px solid #d9d9d9", borderRadius: 6, overflow: "hidden", background: "#fafafa" }}>
+                <img src={item.preview_url} alt={item.name} title={item.name} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                <Button type="primary" danger size="small" shape="circle" icon={<DeleteOutlined />} aria-label={"\u5220\u9664\u622a\u56fe"} onClick={() => removeAnalysisScreenshot(item.id)} style={{ position: "absolute", right: 3, top: 3, transform: "scale(.82)" }} />
+              </div>
+            ))}
+          </Space>
+        )}
         {!capabilities.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有能力编排" /> : (
           <Collapse
             size="small"

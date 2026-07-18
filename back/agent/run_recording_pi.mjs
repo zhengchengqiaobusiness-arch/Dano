@@ -63,7 +63,7 @@ function resolveModel() {
         id: modelId,
         name: modelId,
         reasoning: false,
-        input: ["text"],
+        input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: envInt("DANO_PI_CONTEXT_WINDOW", 128000, 1024),
         maxTokens: envInt("DANO_PI_MAX_TOKENS", 8192, 1),
@@ -146,6 +146,24 @@ function promptWasAppended(session, startIndex, text) {
   ));
 }
 
+function normalizePromptImages(value) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new Error("prompt.images must be an array");
+  if (value.length > 4) throw new Error("prompt.images supports at most 4 images");
+  const allowed = new Set(["image/jpeg", "image/png", "image/webp"]);
+  return value.map((image, index) => {
+    if (!image || typeof image !== "object" || image.type !== "image") {
+      throw new Error(`prompt image ${index + 1} must be an image object`);
+    }
+    const data = typeof image.data === "string" ? image.data : "";
+    const mimeType = typeof image.mimeType === "string" ? image.mimeType.toLowerCase() : "";
+    if (!data || data.length > 3_000_000 || !allowed.has(mimeType)) {
+      throw new Error(`prompt image ${index + 1} is invalid or too large`);
+    }
+    return { type: "image", data, mimeType };
+  });
+}
+
 async function startSession(command) {
   if (active) throw new Error("a recording Pi session is already active; close it before starting another");
   if (promptInFlight) throw new Error("cannot start a session while a prompt is running");
@@ -225,7 +243,12 @@ async function runPrompt(command) {
       void session.abort().catch((abortError) => log("terminal submission abort failed", abortError));
     },
   });
-  const promptOptions = { expandPromptTemplates: false, source: "rpc" };
+  const images = normalizePromptImages(command.images);
+  const promptOptions = {
+    expandPromptTemplates: false,
+    source: "rpc",
+    ...(images.length ? { images } : {}),
+  };
   const startIndex = session.messages.length;
   let work = session.prompt(command.text, promptOptions);
   promptInFlight = work;
@@ -282,6 +305,7 @@ async function runPrompt(command) {
       : (submissionLimitError ? "submission_limit" : (promptCancelled ? "cancelled" : "completed")),
     ...(!acceptedSubmission && submissionLimitError ? { error: submissionLimitError } : {}),
     ...(acceptedSubmission ? { accepted_submission: acceptedSubmission } : {}),
+    image_count: images.length,
     final_text: lastAssistantText(session).slice(0, 100000),
     usage: stats.tokens,
     session: stats,

@@ -112,6 +112,9 @@ async def test_recording_pi_session_reuses_one_process_and_one_session(monkeypat
         tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_ONE, session_root=tmp_path,
     )
     await client.start()
+    client.bind_analysis_images([
+        {"type": "image", "data": "aW1hZ2U=", "mimeType": "image/png"},
+    ])
     first = await client.prompt("执行规划")
     second = await client.prompt("执行修复")
 
@@ -120,6 +123,10 @@ async def test_recording_pi_session_reuses_one_process_and_one_session(monkeypat
     assert [command["type"] for command in process.stdin.commands] == [
         "start_session", "prompt", "prompt",
     ]
+    assert process.stdin.commands[1]["images"] == [
+        {"type": "image", "data": "aW1hZ2U=", "mimeType": "image/png"},
+    ]
+    assert process.stdin.commands[2]["images"] == []
     assert runs.is_valid(client.run_id, client.token)
     assert materials.get(client.run_id, "A-OA") is not None
 

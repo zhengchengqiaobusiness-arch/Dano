@@ -157,6 +157,7 @@ class RecordingPiSession:
         self._state_lock = asyncio.Lock()
         self._closed = False
         self.flow_spec: Any = None
+        self._analysis_images: list[dict[str, str]] = []
         self.last_submission_kind = ""
         self.last_review: dict[str, Any] = {}
 
@@ -261,7 +262,12 @@ class RecordingPiSession:
             raise RecordingPiError("录制 Pi Session 尚未启动")
         async with self._prompt_lock:
             try:
-                event = await self._command("prompt", timeout_s=timeout_s, text=text)
+                images = [dict(image) for image in self._analysis_images]
+                self._analysis_images = []
+                event = await self._command(
+                    "prompt", timeout_s=timeout_s, text=text,
+                    images=images,
+                )
                 # A terminal tool submission has already been persisted by the
                 # Python bridge. It is authoritative even if an older sidecar
                 # also reports a late limiter/cancel status in the same event.
@@ -287,13 +293,29 @@ class RecordingPiSession:
     def bind_flow_spec(self, spec: Any) -> None:
         """Bind the websocket's authoritative FlowSpec before a Pi turn."""
         self.flow_spec = spec.model_copy(deep=True)
+        self._analysis_images = []
         self.last_submission_kind = ""
         # A review is evidence for one exact FlowSpec version. Any subsequent
         # bind invalidates it, including a user edit that happens to reuse the
         # same websocket and Pi conversation.
         self.last_review = {}
 
+
+    def bind_analysis_images(self, images: list[dict] | None) -> None:
+        """Bind validated screenshot evidence for the next Pi prompt."""
+        normalized: list[dict[str, str]] = []
+        for image in images or []:
+            if not isinstance(image, dict):
+                raise ValueError("Pi analysis image must be an object")
+            data = str(image.get("data") or "")
+            mime_type = str(image.get("mimeType") or "")
+            if image.get("type") != "image" or not data or not mime_type.startswith("image/"):
+                raise ValueError("Pi analysis image is invalid")
+            normalized.append({"type": "image", "data": data, "mimeType": mime_type})
+        self._analysis_images = normalized
+
     def current_flow_spec(self) -> Any:
+
         if self.flow_spec is None:
             raise RecordingPiError("录制 FlowSpec 尚未绑定到 Pi Session")
         return self.flow_spec.model_copy(deep=True)
