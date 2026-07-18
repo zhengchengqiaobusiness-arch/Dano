@@ -152,11 +152,20 @@
       request.questions.length > 1
     ),
   );
+  const isActionableConfirmation = $derived(
+    Boolean(
+      isConfirmation &&
+      interaction &&
+      (interaction.state === "awaiting_confirmation" ||
+        interaction.state === "revising") &&
+      interaction.allowedActions.length > 0
+    ),
+  );
   const focusActionable = $derived(
-    isFocusableGroupedForm &&
+    active &&
     block.toolStatus === "pending" &&
-    !askUserQuestionResult(block.resultDetails) &&
-    active,
+    ((isFocusableGroupedForm && !askUserQuestionResult(block.resultDetails)) ||
+      isActionableConfirmation),
   );
   const requestKey = $derived(
     request ? JSON.stringify([request, interaction]) : "",
@@ -287,10 +296,7 @@
         if (!componentAlive || presentationToolCallId !== toolCallId) return;
         applyAuthoritativeInteraction(response);
         if (!response.success) throw new Error(response.error);
-        if (focusActionable && cardElement) {
-          focusedToolCallId = toolCallId;
-          onFocusChange?.({ toolCallId, element: cardElement });
-        }
+        requestFocus(toolCallId);
       })
       .catch(cause => {
         if (presentationToolCallId === toolCallId) {
@@ -298,6 +304,20 @@
           error = cause instanceof Error ? cause.message : String(cause);
         }
       });
+  });
+
+  $effect(() => {
+    const toolCallId = block.toolCallId;
+    if (
+      !isConfirmation ||
+      !focusActionable ||
+      !toolCallId ||
+      focusedToolCallId ||
+      presentationToolCallId
+    ) {
+      return;
+    }
+    requestFocus(toolCallId);
   });
 
   $effect(() => {
@@ -313,6 +333,12 @@
       onFocusChange?.({ toolCallId: focusedToolCallId, element: null });
     }
   });
+
+  function requestFocus(toolCallId: string): void {
+    if (!componentAlive || !focusActionable || !cardElement) return;
+    focusedToolCallId = toolCallId;
+    onFocusChange?.({ toolCallId, element: cardElement });
+  }
 
   $effect(() => {
     if (!pending) {
