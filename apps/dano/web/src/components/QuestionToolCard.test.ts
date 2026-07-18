@@ -364,6 +364,51 @@ describe("QuestionToolCard", () => {
     }
   });
 
+  it("keeps the confirmation focused while Return to Modify projects revisions", async () => {
+    vi.useFakeTimers();
+    const present = vi.fn(async () => ({ success: true } as never));
+    const revise = vi.fn(async () => ({
+      success: true,
+      data: revisingMultiFormBlock().formInteraction,
+    } as never));
+    const focusChange = vi.fn();
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: multiFormConfirmationBlock(),
+        active: true,
+        onPresent: present,
+        onRespond: present,
+        onRevise: revise,
+        onSubmitRevision: present,
+        onFocusChange: focusChange,
+      },
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(400);
+      await tick();
+      await tick();
+
+      const card = target.querySelector("article");
+      [...target.querySelectorAll<HTMLButtonElement>("button")]
+        .find(button => button.textContent?.trim() === "返回修改")
+        ?.click();
+      await tick();
+      await tick();
+
+      expect(revise).toHaveBeenCalledWith("confirm-two", 1);
+      expect(target.querySelectorAll('input[type="text"]')).toHaveLength(2);
+      expect(focusChange).toHaveBeenLastCalledWith({
+        toolCallId: "confirm-two",
+        element: card,
+      });
+    } finally {
+      unmount(component);
+      vi.useRealTimers();
+    }
+  });
+
   it("presents a confirmation without locally authorizing actions before projection", async () => {
     vi.useFakeTimers();
     const response = vi.fn(async () => ({ success: true } as never));
@@ -409,6 +454,7 @@ describe("QuestionToolCard", () => {
         forms: [],
       },
     } as never));
+    const focusChange = vi.fn();
     const target = document.createElement("div");
     const component = mount(QuestionToolCard, {
       target,
@@ -419,6 +465,7 @@ describe("QuestionToolCard", () => {
         onRespond: response,
         onRevise: response,
         onSubmitRevision: response,
+        onFocusChange: focusChange,
       },
     });
     try {
@@ -430,6 +477,10 @@ describe("QuestionToolCard", () => {
       expect(target.textContent).toContain("返回修改");
       expect(target.textContent).toContain("取消");
       expect(target.textContent).toContain("确认");
+      expect(focusChange).toHaveBeenCalledWith({
+        toolCallId: "confirm-two",
+        element: target.querySelector("article"),
+      });
     } finally {
       unmount(component);
       vi.useRealTimers();
@@ -526,7 +577,14 @@ describe("QuestionToolCard", () => {
 
   it("submits all projected form revisions while preserving unchanged values", async () => {
     const response = vi.fn(async () => ({ success: true } as never));
-    const submitRevision = vi.fn(async () => ({ success: true } as never));
+    const submitRevision = vi.fn(async () => ({
+      success: true,
+      data: {
+        ...multiFormConfirmationBlock().formInteraction,
+        revision: 3,
+      },
+    } as never));
+    const focusChange = vi.fn();
     const block = revisingMultiFormBlock();
     const target = document.createElement("div");
     const component = mount(QuestionToolCard, {
@@ -538,9 +596,15 @@ describe("QuestionToolCard", () => {
         onRespond: response,
         onRevise: response,
         onSubmitRevision: submitRevision,
+        onFocusChange: focusChange,
       },
     });
     await tick();
+
+    expect(focusChange).toHaveBeenCalledWith({
+      toolCallId: "confirm-two",
+      element: target.querySelector("article"),
+    });
 
     const inputs = target.querySelectorAll<HTMLInputElement>('input[type="text"]');
     expect([...inputs].map(input => input.value)).toEqual(["家庭事务", "上海"]);
@@ -551,6 +615,8 @@ describe("QuestionToolCard", () => {
       new SubmitEvent("submit", { bubbles: true, cancelable: true }),
     );
     await tick();
+    await tick();
+    await tick();
 
     expect(submitRevision).toHaveBeenCalledWith("confirm-two", 2, {
       "form-a": { reason: "照顾家人" },
@@ -558,6 +624,12 @@ describe("QuestionToolCard", () => {
     });
     expect(target.textContent).toContain("请假申请");
     expect(target.textContent).toContain("出差申请");
+    expect(target.querySelectorAll('input[type="text"]')).toHaveLength(0);
+    expect(target.textContent).toContain("返回修改");
+    expect(focusChange).toHaveBeenLastCalledWith({
+      toolCallId: "confirm-two",
+      element: target.querySelector("article"),
+    });
 
     unmount(component);
   });
@@ -617,55 +689,73 @@ describe("QuestionToolCard", () => {
     unmount(component);
   });
 
-  it("recovers an already-terminal response without local inference", async () => {
-    vi.useFakeTimers();
-    const success = vi.fn(async () => ({ success: true } as never));
-    const terminal = vi.fn(async () => ({
-      success: false,
-      error: "already terminal",
-      data: {
-        code: "already_terminal",
-        interaction: {
-          interactionId: "confirm-two",
-          state: "confirmed",
-          revision: 2,
-          allowedActions: [],
-          forms: [],
+  it.each([
+    ["confirmed", "已确认"],
+    ["cancelled", "已取消"],
+    ["interrupted", "已中断"],
+  ] as const)(
+    "exits focus when the authoritative response is %s",
+    async (terminalState, terminalLabel) => {
+      vi.useFakeTimers();
+      const success = vi.fn(async () => ({ success: true } as never));
+      const terminal = vi.fn(async () => ({
+        success: false,
+        error: "already terminal",
+        data: {
+          code: "already_terminal",
+          interaction: {
+            interactionId: "confirm-two",
+            state: terminalState,
+            revision: 2,
+            allowedActions: [],
+            forms: [],
+          },
         },
-      },
-    } as never));
-    const target = document.createElement("div");
-    const component = mount(QuestionToolCard, {
-      target,
-      props: {
-        block: multiFormConfirmationBlock(),
-        active: true,
-        onPresent: success,
-        onRespond: terminal,
-        onRevise: success,
-        onSubmitRevision: success,
-      },
-    });
-    try {
-      await vi.advanceTimersByTimeAsync(400);
-      await tick();
-      [...target.querySelectorAll<HTMLButtonElement>("button")]
-        .find(button => button.textContent?.trim() === "确认")
-        ?.click();
-      await tick();
-      await tick();
+      } as never));
+      const focusChange = vi.fn();
+      const target = document.createElement("div");
+      const component = mount(QuestionToolCard, {
+        target,
+        props: {
+          block: multiFormConfirmationBlock(),
+          active: true,
+          onPresent: success,
+          onRespond: terminal,
+          onRevise: success,
+          onSubmitRevision: success,
+          onFocusChange: focusChange,
+        },
+      });
+      try {
+        await vi.advanceTimersByTimeAsync(400);
+        await tick();
+        await tick();
+        expect(focusChange).toHaveBeenCalledWith({
+          toolCallId: "confirm-two",
+          element: target.querySelector("article"),
+        });
+        [...target.querySelectorAll<HTMLButtonElement>("button")]
+          .find(button => button.textContent?.trim() === "确认")
+          ?.click();
+        await tick();
+        await tick();
 
-      const actions = target.querySelectorAll<HTMLButtonElement>(
-        ".question-actions button",
-      );
-      expect(actions).toHaveLength(1);
-      expect(actions[0]?.textContent).toContain("已确认");
-      expect(actions[0]?.disabled).toBe(true);
-    } finally {
-      unmount(component);
-      vi.useRealTimers();
-    }
-  });
+        const actions = target.querySelectorAll<HTMLButtonElement>(
+          ".question-actions button",
+        );
+        expect(actions).toHaveLength(1);
+        expect(actions[0]?.textContent).toContain(terminalLabel);
+        expect(actions[0]?.disabled).toBe(true);
+        expect(focusChange).toHaveBeenLastCalledWith({
+          toolCallId: "confirm-two",
+          element: null,
+        });
+      } finally {
+        unmount(component);
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("omits old Submitted Forms while their interaction is revising", async () => {
     const response = vi.fn(async () => ({ success: true } as never));
