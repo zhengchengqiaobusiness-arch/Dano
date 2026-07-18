@@ -2103,3 +2103,67 @@ def test_short_readonly_value_can_link_by_exact_wire_path_without_hijacking_edit
     ]
     assert remaining.source_kind == "previous_response"
     assert reported.source_kind == "user_input"
+
+def test_field_contract_axes_generalize_to_nested_unrelated_system():
+    option_read = {
+        "method": "POST", "url": "https://asset.test/gateway/dispatch",
+        "json": {"payload": {"rows": [{
+            "code": "A-7", "title": "主资产",
+            "quota": {"left": 5}, "group": {"key": "g-2"},
+            "owner": {"userId": "u-9"},
+        }]}},
+        "role": "read_option", "trigger_op": "click",
+        "trigger_locator": "[data-field=assetCode]",
+    }
+    submit = _post("https://asset.test/gateway/dispatch", {
+        "assetCode": "A-7", "scheduleDay": "2026-08-01",
+        "quotaLeft": 5, "amount": 5, "groupKey": "g-2", "ownerId": "u-9",
+    })
+    evidence = [
+        {"label": "资产名称", "field_aliases": ["assetCode"], "control_kind": "select", "op": "select"},
+        {"label": "执行日期", "field_aliases": ["scheduleDay"], "control_kind": "date", "op": "fill"},
+        {"label": "剩余额度", "field_aliases": ["quotaLeft"], "control_kind": "number", "op": "snapshot", "disabled": True},
+        {"label": "申报数量", "field_aliases": ["amount"], "control_kind": "number", "op": "snapshot"},
+        {"label": "业务组", "field_aliases": ["groupKey"], "control_kind": "select", "op": "snapshot", "disabled": True},
+        {"label": "负责人", "field_aliases": ["ownerId"], "control_kind": "select", "op": "snapshot", "disabled": True},
+    ]
+
+    step = flow_spec_module._build_step_from_capture(
+        submit, reads=[option_read],
+        samples={"资产名称": "主资产", "执行日期": "2026-08-01", "申报数量": "5"},
+        storage_state=None, required_labels={"资产名称", "执行日期"},
+        page_enum_options={}, step_index=1, field_evidence=evidence,
+    )
+    params = {param.path: param for param in step.params}
+
+    assert (params["assetCode"].key, params["assetCode"].type, params["assetCode"].category, params["assetCode"].source_kind) == (
+        "资产名称", "enum", "user_param", "api_option",
+    )
+    assert (params["scheduleDay"].key, params["scheduleDay"].type, params["scheduleDay"].category, params["scheduleDay"].source_kind) == (
+        "执行日期", "date", "user_param", "user_input",
+    )
+    assert (params["amount"].key, params["amount"].type, params["amount"].category, params["amount"].source_kind) == (
+        "申报数量", "number", "user_param", "user_input",
+    )
+    assert params["amount"].default_value == 5
+    expected = {
+        "quotaLeft": ("剩余额度", "number", "quota.left"),
+        "groupKey": ("业务组", "string", "group.key"),
+        "ownerId": ("负责人", "string", "owner.userId"),
+    }
+    for path, (name, field_type, response_path) in expected.items():
+        param = params[path]
+        assert (param.key, param.type, param.category, param.source_kind) == (
+            name, field_type, "runtime_var", "selected_option_field",
+        )
+        assert param.exposed_to_user is False
+        assert param.editable is False
+        assert param.required is False
+        assert any(item.get("kind") == "selected_option_projection" for item in param.evidence)
+        assert param.source["response_path"] == response_path
+
+    binding = next(item for item in step.selects if item.path == "assetCode")
+    assert binding.field_projections == {
+        "quotaLeft": "quota.left", "groupKey": "group.key", "ownerId": "owner.userId",
+    }
+    assert "amount" not in binding.field_projections

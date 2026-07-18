@@ -1272,18 +1272,45 @@ def _attach_select_field_projections(
 ) -> None:
     """Map sibling request fields from the same selected option object.
 
-    A project selector often returns the project plus remaining quota, team,
-    work type and approver. Exact wire-name agreement is required, so equal
-    short values in unrelated editable controls are never projected.
+    A selector often returns the chosen record plus sibling business fields.
+    Projection requires both equal captured values and a unique structural path
+    match; endpoint names and vendor-specific field names are never consulted.
     """
     reads_by_path = {
         _request_path({"url": str(read.get("url") or read.get("path") or "")}): read
         for read in reads or [] if isinstance(read, dict)
     }
 
-    def norm_leaf(value: Any) -> str:
-        leaf = re.split(r"\.|\[\d+\]", str(value or ""))[-1]
-        return re.sub(r"[^a-z0-9]+", "", leaf.lower())
+    def path_parts(value: Any) -> list[str]:
+        raw_parts = [part for part in re.split(r"\.|\[\d+\]", str(value or "")) if part]
+        return [re.sub(r"[^\w]+", "", part, flags=re.UNICODE).replace("_", "").casefold() for part in raw_parts]
+
+    def path_tokens(value: Any) -> list[str]:
+        text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value or ""))
+        return [token.casefold() for token in re.findall(r"[A-Za-z]+|\d+|[\u4e00-\u9fff]+", text)]
+
+    def projection_path_score(source_path: str, target_path: str) -> int:
+        source_parts = path_parts(source_path)
+        target_parts = path_parts(target_path)
+        if not source_parts or not target_parts:
+            return 0
+        source_leaf = source_parts[-1]
+        target_leaf = target_parts[-1]
+        if source_leaf == target_leaf:
+            return 100
+        if len(source_parts) >= 2 and "".join(source_parts[-2:]) == target_leaf:
+            return 90
+        source_tokens = path_tokens(source_path)
+        target_tokens = path_tokens(target_path)
+        if source_tokens and target_tokens and source_tokens[-len(target_tokens):] == target_tokens:
+            return 85
+        if (
+            target_tokens and target_tokens[-1] == "id"
+            and source_tokens and source_tokens[-1] == "id"
+            and set(target_tokens[:-1]).issubset(set(source_tokens[:-1]))
+        ):
+            return 75
+        return 0
 
     for select in selects or []:
         source_url = str(select.get("source_url") or "")
@@ -1311,16 +1338,16 @@ def _attach_select_field_projections(
             target_path = str(field.get("path") or "")
             if not target_path or target_path in excluded or field.get("recorded_user_input"):
                 continue
-            target_leaf = norm_leaf(target_path)
-            if not target_leaf:
-                continue
             field_value = str(field.get("value") if field.get("value") is not None else "")
             candidates = [
-                source_path for source_path, _tokens, raw_value, _raw in _leaf_paths(selected_item)
-                if str(raw_value) == field_value and norm_leaf(source_path) == target_leaf
+                (projection_path_score(source_path, target_path), source_path)
+                for source_path, _tokens, raw_value, _raw in _leaf_paths(selected_item)
+                if str(raw_value) == field_value
             ]
-            if len(candidates) == 1:
-                projections[target_path] = candidates[0]
+            best_score = max((score for score, _path in candidates), default=0)
+            best_paths = [source_path for score, source_path in candidates if score == best_score and score >= 75]
+            if len(best_paths) == 1:
+                projections[target_path] = best_paths[0]
         if projections:
             select["field_projections"] = projections
 
@@ -1622,8 +1649,16 @@ def _build_step_from_capture(
                 "target_path": target_path,
             }
             target.exposed_to_user = False
-            target.editable = True
+            target.editable = False
+            target.required = False
             target.need_human_confirm = False
+            target.evidence.append({
+                "kind": "selected_option_projection",
+                "selector_path": binding.path,
+                "source_url": binding.source_url,
+                "response_path": response_path,
+                "target_path": target_path,
+            })
             target.reason = f"该字段来自选择项接口中已选记录的 `{response_path}`，运行期随选择自动写入"
 
     # sample_inputs
@@ -6475,14 +6510,18 @@ def _write_operation_key(step: FlowStep) -> str:
     """Prefer grounded visible-action boundaries over vendor URL conventions."""
     meta = step.source_meta or {}
     action_ref = str(meta.get("trigger_transaction_id") or meta.get("trigger_action_id") or "").strip()
+    locator = re.sub(r"\s+", "", str(meta.get("trigger_locator") or "").casefold())
     trigger_op = str(meta.get("trigger_op") or "").lower()
     confidence = str(meta.get("causality_confidence") or "high").lower()
-    if action_ref and trigger_op in {"click", "submit", "select", "pick"} and confidence in {"high", "medium"}:
+    if (action_ref or locator) and trigger_op in {"click", "submit", "select", "pick"} and confidence in {"high", "medium"}:
+        page_scope = str(
+            meta.get("page_id") or meta.get("page_url") or meta.get("document_url") or ""
+        )
         identity = "|".join((
-            str(meta.get("page_id") or ""),
-            str(meta.get("frame_id") or ""),
-            action_ref,
-            re.sub(r"\s+", "", str(meta.get("trigger_locator") or "").casefold()),
+            page_scope,
+            str(meta.get("frame_id") or meta.get("frame_url") or ""),
+            action_ref or f"locator:{locator}",
+            locator,
         ))
         return f"action_{hashlib.sha1(identity.encode('utf-8')).hexdigest()[:10]}"
     return _capability_business_key(step)
@@ -6507,6 +6546,47 @@ def _partition_steps_by_business_key(
     return list(groups.items())
 
 
+def _merge_partition_groups_by_links(
+    groups: list[tuple[str, list[FlowStep]]],
+    links: list[FlowLink],
+) -> list[tuple[str, list[FlowStep]]]:
+    """Merge only action groups connected by real data dependencies."""
+    if len(groups) < 2:
+        return groups
+    parents = list(range(len(groups)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    group_by_step = {
+        step.step_id: index
+        for index, (_key, steps) in enumerate(groups)
+        for step in steps if step.step_id
+    }
+    for link in links or []:
+        source_group = group_by_step.get(link.source_step_id)
+        target_group = group_by_step.get(link.target_step_id)
+        if source_group is not None and target_group is not None:
+            union(source_group, target_group)
+
+    merged: dict[int, tuple[list[str], list[FlowStep]]] = {}
+    for index, (key, steps) in enumerate(groups):
+        root = find(index)
+        keys, grouped_steps = merged.setdefault(root, ([], []))
+        keys.append(key)
+        seen = {step.step_id for step in grouped_steps}
+        grouped_steps.extend(step for step in steps if step.step_id not in seen)
+    return [("__".join(keys), steps) for keys, steps in merged.values()]
+
+
 def _build_complex_default_capabilities(
     spec: FlowSpec,
     status_steps: list[FlowStep],
@@ -6515,31 +6595,19 @@ def _build_complex_default_capabilities(
     """Split only clearly independent business domains, preserving old fallback."""
     all_submit_ids = {step.step_id for step in (_submit_capability_steps(spec) if write_steps else [])}
     independent_status = [step for step in status_steps if step.step_id not in all_submit_ids]
-    query_groups = _partition_steps_by_business_key(independent_status, query_operations=True)
-    write_groups = _partition_steps_by_business_key(write_steps, write_operations=True)
+    query_groups = _merge_partition_groups_by_links(
+        _partition_steps_by_business_key(independent_status, query_operations=True),
+        spec.links,
+    )
+    write_groups = _merge_partition_groups_by_links(
+        _partition_steps_by_business_key(write_steps, write_operations=True),
+        spec.links,
+    )
 
-    # A response dependency between write anchors means one transactional
-    # chain, even if endpoint prefixes differ; never split that chain.
-    write_key_by_id = {
-        step.step_id: key for key, group in write_groups for step in group if step.step_id
-    }
-    cross_write_dependency = any(
-        link.source_step_id in write_key_by_id
-        and link.target_step_id in write_key_by_id
-        and write_key_by_id[link.source_step_id] != write_key_by_id[link.target_step_id]
-        for link in (spec.links or [])
-    )
-    query_key_by_id = {
-        step.step_id: key for key, group in query_groups for step in group if step.step_id
-    }
-    cross_query_dependency = any(
-        link.source_step_id in query_key_by_id
-        and link.target_step_id in query_key_by_id
-        and query_key_by_id[link.source_step_id] != query_key_by_id[link.target_step_id]
-        for link in (spec.links or [])
-    )
-    split_queries = len(query_groups) > 1 and not cross_query_dependency
-    split_writes = len(write_groups) > 1 and not cross_write_dependency
+    # Dependency-connected action groups are one transaction. Independent
+    # actions remain separate even when another pair is connected.
+    split_queries = len(query_groups) > 1
+    split_writes = len(write_groups) > 1
     if not split_queries and not split_writes:
         return []
 

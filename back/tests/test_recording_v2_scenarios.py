@@ -1557,3 +1557,50 @@ def test_generic_write_endpoint_splits_by_grounded_visible_actions():
 
     assert len(capabilities) == 2
     assert {tuple(cap.step_ids) for cap in capabilities} == {("save",), ("submit",)}
+
+def test_generic_write_endpoint_splits_from_locator_without_action_ids():
+    steps = [
+        FlowStep(
+            step_id="approve", method="POST", path="/gateway/dispatch",
+            source_meta={
+                "trigger_op": "click", "trigger_locator": "button[data-op=approve]",
+                "page_url": "/orders/detail", "causality_confidence": "medium",
+            },
+        ),
+        FlowStep(
+            step_id="reject", method="POST", path="/gateway/dispatch",
+            source_meta={
+                "trigger_op": "click", "trigger_locator": "button[data-op=reject]",
+                "page_url": "/orders/detail", "causality_confidence": "medium",
+            },
+        ),
+    ]
+
+    capabilities = build_default_flow_capabilities(FlowSpec(steps=steps))
+
+    assert len(capabilities) == 2
+    assert {tuple(cap.step_ids) for cap in capabilities} == {("approve",), ("reject",)}
+
+
+def test_dependency_merges_only_connected_action_groups_and_keeps_independent_capability():
+    def write(step_id: str) -> FlowStep:
+        return FlowStep(
+            step_id=step_id, method="POST", path="/rpc/execute",
+            source_meta={
+                "trigger_op": "click", "trigger_locator": f"button[data-op={step_id}]",
+                "page_id": "workspace", "causality_confidence": "high",
+            },
+        )
+
+    spec = FlowSpec(
+        steps=[write("prepare"), write("confirm"), write("archive")],
+        links=[FlowLink(
+            link_id="prepare-confirm", source_step_id="prepare", source_path="data.token",
+            target_step_id="confirm", target_path="token", confidence=0.99,
+        )],
+    )
+
+    capabilities = build_default_flow_capabilities(spec)
+    memberships = {frozenset(cap.step_ids) for cap in capabilities}
+
+    assert memberships == {frozenset({"prepare", "confirm"}), frozenset({"archive"})}

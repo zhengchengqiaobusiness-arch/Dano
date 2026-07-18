@@ -99,6 +99,8 @@ def test_as_list_payload_detects_common_shapes():
     assert as_list_payload([{"id": 1}]) == [{"id": 1}]                      # 裸数组
     assert as_list_payload({"rows": [{"id": 1}], "total": 1}) == [{"id": 1}]  # rows 包装
     assert as_list_payload({"data": {"records": [{"id": 9}]}}) == [{"id": 9}]  # 两层 data.records
+    assert as_list_payload({"payload": {"resultSet": [{"id": 7}]}}) == [{"id": 7}]
+    assert as_list_payload({"payload": {"left": [{"id": 1}], "right": [{"id": 2}]}}) is None
     assert as_list_payload({"code": 200, "msg": "ok"}) is None              # 无列表
     assert as_list_payload([]) is None                                      # 空列表无意义
     assert as_list_payload("x") is None

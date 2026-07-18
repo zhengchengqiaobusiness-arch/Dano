@@ -219,9 +219,24 @@ def as_list_payload(data):
                     v2 = v.get(k2)
                     if isinstance(v2, list) and v2:
                         return v2
-        for v in data.values():                         # 兜底:任意"非空对象数组"键(覆盖未知包装键)
-            if isinstance(v, list) and v and isinstance(v[0], dict):
-                return v
+        # Unknown vendors frequently wrap rows under payload/options/resultSet.
+        # Recurse conservatively and accept only one object-list candidate; if
+        # multiple unrelated lists exist, ambiguity stays unresolved.
+        candidates: list[list] = []
+
+        def collect(node, depth: int = 0) -> None:
+            if depth > 4 or not isinstance(node, dict):
+                return
+            for value in node.values():
+                if isinstance(value, list) and value and isinstance(value[0], dict):
+                    candidates.append(value)
+                elif isinstance(value, dict):
+                    collect(value, depth + 1)
+
+        collect(data)
+        unique = {id(candidate): candidate for candidate in candidates}
+        if len(unique) == 1:
+            return next(iter(unique.values()))
     return None
 
 
