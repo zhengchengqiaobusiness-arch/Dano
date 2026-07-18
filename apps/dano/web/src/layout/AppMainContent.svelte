@@ -26,7 +26,6 @@
   import {
     createCenterFocusStage,
     type CenterFocusStage,
-    isDesktopCenterFocusViewport,
   } from "./centerFocusStage";
 
   let transcriptRef: ChatTranscript | null = $state(null);
@@ -195,7 +194,6 @@
 
   function handleQuestionFocusChange(target: QuestionFocusChange): void {
     if (!centerColumn) return;
-    if (target.element && !isDesktopCenterFocusViewport()) return;
     centerFocusStage ??= createCenterFocusStage(
       centerColumn,
       active => centerFocusActive = active,
@@ -399,6 +397,36 @@
 
     .center-column :global(.composer-bar) {
       transition: opacity 80ms linear;
+    }
+  }
+
+  @media (max-width: 900px) {
+    .center-column.center-focus-active :global(.composer-bar) {
+      transform: translateY(
+        calc(100% + max(24px, env(safe-area-inset-bottom, 0px)))
+      );
+    }
+
+    .center-column :global(.center-focused-card) {
+      scroll-padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+      scrollbar-gutter: stable;
+    }
+
+    .center-column :global(.center-focused-card.center-focus-mobile-card) {
+      left: var(--center-focus-left);
+      top: var(--center-focus-top);
+      width: var(--center-focus-width);
+      max-height: var(--center-focus-max-height);
+    }
+
+    .center-column :global(.center-focused-card .question-actions) {
+      position: sticky;
+      bottom: 0;
+      z-index: 1;
+      margin-top: auto;
+      padding-top: 12px;
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      background: var(--panel);
     }
   }
 

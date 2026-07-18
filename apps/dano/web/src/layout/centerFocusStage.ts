@@ -22,7 +22,8 @@ interface ActivePresentation {
   sourceRect: DOMRect;
 }
 
-const SAFE_MARGIN = 24;
+const DESKTOP_SAFE_MARGIN = 24;
+const MOBILE_SAFE_MARGIN = 14;
 const WIDTH_SCALE = 1.2;
 
 export function createCenterFocusStage(
@@ -55,19 +56,54 @@ export function createCenterFocusStage(
     const { element } = presentation.target;
     const rootRect = root.getBoundingClientRect();
     const cardRect = presentation.sourceRect;
+    presentation.anchor.style.height = `${cardRect.height}px`;
+
+    if (!isDesktopCenterFocusViewport()) {
+      const margin = MOBILE_SAFE_MARGIN;
+      element.classList.add("center-focus-mobile-card");
+      element.style.removeProperty("left");
+      element.style.removeProperty("top");
+      element.style.removeProperty("width");
+      element.style.removeProperty("max-height");
+      element.style.setProperty(
+        "--center-focus-left",
+        `calc(${rootRect.left}px + ${margin}px + env(safe-area-inset-left, 0px))`,
+      );
+      element.style.setProperty(
+        "--center-focus-top",
+        `calc(max(${rootRect.top}px, var(--mobile-header-offset, calc(env(safe-area-inset-top, 0px) + 50px))) + ${margin}px)`,
+      );
+      element.style.setProperty(
+        "--center-focus-width",
+        `calc(${rootRect.width}px - ${margin * 2}px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px))`,
+      );
+      element.style.setProperty(
+        "--center-focus-max-height",
+        `calc(min(${rootRect.bottom}px, 100dvh) - max(${rootRect.top}px, var(--mobile-header-offset, calc(env(safe-area-inset-top, 0px) + 50px))) - ${margin * 2}px - env(safe-area-inset-bottom, 0px))`,
+      );
+      return;
+    }
+
+    element.classList.remove("center-focus-mobile-card");
+    element.style.removeProperty("--center-focus-left");
+    element.style.removeProperty("--center-focus-top");
+    element.style.removeProperty("--center-focus-width");
+    element.style.removeProperty("--center-focus-max-height");
     const width = Math.max(
       0,
-      Math.min(cardRect.width * WIDTH_SCALE, rootRect.width - SAFE_MARGIN * 2),
+      Math.min(
+        cardRect.width * WIDTH_SCALE,
+        rootRect.width - DESKTOP_SAFE_MARGIN * 2,
+      ),
     );
-    const maxHeight = Math.max(0, rootRect.height - SAFE_MARGIN * 2);
+    const maxHeight = Math.max(0, rootRect.height - DESKTOP_SAFE_MARGIN * 2);
     const visibleHeight = Math.min(cardRect.height, maxHeight);
     const left = rootRect.left + (rootRect.width - width) / 2;
     const top = rootRect.top + Math.max(
-      SAFE_MARGIN,
+      DESKTOP_SAFE_MARGIN,
       (rootRect.height - visibleHeight) / 2,
     );
 
-    presentation.anchor.style.height = `${cardRect.height}px`;
     element.style.left = `${left}px`;
     element.style.top = `${top}px`;
     element.style.width = `${width}px`;
@@ -125,6 +161,7 @@ export function createCenterFocusStage(
       root.querySelector<HTMLElement>("[data-center-focus-transcript]")
         ?.removeAttribute("data-center-focus-locked");
       presentation.target.element.classList.remove("center-focused-card");
+      presentation.target.element.classList.remove("center-focus-mobile-card");
       restoreStyle(presentation.target.element, presentation.cardStyle);
       restoreStyle(presentation.anchor, presentation.anchorStyle);
       if (presentation.composer) {
@@ -147,10 +184,6 @@ export function createCenterFocusStage(
   }
 
   function handleResize(): void {
-    if (!isDesktopCenterFocusViewport()) {
-      hide();
-      return;
-    }
     layout();
   }
 
