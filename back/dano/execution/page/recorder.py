@@ -1577,6 +1577,15 @@ class RecordSession:
                 "page_id": fact.get("page_id"),
                 "frame_id": fact.get("frame_id"),
                 "role": fact.get("role"),
+                **{
+                    key: fact.get(key)
+                    for key in (
+                        "trigger_action_id", "trigger_transaction_id", "trigger_event_id",
+                        "trigger_op", "trigger_locator", "trigger_page_context",
+                        "action_delta_ms", "causality_confidence",
+                    )
+                    if fact.get(key) not in (None, "")
+                },
             }
             self.reads.append(read_fact)
             if self._looks_like_dictionary_items(items) and len(self.dictionary_reads) < 20:

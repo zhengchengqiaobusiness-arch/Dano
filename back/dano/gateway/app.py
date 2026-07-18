@@ -139,8 +139,34 @@ def _analysis_screenshot_guidance(screenshots: list[dict]) -> str:
     )
 
 
+def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
+    evidence_rule = (
+        " For every screenshot-derived field decision, field_semantics must contain the exact recorded step_id and "
+        "wire_path plus public_name, business_type, category, source_kind, confidence, and screenshot evidence. "
+        "Visible fields with no grounded recorded match must go to unresolved_items instead of being invented."
+        if has_screenshots else ""
+    )
+    return (
+        " submit_recording_plan.plan must be {semantic_plan:{business_understanding,request_roles,field_semantics,"
+        "capabilities,capability_relations,unresolved_items},ops:[]}. Never submit flow_spec or plan.flow_spec."
+        + evidence_rule
+    )
+
+
 def _pi_analysis_images(screenshots: list[dict]) -> list[dict]:
     return [{"type": "image", "data": item["data"], "mimeType": item["mimeType"]} for item in screenshots]
+
+
+def _verified_pi_image_count(result: dict, expected: int) -> int:
+    try:
+        delivered = int(result.get("image_count") or 0)
+    except (TypeError, ValueError):
+        delivered = -1
+    if delivered != expected:
+        raise RuntimeError(
+            f"截图证据未完整送达 Pi 模型：expected={expected}, delivered={delivered}"
+        )
+    return delivered
 
 
 class _RecordingConnectionLease:
@@ -1543,12 +1569,15 @@ async def record_ws(ws: WebSocket) -> None:
                     pi_session = await _ensure_recording_pi()
                     pi_session.bind_flow_spec(pending_flow_spec)
                     pi_session.bind_analysis_images(_pi_analysis_images(analysis_screenshots))
-                    await pi_session.prompt(
+                    pi_result = await pi_session.prompt(
                         "生成/优化当前录制能力。必须先调用 get_recording_state，完整复核所有已物化接口的能力边界；"
                         "补入同次操作中遗漏的真实接口，补全占位或空白的能力标题、说明和业务语义，"
                         "尊重人工删除记录，不得编造接口。最后必须调用 submit_recording_plan。"
-                        f" recording_id={recording_id}" + _analysis_screenshot_guidance(analysis_screenshots)
+                        f" recording_id={recording_id}"
+                        + _recording_plan_protocol_guidance(has_screenshots=bool(analysis_screenshots))
+                        + _analysis_screenshot_guidance(analysis_screenshots)
                     )
+                    delivered_image_count = _verified_pi_image_count(pi_result, len(analysis_screenshots))
                     if pi_session.last_submission_kind != "plan":
                         raise RuntimeError("Pi 未提交 recording plan")
                     pending_flow_spec = pi_session.current_flow_spec()
@@ -1567,6 +1596,7 @@ async def record_ws(ws: WebSocket) -> None:
                         "pi_session": pi_session.descriptor,
                         "analysis_evidence": {
                             "screenshot_count": len(analysis_screenshots),
+                            "model_image_count": delivered_image_count,
                             "screenshot_names": [item["name"] for item in analysis_screenshots],
                         },
                     }

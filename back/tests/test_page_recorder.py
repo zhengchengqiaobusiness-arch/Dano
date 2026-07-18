@@ -1,4 +1,4 @@
-﻿"""方式B 录制核心:注入式语义动作捕获(真浏览器,缺浏览器自动 skip)。
+"""方式B 录制核心:注入式语义动作捕获(真浏览器,缺浏览器自动 skip)。
 
 不测 WebSocket/截屏(实时管线,手动/前端验);测最有价值、可自动化的部分——
 用户操作(经真实 DOM 事件)是否被转成正确的语义步骤 + 样例值。
@@ -301,6 +301,97 @@ def test_observer_correlates_action_dom_effect_and_request_without_copying_value
     assert request["trigger_event_id"] == "event_1"
     assert request["causality_confidence"] == "high"
     assert events[0]["transaction_id"] == request["trigger_transaction_id"]
+
+
+def test_actual_list_read_preserves_causality_and_drives_generic_option_binding() -> None:
+    from dano.execution.page import flow_spec as flow_spec_module
+
+    class Request:
+        method = "POST"
+        resource_type = "xhr"
+
+    class Response:
+        request = Request()
+        url = "https://asset.test/gateway/dispatch"
+        headers = {"content-type": "application/json"}
+        status = 200
+
+        async def json(self):
+            return {"payload": {"rows": [{
+                "code": "A-7", "title": "主资产", "quota": {"left": 5},
+            }]}}
+
+    sess = RecordSession()
+    sess._on_record(None, json.dumps({
+        "op": "select", "action_id": "action_asset",
+        "locator": "role=combobox[name=资产名称]", "observed_at": int(time.time() * 1000),
+    }))
+    sess._record_all("POST", Response.url, pd='{"keyword":""}')
+    fact = sess.captured_all_requests()[0]
+    sess._request_fact_index[id(Response.request)] = fact["index"]
+
+    asyncio.run(sess._on_response(Response()))
+
+    read = sess.captured_reads()[0]
+    assert read["trigger_action_id"] == "action_asset"
+    assert read["trigger_op"] == "select"
+    assert read["trigger_locator"] == "role=combobox[name=资产名称]"
+    assert read["causality_confidence"] == "high"
+    assert flow_spec_module._read_is_option_source(read) is True
+
+    submit = {
+        "method": "POST", "url": "https://asset.test/gateway/dispatch",
+        "post_data": '{"assetCode":"A-7","quotaLeft":5}',
+    }
+    step = flow_spec_module._build_step_from_capture(
+        submit, reads=[read], samples={"资产名称": "主资产"},
+        storage_state=None, required_labels={"资产名称"}, page_enum_options={},
+        step_index=1, field_evidence=[
+            {"label": "资产名称", "field_aliases": ["assetCode"], "control_kind": "select", "op": "select"},
+            {"label": "剩余额度", "field_aliases": ["quotaLeft"], "control_kind": "number", "op": "snapshot", "disabled": True},
+        ],
+    )
+    params = {param.path: param for param in step.params}
+    assert params["assetCode"].source_kind == "api_option"
+    assert params["quotaLeft"].source_kind == "selected_option_field"
+    assert params["quotaLeft"].source["response_path"] == "quota.left"
+
+
+def test_actual_recording_keeps_same_rpc_requests_from_distinct_actions() -> None:
+    from dano.execution.page.flow_spec import orchestrate_flow_capabilities, to_flow_spec
+
+    sess = RecordSession()
+    now = int(time.time() * 1000)
+    sess._on_record(None, json.dumps({
+        "op": "click", "action_id": "action_save",
+        "locator": "button[data-command=save]", "observed_at": now,
+    }))
+    sess._record_all(
+        "POST", "https://example.test/rpc/execute",
+        pd='{"operation":"save","payload":{"title":"草稿"}}',
+    )
+    sess._on_record(None, json.dumps({
+        "op": "click", "action_id": "action_submit",
+        "locator": "button[data-command=submit]", "observed_at": now + 10,
+    }))
+    sess._record_all(
+        "POST", "https://example.test/rpc/execute",
+        pd='{"operation":"submit","payload":{"title":"草稿"}}',
+    )
+
+    spec = to_flow_spec(
+        captured_requests=sess.captured_all_requests(), reads=[],
+        samples={"标题": "草稿"}, page_events=sess.recorded_page_events(),
+    )
+    assert len(spec.steps) == 2
+    assert {step.source_meta.get("trigger_action_id") for step in spec.steps} == {
+        "action_save", "action_submit",
+    }
+
+    planned = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
+    assert {frozenset(cap.step_ids) for cap in planned.capabilities} == {
+        frozenset({spec.steps[0].step_id}), frozenset({spec.steps[1].step_id}),
+    }
 
 
 def test_observer_never_attaches_another_pages_last_action() -> None:

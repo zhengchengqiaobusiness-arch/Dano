@@ -172,7 +172,7 @@ export const recordingTools = [
     name: "submit_recording_plan",
     label: "提交录制规划",
     description:
-      "提交基于当前录制版本生成的完整语义规划候选。后端会做 Schema、事实和版本校验；不得改写原始请求事实。",
+      "提交基于当前录制版本生成的完整语义规划候选。plan 必须直接包含 semantic_plan（其内包含 business_understanding、request_roles、field_semantics、capabilities、capability_relations、unresolved_items）和可选 ops；禁止提交 plan.flow_spec 或完整 FlowSpec。field_semantics 必须用真实 step_id + wire_path 关联录制字段，并给出 public_name、business_type、category、source_kind、confidence、evidence。后端会做 Schema、事实和版本校验；不得改写原始请求事实。",
     parameters: Type.Object(
       {
         ...RecordingIdentity,

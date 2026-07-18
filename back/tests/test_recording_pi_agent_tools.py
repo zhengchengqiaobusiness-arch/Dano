@@ -259,6 +259,21 @@ def test_pi_tools_read_and_apply_plan_without_changing_request_facts(monkeypatch
     assert "report" in validation and "repair_context" in validation
 
 
+
+def test_pi_plan_rejects_silently_ignored_flow_spec_wrapper(monkeypatch):
+    session = _bind(monkeypatch, recording_id="rec-invalid-plan")
+
+    with pytest.raises(ToolError, match="flow_spec.*step_id.*wire_path"):
+        asyncio.run(submit_recording_plan("run-invalid-plan", {
+            "recording_id": "rec-invalid-plan",
+            "base_flow_version": 1,
+            "plan": {"flow_spec": {"capabilities": [{"title": "截图能力"}]}},
+        }))
+
+    assert int((session.spec.meta or {}).get("current_version") or 0) == 1
+
+
+
 def test_pi_plan_allows_backend_to_refresh_derived_request_usage(monkeypatch):
     session = _bind(monkeypatch, recording_id="rec-derived-usage")
     session.spec.steps[0].source_meta = {"request_id": "request-1"}

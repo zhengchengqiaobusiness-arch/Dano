@@ -4124,6 +4124,43 @@ _DEFAULT_RECORDED_FORBIDDEN_ACTIONS = [
 _LEGACY_RECORDED_FORBIDDEN_ACTIONS = frozenset({"删除", "作废", "撤销", "终止", "驳回"})
 
 
+def _param_has_grounded_public_name(param: ParamField) -> bool:
+    """Return whether recorder/operator evidence already owns the public name."""
+    if param.locked or param.name_source in {"manual", "sample", "assignee"}:
+        return True
+    public_name = str(param.label or param.key or "").strip()
+    if (
+        param.confidence_tier in {"grounded", "linked", "manual"}
+        and public_name
+        and not looks_internal_param_name(public_name)
+    ):
+        return True
+    return any(
+        isinstance(item, dict)
+        and item.get("source") == "recorder_dom"
+        and item.get("kind") == "page_control"
+        and (item.get("field_aliases") or [])
+        and public_name
+        and not looks_internal_param_name(public_name)
+        for item in (param.evidence or [])
+    )
+
+
+def _param_has_grounded_type(param: ParamField) -> bool:
+    """Recorder transport/control evidence outranks a model business-type guess."""
+    if param.locked or _param_has_manual_contract(param):
+        return True
+    if str(param.type or "") in {"", "unknown"}:
+        return False
+    return bool(param.wire_type) or any(
+        isinstance(item, dict)
+        and item.get("source") == "recorder_dom"
+        and item.get("kind") == "page_control"
+        and str(item.get("control_kind") or "unknown") != "unknown"
+        for item in (param.evidence or [])
+    )
+
+
 def _apply_capability_field_to_param(
     spec: FlowSpec,
     raw: dict[str, Any],
@@ -4131,7 +4168,12 @@ def _apply_capability_field_to_param(
     scope: str,
     actor: str = "user",
 ) -> bool:
-    """Persist a step-bound capability field edit on its canonical ParamField."""
+    """Persist a step-bound capability field edit on its canonical ParamField.
+
+    Automated semantic plans may fill unresolved axes, but recorded DOM/API facts
+    and operator edits remain authoritative. Capability views must never degrade
+    the canonical field contract.
+    """
     step_id = str(raw.get("step_id") or "")
     path = str(raw.get("path") or raw.get("key") or "")
     if not step_id or not path:
@@ -4148,40 +4190,52 @@ def _apply_capability_field_to_param(
     except ValueError:
         return False
     normalized_actor = str(actor or "user").strip().lower()
-    if normalized_actor in _AUTOMATED_FIELD_EDIT_ACTORS and (
-        param.locked or _param_has_manual_contract(param)
-    ):
-        # A capability field proposal is a derived view over ParamField, never
-        # stronger evidence than an operator-owned request contract. Consume
-        # the step-bound edit without mutating any user-owned axis.
+    automated = normalized_actor in _AUTOMATED_FIELD_EDIT_ACTORS
+    if automated and (param.locked or _param_has_manual_contract(param)):
         return True
-    if raw.get("key"):
-        param.key = str(raw["key"])
+
+    allow_name = not automated or not _param_has_grounded_public_name(param)
+    allow_type = not automated or not _param_has_grounded_type(param)
+    allow_source = not automated or str(param.source_kind or "unknown") in {"", "unknown"}
+
+    if raw.get("key") and allow_name:
+        if str(raw["key"]) != param.key:
+            _rename_param_public_key(spec, step, param, str(raw["key"]), actor=normalized_actor)
         param.label = str(raw.get("display_name") or raw["key"])
-    if raw.get("display_name"):
+    if raw.get("display_name") and allow_name:
         param.label = str(raw["display_name"])
-    if raw.get("type"):
+    if raw.get("type") and allow_type:
         _transition_param_type(param, raw["type"])
-    if "required" in raw:
+    if "required" in raw and not automated:
         param.required = bool(raw["required"])
-    if raw.get("source_kind"):
+    if raw.get("source_kind") and allow_source:
         param.source_kind = str(raw["source_kind"])
-    if isinstance(raw.get("source"), dict):
+    if isinstance(raw.get("source"), dict) and allow_source:
         param.source = dict(raw["source"])
-    if "exposed_to_caller" in raw:
+    if "exposed_to_caller" in raw and (not automated or allow_source):
         param.exposed_to_user = bool(raw["exposed_to_caller"])
-    if scope == "input":
+    if scope == "input" and (not automated or allow_source):
         param.category = "user_param"
         param.exposed_to_user = True
-    elif scope == "internal":
+    elif scope == "internal" and (not automated or allow_source):
         param.category = "system_const" if param.source_kind == "constant" else "runtime_var"
         param.exposed_to_user = False
-    param.locked = bool(raw.get("locked", True))
+    if not automated:
+        param.locked = bool(raw.get("locked", True))
     if "confirmed" in raw:
         param.need_human_confirm = not bool(raw.get("confirmed"))
     param.evidence.append({
         "source": "capability_field_edit", "scope": scope, "actor": normalized_actor,
+        "applied_axes": {
+            "name": bool(allow_name), "type": bool(allow_type), "source": bool(allow_source),
+        },
     })
+    for evidence in raw.get("evidence") or []:
+        if isinstance(evidence, dict):
+            param.evidence.append({
+                **evidence,
+                "source": str(evidence.get("source") or "planner_semantic_evidence"),
+            })
     if normalized_actor == "user":
         manual_fields = [
             field for field in ("type", "source_kind", "source", "exposed_to_caller")
@@ -4198,7 +4252,6 @@ def _apply_capability_field_to_param(
                 "source": "manual_edit", "field": field, "value": value,
             })
     return True
-
 
 def _capability_confirmation_hash(spec: FlowSpec, cap: FlowCapability) -> str:
     # Hash the same canonical contract shape used by validation/publish. Raw
@@ -7474,13 +7527,45 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
         ).strip()
         confidence = float(item.get("confidence") or 0.0)
         if step_id in step_ids and path and public_name and confidence >= 0.8:
+            owning_capability = next((
+                capability for capability in spec.capabilities or []
+                if step_id in set(_capability_node_step_ids(capability))
+            ), None)
+            if owning_capability is None:
+                ops.append({
+                    "op": "rename_field",
+                    "step_id": step_id,
+                    "path": path,
+                    "label": public_name,
+                    "confidence": confidence,
+                    "evidence": item.get("evidence") or [],
+                })
+                continue
+            target_step = step_by_id.get(step_id)
+            target_param = next((
+                param for param in (target_step.params if target_step else [])
+                if _strip_body_prefix(param.path) == _strip_body_prefix(path)
+            ), None)
+            category = str(item.get("category") or (target_param.category if target_param else "user_param"))
+            source_kind = str(item.get("source_kind") or "")
+            if source_kind in {"", "unknown"} and target_param and target_param.source_kind not in {"", "unknown"}:
+                source_kind = target_param.source_kind
+            operation = "upsert_input_field" if category == "user_param" else "upsert_internal_field"
             ops.append({
-                "op": "rename_field",
-                "step_id": step_id,
-                "path": path,
-                "label": public_name,
-                "confidence": confidence,
-                "evidence": item.get("evidence") or [],
+                "op": operation,
+                "capability": owning_capability.name,
+                "field": {
+                    "step_id": step_id,
+                    "path": path,
+                    "key": public_name,
+                    "display_name": public_name,
+                    "type": str(item.get("business_type") or item.get("type") or ""),
+                    "source_kind": source_kind,
+                    **({"required": bool(item.get("required"))} if "required" in item else {}),
+                    "locked": False,
+                    "confirmed": False,
+                    "evidence": item.get("evidence") or [],
+                },
             })
 
     for item in plan_capabilities:
@@ -8786,6 +8871,19 @@ def _planner_patch_edits(
         if str(edit.get("op") or "") == "upsert_capability"
         and isinstance(edit.get("capability"), dict)
     }
+    planned_steps_by_capability: dict[str, set[str]] = {}
+    for edit in edits or []:
+        if str(edit.get("op") or "") != "add_request_to_capability":
+            continue
+        capability_name = str(edit.get("capability_name") or edit.get("capability") or "")
+        step_id = str(edit.get("step_id") or "")
+        if capability_name and step_id:
+            planned_steps_by_capability.setdefault(capability_name, set()).add(step_id)
+    deterministic_boundaries = [
+        (set(_capability_node_step_ids(capability)), _capability_kind_family(capability.kind))
+        for capability in spec.capabilities or []
+        if _capability_node_step_ids(capability)
+    ]
     safe: list[dict[str, Any]] = []
     scope_ops = {
         "add_request_step", "add_candidate_step", "promote_request",
@@ -8810,7 +8908,14 @@ def _planner_patch_edits(
             if initial_membership is not None:
                 target = cap_by_name.get(cap_name)
                 target_family = _capability_kind_family(target.kind) if target is not None else planned_cap_families.get(cap_name, "")
-                if not target_family or target_family not in initial_membership.get(step_id, set()):
+                proposed_steps = planned_steps_by_capability.get(cap_name) or {step_id}
+                # A semantic plan may refine/split one deterministic boundary,
+                # but it may never merge steps that the recorder placed in
+                # separate action/API boundaries.
+                if not target_family or not any(
+                    proposed_steps.issubset(boundary_steps) and target_family == boundary_family
+                    for boundary_steps, boundary_family in deterministic_boundaries
+                ):
                     continue
         if op == "upsert_capability":
             payload = dict(edit.get("capability") or {})

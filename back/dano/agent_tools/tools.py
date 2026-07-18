@@ -1138,6 +1138,18 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
     raw_plan = params.get("plan")
     if not isinstance(raw_plan, dict):
         raise ToolError("plan 必须是对象")
+    nested_flow_spec = raw_plan.get("flow_spec")
+    if nested_flow_spec is None and isinstance(raw_plan.get("semantic_plan"), dict):
+        nested_flow_spec = raw_plan["semantic_plan"].get("flow_spec")
+    if nested_flow_spec is not None:
+        raise ToolError(
+            "plan 格式错误：禁止提交 flow_spec 包装；请重新调用 get_recording_state，"
+            "然后提交 plan={semantic_plan:{business_understanding,request_roles,field_semantics,"
+            "capabilities,capability_relations,unresolved_items},ops:[]}。"
+            "截图字段必须使用录制事实中的 step_id + wire_path，不能只写能力 inputs。"
+        )
+
+
     if any(key in raw_plan for key in ("semantic_plan", "plan", "ops", "abilities")):
         submission = dict(raw_plan)
     else:

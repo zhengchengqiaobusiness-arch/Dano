@@ -32,6 +32,17 @@ def test_analysis_screenshots_are_validated_and_reduced_to_pi_images() -> None:
         "mimeType": "image/png",
     }]
     assert "semantic evidence" in gateway._analysis_screenshot_guidance(screenshots)
+    protocol = gateway._recording_plan_protocol_guidance(has_screenshots=True)
+    assert "field_semantics" in protocol and "step_id" in protocol and "wire_path" in protocol
+    assert "Never submit flow_spec" in protocol
+
+
+
+def test_pi_image_delivery_count_must_match_uploaded_screenshots() -> None:
+    assert gateway._verified_pi_image_count({"image_count": 2}, 2) == 2
+    assert gateway._verified_pi_image_count({}, 0) == 0
+    with pytest.raises(RuntimeError, match="expected=2, delivered=1"):
+        gateway._verified_pi_image_count({"image_count": 1}, 2)
 
 
 def test_analysis_screenshots_reject_spoofed_or_excess_images() -> None:
@@ -50,6 +61,7 @@ def test_analysis_screenshots_reject_spoofed_or_excess_images() -> None:
 def test_no_analysis_screenshot_keeps_original_fact_based_path() -> None:
     assert gateway._normalize_analysis_screenshots(None) == []
     assert gateway._analysis_screenshot_guidance([]) == ""
+    assert "screenshot-derived" not in gateway._recording_plan_protocol_guidance(has_screenshots=False)
 
 
 class _ConcurrentWriteProbe:

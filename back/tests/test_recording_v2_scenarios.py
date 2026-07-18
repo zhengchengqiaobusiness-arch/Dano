@@ -1359,6 +1359,110 @@ def test_small_manual_change_accepts_one_incremental_pi_submission():
     assert optimized.meta["recording_agent_session"]["generation_mode"] == "optimize"
 
 
+
+def test_screenshot_semantic_plan_updates_canonical_capability_and_field_contract():
+    spec = FlowSpec(
+        title="技术接口",
+        business_description="旧说明",
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            path="/api/seal/submit",
+            body_source='{"useDate":"2026-07-18"}',
+            params=[ParamField(
+                path="useDate",
+                key="useDate",
+                label="useDate",
+                value="2026-07-18",
+                type="string",
+                category="runtime_var",
+                source_kind="unknown",
+                exposed_to_user=False,
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_seal",
+            title="提交",
+            intent="旧能力说明",
+            kind="submit",
+            step_ids=["submit"],
+            nodes=[{"id": "call_1", "type": "call", "step_id": "submit"}],
+        )],
+    )
+    submission = {"semantic_plan": {
+        "business_understanding": {"business_name": "公章申请", "summary": "根据页面填写日期后提交公章申请"},
+        "request_roles": [{
+            "step_id": "submit", "role": "business_write", "name": "提交公章申请", "reason": "页面提交按钮",
+        }],
+        "field_semantics": [{
+            "step_id": "submit", "wire_path": "useDate", "public_name": "使用日期",
+            "business_type": "date", "category": "user_param", "source_kind": "user_input",
+            "required": True, "confidence": 0.99,
+            "evidence": [{"source": "screenshot", "label": "使用日期", "control_kind": "date"}],
+        }],
+        "capabilities": [{
+            "name": "submit_seal", "title": "发起公章使用申请", "kind": "submit",
+            "intent": "填写使用日期并提交审批", "step_ids": ["submit"],
+        }],
+        "capability_relations": [],
+        "unresolved_items": [],
+    }, "ops": []}
+
+    out = asyncio.run(orchestrate_flow_capabilities(spec, submission=submission, generation_mode="optimize"))
+
+    capability = next(cap for cap in out.capabilities if cap.name == "submit_seal")
+    field = next(param for param in out.steps[0].params if param.path == "useDate")
+    assert capability.title == "发起公章使用申请"
+    assert capability.intent == "填写使用日期并提交审批"
+    assert field.key == "使用日期"
+    assert field.label == "使用日期"
+    assert field.type == "date"
+    assert field.category == "user_param"
+    assert field.source_kind == "user_input"
+    assert field.exposed_to_user is True
+
+
+def test_screenshot_plan_cannot_overwrite_grounded_field_axes():
+    field = ParamField(
+        path="projectId", key="项目名称", label="项目名称", value="p-1",
+        type="enum", wire_type="string", category="user_param", source_kind="api_option",
+        source={"kind": "api_option", "source_url": "/api/projects", "value_key": "id", "label_key": "name"},
+        confidence_tier="grounded", name_source="sample",
+        evidence=[{
+            "kind": "page_control", "source": "recorder_dom",
+            "field_aliases": ["projectId"], "control_kind": "select",
+        }],
+    )
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit", method="POST", path="/api/timesheet/submit",
+            body_source='{"projectId":"p-1"}', params=[field],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_timesheet", kind="submit", step_ids=["submit"],
+            nodes=[{"id": "call_1", "type": "call", "step_id": "submit"}],
+        )],
+    )
+    submission = {"semantic_plan": {
+        "business_understanding": {"business_name": "工时申报"},
+        "request_roles": [],
+        "field_semantics": [{
+            "step_id": "submit", "wire_path": "projectId", "public_name": "错误字段名",
+            "business_type": "number", "category": "runtime_var", "source_kind": "previous_response",
+            "confidence": 0.99, "evidence": [{"source": "screenshot", "label": "错误字段名"}],
+        }],
+        "capabilities": [{
+            "name": "submit_timesheet", "kind": "submit", "title": "提交工时", "step_ids": ["submit"],
+        }],
+        "capability_relations": [], "unresolved_items": [],
+    }, "ops": []}
+
+    out = asyncio.run(orchestrate_flow_capabilities(spec, submission=submission, generation_mode="optimize"))
+    result = out.steps[0].params[0]
+    assert (result.key, result.label, result.type) == ("项目名称", "项目名称", "enum")
+    assert (result.category, result.source_kind) == ("user_param", "api_option")
+    assert result.source["source_url"] == "/api/projects"
+
 def test_complete_semantic_plan_can_split_one_deterministic_write_family_on_first_run():
     submission = {"semantic_plan": {
                 "business_understanding": {"intent": "分别保存草稿并提交订单"},
@@ -1426,6 +1530,35 @@ def test_initial_planner_cannot_merge_deterministic_page_boundaries_back_into_on
     assert by_kind["query_status"].step_ids == ["seal-page"]
     assert by_kind["submit"].step_ids == ["definition", "approval", "submit"]
 
+
+def test_initial_planner_cannot_merge_distinct_same_family_action_boundaries():
+    first = FlowStep(
+        step_id="save", method="POST", path="/rpc/execute",
+        body_source='{"operation":"save"}',
+        source_meta={"trigger_action_id": "action_save", "trigger_op": "click"},
+    )
+    second = FlowStep(
+        step_id="submit", method="POST", path="/rpc/execute",
+        body_source='{"operation":"submit"}',
+        source_meta={"trigger_action_id": "action_submit", "trigger_op": "click"},
+    )
+    submission = {"semantic_plan": {
+        "business_understanding": {"business_name": "订单处理"},
+        "request_roles": [], "field_semantics": [],
+        "capabilities": [{
+            "name": "save_and_submit", "title": "保存并提交", "kind": "submit",
+            "intent": "把两个独立动作合成一个能力", "step_ids": ["save", "submit"],
+        }],
+        "capability_relations": [], "unresolved_items": [],
+    }, "ops": []}
+
+    out = asyncio.run(orchestrate_flow_capabilities(
+        FlowSpec(steps=[first, second]), submission=submission, generation_mode="initial",
+    ))
+    scopes = [set(cap.step_ids) for cap in out.capabilities]
+    assert {"save", "submit"} not in scopes
+    assert any("save" in scope for scope in scopes)
+    assert any("submit" in scope for scope in scopes)
 
 def test_publish_preparation_removes_stale_batch_fields_outputs_and_goal_capability():
     step = FlowStep(
