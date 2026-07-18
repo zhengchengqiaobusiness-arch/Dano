@@ -388,6 +388,20 @@
     animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
   }
 
+  @media (prefers-reduced-motion: reduce) {
+    .center-focus-overlay {
+      transition: opacity 80ms linear;
+    }
+
+    .center-column.center-focus-active :global(.composer-bar) {
+      transform: none;
+    }
+
+    .center-column :global(.composer-bar) {
+      transition: opacity 80ms linear;
+    }
+  }
+
   .center-column.empty-conversation {
     display: grid;
     grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr);

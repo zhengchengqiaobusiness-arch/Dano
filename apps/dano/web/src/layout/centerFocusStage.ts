@@ -32,6 +32,11 @@ export function createCenterFocusStage(
   let active: ActivePresentation | null = null;
 
   function runTransition(update: () => void, after?: () => void): void {
+    if (prefersReducedMotion()) {
+      update();
+      after?.();
+      return;
+    }
     const startViewTransition = (
       document as Document & {
         startViewTransition?: (callback: () => void) => { finished: Promise<unknown> };
@@ -151,6 +156,12 @@ export function createCenterFocusStage(
 
   window.addEventListener("resize", handleResize);
   return { show, hide, setSession, destroy };
+}
+
+function prefersReducedMotion(): boolean {
+  return typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 export function hasActiveCenterFocusStage(root: ParentNode = document): boolean {
