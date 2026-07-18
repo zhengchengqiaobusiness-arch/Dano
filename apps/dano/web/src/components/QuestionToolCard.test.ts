@@ -453,6 +453,7 @@ describe("QuestionToolCard", () => {
   it("presents a confirmation without locally authorizing actions before projection", async () => {
     vi.useFakeTimers();
     const response = vi.fn(async () => ({ success: true } as never));
+    const focusChange = vi.fn();
     const block = multiFormConfirmationBlock();
     block.formInteraction = undefined;
     block.questionState = "awaiting_presentation";
@@ -466,6 +467,7 @@ describe("QuestionToolCard", () => {
         onRespond: response,
         onRevise: response,
         onSubmitRevision: response,
+        onFocusChange: focusChange,
       },
     });
     try {
@@ -474,6 +476,7 @@ describe("QuestionToolCard", () => {
 
       expect(response).toHaveBeenCalledWith("confirm-two");
       expect(target.querySelectorAll(".question-actions button")).toHaveLength(0);
+      expect(focusChange).not.toHaveBeenCalled();
     } finally {
       unmount(component);
       vi.useRealTimers();
