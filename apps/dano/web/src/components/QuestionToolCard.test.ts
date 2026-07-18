@@ -122,7 +122,189 @@ function revisingMultiFormBlock(): ToolContentBlock {
   return block;
 }
 
+function pendingGroupedFormBlock(): ToolContentBlock {
+  return {
+    kind: "tool",
+    toolName: "ask_user_question",
+    toolCallId: "grouped-form-1",
+    toolArgs: {},
+    argumentsText: "",
+    toolStatus: "pending",
+    questionRequest: {
+      batch: true,
+      title: "团建行程信息",
+      questions: [
+        { id: "destination", kind: "text", question: "目的地？" },
+        { id: "people", kind: "text", question: "参与人数？" },
+      ],
+    },
+  };
+}
+
+function pendingSingleQuestionBlock(): ToolContentBlock {
+  return {
+    kind: "tool",
+    toolName: "ask_user_question",
+    toolCallId: "single-question-1",
+    toolArgs: {},
+    argumentsText: "",
+    toolStatus: "pending",
+    questionRequest: {
+      batch: false,
+      id: "destination",
+      kind: "text",
+      question: "目的地？",
+    },
+  };
+}
+
 describe("QuestionToolCard", () => {
+  it("requests center focus for the live grouped form only after presentation succeeds", async () => {
+    vi.useFakeTimers();
+    const present = vi.fn(async () => ({ success: true } as never));
+    const focusChange = vi.fn();
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: pendingGroupedFormBlock(),
+        active: true,
+        onPresent: present,
+        onRespond: present,
+        onRevise: present,
+        onSubmitRevision: present,
+        onFocusChange: focusChange,
+      },
+    });
+    try {
+      expect(focusChange).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(400);
+      await tick();
+      await tick();
+
+      const card = target.querySelector("article");
+      expect(present).toHaveBeenCalledWith("grouped-form-1");
+      expect(focusChange).toHaveBeenCalledWith({
+        toolCallId: "grouped-form-1",
+        element: card,
+      });
+
+      target.querySelector("form")?.dispatchEvent(
+        new SubmitEvent("submit", { bubbles: true, cancelable: true }),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      await tick();
+      await tick();
+
+      expect(focusChange).toHaveBeenLastCalledWith({
+        toolCallId: "grouped-form-1",
+        element: card,
+      });
+    } finally {
+      unmount(component);
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an ordinary single question inline after presentation", async () => {
+    vi.useFakeTimers();
+    const present = vi.fn(async () => ({ success: true } as never));
+    const focusChange = vi.fn();
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: pendingSingleQuestionBlock(),
+        active: true,
+        onPresent: present,
+        onRespond: present,
+        onRevise: present,
+        onSubmitRevision: present,
+        onFocusChange: focusChange,
+      },
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(400);
+      await tick();
+      await tick();
+
+      expect(present).toHaveBeenCalledWith("single-question-1");
+      expect(focusChange).not.toHaveBeenCalled();
+    } finally {
+      unmount(component);
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a one-field questions array inline", async () => {
+    vi.useFakeTimers();
+    const present = vi.fn(async () => ({ success: true } as never));
+    const focusChange = vi.fn();
+    const block = pendingGroupedFormBlock();
+    if (!block.questionRequest?.batch) throw new Error("expected grouped request");
+    block.questionRequest.questions = block.questionRequest.questions.slice(0, 1);
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block,
+        active: true,
+        onPresent: present,
+        onRespond: present,
+        onRevise: present,
+        onSubmitRevision: present,
+        onFocusChange: focusChange,
+      },
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(400);
+      await tick();
+      await tick();
+
+      expect(present).toHaveBeenCalledWith("grouped-form-1");
+      expect(focusChange).not.toHaveBeenCalled();
+    } finally {
+      unmount(component);
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores a presentation response that arrives after the card is destroyed", async () => {
+    vi.useFakeTimers();
+    let resolvePresentation: ((response: { success: true }) => void) | undefined;
+    const present = vi.fn(() => new Promise<{ success: true }>(resolve => {
+      resolvePresentation = resolve;
+    }) as never);
+    const focusChange = vi.fn();
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: pendingGroupedFormBlock(),
+        active: true,
+        onPresent: present,
+        onRespond: present,
+        onRevise: present,
+        onSubmitRevision: present,
+        onFocusChange: focusChange,
+      },
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(400);
+      await tick();
+      expect(present).toHaveBeenCalledOnce();
+
+      unmount(component);
+      resolvePresentation?.({ success: true });
+      await tick();
+
+      expect(focusChange).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("renders an unconfirmed Submitted Form as read-only with a disabled submitted status", async () => {
     const response = vi.fn(async () => {
       throw new Error("a Submitted Form must not issue confirmation RPCs");

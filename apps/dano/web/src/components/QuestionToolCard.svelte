@@ -12,7 +12,7 @@
     FormInteractionProjection,
     RpcResponse,
   } from "@dano/types/protocol";
-  import { tick } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import { t } from "../i18n";
   import {
     type AskUserQuestionItem,
@@ -55,6 +55,9 @@
     onRespond,
     onRevise,
     onSubmitRevision,
+    onFocusChange = undefined as
+      | ((target: { toolCallId: string; element: HTMLElement | null }) => void)
+      | undefined,
     onFieldAssist = undefined as
       | ((payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>)
       | undefined,
@@ -78,6 +81,9 @@
       expectedRevision: number,
       answers: Record<string, Record<string, AskUserQuestionAnswer>>,
     ) => Promise<RpcResponse>;
+    onFocusChange?: (
+      target: { toolCallId: string; element: HTMLElement | null },
+    ) => void;
     onFieldAssist?: (payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>;
   } = $props();
 
@@ -123,6 +129,7 @@
   );
   let submittedResult = $state<AskUserQuestionResult | null>(null);
   let presentationToolCallId = $state("");
+  let focusedToolCallId = $state("");
   const result = $derived(
     askUserQuestionResult(block.resultDetails) ?? submittedResult,
   );
@@ -138,6 +145,19 @@
   );
   const interrupted = $derived(
     !isConfirmation && block.toolStatus === "pending" && !result && !active,
+  );
+  const isFocusableGroupedForm = $derived(
+    Boolean(
+      request?.batch &&
+      request.title?.trim() &&
+      request.questions.length > 1
+    ),
+  );
+  const focusActionable = $derived(
+    isFocusableGroupedForm &&
+    block.toolStatus === "pending" &&
+    !askUserQuestionResult(block.resultDetails) &&
+    active,
   );
   const requestKey = $derived(
     request ? JSON.stringify([request, interaction]) : "",
@@ -170,6 +190,8 @@
   let submitting = $state(false);
   let error = $state("");
   let pendingReady = $state(false);
+  let cardElement = $state<HTMLElement | null>(null);
+  let componentAlive = true;
   let aiAssistLoading = $state<Record<string, FieldAssistAction | undefined>>({});
   let aiAssistError = $state<Record<string, string>>({});
   let aiAssistWarning = $state<Record<string, string>>({});
@@ -263,8 +285,13 @@
     void tick()
       .then(() => onPresent(toolCallId))
       .then(response => {
+        if (!componentAlive || presentationToolCallId !== toolCallId) return;
         applyAuthoritativeInteraction(response);
         if (!response.success) throw new Error(response.error);
+        if (focusActionable && cardElement) {
+          focusedToolCallId = toolCallId;
+          onFocusChange?.({ toolCallId, element: cardElement });
+        }
       })
       .catch(cause => {
         if (presentationToolCallId === toolCallId) {
@@ -272,6 +299,20 @@
           error = cause instanceof Error ? cause.message : String(cause);
         }
       });
+  });
+
+  $effect(() => {
+    if (!focusedToolCallId || focusActionable) return;
+    const toolCallId = focusedToolCallId;
+    focusedToolCallId = "";
+    onFocusChange?.({ toolCallId, element: null });
+  });
+
+  onDestroy(() => {
+    componentAlive = false;
+    if (focusedToolCallId) {
+      onFocusChange?.({ toolCallId: focusedToolCallId, element: null });
+    }
   });
 
   $effect(() => {
@@ -810,14 +851,16 @@
 </script>
 
 {#if request && showCard}
-  <article
-    class="question-card"
-    data-status={result?.status ?? "pending"}
-    data-form-id={result?.status === "answered" ? result.formId : undefined}
-    aria-live="polite"
-    aria-label={t("questionTool.label")}
-    aria-busy={pending && submitting}
-  >
+  <div class="question-card-anchor">
+    <article
+      bind:this={cardElement}
+      class="question-card"
+      data-status={result?.status ?? "pending"}
+      data-form-id={result?.status === "answered" ? result.formId : undefined}
+      aria-live="polite"
+      aria-label={t("questionTool.label")}
+      aria-busy={pending && submitting}
+    >
     {#if !request.batch && request.kind !== "confirm"}
       <div class="question-label">{t("questionTool.label")}</div>
     {/if}
@@ -1154,17 +1197,24 @@
     {/if}
 
     {#if error}<div class="question-error" role="alert">{error}</div>{/if}
-  </article>
+    </article>
+  </div>
 {/if}
 
 <style>
+  .question-card-anchor {
+    box-sizing: border-box;
+    width: 100%;
+    margin: 1rem 0;
+  }
+
   .question-card {
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
     gap: 12px;
     width: 100%;
-    margin: 1rem 0;
+    margin: 0;
     padding: 16px;
     border-radius: 14px;
     background: var(--panel);

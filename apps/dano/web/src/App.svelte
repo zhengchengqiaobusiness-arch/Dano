@@ -10,6 +10,7 @@
   import ExtensionDialog from "./components/ExtensionDialog.svelte";
   import ReconnectBanner from "./components/ReconnectBanner.svelte";
   import ThemeSettingsDialog from "./components/ThemeSettingsDialog.svelte";
+  import { hasActiveCenterFocusStage } from "./layout/centerFocusStage";
   import {
     initBridge,
     TRANSCRIPT_PAGE_LIMIT,
@@ -1096,6 +1097,7 @@
     if (event.defaultPrevented) return;
     if (event.key !== "Escape") return;
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (hasActiveCenterFocusStage()) return;
     if (!displayedIsStreaming) return;
     event.preventDefault();
     handleAbort();
