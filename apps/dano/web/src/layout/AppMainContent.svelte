@@ -12,17 +12,27 @@
     FieldAssistCommandPayload,
     FieldAssistResult,
   } from "@dano/types/protocol";
+  import { onDestroy } from "svelte";
   import ChatTranscript from "../components/ChatTranscript.svelte";
   import CompatWarning from "../components/CompatWarning.svelte";
   import ComposerBar from "../components/ComposerBar.svelte";
+  import type { QuestionFocusChange } from "../components/questionFocus";
   import type { ConnectionStatus, TranscriptDelta, TranscriptEntry, TranscriptStream } from "../composables/bridgeStore.svelte";
   import { t } from "../i18n";
   import { isDebugSessionPath } from "../utils/debugSession";
   import type { RpcModelInfo } from "../utils/models";
   import { getRuntimeQuickActions } from "../utils/runtimeConfig";
   import type { PendingTranscriptSessionEvent } from "../utils/transcript";
+  import {
+    createCenterFocusStage,
+    type CenterFocusStage,
+    isDesktopCenterFocusViewport,
+  } from "./centerFocusStage";
 
   let transcriptRef: ChatTranscript | null = $state(null);
+  let centerColumn = $state<HTMLElement | null>(null);
+  let centerFocusStage: CenterFocusStage | null = null;
+  let centerFocusActive = $state(false);
 
   let {
     compatWarningVisible = false,
@@ -182,9 +192,39 @@
   export function scrollToTranscriptEntry(entryId: string): boolean {
     return transcriptRef?.scrollToTranscriptEntry(entryId) ?? false;
   }
+
+  function handleQuestionFocusChange(target: QuestionFocusChange): void {
+    if (!centerColumn) return;
+    if (target.element && !isDesktopCenterFocusViewport()) return;
+    centerFocusStage ??= createCenterFocusStage(
+      centerColumn,
+      active => centerFocusActive = active,
+    );
+    if (!target.element) {
+      centerFocusStage.hide(target.toolCallId);
+      return;
+    }
+    centerFocusStage.show({
+      sessionKey: activeSessionPath ?? "",
+      toolCallId: target.toolCallId,
+      element: target.element,
+    });
+  }
+
+  $effect(() => {
+    const sessionKey = activeSessionPath;
+    centerFocusStage?.setSession(sessionKey);
+  });
+
+  onDestroy(() => centerFocusStage?.destroy());
 </script>
 
-<main class="center-column" class:empty-conversation={isEmptyConversation}>
+<main
+  bind:this={centerColumn}
+  class="center-column"
+  class:empty-conversation={isEmptyConversation}
+  class:center-focus-active={centerFocusActive}
+>
   <CompatWarning visible={compatWarningVisible} />
 
   <ChatTranscript
@@ -200,6 +240,7 @@
     {isStreaming}
     {isPromptPending}
     {isCompacting}
+    scrollLocked={centerFocusActive}
     showMessageIds={isDebugMode}
     {allowRevision}
     onLoadOlder={onLoadOlderTranscript}
@@ -207,7 +248,10 @@
     onOpenFileReference={onOpenFileReference}
     {readWorkspaceFile}
     {onFieldAssist}
+    onQuestionFocusChange={handleQuestionFocusChange}
   />
+
+  <div class="center-focus-overlay" aria-hidden="true"></div>
 
   {#if queuedUserMessages.length > 0}
     <div class="queued-messages-strip">
@@ -293,6 +337,55 @@
     min-height: 0;
     overflow: hidden;
     border-bottom-left-radius: 14px;
+    position: relative;
+    isolation: isolate;
+  }
+
+  .center-focus-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    opacity: 0;
+    pointer-events: none;
+    background: color-mix(in srgb, var(--panel) 58%, transparent);
+    backdrop-filter: blur(3px);
+    transition: opacity 220ms ease;
+  }
+
+  .center-column.center-focus-active .center-focus-overlay {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .center-column.center-focus-active :global(.composer-bar) {
+    opacity: 0;
+    transform: translateY(calc(100% + 24px));
+    pointer-events: none;
+  }
+
+  .center-column :global(.composer-bar) {
+    transition: opacity 220ms ease, transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .center-column :global(.chat-transcript[data-center-focus-locked="true"]) {
+    overflow: hidden;
+  }
+
+  .center-column :global(.center-focused-card) {
+    position: fixed;
+    z-index: 22;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    box-shadow: var(--shadow-overlay, var(--shadow-raised));
+  }
+
+  .center-column :global(.center-focus-transition-card) {
+    view-transition-name: center-focus-card;
+  }
+
+  :global(::view-transition-group(center-focus-card)) {
+    animation-duration: 260ms;
+    animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
   }
 
   .center-column.empty-conversation {

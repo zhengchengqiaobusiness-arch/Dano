@@ -82,6 +82,7 @@
   import ImageLightbox from "./ImageLightbox.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import QuestionToolCard from "./QuestionToolCard.svelte";
+  import type { QuestionFocusChange } from "./questionFocus";
   import SkillInvocationCard from "./SkillInvocationCard.svelte";
   import { getRuntimeEmptyStateConfig } from "../utils/runtimeConfig";
   import { t } from "../i18n";
@@ -98,6 +99,7 @@
     isStreaming = false,
     isPromptPending = false,
     isCompacting = false,
+    scrollLocked = false,
     showMessageIds = false,
     allowRevision = false,
     onLoadOlder = () => false,
@@ -106,6 +108,9 @@
     readWorkspaceFile,
     onFieldAssist = undefined as
       | ((payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>)
+      | undefined,
+    onQuestionFocusChange = undefined as
+      | ((target: QuestionFocusChange) => void)
       | undefined,
   }: {
     sessionPath?: string | null;
@@ -119,6 +124,7 @@
     isStreaming?: boolean;
     isPromptPending?: boolean;
     isCompacting?: boolean;
+    scrollLocked?: boolean;
     showMessageIds?: boolean;
     allowRevision?: boolean;
     onLoadOlder?: () => boolean | Promise<boolean>;
@@ -126,6 +132,7 @@
     onOpenFileReference?: (payload: { path: string; lineNumber: number }) => void;
     readWorkspaceFile?: (path: string) => Promise<{ content: string }>;
     onFieldAssist?: (payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>;
+    onQuestionFocusChange?: (target: QuestionFocusChange) => void;
   } = $props();
 
   type RpcTranscriptToolCallBlock = Extract<
@@ -880,7 +887,7 @@
   }
 
   async function requestOlderTranscript() {
-    if (!container) return;
+    if (!container || scrollLocked) return;
 
     const nearTop = isNearTop(container);
     if (
@@ -941,7 +948,7 @@
   }
 
   export function scrollTranscriptToBottom(options: { smooth?: boolean } = {}) {
-    if (!container) return;
+    if (!container || scrollLocked) return;
     container.scrollTo({
       top: container.scrollHeight,
       behavior: options.smooth ? "smooth" : "auto",
@@ -950,6 +957,7 @@
   }
 
   function scheduleStickToBottom() {
+    if (scrollLocked) return;
     if (stickToBottomFrame) cancelAnimationFrame(stickToBottomFrame);
     stickToBottomFrame = requestAnimationFrame(() => {
       stickToBottomFrame = 0;
@@ -958,6 +966,7 @@
   }
 
   function handleTranscriptScroll() {
+    if (scrollLocked) return;
     updateBottomLock();
     if (container) {
       const nearTop = isNearTop(container);
@@ -989,6 +998,7 @@
   }
 
   export function preserveBottomPosition(gracePx: number = 48): boolean {
+    if (scrollLocked) return false;
     const el = container;
     if (!el) return false;
     if (!shouldStickToBottom && distanceFromBottom(el) > BOTTOM_LOCK_THRESHOLD + gracePx) {
@@ -1019,6 +1029,7 @@
   }
 
   export function scrollToTranscriptEntry(entryId: string): boolean {
+    if (scrollLocked) return false;
     const target = transcriptEntryElement(entryId);
     if (!target) return expandProcessGroupForEntry(entryId);
 
@@ -1113,7 +1124,7 @@
     void transcriptStreams;
     void pendingTranscriptConfigEvent;
     void showBusyIndicator;
-    if (!el || !shouldStickToBottom) return;
+    if (!el || !shouldStickToBottom || scrollLocked) return;
 
     tick().then(() => {
       if (container !== el || !shouldStickToBottom) return;
@@ -1210,7 +1221,12 @@
   {/if}
 {/snippet}
 
-<div bind:this={container} class="chat-transcript" onscroll={handleTranscriptScroll}>
+<div
+  bind:this={container}
+  class="chat-transcript"
+  data-center-focus-transcript
+  onscroll={handleTranscriptScroll}
+>
   {#if initialLoading}
     <div
     class="conversation-skeleton"
@@ -1435,7 +1451,7 @@
               {:else if block.kind === "tool"}
                 {@const readClassification = classifyReadToolBlock(block)}
                 {#if askUserQuestionRequest(block) && !isAskUserQuestionToolError(block)}
-                  <QuestionToolCard {block} active={isStreaming && !initialLoading && shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)} onPresent={presentQuestion} onRespond={answerQuestion} onRevise={reviseQuestion} onSubmitRevision={submitQuestionRevision} {onFieldAssist} />
+                  <QuestionToolCard {block} active={isStreaming && !initialLoading && shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)} onPresent={presentQuestion} onRespond={answerQuestion} onRevise={reviseQuestion} onSubmitRevision={submitQuestionRevision} onFocusChange={onQuestionFocusChange} {onFieldAssist} />
                 {:else if readClassification?.kind === "skill"}
                   <SkillInvocationCard skillName={readClassification.label} />
                 {:else}

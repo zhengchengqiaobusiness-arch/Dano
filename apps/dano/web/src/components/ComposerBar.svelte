@@ -358,7 +358,7 @@
   });
 </script>
 
-<div bind:this={composerRootRef} class="composer-bar">
+<div bind:this={composerRootRef} class="composer-bar" data-center-focus-composer>
   <div class="composer-inner-wrap">
     {#if composer.showCommandPalette}
       <CommandPalette
