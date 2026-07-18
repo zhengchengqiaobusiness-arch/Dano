@@ -16,6 +16,7 @@
   import ChatTranscript from "../components/ChatTranscript.svelte";
   import CompatWarning from "../components/CompatWarning.svelte";
   import ComposerBar from "../components/ComposerBar.svelte";
+  import type { QuestionFocusChange } from "../components/questionFocus";
   import type { ConnectionStatus, TranscriptDelta, TranscriptEntry, TranscriptStream } from "../composables/bridgeStore.svelte";
   import { t } from "../i18n";
   import { isDebugSessionPath } from "../utils/debugSession";
@@ -192,9 +193,7 @@
     return transcriptRef?.scrollToTranscriptEntry(entryId) ?? false;
   }
 
-  function handleQuestionFocusChange(
-    target: { toolCallId: string; element: HTMLElement | null },
-  ): void {
+  function handleQuestionFocusChange(target: QuestionFocusChange): void {
     if (!centerColumn) return;
     if (target.element && !isDesktopCenterFocusViewport()) return;
     centerFocusStage ??= createCenterFocusStage(

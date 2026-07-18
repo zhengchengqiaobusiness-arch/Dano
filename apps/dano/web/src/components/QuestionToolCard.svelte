@@ -45,6 +45,7 @@
   import RefreshCw from "lucide-svelte/icons/refresh-cw";
   import Sparkle from "lucide-svelte/icons/sparkle";
   import "./questionToolControls.css";
+  import type { QuestionFocusChange } from "./questionFocus";
 
   const PENDING_RENDER_DELAY_MS = 400;
 
@@ -56,7 +57,7 @@
     onRevise,
     onSubmitRevision,
     onFocusChange = undefined as
-      | ((target: { toolCallId: string; element: HTMLElement | null }) => void)
+      | ((target: QuestionFocusChange) => void)
       | undefined,
     onFieldAssist = undefined as
       | ((payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>)
@@ -81,9 +82,7 @@
       expectedRevision: number,
       answers: Record<string, Record<string, AskUserQuestionAnswer>>,
     ) => Promise<RpcResponse>;
-    onFocusChange?: (
-      target: { toolCallId: string; element: HTMLElement | null },
-    ) => void;
+    onFocusChange?: (target: QuestionFocusChange) => void;
     onFieldAssist?: (payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>;
   } = $props();
 

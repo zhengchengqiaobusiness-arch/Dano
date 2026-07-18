@@ -82,6 +82,7 @@
   import ImageLightbox from "./ImageLightbox.svelte";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import QuestionToolCard from "./QuestionToolCard.svelte";
+  import type { QuestionFocusChange } from "./questionFocus";
   import SkillInvocationCard from "./SkillInvocationCard.svelte";
   import { getRuntimeEmptyStateConfig } from "../utils/runtimeConfig";
   import { t } from "../i18n";
@@ -109,7 +110,7 @@
       | ((payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>)
       | undefined,
     onQuestionFocusChange = undefined as
-      | ((target: { toolCallId: string; element: HTMLElement | null }) => void)
+      | ((target: QuestionFocusChange) => void)
       | undefined,
   }: {
     sessionPath?: string | null;
@@ -131,9 +132,7 @@
     onOpenFileReference?: (payload: { path: string; lineNumber: number }) => void;
     readWorkspaceFile?: (path: string) => Promise<{ content: string }>;
     onFieldAssist?: (payload: FieldAssistCommandPayload) => Promise<FieldAssistResult>;
-    onQuestionFocusChange?: (
-      target: { toolCallId: string; element: HTMLElement | null },
-    ) => void;
+    onQuestionFocusChange?: (target: QuestionFocusChange) => void;
   } = $props();
 
   type RpcTranscriptToolCallBlock = Extract<
