@@ -364,6 +364,47 @@ describe("QuestionToolCard", () => {
     }
   });
 
+  it("waits for the confirmation presentation handshake before requesting focus", async () => {
+    vi.useFakeTimers();
+    let finishPresentation: ((response: { success: true }) => void) | undefined;
+    const present = vi.fn(() => new Promise<{ success: true }>(resolve => {
+      finishPresentation = resolve;
+    }) as never);
+    const focusChange = vi.fn();
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: multiFormConfirmationBlock(),
+        active: true,
+        onPresent: present,
+        onRespond: present,
+        onRevise: present,
+        onSubmitRevision: present,
+        onFocusChange: focusChange,
+      },
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(400);
+      await tick();
+
+      expect(present).toHaveBeenCalledWith("confirm-two");
+      expect(focusChange).not.toHaveBeenCalled();
+
+      finishPresentation?.({ success: true });
+      await tick();
+      await tick();
+
+      expect(focusChange).toHaveBeenCalledWith({
+        toolCallId: "confirm-two",
+        element: target.querySelector("article"),
+      });
+    } finally {
+      unmount(component);
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps the confirmation focused while Return to Modify projects revisions", async () => {
     vi.useFakeTimers();
     const present = vi.fn(async () => ({ success: true } as never));
