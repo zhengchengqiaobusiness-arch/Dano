@@ -30,13 +30,15 @@ describe("Center Focus Stage", () => {
     const backgroundButton = document.createElement("button");
     const composer = document.createElement("div");
     const composerInput = document.createElement("textarea");
+    const composerAttachment = document.createElement("button");
     transcript.dataset.centerFocusTranscript = "";
     composer.dataset.centerFocusComposer = "";
     composerInput.value = "保留的草稿";
+    composerAttachment.className = "attachment-chip";
     anchor.className = "question-card-anchor";
     anchor.append(card);
     transcript.append(anchor, backgroundButton);
-    composer.append(composerInput);
+    composer.append(composerInput, composerAttachment);
     root.append(transcript, composer);
     document.body.append(root);
     vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(100, 40, 1000, 800));
@@ -54,6 +56,7 @@ describe("Center Focus Stage", () => {
     expect(composer.inert).toBe(true);
     expect(backgroundButton.inert).toBe(true);
     expect(composer.querySelector("textarea")).toBe(composerInput);
+    expect(composer.querySelector(".attachment-chip")).toBe(composerAttachment);
     expect(composerInput.value).toBe("保留的草稿");
     expect(document.activeElement).not.toBe(composerInput);
     expect(activeChange).toHaveBeenLastCalledWith(true);
@@ -76,6 +79,7 @@ describe("Center Focus Stage", () => {
     expect(backgroundButton.inert).toBe(false);
     expect(composer.querySelector("textarea")).toBe(composerInput);
     expect(composerInput.value).toBe("保留的草稿");
+    expect(composer.querySelector(".attachment-chip")).toBe(composerAttachment);
     expect(activeChange).toHaveBeenLastCalledWith(false);
     stage.destroy();
   });
@@ -261,6 +265,125 @@ describe("Center Focus Stage", () => {
     expect(card.classList.contains("center-focused-card")).toBe(false);
     expect(transcript.dataset.centerFocusLocked).toBeUndefined();
     expect(backgroundButton.inert).toBe(false);
+    expect(composer.inert).toBe(false);
+    stage.destroy();
+  });
+
+  it("keeps a focused mobile card inside dynamic viewport and safe-area bounds", () => {
+    const root = document.createElement("main");
+    const transcript = document.createElement("div");
+    const anchor = document.createElement("div");
+    const card = document.createElement("article");
+    const composer = document.createElement("div");
+    transcript.dataset.centerFocusTranscript = "";
+    composer.dataset.centerFocusComposer = "";
+    anchor.className = "question-card-anchor";
+    anchor.append(card);
+    transcript.append(anchor);
+    root.append(transcript, composer);
+    document.body.append(root);
+    const rootRect = vi.spyOn(root, "getBoundingClientRect")
+      .mockReturnValue(rect(0, 60, 390, 700));
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(16, 220, 358, 900));
+    vi.spyOn(window, "matchMedia").mockImplementation(query => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+    } as MediaQueryList));
+    Object.defineProperty(document, "startViewTransition", {
+      configurable: true,
+      value: undefined,
+    });
+    const stage = createCenterFocusStage(root);
+
+    stage.show({ sessionKey: "session-a", toolCallId: "form-a", element: card });
+
+    expect(root.dataset.centerFocusActive).toBe("true");
+    expect(anchor.style.height).toBe("900px");
+    expect(card.style.getPropertyValue("--center-focus-left")).toBe(
+      "calc(0px + 14px + env(safe-area-inset-left, 0px))",
+    );
+    expect(card.style.getPropertyValue("--center-focus-top")).toBe(
+      "calc(max(60px, var(--mobile-header-offset, calc(env(safe-area-inset-top, 0px) + 50px))) + 14px)",
+    );
+    expect(card.style.getPropertyValue("--center-focus-width")).toBe(
+      "calc(390px - 28px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px))",
+    );
+    expect(card.style.getPropertyValue("--center-focus-max-height")).toBe(
+      "calc(min(760px, 100dvh) - max(60px, var(--mobile-header-offset, calc(env(safe-area-inset-top, 0px) + 50px))) - 28px - env(safe-area-inset-bottom, 0px))",
+    );
+
+    rootRect.mockReturnValue(rect(0, 48, 430, 620));
+    window.dispatchEvent(new Event("resize"));
+
+    expect(root.dataset.centerFocusActive).toBe("true");
+    expect(card.style.getPropertyValue("--center-focus-top")).toBe(
+      "calc(max(48px, var(--mobile-header-offset, calc(env(safe-area-inset-top, 0px) + 50px))) + 14px)",
+    );
+    expect(card.style.getPropertyValue("--center-focus-width")).toContain("430px");
+
+    stage.hide("form-a");
+
+    expect(root.dataset.centerFocusActive).toBeUndefined();
+    expect(card.getAttribute("style")).toBeNull();
+    expect(anchor.getAttribute("style")).toBeNull();
+    expect(composer.inert).toBe(false);
+    stage.destroy();
+  });
+
+  it("keeps long mobile interactions scrollable without moving the transcript", () => {
+    const root = document.createElement("main");
+    const transcript = document.createElement("div");
+    const anchor = document.createElement("div");
+    const card = document.createElement("article");
+    const fields = document.createElement("div");
+    const actions = document.createElement("div");
+    const submit = document.createElement("button");
+    const composer = document.createElement("div");
+    const composerInput = document.createElement("textarea");
+    transcript.dataset.centerFocusTranscript = "";
+    composer.dataset.centerFocusComposer = "";
+    anchor.className = "question-card-anchor";
+    actions.className = "question-actions";
+    submit.textContent = "提交";
+    actions.append(submit);
+    card.append(fields, actions);
+    anchor.append(card);
+    transcript.append(anchor);
+    composer.append(composerInput);
+    root.append(transcript, composer);
+    document.body.append(root);
+    transcript.scrollTop = 240;
+    vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(0, 60, 390, 700));
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(16, 220, 358, 1_200));
+    Object.defineProperties(card, {
+      clientHeight: { configurable: true, value: 620 },
+      scrollHeight: { configurable: true, value: 1_200 },
+    });
+    vi.spyOn(window, "matchMedia").mockImplementation(query => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+    } as MediaQueryList));
+    const submitted = vi.fn();
+    submit.addEventListener("click", submitted);
+    composerInput.focus();
+    const stage = createCenterFocusStage(root);
+
+    stage.show({ sessionKey: "session-a", toolCallId: "long-form", element: card });
+    card.scrollTop = card.scrollHeight - card.clientHeight;
+    card.dispatchEvent(new Event("scroll"));
+    submit.click();
+
+    expect(card.classList).toContain("center-focus-mobile-card");
+    expect(card.scrollTop).toBe(580);
+    expect(transcript.scrollTop).toBe(240);
+    expect(transcript.dataset.centerFocusLocked).toBe("true");
+    expect(actions.closest(".center-focused-card")).toBe(card);
+    expect(submitted).toHaveBeenCalledOnce();
+    expect(document.activeElement).not.toBe(composerInput);
+    expect(composer.inert).toBe(true);
+
+    stage.hide("long-form");
+
+    expect(card.classList).not.toContain("center-focus-mobile-card");
+    expect(transcript.dataset.centerFocusLocked).toBeUndefined();
     expect(composer.inert).toBe(false);
     stage.destroy();
   });
