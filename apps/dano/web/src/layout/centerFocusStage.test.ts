@@ -143,4 +143,125 @@ describe("Center Focus Stage", () => {
       matches: false,
     } as MediaQueryList))).toBe(false);
   });
+
+  it("switches immediately without View Transition movement when reduced motion is preferred", () => {
+    const root = document.createElement("main");
+    const transcript = document.createElement("div");
+    const anchor = document.createElement("div");
+    const card = document.createElement("article");
+    const composer = document.createElement("div");
+    transcript.dataset.centerFocusTranscript = "";
+    composer.dataset.centerFocusComposer = "";
+    anchor.className = "question-card-anchor";
+    anchor.append(card);
+    transcript.append(anchor);
+    root.append(transcript, composer);
+    document.body.append(root);
+    vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(0, 0, 1000, 800));
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(200, 160, 600, 400));
+    vi.spyOn(window, "matchMedia").mockImplementation(query => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+    } as MediaQueryList));
+    const startViewTransition = vi.fn((update: () => void) => {
+      update();
+      return { finished: Promise.resolve() };
+    });
+    Object.defineProperty(document, "startViewTransition", {
+      configurable: true,
+      value: startViewTransition,
+    });
+    const stage = createCenterFocusStage(root);
+
+    stage.show({ sessionKey: "session-a", toolCallId: "form-a", element: card });
+
+    expect(startViewTransition).not.toHaveBeenCalled();
+    expect(root.dataset.centerFocusActive).toBe("true");
+    expect(card.classList.contains("center-focused-card")).toBe(true);
+    expect(composer.inert).toBe(true);
+
+    stage.hide("form-a");
+
+    expect(startViewTransition).not.toHaveBeenCalled();
+    expect(root.dataset.centerFocusActive).toBeUndefined();
+    expect(card.classList.contains("center-focused-card")).toBe(false);
+    expect(composer.inert).toBe(false);
+    stage.destroy();
+  });
+
+  it("uses the shared View Transition path when motion is allowed", () => {
+    const root = document.createElement("main");
+    const transcript = document.createElement("div");
+    const anchor = document.createElement("div");
+    const card = document.createElement("article");
+    transcript.dataset.centerFocusTranscript = "";
+    anchor.className = "question-card-anchor";
+    anchor.append(card);
+    transcript.append(anchor);
+    root.append(transcript);
+    document.body.append(root);
+    vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(0, 0, 1000, 800));
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(200, 160, 600, 400));
+    vi.spyOn(window, "matchMedia").mockImplementation(() => ({
+      matches: false,
+    } as MediaQueryList));
+    const startViewTransition = vi.fn((update: () => void) => {
+      update();
+      return { finished: Promise.resolve() };
+    });
+    Object.defineProperty(document, "startViewTransition", {
+      configurable: true,
+      value: startViewTransition,
+    });
+    const stage = createCenterFocusStage(root);
+
+    stage.show({ sessionKey: "session-a", toolCallId: "form-a", element: card });
+    stage.hide("form-a");
+
+    expect(startViewTransition).toHaveBeenCalledTimes(2);
+    expect(root.dataset.centerFocusActive).toBeUndefined();
+    stage.destroy();
+  });
+
+  it("keeps the complete focused interaction when View Transition is unavailable", () => {
+    const root = document.createElement("main");
+    const transcript = document.createElement("div");
+    const anchor = document.createElement("div");
+    const card = document.createElement("article");
+    const backgroundButton = document.createElement("button");
+    const composer = document.createElement("div");
+    transcript.dataset.centerFocusTranscript = "";
+    composer.dataset.centerFocusComposer = "";
+    anchor.className = "question-card-anchor";
+    anchor.append(card);
+    transcript.append(anchor, backgroundButton);
+    root.append(transcript, composer);
+    document.body.append(root);
+    vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(0, 0, 1000, 800));
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(200, 160, 600, 400));
+    vi.spyOn(window, "matchMedia").mockImplementation(() => ({
+      matches: false,
+    } as MediaQueryList));
+    Object.defineProperty(document, "startViewTransition", {
+      configurable: true,
+      value: undefined,
+    });
+    const stage = createCenterFocusStage(root);
+
+    stage.show({ sessionKey: "session-a", toolCallId: "form-a", element: card });
+
+    expect(root.dataset.centerFocusActive).toBe("true");
+    expect(card.classList.contains("center-focused-card")).toBe(true);
+    expect(transcript.dataset.centerFocusLocked).toBe("true");
+    expect(backgroundButton.inert).toBe(true);
+    expect(composer.inert).toBe(true);
+
+    stage.hide("form-a");
+
+    expect(root.dataset.centerFocusActive).toBeUndefined();
+    expect(card.classList.contains("center-focused-card")).toBe(false);
+    expect(transcript.dataset.centerFocusLocked).toBeUndefined();
+    expect(backgroundButton.inert).toBe(false);
+    expect(composer.inert).toBe(false);
+    stage.destroy();
+  });
 });
