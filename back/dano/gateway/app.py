@@ -284,24 +284,43 @@ async def _start_recording_pi_candidate(factory):  # noqa: ANN001, ANN201
     return candidate
 
 
-def _flow_spec_version(spec) -> int:  # noqa: ANN001
-    if spec is None:
-        return -1
-    return int((getattr(spec, "meta", None) or {}).get("current_version") or 0)
+def _checkpoint_accepted_recording_pi_submission(
+    resume_state: dict,
+    flow_spec,
+    *,
+    submission_kind: str,
+    connection_generation: int,
+) -> bool:  # noqa: ANN001
+    """Atomically remember a server-accepted Pi plan/repair for reconnect."""
+    if submission_kind not in {"plan", "repair"}:
+        return False
+    if int(resume_state.get("connection_generation") or 0) != connection_generation:
+        return False
 
+    from dano.execution.page.flow_spec import flow_spec_fingerprint
 
-def _prefer_accepted_recording_pi_spec(pending_flow_spec, recording_pi):  # noqa: ANN001, ANN201
-    """Salvage a tool-accepted update if cancellation interrupted its response."""
-    if recording_pi is None or recording_pi.last_submission_kind not in {"plan", "repair"}:
-        return pending_flow_spec
-    try:
-        candidate = recording_pi.current_flow_spec()
-    except Exception as error:  # noqa: BLE001
-        log.warning("recording_pi.accepted_submission_read_failed", error=str(error))
-        return pending_flow_spec
-    if _flow_spec_version(candidate) > _flow_spec_version(pending_flow_spec):
-        return candidate
-    return pending_flow_spec
+    candidate = flow_spec.model_copy(deep=True)
+    candidate_version = int((candidate.meta or {}).get("current_version") or 0)
+    candidate_fingerprint = flow_spec_fingerprint(candidate)
+    stored_version = int(resume_state.get("flow_spec_version") or 0)
+    stored_fingerprint = str(resume_state.get("flow_spec_fingerprint") or "")
+    if candidate_version < stored_version:
+        return False
+    if (
+        candidate_version == stored_version
+        and stored_fingerprint
+        and candidate_fingerprint != stored_fingerprint
+    ):
+        raise RuntimeError(
+            "accepted FlowSpec fingerprint conflict at "
+            f"version {candidate_version}"
+        )
+
+    resume_state["flow_spec"] = candidate
+    resume_state["flow_spec_version"] = candidate_version
+    resume_state["flow_spec_fingerprint"] = candidate_fingerprint
+    resume_state["submission_kind"] = submission_kind
+    return True
 
 
 def _recording_resume_state(key: tuple[str, str, str]) -> dict:
@@ -1028,6 +1047,16 @@ async def record_ws(ws: WebSocket) -> None:
                 resume_state["flow_spec_fingerprint"] = flow_spec_fingerprint(pending_flow_spec)
             resume_state["operations"] = dict(costly_operation_results)
 
+        def _accepted_pi_submission(flow_spec, submission_kind: str) -> None:  # noqa: ANN001
+            nonlocal pending_flow_spec
+            if _checkpoint_accepted_recording_pi_submission(
+                resume_state,
+                flow_spec,
+                submission_kind=submission_kind,
+                connection_generation=resume_generation,
+            ):
+                pending_flow_spec = flow_spec.model_copy(deep=True)
+
         async def _ensure_recording_pi():
             """Lazily start the sole AgentSession used by this websocket."""
             nonlocal recording_pi
@@ -1039,6 +1068,7 @@ async def record_ws(ws: WebSocket) -> None:
                     tenant=str(init.get("tenant") or ""),
                     subsystem=str(init.get("subsystem") or "A-报销"),
                     recording_id=recording_id,
+                    on_submission_accepted=_accepted_pi_submission,
                     )
                 )
             return recording_pi
@@ -1745,7 +1775,6 @@ async def record_ws(ws: WebSocket) -> None:
             int(resume_state.get("connection_generation") or 0) == resume_generation
         ):
             try:
-                pending_flow_spec = _prefer_accepted_recording_pi_spec(pending_flow_spec, recording_pi)
                 _checkpoint_resume(storage_state=await sess.storage_state())
             except Exception as e:  # noqa: BLE001
                 log.warning("recording.resume_snapshot_failed", action=session_action, error=str(e))

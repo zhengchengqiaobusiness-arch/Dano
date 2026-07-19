@@ -381,32 +381,6 @@ async def test_recording_pi_candidate_failed_start_is_closed_and_not_reused() ->
     assert result is healthy
 
 
-def test_accepted_submission_prefers_only_newer_pi_flow_spec() -> None:
-    prefer = getattr(gateway, "_prefer_accepted_recording_pi_spec", None)
-    assert prefer is not None, "accepted Pi submission salvage is not implemented"
-
-    pending = SimpleNamespace(meta={"current_version": 4})
-    newer = SimpleNamespace(meta={"current_version": 5})
-    older = SimpleNamespace(meta={"current_version": 3})
-
-    accepted = SimpleNamespace(
-        last_submission_kind="plan",
-        current_flow_spec=lambda: newer,
-    )
-    stale = SimpleNamespace(
-        last_submission_kind="repair",
-        current_flow_spec=lambda: older,
-    )
-    unsubmitted = SimpleNamespace(
-        last_submission_kind="",
-        current_flow_spec=lambda: newer,
-    )
-
-    assert prefer(pending, accepted) is newer
-    assert prefer(pending, stale) is pending
-    assert prefer(pending, unsubmitted) is pending
-
-
 def test_recording_storage_cache_accepts_richer_checkpoint() -> None:
     state = {
         "storage_state": {
