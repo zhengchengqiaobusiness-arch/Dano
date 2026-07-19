@@ -1132,14 +1132,16 @@ def _enum_options_for_param(sb) -> list | None:
     opts = list(sb.options or [])
     out = []
     for o in opts:
-        if isinstance(o, dict):
-            label = str(o.get("label") or o.get("text") or o.get("name") or o.get("value") or "").strip()
-            if label:
-                out.append({"label": label, "value": (om or {}).get(label, o.get("value", label))})
+        pair = _enum_label_value(o)
+        if pair is None:
+            continue
+        label, parsed_value = pair
+        if om:
+            out.append({"label": label, "value": om.get(label, parsed_value)})
+        elif isinstance(o, (dict, list, tuple)):
+            out.append({"label": label, "value": parsed_value})
         else:
-            label = str(o or "").strip()
-            if label:
-                out.append({"label": label, "value": om[label]} if om and label in om else ({"label": label, "value": None} if om else label))
+            out.append(label)
     if om:
         return out or None
     if opts:
@@ -1161,12 +1163,26 @@ def _enum_value_map_for_param(sb) -> dict | None:
 
 
 def _enum_label_value(opt) -> tuple[str, Any] | None:
-    """兼容 list[str] 与 list[{label,value}],统一抽取调用侧显示名和真实提交值。"""
+    """Normalize string/dict/list/tuple options to a display label and wire value."""
     if isinstance(opt, dict):
-        label = str(opt.get("label") or opt.get("text") or opt.get("name") or opt.get("value") or "").strip()
+        raw_label = next(
+            (
+                opt.get(key) for key in ("label", "text", "name", "value")
+                if opt.get(key) not in (None, "")
+            ),
+            "",
+        )
+        label = str(raw_label).strip()
         if not label:
             return None
         return label, opt.get("value", label)
+    if isinstance(opt, (list, tuple)):
+        if not opt:
+            return None
+        label = str(opt[0] if opt[0] is not None else "").strip()
+        if not label:
+            return None
+        return label, opt[1] if len(opt) >= 2 else opt[0]
     label = str(opt or "").strip()
     if not label:
         return None
@@ -2505,6 +2521,31 @@ def _option_sources_from_page_enum_options(page_enum_options: dict[str, Any] | N
     return [{"kind": "page_enum_options", "options": page_enum_options}]
 
 
+def _api_option_source_refs(
+    facts_by_id: dict[str, RequestFact],
+    analysis: dict[str, RequestAnalysis],
+) -> list[dict[str, Any]]:
+    """Index captured API enum sources without duplicating their response facts."""
+    sources: list[dict[str, Any]] = []
+    for request_id, fact in facts_by_id.items():
+        request_analysis = analysis.get(request_id)
+        semantic_roles = set(request_analysis.semantic_roles or []) if request_analysis else set()
+        if not request_analysis or (
+            request_analysis.role != "read_option"
+            and "enum_options" not in semantic_roles
+            and "read_option" not in semantic_roles
+        ):
+            continue
+        sources.append({
+            "kind": "api_response",
+            "request_id": request_id,
+            "method": fact.method or "GET",
+            "path": fact.path or _request_path({"url": fact.url}),
+            "response_schema": copy.deepcopy(fact.response_schema or {}),
+        })
+    return sources
+
+
 def _page_enum_options_from_request_facts(request_facts: RequestFacts | None) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for source in (request_facts.option_sources if request_facts else []) or []:
@@ -2569,11 +2610,13 @@ def _build_request_facts(
             _request_sequence_value(fact.sequence if fact.sequence is not None else fact.request_index) or 0,
         ),
     )
+    option_sources = _option_sources_from_page_enum_options(page_enum_options)
+    option_sources.extend(_api_option_source_refs(facts_by_id, analysis))
     return RequestFacts(
         requests=requests,
         diagnostics=list(diagnostics or []),
         page_events=list(page_events or []),
-        option_sources=_option_sources_from_page_enum_options(page_enum_options),
+        option_sources=option_sources,
         analysis=analysis,
         usage=usage,
     )
