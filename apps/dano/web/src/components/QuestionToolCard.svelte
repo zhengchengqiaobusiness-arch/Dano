@@ -1313,7 +1313,6 @@
   .question-card.inline-readonly-card .question-form-scroll-region {
     max-height: 420px;
     overflow-y: auto;
-    overscroll-behavior: contain;
     scrollbar-gutter: stable;
   }
 

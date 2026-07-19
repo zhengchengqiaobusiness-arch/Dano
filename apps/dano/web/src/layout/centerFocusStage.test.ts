@@ -22,6 +22,60 @@ function rect(left: number, top: number, width: number, height: number): DOMRect
 }
 
 describe("Center Focus Stage", () => {
+  it("recenters the active card when a confirmation expands into a form revision", () => {
+    const root = document.createElement("main");
+    const transcript = document.createElement("div");
+    const anchor = document.createElement("div");
+    const card = document.createElement("article");
+    transcript.dataset.centerFocusTranscript = "";
+    anchor.className = "question-card-anchor";
+    anchor.append(card);
+    transcript.append(anchor);
+    root.append(transcript);
+    document.body.append(root);
+    vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(0, 40, 1000, 800));
+    let cardHeight = 360;
+    vi.spyOn(card, "getBoundingClientRect").mockImplementation(
+      () => rect(200, Number.parseFloat(card.style.top || "180"), 600, cardHeight),
+    );
+    vi.spyOn(window, "matchMedia").mockImplementation(query => ({
+      matches: query === "(min-width: 901px)" ||
+        query === "(prefers-reduced-motion: reduce)",
+    } as MediaQueryList));
+    let resizeCallback: ResizeObserverCallback | undefined;
+    const disconnect = vi.fn();
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect = disconnect;
+    } as typeof ResizeObserver;
+
+    try {
+      const stage = createCenterFocusStage(root);
+      stage.show({ sessionKey: "session-a", toolCallId: "confirm-form", element: card });
+
+      expect(card.style.top).toBe("260px");
+
+      cardHeight = 752;
+      resizeCallback?.([], {} as ResizeObserver);
+
+      expect(card.style.top).toBe("64px");
+      expect(Number.parseFloat(card.style.top) + cardHeight).toBeLessThanOrEqual(816);
+
+      stage.hide("confirm-form");
+      expect(disconnect).toHaveBeenCalledOnce();
+      resizeCallback?.([], {} as ResizeObserver);
+      expect(card.getAttribute("style")).toBeNull();
+      stage.destroy();
+    } finally {
+      globalThis.ResizeObserver = OriginalResizeObserver;
+    }
+  });
+
   it("focuses the same card within center bounds and restores the inline presentation", () => {
     const root = document.createElement("main");
     const transcript = document.createElement("div");

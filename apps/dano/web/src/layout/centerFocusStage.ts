@@ -20,6 +20,7 @@ interface ActivePresentation {
   composerWasInert: boolean;
   backgroundBranches: Array<{ element: HTMLElement; wasInert: boolean }>;
   sourceRect: DOMRect;
+  resizeObserver: ResizeObserver | null;
 }
 
 const DESKTOP_SAFE_MARGIN = 24;
@@ -55,8 +56,11 @@ export function createCenterFocusStage(
     if (!presentation) return;
     const { element } = presentation.target;
     const rootRect = root.getBoundingClientRect();
-    const cardRect = presentation.sourceRect;
-    presentation.anchor.style.height = `${cardRect.height}px`;
+    const sourceRect = presentation.sourceRect;
+    const cardHeight = element.classList.contains("center-focused-card")
+      ? element.getBoundingClientRect().height
+      : sourceRect.height;
+    presentation.anchor.style.height = `${sourceRect.height}px`;
 
     if (!isDesktopCenterFocusViewport()) {
       const margin = MOBILE_SAFE_MARGIN;
@@ -92,12 +96,12 @@ export function createCenterFocusStage(
     const width = Math.max(
       0,
       Math.min(
-        cardRect.width * WIDTH_SCALE,
+        sourceRect.width * WIDTH_SCALE,
         rootRect.width - DESKTOP_SAFE_MARGIN * 2,
       ),
     );
     const maxHeight = Math.max(0, rootRect.height - DESKTOP_SAFE_MARGIN * 2);
-    const visibleHeight = Math.min(cardRect.height, maxHeight);
+    const visibleHeight = Math.min(cardHeight, maxHeight);
     const left = rootRect.left + (rootRect.width - width) / 2;
     const top = rootRect.top + Math.max(
       DESKTOP_SAFE_MARGIN,
@@ -130,6 +134,7 @@ export function createCenterFocusStage(
       composerWasInert: composer?.inert ?? false,
       backgroundBranches: [],
       sourceRect: target.element.getBoundingClientRect(),
+      resizeObserver: null,
     };
     active = presentation;
     target.element.classList.add("center-focus-transition-card");
@@ -140,6 +145,12 @@ export function createCenterFocusStage(
       root.querySelector<HTMLElement>("[data-center-focus-transcript]")
         ?.setAttribute("data-center-focus-locked", "true");
       target.element.classList.add("center-focused-card");
+      if (typeof ResizeObserver !== "undefined") {
+        presentation.resizeObserver = new ResizeObserver(() => {
+          if (active === presentation) layout(presentation);
+        });
+        presentation.resizeObserver.observe(target.element);
+      }
       isolateBackground(presentation, root);
       if (composer) {
         if (composer.contains(document.activeElement)) {
@@ -156,6 +167,7 @@ export function createCenterFocusStage(
     if (toolCallId && active.target.toolCallId !== toolCallId) return;
     const presentation = active;
     active = null;
+    presentation.resizeObserver?.disconnect();
     runTransition(() => {
       delete root.dataset.centerFocusActive;
       root.querySelector<HTMLElement>("[data-center-focus-transcript]")
