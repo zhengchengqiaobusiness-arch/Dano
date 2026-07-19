@@ -730,6 +730,31 @@ describe("QuestionToolCard", () => {
     unmount(component);
   });
 
+  it("shows only the individual form titles while revising", async () => {
+    const response = vi.fn(async () => ({ success: true } as never));
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: revisingMultiFormBlock(),
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
+      },
+    });
+    await tick();
+
+    expect(target.querySelector(".question-form-title")).toBeNull();
+    expect(
+      [...target.querySelectorAll(".revision-form-title")]
+        .map(title => title.textContent?.trim()),
+    ).toEqual(["请假申请", "出差申请"]);
+
+    unmount(component);
+  });
+
   it("recovers a stale revision from the authoritative response projection", async () => {
     const response = vi.fn(async () => ({ success: true } as never));
     const submitRevision = vi.fn(async () => ({
