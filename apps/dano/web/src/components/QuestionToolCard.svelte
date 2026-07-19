@@ -880,6 +880,11 @@
     <article
       bind:this={cardElement}
       class="question-card"
+      class:inline-readonly-card={result?.status === "answered" ||
+        result?.status === "confirmed" ||
+        interaction?.state === "confirmed" ||
+        interaction?.state === "cancelled" ||
+        interaction?.state === "interrupted"}
       data-status={result?.status ?? "pending"}
       data-form-id={result?.status === "answered" ? result.formId : undefined}
       aria-live="polite"
@@ -908,34 +913,36 @@
             <p>{t("questionTool.confirmDescription")}</p>
           </div>
         </header>
-        {#each displayedConfirmationForms as form (form.formId)}
-          <div class="confirmation-form" data-form-id={form.formId}>
-            <h4>{form.title}</h4>
-            <div class="submitted-fields">
-              {#each form.items as item (item.id)}
-                <div class="submitted-field">
-                  <div class="submitted-field-label">
-                    <span class="submitted-field-icon" aria-hidden="true">
-                      {#if item.kind === "date"}
-                        <Calendar size={18} />
-                      {:else if item.kind === "single" || item.kind === "multiple" || item.kind === "select" || item.kind === "treeSelect"}
-                        <ListChecks size={18} />
-                      {:else if item.kind === "confirm"}
-                        <CircleCheck size={18} />
-                      {:else}
-                        <MessageSquareText size={18} />
-                      {/if}
-                    </span>
-                    <span>{item.label}</span>
+        <div class="question-form-scroll-region confirmation-form-list">
+          {#each displayedConfirmationForms as form (form.formId)}
+            <div class="confirmation-form" data-form-id={form.formId}>
+              <h4>{form.title}</h4>
+              <div class="submitted-fields">
+                {#each form.items as item (item.id)}
+                  <div class="submitted-field">
+                    <div class="submitted-field-label">
+                      <span class="submitted-field-icon" aria-hidden="true">
+                        {#if item.kind === "date"}
+                          <Calendar size={18} />
+                        {:else if item.kind === "single" || item.kind === "multiple" || item.kind === "select" || item.kind === "treeSelect"}
+                          <ListChecks size={18} />
+                        {:else if item.kind === "confirm"}
+                          <CircleCheck size={18} />
+                        {:else}
+                          <MessageSquareText size={18} />
+                        {/if}
+                      </span>
+                      <span>{item.label}</span>
+                    </div>
+                    <SubmittedAnswerValue value={item.value} />
                   </div>
-                  <SubmittedAnswerValue value={item.value} />
-                </div>
-              {/each}
+                {/each}
+              </div>
             </div>
-          </div>
-        {/each}
+          {/each}
+        </div>
       </section>
-      <div class="mobile-question-result">
+      <div class="mobile-question-result question-form-scroll-region">
         <MarkdownRenderer content={confirmationMarkdown} />
       </div>
       <div class="question-actions">
@@ -968,16 +975,20 @@
       <div class="question-error" role="alert">{block.resultText}</div>
     {:else}
       {#if result?.status === "answered"}
-        <div class="mobile-answered-result question-result">
+        <div class="mobile-answered-result question-result question-form-scroll-region">
           <MarkdownRenderer content={sourceAnsweredMarkdown} />
         </div>
       {/if}
       <form onsubmit={submit} class:answered-source-form={result?.status === "answered"}>
-        {#each questionItems as item}
-          <div class:question-group={request.batch}>
-            {#if item.revisionTitle}
-              <h3 class="revision-form-title">{item.revisionTitle}</h3>
-            {/if}
+        {#if revising}
+          <h2 class="question-form-title">{t("questionTool.modify")}</h2>
+        {/if}
+        <div class="question-form-scroll-region">
+          {#each questionItems as item}
+            <div class:question-group={request.batch}>
+              {#if item.revisionTitle}
+                <h3 class="revision-form-title">{item.revisionTitle}</h3>
+              {/if}
             {#if (request.batch || revising) && item.kind !== "text"}
               <div class="question-text">
                 <MarkdownRenderer content={askUserQuestionMarkdown(item.question)} />
@@ -1185,8 +1196,9 @@
                 onkeydown={preventEnterSubmit}
               />
             {/if}
-          </div>
-        {/each}
+            </div>
+          {/each}
+        </div>
 
         <div class="question-actions">
           {#if revising && interaction}
@@ -1241,6 +1253,10 @@
     box-shadow: var(--shadow-raised);
   }
 
+  .question-card:global(.center-focused-card) {
+    overflow: hidden;
+  }
+
   .question-label {
     color: var(--text-subtle);
     font-size: 0.68rem;
@@ -1270,8 +1286,36 @@
     line-height: 1.5;
   }
 
-  form { display: flex; flex-direction: column; gap: 12px; }
+  form { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
   fieldset { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; }
+
+  .question-form-scroll-region {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-height: 0;
+  }
+
+  .question-card:global(.center-focused-card) form,
+  .question-card:global(.center-focused-card) .desktop-question-result,
+  .question-card:global(.center-focused-card) .mobile-question-result {
+    flex: 1 1 auto;
+  }
+
+  .question-card:global(.center-focused-card) .question-form-scroll-region {
+    flex: 1 1 auto;
+    max-height: none;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  .question-card.inline-readonly-card .question-form-scroll-region {
+    max-height: 420px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
 
   .single-options {
     display: flex;
@@ -1409,7 +1453,12 @@
     resize: vertical;
   }
 
-  .question-actions { display: flex; justify-content: flex-end; gap: 8px; }
+  .question-actions {
+    display: flex;
+    flex: 0 0 auto;
+    justify-content: flex-end;
+    gap: 8px;
+  }
 
   .question-actions .question-button {
     padding: 6px 26px;
@@ -1518,9 +1567,13 @@
     .mobile-question-result { display: none; }
 
     .desktop-question-result {
-      display: grid;
+      display: flex;
+      flex-direction: column;
       gap: 24px;
+      min-height: 0;
     }
+
+    .confirmation-form-list { gap: 24px; }
 
     .submitted-header {
       display: flex;

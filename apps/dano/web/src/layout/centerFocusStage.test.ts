@@ -334,6 +334,7 @@ describe("Center Focus Stage", () => {
     const transcript = document.createElement("div");
     const anchor = document.createElement("div");
     const card = document.createElement("article");
+    const scrollRegion = document.createElement("div");
     const fields = document.createElement("div");
     const actions = document.createElement("div");
     const submit = document.createElement("button");
@@ -343,9 +344,11 @@ describe("Center Focus Stage", () => {
     composer.dataset.centerFocusComposer = "";
     anchor.className = "question-card-anchor";
     actions.className = "question-actions";
+    scrollRegion.className = "question-form-scroll-region";
     submit.textContent = "提交";
     actions.append(submit);
-    card.append(fields, actions);
+    scrollRegion.append(fields);
+    card.append(scrollRegion, actions);
     anchor.append(card);
     transcript.append(anchor);
     composer.append(composerInput);
@@ -354,7 +357,7 @@ describe("Center Focus Stage", () => {
     transcript.scrollTop = 240;
     vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(0, 60, 390, 700));
     vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(16, 220, 358, 1_200));
-    Object.defineProperties(card, {
+    Object.defineProperties(scrollRegion, {
       clientHeight: { configurable: true, value: 620 },
       scrollHeight: { configurable: true, value: 1_200 },
     });
@@ -367,15 +370,17 @@ describe("Center Focus Stage", () => {
     const stage = createCenterFocusStage(root);
 
     stage.show({ sessionKey: "session-a", toolCallId: "long-form", element: card });
-    card.scrollTop = card.scrollHeight - card.clientHeight;
-    card.dispatchEvent(new Event("scroll"));
+    scrollRegion.scrollTop = scrollRegion.scrollHeight - scrollRegion.clientHeight;
+    scrollRegion.dispatchEvent(new Event("scroll"));
     submit.click();
 
     expect(card.classList).toContain("center-focus-mobile-card");
-    expect(card.scrollTop).toBe(580);
+    expect(card.scrollTop).toBe(0);
+    expect(scrollRegion.scrollTop).toBe(580);
     expect(transcript.scrollTop).toBe(240);
     expect(transcript.dataset.centerFocusLocked).toBe("true");
     expect(actions.closest(".center-focused-card")).toBe(card);
+    expect(scrollRegion.contains(actions)).toBe(false);
     expect(submitted).toHaveBeenCalledOnce();
     expect(document.activeElement).not.toBe(composerInput);
     expect(composer.inert).toBe(true);

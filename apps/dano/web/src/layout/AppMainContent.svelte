@@ -372,8 +372,7 @@
   .center-column :global(.center-focused-card) {
     position: fixed;
     z-index: 22;
-    overflow-y: auto;
-    overscroll-behavior: contain;
+    overflow: hidden;
     box-shadow: var(--shadow-overlay, var(--shadow-raised));
   }
 
@@ -408,8 +407,7 @@
     }
 
     .center-column :global(.center-focused-card) {
-      scroll-padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px));
-      scrollbar-gutter: stable;
+      padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
     }
 
     .center-column :global(.center-focused-card.center-focus-mobile-card) {
@@ -420,13 +418,7 @@
     }
 
     .center-column :global(.center-focused-card .question-actions) {
-      position: sticky;
-      bottom: 0;
-      z-index: 1;
-      margin-top: auto;
-      padding-top: 12px;
-      padding-bottom: env(safe-area-inset-bottom, 0px);
-      background: var(--panel);
+      flex: 0 0 auto;
     }
   }
 
