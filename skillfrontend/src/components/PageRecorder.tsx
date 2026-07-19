@@ -993,22 +993,13 @@ function capabilityNodeStepIds(nodes?: Array<Record<string, any>>) {
   return ordered;
 }
 function capabilityActualStepIds(cap?: FlowCapabilityData | null) {
-  // step_ids is the operator-editable canonical order. The server projects it
-  // back into sibling call nodes after every edit. Reading nodes first made the
-  // up/down buttons appear to do nothing until a later full refresh.
-  const ordered: string[] = [];
-  for (const raw of cap?.step_ids || []) {
-    const stepId = String(raw || "").trim();
-    if (stepId && !ordered.includes(stepId)) ordered.push(stepId);
-  }
-  const seen = new Set(ordered);
-  for (const raw of capabilityNodeStepIds(cap?.nodes)) {
-    const stepId = String(raw || "").trim();
-    if (!stepId || seen.has(stepId)) continue;
-    seen.add(stepId);
-    ordered.push(stepId);
-  }
-  return ordered;
+  const nodeIds = capabilityNodeStepIds(cap?.nodes);
+  if (nodeIds.length) return nodeIds;
+  // Read-only compatibility for a pre-P6 projection during rolling upgrades.
+  // New edits never write this derived field.
+  return Array.from(new Set(
+    (cap?.step_ids || []).map((value) => String(value || "").trim()).filter(Boolean),
+  ));
 }
 function capabilityRequestRefForStep(cap: FlowCapabilityData | null | undefined, stepId: string) {
   return (cap?.request_refs || []).find((ref) => ref.step_id === stepId);
@@ -1332,57 +1323,36 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function acceptFlowSpec(fs: FlowSpecData) {
     serverFingerprintRef.current = String(fs.meta?.current_fingerprint || "");
     const pending = pendingCapabilityMembershipRef.current;
-    const edits: any[] = [];
     const remaining: typeof pending = [];
-    let nextSpec = fs;
     for (const item of pending) {
-      const capIdx = (nextSpec.capabilities || []).findIndex((cap, idx) => capabilityRef(cap, idx) === item.capability);
-      const step = (nextSpec.steps || []).find((candidate) => {
+      const capIdx = (fs.capabilities || []).findIndex(
+        (cap, idx) => capabilityRef(cap, idx) === item.capability,
+      );
+      const step = (fs.steps || []).find((candidate) => {
         const meta = candidate.source_meta || {};
         return (item.requestId && String(meta.request_id || "") === item.requestId) ||
           (item.requestIndex != null && String(meta.request_index ?? "") === String(item.requestIndex));
       });
-      const serverRef = capIdx >= 0 && step ? capabilityRequestRefForStep(nextSpec.capabilities?.[capIdx], step.step_id) : undefined;
+      const serverRef = capIdx >= 0 && step
+        ? capabilityRequestRefForStep(fs.capabilities?.[capIdx], step.step_id)
+        : undefined;
       if (
         capIdx < 0 || !step
-        || (item.usage !== "option_source" && !capabilityActualStepIds(nextSpec.capabilities?.[capIdx]).includes(step.step_id))
-        || (item.usage === "option_source" && !serverRef)
+        || (item.usage === "execute" && !capabilityActualStepIds(fs.capabilities?.[capIdx]).includes(step.step_id))
+        || (item.usage !== "execute" && !serverRef)
       ) {
         remaining.push(item);
-        continue;
-      }
-      const cap = nextSpec.capabilities![capIdx];
-      const existingRef = serverRef || capabilityRequestRefForStep(cap, step.step_id);
-      const requestRefs: FlowCapabilityRequestRefData[] = [
-        ...(cap.request_refs || []).filter((ref) => ref.step_id !== step.step_id),
-        {
-          ...(existingRef || {}),
-          request_id: item.requestId || existingRef?.request_id,
-          request_index: item.requestIndex ?? existingRef?.request_index,
-          step_id: step.step_id,
-          usage: item.usage,
-          origin: "manual",
-          confirmed: true,
-        },
-      ];
-      const capabilities = [...(nextSpec.capabilities || [])];
-      capabilities[capIdx] = { ...cap, request_refs: requestRefs };
-      nextSpec = { ...nextSpec, capabilities };
-      if (existingRef?.usage !== item.usage || existingRef?.origin !== "manual" || !existingRef?.confirmed) {
-        edits.push({ op: "update_capability", capability_index: capIdx, field: "request_refs", value: requestRefs });
       }
     }
     pendingCapabilityMembershipRef.current = remaining;
-    flowSpecRef.current = nextSpec;
-    setFlowSpec(nextSpec);
-    if (nextSpec.meta?.last_analysis_application) {
-      setLastAnalysisEvidence(nextSpec.meta.last_analysis_application);
+    flowSpecRef.current = fs;
+    setFlowSpec(fs);
+    if (fs.meta?.last_analysis_application) {
+      setLastAnalysisEvidence(fs.meta.last_analysis_application);
     }
-    if (edits.length) send({ type: "flow_update", edits });
-    const nextTitle = preferredSkillTitle(nextSpec);
+    const nextTitle = preferredSkillTitle(fs);
     if (nextTitle && !title.trim()) setTitle(nextTitle);
   }
-
   function newCostlyOperationId(prefix: string) {
     const id = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
@@ -2549,7 +2519,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       title: `能力 ${idx}`,
       intent: "",
       kind: "submit",
-      step_ids: [],
+      nodes: [],
       input_schema: { type: "object", properties: {}, required: [] },
       output_schema: { type: "object", properties: { raw: { type: "object" } } },
       output_mapping: [{ kind: "final_response", response_path: "response" }],
@@ -2599,19 +2569,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const membership = { usage, origin: "manual", confirmed: true };
     if (value.startsWith("step:")) {
       const stepId = value.slice(5);
-      const cap = flowSpecRef.current?.capabilities?.[idx];
-      const stepIds = usage === "option_source"
-        ? capabilityActualStepIds(cap || {})
-        : Array.from(new Set([...(capabilityActualStepIds(cap || {})), stepId]));
-      const existingRef = (cap?.request_refs || []).find((ref) => ref.step_id === stepId);
-      const requestRefs = [
-        ...(cap?.request_refs || []).filter((ref) => ref.step_id !== stepId),
-        { ...(existingRef || {}), step_id: stepId, ...membership },
-      ];
-      patchLocalCapability(idx, { step_ids: stepIds, request_refs: requestRefs });
       send({ type: "flow_update", edits: [
         { op: "add_capability_step", capability_index: idx, step_id: stepId, ...membership },
-        { op: "update_capability", capability_index: idx, field: "request_refs", value: requestRefs },
         { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
       ] });
       return;
@@ -2635,9 +2594,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     }
   }
   function removeStepFromCapability(idx: number, stepId: string) {
-    const cap = flowSpecRef.current?.capabilities?.[idx];
-    const stepIds = capabilityActualStepIds(cap || {}).filter((id) => id !== stepId);
-    patchLocalCapability(idx, { step_ids: stepIds });
+
     send({ type: "flow_update", edits: [
       { op: "remove_capability_step", capability_index: idx, step_id: stepId },
       { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
@@ -2650,7 +2607,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const [item] = next.splice(from, 1);
     next.splice(to, 0, item);
     preserveEditorScrollForReorder();
-    updateCapabilityField(idx, "step_ids", next);
+    send({ type: "flow_update", edits: [
+      { op: "reorder_capability_steps", capability_index: idx, step_ids: next },
+      { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
+    ] });
   }
   function capabilityRef(cap: FlowCapabilityData, idx: number) {
     return cap.name || cap.capability_id || `idx:${idx}`;

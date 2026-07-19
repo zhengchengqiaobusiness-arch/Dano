@@ -2657,8 +2657,10 @@ def _capability_scoped_node_step_ids(nodes: list[dict[str, Any]]) -> list[str]:
 
 
 def _capability_scoped_step_ids(cap: FlowCapability) -> list[str]:
+    node_ids = _capability_scoped_node_step_ids(cap.nodes or [])
+    source_ids = node_ids if node_ids else list(cap.step_ids or [])
     ids: list[str] = []
-    for sid in list(cap.step_ids or []) + _capability_scoped_node_step_ids(cap.nodes or []):
+    for sid in source_ids:
         sid = str(sid or "").strip()
         if sid and sid not in ids:
             ids.append(sid)
@@ -5509,6 +5511,7 @@ def _canonicalize_public_capability_identities(spec: FlowSpec) -> FlowSpec:
 
 def _repair_generated_capability_contracts(spec: FlowSpec) -> FlowSpec:
     """Deterministically repair only Planner-generated capability contracts."""
+    _normalize_capability_references(spec)
     _infer_computed_runtime_fields(spec)
     rebuild_flow_dependencies(spec)
     _repair_structural_option_bindings(spec)
@@ -5721,6 +5724,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
     if not spec.capabilities:
         return spec
 
+    _normalize_capability_references(spec)
     _normalize_actionable_placeholder_param_names(spec)
 
     def reconcile_schema(derived: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
@@ -5895,6 +5899,12 @@ def _sanitize_capability_nodes(spec: FlowSpec, cap: FlowCapability) -> list[dict
                 source = str(node.get("source") or "")
                 target = str(node.get("target") or "")
                 if not source or not target:
+                    has_children = any(
+                        isinstance(node.get(key), list) and node.get(key)
+                        for key in ("children", "steps", "then", "else", "otherwise")
+                    )
+                    if has_children:
+                        out.append(node)
                     continue
                 if is_batch and source.startswith("input."):
                     # A batch capability exposes one top-level ``entries`` array.
@@ -6431,15 +6441,49 @@ def _capability_step_allowed(spec: FlowSpec, cap: FlowCapability, step: FlowStep
 
 
 def _add_step_id_to_capability(spec: FlowSpec, cap: FlowCapability, step_id: str) -> None:
-    if not step_id or step_id in cap.step_ids:
+    """Insert one call node in stable captured-step order."""
+    if not step_id or step_id in _capability_call_step_ids_from_nodes(cap.nodes or []):
         return
-    order = {s.step_id: i for i, s in enumerate(spec.steps)}
+    node = {
+        "id": f"call_{len(_capability_call_step_ids_from_nodes(cap.nodes or [])) + 1}",
+        "type": "call",
+        "step_id": step_id,
+    }
+    if any(
+        item.get("type") not in {"call", "return"}
+        for item in (cap.nodes or [])
+        if isinstance(item, dict)
+    ):
+        return_index = next(
+            (
+                index for index, item in enumerate(cap.nodes)
+                if isinstance(item, dict) and item.get("type") == "return"
+            ),
+            len(cap.nodes),
+        )
+        cap.nodes.insert(return_index, node)
+        return
+
+    order = {step.step_id: index for index, step in enumerate(spec.steps)}
     new_order = order.get(step_id, 10_000)
-    for idx, sid in enumerate(cap.step_ids or []):
-        if order.get(sid, 10_000) > new_order:
-            cap.step_ids.insert(idx, step_id)
-            return
-    cap.step_ids.append(step_id)
+    insert_at = next(
+        (
+            index for index, item in enumerate(cap.nodes or [])
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "call"
+                and order.get(str(item.get("step_id") or ""), 10_000) > new_order
+            )
+        ),
+        next(
+            (
+                index for index, item in enumerate(cap.nodes or [])
+                if isinstance(item, dict) and item.get("type") == "return"
+            ),
+            len(cap.nodes or []),
+        ),
+    )
+    cap.nodes.insert(insert_at, node)
 
 
 def _set_capability_request_membership(
@@ -8622,18 +8666,30 @@ def _normalize_capability_references(spec: FlowSpec) -> FlowSpec:
 
     for cap in spec.capabilities or []:
         seen: set[str] = set()
-        cap.step_ids = [
+        legacy_step_ids = [
             sid
             for sid in (valid_step_id(x) for x in (cap.step_ids or []))
             if sid and not (sid in seen or seen.add(sid))
         ]
-        cap.nodes = clean_nodes(cap.nodes or [], cap.step_ids)
-        node_step_ids = _capability_call_step_ids_from_nodes(cap.nodes or [])
-        # nodes 是实际执行计划；所有 call 必须在 step_ids 中可见、可编辑。保留 node
-        # 执行顺序，再追加尚未进入 nodes 的显式 step_ids。
-        cap.step_ids = list(dict.fromkeys([*node_step_ids, *cap.step_ids]))
-        if cap.step_ids:
-            _sync_capability_order(spec, cap)
+        cap.nodes = clean_nodes(cap.nodes or [], legacy_step_ids)
+        # Legacy assets may have only step_ids. Migrate that old shape once;
+        # whenever call nodes already exist they are authoritative and a
+        # divergent step_ids projection is deliberately ignored.
+        if not _capability_call_step_ids_from_nodes(cap.nodes or []) and legacy_step_ids:
+            return_nodes = [
+                node for node in cap.nodes
+                if isinstance(node, dict) and node.get("type") == "return"
+            ]
+            body_nodes = [
+                node for node in cap.nodes
+                if not (isinstance(node, dict) and node.get("type") == "return")
+            ]
+            body_nodes.extend(
+                {"id": f"call_{index}", "type": "call", "step_id": step_id}
+                for index, step_id in enumerate(legacy_step_ids, 1)
+            )
+            cap.nodes = body_nodes + return_nodes
+        _sync_capability_order(spec, cap)
     return spec
 
 
@@ -8653,61 +8709,53 @@ def _remove_capability_step_nodes(nodes: list[dict[str, Any]], step_id: str) -> 
 
 
 def _sync_capability_order(spec: FlowSpec, cap: FlowCapability) -> None:
-    seen: set[str] = set()
-    cap.step_ids = [sid for sid in cap.step_ids if not (sid in seen or seen.add(sid))]
-    order = {sid: idx for idx, sid in enumerate(cap.step_ids)}
-
-    def reorder_sibling_calls(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        copied_nodes: list[dict[str, Any]] = []
-        for raw in nodes or []:
-            if not isinstance(raw, dict):
-                continue
-            copied = dict(raw)
-            for child_key in ("children", "steps", "then", "else", "otherwise"):
-                if isinstance(copied.get(child_key), list):
-                    copied[child_key] = reorder_sibling_calls(copied[child_key])
-            copied_nodes.append(copied)
-        call_positions = [
-            idx for idx, node in enumerate(copied_nodes)
-            if node.get("type") == "call" and node.get("step_id") in order
-        ]
-        ordered_calls = sorted(
-            (copied_nodes[idx] for idx in call_positions),
-            key=lambda node: order.get(str(node.get("step_id") or ""), 10_000),
+    """Refresh derived membership views from the executable node plan."""
+    by_id = {step.step_id: step for step in spec.steps}
+    cap.step_ids = [
+        step_id for step_id in _capability_call_step_ids_from_nodes(cap.nodes or [])
+        if step_id in by_id
+    ]
+    existing_execute = {
+        ref.step_id: ref for ref in (cap.request_refs or [])
+        if ref.usage == "execute" and ref.step_id
+    }
+    auxiliary_refs = [
+        ref for ref in (cap.request_refs or [])
+        if ref.usage != "execute"
+    ]
+    execute_refs: list[CapabilityRequestRef] = []
+    for step_id in cap.step_ids:
+        ref = _capability_request_ref_from_step(
+            spec, by_id[step_id], existing_execute.get(step_id),
         )
-        for idx, node in zip(call_positions, ordered_calls):
-            copied_nodes[idx] = node
-        return copied_nodes
+        ref.usage = "execute"
+        execute_refs.append(ref)
+    cap.request_refs = execute_refs + auxiliary_refs
 
-    cap.nodes = reorder_sibling_calls(cap.nodes or [])
-    if any(isinstance(n, dict) and n.get("type") not in {"call", "return"} for n in (cap.nodes or [])):
-        existing_call_steps = set(_capability_call_step_ids_from_nodes(cap.nodes or []))
-        missing = [sid for sid in cap.step_ids if sid not in existing_call_steps]
-        if missing:
-            return_nodes = [n for n in cap.nodes if isinstance(n, dict) and n.get("type") == "return"]
-            body_nodes = [n for n in cap.nodes if not (isinstance(n, dict) and n.get("type") == "return")]
-            body_nodes.extend({"id": f"call_{len(body_nodes) + i + 1}", "type": "call", "step_id": sid} for i, sid in enumerate(missing))
-            cap.nodes = body_nodes + return_nodes
-        return
-    call_by_step: dict[str, dict[str, Any]] = {}
-    other_nodes: list[dict[str, Any]] = []
-    return_nodes: list[dict[str, Any]] = []
-    for node in cap.nodes or []:
-        if not isinstance(node, dict):
+
+def _reorder_capability_call_nodes(
+    nodes: list[dict[str, Any]], order: dict[str, int],
+) -> list[dict[str, Any]]:
+    copied_nodes: list[dict[str, Any]] = []
+    for raw in nodes or []:
+        if not isinstance(raw, dict):
             continue
-        if node.get("type") == "call" and node.get("step_id"):
-            call_by_step.setdefault(str(node.get("step_id")), dict(node))
-        elif node.get("type") == "return":
-            return_nodes.append(dict(node))
-        else:
-            other_nodes.append(dict(node))
-    ordered_calls: list[dict[str, Any]] = []
-    for idx, sid in enumerate(cap.step_ids, 1):
-        node = call_by_step.get(sid) or {"type": "call", "step_id": sid}
-        node.setdefault("id", f"call_{idx}")
-        ordered_calls.append(node)
-    cap.nodes = ordered_calls + other_nodes + return_nodes
-
+        copied = dict(raw)
+        for child_key in ("children", "steps", "then", "else", "otherwise"):
+            if isinstance(copied.get(child_key), list):
+                copied[child_key] = _reorder_capability_call_nodes(copied[child_key], order)
+        copied_nodes.append(copied)
+    call_positions = [
+        index for index, node in enumerate(copied_nodes)
+        if node.get("type") == "call" and str(node.get("step_id") or "") in order
+    ]
+    ordered_calls = sorted(
+        (copied_nodes[index] for index in call_positions),
+        key=lambda node: order[str(node.get("step_id") or "")],
+    )
+    for index, node in zip(call_positions, ordered_calls):
+        copied_nodes[index] = node
+    return copied_nodes
 
 def _iter_capability_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
@@ -9469,15 +9517,10 @@ async def orchestrate_flow_capabilities(
 
 
 def _capability_node_step_ids(cap: FlowCapability) -> list[str]:
-    ids: list[str] = []
-    for sid in cap.step_ids or []:
-        if sid and sid not in ids:
-            ids.append(sid)
-    for node in _iter_capability_nodes(cap.nodes or []):
-        sid = str(node.get("step_id") or "")
-        if sid and sid not in ids:
-            ids.append(sid)
-    return ids
+    node_ids = _capability_call_step_ids_from_nodes(cap.nodes or [])
+    if node_ids:
+        return node_ids
+    return list(dict.fromkeys(str(step_id) for step_id in (cap.step_ids or []) if step_id))
 
 
 def _step_request_key(step: FlowStep) -> str:
@@ -14532,6 +14575,8 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             field = str(edit.get("field") or "")
             if field not in _CAPABILITY_ALLOWED_FIELDS:
                 raise ValueError(f"unknown capability field: {field}")
+            if field in {"step_ids", "request_refs"}:
+                raise ValueError(f"derived capability field is read-only: {field}")
             value = edit.get("value")
             cap = new_spec.capabilities[idx]
             if field == "name":
@@ -14712,10 +14757,8 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             )
             cap.updated_by = "planner" if actor == "planner" else "user"
             _invalidate_capability_contract(cap)
-            if usage != "option_source":
+            if usage == "execute":
                 _add_step_id_to_capability(new_spec, cap, step_id)
-            if usage != "option_source" and not any(n.get("type") == "call" and n.get("step_id") == step_id for n in (cap.nodes or [])):
-                cap.nodes.append({"id": f"call_{len(cap.nodes or []) + 1}", "type": "call", "step_id": step_id})
             _sync_capability_order(new_spec, cap)
             continue
 
@@ -14727,11 +14770,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 _remember_removed_capability_step(
                     new_spec, new_spec.capabilities[idx].name, step_id
                 )
-            new_spec.capabilities[idx].step_ids = [
-                sid
-                for sid in new_spec.capabilities[idx].step_ids
-                if sid != step_id
-            ]
+
             new_spec.capabilities[idx].request_refs = [
                 ref
                 for ref in new_spec.capabilities[idx].request_refs
@@ -14745,6 +14784,24 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             )
             _invalidate_capability_contract(new_spec.capabilities[idx])
             _sync_capability_order(new_spec, new_spec.capabilities[idx])
+            continue
+
+        if op == "reorder_capability_steps":
+            idx = _find_capability_index(new_spec, edit)
+            cap = new_spec.capabilities[idx]
+            requested = [str(value) for value in (edit.get("step_ids") or []) if str(value)]
+            current = _capability_call_step_ids_from_nodes(cap.nodes or [])
+            if len(requested) != len(current) or set(requested) != set(current):
+                raise ValueError(
+                    "reorder_capability_steps must contain every executable step exactly once"
+                )
+            cap.nodes = _reorder_capability_call_nodes(
+                cap.nodes or [],
+                {step_id: index for index, step_id in enumerate(requested)},
+            )
+            cap.updated_by = str(edit.get("actor") or "user")
+            _invalidate_capability_contract(cap)
+            _sync_capability_order(new_spec, cap)
             continue
 
         if op == "bind_dependency":
@@ -15416,6 +15473,12 @@ def apply_client_flow_patch(
         op = str(edit.get("op") or "")
         if op == "update_flow" and str(edit.get("field") or "") == "meta":
             raise ValueError("server-owned flow field: meta")
+        if op in {"add_capability", "upsert_capability"}:
+            raw_capability = edit.get("capability")
+            if isinstance(raw_capability, dict) and (
+                "step_ids" in raw_capability or "request_refs" in raw_capability
+            ):
+                raise ValueError("client capability membership must be expressed through nodes")
         if op == "update" and not edit.get("param_path"):
             field = str(edit.get("field") or "")
             if field in _CLIENT_SERVER_OWNED_STEP_FIELDS or field == "selects":
@@ -15740,10 +15803,9 @@ def _autofix_ops_to_edits(
             step_ids = op.get("step_ids")
             if cap_name in cap_by_name and isinstance(step_ids, list):
                 edits.append({
-                    "op": "update_capability",
+                    "op": "reorder_capability_steps",
                     "capability_index": cap_by_name[cap_name],
-                    "field": "step_ids",
-                    "value": [str(x) for x in step_ids],
+                    "step_ids": [str(x) for x in step_ids],
                 })
         elif kind in {
             "upsert_capability",

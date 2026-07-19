@@ -382,10 +382,9 @@ def test_capability_interface_reorder_updates_flat_calls_even_with_return_node()
     )
 
     updated = apply_flow_edits(spec, [{
-        "op": "update_capability",
+        "op": "reorder_capability_steps",
         "capability_index": 0,
-        "field": "step_ids",
-        "value": ["b", "a"],
+        "step_ids": ["b", "a"],
     }])
 
     calls = [node["step_id"] for node in updated.capabilities[0].nodes if node.get("type") == "call"]
@@ -4111,10 +4110,9 @@ def test_update_capability_step_order_preserves_user_order_independent_of_global
     )
 
     edited = apply_flow_edits(spec, [{
-        "op": "update_capability",
+        "op": "reorder_capability_steps",
         "capability_name": "custom_order",
-        "field": "step_ids",
-        "value": ["submit", "read"],
+        "step_ids": ["submit", "read"],
     }])
 
     assert edited.capabilities[0].step_ids == ["submit", "read"]
