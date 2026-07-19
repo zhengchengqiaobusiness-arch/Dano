@@ -37,6 +37,7 @@ from dano.shared.enums import AssetType, Subsystem
 from dano.shared.models import Scope
 
 from dano.lifecycle.state_machine import SkillLifecycle
+from dano.lifecycle.outbox import InMemoryLifecycleOutboxStore, LifecycleRegistrationReconciler
 from dano.resilience.circuit_breaker import InMemoryCounter
 from dano.shared.enums import SkillState
 
@@ -55,6 +56,10 @@ async def _tenant_subsystems(tenant: str) -> list[Subsystem]:
     return subs or _PROTOTYPE_SUBSYSTEMS
 _registry = InMemoryRegistry()       # DB 就绪换 PgRegistry(lifespan)
 _lifecycle = SkillLifecycle()        # 流程12 Skill 生命周期(进程内;可换 PgSkillStore)
+_lifecycle_reconciler = LifecycleRegistrationReconciler(
+    _lifecycle,
+    InMemoryLifecycleOutboxStore(),
+)
 _breaker = InMemoryCounter()         # 流程10 失败计数/熔断
 
 
@@ -491,16 +496,24 @@ async def lifespan(app: FastAPI):
     from dano.infra.logging import configure_logging
     configure_logging()                    # **先配日志**:否则后台看不到任何记录
     log.info("gateway.starting")
-    global _registry, _lifecycle, _breaker
+    global _registry, _lifecycle, _lifecycle_reconciler, _breaker
     try:
         await init_pool()
         await run_migrations()
         _registry = PgRegistry()
         # 生命周期/失败计数落 PG:重启后 Skill 状态、暂停态、失败计数不丢(否则已熔断 Skill 复活)
         from dano.lifecycle.pg_store import PgSkillStore
+        from dano.lifecycle.pg_outbox import PgLifecycleOutboxStore
         from dano.resilience.circuit_breaker import PgFailureCounter
         _lifecycle = SkillLifecycle(PgSkillStore())
+        _lifecycle_reconciler = LifecycleRegistrationReconciler(
+            _lifecycle,
+            PgLifecycleOutboxStore(),
+        )
         _breaker = PgFailureCounter()
+        reconcile_result = await _lifecycle_reconciler.reconcile()
+        if reconcile_result["completed"] or reconcile_result["pending"]:
+            log.info("lifecycle.startup_reconciled", **reconcile_result)
         log.info("gateway.db_ready")
     except Exception as e:  # noqa: BLE001
         log.warning("gateway.db_unavailable", error=str(e))
@@ -866,7 +879,8 @@ async def onboarding(req: OnboardReq) -> dict:
                            deploy=req.deploy, credentials=req.credentials,
                            policy_text=req.policy_text, include_tags=req.include_tags,
                            business_rules=req.business_rules, holidays=req.holidays,
-                           flows=req.flows, lifecycle=_lifecycle)
+                           flows=req.flows, lifecycle=_lifecycle,
+                           lifecycle_reconciler=_lifecycle_reconciler)
     await _auto_export(req.tenant)
     return report.model_dump()
 
@@ -1733,17 +1747,26 @@ async def record_ws(ws: WebSocket) -> None:
                         "retryable": True,
                     }
                 if rep.get("ok"):
-                    try:
-                        skill_id = rep.get("skill_id") or f"{sub}.{session_action}"
-                        version = await _latest_skill_version(
-                            init["tenant"], Subsystem(sub), session_action, {"integration": "page"},
-                        )
-                        await _lifecycle.register_published(skill_id, Subsystem(sub), session_action, version)
-                    except Exception as e:  # noqa: BLE001
-                        log.warning(
-                            "recording.lifecycle_register_failed",
-                            error=str(e), subsystem=sub, action=session_action,
-                        )
+                    skill_id = rep.get("skill_id") or f"{sub}.{session_action}"
+                    version = int(rep.get("asset_version") or 0)
+                    if not version:
+                        try:
+                            version = await _latest_skill_version(
+                                init["tenant"], Subsystem(sub), session_action, {"integration": "page"},
+                            )
+                        except Exception as error:  # noqa: BLE001
+                            log.warning(
+                                "recording.asset_version_lookup_failed",
+                                error=str(error), subsystem=sub, action=session_action,
+                            )
+                            version = 1
+                    lifecycle_result = await _lifecycle_reconciler.register_or_defer(
+                        skill_id=skill_id,
+                        subsystem=Subsystem(sub),
+                        action=session_action,
+                        asset_version=version,
+                    )
+                    rep = {**rep, **lifecycle_result}
                     await _auto_export(init["tenant"])
                 response = {"type": "result", "operation": "publish", "action": session_action,
                             "operation_id": msg.get("operation_id"),
@@ -1846,7 +1869,8 @@ async def onboarding_start(req: OnboardReq) -> dict:
                 tenant=req.tenant, subsystem=req.subsystem, openapi=req.openapi,
                 deploy=req.deploy, credentials=req.credentials,
                 include_tags=req.include_tags, business_rules=req.business_rules, holidays=req.holidays,
-                flows=req.flows, progress=_progress, lifecycle=_lifecycle)
+                flows=req.flows, progress=_progress, lifecycle=_lifecycle,
+                lifecycle_reconciler=_lifecycle_reconciler)
             job["report"] = rep.model_dump()
             job["status"] = "completed"
             await _auto_export(req.tenant)             # 接入完成即自动导出 skill-creator 包
@@ -2201,6 +2225,12 @@ async def lifecycle_skills() -> list[dict]:
     return [{"skill_id": r.skill_id, "action": r.action, "state": r.state.value,
              "asset_version": r.asset_version, "history": r.history}
             for r in await _lifecycle.store.all()]
+
+
+@app.post("/lifecycle/reconcile")
+async def reconcile_lifecycle_registrations() -> dict:
+    """Retry lifecycle indexing for assets that were already published."""
+    return await _lifecycle_reconciler.reconcile()
 
 
 @app.post("/assurance/report-failure")

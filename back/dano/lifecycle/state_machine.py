@@ -108,7 +108,9 @@ class SkillLifecycle:
         """接入产出登记并驱动到「已发布」(§5:不自动到运行中)。幂等。"""
         if await self.store.get(skill_id) is not None:
             rec = await self.store.get(skill_id)
-            rec.asset_version = version
+            # Delayed outbox retries may arrive after a newer publication.
+            # Registration is idempotent and must never downgrade the index.
+            rec.asset_version = max(rec.asset_version, version)
             await self.store.put(rec)
             return rec
         await self.register(skill_id, subsystem, action)

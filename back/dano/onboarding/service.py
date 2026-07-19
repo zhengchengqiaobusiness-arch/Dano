@@ -37,6 +37,7 @@ class OnboardingReport(BaseModel):
     run_id: str
     status: str                                   # completed / failed
     published_skills: list[str] = Field(default_factory=list)   # 已发布连接器动作
+    lifecycle_pending: list[dict] = Field(default_factory=list)
     pi_final_text: str = ""
     error: str | None = None
 
@@ -231,7 +232,7 @@ async def _onboard_legacy(run_id: str, sid: str, token: str, *, discover_workflo
 
 async def onboard(*, tenant: str, subsystem: str, openapi, deploy: dict,  # noqa: ANN001
                   credentials: dict, system_instance_id: str | None = None,
-                  lifecycle=None, discover_workflows: bool = True,
+                  lifecycle=None, lifecycle_reconciler=None, discover_workflows: bool = True,
                   policy_text: str = "", include_tags: list[str] | None = None,
                   business_rules: list[dict] | None = None,   # 人工业务规则(阈值/审批链)→ pi grounding
                   holidays: list[str] | None = None,          # 日历源 → env_profile,运行期注入 business_days
@@ -296,7 +297,19 @@ async def onboard(*, tenant: str, subsystem: str, openapi, deploy: dict,  # noqa
                if e.body.get("action", e.asset_key) not in hidden and not asset_internal(e.body)]
     skills = sorted({e.body.get("action", e.asset_key) for e in visible})
     # §5:登记已发布 Skill 到生命周期(停在「已发布」)
-    if lifecycle is not None:
+    lifecycle_pending: list[dict] = []
+    if lifecycle_reconciler is not None:
+        for e in visible:
+            action = e.body.get("action", e.asset_key)
+            result = await lifecycle_reconciler.register_or_defer(
+                skill_id=f"{subsystem}.{action}",
+                subsystem=Subsystem(subsystem),
+                action=action,
+                asset_version=e.version,
+            )
+            if result.get("lifecycle_pending"):
+                lifecycle_pending.append({"skill_id": f"{subsystem}.{action}", **result})
+    elif lifecycle is not None:
         for e in visible:
             action = e.body.get("action", e.asset_key)
             await lifecycle.register_published(f"{subsystem}.{action}", Subsystem(subsystem), action, e.version)
@@ -305,4 +318,5 @@ async def onboard(*, tenant: str, subsystem: str, openapi, deploy: dict,  # noqa
     return OnboardingReport(
         tenant=tenant, system_instance_id=sid, run_id=run_id,
         status=status, published_skills=skills,
+        lifecycle_pending=lifecycle_pending,
         pi_final_text=completed.get("final_text", ""), error=completed.get("error"))

@@ -234,6 +234,7 @@ interface RecResult {
   ok?: boolean; action?: string; risk_level?: string; mode?: string; reason?: string;
   status?: string; warnings?: string[]; review_notes?: string[]; clarifications?: string[];
   recording_mode?: string; verification_status?: string; verification_basis?: string; skill_id?: string; asset_id?: string;
+  asset_version?: number; lifecycle_pending?: boolean; lifecycle_message?: string; lifecycle_error?: string;
   api?: { method?: string; path?: string; params?: string[] };
   check_report?: FlowCheckReport;
 }
@@ -1896,6 +1897,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         finalizeOperationRef.current = null;
         if (m.flow_spec) acceptFlowSpec(m.flow_spec);
         setResult(m.report); setPhase("recording");
+        if (m.report?.ok && m.report?.lifecycle_pending) {
+          message.warning(m.report.lifecycle_message || "资产已发布，生命周期登记待补偿");
+        }
         if (m.check_report || m.report?.check_report) {
           setCheckReport(m.check_report || m.report.check_report);
         }
@@ -3171,6 +3175,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     {result.recording_mode && (
                       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                         录制模式：{result.recording_mode === "real_submit" ? "真实提交" : result.recording_mode === "intercepted_submit" ? "只录制不提交" : result.recording_mode}
+                      </Typography.Text>
+                    )}
+                    {result.ok && result.lifecycle_pending && (
+                      <Typography.Text type="warning" style={{ fontSize: 12 }}>
+                        {result.lifecycle_message || "资产已发布，生命周期登记待补偿"}
+                        {result.asset_version ? `（资产版本 ${result.asset_version}）` : ""}
                       </Typography.Text>
                     )}
                     {result.verification_basis && <Typography.Text type="secondary" style={{ fontSize: 12 }}>验证依据：{result.verification_basis}</Typography.Text>}

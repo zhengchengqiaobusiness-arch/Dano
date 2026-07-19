@@ -375,6 +375,7 @@ async def run_request_onboarding(
                 "request_role": role,
                 "goal": goal, "goal_issues": goal_issues,   # 自动提炼 Goal 的完整性问题(建议性,不阻断)
                 "asset_id": pub.get("asset_id"), "skill_id": f"{sid}.{action}",
+                "asset_version": pub.get("version"),
                 "verification_status": status.value,
                 "verification_basis": body.get("verification_basis", ""),
                 "mode": "request", "reason": pub.get("reason", ""),
