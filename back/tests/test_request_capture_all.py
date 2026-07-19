@@ -6,12 +6,10 @@
 3. dataiq 三接口(save_dataiq_chat_list / getappid / sjws_chat)都进 all_requests。
 4. diagnostics 记录 console / pageerror / requestfailed。
 5. captured_all_requests / captured_diagnostics 返回不可变副本(改返回不影响内部)。
-6. 不破坏 captured_requests / captured_reads / _capture 既有行为。
+6. all_requests 是唯一原始请求 ledger；captured_reads 保持派生候选投影。
 """
 
 from __future__ import annotations
-
-import pytest
 
 from dano.execution.page.recorder import RecordSession
 
@@ -56,11 +54,9 @@ def _dataiq_requests():
 # ── 1. all_requests 字段结构 ──
 def test_all_requests_captures_post():
     s = _new_sess()
-    # 模拟 _route 路径:先 _record_all,再 _capture(写请求才走 _capture)
+    # 模拟 _route 路径：请求只写一次权威 ledger。
     s._record_all("POST", "https://x/api/submit", pd='{"a":1}',
                   headers={"Authorization": "Bearer t"}, content_type="application/json")
-    s._capture("POST", "https://x/api/submit", '{"a":1}',
-               "application/json", {"Authorization": "Bearer t"})
     cap = s.captured_all_requests()
     assert len(cap) == 1
     r = cap[0]
@@ -273,31 +269,20 @@ def test_diagnostics_truncation_unified():
         assert len(m) == 2000, f"诊断 message 截断不一致: {len(m)}"
 
 
-# ── 4. 不破坏既有 captured_requests / captured_reads ──
-def test_legacy_captured_requests_still_works_for_writes_only():
-    """原 captured_requests 只收写请求;GET 不进 requests,但 all_requests 全收。"""
-    s = _new_sess()
-    # 模拟 _route 拦截模式:_record_all 唯一写入 all_requests,_capture 只落 requests(写请求)
-    s._record_all("POST", "https://x/api/submit", pd='{"a":1}', content_type="application/json")
-    s._capture("POST", "https://x/api/submit", '{"a":1}', "application/json", {})
-    s._record_all("GET", "https://x/api/foo")     # 全量,但不进 requests
-    assert len(s.captured_requests()) == 1
-    assert s.captured_requests()[0]["method"] == "POST"
-    assert len(s.captured_all_requests()) == 2    # GET + POST 都在
+# ── 4. 请求通知不建立第二份 ledger ──
+def test_write_request_notification_does_not_duplicate_authoritative_ledger():
+    notifications: list[dict] = []
+    s = RecordSession(on_request=notifications.append)
+    s._record_all(
+        "POST", "https://x/api/submit", pd='{"a":1}',
+        headers={"X": "1"}, content_type="application/json",
+    )
+    s._notify_write_request("POST", "https://x/api/submit", '{"a":1}', "application/json")
 
-
-def test_capture_does_not_touch_all_requests():
-    """_capture 只管 self.requests,不调 _record_all —— 避免与调用方双重记录同一请求。"""
-    s = _new_sess()
-    s._capture("POST", "https://x/api/submit", '{"a":1}', "application/json", {"X": "1"})
-    assert len(s.requests) == 1
-    assert len(s.all_requests) == 0                # _capture 不写 all_requests
-    # 完整路径(模拟 _route):先 _record_all 再 _capture → 两路各一条,无双倍
-    s._record_all("POST", "https://x/api/submit", pd='{"a":1}',
-                  headers={"X": "1"}, content_type="application/json")
-    assert len(s.requests) == 1                   # 不会因多调一次 _capture 而变 2
-    assert len(s.all_requests) == 1
-    assert s.all_requests[0]["headers"]["X"] == "1"
+    assert len(s.captured_all_requests()) == 1
+    assert notifications == [{
+        "method": "POST", "url": "https://x/api/submit", "has_body": True, "json": True,
+    }]
 
 
 # ── 5. 不可变副本 ──
@@ -321,14 +306,12 @@ def test_captured_diagnostics_returns_copy():
 def test_reset_clears_all_requests_and_diagnostics():
     s = _new_sess()
     s.steps.append({"op": "click", "locator": "role=button[name=登录]"})
-    s.requests.append({"method": "POST", "url": "https://x/api/b"})
     s.reads.append({"method": "GET", "url": "https://x/api/options"})
     s._record_all("GET", "https://x/api/a")
     s._record_all("POST", "https://x/api/b", pd='{"x":1}')
     s._record_diag("console", {"level": "error", "message": "y"})
     s.reset()
     assert s.steps == []
-    assert s.captured_requests() == []
     assert s.captured_reads() == []
     assert s.captured_all_requests() == []
     assert s.captured_diagnostics() == []

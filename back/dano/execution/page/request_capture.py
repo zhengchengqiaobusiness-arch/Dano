@@ -1824,7 +1824,7 @@ def looks_dangerous_write(api_request: dict) -> bool:
 
 
 def classify_request_role(req: dict) -> dict:
-    """请求语义角色(**确定性**,node 4 语义分类):method + 路径段 + 内容 → {semanticRole, sideEffect, riskLevel}。
+    """请求语义角色(**确定性**,node 4 语义分类):method + 路径段 + 内容 → {semanticRole, sideEffect, risk_level}。
     跨系统通用、零业务字面量;供录入去噪/审计标注。比 LLM 分类更稳(且不占录制热路径)。"""
     steps = [step for step in (req.get("steps") or []) if isinstance(step, dict)]
     if steps:
@@ -1839,7 +1839,7 @@ def classify_request_role(req: dict) -> dict:
                 if any(role.get("semanticRole") == "workflow_submit" for role in writes)
                 else "business_write"
             )
-            return {"semanticRole": semantic, "sideEffect": "write", "riskLevel": "L3"}
+            return {"semanticRole": semantic, "sideEffect": "write", "risk_level": "L3"}
         non_auth_reads = [role for role in roles if role.get("sideEffect") == "read"]
         if non_auth_reads:
             semantic = (
@@ -1847,23 +1847,23 @@ def classify_request_role(req: dict) -> dict:
                 if any(role.get("semanticRole") == "query" for role in non_auth_reads)
                 else "enum_options"
             )
-            return {"semanticRole": semantic, "sideEffect": "read", "riskLevel": "L1"}
-        return {"semanticRole": "auth", "sideEffect": "none", "riskLevel": "L1"}
+            return {"semanticRole": semantic, "sideEffect": "read", "risk_level": "L1"}
+        return {"semanticRole": "auth", "sideEffect": "none", "risk_level": "L1"}
 
     method = (req.get("method") or "GET").upper()
     if looks_dangerous_write(req):
-        return {"semanticRole": "destructive", "sideEffect": "delete", "riskLevel": "L4"}
+        return {"semanticRole": "destructive", "sideEffect": "delete", "risk_level": "L4"}
     url = req.get("url") or req.get("path") or ""
     if looks_like_auth_write(url, req.get("post_data")):
-        return {"semanticRole": "auth", "sideEffect": "none", "riskLevel": "L1"}
+        return {"semanticRole": "auth", "sideEffect": "none", "risk_level": "L1"}
     path = (urlparse(url).path if str(url).startswith("http") else str(url)).lower()
     segs = {s for s in _re.split(r"[^a-zA-Z0-9]+", path) if s}
     if method not in _WRITE:
         role = "enum_options" if (segs & {"list", "options", "dict", "select", "candidates"}) else "query"
-        return {"semanticRole": role, "sideEffect": "read", "riskLevel": "L1"}
+        return {"semanticRole": role, "sideEffect": "read", "risk_level": "L1"}
     role = ("workflow_submit" if (segs & {"submit", "start", "apply", "create", "flow", "process", "task"})
             else "business_write")
-    return {"semanticRole": role, "sideEffect": "write", "riskLevel": "L3"}
+    return {"semanticRole": role, "sideEffect": "write", "risk_level": "L3"}
 
 
 # 提交锚点路径段(P0-2 强信号:用户主动提交触发,优先级高于普通 business_write)

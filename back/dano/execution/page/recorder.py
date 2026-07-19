@@ -993,7 +993,6 @@ class RecordSession:
         # 字典接口经常在用户点击“从这里开始录”之前随页面初始化完成。只保留具备
         # dictType + label + value 结构的引用数据，reset 时不清除，避免枚举证据丢失。
         self.dictionary_reads: list[dict] = []
-        self.requests: list[dict] = []      # 抓到的写请求(有序,method/url/post_data/headers)→ 参数化/多步工作流
         self.reads: list[dict] = []         # 抓到的读请求(GET+JSON 列表/字典)→ Q2 选领导等 select 的候选源
         # P0-1:全量捕获(基础事实)。先抓全再筛 → 治"GET 业务接口被早筛丢"等根因。
         # 不管 method / 业务角色,只要页面发出,就落一行,供后续 P0-2 角色分类 + P0-3 依赖闭包使用。
@@ -1333,16 +1332,8 @@ class RecordSession:
         rec.update({k: v for k, v in (payload or {}).items() if v is not None})
         self.diagnostics.append(rec)
 
-    def _capture(self, m: str, url: str, pd: str | None, ct: str, headers: dict | None = None,
-                 request_index: int | None = None) -> None:
-        """登记一个写请求(含请求头,回放鉴权用)+ 实时推给前端诊断。
-
-        P0-1 收敛:本函数只负责写 self.requests 与触发 on_request_cb;all_requests 由调用方
-        (_route / _on_request)在调本函数**之前**自己 _record_all,避免同一请求被记两次。"""
-        if pd:
-            self.requests.append({"method": m, "url": url, "post_data": pd,
-                                  "content_type": ct, "headers": headers or {},
-                                  "request_index": request_index})
+    def _notify_write_request(self, m: str, url: str, pd: str | None, ct: str) -> None:
+        """Notify the UI after the authoritative all_requests row is recorded."""
         if self._on_request_cb is not None:
             is_json = "json" in (ct or "").lower() or (pd or "").lstrip().startswith(("{", "["))
             try:
@@ -1371,7 +1362,7 @@ class RecordSession:
             except Exception:  # noqa: BLE001
                 navigation_request = False
             # P0-1:GET 也落 all_requests(全量捕获,治"业务 GET 前置接口被早筛丢")。
-            # _record_all 是 all_requests 的唯一写入点;_capture 只负责写 requests(写请求才走)。
+            # _record_all 是唯一请求 ledger 写入点；写请求另发轻量诊断通知。
             request_index = self._record_all(
                 m, url, pd=pd, headers=hd, content_type=hd.get("content-type", ""),
                 resource_type=resource_type, navigation_request=navigation_request,
@@ -1379,7 +1370,7 @@ class RecordSession:
             )
             self._request_fact_index[id(request)] = request_index
             if m in ("POST", "PUT", "PATCH", "DELETE"):
-                self._capture(m, url, pd, hd.get("content-type", ""), hd, request_index)
+                self._notify_write_request(m, url, pd, hd.get("content-type", ""))
         except Exception:  # noqa: BLE001
             pass
 
@@ -1444,7 +1435,7 @@ class RecordSession:
             # 业务写请求 → 抓下来,假装成功不真发;登录/鉴权/上传等基建写、以及 POST 形态的读/查询
             #(getXxxList/queryXxx:下拉/列表源)照常放行真发(否则录制时下拉/列表加载不出来,选不了值)
             if pd and not looks_like_auth_write(url, pd) and not looks_like_read_request(url, pd):
-                self._capture(m, url, pd, ct, hd, request_index)
+                self._notify_write_request(m, url, pd, ct)
                 await route.fulfill(status=200, content_type="application/json",
                                     body=self._success_envelope())
                 return
@@ -1454,9 +1445,6 @@ class RecordSession:
                 await route.continue_()
             except Exception:  # noqa: BLE001
                 pass
-
-    def captured_requests(self) -> list[dict]:
-        return list(self.requests)
 
     def captured_reads(self) -> list[dict]:
         return list(self.reads)
@@ -1528,7 +1516,7 @@ class RecordSession:
                         self._script_source_bytes += body_size
                 return
             # P0-1:全量捕获响应(JSON body)→ 贴回 all_requests 同源记录(P0-3 依赖闭包靠它发现 step 串联)。
-            # 写请求同时贴回 self.requests(Q3 步链 taskId);读候选源走 as_list_payload 单独进 self.reads。
+            # 写/读响应统一贴回 all_requests；列表候选仍额外进入派生 reads 投影。
             # 容错:content-type 不是 JSON 也再试一次 response.json()(治"没设 ct 但 body 是 JSON 文本")。
             if "json" in (ct or "").lower():
                 try:
@@ -1542,13 +1530,6 @@ class RecordSession:
                         status=response.status, content_type=ct,
                         request_index=request_index,
                     )
-                    if m in ("POST", "PUT", "PATCH"):
-                        for r in self.requests:
-                            exact = request_index is not None and r.get("request_index") == request_index
-                            fallback = request_index is None and r.get("url") == url
-                            if (exact or fallback) and "response_json" not in r:
-                                r["response_json"] = data
-                                break
                     # 不 return:有些系统用 POST 查"下拉/选人"列表(带过滤条件)→ 列表型响应也当 select 候选源
             if any(n in url.lower() for n in _READ_NOISE):    # 只跳静态/流(保留字典/列表接口)
                 return
@@ -2036,7 +2017,6 @@ class RecordSession:
         self.enum_snapshots.clear()
         # JS 与结构化字典是当前页面的只读引用证据，通常在开始录制前已经加载；
         # reset 只清业务轨迹，不能把这些枚举证据一起清掉。
-        self.requests.clear()
         self.reads.clear()
         self.all_requests.clear()
         self.diagnostics.clear()

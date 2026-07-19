@@ -1371,7 +1371,7 @@ def _build_step_from_capture(
     # 风险 + 语义角色
     role = classify_request_role(req)
     request_role = req.get("_request_role") or {}
-    risk = request_role.get("risk_level") or role.get("riskLevel", "L3")
+    risk = request_role.get("risk_level") or role.get("risk_level", "L3")
 
     def has_real_enum_source(sb: SelectBinding) -> bool:
         return bool(sb.options) or bool(sb.source_url and sb.value_key and sb.label_key)
@@ -2174,7 +2174,7 @@ def _role_row(req: dict, *, role: str, keep: bool, reason: str, confidence: floa
         row.update({
             "semantic_role": semantic.get("semanticRole", ""),
             "side_effect": semantic.get("sideEffect", ""),
-            "risk_level": semantic.get("riskLevel", ""),
+            "risk_level": semantic.get("risk_level", ""),
         })
     if evidence:
         row["evidence"] = evidence

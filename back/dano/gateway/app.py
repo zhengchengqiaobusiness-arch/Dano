@@ -1225,8 +1225,7 @@ async def record_ws(ws: WebSocket) -> None:
 
                 # finalize 只有一个出口:全部捕获事实直接生成 FlowSpec 工作台。
                 # 前端编辑后的 steps 只用于补齐样例、必填和页面枚举证据，不再建立第二套字段选择协议。
-                all_caps = (sess.captured_all_requests()
-                            if hasattr(sess, "captured_all_requests") else sess.captured_requests())
+                all_caps = sess.captured_all_requests()
                 reads = sess.captured_reads()
                 page_events = sess.recorded_page_events()
                 log.info("record.finalize", captured=len(all_caps), steps=len(steps),

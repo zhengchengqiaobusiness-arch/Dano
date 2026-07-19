@@ -2474,7 +2474,7 @@ def test_classify_request_role_aggregates_multistep_write_instead_of_defaulting_
         ],
     })
 
-    assert role == {"semanticRole": "workflow_submit", "sideEffect": "write", "riskLevel": "L3"}
+    assert role == {"semanticRole": "workflow_submit", "sideEffect": "write", "risk_level": "L3"}
 
 
 def test_flatten_required_defaults_all_when_no_star():
@@ -3467,7 +3467,7 @@ def test_classify_request_role():
     assert classify_request_role({"method": "GET", "url": "http://x/system/user/list"})["semanticRole"] == "enum_options"
     assert classify_request_role({"method": "GET", "url": "http://x/info"})["semanticRole"] == "query"
     sub = classify_request_role({"method": "POST", "url": "http://x/oa/leave/submit"})
-    assert sub["semanticRole"] == "workflow_submit" and sub["riskLevel"] == "L3"
+    assert sub["semanticRole"] == "workflow_submit" and sub["risk_level"] == "L3"
     assert classify_request_role({"method": "POST", "url": "http://x/api/save"})["semanticRole"] == "business_write"
 
 
