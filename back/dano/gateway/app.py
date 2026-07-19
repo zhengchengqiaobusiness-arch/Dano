@@ -937,6 +937,13 @@ def _merge_recording_step_edits(
 ) -> tuple[list[dict], dict, set[str], dict]:
     """Merge the client-visible step edit list with the final browser flush.
 
+    COMPAT[REC-P8-STEP-MERGE]
+    Reason: the browser list can differ from the server recorder ledger.
+    Consumer: recording WebSocket finalize.
+    Delete when: step edits and final debounced input are server-patched with
+    equivalent samples/required/enums across all golden fixtures.
+    Target: recording protocol v4.
+
     This is an intentional P8 compatibility layer. The browser list can differ
     from ``RecordSession.steps`` because it applies live duplicate suppression,
     while the final debounced input exists only in the server session. Keep the
@@ -2128,7 +2135,9 @@ async def invoke_skill_capability(skill_id: str, capability: str, req: Capabilit
                                   x_tenant_key: str | None = Header(default=None)) -> dict:
     """按 Skill 内的指定 capability 调用。
 
-    这是 P3 的显式能力调用入口；旧 `/invoke` + body.capability 继续兼容。
+    COMPAT[API-CAPABILITY-INVOKE]: `/invoke` + body.capability is consumed by
+    existing SDK clients. Remove after traffic is zero on the versioned v2 API;
+    target public API v2.
     """
     if req.capability and req.capability != capability:
         raise HTTPException(status_code=422, detail="body capability must match path capability")
@@ -2150,7 +2159,9 @@ async def list_tools(x_tenant_key: str | None = Header(default=None)) -> list[di
 class ToolCallReq(BaseModel):
     name: str                       # 工具名(= skill_id 的点转 __,如 A-OA__submit_leave)
     capability: str | None = None   # 新调用协议:一个 Skill 内的业务能力键(query_status/submit_batch...)
-    input: dict | None = None       # 新调用协议:input 优先,arguments 兼容
+    # COMPAT[API-TOOL-ARGUMENTS]: function-calling clients still send JSON-string
+    # arguments. Remove after the tool API v2 adoption gate reports zero v1 calls.
+    input: dict | None = None
     arguments: dict | str = Field(default_factory=dict)  # LLM 产出的参数(对象或 JSON 字符串都行)
     confirm: bool = False
     dry_run: bool = False

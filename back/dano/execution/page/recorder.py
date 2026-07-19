@@ -1935,7 +1935,9 @@ class RecordSession:
     async def dispatch_input(self, ev: dict) -> dict:
         """把前端输入转发给活动页，任何单次 Playwright 异常都不得终止录制会话。
 
-        pointer_* 是当前协议，mouse_* 是兼容别名。返回值供直接调用方诊断；WebSocket
+        COMPAT[REC-INPUT-MOUSE-ALIASES]: pointer_* 是当前协议，mouse_* 是旧客户端消费者。
+        删除条件：协议遥测确认 mouse_* 为零且最低前端版本已升级；目标 recording protocol v4。
+        返回值供直接调用方诊断；WebSocket
         当前无需消费它。失败后不自动重放输入，避免操作已部分生效时造成双击/重复提交。
         """
         kind = str(ev.get("kind") or "")

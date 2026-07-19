@@ -8741,7 +8741,12 @@ def _normalize_capability_references(spec: FlowSpec) -> FlowSpec:
             if sid and not (sid in seen or seen.add(sid))
         ]
         cap.nodes = clean_nodes(cap.nodes or [], legacy_step_ids)
-        # Legacy assets may have only step_ids. Migrate that old shape once;
+        # COMPAT[REC-P6-NODE-MIGRATION]
+        # Reason: persisted pre-P6 capabilities may have only step_ids.
+        # Consumer: server load/normalize before edit, publish, and export.
+        # Remove when the PG asset migration proves every capability has call
+        # nodes and rolling-upgrade traffic is gone; target recording protocol v4.
+        # Migrate that old shape once;
         # whenever call nodes already exist they are authoritative and a
         # divergent step_ids projection is deliberately ignored.
         if not _capability_call_step_ids_from_nodes(cap.nodes or []) and legacy_step_ids:

@@ -171,7 +171,11 @@ async def _publish_env_profile(run_id: str, sid: str, deploy: dict,
 async def _onboard_legacy(run_id: str, sid: str, token: str, *, discover_workflows: bool,
                           policy_text: str, timeout_s: float) -> dict:
     """**单一/默认接入路径**:起工具服务 + spawn pi(自主发现)建连接器(隐藏积木)+ 复合 DSL v2
-    业务流程(前置/分支/计算/消歧/不变量,grounded)+ 制度。返回 completed。"""
+    业务流程(前置/分支/计算/消歧/不变量,grounded)+ 制度。返回 completed。
+
+    COMPAT[ONBOARD-LEGACY-NAME]: 名称为历史内部 API，实际实现是当前唯一 Pi 路径。
+    当前消费者为 onboard/保障期全量重跑；内部 API v2 改名窗口完成后删除旧名。
+    """
     server, task, port = await _start_tool_server()
     # 复合优先:把真实业务做成**一个复合 Skill**(多步串成一个能力),步骤连接器是隐藏积木,只露业务。
     prompt = (

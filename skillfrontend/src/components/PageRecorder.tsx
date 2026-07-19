@@ -995,8 +995,10 @@ function capabilityNodeStepIds(nodes?: Array<Record<string, any>>) {
 function capabilityActualStepIds(cap?: FlowCapabilityData | null) {
   const nodeIds = capabilityNodeStepIds(cap?.nodes);
   if (nodeIds.length) return nodeIds;
-  // Read-only compatibility for a pre-P6 projection during rolling upgrades.
-  // New edits never write this derived field.
+  // COMPAT[REC-P6-STEP-IDS]: rolling-upgrade clients can receive a pre-P6
+  // capability with only derived step_ids. Current consumer: read-only workbench.
+  // Remove when stored assets and active clients are protocol_version >= 3;
+  // target recording protocol v4. New edits never write this derived field.
   return Array.from(new Set(
     (cap?.step_ids || []).map((value) => String(value || "").trim()).filter(Boolean),
   ));
