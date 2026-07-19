@@ -23,7 +23,8 @@ def test_finalize_emits_flow_spec_without_legacy_request_fields_protocol() -> No
     assert "pending_page_enum_options" not in source
     assert "pending_field_evidence" not in source
     assert "pending_page_events" not in source
-    assert "_frontend_recording_field_metadata" in source
+    assert "_merge_recording_step_edits" in source
+    assert not hasattr(gateway, "_frontend_recording_field_metadata")
     assert 'msg.get("steps")' in source
 
 

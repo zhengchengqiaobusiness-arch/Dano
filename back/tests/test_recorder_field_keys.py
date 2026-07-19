@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 from dano.execution.page.recorder import RecordSession, assign_step_field_keys
-from dano.gateway.app import _frontend_recording_field_metadata
+from dano.gateway.app import _merge_recording_step_edits, _recording_step_edit_metadata
 
 
 def test_repeated_events_for_same_field_and_locator_reuse_one_key() -> None:
@@ -151,12 +151,50 @@ def test_gateway_frontend_steps_use_the_same_field_mapping() -> None:
         },
     ]
 
-    samples, required, enums = _frontend_recording_field_metadata(steps)
+    samples, required, enums = _recording_step_edit_metadata(steps)
 
     assert samples == {"使用日期": "2026-07-11"}
     assert required == {"使用日期"}
     assert enums["使用日期"]["field_key"] == "使用日期"
     assert "使用日期#2" not in samples
+
+
+def test_recording_step_edit_merger_preserves_client_order_and_final_flush_evidence() -> None:
+    frontend_steps = [
+        {"op": "click", "locator": "#second", "field": "第二步"},
+        {
+            "op": "fill",
+            "locator": "#hours",
+            "field": "申报工时",
+            "value": "7",
+            "required": True,
+        },
+    ]
+    flushed_tail = [
+        {
+            "op": "fill",
+            "locator": "#hours",
+            "field": "申报工时",
+            "value": "8",
+            "required": True,
+        },
+        {
+            "op": "select",
+            "locator": "#type",
+            "field": "工时类型",
+            "value": "公共工时",
+            "options": ["公共工时", "项目工时"],
+        },
+        {"op": "click", "locator": "#ignored-tail"},
+    ]
+
+    merged, samples, required, enums = _merge_recording_step_edits(frontend_steps, flushed_tail)
+
+    assert [step["locator"] for step in merged] == ["#second", "#hours", "#type"]
+    assert samples == {"申报工时": "8", "工时类型": "公共工时"}
+    assert required == {"申报工时"}
+    assert enums["工时类型"]["options"] == ["公共工时", "项目工时"]
+    assert frontend_steps[1]["value"] == "7"
 
 
 def test_submit_snapshot_preserves_required_range_and_page_business_context() -> None:

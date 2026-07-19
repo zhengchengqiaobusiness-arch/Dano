@@ -871,8 +871,8 @@ async def onboarding(req: OnboardReq) -> dict:
     return report.model_dump()
 
 
-def _frontend_recording_field_metadata(raw_steps: list[dict]) -> tuple[dict, set[str], dict]:
-    """把前端编辑后的录制步骤投影成样例、必填字段和页面枚举。"""
+def _recording_step_edit_metadata(raw_steps: list[dict]) -> tuple[dict, set[str], dict]:
+    """Project the accepted recording-step edit list into field evidence."""
     from dano.execution.page.recorder import assign_step_field_keys, has_recorded_value
 
     keymap = assign_step_field_keys(raw_steps)
@@ -915,6 +915,32 @@ def _frontend_recording_field_metadata(raw_steps: list[dict]) -> tuple[dict, set
         if field_key not in page_enum_options:
             page_enum_options[field_key] = entry
     return samples, required_labels, page_enum_options
+
+
+def _merge_recording_step_edits(
+    frontend_steps: list[dict],
+    flushed_tail: list[dict],
+) -> tuple[list[dict], dict, set[str], dict]:
+    """Merge the client-visible step edit list with the final browser flush.
+
+    This is an intentional P8 compatibility layer. The browser list can differ
+    from ``RecordSession.steps`` because it applies live duplicate suppression,
+    while the final debounced input exists only in the server session. Keep the
+    client order/deletions, but replace or append only the flushed field tail.
+    """
+    raw_steps = [dict(step) for step in frontend_steps]
+    for step in flushed_tail:
+        if step.get("op") not in ("fill", "select", "pick"):
+            continue
+        for index, current in enumerate(raw_steps):
+            if current.get("op") == step.get("op") and current.get("locator") == step.get("locator"):
+                raw_steps[index] = dict(step)
+                break
+        else:
+            raw_steps.append(dict(step))
+
+    samples, required_labels, page_enum_options = _recording_step_edit_metadata(raw_steps)
+    return raw_steps, samples, required_labels, page_enum_options
 
 
 # ── 方式B:网页内录制(WebSocket:截屏流出 + 输入回传入 + 实时步骤 + 录完发布)──
@@ -1150,21 +1176,12 @@ async def record_ws(ws: WebSocket) -> None:
                 recorded_page_options = sess.recorded_page_enum_options()
                 raw = msg.get("steps")
                 if raw is not None:           # 前端编辑后的步骤(删了噪声/重复/调序)→ 以它为准
-                    for s in flushed_tail:
-                        if s.get("op") not in ("fill", "select", "pick"):
-                            continue
-                        replaced = False
-                        for idx, cur in enumerate(raw):
-                            if cur.get("op") == s.get("op") and cur.get("locator") == s.get("locator"):
-                                raw[idx] = s
-                                replaced = True
-                                break
-                        if not replaced:
-                            raw.append(s)
+                    raw, samples, required_labels, page_enum_options = _merge_recording_step_edits(
+                        raw,
+                        flushed_tail,
+                    )
                     steps = [{"op": s["op"], "locator": s.get("locator"), "field": (s.get("field") or None)}
                              for s in raw]
-                    # 字段 key 保持与录制样例、必填标记一致。
-                    samples, required_labels, page_enum_options = _frontend_recording_field_metadata(raw)
                     required_labels.update(observed_required_labels)
                 else:
                     steps, samples = sess.recorded_steps()
