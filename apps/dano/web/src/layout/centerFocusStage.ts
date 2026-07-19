@@ -14,6 +14,8 @@ export interface CenterFocusStage {
 interface ActivePresentation {
   target: CenterFocusTarget;
   anchor: HTMLElement;
+  anchorStyle: string | null;
+  placeholderHeight: number;
   composer: HTMLElement | null;
   composerWasInert: boolean;
   backgroundBranches: Array<{ element: HTMLElement; wasInert: boolean }>;
@@ -58,6 +60,8 @@ export function createCenterFocusStage(
     const presentation: ActivePresentation = {
       target,
       anchor,
+      anchorStyle: anchor.getAttribute("style"),
+      placeholderHeight: target.element.getBoundingClientRect().height,
       composer,
       composerWasInert: composer?.inert ?? false,
       backgroundBranches: [],
@@ -66,6 +70,7 @@ export function createCenterFocusStage(
     target.element.classList.add("center-focus-transition-card");
 
     runTransition(() => {
+      presentation.anchor.style.height = `${presentation.placeholderHeight}px`;
       root.dataset.centerFocusActive = "true";
       root.querySelector<HTMLElement>("[data-center-focus-transcript]")
         ?.setAttribute("data-center-focus-locked", "true");
@@ -91,6 +96,7 @@ export function createCenterFocusStage(
       root.querySelector<HTMLElement>("[data-center-focus-transcript]")
         ?.removeAttribute("data-center-focus-locked");
       presentation.target.element.classList.remove("center-focused-card");
+      restoreStyle(presentation.anchor, presentation.anchorStyle);
       if (presentation.composer) {
         presentation.composer.inert = presentation.composerWasInert;
       }
@@ -142,4 +148,9 @@ function isolateBackground(
     }
     branch = parent;
   }
+}
+
+function restoreStyle(element: HTMLElement, style: string | null): void {
+  if (style === null) element.removeAttribute("style");
+  else element.setAttribute("style", style);
 }

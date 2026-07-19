@@ -8,7 +8,7 @@ import {
 } from "./centerFocusStage";
 
 describe("Center Focus Stage", () => {
-  it("lets CSS own the complete focused-card geometry", () => {
+  it("lets CSS own popup geometry while preserving the inline card placeholder", () => {
     const root = document.createElement("main");
     const transcript = document.createElement("div");
     const anchor = document.createElement("div");
@@ -22,9 +22,9 @@ describe("Center Focus Stage", () => {
     vi.spyOn(root, "getBoundingClientRect").mockImplementation(() => {
       throw new Error("Focused-card layout must not read root geometry");
     });
-    vi.spyOn(card, "getBoundingClientRect").mockImplementation(() => {
-      throw new Error("Focused-card layout must not read card geometry");
-    });
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue({
+      height: 360,
+    } as DOMRect);
     vi.spyOn(window, "matchMedia").mockImplementation(query => ({
       matches: query === "(min-width: 901px)" ||
         query === "(prefers-reduced-motion: reduce)",
@@ -44,6 +44,7 @@ describe("Center Focus Stage", () => {
       stage.show({ sessionKey: "session-a", toolCallId: "confirm-form", element: card });
 
       expect(card.getAttribute("style")).toBeNull();
+      expect(anchor.style.height).toBe("360px");
       const focusedCardRule = appMainContentSource.match(
         /\.center-column :global\(\.center-focused-card\) \{([\s\S]*?)\n  \}/,
       )?.[1];
@@ -56,6 +57,7 @@ describe("Center Focus Stage", () => {
 
       stage.hide("confirm-form");
       expect(card.getAttribute("style")).toBeNull();
+      expect(anchor.getAttribute("style")).toBeNull();
       stage.destroy();
     } finally {
       globalThis.ResizeObserver = OriginalResizeObserver;
@@ -81,6 +83,9 @@ describe("Center Focus Stage", () => {
     composer.append(composerInput, composerAttachment);
     root.append(transcript, composer);
     document.body.append(root);
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue({
+      height: 500,
+    } as DOMRect);
     composerInput.focus();
 
     const activeChange = vi.fn();
@@ -90,7 +95,7 @@ describe("Center Focus Stage", () => {
     expect(root.dataset.centerFocusActive).toBe("true");
     expect(card.classList.contains("center-focused-card")).toBe(true);
     expect(card.getAttribute("style")).toBeNull();
-    expect(anchor.getAttribute("style")).toBeNull();
+    expect(anchor.style.height).toBe("500px");
     expect(composer.inert).toBe(true);
     expect(backgroundButton.inert).toBe(true);
     expect(composer.querySelector("textarea")).toBe(composerInput);
@@ -119,6 +124,31 @@ describe("Center Focus Stage", () => {
     expect(composerInput.value).toBe("保留的草稿");
     expect(composer.querySelector(".attachment-chip")).toBe(composerAttachment);
     expect(activeChange).toHaveBeenLastCalledWith(false);
+    stage.destroy();
+  });
+
+  it("does not compensate layout collapse by rewriting transcript scroll position", () => {
+    const root = document.createElement("main");
+    const transcript = document.createElement("div");
+    const anchor = document.createElement("div");
+    const card = document.createElement("article");
+    transcript.dataset.centerFocusTranscript = "";
+    anchor.className = "question-card-anchor";
+    anchor.append(card);
+    transcript.append(anchor);
+    root.append(transcript);
+    document.body.append(root);
+    transcript.scrollTop = 240;
+    vi.spyOn(window, "matchMedia").mockImplementation(query => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+    } as MediaQueryList));
+    const stage = createCenterFocusStage(root);
+
+    stage.show({ sessionKey: "session-a", toolCallId: "form-a", element: card });
+    transcript.scrollTop = 720;
+    stage.hide("form-a");
+
+    expect(transcript.scrollTop).toBe(720);
     stage.destroy();
   });
 
