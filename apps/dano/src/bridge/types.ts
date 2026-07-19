@@ -52,6 +52,8 @@ export interface BridgeConfig {
   readonly quickActions: readonly BridgeQuickActionConfig[];
   /** Whether browser users may invoke slash commands and mention providers. */
   readonly slashCommandsAndMentionsEnabled: boolean;
+  /** Whether completed Assistant Turn process work is collapsed into a summary. */
+  readonly transcriptProcessSummaryEnabled: boolean;
   /** Timeout in ms for extension UI dialog requests routed to browser clients. Default: 60_000 */
   readonly uiRequestTimeout: number;
   /** Maximum number of SSE messages to buffer per client before dropping oldest. Default: 256 */
@@ -75,6 +77,7 @@ export const DEFAULT_BRIDGE_CONFIG: BridgeConfig = {
   },
   quickActions: [],
   slashCommandsAndMentionsEnabled: false,
+  transcriptProcessSummaryEnabled: false,
   uiRequestTimeout: 60_000,
   clientBufferSize: 256,
   heartbeatInterval: 15_000,

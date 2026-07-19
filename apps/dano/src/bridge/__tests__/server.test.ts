@@ -437,6 +437,7 @@ describe("BridgeServer HTTP/SSE transport", () => {
           content: "<strong>给 {产品名称} 发消息</strong>",
         },
         slashCommandsAndMentionsEnabled: true,
+        transcriptProcessSummaryEnabled: true,
         quickActions: [
           { label: "请假", prompt: "帮我申请请假" },
         ],
@@ -463,6 +464,7 @@ describe("BridgeServer HTTP/SSE transport", () => {
       '"quickActions":[{"label":"请假","prompt":"帮我申请请假"}]',
     );
     expect(spaHtml).toContain('"slashCommandsAndMentionsEnabled":true');
+    expect(spaHtml).toContain('"transcriptProcessSummaryEnabled":true');
   });
 
   it("uploads arbitrary files into the current workspace by declared hash", async () => {

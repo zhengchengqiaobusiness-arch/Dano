@@ -9,6 +9,7 @@
   "askUserQuestion": {
     "maxRetries": 10
   },
+  "transcriptProcessSummaryEnabled": false,
   "quickActions": [
     {
       "label": "请假",

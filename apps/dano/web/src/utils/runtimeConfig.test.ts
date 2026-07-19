@@ -5,6 +5,7 @@ import {
   getRuntimeProductName,
   getRuntimeQuickActions,
   getRuntimeSlashCommandsAndMentionsEnabled,
+  getRuntimeTranscriptProcessSummaryEnabled,
 } from "./runtimeConfig";
 
 function stubRuntimeConfig(config: NonNullable<Window["__PI_WEB_CONFIG__"]>) {
@@ -26,6 +27,7 @@ describe("runtimeConfig", () => {
       content: "给 Dano 发消息",
     });
     expect(getRuntimeSlashCommandsAndMentionsEnabled()).toBe(false);
+    expect(getRuntimeTranscriptProcessSummaryEnabled()).toBe(false);
   });
 
   it("uses the configured locale for default empty state copy", () => {
@@ -101,5 +103,11 @@ describe("runtimeConfig", () => {
     stubRuntimeConfig({ slashCommandsAndMentionsEnabled: true });
 
     expect(getRuntimeSlashCommandsAndMentionsEnabled()).toBe(true);
+  });
+
+  it("exposes the configured transcript process summary preference", () => {
+    stubRuntimeConfig({ transcriptProcessSummaryEnabled: true });
+
+    expect(getRuntimeTranscriptProcessSummaryEnabled()).toBe(true);
   });
 });

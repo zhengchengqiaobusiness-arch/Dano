@@ -7,7 +7,6 @@ import type { ImageContentBlock, ToolContentBlock } from "../utils/transcript";
 
 export function createChatTranscriptBlockState() {
   let expandedToolBlocks = $state(new Set<string>());
-  let expandedThinking = $state(new Set<string>());
   let expandedProcessGroups = $state(new Set<string>());
 
   const toolBlockModelCache = new WeakMap<
@@ -26,13 +25,6 @@ export function createChatTranscriptBlockState() {
     expandedToolBlocks = next;
   }
 
-  function toggleThinking(blockKey: string) {
-    const next = new Set(expandedThinking);
-    if (next.has(blockKey)) next.delete(blockKey);
-    else next.add(blockKey);
-    expandedThinking = next;
-  }
-
   function toggleProcessGroup(groupKey: string) {
     const next = new Set(expandedProcessGroups);
     if (next.has(groupKey)) next.delete(groupKey);
@@ -47,10 +39,6 @@ export function createChatTranscriptBlockState() {
 
   function isToolBlockExpanded(blockKey: string): boolean {
     return expandedToolBlocks.has(blockKey);
-  }
-
-  function isThinkingExpanded(blockKey: string): boolean {
-    return expandedThinking.has(blockKey);
   }
 
   function isProcessGroupExpanded(groupKey: string): boolean {
@@ -77,18 +65,13 @@ export function createChatTranscriptBlockState() {
     get expandedToolBlocks() {
       return expandedToolBlocks;
     },
-    get expandedThinking() {
-      return expandedThinking;
-    },
     get expandedProcessGroups() {
       return expandedProcessGroups;
     },
     toggleToolBlock,
-    toggleThinking,
     toggleProcessGroup,
     expandProcessGroup,
     isToolBlockExpanded,
-    isThinkingExpanded,
     isProcessGroupExpanded,
     toolBlockModel,
     toolBlockDetail,

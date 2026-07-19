@@ -22,6 +22,7 @@ describe("Dano config", () => {
           maxRetries: 12,
         },
         slashCommandsAndMentionsEnabled: true,
+        transcriptProcessSummaryEnabled: true,
         quickActions: [
           { label: " 请假 ", prompt: " 帮我申请请假 " },
           { label: "", prompt: "ignored" },
@@ -47,6 +48,7 @@ describe("Dano config", () => {
         maxRetries: 12,
       },
       slashCommandsAndMentionsEnabled: true,
+      transcriptProcessSummaryEnabled: true,
       quickActions: [{ label: "请假", prompt: "帮我申请请假" }],
     });
 
@@ -62,7 +64,10 @@ describe("Dano config", () => {
         env: { DANO_CONFIG_PATH: path.join(tmpDir, "missing.json") },
         startDir: tmpDir,
       }),
-    ).toEqual({ slashCommandsAndMentionsEnabled: false });
+    ).toEqual({
+      slashCommandsAndMentionsEnabled: false,
+      transcriptProcessSummaryEnabled: false,
+    });
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
