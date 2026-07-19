@@ -1375,9 +1375,20 @@ def test_screenshot_semantic_plan_updates_canonical_capability_and_field_contrac
                 label="useDate",
                 value="2026-07-18",
                 type="string",
+                wire_type="string",
                 category="runtime_var",
-                source_kind="unknown",
+                source_kind="current_user",
                 exposed_to_user=False,
+            ), ParamField(
+                path="operatorName",
+                key="operatorName",
+                label="operatorName",
+                value="alice",
+                type="string",
+                wire_type="string",
+                category="user_param",
+                source_kind="user_input",
+                exposed_to_user=True,
             )],
         )],
         capabilities=[FlowCapability(
@@ -1399,6 +1410,12 @@ def test_screenshot_semantic_plan_updates_canonical_capability_and_field_contrac
             "business_type": "date", "category": "user_param", "source_kind": "user_input",
             "required": True, "confidence": 0.99,
             "evidence": [{"source": "screenshot", "label": "使用日期", "control_kind": "date"}],
+        }, {
+            "step_id": "submit", "wire_path": "operatorName", "public_name": "Applicant",
+            "business_type": "string", "category": "runtime_var", "source_kind": "current_user",
+            "confidence": 0.99,
+            "evidence": [{"source": "screenshot", "label": "Applicant", "control_kind": "text",
+                          "editable": False, "read_only": True}],
         }],
         "capabilities": [{
             "name": "submit_seal", "title": "发起公章使用申请", "kind": "submit",
@@ -1411,14 +1428,20 @@ def test_screenshot_semantic_plan_updates_canonical_capability_and_field_contrac
     out = asyncio.run(orchestrate_flow_capabilities(spec, submission=submission, generation_mode="optimize"))
 
     capability = next(cap for cap in out.capabilities if cap.name == "submit_seal")
+    operator = next(param for param in out.steps[0].params if param.path == "operatorName")
     field = next(param for param in out.steps[0].params if param.path == "useDate")
     assert capability.title == "发起公章使用申请"
     assert capability.intent == "填写使用日期并提交审批"
     assert field.key == "使用日期"
     assert field.label == "使用日期"
     assert field.type == "date"
+    assert field.wire_type == "string"
     assert field.category == "user_param"
     assert field.source_kind == "user_input"
+    assert operator.key == "Applicant"
+    assert operator.type == "string"
+    assert (operator.category, operator.source_kind) == ("runtime_var", "current_user")
+    assert operator.exposed_to_user is False
     assert field.exposed_to_user is True
 
 
@@ -1806,3 +1829,211 @@ def test_dependency_merges_only_connected_action_groups_and_keeps_independent_ca
     memberships = {frozenset(cap.step_ids) for cap in capabilities}
 
     assert memberships == {frozenset({"prepare", "confirm"}), frozenset({"archive"})}
+
+def test_uploading_screenshot_after_an_image_free_pass_reanalyzes_the_same_field():
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            path="/api/leave/submit",
+            params=[ParamField(
+                path="startDate",
+                key="startDate",
+                label="startDate",
+                value="2026-07-19",
+                type="string",
+                wire_type="string",
+                category="runtime_var",
+                source_kind="current_user",
+                exposed_to_user=False,
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_leave",
+            title="Submit",
+            intent="Submit",
+            kind="submit",
+            step_ids=["submit"],
+            nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
+        )],
+    )
+
+    def submission(evidence: list[dict]) -> dict:
+        return {"semantic_plan": {
+            "business_understanding": {"summary": "Submit a leave request"},
+            "request_roles": [{
+                "step_id": "submit",
+                "role": "business_write",
+                "name": "Submit leave request",
+                "reason": "Recorded submit request",
+            }],
+            "field_semantics": [{
+                "step_id": "submit",
+                "wire_path": "startDate",
+                "public_name": "Start date",
+                "business_type": "date",
+                "category": "user_param",
+                "source_kind": "user_input",
+                "confidence": 0.99,
+                "evidence": evidence,
+            }],
+            "capabilities": [{
+                "name": "submit_leave",
+                "title": "Submit leave request",
+                "intent": "Submit a leave request",
+                "kind": "submit",
+                "step_ids": ["submit"],
+            }],
+            "capability_relations": [],
+            "unresolved_items": [],
+        }, "ops": []}
+
+    image_free = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission=submission([]),
+        generation_mode="optimize",
+    ))
+    stale = image_free.steps[0].params[0]
+    assert stale.type == "string"
+    assert (stale.category, stale.source_kind) == ("runtime_var", "current_user")
+
+    with_image = asyncio.run(orchestrate_flow_capabilities(
+        image_free,
+        submission=submission([{
+            "source": "screenshot",
+            "screenshot_name": "leave-form.png",
+            "visible_label": "Start date",
+            "control_kind": "date",
+            "editable": True,
+        }]),
+        generation_mode="optimize",
+    ))
+    corrected = with_image.steps[0].params[0]
+    assert (corrected.type, corrected.wire_type) == ("date", "string")
+    assert (corrected.category, corrected.source_kind) == ("user_param", "user_input")
+    assert corrected.exposed_to_user is True
+
+
+
+def test_complete_reanalysis_replaces_auto_relations_and_keeps_confirmed_relations():
+    query = FlowStep(
+        step_id="query",
+        method="GET",
+        path="/api/orders/page",
+        response_json={"data": [{"id": "o-1"}]},
+        params=[ParamField(
+            path="query.filter",
+            key="filter",
+            type="string",
+            wire_type="string",
+            category="user_param",
+            source_kind="user_input",
+        )],
+        source_meta={"role": "business_get"},
+    )
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        response_json={"result": "archived"},
+        path="/api/orders/archive",
+        params=[ParamField(
+            path="orderIds",
+            key="orderIds",
+            type="array",
+            wire_type="array",
+            category="user_param",
+            source_kind="user_input",
+        ), ParamField(
+            path="manualIds",
+            key="manualIds",
+            type="array",
+            wire_type="array",
+            category="user_param",
+            source_kind="user_input",
+        )],
+        source_meta={"role": "submit_anchor"},
+    )
+    spec = FlowSpec(
+        steps=[query, submit],
+        capabilities=[
+            FlowCapability(
+                name="query_orders",
+                title="Query orders",
+                intent="Query orders",
+                kind="query_status",
+                step_ids=["query"],
+                nodes=[{"id": "query_call", "type": "call", "step_id": "query"}],
+            ),
+            FlowCapability(
+                name="archive_orders",
+                title="Archive orders",
+                intent="Archive selected orders",
+                kind="submit",
+                step_ids=["submit"],
+                nodes=[{"id": "submit_call", "type": "call", "step_id": "submit"}],
+            ),
+        ],
+        capability_relations=[
+            CapabilityRelation(
+                from_capability="query_orders",
+                from_output="wrong",
+                to_capability="archive_orders",
+                to_input="orderIds",
+                confirmed=False,
+                evidence={"source": "planner_semantic_plan"},
+            ),
+            CapabilityRelation(
+                from_capability="query_orders",
+                from_output="records",
+                to_capability="archive_orders",
+                to_input="manualIds",
+                confirmed=True,
+                evidence={"source": "manual"},
+            ),
+        ],
+    )
+    submission = {"semantic_plan": {
+        "business_understanding": {"summary": "Query and archive orders"},
+        "request_roles": [
+            {
+                "step_id": "query", "role": "business_get",
+                "name": "Query orders", "reason": "Recorded query",
+            },
+            {
+                "step_id": "submit", "role": "business_write",
+                "name": "Archive orders", "reason": "Recorded submit",
+            },
+        ],
+        "field_semantics": [],
+        "capabilities": [
+            {
+                "name": "query_orders", "title": "Query orders",
+                "intent": "Query orders", "kind": "query_status", "step_ids": ["query"],
+            },
+            {
+                "name": "archive_orders", "title": "Archive orders",
+                "intent": "Archive selected orders", "kind": "submit", "step_ids": ["submit"],
+            },
+        ],
+        "capability_relations": [{
+            "from_capability": "query_orders",
+            "from_output": "records",
+            "to_capability": "archive_orders",
+            "to_input": "orderIds",
+            "type": "external_transform",
+            "confidence": 0.98,
+            "reason": "Screenshot and API facts agree on the selection flow",
+        }],
+        "unresolved_items": [],
+    }, "ops": []}
+
+    out = asyncio.run(orchestrate_flow_capabilities(
+        spec, submission=submission, generation_mode="optimize",
+    ))
+    signatures = {
+        (rel.from_capability, rel.from_output, rel.to_capability, rel.to_input)
+        for rel in out.capability_relations
+    }
+    assert ("query_orders", "wrong", "archive_orders", "orderIds") not in signatures
+    assert ("query_orders", "records", "archive_orders", "orderIds") in signatures
+    assert ("query_orders", "records", "archive_orders", "manualIds") in signatures

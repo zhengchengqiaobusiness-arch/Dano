@@ -6293,6 +6293,59 @@ def test_latest_leave_recording_binds_full_dictionary_and_captured_user_director
     }
     assert captured_option_refs == {"req_10", "req_70"}
 
+def test_structural_option_binding_repairs_get_query_enum_from_recorded_facts():
+    process_status = ParamField(
+        path="query.processStatus", key="Process Status", label="Process Status", value=1,
+        type="string", wire_type="number", category="user_param",
+        source_kind="user_input", exposed_to_user=True,
+    )
+    query = FlowStep(
+        step_id="query-applications", method="GET",
+        path="/admin-api/oa/seal-apply/page?processStatus=1",
+        source_meta={"role": "business_get", "page_id": "seal-list"},
+        params=[process_status],
+    )
+    dictionary_rows = [
+        {"dictType": "system_user_sex", "value": 1, "label": "Male"},
+        {"dictType": "system_user_sex", "value": 2, "label": "Female"},
+        {"dictType": "bpm_process_instance_status", "value": 0, "label": "Draft"},
+        {"dictType": "bpm_process_instance_status", "value": 1, "label": "Pending"},
+        {"dictType": "bpm_process_instance_status", "value": 2, "label": "Approved"},
+        {"dictType": "bpm_process_instance_status", "value": 3, "label": "Rejected"},
+        {"dictType": "bpm_process_instance_status", "value": 4, "label": "Cancelled"},
+    ]
+    facts = RequestFacts(
+        requests=[flow_spec_module.RequestFact(
+            request_id="req_8", method="GET",
+            path="/admin-api/system/dict-data/simple-list",
+            response_json={"code": 0, "data": dictionary_rows},
+        )],
+        analysis={"req_8": flow_spec_module.RequestAnalysis(
+            request_id="req_8", role="read_option", confidence=0.99,
+        )},
+        option_sources=[{"kind": "page_enum_options", "options": {
+            "label=Process Status": {
+                "field_key": "Process Status", "field_aliases": ["processStatus"],
+                "control_kind": "select", "mapping_complete": False,
+                "selected_label": "Pending", "page_id": "seal-list",
+                "options": [{"label": label} for label in (
+                    "Draft", "Pending", "Approved", "Rejected", "Cancelled",
+                )],
+            },
+        }}],
+    )
+    spec = FlowSpec(flow_id="get-query-enum-repair", steps=[query], request_facts=facts)
+
+    assert flow_spec_module._repair_structural_option_bindings(spec) == 1
+    assert (process_status.type, process_status.wire_type) == ("enum", "string")
+    assert process_status.source_kind == "api_option"
+    assert process_status.source["source_request_id"] == "req_8"
+    assert process_status.source["category_value"] == "bpm_process_instance_status"
+    assert process_status.enum_value_map == {
+        "Draft": 0, "Pending": 1, "Approved": 2, "Rejected": 3, "Cancelled": 4,
+    }
+
+
 def test_sync_migrates_legacy_api_option_business_type_without_changing_wire_type():
     param = ParamField(
         path="type", key="请假类型", value=2,

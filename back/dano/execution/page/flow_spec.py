@@ -4042,6 +4042,60 @@ def _param_has_grounded_type(param: ParamField) -> bool:
         for item in (param.evidence or [])
     )
 
+_SCREENSHOT_CONTROL_KINDS = frozenset({
+    "text", "textarea", "number", "date", "datetime", "time",
+    "select", "combobox", "cascader", "picker", "checkbox", "radio",
+    "switch", "slider", "upload", "file", "tree_select", "rich_text",
+})
+_SCREENSHOT_INTERNAL_SOURCE_KINDS = frozenset({
+    "current_user", "page_context", "system_time", "constant",
+    "computed", "system_generated",
+})
+
+
+
+def _screenshot_control_evidence(raw: dict[str, Any]) -> dict[str, Any] | None:
+    for item in raw.get("evidence") or []:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source") or item.get("kind") or "").strip().lower()
+        control_kind = str(item.get("control_kind") or "").strip().lower()
+        if source == "screenshot" and control_kind in _SCREENSHOT_CONTROL_KINDS:
+            return item
+    return None
+
+
+def _screenshot_control_business_type(
+    control: dict[str, Any],
+    proposed: Any,
+) -> str:
+    kind = str(control.get("control_kind") or "").strip().lower()
+    proposed_type = str(proposed or "").strip()
+    if kind in {"text", "textarea", "rich_text"}:
+        return proposed_type if proposed_type in {"string", "email", "url"} else "string"
+    if kind in {"number", "slider"}:
+        return proposed_type if proposed_type in {"number", "integer"} else "number"
+    if kind in {"date", "datetime", "time"}:
+        return kind
+    if kind in {"select", "combobox", "cascader", "radio", "tree_select"}:
+        return "list-enum" if control.get("multiple") else "enum"
+    if kind in {"checkbox", "switch"}:
+        if kind == "checkbox" and (control.get("multiple") or control.get("options")):
+            return "list-enum"
+        return "boolean"
+    if kind in {"upload", "file"}:
+        return "array" if control.get("multiple") else "string"
+    return proposed_type
+
+
+def _param_has_executable_source(param: ParamField) -> bool:
+    if param.source_kind == "api_option":
+        return bool(param.source or param.enum_value_map or param.enum_options)
+    if param.source_kind == "previous_response":
+        return bool(param.source)
+    return False
+
+
 
 def _apply_capability_field_to_param(
     spec: FlowSpec,
@@ -4077,8 +4131,34 @@ def _apply_capability_field_to_param(
         return True
 
     allow_name = not automated or not _param_has_grounded_public_name(param)
-    allow_type = not automated or not _param_has_grounded_type(param)
-    allow_source = not automated or str(param.source_kind or "unknown") in {"", "unknown"}
+    screenshot_control = _screenshot_control_evidence(raw) if automated else None
+    screenshot_editable_input = bool(
+        screenshot_control is not None
+        and screenshot_control.get("editable") is not False
+        and not screenshot_control.get("disabled")
+        and not screenshot_control.get("read_only")
+        and str(raw.get("source_kind") or "") == "user_input"
+    )
+    screenshot_safe_internal = bool(
+        screenshot_control is not None
+        and (
+            screenshot_control.get("editable") is False
+            or screenshot_control.get("disabled")
+            or screenshot_control.get("read_only")
+        )
+        and str(raw.get("source_kind") or "") in _SCREENSHOT_INTERNAL_SOURCE_KINDS
+    )
+    allow_type = (
+        not automated or not _param_has_grounded_type(param) or screenshot_control is not None
+    )
+    allow_source = (
+        not automated
+        or str(param.source_kind or "unknown") in {"", "unknown"}
+        or (
+            (screenshot_editable_input or screenshot_safe_internal)
+            and not _param_has_executable_source(param)
+        )
+    )
 
     if raw.get("key") and allow_name:
         if str(raw["key"]) != param.key:
@@ -7483,13 +7563,18 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
                 and str(evidence_item.get("source") or evidence_item.get("kind") or "") in {
                     "screenshot", "recorder_dom", "page_control",
                 }
-                and str(evidence_item.get("control_kind") or "").lower() in {
-                    "text", "textarea", "number", "date", "datetime", "time",
-                    "select", "combobox", "cascader", "picker", "checkbox", "radio",
-                }
+                and str(evidence_item.get("control_kind") or "").lower()
+                in _SCREENSHOT_CONTROL_KINDS
+                and evidence_item.get("editable") is not False
                 and not evidence_item.get("disabled")
                 and not evidence_item.get("read_only")
                 for evidence_item in (item.get("evidence") or [])
+            )
+            screenshot_control = _screenshot_control_evidence(item)
+            proposed_type = str(item.get("business_type") or item.get("type") or "")
+            business_type = (
+                _screenshot_control_business_type(screenshot_control, proposed_type)
+                if screenshot_control is not None else proposed_type
             )
             if (
                 grounded_editable_control
@@ -7502,6 +7587,21 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
                 # still require their executable binding operations.
                 category = "user_param"
                 source_kind = "user_input"
+            elif (
+                screenshot_control is not None
+                and (
+                    screenshot_control.get("editable") is False
+                    or screenshot_control.get("disabled")
+                    or screenshot_control.get("read_only")
+                )
+                and requested_category in {"runtime_var", "system_const"}
+                and requested_source_kind in _SCREENSHOT_INTERNAL_SOURCE_KINDS
+            ):
+                # A visibly non-editable control can correct a stale caller
+                # classification to a safe UI/system source. API and response
+                # dependencies remain unavailable without recorded bindings.
+                category = requested_category
+                source_kind = requested_source_kind
             operation = "upsert_input_field" if category == "user_param" else "upsert_internal_field"
             ops.append({
                 "op": operation,
@@ -7511,7 +7611,7 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
                     "path": path,
                     "key": public_name,
                     "display_name": public_name,
-                    "type": str(item.get("business_type") or item.get("type") or ""),
+                    "type": business_type,
                     "source_kind": source_kind,
                     **({"required": bool(item.get("required"))} if "required" in item else {}),
                     "locked": False,
@@ -7660,6 +7760,11 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
                 "mode": str(relation.get("mode") or relation.get("type") or "caller_decision"),
                 "confidence": float(relation.get("confidence") or 0.0),
                 "reason": str(relation.get("reason") or "模型完整语义蓝图中的能力关系"),
+                "evidence": (
+                    relation.get("evidence")
+                    if isinstance(relation.get("evidence"), dict)
+                    else {"source": "planner_semantic_plan"}
+                ),
             })
     return ops
 
@@ -9220,6 +9325,19 @@ async def orchestrate_flow_capabilities(
                 for ref in (capability.request_refs or [])
             )
         )
+    preserved_human_relations: list[CapabilityRelation] = []
+    if complete_semantic_submission:
+        # A complete re-analysis owns the automatic relation set as well as
+        # capability boundaries. Keep operator-confirmed relations, then
+        # rebuild every planner suggestion from concrete endpoints below.
+        preserved_human_relations = [
+            relation.model_copy(deep=True)
+            for relation in (original.capability_relations or [])
+            if relation.confirmed
+            or str((relation.evidence or {}).get("source") or "").lower()
+            in {"manual", "user", "operator"}
+        ]
+        current.capability_relations = []
     if initial_generation or complete_semantic_submission:
         # A fresh full screenshot analysis replaces the previous accepted
         # semantic memory only after the candidate quality gate succeeds.
@@ -9283,6 +9401,21 @@ async def orchestrate_flow_capabilities(
             semantic_coverage = dict(previous_model.get("semantic_coverage") or {})
         source = "deterministic" if initial_generation else "incremental_rejected"
         reason = "自动语义 Proposal 未通过单调质量准入: " + ",".join(proposal_gate["reasons"])
+    if preserved_human_relations:
+        valid_capability_refs = {
+            ref
+            for capability in (current.capabilities or [])
+            for ref in (capability.name, capability.capability_id)
+            if ref
+        }
+        for relation in preserved_human_relations:
+            if (
+                relation.from_capability in valid_capability_refs
+                and relation.to_capability in valid_capability_refs
+            ):
+                _upsert_capability_relation(
+                    current, relation.model_dump(exclude_none=True),
+                )
     semantic_plan = _complete_semantic_plan_from_spec(current, semantic_plan)
     current = _apply_semantic_business_understanding(current, semantic_plan)
     semantic_coverage = _semantic_plan_coverage(current, {"semantic_plan": semantic_plan})
@@ -12966,7 +13099,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
 
     eligible_values = [
         str(param.value if param.value is not None else "").strip()
-        for step in _write_steps(spec)
+        for step in spec.steps
         for param in (step.params or [])
         if not param.locked
         and not _param_has_manual_contract(param)
@@ -13117,7 +13250,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
         return contracts
 
     repaired = 0
-    for target in _write_steps(spec):
+    for target in spec.steps:
         for param in target.params or []:
             if (
                 param.locked
@@ -14688,7 +14821,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
 
         if op == "set_capability_relation":
             raw = dict(edit.get("relation") or {})
-            for alias in ("type", "from_capability", "from_output", "to_capability", "to_input", "confidence", "confirmed", "reason"):
+            for alias in ("type", "from_capability", "from_output", "to_capability", "to_input", "confidence", "confirmed", "reason", "evidence"):
                 if alias in edit and alias not in raw:
                     raw[alias] = edit.get(alias)
             raw.setdefault("requires_user_confirmation", bool(edit.get("requires_user_confirmation", True)))

@@ -955,3 +955,116 @@ def test_recording_plan_requires_complete_semantic_contract():
 
     with pytest.raises(ToolError, match="缺少必填字段"):
         agent_tools_module._normalize_recording_plan_submission(incomplete, FlowSpec())
+
+def test_screenshot_normalization_replaces_stale_axes_for_all_control_types():
+    controls = [
+        ("title", "text", {}, "string"),
+        ("amount", "number", {}, "number"),
+        ("useDate", "date", {}, "date"),
+        ("approved", "switch", {}, "boolean"),
+        ("status", "select", {}, "enum"),
+        ("tags", "checkbox", {"options": ["a", "b"]}, "list-enum"),
+        ("files", "upload", {"multiple": True}, "array"),
+    ]
+    params = [
+        ParamField(
+            path=path,
+            key=path,
+            label=path,
+            value="stale",
+            type="string",
+            wire_type="string",
+            category="runtime_var",
+            source_kind="current_user",
+            exposed_to_user=False,
+        )
+        for path, _kind, _extra, _expected in controls
+    ]
+    spec = FlowSpec(steps=[
+        FlowStep(
+            step_id="submit",
+            method="POST",
+            path="/api/generic/submit",
+            params=params,
+        ),
+    ])
+    raw_plan = {
+        "semantic_plan": {
+            "business_understanding": {"summary": "Generic form submission"},
+            "request_roles": [{
+                "step_id": "submit",
+                "role": "business_write",
+                "name": "Submit form",
+                "reason": "Recorded submit request",
+            }],
+            "field_semantics": [
+                {
+                    "step_id": "submit",
+                    "wire_path": path,
+                    "public_name": f"Visible {path}",
+                    "business_type": "string",
+                    "category": "user_param",
+                    "source_kind": "user_input",
+                    "confidence": 0.99,
+                    "evidence": [{
+                        "source": "screenshot",
+                        "screenshot_name": "form.png",
+                        "control_kind": kind,
+                        "editable": True,
+                        **extra,
+                    }],
+                }
+                for path, kind, extra, _expected in controls
+            ],
+            "capabilities": [{
+                "name": "submit_generic",
+                "title": "Submit form",
+                "intent": "Submit visible form fields",
+                "kind": "submit",
+                "step_ids": ["submit"],
+            }],
+            "capability_relations": [],
+            "unresolved_items": [],
+        },
+        "ops": [],
+    }
+
+    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
+    by_path = {
+        item["wire_path"]: item
+        for item in normalized["semantic_plan"]["field_semantics"]
+    }
+
+    for path, _kind, _extra, expected_type in controls:
+        assert by_path[path]["business_type"] == expected_type
+        assert by_path[path]["category"] == "user_param"
+        assert by_path[path]["source_kind"] == "user_input"
+        assert by_path[path]["evidence"][0]["source"] == "screenshot"
+
+
+def test_image_free_normalization_keeps_the_original_grounded_axis_behavior():
+    param = ParamField(
+        path="ownerId", key="ownerId", type="string", wire_type="string",
+        category="runtime_var", source_kind="current_user",
+    )
+    spec = FlowSpec(steps=[
+        FlowStep(step_id="submit", method="POST", path="/api/task", params=[param]),
+    ])
+    raw_plan = {"semantic_plan": {
+        "business_understanding": {"summary": "Task"},
+        "request_roles": [],
+        "field_semantics": [{
+            "step_id": "submit", "wire_path": "ownerId", "public_name": "Owner",
+            "business_type": "enum", "category": "user_param", "source_kind": "user_input",
+            "confidence": 0.99, "evidence": "Model-only guess",
+        }],
+        "capabilities": [],
+        "capability_relations": [],
+        "unresolved_items": [],
+    }, "ops": []}
+
+    field = agent_tools_module._normalize_recording_plan_submission(
+        raw_plan, spec,
+    )["semantic_plan"]["field_semantics"][0]
+    assert (field["category"], field["source_kind"]) == ("runtime_var", "current_user")
+    assert field["evidence"] == [{"source": "pi_analysis", "detail": "Model-only guess"}]

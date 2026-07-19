@@ -32,8 +32,14 @@ def test_analysis_screenshots_are_validated_and_reduced_to_pi_images() -> None:
         "mimeType": "image/png",
     }]
     assert "semantic evidence" in gateway._analysis_screenshot_guidance(screenshots)
+    assert "fresh full semantic analysis" in gateway._analysis_screenshot_guidance(screenshots)
     protocol = gateway._recording_plan_protocol_guidance(has_screenshots=True)
     assert "field_semantics" in protocol and "step_id" in protocol and "wire_path" in protocol
+    assert "control_kind" in protocol
+    assert "user_param/user_input" in protocol
+    assert "capability_relations" in protocol
+    assert "from_output" in protocol and "to_input" in protocol
+    assert "not only enums" in protocol
     assert "Never submit flow_spec" in protocol
 
 

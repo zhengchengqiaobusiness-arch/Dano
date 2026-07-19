@@ -1219,6 +1219,81 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             numeric = default
         return max(0.0, min(1.0, numeric))
 
+    def screenshot_control_kind(detail: object) -> str:
+        text = str(detail or "").strip().lower()
+        for control_kind, markers in (
+            ("checkbox", ("checkbox", "check box", "\u590d\u9009")),
+            ("radio", ("radio", "\u5355\u9009")),
+            ("select", ("select", "dropdown", "drop-down", "\u4e0b\u62c9", "\u9009\u9879")),
+            ("datetime", ("datetime", "date time", "\u65e5\u671f\u65f6\u95f4")),
+            ("date", ("date", "calendar", "\u65e5\u671f", "\u65e5\u5386")),
+            ("time", ("time picker", "\u65f6\u95f4\u9009\u62e9")),
+            ("number", ("number", "numeric", "\u6570\u5b57", "\u6570\u91cf")),
+            ("textarea", ("textarea", "multi-line", "multiline", "\u591a\u884c", "\u5907\u6ce8")),
+            ("text", ("text input", "input box", "\u8f93\u5165\u6846")),
+        ):
+            if any(marker in text for marker in markers):
+                return control_kind
+        return ""
+
+    def normalized_evidence(value: object) -> list[dict]:
+        raw_items = value if isinstance(value, list) else (
+            [value] if isinstance(value, (str, dict)) else []
+        )
+        normalized: list[dict] = []
+        for raw_item in raw_items:
+            if isinstance(raw_item, dict):
+                item = deepcopy(raw_item)
+                source = str(item.get("source") or item.get("kind") or "").strip().lower()
+                detail = item.get("detail") or item.get("reason") or item.get("description") or ""
+                if source in {"screenshot", "reference_screenshot", "uploaded_screenshot"}:
+                    item["source"] = "screenshot"
+                    item.setdefault("control_kind", screenshot_control_kind(detail))
+                normalized.append(item)
+                continue
+            detail = str(raw_item or "").strip()
+            if not detail:
+                continue
+            lowered = detail.lower()
+            from_screenshot = any(marker in lowered for marker in (
+                "screenshot", "screen shot", "reference image", "uploaded image",
+                "\u622a\u56fe", "\u53c2\u8003\u56fe", "\u4e0a\u4f20\u56fe\u7247",
+            ))
+            item = {
+                "source": "screenshot" if from_screenshot else "pi_analysis",
+                "detail": detail,
+            }
+            if from_screenshot:
+                item["control_kind"] = screenshot_control_kind(detail)
+            normalized.append(item)
+        return normalized
+
+    def screenshot_control(evidence: list[dict]) -> dict | None:
+        return next((
+            item for item in evidence
+            if str(item.get("source") or item.get("kind") or "").strip().lower() == "screenshot"
+            and str(item.get("control_kind") or "").strip().lower()
+        ), None)
+
+    def screenshot_business_type(control: dict, proposed: object) -> str:
+        kind = str(control.get("control_kind") or "").strip().lower()
+        proposed_type = str(proposed or "").strip()
+        if kind in {"text", "textarea", "rich_text"}:
+            return proposed_type if proposed_type in {"string", "email", "url"} else "string"
+        if kind in {"number", "slider"}:
+            return proposed_type if proposed_type in {"number", "integer"} else "number"
+        if kind in {"date", "datetime", "time"}:
+            return kind
+        if kind in {"select", "combobox", "radio", "cascader", "tree_select"}:
+            return "list-enum" if control.get("multiple") else "enum"
+        if kind in {"checkbox", "switch"}:
+            if kind == "checkbox" and (control.get("multiple") or control.get("options")):
+                return "list-enum"
+            return "boolean"
+        if kind in {"upload", "file"}:
+            return "array" if control.get("multiple") else "string"
+        return proposed_type
+
     param_by_ref = {
         (str(step.step_id), normalized_path(param.path)): param
         for step in steps for param in (getattr(step, "params", None) or [])
@@ -1238,19 +1313,51 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         field["step_id"] = step_id
         field["wire_path"] = str(getattr(param, "path", None) or path)
         field.setdefault("public_name", str(getattr(param, "label", None) or getattr(param, "key", None) or path))
+        evidence = normalized_evidence(field.get("evidence"))
+        field["evidence"] = evidence
+        control = screenshot_control(evidence)
         field.setdefault("business_type", str(getattr(param, "type", None) or "string"))
-        if str(getattr(param, "category", None) or "") not in {"", "unknown"}:
-            field["category"] = str(param.category)
-        if str(getattr(param, "source_kind", None) or "") not in {"", "unknown"}:
-            field["source_kind"] = str(param.source_kind)
+        if control is not None:
+            field["business_type"] = screenshot_business_type(control, field.get("business_type"))
+        current_category = str(getattr(param, "category", None) or "")
+        current_source_kind = str(getattr(param, "source_kind", None) or "")
+        grounded_executable_source = bool(
+            current_source_kind == "api_option"
+            and (getattr(param, "source", None) or getattr(param, "enum_value_map", None))
+        ) or bool(
+            current_source_kind == "previous_response" and getattr(param, "source", None)
+        )
+        screenshot_user_input = bool(
+            control is not None
+            and not control.get("disabled")
+            and not control.get("read_only")
+            and str(field.get("category") or "") == "user_param"
+            and str(field.get("source_kind") or "") == "user_input"
+            and not grounded_executable_source
+        )
+        screenshot_safe_internal = bool(
+            control is not None
+            and (
+                control.get("editable") is False
+                or control.get("disabled")
+                or control.get("read_only")
+            )
+            and str(field.get("category") or "") in {"runtime_var", "system_const"}
+            and str(field.get("source_kind") or "") in {
+                "current_user", "page_context", "system_time", "constant",
+                "computed", "system_generated",
+            }
+            and not grounded_executable_source
+        )
+        screenshot_axis_override = screenshot_user_input or screenshot_safe_internal
+        if not screenshot_axis_override and current_category not in {"", "unknown"}:
+            field["category"] = current_category
+        if not screenshot_axis_override and current_source_kind not in {"", "unknown"}:
+            field["source_kind"] = current_source_kind
         field["confidence"] = normalized_confidence(
             field.get("confidence"),
             float(getattr(param, "confidence", None) or 0.8),
         )
-        if isinstance(field.get("evidence"), str):
-            field["evidence"] = [{"source": "pi_analysis", "detail": field["evidence"]}]
-        elif not isinstance(field.get("evidence"), list):
-            field["evidence"] = []
         fields.append(field)
     semantic["field_semantics"] = fields
 
