@@ -1731,11 +1731,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         resume_action: actionRef.current,
       });
       // Keep both proxy directions active. Long periods without page changes can
-      // otherwise be treated as an idle WebSocket by an intermediate proxy.
+      // otherwise be treated as an idle WebSocket by an intermediate proxy or
+      // by the backend's uvicorn default idle timeout (5min). 5s is well below
+      // the lowest common idle timeout we have observed (Vite's http-proxy
+      // ~60s, corporate proxies often ~30s, uvicorn default ~300s).
       heartbeatTimerRef.current = window.setInterval(() => {
         if (wsRef.current !== ws || ws.readyState !== WebSocket.OPEN) return;
         ws.send(JSON.stringify({ type: "ping", at: Date.now() }));
-      }, 10000);
+      }, 5000);
     };
     ws.onmessage = (ev) => {
       if (wsRef.current !== ws) return;
@@ -1823,10 +1826,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         if (m.operation === "finalize" && (!m.operation_id || m.operation_id === finalizeOperationRef.current)) {
           finalizeOperationRef.current = null;
+          // finalize 完成:无论之前 phase 是什么,都必须清回 recording,
+          // 否则 "停止并分析请求" 按钮会一直转圈 (P5 引入的守卫漏判 finalize)。
+          setPhase("recording");
         }
         // 发布请求可能与最后一次字段更新响应交错到达。普通更新不能把发布中的
-        // loading/状态提前重置，否则用户看到按钮闪退但后端仍在发布。
-        if (phaseRef.current !== "publishing") setPhase("recording");
+        // loading/状态提前重置,否则用户看到按钮闪退但后端仍在发布。
+        const finalizeJustCleared = m.operation === "finalize" && !finalizeOperationRef.current;
+        if (finalizeJustCleared || phaseRef.current !== "publishing") setPhase("recording");
         const fs = m.flow_spec;
         const acknowledgesActiveMutation = m.operation === "flow_update"
           && (!m.operation_id || m.operation_id === flowMutationInFlightRef.current?.operation_id);

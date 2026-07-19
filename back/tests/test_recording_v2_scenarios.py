@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+import dano.agent_tools.tools as agent_tools_module
 import dano.execution.page.flow_spec as flow_spec_module
 from dano.execution.page.flow_spec import (
     CapabilityField,
@@ -128,6 +129,63 @@ def test_optimize_fills_placeholder_capability_title_and_intent_without_model_gu
     assert "取消酒店申请" in capability.intent
     assert "真实接口" not in capability.intent
     assert capability.step_ids == ["cancel"]
+
+
+def test_capability_explanation_matching_never_compares_tied_plan_dicts():
+    spec = FlowSpec(
+        title="Seal application",
+        steps=[FlowStep(
+            step_id="definition",
+            method="GET",
+            path="/api/process-definition/get",
+            source_meta={"role": "business_get"},
+        )],
+        capabilities=[FlowCapability(
+            name="legacy_query",
+            title="Capability 1",
+            intent="",
+            kind="query_status",
+            step_ids=["definition"],
+            nodes=[{
+                "id": "call_definition",
+                "type": "call",
+                "step_id": "definition",
+            }],
+        )],
+    )
+    semantic_plan = {
+        "capabilities": [
+            {
+                "name": "load_definition_a",
+                "title": "Load definition A",
+                "kind": "query_status",
+                "step_ids": ["definition"],
+                "request_refs": [{
+                    "step_id": "definition",
+                    "usage": "execute",
+                }],
+            },
+            {
+                "name": "load_definition_b",
+                "title": "Load definition B",
+                "kind": "query_status",
+                "step_ids": ["definition"],
+                "request_refs": [{
+                    "step_id": "definition",
+                    "usage": "execute",
+                }],
+            },
+        ],
+    }
+
+    optimized = flow_spec_module._ensure_capability_explanations(
+        spec, semantic_plan,
+    )
+
+    assert optimized.capabilities[0].title not in {
+        "Load definition A", "Load definition B",
+    }
+    assert optimized.capabilities[0].intent
 
 
 def test_capability_nodes_expand_stale_step_ids_and_derive_all_three_step_views():
@@ -1913,6 +1971,193 @@ def test_uploading_screenshot_after_an_image_free_pass_reanalyzes_the_same_field
     assert (corrected.type, corrected.wire_type) == ("date", "string")
     assert (corrected.category, corrected.source_kind) == ("user_param", "user_input")
     assert corrected.exposed_to_user is True
+
+
+def test_screenshot_textarea_replaces_stale_automatic_api_option_binding():
+    stale_source = {
+        "kind": "api_option",
+        "source_url": "/admin-api/system/auth/get-permission-info",
+        "value_key": "id",
+        "label_key": "name",
+    }
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            path="/api/seal/submit",
+            params=[
+                ParamField(
+                    path="useInfo",
+                    key="权限范围",
+                    label="权限范围",
+                    value="1",
+                    type="enum",
+                    wire_type="string",
+                    category="user_param",
+                    source_kind="api_option",
+                    source=stale_source,
+                    enum_options=[{"label": "系统管理", "value": "1"}],
+                    enum_value_map={"系统管理": "1"},
+                    exposed_to_user=True,
+                ),
+                ParamField(
+                    path="sealId",
+                    key="公章",
+                    label="公章",
+                    value="seal-1",
+                    type="enum",
+                    wire_type="string",
+                    category="runtime_var",
+                    source_kind="api_option",
+                    source={
+                        "kind": "api_option",
+                        "source_url": "/admin-api/bd/seal/simple-list",
+                        "value_key": "id",
+                        "label_key": "name",
+                    },
+                    enum_options=[{"label": "财务章", "value": "seal-1"}],
+                    enum_value_map={"财务章": "seal-1"},
+                    exposed_to_user=False,
+                ),
+            ],
+            selects=[
+                SelectBinding(
+                    param="使用描述",
+                    path="useInfo",
+                    source_url="/admin-api/system/auth/get-permission-info",
+                    value_key="id",
+                    label_key="name",
+                    enum_source="api",
+                    enum_confirmed=True,
+                    options=[{"label": "系统管理", "value": "1"}],
+                    option_map={"系统管理": "1"},
+                ),
+                SelectBinding(
+                    param="公章",
+                    path="sealId",
+                    source_url="/admin-api/bd/seal/simple-list",
+                    value_key="id",
+                    label_key="name",
+                    enum_source="api",
+                    enum_confirmed=True,
+                    options=[{"label": "财务章", "value": "seal-1"}],
+                    option_map={"财务章": "seal-1"},
+                ),
+            ],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_seal",
+            title="Submit seal application",
+            intent="Submit seal application",
+            kind="submit",
+            step_ids=["submit"],
+            nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
+        )],
+    )
+    submission = {"semantic_plan": {
+        "business_understanding": {"summary": "Submit seal application"},
+        "request_roles": [{
+            "step_id": "submit",
+            "role": "submit_anchor",
+            "name": "Submit seal application",
+            "reason": "Recorded submit request",
+        }],
+        "field_semantics": [
+            {
+                "step_id": "submit",
+                "wire_path": "useInfo",
+                "public_name": "使用描述",
+                "business_type": "text",
+                "category": "user_param",
+                "source_kind": "user_input",
+                "control_kind": "textarea",
+                "confidence": 0.98,
+                "evidence": [{
+                    "source": "screenshot",
+                    "screenshot_name": "seal-form.png",
+                    "detail": "使用描述是可编辑的多行文本区域",
+                    "editable": True,
+                    "disabled": False,
+                    "read_only": False,
+                    "multiple": False,
+                }],
+            },
+            {
+                "step_id": "submit",
+                "wire_path": "sealId",
+                "public_name": "公章",
+                "business_type": "enum",
+                "category": "user_param",
+                "source_kind": "api_option",
+                "control_kind": "select",
+                "confidence": 0.98,
+                "evidence": [{
+                    "source": "screenshot",
+                    "screenshot_name": "seal-form.png",
+                    "detail": "公章是可编辑的下拉框",
+                    "editable": True,
+                    "disabled": False,
+                    "read_only": False,
+                    "multiple": False,
+                }],
+            },
+        ],
+        "capabilities": [{
+            "name": "submit_seal",
+            "title": "Submit seal application",
+            "intent": "Submit seal application",
+            "kind": "submit",
+            "step_ids": ["submit"],
+        }],
+        "capability_relations": [],
+        "unresolved_items": [],
+    }, "ops": []}
+
+    normalized = agent_tools_module._normalize_recording_plan_submission(
+        submission, spec,
+    )
+    fields = {
+        field["wire_path"]: field
+        for field in normalized["semantic_plan"]["field_semantics"]
+    }
+    assert fields["useInfo"]["business_type"] == "string"
+    assert fields["useInfo"]["source_kind"] == "user_input"
+    assert fields["useInfo"]["evidence"][0]["control_kind"] == "textarea"
+    assert fields["sealId"]["category"] == "user_param"
+    assert fields["sealId"]["source_kind"] == "api_option"
+    assert fields["sealId"]["evidence"][0]["control_kind"] == "select"
+
+    optimized = asyncio.run(orchestrate_flow_capabilities(
+        spec,
+        submission=normalized,
+        generation_mode="optimize",
+    ))
+    params = {param.path: param for param in optimized.steps[0].params}
+    assert (params["useInfo"].type, params["useInfo"].wire_type) == ("string", "string")
+    assert (params["useInfo"].key, params["useInfo"].label) == ("使用描述", "使用描述")
+    assert (params["useInfo"].category, params["useInfo"].source_kind) == (
+        "user_param", "user_input",
+    )
+    assert params["useInfo"].source == {"kind": "user_input", "path": "useInfo"}
+    assert params["useInfo"].enum_options is None
+    assert params["useInfo"].enum_value_map is None
+    assert (params["sealId"].type, params["sealId"].wire_type) == ("enum", "string")
+    assert (params["sealId"].category, params["sealId"].source_kind) == (
+        "user_param", "api_option",
+    )
+    assert params["sealId"].source["source_url"] == "/admin-api/bd/seal/simple-list"
+    assert [binding.path for binding in optimized.steps[0].selects] == ["sealId"]
+
+    # A later Generate/Optimize starts with deterministic source repair.  The
+    # persisted screenshot contract must keep that pass from resurrecting the
+    # stale permission-list binding.
+    assert flow_spec_module._param_has_screenshot_direct_input_contract(
+        params["useInfo"],
+    )
+    flow_spec_module._repair_structural_option_bindings(optimized)
+    params = {param.path: param for param in optimized.steps[0].params}
+    assert params["useInfo"].source_kind == "user_input"
+    assert [binding.path for binding in optimized.steps[0].selects] == ["sealId"]
 
 
 

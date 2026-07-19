@@ -932,6 +932,68 @@ def test_observed_five_interface_plan_keeps_only_business_anchors():
     option_ref = next(ref for ref in repaired_submit.request_refs if ref.step_id == "options")
     assert option_ref.usage == "option_source"
 
+def test_recording_plan_normalizes_labeled_step_ids_from_real_agent_output():
+    spec = FlowSpec(steps=[
+        FlowStep(
+            step_id="0f576fe00bfe",
+            method="POST",
+            path="/admin-api/oa/seal-apply/submit-process",
+            source_meta={"role": "submit_anchor"},
+        ),
+        FlowStep(
+            step_id="10caab0f4afe",
+            method="GET",
+            path="/admin-api/oa/seal-apply/page",
+            source_meta={"role": "business_get"},
+        ),
+    ])
+    raw_plan = {
+        "semantic_plan": {
+            "business_understanding": {
+                "summary": "Submit and query seal applications",
+            },
+            "request_roles": [],
+            "field_semantics": [],
+            "capabilities": [
+                {
+                    "capability_id": "submit_seal_application",
+                    "title": "Submit seal application",
+                    "steps": ["step_id>0f576fe00bfe"],
+                },
+                {
+                    "capability_id": "query_seal_applications",
+                    "title": "Query seal applications",
+                    "steps": ["step_id=10caab0f4afe"],
+                },
+                {
+                    "capability_id": "invented_capability",
+                    "title": "Invented capability",
+                    "steps": ["step_id=not-recorded"],
+                },
+            ],
+            "capability_relations": [],
+            "unresolved_items": [],
+        },
+        "ops": [],
+    }
+
+    normalized = agent_tools_module._normalize_recording_plan_submission(
+        raw_plan, spec,
+    )
+    capabilities = {
+        item["name"]: item
+        for item in normalized["semantic_plan"]["capabilities"]
+    }
+
+    assert set(capabilities) == {
+        "submit_seal_application", "query_seal_applications",
+    }
+    assert capabilities["submit_seal_application"]["kind"] == "submit"
+    assert capabilities["submit_seal_application"]["step_ids"] == ["0f576fe00bfe"]
+    assert capabilities["query_seal_applications"]["kind"] == "query_status"
+    assert capabilities["query_seal_applications"]["step_ids"] == ["10caab0f4afe"]
+
+
 def test_recording_plan_rejects_semantic_fields_outside_semantic_plan():
     malformed = {
         "semantic_plan": {"business_understanding": "发起请假申请单"},

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 from uuid import UUID, uuid4
 
 import structlog
@@ -1178,6 +1179,7 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         _build_initial_flow_capabilities,
         _capability_node_step_ids,
         _option_source_step_ids,
+        _param_has_manual_contract,
         _planned_capability_has_public_anchor,
         _repair_structural_option_bindings,
         rebuild_flow_dependencies,
@@ -1314,6 +1316,15 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         field["wire_path"] = str(getattr(param, "path", None) or path)
         field.setdefault("public_name", str(getattr(param, "label", None) or getattr(param, "key", None) or path))
         evidence = normalized_evidence(field.get("evidence"))
+        for evidence_item in evidence:
+            if str(evidence_item.get("source") or "").lower() != "screenshot":
+                continue
+            for key in (
+                "screenshot_name", "visible_label", "control_kind", "editable",
+                "disabled", "read_only", "multiple", "options",
+            ):
+                if key in field and evidence_item.get(key) in (None, ""):
+                    evidence_item[key] = deepcopy(field[key])
         field["evidence"] = evidence
         control = screenshot_control(evidence)
         field.setdefault("business_type", str(getattr(param, "type", None) or "string"))
@@ -1321,19 +1332,37 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             field["business_type"] = screenshot_business_type(control, field.get("business_type"))
         current_category = str(getattr(param, "category", None) or "")
         current_source_kind = str(getattr(param, "source_kind", None) or "")
+        manual_contract = bool(
+            getattr(param, "locked", False) or _param_has_manual_contract(param)
+        )
         grounded_executable_source = bool(
             current_source_kind == "api_option"
             and (getattr(param, "source", None) or getattr(param, "enum_value_map", None))
         ) or bool(
             current_source_kind == "previous_response" and getattr(param, "source", None)
         )
-        screenshot_user_input = bool(
+        screenshot_editable = bool(
             control is not None
+            and control.get("editable") is not False
             and not control.get("disabled")
             and not control.get("read_only")
+        )
+        control_kind = str((control or {}).get("control_kind") or "").lower()
+        option_control = control_kind in {
+            "select", "combobox", "cascader", "picker", "radio", "tree_select",
+        } or bool(control_kind == "checkbox" and control.get("options"))
+        screenshot_user_category = bool(
+            screenshot_editable
             and str(field.get("category") or "") == "user_param"
+            and not manual_contract
+        )
+        screenshot_user_input = bool(
+            screenshot_user_category
             and str(field.get("source_kind") or "") == "user_input"
-            and not grounded_executable_source
+            and (
+                not grounded_executable_source
+                or (current_source_kind == "api_option" and not option_control)
+            )
         )
         screenshot_safe_internal = bool(
             control is not None
@@ -1348,11 +1377,13 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                 "computed", "system_generated",
             }
             and not grounded_executable_source
+            and not manual_contract
         )
-        screenshot_axis_override = screenshot_user_input or screenshot_safe_internal
-        if not screenshot_axis_override and current_category not in {"", "unknown"}:
+        screenshot_category_override = screenshot_user_category or screenshot_safe_internal
+        screenshot_source_override = screenshot_user_input or screenshot_safe_internal
+        if not screenshot_category_override and current_category not in {"", "unknown"}:
             field["category"] = current_category
-        if not screenshot_axis_override and current_source_kind not in {"", "unknown"}:
+        if not screenshot_source_override and current_source_kind not in {"", "unknown"}:
             field["source_kind"] = current_source_kind
         field["confidence"] = normalized_confidence(
             field.get("confidence"),
@@ -1390,6 +1421,18 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         if isinstance(raw_memberships, (str, dict)):
             raw_memberships = [raw_memberships]
 
+        def normalized_membership_step_id(value: object) -> str:
+            raw = str(value or "").strip()
+            if raw in step_by_id:
+                return raw
+            match = re.fullmatch(
+                r"step[\s_-]*id\s*(?:=|:|>)\s*['\"]?([^'\"\s]+)['\"]?",
+                raw,
+                flags=re.IGNORECASE,
+            )
+            candidate = str(match.group(1) if match else "")
+            return candidate if candidate in step_by_id else ""
+
         def inferred_usage(step_id: str) -> str:
             if step_id in option_source_ids:
                 return "option_source"
@@ -1410,7 +1453,7 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
 
         def add_membership(value, *, default_usage: str | None = None) -> None:  # noqa: ANN001
             ref = deepcopy(value) if isinstance(value, dict) else {"step_id": value}
-            step_id = str(
+            step_id = normalized_membership_step_id(
                 ref.get("step_id")
                 or ref.get("request_step_id")
                 or ref.get("id")
@@ -1467,8 +1510,8 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         for value in raw_steps:
             add_membership(value)
         for key in ("anchor_step_id", "entry_step_id", "primary_step_id"):
-            value = str(capability.get(key) or "")
-            if value in step_by_id:
+            value = capability.get(key)
+            if value not in (None, ""):
                 add_membership(value, default_usage="execute")
         memberships.sort(
             key=lambda item: (step_order[item["step_id"]], item["usage"])

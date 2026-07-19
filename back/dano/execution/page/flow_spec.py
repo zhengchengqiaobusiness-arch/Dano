@@ -4019,6 +4019,9 @@ _SCREENSHOT_CONTROL_KINDS = frozenset({
     "select", "combobox", "cascader", "picker", "checkbox", "radio",
     "switch", "slider", "upload", "file", "tree_select", "rich_text",
 })
+_SCREENSHOT_OPTION_CONTROL_KINDS = frozenset({
+    "select", "combobox", "cascader", "picker", "radio", "tree_select",
+})
 _SCREENSHOT_INTERNAL_SOURCE_KINDS = frozenset({
     "current_user", "page_context", "system_time", "constant",
     "computed", "system_generated",
@@ -4035,6 +4038,28 @@ def _screenshot_control_evidence(raw: dict[str, Any]) -> dict[str, Any] | None:
         if source == "screenshot" and control_kind in _SCREENSHOT_CONTROL_KINDS:
             return item
     return None
+
+
+def _param_has_screenshot_direct_input_contract(param: ParamField) -> bool:
+    """A visible editable non-choice control must not be repaired into an enum."""
+    for item in param.evidence or []:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source") or item.get("kind") or "").strip().lower()
+        control_kind = str(item.get("control_kind") or "").strip().lower()
+        if source != "screenshot" or control_kind not in _SCREENSHOT_CONTROL_KINDS:
+            continue
+        if control_kind in _SCREENSHOT_OPTION_CONTROL_KINDS:
+            continue
+        if control_kind == "checkbox" and item.get("options"):
+            continue
+        if (
+            item.get("editable") is not False
+            and not item.get("disabled")
+            and not item.get("read_only")
+        ):
+            return True
+    return False
 
 
 def _screenshot_control_business_type(
@@ -4102,14 +4127,38 @@ def _apply_capability_field_to_param(
     if automated and (param.locked or _param_has_manual_contract(param)):
         return True
 
-    allow_name = not automated or not _param_has_grounded_public_name(param)
     screenshot_control = _screenshot_control_evidence(raw) if automated else None
-    screenshot_editable_input = bool(
+    allow_name = (
+        not automated
+        or not _param_has_grounded_public_name(param)
+        or screenshot_control is not None
+    )
+    screenshot_editable = bool(
         screenshot_control is not None
         and screenshot_control.get("editable") is not False
         and not screenshot_control.get("disabled")
         and not screenshot_control.get("read_only")
+    )
+    screenshot_control_kind = str(
+        (screenshot_control or {}).get("control_kind") or ""
+    ).strip().lower()
+    screenshot_option_control = bool(
+        screenshot_control_kind in _SCREENSHOT_OPTION_CONTROL_KINDS
+        or (
+            screenshot_control_kind == "checkbox"
+            and (screenshot_control or {}).get("options")
+        )
+    )
+    screenshot_direct_input = bool(
+        screenshot_editable and not screenshot_option_control
+    )
+    screenshot_editable_input = bool(
+        screenshot_editable
         and str(raw.get("source_kind") or "") == "user_input"
+    )
+    screenshot_user_category = bool(
+        screenshot_editable
+        and str(raw.get("category") or "") == "user_param"
     )
     screenshot_safe_internal = bool(
         screenshot_control is not None
@@ -4130,7 +4179,16 @@ def _apply_capability_field_to_param(
             (screenshot_editable_input or screenshot_safe_internal)
             and not _param_has_executable_source(param)
         )
+        or (
+            screenshot_editable_input
+            and screenshot_direct_input
+            and param.source_kind == "api_option"
+        )
     )
+    # Category answers who supplies the value; source answers where option
+    # values come from.  An editable select is a caller input even though its
+    # choices still come from a captured API.
+    allow_category = not automated or allow_source or screenshot_user_category
 
     if raw.get("key") and allow_name:
         if str(raw["key"]) != param.key:
@@ -4146,12 +4204,20 @@ def _apply_capability_field_to_param(
         param.source_kind = str(raw["source_kind"])
     if isinstance(raw.get("source"), dict) and allow_source:
         param.source = dict(raw["source"])
-    if "exposed_to_caller" in raw and (not automated or allow_source):
+    if screenshot_direct_input and allow_source and raw.get("source_kind") == "user_input":
+        param.source = {"kind": "user_input", "path": param.path}
+        param.enum_options = None
+        param.enum_value_map = None
+        step.selects = [
+            binding for binding in (step.selects or [])
+            if _strip_body_prefix(binding.path or "") != _strip_body_prefix(param.path or "")
+        ]
+    if "exposed_to_caller" in raw and (not automated or allow_category):
         param.exposed_to_user = bool(raw["exposed_to_caller"])
-    if scope == "input" and (not automated or allow_source):
+    if scope == "input" and allow_category:
         param.category = "user_param"
         param.exposed_to_user = True
-    elif scope == "internal" and (not automated or allow_source):
+    elif scope == "internal" and allow_category:
         param.category = "system_const" if param.source_kind == "constant" else "runtime_var"
         param.exposed_to_user = False
     if not automated:
@@ -4161,7 +4227,8 @@ def _apply_capability_field_to_param(
     param.evidence.append({
         "source": "capability_field_edit", "scope": scope, "actor": normalized_actor,
         "applied_axes": {
-            "name": bool(allow_name), "type": bool(allow_type), "source": bool(allow_source),
+            "name": bool(allow_name), "type": bool(allow_type),
+            "category": bool(allow_category), "source": bool(allow_source),
         },
     })
     for evidence in raw.get("evidence") or []:
@@ -8245,16 +8312,20 @@ def _ensure_capability_explanations(
             return exact
         cap_steps = set(_capability_node_step_ids(capability))
         candidates = [item for item in plan_items if str(item.get("kind") or "") == capability.kind]
-        scored = sorted(
+        scored = [
             (
                 len(cap_steps & {str(value) for value in (item.get("step_ids") or [])}),
                 item,
             )
             for item in candidates
-        )
-        if not scored or scored[-1][0] <= 0:
+        ]
+        if not scored:
             return candidates[0] if len(candidates) == 1 else {}
-        top_score = scored[-1][0]
+        # Plan items contain nested dictionaries and are not orderable. Compare
+        # only the numeric overlap, especially when multiple read abilities tie.
+        top_score = max(score for score, _item in scored)
+        if top_score <= 0:
+            return candidates[0] if len(candidates) == 1 else {}
         top = [item for score, item in scored if score == top_score]
         return top[0] if len(top) == 1 else {}
 
@@ -13154,6 +13225,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
         for param in (step.params or [])
         if not param.locked
         and not _param_has_manual_contract(param)
+        and not _param_has_screenshot_direct_input_contract(param)
         and param.category != "system_const"
         and str(param.value if param.value is not None else "").strip()
     ]
@@ -13306,6 +13378,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             if (
                 param.locked
                 or _param_has_manual_contract(param)
+                or _param_has_screenshot_direct_input_contract(param)
                 or param.source_kind in _OPTION_SOURCE_KINDS
                 or _looks_pagination_field(param.key, param.path)
                 or param.category == "system_const"
