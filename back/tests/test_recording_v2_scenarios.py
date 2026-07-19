@@ -318,7 +318,8 @@ def test_stale_capability_fields_are_removed_from_validation_and_input_schema():
     cap = edited.capabilities[0]
     report = validate_flow_spec(edited)
 
-    assert {field.path for field in cap.fields} == {"reason"}
+    assert {field.path for field in cap.request_fields} == {"reason"}
+    assert "fields" not in cap.model_dump()
     assert set(cap.input_schema["properties"]) == {"原因"}
     assert cap.input_schema["required"] == ["原因"]
     assert all("missing.path" not in message and "stale" not in message for message in report["errors"])

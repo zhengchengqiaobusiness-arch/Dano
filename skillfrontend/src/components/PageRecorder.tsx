@@ -110,7 +110,6 @@ interface FlowCapabilityData {
   name?: string; title?: string; intent?: string; kind?: string; capability_id?: string;
   request_refs?: FlowCapabilityRequestRefData[];
   step_ids?: string[];
-  fields?: FlowCapabilityFieldData[];
   inputs?: FlowCapabilityFieldData[];
   request_fields?: FlowCapabilityFieldData[];
   internal_fields?: FlowCapabilityFieldData[];
@@ -2750,7 +2749,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const capabilities = flowSpec?.capabilities || [];
     const capabilityFields = (cap: FlowCapabilityData) => [
       ...(cap.inputs || []), ...(cap.request_fields || []), ...(cap.internal_fields || []),
-      ...(cap.computed_fields || []), ...(cap.outputs || []), ...(cap.fields || []),
+      ...(cap.computed_fields || []), ...(cap.outputs || []),
     ];
     let sid = target.target_step_id || target.step_id || target.source_step_id;
     const capRef = target.capability_name || target.capability_id || target.capability

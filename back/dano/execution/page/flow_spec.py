@@ -384,7 +384,7 @@ class FlowCapability(BaseModel):
     capability_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:12])
     request_refs: list[CapabilityRequestRef] = Field(default_factory=list)
     step_ids: list[str] = Field(default_factory=list)
-    fields: list[CapabilityField] = Field(default_factory=list)
+
     inputs: list[CapabilityField] = Field(default_factory=list)
     request_fields: list[CapabilityField] = Field(default_factory=list)
     internal_fields: list[CapabilityField] = Field(default_factory=list)
@@ -2850,53 +2850,6 @@ def _capability_output_fields(cap: FlowCapability) -> list[CapabilityField]:
             confirmed=bool(cap.confirmed),
         ))
     return fields
-
-
-
-
-def _capability_field_merge_key(field: CapabilityField) -> tuple[str, str, str, str]:
-    return (
-        field.scope or "",
-        field.step_id or "",
-        _strip_body_prefix(field.path or ""),
-        field.key or field.display_name or field.field_id or "",
-    )
-
-
-def _merge_capability_scoped_fields(
-    derived: list[CapabilityField],
-    existing: list[CapabilityField],
-) -> list[CapabilityField]:
-    """Merge derived fields with user-locked capability scoped edits.
-
-    P2 keeps steps/links as executable truth, but capability scoped fields must not
-    lose user/agent corrections. Locked existing fields override matching derived
-    entries; custom locked fields that no longer match a step remain visible.
-    """
-    out = [item.model_copy(deep=True) for item in derived]
-    by_key = {_capability_field_merge_key(item): idx for idx, item in enumerate(out)}
-    by_id = {item.field_id: idx for idx, item in enumerate(out) if item.field_id}
-    for item in existing or []:
-        if not item.locked:
-            continue
-        copied = item.model_copy(deep=True)
-        idx = by_id.get(copied.field_id)
-        if idx is None:
-            idx = by_key.get(_capability_field_merge_key(copied))
-        if idx is None:
-            out.append(copied)
-            by_key[_capability_field_merge_key(copied)] = len(out) - 1
-            if copied.field_id:
-                by_id[copied.field_id] = len(out) - 1
-        else:
-            # Step params are the executable source of truth. Capability request
-            # fields are derived views, never independently authoritative. Manual
-            # edits are persisted on ParamField, so even an older locked mirror
-            # must be replaced here.
-            out[idx] = copied
-    return out
-
-
 def _capability_dependency_merge_key(dep: CapabilityDependency) -> tuple[str, str, str, str]:
     source = dep.source or {}
     target = dep.target or {}
@@ -3025,24 +2978,12 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
         inputs: dict[str, CapabilityField] = {}
         request_fields: list[CapabilityField] = []
         internal_fields: list[CapabilityField] = []
-        old_all_fields = list(cap.fields or [])
-        old_inputs = list(cap.inputs or [])
-        old_request_fields = list(cap.request_fields or [])
-        old_internal_fields = list(cap.internal_fields or [])
-        old_computed_fields = list(cap.computed_fields or [])
-        old_outputs = list(cap.outputs or [])
+        capability_computed_fields = [
+            item.model_copy(deep=True)
+            for item in (cap.computed_fields or [])
+            if not item.step_id
+        ]
         old_dependencies = list(cap.dependencies or [])
-        for old_field in old_all_fields:
-            if old_field.scope == "input":
-                old_inputs.append(old_field)
-            elif old_field.scope == "request_field":
-                old_request_fields.append(old_field)
-            elif old_field.scope == "internal":
-                old_internal_fields.append(old_field)
-            elif old_field.scope == "output":
-                old_outputs.append(old_field)
-            else:
-                old_computed_fields.append(old_field)
         request_id_by_step = {ref.step_id: ref.request_id for ref in cap.request_refs}
         for st in step_objs:
             request_id = request_id_by_step.get(st.step_id, "")
@@ -3056,13 +2997,8 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
         # steps/params 是请求字段的唯一真相；能力自身的聚合输入（例如批量 entries）
         # 可以独立存在。任何绑定到 step_id 的能力字段都是派生镜像，不能回写或
         # 覆盖 ParamField，即使旧镜像曾被 locked/confirmed。
-        valid_old_inputs = [
-            item for item in old_inputs
-            if not item.step_id
-            and _schema_path_exists(cap.input_schema, item.path, item.key)
-        ]
         if _capability_is_batch(spec, cap):
-            cap.inputs = _capability_inputs_from_top_level_schema(cap.input_schema, valid_old_inputs)
+            cap.inputs = _capability_inputs_from_top_level_schema(cap.input_schema)
             nested_item_names = set(
                 (((cap.input_schema or {}).get("properties") or {}).get("entries") or {}).get("items", {}).get("properties", {})
             )
@@ -3070,10 +3006,19 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
                 if field.step_id and field.key in nested_item_names:
                     field.exposed_to_caller = False
         else:
-            cap.inputs = _merge_capability_scoped_fields(list(inputs.values()), valid_old_inputs)
+            cap.inputs = list(inputs.values())
+            existing_names = {field.key or field.path for field in cap.inputs}
+            for field in _capability_inputs_from_top_level_schema(cap.input_schema):
+                raw_schema = ((cap.input_schema or {}).get("properties") or {}).get(field.key or field.path)
+                if (
+                    isinstance(raw_schema, dict)
+                    and raw_schema.get("x-dano-capability-owned") is True
+                    and (field.key or field.path) not in existing_names
+                ):
+                    cap.inputs.append(field)
         cap.request_fields = request_fields
         cap.internal_fields = internal_fields
-        cap.computed_fields = [item.model_copy(deep=True) for item in old_computed_fields]
+        cap.computed_fields = capability_computed_fields
         derived_dependencies = [
             _capability_dependency_from_link(link)
             for link in spec.links
@@ -3101,25 +3046,7 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
             derived_dependencies, valid_old_dependencies,
         )
         derived_outputs = _capability_output_fields(cap)
-        valid_old_outputs = [
-            item for item in old_outputs
-            if _schema_path_exists(cap.output_schema, item.path, item.key)
-            and (
-                not item.step_id
-                or (
-                item.step_id in cap_step_ids
-                and _capability_response_path_exists(by_step.get(item.step_id), item.path or item.key)
-                )
-            )
-        ]
-        cap.outputs = _merge_capability_scoped_fields(derived_outputs, valid_old_outputs)
-        cap.fields = [
-            *(cap.inputs or []),
-            *(cap.request_fields or []),
-            *(cap.internal_fields or []),
-            *(cap.computed_fields or []),
-            *(cap.outputs or []),
-        ]
+        cap.outputs = derived_outputs
     for fact in spec.request_facts.requests or []:
         request_id = fact.request_id or ""
         if not request_id:
@@ -5750,17 +5677,37 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
                 # rebuild.
                 annotations = {
                     key: value for key, value in previous.items()
-                    if key in {"title", "description", "examples", "deprecated"}
+                    if key in {
+                        "title", "description", "examples", "deprecated",
+                        "x-dano-capability-owned", "x-dano-operator-owned",
+                    }
                     and key not in field_schema
                 }
                 props[name] = {**annotations, **field_schema}
             else:
                 props[name] = field_schema
+        for name, field_schema in current_props.items():
+            if (
+                name not in props
+                and isinstance(field_schema, dict)
+                and field_schema.get("x-dano-capability-owned") is True
+                and field_schema.get("x-dano-operator-owned") is True
+            ):
+                props[name] = dict(field_schema)
         merged["properties"] = props
         required = [
             str(name) for name in (derived.get("required") or [])
             if str(name) in props
         ]
+        for name in current.get("required") or []:
+            previous = current_props.get(str(name))
+            if (
+                str(name) in props
+                and isinstance(previous, dict)
+                and previous.get("x-dano-capability-owned") is True
+                and str(name) not in required
+            ):
+                required.append(str(name))
         merged["required"] = list(dict.fromkeys(required))
         return merged
 
@@ -6037,6 +5984,14 @@ def _capability_has_explicit_batch_intent(cap: FlowCapability) -> bool:
         for node in _iter_capability_nodes(cap.nodes or [])
     )
     if has_entries_loop and (cap.updated_by == "user" or cap.locked):
+        return True
+    schema_properties = dict((cap.input_schema or {}).get("properties") or {})
+    if any(
+        isinstance(schema_properties.get(name), dict)
+        and schema_properties[name].get("x-dano-capability-owned") is True
+        and schema_properties[name].get("x-dano-operator-owned") is True
+        for name in ("entries", "items")
+    ):
         return True
     if any(
         (field.key or field.path) in {"entries", "items"}
@@ -7292,7 +7247,7 @@ def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
                 "fields": [
                     _capability_field_summary(field)
                     for field in [
-                        *(cap.fields or []),
+
                         *(cap.inputs or []),
                         *(cap.request_fields or []),
                         *(cap.internal_fields or []),
@@ -8951,7 +8906,16 @@ def _capability_contract_view(
             "mapping": [dict(m) for m in (cap.output_mapping or []) if isinstance(m, dict)],
         },
         "fields": {
-            "all": [_capability_field_summary(f) for f in (cap.fields or [])],
+            "all": [
+                _capability_field_summary(f)
+                for f in [
+                    *(cap.inputs or []),
+                    *(cap.request_fields or []),
+                    *(cap.internal_fields or []),
+                    *(cap.computed_fields or []),
+                    *(cap.outputs or []),
+                ]
+            ],
             "request": [_capability_field_summary(f) for f in (cap.request_fields or [])],
             "internal": [_capability_field_summary(f) for f in (cap.internal_fields or [])],
             "computed": [_capability_field_summary(f) for f in (cap.computed_fields or [])],
@@ -10083,8 +10047,7 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
             *(cap.computed_fields or []),
             *(cap.outputs or []),
         ]
-        if not canonical_fields:  # 仅兼容尚未迁移的旧资产
-            canonical_fields = list(cap.fields or [])
+
         seen_field_entries: set[tuple[str, str, str, str]] = set()
         for field in canonical_fields:
             field_key = (field.field_id, field.scope, field.step_id, field.path or field.key)
@@ -13834,7 +13797,7 @@ def _transition_capability_kind(spec: FlowSpec, cap: FlowCapability, value: Any)
             "to": new_kind,
         })
         cap.input_schema = _batch_capability_input_schema(cap_steps)
-        cap.inputs = _capability_inputs_from_top_level_schema(cap.input_schema, cap.inputs)
+        cap.inputs = _capability_inputs_from_top_level_schema(cap.input_schema)
         cap.nodes = _default_capability_nodes(cap_steps, kind="submit_batch", force_batch=True)
         cap.output_schema = {
             "type": "object",
@@ -14038,52 +14001,73 @@ def _set_capability_return(cap: FlowCapability, mapping: list[dict[str, Any]]) -
     cap.updated_by = "repair"
 
 
-def _capability_bucket_for_scope(cap: FlowCapability, scope: str) -> list[CapabilityField]:
-    if scope == "input":
-        return cap.inputs
-    if scope == "request_field":
-        return cap.request_fields
-    if scope == "internal":
-        return cap.internal_fields
-    if scope == "computed":
-        return cap.computed_fields
-    if scope == "output":
-        return cap.outputs
-    return cap.fields
+def _capability_schema_field(field: CapabilityField) -> dict[str, Any]:
+    schema = _schema_for_param_type(field.type or "string")
+    schema["x-dano-capability-owned"] = True
+    schema["x-dano-operator-owned"] = bool(field.locked)
+    if field.enum_options:
+        schema["enum"] = list(field.enum_options)
+    if field.enum_value_map:
+        schema["x-enum-value-map"] = dict(field.enum_value_map)
+    if field.display_name:
+        schema["title"] = field.display_name
+    return schema
 
 
-def _field_match(a: CapabilityField, b: CapabilityField) -> bool:
+def _same_capability_computed_field(a: CapabilityField, b: CapabilityField) -> bool:
+    """Match the only capability fields that remain authoritative at this level."""
     if a.field_id and b.field_id and a.field_id == b.field_id:
         return True
-    if a.scope != b.scope:
+    if a.step_id or b.step_id:
         return False
-    if a.step_id and b.step_id and a.step_id == b.step_id:
-        if _strip_body_prefix(a.path or a.key) == _strip_body_prefix(b.path or b.key):
-            return True
-    if not a.step_id and not b.step_id and (a.key or a.path) and (b.key or b.path):
-        return (a.key or a.path) == (b.key or b.path)
-    return False
+    a_name = str(a.key or a.path or "").strip()
+    b_name = str(b.key or b.path or "").strip()
+    return bool(a_name and b_name and a_name == b_name)
 
 
-def _upsert_capability_field(cap: FlowCapability, data: dict[str, Any], *, default_scope: str) -> CapabilityField:
+def _upsert_capability_field(
+    cap: FlowCapability, data: dict[str, Any], *, default_scope: str,
+) -> CapabilityField:
     raw = dict(data or {})
     raw.setdefault("scope", default_scope)
     raw.setdefault("locked", True)
     raw.setdefault("confirmed", True)
     field = CapabilityField.model_validate(raw)
-    bucket = _capability_bucket_for_scope(cap, field.scope)
-    for idx, existing in enumerate(bucket):
-        if not _field_match(existing, field):
+    name = str(field.key or field.path or field.display_name or "").strip()
+    if field.scope in {"input", "output"} and not field.step_id:
+        if not name:
+            raise ValueError(f"capability {field.scope} field requires a name")
+        schema_name = "input_schema" if field.scope == "input" else "output_schema"
+        schema = dict(getattr(cap, schema_name) or {})
+        schema.setdefault("type", "object")
+        properties = dict(schema.get("properties") or {})
+        properties[name] = _capability_schema_field(field)
+        schema["properties"] = properties
+        required = [str(value) for value in (schema.get("required") or []) if str(value) in properties]
+        if field.required and name not in required:
+            required.append(name)
+        elif not field.required:
+            required = [value for value in required if value != name]
+        schema["required"] = required
+        setattr(cap, schema_name, schema)
+        cap.updated_by = "repair"
+        return field
+    if field.scope != "computed" or field.step_id:
+        raise ValueError(
+            "request/internal fields require a canonical FlowStep ParamField; "
+            "only capability-level computed fields may be persisted"
+        )
+    for index, existing in enumerate(cap.computed_fields or []):
+        if not _same_capability_computed_field(existing, field):
             continue
         merged = existing.model_dump()
         merged.update(field.model_dump(exclude_unset=True))
-        bucket[idx] = CapabilityField.model_validate(merged)
+        cap.computed_fields[index] = CapabilityField.model_validate(merged)
         cap.updated_by = "repair"
-        return bucket[idx]
-    bucket.append(field)
+        return cap.computed_fields[index]
+    cap.computed_fields.append(field)
     cap.updated_by = "repair"
     return field
-
 
 def _upsert_capability_dependency(cap: FlowCapability, data: dict[str, Any]) -> CapabilityDependency:
     dep = CapabilityDependency.model_validate(dict(data or {}))
@@ -14575,7 +14559,10 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             field = str(edit.get("field") or "")
             if field not in _CAPABILITY_ALLOWED_FIELDS:
                 raise ValueError(f"unknown capability field: {field}")
-            if field in {"step_ids", "request_refs"}:
+            if field in {
+                "step_ids", "request_refs", "fields", "inputs",
+                "request_fields", "internal_fields", "outputs",
+            }:
                 raise ValueError(f"derived capability field is read-only: {field}")
             value = edit.get("value")
             cap = new_spec.capabilities[idx]
@@ -14589,23 +14576,12 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 value = bool(value)
             if field == "confidence":
                 value = max(0.0, min(1.0, float(value or 0)))
-            if field == "request_refs":
-                value = [CapabilityRequestRef.model_validate(x) for x in (value or [])]
-            if field in {"fields", "inputs", "request_fields", "internal_fields", "computed_fields", "outputs"}:
+            if field == "computed_fields":
                 value = [CapabilityField.model_validate(x) for x in (value or [])]
-                scope_by_field = {
-                    "inputs": "input", "request_fields": "request_field",
-                    "internal_fields": "internal", "computed_fields": "computed",
-                    "outputs": "output",
-                }
-                routed: list[CapabilityField] = []
-                for item in value:
-                    scope = scope_by_field.get(field, item.scope or "request_field")
-                    if not _apply_capability_field_to_param(
-                        new_spec, item.model_dump(), scope=scope, actor=actor,
-                    ):
-                        routed.append(item)
-                value = routed
+                if any(item.step_id or item.scope != "computed" for item in value):
+                    raise ValueError(
+                        "computed_fields only accepts capability-level computed values"
+                    )
             if field == "dependencies":
                 value = [CapabilityDependency.model_validate(x) for x in (value or [])]
             if field == "confirmed" and value:
@@ -15479,6 +15455,11 @@ def apply_client_flow_patch(
                 "step_ids" in raw_capability or "request_refs" in raw_capability
             ):
                 raise ValueError("client capability membership must be expressed through nodes")
+            derived_fields = {
+                "fields", "inputs", "request_fields", "internal_fields", "outputs",
+            }
+            if isinstance(raw_capability, dict) and derived_fields.intersection(raw_capability):
+                raise ValueError("client capability field projections are read-only")
         if op == "update" and not edit.get("param_path"):
             field = str(edit.get("field") or "")
             if field in _CLIENT_SERVER_OWNED_STEP_FIELDS or field == "selects":
@@ -15654,7 +15635,10 @@ def flow_spec_canonical_summary(spec: FlowSpec) -> dict[str, Any]:
                 ],
                 "input_keys": sorted(((cap.input_schema or {}).get("properties") or {}).keys()),
                 "output_keys": sorted(((cap.output_schema or {}).get("properties") or {}).keys()),
-                "field_count": len(cap.fields or []),
+                "field_count": sum(len(items or []) for items in (
+                    cap.inputs, cap.request_fields, cap.internal_fields,
+                    cap.computed_fields, cap.outputs,
+                )),
                 "dependency_count": len(cap.dependencies or []),
                 "node_types": [str(n.get("type") or "") for n in _iter_capability_nodes(cap.nodes or [])],
                 "confirmed": bool(cap.confirmed),

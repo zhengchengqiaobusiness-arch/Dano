@@ -1794,10 +1794,9 @@ def test_valid_locked_capability_fields_and_dependencies_survive():
 
     edited = apply_flow_edits(spec, [
         {
-            "op": "update_capability",
+            "op": "upsert_request_field",
             "capability_name": "submit_batch",
-            "field": "request_fields",
-            "value": scoped_fields,
+            "field": scoped_fields[0],
         },
         {
             "op": "update_capability",
