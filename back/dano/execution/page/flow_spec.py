@@ -11703,8 +11703,6 @@ def compile_capability_to_api_request(
     capability_id: str | None = None,
     capability_name: str | None = None,
 ) -> tuple[dict | None, list[str]]:
-    if capability is None and not capability_id and not capability_name:
-        return flow_spec_to_api_request(spec)
     try:
         view = capability_to_flow_spec_view(
             spec,

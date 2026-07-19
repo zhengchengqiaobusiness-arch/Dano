@@ -325,6 +325,152 @@ class _Store:
         return None
 
 
+def _recording_orchestrator(skill: SkillSpec, api_request: dict | None = None) -> Orchestrator:
+    asset_id = uuid4()
+    skill.recording_asset_id = asset_id
+    body = {"api_request": api_request} if api_request is not None else {}
+    return Orchestrator(
+        registry=SkillRegistry([skill]),
+        store=_Store(asset_id, body),
+        harness=object(),
+        action_executor=object(),
+    )
+
+
+def _recording_api_request(skill: SkillSpec) -> dict:
+    return {
+        "steps": [{
+            "step_id": "query",
+            "method": "GET",
+            "url": "http://x/api/status",
+            "path": "/api/status",
+        }],
+        "capabilities": list(skill.capabilities),
+    }
+
+
+def test_orchestrator_has_no_whole_recording_asset_executor():
+    assert not hasattr(Orchestrator, "_run_recording")
+
+async def test_orchestrator_zero_capability_recording_skill_returns_gap():
+    skill = _skill()
+    skill.capabilities = []
+    orch = _recording_orchestrator(skill)
+
+    out = await orch.invoke_skill(Subsystem.OA, "submit_form", {}, tenant="t")
+
+    assert out.state == TaskState.CAPABILITY_GAP
+    assert out.audit["capability_count"] == 0
+    assert "capability" in out.message.lower()
+
+
+async def test_orchestrator_auto_selects_single_recording_capability():
+    skill = _skill()
+    skill.capabilities = [skill.capabilities[0]]
+    skill.required_fields = ["legacy_whole_skill_field"]
+    orch = _recording_orchestrator(skill, _recording_api_request(skill))
+
+    out = await orch.invoke_skill(
+        Subsystem.OA,
+        "submit_form",
+        {"month": "2026-05", "__dry_run": True},
+        tenant="t",
+    )
+
+    assert out.state == TaskState.COMPLETED
+    assert out.audit["capability"] == "query_status"
+    assert out.audit["api"]["dry_run"] is True
+
+
+async def test_orchestrator_single_capability_explicit_and_implicit_results_match():
+    skill = _skill()
+    skill.capabilities = [skill.capabilities[0]]
+    skill.required_fields = ["legacy_whole_skill_field"]
+    orch = _recording_orchestrator(skill, _recording_api_request(skill))
+    common = {"month": "2026-05", "__dry_run": True}
+
+    implicit = await orch.invoke_skill(Subsystem.OA, "submit_form", common, tenant="t")
+    explicit = await orch.invoke_skill(
+        Subsystem.OA,
+        "submit_form",
+        {**common, "__capability": "query_status"},
+        tenant="t",
+    )
+
+    assert implicit.state == explicit.state == TaskState.COMPLETED
+    assert implicit.audit == explicit.audit
+    assert implicit.exec_result.structured_output == explicit.exec_result.structured_output
+
+
+async def test_orchestrator_unknown_recording_capability_is_explicit_error():
+    skill = _skill()
+    skill.capabilities = [skill.capabilities[0]]
+    orch = _recording_orchestrator(skill, _recording_api_request(skill))
+
+    out = await orch.invoke_skill(
+        Subsystem.OA,
+        "submit_form",
+        {"__capability": "missing_capability", "__dry_run": True},
+        tenant="t",
+    )
+
+    assert out.state == TaskState.CAPABILITY_GAP
+    assert out.audit["api"]["stage"] == "capability_not_found"
+    assert "Unknown capability: missing_capability" in out.message
+
+
+async def test_orchestrator_single_capability_keeps_input_and_confirmation_validation():
+    query_skill = _skill()
+    query_skill.capabilities = [query_skill.capabilities[0]]
+    query_orch = _recording_orchestrator(query_skill, _recording_api_request(query_skill))
+
+    missing = await query_orch.invoke_skill(
+        Subsystem.OA, "submit_form", {"__dry_run": True}, tenant="t",
+    )
+
+    assert missing.state == TaskState.NEEDS_INPUT
+    assert missing.audit["api"]["stage"] == "missing_input"
+    assert missing.audit["api"]["missing"] == ["month"]
+
+    submit_skill = _skill()
+    submit_skill.capabilities = [submit_skill.capabilities[1]]
+    submit_orch = _recording_orchestrator(submit_skill, _recording_api_request(submit_skill))
+    fields = {"entries": [{}], "__dry_run": True}
+
+    blocked = await submit_orch.invoke_skill(Subsystem.OA, "submit_form", fields, tenant="t")
+    allowed = await submit_orch.invoke_skill(
+        Subsystem.OA, "submit_form", fields, tenant="t", confirm=True,
+    )
+
+    assert blocked.state == TaskState.CANCELLED
+    assert blocked.audit["api"]["stage"] == "confirmation_required"
+    assert allowed.state == TaskState.COMPLETED
+
+
+async def test_orchestrator_single_capability_keeps_output_validation(monkeypatch):
+    async def fake_execute_api(*_args, **_kwargs):
+        return {"ok": True, "response": {"count": "one"}}
+
+    monkeypatch.setattr("dano.orchestrator.capability_runtime.execute_api", fake_execute_api)
+    skill = _skill()
+    skill.capabilities = [{
+        **skill.capabilities[0],
+        "input_schema": {"type": "object", "properties": {}},
+        "output_schema": {
+            "type": "object",
+            "properties": {"count": {"type": "integer"}},
+            "required": ["count"],
+        },
+    }]
+    orch = _recording_orchestrator(skill, _recording_api_request(skill))
+
+    out = await orch.invoke_skill(Subsystem.OA, "submit_form", {}, tenant="t")
+
+    assert out.state == TaskState.FAILED
+    assert out.audit["api"]["stage"] == "invalid_output"
+    assert "output.count" in out.message
+
+
 async def test_orchestrator_capability_invoke_bypasses_whole_skill_required_fields():
     asset_id = uuid4()
     skill = _skill()

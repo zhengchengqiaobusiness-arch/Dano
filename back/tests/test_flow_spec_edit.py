@@ -4267,6 +4267,13 @@ def _report_text(report):
     return "\n".join(str(x) for x in chunks)
 
 
+def test_compile_capability_requires_explicit_capability_selection():
+    api_request, errors = compile_capability_to_api_request(_two_capability_compile_spec())
+
+    assert api_request is None
+    assert errors and "capability" in errors[0]
+
+
 def test_flow_spec_to_api_request_can_compile_single_capability_without_changing_full_export():
     spec = _two_capability_compile_spec()
 

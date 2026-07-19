@@ -246,32 +246,58 @@ class Orchestrator:
         if decision.action == GateAction.REJECT:
             return TaskOutcome(task_id=task_id, state=TaskState.REJECTED, skill_id=skill.skill_id,
                                message=decision.reason)
-        if not capability and len(skill.capabilities or []) > 1:
-            candidates = list(dict.fromkeys(
-                str(c.get("name") or c.get("capability_id") or c.get("kind") or "").strip()
-                for c in skill.capabilities if isinstance(c, dict)
-            ))
-            candidates = [name for name in candidates if name]
-            return TaskOutcome(
-                task_id=task_id,
-                state=TaskState.NEEDS_SELECT,
-                skill_id=skill.skill_id,
-                message="该 Skill 包含多个独立能力，必须显式指定 capability",
-                audit={"capability_required": True, "candidates": candidates},
-            )
-        if capability:
-            if skill.has_api or skill.is_workflow:
+        is_recording_skill = not skill.has_api and not skill.is_workflow
+        if is_recording_skill:
+            capabilities = [item for item in (skill.capabilities or []) if isinstance(item, dict)]
+            if not capabilities:
                 return TaskOutcome(
                     task_id=task_id,
                     state=TaskState.CAPABILITY_GAP,
                     skill_id=skill.skill_id,
-                    message="该 Skill 暂不支持按 capability 分能力调用",
-                    audit={"capability": capability, "integration": "workflow" if skill.is_workflow else "api"},
+                    message="录制型 Skill 没有可调用 capability",
+                    audit={"capability_count": 0},
                 )
+            if not capability:
+                if len(capabilities) > 1:
+                    candidates = list(dict.fromkeys(
+                        str(item.get("name") or item.get("capability_id") or item.get("kind") or "").strip()
+                        for item in capabilities
+                    ))
+                    candidates = [name for name in candidates if name]
+                    return TaskOutcome(
+                        task_id=task_id,
+                        state=TaskState.NEEDS_SELECT,
+                        skill_id=skill.skill_id,
+                        message="该 Skill 包含多个独立能力，必须显式指定 capability",
+                        audit={"capability_required": True, "candidates": candidates},
+                    )
+                selected = capabilities[0]
+                capability = str(
+                    selected.get("name")
+                    or selected.get("capability_id")
+                    or selected.get("kind")
+                    or ""
+                ).strip()
+                if not capability:
+                    return TaskOutcome(
+                        task_id=task_id,
+                        state=TaskState.CAPABILITY_GAP,
+                        skill_id=skill.skill_id,
+                        message="录制型 Skill 的唯一 capability 缺少可调用标识",
+                        audit={"capability_count": 1},
+                    )
             return await self._run_recording_capability(
                 task_id, skill, capability, intent, confirm=confirm, tenant=tenant
             )
 
+        if capability:
+            return TaskOutcome(
+                task_id=task_id,
+                state=TaskState.CAPABILITY_GAP,
+                skill_id=skill.skill_id,
+                message="该 Skill 暂不支持按 capability 分能力调用",
+                audit={"capability": capability, "integration": "workflow" if skill.is_workflow else "api"},
+            )
         missing = [k for k in skill.required_fields if k not in fields]
         if missing:
             return TaskOutcome(task_id=task_id, state=TaskState.NEEDS_INPUT, skill_id=skill.skill_id,
@@ -284,9 +310,7 @@ class Orchestrator:
 
         if skill.is_workflow:
             return await self._run_workflow(task_id, tenant, skill, intent)
-        if skill.has_api:
-            return await self._run_api(task_id, tenant, skill, intent, confirm=confirm_fn)
-        return await self._run_recording(task_id, skill, intent, confirm=confirm_fn, tenant=tenant)
+        return await self._run_api(task_id, tenant, skill, intent, confirm=confirm_fn)
 
     async def _run_workflow(self, task_id, tenant, skill, intent) -> TaskOutcome:  # noqa: ANN001
         """复合流程 Skill(DSL v2):前置不变量 → 解释器执行 steps(call/compute/branch/foreach/select)
@@ -654,52 +678,3 @@ class Orchestrator:
         if capability:
             result["capability"] = capability
         return result
-
-    async def _run_recording(self, task_id, skill, intent, *, confirm, tenant="") -> TaskOutcome:  # noqa: ANN001
-        """录制 V2 能力执行。api_request 直接发请求,不开浏览器。"""
-        env = await self.store.get(skill.recording_asset_id)
-        assert env is not None, "页面脚本资产不存在"
-
-        # 带登录态直接发 SPA 内部接口(参数填回 body_template)。已过 L3 确认闸门。
-        if (env.body or {}).get("api_request"):
-            import json as _json
-
-            from dano.execution.page.request_capture import execute_api   # 单请求或多步工作流(Q3)自动分派
-            from dano.execution.page.sessions import session_path_if_exists
-            from dano.infra.http import tls_verify
-            scope = Scope(tenant=tenant, subsystem=skill.subsystem)
-            ep = await self.store.get_published(AssetType.ENV_PROFILE, scope, asset_key="env_profile")
-            base_url = ((ep.body.get("base_url") if ep else "") or "")
-            storage = None
-            sp = session_path_if_exists(tenant, skill.subsystem.value)
-            if sp:
-                try:
-                    storage = _json.loads(open(sp, encoding="utf-8").read())
-                except Exception:  # noqa: BLE001
-                    pass
-            # 运行期真鉴权:用 token_store(PG)里最新存的鉴权头覆盖**焊进资产的旧 token**(录制那刻的会过期)。
-            # token 过期时前端 PUT /settings/token 换一份即可恢复,无需重录整条流程(治本 401)。
-            from dano.infra.token_store import get_token_headers, merge_auth_headers
-            api_request = env.body["api_request"]
-            override = await get_token_headers(tenant, skill.subsystem.value)
-            if override:
-                api_request = merge_auth_headers(api_request, override)
-            out = await execute_api(api_request, dict(intent.fields),
-                                    base_url=base_url, storage_state=storage,
-                                    send=True, verify=tls_verify())
-            ok = bool(out.get("ok"))
-            er = ExecResult(task_id=task_id, outcome=Outcome.PASSED if ok else Outcome.FAILED,
-                            evidence=Evidence(request_body=dict(intent.fields),
-                                              response_body=out.get("response")),
-                            structured_output=out)
-            # 不信 HTTP 200:业务码失败(out.business_ok=False)也判 FAILED,把业务原因带出来
-            fail_reason = out.get("detail") or out.get("response")
-            return TaskOutcome(
-                task_id=task_id, state=TaskState.COMPLETED if ok else TaskState.FAILED,
-                skill_id=skill.skill_id, exec_result=er,
-                message=(f"已提交(HTTP {out.get('status')})" if ok
-                         else f"提交未生效(HTTP {out.get('status')}):{fail_reason}"),
-                audit={"api": out})
-
-        return TaskOutcome(task_id=task_id, state=TaskState.TRANSFER_HUMAN,
-                           skill_id=skill.skill_id, message="录制资产缺少 api_request,无法执行")
