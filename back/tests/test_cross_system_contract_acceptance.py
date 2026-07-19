@@ -188,7 +188,7 @@ def test_recording_pipeline_cleanup_baseline_is_stable():
     }
     assert baseline == {
         "request_facts": "7e3aae17cac77555",
-        "client_projection": "fbe6386c36aa6bb5",
+        "client_projection": "865aa6c23f2aa4fd",
         "release_payload": "7ab056ef62b2c10a",
         "compiled_api_request": "2009520e9a2c7873",
         "runtime_result": "5424aae2ef90d33f",

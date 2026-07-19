@@ -12747,11 +12747,11 @@ def _client_response_projection(value: Any) -> tuple[Any, dict[str, Any]]:
 
 
 def flow_spec_to_client(spec: FlowSpec) -> dict:
-    """给前端展示的 FlowSpec：保留可编辑请求事实，只隐藏鉴权信息。
+    """Return the bounded, redacted projection used by the recording workbench.
 
-    ``body_source`` 是步骤请求体的唯一事实源，不能在客户端投影中清空；否则客户端
-    回传当前 FlowSpec 时会把有效 POST 降级成无请求体步骤。请求体字段本来就在字段
-    工作台中可见，真正需要隐藏的是认证头、身份值和响应中的敏感字段。
+    The browser never returns this projection as an authoritative FlowSpec, so
+    raw request bodies, transport headers, identities and full responses can
+    remain exclusively on the server.
     """
     client_spec = sync_flow_spec_models(spec.model_copy(deep=True))
     _normalize_capability_references(client_spec)
@@ -12770,6 +12770,8 @@ def flow_spec_to_client(spec: FlowSpec) -> dict:
             req["response_projection"] = projection
     for st in data.get("steps") or []:
         st["headers"] = {k: "***" for k in (st.get("headers") or {})}
+        st["body_source"] = ""
+        st["backup_body_source"] = ""
         if st.get("response_json") is not None:
             projected, projection = _client_response_projection(st.get("response_json"))
             st["response_json"] = _client_redact_sensitive(projected)
@@ -15315,6 +15317,114 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
         actor="user",
     )
 
+
+class FlowSpecConflictError(ValueError):
+    """The client attempted to patch a superseded authoritative draft."""
+
+    def __init__(self, expected_fingerprint: str, current_fingerprint: str) -> None:
+        super().__init__("flow_spec fingerprint conflict")
+        self.expected_fingerprint = expected_fingerprint
+        self.current_fingerprint = current_fingerprint
+
+
+_CLIENT_SERVER_OWNED_STEP_FIELDS = frozenset({
+    "headers", "body_source", "backup_body_source", "response_json", "response_projection",
+    "identity", "params", "sample_inputs", "source_meta", "url", "path", "method", "content_type",
+})
+_CLIENT_SELECT_EDIT_FIELDS = frozenset({
+    "param", "path", "source_url", "value_key", "label_key", "category_key", "category_value",
+    "multi", "element_template", "label_subkey", "count", "options", "option_map", "enum_source",
+    "enum_confirmed", "id_path", "id_tokens", "field_projections",
+})
+
+
+def _client_select_patch(spec: FlowSpec, edit: dict[str, Any]) -> dict[str, Any]:
+    """Convert one select-binding patch into a safe step edit.
+
+    Transport facts (headers/body/content type/request identity) never come from
+    the browser. Existing values remain server-owned; a changed source is
+    rehydrated from RequestFacts.
+    """
+    step_id = str(edit.get("step_id") or "")
+    if not step_id:
+        raise ValueError("upsert_select missing step_id")
+    raw = edit.get("binding")
+    if not isinstance(raw, dict):
+        raise ValueError("upsert_select missing binding object")
+    step = _find_step(spec, step_id)
+    path = str(raw.get("path") or "")
+    param = str(raw.get("param") or "")
+    if not path and not param:
+        raise ValueError("upsert_select requires path or param")
+    index = next((
+        idx for idx, current in enumerate(step.selects)
+        if (path and _strip_body_prefix(current.path or current.id_path or "") == _strip_body_prefix(path))
+        or (param and current.param == param)
+    ), -1)
+    existing = step.selects[index] if index >= 0 else None
+    source_changed = bool(
+        "source_url" in raw
+        and str(raw.get("source_url") or "") != str(existing.source_url if existing else "")
+    )
+    merged = existing.model_dump() if existing is not None and not source_changed else {}
+    for field in _CLIENT_SELECT_EDIT_FIELDS:
+        if field in raw:
+            merged[field] = raw[field]
+    binding = SelectBinding.model_validate(merged)
+    if existing is None or source_changed:
+        _hydrate_select_source_contract(spec, binding)
+    next_selects = list(step.selects)
+    if index >= 0:
+        next_selects[index] = binding
+    else:
+        next_selects.append(binding)
+    return {
+        "op": "update",
+        "step_id": step_id,
+        "field": "selects",
+        "value": [item.model_dump() for item in next_selects],
+    }
+
+
+def apply_client_flow_patch(
+    spec: FlowSpec,
+    edits: list[dict[str, Any]],
+    *,
+    expected_fingerprint: str,
+) -> FlowSpec:
+    """Apply a browser patch without accepting a client-owned FlowSpec.
+
+    The fingerprint gates concurrent edits. RequestFacts and sensitive step
+    transport evidence remain authoritative on the server.
+    """
+    expected = str(expected_fingerprint or "")
+    current = flow_spec_fingerprint(spec)
+    if not expected:
+        raise ValueError("expected_fingerprint is required")
+    if expected != current:
+        raise FlowSpecConflictError(expected, current)
+    if not isinstance(edits, list) or not edits:
+        raise ValueError("flow patch requires a non-empty edits list")
+    if len(edits) > 200:
+        raise ValueError("flow patch contains too many edits")
+
+    safe_edits: list[dict[str, Any]] = []
+    for raw_edit in edits:
+        if not isinstance(raw_edit, dict):
+            raise ValueError("flow patch edits must be objects")
+        edit = dict(raw_edit)
+        op = str(edit.get("op") or "")
+        if op == "update_flow" and str(edit.get("field") or "") == "meta":
+            raise ValueError("server-owned flow field: meta")
+        if op == "update" and not edit.get("param_path"):
+            field = str(edit.get("field") or "")
+            if field in _CLIENT_SERVER_OWNED_STEP_FIELDS or field == "selects":
+                raise ValueError(f"server-owned step field: {field}")
+        if op == "upsert_select":
+            safe_edits.append(_client_select_patch(spec, edit))
+        else:
+            safe_edits.append(edit)
+    return apply_flow_edits(spec, safe_edits)
 
 def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, Any]:
     request_facts = _request_fact_items(spec)

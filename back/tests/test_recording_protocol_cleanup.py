@@ -45,8 +45,8 @@ def test_frontend_uses_only_flow_spec_workbench_protocol() -> None:
     assert "operation_id: operationId" in publish_source
     assert "title: publishTitle" in publish_source
     assert "expected_fingerprint:" in publish_source
-    # Removing the full client FlowSpec belongs to P5's server-authoritative patch protocol.
-    assert "flow_spec: currentSpec" in publish_source
+    # P5 makes the server draft authoritative; publish sends only its fingerprint.
+    assert "flow_spec: currentSpec" not in publish_source
 
     finalize_start = source.index("function finalize()")
     finalize_end = source.index("function badAction", finalize_start)

@@ -68,6 +68,7 @@ _MAX_RECENT_RECORDING_ACTIONS = 4096
 # returned outside that recording connection.
 _RECORDING_RESUME_STATES: dict[tuple[str, str, str], dict] = {}
 _MAX_RECORDING_RESUME_STATES = 128
+RECORDING_FLOW_PROTOCOL_VERSION = 2
 
 _ANALYSIS_SCREENSHOT_MAX_COUNT = 4
 _ANALYSIS_SCREENSHOT_MAX_BYTES = 2 * 1024 * 1024
@@ -898,6 +899,16 @@ def _frontend_recording_field_metadata(raw_steps: list[dict]) -> tuple[dict, set
 
 
 # ── 方式B:网页内录制(WebSocket:截屏流出 + 输入回传入 + 实时步骤 + 录完发布)──
+def _recording_flow_projection(spec) -> dict:  # noqa: ANN001
+    """Return the only FlowSpec representation allowed onto the browser transport."""
+    from dano.execution.page.flow_spec import flow_spec_to_client, validate_flow_spec
+
+    return {
+        "protocol_version": RECORDING_FLOW_PROTOCOL_VERSION,
+        "flow_spec": flow_spec_to_client(spec),
+        "check_report": validate_flow_spec(spec),
+    }
+
 @app.websocket("/onboarding/page/record")
 async def record_ws(ws: WebSocket) -> None:
     """客户在网页里操作我们托管的浏览器,免安装/免命令行。协议见前端 PageRecorder。"""
@@ -982,10 +993,8 @@ async def record_ws(ws: WebSocket) -> None:
             "browser_state_restored": bool(start_storage),
         }
         if resumed_flow_spec is not None:
-            from dano.execution.page.flow_spec import flow_spec_to_client, validate_flow_spec
             started_message.update({
-                "full_spec": flow_spec_to_client(resumed_flow_spec),
-                "check_report": validate_flow_spec(resumed_flow_spec),
+                **_recording_flow_projection(resumed_flow_spec),
                 "resumed_server_draft": True,
             })
         await sender.send_json(started_message)
@@ -1012,7 +1021,11 @@ async def record_ws(ws: WebSocket) -> None:
             if storage_state is not None:
                 _remember_recording_storage(resume_state, storage_state)
             if pending_flow_spec is not None:
+                from dano.execution.page.flow_spec import flow_spec_fingerprint
+
                 resume_state["flow_spec"] = pending_flow_spec.model_copy(deep=True)
+                resume_state["flow_spec_version"] = int((pending_flow_spec.meta or {}).get("current_version") or 0)
+                resume_state["flow_spec_fingerprint"] = flow_spec_fingerprint(pending_flow_spec)
             resume_state["operations"] = dict(costly_operation_results)
 
         async def _ensure_recording_pi():
@@ -1049,67 +1062,6 @@ async def record_ws(ws: WebSocket) -> None:
                 costly_operation_results.pop(next(iter(costly_operation_results)), None)
             costly_operation_results[key] = response
             _checkpoint_resume()
-
-        def _restore_hidden_flow_spec_fields(raw_spec: dict) -> dict:
-            if pending_flow_spec is None:
-                return raw_spec
-            old_by_id = {s.step_id: s for s in pending_flow_spec.steps}
-            for step in raw_spec.get("steps") or []:
-                if not isinstance(step, dict):
-                    continue
-                old = old_by_id.get(str(step.get("step_id") or ""))
-                if old is None:
-                    continue
-                # Client receives only a bounded response sample.  Raw response
-                # evidence remains authoritative on the server and must never
-                # be overwritten by that projection on a round-trip edit.
-                if old.response_json is not None:
-                    step["response_json"] = old.response_json
-                if not step.get("body_source"):
-                    step["body_source"] = step.get("backup_body_source") or old.body_source
-                headers = step.get("headers")
-                if (not headers) or all(v == "***" for v in (headers or {}).values()):
-                    step["headers"] = old.headers
-                old_selects = {
-                    (select.path or "", select.param or ""): select
-                    for select in old.selects
-                }
-                for select in step.get("selects") or []:
-                    if not isinstance(select, dict):
-                        continue
-                    old_select = old_selects.get((str(select.get("path") or ""), str(select.get("param") or "")))
-                    if old_select is None:
-                        continue
-                    if not select.get("source_body"):
-                        select["source_body"] = old_select.source_body
-                    source_headers = select.get("source_headers") or {}
-                    if (not source_headers) or all(value == "***" for value in source_headers.values()):
-                        select["source_headers"] = old_select.source_headers
-                old_identity = {i.path: i for i in old.identity}
-                for idn in step.get("identity") or []:
-                    if isinstance(idn, dict) and idn.get("value") == "***":
-                        old_idn = old_identity.get(str(idn.get("path") or ""))
-                        if old_idn is not None:
-                            idn["value"] = old_idn.value
-
-            def request_key(item: dict) -> tuple[str, object]:
-                return (str(item.get("request_id") or ""), item.get("request_index"))
-
-            old_facts = {
-                (str(f.request_id or ""), f.request_index): f
-                for f in pending_flow_spec.request_facts.requests or []
-            }
-            for fact in ((raw_spec.get("request_facts") or {}).get("requests") or []):
-                if not isinstance(fact, dict):
-                    continue
-                old_fact = old_facts.get(request_key(fact))
-                if old_fact is not None:
-                    fact["response_json"] = old_fact.response_json
-                    fact["response_schema"] = old_fact.response_schema
-                    fact["post_data"] = old_fact.post_data
-                    fact["headers"] = old_fact.headers
-
-            return raw_spec
 
         while True:
             msg = await ws.receive_json()
@@ -1290,7 +1242,6 @@ async def record_ws(ws: WebSocket) -> None:
 
                 try:
                     from dano.execution.page.flow_spec import (
-                        flow_spec_to_client,
                         flow_spec_to_summary,
                         to_flow_spec,
                         validate_flow_spec,
@@ -1316,9 +1267,7 @@ async def record_ws(ws: WebSocket) -> None:
                         "action": session_action,
                         "operation": "finalize",
                         "operation_id": msg.get("operation_id"),
-                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
-                        "full_spec": flow_spec_to_client(pending_flow_spec),
-                        "check_report": validate_flow_spec(pending_flow_spec),
+                        **_recording_flow_projection(pending_flow_spec),
                     }
                     _remember_costly(msg, response)
                     await sender.send_json(response)
@@ -1339,21 +1288,21 @@ async def record_ws(ws: WebSocket) -> None:
                     await sender.send_json({**applied_flow_operations[operation_id], "duplicate": True})
                     continue
                 try:
-                    from dano.execution.page.flow_spec import (
-                        apply_flow_edits,
-                        flow_spec_to_client,
-                        flow_spec_to_summary,
-                        validate_flow_spec,
+                    from dano.execution.page.flow_spec import apply_client_flow_patch
+
+                    pending_flow_spec = apply_client_flow_patch(
+                        pending_flow_spec,
+                        edits,
+                        expected_fingerprint=str(msg.get("expected_fingerprint") or ""),
                     )
-                    pending_flow_spec = apply_flow_edits(pending_flow_spec, edits)
+                    # The accepted version is authoritative before its WebSocket
+                    # acknowledgement; reconnects must observe this exact patch.
                     _checkpoint_resume()
                     response = {
-                        "type": "flow_spec_updated",
+                        "type": "flow_spec",
                         "operation": "flow_update",
                         "operation_id": operation_id,
-                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
-                        "full_spec": flow_spec_to_client(pending_flow_spec),
-                        "check_report": validate_flow_spec(pending_flow_spec),
+                        **_recording_flow_projection(pending_flow_spec),
                     }
                     if operation_id:
                         if len(applied_flow_operations) >= 256:
@@ -1361,71 +1310,30 @@ async def record_ws(ws: WebSocket) -> None:
                         applied_flow_operations[operation_id] = response
                     await sender.send_json(response)
                 except Exception as e:  # noqa: BLE001
-                    # 前端会先做乐观更新。失败时必须回传服务端权威版本，否则页面与
-                    # pending_flow_spec 分叉，下一次发布会发生指纹冲突或使用旧字段。
+                    from dano.execution.page.flow_spec import FlowSpecConflictError
+
+                    conflict = isinstance(e, FlowSpecConflictError)
                     await sender.send_json({
                         "type": "error",
-                        "detail": f"flow_update failed: {e}",
+                        "detail": "工作台版本已变化，请同步服务端最新版本" if conflict else f"flow_update failed: {e}",
                         "operation": "flow_update",
                         "operation_id": operation_id,
-                        "full_spec": flow_spec_to_client(pending_flow_spec),
-                        "check_report": validate_flow_spec(pending_flow_spec),
+                        **({
+                            "stage": "flow_spec_conflict",
+                            "expected_fingerprint": e.expected_fingerprint,
+                            "current_fingerprint": e.current_fingerprint,
+                        } if conflict else {}),
+                        **_recording_flow_projection(pending_flow_spec),
                     })
-            elif t == "flow_replace":
-                operation_id = str(msg.get("operation_id") or "")
-                if operation_id and operation_id in applied_flow_operations:
-                    await sender.send_json({**applied_flow_operations[operation_id], "duplicate": True})
-                    continue
-                try:
-                    from dano.execution.page.flow_spec import (
-                        FlowSpec,
-                        append_flow_version,
-                        flow_spec_to_client,
-                        flow_spec_to_summary,
-                        refresh_review_items,
-                        validate_flow_spec,
-                    )
-                    raw_spec = msg.get("flow_spec")
-                    if not isinstance(raw_spec, dict):
-                        await sender.send_json({"type": "error", "detail": "flow_replace missing flow_spec object"})
-                        continue
-                    raw_spec = _restore_hidden_flow_spec_fields(raw_spec)
-                    pending_flow_spec = append_flow_version(
-                        refresh_review_items(FlowSpec.model_validate(raw_spec)),
-                        "json_replace",
-                        reason="前端 JSON 编辑回写",
-                        actor="user",
-                    )
-                    _checkpoint_resume()
-                    response = {
-                        "type": "flow_spec_updated",
-                        "operation": "flow_replace",
-                        "operation_id": operation_id,
-                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
-                        "full_spec": flow_spec_to_client(pending_flow_spec),
-                        "check_report": validate_flow_spec(pending_flow_spec),
-                    }
-                    if operation_id:
-                        if len(applied_flow_operations) >= 256:
-                            applied_flow_operations.pop(next(iter(applied_flow_operations)), None)
-                        applied_flow_operations[operation_id] = response
-                    await sender.send_json(response)
-                except Exception as e:  # noqa: BLE001
-                    await sender.send_json({
-                        "type": "error", "detail": f"flow_replace failed: {e}",
-                        "operation": "flow_replace", "operation_id": operation_id,
-                    })
-            # Bug 修复: 前端收到 "step not found" 时主动刷新 spec
+            # 前端可显式请求服务端最新脱敏投影。
             elif t == "refresh_flow_spec":
                 if pending_flow_spec is None:
                     await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
-                from dano.execution.page.flow_spec import flow_spec_to_client, flow_spec_to_summary, validate_flow_spec
                 await sender.send_json({
                     "type": "flow_spec",
-                    "flow_spec": flow_spec_to_summary(pending_flow_spec),
-                    "full_spec": flow_spec_to_client(pending_flow_spec),
-                    "check_report": validate_flow_spec(pending_flow_spec),
+                    "operation": "refresh",
+                    **_recording_flow_projection(pending_flow_spec),
                 })
             # 能力编排：唯一的录制 Pi AgentSession 读取当前事实并通过受控工具提交计划。
             elif t == "orchestrate_flow":
@@ -1435,19 +1343,9 @@ async def record_ws(ws: WebSocket) -> None:
                     await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 try:
-                    from dano.execution.page.flow_spec import (
-                        FlowSpec,
-                        flow_spec_to_client,
-                        flow_spec_to_summary,
-                        flow_operation_report,
-                        refresh_review_items,
-                        validate_flow_spec,
-                    )
+                    from dano.execution.page.flow_spec import flow_operation_report
+
                     analysis_screenshots = _normalize_analysis_screenshots(msg.get("analysis_screenshots"))
-                    raw_spec = msg.get("flow_spec")
-                    if isinstance(raw_spec, dict):
-                        raw_spec = _restore_hidden_flow_spec_fields(raw_spec)
-                        pending_flow_spec = refresh_review_items(FlowSpec.model_validate(raw_spec))
                     _checkpoint_resume()
                     before_operation = pending_flow_spec.model_copy(deep=True)
                     pi_session = await _ensure_recording_pi()
@@ -1483,12 +1381,10 @@ async def record_ws(ws: WebSocket) -> None:
                     }
                     _checkpoint_resume()
                     response = {
-                        "type": "flow_spec_updated",
+                        "type": "flow_spec",
                         "operation": operation,
                         "operation_id": msg.get("operation_id"),
-                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
-                        "full_spec": flow_spec_to_client(pending_flow_spec),
-                        "check_report": validate_flow_spec(pending_flow_spec),
+                        **_recording_flow_projection(pending_flow_spec),
                         "operation_report": operation_report,
                         "analysis_application": analysis_application,
                         "pi_session": pi_session.descriptor,
@@ -1510,12 +1406,8 @@ async def record_ws(ws: WebSocket) -> None:
                     await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 try:
-                    from dano.execution.page.flow_spec import (
-                        flow_spec_to_client,
-                        flow_spec_to_summary,
-                        flow_operation_report,
-                        validate_flow_spec,
-                    )
+                    from dano.execution.page.flow_spec import flow_operation_report
+
                     before_operation = pending_flow_spec.model_copy(deep=True)
                     pi_session = await _ensure_recording_pi()
                     pi_session.bind_flow_spec(pending_flow_spec)
@@ -1529,12 +1421,10 @@ async def record_ws(ws: WebSocket) -> None:
                     pending_flow_spec = pi_session.current_flow_spec()
                     _checkpoint_resume()
                     response = {
-                        "type": "flow_spec_updated",
+                        "type": "flow_spec",
                         "operation": "repair",
                         "operation_id": msg.get("operation_id"),
-                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
-                        "full_spec": flow_spec_to_client(pending_flow_spec),
-                        "check_report": validate_flow_spec(pending_flow_spec),
+                        **_recording_flow_projection(pending_flow_spec),
                         "operation_report": flow_operation_report(
                             before_operation, pending_flow_spec, operation="repair",
                         ),
@@ -1550,11 +1440,7 @@ async def record_ws(ws: WebSocket) -> None:
                     await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 try:
-                    from dano.execution.page.flow_spec import (
-                        flow_spec_to_client,
-                        flow_spec_to_summary,
-                        validate_flow_spec,
-                    )
+
                     pi_session = await _ensure_recording_pi()
                     pi_session.bind_flow_spec(pending_flow_spec)
                     await pi_session.prompt(
@@ -1567,10 +1453,9 @@ async def record_ws(ws: WebSocket) -> None:
                     pending_flow_spec = pi_session.current_flow_spec()
                     _checkpoint_resume()
                     await sender.send_json({
-                        "type": "step_names",
-                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
-                        "full_spec": flow_spec_to_client(pending_flow_spec),
-                        "check_report": validate_flow_spec(pending_flow_spec),
+                        "type": "flow_spec",
+                        "operation": "step_naming",
+                        **_recording_flow_projection(pending_flow_spec),
                         "pi_session": pi_session.descriptor,
                     })
                 except Exception as e:  # noqa: BLE001
@@ -1581,11 +1466,7 @@ async def record_ws(ws: WebSocket) -> None:
                     await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
                 try:
-                    from dano.execution.page.flow_spec import (
-                        flow_spec_to_client,
-                        flow_spec_to_summary,
-                        validate_flow_spec,
-                    )
+
                     pi_session = await _ensure_recording_pi()
                     pi_session.bind_flow_spec(pending_flow_spec)
                     await pi_session.prompt(
@@ -1598,13 +1479,10 @@ async def record_ws(ws: WebSocket) -> None:
                         raise RuntimeError("Pi 未提交 business description plan")
                     pending_flow_spec = pi_session.current_flow_spec()
                     _checkpoint_resume()
-                    desc = pending_flow_spec.business_description
                     await sender.send_json({
-                        "type": "business_description",
-                        "description": desc,
-                        "flow_spec": flow_spec_to_summary(pending_flow_spec),
-                        "full_spec": flow_spec_to_client(pending_flow_spec),
-                        "check_report": validate_flow_spec(pending_flow_spec),
+                        "type": "flow_spec",
+                        "operation": "business_description",
+                        **_recording_flow_projection(pending_flow_spec),
                         "pi_session": pi_session.descriptor,
                     })
                 except Exception as e:  # noqa: BLE001
@@ -1651,8 +1529,6 @@ async def record_ws(ws: WebSocket) -> None:
                     continue
                 try:
                     from dano.execution.page.flow_spec import (
-                        FlowSpec,
-                        flow_spec_to_client,
                         flow_spec_required_params,
                         flow_spec_fingerprint,
                         flow_spec_release_payload,
@@ -1661,10 +1537,9 @@ async def record_ws(ws: WebSocket) -> None:
                         prepare_flow_release_candidate,
                         validate_flow_spec,
                     )
-                    raw_spec = msg.get("flow_spec")
                     expected_fingerprint = str(msg.get("expected_fingerprint") or "")
                     current_fingerprint = flow_spec_fingerprint(pending_flow_spec)
-                    if expected_fingerprint and expected_fingerprint != current_fingerprint:
+                    if not expected_fingerprint or expected_fingerprint != current_fingerprint:
                         await sender.send_json({
                             "type": "result",
                             "report": {
@@ -1673,13 +1548,10 @@ async def record_ws(ws: WebSocket) -> None:
                                 "reason": "工作台版本已变化，请使用最新版本重新发布",
                                 "expected_fingerprint": expected_fingerprint,
                                 "current_fingerprint": current_fingerprint,
-                                "full_spec": flow_spec_to_client(pending_flow_spec),
                             },
+                            **_recording_flow_projection(pending_flow_spec),
                         })
                         continue
-                    if isinstance(raw_spec, dict):
-                        raw_spec = _restore_hidden_flow_spec_fields(raw_spec)
-                        pending_flow_spec = FlowSpec.model_validate(raw_spec)
                     # 发布只校验并编译工作台当前版本。Planner/Repair 必须由用户显式点击
                     # “生成/优化能力”触发，禁止在发布阶段静默恢复已删除步骤或改写人工字段。
                     if not pending_flow_spec.capabilities:
@@ -1706,8 +1578,8 @@ async def record_ws(ws: WebSocket) -> None:
                                 "reason": "FlowSpec 发布前校验未通过",
                                 "clarifications": check_report.get("errors") or [],
                                 "check_report": check_report,
-                                "full_spec": flow_spec_to_client(pending_flow_spec),
                             },
+                            **_recording_flow_projection(pending_flow_spec),
                         })
                         continue
                     apir, build_errors = flow_spec_to_api_request(pending_flow_spec)
@@ -1720,8 +1592,8 @@ async def record_ws(ws: WebSocket) -> None:
                                 "reason": "FlowSpec 无法转换成可执行请求",
                                 "clarifications": build_errors,
                                 "check_report": check_report,
-                                "full_spec": flow_spec_to_client(pending_flow_spec),
                             },
+                            **_recording_flow_projection(pending_flow_spec),
                         })
                         continue
                     apir["_flow_spec"] = flow_spec_to_summary(pending_flow_spec)
@@ -1770,8 +1642,8 @@ async def record_ws(ws: WebSocket) -> None:
                             "ok": False,
                             "stage": "recording_pi_review",
                             "reason": str(e),
-                            "full_spec": flow_spec_to_client(pending_flow_spec),
                         },
+                        **_recording_flow_projection(pending_flow_spec),
                         **({"pi_session": recording_pi.descriptor} if recording_pi is not None else {}),
                     })
                     continue
@@ -1830,9 +1702,9 @@ async def record_ws(ws: WebSocket) -> None:
                 response = {"type": "result", "operation": "publish", "action": session_action,
                             "operation_id": msg.get("operation_id"),
                             "report": {**rep, "check_report": check_report,
-                                       "full_spec": flow_spec_to_client(pending_flow_spec),
                                        "release": release_candidate,
                                        "recording_mode": recording_mode},
+                            **_recording_flow_projection(pending_flow_spec),
                             "parsed_steps": len(last_params), "via": "flow_spec",
                             "recording_mode": recording_mode,
                             "workflow_steps": len(apir.get("steps") or []) or None,

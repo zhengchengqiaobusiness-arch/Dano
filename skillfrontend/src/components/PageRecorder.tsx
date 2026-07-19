@@ -29,9 +29,7 @@ import {
   LinkOutlined,
   PictureOutlined,
   PlusOutlined,
-  ReloadOutlined,
   RobotOutlined,
-  SaveOutlined,
   UpOutlined,
   DownOutlined,
 } from "@ant-design/icons";
@@ -1146,6 +1144,7 @@ function inferJsonSchema(value: any): Record<string, any> {
   return { type: "string" };
 }
 
+const RECORDING_FLOW_PROTOCOL_VERSION = 2;
 const MAX_ANALYSIS_SCREENSHOTS = 4;
 const MAX_ANALYSIS_SCREENSHOT_BYTES = 1_400_000;
 
@@ -1266,6 +1265,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   const [flowSpec, setFlowSpec] = useState<FlowSpecData | null>(null);
   const flowSpecRef = useRef<FlowSpecData | null>(null);
+  const serverFingerprintRef = useRef("");
   useEffect(() => { flowSpecRef.current = flowSpec; }, [flowSpec]);
   const pendingEditorScrollRef = useRef<number | null>(null);
   function preserveEditorScrollForReorder() {
@@ -1283,13 +1283,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [descDraft, setDescDraft] = useState("");                 // FC3 修复:说明本地草稿
   useEffect(() => { setTitleDraft(flowSpec?.title || ""); }, [flowSpec?.title]);
   useEffect(() => { setDescDraft(flowSpec?.business_description || ""); }, [flowSpec?.business_description]);
-  // FH6 修复:JSON 面板 — 仅在 jsonDraft 未被本地编辑时才跟随 flowSpec 同步;否则用户输入会被 WS 推送覆盖
-  const jsonDirtyRef = useRef(false);
-  useEffect(() => {
-    if (flowSpec && !jsonDirtyRef.current) {
-      setJsonDraft(JSON.stringify(flowSpec, null, 2));
-    }
-  }, [flowSpec]);
+
   // Capability-local UI state must follow the capability identity, not its
   // current array position. Index keys made expanded panels/dropdowns jump to
   // a different capability immediately after an up/down reorder.
@@ -1303,9 +1297,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   });
   const [newLink, setNewLink] = useState({ source_step_id: "", source_path: "", target_step_id: "", target_path: "" });
   const [bindDraft, setBindDraft] = useState<Record<string, { source_step_id?: string; source_path?: string }>>({});
-  const [jsonDraft, setJsonDraft] = useState("");
-  const [jsonErr, setJsonErr] = useState("");
-  const [lastServerJson, setLastServerJson] = useState("");
+
   const [namingBusy, setNamingBusy] = useState(false);
   const [descBusy, setDescBusy] = useState(false);
   const [orchestrateBusy, setOrchestrateBusy] = useState(false);
@@ -1338,7 +1330,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [activeFlowTab, setActiveFlowTab] = useState("abilities");
 
   function acceptFlowSpec(fs: FlowSpecData) {
-
+    serverFingerprintRef.current = String(fs.meta?.current_fingerprint || "");
     const pending = pendingCapabilityMembershipRef.current;
     const edits: any[] = [];
     const remaining: typeof pending = [];
@@ -1451,7 +1443,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     send({
       type: "orchestrate_flow",
       operation_id: pending.operationId,
-      flow_spec: currentSpec,
       analysis_screenshots: pending.analysisScreenshots,
     });
   }
@@ -1537,7 +1528,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function flushFlowMutationQueue() {
     if (flowMutationInFlightRef.current || !flowMutationQueueRef.current.length) return;
-    const next = flowMutationQueueRef.current.shift();
+    const queued = flowMutationQueueRef.current.shift();
+    const next = { ...queued, expected_fingerprint: serverFingerprintRef.current };
     flowMutationInFlightRef.current = next;
     if (!sendRaw(next)) {
       flowMutationInFlightRef.current = null;
@@ -1586,7 +1578,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
 
   function send(obj: any) {
-    if (obj?.type === "flow_update" || obj?.type === "flow_replace") return enqueueFlowMutation(obj);
+    if (obj?.type === "flow_update") return enqueueFlowMutation(obj);
     return sendRaw(obj);
   }
 
@@ -1676,18 +1668,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function resetEditorState() {
     flowSpecRef.current = null;
+    serverFingerprintRef.current = "";
     setFlowSpec(null);
     setCheckReport(null);
     setBindDraft({});
     setCapabilityAddValue({});
     setCapabilityAddUsage({});
     pendingCapabilityMembershipRef.current = [];
-    setJsonDraft("");
     analysisScreenshotsRef.current = [];
     setAnalysisScreenshots([]);
     setLastAnalysisEvidence(null);
-    setJsonErr("");
-    setLastServerJson("");
     setActiveFlowTab("abilities");
     flowMutationInFlightRef.current = null;
     flowMutationQueueRef.current = [];
@@ -1781,6 +1771,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     ws.onmessage = (ev) => {
       if (wsRef.current !== ws) return;
       let m: any; try { m = JSON.parse(ev.data); } catch { return; }
+      if (m.flow_spec && m.protocol_version !== RECORDING_FLOW_PROTOCOL_VERSION) {
+        const detail = `不支持的录制协议版本：${m.protocol_version ?? "missing"}`;
+        connectionErrorRef.current = detail;
+        setErr(detail); message.error(detail); return;
+      }
       const issuedPiRecordingId = piRecordingIdFromMessage(m);
       if (issuedPiRecordingId) {
         piRecordingScopeRef.current = piRecordingScope;
@@ -1802,10 +1797,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         // reconnect.  In particular, an ability plan may have completed just
         // before a 1006 close; restoring the older local empty draft here used
         // to erase that successful first result.
-        const resumedServerSpec = m.resumed_server_draft && m.full_spec ? m.full_spec : null;
+        const resumedServerSpec = m.resumed_server_draft && m.flow_spec ? m.flow_spec : null;
         if (resumedServerSpec) {
           acceptFlowSpec(resumedServerSpec);
-          setLastServerJson(JSON.stringify(resumedServerSpec));
           if (m.check_report) setCheckReport(m.check_report);
           reconnectRestoreOperationRef.current = null;
           setReconnectedSessionNeedsCapture(false);
@@ -1815,15 +1809,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           flowMutationInFlightRef.current = null;
           flowMutationQueueRef.current = [];
           afterFlowSyncRef.current = null;
-          const operationId = newCostlyOperationId("resume-flow");
-          reconnectRestoreOperationRef.current = operationId;
+          reconnectRestoreOperationRef.current = null;
           setReconnectedSessionNeedsCapture(true);
-          ws.send(JSON.stringify({
-            type: "flow_replace",
-            operation_id: operationId,
-            flow_spec: flowSpecRef.current,
-          }));
-        } else {
+          message.warning("服务端未找到可恢复草稿，请重新触发目标操作并分析");        } else {
           reconnectRestoreOperationRef.current = null;
           setReconnectedSessionNeedsCapture(isReconnect);
           if (isReconnect) message.success("录制连接已自动恢复");
@@ -1856,7 +1844,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         // 当前会话捕获到实时请求后，才解除重连后的分析门禁。
         setReconnectedSessionNeedsCapture(false);
       }
-      else if (m.type === "flow_spec" || m.type === "flow_spec_updated") {
+      else if (m.type === "flow_spec") {
         const restoredAfterReconnect = !!reconnectRestoreOperationRef.current
           && m.operation_id === reconnectRestoreOperationRef.current;
         if (restoredAfterReconnect) {
@@ -1870,17 +1858,19 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         // 发布请求可能与最后一次字段更新响应交错到达。普通更新不能把发布中的
         // loading/状态提前重置，否则用户看到按钮闪退但后端仍在发布。
         if (phaseRef.current !== "publishing") setPhase("recording");
-        const fs = m.full_spec || m.flow_spec;
-        const acknowledgesActiveMutation = (m.operation === "flow_update" || m.operation === "flow_replace")
+        const fs = m.flow_spec;
+        const acknowledgesActiveMutation = m.operation === "flow_update"
           && (!m.operation_id || m.operation_id === flowMutationInFlightRef.current?.operation_id);
         const hasNewerLocalMutation = acknowledgesActiveMutation && flowMutationQueueRef.current.length > 0;
         if (fs) {
+          // Even when a newer optimistic edit is already queued, its patch must
+          // use the fingerprint acknowledged by this server response.
+          serverFingerprintRef.current = String(fs.meta?.current_fingerprint || "");
           // Every field mutation is serialized, but the user may already have made
           // a newer local edit while the previous response is in flight.  Do not
           // repaint that older snapshot over the newer draft.  The final queued
           // response contains the complete server state and is accepted normally.
           if (!hasNewerLocalMutation) acceptFlowSpec(fs);
-          setLastServerJson(JSON.stringify(fs));
           finishFlowOperation(fs.meta?.recording_agent_session, m.operation, m.operation_id);
         }
         if (restoredAfterReconnect && fs) resumeFlowOperationAfterReconnect(fs);
@@ -1899,8 +1889,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         // Do not keep rendering clarifications from an older failed publish;
         // fixed or explicitly ignored warnings must disappear with that old
         // result as soon as the authoritative update is acknowledged.
-        if (!hasNewerLocalMutation && ["flow_update", "flow_replace", "plan", "repair"].includes(String(m.operation || ""))) {
+        if (!hasNewerLocalMutation && ["flow_update", "plan", "repair", "step_naming", "business_description"].includes(String(m.operation || ""))) {
           setResult(null);
+        }
+        if (m.operation === "step_naming") {
+          setNamingBusy(false);
+          message.success("步骤名称已刷新");
+        } else if (m.operation === "business_description") {
+          setDescBusy(false);
+          message.success("业务说明已生成");
         }
         if (m.operation_report) {
           const report = m.operation_report as FlowOperationReport;
@@ -1909,24 +1906,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           else if (report.edit_errors?.length) message.error(report.summary || "自动修复存在无效建议");
           else message.info(report.summary || "检查完成，没有可自动修改的内容");
         }
-        if (m.operation === "flow_update" || m.operation === "flow_replace") finishQueuedFlowMutation(m.operation_id);
-      }
-      else if (m.type === "step_names") {
-        setNamingBusy(false);
-        if (m.full_spec) { acceptFlowSpec(m.full_spec); setLastServerJson(JSON.stringify(m.full_spec)); }
-        if (m.check_report) setCheckReport(m.check_report);
-        message.success("步骤名称已刷新");
-      }
-      else if (m.type === "business_description") {
-        setDescBusy(false);
-        if (m.full_spec) { acceptFlowSpec(m.full_spec); setLastServerJson(JSON.stringify(m.full_spec)); }
-        else if (m.description && flowSpec) {
-          const next = { ...flowSpec, business_description: m.description };
-          flowSpecRef.current = next;
-          setFlowSpec(next);
-        }
-        if (m.check_report) setCheckReport(m.check_report);
-        message.success("业务说明已生成");
+        if (m.operation === "flow_update") finishQueuedFlowMutation(m.operation_id);
       }
       else if (m.type === "input_error") {
         const now = Date.now();
@@ -1938,12 +1918,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       else if (m.type === "result") {
         publishOperationRef.current = null;
         finalizeOperationRef.current = null;
-        if (m.report?.full_spec) {
-          acceptFlowSpec(m.report.full_spec);
-          setLastServerJson(JSON.stringify(m.report.full_spec));
-        }
+        if (m.flow_spec) acceptFlowSpec(m.flow_spec);
         setResult(m.report); setPhase("recording");
-        if (m.report?.check_report) setCheckReport(m.report.check_report);
+        if (m.check_report || m.report?.check_report) {
+          setCheckReport(m.check_report || m.report.check_report);
+        }
       }
       else if (m.type === "error") {
         const detail = m.detail || "录制出错";
@@ -1951,22 +1930,19 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         setNamingBusy(false); setDescBusy(false); clearFlowOperation();
         publishOperationRef.current = null;
         finalizeOperationRef.current = null;
-        if (m.full_spec) {
-          acceptFlowSpec(m.full_spec);
-          setLastServerJson(JSON.stringify(m.full_spec));
-        }
+        if (m.flow_spec) acceptFlowSpec(m.flow_spec);
         if (m.check_report) setCheckReport(m.check_report);
-        if (m.operation === "flow_update" || m.operation === "flow_replace") failQueuedFlowMutation(m.operation_id);
+        if (m.operation === "flow_update") failQueuedFlowMutation(m.operation_id);
         if (reconnectRestoreOperationRef.current && m.operation_id === reconnectRestoreOperationRef.current) {
           reconnectRestoreOperationRef.current = null;
           setReconnectedSessionNeedsCapture(true);
         }
-        if ((m.operation === "flow_update" || m.operation === "flow_replace") && !m.full_spec) {
+        if (m.operation === "flow_update" && !m.flow_spec) {
           sendRaw({ type: "refresh_flow_spec" });
         }
         if (detail.includes("step not found") || detail.includes("link not found")) {
           message.warning("流程已变更，正在同步最新版本");
-          send({ type: "refresh_flow_spec" });
+          sendRaw({ type: "refresh_flow_spec" });
         } else {
           message.error(detail);
           setErr(detail);
@@ -2229,7 +2205,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     // instantaneous publish success while the backend was still reviewing.
     setPhase("publishing");
     if (!send({ type: "publish_request", operation_id: operationId, action: action.trim(), title: publishTitle,
-      flow_spec: currentSpec,
       expected_fingerprint: currentSpec.meta?.current_fingerprint })) {
       publishOperationRef.current = null;
       setPhase("recording");
@@ -2257,11 +2232,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     resetEditorState();
   }
 
-  function sendReplace(next: FlowSpecData) {
-    flowSpecRef.current = next;
-    setFlowSpec(next);
-    send({ type: "flow_replace", flow_spec: next });
-  }
   function updateFlowField(k: string, v: any) { send({ type: "flow_update", edits: [{ op: "update_flow", field: k, value: v }] }); }
   function paramDraftKey(stepId: string, p: FlowParam) {
     return `${stepId}:${p.path || ""}:${p.key || ""}:${p.label || ""}`;
@@ -2290,7 +2260,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const edit = paramRemoveEdit(stepId, p);
     if (!send({ type: "flow_update", edits: [edit] })) return;
 
-    // 删除立即反映到页面；服务端失败时会通过 full_spec 回滚到权威版本。
+    // 删除立即反映到页面；服务端响应会用权威脱敏投影确认或回滚。
     // 同时清理依赖和选择器，避免字段卡片消失后仍残留不可见引用。
     const current = flowSpecRef.current;
     if (!current) return;
@@ -2552,7 +2522,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setOrchestrateBusy(true);
     setAutoFixBusy(true);
     armFlowOperationWatchdog("能力生成");
-    if (!send({ type: "orchestrate_flow", operation_id: flowOperationRef.current.operationId, flow_spec: currentSpec, analysis_screenshots: screenshots })) clearFlowOperation();
+    if (!send({ type: "orchestrate_flow", operation_id: flowOperationRef.current.operationId, analysis_screenshots: screenshots })) clearFlowOperation();
   }
   function autoFixFlow() {
     if (!flowSpecRef.current || flowOperationRef.current) return;
@@ -2714,23 +2684,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setFlowSpec(next);
     send({ type: "flow_update", edits: [{ op: "reorder_capabilities", capability_refs: refs }] });
   }
-  function loadJsonDraft() {
-    if (!flowSpec) return;
-    setJsonDraft(JSON.stringify(flowSpec, null, 2));
-    setJsonErr("");
-    jsonDirtyRef.current = false;                          // FH6:显式载入后清 dirty,允许后续 WS 推送自动同步
-  }
-  function applyJsonDraft() {
-    try { setJsonErr(""); sendReplace(JSON.parse(jsonDraft)); jsonDirtyRef.current = false; }
-    catch (e: any) { setJsonErr(e?.message || "JSON 解析失败"); }
-  }
-  function restoreServerJson() {
-    if (!lastServerJson) { message.warning("没有最近的服务端版本"); return; }
-    setJsonDraft(lastServerJson);
-    jsonDirtyRef.current = false;
-    try { sendReplace(JSON.parse(lastServerJson)); } catch { /* ignore */ }
-  }
-
   const stepById = useMemo(() => Object.fromEntries((flowSpec?.steps || []).map((s) => [s.step_id, s])), [flowSpec]);
   function stepBrief(stepId?: string) {
     const st = stepId ? stepById[stepId] : undefined;
@@ -3084,7 +3037,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const nextSelects = replaced
       ? (step.selects || []).map((s) => (s.path === p.path || (!s.path && s.param === p.key) || s === existing ? nextBinding : s))
       : [...(step.selects || []), nextBinding];
-    const edits: any[] = [{ op: "update", step_id: step.step_id, field: "selects", value: nextSelects }];
+    const edits: any[] = [{ op: "upsert_select", step_id: step.step_id, binding: nextBinding }];
     const paramUpdates: Record<string, any> = {};
     for (const edit of extraEdits) {
       if (edit?.op === "update" && edit.step_id === step.step_id && (edit.param_path || edit.param_key || edit.param_label)) {
@@ -4325,16 +4278,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function renderJsonPanel() {
     return (
       <Space direction="vertical" size={8} style={{ width: "100%" }}>
-        <Alert type="info" showIcon message="高级模式：只在需要批量修复或复制排查时使用。常规编辑请优先用前面的步骤、字段和依赖面板。" />
-        <Space wrap>
-          <Button icon={<ReloadOutlined />} onClick={loadJsonDraft}>载入当前 JSON</Button>
-          <Button type="primary" icon={<SaveOutlined />} onClick={applyJsonDraft} disabled={!jsonDraft.trim()}>应用</Button>
-          <Button onClick={restoreServerJson}>恢复服务端版本</Button>
-          {jsonErr && <Typography.Text type="danger">{jsonErr}</Typography.Text>}
-        </Space>
-        <Input.TextArea rows={14} value={jsonDraft}
-          onChange={(e) => { jsonDirtyRef.current = true; setJsonDraft(e.target.value); }}
-          style={{ fontFamily: "monospace", fontSize: 12 }} placeholder="FlowSpec JSON" />
+        <Alert type="info" showIcon message="服务端权威 FlowSpec 的脱敏只读投影；请在步骤、字段、能力和依赖面板中编辑。" />
+        <Input.TextArea rows={14} readOnly value={flowSpec ? JSON.stringify(flowSpec, null, 2) : ""}
+          style={{ fontFamily: "monospace", fontSize: 12 }} />
       </Space>
     );
   }

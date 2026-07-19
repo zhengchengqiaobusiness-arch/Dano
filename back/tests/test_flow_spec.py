@@ -1407,7 +1407,7 @@ class FlowSpecPublishTest(unittest.TestCase):
         self.assertEqual(links[0]["source_step"], 0)
         self.assertEqual(links[0]["target_path"], "flowTask.taskId")
 
-    def test_client_spec_redacts_secrets_but_preserves_editable_request_body(self):
+    def test_client_spec_redacts_secrets_and_keeps_request_body_server_side(self):
         spec = to_flow_spec([
             _post("https://oa/api/submit", {"a": 1},
                   resp={"code": 200, "data": {"accessToken": "secret-token", "answer": "ok"}},
@@ -1419,7 +1419,8 @@ class FlowSpecPublishTest(unittest.TestCase):
 
         self.assertEqual(step["headers"]["Authorization"], "***")
         self.assertEqual(step["headers"]["X-Tenant"], "***")
-        self.assertEqual(json.loads(step["body_source"]), {"a": 1})
+        self.assertEqual(step["body_source"], "")
+        self.assertEqual(json.loads(spec.steps[0].body_source), {"a": 1})
         self.assertEqual(step["response_json"]["data"]["accessToken"], "***")
         self.assertEqual(step["response_json"]["data"]["answer"], "ok")
 
