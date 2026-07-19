@@ -1421,7 +1421,9 @@
               {:else if block.kind === "thinking" && isStreamingThinkingBlock(isMessageThinkingActive(item.message, item.messageIndex), blocks, bIdx)}
                 <div class="thinking-block">
                   <div class="thinking-stream-line">
-                    <Sparkle class="thinking-stream-icon" aria-hidden="true" size={14} />
+                    <span class="thinking-stream-icon" aria-hidden="true">
+                      <Sparkle size={14} />
+                    </span>
                     <span class="thinking-stream-text">{latestThinkingLine(block.text)}...</span>
                   </div>
                 </div>
@@ -2357,6 +2359,7 @@
   }
 
   .thinking-stream-icon {
+    display: flex;
     flex: 0 0 auto;
     color: var(--text-muted);
   }
