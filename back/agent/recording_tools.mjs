@@ -136,7 +136,7 @@ function proxyTool({ name, label, description, parameters }) {
       if (SUBMISSION_TOOLS.has(name)) {
         const { output } = await runRecordingSubmissionAttempt(
           name,
-          () => callRecordingTool(name, params, toolCallId),
+          () => callRecordingTool(name, sanitizeRecordingToolParams(name, params), toolCallId),
         );
         return {
           content: [{ type: "text", text: JSON.stringify(output) }],
@@ -154,6 +154,13 @@ function proxyTool({ name, label, description, parameters }) {
     },
   });
 }
+
+export function sanitizeRecordingToolParams(name, params) {
+  if (name !== "submit_recording_plan" || !params || typeof params !== "object") return params;
+  const allowed = ["recording_id", "flow_version", "base_flow_version", "plan"];
+  return Object.fromEntries(allowed.filter((key) => key in params).map((key) => [key, params[key]]));
+}
+
 
 const RecordingIdentity = {
   recording_id: Type.String({ minLength: 1 }),
@@ -179,7 +186,9 @@ export const recordingTools = [
         base_flow_version: Type.Integer({ minimum: 0 }),
         plan: Type.Record(Type.String(), Type.Any()),
       },
-      { additionalProperties: false },
+      // Models sometimes flatten explanations beside `plan`; these are
+      // stripped by sanitizeRecordingToolParams before the backend call.
+      { additionalProperties: true },
     ),
   }),
   proxyTool({

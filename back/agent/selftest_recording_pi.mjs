@@ -11,6 +11,7 @@ import {
   guardRecordingToolAttempt,
   recordingTools,
   runRecordingSubmissionAttempt,
+  sanitizeRecordingToolParams,
 } from "./recording_tools.mjs";
 
 const expectedTools = [
@@ -135,6 +136,25 @@ function verifyReviewToolSchema() {
     );
   }
 }
+function verifyPlanToolCompatibility() {
+  const planTool = recordingTools.find((tool) => tool.name === "submit_recording_plan");
+  assert(planTool?.parameters?.additionalProperties === true, "plan tool must tolerate model explanation fields");
+  const plan = { semantic_plan: {}, ops: "" };
+  const sanitized = sanitizeRecordingToolParams("submit_recording_plan", {
+    recording_id: "rec-self-test",
+    flow_version: 3,
+    base_flow_version: 3,
+    plan,
+    description: "model explanation",
+    step_id: "flattened-by-model",
+  });
+  assert(sanitized.plan === plan, "plan payload changed while sanitizing tool params");
+  assert(
+    JSON.stringify(Object.keys(sanitized).sort())
+      === JSON.stringify(["base_flow_version", "flow_version", "plan", "recording_id"]),
+    "unknown plan tool params reached the backend",
+  );
+}
 
 function verifyRuntimeProtocol(tempDir) {
   return new Promise((resolve, reject) => {
@@ -216,6 +236,7 @@ try {
   await verifySuccessfulSubmissionEndsTurn();
   await verifyRejectedThenAcceptedSubmissionIsTerminal();
   verifyReviewToolSchema();
+  verifyPlanToolCompatibility();
   verifyPersistentSession(tempDir);
   await verifyRuntimeProtocol(tempDir);
   process.stdout.write(`${JSON.stringify({ status: "ok", tools: expectedTools, persistent_session: true, runtime_protocol: true })}\n`);

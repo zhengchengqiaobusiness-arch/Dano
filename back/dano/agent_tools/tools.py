@@ -1,4 +1,4 @@
-﻿"""pi 自定义工具的 Python 实现(确定性能力)。
+"""pi 自定义工具的 Python 实现(确定性能力)。
 
 红线:
 - sandbox_test/write_readback/health_check 一律 environment=sandbox + credential_type=test,绝不碰生产写。
@@ -1129,6 +1129,180 @@ async def get_recording_state(run_id: str, params: dict) -> dict:
     return await _recording_session(run_id, params).get_recording_state()
 
 
+def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa: ANN001
+    """Adapt common Pi JSON variants without weakening fact/version gates."""
+    wrapped = any(key in raw_plan for key in ("semantic_plan", "plan", "ops", "abilities"))
+    submission = deepcopy(raw_plan) if wrapped else {"semantic_plan": deepcopy(raw_plan)}
+    semantic = submission.get("semantic_plan")
+    if not isinstance(semantic, dict):
+        semantic = submission.get("plan") if isinstance(submission.get("plan"), dict) else {}
+    semantic = deepcopy(semantic)
+    if isinstance(raw_plan.get("flow_spec"), dict) or isinstance(semantic.get("flow_spec"), dict):
+        raise ToolError(
+            "plan 格式错误：禁止提交 flow_spec；必须提交基于真实 step_id + wire_path 的 semantic_plan"
+        )
+
+    understanding = semantic.get("business_understanding")
+    if isinstance(understanding, str):
+        semantic["business_understanding"] = {"summary": understanding.strip()}
+    elif not isinstance(understanding, dict):
+        semantic["business_understanding"] = {}
+
+    from dano.execution.page.flow_spec import (
+        _build_initial_flow_capabilities,
+        _capability_node_step_ids,
+        _planned_capability_has_public_anchor,
+        _repair_structural_option_bindings,
+        rebuild_flow_dependencies,
+    )
+
+    grounded = spec.model_copy(deep=True)
+    rebuild_flow_dependencies(grounded)
+    _repair_structural_option_bindings(grounded)
+    steps = list(getattr(grounded, "steps", None) or [])
+    step_by_id = {str(step.step_id): step for step in steps}
+    step_order = {str(step.step_id): index for index, step in enumerate(steps)}
+    baseline_capabilities = list(_build_initial_flow_capabilities(grounded) or [])
+
+    role_by_step = {
+        str(item.get("step_id") or ""): deepcopy(item)
+        for item in (semantic.get("request_roles") or [])
+        if isinstance(item, dict) and str(item.get("step_id") or "") in step_by_id
+    }
+    for step in steps:
+        step_id = str(step.step_id)
+        role = role_by_step.setdefault(step_id, {"step_id": step_id})
+        role.setdefault("role", str((getattr(step, "source_meta", None) or {}).get("role") or getattr(step, "semantic_role", None) or "business_request"))
+        role.setdefault("name", str(getattr(step, "name", None) or f"{step.method} {step.path or step.url}"))
+        role.setdefault("reason", str((getattr(step, "source_meta", None) or {}).get("keep_reason") or "来自录制请求事实"))
+    semantic["request_roles"] = list(role_by_step.values())
+
+    def normalized_path(value) -> str:  # noqa: ANN001
+        path = str(value or "")
+        return path[5:] if path.startswith("body.") else path
+
+    param_by_ref = {
+        (str(step.step_id), normalized_path(param.path)): param
+        for step in steps for param in (getattr(step, "params", None) or [])
+    }
+    unresolved = list(semantic.get("unresolved_items") or []) if isinstance(semantic.get("unresolved_items"), list) else []
+    fields = []
+    for raw_field in semantic.get("field_semantics") or []:
+        if not isinstance(raw_field, dict):
+            continue
+        field = deepcopy(raw_field)
+        step_id = str(field.get("step_id") or "")
+        path = str(field.get("wire_path") or field.get("path") or "")
+        param = param_by_ref.get((step_id, normalized_path(path)))
+        if param is None:
+            unresolved.append({"type": "unmatched_field", "step_id": step_id, "wire_path": path})
+            continue
+        field["step_id"] = step_id
+        field["wire_path"] = str(getattr(param, "path", None) or path)
+        field.setdefault("public_name", str(getattr(param, "label", None) or getattr(param, "key", None) or path))
+        field.setdefault("business_type", str(getattr(param, "type", None) or "string"))
+        if str(getattr(param, "category", None) or "") not in {"", "unknown"}:
+            field["category"] = str(param.category)
+        if str(getattr(param, "source_kind", None) or "") not in {"", "unknown"}:
+            field["source_kind"] = str(param.source_kind)
+        field.setdefault("confidence", float(getattr(param, "confidence", None) or 0.8))
+        if isinstance(field.get("evidence"), str):
+            field["evidence"] = [{"source": "pi_analysis", "detail": field["evidence"]}]
+        elif not isinstance(field.get("evidence"), list):
+            field["evidence"] = []
+        fields.append(field)
+    semantic["field_semantics"] = fields
+
+    allowed_kinds = {"query_status", "validate_batch", "submit_batch", "submit"}
+    capabilities = []
+    seen_boundaries: set[tuple[str, tuple[str, ...]]] = set()
+    raw_capabilities = semantic.get("capabilities")
+    if not isinstance(raw_capabilities, list):
+        raw_capabilities = []
+    for raw_capability in raw_capabilities:
+        if not isinstance(raw_capability, dict):
+            continue
+        capability = deepcopy(raw_capability)
+        raw_steps = capability.get("step_ids") or capability.get("steps") or capability.get("depends_on_step_ids") or []
+        if isinstance(raw_steps, str):
+            raw_steps = [raw_steps] if raw_steps.strip() else []
+        candidates = [str(value) for value in raw_steps if str(value) in step_by_id]
+        for key in ("anchor_step_id", "entry_step_id", "primary_step_id"):
+            value = str(capability.get(key) or "")
+            if value in step_by_id:
+                candidates.append(value)
+        candidates = sorted(set(candidates), key=lambda value: step_order[value])
+        requested_kind = str(capability.get("kind") or "")
+        if requested_kind not in allowed_kinds:
+            methods = {str(step_by_id[value].method or "GET").upper() for value in candidates}
+            requested_kind = (
+                "submit"
+                if any(method not in {"GET", "HEAD", "OPTIONS"} for method in methods)
+                else "query_status"
+            )
+        public_anchors = [
+            step_id for step_id in candidates
+            if _planned_capability_has_public_anchor(grounded, requested_kind, [step_id])
+        ]
+        boundary = max(
+            (
+                baseline for baseline in baseline_capabilities
+                if any(step_id in set(_capability_node_step_ids(baseline)) for step_id in public_anchors)
+                and (
+                    (requested_kind in {"submit", "submit_batch"} and baseline.kind in {"submit", "submit_batch"})
+                    or (requested_kind in {"query_status", "validate_batch"} and baseline.kind in {"query_status", "validate_batch"})
+                )
+            ),
+            key=lambda item: len(set(_capability_node_step_ids(item)) & set(candidates)),
+            default=None,
+        )
+        title = str(capability.get("title") or capability.get("name") or capability.get("capability_id") or "").strip()
+        name = str(capability.get("name") or capability.get("capability_id") or capability.get("id") or title).strip()
+        if boundary is None or not name:
+            unresolved.append({
+                "type": "internal_or_unmatched_capability",
+                "title": title or name,
+                "step_ids": candidates,
+            })
+            continue
+        boundary_steps = list(_capability_node_step_ids(boundary))
+        boundary_key = (str(boundary.kind), tuple(boundary_steps))
+        if boundary_key in seen_boundaries:
+            continue
+        seen_boundaries.add(boundary_key)
+        capabilities.append({
+            **capability,
+            "name": name,
+            "title": title or name,
+            "kind": str(boundary.kind),
+            "intent": str(capability.get("intent") or capability.get("description") or title or name),
+            "step_ids": boundary_steps,
+        })
+    if baseline_capabilities and raw_capabilities and not capabilities:
+        raise ToolError("semantic_plan.capabilities 没有可验证的业务锚点；内部预检/选项接口不能独立成能力")
+    semantic["capabilities"] = capabilities
+
+    relations = []
+    for raw_relation in semantic.get("capability_relations") or []:
+        if not isinstance(raw_relation, dict):
+            continue
+        relation = deepcopy(raw_relation)
+        relation.setdefault("from_capability", relation.get("source_capability_id"))
+        relation.setdefault("to_capability", relation.get("target_capability_id"))
+        relation.setdefault("type", relation.get("relation_type"))
+        relations.append(relation)
+    semantic["capability_relations"] = relations
+    semantic["unresolved_items"] = unresolved
+    submission["semantic_plan"] = semantic
+
+    ops = submission.get("ops", [])
+    if ops is None or (isinstance(ops, str) and not ops.strip()):
+        ops = []
+    if not isinstance(ops, list) or any(not isinstance(op, dict) for op in ops):
+        raise ToolError("plan.ops 必须是对象数组或空值")
+    submission["ops"] = ops
+    return submission
+
 async def submit_recording_plan(run_id: str, params: dict) -> dict:
     _strict_recording_params(
         params,
@@ -1138,24 +1312,9 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
     raw_plan = params.get("plan")
     if not isinstance(raw_plan, dict):
         raise ToolError("plan 必须是对象")
-    nested_flow_spec = raw_plan.get("flow_spec")
-    if nested_flow_spec is None and isinstance(raw_plan.get("semantic_plan"), dict):
-        nested_flow_spec = raw_plan["semantic_plan"].get("flow_spec")
-    if nested_flow_spec is not None:
-        raise ToolError(
-            "plan 格式错误：禁止提交 flow_spec 包装；请重新调用 get_recording_state，"
-            "然后提交 plan={semantic_plan:{business_understanding,request_roles,field_semantics,"
-            "capabilities,capability_relations,unresolved_items},ops:[]}。"
-            "截图字段必须使用录制事实中的 step_id + wire_path，不能只写能力 inputs。"
-        )
-
-
-    if any(key in raw_plan for key in ("semantic_plan", "plan", "ops", "abilities")):
-        submission = dict(raw_plan)
-    else:
-        submission = {"semantic_plan": dict(raw_plan), "ops": []}
-    submission.setdefault("submission_id", str(uuid4()))
     session = _recording_session(run_id, params)
+    submission = _normalize_recording_plan_submission(raw_plan, session.current_flow_spec())
+    submission.setdefault("submission_id", str(uuid4()))
     return await _apply_recording_submission_atomic(
         session,
         submission,

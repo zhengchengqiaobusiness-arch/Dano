@@ -666,7 +666,7 @@ class ToFlowSpecTest(unittest.TestCase):
         s = json.dumps(d, ensure_ascii=False, default=str)
         self.assertIsInstance(s, str)
 
-    def test_request_facts_migrate_from_legacy_request_graph(self):
+    def test_request_facts_does_not_migrate_from_legacy_request_graph(self):
         spec = FlowSpec.model_validate({
             "flow_id": "rf",
             "meta": {
@@ -688,9 +688,10 @@ class ToFlowSpecTest(unittest.TestCase):
             },
         })
 
-        self.assertEqual(len(spec.request_facts.requests), 1)
-        self.assertEqual(spec.request_facts.requests[0].request_index, 7)
-        self.assertEqual(spec.request_facts.analysis["idx:7"].role, "business_get")
+        self.assertEqual(spec.request_facts.protocol, "dano.request_facts.v1")
+        self.assertEqual(len(spec.request_facts.requests), 0)
+        self.assertEqual(spec.request_facts.analysis, {})
+        self.assertEqual(spec.request_facts.usage, {})
         self.assertEqual(spec.meta["request_graph"]["all_requests"][0]["request_index"], 7)
 
     def test_request_facts_backfills_legacy_request_graph(self):

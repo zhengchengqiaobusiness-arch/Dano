@@ -1582,11 +1582,12 @@ def test_request_facts_are_first_class_and_sync_with_legacy_request_graph():
     )
 
     assert legacy.request_facts.protocol == "dano.request_facts.v1"
-    assert [r.request_id for r in legacy.request_facts.requests] == ["req-status"]
-    assert legacy.request_facts.analysis["req-status"].bucket == "candidate_reads"
+    assert len(legacy.request_facts.requests) == 0
+    assert legacy.request_facts.analysis == {}
 
     client = flow_spec_to_client(legacy)
-    assert client["request_facts"]["requests"][0]["request_id"] == "req-status"
+    assert client["request_facts"]["requests"] == []
+    assert client["request_facts"]["analysis"] == {}
     assert client["meta"]["request_graph"]["candidate_reads"][0]["request_id"] == "req-status"
 
     modern_entry = _request_fact_entry(request_id="req-options", request_index=12, sequence=12, role="read_option")
@@ -3631,7 +3632,7 @@ def test_capability_confidence_above_sixty_percent_is_auto_adopted():
     assert result.capabilities[1].requires_human_confirm is False
 
 
-def test_legacy_dual_required_fields_are_discarded():
+def test_legacy_dual_required_fields_are_retained_as_extra_fields():
     field = CapabilityField.model_validate({
         "key": "申请标题", "required": True,
         "page_required": False, "required_source": "page",
@@ -3639,8 +3640,8 @@ def test_legacy_dual_required_fields_are_discarded():
 
     payload = field.model_dump()
     assert payload["required"] is True
-    assert "page_required" not in payload
-    assert "required_source" not in payload
+    assert payload["page_required"] is False
+    assert payload["required_source"] == "page"
 
 
 def test_scalar_type_controls_capability_schema_without_deleting_enum_evidence():
@@ -3720,7 +3721,7 @@ def test_manual_business_query_membership_survives_all_sync_layers_without_lock_
         "step_id": "records",
         "usage": "execute",
         "origin": "manual",
-        # Legacy clients may still send this property; the backend discards it.
+        # Legacy clients may still send this property; keep it as extra membership metadata.
         "pinned": True,
     }])
     prepared = prepare_flow_spec_for_publish(edited)
@@ -3731,7 +3732,7 @@ def test_manual_business_query_membership_survives_all_sync_layers_without_lock_
     assert capability.request_refs[0].usage == "execute"
     assert capability.request_refs[0].origin == "manual"
     assert capability.request_refs[0].confirmed is True
-    assert "pinned" not in capability.request_refs[0].model_dump()
+    assert capability.request_refs[0].model_dump().get("pinned") is True
 
 
 def test_option_source_membership_is_visible_but_not_executed():
@@ -3757,7 +3758,7 @@ def test_option_source_membership_is_visible_but_not_executed():
     assert [(ref.step_id, ref.usage, ref.origin, ref.confirmed) for ref in capability.request_refs] == [
         ("options", "option_source", "manual", True),
     ]
-    assert "pinned" not in capability.request_refs[0].model_dump()
+    assert capability.request_refs[0].model_dump().get("pinned") is True
 
 
 def test_default_query_capability_uses_business_records_not_process_configuration():
@@ -5968,3 +5969,168 @@ def test_infer_type_datetime():
 def test_infer_type_string():
     assert _infer_type_from_value("hello") == "string"
     assert _infer_type_from_value(None) == "string"
+
+
+def test_array_first_row_dependency_is_replaced_by_grounded_option_binding():
+    history = FlowStep(
+        step_id="history",
+        method="GET",
+        path="/admin-api/oa/seal-apply/page?pageNo=1&pageSize=10",
+        source_meta={"role": "business_get"},
+        response_json={
+            "data": {
+                "list": [{"sealId": "seal-1", "applyTitle": "old record"}],
+                "total": 1,
+            },
+        },
+    )
+    submit_param = ParamField(
+        path="sealId",
+        key="sealId",
+        label="sealId",
+        value="seal-1",
+        category="runtime_var",
+        source_kind="previous_response",
+        source={
+            "kind": "previous_response",
+            "step_id": "history",
+            "response_path": "data.list[0].sealId",
+            "link_id": "bad-link",
+        },
+        exposed_to_user=False,
+    )
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/admin-api/oa/seal-apply/submit-process",
+        source_meta={"role": "submit_anchor"},
+        params=[submit_param],
+        response_json={"code": 0, "data": "ok"},
+    )
+    options = FlowStep(
+        step_id="seal-options",
+        method="GET",
+        path="/admin-api/bd/seal/simple-list?status=0",
+        source_meta={"role": "business_get"},
+        params=[ParamField(
+            path="query.status",
+            key="status",
+            value="0",
+            category="system_const",
+            source_kind="constant",
+            exposed_to_user=False,
+        )],
+        response_json={
+            "code": 0,
+            "data": [
+                {"id": "seal-1", "name": "Company Seal", "status": 0, "remark": ""},
+                {"id": "seal-2", "name": "Finance Seal", "status": 0, "remark": ""},
+            ],
+        },
+    )
+    spec = FlowSpec(
+        flow_id="grounded-option-repair",
+        steps=[history, submit, options],
+        links=[FlowLink(
+            link_id="bad-link",
+            source_step_id="history",
+            source_path="data.list[0].sealId",
+            target_step_id="submit",
+            target_path="sealId",
+            confirmed=False,
+            confidence=0.85,
+            reason="录制值与上游响应唯一匹配，自动建立依赖",
+            evidence={"kind": "value_match"},
+        )],
+    )
+
+    flow_spec_module.rebuild_flow_dependencies(spec)
+    repaired = flow_spec_module._repair_structural_option_bindings(spec)
+
+    assert repaired == 1
+    assert spec.links == []
+    assert submit_param.category == "user_param"
+    assert submit_param.source_kind == "api_option"
+    assert submit_param.exposed_to_user is True
+    assert submit_param.source["source_step_id"] == "seal-options"
+    assert submit_param.source["value_key"] == "id"
+    assert submit_param.source["label_key"] == "name"
+    assert submit_param.enum_value_map == {
+        "Company Seal": "seal-1",
+        "Finance Seal": "seal-2",
+    }
+
+    spec.capabilities = build_default_flow_capabilities(spec)
+    assert {cap.kind for cap in spec.capabilities} == {"query_status", "submit"}
+    submit_capability = next(cap for cap in spec.capabilities if cap.kind == "submit")
+    assert submit_capability.step_ids == ["submit"]
+    flow_spec_module._attach_option_source_memberships(spec)
+    source_ref = next(ref for ref in submit_capability.request_refs if ref.step_id == "seal-options")
+    assert source_ref.usage == "option_source"
+    assert "seal-options" not in submit_capability.step_ids
+
+@pytest.mark.parametrize(
+    ("target_path", "target_label", "source_path", "value_key", "label_key", "selected"),
+    [
+        ("projectId", "Project", "/gateway/projects/options", "id", "name", "project-2"),
+        ("teamId", "Team", "/api/teams/simple-list", "id", "displayName", "team-2"),
+        ("workTypeCode", "Work Type", "/v2/work-types/candidates", "code", "label", "type-2"),
+        ("approverId", "Approver", "/system/users/select", "userId", "nickName", "user-2"),
+    ],
+)
+def test_structural_option_binding_generalizes_across_business_domains(
+    target_path,
+    target_label,
+    source_path,
+    value_key,
+    label_key,
+    selected,
+):
+    rows = [
+        {value_key: selected.replace("-2", "-1"), label_key: f"{target_label} A"},
+        {value_key: selected, label_key: f"{target_label} B"},
+    ]
+    target_param = ParamField(
+        path=target_path,
+        key=target_label,
+        label=target_label,
+        value=selected,
+        type="string",
+        wire_type="string",
+        category="user_param",
+        source_kind="user_input",
+        exposed_to_user=True,
+        evidence=[{
+            "kind": "page_control",
+            "control_kind": "select",
+            "editable": True,
+            "disabled": False,
+            "read_only": False,
+        }],
+    )
+    target = FlowStep(
+        step_id="write",
+        method="POST",
+        path="/api/business/submit",
+        params=[target_param],
+        source_meta={"role": "submit_anchor"},
+    )
+    source = FlowStep(
+        step_id="options",
+        method="GET",
+        path=source_path,
+        response_json={"data": rows},
+        source_meta={"role": "business_get"},
+    )
+    spec = FlowSpec(flow_id=f"generic-{target_path}", steps=[target, source])
+
+    assert flow_spec_module._repair_structural_option_bindings(spec) == 1
+    assert target_param.key == target_label
+    assert target_param.type == "string"
+    assert target_param.wire_type == "string"
+    assert target_param.category == "user_param"
+    assert target_param.source_kind == "api_option"
+    assert target_param.source["source_step_id"] == "options"
+    assert target_param.source["value_key"] == value_key
+    assert target_param.source["label_key"] == label_key
+    assert target_param.enum_value_map[f"{target_label} B"] == selected

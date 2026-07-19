@@ -1306,8 +1306,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       setJsonDraft(JSON.stringify(flowSpec, null, 2));
     }
   }, [flowSpec]);
-  const [capabilityAddValue, setCapabilityAddValue] = useState<Record<number, string>>({});
-  const [capabilityAddUsage, setCapabilityAddUsage] = useState<Record<number, CapabilityUsage | "">>({});
+  // Capability-local UI state must follow the capability identity, not its
+  // current array position. Index keys made expanded panels/dropdowns jump to
+  // a different capability immediately after an up/down reorder.
+  const [capabilityAddValue, setCapabilityAddValue] = useState<Record<string, string>>({});
+  const [capabilityAddUsage, setCapabilityAddUsage] = useState<Record<string, CapabilityUsage | "">>({});
   const pendingCapabilityMembershipRef = useRef<Array<{
     capability: string; requestId?: string; requestIndex?: number | string | null; usage: CapabilityUsage;
   }>>([]);
@@ -1332,7 +1335,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [lastAnalysisEvidence, setLastAnalysisEvidence] = useState<{ screenshot_count: number; screenshot_names?: string[] } | null>(null);
   const [expandedCapabilityKeys, setExpandedCapabilityKeys] = useState<string[]>([]);
   const [expandedCapabilitySections, setExpandedCapabilitySections] = useState<Record<number, string[]>>({});
-  const [expandedCapabilitySteps, setExpandedCapabilitySteps] = useState<Record<number, string[]>>({});
+  const [expandedCapabilitySteps, setExpandedCapabilitySteps] = useState<Record<string, string[]>>({});
   const [expandedRequestPanels, setExpandedRequestPanels] = useState<string[]>([]);
   const [expandedUnassignedSteps, setExpandedUnassignedSteps] = useState<string[]>([]);
   const [expandedCapabilityRelationKeys, setExpandedCapabilityRelationKeys] = useState<string[]>([]);
@@ -2736,8 +2739,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return cap.name || cap.capability_id || `idx:${idx}`;
   }
   function capabilityPanelKey(cap: FlowCapabilityData, idx: number) {
-    // capability name 可编辑，不能作为面板 key；否则失焦保存会吞掉紧随其后的删除点击。
-    return cap.capability_id || `capability-index:${idx}`;
+    // Names are editable and must never participate in the normal key. Legacy
+    // duplicate server IDs get an indexed quarantine key so React does not
+    // reuse the wrong panel; valid IDs remain stable across every field edit.
+    if (cap.capability_id) {
+      const duplicateCount = (flowSpecRef.current?.capabilities || [])
+        .filter((item) => item.capability_id === cap.capability_id).length;
+      return duplicateCount > 1
+        ? ["capability", cap.capability_id, "duplicate", idx].join(":")
+        : ["capability", cap.capability_id].join(":");
+    }
+    return ["capability-name", cap.name || idx].join(":");
   }
   function moveCapability(idx: number, delta: number) {
     const current = flowSpecRef.current;
@@ -2745,10 +2757,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const caps = [...(current.capabilities || [])];
     const to = idx + delta;
     if (to < 0 || to >= caps.length) return;
-    const refs = caps.map(capabilityRef);
-    const [item] = refs.splice(idx, 1);
-    refs.splice(to, 0, item);
-    const ordered = refs.map((ref) => caps.find((cap, capIdx) => capabilityRef(cap, capIdx) === ref)!).filter(Boolean);
+    const ordered = [...caps];
+    const [item] = ordered.splice(idx, 1);
+    ordered.splice(to, 0, item);
+    const refs = ordered.map(capabilityRef);
     preserveEditorScrollForReorder();
     const next = { ...current, capabilities: ordered };
     flowSpecRef.current = next;
@@ -3417,7 +3429,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return (
       <List
         size="small"
-        rowKey={(req) => requestOptionValue(req)}
+        // allCapturedRequests is grouped by this signature, so it is the one
+        // identity guaranteed unique even if a recorder reuses request_id.
+        rowKey={(req) => requestGraphSignature(req)}
         dataSource={rows}
         renderItem={(req, idx) => {
           const capabilityNames = capturedRequestCapabilityNames(flowSpec, req);
@@ -3876,8 +3890,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         extra={
           <Space onClick={(e) => e.stopPropagation()}>
-            <Tooltip title="上移"><Button size="small" icon={<UpOutlined />} disabled={stepIdx === 0} onClick={() => moveStepInCapability(capIdx, stepIds, stepIdx, -1)} /></Tooltip>
-            <Tooltip title="下移"><Button size="small" icon={<DownOutlined />} disabled={stepIdx === stepIds.length - 1} onClick={() => moveStepInCapability(capIdx, stepIds, stepIdx, 1)} /></Tooltip>
+            <Tooltip title="上移"><Button size="small" icon={<UpOutlined />} disabled={stepIdx === 0}
+              onMouseDown={(e) => e.preventDefault()} onClick={() => moveStepInCapability(capIdx, stepIds, stepIdx, -1)} /></Tooltip>
+            <Tooltip title="下移"><Button size="small" icon={<DownOutlined />} disabled={stepIdx === stepIds.length - 1}
+              onMouseDown={(e) => e.preventDefault()} onClick={() => moveStepInCapability(capIdx, stepIds, stepIdx, 1)} /></Tooltip>
             <Button size="small" danger onClick={() => removeStepFromCapability(capIdx, stepId)}>移除</Button>
           </Space>
         }
@@ -3887,6 +3903,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     );
   }
   function renderCapabilityInterfacesWithFields(cap: FlowCapabilityData, capIdx: number) {
+    const capabilityUiKey = capabilityPanelKey(cap, capIdx);
     const stepIds = capabilityActualStepIds(cap);
     const auxiliaryRefs = (cap.request_refs || []).filter((ref) => ref.usage === "option_source" && ref.step_id && !stepIds.includes(ref.step_id));
     const addOptions = capabilityStepSelectOptions(cap);
@@ -3896,25 +3913,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         <Space wrap align="center">
           <Typography.Text strong>添加接口</Typography.Text>
           <NativeSelect
-            value={capabilityAddValue[capIdx] || ""}
+            value={capabilityAddValue[capabilityUiKey] || ""}
             width={460}
             options={[{ label: addOptions.length ? "选择要加入能力的接口" : "没有可添加的接口", value: "" }, ...addOptions]}
-            onChange={(v) => setCapabilityAddValue((s) => ({ ...s, [capIdx]: v }))}
+            onChange={(v) => setCapabilityAddValue((s) => ({ ...s, [capabilityUiKey]: v }))}
           />
           <NativeSelect
-            value={capabilityAddUsage[capIdx] || ""}
+            value={capabilityAddUsage[capabilityUiKey] || ""}
             width={140}
             options={[{ label: "选择用途", value: "" }, ...CAPABILITY_USAGE_OPTIONS]}
-            onChange={(v) => setCapabilityAddUsage((s) => ({ ...s, [capIdx]: v as CapabilityUsage | "" }))}
+            onChange={(v) => setCapabilityAddUsage((s) => ({ ...s, [capabilityUiKey]: v as CapabilityUsage | "" }))}
           />
           <Button
             size="small"
             type="primary"
-            disabled={!capabilityAddValue[capIdx] || !capabilityAddUsage[capIdx]}
+            disabled={!capabilityAddValue[capabilityUiKey] || !capabilityAddUsage[capabilityUiKey]}
             onClick={() => {
-              addStepToCapability(capIdx, capabilityAddValue[capIdx], capabilityAddUsage[capIdx]);
-              setCapabilityAddValue((s) => ({ ...s, [capIdx]: "" }));
-              setCapabilityAddUsage((s) => ({ ...s, [capIdx]: "" }));
+              addStepToCapability(capIdx, capabilityAddValue[capabilityUiKey], capabilityAddUsage[capabilityUiKey]);
+              setCapabilityAddValue((s) => ({ ...s, [capabilityUiKey]: "" }));
+              setCapabilityAddUsage((s) => ({ ...s, [capabilityUiKey]: "" }));
             }}
           >
             添加接口
@@ -3926,10 +3943,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         ) : (
           <Collapse
             size="small"
-            activeKey={expandedCapabilitySteps[capIdx] || []}
+            activeKey={expandedCapabilitySteps[capabilityUiKey] || []}
             onChange={(keys) => setExpandedCapabilitySteps((current) => ({
               ...current,
-              [capIdx]: (Array.isArray(keys) ? keys : [keys]).map(String),
+              [capabilityUiKey]: (Array.isArray(keys) ? keys : [keys]).map(String),
             }))}
           >
             {stepIds.map((stepId, stepIdx) => renderCapabilityStepWithFields(cap, capIdx, stepId, stepIdx))}
@@ -3939,6 +3956,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <List
             size="small"
             header={<Typography.Text strong>候选来源</Typography.Text>}
+            rowKey={(ref, refIdx) => [capabilityUiKey, "option-source", ref.step_id || ref.request_id || refIdx].join(":")}
             dataSource={auxiliaryRefs}
             renderItem={(ref) => {
               const st = stepById[String(ref.step_id || "")];
@@ -4161,8 +4179,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   }
                   extra={
                     <Space onClick={(e) => e.stopPropagation()}>
-                      <Tooltip title="能力上移"><Button size="small" icon={<UpOutlined />} disabled={idx === 0} onClick={() => moveCapability(idx, -1)} /></Tooltip>
-                      <Tooltip title="能力下移"><Button size="small" icon={<DownOutlined />} disabled={idx === capabilities.length - 1} onClick={() => moveCapability(idx, 1)} /></Tooltip>
+                      <Tooltip title="能力上移"><Button size="small" icon={<UpOutlined />} disabled={idx === 0}
+                        onMouseDown={(e) => e.preventDefault()} onClick={() => moveCapability(idx, -1)} /></Tooltip>
+                      <Tooltip title="能力下移"><Button size="small" icon={<DownOutlined />} disabled={idx === capabilities.length - 1}
+                        onMouseDown={(e) => e.preventDefault()} onClick={() => moveCapability(idx, 1)} /></Tooltip>
                       <Checkbox checked={!!cap.confirmed} onChange={(e) => updateCapabilityConfirmed(idx, e.target.checked)}>采纳当前定义</Checkbox>
                       <Tooltip title="删除"><Button size="small" danger icon={<DeleteOutlined />}
                         onMouseDown={(e) => e.preventDefault()} onClick={() => removeCapability(idx)} /></Tooltip>

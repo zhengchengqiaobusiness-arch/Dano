@@ -1727,7 +1727,7 @@ async def record_ws(ws: WebSocket) -> None:
                                     count=len(relevant),
                                     tenant=init.get("tenant", ""),
                                     subsystem=init.get("subsystem", ""),
-                                    sample=relevant[0].text[:200])
+                                    sample=relevant[0].text[:800])
                     else:
                         log.info("frontend.console_logs",
                                  total=summary["total"],

@@ -51,6 +51,8 @@ from dano.execution.page.request_capture import (
     suggest_select_names,
     suggest_selects,
     suggest_workflow_steps,
+    _is_idlike,
+    _pick_label_key,
 )
 
 
@@ -275,14 +277,6 @@ class RequestFacts(BaseModel):
 class CapabilityRequestRef(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    @model_validator(mode="before")
-    @classmethod
-    def discard_legacy_manual_lock(cls, value: Any) -> Any:
-        if isinstance(value, dict):
-            value = dict(value)
-            value.pop("pinned", None)
-        return value
-
     request_id: str = ""
     request_index: Any = None
     step_id: str = ""
@@ -299,15 +293,6 @@ class CapabilityRequestRef(BaseModel):
 
 class CapabilityField(BaseModel):
     model_config = ConfigDict(extra="allow")
-
-    @model_validator(mode="before")
-    @classmethod
-    def discard_legacy_required_axes(cls, value: Any) -> Any:
-        if isinstance(value, dict):
-            value = dict(value)
-            value.pop("page_required", None)
-            value.pop("required_source", None)
-        return value
 
     field_id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
     scope: str = "input"  # input / request_field / internal / computed / output
@@ -460,28 +445,6 @@ class FlowSpec(BaseModel):
     risk_level: str = "L3"
     meta: dict[str, Any] = Field(default_factory=dict)
     schema_version: int = 1
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_request_facts_input(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        payload = dict(data)
-        meta = dict(payload.get("meta") or {})
-        graph = meta.get("request_graph") or {}
-        raw_facts = payload.get("request_facts")
-        if graph and not _raw_request_facts_has_requests(raw_facts):
-            payload["request_facts"] = _request_facts_from_graph(
-                graph,
-                diagnostics=list(payload.get("diagnostics") or meta.get("diagnostics") or []),
-            ).model_dump()
-        elif raw_facts is not None and _raw_request_facts_has_requests(raw_facts) and not graph:
-            try:
-                meta["request_graph"] = _request_graph_from_request_facts(RequestFacts.model_validate(raw_facts))
-                payload["meta"] = meta
-            except Exception:
-                pass
-        return payload
 
     @model_validator(mode="after")
     def _sync_derived_models(self) -> "FlowSpec":
@@ -754,6 +717,12 @@ def _read_is_option_source(read: dict) -> bool:
     if has_list_payload and control_triggered:
         # Endpoint naming is not portable. A list response causally triggered by
         # opening/selecting a choice control is grounded option-source evidence.
+        return True
+    # A strong candidate endpoint remains an option source even when an older
+    # coarse role classifier called it business_get because rows also had
+    # audit fields such as status/remark/createTime. Strict field binding still
+    # requires structural and value evidence before the source owns a field.
+    if has_list_payload and _is_option_source_url(url):
         return True
     if role in {"business_get", "read_context"}:
         # 业务记录列表不是字段枚举。角色分类是事实库结论，不能再因“响应是数组”
@@ -2722,57 +2691,22 @@ def _request_graph_from_request_facts(request_facts: RequestFacts) -> dict[str, 
     return graph
 
 
-def _raw_request_facts_has_requests(raw_facts: Any) -> bool:
-    if isinstance(raw_facts, RequestFacts):
-        return bool(raw_facts.requests)
-    if isinstance(raw_facts, dict):
-        return bool(raw_facts.get("requests"))
-    return False
-
-
-def _request_graph_has_entries(graph: Any) -> bool:
-    if not isinstance(graph, dict):
-        return False
-    return any(graph.get(bucket) for bucket in ("all_requests", "selected_steps", "candidate_reads", "filtered_requests"))
-
-
 def ensure_request_facts(spec: FlowSpec, *, prefer: str = "request_facts") -> FlowSpec:
-    """同步 P0 request_facts 与旧 meta.request_graph，保持双轨兼容。
+    """同步 P0 request_facts 与旧 meta.request_graph。
 
-    prefer="meta" 用于旧编辑路径刚更新 meta.request_graph 后的反向同步；
-    默认让一等 request_facts 回写 legacy graph。
+    现在只把 request_facts 写回 meta.request_graph，不再从 legacy 图反向补齐
+    request_facts，避免旧导入数据在运行时被静默改写。
     """
     meta = dict(spec.meta or {})
-    graph = meta.get("request_graph") or {}
-    has_graph = _request_graph_has_entries(graph)
     has_facts = bool(spec.request_facts.requests)
-    old_option_sources = list(spec.request_facts.option_sources or [])
-    old_page_events = list(spec.request_facts.page_events or [])
-    if prefer == "meta":
-        if has_graph:
-            spec.request_facts = _request_facts_from_graph(
-                graph,
-                diagnostics=spec.diagnostics,
-                page_events=old_page_events,
-            )
-            if old_option_sources and not spec.request_facts.option_sources:
-                spec.request_facts.option_sources = old_option_sources
-        elif has_facts:
-            meta["request_graph"] = _request_graph_from_request_facts(spec.request_facts)
-            spec.meta = meta
-        return spec
 
     if has_facts:
         meta["request_graph"] = _request_graph_from_request_facts(spec.request_facts)
         spec.meta = meta
-    elif has_graph:
-        spec.request_facts = _request_facts_from_graph(
-            graph,
-            diagnostics=spec.diagnostics,
-            page_events=old_page_events,
-        )
-        if old_option_sources and not spec.request_facts.option_sources:
-            spec.request_facts.option_sources = old_option_sources
+
+    if prefer == "meta" or not has_facts:
+        return spec
+
     return spec
 
 
@@ -2833,11 +2767,13 @@ def _capability_request_ref_from_step(
     spec: FlowSpec,
     step: FlowStep,
     existing: CapabilityRequestRef | None = None,
+    *,
+    extra: dict[str, Any] | None = None,
 ) -> CapabilityRequestRef:
     fact = _step_request_fact_for_capability(spec, step)
     rid = fact.request_id if fact else str((step.source_meta or {}).get("request_id") or "")
     analysis = spec.request_facts.analysis.get(rid) if rid else None
-    return CapabilityRequestRef(
+    ref = CapabilityRequestRef(
         request_id=rid,
         request_index=fact.request_index if fact else (step.source_meta or {}).get("request_index"),
         step_id=step.step_id,
@@ -2851,7 +2787,30 @@ def _capability_request_ref_from_step(
         origin=existing.origin if existing else str((step.source_meta or {}).get("membership_origin") or "planner"),
         confirmed=bool(existing.confirmed) if existing else False,
     )
-
+    merged_extra: dict[str, Any] = {}
+    if existing and existing.__pydantic_extra__:
+        merged_extra.update(existing.__pydantic_extra__ or {})
+    if extra:
+        merged_extra.update(extra)
+    if merged_extra:
+        for key, value in merged_extra.items():
+            if key in {
+                "request_id",
+                "request_index",
+                "step_id",
+                "role",
+                "method",
+                "path",
+                "sequence",
+                "confidence",
+                "reason",
+                "usage",
+                "origin",
+                "confirmed",
+            }:
+                continue
+            ref.__pydantic_extra__[key] = value
+    return ref
 
 def _capability_field_from_param(
     step: FlowStep,
@@ -4431,6 +4390,11 @@ def _auto_dependency_target_allowed(param: ParamField | None) -> bool:
 def _auto_dependency_link_allowed(param: ParamField | None, source_path: str, lk: FlowLink | None = None) -> bool:
     if lk is not None and not _link_is_auto_generated(lk):
         return True
+    # Picking the first row of a previous list is not a dependency. It is an
+    # arbitrary choice and is dangerous for editable dropdown IDs. Legitimate
+    # collection transforms use foreach/map nodes or an explicit manual link.
+    if "[" in str(source_path or ""):
+        return False
     if param is not None and lk is not None and lk.confirmed and float(lk.confidence or 0.0) >= 0.95:
         source_leaf = re.sub(r"[^a-z0-9]+", "", str(source_path or "").split(".")[-1].lower())
         target_leaf = re.sub(r"[^a-z0-9]+", "", str(param.path or param.key or "").split(".")[-1].lower())
@@ -5542,6 +5506,7 @@ def _repair_generated_capability_contracts(spec: FlowSpec) -> FlowSpec:
     """Deterministically repair only Planner-generated capability contracts."""
     _infer_computed_runtime_fields(spec)
     rebuild_flow_dependencies(spec)
+    _repair_structural_option_bindings(spec)
     by_id = {step.step_id: step for step in spec.steps}
     renamed: dict[str, str] = {}
     for cap in spec.capabilities or []:
@@ -5603,6 +5568,7 @@ def _repair_generated_capability_contracts(spec: FlowSpec) -> FlowSpec:
             relation.to_capability = renamed.get(relation.to_capability, relation.to_capability)
     _canonicalize_public_capability_identities(spec)
     spec = _prune_empty_capabilities(spec)
+    _attach_option_source_memberships(spec)
     valid_refs = {
         ref
         for cap in spec.capabilities or []
@@ -6478,16 +6444,16 @@ def _set_capability_request_membership(
     *,
     usage: str,
     origin: str,
+    extra_fields: dict[str, Any] | None = None,
 ) -> CapabilityRequestRef:
     current = next((ref for ref in (cap.request_refs or []) if ref.step_id == step.step_id), None)
-    ref = _capability_request_ref_from_step(spec, step, current)
+    ref = _capability_request_ref_from_step(spec, step, current, extra=extra_fields)
     ref.usage = usage if usage in {"execute", "option_source", "fact_check", "preflight"} else "execute"
     ref.origin = origin or "manual"
     ref.confirmed = ref.origin in {"manual", "user"}
     cap.request_refs = [item for item in (cap.request_refs or []) if item.step_id != step.step_id]
     cap.request_refs.append(ref)
     return ref
-
 
 def _request_graph_entries(spec: FlowSpec, roles: set[str]) -> list[dict[str, Any]]:
     graph = _request_graph_for_spec(spec)
@@ -7470,6 +7436,26 @@ def _merge_capability_lists(
     )
 
 
+def _planned_capability_has_public_anchor(
+    spec: FlowSpec,
+    kind: str,
+    planned_step_ids: list[str],
+) -> bool:
+    """Only user-callable business actions may create public capabilities."""
+    by_id = {step.step_id: step for step in spec.steps}
+    option_ids = _option_source_step_ids(spec)
+    for step_id in planned_step_ids:
+        step = by_id.get(step_id)
+        if step is None or step_id in option_ids:
+            continue
+        method = (step.method or "GET").upper()
+        if kind in {"submit", "submit_batch"} and method in _WRITE_METHODS:
+            return True
+        if kind in {"query_status", "validate_batch"} and _is_business_query_step(step):
+            return True
+    return False
+
+
 def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[str, Any]]:
     """Compile a model's complete semantic blueprint into the existing edit DSL."""
     plan = result.get("semantic_plan") or result.get("plan")
@@ -7546,10 +7532,39 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
                 param for param in (target_step.params if target_step else [])
                 if _strip_body_prefix(param.path) == _strip_body_prefix(path)
             ), None)
-            category = str(item.get("category") or (target_param.category if target_param else "user_param"))
-            source_kind = str(item.get("source_kind") or "")
-            if source_kind in {"", "unknown"} and target_param and target_param.source_kind not in {"", "unknown"}:
-                source_kind = target_param.source_kind
+            # Field semantics may rename and describe a grounded field, but it
+            # cannot invent a source axis. Source/category changes require the
+            # executable bind_dependency/bind_option_source DSL and their
+            # endpoint validation. This blocks prose-only claims such as
+            # "dropdown ID comes from data.list[0]".
+            category = str(target_param.category if target_param else "user_param")
+            source_kind = str(target_param.source_kind if target_param else "unknown")
+            requested_category = str(item.get("category") or "")
+            requested_source_kind = str(item.get("source_kind") or "")
+            grounded_editable_control = any(
+                isinstance(evidence_item, dict)
+                and str(evidence_item.get("source") or evidence_item.get("kind") or "") in {
+                    "screenshot", "recorder_dom", "page_control",
+                }
+                and str(evidence_item.get("control_kind") or "").lower() in {
+                    "text", "textarea", "number", "date", "datetime", "time",
+                    "select", "combobox", "cascader", "picker", "checkbox", "radio",
+                }
+                and not evidence_item.get("disabled")
+                and not evidence_item.get("read_only")
+                for evidence_item in (item.get("evidence") or [])
+            )
+            if (
+                grounded_editable_control
+                and requested_category == "user_param"
+                and requested_source_kind == "user_input"
+            ):
+                # Structured screenshot/DOM control evidence may recover a
+                # caller field that the network-only pass left unknown. Prose
+                # evidence cannot change source axes, and API/dependency sources
+                # still require their executable binding operations.
+                category = "user_param"
+                source_kind = "user_input"
             operation = "upsert_input_field" if category == "user_param" else "upsert_internal_field"
             ops.append({
                 "op": operation,
@@ -7573,6 +7588,11 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
         if kind not in {"query_status", "validate_batch", "submit_batch", "submit"}:
             continue
         proposed_steps = [str(value) for value in (item.get("step_ids") or []) if str(value) in step_ids]
+        if not _planned_capability_has_public_anchor(spec, kind, proposed_steps):
+            # Option sources, process-definition lookups, approval previews and
+            # other internal reads stay inside a real business anchor. They may
+            # be request_refs/preflights but never standalone public abilities.
+            continue
         candidates = by_kind.get(kind) or []
         available = [
             capability for capability in candidates
@@ -8951,6 +8971,10 @@ def _planner_patch_edits(
                 target_path = str(target.get("path") or edit.get("target_path") or "")
                 cap_name = str(edit.get("capability_name") or edit.get("capability") or "")
                 scoped_cap = cap_by_name.get(cap_name)
+            if "[" in source_path:
+                # Planner proposals cannot turn an arbitrary collection row
+                # into a scalar field dependency.
+                continue
             source_step = step_by_id.get(source_step_id)
             target_step = step_by_id.get(target_step_id)
             target_param = next((
@@ -9082,8 +9106,25 @@ async def orchestrate_flow_capabilities(
     initial_report = validate_flow_spec(original)
     current = _prune_empty_capabilities(original.model_copy(deep=True))
     rebuild_flow_dependencies(current)
+    _repair_structural_option_bindings(current)
+    capability_model = (current.meta or {}).get("capability_model") or {}
+    auto_generated_existing = bool(
+        current.capabilities
+        and capability_model.get("source")
+        and not any(
+            cap.locked
+            or cap.updated_by == "user"
+            or any(ref.origin in {"manual", "user"} for ref in (cap.request_refs or []))
+            for cap in current.capabilities
+        )
+    )
+    if auto_generated_existing:
+        # Re-run deterministic boundaries after classifier/link repairs. Old
+        # Planner output must not freeze an invalid generated capability forever.
+        current.capabilities = []
+        current.capability_relations = []
     had_existing = bool(current.capabilities)
-    initial_generation = generation_mode == "initial" or (generation_mode is None and not had_existing)
+    initial_generation = auto_generated_existing or generation_mode == "initial" or (generation_mode is None and not had_existing)
     # Optimization is a boundary re-analysis over already materialized steps.
     # It may repair capability membership, but request IDs outside FlowSpec
     # remain unavailable to both deterministic and model planners.
@@ -9189,10 +9230,25 @@ async def orchestrate_flow_capabilities(
     semantic_coverage = _semantic_plan_coverage(current, {"semantic_plan": semantic_plan})
     caps = list(current.capabilities or [])
     final_report = validate_flow_spec(current)
+    final_errors = [
+        *list(final_report.get("errors") or []),
+        *list((final_report.get("capability_validation") or {}).get("errors") or []),
+    ]
+    public_boundaries_valid = bool(caps) and all(
+        _planned_capability_has_public_anchor(
+            current, capability.kind, list(_capability_node_step_ids(capability)),
+        )
+        for capability in caps
+    )
+    generation_ready = bool(
+        semantic_coverage.get("complete")
+        and public_boundaries_valid
+        and not final_errors
+    )
     current.meta = {
         **(current.meta or {}),
         "capability_model": {
-            "status": "ready",
+            "status": "ready" if generation_ready else "needs_review",
             "source": source,
             "generated_count": len(caps),
             "reason": reason,
@@ -12823,6 +12879,175 @@ def _append_query_params_to_step(step: FlowStep, url: str) -> None:
         existing_keys.add(key)
 
 
+def _option_binding_tokens(value: Any) -> set[str]:
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value or ""))
+    tokens = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9]*|[\u4e00-\u9fff]+", text)
+        if token
+    }
+    expanded = set(tokens)
+    expanded.update(token[:-1] for token in tokens if token.endswith("s") and len(token) > 3)
+    return expanded - {
+        "id", "ids", "code", "key", "value", "values", "data", "api", "admin",
+        "list", "simple", "options", "option", "query", "page", "get",
+    }
+
+
+def _repair_structural_option_bindings(spec: FlowSpec) -> int:
+    """Recover dropdown bindings from grounded option rows and wire values.
+
+    This repair is intentionally narrower than ordinary value matching:
+    - the target must belong to a write request;
+    - the source must already be an option endpoint/role;
+    - the wire value must match one ID-like column;
+    - source and target must share a business token, unless DOM evidence proves
+      that the exact request field is a select control;
+    - exactly one source contract may match.
+
+    It generalizes teamId/userId/workTypeCode/etc. without choosing the first
+    row of an unrelated business list.
+    """
+    candidates: list[tuple[FlowStep, list[dict[str, Any]]]] = []
+    for source in spec.steps:
+        role = str((source.source_meta or {}).get("role") or source.semantic_role or "")
+        items = as_list_payload(source.response_json) or []
+        if (
+            (source.method or "GET").upper() in {"GET", "HEAD"}
+            and items
+            and all(isinstance(item, dict) for item in items)
+            and (role == "read_option" or _is_option_source_url(source.path or source.url))
+        ):
+            candidates.append((source, [dict(item) for item in items if isinstance(item, dict)]))
+
+    repaired = 0
+    for target in _write_steps(spec):
+        for param in target.params or []:
+            if (
+                param.locked
+                or _param_has_manual_contract(param)
+                or param.source_kind in _OPTION_SOURCE_KINDS
+                or _looks_pagination_field(param.key, param.path)
+                or param.category == "system_const"
+            ):
+                continue
+            value = str(param.value if param.value is not None else "").strip()
+            if not value:
+                continue
+            target_tokens = _option_binding_tokens(
+                " ".join((str(param.path or ""), str(param.key or ""), str(param.label or "")))
+            )
+            select_control = any(
+                isinstance(item, dict)
+                and item.get("kind") == "page_control"
+                and str(item.get("control_kind") or "").lower() in {
+                    "select", "combobox", "cascader", "picker", "radio",
+                }
+                and not item.get("disabled")
+                and not item.get("read_only")
+                for item in (param.evidence or [])
+            )
+            matches: list[tuple[FlowStep, str, str, list[dict[str, Any]], dict[str, Any]]] = []
+            for source, items in candidates:
+                source_tokens = _option_binding_tokens(source.path or source.url)
+                if not select_control and not (target_tokens & source_tokens):
+                    continue
+                value_keys = {
+                    str(key)
+                    for item in items
+                    for key, item_value in item.items()
+                    if _is_idlike(str(key)) and str(item_value) == value
+                }
+                if len(value_keys) != 1:
+                    continue
+                value_key = next(iter(value_keys))
+                matching_rows = [item for item in items if str(item.get(value_key)) == value]
+                if len(matching_rows) != 1:
+                    continue
+                label_key = _pick_label_key(matching_rows[0], value_key)
+                if label_key == value_key:
+                    continue
+                records: list[dict[str, Any]] = []
+                option_map: dict[str, Any] = {}
+                valid = True
+                seen_values: set[str] = set()
+                for item in items:
+                    label = str(item.get(label_key) or "").strip()
+                    raw_value = item.get(value_key)
+                    value_sig = str(raw_value)
+                    if not label or raw_value in (None, "") or label in option_map or value_sig in seen_values:
+                        valid = False
+                        break
+                    seen_values.add(value_sig)
+                    option_map[label] = raw_value
+                    records.append({"label": label, "value": raw_value})
+                if valid and records:
+                    matches.append((source, value_key, label_key, records, option_map))
+            fingerprints = {
+                (
+                    source.step_id,
+                    _request_path({"url": source.path or source.url}),
+                    value_key,
+                    label_key,
+                )
+                for source, value_key, label_key, _records, _option_map in matches
+            }
+            if len(fingerprints) != 1:
+                continue
+            source, value_key, label_key, records, option_map = matches[0]
+            _bind_option_source(
+                spec,
+                target_step_id=target.step_id,
+                target_path=param.path,
+                source_step_id=source.step_id,
+                value_key=value_key,
+                label_key=label_key,
+                id_path=param.path,
+                options=records,
+                option_map=option_map,
+                actor="recorder",
+            )
+            repaired += 1
+    return repaired
+
+
+def _attach_option_source_memberships(spec: FlowSpec) -> None:
+    """Expose candidate-source ownership without executing it as a call node."""
+    by_id = {step.step_id: step for step in spec.steps}
+    by_path = {
+        _request_path({"url": step.path or step.url}): step
+        for step in spec.steps
+    }
+    for capability in spec.capabilities or []:
+        source_ids: set[str] = set()
+        for step_id in _capability_node_step_ids(capability):
+            step = by_id.get(step_id)
+            for param in (step.params if step else []):
+                if param.source_kind != "api_option":
+                    continue
+                source = param.source or {}
+                source_id = str(source.get("source_step_id") or "")
+                if not source_id and source.get("source_url"):
+                    source_step = by_path.get(_request_path({"url": str(source.get("source_url"))}))
+                    source_id = source_step.step_id if source_step else ""
+                if source_id in by_id and source_id not in set(_capability_node_step_ids(capability)):
+                    source_ids.add(source_id)
+        for source_id in source_ids:
+            source_step = by_id[source_id]
+            existing = next(
+                (ref for ref in (capability.request_refs or []) if ref.step_id == source_id),
+                None,
+            )
+            ref = _capability_request_ref_from_step(spec, source_step, existing)
+            ref.usage = "option_source"
+            ref.origin = "recorder"
+            ref.confirmed = True
+            capability.request_refs = [
+                item for item in (capability.request_refs or []) if item.step_id != source_id
+            ]
+            capability.request_refs.append(ref)
+
+
 def _dependency_sig(source_step_id: str, source_path: str, target_step_id: str, target_path: str) -> str:
     raw = "|".join([source_step_id or "", source_path or "", target_step_id or "", target_path or ""])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
@@ -12949,6 +13174,8 @@ def rebuild_flow_dependencies(spec: FlowSpec) -> int:
                 if len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 8:
                     continue
                 _score, source, source_path = ranked[0]
+            if "[" in str(source_path or ""):
+                continue
             source_leaf = re.sub(r"[^a-z0-9]+", "", str(source_path or "").split(".")[-1].lower())
             semantic_score = _dependency_match_score(param, source_path)
             strong_internal_id = internal_id_target and source_leaf == "id" and len(matches) == 1
@@ -12973,8 +13200,10 @@ def rebuild_flow_dependencies(spec: FlowSpec) -> int:
             ))
             existing.add(sig)
             added += 1
-    if added:
-        _sync_link_sources(spec.steps, spec.links)
+    # Always prune/synchronize existing links. Previously this only ran when a
+    # new dependency was added, so a bad persisted list[0] link survived every
+    # later re-analysis and kept the target field hidden as previous_response.
+    _sync_link_sources(spec.steps, spec.links)
     return added
 
 
@@ -14051,14 +14280,18 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             step = _find_step(new_spec, step_id)
             usage = str(edit.get("usage") or "execute")
             origin = str(edit.get("origin") or actor or "manual")
+            extra_fields = {
+                k: v for k, v in edit.items()
+                if k not in {"op", "capability_name", "capability_id", "step_id", "actor", "usage", "origin", "request_id", "request_index", "request", "source", "target"}
+            }
             _forget_removed_capability_step(new_spec, cap.name, step_id)
             _set_capability_request_membership(
-                new_spec, cap, step, usage=usage, origin=origin,
+                new_spec, cap, step, usage=usage, origin=origin, extra_fields=extra_fields,
             )
-            if usage != "option_source":
-                _add_step_id_to_capability(new_spec, cap, step_id)
             cap.updated_by = "planner" if actor == "planner" else "user"
             _invalidate_capability_contract(cap)
+            if usage != "option_source":
+                _add_step_id_to_capability(new_spec, cap, step_id)
             if usage != "option_source" and not any(n.get("type") == "call" and n.get("step_id") == step_id for n in (cap.nodes or [])):
                 cap.nodes.append({"id": f"call_{len(cap.nodes or []) + 1}", "type": "call", "step_id": step_id})
             _sync_capability_order(new_spec, cap)

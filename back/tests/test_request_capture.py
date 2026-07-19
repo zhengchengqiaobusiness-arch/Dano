@@ -3860,3 +3860,33 @@ async def test_resolve_selects_projects_fields_from_selected_option_object(monke
     assert overrides[("remainingHours",)] == 8
     assert overrides[("teamId",)] == "team-public"
     assert overrides[("approverId",)] == "user-yan"
+
+def test_simple_list_with_audit_columns_is_still_option_source():
+    request = {
+        "method": "GET",
+        "url": "https://example.test/admin-api/bd/seal/simple-list?status=0",
+        "response_json": {
+            "code": 0,
+            "data": [
+                {
+                    "id": "seal-1",
+                    "name": "Company Seal",
+                    "status": 0,
+                    "remark": "",
+                    "createTime": 1784419173000,
+                },
+                {
+                    "id": "seal-2",
+                    "name": "Finance Seal",
+                    "status": 0,
+                    "remark": "",
+                    "createTime": 1784419174000,
+                },
+            ],
+        },
+    }
+
+    role = classify_capture_request(request)
+
+    assert role["role"] == "read_option"
+    assert role["keep"] is False

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+import dano.agent_tools.tools as agent_tools_module
 
 from dano.agent_tools.tools import (
     ToolError,
@@ -75,10 +76,8 @@ def test_flow_fingerprint_is_stable_after_frozen_snapshot_revalidation() -> None
         method="POST",
         path="/api/submit",
     )
-    # Old clients could round-trip this removed field as model extra data.  The
-    # before-validator deliberately drops it when a frozen snapshot is loaded.
-    # That migration must not make the in-memory review and persisted snapshot
-    # look like different releases.
+    # Old clients can round-trip this field as extra data. We keep it in
+    # metadata so frozen/reloaded snapshots stay structurally consistent.
     ref.__pydantic_extra__ = {"pinned": True}
     spec.capabilities = [flow_module.FlowCapability(
         capability_id="submit-capability",
@@ -90,7 +89,7 @@ def test_flow_fingerprint_is_stable_after_frozen_snapshot_revalidation() -> None
 
     frozen = FlowSpec.model_validate(spec.model_dump(mode="json", exclude_none=True))
 
-    assert "pinned" not in frozen.capabilities[0].request_refs[0].model_dump()
+    assert frozen.capabilities[0].request_refs[0].model_dump().get("pinned") is True
     assert flow_spec_fingerprint(spec) == flow_spec_fingerprint(frozen)
 
 
@@ -260,17 +259,65 @@ def test_pi_tools_read_and_apply_plan_without_changing_request_facts(monkeypatch
 
 
 
-def test_pi_plan_rejects_silently_ignored_flow_spec_wrapper(monkeypatch):
-    session = _bind(monkeypatch, recording_id="rec-invalid-plan")
+def test_pi_plan_rejects_legacy_flow_spec_wrapper(monkeypatch):
+    session = _bind(monkeypatch, recording_id="rec-legacy-plan")
 
-    with pytest.raises(ToolError, match="flow_spec.*step_id.*wire_path"):
-        asyncio.run(submit_recording_plan("run-invalid-plan", {
-            "recording_id": "rec-invalid-plan",
+    with pytest.raises(ToolError, match="禁止提交 flow_spec"):
+        asyncio.run(submit_recording_plan("run-legacy-plan", {
+            "recording_id": "rec-legacy-plan",
             "base_flow_version": 1,
-            "plan": {"flow_spec": {"capabilities": [{"title": "截图能力"}]}},
+            "plan": {"flow_spec": {
+                "title": "截图识别的申请流程",
+                "capabilities": [{"title": "截图能力"}],
+            }},
         }))
 
     assert int((session.spec.meta or {}).get("current_version") or 0) == 1
+
+
+def test_pi_plan_normalizes_observed_model_variant_on_first_submission(monkeypatch):
+    session = _bind(monkeypatch, recording_id="rec-model-variant")
+
+    result = asyncio.run(submit_recording_plan("run-model-variant", {
+        "recording_id": "rec-model-variant",
+        "base_flow_version": 1,
+        "plan": {
+            "semantic_plan": {
+                "business_understanding": "提交申请并返回处理结果",
+                "request_roles": ["submit_anchor"],
+                "field_semantics": [{
+                    "step_id": "submit",
+                    "wire_path": "title",
+                    "public_name": "截图中的申请标题",
+                    "business_type": "string",
+                    "category": "runtime_var",
+                    "source_kind": "previous_response",
+                    "confidence": 0.95,
+                    "evidence": "截图标签与请求字段同名",
+                }],
+                "capabilities": [{
+                    "capability_id": "cap_submit_application",
+                    "title": "发起申请",
+                    "description": "提交页面中的申请表单",
+                    "primary_step_id": "submit",
+                    "entry_step_id": "submit",
+                    "depends_on_step_ids": [],
+                }],
+                "capability_relations": [{
+                    "source_capability_id": "cap_submit_application",
+                    "target_capability_id": "cap_submit_application",
+                    "relation_type": "depends_on",
+                }],
+                "unresolved_items": [],
+            },
+            "ops": "",
+        },
+    }))
+
+    assert result["flow_version"] > 1
+    assert session.spec.capabilities
+    assert session.spec.steps[0].params[0].category == "user_param"
+    assert session.spec.steps[0].params[0].source_kind == "user_input"
 
 
 
@@ -705,3 +752,161 @@ def test_page_onboard_required_recording_session_loss_never_falls_back(monkeypat
             recording_pi_required=True,
         ))
     assert calls == ["save"]
+
+
+def test_observed_five_interface_plan_keeps_only_business_anchors():
+    page = FlowStep(
+        step_id="page",
+        method="GET",
+        path="/admin-api/oa/seal-apply/page?pageNo=1&pageSize=10",
+        source_meta={"role": "business_get"},
+        params=[ParamField(
+            path="query.pageNo", key="pageNo", value="1",
+            category="user_param", source_kind="user_input", exposed_to_user=True,
+        )],
+        response_json={"data": {"list": [{"sealId": "seal-1"}], "total": 1}},
+    )
+    definition = FlowStep(
+        step_id="definition",
+        method="GET",
+        path="/admin-api/bpm/process-definition/get?key=oa_seal_apply",
+        source_meta={"role": "business_get", "control_preflight_for_write": True},
+        response_json={"data": {"id": "process-1"}},
+    )
+    approval = FlowStep(
+        step_id="approval",
+        method="GET",
+        path="/admin-api/bpm/process-instance/get-approval-detail",
+        source_meta={"role": "business_get", "control_preflight_for_write": True},
+        params=[ParamField(
+            path="query.processDefinitionId", key="processDefinitionId",
+            value="process-1", category="runtime_var",
+            source_kind="previous_response", exposed_to_user=False,
+        )],
+        response_json={"data": {"nodes": []}},
+    )
+    seal = ParamField(
+        path="sealId",
+        key="sealId",
+        value="seal-1",
+        category="runtime_var",
+        source_kind="previous_response",
+        source={
+            "step_id": "page",
+            "response_path": "data.list[0].sealId",
+            "link_id": "bad-seal-link",
+        },
+        exposed_to_user=False,
+    )
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/admin-api/oa/seal-apply/submit-process",
+        source_meta={"role": "submit_anchor"},
+        params=[seal],
+        response_json={"code": 0},
+    )
+    options = FlowStep(
+        step_id="options",
+        method="GET",
+        path="/admin-api/bd/seal/simple-list?status=0",
+        source_meta={"role": "business_get"},
+        response_json={
+            "data": [
+                {"id": "seal-1", "name": "Company Seal"},
+                {"id": "seal-2", "name": "Finance Seal"},
+            ],
+        },
+    )
+    spec = FlowSpec(
+        flow_id="observed-five-interface",
+        steps=[page, definition, approval, submit, options],
+        links=[
+            flow_module.FlowLink(
+                source_step_id="definition",
+                source_path="data.id",
+                target_step_id="approval",
+                target_path="query.processDefinitionId",
+                confirmed=True,
+                confidence=0.97,
+            ),
+            flow_module.FlowLink(
+                link_id="bad-seal-link",
+                source_step_id="page",
+                source_path="data.list[0].sealId",
+                target_step_id="submit",
+                target_path="sealId",
+                reason="值匹配自动关联",
+                evidence={"kind": "value_match"},
+                confidence=0.85,
+            ),
+        ],
+    )
+    raw_plan = {
+        "semantic_plan": {
+            "business_understanding": "Submit a seal application",
+            "request_roles": [{"role_id": "submit_anchor"}],
+            "field_semantics": [{
+                "step_id": "submit",
+                "wire_path": "sealId",
+                "public_name": "Seal",
+                "business_type": "string",
+                "category": "runtime_var",
+                "source_kind": "previous_response",
+                "confidence": 0.95,
+                "evidence": "The model guessed data.list[0].sealId",
+            }],
+            "capabilities": [
+                {"capability_id": "cap_submit", "title": "Submit Application", "anchor_step_id": "submit"},
+                {"capability_id": "cap_page", "title": "Query Applications", "anchor_step_id": "page"},
+                {"capability_id": "cap_definition", "title": "Get Process Definition", "anchor_step_id": "definition"},
+                {"capability_id": "cap_approval", "title": "Get Approval Detail", "anchor_step_id": "approval"},
+                {"capability_id": "cap_options", "title": "List Seals", "anchor_step_id": "options"},
+            ],
+            "capability_relations": [],
+            "unresolved_items": [],
+        },
+        "ops": "",
+    }
+
+    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
+    capabilities = normalized["semantic_plan"]["capabilities"]
+
+    assert {item["name"] for item in capabilities} == {"cap_submit", "cap_page"}
+    submit_capability = next(item for item in capabilities if item["name"] == "cap_submit")
+    assert submit_capability["kind"] == "submit"
+    assert submit_capability["step_ids"] == ["definition", "approval", "submit"]
+    query_capability = next(item for item in capabilities if item["name"] == "cap_page")
+    assert query_capability["step_ids"] == ["page"]
+    field = normalized["semantic_plan"]["field_semantics"][0]
+    assert field["category"] == "user_param"
+    assert field["source_kind"] == "api_option"
+
+    spec.capabilities = [flow_module.FlowCapability(
+        name="submit_create",
+        title="Old Incorrect Combined Capability",
+        kind="submit",
+        step_ids=["page", "definition", "approval", "submit"],
+        nodes=[
+            {"id": "call_1", "type": "call", "step_id": step_id}
+            for step_id in ("page", "definition", "approval", "submit")
+        ],
+        updated_by="planner",
+    )]
+    spec.meta = {"capability_model": {"source": "pi_agent_patch", "status": "ready"}}
+
+    repaired = asyncio.run(flow_module.orchestrate_flow_capabilities(
+        spec,
+        submission=normalized,
+        generation_mode="optimize",
+    ))
+
+    assert {cap.kind for cap in repaired.capabilities} == {"query_status", "submit"}
+    repaired_submit = next(cap for cap in repaired.capabilities if cap.kind == "submit")
+    repaired_query = next(cap for cap in repaired.capabilities if cap.kind == "query_status")
+    assert repaired_query.step_ids == ["page"]
+    assert repaired_submit.step_ids == ["definition", "approval", "submit"]
+    repaired_seal = next(param for param in repaired.steps[3].params if param.path == "sealId")
+    assert repaired_seal.source_kind == "api_option"
+    option_ref = next(ref for ref in repaired_submit.request_refs if ref.step_id == "options")
+    assert option_ref.usage == "option_source"

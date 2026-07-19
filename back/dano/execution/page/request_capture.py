@@ -1966,6 +1966,20 @@ def classify_network_request(req: dict) -> dict:
             "dict", "dictionary", "option", "options", "select", "candidate", "candidates",
             "tree", "simple", "simplelist", "user", "users", "dept", "department", "role", "employee",
         }
+        # Explicit candidate endpoints remain option sources even when their
+        # rows contain ordinary audit columns such as status/remark/createTime.
+        # Those columns describe the option record; they do not turn a
+        # simple-list/options endpoint into a public business query. Keep plain
+        # /list ambiguous so record-list APIs still use response/business facts.
+        normalized_path = _re.sub(r"[^a-z0-9]+", "-", path).strip("-")
+        strong_option_endpoint = bool(
+            _re.search(
+                r"(?:^|-)(?:simple-list|simplelist|options?|candidates?|select|tree|dictionary|dict)(?:-|$)",
+                normalized_path,
+            )
+        )
+        if strong_option_endpoint:
+            return False
         if keys & strong_business_key_hints:
             return True
         return bool(segs & business_path_hints) and not bool(segs & option_path_hints)
