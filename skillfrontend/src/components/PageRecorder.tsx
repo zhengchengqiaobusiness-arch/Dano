@@ -173,7 +173,7 @@ interface RequestRoleData {
   index?: number; method: string; path: string; role: string; keep: boolean;
   reason: string; confidence?: number;
 }
-interface RequestGraphEntry {
+interface RequestFactEntry {
   request_index?: number | string | null; request_id?: string; method?: string; url?: string; path?: string; role?: string;
   keep?: boolean; reason?: string; confidence?: number; response_status?: number | null;
   response_json?: any; response_schema?: any; evidence?: any;
@@ -190,7 +190,7 @@ interface FlowSpecData {
   capability_relations?: FlowCapabilityRelationData[];
   risk_level: string; review_items?: ReviewItemData[];
   request_facts?: {
-    requests?: RequestGraphEntry[];
+    requests?: RequestFactEntry[];
     diagnostics?: any[];
     page_events?: any[];
     option_sources?: any[];
@@ -206,12 +206,6 @@ interface FlowSpecData {
     };
     recording_agent_session?: { mode?: "plan" | "repair"; updated_at?: string; [k: string]: any };
     last_analysis_application?: AnalysisApplication;
-    request_graph?: {
-      all_requests?: RequestGraphEntry[];
-      selected_steps?: RequestGraphEntry[];
-      candidate_reads?: RequestGraphEntry[];
-      filtered_requests?: RequestGraphEntry[];
-    };
     versions?: Array<{ version: number; action: string; reason?: string; created_at?: string; summary?: any }>;
     current_version?: number;
     current_fingerprint?: string;
@@ -863,18 +857,18 @@ function leafPathValues(node: any, prefix = ""): Array<{ path: string; value: st
   if (prefix) out.push({ path: prefix, value: String(node) });
   return out;
 }
-function requestGraphPath(req: RequestGraphEntry) {
+function requestFactPath(req: RequestFactEntry) {
   return (req.path || stripHost(req.url || "") || "").split("?", 1)[0];
 }
-function requestGraphSignature(req: RequestGraphEntry) {
-  return `${(req.method || "GET").toUpperCase()} ${requestGraphPath(req)}`;
+function requestFactSignature(req: RequestFactEntry) {
+  return `${(req.method || "GET").toUpperCase()} ${requestFactPath(req)}`;
 }
-function requestGraphKey(req: RequestGraphEntry) {
+function requestFactKey(req: RequestFactEntry) {
   if (req.request_id) return `id:${req.request_id}`;
   if (req.request_index != null) return `idx:${String(req.request_index)}`;
-  return `sig:${requestGraphSignature(req)}`;
+  return `sig:${requestFactSignature(req)}`;
 }
-function requestQueryValues(req: RequestGraphEntry) {
+function requestQueryValues(req: RequestFactEntry) {
   if (req.query && Object.keys(req.query).length) return req.query;
   const raw = String(req.url || "");
   const queryText = raw.includes("?") ? raw.slice(raw.indexOf("?") + 1) : "";
@@ -887,15 +881,15 @@ function requestQueryValues(req: RequestGraphEntry) {
 function isPaginationQueryKey(key: string) {
   return /^(?:page(?:no|num|number|index|size)?|current|limit|offset|rows?)$/i.test(key.replace(/[._-]/g, ""));
 }
-function requestBusinessFilterCount(req: RequestGraphEntry) {
+function requestBusinessFilterCount(req: RequestFactEntry) {
   return Object.entries(requestQueryValues(req)).filter(([key, value]) =>
     !isPaginationQueryKey(key) && (Array.isArray(value) ? value : [value]).some((item) => String(item ?? "").trim())
   ).length;
 }
-function requestQueryFieldCount(req: RequestGraphEntry) {
+function requestQueryFieldCount(req: RequestFactEntry) {
   return Object.keys(requestQueryValues(req)).length;
 }
-function richerRequestFact(candidate: RequestGraphEntry, current: RequestGraphEntry) {
+function richerRequestFact(candidate: RequestFactEntry, current: RequestFactEntry) {
   const candidateScore = [requestBusinessFilterCount(candidate), requestQueryFieldCount(candidate), candidate.response_json != null ? 1 : 0];
   const currentScore = [requestBusinessFilterCount(current), requestQueryFieldCount(current), current.response_json != null ? 1 : 0];
   for (let idx = 0; idx < candidateScore.length; idx += 1) {
@@ -903,7 +897,7 @@ function richerRequestFact(candidate: RequestGraphEntry, current: RequestGraphEn
   }
   return Number(candidate.sequence ?? candidate.request_index ?? 0) > Number(current.sequence ?? current.request_index ?? 0);
 }
-function isApiLikeRequest(req: RequestGraphEntry) {
+function isApiLikeRequest(req: RequestFactEntry) {
   const path = (req.path || stripHost(req.url || "") || "").split("?", 1)[0].toLowerCase();
   if (!path) return false;
   if (/\.(?:css|js|mjs|map|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|html?|txt|xml)$/i.test(path)) return false;
@@ -915,9 +909,8 @@ function isApiLikeRequest(req: RequestGraphEntry) {
 }
 function allCapturedRequests(spec?: FlowSpecData | null) {
   const facts = spec?.request_facts;
-  const graph = spec?.meta?.request_graph || {};
   const factSource = (facts?.requests || []).map((req) => {
-    const key = requestGraphKey(req);
+    const key = requestFactKey(req);
     const analysis = (facts?.analysis?.[req.request_id || key] || facts?.analysis?.[key] || {}) as Partial<RequestRoleData & Record<string, any>>;
     const usage = facts?.usage?.[req.request_id || key] || facts?.usage?.[key] || {};
     return {
@@ -934,11 +927,7 @@ function allCapturedRequests(spec?: FlowSpecData | null) {
       ].filter(Boolean))),
     };
   });
-  const source = factSource.length ? factSource : graph.all_requests?.length ? graph.all_requests : [
-    ...(graph.selected_steps || []),
-    ...(graph.candidate_reads || []),
-  ];
-  const selectedSigs = new Set((graph.selected_steps || []).map(requestGraphSignature));
+  const source = factSource;
   const stepSigs = new Set((spec?.steps || []).map((s) => `${(s.method || "").toUpperCase()} ${purePath(s.path || s.url || "")}`));
   const stepReqKeys = new Set((spec?.steps || []).flatMap((s) => {
     const meta = s.source_meta || {};
@@ -947,18 +936,18 @@ function allCapturedRequests(spec?: FlowSpecData | null) {
     if (meta.request_index != null) out.push(`idx:${String(meta.request_index)}`);
     return out;
   }));
-  const selectedRank = (req: RequestGraphEntry) => (
-    selectedSigs.has(requestGraphSignature(req)) ||
+  const selectedRank = (req: RequestFactEntry) => (
+    req.state === "materialized" ||
     stepSigs.has(`${(req.method || "").toUpperCase()} ${purePath(req.path || req.url || "")}`) ||
-    stepReqKeys.has(requestGraphKey(req))
+    stepReqKeys.has(requestFactKey(req))
   ) ? 0 : 1;
   const sorted = source
     .filter(isApiLikeRequest)
-    .filter((req, idx, arr) => arr.findIndex((x) => requestGraphKey(x) === requestGraphKey(req)) === idx)
+    .filter((req, idx, arr) => arr.findIndex((x) => requestFactKey(x) === requestFactKey(req)) === idx)
     .sort((a, b) => selectedRank(a) - selectedRank(b) || requestRoleRank(a) - requestRoleRank(b) || (b.confidence ?? 0) - (a.confidence ?? 0) || Number(a.request_index ?? 0) - Number(b.request_index ?? 0));
-  const grouped = new Map<string, RequestGraphEntry>();
+  const grouped = new Map<string, RequestFactEntry>();
   for (const req of sorted) {
-    const signature = requestGraphSignature(req);
+    const signature = requestFactSignature(req);
     const current = grouped.get(signature);
     if (!current) {
       grouped.set(signature, { ...req, occurrence_count: 1 });
@@ -979,7 +968,7 @@ function allCapturedRequests(spec?: FlowSpecData | null) {
   }
   return Array.from(grouped.values());
 }
-function requestRoleRank(req: RequestGraphEntry) {
+function requestRoleRank(req: RequestFactEntry) {
   const role = req.role || "";
   if (["submit_anchor", "business_write"].includes(role)) return 0;
   if (role === "business_get") return 1;
@@ -987,8 +976,8 @@ function requestRoleRank(req: RequestGraphEntry) {
   if (role === "read_option") return 3;
   return 9;
 }
-function requestOptionValue(req: RequestGraphEntry) {
-  return requestGraphKey(req);
+function requestOptionValue(req: RequestFactEntry) {
+  return requestFactKey(req);
 }
 function findCapturedRequest(spec: FlowSpecData | null | undefined, key?: string) {
   if (!key) return undefined;
@@ -1042,8 +1031,8 @@ function capabilityRequestRefForStep(cap: FlowCapabilityData | null | undefined,
 function capabilityUsageLabel(usage?: string) {
   return optionLabel(CAPABILITY_USAGE_OPTIONS, usage || "execute");
 }
-function capturedRequestSteps(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
-  const signature = requestGraphSignature(req);
+function capturedRequestSteps(spec: FlowSpecData | null | undefined, req: RequestFactEntry) {
+  const signature = requestFactSignature(req);
   const exact = (spec?.steps || []).filter((step) => {
     const meta = step.source_meta || {};
     return (req.request_id && String(meta.request_id || "") === String(req.request_id)) ||
@@ -1054,7 +1043,7 @@ function capturedRequestSteps(spec: FlowSpecData | null | undefined, req: Reques
     return stepRequestSignature(step) === signature;
   });
 }
-function capturedRequestCapabilityNames(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
+function capturedRequestCapabilityNames(spec: FlowSpecData | null | undefined, req: RequestFactEntry) {
   const requestStepIds = new Set(capturedRequestSteps(spec, req).map((step) => step.step_id));
   const names = (spec?.capabilities || [])
     .filter((cap) => capabilityActualStepIds(cap).some((stepId) => requestStepIds.has(stepId)))
@@ -1062,9 +1051,9 @@ function capturedRequestCapabilityNames(spec: FlowSpecData | null | undefined, r
     .filter(Boolean);
   return Array.from(new Set(names));
 }
-function isCapturedRequestFieldCandidate(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
+function isCapturedRequestFieldCandidate(spec: FlowSpecData | null | undefined, req: RequestFactEntry) {
   if (req.role === "read_option") return true;
-  const reqPath = requestGraphPath(req);
+  const reqPath = requestFactPath(req);
   const usedAsSelectSource = (spec?.steps || []).some((step) => (step.selects || []).some((select) =>
     (req.request_id && String(select.source_request_id || "") === String(req.request_id)) ||
     (select.source_url && purePath(select.source_url) === purePath(reqPath))
@@ -1076,7 +1065,7 @@ function isCapturedRequestFieldCandidate(spec: FlowSpecData | null | undefined, 
       [source.path, source.url, source.source_url].some((value) => value && purePath(String(value)) === purePath(reqPath));
   });
 }
-function isRequestInSteps(spec: FlowSpecData | null | undefined, req: RequestGraphEntry) {
+function isRequestInSteps(spec: FlowSpecData | null | undefined, req: RequestFactEntry) {
   return capturedRequestSteps(spec, req).length > 0;
 }
 function confidencePercent(value?: number) {
@@ -3444,7 +3433,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         size="small"
         // allCapturedRequests is grouped by this signature, so it is the one
         // identity guaranteed unique even if a recorder reuses request_id.
-        rowKey={(req) => requestGraphSignature(req)}
+        rowKey={(req) => requestFactSignature(req)}
         dataSource={rows}
         renderItem={(req, idx) => {
           const capabilityNames = capturedRequestCapabilityNames(flowSpec, req);
@@ -3503,7 +3492,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         value: `step:${s.step_id}`,
       }));
     const reqItems = allCapturedRequests(flowSpec)
-      .filter((req) => !existingReqKeys.has(requestGraphKey(req)) && !allStepReqKeys.has(requestGraphKey(req)))
+      .filter((req) => !existingReqKeys.has(requestFactKey(req)) && !allStepReqKeys.has(requestFactKey(req)))
       .map((req) => ({
         label: `#${req.sequence ?? req.request_index ?? ""} ${req.method || "GET"} ${req.path || stripHost(req.url || "")}`,
         value: `req:${requestOptionValue(req)}`,

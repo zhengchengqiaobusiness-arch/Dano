@@ -1052,11 +1052,9 @@ def _recording_facts(spec) -> dict:  # noqa: ANN001
     # fields) remains immutable recording evidence and is compared fail-closed.
     facts.pop("analysis", None)
     facts.pop("usage", None)
-    # Legacy request_graph compatibility projects analysis/usage back into
-    # RequestFact as Pydantic extra fields (role/state/materialized_step_id,
-    # etc.). Compare only the fields declared by RequestFact: those are the
-    # captured HTTP evidence. Future declared evidence fields are included
-    # automatically, while derived compatibility extras cannot false-trigger.
+    # RequestFacts stores analysis and usage separately from captured HTTP evidence.
+    # Compare only fields declared by RequestFact so derived or imported extras cannot
+    # trigger a false immutable-evidence violation.
     facts["requests"] = [
         fact.model_dump(
             mode="json",

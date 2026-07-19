@@ -14,6 +14,7 @@ from dano.execution.page.flow_spec import (
     dry_run_flow_spec,
     flow_spec_to_api_request,
     flow_spec_to_client,
+    flow_spec_release_payload,
     flow_spec_to_summary,
     orchestrate_flow_capabilities,
     render_business_description,
@@ -666,37 +667,9 @@ class ToFlowSpecTest(unittest.TestCase):
         s = json.dumps(d, ensure_ascii=False, default=str)
         self.assertIsInstance(s, str)
 
-    def test_request_facts_does_not_migrate_from_legacy_request_graph(self):
+    def test_request_facts_is_canonical_for_client_and_release(self):
         spec = FlowSpec.model_validate({
-            "flow_id": "rf",
-            "meta": {
-                "request_graph": {
-                    "all_requests": [{
-                        "request_index": 7,
-                        "method": "GET",
-                        "url": "https://oa/api/detail?id=1",
-                        "path": "/api/detail?id=1",
-                        "role": "business_get",
-                        "keep": True,
-                        "confidence": 0.93,
-                        "response_json": {"code": 0, "data": {"id": 1}},
-                    }],
-                    "selected_steps": [],
-                    "candidate_reads": [],
-                    "filtered_requests": [],
-                }
-            },
-        })
-
-        self.assertEqual(spec.request_facts.protocol, "dano.request_facts.v1")
-        self.assertEqual(len(spec.request_facts.requests), 0)
-        self.assertEqual(spec.request_facts.analysis, {})
-        self.assertEqual(spec.request_facts.usage, {})
-        self.assertEqual(spec.meta["request_graph"]["all_requests"][0]["request_index"], 7)
-
-    def test_request_facts_backfills_legacy_request_graph(self):
-        spec = FlowSpec.model_validate({
-            "flow_id": "rf-new",
+            "flow_id": "rf-canonical",
             "request_facts": {
                 "requests": [{
                     "request_id": "req-1",
@@ -704,7 +677,8 @@ class ToFlowSpecTest(unittest.TestCase):
                     "method": "GET",
                     "url": "https://oa/api/status",
                     "path": "/api/status",
-                    "response_json": {"ok": True},
+                    "headers": {"Authorization": "Bearer secret"},
+                    "response_json": {"token": "secret", "ok": True},
                 }],
                 "analysis": {
                     "req-1": {
@@ -716,11 +690,18 @@ class ToFlowSpecTest(unittest.TestCase):
                     }
                 },
             },
+            "meta": {"request_graph": {"all_requests": [{"request_id": "legacy"}]}},
         })
 
-        graph = spec.meta["request_graph"]
-        self.assertEqual(graph["all_requests"][0]["request_id"], "req-1")
-        self.assertEqual(graph["candidate_reads"][0]["role"], "business_get")
+        client = flow_spec_to_client(spec)
+        released = flow_spec_release_payload(spec)
+
+        self.assertEqual(client["request_facts"]["requests"][0]["request_id"], "req-1")
+        self.assertEqual(client["request_facts"]["requests"][0]["headers"]["Authorization"], "***")
+        self.assertEqual(client["request_facts"]["requests"][0]["response_json"]["token"], "***")
+        self.assertNotIn("request_graph", client["meta"])
+        self.assertEqual(released["request_facts"]["requests"][0]["request_id"], "req-1")
+        self.assertNotIn("request_graph", released["meta"])
 
     def test_capability_scoped_fields_and_dependencies_sync_from_legacy_steps_links(self):
         start = FlowStep(
@@ -943,9 +924,9 @@ class GetBusinessStepTest(unittest.TestCase):
         users_role = next(r for r in roles if "/api/users" in r["path"])
         self.assertEqual(users_role["role"], "read_option")
         self.assertFalse(users_role["keep"])
-        graph = spec.meta.get("request_graph") or {}
-        cand_paths = [r.get("path") for r in graph.get("candidate_reads") or []]
-        self.assertIn("/api/users", cand_paths)
+        users_fact = next(f for f in spec.request_facts.requests if f.path == "/api/users")
+        users_analysis = spec.request_facts.analysis[users_fact.request_id]
+        self.assertEqual(users_analysis.bucket, "candidate_reads")
 
     def test_repeated_preread_gets_are_deduped_and_option_reads_stay_out(self):
         """录制中反复触发的审批详情 GET 只保留最后一次；选人列表不进入主流程。"""
@@ -1001,9 +982,16 @@ class GetBusinessStepTest(unittest.TestCase):
         user_page_roles = [r for r in roles if "/system/user/page" in r["path"]]
         self.assertTrue(user_page_roles)
         self.assertTrue(all(r["role"] == "read_option" and not r["keep"] for r in user_page_roles))
-        graph = spec.meta.get("request_graph") or {}
-        self.assertGreaterEqual(len(graph.get("selected_steps") or []), 2)
-        self.assertTrue(any("/system/user/page" in (r.get("path") or "") for r in graph.get("candidate_reads") or []))
+        selected = [
+            fact for fact in spec.request_facts.requests
+            if spec.request_facts.analysis[fact.request_id].bucket == "selected_steps"
+        ]
+        candidates = [
+            fact for fact in spec.request_facts.requests
+            if spec.request_facts.analysis[fact.request_id].bucket == "candidate_reads"
+        ]
+        self.assertGreaterEqual(len(selected), 2)
+        self.assertTrue(any("/system/user/page" in fact.path for fact in candidates))
 
         self.assertEqual(spec.capabilities, [])
         orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
@@ -1046,18 +1034,25 @@ class GetBusinessStepTest(unittest.TestCase):
         spec = FlowSpec(
             flow_id="cap-add-request",
             capabilities=[FlowCapability(name="query_status", kind="query_status", confirmed=False)],
-            meta={"request_graph": {"all_requests": [{
-                "request_index": 89,
-                "request_id": "req-89",
-                "method": "GET",
-                "url": "https://oa.example.com/api/work-days?start=2026-05-01",
-                "path": "/api/work-days?start=2026-05-01",
-                "role": "business_get",
-                "keep": True,
-                "confidence": 0.96,
-                "response_status": 200,
-                "response_json": {"code": 0, "data": {"missing_dates": ["2026-05-12"]}},
-            }]}},
+            request_facts={
+                "requests": [{
+                    "request_index": 89,
+                    "request_id": "req-89",
+                    "method": "GET",
+                    "url": "https://oa.example.com/api/work-days?start=2026-05-01",
+                    "path": "/api/work-days?start=2026-05-01",
+                    "response_status": 200,
+                    "response_json": {"code": 0, "data": {"missing_dates": ["2026-05-12"]}},
+                }],
+                "analysis": {"req-89": {
+                    "request_id": "req-89",
+                    "role": "business_get",
+                    "keep": True,
+                    "confidence": 0.96,
+                    "bucket": "candidate_reads",
+                }},
+                "usage": {"req-89": {"request_id": "req-89", "state": "captured"}},
+            },
         )
 
         edited = apply_flow_edits(spec, [{
@@ -1073,8 +1068,9 @@ class GetBusinessStepTest(unittest.TestCase):
 
         self.assertEqual(len(edited_again.steps), 1)
         self.assertEqual(edited_again.capabilities[0].step_ids, [edited_again.steps[0].step_id])
-        graph = edited_again.meta.get("request_graph") or {}
-        self.assertEqual(len(graph.get("selected_steps") or []), 1)
+        usage = edited_again.request_facts.usage["req-89"]
+        self.assertEqual(usage.state, "materialized")
+        self.assertEqual(usage.materialized_step_id, edited_again.steps[0].step_id)
 
     def test_orchestrate_flow_merges_existing_capabilities(self):
         spec = FlowSpec(

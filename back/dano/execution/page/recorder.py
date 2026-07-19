@@ -1046,7 +1046,7 @@ class RecordSession:
         return self._frame_ids[key]
 
     def _request_scope(self, request) -> dict[str, str]:  # noqa: ANN001
-        """Best-effort page/frame anchors for RequestGraph facts."""
+        """Best-effort page/frame anchors for RequestFacts."""
         frame = None
         page = None
         try:

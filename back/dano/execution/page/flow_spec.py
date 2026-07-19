@@ -258,10 +258,7 @@ class RequestUsage(BaseModel):
 
 
 class RequestFacts(BaseModel):
-    """录制请求事实库。
-
-    P0 阶段仍会同步旧 meta.request_graph，避免打断旧前端和发布链路。
-    """
+    """录制请求事实库；请求捕获、分析与使用状态的唯一权威来源。"""
 
     model_config = ConfigDict(extra="allow")
 
@@ -448,7 +445,7 @@ class FlowSpec(BaseModel):
 
     @model_validator(mode="after")
     def _sync_derived_models(self) -> "FlowSpec":
-        return sync_flow_spec_models(self, prefer_request_facts=True)
+        return sync_flow_spec_models(self)
 
 
 # ─────────── Step A: 收敛函数 ───────────
@@ -2406,11 +2403,8 @@ def _attach_request_role(req: dict, role: dict) -> dict:
     return out
 
 
-def _request_graph_entry(req: dict, role: dict, *, include_payload: bool = False) -> dict[str, Any]:
-    """给工作台展示的请求事实条目。
-
-    request_graph 是不可变的捕获事实库；能力/步骤只引用这些 request_index/request_id。
-    """
+def _request_fact_entry(req: dict, role: dict) -> dict[str, Any]:
+    """Normalize one captured request into the canonical RequestFacts shape."""
     request_index = req.get("index")
     response_json = req.get("response_json", req.get("json"))
     out = {
@@ -2422,67 +2416,24 @@ def _request_graph_entry(req: dict, role: dict, *, include_payload: bool = False
         "method": (req.get("method") or "").upper(),
         "url": req.get("url") or "",
         "path": _request_path(req),
-        "role": role.get("role") or "",
-        "keep": bool(role.get("keep")),
-        "reason": role.get("reason") or role.get("keep_reason") or role.get("filter_reason") or "",
-        "confidence": float(role.get("confidence") or 0.0),
-        "evidence": role.get("evidence") or {},
-        "state": "captured",
-        "materialized_step_id": req.get("materialized_step_id"),
+        "headers": dict(req.get("headers") or {}),
+        "query": dict(req.get("query") or {}),
+        "content_type": req.get("content_type") or "",
+        "post_data": req.get("post_data"),
+        "response_status": req.get("response_status", req.get("status")),
+        "response_json": response_json,
+        "response_schema": _schema_from_response_value(response_json) if response_json is not None else {},
         "timestamp": req.get("timestamp") or req.get("captured_at"),
     }
     for causal_key in _REQUEST_OBSERVER_KEYS:
         causal_value = req.get(causal_key)
         if causal_value not in (None, ""):
             out[causal_key] = causal_value
-    if include_payload:
-        out.update({
-            "headers": dict(req.get("headers") or {}),
-            "query": dict(req.get("query") or {}),
-            "content_type": req.get("content_type") or "",
-            "post_data": req.get("post_data"),
-            "response_status": req.get("response_status", req.get("status")),
-            "response_json": response_json,
-            "response_schema": _schema_from_response_value(response_json) if response_json is not None else {},
-        })
     return out
 
 
-def _request_graph_signature(req: dict) -> tuple[str, str]:
+def _request_signature(req: dict) -> tuple[str, str]:
     return ((req.get("method") or "GET").upper(), _request_path(req))
-
-
-def _build_request_graph(
-    captured_requests: list[dict],
-    request_roles: list[dict],
-    selected_keys: set[Any],
-) -> dict[str, list[dict[str, Any]]]:
-    all_requests: list[dict[str, Any]] = []
-    selected_steps: list[dict[str, Any]] = []
-    candidate_reads: list[dict[str, Any]] = []
-    filtered_requests: list[dict[str, Any]] = []
-    selected_signatures: set[tuple[str, str]] = set()
-    for req, role in zip(captured_requests or [], request_roles or []):
-        key = _request_role_key(req)
-        role_name = role.get("role") or ""
-        all_requests.append(_request_graph_entry(req, role, include_payload=True))
-        if key in selected_keys:
-            selected_steps.append(_request_graph_entry(req, role, include_payload=True))
-            selected_signatures.add(_request_graph_signature(req))
-            continue
-        if role_name in {"read_option", "read_context", "business_get"} and req.get("response_json", req.get("json")) is not None:
-            if _request_graph_signature(req) in selected_signatures:
-                filtered_requests.append(_request_graph_entry(req, role, include_payload=True))
-                continue
-            candidate_reads.append(_request_graph_entry(req, role, include_payload=True))
-            continue
-        filtered_requests.append(_request_graph_entry(req, role, include_payload=True))
-    return {
-        "all_requests": all_requests,
-        "selected_steps": selected_steps,
-        "candidate_reads": candidate_reads,
-        "filtered_requests": filtered_requests,
-    }
 
 
 def _request_fact_key(entry: dict[str, Any]) -> str:
@@ -2500,67 +2451,48 @@ def _request_fact_key(entry: dict[str, Any]) -> str:
     return "sig:" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
-def _request_fact_from_graph_entry(entry: dict[str, Any]) -> RequestFact:
-    rid = _request_fact_key(entry)
+def _request_fact_from_entry(entry: dict[str, Any]) -> RequestFact:
     payload = dict(entry)
-    payload.update({
-        "request_id": rid,
-        "request_index": entry.get("request_index"),
-        "page_id": entry.get("page_id"),
-        "frame_id": entry.get("frame_id"),
-        "sequence": entry.get("sequence", entry.get("request_index")),
-        "method": (entry.get("method") or "").upper(),
-        "url": entry.get("url") or "",
-        "path": entry.get("path") or entry.get("url") or "",
-        "query": dict(entry.get("query") or {}),
-        "headers": dict(entry.get("headers") or {}),
-        "content_type": entry.get("content_type") or "",
-        "post_data": entry.get("post_data"),
-        "response_status": entry.get("response_status"),
-        "response_json": entry.get("response_json"),
-        "response_schema": dict(entry.get("response_schema") or {}),
-        "timestamp": entry.get("timestamp") or entry.get("captured_at"),
-    })
+    payload["request_id"] = _request_fact_key(entry)
     return RequestFact.model_validate(payload)
 
 
-def _request_analysis_from_graph_entry(entry: dict[str, Any], bucket: str) -> RequestAnalysis:
-    payload = dict(entry)
-    role = str(entry.get("role") or "")
-    semantic_roles = [str(value) for value in (entry.get("semantic_roles") or []) if str(value)]
+def _request_analysis_from_entry(entry: dict[str, Any], role: dict[str, Any], bucket: str) -> RequestAnalysis:
+    role_name = str(role.get("role") or "")
+    semantic_roles = [str(value) for value in (role.get("semantic_roles") or []) if str(value)]
     role_semantic = {
         "business_get": "business_query",
         "read_option": "option_source",
         "read_context": "context_read",
         "submit_anchor": "business_write",
         "business_write": "business_write",
-    }.get(role)
+    }.get(role_name)
     if role_semantic and role_semantic not in semantic_roles:
         semantic_roles.append(role_semantic)
-    payload.update({
+    return RequestAnalysis.model_validate({
+        **role,
         "request_id": _request_fact_key(entry),
-        "role": role,
+        "role": role_name,
         "semantic_roles": semantic_roles,
-        "keep": bool(entry.get("keep")),
-        "reason": entry.get("reason") or "",
-        "confidence": float(entry.get("confidence") or 0.0),
-        "evidence": dict(entry.get("evidence") or {}),
+        "keep": bool(role.get("keep")),
+        "reason": role.get("reason") or role.get("keep_reason") or role.get("filter_reason") or "",
+        "confidence": float(role.get("confidence") or 0.0),
+        "evidence": dict(role.get("evidence") or {}),
         "bucket": bucket,
-        "filter_reason": entry.get("filter_reason") or "",
+        "filter_reason": role.get("filter_reason") or "",
     })
-    return RequestAnalysis.model_validate(payload)
 
 
-def _is_api_like_graph_entry(entry: dict[str, Any]) -> bool:
+def _is_api_like_request_fact(entry: dict[str, Any], role: dict[str, Any] | None = None) -> bool:
     path = _request_path(entry).lower()
     if not path:
         return False
     if re.search(r"\.(?:css|js|mjs|map|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|html?|txt|xml)$", path):
         return False
-    role = str(entry.get("role") or "")
-    if role in {"noise", "auth"}:
+    role_name = str((role or {}).get("role") or entry.get("role") or "")
+    if role_name in {"noise", "auth"}:
         return False
-    if role in {"submit_anchor", "business_write", "business_get", "read_context", "read_option"}:
+    if role_name in {"submit_anchor", "business_write", "business_get", "read_context", "read_option"}:
         return True
     if entry.get("response_json") is not None:
         return True
@@ -2583,52 +2515,58 @@ def _page_enum_options_from_request_facts(request_facts: RequestFacts | None) ->
     return out
 
 
-def _request_facts_from_graph(
-    graph: dict[str, Any],
+def _build_request_facts(
+    captured_requests: list[dict],
+    request_roles: list[dict],
+    selected_keys: set[Any],
     *,
     diagnostics: list[dict[str, Any]] | None = None,
     page_enum_options: dict[str, Any] | None = None,
     page_events: list[dict[str, Any]] | None = None,
 ) -> RequestFacts:
+    """Build the canonical request ledger directly from recorder evidence."""
     facts_by_id: dict[str, RequestFact] = {}
     analysis: dict[str, RequestAnalysis] = {}
     usage: dict[str, RequestUsage] = {}
-    bucket_rank = {
-        "all_requests": 0,
-        "filtered_requests": 1,
-        "candidate_reads": 2,
-        "selected_steps": 3,
-    }
-    for bucket in ("all_requests", "filtered_requests", "candidate_reads", "selected_steps"):
-        for entry in graph.get(bucket) or []:
-            if not isinstance(entry, dict):
-                continue
-            if not _is_api_like_graph_entry(entry):
-                continue
-            rid = _request_fact_key(entry)
-            fact = _request_fact_from_graph_entry(entry)
-            prev = facts_by_id.get(rid)
-            # 优先保留带 payload/schema 的事实；没有则用后出现的更具体条目补齐。
-            if prev is None or (fact.response_json is not None and prev.response_json is None):
-                facts_by_id[rid] = fact
-            ana = _request_analysis_from_graph_entry(entry, bucket)
-            prev_ana = analysis.get(rid)
-            if prev_ana is None or bucket_rank.get(bucket, 0) >= bucket_rank.get(prev_ana.bucket, 0):
-                analysis[rid] = ana
-            materialized_step_id = str(entry.get("materialized_step_id") or "")
-            state = entry.get("state") or ("materialized" if materialized_step_id else "captured")
-            prev_usage = usage.get(rid) or RequestUsage(request_id=rid)
-            if materialized_step_id:
-                prev_usage.materialized_step_id = materialized_step_id
-                prev_usage.state = "materialized"
-            elif bucket == "selected_steps" and prev_usage.state == "captured":
-                prev_usage.state = state
-            usage[rid] = prev_usage
+    selected_signatures: set[tuple[str, str]] = set()
+    for req, role in zip(captured_requests or [], request_roles or []):
+        entry = _request_fact_entry(req, role)
+        if not _is_api_like_request_fact(entry, role):
+            continue
+        rid = _request_fact_key(entry)
+        fact = _request_fact_from_entry(entry)
+        previous = facts_by_id.get(rid)
+        if previous is None or (fact.response_json is not None and previous.response_json is None):
+            facts_by_id[rid] = fact
+
+        key = _request_role_key(req)
+        role_name = str(role.get("role") or "")
+        signature = _request_signature(entry)
+        if key in selected_keys:
+            bucket = "selected_steps"
+            selected_signatures.add(signature)
+        elif (
+            role_name in {"read_option", "read_context", "business_get"}
+            and entry.get("response_json") is not None
+            and signature not in selected_signatures
+        ):
+            bucket = "candidate_reads"
+        else:
+            bucket = "filtered_requests"
+        analysis[rid] = _request_analysis_from_entry(entry, role, bucket)
+
+        materialized_step_id = str(req.get("materialized_step_id") or "")
+        usage[rid] = RequestUsage(
+            request_id=rid,
+            materialized_step_id=materialized_step_id,
+            state="materialized" if materialized_step_id else "captured",
+        )
+
     requests = sorted(
         facts_by_id.values(),
-        key=lambda f: (
-            _request_sequence_value(f.sequence if f.sequence is not None else f.request_index) is None,
-            _request_sequence_value(f.sequence if f.sequence is not None else f.request_index) or 0,
+        key=lambda fact: (
+            _request_sequence_value(fact.sequence if fact.sequence is not None else fact.request_index) is None,
+            _request_sequence_value(fact.sequence if fact.sequence is not None else fact.request_index) or 0,
         ),
     )
     return RequestFacts(
@@ -2641,96 +2579,65 @@ def _request_facts_from_graph(
     )
 
 
-def _graph_entry_from_request_fact(
+def _request_fact_item(
     fact: RequestFact,
-    analysis: RequestAnalysis | None = None,
-    usage: RequestUsage | None = None,
+    analysis: RequestAnalysis | None,
+    usage: RequestUsage | None,
 ) -> dict[str, Any]:
-    out = {
-        "request_index": fact.request_index,
-        "request_id": fact.request_id,
-        "page_id": fact.page_id,
-        "frame_id": fact.frame_id,
-        "sequence": fact.sequence,
-        "method": fact.method,
-        "url": fact.url,
-        "path": fact.path,
+    item = fact.model_dump(exclude_none=True)
+    item.update({
         "role": analysis.role if analysis else "",
+        "semantic_roles": list(analysis.semantic_roles or []) if analysis else [],
         "keep": bool(analysis.keep) if analysis else False,
         "reason": analysis.reason if analysis else "",
         "confidence": float(analysis.confidence) if analysis else 0.0,
         "evidence": dict(analysis.evidence or {}) if analysis else {},
+        "bucket": analysis.bucket if analysis else "",
+        "filter_reason": analysis.filter_reason if analysis else "",
         "state": usage.state if usage else "captured",
         "materialized_step_id": usage.materialized_step_id if usage else "",
-        "headers": dict(fact.headers or {}),
-        "query": dict(fact.query or {}),
-        "content_type": fact.content_type,
-        "post_data": fact.post_data,
-        "response_status": fact.response_status,
-        "response_json": fact.response_json,
-        "response_schema": dict(fact.response_schema or {}),
-        "timestamp": fact.timestamp,
-    }
-    # RequestFact 允许携带录制期因果锚点；legacy request_graph 也必须无损保留。
-    for key in _REQUEST_OBSERVER_KEYS:
-        value = (fact.model_extra or {}).get(key)
-        if value not in (None, ""):
-            out[key] = value
-    return out
+        "used_by_capabilities": list(usage.used_by_capabilities or []) if usage else [],
+    })
+    return item
 
 
-def _request_graph_from_request_facts(request_facts: RequestFacts) -> dict[str, list[dict[str, Any]]]:
-    graph = {
-        "all_requests": [],
-        "selected_steps": [],
-        "candidate_reads": [],
-        "filtered_requests": [],
-    }
-    for fact in request_facts.requests or []:
-        rid = fact.request_id or _request_fact_key(fact.model_dump())
-        analysis = request_facts.analysis.get(rid)
-        usage = request_facts.usage.get(rid)
-        entry = _graph_entry_from_request_fact(fact, analysis, usage)
-        graph["all_requests"].append(entry)
-        bucket = (analysis.bucket if analysis else "") or ""
-        if usage and (usage.materialized_step_id or usage.state == "materialized"):
-            graph["selected_steps"].append(entry)
-        elif bucket == "selected_steps":
-            graph["selected_steps"].append(entry)
-        elif bucket == "candidate_reads":
-            graph["candidate_reads"].append(entry)
-        elif bucket == "filtered_requests":
-            graph["filtered_requests"].append(entry)
-        elif (analysis and analysis.role in {"read_option", "read_context", "business_get"} and analysis.keep):
-            graph["candidate_reads"].append(entry)
-        else:
-            graph["filtered_requests"].append(entry)
-    return graph
+def _request_fact_items(spec: FlowSpec) -> list[dict[str, Any]]:
+    return [
+        _request_fact_item(
+            fact,
+            spec.request_facts.analysis.get(fact.request_id or _request_fact_key(fact.model_dump())),
+            spec.request_facts.usage.get(fact.request_id or _request_fact_key(fact.model_dump())),
+        )
+        for fact in (spec.request_facts.requests or [])
+    ]
 
 
-def ensure_request_facts(spec: FlowSpec, *, prefer: str = "request_facts") -> FlowSpec:
-    """同步 P0 request_facts 与旧 meta.request_graph。
-
-    现在只把 request_facts 写回 meta.request_graph，不再从 legacy 图反向补齐
-    request_facts，避免旧导入数据在运行时被静默改写。
-    """
-    meta = dict(spec.meta or {})
-    has_facts = bool(spec.request_facts.requests)
-
-    if has_facts:
-        meta["request_graph"] = _request_graph_from_request_facts(spec.request_facts)
-        spec.meta = meta
-
-    if prefer == "meta" or not has_facts:
-        return spec
-
-    return spec
+def _find_request_fact_item(
+    spec: FlowSpec,
+    *,
+    request_index: Any = None,
+    request_id: str = "",
+) -> dict[str, Any] | None:
+    for item in _request_fact_items(spec):
+        if request_index is not None and item.get("request_index") == request_index:
+            return item
+        if request_id and str(item.get("request_id") or "") == request_id:
+            return item
+    return None
 
 
-def _request_graph_for_spec(spec: FlowSpec) -> dict[str, Any]:
-    ensure_request_facts(spec, prefer="meta")
-    return (spec.meta or {}).get("request_graph") or {}
-
+def _mark_request_materialized(
+    spec: FlowSpec,
+    entry: dict[str, Any],
+    *,
+    materialized_step_id: str = "",
+) -> None:
+    request_id = _request_fact_key(entry)
+    usage = spec.request_facts.usage.get(request_id) or RequestUsage(request_id=request_id)
+    usage.state = "materialized" if materialized_step_id else usage.state or "captured"
+    if materialized_step_id:
+        usage.materialized_step_id = materialized_step_id
+    spec.request_facts.usage[request_id] = usage
 
 def _capability_scoped_node_step_ids(nodes: list[dict[str, Any]]) -> list[str]:
     ids: list[str] = []
@@ -3069,7 +2976,6 @@ def _capability_inputs_from_top_level_schema(
 
 def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
     """从旧 steps/links/step_ids 派生能力内字段/依赖视图。"""
-    ensure_request_facts(spec)
     if not spec.capabilities:
         return spec
     by_step = {s.step_id: s for s in spec.steps}
@@ -3359,8 +3265,7 @@ def _enrich_materialized_response_shapes(spec: FlowSpec) -> None:
         }
 
 
-def sync_flow_spec_models(spec: FlowSpec, *, prefer_request_facts: bool = True) -> FlowSpec:
-    ensure_request_facts(spec, prefer="request_facts" if prefer_request_facts else "meta")
+def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
     _upgrade_materialized_query_facts(spec)
     _enrich_materialized_response_shapes(spec)
     _ground_saved_page_enums(spec)
@@ -4235,7 +4140,7 @@ def _capability_confirmation_hash(spec: FlowSpec, cap: FlowCapability) -> str:
     # editor state may still have derived fields or schemas pending sync;
     # hashing it directly made an immediate validation look stale.
     canonical = _sync_capability_io_schemas(
-        sync_flow_spec_models(spec.model_copy(deep=True), prefer_request_facts=False)
+        sync_flow_spec_models(spec.model_copy(deep=True))
     )
     canonical_cap = next(
         (
@@ -4627,19 +4532,21 @@ def to_flow_spec(
     preread_cands = _dedupe_preread_candidates(preread_cands)
 
     if not write_cands and not preread_cands:
-        request_graph = _build_request_graph(captured_requests, request_roles, set())
+        request_facts = _build_request_facts(
+            captured_requests,
+            request_roles,
+            set(),
+            diagnostics=diagnostics,
+            page_enum_options=page_enum_options,
+            page_events=page_events,
+        )
         empty_spec = FlowSpec(
             tenant=tenant,
             subsystem=subsystem,
             title="(未捕获到业务请求)",
             recording_mode=recording_mode,
             diagnostics=diagnostics,
-            request_facts=_request_facts_from_graph(
-                request_graph,
-                diagnostics=diagnostics,
-                page_enum_options=page_enum_options,
-                page_events=page_events,
-            ),
+            request_facts=request_facts,
             goal=RecordedGoal(
                 intent="录制业务请求",
                 required_inputs=[],
@@ -4654,7 +4561,6 @@ def to_flow_spec(
                 "captured_write_candidates": 0,
                 "reads_count": len(flow_reads),
                 "request_roles": request_roles,
-                "request_graph": request_graph,
                 "recording_mode": recording_mode,
                 "diagnostics": diagnostics,
                 "page_events_count": len(page_events),
@@ -4826,7 +4732,14 @@ def to_flow_spec(
         )
     }
     selected_keys = selected_write_keys | selected_preread_keys | independent_business_keys
-    request_graph = _build_request_graph(captured_requests, request_roles, selected_keys)
+    request_facts = _build_request_facts(
+        captured_requests,
+        request_roles,
+        selected_keys,
+        diagnostics=diagnostics,
+        page_enum_options=page_enum_options,
+        page_events=page_events,
+    )
     cands = [r for r in captured_requests if _request_role_key(r) in selected_keys]
 
     # 4) 每条 → FlowStep
@@ -5007,12 +4920,7 @@ def to_flow_spec(
         links=link_objs,
         goal={},
         risk_level=overall,
-        request_facts=_request_facts_from_graph(
-            request_graph,
-            diagnostics=diagnostics,
-            page_enum_options=page_enum_options,
-            page_events=page_events,
-        ),
+        request_facts=request_facts,
         meta={
             "captured_total": len(captured_requests),
             "captured_write_candidates": len(write_cands),
@@ -5022,7 +4930,6 @@ def to_flow_spec(
             "captured_workflow_steps": len(step_objs),
             "reads_count": len(flow_reads),
             "request_roles": request_roles,
-            "request_graph": request_graph,
             "recording_mode": recording_mode,
             "diagnostics": diagnostics,
             "page_events_count": len(page_events),
@@ -6473,23 +6380,11 @@ def _set_capability_request_membership(
     cap.request_refs.append(ref)
     return ref
 
-def _request_graph_entries(spec: FlowSpec, roles: set[str]) -> list[dict[str, Any]]:
-    graph = _request_graph_for_spec(spec)
-    out: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, Any]] = set()
-    for bucket in ("selected_steps", "candidate_reads", "all_requests"):
-        for entry in graph.get(bucket) or []:
-            if (entry.get("role") or "") not in roles:
-                continue
-            sig = (entry.get("method") or "", entry.get("path") or entry.get("url") or "", entry.get("request_index"))
-            if sig in seen:
-                continue
-            seen.add(sig)
-            out.append({**entry, "bucket": bucket})
-    return out
-
-
-
+def _request_facts_by_roles(spec: FlowSpec, roles: set[str]) -> list[dict[str, Any]]:
+    return [
+        item for item in _request_fact_items(spec)
+        if str(item.get("role") or "") in roles
+    ]
 
 _CAPABILITY_PATH_PREFIXES = frozenset({
     "api", "rest", "gateway", "openapi", "v1", "v2", "v3", "oa", "system", "admin", "admin-api",
@@ -6709,7 +6604,7 @@ def _build_complex_default_capabilities(
 
 
 def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
-    """从 FlowSpec 的 steps/request_graph 生成默认业务能力编排。
+    """从 FlowSpec 的 steps/RequestFacts 生成默认业务能力编排。
 
     这些能力只是对外调用层的候选描述，不改变真实执行计划；发布执行仍以 steps/links 为准。
     """
@@ -6807,13 +6702,13 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
         return caps
 
     # The independent-status branch above already materialized the complete
-    # read-only capability. Do not append the legacy graph fallback a second
+    # read-only capability. Do not append the RequestFacts fallback a second
     # time for query-only recordings.
     if independent_status_steps:
         return caps
 
-    status_graph = _request_graph_entries(spec, {"business_get", "read_context"})
-    if status_steps or status_graph:
+    status_facts = _request_facts_by_roles(spec, {"business_get", "read_context"})
+    if status_steps or status_facts:
         status_params = [p for st in status_steps for p in st.params]
         caps.append(FlowCapability(
             name="query_status",
@@ -6843,14 +6738,14 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
                 ],
                 *[
                     {
-                        "kind": "request_graph",
+                        "kind": "request_fact",
                         "request_index": e.get("request_index"),
                         "method": e.get("method"),
                         "path": e.get("path") or e.get("url"),
                         "role": e.get("role"),
                         "bucket": e.get("bucket"),
                     }
-                    for e in status_graph
+                    for e in status_facts
                 ],
             ],
             caller_responsibilities=["提供查询所需的业务标识或筛选条件"],
@@ -7050,7 +6945,7 @@ def _build_initial_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
 
 def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
     """Return the grounded recording state exposed to the Pi recording agent."""
-    graph = _request_graph_for_spec(spec)
+    request_facts = _request_fact_items(spec)
     return {
         "protocol": "dano.recording-semantic-facts.v1",
         "tenant": spec.tenant,
@@ -7119,9 +7014,9 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 "action_delta_ms": request.get("action_delta_ms"),
                 "causality_confidence": request.get("causality_confidence"),
             }
-            for request in (graph.get("all_requests") or [])[:120]
+            for request in request_facts[:120]
         ],
-        "captured_request_count": len(graph.get("all_requests") or []),
+        "captured_request_count": len(request_facts),
         "page_events": [
             {
                 key: event.get(key)
@@ -7234,7 +7129,7 @@ def _capability_from_agent(raw: dict[str, Any], step_ids: set[str], used_names: 
 
 
 def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
-    graph = _request_graph_for_spec(spec)
+    request_facts = _request_fact_items(spec)
     validation_findings: dict[str, Any] = {}
     try:
         validation = validate_flow_spec(spec)
@@ -7341,9 +7236,9 @@ def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
                 "confidence": r.get("confidence"),
                 "reason": r.get("reason"),
             }
-            for r in (graph.get("all_requests") or [])[:120]
+            for r in request_facts[:120]
         ],
-        "captured_request_count": len(graph.get("all_requests") or []),
+        "captured_request_count": len(request_facts),
     }
 
 
@@ -8867,7 +8762,6 @@ def _capability_contract_view(
     """Build a capability-centric contract view for manifest/runtime consumers."""
     current = ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(
         spec.model_copy(deep=True),
-        prefer_request_facts=False,
     )))
     _normalize_capability_references(current)
     cap = capability.model_copy(deep=True) if capability is not None else _select_flow_capability(
@@ -8926,7 +8820,6 @@ def _capability_contract_views(
     """Return capability contract summaries, optionally scoped to one capability."""
     current = ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(
         spec.model_copy(deep=True),
-        prefer_request_facts=False,
     )))
     _normalize_capability_references(current)
     if capability_id or capability_name:
@@ -9304,7 +9197,7 @@ async def orchestrate_flow_capabilities(
     if initial_generation:
         proposal_baseline = _repair_generated_capability_contracts(proposal_baseline)
     proposal_baseline = _ensure_external_transform_relations(
-        _sync_capability_io_schemas(sync_flow_spec_models(proposal_baseline, prefer_request_facts=False))
+        _sync_capability_io_schemas(sync_flow_spec_models(proposal_baseline))
     )
 
     proposed_semantic_plan = (
@@ -9380,7 +9273,7 @@ async def orchestrate_flow_capabilities(
     if initial_generation:
         current = _repair_generated_capability_contracts(current)
     current = _ensure_external_transform_relations(
-        _sync_capability_io_schemas(sync_flow_spec_models(current, prefer_request_facts=False))
+        _sync_capability_io_schemas(sync_flow_spec_models(current))
     )
     proposal_accepted, proposal_gate = _semantic_candidate_gate(proposal_baseline, current)
     if not proposal_accepted:
@@ -9427,7 +9320,7 @@ async def orchestrate_flow_capabilities(
             "mode": "initial" if initial_generation else "boundary_reanalysis",
             "checked_steps": len(original.steps),
             "checked_fields": sum(len(step.params or []) for step in original.steps),
-            "checked_captured_requests": len(_request_graph_items(original)),
+            "checked_captured_requests": len(_request_fact_items(original)),
             "before_errors": len(initial_report.get("errors") or []),
             "before_warnings": len(initial_report.get("warnings") or []),
             "after_errors": len(final_report.get("errors") or []),
@@ -9467,11 +9360,11 @@ def _step_request_signature_key(step: FlowStep) -> str:
     return f"{(step.method or '').upper()} {_request_path({'url': step.path or step.url})}"
 
 
-def _request_graph_signature_key(entry: dict[str, Any]) -> str:
+def _request_fact_signature_key(entry: dict[str, Any]) -> str:
     return f"{(entry.get('method') or '').upper()} {_request_path(entry)}"
 
 
-def _request_graph_key_from_entry(entry: dict[str, Any]) -> str:
+def _request_fact_key_from_entry(entry: dict[str, Any]) -> str:
     if entry.get("request_id"):
         return f"id:{entry.get('request_id')}"
     if entry.get("request_index") is not None:
@@ -9491,7 +9384,7 @@ def _capability_request_indexes(spec: FlowSpec) -> tuple[set[str], set[str]]:
             request_ids.add(str(fact.request_id))
         if fact.request_index is not None:
             request_indexes.add(str(fact.request_index))
-    for item in _request_graph_items(spec):
+    for item in _request_fact_items(spec):
         if item.get("request_id"):
             request_ids.add(str(item.get("request_id")))
         if item.get("request_index") is not None:
@@ -9781,7 +9674,7 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
     warnings: list[str] = []
     caps = list(spec.capabilities or [])
     step_by_id = {s.step_id: s for s in spec.steps}
-    graph_items = _request_graph_items(spec)
+    request_items = _request_fact_items(spec)
     materialized_keys = {_step_request_key(s) for s in spec.steps}
     materialized_signatures = {_step_request_signature_key(s) for s in spec.steps}
     high_conf_unused = [
@@ -9794,11 +9687,11 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
             "confidence": item.get("confidence"),
             "reason": item.get("reason"),
         }
-        for item in graph_items
+        for item in request_items
         if float(item.get("confidence") or 0) >= 0.9
         and (item.get("role") or "") in {"submit_anchor", "business_write", "business_get", "read_context", "read_option"}
-        and _request_graph_key_from_entry(item) not in materialized_keys
-        and _request_graph_signature_key(item) not in materialized_signatures
+        and _request_fact_key_from_entry(item) not in materialized_keys
+        and _request_fact_signature_key(item) not in materialized_signatures
     ]
     checked_requests: list[dict[str, Any]] = []
     checked_manual_requests: list[dict[str, Any]] = []
@@ -10347,7 +10240,7 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
         if cap.kind in {"submit", "submit_batch"} and not any((s.method or "").upper() in _WRITE_METHODS for s in cap_steps):
             cap_errors.append(f"Capability `{label}` 已确认提交能力，但没有关联写请求步骤")
         if cap.kind == "query_status" and not (cap_steps or cap.evidence):
-            cap_errors.append(f"Capability `{label}` 已确认状态查询能力，但缺少读接口步骤或 request_graph 证据")
+            cap_errors.append(f"Capability `{label}` 已确认状态查询能力，但缺少读接口步骤或 RequestFacts 证据")
         if cap.kind == "list_options":
             fields = (((cap.input_schema or {}).get("properties") or {}).get("field") or {}).get("enum") or []
             if not fields and not cap.evidence:
@@ -10965,8 +10858,12 @@ def refresh_review_items(spec: FlowSpec) -> FlowSpec:
 
 
 def flow_spec_release_payload(spec: FlowSpec) -> dict[str, Any]:
-    """Return the one JSON representation used for release persistence."""
-    return spec.model_dump(mode="json", exclude_none=True)
+    """Return the canonical RequestFacts-only release representation."""
+    payload = spec.model_dump(mode="json", exclude_none=True)
+    meta = dict(payload.get("meta") or {})
+    meta.pop("request_graph", None)
+    payload["meta"] = meta
+    return payload
 
 
 def _flow_fingerprint(spec: FlowSpec) -> str:
@@ -11109,7 +11006,7 @@ def append_flow_version(
     actor: str = "system",
 ) -> FlowSpec:
     """在 FlowSpec.meta 中追加轻量版本记录。"""
-    sync_flow_spec_models(spec, prefer_request_facts=False)
+    sync_flow_spec_models(spec)
     meta = dict(spec.meta or {})
     versions = list(meta.get("versions") or [])
     current = max([int(v.get("version") or 0) for v in versions] or [0])
@@ -11143,7 +11040,9 @@ def ensure_flow_version(spec: FlowSpec, action: str, *, reason: str = "") -> Flo
 
 
 def flow_spec_to_summary(spec: FlowSpec) -> dict:
-    spec = sync_flow_spec_models(spec.model_copy(deep=True), prefer_request_facts=False)
+    spec = sync_flow_spec_models(spec.model_copy(deep=True))
+    summary_meta = dict(spec.meta or {})
+    summary_meta.pop("request_graph", None)
     return {
         "flow_id": spec.flow_id,
         "title": spec.title,
@@ -11193,7 +11092,7 @@ def flow_spec_to_summary(spec: FlowSpec) -> dict:
             }
             for link in spec.links
         ],
-        "meta": spec.meta,
+        "meta": summary_meta,
     }
 
 
@@ -11637,7 +11536,6 @@ def capability_to_flow_spec_view(
     """
     current = ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(
         spec.model_copy(deep=True),
-        prefer_request_facts=False,
     )))
     ref = capability
     if ref is None:
@@ -11680,7 +11578,7 @@ def capability_to_flow_spec_view(
             "step_ids": selected_cap.step_ids,
         },
     }
-    return sync_flow_spec_models(view, prefer_request_facts=False)
+    return sync_flow_spec_models(view)
 
 
 def flow_spec_capability_contracts(
@@ -12410,7 +12308,7 @@ def _prune_invalid_fact_checks(spec: FlowSpec) -> None:
 
 def prepare_flow_spec_for_publish(spec: FlowSpec) -> FlowSpec:
     """Canonicalize the current workbench state without invoking the Pi Agent."""
-    current = sync_flow_spec_models(spec.model_copy(deep=True), prefer_request_facts=False)
+    current = sync_flow_spec_models(spec.model_copy(deep=True))
     _prune_invalid_fact_checks(current)
     _canonicalize_public_capability_identities(current)
     _normalize_capability_references(current)
@@ -12722,21 +12620,11 @@ def flow_spec_to_client(spec: FlowSpec) -> dict:
     回传当前 FlowSpec 时会把有效 POST 降级成无请求体步骤。请求体字段本来就在字段
     工作台中可见，真正需要隐藏的是认证头、身份值和响应中的敏感字段。
     """
-    client_spec = sync_flow_spec_models(spec.model_copy(deep=True), prefer_request_facts=False)
+    client_spec = sync_flow_spec_models(spec.model_copy(deep=True))
     _normalize_capability_references(client_spec)
     data = refresh_review_items(_sync_capability_io_schemas(client_spec)).model_dump()
     data["meta"] = {**(data.get("meta") or {}), "current_fingerprint": _flow_fingerprint(client_spec)}
-    request_graph = ((data.get("meta") or {}).get("request_graph") or {})
-    for bucket in ("all_requests", "candidate_reads", "selected_steps", "filtered_requests"):
-        for req in request_graph.get(bucket) or []:
-            if req.get("headers"):
-                req["headers"] = {k: "***" for k in (req.get("headers") or {})}
-            if req.get("post_data") is not None:
-                req["post_data"] = ""
-            if req.get("response_json") is not None:
-                projected, projection = _client_response_projection(req.get("response_json"))
-                req["response_json"] = _client_redact_sensitive(projected)
-                req["response_projection"] = projection
+    data["meta"].pop("request_graph", None)
     request_facts = data.get("request_facts") or {}
     for req in request_facts.get("requests") or []:
         if req.get("headers"):
@@ -12903,82 +12791,6 @@ def _dedupe_flow_steps(spec: FlowSpec) -> int:
         "deduped_step_count": int(spec.meta.get("deduped_step_count") or 0) + len(removed_ids),
     }
     return len(removed_ids)
-
-
-def _request_graph_items(spec: FlowSpec) -> list[dict[str, Any]]:
-    graph = _request_graph_for_spec(spec)
-    out: list[dict[str, Any]] = []
-    seen: set[tuple[str, Any, str, str]] = set()
-    for bucket in ("all_requests", "selected_steps", "candidate_reads", "filtered_requests"):
-        for item in graph.get(bucket) or []:
-            request_id = str(item.get("request_id") or "")
-            sig = (
-                request_id,
-                item.get("request_index") if not request_id else "",
-                (item.get("method") or "").upper(),
-                item.get("path") or item.get("url") or "",
-            )
-            if sig in seen:
-                continue
-            seen.add(sig)
-            out.append(dict(item))
-    return out
-
-
-def _find_request_graph_item(spec: FlowSpec, *, request_index: Any = None, request_id: str = "") -> dict[str, Any] | None:
-    for item in _request_graph_items(spec):
-        if request_index is not None and item.get("request_index") == request_index:
-            return item
-        if request_id and str(item.get("request_id") or "") == request_id:
-            return item
-    return None
-
-
-def _same_request_graph_item(item: dict[str, Any], entry: dict[str, Any]) -> bool:
-    item_id = str(item.get("request_id") or "")
-    entry_id = str(entry.get("request_id") or "")
-    if item_id and entry_id:
-        return item_id == entry_id
-    if item.get("request_index") is not None and entry.get("request_index") is not None:
-        return item.get("request_index") == entry.get("request_index")
-    return _request_graph_signature(item) == _request_graph_signature(entry)
-
-
-def _mark_request_selected(spec: FlowSpec, entry: dict[str, Any], *, materialized_step_id: str = "") -> None:
-    rg = dict(_request_graph_for_spec(spec))
-    selected = list(rg.get("selected_steps") or [])
-    if not any(_same_request_graph_item(item, entry) for item in selected):
-        selected.append({
-            k: entry.get(k)
-            for k in (
-                "request_index", "request_id", "page_id", "frame_id", "sequence",
-                "method", "url", "path", "role", "reason", "confidence", "evidence",
-                "response_status", "response_schema",
-            )
-        })
-    for item in selected:
-        if _same_request_graph_item(item, entry):
-            item["state"] = "materialized" if materialized_step_id else item.get("state") or "captured"
-            if materialized_step_id:
-                item["materialized_step_id"] = materialized_step_id
-    for bucket in ("all_requests", "candidate_reads", "filtered_requests"):
-        updated = []
-        for item in (rg.get(bucket) or []):
-            item = dict(item)
-            if _same_request_graph_item(item, entry):
-                item["state"] = "materialized" if materialized_step_id else item.get("state") or "captured"
-                if materialized_step_id:
-                    item["materialized_step_id"] = materialized_step_id
-            updated.append(item)
-        if bucket in rg:
-            rg[bucket] = updated
-    rg["selected_steps"] = selected
-    rg["candidate_reads"] = [
-        item for item in (rg.get("candidate_reads") or [])
-        if not _same_request_graph_item(item, entry)
-    ]
-    spec.meta = {**(spec.meta or {}), "request_graph": rg}
-    ensure_request_facts(spec, prefer="meta")
 
 
 def _param_type_from_value(value: Any) -> str:
@@ -13581,7 +13393,7 @@ def _record_rejected_dependency_raw(
 def rebuild_flow_dependencies(spec: FlowSpec) -> int:
     """基于已物化步骤重建高置信值驱动依赖。
 
-    只追加缺失候选；不会修改原始 RequestGraph，也不会恢复用户已删除的依赖。
+    只追加缺失候选；不会修改原始 RequestFacts，也不会恢复用户已删除的依赖。
     """
     existing = {
         _dependency_sig(lk.source_step_id, lk.source_path, lk.target_step_id, lk.target_path)
@@ -13706,11 +13518,11 @@ def _insert_promoted_step(spec: FlowSpec, step: FlowStep, entry: dict[str, Any])
     spec.steps.append(step)
 
 
-def _add_request_step_from_graph(spec: FlowSpec, entry: dict[str, Any]) -> FlowStep:
+def _add_request_step_from_fact(spec: FlowSpec, entry: dict[str, Any]) -> FlowStep:
     request_id = str(entry.get("request_id") or "")
     request_index = entry.get("request_index")
     existing = None
-    entry_sig = _request_graph_signature(entry)
+    entry_sig = _request_signature(entry)
     for step in spec.steps:
         meta = step.source_meta or {}
         if request_id and str(meta.get("request_id") or "") == request_id:
@@ -13728,7 +13540,7 @@ def _add_request_step_from_graph(spec: FlowSpec, entry: dict[str, Any]) -> FlowS
             if ((s.method or "").upper(), _request_path({"url": s.path or s.url})) == entry_sig
         ), None)
     if existing is not None:
-        _mark_request_selected(spec, entry, materialized_step_id=existing.step_id)
+        _mark_request_materialized(spec, entry, materialized_step_id=existing.step_id)
         return existing
 
     role = {
@@ -13754,7 +13566,7 @@ def _add_request_step_from_graph(spec: FlowSpec, entry: dict[str, Any]) -> FlowS
         for s in spec.steps
         if s.response_json is not None
     ]
-    for item in _request_graph_items(spec):
+    for item in _request_fact_items(spec):
         if item.get("response_json") is not None:
             reads_for_candidate.append({"url": item.get("url") or item.get("path") or "", "json": item.get("response_json")})
     st = _build_step_from_capture(
@@ -13780,19 +13592,19 @@ def _add_request_step_from_graph(spec: FlowSpec, entry: dict[str, Any]) -> FlowS
         "promoted_at": datetime.now(timezone.utc).isoformat(),
     }
     _insert_promoted_step(spec, st, entry)
-    _mark_request_selected(spec, entry, materialized_step_id=st.step_id)
+    _mark_request_materialized(spec, entry, materialized_step_id=st.step_id)
     return st
 
 
 def promote_request_to_step(spec: FlowSpec, *, request_index: Any = None, request_id: str = "") -> FlowStep:
-    """把 RequestGraph 事实提升为可执行 FlowStepTemplate。
+    """把 RequestFacts 事实提升为可执行 FlowStepTemplate。
 
     这是录制 V2 的唯一请求加入入口：手工加入、能力加入、自动修复和发布补齐都走这里。
     """
-    entry = _find_request_graph_item(spec, request_index=request_index, request_id=request_id)
+    entry = _find_request_fact_item(spec, request_index=request_index, request_id=request_id)
     if entry is None:
         raise ValueError(f"captured request not found: {request_index or request_id}")
-    return _add_request_step_from_graph(spec, entry)
+    return _add_request_step_from_fact(spec, entry)
 
 
 def _find_capability_index(spec: FlowSpec, edit: dict[str, Any]) -> int:
@@ -15372,7 +15184,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
 
 
 def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, Any]:
-    graph = _request_graph_for_spec(spec)
+    request_facts = _request_fact_items(spec)
     cap_validation = report.get("capability_validation") or {}
     option_sources: list[dict[str, Any]] = []
     for fact in (spec.request_facts.requests or []):
@@ -15438,7 +15250,7 @@ def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, A
             }
             for cap in spec.capabilities
         ],
-        "request_graph": [
+        "request_facts": [
             {
                 "request_id": r.get("request_id"),
                 "request_index": r.get("request_index"),
@@ -15448,7 +15260,7 @@ def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, A
                 "confidence": r.get("confidence"),
                 "reason": r.get("reason"),
             }
-            for r in (graph.get("all_requests") or [])[:120]
+            for r in request_facts[:120]
         ],
         "candidate_option_sources": option_sources,
     }
@@ -15478,7 +15290,6 @@ def flow_spec_canonical_summary(spec: FlowSpec) -> dict[str, Any]:
     """Stable golden/shadow summary for recording V3 regression tests."""
     current = ensure_recorded_goal(_sync_capability_io_schemas(sync_flow_spec_models(
         spec.model_copy(deep=True),
-        prefer_request_facts=False,
     )))
     request_facts = current.request_facts
     return {
@@ -16128,7 +15939,7 @@ async def apply_recording_agent_submission(
         # first plan appears publish-invalid solely because its newly created
         # capabilities are still drafts, causing a redundant full model call.
         current = _auto_confirm_ready_capabilities(
-            _sync_capability_io_schemas(sync_flow_spec_models(current, prefer_request_facts=False))
+            _sync_capability_io_schemas(sync_flow_spec_models(current))
         )
         report = validate_flow_spec(current)
         history.append({
@@ -16159,7 +15970,7 @@ async def apply_recording_agent_submission(
         break
 
     current = _auto_confirm_ready_capabilities(
-        _sync_capability_io_schemas(sync_flow_spec_models(current, prefer_request_facts=False))
+        _sync_capability_io_schemas(sync_flow_spec_models(current))
     )
     current = _ensure_capability_explanations(
         current,

@@ -1177,20 +1177,6 @@ async def record_ws(ws: WebSocket) -> None:
                     fact["post_data"] = old_fact.post_data
                     fact["headers"] = old_fact.headers
 
-            old_graph = ((pending_flow_spec.meta or {}).get("request_graph") or {})
-            raw_graph = ((raw_spec.get("meta") or {}).get("request_graph") or {})
-            for bucket in ("all_requests", "candidate_reads", "selected_steps", "filtered_requests"):
-                old_items = {
-                    request_key(item): item
-                    for item in (old_graph.get(bucket) or []) if isinstance(item, dict)
-                }
-                for item in raw_graph.get(bucket) or []:
-                    if not isinstance(item, dict):
-                        continue
-                    old_item = old_items.get(request_key(item))
-                    if old_item is not None:
-                        for field in ("response_json", "response_schema", "post_data", "headers"):
-                            item[field] = old_item.get(field)
             return raw_spec
 
         while True:
@@ -1433,7 +1419,7 @@ async def record_ws(ws: WebSocket) -> None:
                                             "parsed_steps": 0})
                     continue
 
-                # 录制 V2:没有 JSON 写请求时仍然下发 RequestGraph/GET FlowSpec 工作台，
+                # 录制 V2:没有 JSON 写请求时仍然下发 RequestFacts/GET FlowSpec 工作台，
                 # 让用户可以从已捕获读接口编排 query/list_options 能力。
                 try:
                     from dano.execution.page.flow_spec import (

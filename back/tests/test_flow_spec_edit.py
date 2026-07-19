@@ -24,6 +24,64 @@ from dano.execution.page.request_capture import execute_api_request
 from dano.execution.page.repair_ops import collect_capability_findings, collect_repair_findings
 
 
+def _request_facts_from_graph_fixture(graph: dict) -> RequestFacts:
+    """Translate legacy-shaped test evidence into the canonical test contract."""
+    requests = []
+    analysis = {}
+    usage = {}
+    seen = set()
+    bucket_rank = {
+        "all_requests": 0,
+        "filtered_requests": 1,
+        "candidate_reads": 2,
+        "selected_steps": 3,
+    }
+    for bucket in ("all_requests", "filtered_requests", "candidate_reads", "selected_steps"):
+        for raw in graph.get(bucket) or []:
+            entry = dict(raw)
+            request_id = str(entry.get("request_id") or (
+                f"idx:{entry.get('request_index')}" if entry.get("request_index") is not None else ""
+            ))
+            entry["request_id"] = request_id
+            identity = (request_id, entry.get("request_index"))
+            if identity not in seen:
+                requests.append({
+                    key: value for key, value in entry.items()
+                    if key not in {
+                        "role", "semantic_roles", "keep", "reason", "confidence",
+                        "evidence", "bucket", "filter_reason", "state",
+                        "materialized_step_id", "used_by_capabilities",
+                    }
+                })
+                seen.add(identity)
+            current = analysis.get(request_id)
+            current_rank = bucket_rank.get(str((current or {}).get("bucket") or ""), -1)
+            if bucket_rank[bucket] >= current_rank:
+                analysis[request_id] = {
+                    "request_id": request_id,
+                    "role": entry.get("role") or "",
+                    "semantic_roles": entry.get("semantic_roles") or [],
+                    "keep": bool(entry.get("keep")),
+                    "reason": entry.get("reason") or "",
+                    "confidence": float(entry.get("confidence") or 0),
+                    "evidence": entry.get("evidence") or {},
+                    "bucket": bucket,
+                    "filter_reason": entry.get("filter_reason") or "",
+                }
+            materialized_step_id = str(entry.get("materialized_step_id") or "")
+            usage[request_id] = {
+                "request_id": request_id,
+                "materialized_step_id": materialized_step_id,
+                "state": "materialized" if materialized_step_id else entry.get("state") or "captured",
+                "used_by_capabilities": entry.get("used_by_capabilities") or [],
+            }
+    return RequestFacts.model_validate({
+        "requests": requests,
+        "analysis": analysis,
+        "usage": usage,
+    })
+
+
 def _make_spec():
     param1 = ParamField(path="form.userId", key="userId", value="123", type="string", required=True)
     param2 = ParamField(path="form.name", key="name", value="test", type="string", required=True)
@@ -1542,7 +1600,7 @@ def test_reject_dependency_records_lock_and_removes_link():
 def test_add_request_step_is_idempotent_for_same_request_id():
     spec = FlowSpec(
         flow_id="f",
-        meta={"request_graph": {"all_requests": [
+        request_facts=_request_facts_from_graph_fixture({"all_requests": [
             {
                 "request_index": 1,
                 "request_id": "r1",
@@ -1565,7 +1623,7 @@ def test_add_request_step_is_idempotent_for_same_request_id():
                 "response_status": 200,
                 "response_json": {"data": {"id": "p1"}},
             },
-        ]}},
+        ]}),
     )
 
     one = apply_flow_edits(spec, [{"op": "add_request_step", "request_index": 1, "request_id": "r1"}])
@@ -1575,43 +1633,32 @@ def test_add_request_step_is_idempotent_for_same_request_id():
     assert two.steps[0].path == "/admin-api/bpm/process-definition/get"
 
 
-def test_request_facts_are_first_class_and_sync_with_legacy_request_graph():
-    legacy_entry = _request_fact_entry(request_id="req-status", request_index=11, sequence=11)
-    legacy = FlowSpec(
-        flow_id="legacy-request-graph",
-        meta={"request_graph": {"all_requests": [legacy_entry], "candidate_reads": [legacy_entry]}},
+def test_request_facts_are_first_class_and_client_omits_legacy_graph():
+    entry = _request_fact_entry(
+        request_id="req-options",
+        request_index=12,
+        sequence=12,
+        role="read_option",
+        headers={"Authorization": "Bearer secret"},
+        post_data={"scope": "all"},
+        response_json={"token": "secret", "data": [{"label": "病假", "value": "2"}]},
+    )
+    spec = FlowSpec(
+        flow_id="canonical-request-facts",
+        request_facts=_request_facts_from_graph_fixture({
+            "candidate_reads": [entry],
+        }),
+        meta={"request_graph": {"all_requests": [{"request_id": "must-not-project"}]}},
     )
 
-    assert legacy.request_facts.protocol == "dano.request_facts.v1"
-    assert len(legacy.request_facts.requests) == 0
-    assert legacy.request_facts.analysis == {}
+    client = flow_spec_to_client(spec)
 
-    client = flow_spec_to_client(legacy)
-    assert client["request_facts"]["requests"] == []
-    assert client["request_facts"]["analysis"] == {}
-    assert client["meta"]["request_graph"]["candidate_reads"][0]["request_id"] == "req-status"
-
-    modern_entry = _request_fact_entry(request_id="req-options", request_index=12, sequence=12, role="read_option")
-    modern = FlowSpec(
-        flow_id="modern-request-facts",
-        request_facts={
-            "requests": [modern_entry],
-            "analysis": {
-                "req-options": {
-                    "request_id": "req-options",
-                    "role": "read_option",
-                    "keep": True,
-                    "bucket": "candidate_reads",
-                    "confidence": 0.91,
-                    "reason": "候选项读取",
-                }
-            },
-        },
-    )
-
-    graph = modern.meta["request_graph"]
-    assert graph["all_requests"][0]["request_id"] == "req-options"
-    assert graph["candidate_reads"][0]["request_id"] == "req-options"
+    assert [item["request_id"] for item in client["request_facts"]["requests"]] == ["req-options"]
+    assert client["request_facts"]["analysis"]["req-options"]["role"] == "read_option"
+    assert client["request_facts"]["requests"][0]["headers"]["Authorization"] == "***"
+    assert client["request_facts"]["requests"][0]["post_data"] == ""
+    assert client["request_facts"]["requests"][0]["response_json"]["token"] == "***"
+    assert "request_graph" not in client["meta"]
 
 
 def test_to_flow_spec_request_facts_filter_static_assets_and_keep_page_enums():
@@ -1648,7 +1695,7 @@ def test_to_flow_spec_request_facts_filter_static_assets_and_keep_page_enums():
     assert spec.request_facts.page_events == page_events
     post_fact = next(fact for fact in spec.request_facts.requests if fact.request_id == "post-1")
     assert post_fact.trigger_action_id == "action_3"
-    assert spec.meta["request_graph"]["all_requests"][-1]["trigger_action_id"] == "action_3"
+    assert post_fact.trigger_action_id == "action_3"
 
 
 def test_observer_anchor_is_required_for_auto_confirming_discovered_links():
@@ -2849,12 +2896,11 @@ def test_user_confirmed_link_overrides_manual_source_then_reset_is_stable():
     assert removed_param.locked is True
 
 
-def test_add_candidate_step_promotes_request_graph_entry():
+def test_add_candidate_step_promotes_request_fact():
     spec = FlowSpec(
         flow_id="f",
         steps=[FlowStep(step_id="write", method="POST", url="/api/save", path="/api/save")],
-        meta={
-            "request_graph": {
+        request_facts=_request_facts_from_graph_fixture({
                 "selected_steps": [],
                 "candidate_reads": [{
                     "request_index": 7,
@@ -2867,8 +2913,7 @@ def test_add_candidate_step_promotes_request_graph_entry():
                     "response_json": {"data": [{"xmId": "YF001", "xmName": "项目A"}]},
                 }],
                 "filtered_requests": [],
-            }
-        },
+            }),
     )
 
     new = apply_flow_edits(spec, [{"op": "add_candidate_step", "request_index": 7}])
@@ -2881,17 +2926,15 @@ def test_add_candidate_step_promotes_request_graph_entry():
     assert [p.path for p in promoted.params] == ["query.keyword"]
     assert promoted.source_meta["manual_added"] is True
     assert new.steps[1].step_id == "write"
-    graph = new.meta["request_graph"]
-    assert graph["candidate_reads"] == []
-    assert graph["selected_steps"][0]["request_index"] == 7
-    assert graph["selected_steps"][0]["state"] == "materialized"
-    assert graph["selected_steps"][0]["materialized_step_id"] == promoted.step_id
+    usage = new.request_facts.usage["idx:7"]
+    assert usage.materialized_step_id == promoted.step_id
+    assert usage.state == "materialized"
 
 
 def test_add_request_step_keeps_same_path_distinct_request_ids():
     spec = FlowSpec(
         flow_id="f",
-        meta={"request_graph": {"all_requests": [
+        request_facts=_request_facts_from_graph_fixture({"all_requests": [
             {
                 "request_index": 1,
                 "request_id": "req-a",
@@ -2912,7 +2955,7 @@ def test_add_request_step_keeps_same_path_distinct_request_ids():
                 "confidence": 0.96,
                 "response_json": {"data": {"id": 2}},
             },
-        ]}},
+        ]}),
     )
 
     new = apply_flow_edits(spec, [
@@ -2953,7 +2996,7 @@ def test_promoted_read_is_ordered_before_write_and_rebuilds_dependency():
             confirmed=True,
             requires_human_confirm=False,
         )],
-        meta={"request_graph": {"all_requests": [{
+        request_facts=_request_facts_from_graph_fixture({"all_requests": [{
             "request_index": 10,
             "request_id": "req-date",
             "sequence": 10,
@@ -2964,7 +3007,7 @@ def test_promoted_read_is_ordered_before_write_and_rebuilds_dependency():
             "confidence": 0.96,
             "response_status": 200,
             "response_json": {"code": 0, "data": {"startDate": "2026-05-12", "missingDates": ["2026-05-12"]}},
-        }]}}
+        }]})
     )
 
     new = apply_flow_edits(spec, [{
@@ -3107,7 +3150,7 @@ def test_auto_fix_promotes_high_confidence_request_into_capability_closure():
             source_meta={"request_index": 20, "sequence": 20},
             params=[ParamField(path="date", key="date", value="2026-05-12", type="date", required=True)],
         )],
-        meta={"request_graph": {"all_requests": [{
+        request_facts=_request_facts_from_graph_fixture({"all_requests": [{
             "request_index": 10,
             "request_id": "req-date",
             "sequence": 10,
@@ -3118,7 +3161,7 @@ def test_auto_fix_promotes_high_confidence_request_into_capability_closure():
             "confidence": 0.96,
             "response_status": 200,
             "response_json": {"code": 0, "data": {"startDate": "2026-05-12"}},
-        }]}}
+        }]})
     )
 
     fixed = asyncio.run(auto_fix_flow_spec(spec, repair_ops=[], max_rounds=2))
@@ -3162,7 +3205,7 @@ def test_capability_scoped_view_uses_param_as_truth_over_locked_mirror():
         )],
     )
 
-    synced = sync_flow_spec_models(spec, prefer_request_facts=False)
+    synced = sync_flow_spec_models(spec)
     fields = synced.capabilities[0].request_fields
 
     locked = next(f for f in fields if f.path == "type")
@@ -3209,7 +3252,7 @@ def test_auto_fix_routes_option_and_status_requests_to_matching_capabilities():
                 confirmed=False,
             ),
         ],
-        meta={"request_graph": {"all_requests": [
+        request_facts=_request_facts_from_graph_fixture({"all_requests": [
             {
                 "request_index": 10,
                 "request_id": "req-options",
@@ -3234,7 +3277,7 @@ def test_auto_fix_routes_option_and_status_requests_to_matching_capabilities():
                 "response_status": 200,
                 "response_json": {"data": {"status": "draft"}},
             },
-        ]}},
+        ]}),
     )
 
     fixed = asyncio.run(auto_fix_flow_spec(spec, repair_ops=[], max_rounds=2))
@@ -3288,7 +3331,7 @@ def test_high_confidence_duplicate_path_is_treated_as_already_covered():
             path="/api/detail",
             source_meta={"request_id": "req-1"},
         )],
-        meta={"request_graph": {"all_requests": [
+        request_facts=_request_facts_from_graph_fixture({"all_requests": [
             {
                 "request_index": 1,
                 "request_id": "req-1",
@@ -3307,7 +3350,7 @@ def test_high_confidence_duplicate_path_is_treated_as_already_covered():
                 "role": "business_get",
                 "confidence": 0.96,
             },
-        ]}},
+        ]}),
     )
 
     cap_report = validate_flow_spec(spec)["capability_validation"]
@@ -4436,8 +4479,7 @@ def test_add_candidate_step_is_idempotent_when_request_already_exists():
             path="/gsgl/xm/getProjectInfosByBt?keyword=abc",
             source_meta={"request_index": 7},
         )],
-        meta={
-            "request_graph": {
+        request_facts=_request_facts_from_graph_fixture({
                 "selected_steps": [],
                 "candidate_reads": [{
                     "request_index": 7,
@@ -4450,16 +4492,15 @@ def test_add_candidate_step_is_idempotent_when_request_already_exists():
                     "response_json": {"data": [{"xmId": "YF001", "xmName": "项目A"}]},
                 }],
                 "filtered_requests": [],
-            }
-        },
+            }),
     )
 
     new = apply_flow_edits(spec, [{"op": "add_candidate_step", "request_index": 7}])
 
     assert len(new.steps) == 1
-    graph = new.meta["request_graph"]
-    assert graph["candidate_reads"] == []
-    assert graph["selected_steps"][0]["request_index"] == 7
+    usage = new.request_facts.usage["idx:7"]
+    assert usage.materialized_step_id == "read"
+    assert usage.state == "materialized"
 
 
 def test_nonexistent_link_lists_available():
@@ -4915,7 +4956,7 @@ def test_manual_source_override_is_preserved_without_rewriting_type_or_evidence(
     assert param.enum_value_map == {"候选十二": "12"}
     assert len(edited.steps[0].selects) == 1
 
-    synced = sync_flow_spec_models(edited, prefer_request_facts=False)
+    synced = sync_flow_spec_models(edited)
     synced_param = synced.steps[0].params[0]
     assert synced_param.type == "enum"
     assert synced_param.source_kind == "user_input"
