@@ -143,6 +143,12 @@ function revisingMultiFormBlock(): ToolContentBlock {
   return block;
 }
 
+function revisingSingleFormBlock(): ToolContentBlock {
+  const block = revisingMultiFormBlock();
+  block.formInteraction!.forms = block.formInteraction!.forms.slice(0, 1);
+  return block;
+}
+
 function pendingGroupedFormBlock(): ToolContentBlock {
   return {
     kind: "tool",
@@ -730,7 +736,7 @@ describe("QuestionToolCard", () => {
     unmount(component);
   });
 
-  it("shows only the individual form titles while revising", async () => {
+  it("shows the edit heading and individual form titles while revising", async () => {
     const response = vi.fn(async () => ({ success: true } as never));
     const target = document.createElement("div");
     const component = mount(QuestionToolCard, {
@@ -746,13 +752,103 @@ describe("QuestionToolCard", () => {
     });
     await tick();
 
-    expect(target.querySelector(".question-form-title")).toBeNull();
+    expect(target.querySelector(".question-form-title")?.textContent).toBe("修改");
     expect(
       [...target.querySelectorAll(".revision-form-title")]
         .map(title => title.textContent?.trim()),
     ).toEqual(["请假申请", "出差申请"]);
 
     unmount(component);
+  });
+
+  it("keeps the title and actions outside the focused form scroll region", async () => {
+    const response = vi.fn(async () => ({ success: true } as never));
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: revisingSingleFormBlock(),
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
+      },
+    });
+    await tick();
+
+    const form = target.querySelector("form");
+    const scrollRegion = form?.querySelector(":scope > .question-form-scroll-region");
+    expect(scrollRegion).not.toBeNull();
+    expect(scrollRegion?.querySelector('input[type="text"]')).not.toBeNull();
+    expect(form?.querySelector(":scope > .question-form-title")?.textContent).toBe("修改");
+    expect(scrollRegion?.querySelector(".revision-form-title")?.textContent).toBe("请假申请");
+    expect(scrollRegion?.querySelector(".question-actions")).toBeNull();
+    expect(form?.querySelector(":scope > .question-actions")).not.toBeNull();
+
+    unmount(component);
+  });
+
+  it("keeps confirmation heading and actions outside its summary scroll region", async () => {
+    const response = vi.fn(async () => ({ success: true } as never));
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: multiFormConfirmationBlock(),
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
+      },
+    });
+    await tick();
+
+    const summary = target.querySelector(".desktop-question-result");
+    const scrollRegion = summary?.querySelector(":scope > .question-form-scroll-region");
+    expect(summary?.querySelector(":scope > .submitted-header h3")?.textContent)
+      .toBe("确认 2 份表单");
+    expect(scrollRegion?.querySelector(".confirmation-form")).not.toBeNull();
+    expect(scrollRegion?.querySelector(".submitted-header")).toBeNull();
+    expect(scrollRegion?.querySelector(".question-actions")).toBeNull();
+    expect(target.querySelector("article > .question-actions")).not.toBeNull();
+
+    unmount(component);
+  });
+
+  it("keeps a new grouped form title and actions outside its scroll region", async () => {
+    vi.useFakeTimers();
+    const response = vi.fn(async () => ({ success: true } as never));
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: pendingGroupedFormBlock(),
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
+      },
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(400);
+      await tick();
+      await tick();
+
+      const form = target.querySelector("form");
+      const scrollRegion = form?.querySelector(":scope > .question-form-scroll-region");
+      expect(target.querySelector(".question-form-title")?.textContent)
+        .toBe("团建行程信息");
+      expect(scrollRegion?.querySelector('input[type="text"]')).not.toBeNull();
+      expect(scrollRegion?.querySelector(".question-form-title")).toBeNull();
+      expect(scrollRegion?.querySelector(".question-actions")).toBeNull();
+      expect(form?.querySelector(":scope > .question-actions")).not.toBeNull();
+    } finally {
+      unmount(component);
+      vi.useRealTimers();
+    }
   });
 
   it("recovers a stale revision from the authoritative response projection", async () => {
