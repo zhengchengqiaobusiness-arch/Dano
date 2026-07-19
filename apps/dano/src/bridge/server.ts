@@ -1009,6 +1009,8 @@ function injectRuntimeConfig(html: string, config: BridgeConfig): string {
     quickActions: config.quickActions,
     slashCommandsAndMentionsEnabled:
       config.slashCommandsAndMentionsEnabled,
+    transcriptProcessSummaryEnabled:
+      config.transcriptProcessSummaryEnabled,
   };
   const configScript = `<script>window.__PI_WEB_CONFIG__=${serializeRuntimeConfig(runtimeConfig)};</script>`;
   return html.includes("</head>")

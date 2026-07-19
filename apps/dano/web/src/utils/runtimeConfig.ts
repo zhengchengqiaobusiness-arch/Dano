@@ -68,3 +68,7 @@ export function getRuntimeQuickActions(): BridgeQuickActionConfig[] {
 export function getRuntimeSlashCommandsAndMentionsEnabled(): boolean {
   return runtimeConfig()?.slashCommandsAndMentionsEnabled === true;
 }
+
+export function getRuntimeTranscriptProcessSummaryEnabled(): boolean {
+  return runtimeConfig()?.transcriptProcessSummaryEnabled === true;
+}

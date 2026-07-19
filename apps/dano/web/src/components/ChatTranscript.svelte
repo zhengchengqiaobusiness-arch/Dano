@@ -84,7 +84,10 @@
   import QuestionToolCard from "./QuestionToolCard.svelte";
   import type { QuestionFocusChange } from "./questionFocus";
   import SkillInvocationCard from "./SkillInvocationCard.svelte";
-  import { getRuntimeEmptyStateConfig } from "../utils/runtimeConfig";
+  import {
+    getRuntimeEmptyStateConfig,
+    getRuntimeTranscriptProcessSummaryEnabled,
+  } from "../utils/runtimeConfig";
   import { t } from "../i18n";
 
   let {
@@ -141,6 +144,8 @@
   >;
 
   const emptyStateConfig = getRuntimeEmptyStateConfig();
+  const transcriptProcessSummaryEnabled =
+    getRuntimeTranscriptProcessSummaryEnabled();
   const transcriptRevealTransition = { duration: 160 };
   const terminalFailuresAborted = new Set<string>();
 
@@ -196,11 +201,15 @@
       { pendingSessionEvent: pendingTranscriptConfigEvent },
     ).filter(item => item.kind !== "session_event"),
   );
-  let processGroups = $derived(buildTranscriptProcessGroups(displayItems, {
-    blocksForMessage: displayContentBlocks,
-    isMessageActive: shouldDeferMessageMarkdownErrors,
-    messageKey: messageStableKey,
-  }));
+  let processGroups = $derived(
+    transcriptProcessSummaryEnabled
+      ? buildTranscriptProcessGroups(displayItems, {
+          blocksForMessage: displayContentBlocks,
+          isMessageActive: shouldDeferMessageMarkdownErrors,
+          messageKey: messageStableKey,
+        })
+      : [],
+  );
   let hasVisibleStreaming = $derived(
     isStreaming || transcriptStreams.length > 0 || transcriptDeltas.length > 0,
   );
@@ -461,14 +470,6 @@
     blockIndex: number,
   ): string {
     return contentBlockKey(msg, messageIndex, block, blockIndex);
-  }
-
-  function thinkingBlockStateKey(
-    msg: TranscriptEntry,
-    messageIndex: number,
-    blockIndex: number,
-  ): string {
-    return `${messageStableKey(msg, messageIndex)}:thinking:${blockIndex}`;
   }
 
   function processGroupForItemIndex(itemIndex: number): TranscriptProcessGroup | undefined {
@@ -1417,36 +1418,12 @@
                     />
                   {/if}
                 </article>
-              {:else if block.kind === "thinking"}
-                <div
-                  class={`thinking-block ${blockState.isThinkingExpanded(thinkingBlockStateKey(item.message, item.messageIndex, bIdx)) ? "expanded" : ""}`}
-                >
-                  {#if isStreamingThinkingBlock(isMessageThinkingActive(item.message, item.messageIndex), blocks, bIdx)}
-                    <div class="thinking-stream-line">
-                      {latestThinkingLine(block.text)}...
-                    </div>
-                  {:else}
-                    <button
-                      type="button"
-                      class="thinking-toggle"
-                      onclick={() => blockState.toggleThinking(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
-                      aria-expanded={blockState.isThinkingExpanded(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
-                    >
-                      <Sparkle class="toggle-icon" aria-hidden="true" size={14} />
-                      {t("chatTranscript.thinkingComplete")}
-                    </button>
-                  {/if}
-                  {#if blockState.isThinkingExpanded(thinkingBlockStateKey(item.message, item.messageIndex, bIdx))}
-                    <div class="thinking-content-panel" transition:slide={transcriptRevealTransition}>
-                      <MarkdownRenderer
-                        class="thinking-content"
-                        content={block.text}
-                        streaming={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
-                        deferMermaidErrors={shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)}
-                        onOpenFileReference={onOpenFileReference}
-                      />
-                    </div>
-                  {/if}
+              {:else if block.kind === "thinking" && isStreamingThinkingBlock(isMessageThinkingActive(item.message, item.messageIndex), blocks, bIdx)}
+                <div class="thinking-block">
+                  <div class="thinking-stream-line">
+                    <Sparkle class="thinking-stream-icon" aria-hidden="true" size={14} />
+                    <span class="thinking-stream-text">{latestThinkingLine(block.text)}...</span>
+                  </div>
                 </div>
               {:else if block.kind === "tool"}
                 {@const readClassification = classifyReadToolBlock(block)}
@@ -2217,10 +2194,6 @@
     margin-top: 6px;
   }
 
-  .thinking-block.expanded + :global(.markdown-renderer) {
-    margin-top: 10px;
-  }
-
   .tool-inline-block,
   .tool-inline-code-panel {
     overflow-anchor: none;
@@ -2372,32 +2345,24 @@
       var(--shadow-floating);
   }
 
-  .thinking-toggle {
-    display: inline-flex;
+  .thinking-stream-line {
+    display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 0;
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    font: inherit;
-    font-size: 0.9rem;
-    min-height: 24px;
-    line-height: 24px;
-    cursor: pointer;
-  }
-
-  .thinking-toggle:hover { color: var(--text); }
-
-  .thinking-stream-line {
-    color: var(--text-muted);
-    font-size: 0.9rem;
-    min-height: 24px;
-    line-height: 24px;
-  }
-
-  .thinking-stream-line {
+    gap: 8px;
     max-width: min(720px, 100%);
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    min-height: 24px;
+    line-height: 24px;
+  }
+
+  .thinking-stream-icon {
+    flex: 0 0 auto;
+    color: var(--text-muted);
+  }
+
+  .thinking-stream-text {
+    min-width: 0;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
@@ -2423,26 +2388,11 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .thinking-stream-line {
+    .thinking-stream-text {
       animation: none;
       background: none;
       color: var(--text-muted);
     }
-  }
-
-  .thinking-content-panel {
-    overflow: hidden;
-  }
-
-  .thinking-block :global(.thinking-content) {
-    margin: 0;
-    padding: 0;
-    font-size: 0.9rem;
-    line-height: 1.55;
-    color: var(--text-muted);
-    max-height: 400px;
-    overflow-y: auto;
-    word-break: break-word;
   }
 
   .tool-inline {

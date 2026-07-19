@@ -1119,6 +1119,7 @@ export interface BridgeBrowserRuntimeConfig {
   readonly emptyState?: Partial<BridgeEmptyStateConfig>;
   readonly quickActions?: readonly BridgeQuickActionConfig[];
   readonly slashCommandsAndMentionsEnabled?: boolean;
+  readonly transcriptProcessSummaryEnabled?: boolean;
 }
 
 // ============================================================================

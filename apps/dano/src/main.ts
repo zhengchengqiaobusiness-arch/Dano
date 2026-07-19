@@ -624,6 +624,8 @@ async function runDanoMain(): Promise<number> {
         quickActions: danoConfig.quickActions ?? [],
         slashCommandsAndMentionsEnabled:
           danoConfig.slashCommandsAndMentionsEnabled ?? false,
+        transcriptProcessSummaryEnabled:
+          danoConfig.transcriptProcessSummaryEnabled ?? false,
         staticDir: options.staticDir,
       };
 

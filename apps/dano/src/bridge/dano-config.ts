@@ -17,6 +17,7 @@ export interface DanoConfig {
     maxRetries?: number;
   };
   slashCommandsAndMentionsEnabled?: boolean;
+  transcriptProcessSummaryEnabled?: boolean;
   quickActions?: BridgeQuickActionConfig[];
 }
 
@@ -32,6 +33,7 @@ export const DANO_DEFAULT_CONFIG = {
     maxRetries: 10,
   },
   slashCommandsAndMentionsEnabled: false,
+  transcriptProcessSummaryEnabled: false,
   quickActions: [],
 } satisfies Required<DanoConfig>;
 
@@ -126,6 +128,9 @@ function normalizeDanoConfig(raw: unknown): DanoConfig {
   const slashCommandsAndMentionsEnabled = readBoolean(
     record.slashCommandsAndMentionsEnabled,
   );
+  const transcriptProcessSummaryEnabled = readBoolean(
+    record.transcriptProcessSummaryEnabled,
+  );
   const quickActions = readQuickActions(record.quickActions);
 
   return {
@@ -137,6 +142,9 @@ function normalizeDanoConfig(raw: unknown): DanoConfig {
     ...(askUserQuestion ? { askUserQuestion } : {}),
     ...(slashCommandsAndMentionsEnabled !== undefined
       ? { slashCommandsAndMentionsEnabled }
+      : {}),
+    ...(transcriptProcessSummaryEnabled !== undefined
+      ? { transcriptProcessSummaryEnabled }
       : {}),
     ...(quickActions ? { quickActions } : {}),
   };
@@ -183,5 +191,7 @@ export function loadDanoConfig(
       env,
       configured.slashCommandsAndMentionsEnabled,
     ),
+    transcriptProcessSummaryEnabled:
+      configured.transcriptProcessSummaryEnabled ?? false,
   };
 }
