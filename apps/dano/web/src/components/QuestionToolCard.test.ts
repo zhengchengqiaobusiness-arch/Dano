@@ -107,8 +107,29 @@ function revisingMultiFormBlock(): ToolContentBlock {
         formId: "form-a",
         title: "请假申请",
         revision: 2,
-        questions: [{ id: "reason", kind: "text", question: "请假原因？" }],
-        answer: { reason: "家庭事务" },
+        questions: [
+          { id: "reason", kind: "text", question: "请假原因？" },
+          {
+            id: "departure_date",
+            kind: "date",
+            question: "出发日期是哪天？",
+            dateFormat: "yyyy-MM-dd",
+          },
+          {
+            id: "activity_type",
+            kind: "single",
+            question: "活动类型？",
+            options: [
+              { id: "training", label: "培训" },
+              { id: "team_building", label: "团建" },
+            ],
+          },
+        ],
+        answer: {
+          reason: "家庭事务",
+          departure_date: "2026-07-25",
+          activity_type: "team_building",
+        },
       },
       {
         formId: "form-b",
@@ -663,7 +684,11 @@ describe("QuestionToolCard", () => {
     await tick();
 
     expect(submitRevision).toHaveBeenCalledWith("confirm-two", 2, {
-      "form-a": { reason: "照顾家人" },
+      "form-a": {
+        reason: "照顾家人",
+        departure_date: "2026-07-25",
+        activity_type: "team_building",
+      },
       "form-b": { destination: "上海" },
     });
     expect(target.textContent).toContain("请假申请");
@@ -674,6 +699,33 @@ describe("QuestionToolCard", () => {
       toolCallId: "confirm-two",
       element: target.querySelector("article"),
     });
+
+    unmount(component);
+  });
+
+  it("shows each Form Revision field label once while preserving accessible labels", async () => {
+    const response = vi.fn(async () => ({ success: true } as never));
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: revisingMultiFormBlock(),
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
+      },
+    });
+    await tick();
+
+    expect(target.querySelectorAll(".question-text")).toHaveLength(4);
+    expect(
+      target.querySelector('label.sr-only[for="question-confirm-two-form-a:departure_date-trigger"]')
+        ?.textContent,
+    ).toBe("出发日期是哪天？");
+    expect(target.querySelector("fieldset.single-options legend.sr-only")?.textContent)
+      .toBe("活动类型？");
 
     unmount(component);
   });
