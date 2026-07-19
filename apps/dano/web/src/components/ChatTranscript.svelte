@@ -32,7 +32,9 @@
     type TranscriptStream,
   } from "../composables/bridgeStore.svelte";
   import {
+    askUserQuestionReturnedConfirmationFormIds,
     askUserQuestionRequest,
+    hideAskUserQuestionToolBlock,
     isAskUserQuestionTerminalFailure,
     isAskUserQuestionToolError,
     isAskUserQuestionValidationTerminalFailure,
@@ -62,6 +64,7 @@
     type ContentBlock,
     type ToolContentBlock,
     type TranscriptDisplayItem,
+    type TranscriptMessageDisplayItem,
     type TranscriptProcessGroup,
   } from "../utils/transcript";
   import {
@@ -196,11 +199,29 @@
       .filter(stream => !messageKeys.has(messageStableKey(stream.message, -1)))
       .map(stream => messageWithTranscriptDeltas(stream.message, -1));
   });
-  let displayItems = $derived(
+  let unfilteredDisplayItems = $derived(
     buildTranscriptDisplayItems(
       [...messages, ...streamDisplayMessages],
       { pendingSessionEvent: pendingTranscriptConfigEvent },
-    ).filter(item => item.kind !== "session_event"),
+    ),
+  );
+  let returnedConfirmationFormIds = $derived.by(() => {
+    const formIds = new Set<string>();
+    for (const item of unfilteredDisplayItems) {
+      if (item.kind !== "message") continue;
+      for (const block of rawDisplayContentBlocks(item.message, item.messageIndex)) {
+        if (block.kind !== "tool") continue;
+        for (const formId of askUserQuestionReturnedConfirmationFormIds(block)) {
+          formIds.add(formId);
+        }
+      }
+    }
+    return formIds;
+  });
+  let displayItems = $derived(
+    unfilteredDisplayItems
+      .filter((item): item is TranscriptMessageDisplayItem => item.kind === "message")
+      .filter(item => !isSupersededFormOnlyItem(item)),
   );
   let processGroups = $derived(
     transcriptProcessSummaryEnabled
@@ -418,12 +439,19 @@
     };
   }
 
-  function displayContentBlocks(msg: TranscriptEntry, index: number) {
+  function rawDisplayContentBlocks(msg: TranscriptEntry, index: number) {
     // Stream display messages already have deltas applied before they enter
     // `displayItems`, so avoid replaying the same deltas a second time.
-    const blocks = index >= messages.length
+    return index >= messages.length
       ? contentBlocks(msg)
       : contentBlocks(messageWithTranscriptDeltas(msg, index));
+  }
+
+  function displayContentBlocks(msg: TranscriptEntry, index: number) {
+    const blocks = rawDisplayContentBlocks(msg, index).filter(block =>
+      block.kind !== "tool" ||
+      !hideAskUserQuestionToolBlock(block, returnedConfirmationFormIds),
+    );
     if (
       msg.role === "user" &&
       blocks.some(block => block.kind === "file" && isImageFile(block))
@@ -431,6 +459,15 @@
       return blocks.filter(block => block.kind !== "image");
     }
     return blocks;
+  }
+
+  function isSupersededFormOnlyItem(item: TranscriptDisplayItem): boolean {
+    if (item.kind !== "message") return false;
+    const blocks = rawDisplayContentBlocks(item.message, item.messageIndex);
+    return blocks.length > 0 && blocks.every(block =>
+      block.kind === "tool" &&
+      hideAskUserQuestionToolBlock(block, returnedConfirmationFormIds),
+    );
   }
 
   function toolBlockIdentity(block: ToolContentBlock, blockIndex: number): string {
