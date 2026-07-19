@@ -2311,26 +2311,6 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
     return out
 
 
-def auto_required_fields(post_data: str | None, samples: dict | None, param_map: dict | None,
-                         *, form_required_labels: set | None = None,
-                         params: list[str] | None = None) -> list[str]:
-    """**自动**判定哪些参数必填(免手动勾选,默认全部必填,写操作宁多勿漏)。
-
-    post_data/samples/form_required_labels 同 flatten_body;param_map:{字段点路径→参数名};
-    params:最终参数名(给定则按它过滤+排序,适配多步取最后一步的 params)。
-    判据复用 flatten_body 的 required(已按"默认必填 + 表单 * 区分时降级可选"算好),
-    再经 param_map 把点路径桥到参数名;本请求体里找不到的路径(如多步早期步)默认必填。
-    返回必填参数名(有序、去重)。"""
-    fl = flatten_body(post_data, samples, form_required_labels)
-    path_req = {f["path"]: bool(f.get("required")) for f in fl}
-    name_req: dict[str, bool] = {}
-    for path, name in (param_map or {}).items():
-        r = path_req.get(path, True)
-        name_req[name] = name_req.get(name, False) or r       # 多路径绑同名 → 任一必填则必填
-    names = list(params) if params is not None else list(dict.fromkeys(name_req))
-    return [p for p in names if name_req.get(p, True)]         # 未知参数 → 默认必填
-
-
 def build_api_request(req: dict, param_map: dict, base_url: str = "",
                       selects: list[dict] | None = None, identity: list[dict] | None = None,
                       typed: dict | None = None) -> dict | None:

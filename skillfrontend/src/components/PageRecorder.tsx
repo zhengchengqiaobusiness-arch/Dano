@@ -1752,18 +1752,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     openRecorderConnection(false);
   }
 
-  function reconnectRecorder() {
-    if (!tenant || !startUrl.trim()) return;
-    const current = wsRef.current;
-    if (current && current.readyState < WebSocket.CLOSING) return;
-    if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
-    reconnectTimerRef.current = null;
-    reconnectAttemptRef.current = 0;
-    setErr("");
-    setConnectionState("reconnecting");
-    openRecorderConnection(true);
-  }
-
   function resetFrameStreamForReconnect() {
     // Keep the currently painted image as a stable fallback, but invalidate all
     // in-flight decoders and the old session's sequence numbers. A replacement

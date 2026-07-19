@@ -62,16 +62,6 @@ def llm_budget_scope(limit: int) -> Iterator[LLMBudget]:
         _BUDGET.reset(token)
 
 
-def begin_llm_budget(limit: int):  # noqa: ANN201 - opaque ContextVar token
-    """Begin a budget that may span an existing long-lived async handler."""
-    return _BUDGET.set(LLMBudget(max(1, int(limit))))
-
-
-def end_llm_budget(token) -> None:  # noqa: ANN001
-    if token is not None:
-        _BUDGET.reset(token)
-
-
 def reserve_llm_tokens(tokens: int, *, purpose: str, per_request_limit: int) -> None:
     if tokens > per_request_limit:
         raise LLMBudgetExceeded(

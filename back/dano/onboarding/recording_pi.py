@@ -152,7 +152,6 @@ class RecordingPiSession:
         self._stdout_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
         self._pending: dict[str, asyncio.Future] = {}
-        self._events: list[dict[str, Any]] = []
         self._prompt_lock = asyncio.Lock()
         self._state_lock = asyncio.Lock()
         self._closed = False
@@ -160,12 +159,6 @@ class RecordingPiSession:
         self._analysis_images: list[dict[str, str]] = []
         self.last_submission_kind = ""
         self.last_review: dict[str, Any] = {}
-
-    async def __aenter__(self) -> "RecordingPiSession":
-        return await self.start()
-
-    async def __aexit__(self, *_exc: object) -> None:
-        await self.close()
 
     async def start(self) -> "RecordingPiSession":
         if self._proc is not None:
@@ -428,10 +421,6 @@ class RecordingPiSession:
         return review
 
     @property
-    def events(self) -> tuple[dict[str, Any], ...]:
-        return tuple(self._events)
-
-    @property
     def descriptor(self) -> dict[str, str | bool | None]:
         """Public opaque resume data; never expose server filesystem paths/tokens."""
         return {
@@ -439,13 +428,6 @@ class RecordingPiSession:
             "session_id": self.session_id,
             "resumed": self.resumed,
         }
-
-    def latest_tool_result(self, tool_name: str) -> dict[str, Any] | None:
-        """Return the latest Pi tool completion summary when the runtime emitted one."""
-        for event in reversed(self._events):
-            if event.get("event") in ("tool_execution_end", "tool_call_end") and event.get("toolName") == tool_name:
-                return event
-        return None
 
     async def _command(self, command_type: str, *, timeout_s: float | None = None, **payload: Any) -> dict[str, Any]:
         request_id = uuid4().hex
@@ -477,9 +459,6 @@ class RecordingPiSession:
                 except json.JSONDecodeError:
                     log.warning("recording_pi.stdout_invalid", run_id=self.run_id, line=line[:300])
                     continue
-                self._events.append(event)
-                if len(self._events) > 1000:
-                    del self._events[:500]
                 request_id = str(event.get("request_id") or "")
                 future = self._pending.get(request_id)
                 if future is None or future.done():

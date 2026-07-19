@@ -60,12 +60,3 @@ async def call_tool(name: str, request: Request,
     log.info("agent_tool.done", run_id=run_id, tool=name, dur_s=dur, **summary)
     progress.emit(run_id, {"type": "tool_done", "tool": name, "dur_s": dur, "summary": summary})
     return out
-
-
-# 兼容旧接口:固定令牌的独立 app(Phase 2 测试用)
-def make_agent_app(token: str, run_id: str):  # noqa: ANN201
-    from fastapi import FastAPI
-    runs.register(run_id, token)
-    app = FastAPI(docs_url=None, redoc_url=None)
-    app.include_router(agent_tools_router)
-    return app

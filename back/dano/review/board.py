@@ -750,32 +750,3 @@ async def generate_goal(client: "ChatClient | None", model: str | None, *,
         log.warning("generate_goal.failed", action=action)
         return {}
     return out if isinstance(out, dict) else {}
-
-
-# ─────────── P3:LLM 字段语义增强(只为确定性命名没把握的字段补名,有把握的不覆盖) ───────────
-_FIELD_NAME_SYSTEM = (
-    "你是表单字段**命名助手**。给定一组**机器字段名**(英文 key / 路径,**无值**),为每个起一个**简短中文业务名**。"
-    "原则:只对**能合理推断**的起名(applicantId→申请人、leaveType→请假类型、processDefKey→流程标识);"
-    "**像随机码/无意义标识**(Activity_09dlq0g、hash、纯数字)无法推断 → **省略该项**(绝不瞎编)。"
-    "输出 JSON 对象:{\"names\": {\"原始key\": \"中文名\"}}(只含你有把握的项)。"
-)
-
-
-async def suggest_field_names_llm(client: "ChatClient | None", model: str | None, *,
-                                  action: str, fields: list[dict]) -> dict:
-    """为**确定性命名没把握**的字段(suggest_name==key)提议中文名。只喂 key/type/path(**无值**)。失败/无项 → {}。"""
-    if client is None or not model:
-        return {}
-    need = [{"key": f.get("key"), "type": f.get("type"), "path": f.get("path")}
-            for f in (fields or []) if f.get("suggest_name") == f.get("key")]
-    if not need:
-        return {}
-    payload = json.dumps({"action": action, "fields": need}, ensure_ascii=False)
-    try:
-        out = await client.complete_json(model=model, system=_FIELD_NAME_SYSTEM,
-                                         user="【待命名字段(仅机器名,无值)】\n" + payload, timeout_s=30.0)
-    except Exception:  # noqa: BLE001 —— 命名增强失败不影响录制(退回确定性 key 名)
-        log.warning("suggest_field_names_llm.failed", action=action)
-        return {}
-    names = out.get("names") if isinstance(out, dict) else None
-    return {str(k): str(v) for k, v in names.items() if str(v).strip()} if isinstance(names, dict) else {}

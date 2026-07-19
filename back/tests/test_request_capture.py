@@ -8,7 +8,6 @@ from dano.execution.page.request_capture import (
     _resolve_list_selects,
     _resolve_selects,
     as_list_payload,
-    auto_required_fields,
     classify_request_role,
     classify_network_request as classify_capture_request,
     infer_success_rule,
@@ -2505,33 +2504,6 @@ def test_flatten_required_nonparam_is_optional():
     assert fields["procDefKey"]["suggest_param"] is False and fields["procDefKey"]["required"] is False
 
 
-def test_auto_required_defaults_all_params():
-    """auto_required_fields:没 * 信息 → 全部参数必填(默认),经 param_map 桥到参数名。"""
-    body = '{"reason":"回家","days":"3"}'
-    samples = {"原因": "回家", "天数": "3"}
-    param_map = {"reason": "原因", "days": "天数"}
-    out = auto_required_fields(body, samples, param_map, params=["原因", "天数"])
-    assert out == ["原因", "天数"]
-
-
-def test_auto_required_downgrades_with_star():
-    """auto_required_fields:表单区分了必填(有 *)→ 没标 * 的参数降级可选;标了的保持必填。"""
-    body = '{"reason":"回家","street":"中山路"}'
-    samples = {"原因": "回家", "街道": "中山路"}
-    param_map = {"reason": "原因", "street": "街道"}
-    out = auto_required_fields(body, samples, param_map,
-                               form_required_labels={"原因"}, params=["原因", "街道"])
-    assert out == ["原因"]                       # 街道没 * → 可选,不在必填清单
-
-
-def test_auto_required_unknown_path_defaults_required():
-    """多步:早期步的参数不在提交那条请求体里(path 找不到)→ 默认必填(宁多勿漏)。"""
-    body = '{"reason":"回家"}'
-    out = auto_required_fields(body, {"原因": "回家"}, {"reason": "原因", "taskTitle": "标题"},
-                               params=["原因", "标题"])
-    assert set(out) == {"原因", "标题"}
-
-
 def test_flatten_body_non_json_returns_empty():
     assert flatten_body("plain text no kv") == []     # 非 JSON 非表单 → 空(form 体现已支持,另有专测)
     assert flatten_body(None) == []
@@ -3453,33 +3425,6 @@ async def test_onboarding_live_verify_reaches_verified():
             await c.execute("DELETE FROM assets WHERE tenant=$1", tenant)
         srv.shutdown()
         await close_pool()
-
-
-# ─────────── P3:LLM 字段语义增强(只补确定性没把握的字段,有把握的不覆盖) ───────────
-async def test_suggest_field_names_llm_only_unnamed_and_redacts():
-    """只把"名字仍=key"的字段送 LLM 命名;且只喂机器名/类型/路径,不带值。"""
-    from dano.review.board import suggest_field_names_llm
-    fake = _FakeChat({"names": {"applicantId": "申请人", "leaveType": "请假类型"}})
-    fields = [
-        {"key": "reason", "suggest_name": "原因", "type": "string", "path": "reason", "value": "回家"},  # 已确信
-        {"key": "applicantId", "suggest_name": "applicantId", "type": "string", "path": "applicantId", "value": "118"},
-        {"key": "leaveType", "suggest_name": "leaveType", "type": "string", "path": "leaveType", "value": "事假"},
-    ]
-    names = await suggest_field_names_llm(fake, "m", action="submit", fields=fields)
-    assert names == {"applicantId": "申请人", "leaveType": "请假类型"}
-    # 只送了没命名的两个;确信的 reason 不送;且 user 里没有值"回家"/"118"
-    assert "applicantId" in fake.seen["user"] and "leaveType" in fake.seen["user"]
-    assert "回家" not in fake.seen["user"] and "118" not in fake.seen["user"]
-
-
-async def test_suggest_field_names_llm_safe_degrade():
-    from dano.review.board import suggest_field_names_llm
-    assert await suggest_field_names_llm(None, "m", action="a", fields=[]) == {}
-    # 所有字段都已命名 → 不调 LLM
-    named = [{"key": "reason", "suggest_name": "原因"}]
-    assert await suggest_field_names_llm(_FakeChat({"names": {"x": "y"}}), "m", action="a", fields=named) == {}
-
-
 
 
 # ─────────── 补齐:业务相关性门 / 字段语义门 / 步骤依赖门(无源) ───────────

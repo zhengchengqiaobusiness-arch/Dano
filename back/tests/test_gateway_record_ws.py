@@ -445,7 +445,6 @@ class _FakeWebSocket(_ConcurrentWriteProbe):
 @pytest.mark.asyncio
 async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverable(monkeypatch) -> None:  # noqa: ANN001
     import dano.execution.page.recorder as recorder_module
-    import dano.infra.llm_control as llm_control
 
     sessions = []
 
@@ -486,8 +485,6 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
             self.stopped = True
 
     monkeypatch.setattr(recorder_module, "RecordSession", FakeRecordSession)
-    monkeypatch.setattr(llm_control, "begin_llm_budget", lambda _budget: object())
-    monkeypatch.setattr(llm_control, "end_llm_budget", lambda _token: None)
     gateway._RECENT_RECORDING_ACTIONS.clear()
 
     resume_id = f"recording_{'a' * 32}"

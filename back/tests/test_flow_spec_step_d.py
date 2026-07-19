@@ -2,7 +2,7 @@
 
 from dano.execution.page.flow_spec import (
     FlowSpec, FlowStep, FlowLink, ParamField,
-    rename_steps_deterministically, render_business_description,
+    render_business_description,
     _derive_step_name, _derive_title,
 )
 
@@ -24,22 +24,6 @@ def test_derive_step_name_with_params():
     s = FlowStep(method="POST", url="/api/submit", path="/api/submit",
                  params=[ParamField(path="x", key="x", value="1", type="string", required=True)])
     assert "含1字段" in _derive_step_name(s)
-
-
-def test_rename_uses_deterministic_facts():
-    s1 = _step(path="/api/leave/submit")
-    s2 = _step(path="/api/leave/approve")
-    spec = FlowSpec(flow_id="f", steps=[s1, s2])
-    new = rename_steps_deterministically(spec)
-    assert new.steps[0].name == "POST_submit"
-    assert new.steps[1].name == "POST_approve"
-
-
-def test_rename_does_not_mutate_input():
-    s = _step(name="old", path="/api/submit")
-    spec = FlowSpec(flow_id="f", steps=[s])
-    rename_steps_deterministically(spec)
-    assert spec.steps[0].name == "old"
 
 
 # ── Step D3: 业务说明 ──

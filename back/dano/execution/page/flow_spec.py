@@ -16249,13 +16249,6 @@ def _derive_step_name(step: FlowStep) -> str:
     return f"{method}_{last}"
 
 
-def rename_steps_deterministically(spec: FlowSpec) -> FlowSpec:
-    new_spec = spec.model_copy(deep=True)
-    for st in new_spec.steps:
-        st.name = _derive_step_name(st)
-    return append_flow_version(refresh_review_items(new_spec), "step_naming", reason="生成或刷新步骤名称")
-
-
 def _description_param_key(param: ParamField) -> str:
     return param.label or param.key or param.path
 

@@ -11,21 +11,6 @@ from dano.agent_tools import materials
 log = structlog.get_logger(__name__)
 
 
-async def _advisory_notes(action: str, api_request: dict) -> list[str]:
-    """录制 skill 的**非阻断**语义顾问:仅当评审 client 已注入(生产启动注入;测试默认无)才跑。
-    任何失败/未配置都返回 [] —— 顾问绝不阻断发布。"""
-    try:
-        from dano.agent_tools import tools as T
-        board = T._review_board
-        if board is None:
-            return []
-        from dano.review.board import advisory_capture_review
-        return await advisory_capture_review(board.client, (getattr(board, "models", None) or {}).get("acceptance"),
-                                             action=action, api_request=api_request)
-    except Exception:  # noqa: BLE001
-        return []
-
-
 async def _auto_goal(action: str, api_request: dict) -> dict:
     """LLM 就绪时自动提炼业务 Goal(随资产存档);未注入/失败 → {}。提议性质,不因 LLM 抖动阻断发布。"""
     try:

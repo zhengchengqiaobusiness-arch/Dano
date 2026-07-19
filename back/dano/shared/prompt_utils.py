@@ -75,18 +75,6 @@ def extract_json_obj(s: str) -> dict:
     return {}
 
 
-def estimate_tokens(text: str) -> int:
-    """无依赖的粗略 token 估算(偏保守,宁多勿少):每个 CJK 字≈1 token,其余每 4 字符≈1 token。
-
-    只用于「喂模型前按预算截断」的相对比较,不追求与某具体 tokenizer 精确一致;跨 provider 通用,
-    免引入 tiktoken 之类重依赖。字符切片(len[:N])会严重低估 CJK 的真实 token 量,故改用本估算。
-    """
-    if not text:
-        return 0
-    cjk = sum(1 for ch in text if "一" <= ch <= "鿿")
-    return cjk + (len(text) - cjk) // 4 + 1
-
-
 def wrap_data(label: str, text: str) -> str:
     """把不可信外部数据(接口文档原文等)包进带标签的分隔块。
 
