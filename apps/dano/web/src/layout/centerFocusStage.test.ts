@@ -1,6 +1,7 @@
 /** @vitest-environment happy-dom */
 
 import { describe, expect, it, vi } from "vitest";
+import appMainContentSource from "./AppMainContent.svelte?raw";
 import {
   createCenterFocusStage,
   hasActiveCenterFocusStage,
@@ -22,7 +23,7 @@ function rect(left: number, top: number, width: number, height: number): DOMRect
 }
 
 describe("Center Focus Stage", () => {
-  it("recenters the active card when a confirmation expands into a form revision", () => {
+  it("provides fixed safe bounds while CSS owns dynamic card centering", () => {
     const root = document.createElement("main");
     const transcript = document.createElement("div");
     const anchor = document.createElement("div");
@@ -34,41 +35,35 @@ describe("Center Focus Stage", () => {
     root.append(transcript);
     document.body.append(root);
     vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(0, 40, 1000, 800));
-    let cardHeight = 360;
-    vi.spyOn(card, "getBoundingClientRect").mockImplementation(
-      () => rect(200, Number.parseFloat(card.style.top || "180"), 600, cardHeight),
-    );
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(200, 180, 600, 360));
     vi.spyOn(window, "matchMedia").mockImplementation(query => ({
       matches: query === "(min-width: 901px)" ||
         query === "(prefers-reduced-motion: reduce)",
     } as MediaQueryList));
-    let resizeCallback: ResizeObserverCallback | undefined;
-    const disconnect = vi.fn();
     const OriginalResizeObserver = globalThis.ResizeObserver;
     globalThis.ResizeObserver = class {
-      constructor(callback: ResizeObserverCallback) {
-        resizeCallback = callback;
+      constructor() {
+        throw new Error("Card centering must not observe card height");
       }
-      observe() {}
-      unobserve() {}
-      disconnect = disconnect;
+      disconnect() {}
+      observe(_target: Element, _options?: ResizeObserverOptions) {}
+      unobserve(_target: Element) {}
     } as typeof ResizeObserver;
 
     try {
       const stage = createCenterFocusStage(root);
       stage.show({ sessionKey: "session-a", toolCallId: "confirm-form", element: card });
 
-      expect(card.style.top).toBe("260px");
-
-      cardHeight = 752;
-      resizeCallback?.([], {} as ResizeObserver);
-
       expect(card.style.top).toBe("64px");
-      expect(Number.parseFloat(card.style.top) + cardHeight).toBeLessThanOrEqual(816);
+      expect(card.style.bottom).toBe("calc(100dvh - 840px + 24px)");
+      expect(card.style.maxHeight).toBe("752px");
+      const focusedCardRule = appMainContentSource.match(
+        /\.center-column :global\(\.center-focused-card\) \{([\s\S]*?)\n  \}/,
+      )?.[1];
+      expect(focusedCardRule).toContain("height: fit-content;");
+      expect(focusedCardRule).toContain("margin-block: auto;");
 
       stage.hide("confirm-form");
-      expect(disconnect).toHaveBeenCalledOnce();
-      resizeCallback?.([], {} as ResizeObserver);
       expect(card.getAttribute("style")).toBeNull();
       stage.destroy();
     } finally {

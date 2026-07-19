@@ -20,7 +20,6 @@ interface ActivePresentation {
   composerWasInert: boolean;
   backgroundBranches: Array<{ element: HTMLElement; wasInert: boolean }>;
   sourceRect: DOMRect;
-  resizeObserver: ResizeObserver | null;
 }
 
 const DESKTOP_SAFE_MARGIN = 24;
@@ -57,9 +56,6 @@ export function createCenterFocusStage(
     const { element } = presentation.target;
     const rootRect = root.getBoundingClientRect();
     const sourceRect = presentation.sourceRect;
-    const cardHeight = element.classList.contains("center-focused-card")
-      ? element.getBoundingClientRect().height
-      : sourceRect.height;
     presentation.anchor.style.height = `${sourceRect.height}px`;
 
     if (!isDesktopCenterFocusViewport()) {
@@ -67,6 +63,7 @@ export function createCenterFocusStage(
       element.classList.add("center-focus-mobile-card");
       element.style.removeProperty("left");
       element.style.removeProperty("top");
+      element.style.removeProperty("bottom");
       element.style.removeProperty("width");
       element.style.removeProperty("max-height");
       element.style.setProperty(
@@ -76,6 +73,10 @@ export function createCenterFocusStage(
       element.style.setProperty(
         "--center-focus-top",
         `calc(max(${rootRect.top}px, var(--mobile-header-offset, calc(env(safe-area-inset-top, 0px) + 50px))) + ${margin}px)`,
+      );
+      element.style.setProperty(
+        "--center-focus-bottom",
+        `calc(100dvh - min(${rootRect.bottom}px, 100dvh) + ${margin}px + env(safe-area-inset-bottom, 0px))`,
       );
       element.style.setProperty(
         "--center-focus-width",
@@ -91,6 +92,7 @@ export function createCenterFocusStage(
     element.classList.remove("center-focus-mobile-card");
     element.style.removeProperty("--center-focus-left");
     element.style.removeProperty("--center-focus-top");
+    element.style.removeProperty("--center-focus-bottom");
     element.style.removeProperty("--center-focus-width");
     element.style.removeProperty("--center-focus-max-height");
     const width = Math.max(
@@ -101,15 +103,11 @@ export function createCenterFocusStage(
       ),
     );
     const maxHeight = Math.max(0, rootRect.height - DESKTOP_SAFE_MARGIN * 2);
-    const visibleHeight = Math.min(cardHeight, maxHeight);
     const left = rootRect.left + (rootRect.width - width) / 2;
-    const top = rootRect.top + Math.max(
-      DESKTOP_SAFE_MARGIN,
-      (rootRect.height - visibleHeight) / 2,
-    );
 
     element.style.left = `${left}px`;
-    element.style.top = `${top}px`;
+    element.style.top = `${rootRect.top + DESKTOP_SAFE_MARGIN}px`;
+    element.style.bottom = `calc(100dvh - ${rootRect.bottom}px + ${DESKTOP_SAFE_MARGIN}px)`;
     element.style.width = `${width}px`;
     element.style.maxHeight = `${maxHeight}px`;
   }
@@ -134,7 +132,6 @@ export function createCenterFocusStage(
       composerWasInert: composer?.inert ?? false,
       backgroundBranches: [],
       sourceRect: target.element.getBoundingClientRect(),
-      resizeObserver: null,
     };
     active = presentation;
     target.element.classList.add("center-focus-transition-card");
@@ -145,12 +142,6 @@ export function createCenterFocusStage(
       root.querySelector<HTMLElement>("[data-center-focus-transcript]")
         ?.setAttribute("data-center-focus-locked", "true");
       target.element.classList.add("center-focused-card");
-      if (typeof ResizeObserver !== "undefined") {
-        presentation.resizeObserver = new ResizeObserver(() => {
-          if (active === presentation) layout(presentation);
-        });
-        presentation.resizeObserver.observe(target.element);
-      }
       isolateBackground(presentation, root);
       if (composer) {
         if (composer.contains(document.activeElement)) {
@@ -167,7 +158,6 @@ export function createCenterFocusStage(
     if (toolCallId && active.target.toolCallId !== toolCallId) return;
     const presentation = active;
     active = null;
-    presentation.resizeObserver?.disconnect();
     runTransition(() => {
       delete root.dataset.centerFocusActive;
       root.querySelector<HTMLElement>("[data-center-focus-transcript]")

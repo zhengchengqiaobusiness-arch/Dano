@@ -28,6 +28,7 @@ export type FormInteractionTransition =
   | { type: "cancel" }
   | { type: "interrupt" }
   | { type: "return_modify" }
+  | { type: "cancel_revision" }
   | { type: "submit_revision"; forms: AskUserQuestionConfirmationForm[] };
 
 export type FormInteractionTransitionResult =
@@ -42,7 +43,7 @@ type OpenFormInteractionState = Extract<
 
 const ALLOWED_TRANSITIONS = {
   awaiting_confirmation: ["confirm", "cancel", "interrupt", "return_modify"],
-  revising: ["cancel", "interrupt", "submit_revision"],
+  revising: ["cancel_revision", "interrupt", "submit_revision"],
 } as const satisfies Record<
   OpenFormInteractionState,
   readonly FormInteractionTransition["type"][]
@@ -53,6 +54,7 @@ const CLIENT_ACTION_BY_TRANSITION = {
   cancel: "cancel",
   interrupt: null,
   return_modify: "return_modify",
+  cancel_revision: "cancel_revision",
   submit_revision: "submit_revision",
 } as const satisfies Record<
   FormInteractionTransition["type"],
@@ -150,6 +152,15 @@ export function reduceFormInteraction(
         },
       };
     }
+    case "cancel_revision":
+      return {
+        kind: "transitioned",
+        snapshot: {
+          ...current,
+          state: "awaiting_confirmation",
+          revision: current.revision + 1,
+        },
+      };
     case "confirm":
       return terminalTransition(current, "confirmed");
     case "cancel":

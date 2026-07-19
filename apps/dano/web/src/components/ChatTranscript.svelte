@@ -22,6 +22,7 @@
   import {
     abortGeneration,
     answerQuestion,
+    cancelQuestionRevision,
     getBridgeClientId,
     presentQuestion,
     reviseQuestion,
@@ -1430,7 +1431,7 @@
               {:else if block.kind === "tool"}
                 {@const readClassification = classifyReadToolBlock(block)}
                 {#if askUserQuestionRequest(block) && !isAskUserQuestionToolError(block)}
-                  <QuestionToolCard {block} active={isStreaming && !initialLoading && shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)} onPresent={presentQuestion} onRespond={answerQuestion} onRevise={reviseQuestion} onSubmitRevision={submitQuestionRevision} onFocusChange={onQuestionFocusChange} {onFieldAssist} />
+                  <QuestionToolCard {block} active={isStreaming && !initialLoading && shouldDeferMessageMarkdownErrors(item.message, item.messageIndex)} onPresent={presentQuestion} onRespond={answerQuestion} onRevise={reviseQuestion} onCancelRevision={cancelQuestionRevision} onSubmitRevision={submitQuestionRevision} onFocusChange={onQuestionFocusChange} {onFieldAssist} />
                 {:else if readClassification?.kind === "skill"}
                   <SkillInvocationCard skillName={readClassification.label} />
                 {:else}

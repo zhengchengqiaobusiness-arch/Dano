@@ -3,6 +3,7 @@
 import { mount, unmount } from "svelte";
 import { describe, expect, it } from "vitest";
 import SubmittedAnswerValue from "./SubmittedAnswerValue.svelte";
+import submittedAnswerValueSource from "./SubmittedAnswerValue.svelte?raw";
 
 describe("SubmittedAnswerValue", () => {
   it("reuses the editable form control styles", () => {
@@ -19,5 +20,14 @@ describe("SubmittedAnswerValue", () => {
     } finally {
       unmount(component);
     }
+  });
+
+  it("vertically centers the single-line confirmation value", () => {
+    const rule = submittedAnswerValueSource.match(
+      /\.submitted-field-value \{([\s\S]*?)\n  \}/,
+    )?.[1];
+
+    expect(rule).toContain("display: flex;");
+    expect(rule).toContain("align-items: center;");
   });
 });

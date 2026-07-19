@@ -102,7 +102,7 @@ function revisingMultiFormBlock(): ToolContentBlock {
     interactionId: "confirm-two",
     state: "revising",
     revision: 2,
-    allowedActions: ["cancel", "submit_revision"],
+    allowedActions: ["cancel_revision", "submit_revision"],
     forms: [
       {
         formId: "form-a",
@@ -476,6 +476,45 @@ describe("QuestionToolCard", () => {
       unmount(component);
       vi.useRealTimers();
     }
+  });
+
+  it("cancels only the draft revision and returns to confirmation", async () => {
+    const respond = vi.fn(async () => ({ success: true } as never));
+    const cancelRevision = vi.fn(async () => ({
+      success: true,
+      data: {
+        ...multiFormConfirmationBlock().formInteraction,
+        revision: 3,
+      },
+    } as never));
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: revisingMultiFormBlock(),
+        active: true,
+        onPresent: respond,
+        onRespond: respond,
+        onRevise: respond,
+        onCancelRevision: cancelRevision,
+        onSubmitRevision: respond,
+      },
+    });
+    await tick();
+
+    const cancel = [...target.querySelectorAll<HTMLButtonElement>("button")]
+      .find(button => button.textContent?.trim() === "取消");
+    expect(cancel).toBeDefined();
+    cancel?.click();
+    await tick();
+    await tick();
+
+    expect(cancelRevision).toHaveBeenCalledWith("confirm-two", 2);
+    expect(respond).not.toHaveBeenCalled();
+    expect(target.querySelectorAll('input[type="text"]')).toHaveLength(0);
+    expect(target.textContent).toContain("返回修改");
+
+    unmount(component);
   });
 
   it("presents a confirmation without locally authorizing actions before projection", async () => {
@@ -1045,7 +1084,7 @@ describe("QuestionToolCard", () => {
       interactionId: "confirm-form-1",
       state: "revising",
       revision: 2,
-      allowedActions: ["cancel", "submit_revision"],
+      allowedActions: ["cancel_revision", "submit_revision"],
       forms: [],
     };
     const target = document.createElement("div");

@@ -55,6 +55,9 @@
     onPresent,
     onRespond,
     onRevise,
+    onCancelRevision = undefined as
+      | ((toolCallId: string, expectedRevision: number) => Promise<RpcResponse>)
+      | undefined,
     onSubmitRevision,
     onFocusChange = undefined as
       | ((target: QuestionFocusChange) => void)
@@ -77,6 +80,7 @@
         },
     ) => Promise<RpcResponse>;
     onRevise: (toolCallId: string, expectedRevision: number) => Promise<RpcResponse>;
+    onCancelRevision?: (toolCallId: string, expectedRevision: number) => Promise<RpcResponse>;
     onSubmitRevision: (
       toolCallId: string,
       expectedRevision: number,
@@ -446,6 +450,21 @@
         interaction.revision,
         answers,
       );
+      applyAuthoritativeInteraction(rpc);
+      if (!rpc.success) throw new Error(rpc.error);
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : String(cause);
+    } finally {
+      submitting = false;
+    }
+  }
+
+  async function cancelRevision() {
+    if (!block.toolCallId || !interaction || !onCancelRevision || submitting) return;
+    submitting = true;
+    error = "";
+    try {
+      const rpc = await onCancelRevision(block.toolCallId, interaction.revision);
       applyAuthoritativeInteraction(rpc);
       if (!rpc.success) throw new Error(rpc.error);
     } catch (cause) {
@@ -1202,8 +1221,8 @@
 
         <div class="question-actions">
           {#if revising && interaction}
-            {#if interaction.allowedActions.includes("cancel")}
-              <button type="button" class="question-button secondary" disabled={submitting} onclick={() => void respond({ cancelled: true })}>
+            {#if interaction.allowedActions.includes("cancel_revision")}
+              <button type="button" class="question-button secondary" disabled={submitting} onclick={() => void cancelRevision()}>
                 {t("questionTool.cancel")}
               </button>
             {/if}

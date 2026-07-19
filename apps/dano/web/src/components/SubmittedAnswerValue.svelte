@@ -38,6 +38,8 @@
 
 <style>
   .submitted-field-value {
+    display: flex;
+    align-items: center;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

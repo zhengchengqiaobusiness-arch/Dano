@@ -372,6 +372,8 @@
   .center-column :global(.center-focused-card) {
     position: fixed;
     z-index: 22;
+    height: fit-content;
+    margin-block: auto;
     overflow: hidden;
     box-shadow: var(--shadow-overlay, var(--shadow-raised));
   }
@@ -413,6 +415,7 @@
     .center-column :global(.center-focused-card.center-focus-mobile-card) {
       left: var(--center-focus-left);
       top: var(--center-focus-top);
+      bottom: var(--center-focus-bottom);
       width: var(--center-focus-width);
       max-height: var(--center-focus-max-height);
     }
