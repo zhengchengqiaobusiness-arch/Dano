@@ -16,6 +16,10 @@ _Avoid_: bridge workspace package, separate bridge service
 A transient AI helper for ask_user_question input and editor fields that rewrites or generates the field value without submitting the answer or creating a normal Dano conversation turn.
 _Avoid_: detached session, user prompt, field workflow, preview candidate
 
+**Grouped Form**:
+An actionable multi-field question that collects a titled set of related answers in one card. Answering it produces a Submitted Form; it is not itself a Submitted Form while the user can still edit it.
+_Avoid_: ordinary single question, Submitted Form before submission, confirmation lifecycle
+
 **Submitted Form**:
 A completed, read-only grouped form identified by an opaque `formId` that reuses its source tool-call ID. Submission ends the original interactive question; a later confirmation flow in the same Assistant Turn may reference the form without reopening it. Transcript identity may outlive that Turn, but confirmation eligibility does not.
 _Avoid_: pending confirmation, editable form, separate form identifier
@@ -27,6 +31,10 @@ _Avoid_: one assistant message, one tool call, browser streaming state
 **Form Interaction**:
 The server-owned confirmation lifecycle for one or more Submitted Forms. Its append-only snapshots live in the existing session JSONL and reduce to `awaiting_confirmation`, `revising`, `confirmed`, `cancelled`, or `interrupted`; the browser only renders the projected state, Form Revisions, and allowed actions.
 _Avoid_: frontend confirmation state, global streaming state, reconstructed form relationship
+
+**Confirmation Card**:
+The browser presentation that summarizes one or more Submitted Forms for confirmation. It may appear before its Form Interaction has been presented, but it exposes actions only from the server-projected Form Interaction and never owns confirmation state itself.
+_Avoid_: Form Interaction, automatically transformed Submitted Form, frontend-owned confirmation state
 
 Form Interaction mutations use the projected interaction revision as an optimistic concurrency token. A stale client receives the latest authoritative projection without changing JSONL; the first persisted terminal state is immutable, and safe duplicate revision requests do not append contradictory snapshots.
 
