@@ -343,7 +343,17 @@ def test_pi_plan_allows_backend_to_refresh_derived_request_usage(monkeypatch):
     result = asyncio.run(submit_recording_plan("run-derived-usage", {
         "recording_id": "rec-derived-usage",
         "base_flow_version": 1,
-        "plan": {"semantic_plan": {}, "ops": []},
+        "plan": {
+            "semantic_plan": {
+                "business_understanding": {},
+                "request_roles": [],
+                "field_semantics": [],
+                "capabilities": [],
+                "capability_relations": [],
+                "unresolved_items": [],
+            },
+            "ops": [],
+        },
     }))
 
     assert result["flow_version"] > 1
@@ -577,7 +587,17 @@ def test_fact_violation_rolls_back_entire_recording_session(monkeypatch, mode):
         "base_flow_version": 1,
     }
     if mode == "plan":
-        params["plan"] = {"semantic_plan": {}, "ops": []}
+        params["plan"] = {
+            "semantic_plan": {
+                "business_understanding": {},
+                "request_roles": [],
+                "field_semantics": [],
+                "capabilities": [],
+                "capability_relations": [],
+                "unresolved_items": [],
+            },
+            "ops": [],
+        }
         call = submit_recording_plan
     else:
         params["operations"] = []
@@ -910,3 +930,27 @@ def test_observed_five_interface_plan_keeps_only_business_anchors():
     assert repaired_seal.source_kind == "api_option"
     option_ref = next(ref for ref in repaired_submit.request_refs if ref.step_id == "options")
     assert option_ref.usage == "option_source"
+
+def test_recording_plan_rejects_semantic_fields_outside_semantic_plan():
+    malformed = {
+        "semantic_plan": {"business_understanding": "发起请假申请单"},
+        "field_semantics": [],
+        "capabilities": [],
+        "capability_relations": [],
+        "unresolved_items": [],
+    }
+
+    with pytest.raises(ToolError, match="必须位于 plan.semantic_plan 内"):
+        agent_tools_module._normalize_recording_plan_submission(malformed, FlowSpec())
+
+
+def test_recording_plan_requires_complete_semantic_contract():
+    incomplete = {
+        "semantic_plan": {
+            "business_understanding": "发起请假申请单",
+            "request_roles": [],
+        },
+    }
+
+    with pytest.raises(ToolError, match="缺少必填字段"):
+        agent_tools_module._normalize_recording_plan_submission(incomplete, FlowSpec())

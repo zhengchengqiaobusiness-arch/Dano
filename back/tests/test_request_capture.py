@@ -3890,3 +3890,24 @@ def test_simple_list_with_audit_columns_is_still_option_source():
 
     assert role["role"] == "read_option"
     assert role["keep"] is False
+
+def test_system_user_page_with_audit_columns_is_reference_option_source():
+    request = {
+        "method": "GET",
+        "url": "https://example.test/admin-api/system/user/page?pageNo=1&pageSize=100",
+        "response_json": {
+            "code": 0,
+            "data": {
+                "list": [
+                    {"id": 149, "nickname": "hunk", "status": 0, "createTime": 1784419173000, "remark": ""},
+                    {"id": 144, "nickname": "姜楠", "status": 0, "createTime": 1784419174000, "remark": ""},
+                ],
+                "total": 2,
+            },
+        },
+    }
+
+    role = classify_capture_request(request)
+
+    assert role["role"] == "read_option"
+    assert role["keep"] is False

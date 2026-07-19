@@ -1131,6 +1131,34 @@ async def get_recording_state(run_id: str, params: dict) -> dict:
 
 def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa: ANN001
     """Adapt common Pi JSON variants without weakening fact/version gates."""
+    semantic_keys = {
+        "business_understanding",
+        "request_roles",
+        "field_semantics",
+        "capabilities",
+        "capability_relations",
+        "unresolved_items",
+    }
+    if "semantic_plan" in raw_plan:
+        raw_semantic = raw_plan.get("semantic_plan")
+        if not isinstance(raw_semantic, dict):
+            raise ToolError("plan.semantic_plan 必须是对象")
+        misplaced = sorted(semantic_keys.intersection(raw_plan))
+        if misplaced:
+            raise ToolError(
+                "plan 格式错误：以下字段必须位于 plan.semantic_plan 内："
+                + ", ".join(misplaced)
+            )
+        missing = sorted(semantic_keys.difference(raw_semantic))
+        if missing:
+            raise ToolError(
+                "plan.semantic_plan 缺少必填字段：" + ", ".join(missing)
+            )
+        unknown = sorted(set(raw_semantic).difference(semantic_keys))
+        if unknown:
+            raise ToolError(
+                "plan.semantic_plan 包含未知字段：" + ", ".join(unknown)
+            )
     wrapped = any(key in raw_plan for key in ("semantic_plan", "plan", "ops", "abilities"))
     submission = deepcopy(raw_plan) if wrapped else {"semantic_plan": deepcopy(raw_plan)}
     semantic = submission.get("semantic_plan")
@@ -1151,6 +1179,7 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
     from dano.execution.page.flow_spec import (
         _build_initial_flow_capabilities,
         _capability_node_step_ids,
+        _option_source_step_ids,
         _planned_capability_has_public_anchor,
         _repair_structural_option_bindings,
         rebuild_flow_dependencies,
@@ -1162,6 +1191,7 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
     steps = list(getattr(grounded, "steps", None) or [])
     step_by_id = {str(step.step_id): step for step in steps}
     step_order = {str(step.step_id): index for index, step in enumerate(steps)}
+    option_source_ids = _option_source_step_ids(grounded)
     baseline_capabilities = list(_build_initial_flow_capabilities(grounded) or [])
 
     role_by_step = {
@@ -1214,8 +1244,9 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
     semantic["field_semantics"] = fields
 
     allowed_kinds = {"query_status", "validate_batch", "submit_batch", "submit"}
+    allowed_usages = {"execute", "option_source", "fact_check", "preflight"}
     capabilities = []
-    seen_boundaries: set[tuple[str, tuple[str, ...]]] = set()
+    seen_boundaries: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
     raw_capabilities = semantic.get("capabilities")
     if not isinstance(raw_capabilities, list):
         raw_capabilities = []
@@ -1223,50 +1254,184 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         if not isinstance(raw_capability, dict):
             continue
         capability = deepcopy(raw_capability)
-        raw_steps = capability.get("step_ids") or capability.get("steps") or capability.get("depends_on_step_ids") or []
+        raw_steps = (
+            capability.get("step_ids")
+            or capability.get("steps")
+            or capability.get("depends_on_step_ids")
+            or []
+        )
         if isinstance(raw_steps, str):
             raw_steps = [raw_steps] if raw_steps.strip() else []
-        candidates = [str(value) for value in raw_steps if str(value) in step_by_id]
+        memberships: list[dict] = []
+        raw_memberships = (
+            capability.get("request_refs")
+            or capability.get("requests")
+            or capability.get("memberships")
+            or []
+        )
+        if isinstance(raw_memberships, (str, dict)):
+            raw_memberships = [raw_memberships]
+
+        def inferred_usage(step_id: str) -> str:
+            if step_id in option_source_ids:
+                return "option_source"
+            meta = getattr(step_by_id[step_id], "source_meta", None) or {}
+            semantic_role = str(
+                meta.get("role")
+                or getattr(step_by_id[step_id], "semantic_role", None)
+                or ""
+            ).lower()
+            if (
+                semantic_role in {"preflight", "process_definition", "definition_lookup"}
+                or meta.get("control_preflight_for_write")
+            ):
+                return "preflight"
+            if semantic_role in {"fact_check", "approval_preview", "validation"}:
+                return "fact_check"
+            return "execute"
+
+        def add_membership(value, *, default_usage: str | None = None) -> None:  # noqa: ANN001
+            ref = deepcopy(value) if isinstance(value, dict) else {"step_id": value}
+            step_id = str(
+                ref.get("step_id")
+                or ref.get("request_step_id")
+                or ref.get("id")
+                or ""
+            )
+            if step_id not in step_by_id:
+                return
+            usage = str(ref.get("usage") or default_usage or inferred_usage(step_id))
+            if usage not in allowed_usages:
+                usage = inferred_usage(step_id)
+            if any(
+                item["step_id"] == step_id and item["usage"] == usage
+                for item in memberships
+            ):
+                return
+            step = step_by_id[step_id]
+            meta = getattr(step, "source_meta", None) or {}
+            memberships.append({
+                **ref,
+                "step_id": step_id,
+                "request_id": ref.get("request_id") or meta.get("request_id"),
+                "request_index": (
+                    ref.get("request_index")
+                    if ref.get("request_index") is not None
+                    else meta.get("request_index")
+                ),
+                "method": str(
+                    ref.get("method") or getattr(step, "method", None) or "GET"
+                ).upper(),
+                "path": str(
+                    ref.get("path")
+                    or getattr(step, "path", None)
+                    or getattr(step, "url", None)
+                    or ""
+                ),
+                "role": str(
+                    ref.get("role")
+                    or meta.get("role")
+                    or getattr(step, "semantic_role", None)
+                    or "business_request"
+                ),
+                "usage": usage,
+                "origin": str(ref.get("origin") or "planner"),
+                "confidence": float(ref.get("confidence") or 0.8),
+                "reason": str(
+                    ref.get("reason")
+                    or "Pi 基于录制请求与页面证据建立的能力成员关系"
+                ),
+                "confirmed": bool(ref.get("confirmed", False)),
+            })
+
+        for value in raw_memberships:
+            add_membership(value)
+        for value in raw_steps:
+            add_membership(value)
         for key in ("anchor_step_id", "entry_step_id", "primary_step_id"):
             value = str(capability.get(key) or "")
             if value in step_by_id:
-                candidates.append(value)
-        candidates = sorted(set(candidates), key=lambda value: step_order[value])
+                add_membership(value, default_usage="execute")
+        memberships.sort(
+            key=lambda item: (step_order[item["step_id"]], item["usage"])
+        )
+        candidates = [
+            item["step_id"]
+            for item in memberships
+            if item["usage"] != "option_source"
+        ]
         requested_kind = str(capability.get("kind") or "")
         if requested_kind not in allowed_kinds:
-            methods = {str(step_by_id[value].method or "GET").upper() for value in candidates}
+            methods = {
+                str(step_by_id[value].method or "GET").upper()
+                for value in candidates
+            }
             requested_kind = (
                 "submit"
                 if any(method not in {"GET", "HEAD", "OPTIONS"} for method in methods)
                 else "query_status"
             )
-        public_anchors = [
-            step_id for step_id in candidates
-            if _planned_capability_has_public_anchor(grounded, requested_kind, [step_id])
-        ]
-        boundary = max(
-            (
-                baseline for baseline in baseline_capabilities
-                if any(step_id in set(_capability_node_step_ids(baseline)) for step_id in public_anchors)
-                and (
-                    (requested_kind in {"submit", "submit_batch"} and baseline.kind in {"submit", "submit_batch"})
-                    or (requested_kind in {"query_status", "validate_batch"} and baseline.kind in {"query_status", "validate_batch"})
+        if not raw_memberships and not raw_steps and candidates:
+            same_family = (
+                {"submit", "submit_batch"}
+                if requested_kind in {"submit", "submit_batch"}
+                else {"query_status", "validate_batch"}
+            )
+            boundary = max(
+                (
+                    baseline
+                    for baseline in baseline_capabilities
+                    if baseline.kind in same_family
+                    and set(candidates)
+                    & set(_capability_node_step_ids(baseline))
+                ),
+                key=lambda baseline: len(
+                    set(candidates) & set(_capability_node_step_ids(baseline))
+                ),
+                default=None,
+            )
+            if boundary is not None:
+                for step_id in _capability_node_step_ids(boundary):
+                    add_membership(step_id)
+                memberships.sort(
+                    key=lambda item: (
+                        step_order[item["step_id"]],
+                        item["usage"],
+                    )
                 )
-            ),
-            key=lambda item: len(set(_capability_node_step_ids(item)) & set(candidates)),
-            default=None,
-        )
-        title = str(capability.get("title") or capability.get("name") or capability.get("capability_id") or "").strip()
-        name = str(capability.get("name") or capability.get("capability_id") or capability.get("id") or title).strip()
-        if boundary is None or not name:
+                candidates = [
+                    item["step_id"]
+                    for item in memberships
+                    if item["usage"] != "option_source"
+                ]
+        title = str(
+            capability.get("title")
+            or capability.get("name")
+            or capability.get("capability_id")
+            or ""
+        ).strip()
+        name = str(
+            capability.get("name")
+            or capability.get("capability_id")
+            or capability.get("id")
+            or title
+        ).strip()
+        if (
+            not name
+            or not _planned_capability_has_public_anchor(
+                grounded, requested_kind, candidates
+            )
+        ):
             unresolved.append({
                 "type": "internal_or_unmatched_capability",
                 "title": title or name,
                 "step_ids": candidates,
             })
             continue
-        boundary_steps = list(_capability_node_step_ids(boundary))
-        boundary_key = (str(boundary.kind), tuple(boundary_steps))
+        boundary_key = (
+            requested_kind,
+            tuple((item["step_id"], item["usage"]) for item in memberships),
+        )
         if boundary_key in seen_boundaries:
             continue
         seen_boundaries.add(boundary_key)
@@ -1274,12 +1439,21 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             **capability,
             "name": name,
             "title": title or name,
-            "kind": str(boundary.kind),
-            "intent": str(capability.get("intent") or capability.get("description") or title or name),
-            "step_ids": boundary_steps,
+            "kind": requested_kind,
+            "intent": str(
+                capability.get("intent")
+                or capability.get("description")
+                or title
+                or name
+            ),
+            "step_ids": candidates,
+            "request_refs": memberships,
         })
-    if baseline_capabilities and raw_capabilities and not capabilities:
-        raise ToolError("semantic_plan.capabilities 没有可验证的业务锚点；内部预检/选项接口不能独立成能力")
+    if steps and raw_capabilities and not capabilities:
+        raise ToolError(
+            "semantic_plan.capabilities 没有可验证的业务锚点；"
+            "内部预检/选项接口不能独立成能力"
+        )
     semantic["capabilities"] = capabilities
 
     relations = []

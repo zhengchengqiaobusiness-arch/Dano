@@ -1071,7 +1071,7 @@ def test_api_option_binding_preserves_source_request_in_capability_field():
     param = prepared.steps[0].params[0]
     field = prepared.capabilities[0].inputs[0]
 
-    assert (param.type, param.source_kind) == ("string", "api_option")
+    assert (param.type, param.wire_type, param.source_kind) == ("enum", "string", "api_option")
     assert param.source["source_url"] == "/users/options"
     assert param.source["source_request_id"] == "users-options"
     assert field.source_kind == "api_option"
@@ -1079,7 +1079,7 @@ def test_api_option_binding_preserves_source_request_in_capability_field():
     assert field.enum_value_map == {"张三": "142"}
 
 
-def test_api_option_reselection_refreshes_candidates_without_changing_field_type():
+def test_api_option_reselection_refreshes_candidates_while_preserving_wire_type():
     captured = [
         _get(1, "/api/old/options", {"data": []}),
         _get(2, "/api/new/options", {"data": [
@@ -1112,7 +1112,7 @@ def test_api_option_reselection_refreshes_candidates_without_changing_field_type
     param = next(item for item in submit.params if item.path == "sealCode")
     binding = submit.selects[0]
 
-    assert (param.type, param.source_kind) == ("number", "api_option")
+    assert (param.type, param.wire_type, param.source_kind) == ("enum", "number", "api_option")
     assert (binding.value_key, binding.label_key) == ("code", "title")
     assert binding.options == [
         {"label": "行政章", "value": 2},
@@ -1491,6 +1491,75 @@ def test_complete_semantic_plan_can_split_one_deterministic_write_family_on_firs
         ("save_draft", ("draft",)),
         ("commit_order", ("commit",)),
     }
+
+
+def test_complete_semantic_plan_can_split_planner_managed_aggregate_during_optimize():
+    submission = {"semantic_plan": {
+        "business_understanding": {"intent": "分别保存草稿并提交订单"},
+        "request_roles": [
+            {"step_id": "draft", "role": "business_write", "name": "保存订单草稿"},
+            {"step_id": "commit", "role": "business_write", "name": "提交订单"},
+        ],
+        "field_semantics": [],
+        "capabilities": [
+            {
+                "name": "save_draft",
+                "title": "保存订单草稿",
+                "kind": "submit",
+                "step_ids": ["draft"],
+            },
+            {
+                "name": "commit_order",
+                "title": "提交订单",
+                "kind": "submit",
+                "step_ids": ["commit"],
+            },
+        ],
+        "capability_relations": [],
+        "unresolved_items": [],
+    }, "ops": []}
+    spec = FlowSpec(
+        steps=[
+            FlowStep(
+                step_id="draft", method="POST",
+                path="/api/order/draft", body_source="{}",
+            ),
+            FlowStep(
+                step_id="commit", method="POST",
+                path="/api/order/commit", body_source="{}",
+            ),
+        ],
+        capabilities=[FlowCapability(
+            name="submit_order",
+            title="旧聚合能力",
+            kind="submit",
+            step_ids=["draft", "commit"],
+            nodes=[
+                {"id": "draft_call", "type": "call", "step_id": "draft"},
+                {"id": "commit_call", "type": "call", "step_id": "commit"},
+            ],
+            updated_by="planner",
+        )],
+        meta={"capability_model": {"status": "ready"}},
+    )
+
+    optimized = asyncio.run(orchestrate_flow_capabilities(
+        spec, submission=submission, generation_mode="optimize",
+    ))
+
+    assert {(cap.name, tuple(cap.step_ids)) for cap in optimized.capabilities} == {
+        ("save_draft", ("draft",)),
+        ("commit_order", ("commit",)),
+    }
+    persisted_plan = optimized.meta["capability_model"]["semantic_plan"]
+    assert {
+        (item["name"], tuple(item["step_ids"]))
+        for item in persisted_plan["capabilities"]
+    } == {
+        ("save_draft", ("draft",)),
+        ("commit_order", ("commit",)),
+    }
+    assert persisted_plan["business_understanding"]["intent"] == "分别保存草稿并提交订单"
 
 
 def test_initial_planner_cannot_merge_deterministic_page_boundaries_back_into_one_capability():

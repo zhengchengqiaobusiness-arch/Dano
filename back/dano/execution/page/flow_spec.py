@@ -687,6 +687,17 @@ def _is_option_source_url(url: str) -> bool:
     return False
 
 
+def _list_payload_has_reference_contract(payload: Any) -> bool:
+    items = as_list_payload(payload) or []
+    sample = next((item for item in items[:10] if isinstance(item, dict)), None)
+    if not sample:
+        return False
+    for key in sample:
+        if _is_idlike(str(key)) and _pick_label_key(sample, str(key)) != key:
+            return True
+    return False
+
+
 def _read_is_option_source(read: dict) -> bool:
     role = str(read.get("role") or read.get("request_role") or "")
     url = str(read.get("url") or read.get("path") or "")
@@ -717,6 +728,12 @@ def _read_is_option_source(read: dict) -> bool:
     if has_list_payload and control_triggered:
         # Endpoint naming is not portable. A list response causally triggered by
         # opening/selecting a choice control is grounded option-source evidence.
+        return True
+    if has_list_payload and is_known_option_path and _list_payload_has_reference_contract(payload):
+        # Saved recordings may carry the old business_get role for directory
+        # pages such as IAM users because their rows contain audit columns.
+        # An explicit reference-entity path plus ID/display contract is stronger
+        # option-source evidence and remains safe for structural field matching.
         return True
     # A strong candidate endpoint remains an option source even when an older
     # coarse role classifier called it business_get because rows also had
@@ -3939,11 +3956,12 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
                 str(label): value for label, value in (_enum_value_map_for_param(binding) or {}).items()
                 if str(label) in page_labels and value is not None
             })
-        # A candidate API is a value source only. It must never rewrite the
-        # request field's declared type (string/number/object/array are all
-        # valid). Static/page enums keep the historic enum projection.
-        if source_kind != "api_option":
-            param.type = "list-enum" if binding.multi else "enum"
+        # Every grounded choice is an enum in the caller-facing business
+        # contract. The recorded scalar/array transport remains independently
+        # available in wire_type for request serialization.
+        if not param.wire_type:
+            param.wire_type = param.type
+        param.type = "list-enum" if binding.multi else "enum"
         param.category = "user_param"
         param.source_kind = source_kind
         param.exposed_to_user = True
@@ -7245,6 +7263,10 @@ def _orchestration_context(spec: FlowSpec) -> dict[str, Any]:
                 "kind": cap.kind,
                 "step_ids": list(cap.step_ids or []),
                 "nodes": list(cap.nodes or []),
+                "request_refs": [
+                    ref.model_dump(exclude_none=True)
+                    for ref in (cap.request_refs or [])
+                ],
                 "input_schema": cap.input_schema or {},
                 "output_schema": cap.output_schema or {},
                 "output_mapping": list(cap.output_mapping or []),
@@ -7479,13 +7501,33 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
         if len(existing_for_kind) != 1 or len(items) <= 1:
             continue
         baseline_steps = set(_capability_node_step_ids(existing_for_kind[0]))
-        planned_sets = [
-            {str(value) for value in (item.get("step_ids") or []) if str(value) in step_ids}
-            for item in items
-        ]
-        if baseline_steps and all(values and values.issubset(baseline_steps) for values in planned_sets):
-            if set().union(*planned_sets) == baseline_steps:
-                split_kinds.add(kind)
+        planned_sets = []
+        for item in items:
+            raw_steps = item.get("step_ids") or []
+            if isinstance(raw_steps, str):
+                raw_steps = [raw_steps]
+            planned = {str(value) for value in raw_steps if str(value) in step_ids}
+            raw_refs = (
+                item.get("request_refs")
+                or item.get("requests")
+                or item.get("memberships")
+                or []
+            )
+            if isinstance(raw_refs, (str, dict)):
+                raw_refs = [raw_refs]
+            planned.update(
+                str(ref.get("step_id") or ref.get("request_step_id") or "")
+                for ref in raw_refs
+                if isinstance(ref, dict)
+                and str(ref.get("usage") or "execute") != "option_source"
+            )
+            planned_sets.append({value for value in planned if value in step_ids})
+        if (
+            baseline_steps
+            and all(values and values.issubset(baseline_steps) for values in planned_sets)
+            and set().union(*planned_sets) == baseline_steps
+        ):
+            split_kinds.add(kind)
     used_existing: set[str] = set()
     capability_name_map: dict[str, str] = {}
 
@@ -7587,28 +7629,92 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
         kind = str(item.get("kind") or "")
         if kind not in {"query_status", "validate_batch", "submit_batch", "submit"}:
             continue
-        proposed_steps = [str(value) for value in (item.get("step_ids") or []) if str(value) in step_ids]
+        memberships: list[dict[str, Any]] = []
+        raw_memberships = (
+            item.get("request_refs")
+            or item.get("requests")
+            or item.get("memberships")
+            or []
+        )
+        if isinstance(raw_memberships, (str, dict)):
+            raw_memberships = [raw_memberships]
+        for raw_ref in raw_memberships:
+            ref = dict(raw_ref) if isinstance(raw_ref, dict) else {"step_id": raw_ref}
+            ref_step_id = str(
+                ref.get("step_id") or ref.get("request_step_id") or ref.get("id") or ""
+            )
+            if ref_step_id not in step_ids:
+                continue
+            usage = str(ref.get("usage") or "execute")
+            if usage not in {"execute", "option_source", "fact_check", "preflight"}:
+                usage = "execute"
+            if any(
+                existing_ref["step_id"] == ref_step_id
+                and existing_ref["usage"] == usage
+                for existing_ref in memberships
+            ):
+                continue
+            memberships.append({
+                **ref,
+                "step_id": ref_step_id,
+                "usage": usage,
+                "origin": str(ref.get("origin") or "planner"),
+            })
+        raw_step_ids = item.get("step_ids") or []
+        if isinstance(raw_step_ids, str):
+            raw_step_ids = [raw_step_ids]
+        for value in raw_step_ids:
+            step_id = str(value)
+            if step_id not in step_ids or any(
+                ref["step_id"] == step_id for ref in memberships
+            ):
+                continue
+            memberships.append({
+                "step_id": step_id,
+                "usage": "execute",
+                "origin": "planner",
+            })
+        proposed_steps = [
+            ref["step_id"]
+            for ref in memberships
+            if ref["usage"] != "option_source"
+        ]
         if not _planned_capability_has_public_anchor(spec, kind, proposed_steps):
-            # Option sources, process-definition lookups, approval previews and
-            # other internal reads stay inside a real business anchor. They may
-            # be request_refs/preflights but never standalone public abilities.
+            # Option sources and internal preflights are members of a grounded
+            # business capability, never standalone public capabilities.
             continue
         candidates = by_kind.get(kind) or []
         available = [
-            capability for capability in candidates
+            capability
+            for capability in candidates
             if capability.capability_id not in used_existing
+            and not capability.locked
+            and capability.updated_by != "user"
+            and not any(
+                ref.origin in {"manual", "user"}
+                for ref in (capability.request_refs or [])
+            )
         ]
-        existing = None if kind in split_kinds else max(
-            available,
-            key=lambda capability: len(set(_capability_node_step_ids(capability)) & set(proposed_steps)),
-            default=None,
+        proposed_name = str(item.get("name") or kind)
+        existing = None if kind in split_kinds else next(
+            (capability for capability in available if capability.name == proposed_name),
+            None,
         )
+        if existing is None and kind not in split_kinds:
+            existing = max(
+                available,
+                key=lambda capability: len(
+                    set(_capability_node_step_ids(capability)) & set(proposed_steps)
+                ),
+                default=None,
+            )
         if existing is not None:
             used_existing.add(existing.capability_id)
-        proposed_name = str(item.get("name") or kind)
         name = str((existing.name if existing is not None else None) or proposed_name)
         if name in {cap.name for cap in spec.capabilities} and existing is None:
-            name = _flow_capability_id(kind, str(item.get("title") or proposed_name))
+            name = _flow_capability_id(
+                kind, str(item.get("title") or proposed_name)
+            )
         capability_name_map[proposed_name] = name
         ops.append({
             "op": "upsert_capability",
@@ -7619,11 +7725,21 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
                 "intent": str(item.get("intent") or item.get("description") or ""),
             },
         })
-        for step_id in proposed_steps:
+        planned_membership_ids = {ref["step_id"] for ref in memberships}
+        if existing is not None:
+            for old_step_id in _capability_node_step_ids(existing):
+                if old_step_id not in planned_membership_ids:
+                    ops.append({
+                        "op": "remove_request_from_capability",
+                        "capability": name,
+                        "step_id": old_step_id,
+                        "_semantic_boundary_reconcile": True,
+                    })
+        for ref in memberships:
             ops.append({
                 "op": "add_request_to_capability",
                 "capability": name,
-                "step_id": step_id,
+                **ref,
             })
 
     for relation in plan.get("capability_relations") or []:
@@ -8908,13 +9024,35 @@ def _planner_patch_edits(
     scope_ops = {
         "add_request_step", "add_candidate_step", "promote_request",
         "add_capability", "create_capability", "remove_capability",
-        "remove_request_from_capability", "reject_dependency",
+        "reject_dependency",
     }
     for raw in edits or []:
         edit = dict(raw)
         op = str(edit.get("op") or "")
         if op in scope_ops:
             continue
+        if op == "remove_request_from_capability":
+            if not edit.get("_semantic_boundary_reconcile"):
+                continue
+            cap_name = str(
+                edit.get("capability_name") or edit.get("capability") or ""
+            )
+            step_id = str(edit.get("step_id") or "")
+            target = cap_by_name.get(cap_name)
+            planner_managed = bool(
+                target is not None
+                and not target.locked
+                and target.updated_by != "user"
+                and not any(
+                    ref.origin in {"manual", "user"}
+                    for ref in (target.request_refs or [])
+                )
+            )
+            if (
+                not planner_managed
+                or step_id not in set(_capability_node_step_ids(target))
+            ):
+                continue
         if op == "add_request_to_capability":
             # Planner 只能重组已经在字段/接口工作台物化的步骤，不能用 request_id
             # 或 request_index 从捕获事实库静默拉入新接口。
@@ -9173,17 +9311,41 @@ async def orchestrate_flow_capabilities(
         submission.get("semantic_plan") if isinstance(submission.get("semantic_plan"), dict)
         else (submission.get("plan") if isinstance(submission.get("plan"), dict) else {})
     )
-    if initial_generation:
+    complete_semantic_submission = bool(
+        proposed_semantic_plan.get("capabilities")
+        and isinstance(proposed_semantic_plan.get("request_roles"), list)
+        and isinstance(proposed_semantic_plan.get("field_semantics"), list)
+    )
+    if complete_semantic_submission and not initial_generation:
+        baseline_ids.update(
+            capability.capability_id
+            for capability in current.capabilities or []
+            if not capability.locked
+            and capability.updated_by != "user"
+            and not any(
+                ref.origin in {"manual", "user"}
+                for ref in (capability.request_refs or [])
+            )
+        )
+    if initial_generation or complete_semantic_submission:
+        # A fresh full screenshot analysis replaces the previous accepted
+        # semantic memory only after the candidate quality gate succeeds.
         semantic_plan = proposed_semantic_plan
         semantic_coverage = _semantic_plan_coverage(current, submission)
     else:
-        # Incremental submissions are deltas, never a replacement for the
-        # accepted complete first-pass semantic memory stored in FlowSpec.
+        # Ops-only submissions remain incremental and retain the last accepted
+        # complete semantic blueprint.
         semantic_plan = previous_semantic_plan
         semantic_coverage = dict(previous_model.get("semantic_coverage") or {})
+    if not initial_generation:
         incremental_review = {
             "reviewed_scope": submission.get("reviewed_scope") or {},
-            "unresolved_items": submission.get("unresolved_items") or [],
+            "unresolved_items": (
+                proposed_semantic_plan.get("unresolved_items")
+                or submission.get("unresolved_items")
+                or []
+            ),
+            "complete_semantic_submission": complete_semantic_submission,
         }
     combined_ops = [
         *_semantic_plan_to_ops(current, submission),
@@ -9223,6 +9385,9 @@ async def orchestrate_flow_capabilities(
     proposal_accepted, proposal_gate = _semantic_candidate_gate(proposal_baseline, current)
     if not proposal_accepted:
         current = proposal_baseline
+        if not initial_generation:
+            semantic_plan = previous_semantic_plan
+            semantic_coverage = dict(previous_model.get("semantic_coverage") or {})
         source = "deterministic" if initial_generation else "incremental_rejected"
         reason = "自动语义 Proposal 未通过单调质量准入: " + ",".join(proposal_gate["reasons"])
     semantic_plan = _complete_semantic_plan_from_spec(current, semantic_plan)
@@ -10847,6 +11012,7 @@ def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) 
                 cap.name, cap.title, cap.kind, tuple(_capability_node_step_ids(cap)),
                 bool(cap.confirmed), bool(cap.requires_human_confirm),
                 _stable_json_hash(cap.nodes or []),
+                _stable_json_hash([ref.model_dump(exclude_none=True) for ref in (cap.request_refs or [])]),
                 _stable_json_hash(cap.input_schema or {}),
                 _stable_json_hash(cap.output_schema or {}),
                 _stable_json_hash(cap.output_mapping or []),
@@ -12894,31 +13060,251 @@ def _option_binding_tokens(value: Any) -> set[str]:
     }
 
 
+def _option_binding_semantic_families(value: Any) -> set[str]:
+    text = str(value or "").casefold()
+    families: set[str] = set()
+    patterns = {
+        "person": r"(?:user|users|assignee|approver|reviewer|auditor|employee|member|person|people|审批|审核|人员|用户|负责人)",
+        "organization": r"(?:dept|department|org|organization|division|unit|部门|组织|机构)",
+        "team": r"(?:team|group|squad|团队|班组|小组)",
+        "project": r"(?:project|initiative|项目)",
+        "role": r"(?:role|position|post|岗位|角色|职位)",
+        "customer": r"(?:customer|client|buyer|客户|购买方)",
+        "supplier": r"(?:supplier|vendor|provider|供应商|供方)",
+    }
+    for family, pattern in patterns.items():
+        if re.search(pattern, text, re.I):
+            families.add(family)
+    return families
+
+
 def _repair_structural_option_bindings(spec: FlowSpec) -> int:
-    """Recover dropdown bindings from grounded option rows and wire values.
+    """Recover grounded enum/reference bindings, including captured-only reads.
 
-    This repair is intentionally narrower than ordinary value matching:
-    - the target must belong to a write request;
-    - the source must already be an option endpoint/role;
-    - the wire value must match one ID-like column;
-    - source and target must share a business token, unless DOM evidence proves
-      that the exact request field is a select control;
-    - exactly one source contract may match.
-
-    It generalizes teamId/userId/workTypeCode/etc. without choosing the first
-    row of an unrelated business list.
+    Candidate selection is evidence based: an exact recorded wire value, a real
+    ID/display row contract, and either control ownership, a shared semantic
+    family, or an exact field token are required. Shared dictionary endpoints
+    are narrowed only when the page's visible labels identify one category.
+    Repeated captures of the same endpoint/contract are one source, not an
+    ambiguity.
     """
-    candidates: list[tuple[FlowStep, list[dict[str, Any]]]] = []
+    candidates: list[dict[str, Any]] = []
+    materialized_request_ids: set[str] = set()
     for source in spec.steps:
         role = str((source.source_meta or {}).get("role") or source.semantic_role or "")
+        request_id = str((source.source_meta or {}).get("request_id") or "")
+        read = {
+            "url": source.url or source.path,
+            "path": source.path,
+            "method": source.method,
+            "role": role,
+            "response_json": source.response_json,
+            **dict(source.source_meta or {}),
+        }
         items = as_list_payload(source.response_json) or []
         if (
             (source.method or "GET").upper() in {"GET", "HEAD"}
             and items
             and all(isinstance(item, dict) for item in items)
-            and (role == "read_option" or _is_option_source_url(source.path or source.url))
+            and _read_is_option_source(read)
         ):
-            candidates.append((source, [dict(item) for item in items if isinstance(item, dict)]))
+            candidates.append({
+                "source_step_id": source.step_id,
+                "source_request_id": request_id,
+                "source_url": source.url or source.path,
+                "sequence": (source.source_meta or {}).get("sequence", (source.source_meta or {}).get("request_index")),
+                "items": [dict(item) for item in items if isinstance(item, dict)],
+            })
+            if request_id:
+                materialized_request_ids.add(request_id)
+
+    for fact in (spec.request_facts.requests or []):
+        request_id = str(fact.request_id or "")
+        if request_id and request_id in materialized_request_ids:
+            continue
+        analysis = spec.request_facts.analysis.get(request_id) if request_id else None
+        read = fact.model_dump(exclude_none=True)
+        read["role"] = str(analysis.role if analysis is not None else read.get("role") or "")
+        items = as_list_payload(fact.response_json) or []
+        if (
+            (fact.method or "GET").upper() in {"GET", "HEAD"}
+            and items
+            and all(isinstance(item, dict) for item in items)
+            and _read_is_option_source(read)
+        ):
+            candidates.append({
+                "source_step_id": "",
+                "source_request_id": request_id,
+                "source_url": fact.url or fact.path,
+                "sequence": fact.sequence if fact.sequence is not None else fact.request_index,
+                "items": [dict(item) for item in items if isinstance(item, dict)],
+            })
+
+    page_options = _page_enum_options_from_request_facts(spec.request_facts)
+
+    def normalized(value: Any) -> str:
+        return re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(value or "")).casefold()
+
+    def option_labels(raw: dict[str, Any]) -> set[str]:
+        labels = set()
+        for option in list(raw.get("options") or raw.get("values") or []):
+            pair = _enum_label_value(option)
+            label = str(pair[0] if pair is not None else "").strip()
+            if label:
+                labels.add(label)
+        return labels
+
+    eligible_values = [
+        str(param.value if param.value is not None else "").strip()
+        for step in _write_steps(spec)
+        for param in (step.params or [])
+        if not param.locked
+        and not _param_has_manual_contract(param)
+        and param.category != "system_const"
+        and str(param.value if param.value is not None else "").strip()
+    ]
+    value_owner_counts = {value: eligible_values.count(value) for value in set(eligible_values)}
+
+    def page_evidence_for(target: FlowStep, param: ParamField, value: str) -> list[dict[str, Any]]:
+        param_names = {
+            normalized(name)
+            for name in (
+                param.path, _strip_body_prefix(param.path or ""),
+                _strip_body_prefix(param.path or "").split(".")[-1],
+                param.key, param.label,
+            )
+            if normalized(name)
+        }
+        for evidence in param.evidence or []:
+            if not isinstance(evidence, dict):
+                continue
+            param_names.update(
+                normalized(str(alias).split(":", 1)[-1])
+                for alias in (evidence.get("field_aliases") or [])
+                if normalized(str(alias).split(":", 1)[-1])
+            )
+        semantic_matches: list[dict[str, Any]] = []
+        fallback_matches: list[dict[str, Any]] = []
+        target_meta = target.source_meta or {}
+        for raw_key, raw_value in page_options.items():
+            if not isinstance(raw_value, dict):
+                continue
+            raw = dict(raw_value)
+            labels = option_labels(raw)
+            if len(labels) < 2 or str(raw.get("control_kind") or "select").lower() != "select":
+                continue
+            if target_meta.get("page_id") and raw.get("page_id") and str(target_meta.get("page_id")) != str(raw.get("page_id")):
+                continue
+            raw_names = {
+                normalized(str(name).split(":", 1)[-1])
+                for name in (raw_key, raw.get("field_key"), *(raw.get("field_aliases") or []))
+                if normalized(str(name).split(":", 1)[-1])
+            }
+            contract = {
+                "raw": raw,
+                "labels": labels,
+                "selected": str(raw.get("selected_label") or raw.get("selected") or "").strip(),
+            }
+            if param_names & raw_names:
+                semantic_matches.append(contract)
+            elif value_owner_counts.get(value) == 1 and contract["selected"]:
+                fallback_matches.append(contract)
+        return semantic_matches or fallback_matches
+
+    def row_contracts(
+        items: list[dict[str, Any]],
+        value: str,
+        page_contract: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        matching_items = [
+            item for item in items
+            if any(_is_idlike(str(key)) and str(item_value) == value for key, item_value in item.items())
+        ]
+        value_keys = {
+            str(key)
+            for item in matching_items
+            for key, item_value in item.items()
+            if _is_idlike(str(key)) and str(item_value) == value
+        }
+        contracts: list[dict[str, Any]] = []
+        visible_labels = set(page_contract.get("labels") or set()) if page_contract else set()
+        selected_label = str(page_contract.get("selected") or "") if page_contract else ""
+        for value_key in value_keys:
+            label_keys = {
+                _pick_label_key(item, value_key)
+                for item in matching_items
+                if _pick_label_key(item, value_key) != value_key
+            }
+            for label_key in label_keys:
+                subsets: list[tuple[str | None, Any, list[dict[str, Any]]]] = [(None, None, items)]
+                if page_contract:
+                    scalar_keys = {
+                        str(key)
+                        for item in items
+                        for key, raw_value in item.items()
+                        if key not in {value_key, label_key}
+                        and not isinstance(raw_value, (dict, list))
+                    }
+                    for category_key in scalar_keys:
+                        category_values = {
+                            item.get(category_key)
+                            for item in matching_items
+                            if item.get(category_key) not in (None, "")
+                        }
+                        for category_value in category_values:
+                            subset = [
+                                item for item in items
+                                if str(item.get(category_key)) == str(category_value)
+                            ]
+                            if len(subset) >= 2:
+                                subsets.append((category_key, category_value, subset))
+                seen_subsets: set[str] = set()
+                for category_key, category_value, subset in subsets:
+                    subset_sig = json.dumps(
+                        [category_key, category_value, subset],
+                        ensure_ascii=False, sort_keys=True, default=str,
+                    )
+                    if subset_sig in seen_subsets:
+                        continue
+                    seen_subsets.add(subset_sig)
+                    selected_rows = [item for item in subset if str(item.get(value_key)) == value]
+                    if len(selected_rows) != 1:
+                        continue
+                    records: list[dict[str, Any]] = []
+                    option_map: dict[str, Any] = {}
+                    seen_values: set[str] = set()
+                    valid = True
+                    for item in subset:
+                        label = str(item.get(label_key) or "").strip()
+                        raw_value = item.get(value_key)
+                        value_sig = str(raw_value)
+                        if not label or raw_value in (None, "") or label in option_map or value_sig in seen_values:
+                            valid = False
+                            break
+                        seen_values.add(value_sig)
+                        option_map[label] = raw_value
+                        records.append({"label": label, "value": raw_value})
+                    if not valid or len(records) < 2:
+                        continue
+                    if page_contract:
+                        record_labels = set(option_map)
+                        required_overlap = min(2, len(visible_labels))
+                        if len(record_labels & visible_labels) < required_overlap:
+                            continue
+                        if selected_label and (
+                            selected_label not in option_map
+                            or str(option_map[selected_label]) != value
+                        ):
+                            continue
+                    contracts.append({
+                        "value_key": value_key,
+                        "label_key": label_key,
+                        "category_key": category_key,
+                        "category_value": category_value,
+                        "records": records,
+                        "option_map": option_map,
+                    })
+        return contracts
 
     repaired = 0
     for target in _write_steps(spec):
@@ -12934,9 +13320,9 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             value = str(param.value if param.value is not None else "").strip()
             if not value:
                 continue
-            target_tokens = _option_binding_tokens(
-                " ".join((str(param.path or ""), str(param.key or ""), str(param.label or "")))
-            )
+            target_text = " ".join((str(param.path or ""), str(param.key or ""), str(param.label or "")))
+            target_tokens = _option_binding_tokens(target_text)
+            target_families = _option_binding_semantic_families(target_text)
             select_control = any(
                 isinstance(item, dict)
                 and item.get("kind") == "page_control"
@@ -12947,69 +13333,79 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 and not item.get("read_only")
                 for item in (param.evidence or [])
             )
-            matches: list[tuple[FlowStep, str, str, list[dict[str, Any]], dict[str, Any]]] = []
-            for source, items in candidates:
-                source_tokens = _option_binding_tokens(source.path or source.url)
-                if not select_control and not (target_tokens & source_tokens):
-                    continue
-                value_keys = {
-                    str(key)
-                    for item in items
-                    for key, item_value in item.items()
-                    if _is_idlike(str(key)) and str(item_value) == value
-                }
-                if len(value_keys) != 1:
-                    continue
-                value_key = next(iter(value_keys))
-                matching_rows = [item for item in items if str(item.get(value_key)) == value]
-                if len(matching_rows) != 1:
-                    continue
-                label_key = _pick_label_key(matching_rows[0], value_key)
-                if label_key == value_key:
-                    continue
-                records: list[dict[str, Any]] = []
-                option_map: dict[str, Any] = {}
-                valid = True
-                seen_values: set[str] = set()
-                for item in items:
-                    label = str(item.get(label_key) or "").strip()
-                    raw_value = item.get(value_key)
-                    value_sig = str(raw_value)
-                    if not label or raw_value in (None, "") or label in option_map or value_sig in seen_values:
-                        valid = False
-                        break
-                    seen_values.add(value_sig)
-                    option_map[label] = raw_value
-                    records.append({"label": label, "value": raw_value})
-                if valid and records:
-                    matches.append((source, value_key, label_key, records, option_map))
-            fingerprints = {
-                (
-                    source.step_id,
-                    _request_path({"url": source.path or source.url}),
-                    value_key,
-                    label_key,
+            page_contracts = page_evidence_for(target, param, value)
+            matches: list[dict[str, Any]] = []
+            for source in candidates:
+                items = source["items"]
+                source_url = str(source.get("source_url") or "")
+                source_text = " ".join([
+                    source_url,
+                    *[str(key) for item in items[:3] for key in item.keys()],
+                ])
+                source_tokens = _option_binding_tokens(source_text)
+                source_families = _option_binding_semantic_families(source_text)
+                compatible_without_page = bool(
+                    select_control
+                    or (target_tokens & source_tokens)
+                    or (target_families & source_families)
                 )
-                for source, value_key, label_key, _records, _option_map in matches
-            }
-            if len(fingerprints) != 1:
+                # Page evidence is a strong bridge when it describes this
+                # source, but an unrelated open popup must not suppress a
+                # valid semantic source (for example an approver directory
+                # captured while the leave-type popup is still visible).
+                source_page_contracts = [*page_contracts, None] if page_contracts else [None]
+                for page_contract in source_page_contracts:
+                    if page_contract is None and not compatible_without_page:
+                        continue
+                    for contract in row_contracts(items, value, page_contract):
+                        matches.append({**source, **contract})
+            unique: dict[tuple[Any, ...], dict[str, Any]] = {}
+            for match in matches:
+                parsed = urlparse(str(match.get("source_url") or ""))
+                endpoint = parsed.path or str(match.get("source_url") or "")
+                if parsed.query:
+                    endpoint += "?" + parsed.query
+                fingerprint = (
+                    endpoint,
+                    match["value_key"], match["label_key"],
+                    str(match.get("category_key") or ""),
+                    str(match.get("category_value") or ""),
+                    json.dumps(match["records"], ensure_ascii=False, sort_keys=True, default=str),
+                )
+                previous = unique.get(fingerprint)
+
+                def rank(item: dict[str, Any]) -> tuple[int, float]:
+                    try:
+                        sequence = float(item.get("sequence"))
+                    except (TypeError, ValueError):
+                        sequence = -1.0
+                    return (1 if item.get("source_step_id") else 0, sequence)
+
+                if previous is None or rank(match) > rank(previous):
+                    unique[fingerprint] = match
+            if len(unique) != 1:
                 continue
-            source, value_key, label_key, records, option_map = matches[0]
+            match = next(iter(unique.values()))
+            multi = bool(param.type in {"array", "list-enum"} and not re.search(r"\[\d+\]$", param.path or ""))
             _bind_option_source(
                 spec,
                 target_step_id=target.step_id,
                 target_path=param.path,
-                source_step_id=source.step_id,
-                value_key=value_key,
-                label_key=label_key,
+                source_step_id=str(match.get("source_step_id") or ""),
+                source_url=str(match.get("source_url") or ""),
+                source_request_id=str(match.get("source_request_id") or ""),
+                value_key=match["value_key"],
+                label_key=match["label_key"],
+                category_key=match.get("category_key"),
+                category_value=match.get("category_value"),
                 id_path=param.path,
-                options=records,
-                option_map=option_map,
+                options=match["records"],
+                option_map=match["option_map"],
+                multi=multi,
                 actor="recorder",
             )
             repaired += 1
     return repaired
-
 
 def _attach_option_source_memberships(spec: FlowSpec) -> None:
     """Expose candidate-source ownership without executing it as a call node."""
@@ -13018,9 +13414,32 @@ def _attach_option_source_memberships(spec: FlowSpec) -> None:
         _request_path({"url": step.path or step.url}): step
         for step in spec.steps
     }
+    facts = list((spec.request_facts or RequestFacts()).requests or [])
+    facts_by_id = {str(fact.request_id or ""): fact for fact in facts if fact.request_id}
+    node_ids_by_capability = {
+        capability.capability_id: set(_capability_node_step_ids(capability))
+        for capability in (spec.capabilities or [])
+    }
+
+    def captured_fact(source: dict[str, Any]) -> RequestFact | None:
+        request_id = str(source.get("source_request_id") or "")
+        if request_id and request_id in facts_by_id:
+            return facts_by_id[request_id]
+        source_path = _request_path({"url": str(source.get("source_url") or "")})
+        if not source_path:
+            return None
+        # The latest duplicate capture represents the source selected most
+        # recently by the operator.
+        return next(
+            (fact for fact in reversed(facts) if _request_path({"url": fact.path or fact.url}) == source_path),
+            None,
+        )
+
     for capability in spec.capabilities or []:
+        node_ids = node_ids_by_capability.get(capability.capability_id, set())
         source_ids: set[str] = set()
-        for step_id in _capability_node_step_ids(capability):
+        captured_source_facts: dict[str, RequestFact] = {}
+        for step_id in node_ids:
             step = by_id.get(step_id)
             for param in (step.params if step else []):
                 if param.source_kind != "api_option":
@@ -13030,8 +13449,13 @@ def _attach_option_source_memberships(spec: FlowSpec) -> None:
                 if not source_id and source.get("source_url"):
                     source_step = by_path.get(_request_path({"url": str(source.get("source_url"))}))
                     source_id = source_step.step_id if source_step else ""
-                if source_id in by_id and source_id not in set(_capability_node_step_ids(capability)):
+                if source_id in by_id and source_id not in node_ids:
                     source_ids.add(source_id)
+                    continue
+                fact = captured_fact(source)
+                if fact is not None:
+                    captured_source_facts[str(fact.request_id or fact.request_index or fact.path or fact.url)] = fact
+
         for source_id in source_ids:
             source_step = by_id[source_id]
             existing = next(
@@ -13047,6 +13471,44 @@ def _attach_option_source_memberships(spec: FlowSpec) -> None:
             ]
             capability.request_refs.append(ref)
 
+        for fact in captured_source_facts.values():
+            analysis = spec.request_facts.analysis.get(str(fact.request_id or ""))
+            existing = next(
+                (
+                    ref for ref in (capability.request_refs or [])
+                    if (fact.request_id and ref.request_id == fact.request_id)
+                    or (
+                        not ref.step_id
+                        and _request_path({"url": ref.path}) == _request_path({"url": fact.path or fact.url})
+                    )
+                ),
+                None,
+            )
+            ref = CapabilityRequestRef(
+                request_id=str(fact.request_id or ""),
+                request_index=fact.request_index,
+                step_id="",
+                role=(analysis.role if analysis else "") or "read_option",
+                method=str(fact.method or "GET").upper(),
+                path=fact.path or fact.url,
+                sequence=fact.sequence,
+                confidence=float((analysis.confidence if analysis else None) or 1.0),
+                reason=(analysis.reason if analysis else "") or "字段候选来自录制捕获的只读接口",
+                usage="option_source",
+                origin="repair" if existing is None else existing.origin,
+                confirmed=True,
+            )
+            capability.request_refs = [
+                item for item in (capability.request_refs or [])
+                if not (
+                    (fact.request_id and item.request_id == fact.request_id)
+                    or (
+                        not item.step_id
+                        and _request_path({"url": item.path}) == _request_path({"url": fact.path or fact.url})
+                    )
+                )
+            ]
+            capability.request_refs.append(ref)
 
 def _dependency_sig(source_step_id: str, source_path: str, target_step_id: str, target_path: str) -> str:
     raw = "|".join([source_step_id or "", source_path or "", target_step_id or "", target_path or ""])
@@ -13456,8 +13918,11 @@ def _bind_option_source(
     target_path: str,
     source_step_id: str = "",
     source_url: str = "",
+    source_request_id: str = "",
     value_key: str = "",
     label_key: str = "",
+    category_key: str | None = None,
+    category_value: Any = None,
     id_path: str = "",
     options: list[Any] | None = None,
     option_map: dict[str, Any] | None = None,
@@ -13478,17 +13943,23 @@ def _bind_option_source(
 
     param.category = "user_param"
     param.source_kind = "api_option"
-    # Binding an interface candidate source does not alter the request field's
-    # declared data type. Callers may select values for any JSON-compatible type.
+    # ``type`` is the caller-facing business contract; ``wire_type`` retains
+    # the recorded JSON scalar transported to the backend.
+    if not param.wire_type:
+        param.wire_type = param.type
+    param.type = "list-enum" if multi else "enum"
     param.exposed_to_user = True
     param.editable = True
     param.need_human_confirm = False
     param.source = {
         "kind": "api_option",
         "source_step_id": source_step_id,
+        "source_request_id": source_request_id,
         "source_url": src_url,
         "value_key": value_key,
         "label_key": label_key,
+        "category_key": category_key,
+        "category_value": category_value,
         "id_path": id_path or param.path,
     }
     param.reason = "字段候选来自接口选项源，调用方传显示值，运行期按 label/value 映射提交真实值"
@@ -13499,9 +13970,12 @@ def _bind_option_source(
     param.evidence.append({
         "source": "option_source",
         "source_step_id": source_step_id,
+        "source_request_id": source_request_id,
         "source_url": src_url,
         "value_key": value_key,
         "label_key": label_key,
+        "category_key": category_key,
+        "category_value": category_value,
     })
 
     sel = _find_select_binding(step, param)
@@ -13511,8 +13985,11 @@ def _bind_option_source(
     sel.param = param.key
     sel.path = param.path
     sel.source_url = src_url
+    sel.source_request_id = source_request_id or sel.source_request_id
     sel.value_key = value_key or sel.value_key
     sel.label_key = label_key or sel.label_key
+    sel.category_key = category_key
+    sel.category_value = None if category_value is None else str(category_value)
     sel.id_path = id_path or sel.id_path or param.path
     sel.multi = bool(multi)
     if options:
@@ -14300,15 +14777,27 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
         if op in {"remove_request_from_capability", "remove_capability_step"}:
             idx = _find_capability_index(new_spec, edit)
             step_id = str(edit.get("step_id") or "")
-            _remember_removed_capability_step(new_spec, new_spec.capabilities[idx].name, step_id)
-            new_spec.capabilities[idx].step_ids = [sid for sid in new_spec.capabilities[idx].step_ids if sid != step_id]
+            actor = str(edit.get("actor") or edit.get("origin") or "user")
+            if actor != "planner":
+                _remember_removed_capability_step(
+                    new_spec, new_spec.capabilities[idx].name, step_id
+                )
+            new_spec.capabilities[idx].step_ids = [
+                sid
+                for sid in new_spec.capabilities[idx].step_ids
+                if sid != step_id
+            ]
             new_spec.capabilities[idx].request_refs = [
-                ref for ref in new_spec.capabilities[idx].request_refs if ref.step_id != step_id
+                ref
+                for ref in new_spec.capabilities[idx].request_refs
+                if ref.step_id != step_id
             ]
             new_spec.capabilities[idx].nodes = _remove_capability_step_nodes(
                 new_spec.capabilities[idx].nodes or [], step_id,
             )
-            new_spec.capabilities[idx].updated_by = "user"
+            new_spec.capabilities[idx].updated_by = (
+                "planner" if actor == "planner" else "user"
+            )
             _invalidate_capability_contract(new_spec.capabilities[idx])
             _sync_capability_order(new_spec, new_spec.capabilities[idx])
             continue

@@ -10,8 +10,10 @@ import {
   endRecordingToolTurn,
   guardRecordingToolAttempt,
   recordingTools,
+  recordRecordingToolRead,
   runRecordingSubmissionAttempt,
   sanitizeRecordingToolParams,
+  requireRecordingSubmissionPrerequisite,
 } from "./recording_tools.mjs";
 
 const expectedTools = [
@@ -112,6 +114,30 @@ async function verifyRejectedThenAcceptedSubmissionIsTerminal() {
     assert(afterAccepted.duplicate === true, "post-success review was not suppressed");
     assert(backendCalls === 2, "post-success review reached the backend");
     assert(exceeded === 0, "post-success review incorrectly triggered the attempt limit");
+  } finally {
+    endRecordingToolTurn();
+  }
+}
+function verifyFreshReadPrerequisites() {
+  beginRecordingToolTurn();
+  try {
+    let missingReadRejected = false;
+    try {
+      requireRecordingSubmissionPrerequisite("submit_recording_plan", { base_flow_version: 4 });
+    } catch (error) {
+      missingReadRejected = /get_recording_state/.test(String(error?.message || error));
+    }
+    assert(missingReadRejected, "plan submission without a fresh state read must be rejected");
+    recordRecordingToolRead("get_recording_state", { flow_version: 4 });
+    requireRecordingSubmissionPrerequisite("submit_recording_plan", { base_flow_version: 4 });
+    let staleVersionRejected = false;
+    try {
+      requireRecordingSubmissionPrerequisite("submit_recording_plan", { base_flow_version: 1 });
+    } catch (error) {
+      staleVersionRejected = /does not match/.test(String(error?.message || error));
+    }
+    assert(staleVersionRejected, "stale plan base version must be rejected before consuming submission budget");
+    assert(guardRecordingToolAttempt("submit_recording_plan") === 1, "fresh-read rejection consumed the submission budget");
   } finally {
     endRecordingToolTurn();
   }
@@ -233,6 +259,7 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-recording-pi-"));
 try {
   assert(JSON.stringify(recordingTools.map((tool) => tool.name)) === JSON.stringify(expectedTools), "recording tool allowlist mismatch");
   verifySubmissionAttemptLimit();
+  verifyFreshReadPrerequisites();
   await verifySuccessfulSubmissionEndsTurn();
   await verifyRejectedThenAcceptedSubmissionIsTerminal();
   verifyReviewToolSchema();

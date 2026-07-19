@@ -1023,7 +1023,8 @@ def test_bind_option_source_updates_param_and_select_binding():
     }])
 
     param = new.steps[1].params[0]
-    assert param.type == "number"
+    assert param.type == "enum"
+    assert param.wire_type == "number"
     assert param.source_kind == "api_option"
     assert param.enum_value_map == {"病假": "1"}
     assert param.locked is True
@@ -6126,7 +6127,7 @@ def test_structural_option_binding_generalizes_across_business_domains(
 
     assert flow_spec_module._repair_structural_option_bindings(spec) == 1
     assert target_param.key == target_label
-    assert target_param.type == "string"
+    assert target_param.type == "enum"
     assert target_param.wire_type == "string"
     assert target_param.category == "user_param"
     assert target_param.source_kind == "api_option"
@@ -6134,3 +6135,135 @@ def test_structural_option_binding_generalizes_across_business_domains(
     assert target_param.source["value_key"] == value_key
     assert target_param.source["label_key"] == label_key
     assert target_param.enum_value_map[f"{target_label} B"] == selected
+
+def test_latest_leave_recording_binds_full_dictionary_and_captured_user_directory():
+    submit = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/admin-api/oa/leave/submit-process",
+        source_meta={"role": "submit_anchor", "page_id": "leave-page"},
+        params=[
+            ParamField(
+                path="type", key="请假类型", label="请假类型", value=2,
+                type="number", wire_type="number", category="user_param",
+                source_kind="user_input", exposed_to_user=True,
+            ),
+            ParamField(
+                path="startUserSelectAssignees.Activity_approve[0]",
+                key="审批人", label="审批人", value=149,
+                type="number", wire_type="number", category="user_param",
+                source_kind="user_input", exposed_to_user=True,
+            ),
+            ParamField(
+                path="startUserSelectAssignees.Activity_hr[0]",
+                key="审批人", label="审批人", value=144,
+                type="number", wire_type="number", category="user_param",
+                source_kind="user_input", exposed_to_user=True,
+            ),
+        ],
+    )
+    dictionary_rows = [
+        {"dictType": "system_user_sex", "value": 1, "label": "男"},
+        {"dictType": "system_user_sex", "value": 2, "label": "女"},
+        {"dictType": "oa_duty_leave_type", "value": 1, "label": "病假"},
+        {"dictType": "oa_duty_leave_type", "value": 2, "label": "事假"},
+        {"dictType": "oa_duty_leave_type", "value": 3, "label": "婚假"},
+    ]
+    users = [
+        {"id": 149, "nickname": "hunk", "status": 0, "createTime": 1784419173000, "remark": ""},
+        {"id": 144, "nickname": "姜楠", "status": 0, "createTime": 1784419174000, "remark": ""},
+    ]
+    facts = RequestFacts(
+        requests=[
+            flow_spec_module.RequestFact(
+                request_id="req_10", request_index=10, sequence=10, method="GET",
+                path="/admin-api/system/dict-data/simple-list",
+                response_json={"code": 0, "data": dictionary_rows},
+            ),
+            flow_spec_module.RequestFact(
+                request_id="req_68", request_index=68, sequence=68, method="GET",
+                path="/admin-api/system/user/page?pageNo=1&pageSize=100",
+                response_json={"code": 0, "data": {"list": users, "total": 2}},
+            ),
+            flow_spec_module.RequestFact(
+                request_id="req_70", request_index=70, sequence=70, method="GET",
+                path="/admin-api/system/user/page?pageNo=1&pageSize=100",
+                response_json={"code": 0, "data": {"list": users, "total": 2}},
+            ),
+        ],
+        analysis={
+            "req_10": flow_spec_module.RequestAnalysis(request_id="req_10", role="read_option", confidence=0.99),
+            # Reproduce the stale misclassification observed in the real log.
+            "req_68": flow_spec_module.RequestAnalysis(request_id="req_68", role="business_get", confidence=0.9),
+            "req_70": flow_spec_module.RequestAnalysis(request_id="req_70", role="business_get", confidence=0.9),
+        },
+        option_sources=[{
+            "kind": "page_enum_options",
+            "options": {
+                "label=请假类型": {
+                    "field_key": "请假类型",
+                    "field_aliases": ["type"],
+                    "control_kind": "select",
+                    "mapping_complete": False,
+                    "selected_label": "事假",
+                    "page_id": "leave-page",
+                    "options": [{"label": "病假"}, {"label": "事假"}, {"label": "婚假"}],
+                },
+            },
+        }],
+    )
+    spec = FlowSpec(flow_id="latest-leave-log", steps=[submit], request_facts=facts)
+
+    assert flow_spec_module._repair_structural_option_bindings(spec) == 3
+
+    leave_type, first_approver, second_approver = submit.params
+    assert leave_type.type == "enum"
+    assert leave_type.wire_type == "number"
+    assert leave_type.source_kind == "api_option"
+    assert leave_type.source["source_request_id"] == "req_10"
+    assert leave_type.source["category_key"] == "dictType"
+    assert leave_type.source["category_value"] == "oa_duty_leave_type"
+    assert leave_type.enum_value_map == {"病假": 1, "事假": 2, "婚假": 3}
+
+    for approver, expected_label, expected_value in (
+        (first_approver, "hunk", 149),
+        (second_approver, "姜楠", 144),
+    ):
+        assert approver.type == "enum"
+        assert approver.wire_type == "number"
+        assert approver.source_kind == "api_option"
+        assert approver.source["source_request_id"] == "req_70"
+        assert approver.source["label_key"] == "nickname"
+        assert approver.enum_value_map[expected_label] == expected_value
+
+    spec.capabilities = build_default_flow_capabilities(spec)
+    flow_spec_module._attach_option_source_memberships(spec)
+    submit_capability = next(cap for cap in spec.capabilities if cap.kind == "submit")
+    captured_option_refs = {
+        ref.request_id for ref in submit_capability.request_refs
+        if ref.usage == "option_source" and not ref.step_id
+    }
+    assert captured_option_refs == {"req_10", "req_70"}
+
+def test_sync_migrates_legacy_api_option_business_type_without_changing_wire_type():
+    param = ParamField(
+        path="type", key="请假类型", value=2,
+        type="number", wire_type="number", category="user_param",
+        source_kind="api_option", source={"kind": "api_option", "source_url": "/api/dict"},
+    )
+    step = FlowStep(
+        step_id="submit", method="POST", path="/api/leave", params=[param],
+        selects=[SelectBinding(
+            param="请假类型", path="type", id_path="type",
+            source_url="/api/dict", value_key="value", label_key="label",
+            options=[{"label": "病假", "value": 1}, {"label": "事假", "value": 2}],
+            option_map={"病假": 1, "事假": 2}, enum_source="api", enum_confirmed=True,
+        )],
+    )
+    spec = FlowSpec(flow_id="legacy-api-option", steps=[step])
+
+    flow_spec_module._sync_step_option_contracts(spec, step)
+
+    assert param.type == "enum"
+    assert param.wire_type == "number"
+    assert param.source_kind == "api_option"

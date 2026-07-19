@@ -1966,6 +1966,13 @@ def classify_network_request(req: dict) -> dict:
             "dict", "dictionary", "option", "options", "select", "candidate", "candidates",
             "tree", "simple", "simplelist", "user", "users", "dept", "department", "role", "employee",
         }
+        reference_namespace_hints = {
+            "system", "identity", "directory", "iam", "masterdata", "lookup", "reference",
+        }
+        reference_entity_hints = {
+            "user", "users", "person", "people", "employee", "employees", "member", "members",
+            "dept", "department", "team", "role", "tenant", "post", "position",
+        }
         # Explicit candidate endpoints remain option sources even when their
         # rows contain ordinary audit columns such as status/remark/createTime.
         # Those columns describe the option record; they do not turn a
@@ -1980,6 +1987,18 @@ def classify_network_request(req: dict) -> dict:
         )
         if strong_option_endpoint:
             return False
+        # Directory/reference pages frequently carry status/createTime/remark
+        # audit columns even though their rows are still selectable entities.
+        # Require both a reference namespace/entity path and an explicit
+        # ID+display-label row contract before overriding the audit columns.
+        if (
+            segs & reference_namespace_hints
+            and segs & reference_entity_hints
+            and sample
+        ):
+            value_keys = [key for key in sample if _is_idlike(str(key))]
+            if any(_pick_label_key(sample, str(key)) != key for key in value_keys):
+                return False
         if keys & strong_business_key_hints:
             return True
         return bool(segs & business_path_hints) and not bool(segs & option_path_hints)

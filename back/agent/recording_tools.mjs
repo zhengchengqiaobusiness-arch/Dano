@@ -25,6 +25,8 @@ export function beginRecordingToolTurn({
     onSubmissionAccepted,
     acceptedSubmission: "",
     limitReported: false,
+    freshStateVersion: null,
+    freshValidationVersion: null,
     submissionTail: Promise.resolve(),
   };
 }
@@ -61,6 +63,40 @@ export function acceptRecordingToolSubmission(name, turn = activeTurnBudget) {
   return true;
 }
 
+export function recordRecordingToolRead(name, output, turn = activeTurnBudget) {
+  if (!turn || !output || typeof output !== "object") return;
+  const version = Number(output.flow_version);
+  if (!Number.isInteger(version) || version < 0) return;
+  if (name === "get_recording_state") turn.freshStateVersion = version;
+  if (name === "get_validation_report") turn.freshValidationVersion = version;
+}
+
+export function requireRecordingSubmissionPrerequisite(name, params, turn = activeTurnBudget) {
+  if (!turn || !SUBMISSION_TOOLS.has(name)) return;
+  const baseVersion = Number(params?.base_flow_version);
+  const requireVersion = (label, version) => {
+    if (!Number.isInteger(version)) {
+      throw new Error(`${name} requires ${label} in the current turn before submission`);
+    }
+    if (!Number.isInteger(baseVersion) || baseVersion !== version) {
+      throw new Error(
+        `${name} base_flow_version=${String(params?.base_flow_version)} does not match `
+        + `fresh ${label} flow_version=${version}`,
+      );
+    }
+  };
+  if (name === "submit_recording_plan") {
+    requireVersion("get_recording_state", turn.freshStateVersion);
+  } else if (name === "submit_recording_repair") {
+    requireVersion("get_validation_report", turn.freshValidationVersion);
+  } else if (name === "submit_recording_review") {
+    requireVersion("get_recording_state", turn.freshStateVersion);
+    requireVersion("get_validation_report", turn.freshValidationVersion);
+    if (turn.freshStateVersion !== turn.freshValidationVersion) {
+      throw new Error("submit_recording_review requires state and validation from the same flow version");
+    }
+  }
+}
 export async function runRecordingSubmissionAttempt(name, operation) {
   const turn = activeTurnBudget;
   if (!turn || !SUBMISSION_TOOLS.has(name)) {
@@ -134,9 +170,11 @@ function proxyTool({ name, label, description, parameters }) {
     ...(SUBMISSION_TOOLS.has(name) ? { executionMode: "sequential" } : {}),
     execute: async (toolCallId, params) => {
       if (SUBMISSION_TOOLS.has(name)) {
+        const sanitizedParams = sanitizeRecordingToolParams(name, params);
+        requireRecordingSubmissionPrerequisite(name, sanitizedParams);
         const { output } = await runRecordingSubmissionAttempt(
           name,
-          () => callRecordingTool(name, sanitizeRecordingToolParams(name, params), toolCallId),
+          () => callRecordingTool(name, sanitizedParams, toolCallId),
         );
         return {
           content: [{ type: "text", text: JSON.stringify(output) }],
@@ -147,6 +185,7 @@ function proxyTool({ name, label, description, parameters }) {
         };
       }
       const output = await callRecordingTool(name, params, toolCallId);
+      recordRecordingToolRead(name, output);
       return {
         content: [{ type: "text", text: JSON.stringify(output) }],
         isError: false,
@@ -167,6 +206,26 @@ const RecordingIdentity = {
   flow_version: Type.Optional(Type.Integer({ minimum: 0 })),
 };
 
+const SemanticEntry = Type.Record(Type.String(), Type.Any());
+const SemanticPlan = Type.Object(
+  {
+    business_understanding: Type.Union([Type.String(), SemanticEntry]),
+    request_roles: Type.Array(SemanticEntry),
+    field_semantics: Type.Array(SemanticEntry),
+    capabilities: Type.Array(SemanticEntry),
+    capability_relations: Type.Array(SemanticEntry),
+    unresolved_items: Type.Array(SemanticEntry),
+  },
+  { additionalProperties: false },
+);
+const RecordingPlan = Type.Object(
+  {
+    semantic_plan: SemanticPlan,
+    ops: Type.Optional(Type.Array(SemanticEntry)),
+  },
+  { additionalProperties: false },
+);
+
 export const recordingTools = [
   proxyTool({
     name: "get_recording_state",
@@ -184,7 +243,7 @@ export const recordingTools = [
       {
         ...RecordingIdentity,
         base_flow_version: Type.Integer({ minimum: 0 }),
-        plan: Type.Record(Type.String(), Type.Any()),
+        plan: RecordingPlan,
       },
       // Models sometimes flatten explanations beside `plan`; these are
       // stripped by sanitizeRecordingToolParams before the backend call.
