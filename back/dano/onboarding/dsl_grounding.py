@@ -14,7 +14,7 @@ from __future__ import annotations
 import ast
 from collections.abc import Iterator
 
-from dano.shared.asset_bodies import Invariant, WorkflowSkillBody, WorkflowStep
+from dano.shared.asset_bodies import WorkflowSkillBody, WorkflowStep
 from dano.shared.business_funcs import FUNCS
 
 _LITERALS = {"null", "true", "false"}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -10,7 +11,9 @@ import pytest
 from dano.catalog.manifest import to_manifest
 from dano.execution.page.flow_spec import (
     FlowSpec,
+    flow_spec_release_payload,
     flow_spec_to_api_request,
+    flow_spec_to_client,
     prepare_flow_release_candidate,
 )
 from dano.export.agent_skills import _dano_call_py
@@ -32,6 +35,7 @@ def _ordinary_form_spec() -> FlowSpec:
             "method": "POST",
             "url": "/crm/forms/contact/save",
             "path": "/crm/forms/contact/save",
+            "headers": {"Authorization": "Bearer baseline-secret", "X-Tenant": "tenant-a"},
             "body_source": json.dumps({
                 "employee_name": "王小明",
                 "mobileNo": "13800000000",
@@ -68,6 +72,7 @@ def _ordinary_form_spec() -> FlowSpec:
         "capabilities": [{
             "name": "submit",
             "kind": "submit",
+            "capability_id": "cap-contact-submit",
             "title": "提交联系人表单",
             "step_ids": ["save_contact"],
             "nodes": [
@@ -84,6 +89,7 @@ def _ordinary_form_spec() -> FlowSpec:
                 "request_id": "req-save-contact", "request_index": 11, "sequence": 11,
                 "method": "POST", "url": "/crm/forms/contact/save",
                 "path": "/crm/forms/contact/save",
+                "headers": {"Authorization": "Bearer baseline-secret", "X-Tenant": "tenant-a"},
                 "response_json": {"success": True, "result": {"contactId": "C-100"}},
             }],
         },
@@ -119,6 +125,103 @@ def _export_chain(spec: FlowSpec):
     exec(compile(_dano_call_py(manifest), "<generated-dano-call>", "exec"), namespace)  # noqa: S102
     return release, api_request, manifest, namespace
 
+
+def _without_release_timestamp(value: dict) -> dict:
+    stable = json.loads(json.dumps(value, ensure_ascii=False, default=str))
+    roots = [stable]
+    if isinstance(stable.get("_flow_spec"), dict):
+        roots.append(stable["_flow_spec"])
+    for root in roots:
+        release = ((root.get("meta") or {}).get("release_candidate") or {})
+        release.pop("created_at", None)
+    return stable
+
+
+def _contract_hash(value: dict) -> str:
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def test_recording_pipeline_cleanup_baseline_is_stable():
+    release, release_descriptor = prepare_flow_release_candidate(_ordinary_form_spec())
+    client = flow_spec_to_client(release)
+    persisted = flow_spec_release_payload(release)
+    api_request, errors = flow_spec_to_api_request(release)
+    runtime_result = normalize_capability_result(
+        {"ok": True, "response": {"contactId": "C-100", "accepted": True}},
+        "submit",
+        skill_id="A-OA.plain_contact_form",
+        output_schema={
+            "type": "object",
+            "properties": {
+                "contactId": {"type": "string"},
+                "accepted": {"type": "boolean"},
+            },
+            "required": ["contactId", "accepted"],
+        },
+    )
+
+    assert errors == []
+    assert api_request is not None
+    assert client["steps"][0]["headers"] == {"Authorization": "***", "X-Tenant": "***"}
+    assert client["request_facts"]["requests"][0]["headers"] == {
+        "Authorization": "***",
+        "X-Tenant": "***",
+    }
+    assert persisted["steps"][0]["headers"]["Authorization"] == "Bearer baseline-secret"
+    assert release_descriptor["release_id"].endswith(release_descriptor["flow_fingerprint"])
+
+    baseline = {
+        "request_facts": _contract_hash(release.request_facts.model_dump(mode="json")),
+        "client_projection": _contract_hash(_without_release_timestamp(client)),
+        "release_payload": _contract_hash(_without_release_timestamp(persisted)),
+        "compiled_api_request": _contract_hash(_without_release_timestamp(api_request)),
+        "runtime_result": _contract_hash(runtime_result),
+        "shape": {
+            "request_ids": [fact.request_id for fact in release.request_facts.requests],
+            "capabilities": [cap.name for cap in release.capabilities],
+            "compiled_steps": [
+                step.get("step_id") for step in (api_request.get("steps") or [])
+            ],
+            "runtime_keys": sorted(runtime_result),
+        },
+    }
+    assert baseline == {
+        "request_facts": "7e3aae17cac77555",
+        "client_projection": "7a7a1a99a4b640ee",
+        "release_payload": "e4965ea89b41e38d",
+        "compiled_api_request": "cd9a7675495b52f4",
+        "runtime_result": "5424aae2ef90d33f",
+        "shape": {
+            "request_ids": ["req-save-contact"],
+            "capabilities": ["submit"],
+            "compiled_steps": [],
+            "runtime_keys": [
+                "batch",
+                "blocked",
+                "capability",
+                "detail",
+                "fact_check_items",
+                "fact_check_note",
+                "fact_check_passed",
+                "failed_count",
+                "failed_items",
+                "ok",
+                "output",
+                "raw",
+                "relations",
+                "response",
+                "results",
+                "skill_id",
+                "source_status",
+                "status",
+                "structured_output",
+                "success_count",
+                "total",
+                "verification_status",
+            ],
+        },
+    }
 
 @pytest.mark.parametrize(
     ("scenario", "expected_kind", "expected_fields"),

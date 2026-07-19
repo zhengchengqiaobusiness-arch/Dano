@@ -82,7 +82,8 @@ async def _spawn_pi(*, run_id: str, token: str, port: int, prompt: str,
     )
     start = json.dumps({"type": "start_run", "run_id": run_id, "prompt": prompt,
                         "context": context, "budget": {"timeout_s": int(timeout_s)}}) + "\n"
-    proc.stdin.write(start.encode()); await proc.stdin.drain()
+    proc.stdin.write(start.encode())
+    await proc.stdin.drain()
     completed: dict = {}
     stderr_buf: list[str] = []
     n_events = 0

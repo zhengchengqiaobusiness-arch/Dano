@@ -12,10 +12,10 @@ import datetime as _dt
 import copy
 import json
 import logging
-
-_log = logging.getLogger("dano.request_capture")
 import re as _re
 from urllib.parse import parse_qsl, urlencode, unquote, urlparse, urlunparse
+
+_log = logging.getLogger("dano.request_capture")
 
 _WRITE = {"POST", "PUT", "PATCH", "DELETE"}
 # 「读请求」噪声:只排静态资源/流/心跳(通用,无任何业务路径名);保留字典/列表接口(select 候选源)。
@@ -4257,7 +4257,6 @@ async def execute_api(api_request: dict, fields: dict, **kw) -> dict:
     else:
         out = await runner(api_request, fields, **kw)
     if cap and cap.get("output_mapping") and not out.get("structured_output"):
-        steps = list(api_request.get("steps") or [])
         responses_by_step: dict = dict(out.get("_responses_by_step") or {})
         if not responses_by_step:
             sid = str(api_request.get("step_id") or "")

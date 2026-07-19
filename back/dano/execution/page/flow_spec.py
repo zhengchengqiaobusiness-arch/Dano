@@ -11183,15 +11183,15 @@ def flow_spec_to_summary(spec: FlowSpec) -> dict:
         ],
         "links": [
             {
-                "link_id": l.link_id,
-                "source_step_id": l.source_step_id,
-                "source_path": l.source_path,
-                "target_step_id": l.target_step_id,
-                "target_path": l.target_path,
-                "confirmed": l.confirmed,
-                "confidence": l.confidence,
+                "link_id": link.link_id,
+                "source_step_id": link.source_step_id,
+                "source_path": link.source_path,
+                "target_step_id": link.target_step_id,
+                "target_path": link.target_path,
+                "confirmed": link.confirmed,
+                "confidence": link.confidence,
             }
-            for l in spec.links
+            for link in spec.links
         ],
         "meta": spec.meta,
     }
@@ -12802,7 +12802,7 @@ def _find_link(spec: FlowSpec, link_id: str) -> FlowLink:
     for link in spec.links:
         if link.link_id == link_id:
             return link
-    available = [l.link_id for l in spec.links]
+    available = [link.link_id for link in spec.links]
     raise ValueError(f"link not found: {link_id} (available: {available})")
 
 

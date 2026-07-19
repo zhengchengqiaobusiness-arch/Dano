@@ -2617,7 +2617,6 @@ class RecordSession:
                 labels_by_norm.setdefault(key, set()).update(fields)
 
         for storage_key, entry in page_options.items():
-            options = list(entry.get("options") or [])
             explicit_fields = {
                 field
                 for label in (storage_key, entry.get("field_key"))

@@ -3878,7 +3878,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <List
             size="small"
             // path/key are editable. Stable positional keys prevent row remounts between blur and click.
-            rowKey={(_p, index) => `${step.step_id}:param:${index}`}
+            rowKey={(param) => `${step.step_id}:param:${(step.params || []).indexOf(param)}`}
             dataSource={step.params || []}
             renderItem={(p, index) => renderParamEditorInCapability(step, p, index)}
           />
@@ -3981,7 +3981,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <List
             size="small"
             header={<Typography.Text strong>候选来源</Typography.Text>}
-            rowKey={(ref, refIdx) => [capabilityUiKey, "option-source", ref.step_id || ref.request_id || refIdx].join(":")}
+            rowKey={(ref) => [
+              capabilityUiKey,
+              "option-source",
+              ref.step_id || ref.request_id || auxiliaryRefs.indexOf(ref),
+            ].join(":")}
             dataSource={auxiliaryRefs}
             renderItem={(ref) => {
               const st = stepById[String(ref.step_id || "")];
