@@ -2066,7 +2066,7 @@ describe("BridgeRpcAdapter", () => {
       }
     });
 
-    it("cancels one pending confirmation atomically while revising", async () => {
+    it("cancels a draft revision without terminating its pending confirmation", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dano-revise-cancel-"));
       const controller = new AbortController();
       try {
@@ -2119,10 +2119,9 @@ describe("BridgeRpcAdapter", () => {
           },
           {
             id: "cancel-revising-confirm",
-            type: "answer_question",
+            type: "cancel_question_revision",
             toolCallId: "cancel-confirm",
             expectedRevision: 2,
-            cancelled: true,
           },
         ] satisfies RpcCommand[]) {
           ws.trigger(
@@ -2132,10 +2131,34 @@ describe("BridgeRpcAdapter", () => {
           await new Promise(resolve => setTimeout(resolve, 10));
         }
 
+        let confirmationSettled = false;
+        void confirmation.finally(() => {
+          confirmationSettled = true;
+        });
+        await new Promise(resolve => setTimeout(resolve, 10));
+        expect(confirmationSettled).toBe(false);
+        expect(
+          readFormInteractions(sessionManager.getBranch()).get("cancel-confirm"),
+        ).toMatchObject({ state: "awaiting_confirmation", revision: 3 });
+
+        ws.trigger(
+          "message",
+          Buffer.from(JSON.stringify({
+            type: "command",
+            payload: {
+              id: "cancel-confirmation",
+              type: "answer_question",
+              toolCallId: "cancel-confirm",
+              expectedRevision: 3,
+              cancelled: true,
+            } satisfies RpcCommand,
+          })),
+        );
+        await new Promise(resolve => setTimeout(resolve, 10));
         await expect(confirmation).resolves.toEqual({ status: "cancelled" });
         expect(
           readFormInteractions(sessionManager.getBranch()).get("cancel-confirm"),
-        ).toMatchObject({ state: "cancelled", revision: 3 });
+        ).toMatchObject({ state: "cancelled", revision: 4 });
       } finally {
         controller.abort();
         fs.rmSync(tmpDir, { recursive: true, force: true });

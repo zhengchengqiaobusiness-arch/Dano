@@ -186,7 +186,7 @@ describe("Form Interaction", () => {
     });
   });
 
-  it("cancels the whole interaction while revising", () => {
+  it("discards a draft revision and returns to confirmation", () => {
     const manager = sessionManager();
     createFormInteraction(manager, {
       interactionId: "confirm-two",
@@ -195,11 +195,24 @@ describe("Form Interaction", () => {
     });
     transitionFormInteraction(manager, "confirm-two", { type: "return_modify" });
 
+    expect(transitionFormInteraction(manager, "confirm-two", {
+      type: "cancel_revision",
+    })).toMatchObject({
+      kind: "transitioned",
+      snapshot: {
+        state: "awaiting_confirmation",
+        revision: 3,
+        forms: [
+          { formId: "form-a", answer: { reason: "家庭事务" } },
+          { formId: "form-b", answer: { destination: "上海" } },
+        ],
+      },
+    });
     expect(
       transitionFormInteraction(manager, "confirm-two", { type: "cancel" }),
     ).toMatchObject({
       kind: "transitioned",
-      snapshot: { state: "cancelled", revision: 3 },
+      snapshot: { state: "cancelled", revision: 4 },
     });
   });
 

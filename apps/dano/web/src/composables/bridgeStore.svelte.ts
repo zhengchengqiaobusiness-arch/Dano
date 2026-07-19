@@ -2168,6 +2168,17 @@ export function reviseQuestion(
   return sendCommand({ type: "revise_question", toolCallId, expectedRevision });
 }
 
+export function cancelQuestionRevision(
+  toolCallId: string,
+  expectedRevision: number,
+): Promise<RpcResponse> {
+  return sendCommand({
+    type: "cancel_question_revision",
+    toolCallId,
+    expectedRevision,
+  });
+}
+
 export function submitQuestionRevision(
   toolCallId: string,
   expectedRevision: number,

@@ -6506,6 +6506,73 @@ export class BridgeRpcAdapter {
         };
       }
 
+      case "cancel_question_revision": {
+        const toolCallId = command.toolCallId.trim();
+        const sessionManager = this.sessionRuntime.currentSessionManager();
+        const interaction = readFormInteractions(sessionManager.getBranch()).get(
+          toolCallId,
+        );
+        if (!interaction) {
+          throw new Error(`Form Interaction not found: ${toolCallId}`);
+        }
+        if (isTerminalFormInteraction(interaction)) {
+          return formInteractionCommandFailure(
+            correlationId,
+            "cancel_question_revision",
+            "already_terminal",
+            `Form Interaction ${toolCallId} is already terminal (${interaction.state}); use the returned authoritative projection and do not retry this action.`,
+            interaction,
+          );
+        }
+        if (
+          interaction.state === "awaiting_confirmation" &&
+          interaction.revision === command.expectedRevision + 1
+        ) {
+          return {
+            id: correlationId,
+            type: "response",
+            command: "cancel_question_revision",
+            success: true,
+            data: projectFormInteraction(interaction),
+          };
+        }
+        if (command.expectedRevision !== interaction.revision) {
+          return staleFormInteractionResponse(
+            correlationId,
+            "cancel_question_revision",
+            command.expectedRevision,
+            interaction,
+          );
+        }
+        if (!canApplyFormInteractionTransition(interaction, "cancel_revision")) {
+          return formInteractionCommandFailure(
+            correlationId,
+            "cancel_question_revision",
+            "invalid_state",
+            `Form Interaction ${toolCallId} does not allow cancel_revision from ${interaction.state}.`,
+            interaction,
+          );
+        }
+        const transitioned = transitionFormInteraction(
+          sessionManager,
+          toolCallId,
+          { type: "cancel_revision" },
+        );
+        if (transitioned.kind !== "transitioned") {
+          throw new Error(`Failed to cancel Form Interaction revision: ${toolCallId}`);
+        }
+        this.sendTranscriptSnapshot(
+          this.sessionRuntime.buildCurrentTranscriptPage(),
+        );
+        return {
+          id: correlationId,
+          type: "response",
+          command: "cancel_question_revision",
+          success: true,
+          data: projectFormInteraction(transitioned.snapshot),
+        };
+      }
+
       /* ====================================================================
        * Session state and model settings
        * Shared state: SessionRuntime plus live ctx and pi settings APIs.

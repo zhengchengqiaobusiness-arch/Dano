@@ -259,6 +259,7 @@ export type FormInteractionAction =
   | "confirm"
   | "cancel"
   | "return_modify"
+  | "cancel_revision"
   | "submit_revision";
 
 export type FormRevisionProjection = AskUserQuestionConfirmationForm & {
@@ -507,6 +508,7 @@ export interface RpcCommandMap {
           | Record<string, AskUserQuestionAnswerInput>;
       };
   revise_question: { toolCallId: string; expectedRevision: number };
+  cancel_question_revision: { toolCallId: string; expectedRevision: number };
   submit_question_revision: {
     toolCallId: string;
     expectedRevision: number;
@@ -901,6 +903,7 @@ export interface RpcResponseMap {
   present_question: FormInteractionProjection | null;
   answer_question: AskUserQuestionResult;
   revise_question: FormInteractionProjection;
+  cancel_question_revision: FormInteractionProjection;
   submit_question_revision: FormInteractionProjection;
   new_session: {
     transcript: RpcTranscriptPage;
