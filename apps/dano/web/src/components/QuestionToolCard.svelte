@@ -423,33 +423,14 @@
     }
   }
 
-  async function startRevision() {
-    if (!block.toolCallId || !interaction || submitting) return;
-    submitting = true;
-    error = "";
-    try {
-      const rpc = await onRevise(block.toolCallId, interaction.revision);
-      applyAuthoritativeInteraction(rpc);
-      if (!rpc.success) throw new Error(rpc.error);
-    } catch (cause) {
-      error = cause instanceof Error ? cause.message : String(cause);
-    } finally {
-      submitting = false;
-    }
-  }
-
-  async function submitRevision(
-    answers: Record<string, Record<string, AskUserQuestionAnswer>>,
+  async function requestInteraction(
+    request: (toolCallId: string, expectedRevision: number) => Promise<RpcResponse>,
   ) {
     if (!block.toolCallId || !interaction || submitting) return;
     submitting = true;
     error = "";
     try {
-      const rpc = await onSubmitRevision(
-        block.toolCallId,
-        interaction.revision,
-        answers,
-      );
+      const rpc = await request(block.toolCallId, interaction.revision);
       applyAuthoritativeInteraction(rpc);
       if (!rpc.success) throw new Error(rpc.error);
     } catch (cause) {
@@ -459,19 +440,21 @@
     }
   }
 
+  async function startRevision() {
+    await requestInteraction(onRevise);
+  }
+
+  async function submitRevision(
+    answers: Record<string, Record<string, AskUserQuestionAnswer>>,
+  ) {
+    await requestInteraction((toolCallId, expectedRevision) =>
+      onSubmitRevision(toolCallId, expectedRevision, answers)
+    );
+  }
+
   async function cancelRevision() {
-    if (!block.toolCallId || !interaction || !onCancelRevision || submitting) return;
-    submitting = true;
-    error = "";
-    try {
-      const rpc = await onCancelRevision(block.toolCallId, interaction.revision);
-      applyAuthoritativeInteraction(rpc);
-      if (!rpc.success) throw new Error(rpc.error);
-    } catch (cause) {
-      error = cause instanceof Error ? cause.message : String(cause);
-    } finally {
-      submitting = false;
-    }
+    if (!onCancelRevision) return;
+    await requestInteraction(onCancelRevision);
   }
 
   function applyAuthoritativeInteraction(response: RpcResponse): void {
@@ -1221,7 +1204,7 @@
 
         <div class="question-actions">
           {#if revising && interaction}
-            {#if interaction.allowedActions.includes("cancel_revision")}
+            {#if onCancelRevision && interaction.allowedActions.includes("cancel_revision")}
               <button type="button" class="question-button secondary" disabled={submitting} onclick={() => void cancelRevision()}>
                 {t("questionTool.cancel")}
               </button>

@@ -517,6 +517,30 @@ describe("QuestionToolCard", () => {
     unmount(component);
   });
 
+  it("does not expose revision cancellation without a cancellation handler", async () => {
+    const response = vi.fn(async () => ({ success: true } as never));
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: revisingMultiFormBlock(),
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
+      },
+    });
+    await tick();
+
+    expect(
+      [...target.querySelectorAll<HTMLButtonElement>("button")]
+        .some(button => button.textContent?.trim() === "取消"),
+    ).toBe(false);
+
+    unmount(component);
+  });
+
   it("presents a confirmation without locally authorizing actions before projection", async () => {
     vi.useFakeTimers();
     const response = vi.fn(async () => ({ success: true } as never));

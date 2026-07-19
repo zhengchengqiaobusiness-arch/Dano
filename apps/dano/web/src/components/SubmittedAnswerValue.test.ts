@@ -23,11 +23,17 @@ describe("SubmittedAnswerValue", () => {
   });
 
   it("vertically centers the single-line confirmation value", () => {
-    const rule = submittedAnswerValueSource.match(
+    const containerRule = submittedAnswerValueSource.match(
       /\.submitted-field-value \{([\s\S]*?)\n  \}/,
     )?.[1];
+    const textRule = submittedAnswerValueSource.match(
+      /\.submitted-field-value-text \{([\s\S]*?)\n  \}/,
+    )?.[1];
 
-    expect(rule).toContain("display: flex;");
-    expect(rule).toContain("align-items: center;");
+    expect(containerRule).toContain("display: flex;");
+    expect(containerRule).toContain("align-items: center;");
+    expect(textRule).toContain("min-width: 0;");
+    expect(textRule).toContain("overflow: hidden;");
+    expect(textRule).toContain("text-overflow: ellipsis;");
   });
 });

@@ -184,6 +184,9 @@
     const s: Record<string, string> = {
       ...resolveAppThemeVars(activeTheme),
       ...browserChromeVars,
+      "--right-rail-space": !compactLayout && shellRightRailOpen
+        ? `${rightRailWidth}px`
+        : "0px",
       "color-scheme": String(activeTheme.mode),
     };
     if (!compactLayout) {

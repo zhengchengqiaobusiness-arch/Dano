@@ -5961,6 +5961,95 @@ export class BridgeRpcAdapter {
     }
   }
 
+  private transitionFormInteractionRevision({
+    correlationId,
+    command,
+    toolCallId: rawToolCallId,
+    expectedRevision,
+  }: {
+    correlationId: string;
+    command: "revise_question" | "cancel_question_revision";
+    toolCallId: string;
+    expectedRevision: number;
+  }): RpcResponse {
+    const { transition, idempotentState } = command === "revise_question"
+      ? { transition: "return_modify", idempotentState: "revising" } as const
+      : {
+          transition: "cancel_revision",
+          idempotentState: "awaiting_confirmation",
+        } as const;
+    const toolCallId = rawToolCallId.trim();
+    const sessionManager = this.sessionRuntime.currentSessionManager();
+    const interaction = readFormInteractions(sessionManager.getBranch()).get(
+      toolCallId,
+    );
+    if (!interaction) {
+      throw new Error(`Form Interaction not found: ${toolCallId}`);
+    }
+    if (isTerminalFormInteraction(interaction)) {
+      return formInteractionCommandFailure(
+        correlationId,
+        command,
+        "already_terminal",
+        `Form Interaction ${toolCallId} is already terminal (${interaction.state}); use the returned authoritative projection and do not retry this action.`,
+        interaction,
+      );
+    }
+    if (
+      interaction.state === idempotentState &&
+      interaction.revision === expectedRevision + 1
+    ) {
+      return {
+        id: correlationId,
+        type: "response",
+        command,
+        success: true,
+        data: projectFormInteraction(interaction),
+      };
+    }
+    if (expectedRevision !== interaction.revision) {
+      return staleFormInteractionResponse(
+        correlationId,
+        command,
+        expectedRevision,
+        interaction,
+      );
+    }
+    if (!canApplyFormInteractionTransition(interaction, transition)) {
+      return formInteractionCommandFailure(
+        correlationId,
+        command,
+        "invalid_state",
+        `Form Interaction ${toolCallId} does not allow ${transition} from ${interaction.state}.`,
+        interaction,
+      );
+    }
+    const transitioned = transitionFormInteraction(
+      sessionManager,
+      toolCallId,
+      { type: transition },
+    );
+    if (transitioned.kind !== "transitioned") {
+      return formInteractionCommandFailure(
+        correlationId,
+        command,
+        "invalid_state",
+        `Form Interaction ${toolCallId} does not allow ${transition} from ${interaction.state}.`,
+        interaction,
+      );
+    }
+    this.sendTranscriptSnapshot(
+      this.sessionRuntime.buildCurrentTranscriptPage(),
+    );
+    return {
+      id: correlationId,
+      type: "response",
+      command,
+      success: true,
+      data: projectFormInteraction(transitioned.snapshot),
+    };
+  }
+
   /**
    * Dispatch command to Pi extension API
    */
@@ -6342,76 +6431,12 @@ export class BridgeRpcAdapter {
       }
 
       case "revise_question": {
-        const toolCallId = command.toolCallId.trim();
-        const sessionManager = this.sessionRuntime.currentSessionManager();
-        const interaction = readFormInteractions(sessionManager.getBranch()).get(
-          toolCallId,
-        );
-        if (!interaction) {
-          throw new Error(`Form Interaction not found: ${toolCallId}`);
-        }
-        if (isTerminalFormInteraction(interaction)) {
-          return formInteractionCommandFailure(
-            correlationId,
-            "revise_question",
-            "already_terminal",
-            `Form Interaction ${toolCallId} is already terminal (${interaction.state}); use the returned authoritative projection and do not retry this action.`,
-            interaction,
-          );
-        }
-        if (
-          interaction.state === "revising" &&
-          interaction.revision === command.expectedRevision + 1
-        ) {
-          return {
-            id: correlationId,
-            type: "response",
-            command: "revise_question",
-            success: true,
-            data: projectFormInteraction(interaction),
-          };
-        }
-        if (command.expectedRevision !== interaction.revision) {
-          return staleFormInteractionResponse(
-            correlationId,
-            "revise_question",
-            command.expectedRevision,
-            interaction,
-          );
-        }
-        if (!canApplyFormInteractionTransition(interaction, "return_modify")) {
-          return formInteractionCommandFailure(
-            correlationId,
-            "revise_question",
-            "invalid_state",
-            `Form Interaction ${toolCallId} does not allow return_modify from ${interaction.state}.`,
-            interaction,
-          );
-        }
-        const transitioned = transitionFormInteraction(
-          sessionManager,
-          toolCallId,
-          { type: "return_modify" },
-        );
-        if (transitioned.kind !== "transitioned") {
-          return formInteractionCommandFailure(
-            correlationId,
-            "revise_question",
-            "invalid_state",
-            `Form Interaction ${toolCallId} does not allow return_modify from ${interaction.state}.`,
-            interaction,
-          );
-        }
-        this.sendTranscriptSnapshot(
-          this.sessionRuntime.buildCurrentTranscriptPage(),
-        );
-        return {
-          id: correlationId,
-          type: "response",
+        return this.transitionFormInteractionRevision({
+          correlationId,
           command: "revise_question",
-          success: true,
-          data: projectFormInteraction(transitioned.snapshot),
-        };
+          toolCallId: command.toolCallId,
+          expectedRevision: command.expectedRevision,
+        });
       }
 
       case "submit_question_revision": {
@@ -6507,70 +6532,12 @@ export class BridgeRpcAdapter {
       }
 
       case "cancel_question_revision": {
-        const toolCallId = command.toolCallId.trim();
-        const sessionManager = this.sessionRuntime.currentSessionManager();
-        const interaction = readFormInteractions(sessionManager.getBranch()).get(
-          toolCallId,
-        );
-        if (!interaction) {
-          throw new Error(`Form Interaction not found: ${toolCallId}`);
-        }
-        if (isTerminalFormInteraction(interaction)) {
-          return formInteractionCommandFailure(
-            correlationId,
-            "cancel_question_revision",
-            "already_terminal",
-            `Form Interaction ${toolCallId} is already terminal (${interaction.state}); use the returned authoritative projection and do not retry this action.`,
-            interaction,
-          );
-        }
-        if (
-          interaction.state === "awaiting_confirmation" &&
-          interaction.revision === command.expectedRevision + 1
-        ) {
-          return {
-            id: correlationId,
-            type: "response",
-            command: "cancel_question_revision",
-            success: true,
-            data: projectFormInteraction(interaction),
-          };
-        }
-        if (command.expectedRevision !== interaction.revision) {
-          return staleFormInteractionResponse(
-            correlationId,
-            "cancel_question_revision",
-            command.expectedRevision,
-            interaction,
-          );
-        }
-        if (!canApplyFormInteractionTransition(interaction, "cancel_revision")) {
-          return formInteractionCommandFailure(
-            correlationId,
-            "cancel_question_revision",
-            "invalid_state",
-            `Form Interaction ${toolCallId} does not allow cancel_revision from ${interaction.state}.`,
-            interaction,
-          );
-        }
-        const transitioned = transitionFormInteraction(
-          sessionManager,
-          toolCallId,
-          { type: "cancel_revision" },
-        );
-        if (transitioned.kind !== "transitioned") {
-          throw new Error(`Failed to cancel Form Interaction revision: ${toolCallId}`);
-        }
-        this.sendTranscriptSnapshot(
-          this.sessionRuntime.buildCurrentTranscriptPage(),
-        );
-        return {
-          id: correlationId,
-          type: "response",
+        return this.transitionFormInteractionRevision({
+          correlationId,
           command: "cancel_question_revision",
-          success: true,
-          data: projectFormInteraction(transitioned.snapshot),
-        };
+          toolCallId: command.toolCallId,
+          expectedRevision: command.expectedRevision,
+        });
       }
 
       /* ====================================================================

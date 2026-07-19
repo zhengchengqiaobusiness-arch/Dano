@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   askUserQuestionAnswerItems,
   askUserQuestionAnswerMarkdown,
+  askUserQuestionConfirmationFormIds,
+  askUserQuestionReturnedConfirmationFormIds,
   askUserQuestionMarkdown,
   askUserQuestionRequest,
   askUserQuestionResult,
@@ -369,6 +371,43 @@ describe("ask user question transcript data", () => {
         block({ question: "Name?" }, { toolName: "curl", toolStatus: "error" }),
       ),
     ).toBe(false);
+  });
+
+  it("hides only source forms covered by a confirmation card", () => {
+    const source = questionBlock({
+      batch: true,
+      title: "出差申请",
+      questions: [{ id: "city", kind: "text", question: "城市？" }],
+    });
+    source.toolCallId = "form-1";
+    const confirmation = questionBlock({
+      batch: false,
+      id: "confirmation",
+      kind: "confirm",
+      title: "确认表单",
+      confirmationOfToolCallId: "form-1",
+      questions: [{ id: "city", kind: "text", question: "城市？" }],
+      answer: { city: "北京" },
+    });
+    confirmation.toolCallId = "confirm-1";
+
+    const coveredIds = new Set(askUserQuestionConfirmationFormIds(confirmation));
+    expect(coveredIds).toEqual(new Set(["form-1"]));
+    expect(askUserQuestionReturnedConfirmationFormIds(confirmation)).toEqual([]);
+    expect(hideAskUserQuestionToolBlock(source, coveredIds)).toBe(true);
+    expect(hideAskUserQuestionToolBlock(confirmation, coveredIds)).toBe(false);
+    expect(hideAskUserQuestionToolBlock(source, new Set(["form-2"]))).toBe(false);
+
+    confirmation.formInteraction = {
+      interactionId: "confirm-1",
+      state: "confirmed",
+      revision: 2,
+      allowedActions: [],
+      forms: [],
+    };
+    expect(askUserQuestionReturnedConfirmationFormIds(confirmation)).toEqual([
+      "form-1",
+    ]);
   });
 
   it("distinguishes bounded terminal presentation failures from retryable errors", () => {

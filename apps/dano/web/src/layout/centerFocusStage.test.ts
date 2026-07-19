@@ -5,25 +5,10 @@ import appMainContentSource from "./AppMainContent.svelte?raw";
 import {
   createCenterFocusStage,
   hasActiveCenterFocusStage,
-  isDesktopCenterFocusViewport,
 } from "./centerFocusStage";
 
-function rect(left: number, top: number, width: number, height: number): DOMRect {
-  return {
-    x: left,
-    y: top,
-    left,
-    top,
-    width,
-    height,
-    right: left + width,
-    bottom: top + height,
-    toJSON: () => ({}),
-  } as DOMRect;
-}
-
 describe("Center Focus Stage", () => {
-  it("provides fixed safe bounds while CSS owns dynamic card centering", () => {
+  it("lets CSS own popup geometry while preserving the inline card placeholder", () => {
     const root = document.createElement("main");
     const transcript = document.createElement("div");
     const anchor = document.createElement("div");
@@ -34,8 +19,12 @@ describe("Center Focus Stage", () => {
     transcript.append(anchor);
     root.append(transcript);
     document.body.append(root);
-    vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(0, 40, 1000, 800));
-    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(200, 180, 600, 360));
+    vi.spyOn(root, "getBoundingClientRect").mockImplementation(() => {
+      throw new Error("Focused-card layout must not read root geometry");
+    });
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue({
+      height: 360,
+    } as DOMRect);
     vi.spyOn(window, "matchMedia").mockImplementation(query => ({
       matches: query === "(min-width: 901px)" ||
         query === "(prefers-reduced-motion: reduce)",
@@ -54,17 +43,21 @@ describe("Center Focus Stage", () => {
       const stage = createCenterFocusStage(root);
       stage.show({ sessionKey: "session-a", toolCallId: "confirm-form", element: card });
 
-      expect(card.style.top).toBe("64px");
-      expect(card.style.bottom).toBe("calc(100dvh - 840px + 24px)");
-      expect(card.style.maxHeight).toBe("752px");
+      expect(card.getAttribute("style")).toBeNull();
+      expect(anchor.style.height).toBe("360px");
       const focusedCardRule = appMainContentSource.match(
         /\.center-column :global\(\.center-focused-card\) \{([\s\S]*?)\n  \}/,
       )?.[1];
+      expect(focusedCardRule).toContain("position: fixed;");
+      expect(focusedCardRule).toContain("top: 24px;");
+      expect(focusedCardRule).toContain("bottom: 24px;");
+      expect(focusedCardRule).toContain("var(--right-rail-space, 0px)");
       expect(focusedCardRule).toContain("height: fit-content;");
-      expect(focusedCardRule).toContain("margin-block: auto;");
+      expect(focusedCardRule).toContain("margin: auto;");
 
       stage.hide("confirm-form");
       expect(card.getAttribute("style")).toBeNull();
+      expect(anchor.getAttribute("style")).toBeNull();
       stage.destroy();
     } finally {
       globalThis.ResizeObserver = OriginalResizeObserver;
@@ -90,8 +83,9 @@ describe("Center Focus Stage", () => {
     composer.append(composerInput, composerAttachment);
     root.append(transcript, composer);
     document.body.append(root);
-    vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(100, 40, 1000, 800));
-    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(220, 180, 600, 500));
+    vi.spyOn(card, "getBoundingClientRect").mockReturnValue({
+      height: 500,
+    } as DOMRect);
     composerInput.focus();
 
     const activeChange = vi.fn();
@@ -100,7 +94,7 @@ describe("Center Focus Stage", () => {
 
     expect(root.dataset.centerFocusActive).toBe("true");
     expect(card.classList.contains("center-focused-card")).toBe(true);
-    expect(card.style.width).toBe("720px");
+    expect(card.getAttribute("style")).toBeNull();
     expect(anchor.style.height).toBe("500px");
     expect(composer.inert).toBe(true);
     expect(backgroundButton.inert).toBe(true);
@@ -133,6 +127,31 @@ describe("Center Focus Stage", () => {
     stage.destroy();
   });
 
+  it("does not compensate layout collapse by rewriting transcript scroll position", () => {
+    const root = document.createElement("main");
+    const transcript = document.createElement("div");
+    const anchor = document.createElement("div");
+    const card = document.createElement("article");
+    transcript.dataset.centerFocusTranscript = "";
+    anchor.className = "question-card-anchor";
+    anchor.append(card);
+    transcript.append(anchor);
+    root.append(transcript);
+    document.body.append(root);
+    transcript.scrollTop = 240;
+    vi.spyOn(window, "matchMedia").mockImplementation(query => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+    } as MediaQueryList));
+    const stage = createCenterFocusStage(root);
+
+    stage.show({ sessionKey: "session-a", toolCallId: "form-a", element: card });
+    transcript.scrollTop = 720;
+    stage.hide("form-a");
+
+    expect(transcript.scrollTop).toBe(720);
+    stage.destroy();
+  });
+
   it("releases focus when the active session changes", () => {
     const root = document.createElement("main");
     const transcript = document.createElement("div");
@@ -146,8 +165,6 @@ describe("Center Focus Stage", () => {
     transcript.append(anchor);
     root.append(transcript, composer);
     document.body.append(root);
-    vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(0, 0, 900, 700));
-    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(100, 100, 600, 400));
     const stage = createCenterFocusStage(root);
 
     stage.show({ sessionKey: "session-a", toolCallId: "form-a", element: card });
@@ -166,7 +183,6 @@ describe("Center Focus Stage", () => {
     composer.dataset.centerFocusComposer = "";
     root.append(transcript, composer);
     document.body.append(root);
-    vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(0, 0, 900, 700));
 
     const cards = ["form-a", "form-b"].map(id => {
       const anchor = document.createElement("div");
@@ -174,7 +190,6 @@ describe("Center Focus Stage", () => {
       anchor.className = "question-card-anchor";
       anchor.append(card);
       transcript.append(anchor);
-      vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(100, 100, 600, 400));
       return { id, card };
     });
     const stage = createCenterFocusStage(root);
@@ -186,15 +201,6 @@ describe("Center Focus Stage", () => {
     expect(root.dataset.centerFocusActive).toBe("true");
     expect(cards[1]!.card.classList.contains("center-focused-card")).toBe(true);
     stage.destroy();
-  });
-
-  it("limits the first stage implementation to desktop viewports", () => {
-    expect(isDesktopCenterFocusViewport(query => ({
-      matches: query === "(min-width: 901px)",
-    } as MediaQueryList))).toBe(true);
-    expect(isDesktopCenterFocusViewport(() => ({
-      matches: false,
-    } as MediaQueryList))).toBe(false);
   });
 
   it("switches immediately without View Transition movement when reduced motion is preferred", () => {
@@ -210,8 +216,6 @@ describe("Center Focus Stage", () => {
     transcript.append(anchor);
     root.append(transcript, composer);
     document.body.append(root);
-    vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(0, 0, 1000, 800));
-    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(200, 160, 600, 400));
     vi.spyOn(window, "matchMedia").mockImplementation(query => ({
       matches: query === "(prefers-reduced-motion: reduce)",
     } as MediaQueryList));
@@ -252,8 +256,6 @@ describe("Center Focus Stage", () => {
     transcript.append(anchor);
     root.append(transcript);
     document.body.append(root);
-    vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(0, 0, 1000, 800));
-    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(200, 160, 600, 400));
     vi.spyOn(window, "matchMedia").mockImplementation(() => ({
       matches: false,
     } as MediaQueryList));
@@ -289,8 +291,6 @@ describe("Center Focus Stage", () => {
     transcript.append(anchor, backgroundButton);
     root.append(transcript, composer);
     document.body.append(root);
-    vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(0, 0, 1000, 800));
-    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(200, 160, 600, 400));
     vi.spyOn(window, "matchMedia").mockImplementation(() => ({
       matches: false,
     } as MediaQueryList));
@@ -318,7 +318,7 @@ describe("Center Focus Stage", () => {
     stage.destroy();
   });
 
-  it("keeps a focused mobile card inside dynamic viewport and safe-area bounds", () => {
+  it("keeps focused mobile cards inside CSS safe-area bounds", () => {
     const root = document.createElement("main");
     const transcript = document.createElement("div");
     const anchor = document.createElement("div");
@@ -331,9 +331,6 @@ describe("Center Focus Stage", () => {
     transcript.append(anchor);
     root.append(transcript, composer);
     document.body.append(root);
-    const rootRect = vi.spyOn(root, "getBoundingClientRect")
-      .mockReturnValue(rect(0, 60, 390, 700));
-    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(16, 220, 358, 900));
     vi.spyOn(window, "matchMedia").mockImplementation(query => ({
       matches: query === "(prefers-reduced-motion: reduce)",
     } as MediaQueryList));
@@ -346,28 +343,13 @@ describe("Center Focus Stage", () => {
     stage.show({ sessionKey: "session-a", toolCallId: "form-a", element: card });
 
     expect(root.dataset.centerFocusActive).toBe("true");
-    expect(anchor.style.height).toBe("900px");
-    expect(card.style.getPropertyValue("--center-focus-left")).toBe(
-      "calc(0px + 14px + env(safe-area-inset-left, 0px))",
-    );
-    expect(card.style.getPropertyValue("--center-focus-top")).toBe(
-      "calc(max(60px, var(--mobile-header-offset, calc(env(safe-area-inset-top, 0px) + 50px))) + 14px)",
-    );
-    expect(card.style.getPropertyValue("--center-focus-width")).toBe(
-      "calc(390px - 28px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px))",
-    );
-    expect(card.style.getPropertyValue("--center-focus-max-height")).toBe(
-      "calc(min(760px, 100dvh) - max(60px, var(--mobile-header-offset, calc(env(safe-area-inset-top, 0px) + 50px))) - 28px - env(safe-area-inset-bottom, 0px))",
-    );
-
-    rootRect.mockReturnValue(rect(0, 48, 430, 620));
-    window.dispatchEvent(new Event("resize"));
-
-    expect(root.dataset.centerFocusActive).toBe("true");
-    expect(card.style.getPropertyValue("--center-focus-top")).toBe(
-      "calc(max(48px, var(--mobile-header-offset, calc(env(safe-area-inset-top, 0px) + 50px))) + 14px)",
-    );
-    expect(card.style.getPropertyValue("--center-focus-width")).toContain("430px");
+    const mobileRule = appMainContentSource.match(
+      /@media \(max-width: 900px\) \{[\s\S]*?\.center-column :global\(\.center-focused-card\) \{([\s\S]*?)\n    \}/,
+    )?.[1];
+    expect(mobileRule).toContain("top: calc(var(--mobile-header-offset");
+    expect(mobileRule).toContain("env(safe-area-inset-bottom, 0px)");
+    expect(mobileRule).toContain("env(safe-area-inset-left, 0px)");
+    expect(mobileRule).toContain("env(safe-area-inset-right, 0px)");
 
     stage.hide("form-a");
 
@@ -404,8 +386,6 @@ describe("Center Focus Stage", () => {
     root.append(transcript, composer);
     document.body.append(root);
     transcript.scrollTop = 240;
-    vi.spyOn(root, "getBoundingClientRect").mockReturnValue(rect(0, 60, 390, 700));
-    vi.spyOn(card, "getBoundingClientRect").mockReturnValue(rect(16, 220, 358, 1_200));
     Object.defineProperties(scrollRegion, {
       clientHeight: { configurable: true, value: 620 },
       scrollHeight: { configurable: true, value: 1_200 },
@@ -423,7 +403,6 @@ describe("Center Focus Stage", () => {
     scrollRegion.dispatchEvent(new Event("scroll"));
     submit.click();
 
-    expect(card.classList).toContain("center-focus-mobile-card");
     expect(card.scrollTop).toBe(0);
     expect(scrollRegion.scrollTop).toBe(580);
     expect(transcript.scrollTop).toBe(240);
@@ -436,7 +415,6 @@ describe("Center Focus Stage", () => {
 
     stage.hide("long-form");
 
-    expect(card.classList).not.toContain("center-focus-mobile-card");
     expect(transcript.dataset.centerFocusLocked).toBeUndefined();
     expect(composer.inert).toBe(false);
     stage.destroy();

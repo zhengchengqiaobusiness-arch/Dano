@@ -371,9 +371,15 @@
 
   .center-column :global(.center-focused-card) {
     position: fixed;
+    top: 24px;
+    right: calc(24px + var(--right-rail-space, 0px));
+    bottom: 24px;
+    left: 24px;
     z-index: 22;
+    width: min(1104px, calc(100vw - var(--right-rail-space, 0px) - 48px));
+    max-height: calc(100dvh - 48px);
     height: fit-content;
-    margin-block: auto;
+    margin: auto;
     overflow: hidden;
     box-shadow: var(--shadow-overlay, var(--shadow-raised));
   }
@@ -409,15 +415,13 @@
     }
 
     .center-column :global(.center-focused-card) {
+      top: calc(var(--mobile-header-offset, calc(env(safe-area-inset-top, 0px) + 50px)) + 14px);
+      right: calc(14px + env(safe-area-inset-right, 0px));
+      bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+      left: calc(14px + env(safe-area-inset-left, 0px));
+      width: auto;
+      max-height: calc(100dvh - var(--mobile-header-offset, calc(env(safe-area-inset-top, 0px) + 50px)) - 28px - env(safe-area-inset-bottom, 0px));
       padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
-    }
-
-    .center-column :global(.center-focused-card.center-focus-mobile-card) {
-      left: var(--center-focus-left);
-      top: var(--center-focus-top);
-      bottom: var(--center-focus-bottom);
-      width: var(--center-focus-width);
-      max-height: var(--center-focus-max-height);
     }
 
     .center-column :global(.center-focused-card .question-actions) {

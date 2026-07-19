@@ -140,8 +140,33 @@ export function isPendingAskUserQuestionBlock(
 
 export function hideAskUserQuestionToolBlock(
   block: ToolContentBlock,
+  confirmationFormIds: ReadonlySet<string> = new Set(),
 ): boolean {
-  return false;
+  const request = askUserQuestionRequest(block);
+  return Boolean(
+    request &&
+      (request.batch || request.kind !== "confirm") &&
+      block.toolCallId &&
+      confirmationFormIds.has(block.toolCallId),
+  );
+}
+
+export function askUserQuestionConfirmationFormIds(
+  block: ToolContentBlock,
+): string[] {
+  const request = askUserQuestionRequest(block);
+  if (!request || request.batch || request.kind !== "confirm") return [];
+  return askUserQuestionConfirmationForms(request).map(form => form.formId);
+}
+
+export function askUserQuestionReturnedConfirmationFormIds(
+  block: ToolContentBlock,
+): string[] {
+  const state = block.formInteraction?.state;
+  if (state !== "confirmed" && state !== "cancelled" && state !== "interrupted") {
+    return [];
+  }
+  return askUserQuestionConfirmationFormIds(block);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
