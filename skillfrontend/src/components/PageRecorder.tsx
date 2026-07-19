@@ -39,19 +39,6 @@ import { useNavigate } from "react-router-dom";
 
 interface RecStep { op: string; locator?: string; field?: string; value?: string; required?: boolean; options?: any[] }
 interface RecReq { method: string; url: string; has_body?: boolean; json?: boolean }
-interface RecField {
-  path: string; key: string; value: string; suggest_param: boolean; suggest_name: string;
-  type?: string; required?: boolean; confidence?: number; confidence_tier?: string; name_source?: string;
-  system_value?: boolean;
-}
-interface RecCand { idx: number; method: string; path: string }
-interface RecSelect {
-  path: string; source_url: string; value_key: string; label_key: string; label: string;
-  count: number; multi?: boolean; options?: string[]; option_map?: Record<string, any>;
-  enum_source?: string; enum_confirmed?: boolean;
-}
-interface RecIdentity { path: string; source: string }
-
 interface AnalysisScreenshotPayload {
   name: string;
   mime_type: "image/jpeg";
@@ -1269,14 +1256,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   useEffect(() => { hasFrameRef.current = hasFrame; }, [hasFrame]);
   const [steps, setSteps] = useState<RecStep[]>([]);
   const [reqs, setReqs] = useState<RecReq[]>([]);
-  const [fields, setFields] = useState<RecField[]>([]);
-  const [picked, setPicked] = useState<Record<string, { on: boolean; name: string }>>({});
-  const [reqMeta, setReqMeta] = useState<{ method: string; url: string } | null>(null);
-  const [cands, setCands] = useState<RecCand[]>([]);
-  const [chosenIdx, setChosenIdx] = useState(0);
-  const [stepSel, setStepSel] = useState<Record<number, boolean>>({});
-  const [selects, setSelects] = useState<Record<string, RecSelect>>({});
-  const [identity, setIdentity] = useState<Record<string, RecIdentity>>({});
   const [action, setAction] = useState(() => newRecordingActionName());
   const actionRef = useRef(action);
   useEffect(() => { actionRef.current = action; }, [action]);
@@ -1722,8 +1701,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
     reconnectTimerRef.current = null;
     reconnectAttemptRef.current = 0;
-    setErr(""); setResult(null); setSteps([]); setReqs([]); clearFrame(); setFields([]); setPicked({});
-    setCands([]); setSelects({}); setIdentity({}); setStepSel({}); resetEditorState();
+    setErr(""); setResult(null); setSteps([]); setReqs([]); clearFrame();
+    resetEditorState();
     const nextAction = newRecordingActionName();
     actionRef.current = nextAction;
     setAction(nextAction);
@@ -1874,29 +1853,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       });
       else if (m.type === "request") {
         setReqs((r) => [...r, m.request].slice(-40));
-        // request_fields 要到 finalize 分析后才会产生，因此重连门禁必须由新会话的实时请求解锁。
+        // 当前会话捕获到实时请求后，才解除重连后的分析门禁。
         setReconnectedSessionNeedsCapture(false);
-      }
-      else if (m.type === "request_fields") {
-        setReconnectedSessionNeedsCapture(false);
-        const fs: RecField[] = m.fields || [];
-        const selMap: Record<string, RecSelect> = {};
-        (m.selects || []).forEach((s: RecSelect) => { selMap[s.path] = s; });
-        const idMap: Record<string, RecIdentity> = {};
-        (m.identity || []).forEach((i: RecIdentity) => { idMap[i.path] = i; });
-        setSelects(selMap); setIdentity(idMap); setFields(fs);
-        const pk: Record<string, { on: boolean; name: string }> = {};
-        fs.forEach((f) => {
-          const on = idMap[f.path] ? false : (selMap[f.path] ? true : !!f.suggest_param);
-          pk[f.path] = { on, name: f.suggest_name || f.key };
-        });
-        setPicked(pk);
-        setReqMeta({ method: m.method, url: m.url });
-        setCands(m.candidates || []);
-        setChosenIdx(m.chosen_idx ?? 0);
-        setStepSel(Object.fromEntries((m.suggested_steps || []).map((i: number) => [i, true])));
-        setPhase("recording");
-        message.success("抓到提交请求，请核对字段和流程");
       }
       else if (m.type === "flow_spec" || m.type === "flow_spec_updated") {
         const restoredAfterReconnect = !!reconnectRestoreOperationRef.current
@@ -1986,9 +1944,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         setResult(m.report); setPhase("recording");
         if (m.report?.check_report) setCheckReport(m.report.check_report);
-        if (m.report?.ok) {
-          setFields([]); setPicked({}); setCands([]); setSelects({}); setIdentity({}); setStepSel({});
-        }
       }
       else if (m.type === "error") {
         const detail = m.detail || "录制出错";
@@ -2248,7 +2203,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const operationId = newCostlyOperationId("finalize");
     finalizeOperationRef.current = operationId;
     setResult(null); setPhase("publishing");
-    if (!send({ type: "finalize", operation_id: operationId, action: action.trim(), title: title.trim(), success_marker: null, steps })) {
+    if (!send({ type: "finalize", operation_id: operationId, action: action.trim(), title: title.trim(), steps })) {
       finalizeOperationRef.current = null;
       setPhase("recording");
     }
@@ -2257,15 +2212,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(a)) { message.error("动作名请用英文标识"); return true; }
     return false;
   }
-  function payload() {
-    const param_map: Record<string, string> = {};
-    fields.forEach((f) => { const p = picked[f.path]; if (p?.on && p.name.trim()) param_map[f.path] = p.name.trim(); });
-    const selList = Object.values(selects).filter((s) => param_map[s.path]);
-    const idList = Object.values(identity);
-    const checked = cands.filter((c) => stepSel[c.idx]).map((c) => c.idx);
-    const step_idxs = checked.length >= 2 ? [...checked.filter((i) => i !== chosenIdx).sort((a, b) => a - b), chosenIdx] : [];
-    return { param_map, selList, idList, step_idxs };
-  }
   function publishRequest() {
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     if (!action.trim() || badAction(action.trim())) return;
@@ -2273,7 +2219,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function performPublishRequest() {
     if (publishOperationRef.current) return;
-    const { param_map, selList, idList, step_idxs } = payload();
     const currentSpec = flowSpecRef.current || flowSpec;
     if (!currentSpec) { message.error("请先生成 FlowSpec 后再发布"); return; }
     const publishTitle = title.trim() || preferredSkillTitle(currentSpec);
@@ -2284,7 +2229,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     // instantaneous publish success while the backend was still reviewing.
     setPhase("publishing");
     if (!send({ type: "publish_request", operation_id: operationId, action: action.trim(), title: publishTitle,
-      param_map, selects: selList, identity: idList, step_idxs, use_flow_spec: true, flow_spec: currentSpec,
+      flow_spec: currentSpec,
       expected_fingerprint: currentSpec.meta?.current_fingerprint })) {
       publishOperationRef.current = null;
       setPhase("recording");
@@ -2308,8 +2253,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
     }, 2000);
     setConnectionState("idle");
-    setPhase("idle"); setResult(null); setSteps([]); clearFrame(); setFields([]); setPicked({});
-    setCands([]); setSelects({}); setIdentity({}); setStepSel({}); resetEditorState();
+    setPhase("idle"); setResult(null); setSteps([]); clearFrame();
+    resetEditorState();
   }
 
   function sendReplace(next: FlowSpecData) {
@@ -4474,22 +4419,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               {frameMeta.viewportWidth ? ` · 浏览器 ${frameMeta.viewportWidth}×${frameMeta.viewportHeight || "?"}` : ""}
               {frameMeta.deviceScaleFactor ? ` · DPR ${frameMeta.deviceScaleFactor}` : ""}
             </Typography.Text>
-          )}
-
-          {fields.length > 0 && !flowSpec && (
-            <Alert
-              style={{ marginTop: 12 }}
-              type="warning"
-              showIcon
-              message="已抓到提交请求，但还没有生成 FlowSpec"
-              description={
-                <Space wrap>
-                  {reqMeta && <Typography.Text code>{reqMeta.method} {stripHost(reqMeta.url)}</Typography.Text>}
-                  <Typography.Text>请重新分析请求，发布只使用 FlowSpec 工作台中的步骤、字段、依赖和说明。</Typography.Text>
-                  <Button size="small" loading={phase === "publishing"} onClick={finalize}>重新分析</Button>
-                </Space>
-              }
-            />
           )}
 
           {renderFlowWorkbench()}
