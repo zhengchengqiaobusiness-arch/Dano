@@ -4,6 +4,7 @@ import { mount, tick, unmount } from "svelte";
 import { describe, expect, it, vi } from "vitest";
 import type { ToolContentBlock } from "../utils/transcript";
 import QuestionToolCard from "./QuestionToolCard.svelte";
+import questionToolCardSource from "./QuestionToolCard.svelte?raw";
 
 vi.mock("./MarkdownRenderer.svelte", () => ({
   default: (payload: { out: string }, props: { content: string }) => {
@@ -644,6 +645,69 @@ describe("QuestionToolCard", () => {
     expect(response).not.toHaveBeenCalled();
 
     unmount(component);
+  });
+
+  it.each([
+    [
+      "confirmed confirmation",
+      () => {
+        const block = multiFormConfirmationBlock();
+        block.toolStatus = "success";
+        block.formInteraction = {
+          interactionId: "confirm-two",
+          state: "confirmed",
+          revision: 2,
+          allowedActions: [],
+          forms: [],
+        };
+        return block;
+      },
+      ".desktop-question-result .question-form-scroll-region",
+    ],
+    [
+      "submitted source form",
+      () => submittedFormBlock("confirmed"),
+      ".answered-source-form .question-form-scroll-region",
+    ],
+    [
+      "submitted source mobile summary",
+      () => submittedFormBlock("confirmed"),
+      ".mobile-answered-result.question-form-scroll-region",
+    ],
+  ] as const)(
+    "caps inline %s content height and enables overflow scrolling",
+    async (_label, blockFactory, selector) => {
+      const response = vi.fn(async () => ({ success: true } as never));
+      const target = document.createElement("div");
+      const component = mount(QuestionToolCard, {
+        target,
+        props: {
+          block: blockFactory(),
+          active: false,
+          onPresent: response,
+          onRespond: response,
+          onRevise: response,
+          onSubmitRevision: response,
+        },
+      });
+      await tick();
+
+      const scrollRegion = target.querySelector<HTMLElement>(selector);
+      expect(scrollRegion).not.toBeNull();
+      expect(target.querySelector("article")?.classList).toContain("inline-readonly-card");
+
+      unmount(component);
+    },
+  );
+
+  it("defines the inline read-only form height and overflow contract", () => {
+    const rule = questionToolCardSource.match(
+      /\.question-card\.inline-readonly-card \.question-form-scroll-region \{([\s\S]*?)\n  \}/,
+    )?.[1];
+
+    expect(rule).toContain("max-height: 420px;");
+    expect(rule).toContain("overflow-y: auto;");
+    expect(rule).toContain("overscroll-behavior: contain;");
   });
 
   it("submits all projected form revisions while preserving unchanged values", async () => {

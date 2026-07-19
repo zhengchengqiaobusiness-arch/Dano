@@ -880,6 +880,11 @@
     <article
       bind:this={cardElement}
       class="question-card"
+      class:inline-readonly-card={result?.status === "answered" ||
+        result?.status === "confirmed" ||
+        interaction?.state === "confirmed" ||
+        interaction?.state === "cancelled" ||
+        interaction?.state === "interrupted"}
       data-status={result?.status ?? "pending"}
       data-form-id={result?.status === "answered" ? result.formId : undefined}
       aria-live="polite"
@@ -970,7 +975,7 @@
       <div class="question-error" role="alert">{block.resultText}</div>
     {:else}
       {#if result?.status === "answered"}
-        <div class="mobile-answered-result question-result">
+        <div class="mobile-answered-result question-result question-form-scroll-region">
           <MarkdownRenderer content={sourceAnsweredMarkdown} />
         </div>
       {/if}
@@ -1299,6 +1304,14 @@
 
   .question-card:global(.center-focused-card) .question-form-scroll-region {
     flex: 1 1 auto;
+    max-height: none;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  .question-card.inline-readonly-card .question-form-scroll-region {
+    max-height: 420px;
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
