@@ -19,7 +19,7 @@ When the user asks to fill in a form, complete a form, or provide form fields, u
 
 Use exactly one ask_user_question call per assistant response. If you need more than one answer, provide a form title and use only the questions array: {"title":"请假申请","questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假","required":true},{"id":"start_at","question":"开始时间？","inputType":"date","dateFormat":"yyyy-MM-dd HH:mm","default":"2026-07-08 09:00","required":true},{"id":"reason","question":"原因？","default":"个人事务","required":true}]}. When questions is present, put every field's options, inputType, dateFormat, required, dataSource, multiple, and default inside the matching questions[] item; do not include top-level confirm or top-level field configuration.
 
-For a single question, use top-level question/options/inputType/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. default is required and string defaults must be non-empty. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. After a grouped form is answered, call exactly {"confirm":true}; Dano binds the latest saved form and returns its final full answer only after the user confirms.
+For a single question, use top-level question/options/inputType/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. default is required and string defaults must be non-empty. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. When the workflow needs final confirmation for submitted grouped forms, call {"confirm":true,"formIds":["<formId>"]} with the formId values returned by those submissions. This is only for grouped-form confirmation; use a normal single-choice question to confirm an ordinary sentence or operation. If final confirmation is not needed, continue without this call.
 ```
 
 ## promptSnippet
@@ -43,7 +43,8 @@ Ask the user one native question card; for several fields use one questions arra
   "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
   "Dano returns the user's date answer as submitted; convert it yourself if a downstream interface needs another business format.",
   "When using questions, provide a concise top-level title and put each field's id, question, options, inputType, dateFormat, required, dataSource, multiple, and default inside its questions item.",
-  "After a grouped form is answered, call ask_user_question with only {confirm:true}. Do not send confirmation text, the prior answers, or a relation id; Dano binds the latest saved form."
+  "When one or more submitted grouped forms require final confirmation, call ask_user_question with {confirm:true,formIds:[\"<formId>\"]} using their returned formId values. Do not send confirmation text or prior answers. If confirmation is not required, continue normally.",
+  "Use confirm:true only for submitted grouped forms. To confirm an ordinary sentence or operation, ask a normal single-choice question instead."
 ]
 ```
 
@@ -51,13 +52,13 @@ Ask the user one native question card; for several fields use one questions arra
 
 1. Call a grouped form with `title` and `questions`.
 2. The user submits the form. Dano keeps that rendered form visible and locks its controls.
-3. Call `{"confirm":true}` in the same tool execution workflow. Any other confirmation field is invalid.
-4. Dano renders `<title>确认` with the latest saved answers. The user may cancel, return to modify, or confirm.
-5. Returning to modify unlocks the original form. Saving replaces the server-side snapshot and returns to the confirmation card.
+3. If the workflow requires final confirmation, make a later call in the same Assistant Turn with `{"confirm":true,"formIds":["<formId>"]}` using one or more returned `formId` values. If final confirmation is not required, continue without this call.
+4. Dano renders a confirmation card with the selected forms' latest saved answers. The user may cancel, return to modify, or confirm.
+5. Returning to modify moves the Form Interaction to `revising`; the confirmation card displays editable Form Revisions. Saving replaces the server-side snapshot and returns the same card to confirmation.
 6. Confirming returns `status:"confirmed"` plus the final complete answer. Cancelling returns `status:"cancelled"` and stops the workflow.
 
-The confirmation relation and saved answer are Dano-owned state. The model must
-not send a relation id or repeat the prior fields. A browser refresh can recover
+The saved answers and Form Interaction are Dano-owned state. The model selects
+Submitted Forms by their returned `formId` values and must not repeat the prior fields. A browser refresh can recover
 the latest saved snapshot while the Dano server process and runtime session are
 still alive. Unsaved edits and server-process restarts are outside this contract.
 
@@ -220,7 +221,13 @@ still alive. Unsaved edits and server-process restarts are outside this contract
     "confirm": {
       "type": "boolean",
       "const": true,
-      "description": "Call with only {confirm:true} after the user submitted a grouped form. Dano supplies the form title and latest saved answers."
+      "description": "Confirm one or more previously submitted grouped forms. Use {confirm:true,formIds:[\"<formId>\"]}; Dano supplies each selected form's title and latest submitted answers."
+    },
+    "formIds": {
+      "type": "array",
+      "minItems": 1,
+      "items": {},
+      "description": "Standard grouped-form confirmation target: an array of formId strings returned by earlier grouped form submissions in this Assistant Turn."
     },
     "questions": {
       "description": "Preferred for collecting more than one answer. Provide a top-level title and make exactly one ask_user_question call. A single question object is also accepted and normalized to an array. Do not include top-level confirm or top-level field configuration with questions.",
@@ -269,6 +276,7 @@ still alive. Unsaved edits and server-process restarts are outside this contract
       "type": "object",
       "properties": {
         "status": { "type": "string", "const": "answered" },
+        "formId": { "type": "string" },
         "answer": {
           "anyOf": [
             { "$ref": "#/$defs/answer" },
@@ -289,9 +297,23 @@ still alive. Unsaved edits and server-process restarts are outside this contract
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/answer" }
         },
-        "confirmationOfToolCallId": { "type": "string" }
+        "confirmationOfToolCallId": { "type": "string" },
+        "forms": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "formId": { "type": "string" },
+              "answer": {
+                "type": "object",
+                "additionalProperties": { "$ref": "#/$defs/answer" }
+              }
+            },
+            "required": ["formId", "answer"]
+          }
+        }
       },
-      "required": ["status", "answer", "confirmationOfToolCallId"]
+      "required": ["status", "answer", "confirmationOfToolCallId", "forms"]
     },
     {
       "type": "object",
