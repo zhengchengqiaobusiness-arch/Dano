@@ -873,7 +873,7 @@ def test_observed_five_interface_plan_keeps_only_business_anchors():
                 "business_type": "string",
                 "category": "runtime_var",
                 "source_kind": "previous_response",
-                "confidence": 0.95,
+                "confidence": "high",
                 "evidence": "The model guessed data.list[0].sealId",
             }],
             "capabilities": [
@@ -901,6 +901,7 @@ def test_observed_five_interface_plan_keeps_only_business_anchors():
     field = normalized["semantic_plan"]["field_semantics"][0]
     assert field["category"] == "user_param"
     assert field["source_kind"] == "api_option"
+    assert field["confidence"] == 0.95
 
     spec.capabilities = [flow_module.FlowCapability(
         name="submit_create",

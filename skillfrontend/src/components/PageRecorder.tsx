@@ -66,6 +66,21 @@ interface AnalysisScreenshot extends AnalysisScreenshotPayload {
   preview_url: string;
 }
 
+interface AnalysisApplication {
+  status: "applied" | "no_change" | "rejected";
+  summary?: string;
+  screenshot_count: number;
+  model_image_count?: number;
+  screenshot_names?: string[];
+  changes?: Record<string, number>;
+  capability_count_before?: number;
+  capability_count_after?: number;
+  field_count_before?: number;
+  field_count_after?: number;
+  proposal_gate?: { accepted?: boolean; reasons?: string[] };
+  operation_id?: string;
+}
+
 interface FlowParam {
   path: string; key: string; label?: string; value: string; type: string; required: boolean; name_source?: string;
   category?: string; source_kind?: string; source?: any; reason?: string;
@@ -190,6 +205,7 @@ interface FlowSpecData {
       indexed_range_changes?: any[]; [k: string]: any;
     };
     recording_agent_session?: { mode?: "plan" | "repair"; updated_at?: string; [k: string]: any };
+    last_analysis_application?: AnalysisApplication;
     request_graph?: {
       all_requests?: RequestGraphEntry[];
       selected_steps?: RequestGraphEntry[];
@@ -1332,7 +1348,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   useEffect(() => { analysisScreenshotsRef.current = analysisScreenshots; }, [analysisScreenshots]);
   const screenshotInputRef = useRef<HTMLInputElement>(null);
   const [analysisScreenshotBusy, setAnalysisScreenshotBusy] = useState(false);
-  const [lastAnalysisEvidence, setLastAnalysisEvidence] = useState<{ screenshot_count: number; screenshot_names?: string[] } | null>(null);
+  const [lastAnalysisEvidence, setLastAnalysisEvidence] = useState<AnalysisApplication | null>(null);
   const [expandedCapabilityKeys, setExpandedCapabilityKeys] = useState<string[]>([]);
   const [expandedCapabilitySections, setExpandedCapabilitySections] = useState<Record<number, string[]>>({});
   const [expandedCapabilitySteps, setExpandedCapabilitySteps] = useState<Record<string, string[]>>({});
@@ -1399,6 +1415,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     pendingCapabilityMembershipRef.current = remaining;
     flowSpecRef.current = nextSpec;
     setFlowSpec(nextSpec);
+    if (nextSpec.meta?.last_analysis_application) {
+      setLastAnalysisEvidence(nextSpec.meta.last_analysis_application);
+    }
     if (edits.length) send({ type: "flow_update", edits });
     const nextTitle = preferredSkillTitle(nextSpec);
     if (nextTitle && !title.trim()) setTitle(nextTitle);
@@ -1932,8 +1951,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         if (restoredAfterReconnect && fs) resumeFlowOperationAfterReconnect(fs);
         if (m.check_report && !hasNewerLocalMutation) setCheckReport(m.check_report);
         else if (hasNewerLocalMutation) setCheckReport(null);
-        if (m.operation === "plan" && m.analysis_evidence) {
-          setLastAnalysisEvidence(m.analysis_evidence);
+        if (m.operation === "plan" && (m.analysis_application || m.analysis_evidence)) {
+          const application = m.analysis_application || {
+            ...m.analysis_evidence,
+            status: m.operation_report?.changed ? "applied" : "no_change",
+            summary: m.operation_report?.summary,
+            changes: m.operation_report?.changes,
+          };
+          setLastAnalysisEvidence(application);
         }
         // A successful server mutation produces a new validation snapshot.
         // Do not keep rendering clarifications from an older failed publish;
@@ -4130,7 +4155,60 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <Tag color="cyan">识别区间字段 {flowSpec.meta.capability_generation.indexed_range_changes.length}</Tag>}
           </>}
         </Space>
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>{"\u622a\u56fe\u53ef\u9009\uff1b\u4e0a\u4f20\u540e\uff0c\u6bcf\u6b21\u70b9\u51fb\u751f\u6210/\u4f18\u5316\u90fd\u4f1a\u7ed3\u5408\u622a\u56fe\u4e0e\u5df2\u5f55\u5236\u63a5\u53e3\u91cd\u65b0\u5206\u6790\u3002"}</Typography.Text>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>{"截图可选；上传后，每次点击生成/优化都会结合截图与已录制接口重新分析。"}</Typography.Text>
+        <Alert
+          showIcon
+          type={!lastAnalysisEvidence
+            ? "info"
+            : lastAnalysisEvidence.status === "applied"
+              ? "success"
+              : lastAnalysisEvidence.status === "rejected"
+                ? "error"
+                : "warning"}
+          message={!lastAnalysisEvidence
+            ? "能力分析结果（等待生成）"
+            : (lastAnalysisEvidence.screenshot_count > 0 ? "图片增强" : "常规") + "分析" + (
+              lastAnalysisEvidence.status === "applied"
+                ? "已应用"
+                : lastAnalysisEvidence.status === "rejected"
+                  ? "未通过安全准入"
+                  : "已完成，无可应用变化"
+            )}
+          description={(
+            <Space direction="vertical" size={4}>
+              <Typography.Text style={{ fontSize: 12 }}>
+                {lastAnalysisEvidence?.summary || "这里固定显示最近一次生成/优化结果；重新打开页面后从流程数据恢复，只更新内容。"}
+              </Typography.Text>
+              {lastAnalysisEvidence && (
+                <Space wrap size={4}>
+                  <Tag color={
+                    (lastAnalysisEvidence.model_image_count ?? 0)
+                      === lastAnalysisEvidence.screenshot_count
+                      ? "success"
+                      : "error"
+                  }>
+                    图片送达 {lastAnalysisEvidence.model_image_count ?? 0} / {lastAnalysisEvidence.screenshot_count}
+                  </Tag>
+                  <Tag>
+                    能力 {lastAnalysisEvidence.capability_count_before ?? "-"} → {lastAnalysisEvidence.capability_count_after ?? "-"}
+                  </Tag>
+                  <Tag>
+                    字段 {lastAnalysisEvidence.field_count_before ?? "-"} → {lastAnalysisEvidence.field_count_after ?? "-"}
+                  </Tag>
+                  {!!lastAnalysisEvidence.changes?.capabilities && (
+                    <Tag color="blue">能力变化 {lastAnalysisEvidence.changes.capabilities}</Tag>
+                  )}
+                  {!!lastAnalysisEvidence.changes?.fields && (
+                    <Tag color="cyan">字段变化 {lastAnalysisEvidence.changes.fields}</Tag>
+                  )}
+                  {!!lastAnalysisEvidence.changes?.links && (
+                    <Tag color="purple">关联变化 {lastAnalysisEvidence.changes.links}</Tag>
+                  )}
+                </Space>
+              )}
+            </Space>
+          )}
+        />
         {analysisScreenshots.length > 0 && (
           <Space wrap size={8}>
             {analysisScreenshots.map((item) => (

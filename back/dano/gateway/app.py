@@ -142,7 +142,8 @@ def _analysis_screenshot_guidance(screenshots: list[dict]) -> str:
 def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
     evidence_rule = (
         " For every screenshot-derived field decision, field_semantics must contain the exact recorded step_id and "
-        "wire_path plus public_name, business_type, category, source_kind, confidence, and screenshot evidence. "
+        "wire_path plus public_name, business_type, category, source_kind, numeric confidence from 0 to 1, " +
+        "and screenshot evidence. "
         "Visible fields with no grounded recorded match must go to unresolved_items instead of being invented."
         if has_screenshots else ""
     )
@@ -167,6 +168,38 @@ def _verified_pi_image_count(result: dict, expected: int) -> int:
             f"截图证据未完整送达 Pi 模型：expected={expected}, delivered={delivered}"
         )
     return delivered
+
+
+def _analysis_application_report(
+    *,
+    before,
+    after,
+    operation_report: dict,
+    screenshots: list[dict],
+    delivered_image_count: int,
+    operation_id: str | None,
+) -> dict:
+    """Persistable proof that screenshot evidence reached and changed the plan."""
+    proposal_gate = dict(operation_report.get("proposal_gate") or {})
+    status = (
+        "rejected"
+        if proposal_gate.get("accepted") is False
+        else ("applied" if operation_report.get("changed") else "no_change")
+    )
+    return {
+        "status": status,
+        "summary": operation_report.get("summary") or "",
+        "screenshot_count": len(screenshots),
+        "model_image_count": delivered_image_count,
+        "screenshot_names": [item["name"] for item in screenshots],
+        "changes": dict(operation_report.get("changes") or {}),
+        "capability_count_before": len(before.capabilities or []),
+        "capability_count_after": len(after.capabilities or []),
+        "field_count_before": sum(len(step.params or []) for step in before.steps),
+        "field_count_after": sum(len(step.params or []) for step in after.steps),
+        "proposal_gate": proposal_gate,
+        "operation_id": operation_id,
+    }
 
 
 class _RecordingConnectionLease:
@@ -1581,8 +1614,23 @@ async def record_ws(ws: WebSocket) -> None:
                     if pi_session.last_submission_kind != "plan":
                         raise RuntimeError("Pi 未提交 recording plan")
                     pending_flow_spec = pi_session.current_flow_spec()
-                    _checkpoint_resume()
                     operation = "plan"
+                    operation_report = flow_operation_report(
+                        before_operation, pending_flow_spec, operation=operation,
+                    )
+                    analysis_application = _analysis_application_report(
+                        before=before_operation,
+                        after=pending_flow_spec,
+                        operation_report=operation_report,
+                        screenshots=analysis_screenshots,
+                        delivered_image_count=delivered_image_count,
+                        operation_id=msg.get("operation_id"),
+                    )
+                    pending_flow_spec.meta = {
+                        **(pending_flow_spec.meta or {}),
+                        "last_analysis_application": analysis_application,
+                    }
+                    _checkpoint_resume()
                     response = {
                         "type": "flow_spec_updated",
                         "operation": operation,
@@ -1590,9 +1638,8 @@ async def record_ws(ws: WebSocket) -> None:
                         "flow_spec": flow_spec_to_summary(pending_flow_spec),
                         "full_spec": flow_spec_to_client(pending_flow_spec),
                         "check_report": validate_flow_spec(pending_flow_spec),
-                        "operation_report": flow_operation_report(
-                            before_operation, pending_flow_spec, operation=operation,
-                        ),
+                        "operation_report": operation_report,
+                        "analysis_application": analysis_application,
                         "pi_session": pi_session.descriptor,
                         "analysis_evidence": {
                             "screenshot_count": len(analysis_screenshots),

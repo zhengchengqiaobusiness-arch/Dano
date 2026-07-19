@@ -1211,6 +1211,16 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         path = str(value or "")
         return path[5:] if path.startswith("body.") else path
 
+    def normalized_confidence(value, default: float = 0.8) -> float:  # noqa: ANN001
+        if isinstance(value, str):
+            named = {"high": 0.95, "medium": 0.75, "low": 0.4}
+            value = named.get(value.strip().lower(), value)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            numeric = default
+        return max(0.0, min(1.0, numeric))
+
     param_by_ref = {
         (str(step.step_id), normalized_path(param.path)): param
         for step in steps for param in (getattr(step, "params", None) or [])
@@ -1235,7 +1245,10 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             field["category"] = str(param.category)
         if str(getattr(param, "source_kind", None) or "") not in {"", "unknown"}:
             field["source_kind"] = str(param.source_kind)
-        field.setdefault("confidence", float(getattr(param, "confidence", None) or 0.8))
+        field["confidence"] = normalized_confidence(
+            field.get("confidence"),
+            float(getattr(param, "confidence", None) or 0.8),
+        )
         if isinstance(field.get("evidence"), str):
             field["evidence"] = [{"source": "pi_analysis", "detail": field["evidence"]}]
         elif not isinstance(field.get("evidence"), list):
@@ -1336,7 +1349,7 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                 ),
                 "usage": usage,
                 "origin": str(ref.get("origin") or "planner"),
-                "confidence": float(ref.get("confidence") or 0.8),
+                "confidence": normalized_confidence(ref.get("confidence")),
                 "reason": str(
                     ref.get("reason")
                     or "Pi 基于录制请求与页面证据建立的能力成员关系"

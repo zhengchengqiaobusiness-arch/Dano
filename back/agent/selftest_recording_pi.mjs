@@ -165,7 +165,27 @@ function verifyReviewToolSchema() {
 function verifyPlanToolCompatibility() {
   const planTool = recordingTools.find((tool) => tool.name === "submit_recording_plan");
   assert(planTool?.parameters?.additionalProperties === true, "plan tool must tolerate model explanation fields");
-  const plan = { semantic_plan: {}, ops: "" };
+  assert(
+    planTool?.parameters?.properties?.plan?.additionalProperties === true,
+    "plan payload must reach deterministic canonicalization before strict backend validation",
+  );
+  const plan = {
+    semantic_plan: {
+      business_understanding: "Create request",
+      capabilities: [{ capability_id: "query", step_ids: ["query"] }],
+      capability_relations: [],
+      item: { capability_id: "options", step_ids: ["options"] },
+    },
+    field_semantics: [{
+      step_id: "submit",
+      wire_path: "sealId",
+      confidence: "high",
+    }],
+    request_roles: [{ step_id: "submit", role: "submit_anchor" }],
+    unresolved_items: [],
+    item: { capability_id: "submit", step_ids: ["submit"] },
+    ops: "",
+  };
   const sanitized = sanitizeRecordingToolParams("submit_recording_plan", {
     recording_id: "rec-self-test",
     flow_version: 3,
@@ -174,12 +194,18 @@ function verifyPlanToolCompatibility() {
     description: "model explanation",
     step_id: "flattened-by-model",
   });
-  assert(sanitized.plan === plan, "plan payload changed while sanitizing tool params");
+  assert(sanitized.plan !== plan, "plan payload was not canonicalized");
   assert(
     JSON.stringify(Object.keys(sanitized).sort())
       === JSON.stringify(["base_flow_version", "flow_version", "plan", "recording_id"]),
     "unknown plan tool params reached the backend",
   );
+  const semantic = sanitized.plan.semantic_plan;
+  assert(semantic.request_roles.length === 1, "flattened request_roles were not restored");
+  assert(semantic.field_semantics[0].confidence === 0.95, "high confidence was not normalized");
+  assert(semantic.capabilities.length === 3, "misplaced capability items were not merged");
+  assert(Array.isArray(semantic.unresolved_items), "unresolved_items were not restored");
+  assert(Array.isArray(sanitized.plan.ops) && sanitized.plan.ops.length === 0, "invalid ops were not normalized");
 }
 
 function verifyRuntimeProtocol(tempDir) {

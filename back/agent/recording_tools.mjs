@@ -194,10 +194,90 @@ function proxyTool({ name, label, description, parameters }) {
   });
 }
 
+const SEMANTIC_PLAN_KEYS = [
+  "business_understanding",
+  "request_roles",
+  "field_semantics",
+  "capabilities",
+  "capability_relations",
+  "unresolved_items",
+];
+
+function asSemanticArray(value) {
+  if (Array.isArray(value)) return value.filter((item) => item && typeof item === "object");
+  return value && typeof value === "object" ? [value] : [];
+}
+
+function normalizedConfidence(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, Math.min(1, value));
+  }
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (normalized === "high") return 0.95;
+  if (normalized === "medium") return 0.75;
+  if (normalized === "low") return 0.4;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(1, parsed)) : value;
+}
+
+function normalizeConfidenceDeep(value) {
+  if (Array.isArray(value)) return value.map(normalizeConfidenceDeep);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    key === "confidence" ? normalizedConfidence(item) : normalizeConfidenceDeep(item),
+  ]));
+}
+
+export function canonicalizeRecordingPlan(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("submit_recording_plan.plan must be an object");
+  }
+  const rawSemantic = (
+    value.semantic_plan
+    && typeof value.semantic_plan === "object"
+    && !Array.isArray(value.semantic_plan)
+  ) ? value.semantic_plan : {};
+  const semantic = { ...rawSemantic };
+  for (const key of SEMANTIC_PLAN_KEYS) {
+    if (semantic[key] === undefined && value[key] !== undefined) {
+      semantic[key] = value[key];
+    }
+  }
+  semantic.business_understanding = (
+    typeof semantic.business_understanding === "string"
+    || (
+      semantic.business_understanding
+      && typeof semantic.business_understanding === "object"
+      && !Array.isArray(semantic.business_understanding)
+    )
+  ) ? semantic.business_understanding : {};
+  semantic.request_roles = asSemanticArray(semantic.request_roles);
+  semantic.field_semantics = asSemanticArray(semantic.field_semantics);
+  semantic.capabilities = [
+    ...asSemanticArray(semantic.capabilities),
+    ...asSemanticArray(semantic.item),
+    ...asSemanticArray(value.item),
+    ...asSemanticArray(value.capability),
+  ];
+  semantic.capability_relations = asSemanticArray(semantic.capability_relations);
+  semantic.unresolved_items = asSemanticArray(semantic.unresolved_items);
+  delete semantic.item;
+  delete semantic.capability;
+  return normalizeConfidenceDeep({
+    semantic_plan: semantic,
+    ops: Array.isArray(value.ops) ? value.ops : [],
+  });
+}
+
 export function sanitizeRecordingToolParams(name, params) {
   if (name !== "submit_recording_plan" || !params || typeof params !== "object") return params;
   const allowed = ["recording_id", "flow_version", "base_flow_version", "plan"];
-  return Object.fromEntries(allowed.filter((key) => key in params).map((key) => [key, params[key]]));
+  const sanitized = Object.fromEntries(
+    allowed.filter((key) => key in params).map((key) => [key, params[key]]),
+  );
+  sanitized.plan = canonicalizeRecordingPlan(sanitized.plan);
+  return sanitized;
 }
 
 
@@ -206,25 +286,10 @@ const RecordingIdentity = {
   flow_version: Type.Optional(Type.Integer({ minimum: 0 })),
 };
 
-const SemanticEntry = Type.Record(Type.String(), Type.Any());
-const SemanticPlan = Type.Object(
-  {
-    business_understanding: Type.Union([Type.String(), SemanticEntry]),
-    request_roles: Type.Array(SemanticEntry),
-    field_semantics: Type.Array(SemanticEntry),
-    capabilities: Type.Array(SemanticEntry),
-    capability_relations: Type.Array(SemanticEntry),
-    unresolved_items: Type.Array(SemanticEntry),
-  },
-  { additionalProperties: false },
-);
-const RecordingPlan = Type.Object(
-  {
-    semantic_plan: SemanticPlan,
-    ops: Type.Optional(Type.Array(SemanticEntry)),
-  },
-  { additionalProperties: false },
-);
+// The SDK validates tool arguments before execute/sanitization. Keep this
+// boundary object-shaped but tolerant, then canonicalize deterministically and
+// let the backend enforce the complete semantic/fact contract.
+const RecordingPlan = Type.Object({}, { additionalProperties: true });
 
 export const recordingTools = [
   proxyTool({
@@ -238,7 +303,7 @@ export const recordingTools = [
     name: "submit_recording_plan",
     label: "提交录制规划",
     description:
-      "提交基于当前录制版本生成的完整语义规划候选。plan 必须直接包含 semantic_plan（其内包含 business_understanding、request_roles、field_semantics、capabilities、capability_relations、unresolved_items）和可选 ops；禁止提交 plan.flow_spec 或完整 FlowSpec。field_semantics 必须用真实 step_id + wire_path 关联录制字段，并给出 public_name、business_type、category、source_kind、confidence、evidence。后端会做 Schema、事实和版本校验；不得改写原始请求事实。",
+      "提交基于当前录制版本生成的完整语义规划候选。plan 必须直接包含 semantic_plan（其内包含 business_understanding、request_roles、field_semantics、capabilities、capability_relations、unresolved_items）和可选 ops；禁止提交 plan.flow_spec 或完整 FlowSpec。field_semantics 必须用真实 step_id + wire_path 关联录制字段，并给出 public_name、business_type、category、source_kind、数值 confidence（0 到 1）、evidence。入口会修复常见字段摊平并归一化置信度，后端会做 Schema、事实和版本校验；不得改写原始请求事实。",
     parameters: Type.Object(
       {
         ...RecordingIdentity,

@@ -64,6 +64,50 @@ def test_no_analysis_screenshot_keeps_original_fact_based_path() -> None:
     assert "screenshot-derived" not in gateway._recording_plan_protocol_guidance(has_screenshots=False)
 
 
+@pytest.mark.parametrize(
+    ("changed", "accepted", "expected_status"),
+    [
+        (True, True, "applied"),
+        (False, True, "no_change"),
+        (True, False, "rejected"),
+    ],
+)
+def test_analysis_application_report_is_persistable_and_explicit(
+    changed: bool,
+    accepted: bool,
+    expected_status: str,
+) -> None:
+    before = SimpleNamespace(
+        capabilities=[object()],
+        steps=[SimpleNamespace(params=[object()])],
+    )
+    after = SimpleNamespace(
+        capabilities=[object(), object()],
+        steps=[SimpleNamespace(params=[object(), object()])],
+    )
+    report = gateway._analysis_application_report(
+        before=before,
+        after=after,
+        operation_report={
+            "changed": changed,
+            "summary": "analysis complete",
+            "changes": {"capabilities": int(changed), "fields": int(changed)},
+            "proposal_gate": {"accepted": accepted, "reasons": []},
+        },
+        screenshots=[{"name": "form.png"}],
+        delivered_image_count=1,
+        operation_id="plan-1",
+    )
+
+    assert report["status"] == expected_status
+    assert report["screenshot_count"] == report["model_image_count"] == 1
+    assert report["capability_count_before"] == 1
+    assert report["capability_count_after"] == 2
+    assert report["field_count_before"] == 1
+    assert report["field_count_after"] == 2
+    assert report["operation_id"] == "plan-1"
+
+
 class _ConcurrentWriteProbe:
     def __init__(self) -> None:
         self.active_writes = 0
