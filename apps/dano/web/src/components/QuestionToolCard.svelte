@@ -967,11 +967,6 @@
     {:else if !pending && !revising && result?.status !== "answered"}
       <div class="question-error" role="alert">{block.resultText}</div>
     {:else}
-      {#if revising}
-        <h2 class="question-form-title">
-          {!request.batch && request.kind === "confirm" ? request.title : ""}
-        </h2>
-      {/if}
       {#if result?.status === "answered"}
         <div class="mobile-answered-result question-result">
           <MarkdownRenderer content={sourceAnsweredMarkdown} />
