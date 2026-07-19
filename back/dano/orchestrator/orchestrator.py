@@ -17,7 +17,7 @@ from dano.assets.store import AssetStore
 from dano.orchestrator.gate import GateAction, PolicyGate
 from dano.orchestrator.capability_runtime import CapabilityInvokePayload, invoke_skill_capability
 from dano.orchestrator.skills import SkillRegistry
-from dano.orchestrator.types import SkillSpec, TaskOutcome
+from dano.orchestrator.types import TaskOutcome
 from dano.shared.asset_bodies import (
     Assertions,
     ConnectorBody,
@@ -26,7 +26,6 @@ from dano.shared.asset_bodies import (
 from dano.shared.enums import (
     AssetType,
     Outcome,
-    RecoveryAction,
     RiskLevel,
     Subsystem,
     TaskState,
@@ -139,13 +138,7 @@ class _NeedSelect(Exception):
         super().__init__(bind)
         self.bind, self.candidates, self.label_template = bind, candidates, label_template
 
-# 确认卡片回调:给定 skill+字段,返回用户是否确认(L3)。默认不确认(安全)。
-ConfirmHandler = Callable[[SkillSpec, dict], bool]
 CredentialResolver = Callable[[dict[str, str]], dict[str, str]]
-
-
-def _default_confirm(skill: SkillSpec, fields: dict) -> bool:
-    return False
 
 
 def _noop_resolver(refs: dict[str, str]) -> dict[str, str]:
@@ -163,8 +156,6 @@ class Orchestrator:
         closure: VerificationClosure | None = None,
         gate: PolicyGate | None = None,
         resolve_credentials: CredentialResolver = _noop_resolver,
-        failure_handler=None,  # FailureHandler(可选,流程10;Phase 4 接)
-        heal_queue=None,       # 漂移自愈触发队列(流程11;Phase 4 接)
         holidays: list[str] | None = None,   # 日历源:注入复合流程 compute 的 business_days(节假日)
     ) -> None:
         self.registry = registry
@@ -174,21 +165,12 @@ class Orchestrator:
         self.closure = closure or VerificationClosure()
         self.gate = gate or PolicyGate()
         self.resolve = resolve_credentials
-        self.failure_handler = failure_handler
-        self.heal_queue = heal_queue
         self.holidays = list(holidays or [])
 
     async def _connector_body(self, asset_id: UUID) -> ConnectorBody:
         env = await self.store.get(asset_id)
         assert env is not None, "连接器资产不存在"
         return ConnectorBody.model_validate(env.body)
-
-    async def _enqueue_heal(self, skill, reason: str) -> None:  # noqa: ANN001
-        from dano.resilience.queue import HealRequest
-
-        await self.heal_queue.enqueue(HealRequest(
-            skill_id=skill.skill_id, subsystem=skill.subsystem.value,
-            action=skill.action, reason=reason))
 
     async def _load_policy(self, scope: Scope) -> PolicyRuleBody | None:
         env = await self.store.get_published(
@@ -499,28 +481,10 @@ class Orchestrator:
             risk_level=RiskLevel(skill.risk_level),
         )
 
-        # 执行(失败 → 流程10:分类/熔断/限次受控重试)
-        attempt = 1
-        while True:
-            exec_result = await self.harness.run(brief, connector.model_dump(), pre_facts=before)
-            if exec_result.outcome != Outcome.FAILED or self.failure_handler is None:
-                break
-            decision = await self.failure_handler.handle(
-                skill.skill_id, exec_result, attempt=attempt)
-            if decision.should_retry:
-                attempt += 1
-                continue
-            # 页面/字段变更 → 自动触发流程11 自愈(入队)
-            if decision.action == RecoveryAction.REGENERATE and self.heal_queue is not None:
-                await self._enqueue_heal(skill, decision.reason)
-            return TaskOutcome(task_id=task_id, state=TaskState.FAILED, skill_id=skill.skill_id,
-                               exec_result=exec_result, message=f"执行跑不通 → 流程10:{decision.reason}",
-                               audit={"recovery": decision.model_dump(mode="json"), "attempts": attempt})
+        exec_result = await self.harness.run(brief, connector.model_dump(), pre_facts=before)
         if exec_result.outcome == Outcome.FAILED:
             return TaskOutcome(task_id=task_id, state=TaskState.FAILED, skill_id=skill.skill_id,
                                exec_result=exec_result, message="执行跑不通 → 流程10")
-        if self.failure_handler is not None:
-            await self.failure_handler.on_success(skill.skill_id)  # 成功清零失败计数
 
         after = await self._snapshot(skill.subsystem, skill.fact_check_query, intent.fields, creds)
         closure = await self.closure.verify(

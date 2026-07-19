@@ -390,8 +390,8 @@ def _capability_of(skill: SkillSpec) -> str:
     return skill.skill_id
 
 
-def _capability_meta(skill: SkillSpec, capability: str) -> dict:
-    """收集能力元数据,并显式记录 legacy skill/tool 名,方便调用协议迁移。"""
+def _capability_meta(skill: SkillSpec) -> dict:
+    """收集能力元数据。"""
     meta: dict = {}
     raw = getattr(skill, "capability_meta", {}) or {}
     if isinstance(raw, dict):
@@ -400,28 +400,20 @@ def _capability_meta(skill: SkillSpec, capability: str) -> dict:
     raw = call_meta.get("capability_meta") if isinstance(call_meta, dict) else None
     if isinstance(raw, dict):
         meta.update(raw)
-    meta.setdefault("legacy_skill_id", skill.skill_id)
-    meta.setdefault("legacy_tool_name", skill.skill_id.replace(".", "__"))
-    if capability != skill.skill_id:
-        aliases = list(meta.get("aliases") or [])
-        for val in (skill.skill_id, skill.skill_id.replace(".", "__")):
-            if val not in aliases:
-                aliases.append(val)
-        meta["aliases"] = aliases
     return meta
 
 
 def _call_protocol(capability: str, skill_id: str) -> dict:
-    """导出给 Agent 的稳定调用协议，同时声明旧 name 兼容通道。"""
+    """导出给 Agent 的稳定调用协议。"""
+    tool_name = skill_id.replace(".", "__")
     return {
         "protocol": "dano.capability_call.v1",
         "transport": "POST /v1/tools/call",
         "capability": capability,
         "capability_key": "capability",
-        "legacy_name": skill_id.replace(".", "__"),
-        "arguments_keys": ["input", "arguments"],
+        "tool_name": tool_name,
+        "payload": {"name": tool_name, "capability": capability, "input": {}, "confirm": False},
         "confirm_key": "confirm",
-        "compatibility": "payload always includes legacy name for existing Dano gateways",
         "interaction_protocol": _ask_user_question_interaction_protocol(),
     }
 
@@ -495,7 +487,6 @@ def _capability_call_protocol(skill_id: str, capability: str) -> dict:
         "tool_name": tool_name,
         "tool_payload": {"name": tool_name, "capability": capability, "input": {}, "confirm": False},
         "invoke_path": f"/v1/skills/{skill_id}/capabilities/{capability}/invoke",
-        "legacy_invoke_path": f"/v1/skills/{skill_id}/invoke",
         "interaction_protocol": _ask_user_question_interaction_protocol(),
     }
 
@@ -879,7 +870,7 @@ def to_manifest(skill: SkillSpec) -> SkillManifest:
     return SkillManifest(
         name=skill.skill_id,
         capability=capability,
-        capability_meta=_capability_meta(skill, capability),
+        capability_meta=_capability_meta(skill),
         capabilities=capabilities,
         capability_relations=capability_relations,
         subsystem=skill.subsystem.value,

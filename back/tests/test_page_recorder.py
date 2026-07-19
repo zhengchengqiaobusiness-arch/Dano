@@ -12,7 +12,6 @@ import pytest
 
 pytest.importorskip("playwright")
 
-from dano.execution.page.driver import PlaywrightPageDriver
 from dano.execution.page.recorder import RecordSession, _RECORDER_JS
 from dano.execution.page.sessions import SESSION_STORAGE_STATE_KEY
 
@@ -775,12 +774,21 @@ _HTML = """<!doctype html><html><head><meta charset="utf-8"></head><body>
 
 
 async def _chromium_available() -> bool:
+    from playwright.async_api import async_playwright
+
+    pw = None
+    browser = None
     try:
-        d, _ = await PlaywrightPageDriver.launch(headless=True)
-        await d.close()
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True)
         return True
     except Exception:  # noqa: BLE001
         return False
+    finally:
+        if browser is not None:
+            await browser.close()
+        if pw is not None:
+            await pw.stop()
 
 
 async def test_record_session_captures_semantic_steps(tmp_path) -> None:  # noqa: ANN001
@@ -1205,4 +1213,3 @@ async def test_real_browser_diagnostics_captures_console_and_pageerror(tmp_path)
     # pageerror.message 含原异常文案
     page_errors = [d for d in sess.captured_diagnostics() if d["type"] == "pageerror"]
     assert any("boom-from-page" in d["message"] for d in page_errors), page_errors
-

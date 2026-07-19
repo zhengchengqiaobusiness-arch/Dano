@@ -2,7 +2,7 @@
 
 ## 状态与真实基线
 
-本文是当前实施和验收依据，替代 2026-07-18 的旧设计快照。
+本文是当前实施和验收依据。旧设计快照及其兼容债清单已在最终清理中删除。
 
 - 审计基准：`28b44d277ef5a0314e2d9ced848e8d2069dd9f2b`
 - P10 开始时 HEAD：`b8cd459`
@@ -51,41 +51,45 @@ capability 未指定时返回 `NEEDS_SELECT`；录制资产不存在整份 FlowS
 | P6.3 | option_sources → step/param → capability 的单向枚举投影 | `a356685` |
 | P6.4 | `all_requests` 唯一原始请求 ledger，统一 `risk_level` | `45feef7` |
 | P7 | plan/repair 工具接受时立即 checkpoint；删除 finally salvage | `9d177d4` |
-| P8 | 不满足安全删除条件；保留并重命名为录制步骤编辑合并器，增加等价测试 | `378e33f` |
+| P8 | 最终确认前端不存在 raw step 编辑入口；finalize 改为只读服务端 RecordSession，旧 step 消息和合并器已删除 | `378e33f` 后续清理 |
 | P9 | 生命周期登记 outbox、幂等补偿、启动恢复和前端 pending 提示 | `b8cd459` |
 | P10 | 旧文档退役、兼容债标记、当前基线和验证矩阵固化 | 本提交 |
 
 `3427f60` 是阶段执行期间进入主分支的跨系统语义/场景增强提交，不作为 P 阶段提交，
 但已纳入后续全量验证。
 
-## P8 保留结论
+## P8 最终结论
 
-P8 没有强行删除 finalize 步骤层，原因是删除前置条件尚未同时成立：
+P8 初次实施时保留了 finalize 步骤合并器；最终全链核查确认以下事实：
 
-1. 前端接收实时 step 时会做连续重复抑制，服务端 `RecordSession.steps` 不保证同形。
-2. 最后一个防抖 fill 只在 finalize 的 server flush 后出现，前端可能尚未收到。
-3. 样例、必填和页面枚举仍要以用户看到的步骤顺序/删除结果与最后 flush 合并。
+1. 前端没有 raw step 删除、调序或字段修改入口。
+2. `steps` 状态只用于接收 WebSocket 消息、按钮门控和原样回传。
+3. 服务端 finalize 已先 `flush_recording()`，并能从 RecordSession 恢复步骤、必填标签和页面枚举。
 
-当前唯一保留函数是 `_merge_recording_step_edits`，职责、消费者、删除条件和目标版本已
-以 `COMPAT[REC-P8-STEP-MERGE]` 标记，并由字段/枚举等价测试锁定。
+因此已删除 step WebSocket 消息、前端 `steps` 状态、finalize `steps` 入参和
+`_merge_recording_step_edits`。录制事实现在只有服务端 RecordSession 一份。
 
-## 兼容债与非债务功能
+## 已清零的兼容债与保留的泛化功能
 
-所有暂留兼容块都使用 `COMPAT[ID]` 标记，完整登记见 `docs/compat-debt.md`。当前共 7 项，
-每项均包含原因、当前消费者、删除条件和目标版本。
+最终清理已经删除原登记的 7 条兼容债：finalize step 合并、`step_ids` 迁移、鼠标事件别名、
+body capability、`arguments` 双载荷、旧 onboarding 名称以及相关 manifest legacy 元数据。
+调用协议现在统一为对象 `input`；显式能力只取 URL path，单能力隐式调用继续使用 `/invoke`。
+
+同时删除了从未接入生产主链的原型骨架：内存资产库、旧 fake/HTTP 执行器、fake 页面
+driver、失败处理器和自愈队列、Redis 计数骨架、系统实例空置 CRUD 及其专属模型。
 
 以下多形态逻辑属于当前泛化能力，不列入待删：枚举 string/dict/tuple 归一化、DOM popup
 fallback、跨标签活动页恢复、RequestFacts 页面/接口候选证据、发布编译器和 execute_api。
 
 ## 最终验证矩阵
 
-自动化验收记录（2026-07-19，P9 后及 P10 最终复验）：
+自动化验收记录（2026-07-20，P10 后最终清理复验）：
 
 | 检查 | 结果 |
 |---|---|
-| 后端全量 pytest | 通过，1,009 passed；包含两个 aiohttp + Playwright 真实浏览器测试 |
+| 后端全量 pytest | 通过，1,007 passed；包含两个 aiohttp + Playwright 真实浏览器测试 |
 | Recording Pi self-test | 通过，`status=ok`，persistent session/runtime protocol 均为 true |
-| TypeScript `npx tsc --noEmit` | 通过 |
+| TypeScript `npx tsc --noEmit` | 通过；已启用 `noUnusedLocals/noUnusedParameters` 防止死代码回流 |
 | 前端生产构建 | 通过；仅保留 Vite 大 chunk 非阻断警告 |
 | Ruff 生产代码 | 通过，All checks passed |
 | `git diff --check` | 通过 |

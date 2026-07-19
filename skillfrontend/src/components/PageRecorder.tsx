@@ -35,7 +35,6 @@ import {
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 
-interface RecStep { op: string; locator?: string; field?: string; value?: string; required?: boolean; options?: any[] }
 interface RecReq { method: string; url: string; has_body?: boolean; json?: boolean }
 interface AnalysisScreenshotPayload {
   name: string;
@@ -993,15 +992,7 @@ function capabilityNodeStepIds(nodes?: Array<Record<string, any>>) {
   return ordered;
 }
 function capabilityActualStepIds(cap?: FlowCapabilityData | null) {
-  const nodeIds = capabilityNodeStepIds(cap?.nodes);
-  if (nodeIds.length) return nodeIds;
-  // COMPAT[REC-P6-STEP-IDS]: rolling-upgrade clients can receive a pre-P6
-  // capability with only derived step_ids. Current consumer: read-only workbench.
-  // Remove when stored assets and active clients are protocol_version >= 3;
-  // target recording protocol v4. New edits never write this derived field.
-  return Array.from(new Set(
-    (cap?.step_ids || []).map((value) => String(value || "").trim()).filter(Boolean),
-  ));
+  return capabilityNodeStepIds(cap?.nodes);
 }
 function capabilityRequestRefForStep(cap: FlowCapabilityData | null | undefined, stepId: string) {
   return (cap?.request_refs || []).find((ref) => ref.step_id === stepId);
@@ -1246,7 +1237,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [frameMeta, setFrameMeta] = useState<RecorderFrameMeta>({});
   const hasFrameRef = useRef(false);
   useEffect(() => { hasFrameRef.current = hasFrame; }, [hasFrame]);
-  const [steps, setSteps] = useState<RecStep[]>([]);
   const [reqs, setReqs] = useState<RecReq[]>([]);
   const [action, setAction] = useState(() => newRecordingActionName());
   const actionRef = useRef(action);
@@ -1663,7 +1653,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
     reconnectTimerRef.current = null;
     reconnectAttemptRef.current = 0;
-    setErr(""); setResult(null); setSteps([]); setReqs([]); clearFrame();
+    setErr(""); setResult(null); setReqs([]); clearFrame();
     resetEditorState();
     const nextAction = newRecordingActionName();
     actionRef.current = nextAction;
@@ -1799,21 +1789,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         // GET-only recordings analyzable after reconnect, where no write callback exists.
         setReconnectedSessionNeedsCapture(false);
       }
-      else if (m.type === "step") setSteps((s) => {
-        const st = m.step;
-        const last = s[s.length - 1];
-        // FH1 修复:覆盖规则扩展 —— 同 locator + 同 op 时覆盖(避免连续 click 同一按钮记成多步);submit 后任意步骤都不再覆盖
-        if (
-          last &&
-          last.locator === st.locator &&
-          last.op === st.op &&
-          last.op !== "submit" &&
-          (st.op === "fill" || st.op === "select" || st.op === "pick" || st.op === "click")
-        ) {
-          return [...s.slice(0, -1), st];
-        }
-        return [...s, st];
-      });
       else if (m.type === "request") {
         setReqs((r) => [...r, m.request].slice(-40));
         // 当前会话捕获到实时请求后，才解除重连后的分析门禁。
@@ -2147,7 +2122,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function resetFromHere() {
     send({ type: "reset" });
-    setSteps([]); setResult(null); resetEditorState();
+    setResult(null); resetEditorState();
     message.success("已清空，从现在起只录业务步骤");
   }
   function finalize() {
@@ -2157,11 +2132,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       return;
     }
     if (!action.trim() || badAction(action.trim())) return;
-    if (!hasFrame && !steps.length && !reqs.length) { message.error("还没有可分析的页面画面或请求"); return; }
+    if (!hasFrame && !reqs.length) { message.error("还没有可分析的页面画面或请求"); return; }
     const operationId = newCostlyOperationId("finalize");
     finalizeOperationRef.current = operationId;
     setResult(null); setPhase("publishing");
-    if (!send({ type: "finalize", operation_id: operationId, action: action.trim(), title: title.trim(), steps })) {
+    if (!send({ type: "finalize", operation_id: operationId, action: action.trim(), title: title.trim() })) {
       finalizeOperationRef.current = null;
       setPhase("recording");
     }
@@ -2210,7 +2185,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
     }, 2000);
     setConnectionState("idle");
-    setPhase("idle"); setResult(null); setSteps([]); clearFrame();
+    setPhase("idle"); setResult(null); clearFrame();
     resetEditorState();
   }
 
@@ -4317,7 +4292,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <Form.Item label="标题" style={{ marginBottom: 0 }}>
                 <Input value={title} onChange={(e) => setTitle(e.target.value)} style={{ width: 180 }} />
               </Form.Item>
-              <Button type="primary" loading={phase === "publishing"} disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || (!hasFrame && !steps.length && !reqs.length)} onClick={finalize}>
+              <Button type="primary" loading={phase === "publishing"} disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || (!hasFrame && !reqs.length)} onClick={finalize}>
                 停止并分析请求
               </Button>
             </Space>

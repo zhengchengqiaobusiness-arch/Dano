@@ -2700,10 +2700,8 @@ def _capability_scoped_node_step_ids(nodes: list[dict[str, Any]]) -> list[str]:
 
 
 def _capability_scoped_step_ids(cap: FlowCapability) -> list[str]:
-    node_ids = _capability_scoped_node_step_ids(cap.nodes or [])
-    source_ids = node_ids if node_ids else list(cap.step_ids or [])
     ids: list[str] = []
-    for sid in source_ids:
+    for sid in _capability_scoped_node_step_ids(cap.nodes or []):
         sid = str(sid or "").strip()
         if sid and sid not in ids:
             ids.append(sid)
@@ -2997,7 +2995,8 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
         # scoped membership policy from the node tree as well.
         for removed_step_id in set(previous_step_ids) - set(cap_step_ids):
             cap.nodes = _remove_capability_step_nodes(cap.nodes or [], removed_step_id)
-        cap.step_ids = cap_step_ids
+        _sync_capability_order(spec, cap)
+        cap_step_ids = list(cap.step_ids)
         step_objs = [by_step[sid] for sid in cap_step_ids]
         cap.request_refs = [
             _capability_request_ref_from_step(spec, st, previous_refs.get(st.step_id))
@@ -5512,10 +5511,13 @@ def _normalize_generated_capability_semantics(spec: FlowSpec, cap: FlowCapabilit
             cap.intent = "调用方提供业务字段；Skill 按能力内接口顺序执行前置查询、依赖注入和最终提交。"
     if cap.kind == "query_status":
         status_ids = {step.step_id for step in _read_status_steps(spec)}
-        cap.step_ids = [step.step_id for step in steps if step.step_id in status_ids]
+        for step_id in set(cap.step_ids) - status_ids:
+            cap.nodes = _remove_capability_step_nodes(cap.nodes or [], step_id)
+        _sync_capability_order(spec, cap)
     elif cap.kind == "list_options":
         # 下拉来源属于字段执行细节，不自动暴露成独立业务能力。
-        cap.step_ids = []
+        cap.nodes = []
+        _sync_capability_order(spec, cap)
 
 
 def _canonicalize_public_capability_identities(spec: FlowSpec) -> FlowSpec:
@@ -5826,7 +5828,7 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
         if cap.kind == "query_status":
             option_source_ids = _option_source_step_ids(spec)
             memberships = {ref.step_id: ref for ref in (cap.request_refs or []) if ref.step_id}
-            cap.step_ids = [
+            allowed_step_ids = {
                 sid for sid in (cap.step_ids or [])
                 if (
                     bool(memberships.get(sid) and memberships[sid].origin in {"manual", "user"} and memberships[sid].usage in {"execute", "preflight", "fact_check"})
@@ -5839,7 +5841,10 @@ def _sync_capability_io_schemas(spec: FlowSpec) -> FlowSpec:
                         )
                     )
                 )
-            ]
+            }
+            for step_id in set(cap.step_ids) - allowed_step_ids:
+                cap.nodes = _remove_capability_step_nodes(cap.nodes or [], step_id)
+            _sync_capability_order(spec, cap)
         cap.nodes = _sanitize_capability_nodes(spec, cap)
         cap_steps = [by_id[sid] for sid in (cap.step_ids or []) if sid in by_id]
         if not cap_steps:
@@ -6481,7 +6486,7 @@ def _capability_step_allowed(spec: FlowSpec, cap: FlowCapability, step: FlowStep
     # not whether the same request may execute inside a capability.
     if membership and membership.origin in {"manual", "user"} and membership.usage in {"execute", "preflight", "fact_check"}:
         return True
-    if step.step_id in set(cap.step_ids or []) and (
+    if step.step_id in set(_capability_scoped_step_ids(cap)) and (
         cap.updated_by == "user" or cap.locked or cap.confirmed or not role
     ):
         return True
@@ -8623,11 +8628,6 @@ def _merge_capability_lists_impl(
             if cap.name:
                 by_name[cap.name] = cap
             continue
-        for sid in cap.step_ids:
-            if _capability_step_was_removed(spec, cur.name, sid):
-                continue
-            if sid not in cur.step_ids:
-                cur.step_ids.append(sid)
         existing_node_keys = {
             (n.get("type"), n.get("step_id"), n.get("id"))
             for n in (cur.nodes or [])
@@ -8734,35 +8734,7 @@ def _normalize_capability_references(spec: FlowSpec) -> FlowSpec:
         return cleaned
 
     for cap in spec.capabilities or []:
-        seen: set[str] = set()
-        legacy_step_ids = [
-            sid
-            for sid in (valid_step_id(x) for x in (cap.step_ids or []))
-            if sid and not (sid in seen or seen.add(sid))
-        ]
-        cap.nodes = clean_nodes(cap.nodes or [], legacy_step_ids)
-        # COMPAT[REC-P6-NODE-MIGRATION]
-        # Reason: persisted pre-P6 capabilities may have only step_ids.
-        # Consumer: server load/normalize before edit, publish, and export.
-        # Remove when the PG asset migration proves every capability has call
-        # nodes and rolling-upgrade traffic is gone; target recording protocol v4.
-        # Migrate that old shape once;
-        # whenever call nodes already exist they are authoritative and a
-        # divergent step_ids projection is deliberately ignored.
-        if not _capability_call_step_ids_from_nodes(cap.nodes or []) and legacy_step_ids:
-            return_nodes = [
-                node for node in cap.nodes
-                if isinstance(node, dict) and node.get("type") == "return"
-            ]
-            body_nodes = [
-                node for node in cap.nodes
-                if not (isinstance(node, dict) and node.get("type") == "return")
-            ]
-            body_nodes.extend(
-                {"id": f"call_{index}", "type": "call", "step_id": step_id}
-                for index, step_id in enumerate(legacy_step_ids, 1)
-            )
-            cap.nodes = body_nodes + return_nodes
+        cap.nodes = clean_nodes(cap.nodes or [], [])
         _sync_capability_order(spec, cap)
     return spec
 
@@ -9600,10 +9572,7 @@ async def orchestrate_flow_capabilities(
 
 
 def _capability_node_step_ids(cap: FlowCapability) -> list[str]:
-    node_ids = _capability_call_step_ids_from_nodes(cap.nodes or [])
-    if node_ids:
-        return node_ids
-    return list(dict.fromkeys(str(step_id) for step_id in (cap.step_ids or []) if step_id))
+    return _capability_call_step_ids_from_nodes(cap.nodes or [])
 
 
 def _step_request_key(step: FlowStep) -> str:
@@ -11803,8 +11772,6 @@ def capability_to_flow_spec_view(
         raise ValueError(f"capability not found: {ref}")
     by_step = {s.step_id: s for s in current.steps}
     step_ids = [sid for sid in _capability_node_step_ids(cap) if sid in by_step]
-    if not step_ids:
-        step_ids = [sid for sid in (cap.step_ids or []) if sid in by_step]
     keep = set(step_ids)
     view = current.model_copy(deep=True)
     view.steps = [s for s in view.steps if s.step_id in keep]
@@ -11815,13 +11782,13 @@ def capability_to_flow_spec_view(
     selected_cap = _find_capability_by_ref(view, cap.capability_id) or _find_capability_by_ref(view, cap.name)
     if selected_cap is None:
         selected_cap = cap.model_copy(deep=True)
-    selected_cap.step_ids = [sid for sid in step_ids if sid in keep]
     selected_cap.nodes = [
         n for n in (selected_cap.nodes or [])
         if not isinstance(n, dict)
         or n.get("type") != "call"
         or str(n.get("step_id") or "") in keep
     ]
+    _sync_capability_order(view, selected_cap)
     view.capabilities = [selected_cap]
     view.capability_relations = [
         rel for rel in (view.capability_relations or [])

@@ -1,29 +1,22 @@
-"""租户与系统实例登记(流程1 第1–3步)。
-
-文档流程1 前三步:建租户 → 选系统类型模板 → 创建系统实例。本模块把这三步落成
-可审计的真实记录(PG 持久化),接入(流程1 第4步起)针对已登记实例导入材料生成资产。
-"""
+"""租户登记与系统类型模板目录。"""
 
 from dano.registry.models import (
     SYSTEM_TEMPLATES,
-    SystemInstance,
     SystemTemplate,
     TenantRecord,
     all_system_templates,
     get_system_template,
     register_system_template,
 )
-from dano.registry.store import InMemoryRegistry, PgRegistry, RegistryStore
+from dano.registry.store import InMemoryRegistry, PgRegistry
 
 __all__ = [
     "TenantRecord",
-    "SystemInstance",
     "SystemTemplate",
     "SYSTEM_TEMPLATES",
     "register_system_template",
     "all_system_templates",
     "get_system_template",
-    "RegistryStore",
     "InMemoryRegistry",
     "PgRegistry",
 ]

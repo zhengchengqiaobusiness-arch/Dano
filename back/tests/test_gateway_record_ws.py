@@ -429,8 +429,7 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
     sessions = []
 
     class FakeRecordSession:
-        def __init__(self, on_step, on_request, **_kwargs) -> None:  # noqa: ANN001
-            self.on_step = on_step
+        def __init__(self, on_request, **_kwargs) -> None:  # noqa: ANN001
             self.on_request = on_request
             self.events: list[dict] = []
             self.stopped = False
@@ -440,7 +439,6 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
             return None
 
         async def start_screencast(self, on_frame) -> None:  # noqa: ANN001
-            self.on_step({"op": "click"})
             self.on_request({"method": "POST"})
             await on_frame({"image": "frame"})
 
@@ -534,4 +532,4 @@ def test_recording_gateway_builds_enum_evidence_once_per_finalize() -> None:
 
     assert source.count("recorded_page_enum_options()") == 1
     assert "recorded_page_options = sess.recorded_page_enum_options()" in source
-    assert "page_options_by_field = recorded_page_options" in source
+    assert "for storage_key, raw_entry in (recorded_page_options or {}).items()" in source

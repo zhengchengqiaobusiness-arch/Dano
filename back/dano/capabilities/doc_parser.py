@@ -4,9 +4,9 @@
 内置:
 - OpenAPI 3.x(servers / requestBody.content / components.schemas,解析 $ref)
 - Swagger 2.0(host+basePath+schemes / parameters[in=body].schema / definitions,解析 $ref)
-后期支持扩展:实现 SpecAdapter 并 register_spec_adapter() 即可接新规格(如 RAML/GraphQL SDL)。
+当前只支持内置 Swagger 2.0 与 OpenAPI 3.x 适配器。
 
-表单/制度等其余材料解析见 parse_form_spec;PDF/截图非结构化解析留 OCR/浏览器侦察。
+表单、制度、PDF 和截图等非结构化材料由浏览器侦察链处理。
 """
 
 from __future__ import annotations
@@ -42,11 +42,6 @@ class ActionSpec(BaseModel):
     tags: list[str] = Field(default_factory=list)         # 文档 tags(供端点分类)
     summary: str = ""                                      # 文档 summary(标题/分类)
     field_docs: dict[str, str] = Field(default_factory=dict)  # 入参名→语义描述(阶段4)
-
-
-class RawField(BaseModel):
-    name: str
-    label: str | None = None
 
 
 # ─────────────────────────── $ref 解析(两规格共用) ───────────────────────────
@@ -121,11 +116,6 @@ class SpecAdapter(ABC):
     def parse_actions(self, spec: dict[str, Any]) -> list[ActionSpec]:
         ...
 
-    @abstractmethod
-    def base_urls(self, spec: dict[str, Any]) -> list[str]:
-        ...
-
-
 class OpenAPI3Adapter(SpecAdapter):
     """OpenAPI 3.x:servers + requestBody.content.*.schema + responses.content.*.schema。"""
 
@@ -178,15 +168,6 @@ class OpenAPI3Adapter(SpecAdapter):
                 )
         return actions
 
-    def base_urls(self, spec: dict[str, Any]) -> list[str]:
-        out: list[str] = []
-        for s in spec.get("servers", []):
-            url = s.get("url") if isinstance(s, dict) else None
-            if url:
-                out.append(url.rstrip("/"))
-        return out
-
-
 class Swagger2Adapter(SpecAdapter):
     """Swagger 2.0:host+basePath+schemes / parameters[in=body].schema / responses.schema / definitions。"""
 
@@ -235,23 +216,9 @@ class Swagger2Adapter(SpecAdapter):
                 )
         return actions
 
-    def base_urls(self, spec: dict[str, Any]) -> list[str]:
-        host = spec.get("host")
-        if not host:
-            return []
-        base_path = (spec.get("basePath") or "").rstrip("/")
-        schemes = spec.get("schemes") or ["https"]
-        return [f"{scheme}://{host}{base_path}" for scheme in schemes if scheme]
-
-
 # 适配器注册表(靠前的优先匹配)。OpenAPI3 兜底:无版本键的最小化 spec 按 3.x 解析。
 _ADAPTERS: list[SpecAdapter] = [Swagger2Adapter(), OpenAPI3Adapter()]
 _FALLBACK = OpenAPI3Adapter()
-
-
-def register_spec_adapter(adapter: SpecAdapter) -> None:
-    """扩展点:注册新的接口规格适配器(插到最前,优先于内置)。"""
-    _ADAPTERS.insert(0, adapter)
 
 
 def _adapter_for(spec: dict[str, Any]) -> SpecAdapter:
@@ -261,26 +228,10 @@ def _adapter_for(spec: dict[str, Any]) -> SpecAdapter:
     return _FALLBACK  # 容忍最小化 spec(仅 paths,无 openapi/swagger 版本键)
 
 
-# ─────────────────────────── 对外 API(签名保持兼容) ───────────────────────────
+# ─────────────────────────── 对外 API ───────────────────────────
 def parse_openapi(spec: dict[str, Any]) -> list[ActionSpec]:
     """从接口文档抽动作清单。自动识别 Swagger 2.0 / OpenAPI 3.x。"""
     return _adapter_for(spec).parse_actions(spec)
-
-
-def parse_servers(spec: dict[str, Any]) -> list[str]:
-    """抽基址 URL 列表(OpenAPI servers / Swagger host+basePath),供自动填 base_url。"""
-    return _adapter_for(spec).base_urls(spec)
-
-
-def parse_form_spec(spec: list[Any]) -> list[RawField]:
-    """表单说明 → 字段清单。条目可为字符串或 {name,label}。"""
-    fields: list[RawField] = []
-    for item in spec:
-        if isinstance(item, str):
-            fields.append(RawField(name=item))
-        elif isinstance(item, dict):
-            fields.append(RawField(name=item["name"], label=item.get("label")))
-    return fields
 
 
 # ─────────────────────────── 内部小工具 ───────────────────────────

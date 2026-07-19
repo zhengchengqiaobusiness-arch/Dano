@@ -114,6 +114,3 @@ class AuthManager:
             self._cache[system_key] = ctx
             log.info("auth.refreshed", system=system_key, kind=config.kind.value)
             return ctx.headers
-
-    def invalidate(self, system_key: str) -> None:
-        self._cache.pop(system_key, None)

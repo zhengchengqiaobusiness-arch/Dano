@@ -24,6 +24,13 @@ from dano.execution.page.request_capture import execute_api_request
 from dano.execution.page.repair_ops import collect_capability_findings, collect_repair_findings
 
 
+def _call_nodes(step_ids: list[str]) -> list[dict]:
+    return [
+        {"id": f"call_{index}", "type": "call", "step_id": step_id}
+        for index, step_id in enumerate(step_ids)
+    ]
+
+
 def _request_facts_from_graph_fixture(graph: dict) -> RequestFacts:
     """Translate legacy-shaped test evidence into the canonical test contract."""
     requests = []
@@ -144,7 +151,6 @@ def test_required_flag_changes_caller_schema_without_blocking_publish(required):
         capabilities=[FlowCapability(
             name="submit",
             kind="submit",
-            step_ids=["submit"],
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
         )],
     )
@@ -221,7 +227,7 @@ def test_publish_canonicalizes_submit_alias_and_all_relations_atomically():
         flow_id="canonical-capability", steps=[step],
         capabilities=[FlowCapability(
             capability_id="write-cap", name="submit_batch", kind="submit",
-            step_ids=["submit-step"], nodes=[{"id": "call", "type": "call", "step_id": "submit-step"}],
+            nodes=[{"id": "call", "type": "call", "step_id": "submit-step"}],
         )],
         capability_relations=[CapabilityRelation(
             from_capability="query_status", to_capability="submit_batch", type="caller_decision",
@@ -318,7 +324,7 @@ def test_planner_foreach_alone_does_not_promote_single_leave_submit_to_batch():
         ],
     )
     cap = FlowCapability(
-        name="submit_batch", kind="submit_batch", step_ids=["submit"], updated_by="planner",
+        name="submit_batch", kind="submit_batch", updated_by="planner",
         nodes=[{"id": "foreach", "type": "foreach", "items": "input.entries", "steps": [
             {"id": "call", "type": "call", "step_id": "submit"},
         ]}],
@@ -337,11 +343,11 @@ def test_planner_foreach_alone_does_not_promote_single_leave_submit_to_batch():
 def test_single_submit_prunes_stale_entries_relations_without_inventing_decision_relation():
     query = FlowCapability(
         capability_id="query-cap", name="query_status", kind="query_status",
-        step_ids=["query"], output_schema={"type": "object", "properties": {"records": {"type": "array"}}},
+        nodes=_call_nodes(["query"]), output_schema={"type": "object", "properties": {"records": {"type": "array"}}},
     )
     submit = FlowCapability(
         capability_id="submit-cap", name="submit", kind="submit",
-        step_ids=["submit"], input_schema={"type": "object", "properties": {"原因": {"type": "string"}}},
+        nodes=_call_nodes(["submit"]), input_schema={"type": "object", "properties": {"原因": {"type": "string"}}},
     )
     spec = FlowSpec(
         flow_id="stale-relations",
@@ -372,7 +378,6 @@ def test_capability_interface_reorder_updates_flat_calls_even_with_return_node()
         ],
         capabilities=[FlowCapability(
             name="submit",
-            step_ids=["a", "b"],
             nodes=[
                 {"id": "call_a", "type": "call", "step_id": "a"},
                 {"id": "call_b", "type": "call", "step_id": "b"},
@@ -418,7 +423,7 @@ def test_generated_capabilities_repair_wrong_option_query_batch_and_stale_output
         steps=[option, submit],
         capabilities=[
             FlowCapability(
-                name="query_status", kind="query_status", step_ids=["tenant-options"],
+                name="query_status", kind="query_status",
                 nodes=[{"id": "call_option", "type": "call", "step_id": "tenant-options"}],
                 output_mapping=[{"step_id": "old-step", "response_path": "response"}],
                 evidence=[{"kind": "read_step", "step_id": "tenant-options"}],
@@ -426,7 +431,6 @@ def test_generated_capabilities_repair_wrong_option_query_batch_and_stale_output
             ),
             FlowCapability(
                 name="submit_batch", title="批量提交业务申请", kind="submit_batch",
-                step_ids=["leave-submit"],
                 nodes=[{
                     "id": "foreach_entries", "type": "foreach", "items": "input.entries",
                     "steps": [{"id": "call_submit", "type": "call", "step_id": "leave-submit"}],
@@ -486,7 +490,6 @@ def test_repair_mode_fixes_warning_only_batch_nodes_and_dangling_relations():
             name="submit_batch2",
             title="批量提交业务申请",
             kind="submit_batch",
-            step_ids=["submit"],
             nodes=[
                 {
                     "id": "foreach_entries", "type": "foreach", "items": "input.entries",
@@ -664,7 +667,7 @@ def test_manual_category_and_source_change_preserves_independently_managed_link(
 def test_capability_input_schema_drops_deleted_fields():
     spec = _make_spec()
     spec.capabilities = [FlowCapability(
-        name="submit", title="提交", kind="submit", step_ids=["step1"], confirmed=True,
+        name="submit", title="提交", kind="submit", nodes=_call_nodes(["step1"]), confirmed=True,
         input_schema={
             "type": "object",
             "properties": {"old": {"type": "string"}, "name": {"type": "number", "description": "旧说明"}},
@@ -686,7 +689,7 @@ def test_capability_input_schema_drops_deleted_fields():
 def test_unconfirmed_capabilities_are_generation_advice_not_publish_policy():
     spec = _make_spec()
     spec.capabilities = [FlowCapability(
-        name="submit", title="提交", kind="submit", step_ids=["step1"], confirmed=False,
+        name="submit", title="提交", kind="submit", nodes=_call_nodes(["step1"]), confirmed=False,
     )]
 
     report = validate_flow_spec(spec)
@@ -715,7 +718,6 @@ def test_confirmed_capability_contract_change_is_advice_not_publish_policy():
         )],
         capabilities=[FlowCapability(
             capability_id="submit-cap", name="submit", title="提交请假申请", kind="submit",
-            step_ids=["submit"],
             nodes=[
                 {"id": "call_submit", "type": "call", "step_id": "submit"},
                 {"id": "return_result", "type": "return", "from": "submit", "path": "response"},
@@ -743,7 +745,6 @@ def test_generated_placeholder_output_name_is_normalized_to_stable_result():
             body_source="{}", response_json={"code": 0, "data": {"id": "1"}},
         )],
         capabilities=[FlowCapability(
-            name="submit", title="提交申请", kind="submit", step_ids=["submit"],
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
             output_mapping=[{
                 "kind": "final_response", "name": "output_1",
@@ -779,7 +780,6 @@ def test_publish_preparation_strips_actionable_placeholder_field_name_atomically
         capabilities=[FlowCapability(
             name="withdraw_request",
             kind="submit",
-            step_ids=["withdraw"],
             nodes=[{"id": "call_withdraw", "type": "call", "step_id": "withdraw"}],
             output_mapping=[{
                 "kind": "final_response",
@@ -831,7 +831,6 @@ def test_manual_placeholder_name_remains_locatable_nonblocking_and_stays_ignored
         capabilities=[FlowCapability(
             name="withdraw_request",
             kind="submit",
-            step_ids=["withdraw"],
             nodes=[{"id": "call_withdraw", "type": "call", "step_id": "withdraw"}],
             output_mapping=[{
                 "kind": "final_response",
@@ -896,7 +895,6 @@ def test_no_response_final_response_mapping_builds_consistent_object_output_cont
         capabilities=[FlowCapability(
             name="withdraw_request",
             kind="submit",
-            step_ids=["withdraw"],
             nodes=[{"id": "call_withdraw", "type": "call", "step_id": "withdraw"}],
             output_mapping=[{
                 "kind": "final_response",
@@ -925,7 +923,7 @@ def test_compiled_capability_output_issue_targets_capability_io_not_request_fiel
     spec = FlowSpec(capabilities=[FlowCapability(
         name="withdraw_request",
         kind="submit",
-        step_ids=["withdraw"],
+        nodes=_call_nodes(["withdraw"]),
     )])
     groups = flow_spec_module._compiled_contract_issue_groups(
         spec,
@@ -1097,7 +1095,7 @@ def test_capability_loop_and_return_edits():
     spec = FlowSpec(
         flow_id="f",
         steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
-        capabilities=[FlowCapability(name="submit_batch", kind="submit", step_ids=["submit"])],
+        capabilities=[FlowCapability(name="submit_batch", kind="submit", nodes=_call_nodes(["submit"]))],
     )
 
     new = apply_flow_edits(spec, [
@@ -1139,10 +1137,10 @@ def test_capability_scoped_patch_ops_update_fields_dependencies_nodes_and_relati
             FlowCapability(
                 name="query_status",
                 kind="query_status",
-                step_ids=["query"],
+                nodes=_call_nodes(["query"]),
                 output_schema={"type": "object", "properties": {"missing_dates": {"type": "array"}}},
             ),
-            FlowCapability(name="submit_batch", kind="submit_batch", step_ids=["submit"]),
+            FlowCapability(name="submit_batch", kind="submit_batch", nodes=_call_nodes(["submit"])),
         ],
     )
 
@@ -1197,9 +1195,9 @@ def test_capability_validator_checks_condition_and_map_refs():
         capabilities=[FlowCapability(
             name="submit_batch",
             kind="submit_batch",
-            step_ids=["submit"],
             input_schema={"type": "object", "properties": {"entries": {"type": "array"}}},
             nodes=[
+                {"id": "call_submit", "type": "call", "step_id": "submit"},
                 {"id": "bad_condition", "type": "condition", "condition": "input.missing.length > 0", "then": []},
                 {"id": "bad_map", "type": "map", "source": "input.unknown", "target": "submit.nope"},
             ],
@@ -1232,7 +1230,6 @@ def test_batch_map_top_level_input_is_rewritten_to_loop_item():
         capabilities=[FlowCapability(
             name="submit_batch",
             kind="submit_batch",
-            step_ids=["submit"],
             nodes=[
                 {"id": "foreach_entries", "type": "foreach", "items": "input.entries", "steps": [
                     {"id": "call_submit", "type": "call", "step_id": "submit"},
@@ -1267,7 +1264,7 @@ def test_duplicate_caller_field_names_are_disambiguated_without_splitting_shared
     )
     spec = FlowSpec(
         steps=[first, second],
-        capabilities=[FlowCapability(name="submit_project", kind="submit", step_ids=["lookup", "submit"])],
+        capabilities=[FlowCapability(name="submit_project", kind="submit", nodes=_call_nodes(["lookup", "submit"]))],
     )
 
     normalized = flow_spec_module._sync_capability_io_schemas(spec)
@@ -1318,7 +1315,7 @@ def test_auto_fix_skips_stale_field_patch_and_keeps_valid_suggestions():
         capabilities=[FlowCapability(
             name="search_items",
             kind="submit",
-            step_ids=["query"],
+            nodes=_call_nodes(["query"]),
         )],
     )
 
@@ -1353,7 +1350,7 @@ def test_auto_fix_accepts_capability_scoped_pi_repair_ops():
     spec = FlowSpec(
         flow_id="f",
         steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
-        capabilities=[FlowCapability(name="submit_batch", kind="submit_batch", step_ids=["submit"])],
+        capabilities=[FlowCapability(name="submit_batch", kind="submit_batch", nodes=_call_nodes(["submit"]))],
     )
 
     fixed = asyncio.run(auto_fix_flow_spec(spec, repair_ops=_capability_repair_ops(), max_rounds=1))
@@ -1467,7 +1464,6 @@ def test_user_capability_kind_transition_is_atomic_and_later_param_type_edit_sta
             name="submit_batch",
             title="提交用印申请",
             kind="submit",
-            step_ids=["submit"],
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
             confirmed=True,
         )],
@@ -1536,7 +1532,6 @@ def test_auto_fix_deterministically_adds_batch_loop_maps_and_output():
         capabilities=[FlowCapability(
             name="submit_batch",
             kind="submit_batch",
-            step_ids=["submit"],
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
         )],
     )
@@ -1765,7 +1760,6 @@ def test_valid_locked_capability_fields_and_dependencies_survive():
         capabilities=[FlowCapability(
             name="submit_batch",
             kind="submit_batch",
-            step_ids=["submit"],
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
         )],
     )
@@ -2371,8 +2365,8 @@ def test_reorder_missing_raises():
 def test_reorder_capabilities_basic():
     spec = _three_step_spec()
     spec.capabilities = [
-        FlowCapability(name="query_status", kind="query_status", step_ids=["A"]),
-        FlowCapability(name="submit_batch", kind="submit_batch", step_ids=["B"]),
+        FlowCapability(name="query_status", kind="query_status", nodes=_call_nodes(["A"])),
+        FlowCapability(name="submit_batch", kind="submit_batch", nodes=_call_nodes(["B"])),
     ]
 
     new = apply_flow_edits(spec, [{"op": "reorder_capabilities", "capability_names": ["submit_batch", "query_status"]}])
@@ -2384,8 +2378,8 @@ def test_reorder_capabilities_basic():
 def test_reorder_capabilities_missing_raises():
     spec = _three_step_spec()
     spec.capabilities = [
-        FlowCapability(name="query_status", kind="query_status", step_ids=["A"]),
-        FlowCapability(name="submit_batch", kind="submit_batch", step_ids=["B"]),
+        FlowCapability(name="query_status", kind="query_status", nodes=_call_nodes(["A"])),
+        FlowCapability(name="submit_batch", kind="submit_batch", nodes=_call_nodes(["B"])),
     ]
 
     with pytest.raises(ValueError, match="reorder_capabilities"):
@@ -2395,8 +2389,8 @@ def test_reorder_capabilities_missing_raises():
 def test_reorder_capabilities_by_capability_id_when_name_empty():
     spec = _three_step_spec()
     spec.capabilities = [
-        FlowCapability(name="", capability_id="cap_a", kind="query_status", step_ids=["A"]),
-        FlowCapability(name="", capability_id="cap_b", kind="submit_batch", step_ids=["B"]),
+        FlowCapability(name="", capability_id="cap_a", kind="query_status", nodes=_call_nodes(["A"])),
+        FlowCapability(name="", capability_id="cap_b", kind="submit_batch", nodes=_call_nodes(["B"])),
     ]
 
     new = apply_flow_edits(spec, [{"op": "reorder_capabilities", "capability_refs": ["cap_b", "cap_a"]}])
@@ -2656,7 +2650,7 @@ def test_sync_capability_scoped_views_prunes_noisy_submit_steps():
         flow_id="cap-sync-prune",
         steps=[option, query, submit],
         links=[FlowLink(source_step_id="query", source_path="data.key", target_step_id="submit", target_path="processDefKey")],
-        capabilities=[FlowCapability(name="submit_batch", kind="submit_batch", step_ids=["opt", "query", "submit"])],
+        capabilities=[FlowCapability(name="submit_batch", kind="submit_batch", nodes=_call_nodes(["opt", "query", "submit"]))],
     )
 
     synced = sync_flow_spec_models(spec)
@@ -2989,7 +2983,6 @@ def test_promoted_read_is_ordered_before_write_and_rebuilds_dependency():
         capabilities=[FlowCapability(
             name="submit_batch",
             kind="submit_batch",
-            step_ids=["write"],
             nodes=[{"id": "call_1", "type": "call", "step_id": "write"}],
             confirmed=True,
             requires_human_confirm=False,
@@ -3054,7 +3047,6 @@ def test_add_capability_step_from_request_fact_updates_usage_index_and_refs():
         capabilities=[FlowCapability(
             name="submit_batch",
             kind="submit_batch",
-            step_ids=["write"],
             nodes=[{"id": "call_write", "type": "call", "step_id": "write"}],
         )],
         request_facts={
@@ -3105,7 +3097,6 @@ def test_remove_capability_step_clears_request_usage_without_deleting_step():
         capabilities=[FlowCapability(
             name="query_status",
             kind="query_status",
-            step_ids=["read"],
             nodes=[{"id": "call_read", "type": "call", "step_id": "read"}],
         )],
         request_facts={
@@ -3187,7 +3178,6 @@ def test_capability_scoped_view_uses_param_as_truth_over_locked_mirror():
         capabilities=[FlowCapability(
             name="submit_batch",
             kind="submit_batch",
-            step_ids=["submit"],
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
             request_fields=[CapabilityField(
                 field_id="request_field:submit:type",
@@ -3231,21 +3221,18 @@ def test_auto_fix_routes_option_and_status_requests_to_matching_capabilities():
             FlowCapability(
                 name="list_options",
                 kind="list_options",
-                step_ids=[],
                 nodes=[],
                 confirmed=False,
             ),
             FlowCapability(
                 name="query_status",
                 kind="query_status",
-                step_ids=[],
                 nodes=[],
                 confirmed=False,
             ),
             FlowCapability(
                 name="submit_batch",
                 kind="submit_batch",
-                step_ids=["submit"],
                 nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
                 confirmed=False,
             ),
@@ -3363,7 +3350,6 @@ def test_capability_validation_drops_stale_missing_node_step():
         capabilities=[FlowCapability(
             name="query_status",
             kind="query_status",
-            step_ids=["query", "stale-request-id"],
             nodes=[{"id": "bad_call", "type": "call", "step_id": "missing"}],
             confirmed=True,
             requires_human_confirm=False,
@@ -3412,7 +3398,6 @@ def test_capability_validation_ignores_stale_scoped_copies_but_checks_active_out
         capabilities=[FlowCapability(
             name="submit_user",
             kind="submit",
-            step_ids=["read", "write"],
             nodes=[
                 {"id": "call_read", "type": "call", "step_id": "read"},
                 {"id": "call_write", "type": "call", "step_id": "write"},
@@ -3485,7 +3470,6 @@ def test_capability_validator_reports_deep_p1_field_and_loop_findings():
         capabilities=[FlowCapability(
             name="submit_batch",
             kind="submit_batch",
-            step_ids=["submit"],
             nodes=[{
                 "id": "foreach_entries",
                 "type": "foreach",
@@ -3569,7 +3553,6 @@ def test_confirmed_capability_blocks_enum_without_label_value_mapping():
         capabilities=[FlowCapability(
             name="submit_leave",
             kind="submit",
-            step_ids=["submit"],
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
             output_mapping=[{"kind": "final_response", "step_id": "submit", "response_path": "response"}],
             confirmed=True,
@@ -3601,7 +3584,6 @@ def test_confirmed_capability_blocks_required_internal_request_field_without_sou
         capabilities=[FlowCapability(
             name="submit_leave",
             kind="submit",
-            step_ids=["submit"],
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
             request_fields=[CapabilityField(
                 field_id="proc",
@@ -3646,7 +3628,6 @@ def test_confirmation_records_operator_decision_without_model_veto():
         capabilities=[FlowCapability(
             name="submit",
             kind="submit",
-            step_ids=["submit"],
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
             output_mapping=[{"kind": "final_response", "step_id": "submit", "response_path": "response"}],
         )],
@@ -3701,7 +3682,7 @@ def test_scalar_type_controls_capability_schema_without_deleting_enum_evidence()
             selects=[SelectBinding(param="类型", path="type", options=[{"label": "甲", "value": "A"}])],
         )],
         capabilities=[FlowCapability(
-            name="submit", kind="submit", step_ids=["submit"],
+            name="submit", kind="submit", nodes=_call_nodes(["submit"]),
             input_schema={"type": "object", "properties": {
                 "类型": {"type": "string", "enum": ["甲"], "x-options": ["甲"], "format": "name-ref"},
             }},
@@ -3838,7 +3819,7 @@ def test_capability_schema_separates_enum_business_type_from_numeric_wire_type()
                 enum_options=[{"label": "病假", "value": 2}], enum_value_map={"病假": 2},
             )],
         )],
-        capabilities=[FlowCapability(name="submit", kind="submit", step_ids=["submit"])],
+        capabilities=[FlowCapability(name="submit", kind="submit", nodes=_call_nodes(["submit"]))],
     )
 
     prepared, release = prepare_flow_release_candidate(spec)
@@ -3907,7 +3888,6 @@ def test_strict_skill_level_reports_advice_without_publish_veto():
         capabilities=[FlowCapability(
             name="submit_form",
             kind="submit",
-            step_ids=["submit"],
             nodes=[
                 {"id": "call_submit", "type": "call", "step_id": "submit"},
                 {"id": "return_result", "type": "return", "from": "submit", "path": "response"},
@@ -3942,7 +3922,6 @@ def test_unconfirmed_capability_relation_type_mismatch_is_p1_warning_not_publish
             FlowCapability(
                 name="read_count",
                 kind="submit",
-                step_ids=["write"],
                 nodes=[
                     {"id": "call_write", "type": "call", "step_id": "write"},
                     {"id": "return_result", "type": "return", "from": "write", "path": "response"},
@@ -3954,7 +3933,6 @@ def test_unconfirmed_capability_relation_type_mismatch_is_p1_warning_not_publish
             FlowCapability(
                 name="submit_items",
                 kind="submit",
-                step_ids=["write"],
                 nodes=[
                     {"id": "call_write", "type": "call", "step_id": "write"},
                     {"id": "return_result", "type": "return", "from": "write", "path": "response"},
@@ -4000,7 +3978,6 @@ def test_confirmed_capability_relation_type_mismatch_blocks_publish_gate():
             FlowCapability(
                 name="read_count",
                 kind="submit",
-                step_ids=["write"],
                 nodes=[{"id": "call_write", "type": "call", "step_id": "write"}],
                 output_schema={"type": "object", "properties": {"count": {"type": "number"}}},
                 confirmed=True,
@@ -4009,7 +3986,6 @@ def test_confirmed_capability_relation_type_mismatch_blocks_publish_gate():
             FlowCapability(
                 name="submit_items",
                 kind="submit",
-                step_ids=["write"],
                 nodes=[{"id": "call_write", "type": "call", "step_id": "write"}],
                 input_schema={"type": "object", "properties": {"items": {"type": "array"}}},
                 confirmed=True,
@@ -4042,7 +4018,6 @@ def test_generate_capabilities_edit_is_incremental():
             name="submit_batch",
             title="人工确认标题",
             kind="submit_batch",
-            step_ids=[],
             nodes=[],
             confirmed=True,
             requires_human_confirm=False,
@@ -4075,7 +4050,6 @@ def test_generate_capabilities_respects_removed_capability_step():
         capabilities=[FlowCapability(
             name="submit_batch",
             kind="submit_batch",
-            step_ids=["read", "submit"],
             nodes=[
                 {"id": "call_1", "type": "call", "step_id": "read"},
                 {"id": "call_2", "type": "call", "step_id": "submit"},
@@ -4100,7 +4074,6 @@ def test_update_capability_step_order_preserves_user_order_independent_of_global
         capabilities=[FlowCapability(
             name="custom_order",
             kind="submit",
-            step_ids=["read", "submit"],
             nodes=[
                 {"id": "call_1", "type": "call", "step_id": "read"},
                 {"id": "call_2", "type": "call", "step_id": "submit"},
@@ -4122,7 +4095,7 @@ def test_generate_capabilities_respects_removed_capability():
     spec = FlowSpec(
         flow_id="f",
         steps=[FlowStep(step_id="submit", method="POST", url="/api/submit", path="/api/submit")],
-        capabilities=[FlowCapability(name="submit_batch", kind="submit_batch", step_ids=["submit"])],
+        capabilities=[FlowCapability(name="submit_batch", kind="submit_batch", nodes=_call_nodes(["submit"]))],
     )
 
     edited = apply_flow_edits(spec, [{"op": "remove_capability", "capability_index": 0}])
@@ -4244,7 +4217,6 @@ def _two_capability_compile_spec():
                 name="query_status",
                 capability_id="cap-query",
                 kind="query_status",
-                step_ids=["status"],
                 nodes=[
                     {"id": "call_status", "type": "call", "step_id": "status"},
                     {"id": "return_status", "type": "return", "from": "status", "path": "response.data.status"},
@@ -4260,7 +4232,6 @@ def _two_capability_compile_spec():
                 name="submit_batch",
                 capability_id="cap-submit",
                 kind="submit_batch",
-                step_ids=["submit"],
                 nodes=[
                     {"id": "call_submit", "type": "call", "step_id": "submit"},
                     {"id": "return_submit", "type": "return", "from": "submit", "path": "response.data.processId"},
@@ -4451,7 +4422,6 @@ def test_capability_return_node_without_source_is_normalized_to_last_call():
             name="submit_batch",
             title="提交业务申请",
             kind="submit_batch",
-            step_ids=["read", "submit"],
             nodes=[
                 {"id": "node_1", "type": "call", "step_id": "read"},
                 {"id": "node_2", "type": "call", "step_id": "submit"},
@@ -4581,7 +4551,6 @@ def test_unknown_source_review_is_locatable_ignorable_and_non_blocking_after_cap
     spec.capabilities = [FlowCapability(
         name="submit",
         kind="submit",
-        step_ids=["step1"],
         nodes=[{"id": "call_step1", "type": "call", "step_id": "step1"}],
     )]
 
@@ -4674,7 +4643,6 @@ def test_missing_runtime_source_configuration_is_advisory(
     )], capabilities=[FlowCapability(
         name="query_status",
         kind="query_status",
-        step_ids=["query"],
         nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
     )])
 
@@ -4719,7 +4687,6 @@ def test_source_warning_does_not_hide_unrelated_request_builder_error():
     )], capabilities=[FlowCapability(
         name="submit",
         kind="submit",
-        step_ids=["submit"],
         nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
     )])
 
@@ -4742,7 +4709,6 @@ def test_orchestrate_existing_capability_reanalyses_uncovered_recorded_interface
         capabilities=[FlowCapability(
             name="submit_batch",
             kind="submit_batch",
-            step_ids=["submit"],
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
             title="用户已经编辑的能力",
             updated_by="user",
@@ -4812,10 +4778,14 @@ def test_recording_submission_rejects_destructive_incremental_operations():
     spec = FlowSpec(
         steps=[query, submit], links=[link], capability_relations=[relation],
         capabilities=[
-            FlowCapability(name="query_status", kind="query_status", step_ids=["query"],
-                           nodes=[{"id": "call_query", "type": "call", "step_id": "query"}]),
-            FlowCapability(name="submit", kind="submit", step_ids=["submit"],
-                           nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}]),
+            FlowCapability(
+                name="query_status", kind="query_status",
+                nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
+            ),
+            FlowCapability(
+                name="submit", kind="submit",
+                nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
+            ),
         ],
         meta={"capability_model": {"status": "ready"}},
     )
@@ -4837,7 +4807,6 @@ def test_repeated_orchestration_can_reanalyse_real_interfaces_but_not_remove_the
             name="submit_batch",
             title="批量提交",
             kind="submit_batch",
-            step_ids=["submit"],
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
         )],
         meta={"capability_model": {"status": "ready"}},
@@ -4873,7 +4842,6 @@ def test_manual_field_contract_is_locked_against_planner_overwrite():
         capabilities=[FlowCapability(
             name="submit",
             kind="submit",
-            step_ids=["submit"],
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
         )],
     )
@@ -4931,7 +4899,6 @@ def test_manual_source_override_is_preserved_without_rewriting_type_or_evidence(
         capabilities=[FlowCapability(
             name="query_status",
             kind="query_status",
-            step_ids=["query"],
             nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
         )],
     )
@@ -5006,7 +4973,6 @@ def _manual_param_capability_spec(*, locked: bool = True) -> FlowSpec:
         capabilities=[FlowCapability(
             name="query_status",
             kind="query_status",
-            step_ids=["query"],
             nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
         )],
     )
@@ -5103,7 +5069,7 @@ def test_incremental_planner_cannot_overwrite_user_confirmed_capability_identity
         steps=[FlowStep(step_id="submit", method="POST", path="/submit")],
         capabilities=[FlowCapability(
             name="submit", title="人工确认标题", intent="人工确认意图", kind="submit",
-            step_ids=["submit"], confirmed=True, locked=True, updated_by="user",
+            nodes=_call_nodes(["submit"]), confirmed=True, locked=True, updated_by="user",
         )],
         meta={"capability_model": {"status": "ready"}},
     )
@@ -5136,7 +5102,7 @@ def test_incremental_semantic_candidate_with_new_validation_error_is_rolled_back
             params=[ParamField(path="title", key="标题", category="user_param", source_kind="user_input")],
         )],
         capabilities=[FlowCapability(
-            name="submit", title="提交", kind="submit", step_ids=["submit"],
+            name="submit", title="提交", kind="submit",
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
         )],
         meta={"capability_model": {"status": "ready"}},
@@ -5183,7 +5149,6 @@ def test_page_context_missing_key_is_advisory_and_differs_from_upstream_response
         capabilities=[FlowCapability(
             name="submit",
             kind="submit",
-            step_ids=["submit"],
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
         )],
     )
@@ -5217,7 +5182,6 @@ def test_orchestration_removes_empty_planner_capability():
             FlowCapability(
                 name="submit",
                 kind="submit",
-                step_ids=["submit"],
                 nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
             ),
         ],
@@ -5309,7 +5273,6 @@ def test_batch_input_schema_requires_entries_and_keeps_only_shared_fields_at_top
         capabilities=[FlowCapability(
             name="submit_batch",
             kind="submit_batch",
-            step_ids=["query", "submit"],
             nodes=[
                 {"id": "call_query", "type": "call", "step_id": "query"},
                 {"id": "foreach_entries", "type": "foreach", "items": "input.entries", "steps": [
@@ -5353,7 +5316,6 @@ def test_approval_list_in_single_form_is_not_exported_as_batch_entries():
             name="submit_batch",
             title="批量提交",
             kind="submit_batch",
-            step_ids=["submit"],
             nodes=[{"id": "foreach_entries", "type": "foreach", "items": "input.entries", "steps": [
                 {"id": "call_submit", "type": "call", "step_id": "submit"},
             ]}],
@@ -5415,7 +5377,7 @@ def test_manual_activity_id_source_is_not_overridden_by_engine_specific_rules():
         capabilities=[FlowCapability(
             name="submit",
             kind="submit",
-            step_ids=["approval"],
+            nodes=_call_nodes(["approval"]),
             confirmed=True,
             request_fields=[CapabilityField(
                 field_id="request_field:approval:query.activityId",
@@ -5513,7 +5475,7 @@ def test_capability_sync_preserves_process_field_and_excludes_option_reads_from_
         capabilities=[
             FlowCapability(
                 name="query_status", kind="query_status",
-                step_ids=["users", "leave-page"], confirmed=True,
+                nodes=_call_nodes(["users", "leave-page"]), confirmed=True,
                 output_mapping=[
                     {"name": "records", "step_id": "users", "response_path": "data.list"},
                     {"name": "records_2", "step_id": "leave-page", "response_path": "data.list"},
@@ -5521,7 +5483,7 @@ def test_capability_sync_preserves_process_field_and_excludes_option_reads_from_
             ),
             FlowCapability(
                 name="submit", kind="submit",
-                step_ids=["process", "approval", "submit"], confirmed=True,
+                nodes=_call_nodes(["process", "approval", "submit"]), confirmed=True,
                 input_schema={"type": "object", "properties": {
                     "entries": {"type": "array", "items": {"type": "object", "properties": {
                         "审批人1": {"type": "string"}, "审批人2": {"type": "string"},
@@ -5583,7 +5545,6 @@ def test_incremental_orchestration_keeps_enum_in_existing_capability():
         capabilities=[FlowCapability(
             name="submit_seal",
             kind="submit",
-            step_ids=["submit"],
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
         )],
     )
@@ -5692,13 +5653,11 @@ def test_remove_capability_cleans_relations_and_scopes_publish_findings():
             FlowCapability(
                 name="keep_cap",
                 kind="query_status",
-                step_ids=["keep"],
                 nodes=[{"id": "call_keep", "type": "call", "step_id": "keep"}],
             ),
             FlowCapability(
                 name="removed_cap",
                 kind="query_status",
-                step_ids=["removed"],
                 nodes=[{"id": "call_removed", "type": "call", "step_id": "removed"}],
             ),
         ],
@@ -5754,7 +5713,7 @@ def test_publish_validation_does_not_promote_generated_field_advice_to_issues():
                 required=True,
             )],
         )],
-        capabilities=[FlowCapability(name="submit", kind="submit", step_ids=["submit"], confirmed=True)],
+        capabilities=[FlowCapability(name="submit", kind="submit", nodes=_call_nodes(["submit"]), confirmed=True)],
         meta={"capability_model": {"status": "ready"}},
     )
 
@@ -5772,7 +5731,6 @@ def test_publish_validation_keeps_generator_advice_outside_issue_groups():
         capabilities=[FlowCapability(
             name="query_status",
             kind="query_status",
-            step_ids=["query"],
             nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
             confirmed=True,
         )],
@@ -5810,7 +5768,6 @@ def test_capability_map_accepts_quoted_constants_and_compiled_values():
         capabilities=[FlowCapability(
             name="submit",
             kind="submit",
-            step_ids=["submit"],
             nodes=[
                 {"id": "map_billType", "type": "map", "source": "'oa_duty_leave'", "target": "submit.billType"},
                 {"id": "map_processDefKey", "type": "map", "source": '"oa_duty_leave"', "target": "submit.processDefKey"},
@@ -5837,7 +5794,7 @@ def _enum_policy_spec(param: ParamField, *, confirmed: bool = False) -> FlowSpec
             params=[param], response_json={"data": {"list": []}}, success_rule={"path": "data.list"},
         )],
         capabilities=[FlowCapability(
-            name="query_status", kind="query_status", step_ids=["query"],
+            name="query_status", kind="query_status",
             nodes=[{"id": "call_query", "type": "call", "step_id": "query"}],
             output_mapping=[{"kind": "final_response", "step_id": "query", "response_path": "response"}],
             confirmed=confirmed, requires_human_confirm=not confirmed,

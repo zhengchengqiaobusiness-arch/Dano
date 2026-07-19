@@ -976,8 +976,7 @@ _RECORDER_JS = r"""() => {
 class RecordSession:
     """一次网页内录制。start→(用户经截屏+输入回传操作)→recorded_steps→stop。"""
 
-    def __init__(self, *, on_step: Callable[[dict], None] | None = None,
-                 on_request: Callable[[dict], None] | None = None,
+    def __init__(self, *, on_request: Callable[[dict], None] | None = None,
                  intercept_submit: bool = True, capture_reads: bool = True) -> None:
         self.steps: list[dict] = []
         # 点击提交时保存的页面语义/必填快照。它独立于操作步骤，避免弹窗关闭后
@@ -1010,7 +1009,6 @@ class RecordSession:
         self._frame_counter: int = 0
         self._page_ids: dict[int, str] = {}
         self._frame_ids: dict[int, str] = {}
-        self._on_step = on_step
         self._on_request_cb = on_request    # 实时把抓到的请求推给前端(诊断可见)
         # 拦截提交:点提交时抓到业务写请求后,假装成功、不真发给服务器 → 录制不产生真实记录
         self._intercept = intercept_submit
@@ -1473,10 +1471,6 @@ class RecordSession:
         """返回脱敏后的页面观察时间线，不包含输入值或响应正文。"""
         return [dict(event) for event in self.page_events]
 
-    def recorded_raw_steps(self) -> list[dict]:
-        """返回原始录制步骤副本。用于 finalize 前 flush 后补齐前端尚未收到的最后输入。"""
-        return [dict(s) for s in self.steps]
-
     def _resp_dispatch(self, response) -> None:  # noqa: ANN001 —— 同步快筛后再异步读 body
         try:
             m = (response.request.method or "").upper()
@@ -1742,12 +1736,6 @@ class RecordSession:
             self.steps[-1] = step
         else:
             self.steps.append(step)
-        if self._on_step is not None:
-            try:
-                self._on_step(step)
-            except Exception:  # noqa: BLE001
-                pass
-
     # ── P0-1 诊断事件:console / pageerror / requestfailed ──
     def _on_console(self, msg) -> None:  # noqa: ANN001 —— context 级 console 事件
         try:
@@ -1935,8 +1923,6 @@ class RecordSession:
     async def dispatch_input(self, ev: dict) -> dict:
         """把前端输入转发给活动页，任何单次 Playwright 异常都不得终止录制会话。
 
-        COMPAT[REC-INPUT-MOUSE-ALIASES]: pointer_* 是当前协议，mouse_* 是旧客户端消费者。
-        删除条件：协议遥测确认 mouse_* 为零且最低前端版本已升级；目标 recording protocol v4。
         返回值供直接调用方诊断；WebSocket
         当前无需消费它。失败后不自动重放输入，避免操作已部分生效时造成双击/重复提交。
         """
@@ -1956,12 +1942,12 @@ class RecordSession:
                 await page.mouse.dblclick(x, y, button=button)
             elif kind in {"right_click", "contextmenu"}:
                 await page.mouse.click(x, y, button="right")
-            elif kind in {"pointer_move", "mouse_move", "hover"}:
+            elif kind in {"pointer_move", "hover"}:
                 await page.mouse.move(x, y, steps=steps)
-            elif kind in {"pointer_down", "mouse_down"}:
+            elif kind == "pointer_down":
                 await page.mouse.move(x, y)
                 await page.mouse.down(button=button, click_count=click_count)
-            elif kind in {"pointer_up", "mouse_up"}:
+            elif kind == "pointer_up":
                 await page.mouse.move(x, y)
                 await page.mouse.up(button=button, click_count=click_count)
             elif kind == "drag":

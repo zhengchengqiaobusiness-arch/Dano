@@ -142,14 +142,3 @@ class SkillLifecycle:
     async def resume_no_change(self, skill_id: str) -> SkillRecord:
         """人工确认无需改资产 → 直接恢复运行。"""
         return await self.transition(skill_id, SkillState.RUNNING)
-
-    async def recover_via_patch(self, skill_id: str, new_version: int) -> SkillRecord:
-        """流程11 生成补丁后恢复:异常暂停→绑定资产→测试中→待发布→已发布→运行中。"""
-        await self.drive(skill_id, [
-            SkillState.BOUND, SkillState.TESTING, SkillState.PENDING_RELEASE,
-            SkillState.PUBLISHED, SkillState.RUNNING,
-        ])
-        rec = await self.store.get(skill_id)
-        rec.asset_version = new_version
-        await self.store.put(rec)
-        return rec

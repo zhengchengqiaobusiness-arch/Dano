@@ -33,6 +33,13 @@ from dano.execution.page.flow_spec import (
     to_flow_spec,
     validate_flow_spec,
 )
+
+
+def _call_nodes(step_ids: list[str]) -> list[dict]:
+    return [
+        {"id": f"call_{index}", "type": "call", "step_id": step_id}
+        for index, step_id in enumerate(step_ids)
+    ]
 from dano.execution.page.repair_ops import collect_capability_findings
 
 
@@ -118,7 +125,7 @@ def test_optimize_fills_placeholder_capability_title_and_intent_without_model_gu
         )],
         capabilities=[FlowCapability(
             name="capability_2", title="能力 2", intent="", kind="submit",
-            step_ids=["cancel"], nodes=[{"id": "call_cancel", "type": "call", "step_id": "cancel"}],
+            nodes=[{"id": "call_cancel", "type": "call", "step_id": "cancel"}],
         )],
         meta={"capability_model": {"status": "ready"}},
     )
@@ -145,7 +152,6 @@ def test_capability_explanation_matching_never_compares_tied_plan_dicts():
             title="Capability 1",
             intent="",
             kind="query_status",
-            step_ids=["definition"],
             nodes=[{
                 "id": "call_definition",
                 "type": "call",
@@ -249,7 +255,6 @@ def test_capability_nodes_expand_stale_step_ids_and_derive_all_three_step_views(
         capabilities=[FlowCapability(
             name="submit_leave",
             kind="submit",
-            step_ids=["submit"],
             nodes=[
                 {"id": "call_definition", "type": "call", "step_id": "definition"},
                 {"id": "call_detail", "type": "call", "step_id": "detail"},
@@ -284,7 +289,6 @@ def test_remove_capability_step_recursively_clears_nested_condition_map_and_loop
         capabilities=[FlowCapability(
             name="nested",
             kind="submit",
-            step_ids=["keep", "remove"],
             nodes=[{
                 "id": "condition_1",
                 "type": "condition",
@@ -352,7 +356,6 @@ def test_stale_capability_fields_are_removed_from_validation_and_input_schema():
             name="submit_leave",
             title="提交请假",
             kind="submit",
-            step_ids=["submit"],
             nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
             fields=[stale],
             inputs=[stale],
@@ -874,7 +877,7 @@ def test_planner_batch_kind_uses_same_recorded_evidence_as_default_planner():
         capabilities=[FlowCapability(
             name="submit_batch",
             kind="submit_batch",
-            step_ids=["submit_one"],
+            nodes=_call_nodes(["submit_one"]),
             evidence=[{"kind": "planner"}],
         )],
     )
@@ -1037,7 +1040,6 @@ def test_reoptimization_can_refresh_auto_accepted_semantics_but_keeps_user_owned
     auto = FlowCapability(
         name="submit", title="提交业务申请",
         intent="调用方提供业务字段；Skill 按已纳入接口顺序执行前置查询、依赖注入和最终提交。",
-        kind="submit", step_ids=["withdraw"],
         nodes=[{"id": "call_withdraw", "type": "call", "step_id": "withdraw"}],
         confirmed=True, updated_by="planner", confidence=0.95,
     )
@@ -1086,7 +1088,7 @@ def test_page_enum_binding_is_projected_to_param_and_capability_contract():
     )
     spec = FlowSpec(
         steps=[step],
-        capabilities=[FlowCapability(name="submit", kind="submit", step_ids=["submit"])],
+        capabilities=[FlowCapability(name="submit", kind="submit", nodes=_call_nodes(["submit"]))],
     )
 
     prepared = prepare_flow_spec_for_publish(spec)
@@ -1123,7 +1125,7 @@ def test_api_option_binding_preserves_source_request_in_capability_field():
     )
     spec = FlowSpec(
         steps=[step],
-        capabilities=[FlowCapability(name="submit", kind="submit", step_ids=["submit"])],
+        capabilities=[FlowCapability(name="submit", kind="submit", nodes=_call_nodes(["submit"]))],
     )
 
     prepared = prepare_flow_spec_for_publish(spec)
@@ -1199,7 +1201,7 @@ def test_empty_api_candidates_are_valid_and_do_not_emit_dynamic_enum_warning():
     )
     report = validate_flow_spec(FlowSpec(
         steps=[step],
-        capabilities=[FlowCapability(name="submit", kind="submit", step_ids=["submit"])],
+        capabilities=[FlowCapability(name="submit", kind="submit", nodes=_call_nodes(["submit"]))],
     ))
     messages = [*report["errors"], *report["warnings"]]
 
@@ -1455,7 +1457,6 @@ def test_screenshot_semantic_plan_updates_canonical_capability_and_field_contrac
             title="提交",
             intent="旧能力说明",
             kind="submit",
-            step_ids=["submit"],
             nodes=[{"id": "call_1", "type": "call", "step_id": "submit"}],
         )],
     )
@@ -1521,7 +1522,6 @@ def test_screenshot_plan_cannot_overwrite_grounded_field_axes():
             body_source='{"projectId":"p-1"}', params=[field],
         )],
         capabilities=[FlowCapability(
-            name="submit_timesheet", kind="submit", step_ids=["submit"],
             nodes=[{"id": "call_1", "type": "call", "step_id": "submit"}],
         )],
     )
@@ -1615,7 +1615,6 @@ def test_complete_semantic_plan_can_split_planner_managed_aggregate_during_optim
             name="submit_order",
             title="旧聚合能力",
             kind="submit",
-            step_ids=["draft", "commit"],
             nodes=[
                 {"id": "draft_call", "type": "call", "step_id": "draft"},
                 {"id": "commit_call", "type": "call", "step_id": "commit"},
@@ -1719,7 +1718,7 @@ def test_publish_preparation_removes_stale_batch_fields_outputs_and_goal_capabil
         response_json={"code": 0, "data": {"id": "leave-1"}},
     )
     capability = FlowCapability(
-        name="submit", kind="submit", step_ids=["submit"],
+        name="submit", kind="submit", nodes=_call_nodes(["submit"]),
         input_schema={"type": "object", "properties": {"entries": {"type": "array"}}, "required": ["entries"]},
         output_schema={"type": "object", "properties": {}},
         inputs=[CapabilityField(scope="input", key="entries", path="entries", type="array", locked=True)],
@@ -1752,7 +1751,7 @@ def test_final_response_output_uses_one_canonical_name_in_fields_and_schema():
     spec = FlowSpec(
         steps=[step],
         capabilities=[FlowCapability(
-            name="submit", kind="submit", step_ids=["submit"],
+            name="submit", kind="submit", nodes=_call_nodes(["submit"]),
             output_mapping=[{"kind": "final_response", "step_id": "submit", "response_path": "response"}],
         )],
     )
@@ -1781,8 +1780,8 @@ def test_relation_without_field_mapping_is_canonicalized_as_caller_decision():
     spec = FlowSpec(
         steps=[query, submit],
         capabilities=[
-            FlowCapability(name="query_status", kind="query_status", step_ids=["query"]),
-            FlowCapability(name="submit", kind="submit", step_ids=["submit"]),
+            FlowCapability(name="query_status", kind="query_status", nodes=_call_nodes(["query"])),
+            FlowCapability(name="submit", kind="submit", nodes=_call_nodes(["submit"])),
         ],
         capability_relations=[CapabilityRelation(
             relation_id="legacy-empty-transform",
@@ -1912,7 +1911,6 @@ def test_uploading_screenshot_after_an_image_free_pass_reanalyzes_the_same_field
             title="Submit",
             intent="Submit",
             kind="submit",
-            step_ids=["submit"],
             nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
         )],
     )
@@ -2050,7 +2048,6 @@ def test_screenshot_textarea_replaces_stale_automatic_api_option_binding():
             title="Submit seal application",
             intent="Submit seal application",
             kind="submit",
-            step_ids=["submit"],
             nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
         )],
     )
@@ -2207,7 +2204,6 @@ def test_complete_reanalysis_replaces_auto_relations_and_keeps_confirmed_relatio
                 title="Query orders",
                 intent="Query orders",
                 kind="query_status",
-                step_ids=["query"],
                 nodes=[{"id": "query_call", "type": "call", "step_id": "query"}],
             ),
             FlowCapability(
@@ -2215,7 +2211,6 @@ def test_complete_reanalysis_replaces_auto_relations_and_keeps_confirmed_relatio
                 title="Archive orders",
                 intent="Archive selected orders",
                 kind="submit",
-                step_ids=["submit"],
                 nodes=[{"id": "submit_call", "type": "call", "step_id": "submit"}],
             ),
         ],

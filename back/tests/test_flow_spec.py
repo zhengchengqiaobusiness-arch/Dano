@@ -25,6 +25,13 @@ from dano.execution.page.flow_spec import (
 )
 
 
+def _call_nodes(step_ids: list[str]) -> list[dict]:
+    return [
+        {"id": f"call_{index}", "type": "call", "step_id": step_id}
+        for index, step_id in enumerate(step_ids)
+    ]
+
+
 def _post(url, body, method="POST", resp=None, headers=None):
     return {
         "method": method, "url": url,
@@ -742,7 +749,7 @@ class ToFlowSpecTest(unittest.TestCase):
             flow_id="cap-fields",
             steps=[start, submit],
             links=[link],
-            capabilities=[FlowCapability(name="submit_batch", kind="submit_batch", step_ids=["start", "submit"])],
+            capabilities=[FlowCapability(name="submit_batch", kind="submit_batch", nodes=_call_nodes(["start", "submit"]))],
         )
 
         cap = spec.capabilities[0]
@@ -1018,7 +1025,6 @@ class GetBusinessStepTest(unittest.TestCase):
             capabilities=[FlowCapability(
                 name="submit_batch",
                 kind="submit_batch",
-                step_ids=["submit", "missing"],
                 nodes=[{"id": "call_missing", "type": "call", "step_id": "missing"}],
                 confirmed=True,
                 requires_human_confirm=False,
@@ -1080,7 +1086,6 @@ class GetBusinessStepTest(unittest.TestCase):
                 name="submit_batch",
                 title="人工改过的标题",
                 kind="submit_batch",
-                step_ids=["submit"],
                 nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
                 input_schema={"type": "object"},
                 confirmed=True,

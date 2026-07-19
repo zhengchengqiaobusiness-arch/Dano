@@ -50,8 +50,8 @@ def _skill() -> SkillSpec:
     )
 
 
-def test_payload_fields_merges_arguments_then_input_and_marks_capability():
-    payload = CapabilityInvokePayload(arguments={"month": "2026-05", "x": 1}, input={"x": 2})
+def test_payload_fields_uses_input_and_marks_capability():
+    payload = CapabilityInvokePayload(input={"month": "2026-05", "x": 2})
 
     assert payload_fields(payload, "query_status") == {
         "month": "2026-05",
@@ -64,14 +64,12 @@ def test_capability_payload_rejects_unknown_protocol_fields():
     import pytest
     from pydantic import ValidationError
 
-    payload = CapabilityInvokePayload(
-        input={}, name="A-OA__submit", capability="query_status",
-        protocol="dano.capability_call.v1",
-    )
-    assert payload.capability == "query_status"
+    payload = CapabilityInvokePayload(input={}, protocol="dano.capability_call.v1")
+    assert payload.input == {}
 
-    with pytest.raises(ValidationError):
-        CapabilityInvokePayload(input={}, unexpected=True)
+    for obsolete in ({"unexpected": True}, {"arguments": {}}, {"name": "tool"}, {"capability": "query"}):
+        with pytest.raises(ValidationError):
+            CapabilityInvokePayload(input={}, **obsolete)
 
     with pytest.raises(ValidationError):
         CapabilityInvokePayload(input={}, protocol="dano.capability_call.v2")
@@ -194,17 +192,12 @@ async def test_capability_invoke_rejects_invalid_batch_shape_before_execution():
     assert "array" in out["detail"]
 
 
-async def test_capability_invoke_returns_controlled_error_for_non_object_arguments():
-    out = await invoke_skill_capability(
-        skill=_skill(),
-        capability="query_status",
-        payload=CapabilityInvokePayload(arguments="[]"),
-        api_request={"method": "GET", "url": "http://x/status"},
-    )
+def test_capability_payload_rejects_non_object_input():
+    import pytest
+    from pydantic import ValidationError
 
-    assert out["ok"] is False
-    assert out["stage"] == "invalid_input"
-    assert "JSON objects" in out["detail"]
+    with pytest.raises(ValidationError):
+        CapabilityInvokePayload(input=[])
 
 
 def test_normalized_capability_result_preserves_fact_check_state():

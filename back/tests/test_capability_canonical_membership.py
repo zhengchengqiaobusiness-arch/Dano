@@ -43,20 +43,6 @@ def _spec(capability: FlowCapability) -> FlowSpec:
     )
 
 
-def test_legacy_step_ids_are_migrated_once_into_call_nodes() -> None:
-    spec = _spec(FlowCapability(name="submit", step_ids=["query", "submit"]))
-
-    _normalize_capability_references(spec)
-
-    cap = spec.capabilities[0]
-    assert [node["step_id"] for node in cap.nodes if node.get("type") == "call"] == ["query", "submit"]
-    assert cap.step_ids == ["query", "submit"]
-    assert [(ref.step_id, ref.request_id, ref.usage) for ref in cap.request_refs] == [
-        ("query", "req-query", "execute"),
-        ("submit", "req-submit", "execute"),
-    ]
-
-
 def test_nodes_override_divergent_derived_membership_views() -> None:
     spec = _spec(FlowCapability(
         name="submit",

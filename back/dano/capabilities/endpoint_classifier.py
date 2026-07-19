@@ -32,8 +32,3 @@ def classify(action: ActionSpec, *, extra_infra: tuple[str, ...] = ()) -> str:
     if action.method.upper() == "GET" or action.name.lower().startswith(_QUERY_PREFIXES):
         return QUERY
     return BUSINESS
-
-
-def is_business_skill(action: ActionSpec, *, extra_infra: tuple[str, ...] = ()) -> bool:
-    """是否应暴露成业务 Skill(查询 + 业务动作 = 是;基础设施 = 否)。"""
-    return classify(action, extra_infra=extra_infra) != INFRASTRUCTURE

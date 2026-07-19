@@ -26,40 +26,15 @@ READ_ONLY_CAPABILITY_KINDS = {
 class CapabilityInvokePayload(BaseModel):
     """Normalized external capability invocation payload."""
 
-    input: dict[str, Any] | None = Field(default_factory=dict)
-    arguments: dict[str, Any] | str | None = Field(default_factory=dict)
+    input: dict[str, Any] = Field(default_factory=dict)
     confirm: bool = False
     dry_run: bool = False
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    idempotency_key: str | None = None
-    name: str | None = None
-    capability: str | None = None
     protocol: Literal["dano.capability_call.v1"] = "dano.capability_call.v1"
 
     model_config = ConfigDict(extra="forbid")
 
-    def effective_arguments(self) -> dict[str, Any]:
-        return _dict_from(self.arguments)
-
-    def effective_input(self) -> dict[str, Any]:
-        return _dict_from(self.input)
-
-
-def _dict_from(value: Any) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return dict(value)
-    if isinstance(value, str):
-        parsed = json.loads(value or "{}")
-        if isinstance(parsed, dict):
-            return dict(parsed)
-    raise ValueError("capability input and arguments must be JSON objects")
-
-
 def payload_fields(payload: CapabilityInvokePayload, capability: str) -> dict[str, Any]:
-    fields = payload.effective_arguments()
-    fields.update(payload.effective_input())
+    fields = dict(payload.input)
     fields["__capability"] = capability
     return fields
 

@@ -173,12 +173,6 @@ class DraftStore:
             )
         return self._rrun(row)
 
-    async def list_reviews(self, asset_draft_id: UUID) -> list[ReviewRun]:
-        async with get_pool().acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT * FROM review_runs WHERE asset_draft_id=$1 ORDER BY created_at", asset_draft_id)
-        return [self._rrun(r) for r in rows]
-
     async def verify_reviewed(
         self, asset_draft_id: UUID, review_run_ids: list[UUID]
     ) -> tuple[bool, str]:

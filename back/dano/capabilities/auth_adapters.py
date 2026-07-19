@@ -33,10 +33,3 @@ def select_adapter(auth_hint: str) -> AuthAdapter:
         if score > best_score:
             best, best_score = adapter, score
     return best or _REGISTRY[1]  # 默认 Token
-
-
-def get_adapter(kind: AuthKind) -> AuthAdapter:
-    for adapter in _REGISTRY:
-        if adapter.kind == kind:
-            return adapter
-    raise KeyError(kind)

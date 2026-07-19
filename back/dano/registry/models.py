@@ -66,13 +66,3 @@ class TenantRecord(BaseModel):
     worker_location: str = ""
     log_policy: str = ""
     api_key: str = Field(default_factory=new_api_key)
-
-
-class SystemInstance(BaseModel):
-    """系统实例(流程1 第3步「创建系统实例 A-OA / A-工单 / A-报销」)。"""
-
-    tenant: str
-    subsystem: Subsystem
-    type_template: str               # 选用的模板 id
-    integration: str                 # api / page
-    status: str = "created"          # created → onboarded

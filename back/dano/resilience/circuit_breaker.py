@@ -1,17 +1,12 @@
 """流程10:同类失败计数 + 达阈值熔断。
 
-计数器接口化(CounterStore):离线/测试用 InMemoryCounter,生产用 RedisCounter(骨架)。
+计数器接口化(CounterStore):离线用 InMemoryCounter，生产用 PgFailureCounter。
 按 (skill_id, failure_class) 计数;达阈值 → 触发熔断(由调用方暂停 Skill,进流程12)。
 """
 
 from __future__ import annotations
 
 from typing import Protocol
-
-import structlog
-
-log = structlog.get_logger(__name__)
-
 
 class CounterStore(Protocol):
     async def incr(self, key: str) -> int: ...
@@ -53,36 +48,3 @@ class PgFailureCounter:
         async with get_pool().acquire() as conn:
             await conn.execute(
                 "DELETE FROM failure_counts WHERE counter_key LIKE $1 ESCAPE '\\'", like)
-
-
-class RedisCounter:  # pragma: no cover - 需 Redis
-    """生产计数器(骨架):INCR + 滑动窗口 TTL。"""
-
-    def __init__(self, client) -> None:  # noqa: ANN001
-        self._r = client
-
-    async def incr(self, key: str) -> int:
-        n = await self._r.incr(f"dano:fail:{key}")
-        await self._r.expire(f"dano:fail:{key}", 3600)
-        return int(n)
-
-    async def reset_prefix(self, prefix: str) -> None:
-        async for k in self._r.scan_iter(f"dano:fail:{prefix}*"):
-            await self._r.delete(k)
-
-
-class CircuitBreaker:
-    def __init__(self, counter: CounterStore | None = None, *, threshold: int = 3) -> None:
-        self.counter = counter or InMemoryCounter()
-        self.threshold = threshold
-
-    async def record_failure(self, skill_id: str, failure_class: str) -> tuple[int, bool]:
-        """记一次同类失败,返回(当前计数, 是否达阈值需熔断)。"""
-        count = await self.counter.incr(f"{skill_id}:{failure_class}")
-        tripped = count >= self.threshold
-        log.info("circuit.record", skill_id=skill_id, fc=failure_class, count=count, tripped=tripped)
-        return count, tripped
-
-    async def reset(self, skill_id: str) -> None:
-        """成功后清零该 Skill 的失败计数。"""
-        await self.counter.reset_prefix(f"{skill_id}:")

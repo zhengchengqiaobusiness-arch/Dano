@@ -16,12 +16,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import re
 import shutil
+from typing import Literal
 import uuid
 
 import structlog
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from dano.assets.repository import AssetRepository
 from dano.catalog.manifest import build_function_tools, build_manifests, skill_id_of
@@ -885,85 +886,6 @@ async def onboarding(req: OnboardReq) -> dict:
     return report.model_dump()
 
 
-def _recording_step_edit_metadata(raw_steps: list[dict]) -> tuple[dict, set[str], dict]:
-    """Project the accepted recording-step edit list into field evidence."""
-    from dano.execution.page.recorder import assign_step_field_keys, has_recorded_value
-
-    keymap = assign_step_field_keys(raw_steps)
-    samples = {
-        keymap[i]: raw_steps[i].get("value", "")
-        for i in keymap
-        if raw_steps[i].get("op") in ("fill", "select", "pick")
-        and has_recorded_value(raw_steps[i])
-    }
-    required_labels = {
-        keymap[i]
-        for i in keymap
-        if raw_steps[i].get("required")
-        and raw_steps[i].get("op") in ("fill", "select", "pick")
-    }
-    page_enum_options: dict = {}
-    last_field_idx: int | None = None
-    for i, step in enumerate(raw_steps):
-        if i in keymap:
-            last_field_idx = i
-        if step.get("op") not in ("pick", "select") or not step.get("options"):
-            continue
-        owner_idx = i if i in keymap else last_field_idx
-        field_key = keymap.get(owner_idx, "") if owner_idx is not None else ""
-        if not field_key:
-            continue
-        selected = str(step.get("value", "") or "").strip()
-        if selected and field_key not in samples:
-            samples[field_key] = selected
-        entry = {
-            "options": list(step["options"]),
-            "field_key": field_key,
-            "field_aliases": list(step.get("field_aliases") or []),
-            "selected": selected,
-            "page_id": str(step.get("page_id") or ""),
-            "frame_id": str(step.get("frame_id") or ""),
-            "page_context": dict(step.get("page_context") or {}),
-            "control_kind": str(step.get("control_kind") or "select"),
-        }
-        if field_key not in page_enum_options:
-            page_enum_options[field_key] = entry
-    return samples, required_labels, page_enum_options
-
-
-def _merge_recording_step_edits(
-    frontend_steps: list[dict],
-    flushed_tail: list[dict],
-) -> tuple[list[dict], dict, set[str], dict]:
-    """Merge the client-visible step edit list with the final browser flush.
-
-    COMPAT[REC-P8-STEP-MERGE]
-    Reason: the browser list can differ from the server recorder ledger.
-    Consumer: recording WebSocket finalize.
-    Delete when: step edits and final debounced input are server-patched with
-    equivalent samples/required/enums across all golden fixtures.
-    Target: recording protocol v4.
-
-    This is an intentional P8 compatibility layer. The browser list can differ
-    from ``RecordSession.steps`` because it applies live duplicate suppression,
-    while the final debounced input exists only in the server session. Keep the
-    client order/deletions, but replace or append only the flushed field tail.
-    """
-    raw_steps = [dict(step) for step in frontend_steps]
-    for step in flushed_tail:
-        if step.get("op") not in ("fill", "select", "pick"):
-            continue
-        for index, current in enumerate(raw_steps):
-            if current.get("op") == step.get("op") and current.get("locator") == step.get("locator"):
-                raw_steps[index] = dict(step)
-                break
-        else:
-            raw_steps.append(dict(step))
-
-    samples, required_labels, page_enum_options = _recording_step_edit_metadata(raw_steps)
-    return raw_steps, samples, required_labels, page_enum_options
-
-
 # ── 方式B:网页内录制(WebSocket:截屏流出 + 输入回传入 + 实时步骤 + 录完发布)──
 def _recording_flow_projection(spec) -> dict:  # noqa: ANN001
     """Return the only FlowSpec representation allowed onto the browser transport."""
@@ -1027,13 +949,10 @@ async def record_ws(ws: WebSocket) -> None:
         from dano.execution.page.sessions import load_session_state
         persisted_storage = load_session_state(resume_key[0], resume_key[1])
         from dano.execution.page.recorder import RecordSession
-        def on_step(step: dict) -> None:
-            sender.send_background({"type": "step", "step": step})
-
         def on_request(r: dict) -> None:                  # 诊断:抓到的写请求实时推给前端
             sender.send_background({"type": "request", "request": r})
 
-        sess = RecordSession(on_step=on_step, on_request=on_request,
+        sess = RecordSession(on_request=on_request,
                              intercept_submit=init.get("intercept", True),
                              capture_reads=init.get("capture_reads", True))
         start_storage = resume_state.get("storage_state") or persisted_storage or init.get("storage_state") or None
@@ -1180,63 +1099,16 @@ async def record_ws(ws: WebSocket) -> None:
             elif t == "finalize":
                 if await _replay_costly(msg):
                     continue
-                before_flush_steps = sess.recorded_raw_steps()
                 await sess.flush_recording()
                 observed_required_labels = await sess.observed_required_labels()
                 observed_page_context = await sess.observed_page_context()
-                after_flush_steps = sess.recorded_raw_steps()
-                flushed_tail: list[dict] = []
-                if len(after_flush_steps) > len(before_flush_steps):
-                    flushed_tail = after_flush_steps[len(before_flush_steps):]
-                elif before_flush_steps and after_flush_steps and before_flush_steps[-1] != after_flush_steps[-1]:
-                    flushed_tail = [after_flush_steps[-1]]
-                # DOM/JS enum evidence can be moderately expensive to index.
-                # Build it once after the final browser flush and reuse the
-                # same snapshot in both the recorded-step and edited-step
-                # branches below.
+                steps, samples = sess.recorded_steps()
+                required_labels = sess.recorded_required_labels()
+                required_labels.update(observed_required_labels)
                 recorded_page_options = sess.recorded_page_enum_options()
-                raw = msg.get("steps")
-                if raw is not None:           # 前端编辑后的步骤(删了噪声/重复/调序)→ 以它为准
-                    raw, samples, required_labels, page_enum_options = _merge_recording_step_edits(
-                        raw,
-                        flushed_tail,
-                    )
-                    steps = [{"op": s["op"], "locator": s.get("locator"), "field": (s.get("field") or None)}
-                             for s in raw]
-                    required_labels.update(observed_required_labels)
-                else:
-                    steps, samples = sess.recorded_steps()
-                    required_labels = sess.recorded_required_labels()
-                    required_labels.update(observed_required_labels)
-                    page_options_by_field = recorded_page_options  # {字段key: {options, field_key, selected}}
-                    # 枚举地面真值:既按「选中显示值」也对到「字段 key」,使 page_enum_selects 在 body leaf
-                    # 不出现 label 但出现内部英文名时也能命中(治"请假类型=病假 → body.leaveType=2"漏识别)。
-                    page_enum_options = {}
-                    for storage_key, raw_entry in (page_options_by_field or {}).items():
-                        opts = raw_entry.get("options") if isinstance(raw_entry, dict) else raw_entry
-                        if not opts:
-                            continue
-                        field_key = str(raw_entry.get("field_key") or storage_key) if isinstance(raw_entry, dict) else str(storage_key)
-                        label = str((raw_entry.get("selected") if isinstance(raw_entry, dict) else None)
-                                    or samples.get(field_key, "") or "").strip()
-                        entry = {
-                            "options": list(opts), "field_key": field_key, "selected": label,
-                            "field_aliases": list(raw_entry.get("field_aliases") or []) if isinstance(raw_entry, dict) else [],
-                            "page_id": str(raw_entry.get("page_id") or "") if isinstance(raw_entry, dict) else "",
-                            "frame_id": str(raw_entry.get("frame_id") or "") if isinstance(raw_entry, dict) else "",
-                            "page_context": dict(raw_entry.get("page_context") or {}) if isinstance(raw_entry, dict) else {},
-                            "control_kind": str(raw_entry.get("control_kind") or "select") if isinstance(raw_entry, dict) else "select",
-                            "enum_source": str(raw_entry.get("enum_source") or "dom") if isinstance(raw_entry, dict) else "dom",
-                            "script_url": str(raw_entry.get("script_url") or "") if isinstance(raw_entry, dict) else "",
-                            "source_url": str(raw_entry.get("source_url") or "") if isinstance(raw_entry, dict) else "",
-                            "dict_type": str(raw_entry.get("dict_type") or "") if isinstance(raw_entry, dict) else "",
-                            "mapping_complete": bool(raw_entry.get("mapping_complete")) if isinstance(raw_entry, dict) else False,
-                        }
-                        if storage_key and storage_key not in page_enum_options:
-                            page_enum_options[str(storage_key)] = entry
-                # Browser enum snapshots live outside executable steps. Always
-                # merge them, including when the frontend sends an edited step
-                # list, or editing/reordering silently discards DOM evidence.
+                page_enum_options: dict = {}
+                # Browser enum snapshots live outside executable steps and are
+                # the sole page enum projection used during finalize.
                 for storage_key, raw_entry in (recorded_page_options or {}).items():
                     opts = raw_entry.get("options") if isinstance(raw_entry, dict) else raw_entry
                     if not opts:
@@ -1292,7 +1164,6 @@ async def record_ws(ws: WebSocket) -> None:
                 save_session(str(init.get("tenant") or ""), str(sub), login_state)
 
                 # finalize 只有一个出口:全部捕获事实直接生成 FlowSpec 工作台。
-                # 前端编辑后的 steps 只用于补齐样例、必填和页面枚举证据，不再建立第二套字段选择协议。
                 all_caps = sess.captured_all_requests()
                 reads = sess.captured_reads()
                 page_events = sess.recorded_page_events()
@@ -2067,14 +1938,12 @@ async def resume_skill(skill_id: str, x_tenant_key: str | None = Header(default=
 
 # ── 瘦执行(前端只给 skill_id + input;endpoint/凭证/断言后端取)──
 class InvokeReq(BaseModel):
-    input: dict | None = Field(default_factory=dict)
-    arguments: dict | str | None = Field(default_factory=dict)
-    idempotency_key: str | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    input: dict = Field(default_factory=dict)
     confirm: bool = False
-    capability: str | None = None
     dry_run: bool = False
-    metadata: dict = Field(default_factory=dict)
-    protocol: str = "dano.capability_call.v1"
+    protocol: Literal["dano.capability_call.v1"] = "dano.capability_call.v1"
 
 
 async def _invoke(tenant: str, skill_id: str, input_: dict, confirm: bool) -> dict:
@@ -2092,32 +1961,11 @@ async def _invoke(tenant: str, skill_id: str, input_: dict, confirm: bool) -> di
     return outcome.model_dump(mode="json")
 
 
-def _payload_dict(value) -> dict:  # noqa: ANN001
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return dict(value)
-    if isinstance(value, str):
-        import json as _json
-        try:
-            loaded = _json.loads(value or "{}")
-        except _json.JSONDecodeError as e:
-            raise HTTPException(status_code=400, detail=f"arguments 非合法 JSON: {e}") from e
-        if not isinstance(loaded, dict):
-            raise HTTPException(status_code=400, detail="arguments 必须是 JSON object")
-        return loaded
-    raise HTTPException(status_code=400, detail="payload 必须是 object")
-
-
-def _normalize_skill_call(req, *, capability: str | None = None) -> dict:  # noqa: ANN001
-    args = _payload_dict(getattr(req, "arguments", None))
-    input_obj = getattr(req, "input", None)
-    if input_obj is not None:
-        args.update(_payload_dict(input_obj))
-    cap = capability or getattr(req, "capability", None)
-    if cap:
-        args["__capability"] = cap
-    if getattr(req, "dry_run", False):
+def _skill_call_input(input_: dict, *, capability: str | None = None, dry_run: bool = False) -> dict:
+    args = dict(input_)
+    if capability:
+        args["__capability"] = capability
+    if dry_run:
         args["__dry_run"] = True
     return args
 
@@ -2126,23 +1974,16 @@ def _normalize_skill_call(req, *, capability: str | None = None) -> dict:  # noq
 async def invoke_skill(skill_id: str, req: InvokeReq,
                        x_tenant_key: str | None = Header(default=None)) -> dict:
     tenant = await _auth_tenant(x_tenant_key)
-    args = _normalize_skill_call(req)
+    args = _skill_call_input(req.input, dry_run=req.dry_run)
     return await _invoke(tenant, skill_id, args, req.confirm)
 
 
 @app.post("/v1/skills/{skill_id}/capabilities/{capability}/invoke")
 async def invoke_skill_capability(skill_id: str, capability: str, req: CapabilityInvokePayload,
                                   x_tenant_key: str | None = Header(default=None)) -> dict:
-    """按 Skill 内的指定 capability 调用。
-
-    COMPAT[API-CAPABILITY-INVOKE]: `/invoke` + body.capability is consumed by
-    existing SDK clients. Remove after traffic is zero on the versioned v2 API;
-    target public API v2.
-    """
-    if req.capability and req.capability != capability:
-        raise HTTPException(status_code=422, detail="body capability must match path capability")
+    """按 Skill 内的指定 capability 调用。"""
     tenant = await _auth_tenant(x_tenant_key)
-    args = _normalize_skill_call(req, capability=capability)
+    args = _skill_call_input(req.input, capability=capability, dry_run=req.dry_run)
     return await _invoke(tenant, skill_id, args, req.confirm)
 
 
@@ -2157,21 +1998,20 @@ async def list_tools(x_tenant_key: str | None = Header(default=None)) -> list[di
 
 
 class ToolCallReq(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str                       # 工具名(= skill_id 的点转 __,如 A-OA__submit_leave)
-    capability: str | None = None   # 新调用协议:一个 Skill 内的业务能力键(query_status/submit_batch...)
-    # COMPAT[API-TOOL-ARGUMENTS]: function-calling clients still send JSON-string
-    # arguments. Remove after the tool API v2 adoption gate reports zero v1 calls.
-    input: dict | None = None
-    arguments: dict | str = Field(default_factory=dict)  # LLM 产出的参数(对象或 JSON 字符串都行)
+    capability: str | None = None   # 一个 Skill 内的业务能力键(query_status/submit_batch...)
+    input: dict = Field(default_factory=dict)
     confirm: bool = False
     dry_run: bool = False
 
 
 @app.post("/v1/tools/call")
 async def call_tool(req: ToolCallReq, x_tenant_key: str | None = Header(default=None)) -> dict:
-    """执行一次 LLM 工具调用:name→skill_id、arguments→input,走与 /invoke 同一受控链路。"""
+    """执行一次 LLM 工具调用:name→skill_id，走与 /invoke 同一受控链路。"""
     tenant = await _auth_tenant(x_tenant_key)
-    args = _normalize_skill_call(req)
+    args = _skill_call_input(req.input, capability=req.capability, dry_run=req.dry_run)
     return await _invoke(tenant, skill_id_of(req.name), args, req.confirm)
 
 

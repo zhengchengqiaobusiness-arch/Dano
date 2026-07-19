@@ -169,20 +169,6 @@ class FactCheckSpec(BaseModel):
     backoff_s: float = 0.8
 
 
-# ─────────────────────── 录制 V2 Skill 语义标注───────────────────────
-class LocatorStrategy(BaseModel):
-    """元素的一条定位策略;一个元素配多条、按优先级排列,运行期依次回退。跨系统稳定的核心。
-
-    优先级建议:testid > role+name > label > placeholder > name > text > css(坐标禁用)。
-    """
-
-    type: Literal["testid", "role", "label", "placeholder", "name", "text", "css", "xpath"]
-    role: str = Field(default="", description="type=role 时的 ARIA role(button/combobox/textbox…)")
-    value: str = Field(default="", description="单值(testid/label/placeholder/name/css/xpath)")
-    patterns: list[str] = Field(default_factory=list, description="可接受的名字/文本候选(role/text;多语言多写法)")
-    negative_patterns: list[str] = Field(default_factory=list, description="命中即拒(防误点删除/作废)")
-
-
 class PageNode(BaseModel):
     """页面角色(不只是 URL):不同 OA 的 URL 可不同,但页面角色相同。"""
 

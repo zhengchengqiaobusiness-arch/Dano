@@ -31,6 +31,13 @@ from dano.execution.page.flow_spec import (
     flow_spec_fingerprint,
     prepare_flow_release_candidate,
 )
+
+
+def _call_nodes(step_ids: list[str]) -> list[dict]:
+    return [
+        {"id": f"call_{index}", "type": "call", "step_id": step_id}
+        for index, step_id in enumerate(step_ids)
+    ]
 from dano.onboarding.page_onboard import run_request_onboarding
 
 
@@ -84,7 +91,7 @@ def test_flow_fingerprint_is_stable_after_frozen_snapshot_revalidation() -> None
         name="submit",
         title="提交申请",
         request_refs=[ref],
-        step_ids=["submit"],
+        nodes=_call_nodes(["submit"]),
     )]
 
     frozen = FlowSpec.model_validate(spec.model_dump(mode="json", exclude_none=True))
@@ -100,7 +107,6 @@ def test_manual_edit_then_release_reviews_the_exact_persisted_snapshot() -> None
         name="submit_request",
         title="提交申请",
         kind="submit",
-        step_ids=["submit"],
         nodes=[{"id": "call_submit", "type": "call", "step_id": "submit"}],
         confirmed=True,
     )]
@@ -907,7 +913,6 @@ def test_observed_five_interface_plan_keeps_only_business_anchors():
         name="submit_create",
         title="Old Incorrect Combined Capability",
         kind="submit",
-        step_ids=["page", "definition", "approval", "submit"],
         nodes=[
             {"id": "call_1", "type": "call", "step_id": step_id}
             for step_id in ("page", "definition", "approval", "submit")

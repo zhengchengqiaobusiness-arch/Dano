@@ -2851,12 +2851,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 async def test_recorder_captures_required_star_elementui():
     """真浏览器:Element-UI 结构(el-form-item.is-required + label[for])→ 录制捕获 * 必填 + 中文标签。"""
     pytest.importorskip("playwright")
-    from dano.execution.page.driver import PlaywrightPageDriver
     from dano.execution.page.recorder import RecordSession
+    from playwright.async_api import async_playwright
+    pw = None
+    browser = None
     try:
-        d, _ = await PlaywrightPageDriver.launch(headless=True); await d.close()
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True)
     except Exception:  # noqa: BLE001
         pytest.skip("chromium 未安装")
+    finally:
+        if browser is not None:
+            await browser.close()
+        if pw is not None:
+            await pw.stop()
     html = ('<!doctype html><html><head><meta charset="utf-8"></head><body><form>'
             '<div class="el-form-item is-required"><label for="dest">目的地</label><input id="dest"></div>'
             '<div class="el-form-item"><label for="remark">备注</label><input id="remark"></div>'

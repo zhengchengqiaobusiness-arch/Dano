@@ -3,6 +3,9 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from dano.gateway import app as gateway
 
 
@@ -23,9 +26,8 @@ def test_finalize_emits_flow_spec_without_legacy_request_fields_protocol() -> No
     assert "pending_page_enum_options" not in source
     assert "pending_field_evidence" not in source
     assert "pending_page_events" not in source
-    assert "_merge_recording_step_edits" in source
-    assert not hasattr(gateway, "_frontend_recording_field_metadata")
-    assert 'msg.get("steps")' in source
+    assert not hasattr(gateway, "_merge_recording_step_edits")
+    assert 'msg.get("steps")' not in source
 
 
 def test_frontend_uses_only_flow_spec_workbench_protocol() -> None:
@@ -53,4 +55,15 @@ def test_frontend_uses_only_flow_spec_workbench_protocol() -> None:
     finalize_end = source.index("function badAction", finalize_start)
     finalize_source = source[finalize_start:finalize_end]
     assert 'type: "finalize"' in finalize_source
-    assert "steps" in finalize_source
+    assert "steps" not in finalize_source
+
+
+def test_invoke_protocol_rejects_removed_compatibility_fields() -> None:
+    assert gateway.InvokeReq(input={"month": "2026-07"}).input == {"month": "2026-07"}
+    assert gateway.ToolCallReq(name="A-OA__query", input={}).input == {}
+
+    for obsolete in ({"arguments": {}}, {"capability": "query"}, {"metadata": {}}):
+        with pytest.raises(ValidationError):
+            gateway.InvokeReq(input={}, **obsolete)
+    with pytest.raises(ValidationError):
+        gateway.ToolCallReq(name="A-OA__query", input={}, arguments={})

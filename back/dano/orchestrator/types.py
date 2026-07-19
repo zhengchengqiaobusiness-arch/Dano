@@ -6,7 +6,7 @@ from typing import Any, Literal
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 from dano.shared.enums import RiskLevel, Subsystem, TaskState
 from dano.shared.models import ExecResult
@@ -63,34 +63,6 @@ class SkillSpec(BaseModel):
 
     business: str = ""
     business_meta: dict = Field(default_factory=dict)           # 业务规则(x-flow)→ 导出剧本的前置/错误/确认段
-
-
-class CapabilityCallEnvelope(BaseModel):
-    """导出脚本/Agent 调用 Dano 的 JSON 调用协议草案。
-
-    兼容旧 function-calling 载荷:旧侧只传 name+arguments;新侧可传 capability+input。
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    protocol: str = "dano.capability_call.v1"
-    name: str | None = None                # 旧工具名,如 A-OA__submit_leave
-    capability: str | None = None          # 新能力键;服务端未支持时仍可按 name 兼容执行
-    arguments: dict[str, Any] | str | None = None
-    input: dict[str, Any] | None = None
-    confirm: bool = False
-    idempotency_key: str | None = None
-
-    def effective_arguments(self) -> dict[str, Any]:
-        """返回对编排器实际可执行的参数对象,input 优先,arguments 兼容。"""
-        if self.input is not None:
-            return dict(self.input)
-        if self.arguments is None:
-            return {}
-        if isinstance(self.arguments, dict):
-            return dict(self.arguments)
-        import json as _json
-        return _json.loads(self.arguments or "{}")
 
 
 class TaskOutcome(BaseModel):

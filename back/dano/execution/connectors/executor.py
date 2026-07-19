@@ -1,8 +1,4 @@
-"""动作执行器:把连接器规格 + 入参 + 凭证,变成一次真实(或沙箱)调用。
-
-接口化(ActionExecutor Protocol):
-- HttpActionExecutor:真实 HTTP 调用(httpx),按 field_bindings 映射入参、按鉴权注入凭证。
-- FakeActionExecutor:原型/测试用,按 action 返回可配置响应,驱动断言与事实核查逻辑。
+"""动作执行器:把连接器规格 + 入参 + 凭证变成真实调用。
 
 幂等:写动作带 idempotency_key(任务ID + 动作签名),由调用方传入,重试不重复创建。
 """
@@ -45,85 +41,6 @@ class ActionExecutor(Protocol):
         *,
         idempotency_key: str | None = None,
     ) -> ActionResponse: ...
-
-
-class HttpActionExecutor:
-    """真实 HTTP 执行(A 公司侧 Worker)。endpoint 基址由环境画像/配置提供。"""
-
-    def __init__(self, base_url: str) -> None:
-        self._base_url = base_url.rstrip("/")
-
-    def _auth_headers(self, connector: dict, credentials: dict) -> dict[str, str]:
-        kind = connector.get("auth_kind")
-        if kind == "token":
-            tok = (credentials.get("token") or "").strip()
-            return {"Authorization": f"Bearer {tok}"} if tok else {}
-        if kind == "sso":
-            return {"Cookie": credentials.get("session", "")}
-        return {}
-
-    async def execute(
-        self,
-        connector: dict[str, Any],
-        inputs: dict[str, Any],
-        credentials: dict[str, str],
-        *,
-        idempotency_key: str | None = None,
-    ) -> ActionResponse:
-        import httpx
-
-        url = self._base_url + connector["endpoint"]
-        method = connector.get("method", "POST").upper()
-        headers = self._auth_headers(connector, credentials)
-        if idempotency_key:
-            headers["Idempotency-Key"] = idempotency_key
-        from dano.infra.http import tls_verify
-        async with httpx.AsyncClient(timeout=30, verify=tls_verify()) as client:
-            if method == "GET":
-                resp = await client.get(url, params=inputs, headers=headers)
-            else:
-                resp = await client.request(method, url, json=inputs, headers=headers)
-        try:
-            body = resp.json()
-        except Exception:  # noqa: BLE001
-            body = {"raw": resp.text}
-        log.info("action.http", action=connector.get("action"), status=resp.status_code)
-        return ActionResponse(http=resp.status_code, body=body)
-
-
-class FakeActionExecutor:
-    """原型/测试执行器。
-
-    responses: {action: (http, body)} 预设;未配置的动作默认 200 + 通用单号。
-    failures: 标记为失败(返回 5xx)的动作集合。
-    记录调用历史,供事实核查测试断言。
-    """
-
-    def __init__(
-        self,
-        responses: dict[str, tuple[int, dict]] | None = None,
-        failures: set[str] | None = None,
-    ) -> None:
-        self._responses = responses or {}
-        self._failures = failures or set()
-        self.calls: list[dict[str, Any]] = []
-
-    async def execute(
-        self,
-        connector: dict[str, Any],
-        inputs: dict[str, Any],
-        credentials: dict[str, str],
-        *,
-        idempotency_key: str | None = None,
-    ) -> ActionResponse:
-        action = connector.get("action", "")
-        self.calls.append({"action": action, "inputs": dict(inputs), "key": idempotency_key})
-        if action in self._failures:
-            return ActionResponse(http=500, body={"error": f"{action} failed"})
-        if action in self._responses:
-            http, body = self._responses[action]
-            return ActionResponse(http=http, body=body)
-        return ActionResponse(http=200, body={"request_id": "RT-0001", "status": "已提交"})
 
 
 class SystemEndpoint(BaseModel):
