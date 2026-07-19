@@ -983,7 +983,7 @@
             {#if item.revisionTitle}
               <h3 class="revision-form-title">{item.revisionTitle}</h3>
             {/if}
-            {#if request.batch && item.kind !== "text"}
+            {#if (request.batch || revising) && item.kind !== "text"}
               <div class="question-text">
                 <MarkdownRenderer content={askUserQuestionMarkdown(item.question)} />
               </div>
