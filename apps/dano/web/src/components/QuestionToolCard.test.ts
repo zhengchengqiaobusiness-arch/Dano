@@ -35,7 +35,7 @@ function submittedFormBlock(
     questionRequest: {
       batch: true,
       title: "测试申请",
-      questions: [{ id: "reason", kind: "text", question: "申请原因？" }],
+      questions: [{ id: "reason", kind: "text", question: "申请原因？", fieldAssist: false }],
     },
     resultDetails: {
       status: "answered",
@@ -69,19 +69,19 @@ function multiFormConfirmationBlock(): ToolContentBlock {
       kind: "confirm",
       title: "确认 2 份表单",
       confirmationOfToolCallId: "form-a",
-      questions: [{ id: "reason", kind: "text", question: "请假原因？" }],
+      questions: [{ id: "reason", kind: "text", question: "请假原因？", fieldAssist: false }],
       answer: { reason: "家庭事务" },
       forms: [
         {
           formId: "form-a",
           title: "请假申请",
-          questions: [{ id: "reason", kind: "text", question: "请假原因？" }],
+          questions: [{ id: "reason", kind: "text", question: "请假原因？", fieldAssist: false }],
           answer: { reason: "家庭事务" },
         },
         {
           formId: "form-b",
           title: "出差申请",
-          questions: [{ id: "destination", kind: "text", question: "目的地？" }],
+          questions: [{ id: "destination", kind: "text", question: "目的地？", fieldAssist: false }],
           answer: { destination: "上海" },
         },
       ],
@@ -109,7 +109,7 @@ function revisingMultiFormBlock(): ToolContentBlock {
         title: "请假申请",
         revision: 2,
         questions: [
-          { id: "reason", kind: "text", question: "请假原因？" },
+          { id: "reason", kind: "text", question: "请假原因？", fieldAssist: true },
           {
             id: "departure_date",
             kind: "date",
@@ -136,7 +136,7 @@ function revisingMultiFormBlock(): ToolContentBlock {
         formId: "form-b",
         title: "出差申请",
         revision: 2,
-        questions: [{ id: "destination", kind: "text", question: "目的地？" }],
+        questions: [{ id: "destination", kind: "text", question: "目的地？", fieldAssist: false }],
         answer: { destination: "上海" },
       },
     ],
@@ -162,8 +162,8 @@ function pendingGroupedFormBlock(): ToolContentBlock {
       batch: true,
       title: "团建行程信息",
       questions: [
-        { id: "destination", kind: "text", question: "目的地？" },
-        { id: "people", kind: "text", question: "参与人数？" },
+        { id: "destination", kind: "text", question: "目的地？", fieldAssist: false },
+        { id: "people", kind: "text", question: "参与人数？", fieldAssist: false },
       ],
     },
   };
@@ -182,11 +182,80 @@ function pendingSingleQuestionBlock(): ToolContentBlock {
       id: "destination",
       kind: "text",
       question: "目的地？",
+      fieldAssist: false,
     },
   };
 }
 
 describe("QuestionToolCard", () => {
+  it("omits Field Assist actions when the canonical text field disables exposure", async () => {
+    vi.useFakeTimers();
+    const response = vi.fn(async () => ({ success: true } as never));
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block: pendingSingleQuestionBlock(),
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
+        onFieldAssist: response,
+      },
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(400);
+      await tick();
+      await tick();
+
+      expect(target.querySelector('input[type="text"]')).not.toBeNull();
+      expect(target.querySelector(".question-ai-actions")).toBeNull();
+    } finally {
+      unmount(component);
+      vi.useRealTimers();
+    }
+  });
+
+  it("renders Field Assist actions inside an enabled single-line field block", async () => {
+    vi.useFakeTimers();
+    const response = vi.fn(async () => ({ success: true } as never));
+    const block = pendingSingleQuestionBlock();
+    if (
+      !block.questionRequest
+      || block.questionRequest.batch
+      || block.questionRequest.kind !== "text"
+    ) {
+      throw new Error("expected single question");
+    }
+    block.questionRequest.fieldAssist = true;
+    const target = document.createElement("div");
+    const component = mount(QuestionToolCard, {
+      target,
+      props: {
+        block,
+        active: true,
+        onPresent: response,
+        onRespond: response,
+        onRevise: response,
+        onSubmitRevision: response,
+        onFieldAssist: response,
+      },
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(400);
+      await tick();
+      await tick();
+
+      const field = target.querySelector(".single-line-text-field");
+      expect(field?.querySelector('input[type="text"]')).not.toBeNull();
+      expect(field?.querySelectorAll(".question-ai-actions button")).toHaveLength(2);
+    } finally {
+      unmount(component);
+      vi.useRealTimers();
+    }
+  });
+
   it("requests center focus for the live grouped form only after presentation succeeds", async () => {
     vi.useFakeTimers();
     const present = vi.fn(async () => ({ success: true } as never));
@@ -906,10 +975,12 @@ describe("QuestionToolCard", () => {
 
     const form = target.querySelector("form");
     const scrollRegion = form?.querySelector(":scope > .question-form-scroll-region");
+    const formContent = scrollRegion?.querySelector(":scope > .question-form-content");
     expect(scrollRegion).not.toBeNull();
-    expect(scrollRegion?.querySelector('input[type="text"]')).not.toBeNull();
+    expect(formContent).not.toBeNull();
+    expect(formContent?.querySelector('input[type="text"]')).not.toBeNull();
     expect(form?.querySelector(":scope > .question-form-title")?.textContent).toBe("修改");
-    expect(scrollRegion?.querySelector(".revision-form-title")?.textContent).toBe("请假申请");
+    expect(formContent?.querySelector(".revision-form-title")?.textContent).toBe("请假申请");
     expect(scrollRegion?.querySelector(".question-actions")).toBeNull();
     expect(form?.querySelector(":scope > .question-actions")).not.toBeNull();
 
@@ -1137,7 +1208,7 @@ describe("QuestionToolCard", () => {
       formId: "form-1",
       title: "测试申请",
       revision: 2,
-      questions: [{ id: "reason", kind: "text", question: "申请原因？" }],
+      questions: [{ id: "reason", kind: "text", question: "申请原因？", fieldAssist: false }],
       answer: { reason: "照顾家人" },
     }];
     const target = document.createElement("div");
@@ -1174,6 +1245,7 @@ describe("QuestionToolCard", () => {
         id: "reason",
         kind: "text",
         question: "申请原因？",
+        fieldAssist: false,
         default: "个人事务",
       }],
       answer: {},

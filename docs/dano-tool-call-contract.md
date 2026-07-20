@@ -17,9 +17,9 @@ Ask the user for structured input during execution.
 
 When the user asks to fill in a form, complete a form, or provide form fields, use ask_user_question to collect the fields instead of asking in assistant text. Every non-confirmation question must include a context-based recommended default so the user can usually submit directly. String defaults must be non-empty; never use default:"". required:true controls whether the user may submit an empty answer.
 
-Use exactly one ask_user_question call per assistant response. If you need more than one answer, provide a form title and use only the questions array: {"title":"请假申请","questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假","required":true},{"id":"start_at","question":"开始时间？","inputType":"date","dateFormat":"yyyy-MM-dd HH:mm","default":"2026-07-08 09:00","required":true},{"id":"reason","question":"原因？","default":"个人事务","required":true}]}. When questions is present, put every field's options, inputType, dateFormat, required, dataSource, multiple, and default inside the matching questions[] item; do not include top-level confirm or top-level field configuration.
+Use exactly one ask_user_question call per assistant response. If you need more than one answer, provide a form title and use only the questions array: {"title":"请假申请","questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假","required":true},{"id":"start_at","question":"开始时间？","inputType":"date","dateFormat":"yyyy-MM-dd HH:mm","default":"2026-07-08 09:00","required":true},{"id":"reason","question":"原因？","default":"个人事务","fieldAssist":true,"required":true}]}. When questions is present, put every field's options, inputType, fieldAssist, dateFormat, required, dataSource, multiple, and default inside the matching questions[] item; do not include top-level confirm or top-level field configuration.
 
-For a single question, use top-level question/options/inputType/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. default is required and string defaults must be non-empty. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. When the workflow needs final confirmation for submitted grouped forms, call {"confirm":true,"formIds":["<formId>"]} with the formId values returned by those submissions. This is only for grouped-form confirmation; use a normal single-choice question to confirm an ordinary sentence or operation. If final confirmation is not needed, continue without this call.
+For a single question, use top-level question/options/inputType/fieldAssist/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. fieldAssist controls generation and polishing actions for text fields; it defaults to false for single-line text and true for textarea. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. default is required and string defaults must be non-empty. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. When the workflow needs final confirmation for submitted grouped forms, call {"confirm":true,"formIds":["<formId>"]} with the formId values returned by those submissions. This is only for grouped-form confirmation; use a normal single-choice question to confirm an ordinary sentence or operation. If final confirmation is not needed, continue without this call.
 ```
 
 ## promptSnippet
@@ -42,7 +42,8 @@ Ask the user one native question card; for several fields use one questions arra
   "Set required:true only when an answer is mandatory. required defaults to false.",
   "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
   "Dano returns the user's date answer as submitted; convert it yourself if a downstream interface needs another business format.",
-  "When using questions, provide a concise top-level title and put each field's id, question, options, inputType, dateFormat, required, dataSource, multiple, and default inside its questions item.",
+  "Use fieldAssist to control generation and polishing actions on text fields. It defaults to false for single-line text and true for textarea; enable it when drafting or polishing business text would help, while factual short values usually omit it.",
+  "When using questions, provide a concise top-level title and put each field's id, question, options, inputType, fieldAssist, dateFormat, required, dataSource, multiple, and default inside its questions item.",
   "When one or more submitted grouped forms require final confirmation, call ask_user_question with {confirm:true,formIds:[\"<formId>\"]} using their returned formId values. Do not send confirmation text or prior answers. If confirmation is not required, continue normally.",
   "Use confirm:true only for submitted grouped forms. To confirm an ordinary sentence or operation, ask a normal single-choice question instead."
 ]
@@ -146,6 +147,9 @@ still alive. Unsaved edits and server-process restarts are outside this contract
           "type": "string",
           "enum": ["text", "textarea", "date", "radio", "checkbox", "select", "treeSelect"]
         },
+        "fieldAssist": {
+          "description": "Controls whether text fields show Field Assist generation and polishing actions. Single-line text defaults to false; textarea defaults to true. Enable it when drafting or polishing business text would help; factual short values usually omit it."
+        },
         "dateFormat": { "type": "string", "minLength": 1 },
         "dataSource": { "$ref": "#/$defs/dataSource" },
         "multiple": { "type": "boolean" },
@@ -196,6 +200,9 @@ still alive. Unsaved edits and server-process restarts are outside this contract
     "type": { "type": "string", "minLength": 1 },
     "input_type": { "type": "string", "minLength": 1 },
     "component": { "type": "string", "minLength": 1 },
+    "fieldAssist": {
+      "description": "Controls whether text fields show Field Assist generation and polishing actions. Single-line text defaults to false; textarea defaults to true. Enable it when drafting or polishing business text would help; factual short values usually omit it."
+    },
     "dateFormat": {
       "type": "string",
       "minLength": 1,
@@ -230,7 +237,7 @@ still alive. Unsaved edits and server-process restarts are outside this contract
       "description": "Standard grouped-form confirmation target: an array of formId strings returned by earlier grouped form submissions in this Assistant Turn."
     },
     "questions": {
-      "description": "Preferred for collecting more than one answer. Provide a top-level title and make exactly one ask_user_question call. A single question object is also accepted and normalized to an array. Do not include top-level confirm or top-level field configuration with questions.",
+      "description": "Preferred for collecting more than one answer. Provide a top-level title and make exactly one ask_user_question call. Put fieldAssist inside the matching questions[] item when overriding its text-field default. A single question object is also accepted and normalized to an array. Do not include top-level confirm or top-level field configuration with questions.",
       "anyOf": [
         { "$ref": "#/$defs/question" },
         {

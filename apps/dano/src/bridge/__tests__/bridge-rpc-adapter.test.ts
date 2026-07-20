@@ -1593,7 +1593,7 @@ describe("BridgeRpcAdapter", () => {
           forms: [{
             formId: "restore-form",
             title: "请假申请",
-            questions: [{ id: "reason", kind: "text", question: "原因？" }],
+            questions: [{ id: "reason", kind: "text", question: "原因？", fieldAssist: false }],
             answer: { reason: "照顾家人" },
           }],
         });
@@ -1736,7 +1736,7 @@ describe("BridgeRpcAdapter", () => {
           forms: [{
             formId: "active-form",
             title: "活动申请",
-            questions: [{ id: "reason", kind: "text", question: "原因？" }],
+            questions: [{ id: "reason", kind: "text", question: "原因？", fieldAssist: false }],
             answer: { reason: "仍在等待" },
           }],
         });
@@ -4571,12 +4571,14 @@ describe("BridgeRpcAdapter", () => {
                 id: "approver1",
                 kind: "text",
                 question: "审批人 1",
+                fieldAssist: false,
                 default: "张三",
               },
               {
                 id: "approver2",
                 kind: "text",
                 question: "审批人 2",
+                fieldAssist: false,
                 default: "李四",
               },
             ],
@@ -4610,12 +4612,14 @@ describe("BridgeRpcAdapter", () => {
                 id: "approver1",
                 kind: "text",
                 question: "审批人 1",
+                fieldAssist: false,
                 default: "张三",
               },
               {
                 id: "approver2",
                 kind: "text",
                 question: "审批人 2",
+                fieldAssist: false,
                 default: "李四",
               },
             ],
@@ -4629,12 +4633,14 @@ describe("BridgeRpcAdapter", () => {
                     id: "approver1",
                     kind: "text",
                     question: "审批人 1",
+                    fieldAssist: false,
                     default: "张三",
                   },
                   {
                     id: "approver2",
                     kind: "text",
                     question: "审批人 2",
+                    fieldAssist: false,
                     default: "李四",
                   },
                 ],
@@ -7960,7 +7966,7 @@ describe("BridgeRpcAdapter", () => {
           forms: [{
             formId: "replay-form",
             title: "报销申请",
-            questions: [{ id: "amount", kind: "text", question: "金额？" }],
+            questions: [{ id: "amount", kind: "text", question: "金额？", fieldAssist: false }],
             answer: { amount: "100" },
           }],
         });

@@ -13,7 +13,7 @@ The internal HTTP/SSE and RPC subsystem inside the Dano server that connects bro
 _Avoid_: bridge workspace package, separate bridge service
 
 **Field Assist**:
-A transient AI helper for ask_user_question input and editor fields that rewrites or generates the field value without submitting the answer or creating a normal Dano conversation turn.
+A transient AI helper for ask_user_question input and editor fields that rewrites or generates the field value without submitting the answer or creating a normal Dano conversation turn. A text field may expose or omit Field Assist independently; exposure is a presentation choice, not an authorization boundary.
 _Avoid_: detached session, user prompt, field workflow, preview candidate
 
 **Grouped Form**:

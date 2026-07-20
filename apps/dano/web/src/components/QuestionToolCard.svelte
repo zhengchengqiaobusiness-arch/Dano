@@ -915,9 +915,10 @@
             <p>{t("questionTool.confirmDescription")}</p>
           </div>
         </header>
-        <div class="question-form-scroll-region confirmation-form-list">
-          {#each displayedConfirmationForms as form (form.formId)}
-            <div class="confirmation-form" data-form-id={form.formId}>
+        <div class="question-form-scroll-region">
+          <div class="question-form-content confirmation-form-list">
+            {#each displayedConfirmationForms as form (form.formId)}
+              <div class="confirmation-form" data-form-id={form.formId}>
               <h4>{form.title}</h4>
               <div class="submitted-fields">
                 {#each form.items as item (item.id)}
@@ -940,12 +941,15 @@
                   </div>
                 {/each}
               </div>
-            </div>
-          {/each}
+              </div>
+            {/each}
+          </div>
         </div>
       </section>
       <div class="mobile-question-result question-form-scroll-region">
-        <MarkdownRenderer content={confirmationMarkdown} />
+        <div class="question-form-content">
+          <MarkdownRenderer content={confirmationMarkdown} />
+        </div>
       </div>
       <div class="question-actions">
         {#if interaction?.allowedActions.includes("cancel")}
@@ -978,7 +982,9 @@
     {:else}
       {#if result?.status === "answered"}
         <div class="mobile-answered-result question-result question-form-scroll-region">
-          <MarkdownRenderer content={sourceAnsweredMarkdown} />
+          <div class="question-form-content">
+            <MarkdownRenderer content={sourceAnsweredMarkdown} />
+          </div>
         </div>
       {/if}
       <form onsubmit={submit} class:answered-source-form={result?.status === "answered"}>
@@ -986,8 +992,12 @@
           <h2 class="question-form-title">{t("questionTool.modify")}</h2>
         {/if}
         <div class="question-form-scroll-region">
-          {#each questionItems as item}
-            <div class:question-group={request.batch}>
+          <div class="question-form-content">
+            {#each questionItems as item}
+              <div
+                class:question-group={request.batch}
+                class:single-line-text-field={item.kind === "text" && item.inputType !== "textarea"}
+              >
               {#if item.revisionTitle}
                 <h3 class="revision-form-title">{item.revisionTitle}</h3>
               {/if}
@@ -1106,30 +1116,32 @@
                 <div class="question-text">
                   <MarkdownRenderer content={askUserQuestionMarkdown(item.question)} />
                 </div>
-                <div class="question-ai-actions" aria-label={`${t("questionTool.aiAssistRegenerate")} / ${t("questionTool.aiAssistPolish")}`}>
-                  <button
-                    type="button"
-                    class="question-button secondary icon-button"
-                    disabled={!formEnabled || submitting || Boolean(aiAssistLoading[item.id])}
-                    onclick={() => void runFieldAssist(item, "regenerate")}
-                    aria-label={aiAssistLoading[item.id] === "regenerate" ? t("questionTool.aiAssistGenerating") : t("questionTool.aiAssistRegenerate")}
-                    title={aiAssistLoading[item.id] === "regenerate" ? t("questionTool.aiAssistGenerating") : t("questionTool.aiAssistRegenerate")}
-                    data-tooltip={aiAssistLoading[item.id] === "regenerate" ? t("questionTool.aiAssistGenerating") : t("questionTool.aiAssistRegenerate")}
-                  >
-                    <RefreshCw size={16} aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    class="question-button secondary icon-button"
-                    disabled={!formEnabled || submitting || Boolean(aiAssistLoading[item.id]) || !textAnswer[item.id]?.trim()}
-                    onclick={() => void runFieldAssist(item, "polish")}
-                    aria-label={aiAssistLoading[item.id] === "polish" ? t("questionTool.aiAssistPolishing") : t("questionTool.aiAssistPolish")}
-                    title={aiAssistLoading[item.id] === "polish" ? t("questionTool.aiAssistPolishing") : t("questionTool.aiAssistPolish")}
-                    data-tooltip={aiAssistLoading[item.id] === "polish" ? t("questionTool.aiAssistPolishing") : t("questionTool.aiAssistPolish")}
-                  >
-                    <Sparkle size={16} aria-hidden="true" />
-                  </button>
-                </div>
+                {#if item.fieldAssist}
+                  <div class="question-ai-actions" aria-label={`${t("questionTool.aiAssistRegenerate")} / ${t("questionTool.aiAssistPolish")}`}>
+                    <button
+                      type="button"
+                      class="question-button secondary icon-button"
+                      disabled={!formEnabled || submitting || Boolean(aiAssistLoading[item.id])}
+                      onclick={() => void runFieldAssist(item, "regenerate")}
+                      aria-label={aiAssistLoading[item.id] === "regenerate" ? t("questionTool.aiAssistGenerating") : t("questionTool.aiAssistRegenerate")}
+                      title={aiAssistLoading[item.id] === "regenerate" ? t("questionTool.aiAssistGenerating") : t("questionTool.aiAssistRegenerate")}
+                      data-tooltip={aiAssistLoading[item.id] === "regenerate" ? t("questionTool.aiAssistGenerating") : t("questionTool.aiAssistRegenerate")}
+                    >
+                      <RefreshCw size={16} aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      class="question-button secondary icon-button"
+                      disabled={!formEnabled || submitting || Boolean(aiAssistLoading[item.id]) || !textAnswer[item.id]?.trim()}
+                      onclick={() => void runFieldAssist(item, "polish")}
+                      aria-label={aiAssistLoading[item.id] === "polish" ? t("questionTool.aiAssistPolishing") : t("questionTool.aiAssistPolish")}
+                      title={aiAssistLoading[item.id] === "polish" ? t("questionTool.aiAssistPolishing") : t("questionTool.aiAssistPolish")}
+                      data-tooltip={aiAssistLoading[item.id] === "polish" ? t("questionTool.aiAssistPolishing") : t("questionTool.aiAssistPolish")}
+                    >
+                      <Sparkle size={16} aria-hidden="true" />
+                    </button>
+                  </div>
+                {/if}
               </div>
               <label class="sr-only" for={`question-${block.toolCallId}-${item.id}`}>{item.question}</label>
               <div
@@ -1198,8 +1210,9 @@
                 onkeydown={preventEnterSubmit}
               />
             {/if}
-            </div>
-          {/each}
+              </div>
+            {/each}
+          </div>
         </div>
 
         <div class="question-actions">
@@ -1292,10 +1305,19 @@
   fieldset { display: grid; gap: 8px; margin: 0; padding: 0; border: 0; }
 
   .question-form-scroll-region {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 0;
+  }
+
+  .question-form-content {
+    box-sizing: border-box;
     display: flex;
     flex-direction: column;
     gap: 12px;
-    min-height: 0;
+    width: 100%;
+    max-width: 900px;
+    margin-inline: auto;
   }
 
   .question-card:global(.center-focused-card) form,
@@ -1306,7 +1328,10 @@
 
   .question-card:global(.center-focused-card) .question-form-scroll-region {
     flex: 1 1 auto;
+    width: calc(100% + 32px);
     max-height: none;
+    margin-inline: -16px;
+    padding-inline: 16px;
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
@@ -1328,6 +1353,11 @@
     display: grid;
     gap: 10px;
     margin-bottom: 1rem;
+  }
+
+  .single-line-text-field {
+    width: 100%;
+    max-width: 600px;
   }
 
   .question-option {

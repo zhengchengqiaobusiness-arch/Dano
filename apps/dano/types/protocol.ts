@@ -188,6 +188,7 @@ export type AskUserQuestionCardItem =
       kind: "text";
       question: string;
       inputType?: "text" | "textarea";
+      fieldAssist: boolean;
       required?: boolean;
       default?: string;
     }
