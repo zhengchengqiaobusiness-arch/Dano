@@ -8,6 +8,14 @@
   import { markdownDroppedObjectLiteralContent } from "../utils/markdownFallback";
   import { copyTextToClipboard } from "../utils/messageCopy";
   import { t } from "../i18n";
+  import {
+    Body as TableBody,
+    Cell as TableCell,
+    Head as TableHead,
+    Header as TableHeader,
+    Row as TableRow,
+    Table,
+  } from "./ui/table";
 
   let {
     class: className = "",
@@ -30,8 +38,25 @@
   } = $props();
 
   type MermaidRenderer = typeof import("beautiful-mermaid").renderMermaidSVG;
+  type MarkdownTreeNode = string | [string | null, Record<string, unknown>, ...MarkdownTreeNode[]];
 
   const COMARK_OPTIONS = { html: false };
+  const COMARK_COMPONENTS = {
+    table: Table,
+    thead: TableHeader,
+    tbody: TableBody,
+    tr: TableRow,
+    th: TableHead,
+    td: TableCell,
+  };
+  const COMARK_PLUGINS = [
+    {
+      name: "restore-markdown-dash-runs",
+      post(state: { tree: { nodes: MarkdownTreeNode[] } }) {
+        state.tree.nodes = restoreMarkdownDashRuns(state.tree.nodes);
+      },
+    },
+  ];
   const MERMAID_MIN_WIDTH = 420;
   const MERMAID_MAX_WIDTH = 900;
   const MERMAID_MIN_ZOOM = 0.5;
@@ -48,6 +73,21 @@
   let forceCodeRender = false;
   let forceMermaidRender = false;
   let showFallback = $state(false);
+
+  function restoreMarkdownDashRuns(nodes: MarkdownTreeNode[]): MarkdownTreeNode[] {
+    return nodes.map(node => {
+      if (typeof node === "string") return node;
+
+      const [tag, props, ...children] = node;
+      const restoredChildren = restoreMarkdownDashRuns(children);
+      if (typeof tag === "string" && /^-{3,}$/.test(tag)) {
+        return restoredChildren.length === 0
+          ? tag
+          : ["span", {}, tag, ...restoredChildren];
+      }
+      return [tag, props, ...restoredChildren];
+    });
+  }
 
   function markdownBody(): HTMLElement | null {
     return container?.querySelector<HTMLElement>(".markdown-rendered") ?? null;
@@ -642,6 +682,8 @@
   <Comark
     markdown={content}
     options={COMARK_OPTIONS}
+    plugins={COMARK_PLUGINS}
+    components={COMARK_COMPONENTS}
     streaming={streaming}
     class={`markdown-body markdown-rendered ${showFallback ? "markdown-rendered-hidden" : ""} ${className}`.trim()}
   />
@@ -995,26 +1037,6 @@
     margin: 1.2em 0;
     border: none;
     border-top: 1px solid var(--border);
-  }
-
-  :global(.markdown-body table) {
-    margin: 0.6em 0;
-    border-collapse: collapse;
-    width: 100%;
-    font-size: 0.85em;
-  }
-
-  :global(.markdown-body th),
-  :global(.markdown-body td) {
-    padding: 8px 12px;
-    border: 1px solid var(--border);
-    text-align: left;
-  }
-
-  :global(.markdown-body th) {
-    background: var(--panel);
-    font-weight: 600;
-    color: var(--text);
   }
 
   :global(.markdown-body img) {
