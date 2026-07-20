@@ -3087,7 +3087,7 @@ def test_add_request_step_keeps_same_path_distinct_request_ids():
     assert {s.source_meta.get("request_id") for s in new.steps} == {"req-a", "req-b"}
 
 
-def test_promoted_read_is_ordered_before_write_and_rebuilds_dependency():
+def test_promoted_read_is_ordered_before_write_without_value_only_dependency():
     spec = FlowSpec(
         flow_id="f",
         steps=[FlowStep(
@@ -3138,15 +3138,10 @@ def test_promoted_read_is_ordered_before_write_and_rebuilds_dependency():
     assert [s.method for s in new.steps] == ["GET", "POST"]
     assert new.capabilities[0].step_ids == [new.steps[0].step_id, "write"]
     assert [n["step_id"] for n in new.capabilities[0].nodes if n.get("type") == "call"] == [new.steps[0].step_id, "write"]
-    assert len(new.links) == 1
-    link = new.links[0]
-    assert link.source_step_id == new.steps[0].step_id
-    assert link.target_step_id == "write"
-    assert link.source_path == "data.startDate"
-    assert link.target_path == "[0].sbrq"
+    assert new.links == []
     param = new.steps[1].params[0]
-    assert param.source_kind == "previous_response"
-    assert param.source["step_id"] == new.steps[0].step_id
+    assert param.category == "user_param"
+    assert param.source_kind == "user_input"
 
     cap_report = validate_flow_spec(new)["capability_validation"]
     assert cap_report["checked_manual_requests"]

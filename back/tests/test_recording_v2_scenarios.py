@@ -898,15 +898,13 @@ def test_daily_report_builds_independent_query_and_batch_submit_capabilities():
     assert not set(by_kind["query_status"].step_ids) & set(by_kind["submit_batch"].step_ids)
 
     orchestrated = asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
-    assert len(orchestrated.capability_relations) == 1
-    relation = orchestrated.capability_relations[0]
-    assert relation.type == "external_transform"
-    assert relation.transform_owner == "caller"
-    assert relation.from_output == "missing_dates"
-    assert relation.to_input == "entries"
+    # Similar field names and compatible collection shapes do not prove that
+    # the query output should feed the submit input.  The caller may add an
+    # explicit relation after choosing the required transform.
+    assert orchestrated.capability_relations == []
     api_request, errors = flow_spec_to_api_request(orchestrated)
     assert errors == []
-    assert api_request["capability_graph"]["relations"][0]["mode"] == "external_transform"
+    assert api_request["capability_graph"]["relations"] == []
 
 
 def test_query_output_mapping_uses_stable_names_for_numeric_urls():
@@ -948,7 +946,7 @@ def test_missing_dates_query_and_single_row_submit_compile_to_foreach_batch_cont
 
     assert batch.input_schema["properties"]["entries"]["type"] == "array"
     assert any(node.get("type") == "foreach" for node in batch.nodes)
-    assert out.capability_relations[0].type == "external_transform"
+    assert out.capability_relations == []
 
 
 def test_legacy_query_url_materializes_capability_inputs_from_step_params():

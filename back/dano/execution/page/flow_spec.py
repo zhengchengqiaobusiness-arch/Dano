@@ -4904,6 +4904,13 @@ def _auto_dependency_link_allowed(param: ParamField | None, source_path: str, lk
     # collection transforms use foreach/map nodes or an explicit manual link.
     if "[" in str(source_path or ""):
         return False
+    if param is None:
+        return False
+    if param.category == "user_param" or param.source_kind == "user_input" or _looks_user_entered_business_field(param.key, param.path):
+        # A recorded value or a similar field name cannot prove that an editable
+        # business field is supplied by an earlier response.  Manual links have
+        # already returned above; automatic links need a real runtime contract.
+        return False
     if param is not None and lk is not None and lk.confirmed and float(lk.confidence or 0.0) >= 0.95:
         source_leaf = re.sub(r"[^a-z0-9]+", "", str(source_path or "").split(".")[-1].lower())
         target_leaf = re.sub(r"[^a-z0-9]+", "", str(param.path or param.key or "").split(".")[-1].lower())
@@ -4918,12 +4925,6 @@ def _auto_dependency_link_allowed(param: ParamField | None, source_path: str, lk
             return True
     if not _auto_dependency_target_allowed(param):
         return False
-    if param is None:
-        return False
-    if param.category == "user_param" or param.source_kind == "user_input" or _looks_user_entered_business_field(param.key, param.path):
-        if "[" in str(source_path or ""):
-            return False
-        return _dependency_match_score(param, source_path) >= 12
     return True
 
 
@@ -7495,6 +7496,16 @@ def _normalize_capability_relation_semantics(relation: CapabilityRelation) -> Ca
     return relation
 
 
+def _capability_relation_schemas_compatible(source: dict[str, Any], target: dict[str, Any]) -> bool:
+    if not _capability_types_compatible(str(source.get("type") or ""), str(target.get("type") or "")):
+        return False
+    if source.get("type") == target.get("type") == "array":
+        source_items = source.get("items") if isinstance(source.get("items"), dict) else {}
+        target_items = target.get("items") if isinstance(target.get("items"), dict) else {}
+        return _capability_relation_schemas_compatible(source_items, target_items)
+    return True
+
+
 def _ensure_external_transform_relations(spec: FlowSpec) -> FlowSpec:
     """Describe grounded caller-owned capability cooperation without auto-running it."""
     spec.capability_relations = [
@@ -7510,72 +7521,31 @@ def _ensure_external_transform_relations(spec: FlowSpec) -> FlowSpec:
     def relation_is_valid(relation: CapabilityRelation) -> bool:
         source = capability_by_ref.get(relation.from_capability)
         target = capability_by_ref.get(relation.to_capability)
-        relation_kind = str(relation.mode or relation.type or "").strip().lower()
-        if (
-            relation_kind == "external_transform"
-            and source is not None
-            and target is not None
-            and source.kind == "query_status"
-            and target.kind == "submit"
-            and relation.to_input == "entries"
-        ):
-            return False
-        if (relation.evidence or {}).get("kind") != "typed_capability_contract":
+        evidence_kind = str((relation.evidence or {}).get("kind") or "").strip().lower()
+        if evidence_kind in {"user_confirmed", "manual", "manual_relation"}:
             return True
-        if source is None or target is None:
-            return False
         if not _capability_relation_requires_fields(relation):
             return True
-        return bool(
+        if source is None or target is None:
+            return bool(relation.confirmed and evidence_kind != "typed_capability_contract")
+        source_field = ((source.output_schema or {}).get("properties") or {}).get(relation.from_output)
+        target_field = ((target.input_schema or {}).get("properties") or {}).get(relation.to_input)
+        if not (
             relation.from_output
             and relation.to_input
-            and relation.from_output in ((source.output_schema or {}).get("properties") or {})
-            and relation.to_input in ((target.input_schema or {}).get("properties") or {})
-        )
+            and isinstance(source_field, dict)
+            and isinstance(target_field, dict)
+        ):
+            return bool(relation.confirmed and evidence_kind != "typed_capability_contract")
+        if evidence_kind == "typed_capability_contract":
+            return _capability_relation_schemas_compatible(source_field, target_field)
+        # Keep an explicit, resolvable relation so the validation report can
+        # surface a type mismatch instead of silently deleting user intent.
+        return True
 
     spec.capability_relations = [
         relation for relation in spec.capability_relations if relation_is_valid(relation)
     ]
-    queries = [cap for cap in spec.capabilities if cap.kind == "query_status"]
-    batches = [cap for cap in spec.capabilities if cap.kind == "submit_batch"]
-    for query in queries:
-        output_props = dict((query.output_schema or {}).get("properties") or {})
-        if "missing_dates" not in output_props:
-            continue
-        for batch in batches:
-            input_props = dict((batch.input_schema or {}).get("properties") or {})
-            entries_schema = input_props.get("entries")
-            if not isinstance(entries_schema, dict) or entries_schema.get("type") != "array":
-                continue
-            if any(
-                relation.from_capability in {query.name, query.capability_id}
-                and relation.from_output == "missing_dates"
-                and relation.to_capability in {batch.name, batch.capability_id}
-                and relation.to_input == "entries"
-                for relation in spec.capability_relations
-            ):
-                continue
-            spec.capability_relations.append(CapabilityRelation(
-                type="external_transform",
-                mode="external_transform",
-                transform_owner="caller",
-                from_capability=query.name or query.capability_id,
-                from_output="missing_dates",
-                to_capability=batch.name or batch.capability_id,
-                to_input="entries",
-                source_selector="missing_dates",
-                target_path="entries[].date",
-                cardinality="many_to_many",
-                required=False,
-                requires_user_confirmation=True,
-                confirmed=True,
-                confidence=0.98,
-                reason="调用方读取未填写日期、向用户确认并生成 entries 后，再显式调用批量提交能力",
-                input_schema=output_props.get("missing_dates") or {},
-                output_schema=entries_schema,
-                evidence={"kind": "typed_capability_contract", "automatic_execution": False},
-            ))
-
     deduped_relations: list[CapabilityRelation] = []
     seen_relations: set[tuple[str, str, str, str, str]] = set()
     for relation in spec.capability_relations:
