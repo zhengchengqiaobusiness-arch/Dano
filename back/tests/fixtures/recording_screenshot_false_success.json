@@ -1,0 +1,26 @@
+{
+  "case": "uploaded screenshots produce prose-only plan",
+  "screenshot_count": 2,
+  "recognized_controls": [
+    {"visible_label": "申请标题", "control_kind": "text", "required_state": "required"},
+    {"visible_label": "公章", "control_kind": "select", "required_state": "required"},
+    {"visible_label": "使用日期", "control_kind": "date", "required_state": "required"},
+    {"visible_label": "归还日期", "control_kind": "date", "required_state": "required"},
+    {"visible_label": "使用描述", "control_kind": "textarea", "required_state": "required"},
+    {"visible_label": "备注", "control_kind": "textarea", "required_state": "optional"}
+  ],
+  "bridge_output_plan": {
+    "_analysis_screenshot_count": 2,
+    "semantic_plan": {
+      "business_understanding": {
+        "summary": "发起公章使用申请，截图显示六个表单字段"
+      },
+      "request_roles": [],
+      "field_semantics": [],
+      "capabilities": [],
+      "capability_relations": [],
+      "unresolved_items": []
+    },
+    "ops": []
+  }
+}
