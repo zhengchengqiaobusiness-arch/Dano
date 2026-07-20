@@ -1685,7 +1685,10 @@ def test_to_flow_spec_request_facts_filter_static_assets_and_keep_page_enums():
     assert "css-1" not in ids
     assert "js-1" not in ids
     assert spec.request_facts.option_sources
-    assert spec.request_facts.option_sources[0]["options"] == page_enums
+    page_source = spec.request_facts.option_sources[0]["options"]["type"]
+    assert page_source["options"] == page_enums["type"]["options"]
+    assert page_source["option_map"] == page_enums["type"]["option_map"]
+    assert page_source["trace_status"]["submitted_value"] == "missing"
     assert spec.request_facts.page_events == page_events
     post_fact = next(fact for fact in spec.request_facts.requests if fact.request_id == "post-1")
     assert post_fact.trigger_action_id == "action_3"

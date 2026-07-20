@@ -2423,6 +2423,11 @@ def _request_fact_entry(req: dict, role: dict) -> dict[str, Any]:
     """Normalize one captured request into the canonical RequestFacts shape."""
     request_index = req.get("index")
     response_json = req.get("response_json", req.get("json"))
+    query = _request_query_values(req)
+    body = _parse_body(req.get("post_data"))
+    body_paths = [
+        path for path, _tokens, _serialized, _raw in (_leaf_paths(body) if body is not None else [])
+    ]
     out = {
         "request_index": request_index,
         "request_id": str(req.get("request_id") or req.get("id") or request_index or uuid.uuid4().hex[:8]),
@@ -2433,7 +2438,9 @@ def _request_fact_entry(req: dict, role: dict) -> dict[str, Any]:
         "url": req.get("url") or "",
         "path": _request_path(req),
         "headers": dict(req.get("headers") or {}),
-        "query": dict(req.get("query") or {}),
+        "query": query,
+        "query_paths": [f"query.{key}" for key in query],
+        "body_paths": body_paths,
         "content_type": req.get("content_type") or "",
         "post_data": req.get("post_data"),
         "response_status": req.get("response_status", req.get("status")),
@@ -2515,10 +2522,83 @@ def _is_api_like_request_fact(entry: dict[str, Any], role: dict[str, Any] | None
     return bool(re.search(r"^/?(?:api|admin-api|appgateway|gsgl|oa|bpm|system|workflow|process|v1|v2)\b", path))
 
 
-def _option_sources_from_page_enum_options(page_enum_options: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _option_sources_from_page_enum_options(
+    page_enum_options: dict[str, Any] | None,
+    captured_requests: list[dict] | None = None,
+    facts_by_id: dict[str, RequestFact] | None = None,
+) -> list[dict[str, Any]]:
     if not page_enum_options:
         return []
-    return [{"kind": "page_enum_options", "options": page_enum_options}]
+    enriched = copy.deepcopy(page_enum_options)
+    facts = list((facts_by_id or {}).values())
+    facts_by_request_id = {fact.request_id: fact for fact in facts if fact.request_id}
+    facts_by_request_index = {
+        fact.request_index: fact for fact in facts if fact.request_index is not None
+    }
+
+    def alias_path(value: Any) -> str:
+        path = str(value or "").strip()
+        if ":" in path:
+            path = path.rsplit(":", 1)[-1]
+        return path.removeprefix("query.")
+
+    for raw_entry in enriched.values():
+        if not isinstance(raw_entry, dict):
+            continue
+        aliases = {
+            alias_path(alias)
+            for alias in [raw_entry.get("field_key"), *(raw_entry.get("field_aliases") or [])]
+            if alias_path(alias)
+        }
+        source_path = _request_path({"url": str(raw_entry.get("source_url") or "")})
+        if source_path:
+            raw_entry["source_request_ids"] = [
+                fact.request_id
+                for fact in facts
+                if (fact.method or "GET").upper() == "GET"
+                and _request_path({"url": fact.path or fact.url}) == source_path
+            ]
+        observations: list[dict[str, Any]] = []
+        for request in captured_requests or []:
+            fact = facts_by_request_id.get(str(request.get("request_id") or ""))
+            if fact is None and request.get("index") is not None:
+                fact = facts_by_request_index.get(request.get("index"))
+            if fact is None:
+                continue
+            for wire_path, value in _request_values(request):
+                if alias_path(wire_path) not in aliases:
+                    continue
+                observations.append({
+                    "request_id": fact.request_id,
+                    "request_index": fact.request_index,
+                    "method": fact.method,
+                    "path": fact.path or _request_path({"url": fact.url}),
+                    "wire_path": wire_path,
+                    "value": value,
+                    "sequence": fact.sequence,
+                    **{
+                        key: getattr(fact, key, None)
+                        for key in (
+                            "trigger_action_id", "trigger_transaction_id", "action_delta_ms",
+                        )
+                        if getattr(fact, key, None) not in (None, "")
+                    },
+                })
+        if observations:
+            raw_entry["request_value_observations"] = observations
+        raw_entry["trace_status"] = {
+            "control": "observed" if raw_entry.get("control_kind") or aliases else "missing",
+            "candidates": "observed" if raw_entry.get("options") else "missing",
+            "selection": "observed" if raw_entry.get("selected_label") or raw_entry.get("selected") else "missing",
+            "selected_value": "observed" if raw_entry.get("selected_value") not in (None, "") else "missing",
+            "source_request": (
+                "observed" if raw_entry.get("source_request_ids")
+                else "missing" if source_path else "not_declared"
+            ),
+            "submitted_value": "observed" if observations else "missing",
+            "mapping": "complete" if raw_entry.get("mapping_complete") is True else "incomplete",
+        }
+    return [{"kind": "page_enum_options", "options": enriched}]
 
 
 def _api_option_source_refs(
@@ -2541,7 +2621,19 @@ def _api_option_source_refs(
             "request_id": request_id,
             "method": fact.method or "GET",
             "path": fact.path or _request_path({"url": fact.url}),
+            "page_id": fact.page_id,
+            "frame_id": fact.frame_id,
+            "sequence": fact.sequence,
+            "query_paths": list(getattr(fact, "query_paths", []) or []),
             "response_schema": copy.deepcopy(fact.response_schema or {}),
+            **{
+                key: getattr(fact, key, None)
+                for key in (
+                    "trigger_action_id", "trigger_transaction_id", "trigger_event_id",
+                    "action_delta_ms", "causality_confidence",
+                )
+                if getattr(fact, key, None) not in (None, "")
+            },
         })
     return sources
 
@@ -2564,6 +2656,7 @@ def _build_request_facts(
     diagnostics: list[dict[str, Any]] | None = None,
     page_enum_options: dict[str, Any] | None = None,
     page_events: list[dict[str, Any]] | None = None,
+    field_evidence: list[dict[str, Any]] | None = None,
 ) -> RequestFacts:
     """Build the canonical request ledger directly from recorder evidence."""
     facts_by_id: dict[str, RequestFact] = {}
@@ -2610,11 +2703,16 @@ def _build_request_facts(
             _request_sequence_value(fact.sequence if fact.sequence is not None else fact.request_index) or 0,
         ),
     )
-    option_sources = _option_sources_from_page_enum_options(page_enum_options)
+    option_sources = _option_sources_from_page_enum_options(
+        page_enum_options,
+        captured_requests,
+        facts_by_id,
+    )
     option_sources.extend(_api_option_source_refs(facts_by_id, analysis))
     return RequestFacts(
         requests=requests,
         diagnostics=list(diagnostics or []),
+        field_evidence=copy.deepcopy(field_evidence or []),
         page_events=list(page_events or []),
         option_sources=option_sources,
         analysis=analysis,
@@ -4657,6 +4755,7 @@ def to_flow_spec(
             diagnostics=diagnostics,
             page_enum_options=page_enum_options,
             page_events=page_events,
+            field_evidence=field_evidence,
         )
         empty_spec = FlowSpec(
             tenant=tenant,
@@ -4857,6 +4956,7 @@ def to_flow_spec(
         diagnostics=diagnostics,
         page_enum_options=page_enum_options,
         page_events=page_events,
+        field_evidence=field_evidence,
     )
     cands = [r for r in captured_requests if _request_role_key(r) in selected_keys]
 
@@ -7169,9 +7269,14 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                         "wire_type": param.wire_type,
                         "category": param.category,
                         "source_kind": param.source_kind,
+                        "default_value": _client_redact_sensitive(param.default_value, param.path),
                         "caller_required": _param_requires_caller_input(param),
                         "exposed": bool(param.exposed_to_user),
                         "locked": bool(param.locked),
+                        "evidence": _client_redact_sensitive(
+                            copy.deepcopy((param.evidence or [])[-10:]),
+                            param.path,
+                        ),
                     }
                     for param in step.params
                 ],
@@ -7199,24 +7304,38 @@ def _semantic_fact_snapshot(spec: FlowSpec) -> dict[str, Any]:
                 "method": request.get("method"),
                 "path": request.get("path") or request.get("url"),
                 "page_id": request.get("page_id"),
+                "frame_id": request.get("frame_id"),
+                "sequence": request.get("sequence"),
                 "role": request.get("role"),
                 "confidence": request.get("confidence"),
                 "reason": request.get("reason"),
                 "trigger_action_id": request.get("trigger_action_id"),
+                "trigger_transaction_id": request.get("trigger_transaction_id"),
+                "trigger_event_id": request.get("trigger_event_id"),
                 "trigger_op": request.get("trigger_op"),
                 "trigger_locator": request.get("trigger_locator"),
                 "action_delta_ms": request.get("action_delta_ms"),
                 "causality_confidence": request.get("causality_confidence"),
+                "query_paths": list(request.get("query_paths") or []),
+                "body_paths": list(request.get("body_paths") or []),
+                "response_schema": copy.deepcopy(request.get("response_schema") or {}),
             }
             for request in request_facts[:120]
         ],
         "captured_request_count": len(request_facts),
+        "field_evidence": _client_redact_sensitive(
+            copy.deepcopy((getattr(spec.request_facts, "field_evidence", []) or [])[-500:]),
+        ),
+        "option_sources": _client_redact_sensitive(
+            copy.deepcopy((spec.request_facts.option_sources or [])[:120]),
+        ),
         "page_events": [
             {
                 key: event.get(key)
                 for key in (
-                    "event_id", "kind", "action_id", "op", "locator", "field",
-                    "required", "observed_at", "page_id", "frame_id", "changes",
+                    "event_id", "kind", "action_id", "transaction_id", "op", "locator", "field",
+                    "required", "has_value", "observed_at", "page_id", "frame_id", "changes",
+                    "option_count", "field_count", "required_fields", "page_context",
                 )
                 if event.get(key) not in (None, "", [], {})
             }
@@ -7254,6 +7373,9 @@ def _semantic_fact_hash(spec: FlowSpec) -> str:
             (str(fact.request_id or ""), str(fact.request_index if fact.request_index is not None else ""))
             for fact in spec.request_facts.requests or []
         ),
+        "field_evidence": getattr(spec.request_facts, "field_evidence", []) or [],
+        "option_sources": spec.request_facts.option_sources or [],
+        "page_events": spec.request_facts.page_events or [],
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
@@ -12813,12 +12935,36 @@ _CLIENT_SECRET_KEY_HINTS = (
 
 def _client_redact_sensitive(node, key_hint: str = ""):
     key_l = str(key_hint or "").lower()
-    if key_l and any(h in key_l for h in _CLIENT_SECRET_KEY_HINTS):
-        return "***"
     if isinstance(node, dict):
-        return {k: _client_redact_sensitive(v, str(k)) for k, v in node.items()}
+        grounded_identity = any(
+            node.get(key) not in (None, "", [])
+            for key in ("wire_path", "path", "field_key", "field_aliases", "key", "field")
+        )
+        value_hint = next((
+            str(node.get(key) or "")
+            for key in ("wire_path", "path", "field_key", "key", "field")
+            if node.get(key) not in (None, "")
+        ), key_hint)
+        aliases = " ".join(str(value) for value in (node.get("field_aliases") or []))
+        if aliases:
+            value_hint = f"{value_hint} {aliases}".strip()
+        return {
+            k: _client_redact_sensitive(
+                v,
+                value_hint if str(k) in {
+                    "value", "selected_value", "visible_value", "default", "default_value",
+                } else (
+                    key_hint
+                    if not grounded_identity and any(h in key_l for h in _CLIENT_SECRET_KEY_HINTS)
+                    else str(k)
+                ),
+            )
+            for k, v in node.items()
+        }
     if isinstance(node, list):
         return [_client_redact_sensitive(v, key_hint) for v in node]
+    if key_l and any(h in key_l for h in _CLIENT_SECRET_KEY_HINTS):
+        return "***"
     return node
 
 
@@ -12851,6 +12997,9 @@ def flow_spec_to_client(spec: FlowSpec) -> dict:
     data["meta"] = {**(data.get("meta") or {}), "current_fingerprint": _flow_fingerprint(client_spec)}
     data["meta"].pop("request_graph", None)
     request_facts = data.get("request_facts") or {}
+    for evidence_key in ("field_evidence", "option_sources", "page_events"):
+        if request_facts.get(evidence_key):
+            request_facts[evidence_key] = _client_redact_sensitive(request_facts[evidence_key])
     for req in request_facts.get("requests") or []:
         if req.get("headers"):
             req["headers"] = {k: "***" for k in (req.get("headers") or {})}
@@ -15561,6 +15710,15 @@ def apply_client_flow_patch(
 def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, Any]:
     request_facts = _request_fact_items(spec)
     cap_validation = report.get("capability_validation") or {}
+    recorded_field_evidence = _client_redact_sensitive(
+        copy.deepcopy((getattr(spec.request_facts, "field_evidence", []) or [])[-500:]),
+    )
+    recorded_option_sources = _client_redact_sensitive(
+        copy.deepcopy((spec.request_facts.option_sources or [])[:120]),
+    )
+    recorded_page_events = _client_redact_sensitive(
+        copy.deepcopy((spec.request_facts.page_events or [])[-300:]),
+    )
     option_sources: list[dict[str, Any]] = []
     for fact in (spec.request_facts.requests or []):
         if (fact.method or "").upper() != "GET":
@@ -15637,6 +15795,9 @@ def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, A
             }
             for r in request_facts[:120]
         ],
+        "recorded_field_evidence": recorded_field_evidence,
+        "recorded_option_sources": recorded_option_sources,
+        "page_events": recorded_page_events,
         "candidate_option_sources": option_sources,
     }
 

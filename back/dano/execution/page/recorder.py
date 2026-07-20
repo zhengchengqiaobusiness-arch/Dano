@@ -535,11 +535,11 @@ _RECORDER_JS = r"""() => {
       }));
     } catch (e) {}
   }
-  function emit(op, loc, value, field, required, options, evidence) {
+  function emit(op, loc, value, field, required, options, evidence, existingActionId) {
     if (!loc || onLoginPage()) return;            // 登录页上的任何操作一律不录(自动跳过登录,免手点「从这里开始录」)
     try {
-      actionSeq += 1;
-      var actionId = 'action_' + actionSeq;
+      if (!existingActionId) actionSeq += 1;
+      var actionId = existingActionId || ('action_' + actionSeq);
       var startMutationSeq = mutationSeq;
       window.__danoRecord(JSON.stringify({
         op: op,
@@ -798,7 +798,7 @@ _RECORDER_JS = r"""() => {
     var inp = trig && trig.querySelector ? trig.querySelector('input,select,[role="combobox"]') : trig;
     return controlKind(inp || trig) === 'select';
   }
-  function emitEnumSnapshot(trig) {
+  function emitEnumSnapshot(trig, actionId) {
     if (!trig || onLoginPage() || !isEnumTrigger(trig)) return;
     try {
       var inp = trig.matches && trig.matches('input,select,[role="combobox"]') ? trig :
@@ -848,6 +848,7 @@ _RECORDER_JS = r"""() => {
       if (!records.length) return;
       window.__danoRecord(JSON.stringify({
         op: 'enum_snapshot',
+        action_id: actionId || '',
         locator: loc,
         field: fieldOf(loc),
         field_aliases: enumFieldAliases(trig, inp),
@@ -862,9 +863,9 @@ _RECORDER_JS = r"""() => {
       }));
     } catch (e) {}
   }
-  function scheduleEnumSnapshots(trig) {
+  function scheduleEnumSnapshots(trig, actionId) {
     [60, 220, 600].forEach(function (delay) {
-      setTimeout(function () { emitEnumSnapshot(trig); }, delay);
+      setTimeout(function () { emitEnumSnapshot(trig, actionId); }, delay);
     });
   }
   // 触发框:W3C aria-haspopup / readonly 优先 + Element/Ant/Vant 框架特定 class 兜底
@@ -878,7 +879,7 @@ _RECORDER_JS = r"""() => {
                     '.bp5-html-select,.bp5-popover-target,.bp5-select,' +
                     '.v-field,.v-input,' +
                     '.q-field,.q-select,.q-input';
-  var activeTrigger = null, prevVal = '', pickTimer = null, lastPickOptions = [];
+  var activeTrigger = null, activeControlActionId = '', prevVal = '', pickTimer = null, lastPickOptions = [];
   function triggerOf(t) {                               // 触发型字段:已知选择器类 / 含 readonly input / aria-haspopup
     var k = t.closest ? t.closest(TRIGGER_CLS + ',[aria-haspopup]') : null; if (k) return k;
     var node = t;
@@ -887,6 +888,24 @@ _RECORDER_JS = r"""() => {
       node = node.parentElement;
     }
     return null;
+  }
+  function emitControlOpen(trig, actionId) {
+    try {
+      var inp = trig && trig.querySelector ? trig.querySelector('input,select,[role="combobox"]') : trig;
+      var loc = locateField(inp || trig);
+      if (!loc || onLoginPage()) return;
+      var evidence = fieldEvidence(inp || trig);
+      window.__danoRecord(JSON.stringify({
+        op: 'control_open',
+        action_id: actionId,
+        observed_at: Date.now(),
+        locator: loc,
+        field: fieldOf(loc),
+        field_aliases: (evidence && evidence.field_aliases) || [],
+        control_kind: (evidence && evidence.control_kind) || 'unknown',
+        page_context: window.__danoPageContext ? window.__danoPageContext() : {}
+      }));
+    } catch (e) {}
   }
   // 取触发框当前"显示值":优先 input.value(旧 Element UI),退而读触发框可见文本
   // —— Element Plus(Vue3)等现代框架选中值在文本节点里、input.value 为空,必须读 innerText 才抓得到。
@@ -922,7 +941,7 @@ _RECORDER_JS = r"""() => {
   }
   // 选中值落定检测:**不靠固定延时**,轮询显示值直到变成「非空且与点击前不同」才记 pick
   // —— 异步/远程搜索/级联(值晚一点回填)也能稳抓,不会读太早拿空值而漏掉(框架无关)。
-  function pollPick(trig, resetOptions) {
+  function pollPick(trig, resetOptions, actionId) {
     if (pickTimer) { clearInterval(pickTimer); pickTimer = null; }
     if (!trig) return;
     // 只有打开一个新触发框时才清理旧候选。点击弹层选项后再次启动轮询时，
@@ -938,7 +957,7 @@ _RECORDER_JS = r"""() => {
         var loc = locateField(inp || trig);
         if (loc) emit(
           'pick', loc, v, fieldOf(loc), requiredOf(trig) || (inp && requiredOf(inp)),
-          isEnumTrigger(trig) ? lastPickOptions : [], fieldEvidence(inp || trig)
+          isEnumTrigger(trig) ? lastPickOptions : [], fieldEvidence(inp || trig), actionId
         );
       } else if (tries >= 25) { clearInterval(pickTimer); pickTimer = null; }   // ~2.5s 仍没变 → 放弃
     }, 100);
@@ -949,15 +968,18 @@ _RECORDER_JS = r"""() => {
     if (e.target.closest && e.target.closest(POPUP)) {
       var _opts = isEnumTrigger(activeTrigger) ? popupOptions(e.target.closest(POPUP)) : [];
       if (_opts.length) lastPickOptions = _opts;
-      pollPick(activeTrigger, false); return;
+      pollPick(activeTrigger, false, activeControlActionId); return;
     }
     // B) 点选择型触发框 → 记住它 + 点击前的显示值,开始轮询(覆盖单击即选 / 远程搜索异步回填 / 级联)
     var trig = triggerOf(e.target);
     if (trig) {
+      actionSeq += 1;
+      activeControlActionId = 'action_' + actionSeq;
       activeTrigger = trig;
       prevVal = pickVal(trig);
-      pollPick(trig, true);
-      if (isEnumTrigger(trig)) scheduleEnumSnapshots(trig);
+      emitControlOpen(trig, activeControlActionId);
+      pollPick(trig, true, activeControlActionId);
+      if (isEnumTrigger(trig)) scheduleEnumSnapshots(trig, activeControlActionId);
       return;
     }
     // C) 普通输入框点击 = 聚焦噪声(打字会另记 fill)→ 跳过
@@ -1590,6 +1612,41 @@ class RecordSession:
         observed_at = step.get("observed_at") or int(time.time() * 1000)
         scope = (str(step.get("page_id") or ""), str(step.get("frame_id") or ""))
         op = str(step.get("op") or "")
+        if op == "control_open":
+            action_id = str(step.get("action_id") or f"action_server_{self._event_counter}")
+            transaction_id = "|".join(part for part in (
+                scope[0] or "page_unknown",
+                scope[1] or "frame_unknown",
+                action_id,
+            ))
+            event = {
+                "event_id": event_id,
+                "kind": "action",
+                "action_id": action_id,
+                "transaction_id": transaction_id,
+                "op": op,
+                "locator": str(step.get("locator") or ""),
+                "field": str(step.get("field") or ""),
+                "control_kind": str(step.get("control_kind") or "unknown"),
+                "observed_at": observed_at,
+                "page_id": scope[0],
+                "frame_id": scope[1],
+                "page_context": dict(step.get("page_context") or {}),
+            }
+            self.page_events.append(event)
+            action_ref = {
+                "action_id": action_id,
+                "transaction_id": transaction_id,
+                "event_id": event_id,
+                "op": op,
+                "locator": event["locator"],
+                "page_context": event["page_context"],
+                "monotonic": time.monotonic(),
+            }
+            self._last_action_by_scope[scope] = action_ref
+            self._last_action_by_scope[("", "")] = action_ref
+            self.page_events = self.page_events[-1000:]
+            return
         if op == "dom_effect":
             self.page_events.append({
                 "event_id": event_id,
@@ -1605,6 +1662,15 @@ class RecordSession:
             self.page_events = self.page_events[-1000:]
             return
         if op == "enum_snapshot":
+            action_id = str(step.get("action_id") or "")
+            transaction_id = (
+                "|".join(part for part in (
+                    scope[0] or "page_unknown",
+                    scope[1] or "frame_unknown",
+                    action_id,
+                ))
+                if action_id else ""
+            )
             raw_options = list(step.get("options") or [])
             options = raw_options[:500]
             if options and step.get("field"):
@@ -1612,6 +1678,7 @@ class RecordSession:
                     **step,
                     "options": options,
                     "event_id": event_id,
+                    "transaction_id": transaction_id,
                     "mapping_complete": bool(step.get("mapping_complete")) and len(raw_options) <= 500,
                     "snapshot_truncated": len(raw_options) > 500,
                 }
@@ -1667,6 +1734,8 @@ class RecordSession:
                 self.page_events.append({
                     "event_id": event_id,
                     "kind": "enum_snapshot",
+                    "action_id": action_id,
+                    "transaction_id": transaction_id,
                     "field": str(step.get("field") or ""),
                     "locator": str(step.get("locator") or ""),
                     "option_count": len(options),
@@ -2176,6 +2245,17 @@ class RecordSession:
                     entry["selected_value"] = previous.get("selected_value")
                 if mapping_conflict:
                     entry["mapping_conflict"] = True
+                for fact_key in (
+                    "action_id", "transaction_id", "observed_at", "enum_source",
+                    "source_url", "dict_type", "script_url",
+                ):
+                    fact_value = s.get(fact_key)
+                    if fact_value in (None, ""):
+                        fact_value = owner.get(fact_key)
+                    if fact_value in (None, ""):
+                        fact_value = previous.get(fact_key)
+                    if fact_value not in (None, ""):
+                        entry[fact_key] = fact_value
                 if (
                     s.get("control_kind") or owner.get("control_kind")
                     or aliases or previous.get("control_kind")

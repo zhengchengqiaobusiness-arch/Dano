@@ -746,10 +746,65 @@ def test_open_dropdown_snapshot_is_persisted_without_executable_pick() -> None:
     assert sess.recorded_page_events()[-1]["kind"] == "enum_snapshot"
 
 
+def test_control_open_snapshot_and_pick_share_non_executable_transaction() -> None:
+    sess = RecordSession()
+    common = {
+        "action_id": "action-select-seal",
+        "page_id": "page-1",
+        "frame_id": "main",
+        "locator": "role=combobox[name=公章]",
+        "field": "公章",
+        "field_aliases": ["sealId"],
+        "control_kind": "select",
+    }
+    sess._on_record(None, json.dumps({
+        **common,
+        "op": "control_open",
+        "observed_at": 1000,
+    }))
+    sess._on_record(None, json.dumps({
+        **common,
+        "op": "enum_snapshot",
+        "options": ["公司章", "财务章"],
+        "observed_at": 1050,
+    }))
+    sess._on_record(None, json.dumps({
+        **common,
+        "op": "pick",
+        "value": "公司章",
+        "options": ["公司章", "财务章"],
+        "observed_at": 1100,
+    }))
+
+    assert len(sess.steps) == 1
+    assert sess.steps[0]["op"] == "pick"
+    transaction_id = "page-1|main|action-select-seal"
+    assert sess.steps[0]["transaction_id"] == transaction_id
+    traced_events = [
+        event for event in sess.recorded_page_events()
+        if event.get("action_id") == "action-select-seal"
+    ]
+    assert [event["op"] for event in traced_events if event["kind"] == "action"] == [
+        "control_open", "pick",
+    ]
+    assert all(event["transaction_id"] == transaction_id for event in traced_events)
+    enum = sess.recorded_page_enum_options()["公章"]
+    assert enum["action_id"] == "action-select-seal"
+    assert enum["transaction_id"] == transaction_id
+    assert enum["observed_at"] == 1100
+
+
+def test_recorder_script_emits_control_open_before_remote_options_request() -> None:
+    assert "op: 'control_open'" in _RECORDER_JS
+    assert "emitControlOpen(trig, activeControlActionId)" in _RECORDER_JS
+    assert "fieldEvidence(inp || trig), actionId" in _RECORDER_JS
+    assert "activeControlActionId" in _RECORDER_JS
+
+
 def test_popup_pick_preserves_options_until_selected_value_is_recorded() -> None:
     """点击弹层项时不得清空刚抓到的候选，未知 value 也不能伪装成 label。"""
-    assert "pollPick(activeTrigger, false)" in _RECORDER_JS
-    assert "pollPick(trig, true)" in _RECORDER_JS
+    assert "pollPick(activeTrigger, false, activeControlActionId)" in _RECORDER_JS
+    assert "pollPick(trig, true, activeControlActionId)" in _RECORDER_JS
     assert "if (resetOptions) lastPickOptions = []" in _RECORDER_JS
     assert "return label;" not in _RECORDER_JS
 

@@ -100,3 +100,201 @@ def test_api_option_source_is_an_index_to_request_fact_not_a_response_copy() -> 
     assert source["path"] == "/api/dict/leave-types"
     assert "response_json" not in source
     assert facts.requests[0].response_json == [{"label": "年假", "value": "1"}]
+
+
+def test_request_facts_and_agent_context_preserve_complete_selection_trace() -> None:
+    page_events = [
+        {
+            "event_id": "event-open",
+            "kind": "action",
+            "action_id": "action-select-seal",
+            "transaction_id": "page-1|main|action-select-seal",
+            "op": "control_open",
+            "field": "公章",
+            "observed_at": 1000,
+            "page_id": "page-1",
+            "frame_id": "main",
+        },
+        {
+            "event_id": "event-pick",
+            "kind": "action",
+            "action_id": "action-select-seal",
+            "transaction_id": "page-1|main|action-select-seal",
+            "op": "pick",
+            "field": "公章",
+            "observed_at": 1100,
+            "page_id": "page-1",
+            "frame_id": "main",
+        },
+        {
+            "event_id": "event-submit",
+            "kind": "action",
+            "action_id": "action-submit",
+            "transaction_id": "page-1|main|action-submit",
+            "op": "submit",
+            "observed_at": 1200,
+            "page_id": "page-1",
+            "frame_id": "main",
+        },
+    ]
+    field_evidence = [{
+        "path": "sealId",
+        "label": "公章",
+        "field_aliases": ["sealId"],
+        "control_kind": "select",
+        "required": True,
+        "page_id": "page-1",
+        "frame_id": "main",
+    }]
+    page_options = {
+        "公章": {
+            "field_key": "公章",
+            "field_aliases": ["sealId"],
+            "control_kind": "select",
+            "options": [
+                {"label": "公司章", "value": "seal-a"},
+                {"label": "财务章", "value": "seal-b"},
+            ],
+            "selected": "公司章",
+            "selected_label": "公司章",
+            "selected_value": "seal-a",
+            "mapping_complete": True,
+            "enum_source": "api",
+            "source_url": "https://example.test/api/seals/options?enabled=1",
+            "dict_type": "seal_type",
+            "action_id": "action-select-seal",
+            "transaction_id": "page-1|main|action-select-seal",
+            "observed_at": 1100,
+            "page_id": "page-1",
+            "frame_id": "main",
+        },
+    }
+    captured = [
+        {
+            "index": 1,
+            "request_id": "req-options",
+            "sequence": 1,
+            "method": "GET",
+            "url": "https://example.test/api/seals/options?enabled=1",
+            "response_json": {"result": [
+                {"id": "seal-a", "name": "公司章"},
+                {"id": "seal-b", "name": "财务章"},
+            ]},
+            "trigger_action_id": "action-select-seal",
+            "trigger_transaction_id": "page-1|main|action-select-seal",
+            "trigger_event_id": "event-open",
+            "action_delta_ms": 25,
+            "page_id": "page-1",
+            "frame_id": "main",
+        },
+        {
+            "index": 2,
+            "request_id": "req-submit",
+            "sequence": 2,
+            "method": "POST",
+            "url": "https://example.test/api/seal-apply",
+            "post_data": '{"sealId":"seal-a","title":"Project"}',
+            "response_json": {"ok": True},
+            "trigger_action_id": "action-submit",
+            "trigger_transaction_id": "page-1|main|action-submit",
+            "trigger_event_id": "event-submit",
+            "action_delta_ms": 15,
+            "page_id": "page-1",
+            "frame_id": "main",
+        },
+    ]
+    facts = flow_spec_module._build_request_facts(
+        captured_requests=captured,
+        request_roles=[
+            {"role": "read_option", "semantic_roles": ["enum_options"], "keep": False},
+            {"role": "business_write", "keep": True},
+        ],
+        selected_keys={2},
+        page_enum_options=page_options,
+        page_events=page_events,
+        field_evidence=field_evidence,
+    )
+
+    option_fact = next(fact for fact in facts.requests if fact.request_id == "req-options")
+    submit_fact = next(fact for fact in facts.requests if fact.request_id == "req-submit")
+    assert option_fact.query == {"enabled": ["1"]}
+    assert option_fact.query_paths == ["query.enabled"]
+    assert submit_fact.body_paths == ["sealId", "title"]
+    assert facts.field_evidence == field_evidence
+    assert facts.page_events == page_events
+
+    page_source = next(source for source in facts.option_sources if source["kind"] == "page_enum_options")
+    seal_source = page_source["options"]["公章"]
+    assert seal_source["field_aliases"] == ["sealId"]
+    assert seal_source["selected_label"] == "公司章"
+    assert seal_source["selected_value"] == "seal-a"
+    assert seal_source["mapping_complete"] is True
+    assert seal_source["source_request_ids"] == ["req-options"]
+    assert seal_source["transaction_id"] == "page-1|main|action-select-seal"
+    assert seal_source["trace_status"] == {
+        "control": "observed",
+        "candidates": "observed",
+        "selection": "observed",
+        "selected_value": "observed",
+        "source_request": "observed",
+        "submitted_value": "observed",
+        "mapping": "complete",
+    }
+    assert seal_source["request_value_observations"] == [{
+        "request_id": "req-submit",
+        "request_index": 2,
+        "method": "POST",
+        "path": "/api/seal-apply",
+        "wire_path": "sealId",
+        "value": "seal-a",
+        "sequence": 2,
+        "trigger_action_id": "action-submit",
+        "trigger_transaction_id": "page-1|main|action-submit",
+        "action_delta_ms": 15,
+    }]
+
+    spec = FlowSpec(request_facts=facts)
+    state = flow_spec_module.recording_agent_state(spec)
+    semantic_facts = state["facts"]
+    assert semantic_facts["field_evidence"] == field_evidence
+    assert semantic_facts["option_sources"][0]["options"]["公章"]["selected_value"] == "seal-a"
+    assert semantic_facts["captured_requests"][0]["query_paths"] == ["query.enabled"]
+    assert semantic_facts["captured_requests"][1]["body_paths"] == ["sealId", "title"]
+    assert semantic_facts["page_events"][0]["transaction_id"] == "page-1|main|action-select-seal"
+
+    validation = flow_spec_module.recording_agent_validation(spec)
+    repair_context = validation["repair_context"]
+    assert repair_context["recorded_field_evidence"] == field_evidence
+    assert repair_context["recorded_option_sources"][0]["options"]["公章"]["source_request_ids"] == [
+        "req-options",
+    ]
+    assert repair_context["page_events"][1]["op"] == "pick"
+
+
+def test_recording_fact_projection_redacts_values_using_wire_path_identity() -> None:
+    spec = FlowSpec(request_facts=RequestFacts(
+        field_evidence=[{
+            "path": "accessToken",
+            "field_aliases": ["accessToken"],
+            "value": "secret-token",
+        }],
+        option_sources=[{
+            "kind": "page_enum_options",
+            "options": {
+                "Token": {
+                    "field_aliases": ["accessToken"],
+                    "selected_value": "secret-token",
+                    "request_value_observations": [{
+                        "wire_path": "accessToken",
+                        "value": "secret-token",
+                    }],
+                },
+            },
+        }],
+    ))
+
+    projected = flow_spec_module.recording_agent_state(spec)["facts"]
+    assert projected["field_evidence"][0]["value"] == "***"
+    option = projected["option_sources"][0]["options"]["Token"]
+    assert option["selected_value"] == "***"
+    assert option["request_value_observations"][0]["value"] == "***"
