@@ -2484,6 +2484,8 @@ def _request_fact_from_entry(entry: dict[str, Any]) -> RequestFact:
 
 def _request_analysis_from_entry(entry: dict[str, Any], role: dict[str, Any], bucket: str) -> RequestAnalysis:
     role_name = str(role.get("role") or "")
+    if role_name == "submit_anchor":
+        role_name = "business_write"
     semantic_roles = [str(value) for value in (role.get("semantic_roles") or []) if str(value)]
     role_semantic = {
         "business_get": "business_query",
@@ -2840,17 +2842,32 @@ def _capability_request_ref_from_step(
     fact = _step_request_fact_for_capability(spec, step)
     rid = fact.request_id if fact else str((step.source_meta or {}).get("request_id") or "")
     analysis = spec.request_facts.analysis.get(rid) if rid else None
+    derived_usage = (
+        "preflight"
+        if bool((step.source_meta or {}).get("control_preflight_for_write"))
+        else "execute"
+    )
+    usage = (
+        existing.usage
+        if existing and existing.origin in {"manual", "user"}
+        else derived_usage
+    )
+    role = (analysis.role if analysis else "") or (step.source_meta or {}).get("role") or step.semantic_role or ""
+    if role == "submit_anchor":
+        role = "business_write"
+    elif derived_usage == "preflight" and role in {"", "business_get"}:
+        role = "read_context"
     ref = CapabilityRequestRef(
         request_id=rid,
         request_index=fact.request_index if fact else (step.source_meta or {}).get("request_index"),
         step_id=step.step_id,
-        role=(analysis.role if analysis else "") or (step.source_meta or {}).get("role") or step.semantic_role or "",
+        role=role,
         method=(step.method or "").upper(),
         path=step.path or step.url,
         sequence=fact.sequence if fact else (step.source_meta or {}).get("sequence", (step.source_meta or {}).get("request_index")),
         confidence=float((analysis.confidence if analysis else None) or (step.source_meta or {}).get("confidence") or 0.0),
         reason=(analysis.reason if analysis else "") or (step.source_meta or {}).get("keep_reason") or "",
-        usage=existing.usage if existing else str((step.source_meta or {}).get("capability_usage") or "execute"),
+        usage=usage,
         origin=existing.origin if existing else str((step.source_meta or {}).get("membership_origin") or "planner"),
         confirmed=bool(existing.confirmed) if existing else False,
     )
@@ -5037,6 +5054,23 @@ def to_flow_spec(
                 and float((role_by_key.get(_request_role_key(request)) or {}).get("confidence") or 0.0) >= 0.9
             )
         )
+    }
+    for index, (request, role_info) in enumerate(zip(captured_requests, request_roles)):
+        request_key = _request_role_key(request)
+        stable_role = dict(role_info or {})
+        if request_key in selected_write_keys and stable_role.get("role") == "submit_anchor":
+            stable_role["role"] = "business_write"
+        if request_key in preflight_owner_request_keys:
+            stable_role.update({
+                "role": "read_context",
+                "keep": True,
+                "filter_reason": "",
+                "confidence": max(float(stable_role.get("confidence") or 0.0), 0.9),
+            })
+        request_roles[index] = stable_role
+    role_by_key = {
+        _request_role_key(request): role
+        for request, role in zip(captured_requests, request_roles)
     }
     selected_keys = selected_write_keys | selected_preread_keys | independent_business_keys
     request_facts = _build_request_facts(
@@ -8982,20 +9016,19 @@ def _sync_capability_order(spec: FlowSpec, cap: FlowCapability) -> None:
         step_id for step_id in _capability_call_step_ids_from_nodes(cap.nodes or [])
         if step_id in by_id
     ]
-    existing_execute = {
+    existing_memberships = {
         ref.step_id: ref for ref in (cap.request_refs or [])
-        if ref.usage == "execute" and ref.step_id
+        if ref.usage in {"execute", "preflight"} and ref.step_id
     }
     auxiliary_refs = [
         ref for ref in (cap.request_refs or [])
-        if ref.usage != "execute"
+        if ref.usage not in {"execute", "preflight"} or not ref.step_id
     ]
     execute_refs: list[CapabilityRequestRef] = []
     for step_id in cap.step_ids:
         ref = _capability_request_ref_from_step(
-            spec, by_id[step_id], existing_execute.get(step_id),
+            spec, by_id[step_id], existing_memberships.get(step_id),
         )
-        ref.usage = "execute"
         execute_refs.append(ref)
     cap.request_refs = execute_refs + auxiliary_refs
 

@@ -791,7 +791,7 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertEqual(len(spec.steps), 3)
         roles = spec.meta.get("request_roles") or []
         self.assertEqual(len(roles), 3)
-        self.assertIn("business_get", {r["role"] for r in roles})
+        self.assertIn("read_context", {r["role"] for r in roles})
         get_role = next(r for r in roles if "/getappid" in r["path"])
         self.assertTrue(get_role["keep"])
         self.assertIn("后续业务请求引用", get_role["reason"])
@@ -985,7 +985,8 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertEqual(spec.meta["captured_preread_candidates"], 1)
 
         roles = spec.meta.get("request_roles") or []
-        self.assertEqual(sum(1 for r in roles if r["role"] == "business_get"), 12)
+        self.assertEqual(sum(1 for r in roles if r["role"] == "business_get"), 11)
+        self.assertEqual(sum(1 for r in roles if r["role"] == "read_context"), 1)
         user_page_roles = [r for r in roles if "/system/user/page" in r["path"]]
         self.assertTrue(user_page_roles)
         self.assertTrue(all(r["role"] == "read_option" and not r["keep"] for r in user_page_roles))

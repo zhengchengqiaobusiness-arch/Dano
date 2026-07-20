@@ -318,19 +318,10 @@ def test_r0_seal_truth_resolves_each_field_axis_independently(
     ("request_index", "expected_role"),
     [
         ("1", "business_get"),
-        pytest.param(
-            "2", "read_context",
-            marks=pytest.mark.xfail(strict=True, reason="R4: 流程定义查询是写能力前置上下文"),
-        ),
-        pytest.param(
-            "3", "read_context",
-            marks=pytest.mark.xfail(strict=True, reason="R4: 审批详情查询是写能力前置上下文"),
-        ),
+        ("2", "read_context"),
+        ("3", "read_context"),
         ("4", "read_option"),
-        pytest.param(
-            "5", "business_write",
-            marks=pytest.mark.xfail(strict=True, reason="R4: RequestAnalysis 使用稳定业务角色，不保留 submit_anchor 临时角色"),
-        ),
+        ("5", "business_write"),
     ],
 )
 def test_r0_seal_truth_classifies_each_interface_role(
@@ -346,18 +337,9 @@ def test_r0_seal_truth_classifies_each_interface_role(
     ("capability_kind", "path_fragment", "expected_role", "expected_usage"),
     [
         ("query_status", "/oa/seal-apply/page", "business_get", "execute"),
-        pytest.param(
-            "submit", "/process-definition/get", "read_context", "preflight",
-            marks=pytest.mark.xfail(strict=True, reason="R4: 写能力前置接口必须标记 preflight"),
-        ),
-        pytest.param(
-            "submit", "/get-approval-detail", "read_context", "preflight",
-            marks=pytest.mark.xfail(strict=True, reason="R4: 写能力前置接口必须标记 preflight"),
-        ),
-        pytest.param(
-            "submit", "/seal-apply/submit-process", "business_write", "execute",
-            marks=pytest.mark.xfail(strict=True, reason="R4: capability ref 复用稳定业务角色，不泄漏 submit_anchor"),
-        ),
+        ("submit", "/process-definition/get", "read_context", "preflight"),
+        ("submit", "/get-approval-detail", "read_context", "preflight"),
+        ("submit", "/seal-apply/submit-process", "business_write", "execute"),
         ("submit", "/bd/seal/simple-list", "read_option", "option_source"),
     ],
 )
