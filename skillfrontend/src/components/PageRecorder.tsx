@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import type { ButtonProps } from "antd";
 import {
   Alert,
-  Button,
+  Button as AntButton,
   Card,
   Checkbox,
   Col,
@@ -35,6 +36,10 @@ import {
 } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 
+function Button(props: ButtonProps) {
+  return <AntButton htmlType="button" {...props} />;
+}
+
 interface RecReq { method: string; url: string; has_body?: boolean; json?: boolean }
 interface AnalysisScreenshotPayload {
   name: string;
@@ -51,7 +56,7 @@ interface AnalysisScreenshot extends AnalysisScreenshotPayload {
 }
 
 interface AnalysisApplication {
-  status: "applied" | "no_change" | "rejected";
+  status: "applied" | "no_change" | "needs_review" | "rejected";
   summary?: string;
   screenshot_count: number;
   model_image_count?: number;
@@ -61,6 +66,11 @@ interface AnalysisApplication {
   capability_count_after?: number;
   field_count_before?: number;
   field_count_after?: number;
+  matched_field_count?: number;
+  unmatched_field_count?: number;
+  locked_field_count?: number;
+  rejected_field_count?: number;
+  unresolved_field_count?: number;
   proposal_gate?: { accepted?: boolean; reasons?: string[] };
   operation_id?: string;
 }
@@ -1293,8 +1303,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const [analysisScreenshotBusy, setAnalysisScreenshotBusy] = useState(false);
   const [lastAnalysisEvidence, setLastAnalysisEvidence] = useState<AnalysisApplication | null>(null);
   const [expandedCapabilityKeys, setExpandedCapabilityKeys] = useState<string[]>([]);
-  const [expandedCapabilitySections, setExpandedCapabilitySections] = useState<Record<number, string[]>>({});
+  const [expandedCapabilitySections, setExpandedCapabilitySections] = useState<Record<string, string[]>>({});
   const [expandedCapabilitySteps, setExpandedCapabilitySteps] = useState<Record<string, string[]>>({});
+  const [optimisticCapabilityStepOrder, setOptimisticCapabilityStepOrder] = useState<Record<string, string[]>>({});
   const [expandedRequestPanels, setExpandedRequestPanels] = useState<string[]>([]);
   const [expandedUnassignedSteps, setExpandedUnassignedSteps] = useState<string[]>([]);
   const [expandedCapabilityRelationKeys, setExpandedCapabilityRelationKeys] = useState<string[]>([]);
@@ -1339,6 +1350,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     pendingCapabilityMembershipRef.current = remaining;
     flowSpecRef.current = fs;
     setFlowSpec(fs);
+    setOptimisticCapabilityStepOrder({});
     if (fs.meta?.last_analysis_application) {
       setLastAnalysisEvidence(fs.meta.last_analysis_application);
     }
@@ -1493,7 +1505,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const queued = flowMutationQueueRef.current.shift();
     const next = { ...queued, expected_fingerprint: serverFingerprintRef.current };
     flowMutationInFlightRef.current = next;
-    if (!sendRaw(next)) {
+    const { _rollback, ...wireMessage } = next;
+    if (!sendRaw(wireMessage)) {
+      next._rollback?.();
       flowMutationInFlightRef.current = null;
       flowMutationQueueRef.current = [];
       afterFlowSyncRef.current = null;
@@ -1502,7 +1516,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function enqueueFlowMutation(obj: any) {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return sendRaw(obj);
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      const { _rollback, ...wireMessage } = obj;
+      const sent = sendRaw(wireMessage);
+      if (!sent) _rollback?.();
+      return sent;
+    }
     const operationId = obj.operation_id || `flow-${Date.now()}-${++flowMutationSeqRef.current}`;
     flowMutationQueueRef.current.push({ ...obj, operation_id: operationId });
     flushFlowMutationQueue();
@@ -1522,9 +1541,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     }
   }
 
-  function failQueuedFlowMutation(operationId?: string) {
+  function failQueuedFlowMutation(operationId?: string, restoreLocal = true) {
     const active = flowMutationInFlightRef.current;
     if (operationId && active?.operation_id && operationId !== active.operation_id) return;
+    if (restoreLocal) {
+      [...flowMutationQueueRef.current].reverse().forEach((queued) => queued?._rollback?.());
+      active?._rollback?.();
+    }
     flowMutationInFlightRef.current = null;
     flowMutationQueueRef.current = [];
     afterFlowSyncRef.current = null;
@@ -1856,9 +1879,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         if (m.operation_report) {
           const report = m.operation_report as FlowOperationReport;
           setLastOperationReport(report);
-          if (report.changed) message.success(report.summary || "流程编排已更新");
-          else if (report.edit_errors?.length) message.error(report.summary || "自动修复存在无效建议");
-          else message.info(report.summary || "检查完成，没有可自动修改的内容");
+          if (report.edit_errors?.length) message.error(report.summary || "自动修复存在无效建议");
+          else if (!report.changed) message.info(report.summary || "检查完成，没有可自动修改的内容");
         }
         if (m.operation === "flow_update") finishQueuedFlowMutation(m.operation_id);
       }
@@ -1889,7 +1911,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         finalizeOperationRef.current = null;
         if (m.flow_spec) acceptFlowSpec(m.flow_spec);
         if (m.check_report) setCheckReport(m.check_report);
-        if (m.operation === "flow_update") failQueuedFlowMutation(m.operation_id);
+        if (m.operation === "flow_update") failQueuedFlowMutation(m.operation_id, !m.flow_spec);
         if (reconnectRestoreOperationRef.current && m.operation_id === reconnectRestoreOperationRef.current) {
           reconnectRestoreOperationRef.current = null;
           setReconnectedSessionNeedsCapture(true);
@@ -2502,6 +2524,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!current) return;
     const idx = (current.capabilities?.length || 0) + 1;
     const capability: FlowCapabilityData = {
+      capability_id: newCostlyOperationId("capability"),
       name: `capability_${idx}`,
       title: `能力 ${idx}`,
       intent: "",
@@ -2593,27 +2616,25 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const next = [...stepIds];
     const [item] = next.splice(from, 1);
     next.splice(to, 0, item);
+    const cap = flowSpecRef.current?.capabilities?.[idx];
+    if (!cap) return;
+    const capabilityUiKey = capabilityPanelKey(cap, idx);
     preserveEditorScrollForReorder();
+    setOptimisticCapabilityStepOrder((current) => ({ ...current, [capabilityUiKey]: next }));
     send({ type: "flow_update", edits: [
       { op: "reorder_capability_steps", capability_index: idx, step_ids: next },
       { op: "update_capability", capability_index: idx, field: "confirmed", value: false },
-    ] });
+    ], _rollback: () => setOptimisticCapabilityStepOrder((current) => ({
+      ...current,
+      [capabilityUiKey]: stepIds,
+    })) });
   }
   function capabilityRef(cap: FlowCapabilityData, idx: number) {
     return cap.name || cap.capability_id || `idx:${idx}`;
   }
   function capabilityPanelKey(cap: FlowCapabilityData, idx: number) {
-    // Names are editable and must never participate in the normal key. Legacy
-    // duplicate server IDs get an indexed quarantine key so React does not
-    // reuse the wrong panel; valid IDs remain stable across every field edit.
-    if (cap.capability_id) {
-      const duplicateCount = (flowSpecRef.current?.capabilities || [])
-        .filter((item) => item.capability_id === cap.capability_id).length;
-      return duplicateCount > 1
-        ? ["capability", cap.capability_id, "duplicate", idx].join(":")
-        : ["capability", cap.capability_id].join(":");
-    }
-    return ["capability-name", cap.name || idx].join(":");
+    void idx;
+    return ["capability", cap.capability_id || cap.name || "missing-id"].join(":");
   }
   function moveCapability(idx: number, delta: number) {
     const current = flowSpecRef.current;
@@ -2629,7 +2650,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const next = { ...current, capabilities: ordered };
     flowSpecRef.current = next;
     setFlowSpec(next);
-    send({ type: "flow_update", edits: [{ op: "reorder_capabilities", capability_refs: refs }] });
+    send({
+      type: "flow_update",
+      edits: [{ op: "reorder_capabilities", capability_refs: refs }],
+      _rollback: () => {
+        const restored = { ...current, capabilities: caps };
+        flowSpecRef.current = restored;
+        setFlowSpec(restored);
+      },
+    });
   }
   const stepById = useMemo(() => Object.fromEntries((flowSpec?.steps || []).map((s) => [s.step_id, s])), [flowSpec]);
   function stepBrief(stepId?: string) {
@@ -2774,12 +2803,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           : "interfaces";
       setExpandedCapabilitySections((current) => ({
         ...current,
-        [capIdx]: Array.from(new Set([...(current[capIdx] || ["interfaces"]), section])),
+        [panelKey]: Array.from(new Set([...(current[panelKey] || ["interfaces"]), section])),
       }));
       if (sid) {
         setExpandedCapabilitySteps((current) => ({
           ...current,
-          [capIdx]: Array.from(new Set([...(current[capIdx] || []), sid])),
+          [panelKey]: Array.from(new Set([...(current[panelKey] || []), sid])),
         }));
       }
       if (target.link_id) anchor = `link-${domAnchorPart(target.link_id)}`;
@@ -3087,6 +3116,41 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (p.source_kind === "page_context") return `调用上下文：运行期从 ${(p.source as any)?.context_key || "未配置 context_key"} 注入；它不是上游接口响应`;
     return "来源未确认：需要选择用户输入、上游响应、固定值或系统来源";
   }
+  function renderLatestOperationDetail() {
+    if (!lastAnalysisEvidence && !lastOperationReport) return null;
+    return (
+      <Space direction="vertical" size={2}>
+        {lastAnalysisEvidence && (
+          <>
+            <Typography.Text style={{ fontSize: 12 }}>
+              {lastAnalysisEvidence.summary || "最近一次能力分析已完成"}
+            </Typography.Text>
+            <Space wrap size={4}>
+              {lastAnalysisEvidence.screenshot_count > 0 && (
+                <Tag color={(lastAnalysisEvidence.model_image_count ?? 0) === lastAnalysisEvidence.screenshot_count ? "success" : "error"}>
+                  图片匹配 {lastAnalysisEvidence.model_image_count ?? 0}/{lastAnalysisEvidence.screenshot_count}
+                </Tag>
+              )}
+              <Tag>截图匹配字段 {lastAnalysisEvidence.matched_field_count ?? 0}</Tag>
+              {!!lastAnalysisEvidence.unmatched_field_count && <Tag color="orange">未匹配字段 {lastAnalysisEvidence.unmatched_field_count}</Tag>}
+              {!!lastAnalysisEvidence.unresolved_field_count && <Tag color="orange">待确认 {lastAnalysisEvidence.unresolved_field_count}</Tag>}
+              {!!lastAnalysisEvidence.rejected_field_count && <Tag color="red">已拒绝冲突 {lastAnalysisEvidence.rejected_field_count}</Tag>}
+            </Space>
+          </>
+        )}
+        {lastOperationReport && (
+          <Space wrap size={4}>
+            <Typography.Text style={{ fontSize: 12 }}>{lastOperationReport.summary || "编排操作完成"}</Typography.Text>
+            {!!lastOperationReport.edit_errors?.length && <Tag color="orange">跳过无效建议 {lastOperationReport.edit_errors.length}</Tag>}
+            <Tag color={(lastOperationReport.errors_after || 0) > 0 ? "error" : "success"}>
+              错误 {lastOperationReport.errors_before || 0} → {lastOperationReport.errors_after || 0}
+            </Tag>
+            <Tag>警告 {lastOperationReport.warnings_before || 0} → {lastOperationReport.warnings_after || 0}</Tag>
+          </Space>
+        )}
+      </Space>
+    );
+  }
   function renderFlowWorkbench() {
     if (!flowSpec) return null;
     const totalParams = flowSpec.steps.reduce((n, s) => n + (s.params?.length || 0), 0);
@@ -3101,41 +3165,50 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const publishFailed = result?.ok === false;
     const publishPending = phase === "publishing" && !!publishOperationRef.current;
     const validationRefreshing = !checkReport;
+    const analysisPending = orchestrateBusy || autoFixBusy;
+    const analysisRejected = lastAnalysisEvidence?.status === "rejected";
+    const analysisNeedsReview = lastAnalysisEvidence?.status === "needs_review";
     return (
       <Card style={{ marginTop: 16 }} styles={{ body: { paddingTop: 8 } }}>
-        {capabilities.length > 0 && (
           <Alert
-            type={publishPending || validationRefreshing ? "info" : (!publishFailed && checkReport?.passed && !hasPublishAdvice ? "success" : "warning")}
+            key="flow-status-panel"
+            type={publishPending || analysisPending ? "info" : publishFailed || analysisRejected ? "error" : analysisNeedsReview || (!validationRefreshing && (!checkReport?.passed || hasPublishAdvice)) ? "warning" : validationRefreshing ? "info" : "success"}
             showIcon
-            style={{ marginBottom: 12 }}
+            style={{ marginBottom: 12, minHeight: 96 }}
             message={publishPending
               ? "正在审核并发布当前流程"
-              : validationRefreshing
-              ? "\u6b63\u5728\u66f4\u65b0\u53d1\u5e03\u6821\u9a8c"
+              : analysisPending
+              ? "正在分析并更新当前流程"
               : publishFailed
               ? "发布未完成"
+              : result?.ok
+              ? "发布完成"
+              : analysisRejected
+              ? "分析提出的修改未通过准入"
+              : analysisNeedsReview
+              ? "分析完成，仍有字段需要确认"
+              : lastAnalysisEvidence?.status === "applied"
+              ? "分析结果已应用"
+              : lastAnalysisEvidence?.status === "no_change"
+              ? "分析完成，没有可应用变化"
+              : validationRefreshing
+              ? "\u6b63\u5728\u66f4\u65b0\u53d1\u5e03\u6821\u9a8c"
               : checkReport?.passed
                 ? (hasPublishAdvice ? "基础校验通过，仍有建议项" : "发布校验通过")
                 : "发布校验需要处理"}
             description={
               !checkReport ? (
-                <Typography.Text style={{ fontSize: 12 }}>{"\u6821\u9a8c\u533a\u57df\u56fa\u5b9a\u4fdd\u7559\uff0c\u6700\u65b0\u7ed3\u679c\u8fd4\u56de\u540e\u5c06\u5728\u8fd9\u91cc\u66f4\u65b0\u3002"}</Typography.Text>
+                <Space direction="vertical" size={2}>
+                  {renderLatestOperationDetail()}
+                  <Typography.Text style={{ fontSize: 12 }}>{"\u6821\u9a8c\u533a\u57df\u56fa\u5b9a\u4fdd\u7559\uff0c\u6700\u65b0\u7ed3\u679c\u8fd4\u56de\u540e\u5c06\u5728\u8fd9\u91cc\u66f4\u65b0\u3002"}</Typography.Text>
+                </Space>
               ) : <Space direction="vertical" size={2}>
+                {renderLatestOperationDetail()}
                 <Typography.Text style={{ fontSize: 12 }}>
                   Skill 参数：{checkReport.api_preview?.params?.length ? checkReport.api_preview.params.join(", ") : "无"}
                   {checkReport.dry_run ? ` · Dry-run ${checkReport.dry_run.ok ? "OK" : "需要处理"}` : ""}
                   {checkReport.dry_run?.request_count != null ? ` · ${checkReport.dry_run.request_count} 步` : ""}
                 </Typography.Text>
-                {lastOperationReport && (
-                  <Space wrap size={4}>
-                    <Typography.Text style={{ fontSize: 12 }}>{lastOperationReport.summary || "编排操作完成"}</Typography.Text>
-                    {!!lastOperationReport.edit_errors?.length && <Tag color="orange">跳过无效建议 {lastOperationReport.edit_errors.length}</Tag>}
-                    <Tag color={(lastOperationReport.errors_after || 0) > 0 ? "error" : "success"}>
-                      错误 {lastOperationReport.errors_before || 0} → {lastOperationReport.errors_after || 0}
-                    </Tag>
-                    <Tag>警告 {lastOperationReport.warnings_before || 0} → {lastOperationReport.warnings_after || 0}</Tag>
-                  </Space>
-                )}
                 {result && !publishPending && (
                   <Space direction="vertical" size={2}>
                     <Space wrap size={4}>
@@ -3201,7 +3274,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               </Space>
             }
           />
-        )}
         <Tabs
           activeKey={activeFlowTab}
           onChange={setActiveFlowTab}
@@ -3353,7 +3425,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function renderParamEditorInCapability(
     step: FlowStepData,
     p: FlowParam,
-    paramIndex: number,
   ) {
     const bindKey = paramDraftKey(step.step_id, p);
     const linked = incomingLink(step.step_id, p.path);
@@ -3393,7 +3464,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       <List.Item
         // key 不能包含可编辑的 path/key/label。失焦保存会立即更新这些值；
         // 若 key 随之变化，组件会在 click 前被卸载，导致删除事件丢失。
-        key={`${step.step_id}:param:${paramIndex}`}
+        key={`${step.step_id}:param:${stripBodyPrefix(p.path || p.key)}`}
         id={fieldEditorAnchorId(step.step_id, p.path)}
         style={{ padding: "12px 0" }}
       >
@@ -3708,7 +3779,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             // path/key are editable. Stable positional keys prevent row remounts between blur and click.
             rowKey={(param) => `${step.step_id}:param:${(step.params || []).indexOf(param)}`}
             dataSource={step.params || []}
-            renderItem={(p, index) => renderParamEditorInCapability(step, p, index)}
+            renderItem={(p) => renderParamEditorInCapability(step, p)}
           />
         ) : (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="这个接口没有请求入参" />
@@ -3757,7 +3828,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function renderCapabilityInterfacesWithFields(cap: FlowCapabilityData, capIdx: number) {
     const capabilityUiKey = capabilityPanelKey(cap, capIdx);
-    const stepIds = capabilityActualStepIds(cap);
+    const actualStepIds = capabilityActualStepIds(cap);
+    const optimisticOrder = optimisticCapabilityStepOrder[capabilityUiKey] || [];
+    const stepIds = [
+      ...optimisticOrder.filter((stepId) => actualStepIds.includes(stepId)),
+      ...actualStepIds.filter((stepId) => !optimisticOrder.includes(stepId)),
+    ];
     const auxiliaryRefs = (cap.request_refs || []).filter((ref) => ref.usage === "option_source" && ref.step_id && !stepIds.includes(ref.step_id));
     const addOptions = capabilityStepSelectOptions(cap);
     const fieldCount = stepIds.reduce((n, sid) => n + (stepById[sid]?.params?.length || 0), 0);
@@ -3988,59 +4064,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           </>}
         </Space>
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>{"截图可选；上传后，每次点击生成/优化都会结合截图与已录制接口重新分析。"}</Typography.Text>
-        <Alert
-          showIcon
-          type={!lastAnalysisEvidence
-            ? "info"
-            : lastAnalysisEvidence.status === "applied"
-              ? "success"
-              : lastAnalysisEvidence.status === "rejected"
-                ? "error"
-                : "warning"}
-          message={!lastAnalysisEvidence
-            ? "能力分析结果（等待生成）"
-            : (lastAnalysisEvidence.screenshot_count > 0 ? "图片增强" : "常规") + "分析" + (
-              lastAnalysisEvidence.status === "applied"
-                ? "已应用"
-                : lastAnalysisEvidence.status === "rejected"
-                  ? "未通过安全准入"
-                  : "已完成，无可应用变化"
-            )}
-          description={(
-            <Space direction="vertical" size={4}>
-              <Typography.Text style={{ fontSize: 12 }}>
-                {lastAnalysisEvidence?.summary || "这里固定显示最近一次生成/优化结果；重新打开页面后从流程数据恢复，只更新内容。"}
-              </Typography.Text>
-              {lastAnalysisEvidence && (
-                <Space wrap size={4}>
-                  <Tag color={
-                    (lastAnalysisEvidence.model_image_count ?? 0)
-                      === lastAnalysisEvidence.screenshot_count
-                      ? "success"
-                      : "error"
-                  }>
-                    图片送达 {lastAnalysisEvidence.model_image_count ?? 0} / {lastAnalysisEvidence.screenshot_count}
-                  </Tag>
-                  <Tag>
-                    能力 {lastAnalysisEvidence.capability_count_before ?? "-"} → {lastAnalysisEvidence.capability_count_after ?? "-"}
-                  </Tag>
-                  <Tag>
-                    字段 {lastAnalysisEvidence.field_count_before ?? "-"} → {lastAnalysisEvidence.field_count_after ?? "-"}
-                  </Tag>
-                  {!!lastAnalysisEvidence.changes?.capabilities && (
-                    <Tag color="blue">能力变化 {lastAnalysisEvidence.changes.capabilities}</Tag>
-                  )}
-                  {!!lastAnalysisEvidence.changes?.fields && (
-                    <Tag color="cyan">字段变化 {lastAnalysisEvidence.changes.fields}</Tag>
-                  )}
-                  {!!lastAnalysisEvidence.changes?.links && (
-                    <Tag color="purple">关联变化 {lastAnalysisEvidence.changes.links}</Tag>
-                  )}
-                </Space>
-              )}
-            </Space>
-          )}
-        />
         {analysisScreenshots.length > 0 && (
           <Space wrap size={8}>
             {analysisScreenshots.map((item) => (
@@ -4058,6 +4081,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             onChange={(keys) => setExpandedCapabilityKeys((Array.isArray(keys) ? keys : [keys]).map(String))}
           >
             {capabilities.map((cap, idx) => {
+              const capabilityUiKey = capabilityPanelKey(cap, idx);
               const stepIds = capabilityActualStepIds(cap);
               const capSteps = stepIds.map((sid) => stepById[sid]).filter(Boolean);
               const capParams = capSteps.flatMap((st) => st.params || []);
@@ -4077,9 +4101,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               const derivedOutputSchema = lastResponse != null ? inferJsonSchema(lastResponse) : (cap.output_schema || {});
               return (
                 <Collapse.Panel
-                  key={capabilityPanelKey(cap, idx)}
+                  key={capabilityUiKey}
                   header={
-                    <Space wrap id={`capability-${domAnchorPart(cap.name || cap.capability_id || idx)}`}>
+                    <Space wrap id={`capability-${domAnchorPart(cap.capability_id || cap.name || "missing-id")}`}>
                       <Tag color={cap.confirmed ? "success" : "default"}>{cap.confirmed ? "已采纳" : "模型建议"}</Tag>
                       <Tag color="blue">{optionLabel(kindOptions, cap.kind || "submit")}</Tag>
                       <Tag color={confidenceColor(cap.confidence)}>置信度 {confidencePercent(cap.confidence)}</Tag>
@@ -4117,10 +4141,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                     <Collapse
                       ghost
                       size="small"
-                      activeKey={expandedCapabilitySections[idx] || ["interfaces"]}
+                      activeKey={expandedCapabilitySections[capabilityUiKey] || ["interfaces"]}
                       onChange={(keys) => setExpandedCapabilitySections((current) => ({
                         ...current,
-                        [idx]: (Array.isArray(keys) ? keys : [keys]).map(String),
+                        [capabilityUiKey]: (Array.isArray(keys) ? keys : [keys]).map(String),
                       }))}
                     >
                       <Collapse.Panel
@@ -4148,12 +4172,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             onChange={(keys) => setExpandedCapabilityRelationKeys((Array.isArray(keys) ? keys : [keys]).map(String))}>
             <Collapse.Panel key="capability-relations" header={`能力关系 ${capabilityRelations.length}`}>
               <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                {capabilityRelations.map((relation, index) => {
+                {capabilityRelations.map((relation) => {
                   const relationType = relation.mode || relation.type || "external_transform";
                   const owner = relation.transform_owner === "skill" ? "Skill 内部" : "调用方";
                   return (
-                    <div key={relation.relation_id || `${relation.from_capability}-${relation.to_capability}-${index}`}
-                      id={`capability-relation-${domAnchorPart(relation.relation_id || index)}`}
+                    <div key={relation.relation_id || `${relation.from_capability}-${relation.to_capability}-${relationType}`}
+                      id={`capability-relation-${domAnchorPart(relation.relation_id || `${relation.from_capability}-${relation.to_capability}-${relationType}`)}`}
                       style={{ display: "grid", gridTemplateColumns: "minmax(160px, 1fr) auto minmax(160px, 1fr)", gap: 8, alignItems: "center" }}>
                       <Space wrap size={4}>
                         <Tag color="blue">{relation.from_capability || "未指定来源能力"}</Tag>
