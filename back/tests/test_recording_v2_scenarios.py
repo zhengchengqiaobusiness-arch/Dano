@@ -1186,6 +1186,57 @@ def test_semantic_coverage_requires_all_seven_field_axes_and_axis_evidence():
     assert "field_axis_contract" in coverage["missing"]
 
 
+def test_semantic_coverage_accepts_only_resolved_seven_axis_contracts():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/request/submit",
+        params=[ParamField(path="days", key="days", value="2")],
+    )])
+    field_axes = [
+        "path", "name", "default_value", "type", "category", "source", "required",
+    ]
+    result = {"semantic_plan": {
+        "business_understanding": {"summary": "Submit leave request"},
+        "request_roles": [{
+            "step_id": "submit", "role": "submit_anchor",
+            "name": "Submit leave request", "reason": "Recorded write",
+        }],
+        "field_semantics": [{
+            "step_id": "submit",
+            "wire_path": "days",
+            "public_name": "请假天数",
+            "default_value": "2",
+            "business_type": "number",
+            "category": "user_param",
+            "source_kind": "user_input",
+            "required": True,
+            "confidence": 0.99,
+            "axis_status": {axis: "grounded" for axis in field_axes},
+            "evidence": [{"source": "recording", "axes": field_axes}],
+        }],
+        "capabilities": [{
+            "name": "submit_leave", "title": "Submit leave", "kind": "submit",
+            "intent": "Submit leave request", "step_ids": ["submit"],
+        }],
+        "capability_relations": [],
+        "unresolved_items": [],
+    }}
+
+    coverage = flow_spec_module._semantic_plan_coverage(spec, result)
+
+    assert coverage["complete"] is True
+    assert coverage["missing"] == []
+
+    result["semantic_plan"]["unresolved_items"] = [{
+        "kind": "field_axis", "step_id": "submit", "path": "days",
+        "axis": "required", "reason": "required marker not visible",
+    }]
+    blocked = flow_spec_module._semantic_plan_coverage(spec, result)
+    assert blocked["complete"] is False
+    assert "unresolved_blockers" in blocked["missing"]
+
+
 def test_unrelated_same_value_list_is_not_bound_as_option_source():
     """A matching recorded value is not causal evidence for an option endpoint."""
     option_read = _get(
@@ -1958,6 +2009,9 @@ def _seal_semantic_spec() -> FlowSpec:
 
 
 def _complete_semantic_submission() -> dict:
+    field_axes = [
+        "path", "name", "default_value", "type", "category", "source", "required",
+    ]
     return {
             "semantic_plan": {
                 "business_understanding": {
@@ -1977,9 +2031,16 @@ def _complete_semantic_submission() -> dict:
                             "query.useTime[0]": "查询开始时间",
                             "query.useTime[1]": "查询结束时间",
                         }.get(param.path, param.key),
+                        "default_value": param.default_value,
                         "business_type": param.type,
-                        "source_kind": param.source_kind,
+                        "category": param.category,
+                        "source_kind": (
+                            "user_input" if param.category == "user_param" else param.source_kind
+                        ),
+                        "required": param.required,
                         "confidence": 0.99,
+                        "axis_status": {axis: "grounded" for axis in field_axes},
+                        "evidence": [{"source": "recording", "axes": field_axes}],
                     }
                     for step in _seal_semantic_spec().steps
                     for param in step.params

@@ -3643,7 +3643,7 @@ def _param_field_manually_edited(param: ParamField, field: str) -> bool:
     return any(
         isinstance(item, dict)
         and item.get("source") == "manual_edit"
-        and item.get("field") == field
+        and (item.get("field") == field or item.get("axis") == field)
         for item in (param.evidence or [])
     )
 
@@ -3689,19 +3689,19 @@ def _semantic_recorded_type(param: ParamField) -> str:
 def _audit_step_param_contracts(step: FlowStep) -> None:
     """Conservatively repair only contradictory generated field contracts."""
     display_paths = {
-        _strip_body_prefix(binding.path)
+        binding.path
         for binding in (step.selects or [])
         if binding.path and _select_has_executable_options(binding)
     }
     id_paths = {
-        _strip_body_prefix(binding.id_path)
+        binding.id_path
         for binding in (step.selects or [])
         if binding.id_path and _select_has_executable_options(binding)
     }
     for param in step.params or []:
-        if _param_has_manual_contract(param):
+        if param.locked:
             continue
-        normalized_path = _strip_body_prefix(param.path or "")
+        normalized_path = param.path or ""
         if (
             (step.method or "GET").upper() in {"GET", "HEAD"}
             and str(param.path or "").startswith("query.")
@@ -3718,27 +3718,45 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
                 # the same value serialized in the URL.
                 param.wire_type = "string"
         if _looks_pagination_field(param.key, param.path):
-            param.type = _infer_type_from_value(param.value)
-            param.wire_type = param.type
-            param.required = False
-            param.category = "user_param"
-            param.source_kind = "user_input"
-            param.source = {"kind": "pagination", "path": param.path}
-            param.exposed_to_user = True
-            param.editable = True
-            param.need_human_confirm = False
-            param.enum_options = None
-            param.enum_value_map = None
-            param.description = _strip_option_descriptions(param.description) or None
-            param.reason = "分页参数具有录制默认值；调用方省略时安全使用默认值，也可以显式覆盖"
+            inferred_type = _infer_type_from_value(param.value)
+            if (
+                not _param_field_manually_edited(param, "type")
+                and not _param_axis_manually_edited(
+                    param, "category", "source_kind", "source", "exposed_to_user", "editable",
+                )
+            ):
+                param.type = inferred_type
+            param.wire_type = inferred_type
+            if not _param_field_manually_edited(param, "required"):
+                param.required = False
+            if not _param_axis_manually_edited(
+                param, "category", "source_kind", "source", "exposed_to_user", "editable",
+            ):
+                param.category = "user_param"
+                param.source_kind = "user_input"
+                param.source = {"kind": "pagination", "path": param.path}
+                param.exposed_to_user = True
+                param.editable = True
+            if not _param_field_manually_edited(param, "need_human_confirm"):
+                param.need_human_confirm = False
+            if not _param_axis_manually_edited(param, "enum_options", "enum_value_map"):
+                param.enum_options = None
+                param.enum_value_map = None
+            if not _param_field_manually_edited(param, "description"):
+                param.description = _strip_option_descriptions(param.description) or None
+            if not _param_field_manually_edited(param, "reason"):
+                param.reason = "分页参数具有录制默认值；调用方省略时安全使用默认值，也可以显式覆盖"
             continue
         if param.source_kind == "api_option":
             # A live candidate source remains valid even when the captured
             # snapshot is empty and regardless of the field's declared type.
-            if param.category == "user_param":
+            if param.category == "user_param" and not _param_axis_manually_edited(
+                param, "category", "exposed_to_user", "editable",
+            ):
                 param.exposed_to_user = True
                 param.editable = True
-            param.need_human_confirm = False
+            if not _param_field_manually_edited(param, "need_human_confirm"):
+                param.need_human_confirm = False
             if param.type in _ENUM_PARAM_TYPES:
                 _refresh_param_enum_description(param)
             continue
@@ -3747,24 +3765,37 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
             continue
         if param.type in _ENUM_PARAM_TYPES or param.source_kind in _ENUM_SOURCE_KINDS:
             if not option_contract and param.source_kind not in _ENUM_SOURCE_KINDS:
-                param.type = param.wire_type or _infer_type_from_value(param.value)
-                param.enum_options = None
-                param.enum_value_map = None
-                if param.category == "user_param":
+                if not _param_field_manually_edited(param, "type"):
+                    param.type = param.wire_type or _infer_type_from_value(param.value)
+                if not _param_axis_manually_edited(param, "enum_options", "enum_value_map"):
+                    param.enum_options = None
+                    param.enum_value_map = None
+                if (
+                    param.category == "user_param"
+                    and not _param_field_manually_edited(param, "type")
+                    and not _param_axis_manually_edited(
+                        param, "source_kind", "source", "exposed_to_user", "editable",
+                    )
+                ):
                     param.source_kind = "user_input"
                     param.source = {"kind": "sample", "path": param.path}
                     param.exposed_to_user = True
                     param.editable = True
-                param.description = _strip_option_descriptions(param.description) or None
-                param.reason = _strip_option_descriptions(param.reason)
+                if not _param_field_manually_edited(param, "description"):
+                    param.description = _strip_option_descriptions(param.description) or None
+                if not _param_field_manually_edited(param, "reason"):
+                    param.reason = _strip_option_descriptions(param.reason)
             else:
-                param.category = "user_param"
-                param.exposed_to_user = True
-                param.editable = True
+                if not _param_axis_manually_edited(
+                    param, "category", "exposed_to_user", "editable",
+                ):
+                    param.category = "user_param"
+                    param.exposed_to_user = True
+                    param.editable = True
                 _refresh_param_enum_description(param)
         elif param.category == "user_param" and param.source_kind == "user_input":
             semantic_type = _semantic_recorded_type(param)
-            if semantic_type in {"date", "datetime"}:
+            if semantic_type in {"date", "datetime"} and not _param_field_manually_edited(param, "type"):
                 param.type = semantic_type
 
 
@@ -3880,10 +3911,13 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
     for param in step.params or []:
         if param.type in _ENUM_PARAM_TYPES or param.source_kind in _ENUM_SOURCE_KINDS or param.source_kind == "api_option":
             continue
-        param.enum_options = None
-        param.enum_value_map = None
-        param.description = _strip_option_descriptions(param.description) or None
-        param.reason = _strip_option_descriptions(param.reason)
+        if not _param_axis_manually_edited(param, "enum_options", "enum_value_map"):
+            param.enum_options = None
+            param.enum_value_map = None
+        if not _param_field_manually_edited(param, "description"):
+            param.description = _strip_option_descriptions(param.description) or None
+        if not _param_field_manually_edited(param, "reason"):
+            param.reason = _strip_option_descriptions(param.reason)
     grounded_bindings: list[SelectBinding] = []
     for binding in step.selects or []:
         _hydrate_select_source_contract(spec, binding)
@@ -3893,35 +3927,24 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
         # no separate display path in the request.
         param = next((
             item for item in (step.params or [])
-            if binding.path and _strip_body_prefix(item.path) == _strip_body_prefix(binding.path)
+            if binding.path and item.path == binding.path
         ), None)
         if param is None:
             param = next((
                 item for item in (step.params or [])
-                if binding.param and binding.param in {item.key, item.label}
-            ), None)
-        if param is None:
-            param = next((
-                item for item in (step.params or [])
-                if binding.id_path and _strip_body_prefix(item.path) == _strip_body_prefix(binding.id_path)
+                if binding.id_path and item.path == binding.id_path
             ), None)
         if param is None:
             continue
-        # 人工修改过数据契约后，SelectBinding 只能作为历史证据，不能在每次
-        # sync 时把类型/分类/来源自动改回录制推断值。
-        if any(
-            isinstance(item, dict)
-            and item.get("source") == "manual_edit"
-            and item.get("field") in {
-                "type", "category", "source_kind", "source", "enum_options", "enum_value_map",
-            }
-            for item in (param.evidence or [])
-        ):
-            # ``step.selects`` is rebuilt from ``grounded_bindings`` below.
-            # Keep the existing binding as historical/runtime evidence while
-            # refusing to project it back over an operator-edited contract.
+        if param.locked:
             grounded_bindings.append(binding)
             continue
+        type_owned = _param_field_manually_edited(param, "type")
+        category_owned = _param_axis_manually_edited(
+            param, "category", "exposed_to_user", "editable",
+        )
+        source_owned = _param_axis_manually_edited(param, "source_kind", "source")
+        options_owned = _param_axis_manually_edited(param, "enum_options", "enum_value_map")
         page_contract = _page_enum_contract_for_param(spec, step, param, binding)
         if page_contract:
             page_options, page_value_map, page_meta = page_contract
@@ -3999,17 +4022,23 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
             # not project it as an executable enum contract.
             binding.enum_confirmed = False
             grounded_bindings.append(binding)
-            if not _param_has_manual_contract(param):
+            if not type_owned and not source_owned:
                 param.type = param.wire_type or _infer_type_from_value(param.value)
+            if not options_owned and not source_owned:
                 param.enum_options = None
                 param.enum_value_map = None
-                if param.category == "user_param":
+            if param.category == "user_param" and not type_owned:
+                if not source_owned:
                     param.source_kind = "user_input"
                     param.source = {"kind": "sample", "path": param.path}
+                if not category_owned:
                     param.exposed_to_user = True
                     param.editable = True
+            if not _param_field_manually_edited(param, "need_human_confirm"):
                 param.need_human_confirm = False
+            if not _param_field_manually_edited(param, "description"):
                 param.description = _strip_option_descriptions(param.description) or None
+            if not _param_field_manually_edited(param, "reason"):
                 param.reason = _strip_option_descriptions(param.reason)
             continue
         source_kind = (
@@ -4038,46 +4067,55 @@ def _sync_step_option_contracts(spec: FlowSpec, step: FlowStep) -> None:
         # available in wire_type for request serialization.
         if not param.wire_type:
             param.wire_type = param.type
-        param.type = "list-enum" if binding.multi else "enum"
-        param.category = "user_param"
-        param.source_kind = source_kind
-        param.exposed_to_user = True
-        param.editable = True
-        if source_kind == "api_option":
+        if not type_owned:
+            param.type = "list-enum" if binding.multi else "enum"
+        if not category_owned:
+            param.category = "user_param"
+            param.exposed_to_user = True
+            param.editable = True
+        if not source_owned:
+            param.source_kind = source_kind
+        if not options_owned and source_kind == "api_option":
             # The selected API is authoritative, including an empty result.
             # Never resurrect candidates captured from the previously selected
             # endpoint after a source change.
             param.enum_options = list(options or []) or None
             param.enum_value_map = dict(option_map or {}) or None
-        else:
+        elif not options_owned:
             param.enum_options = list(options or param.enum_options or []) or None
             param.enum_value_map = dict(option_map or param.enum_value_map or {}) or None
-        param.source = {
-            **dict(param.source or {}),
-            "kind": source_kind,
-            "source_url": binding.source_url if source_kind == "api_option" else None,
-            "source_method": binding.source_method,
-            "source_request_id": binding.source_request_id,
-            "value_key": binding.value_key,
-            "label_key": binding.label_key,
-            "category_key": binding.category_key,
-            "category_value": binding.category_value,
-            "id_path": binding.id_path or binding.path or param.path,
-            "enum_source": (
-                "dom" if source_kind == "page_enum"
-                else "script_static" if source_kind == "static_enum"
-                else "manual" if source_kind == "manual_enum"
-                else "api"
-            ),
-            "enum_confirmed": (
-                len(option_map) == len(options or [])
-                if page_contract
-                else (binding.enum_confirmed if binding.enum_confirmed is not None else True)
-            ),
-        }
-        param.need_human_confirm = bool(
-            source_kind == "unknown" or (source_kind == "page_enum" and (param.source or {}).get("enum_confirmed") is False)
-        )
+        if not source_owned:
+            param.source = {
+                **dict(param.source or {}),
+                "kind": source_kind,
+                "source_url": binding.source_url if source_kind == "api_option" else None,
+                "source_method": binding.source_method,
+                "source_request_id": binding.source_request_id,
+                "value_key": binding.value_key,
+                "label_key": binding.label_key,
+                "category_key": binding.category_key,
+                "category_value": binding.category_value,
+                "id_path": binding.id_path or binding.path or param.path,
+                "enum_source": (
+                    "dom" if source_kind == "page_enum"
+                    else "script_static" if source_kind == "static_enum"
+                    else "manual" if source_kind == "manual_enum"
+                    else "api"
+                ),
+                "enum_confirmed": (
+                    len(option_map) == len(options or [])
+                    if page_contract
+                    else (binding.enum_confirmed if binding.enum_confirmed is not None else True)
+                ),
+            }
+        if not _param_field_manually_edited(param, "need_human_confirm"):
+            param.need_human_confirm = bool(
+                source_kind == "unknown"
+                or (
+                    source_kind == "page_enum"
+                    and (param.source or {}).get("enum_confirmed") is False
+                )
+            )
         source_reason = (
             "候选来自录制捕获的只读接口；调用方传显示值，运行期按当前接口结果映射真实值"
             if source_kind == "api_option"
@@ -4099,13 +4137,24 @@ def _strip_body_prefix(path: str) -> str:
 
 def _record_param_manual_contract(param: ParamField, fields: list[str] | tuple[str, ...]) -> None:
     """Mark explicit operator-owned ParamField axes before any derived sync."""
-    param.locked = True
+    axis_by_field = {
+        "key": "name", "label": "name", "name": "name", "display_name": "name",
+        "path": "path", "value": "default_value", "default_value": "default_value",
+        "type": "type", "wire_type": "path", "category": "category",
+        "exposed_to_user": "category", "exposed_to_caller": "category",
+        "editable": "category", "source_kind": "source", "source": "source",
+        "enum_options": "source", "enum_value_map": "source",
+        "required": "required",
+    }
     for field in dict.fromkeys(fields):
         if not hasattr(param, field):
             continue
         param.evidence.append({
             "source": "manual_edit",
             "field": field,
+            "axis": axis_by_field.get(field, field),
+            "status": "locked",
+            "kind": "manual_override",
             "value": getattr(param, field),
         })
 
@@ -4119,7 +4168,11 @@ def _reset_param_source(
     """把字段从运行期/接口来源恢复成普通用户输入，供删除依赖/重置来源使用。"""
     normalized_actor = str(actor or "system").strip().lower()
     if normalized_actor in _AUTOMATED_FIELD_EDIT_ACTORS and (
-        param.locked or _param_has_manual_contract(param)
+        param.locked
+        or _param_axis_manually_edited(
+            param, "category", "source_kind", "source", "editable",
+            "exposed_to_user", "need_human_confirm",
+        )
     ):
         return
     param.category = "user_param"
@@ -4219,7 +4272,7 @@ def _param_has_grounded_type(param: ParamField) -> bool:
     )
 
 _SCREENSHOT_CONTROL_KINDS = frozenset({
-    "text", "textarea", "number", "date", "datetime", "time",
+    "input", "text", "textarea", "number", "date", "datetime", "time",
     "select", "combobox", "cascader", "picker", "checkbox", "radio",
     "switch", "slider", "upload", "file", "tree_select", "rich_text",
 })
@@ -4272,7 +4325,7 @@ def _screenshot_control_business_type(
 ) -> str:
     kind = str(control.get("control_kind") or "").strip().lower()
     proposed_type = str(proposed or "").strip()
-    if kind in {"text", "textarea", "rich_text"}:
+    if kind in {"input", "text", "textarea", "rich_text"}:
         return proposed_type if proposed_type in {"string", "email", "url"} else "string"
     if kind in {"number", "slider"}:
         return proposed_type if proposed_type in {"number", "integer"} else "number"
@@ -4295,6 +4348,42 @@ def _param_has_executable_source(param: ParamField) -> bool:
     if param.source_kind == "previous_response":
         return bool(param.source)
     return False
+
+
+def _cross_validated_visible_default(
+    param: ParamField,
+    visible_default: Any,
+    screenshot_control: dict[str, Any] | None,
+) -> bool:
+    """Accept a screenshot default only when it agrees with the recorded request value."""
+    if screenshot_control is None or "visible_value" not in screenshot_control:
+        return False
+    visible_value = screenshot_control.get("visible_value")
+    if str(visible_value).strip() != str(visible_default).strip():
+        return False
+    recorded = param.value
+    if param.type in _ENUM_PARAM_TYPES:
+        value_map = dict(param.enum_value_map or _enum_option_map_from_options(param.enum_options))
+        mapped = value_map.get(str(visible_default))
+        return mapped is not None and str(mapped) == str(recorded)
+    if param.type in {"number", "integer"}:
+        try:
+            return float(visible_default) == float(recorded)
+        except (TypeError, ValueError):
+            return False
+    if param.type == "boolean":
+        normalized = {
+            "true": True, "1": True, "yes": True, "y": True,
+            "false": False, "0": False, "no": False, "n": False,
+        }
+        left_key = str(visible_default).strip().lower()
+        right_key = str(recorded).strip().lower()
+        return left_key in normalized and right_key in normalized and normalized[left_key] == normalized[right_key]
+    if param.type in {"date", "datetime"}:
+        left = _date_like_epoch_seconds(visible_default)
+        right = _date_like_epoch_seconds(recorded)
+        return left is not None and right is not None and abs(left - right) < 1
+    return str(visible_default) == str(recorded)
 
 
 
@@ -4450,7 +4539,7 @@ def _apply_capability_field_to_param(
         _transition_param_type(param, raw["type"])
     screenshot_required = bool(
         screenshot_control is not None
-        and isinstance(screenshot_control.get("required"), bool)
+        and screenshot_control.get("required") is True
     )
     allow_required = not automated or (
         screenshot_required and not _param_field_manually_edited(param, "required")
@@ -4474,9 +4563,17 @@ def _apply_capability_field_to_param(
         if isinstance(raw.get("enum_options"), list):
             param.enum_options = copy.deepcopy(raw["enum_options"])
             param.enum_value_map = None
-    # Screenshot evidence never changes defaults. A pictured value can be a
-    # transient form value, sample data or placeholder, not an API default.
-    allow_default = not automated
+    allow_default = (
+        not automated
+        or (
+            not _param_axis_manually_edited(param, "value", "default_value")
+            and _cross_validated_visible_default(
+                param,
+                raw.get("visible_default"),
+                screenshot_control,
+            )
+        )
+    )
     if "visible_default" in raw and allow_default:
         param.default_value = copy.deepcopy(raw.get("visible_default"))
     if "exposed_to_caller" in raw and (not automated or allow_category):
@@ -4487,8 +4584,8 @@ def _apply_capability_field_to_param(
     elif scope == "internal" and allow_category:
         param.category = "system_const" if param.source_kind == "constant" else "runtime_var"
         param.exposed_to_user = False
-    if not automated:
-        param.locked = bool(raw.get("locked", True))
+    if not automated and "locked" in raw:
+        param.locked = bool(raw.get("locked"))
     if "confirmed" in raw:
         param.need_human_confirm = not bool(raw.get("confirmed"))
     param.evidence.append({
@@ -4585,11 +4682,13 @@ def _apply_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
         source = by_id.get(lk.source_step_id)
         if target is None or source is None:
             continue
-        target_path = _strip_body_prefix(lk.target_path)
+        target_path = lk.target_path
         for p in target.params:
             if p.path != target_path:
                 continue
-            if _param_has_manual_contract(p):
+            if p.locked or _param_axis_manually_edited(
+                p, "category", "source_kind", "source", "editable", "exposed_to_user",
+            ):
                 # 依赖连线和字段来源是独立可编辑的事实。人工已选择
                 # 分类/来源后，同步层不得再用旧连线覆盖用户结果。
                 continue
@@ -4627,10 +4726,10 @@ def _apply_user_link_source(steps: list[FlowStep], link: FlowLink) -> None:
     target_step = by_id.get(link.target_step_id)
     if source_step is None or target_step is None:
         return
-    target_path = _strip_body_prefix(link.target_path)
+    target_path = link.target_path
     param = next((
         item for item in target_step.params
-        if _strip_body_prefix(item.path) == target_path
+        if item.path == target_path
     ), None)
     if param is None:
         return
@@ -8312,6 +8411,54 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
             return float(item.get("confidence") or 0.0)
         except (TypeError, ValueError):
             return 0.0
+
+    field_axes = (
+        "path", "name", "default_value", "type", "category", "source", "required",
+    )
+    resolved_statuses = {"grounded", "image_matched", "preserved_fact", "locked"}
+
+    def axis_statuses(item: dict[str, Any]) -> dict[str, str]:
+        raw_statuses = item.get("axis_status")
+        if not isinstance(raw_statuses, dict):
+            return {}
+        statuses: dict[str, str] = {}
+        for axis, raw_status in raw_statuses.items():
+            value = raw_status.get("status") if isinstance(raw_status, dict) else raw_status
+            statuses[str(axis)] = str(value or "")
+        return statuses
+
+    def evidenced_axes(item: dict[str, Any]) -> set[str]:
+        raw_axis_evidence = item.get("axis_evidence")
+        axes = {
+            str(axis) for axis, evidence in raw_axis_evidence.items() if evidence
+        } if isinstance(raw_axis_evidence, dict) else set()
+        for evidence in item.get("evidence") or []:
+            if not isinstance(evidence, dict):
+                continue
+            declared = evidence.get("axes") or evidence.get("axis") or []
+            if isinstance(declared, str):
+                declared = [declared]
+            axes.update(str(axis) for axis in declared if str(axis))
+        return axes
+
+    def field_axis_contract_complete(item: dict[str, Any]) -> bool:
+        values_present = {
+            "path": bool(str(item.get("wire_path") or item.get("path") or "")),
+            "name": bool(str(item.get("public_name") or item.get("business_name") or item.get("label") or "")),
+            "default_value": any(key in item for key in ("visible_default", "default_value", "default")),
+            "type": bool(str(item.get("business_type") or item.get("type") or "")),
+            "category": str(item.get("category") or "").strip().lower() not in {"", "unknown"},
+            "source": str(item.get("source_kind") or "").strip().lower() not in {"", "unknown"},
+            "required": isinstance(item.get("required"), bool),
+        }
+        statuses = axis_statuses(item)
+        evidence = evidenced_axes(item)
+        return bool(
+            confidence_of(item) > 0
+            and all(values_present.values())
+            and all(statuses.get(axis) in resolved_statuses for axis in field_axes)
+            and set(field_axes).issubset(evidence)
+        )
     role_items = [
         item for item in (plan.get("request_roles") or []) if isinstance(item, dict)
     ]
@@ -8350,15 +8497,10 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
     if any(
         (str(item.get("step_id") or ""), str(item.get("path") or item.get("wire_path") or ""))
         in required_fields
-        and not (
-            str(item.get("public_name") or item.get("business_name") or item.get("label") or "").strip()
-            and str(item.get("business_type") or item.get("type") or "").strip()
-            and str(item.get("source_kind") or "").strip()
-            and confidence_of(item) > 0
-        )
+        and not field_axis_contract_complete(item)
         for item in field_items
     ):
-        missing.append("field_semantic_contract")
+        missing.append("field_axis_contract")
     if not isinstance(plan.get("capabilities"), list) or not plan.get("capabilities"):
         missing.append("capabilities")
     elif any(
@@ -8368,6 +8510,8 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
             and str(item.get("kind") or "").strip()
             and str(item.get("intent") or item.get("description") or "").strip()
             and isinstance(item.get("step_ids"), list)
+            and bool(item.get("step_ids"))
+            and set(str(step_id) for step_id in item.get("step_ids") or []).issubset(required_steps)
         )
         for item in plan.get("capabilities") or [] if isinstance(item, dict)
     ):
@@ -8378,6 +8522,8 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         missing.append("capability_relations")
     if not isinstance(plan.get("unresolved_items"), list):
         missing.append("unresolved_items")
+    elif plan.get("unresolved_items"):
+        missing.append("unresolved_blockers")
     return {
         "complete": not missing,
         "missing": missing,
@@ -11935,26 +12081,17 @@ def _apply_grounded_indexed_range_names(spec: FlowSpec) -> tuple[FlowSpec, list[
 
 def _select_param_for_runtime(step: FlowStep, binding: SelectBinding) -> ParamField | None:
     """Return the current field contract owned by a recorded select binding."""
-    normalized_path = _strip_body_prefix(binding.path or "")
-    if normalized_path:
+    if binding.path:
         matched = next((
             param for param in (step.params or [])
-            if _strip_body_prefix(param.path or "") == normalized_path
+            if param.path == binding.path
         ), None)
         if matched is not None:
             return matched
-    if binding.param:
-        matched = next((
-            param for param in (step.params or [])
-            if binding.param in {param.key, param.label}
-        ), None)
-        if matched is not None:
-            return matched
-    normalized_id_path = _strip_body_prefix(binding.id_path or "")
-    if normalized_id_path:
+    if binding.id_path:
         return next((
             param for param in (step.params or [])
-            if _strip_body_prefix(param.path or "") == normalized_id_path
+            if param.path == binding.id_path
         ), None)
     return None
 
@@ -13317,20 +13454,6 @@ def _find_param(step: FlowStep, param_path: str, *, param_key: str = "", param_l
     for param in step.params:
         if param.path == needle:
             return param
-    stripped = _strip_body_prefix(needle)
-    if stripped and stripped != needle:
-        for param in step.params:
-            if _strip_body_prefix(param.path) == stripped:
-                return param
-    hints = [str(x or "").strip() for x in (param_key, param_label)]
-    hints = [x for x in hints if x]
-    for hint in hints:
-        for param in step.params:
-            if param.key == hint or param.label == hint:
-                return param
-    for param in step.params:
-        if param.path and (param.path.endswith(f".{needle}") or param.path.endswith(f"[{needle}]")):
-            return param
     available = [f"{p.path}({p.key})" for p in step.params]
     raise ValueError(f"param not found: {param_path} in step {step.step_id}; available={available}")
 
@@ -14388,7 +14511,7 @@ def _transition_capability_kind(spec: FlowSpec, cap: FlowCapability, value: Any)
 
 def _find_select_binding(step: FlowStep, param: ParamField) -> SelectBinding | None:
     for sel in step.selects:
-        if sel.path == param.path or sel.param == param.key or (sel.id_path and sel.id_path == param.path):
+        if sel.path == param.path or (sel.id_path and sel.id_path == param.path):
             return sel
     return None
 
@@ -14414,8 +14537,9 @@ def _bind_option_source(
     step = _find_step(spec, target_step_id)
     param = _find_param(step, target_path)
     normalized_actor = str(actor or "system").strip().lower()
-    if normalized_actor in _AUTOMATED_FIELD_EDIT_ACTORS and (
-        param.locked or _param_has_manual_contract(param)
+    automated = normalized_actor in _AUTOMATED_FIELD_EDIT_ACTORS
+    if automated and (
+        param.locked or _param_axis_manually_edited(param, "source_kind", "source")
     ):
         return
     source_step = _find_step(spec, source_step_id) if source_step_id else None
@@ -14423,15 +14547,25 @@ def _bind_option_source(
     if not src_url:
         raise ValueError("bind_option_source missing source_url/source_step")
 
-    param.category = "user_param"
+    category_owned = automated and _param_axis_manually_edited(
+        param, "category", "exposed_to_user", "editable",
+    )
+    type_owned = automated and _param_field_manually_edited(param, "type")
+    options_owned = automated and _param_axis_manually_edited(
+        param, "enum_options", "enum_value_map",
+    )
+    if not category_owned:
+        param.category = "user_param"
     param.source_kind = "api_option"
     # ``type`` is the caller-facing business contract; ``wire_type`` retains
     # the recorded JSON scalar transported to the backend.
     if not param.wire_type:
         param.wire_type = param.type
-    param.type = "list-enum" if multi else "enum"
-    param.exposed_to_user = True
-    param.editable = True
+    if not type_owned:
+        param.type = "list-enum" if multi else "enum"
+    if not category_owned:
+        param.exposed_to_user = True
+        param.editable = True
     param.need_human_confirm = False
     param.source = {
         "kind": "api_option",
@@ -14445,9 +14579,9 @@ def _bind_option_source(
         "id_path": id_path or param.path,
     }
     param.reason = "字段候选来自接口选项源，调用方传显示值，运行期按 label/value 映射提交真实值"
-    if options:
+    if options and not options_owned:
         param.enum_options = list(options)
-    if option_map:
+    if option_map and not options_owned:
         param.enum_value_map = dict(option_map)
     param.evidence.append({
         "source": "option_source",
@@ -14484,7 +14618,7 @@ def _bind_option_source(
     _hydrate_select_source_contract(spec, sel)
     if normalized_actor == "user":
         manual_fields = [
-            "category", "source_kind", "source", "exposed_to_user",
+            "type", "category", "source_kind", "source", "exposed_to_user",
             "editable", "need_human_confirm",
         ]
         if options:
@@ -14851,7 +14985,6 @@ def _rename_param_public_key(
     param.label = proposed
     if actor == "user":
         param.name_source = "manual"
-        param.locked = True
         evidence_source = "manual_edit"
     else:
         # A model proposal is useful semantic evidence, not an operator lock.
@@ -14861,6 +14994,7 @@ def _rename_param_public_key(
     param.evidence.append({
         "source": evidence_source,
         "field": "key",
+        **({"axis": "name", "status": "locked", "kind": "manual_override"} if actor == "user" else {}),
         "previous": old_key,
         "value": proposed,
     })
@@ -15590,6 +15724,8 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     param = next((item for item in step.params if item.path == param_path), None)
                     if param is None:
                         continue
+                    if field == "locked":
+                        continue
                     protected_axes = {
                         "key": ("key", "label", "name", "display_name"),
                         "label": ("key", "label", "name", "display_name"),
@@ -15664,7 +15800,6 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     setattr(param, field, value)
                     if field in {"label", "description"}:
                         param.name_source = "manual"
-                        param.locked = True
                 else:
                     # H19 修复:不再 hasattr 兜底(避免改 path/source_kind/internal 等关键字段)
                     raise ValueError(f"unknown param field: {field}")
@@ -15672,12 +15807,8 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     "key", "label", "description", "value", "type", "category", "source_kind", "source",
                     "required", "exposed_to_user", "editable", "need_human_confirm", "enum_options", "enum_value_map",
                 }:
-                    param.locked = True
-                    param.evidence.append({
-                        "source": "manual_edit",
-                        "field": str(field),
-                        "value": value,
-                    })
+                    if field != "key":
+                        _record_param_manual_contract(param, (str(field),))
                 if field in {
                     "key", "path", "label", "description", "value", "type", "category", "source_kind",
                     "source", "required", "exposed_to_user", "editable", "need_human_confirm",
@@ -15821,6 +15952,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     "need_human_confirm", "enum_options", "enum_value_map",
                 ) if field in explicit_fields]
                 _record_param_manual_contract(new_param, manual_fields)
+                new_param.locked = True
             elif actor in _AUTOMATED_FIELD_EDIT_ACTORS:
                 # Planner/repair payloads are proposals and cannot grant
                 # themselves operator ownership through locked/manual markers.

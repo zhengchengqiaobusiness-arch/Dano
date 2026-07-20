@@ -1014,12 +1014,12 @@ def test_edit_key():
     assert spec.steps[0].params[0].key == "userId"
     assert new.steps[0].params[0].key == "newUserId"
     assert new.steps[0].params[0].name_source == "manual"
-    assert new.steps[0].params[0].locked is True
+    assert new.steps[0].params[0].locked is False
     assert new.meta["current_version"] == 1
     assert new.meta["versions"][0]["action"] == "flow_edit"
 
 
-def test_update_param_falls_back_to_key_when_path_is_stale():
+def test_update_param_rejects_stale_path_even_when_key_matches():
     spec = FlowSpec(
         flow_id="f",
         steps=[FlowStep(
@@ -1031,17 +1031,16 @@ def test_update_param_falls_back_to_key_when_path_is_stale():
         )],
     )
 
-    new = apply_flow_edits(spec, [{
-        "op": "update",
-        "step_id": "step1",
-        "param_path": "type",
-        "param_key": "type",
-        "param_label": "请假类型",
-        "field": "type",
-        "value": "enum",
-    }])
-
-    assert new.steps[0].params[0].type == "enum"
+    with pytest.raises(ValueError, match="param not found: type"):
+        apply_flow_edits(spec, [{
+            "op": "update",
+            "step_id": "step1",
+            "param_path": "type",
+            "param_key": "type",
+            "param_label": "请假类型",
+            "field": "type",
+            "value": "enum",
+        }])
 
 
 def test_bind_option_source_updates_param_and_select_binding():
@@ -1082,7 +1081,7 @@ def test_bind_option_source_updates_param_and_select_binding():
     assert param.wire_type == "number"
     assert param.source_kind == "api_option"
     assert param.enum_value_map == {"病假": "1"}
-    assert param.locked is True
+    assert param.locked is False
     assert {item.get("field") for item in param.evidence if item.get("source") == "manual_edit"} >= {
         "category", "source_kind", "source", "exposed_to_user",
     }
@@ -2216,6 +2215,55 @@ def test_manual_label_edit_owns_only_label_axis_not_entire_param():
     assert {item["field"] for item in param.evidence if item.get("source") == "manual_edit"} == {"label"}
 
 
+def test_explicit_locked_edit_still_owns_the_complete_param():
+    spec = FlowSpec(flow_id="full-param-lock", steps=[FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/submit",
+        params=[ParamField(path="days", key="天数", value="2", type="string")],
+    )])
+    locked = apply_flow_edits(spec, [{
+        "op": "update", "step_id": "submit", "param_path": "days",
+        "field": "locked", "value": True, "actor": "user",
+    }])
+
+    updated = apply_flow_edits(locked, [{
+        "op": "update", "step_id": "submit", "param_path": "days",
+        "field": "type", "value": "number", "actor": "planner",
+    }])
+
+    assert updated.steps[0].params[0].locked is True
+    assert updated.steps[0].params[0].type == "string"
+
+
+def test_select_binding_uses_exact_full_path_when_leaf_names_collide():
+    spec = FlowSpec(flow_id="exact-select-path", steps=[FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/submit",
+        params=[
+            ParamField(path="status", key="顶层状态", value="draft"),
+            ParamField(path="body.status", key="表单状态", value="1"),
+        ],
+        selects=[SelectBinding(
+            param="表单状态",
+            path="body.status",
+            options=[{"label": "启用", "value": "1"}],
+            option_map={"启用": "1"},
+            enum_source="dom",
+            enum_confirmed=True,
+        )],
+    )])
+
+    synced = sync_flow_spec_models(spec)
+    by_path = {param.path: param for param in synced.steps[0].params}
+
+    assert by_path["status"].type == "string"
+    assert by_path["status"].source_kind == "unknown"
+    assert by_path["body.status"].type == "enum"
+    assert by_path["body.status"].source_kind == "page_enum"
+
+
 def test_manual_type_category_source_combination_survives_publish_sync():
     """The backend must persist an operator combination even when it looks unusual."""
     spec = FlowSpec(flow_id="manual-axis-combination", steps=[FlowStep(
@@ -2778,7 +2826,7 @@ def test_add_link():
     )
     assert param.need_human_confirm is True
     assert param.source["response_path"] == "data.z"
-    assert param.locked is True
+    assert param.locked is False
 
 
 def test_add_link_bad_source_raises():
@@ -2859,7 +2907,7 @@ def test_remove_link_resets_target_param_source():
     assert after.source_kind == "user_input"
     assert after.editable is True
     assert after.exposed_to_user is True
-    assert after.locked is True
+    assert after.locked is False
     assert {item.get("field") for item in after.evidence if item.get("source") == "manual_edit"} >= {
         "category", "source_kind", "source", "exposed_to_user",
     }
@@ -2873,7 +2921,7 @@ def test_reset_param_source_removes_incoming_link():
     param = {p.path: p for p in new.steps[1].params}["y"]
     assert param.category == "user_param"
     assert param.source_kind == "user_input"
-    assert param.locked is True
+    assert param.locked is False
 
 
 @pytest.mark.parametrize(("target_source", "expected"), [
@@ -2907,7 +2955,7 @@ def test_user_reset_page_number_source_survives_pagination_sync(target_source, e
     result = prepared.steps[1].params[0]
 
     assert (result.type, result.category, result.source_kind, result.exposed_to_user) == expected
-    assert result.locked is True
+    assert result.locked is False
     assert not prepared.links
 
 
@@ -4890,7 +4938,7 @@ def test_repeated_orchestration_can_reanalyse_real_interfaces_but_not_remove_the
     assert "status" in by_name["submit_batch"].step_ids
 
 
-def test_manual_field_contract_is_locked_against_planner_overwrite():
+def test_manual_field_axes_are_preserved_against_planner_overwrite():
     spec = FlowSpec(
         flow_id="manual-field-lock",
         steps=[FlowStep(
@@ -4926,7 +4974,7 @@ def test_manual_field_contract_is_locked_against_planner_overwrite():
     ))
     param = fixed.steps[0].params[0]
 
-    assert param.locked is True
+    assert param.locked is False
     assert param.category == "user_param"
     assert param.source_kind == "user_input"
 
@@ -4977,7 +5025,7 @@ def test_manual_source_override_is_preserved_without_rewriting_type_or_evidence(
         "field": "source", "value": {"kind": "sample", "path": "query.useInfo"}, "actor": "user",
     }])
     param = edited.steps[0].params[0]
-    assert param.locked is True
+    assert param.locked is False
     assert param.type == "enum"
     assert param.category == "user_param"
     assert param.source_kind == "user_input"

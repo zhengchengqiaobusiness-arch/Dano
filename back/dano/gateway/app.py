@@ -175,7 +175,11 @@ def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
     if has_screenshots:
         evidence_rule += (
             " The required screenshot field axes are step_id, wire_path, public_name, visible_default, "
-            "business_type, category, source_kind, required, confidence, and evidence."
+            "business_type, category, source_kind, required, confidence, axis_status, and evidence. "
+            "axis_status must resolve each of path,name,default_value,type,category,source,required as "
+            "grounded,image_matched,preserved_fact,locked,or unresolved. Every evidence object must declare "
+            "the axis or axes it supports; unresolved axes must also be listed in unresolved_items with an "
+            "exact reason."
         )
     return (
         " submit_recording_plan.plan must be {semantic_plan:{business_understanding,request_roles,field_semantics,"
