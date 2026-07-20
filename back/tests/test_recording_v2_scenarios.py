@@ -15,9 +15,12 @@ import pytest
 
 import dano.agent_tools.tools as agent_tools_module
 import dano.execution.page.flow_spec as flow_spec_module
+from dano.execution.page.recorder import RecordSession
+from dano.execution.page.repair_ops import collect_capability_findings
 from dano.execution.page.flow_spec import (
     CapabilityField,
     CapabilityRelation,
+    CapabilityRequestRef,
     FlowCapability,
     FlowLink,
     FlowSpec,
@@ -43,7 +46,6 @@ def _call_nodes(step_ids: list[str]) -> list[dict]:
         {"id": f"call_{index}", "type": "call", "step_id": step_id}
         for index, step_id in enumerate(step_ids)
     ]
-from dano.execution.page.repair_ops import collect_capability_findings
 
 
 def _get(index: int, path: str, response_json: dict) -> dict:
@@ -1123,6 +1125,462 @@ def test_enum_binding_without_real_label_value_contract_is_not_executable_or_gue
     assert param.enum_value_map is None
 
 
+def test_partial_page_enum_cannot_execute_only_because_current_label_is_recorded():
+    """A partial snapshot must map every exposed label, including non-current choices."""
+    param = ParamField(
+        path="requestType",
+        key="申请类型",
+        value="病假",
+        type="enum",
+        wire_type="string",
+        category="user_param",
+        source_kind="page_enum",
+        exposed_to_user=True,
+        enum_options=["病假", "事假"],
+        enum_value_map={"病假": "2"},
+        source={"mapping_complete": False},
+    )
+
+    assert flow_spec_module._incomplete_page_enum_is_executable(param) is False
+
+
+def test_partial_page_enum_is_executable_when_every_label_has_an_explicit_value():
+    param = ParamField(
+        path="requestType",
+        key="申请类型",
+        value="2",
+        type="enum",
+        wire_type="string",
+        category="user_param",
+        source_kind="page_enum",
+        exposed_to_user=True,
+        enum_options=["病假", "事假"],
+        enum_value_map={"病假": "2", "事假": "3"},
+        source={"mapping_complete": False},
+    )
+
+    assert flow_spec_module._incomplete_page_enum_is_executable(param) is True
+
+
+def test_semantic_coverage_requires_all_seven_field_axes_and_axis_evidence():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/request/submit",
+        params=[ParamField(path="days", key="days", value="2")],
+    )])
+    result = {"semantic_plan": {
+        "business_understanding": {"summary": "Submit leave request"},
+        "request_roles": [{
+            "step_id": "submit",
+            "role": "submit_anchor",
+            "name": "Submit leave request",
+            "reason": "Recorded write",
+        }],
+        "field_semantics": [{
+            "step_id": "submit",
+            "wire_path": "days",
+            "public_name": "请假天数",
+            "business_type": "number",
+            "source_kind": "user_input",
+            "confidence": 0.99,
+            # Missing default conclusion, category, required, and per-axis
+            # evidence/status must not be accepted as complete coverage.
+        }],
+        "capabilities": [{
+            "name": "submit_leave",
+            "title": "Submit leave",
+            "kind": "submit",
+            "intent": "Submit leave request",
+            "step_ids": ["submit"],
+        }],
+        "capability_relations": [],
+        "unresolved_items": [],
+    }}
+
+    coverage = flow_spec_module._semantic_plan_coverage(spec, result)
+
+    assert coverage["complete"] is False
+    assert "field_axis_contract" in coverage["missing"]
+
+
+def test_semantic_coverage_accepts_only_resolved_seven_axis_contracts():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/request/submit",
+        params=[ParamField(path="days", key="days", value="2")],
+    )])
+    field_axes = [
+        "path", "name", "default_value", "type", "category", "source", "required",
+    ]
+    result = {"semantic_plan": {
+        "business_understanding": {"summary": "Submit leave request"},
+        "request_roles": [{
+            "step_id": "submit", "role": "submit_anchor",
+            "name": "Submit leave request", "reason": "Recorded write",
+        }],
+        "field_semantics": [{
+            "step_id": "submit",
+            "wire_path": "days",
+            "public_name": "请假天数",
+            "default_value": "2",
+            "business_type": "number",
+            "category": "user_param",
+            "source_kind": "user_input",
+            "required": True,
+            "confidence": 0.99,
+            "axis_status": {axis: "grounded" for axis in field_axes},
+            "evidence": [{"source": "recording", "axes": field_axes}],
+        }],
+        "capabilities": [{
+            "name": "submit_leave", "title": "Submit leave", "kind": "submit",
+            "intent": "Submit leave request", "step_ids": ["submit"],
+        }],
+        "capability_relations": [],
+        "unresolved_items": [],
+    }}
+
+    coverage = flow_spec_module._semantic_plan_coverage(spec, result)
+
+    assert coverage["complete"] is True
+    assert coverage["missing"] == []
+
+    result["semantic_plan"]["unresolved_items"] = [{
+        "kind": "field_axis", "step_id": "submit", "path": "days",
+        "axis": "required", "reason": "required marker not visible",
+    }]
+    blocked = flow_spec_module._semantic_plan_coverage(spec, result)
+    assert blocked["complete"] is False
+    assert "unresolved_blockers" in blocked["missing"]
+
+
+def test_unrelated_same_value_list_is_not_bound_as_option_source():
+    """A matching recorded value is not causal evidence for an option endpoint."""
+    source = FlowStep(
+        step_id="permissions",
+        method="GET",
+        path="/api/permissions/simple-list",
+        response_json={"data": [{"id": "1", "name": "管理员"}, {"id": "2", "name": "访客"}]},
+        source_meta={
+            "role": "read_option",
+            "trigger_transaction_id": "txn-permissions",
+            "trigger_action_id": "open-permissions",
+        },
+    )
+    target = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/request/submit",
+        params=[ParamField(
+            path="requestType",
+            key="申请类型",
+            value="1",
+            category="user_param",
+            source_kind="user_input",
+            evidence=[{"kind": "page_control", "control_kind": "select"}],
+        )],
+        source_meta={
+            "trigger_transaction_id": "txn-submit-request",
+            "trigger_action_id": "submit-request",
+        },
+    )
+    spec = FlowSpec(steps=[source, target])
+
+    repaired = flow_spec_module._repair_structural_option_bindings(spec)
+
+    assert repaired == 0
+    assert target.params[0].source_kind != "api_option"
+    assert not any(binding.path == "requestType" for step in spec.steps for binding in step.selects)
+
+
+def test_same_transaction_is_causal_evidence_for_an_option_source():
+    source = FlowStep(
+        step_id="permissions",
+        method="GET",
+        path="/api/permissions/simple-list",
+        response_json={"data": [{"id": "1", "name": "管理员"}, {"id": "2", "name": "访客"}]},
+        source_meta={
+            "role": "read_option",
+            "trigger_transaction_id": "txn-request-form",
+            "trigger_action_id": "submit-request",
+        },
+    )
+    target = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/request/submit",
+        params=[ParamField(
+            path="requestType",
+            key="申请类型",
+            value="1",
+            category="user_param",
+            source_kind="user_input",
+            evidence=[{"kind": "page_control", "control_kind": "select"}],
+        )],
+        source_meta={
+            "trigger_transaction_id": "txn-request-form",
+            "trigger_action_id": "submit-request",
+        },
+    )
+    spec = FlowSpec(steps=[source, target])
+
+    repaired = flow_spec_module._repair_structural_option_bindings(spec)
+
+    assert repaired == 1
+    assert target.params[0].source_kind == "api_option"
+    assert target.params[0].enum_value_map == {"管理员": "1", "访客": "2"}
+
+
+def test_structurally_generic_list_is_not_promoted_without_business_evidence():
+    request = _get(
+        1,
+        "/api/common/list",
+        {"data": [
+            {"nodeKey": "n1", "caption": "Inbox", "route": "/inbox", "icon": "mail"},
+            {"nodeKey": "n2", "caption": "Tasks", "route": "/tasks", "icon": "check"},
+        ]},
+    )
+    request.update({"resource_type": "xhr"})
+
+    classification = flow_spec_module.classify_network_request(request)
+
+    assert classification["role"] != "business_get"
+    assert classification["keep"] is False
+
+
+def test_multipart_text_fields_remain_supported_request_data():
+    request = {
+        "method": "POST",
+        "url": "https://oa.example.test/api/request/submit",
+        "content_type": "multipart/form-data; boundary=abc",
+        "post_data": (
+            "--abc\r\nContent-Disposition: form-data; name=\"reason\"\r\n\r\n"
+            "annual leave\r\n--abc--\r\n"
+        ),
+        "response_status": 200,
+        "response_json": {"ok": True},
+    }
+
+    classification = flow_spec_module.classify_network_request(request)
+
+    assert classification["role"] == "business_write"
+    assert classification["keep"] is True
+    assert classification.get("unsupported") is not True
+
+
+def test_recorder_classification_uses_full_action_and_transaction_context():
+    entry = {
+        "method": "POST",
+        "url": "https://crm.example.test/api/op/query",
+        "post_data": json.dumps({"region": "east"}),
+        "response_json": {"payload": {"rows": [{"record": "r1", "amount": 4}]}},
+        "trigger_op": "click",
+        "trigger_locator": "button[type=submit]",
+        "trigger_action_id": "search-orders",
+        "trigger_transaction_id": "page|main|search-orders",
+        "page_id": "orders",
+        "frame_id": "main",
+    }
+    session = RecordSession()
+
+    session._classify_entry(entry)
+
+    assert entry["role"] == "business_get"
+    assert entry["keep"] is True
+
+
+def test_fact_check_request_ref_survives_capability_view_sync():
+    spec = FlowSpec(
+        steps=[
+            FlowStep(step_id="submit", method="POST", path="/api/submit"),
+            FlowStep(step_id="verify", method="GET", path="/api/verify"),
+        ],
+        capabilities=[FlowCapability(
+            name="submit_order",
+            kind="submit",
+            nodes=_call_nodes(["submit"]),
+            request_refs=[CapabilityRequestRef(
+                step_id="verify",
+                method="GET",
+                path="/api/verify",
+                usage="fact_check",
+                origin="planner",
+            )],
+        )],
+    )
+
+    synced = sync_flow_spec_models(spec)
+
+    assert [(ref.step_id, ref.usage) for ref in synced.capabilities[0].request_refs] == [
+        ("submit", "execute"),
+        ("verify", "fact_check"),
+    ]
+
+
+def test_write_operation_identity_prefers_transaction_over_locator():
+    def write(step_id: str, locator: str) -> FlowStep:
+        return FlowStep(
+            step_id=step_id,
+            method="POST",
+            path=f"/api/{step_id}",
+            source_meta={
+                "trigger_transaction_id": "txn-one",
+                "trigger_action_id": "action-one",
+                "trigger_op": "click",
+                "trigger_locator": locator,
+                "page_id": "page-one",
+                "frame_id": "main",
+                "causality_confidence": "high",
+            },
+        )
+
+    assert flow_spec_module._write_operation_key(write("audit", "button.audit")) == (
+        flow_spec_module._write_operation_key(write("save", "button.save"))
+    )
+
+
+def test_value_equality_without_causal_evidence_does_not_keep_flow_link():
+    source = FlowStep(
+        step_id="source",
+        method="GET",
+        path="/api/source",
+        response_json={"data": {"title": "UNIQUE-LONG-TITLE"}},
+        source_meta={"sequence": 1},
+    )
+    target = FlowStep(
+        step_id="target",
+        method="POST",
+        path="/api/target",
+        params=[ParamField(
+            path="title",
+            key="title",
+            value="UNIQUE-LONG-TITLE",
+            category="user_param",
+            source_kind="user_input",
+            evidence=[{"source": "page_control", "kind": "text"}],
+        )],
+        source_meta={"sequence": 2},
+    )
+    links = [FlowLink(
+        link_id="accidental-value",
+        source_step_id="source",
+        source_path="data.title",
+        target_step_id="target",
+        target_path="title",
+        confirmed=True,
+        confidence=0.97,
+        evidence={"kind": "value_match"},
+    )]
+
+    flow_spec_module._prune_unsafe_auto_links([source, target], links)
+
+    assert links == []
+
+
+def test_generic_relation_builder_does_not_create_named_field_special_case():
+    spec = FlowSpec(capabilities=[
+        FlowCapability(
+            name="query_status",
+            kind="query_status",
+            output_schema={"type": "object", "properties": {
+                "missing_dates": {"type": "array", "items": {"type": "string"}},
+            }},
+        ),
+        FlowCapability(
+            name="submit_batch",
+            kind="submit_batch",
+            input_schema={"type": "object", "properties": {
+                "entries": {"type": "array", "items": {"type": "object"}},
+            }},
+        ),
+    ])
+
+    result = flow_spec_module._ensure_external_transform_relations(spec)
+
+    assert result.capability_relations == []
+
+
+def test_execution_fingerprint_ignores_descriptive_copy():
+    original = FlowSpec(
+        flow_id="fingerprint",
+        title="Original title",
+        business_description="Original description",
+        steps=[FlowStep(step_id="submit", method="POST", path="/api/submit")],
+    )
+    renamed = original.model_copy(deep=True)
+    renamed.title = "Localized title"
+    renamed.business_description = "Localized description"
+
+    assert flow_spec_module.flow_spec_fingerprint(original) == flow_spec_module.flow_spec_fingerprint(renamed)
+
+
+def test_screenshot_without_positive_required_marker_cannot_downgrade_required():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/submit",
+        params=[ParamField(path="reason", key="原因", value="leave", required=True)],
+    )])
+
+    flow_spec_module._apply_capability_field_to_param(
+        spec,
+        {
+            "step_id": "submit",
+            "wire_path": "reason",
+            "key": "原因",
+            "required": False,
+            "evidence": [{
+                "source": "screenshot",
+                "screenshot_name": "form.png",
+                "control_kind": "input",
+                "editable": True,
+                "required": False,
+            }],
+        },
+        scope="input",
+        actor="planner",
+    )
+
+    assert spec.steps[0].params[0].required is True
+
+
+def test_cross_validated_screenshot_default_can_preserve_recorded_default():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/submit",
+        params=[ParamField(
+            path="days",
+            key="天数",
+            value="2",
+            default_value=None,
+            type="number",
+        )],
+    )])
+
+    flow_spec_module._apply_capability_field_to_param(
+        spec,
+        {
+            "step_id": "submit",
+            "wire_path": "days",
+            "key": "天数",
+            "visible_default": "2",
+            "evidence": [{
+                "source": "screenshot",
+                "screenshot_name": "form.png",
+                "control_kind": "input",
+                "editable": True,
+                "visible_value": "2",
+            }],
+        },
+        scope="input",
+        actor="planner",
+    )
+
+    assert spec.steps[0].params[0].default_value == "2"
+
+
 def test_query_output_fields_use_mapped_response_schema_types():
     query = FlowStep(
         step_id="query",
@@ -1611,6 +2069,9 @@ def _seal_semantic_spec() -> FlowSpec:
 
 
 def _complete_semantic_submission() -> dict:
+    field_axes = [
+        "path", "name", "default_value", "type", "category", "source", "required",
+    ]
     return {
             "semantic_plan": {
                 "business_understanding": {
@@ -1630,9 +2091,16 @@ def _complete_semantic_submission() -> dict:
                             "query.useTime[0]": "查询开始时间",
                             "query.useTime[1]": "查询结束时间",
                         }.get(param.path, param.key),
+                        "default_value": param.default_value,
                         "business_type": param.type,
-                        "source_kind": param.source_kind,
+                        "category": param.category,
+                        "source_kind": (
+                            "user_input" if param.category == "user_param" else param.source_kind
+                        ),
+                        "required": param.required,
                         "confidence": 0.99,
+                        "axis_status": {axis: "grounded" for axis in field_axes},
+                        "evidence": [{"source": "recording", "axes": field_axes}],
                     }
                     for step in _seal_semantic_spec().steps
                     for param in step.params

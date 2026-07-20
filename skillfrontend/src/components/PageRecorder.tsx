@@ -782,25 +782,30 @@ function EditableComboInput({
 function EditableTextArea({
   value,
   onSave,
+  onDraftChange,
   rows = 3,
   placeholder = "",
 }: {
   value?: string;
   onSave: (value: string) => void;
+  onDraftChange?: (value: string) => void;
   rows?: number;
   placeholder?: string;
 }) {
   const [local, setLocal] = useState(value || "");
   useEffect(() => setLocal(value || ""), [value]);
   function save() {
-    if (local !== (value || "")) onSave(local);
+    if (onDraftChange || local !== (value || "")) onSave(local);
   }
   return (
     <Input.TextArea
       rows={rows}
       value={local}
       placeholder={placeholder}
-      onChange={(e) => setLocal(e.target.value)}
+      onChange={(e) => {
+        setLocal(e.target.value);
+        onDraftChange?.(e.target.value);
+      }}
       onBlur={save}
     />
   );
@@ -3719,6 +3724,14 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                             rows={3}
                             value={enumOptionsTextForParam(step, p)}
                             placeholder="每行写 名称=实际值；只有名称会保留为未映射，不会假定名称就是提交值"
+                            onDraftChange={(v) => {
+                              const { options, optionMap, mappingComplete } = parseEnumOptionsText(v);
+                              patchLocalParam(step.step_id, p, {
+                                enum_options: options,
+                                enum_value_map: optionMap,
+                                need_human_confirm: !mappingComplete,
+                              });
+                            }}
                             onSave={(v) => {
                               const { options, optionMap, mappingComplete } = parseEnumOptionsText(v);
                               upsertSelectBinding(

@@ -62,6 +62,28 @@ def _authoritative_spec() -> FlowSpec:
     )
 
 
+def test_workbench_contract_uses_stable_field_identity_and_rolls_back_disconnects() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    assert 'analysis_kind?: "initial" | "incremental"' in source
+    assert 'lastAnalysisEvidence.analysis_kind !== "initial"' in source
+    assert "p.field_id" in source
+    assert 'key={`${step.step_id}:param:${stripBodyPrefix(p.path || p.key)}`}' not in source
+    onclose = source[source.index("ws.onclose ="):source.index("ws.onerror =")]
+    assert "failQueuedFlowMutation" in onclose
+
+
+def test_enum_mapping_warning_tracks_the_textarea_draft_before_blur() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+    editor = source[source.index('<FieldControl label="枚举候选">'):source.index("</FieldControl>", source.index('<FieldControl label="枚举候选">'))]
+
+    assert "onDraftChange={(v) =>" in editor
+    assert "parseEnumOptionsText(v)" in editor
+    assert "patchLocalParam(step.step_id, p" in editor
+    assert "need_human_confirm: !mappingComplete" in editor
+    assert 'if (onDraftChange || local !== (value || "")) onSave(local);' in source
+
+
 def test_client_projection_is_bounded_and_contains_no_authoritative_secrets() -> None:
     spec = _authoritative_spec()
     client = flow_spec_to_client(spec)

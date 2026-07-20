@@ -79,9 +79,51 @@ def _unwrap_json_strings(node, depth: int = 0):
     return node
 
 
+def _multipart_contains_file(post_data: str | None) -> bool:
+    return bool(
+        post_data
+        and _re.search(r'content-disposition\s*:\s*form-data;[^\r\n]*\bfilename\s*=', post_data, _re.I)
+    )
+
+
+def _parse_multipart_text_fields(post_data: str) -> dict[str, object] | None:
+    """Parse ordinary multipart text controls without retaining file bytes."""
+    if "content-disposition" not in post_data.lower() or "form-data" not in post_data.lower():
+        return None
+    first_line = post_data.splitlines()[0].strip() if post_data.splitlines() else ""
+    if not first_line.startswith("--"):
+        return None
+    fields: dict[str, object] = {}
+    for part in post_data.split(first_line)[1:]:
+        part = part.strip("\r\n-")
+        if not part:
+            continue
+        headers, separator, value = part.partition("\r\n\r\n")
+        if not separator:
+            headers, separator, value = part.partition("\n\n")
+        if not separator or _multipart_contains_file(headers):
+            continue
+        match = _re.search(r'\bname\s*=\s*"([^"]+)"', headers, _re.I)
+        if not match:
+            continue
+        name = match.group(1)
+        parsed: object = value.rstrip("\r\n")
+        existing = fields.get(name)
+        if existing is None:
+            fields[name] = parsed
+        elif isinstance(existing, list):
+            existing.append(parsed)
+        else:
+            fields[name] = [existing, parsed]
+    return fields or None
+
+
 def _parse_body(post_data: str | None):
     if not post_data:
         return None
+    multipart = _parse_multipart_text_fields(post_data)
+    if multipart is not None:
+        return multipart
     try:
         return _unwrap_json_strings(json.loads(post_data))   # JSON:解析 + 解开内层 stringified JSON,内层字段可参数化
     except Exception:  # noqa: BLE001 —— 非 JSON,尝试 application/x-www-form-urlencoded(a=1&b=2)
