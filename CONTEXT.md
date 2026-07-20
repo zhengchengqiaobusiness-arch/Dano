@@ -42,6 +42,7 @@ On process or stored-session recovery, any persisted open Form Interaction is te
 
 **Form Revision**:
 The next editable revision of one Submitted Form inside a revising Form Interaction. It preserves the form's `formId`, increments its per-form revision, and starts from the latest complete submitted answer; all revisions in the interaction are submitted as one set before confirmation resumes.
+A Form Revision remains the same editable form rather than becoming a distinct card type: it uses the same field presentation as a Grouped Form, while its revision heading, current answers, and revision actions communicate that the form is being modified.
 _Avoid_: new form identity, unsaved draft, reopened Submitted Form
 
 **Runtime Workspace**:
