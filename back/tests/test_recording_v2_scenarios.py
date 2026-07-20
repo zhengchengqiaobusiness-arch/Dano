@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 import dano.agent_tools.tools as agent_tools_module
 import dano.execution.page.flow_spec as flow_spec_module
 from dano.execution.page.flow_spec import (
@@ -79,6 +81,311 @@ def _walk_nodes(nodes: list[dict]) -> list[dict]:
             if isinstance(child, list):
                 flattened.extend(_walk_nodes([item for item in child if isinstance(item, dict)]))
     return flattened
+
+
+@pytest.fixture(scope="module")
+def r0_seal_recording_truth_spec() -> FlowSpec:
+    """脱敏真实录制：列表查询、审批前置、候选源和最终提交的完整混合流程。"""
+    option_response = {"data": [
+        {"id": "seal-a", "name": "公司章"},
+        {"id": "seal-b", "name": "财务章"},
+    ]}
+    process_definition_id = "oa_seal_apply:1:def"
+    captured = [
+        _get(
+            1,
+            "/admin-api/oa/seal-apply/page?pageNo=1&pageSize=10&processStatus=2",
+            {"data": {"list": [], "total": 0}},
+        ),
+        _get(
+            2,
+            "/admin-api/bpm/process-definition/get?key=oa_seal_apply",
+            {"data": {"id": process_definition_id}},
+        ),
+        _get(
+            3,
+            "/admin-api/bpm/process-instance/get-approval-detail?"
+            "processDefinitionId=oa_seal_apply%3A1%3Adef&activityId=StartUserNode",
+            {"data": {"node": "StartUserNode"}},
+        ),
+        _get(4, "/admin-api/bd/seal/simple-list?status=0", option_response),
+        _post(5, "/admin-api/oa/seal-apply/submit-process", {
+            "sealId": "seal-a",
+            "applyTitle": "项目用章",
+            "useTime": 1784476800000,
+            "backTime": 1784563200000,
+            "useInfo": "项目材料",
+            "billType": "oa_seal_apply",
+            "processDefKey": "oa_seal_apply",
+            "remark": "当天归还",
+        }),
+    ]
+    for request in captured:
+        request.update({"page_id": "seal-page", "frame_id": "main", "resource_type": "xhr"})
+    captured[0].update({
+        "trigger_action_id": "query-seal-applications",
+        "trigger_transaction_id": "txn-query-seal-applications",
+    })
+    for request in (captured[1], captured[2], captured[4]):
+        request.update({
+            "trigger_action_id": "submit-seal-application",
+            "trigger_transaction_id": "txn-submit-seal-application",
+        })
+    captured[3].update({
+        "trigger_action_id": "select-seal",
+        "trigger_transaction_id": "txn-select-seal",
+    })
+
+    def control(path: str, label: str, kind: str, value: str) -> dict:
+        return {
+            "path": path,
+            "key": path.rsplit(".", 1)[-1],
+            "suggest_name": label,
+            "name_source": "dom",
+            "label": label,
+            "value": value,
+            "field_aliases": [path.rsplit(".", 1)[-1]],
+            "control_kind": kind,
+            "page_id": "seal-page",
+            "frame_id": "main",
+        }
+
+    spec = to_flow_spec(
+        captured,
+        reads=[{"url": captured[3]["url"], "json": option_response, "role": "read_option"}],
+        samples={
+            "流程状态": "审批中",
+            "公章": "公司章",
+            "申请标题": "项目用章",
+            "使用日期": "2026-07-20",
+            "归还日期": "2026-07-21",
+            "使用描述": "项目材料",
+            "备注": "当天归还",
+        },
+        required_labels={"公章", "申请标题", "使用日期", "归还日期", "使用描述"},
+        page_enum_options={
+            "流程状态": {
+                "field_key": "流程状态",
+                "field_aliases": ["processStatus"],
+                "control_kind": "select",
+                "selected": "审批中",
+                "selected_label": "审批中",
+                "selected_value": "2",
+                "mapping_complete": False,
+                "options": ["未提交", "审批中", "审批通过", "审批不通过", "已取消"],
+                "page_id": "seal-page",
+                "frame_id": "main",
+            },
+        },
+        field_evidence=[
+            control("query.processStatus", "流程状态", "select", "审批中"),
+            control("sealId", "公章", "select", "公司章"),
+            control("applyTitle", "申请标题", "text", "项目用章"),
+            control("useTime", "使用日期", "date", "2026-07-20"),
+            control("backTime", "归还日期", "date", "2026-07-21"),
+            control("useInfo", "使用描述", "textarea", "项目材料"),
+            control("remark", "备注", "textarea", "当天归还"),
+        ],
+        page_events=[
+            {"type": "control_open", "field_aliases": ["processStatus"], "page_id": "seal-page"},
+            {"type": "control_select", "field_aliases": ["sealId"], "page_id": "seal-page"},
+        ],
+        recording_mode="browser",
+    )
+    return asyncio.run(orchestrate_flow_capabilities(spec, submission={"ops": []}))
+
+
+def _r0_step(spec: FlowSpec, path_fragment: str) -> FlowStep:
+    return next(step for step in spec.steps if path_fragment in (step.path or step.url))
+
+
+def _r0_param(spec: FlowSpec, step_fragment: str, path: str) -> ParamField:
+    step = _r0_step(spec, step_fragment)
+    return next(param for param in step.params if param.path == path)
+
+
+def test_r0_seal_truth_preserves_facts_capability_boundaries_and_relations(
+    r0_seal_recording_truth_spec: FlowSpec,
+):
+    spec = r0_seal_recording_truth_spec
+    assert len(spec.request_facts.requests) == 5
+    assert len(spec.request_facts.page_events) == 2
+    assert len(spec.steps) == 4
+    assert not any("/bd/seal/simple-list" in step.path for step in spec.steps)
+
+    capabilities = {cap.kind: cap for cap in spec.capabilities}
+    assert set(capabilities) == {"query_status", "submit"}
+    assert [
+        _r0_step(spec, "/oa/seal-apply/page").step_id,
+    ] == capabilities["query_status"].step_ids
+    assert capabilities["submit"].step_ids == [
+        _r0_step(spec, "/process-definition/get").step_id,
+        _r0_step(spec, "/get-approval-detail").step_id,
+        _r0_step(spec, "/seal-apply/submit-process").step_id,
+    ]
+
+    option_ref = next(
+        ref for ref in capabilities["submit"].request_refs
+        if "/bd/seal/simple-list" in ref.path
+    )
+    assert option_ref.usage == "option_source"
+    assert option_ref.step_id == ""
+
+    assert len(spec.links) == 1
+    link = spec.links[0]
+    assert link.source_step_id == _r0_step(spec, "/process-definition/get").step_id
+    assert link.source_path == "data.id"
+    assert link.target_step_id == _r0_step(spec, "/get-approval-detail").step_id
+    assert link.target_path == "query.processDefinitionId"
+    assert link.confirmed is True
+    assert spec.capability_relations == []
+
+    seal = _r0_param(spec, "/seal-apply/submit-process", "sealId")
+    assert seal.source["source_request_id"] == "4"
+    assert seal.source["value_key"] == "id"
+    assert seal.source["label_key"] == "name"
+    process_definition = _r0_param(spec, "/get-approval-detail", "query.processDefinitionId")
+    assert process_definition.source["response_path"] == "data.id"
+    assert process_definition.source["target_path"] == "query.processDefinitionId"
+
+
+@pytest.mark.parametrize(
+    (
+        "step_fragment", "path", "name", "default_value", "business_type",
+        "wire_type", "category", "source_kind", "required",
+    ),
+    [
+        ("/oa/seal-apply/page", "query.pageNo", "pageNo", "1", "number", "number", "user_param", "user_input", False),
+        ("/oa/seal-apply/page", "query.pageSize", "pageSize", "10", "number", "number", "user_param", "user_input", False),
+        pytest.param(
+            "/oa/seal-apply/page", "query.processStatus", "流程状态", "2",
+            "enum", "string", "user_param", "page_enum", False,
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="R3: 只有页面标签快照时仍须保留 incomplete enum，不能退化为 string",
+            ),
+        ),
+        ("/process-definition/get", "query.key", "key", "oa_seal_apply", "string", "string", "system_const", "constant", False),
+        ("/get-approval-detail", "query.processDefinitionId", "processDefinitionId", "oa_seal_apply:1:def", "string", "string", "runtime_var", "previous_response", False),
+        ("/get-approval-detail", "query.activityId", "activityId", "StartUserNode", "string", "string", "system_const", "constant", False),
+        ("/seal-apply/submit-process", "sealId", "公章", "seal-a", "enum", "string", "user_param", "api_option", True),
+        ("/seal-apply/submit-process", "applyTitle", "申请标题", "项目用章", "string", "string", "user_param", "user_input", True),
+        pytest.param(
+            "/seal-apply/submit-process", "useTime", "使用日期", 1784476800000,
+            "datetime", "number", "user_param", "user_input", True,
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="R2: 日期业务类型不能覆盖 JSON 数字时间戳的 wire_type",
+            ),
+        ),
+        pytest.param(
+            "/seal-apply/submit-process", "backTime", "归还日期", 1784563200000,
+            "datetime", "number", "user_param", "user_input", True,
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="R2: 日期业务类型不能覆盖 JSON 数字时间戳的 wire_type",
+            ),
+        ),
+        ("/seal-apply/submit-process", "useInfo", "使用描述", "项目材料", "string", "string", "user_param", "user_input", True),
+        ("/seal-apply/submit-process", "billType", "billType", "oa_seal_apply", "string", "string", "system_const", "constant", False),
+        ("/seal-apply/submit-process", "processDefKey", "processDefKey", "oa_seal_apply", "string", "string", "system_const", "constant", False),
+        ("/seal-apply/submit-process", "remark", "备注", "当天归还", "string", "string", "user_param", "user_input", False),
+    ],
+)
+def test_r0_seal_truth_resolves_each_field_axis_independently(
+    r0_seal_recording_truth_spec: FlowSpec,
+    step_fragment: str,
+    path: str,
+    name: str,
+    default_value,
+    business_type: str,
+    wire_type: str,
+    category: str,
+    source_kind: str,
+    required: bool,
+):
+    param = _r0_param(r0_seal_recording_truth_spec, step_fragment, path)
+    assert {
+        "path": param.path,
+        "name": param.key,
+        "default_value": param.default_value,
+        "business_type": param.type,
+        "wire_type": param.wire_type,
+        "category": param.category,
+        "source_kind": param.source_kind,
+        "required": param.required,
+    } == {
+        "path": path,
+        "name": name,
+        "default_value": default_value,
+        "business_type": business_type,
+        "wire_type": wire_type,
+        "category": category,
+        "source_kind": source_kind,
+        "required": required,
+    }
+
+
+@pytest.mark.parametrize(
+    ("request_index", "expected_role"),
+    [
+        ("1", "business_get"),
+        pytest.param(
+            "2", "read_context",
+            marks=pytest.mark.xfail(strict=True, reason="R4: 流程定义查询是写能力前置上下文"),
+        ),
+        pytest.param(
+            "3", "read_context",
+            marks=pytest.mark.xfail(strict=True, reason="R4: 审批详情查询是写能力前置上下文"),
+        ),
+        ("4", "read_option"),
+        pytest.param(
+            "5", "business_write",
+            marks=pytest.mark.xfail(strict=True, reason="R4: RequestAnalysis 使用稳定业务角色，不保留 submit_anchor 临时角色"),
+        ),
+    ],
+)
+def test_r0_seal_truth_classifies_each_interface_role(
+    r0_seal_recording_truth_spec: FlowSpec,
+    request_index: str,
+    expected_role: str,
+):
+    analysis = r0_seal_recording_truth_spec.request_facts.analysis[request_index]
+    assert analysis.role == expected_role
+
+
+@pytest.mark.parametrize(
+    ("capability_kind", "path_fragment", "expected_role", "expected_usage"),
+    [
+        ("query_status", "/oa/seal-apply/page", "business_get", "execute"),
+        pytest.param(
+            "submit", "/process-definition/get", "read_context", "preflight",
+            marks=pytest.mark.xfail(strict=True, reason="R4: 写能力前置接口必须标记 preflight"),
+        ),
+        pytest.param(
+            "submit", "/get-approval-detail", "read_context", "preflight",
+            marks=pytest.mark.xfail(strict=True, reason="R4: 写能力前置接口必须标记 preflight"),
+        ),
+        pytest.param(
+            "submit", "/seal-apply/submit-process", "business_write", "execute",
+            marks=pytest.mark.xfail(strict=True, reason="R4: capability ref 复用稳定业务角色，不泄漏 submit_anchor"),
+        ),
+        ("submit", "/bd/seal/simple-list", "read_option", "option_source"),
+    ],
+)
+def test_r0_seal_truth_separates_interface_role_from_capability_usage(
+    r0_seal_recording_truth_spec: FlowSpec,
+    capability_kind: str,
+    path_fragment: str,
+    expected_role: str,
+    expected_usage: str,
+):
+    capability = next(
+        cap for cap in r0_seal_recording_truth_spec.capabilities
+        if cap.kind == capability_kind
+    )
+    ref = next(ref for ref in capability.request_refs if path_fragment in ref.path)
+    assert (ref.role, ref.usage) == (expected_role, expected_usage)
 
 
 def test_same_command_transaction_keeps_auxiliary_json_interface_in_operation():
