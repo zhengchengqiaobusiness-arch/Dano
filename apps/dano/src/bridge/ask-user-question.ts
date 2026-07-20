@@ -601,12 +601,20 @@ type CompatibleQuestionsResult =
   | { questions: NormalizedAskUserQuestionRequestItem[] }
   | { error: string };
 
+type CompatibleQuestionResult =
+  | { question: NormalizedAskUserQuestionRequestItem }
+  | { error: string };
+
 function normalizeCompatibleRequest(
   request: AskUserQuestionRequestParams,
 ): CompatibleRequestResult {
-  const normalized: NormalizedAskUserQuestionRequest =
-    normalizeCompatibleQuestion(request);
   const rawQuestions = request.questions;
+  const questionResult = normalizeCompatibleQuestion(
+    request,
+    rawQuestions === undefined,
+  );
+  if ("error" in questionResult) return questionResult;
+  const normalized: NormalizedAskUserQuestionRequest = questionResult.question;
   if (rawQuestions !== undefined) {
     normalized.title = firstScalarString(request.title);
     normalized.question = firstScalarString(request.question, request.label, request.prompt);
@@ -641,38 +649,66 @@ function normalizeCompatibleQuestions(
       error: "Invalid questions: every questions array item must be an object",
     };
   }
-  return {
-    questions: rawItems.map(value => normalizeCompatibleQuestion(value)),
-  };
+  const questions: NormalizedAskUserQuestionRequestItem[] = [];
+  for (const value of rawItems) {
+    const result = normalizeCompatibleQuestion(value);
+    if ("error" in result) return result;
+    questions.push(result.question);
+  }
+  return { questions };
 }
 
 function normalizeCompatibleQuestion(
   request: AskUserQuestionRequestItem | Record<string, unknown>,
-): NormalizedAskUserQuestionRequestItem {
+  includeTitleAsQuestion = true,
+): CompatibleQuestionResult {
   const normalized: NormalizedAskUserQuestionRequestItem = {};
-  const id = firstScalarString(request.id, request.key, request.name);
-  if (id) normalized.id = id;
-
-  const question = firstScalarString(request.question, request.label, request.prompt, request.title);
-  if (question) normalized.question = question;
-
-  const inputType = normalizeInputType(
-    request.inputType ?? request.input_type ?? request.type ?? request.component,
+  const id = normalizeCompatibleAliases(
+    "question id",
+    [request.id, request.key, request.name],
+    firstScalarString,
   );
-  if (inputType) normalized.inputType = inputType;
+  if ("error" in id) return id;
+  if (id.value) normalized.id = id.value;
 
-  const rawOptions = request.options ?? request.choices;
-  const options = normalizeCompatibleOptions(rawOptions);
-  if (options.values.length > 0 && !options.invalid) {
-    normalized.options = options.values;
+  const question = normalizeCompatibleAliases(
+    "question text",
+    [
+      request.question,
+      request.label,
+      request.prompt,
+      ...(includeTitleAsQuestion ? [request.title] : []),
+    ],
+    firstScalarString,
+  );
+  if ("error" in question) return question;
+  if (question.value) normalized.question = question.value;
+
+  const inputType = normalizeCompatibleAliases(
+    "input type",
+    [request.inputType, request.input_type, request.type, request.component],
+    normalizeInputType,
+  );
+  if ("error" in inputType) return inputType;
+  if (inputType.value) normalized.inputType = inputType.value;
+
+  const options = normalizeCompatibleAliases(
+    "options",
+    [request.options, request.choices],
+    normalizeCompatibleOptionsAlias,
+  );
+  if ("error" in options) return options;
+  const optionsProvided = request.options !== undefined || request.choices !== undefined;
+  if (options.value) {
+    normalized.options = options.value;
   } else if (
-    rawOptions !== undefined &&
-    inputType !== "text" &&
-    inputType !== "textarea" &&
-    inputType !== "date" &&
-    inputType !== "confirm"
+    optionsProvided &&
+    inputType.value !== "text" &&
+    inputType.value !== "textarea" &&
+    inputType.value !== "date" &&
+    inputType.value !== "confirm"
   ) {
-    normalized.inputType = inputType ?? "radio";
+    normalized.inputType = inputType.value ?? "radio";
   }
 
   const fieldAssist = firstNormalizedFieldAssistValue(
@@ -685,36 +721,53 @@ function normalizeCompatibleQuestion(
 
   if ("dateFormat" in request) normalized.dateFormat = request.dateFormat;
 
-  const dataSource = normalizeCompatibleDataSource(
-    request.dataSource ?? request.data_source,
+  const dataSource = normalizeCompatibleAliases(
+    "data source",
+    [request.dataSource, request.data_source],
+    normalizeCompatibleDataSource,
   );
-  if (dataSource) normalized.dataSource = dataSource;
-  if (dataSource && !inputType) normalized.inputType = "select";
+  if ("error" in dataSource) return dataSource;
+  if (dataSource.value) normalized.dataSource = dataSource.value;
+  if (dataSource.value && !inputType.value) normalized.inputType = "select";
 
-  const multiple = firstNormalizedBoolean(
-    request.multiple,
-    request.multi,
-    request.multipleSelect,
+  const multiple = normalizeCompatibleAliases(
+    "multiple",
+    [request.multiple, request.multi, request.multipleSelect],
+    normalizeBoolean,
   );
-  if (multiple !== undefined) normalized.multiple = multiple;
+  if ("error" in multiple) return multiple;
+  if (multiple.value !== undefined) normalized.multiple = multiple.value;
 
   const required = normalizeBoolean(request.required);
   if (required !== undefined) normalized.required = required;
 
-  if (normalizeBoolean(request.confirm) === true || inputType === "confirm") {
+  if (normalizeBoolean(request.confirm) === true || inputType.value === "confirm") {
     normalized.confirm = true;
   }
 
-  const defaultValue = firstDefined(
+  const defaultValues = [
     request.default,
     request.defaultValue,
     request.prefill,
     request.value,
+  ];
+  const compatibleDefault = normalizeCompatibleAliases(
+    "default",
+    defaultValues,
+    normalizeCompatibleDefault,
   );
-  const compatibleDefault = normalizeCompatibleAnswerInput(defaultValue);
-  if (compatibleDefault !== undefined) normalized.default = compatibleDefault;
+  if ("error" in compatibleDefault) return compatibleDefault;
+  if (compatibleDefault.value !== undefined) {
+    normalized.default = compatibleDefault.value;
+  } else {
+    const invalidDefault = firstNormalizedValue(
+      defaultValues,
+      normalizeCompatibleAnswerInput,
+    );
+    if (invalidDefault !== undefined) normalized.default = invalidDefault;
+  }
 
-  return normalized;
+  return { question: normalized };
 }
 
 function foldCompatibleGroupedFields(
@@ -899,6 +952,15 @@ function normalizeCompatibleOptions(
   return { values, invalid: values.length !== value.length };
 }
 
+function normalizeCompatibleOptionsAlias(
+  value: unknown,
+): Array<string | AskUserQuestionOption> | undefined {
+  const normalized = normalizeCompatibleOptions(value);
+  return !normalized.invalid && normalized.values.length > 0
+    ? normalized.values
+    : undefined;
+}
+
 function normalizeCompatibleOption(
   value: unknown,
 ): string | AskUserQuestionOption | undefined {
@@ -912,10 +974,19 @@ function normalizeCompatibleOption(
   if (typeof value === "boolean") return String(value);
   if (!isPlainRecord(value)) return undefined;
 
-  const rawId = firstDefined(value.id, value.value, value.key);
-  const rawLabel = firstDefined(value.label, value.text, value.name);
-  const id = normalizeOptionId(rawId ?? rawLabel);
-  const label = firstScalarString(rawLabel, id);
+  const idAliases = normalizeCompatibleAliases(
+    "option id",
+    [value.id, value.value, value.key],
+    normalizeOptionId,
+  );
+  const labelAliases = normalizeCompatibleAliases(
+    "option label",
+    [value.label, value.text, value.name],
+    firstScalarString,
+  );
+  if ("error" in idAliases || "error" in labelAliases) return undefined;
+  const id = idAliases.value ?? normalizeOptionId(labelAliases.value);
+  const label = labelAliases.value ?? firstScalarString(id);
   if (id === undefined || !label) return undefined;
   return {
     id,
@@ -950,6 +1021,15 @@ function normalizeCompatibleAnswerInput(
     return items;
   }
   return normalizeCompatibleOption(value);
+}
+
+function normalizeCompatibleDefault(
+  value: unknown,
+): AskUserQuestionAnswerInput | undefined {
+  const normalized = normalizeCompatibleAnswerInput(value);
+  if (typeof normalized === "string" && !normalized.trim()) return undefined;
+  if (Array.isArray(normalized) && normalized.length === 0) return undefined;
+  return normalized;
 }
 
 function normalizeCompatibleDataSource(
@@ -1035,6 +1115,27 @@ function firstScalarString(...values: unknown[]): string | undefined {
   return undefined;
 }
 
+function normalizeCompatibleAliases<T>(
+  name: string,
+  values: unknown[],
+  normalize: (value: unknown) => T | undefined,
+): { value?: T } | { error: string } {
+  let selected: T | undefined;
+  for (const value of values) {
+    if (value === undefined) continue;
+    const normalized = normalize(value);
+    if (normalized === undefined) continue;
+    if (selected === undefined) {
+      selected = normalized;
+      continue;
+    }
+    if (!isDeepStrictEqual(selected, normalized)) {
+      return { error: `Conflicting compatible aliases for ${name}` };
+    }
+  }
+  return selected === undefined ? {} : { value: selected };
+}
+
 function normalizeBoolean(value: unknown): boolean | undefined {
   if (typeof value === "boolean") return value;
   if (typeof value === "number") {
@@ -1053,18 +1154,6 @@ function normalizeBoolean(value: unknown): boolean | undefined {
   return undefined;
 }
 
-function firstNormalizedBoolean(...values: unknown[]): boolean | undefined {
-  for (const value of values) {
-    const normalized = normalizeBoolean(value);
-    if (normalized !== undefined) return normalized;
-  }
-  return undefined;
-}
-
-function firstDefined<T>(...values: T[]): T | undefined {
-  return values.find(value => value !== undefined);
-}
-
 function normalizeFieldAssistValue(value: unknown): boolean | undefined {
   if (typeof value === "boolean") return value;
   if (typeof value === "number") return value === 0 ? false : true;
@@ -1081,8 +1170,15 @@ function normalizeFieldAssistValue(value: unknown): boolean | undefined {
 }
 
 function firstNormalizedFieldAssistValue(...values: unknown[]): boolean | undefined {
+  return firstNormalizedValue(values, normalizeFieldAssistValue);
+}
+
+function firstNormalizedValue<T>(
+  values: unknown[],
+  normalize: (value: unknown) => T | undefined,
+): T | undefined {
   for (const value of values) {
-    const normalized = normalizeFieldAssistValue(value);
+    const normalized = normalize(value);
     if (normalized !== undefined) return normalized;
   }
   return undefined;

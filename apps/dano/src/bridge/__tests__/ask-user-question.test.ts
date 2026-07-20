@@ -517,6 +517,85 @@ describe("ask_user_question tool", () => {
     });
   });
 
+  it.each([
+    [
+      "top-level question",
+      {
+        question: "Reason?",
+        inputType: { malformed: true },
+        type: "textarea",
+        default: null,
+        defaultValue: "Annual leave",
+      },
+      { batch: false, kind: "text", inputType: "textarea", default: "Annual leave" },
+    ],
+    [
+      "questions item",
+      {
+        title: "Leave request",
+        questions: [{
+          id: "reason",
+          question: "Reason?",
+          inputType: { malformed: true },
+          type: "textarea",
+          default: null,
+          defaultValue: "Annual leave",
+        }],
+      },
+      {
+        batch: true,
+        questions: [{ id: "reason", kind: "text", inputType: "textarea", default: "Annual leave" }],
+      },
+    ],
+  ])("uses the first convertible aliases for a %s", (_label, request, expected) => {
+    expect(normalizeAskUserQuestionCardRequest(request)).toMatchObject(expected);
+  });
+
+  it("falls back from malformed canonical choice and data-source fields", () => {
+    expect(
+      normalizeAskUserQuestionCardRequest({
+        question: "Employee?",
+        options: { malformed: true },
+        choices: ["Alice", "Bob"],
+        inputType: "select",
+        dataSource: { type: "api" },
+        data_source: { type: "api", endpoint: "/api/employees" },
+        default: null,
+        prefill: "Alice",
+      }),
+    ).toMatchObject({
+      batch: false,
+      kind: "select",
+      options: [
+        { id: "Alice", label: "Alice" },
+        { id: "Bob", label: "Bob" },
+      ],
+      dataSource: { type: "api", endpoint: "/api/employees" },
+      default: "Alice",
+    });
+  });
+
+  it.each([
+    ["input type", { inputType: "text", type: "date", default: "x" }],
+    ["options", { options: ["A", "B"], choices: ["A", "C"], default: "A" }],
+    ["option object", {
+      options: [{ id: "A", value: "B", label: "A" }, "C"],
+      default: "A",
+    }],
+    ["data source", {
+      inputType: "select",
+      dataSource: { type: "api", endpoint: "/api/a" },
+      data_source: { type: "api", endpoint: "/api/b" },
+      default: "a",
+    }],
+    ["multiple", { options: ["A", "B"], multiple: true, multi: false, default: ["A"] }],
+    ["default", { default: "A", defaultValue: "B" }],
+  ])("rejects conflicting %s aliases", (_label, fields) => {
+    expect(
+      normalizeAskUserQuestionCardRequest({ question: "Question?", ...fields }),
+    ).toBeNull();
+  });
+
   it("normalizes a recoverable remote data source without leaking input aliases", () => {
     expect(
       normalizeAskUserQuestionCardRequest({
@@ -578,6 +657,29 @@ describe("ask_user_question tool", () => {
         default: "Production",
       }),
     ).toBeNull();
+  });
+
+  it.each([
+    ["non-object request", "not an object"],
+    ["non-object questions item", { title: "Form", questions: [null] }],
+    ["empty questions", { title: "Form", questions: [] }],
+    ["missing question text", { default: "Answer" }],
+    [
+      "duplicate grouped ids",
+      {
+        title: "Form",
+        questions: [
+          { id: "same", question: "First?", default: "A" },
+          { id: "same", question: "Second?", default: "B" },
+        ],
+      },
+    ],
+    [
+      "choice without an option source",
+      { question: "Choice?", inputType: "select", default: "A" },
+    ],
+  ])("retains strict failure for %s", (_label, request) => {
+    expect(normalizeAskUserQuestionCardRequest(request)).toBeNull();
   });
 
   it("drops redundant grouped top-level semantics from the card protocol", () => {
