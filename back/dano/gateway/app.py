@@ -478,6 +478,8 @@ _ACTIVE_RECORDING_CONNECTIONS: dict[tuple[str, str, str], _RecordingConnectionLe
 
 async def _claim_recording_connection(
     key: tuple[str, str, str],
+    *,
+    cancel_previous: bool = False,
 ) -> _RecordingConnectionLease:
     """Replace and fully drain the previous handler for one recording key."""
     task = asyncio.current_task()
@@ -488,6 +490,11 @@ async def _claim_recording_connection(
     _ACTIVE_RECORDING_CONNECTIONS[key] = lease
     if previous is None or previous.task is task:
         return lease
+    if cancel_previous:
+        # A replacement websocket is the new transport owner. The previous
+        # handler can otherwise remain blocked forever in ``receive_json``
+        # after a proxy-side 1006 close, leaving the UI stuck reconnecting.
+        previous.task.cancel()
     try:
         await previous.released.wait()
     except BaseException:
@@ -727,6 +734,37 @@ class _WebSocketSendQueue:
         if not self._writer.done():
             await self._queue.put(None)
         await asyncio.gather(self._writer, return_exceptions=True)
+
+
+@asynccontextmanager
+async def _recording_operation_keepalive(
+    sender,
+    *,
+    operation: str,
+    operation_id: str,
+    interval: float = 12.0,
+):  # noqa: ANN001, ANN202
+    """Keep a long Pi operation visible to proxies without changing its result."""
+    async def emit_progress() -> None:
+        sequence = 0
+        while True:
+            sequence += 1
+            await sender.send_json({
+                "type": "operation_progress",
+                "operation": operation,
+                "operation_id": operation_id,
+                "sequence": sequence,
+            })
+            await asyncio.sleep(interval)
+
+    keepalive = asyncio.create_task(
+        emit_progress(), name=f"recording-{operation}-keepalive",
+    )
+    try:
+        yield
+    finally:
+        keepalive.cancel()
+        await asyncio.gather(keepalive, return_exceptions=True)
 
 
 @asynccontextmanager
@@ -1175,7 +1213,9 @@ async def record_ws(ws: WebSocket) -> None:
             recording_id,
         )
         connection_key = resume_key
-        connection_lease = await _claim_recording_connection(resume_key)
+        connection_lease = await _claim_recording_connection(
+            resume_key, cancel_previous=True,
+        )
         resume_state = _recording_resume_state(resume_key)
         # A reconnect replaces the transport/browser owner for this logical
         # recording.  The superseded handler may still be unwinding after a
@@ -1498,23 +1538,29 @@ async def record_ws(ws: WebSocket) -> None:
                 if pending_flow_spec is None:
                     await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
                     continue
+                analysis_screenshots: list[dict] = []
+                before_operation = pending_flow_spec.model_copy(deep=True)
                 try:
                     from dano.execution.page.flow_spec import flow_operation_report
 
                     analysis_screenshots = _normalize_analysis_screenshots(msg.get("analysis_screenshots"))
                     _checkpoint_resume()
-                    before_operation = pending_flow_spec.model_copy(deep=True)
                     pi_session = await _ensure_recording_pi()
                     pi_session.bind_flow_spec(pending_flow_spec)
                     pi_session.bind_analysis_images(_pi_analysis_images(analysis_screenshots))
-                    pi_result = await pi_session.prompt(
-                        "生成/优化当前录制能力。必须先调用 get_recording_state，完整复核所有已物化接口的能力边界；"
-                        "补入同次操作中遗漏的真实接口，补全占位或空白的能力标题、说明和业务语义，"
-                        "尊重人工删除记录，不得编造接口。最后必须调用 submit_recording_plan。"
-                        f" recording_id={recording_id}"
-                        + _recording_plan_protocol_guidance(has_screenshots=bool(analysis_screenshots))
-                        + _analysis_screenshot_guidance(analysis_screenshots)
-                    )
+                    async with _recording_operation_keepalive(
+                        sender,
+                        operation="plan",
+                        operation_id=operation_id,
+                    ):
+                        pi_result = await pi_session.prompt(
+                            "生成/优化当前录制能力。必须先调用 get_recording_state，完整复核所有已物化接口的能力边界；"
+                            "补入同次操作中遗漏的真实接口，补全占位或空白的能力标题、说明和业务语义，"
+                            "尊重人工删除记录，不得编造接口。最后必须调用 submit_recording_plan。"
+                            f" recording_id={recording_id}"
+                            + _recording_plan_protocol_guidance(has_screenshots=bool(analysis_screenshots))
+                            + _analysis_screenshot_guidance(analysis_screenshots)
+                        )
                     delivered_image_count = _verified_pi_image_count(pi_result, len(analysis_screenshots))
                     if pi_session.last_submission_kind != "plan":
                         raise RuntimeError("Pi 未提交 recording plan")
@@ -1582,7 +1628,43 @@ async def record_ws(ws: WebSocket) -> None:
                         operation_id=operation_id,
                         error=str(e),
                     )
-                    await sender.send_json({"type": "error", "detail": f"orchestrate_flow failed: {e}"})
+                    error_response = {
+                        "type": "error",
+                        "operation": "plan",
+                        "operation_id": operation_id,
+                        "detail": f"orchestrate_flow failed: {e}",
+                        "analysis_application": {
+                            "status": "rejected",
+                            "analysis_kind": "incremental",
+                            "summary": f"分析结果未应用，原配置保持不变：{e}",
+                            "screenshot_count": len(analysis_screenshots),
+                            "model_image_count": 0,
+                            "screenshot_names": [
+                                item.get("name") for item in analysis_screenshots
+                            ],
+                            "changes": {
+                                "steps": 0, "fields": 0, "capabilities": 0,
+                                "links": 0, "relations": 0, "flow": 0,
+                            },
+                            "field_changes": [],
+                            "matched_field_count": 0,
+                            "unmatched_field_count": 0,
+                            "unresolved_field_count": 0,
+                            "unresolved_relation_count": 0,
+                            "rejected_field_count": 0,
+                            "capability_count_before": len(before_operation.capabilities or []),
+                            "capability_count_after": len(before_operation.capabilities or []),
+                            "field_count_before": sum(
+                                len(step.params or []) for step in before_operation.steps
+                            ),
+                            "field_count_after": sum(
+                                len(step.params or []) for step in before_operation.steps
+                            ),
+                            "operation_id": operation_id,
+                        },
+                    }
+                    _remember_costly(msg, error_response)
+                    await sender.send_json(error_response)
             # 一键修正：同一个录制 Pi Session 读取最新校验并提交白名单修复。
             elif t == "auto_fix_flow":
                 if await _replay_costly(msg):

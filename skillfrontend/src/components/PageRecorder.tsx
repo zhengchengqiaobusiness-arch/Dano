@@ -2050,6 +2050,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         finalizeOperationRef.current = null;
         if (m.flow_spec) acceptFlowSpec(m.flow_spec);
         if (m.check_report) setCheckReport(m.check_report);
+        if (m.operation === "plan" && m.analysis_application) {
+          setLastAnalysisEvidence(m.analysis_application);
+          setLastOperationReport(null);
+        }
         if (m.operation === "flow_update") failQueuedFlowMutation(m.operation_id, !m.flow_spec);
         if (reconnectRestoreOperationRef.current && m.operation_id === reconnectRestoreOperationRef.current) {
           reconnectRestoreOperationRef.current = null;
@@ -3321,18 +3325,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             <Typography.Text style={{ fontSize: 12 }}>
               {lastAnalysisEvidence.summary || "最近一次能力分析已完成"}
             </Typography.Text>
-            {lastAnalysisEvidence.analysis_kind !== "initial" && <>
-              {lastAnalysisEvidence.field_changes?.slice(0, 6).map((change) => (
-                <Typography.Text key={`${change.step_id}:${change.path}`} style={{ fontSize: 12 }}>
-                  {analysisFieldChangeText(change)}
-                </Typography.Text>
-              ))}
-              {(lastAnalysisEvidence.field_changes?.length || 0) > 6 && (
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  另有 {(lastAnalysisEvidence.field_changes?.length || 0) - 6} 个字段发生修改
-                </Typography.Text>
-              )}
-            </>}
+            {lastAnalysisEvidence.field_changes?.slice(0, 6).map((change) => (
+              <Typography.Text key={`${change.step_id}:${change.path}`} style={{ fontSize: 12 }}>
+                {analysisFieldChangeText(change)}
+              </Typography.Text>
+            ))}
+            {(lastAnalysisEvidence.field_changes?.length || 0) > 6 && (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                另有 {(lastAnalysisEvidence.field_changes?.length || 0) - 6} 个字段发生修改
+              </Typography.Text>
+            )}
             {visibleUnmatched.map((item) => (
               <Button key={`unmatched:${item.step_id}:${item.path}`} type="link" size="small"
                 style={{ padding: 0, height: "auto", textAlign: "left" }}
@@ -3372,7 +3374,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               {!!lastAnalysisEvidence.unresolved_field_count && <Tag color="orange">待确认 {lastAnalysisEvidence.unresolved_field_count}</Tag>}
               {!!lastAnalysisEvidence.unresolved_relation_count && <Tag color="orange">待确认关系 {lastAnalysisEvidence.unresolved_relation_count}</Tag>}
               {!!lastAnalysisEvidence.rejected_field_count && <Tag color="red">已拒绝冲突 {lastAnalysisEvidence.rejected_field_count}</Tag>}
-              {!!lastAnalysisEvidence.changes?.capabilities && <Tag>能力变化 {lastAnalysisEvidence.changes.capabilities} 项</Tag>}
+              {lastAnalysisEvidence.capability_count_after !== undefined && (
+                <Tag>能力总数 {lastAnalysisEvidence.capability_count_after}</Tag>
+              )}
+              {!!lastAnalysisEvidence.changes?.capabilities && <Tag>能力内容变化 {lastAnalysisEvidence.changes.capabilities} 项</Tag>}
               {!!lastAnalysisEvidence.changes?.links && <Tag>字段关联变化 {lastAnalysisEvidence.changes.links} 项</Tag>}
               {!!lastAnalysisEvidence.changes?.relations && <Tag>能力关联变化 {lastAnalysisEvidence.changes.relations} 项</Tag>}
             </Space>
@@ -3426,11 +3431,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               : analysisRejected
               ? "分析提出的修改未通过准入"
               : analysisNeedsReview
-              ? "分析完成，仍有字段需要确认"
+              ? "分析结果未应用，仍有字段需要确认"
               : lastAnalysisEvidence?.status === "applied"
               ? "分析结果已应用"
               : lastAnalysisEvidence?.status === "no_change"
-              ? "分析完成，没有可应用变化"
+              ? "已完整核验，当前配置无需修改"
               : validationRefreshing
               ? "\u6b63\u5728\u66f4\u65b0\u53d1\u5e03\u6821\u9a8c"
               : checkReport?.passed

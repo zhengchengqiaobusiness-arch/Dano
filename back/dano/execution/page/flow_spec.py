@@ -2374,9 +2374,26 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
     segs = _request_segments(req)
 
     if method not in _WRITE_METHODS:
-        if list_items is not None and (
-            _choice_control_triggered(req)
-            or (response_ref and _list_payload_has_reference_contract(req.get("response_json")))
+        if list_items is not None and _choice_control_triggered(req):
+            count = len(list_items or [])
+            return _role_row(req, role="read_option", keep=False,
+                             reason=f"读接口返回候选列表/枚举源({count}项)，作为字段来源，不进入主流程",
+                             confidence=0.9, semantic=semantic)
+        # A submitted search remains a callable query even when a row value is
+        # reused later. Value reuse alone cannot turn a result table into a
+        # dropdown source.
+        if _request_has_business_query_evidence(req):
+            return _role_row(req, role="business_get", keep=True,
+                             reason="用户查询动作携带非分页业务条件，作为独立查询能力候选",
+                             confidence=0.94, semantic=semantic)
+        if list_items is not None and _list_payload_is_business_records(req, list_items):
+            return _role_row(req, role="business_get", keep=True,
+                             reason="列表响应包含业务记录并具有查询动作证据，作为独立查询能力候选",
+                             confidence=0.93, semantic=semantic)
+        if (
+            list_items is not None
+            and response_ref
+            and _list_payload_has_reference_contract(req.get("response_json"))
         ):
             count = len(list_items or [])
             return _role_row(req, role="read_option", keep=False,
@@ -2390,14 +2407,6 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
             return _role_row(req, role="business_get", keep=True,
                              reason="参数化读请求返回业务标量值，作为独立查询能力候选",
                              confidence=0.9, semantic=semantic)
-        if _request_has_business_query_evidence(req):
-            return _role_row(req, role="business_get", keep=True,
-                             reason="用户查询动作携带非分页业务条件，作为独立查询能力候选",
-                             confidence=0.94, semantic=semantic)
-        if list_items is not None and _list_payload_is_business_records(req, list_items):
-            return _role_row(req, role="business_get", keep=True,
-                             reason="列表响应包含日期/状态/业务记录字段，作为独立查询能力候选",
-                             confidence=0.93, semantic=semantic)
         if list_items is not None and (
             (
                 _list_payload_has_conventional_option_contract(req.get("response_json"))
@@ -3402,6 +3411,10 @@ def _upgrade_materialized_query_facts(spec: FlowSpec) -> None:
         for ref in (cap.request_refs or [])
         if ref.step_id and ref.origin in {"manual", "user"}
     }
+    fact_rows = [
+        fact.model_dump(exclude_none=True)
+        for fact in (spec.request_facts.requests or [])
+    ]
     for step in spec.steps:
         if (step.method or "GET").upper() not in {"GET", "HEAD"} or step.step_id in manually_assigned_steps:
             continue
@@ -3418,20 +3431,28 @@ def _upgrade_materialized_query_facts(spec: FlowSpec) -> None:
             "index": (step.source_meta or {}).get("request_index"),
         }
         current_path = _request_path(current)
-        candidates: list[tuple[RequestFact, RequestAnalysis | None, dict[str, Any]]] = []
-        for fact in spec.request_facts.requests or []:
-            raw = fact.model_dump(exclude_none=True)
+        candidates: list[tuple[RequestFact, RequestAnalysis | None, dict[str, Any], str]] = []
+        for fact, raw in zip(spec.request_facts.requests or [], fact_rows):
             if (fact.method or "GET").upper() != (step.method or "GET").upper():
                 continue
             if _request_path(raw) != current_path:
                 continue
             analysis = spec.request_facts.analysis.get(fact.request_id or "")
-            if analysis is not None and analysis.role not in {"business_get", "read_context"}:
-                continue
-            candidates.append((fact, analysis, raw))
+            role = str(analysis.role if analysis is not None else raw.get("role") or "")
+            if role not in {"business_get", "read_context"}:
+                # Re-evaluate recordings made before business searches were
+                # distinguished from option lists. The raw request fact stays
+                # authoritative; only its derived role is refreshed.
+                refreshed = classify_network_request(raw, trace=fact_rows)
+                if refreshed.get("role") != "business_get":
+                    continue
+                role = "business_get"
+            candidates.append((fact, analysis, raw, role))
         if not candidates:
             continue
-        fact, analysis, best = max(candidates, key=lambda item: _preread_candidate_score(item[2]))
+        fact, analysis, best, best_role = max(
+            candidates, key=lambda item: _preread_candidate_score(item[2]),
+        )
         if _business_filter_count(best) <= _business_filter_count(current):
             continue
         step.url = _request_url_with_query(best)
@@ -3454,7 +3475,7 @@ def _upgrade_materialized_query_facts(spec: FlowSpec) -> None:
             "request_id": fact.request_id,
             "request_index": fact.request_index,
             "response_status": fact.response_status,
-            "role": analysis.role if analysis else (step.source_meta or {}).get("role"),
+            "role": best_role or (step.source_meta or {}).get("role"),
             "confidence": analysis.confidence if analysis else (step.source_meta or {}).get("confidence"),
             "query_fact_upgraded": True,
         }
@@ -7570,15 +7591,18 @@ def _build_initial_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
     for step in initial.steps:
         if (step.method or "GET").upper() not in {"GET", "HEAD"}:
             continue
-        if step.step_id in option_ids:
-            continue
         role = str((step.source_meta or {}).get("role") or step.semantic_role or "")
-        if role in {"read_option", "read_context"}:
-            continue
         path = _request_path({"url": step.path or step.url}).lower()
         if not re.search(r"(?:^|/)(?:page|list|search|query|history|records?|status|statistics|detail)(?:/|$|\?)", path):
             continue
         query_score = _business_query_evidence_score(step)
+        # A populated page/search response is stronger evidence than an older
+        # coarse read_option/read_context label. Real option endpoints remain
+        # excluded by their negative score and source contract.
+        if step.step_id in option_ids and query_score < 3:
+            continue
+        if role in {"read_option", "read_context"} and query_score < 3:
+            continue
         if query_score < 2:
             continue
         page_id = _step_page_id_from_facts(initial, step)
@@ -14201,6 +14225,11 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             target_tokens = _option_binding_tokens(target_text)
             target_families = _option_binding_semantic_families(target_text)
             page_contracts = page_evidence_for(target, param, value)
+            has_recorded_select = any(
+                isinstance(evidence, dict)
+                and str(evidence.get("control_kind") or "").lower() == "select"
+                for evidence in (param.evidence or [])
+            )
             matches: list[dict[str, Any]] = []
             for source in candidates:
                 items = source["items"]
@@ -14221,6 +14250,11 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 # captured while the leave-type popup is still visible).
                 source_page_contracts = [*page_contracts, None] if page_contracts else [None]
                 for page_contract in source_page_contracts:
+                    # Same-action timing is only sufficient when the target is
+                    # a recorded select. It cannot convert textarea/input
+                    # values into enums through an accidental ID collision.
+                    if page_contract is None and not semantic_match and not has_recorded_select:
+                        continue
                     if not source_is_grounded_for_target(source, target, page_contract, semantic_match):
                         continue
                     for contract in row_contracts(items, value, page_contract):

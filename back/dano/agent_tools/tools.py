@@ -1624,7 +1624,7 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             add_membership(value)
         for value in raw_steps:
             add_membership(value)
-        for key in ("anchor_step_id", "entry_step_id", "primary_step_id"):
+        for key in ("anchor_step_id", "entry_step_id", "primary_step_id", "primary_step"):
             value = capability.get(key)
             if value not in (None, ""):
                 add_membership(value, default_usage="execute")

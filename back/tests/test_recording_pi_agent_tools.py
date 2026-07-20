@@ -1259,6 +1259,56 @@ def test_no_screenshot_plan_keeps_existing_compatibility_for_empty_semantic_list
     assert normalized["semantic_plan"]["request_roles"][0]["step_id"] == "submit"
 
 
+def test_legacy_primary_step_plan_keeps_grounded_query_and_submit_boundaries():
+    query = FlowStep(
+        step_id="query", method="GET", path="/api/applications/page?pageNo=1&pageSize=10",
+        source_meta={"role": "read_context", "control_preflight_for_write": True},
+        response_json={"data": {"list": [{"id": "one", "status": 1}], "total": 1}},
+    )
+    submit = FlowStep(
+        step_id="submit", method="POST", path="/api/applications/submit",
+        source_meta={"role": "business_write"},
+    )
+    raw_plan = {
+        "semantic_plan": {
+            "business_understanding": "Submit and query applications",
+            "request_roles": [],
+            "field_semantics": [],
+            "capabilities": [
+                {
+                    "capability_id": "submit_application",
+                    "category": "business_write",
+                    "primary_step": "submit",
+                    "precondition_steps": [],
+                    "post_steps": ["query"],
+                },
+                {
+                    "capability_id": "query_applications",
+                    "category": "business_query",
+                    "primary_step": "query",
+                },
+            ],
+            "capability_relations": [],
+            "unresolved_items": [],
+        },
+        "ops": [],
+    }
+
+    normalized = agent_tools_module._normalize_recording_plan_submission(
+        raw_plan, FlowSpec(steps=[query, submit]),
+    )
+    by_name = {
+        item["name"]: item
+        for item in normalized["semantic_plan"]["capabilities"]
+    }
+
+    assert set(by_name) == {"query_applications", "submit_application"}
+    assert by_name["query_applications"]["kind"] == "query_status"
+    assert by_name["query_applications"]["step_ids"] == ["query"]
+    assert by_name["submit_application"]["kind"] == "submit"
+    assert by_name["submit_application"]["step_ids"] == ["submit"]
+
+
 def _screenshot_match_plan(field_semantics: list[dict]) -> dict:
     return {
         "_analysis_screenshot_count": 1,

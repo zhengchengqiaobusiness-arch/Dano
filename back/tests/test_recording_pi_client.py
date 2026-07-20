@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from dano.agent_tools import materials, runs
+from dano.execution.page.flow_spec import FlowSpec, FlowStep, ParamField
 from dano.onboarding import recording_pi
 
 
@@ -468,3 +469,82 @@ def test_require_publish_review_hard_fails_missing_stale_and_rejected(monkeypatc
     assert client.require_publish_review(
         flow_version=7, flow_fingerprint="release-fingerprint",
     )["all_passed"] is True
+
+
+def test_screenshot_candidate_gate_requires_complete_ready_candidate() -> None:
+    candidate = FlowSpec(meta={
+        "capability_model": {
+            "status": "needs_review",
+            "semantic_coverage": {
+                "complete": False,
+                "missing": ["field_semantics", "field_axis_contract"],
+            },
+            "proposal_gate": {"accepted": True, "reasons": []},
+            "semantic_plan": {"unresolved_items": [{"kind": "field"}]},
+        },
+    })
+
+    reasons = recording_pi._screenshot_candidate_rejection_reasons(candidate)
+
+    assert any(reason.startswith("semantic_coverage_incomplete") for reason in reasons)
+    assert "candidate_status:needs_review" in reasons
+    assert "unresolved_items:1" in reasons
+
+    candidate.meta["capability_model"] = {
+        "status": "ready",
+        "semantic_coverage": {"complete": True, "missing": []},
+        "proposal_gate": {"accepted": True, "reasons": []},
+        "semantic_plan": {"unresolved_items": []},
+    }
+    assert recording_pi._screenshot_candidate_rejection_reasons(candidate) == []
+
+
+@pytest.mark.asyncio
+async def test_incomplete_screenshot_candidate_never_mutates_session_or_checkpoints(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from dano.execution.page import flow_spec as flow_module
+
+    before = FlowSpec(
+        title="original",
+        steps=[FlowStep(
+            step_id="submit", method="POST", path="/api/submit",
+            params=[ParamField(path="title", key="标题")],
+        )],
+        meta={"current_version": 0},
+    )
+    candidate = before.model_copy(deep=True)
+    candidate.title = "candidate-must-not-land"
+    candidate.meta = {
+        **candidate.meta,
+        "capability_model": {
+            "status": "needs_review",
+            "semantic_coverage": {"complete": False, "missing": ["field_axis_contract"]},
+            "proposal_gate": {"accepted": True, "reasons": []},
+            "semantic_plan": {"unresolved_items": []},
+        },
+    }
+
+    async def fake_apply(_current, *, submission, mode):  # noqa: ANN001, ARG001
+        return candidate.model_copy(deep=True)
+
+    monkeypatch.setattr(flow_module, "apply_recording_agent_submission", fake_apply)
+    checkpoints: list[str] = []
+    client = recording_pi.RecordingPiSession(
+        tenant="tenant-a",
+        subsystem="A-OA",
+        recording_id=RECORDING_THREE,
+        session_root=tmp_path,
+        on_submission_accepted=lambda _spec, mode: checkpoints.append(mode),
+    )
+    client.bind_flow_spec(before)
+
+    with pytest.raises(recording_pi.RecordingPiError, match="原配置保持不变"):
+        await client.apply_submission(
+            {"_analysis_screenshot_count": 1}, mode="plan", base_flow_version=0,
+        )
+
+    assert client.current_flow_spec().title == "original"
+    assert client.last_submission_kind == ""
+    assert checkpoints == []

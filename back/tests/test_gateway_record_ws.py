@@ -84,6 +84,10 @@ def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
     failure_handler = branch.index("except Exception as e:")
     assert disconnect_guard < failure_handler
     assert "raise" in branch[disconnect_guard:failure_handler]
+    assert "_remember_costly(msg, error_response)" in branch
+    assert '"operation_id": operation_id' in branch
+    assert '"status": "rejected"' in branch
+    assert "原配置保持不变" in branch
 
 
 @pytest.mark.parametrize(
@@ -585,6 +589,53 @@ def test_recording_gateway_builds_enum_evidence_once_per_finalize() -> None:
     assert source.count("recorded_page_enum_options()") == 1
     assert "recorded_page_options = sess.recorded_page_enum_options()" in source
     assert "_project_recorded_page_enum_options(" in source
+
+
+@pytest.mark.asyncio
+async def test_recording_operation_keepalive_sends_progress_until_completion() -> None:
+    class Sender:
+        def __init__(self) -> None:
+            self.messages: list[dict] = []
+
+        async def send_json(self, message: dict) -> None:
+            self.messages.append(message)
+
+    sender = Sender()
+    async with gateway._recording_operation_keepalive(
+        sender, operation="plan", operation_id="plan-1", interval=0.01,
+    ):
+        await asyncio.sleep(0.035)
+
+    sent = len(sender.messages)
+    assert sent >= 2
+    assert all(message["type"] == "operation_progress" for message in sender.messages)
+    assert all(message["operation_id"] == "plan-1" for message in sender.messages)
+    await asyncio.sleep(0.02)
+    assert len(sender.messages) == sent
+
+
+@pytest.mark.asyncio
+async def test_reconnect_cancels_and_drains_previous_transport_owner() -> None:
+    key = ("tenant", "subsystem", "recording_test")
+    ready = asyncio.Event()
+
+    async def owner() -> None:
+        lease = await gateway._claim_recording_connection(key)
+        ready.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            gateway._release_recording_connection(key, lease)
+
+    previous = asyncio.create_task(owner())
+    await ready.wait()
+
+    replacement = await asyncio.wait_for(
+        gateway._claim_recording_connection(key, cancel_previous=True), timeout=0.5,
+    )
+
+    assert previous.cancelled()
+    gateway._release_recording_connection(key, replacement)
 
 
 def test_finalize_projection_preserves_recorded_enum_fact_metadata() -> None:

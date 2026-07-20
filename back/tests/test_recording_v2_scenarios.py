@@ -61,6 +61,80 @@ def _get(index: int, path: str, response_json: dict) -> dict:
     }
 
 
+def test_search_result_referenced_by_later_write_remains_business_query() -> None:
+    query = {
+        "index": 1,
+        "request_id": "query",
+        "method": "GET",
+        "url": "https://example.test/api/applications/page?pageNo=1&pageSize=10&status=2",
+        "query": {"pageNo": "1", "pageSize": "10", "status": "2"},
+        "trigger_action_id": "search-action",
+        "trigger_transaction_id": "page|main|search-action",
+        "trigger_op": "click",
+        "trigger_locator": "text=Search",
+        "response_json": {
+            "data": {
+                "list": [{
+                    "id": "record-1", "status": 2,
+                    "createdAt": "2026-07-20 20:00:00",
+                    "description": "same recorded value",
+                }],
+                "total": 1,
+            },
+        },
+    }
+    later_write = {
+        "index": 2,
+        "method": "POST",
+        "url": "https://example.test/api/applications/submit",
+        "post_data": '{"description":"same recorded value"}',
+    }
+
+    classified = flow_spec_module.classify_network_request(
+        query, trace=[query, later_write],
+    )
+
+    assert classified["role"] == "business_get"
+    assert classified["keep"] is True
+
+
+def test_same_action_value_collision_does_not_turn_textarea_into_api_enum() -> None:
+    textarea = ParamField(
+        path="description", key="Description", value="1", default_value="1",
+        type="string", wire_type="string", required=True,
+        category="user_param", source_kind="user_input",
+        evidence=[{
+            "kind": "page_required", "source": "recorder_dom",
+            "request_path": "description",
+        }],
+    )
+    submit = FlowStep(
+        step_id="submit", method="POST", path="/api/applications/submit",
+        params=[textarea],
+        source_meta={
+            "role": "business_write", "trigger_action_id": "submit-action",
+            "trigger_transaction_id": "page|main|submit-action",
+        },
+    )
+    unrelated = FlowStep(
+        step_id="users", method="GET", path="/system/users/list",
+        response_json={"data": [{"id": 1, "name": "Administrator"}, {"id": 2, "name": "Reviewer"}]},
+        source_meta={
+            "role": "read_context", "trigger_action_id": "submit-action",
+            "trigger_transaction_id": "page|main|submit-action",
+        },
+    )
+    spec = FlowSpec(steps=[submit, unrelated])
+
+    repaired = flow_spec_module._repair_structural_option_bindings(spec)
+
+    assert repaired == 0
+    assert textarea.type == "string"
+    assert textarea.category == "user_param"
+    assert textarea.source_kind == "user_input"
+    assert submit.selects == []
+
+
 def _post(index: int, path: str, body: dict | list, response_json: dict | None = None) -> dict:
     return {
         "index": index,
