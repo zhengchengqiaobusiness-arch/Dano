@@ -924,6 +924,7 @@ describe("QuestionToolCard", () => {
     await tick();
 
     expect(target.querySelectorAll(".question-text")).toHaveLength(4);
+    expect(target.querySelectorAll(".question-group")).toHaveLength(4);
     expect(
       [...target.querySelectorAll(".question-field-icon")]
         .map(icon => icon.getAttribute("data-question-kind")),
@@ -1055,6 +1056,7 @@ describe("QuestionToolCard", () => {
         .toBe("团建行程信息");
       expect(scrollRegion?.querySelectorAll('.question-field-icon[data-question-kind="text"]'))
         .toHaveLength(2);
+      expect(scrollRegion?.querySelectorAll(".question-group")).toHaveLength(2);
       expect(scrollRegion?.querySelector('input[type="text"]')).not.toBeNull();
       expect(scrollRegion?.querySelector(".question-form-title")).toBeNull();
       expect(scrollRegion?.querySelector(".question-actions")).toBeNull();
