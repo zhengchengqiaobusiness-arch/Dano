@@ -62,6 +62,7 @@ interface AnalysisFieldChange {
 
 interface AnalysisApplication {
   status: "applied" | "no_change" | "needs_review" | "rejected";
+  analysis_kind?: "initial" | "incremental";
   summary?: string;
   screenshot_count: number;
   model_image_count?: number;
@@ -77,6 +78,8 @@ interface AnalysisApplication {
   locked_field_count?: number;
   rejected_field_count?: number;
   unresolved_field_count?: number;
+  unmatched_fields?: Array<{ step_id: string; path: string; name: string }>;
+  unresolved_items?: Array<{ step_id?: string; path?: string; name?: string; axis?: string; reason?: string }>;
   proposal_gate?: { accepted?: boolean; reasons?: string[] };
   operation_id?: string;
 }
@@ -3214,16 +3217,28 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             <Typography.Text style={{ fontSize: 12 }}>
               {lastAnalysisEvidence.summary || "最近一次能力分析已完成"}
             </Typography.Text>
-            {lastAnalysisEvidence.field_changes?.slice(0, 6).map((change) => (
-              <Typography.Text key={`${change.step_id}:${change.path}`} style={{ fontSize: 12 }}>
-                {analysisFieldChangeText(change)}
+            {lastAnalysisEvidence.analysis_kind !== "initial" && <>
+              {lastAnalysisEvidence.field_changes?.slice(0, 6).map((change) => (
+                <Typography.Text key={`${change.step_id}:${change.path}`} style={{ fontSize: 12 }}>
+                  {analysisFieldChangeText(change)}
+                </Typography.Text>
+              ))}
+              {(lastAnalysisEvidence.field_changes?.length || 0) > 6 && (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  另有 {(lastAnalysisEvidence.field_changes?.length || 0) - 6} 个字段发生修改
+                </Typography.Text>
+              )}
+            </>}
+            {lastAnalysisEvidence.unmatched_fields?.slice(0, 6).map((item) => (
+              <Typography.Text key={`unmatched:${item.step_id}:${item.path}`} type="warning" style={{ fontSize: 12 }}>
+                未匹配：{item.name || item.path}（{item.step_id} · {item.path}）
               </Typography.Text>
             ))}
-            {(lastAnalysisEvidence.field_changes?.length || 0) > 6 && (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                另有 {(lastAnalysisEvidence.field_changes?.length || 0) - 6} 个字段发生修改
+            {lastAnalysisEvidence.unresolved_items?.slice(0, 6).map((item, index) => (
+              <Typography.Text key={`unresolved:${item.step_id}:${item.path}:${item.axis}:${index}`} type="warning" style={{ fontSize: 12 }}>
+                待确认：{item.name || item.path || item.step_id || "字段"}{item.axis ? ` · ${ANALYSIS_AXIS_LABELS[item.axis] || item.axis}` : ""}{item.reason ? `（${item.reason}）` : ""}
               </Typography.Text>
-            )}
+            ))}
             <Space wrap size={4}>
               {lastAnalysisEvidence.screenshot_count > 0 && (
                 <Tag color={(lastAnalysisEvidence.model_image_count ?? 0) === lastAnalysisEvidence.screenshot_count ? "success" : "error"}>

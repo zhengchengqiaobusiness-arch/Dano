@@ -212,20 +212,22 @@ def _verified_pi_image_count(result: dict, expected: int) -> int:
     return delivered
 
 
-def _analysis_field_coverage(after) -> dict[str, int]:
+def _analysis_field_coverage(after) -> dict:
     if not hasattr(after, "meta"):
         return {
             "matched_field_count": 0, "unmatched_field_count": 0,
             "locked_field_count": 0, "rejected_field_count": 0,
             "unresolved_field_count": 0,
+            "unmatched_fields": [], "unresolved_items": [],
         }
     capability_model = dict((after.meta or {}).get("capability_model") or {})
     semantic_plan = dict(capability_model.get("semantic_plan") or {})
     actual = {
-        (step.step_id, param.path)
+        (step.step_id, param.path): param
         for step in after.steps
         for param in step.params
     }
+    actual_refs = set(actual)
     field_items = [
         item for item in (semantic_plan.get("field_semantics") or [])
         if isinstance(item, dict)
@@ -233,7 +235,7 @@ def _analysis_field_coverage(after) -> dict[str, int]:
     covered = {
         (str(item.get("step_id") or ""), str(item.get("wire_path") or item.get("path") or ""))
         for item in field_items
-    } & actual
+    } & actual_refs
     image_matched = {
         (str(item.get("step_id") or ""), str(item.get("wire_path") or item.get("path") or ""))
         for item in field_items
@@ -241,7 +243,7 @@ def _analysis_field_coverage(after) -> dict[str, int]:
             isinstance(evidence, dict) and evidence.get("source") == "screenshot"
             for evidence in (item.get("evidence") or [])
         )
-    } & actual
+    } & actual_refs
     unresolved = [
         item for item in (semantic_plan.get("unresolved_items") or [])
         if isinstance(item, dict)
@@ -251,12 +253,22 @@ def _analysis_field_coverage(after) -> dict[str, int]:
         if str(item.get("status") or "").lower() == "rejected"
         or "conflict" in str(item.get("reason") or "").lower()
     ]
+    unmatched_fields = [
+        {
+            "step_id": step_id,
+            "path": path,
+            "name": actual[(step_id, path)].label or actual[(step_id, path)].key or path,
+        }
+        for step_id, path in sorted(actual_refs - covered)
+    ]
     return {
         "matched_field_count": len(image_matched),
-        "unmatched_field_count": len(actual - covered),
+        "unmatched_field_count": len(unmatched_fields),
         "locked_field_count": sum(param.locked for step in after.steps for param in step.params),
         "rejected_field_count": len(rejected),
         "unresolved_field_count": len(unresolved),
+        "unmatched_fields": unmatched_fields,
+        "unresolved_items": unresolved,
     }
 
 
@@ -272,6 +284,8 @@ def _analysis_application_report(
     """Persistable proof that screenshot evidence reached and changed the plan."""
     proposal_gate = dict(operation_report.get("proposal_gate") or {})
     field_coverage = _analysis_field_coverage(after)
+    generation = dict((getattr(after, "meta", None) or {}).get("capability_generation") or {})
+    analysis_kind = "initial" if generation.get("last_mode") == "initial" else "incremental"
     semantic_coverage = dict(
         ((getattr(after, "meta", None) or {}).get("capability_model") or {}).get("semantic_coverage") or {}
     )
@@ -292,6 +306,7 @@ def _analysis_application_report(
     )
     return {
         "status": status,
+        "analysis_kind": analysis_kind,
         "summary": operation_report.get("summary") or "",
         "screenshot_count": len(screenshots),
         "model_image_count": delivered_image_count,
