@@ -201,6 +201,10 @@ function verifyPlanToolCompatibility() {
     "unknown plan tool params reached the backend",
   );
   const semantic = sanitized.plan.semantic_plan;
+  assert(
+    sanitized.plan._submitted_semantic_keys.includes("field_semantics"),
+    "originally submitted semantic keys were not preserved",
+  );
   assert(semantic.request_roles.length === 1, "flattened request_roles were not restored");
   assert(semantic.field_semantics[0].confidence === 0.95, "high confidence was not normalized");
   assert(semantic.capabilities.length === 3, "misplaced capability items were not merged");

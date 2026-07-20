@@ -105,7 +105,29 @@ def test_analysis_application_report_is_persistable_and_explicit(
     )
     after = SimpleNamespace(
         capabilities=[object(), object()],
-        steps=[SimpleNamespace(params=[object(), object()])],
+        steps=[SimpleNamespace(
+            step_id="submit",
+            params=[
+                SimpleNamespace(path="reason", label="原因", key="reason", locked=False),
+                SimpleNamespace(path="remark", label="备注", key="remark", locked=False),
+            ],
+        )],
+        meta={
+            "capability_model": {
+                "semantic_plan": {
+                    "field_semantics": [{
+                        "step_id": "submit", "wire_path": "reason",
+                        "evidence": [{"source": "screenshot"}],
+                    }, {
+                        "step_id": "submit", "wire_path": "remark",
+                        "evidence": [{"source": "screenshot"}],
+                    }],
+                    "unresolved_items": [],
+                },
+                "semantic_coverage": {"complete": True},
+            },
+            "capability_generation": {"last_mode": "optimize"},
+        },
     )
     report = gateway._analysis_application_report(
         before=before,

@@ -39,23 +39,15 @@ def _six_field_spec() -> FlowSpec:
     )])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="P1: screenshot prose-only submissions must be rejected before normalization",
-)
 def test_screenshot_prose_only_plan_is_rejected() -> None:
     incident = _incident()
 
-    with pytest.raises(agent_tools.ToolError, match="截图.*字段|field_semantics"):
+    with pytest.raises(agent_tools.ToolError, match="截图分析.*不能为空|field_semantics"):
         agent_tools._normalize_recording_plan_submission(
             incident["bridge_output_plan"], _six_field_spec(),
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="P1: zero screenshot matches is rejection, not a successful needs-review result",
-)
 def test_screenshot_zero_match_report_is_rejected() -> None:
     before = _six_field_spec()
     after = before.model_copy(deep=True)

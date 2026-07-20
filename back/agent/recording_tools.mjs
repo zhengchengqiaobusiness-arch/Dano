@@ -239,6 +239,9 @@ export function canonicalizeRecordingPlan(value) {
     && !Array.isArray(value.semantic_plan)
   ) ? value.semantic_plan : {};
   const semantic = { ...rawSemantic };
+  const submittedSemanticKeys = SEMANTIC_PLAN_KEYS.filter(
+    (key) => rawSemantic[key] !== undefined || value[key] !== undefined,
+  );
   for (const key of SEMANTIC_PLAN_KEYS) {
     if (semantic[key] === undefined && value[key] !== undefined) {
       semantic[key] = value[key];
@@ -265,6 +268,7 @@ export function canonicalizeRecordingPlan(value) {
   delete semantic.item;
   delete semantic.capability;
   return normalizeConfidenceDeep({
+    _submitted_semantic_keys: submittedSemanticKeys,
     semantic_plan: semantic,
     ops: Array.isArray(value.ops) ? value.ops : [],
   });

@@ -383,7 +383,13 @@ def _analysis_application_report(
     )
     status = (
         "rejected"
-        if proposal_gate.get("accepted") is False
+        if (
+            proposal_gate.get("accepted") is False
+            or (
+                bool(screenshots)
+                and field_coverage["matched_field_count"] == 0
+            )
+        )
         else "needs_review"
         if incomplete
         else ("applied" if operation_report.get("changed") else "no_change")

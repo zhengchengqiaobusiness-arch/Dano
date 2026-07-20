@@ -250,10 +250,18 @@ def test_pi_tools_read_and_apply_plan_without_changing_request_facts(monkeypatch
                 }],
                 "field_semantics": [{
                     "step_id": "submit", "wire_path": "title", "public_name": "申请标题",
-                    "business_type": "string", "source_kind": "user_input",
-                    "confidence": 0.95, "evidence": ["页面标签"],
+                    "business_type": "string", "category": "user_param",
+                    "source_kind": "user_input", "confidence": 0.95,
+                    "evidence": [{
+                        "source": "screenshot", "screenshot_name": "form.png",
+                        "visible_label": "申请标题", "control_kind": "text",
+                        "editable": True,
+                    }],
                 }],
-                "capabilities": [],
+                "capabilities": [{
+                    "name": "submit_application", "title": "提交申请",
+                    "intent": "提交申请", "kind": "submit", "step_ids": ["submit"],
+                }],
                 "capability_relations": [],
                 "unresolved_items": [],
             },
@@ -1197,3 +1205,56 @@ def test_r2_plan_normalization_does_not_fill_missing_semantic_axes_from_old_valu
     assert "public_name" not in field
     assert "business_type" not in field
     assert field["confidence"] == 0.0
+
+
+def test_screenshot_plan_requires_actual_image_evidence_after_field_matching():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/task",
+        source_meta={"role": "business_write"},
+        params=[ParamField(path="title", key="标题")],
+    )])
+    raw_plan = {
+        "_analysis_screenshot_count": 1,
+        "semantic_plan": {
+            "business_understanding": {"summary": "Submit task"},
+            "request_roles": [{
+                "step_id": "submit", "role": "business_write",
+                "name": "Submit task", "reason": "recorded request",
+            }],
+            "field_semantics": [{
+                "step_id": "submit", "wire_path": "title",
+                "public_name": "标题", "business_type": "string",
+                "category": "user_param", "source_kind": "user_input",
+                "confidence": 0.99, "evidence": [{"source": "pi_analysis"}],
+            }],
+            "capabilities": [{
+                "name": "submit_task", "title": "Submit task",
+                "intent": "Submit task", "kind": "submit", "step_ids": ["submit"],
+            }],
+            "capability_relations": [],
+            "unresolved_items": [],
+        },
+        "ops": [],
+    }
+
+    with pytest.raises(ToolError, match="图片字段证据"):
+        agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
+
+
+def test_no_screenshot_plan_keeps_existing_compatibility_for_empty_semantic_lists():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/api/task",
+        source_meta={"role": "business_write"},
+        params=[ParamField(path="title", key="标题")],
+    )])
+    raw_plan = {"semantic_plan": {
+        "business_understanding": {"summary": "Submit task"},
+        "request_roles": [], "field_semantics": [], "capabilities": [],
+        "capability_relations": [], "unresolved_items": [],
+    }, "ops": []}
+
+    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
+
+    assert normalized["semantic_plan"]["request_roles"][0]["step_id"] == "submit"

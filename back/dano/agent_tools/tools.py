@@ -1186,6 +1186,21 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
     )
 
     screenshot_count = int(raw_plan.get("_analysis_screenshot_count") or 0)
+    if screenshot_count:
+        submitted_keys = raw_plan.get("_submitted_semantic_keys")
+        if isinstance(submitted_keys, list):
+            missing_submitted = sorted(semantic_keys.difference(
+                str(key) for key in submitted_keys
+            ))
+            if missing_submitted:
+                raise ToolError(
+                    "截图分析没有实际提交完整语义字段："
+                    + ", ".join(missing_submitted)
+                )
+        for key in ("request_roles", "field_semantics", "capabilities"):
+            value = semantic.get(key)
+            if not isinstance(value, list) or not value:
+                raise ToolError(f"截图分析的 {key} 不能为空")
     grounded = spec.model_copy(deep=True)
     rebuild_flow_dependencies(grounded)
     if not screenshot_count:
@@ -1364,6 +1379,16 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                     field["enum_options"] = deepcopy(visible_options)
         fields.append(field)
     semantic["field_semantics"] = fields
+    if screenshot_count:
+        if not fields:
+            raise ToolError("截图分析未匹配到任何真实接口字段")
+        if not any(
+            str(evidence.get("source") or "").lower() == "screenshot"
+            for field in fields
+            for evidence in (field.get("evidence") or [])
+            if isinstance(evidence, dict)
+        ):
+            raise ToolError("截图分析没有提交可验证的图片字段证据")
 
     allowed_kinds = {"query_status", "validate_batch", "submit_batch", "submit"}
     allowed_usages = {"execute", "option_source", "fact_check", "preflight"}
