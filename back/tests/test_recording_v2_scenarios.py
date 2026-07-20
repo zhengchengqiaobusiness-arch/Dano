@@ -1144,6 +1144,24 @@ def test_partial_page_enum_cannot_execute_only_because_current_label_is_recorded
     assert flow_spec_module._incomplete_page_enum_is_executable(param) is False
 
 
+def test_partial_page_enum_is_executable_when_every_label_has_an_explicit_value():
+    param = ParamField(
+        path="requestType",
+        key="申请类型",
+        value="2",
+        type="enum",
+        wire_type="string",
+        category="user_param",
+        source_kind="page_enum",
+        exposed_to_user=True,
+        enum_options=["病假", "事假"],
+        enum_value_map={"病假": "2", "事假": "3"},
+        source={"mapping_complete": False},
+    )
+
+    assert flow_spec_module._incomplete_page_enum_is_executable(param) is True
+
+
 def test_semantic_coverage_requires_all_seven_field_axes_and_axis_evidence():
     spec = FlowSpec(steps=[FlowStep(
         step_id="submit",
@@ -1239,37 +1257,79 @@ def test_semantic_coverage_accepts_only_resolved_seven_axis_contracts():
 
 def test_unrelated_same_value_list_is_not_bound_as_option_source():
     """A matching recorded value is not causal evidence for an option endpoint."""
-    option_read = _get(
-        1,
-        "/api/permissions/simple-list",
-        {"data": [{"id": "1", "name": "管理员"}, {"id": "2", "name": "访客"}]},
+    source = FlowStep(
+        step_id="permissions",
+        method="GET",
+        path="/api/permissions/simple-list",
+        response_json={"data": [{"id": "1", "name": "管理员"}, {"id": "2", "name": "访客"}]},
+        source_meta={
+            "role": "read_option",
+            "trigger_transaction_id": "txn-permissions",
+            "trigger_action_id": "open-permissions",
+        },
     )
-    option_read.update({
-        "trigger_transaction_id": "txn-permissions",
-        "trigger_action_id": "open-permissions",
-    })
-    submit = _post(2, "/api/request/submit", {"requestType": "1"})
-    submit.update({
-        "trigger_transaction_id": "txn-submit-request",
-        "trigger_action_id": "submit-request",
-    })
-
-    spec = to_flow_spec(
-        [option_read, submit],
-        reads=[{"url": option_read["url"], "json": option_read["response_json"]}],
-        samples={"申请类型": "管理员"},
-        field_evidence=[{
-            "path": "requestType",
-            "key": "requestType",
-            "suggest_name": "申请类型",
-            "value": "1",
-            "control_kind": "select",
-        }],
+    target = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/request/submit",
+        params=[ParamField(
+            path="requestType",
+            key="申请类型",
+            value="1",
+            category="user_param",
+            source_kind="user_input",
+            evidence=[{"kind": "page_control", "control_kind": "select"}],
+        )],
+        source_meta={
+            "trigger_transaction_id": "txn-submit-request",
+            "trigger_action_id": "submit-request",
+        },
     )
-    param = next(p for step in spec.steps if step.method == "POST" for p in step.params)
+    spec = FlowSpec(steps=[source, target])
 
-    assert param.source_kind != "api_option"
+    repaired = flow_spec_module._repair_structural_option_bindings(spec)
+
+    assert repaired == 0
+    assert target.params[0].source_kind != "api_option"
     assert not any(binding.path == "requestType" for step in spec.steps for binding in step.selects)
+
+
+def test_same_transaction_is_causal_evidence_for_an_option_source():
+    source = FlowStep(
+        step_id="permissions",
+        method="GET",
+        path="/api/permissions/simple-list",
+        response_json={"data": [{"id": "1", "name": "管理员"}, {"id": "2", "name": "访客"}]},
+        source_meta={
+            "role": "read_option",
+            "trigger_transaction_id": "txn-request-form",
+            "trigger_action_id": "submit-request",
+        },
+    )
+    target = FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/request/submit",
+        params=[ParamField(
+            path="requestType",
+            key="申请类型",
+            value="1",
+            category="user_param",
+            source_kind="user_input",
+            evidence=[{"kind": "page_control", "control_kind": "select"}],
+        )],
+        source_meta={
+            "trigger_transaction_id": "txn-request-form",
+            "trigger_action_id": "submit-request",
+        },
+    )
+    spec = FlowSpec(steps=[source, target])
+
+    repaired = flow_spec_module._repair_structural_option_bindings(spec)
+
+    assert repaired == 1
+    assert target.params[0].source_kind == "api_option"
+    assert target.params[0].enum_value_map == {"管理员": "1", "访客": "2"}
 
 
 def test_structurally_generic_list_is_not_promoted_without_business_evidence():

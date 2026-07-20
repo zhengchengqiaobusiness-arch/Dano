@@ -1183,6 +1183,21 @@ def _enum_label_value(opt) -> tuple[str, Any] | None:
     return label, label
 
 
+def _explicit_enum_value_map(options: list[Any] | None, value_map: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep only recorded or operator-supplied label/value pairs; never invent identity pairs."""
+    explicit = dict(value_map or {})
+    for option in options or []:
+        if not (
+            (isinstance(option, dict) and "value" in option)
+            or (isinstance(option, (list, tuple)) and len(option) >= 2)
+        ):
+            continue
+        pair = _enum_label_value(option)
+        if pair is not None:
+            explicit.setdefault(pair[0], pair[1])
+    return explicit
+
+
 def _enum_options_description(kind: str, options: list[Any] | None, value_map: dict[str, Any] | None = None) -> str | None:
     if not options:
         return None
@@ -12703,9 +12718,13 @@ def _enum_map_covers_recorded_value(param: ParamField) -> bool:
         label, value = pair
         labels.append(label)
         option_values.append(value)
-    if current in labels:
-        return True
-    mapped_values = list((param.enum_value_map or {}).values()) or option_values
+    explicit = _explicit_enum_value_map(param.enum_options, param.enum_value_map)
+    if param.source_kind in {"page_enum", "manual_enum"}:
+        if not labels or not all(label in explicit and explicit[label] is not None for label in labels):
+            return False
+        mapped_values = list(explicit.values())
+    else:
+        mapped_values = list(explicit.values()) or option_values
     return any(str(v) == current for v in mapped_values if v not in (None, ""))
 
 
@@ -12724,12 +12743,10 @@ def _incomplete_page_enum_is_executable(param: ParamField) -> bool:
     ]
     if not labels:
         return False
-    current = str(param.value or "").strip()
-    if current and current in labels:
-        return True
-    explicit = dict(param.enum_value_map or {})
+    explicit = _explicit_enum_value_map(param.enum_options, param.enum_value_map)
     if not explicit or not all(label in explicit and explicit[label] is not None for label in labels):
         return False
+    current = str(param.value or "").strip()
     return not current or any(str(value) == current for value in explicit.values())
 
 
@@ -13700,6 +13717,10 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 "source_request_id": request_id,
                 "source_url": source.url or source.path,
                 "sequence": (source.source_meta or {}).get("sequence", (source.source_meta or {}).get("request_index")),
+                "page_id": (source.source_meta or {}).get("page_id"),
+                "frame_id": (source.source_meta or {}).get("frame_id"),
+                "trigger_action_id": (source.source_meta or {}).get("trigger_action_id"),
+                "trigger_transaction_id": (source.source_meta or {}).get("trigger_transaction_id"),
                 "items": [dict(item) for item in items if isinstance(item, dict)],
             })
             if request_id:
@@ -13727,6 +13748,10 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 "source_request_id": request_id,
                 "source_url": fact.url or fact.path,
                 "sequence": fact.sequence if fact.sequence is not None else fact.request_index,
+                "page_id": fact.page_id,
+                "frame_id": fact.frame_id,
+                "trigger_action_id": getattr(fact, "trigger_action_id", None),
+                "trigger_transaction_id": getattr(fact, "trigger_transaction_id", None),
                 "items": [dict(item) for item in items if isinstance(item, dict)],
             })
 
@@ -13795,6 +13820,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 "raw": raw,
                 "labels": labels,
                 "selected": str(raw.get("selected_label") or raw.get("selected") or "").strip(),
+                "semantic_match": bool(param_names & raw_names),
             }
             if param_names & raw_names:
                 semantic_matches.append(contract)
@@ -13904,6 +13930,66 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 return exact_label_contracts
         return contracts
 
+    def source_is_grounded_for_target(
+        source: dict[str, Any],
+        target: FlowStep,
+        page_contract: dict[str, Any] | None,
+        semantic_match: bool,
+    ) -> bool:
+        """Require a causal, explicit, or semantic bridge; value equality is never enough."""
+        if semantic_match:
+            return True
+        source_tx = str(source.get("trigger_transaction_id") or "")
+        source_action = str(source.get("trigger_action_id") or "")
+        target_meta = target.source_meta or {}
+        target_tx = str(target_meta.get("trigger_transaction_id") or "")
+        target_action = str(target_meta.get("trigger_action_id") or "")
+        source_page = str(source.get("page_id") or "")
+        source_frame = str(source.get("frame_id") or "")
+        target_page = str(target_meta.get("page_id") or "")
+        target_frame = str(target_meta.get("frame_id") or "")
+        same_action_context = bool(
+            source_action
+            and source_action == target_action
+            and not (source_page and target_page and source_page != target_page)
+            and not (source_frame and target_frame and source_frame != target_frame)
+        )
+        if (source_tx and source_tx == target_tx) or same_action_context:
+            return True
+        if page_contract is None:
+            return False
+        if page_contract.get("semantic_match"):
+            return True
+        raw = page_contract.get("raw") or {}
+        source_request_id = str(source.get("source_request_id") or "")
+        page_request_ids = {
+            str(item) for item in (raw.get("source_request_ids") or []) if item not in (None, "")
+        }
+        if source_request_id and source_request_id in page_request_ids:
+            return True
+        source_url = str(source.get("source_url") or "")
+        page_source_urls = {
+            str(item) for item in (
+                raw.get("source_url"),
+                *(raw.get("source_urls") or []),
+            ) if item not in (None, "")
+        }
+        if source_url and source_url in page_source_urls:
+            return True
+        page_tx = str(raw.get("trigger_transaction_id") or raw.get("transaction_id") or "")
+        page_action = str(raw.get("trigger_action_id") or raw.get("action_id") or "")
+        page_id = str(raw.get("page_id") or "")
+        frame_id = str(raw.get("frame_id") or "")
+        return bool(
+            (source_tx and source_tx == page_tx)
+            or (
+                source_action
+                and source_action == page_action
+                and not (source_page and page_id and source_page != page_id)
+                and not (source_frame and frame_id and source_frame != frame_id)
+            )
+        )
+
     repaired = 0
     for target in spec.steps:
         for param in target.params or []:
@@ -13928,16 +14014,6 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             target_text = " ".join((str(param.path or ""), str(param.key or ""), str(param.label or "")))
             target_tokens = _option_binding_tokens(target_text)
             target_families = _option_binding_semantic_families(target_text)
-            select_control = any(
-                isinstance(item, dict)
-                and item.get("kind") == "page_control"
-                and str(item.get("control_kind") or "").lower() in {
-                    "select", "combobox", "cascader", "picker", "radio",
-                }
-                and not item.get("disabled")
-                and not item.get("read_only")
-                for item in (param.evidence or [])
-            )
             page_contracts = page_evidence_for(target, param, value)
             matches: list[dict[str, Any]] = []
             for source in candidates:
@@ -13949,9 +14025,8 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 ])
                 source_tokens = _option_binding_tokens(source_text)
                 source_families = _option_binding_semantic_families(source_text)
-                compatible_without_page = bool(
-                    select_control
-                    or (target_tokens & source_tokens)
+                semantic_match = bool(
+                    (target_tokens & source_tokens)
                     or (target_families & source_families)
                 )
                 # Page evidence is a strong bridge when it describes this
@@ -13960,7 +14035,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 # captured while the leave-type popup is still visible).
                 source_page_contracts = [*page_contracts, None] if page_contracts else [None]
                 for page_contract in source_page_contracts:
-                    if page_contract is None and not compatible_without_page:
+                    if not source_is_grounded_for_target(source, target, page_contract, semantic_match):
                         continue
                     for contract in row_contracts(items, value, page_contract):
                         matches.append({**source, **contract})
