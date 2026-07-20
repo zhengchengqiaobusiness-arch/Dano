@@ -2109,11 +2109,12 @@ def _legacy_classify_network_request(req: dict) -> dict:
             "confidence": 0.7}
 
 
-def classify_network_request(req: dict) -> dict:
+def classify_network_request(req: dict, trace: list[dict] | None = None,
+                             samples: dict | None = None) -> dict:
     """Compatibility entry point backed by the canonical evidence classifier."""
     from dano.execution.page.flow_spec import classify_network_request as classify
 
-    return classify(req)
+    return classify(req, trace, samples)
 
 
 def validate_goal(goal: dict, api_request: dict) -> list[str]:

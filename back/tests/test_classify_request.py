@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dano.execution.page.recorder import RecordSession
 from dano.execution.page.request_capture import classify_network_request
+from dano.execution.page.flow_spec import classify_network_request as classify_flow_request
 
 
 # ── 1. classify_network_request 纯函数 ──
@@ -144,6 +145,33 @@ def test_classify_returns_required_keys():
     assert isinstance(cls["keep"], bool)
     assert isinstance(cls["confidence"], (int, float))
     assert 0.0 <= cls["confidence"] <= 1.0
+
+
+def test_public_classifier_forwards_trace_and_samples_to_canonical_classifier():
+    request = {
+        "method": "GET",
+        "url": "https://x/api/context",
+        "response_json": {"data": {"token": "ABC-1"}},
+    }
+    trace = [request, {
+        "method": "POST", "url": "https://x/api/submit", "post_data": '{"token":"ABC-1"}',
+    }]
+    samples = {"业务编号": "ABC-1"}
+
+    assert classify_network_request(request, trace, samples) == classify_flow_request(request, trace, samples)
+
+
+def test_generic_message_rows_are_not_business_capability_by_field_names_alone():
+    cls = classify_network_request({
+        "method": "GET",
+        "url": "https://x/api/messages",
+        "response_json": [{
+            "content": "hello", "reason": "system", "remark": "x", "progress": 1,
+        }],
+    })
+
+    assert cls["role"] != "business_get"
+    assert cls["keep"] is False
 
 
 # ── 2. all_requests 自动分类 ──

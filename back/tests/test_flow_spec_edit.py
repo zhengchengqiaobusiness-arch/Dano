@@ -6529,6 +6529,38 @@ def test_r2_automated_field_resolution_requires_exact_step_path_identity():
     assert [param.key for param in spec.steps[0].params] == ["客户编号", "id"]
 
 
+def test_r5_confirmed_relation_rejects_unknown_cardinality_and_transform_owner():
+    source = FlowCapability(
+        name="query", title="Query", kind="query_status", confirmed=True,
+        nodes=[{"id": "call", "type": "call", "step_id": "write"}],
+        output_schema={"type": "object", "properties": {"records": {"type": "array"}}},
+    )
+    target = FlowCapability(
+        name="submit", title="Submit", kind="submit", confirmed=True,
+        nodes=[{"id": "call", "type": "call", "step_id": "write"}],
+        input_schema={"type": "object", "properties": {"ids": {"type": "array"}}},
+    )
+    spec = FlowSpec(
+        flow_id="invalid-relation-contract",
+        steps=[FlowStep(step_id="write", method="POST", path="/api/write")],
+        capabilities=[source, target],
+        capability_relations=[CapabilityRelation(
+            relation_id="bad-contract",
+            from_capability="query", from_output="records",
+            to_capability="submit", to_input="ids",
+            type="external_transform", confirmed=True,
+            cardinality="nonsense", transform_owner="nobody",
+        )],
+    )
+
+    report = validate_flow_spec(spec)
+    relation_report = report["capability_validation"]["capability_relations"]
+
+    assert relation_report["relations"][0]["cardinality_valid"] is False
+    assert relation_report["relations"][0]["transform_owner_valid"] is False
+    assert any(item["code"] == "capability_relation_contract_invalid" for item in relation_report["errors"])
+
+
 def test_r2_manual_field_evidence_protects_only_its_owned_axis():
     param = ParamField(
         path="useTime",

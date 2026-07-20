@@ -1318,7 +1318,7 @@ class RecordSession:
 
         失败/异常时静默留空(下游 captured_all_requests 会兜底重试)。"""
         try:
-            from dano.execution.page.flow_spec import classify_network_request
+            from dano.execution.page.request_capture import classify_network_request
             cls = classify_network_request(entry, self.all_requests)
             entry["role"] = cls["role"]
             entry["keep"] = cls["keep"]

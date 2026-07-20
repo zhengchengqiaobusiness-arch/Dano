@@ -3156,6 +3156,26 @@ def test_r5_auto_flow_links_require_real_ordered_type_compatible_endpoints():
     assert [link.link_id for link in links] == ["valid"]
 
 
+def test_r5_value_only_link_to_opaque_runtime_field_is_rejected():
+    source = FlowStep(
+        step_id="source", method="GET", response_json={"data": {"value": "SAME"}},
+        source_meta={"sequence": 1},
+    )
+    target = FlowStep(
+        step_id="target", method="POST", source_meta={"sequence": 2},
+        params=[ParamField(path="opaque", key="opaque", value="SAME", category="runtime_var")],
+    )
+    links = [FlowLink(
+        link_id="value-only", source_step_id="source", source_path="data.value",
+        target_step_id="target", target_path="opaque", confirmed=True, confidence=0.99,
+        evidence={"kind": "value_match"},
+    )]
+
+    flow_spec_module._prune_unsafe_auto_links([source, target], links)
+
+    assert links == []
+
+
 def test_r5_field_projection_requires_selected_wire_value_not_visible_label():
     selects = [{
         "path": "projectId", "source_url": "/api/projects/options",

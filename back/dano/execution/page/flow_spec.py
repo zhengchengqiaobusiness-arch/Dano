@@ -2262,14 +2262,10 @@ def _list_payload_is_business_records(req: dict, items: list[dict] | list[Any]) 
         return True
     if _list_payload_has_reference_contract(req.get("response_json")):
         return False
-    business_fields = sum(
-        1 for key in sample
-        if re.search(
-            r"(?:date|time|status|state|reason|remark|content|amount|price|total|count|quantity|duration|progress|日期|时间|状态|原因|备注|内容|金额|数量)",
-            re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(key)).casefold(),
-        )
-    )
-    return business_fields > 0
+    # Field names describe a row's shape, not why the request happened. Generic
+    # payloads such as messages/logs commonly contain status/content/progress and
+    # must not become public business capabilities without operation evidence.
+    return False
 
 
 def _list_payload_has_conventional_option_contract(payload: Any) -> bool:
@@ -4949,10 +4945,31 @@ def _auto_link_has_grounded_contract(steps: list[FlowStep], link: FlowLink) -> b
     if source_value is _FLOW_PATH_MISSING:
         return False
     target_param = _resolve_param_reference(target, link.target_path)
-    return bool(
-        target_param is not None
-        and _recorded_scalar_values_match(source_value, target_param.value)
+    if target_param is None or not _recorded_scalar_values_match(source_value, target_param.value):
+        return False
+    evidence = link.evidence if isinstance(link.evidence, dict) else {}
+    source_action = str(evidence.get("source_action_id") or "")
+    target_action = str(evidence.get("target_action_id") or "")
+    source_transaction = str((source.source_meta or {}).get("trigger_transaction_id") or "")
+    target_transaction = str((target.source_meta or {}).get("trigger_transaction_id") or "")
+    causal = bool(
+        evidence.get("same_action_chain") is True
+        or (source_action and source_action == target_action)
+        or (source_transaction and source_transaction == target_transaction)
+        or evidence.get("kind") in {
+            "response_projection", "request_dependency", "causal_transaction", "explicit_projection",
+        }
     )
+    source_leaf = re.sub(r"[^a-z0-9]+", "", source_path.split(".")[-1].casefold())
+    target_leaf = re.sub(
+        r"[^a-z0-9]+", "", str(target_param.path or target_param.key).split(".")[-1].casefold(),
+    )
+    structural_id_projection = bool(
+        target_leaf.endswith("id")
+        and (source_leaf == "id" or source_leaf == target_leaf)
+        and not _param_has_editable_control_evidence(target_param)
+    )
+    return causal or structural_id_projection
 
 
 def _prune_unsafe_auto_links(steps: list[FlowStep], links: list[FlowLink]) -> None:
@@ -11121,6 +11138,10 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
         from_type = _capability_field_type(from_cap, relation.from_output, direction="output") if from_cap and requires_fields else ""
         to_type = _capability_field_type(to_cap, relation.to_input, direction="input") if to_cap and requires_fields else ""
         compatible = not requires_fields or _capability_types_compatible(from_type, to_type)
+        cardinality = str(relation.cardinality or "")
+        transform_owner = str(relation.transform_owner or "")
+        cardinality_valid = cardinality in {"one_to_one", "one_to_many", "many_to_one", "many_to_many"}
+        transform_owner_valid = transform_owner in {"caller", "skill", "runtime"}
         relation_entry = {
             "relation_id": relation.relation_id,
             "type": relation.type,
@@ -11134,9 +11155,33 @@ def _capability_validation_report(spec: FlowSpec) -> dict[str, Any]:
             "to_input_type": to_type,
             "type_compatible": compatible,
             "requires_field_mapping": requires_fields,
+            "cardinality": cardinality,
+            "cardinality_valid": cardinality_valid,
+            "transform_owner": transform_owner,
+            "transform_owner_valid": transform_owner_valid,
         }
         capability_relations["relations"].append(relation_entry)
-        if from_cap is None or to_cap is None:
+        if not cardinality_valid or not transform_owner_valid:
+            invalid_parts = []
+            if not cardinality_valid:
+                invalid_parts.append(f"cardinality={cardinality!r}")
+            if not transform_owner_valid:
+                invalid_parts.append(f"transform_owner={transform_owner!r}")
+            msg = f"Capability relation `{relation.relation_id}` 编排契约无效: {', '.join(invalid_parts)}"
+            issue = {
+                "code": "capability_relation_contract_invalid",
+                "message": msg,
+                "target": {"kind": "capability_relation", "relation_id": relation.relation_id},
+            }
+            if relation.confirmed:
+                capability_relations.setdefault("errors", []).append(issue)
+                errors.append(msg)
+            else:
+                _capability_warning(
+                    capability_relations, warnings,
+                    code=issue["code"], message=msg, target=issue["target"],
+                )
+        elif from_cap is None or to_cap is None:
             msg = f"Capability relation `{relation.relation_id}` 指向不存在的 from/to capability"
             if relation.confirmed:
                 capability_relations.setdefault("errors", []).append({
