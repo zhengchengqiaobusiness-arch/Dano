@@ -533,7 +533,7 @@ def test_recording_gateway_builds_enum_evidence_once_per_finalize() -> None:
 
     assert source.count("recorded_page_enum_options()") == 1
     assert "recorded_page_options = sess.recorded_page_enum_options()" in source
-    assert "for storage_key, raw_entry in (recorded_page_options or {}).items()" in source
+    assert "_project_recorded_page_enum_options(" in source
 
 
 def test_finalize_projection_preserves_recorded_enum_fact_metadata() -> None:

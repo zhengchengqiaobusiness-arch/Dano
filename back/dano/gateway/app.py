@@ -295,6 +295,55 @@ def _analysis_application_report(
     }
 
 
+def _project_recorded_page_enum_options(recorded_page_options: dict, samples: dict) -> dict:
+    """Preserve browser enum facts verbatim while building the finalize projection."""
+    projected: dict = {}
+    for storage_key, raw_entry in (recorded_page_options or {}).items():
+        opts = raw_entry.get("options") if isinstance(raw_entry, dict) else raw_entry
+        if not opts:
+            continue
+        raw = raw_entry if isinstance(raw_entry, dict) else {}
+        field_key = str(raw.get("field_key") or storage_key)
+        selected = str(raw.get("selected") or samples.get(field_key, "") or "").strip()
+        entry = {
+            "options": list(opts),
+            "field_key": field_key,
+            "field_aliases": list(raw.get("field_aliases") or []),
+            "selected": selected,
+            "selected_label": str(raw.get("selected_label") or selected),
+            "selected_value": raw.get("selected_value"),
+            "page_id": str(raw.get("page_id") or ""),
+            "frame_id": str(raw.get("frame_id") or ""),
+            "page_context": dict(raw.get("page_context") or {}),
+            "control_kind": str(raw.get("control_kind") or "select"),
+            "enum_source": str(raw.get("enum_source") or "dom"),
+            "script_url": str(raw.get("script_url") or ""),
+            "source_url": str(raw.get("source_url") or ""),
+            "dict_type": str(raw.get("dict_type") or ""),
+            "mapping_complete": bool(raw.get("mapping_complete")),
+            "mapping_conflict": bool(raw.get("mapping_conflict")),
+            "truncated": bool(raw.get("truncated") or raw.get("snapshot_truncated")),
+            "snapshot_truncated": bool(raw.get("snapshot_truncated") or raw.get("truncated")),
+            "action_id": str(raw.get("action_id") or raw.get("trigger_action_id") or ""),
+            "transaction_id": str(raw.get("transaction_id") or raw.get("trigger_transaction_id") or ""),
+            "observed_at": raw.get("observed_at"),
+        }
+        existing = projected.get(str(storage_key))
+        if isinstance(existing, dict):
+            by_label = {
+                str(option.get("label") if isinstance(option, dict) else option): option
+                for option in [*(existing.get("options") or []), *entry["options"]]
+                if str(option.get("label") if isinstance(option, dict) else option)
+            }
+            entry["options"] = list(by_label.values())
+            entry["field_aliases"] = list(dict.fromkeys([
+                *list(existing.get("field_aliases") or []), *entry["field_aliases"],
+            ]))
+            entry["selected"] = selected or str(existing.get("selected") or "")
+        projected[str(storage_key)] = entry
+    return projected
+
+
 class _RecordingConnectionLease:
     """Exclusive owner for one logical recording transport."""
 
@@ -1174,51 +1223,12 @@ async def record_ws(ws: WebSocket) -> None:
                 required_labels = sess.recorded_required_labels()
                 required_labels.update(observed_required_labels)
                 recorded_page_options = sess.recorded_page_enum_options()
-                page_enum_options: dict = {}
                 # Browser enum snapshots live outside executable steps and are
                 # the sole page enum projection used during finalize.
-                for storage_key, raw_entry in (recorded_page_options or {}).items():
-                    opts = raw_entry.get("options") if isinstance(raw_entry, dict) else raw_entry
-                    if not opts:
-                        continue
-                    field_key = str(raw_entry.get("field_key") or storage_key) if isinstance(raw_entry, dict) else str(storage_key)
-                    selected = str(
-                        (raw_entry.get("selected") if isinstance(raw_entry, dict) else "")
-                        or samples.get(field_key, "")
-                        or ""
-                    ).strip()
-                    entry = {
-                        "options": list(opts),
-                        "field_key": field_key,
-                        "field_aliases": list(
-                            raw_entry.get("field_aliases") or []
-                            if isinstance(raw_entry, dict) else []
-                        ),
-                        "selected": selected,
-                        "page_id": str(raw_entry.get("page_id") or "") if isinstance(raw_entry, dict) else "",
-                        "frame_id": str(raw_entry.get("frame_id") or "") if isinstance(raw_entry, dict) else "",
-                        "page_context": dict(raw_entry.get("page_context") or {}) if isinstance(raw_entry, dict) else {},
-                        "control_kind": str(raw_entry.get("control_kind") or "select") if isinstance(raw_entry, dict) else "select",
-                        "enum_source": str(raw_entry.get("enum_source") or "dom") if isinstance(raw_entry, dict) else "dom",
-                        "script_url": str(raw_entry.get("script_url") or "") if isinstance(raw_entry, dict) else "",
-                        "source_url": str(raw_entry.get("source_url") or "") if isinstance(raw_entry, dict) else "",
-                        "dict_type": str(raw_entry.get("dict_type") or "") if isinstance(raw_entry, dict) else "",
-                        "mapping_complete": bool(raw_entry.get("mapping_complete")) if isinstance(raw_entry, dict) else False,
-                    }
-                    existing = page_enum_options.get(str(storage_key))
-                    if isinstance(existing, dict):
-                        by_label = {
-                            str(option.get("label") if isinstance(option, dict) else option): option
-                            for option in [*(existing.get("options") or []), *entry["options"]]
-                            if str(option.get("label") if isinstance(option, dict) else option)
-                        }
-                        entry["options"] = list(by_label.values())
-                        entry["field_aliases"] = list(dict.fromkeys([
-                            *list(existing.get("field_aliases") or []),
-                            *entry["field_aliases"],
-                        ]))
-                        entry["selected"] = selected or str(existing.get("selected") or "")
-                    page_enum_options[str(storage_key)] = entry
+                page_enum_options = _project_recorded_page_enum_options(
+                    recorded_page_options,
+                    samples,
+                )
                 # Submit-time form evidence survives modal teardown and fills
                 # untouched/compound controls (for example a two-input date
                 # range) into the same sample map used for body-field matching.

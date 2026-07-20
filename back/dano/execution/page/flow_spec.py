@@ -52,6 +52,7 @@ from dano.execution.page.request_capture import (
     suggest_selects,
     suggest_workflow_steps,
     _is_idlike,
+    _multipart_contains_file,
     _pick_label_key,
 )
 
@@ -2284,7 +2285,10 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
                          confidence=0.98, semantic=semantic)
 
     ct = (req.get("content_type") or (req.get("headers") or {}).get("content-type") or "").lower()
-    if ct.startswith("multipart/") or _request_segments(req) & {"upload", "file", "files", "attachment", "attachments"}:
+    if (
+        (ct.startswith("multipart/") and _multipart_contains_file(str(req.get("post_data") or "")))
+        or _request_segments(req) & {"upload", "file", "files", "attachment", "attachments"}
+    ):
         return _role_row(req, role="unsupported_upload", keep=False,
                          reason="文件/附件上传请求已放行真发；当前 FlowSpec 暂不自动复用 multipart 文件内容",
                          confidence=0.96, semantic=semantic)
