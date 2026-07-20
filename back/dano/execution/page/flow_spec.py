@@ -4969,12 +4969,22 @@ def _auto_link_has_grounded_contract(steps: list[FlowStep], link: FlowLink) -> b
     target_leaf = re.sub(
         r"[^a-z0-9]+", "", str(target_param.path or target_param.key).split(".")[-1].casefold(),
     )
-    structural_id_projection = bool(
-        target_leaf.endswith("id")
-        and (source_leaf == "id" or source_leaf == target_leaf)
-        and not _param_has_editable_control_evidence(target_param)
+    scalar_envelope_projection = bool(
+        source_path in {"data", "result", "value"}
+        and not isinstance(source_value, (dict, list))
     )
-    return causal or structural_id_projection
+    structural_projection = bool(
+        not _param_has_editable_control_evidence(target_param)
+        and (
+            source_leaf == target_leaf
+            or (
+                target_leaf.endswith("id")
+                and source_leaf == "id"
+            )
+            or scalar_envelope_projection
+        )
+    )
+    return causal or structural_projection
 
 
 def _prune_unsafe_auto_links(steps: list[FlowStep], links: list[FlowLink]) -> None:
@@ -6582,45 +6592,6 @@ def _looks_batch_step(step: FlowStep) -> bool:
     return isinstance(body, list) and len(body) > 1
 
 
-_REPEATED_DATE_FIELD_RE = re.compile(
-    r"(?:^|[.\[_\s-])(?:date|day|reportdate|workdate|填报日期|日报日期|工作日期)(?:$|[.\]_\s-])",
-    re.I,
-)
-_REPEATED_CONTENT_FIELD_RE = re.compile(
-    r"(?:content|workcontent|reportcontent|工作内容|日报内容|日志内容)", re.I,
-)
-
-
-def _query_implies_repeated_submit(spec: FlowSpec, write_steps: list[FlowStep]) -> bool:
-    """Ground foreach intent in a query result plus one-day business fields.
-
-    This recognizes the common query-missing-days -> caller confirmation/content
-    split -> repeated single-row submit workflow without treating leave ranges or
-    approval-person arrays as batch business rows.
-    """
-    has_missing_dates = any(
-        any(
-            re.search(r"(?:missing|unfilled|未填|待填).*(?:date|day|日期|天)", path, re.I)
-            or (
-                re.search(r"(?:missing|unfilled|未填|待填)", path, re.I)
-                and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(value or ""))
-            )
-            for path, _tokens, value, _raw in _leaf_paths(step.response_json)
-        )
-        for step in spec.steps
-        if (step.method or "GET").upper() == "GET"
-    )
-    if not has_missing_dates:
-        return False
-    texts = [
-        " ".join(str(value or "") for value in (param.path, param.key, param.label, param.description))
-        for step in write_steps for param in step.params
-    ]
-    return any(_REPEATED_DATE_FIELD_RE.search(text) for text in texts) and any(
-        _REPEATED_CONTENT_FIELD_RE.search(text) for text in texts
-    )
-
-
 _ROUTING_FIELD_RE = re.compile(
     r"(?:approv|assignee|reviewer|audit|leader|manager|hr|cc|copy|审批|审核|领导|人力|抄送|经办)",
     re.I,
@@ -6677,7 +6648,6 @@ def _write_contract_is_batch(
     """Return the single reproducible submit/submit_batch decision."""
     return bool(
         any(_looks_batch_step(step) for step in write_steps)
-        or _query_implies_repeated_submit(spec, write_steps)
         or (cap is not None and _capability_has_explicit_batch_intent(cap))
     )
 
@@ -6808,15 +6778,24 @@ def _query_output_mappings(steps: list[FlowStep]) -> list[dict[str, Any]]:
         response = step.response_json
         semantic_paths: list[tuple[str, str]] = []
         if isinstance(response, dict):
-            for path, output_name in (
-                ("data.filled_dates", "filled_dates"), ("filled_dates", "filled_dates"),
-                ("data.missing_dates", "missing_dates"), ("missing_dates", "missing_dates"),
-                ("data.list", "records"), ("data.records", "records"),
-                ("data.rows", "records"), ("list", "records"), ("rows", "records"),
-                ("data.total", "total"), ("total", "total"),
-            ):
-                if _flow_path_lookup(response, path) is not _FLOW_PATH_MISSING:
-                    semantic_paths.append((path, output_name))
+            container = response
+            prefix = ""
+            for wrapper in ("data", "result"):
+                if isinstance(response.get(wrapper), dict):
+                    container = response[wrapper]
+                    prefix = f"{wrapper}."
+                    break
+            for field_name in list(container)[:20]:
+                if not prefix and str(field_name).casefold() in {"code", "message", "msg", "success"}:
+                    continue
+                output_name = re.sub(r"[^a-zA-Z0-9_]+", "_", str(field_name)).strip("_")
+                if output_name.casefold() in {"list", "rows", "records"}:
+                    output_name = "records"
+                if len(container) == 1 and output_name.casefold() in {"value", "result", "data"}:
+                    output_name = name
+                if not output_name:
+                    output_name = f"output_{len(semantic_paths) + 1}"
+                semantic_paths.append((f"{prefix}{field_name}", output_name))
         if semantic_paths:
             for path, output_name in semantic_paths:
                 mapping = {
@@ -6825,9 +6804,8 @@ def _query_output_mappings(steps: list[FlowStep]) -> list[dict[str, Any]]:
                     "step_id": step.step_id,
                     "response_path": path,
                 }
-                # A semantic capability output has one stable public name. If
-                # several query stages expose it, the later stage is the final
-                # business result instead of creating missing_dates_2/_3 noise.
+                # A response field has one stable public name. If several query
+                # stages expose it, the later stage is the final observed result.
                 previous_idx = next((
                     i for i, item in enumerate(mappings)
                     if item.get("name") == output_name
@@ -6851,6 +6829,11 @@ def _query_output_mappings(steps: list[FlowStep]) -> list[dict[str, Any]]:
 def _flow_capability_id(kind: str, seed: str = "") -> str:
     raw = re.sub(r"[^a-zA-Z0-9_]+", "_", f"{kind}_{seed}".strip("_")).strip("_").lower()
     return raw[:64] or kind
+
+
+def _stable_capability_id(name: str, kind: str, step_ids: list[str]) -> str:
+    raw = json.dumps([name, kind, list(step_ids)], ensure_ascii=False, separators=(",", ":"))
+    return f"cap_{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]}"
 
 
 def _capability_step_ids(steps: list[FlowStep]) -> list[str]:
@@ -7333,6 +7316,9 @@ def _build_complex_default_capabilities(
         sub.capability_relations = []
         for capability in build_default_flow_capabilities(sub):
             capability.name = _flow_capability_id(capability.kind, key)
+            capability.capability_id = _stable_capability_id(
+                capability.name, capability.kind, _capability_node_step_ids(capability),
+            )
             capability.evidence.append({
                 "kind": "automatic_business_partition",
                 "business_key": key,
@@ -7363,6 +7349,7 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
         )
         caps.append(FlowCapability(
             name="query_status",
+            capability_id=_stable_capability_id("query_status", "query_status", _capability_step_ids(independent_status_steps)),
             title="查询流程状态",
             intent="查询流程、审批或上下文详情，用于判断业务当前状态，并把结果返回给调用方决定下一步。",
             kind="query_status",
@@ -7391,7 +7378,6 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
         ))
 
     if write_steps:
-        inferred_repeated_submit = _query_implies_repeated_submit(spec, write_steps)
         kind = "submit_batch" if _write_contract_is_batch(spec, write_steps) else "submit"
         submit_input_schema = (
             _batch_capability_input_schema(submit_steps)
@@ -7400,11 +7386,12 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
         )
         caps.append(FlowCapability(
             name=kind,
+            capability_id=_stable_capability_id(kind, kind, _capability_step_ids(submit_steps)),
             title="批量提交业务申请" if kind == "submit_batch" else "提交业务申请",
             intent="调用方提供业务字段；Skill 按已纳入接口顺序执行前置查询、依赖注入和最终提交，并返回最后写接口结果。",
             kind=kind,
             step_ids=_capability_step_ids(submit_steps),
-            nodes=_default_capability_nodes(submit_steps, kind=kind, force_batch=inferred_repeated_submit),
+            nodes=_default_capability_nodes(submit_steps, kind=kind),
             input_schema=submit_input_schema,
             output_schema={
                 "type": "object",
@@ -7432,8 +7419,8 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
                 "kind": "write_steps",
                 "step_ids": _capability_step_ids(write_steps),
                 "paths": [s.path or s.url for s in write_steps],
-                "batch_intent": inferred_repeated_submit,
-                "repeated_submission": inferred_repeated_submit,
+                "batch_intent": kind == "submit_batch",
+                "repeated_submission": kind == "submit_batch",
             }],
             caller_responsibilities=["提供 input_schema 中的业务字段", "确认写操作后调用"],
             skill_responsibilities=["按 FlowStep 顺序执行请求", "注入 links/system_values/runtime_var", "返回每条提交的成功状态"],
@@ -7451,6 +7438,7 @@ def build_default_flow_capabilities(spec: FlowSpec) -> list[FlowCapability]:
         status_params = [p for st in status_steps for p in st.params]
         caps.append(FlowCapability(
             name="query_status",
+            capability_id=_stable_capability_id("query_status", "query_status", _capability_step_ids(status_steps)),
             title="查询流程状态",
             intent="查询流程、审批或上下文详情，用于判断业务当前状态。",
             kind="query_status",
@@ -7840,6 +7828,7 @@ def _capability_from_agent(raw: dict[str, Any], step_ids: set[str], used_names: 
     used_names.add(name)
     return FlowCapability(
         name=name,
+        capability_id=_stable_capability_id(name, kind, selected_steps),
         title=str(raw.get("title") or name),
         intent=str(raw.get("intent") or raw.get("description") or ""),
         kind=kind,
@@ -11763,23 +11752,72 @@ def flow_spec_release_payload(spec: FlowSpec) -> dict[str, Any]:
     return payload
 
 
-def _flow_fingerprint(spec: FlowSpec) -> str:
-    # Fingerprints are persisted in a JSON release snapshot and later checked
-    # after ``FlowSpec.model_validate`` reconstructs that snapshot.  Some
-    # recording values are assigned after model construction, so their Python
-    # runtime type can temporarily differ from the declared Pydantic type
-    # (for example an integer in a legacy ``str | None`` evidence field).
-    # Canonicalise through JSON + validation before hashing; otherwise the
-    # in-memory review and its semantically identical frozen draft can produce
-    # different hashes merely because validation coerced ``2`` to ``"2"``.
+_FINGERPRINT_NON_EXECUTABLE_KEYS = frozenset({
+    "title", "description", "intent", "reason", "evidence", "confidence",
+    "confidence_tier", "name_source", "display_name", "field_id", "link_id",
+    "relation_id", "capability_id", "locked", "updated_by", "confirmation_hash",
+    "need_human_confirm", "requires_human_confirm", "step_name",
+})
+
+
+def _execution_fingerprint_payload(spec: FlowSpec) -> dict[str, Any]:
+    """Project only state that can change compilation, execution or its gate."""
     canonical = FlowSpec.model_validate(flow_spec_release_payload(spec))
-    payload = canonical.model_dump(
-        mode="json",
-        # Human-facing copy can be localized or regenerated without changing
-        # the executable request/capability contract or invalidating edits.
-        exclude={"meta", "review_items", "title", "business_description"},
-        exclude_none=True,
-    )
+
+    def clean(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: clean(item) for key, item in value.items()
+                if key not in _FINGERPRINT_NON_EXECUTABLE_KEYS
+            }
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        return value
+
+    step_rows: list[dict[str, Any]] = []
+    for step in canonical.steps:
+        row = step.model_dump(mode="json", exclude_none=True)
+        for key in ("name", "response_json", "source_meta", "fact_check", "sample_inputs", "notes"):
+            row.pop(key, None)
+        for param in row.get("params") or []:
+            for key in ("label", "description", "reason", "evidence"):
+                param.pop(key, None)
+        step_rows.append(clean(row))
+
+    capability_refs = {
+        cap.capability_id: cap.name
+        for cap in canonical.capabilities
+        if cap.capability_id and cap.name
+    }
+    capabilities: list[dict[str, Any]] = []
+    for cap in canonical.capabilities:
+        row = cap.model_dump(mode="json", exclude_none=True)
+        for key in (
+            "title", "intent", "status", "evidence", "caller_responsibilities",
+            "skill_responsibilities", "confidence", "requires_human_confirm", "updated_by",
+        ):
+            row.pop(key, None)
+        capabilities.append(clean(row))
+
+    relations: list[dict[str, Any]] = []
+    for relation in canonical.capability_relations:
+        row = relation.model_dump(mode="json", exclude_none=True)
+        row["from_capability"] = capability_refs.get(row.get("from_capability"), row.get("from_capability"))
+        row["to_capability"] = capability_refs.get(row.get("to_capability"), row.get("to_capability"))
+        relations.append(clean(row))
+
+    return {
+        "schema_version": canonical.schema_version,
+        "risk_level": canonical.risk_level,
+        "steps": step_rows,
+        "links": [clean(link.model_dump(mode="json", exclude_none=True)) for link in canonical.links],
+        "capabilities": capabilities,
+        "capability_relations": relations,
+    }
+
+
+def _flow_fingerprint(spec: FlowSpec) -> str:
+    payload = _execution_fingerprint_payload(spec)
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 

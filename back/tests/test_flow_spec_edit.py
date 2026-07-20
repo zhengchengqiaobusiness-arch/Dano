@@ -242,7 +242,7 @@ def test_publish_canonicalizes_submit_alias_and_all_relations_atomically():
     assert prepared.goal["capabilities"] == ["submit"]
 
 
-def test_leave_range_is_single_submit_but_grounded_missing_day_flow_is_batch():
+def test_response_field_names_do_not_change_single_submit_cardinality():
     leave_query = FlowStep(
         step_id="leave-query", method="GET",
         url="/leave/page?startDate=2026-07-01&endDate=2026-07-11",
@@ -273,8 +273,8 @@ def test_leave_range_is_single_submit_but_grounded_missing_day_flow_is_batch():
     )
     daily_caps = build_default_flow_capabilities(FlowSpec(flow_id="daily", steps=[daily_query, daily_submit]))
     batch = next(cap for cap in daily_caps if cap.kind in {"submit", "submit_batch"})
-    assert batch.kind == "submit_batch"
-    assert batch.input_schema["properties"]["entries"]["type"] == "array"
+    assert batch.kind == "submit"
+    assert set(batch.input_schema["properties"]) >= {"日报日期", "工作内容"}
 
 
 def test_sync_upgrades_default_query_step_to_richer_captured_search_fact():

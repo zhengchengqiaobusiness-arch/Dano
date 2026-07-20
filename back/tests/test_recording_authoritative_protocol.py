@@ -130,15 +130,25 @@ def test_client_patch_requires_current_fingerprint_and_preserves_server_facts() 
     assert updated.steps[0].selects[0].source_body == spec.steps[0].selects[0].source_body
     assert updated.steps[0].identity[0].value == spec.steps[0].identity[0].value
     assert updated.meta["current_version"] == 1
-    assert flow_spec_fingerprint(updated) != fingerprint
+    assert flow_spec_fingerprint(updated) == fingerprint
+
+    execution_updated = apply_client_flow_patch(
+        updated,
+        [{
+            "op": "update", "step_id": "submit", "param_path": "reason",
+            "field": "required", "value": False,
+        }],
+        expected_fingerprint=fingerprint,
+    )
+    assert flow_spec_fingerprint(execution_updated) != fingerprint
 
     with pytest.raises(FlowSpecConflictError) as conflict:
         apply_client_flow_patch(
-            updated,
+            execution_updated,
             [{"op": "update", "step_id": "submit", "field": "name", "value": "stale"}],
             expected_fingerprint=fingerprint,
         )
-    assert conflict.value.current_fingerprint == flow_spec_fingerprint(updated)
+    assert conflict.value.current_fingerprint == flow_spec_fingerprint(execution_updated)
 
 
 @pytest.mark.parametrize("field", ["headers", "body_source", "response_json", "identity", "params", "source_meta"])

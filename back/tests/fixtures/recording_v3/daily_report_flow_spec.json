@@ -197,6 +197,8 @@
           "message": "批量写入前必须由调用方确认"
         }
       ],
+      "locked": true,
+      "updated_by": "user",
       "confirmed": true,
       "requires_human_confirm": false,
       "confidence": 0.96

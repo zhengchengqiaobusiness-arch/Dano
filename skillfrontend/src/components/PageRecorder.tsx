@@ -923,7 +923,7 @@ function isApiLikeRequest(req: RequestFactEntry) {
   const role = req.role || "";
   if (["submit_anchor", "business_write", "business_get", "read_context", "read_option"].includes(role)) return true;
   if (req.response_json != null) return true;
-  return /^\/?(?:api|admin-api|appgateway|gsgl|oa|bpm|system|workflow|process|v1|v2)\b/i.test(path);
+  return false;
 }
 function allCapturedRequests(spec?: FlowSpecData | null) {
   const facts = spec?.request_facts;

@@ -925,7 +925,7 @@ def test_query_output_mapping_uses_stable_names_for_numeric_urls():
     assert [mapping["name"] for mapping in cap.output_mapping] == ["query_1", "query_2", "query_3"]
 
 
-def test_missing_dates_query_and_single_row_submit_compile_to_foreach_batch_contract():
+def test_query_result_names_do_not_invent_batch_for_single_row_submit():
     query = FlowStep(
         step_id="query_missing", method="GET", path="/daily/page",
         source_meta={"role": "business_get", "confidence": 0.96},
@@ -942,10 +942,10 @@ def test_missing_dates_query_and_single_row_submit_compile_to_foreach_batch_cont
     )
 
     out = asyncio.run(orchestrate_flow_capabilities(FlowSpec(steps=[query, submit]), submission={"ops": []}))
-    batch = next(cap for cap in out.capabilities if cap.kind == "submit_batch")
+    submit_cap = next(cap for cap in out.capabilities if cap.kind == "submit")
 
-    assert batch.input_schema["properties"]["entries"]["type"] == "array"
-    assert any(node.get("type") == "foreach" for node in batch.nodes)
+    assert "entries" not in submit_cap.input_schema.get("properties", {})
+    assert not any(node.get("type") == "foreach" for node in submit_cap.nodes)
     assert out.capability_relations == []
 
 
@@ -1512,13 +1512,57 @@ def test_execution_fingerprint_ignores_descriptive_copy():
         flow_id="fingerprint",
         title="Original title",
         business_description="Original description",
-        steps=[FlowStep(step_id="submit", method="POST", path="/api/submit")],
+        goal={"intent": "Original goal"},
+        steps=[FlowStep(
+            step_id="submit", name="Original step", method="POST", path="/api/submit",
+            params=[ParamField(path="reason", key="reason", description="Original field")],
+        )],
+        capabilities=[FlowCapability(
+            name="submit", title="Original capability", intent="Original intent",
+            kind="submit", step_ids=["submit"], nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
+        )],
     )
     renamed = original.model_copy(deep=True)
     renamed.title = "Localized title"
     renamed.business_description = "Localized description"
+    renamed.goal["intent"] = "Localized goal"
+    renamed.steps[0].name = "Localized step"
+    renamed.steps[0].params[0].description = "Localized field"
+    renamed.capabilities[0].title = "Localized capability"
+    renamed.capabilities[0].intent = "Localized intent"
 
     assert flow_spec_module.flow_spec_fingerprint(original) == flow_spec_module.flow_spec_fingerprint(renamed)
+
+    changed = original.model_copy(deep=True)
+    changed.steps[0].params[0].required = False
+    assert flow_spec_module.flow_spec_fingerprint(original) != flow_spec_module.flow_spec_fingerprint(changed)
+
+
+def test_generated_capability_ids_are_stable_for_same_execution_membership():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/custom/commands/create",
+        source_meta={"role": "submit_anchor"},
+    )])
+
+    first = build_default_flow_capabilities(spec)
+    second = build_default_flow_capabilities(spec.model_copy(deep=True))
+
+    assert [cap.capability_id for cap in first] == [cap.capability_id for cap in second]
+    assert first[0].capability_id.startswith("cap_")
+
+
+def test_query_outputs_are_projected_from_arbitrary_response_fields():
+    step = FlowStep(
+        step_id="query", method="GET", path="/custom/search",
+        source_meta={"role": "business_get"},
+        response_json={"result": {"widgets": [{"id": 1}], "cursor": "next"}},
+    )
+
+    mappings = flow_spec_module._query_output_mappings([step])
+
+    assert [(item["name"], item["response_path"]) for item in mappings] == [
+        ("widgets", "result.widgets"), ("cursor", "result.cursor"),
+    ]
 
 
 def test_screenshot_without_positive_required_marker_cannot_downgrade_required():
@@ -1606,7 +1650,7 @@ def test_query_output_fields_use_mapped_response_schema_types():
     assert all(field.required for field in cap.outputs)
 
 
-def test_planner_batch_kind_uses_same_recorded_evidence_as_default_planner():
+def test_planner_batch_kind_requires_recorded_or_operator_batch_evidence():
     query = FlowStep(
         step_id="query_missing",
         method="GET",
@@ -1636,8 +1680,8 @@ def test_planner_batch_kind_uses_same_recorded_evidence_as_default_planner():
 
     repaired = flow_spec_module._repair_generated_capability_contracts(spec)
 
-    assert repaired.capabilities[0].kind == "submit_batch"
-    assert repaired.capabilities[0].name == "submit_batch"
+    assert repaired.capabilities[0].kind == "submit"
+    assert repaired.capabilities[0].name == "submit"
 
 
 def test_external_transform_relation_prunes_only_stale_derived_mapping():

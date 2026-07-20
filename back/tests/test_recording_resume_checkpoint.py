@@ -67,10 +67,12 @@ def test_same_version_with_different_fingerprint_is_rejected() -> None:
         "flow_spec_fingerprint": flow_spec_fingerprint(accepted),
     }
 
+    conflicting = _spec(3, title="conflicting")
+    conflicting.risk_level = "L4"
     with pytest.raises(RuntimeError, match="fingerprint conflict"):
         gateway._checkpoint_accepted_recording_pi_submission(
             state,
-            _spec(3, title="conflicting"),
+            conflicting,
             submission_kind="plan",
             connection_generation=2,
         )
