@@ -2,9 +2,10 @@
 
 This document records the current Dano model-facing contract for the
 `ask_user_question` tool. The source contract comes from Dano's
-`apps/dano/src/bridge/ask-user-question.ts`. Its TypeBox expressions are fully
-expanded below as standalone JSON Schema, so the schema does not depend on an
-unexplained imported `Type` builder.
+`apps/dano/src/bridge/ask-user-question.ts`. The schema below describes the
+recommended canonical authoring shape. Runtime admission is intentionally
+broader: the TypeBox tool schema accepts best-effort values and the bridge
+normalizes them before producing the strongly typed Card Request.
 
 It intentionally does not include the standalone extension's additions:
 `dataSource.headers`, `dataSource.cookies`, or the top-level
@@ -19,7 +20,7 @@ When the user asks to fill in a form, complete a form, or provide form fields, u
 
 Use exactly one ask_user_question call per assistant response. If you need more than one answer, provide a form title and use only the questions array: {"title":"请假申请","questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假","required":true},{"id":"start_at","question":"开始时间？","inputType":"date","dateFormat":"yyyy-MM-dd HH:mm","default":"2026-07-08 09:00","required":true},{"id":"reason","question":"原因？","default":"个人事务","fieldAssist":true,"required":true}]}. When questions is present, put every field's options, inputType, fieldAssist, dateFormat, required, dataSource, multiple, and default inside the matching questions[] item; do not include top-level confirm or top-level field configuration.
 
-For a single question, use top-level question/options/inputType/fieldAssist/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. fieldAssist controls generation and polishing actions for text fields; it defaults to false for single-line text and true for textarea. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. default is required and string defaults must be non-empty. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. When the workflow needs final confirmation for submitted grouped forms, call {"confirm":true,"formIds":["<formId>"]} with the formId values returned by those submissions. This is only for grouped-form confirmation; use a normal single-choice question to confirm an ordinary sentence or operation. If final confirmation is not needed, continue without this call.
+For a single question, use top-level question/options/inputType/fieldAssist/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. fieldAssist controls generation and polishing actions for text fields; it defaults to false for single-line text and true for textarea. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. default is required and string defaults must be non-empty. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. Dano normalizes unambiguous aliases and safe scalar deviations, ignores unknown or inapplicable optional fields, and rejects only inputs that cannot preserve rendering, submission, or answer mapping. When the workflow needs final confirmation for submitted grouped forms, call {"confirm":true,"formIds":["<formId>"]} with the formId values returned by those submissions. This is only for grouped-form confirmation; use a normal single-choice question to confirm an ordinary sentence or operation. If final confirmation is not needed, continue without this call.
 ```
 
 ## promptSnippet
@@ -38,6 +39,7 @@ Ask the user one native question card; for several fields use one questions arra
   "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
   "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
   "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
+  "Use the documented canonical parameters. Dano treats model-generated arguments as best-effort input and normalizes safe aliases or coercions, but still rejects ambiguity that could change rendering, submission, or answer mapping.",
   "Give every non-confirmation question a context-based recommended non-empty default. Do not use empty string or placeholder defaults.",
   "Set required:true only when an answer is mandatory. required defaults to false.",
   "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
@@ -48,6 +50,34 @@ Ask the user one native question card; for several fields use one questions arra
   "Use confirm:true only for submitted grouped forms. To confirm an ordinary sentence or operation, ask a normal single-choice question instead."
 ]
 ```
+
+## Compatibility and validation boundary
+
+Top-level single questions and every `questions[]` item pass through the same
+compatibility normalizer. The bridge then projects only canonical values into
+`AskUserQuestionCardRequest`; compatibility-only names and malformed optional
+values never cross the browser protocol boundary.
+
+| Input path | Classification | Runtime behavior |
+| --- | --- | --- |
+| Unknown extra parameters | Recoverable | Ignore them. |
+| `key`/`name`, `label`/`prompt`/`title`, `choices`, `input_type`/`type`/`component`, `data_source`, `multi`/`multipleSelect`, `defaultValue`/`prefill`/`value`, and Field Assist aliases | Recoverable when one canonical meaning is available | Map to the canonical field. |
+| Finite numbers or booleans used for textual question, title, id, option label, or text default values | Recoverable | Convert deterministically to strings. |
+| Boolean-like `true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off` values | Recoverable | Convert `required`, `multiple`, `confirm`, and Field Assist values; otherwise treat an unrecognized optional value as omitted. |
+| Option ids/labels and optional `dataSource` fields with safely coercible scalar types | Recoverable | Normalize them and discard unknown nested fields. |
+| `dateFormat`, options, `multiple`, `dataSource`, or Field Assist on a control that does not use them | Recoverable | Ignore the inapplicable fields. |
+| Malformed optional presentation data that does not determine the control | Recoverable | Treat it as omitted. |
+| Non-object request; malformed JSON `questions`; non-object question entries | Not recoverable | Reject because no question structure can be determined. |
+| Missing question text, empty `questions`, or a grouped form without a title | Not recoverable | Reject because the question cannot be presented correctly. |
+| Duplicate grouped field ids, duplicate option ids, or malformed options needed by an explicit/inferred choice control | Not recoverable | Reject because answer mapping would be ambiguous. Missing grouped ids receive deterministic positional ids. |
+| Choice or multiple-choice control without static options or a valid remote data source | Not recoverable | Reject because the answer semantics cannot be determined. |
+| Date control without a supported `dateFormat`, or a non-empty default that does not match it | Not recoverable | Reject because the browser value cannot be rendered and returned under the requested format. |
+| Missing, empty, or incompatible non-confirmation default | Not recoverable | Reject because Dano requires a usable recommended default. |
+| Confirmation with no eligible Submitted Form | Not recoverable | Reject because no authoritative form identity can be selected. |
+
+Submission remains strict after rendering: required answers must be present,
+choice answers must map to exactly one option (or the explicit Other path), and
+grouped answers must map by canonical field id.
 
 ## Confirmation lifecycle
 
@@ -65,7 +95,7 @@ still alive. Unsaved edits and server-process restarts are outside this contract
 
 ## schema
 
-### Parameter schema
+### Recommended parameter shape
 
 ```json
 {
