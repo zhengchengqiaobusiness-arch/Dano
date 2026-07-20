@@ -1328,3 +1328,81 @@ def test_screenshot_field_does_not_guess_between_duplicate_recorded_labels():
 
     with pytest.raises(ToolError, match="未匹配到任何真实接口字段"):
         agent_tools_module._normalize_recording_plan_submission(plan, spec)
+
+
+def test_capability_memberships_use_recorded_internal_roles_not_model_execute_labels():
+    spec = FlowSpec(steps=[
+        FlowStep(
+            step_id="options", method="GET", path="/api/seals/options",
+            source_meta={"role": "read_option"},
+        ),
+        FlowStep(
+            step_id="definition", method="GET", path="/api/process-definition",
+            source_meta={"role": "process_definition", "control_preflight_for_write": True},
+        ),
+        FlowStep(
+            step_id="submit", method="POST", path="/api/seal/submit",
+            source_meta={"role": "business_write"},
+            params=[ParamField(path="sealId", key="公章")],
+        ),
+    ])
+    raw_plan = {"semantic_plan": {
+        "business_understanding": {"summary": "Submit seal request"},
+        "request_roles": [],
+        "field_semantics": [],
+        "capabilities": [{
+            "name": "submit_seal", "title": "Submit seal request",
+            "intent": "Submit seal request", "kind": "submit",
+            "request_refs": [
+                {"step_id": "options", "usage": "execute"},
+                {"step_id": "definition", "usage": "execute"},
+                {"step_id": "submit", "usage": "preflight"},
+            ],
+        }],
+        "capability_relations": [], "unresolved_items": [],
+    }, "ops": []}
+
+    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
+    capability = normalized["semantic_plan"]["capabilities"][0]
+    usages = {item["step_id"]: item["usage"] for item in capability["request_refs"]}
+
+    assert usages == {
+        "options": "option_source",
+        "definition": "preflight",
+        "submit": "execute",
+    }
+    assert capability["step_ids"] == ["definition", "submit"]
+
+
+@pytest.mark.parametrize(
+    ("method", "requested_kind", "expected_kind"),
+    [
+        ("POST", "query_status", "submit"),
+        ("GET", "submit", "query_status"),
+    ],
+)
+def test_capability_kind_cannot_contradict_recorded_execute_method(
+    method: str,
+    requested_kind: str,
+    expected_kind: str,
+):
+    role = "business_write" if method == "POST" else "business_get"
+    path = "/api/task/submit" if method == "POST" else "/api/task/page"
+    response_json = None if method == "POST" else {"data": {"list": [], "total": 0}}
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="anchor", method=method, path=path,
+        source_meta={"role": role}, response_json=response_json,
+    )])
+    raw_plan = {"semantic_plan": {
+        "business_understanding": {"summary": "Task"},
+        "request_roles": [], "field_semantics": [],
+        "capabilities": [{
+            "name": "task", "title": "Task", "intent": "Task",
+            "kind": requested_kind, "step_ids": ["anchor"],
+        }],
+        "capability_relations": [], "unresolved_items": [],
+    }, "ops": []}
+
+    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
+
+    assert normalized["semantic_plan"]["capabilities"][0]["kind"] == expected_kind

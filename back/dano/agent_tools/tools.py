@@ -1561,9 +1561,24 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             )
             if step_id not in step_by_id:
                 return
-            usage = str(ref.get("usage") or default_usage or inferred_usage(step_id))
+            grounded_usage = inferred_usage(step_id)
+            requested_usage = str(ref.get("usage") or default_usage or grounded_usage)
+            recorded_role = str(
+                (getattr(step_by_id[step_id], "source_meta", None) or {}).get("role")
+                or getattr(step_by_id[step_id], "semantic_role", None)
+                or ""
+            )
+            # Model membership labels cannot upgrade internal requests or
+            # downgrade recorded business anchors. Grounded roles are
+            # authoritative in both directions; a model usage is considered
+            # only for legacy facts that have no recorded role at all.
+            usage = (
+                grounded_usage
+                if recorded_role or step_id in option_source_ids
+                else requested_usage
+            )
             if usage not in allowed_usages:
-                usage = inferred_usage(step_id)
+                usage = grounded_usage
             if any(
                 item["step_id"] == step_id and item["usage"] == usage
                 for item in memberships
@@ -1632,6 +1647,20 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                 if any(method not in {"GET", "HEAD", "OPTIONS"} for method in methods)
                 else "query_status"
             )
+        execute_methods = {
+            str(step_by_id[item["step_id"]].method or "GET").upper()
+            for item in memberships if item["usage"] == "execute"
+        }
+        if requested_kind == "query_status" and any(
+            method not in {"GET", "HEAD", "OPTIONS"}
+            for method in execute_methods
+        ):
+            requested_kind = "submit"
+        elif requested_kind in {"submit", "submit_batch"} and execute_methods and all(
+            method in {"GET", "HEAD", "OPTIONS"}
+            for method in execute_methods
+        ):
+            requested_kind = "query_status"
         if not raw_memberships and not raw_steps and candidates:
             same_family = (
                 {"submit", "submit_batch"}
