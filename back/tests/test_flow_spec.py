@@ -918,8 +918,8 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertNotIn("token", detail_step.get("params") or [])
         self.assertTrue(any(l["target_path"] == "query.token" for l in detail_step["links"]))
 
-    def test_list_response_not_business_get(self):
-        """返回 list 的 GET 是下拉源,不入 spec。"""
+    def test_unconsumed_list_response_stays_context_only(self):
+        """无控件因果、无下游消费的 list 不得自动成为下拉源。"""
         captured = [
             _post("https://x/dataiq/submit", {"a": 1}, resp={"code": 200}),
             {"method": "GET", "url": "https://x/api/users",
@@ -930,7 +930,7 @@ class GetBusinessStepTest(unittest.TestCase):
         self.assertNotIn("/api/users", spec.steps[0].path)
         roles = spec.meta.get("request_roles") or []
         users_role = next(r for r in roles if "/api/users" in r["path"])
-        self.assertEqual(users_role["role"], "read_option")
+        self.assertEqual(users_role["role"], "read_context")
         self.assertFalse(users_role["keep"])
         users_fact = next(f for f in spec.request_facts.requests if f.path == "/api/users")
         users_analysis = spec.request_facts.analysis[users_fact.request_id]

@@ -126,6 +126,8 @@ def r0_seal_recording_truth_spec() -> FlowSpec:
     captured[0].update({
         "trigger_action_id": "query-seal-applications",
         "trigger_transaction_id": "txn-query-seal-applications",
+        "trigger_op": "click",
+        "trigger_locator": "button[type=submit]",
     })
     for request in (captured[1], captured[2], captured[4]):
         request.update({
@@ -135,6 +137,8 @@ def r0_seal_recording_truth_spec() -> FlowSpec:
     captured[3].update({
         "trigger_action_id": "select-seal",
         "trigger_transaction_id": "txn-select-seal",
+        "trigger_op": "select",
+        "trigger_locator": "[role=combobox]",
     })
 
     def control(path: str, label: str, kind: str, value: str) -> dict:
@@ -666,7 +670,13 @@ def test_stale_capability_fields_are_removed_from_validation_and_input_schema():
 
 def test_to_flow_spec_materializes_high_confidence_business_query_and_dependency_closure():
     captured = [
-        _get(1, "/daily-report/page", {"data": {"list": [{"date": "2026-05-01"}]}}),
+        {
+            **_get(1, "/daily-report/page?window=current", {"data": {"list": [{"date": "2026-05-01"}]}}),
+            "query": {"window": "current"},
+            "trigger_op": "click",
+            "trigger_locator": "button[type=submit]",
+            "trigger_transaction_id": "txn-business-query",
+        },
         _get(2, "/process/definition/get?key=daily", {"data": {"id": "PROC-UNIQUE-001"}}),
         _post(
             3,
@@ -2888,3 +2898,82 @@ def test_r7_only_explicit_error_location_scrolls_the_page():
     locate_start = source.index("function locatePublishIssue(")
     locate_end = source.index("function publishIssueReviewId(")
     assert "scrollIntoView(" in source[locate_start:locate_end]
+
+
+@pytest.mark.parametrize(
+    ("host", "option_path", "business_path", "wrapper"),
+    [
+        ("crm.invalid", "/x/lookup", "/x/search", "payload"),
+        ("erp.invalid", "/v9/reference", "/v9/filter", "choices"),
+        ("legacy.invalid", "/service/a", "/service/b", "resultSet"),
+    ],
+)
+def test_r8_request_roles_are_invariant_to_host_path_wrapper_and_field_names(
+    host: str,
+    option_path: str,
+    business_path: str,
+    wrapper: str,
+):
+    option_rows = {wrapper: {"bucket": [
+        {"refCode": "wire-a", "displayText": "Visible A"},
+        {"refCode": "wire-b", "displayText": "Visible B"},
+    ]}}
+    option_request = {
+        "index": 1,
+        "method": "GET",
+        "url": f"https://{host}{option_path}",
+        "response_json": option_rows,
+        "trigger_op": "select",
+        "trigger_locator": "[role=combobox]",
+        "trigger_transaction_id": "txn-option",
+    }
+    unrelated_list = {
+        **option_request,
+        "index": 2,
+        "url": f"https://{host}{option_path}-unrelated",
+        "trigger_op": "",
+        "trigger_locator": "",
+        "trigger_transaction_id": "",
+    }
+    business_query = {
+        "index": 3,
+        "method": "GET",
+        "url": f"https://{host}{business_path}?q=active",
+        "query": {"q": "active"},
+        "response_json": {wrapper: {"bucket": [
+            {"recordToken": "r-1", "measure": 7, "captionText": "First"},
+        ]}},
+        "trigger_op": "click",
+        "trigger_locator": "button[type=submit]",
+        "trigger_transaction_id": "txn-query",
+    }
+
+    assert flow_spec_module.classify_network_request(option_request)["role"] == "read_option"
+    assert flow_spec_module.classify_network_request(unrelated_list)["role"] == "read_context"
+    assert flow_spec_module.classify_network_request(business_query)["role"] == "business_get"
+
+
+def test_r8_empty_business_query_uses_action_and_filter_evidence_not_endpoint_tokens():
+    request = {
+        "index": 1,
+        "method": "GET",
+        "url": "https://held-out.invalid/q7/z9?page=1",
+        "query": {"page": 1},
+        "response_json": {"opaque": {"bucket": []}},
+        "trigger_op": "click",
+        "trigger_locator": "button[type=submit]",
+        "trigger_transaction_id": "txn-held-out-query",
+    }
+
+    assert flow_spec_module.classify_network_request(request)["role"] == "business_get"
+
+
+def test_r8_recording_rules_do_not_contain_scenario_specific_identifiers():
+    source = Path(flow_spec_module.__file__).read_text(encoding="utf-8")
+
+    for forbidden in (
+        "seal_apply vs hotel_apply",
+        "seal chooser",
+        "oa|bpm|system|workflow|process",
+    ):
+        assert forbidden not in source

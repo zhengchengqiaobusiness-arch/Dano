@@ -25,6 +25,9 @@ def _get(index: int, url: str, response_json: dict) -> dict:
         "headers": {},
         "response_status": 200,
         "response_json": response_json,
+        "trigger_op": "click",
+        "trigger_locator": "button[type=submit]",
+        "trigger_transaction_id": f"txn-query-{index}",
     }
 
 

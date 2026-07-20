@@ -695,25 +695,10 @@ def _list_payload_has_reference_contract(payload: Any) -> bool:
     return False
 
 
-def _read_is_option_source(read: dict) -> bool:
-    role = str(read.get("role") or read.get("request_role") or "")
-    url = str(read.get("url") or read.get("path") or "")
-    path = _request_path({"url": url}).lower()
-    is_known_option_path = _is_option_source_url(url) or any(
-        seg in path for seg in ("/user/", "/dept/", "/department/", "/role/", "/post/", "/employee/", "/person/")
-    )
-    if path.endswith("/page") or "/page?" in str(url).lower():
-        if not is_known_option_path:
-            return False
-    payload = read.get("json", read.get("response_json"))
-    has_list_payload = bool(as_list_payload(payload))
-    if role == "explicit_read_option":
-        return has_list_payload
-    if role == "read_option":
-        return has_list_payload
-    trigger_op = str(read.get("trigger_op") or "").lower()
-    trigger_locator = str(read.get("trigger_locator") or "").lower()
-    control_triggered = (
+def _choice_control_triggered(request: dict) -> bool:
+    trigger_op = str(request.get("trigger_op") or "").lower()
+    trigger_locator = str(request.get("trigger_locator") or "").lower()
+    return (
         trigger_op in {"select", "pick"}
         or (
             trigger_op == "click"
@@ -722,33 +707,39 @@ def _read_is_option_source(read: dict) -> bool:
             ))
         )
     )
-    if has_list_payload and control_triggered:
+
+
+def _read_is_option_source(read: dict) -> bool:
+    role = str(read.get("role") or read.get("request_role") or "")
+    payload = read.get("json", read.get("response_json"))
+    has_list_payload = bool(as_list_payload(payload))
+    if role == "explicit_read_option":
+        return has_list_payload
+    if role == "read_option":
+        return has_list_payload
+    if has_list_payload and _choice_control_triggered(read):
         # Endpoint naming is not portable. A list response causally triggered by
         # opening/selecting a choice control is grounded option-source evidence.
         return True
-    if has_list_payload and is_known_option_path and _list_payload_has_reference_contract(payload):
-        # Saved recordings may carry the old business_get role for directory
-        # pages such as IAM users because their rows contain audit columns.
-        # An explicit reference-entity path plus ID/display contract is stronger
-        # option-source evidence and remains safe for structural field matching.
+    if not role and has_list_payload and _list_payload_has_reference_contract(payload):
+        # Explicit read snapshots may predate causal metadata. They are only
+        # candidates here; field binding still requires an exact selected wire
+        # value plus control/semantic ownership and rejects collisions.
         return True
-    # A strong candidate endpoint remains an option source even when an older
-    # coarse role classifier called it business_get because rows also had
-    # audit fields such as status/remark/createTime. Strict field binding still
-    # requires structural and value evidence before the source owns a field.
-    if has_list_payload and _is_option_source_url(url):
-        return True
-    if role in {"business_get", "read_context"}:
-        # 业务记录列表不是字段枚举。角色分类是事实库结论，不能再因“响应是数组”
-        # 二次降格成选项源，否则日报日期/审批记录会被错误绑定到提交字段。
-        return False
-    if not _is_option_source_url(url):
-        return False
-    return has_list_payload
+    return False
 
 
 def _option_candidate_reads(reads: list[dict] | None) -> list[dict]:
-    return [r for r in (reads or []) if isinstance(r, dict) and _read_is_option_source(r)]
+    return [
+        read for read in (reads or [])
+        if isinstance(read, dict)
+        and (
+            _read_is_option_source(read)
+            or _list_payload_has_reference_contract(
+                read.get("json", read.get("response_json")),
+            )
+        )
+    ]
 
 
 def _select_source_kind(sel: SelectBinding | None) -> str:
@@ -1419,7 +1410,7 @@ def _build_step_from_capture(
         # Query parameters on an option-source request configure that source;
         # they are not themselves options selected from its own response.  In
         # particular ``simple-list?status=0`` must remain an internal filter,
-        # not become the seal chooser nor inherit an unrelated page enum.
+        # must not become the chooser nor inherit an unrelated page enum.
         selects_raw = (
             [] if query_is_option_source
             else _detect_query_selects(req, grounded_samples, option_reads, page_enum_options, field_evidence)
@@ -2022,7 +2013,57 @@ def _detect_query_selects(req: dict, samples: dict | None,
     api_selects = suggest_selects(
         api_pd, reads or [], samples, skip_paths=[], fields=api_fields,
     ) if api_fields else []
-    selects_raw = [*page_selects, *api_selects]
+    # Explicit legacy ``reads`` may not carry DOM control metadata. Preserve
+    # them only when the query leaf is an exact source token and its recorded
+    # wire value resolves to one unambiguous ID/display row. The existing
+    # selector then enforces a complete mapping and rejects competing sources.
+    legacy_selects: list[dict] = []
+    for field in api_fields:
+        leaf = str(field.get("path") or "").split(".")[-1]
+        wire_value = field.get("value")
+        if not leaf or wire_value in (None, ""):
+            continue
+        inferred: list[dict] = []
+        for read in reads or []:
+            if str(read.get("role") or "") != "explicit_read_option":
+                continue
+            if leaf.casefold() not in _option_binding_tokens(read.get("url") or read.get("path") or ""):
+                continue
+            items = as_list_payload(read.get("json", read.get("response_json"))) or []
+            matched_labels = {
+                str(item.get(label_key) or "").strip()
+                for item in items if isinstance(item, dict)
+                for value_key, value in item.items()
+                if _is_idlike(str(value_key)) and str(value) == str(wire_value)
+                for label_key in [_pick_label_key(item, str(value_key))]
+                if label_key != value_key and str(item.get(label_key) or "").strip()
+            }
+            if len(matched_labels) != 1:
+                continue
+            grounded_field = {
+                **field,
+                "control_kind": "select",
+                "field_aliases": [leaf],
+            }
+            inferred.extend(suggest_selects(
+                json.dumps({leaf: wire_value}, ensure_ascii=False),
+                [read],
+                {leaf: next(iter(matched_labels))},
+                skip_paths=[],
+                fields=[grounded_field],
+            ))
+        fingerprints = {
+            (
+                str(item.get("source_url") or ""),
+                str(item.get("value_key") or ""),
+                str(item.get("label_key") or ""),
+                json.dumps(item.get("option_map") or {}, sort_keys=True, default=str),
+            )
+            for item in inferred
+        }
+        if len(fingerprints) == 1:
+            legacy_selects.append(inferred[0])
+    selects_raw = [*page_selects, *api_selects, *legacy_selects]
 
     # 重写 path 为 query.<key>,保持与 _params_from_get_query 的输出对齐
     for s in selects_raw or []:
@@ -2196,27 +2237,33 @@ def _role_row(req: dict, *, role: str, keep: bool, reason: str, confidence: floa
 
 def _list_payload_is_business_records(req: dict, items: list[dict] | list[Any]) -> bool:
     sample = next((item for item in items[:5] if isinstance(item, dict)), None)
-    keys = {
-        re.sub(r"[^a-z0-9]+", "", str(key).lower())
-        for key in (sample or {}).keys()
-    }
-    strong_business_keys = {
-        "date", "day", "startdate", "enddate", "applydate", "reportdate",
-        "content", "workcontent", "reason", "remark", "description", "hours",
-        "approvestatus", "approvalstatus", "projectid", "projectname", "filled", "missing",
-    }
-    segs = _request_segments(req)
-    business_segments = {
-        "report", "daily", "workhour", "worktime", "apply", "approval", "leave",
-        "reimburse", "expense", "order", "record", "detail", "history", "task",
-    }
-    option_segments = {
-        "dict", "dictionary", "option", "options", "select", "candidate", "candidates",
-        "tree", "simple", "simplelist", "user", "users", "dept", "department", "role", "roles", "employee",
-    }
-    if keys & strong_business_keys:
+    if not sample or _choice_control_triggered(req):
+        return False
+    if _request_has_business_query_evidence(req):
         return True
-    return bool(segs & business_segments) and not bool(segs & option_segments)
+    if _list_payload_has_reference_contract(req.get("response_json")) and len(sample) <= 3:
+        return False
+    return len(sample) >= 4 or any(isinstance(value, (dict, list)) for value in sample.values())
+
+
+def _request_has_business_query_evidence(req: dict) -> bool:
+    business_filters = _business_filter_count(req)
+    trigger_op = str(req.get("trigger_op") or "").lower()
+    trigger_locator = str(req.get("trigger_locator") or "").lower()
+    submitted_query = trigger_op == "submit" or (
+        trigger_op == "click" and "submit" in trigger_locator
+    )
+    return bool(
+        not _choice_control_triggered(req)
+        and (
+            business_filters >= 2
+            or (
+                _request_transaction_id(req)
+                and (business_filters > 0 or submitted_query)
+                and trigger_op in {"click", "submit"}
+            )
+        )
+    )
 
 
 def classify_network_request(req: dict, trace: list[dict] | None = None,
@@ -2257,11 +2304,10 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
     segs = _request_segments(req)
 
     if method not in _WRITE_METHODS:
-        if list_items is not None and _list_payload_is_business_records(req, list_items):
-            return _role_row(req, role="business_get", keep=True,
-                             reason="列表响应包含日期/状态/业务记录字段，作为独立查询能力候选",
-                             confidence=0.93, semantic=semantic)
-        if list_items is not None or segs & _OPTION_SEGS:
+        if list_items is not None and (
+            _choice_control_triggered(req)
+            or (response_ref and _list_payload_has_reference_contract(req.get("response_json")))
+        ):
             count = len(list_items or [])
             return _role_row(req, role="read_option", keep=False,
                              reason=f"读接口返回候选列表/枚举源({count}项)，作为字段来源，不进入主流程",
@@ -2270,14 +2316,14 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
             return _role_row(req, role="business_get", keep=True,
                              reason="GET 响应值被后续业务请求引用，作为前置步骤保留",
                              confidence=0.96, semantic=semantic, evidence=response_ref)
-        if (
-            segs & {"page", "list", "search", "query", "records", "history", "detail"}
-            and segs & {"report", "daily", "workhour", "worktime", "apply", "approval", "leave", "reimburse", "expense", "order", "record", "task"}
-            and not segs & _OPTION_SEGS
-        ):
+        if _request_has_business_query_evidence(req):
             return _role_row(req, role="business_get", keep=True,
-                             reason="业务分页/搜索接口即使当前结果为空，也保留为独立查询能力",
-                             confidence=0.9, semantic=semantic)
+                             reason="用户查询动作携带非分页业务条件，作为独立查询能力候选",
+                             confidence=0.94, semantic=semantic)
+        if list_items is not None and _list_payload_is_business_records(req, list_items):
+            return _role_row(req, role="business_get", keep=True,
+                             reason="列表响应包含日期/状态/业务记录字段，作为独立查询能力候选",
+                             confidence=0.93, semantic=semantic)
         return _role_row(req, role="read_context", keep=False,
                          reason="普通读接口，未发现后续业务请求依赖，默认不进入主流程",
                          confidence=0.68, semantic=semantic)
@@ -2296,7 +2342,7 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
             return _role_row(req, role="business_get", keep=True,
                              reason="POST 查询返回业务记录列表，作为独立查询能力候选",
                              confidence=0.93, semantic=semantic)
-        if list_items is not None or segs & _OPTION_SEGS:
+        if list_items is not None and _choice_control_triggered(req):
             count = len(list_items or [])
             return _role_row(req, role="read_option", keep=False,
                              reason=f"POST 查询返回候选列表/枚举源({count}项)，作为字段来源，不进入主流程",
@@ -2377,9 +2423,8 @@ def _request_has_command_anchor(request: dict) -> bool:
 
 
 def _preread_dedupe_key(req: dict) -> tuple[str, str, tuple[str, ...]]:
-    # Same endpoint may be a shared workflow-definition service. Distinct
-    # process keys are different facts and must never collapse into the latest
-    # request (for example seal_apply vs hotel_apply).
+    # Same endpoint may serve several workflows. Distinct routing values are
+    # different facts and must never collapse into the latest request.
     context = tuple(sorted(_workflow_context_values_for_request(req)))
     return ((req.get("method") or "GET").upper(), _request_path(req), context)
 
@@ -2534,7 +2579,17 @@ def _is_api_like_request_fact(entry: dict[str, Any], role: dict[str, Any] | None
         return True
     if entry.get("response_json") is not None:
         return True
-    return bool(re.search(r"^/?(?:api|admin-api|appgateway|gsgl|oa|bpm|system|workflow|process|v1|v2)\b", path))
+    method = str(entry.get("method") or "").upper()
+    content_type = str(entry.get("content_type") or "").lower()
+    return bool(
+        method in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+        and (
+            entry.get("response_status") is not None
+            or entry.get("query_paths")
+            or entry.get("body_paths")
+            or any(token in content_type for token in ("json", "form", "multipart"))
+        )
+    )
 
 
 def _option_sources_from_page_enum_options(
@@ -13508,7 +13563,10 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             (source.method or "GET").upper() in {"GET", "HEAD"}
             and items
             and all(isinstance(item, dict) for item in items)
-            and _read_is_option_source(read)
+            and (
+                _read_is_option_source(read)
+                or _list_payload_has_reference_contract(source.response_json)
+            )
         ):
             candidates.append({
                 "source_step_id": source.step_id,
@@ -13532,7 +13590,10 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             (fact.method or "GET").upper() in {"GET", "HEAD"}
             and items
             and all(isinstance(item, dict) for item in items)
-            and _read_is_option_source(read)
+            and (
+                _read_is_option_source(read)
+                or _list_payload_has_reference_contract(fact.response_json)
+            )
         ):
             candidates.append({
                 "source_step_id": "",
@@ -16549,6 +16610,7 @@ async def auto_fix_flow_spec(
     for round_idx in range(max_rounds):
         report = validate_flow_spec(current)
         edits: list[dict[str, Any]] = []
+        preflight_rejected_edits: list[dict[str, Any]] = []
         if not current.capabilities and current.steps:
             edits.append({"op": "generate_capabilities"})
         cap_report = report.get("capability_validation") or {}
@@ -16571,11 +16633,30 @@ async def auto_fix_flow_spec(
                 "request_index": item.get("request_index"),
             })
         if round_idx == 0 and repair_ops:
-            agent_edits = _autofix_ops_to_edits(
-                current,
-                repair_ops,
-                allow_scope_changes=bool(allow_scope_changes),
-            )
+            agent_edits: list[dict[str, Any]] = []
+            for repair_op in repair_ops:
+                translated = _autofix_ops_to_edits(
+                    current,
+                    [repair_op],
+                    allow_scope_changes=bool(allow_scope_changes),
+                )
+                if translated:
+                    agent_edits.extend(translated)
+                    continue
+                kind = str(repair_op.get("op") or "")
+                step_id = str(repair_op.get("step_id") or repair_op.get("target_step") or "")
+                path = str(repair_op.get("path") or repair_op.get("target_path") or "")
+                error = (
+                    f"param not found or unavailable: {step_id}:{path}"
+                    if kind == "rename_field"
+                    else "repair operation is not applicable to the current flow"
+                )
+                preflight_rejected_edits.append({
+                    "op": kind,
+                    "step_id": step_id,
+                    "path": path,
+                    "error": error,
+                })
             if not allow_scope_changes:
                 agent_edits = _planner_patch_edits(current, agent_edits)
             edits.extend(agent_edits)
@@ -16583,13 +16664,14 @@ async def auto_fix_flow_spec(
             history.append({
                 "round": round_idx,
                 "applied": 0,
+                **({"rejected_edits": preflight_rejected_edits[:50]} if preflight_rejected_edits else {}),
                 "remaining_errors": len(report.get("errors") or []),
             })
             break
         before = _flow_fingerprint(current)
         candidate = current.model_copy(deep=True)
         applied_edits: list[dict[str, Any]] = []
-        rejected_edits: list[dict[str, Any]] = []
+        rejected_edits: list[dict[str, Any]] = list(preflight_rejected_edits)
         # Pi 可能给出一个已经被前序编辑删除/改名的字段。单条坏 patch 不应让
         # 整个“自动修复”请求失败；按顺序应用，保留成功项并把拒绝原因回显。
         for edit in edits:
