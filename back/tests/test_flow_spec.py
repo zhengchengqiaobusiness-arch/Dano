@@ -407,8 +407,9 @@ class ToFlowSpecTest(unittest.TestCase):
         }])
         broken_report = validate_flow_spec(broken)
         self.assertTrue(broken_report["passed"])
-        self.assertTrue(any(i["type"] == "link_source_missing" for i in broken_report["review_items"]))
-        self.assertTrue(any("来源路径" in e and "data.missing" in e for e in broken_report["suggestions"]))
+        self.assertEqual(broken.links, [])
+        self.assertFalse(any(i["type"] == "link_source_missing" for i in broken_report["review_items"]))
+        self.assertFalse(any("data.missing" in e for e in broken_report["suggestions"]))
         self.assertEqual(broken_report["errors"], [])
 
         confirmed = apply_flow_edits(spec, [{

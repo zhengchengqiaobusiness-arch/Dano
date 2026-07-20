@@ -2612,5 +2612,132 @@ def test_complete_reanalysis_replaces_auto_relations_and_keeps_confirmed_relatio
         for rel in out.capability_relations
     }
     assert ("query_orders", "wrong", "archive_orders", "orderIds") not in signatures
-    assert ("query_orders", "records", "archive_orders", "orderIds") in signatures
+    assert ("query_orders", "records", "archive_orders", "orderIds") not in signatures
     assert ("query_orders", "records", "archive_orders", "manualIds") in signatures
+    assert submission["semantic_plan"]["unresolved_items"] == [{
+        "kind": "capability_relation",
+        "from_capability": "query_orders",
+        "from_output": "records",
+        "to_capability": "archive_orders",
+        "to_input": "orderIds",
+        "reason": "relation endpoints are missing or type-incompatible",
+    }]
+
+
+def test_r5_auto_flow_links_require_real_ordered_type_compatible_endpoints():
+    source = FlowStep(
+        step_id="source", method="GET", path="/api/source",
+        response_json={"data": {"id": "ENTITY-1", "count": 1}},
+        source_meta={"sequence": 1},
+    )
+    target = FlowStep(
+        step_id="target", method="POST", path="/api/target",
+        params=[
+            ParamField(path="entityId", key="entityId", value="ENTITY-1", category="runtime_var"),
+            ParamField(path="count", key="count", value="1", wire_type="string", category="runtime_var"),
+        ],
+        source_meta={"sequence": 2},
+    )
+    late_source = FlowStep(
+        step_id="late", method="GET", path="/api/late",
+        response_json={"data": {"id": "ENTITY-1"}},
+        source_meta={"sequence": 3},
+    )
+    links = [
+        FlowLink(
+            link_id="valid", source_step_id="source", source_path="data.id",
+            target_step_id="target", target_path="entityId", confirmed=True, confidence=0.98,
+            evidence={"kind": "value_match"},
+        ),
+        FlowLink(
+            link_id="missing-source", source_step_id="source", source_path="data.missing",
+            target_step_id="target", target_path="entityId", confirmed=True, confidence=0.98,
+            evidence={"kind": "value_match"},
+        ),
+        FlowLink(
+            link_id="reverse-time", source_step_id="late", source_path="data.id",
+            target_step_id="target", target_path="entityId", confirmed=True, confidence=0.98,
+            evidence={"kind": "value_match"},
+        ),
+        FlowLink(
+            link_id="type-collision", source_step_id="source", source_path="data.count",
+            target_step_id="target", target_path="count", confirmed=True, confidence=0.98,
+            evidence={"kind": "value_match"},
+        ),
+    ]
+
+    flow_spec_module._prune_unsafe_auto_links([source, target, late_source], links)
+
+    assert [link.link_id for link in links] == ["valid"]
+
+
+def test_r5_field_projection_requires_selected_wire_value_not_visible_label():
+    selects = [{
+        "path": "projectId", "source_url": "/api/projects/options",
+        "value_key": "code", "label_key": "title",
+    }]
+    fields = [
+        {"path": "projectId", "value": "Project B"},
+        {"path": "team", "value": "Team B"},
+    ]
+    reads = [{
+        "url": "/api/projects/options",
+        "json": {"items": [{"code": "P-2", "title": "Project B", "team": "Team B"}]},
+    }]
+
+    flow_spec_module._attach_select_field_projections(selects, fields, reads)
+
+    assert "field_projections" not in selects[0]
+
+
+def test_r5_field_projection_requires_exact_typed_submitted_value():
+    selects = [{
+        "path": "projectId", "source_url": "/api/projects/options",
+        "value_key": "code", "label_key": "title",
+    }]
+    fields = [
+        {"path": "projectId", "value": "P-2"},
+        {"path": "quota", "value": "7"},
+    ]
+    reads = [{
+        "url": "/api/projects/options",
+        "json": {"items": [{"code": "P-2", "title": "Project B", "quota": 7}]},
+    }]
+
+    flow_spec_module._attach_select_field_projections(selects, fields, reads)
+
+    assert "field_projections" not in selects[0]
+
+
+def test_r5_semantic_relation_requires_real_typed_endpoints_or_becomes_unresolved():
+    spec = FlowSpec(capabilities=[
+        FlowCapability(
+            name="query_status", kind="query_status",
+            output_schema={"type": "object", "properties": {"records": {"type": "array"}}},
+        ),
+        FlowCapability(
+            name="submit_batch", kind="submit_batch",
+            input_schema={"type": "object", "properties": {"entries": {"type": "array"}}},
+        ),
+    ])
+    submission = {"semantic_plan": {
+        "capabilities": [], "field_semantics": [], "request_roles": [],
+        "capability_relations": [{
+            "from_capability": "query_status", "from_output": "missing_records",
+            "to_capability": "submit_batch", "to_input": "entries",
+            "type": "external_transform",
+        }],
+        "unresolved_items": [],
+    }}
+
+    ops = flow_spec_module._semantic_plan_to_ops(spec, submission)
+
+    assert not any(op.get("op") == "set_capability_relation" for op in ops)
+    assert submission["semantic_plan"]["unresolved_items"] == [{
+        "kind": "capability_relation",
+        "from_capability": "query_status",
+        "from_output": "missing_records",
+        "to_capability": "submit_batch",
+        "to_input": "entries",
+        "reason": "relation endpoints are missing or type-incompatible",
+    }]

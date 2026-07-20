@@ -1266,6 +1266,14 @@ def _enum_option_map_from_options(options: list[Any] | None) -> dict[str, Any]:
     return out
 
 
+def _recorded_scalar_values_match(left: Any, right: Any) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is type(right) and left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    return type(left) is type(right) and left == right
+
+
 def _attach_select_field_projections(
     selects: list[dict],
     fields: list[dict],
@@ -1325,10 +1333,12 @@ def _attach_select_field_projections(
         selected_field = next((item for item in fields if str(item.get("path") or "") == select_path), None)
         if selected_field is None:
             continue
-        selected_value = str(selected_field.get("value") if selected_field.get("value") is not None else "")
         matches = [
             item for item in items if isinstance(item, dict)
-            and selected_value in {str(item.get(value_key)), str(item.get(label_key))}
+            and _recorded_scalar_values_match(
+                selected_field.get("raw_value", selected_field.get("value")),
+                item.get(value_key),
+            )
         ]
         if len(matches) != 1:
             continue
@@ -1339,11 +1349,12 @@ def _attach_select_field_projections(
             target_path = str(field.get("path") or "")
             if not target_path or target_path in excluded or field.get("recorded_user_input"):
                 continue
-            field_value = str(field.get("value") if field.get("value") is not None else "")
             candidates = [
                 (projection_path_score(source_path, target_path), source_path)
-                for source_path, _tokens, raw_value, _raw in _leaf_paths(selected_item)
-                if str(raw_value) == field_value
+                for source_path, _tokens, _raw_value, raw in _leaf_paths(selected_item)
+                if _recorded_scalar_values_match(
+                    field.get("raw_value", field.get("value")), raw,
+                )
             ]
             best_score = max((score for score, _path in candidates), default=0)
             best_paths = [source_path for score, source_path in candidates if score == best_score and score >= 75]
@@ -4664,12 +4675,42 @@ def _auto_dependency_link_allowed(param: ParamField | None, source_path: str, lk
     return True
 
 
+def _auto_link_has_grounded_contract(steps: list[FlowStep], link: FlowLink) -> bool:
+    by_id = {step.step_id: step for step in steps}
+    positions = {step.step_id: index for index, step in enumerate(steps)}
+    source = by_id.get(link.source_step_id)
+    target = by_id.get(link.target_step_id)
+    if source is None or target is None:
+        return False
+    source_sequence = _step_sequence(source)
+    target_sequence = _step_sequence(target)
+    if source_sequence is not None and target_sequence is not None:
+        if source_sequence >= target_sequence:
+            return False
+    elif positions[source.step_id] >= positions[target.step_id]:
+        return False
+    if source.response_json is None:
+        return False
+    source_path = str(link.source_path or "").removeprefix("response.")
+    source_value = _flow_path_lookup(source.response_json, source_path)
+    if source_value is _FLOW_PATH_MISSING:
+        return False
+    target_path = _strip_body_prefix(link.target_path)
+    target_param = next((param for param in target.params if param.path == target_path), None)
+    return bool(
+        target_param is not None
+        and _recorded_scalar_values_match(source_value, target_param.value)
+    )
+
+
 def _prune_unsafe_auto_links(steps: list[FlowStep], links: list[FlowLink]) -> None:
     by_id = {s.step_id: s for s in steps}
     kept: list[FlowLink] = []
     for lk in links:
         if not _link_is_auto_generated(lk):
             kept.append(lk)
+            continue
+        if not _auto_link_has_grounded_contract(steps, lk):
             continue
         target = by_id.get(lk.target_step_id)
         target_path = _strip_body_prefix(lk.target_path)
@@ -8123,6 +8164,12 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
                 **ref,
             })
 
+    relation_capabilities = {
+        ref: capability
+        for capability in spec.capabilities or []
+        for ref in (capability.name, capability.capability_id)
+        if ref
+    }
     for relation in plan.get("capability_relations") or []:
         if not isinstance(relation, dict):
             continue
@@ -8132,18 +8179,43 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
         target = capability_name_map.get(target_raw, target_raw)
         from_output = str(relation.get("from_output") or "").strip()
         to_input = str(relation.get("to_input") or "").strip()
+        relation_kind = str(relation.get("type") or relation.get("mode") or "caller_decision").strip().lower()
+        source_capability = relation_capabilities.get(source)
+        target_capability = relation_capabilities.get(target)
+        from_type = (
+            _capability_field_type(source_capability, from_output, direction="output")
+            if source_capability is not None and from_output else ""
+        )
+        to_type = (
+            _capability_field_type(target_capability, to_input, direction="input")
+            if target_capability is not None and to_input else ""
+        )
+        explicit_decision = bool(
+            relation_kind == "caller_decision"
+            and source_capability is not None
+            and target_capability is not None
+            and not from_output
+            and not to_input
+        )
+        typed_contract = bool(
+            source_capability is not None
+            and target_capability is not None
+            and from_type
+            and to_type
+            and _capability_types_compatible(from_type, to_type)
+        )
         # A model statement such as "query then submit" is not a data
         # relationship. Automatic relations require concrete endpoints;
         # operators may still create an explicit caller-decision relation.
-        if source and target and from_output and to_input:
+        if source and target and (explicit_decision or typed_contract):
             ops.append({
                 "op": "set_capability_relation",
                 "from_capability": source,
                 "from_output": from_output,
                 "to_capability": target,
                 "to_input": to_input,
-                "type": str(relation.get("type") or relation.get("mode") or "caller_decision"),
-                "mode": str(relation.get("mode") or relation.get("type") or "caller_decision"),
+                "type": relation_kind,
+                "mode": relation_kind,
                 "confidence": float(relation.get("confidence") or 0.0),
                 "reason": str(relation.get("reason") or "模型完整语义蓝图中的能力关系"),
                 "evidence": (
@@ -8152,6 +8224,18 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
                     else {"source": "planner_semantic_plan"}
                 ),
             })
+            continue
+        unresolved = plan.setdefault("unresolved_items", [])
+        issue = {
+            "kind": "capability_relation",
+            "from_capability": source,
+            "from_output": from_output,
+            "to_capability": target,
+            "to_input": to_input,
+            "reason": "relation endpoints are missing or type-incompatible",
+        }
+        if isinstance(unresolved, list) and issue not in unresolved:
+            unresolved.append(issue)
     return ops
 
 
