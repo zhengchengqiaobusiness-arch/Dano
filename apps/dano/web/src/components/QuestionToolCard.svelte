@@ -959,7 +959,7 @@
           <div class="question-form-content">
             {#each questionItems as item}
               <div
-                class:question-group={request.batch}
+                class:question-group={request.batch || revising}
                 class:single-line-text-field={item.kind === "text" && item.inputType !== "textarea"}
               >
                 {#if item.revisionTitle}
