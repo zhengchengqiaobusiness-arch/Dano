@@ -1395,6 +1395,7 @@ def test_fact_check_request_ref_survives_capability_view_sync():
         steps=[
             FlowStep(step_id="submit", method="POST", path="/api/submit"),
             FlowStep(step_id="verify", method="GET", path="/api/verify"),
+            FlowStep(step_id="prepare", method="GET", path="/api/prepare"),
         ],
         capabilities=[FlowCapability(
             name="submit_order",
@@ -1406,6 +1407,12 @@ def test_fact_check_request_ref_survives_capability_view_sync():
                 path="/api/verify",
                 usage="fact_check",
                 origin="planner",
+            ), CapabilityRequestRef(
+                step_id="prepare",
+                method="GET",
+                path="/api/prepare",
+                usage="preflight",
+                origin="planner",
             )],
         )],
     )
@@ -1415,6 +1422,7 @@ def test_fact_check_request_ref_survives_capability_view_sync():
     assert [(ref.step_id, ref.usage) for ref in synced.capabilities[0].request_refs] == [
         ("submit", "execute"),
         ("verify", "fact_check"),
+        ("prepare", "preflight"),
     ]
 
 

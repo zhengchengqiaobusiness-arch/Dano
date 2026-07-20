@@ -1318,13 +1318,8 @@ class RecordSession:
 
         失败/异常时静默留空(下游 captured_all_requests 会兜底重试)。"""
         try:
-            from dano.execution.page.request_capture import classify_network_request
-            cls = classify_network_request({
-                "method": entry.get("method"),
-                "url": entry.get("url"),
-                "post_data": entry.get("post_data"),
-                "response_json": entry.get("response_json"),
-            })
+            from dano.execution.page.flow_spec import classify_network_request
+            cls = classify_network_request(entry, self.all_requests)
             entry["role"] = cls["role"]
             entry["keep"] = cls["keep"]
             entry["reason"] = cls["reason"]
@@ -1483,10 +1478,9 @@ class RecordSession:
 
         返回不可变副本,避免外部误改污染内部状态。每条字段:index/method/url/headers/query/post_data
         /response_json/status/content_type/timestamp/role/keep/reason/confidence。"""
-        # 兜底:漏分类的 entry 在返回前再分一次
+        # 使用完整请求时间线重算，避免早到请求在后续依赖出现前保留过时角色。
         for r in self.all_requests:
-            if "role" not in r:
-                self._classify_entry(r)
+            self._classify_entry(r)
         return [dict(r) for r in self.all_requests]
 
     def captured_diagnostics(self) -> list[dict]:

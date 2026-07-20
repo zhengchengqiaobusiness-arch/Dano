@@ -13,10 +13,6 @@
 
 from __future__ import annotations
 
-import json
-
-import pytest
-
 from dano.execution.page.recorder import RecordSession
 from dano.execution.page.request_capture import classify_network_request
 
@@ -200,17 +196,17 @@ def test_dataiq_three_requests_classified():
 
 
 def test_response_reclassification_changes_role():
-    """响应从无到有,role 应当从兜底重分(治"GET 没响应时判不准")。"""
+    """孤立列表即使响应落地，也不能在没有候选因果时被提升为下拉源。"""
     s = _new_sess()
     # 1) 先 _record_all 时无响应 → role 兜底为 read_context
     s._record_all("GET", "https://x/api/foo")
     entry = s.all_requests[0]
     assert entry["role"] == "read_context"
-    # 2) 响应落地后 → 重新分类为 read_option(列表型响应)
+    # 2) 响应落地后仍是 read_context；列表结构本身不是候选源证据。
     s._attach_response(url="https://x/api/foo", method="GET",
                        response_json={"rows": [{"id": 1, "name": "张三"}]},
                        status=200, content_type="application/json")
-    assert entry["role"] == "read_option"
+    assert entry["role"] == "read_context"
 
 
 def test_tenant_simple_list_with_status_field_remains_option_source():
@@ -242,7 +238,6 @@ def test_keep_filter_drops_noise_and_auth():
     s._record_all("DELETE", "https://x/api/leave/123")                           # destructive
     cap = s.captured_all_requests()
     keeps = [r["url"] for r in cap if r["keep"]]
-    drops = [r["url"] for r in cap if not r["keep"]]
     # 主流程只留业务写
     assert any("save_dataiq_chat_list" in u for u in keeps), keeps
     # 噪声/登录/列表源不进主流程；危险业务操作不能在录制层丢失。

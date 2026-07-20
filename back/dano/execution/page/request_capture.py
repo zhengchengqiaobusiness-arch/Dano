@@ -1947,7 +1947,7 @@ def _looks_graphql_request(req: dict) -> bool:
     return query.startswith(("query", "mutation", "subscription")) or query.startswith("{")
 
 
-def classify_network_request(req: dict) -> dict:
+def _legacy_classify_network_request(req: dict) -> dict:
     """P0-2:把每条网络请求翻译成 {role, keep, reason, confidence},供前端 + 后续 P0-3 依赖闭包使用。
 
     复用既有 classify_request_role / looks_dangerous_write / looks_like_read_request / as_list_payload,加层薄壳
@@ -2107,6 +2107,13 @@ def classify_network_request(req: dict) -> dict:
     return {"role": "business_write", "keep": True,
             "reason": "写请求(POST/PUT/PATCH)且不属于登录/查询/危险,默认进入业务步骤",
             "confidence": 0.7}
+
+
+def classify_network_request(req: dict) -> dict:
+    """Compatibility entry point backed by the canonical evidence classifier."""
+    from dano.execution.page.flow_spec import classify_network_request as classify
+
+    return classify(req)
 
 
 def validate_goal(goal: dict, api_request: dict) -> list[str]:

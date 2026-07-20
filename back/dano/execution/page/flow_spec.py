@@ -2102,7 +2102,10 @@ def _detect_query_selects(req: dict, samples: dict | None,
 
 _WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _NOISE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".js", ".map", ".woff", ".woff2", ".ico")
-_NOISE_SEGS = {"heartbeat", "metrics", "metric", "track", "trace", "analytics", "log", "logs", "beacon", "ping"}
+_NOISE_SEGS = {
+    "heartbeat", "metrics", "metric", "track", "trace", "analytics",
+    "log", "logs", "beacon", "ping", "sse", "socket", "websocket", "ws",
+}
 _OPTION_SEGS = {"list", "options", "option", "dict", "select", "candidates", "tree", "users", "roles"}
 _WRITE_HINT_SEGS = {
     "submit", "save", "create", "update", "send", "apply", "start", "commit",
@@ -2257,9 +2260,60 @@ def _list_payload_is_business_records(req: dict, items: list[dict] | list[Any]) 
         return False
     if _request_has_business_query_evidence(req):
         return True
-    if _list_payload_has_reference_contract(req.get("response_json")) and len(sample) <= 3:
+    if _list_payload_has_reference_contract(req.get("response_json")):
         return False
-    return len(sample) >= 4 or any(isinstance(value, (dict, list)) for value in sample.values())
+    business_fields = sum(
+        1 for key in sample
+        if re.search(
+            r"(?:date|time|status|state|reason|remark|content|amount|price|total|count|quantity|duration|progress|日期|时间|状态|原因|备注|内容|金额|数量)",
+            re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", str(key)).casefold(),
+        )
+    )
+    return business_fields > 0
+
+
+def _list_payload_has_conventional_option_contract(payload: Any) -> bool:
+    """Recognize common ID/name rows without treating arbitrary two-column records as options."""
+    items = as_list_payload(payload) or []
+    sample = next((item for item in items[:5] if isinstance(item, dict)), None)
+    if not sample:
+        return False
+    normalized = {
+        re.sub(r"[^a-z0-9]+", "", str(key).casefold())
+        for key in sample
+    }
+    return bool(
+        normalized & {"id", "value", "code", "key", "uuid"}
+        and normalized & {"name", "label", "text", "title", "displayname"}
+    )
+
+
+def _request_has_option_endpoint_hint(req: dict) -> bool:
+    leaf = _request_path(req).rstrip("/").rsplit("/", 1)[-1].casefold()
+    normalized = re.sub(r"[^a-z0-9]+", "", leaf)
+    return bool(re.search(r"(?:simplelist|options?|candidates?|dictionary|dict|tree|list)$", normalized))
+
+
+def _request_has_reference_entity_hint(req: dict) -> bool:
+    segments = _request_segments(req)
+    return bool(
+        segments & {"system", "identity", "directory", "iam", "masterdata", "lookup", "reference"}
+        and segments & {
+            "user", "users", "person", "people", "employee", "employees",
+            "member", "members", "dept", "department", "team", "role", "tenant",
+            "post", "position",
+        }
+    )
+
+
+def _response_has_scalar_business_value(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for key in ("data", "result", "value"):
+        value = payload.get(key)
+        if value not in (None, "") and not isinstance(value, (dict, list)):
+            return True
+    return False
 
 
 def _request_has_business_query_evidence(req: dict) -> bool:
@@ -2335,6 +2389,10 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
             return _role_row(req, role="business_get", keep=True,
                              reason="GET 响应值被后续业务请求引用，作为前置步骤保留",
                              confidence=0.96, semantic=semantic, evidence=response_ref)
+        if _business_filter_count(req) > 0 and _response_has_scalar_business_value(req.get("response_json")):
+            return _role_row(req, role="business_get", keep=True,
+                             reason="参数化读请求返回业务标量值，作为独立查询能力候选",
+                             confidence=0.9, semantic=semantic)
         if _request_has_business_query_evidence(req):
             return _role_row(req, role="business_get", keep=True,
                              reason="用户查询动作携带非分页业务条件，作为独立查询能力候选",
@@ -2343,6 +2401,19 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
             return _role_row(req, role="business_get", keep=True,
                              reason="列表响应包含日期/状态/业务记录字段，作为独立查询能力候选",
                              confidence=0.93, semantic=semantic)
+        if list_items is not None and (
+            (
+                _list_payload_has_conventional_option_contract(req.get("response_json"))
+                and _request_has_option_endpoint_hint(req)
+            )
+            or (
+                _list_payload_has_reference_contract(req.get("response_json"))
+                and _request_has_reference_entity_hint(req)
+            )
+        ):
+            return _role_row(req, role="read_option", keep=False,
+                             reason="列表响应具备明确候选项契约，作为字段来源但不进入主流程",
+                             confidence=0.88, semantic=semantic)
         return _role_row(req, role="read_context", keep=False,
                          reason="普通读接口，未发现后续业务请求依赖，默认不进入主流程",
                          confidence=0.68, semantic=semantic)
@@ -2366,6 +2437,13 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
             return _role_row(req, role="read_option", keep=False,
                              reason=f"POST 查询返回候选列表/枚举源({count}项)，作为字段来源，不进入主流程",
                              confidence=0.9, semantic=semantic)
+        if list_items is not None and (
+            _list_payload_has_conventional_option_contract(req.get("response_json"))
+            or _request_has_option_endpoint_hint(req)
+        ):
+            return _role_row(req, role="read_option", keep=False,
+                             reason="POST 查询返回明确候选项列表，作为字段来源但不进入主流程",
+                             confidence=0.86, semantic=semantic)
         return _role_row(req, role="read_context", keep=False,
                          reason="POST 查询/搜索类接口，未发现被后续步骤依赖，默认不进入主流程",
                          confidence=0.72, semantic=semantic)
@@ -3182,11 +3260,12 @@ def sync_capability_scoped_views(spec: FlowSpec) -> FlowSpec:
     memberships_by_request: dict[str, list[dict[str, Any]]] = {}
     for cap in spec.capabilities:
         previous_refs = {ref.step_id: ref for ref in (cap.request_refs or []) if ref.step_id}
+        previous_step_ids = _capability_scoped_step_ids(cap)
         auxiliary_refs = [
             ref for ref in (cap.request_refs or [])
-            if ref.usage == "option_source" and ref.step_id not in _capability_scoped_step_ids(cap)
+            if ref.usage in {"fact_check", "preflight", "option_source"}
+            and (not ref.step_id or ref.step_id not in previous_step_ids)
         ]
-        previous_step_ids = _capability_scoped_step_ids(cap)
         cap_step_ids = [
             sid for sid in previous_step_ids
             if sid in by_step and _capability_step_allowed(spec, cap, by_step[sid])
@@ -7090,7 +7169,6 @@ def _write_operation_key(step: FlowStep) -> str:
             page_scope,
             str(meta.get("frame_id") or meta.get("frame_url") or ""),
             action_ref or f"locator:{locator}",
-            locator,
         ))
         return f"action_{hashlib.sha1(identity.encode('utf-8')).hexdigest()[:10]}"
     return _capability_business_key(step)
