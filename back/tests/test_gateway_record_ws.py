@@ -607,7 +607,7 @@ def test_analysis_report_exposes_initial_kind_and_actionable_issue_details() -> 
             path="/api/submit",
             params=[
                 ParamField(path="reason", key="原因", value="leave"),
-                ParamField(path="days", key="天数", value="2"),
+                ParamField(path="days", key="天数", value="2", locked=True),
             ],
         )],
     )
@@ -620,6 +620,7 @@ def test_analysis_report_exposes_initial_kind_and_actionable_issue_details() -> 
                 "field_semantics": [{
                     "step_id": "submit",
                     "wire_path": "reason",
+                    "axis_status": {"name": "locked"},
                     "evidence": [{"source": "screenshot", "axis": "name"}],
                 }],
                 "unresolved_items": [{
@@ -628,6 +629,12 @@ def test_analysis_report_exposes_initial_kind_and_actionable_issue_details() -> 
                     "path": "days",
                     "axis": "required",
                     "reason": "required marker not visible",
+                }, {
+                    "kind": "field_axis", "step_id": "submit", "path": "days",
+                    "axis": "required", "reason": "required marker not visible",
+                }, {
+                    "kind": "capability_relation", "relation_id": "rel-1",
+                    "status": "rejected", "reason": "conflict with recorded order",
                 }],
             },
         },
@@ -649,11 +656,17 @@ def test_analysis_report_exposes_initial_kind_and_actionable_issue_details() -> 
     )
 
     assert report["analysis_kind"] == "initial"
-    assert report["unmatched_fields"] == [{
-        "step_id": "submit",
-        "path": "days",
-        "name": "天数",
-    }]
+    assert report["unmatched_fields"][0]["target"] == {
+        "kind": "param", "step_id": "submit", "path": "days",
+    }
+    assert report["unmatched_fields"][0]["missing_axes"] == [
+        "path", "name", "default_value", "type", "category", "source", "required",
+    ]
     assert report["unmatched_field_count"] == len(report["unmatched_fields"])
     assert report["unresolved_items"][0]["axis"] == "required"
     assert report["unresolved_field_count"] == len(report["unresolved_items"])
+    assert report["locked_field_count"] == 2
+    assert len(report["locked_items"]) == 2
+    assert report["rejected_field_count"] == 1
+    assert len(report["rejected_items"]) == 1
+    assert "field" in report["issue_groups"]

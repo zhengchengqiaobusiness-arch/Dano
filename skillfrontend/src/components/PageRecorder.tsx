@@ -78,10 +78,18 @@ interface AnalysisApplication {
   locked_field_count?: number;
   rejected_field_count?: number;
   unresolved_field_count?: number;
-  unmatched_fields?: Array<{ step_id: string; path: string; name: string }>;
-  unresolved_items?: Array<{ step_id?: string; path?: string; name?: string; axis?: string; reason?: string }>;
+  unresolved_relation_count?: number;
+  unmatched_fields?: AnalysisIssue[];
+  unresolved_items?: AnalysisIssue[];
+  locked_items?: AnalysisIssue[];
+  rejected_items?: AnalysisIssue[];
+  issue_groups?: Record<string, AnalysisIssue[]>;
   proposal_gate?: { accepted?: boolean; reasons?: string[] };
   operation_id?: string;
+}
+interface AnalysisIssue {
+  kind?: string; step_id?: string; path?: string; name?: string; axis?: string; reason?: string;
+  missing_axes?: string[]; suggested_action?: string; target?: Record<string, any>; axes?: string[];
 }
 
 interface FlowParam {
@@ -1373,6 +1381,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const screenshotInputRef = useRef<HTMLInputElement>(null);
   const [analysisScreenshotBusy, setAnalysisScreenshotBusy] = useState(false);
   const [lastAnalysisEvidence, setLastAnalysisEvidence] = useState<AnalysisApplication | null>(null);
+  const [showAllAnalysisIssues, setShowAllAnalysisIssues] = useState(false);
   const [expandedCapabilityKeys, setExpandedCapabilityKeys] = useState<string[]>([]);
   const [expandedCapabilitySections, setExpandedCapabilitySections] = useState<Record<string, string[]>>({});
   const [expandedCapabilitySteps, setExpandedCapabilitySteps] = useState<Record<string, string[]>>({});
@@ -2934,10 +2943,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       || (target.field_id && cap
         ? capabilityFields(cap).find((field) => field.field_id === target.field_id)?.path
         : "");
-    const targetParam = sid && targetPath
-      ? stepById[String(sid)]?.params?.find((param) =>
-        stripBodyPrefix(param.path || "") === stripBodyPrefix(String(targetPath)))
+    const targetStep = sid ? stepById[String(sid)] : undefined;
+    const exactTargetParam = targetStep && targetPath
+      ? targetStep.params?.find((param) => param.path === String(targetPath))
       : undefined;
+    const legacyTargetParams = targetStep && targetPath && !exactTargetParam
+      ? targetStep.params?.filter((param) =>
+        stripBodyPrefix(param.path || "") === stripBodyPrefix(String(targetPath))) || []
+      : [];
+    const targetParam = exactTargetParam || (legacyTargetParams.length === 1 ? legacyTargetParams[0] : undefined);
     const targetAnchorRef = targetParam?.field_id || targetPath;
     const isRequest = target.kind === "request_role";
     const unassignedStepId = sid && capIdx < 0 && stepById[String(sid)] ? String(sid) : "";
@@ -3290,6 +3304,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function renderLatestOperationDetail() {
     if (!lastAnalysisEvidence && !lastOperationReport) return null;
+    const unmatchedIssues = lastAnalysisEvidence?.unmatched_fields || [];
+    const unresolvedIssues = lastAnalysisEvidence?.unresolved_items || [];
+    const rejectedIssues = lastAnalysisEvidence?.rejected_items || [];
+    const issueLimit = showAllAnalysisIssues ? Number.POSITIVE_INFINITY : 6;
+    const visibleUnmatched = unmatchedIssues.slice(0, issueLimit);
+    const remainingLimit = Math.max(0, issueLimit - visibleUnmatched.length);
+    const visibleUnresolved = unresolvedIssues.slice(0, remainingLimit);
+    const remainingRejectedLimit = Math.max(0, remainingLimit - visibleUnresolved.length);
+    const visibleRejected = rejectedIssues.slice(0, remainingRejectedLimit);
+    const analysisIssueCount = unmatchedIssues.length + unresolvedIssues.length + rejectedIssues.length;
     return (
       <Space direction="vertical" size={2}>
         {lastAnalysisEvidence && (
@@ -3309,16 +3333,34 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 </Typography.Text>
               )}
             </>}
-            {lastAnalysisEvidence.unmatched_fields?.slice(0, 6).map((item) => (
-              <Typography.Text key={`unmatched:${item.step_id}:${item.path}`} type="warning" style={{ fontSize: 12 }}>
+            {visibleUnmatched.map((item) => (
+              <Button key={`unmatched:${item.step_id}:${item.path}`} type="link" size="small"
+                style={{ padding: 0, height: "auto", textAlign: "left" }}
+                onClick={() => locatePublishIssue(item.target || { kind: "param", step_id: item.step_id, path: item.path })}>
                 未匹配：{item.name || item.path}（{item.step_id} · {item.path}）
-              </Typography.Text>
+                {item.missing_axes?.length ? ` · 缺 ${item.missing_axes.map((axis) => ANALYSIS_AXIS_LABELS[axis] || axis).join("、")}` : ""}
+              </Button>
             ))}
-            {lastAnalysisEvidence.unresolved_items?.slice(0, 6).map((item, index) => (
-              <Typography.Text key={`unresolved:${item.step_id}:${item.path}:${item.axis}:${index}`} type="warning" style={{ fontSize: 12 }}>
+            {visibleUnresolved.map((item, index) => (
+              <Button key={`unresolved:${item.step_id}:${item.path}:${item.axis}:${index}`} type="link" size="small"
+                style={{ padding: 0, height: "auto", textAlign: "left" }}
+                onClick={() => locatePublishIssue(item.target || { kind: item.kind || "param", step_id: item.step_id, path: item.path })}>
                 待确认：{item.name || item.path || item.step_id || "字段"}{item.axis ? ` · ${ANALYSIS_AXIS_LABELS[item.axis] || item.axis}` : ""}{item.reason ? `（${item.reason}）` : ""}
-              </Typography.Text>
+              </Button>
             ))}
+            {visibleRejected.map((item, index) => (
+              <Button key={`rejected:${item.step_id}:${item.path}:${index}`} type="link" danger size="small"
+                style={{ padding: 0, height: "auto", textAlign: "left" }}
+                onClick={() => locatePublishIssue(item.target || { kind: item.kind || "param", step_id: item.step_id, path: item.path })}>
+                已拒绝：{item.name || item.path || item.step_id || item.kind || "建议"}{item.reason ? `（${item.reason}）` : ""}
+              </Button>
+            ))}
+            {analysisIssueCount > 6 && (
+              <Button type="link" size="small" style={{ padding: 0, alignSelf: "flex-start" }}
+                onClick={() => setShowAllAnalysisIssues((value) => !value)}>
+                {showAllAnalysisIssues ? "收起问题" : `展开全部 ${analysisIssueCount} 项`}
+              </Button>
+            )}
             <Space wrap size={4}>
               {lastAnalysisEvidence.screenshot_count > 0 && (
                 <Tag color={(lastAnalysisEvidence.model_image_count ?? 0) === lastAnalysisEvidence.screenshot_count ? "success" : "error"}>
@@ -3328,6 +3370,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               <Tag>截图匹配字段 {lastAnalysisEvidence.matched_field_count ?? 0}</Tag>
               {!!lastAnalysisEvidence.unmatched_field_count && <Tag color="orange">未匹配字段 {lastAnalysisEvidence.unmatched_field_count}</Tag>}
               {!!lastAnalysisEvidence.unresolved_field_count && <Tag color="orange">待确认 {lastAnalysisEvidence.unresolved_field_count}</Tag>}
+              {!!lastAnalysisEvidence.unresolved_relation_count && <Tag color="orange">待确认关系 {lastAnalysisEvidence.unresolved_relation_count}</Tag>}
               {!!lastAnalysisEvidence.rejected_field_count && <Tag color="red">已拒绝冲突 {lastAnalysisEvidence.rejected_field_count}</Tag>}
               {!!lastAnalysisEvidence.changes?.capabilities && <Tag>能力变化 {lastAnalysisEvidence.changes.capabilities} 项</Tag>}
               {!!lastAnalysisEvidence.changes?.links && <Tag>字段关联变化 {lastAnalysisEvidence.changes.links} 项</Tag>}

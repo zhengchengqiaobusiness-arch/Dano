@@ -2328,6 +2328,25 @@ def test_legacy_body_prefix_reference_is_used_only_when_unambiguous():
     assert flow_spec_module._resolve_param_reference(ambiguous, "body.status") is ambiguous.params[1]
 
 
+def test_param_field_id_persists_across_round_trip_and_path_edit():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit", params=[ParamField(path="body.reason", key="原因")],
+    )])
+    original_id = spec.steps[0].params[0].field_id
+    restored = FlowSpec.model_validate(spec.model_dump())
+
+    assert original_id.startswith("pf_")
+    assert restored.steps[0].params[0].field_id == original_id
+
+    edited = apply_flow_edits(restored, [{
+        "op": "update", "step_id": "submit", "field_id": original_id,
+        "param_path": "stale.path", "field": "path", "value": "body.leaveReason",
+    }])
+
+    assert edited.steps[0].params[0].field_id == original_id
+    assert edited.steps[0].params[0].path == "body.leaveReason"
+
+
 def test_manual_type_category_source_combination_survives_publish_sync():
     """The backend must persist an operator combination even when it looks unusual."""
     spec = FlowSpec(flow_id="manual-axis-combination", steps=[FlowStep(

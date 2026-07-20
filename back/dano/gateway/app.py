@@ -217,8 +217,9 @@ def _analysis_field_coverage(after) -> dict:
         return {
             "matched_field_count": 0, "unmatched_field_count": 0,
             "locked_field_count": 0, "rejected_field_count": 0,
-            "unresolved_field_count": 0,
+            "unresolved_field_count": 0, "unresolved_relation_count": 0,
             "unmatched_fields": [], "unresolved_items": [],
+            "locked_items": [], "rejected_items": [], "issue_groups": {},
         }
     capability_model = dict((after.meta or {}).get("capability_model") or {})
     semantic_plan = dict(capability_model.get("semantic_plan") or {})
@@ -232,6 +233,10 @@ def _analysis_field_coverage(after) -> dict:
         item for item in (semantic_plan.get("field_semantics") or [])
         if isinstance(item, dict)
     ]
+    by_ref = {
+        (str(item.get("step_id") or ""), str(item.get("wire_path") or item.get("path") or "")): item
+        for item in field_items
+    }
     covered = {
         (str(item.get("step_id") or ""), str(item.get("wire_path") or item.get("path") or ""))
         for item in field_items
@@ -244,31 +249,110 @@ def _analysis_field_coverage(after) -> dict:
             for evidence in (item.get("evidence") or [])
         )
     } & actual_refs
-    unresolved = [
+    raw_unresolved = [
         item for item in (semantic_plan.get("unresolved_items") or [])
         if isinstance(item, dict)
     ]
+
+    def issue_kind(item: dict) -> str:
+        kind = str(item.get("kind") or "").lower()
+        axis = str(item.get("axis") or "").lower()
+        if "relation" in kind:
+            return "capability_relation"
+        if "link" in kind or "dependency" in kind:
+            return "field_link"
+        if "enum" in kind or axis in {"enum", "enum_options", "enum_value_map"}:
+            return "enum"
+        if axis in {"source", "source_kind"}:
+            return "source"
+        if item.get("step_id") or item.get("path") or item.get("wire_path") or "field" in kind:
+            return "field"
+        return "other"
+
+    def issue_key(item: dict) -> tuple:
+        return (
+            issue_kind(item), str(item.get("step_id") or ""),
+            str(item.get("wire_path") or item.get("path") or ""),
+            str(item.get("axis") or ""), str(item.get("relation_id") or ""),
+            str(item.get("from_capability") or ""), str(item.get("to_capability") or ""),
+        )
+
+    normalized: list[dict] = []
+    seen: set[tuple] = set()
+    for raw in raw_unresolved:
+        key = issue_key(raw)
+        if key in seen:
+            continue
+        seen.add(key)
+        item = dict(raw)
+        path = str(item.get("wire_path") or item.get("path") or "")
+        step_id = str(item.get("step_id") or "")
+        item.setdefault("kind", issue_kind(item))
+        item.setdefault("target", {
+            "kind": "param" if step_id and path else issue_kind(item),
+            **({"step_id": step_id} if step_id else {}),
+            **({"path": path} if path else {}),
+            **({"relation_id": item.get("relation_id")} if item.get("relation_id") else {}),
+        })
+        item.setdefault("missing_axes", [item["axis"]] if item.get("axis") else [])
+        item.setdefault("evidence", [])
+        item.setdefault("reason", "缺少可验证证据")
+        item.setdefault("suggested_action", "定位目标并补充证据或人工确认")
+        normalized.append(item)
+
     rejected = [
-        item for item in unresolved
+        item for item in normalized
         if str(item.get("status") or "").lower() == "rejected"
         or "conflict" in str(item.get("reason") or "").lower()
     ]
+    unresolved = [item for item in normalized if item not in rejected]
+    locked_items: list[dict] = []
+    locked_refs: set[tuple[str, str]] = set()
+    for (step_id, path), param in actual.items():
+        semantic = by_ref.get((step_id, path)) or {}
+        locked_axes = [
+            str(axis) for axis, status in dict(semantic.get("axis_status") or {}).items()
+            if str(status).lower() == "locked"
+        ]
+        if param.locked:
+            locked_axes = ["all", *locked_axes]
+        if locked_axes:
+            locked_refs.add((step_id, path))
+            locked_items.append({
+                "step_id": step_id, "path": path,
+                "name": param.label or param.key or path,
+                "axes": list(dict.fromkeys(locked_axes)),
+                "target": {"kind": "param", "step_id": step_id, "path": path},
+            })
     unmatched_fields = [
         {
             "step_id": step_id,
             "path": path,
             "name": actual[(step_id, path)].label or actual[(step_id, path)].key or path,
+            "missing_axes": ["path", "name", "default_value", "type", "category", "source", "required"],
+            "reason": "分析结果中没有该请求字段的语义记录",
+            "suggested_action": "定位字段并补充截图证据或人工确认七项字段语义",
+            "target": {"kind": "param", "step_id": step_id, "path": path},
         }
         for step_id, path in sorted(actual_refs - covered)
     ]
+    issue_groups: dict[str, list[dict]] = {}
+    for item in unresolved:
+        issue_groups.setdefault(issue_kind(item), []).append(item)
+    field_unresolved = [item for item in unresolved if issue_kind(item) in {"field", "enum", "source"}]
+    relation_unresolved = [item for item in unresolved if issue_kind(item) == "capability_relation"]
     return {
         "matched_field_count": len(image_matched),
         "unmatched_field_count": len(unmatched_fields),
-        "locked_field_count": sum(param.locked for step in after.steps for param in step.params),
+        "locked_field_count": len(locked_refs),
         "rejected_field_count": len(rejected),
-        "unresolved_field_count": len(unresolved),
+        "unresolved_field_count": len(field_unresolved),
+        "unresolved_relation_count": len(relation_unresolved),
         "unmatched_fields": unmatched_fields,
         "unresolved_items": unresolved,
+        "locked_items": locked_items,
+        "rejected_items": rejected,
+        "issue_groups": issue_groups,
     }
 
 

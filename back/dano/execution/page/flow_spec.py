@@ -67,6 +67,7 @@ _REQUEST_OBSERVER_KEYS = (
 
 # ─────────── 数据模型 ───────────
 class ParamField(BaseModel):
+    field_id: str = ""
     path: str
     key: str
     label: str = ""
@@ -3520,6 +3521,10 @@ def sync_flow_spec_models(spec: FlowSpec) -> FlowSpec:
     # FlowStep 已经是可编辑/可编排接口的物化事实；usage 不能等到能力绑定后才更新，
     # 否则初次分析会把已进入字段页的查询接口仍标成 captured。
     for step in spec.steps:
+        for param in step.params:
+            if not param.field_id:
+                identity = f"{step.step_id}\0{param.path}".encode("utf-8")
+                param.field_id = f"pf_{hashlib.sha256(identity).hexdigest()[:16]}"
         if (step.method or "GET").upper() in {"GET", "HEAD"}:
             # Legacy/imported specs may only carry query values in the URL. Put
             # them into ParamField first so request compilation, capability input
@@ -13622,7 +13627,12 @@ def _find_step(spec: FlowSpec, step_id: str) -> FlowStep:
     raise ValueError(f"step not found: {step_id} (available: {available})")
 
 
-def _find_param(step: FlowStep, param_path: str, *, param_key: str = "", param_label: str = "") -> ParamField:
+def _find_param(step: FlowStep, param_path: str, *, field_id: str = "", param_key: str = "", param_label: str = "") -> ParamField:
+    stable_id = str(field_id or "")
+    if stable_id:
+        matched = next((param for param in step.params if param.field_id == stable_id), None)
+        if matched is not None:
+            return matched
     needle = str(param_path or "")
     for param in step.params:
         if param.path == needle:
@@ -16004,6 +16014,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     param = _find_param(
                         step,
                         param_path,
+                        field_id=str(edit.get("field_id") or ""),
                         param_key=str(edit.get("param_key") or ""),
                         param_label=str(edit.get("param_label") or ""),
                     )
@@ -16159,6 +16170,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             param = _find_param(
                 step,
                 param_path,
+                field_id=str(edit.get("field_id") or ""),
                 param_key=str(edit.get("param_key") or ""),
                 param_label=str(edit.get("param_label") or ""),
             )
@@ -16234,6 +16246,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             param = _find_param(
                 step,
                 param_path,
+                field_id=str(edit.get("field_id") or ""),
                 param_key=str(edit.get("param_key") or ""),
                 param_label=str(edit.get("param_label") or ""),
             )
