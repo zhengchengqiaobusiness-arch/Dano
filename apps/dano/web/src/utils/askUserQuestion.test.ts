@@ -66,6 +66,7 @@ describe("ask user question transcript data", () => {
           id: "reason",
           kind: "text" as const,
           inputType: "textarea" as const,
+          fieldAssist: true,
           question: "请假原因？",
           default: "个人事务",
         },
@@ -188,10 +189,10 @@ describe("ask user question transcript data", () => {
       questionBlock({
         batch: true,
         questions: [
-          { id: "expense_type", kind: "text", question: "费用类型？", default: "交通费" },
-          { id: "expense_date", kind: "text", question: "发生时间：", default: "2026-06-28" },
-          { id: "expense_amount", kind: "text", question: "金额", default: "0" },
-          { id: "expense_reason", kind: "text", question: "事由", default: "办公相关支出" },
+          { id: "expense_type", kind: "text", question: "费用类型？", fieldAssist: false, default: "交通费" },
+          { id: "expense_date", kind: "text", question: "发生时间：", fieldAssist: false, default: "2026-06-28" },
+          { id: "expense_amount", kind: "text", question: "金额", fieldAssist: false, default: "0" },
+          { id: "expense_reason", kind: "text", question: "事由", fieldAssist: false, default: "办公相关支出" },
         ],
       }),
     );
@@ -233,7 +234,7 @@ describe("ask user question transcript data", () => {
             question: "使用日期：",
             dateFormat: "yyyy-MM-dd HH:mm",
           },
-          { id: "note", kind: "text", question: "备注。" },
+          { id: "note", kind: "text", question: "备注。", fieldAssist: false },
         ],
       }),
     );
@@ -279,7 +280,7 @@ describe("ask user question transcript data", () => {
         kind: "confirm",
         title: "公章使用申请确认",
         confirmationOfToolCallId: "form-1",
-        questions: [{ id: "type", kind: "text", question: "印章类型？" }],
+        questions: [{ id: "type", kind: "text", question: "印章类型？", fieldAssist: false }],
         answer: { type: "财务章" },
       }),
     );
@@ -377,7 +378,7 @@ describe("ask user question transcript data", () => {
     const source = questionBlock({
       batch: true,
       title: "出差申请",
-      questions: [{ id: "city", kind: "text", question: "城市？" }],
+      questions: [{ id: "city", kind: "text", question: "城市？", fieldAssist: false }],
     });
     source.toolCallId = "form-1";
     const confirmation = questionBlock({
@@ -386,7 +387,7 @@ describe("ask user question transcript data", () => {
       kind: "confirm",
       title: "确认表单",
       confirmationOfToolCallId: "form-1",
-      questions: [{ id: "city", kind: "text", question: "城市？" }],
+      questions: [{ id: "city", kind: "text", question: "城市？", fieldAssist: false }],
       answer: { city: "北京" },
     });
     confirmation.toolCallId = "confirm-1";

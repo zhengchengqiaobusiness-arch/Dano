@@ -244,7 +244,8 @@ describe("ask_user_question tool", () => {
       "Set required:true only when an answer is mandatory. required defaults to false.",
       "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
       "Dano returns the user's date answer as submitted; convert it yourself if a downstream interface needs another business format.",
-      "When using questions, provide a concise top-level title and put each field's id, question, options, inputType, dateFormat, required, dataSource, multiple, and default inside its questions item.",
+      "Use fieldAssist to control generation and polishing actions on text fields. It defaults to false for single-line text and true for textarea; enable it when drafting or polishing business text would help, while factual short values usually omit it.",
+      "When using questions, provide a concise top-level title and put each field's id, question, options, inputType, fieldAssist, dateFormat, required, dataSource, multiple, and default inside its questions item.",
       "When one or more submitted grouped forms require final confirmation, call ask_user_question with {confirm:true,formIds:[\"<formId>\"]} using their returned formId values. Do not send confirmation text or prior answers. If confirmation is not required, continue normally.",
       "Use confirm:true only for submitted grouped forms. To confirm an ordinary sentence or operation, ask a normal single-choice question instead.",
     ]);
@@ -254,7 +255,7 @@ describe("ask_user_question tool", () => {
     [
       "single text",
       { question: "姓名？", default: "张三" },
-      { batch: false, kind: "text", id: "answer", question: "姓名？", default: "张三" },
+      { batch: false, kind: "text", id: "answer", question: "姓名？", fieldAssist: false, default: "张三" },
     ],
     [
       "compatible aliases",
@@ -274,6 +275,7 @@ describe("ask_user_question tool", () => {
             kind: "text",
             inputType: "textarea",
             question: "请假原因？",
+            fieldAssist: true,
             default: "个人事务",
           },
         ],
@@ -310,6 +312,7 @@ describe("ask_user_question tool", () => {
             id: "reason",
             kind: "text",
             question: "原因？",
+            fieldAssist: false,
             default: "个人事务",
           },
         ],
@@ -334,6 +337,89 @@ describe("ask_user_question tool", () => {
     ],
   ])("normalizes accepted %s calls into browser-safe card requests", (_, input, expected) => {
     expect(normalizeAskUserQuestionCardRequest(input)).toEqual(expected);
+  });
+
+  it("defaults single-line text Field Assist exposure off in the canonical card request", () => {
+    expect(
+      normalizeAskUserQuestionCardRequest({
+        question: "标题？",
+        default: "季度总结",
+      }),
+    ).toMatchObject({
+      batch: false,
+      kind: "text",
+      fieldAssist: false,
+    });
+  });
+
+  it("coerces the canonical Field Assist parameter without rejecting the question", () => {
+    expect(
+      normalizeAskUserQuestionCardRequest({
+        question: "标题？",
+        default: "季度总结",
+        fieldAssist: " enabled ",
+      }),
+    ).toMatchObject({
+      batch: false,
+      kind: "text",
+      fieldAssist: true,
+    });
+  });
+
+  it.each([
+    ["field_assist", { field_assist: 1 }, true],
+    ["aiAssist", { inputType: "textarea", aiAssist: "off" }, false],
+    ["ai_assist", { ai_assist: "开启" }, true],
+    [
+      "first convertible alias",
+      { fieldAssist: "unknown", field_assist: "disabled", aiAssist: true },
+      false,
+    ],
+  ])("normalizes the %s Field Assist alias", (_label, fields, expected) => {
+    expect(
+      normalizeAskUserQuestionCardRequest({
+        question: "说明？",
+        default: "项目需要",
+        ...fields,
+      }),
+    ).toMatchObject({
+      batch: false,
+      kind: "text",
+      fieldAssist: expected,
+    });
+  });
+
+  it("normalizes grouped text Field Assist and silently ignores it on non-text fields", () => {
+    const request = normalizeAskUserQuestionCardRequest({
+      title: "请假申请",
+      questions: [
+        {
+          id: "reason",
+          question: "原因？",
+          inputType: "textarea",
+          ai_assist: "禁用",
+          default: "个人事务",
+        },
+        {
+          id: "start_at",
+          question: "开始日期？",
+          inputType: "date",
+          dateFormat: "yyyy-MM-dd",
+          fieldAssist: true,
+          default: "2026-07-20",
+        },
+      ],
+    });
+
+    expect(request).toMatchObject({
+      batch: true,
+      questions: [
+        { id: "reason", kind: "text", fieldAssist: false },
+        { id: "start_at", kind: "date" },
+      ],
+    });
+    if (!request?.batch) throw new Error("expected grouped request");
+    expect(request.questions[1]).not.toHaveProperty("fieldAssist");
   });
 
   it("drops redundant grouped top-level semantics from the card protocol", () => {

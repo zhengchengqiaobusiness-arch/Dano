@@ -67,6 +67,13 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 - If `podman ps` works but `podman compose` or `podman machine list` fails with `podman-machine-default.lock: operation not permitted` or `could not find a matching machine`, treat it as local Podman machine metadata being blocked by the sandbox, not a Dano bug. Re-run the same Compose command outside the sandbox/escalated instead of changing Dano code.
 - After Podman-based deployment or smoke tests, stop and remove the test containers and pods, then remove Dano temporary images/tags and dangling build layers after confirming no containers reference them; keep reusable base images unless explicitly asked.
 
+## Model tool argument compatibility
+
+- Treat model-generated tool arguments as best-effort input. Normalize supported aliases and safely coercible value types when the intended behavior remains unambiguous.
+- Silently ignore or default unknown, misplaced, or malformed optional arguments when doing so does not prevent the requested capability from rendering, executing, or returning the correct result. Do not reject the tool call or trigger a model retry solely for those non-functional errors.
+- Keep strict validation only when recovery would be ambiguous or could cause an incorrect submission, incorrect field mapping, data loss, or another materially wrong result.
+- Encode runtime behavior in parser code, runtime defaults, tool prompt metadata, and tests; do not rely on this file alone to enforce model-facing behavior.
+
 ## GitHub Workflow
 
 - Each time an issue is solved and verified, create a pull request to `upstream`.

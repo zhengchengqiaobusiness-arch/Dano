@@ -54,14 +54,14 @@ const forms: AskUserQuestionConfirmationForm[] = [
   {
     formId: "form-a",
     title: "请假申请",
-    questions: [{ id: "reason", kind: "text" as const, question: "原因？" }],
+    questions: [{ id: "reason", kind: "text" as const, question: "原因？", fieldAssist: true }],
     answer: { reason: "家庭事务" },
   },
   {
     formId: "form-b",
     title: "出差申请",
     questions: [
-      { id: "destination", kind: "text" as const, question: "目的地？" },
+      { id: "destination", kind: "text" as const, question: "目的地？", fieldAssist: false },
     ],
     answer: { destination: "上海" },
   },
@@ -150,7 +150,12 @@ describe("Form Interaction", () => {
         state: "revising",
         revision: 2,
         forms: [
-          { formId: "form-a", revision: 2, answer: { reason: "家庭事务" } },
+          {
+            formId: "form-a",
+            revision: 2,
+            questions: [expect.objectContaining({ id: "reason", fieldAssist: true })],
+            answer: { reason: "家庭事务" },
+          },
           { formId: "form-b", revision: 2, answer: { destination: "上海" } },
         ],
       },
@@ -164,7 +169,12 @@ describe("Form Interaction", () => {
         state: "revising",
         revision: 2,
         forms: [
-          { formId: "form-a", revision: 2, answer: { reason: "家庭事务" } },
+          {
+            formId: "form-a",
+            revision: 2,
+            questions: [expect.objectContaining({ id: "reason", fieldAssist: true })],
+            answer: { reason: "家庭事务" },
+          },
           { formId: "form-b", revision: 2, answer: { destination: "上海" } },
         ],
       });
