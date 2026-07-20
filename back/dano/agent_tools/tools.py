@@ -1314,27 +1314,130 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         return proposed_type
 
     params_by_ref: dict[tuple[str, str], list] = {}
+    field_candidates: list[tuple[object, object]] = []
     for step in steps:
         for param in (getattr(step, "params", None) or []):
             params_by_ref.setdefault(
                 (str(step.step_id), normalized_path(param.path)), []
             ).append(param)
+            field_candidates.append((step, param))
+
+    def semantic_token(value: object) -> str:
+        return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").casefold())
+
+    def candidate_labels(param) -> set[str]:  # noqa: ANN001
+        values = {
+            semantic_token(getattr(param, "key", "")),
+            semantic_token(getattr(param, "label", "")),
+            semantic_token(str(getattr(param, "path", "")).split(".")[-1]),
+        }
+        for item in getattr(param, "evidence", None) or []:
+            if not isinstance(item, dict):
+                continue
+            values.update(semantic_token(item.get(key)) for key in (
+                "visible_label", "label", "field_label", "field_key", "name",
+            ))
+        return {value for value in values if value}
+
+    def match_screenshot_field(
+        field: dict,
+        control: dict,
+        assigned: set[tuple[str, str]],
+    ) -> tuple[object, object, int, list[str]] | None:
+        """Return one unique recorded field for a screenshot observation."""
+        labels = {
+            semantic_token(field.get("public_name")),
+            semantic_token(field.get("business_name")),
+            semantic_token(field.get("label")),
+            semantic_token(control.get("visible_label")),
+        }
+        labels.discard("")
+        visible_value = control.get("visible_value")
+        requested_step = str(field.get("step_id") or "")
+        ranked: list[tuple[int, str, str, object, object, list[str]]] = []
+        for step, param in field_candidates:
+            ref = (str(step.step_id), normalized_path(param.path))
+            if ref in assigned:
+                continue
+            score = 0
+            reasons: list[str] = []
+            names = candidate_labels(param)
+            if labels & names:
+                score += 100
+                reasons.append("label_exact")
+            elif any(
+                len(left) >= 2 and len(right) >= 2 and (left in right or right in left)
+                for left in labels for right in names
+            ):
+                score += 55
+                reasons.append("label_related")
+            if requested_step and requested_step == str(step.step_id):
+                score += 20
+                reasons.append("step_hint")
+            if visible_value not in (None, "") and str(visible_value) == str(getattr(param, "value", "")):
+                score += 45
+                reasons.append("recorded_value")
+            page_id = str(control.get("page_id") or control.get("frame_id") or "")
+            source_meta = getattr(step, "source_meta", None) or {}
+            if page_id and page_id in {
+                str(source_meta.get("page_id") or ""),
+                str(source_meta.get("frame_id") or ""),
+            }:
+                score += 30
+                reasons.append("page_context")
+            if score:
+                ranked.append((score, str(step.step_id), str(param.path), step, param, reasons))
+        ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
+        if not ranked or ranked[0][0] < 80:
+            return None
+        if len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 15:
+            return None
+        score, _step_id, _path, step, param, reasons = ranked[0]
+        return step, param, score, reasons
+
     unresolved = list(semantic.get("unresolved_items") or []) if isinstance(semantic.get("unresolved_items"), list) else []
     fields = []
+    assigned_field_refs: set[tuple[str, str]] = set()
     for raw_field in semantic.get("field_semantics") or []:
         if not isinstance(raw_field, dict):
             continue
         field = deepcopy(raw_field)
+        evidence = normalized_evidence(field.get("evidence"))
+        control = screenshot_control(evidence)
         step_id = str(field.get("step_id") or "")
         path = str(field.get("wire_path") or field.get("path") or "")
         matches = params_by_ref.get((step_id, normalized_path(path))) or []
-        if len(matches) != 1:
-            unresolved.append({"type": "unmatched_field", "step_id": step_id, "wire_path": path})
+        exact_ref = (step_id, normalized_path(path))
+        matched_step = step_by_id.get(step_id) if len(matches) == 1 else None
+        param = matches[0] if len(matches) == 1 else None
+        match_score = 200 if param is not None else 0
+        match_reasons = ["exact_recorded_reference"] if param is not None else []
+        if param is not None and exact_ref in assigned_field_refs:
+            param = None
+            matched_step = None
+        if param is None and screenshot_count and control is not None:
+            matched = match_screenshot_field(field, control, assigned_field_refs)
+            if matched is not None:
+                matched_step, param, match_score, match_reasons = matched
+                step_id = str(matched_step.step_id)
+                path = str(param.path)
+        if param is None or matched_step is None:
+            unresolved.append({
+                "type": "unmatched_field",
+                "step_id": step_id,
+                "wire_path": path,
+                "visible_label": str((control or {}).get("visible_label") or field.get("public_name") or ""),
+                "reason": "截图控件无法唯一匹配到真实录制字段" if control else "字段引用不存在或不唯一",
+            })
             continue
-        param = matches[0]
+        assigned_field_refs.add((step_id, normalized_path(param.path)))
         field["step_id"] = step_id
         field["wire_path"] = str(getattr(param, "path", None) or path)
-        evidence = normalized_evidence(field.get("evidence"))
+        field["match"] = {
+            "status": "confirmed",
+            "score": match_score,
+            "reasons": match_reasons,
+        }
         for evidence_item in evidence:
             if str(evidence_item.get("source") or "").lower() != "screenshot":
                 continue
@@ -1345,7 +1448,6 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                 if key in field and evidence_item.get(key) in (None, ""):
                     evidence_item[key] = deepcopy(field[key])
         field["evidence"] = evidence
-        control = screenshot_control(evidence)
         if control is not None:
             field["business_type"] = screenshot_business_type(control, field.get("business_type"))
         current_category = str(getattr(param, "category", None) or "")

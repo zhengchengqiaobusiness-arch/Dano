@@ -4445,43 +4445,6 @@ def _param_has_executable_source(param: ParamField) -> bool:
     return False
 
 
-def _cross_validated_visible_default(
-    param: ParamField,
-    visible_default: Any,
-    screenshot_control: dict[str, Any] | None,
-) -> bool:
-    """Accept a screenshot default only when it agrees with the recorded request value."""
-    if screenshot_control is None or "visible_value" not in screenshot_control:
-        return False
-    visible_value = screenshot_control.get("visible_value")
-    if str(visible_value).strip() != str(visible_default).strip():
-        return False
-    recorded = param.value
-    if param.type in _ENUM_PARAM_TYPES:
-        value_map = dict(param.enum_value_map or _enum_option_map_from_options(param.enum_options))
-        mapped = value_map.get(str(visible_default))
-        return mapped is not None and str(mapped) == str(recorded)
-    if param.type in {"number", "integer"}:
-        try:
-            return float(visible_default) == float(recorded)
-        except (TypeError, ValueError):
-            return False
-    if param.type == "boolean":
-        normalized = {
-            "true": True, "1": True, "yes": True, "y": True,
-            "false": False, "0": False, "no": False, "n": False,
-        }
-        left_key = str(visible_default).strip().lower()
-        right_key = str(recorded).strip().lower()
-        return left_key in normalized and right_key in normalized and normalized[left_key] == normalized[right_key]
-    if param.type in {"date", "datetime"}:
-        left = _date_like_epoch_seconds(visible_default)
-        right = _date_like_epoch_seconds(recorded)
-        return left is not None and right is not None and abs(left - right) < 1
-    return str(visible_default) == str(recorded)
-
-
-
 def _apply_capability_field_to_param(
     spec: FlowSpec,
     raw: dict[str, Any],
@@ -4636,8 +4599,15 @@ def _apply_capability_field_to_param(
         screenshot_control is not None
         and screenshot_control.get("required") is True
     )
+    screenshot_optional = bool(
+        screenshot_control is not None
+        and screenshot_control.get("required") is False
+        and screenshot_control.get("required_convention_confirmed") is True
+        and screenshot_control.get("label_region_complete") is True
+    )
     allow_required = not automated or (
-        screenshot_required and not _param_field_manually_edited(param, "required")
+        (screenshot_required or screenshot_optional)
+        and not _param_field_manually_edited(param, "required")
     )
     if "required" in raw and allow_required:
         param.required = bool(raw["required"])
@@ -4658,17 +4628,9 @@ def _apply_capability_field_to_param(
         if isinstance(raw.get("enum_options"), list):
             param.enum_options = copy.deepcopy(raw["enum_options"])
             param.enum_value_map = None
-    allow_default = (
-        not automated
-        or (
-            not _param_axis_manually_edited(param, "value", "default_value")
-            and _cross_validated_visible_default(
-                param,
-                raw.get("visible_default"),
-                screenshot_control,
-            )
-        )
-    )
+    # Screenshot values are observations used for identity matching, not proof
+    # of an initial default. Recorded request values may be temporary user input.
+    allow_default = not automated
     if "visible_default" in raw and allow_default:
         param.default_value = copy.deepcopy(raw.get("visible_default"))
     if "exposed_to_caller" in raw and (not automated or allow_category):

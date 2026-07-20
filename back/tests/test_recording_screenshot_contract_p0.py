@@ -79,10 +79,6 @@ def test_screenshot_zero_match_report_is_rejected() -> None:
     assert report["status"] == "rejected"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="P2: screenshot values may match fields but must not write defaults",
-)
 def test_screenshot_value_never_writes_default_value() -> None:
     spec = FlowSpec(steps=[FlowStep(
         step_id="submit",
@@ -113,10 +109,6 @@ def test_screenshot_value_never_writes_default_value() -> None:
     assert spec.steps[0].params[0].default_value is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="P2: a proven page required-marker convention may correct required to optional",
-)
 def test_confirmed_required_marker_convention_can_set_optional() -> None:
     spec = FlowSpec(steps=[FlowStep(
         step_id="submit",

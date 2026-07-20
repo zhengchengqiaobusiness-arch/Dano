@@ -156,17 +156,18 @@ def _analysis_screenshot_guidance(screenshots: list[dict]) -> str:
 
 def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
     evidence_rule = (
-        " For every screenshot-derived field decision, field_semantics must contain the exact recorded step_id and "
-        "wire_path plus public_name, business_type, category, source_kind, required, "
+        " For every visible control, field_semantics must contain public_name, business_type, category, "
+        "source_kind, required, "
         "enum_options when visible, and numeric confidence from 0 to 1, " +
         "and evidence objects shaped as {source:'screenshot',screenshot_name,detail,visible_label,control_kind,"
         "editable,disabled,read_only,multiple,required,options}. control_kind must be one of "
         "text,textarea,rich_text,number,date,"
         "datetime,time,select,combobox,cascader,picker,checkbox,radio,switch,slider,upload,file,tree_select. "
         "Use enum/list-enum for single/multiple choice business types while preserving the recorded wire type. "
-        "Analyze every screenshot separately and emit one field_semantics item for every visible control that can "
-        "be matched to a recorded field. A red asterisk or explicit required marker means required=true; an "
-        "explicitly visible optional field means required=false. Textarea/text/date/number controls must not be "
+        "Analyze every screenshot separately and emit one field_semantics item for every visible control. Provide "
+        "step_id and wire_path only as recorded-field hints; the backend owns the final one-to-one match. A red "
+        "asterisk or explicit required marker means required=true. required=false needs either explicit DOM/form "
+        "validation evidence or a complete label region plus a confirmed required-marker convention. Textarea/text/date/number controls must not be "
         "classified as enum or api_option merely because an unrelated option endpoint was captured. "
         "Cover every matched recorded field, not only enums or fields that changed. Rebuild capabilities from exact "
         "request step_ids and emit capability_relations only with concrete from_capability/from_output and "
@@ -177,12 +178,14 @@ def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
         "A visibly read-only or disabled control may use runtime_var/system_const only with a safe screenshot "
         "source such as current_user, page_context, system_time, or constant; it must not claim api_option or "
         "previous_response without recorded grounding. "
+        "visible_default or visible_value may be reported for identity matching only and must never overwrite the "
+        "recorded default_value. "
         "Visible fields with no grounded recorded match must go to unresolved_items instead of being invented."
         if has_screenshots else ""
     )
     if has_screenshots:
         evidence_rule += (
-            " The required screenshot field axes are step_id, wire_path, public_name, visible_default, "
+            " The required screenshot field axes are public_name, "
             "business_type, category, source_kind, required, confidence, axis_status, and evidence. "
             "axis_status must resolve each of path,name,default_value,type,category,source,required as "
             "grounded,image_matched,preserved_fact,locked,or unresolved. Every evidence object must declare "

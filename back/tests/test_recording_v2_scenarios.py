@@ -1595,7 +1595,7 @@ def test_screenshot_without_positive_required_marker_cannot_downgrade_required()
     assert spec.steps[0].params[0].required is True
 
 
-def test_cross_validated_screenshot_default_can_preserve_recorded_default():
+def test_screenshot_value_cannot_be_promoted_to_default_value():
     spec = FlowSpec(steps=[FlowStep(
         step_id="submit",
         method="POST",
@@ -1628,7 +1628,7 @@ def test_cross_validated_screenshot_default_can_preserve_recorded_default():
         actor="planner",
     )
 
-    assert spec.steps[0].params[0].default_value == "2"
+    assert spec.steps[0].params[0].default_value is None
 
 
 def test_query_output_fields_use_mapped_response_schema_types():

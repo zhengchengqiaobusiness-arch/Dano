@@ -1178,11 +1178,10 @@ def test_r2_plan_normalization_rejects_ambiguous_normalized_wire_paths():
         raw_plan, spec,
     )["semantic_plan"]
     assert semantic["field_semantics"] == []
-    assert semantic["unresolved_items"] == [{
-        "type": "unmatched_field",
-        "step_id": "submit",
-        "wire_path": "id",
-    }]
+    assert semantic["unresolved_items"][0]["type"] == "unmatched_field"
+    assert semantic["unresolved_items"][0]["step_id"] == "submit"
+    assert semantic["unresolved_items"][0]["wire_path"] == "id"
+    assert semantic["unresolved_items"][0]["reason"] == "字段引用不存在或不唯一"
 
 
 def test_r2_plan_normalization_does_not_fill_missing_semantic_axes_from_old_values():
@@ -1258,3 +1257,74 @@ def test_no_screenshot_plan_keeps_existing_compatibility_for_empty_semantic_list
     normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
 
     assert normalized["semantic_plan"]["request_roles"][0]["step_id"] == "submit"
+
+
+def _screenshot_match_plan(field_semantics: list[dict]) -> dict:
+    return {
+        "_analysis_screenshot_count": 1,
+        "semantic_plan": {
+            "business_understanding": {"summary": "Submit request"},
+            "request_roles": [{
+                "step_id": "submit", "role": "business_write",
+                "name": "Submit request", "reason": "recorded request",
+            }],
+            "field_semantics": field_semantics,
+            "capabilities": [{
+                "name": "submit_request", "title": "Submit request",
+                "intent": "Submit request", "kind": "submit", "step_ids": ["submit"],
+            }],
+            "capability_relations": [],
+            "unresolved_items": [],
+        },
+        "ops": [],
+    }
+
+
+def test_screenshot_field_without_model_wire_identity_matches_unique_recorded_label():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/api/request",
+        source_meta={"role": "business_write"},
+        params=[
+            ParamField(path="title", key="申请标题", label="申请标题"),
+            ParamField(path="remark", key="备注", label="备注"),
+        ],
+    )])
+    plan = _screenshot_match_plan([{
+        "public_name": "备注", "business_type": "string",
+        "category": "user_param", "source_kind": "user_input",
+        "required": False, "confidence": 0.98,
+        "evidence": [{
+            "source": "screenshot", "screenshot_name": "form.png",
+            "visible_label": "备注", "control_kind": "textarea", "editable": True,
+        }],
+    }])
+
+    normalized = agent_tools_module._normalize_recording_plan_submission(plan, spec)
+    field = normalized["semantic_plan"]["field_semantics"][0]
+
+    assert (field["step_id"], field["wire_path"]) == ("submit", "remark")
+    assert field["match"]["status"] == "confirmed"
+    assert "label_exact" in field["match"]["reasons"]
+
+
+def test_screenshot_field_does_not_guess_between_duplicate_recorded_labels():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/api/request",
+        source_meta={"role": "business_write"},
+        params=[
+            ParamField(path="applicant.remark", key="备注", label="备注"),
+            ParamField(path="review.remark", key="备注", label="备注"),
+        ],
+    )])
+    plan = _screenshot_match_plan([{
+        "public_name": "备注", "business_type": "string",
+        "category": "user_param", "source_kind": "user_input",
+        "required": False, "confidence": 0.98,
+        "evidence": [{
+            "source": "screenshot", "screenshot_name": "form.png",
+            "visible_label": "备注", "control_kind": "textarea", "editable": True,
+        }],
+    }])
+
+    with pytest.raises(ToolError, match="未匹配到任何真实接口字段"):
+        agent_tools_module._normalize_recording_plan_submission(plan, spec)
