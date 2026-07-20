@@ -23,46 +23,6 @@ import {
 export const ASK_USER_QUESTION_CANCELLED_CODE =
   "ASK_USER_QUESTION_CANCELLED";
 
-const askUserQuestionOptionItemSchema = Type.Object({
-  id: Type.Union([Type.String({ minLength: 1 }), Type.Number()]),
-  label: Type.String({ minLength: 1 }),
-  extra: Type.Optional(Type.Record(Type.String(), Type.Any())),
-});
-
-const askUserQuestionAnswerInputSchema = Type.Union([
-  Type.String(),
-  Type.Number(),
-  askUserQuestionOptionItemSchema,
-  Type.Array(
-    Type.Union([
-      Type.String(),
-      Type.Number(),
-      askUserQuestionOptionItemSchema,
-    ]),
-  ),
-  Type.Boolean(),
-], {
-  description:
-    "Default or answer value: string for text/single-choice labels, string or number option ids, option item objects, arrays for multiple-choice, boolean for confirmation.",
-});
-
-const askUserQuestionDefaultSchema = Type.Union([
-  Type.String(),
-  Type.Number(),
-  askUserQuestionOptionItemSchema,
-  Type.Array(
-    Type.Union([
-      Type.String(),
-      Type.Number(),
-      askUserQuestionOptionItemSchema,
-    ]),
-  ),
-  Type.Boolean(),
-], {
-  description:
-    "Required for every non-confirmation question. Provide a context-based recommended default value. String defaults must be non-empty and must not be placeholders such as \"\".",
-});
-
 const askUserQuestionAnswerSchema = Type.Union([
   Type.String(),
   Type.Number(),
@@ -85,62 +45,27 @@ const missingConfirmationSourceError = JSON.stringify({
   example: { confirm: true, formIds: ["<formId>"] },
 });
 
-const askUserQuestionOptionSchema = Type.Union([
-  Type.String({ minLength: 1 }),
-  askUserQuestionOptionItemSchema,
-]);
-
-const askUserQuestionInputTypeSchema = Type.Union([
-  Type.Literal("text"),
-  Type.Literal("textarea"),
-  Type.Literal("date"),
-  Type.Literal("radio"),
-  Type.Literal("checkbox"),
-  Type.Literal("select"),
-  Type.Literal("treeSelect"),
-  Type.Literal("confirm"),
-]);
-
-const askUserQuestionDataSourceSchema = Type.Object({
-  type: Type.Literal("api"),
-  endpoint: Type.String({ minLength: 1 }),
-  method: Type.Optional(Type.Union([Type.Literal("GET"), Type.Literal("POST")])),
-  params: Type.Optional(Type.Record(Type.String(), Type.Any())),
-  searchParam: Type.Optional(Type.String({ minLength: 1 })),
-  pageParam: Type.Optional(Type.String({ minLength: 1 })),
-  pageSizeParam: Type.Optional(Type.String({ minLength: 1 })),
-  pageSize: Type.Optional(Type.Number({ minimum: 1 })),
-  resultPath: Type.Optional(Type.String({ minLength: 1 })),
-  totalPath: Type.Optional(Type.String({ minLength: 1 })),
-  idField: Type.Optional(Type.String({ minLength: 1 })),
-  labelField: Type.Optional(Type.String({ minLength: 1 })),
-  childrenField: Type.Optional(Type.String({ minLength: 1 })),
-  extraFields: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-});
-
 const askUserQuestionFields = {
   question: Type.Optional(
-    Type.String({
-      minLength: 1,
+    Type.Any({
       description:
         "Single-question call: the clear, specific question to ask the user. With questions[], top-level question/title/label/prompt is treated only as optional form instruction text; each actual field question must be inside questions[].",
     }),
   ),
-  title: Type.Optional(Type.String({ minLength: 1 })),
-  label: Type.Optional(Type.String({ minLength: 1 })),
-  prompt: Type.Optional(Type.String({ minLength: 1 })),
+  title: Type.Optional(Type.Any()),
+  label: Type.Optional(Type.Any()),
+  prompt: Type.Optional(Type.Any()),
   options: Type.Optional(
-    Type.Array(askUserQuestionOptionSchema, {
-      minItems: 2,
+    Type.Any({
       description:
         "Choices for this question. Strings remain supported; objects use stable id plus label. Include '其他' or 'Other' to let the user enter one custom answer. Omit for free-text, confirmation, or remote dataSource input.",
     }),
   ),
-  choices: Type.Optional(Type.Array(askUserQuestionOptionSchema, { minItems: 2 })),
-  inputType: Type.Optional(askUserQuestionInputTypeSchema),
-  type: Type.Optional(Type.String({ minLength: 1 })),
-  input_type: Type.Optional(Type.String({ minLength: 1 })),
-  component: Type.Optional(Type.String({ minLength: 1 })),
+  choices: Type.Optional(Type.Any()),
+  inputType: Type.Optional(Type.Any()),
+  type: Type.Optional(Type.Any()),
+  input_type: Type.Optional(Type.Any()),
+  component: Type.Optional(Type.Any()),
   fieldAssist: Type.Optional(
     Type.Any({
       description:
@@ -148,45 +73,43 @@ const askUserQuestionFields = {
     }),
   ),
   dateFormat: Type.Optional(
-    Type.String({
-      minLength: 1,
+    Type.Any({
       description:
         "Required when inputType is \"date\". A frontend date-control format such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\".",
     }),
   ),
-  dataSource: Type.Optional(askUserQuestionDataSourceSchema),
-  data_source: Type.Optional(askUserQuestionDataSourceSchema),
+  dataSource: Type.Optional(Type.Any()),
+  data_source: Type.Optional(Type.Any()),
   multiple: Type.Optional(
-    Type.Boolean({
+    Type.Any({
       default: false,
       description: "Set true with options to allow multiple selections.",
     }),
   ),
-  multi: Type.Optional(Type.Boolean()),
-  multipleSelect: Type.Optional(Type.Boolean()),
+  multi: Type.Optional(Type.Any()),
+  multipleSelect: Type.Optional(Type.Any()),
   required: Type.Optional(
-    Type.Boolean({
+    Type.Any({
       description:
         "Set true to require a non-empty answer. Defaults to false.",
     }),
   ),
-  default: Type.Optional(askUserQuestionDefaultSchema),
-  defaultValue: Type.Optional(askUserQuestionDefaultSchema),
-  prefill: Type.Optional(askUserQuestionDefaultSchema),
-  value: Type.Optional(askUserQuestionDefaultSchema),
+  default: Type.Optional(Type.Any()),
+  defaultValue: Type.Optional(Type.Any()),
+  prefill: Type.Optional(Type.Any()),
+  value: Type.Optional(Type.Any()),
 };
 
 export const askUserQuestionParameters = Type.Object({
   ...askUserQuestionFields,
   confirm: Type.Optional(
-    Type.Literal(true, {
+    Type.Any({
       description:
         "Confirm one or more previously submitted grouped forms. Use {confirm:true,formIds:[\"<formId>\"]}; Dano supplies each selected form's title and latest submitted answers.",
     }),
   ),
   formIds: Type.Optional(
-    Type.Array(Type.Any(), {
-      minItems: 1,
+    Type.Any({
       description:
         "Standard grouped-form confirmation target: an array of formId strings returned by earlier grouped form submissions in this Assistant Turn.",
     }),
@@ -225,37 +148,37 @@ export const askUserQuestionResultSchema = Type.Union([
 type PendingQuestionKind = "text" | "date" | "single" | "multiple" | "confirm";
 
 type AskUserQuestionRequestItem = {
-  id?: string;
-  key?: string;
-  name?: string;
-  question?: string;
-  title?: string;
-  label?: string;
-  prompt?: string;
-  options?: readonly (string | AskUserQuestionOption)[];
-  choices?: readonly (string | AskUserQuestionOption)[];
-  inputType?: AskUserQuestionInputType;
-  type?: string;
-  input_type?: string;
-  component?: string;
+  id?: unknown;
+  key?: unknown;
+  name?: unknown;
+  question?: unknown;
+  title?: unknown;
+  label?: unknown;
+  prompt?: unknown;
+  options?: unknown;
+  choices?: unknown;
+  inputType?: unknown;
+  type?: unknown;
+  input_type?: unknown;
+  component?: unknown;
   fieldAssist?: unknown;
   field_assist?: unknown;
   aiAssist?: unknown;
   ai_assist?: unknown;
   dateFormat?: unknown;
-  dataSource?: AskUserQuestionDataSource;
-  data_source?: AskUserQuestionDataSource;
-  multiple?: boolean;
-  multi?: boolean;
-  multipleSelect?: boolean;
+  dataSource?: unknown;
+  data_source?: unknown;
+  multiple?: unknown;
+  multi?: unknown;
+  multipleSelect?: unknown;
   required?: unknown;
-  confirm?: true;
+  confirm?: unknown;
   formId?: unknown;
   formIds?: unknown;
-  default?: AskUserQuestionAnswerInput;
-  defaultValue?: AskUserQuestionAnswerInput;
-  prefill?: AskUserQuestionAnswerInput;
-  value?: AskUserQuestionAnswerInput;
+  default?: unknown;
+  defaultValue?: unknown;
+  prefill?: unknown;
+  value?: unknown;
 };
 
 type AskUserQuestionRequestParams = AskUserQuestionRequestItem & {
@@ -357,11 +280,7 @@ export class AskUserQuestionCoordinator {
     if ("error" in normalized) {
       return this.rejectValidation(toolCallId, normalized.error, signal);
     }
-    if (
-      isPlainRecord(parsedRequest) &&
-      parsedRequest.questions !== undefined &&
-      !firstString(parsedRequest.title)
-    ) {
+    if (normalized.request.questions !== undefined && !normalized.request.title) {
       return this.rejectValidation(
         toolCallId,
         "Grouped forms require a top-level title",
@@ -689,8 +608,8 @@ function normalizeCompatibleRequest(
     normalizeCompatibleQuestion(request);
   const rawQuestions = request.questions;
   if (rawQuestions !== undefined) {
-    normalized.title = firstString(request.title);
-    normalized.question = firstString(request.question, request.label, request.prompt);
+    normalized.title = firstScalarString(request.title);
+    normalized.question = firstScalarString(request.question, request.label, request.prompt);
     if (!normalized.question) delete normalized.question;
     const questionsResult = normalizeCompatibleQuestions(rawQuestions);
     if ("error" in questionsResult) return questionsResult;
@@ -731,21 +650,30 @@ function normalizeCompatibleQuestion(
   request: AskUserQuestionRequestItem | Record<string, unknown>,
 ): NormalizedAskUserQuestionRequestItem {
   const normalized: NormalizedAskUserQuestionRequestItem = {};
-  const id = firstString(request.id, request.key, request.name);
+  const id = firstScalarString(request.id, request.key, request.name);
   if (id) normalized.id = id;
 
-  const question = firstString(request.question, request.label, request.prompt, request.title);
+  const question = firstScalarString(request.question, request.label, request.prompt, request.title);
   if (question) normalized.question = question;
-
-  const options = request.options ?? request.choices;
-  if (Array.isArray(options)) {
-    normalized.options = options as readonly (string | AskUserQuestionOption)[];
-  }
 
   const inputType = normalizeInputType(
     request.inputType ?? request.input_type ?? request.type ?? request.component,
   );
   if (inputType) normalized.inputType = inputType;
+
+  const rawOptions = request.options ?? request.choices;
+  const options = normalizeCompatibleOptions(rawOptions);
+  if (options.values.length > 0 && !options.invalid) {
+    normalized.options = options.values;
+  } else if (
+    rawOptions !== undefined &&
+    inputType !== "text" &&
+    inputType !== "textarea" &&
+    inputType !== "date" &&
+    inputType !== "confirm"
+  ) {
+    normalized.inputType = inputType ?? "radio";
+  }
 
   const fieldAssist = firstNormalizedFieldAssistValue(
     request.fieldAssist,
@@ -757,15 +685,23 @@ function normalizeCompatibleQuestion(
 
   if ("dateFormat" in request) normalized.dateFormat = request.dateFormat;
 
-  const dataSource = request.dataSource ?? request.data_source;
-  if (isCompatibleDataSource(dataSource)) normalized.dataSource = dataSource;
+  const dataSource = normalizeCompatibleDataSource(
+    request.dataSource ?? request.data_source,
+  );
+  if (dataSource) normalized.dataSource = dataSource;
+  if (dataSource && !inputType) normalized.inputType = "select";
 
-  const multiple = request.multiple ?? request.multi ?? request.multipleSelect;
-  if (typeof multiple === "boolean") normalized.multiple = multiple;
+  const multiple = firstNormalizedBoolean(
+    request.multiple,
+    request.multi,
+    request.multipleSelect,
+  );
+  if (multiple !== undefined) normalized.multiple = multiple;
 
-  if ("required" in request) normalized.required = request.required;
+  const required = normalizeBoolean(request.required);
+  if (required !== undefined) normalized.required = required;
 
-  if (request.confirm === true || inputType === "confirm") {
+  if (normalizeBoolean(request.confirm) === true || inputType === "confirm") {
     normalized.confirm = true;
   }
 
@@ -775,7 +711,8 @@ function normalizeCompatibleQuestion(
     request.prefill,
     request.value,
   );
-  if (isAnswerInput(defaultValue)) normalized.default = defaultValue;
+  const compatibleDefault = normalizeCompatibleAnswerInput(defaultValue);
+  if (compatibleDefault !== undefined) normalized.default = compatibleDefault;
 
   return normalized;
 }
@@ -826,7 +763,7 @@ export function isAskUserQuestionConfirmationCall(
   const parsed = parseJsonString(rawRequest);
   return (
     isPlainRecord(parsed) &&
-    parsed.confirm === true &&
+    normalizeBoolean(parsed.confirm) === true &&
     parsed.questions === undefined
   );
 }
@@ -949,42 +886,177 @@ function confirmationParameterShape(value: unknown): string {
   return typeof value;
 }
 
-function isCompatibleDataSource(
+function normalizeCompatibleOptions(
   value: unknown,
-): value is AskUserQuestionDataSource {
-  return (
-    isPlainRecord(value) &&
-    value.type === "api" &&
-    typeof value.endpoint === "string" &&
-    value.endpoint.trim().length > 0
-  );
+): { values: Array<string | AskUserQuestionOption>; invalid: boolean } {
+  if (!Array.isArray(value)) {
+    return { values: [], invalid: value !== undefined };
+  }
+  const values = value.flatMap(option => {
+    const normalized = normalizeCompatibleOption(option);
+    return normalized === undefined ? [] : [normalized];
+  });
+  return { values, invalid: values.length !== value.length };
 }
 
-function isAnswerInput(value: unknown): value is AskUserQuestionAnswerInput {
-  return (
+function normalizeCompatibleOption(
+  value: unknown,
+): string | AskUserQuestionOption | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed || undefined;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return { id: value, label: String(value) };
+  }
+  if (typeof value === "boolean") return String(value);
+  if (!isPlainRecord(value)) return undefined;
+
+  const rawId = firstDefined(value.id, value.value, value.key);
+  const rawLabel = firstDefined(value.label, value.text, value.name);
+  const id = normalizeOptionId(rawId ?? rawLabel);
+  const label = firstScalarString(rawLabel, id);
+  if (id === undefined || !label) return undefined;
+  return {
+    id,
+    label,
+    ...(isPlainRecord(value.extra) ? { extra: value.extra } : {}),
+  };
+}
+
+function normalizeOptionId(value: unknown): AskUserQuestionOptionId | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value === "boolean") return String(value);
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function normalizeCompatibleAnswerInput(
+  value: unknown,
+): AskUserQuestionAnswerInput | undefined {
+  if (
     typeof value === "string" ||
-    typeof value === "number" ||
     typeof value === "boolean" ||
-    isOptionObject(value) ||
-    (Array.isArray(value) &&
-      value.every(
-        item =>
-          typeof item === "string" ||
-          typeof item === "number" ||
-          isOptionObject(item),
-      ))
-  );
+    (typeof value === "number" && Number.isFinite(value))
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const items = value.flatMap(item => {
+      const normalized = normalizeCompatibleOption(item);
+      return normalized === undefined ? [] : [normalized];
+    });
+    return items;
+  }
+  return normalizeCompatibleOption(value);
+}
+
+function normalizeCompatibleDataSource(
+  value: unknown,
+): AskUserQuestionDataSource | undefined {
+  const parsed = parseJsonString(value);
+  if (!isPlainRecord(parsed)) return undefined;
+  if (firstScalarString(parsed.type)?.toLowerCase() !== "api") return undefined;
+  const endpoint = firstScalarString(parsed.endpoint)?.trim();
+  if (!endpoint) return undefined;
+
+  const methodValue = firstScalarString(parsed.method)?.toUpperCase();
+  const method = methodValue === "GET" || methodValue === "POST"
+    ? methodValue
+    : undefined;
+  const pageSizeValue =
+    typeof parsed.pageSize === "number"
+      ? parsed.pageSize
+      : typeof parsed.pageSize === "string"
+        ? Number(parsed.pageSize.trim())
+        : Number.NaN;
+  const pageSize = Number.isFinite(pageSizeValue) && pageSizeValue >= 1
+    ? pageSizeValue
+    : undefined;
+  const extraFieldsValue = Array.isArray(parsed.extraFields)
+    ? parsed.extraFields
+    : parsed.extraFields === undefined
+      ? []
+      : [parsed.extraFields];
+  const extraFields = extraFieldsValue.flatMap(field => {
+    const normalized = firstScalarString(field);
+    return normalized ? [normalized] : [];
+  });
+
+  return {
+    type: "api",
+    endpoint,
+    ...(method ? { method } : {}),
+    ...(isPlainRecord(parsed.params) ? { params: parsed.params } : {}),
+    ...normalizedDataSourceStrings(parsed),
+    ...(pageSize !== undefined ? { pageSize } : {}),
+    ...(extraFields.length > 0 ? { extraFields } : {}),
+  };
+}
+
+function normalizedDataSourceStrings(
+  source: Record<string, unknown>,
+): Partial<AskUserQuestionDataSource> {
+  const normalized: Partial<AskUserQuestionDataSource> = {};
+  for (const key of [
+    "searchParam",
+    "pageParam",
+    "pageSizeParam",
+    "resultPath",
+    "totalPath",
+    "idField",
+    "labelField",
+    "childrenField",
+  ] as const) {
+    const value = firstScalarString(source[key]);
+    if (value) normalized[key] = value;
+  }
+  return normalized;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function firstString(...values: unknown[]): string | undefined {
+function firstScalarString(...values: unknown[]): string | undefined {
   for (const value of values) {
-    if (typeof value !== "string") continue;
-    const trimmed = value.trim();
+    if (
+      typeof value !== "string" &&
+      typeof value !== "number" &&
+      typeof value !== "boolean"
+    ) {
+      continue;
+    }
+    if (typeof value === "number" && !Number.isFinite(value)) continue;
+    const trimmed = String(value).trim();
     if (trimmed) return trimmed;
+  }
+  return undefined;
+}
+
+function normalizeBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (value === 0) return false;
+    if (value === 1) return true;
+    return undefined;
+  }
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (["true", "1", "yes", "on", "是", "开启", "启用"].includes(normalized)) {
+    return true;
+  }
+  if (["false", "0", "no", "off", "否", "关闭", "禁用"].includes(normalized)) {
+    return false;
+  }
+  return undefined;
+}
+
+function firstNormalizedBoolean(...values: unknown[]): boolean | undefined {
+  for (const value of values) {
+    const normalized = normalizeBoolean(value);
+    if (normalized !== undefined) return normalized;
   }
   return undefined;
 }
@@ -1288,13 +1360,16 @@ function normalizeQuestion(
   const inputType = request.confirm
     ? "confirm"
     : (request.inputType ?? (request.multiple ? "checkbox" : request.options ? "radio" : "text"));
-  if (inputType === "confirm" && request.options) {
-    return "Confirmation questions cannot provide options or multiple";
-  }
-  if (request.required !== undefined && typeof request.required !== "boolean") {
-    return "required must be a boolean. Retry with required:true or required:false.";
-  }
   const required = request.required === true;
+  const acceptsChoices =
+    inputType === "radio" ||
+    inputType === "checkbox" ||
+    inputType === "select" ||
+    inputType === "treeSelect";
+  const acceptsDataSource = inputType === "select" || inputType === "treeSelect";
+  const compatibleOptions = acceptsChoices ? request.options : undefined;
+  const compatibleDataSource = acceptsDataSource ? request.dataSource : undefined;
+  const multiple = acceptsChoices && (request.multiple || inputType === "checkbox");
   const dateFormat =
     inputType === "date" && typeof request.dateFormat === "string"
       ? request.dateFormat.trim()
@@ -1310,16 +1385,8 @@ function normalizeQuestion(
     ) {
       return `默认日期必须匹配 dateFormat: ${dateFormat}`;
     }
-  } else if (request.dateFormat !== undefined) {
-    return "dateFormat is only allowed when inputType is \"date\".";
   }
-  if (inputType === "date" && (request.options || request.multiple || request.dataSource)) {
-    return "Date questions cannot provide options, multiple, or dataSource.";
-  }
-  if (request.confirm && (request.options || request.multiple || request.dataSource)) {
-    return "Confirmation questions cannot provide options or multiple";
-  }
-  const rawOptions = request.options?.map(normalizeOption);
+  const rawOptions = compatibleOptions?.map(normalizeOption);
   if (rawOptions?.some(option => !option)) {
     return "Question options must be non-empty and unique";
   }
@@ -1328,20 +1395,17 @@ function normalizeQuestion(
   if (new Set(optionIds).size !== optionIds.length) {
     return "Question options must be non-empty and unique";
   }
-  if (request.dataSource && inputType !== "select" && inputType !== "treeSelect") {
-    return "Data sources require select or treeSelect inputType";
-  }
   if (
-    (request.multiple || inputType === "checkbox") &&
+    multiple &&
     !options &&
-    !request.dataSource
+    !compatibleDataSource
   ) {
     return "Multiple-choice questions require options or dataSource";
   }
   if (
     (inputType === "radio" || inputType === "select" || inputType === "treeSelect") &&
     !options &&
-    !request.dataSource
+    !compatibleDataSource
   ) {
     return "Choice questions require options or dataSource";
   }
@@ -1349,8 +1413,8 @@ function normalizeQuestion(
   let kind: PendingQuestionKind = "text";
   if (inputType === "confirm") kind = "confirm";
   else if (inputType === "date") kind = "date";
-  else if (request.multiple || inputType === "checkbox") kind = "multiple";
-  else if (options || request.dataSource || inputType === "radio" || inputType === "select" || inputType === "treeSelect") {
+  else if (multiple) kind = "multiple";
+  else if (options || compatibleDataSource || inputType === "radio" || inputType === "select" || inputType === "treeSelect") {
     kind = "single";
   }
 
@@ -1364,18 +1428,23 @@ function normalizeQuestion(
       : {}),
     required,
     ...(options ? { options } : {}),
-    ...(request.dataSource ? { dataSource: request.dataSource } : {}),
+    ...(compatibleDataSource ? { dataSource: compatibleDataSource } : {}),
     ...(dateFormat ? { dateFormat } : {}),
   };
   if (kind !== "confirm" && request.default === undefined) {
     return "默认答案缺失：每个非确认问题都必须提供非空 default 推荐值";
   }
   if (request.default !== undefined) {
-    if (typeof request.default === "string" && !request.default.trim()) {
+    const compatibleDefault =
+      kind === "text" &&
+      (typeof request.default === "number" || typeof request.default === "boolean")
+        ? String(request.default)
+        : request.default;
+    if (typeof compatibleDefault === "string" && !compatibleDefault.trim()) {
       return "默认答案无效：default 必须是非空推荐值，不能是空字符串";
     }
     try {
-      question.default = normalizeAnswer(question, request.default);
+      question.default = normalizeAnswer(question, compatibleDefault);
     } catch (cause) {
       if (cause instanceof Error) return `默认答案无效：${cause.message}`;
       return "默认答案无效";
@@ -1529,7 +1598,7 @@ When the user asks to fill in a form, complete a form, or provide form fields, u
 
 Use exactly one ask_user_question call per assistant response. If you need more than one answer, provide a form title and use only the questions array: {"title":"请假申请","questions":[{"id":"leave_type","question":"请假类型？","options":["事假",{"id":"sick","label":"病假"}],"default":"事假","required":true},{"id":"start_at","question":"开始时间？","inputType":"date","dateFormat":"yyyy-MM-dd HH:mm","default":"2026-07-08 09:00","required":true},{"id":"reason","question":"原因？","default":"个人事务","fieldAssist":true,"required":true}]}. When questions is present, put every field's options, inputType, fieldAssist, dateFormat, required, dataSource, multiple, and default inside the matching questions[] item; do not include top-level confirm or top-level field configuration.
 
-For a single question, use top-level question/options/inputType/fieldAssist/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. fieldAssist controls generation and polishing actions for text fields; it defaults to false for single-line text and true for textarea. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. default is required and string defaults must be non-empty. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. When the workflow needs final confirmation for submitted grouped forms, call {"confirm":true,"formIds":["<formId>"]} with the formId values returned by those submissions. This is only for grouped-form confirmation; use a normal single-choice question to confirm an ordinary sentence or operation. If final confirmation is not needed, continue without this call.`,
+For a single question, use top-level question/options/inputType/fieldAssist/dateFormat/required/dataSource/multiple/default. For multiple questions, use title plus questions[]. fieldAssist controls generation and polishing actions for text fields; it defaults to false for single-line text and true for textarea. Dates require inputType:"date" plus dateFormat, for example "yyyy-MM-dd" or "yyyy-MM-dd HH:mm"; Dano returns the user's submitted date value as-is. required defaults to false; set required:true when an empty answer must not be submitted. default is required and string defaults must be non-empty. Use inputType:"select" or inputType:"treeSelect" with dataSource for remote API-backed choices. Dano normalizes unambiguous aliases and safe scalar deviations, ignores unknown or inapplicable optional fields, and rejects only inputs that cannot preserve rendering, submission, or answer mapping. When the workflow needs final confirmation for submitted grouped forms, call {"confirm":true,"formIds":["<formId>"]} with the formId values returned by those submissions. This is only for grouped-form confirmation; use a normal single-choice question to confirm an ordinary sentence or operation. If final confirmation is not needed, continue without this call.`,
   promptSnippet:
     "Ask the user one native question card; for several fields use one questions array with one submit button",
   promptGuidelines: [
@@ -1539,6 +1608,7 @@ For a single question, use top-level question/options/inputType/fieldAssist/date
     "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
     "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
     "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
+    "Use the documented canonical parameters. Dano treats model-generated arguments as best-effort input and normalizes safe aliases or coercions, but still rejects ambiguity that could change rendering, submission, or answer mapping.",
     "Give every non-confirmation question a context-based recommended non-empty default. Do not use empty string or placeholder defaults.",
     "Set required:true only when an answer is mandatory. required defaults to false.",
     "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",

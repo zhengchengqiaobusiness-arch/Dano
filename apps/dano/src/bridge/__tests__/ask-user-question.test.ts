@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Value } from "typebox/value";
 import type {
   AskUserQuestionAnswerInput,
   AskUserQuestionDataSource,
@@ -14,6 +15,7 @@ import {
   ASK_USER_QUESTION_CANCELLED_CODE,
   AskUserQuestionCoordinator,
   askUserQuestionCoordinator,
+  askUserQuestionParameters,
   askUserQuestionTool,
   normalizeAskUserQuestionCardRequest,
 } from "../ask-user-question.js";
@@ -240,6 +242,7 @@ describe("ask_user_question tool", () => {
       "If the user cancels ask_user_question, stop the current workflow. Do not ask again or retry unless the user sends a new message explicitly requesting it.",
       "Invoke ask_user_question as a native tool call. Never print, describe, or wrap a tool call in <question> tags, XML, JSON, Markdown, or other assistant text.",
       "If ask_user_question returns a validation error, retry silently with a corrected native tool call; do not explain the correction to the user.",
+      "Use the documented canonical parameters. Dano treats model-generated arguments as best-effort input and normalizes safe aliases or coercions, but still rejects ambiguity that could change rendering, submission, or answer mapping.",
       "Give every non-confirmation question a context-based recommended non-empty default. Do not use empty string or placeholder defaults.",
       "Set required:true only when an answer is mandatory. required defaults to false.",
       "For date fields, use inputType:\"date\" and provide dateFormat such as \"yyyy-MM-dd\" or \"yyyy-MM-dd HH:mm\". The dateFormat configures the frontend date control display and submitted output.",
@@ -420,6 +423,161 @@ describe("ask_user_question tool", () => {
     });
     if (!request?.batch) throw new Error("expected grouped request");
     expect(request.questions[1]).not.toHaveProperty("fieldAssist");
+  });
+
+  it("lets best-effort model input reach runtime normalization", () => {
+    expect(
+      Value.Check(askUserQuestionParameters, {
+        question: 404,
+        options: [1, { value: 2, text: "Two" }],
+        multiple: "false",
+        required: "true",
+        default: 1,
+        unknownPresentationHint: "ignored",
+      }),
+    ).toBe(true);
+  });
+
+  it("coerces safe scalar deviations and ignores optional fields that do not apply", () => {
+    expect(
+      normalizeAskUserQuestionCardRequest({
+        question: 404,
+        inputType: "text",
+        default: 2026,
+        required: "yes",
+        dateFormat: "yyyy-MM-dd",
+        dataSource: { type: "api", endpoint: "/api/ignored" },
+        unknownPresentationHint: "ignored",
+      }),
+    ).toEqual({
+      batch: false,
+      kind: "text",
+      id: "answer",
+      question: "404",
+      fieldAssist: false,
+      required: true,
+      default: "2026",
+    });
+  });
+
+  it("treats unconvertible non-functional values as omitted", () => {
+    expect(
+      normalizeAskUserQuestionCardRequest({
+        question: "Reason?",
+        inputType: "text",
+        options: { unexpected: true },
+        multiple: "sometimes",
+        required: "sometimes",
+        dateFormat: { unexpected: true },
+        dataSource: "unexpected",
+        default: "Annual leave",
+      }),
+    ).toEqual({
+      batch: false,
+      kind: "text",
+      id: "answer",
+      question: "Reason?",
+      fieldAssist: false,
+      default: "Annual leave",
+    });
+  });
+
+  it("uses the same compatible aliases and coercions inside questions", () => {
+    expect(
+      normalizeAskUserQuestionCardRequest({
+        title: 2026,
+        questions: [
+          {
+            key: 101,
+            label: 202,
+            input_type: "multi-select",
+            choices: [1, { value: 2, text: "Two", ignored: true }],
+            multi: "on",
+            required: 1,
+            defaultValue: [1],
+          },
+        ],
+      }),
+    ).toEqual({
+      batch: true,
+      title: "2026",
+      questions: [
+        {
+          id: "101",
+          kind: "multiple",
+          question: "202",
+          options: [
+            { id: 1, label: "1" },
+            { id: 2, label: "Two" },
+          ],
+          required: true,
+          default: [1],
+        },
+      ],
+    });
+  });
+
+  it("normalizes a recoverable remote data source without leaking input aliases", () => {
+    expect(
+      normalizeAskUserQuestionCardRequest({
+        question: "Employee?",
+        inputType: "dropdown",
+        data_source: {
+          type: "API",
+          endpoint: " /api/employees ",
+          method: "post",
+          searchParam: 9,
+          pageSize: "20",
+          ignored: "value",
+        },
+        defaultValue: "emp_1",
+      }),
+    ).toEqual({
+      batch: false,
+      kind: "select",
+      id: "answer",
+      question: "Employee?",
+      options: [],
+      dataSource: {
+        type: "api",
+        endpoint: "/api/employees",
+        method: "POST",
+        searchParam: "9",
+        pageSize: 20,
+      },
+      default: "emp_1",
+    });
+  });
+
+  it("ignores choice-only configuration on date questions", () => {
+    expect(
+      normalizeAskUserQuestionCardRequest({
+        question: "Start date?",
+        inputType: "date",
+        dateFormat: "yyyy-MM-dd",
+        options: ["Today", "Tomorrow"],
+        multiple: true,
+        dataSource: { type: "api", endpoint: "/api/ignored" },
+        default: "2026-07-20",
+      }),
+    ).toEqual({
+      batch: false,
+      kind: "date",
+      id: "answer",
+      question: "Start date?",
+      dateFormat: "yyyy-MM-dd",
+      default: "2026-07-20",
+    });
+  });
+
+  it("still rejects malformed options when they determine choice semantics", () => {
+    expect(
+      normalizeAskUserQuestionCardRequest({
+        question: "Environment?",
+        options: ["Production", null],
+        default: "Production",
+      }),
+    ).toBeNull();
   });
 
   it("drops redundant grouped top-level semantics from the card protocol", () => {
@@ -845,24 +1003,34 @@ describe("ask_user_question tool", () => {
     ).rejects.toThrow("默认日期必须匹配 dateFormat: yyyy-MM-dd");
   });
 
-  it("rejects non-boolean required values", async () => {
-    await expect(
-      executeQuestion("required-string", {
-        question: "Start date?",
-        inputType: "date",
-        dateFormat: "yyyy-MM-dd",
-        required: "true",
-      }),
-    ).rejects.toThrow("required must be a boolean");
+  it("coerces an unambiguous required value", async () => {
+    const execution = executeQuestion("required-string", {
+      question: "Start date?",
+      inputType: "date",
+      dateFormat: "yyyy-MM-dd",
+      required: "true",
+    });
+    askUserQuestionCoordinator.answer("required-string", {
+      cancelled: false,
+      answer: "2026-07-20",
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: "2026-07-20" },
+    });
   });
 
-  it("rejects dateFormat on non-date questions", async () => {
-    await expect(
-      executeQuestion("text-date-format", {
-        question: "Reason?",
-        dateFormat: "yyyy-MM-dd",
-      }),
-    ).rejects.toThrow("dateFormat is only allowed");
+  it("ignores dateFormat on non-date questions", async () => {
+    const execution = executeQuestion("text-date-format", {
+      question: "Reason?",
+      dateFormat: "yyyy-MM-dd",
+    });
+    askUserQuestionCoordinator.answer("text-date-format", {
+      cancelled: false,
+      answer: "Annual leave",
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: "Annual leave" },
+    });
   });
 
   it("returns multiple selected options", async () => {
@@ -1789,32 +1957,36 @@ describe("ask_user_question tool", () => {
     ).rejects.toThrow(/invalid_confirmation_source.*fallbackAttempted/s);
   });
 
-  it("rejects grouped confirmation parameters instead of waiting forever", async () => {
-    await expect(
-      askUserQuestionTool.execute(
-        "group-confirm-invalid",
-        {
-          title: "测试表单",
-          questions: [
-            {
-              id: "confirm_leave",
-              question: "Submit leave request?",
-              options: ["Submit", "Revise"],
-              confirm: true,
-            },
-          ],
-        },
-        undefined,
-        undefined,
-        {} as never,
-      ),
-    ).rejects.toThrow("cannot provide options");
-    expect(() =>
-      askUserQuestionCoordinator.answer("group-confirm-invalid", {
-        cancelled: false,
-        answer: true,
-      }),
-    ).toThrow("Pending question not found");
+  it("ignores choice-only parameters on a grouped confirmation field", async () => {
+    const execution = askUserQuestionTool.execute(
+      "group-confirm-compatible",
+      {
+        title: "测试表单",
+        questions: [
+          {
+            id: "confirm_leave",
+            question: "Submit leave request?",
+            options: ["Submit", "Revise"],
+            confirm: true,
+          },
+        ],
+      } as never,
+      undefined,
+      undefined,
+      {} as never,
+    );
+    expect(askUserQuestionCoordinator.cardRequest("group-confirm-compatible"))
+      .toMatchObject({
+        batch: true,
+        questions: [{ id: "confirm_leave", kind: "confirm" }],
+      });
+    askUserQuestionCoordinator.answer("group-confirm-compatible", {
+      cancelled: false,
+      answer: { confirm_leave: true },
+    });
+    await expect(execution).resolves.toMatchObject({
+      details: { status: "answered", answer: { confirm_leave: true } },
+    });
   });
 
   it("returns cancellation as a successful tool result", async () => {
