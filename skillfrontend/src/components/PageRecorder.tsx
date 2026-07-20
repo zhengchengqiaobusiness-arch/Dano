@@ -1617,6 +1617,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const { _rollback, ...wireMessage } = next;
     if (!sendRaw(wireMessage)) {
       next._rollback?.();
+      restoreAuthoritativeFlowSpec();
       flowMutationInFlightRef.current = null;
       flowMutationQueueRef.current = [];
       afterFlowSyncRef.current = null;
@@ -1628,7 +1629,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       const { _rollback, ...wireMessage } = obj;
       const sent = sendRaw(wireMessage);
-      if (!sent) _rollback?.();
+      if (!sent) {
+        _rollback?.();
+        restoreAuthoritativeFlowSpec();
+      }
       return sent;
     }
     const operationId = obj.operation_id || `flow-${Date.now()}-${++flowMutationSeqRef.current}`;
@@ -1656,14 +1660,17 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (restoreLocal) {
       [...flowMutationQueueRef.current].reverse().forEach((queued) => queued?._rollback?.());
       active?._rollback?.();
-      if (authoritativeFlowSpecRef.current) {
-        flowSpecRef.current = authoritativeFlowSpecRef.current;
-        setFlowSpec(authoritativeFlowSpecRef.current);
-      }
+      restoreAuthoritativeFlowSpec();
     }
     flowMutationInFlightRef.current = null;
     flowMutationQueueRef.current = [];
     afterFlowSyncRef.current = null;
+  }
+
+  function restoreAuthoritativeFlowSpec() {
+    if (!authoritativeFlowSpecRef.current) return;
+    flowSpecRef.current = authoritativeFlowSpecRef.current;
+    setFlowSpec(authoritativeFlowSpecRef.current);
   }
 
   function runAfterFlowSync(callback: () => void) {
@@ -2355,7 +2362,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     // 同时清理依赖和选择器，避免字段卡片消失后仍残留不可见引用。
     const current = flowSpecRef.current;
     if (!current) return;
-    const removedPath = stripBodyPrefix(p.path || "");
+    const currentStep = (current.steps || []).find((step) => step.step_id === stepId);
     const next: FlowSpecData = {
       ...current,
       steps: (current.steps || []).map((step) => {
@@ -2365,17 +2372,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         return {
           ...step,
           params: (step.params || []).filter((candidate) => !paramMatches(candidate, p)),
-          selects: (step.selects || []).filter((binding) => {
-            const bindingPath = stripBodyPrefix(binding.path || binding.id_path || "");
-            return bindingPath !== removedPath && binding.param !== p.key;
-          }),
+          selects: (step.selects || []).filter((binding) => !selectBindingMatchesParam(step, binding, p)),
           identity: (step.identity || []).filter((binding) =>
-            stripBodyPrefix(String(binding?.path || "")) !== removedPath),
+            !referenceMatchesParam(step, String(binding?.path || ""), p)),
           sample_inputs: sampleInputs,
         };
       }),
       links: (current.links || []).filter((link) =>
-        !(link.target_step_id === stepId && stripBodyPrefix(link.target_path || "") === removedPath)),
+        !(link.target_step_id === stepId && currentStep
+          && referenceMatchesParam(currentStep, link.target_path || "", p))),
       capabilities: (current.capabilities || []).map((cap) => capabilityActualStepIds(cap).includes(stepId)
         ? { ...cap, confirmed: false }
         : cap),
@@ -2386,12 +2391,31 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function paramMatches(a: FlowParam, b: FlowParam) {
     if (a.field_id && b.field_id) return a.field_id === b.field_id;
-    const ap = stripBodyPrefix(a.path || "");
-    const bp = stripBodyPrefix(b.path || "");
+    const ap = String(a.path || "");
+    const bp = String(b.path || "");
     if (ap && bp && ap === bp) return true;
-    if (a.key && b.key && a.key === b.key) return true;
-    if (a.label && b.label && a.label === b.label) return true;
+    if (!ap && !bp && a.key && b.key && a.key === b.key) return true;
+    if (!ap && !bp && a.label && b.label && a.label === b.label) return true;
     return false;
+  }
+  function referenceMatchesParam(step: FlowStepData, referencePath: string, p: FlowParam) {
+    const reference = String(referencePath || "");
+    if (!reference) return false;
+    if (reference === String(p.path || "")) return true;
+    const normalized = stripBodyPrefix(reference);
+    const matches = (step.params || []).filter((candidate) =>
+      stripBodyPrefix(candidate.path || "") === normalized);
+    return matches.length === 1 && paramMatches(matches[0], p);
+  }
+  function selectBindingMatchesParam(step: FlowStepData, binding: FlowSelectBinding, p: FlowParam) {
+    if (referenceMatchesParam(step, binding.path || binding.id_path || "", p)) return true;
+    if (binding.path || binding.id_path) return false;
+    const sameKey = (step.params || []).filter((item) => item.key === p.key).length === 1
+      && binding.param === p.key;
+    const sameLabel = !!p.label
+      && (step.params || []).filter((item) => item.label === p.label).length === 1
+      && binding.param === p.label;
+    return sameKey || sameLabel;
   }
   function patchLocalParam(stepId: string, p: FlowParam, updates: Record<string, any>) {
     const base = flowSpecRef.current;
@@ -2411,7 +2435,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           return nextParam;
         });
         const newSelects = (step.selects || []).map((sel) => {
-          const sameParam = (sel.param && oldKey && sel.param === oldKey) || stripBodyPrefix(sel.path || "") === stripBodyPrefix(p.path || "");
+          const sameParam = selectBindingMatchesParam(step, sel, p);
           if (!sameParam) return sel;
           return {
             ...sel,
@@ -3083,14 +3107,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return out;
   }
   function incomingLink(stepId: string, path: string) {
-    return (flowSpec?.links || []).find((l) => l.target_step_id === stepId && stripBodyPrefix(l.target_path) === stripBodyPrefix(path));
+    const step = (flowSpec?.steps || []).find((item) => item.step_id === stepId);
+    const param = step?.params?.find((item) => item.path === path);
+    return (flowSpec?.links || []).find((link) =>
+      link.target_step_id === stepId
+      && (step && param ? referenceMatchesParam(step, link.target_path, param) : link.target_path === path));
   }
   function selectBindingForParam(step: FlowStepData, p: FlowParam) {
     const selects = step.selects || [];
-    return selects.find((s) => s.path === p.path) ||
-      selects.find((s) => s.id_path === p.path) ||
-      selects.find((s) => !s.path && s.param === p.key) ||
-      selects.find((s) => s.param === p.key);
+    return selects.find((binding) => selectBindingMatchesParam(step, binding, p));
   }
   function enumOptionEdits(step: FlowStepData, p: FlowParam, options: Array<string | { label: string; value?: any }>, optionMap?: Record<string, any> | null) {
     const records = options.map(enumOptionRecord).filter((item): item is { label: string; value?: any } => !!item);
@@ -3107,6 +3132,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return "manual";
   }
   function upsertSelectBinding(step: FlowStepData, p: FlowParam, patch: Partial<FlowSelectBinding>, extraEdits: any[] = []) {
+    const previousSpec = flowSpecRef.current;
     const existing = selectBindingForParam(step, p);
     const hasExplicitIdPath = Object.prototype.hasOwnProperty.call(patch, "id_path");
     const sourceChanged = Object.prototype.hasOwnProperty.call(patch, "source_url")
@@ -3142,9 +3168,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       nextBinding.id_path = currentPath;
     }
     if (nextBinding.options) nextBinding.count = nextBinding.options.length;
-    const replaced = (step.selects || []).some((s) => s.path === p.path || (!s.path && s.param === p.key) || s === existing);
+    const replaced = (step.selects || []).some((binding) => binding === existing || selectBindingMatchesParam(step, binding, p));
     const nextSelects = replaced
-      ? (step.selects || []).map((s) => (s.path === p.path || (!s.path && s.param === p.key) || s === existing ? nextBinding : s))
+      ? (step.selects || []).map((binding) => (binding === existing || selectBindingMatchesParam(step, binding, p) ? nextBinding : binding))
       : [...(step.selects || []), nextBinding];
     const edits: any[] = [{ op: "upsert_select", step_id: step.step_id, binding: nextBinding }];
     const paramUpdates: Record<string, any> = {};
@@ -3155,7 +3181,15 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     }
     patchLocalStep(step.step_id, { selects: nextSelects });
     if (Object.keys(paramUpdates).length) patchLocalParam(step.step_id, p, paramUpdates);
-    send({ type: "flow_update", edits: [...edits, ...extraEdits] });
+    send({
+      type: "flow_update",
+      edits: [...edits, ...extraEdits],
+      _rollback: () => {
+        if (!previousSpec) return;
+        flowSpecRef.current = previousSpec;
+        setFlowSpec(previousSpec);
+      },
+    });
   }
   function enumOptionRecord(x: any): { label: string; value?: any } | null {
     if (x == null) return null;
@@ -3194,6 +3228,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function enumMappingCompleteForParam(step: FlowStepData, p: FlowParam) {
     const records = enumOptionRecordsForParam(step, p);
     return records.length > 0 && records.every((item) => item.value !== undefined);
+  }
+  function enumMissingValueLabelsForParam(step: FlowStepData, p: FlowParam) {
+    return enumOptionRecordsForParam(step, p)
+      .filter((item) => item.value === undefined)
+      .map((item) => item.label);
   }
   function parseEnumOptionsText(text: string): { options: Array<{ label: string; value?: any }>; optionMap: Record<string, any> | null; mappingComplete: boolean } {
     const chunks = text.includes("\n") ? text.split(/\n/) : text.split(/[,，]/);
@@ -3600,6 +3639,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const selectBinding = selectBindingForParam(step, p);
     const enumOptions = enumOptionsForParam(step, p);
     const enumMappingComplete = enumMappingCompleteForParam(step, p);
+    const enumMissingValueLabels = enumMissingValueLabelsForParam(step, p);
     const enumSelectOptions = enumOptions.map((x) => ({ label: x, value: x }));
     const isApiOption = p.source_kind === "api_option";
     const isTypedEnum = p.type === "enum" || p.type === "list-enum";
@@ -3636,7 +3676,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 {linked && <Tag color="cyan">依赖字段</Tag>}
                 {isApiOption && <Tag color="geekblue">接口候选</Tag>}
                 {isEnumOption && enumOptions.length > 0 && <Tag color="purple">枚举 {enumOptions.length}</Tag>}
-                {isEnumOption && enumOptions.length > 0 && !enumMappingComplete && <Tag color="orange">仅有名称，值未映射</Tag>}
+                {isEnumOption && enumOptions.length > 0 && !enumMappingComplete && (
+                  <Tag color="orange">未映射值：{enumMissingValueLabels.join("、")}</Tag>
+                )}
                 {needsManualConfirm && <Tag color="warning">待确认</Tag>}
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.reason}</Typography.Text>
               </Space>
@@ -3722,7 +3764,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                         <Tag color={selectBinding?.source_url ? "geekblue" : "purple"}>{enumSourceLabel(selectBinding)}</Tag>
                         {enumOptions.slice(0, 8).map((x, enumIdx) => <Tag key={`${x}-${enumIdx}`}>{x}</Tag>)}
                         {enumOptions.length > 8 && <Tag>+{enumOptions.length - 8}</Tag>}
-                        {enumOptions.length > 0 && !enumMappingComplete && <Tag color="orange">未映射实际提交值</Tag>}
+                        {enumOptions.length > 0 && !enumMappingComplete && (
+                          <Tag color="orange">未映射实际提交值：{enumMissingValueLabels.join("、")}</Tag>
+                        )}
                       </Space>
                       {isApiOption && (
                         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 8, alignItems: "end" }}>

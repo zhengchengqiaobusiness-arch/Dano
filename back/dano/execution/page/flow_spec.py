@@ -4760,7 +4760,7 @@ def _remove_param_incoming_links(spec: FlowSpec, step: FlowStep, param: ParamFie
     removed = [
         link for link in spec.links
         if link.target_step_id == step.step_id
-        and _strip_body_prefix(link.target_path) == _strip_body_prefix(param.path)
+        and _reference_targets_param(step, link.target_path, param)
     ]
     for link in removed:
         _record_rejected_dependency(spec, link)
@@ -4948,8 +4948,7 @@ def _auto_link_has_grounded_contract(steps: list[FlowStep], link: FlowLink) -> b
     source_value = _flow_path_lookup(source.response_json, source_path)
     if source_value is _FLOW_PATH_MISSING:
         return False
-    target_path = _strip_body_prefix(link.target_path)
-    target_param = next((param for param in target.params if param.path == target_path), None)
+    target_param = _resolve_param_reference(target, link.target_path)
     return bool(
         target_param is not None
         and _recorded_scalar_values_match(source_value, target_param.value)
@@ -4966,8 +4965,7 @@ def _prune_unsafe_auto_links(steps: list[FlowStep], links: list[FlowLink]) -> No
         if not _auto_link_has_grounded_contract(steps, lk):
             continue
         target = by_id.get(lk.target_step_id)
-        target_path = _strip_body_prefix(lk.target_path)
-        param = next((p for p in (target.params if target else []) if p.path == target_path), None)
+        param = _resolve_param_reference(target, lk.target_path) if target else None
         if _auto_dependency_link_allowed(param, lk.source_path, lk):
             kept.append(lk)
     links[:] = kept
@@ -4975,9 +4973,12 @@ def _prune_unsafe_auto_links(steps: list[FlowStep], links: list[FlowLink]) -> No
 
 def _sync_link_sources(steps: list[FlowStep], links: list[FlowLink]) -> None:
     _prune_unsafe_auto_links(steps, links)
+    by_id = {step.step_id: step for step in steps}
     valid_targets = {
-        (lk.link_id, lk.target_step_id, _strip_body_prefix(lk.target_path))
+        (lk.link_id, lk.target_step_id, target_param.path)
         for lk in links
+        if (target := by_id.get(lk.target_step_id)) is not None
+        if (target_param := _resolve_param_reference(target, lk.target_path)) is not None
     }
     for st in steps:
         for p in st.params:
@@ -13585,6 +13586,26 @@ def _find_param(step: FlowStep, param_path: str, *, param_key: str = "", param_l
     raise ValueError(f"param not found: {param_path} in step {step.step_id}; available={available}")
 
 
+def _resolve_param_reference(step: FlowStep, reference_path: str) -> ParamField | None:
+    """Resolve legacy body-prefixed paths without collapsing distinct fields."""
+    reference = str(reference_path or "")
+    if not reference:
+        return None
+    exact = next((param for param in step.params if param.path == reference), None)
+    if exact is not None:
+        return exact
+    normalized = _strip_body_prefix(reference)
+    matches = [
+        param for param in step.params
+        if _strip_body_prefix(param.path) == normalized
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _reference_targets_param(step: FlowStep, reference_path: str, param: ParamField) -> bool:
+    return _resolve_param_reference(step, reference_path) is param
+
+
 def _find_link(spec: FlowSpec, link_id: str) -> FlowLink:
     for link in spec.links:
         if link.link_id == link_id:
@@ -15950,6 +15971,17 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                         raise ValueError("param path cannot be empty")
                     if any(p is not param and p.path == new_path for p in step.params):
                         raise ValueError(f"duplicate param path: {new_path}")
+                    linked_targets = [
+                        lk for lk in new_spec.links
+                        if lk.target_step_id == step.step_id
+                        and _reference_targets_param(step, lk.target_path, param)
+                    ]
+                    source_targets_param = bool(
+                        isinstance(param.source, dict)
+                        and _reference_targets_param(
+                            step, str(param.source.get("target_path") or ""), param,
+                        )
+                    )
                     param.path = new_path
                     for sb in step.selects:
                         if sb.path == old_path:
@@ -15962,10 +15994,9 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     for sv in step.system_values:
                         if sv.path == old_path:
                             sv.path = new_path
-                    for lk in new_spec.links:
-                        if lk.target_step_id == step.step_id and _strip_body_prefix(lk.target_path) == _strip_body_prefix(old_path):
-                            lk.target_path = new_path
-                    if isinstance(param.source, dict) and _strip_body_prefix(str(param.source.get("target_path") or "")) == _strip_body_prefix(old_path):
+                    for lk in linked_targets:
+                        lk.target_path = new_path
+                    if isinstance(param.source, dict) and source_targets_param:
                         param.source["target_path"] = new_path
                 elif field == "value":
                     param.value = str(value)
@@ -16094,7 +16125,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                 continue
             new_spec.links = [
                 lk for lk in new_spec.links
-                if not (lk.target_step_id == step.step_id and _strip_body_prefix(lk.target_path) == _strip_body_prefix(param.path))
+                if not (lk.target_step_id == step.step_id and _reference_targets_param(step, lk.target_path, param))
             ]
             if target == "constant":
                 param.category = "system_const"
@@ -16165,17 +16196,24 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
             # 依赖、枚举绑定或身份绑定。否则前端看似删除成功，下一轮同步/校验又会
             # 从这些残留引用中恢复旧字段，表现为“修改后无法删除”。
             _remove_param_incoming_links(new_spec, step, param)
-            param_path_normalized = _strip_body_prefix(param.path)
+            key_is_unique = sum(item.key == param.key for item in step.params) == 1
+            label_is_unique = bool(param.label) and sum(item.label == param.label for item in step.params) == 1
             step.selects = [
                 binding for binding in (step.selects or [])
                 if not (
-                    _strip_body_prefix(binding.path or binding.id_path or "") == param_path_normalized
-                    or binding.param in {param.key, param.label}
+                    _reference_targets_param(step, binding.path or binding.id_path or "", param)
+                    or (
+                        not binding.path and not binding.id_path
+                        and (
+                            (key_is_unique and binding.param == param.key)
+                            or (label_is_unique and binding.param == param.label)
+                        )
+                    )
                 )
             ]
             step.identity = [
                 binding for binding in (step.identity or [])
-                if _strip_body_prefix(binding.path or "") != param_path_normalized
+                if not _reference_targets_param(step, binding.path or "", param)
             ]
             step.params.remove(param)
             if param.key in step.sample_inputs:
@@ -16257,10 +16295,21 @@ def _client_select_patch(spec: FlowSpec, edit: dict[str, Any]) -> dict[str, Any]
     param = str(raw.get("param") or "")
     if not path and not param:
         raise ValueError("upsert_select requires path or param")
+    target_param = _resolve_param_reference(step, path) if path else None
+    param_name_is_unique = bool(param) and sum(item.key == param for item in step.params) == 1
     index = next((
         idx for idx, current in enumerate(step.selects)
-        if (path and _strip_body_prefix(current.path or current.id_path or "") == _strip_body_prefix(path))
-        or (param and current.param == param)
+        if (
+            path
+            and target_param is not None
+            and _reference_targets_param(step, current.path or current.id_path or "", target_param)
+        )
+        or (
+            param_name_is_unique
+            and not current.path
+            and not current.id_path
+            and current.param == param
+        )
     ), -1)
     existing = step.selects[index] if index >= 0 else None
     source_changed = bool(

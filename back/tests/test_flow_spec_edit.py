@@ -2278,6 +2278,56 @@ def test_select_binding_uses_exact_full_path_when_leaf_names_collide():
     assert by_path["body.status"].source_kind == "page_enum"
 
 
+def test_removing_full_path_field_keeps_sibling_contract_with_same_normalized_path():
+    spec = FlowSpec(flow_id="remove-exact-path", steps=[
+        FlowStep(
+            step_id="source",
+            method="GET",
+            response_json={"data": {"top": "a", "body": "b"}},
+        ),
+        FlowStep(
+            step_id="submit",
+            params=[
+                ParamField(path="status", key="状态", label="状态"),
+                ParamField(path="body.status", key="状态", label="状态"),
+            ],
+            selects=[
+                SelectBinding(param="状态", path="status", options=[{"label": "A", "value": "a"}]),
+                SelectBinding(param="状态", path="body.status", options=[{"label": "B", "value": "b"}]),
+            ],
+            identity=[
+                IdentityBinding(path="status", source="storage:top"),
+                IdentityBinding(path="body.status", source="storage:body"),
+            ],
+        ),
+    ], links=[
+        FlowLink(link_id="top", source_step_id="source", source_path="data.top", target_step_id="submit", target_path="status", locked=True),
+        FlowLink(link_id="body", source_step_id="source", source_path="data.body", target_step_id="submit", target_path="body.status", locked=True),
+    ])
+
+    updated = apply_flow_edits(spec, [{
+        "op": "remove", "step_id": "submit", "param_path": "body.status",
+    }])
+
+    step = updated.steps[1]
+    assert [param.path for param in step.params] == ["status"]
+    assert [binding.path for binding in step.selects] == ["status"]
+    assert [binding.path for binding in step.identity] == ["status"]
+    assert [link.link_id for link in updated.links] == ["top"]
+
+
+def test_legacy_body_prefix_reference_is_used_only_when_unambiguous():
+    single = FlowStep(step_id="single", params=[ParamField(path="status", key="状态")])
+    assert flow_spec_module._resolve_param_reference(single, "body.status") is single.params[0]
+
+    ambiguous = FlowStep(step_id="ambiguous", params=[
+        ParamField(path="status", key="状态"),
+        ParamField(path="body.status", key="表单状态"),
+    ])
+    assert flow_spec_module._resolve_param_reference(ambiguous, "status") is ambiguous.params[0]
+    assert flow_spec_module._resolve_param_reference(ambiguous, "body.status") is ambiguous.params[1]
+
+
 def test_manual_type_category_source_combination_survives_publish_sync():
     """The backend must persist an operator combination even when it looks unusual."""
     spec = FlowSpec(flow_id="manual-axis-combination", steps=[FlowStep(
