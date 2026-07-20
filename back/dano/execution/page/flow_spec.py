@@ -2379,6 +2379,10 @@ def classify_network_request(req: dict, trace: list[dict] | None = None,
             return _role_row(req, role="read_option", keep=False,
                              reason=f"读接口返回候选列表/枚举源({count}项)，作为字段来源，不进入主流程",
                              confidence=0.9, semantic=semantic)
+        if response_ref and list_items is None:
+            return _role_row(req, role="business_get", keep=True,
+                             reason="GET 响应值被后续业务请求引用，作为前置步骤保留",
+                             confidence=0.96, semantic=semantic, evidence=response_ref)
         # A submitted search remains a callable query even when a row value is
         # reused later. Value reuse alone cannot turn a result table into a
         # dropdown source.
