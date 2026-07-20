@@ -172,6 +172,11 @@ def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
         "Visible fields with no grounded recorded match must go to unresolved_items instead of being invented."
         if has_screenshots else ""
     )
+    if has_screenshots:
+        evidence_rule += (
+            " The required screenshot field axes are step_id, wire_path, public_name, visible_default, "
+            "business_type, category, source_kind, required, confidence, and evidence."
+        )
     return (
         " submit_recording_plan.plan must be {semantic_plan:{business_understanding,request_roles,field_semantics,"
         "capabilities,capability_relations,unresolved_items},ops:[]}. Never submit flow_spec or plan.flow_spec."
@@ -195,6 +200,54 @@ def _verified_pi_image_count(result: dict, expected: int) -> int:
     return delivered
 
 
+def _analysis_field_coverage(after) -> dict[str, int]:
+    if not hasattr(after, "meta"):
+        return {
+            "matched_field_count": 0, "unmatched_field_count": 0,
+            "locked_field_count": 0, "rejected_field_count": 0,
+            "unresolved_field_count": 0,
+        }
+    capability_model = dict((after.meta or {}).get("capability_model") or {})
+    semantic_plan = dict(capability_model.get("semantic_plan") or {})
+    actual = {
+        (step.step_id, param.path)
+        for step in after.steps
+        for param in step.params
+    }
+    field_items = [
+        item for item in (semantic_plan.get("field_semantics") or [])
+        if isinstance(item, dict)
+    ]
+    covered = {
+        (str(item.get("step_id") or ""), str(item.get("wire_path") or item.get("path") or ""))
+        for item in field_items
+    } & actual
+    image_matched = {
+        (str(item.get("step_id") or ""), str(item.get("wire_path") or item.get("path") or ""))
+        for item in field_items
+        if any(
+            isinstance(evidence, dict) and evidence.get("source") == "screenshot"
+            for evidence in (item.get("evidence") or [])
+        )
+    } & actual
+    unresolved = [
+        item for item in (semantic_plan.get("unresolved_items") or [])
+        if isinstance(item, dict)
+    ]
+    rejected = [
+        item for item in unresolved
+        if str(item.get("status") or "").lower() == "rejected"
+        or "conflict" in str(item.get("reason") or "").lower()
+    ]
+    return {
+        "matched_field_count": len(image_matched),
+        "unmatched_field_count": len(actual - covered),
+        "locked_field_count": sum(param.locked for step in after.steps for param in step.params),
+        "rejected_field_count": len(rejected),
+        "unresolved_field_count": len(unresolved),
+    }
+
+
 def _analysis_application_report(
     *,
     before,
@@ -206,9 +259,23 @@ def _analysis_application_report(
 ) -> dict:
     """Persistable proof that screenshot evidence reached and changed the plan."""
     proposal_gate = dict(operation_report.get("proposal_gate") or {})
+    field_coverage = _analysis_field_coverage(after)
+    semantic_coverage = dict(
+        ((getattr(after, "meta", None) or {}).get("capability_model") or {}).get("semantic_coverage") or {}
+    )
+    incomplete = bool(
+        screenshots
+        and (
+            semantic_coverage.get("complete") is False
+            or field_coverage["unmatched_field_count"]
+            or field_coverage["unresolved_field_count"]
+        )
+    )
     status = (
         "rejected"
         if proposal_gate.get("accepted") is False
+        else "needs_review"
+        if incomplete
         else ("applied" if operation_report.get("changed") else "no_change")
     )
     return {
@@ -222,6 +289,7 @@ def _analysis_application_report(
         "capability_count_after": len(after.capabilities or []),
         "field_count_before": sum(len(step.params or []) for step in before.steps),
         "field_count_after": sum(len(step.params or []) for step in after.steps),
+        **field_coverage,
         "proposal_gate": proposal_gate,
         "operation_id": operation_id,
     }

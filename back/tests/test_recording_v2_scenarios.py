@@ -2741,3 +2741,96 @@ def test_r5_semantic_relation_requires_real_typed_endpoints_or_becomes_unresolve
         "to_input": "entries",
         "reason": "relation endpoints are missing or type-incompatible",
     }]
+
+
+def test_r6_screenshot_protocol_requires_complete_field_axes_and_forbids_fact_creation():
+    from dano.gateway import app as gateway
+
+    protocol = gateway._recording_plan_protocol_guidance(has_screenshots=True)
+
+    for field in (
+        "step_id", "wire_path", "public_name", "visible_default", "business_type",
+        "category", "source_kind", "required", "confidence", "evidence",
+    ):
+        assert field in protocol
+    assert "must never create" in gateway._analysis_screenshot_guidance([{
+        "name": "form.png", "data": "AA==", "mimeType": "image/png",
+    }])
+
+
+def test_r6_screenshot_report_marks_incomplete_field_coverage_as_needs_review():
+    from dano.gateway import app as gateway
+
+    before = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/api/submit",
+        params=[
+            ParamField(path="title", key="Title"),
+            ParamField(path="description", key="Description"),
+        ],
+    )])
+    after = before.model_copy(deep=True)
+    after.meta = {"capability_model": {
+        "semantic_plan": {
+            "field_semantics": [{
+                "step_id": "submit", "wire_path": "title", "public_name": "Title",
+                "business_type": "string", "category": "user_param",
+                "source_kind": "user_input", "required": True, "confidence": 0.99,
+                "evidence": [{"source": "screenshot", "screenshot_name": "form.png"}],
+            }],
+            "unresolved_items": [{
+                "kind": "field", "step_id": "submit", "wire_path": "description",
+                "reason": "field is not visible in the supplied screenshot",
+            }],
+        },
+        "semantic_coverage": {"complete": False, "missing": ["field_semantics"]},
+    }}
+
+    report = gateway._analysis_application_report(
+        before=before,
+        after=after,
+        operation_report={
+            "changed": True, "summary": "updated", "changes": {"fields": 1},
+            "proposal_gate": {"accepted": True},
+        },
+        screenshots=[{"name": "form.png"}],
+        delivered_image_count=1,
+        operation_id="r6-report",
+    )
+
+    assert report["status"] == "needs_review"
+    assert report["matched_field_count"] == 1
+    assert report["unmatched_field_count"] == 1
+    assert report["locked_field_count"] == 0
+    assert report["rejected_field_count"] == 0
+    assert report["unresolved_field_count"] == 1
+
+
+def test_r6_screenshot_field_identity_does_not_cross_same_named_paths():
+    first = FlowStep(
+        step_id="create", method="POST", path="/api/create",
+        params=[ParamField(path="body.status", key="Status", type="string")],
+    )
+    second = FlowStep(
+        step_id="approve", method="POST", path="/api/approve",
+        params=[ParamField(path="body.status", key="Status", type="string")],
+    )
+    spec = FlowSpec(steps=[first, second])
+
+    changed = flow_spec_module._apply_capability_field_to_param(
+        spec,
+        {
+            "step_id": "approve", "wire_path": "body.status", "key": "Approval status",
+            "type": "enum", "category": "user_param", "source_kind": "page_enum",
+            "required": True, "enum_options": ["Pending", "Approved"],
+            "evidence": [{
+                "source": "screenshot", "screenshot_name": "approve.png",
+                "control_kind": "select", "editable": True, "required": True,
+            }],
+        },
+        scope="input",
+        actor="planner",
+    )
+
+    assert changed is True
+    assert (first.params[0].key, first.params[0].type) == ("Status", "string")
+    assert (second.params[0].key, second.params[0].type) == ("Approval status", "enum")
