@@ -3308,6 +3308,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function renderLatestOperationDetail() {
     if (!lastAnalysisEvidence && !lastOperationReport) return null;
+    const showDetailedAnalysis = lastAnalysisEvidence?.analysis_kind !== "initial";
     const unmatchedIssues = lastAnalysisEvidence?.unmatched_fields || [];
     const unresolvedIssues = lastAnalysisEvidence?.unresolved_items || [];
     const rejectedIssues = lastAnalysisEvidence?.rejected_items || [];
@@ -3323,19 +3324,21 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         {lastAnalysisEvidence && (
           <>
             <Typography.Text style={{ fontSize: 12 }}>
-              {lastAnalysisEvidence.summary || "最近一次能力分析已完成"}
+              {showDetailedAnalysis
+                ? (lastAnalysisEvidence.summary || "最近一次能力分析已完成")
+                : `首次分析完成：已生成 ${lastAnalysisEvidence.capability_count_after ?? 0} 个能力，字段配置已同步`}
             </Typography.Text>
-            {lastAnalysisEvidence.field_changes?.slice(0, 6).map((change) => (
+            {showDetailedAnalysis && lastAnalysisEvidence.field_changes?.slice(0, 6).map((change) => (
               <Typography.Text key={`${change.step_id}:${change.path}`} style={{ fontSize: 12 }}>
                 {analysisFieldChangeText(change)}
               </Typography.Text>
             ))}
-            {(lastAnalysisEvidence.field_changes?.length || 0) > 6 && (
+            {showDetailedAnalysis && (lastAnalysisEvidence.field_changes?.length || 0) > 6 && (
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                 另有 {(lastAnalysisEvidence.field_changes?.length || 0) - 6} 个字段发生修改
               </Typography.Text>
             )}
-            {visibleUnmatched.map((item) => (
+            {showDetailedAnalysis && visibleUnmatched.map((item) => (
               <Button key={`unmatched:${item.step_id}:${item.path}`} type="link" size="small"
                 style={{ padding: 0, height: "auto", textAlign: "left" }}
                 onClick={() => locatePublishIssue(item.target || { kind: "param", step_id: item.step_id, path: item.path })}>
@@ -3343,21 +3346,21 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                 {item.missing_axes?.length ? ` · 缺 ${item.missing_axes.map((axis) => ANALYSIS_AXIS_LABELS[axis] || axis).join("、")}` : ""}
               </Button>
             ))}
-            {visibleUnresolved.map((item, index) => (
+            {showDetailedAnalysis && visibleUnresolved.map((item, index) => (
               <Button key={`unresolved:${item.step_id}:${item.path}:${item.axis}:${index}`} type="link" size="small"
                 style={{ padding: 0, height: "auto", textAlign: "left" }}
                 onClick={() => locatePublishIssue(item.target || { kind: item.kind || "param", step_id: item.step_id, path: item.path })}>
                 待确认：{item.name || item.path || item.step_id || "字段"}{item.axis ? ` · ${ANALYSIS_AXIS_LABELS[item.axis] || item.axis}` : ""}{item.reason ? `（${item.reason}）` : ""}
               </Button>
             ))}
-            {visibleRejected.map((item, index) => (
+            {showDetailedAnalysis && visibleRejected.map((item, index) => (
               <Button key={`rejected:${item.step_id}:${item.path}:${index}`} type="link" danger size="small"
                 style={{ padding: 0, height: "auto", textAlign: "left" }}
                 onClick={() => locatePublishIssue(item.target || { kind: item.kind || "param", step_id: item.step_id, path: item.path })}>
                 已拒绝：{item.name || item.path || item.step_id || item.kind || "建议"}{item.reason ? `（${item.reason}）` : ""}
               </Button>
             ))}
-            {analysisIssueCount > 6 && (
+            {showDetailedAnalysis && analysisIssueCount > 6 && (
               <Button type="link" size="small" style={{ padding: 0, alignSelf: "flex-start" }}
                 onClick={() => setShowAllAnalysisIssues((value) => !value)}>
                 {showAllAnalysisIssues ? "收起问题" : `展开全部 ${analysisIssueCount} 项`}
@@ -3369,21 +3372,23 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
                   图片匹配 {lastAnalysisEvidence.model_image_count ?? 0}/{lastAnalysisEvidence.screenshot_count}
                 </Tag>
               )}
-              <Tag>截图匹配字段 {lastAnalysisEvidence.matched_field_count ?? 0}</Tag>
-              {!!lastAnalysisEvidence.unmatched_field_count && <Tag color="orange">未匹配字段 {lastAnalysisEvidence.unmatched_field_count}</Tag>}
-              {!!lastAnalysisEvidence.unresolved_field_count && <Tag color="orange">待确认 {lastAnalysisEvidence.unresolved_field_count}</Tag>}
-              {!!lastAnalysisEvidence.unresolved_relation_count && <Tag color="orange">待确认关系 {lastAnalysisEvidence.unresolved_relation_count}</Tag>}
-              {!!lastAnalysisEvidence.rejected_field_count && <Tag color="red">已拒绝冲突 {lastAnalysisEvidence.rejected_field_count}</Tag>}
+              {showDetailedAnalysis && lastAnalysisEvidence.screenshot_count > 0 && (
+                <Tag>截图匹配字段 {lastAnalysisEvidence.matched_field_count ?? 0}</Tag>
+              )}
+              {showDetailedAnalysis && !!lastAnalysisEvidence.unmatched_field_count && <Tag color="orange">未匹配字段 {lastAnalysisEvidence.unmatched_field_count}</Tag>}
+              {showDetailedAnalysis && !!lastAnalysisEvidence.unresolved_field_count && <Tag color="orange">待确认 {lastAnalysisEvidence.unresolved_field_count}</Tag>}
+              {showDetailedAnalysis && !!lastAnalysisEvidence.unresolved_relation_count && <Tag color="orange">待确认关系 {lastAnalysisEvidence.unresolved_relation_count}</Tag>}
+              {showDetailedAnalysis && !!lastAnalysisEvidence.rejected_field_count && <Tag color="red">已拒绝冲突 {lastAnalysisEvidence.rejected_field_count}</Tag>}
               {lastAnalysisEvidence.capability_count_after !== undefined && (
                 <Tag>能力总数 {lastAnalysisEvidence.capability_count_after}</Tag>
               )}
-              {!!lastAnalysisEvidence.changes?.capabilities && <Tag>能力内容变化 {lastAnalysisEvidence.changes.capabilities} 项</Tag>}
-              {!!lastAnalysisEvidence.changes?.links && <Tag>字段关联变化 {lastAnalysisEvidence.changes.links} 项</Tag>}
-              {!!lastAnalysisEvidence.changes?.relations && <Tag>能力关联变化 {lastAnalysisEvidence.changes.relations} 项</Tag>}
+              {showDetailedAnalysis && !!lastAnalysisEvidence.changes?.capabilities && <Tag>能力内容变化 {lastAnalysisEvidence.changes.capabilities} 项</Tag>}
+              {showDetailedAnalysis && !!lastAnalysisEvidence.changes?.links && <Tag>字段关联变化 {lastAnalysisEvidence.changes.links} 项</Tag>}
+              {showDetailedAnalysis && !!lastAnalysisEvidence.changes?.relations && <Tag>能力关联变化 {lastAnalysisEvidence.changes.relations} 项</Tag>}
             </Space>
           </>
         )}
-        {lastOperationReport && (
+        {lastOperationReport && (!lastAnalysisEvidence || showDetailedAnalysis) && (
           <Space wrap size={4}>
             <Typography.Text style={{ fontSize: 12 }}>{lastOperationReport.summary || "编排操作完成"}</Typography.Text>
             {!!lastOperationReport.edit_errors?.length && <Tag color="orange">跳过无效建议 {lastOperationReport.edit_errors.length}</Tag>}

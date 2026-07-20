@@ -1309,6 +1309,42 @@ def test_legacy_primary_step_plan_keeps_grounded_query_and_submit_boundaries():
     assert by_name["submit_application"]["step_ids"] == ["submit"]
 
 
+def test_semicolon_record_field_semantics_are_normalized_instead_of_dropped():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/api/applications/submit",
+        source_meta={"role": "business_write"},
+        params=[ParamField(
+            path="useInfo", key="useInfo", value="1", type="string",
+            category="user_param", source_kind="user_input",
+        )],
+    )])
+    raw_plan = {"semantic_plan": {
+        "business_understanding": "Submit an application",
+        "request_roles": [
+            "step_id=submit;role=business_write;name=Submit application",
+        ],
+        "field_semantics": [
+            "step_id=submit;wire_path=useInfo;public_name=Usage description;"
+            "business_type=string;category=user_param;source_kind=user_input;"
+            "confidence=0.95;evidence=recorded textarea",
+        ],
+        "capabilities": [{
+            "name": "submit_application", "title": "Submit application",
+            "kind": "submit", "primary_step": "submit",
+        }],
+        "capability_relations": [], "unresolved_items": [],
+    }, "ops": []}
+
+    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
+    field = normalized["semantic_plan"]["field_semantics"][0]
+
+    assert field["step_id"] == "submit"
+    assert field["wire_path"] == "useInfo"
+    assert field["public_name"] == "Usage description"
+    assert field["business_type"] == "string"
+    assert field["confidence"] == 0.95
+
+
 def _screenshot_match_plan(field_semantics: list[dict]) -> dict:
     return {
         "_analysis_screenshot_count": 1,

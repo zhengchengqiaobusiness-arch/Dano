@@ -1175,6 +1175,46 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
     elif not isinstance(understanding, dict):
         semantic["business_understanding"] = {}
 
+    def semantic_record(value: object) -> dict | None:
+        """Accept Pi's compact ``key=value;...`` records without losing facts."""
+        if isinstance(value, dict):
+            return deepcopy(value)
+        if not isinstance(value, str):
+            return None
+        parsed: dict = {}
+        for segment in value.split(";"):
+            key, separator, raw_value = segment.partition("=")
+            key = key.strip()
+            if not separator or not key:
+                continue
+            normalized: object = raw_value.strip()
+            lowered = str(normalized).lower()
+            if lowered in {"true", "false"}:
+                normalized = lowered == "true"
+            elif key == "confidence":
+                try:
+                    normalized = float(str(normalized))
+                except ValueError:
+                    pass
+            parsed[key] = normalized
+        return parsed or None
+
+    # The Pi transport may compact arrays of records to semicolon-delimited
+    # strings.  Normalize that representation at the boundary so the existing
+    # grounding/version gates still validate the resulting dictionaries.
+    for key in (
+        "request_roles", "field_semantics", "capabilities", "capability_relations",
+    ):
+        raw_items = semantic.get(key)
+        if not isinstance(raw_items, list):
+            continue
+        normalized_items = []
+        for raw_item in raw_items:
+            record = semantic_record(raw_item)
+            if record is not None:
+                normalized_items.append(record)
+        semantic[key] = normalized_items
+
     from dano.execution.page.flow_spec import (
         _build_initial_flow_capabilities,
         _capability_node_step_ids,

@@ -1744,6 +1744,14 @@ def _query_param_type(key: str, value: Any) -> str:
             return "datetime"
     if text.lower() in {"true", "false"}:
         return "boolean"
+    # A recorded sample is not a schema.  Free-text business fields commonly
+    # contain a numeric-looking value (for example a short description of
+    # "1"), so their semantic key must take precedence over value inference.
+    if re.search(
+        r"(?:name|title|desc|description|info|remark|memo|note|keyword|text|content|label|subject|reason|purpose)",
+        key_text,
+    ):
+        return "string"
     if re.fullmatch(r"-?(?:\d+|\d+\.\d+)", text) and not re.search(
         r"(?:id|code|key|type|status|no|number)", key_text,
     ):
@@ -4567,11 +4575,34 @@ def _apply_capability_field_to_param(
         )
         and str(raw.get("source_kind") or "") in _SCREENSHOT_INTERNAL_SOURCE_KINDS
     )
+    stale_text_option_recovery = bool(
+        automated
+        and str(raw.get("source_kind") or "") == "user_input"
+        and str(raw.get("type") or "") in {"string", "text", "textarea"}
+        and not _param_axis_manually_edited(
+            param, "source_kind", "source", "category",
+            "exposed_to_user", "exposed_to_caller",
+        )
+        and _weak_automatic_text_option_binding(param)
+    )
+    semantic_text_type_recovery = bool(
+        automated
+        and str(raw.get("type") or "") in {"string", "text", "textarea"}
+        and str(param.wire_type or "") == "string"
+        and str(param.type or "") not in {"string", "text", "textarea"}
+        and str(raw.get("source_kind") or param.source_kind or "") == "user_input"
+        and _looks_user_entered_business_field(param.key, param.path)
+    )
     allow_type = (
         not automated
         or (
             not _param_field_manually_edited(param, "type")
-            and (not _param_has_grounded_type(param) or screenshot_control is not None)
+            and (
+                not _param_has_grounded_type(param)
+                or screenshot_control is not None
+                or stale_text_option_recovery
+                or semantic_text_type_recovery
+            )
         )
     )
     allow_source = (
@@ -4591,6 +4622,7 @@ def _apply_capability_field_to_param(
                     screenshot_editable_input
                     and screenshot_direct_input
                 )
+                or stale_text_option_recovery
             )
         )
     )
@@ -4640,7 +4672,11 @@ def _apply_capability_field_to_param(
         param.source_kind = str(raw["source_kind"])
     if isinstance(raw.get("source"), dict) and allow_source:
         param.source = dict(raw["source"])
-    if screenshot_direct_input and allow_source and raw.get("source_kind") == "user_input":
+    if (
+        (screenshot_direct_input or stale_text_option_recovery)
+        and allow_source
+        and raw.get("source_kind") == "user_input"
+    ):
         param.source = {"kind": "user_input", "path": param.path}
         param.enum_options = None
         param.enum_value_map = None
@@ -8187,6 +8223,37 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
             source_kind = str(target_param.source_kind if target_param else "unknown")
             requested_category = str(item.get("category") or "")
             requested_source_kind = str(item.get("source_kind") or "")
+            proposed_type = str(item.get("business_type") or item.get("type") or "")
+            manual_source_contract = bool(
+                target_param
+                and (
+                    target_param.locked
+                    or any(
+                        _param_field_manually_edited(target_param, axis)
+                        for axis in (
+                            "category", "exposed_to_user", "exposed_to_caller",
+                            "source_kind", "source",
+                        )
+                    )
+                )
+            )
+            stale_text_option_recovery = bool(
+                requested_category == "user_param"
+                and requested_source_kind == "user_input"
+                and proposed_type in {"string", "text", "textarea"}
+                and not manual_source_contract
+                and target_param is not None
+                and _weak_automatic_text_option_binding(target_param)
+            )
+            semantic_text_type_recovery = bool(
+                proposed_type in {"string", "text", "textarea"}
+                and target_param is not None
+                and str(target_param.wire_type or "") == "string"
+                and str(target_param.type or "") not in {"string", "text", "textarea"}
+                and requested_source_kind == "user_input"
+                and not _param_field_manually_edited(target_param, "type")
+                and _looks_user_entered_business_field(target_param.key, target_param.path)
+            )
             grounded_editable_control = any(
                 isinstance(evidence_item, dict)
                 and str(evidence_item.get("source") or evidence_item.get("kind") or "") in {
@@ -8200,7 +8267,6 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
                 for evidence_item in (item.get("evidence") or [])
             )
             screenshot_control = _screenshot_control_evidence(item)
-            proposed_type = str(item.get("business_type") or item.get("type") or "")
             grounded_type_proposal = screenshot_control is not None or any(
                 isinstance(evidence_item, dict)
                 and str(evidence_item.get("source") or evidence_item.get("kind") or "").lower()
@@ -8215,10 +8281,14 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
             business_type = (
                 _screenshot_control_business_type(screenshot_control, proposed_type)
                 if screenshot_control is not None
+                else "string" if (stale_text_option_recovery or semantic_text_type_recovery)
                 else proposed_type if grounded_type_proposal
                 else str(target_param.type if target_param else "")
             )
-            if (
+            if stale_text_option_recovery:
+                category = "user_param"
+                source_kind = "user_input"
+            elif (
                 grounded_editable_control
                 and requested_category == "user_param"
                 and requested_source_kind == "user_input"
@@ -13872,9 +13942,45 @@ def _option_binding_tokens(value: Any) -> set[str]:
     return expanded - {
         "id", "ids", "code", "key", "value", "values", "data", "api", "admin",
         "list", "simple", "options", "option", "query", "page", "get",
+        # These words describe generic payloads/endpoints and cannot establish
+        # that a caller-entered field owns an option source.
+        "info", "information",
     }
 
 
+def _weak_automatic_text_option_binding(param: ParamField) -> bool:
+    """Identify an ungrounded automatic option binding on a text-like field.
+
+    This intentionally does not override manual edits or a recorded select;
+    callers enforce edit ownership separately.  It only marks bindings whose
+    endpoint has no semantic bridge to the field after generic tokens such as
+    ``info`` have been removed.
+    """
+    if (
+        param.source_kind != "api_option"
+        or not _looks_user_entered_business_field(param.key, param.path)
+    ):
+        return False
+    option_controls = {
+        "select", "combobox", "cascader", "picker", "radio", "tree_select",
+    }
+    if any(
+        isinstance(item, dict)
+        and str(item.get("control_kind") or "").strip().lower() in option_controls
+        for item in (param.evidence or [])
+    ):
+        return False
+    target_text = " ".join((str(param.path or ""), str(param.key or ""), str(param.label or "")))
+    source_text = str((param.source or {}).get("source_url") or "")
+    if not source_text:
+        return False
+    return not bool(
+        (_option_binding_tokens(target_text) & _option_binding_tokens(source_text))
+        or (
+            _option_binding_semantic_families(target_text)
+            & _option_binding_semantic_families(source_text)
+        )
+    )
 def _option_binding_semantic_families(value: Any) -> set[str]:
     text = str(value or "").casefold()
     families: set[str] = set()

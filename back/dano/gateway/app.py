@@ -371,6 +371,16 @@ def _analysis_application_report(
     """Persistable proof that screenshot evidence reached and changed the plan."""
     proposal_gate = dict(operation_report.get("proposal_gate") or {})
     field_coverage = _analysis_field_coverage(after)
+    if not screenshots:
+        # "Matched/unmatched" is specifically screenshot-to-field coverage.
+        # A normal first-pass semantic analysis has no images to match and must
+        # not label every recorded field as an unmatched screenshot field.
+        field_coverage = {
+            **field_coverage,
+            "matched_field_count": 0,
+            "unmatched_field_count": 0,
+            "unmatched_fields": [],
+        }
     generation = dict((getattr(after, "meta", None) or {}).get("capability_generation") or {})
     analysis_kind = "initial" if generation.get("last_mode") == "initial" else "incremental"
     semantic_coverage = dict(

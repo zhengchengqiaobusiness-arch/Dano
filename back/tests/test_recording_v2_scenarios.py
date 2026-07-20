@@ -135,6 +135,151 @@ def test_same_action_value_collision_does_not_turn_textarea_into_api_enum() -> N
     assert submit.selects == []
 
 
+def test_weak_info_token_does_not_bind_use_info_to_permission_list() -> None:
+    use_info = ParamField(
+        path="useInfo", key="useInfo", value="1", default_value="1",
+        type="string", wire_type="string", required=True,
+        category="user_param", source_kind="user_input",
+        evidence=[{
+            "kind": "page_required", "source": "recorder_dom",
+            "request_path": "useInfo",
+        }],
+    )
+    submit = FlowStep(
+        step_id="submit", method="POST", path="/api/applications/submit",
+        params=[use_info], source_meta={"role": "business_write"},
+    )
+    permissions = FlowStep(
+        step_id="permissions", method="GET",
+        path="/admin-api/system/auth/get-permission-info",
+        response_json={"data": [
+            {"id": 1, "name": "System Management"},
+            {"id": 2, "name": "Infrastructure"},
+        ]},
+        source_meta={"role": "read_context"},
+    )
+    spec = FlowSpec(steps=[submit, permissions])
+
+    repaired = flow_spec_module._repair_structural_option_bindings(spec)
+
+    assert repaired == 0
+    assert use_info.type == "string"
+    assert use_info.source_kind == "user_input"
+    assert use_info.enum_options is None
+    assert submit.selects == []
+
+
+def test_numeric_looking_info_query_remains_text_without_a_number_control() -> None:
+    fields = flow_spec_module._params_from_get_query({
+        "method": "GET",
+        "url": "https://example.test/api/applications/page?useInfo=1",
+    })
+
+    assert fields[0]["path"] == "query.useInfo"
+    assert fields[0]["type"] == "string"
+    assert fields[0]["wire_type"] == "string"
+
+
+def test_later_plain_analysis_removes_a_stale_weak_text_option_binding() -> None:
+    stale_source = {
+        "kind": "api_option",
+        "source_url": "/admin-api/system/auth/get-permission-info",
+        "value_key": "id",
+        "label_key": "name",
+    }
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit", method="POST", path="/api/applications/submit",
+            params=[ParamField(
+                path="useInfo", key="useInfo", label="useInfo", value="1",
+                type="enum", wire_type="string", category="user_param",
+                source_kind="api_option", source=stale_source,
+                enum_options=[{"label": "System Management", "value": "1"}],
+                enum_value_map={"System Management": "1"},
+            )],
+            selects=[SelectBinding(
+                path="useInfo", param="useInfo",
+                source_url=stale_source["source_url"],
+                value_key="id", label_key="name",
+                options=[{"label": "System Management", "value": "1"}],
+                option_map={"System Management": "1"},
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_application", kind="submit",
+            nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
+        )],
+    )
+    submission = {"semantic_plan": {
+        "business_understanding": {"summary": "Submit application"},
+        "request_roles": [],
+        "field_semantics": [{
+            "step_id": "submit", "wire_path": "useInfo",
+            "public_name": "Usage description", "business_type": "string",
+            "category": "user_param", "source_kind": "user_input",
+            "confidence": 0.95, "evidence": ["recorded textarea"],
+        }],
+        "capabilities": [{
+            "name": "submit_application", "kind": "submit",
+            "step_ids": ["submit"],
+        }],
+        "capability_relations": [], "unresolved_items": [],
+    }, "ops": []}
+
+    optimized = asyncio.run(orchestrate_flow_capabilities(
+        spec, submission=submission, generation_mode="optimize",
+    ))
+    field = optimized.steps[0].params[0]
+
+    assert (field.type, field.wire_type) == ("string", "string")
+    assert (field.category, field.source_kind) == ("user_param", "user_input")
+    assert field.enum_options is None
+    assert field.enum_value_map is None
+    assert optimized.steps[0].selects == []
+
+
+def test_later_plain_analysis_repairs_numeric_sample_type_for_text_field() -> None:
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="query", method="GET", path="/api/applications/page?useInfo=1",
+            source_meta={"role": "business_get"},
+            response_json={"data": {"list": [{"id": 1}], "total": 1}},
+            params=[ParamField(
+                path="query.useInfo", key="useInfo", value="1",
+                type="number", wire_type="string", category="user_param",
+                source_kind="user_input",
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="query_applications", kind="query_status",
+            nodes=[{"id": "call", "type": "call", "step_id": "query"}],
+        )],
+    )
+    submission = {"semantic_plan": {
+        "business_understanding": {"summary": "Query applications"},
+        "request_roles": [],
+        "field_semantics": [{
+            "step_id": "query", "wire_path": "query.useInfo",
+            "public_name": "Usage description", "business_type": "string",
+            "category": "user_param", "source_kind": "user_input",
+            "confidence": 0.95, "evidence": ["recorded text filter"],
+        }],
+        "capabilities": [{
+            "name": "query_applications", "kind": "query_status",
+            "step_ids": ["query"],
+        }],
+        "capability_relations": [], "unresolved_items": [],
+    }, "ops": []}
+
+    optimized = asyncio.run(orchestrate_flow_capabilities(
+        spec, submission=submission, generation_mode="optimize",
+    ))
+    field = optimized.steps[0].params[0]
+
+    assert (field.type, field.wire_type) == ("string", "string")
+    assert field.source_kind == "user_input"
+
+
 def _post(index: int, path: str, body: dict | list, response_json: dict | None = None) -> dict:
     return {
         "index": index,

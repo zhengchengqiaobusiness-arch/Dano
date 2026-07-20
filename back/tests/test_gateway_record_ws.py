@@ -743,3 +743,33 @@ def test_analysis_report_exposes_initial_kind_and_actionable_issue_details() -> 
     assert report["rejected_field_count"] == 1
     assert len(report["rejected_items"]) == 1
     assert "field" in report["issue_groups"]
+
+
+def test_analysis_without_screenshots_does_not_report_field_matching_gaps() -> None:
+    before = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/api/submit",
+        params=[ParamField(path="useInfo", key="使用描述")],
+    )])
+    after = before.model_copy(deep=True)
+    after.meta = {
+        "capability_generation": {"initial_completed": True, "last_mode": "initial"},
+        "capability_model": {
+            "semantic_plan": {"field_semantics": [], "unresolved_items": []},
+        },
+    }
+
+    report = gateway._analysis_application_report(
+        before=before,
+        after=after,
+        operation_report={
+            "changed": True, "summary": "initial analysis",
+            "changes": {"fields": 1}, "field_changes": [],
+            "proposal_gate": {"accepted": True},
+        },
+        screenshots=[], delivered_image_count=0, operation_id="initial-plain",
+    )
+
+    assert report["analysis_kind"] == "initial"
+    assert report["matched_field_count"] == 0
+    assert report["unmatched_field_count"] == 0
+    assert report["unmatched_fields"] == []
