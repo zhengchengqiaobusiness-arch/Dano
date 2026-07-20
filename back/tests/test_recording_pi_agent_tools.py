@@ -166,6 +166,8 @@ class _Session:
         self.spec = _spec()
         self.last_review = {}
         self.last_submission_kind = ""
+        self.analysis_image_count = 0
+        self.received_submission = None
 
     def bind_flow_spec(self, spec):
         self.spec = spec.model_copy(deep=True)
@@ -185,6 +187,7 @@ class _Session:
         current = int((self.spec.meta or {}).get("current_version") or 0)
         if base_flow_version != current:
             raise RuntimeError(f"录制版本冲突: base={base_flow_version}, current={current}")
+        self.received_submission = submission
         self.spec = await flow_module.apply_recording_agent_submission(
             self.spec, submission=submission, mode=mode,
         )
@@ -229,6 +232,7 @@ def test_recording_core_has_no_direct_llm_conversation_or_cache_path():
 
 def test_pi_tools_read_and_apply_plan_without_changing_request_facts(monkeypatch):
     session = _bind(monkeypatch)
+    session.analysis_image_count = 2
     state = asyncio.run(get_recording_state("run-recording", {"recording_id": "rec-1"}))
     assert state["flow_version"] == 1
     before_facts = session.spec.request_facts.model_dump(mode="json")
@@ -257,6 +261,7 @@ def test_pi_tools_read_and_apply_plan_without_changing_request_facts(monkeypatch
         },
     }))
     assert result["flow_version"] > 1
+    assert session.received_submission["_analysis_screenshot_count"] == 2
     assert session.spec.request_facts.model_dump(mode="json") == before_facts
 
     validation = asyncio.run(get_validation_report("run-recording", {"recording_id": "rec-1"}))
@@ -905,8 +910,8 @@ def test_observed_five_interface_plan_keeps_only_business_anchors():
     query_capability = next(item for item in capabilities if item["name"] == "cap_page")
     assert query_capability["step_ids"] == ["page"]
     field = normalized["semantic_plan"]["field_semantics"][0]
-    assert field["category"] == "user_param"
-    assert field["source_kind"] == "api_option"
+    assert field["category"] == "runtime_var"
+    assert field["source_kind"] == "previous_response"
     assert field["confidence"] == 0.95
 
     spec.capabilities = [flow_module.FlowCapability(
@@ -1109,7 +1114,7 @@ def test_screenshot_normalization_replaces_stale_axes_for_all_control_types():
         assert by_path[path]["evidence"][0]["source"] == "screenshot"
 
 
-def test_image_free_normalization_keeps_the_original_grounded_axis_behavior():
+def test_image_free_normalization_does_not_relabel_a_model_axis_as_grounded():
     param = ParamField(
         path="ownerId", key="ownerId", type="string", wire_type="string",
         category="runtime_var", source_kind="current_user",
@@ -1133,5 +1138,62 @@ def test_image_free_normalization_keeps_the_original_grounded_axis_behavior():
     field = agent_tools_module._normalize_recording_plan_submission(
         raw_plan, spec,
     )["semantic_plan"]["field_semantics"][0]
-    assert (field["category"], field["source_kind"]) == ("runtime_var", "current_user")
+    assert (field["category"], field["source_kind"]) == ("user_param", "user_input")
     assert field["evidence"] == [{"source": "pi_analysis", "detail": "Model-only guess"}]
+
+
+def test_r2_plan_normalization_rejects_ambiguous_normalized_wire_paths():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit",
+        params=[
+            ParamField(path="id", key="根编号"),
+            ParamField(path="body.id", key="请求体编号"),
+        ],
+    )])
+    raw_plan = {"semantic_plan": {
+        "business_understanding": {},
+        "request_roles": [],
+        "field_semantics": [{
+            "step_id": "submit",
+            "wire_path": "id",
+            "public_name": "编号",
+            "business_type": "string",
+            "source_kind": "user_input",
+            "confidence": 0.9,
+        }],
+        "capabilities": [],
+        "capability_relations": [],
+        "unresolved_items": [],
+    }, "ops": []}
+
+    semantic = agent_tools_module._normalize_recording_plan_submission(
+        raw_plan, spec,
+    )["semantic_plan"]
+    assert semantic["field_semantics"] == []
+    assert semantic["unresolved_items"] == [{
+        "type": "unmatched_field",
+        "step_id": "submit",
+        "wire_path": "id",
+    }]
+
+
+def test_r2_plan_normalization_does_not_fill_missing_semantic_axes_from_old_values():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit",
+        params=[ParamField(path="title", key="旧标题", type="string")],
+    )])
+    raw_plan = {"semantic_plan": {
+        "business_understanding": {},
+        "request_roles": [],
+        "field_semantics": [{"step_id": "submit", "wire_path": "title"}],
+        "capabilities": [],
+        "capability_relations": [],
+        "unresolved_items": [],
+    }, "ops": []}
+
+    field = agent_tools_module._normalize_recording_plan_submission(
+        raw_plan, spec,
+    )["semantic_plan"]["field_semantics"][0]
+    assert "public_name" not in field
+    assert "business_type" not in field
+    assert field["confidence"] == 0.0

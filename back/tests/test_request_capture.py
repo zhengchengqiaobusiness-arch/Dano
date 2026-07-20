@@ -2420,12 +2420,15 @@ def test_flatten_same_value_fields_take_distinct_labels():
 def test_flatten_infers_field_types():
     """字段类型从值推断(通用):文本/数字/毫秒时间戳→datetime/布尔/数组。"""
     body = '{"reason":"回家","amount":12.5,"days":3,"startTime":1782230400000,"draft":false,"checkin":"2026-06-24"}'
-    t = {f["key"]: f["type"] for f in flatten_body(body)}
+    fields = {f["key"]: f for f in flatten_body(body)}
+    t = {key: field["type"] for key, field in fields.items()}
     assert t["reason"] == "string"
     assert t["amount"] == "number" and t["days"] == "number"
     assert t["startTime"] == "datetime"        # 13 位毫秒 + 时间类 key
     assert t["checkin"] == "date"              # YYYY-MM-DD 字符串
     assert t["draft"] == "boolean"
+    assert fields["startTime"]["wire_type"] == "number"
+    assert fields["checkin"]["wire_type"] == "string"
 
 
 def test_build_api_request_field_types_with_enum():

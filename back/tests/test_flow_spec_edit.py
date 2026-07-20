@@ -2053,6 +2053,7 @@ def test_edit_value():
     new = apply_flow_edits(_make_spec(), [{"op": "update", "step_id": "step1",
                                            "param_path": "form.userId", "field": "value", "value": "456"}])
     assert new.steps[0].params[0].value == "456"
+    assert new.steps[0].params[0].default_value == "456"
     assert new.steps[0].sample_inputs["userId"] == "456"
 
 
@@ -5039,7 +5040,7 @@ def test_autofix_capability_field_cannot_overwrite_manual_evidence_when_unlocked
     ))
     param = fixed.steps[0].params[0]
     assert (param.type, param.category, param.source_kind, param.source, param.exposed_to_user) == (
-        "string", "user_param", "user_input",
+        "number", "user_param", "user_input",
         {"kind": "sample", "path": "query.status"}, True,
     )
 

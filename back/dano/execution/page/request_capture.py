@@ -1715,6 +1715,19 @@ def _infer_type(node, key: str = "") -> str:
     return "string"
 
 
+def _infer_wire_type(node) -> str:
+    """Infer only the serialized JSON shape, without business-key semantics."""
+    if isinstance(node, bool):
+        return "boolean"
+    if isinstance(node, (int, float)):
+        return "number"
+    if isinstance(node, list):
+        return "array"
+    if isinstance(node, dict):
+        return "object"
+    return "string"
+
+
 def _date_keys(s) -> set:
     """从一个值里抽出 YYYY-MM-DD,用于日期字段跨格式匹配(通用,不挑系统):
     支持 ISO / 带斜杠日期串(2026-06-24、2026/6/24)、**10 位秒级时间戳**、12-13 位毫秒时间戳。
@@ -2280,7 +2293,7 @@ def flatten_body(post_data: str | None, samples: dict | None = None,
                     "suggest_param": is_param,
                     "suggest_name": label or key,            # 对不上 → 退原始 key(不瞎猜)
                     "type": inferred_type,
-                    "wire_type": _infer_type(node, key),
+                    "wire_type": _infer_wire_type(node),
                     "name_source": "dom" if control and label else "sample" if label and label != key else "auto",
                     "field_aliases": evidence_aliases(control or {}),
                     "control_kind": str((control or {}).get("control_kind") or "unknown"),

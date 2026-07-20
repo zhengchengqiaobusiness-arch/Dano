@@ -1179,15 +1179,17 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         _build_initial_flow_capabilities,
         _capability_node_step_ids,
         _option_source_step_ids,
-        _param_has_manual_contract,
+        _param_field_manually_edited,
         _planned_capability_has_public_anchor,
         _repair_structural_option_bindings,
         rebuild_flow_dependencies,
     )
 
+    screenshot_count = int(raw_plan.get("_analysis_screenshot_count") or 0)
     grounded = spec.model_copy(deep=True)
     rebuild_flow_dependencies(grounded)
-    _repair_structural_option_bindings(grounded)
+    if not screenshot_count:
+        _repair_structural_option_bindings(grounded)
     steps = list(getattr(grounded, "steps", None) or [])
     step_by_id = {str(step.step_id): step for step in steps}
     step_order = {str(step.step_id): index for index, step in enumerate(steps)}
@@ -1296,10 +1298,12 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             return "array" if control.get("multiple") else "string"
         return proposed_type
 
-    param_by_ref = {
-        (str(step.step_id), normalized_path(param.path)): param
-        for step in steps for param in (getattr(step, "params", None) or [])
-    }
+    params_by_ref: dict[tuple[str, str], list] = {}
+    for step in steps:
+        for param in (getattr(step, "params", None) or []):
+            params_by_ref.setdefault(
+                (str(step.step_id), normalized_path(param.path)), []
+            ).append(param)
     unresolved = list(semantic.get("unresolved_items") or []) if isinstance(semantic.get("unresolved_items"), list) else []
     fields = []
     for raw_field in semantic.get("field_semantics") or []:
@@ -1308,87 +1312,56 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         field = deepcopy(raw_field)
         step_id = str(field.get("step_id") or "")
         path = str(field.get("wire_path") or field.get("path") or "")
-        param = param_by_ref.get((step_id, normalized_path(path)))
-        if param is None:
+        matches = params_by_ref.get((step_id, normalized_path(path))) or []
+        if len(matches) != 1:
             unresolved.append({"type": "unmatched_field", "step_id": step_id, "wire_path": path})
             continue
+        param = matches[0]
         field["step_id"] = step_id
         field["wire_path"] = str(getattr(param, "path", None) or path)
-        field.setdefault("public_name", str(getattr(param, "label", None) or getattr(param, "key", None) or path))
         evidence = normalized_evidence(field.get("evidence"))
         for evidence_item in evidence:
             if str(evidence_item.get("source") or "").lower() != "screenshot":
                 continue
             for key in (
                 "screenshot_name", "visible_label", "control_kind", "editable",
-                "disabled", "read_only", "multiple", "options",
+                "disabled", "read_only", "multiple", "required", "options",
             ):
                 if key in field and evidence_item.get(key) in (None, ""):
                     evidence_item[key] = deepcopy(field[key])
         field["evidence"] = evidence
         control = screenshot_control(evidence)
-        field.setdefault("business_type", str(getattr(param, "type", None) or "string"))
         if control is not None:
             field["business_type"] = screenshot_business_type(control, field.get("business_type"))
         current_category = str(getattr(param, "category", None) or "")
         current_source_kind = str(getattr(param, "source_kind", None) or "")
-        manual_contract = bool(
-            getattr(param, "locked", False) or _param_has_manual_contract(param)
-        )
-        grounded_executable_source = bool(
-            current_source_kind == "api_option"
-            and (getattr(param, "source", None) or getattr(param, "enum_value_map", None))
-        ) or bool(
-            current_source_kind == "previous_response" and getattr(param, "source", None)
-        )
-        screenshot_editable = bool(
-            control is not None
-            and control.get("editable") is not False
-            and not control.get("disabled")
-            and not control.get("read_only")
+        manual_contract = bool(getattr(param, "locked", False))
+        manual_source_contract = manual_contract or any(
+            _param_field_manually_edited(param, axis)
+            for axis in (
+                "category", "exposed_to_user", "exposed_to_caller",
+                "source_kind", "source",
+            )
         )
         control_kind = str((control or {}).get("control_kind") or "").lower()
         option_control = control_kind in {
             "select", "combobox", "cascader", "picker", "radio", "tree_select",
         } or bool(control_kind == "checkbox" and control.get("options"))
-        screenshot_user_category = bool(
-            screenshot_editable
-            and str(field.get("category") or "") == "user_param"
-            and not manual_contract
-        )
-        screenshot_user_input = bool(
-            screenshot_user_category
-            and str(field.get("source_kind") or "") == "user_input"
-            and (
-                not grounded_executable_source
-                or (current_source_kind == "api_option" and not option_control)
-            )
-        )
-        screenshot_safe_internal = bool(
-            control is not None
-            and (
-                control.get("editable") is False
-                or control.get("disabled")
-                or control.get("read_only")
-            )
-            and str(field.get("category") or "") in {"runtime_var", "system_const"}
-            and str(field.get("source_kind") or "") in {
-                "current_user", "page_context", "system_time", "constant",
-                "computed", "system_generated",
-            }
-            and not grounded_executable_source
-            and not manual_contract
-        )
-        screenshot_category_override = screenshot_user_category or screenshot_safe_internal
-        screenshot_source_override = screenshot_user_input or screenshot_safe_internal
-        if not screenshot_category_override and current_category not in {"", "unknown"}:
+        if manual_source_contract and current_category not in {"", "unknown"}:
             field["category"] = current_category
-        if not screenshot_source_override and current_source_kind not in {"", "unknown"}:
+        if manual_source_contract and current_source_kind not in {"", "unknown"}:
             field["source_kind"] = current_source_kind
         field["confidence"] = normalized_confidence(
             field.get("confidence"),
-            float(getattr(param, "confidence", None) or 0.8),
+            0.0,
         )
+        if control is not None:
+            if "required" not in field and isinstance(control.get("required"), bool):
+                field["required"] = control["required"]
+            if option_control and not isinstance(field.get("enum_options"), list):
+                visible_options = control.get("options")
+                if isinstance(visible_options, list):
+                    field["enum_options"] = deepcopy(visible_options)
         fields.append(field)
     semantic["field_semantics"] = fields
 
@@ -1648,6 +1621,11 @@ async def submit_recording_plan(run_id: str, params: dict) -> dict:
     if not isinstance(raw_plan, dict):
         raise ToolError("plan 必须是对象")
     session = _recording_session(run_id, params)
+    if int(getattr(session, "analysis_image_count", 0) or 0):
+        raw_plan = {
+            **deepcopy(raw_plan),
+            "_analysis_screenshot_count": int(session.analysis_image_count),
+        }
     submission = _normalize_recording_plan_submission(raw_plan, session.current_flow_spec())
     submission.setdefault("submission_id", str(uuid4()))
     return await _apply_recording_submission_atomic(

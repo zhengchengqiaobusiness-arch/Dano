@@ -3553,6 +3553,14 @@ def _param_field_manually_edited(param: ParamField, field: str) -> bool:
     )
 
 
+def _param_axis_manually_edited(param: ParamField, *fields: str) -> bool:
+    return any(_param_field_manually_edited(param, field) for field in fields)
+
+
+def _param_has_full_lock(param: ParamField) -> bool:
+    return bool(param.locked)
+
+
 def _param_has_page_required_evidence(param: ParamField) -> bool:
     """Return true only for a captured page-required marker.
 
@@ -4077,7 +4085,7 @@ _LEGACY_RECORDED_FORBIDDEN_ACTIONS = frozenset({"删除", "作废", "撤销", "�
 
 def _param_has_grounded_public_name(param: ParamField) -> bool:
     """Return whether recorder/operator evidence already owns the public name."""
-    if param.locked or param.name_source in {"manual", "sample", "assignee"}:
+    if _param_has_full_lock(param) or param.name_source in {"manual", "sample", "assignee"}:
         return True
     public_name = str(param.label or param.key or "").strip()
     if (
@@ -4098,15 +4106,19 @@ def _param_has_grounded_public_name(param: ParamField) -> bool:
 
 
 def _param_has_grounded_type(param: ParamField) -> bool:
-    """Recorder transport/control evidence outranks a model business-type guess."""
-    if param.locked or _param_has_manual_contract(param):
+    """Return whether evidence grounds the business type, not its wire shape."""
+    if _param_has_full_lock(param) or _param_field_manually_edited(param, "type"):
         return True
     if str(param.type or "") in {"", "unknown"}:
         return False
-    return bool(param.wire_type) or any(
+    if param.type in {"enum", "list-enum"} and (
+        param.enum_options or param.enum_value_map or _param_has_executable_source(param)
+    ):
+        return True
+    return any(
         isinstance(item, dict)
-        and item.get("source") == "recorder_dom"
-        and item.get("kind") == "page_control"
+        and str(item.get("source") or item.get("kind") or "").lower()
+        in {"recorder_dom", "page", "page_snapshot", "screenshot"}
         and str(item.get("control_kind") or "unknown") != "unknown"
         for item in (param.evidence or [])
     )
@@ -4204,31 +4216,45 @@ def _apply_capability_field_to_param(
     and operator edits remain authoritative. Capability views must never degrade
     the canonical field contract.
     """
+    normalized_actor = str(actor or "user").strip().lower()
+    automated = normalized_actor in _AUTOMATED_FIELD_EDIT_ACTORS
     step_id = str(raw.get("step_id") or "")
-    path = str(raw.get("path") or raw.get("key") or "")
+    path = str(
+        raw.get("path") or raw.get("wire_path")
+        or (raw.get("key") if not automated else "")
+        or ""
+    )
     if not step_id or not path:
         return False
     step = next((item for item in spec.steps if item.step_id == step_id), None)
     if step is None:
         return False
-    try:
-        param = _find_param(
-            step, path,
-            param_key=str(raw.get("key") or ""),
-            param_label=str(raw.get("display_name") or ""),
-        )
-    except ValueError:
-        return False
-    normalized_actor = str(actor or "user").strip().lower()
-    automated = normalized_actor in _AUTOMATED_FIELD_EDIT_ACTORS
-    if automated and (param.locked or _param_has_manual_contract(param)):
+    if automated:
+        param = next((item for item in step.params if item.path == path), None)
+        if param is None:
+            return False
+    else:
+        try:
+            param = _find_param(
+                step, path,
+                param_key=str(raw.get("key") or ""),
+                param_label=str(raw.get("display_name") or ""),
+            )
+        except ValueError:
+            return False
+    if automated and _param_has_full_lock(param):
         return True
 
     screenshot_control = _screenshot_control_evidence(raw) if automated else None
     allow_name = (
         not automated
-        or not _param_has_grounded_public_name(param)
-        or screenshot_control is not None
+        or (
+            not _param_axis_manually_edited(param, "key", "label", "name", "display_name")
+            and (
+                not _param_has_grounded_public_name(param)
+                or screenshot_control is not None
+            )
+        )
     )
     screenshot_editable = bool(
         screenshot_control is not None
@@ -4253,6 +4279,14 @@ def _apply_capability_field_to_param(
         screenshot_editable
         and str(raw.get("source_kind") or "") == "user_input"
     )
+    screenshot_page_enum = bool(
+        screenshot_editable
+        and screenshot_option_control
+        and str(raw.get("source_kind") or "") in {
+            "page_enum", "static_enum", "form_option",
+        }
+        and param.source_kind != "api_option"
+    )
     screenshot_user_category = bool(
         screenshot_editable
         and str(raw.get("category") or "") == "user_param"
@@ -4267,25 +4301,49 @@ def _apply_capability_field_to_param(
         and str(raw.get("source_kind") or "") in _SCREENSHOT_INTERNAL_SOURCE_KINDS
     )
     allow_type = (
-        not automated or not _param_has_grounded_type(param) or screenshot_control is not None
+        not automated
+        or (
+            not _param_field_manually_edited(param, "type")
+            and (not _param_has_grounded_type(param) or screenshot_control is not None)
+        )
     )
     allow_source = (
         not automated
-        or str(param.source_kind or "unknown") in {"", "unknown"}
         or (
-            (screenshot_editable_input or screenshot_safe_internal)
-            and not _param_has_executable_source(param)
-        )
-        or (
-            screenshot_editable_input
-            and screenshot_direct_input
-            and param.source_kind == "api_option"
+            not _param_axis_manually_edited(
+                param, "source_kind", "source", "category",
+                "exposed_to_user", "exposed_to_caller",
+            )
+            and (
+                str(param.source_kind or "unknown") in {"", "unknown"}
+                or (
+                    (screenshot_editable_input or screenshot_page_enum or screenshot_safe_internal)
+                    and not _param_has_executable_source(param)
+                )
+                or (
+                    screenshot_editable_input
+                    and screenshot_direct_input
+                )
+            )
         )
     )
     # Category answers who supplies the value; source answers where option
     # values come from.  An editable select is a caller input even though its
     # choices still come from a captured API.
-    allow_category = not automated or allow_source or screenshot_user_category
+    allow_category = (
+        not automated
+        or (
+            not _param_axis_manually_edited(
+                param, "category", "exposed_to_user", "exposed_to_caller",
+                "source_kind", "source",
+            )
+            and (
+                str(param.category or "unknown") in {"", "unknown"}
+                or screenshot_user_category
+                or screenshot_safe_internal
+            )
+        )
+    )
 
     if raw.get("key") and allow_name:
         if str(raw["key"]) != param.key:
@@ -4295,7 +4353,14 @@ def _apply_capability_field_to_param(
         param.label = str(raw["display_name"])
     if raw.get("type") and allow_type:
         _transition_param_type(param, raw["type"])
-    if "required" in raw and not automated:
+    screenshot_required = bool(
+        screenshot_control is not None
+        and isinstance(screenshot_control.get("required"), bool)
+    )
+    allow_required = not automated or (
+        screenshot_required and not _param_field_manually_edited(param, "required")
+    )
+    if "required" in raw and allow_required:
         param.required = bool(raw["required"])
     if raw.get("source_kind") and allow_source:
         param.source_kind = str(raw["source_kind"])
@@ -4309,6 +4374,16 @@ def _apply_capability_field_to_param(
             binding for binding in (step.selects or [])
             if _strip_body_prefix(binding.path or "") != _strip_body_prefix(param.path or "")
         ]
+    if screenshot_page_enum and allow_source:
+        param.source = {"kind": str(raw.get("source_kind") or "page_enum"), "path": param.path}
+        if isinstance(raw.get("enum_options"), list):
+            param.enum_options = copy.deepcopy(raw["enum_options"])
+            param.enum_value_map = None
+    # Screenshot evidence never changes defaults. A pictured value can be a
+    # transient form value, sample data or placeholder, not an API default.
+    allow_default = not automated
+    if "visible_default" in raw and allow_default:
+        param.default_value = copy.deepcopy(raw.get("visible_default"))
     if "exposed_to_caller" in raw and (not automated or allow_category):
         param.exposed_to_user = bool(raw["exposed_to_caller"])
     if scope == "input" and allow_category:
@@ -4326,6 +4401,7 @@ def _apply_capability_field_to_param(
         "applied_axes": {
             "name": bool(allow_name), "type": bool(allow_type),
             "category": bool(allow_category), "source": bool(allow_source),
+            "required": bool(allow_required), "default": bool(allow_default),
         },
     })
     for evidence in raw.get("evidence") or []:
@@ -4339,6 +4415,12 @@ def _apply_capability_field_to_param(
             field for field in ("type", "source_kind", "source", "exposed_to_caller")
             if field in raw
         ]
+        if raw.get("key"):
+            manual_fields.append("key")
+        if raw.get("display_name"):
+            manual_fields.append("label")
+        if "required" in raw:
+            manual_fields.append("required")
         if scope in {"input", "internal"}:
             manual_fields.extend(["category", "exposed_to_user"])
         for field in dict.fromkeys(manual_fields):
@@ -7783,7 +7865,7 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
             target_step = step_by_id.get(step_id)
             target_param = next((
                 param for param in (target_step.params if target_step else [])
-                if _strip_body_prefix(param.path) == _strip_body_prefix(path)
+                if param.path == path
             ), None)
             # Field semantics may rename and describe a grounded field, but it
             # cannot invent a source axis. Source/category changes require the
@@ -7808,9 +7890,22 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
             )
             screenshot_control = _screenshot_control_evidence(item)
             proposed_type = str(item.get("business_type") or item.get("type") or "")
+            grounded_type_proposal = screenshot_control is not None or any(
+                isinstance(evidence_item, dict)
+                and str(evidence_item.get("source") or evidence_item.get("kind") or "").lower()
+                in {"recorder_dom", "page", "page_snapshot", "api_schema", "manual"}
+                and (
+                    str(evidence_item.get("control_kind") or "unknown") != "unknown"
+                    or bool(evidence_item.get("business_type"))
+                    or bool(evidence_item.get("schema_type"))
+                )
+                for evidence_item in (item.get("evidence") or [])
+            )
             business_type = (
                 _screenshot_control_business_type(screenshot_control, proposed_type)
-                if screenshot_control is not None else proposed_type
+                if screenshot_control is not None
+                else proposed_type if grounded_type_proposal
+                else str(target_param.type if target_param else "")
             )
             if (
                 grounded_editable_control
@@ -7823,6 +7918,17 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
                 # still require their executable binding operations.
                 category = "user_param"
                 source_kind = "user_input"
+            elif (
+                grounded_editable_control
+                and screenshot_control is not None
+                and str(screenshot_control.get("control_kind") or "").lower()
+                in _SCREENSHOT_OPTION_CONTROL_KINDS
+                and requested_category == "user_param"
+                and requested_source_kind in {"page_enum", "static_enum", "form_option"}
+                and source_kind != "api_option"
+            ):
+                category = "user_param"
+                source_kind = requested_source_kind
             elif (
                 screenshot_control is not None
                 and (
@@ -7848,8 +7954,10 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
                     "key": public_name,
                     "display_name": public_name,
                     "type": business_type,
+                    "category": category,
                     "source_kind": source_kind,
                     **({"required": bool(item.get("required"))} if "required" in item else {}),
+                    **({"enum_options": item.get("enum_options")} if isinstance(item.get("enum_options"), list) else {}),
                     "locked": False,
                     "confirmed": False,
                     "evidence": item.get("evidence") or [],
@@ -8030,15 +8138,14 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         item for item in (plan.get("field_semantics") or []) if isinstance(item, dict)
     ]
     covered_fields = {
-        (str(item.get("step_id") or ""), _strip_body_prefix(str(item.get("path") or item.get("wire_path") or "")))
+        (str(item.get("step_id") or ""), str(item.get("path") or item.get("wire_path") or ""))
         for item in field_items
     }
     required_steps = {step.step_id for step in spec.steps}
     required_fields = {
-        (step.step_id, _strip_body_prefix(param.path))
+        (step.step_id, param.path)
         for step in spec.steps
         for param in step.params
-        if param.category == "user_param" and param.exposed_to_user
     }
     missing: list[str] = []
     if not required_steps.issubset(covered_steps):
@@ -8056,7 +8163,7 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
     if not required_fields.issubset(covered_fields):
         missing.append("field_semantics")
     if any(
-        (str(item.get("step_id") or ""), _strip_body_prefix(str(item.get("path") or item.get("wire_path") or "")))
+        (str(item.get("step_id") or ""), str(item.get("path") or item.get("wire_path") or ""))
         in required_fields
         and not (
             str(item.get("public_name") or item.get("business_name") or item.get("label") or "").strip()
@@ -8615,29 +8722,13 @@ def _complete_semantic_plan_from_spec(
         item.setdefault("reason", str((step.source_meta or {}).get("keep_reason") or "来自录制请求事实"))
     plan["request_roles"] = list(role_by_step.values())
 
-    field_by_ref = {
-        (
-            str(item.get("step_id") or ""),
-            _strip_body_prefix(str(item.get("wire_path") or item.get("path") or "")),
-        ): item
-        for item in (plan.get("field_semantics") or [])
+    # Field omissions remain omissions.  Reusing current ParamField values here
+    # made stale heuristic names/types look model-confirmed and hid unresolved
+    # internal/runtime fields from the coverage gate.
+    plan["field_semantics"] = [
+        item for item in (plan.get("field_semantics") or [])
         if isinstance(item, dict)
-    }
-    for step in spec.steps:
-        for param in step.params:
-            if param.category != "user_param" or not param.exposed_to_user:
-                continue
-            ref = (step.step_id, _strip_body_prefix(param.path))
-            item = field_by_ref.setdefault(ref, {
-                "step_id": step.step_id,
-                "wire_path": param.path,
-            })
-            item.setdefault("public_name", param.label or param.key or param.path)
-            item.setdefault("business_type", param.type)
-            item.setdefault("source_kind", param.source_kind or "user_input")
-            item.setdefault("confidence", float(param.confidence or (1.0 if param.locked else 0.8)))
-            item.setdefault("evidence", list(param.evidence or [{"source": "recorded_flow_spec"}]))
-    plan["field_semantics"] = list(field_by_ref.values())
+    ]
 
     capability_by_name = {
         str(item.get("name") or ""): item
@@ -15292,16 +15383,40 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
 
             if param_path:
                 # 参数级编辑
-                param = _find_param(
-                    step,
-                    param_path,
-                    param_key=str(edit.get("param_key") or ""),
-                    param_label=str(edit.get("param_label") or ""),
-                )
-                if actor in _AUTOMATED_FIELD_EDIT_ACTORS and (
-                    param.locked or _param_has_manual_contract(param)
-                ):
-                    continue
+                if actor in _AUTOMATED_FIELD_EDIT_ACTORS:
+                    param = next((item for item in step.params if item.path == param_path), None)
+                    if param is None:
+                        continue
+                    protected_axes = {
+                        "key": ("key", "label", "name", "display_name"),
+                        "label": ("key", "label", "name", "display_name"),
+                        "value": ("value", "default_value"),
+                        "source_kind": (
+                            "source_kind", "source", "category",
+                            "exposed_to_user", "exposed_to_caller",
+                        ),
+                        "source": (
+                            "source_kind", "source", "category",
+                            "exposed_to_user", "exposed_to_caller",
+                        ),
+                        "category": (
+                            "category", "exposed_to_user", "exposed_to_caller",
+                            "source_kind", "source",
+                        ),
+                        "exposed_to_user": (
+                            "category", "exposed_to_user", "exposed_to_caller",
+                            "source_kind", "source",
+                        ),
+                    }.get(str(field), (str(field),))
+                    if _param_has_full_lock(param) or _param_axis_manually_edited(param, *protected_axes):
+                        continue
+                else:
+                    param = _find_param(
+                        step,
+                        param_path,
+                        param_key=str(edit.get("param_key") or ""),
+                        param_label=str(edit.get("param_label") or ""),
+                    )
                 if field == "key":
                     _rename_param_public_key(new_spec, step, param, str(value), actor=actor)
                 elif field == "path":
@@ -15330,6 +15445,7 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                         param.source["target_path"] = new_path
                 elif field == "value":
                     param.value = str(value)
+                    param.default_value = param.value
                     step.sample_inputs[param.key] = param.value
                 elif field == "type":
                     _transition_param_type(param, value)
@@ -15346,11 +15462,6 @@ def apply_flow_edits(spec: FlowSpec, edits: list[dict[str, Any]]) -> FlowSpec:
                     if field in {"label", "description"}:
                         param.name_source = "manual"
                         param.locked = True
-                        param.evidence.append({
-                            "source": "manual_edit",
-                            "field": field,
-                            "value": value,
-                        })
                 else:
                     # H19 修复:不再 hasattr 兜底(避免改 path/source_kind/internal 等关键字段)
                     raise ValueError(f"unknown param field: {field}")
@@ -15915,7 +16026,10 @@ def _autofix_ops_to_edits(
 
     def locked_param(step_id: str, path: str) -> bool:
         step = step_by_id.get(step_id)
-        return bool(next((p for p in (step.params if step else []) if _strip_body_prefix(p.path) == _strip_body_prefix(path) and p.locked), None))
+        param = next((p for p in (step.params if step else []) if p.path == path), None)
+        # Automatic edits use the stored request path as identity.  Treat an
+        # unmatched path as unavailable instead of falling back to a name/leaf.
+        return param is None or bool(param.locked)
 
     for op in ops or []:
         if not isinstance(op, dict):

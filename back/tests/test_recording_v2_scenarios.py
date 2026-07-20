@@ -270,21 +270,13 @@ def test_r0_seal_truth_preserves_facts_capability_boundaries_and_relations(
         ("/get-approval-detail", "query.activityId", "activityId", "StartUserNode", "string", "string", "system_const", "constant", False),
         ("/seal-apply/submit-process", "sealId", "公章", "seal-a", "enum", "string", "user_param", "api_option", True),
         ("/seal-apply/submit-process", "applyTitle", "申请标题", "项目用章", "string", "string", "user_param", "user_input", True),
-        pytest.param(
+        (
             "/seal-apply/submit-process", "useTime", "使用日期", 1784476800000,
             "datetime", "number", "user_param", "user_input", True,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="R2: 日期业务类型不能覆盖 JSON 数字时间戳的 wire_type",
-            ),
         ),
-        pytest.param(
+        (
             "/seal-apply/submit-process", "backTime", "归还日期", 1784563200000,
             "datetime", "number", "user_param", "user_input", True,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="R2: 日期业务类型不能覆盖 JSON 数字时间戳的 wire_type",
-            ),
         ),
         ("/seal-apply/submit-process", "useInfo", "使用描述", "项目材料", "string", "string", "user_param", "user_input", True),
         ("/seal-apply/submit-process", "billType", "billType", "oa_seal_apply", "string", "string", "system_const", "constant", False),
@@ -1744,6 +1736,8 @@ def test_screenshot_semantic_plan_updates_canonical_capability_and_field_contrac
                 value="2026-07-18",
                 type="string",
                 wire_type="string",
+                required=False,
+                default_value="2026-07-17",
                 category="runtime_var",
                 source_kind="current_user",
                 exposed_to_user=False,
@@ -1776,7 +1770,10 @@ def test_screenshot_semantic_plan_updates_canonical_capability_and_field_contrac
             "step_id": "submit", "wire_path": "useDate", "public_name": "使用日期",
             "business_type": "date", "category": "user_param", "source_kind": "user_input",
             "required": True, "confidence": 0.99,
-            "evidence": [{"source": "screenshot", "label": "使用日期", "control_kind": "date"}],
+            "evidence": [{
+                "source": "screenshot", "label": "使用日期", "control_kind": "date",
+                "editable": True, "required": True, "visible_value": "2026-07-18",
+            }],
         }, {
             "step_id": "submit", "wire_path": "operatorName", "public_name": "Applicant",
             "business_type": "string", "category": "runtime_var", "source_kind": "current_user",
@@ -1805,6 +1802,8 @@ def test_screenshot_semantic_plan_updates_canonical_capability_and_field_contrac
     assert field.wire_type == "string"
     assert field.category == "user_param"
     assert field.source_kind == "user_input"
+    assert field.required is True
+    assert field.default_value == "2026-07-17"
     assert operator.key == "Applicant"
     assert operator.type == "string"
     assert (operator.category, operator.source_kind) == ("runtime_var", "current_user")
@@ -2358,7 +2357,7 @@ def test_screenshot_textarea_replaces_stale_automatic_api_option_binding():
             nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
         )],
     )
-    submission = {"semantic_plan": {
+    submission = {"_analysis_screenshot_count": 1, "semantic_plan": {
         "business_understanding": {"summary": "Submit seal application"},
         "request_roles": [{
             "step_id": "submit",
@@ -2394,6 +2393,7 @@ def test_screenshot_textarea_replaces_stale_automatic_api_option_binding():
                 "category": "user_param",
                 "source_kind": "api_option",
                 "control_kind": "select",
+                "required": True,
                 "confidence": 0.98,
                 "evidence": [{
                     "source": "screenshot",
@@ -2403,6 +2403,7 @@ def test_screenshot_textarea_replaces_stale_automatic_api_option_binding():
                     "disabled": False,
                     "read_only": False,
                     "multiple": False,
+                    "required": True,
                 }],
             },
         ],
@@ -2449,6 +2450,7 @@ def test_screenshot_textarea_replaces_stale_automatic_api_option_binding():
     assert (params["sealId"].category, params["sealId"].source_kind) == (
         "user_param", "api_option",
     )
+    assert params["sealId"].required is True
     assert params["sealId"].source["source_url"] == "/admin-api/bd/seal/simple-list"
     assert [binding.path for binding in optimized.steps[0].selects] == ["sealId"]
 
@@ -2464,6 +2466,55 @@ def test_screenshot_textarea_replaces_stale_automatic_api_option_binding():
     assert [binding.path for binding in optimized.steps[0].selects] == ["sealId"]
 
 
+def test_screenshot_select_replaces_stale_text_input_with_visible_page_enum():
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit", method="POST", path="/api/request/submit",
+            params=[ParamField(
+                path="requestType", key="requestType", label="requestType", value="annual",
+                type="string", wire_type="string", required=False,
+                category="user_param", source_kind="user_input",
+            )],
+        )],
+        capabilities=[FlowCapability(
+            name="submit_request", title="Submit request", intent="Submit request", kind="submit",
+            nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
+        )],
+    )
+    submission = {"_analysis_screenshot_count": 1, "semantic_plan": {
+        "business_understanding": {"summary": "Submit request"},
+        "request_roles": [{
+            "step_id": "submit", "role": "business_write",
+            "name": "Submit request", "reason": "Recorded submit request",
+        }],
+        "field_semantics": [{
+            "step_id": "submit", "wire_path": "requestType", "public_name": "申请类型",
+            "business_type": "enum", "category": "user_param", "source_kind": "page_enum",
+            "required": True, "confidence": 0.99,
+            "evidence": [{
+                "source": "screenshot", "screenshot_name": "request.png",
+                "visible_label": "申请类型", "control_kind": "select", "editable": True,
+                "required": True, "visible_value": "年假", "options": ["年假", "事假"],
+            }],
+        }],
+        "capabilities": [{
+            "name": "submit_request", "title": "提交申请", "intent": "提交申请",
+            "kind": "submit", "step_ids": ["submit"],
+        }],
+        "capability_relations": [], "unresolved_items": [],
+    }, "ops": []}
+
+    normalized = agent_tools_module._normalize_recording_plan_submission(submission, spec)
+    optimized = asyncio.run(orchestrate_flow_capabilities(
+        spec, submission=normalized, generation_mode="optimize",
+    ))
+    field = optimized.steps[0].params[0]
+
+    assert (field.key, field.type) == ("申请类型", "enum")
+    assert (field.category, field.source_kind) == ("user_param", "page_enum")
+    assert field.required is True
+    assert field.default_value is None
+    assert field.enum_options == ["年假", "事假"]
 
 def test_complete_reanalysis_replaces_auto_relations_and_keeps_confirmed_relations():
     query = FlowStep(
@@ -2540,7 +2591,7 @@ def test_complete_reanalysis_replaces_auto_relations_and_keeps_confirmed_relatio
             ),
         ],
     )
-    submission = {"semantic_plan": {
+    submission = {"_analysis_screenshot_count": 1, "semantic_plan": {
         "business_understanding": {"summary": "Query and archive orders"},
         "request_roles": [
             {
