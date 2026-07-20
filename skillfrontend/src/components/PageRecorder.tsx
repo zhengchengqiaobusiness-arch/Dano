@@ -85,6 +85,7 @@ interface AnalysisApplication {
 }
 
 interface FlowParam {
+  field_id?: string;
   path: string; key: string; label?: string; value: string; type: string; required: boolean; name_source?: string;
   default_value?: any;
   category?: string; source_kind?: string; source?: any; reason?: string;
@@ -1326,6 +1327,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   const [flowSpec, setFlowSpec] = useState<FlowSpecData | null>(null);
   const flowSpecRef = useRef<FlowSpecData | null>(null);
+  const authoritativeFlowSpecRef = useRef<FlowSpecData | null>(null);
+  const paramFieldIdSeqRef = useRef(0);
   const serverFingerprintRef = useRef("");
   useEffect(() => { flowSpecRef.current = flowSpec; }, [flowSpec]);
   const pendingEditorScrollRef = useRef<number | null>(null);
@@ -1391,8 +1394,34 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const publishLocateTokenRef = useRef(0);
   const [activeFlowTab, setActiveFlowTab] = useState("abilities");
 
+  function withStableParamFieldIds(fs: FlowSpecData) {
+    const currentSteps = flowSpecRef.current?.steps || [];
+    return {
+      ...fs,
+      steps: (fs.steps || []).map((step) => {
+        const previous = currentSteps.find((item) => item.step_id === step.step_id)?.params || [];
+        return {
+          ...step,
+          params: (step.params || []).map((param) => {
+            if (param.field_id) return param;
+            const pathMatch = previous.find((item) => item.path === param.path);
+            const aliasMatches = previous.filter((item) =>
+              (!!param.key && item.key === param.key) || (!!param.label && item.label === param.label));
+            const prior = pathMatch || (aliasMatches.length === 1 ? aliasMatches[0] : undefined);
+            return {
+              ...param,
+              field_id: prior?.field_id || `${step.step_id}:field:${++paramFieldIdSeqRef.current}`,
+            };
+          }),
+        };
+      }),
+    };
+  }
+
   function acceptFlowSpec(fs: FlowSpecData) {
-    serverFingerprintRef.current = String(fs.meta?.current_fingerprint || "");
+    const stable = withStableParamFieldIds(fs);
+    authoritativeFlowSpecRef.current = stable;
+    serverFingerprintRef.current = String(stable.meta?.current_fingerprint || "");
     const pending = pendingCapabilityMembershipRef.current;
     const remaining: typeof pending = [];
     for (const item of pending) {
@@ -1416,8 +1445,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       }
     }
     pendingCapabilityMembershipRef.current = remaining;
-    flowSpecRef.current = fs;
-    setFlowSpec(fs);
+    flowSpecRef.current = stable;
+    setFlowSpec(stable);
     setOptimisticCapabilityStepOrder({});
     if (fs.meta?.last_analysis_application) {
       setLastAnalysisEvidence(fs.meta.last_analysis_application);
@@ -1627,6 +1656,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     if (restoreLocal) {
       [...flowMutationQueueRef.current].reverse().forEach((queued) => queued?._rollback?.());
       active?._rollback?.();
+      if (authoritativeFlowSpecRef.current) {
+        flowSpecRef.current = authoritativeFlowSpecRef.current;
+        setFlowSpec(authoritativeFlowSpecRef.current);
+      }
     }
     flowMutationInFlightRef.current = null;
     flowMutationQueueRef.current = [];
@@ -1733,6 +1766,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function resetEditorState() {
     flowSpecRef.current = null;
+    authoritativeFlowSpecRef.current = null;
     serverFingerprintRef.current = "";
     setFlowSpec(null);
     setCheckReport(null);
@@ -1931,6 +1965,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           // Even when a newer optimistic edit is already queued, its patch must
           // use the fingerprint acknowledged by this server response.
           serverFingerprintRef.current = String(fs.meta?.current_fingerprint || "");
+          authoritativeFlowSpecRef.current = withStableParamFieldIds(fs);
           // Every field mutation is serialized, but the user may already have made
           // a newer local edit while the previous response is in flight.  Do not
           // repaint that older snapshot over the newer draft.  The final queued
@@ -2016,12 +2051,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
       }
     };
-    ws.onerror = () => {
-      if (wsRef.current === ws && !connectionErrorRef.current) {
-        connectionErrorRef.current = "WebSocket 连接失败，当前画面和已录步骤已保留";
-        setErr(connectionErrorRef.current);
-      }
-    };
     ws.onclose = (event) => {
       if (wsRef.current !== ws) return;
       if (!intentionalCloseRef.current && event.code !== 1000 && !connectionErrorRef.current) {
@@ -2045,9 +2074,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       publishOperationRef.current = null;
       setNamingBusy(false);
       setDescBusy(false);
-      flowMutationInFlightRef.current = null;
-      flowMutationQueueRef.current = [];
-      afterFlowSyncRef.current = null;
+      failQueuedFlowMutation(undefined, true);
       pauseFlowOperationForReconnect();
       if (intentionalCloseRef.current) {
         setConnectionState("idle");
@@ -2060,6 +2087,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         ? "录制连接已断开，正在自动恢复，现场和编辑内容已保留"
         : "录制服务暂时不可用，正在自动连接"));
       scheduleRecorderReconnect();
+    };
+    ws.onerror = () => {
+      if (wsRef.current === ws && !connectionErrorRef.current) {
+        connectionErrorRef.current = "WebSocket 连接失败，当前画面和已录步骤已保留";
+        setErr(connectionErrorRef.current);
+      }
     };
   }
 
@@ -2290,12 +2323,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function updateFlowField(k: string, v: any) { send({ type: "flow_update", edits: [{ op: "update_flow", field: k, value: v }] }); }
   function paramDraftKey(stepId: string, p: FlowParam) {
-    return `${stepId}:${p.path || ""}:${p.key || ""}:${p.label || ""}`;
+    return `${stepId}:${p.field_id || `${p.path || ""}:${p.key || ""}:${p.label || ""}`}`;
   }
   function paramEdit(stepId: string, p: FlowParam, field: string, value: any) {
     return {
       op: "update",
       step_id: stepId,
+      field_id: p.field_id,
       param_path: p.path || p.key || p.label,
       param_key: p.key,
       param_label: p.label || p.key,
@@ -2307,6 +2341,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     return {
       op: "remove",
       step_id: stepId,
+      field_id: p.field_id,
       param_path: p.path || p.key || p.label,
       param_key: p.key,
       param_label: p.label || p.key,
@@ -2350,6 +2385,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setCheckReport(null);
   }
   function paramMatches(a: FlowParam, b: FlowParam) {
+    if (a.field_id && b.field_id) return a.field_id === b.field_id;
     const ap = stripBodyPrefix(a.path || "");
     const bp = stripBodyPrefix(b.path || "");
     if (ap && bp && ap === bp) return true;
@@ -2874,6 +2910,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       || (target.field_id && cap
         ? capabilityFields(cap).find((field) => field.field_id === target.field_id)?.path
         : "");
+    const targetParam = sid && targetPath
+      ? stepById[String(sid)]?.params?.find((param) =>
+        stripBodyPrefix(param.path || "") === stripBodyPrefix(String(targetPath)))
+      : undefined;
+    const targetAnchorRef = targetParam?.field_id || targetPath;
     const isRequest = target.kind === "request_role";
     const unassignedStepId = sid && capIdx < 0 && stepById[String(sid)] ? String(sid) : "";
     setActiveFlowTab(isRequest || !!unassignedStepId ? "requests" : "abilities");
@@ -2884,8 +2925,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     } else if (unassignedStepId) {
       setExpandedRequestPanels((keys) => Array.from(new Set([...keys, "unassigned-steps"])));
       setExpandedUnassignedSteps((keys) => Array.from(new Set([...keys, unassignedStepId])));
-      anchor = targetPath
-        ? fieldEditorAnchorId(unassignedStepId, targetPath)
+      anchor = targetAnchorRef
+        ? fieldEditorAnchorId(unassignedStepId, targetAnchorRef)
         : `step-${domAnchorPart(unassignedStepId)}`;
     } else if (capIdx >= 0) {
       const panelKey = capabilityPanelKey(cap!, capIdx);
@@ -2904,7 +2945,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }));
       }
       if (target.link_id) anchor = `link-${domAnchorPart(target.link_id)}`;
-      else if (sid && targetPath) anchor = `field-${domAnchorPart(sid)}-${domAnchorPart(stripBodyPrefix(targetPath))}`;
+      else if (sid && targetAnchorRef) anchor = fieldEditorAnchorId(String(sid), String(targetAnchorRef));
       else if (sid) anchor = `step-${domAnchorPart(sid)}`;
       else anchor = `capability-${domAnchorPart(cap!.name || cap!.capability_id || capIdx)}`;
     }
@@ -3581,8 +3622,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       <List.Item
         // key 不能包含可编辑的 path/key/label。失焦保存会立即更新这些值；
         // 若 key 随之变化，组件会在 click 前被卸载，导致删除事件丢失。
-        key={`${step.step_id}:param:${stripBodyPrefix(p.path || p.key)}`}
-        id={fieldEditorAnchorId(step.step_id, p.path)}
+        key={p.field_id || `${step.step_id}:param:${stripBodyPrefix(p.path || p.key)}`}
+        id={fieldEditorAnchorId(step.step_id, p.field_id || p.path)}
         style={{ padding: "12px 0" }}
       >
         <div style={{ width: "100%", border: "1px solid #f0f0f0", borderRadius: 6, padding: 12, background: "#fff" }}>
@@ -3902,7 +3943,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <List
             size="small"
             // path/key are editable. Stable positional keys prevent row remounts between blur and click.
-            rowKey={(param) => `${step.step_id}:param:${(step.params || []).indexOf(param)}`}
+            rowKey={(param) => param.field_id || `${step.step_id}:param:${(step.params || []).indexOf(param)}`}
             dataSource={step.params || []}
             renderItem={(p) => renderParamEditorInCapability(step, p)}
           />
