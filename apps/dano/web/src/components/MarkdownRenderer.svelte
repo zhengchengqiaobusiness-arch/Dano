@@ -16,6 +16,7 @@
     streaming = false,
     deferMermaidErrors = false,
     linkInlineFileReferences = false,
+    interactiveRoot = true,
     onOpenFileReference = (_: { path: string; lineNumber: number }) => {},
   }: {
     class?: string;
@@ -24,6 +25,7 @@
     streaming?: boolean;
     deferMermaidErrors?: boolean;
     linkInlineFileReferences?: boolean;
+    interactiveRoot?: boolean;
     onOpenFileReference?: (payload: { path: string; lineNumber: number }) => void;
   } = $props();
 
@@ -636,7 +638,7 @@
 
 </script>
 
-<div class="markdown-renderer" bind:this={container} role="button" tabindex="0" onclick={handleClick} onkeydown={handleKeydown}>
+{#snippet renderedMarkdown()}
   <Comark
     markdown={content}
     options={COMARK_OPTIONS}
@@ -646,7 +648,17 @@
   {#if showFallback}
     <div class={`markdown-body markdown-fallback ${className}`.trim()}>{fallbackText}</div>
   {/if}
-</div>
+{/snippet}
+
+{#if interactiveRoot}
+  <div class="markdown-renderer" bind:this={container} role="button" tabindex="0" onclick={handleClick} onkeydown={handleKeydown}>
+    {@render renderedMarkdown()}
+  </div>
+{:else}
+  <div class="markdown-renderer" bind:this={container}>
+    {@render renderedMarkdown()}
+  </div>
+{/if}
 
 <style>
   :global(.markdown-body) {

@@ -74,8 +74,18 @@ PATH=/Users/joseph/.cache/codex-runtimes/codex-primary-runtime/dependencies/node
 - Keep strict validation only when recovery would be ambiguous or could cause an incorrect submission, incorrect field mapping, data loss, or another materially wrong result.
 - Encode runtime behavior in parser code, runtime defaults, tool prompt metadata, and tests; do not rely on this file alone to enforce model-facing behavior.
 
+## Frontend component library
+
+- Frontend feature components must use the project's shadcn-svelte components
+  through `apps/dano/web/src/components/ui`. Do not import `bits-ui` directly
+  from feature components; low-level primitive imports belong only inside the
+  shadcn component wrappers under `components/ui`.
+
 ## GitHub Workflow
 
+- Run every `gh` command outside the sandbox with escalated permissions, using
+  `/opt/homebrew/bin/gh` explicitly. Do not first retry `gh` through the sandbox
+  or rely on the shell `PATH` to find it.
 - Each time an issue is solved and verified, create a pull request to `upstream`.
 - After a pull request merges successfully, delete the remote PR branch by default.
 - Before updating the server deployment, switch to `main` and run `git sync-upstream`.

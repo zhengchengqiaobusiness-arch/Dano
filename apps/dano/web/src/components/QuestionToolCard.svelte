@@ -34,14 +34,11 @@
   import type { ToolContentBlock } from "../utils/transcript";
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import QuestionDateField from "./QuestionDateField.svelte";
+  import QuestionFieldLabel from "./QuestionFieldLabel.svelte";
   import QuestionRemoteCombobox from "./QuestionRemoteCombobox.svelte";
   import SubmittedAnswerValue from "./SubmittedAnswerValue.svelte";
   import ChevronDown from "lucide-svelte/icons/chevron-down";
-  import Calendar from "lucide-svelte/icons/calendar";
   import Check from "lucide-svelte/icons/check";
-  import CircleCheck from "lucide-svelte/icons/circle-check";
-  import ListChecks from "lucide-svelte/icons/list-checks";
-  import MessageSquareText from "lucide-svelte/icons/message-square-text";
   import RefreshCw from "lucide-svelte/icons/refresh-cw";
   import Sparkle from "lucide-svelte/icons/sparkle";
   import "./questionToolControls.css";
@@ -798,23 +795,6 @@
       ? confirmationFormsForDisplay(request, result)
       : [],
   );
-  const confirmationMarkdown = $derived(
-    request && !request.batch && request.kind === "confirm"
-      ? displayedConfirmationForms
-          .map(
-            form =>
-              `**${form.title}**\n\n${askUserQuestionAnswerMarkdown(
-                { batch: true, title: form.title, questions: form.questions },
-                form.answer,
-                {
-                  confirm: t("questionTool.confirm"),
-                  cancel: t("questionTool.cancel"),
-                },
-              )}`,
-          )
-          .join("\n\n")
-      : "",
-  );
   const sourceAnsweredMarkdown = $derived(
     request && request.batch && result?.status === "answered"
       ? t("questionTool.answered", {
@@ -919,38 +899,22 @@
           <div class="question-form-content confirmation-form-list">
             {#each displayedConfirmationForms as form (form.formId)}
               <div class="confirmation-form" data-form-id={form.formId}>
-              <h4>{form.title}</h4>
-              <div class="submitted-fields">
-                {#each form.items as item (item.id)}
-                  <div class="submitted-field">
-                    <div class="submitted-field-label">
-                      <span class="submitted-field-icon" aria-hidden="true">
-                        {#if item.kind === "date"}
-                          <Calendar size={18} />
-                        {:else if item.kind === "single" || item.kind === "multiple" || item.kind === "select" || item.kind === "treeSelect"}
-                          <ListChecks size={18} />
-                        {:else if item.kind === "confirm"}
-                          <CircleCheck size={18} />
-                        {:else}
-                          <MessageSquareText size={18} />
-                        {/if}
-                      </span>
-                      <span>{item.label}</span>
+                <h4>{form.title}</h4>
+                <div class="submitted-fields">
+                  {#each form.items as item (item.id)}
+                    <div class="submitted-field">
+                      <div class="submitted-field-label">
+                        <QuestionFieldLabel kind={item.kind} label={item.label} />
+                      </div>
+                      <SubmittedAnswerValue value={item.value} />
                     </div>
-                    <SubmittedAnswerValue value={item.value} />
-                  </div>
-                {/each}
-              </div>
+                  {/each}
+                </div>
               </div>
             {/each}
           </div>
         </div>
       </section>
-      <div class="mobile-question-result question-form-scroll-region">
-        <div class="question-form-content">
-          <MarkdownRenderer content={confirmationMarkdown} />
-        </div>
-      </div>
       <div class="question-actions">
         {#if interaction?.allowedActions.includes("cancel")}
           <button type="button" class="question-button secondary" disabled={submitting} onclick={() => void respond({ cancelled: true })}>
@@ -998,14 +962,14 @@
                 class:question-group={request.batch}
                 class:single-line-text-field={item.kind === "text" && item.inputType !== "textarea"}
               >
-              {#if item.revisionTitle}
-                <h3 class="revision-form-title">{item.revisionTitle}</h3>
-              {/if}
-            {#if (request.batch || revising) && item.kind !== "text"}
-              <div class="question-text">
-                <MarkdownRenderer content={askUserQuestionMarkdown(item.question)} />
-              </div>
-            {/if}
+                {#if item.revisionTitle}
+                  <h3 class="revision-form-title">{item.revisionTitle}</h3>
+                {/if}
+                {#if (request.batch || revising) && item.kind !== "text"}
+                  <div class="question-text">
+                    <QuestionFieldLabel kind={item.kind} label={askUserQuestionMarkdown(item.question)} />
+                  </div>
+                {/if}
 
             {#if item.kind === "single"}
               <fieldset class="single-options" disabled={!formEnabled || submitting}>
@@ -1114,7 +1078,11 @@
             {:else if item.kind === "text"}
               <div class="question-field-header">
                 <div class="question-text">
-                  <MarkdownRenderer content={askUserQuestionMarkdown(item.question)} />
+                  {#if request.batch || revising}
+                    <QuestionFieldLabel kind={item.kind} label={askUserQuestionMarkdown(item.question)} />
+                  {:else}
+                    <MarkdownRenderer content={askUserQuestionMarkdown(item.question)} />
+                  {/if}
                 </div>
                 {#if item.fieldAssist}
                   <div class="question-ai-actions" aria-label={`${t("questionTool.aiAssistRegenerate")} / ${t("questionTool.aiAssistPolish")}`}>
@@ -1295,6 +1263,7 @@
   }
 
   .question-text {
+    min-width: 0;
     color: var(--text);
     font-size: 0.92rem;
     font-weight: normal;
@@ -1321,8 +1290,7 @@
   }
 
   .question-card:global(.center-focused-card) form,
-  .question-card:global(.center-focused-card) .desktop-question-result,
-  .question-card:global(.center-focused-card) .mobile-question-result {
+  .question-card:global(.center-focused-card) .desktop-question-result {
     flex: 1 1 auto;
   }
 
@@ -1352,6 +1320,7 @@
   .question-group {
     display: grid;
     gap: 10px;
+    min-width: 0;
     margin-bottom: 1rem;
   }
 
@@ -1576,7 +1545,6 @@
   }
 
   .question-result { color: var(--text); }
-  .desktop-question-result { display: none; }
   .mobile-answered-result { display: none; }
   .question-result.muted { color: var(--text-muted); }
   .question-warning { color: var(--text-muted); font-size: 0.76rem; }
@@ -1594,95 +1562,86 @@
     border: 0;
   }
 
+  .desktop-question-result {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    min-height: 0;
+  }
+
+  .confirmation-form-list { gap: 24px; }
+
+  .submitted-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+  }
+
+  .submitted-status-icon {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--on-accent);
+  }
+
+  .submitted-header h3,
+  .submitted-header p {
+    margin: 0;
+  }
+
+  .submitted-header h3 {
+    color: var(--text);
+    font-size: 1.1rem;
+    line-height: 1.4;
+    text-wrap: balance;
+  }
+
+  .submitted-header p {
+    margin-top: 4px;
+    color: var(--text-muted);
+    font-size: 0.84rem;
+    line-height: 1.5;
+    text-wrap: pretty;
+  }
+
+  .confirmation-form {
+    display: grid;
+    gap: 12px;
+  }
+
+  .confirmation-form h4 {
+    margin: 0;
+    color: var(--text);
+    font-size: 0.94rem;
+    line-height: 1.4;
+  }
+
+  .submitted-fields {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 18px 28px;
+  }
+
+  .submitted-field {
+    min-width: 0;
+  }
+
+  .submitted-field-label {
+    min-width: 0;
+    margin-bottom: 7px;
+    color: var(--text-subtle);
+    font-size: 0.84rem;
+    font-weight: normal;
+  }
+
   @media (min-width: 641px) {
-    .mobile-question-result { display: none; }
-
-    .desktop-question-result {
-      display: flex;
-      flex-direction: column;
-      gap: 24px;
-      min-height: 0;
-    }
-
-    .confirmation-form-list { gap: 24px; }
-
-    .submitted-header {
-      display: flex;
-      align-items: flex-start;
-      gap: 14px;
-    }
-
-    .submitted-status-icon {
-      display: inline-flex;
-      flex: 0 0 auto;
-      align-items: center;
-      justify-content: center;
-      width: 40px;
-      height: 40px;
-      border-radius: 999px;
-      background: var(--accent);
-      color: var(--on-accent);
-    }
-
-    .submitted-header h3,
-    .submitted-header p {
-      margin: 0;
-    }
-
-    .submitted-header h3 {
-      color: var(--text);
-      font-size: 1.1rem;
-      line-height: 1.4;
-      text-wrap: balance;
-    }
-
-    .submitted-header p {
-      margin-top: 4px;
-      color: var(--text-muted);
-      font-size: 0.84rem;
-      line-height: 1.5;
-      text-wrap: pretty;
-    }
-
-    .confirmation-form {
-      display: grid;
-      gap: 12px;
-    }
-
-    .confirmation-form h4 {
-      margin: 0;
-      color: var(--text);
-      font-size: 0.94rem;
-      line-height: 1.4;
-    }
-
     .submitted-fields {
-      display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 18px 28px;
-    }
-
-    .submitted-field {
-      min-width: 0;
-    }
-
-    .submitted-field-label {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
-      margin-bottom: 7px;
-      color: var(--text-subtle);
-      font-size: 0.84rem;
-      font-weight: normal;
-    }
-
-    .submitted-field-icon {
-      display: inline-flex;
-      flex: 0 0 auto;
-      align-items: center;
-      justify-content: center;
-      color: var(--accent);
     }
   }
 

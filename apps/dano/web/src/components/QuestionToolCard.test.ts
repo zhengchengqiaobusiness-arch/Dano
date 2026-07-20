@@ -211,6 +211,8 @@ describe("QuestionToolCard", () => {
 
       expect(target.querySelector('input[type="text"]')).not.toBeNull();
       expect(target.querySelector(".question-ai-actions")).toBeNull();
+      expect(target.querySelector(".question-field-label")).toBeNull();
+      expect(target.querySelector(".question-field-icon")).toBeNull();
     } finally {
       unmount(component);
       vi.useRealTimers();
@@ -923,6 +925,13 @@ describe("QuestionToolCard", () => {
 
     expect(target.querySelectorAll(".question-text")).toHaveLength(4);
     expect(
+      [...target.querySelectorAll(".question-field-icon")]
+        .map(icon => icon.getAttribute("data-question-kind")),
+    ).toEqual(["text", "date", "single", "text"]);
+    const assistedHeader = target.querySelector(".question-field-header:has(.question-ai-actions)");
+    expect(assistedHeader?.querySelector(".question-field-label")).not.toBeNull();
+    expect(assistedHeader?.querySelectorAll(".question-ai-actions button")).toHaveLength(2);
+    expect(
       target.querySelector('label.sr-only[for="question-confirm-two-form-a:departure_date-trigger"]')
         ?.textContent,
     ).toBe("出发日期是哪天？");
@@ -1008,6 +1017,11 @@ describe("QuestionToolCard", () => {
     expect(summary?.querySelector(":scope > .submitted-header h3")?.textContent)
       .toBe("确认 2 份表单");
     expect(scrollRegion?.querySelector(".confirmation-form")).not.toBeNull();
+    expect(
+      [...(scrollRegion?.querySelectorAll(".question-field-icon") ?? [])]
+        .map(icon => icon.getAttribute("data-question-kind")),
+    ).toEqual(["text", "text"]);
+    expect(target.querySelector(".mobile-question-result")).toBeNull();
     expect(scrollRegion?.querySelector(".submitted-header")).toBeNull();
     expect(scrollRegion?.querySelector(".question-actions")).toBeNull();
     expect(target.querySelector("article > .question-actions")).not.toBeNull();
@@ -1039,6 +1053,8 @@ describe("QuestionToolCard", () => {
       const scrollRegion = form?.querySelector(":scope > .question-form-scroll-region");
       expect(target.querySelector(".question-form-title")?.textContent)
         .toBe("团建行程信息");
+      expect(scrollRegion?.querySelectorAll('.question-field-icon[data-question-kind="text"]'))
+        .toHaveLength(2);
       expect(scrollRegion?.querySelector('input[type="text"]')).not.toBeNull();
       expect(scrollRegion?.querySelector(".question-form-title")).toBeNull();
       expect(scrollRegion?.querySelector(".question-actions")).toBeNull();
