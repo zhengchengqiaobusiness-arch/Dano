@@ -179,3 +179,42 @@ def test_gateway_and_frontend_use_one_versioned_server_authoritative_protocol() 
     publish_source = frontend_source[publish_start:publish_end]
     assert "expected_fingerprint:" in publish_source
     assert "flow_spec:" not in publish_source
+
+
+def test_frontend_pauses_flow_loading_during_recorder_reconnect() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    helper_start = source.index("function pauseFlowOperationForReconnect()")
+    helper_end = source.index("function resumeFlowOperationAfterReconnect", helper_start)
+    helper_source = source[helper_start:helper_end]
+    assert "setOrchestrateBusy(false)" in helper_source
+    assert "setAutoFixBusy(false)" in helper_source
+    assert "flowOperationRef.current = null" not in helper_source
+
+    close_start = source.index("ws.onclose = (event) =>")
+    close_end = source.index("};", close_start)
+    assert "pauseFlowOperationForReconnect()" in source[close_start:close_end]
+
+
+def test_frontend_only_starts_flow_operation_on_connected_websocket() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    orchestrate_start = source.index("function orchestrateFlow()")
+    orchestrate_end = source.index("function autoFixFlow()", orchestrate_start)
+    orchestrate_source = source[orchestrate_start:orchestrate_end]
+    assert 'connectionState !== "connected"' in orchestrate_source
+    assert "reconnectedSessionNeedsCapture" in orchestrate_source
+    assert "clearFlowOperation()" in orchestrate_source
+
+    button_start = source.index('loading={orchestrateBusy || autoFixBusy}')
+    button_source = source[button_start:button_start + 220]
+    assert 'disabled={connectionState !== "connected"' in button_source
+    assert "reconnectedSessionNeedsCapture" in button_source
+
+
+def test_frontend_discards_unresumable_flow_operation_after_backend_restart() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+    reconnect_start = source.index("} else if (isReconnect && flowSpecRef.current) {")
+    reconnect_end = source.index("} else {", reconnect_start)
+
+    assert "clearFlowOperation()" in source[reconnect_start:reconnect_end]

@@ -176,6 +176,40 @@ async def test_recording_pi_runtime_error_has_no_fallback(monkeypatch, tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_recording_pi_logs_provider_error_agent_events(monkeypatch) -> None:  # noqa: ANN001
+    stdout = asyncio.StreamReader()
+    client = recording_pi.RecordingPiSession(
+        tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_TWO,
+    )
+    client._proc = SimpleNamespace(stdout=stdout)
+    errors: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        recording_pi.log,
+        "error",
+        lambda event, **fields: errors.append((event, fields)),
+    )
+
+    task = asyncio.create_task(client._read_stdout())
+    stdout.feed_data((json.dumps({
+        "type": "agent_event",
+        "event": "message_end",
+        "request_id": "request-one",
+        "stop_reason": "error",
+        "error": "Stream ended without finish_reason",
+    }) + "\n").encode())
+    await asyncio.sleep(0)
+    stdout.feed_eof()
+    await task
+
+    assert errors == [("recording_pi.agent_error", {
+        "run_id": client.run_id,
+        "agent_event": "message_end",
+        "error": "Stream ended without finish_reason",
+    })]
+    client._proc = None
+
+
+@pytest.mark.asyncio
 async def test_recording_pi_submission_limit_is_exposed_as_hard_failure(monkeypatch) -> None:  # noqa: ANN001
     client = recording_pi.RecordingPiSession(
         tenant="tenant-a", subsystem="A-OA", recording_id=RECORDING_TWO,

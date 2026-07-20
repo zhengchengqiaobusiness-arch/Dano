@@ -157,15 +157,23 @@ def _analysis_screenshot_guidance(screenshots: list[dict]) -> str:
 def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
     evidence_rule = (
         " For every screenshot-derived field decision, field_semantics must contain the exact recorded step_id and "
-        "wire_path plus public_name, business_type, category, source_kind, numeric confidence from 0 to 1, " +
+        "wire_path plus public_name, business_type, category, source_kind, required, "
+        "enum_options when visible, and numeric confidence from 0 to 1, " +
         "and evidence objects shaped as {source:'screenshot',screenshot_name,detail,visible_label,control_kind,"
-        "editable,disabled,read_only,multiple}. control_kind must be one of text,textarea,rich_text,number,date,"
+        "editable,disabled,read_only,multiple,required,options}. control_kind must be one of "
+        "text,textarea,rich_text,number,date,"
         "datetime,time,select,combobox,cascader,picker,checkbox,radio,switch,slider,upload,file,tree_select. "
         "Use enum/list-enum for single/multiple choice business types while preserving the recorded wire type. "
+        "Analyze every screenshot separately and emit one field_semantics item for every visible control that can "
+        "be matched to a recorded field. A red asterisk or explicit required marker means required=true; an "
+        "explicitly visible optional field means required=false. Textarea/text/date/number controls must not be "
+        "classified as enum or api_option merely because an unrelated option endpoint was captured. "
         "Cover every matched recorded field, not only enums or fields that changed. Rebuild capabilities from exact "
         "request step_ids and emit capability_relations only with concrete from_capability/from_output and "
         "to_capability/to_input endpoints. Screenshot evidence may set user_param/user_input for a visible editable "
-        "control, but api_option and previous_response require matching recorded request/response facts. "
+        "direct text/date/number control, but a visible choice control without a captured option API must use "
+        "page_enum plus its visible enum_options. api_option and previous_response require matching recorded "
+        "request/response facts. "
         "A visibly read-only or disabled control may use runtime_var/system_const only with a safe screenshot "
         "source such as current_user, page_context, system_time, or constant; it must not claim api_option or "
         "previous_response without recorded grounding. "
@@ -285,6 +293,7 @@ def _analysis_application_report(
         "model_image_count": delivered_image_count,
         "screenshot_names": [item["name"] for item in screenshots],
         "changes": dict(operation_report.get("changes") or {}),
+        "field_changes": list(operation_report.get("field_changes") or []),
         "capability_count_before": len(before.capabilities or []),
         "capability_count_after": len(after.capabilities or []),
         "field_count_before": sum(len(step.params or []) for step in before.steps),
@@ -1032,6 +1041,8 @@ async def record_ws(ws: WebSocket) -> None:
                          # page after every transient WebSocket replacement.
                          storage_state=start_storage,
                          token=init.get("token") or None)   # 贴 token → 预置登录态,免在画面里登录
+        if bool(resume_state.get("recording_paused")):
+            sess.pause_recording()
 
         async def on_frame(frame: dict) -> None:
             sender.send_latest_frame({"type": "frame", **frame})
@@ -1044,6 +1055,7 @@ async def record_ws(ws: WebSocket) -> None:
             "action": session_action,
             "pi_recording_id": recording_id,
             "browser_state_restored": bool(start_storage),
+            "recording_paused": bool(resume_state.get("recording_paused")),
         }
         if resumed_flow_spec is not None:
             started_message.update({
@@ -1156,6 +1168,7 @@ async def record_ws(ws: WebSocket) -> None:
             elif t == "reset":
                 await sess.flush_recording()
                 sess.reset()                          # 登录后:丢弃登录步骤,只录业务流程
+                resume_state["recording_paused"] = False
                 # “从这里开始录” normally follows a successful interactive
                 # login.  Capture that authenticated state immediately rather
                 # than waiting for a later finalize/finally race.
@@ -1343,7 +1356,22 @@ async def record_ws(ws: WebSocket) -> None:
                 })
             # 能力编排：唯一的录制 Pi AgentSession 读取当前事实并通过受控工具提交计划。
             elif t == "orchestrate_flow":
+                operation_id = str(msg.get("operation_id") or "")
+                log.info(
+                    "recording.operation_started",
+                    action=session_action,
+                    operation="plan",
+                    operation_id=operation_id,
+                    screenshot_count=len(msg.get("analysis_screenshots") or []),
+                )
                 if await _replay_costly(msg):
+                    log.info(
+                        "recording.operation_completed",
+                        action=session_action,
+                        operation="plan",
+                        operation_id=operation_id,
+                        replayed=True,
+                    )
                     continue
                 if pending_flow_spec is None:
                     await sender.send_json({"type": "error", "detail": "no flow_spec loaded"})
@@ -1381,6 +1409,14 @@ async def record_ws(ws: WebSocket) -> None:
                         delivered_image_count=delivered_image_count,
                         operation_id=msg.get("operation_id"),
                     )
+                    log.info(
+                        "recording.analysis_application",
+                        status=analysis_application.get("status"),
+                        screenshots=analysis_application.get("screenshot_count"),
+                        field_changes=len(analysis_application.get("field_changes") or []),
+                        changes=analysis_application.get("changes"),
+                        summary=analysis_application.get("summary"),
+                    )
                     pending_flow_spec.meta = {
                         **(pending_flow_spec.meta or {}),
                         "last_analysis_application": analysis_application,
@@ -1401,8 +1437,23 @@ async def record_ws(ws: WebSocket) -> None:
                         },
                     }
                     _remember_costly(msg, response)
+                    log.info(
+                        "recording.operation_completed",
+                        action=session_action,
+                        operation="plan",
+                        operation_id=operation_id,
+                        changed=bool(operation_report.get("changed")),
+                        screenshot_count=len(analysis_screenshots),
+                    )
                     await sender.send_json(response)
                 except Exception as e:  # noqa: BLE001
+                    log.exception(
+                        "recording.operation_failed",
+                        action=session_action,
+                        operation="plan",
+                        operation_id=operation_id,
+                        error=str(e),
+                    )
                     await sender.send_json({"type": "error", "detail": f"orchestrate_flow failed: {e}"})
             # 一键修正：同一个录制 Pi Session 读取最新校验并提交白名单修复。
             elif t == "auto_fix_flow":
@@ -1728,11 +1779,14 @@ async def record_ws(ws: WebSocket) -> None:
                 await sender.send_json(response)
             elif t == "stop":
                 await sess.flush_recording()
-                # Acknowledge the stop before closing from the server side.  If the
-                # browser closes immediately after sending ``stop``, Vite can still
-                # be forwarding queued frames and writes into an upstream FIN.
-                await sender.send_json({"type": "stopped"})
-                break
+                sess.pause_recording()
+                resume_state["recording_paused"] = True
+                _checkpoint_resume(storage_state=await sess.storage_state())
+                # Ending capture is not ending the workbench session. Keep the
+                # websocket, browser, draft and Pi context alive for later edits,
+                # screenshot analysis, optimization and publishing.
+                await sender.send_json({"type": "stopped", "connection_retained": True})
+                continue
     except asyncio.CancelledError:
         log.info(
             "recording.websocket_cancelled",

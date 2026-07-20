@@ -70,6 +70,17 @@ def test_no_analysis_screenshot_keeps_original_fact_based_path() -> None:
     assert "screenshot-derived" not in gateway._recording_plan_protocol_guidance(has_screenshots=False)
 
 
+def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
+    source = inspect.getsource(gateway.record_ws)
+    branch_start = source.index('elif t == "orchestrate_flow":')
+    branch_end = source.index('elif t == "auto_fix_flow":', branch_start)
+    branch = source[branch_start:branch_end]
+
+    assert '"recording.operation_started"' in branch
+    assert '"recording.operation_completed"' in branch
+    assert '"recording.operation_failed"' in branch
+
+
 @pytest.mark.parametrize(
     ("changed", "accepted", "expected_status"),
     [
@@ -98,6 +109,7 @@ def test_analysis_application_report_is_persistable_and_explicit(
             "changed": changed,
             "summary": "analysis complete",
             "changes": {"capabilities": int(changed), "fields": int(changed)},
+            "field_changes": ([{"step_id": "submit", "path": "reason", "name": "原因", "axes": {"type": {"before": "string", "after": "enum"}}}] if changed else []),
             "proposal_gate": {"accepted": accepted, "reasons": []},
         },
         screenshots=[{"name": "form.png"}],
@@ -112,6 +124,7 @@ def test_analysis_application_report_is_persistable_and_explicit(
     assert report["field_count_before"] == 1
     assert report["field_count_after"] == 2
     assert report["operation_id"] == "plan-1"
+    assert len(report["field_changes"]) == int(changed)
 
 
 class _ConcurrentWriteProbe:
@@ -414,6 +427,8 @@ class _FakeWebSocket(_ConcurrentWriteProbe):
         self.accepted = True
 
     async def receive_json(self) -> dict:
+        if not self.incoming:
+            raise gateway.WebSocketDisconnect(code=1000)
         return self.incoming.pop(0)
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
@@ -433,6 +448,7 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
             self.on_request = on_request
             self.events: list[dict] = []
             self.stopped = False
+            self.paused = False
             sessions.append(self)
 
         async def start(self, *_args, **_kwargs) -> None:
@@ -459,6 +475,12 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
         async def flush_recording(self) -> None:
             return None
 
+        def pause_recording(self) -> None:
+            self.paused = True
+
+        async def storage_state(self) -> dict:
+            return {}
+
         async def stop(self) -> None:
             self.stopped = True
 
@@ -476,6 +498,7 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
             {"type": "input", "event": {"kind": "pointer_up", "nx": 0.5, "ny": 0.6}},
             {"type": "ping", "at": 123456},
             {"type": "stop"},
+            {"type": "ping", "at": 654321},
         ]
 
     first_ws = _FakeWebSocket(incoming())
@@ -502,8 +525,10 @@ async def test_record_ws_started_action_is_unique_and_input_errors_are_recoverab
     assert all(error["recoverable"] for error in errors)
     assert sessions[0].events[-1]["kind"] == "pointer_up"
     assert {"type": "pong", "at": 123456} in first_ws.messages
-    assert first_ws.messages[-1] == {"type": "stopped"}
-    assert second_ws.messages[-1] == {"type": "stopped"}
+    assert {"type": "stopped", "connection_retained": True} in first_ws.messages
+    assert {"type": "stopped", "connection_retained": True} in second_ws.messages
+    assert {"type": "pong", "at": 654321} in first_ws.messages
+    assert all(session.paused for session in sessions)
     assert all(session.stopped for session in sessions)
     assert first_ws.accepted and first_ws.closed
     assert first_ws.close_code == 1000

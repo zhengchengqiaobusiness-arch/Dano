@@ -38,6 +38,7 @@ _NOISE_PATTERNS = (
     "[HMR]", "[vite]",
     "webpack-dev-server",
     "[rc-collapse] `children` will be removed",
+    "findDOMNode is deprecated",
 )
 
 

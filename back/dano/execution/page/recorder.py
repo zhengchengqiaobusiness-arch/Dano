@@ -1044,6 +1044,7 @@ class RecordSession:
         self._last_frame_sent_at = 0.0
         self._last_activity_at = time.monotonic()
         self._closing = False        # stop()/断连中:页面 close 事件不再重开截屏(避免在已关 context 上 new_cdp_session 抛错)
+        self._recording_paused = False
         self.page = None
 
     def _page_id(self, page) -> str:  # noqa: ANN001
@@ -1363,6 +1364,8 @@ class RecordSession:
                 pass
 
     def _on_request(self, request) -> None:  # noqa: ANN001 —— playwright Request(直录模式旁观)
+        if self._recording_paused:
+            return
         try:
             self._mark_active()
             m = (request.method or "").upper()
@@ -1420,6 +1423,9 @@ class RecordSession:
 
     async def _route(self, route, request) -> None:  # noqa: ANN001 —— 拦截模式
         from dano.execution.page.request_capture import looks_like_auth_write, looks_like_read_request
+        if self._recording_paused:
+            await route.continue_()
+            return
         try:
             self._mark_active()
             m = (request.method or "").upper()
@@ -1494,6 +1500,8 @@ class RecordSession:
         return [dict(event) for event in self.page_events]
 
     def _resp_dispatch(self, response) -> None:  # noqa: ANN001 —— 同步快筛后再异步读 body
+        if self._recording_paused:
+            return
         try:
             m = (response.request.method or "").upper()
             if m == "GET" or m in ("POST", "PUT", "PATCH"):   # GET=select 候选源;写=取响应(Q3 步链 taskId)
@@ -1591,6 +1599,8 @@ class RecordSession:
             pass
 
     def _on_record(self, source, payload: str) -> None:  # noqa: ANN001 —— expose_binding 回调
+        if self._recording_paused:
+            return
         try:
             step = json.loads(payload)
         except Exception:  # noqa: BLE001
@@ -2066,9 +2076,14 @@ class RecordSession:
         except Exception:  # noqa: BLE001
             pass
 
+    def pause_recording(self) -> None:
+        """Stop collecting facts while keeping the browser and transport alive."""
+        self._recording_paused = True
+
     def reset(self) -> None:
         """清空已录步骤(用户登录完后点「从这里开始录」,丢弃登录步骤,只留业务流程)。
         同时清 all_requests/diagnostics 与请求计数——后续诊断基于录制期抓的事实,登录噪声不计。"""
+        self._recording_paused = False
         self.steps.clear()
         self.form_snapshots.clear()
         self.enum_snapshots.clear()

@@ -15,11 +15,20 @@ import {
   endRecordingToolTurn,
   recordingTools,
 } from "./recording_tools.mjs";
+import { installOpenAIToolCallStreamCompatibility } from "./openai_stream_compat.mjs";
 
 const emit = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
 const log = (...parts) => process.stderr.write(`[recording_pi] ${parts.join(" ")}\n`);
 const CWD = process.env.DANO_RECORDING_PI_CWD || path.resolve(new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
 const AGENT_DIR = process.env.DANO_RECORDING_PI_AGENT_DIR || path.join(CWD, ".pi-recording-agent");
+
+installOpenAIToolCallStreamCompatibility({
+  baseUrl: process.env.DANO_PI_BASE_URL,
+  onRepair: ({ toolCallCount }) => log(
+    "normalized missing finish_reason from completed tool-call stream",
+    `tool_calls=${toolCallCount}`,
+  ),
+});
 
 const SYSTEM_PROMPT = `你是 Dano 网页录制模式的专用语义编排 Agent。
 你只能使用当前提供的五个录制工具，不具备 Shell、文件、技能、扩展、模板或上下文文件能力。
@@ -115,6 +124,7 @@ function summarizeAgentEvent(event) {
   const message = event?.message;
   if (message?.role) summary.role = message.role;
   if (message?.stopReason) summary.stop_reason = message.stopReason;
+  if (message?.errorMessage) summary.error = String(message.errorMessage).slice(0, 2000);
   if (message?.usage) summary.usage = message.usage;
   if (event?.errorMessage) summary.error = String(event.errorMessage).slice(0, 2000);
   if (event?.error) summary.error = String(event.error).slice(0, 2000);

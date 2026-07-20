@@ -309,6 +309,10 @@ class RecordingPiSession:
             normalized.append({"type": "image", "data": data, "mimeType": mime_type})
         self._analysis_images = normalized
 
+    @property
+    def analysis_image_count(self) -> int:
+        return len(self._analysis_images)
+
     def current_flow_spec(self) -> Any:
 
         if self.flow_spec is None:
@@ -465,11 +469,21 @@ class RecordingPiSession:
                 except json.JSONDecodeError:
                     log.warning("recording_pi.stdout_invalid", run_id=self.run_id, line=line[:300])
                     continue
+                event_type = event.get("type")
+                if (
+                    event_type == "agent_event"
+                    and (event.get("stop_reason") == "error" or event.get("error"))
+                ):
+                    log.error(
+                        "recording_pi.agent_error",
+                        run_id=self.run_id,
+                        agent_event=str(event.get("event") or "unknown"),
+                        error=str(event.get("error") or "provider returned an error")[:2000],
+                    )
                 request_id = str(event.get("request_id") or "")
                 future = self._pending.get(request_id)
                 if future is None or future.done():
                     continue
-                event_type = event.get("type")
                 if event_type in ("session_started", "prompt_completed", "session_closed"):
                     future.set_result(event)
                 elif event_type == "agent_event" and event.get("event") == "cancelled":

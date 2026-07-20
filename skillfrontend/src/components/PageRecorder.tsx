@@ -43,7 +43,7 @@ function Button(props: ButtonProps) {
 interface RecReq { method: string; url: string; has_body?: boolean; json?: boolean }
 interface AnalysisScreenshotPayload {
   name: string;
-  mime_type: "image/jpeg";
+  mime_type: "image/jpeg" | "image/png" | "image/webp";
   data: string;
   width: number;
   height: number;
@@ -55,6 +55,11 @@ interface AnalysisScreenshot extends AnalysisScreenshotPayload {
   preview_url: string;
 }
 
+interface AnalysisFieldChange {
+  capability?: string; step_id: string; path: string; name: string;
+  axes: Record<string, { before?: any; after?: any }>;
+}
+
 interface AnalysisApplication {
   status: "applied" | "no_change" | "needs_review" | "rejected";
   summary?: string;
@@ -62,6 +67,7 @@ interface AnalysisApplication {
   model_image_count?: number;
   screenshot_names?: string[];
   changes?: Record<string, number>;
+  field_changes?: AnalysisFieldChange[];
   capability_count_before?: number;
   capability_count_after?: number;
   field_count_before?: number;
@@ -77,6 +83,7 @@ interface AnalysisApplication {
 
 interface FlowParam {
   path: string; key: string; label?: string; value: string; type: string; required: boolean; name_source?: string;
+  default_value?: any;
   category?: string; source_kind?: string; source?: any; reason?: string;
   exposed_to_user?: boolean; need_human_confirm?: boolean; editable?: boolean; confidence?: number;
   // 系统化:enum_options 兼容 list[string] 与 list[{label, value}];label→value 表由后端 enum_value_map 提供
@@ -1142,6 +1149,36 @@ const RECORDING_FLOW_PROTOCOL_VERSION = 2;
 const MAX_ANALYSIS_SCREENSHOTS = 4;
 const MAX_ANALYSIS_SCREENSHOT_BYTES = 1_400_000;
 
+const ANALYSIS_AXIS_LABELS: Record<string, string> = {
+  name: "名称", type: "类型", category: "分类", source: "来源",
+  required: "必填性", default: "默认值", enum_options: "候选项",
+};
+const ANALYSIS_VALUE_LABELS: Record<string, string> = {
+  string: "文本", number: "数字", integer: "整数", boolean: "布尔值",
+  date: "日期", datetime: "日期时间", enum: "单选枚举", "list-enum": "多选枚举",
+  user_param: "用户参数", runtime_var: "运行变量", system_const: "系统常量",
+  user_input: "用户输入", page_enum: "页面枚举", static_enum: "静态枚举",
+  form_option: "表单选项", api_option: "接口候选", previous_response: "上游响应",
+  current_user: "当前用户", constant: "固定值", unknown: "来源未知",
+};
+
+function analysisValueLabel(axis: string, value: any) {
+  if (axis === "required") return value ? "必填" : "非必填";
+  if (axis === "enum_options" && Array.isArray(value)) return `${value.length} 项`;
+  const key = String(value ?? "");
+  if (ANALYSIS_VALUE_LABELS[key]) return ANALYSIS_VALUE_LABELS[key];
+  const text = (typeof value === "string" ? value : JSON.stringify(value)) ?? "";
+  return text.length > 24 ? `${text.slice(0, 21)}...` : text;
+}
+
+function analysisFieldChangeText(change: AnalysisFieldChange) {
+  const target = `${change.capability ? `能力「${change.capability}」` : ""}字段「${change.name || change.path}」`;
+  const details = Object.entries(change.axes || {}).map(([axis, values]) => (
+    `${ANALYSIS_AXIS_LABELS[axis] || axis}从“${analysisValueLabel(axis, values.before)}”改为“${analysisValueLabel(axis, values.after)}”`
+  ));
+  return `${target}：${details.join("；")}`;
+}
+
 function base64ByteSize(data: string) {
   const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
   return Math.floor(data.length * 3 / 4) - padding;
@@ -1169,6 +1206,28 @@ async function prepareAnalysisScreenshot(file: File): Promise<AnalysisScreenshot
   const sourceWidth = image.naturalWidth || image.width;
   const sourceHeight = image.naturalHeight || image.height;
   if (!sourceWidth || !sourceHeight) throw new Error("Screenshot has no readable dimensions");
+
+  if (
+    file.size <= MAX_ANALYSIS_SCREENSHOT_BYTES
+    && ["image/png", "image/jpeg", "image/webp"].includes(file.type)
+  ) {
+    const data = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || "").split(",", 2)[1] || "");
+      reader.onerror = () => reject(new Error("Unable to read screenshot"));
+      reader.readAsDataURL(file);
+    });
+    return {
+      id: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+      name: file.name || "screenshot",
+      mime_type: file.type as AnalysisScreenshotPayload["mime_type"],
+      data,
+      width: sourceWidth,
+      height: sourceHeight,
+      byte_size: file.size,
+      preview_url: `data:${file.type};base64,${data}`,
+    };
+  }
 
   let scale = Math.min(1, 1800 / Math.max(sourceWidth, sourceHeight));
   let latest: AnalysisScreenshot | null = null;
@@ -1242,6 +1301,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   useEffect(() => { phaseRef.current = phase; }, [phase]);
   const [startUrl, setStartUrl] = useState("");
   const [connectionState, setConnectionState] = useState<RecorderConnectionState>("idle");
+  const [recordingStopped, setRecordingStopped] = useState(false);
   const [reconnectedSessionNeedsCapture, setReconnectedSessionNeedsCapture] = useState(false);
   const [hasFrame, setHasFrame] = useState(false);
   const [frameMeta, setFrameMeta] = useState<RecorderFrameMeta>({});
@@ -1391,6 +1451,13 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setAutoFixBusy(false);
   }
 
+  function pauseFlowOperationForReconnect() {
+    if (flowOperationTimerRef.current != null) window.clearTimeout(flowOperationTimerRef.current);
+    flowOperationTimerRef.current = null;
+    setOrchestrateBusy(false);
+    setAutoFixBusy(false);
+  }
+
   function armFlowOperationWatchdog(label: string) {
     if (flowOperationTimerRef.current != null) window.clearTimeout(flowOperationTimerRef.current);
     const reportStillRunning = () => {
@@ -1411,14 +1478,19 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     const pending = flowOperationRef.current;
     if (!pending) return;
     if (pending.mode === "repair") {
-      send({ type: "auto_fix_flow", operation_id: pending.operationId });
+      setAutoFixBusy(true);
+      armFlowOperationWatchdog("自动修复");
+      if (!send({ type: "auto_fix_flow", operation_id: pending.operationId })) clearFlowOperation();
       return;
     }
-    send({
+    setOrchestrateBusy(true);
+    setAutoFixBusy(true);
+    armFlowOperationWatchdog("能力生成");
+    if (!send({
       type: "orchestrate_flow",
       operation_id: pending.operationId,
       analysis_screenshots: pending.analysisScreenshots,
-    });
+    })) clearFlowOperation();
   }
 
   useEffect(() => () => {
@@ -1690,6 +1762,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     piRecordingScopeRef.current = piRecordingScope;
     piRecordingIdRef.current = null;
     setReconnectedSessionNeedsCapture(false);
+    setRecordingStopped(false);
     setConnectionState("connecting");
     setPhase("recording");
     openRecorderConnection(false);
@@ -1781,6 +1854,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         }
         setPhase("recording");
         setConnectionState("connected");
+        setRecordingStopped(Boolean(m.recording_paused));
         // The server draft is authoritative across a transient WebSocket
         // reconnect.  In particular, an ability plan may have completed just
         // before a 1006 close; restoring the older local empty draft here used
@@ -1798,14 +1872,20 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           flowMutationQueueRef.current = [];
           afterFlowSyncRef.current = null;
           reconnectRestoreOperationRef.current = null;
+          clearFlowOperation();
           setReconnectedSessionNeedsCapture(true);
           message.warning("服务端未找到可恢复草稿，请重新触发目标操作并分析");        } else {
           reconnectRestoreOperationRef.current = null;
+          if (isReconnect) clearFlowOperation();
           setReconnectedSessionNeedsCapture(isReconnect);
           if (isReconnect) message.success("录制连接已自动恢复");
         }
       }
-      else if (m.type === "pong" || m.type === "stopped") return;
+      else if (m.type === "pong") return;
+      else if (m.type === "stopped") {
+        setRecordingStopped(true);
+        message.success("录制已结束，连接和当前分析结果继续保留");
+      }
       else if (m.type === "frame") {
         queueFrame(Number(m.seq || 0), m.data, frameMetaFromMessage(m));
         // A fresh frame proves the replacement RecordSession is active. This also keeps
@@ -1960,6 +2040,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       flowMutationInFlightRef.current = null;
       flowMutationQueueRef.current = [];
       afterFlowSyncRef.current = null;
+      pauseFlowOperationForReconnect();
       if (intentionalCloseRef.current) {
         setConnectionState("idle");
         clearFlowOperation();
@@ -2144,6 +2225,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function resetFromHere() {
     send({ type: "reset" });
+    setRecordingStopped(false);
     setResult(null); resetEditorState();
     message.success("已清空，从现在起只录业务步骤");
   }
@@ -2191,24 +2273,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     }
   }
   function stopAll() {
-    intentionalCloseRef.current = true;
-    if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
-    reconnectTimerRef.current = null;
-    reconnectAttemptRef.current = 0;
-    reconnectRestoreOperationRef.current = null;
-    const ws = wsRef.current;
-    const stopSent = send({ type: "stop" });
-    // Let the server flush, acknowledge, and initiate the WebSocket close.  Closing
-    // here immediately races the Vite proxy against queued recording frames.
-    if (!stopSent) ws?.close(1000, "recording stopped");
-    else if (ws) window.setTimeout(() => {
-      if (wsRef.current === ws && ws.readyState < WebSocket.CLOSING) {
-        ws.close(1000, "recording stop timeout");
-      }
-    }, 2000);
-    setConnectionState("idle");
-    setPhase("idle"); setResult(null); clearFrame();
-    resetEditorState();
+    if (send({ type: "stop" })) {
+      setRecordingStopped(true);
+    } else {
+      message.warning("连接尚未恢复，暂时无法结束录制");
+    }
   }
 
   function updateFlowField(k: string, v: any) { send({ type: "flow_update", edits: [{ op: "update_flow", field: k, value: v }] }); }
@@ -2352,7 +2421,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     setCheckReport(null);
   }
   function updateParam(stepId: string, p: FlowParam, field: string, value: any) {
-    patchLocalParam(stepId, p, { [field]: value });
+    patchLocalParam(stepId, p, {
+      [field]: value,
+      ...(field === "value" ? { default_value: value } : {}),
+    });
     send({ type: "flow_update", edits: [paramEdit(stepId, p, field, value)] });
   }
   function updateParamType(step: FlowStepData, p: FlowParam, value: string) {
@@ -2477,6 +2549,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function orchestrateFlow() {
     if (!flowSpecRef.current || flowOperationRef.current) return;
+    if (connectionState !== "connected" || reconnectedSessionNeedsCapture) {
+      message.warning(reconnectedSessionNeedsCapture
+        ? "服务端草稿已失效，请重新抓取并分析请求"
+        : "录制连接正在恢复，连接正常后再生成/优化能力");
+      return;
+    }
     if (flowMutationInFlightRef.current || flowMutationQueueRef.current.length) {
       runAfterFlowSync(orchestrateFlow);
       return;
@@ -2505,6 +2583,12 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   }
   function autoFixFlow() {
     if (!flowSpecRef.current || flowOperationRef.current) return;
+    if (connectionState !== "connected" || reconnectedSessionNeedsCapture) {
+      message.warning(reconnectedSessionNeedsCapture
+        ? "服务端草稿已失效，请重新抓取并分析请求"
+        : "录制连接正在恢复，连接正常后再自动修复");
+      return;
+    }
     if (flowMutationInFlightRef.current || flowMutationQueueRef.current.length) {
       runAfterFlowSync(autoFixFlow);
       return;
@@ -3125,6 +3209,16 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             <Typography.Text style={{ fontSize: 12 }}>
               {lastAnalysisEvidence.summary || "最近一次能力分析已完成"}
             </Typography.Text>
+            {lastAnalysisEvidence.field_changes?.slice(0, 6).map((change) => (
+              <Typography.Text key={`${change.step_id}:${change.path}`} style={{ fontSize: 12 }}>
+                {analysisFieldChangeText(change)}
+              </Typography.Text>
+            ))}
+            {(lastAnalysisEvidence.field_changes?.length || 0) > 6 && (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                另有 {(lastAnalysisEvidence.field_changes?.length || 0) - 6} 个字段发生修改
+              </Typography.Text>
+            )}
             <Space wrap size={4}>
               {lastAnalysisEvidence.screenshot_count > 0 && (
                 <Tag color={(lastAnalysisEvidence.model_image_count ?? 0) === lastAnalysisEvidence.screenshot_count ? "success" : "error"}>
@@ -3135,6 +3229,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
               {!!lastAnalysisEvidence.unmatched_field_count && <Tag color="orange">未匹配字段 {lastAnalysisEvidence.unmatched_field_count}</Tag>}
               {!!lastAnalysisEvidence.unresolved_field_count && <Tag color="orange">待确认 {lastAnalysisEvidence.unresolved_field_count}</Tag>}
               {!!lastAnalysisEvidence.rejected_field_count && <Tag color="red">已拒绝冲突 {lastAnalysisEvidence.rejected_field_count}</Tag>}
+              {!!lastAnalysisEvidence.changes?.capabilities && <Tag>能力变化 {lastAnalysisEvidence.changes.capabilities} 项</Tag>}
+              {!!lastAnalysisEvidence.changes?.links && <Tag>字段关联变化 {lastAnalysisEvidence.changes.links} 项</Tag>}
+              {!!lastAnalysisEvidence.changes?.relations && <Tag>能力关联变化 {lastAnalysisEvidence.changes.relations} 项</Tag>}
             </Space>
           </>
         )}
@@ -3510,11 +3607,11 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
             </FieldControl>
             <FieldControl label="默认值">
               {enumOptions.length > 0 && enumMappingComplete ? (
-                <EnumValueInput value={String(p.value ?? "")} width="100%"
+                <EnumValueInput value={String(p.default_value ?? p.value ?? "")} width="100%"
                   options={enumSelectOptions}
                   onSave={(v) => updateParam(step.step_id, p, "value", v)} />
               ) : (
-                <EditableText value={String(p.value ?? "")} width="100%" onSave={(v) => updateParam(step.step_id, p, "value", v)} />
+                <EditableText value={String(p.default_value ?? p.value ?? "")} width="100%" onSave={(v) => updateParam(step.step_id, p, "value", v)} />
               )}
             </FieldControl>
             <FieldControl label="类型">
@@ -4037,7 +4134,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       <Space id="flow-workbench" direction="vertical" size={12} style={{ width: "100%" }}>
         <Space wrap>
           <Tooltip title="基于当前能力、接口和人工修改继续规划，并同步修正字段绑定、枚举来源、依赖和接口闭包">
-            <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy || autoFixBusy} onClick={orchestrateFlow}>生成/优化能力</Button>
+            <Button icon={<RobotOutlined />} type="primary" loading={orchestrateBusy || autoFixBusy}
+              disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture}
+              onClick={orchestrateFlow}>生成/优化能力</Button>
           </Tooltip>
           <Button
             icon={<PictureOutlined />}
@@ -4304,10 +4403,10 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           }}>
             <Space align="center" wrap size={12}>
               <Tag color={connectionState === "connected" ? "processing" : (connectionState === "connecting" || connectionState === "reconnecting") ? "warning" : "error"}>
-                {connectionState === "connected" ? (phase === "publishing" ? "发布中" : "录制中") : connectionState === "connecting" ? "连接中" : connectionState === "reconnecting" ? "重连中" : "已断开"}
+                {connectionState === "connected" ? (phase === "publishing" ? "发布中" : recordingStopped ? "录制已结束·连接正常" : "录制中") : connectionState === "connecting" ? "连接中" : connectionState === "reconnecting" ? "重连中" : "已断开"}
               </Tag>
               <Button size="small" disabled={phase === "publishing" || connectionState !== "connected"} onClick={resetFromHere}>从这里开始录</Button>
-              <Button size="small" onClick={stopAll} disabled={phase === "publishing"}>结束录制</Button>
+              <Button size="small" onClick={stopAll} disabled={phase === "publishing" || recordingStopped}>结束录制</Button>
               <Form.Item label="动作名" required style={{ marginBottom: 0 }}>
                 <Tooltip title="每个录制会话自动生成唯一 UUID 动作名，避免与历史资产重复">
                   <Input value={action} readOnly style={{ width: 340, fontFamily: "monospace" }} />

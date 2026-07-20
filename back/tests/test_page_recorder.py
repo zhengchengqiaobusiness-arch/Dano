@@ -16,6 +16,19 @@ from dano.execution.page.recorder import RecordSession, _RECORDER_JS
 from dano.execution.page.sessions import SESSION_STORAGE_STATE_KEY
 
 
+def test_pause_recording_keeps_session_but_stops_fact_collection_until_reset() -> None:
+    sess = RecordSession()
+    event = json.dumps({"op": "click", "locator": "button#submit"})
+
+    sess.pause_recording()
+    sess._on_record({}, event)
+    assert sess.steps == []
+
+    sess.reset()
+    sess._on_record({}, event)
+    assert [step["locator"] for step in sess.steps] == ["button#submit"]
+
+
 def test_static_script_enum_repairs_only_exact_label_value_mapping() -> None:
     sess = RecordSession()
     sess.script_sources = [{

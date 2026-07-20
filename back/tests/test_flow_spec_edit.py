@@ -1282,18 +1282,32 @@ def test_flow_operation_report_explains_noop_and_changes():
     unchanged = before.model_copy(deep=True)
     internal_only = before.model_copy(deep=True)
     internal_only.request_facts.diagnostics.append({"type": "console", "message": "derived audit"})
+    capability_only = before.model_copy(deep=True)
+    capability_only.capabilities = [FlowCapability(
+        name="submit_request",
+        title="仅修改能力名称",
+        nodes=_call_nodes([before.steps[0].step_id]),
+    )]
     changed = before.model_copy(deep=True)
     changed.steps[0].params[0].key = "申请人ID"
+    changed.steps[0].params[0].default_value = "new-default"
 
     noop = flow_operation_report(before, unchanged, operation="plan")
     internal = flow_operation_report(before, internal_only, operation="plan")
+    capability_delta = flow_operation_report(before, capability_only, operation="plan")
     delta = flow_operation_report(before, changed, operation="plan")
 
     assert noop["changed"] is False
     assert noop["summary"]
     assert internal["changed"] is False
+    assert capability_delta["changes"]["capabilities"] == 1
+    assert capability_delta["field_changes"] == []
     assert delta["changed"] is True
     assert delta["changes"]["fields"] == 1
+    assert delta["field_changes"][0]["path"] == changed.steps[0].params[0].path
+    assert set(delta["field_changes"][0]["axes"]) == {"name", "default"}
+    assert delta["summary"] == "实际修改：字段1项"
+    assert noop["summary"] == "未修改任何字段、能力或关联"
 
 
 def _mixed_stale_repair_ops() -> list[dict]:
@@ -6326,3 +6340,114 @@ def test_sync_migrates_legacy_api_option_business_type_without_changing_wire_typ
     assert param.type == "enum"
     assert param.wire_type == "number"
     assert param.source_kind == "api_option"
+def test_r2_automated_field_resolution_requires_exact_step_path_identity():
+    first = ParamField(path="body.customer.id", key="id", label="编号")
+    second = ParamField(path="body.order.id", key="id", label="编号")
+    spec = FlowSpec(steps=[FlowStep(step_id="submit", params=[first, second])])
+
+    assert flow_spec_module._apply_capability_field_to_param(
+        spec,
+        {
+            "step_id": "submit",
+            "path": "id",
+            "key": "客户编号",
+            "display_name": "客户编号",
+            "type": "string",
+        },
+        scope="input",
+        actor="planner",
+    ) is False
+    assert [param.key for param in spec.steps[0].params] == ["id", "id"]
+
+    assert flow_spec_module._apply_capability_field_to_param(
+        spec,
+        {
+            "step_id": "submit",
+            "path": "body.customer.id",
+            "key": "客户编号",
+            "display_name": "客户编号",
+            "type": "string",
+        },
+        scope="input",
+        actor="planner",
+    ) is True
+    assert [param.key for param in spec.steps[0].params] == ["客户编号", "id"]
+
+
+def test_r2_manual_field_evidence_protects_only_its_owned_axis():
+    param = ParamField(
+        path="useTime",
+        key="useTime",
+        label="useTime",
+        type="string",
+        wire_type="number",
+        required=True,
+        category="system_const",
+        source_kind="unknown",
+        default_value=1784476800000,
+        evidence=[{"source": "manual_edit", "field": "required", "value": True}],
+    )
+    spec = FlowSpec(steps=[FlowStep(step_id="submit", params=[param])])
+
+    assert flow_spec_module._apply_capability_field_to_param(
+        spec,
+        {
+            "step_id": "submit",
+            "path": "useTime",
+            "key": "使用日期",
+            "display_name": "使用日期",
+            "type": "datetime",
+            "category": "user_param",
+            "source_kind": "user_input",
+            "required": False,
+            "visible_default": "2026-07-20",
+            "evidence": [{
+                "source": "screenshot",
+                "control_kind": "date",
+                "editable": True,
+                "required": False,
+            }],
+        },
+        scope="input",
+        actor="planner",
+    ) is True
+
+    assert param.key == "使用日期"
+    assert (param.type, param.wire_type) == ("datetime", "number")
+    assert param.category == "user_param"
+    assert param.source_kind == "user_input"
+    assert param.required is True
+    assert param.default_value == 1784476800000
+
+
+def test_r2_semantic_completion_does_not_resurrect_unreviewed_field_values():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit",
+        params=[
+            ParamField(path="title", key="旧标题", category="user_param"),
+            ParamField(path="tenantId", key="旧租户", category="system_const"),
+        ],
+    )])
+    proposed = {
+        "field_semantics": [{
+            "step_id": "submit",
+            "wire_path": "title",
+            "public_name": "申请标题",
+            "business_type": "string",
+            "source_kind": "user_input",
+            "confidence": 0.95,
+        }],
+        "request_roles": [],
+        "capabilities": [],
+        "capability_relations": [],
+        "unresolved_items": [],
+    }
+
+    completed = flow_spec_module._complete_semantic_plan_from_spec(spec, proposed)
+    assert [field["wire_path"] for field in completed["field_semantics"]] == ["title"]
+    coverage = flow_spec_module._semantic_plan_coverage(
+        spec, {"semantic_plan": completed},
+    )
+    assert coverage["total_fields"] == 2
+    assert coverage["covered_fields"] == 1
+    assert "field_semantics" in coverage["missing"]

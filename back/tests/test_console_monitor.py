@@ -54,6 +54,10 @@ def test_is_relevant_blocks_noise():
     assert is_relevant_error("error", "Failed to load favicon.ico 404") is False
     assert is_relevant_error("info", "Download the React DevTools") is False
     assert is_relevant_error("error", "[HMR] update") is False
+    assert is_relevant_error(
+        "error",
+        "Warning: findDOMNode is deprecated and will be removed in the next major release",
+    ) is False
 
 
 def test_is_relevant_keeps_real_errors():

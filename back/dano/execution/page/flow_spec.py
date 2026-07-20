@@ -5868,12 +5868,17 @@ def _canonicalize_public_capability_identities(spec: FlowSpec) -> FlowSpec:
     return spec
 
 
-def _repair_generated_capability_contracts(spec: FlowSpec) -> FlowSpec:
+def _repair_generated_capability_contracts(
+    spec: FlowSpec,
+    *,
+    repair_option_bindings: bool = True,
+) -> FlowSpec:
     """Deterministically repair only Planner-generated capability contracts."""
     _normalize_capability_references(spec)
     _infer_computed_runtime_fields(spec)
     rebuild_flow_dependencies(spec)
-    _repair_structural_option_bindings(spec)
+    if repair_option_bindings:
+        _repair_structural_option_bindings(spec)
     by_id = {step.step_id: step for step in spec.steps}
     renamed: dict[str, str] = {}
     for cap in spec.capabilities or []:
@@ -9734,11 +9739,13 @@ async def orchestrate_flow_capabilities(
     if not isinstance(submission.get("ops", []), list):
         raise ValueError("recording plan ops must be a list")
     _validate_recording_agent_ops(submission.get("ops") or [])
+    screenshot_analysis = bool(int(submission.get("_analysis_screenshot_count") or 0))
     original = spec.model_copy(deep=True)
     initial_report = validate_flow_spec(original)
     current = _prune_empty_capabilities(original.model_copy(deep=True))
     rebuild_flow_dependencies(current)
-    _repair_structural_option_bindings(current)
+    if not screenshot_analysis:
+        _repair_structural_option_bindings(current)
     capability_model = (current.meta or {}).get("capability_model") or {}
     auto_generated_existing = bool(
         current.capabilities
@@ -9796,7 +9803,10 @@ async def orchestrate_flow_capabilities(
     incremental_review: dict[str, Any] = {}
     proposal_baseline = current.model_copy(deep=True)
     if initial_generation:
-        proposal_baseline = _repair_generated_capability_contracts(proposal_baseline)
+        proposal_baseline = _repair_generated_capability_contracts(
+            proposal_baseline,
+            repair_option_bindings=not screenshot_analysis,
+        )
     proposal_baseline = _ensure_external_transform_relations(
         _sync_capability_io_schemas(sync_flow_spec_models(proposal_baseline))
     )
@@ -9885,7 +9895,10 @@ async def orchestrate_flow_capabilities(
         current = _drop_superseded_baseline_capabilities(current, baseline_ids)
     _normalize_capability_references(current)
     if initial_generation:
-        current = _repair_generated_capability_contracts(current)
+        current = _repair_generated_capability_contracts(
+            current,
+            repair_option_bindings=not screenshot_analysis,
+        )
     current = _ensure_external_transform_relations(
         _sync_capability_io_schemas(sync_flow_spec_models(current))
     )
@@ -11512,12 +11525,35 @@ def flow_spec_fingerprint(spec: FlowSpec) -> str:
 def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) -> dict[str, Any]:
     """Build a safe, operator-facing semantic diff for a workbench operation."""
 
+    def field_detail_index(spec: FlowSpec) -> dict[tuple[str, str], dict[str, Any]]:
+        capability_by_step = {
+            step_id: capability.title or capability.name or capability.capability_id
+            for capability in spec.capabilities or []
+            for step_id in _capability_node_step_ids(capability)
+        }
+        return {
+            (step.step_id, param.path): {
+                "capability": capability_by_step.get(step.step_id, ""),
+                "step_id": step.step_id,
+                "path": param.path,
+                "name": param.label or param.key or param.path,
+                "type": param.type,
+                "category": param.category,
+                "source": param.source_kind,
+                "required": bool(param.required),
+                "default": copy.deepcopy(param.default_value),
+                "enum_options": copy.deepcopy(param.enum_options or []),
+            }
+            for step in spec.steps for param in step.params
+        }
+
     def field_index(spec: FlowSpec) -> dict[tuple[str, str], tuple[Any, ...]]:
         return {
             (step.step_id, param.path): (
                 param.key, param.label, param.type, param.wire_type,
                 param.category, param.source_kind, _stable_json_hash(param.source or {}),
                 bool(param.required), bool(param.exposed_to_user),
+                _stable_json_hash(param.default_value),
                 _stable_json_hash(param.enum_options or []), _stable_json_hash(param.enum_value_map or {}),
             )
             for step in spec.steps for param in step.params
@@ -11530,8 +11566,6 @@ def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) 
                 bool(cap.confirmed), bool(cap.requires_human_confirm),
                 _stable_json_hash(cap.nodes or []),
                 _stable_json_hash([ref.model_dump(exclude_none=True) for ref in (cap.request_refs or [])]),
-                _stable_json_hash(cap.input_schema or {}),
-                _stable_json_hash(cap.output_schema or {}),
                 _stable_json_hash(cap.output_mapping or []),
                 _stable_json_hash(cap.preconditions or []),
             )
@@ -11559,6 +11593,31 @@ def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) 
 
     def changed_count(left: dict[Any, Any], right: dict[Any, Any]) -> int:
         return sum(1 for key in set(left) | set(right) if left.get(key) != right.get(key))
+
+    before_field_details = field_detail_index(before)
+    after_field_details = field_detail_index(after)
+    field_changes: list[dict[str, Any]] = []
+    field_axes = (
+        "name", "type", "category", "source", "required", "default", "enum_options",
+    )
+    for field_ref in sorted(set(before_field_details) | set(after_field_details)):
+        left = before_field_details.get(field_ref)
+        right = after_field_details.get(field_ref)
+        axes: dict[str, dict[str, Any]] = {}
+        for axis in field_axes:
+            old_value = left.get(axis) if left else None
+            new_value = right.get(axis) if right else None
+            if old_value != new_value:
+                axes[axis] = {"before": old_value, "after": new_value}
+        if not axes:
+            continue
+        field_changes.append({
+            "capability": (right or left or {}).get("capability") or "",
+            "step_id": field_ref[0],
+            "path": field_ref[1],
+            "name": (right or left or {}).get("name") or field_ref[1],
+            "axes": axes,
+        })
 
     before_report = validate_flow_spec(before)
     after_report = validate_flow_spec(after)
@@ -11589,12 +11648,12 @@ def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) 
     if changed:
         details = "，".join(
             f"{label}{changes[key]}项" for key, label in (
-                ("capabilities", "能力"), ("fields", "字段"), ("links", "依赖"),
+                ("fields", "字段"), ("capabilities", "能力"), ("links", "字段依赖"),
                 ("relations", "能力关系"), ("steps", "接口步骤"),
                 ("flow", "流程说明"),
             ) if changes[key]
         )
-        summary = "已更新流程编排" + (f"：{details}" if details else "")
+        summary = "实际修改" + (f"：{details}" if details else "流程数据")
         if edit_errors:
             summary += f"；另跳过 {len(edit_errors)} 条已失效的修复建议"
     elif proposal_gate.get("accepted") is False:
@@ -11603,11 +11662,12 @@ def flow_operation_report(before: FlowSpec, after: FlowSpec, *, operation: str) 
     elif edit_errors:
         summary = "已跳过无效修复项，其他有效修改已保留：" + "；".join(edit_errors[:3])
     else:
-        summary = "已完成检查，但没有发现有充分证据可自动修改的内容"
+        summary = "未修改任何字段、能力或关联"
     return {
         "operation": operation,
         "changed": changed,
         "changes": changes,
+        "field_changes": field_changes,
         "summary": summary,
         "edit_errors": edit_errors,
         "proposal_gate": proposal_gate,
