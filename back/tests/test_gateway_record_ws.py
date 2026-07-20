@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dano.execution.page.flow_spec import FlowSpec, FlowStep, ParamField
 from dano.gateway import app as gateway
 
 
@@ -533,3 +534,97 @@ def test_recording_gateway_builds_enum_evidence_once_per_finalize() -> None:
     assert source.count("recorded_page_enum_options()") == 1
     assert "recorded_page_options = sess.recorded_page_enum_options()" in source
     assert "for storage_key, raw_entry in (recorded_page_options or {}).items()" in source
+
+
+def test_finalize_projection_preserves_recorded_enum_fact_metadata() -> None:
+    raw = {
+        "requestType": {
+            "field_key": "requestType",
+            "field_aliases": ["申请类型"],
+            "options": [
+                {"label": "病假", "value": "2"},
+                {"label": "事假", "value": "3"},
+            ],
+            "selected": "病假",
+            "selected_label": "病假",
+            "selected_value": "2",
+            "mapping_complete": False,
+            "mapping_conflict": True,
+            "truncated": True,
+            "action_id": "action-select-request-type",
+            "transaction_id": "page-1|main|action-select-request-type",
+            "observed_at": 1784563200000,
+        },
+    }
+
+    projected = gateway._project_recorded_page_enum_options(raw, samples={})
+    fact = projected["requestType"]
+
+    assert fact["selected_label"] == "病假"
+    assert fact["selected_value"] == "2"
+    assert fact["mapping_complete"] is False
+    assert fact["mapping_conflict"] is True
+    assert fact["truncated"] is True
+    assert fact["action_id"] == "action-select-request-type"
+    assert fact["transaction_id"] == "page-1|main|action-select-request-type"
+    assert fact["observed_at"] == 1784563200000
+
+
+def test_analysis_report_exposes_initial_kind_and_actionable_issue_details() -> None:
+    before = FlowSpec(
+        steps=[FlowStep(
+            step_id="submit",
+            method="POST",
+            path="/api/submit",
+            params=[
+                ParamField(path="reason", key="原因", value="leave"),
+                ParamField(path="days", key="天数", value="2"),
+            ],
+        )],
+    )
+    after = before.model_copy(deep=True)
+    after.meta = {
+        "capability_generation": {"initial_completed": True, "last_mode": "initial"},
+        "capability_model": {
+            "semantic_coverage": {"complete": False},
+            "semantic_plan": {
+                "field_semantics": [{
+                    "step_id": "submit",
+                    "wire_path": "reason",
+                    "evidence": [{"source": "screenshot", "axis": "name"}],
+                }],
+                "unresolved_items": [{
+                    "kind": "field_axis",
+                    "step_id": "submit",
+                    "path": "days",
+                    "axis": "required",
+                    "reason": "required marker not visible",
+                }],
+            },
+        },
+    }
+
+    report = gateway._analysis_application_report(
+        before=before,
+        after=after,
+        operation_report={
+            "changed": True,
+            "summary": "initial analysis",
+            "changes": {"fields": 1},
+            "field_changes": [],
+            "proposal_gate": {"accepted": True},
+        },
+        screenshots=[{"name": "form.png"}],
+        delivered_image_count=1,
+        operation_id="initial-1",
+    )
+
+    assert report["analysis_kind"] == "initial"
+    assert report["unmatched_fields"] == [{
+        "step_id": "submit",
+        "path": "days",
+        "name": "天数",
+    }]
+    assert report["unmatched_field_count"] == len(report["unmatched_fields"])
+    assert report["unresolved_items"][0]["axis"] == "required"
+    assert report["unresolved_field_count"] == len(report["unresolved_items"])

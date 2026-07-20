@@ -62,6 +62,17 @@ def _authoritative_spec() -> FlowSpec:
     )
 
 
+def test_workbench_contract_uses_stable_field_identity_and_rolls_back_disconnects() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    assert 'analysis_kind?: "initial" | "incremental"' in source
+    assert 'lastAnalysisEvidence.analysis_kind !== "initial"' in source
+    assert "p.field_id" in source
+    assert 'key={`${step.step_id}:param:${stripBodyPrefix(p.path || p.key)}`}' not in source
+    onclose = source[source.index("ws.onclose ="):source.index("ws.onerror =")]
+    assert "failQueuedFlowMutation" in onclose
+
+
 def test_client_projection_is_bounded_and_contains_no_authoritative_secrets() -> None:
     spec = _authoritative_spec()
     client = flow_spec_to_client(spec)

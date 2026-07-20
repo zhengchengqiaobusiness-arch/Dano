@@ -2154,6 +2154,68 @@ def test_edit_type_to_enum_does_not_overwrite_category_or_source():
     assert param.source_kind == "unknown"
 
 
+def test_short_param_path_cannot_collide_with_two_exact_nested_paths():
+    spec = FlowSpec(flow_id="exact-param-path", steps=[FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/submit",
+        params=[
+            ParamField(path="applicant.id", key="申请人", value="A-1"),
+            ParamField(path="approver.id", key="审批人", value="B-1"),
+        ],
+    )])
+
+    with pytest.raises(ValueError, match="param not found: id"):
+        apply_flow_edits(spec, [{
+            "op": "update",
+            "step_id": "submit",
+            "param_path": "id",
+            "field": "label",
+            "value": "不得猜测",
+            "actor": "user",
+        }])
+
+
+def test_manual_label_edit_owns_only_label_axis_not_entire_param():
+    spec = FlowSpec(flow_id="per-axis-ownership", steps=[FlowStep(
+        step_id="submit",
+        method="POST",
+        path="/api/submit",
+        params=[ParamField(
+            path="days",
+            key="days",
+            label="days",
+            value="2",
+            type="string",
+            category="user_param",
+            source_kind="user_input",
+        )],
+    )])
+    renamed = apply_flow_edits(spec, [{
+        "op": "update",
+        "step_id": "submit",
+        "param_path": "days",
+        "field": "label",
+        "value": "请假天数",
+        "actor": "user",
+    }])
+
+    updated = apply_flow_edits(renamed, [{
+        "op": "update",
+        "step_id": "submit",
+        "param_path": "days",
+        "field": "type",
+        "value": "number",
+        "actor": "planner",
+    }])
+    param = updated.steps[0].params[0]
+
+    assert param.label == "请假天数"
+    assert param.type == "number"
+    assert param.locked is False
+    assert {item["field"] for item in param.evidence if item.get("source") == "manual_edit"} == {"label"}
+
+
 def test_manual_type_category_source_combination_survives_publish_sync():
     """The backend must persist an operator combination even when it looks unusual."""
     spec = FlowSpec(flow_id="manual-axis-combination", steps=[FlowStep(
@@ -2688,7 +2750,7 @@ def test_dedupe_steps_keeps_latest_repeated_read_step():
     new = apply_flow_edits(spec, [{"op": "dedupe_steps"}])
 
     assert [s.step_id for s in new.steps] == ["old2", "submit"]
-    assert [l.link_id for l in new.links] == ["ok"]
+    assert [link.link_id for link in new.links] == ["ok"]
     assert new.meta["deduped_step_count"] == 1
 
 
