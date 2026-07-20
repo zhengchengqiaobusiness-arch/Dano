@@ -394,22 +394,75 @@ function hasVisibleAssistantContent(message: TranscriptEntryLike): boolean {
   );
 }
 
+function lastUserMessageIndex(
+  messages: readonly TranscriptEntryLike[],
+): number {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index]?.role === "user") return index;
+  }
+  return -1;
+}
+
 export function shouldShowAssistantPending(
   messages: readonly TranscriptEntryLike[],
   isStreaming: boolean,
 ): boolean {
   if (!isStreaming) return false;
 
-  let lastUserIndex = -1;
-  for (let index = messages.length - 1; index >= 0; index--) {
-    if (messages[index]?.role === "user") {
-      lastUserIndex = index;
-      break;
-    }
-  }
+  const lastUserIndex = lastUserMessageIndex(messages);
   if (lastUserIndex < 0) return false;
 
   return !messages.slice(lastUserIndex + 1).some(hasVisibleAssistantContent);
+}
+
+export type AssistantPendingState = "initial" | "post-tool" | null;
+
+export function assistantPendingState(
+  messages: readonly TranscriptEntryLike[],
+  isStreaming: boolean,
+): AssistantPendingState {
+  if (!isStreaming) return null;
+  if (shouldShowAssistantPending(messages, true)) return "initial";
+
+  const lastUserIndex = lastUserMessageIndex(messages);
+
+  let outstandingToolCalls = 0;
+  let completedToolWorkAtTail = false;
+  for (let messageIndex = lastUserIndex + 1; messageIndex < messages.length; messageIndex++) {
+    const message = messages[messageIndex];
+    if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+
+    for (let blockIndex = 0; blockIndex < message.content.length; blockIndex++) {
+      const block = message.content[blockIndex];
+      if (typeof block === "string") {
+        if (block.trim()) completedToolWorkAtTail = false;
+        continue;
+      }
+      if (block.type === "text") {
+        if (block.text.trim()) completedToolWorkAtTail = false;
+        continue;
+      }
+      if (block.type === "thinking") {
+        if (block.thinking.trim()) completedToolWorkAtTail = false;
+        continue;
+      }
+      if (block.type === "toolCall") {
+        outstandingToolCalls += 1;
+        completedToolWorkAtTail = false;
+        continue;
+      }
+      if (block.type === "toolResult") {
+        outstandingToolCalls = Math.max(0, outstandingToolCalls - 1);
+        completedToolWorkAtTail = outstandingToolCalls === 0;
+        continue;
+      }
+      completedToolWorkAtTail = false;
+    }
+  }
+
+  return completedToolWorkAtTail && outstandingToolCalls === 0
+    ? "post-tool"
+    : null;
 }
 
 export function normalizeTranscript(

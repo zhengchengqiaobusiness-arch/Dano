@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assistantPendingState,
   buildTranscriptDisplayItems,
   buildTranscriptProcessGroups,
   contentBlocks,
@@ -19,6 +20,10 @@ describe("assistant pending indicator", () => {
       userMessage,
       { id: "assistant-1", role: "assistant", content: [] },
     ], true)).toBe(true);
+    expect(assistantPendingState([
+      userMessage,
+      { id: "assistant-1", role: "assistant", content: [] },
+    ] as never, true)).toBe("initial");
   });
 
   it("hides when the first assistant text becomes visible", () => {
@@ -45,6 +50,177 @@ describe("assistant pending indicator", () => {
 
   it("does not show outside an active response", () => {
     expect(shouldShowAssistantPending([userMessage], false)).toBe(false);
+  });
+
+  it("waits for model continuation after completed tool work", () => {
+    const messages = normalizeTranscript([
+      userMessage,
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "tool-1", name: "read", arguments: {} },
+        ],
+      },
+      {
+        id: "tool-result-1",
+        role: "toolResult",
+        toolCallId: "tool-1",
+        toolName: "read",
+        content: [{ type: "text", text: "done" }],
+      },
+    ] as never);
+
+    expect(assistantPendingState(messages, true)).toBe("post-tool");
+  });
+
+  it("keeps waiting for the remaining tools in a batch", () => {
+    const messages = normalizeTranscript([
+      userMessage,
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "tool-1", name: "read", arguments: {} },
+          { type: "toolCall", id: "tool-2", name: "read", arguments: {} },
+        ],
+      },
+      {
+        id: "tool-result-2",
+        role: "toolResult",
+        toolCallId: "tool-2",
+        toolName: "read",
+        content: [{ type: "text", text: "done" }],
+      },
+    ] as never);
+
+    expect(assistantPendingState(messages, true)).toBe(null);
+  });
+
+  it("waits after every tool in a batch has completed", () => {
+    const messages = normalizeTranscript([
+      userMessage,
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "tool-1", name: "read", arguments: {} },
+          { type: "toolCall", id: "tool-2", name: "read", arguments: {} },
+        ],
+      },
+      {
+        id: "tool-result-2",
+        role: "toolResult",
+        toolCallId: "tool-2",
+        toolName: "read",
+        content: [{ type: "text", text: "second" }],
+      },
+      {
+        id: "tool-result-1",
+        role: "toolResult",
+        toolCallId: "tool-1",
+        toolName: "read",
+        content: [{ type: "text", text: "first" }],
+      },
+    ] as never);
+
+    expect(assistantPendingState(messages, true)).toBe("post-tool");
+  });
+
+  it("treats an answered tool with empty content as completed", () => {
+    const messages = normalizeTranscript([
+      userMessage,
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [{
+          type: "toolCall",
+          id: "question-1",
+          name: "ask_user_question",
+          arguments: {},
+        }],
+      },
+      {
+        id: "tool-result-1",
+        role: "toolResult",
+        toolCallId: "question-1",
+        toolName: "ask_user_question",
+        content: [],
+        details: { status: "answered", answer: "继续" },
+      },
+    ] as never);
+
+    expect(assistantPendingState(messages, true)).toBe("post-tool");
+  });
+
+  it("treats failed tool work as completed when the turn continues", () => {
+    const messages = normalizeTranscript([
+      userMessage,
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [{ type: "toolCall", id: "tool-1", name: "read", arguments: {} }],
+      },
+      {
+        id: "tool-result-1",
+        role: "toolResult",
+        toolCallId: "tool-1",
+        toolName: "read",
+        content: [{ type: "text", text: "failed" }],
+        isError: true,
+      },
+    ] as never);
+
+    expect(assistantPendingState(messages, true)).toBe("post-tool");
+  });
+
+  it("stops waiting when later assistant output becomes visible", () => {
+    const completedToolMessages = normalizeTranscript([
+      userMessage,
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [{ type: "toolCall", id: "tool-1", name: "read", arguments: {} }],
+      },
+      {
+        id: "tool-result-1",
+        role: "toolResult",
+        toolCallId: "tool-1",
+        toolName: "read",
+        content: [{ type: "text", text: "done" }],
+      },
+    ] as never);
+
+    for (const content of [
+      [{ type: "thinking", thinking: "继续思考" }],
+      [{ type: "text", text: "最终回答" }],
+      [{ type: "toolCall", id: "tool-2", name: "read", arguments: {} }],
+    ]) {
+      expect(assistantPendingState([
+        ...completedToolMessages,
+        { id: "assistant-2", role: "assistant", content },
+      ] as never, true)).toBe(null);
+    }
+  });
+
+  it("does not wait after the Assistant Turn ends", () => {
+    const messages = normalizeTranscript([
+      userMessage,
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [{ type: "toolCall", id: "tool-1", name: "read", arguments: {} }],
+      },
+      {
+        id: "tool-result-1",
+        role: "toolResult",
+        toolCallId: "tool-1",
+        toolName: "read",
+        content: [{ type: "text", text: "done" }],
+      },
+    ] as never);
+
+    expect(assistantPendingState(messages, false)).toBe(null);
   });
 });
 

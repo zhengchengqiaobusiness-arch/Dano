@@ -45,6 +45,7 @@
     userMessagePlainText,
   } from "../utils/messageCopy";
   import {
+    assistantPendingState,
     buildTranscriptDisplayItems,
     buildTranscriptProcessGroups,
     contentBlocks,
@@ -57,7 +58,6 @@
     isToolResultMessage,
     latestThinkingLine,
     messageContent,
-    shouldShowAssistantPending,
     type FileContentBlock,
     type ImageContentBlock,
     type PendingTranscriptSessionEvent,
@@ -236,8 +236,8 @@
     isStreaming || transcriptStreams.length > 0 || transcriptDeltas.length > 0,
   );
   let showBusyIndicator = $derived(hasVisibleStreaming || isCompacting);
-  let showAssistantPending = $derived(
-    shouldShowAssistantPending(
+  let pendingAssistantState = $derived(
+    assistantPendingState(
       [
         ...messages.map((message, index) =>
           messageWithTranscriptDeltas(message, index),
@@ -1692,9 +1692,10 @@
     {/if}
   {/each}
 
-  {#if showAssistantPending}
+  {#if pendingAssistantState}
     <div
       class="message-row assistant assistant-pending-row"
+      class:assistant-pending-delayed={pendingAssistantState === "post-tool"}
       role="status"
       aria-label={t("chatTranscript.waitingForResponse")}
     >
@@ -1975,6 +1976,11 @@
     overflow-anchor: none;
   }
 
+  .assistant-pending-row.assistant-pending-delayed {
+    visibility: hidden;
+    animation: assistant-pending-reveal 0s linear 500ms forwards;
+  }
+
   .assistant-pending {
     display: inline-flex;
     align-items: center;
@@ -2002,6 +2008,10 @@
       opacity: 1;
       transform: translateY(-2px);
     }
+  }
+
+  @keyframes assistant-pending-reveal {
+    to { visibility: visible; }
   }
 
   .process-summary-row {
