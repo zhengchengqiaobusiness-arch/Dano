@@ -11724,7 +11724,9 @@ def _flow_fingerprint(spec: FlowSpec) -> str:
     canonical = FlowSpec.model_validate(flow_spec_release_payload(spec))
     payload = canonical.model_dump(
         mode="json",
-        exclude={"meta", "review_items"},
+        # Human-facing copy can be localized or regenerated without changing
+        # the executable request/capability contract or invalidating edits.
+        exclude={"meta", "review_items", "title", "business_description"},
         exclude_none=True,
     )
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
