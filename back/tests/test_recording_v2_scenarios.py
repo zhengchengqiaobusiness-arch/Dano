@@ -257,13 +257,9 @@ def test_r0_seal_truth_preserves_facts_capability_boundaries_and_relations(
     [
         ("/oa/seal-apply/page", "query.pageNo", "pageNo", "1", "number", "number", "user_param", "user_input", False),
         ("/oa/seal-apply/page", "query.pageSize", "pageSize", "10", "number", "number", "user_param", "user_input", False),
-        pytest.param(
+        (
             "/oa/seal-apply/page", "query.processStatus", "流程状态", "2",
             "enum", "string", "user_param", "page_enum", False,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="R3: 只有页面标签快照时仍须保留 incomplete enum，不能退化为 string",
-            ),
         ),
         ("/process-definition/get", "query.key", "key", "oa_seal_apply", "string", "string", "system_const", "constant", False),
         ("/get-approval-detail", "query.processDefinitionId", "processDefinitionId", "oa_seal_apply:1:def", "string", "string", "runtime_var", "previous_response", False),

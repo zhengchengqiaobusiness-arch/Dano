@@ -1136,9 +1136,11 @@ def _enum_options_for_param(sb) -> list | None:
         if pair is None:
             continue
         label, parsed_value = pair
-        if om:
-            out.append({"label": label, "value": om.get(label, parsed_value)})
-        elif isinstance(o, (dict, list, tuple)):
+        if om and label in om:
+            out.append({"label": label, "value": om[label]})
+        elif (
+            isinstance(o, dict) and "value" in o and o.get("value") is not None
+        ) or (isinstance(o, (list, tuple)) and len(o) >= 2 and o[1] is not None):
             out.append({"label": label, "value": parsed_value})
         else:
             out.append(label)
@@ -3384,10 +3386,11 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
     for raw_key, raw in page_options.items():
         if isinstance(raw, dict):
             source_kind = str(raw.get("enum_source") or "dom").strip()
+            mapping_complete = raw.get("mapping_complete") is True
             if (
                 str(raw.get("control_kind") or "").lower() != "select"
-                or raw.get("mapping_complete") is not True
                 or source_kind not in {"dom", "script_static", "script_dictionary"}
+                or (not mapping_complete and source_kind != "dom")
                 or (source_kind == "script_static" and not raw.get("script_url"))
                 or (
                     source_kind == "script_dictionary"
@@ -3410,7 +3413,8 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
             continue
         option_pairs = [_enum_label_value(option) for option in options]
         if (
-            any(pair is None or pair[1] is None for pair in option_pairs)
+            any(pair is None for pair in option_pairs)
+            or (mapping_complete and any(pair[1] is None for pair in option_pairs if pair))
             or len({str(pair[0]) for pair in option_pairs if pair}) != len(options)
         ):
             continue
@@ -3486,7 +3490,11 @@ def _ground_saved_page_enums(spec: FlowSpec) -> None:
             str(pair[0]) for option in options
             if (pair := _enum_label_value(option)) is not None
         ]
-        confirmed = bool(labels) and all(label in option_map and option_map[label] is not None for label in labels)
+        confirmed = bool(
+            mapping_complete
+            and labels
+            and all(label in option_map and option_map[label] is not None for label in labels)
+        )
 
         binding = existing_binding
         if binding is None:
@@ -13582,6 +13590,13 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                         "records": records,
                         "option_map": option_map,
                     })
+        if page_contract:
+            exact_label_contracts = [
+                contract for contract in contracts
+                if set(contract["option_map"]) == visible_labels
+            ]
+            if exact_label_contracts:
+                return exact_label_contracts
         return contracts
 
     repaired = 0
@@ -13591,7 +13606,13 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 param.locked
                 or _param_has_manual_contract(param)
                 or _param_has_screenshot_direct_input_contract(param)
-                or param.source_kind in _OPTION_SOURCE_KINDS
+                or (
+                    param.source_kind in _OPTION_SOURCE_KINDS
+                    and not (
+                        param.source_kind == "page_enum"
+                        and (param.source or {}).get("enum_confirmed") is False
+                    )
+                )
                 or _looks_pagination_field(param.key, param.path)
                 or param.category == "system_const"
             ):
@@ -15830,9 +15851,34 @@ def _flow_autofix_context(spec: FlowSpec, report: dict[str, Any]) -> dict[str, A
     recorded_page_events = _client_redact_sensitive(
         copy.deepcopy((spec.request_facts.page_events or [])[-300:]),
     )
+    admitted_request_ids: set[str] = set()
+    admitted_paths: set[str] = set()
+    for source in spec.request_facts.option_sources or []:
+        if not isinstance(source, dict):
+            continue
+        if source.get("kind") == "api_response":
+            admitted_request_ids.add(str(source.get("request_id") or ""))
+            admitted_paths.add(_request_path({"url": str(source.get("path") or "")}))
+        elif source.get("kind") == "page_enum_options":
+            for option in (source.get("options") or {}).values():
+                if not isinstance(option, dict):
+                    continue
+                admitted_request_ids.update(str(value) for value in (option.get("source_request_ids") or []) if value)
+                admitted_paths.add(_request_path({"url": str(option.get("source_url") or "")}))
+    admitted_paths.update(
+        _request_path({"url": binding.source_url})
+        for step in spec.steps for binding in (step.selects or []) if binding.source_url
+    )
+    admitted_request_ids.discard("")
+    admitted_paths.discard("")
     option_sources: list[dict[str, Any]] = []
     for fact in (spec.request_facts.requests or []):
         if (fact.method or "").upper() != "GET":
+            continue
+        if (
+            str(fact.request_id or "") not in admitted_request_ids
+            and _request_path({"url": fact.path or fact.url}) not in admitted_paths
+        ):
             continue
         items = as_list_payload(fact.response_json)
         if not items:

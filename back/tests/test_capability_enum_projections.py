@@ -80,6 +80,89 @@ def test_mixed_enum_shapes_normalize_once_then_project_to_capability() -> None:
     assert schema["x-options-snapshot"] == expected
 
 
+def test_incomplete_dom_select_preserves_enum_without_executable_label_fallback() -> None:
+    spec = FlowSpec(
+        steps=[FlowStep(
+            step_id="query",
+            method="GET",
+            path="/api/applications/page",
+            source_meta={"page_id": "applications", "frame_id": "main"},
+            params=[ParamField(
+                path="query.status",
+                key="status",
+                value="2",
+                type="string",
+                wire_type="string",
+                category="user_param",
+                source_kind="user_input",
+            )],
+        )],
+        request_facts=RequestFacts(option_sources=[{
+            "kind": "page_enum_options",
+            "options": {
+                "status": {
+                    "field_key": "状态",
+                    "field_aliases": ["status"],
+                    "control_kind": "select",
+                    "selected_label": "处理中",
+                    "selected_value": "2",
+                    "mapping_complete": False,
+                    "options": ["待处理", "处理中", "已完成"],
+                    "page_id": "applications",
+                    "frame_id": "main",
+                },
+            },
+        }]),
+    )
+
+    synced = sync_flow_spec_models(spec)
+    param = synced.steps[0].params[0]
+    binding = synced.steps[0].selects[0]
+
+    assert (param.type, param.wire_type) == ("enum", "string")
+    assert (param.category, param.source_kind) == ("user_param", "page_enum")
+    assert param.enum_options == ["待处理", {"label": "处理中", "value": "2"}, "已完成"]
+    assert param.enum_value_map == {"处理中": "2"}
+    assert param.source["enum_confirmed"] is False
+    assert param.need_human_confirm is True
+    assert binding.enum_confirmed is False
+    assert flow_spec_module._runtime_select_bindings(synced.steps[0]) == []
+
+
+def test_autofix_context_only_exposes_admitted_option_sources() -> None:
+    option_rows = [{"id": "1", "name": "财务章"}, {"id": "2", "name": "合同章"}]
+    menu_rows = [{"id": "1", "name": "首页"}, {"id": "2", "name": "系统管理"}]
+    spec = FlowSpec(request_facts=RequestFacts(
+        requests=[
+            RequestFact(
+                request_id="req-option", method="GET", path="/api/seals/simple-list",
+                response_json=option_rows,
+            ),
+            RequestFact(
+                request_id="req-menu", method="GET", path="/api/menus/list",
+                response_json=menu_rows,
+            ),
+        ],
+        analysis={
+            "req-option": RequestAnalysis(request_id="req-option", role="read_option"),
+            "req-menu": RequestAnalysis(request_id="req-menu", role="business_get"),
+        },
+        option_sources=[{
+            "kind": "api_response",
+            "request_id": "req-option",
+            "path": "/api/seals/simple-list",
+        }],
+    ))
+
+    context = flow_spec_module._flow_autofix_context(
+        spec, {"capability_validation": {}},
+    )
+
+    assert [source["request_id"] for source in context["candidate_option_sources"]] == [
+        "req-option",
+    ]
+
+
 def test_api_option_source_is_an_index_to_request_fact_not_a_response_copy() -> None:
     facts = flow_spec_module._build_request_facts(
         captured_requests=[{
