@@ -1475,6 +1475,12 @@ async def record_ws(ws: WebSocket) -> None:
                         screenshot_count=len(analysis_screenshots),
                     )
                     await sender.send_json(response)
+                except WebSocketDisconnect:
+                    # The plan was already applied and checkpointed. A client
+                    # closing before the acknowledgement is a transport event,
+                    # not an orchestration failure; let the outer reconnect
+                    # handler retain the resumable authoritative draft.
+                    raise
                 except Exception as e:  # noqa: BLE001
                     log.exception(
                         "recording.operation_failed",

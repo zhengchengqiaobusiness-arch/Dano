@@ -80,6 +80,10 @@ def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
     assert '"recording.operation_started"' in branch
     assert '"recording.operation_completed"' in branch
     assert '"recording.operation_failed"' in branch
+    disconnect_guard = branch.index("except WebSocketDisconnect:")
+    failure_handler = branch.index("except Exception as e:")
+    assert disconnect_guard < failure_handler
+    assert "raise" in branch[disconnect_guard:failure_handler]
 
 
 @pytest.mark.parametrize(
