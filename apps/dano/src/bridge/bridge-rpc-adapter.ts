@@ -37,6 +37,10 @@ import {
   type AskUserQuestionCoordinator,
   type AskUserQuestionRuntime,
 } from "./ask-user-question.js";
+import {
+  parseAskUserQuestionFailure,
+  projectAskUserQuestionFailure,
+} from "./ask-user-question-errors.js";
 import { DetachedSessionRegistry } from "./session-registry.js";
 import {
   ASK_USER_QUESTION_PRESENTATION_RETRY_CODE,
@@ -4428,12 +4432,17 @@ function projectAskUserQuestionRequests(
       recovering,
       coordinator,
     );
-    if (!questionRequest && !questionState) return block;
+    const questionError = questionErrorProjection(
+      message.content as Array<string | RpcTranscriptContentBlock>,
+      index,
+    );
+    if (!questionRequest && !questionState && !questionError) return block;
     changed = true;
     return {
       ...block,
       ...(questionRequest ? { questionRequest } : {}),
       ...(questionState ? { questionState } : {}),
+      ...(questionError ? { questionError } : {}),
     };
   });
   return changed ? { ...message, content } : message;
@@ -4544,6 +4553,10 @@ function projectRecoveredQuestionLifecycle(
   recoveryMessages: readonly RpcTranscriptMessage[],
 ): RpcTranscriptMessage[] {
   const completed = new Map<string, AskUserQuestionLifecycleState>();
+  const errors = new Map<
+    string,
+    ReturnType<typeof projectAskUserQuestionFailure>
+  >();
   const confirmed = new Map<
     string,
     {
@@ -4557,6 +4570,12 @@ function projectRecoveredQuestionLifecycle(
   >();
   for (const message of recoveryMessages) {
     if (message.role !== "toolResult" || !message.toolCallId) continue;
+    const failure =
+      parseAskUserQuestionFailure(message.details) ??
+      parseAskUserQuestionFailure(questionResultErrorText(message));
+    if (failure) {
+      errors.set(message.toolCallId, projectAskUserQuestionFailure(failure));
+    }
     completed.set(
       message.toolCallId,
       questionResultLifecycleState(
@@ -4623,6 +4642,9 @@ function projectRecoveredQuestionLifecycle(
       return {
         ...block,
         questionState: completed.get(block.id),
+        ...(errors.has(block.id)
+          ? { questionError: errors.get(block.id) }
+          : {}),
         ...(sources.length > 0
           ? {
               questionRequest: buildAskUserQuestionConfirmationCardRequestForForms(
@@ -4684,6 +4706,22 @@ function questionResultLifecycleState(
   isError: boolean | undefined,
   errorText: string,
 ): AskUserQuestionLifecycleState {
+  const structuredFailure =
+    parseAskUserQuestionFailure(details) ??
+    parseAskUserQuestionFailure(errorText);
+  if (structuredFailure) {
+    switch (structuredFailure.error.code) {
+      case "question_presentation_timeout":
+        return "retrying";
+      case "question_cancelled":
+        return "cancelled";
+      case "question_presentation_failed":
+      case "question_validation_failed":
+        return "terminal_failure";
+      default:
+        return "invalid";
+    }
+  }
   if (
     details &&
     typeof details === "object" &&
@@ -4728,6 +4766,20 @@ function questionResultLifecycleState(
     }
   }
   return "invalid";
+}
+
+function questionErrorProjection(
+  content: Array<string | RpcTranscriptContentBlock>,
+  index: number,
+) {
+  const result = content[index + 1];
+  if (!result || typeof result === "string" || result.type !== "toolResult") {
+    return undefined;
+  }
+  const failure =
+    parseAskUserQuestionFailure(result.details) ??
+    parseAskUserQuestionFailure(questionResultErrorText(result));
+  return failure ? projectAskUserQuestionFailure(failure) : undefined;
 }
 
 function questionResultErrorText(source: {

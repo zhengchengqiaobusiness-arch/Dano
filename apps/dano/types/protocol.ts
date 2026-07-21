@@ -113,6 +113,79 @@ export const ASK_USER_QUESTION_PRESENTATION_TERMINAL_CODE =
 export const ASK_USER_QUESTION_VALIDATION_TERMINAL_CODE =
   "QUESTION_VALIDATION_FAILED";
 
+export type AskUserQuestionErrorCategory =
+  | "validation"
+  | "confirmation"
+  | "duplicate_call"
+  | "lifecycle";
+
+export type AskUserQuestionErrorCode =
+  | "invalid_question_arguments"
+  | "invalid_confirmation_source"
+  | "duplicate_question_call"
+  | "question_presentation_timeout"
+  | "question_presentation_failed"
+  | "question_validation_failed"
+  | "question_cancelled";
+
+export type AskUserQuestionIssueCode =
+  | "invalid_request_shape"
+  | "invalid_questions_json"
+  | "invalid_questions_shape"
+  | "invalid_question_item"
+  | "conflicting_aliases"
+  | "missing_question_id"
+  | "duplicate_question_id"
+  | "missing_question_text"
+  | "invalid_input_type"
+  | "invalid_options"
+  | "duplicate_option_id"
+  | "missing_choice_source"
+  | "invalid_default"
+  | "invalid_date_format"
+  | "invalid_data_source"
+  | "invalid_confirmation_target"
+  | "duplicate_tool_call"
+  | "presentation_timeout"
+  | "presentation_failed"
+  | "validation_retry_exhausted"
+  | "cancelled";
+
+export type AskUserQuestionErrorIssue = {
+  code: AskUserQuestionIssueCode;
+  path?: string;
+  message: string;
+};
+
+export type AskUserQuestionError = {
+  code: AskUserQuestionErrorCode;
+  category: AskUserQuestionErrorCategory;
+  message: string;
+  retryable: boolean;
+  issues: AskUserQuestionErrorIssue[];
+  sourceCode?: AskUserQuestionErrorCode;
+  /** Legacy Pi error token retained as structured metadata during migration. */
+  terminalCode?: string;
+  context?: {
+    receivedShape?: { formIds: string; formId: string };
+    ignoredReasons?: string[];
+    fallbackAttempted?: boolean;
+  };
+};
+
+export type AskUserQuestionInvalidResult = {
+  status: "invalid";
+  error: AskUserQuestionError;
+};
+
+/** Browser-safe summary; field-level diagnostics remain model-facing only. */
+export type AskUserQuestionErrorProjection = {
+  code: AskUserQuestionErrorCode;
+  category: AskUserQuestionErrorCategory;
+  message: string;
+  retryable: boolean;
+};
+
 export type AskUserQuestionOptionId = string | number;
 
 export type AskUserQuestionOption = {
@@ -175,7 +248,8 @@ export type AskUserQuestionResult =
       confirmationOfToolCallId: string;
       forms: AskUserQuestionConfirmedForm[];
     }
-  | { status: "cancelled" };
+  | { status: "cancelled" }
+  | AskUserQuestionInvalidResult;
 
 export type AskUserQuestionConfirmedForm = {
   formId: string;
@@ -371,6 +445,7 @@ export interface RpcAgentToolCall {
   arguments: RpcJsonObject;
   questionRequest?: AskUserQuestionCardRequest;
   questionState?: AskUserQuestionLifecycleState;
+  questionError?: AskUserQuestionErrorProjection;
   formInteraction?: FormInteractionProjection;
   thoughtSignature?: string;
 }
@@ -739,6 +814,7 @@ export interface RpcTranscriptToolCallBlock {
   arguments?: RpcToolArguments;
   questionRequest?: AskUserQuestionCardRequest;
   questionState?: AskUserQuestionLifecycleState;
+  questionError?: AskUserQuestionErrorProjection;
   formInteraction?: FormInteractionProjection;
   thoughtSignature?: string;
 }
