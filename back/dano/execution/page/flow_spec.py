@@ -4425,14 +4425,17 @@ def _screenshot_control_evidence(raw: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _param_has_screenshot_direct_input_contract(param: ParamField) -> bool:
+def _param_has_grounded_direct_input_contract(param: ParamField) -> bool:
     """A visible editable non-choice control must not be repaired into an enum."""
     for item in param.evidence or []:
         if not isinstance(item, dict):
             continue
         source = str(item.get("source") or item.get("kind") or "").strip().lower()
         control_kind = str(item.get("control_kind") or "").strip().lower()
-        if source != "screenshot" or control_kind not in _SCREENSHOT_CONTROL_KINDS:
+        if (
+            source not in {"screenshot", "recorder_dom", "page", "page_snapshot", "page_control"}
+            or control_kind not in _SCREENSHOT_CONTROL_KINDS
+        ):
             continue
         if control_kind in _SCREENSHOT_OPTION_CONTROL_KINDS:
             continue
@@ -14174,6 +14177,41 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             if request_id:
                 materialized_request_ids.add(request_id)
 
+    # Reuse an already confirmed binding as ordinary candidate evidence. The
+    # existing unique matcher can then ground repeated sibling fields even when
+    # their projected request rows were truncated.
+    for source in spec.steps:
+        for binding in source.selects or []:
+            option_map = dict(binding.option_map or {})
+            if not (
+                binding.enum_confirmed is True
+                and binding.source_url and binding.value_key and binding.label_key
+                and len(option_map) >= 2
+            ):
+                continue
+            owner = next((
+                param for param in (source.params or [])
+                if _strip_body_prefix(param.path or "")
+                == _strip_body_prefix(binding.path or binding.id_path or "")
+            ), None)
+            if owner is not None and _param_has_grounded_direct_input_contract(owner):
+                continue
+            owner_source = dict((owner.source if owner is not None else None) or {})
+            candidates.append({
+                "source_step_id": str(owner_source.get("source_step_id") or ""),
+                "source_request_id": str(owner_source.get("source_request_id") or ""),
+                "source_url": binding.source_url,
+                "sequence": (source.source_meta or {}).get("sequence"),
+                "page_id": (source.source_meta or {}).get("page_id"),
+                "frame_id": (source.source_meta or {}).get("frame_id"),
+                "trigger_action_id": (source.source_meta or {}).get("trigger_action_id"),
+                "trigger_transaction_id": (source.source_meta or {}).get("trigger_transaction_id"),
+                "items": [
+                    {binding.value_key: value, binding.label_key: label}
+                    for label, value in option_map.items()
+                ],
+            })
+
     for fact in (spec.request_facts.requests or []):
         request_id = str(fact.request_id or "")
         if request_id and request_id in materialized_request_ids:
@@ -14203,6 +14241,31 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 "items": [dict(item) for item in items if isinstance(item, dict)],
             })
 
+    repaired = 0
+    for target in spec.steps:
+        direct_input_paths: set[str] = set()
+        for param in target.params or []:
+            if (
+                param.source_kind not in _OPTION_SOURCE_KINDS
+                or param.locked
+                or _param_has_manual_contract(param)
+                or not _param_has_grounded_direct_input_contract(param)
+            ):
+                continue
+            param.type = str(param.wire_type or "string")
+            param.source_kind = "user_input"
+            param.source = {"kind": "user_input", "path": param.path}
+            param.enum_options = None
+            param.enum_value_map = None
+            _refresh_param_enum_description(param)
+            direct_input_paths.add(_strip_body_prefix(param.path or ""))
+            repaired += 1
+        if direct_input_paths:
+            target.selects = [
+                binding for binding in (target.selects or [])
+                if _strip_body_prefix(binding.path or binding.id_path or "") not in direct_input_paths
+            ]
+
     page_options = _page_enum_options_from_request_facts(spec.request_facts)
 
     def normalized(value: Any) -> str:
@@ -14223,7 +14286,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
         for param in (step.params or [])
         if not param.locked
         and not _param_has_manual_contract(param)
-        and not _param_has_screenshot_direct_input_contract(param)
+        and not _param_has_grounded_direct_input_contract(param)
         and param.category != "system_const"
         and str(param.value if param.value is not None else "").strip()
     ]
@@ -14439,13 +14502,12 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
             )
         )
 
-    repaired = 0
     for target in spec.steps:
         for param in target.params or []:
             if (
                 param.locked
                 or _param_has_manual_contract(param)
-                or _param_has_screenshot_direct_input_contract(param)
+                or _param_has_grounded_direct_input_contract(param)
                 or (
                     param.source_kind in _OPTION_SOURCE_KINDS
                     and not (
@@ -14544,6 +14606,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 actor="recorder",
             )
             repaired += 1
+
     return repaired
 
 def _attach_option_source_memberships(spec: FlowSpec) -> None:

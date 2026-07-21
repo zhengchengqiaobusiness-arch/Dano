@@ -3193,7 +3193,7 @@ def test_screenshot_textarea_replaces_stale_automatic_api_option_binding():
     # A later Generate/Optimize starts with deterministic source repair.  The
     # persisted screenshot contract must keep that pass from resurrecting the
     # stale permission-list binding.
-    assert flow_spec_module._param_has_screenshot_direct_input_contract(
+    assert flow_spec_module._param_has_grounded_direct_input_contract(
         params["useInfo"],
     )
     flow_spec_module._repair_structural_option_bindings(optimized)

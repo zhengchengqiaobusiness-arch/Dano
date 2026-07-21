@@ -88,6 +88,10 @@ def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
     assert '"operation_id": operation_id' in branch
     assert '"status": "rejected"' in branch
     assert "原配置保持不变" in branch
+    assert "orchestrate_flow_capabilities" in branch
+    assert "pending_flow_spec or before_operation" in branch
+    assert '"operation_warning": str(e)' in branch
+    assert '"type": "flow_spec"' in branch
 
 
 @pytest.mark.parametrize(
@@ -338,7 +342,7 @@ async def test_recording_connection_lease_waits_for_previous_owner_cleanup() -> 
 
 
 @pytest.mark.asyncio
-async def test_cancelled_connection_waiter_relays_predecessor_release() -> None:
+async def test_cancelled_connection_waiter_never_replaces_or_cancels_owner() -> None:
     key = ("tenant-a", "A-OA", f"recording_{'d' * 32}")
     gateway._ACTIVE_RECORDING_CONNECTIONS.clear()
     current_task = asyncio.current_task()
@@ -350,25 +354,15 @@ async def test_cancelled_connection_waiter_relays_predecessor_release() -> None:
 
     second_task = asyncio.create_task(gateway._claim_recording_connection(key))
     await asyncio.sleep(0)
-    second = gateway._ACTIVE_RECORDING_CONNECTIONS[key]
-    assert second is not original
-
-    third_task = asyncio.create_task(gateway._claim_recording_connection(key))
-    await asyncio.sleep(0)
-    third = gateway._ACTIVE_RECORDING_CONNECTIONS[key]
-    assert third is not second
+    assert gateway._ACTIVE_RECORDING_CONNECTIONS[key] is original
 
     second_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await second_task
-    await asyncio.sleep(0)
-    assert not third_task.done()
+    assert gateway._ACTIVE_RECORDING_CONNECTIONS[key] is original
 
     gateway._release_recording_connection(key, original)
-    replacement = await asyncio.wait_for(third_task, timeout=1)
-    assert replacement is third
-    assert gateway._ACTIVE_RECORDING_CONNECTIONS[key] is third
-    gateway._release_recording_connection(key, third)
+    assert key not in gateway._ACTIVE_RECORDING_CONNECTIONS
 
 
 @pytest.mark.asyncio
@@ -617,63 +611,29 @@ async def test_recording_operation_keepalive_sends_progress_until_completion() -
 
 
 @pytest.mark.asyncio
-async def test_reconnect_cancels_and_drains_previous_transport_owner() -> None:
+async def test_reconnect_waits_without_cancelling_previous_transport_owner() -> None:
     key = ("tenant", "subsystem", "recording_test")
     ready = asyncio.Event()
-
-    async def owner() -> None:
-        lease = await gateway._claim_recording_connection(key)
-        ready.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            gateway._release_recording_connection(key, lease)
-
-    previous = asyncio.create_task(owner())
-    await ready.wait()
-
-    replacement = await asyncio.wait_for(
-        gateway._claim_recording_connection(key, cancel_previous=True), timeout=0.5,
-    )
-
-    assert previous.cancelled()
-    gateway._release_recording_connection(key, replacement)
-
-
-@pytest.mark.asyncio
-async def test_reconnect_waits_for_an_inflight_analysis() -> None:
-    key = ("tenant", "subsystem", "recording_busy")
-    ready = asyncio.Event()
     finish = asyncio.Event()
-    cancelled = asyncio.Event()
 
     async def owner() -> None:
         lease = await gateway._claim_recording_connection(key)
-        lease.operation_idle.clear()
         ready.set()
         try:
             await finish.wait()
-            lease.operation_idle.set()
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            cancelled.set()
         finally:
             gateway._release_recording_connection(key, lease)
 
     previous = asyncio.create_task(owner())
     await ready.wait()
-    replacement_task = asyncio.create_task(
-        gateway._claim_recording_connection(key, cancel_previous=True),
-    )
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
 
-    assert not cancelled.is_set()
+    replacement_task = asyncio.create_task(gateway._claim_recording_connection(key))
+    await asyncio.sleep(0)
     assert not replacement_task.done()
+    assert not previous.cancelled()
     finish.set()
-    replacement = await asyncio.wait_for(replacement_task, timeout=0.5)
     await previous
-    assert cancelled.is_set()
+    replacement = await asyncio.wait_for(replacement_task, timeout=0.5)
     gateway._release_recording_connection(key, replacement)
 
 
@@ -812,3 +772,28 @@ def test_analysis_without_screenshots_does_not_report_field_matching_gaps() -> N
     assert report["matched_field_count"] == 0
     assert report["unmatched_field_count"] == 0
     assert report["unmatched_fields"] == []
+
+
+def test_analysis_report_ignores_malformed_axis_status_instead_of_failing_operation() -> None:
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/api/submit",
+        params=[ParamField(path="reason", key="原因")],
+    )])
+    spec.meta = {
+        "capability_model": {"semantic_plan": {
+            "field_semantics": [{
+                "step_id": "submit", "wire_path": "reason",
+                "axis_status": ["name", "type"],
+            }],
+            "unresolved_items": [],
+        }},
+    }
+
+    report = gateway._analysis_application_report(
+        before=spec, after=spec,
+        operation_report={"changed": False, "changes": {}, "field_changes": []},
+        screenshots=[], delivered_image_count=0, operation_id="plan-malformed-axis",
+    )
+
+    assert report["status"] == "no_change"
+    assert report["locked_field_count"] == 0

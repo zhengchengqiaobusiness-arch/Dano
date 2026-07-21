@@ -6382,6 +6382,74 @@ def test_structural_option_binding_generalizes_across_business_domains(
     assert target_param.source["label_key"] == label_key
     assert target_param.enum_value_map[f"{target_label} B"] == selected
 
+
+def test_repeated_option_field_reuses_complete_sibling_contract_when_facts_are_truncated():
+    first = ParamField(
+        path="approvers.Activity_first[0]", key="审批人1", value=145,
+        type="enum", wire_type="number", category="user_param", source_kind="api_option",
+        source={"kind": "api_option", "source_url": "/api/users", "source_request_id": "users"},
+        enum_options=[{"label": "财务A", "value": 145}, {"label": "姜楠", "value": 144}],
+        enum_value_map={"财务A": 145, "姜楠": 144},
+    )
+    second = ParamField(
+        path="approvers.Activity_second[0]", key="审批人2", value=144,
+        type="number", wire_type="number", category="user_param", source_kind="user_input",
+    )
+    step = FlowStep(
+        step_id="submit", method="POST", path="/api/submit", params=[first, second],
+        selects=[SelectBinding(
+            param="审批人1", path=first.path, id_path=first.path,
+            source_url="/api/users", value_key="id", label_key="nickname",
+            options=first.enum_options, option_map=first.enum_value_map,
+            enum_source="api", enum_confirmed=True,
+        )],
+    )
+    spec = FlowSpec(steps=[step])
+
+    assert flow_spec_module._repair_structural_option_bindings(spec) == 1
+    assert second.source_kind == "api_option"
+    assert second.enum_value_map == {"财务A": 145, "姜楠": 144}
+
+
+@pytest.mark.parametrize(("control_kind", "wire_type"), [
+    ("text", "string"), ("textarea", "string"), ("rich_text", "string"),
+    ("number", "number"), ("slider", "number"),
+    ("date", "date"), ("datetime", "datetime"), ("time", "time"),
+    ("checkbox", "boolean"), ("switch", "boolean"),
+    ("upload", "string"), ("file", "string"),
+])
+def test_recorded_text_input_never_becomes_api_option_from_name_or_value_collision(
+    control_kind, wire_type,
+):
+    hotel_name = ParamField(
+        path="hotelName", key="酒店名称", value="1",
+        type="enum", wire_type=wire_type, category="user_param", source_kind="api_option",
+        source={"kind": "api_option", "source_url": "/api/hotel/options"},
+        enum_options=[{"label": "酒店A", "value": "1"}, {"label": "酒店B", "value": "2"}],
+        enum_value_map={"酒店A": "1", "酒店B": "2"},
+        evidence=[{
+            "source": "recorder_dom", "control_kind": control_kind, "editable": True,
+            "disabled": False, "read_only": False,
+        }],
+    )
+    submit = FlowStep(
+        step_id="submit", method="POST", path="/api/hotel/apply", params=[hotel_name],
+        selects=[SelectBinding(
+            path="hotelName", source_url="/api/hotel/options",
+            value_key="id", label_key="name", enum_source="api", enum_confirmed=True,
+            options=hotel_name.enum_options, option_map=hotel_name.enum_value_map,
+        )],
+    )
+    options = FlowStep(
+        step_id="hotel-options", method="GET", path="/api/hotel/options",
+        response_json={"data": [{"id": "1", "name": "酒店A"}, {"id": "2", "name": "酒店B"}]},
+    )
+    spec = FlowSpec(steps=[submit, options])
+
+    assert flow_spec_module._repair_structural_option_bindings(spec) == 1
+    assert (hotel_name.type, hotel_name.source_kind) == (wire_type, "user_input")
+    assert submit.selects == []
+
 def test_latest_leave_recording_binds_full_dictionary_and_captured_user_directory():
     submit = FlowStep(
         step_id="submit",

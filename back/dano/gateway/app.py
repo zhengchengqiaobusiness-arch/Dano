@@ -314,8 +314,9 @@ def _analysis_field_coverage(after) -> dict:
     locked_refs: set[tuple[str, str]] = set()
     for (step_id, path), param in actual.items():
         semantic = by_ref.get((step_id, path)) or {}
+        axis_status = semantic.get("axis_status")
         locked_axes = [
-            str(axis) for axis, status in dict(semantic.get("axis_status") or {}).items()
+            str(axis) for axis, status in (axis_status.items() if isinstance(axis_status, dict) else [])
             if str(status).lower() == "locked"
         ]
         if param.locked:
@@ -483,8 +484,6 @@ class _RecordingConnectionLease:
     def __init__(self, *, task: asyncio.Task, released: asyncio.Event) -> None:
         self.task = task
         self.released = released
-        self.operation_idle = asyncio.Event()
-        self.operation_idle.set()
 
 
 _ACTIVE_RECORDING_CONNECTIONS: dict[tuple[str, str, str], _RecordingConnectionLease] = {}
@@ -492,39 +491,18 @@ _ACTIVE_RECORDING_CONNECTIONS: dict[tuple[str, str, str], _RecordingConnectionLe
 
 async def _claim_recording_connection(
     key: tuple[str, str, str],
-    *,
-    cancel_previous: bool = False,
 ) -> _RecordingConnectionLease:
-    """Replace and fully drain the previous handler for one recording key."""
+    """Wait for the current owner; a reconnect never interrupts live work."""
     task = asyncio.current_task()
     if task is None:
         raise RuntimeError("recording connection must run inside an asyncio task")
     lease = _RecordingConnectionLease(task=task, released=asyncio.Event())
-    previous = _ACTIVE_RECORDING_CONNECTIONS.get(key)
-    _ACTIVE_RECORDING_CONNECTIONS[key] = lease
-    if previous is None or previous.task is task:
-        return lease
-    if cancel_previous:
-        await previous.operation_idle.wait()
-        # A replacement websocket is the new transport owner. The previous
-        # handler can otherwise remain blocked forever in ``receive_json``
-        # after a proxy-side 1006 close, leaving the UI stuck reconnecting.
-        previous.task.cancel()
-    try:
+    while True:
+        previous = _ACTIVE_RECORDING_CONNECTIONS.get(key)
+        if previous is None or previous.task is task:
+            _ACTIVE_RECORDING_CONNECTIONS[key] = lease
+            return lease
         await previous.released.wait()
-    except BaseException:
-        # A cancelled waiter may already be the predecessor of a newer waiter.
-        # Relay the original predecessor's release instead of waking the newer
-        # waiter early while the original owner is still cleaning up.
-        async def relay_predecessor_release() -> None:
-            await previous.released.wait()
-            _release_recording_connection(key, lease)
-
-        asyncio.create_task(
-            relay_predecessor_release(), name="recording-connection-release-relay",
-        )
-        raise
-    return lease
 
 
 def _release_recording_connection(
@@ -1228,14 +1206,10 @@ async def record_ws(ws: WebSocket) -> None:
             recording_id,
         )
         connection_key = resume_key
-        connection_lease = await _claim_recording_connection(
-            resume_key, cancel_previous=True,
-        )
+        connection_lease = await _claim_recording_connection(resume_key)
         resume_state = _recording_resume_state(resume_key)
-        # A reconnect replaces the transport/browser owner for this logical
-        # recording.  The superseded handler may still be unwinding after a
-        # 1006 close; generation ownership prevents its late ``finally`` from
-        # overwriting the newer draft or authenticated browser snapshot.
+        # A reconnect starts only after the previous owner has checkpointed and
+        # released; generation ownership still rejects any stale finalizer.
         resume_generation = int(resume_state.get("connection_generation") or 0) + 1
         resume_state["connection_generation"] = resume_generation
         resumed_flow_spec = resume_state.get("flow_spec")
@@ -1246,7 +1220,7 @@ async def record_ws(ws: WebSocket) -> None:
             sender.send_background({"type": "request", "request": r})
 
         sess = RecordSession(on_request=on_request,
-                             intercept_submit=init.get("intercept", True),
+                             intercept_submit=False,
                              capture_reads=init.get("capture_reads", True))
         start_storage = resume_state.get("storage_state") or persisted_storage or init.get("storage_state") or None
         await sess.start(init["start_url"], base_url=init.get("base_url", ""),
@@ -1287,7 +1261,7 @@ async def record_ws(ws: WebSocket) -> None:
         )                                      # Step A/B/C/D:可编辑的完整 FlowSpec
         applied_flow_operations: dict[str, dict] = {}  # flow_update 幂等回执(operation_id → response)
         costly_operation_results = dict(resume_state.get("operations") or {})
-        recording_mode = "intercepted_submit" if init.get("intercept", True) else "real_submit"
+        recording_mode = "real_submit"
 
         def _owns_resume_state() -> bool:
             return bool(
@@ -1555,7 +1529,6 @@ async def record_ws(ws: WebSocket) -> None:
                     continue
                 analysis_screenshots: list[dict] = []
                 before_operation = pending_flow_spec.model_copy(deep=True)
-                connection_lease.operation_idle.clear()
                 try:
                     from dano.execution.page.flow_spec import flow_operation_report
 
@@ -1645,11 +1618,61 @@ async def record_ws(ws: WebSocket) -> None:
                         operation_id=operation_id,
                         error=str(e),
                     )
+                    try:
+                        from dano.execution.page.flow_spec import (
+                            flow_operation_report,
+                            orchestrate_flow_capabilities,
+                        )
+
+                        pending_flow_spec = await orchestrate_flow_capabilities(
+                            pending_flow_spec or before_operation,
+                            submission={"ops": []},
+                        )
+                        operation_report = flow_operation_report(
+                            before_operation, pending_flow_spec, operation="plan",
+                        )
+                        analysis_application = _analysis_application_report(
+                            before=before_operation,
+                            after=pending_flow_spec,
+                            operation_report=operation_report,
+                            screenshots=analysis_screenshots,
+                            delivered_image_count=0,
+                            operation_id=operation_id,
+                        )
+                        analysis_application.update({
+                            "status": "needs_review",
+                            "summary": f"模型分析未完成，已生成并保留可运行的事实基线：{e}",
+                        })
+                        pending_flow_spec.meta = {
+                            **(pending_flow_spec.meta or {}),
+                            "last_analysis_application": analysis_application,
+                        }
+                        _checkpoint_resume()
+                        response = {
+                            "type": "flow_spec",
+                            "operation": "plan",
+                            "operation_id": operation_id,
+                            **_recording_flow_projection(pending_flow_spec),
+                            "operation_report": operation_report,
+                            "analysis_application": analysis_application,
+                            "operation_warning": str(e),
+                        }
+                        _remember_costly(msg, response)
+                        await sender.send_json(response)
+                        continue
+                    except Exception as fallback_error:  # noqa: BLE001
+                        log.exception(
+                            "recording.operation_fallback_failed",
+                            action=session_action,
+                            operation_id=operation_id,
+                            error=str(fallback_error),
+                        )
                     error_response = {
                         "type": "error",
                         "operation": "plan",
                         "operation_id": operation_id,
                         "detail": f"orchestrate_flow failed: {e}",
+                        **_recording_flow_projection(before_operation),
                         "analysis_application": {
                             "status": "rejected",
                             "analysis_kind": "incremental",
@@ -1683,8 +1706,6 @@ async def record_ws(ws: WebSocket) -> None:
                     }
                     _remember_costly(msg, error_response)
                     await sender.send_json(error_response)
-                finally:
-                    connection_lease.operation_idle.set()
             # 一键修正：同一个录制 Pi Session 读取最新校验并提交白名单修复。
             elif t == "auto_fix_flow":
                 if await _replay_costly(msg):

@@ -1012,6 +1012,28 @@ def test_recording_plan_normalizes_labeled_step_ids_from_real_agent_output():
     assert capabilities["query_seal_applications"]["step_ids"] == ["10caab0f4afe"]
 
 
+def test_internal_only_capability_is_ignored_without_rejecting_the_plan():
+    spec = FlowSpec(steps=[FlowStep(
+        step_id="options", method="GET", path="/api/users/options",
+        source_meta={"role": "read_option"},
+        response_json={"data": [{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]},
+    )])
+    raw_plan = {"semantic_plan": {
+        "business_understanding": {"summary": "User options"},
+        "request_roles": [], "field_semantics": [],
+        "capabilities": [{
+            "capability_id": "list_users", "title": "List users",
+            "anchor_step_id": "options",
+        }],
+        "capability_relations": [], "unresolved_items": [],
+    }, "ops": []}
+
+    normalized = agent_tools_module._normalize_recording_plan_submission(raw_plan, spec)
+
+    assert normalized["semantic_plan"]["capabilities"] == []
+    assert normalized["semantic_plan"]["unresolved_items"][0]["type"] == "internal_or_unmatched_capability"
+
+
 def test_recording_plan_rejects_semantic_fields_outside_semantic_plan():
     malformed = {
         "semantic_plan": {"business_understanding": "发起请假申请单"},

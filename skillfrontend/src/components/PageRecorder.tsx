@@ -15,7 +15,6 @@ import {
   List,
   Modal,
   Row,
-  Segmented,
   Space,
   Tabs,
   Tag,
@@ -268,7 +267,6 @@ interface RecResult {
   api?: { method?: string; path?: string; params?: string[] };
   check_report?: FlowCheckReport;
 }
-type RecordingMode = "real_submit" | "record_only";
 type RecorderConnectionState = "idle" | "connecting" | "connected" | "reconnecting" | "disconnected";
 
 interface RecorderFrameMeta {
@@ -1332,7 +1330,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   useEffect(() => { actionRef.current = action; }, [action]);
   const [title, setTitle] = useState("");
   const [result, setResult] = useState<RecResult | null>(null);
-  const [recordingMode, setRecordingMode] = useState<RecordingMode>("real_submit");
   const [err, setErr] = useState("");
 
   const [flowSpec, setFlowSpec] = useState<FlowSpecData | null>(null);
@@ -1854,7 +1851,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
 
   function openRecorderConnection(isReconnect = false) {
     if (isReconnect) resetFrameStreamForReconnect();
-    const intercept = recordingMode === "record_only";
     const targetUrl = startUrl.trim();
     const piRecordingScope = piRecordingStorageKey(tenant, subsystem, targetUrl);
     if (piRecordingScopeRef.current !== piRecordingScope) {
@@ -1875,7 +1871,7 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         type: "start", tenant, subsystem, start_url: targetUrl,
         base_url: baseUrl.trim() || undefined,
         storage_state: storageState.trim() || undefined,
-        intercept,
+        intercept: false,
         pi_recording_id: piRecordingId || undefined,
         resume_action: actionRef.current,
       });
@@ -2022,6 +2018,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           setLastOperationReport(report);
           if (report.edit_errors?.length) message.error(report.summary || "自动修复存在无效建议");
           else if (!report.changed) message.info(report.summary || "检查完成，没有可自动修改的内容");
+        }
+        if (m.operation_warning) {
+          message.warning(`模型分析未完成，已保留可运行的事实基线：${m.operation_warning}`);
         }
         if (m.operation === "flow_update") finishQueuedFlowMutation(m.operation_id);
       }
@@ -4559,16 +4558,8 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           </Form.Item>
           <Space align="center" wrap>
             <Button type="primary" onClick={start} loading={connectionState === "connecting"} disabled={connectionState === "connecting"}>开始录制</Button>
-            <Segmented
-              value={recordingMode}
-              onChange={(v) => setRecordingMode(v as RecordingMode)}
-              options={[
-                { label: "真实提交", value: "real_submit" },
-                { label: "只录制不提交", value: "record_only" },
-              ]}
-            />
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {recordingMode === "record_only" ? "点提交只抓请求，不产生真实记录。" : "点提交会按页面原逻辑真实提交。"}
+              页面操作始终按原逻辑真实执行，录制不会拦截请求。
             </Typography.Text>
           </Space>
           {err && <Alert style={{ marginTop: 12 }} type="error" showIcon message={err} />}

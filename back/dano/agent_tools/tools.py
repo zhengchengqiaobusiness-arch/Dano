@@ -1849,11 +1849,6 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             "step_ids": candidates,
             "request_refs": memberships,
         })
-    if steps and raw_capabilities and not capabilities:
-        raise ToolError(
-            "semantic_plan.capabilities 没有可验证的业务锚点；"
-            "内部预检/选项接口不能独立成能力"
-        )
     semantic["capabilities"] = capabilities
 
     relations = []

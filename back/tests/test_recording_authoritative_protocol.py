@@ -86,6 +86,16 @@ def test_enum_mapping_warning_tracks_the_textarea_draft_before_blur() -> None:
     assert 'if (local !== (value || "")) onSave(local);' in source
 
 
+def test_recorded_page_operations_are_never_intercepted() -> None:
+    frontend = _PAGE_RECORDER.read_text(encoding="utf-8")
+    backend = inspect.getsource(gateway.record_ws)
+
+    assert "record_only" not in frontend
+    assert "intercept: false" in frontend
+    assert "intercept_submit=False" in backend
+    assert 'recording_mode = "real_submit"' in backend
+
+
 def test_client_projection_is_bounded_and_contains_no_authoritative_secrets() -> None:
     spec = _authoritative_spec()
     client = flow_spec_to_client(spec)
