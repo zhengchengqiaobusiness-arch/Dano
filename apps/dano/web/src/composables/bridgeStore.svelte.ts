@@ -47,6 +47,11 @@ import {
   summarizeErrorMessage,
 } from "../utils/bridgeErrors";
 import {
+  BridgePromptAcknowledgementTimeoutError,
+  BridgePromptDispatchHttpError,
+  dispatchPromptForAcknowledgement,
+} from "../utils/bridgePromptDispatch";
+import {
   createExplicitNewSessionAction,
   readActiveSessionCache,
   writeActiveSessionCache,
@@ -1713,6 +1718,30 @@ async function ensureConnectedForPrompt(): Promise<boolean> {
   return false;
 }
 
+function reportPromptDispatchFailure(error: unknown) {
+  let message: string;
+  if (error instanceof BridgePromptAcknowledgementTimeoutError) {
+    message = t("store.error.promptAcknowledgementTimeout");
+  } else if (error instanceof BridgePromptDispatchHttpError) {
+    if (isStaleBridgeClientError(error.detail)) {
+      _connectionStatus = "disconnected";
+      _connectionError = t("store.error.staleClient");
+    }
+    message = bridgeServerErrorMessage(error.detail, {
+      staleClient: t("store.error.staleClient"),
+      fallback: t("store.error.sendBridgeMessageFailed"),
+    });
+  } else {
+    message = summarizeErrorMessage(
+      error instanceof Error
+        ? error.message
+        : t("store.error.sendBridgeMessageFailed"),
+      t("store.error.sendBridgeMessageFailed"),
+    );
+  }
+  pushNotification(message, "error");
+}
+
 async function sendPrompt(
   message: string,
   images?: RpcImageContent[],
@@ -1721,24 +1750,46 @@ async function sendPrompt(
 ): Promise<boolean> {
   if (!(await ensureConnectedForPrompt())) return false;
 
-  const wasStreaming = _isStreaming;
-  if (_isStreaming) {
-    _queuedUserMessages = [
-      ..._queuedUserMessages,
-      {
-        text: message,
-        images: images ?? [],
-        timestamp: Date.now(),
-        queueType: streamingBehavior === "steer" ? "steering" : "followUp",
-      },
-    ];
-  }
-  if (!wasStreaming) beginPromptPending();
-  sendEnvelope({
+  const promptEnvelope: ClientMessage = {
     type: "command",
     payload: { type: "prompt", message, images, files, streamingBehavior },
-  });
-  return true;
+  };
+  if (_isStreaming) {
+    const optimisticQueuedMessage: RpcQueuedMessage = {
+      text: message,
+      images: images ?? [],
+      timestamp: Date.now(),
+      queueType: streamingBehavior === "steer" ? "steering" : "followUp",
+    };
+    _queuedUserMessages = [
+      ..._queuedUserMessages,
+      optimisticQueuedMessage,
+    ];
+    const optimisticQueueEntry = _queuedUserMessages.at(-1);
+    try {
+      await dispatchPromptForAcknowledgement(
+        clientMessagesUrl!,
+        promptEnvelope,
+      );
+      return true;
+    } catch (error) {
+      _queuedUserMessages = _queuedUserMessages.filter(
+        queuedMessage => queuedMessage !== optimisticQueueEntry,
+      );
+      reportPromptDispatchFailure(error);
+      return false;
+    }
+  }
+
+  beginPromptPending();
+  try {
+    await dispatchPromptForAcknowledgement(clientMessagesUrl!, promptEnvelope);
+    return true;
+  } catch (error) {
+    clearPromptPending();
+    reportPromptDispatchFailure(error);
+    return false;
+  }
 }
 
 async function dequeueQueuedMessage(

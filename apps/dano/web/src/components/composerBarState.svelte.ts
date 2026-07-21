@@ -198,6 +198,7 @@ export function createComposerBarState(
   let isComposing = $state(false);
   let attachments = $state<ComposerAttachment[]>([]);
   let isDragActive = $state(false);
+  let isSubmitting = $state(false);
   let dragDepth = 0;
 
   // ---- palette dismissal state ----
@@ -309,7 +310,7 @@ export function createComposerBarState(
     !isDisabled && attachments.length < MAX_COMPOSER_ATTACHMENTS,
   );
   let canSubmit = $derived(
-    canSubmitComposerMessage({
+    !isSubmitting && canSubmitComposerMessage({
       connectionStatus: props.connectionStatus,
       hasUploadingAttachments,
       hasFailedAttachments,
@@ -543,33 +544,52 @@ export function createComposerBarState(
 
   // ---- submission ----
 
-  function resetComposerState(fileInputEl?: HTMLInputElement | null) {
-    $rx.inputText = "";
-    $rx.cursorOffset = 0;
-    dismissedCommandKey = null;
-    dismissedMentionKey = null;
-    revisionBackup = null;
-    clearAttachments(fileInputEl);
-    clearAttachmentNotice();
-  }
-
   async function submitMessage(
     message: string,
     steer: boolean,
     fileInputEl?: HTMLInputElement | null,
     textareaEl?: HTMLTextAreaElement | null,
   ): Promise<boolean> {
-    const accepted = await callbacks.onSubmit({
-      message,
-      images: toRpcImageContent(attachments),
-      files: toRpcUploadedFileRefs(attachments),
-      revisionEntryId: props.revision?.entryId,
-      steer,
-    });
-    if (!accepted) return false;
-    resetComposerState(fileInputEl);
-    resizeTextarea(textareaEl);
-    return true;
+    if (isSubmitting) return false;
+
+    const submittedText = $rx.inputText;
+    const submittedAttachmentIds = new Set(
+      attachments.map(attachment => attachment.id),
+    );
+    const images = toRpcImageContent(attachments);
+    const files = toRpcUploadedFileRefs(attachments);
+    isSubmitting = true;
+    try {
+      const accepted = await callbacks.onSubmit({
+        message,
+        images,
+        files,
+        revisionEntryId: props.revision?.entryId,
+        steer,
+      });
+      if (!accepted) return false;
+
+      if ($rx.inputText === submittedText) {
+        $rx.inputText = "";
+        $rx.cursorOffset = 0;
+        dismissedCommandKey = null;
+        dismissedMentionKey = null;
+        revisionBackup = null;
+      }
+      const acceptedAttachments = attachments.filter(attachment =>
+        submittedAttachmentIds.has(attachment.id),
+      );
+      for (const attachment of acceptedAttachments) disposeAttachment(attachment);
+      attachments = attachments.filter(
+        attachment => !submittedAttachmentIds.has(attachment.id),
+      );
+      if (fileInputEl) fileInputEl.value = "";
+      if (attachments.length === 0) clearAttachmentNotice();
+      resizeTextarea(textareaEl);
+      return true;
+    } finally {
+      isSubmitting = false;
+    }
   }
 
   async function handleSubmit(

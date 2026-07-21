@@ -85,7 +85,8 @@ export default defineConfig({
     },
     proxy: {
       "/api": {
-        target: "http://localhost:8080",
+        target:
+          process.env.DANO_DEV_BACKEND_ORIGIN ?? "http://localhost:8080",
       },
     },
   },
