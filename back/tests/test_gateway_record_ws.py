@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dano.agent_tools import tools as agent_tools_module
 from dano.execution.page.flow_spec import FlowSpec, FlowStep, ParamField
 from dano.gateway import app as gateway
 
@@ -45,11 +46,10 @@ def test_analysis_screenshots_are_validated_and_reduced_to_pi_images() -> None:
 
 
 
-def test_pi_image_delivery_count_must_match_uploaded_screenshots() -> None:
+def test_pi_image_delivery_count_is_reported_without_blocking_the_plan() -> None:
     assert gateway._verified_pi_image_count({"image_count": 2}, 2) == 2
     assert gateway._verified_pi_image_count({}, 0) == 0
-    with pytest.raises(RuntimeError, match="expected=2, delivered=1"):
-        gateway._verified_pi_image_count({"image_count": 1}, 2)
+    assert gateway._verified_pi_image_count({"image_count": 1}, 2) == 1
 
 
 def test_analysis_screenshots_reject_spoofed_or_excess_images() -> None:
@@ -97,6 +97,15 @@ def test_orchestrate_flow_logs_real_request_boundary_and_failure() -> None:
     assert "pending_flow_spec or before_operation" in branch
     assert '"operation_warning": str(e)' in branch
     assert '"type": "flow_spec"' in branch
+    fallback = branch[branch.index("pending_flow_spec = await orchestrate_flow_capabilities"):]
+    assert fallback.index("except WebSocketDisconnect:") < fallback.index("except Exception as fallback_error:")
+
+
+def test_every_recording_pi_button_has_a_finite_timeout() -> None:
+    source = inspect.getsource(gateway.record_ws)
+
+    assert "timeout_s=0" not in source
+    assert "timeout_s=3000" in source
 
 
 @pytest.mark.parametrize(
@@ -616,17 +625,142 @@ async def test_recording_operation_keepalive_sends_progress_until_completion() -
 
 
 @pytest.mark.asyncio
-async def test_recording_operation_keepalive_releases_a_disconnected_transport() -> None:
+async def test_recording_operation_keepalive_does_not_cancel_live_work_on_disconnect() -> None:
     class DisconnectedSender:
         async def send_json(self, _message: dict) -> None:
             raise gateway.WebSocketDisconnect(code=1006)
 
+    completed = False
+    async with gateway._recording_operation_keepalive(
+        DisconnectedSender(), operation="plan", operation_id="plan-disconnected",
+        interval=0.01,
+    ):
+        await asyncio.sleep(0.03)
+        completed = True
+
+    assert completed is True
+
+
+@pytest.mark.asyncio
+async def test_long_operation_drains_page_input_without_cancelling_on_disconnect() -> None:
+    incoming: asyncio.Queue = asyncio.Queue()
+    release_operation = asyncio.Event()
+    all_inputs_handled = asyncio.Event()
+    handled: list[int] = []
+
+    async def operation() -> str:
+        await release_operation.wait()
+        return "completed"
+
+    async def handle_live(message: dict) -> bool:
+        if message.get("type") != "input":
+            return False
+        handled.append(int(message["index"]))
+        if len(handled) == 40:
+            all_inputs_handled.set()
+        return True
+
+    waiting = asyncio.create_task(
+        gateway._await_operation_while_draining_recording_input(
+            operation(), incoming, handle_live,
+        )
+    )
+    for index in range(40):
+        await incoming.put({"type": "input", "index": index})
+    await incoming.put({"type": "flow_update", "operation_id": "edit-1"})
+    await incoming.put(gateway.WebSocketDisconnect(code=1006))
+
+    await asyncio.wait_for(all_inputs_handled.wait(), timeout=0.5)
+    assert handled == list(range(40))
+    for _ in range(20):
+        if incoming.empty():
+            break
+        await asyncio.sleep(0)
+    assert incoming.empty()
+    assert not waiting.done()
+
+    release_operation.set()
+    result, deferred = await asyncio.wait_for(waiting, timeout=0.5)
+
+    assert result == "completed"
+    assert deferred[0] == {"type": "flow_update", "operation_id": "edit-1"}
+    assert isinstance(deferred[1], gateway.WebSocketDisconnect)
+
+
+@pytest.mark.asyncio
+async def test_long_operation_preserves_deferred_messages_when_model_fails() -> None:
+    incoming: asyncio.Queue = asyncio.Queue()
+    release_operation = asyncio.Event()
+    deferred: list[object] = []
+
+    async def operation() -> None:
+        await release_operation.wait()
+        raise RuntimeError("model failed")
+
+    waiting = asyncio.create_task(
+        gateway._await_operation_while_draining_recording_input(
+            operation(), incoming, lambda _message: asyncio.sleep(0, result=False), deferred,
+        )
+    )
+    update = {"type": "flow_update", "operation_id": "edit-1"}
+    await incoming.put(update)
+    for _ in range(20):
+        if incoming.empty():
+            break
+        await asyncio.sleep(0)
+    release_operation.set()
+
+    with pytest.raises(RuntimeError, match="model failed"):
+        await waiting
+    assert deferred == [update]
+
+
+@pytest.mark.asyncio
+async def test_deferred_message_is_an_ordering_barrier_for_later_page_input() -> None:
+    incoming: asyncio.Queue = asyncio.Queue()
+    release_operation = asyncio.Event()
+    handled: list[dict] = []
+
+    async def operation() -> str:
+        await release_operation.wait()
+        return "completed"
+
+    async def handle_live(message: dict) -> bool:
+        handled.append(message)
+        return message.get("type") == "input"
+
+    waiting = asyncio.create_task(
+        gateway._await_operation_while_draining_recording_input(
+            operation(), incoming, handle_live,
+        )
+    )
+    reset = {"type": "reset"}
+    later_input = {"type": "input", "event": {"kind": "click"}}
+    await incoming.put(reset)
+    await incoming.put(later_input)
+    for _ in range(20):
+        if incoming.empty():
+            break
+        await asyncio.sleep(0)
+    release_operation.set()
+
+    result, deferred = await waiting
+
+    assert result == "completed"
+    assert handled == [reset]
+    assert deferred == [reset, later_input]
+
+
+@pytest.mark.asyncio
+async def test_websocket_send_queue_normalizes_write_failure_as_disconnect() -> None:
+    class DisconnectedSocket:
+        async def send_json(self, _message: dict) -> None:
+            raise RuntimeError("transport closed")
+
+    sender = gateway._WebSocketSendQueue(DisconnectedSocket())
     with pytest.raises(gateway.WebSocketDisconnect):
-        async with gateway._recording_operation_keepalive(
-            DisconnectedSender(), operation="plan", operation_id="plan-disconnected",
-            interval=0.01,
-        ):
-            await asyncio.sleep(1)
+        await sender.send_json({"type": "operation_progress"})
+    await sender.close()
 
 
 @pytest.mark.asyncio
@@ -747,13 +881,8 @@ def test_analysis_report_exposes_initial_kind_and_actionable_issue_details() -> 
     )
 
     assert report["analysis_kind"] == "initial"
-    assert report["unmatched_fields"][0]["target"] == {
-        "kind": "param", "step_id": "submit", "path": "days",
-    }
-    assert report["unmatched_fields"][0]["missing_axes"] == [
-        "path", "name", "default_value", "type", "category", "source", "required",
-    ]
-    assert report["unmatched_field_count"] == len(report["unmatched_fields"])
+    assert report["unmatched_fields"] == []
+    assert report["unmatched_field_count"] == 0
     assert report["unresolved_items"][0]["axis"] == "required"
     assert report["unresolved_field_count"] == len(report["unresolved_items"])
     assert report["locked_field_count"] == 2
@@ -761,6 +890,88 @@ def test_analysis_report_exposes_initial_kind_and_actionable_issue_details() -> 
     assert report["rejected_field_count"] == 1
     assert len(report["rejected_items"]) == 1
     assert "field" in report["issue_groups"]
+
+
+def test_analysis_report_only_requires_review_for_real_unapplied_work() -> None:
+    before = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/api/submit",
+        params=[ParamField(path="reason", key="原因")],
+    )])
+
+    def report_for(issue: dict, *, changed: bool = False) -> dict:
+        after = before.model_copy(deep=True)
+        after.meta = {"capability_model": {"semantic_plan": {
+            "field_semantics": [], "unresolved_items": [issue],
+        }}}
+        return gateway._analysis_application_report(
+            before=before, after=after,
+            operation_report={
+                "changed": changed, "changes": {}, "field_changes": [],
+                "proposal_gate": {"accepted": True},
+            },
+            screenshots=[{"name": "form.png"}], delivered_image_count=1,
+            operation_id="review-status",
+        )
+
+    advisory = report_for({
+        "kind": "field", "step_id": "submit", "path": "reason",
+        "reason": "control is outside the supplied screenshot",
+    })
+    assert advisory["status"] == "no_change"
+
+    unmatched = report_for({
+        "kind": "unmatched_field", "status": "unmatched", "blocking": False,
+        "reason": "visible control has no unique recorded field match",
+    })
+    assert unmatched["status"] == "needs_review"
+    assert unmatched["unmatched_field_count"] == 1
+
+    blocking = report_for({
+        "kind": "field", "step_id": "submit", "path": "reason",
+        "blocking": True, "reason": "contradicts recorded API facts",
+    })
+    assert blocking["status"] == "needs_review"
+
+
+def test_normalized_unmatched_screenshot_field_reaches_application_report() -> None:
+    before = FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/api/submit",
+        params=[ParamField(path="reason", key="原因")],
+    )])
+    normalized = agent_tools_module._normalize_recording_plan_submission({
+        "_analysis_screenshot_count": 1,
+        "semantic_plan": {
+            "business_understanding": {"summary": "提交"},
+            "request_roles": [],
+            "field_semantics": [{
+                "public_name": "截图中的未知字段", "business_type": "string",
+                "category": "user_param", "source_kind": "user_input",
+                "confidence": 0.95,
+                "evidence": [{
+                    "source": "screenshot", "visible_label": "截图中的未知字段",
+                    "control_kind": "text", "editable": True,
+                }],
+            }],
+            "capabilities": [], "capability_relations": [], "unresolved_items": [],
+        },
+        "ops": [],
+    }, before)
+    after = before.model_copy(deep=True)
+    after.meta = {"capability_model": {"semantic_plan": normalized["semantic_plan"]}}
+
+    report = gateway._analysis_application_report(
+        before=before, after=after,
+        operation_report={
+            "changed": True, "changes": {"flow": 1}, "field_changes": [],
+            "proposal_gate": {"accepted": True},
+        },
+        screenshots=[{"name": "form.png"}], delivered_image_count=1,
+        operation_id="plan-unmatched",
+    )
+
+    assert report["status"] == "needs_review"
+    assert report["unmatched_field_count"] == 1
+    assert report["unmatched_fields"][0]["kind"] == "unmatched_field"
 
 
 def test_analysis_without_screenshots_does_not_report_field_matching_gaps() -> None:

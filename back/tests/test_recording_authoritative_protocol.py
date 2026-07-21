@@ -242,13 +242,31 @@ def test_frontend_pauses_flow_loading_during_recorder_reconnect() -> None:
     helper_start = source.index("function pauseFlowOperationForReconnect()")
     helper_end = source.index("function resumeFlowOperationAfterReconnect", helper_start)
     helper_source = source[helper_start:helper_end]
-    assert "setOrchestrateBusy(false)" in helper_source
-    assert "setAutoFixBusy(false)" in helper_source
+    assert "setOrchestrateBusy(false)" not in helper_source
+    assert "setAutoFixBusy(false)" not in helper_source
     assert "flowOperationRef.current = null" not in helper_source
 
     close_start = source.index("ws.onclose = (event) =>")
     close_end = source.index("};", close_start)
     assert "pauseFlowOperationForReconnect()" in source[close_start:close_end]
+
+
+def test_frontend_does_not_fill_the_websocket_queue_with_application_pings() -> None:
+    source = _PAGE_RECORDER.read_text(encoding="utf-8")
+
+    assert "heartbeatTimerRef" not in source
+    assert 'type: "ping"' not in source
+
+
+def test_recording_transport_drains_messages_during_long_model_operations() -> None:
+    source = inspect.getsource(gateway.record_ws)
+
+    assert "async def receive_pump()" in source
+    assert "incoming_messages.put(await ws.receive_json())" in source
+    assert "msg = incoming" in source
+
+    launcher = (_REPO_ROOT / "start-dano.bat").read_text(encoding="utf-8")
+    assert "--ws-max-queue 2048" in launcher
 
 
 def test_frontend_automatically_retries_local_edit_after_server_version_conflict() -> None:

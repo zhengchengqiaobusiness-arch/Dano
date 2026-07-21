@@ -24,7 +24,7 @@ if not exist "%PY%" (
 
 echo Starting backend on port %BACKEND_PORT% ...
 pushd "%ROOT%back"
-start "Dano Backend %BACKEND_PORT%" cmd /k ""%PY%" -m uvicorn dano.gateway.app:app --host 127.0.0.1 --port %BACKEND_PORT%"
+start "Dano Backend %BACKEND_PORT%" cmd /k ""%PY%" -m uvicorn dano.gateway.app:app --host 127.0.0.1 --port %BACKEND_PORT% --ws-max-queue 2048"
 popd
 
 echo Starting frontend on port %FRONTEND_PORT% ...

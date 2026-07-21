@@ -1304,7 +1304,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   const intentionalCloseRef = useRef(false);
   const sessionStartedRef = useRef(false);
   const connectionErrorRef = useRef("");
-  const heartbeatTimerRef = useRef<number | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
   const reconnectRestoreOperationRef = useRef<string | null>(null);
@@ -1499,8 +1498,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
   function pauseFlowOperationForReconnect() {
     if (flowOperationTimerRef.current != null) window.clearTimeout(flowOperationTimerRef.current);
     flowOperationTimerRef.current = null;
-    setOrchestrateBusy(false);
-    setAutoFixBusy(false);
+    // Keep loading visible while the accepted server operation continues.
+    // Clearing it while retaining flowOperationRef made the button look usable
+    // even though every click was intentionally deduplicated.
   }
 
   function armFlowOperationWatchdog(label: string) {
@@ -1546,7 +1546,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       wsRef.current?.close();
     }
     if (pointerMoveTimerRef.current != null) window.clearTimeout(pointerMoveTimerRef.current);
-    if (heartbeatTimerRef.current != null) window.clearInterval(heartbeatTimerRef.current);
     if (reconnectTimerRef.current != null) window.clearTimeout(reconnectTimerRef.current);
     frameDecodeGenerationRef.current += 1;
   }, []);
@@ -1887,7 +1886,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
     intentionalCloseRef.current = false;
     sessionStartedRef.current = false;
     connectionErrorRef.current = "";
-    if (heartbeatTimerRef.current != null) window.clearInterval(heartbeatTimerRef.current);
     wsAliveRef.current = true;                                     // FC2 修复:每次 start 重置存活标志
     const ws = new WebSocket(recorderWebSocketUrl(reconnectAttemptRef.current));
     wsRef.current = ws;
@@ -1901,15 +1899,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
         pi_recording_id: piRecordingId || undefined,
         resume_action: actionRef.current,
       });
-      // Keep both proxy directions active. Long periods without page changes can
-      // otherwise be treated as an idle WebSocket by an intermediate proxy or
-      // by the backend's uvicorn default idle timeout (5min). 5s is well below
-      // the lowest common idle timeout we have observed (Vite's http-proxy
-      // ~60s, corporate proxies often ~30s, uvicorn default ~300s).
-      heartbeatTimerRef.current = window.setInterval(() => {
-        if (wsRef.current !== ws || ws.readyState !== WebSocket.OPEN) return;
-        ws.send(JSON.stringify({ type: "ping", at: Date.now() }));
-      }, 5000);
     };
     ws.onmessage = (ev) => {
       if (wsRef.current !== ws) return;
@@ -2117,10 +2106,6 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
       const hadStarted = sessionStartedRef.current;
       sessionStartedRef.current = false;
       wsRef.current = null;
-      if (heartbeatTimerRef.current != null) {
-        window.clearInterval(heartbeatTimerRef.current);
-        heartbeatTimerRef.current = null;
-      }
       wsAliveRef.current = false;                                 // FC2 修复:WS 关闭,send 会自动避免刷屏
       pointerGestureRef.current = null;
       pendingPointerMoveRef.current = null;
@@ -4312,7 +4297,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           {analysisScreenshots.length > 0 && <Tag color="purple">{"\u5df2\u4e0a\u4f20"} {analysisScreenshots.length} / {MAX_ANALYSIS_SCREENSHOTS}</Tag>}
           {lastAnalysisEvidence && <Tag color={lastAnalysisEvidence.screenshot_count > 0 ? "success" : "default"}>{"\u6700\u8fd1\u5206\u6790\u5df2\u53c2\u8003"} {lastAnalysisEvidence.screenshot_count} {"\u5f20\u622a\u56fe"}</Tag>}
           <Button icon={<PlusOutlined />} onClick={addCapability}>新增能力</Button>
-          <Button icon={<RobotOutlined />} loading={namingBusy} onClick={() => { setNamingBusy(true); send({ type: "step_naming" }); }}>命名步骤</Button>
+          <Button icon={<RobotOutlined />} loading={namingBusy}
+            disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || orchestrateBusy || autoFixBusy}
+            onClick={() => { if (send({ type: "step_naming" })) setNamingBusy(true); }}>命名步骤</Button>
           {flowSpec.meta?.capability_generation && <>
             <Tag color={flowSpec.meta.capability_generation.initial_completed ? "success" : "warning"}>
               {flowSpec.meta.capability_generation.initial_completed ? "语义规划完成" : "语义规划待补全"}
@@ -4476,7 +4463,9 @@ export default function PageRecorder({ tenant, subsystem, baseUrl, storageState 
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             面向调用方描述整体能力、输入输出和执行边界。
           </Typography.Text>
-          <Button icon={<FileTextOutlined />} type="primary" loading={descBusy} onClick={() => { setDescBusy(true); send({ type: "business_description" }); }}>
+          <Button icon={<FileTextOutlined />} type="primary" loading={descBusy}
+            disabled={connectionState !== "connected" || reconnectedSessionNeedsCapture || orchestrateBusy || autoFixBusy}
+            onClick={() => { if (send({ type: "business_description" })) setDescBusy(true); }}>
             {flowSpec.business_description ? "重新生成整体说明" : "生成整体说明"}
           </Button>
         </Space>

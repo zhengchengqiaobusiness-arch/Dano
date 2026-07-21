@@ -4040,7 +4040,7 @@ def test_default_query_capability_uses_business_records_not_process_configuratio
             FlowStep(
                 step_id="records", method="GET",
                 url="/admin-api/oa/duty-leave/page", path="/admin-api/oa/duty-leave/page",
-                source_meta={"role": "read_option"},
+                source_meta={"role": "business_get"},
                 response_json={"data": {"list": [{"id": "leave-1", "type": 2}], "total": 1}},
             ),
         ],
@@ -4050,6 +4050,28 @@ def test_default_query_capability_uses_business_records_not_process_configuratio
     query = next(cap for cap in capabilities if cap.kind == "query_status")
 
     assert query.step_ids == ["records"]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/system/users/page",
+        "/api/options/list",
+        "/api/tenant/records",
+        "/api/simple-list",
+    ],
+)
+def test_explicit_business_query_role_wins_over_generic_url_tokens(path: str):
+    step = FlowStep(
+        step_id="records", method="GET", path=path,
+        source_meta={"role": "business_get"},
+        response_json={"data": {"list": [{"id": 1}], "total": 1}},
+    )
+
+    assert flow_spec_module._business_query_evidence_score(step) >= 3
+    assert flow_spec_module._planned_capability_has_public_anchor(
+        FlowSpec(steps=[step]), "query_status", ["records"],
+    ) is True
 
 
 def test_capability_schema_separates_enum_business_type_from_numeric_wire_type():
@@ -5675,7 +5697,7 @@ def test_capability_sync_preserves_process_field_and_excludes_option_reads_from_
         method="GET",
         path="/admin-api/system/user/page",
         response_json={"data": {"list": [{"id": 1, "nickname": "张三"}], "total": 1}},
-        source_meta={"role": "business_get"},
+        source_meta={"role": "read_option"},
     )
     approval = FlowStep(
         step_id="approval",
@@ -6381,6 +6403,92 @@ def test_structural_option_binding_generalizes_across_business_domains(
     assert target_param.source["value_key"] == value_key
     assert target_param.source["label_key"] == label_key
     assert target_param.enum_value_map[f"{target_label} B"] == selected
+    stable = spec.model_dump(mode="json")
+
+    flow_spec_module._repair_structural_option_bindings(spec)
+
+    assert spec.model_dump(mode="json") == stable
+
+
+def test_explicit_option_endpoint_with_one_visible_row_still_binds() -> None:
+    target = FlowStep(
+        step_id="submit", method="POST", path="/api/request",
+        params=[ParamField(
+            path="assigneeId", key="Assignee", value=145,
+            type="number", wire_type="number", source_kind="user_input",
+        )],
+    )
+    source = FlowStep(
+        step_id="assignees", method="GET", path="/api/hr/assignees/options",
+        source_meta={"role": "read_option"},
+        response_json={"data": [{"id": 145, "name": "Finance A"}]},
+    )
+    spec = FlowSpec(steps=[target, source])
+
+    assert flow_spec_module._repair_structural_option_bindings(spec) == 1
+    field = target.params[0]
+    assert field.source_kind == "api_option"
+    assert field.source["source_step_id"] == "assignees"
+    assert field.enum_value_map == {"Finance A": 145}
+
+
+def test_unrelated_one_row_business_list_does_not_bind_by_value_alone() -> None:
+    target = FlowStep(
+        step_id="submit", method="POST", path="/api/request",
+        params=[ParamField(
+            path="amount", key="Amount", value=145,
+            type="number", wire_type="number", source_kind="user_input",
+        )],
+    )
+    history = FlowStep(
+        step_id="history", method="GET", path="/api/orders/page",
+        source_meta={"role": "business_get"},
+        response_json={"data": {"list": [{"id": 145, "name": "Old order"}]}},
+    )
+    spec = FlowSpec(steps=[target, history])
+
+    assert flow_spec_module._repair_structural_option_bindings(spec) == 0
+    assert target.params[0].source_kind == "user_input"
+
+
+@pytest.mark.parametrize(
+    ("path", "label", "family"),
+    [
+        ("userCount", "入住人数", "users"),
+        ("participantCount", "参会人数", "participants"),
+        ("roomCount", "房间数量", "rooms"),
+        ("userNum", "用户数", "users"),
+        ("peopleNum", "人员数", "people"),
+        ("guestNumber", "来宾数量", "guests"),
+        ("numberOfParticipants", "参与者数量", "participants"),
+        ("roomNum", "房间数", "rooms"),
+    ],
+)
+def test_quantitative_fields_do_not_bind_to_same_family_option_rows(
+    path: str,
+    label: str,
+    family: str,
+) -> None:
+    target = FlowStep(
+        step_id="submit", method="POST", path="/api/request",
+        params=[ParamField(
+            path=path, key=label, label=label, value=1,
+            type="number", wire_type="number", category="user_param",
+            source_kind="user_input",
+        )],
+    )
+    source = FlowStep(
+        step_id="options", method="GET", path=f"/api/{family}/options",
+        source_meta={"role": "read_option"},
+        response_json={"data": [
+            {"id": 1, "name": "A"}, {"id": 2, "name": "B"},
+        ]},
+    )
+    spec = FlowSpec(steps=[target, source])
+
+    assert flow_spec_module._repair_structural_option_bindings(spec) == 0
+    field = target.params[0]
+    assert (field.type, field.source_kind) == ("number", "user_input")
 
 
 def test_repeated_option_field_reuses_complete_sibling_contract_when_facts_are_truncated():

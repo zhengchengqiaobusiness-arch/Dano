@@ -3892,8 +3892,11 @@ def _audit_step_param_contracts(step: FlowStep) -> None:
         if normalized_path in id_paths and normalized_path not in display_paths:
             continue
         if param.type in _ENUM_PARAM_TYPES or param.source_kind in _ENUM_SOURCE_KINDS:
-            if not option_contract and param.source_kind not in _ENUM_SOURCE_KINDS:
-                if not _param_field_manually_edited(param, "type"):
+            if not option_contract:
+                if (
+                    not _param_field_manually_edited(param, "type")
+                    and not _param_has_grounded_type(param)
+                ):
                     param.type = param.wire_type or _infer_type_from_value(param.value)
                 if not _param_axis_manually_edited(param, "enum_options", "enum_value_map"):
                     param.enum_options = None
@@ -4391,10 +4394,13 @@ def _param_has_grounded_type(param: ParamField) -> bool:
         param.enum_options or param.enum_value_map or _param_has_executable_source(param)
     ):
         return True
+    screenshot = _screenshot_control_evidence({"evidence": param.evidence})
+    if _screenshot_control_supports_axis(screenshot, "type"):
+        return True
     return any(
         isinstance(item, dict)
         and str(item.get("source") or item.get("kind") or "").lower()
-        in {"recorder_dom", "page", "page_snapshot", "screenshot"}
+        in {"recorder_dom", "page", "page_snapshot"}
         and str(item.get("control_kind") or "unknown") != "unknown"
         for item in (param.evidence or [])
     )
@@ -4414,7 +4420,43 @@ _SCREENSHOT_INTERNAL_SOURCE_KINDS = frozenset({
 
 
 
+def _canonical_screenshot_control(raw: dict[str, Any]) -> dict[str, Any] | None:
+    return next((
+        item for item in reversed(raw.get("evidence") or [])
+        if isinstance(item, dict) and item.get("canonical_screenshot_control") is True
+    ), None)
+
+
+def _screenshot_control_supports_axis(
+    control: dict[str, Any] | None,
+    axis: str,
+) -> bool:
+    if control is None:
+        return False
+    declared = {
+        str(value).strip().lower()
+        for value in (control.get("axes") or [])
+        if str(value or "").strip()
+    }
+    aliases = {
+        "name": {"name", "label", "display_name", "public_name"},
+        "path": {"path", "wire_path"},
+        "default": {"default", "default_value", "visible_default"},
+        "type": {"type", "business_type", "control_kind"},
+        "category": {"category"},
+        "source": {"source", "source_kind"},
+        "required": {"required", "requiredness"},
+    }
+    return not declared or bool(declared & aliases.get(axis, {axis}))
+
+
 def _screenshot_control_evidence(raw: dict[str, Any]) -> dict[str, Any] | None:
+    canonical = _canonical_screenshot_control(raw)
+    if canonical is not None:
+        if canonical.get("control_kind_conflict"):
+            return None
+        control_kind = str(canonical.get("control_kind") or "").strip().lower()
+        return canonical if control_kind in _SCREENSHOT_CONTROL_KINDS else None
     for item in raw.get("evidence") or []:
         if not isinstance(item, dict):
             continue
@@ -4427,13 +4469,26 @@ def _screenshot_control_evidence(raw: dict[str, Any]) -> dict[str, Any] | None:
 
 def _param_has_grounded_direct_input_contract(param: ParamField) -> bool:
     """A visible editable non-choice control must not be repaired into an enum."""
+    screenshot = _screenshot_control_evidence({"evidence": param.evidence})
+    if screenshot is not None and (
+        _screenshot_control_supports_axis(screenshot, "type")
+        or _screenshot_control_supports_axis(screenshot, "source")
+    ):
+        control_kind = str(screenshot.get("control_kind") or "").strip().lower()
+        return bool(
+            control_kind not in _SCREENSHOT_OPTION_CONTROL_KINDS
+            and not (control_kind == "checkbox" and screenshot.get("options"))
+            and screenshot.get("editable") is not False
+            and not screenshot.get("disabled")
+            and not screenshot.get("read_only")
+        )
     for item in param.evidence or []:
         if not isinstance(item, dict):
             continue
         source = str(item.get("source") or item.get("kind") or "").strip().lower()
         control_kind = str(item.get("control_kind") or "").strip().lower()
         if (
-            source not in {"screenshot", "recorder_dom", "page", "page_snapshot", "page_control"}
+            source not in {"recorder_dom", "page", "page_snapshot", "page_control"}
             or control_kind not in _SCREENSHOT_CONTROL_KINDS
         ):
             continue
@@ -4462,7 +4517,7 @@ def _screenshot_control_business_type(
         return proposed_type if proposed_type in {"number", "integer"} else "number"
     if kind in {"date", "datetime", "time"}:
         return kind
-    if kind in {"select", "combobox", "cascader", "radio", "tree_select"}:
+    if kind in {"select", "combobox", "cascader", "picker", "radio", "tree_select"}:
         return "list-enum" if control.get("multiple") else "enum"
     if kind in {"checkbox", "switch"}:
         if kind == "checkbox" and (control.get("multiple") or control.get("options")):
@@ -4524,13 +4579,24 @@ def _apply_capability_field_to_param(
         return True
 
     screenshot_control = _screenshot_control_evidence(raw) if automated else None
+    screenshot_name_axis = _screenshot_control_supports_axis(screenshot_control, "name")
+    screenshot_type_axis = _screenshot_control_supports_axis(screenshot_control, "type")
+    screenshot_category_axis = _screenshot_control_supports_axis(
+        screenshot_control, "category"
+    )
+    screenshot_source_axis = _screenshot_control_supports_axis(
+        screenshot_control, "source"
+    )
+    screenshot_required_axis = _screenshot_control_supports_axis(
+        screenshot_control, "required"
+    )
     allow_name = (
         not automated
         or (
             not _param_axis_manually_edited(param, "key", "label", "name", "display_name")
             and (
                 not _param_has_grounded_public_name(param)
-                or screenshot_control is not None
+                or screenshot_name_axis
             )
         )
     )
@@ -4555,10 +4621,12 @@ def _apply_capability_field_to_param(
     )
     screenshot_editable_input = bool(
         screenshot_editable
+        and screenshot_source_axis
         and str(raw.get("source_kind") or "") == "user_input"
     )
     screenshot_page_enum = bool(
         screenshot_editable
+        and screenshot_source_axis
         and screenshot_option_control
         and str(raw.get("source_kind") or "") in {
             "page_enum", "static_enum", "form_option",
@@ -4567,16 +4635,28 @@ def _apply_capability_field_to_param(
     )
     screenshot_user_category = bool(
         screenshot_editable
+        and screenshot_category_axis
         and str(raw.get("category") or "") == "user_param"
     )
-    screenshot_safe_internal = bool(
+    screenshot_safe_internal_source = bool(
         screenshot_control is not None
+        and screenshot_source_axis
         and (
             screenshot_control.get("editable") is False
             or screenshot_control.get("disabled")
             or screenshot_control.get("read_only")
         )
         and str(raw.get("source_kind") or "") in _SCREENSHOT_INTERNAL_SOURCE_KINDS
+    )
+    screenshot_safe_internal_category = bool(
+        screenshot_control is not None
+        and screenshot_category_axis
+        and (
+            screenshot_control.get("editable") is False
+            or screenshot_control.get("disabled")
+            or screenshot_control.get("read_only")
+        )
+        and str(raw.get("category") or "") in {"runtime_var", "system_const"}
     )
     stale_text_option_recovery = bool(
         automated
@@ -4602,7 +4682,7 @@ def _apply_capability_field_to_param(
             not _param_field_manually_edited(param, "type")
             and (
                 not _param_has_grounded_type(param)
-                or screenshot_control is not None
+                or screenshot_type_axis
                 or stale_text_option_recovery
                 or semantic_text_type_recovery
             )
@@ -4618,7 +4698,11 @@ def _apply_capability_field_to_param(
             and (
                 str(param.source_kind or "unknown") in {"", "unknown"}
                 or (
-                    (screenshot_editable_input or screenshot_page_enum or screenshot_safe_internal)
+                    (
+                        screenshot_editable_input
+                        or screenshot_page_enum
+                        or screenshot_safe_internal_source
+                    )
                     and not _param_has_executable_source(param)
                 )
                 or (
@@ -4642,7 +4726,7 @@ def _apply_capability_field_to_param(
             and (
                 str(param.category or "unknown") in {"", "unknown"}
                 or screenshot_user_category
-                or screenshot_safe_internal
+                or screenshot_safe_internal_category
             )
         )
     )
@@ -4657,10 +4741,12 @@ def _apply_capability_field_to_param(
         _transition_param_type(param, raw["type"])
     screenshot_required = bool(
         screenshot_control is not None
+        and screenshot_required_axis
         and screenshot_control.get("required") is True
     )
     screenshot_optional = bool(
         screenshot_control is not None
+        and screenshot_required_axis
         and screenshot_control.get("required") is False
         and screenshot_control.get("required_convention_confirmed") is True
         and screenshot_control.get("label_region_complete") is True
@@ -4709,6 +4795,25 @@ def _apply_capability_field_to_param(
         param.locked = bool(raw.get("locked"))
     if "confirmed" in raw:
         param.need_human_confirm = not bool(raw.get("confirmed"))
+    incoming_evidence = [
+        evidence for evidence in (raw.get("evidence") or [])
+        if isinstance(evidence, dict)
+    ]
+    if automated and any(
+        evidence.get("canonical_screenshot_control") is True
+        for evidence in incoming_evidence
+    ):
+        param.evidence = [
+            evidence for evidence in (param.evidence or [])
+            if not (
+                isinstance(evidence, dict)
+                and (
+                    evidence.get("canonical_screenshot_control") is True
+                    or str(evidence.get("source") or "").strip().lower()
+                    in {"screenshot", "reference_screenshot", "uploaded_screenshot"}
+                )
+            )
+        ]
     param.evidence.append({
         "source": "capability_field_edit", "scope": scope, "actor": normalized_actor,
         "applied_axes": {
@@ -4717,12 +4822,11 @@ def _apply_capability_field_to_param(
             "required": bool(allow_required), "default": bool(allow_default),
         },
     })
-    for evidence in raw.get("evidence") or []:
-        if isinstance(evidence, dict):
-            param.evidence.append({
-                **evidence,
-                "source": str(evidence.get("source") or "planner_semantic_evidence"),
-            })
+    for evidence in incoming_evidence:
+        param.evidence.append({
+            **evidence,
+            "source": str(evidence.get("source") or "planner_semantic_evidence"),
+        })
     if normalized_actor == "user":
         manual_fields = [
             field for field in ("type", "source_kind", "source", "exposed_to_caller")
@@ -6945,15 +7049,23 @@ def _business_query_evidence_score(step: FlowStep) -> int:
     if (step.method or "GET").upper() not in {"GET", "HEAD"}:
         return -100
     path = _request_path({"url": step.path or step.url}).lower()
-    if re.search(
-        r"(?:process-definition|approval-detail|form-config|permissions?|tenant|current-user|auth|dict(?:ionary)?|options?|simple-list|departments?|roles?)",
-        path,
-    ) or re.search(r"(?:^|/)(?:system|im)/users?(?:/|$)", path):
-        return -10
-    score = 0
     role = str((step.source_meta or {}).get("role") or step.semantic_role or "")
-    if role == "business_get":
-        score += 2
+    if role in {"read_option", "option_source", "explicit_read_option"}:
+        return -10
+    if re.search(
+        r"(?:process-definition|approval-detail|form-config|permissions?|current-user|auth)",
+        path,
+    ):
+        return -10
+    if role != "business_get" and (
+        re.search(
+            r"(?:tenant|dict(?:ionary)?|options?|simple-list|departments?|roles?)",
+            path,
+        )
+        or re.search(r"(?:^|/)(?:system|im)/users?(?:/|$)", path)
+    ):
+        return -10
+    score = 2 if role == "business_get" else 0
     if re.search(r"(?:^|/)(?:page|list|search|query|history|records?|status|statistics|detail)(?:/|$|\?)", path):
         score += 2
     response = step.response_json
@@ -8126,8 +8238,16 @@ def _planned_capability_has_public_anchor(
     option_ids = _option_source_step_ids(spec)
     for step_id in planned_step_ids:
         step = by_id.get(step_id)
-        if step is None or step_id in option_ids:
+        if step is None:
             continue
+        # `/list` is common to both business searches and option endpoints.
+        # Strong recorded business-query evidence wins over the URL heuristic.
+        if step_id in option_ids:
+            recorded_role = str(
+                (step.source_meta or {}).get("role") or step.semantic_role or ""
+            )
+            if recorded_role != "business_get":
+                continue
         method = (step.method or "GET").upper()
         if kind in {"submit", "submit_batch"} and method in _WRITE_METHODS:
             return True
@@ -8136,7 +8256,12 @@ def _planned_capability_has_public_anchor(
     return False
 
 
-def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[str, Any]]:
+def _semantic_plan_to_ops(
+    spec: FlowSpec,
+    result: dict[str, Any],
+    *,
+    include_relations: bool = True,
+) -> list[dict[str, Any]]:
     """Compile a model's complete semantic blueprint into the existing edit DSL."""
     plan = result.get("semantic_plan") or result.get("plan")
     if not isinstance(plan, dict):
@@ -8273,11 +8398,17 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
                 and not _param_field_manually_edited(target_param, "type")
                 and _looks_user_entered_business_field(target_param.key, target_param.path)
             )
-            grounded_editable_control = any(
+            screenshot_control = _screenshot_control_evidence(item)
+            screenshot_editable_control = bool(
+                screenshot_control is not None
+                and screenshot_control.get("editable") is not False
+                and not screenshot_control.get("disabled")
+                and not screenshot_control.get("read_only")
+            )
+            dom_editable_control = any(
                 isinstance(evidence_item, dict)
-                and str(evidence_item.get("source") or evidence_item.get("kind") or "") in {
-                    "screenshot", "recorder_dom", "page_control",
-                }
+                and str(evidence_item.get("source") or evidence_item.get("kind") or "")
+                in {"recorder_dom", "page_control"}
                 and str(evidence_item.get("control_kind") or "").lower()
                 in _SCREENSHOT_CONTROL_KINDS
                 and evidence_item.get("editable") is not False
@@ -8285,8 +8416,10 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
                 and not evidence_item.get("read_only")
                 for evidence_item in (item.get("evidence") or [])
             )
-            screenshot_control = _screenshot_control_evidence(item)
-            grounded_type_proposal = screenshot_control is not None or any(
+            screenshot_type_evidence = _screenshot_control_supports_axis(
+                screenshot_control, "type"
+            )
+            grounded_type_proposal = screenshot_type_evidence or any(
                 isinstance(evidence_item, dict)
                 and str(evidence_item.get("source") or evidence_item.get("kind") or "").lower()
                 in {"recorder_dom", "page", "page_snapshot", "api_schema", "manual"}
@@ -8299,7 +8432,7 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
             )
             business_type = (
                 _screenshot_control_business_type(screenshot_control, proposed_type)
-                if screenshot_control is not None
+                if screenshot_type_evidence
                 else "string" if (stale_text_option_recovery or semantic_text_type_recovery)
                 else proposed_type if grounded_type_proposal
                 else str(target_param.type if target_param else "")
@@ -8307,43 +8440,51 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
             if stale_text_option_recovery:
                 category = "user_param"
                 source_kind = "user_input"
-            elif (
-                grounded_editable_control
-                and requested_category == "user_param"
-                and requested_source_kind == "user_input"
-            ):
-                # Structured screenshot/DOM control evidence may recover a
-                # caller field that the network-only pass left unknown. Prose
-                # evidence cannot change source axes, and API/dependency sources
-                # still require their executable binding operations.
-                category = "user_param"
-                source_kind = "user_input"
-            elif (
-                grounded_editable_control
-                and screenshot_control is not None
-                and str(screenshot_control.get("control_kind") or "").lower()
-                in _SCREENSHOT_OPTION_CONTROL_KINDS
-                and requested_category == "user_param"
-                and requested_source_kind in {"page_enum", "static_enum", "form_option"}
-                and source_kind != "api_option"
-            ):
-                category = "user_param"
-                source_kind = requested_source_kind
-            elif (
-                screenshot_control is not None
-                and (
-                    screenshot_control.get("editable") is False
-                    or screenshot_control.get("disabled")
-                    or screenshot_control.get("read_only")
+            else:
+                category_evidence = dom_editable_control or (
+                    screenshot_editable_control
+                    and _screenshot_control_supports_axis(screenshot_control, "category")
                 )
-                and requested_category in {"runtime_var", "system_const"}
-                and requested_source_kind in _SCREENSHOT_INTERNAL_SOURCE_KINDS
-            ):
-                # A visibly non-editable control can correct a stale caller
-                # classification to a safe UI/system source. API and response
-                # dependencies remain unavailable without recorded bindings.
-                category = requested_category
-                source_kind = requested_source_kind
+                source_evidence = dom_editable_control or (
+                    screenshot_editable_control
+                    and _screenshot_control_supports_axis(screenshot_control, "source")
+                )
+                screenshot_noneditable = bool(
+                    screenshot_control is not None
+                    and (
+                        screenshot_control.get("editable") is False
+                        or screenshot_control.get("disabled")
+                        or screenshot_control.get("read_only")
+                    )
+                )
+                if requested_category == "user_param" and category_evidence:
+                    category = requested_category
+                if requested_source_kind == "user_input" and source_evidence:
+                    source_kind = requested_source_kind
+                if (
+                    screenshot_editable_control
+                    and str(screenshot_control.get("control_kind") or "").lower()
+                    in _SCREENSHOT_OPTION_CONTROL_KINDS
+                ):
+                    if requested_category == "user_param" and category_evidence:
+                        category = requested_category
+                    if (
+                        requested_source_kind in {"page_enum", "static_enum", "form_option"}
+                        and source_kind != "api_option"
+                        and source_evidence
+                    ):
+                        source_kind = requested_source_kind
+                if screenshot_noneditable:
+                    if (
+                        requested_category in {"runtime_var", "system_const"}
+                        and _screenshot_control_supports_axis(screenshot_control, "category")
+                    ):
+                        category = requested_category
+                    if (
+                        requested_source_kind in _SCREENSHOT_INTERNAL_SOURCE_KINDS
+                        and _screenshot_control_supports_axis(screenshot_control, "source")
+                    ):
+                        source_kind = requested_source_kind
             operation = "upsert_input_field" if category == "user_param" else "upsert_internal_field"
             ops.append({
                 "op": operation,
@@ -8512,6 +8653,8 @@ def _semantic_plan_to_ops(spec: FlowSpec, result: dict[str, Any]) -> list[dict[s
                 **ref,
             })
 
+    if not include_relations:
+        return ops
     relation_capabilities = {
         ref: capability
         for capability in spec.capabilities or []
@@ -8716,7 +8859,7 @@ def _semantic_plan_coverage(spec: FlowSpec, result: dict[str, Any]) -> dict[str,
         not isinstance(item, dict)
         or item.get("blocking") is True
         or str(item.get("severity") or "").strip().lower()
-        in {"", "high", "critical", "blocker", "error"}
+        in {"high", "critical", "blocker", "error"}
         for item in plan.get("unresolved_items") or []
     ):
         missing.append("unresolved_blockers")
@@ -10085,11 +10228,11 @@ async def orchestrate_flow_capabilities(
     initial_report = validate_flow_spec(original)
     current = _prune_empty_capabilities(original.model_copy(deep=True))
     rebuild_flow_dependencies(current)
-    # Recorded DOM/request facts remain authoritative during screenshot
-    # analysis too.  Skipping this pass preserved stale API-option bindings on
-    # ordinary text/number controls whenever the screenshot planner omitted a
-    # field or failed to submit a plan.
-    _repair_structural_option_bindings(current)
+    # No-image analysis can repair recorded option facts immediately. Screenshot
+    # analysis waits until its field edits are applied, then binds once below;
+    # binding both before and after would retain stale evidence and fake a diff.
+    if not screenshot_analysis:
+        _repair_structural_option_bindings(current)
     capability_model = (current.meta or {}).get("capability_model") or {}
     auto_generated_existing = bool(
         current.capabilities
@@ -10209,7 +10352,7 @@ async def orchestrate_flow_capabilities(
             "complete_semantic_submission": complete_semantic_submission,
         }
     combined_ops = [
-        *_semantic_plan_to_ops(current, submission),
+        *_semantic_plan_to_ops(current, submission, include_relations=False),
         *(submission.get("ops") or []),
     ]
     if combined_ops:
@@ -10221,6 +10364,25 @@ async def orchestrate_flow_capabilities(
         if edits:
             current = apply_flow_edits(current, [{**edit, "actor": "planner"} for edit in edits])
             source = "pi_agent_patch"
+    if proposed_semantic_plan.get("capability_relations"):
+        current = _sync_capability_io_schemas(sync_flow_spec_models(current))
+        relation_ops = [
+            operation
+            for operation in _semantic_plan_to_ops(current, submission)
+            if operation.get("op") == "set_capability_relation"
+        ]
+        relation_edits = _planner_patch_edits(current, _autofix_ops_to_edits(current, relation_ops))
+        if relation_edits:
+            current = apply_flow_edits(
+                current,
+                [{**edit, "actor": "planner"} for edit in relation_edits],
+            )
+            source = "pi_agent_patch"
+    # Screenshot-corrected names/control evidence can make a recorded option
+    # endpoint uniquely matchable. Ordinary no-image analysis already ran the
+    # binder above and does not need another full scan.
+    if screenshot_analysis:
+        _repair_structural_option_bindings(current)
     raw_abilities = submission.get("abilities")
     if isinstance(raw_abilities, list) and initial_generation and not initial_scope_established:
         step_ids = {step.step_id for step in current.steps}
@@ -10241,7 +10403,7 @@ async def orchestrate_flow_capabilities(
     if initial_generation:
         current = _repair_generated_capability_contracts(
             current,
-            repair_option_bindings=True,
+            repair_option_bindings=not screenshot_analysis,
         )
     current = _ensure_external_transform_relations(
         _sync_capability_io_schemas(sync_flow_spec_models(current))
@@ -14141,6 +14303,26 @@ def _option_binding_semantic_families(value: Any) -> set[str]:
     return families
 
 
+def _looks_quantitative_option_target(param: ParamField) -> bool:
+    """Counts and measurements are scalar inputs, not foreign-key choices."""
+    text = " ".join((str(param.path or ""), str(param.key or ""), str(param.label or "")))
+    split = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text).casefold()
+    compact = re.sub(r"[^0-9a-zA-Z\u4e00-\u9fff]+", "", text).casefold()
+    if re.search(r"(?:id|ids|code|key)$", compact):
+        return False
+    numeric_wire = str(param.wire_type or param.type or "").lower() in {
+        "number", "integer", "float", "decimal",
+    }
+    return bool(
+        re.search(r"(?:^|\W)(?:count|qty|quantity|amount|total|capacity)(?:$|\W)", split)
+        or (
+            numeric_wire
+            and re.search(r"(?:^|\W)(?:num|number)(?:$|\W)", split)
+        )
+        or re.search(r"(?:人数|数量|个数|金额|总数|总量|容量|次数|时长|天数)", text)
+    )
+
+
 def _repair_structural_option_bindings(spec: FlowSpec) -> int:
     """Recover grounded enum/reference bindings, including captured-only reads.
 
@@ -14183,6 +14365,9 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 "frame_id": (source.source_meta or {}).get("frame_id"),
                 "trigger_action_id": (source.source_meta or {}).get("trigger_action_id"),
                 "trigger_transaction_id": (source.source_meta or {}).get("trigger_transaction_id"),
+                "explicit_option_source": role in {
+                    "read_option", "option_source", "explicit_read_option",
+                } or _choice_control_triggered(read),
                 "items": [dict(item) for item in items if isinstance(item, dict)],
             })
             if request_id:
@@ -14249,10 +14434,36 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 "frame_id": fact.frame_id,
                 "trigger_action_id": getattr(fact, "trigger_action_id", None),
                 "trigger_transaction_id": getattr(fact, "trigger_transaction_id", None),
+                "explicit_option_source": read["role"] in {
+                    "read_option", "option_source", "explicit_read_option",
+                } or _choice_control_triggered(read),
                 "items": [dict(item) for item in items if isinstance(item, dict)],
             })
 
     repaired = 0
+
+    def has_screenshot_choice(param: ParamField) -> bool:
+        control = _screenshot_control_evidence({"evidence": param.evidence})
+        return bool(
+            control is not None
+            and (
+                _screenshot_control_supports_axis(control, "type")
+                or _screenshot_control_supports_axis(control, "source")
+            )
+            and str(control.get("control_kind") or "").lower()
+            in _SCREENSHOT_OPTION_CONTROL_KINDS
+        )
+
+    def has_recorded_choice(param: ParamField) -> bool:
+        return has_screenshot_choice(param) or any(
+            isinstance(item, dict)
+            and str(item.get("source") or item.get("kind") or "").lower()
+            in {"recorder_dom", "page", "page_snapshot", "page_control"}
+            and str(item.get("control_kind") or "").lower()
+            in _SCREENSHOT_OPTION_CONTROL_KINDS
+            for item in (param.evidence or [])
+        )
+
     for target in spec.steps:
         direct_input_paths: set[str] = set()
         for param in target.params or []:
@@ -14321,6 +14532,23 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                 for alias in (evidence.get("field_aliases") or [])
                 if normalized(str(alias).split(":", 1)[-1])
             )
+        screenshot_matches: list[dict[str, Any]] = []
+        screenshot_evidence = _screenshot_control_evidence({"evidence": param.evidence})
+        for evidence in [screenshot_evidence] if screenshot_evidence is not None else []:
+            if str(evidence.get("control_kind") or "").lower() not in _SCREENSHOT_OPTION_CONTROL_KINDS:
+                continue
+            labels = option_labels({"options": evidence.get("options") or []})
+            if len(labels) < 2:
+                continue
+            visible_value = str(evidence.get("visible_value") or "").strip()
+            screenshot_matches.append({
+                "raw": evidence,
+                "labels": labels,
+                "selected": visible_value if visible_value in labels else "",
+                "semantic_match": True,
+            })
+        if screenshot_matches:
+            return screenshot_matches
         semantic_matches: list[dict[str, Any]] = []
         fallback_matches: list[dict[str, Any]] = []
         target_meta = target.source_meta or {}
@@ -14354,6 +14582,8 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
         items: list[dict[str, Any]],
         value: str,
         page_contract: dict[str, Any] | None,
+        *,
+        allow_single: bool = False,
     ) -> list[dict[str, Any]]:
         matching_items = [
             item for item in items
@@ -14424,7 +14654,7 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                         seen_values.add(value_sig)
                         option_map[label] = raw_value
                         records.append({"label": label, "value": raw_value})
-                    if not valid or len(records) < 2:
+                    if not valid or len(records) < (1 if allow_single else 2):
                         continue
                     if page_contract:
                         record_labels = set(option_map)
@@ -14515,18 +14745,28 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
 
     for target in spec.steps:
         for param in target.params or []:
+            rebindable_option = bool(
+                param.source_kind == "api_option" and has_screenshot_choice(param)
+            ) or bool(
+                param.source_kind == "page_enum"
+                and (
+                    (param.source or {}).get("enum_confirmed") is False
+                    or not _incomplete_page_enum_is_executable(param)
+                )
+            )
             if (
                 param.locked
                 or _param_has_manual_contract(param)
                 or _param_has_grounded_direct_input_contract(param)
                 or (
                     param.source_kind in _OPTION_SOURCE_KINDS
-                    and not (
-                        param.source_kind == "page_enum"
-                        and (param.source or {}).get("enum_confirmed") is False
-                    )
+                    and not rebindable_option
                 )
                 or _looks_pagination_field(param.key, param.path)
+                or (
+                    _looks_quantitative_option_target(param)
+                    and not has_recorded_choice(param)
+                )
                 or param.category == "system_const"
             ):
                 continue
@@ -14564,7 +14804,16 @@ def _repair_structural_option_bindings(spec: FlowSpec) -> int:
                         continue
                     if not source_is_grounded_for_target(source, target, page_contract, semantic_match):
                         continue
-                    for contract in row_contracts(items, value, page_contract):
+                    allow_single = bool(
+                        source.get("explicit_option_source")
+                        or (
+                            value_owner_counts.get(value) == 1
+                            and page_contract is not None
+                        )
+                    )
+                    for contract in row_contracts(
+                        items, value, page_contract, allow_single=allow_single,
+                    ):
                         matches.append({**source, **contract})
             unique: dict[tuple[Any, ...], dict[str, Any]] = {}
             for match in matches:
@@ -15186,7 +15435,7 @@ def _bind_option_source(
         param.enum_options = list(options)
     if option_map and not options_owned:
         param.enum_value_map = dict(option_map)
-    param.evidence.append({
+    option_evidence = {
         "source": "option_source",
         "source_step_id": source_step_id,
         "source_request_id": source_request_id,
@@ -15195,7 +15444,9 @@ def _bind_option_source(
         "label_key": label_key,
         "category_key": category_key,
         "category_value": category_value,
-    })
+    }
+    if option_evidence not in param.evidence:
+        param.evidence.append(option_evidence)
 
     sel = _find_select_binding(step, param)
     if sel is None:

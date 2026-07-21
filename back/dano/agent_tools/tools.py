@@ -1233,6 +1233,38 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
     step_by_id = {str(step.step_id): step for step in steps}
     step_order = {str(step.step_id): index for index, step in enumerate(steps)}
     option_source_ids = _option_source_step_ids(grounded)
+    option_source_consumers: dict[str, set[str]] = {}
+
+    def recorded_source_step_id(source: dict) -> str:
+        direct = str(source.get("source_step_id") or "")
+        if direct in step_by_id:
+            return direct
+        request_id = str(source.get("source_request_id") or "")
+        source_url = re.sub(
+            r"^[a-z][a-z0-9+.-]*://[^/]+", "",
+            str(source.get("source_url") or ""), flags=re.IGNORECASE,
+        ).split("?", 1)[0]
+        for candidate in steps:
+            meta = getattr(candidate, "source_meta", None) or {}
+            if request_id and request_id == str(meta.get("request_id") or ""):
+                return str(candidate.step_id)
+            candidate_url = re.sub(
+                r"^[a-z][a-z0-9+.-]*://[^/]+", "",
+                str(candidate.path or candidate.url or ""), flags=re.IGNORECASE,
+            ).split("?", 1)[0]
+            if source_url and source_url == candidate_url:
+                return str(candidate.step_id)
+        return ""
+
+    for consumer in steps:
+        for param in getattr(consumer, "params", None) or []:
+            if str(getattr(param, "source_kind", None) or "") != "api_option":
+                continue
+            source_id = recorded_source_step_id(dict(getattr(param, "source", None) or {}))
+            if source_id:
+                option_source_consumers.setdefault(source_id, set()).add(
+                    str(consumer.step_id)
+                )
     baseline_capabilities = list(_build_initial_flow_capabilities(grounded) or [])
 
     role_by_step = {
@@ -1320,11 +1352,105 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         return normalized
 
     def screenshot_control(evidence: list[dict]) -> dict | None:
-        return next((
-            item for item in evidence
+        canonical_indexes = [
+            index for index, item in enumerate(evidence)
+            if item.get("canonical_screenshot_control") is True
+        ]
+        current_evidence = (
+            evidence[canonical_indexes[-1] + 1:]
+            if canonical_indexes else evidence
+        )
+        controls = [
+            item for item in current_evidence
             if str(item.get("source") or item.get("kind") or "").strip().lower() == "screenshot"
+            and item.get("canonical_screenshot_control") is not True
             and str(item.get("control_kind") or "").strip().lower()
-        ), None)
+        ]
+        if not controls:
+            return None
+
+        def stable_value(value: object) -> str:
+            if isinstance(value, dict):
+                return repr(sorted((str(key), stable_value(item)) for key, item in value.items()))
+            if isinstance(value, list):
+                return repr([stable_value(item) for item in value])
+            return repr(value)
+
+        def rank(item: dict) -> tuple[int, int, int]:
+            editable = bool(
+                item.get("editable") is True
+                and not item.get("disabled")
+                and not item.get("read_only")
+            )
+            return (
+                int(editable),
+                len(item.get("options") or []) if isinstance(item.get("options"), list) else 0,
+                int(bool(str(item.get("visible_label") or "").strip())),
+            )
+
+        def control_type_signature(item: dict) -> str:
+            kind = str(item.get("control_kind") or "").strip().lower()
+            if kind in {"text", "textarea", "rich_text"}:
+                return "string"
+            if kind in {"number", "slider"}:
+                return "number"
+            if kind in {"select", "combobox", "radio", "cascader", "picker", "tree_select"}:
+                return "list-enum" if item.get("multiple") else "enum"
+            if kind == "checkbox":
+                return "list-enum" if item.get("multiple") or item.get("options") else "boolean"
+            if kind == "switch":
+                return "boolean"
+            if kind in {"upload", "file"}:
+                return "array" if item.get("multiple") else "string"
+            return kind
+
+        # A field may appear read-only in a list and editable in a later form.
+        # Pick the strongest control deterministically, then merge complementary
+        # per-axis evidence so upload order cannot change the result.
+        strongest_rank = max(rank(item) for item in controls)
+        strongest = [item for item in controls if rank(item) == strongest_rank]
+        merged = deepcopy(max(strongest, key=stable_value))
+        conflicting_types = sorted({control_type_signature(item) for item in strongest} - {""})
+        if len(conflicting_types) > 1:
+            merged["control_kind_conflict"] = conflicting_types
+        merged["visible_labels"] = sorted({
+            str(item.get("visible_label") or "").strip()
+            for item in controls if str(item.get("visible_label") or "").strip()
+        })
+        if all(item.get("axes") for item in controls):
+            merged["axes"] = sorted({
+                str(axis).strip()
+                for item in controls for axis in (item.get("axes") or [])
+                if str(axis or "").strip()
+            })
+        else:
+            merged.pop("axes", None)
+        options: dict[str, object] = {}
+        for option in merged.get("options") or []:
+            options.setdefault(stable_value(option), deepcopy(option))
+        for item in sorted(controls, key=stable_value):
+            for option in item.get("options") or []:
+                options.setdefault(stable_value(option), deepcopy(option))
+        if options:
+            merged["options"] = list(options.values())
+        if any(item.get("required") is True for item in controls):
+            merged["required"] = True
+        else:
+            verified_optional = next((
+                item for item in controls
+                if item.get("required") is False
+                and item.get("required_convention_confirmed") is True
+                and item.get("label_region_complete") is True
+            ), None)
+            if verified_optional is not None:
+                merged.update({
+                    "required": False,
+                    "required_convention_confirmed": True,
+                    "label_region_complete": True,
+                })
+            else:
+                merged.pop("required", None)
+        return merged
 
     def screenshot_business_type(control: dict, proposed: object) -> str:
         kind = str(control.get("control_kind") or "").strip().lower()
@@ -1335,7 +1461,7 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             return proposed_type if proposed_type in {"number", "integer"} else "number"
         if kind in {"date", "datetime", "time"}:
             return kind
-        if kind in {"select", "combobox", "radio", "cascader", "tree_select"}:
+        if kind in {"select", "combobox", "radio", "cascader", "picker", "tree_select"}:
             return "list-enum" if control.get("multiple") else "enum"
         if kind in {"checkbox", "switch"}:
             if kind == "checkbox" and (control.get("multiple") or control.get("options")):
@@ -1411,10 +1537,10 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             semantic_token(field.get("business_name")),
             semantic_token(field.get("label")),
             semantic_token(control.get("visible_label")),
+            *(semantic_token(value) for value in (control.get("visible_labels") or [])),
         }
         labels.discard("")
         visible_value = control.get("visible_value")
-        requested_step = str(field.get("step_id") or "")
         compatible_types = {
             "text": {"string", "text", "textarea", "email", "url"},
             "textarea": {"string", "text", "textarea"},
@@ -1435,6 +1561,16 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             "upload": {"string", "array", "file"},
             "file": {"string", "array", "file"},
         }.get(str(control.get("control_kind") or "").lower(), set())
+        unique_value_ref: tuple[str, str] | None = None
+        if visible_value not in (None, ""):
+            value_refs = [
+                (str(step.step_id), normalized_path(param.path))
+                for step, param in field_candidates
+                if (str(step.step_id), normalized_path(param.path)) not in assigned
+                and str(visible_value) == str(getattr(param, "value", ""))
+            ]
+            if len(value_refs) == 1:
+                unique_value_ref = value_refs[0]
         ranked: list[tuple[int, str, str, object, object, list[str]]] = []
         for step, param in field_candidates:
             ref = (str(step.step_id), normalized_path(param.path))
@@ -1452,9 +1588,6 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             ):
                 score += 55
                 reasons.append("label_related")
-            if requested_step and requested_step == str(step.step_id):
-                score += 20
-                reasons.append("step_hint")
             recorded_value_match = bool(
                 visible_value not in (None, "")
                 and str(visible_value) == str(getattr(param, "value", ""))
@@ -1468,6 +1601,9 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             }:
                 score += 35
                 reasons.append("control_type")
+                if ref == unique_value_ref:
+                    score += 40
+                    reasons.append("unique_recorded_value")
             page_id = str(control.get("page_id") or control.get("frame_id") or "")
             source_meta = getattr(step, "source_meta", None) or {}
             if page_id and page_id in {
@@ -1489,11 +1625,29 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
     unresolved = list(semantic.get("unresolved_items") or []) if isinstance(semantic.get("unresolved_items"), list) else []
     fields = []
     assigned_field_refs: set[tuple[str, str]] = set()
-    for raw_field in semantic.get("field_semantics") or []:
+    planned_public_names: dict[tuple[str, str], str] = {}
+    raw_field_semantics = semantic.get("field_semantics") or []
+    proposed_name_tokens = [
+        semantic_token(item.get("public_name") or item.get("business_name") or item.get("label"))
+        for item in raw_field_semantics
+        if isinstance(item, dict)
+    ]
+    for raw_field in raw_field_semantics:
         if not isinstance(raw_field, dict):
             continue
         field = deepcopy(raw_field)
         evidence = normalized_evidence(field.get("evidence"))
+        for evidence_item in evidence:
+            if str(evidence_item.get("source") or "").lower() != "screenshot":
+                continue
+            for key in (
+                "screenshot_name", "visible_label", "control_kind", "editable",
+                "disabled", "read_only", "multiple", "required", "options",
+                "visible_value", "page_id", "frame_id",
+                "required_convention_confirmed", "label_region_complete",
+            ):
+                if evidence_item.get(key) in (None, "") and field.get(key) not in (None, ""):
+                    evidence_item[key] = deepcopy(field[key])
         control = screenshot_control(evidence)
         step_id = str(field.get("step_id") or "")
         path = str(field.get("wire_path") or field.get("path") or "")
@@ -1506,15 +1660,20 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
         if param is not None and exact_ref in assigned_field_refs:
             param = None
             matched_step = None
-        if param is None and screenshot_count and control is not None:
+        if screenshot_count and control is not None:
             matched = match_screenshot_field(field, control, assigned_field_refs)
             if matched is not None:
                 matched_step, param, match_score, match_reasons = matched
                 step_id = str(matched_step.step_id)
                 path = str(param.path)
+            # A unique recorded step/path remains authoritative when the image
+            # matcher has no stronger unique candidate. Repeated labels and
+            # scalar values across query/submit steps must not erase that ref.
         if param is None or matched_step is None:
             unresolved.append({
-                "type": "unmatched_field",
+                "kind": "unmatched_field",
+                "status": "unmatched",
+                "blocking": False,
                 "step_id": step_id,
                 "wire_path": path,
                 "visible_label": str((control or {}).get("visible_label") or field.get("public_name") or ""),
@@ -1540,8 +1699,6 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                 if key in field and evidence_item.get(key) in (None, ""):
                     evidence_item[key] = deepcopy(field[key])
         field["evidence"] = evidence
-        if control is not None:
-            field["business_type"] = screenshot_business_type(control, field.get("business_type"))
         current_category = str(getattr(param, "category", None) or "")
         current_source_kind = str(getattr(param, "source_kind", None) or "")
         manual_contract = bool(getattr(param, "locked", False))
@@ -1552,10 +1709,99 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                 "source_kind", "source",
             )
         )
-        control_kind = str((control or {}).get("control_kind") or "").lower()
+        manual_required_contract = manual_contract or _param_field_manually_edited(
+            param, "required",
+        )
+        control_kind_conflict = bool((control or {}).get("control_kind_conflict"))
+        control_kind = (
+            "" if control_kind_conflict
+            else str((control or {}).get("control_kind") or "").lower()
+        )
         option_control = control_kind in {
             "select", "combobox", "cascader", "picker", "radio", "tree_select",
         } or bool(control_kind == "checkbox" and control.get("options"))
+        visible_options = control.get("options") if control is not None else None
+        visible_option_values: set[str] = set()
+        visible_option_pairs: list[tuple[str, str]] = []
+        explicit_option_mapping = bool(isinstance(visible_options, list) and visible_options)
+        if isinstance(visible_options, list):
+            for option in visible_options:
+                if isinstance(option, dict):
+                    label = option.get("label")
+                    value = option.get("value")
+                    explicit_option_mapping = bool(
+                        explicit_option_mapping
+                        and label not in (None, "")
+                        and value not in (None, "")
+                    )
+                    if value not in (None, ""):
+                        visible_option_values.add(str(value))
+                    if label not in (None, "") and value not in (None, ""):
+                        visible_option_pairs.append((str(label), str(value)))
+                elif str(option or "").strip():
+                    explicit_option_mapping = False
+                    visible_option_values.add(str(option))
+                else:
+                    explicit_option_mapping = False
+        grounded_option_map = {
+            str(label): str(value)
+            for label, value in (getattr(param, "enum_value_map", None) or {}).items()
+        }
+
+        def add_grounded_options(options: object) -> None:
+            if not isinstance(options, list):
+                return
+            for option in options:
+                if isinstance(option, dict):
+                    label, value = option.get("label"), option.get("value")
+                elif isinstance(option, (list, tuple)) and len(option) >= 2:
+                    label, value = option[0], option[1]
+                else:
+                    continue
+                if label not in (None, "") and value not in (None, ""):
+                    grounded_option_map.setdefault(str(label), str(value))
+
+        add_grounded_options(getattr(param, "enum_options", None))
+        for select in getattr(matched_step, "selects", None) or []:
+            if str(param.path) not in {
+                str(getattr(select, "path", "") or ""),
+                str(getattr(select, "id_path", "") or ""),
+            }:
+                continue
+            grounded_option_map.update({
+                str(label): str(value)
+                for label, value in (getattr(select, "option_map", None) or {}).items()
+            })
+            add_grounded_options(getattr(select, "options", None))
+
+        recorded_value = str(getattr(param, "value", "") or "")
+        mapping_grounded = bool(
+            explicit_option_mapping
+            and len(visible_option_pairs) == len(visible_options or [])
+            and all(grounded_option_map.get(label) == value for label, value in visible_option_pairs)
+        )
+        page_enum_executable = bool(
+            isinstance(visible_options, list)
+            and len(visible_options) >= 2
+            and mapping_grounded
+            and recorded_value
+            and recorded_value in visible_option_values
+        )
+        current_option_contract = current_source_kind in {
+            "api_option", "page_enum", "static_enum", "manual_enum", "form_option",
+        }
+        control_axes = {
+            str(axis).strip() for axis in ((control or {}).get("axes") or [])
+            if str(axis or "").strip()
+        }
+
+        def control_supports(axis: str) -> bool:
+            return control is not None and (not control_axes or axis in control_axes)
+
+        if control_supports("type") and not control_kind_conflict:
+            field["business_type"] = screenshot_business_type(
+                control, field.get("business_type"),
+            )
         if manual_source_contract and current_category not in {"", "unknown"}:
             field["category"] = current_category
         if manual_source_contract and current_source_kind not in {"", "unknown"}:
@@ -1564,49 +1810,96 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             field.get("confidence"),
             0.0,
         )
+        if control is not None and match_score >= 80:
+            field["confidence"] = max(field["confidence"], 0.8)
         if control is not None:
-            if "required" not in field and isinstance(control.get("required"), bool):
-                field["required"] = control["required"]
-            if option_control and not isinstance(field.get("enum_options"), list):
-                visible_options = control.get("options")
-                if isinstance(visible_options, list):
+            safe_optional = bool(
+                control.get("required") is False
+                and control.get("required_convention_confirmed") is True
+                and control.get("label_region_complete") is True
+            )
+            if manual_required_contract:
+                field["required"] = bool(param.required)
+            elif control_supports("required") and (
+                control.get("required") is True or safe_optional
+            ):
+                field["required"] = bool(control["required"])
+            if option_control and (
+                control_supports("type") or control_supports("source")
+            ):
+                if page_enum_executable and not current_option_contract:
                     field["enum_options"] = deepcopy(visible_options)
+                else:
+                    field.pop("enum_options", None)
         if screenshot_count:
             statuses = field.get("axis_status") if isinstance(field.get("axis_status"), dict) else {}
             if control is not None:
-                declared_axes = {
-                    str(axis).strip() for axis in (control.get("axes") or [])
-                    if str(axis or "").strip()
-                }
                 def supports(axis: str) -> bool:
-                    return not declared_axes or axis in declared_axes
-                if supports("type"):
+                    return control_supports(axis)
+                if supports("type") and not control_kind_conflict:
                     statuses["type"] = "image_matched"
-                visible_label = str(control.get("visible_label") or "").strip()
-                if visible_label:
+                if control_kind_conflict:
+                    unresolved.append({
+                        "kind": "control_type_conflict",
+                        "status": "advisory",
+                        "blocking": False,
+                        "step_id": step_id,
+                        "wire_path": str(param.path),
+                        "axis": "type",
+                        "reason": "同强度截图对控件类型的证据冲突，保留录制类型",
+                    })
+                visible_label = str(
+                    control.get("visible_label") or field.get("public_name") or ""
+                ).strip()
+                if supports("name") and visible_label:
                     field["public_name"] = visible_label
-                if supports("name") and str(field.get("public_name") or "").strip():
                     statuses["name"] = "image_matched"
-                if supports("required") and isinstance(control.get("required"), bool):
+                safe_optional = bool(
+                    control.get("required") is False
+                    and control.get("required_convention_confirmed") is True
+                    and control.get("label_region_complete") is True
+                )
+                if manual_required_contract:
+                    statuses["required"] = "locked"
+                elif supports("required") and (
+                    control.get("required") is True or safe_optional
+                ):
                     statuses["required"] = "image_matched"
-                if (
-                    supports("category")
-                    and supports("source")
-                    and control.get("editable") is True
+                elif supports("required"):
+                    statuses.pop("required", None)
+                editable_control = bool(
+                    control.get("editable") is True
                     and not control.get("disabled")
                     and not control.get("read_only")
                     and not manual_source_contract
-                ):
+                )
+                if editable_control and supports("category"):
                     field["category"] = "user_param"
-                    field["source_kind"] = (
-                        current_source_kind
-                        if option_control and current_source_kind in {
-                            "api_option", "page_enum", "static_enum", "manual_enum", "form_option",
-                        }
-                        else "page_enum" if option_control else "user_input"
-                    )
                     statuses["category"] = "image_matched"
-                    statuses["source"] = "image_matched"
+                if editable_control and supports("source") and not control_kind_conflict:
+                    if not option_control:
+                        field["source_kind"] = "user_input"
+                        statuses["source"] = "image_matched"
+                    elif current_source_kind in {
+                        "api_option", "page_enum", "static_enum", "manual_enum", "form_option",
+                    }:
+                        field["source_kind"] = current_source_kind
+                        statuses["source"] = "preserved_fact"
+                    elif page_enum_executable:
+                        field["source_kind"] = "page_enum"
+                        statuses["source"] = "image_matched"
+                    else:
+                        field["source_kind"] = current_source_kind or "unknown"
+                        statuses["source"] = "preserved_fact"
+                        unresolved.append({
+                            "kind": "enum_mapping",
+                            "status": "advisory",
+                            "blocking": False,
+                            "step_id": step_id,
+                            "wire_path": str(param.path),
+                            "axis": "source",
+                            "reason": "截图仅证明该字段是选择控件，未证明显示标签到接口值的映射",
+                        })
             preserved_axes = []
             resolved = {"grounded", "image_matched", "preserved_fact", "locked"}
             preserved_values = {
@@ -1619,6 +1912,30 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                 "required": ("required", bool(param.required)),
             }
             for axis, (key, value) in preserved_values.items():
+                # Screenshot values help identify the recorded field but never
+                # replace the executable request sample/default.
+                unsupported_screenshot_axis = bool(
+                    control is None
+                    or (
+                        not control_supports(axis)
+                        or (axis == "type" and control_kind_conflict)
+                    )
+                )
+                if axis in {"path", "default_value"} or unsupported_screenshot_axis:
+                    field[key] = value
+                    statuses[axis] = (
+                        "locked"
+                        if (
+                            (axis == "required" and manual_required_contract)
+                            or (
+                                axis in {"category", "source"}
+                                and manual_source_contract
+                            )
+                        )
+                        else "preserved_fact"
+                    )
+                    preserved_axes.append(axis)
+                    continue
                 raw_status = statuses.get(axis)
                 status = raw_status.get("status") if isinstance(raw_status, dict) else raw_status
                 if str(status or "") not in resolved:
@@ -1631,7 +1948,66 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                     "kind": "preserved_fact",
                     "axes": preserved_axes,
                 })
+            if control is not None:
+                screenshot_axes = [
+                    axis for axis, status in statuses.items()
+                    if status == "image_matched"
+                ]
+                control["axes"] = list(dict.fromkeys([
+                    *(control.get("axes") or []), *screenshot_axes,
+                ]))
+            proposed_name = str(field.get("public_name") or "").strip()
+            selected_name = ""
+            for candidate_name in (
+                proposed_name,
+                str(param.label or "").strip(),
+                str(param.key or "").strip(),
+                str(param.path or "").strip(),
+            ):
+                token = semantic_token(candidate_name)
+                if not token:
+                    continue
+                conflicts_with_recorded = any(
+                    other is not param
+                    and token in {
+                        semantic_token(getattr(other, "key", "")),
+                        semantic_token(getattr(other, "label", "")),
+                    }
+                    for other in (getattr(matched_step, "params", None) or [])
+                )
+                recorded_name_reassigned = any(
+                    old_token
+                    and old_token != token
+                    and proposed_name_tokens.count(old_token) == 1
+                    for old_token in {
+                        semantic_token(getattr(param, "key", "")),
+                        semantic_token(getattr(param, "label", "")),
+                    }
+                )
+                owner = planned_public_names.get((step_id, token))
+                if (conflicts_with_recorded and not recorded_name_reassigned) or (
+                    owner and owner != normalized_path(param.path)
+                ):
+                    continue
+                selected_name = candidate_name
+                break
+            field["public_name"] = selected_name or str(param.path)
+            if field["public_name"] != proposed_name:
+                statuses["name"] = "preserved_fact"
+            planned_public_names[(step_id, semantic_token(field["public_name"]))] = normalized_path(param.path)
             field["axis_status"] = statuses
+            if control is not None:
+                evidence[:] = [
+                    item for item in evidence
+                    if not (isinstance(item, dict) and item.get("canonical_screenshot_control") is True)
+                ]
+                evidence.append({
+                    **deepcopy(control),
+                    "source": "screenshot",
+                    "kind": "canonical_screenshot_control",
+                    "canonical_screenshot_control": True,
+                })
+                field["evidence"] = evidence
         fields.append(field)
     semantic["field_semantics"] = fields
 
@@ -1677,15 +2053,37 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             candidate = str(match.group(1) if match else "")
             return candidate if candidate in step_by_id else ""
 
+        capability_execute_ids = {
+            normalized_membership_step_id(value)
+            for value in raw_steps
+        }
+        for raw_ref in raw_memberships:
+            ref = raw_ref if isinstance(raw_ref, dict) else {"step_id": raw_ref}
+            if str(ref.get("usage") or "execute") == "option_source":
+                continue
+            capability_execute_ids.add(normalized_membership_step_id(
+                ref.get("step_id") or ref.get("request_step_id") or ref.get("id") or ""
+            ))
+        for key in ("anchor_step_id", "entry_step_id", "primary_step_id", "primary_step"):
+            capability_execute_ids.add(normalized_membership_step_id(capability.get(key)))
+        capability_execute_ids.discard("")
+
+        def grounded_option_membership(step_id: str) -> bool:
+            return bool(
+                option_source_consumers.get(step_id, set()) & capability_execute_ids
+            )
+
         def inferred_usage(step_id: str) -> str:
-            if step_id in option_source_ids:
-                return "option_source"
             meta = getattr(step_by_id[step_id], "source_meta", None) or {}
             semantic_role = str(
                 meta.get("role")
                 or getattr(step_by_id[step_id], "semantic_role", None)
                 or ""
             ).lower()
+            if semantic_role == "business_get":
+                return "execute"
+            if semantic_role in {"read_option", "option_source", "explicit_read_option"}:
+                return "option_source"
             if (
                 semantic_role in {"preflight", "process_definition", "definition_lookup"}
                 or meta.get("control_preflight_for_write")
@@ -1693,6 +2091,8 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
                 return "preflight"
             if semantic_role in {"fact_check", "approval_preview", "validation"}:
                 return "fact_check"
+            if step_id in option_source_ids:
+                return "option_source"
             return "execute"
 
         def add_membership(value, *, default_usage: str | None = None) -> None:  # noqa: ANN001
@@ -1717,7 +2117,10 @@ def _normalize_recording_plan_submission(raw_plan: dict, spec) -> dict:  # noqa:
             # authoritative in both directions; a model usage is considered
             # only for legacy facts that have no recorded role at all.
             usage = (
-                grounded_usage
+                "option_source"
+                if requested_usage == "option_source"
+                and grounded_option_membership(step_id)
+                else grounded_usage
                 if recorded_role or step_id in option_source_ids
                 else requested_usage
             )

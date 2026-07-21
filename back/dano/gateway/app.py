@@ -166,7 +166,8 @@ def _recording_plan_protocol_guidance(*, has_screenshots: bool) -> str:
         "datetime,time,select,combobox,cascader,picker,checkbox,radio,switch,slider,upload,file,tree_select. "
         "Use enum/list-enum for single/multiple choice business types while preserving the recorded wire type. "
         "Analyze every screenshot separately. Emit field_semantics only when a control can be matched reliably; "
-        "an unmatched control is a non-blocking unresolved item, not a reason to reject other corrections. Provide "
+        "an unmatched visible control must be emitted as a non-blocking unresolved item "
+        "{kind:'unmatched_field',status:'unmatched',blocking:false}, and is not a reason to reject other corrections. Provide "
         "step_id and wire_path only as recorded-field hints; the backend owns the final one-to-one match. A red "
         "asterisk or explicit required marker means required=true. required=false needs either explicit DOM/form "
         "validation evidence or a complete label region plus a confirmed required-marker convention. Textarea/text/date/number controls must not be "
@@ -211,11 +212,7 @@ def _verified_pi_image_count(result: dict, expected: int) -> int:
         delivered = int(result.get("image_count") or 0)
     except (TypeError, ValueError):
         delivered = -1
-    if delivered != expected:
-        raise RuntimeError(
-            f"截图证据未完整送达 Pi 模型：expected={expected}, delivered={delivered}"
-        )
-    return delivered
+    return max(delivered, 0)
 
 
 def _analysis_field_coverage(after) -> dict:
@@ -243,10 +240,6 @@ def _analysis_field_coverage(after) -> dict:
         (str(item.get("step_id") or ""), str(item.get("wire_path") or item.get("path") or "")): item
         for item in field_items
     }
-    covered = {
-        (str(item.get("step_id") or ""), str(item.get("wire_path") or item.get("path") or ""))
-        for item in field_items
-    } & actual_refs
     image_matched = {
         (str(item.get("step_id") or ""), str(item.get("wire_path") or item.get("path") or ""))
         for item in field_items
@@ -304,6 +297,7 @@ def _analysis_field_coverage(after) -> dict:
         item.setdefault("evidence", [])
         item.setdefault("reason", "缺少可验证证据")
         item.setdefault("suggested_action", "定位目标并补充证据或人工确认")
+        item.setdefault("blocking", False)
         normalized.append(item)
 
     rejected = [
@@ -331,17 +325,13 @@ def _analysis_field_coverage(after) -> dict:
                 "axes": list(dict.fromkeys(locked_axes)),
                 "target": {"kind": "param", "step_id": step_id, "path": path},
             })
+    # A screenshot is intentionally partial. Fields outside the captured region
+    # are not failed matches; only an explicitly reported visible-but-unmatched
+    # control belongs in this list.
     unmatched_fields = [
-        {
-            "step_id": step_id,
-            "path": path,
-            "name": actual[(step_id, path)].label or actual[(step_id, path)].key or path,
-            "missing_axes": ["path", "name", "default_value", "type", "category", "source", "required"],
-            "reason": "分析结果中没有该请求字段的语义记录",
-            "suggested_action": "定位字段并补充截图证据或人工确认七项字段语义",
-            "target": {"kind": "param", "step_id": step_id, "path": path},
-        }
-        for step_id, path in sorted(actual_refs - covered)
+        item for item in normalized
+        if str(item.get("kind") or "").lower() == "unmatched_field"
+        or str(item.get("status") or "").lower() == "unmatched"
     ]
     issue_groups: dict[str, list[dict]] = {}
     for item in unresolved:
@@ -393,14 +383,21 @@ def _analysis_application_report(
     )
     analysis_kind = "incremental" if previous_application else "initial"
     semantic_coverage = dict(
-        ((getattr(after, "meta", None) or {}).get("capability_model") or {}).get("semantic_coverage") or {}
+        ((getattr(after, "meta", None) or {}).get("capability_model") or {}).get(
+            "semantic_coverage"
+        ) or {}
     )
     incomplete = bool(
         screenshots
         and (
-            semantic_coverage.get("complete") is False
-            or field_coverage["unmatched_field_count"]
-            or field_coverage["unresolved_field_count"]
+            field_coverage["unmatched_field_count"]
+            or field_coverage["rejected_field_count"]
+            or any(item.get("blocking") is True for item in field_coverage["unresolved_items"])
+            or operation_report.get("edit_errors")
+            or (
+                semantic_coverage.get("complete") is False
+                and not field_coverage["matched_field_count"]
+            )
         )
     )
     status = (
@@ -691,11 +688,15 @@ class _WebSocketSendQueue:
                 try:
                     await self._ws.send_json(message)
                 except BaseException as exc:
-                    self._failure = exc
+                    failure = (
+                        exc if isinstance(exc, WebSocketDisconnect)
+                        else WebSocketDisconnect(code=1006)
+                    )
+                    self._failure = failure
                     self._closed = True
                     if acknowledged is not None and not acknowledged.done():
-                        acknowledged.set_exception(exc)
-                    self._reject_pending(exc)
+                        acknowledged.set_exception(failure)
+                    self._reject_pending(failure)
                     return
                 else:
                     if acknowledged is not None and not acknowledged.done():
@@ -738,9 +739,7 @@ async def _recording_operation_keepalive(
     operation_id: str,
     interval: float = 12.0,
 ):  # noqa: ANN001, ANN202
-    """Keep a long Pi operation visible to proxies without changing its result."""
-    owner = asyncio.current_task()
-    send_failure: list[BaseException] = []
+    """Keep a long Pi operation visible without tying it to the transport."""
 
     async def emit_progress() -> None:
         sequence = 0
@@ -753,10 +752,7 @@ async def _recording_operation_keepalive(
                     "operation_id": operation_id,
                     "sequence": sequence,
                 })
-            except Exception as exc:  # noqa: BLE001
-                send_failure.append(exc)
-                if owner is not None:
-                    owner.cancel()
+            except Exception:  # noqa: BLE001
                 return
             await asyncio.sleep(interval)
 
@@ -765,13 +761,63 @@ async def _recording_operation_keepalive(
     )
     try:
         yield
-    except asyncio.CancelledError:
-        if send_failure:
-            raise send_failure[0]
-        raise
     finally:
         keepalive.cancel()
         await asyncio.gather(keepalive, return_exceptions=True)
+
+
+async def _await_operation_while_draining_recording_input(
+    operation, incoming_messages: asyncio.Queue, handle_live_message,
+    deferred: list[object] | None = None,
+):  # noqa: ANN001, ANN202
+    """Keep browser input responsive while a long model operation runs."""
+    operation_task = asyncio.create_task(operation)
+    deferred_messages = deferred if deferred is not None else []
+    receive_task: asyncio.Task | None = None
+    transport_closed = False
+    ordering_barrier = False
+    try:
+        while not operation_task.done() and not transport_closed:
+            receive_task = asyncio.create_task(incoming_messages.get())
+            completed, _pending = await asyncio.wait(
+                {operation_task, receive_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if receive_task in completed:
+                incoming = receive_task.result()
+                receive_task = None
+                if isinstance(incoming, BaseException):
+                    deferred_messages.append(incoming)
+                    transport_closed = True
+                elif ordering_barrier:
+                    deferred_messages.append(incoming)
+                else:
+                    try:
+                        handled = await handle_live_message(incoming)
+                    except BaseException:
+                        deferred_messages.append(incoming)
+                        raise
+                    if not handled:
+                        deferred_messages.append(incoming)
+                        ordering_barrier = True
+            if operation_task in completed:
+                break
+        return await operation_task, deferred_messages
+    except BaseException:
+        if not operation_task.done():
+            operation_task.cancel()
+            await asyncio.gather(operation_task, return_exceptions=True)
+        raise
+    finally:
+        if receive_task is not None:
+            if receive_task.done():
+                try:
+                    deferred_messages.append(receive_task.result())
+                except BaseException as exc:  # queue cancellation is still transport state
+                    deferred_messages.append(exc)
+            else:
+                receive_task.cancel()
+                await asyncio.gather(receive_task, return_exceptions=True)
 
 
 @asynccontextmanager
@@ -1197,11 +1243,27 @@ async def record_ws(ws: WebSocket) -> None:
     pending_flow_spec = None
     costly_operation_results: dict[str, dict] = {}
     _checkpoint_resume = None
+    receiver_task: asyncio.Task | None = None
     try:
         init = await ws.receive_json()
         if init.get("type") != "start" or not init.get("start_url"):
             await sender.send_json({"type": "error", "detail": "首帧须为 {type:'start', start_url, ...}"})
             return
+        incoming_messages: asyncio.Queue = asyncio.Queue()
+        async def receive_pump() -> None:
+            """Drain ASGI messages while Pi is busy so its small queue cannot overflow."""
+            try:
+                while True:
+                    await incoming_messages.put(await ws.receive_json())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                await incoming_messages.put(exc)
+                # Do not cancel an accepted plan when its transport disappears.
+                # The owner checkpoints/caches the result, consumes this sentinel,
+                # then releases the lease so a reconnect can replay that result.
+
+        receiver_task = asyncio.create_task(receive_pump())
         requested_action = str(init.get("resume_action") or "")
         session_action = (
             requested_action
@@ -1343,32 +1405,76 @@ async def record_ws(ws: WebSocket) -> None:
             costly_operation_results[key] = response
             _checkpoint_resume()
 
+        async def _send_live_message(payload: dict) -> None:
+            try:
+                await sender.send_json(payload)
+            except WebSocketDisconnect:
+                # The accepted model operation owns the authoritative result;
+                # losing its transport must not cancel that work.
+                return
+
+        async def _dispatch_recording_input(event: dict) -> None:
+            try:
+                input_result = await sess.dispatch_input(event)
+            except Exception as exc:  # noqa: BLE001 - one browser event is recoverable
+                await _send_live_message({
+                    "type": "input_error",
+                    "detail": str(exc) or exc.__class__.__name__,
+                    "event": event,
+                    "kind": event.get("kind"),
+                    "recoverable": True,
+                    "error_type": exc.__class__.__name__,
+                })
+                return
+            if isinstance(input_result, dict) and not input_result.get("ok", True):
+                await _send_live_message({
+                    "type": "input_error",
+                    "detail": str(input_result.get("error") or "浏览器输入事件执行失败"),
+                    "event": event,
+                    "kind": input_result.get("kind") or event.get("kind"),
+                    "recoverable": bool(input_result.get("recoverable", True)),
+                    "error_type": input_result.get("error_type") or "InputDispatchError",
+                })
+
+        async def _pause_recording_capture() -> None:
+            await sess.flush_recording()
+            sess.pause_recording()
+            resume_state["recording_paused"] = True
+            _checkpoint_resume(storage_state=await sess.storage_state())
+            await _send_live_message({"type": "stopped", "connection_retained": True})
+
+        async def _handle_live_recording_message(message: dict) -> bool:
+            message_type = message.get("type")
+            if message_type == "input":
+                await _dispatch_recording_input(message.get("event") or {})
+                return True
+            if message_type == "ping":
+                await _send_live_message({"type": "pong", "at": message.get("at")})
+                return True
+            if message_type == "stop":
+                await _pause_recording_capture()
+                return True
+            return False
+
+        async def _responsive_prompt(prompt) -> object:  # noqa: ANN001
+            result, _deferred = await _await_operation_while_draining_recording_input(
+                prompt, incoming_messages, _handle_live_recording_message, deferred_messages,
+            )
+            return result
+
+        deferred_messages: list[object] = []
+
         while True:
-            msg = await ws.receive_json()
+            incoming = (
+                deferred_messages.pop(0)
+                if deferred_messages else await incoming_messages.get()
+            )
+            if isinstance(incoming, BaseException):
+                raise incoming
+            msg = incoming
             t = msg.get("type")
             if t == "input":
-                event = msg.get("event") or {}
-                try:
-                    input_result = await sess.dispatch_input(event)
-                except Exception as exc:  # noqa: BLE001 - one bad browser event must not end the session
-                    await sender.send_json({
-                        "type": "input_error",
-                        "detail": str(exc) or exc.__class__.__name__,
-                        "event": event,
-                        "kind": event.get("kind"),
-                        "recoverable": True,
-                        "error_type": exc.__class__.__name__,
-                    })
-                    continue
-                if isinstance(input_result, dict) and not input_result.get("ok", True):
-                    await sender.send_json({
-                        "type": "input_error",
-                        "detail": str(input_result.get("error") or "浏览器输入事件执行失败"),
-                        "event": event,
-                        "kind": input_result.get("kind") or event.get("kind"),
-                        "recoverable": bool(input_result.get("recoverable", True)),
-                        "error_type": input_result.get("error_type") or "InputDispatchError",
-                    })
+                await _dispatch_recording_input(msg.get("event") or {})
             elif t == "reset":
                 await sess.flush_recording()
                 sess.reset()                          # 登录后:丢弃登录步骤,只录业务流程
@@ -1572,7 +1678,7 @@ async def record_ws(ws: WebSocket) -> None:
                             operation="plan",
                             operation_id=operation_id,
                         ):
-                            pi_result = await pi_session.prompt(
+                            pi_result = await _responsive_prompt(pi_session.prompt(
                                 "生成/优化当前录制能力。必须先调用 get_recording_state，完整复核所有已物化接口的能力边界；"
                                 "补入同次操作中遗漏的真实接口，补全占位或空白的能力标题、说明和业务语义，"
                                 "尊重人工删除记录，不得编造接口。最后必须调用 submit_recording_plan。"
@@ -1580,7 +1686,7 @@ async def record_ws(ws: WebSocket) -> None:
                                 + _recording_plan_protocol_guidance(has_screenshots=bool(analysis_screenshots))
                                 + _analysis_screenshot_guidance(analysis_screenshots),
                                 timeout_s=3000,
-                            )
+                            ))
                         delivered_image_count = _verified_pi_image_count(
                             pi_result, len(analysis_screenshots),
                         )
@@ -1602,6 +1708,14 @@ async def record_ws(ws: WebSocket) -> None:
                     operation_warning = str(
                         getattr(pi_session, "last_submission_warning", "") if pi_session else ""
                     )
+                    if delivered_image_count != len(analysis_screenshots):
+                        delivery_warning = (
+                            "截图送达数量与上传数量不一致："
+                            f"uploaded={len(analysis_screenshots)}, delivered={delivered_image_count}"
+                        )
+                        operation_warning = "；".join(filter(None, (
+                            operation_warning, delivery_warning,
+                        )))
                     if operation_warning:
                         analysis_application.update({
                             "status": "needs_review",
@@ -1705,6 +1819,8 @@ async def record_ws(ws: WebSocket) -> None:
                         _remember_costly(msg, response)
                         await sender.send_json(response)
                         continue
+                    except WebSocketDisconnect:
+                        raise
                     except Exception as fallback_error:  # noqa: BLE001
                         log.exception(
                             "recording.operation_fallback_failed",
@@ -1768,11 +1884,11 @@ async def record_ws(ws: WebSocket) -> None:
                     before_operation = pending_flow_spec.model_copy(deep=True)
                     pi_session = await _ensure_recording_pi()
                     pi_session.bind_flow_spec(pending_flow_spec)
-                    await pi_session.prompt(
+                    await _responsive_prompt(pi_session.prompt(
                         "修复当前录制编排。必须先调用 get_validation_report；必要时调用 get_recording_state，"
                         "仅根据当前事实提交可验证的修复，最后必须调用 submit_recording_repair。"
-                        f" recording_id={recording_id}", timeout_s=0
-                    )
+                        f" recording_id={recording_id}"
+                    ))
                     if pi_session.last_submission_kind != "repair":
                         raise RuntimeError("Pi 未提交 recording repair")
                     pending_flow_spec = pi_session.current_flow_spec()
@@ -1800,11 +1916,11 @@ async def record_ws(ws: WebSocket) -> None:
 
                     pi_session = await _ensure_recording_pi()
                     pi_session.bind_flow_spec(pending_flow_spec)
-                    await pi_session.prompt(
+                    await _responsive_prompt(pi_session.prompt(
                         "补全当前录制中仍为技术名或占位名的接口业务名称；保留已有人工业务名称。"
                         "必须先调用 get_recording_state，最后调用 submit_recording_plan。"
-                        f" recording_id={recording_id}", timeout_s=0
-                    )
+                        f" recording_id={recording_id}"
+                    ))
                     if pi_session.last_submission_kind != "plan":
                         raise RuntimeError("Pi 未提交 step naming plan")
                     pending_flow_spec = pi_session.current_flow_spec()
@@ -1826,12 +1942,12 @@ async def record_ws(ws: WebSocket) -> None:
 
                     pi_session = await _ensure_recording_pi()
                     pi_session.bind_flow_spec(pending_flow_spec)
-                    await pi_session.prompt(
+                    await _responsive_prompt(pi_session.prompt(
                         "基于当前已录制接口、字段、依赖和能力生成完整整体说明，写入 semantic_plan 的"
                         " business_understanding.summary；不得改写人工业务文本。必须先调用"
                         " get_recording_state，最后调用 submit_recording_plan。"
-                        f" recording_id={recording_id}", timeout_s=0
-                    )
+                        f" recording_id={recording_id}"
+                    ))
                     if pi_session.last_submission_kind != "plan":
                         raise RuntimeError("Pi 未提交 business description plan")
                     pending_flow_spec = pi_session.current_flow_spec()
@@ -1867,7 +1983,7 @@ async def record_ws(ws: WebSocket) -> None:
                                  errors=summary["errors"],
                                  warnings=summary["warnings"])
             elif t == "ping":
-                await sender.send_json({"type": "pong", "at": msg.get("at")})
+                await _send_live_message({"type": "pong", "at": msg.get("at")})
             elif t == "publish_request":
                 if await _replay_costly(msg):
                     continue
@@ -1975,7 +2091,7 @@ async def record_ws(ws: WebSocket) -> None:
                     pi_session = await _ensure_recording_pi()
                     pi_session.bind_flow_spec(pending_flow_spec)
                     review_version = int((pending_flow_spec.meta or {}).get("current_version") or 0)
-                    await pi_session.prompt(
+                    await _responsive_prompt(pi_session.prompt(
                         "对当前录制发布候选执行最终审核。必须先调用 get_recording_state 和 "
                         "get_validation_report，再通过 submit_recording_review 提交 acceptance、"
                         "security、compliance 三角色结论。每个角色只能包含 passed(bool)、"
@@ -1985,8 +2101,7 @@ async def record_ws(ws: WebSocket) -> None:
                         "destructive/L4 等风险标签拒绝，拒绝必须基于独立、具体且可定位的契约、权限或校验证据。"
                         "提交成功后立即结束，不得再次读取或重复提交。"
                         f" recording_id={recording_id} flow_version={review_version}",
-                        timeout_s=0,
-                    )
+                    ))
                     pi_session.require_publish_review(
                         flow_version=review_version,
                         flow_fingerprint=str(release_candidate["flow_fingerprint"]),
@@ -2079,14 +2194,10 @@ async def record_ws(ws: WebSocket) -> None:
                 _remember_costly(msg, response)
                 await sender.send_json(response)
             elif t == "stop":
-                await sess.flush_recording()
-                sess.pause_recording()
-                resume_state["recording_paused"] = True
-                _checkpoint_resume(storage_state=await sess.storage_state())
                 # Ending capture is not ending the workbench session. Keep the
                 # websocket, browser, draft and Pi context alive for later edits,
                 # screenshot analysis, optimization and publishing.
-                await sender.send_json({"type": "stopped", "connection_retained": True})
+                await _pause_recording_capture()
                 continue
     except asyncio.CancelledError:
         log.info(
@@ -2112,6 +2223,9 @@ async def record_ws(ws: WebSocket) -> None:
         except Exception:  # noqa: BLE001
             pass
     finally:
+        if receiver_task is not None:
+            receiver_task.cancel()
+            await asyncio.gather(receiver_task, return_exceptions=True)
         if _checkpoint_resume is not None and sess is not None and session_action and resume_state is not None and (
             int(resume_state.get("connection_generation") or 0) == resume_generation
         ):

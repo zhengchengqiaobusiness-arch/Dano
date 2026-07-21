@@ -1477,6 +1477,10 @@ def test_semantic_coverage_accepts_only_resolved_seven_axis_contracts():
         "kind": "field_axis", "step_id": "submit", "path": "days",
         "axis": "required", "reason": "required marker not visible",
     }]
+    advisory = flow_spec_module._semantic_plan_coverage(spec, result)
+    assert advisory["complete"] is True
+
+    result["semantic_plan"]["unresolved_items"][0]["blocking"] = True
     blocked = flow_spec_module._semantic_plan_coverage(spec, result)
     assert blocked["complete"] is False
     assert "unresolved_blockers" in blocked["missing"]
@@ -2232,6 +2236,23 @@ def test_empty_api_candidates_are_valid_and_do_not_emit_dynamic_enum_warning():
 
     assert not any("动态枚举缺少可执行的实时来源接口" in message for message in messages)
     assert not any("标记为接口选项，但缺少可执行" in message for message in messages)
+
+
+def test_empty_page_enum_without_a_wire_mapping_returns_to_user_input():
+    param = ParamField(
+        path="status", key="流程状态", value="1", type="enum", wire_type="string",
+        category="user_param", source_kind="page_enum",
+        enum_options=None, enum_value_map=None,
+    )
+
+    synchronized = sync_flow_spec_models(FlowSpec(steps=[FlowStep(
+        step_id="submit", method="POST", path="/apply", params=[param],
+    )]))
+    repaired = synchronized.steps[0].params[0]
+
+    assert repaired.type == "string"
+    assert repaired.source_kind == "user_input"
+    assert repaired.enum_options is None
 
 
 def test_option_endpoint_unmatched_filters_are_constants_but_recorded_search_is_input():
@@ -3202,7 +3223,7 @@ def test_screenshot_textarea_replaces_stale_automatic_api_option_binding():
     assert [binding.path for binding in optimized.steps[0].selects] == ["sealId"]
 
 
-def test_screenshot_select_replaces_stale_text_input_with_visible_page_enum():
+def test_screenshot_select_without_grounded_wire_map_keeps_executable_source_safe():
     spec = FlowSpec(
         steps=[FlowStep(
             step_id="submit", method="POST", path="/api/request/submit",
@@ -3230,7 +3251,78 @@ def test_screenshot_select_replaces_stale_text_input_with_visible_page_enum():
             "evidence": [{
                 "source": "screenshot", "screenshot_name": "request.png",
                 "visible_label": "申请类型", "control_kind": "select", "editable": True,
-                "required": True, "visible_value": "年假", "options": ["年假", "事假"],
+                "required": True, "visible_value": "年假", "options": [
+                    {"label": "年假", "value": "annual"},
+                    {"label": "事假", "value": "personal"},
+                ],
+            }],
+        }],
+        "capabilities": [{
+            "name": "submit_request", "title": "提交申请", "intent": "提交申请",
+            "kind": "submit", "step_ids": ["submit"],
+        }],
+        "capability_relations": [], "unresolved_items": [],
+    }, "ops": []}
+
+    normalized = agent_tools_module._normalize_recording_plan_submission(submission, spec)
+    semantic_field = normalized["semantic_plan"]["field_semantics"][0]
+    assert semantic_field["business_type"] == "enum"
+    assert semantic_field["source_kind"] == "user_input"
+    assert any(
+        item.get("kind") == "enum_mapping"
+        for item in normalized["semantic_plan"]["unresolved_items"]
+    )
+    optimized = asyncio.run(orchestrate_flow_capabilities(
+        spec, submission=normalized, generation_mode="optimize",
+    ))
+    field = optimized.steps[0].params[0]
+
+    assert (field.key, field.type, field.wire_type) == ("申请类型", "enum", "string")
+    assert (field.category, field.source_kind) == ("user_param", "user_input")
+    assert field.required is True
+    assert field.default_value is None
+    assert field.enum_options is None
+
+
+def test_screenshot_name_and_recorded_value_can_recover_unique_api_option_source():
+    option_source = FlowStep(
+        step_id="people", method="GET", path="/api/system/user/page",
+        response_json={"data": {"list": [
+            {"id": 145, "name": "财务A"},
+            {"id": 148, "name": "审批B"},
+        ]}},
+        source_meta={"role": "read_option"},
+    )
+    submit = FlowStep(
+        step_id="submit", method="POST", path="/api/request/submit",
+        params=[ParamField(
+            path="assigneeId", key="unknownAssignee", label="unknownAssignee",
+            value=145, type="number", wire_type="number",
+            category="user_param", source_kind="user_input",
+        )],
+        source_meta={"role": "business_write"},
+    )
+    spec = FlowSpec(
+        steps=[option_source, submit],
+        capabilities=[FlowCapability(
+            name="submit_request", title="Submit request", intent="Submit request",
+            kind="submit", nodes=[{"id": "call", "type": "call", "step_id": "submit"}],
+        )],
+    )
+    submission = {"_analysis_screenshot_count": 1, "semantic_plan": {
+        "business_understanding": {"summary": "Submit request"},
+        "request_roles": [
+            {"step_id": "people", "role": "read_option", "name": "人员候选", "reason": "录制事实"},
+            {"step_id": "submit", "role": "business_write", "name": "提交申请", "reason": "录制事实"},
+        ],
+        "field_semantics": [{
+            "step_id": "submit", "wire_path": "assigneeId", "public_name": "审批人",
+            "business_type": "enum", "category": "user_param", "source_kind": "page_enum",
+            "required": True, "confidence": 0.99,
+            "evidence": [{
+                "source": "screenshot", "screenshot_name": "request.png",
+                "visible_label": "审批人", "control_kind": "select", "editable": True,
+                "required": True, "visible_value": "财务A", "options": ["财务A", "审批B"],
             }],
         }],
         "capabilities": [{
@@ -3244,13 +3336,59 @@ def test_screenshot_select_replaces_stale_text_input_with_visible_page_enum():
     optimized = asyncio.run(orchestrate_flow_capabilities(
         spec, submission=normalized, generation_mode="optimize",
     ))
-    field = optimized.steps[0].params[0]
+    field = next(param for param in optimized.steps[1].params if param.path == "assigneeId")
 
-    assert (field.key, field.type) == ("申请类型", "enum")
-    assert (field.category, field.source_kind) == ("user_param", "page_enum")
-    assert field.required is True
-    assert field.default_value is None
-    assert field.enum_options == ["年假", "事假"]
+    assert field.key == "审批人"
+    assert (field.type, field.source_kind) == ("enum", "api_option")
+    assert field.enum_value_map == {"财务A": 145, "审批B": 148}
+    assert field.source["source_step_id"] == "people"
+
+
+def test_screenshot_visible_options_replace_a_stale_api_source_only_when_unique():
+    people = FlowStep(
+        step_id="people", method="GET", path="/api/hr/users/page",
+        response_json={"data": {"list": [
+            {"id": 145, "name": "财务A"},
+            {"id": 148, "name": "审批B"},
+        ]}},
+        source_meta={"role": "read_option"},
+    )
+    tenants = FlowStep(
+        step_id="tenants", method="GET", path="/api/system/tenant/list",
+        response_json={"data": {"list": [
+            {"id": 145, "name": "租户甲"},
+            {"id": 149, "name": "租户乙"},
+        ]}},
+        source_meta={"role": "read_option"},
+    )
+    submit = FlowStep(
+        step_id="submit", method="POST", path="/api/request/submit",
+        source_meta={"role": "business_write"},
+        params=[ParamField(
+            path="assigneeId", key="审批人", label="审批人", value=145,
+            type="enum", wire_type="number", category="user_param",
+            source_kind="api_option",
+            source={
+                "kind": "api_option", "source_step_id": "tenants",
+                "source_url": "/api/system/tenant/list",
+                "value_key": "id", "label_key": "name",
+            },
+            evidence=[{
+                "source": "screenshot", "visible_label": "审批人",
+                "visible_value": "财务A", "control_kind": "select", "editable": True,
+                "options": ["财务A", "审批B"],
+            }],
+        )],
+    )
+    spec = FlowSpec(steps=[people, tenants, submit])
+
+    repaired = flow_spec_module._repair_structural_option_bindings(spec)
+    field = submit.params[0]
+
+    assert repaired == 1
+    assert field.source_kind == "api_option"
+    assert field.source["source_step_id"] == "people"
+    assert field.enum_value_map == {"财务A": 145, "审批B": 148}
 
 def test_complete_reanalysis_replaces_auto_relations_and_keeps_confirmed_relations():
     query = FlowStep(
@@ -3521,6 +3659,58 @@ def test_r5_semantic_relation_requires_real_typed_endpoints_or_becomes_unresolve
     }]
 
 
+def test_split_capabilities_resolve_relations_after_the_new_boundaries_exist():
+    first = FlowStep(
+        step_id="first", method="GET", path="/api/first/list",
+        response_json={"data": {"records": [{"recordNo": "A-1"}]}},
+        source_meta={"role": "business_get"},
+    )
+    second = FlowStep(
+        step_id="second", method="GET", path="/api/second/list",
+        response_json={"data": {"records": [{"recordNo": "B-1"}]}},
+        source_meta={"role": "business_get"},
+    )
+    spec = FlowSpec(
+        steps=[first, second],
+        capabilities=[FlowCapability(
+            name="combined", title="Combined", kind="query_status",
+            nodes=_call_nodes(["first", "second"]),
+        )],
+    )
+    submission = {"semantic_plan": {
+        "business_understanding": {"summary": "Two independent queries"},
+        "request_roles": [
+            {"step_id": "first", "role": "business_get", "name": "First", "reason": "recorded"},
+            {"step_id": "second", "role": "business_get", "name": "Second", "reason": "recorded"},
+        ],
+        "field_semantics": [],
+        "capabilities": [
+            {"name": "query_first", "title": "First", "kind": "query_status", "step_ids": ["first"]},
+            {"name": "query_second", "title": "Second", "kind": "query_status", "step_ids": ["second"]},
+        ],
+        "capability_relations": [{
+            "from_capability": "query_first", "to_capability": "query_second",
+            "type": "caller_decision", "confidence": 0.98,
+        }],
+        "unresolved_items": [],
+    }, "ops": []}
+
+    out = asyncio.run(orchestrate_flow_capabilities(
+        spec, submission=submission, generation_mode="optimize",
+    ))
+
+    assert any(
+        relation.from_capability == "query_first"
+        and relation.to_capability == "query_second"
+        for relation in out.capability_relations
+    ), (
+        [capability.name for capability in out.capabilities],
+        [relation.model_dump() for relation in out.capability_relations],
+        submission["semantic_plan"]["unresolved_items"],
+        out.meta.get("capability_model"),
+    )
+
+
 def test_r6_screenshot_protocol_requires_complete_field_axes_and_forbids_fact_creation():
     from dano.gateway import app as gateway
 
@@ -3536,7 +3726,7 @@ def test_r6_screenshot_protocol_requires_complete_field_axes_and_forbids_fact_cr
     }])
 
 
-def test_r6_screenshot_report_marks_incomplete_field_coverage_as_needs_review():
+def test_r6_screenshot_report_does_not_treat_offscreen_fields_as_failed_matches():
     from dano.gateway import app as gateway
 
     before = FlowSpec(steps=[FlowStep(
@@ -3575,9 +3765,9 @@ def test_r6_screenshot_report_marks_incomplete_field_coverage_as_needs_review():
         operation_id="r6-report",
     )
 
-    assert report["status"] == "needs_review"
+    assert report["status"] == "applied"
     assert report["matched_field_count"] == 1
-    assert report["unmatched_field_count"] == 1
+    assert report["unmatched_field_count"] == 0
     assert report["locked_field_count"] == 0
     assert report["rejected_field_count"] == 0
     assert report["unresolved_field_count"] == 1
