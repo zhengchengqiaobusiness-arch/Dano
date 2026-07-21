@@ -18,7 +18,6 @@
     type AskUserQuestionItem,
     type NormalizedAskUserQuestionOption,
     askUserQuestionAnswerItems,
-    askUserQuestionAnswerMarkdown,
     askUserQuestionConfirmationForms,
     askUserQuestionMarkdown,
     askUserQuestionRequest,
@@ -178,6 +177,11 @@
       ? result.answer
       : undefined,
   );
+  const singleQuestionAnswer = $derived(
+    result?.status === "answered" && request && !request.batch && request.kind !== "confirm"
+      ? result.answer
+      : undefined,
+  );
   const interactionFormAnswer = $derived(
     result?.status === "answered"
       ? interaction?.forms.find(form => form.formId === result.formId)?.answer
@@ -241,7 +245,7 @@
         ? revisionForm.answer[item.originalId ?? item.id]
         : interactionFormAnswer !== undefined
           ? interactionFormAnswer[item.id]
-          : formAnswer?.[item.id];
+          : formAnswer?.[item.id] ?? singleQuestionAnswer;
       const authoritativeAnswer =
         revisionForm !== undefined || interactionFormAnswer !== undefined;
       const fallbackDefault = authoritativeAnswer ? undefined : item.default;
@@ -795,21 +799,6 @@
       ? confirmationFormsForDisplay(request, result)
       : [],
   );
-  const sourceAnsweredMarkdown = $derived(
-    request && request.batch && result?.status === "answered"
-      ? t("questionTool.answered", {
-          answer: askUserQuestionAnswerMarkdown(
-            request,
-            result.answer,
-            {
-              confirm: t("questionTool.confirm"),
-              cancel: t("questionTool.cancel"),
-            },
-          ),
-        })
-      : "",
-  );
-
   function confirmationFormsForDisplay(
     confirmationRequest: AskUserQuestionConfirmationCardRequest,
     confirmationResult: AskUserQuestionResult | null,
@@ -944,14 +933,7 @@
     {:else if !pending && !revising && result?.status !== "answered"}
       <div class="question-error" role="alert">{block.resultText}</div>
     {:else}
-      {#if result?.status === "answered"}
-        <div class="mobile-answered-result question-result question-form-scroll-region">
-          <div class="question-form-content">
-            <MarkdownRenderer content={sourceAnsweredMarkdown} />
-          </div>
-        </div>
-      {/if}
-      <form onsubmit={submit} class:answered-source-form={result?.status === "answered"}>
+      <form onsubmit={submit}>
         {#if revising}
           <h2 class="question-form-title">{t("questionTool.modify")}</h2>
         {/if}
@@ -1551,7 +1533,6 @@
   }
 
   .question-result { color: var(--text); }
-  .mobile-answered-result { display: none; }
   .question-result.muted { color: var(--text-muted); }
   .question-warning { color: var(--text-muted); font-size: 0.76rem; }
   .question-error { color: var(--error-text); font-size: 0.76rem; }
@@ -1651,8 +1632,4 @@
     }
   }
 
-  @media (max-width: 640px) {
-    .answered-source-form { display: none; }
-    .mobile-answered-result { display: block; }
-  }
 </style>
